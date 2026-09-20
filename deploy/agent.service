@@ -1,0 +1,19 @@
+# Run as the home project owner, not root. Replace YOUR_USER and paths.
+[Unit]
+Description=CodePier Home Development Agent
+Wants=network-online.target
+After=network-online.target
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/home/YOUR_USER/codepier
+ExecStart=/home/YOUR_USER/codepier/.venv/bin/python -m agent --config /home/YOUR_USER/.codepier-agent/config.json run
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=90
+UMask=0077
+NoNewPrivileges=true
+# Project tasks intentionally run as this user; this is NOT an OS sandbox.
+[Install]
+WantedBy=multi-user.target

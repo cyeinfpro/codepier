@@ -1,0 +1,11 @@
+{
+  "name": "CodePier",
+  "version": "1.9.1",
+  "date": "2026-09-20",
+  "status": "release-candidate",
+  "source_only": true,
+  "published": false,
+  "deployed": false,
+  "release_notes": "CHANGELOG.md",
+  "release_checklist": "docs/RELEASING.md"
+}

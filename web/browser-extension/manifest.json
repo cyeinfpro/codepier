@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "CodePier · 后台浏览器",
+  "version": "1.0.0",
+  "description": "本机明确授权的后台标签页，独立于 Codex。",
+  "permissions": [
+    "nativeMessaging",
+    "storage",
+    "tabs",
+    "tabGroups",
+    "scripting",
+    "alarms"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "CodePier 后台浏览器"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'"
+  }
+}

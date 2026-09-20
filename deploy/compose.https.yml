@@ -1,0 +1,41 @@
+# Optional overlay. Base HTTP/IP endpoint remains available for the home Agent.
+# Persist COMPOSE_FILE=compose.yml:deploy/compose.https.yml in .env first
+# (Windows uses ; as the separator), then run bash install.sh.
+# Keeping this selection in .env also preserves HTTPS during later upgrades.
+services:
+  hub:
+    environment:
+      MCP_PUBLIC_URL: "https://${MCP_DOMAIN:?Set MCP_DOMAIN in .env}"
+      FORWARDED_ALLOW_IPS: "172.30.87.2"
+    networks:
+      default: {}
+      proxy:
+        ipv4_address: 172.30.87.3
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      MCP_DOMAIN: "${MCP_DOMAIN:?Set MCP_DOMAIN in .env}"
+      TLS_EMAIL: "${TLS_EMAIL:?Set TLS_EMAIL in .env}"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      proxy:
+        ipv4_address: 172.30.87.2
+networks:
+  proxy:
+    ipam:
+      config:
+        - subnet: 172.30.87.0/24
+volumes:
+  caddy-data:
+    name: "${CODEPIER_CADDY_DATA_VOLUME:-codepier-caddy-data}"
+    external: true
+  caddy-config:
+    name: "${CODEPIER_CADDY_CONFIG_VOLUME:-codepier-caddy-config}"
+    external: true

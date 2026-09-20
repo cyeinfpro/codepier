@@ -1,0 +1,26 @@
+# Native installation example. Create a dedicated codepier user and edit paths first.
+[Unit]
+Description=CodePier CodePier Hub
+Wants=network-online.target
+After=network-online.target
+[Service]
+Type=simple
+User=codepier
+Group=codepier
+WorkingDirectory=/opt/codepier
+Environment=HUB_DATA_DIR=/var/lib/codepier
+Environment=HUB_PUBLIC_URL=http://YOUR_SERVER_IP:8765
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/codepier/.venv/bin/python -m hub run --host 0.0.0.0 --port 8765
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+StateDirectory=codepier
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/codepier
+[Install]
+WantedBy=multi-user.target

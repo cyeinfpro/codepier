@@ -1,0 +1,78 @@
+name: CodePier CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - name: Install isolated Python environments
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements-dev.txt -r requirements-tools.txt
+          python -m venv .venv-compat
+          .venv-compat/bin/python -m pip install --upgrade pip==26.2.1
+          .venv-compat/bin/python -m pip install -r requirements-compat.txt
+          .venv/bin/python -m playwright install --with-deps chromium webkit
+      - name: Build browser resources
+        run: |
+          npm --prefix web/mcp-apps ci --ignore-scripts
+          npm --prefix web/mcp-apps run build
+          .venv/bin/python scripts/build_integration_assets.py
+      - name: Correctness and dependency checks
+        run: |
+          .venv/bin/python -m ruff check agent hub shared scripts tests
+          .venv/bin/python -m pip_audit --local
+          .venv/bin/python -m pip_audit --path .venv-compat/lib/python3.13/site-packages
+          npm --prefix web/mcp-apps audit
+          .venv/bin/python scripts/check_release.py
+      - name: Complete regression
+        run: .venv/bin/python scripts/check_full_regression.py --output dist/ci-results --workers 2 --timeout 900
+      - name: Public source bundle
+        run: |
+          .venv/bin/python scripts/build_source_bundle.py --public --output dist/codepier-1.9.1-source.zip
+          .venv/bin/python scripts/check_release.py --bundle dist/codepier-1.9.1-source.zip --output dist/public-check.json
+      - name: Retain isolated CI evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codepier-${{ matrix.os }}-${{ github.run_id }}
+          path: |
+            dist/ci-results/
+            !dist/ci-results/**/tmp/**
+            !dist/ci-results/**/cache/**
+            !dist/ci-results/collect-cache/**
+            dist/public-check.json
+            dist/codepier-1.9.1-source.zip
+            dist/codepier-1.9.1-source.manifest.json
+          if-no-files-found: warn
+          retention-days: 14

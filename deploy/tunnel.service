@@ -1,0 +1,17 @@
+# Optional: official OpenAI tunnel-client installed separately by the operator.
+[Unit]
+Description=OpenAI Secure MCP Tunnel for CodePier
+After=network-online.target
+Wants=network-online.target
+[Service]
+User=codepier
+Group=codepier
+WorkingDirectory=/opt/codepier
+EnvironmentFile=/opt/codepier/private/tunnel.env
+ExecStart=/usr/local/bin/tunnel-client run --profile codepier
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+[Install]
+WantedBy=multi-user.target

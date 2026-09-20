@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+component=${1:-help}
+if [[ $# -gt 0 ]]; then shift; fi
+case "$component" in
+  help|--help|-h)
+    printf '%s\n' 'CodePier · 码头' 'AI 与本地代码对接、任务停靠的地方' '' \
+      './codepier hub <init|run|...>          面板命令' \
+      './codepier agent <参数与子命令>       Agent 命令' \
+      './codepier control <参数>             本机能力控制' \
+      './codepier install-hub <参数>         安装/更新面板并迁移旧命名'
+    exit 0;;
+  install-hub) exec bash "$root/install.sh" "$@";;
+  hub) module=hub;;
+  agent) module=agent;;
+  control) module=agent.codepier_control;;
+  *) printf '未知 CodePier 命令：%s\n' "$component" >&2; exit 2;;
+esac
+python=${CODEPIER_PYTHON:-"$root/.venv/bin/python"}
+[[ -x "$python" ]] || { printf '%s\n' '源码 Python 环境不存在；先准备 .venv，或通过 CODEPIER_PYTHON 指定已安装依赖的解释器。' >&2; exit 1; }
+cd "$root"
+exec "$python" -m "$module" "$@"

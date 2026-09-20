@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "CodePier · Background Browser",
+  "version": "1.0.0",
+  "description": "Explicitly authorized, profile-bound background tabs for your local CodePier Agent.",
+  "minimum_chrome_version": "116",
+  "permissions": ["nativeMessaging", "storage", "tabs", "tabGroups", "scripting", "alarms"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "background": {"service_worker": "background.js", "type": "module"},
+  "action": {"default_popup": "popup.html", "default_title": "CodePier 浏览器连接"},
+  "content_security_policy": {"extension_pages": "script-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'"}
+}

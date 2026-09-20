@@ -1,0 +1,9 @@
+{
+    email {$TLS_EMAIL}
+}
+{$MCP_DOMAIN} {
+    reverse_proxy hub:8765 {
+        flush_interval -1
+    }
+    header -Server
+}
