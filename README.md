@@ -403,6 +403,18 @@ Hub CLI：
 
 Hub 的数据目录包含认证、项目、操作和其他运行状态，应按私密数据处理。
 
+## 在 ChatGPT 中用密码操作 VPS
+
+用户授权服务器访问后，使用 `ssh_exec`，提供 `project`、`host`、`port`、`username`、`password`、远端 `command` 和 `idempotency_key`。Agent 自动执行非交互密码认证；本机需要 `ssh` 与 `sshpass`，仍须开启项目执行权限和完整 Shell 授权。`execution_info` 会报告依赖是否可用。
+
+默认严格验证 SSH 主机密钥；首次连接可显式选择 `host_key_policy: "accept-new"`，保存新主机密钥，已有密钥变化仍拒绝。可用 `known_hosts_file` 指定 Agent 本机绝对路径。登录后的命令不支持交互输入或 sudo 密码提示。
+
+已有本机部署脚本继续使用 `shell_exec`，并在 `env` 中明确传入 `SSHPASS`。只在聊天中写出密码不会自动设置环境变量；不要把密码拼进命令行。专用接口的密码不进入进程参数，审计摘要隐藏密码，输出流在持久化前遮盖精确密码值（不保证识别经编码或变形的密码）。排队请求按既有机制在 Hub 加密存储，完成后清除请求载荷。
+
+两个接口都返回操作 ID。用 `operations_wait/get` 读取原操作结果，区分认证、主机密钥和命令失败；不要因连接中断重复执行。取消会停止本机 SSH 进程，不保证远端命令回滚或退出。
+
+源码升级需同时更新 Hub 与 Agent，再在 ChatGPT 应用设置刷新工具目录，确认出现 `ssh_exec`。仅修改本地源码不会改变已运行的服务。
+
 ## 本地开发
 
 推荐使用 Python 3.13。

@@ -647,7 +647,7 @@ class Runtime:
             state = "needs_review"
         elif error.get("code") == "CANCELLED" or data.get("cancelled"):
             state = "cancelled"
-        elif op["tool"] in {"tasks_run", "shell_exec", "validation_run", "git_status", "git_diff", "git_log"} and result["ok"]:
+        elif op["tool"] in {"tasks_run", "shell_exec", "ssh_exec", "validation_run", "git_status", "git_diff", "git_log"} and result["ok"]:
             if not data.get("command_ok", False):
                 state = "failed"
                 error = {"message": "本机任务执行超时" if data.get("timed_out") else f"本机任务退出码 {data.get('exit_code')}；请查看操作输出"}
