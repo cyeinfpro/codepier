@@ -2,7 +2,7 @@
 .integration-center{min-width:0;color:var(--ui-text)}
 .integration-context{display:flex;align-items:end;gap:16px;flex-wrap:wrap;margin-bottom:16px}
 .integration-context label{display:grid;gap:6px;min-width:180px;max-width:100%;font-size:12px;color:var(--ui-muted)}
-.integration-context select{width:min(310px,100%);min-height:40px}
+.integration-context select{width:min(310px,100%);min-width:0;max-width:100%;min-height:40px;appearance:none;padding-right:32px;background-image:linear-gradient(45deg,transparent 50%,var(--ui-muted) 50%),linear-gradient(135deg,var(--ui-muted) 50%,transparent 50%);background-position:calc(100% - 17px) 50%,calc(100% - 12px) 50%;background-size:5px 5px;background-repeat:no-repeat}
 .integration-scope{font-size:12px;color:var(--ui-muted);padding-bottom:10px}
 .integration-tabs{display:flex;gap:4px;overflow:auto;max-width:100%;padding:4px;background:var(--ui-surface);border-radius:18px;margin-bottom:12px;scrollbar-width:thin}
 .integration-tabs button{flex:0 0 auto;padding:9px 15px;border:0;border-radius:14px;font:inherit;font-size:13px;background:transparent;color:var(--ui-muted);cursor:pointer}

@@ -43,12 +43,16 @@ def test_remote_contracts_accept_pending_and_errors_without_weakening_success(na
     with pytest.raises(SchemaError):validate({'operation_id':'op','pending':False,'state':'queued'})
 
 
-def test_public_catalogue_has_apps_and_native_files_but_no_owner_controls():
-    definitions={d['name']:d for d in tool_definitions()}
+@pytest.mark.parametrize('profile', ['full', 'coding'])
+def test_public_catalogue_uses_text_without_auto_cards_or_owner_controls(profile):
+    definitions={d['name']:d for d in tool_definitions(profile)}
     assert not set(definitions)&ADMIN_TOOLS
     assert definitions['download_artifact']['_meta']['openai/fileParams']==['file']
-    assert definitions['show_changes']['_meta']['ui']['resourceUri']=='ui://codepier/changes-v1.html'
-    assert definitions['open_workspace']['_meta']['ui']['resourceUri']=='ui://codepier/workspace-v1.html'
+    for definition in definitions.values():
+        assert 'resourceUri' not in definition['_meta'].get('ui', {})
+        assert 'openai/outputTemplate' not in definition['_meta']
+    for name in ('open_workspace', 'show_changes'):
+        assert definitions[name]['_meta']['openai/widgetAccessible'] is True
     assert definitions['lsp_query']['annotations']['readOnlyHint']
     assert set(definitions['lsp_query']['securitySchemes'][0]['scopes'])=={'read','execute'}
     for name in ('fs_read','shell_exec','lsp_query'):

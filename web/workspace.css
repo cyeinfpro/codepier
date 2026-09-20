@@ -126,6 +126,8 @@
   .workspace-stat .stat-value { font-size:32px;margin:7px 0 5px; }
   .workspace-stat .stat-foot { font-size:10px; }
   .workspace-device-head { min-height:100px;padding:16px 20px; }
+  .workspace-device>.device-lifecycle { gap:6px;padding-block:8px; }
+  .workspace-device-facts { padding-block:12px; }
 }
 /* Short desktop windows keep the same cover identity; remove repeated vertical
    padding rather than shrinking the entire interface or hiding controls. */
@@ -135,7 +137,7 @@
   .workspace-device-title h2 { margin-bottom:4px;font-size:25px; }
   .workspace-device-symbol { width:54px;height:58px; }
   .workspace-device-facts { padding:10px 18px;gap:8px 16px; }
-  .workspace-device>.device-lifecycle { padding:8px 0;margin-inline:18px; }
+  .workspace-device>.device-lifecycle { padding:6px 0;margin-inline:18px;gap:5px; }
   .workspace-device-roots,.workspace-device-raw { margin-inline:18px; }
   .workspace-device-roots>summary,.workspace-device-raw>summary { padding:8px 0; }
   .workspace-device-actions { padding:10px 18px 12px; }

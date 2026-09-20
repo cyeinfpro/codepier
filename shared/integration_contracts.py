@@ -227,23 +227,46 @@ def register(Tool, tools, schemas):
         schemas[name] = output_schema(name)
 
 
+TOOL_TITLES = {
+    'projects_list': '查找项目', 'projects_resolve': '查找项目',
+    'open_workspace': '项目概览', 'project_context': '读取项目', 'workspace_status': '任务状态',
+    'fs_tree': '查看目录', 'fs_read': '读取文件', 'fs_read_many': '批量读取文件',
+    'fs_search': '搜索代码', 'fs_mkdir': '创建目录', 'fs_preview': '预览改动',
+    'fs_write': '写入文件', 'fs_edit': '编辑文件', 'apply_patch': '批量修改',
+    'skills_list': '查找技能', 'skills_read': '读取技能',
+    'shell_exec': '命令回执', 'ssh_exec': 'SSH 回执', 'vps_list': '查找服务器', 'vps_exec': '服务器回执',
+    'operations_wait': '等待结果', 'operations_get': '读取结果',
+    'operations_list': '查找操作', 'operations_cancel': '取消操作', 'show_changes': '查看改动',
+    'download_artifact': '导入附件', 'artifacts_register': '登记交付物',
+    'lsp_status': '代码服务状态', 'lsp_query': '查询代码',
+    'worktrees_create': '创建工作目录', 'worktrees_list': '查看工作目录', 'worktrees_remove': '移除工作目录',
+    'validation_run': '验证回执', 'validations_get': '核对验证', 'validations_list': '查看验证',
+    'readiness_get': '检查就绪状态', 'execution_info': '检查执行能力', 'activity_list': '查看活动',
+    'workflows_create': '建立任务', 'workflows_list': '查找任务', 'workflows_get': '任务概览',
+    'workflows_update': '保存进度', 'workflows_handoff': '恢复任务', 'tasks_run': '任务回执',
+}
+
+
 def decorate(definition):
     name = definition['name']
+    if name in TOOL_TITLES:
+        title = TOOL_TITLES[name]
+        definition['title'] = title
+        definition['_meta'].update({'openai/toolInvocation/invoking': title + '…',
+                                   'openai/toolInvocation/invoked': title + ' · 已返回'})
     scopes = sorted({'read', *definition['_meta']['securitySchemes'][0]['scopes']})
     schemes = [{'type':'oauth2', 'scopes':scopes}]
     definition['securitySchemes'] = schemes
     definition['_meta']['securitySchemes'] = schemes
-    if name in {'operations_get', 'operations_wait', 'readiness_get', 'validations_get', 'fs_tree', 'download_artifact'}:
+    # Keep existing app instances able to read tools, without opening a new card.
+    if name in {'operations_get', 'operations_wait', 'readiness_get', 'validations_get', 'fs_tree', 'download_artifact',
+                'open_workspace', 'show_changes', 'workflows_get'}:
         definition['_meta']['ui'] = {'visibility':['model','app']}
         definition['_meta']['openai/widgetAccessible'] = True
     if name in APP_ONLY_TOOLS:
         definition['_meta']['ui'] = {'visibility':['app']}
         definition['_meta']['openai/visibility'] = 'private'
         definition['_meta']['openai/widgetAccessible'] = True
-    if name in {'open_workspace', 'show_changes', 'workflows_get'}:
-        uri = 'ui://codepier/'+('changes' if name == 'show_changes' else 'workspace')+'-v1.html'
-        definition['_meta'].update({'ui':{'resourceUri':uri, 'visibility':['model','app']},
-                                   'openai/outputTemplate':uri, 'openai/widgetAccessible':True})
     if name == 'download_artifact':
         definition['_meta']['openai/fileParams'] = ['file']
         definition['annotations']['openWorldHint'] = True

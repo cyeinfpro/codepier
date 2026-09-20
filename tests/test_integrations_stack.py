@@ -48,7 +48,7 @@ def resolved(s,name,args=None,*,panel=False,expect='succeeded'):
     return result
 
 
-def modern(s,method,params=None,**overrides):
+def modern(s,method,params=None,*,profile='full',**overrides):
     params=dict(params or {})
     params['_meta']={PREFIX+'protocolVersion':MODERN,PREFIX+'clientCapabilities':{},
                      PREFIX+'clientInfo':{'name':'CodePier independent wire test','version':'1'}}
@@ -57,7 +57,7 @@ def modern(s,method,params=None,**overrides):
     if method=='tools/call':headers['Mcp-Name']=params['name']
     if method=='resources/read':headers['Mcp-Name']=params['uri']
     headers.update(overrides)
-    return s.client.post('/mcp',headers=headers,json={'jsonrpc':'2.0','id':uuid.uuid4().hex,'method':method,'params':params})
+    return s.client.post('/mcp?profile='+profile,headers=headers,json={'jsonrpc':'2.0','id':uuid.uuid4().hex,'method':method,'params':params})
 
 
 def test_legacy_and_modern_protocols_are_distinct_and_share_permissions(integrated_stack):
@@ -81,6 +81,11 @@ def test_legacy_and_modern_protocols_are_distinct_and_share_permissions(integrat
 
 def test_apps_resources_are_real_built_documents_and_bound_to_snapshots(integrated_stack):
     s=integrated_stack
+    # New calls stay text-only; saved app instances can still resolve their resources.
+    for profile in ('full', 'coding'):
+        for definition in modern(s, 'tools/list', profile=profile).json()['result']['tools']:
+            assert 'resourceUri' not in definition['_meta'].get('ui', {})
+            assert 'openai/outputTemplate' not in definition['_meta']
     listing=s.rpc('resources/list').json()['result']['resources']
     assert {'ui://codepier/workspace-v1.html','ui://codepier/changes-v1.html'}<={r['uri'] for r in listing}
     card=s.rpc('resources/read',{'uri':'ui://codepier/changes-v1.html'}).json()['result']['contents'][0]
