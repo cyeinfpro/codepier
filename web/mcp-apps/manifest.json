@@ -1,5 +1,5 @@
 {
-  "sdk": "@modelcontextprotocol/ext-apps@1.1.2",
+  "sdk": "@modelcontextprotocol/ext-apps@2.0.0",
   "outputs": {
     "workspace-v1.html": {
       "bytes": 667112,
