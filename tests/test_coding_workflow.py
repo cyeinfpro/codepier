@@ -29,7 +29,7 @@ def test_small_catalog_is_opt_in_and_complete():
     full, compact = tool_definitions(), tool_definitions('coding')
     assert {d['name'] for d in full} == set(TOOLS) - {'integration_control','validations_accept'}
     model_tools = [x for x in compact if x.get('_meta', {}).get('ui', {}).get('visibility') != ['app']]
-    assert len(model_tools) == len(CODING_TOOLS) == 30
+    assert len(model_tools) == len(CODING_TOOLS) == 31
     assert {x['name'] for x in model_tools} == set(CODING_TOOLS)
     assert {x['name'] for x in compact} == set(CODING_TOOLS) | {'workspace_status'}
     # App-only refresh schemas are host metadata, not model context. Preserve

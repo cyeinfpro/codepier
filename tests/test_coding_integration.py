@@ -1,5 +1,6 @@
 """Actual loopback Hub/Agent coding tools, grants, replay and MCP schemas."""
 import json
+import hashlib
 import uuid
 import jsonschema
 from shared.contracts import tool_definitions
@@ -45,7 +46,7 @@ def test_profile_old_transport_and_default_full_remain_compatible(coding_stack):
     original=s.rpc('tools/list').json()['result']['tools']
     compact=rpc(s,'tools/list').json()['result']['tools']
     assert_task_catalog(original, 72)
-    assert_task_catalog(compact, 30)
+    assert_task_catalog(compact, 31)
     assert {t['name'] for t in compact} < {t['name'] for t in original}
     assert not {'integration_control','validations_accept'} & {t['name'] for t in original}
     initialized=rpc(s,'initialize',{'protocolVersion':'2025-11-25'}).json()['result']
@@ -60,6 +61,11 @@ def test_remote_non_git_review_patch_idempotency_and_grant_boundaries(coding_sta
     s=coding_stack
     first=value(s,tool(s,'open_workspace',{'project':'Imago','capture_baseline':True}))
     assert first['baseline_ref'] and first['workspace']['root']==str(s.imago)
+    # One coding-profile call returns both source SHAs and per-file failures.
+    batch = value(s, tool(s, 'fs_read_many', {'project': 'Imago', 'paths': ['README.md', 'missing.txt']}))
+    assert batch['files'][0]['ok'] and not batch['files'][1]['ok']
+    assert batch['files'][0]['sha256'] == hashlib.sha256((s.imago/'README.md').read_bytes()).hexdigest()
+    assert not batch['truncated']
     again=value(s,tool(s,'open_workspace',{'project':'Imago','context_id':first['context_id']}))
     assert again['context_unchanged'] and again['context'] is None
     patch={'project':'Imago','idempotency_key':'coding-write-'+uuid.uuid4().hex,
@@ -94,7 +100,7 @@ def test_coding_profile_uses_canonical_oauth_resource_and_revocation(coding_stac
     decision=s.must(s.client.post('/api/oauth/requests/'+request+'/decide',json={'allow':True,'scopes':['read'],'projects':[s.project['id']]}))
     code=parse_qs(urlparse(decision['redirect']).query)['code'][0]
     tokens=s.must(s.client.post('/oauth/token',data={'grant_type':'authorization_code','client_id':registration['client_id'],'code':code,'code_verifier':verifier,'redirect_uri':args['redirect_uri'],'resource':s.url+'/mcp'}))
-    assert_task_catalog(rpc(s,'tools/list',token=tokens['access_token']).json()['result']['tools'], 30)
+    assert_task_catalog(rpc(s,'tools/list',token=tokens['access_token']).json()['result']['tools'], 31)
     opened=value(s,tool(s,'open_workspace',{'project':'Imago'},tokens['access_token']))
     assert opened['workspace']['granted_scopes']==['read']
     assert s.client.post('/oauth/revoke',data={'token':tokens['access_token'],'client_id':registration['client_id']}).status_code==200

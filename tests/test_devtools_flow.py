@@ -41,6 +41,8 @@ def tools_page(integrated_stack, chat_browser_pool):
     page.locator('#login-form button').click()
     page.wait_for_selector('#integration-center')
     page.select_option('#i-project', s.project['id'])
+    # Selection clears readiness before the previous checks leave the DOM.
+    page.wait_for_function('project => S.integrations.project === project && !!S.integrations.ready?.data', arg=s.project['id'])
     page.wait_for_selector('#i-checks .integration-check')
     page.evaluate('''() => {
       window.realToolsApi = api; window.toolCalls=[]; window.toolHandlers={}; window.nativeCalls=[];
