@@ -1,0 +1,4 @@
+# Developer and CI tooling only; never installed into Hub or Agent runtime.
+pip==26.2.1
+ruff==0.16.8
+pip-audit==2.10.1

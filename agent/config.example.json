@@ -1,0 +1,42 @@
+{
+  "device_id": "REPLACE_WITH_PAIRING_DEVICE_ID",
+  "name": "Home-PC",
+  "secret": "REPLACE_WITH_SECRET_FROM_PAIRING_FILE_DO_NOT_REUSE_EXAMPLE",
+  "hub_url": "http://192.0.2.20:8765",
+  "state_dir": "/home/YOUR_USER/.codepier-agent/state",
+  "allowed_roots": [
+    {
+      "path": "/home/YOUR_USER/Projects",
+      "writable": true,
+      "allow_tasks": false
+    }
+  ],
+  "tasks": {},
+  "mcp_policy": {
+    "block_local_codex": true
+  },
+  "shell": {
+    "enabled": false,
+    "projects": [],
+    "inherit_env": true,
+    "env": {},
+    "max_timeout_seconds": 86400
+  },
+  "skills": {
+    "codex_enabled": false,
+    "codex_projects": [],
+    "codex_home": "",
+    "extra_roots": []
+  },
+  "computer": {
+    "enabled": false,
+    "projects": [],
+    "allowed_apps": [],
+    "plugin_root": "",
+    "codex_home": "",
+    "max_session_seconds": 900,
+    "observation_max_age_seconds": 60,
+    "call_timeout_seconds": 45,
+    "approval_timeout_seconds": 60
+  }
+}

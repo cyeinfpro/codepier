@@ -1,0 +1,23 @@
+{
+  "outputs": {
+    "browser-extension.zip": {
+      "sha256": "1ee991cb4f6e14b3ff38d06f044ce3c337fd0538a139d2947d0ff5af64f21ec7",
+      "bytes": 11556
+    },
+    "integration-guide.md": {
+      "sha256": "be49d4482f295482425b49d9e6e443cb2a2b5acaa36090325e90897c621d75ee",
+      "bytes": 14678
+    }
+  },
+  "extension_sources": {
+    "manifest.json": "71e74e2d74214d4f4e1239f1491dbdbc5b72c2f6821998fee0d7821a581dccaf",
+    "background.js": "b8c11868de7d7536539fb3669f751f6e7c6208f584674d52a3be3d7102a55be9",
+    "workspace.js": "521c3a7e58a742ab6af60379927f83f3172363b6bd19a0dc671611be7ac2d6a1",
+    "page.js": "300d516ea181652c52b546cd573e4e580a653453bcecfce0e8eb572ff3514844",
+    "popup.html": "c6ecde7f6f23179fc72e6e8712ba0abd182732eb75d3ec213ac10b90c3b3d811",
+    "popup.js": "218da59d2b823b4268ca8833e045461882e1c8803f95424ecbb1d854add23137",
+    "popup.css": "117f7486176280b318aa2de0ee76f0c3c6b05fade881491a6f1f17be2c0643c7",
+    "idle.html": "4c3f26511815cb894b6b510c75e9dd14a64735aa86cb70d53e78fb7ba676389d"
+  },
+  "contains_credentials": false
+}

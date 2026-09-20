@@ -1,0 +1,11 @@
+{
+  "name": "js-sha256",
+  "version": "1.0.0",
+  "integrity": "sha512-Bqxf6ENUzYIMzuELCmRNrJOVbjKH1oMgbfYJBKVr/W1Xf9fazpahqCbb24v1pR7XV1isuqhM+w9KWpK7zCyUQw==",
+  "purpose": "HTTP-compatible file integrity checks; same-origin vendored only",
+  "files": {
+    "package.json": "3247793ac647a13b97885664bf3df6d181c9cad9de3d4fef737f9550f8b5f702",
+    "sha256.min.js": "a050d794e170699bd1a69d33908d0942c68901cb88347016064b60b240f0067e",
+    "LICENSE.txt": "2153bd2978793748fbe0eb8f838ae2ae19f03f9d4ee5473dd1628a0c0790e4ab"
+  }
+}

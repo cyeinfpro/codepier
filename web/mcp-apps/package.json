@@ -1,0 +1,15 @@
+{
+  "name": "codepier-mcp-apps",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "1.1.2"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

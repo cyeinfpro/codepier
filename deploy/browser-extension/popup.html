@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CodePier 浏览器连接</title><link rel="stylesheet" href="popup.css">
+<body><main>
+<p class="eyebrow">CodePier / BROWSER</p><h1>本机浏览器连接</h1>
+<p id="status" role="status">正在读取状态…</p>
+<label>扩展编号<input id="extension" readonly></label>
+<label>档案编号<input id="profile" readonly></label>
+<button id="copy">复制绑定信息</button>
+<div class="row"><button id="connect">连接 Agent</button><button id="disconnect">断开连接</button></div>
+<hr>
+<label>工作页数量<select id="size"><option value="4">4 个</option><option value="8">8 个</option><option value="12">12 个</option><option value="16">16 个</option></select></label>
+<button id="prepare">准备工作页</button>
+<p class="hint">只在你主动点击且 Chrome 已在前台时新建工作页。远程请求不会占用个人标签页。</p>
+<hr>
+<label>允许操作的网站<input id="origin" placeholder="https://example.com"></label>
+<button id="grant">授予此网站的浏览器权限</button><div id="sites"></div>
+<p class="hint">还需在本机 Agent 中授权同一项目、网站、扩展和档案。浏览器授权不会自动扩大 Agent 权限。</p>
+<button id="release">释放所有工作页</button>
+<p class="hint">解除扩展连接不代表已取消本机任务。请在 CodePier 面板查看操作结果。</p>
+<p id="error" role="alert"></p>
+</main><script type="module" src="popup.js"></script></body></html>

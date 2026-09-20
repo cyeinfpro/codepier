@@ -1,0 +1,8 @@
+target-version = "py313"
+exclude = [".venv*", ".work", "dist", "node_modules", "web/vendor"]
+
+[lint]
+# Correctness gate. The broader audit also reviews B/ASYNC findings manually.
+# Imported pytest fixtures and compatibility wildcard re-exports are deliberate;
+# do not delete them just to silence unused-import warnings.
+select = ["E9", "F821", "F822", "F823", "B012", "B006", "B008", "B016", "B019", "B020", "B021", "B024", "B025", "B032"]

@@ -1,0 +1,40 @@
+name: codepier
+services:
+  hub:
+    build: .
+    image: codepier:1.9.1
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${HUB_BIND_ADDRESS:-0.0.0.0}:${HUB_PORT:-8765}:8765"
+    environment:
+      HUB_DATA_DIR: /app/data
+      HUB_PORT: "8765"
+      HUB_PUBLIC_URL: "${HUB_PUBLIC_URL:-http://127.0.0.1:8765}"
+      MCP_PUBLIC_URL: "${MCP_PUBLIC_URL:-${HUB_PUBLIC_URL:-http://127.0.0.1:8765}}"
+      HUB_QUEUE_TTL_SECONDS: "${HUB_QUEUE_TTL_SECONDS:-1800}"
+      HUB_CALL_WAIT_SECONDS: "${HUB_CALL_WAIT_SECONDS:-8}"
+      HUB_DELIVERY_RETRY_SECONDS: "${HUB_DELIVERY_RETRY_SECONDS:-5}"
+      MCP_BLOCK_LOCAL_CODEX: "${MCP_BLOCK_LOCAL_CODEX:-false}"
+      TZ: "${TZ:-Asia/Taipei}"
+      FORWARDED_ALLOW_IPS: "${FORWARDED_ALLOW_IPS:-127.0.0.1}"
+      OAUTH_REDIRECT_HOSTS: "${OAUTH_REDIRECT_HOSTS:-chatgpt.com,chat.openai.com,platform.openai.com,localhost,127.0.0.1,::1}"
+    volumes:
+      - hub-data:/app/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    stop_grace_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+volumes:
+  hub-data:
+    name: "${CODEPIER_HUB_DATA_VOLUME:-codepier-hub-data}"
+    external: true
