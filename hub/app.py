@@ -21,6 +21,7 @@ from hub.auth import Auth, SESSION_SECONDS
 from hub.artifacts import make_artifact_router
 from hub.agent_install import make_agent_install_router
 from hub.native_cli import make_native_router
+from hub.vps import make_vps_router
 from hub.mcp import make_router, VERSIONS
 from hub.oauth import OAuth
 from hub.runtime import Runtime, alias_key
@@ -573,6 +574,7 @@ def create_app(data_dir: str | None = None):
         app.include_router(make_artifact_router(auth, runtime))
         app.include_router(make_agent_install_router(runtime, auth))
         app.include_router(make_native_router(auth, runtime))
+        app.include_router(make_vps_router(auth, runtime))
         app.mount("/static", StaticFiles(directory=BASE / "web"), name="static")
     except BaseException:
         try:

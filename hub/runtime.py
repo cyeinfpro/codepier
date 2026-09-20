@@ -91,6 +91,8 @@ class Runtime:
         self.workflows = Workflows(self)
         from hub.integrations import HubIntegrations
         self.integrations = HubIntegrations(self)
+        from hub.vps import VPSService
+        self.vps = VPSService(self)
         self.diagnostics = Diagnostics(self)
         self.artifacts = ArtifactService(self)
         self.native = NativeService(self)
@@ -264,6 +266,8 @@ class Runtime:
             return self.integrations.activity(args, principal)
         if name == "projects_list":
             result = {"projects": self.list_projects(principal)}
+        elif name == "vps_list":
+            result = self.vps.list(args, principal)
         elif name == "projects_resolve":
             result = self.project_public(self.project(args["project"], principal))
         elif name == 'workspace_status':
@@ -423,7 +427,10 @@ class Runtime:
                     raise DevError("DEVICE_BUSY", "该设备已有 64 个待完成操作，请先查询并等待已有操作", 429, retryable=True, retry_after_seconds=3)
                 id, now = uuid.uuid4().hex, time.time()
                 self.integrations.prepare(id, name, args, project, principal)
-                payload = self.store.encrypt(json.dumps({"tool": name, "args": args, "project": snapshot}, ensure_ascii=False))
+                request = {"tool": name, "args": args, "project": snapshot}
+                if name == "vps_exec":
+                    request["vps_ref"] = self.vps.reference(args, project)
+                payload = self.store.encrypt(json.dumps(request, ensure_ascii=False))
                 lifecycle_ttl = 900 if name == "agent_update" else 120
                 deadline_seconds = (min(self.queue_seconds, 15) if name in {"computer_action", "browser_action"} else
                                     min(self.queue_seconds, 60) if name in COMPUTER_TOOLS | {"browser_open", "browser_snapshot"} else
@@ -481,6 +488,10 @@ class Runtime:
         project = self.store.one("SELECT * FROM projects WHERE id=?", (op["project_id"],))
         if not project or project["root"] != request["project"]["root"] or project["device_id"] != op["device_id"] or project["alias"] != request["project"].get("alias"):
             return "项目映射在排队期间被删除或修改，未在新的路径执行"
+        if op["tool"] == "vps_exec":
+            denied = self.vps.permission_error(request, op["project_id"])
+            if denied:
+                return denied
         scope = TOOLS[op["tool"]].scope
         if op["tool"] in MUTATING and op["tool"] != "computer_session_close" and project["mode"] != "write" or op["tool"] in PROCESS_TOOLS and not project["allow_tasks"]:
             return "排队操作的项目写入/任务权限已撤销"
@@ -606,9 +617,21 @@ class Runtime:
             if op["accepted_at"] or expired or denied or op["cancel_requested"] and op["attempts"]:
                 packets.append({"type": "probe", "id": id})
             else:
-                self.store.execute("UPDATE operations SET attempts=attempts+1,journal_id=COALESCE(journal_id,?),updated=? WHERE id=?", (con.journal_id, now, id))
-                self.diagnostics.record(id, "dispatched")
-                packets.append({"type": "call", "id": id, **request, "not_after": op["deadline"]})
+                if op["tool"] == "vps_exec":
+                    try:
+                        request = self.vps.transport(request, op["project_id"])
+                    except DevError as exc:
+                        if op["attempts"]:
+                            # An earlier send may already have executed. Recover
+                            # that journal result instead of claiming no execution.
+                            packets.append({"type": "probe", "id": id})
+                        else:
+                            self.complete(op, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+                        request = None
+                if request is not None:
+                    self.store.execute("UPDATE operations SET attempts=attempts+1,journal_id=COALESCE(journal_id,?),updated=? WHERE id=?", (con.journal_id, now, id))
+                    self.diagnostics.record(id, "dispatched")
+                    packets.append({"type": "call", "id": id, **request, "not_after": op["deadline"]})
         for packet in packets:
             if self.connections.get(op["device_id"]) is not con or con.unusable or not self.connection_authorized(op["device_id"], con):
                 return  # A fresh authenticated connection will replay the operation.
@@ -647,7 +670,7 @@ class Runtime:
             state = "needs_review"
         elif error.get("code") == "CANCELLED" or data.get("cancelled"):
             state = "cancelled"
-        elif op["tool"] in {"tasks_run", "shell_exec", "ssh_exec", "validation_run", "git_status", "git_diff", "git_log"} and result["ok"]:
+        elif op["tool"] in {"tasks_run", "shell_exec", "ssh_exec", "vps_exec", "validation_run", "git_status", "git_diff", "git_log"} and result["ok"]:
             if not data.get("command_ok", False):
                 state = "failed"
                 error = {"message": "本机任务执行超时" if data.get("timed_out") else f"本机任务退出码 {data.get('exit_code')}；请查看操作输出"}

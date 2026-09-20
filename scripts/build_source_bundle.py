@@ -64,7 +64,7 @@ REQUIRED_FILES = {'codepier','codepier.ps1','web/brand.js','shared/brand_migrati
 
 PUBLIC_DOCS = {
     'docs/INTEGRATIONS-20260917.md', 'docs/MCP-WORKSPACE-DASHBOARD-20260917.md',
-    'docs/DEVTOOLS-FLOW-20260918.md', 'docs/RELEASING.md', 'docs/ARCHITECTURE.md',
+    'docs/DEVTOOLS-FLOW-20260918.md', 'docs/RELEASING.md', 'docs/VPS.md', 'docs/ARCHITECTURE.md',
 }
 
 

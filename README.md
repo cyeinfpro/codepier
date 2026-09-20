@@ -460,6 +460,14 @@ npm --prefix web/mcp-apps run build
 .venv/bin/python scripts/check_release.py
 ```
 
+## VPS 管理
+
+在面板保存服务器名称、IP / 域名、SSH 端口、账号和密码，再将连接分配给项目。同一 VPS 可供多个项目使用，一个项目也可分配多台 VPS；项目映射页面与 VPS 卡片都能调整分配。
+
+ChatGPT 通过 `vps_list` 查询已授权连接，再通过 `vps_exec` 执行命令。例如：“SSH 到 Imago 的广州面板，检查磁盘占用。”模型只传项目、连接名称 / IP 与命令，不需要读取或重新传递已保存的密码。同 IP 多端口或账号必须明确选择。
+
+密码使用 Hub 的 `master.key` 加密保存，由项目所属 Agent 执行时使用；项目分配不绕过执行权限、本机 Shell 授权或主机密钥验证。详见 [VPS 管理与调用](docs/VPS.md)。
+
 ## 项目目录
 
 ```text
@@ -500,6 +508,7 @@ CodePier 能执行真实文件修改、Shell、浏览器和桌面操作，因此
 ## 相关文档
 
 - [架构说明](docs/ARCHITECTURE.md)
+- [VPS 管理与调用](docs/VPS.md)
 - [开发能力与本机集成](docs/INTEGRATIONS-20260917.md)
 - [开发工具工作流](docs/DEVTOOLS-FLOW-20260918.md)
 - [ChatGPT MCP 工作区](docs/MCP-WORKSPACE-DASHBOARD-20260917.md)
