@@ -11,5 +11,5 @@ tree-sitter-bash==0.25.1
 tree-sitter-javascript==0.25.0
 tree-sitter-typescript==0.23.2
 PyYAML==6.0.3
-jsonschema==4.25.1
+jsonschema==4.26.0
 pywinpty==3.0.5; sys_platform == "win32"
