@@ -19,6 +19,9 @@ def assert_task_catalog(catalog, model_count):
             app_only.add(name)
     assert app_only == {'workspace_status'}
     assert len(model_names) == model_count
+    assert {'vps_list', 'vps_exec'} <= model_names
+    for name in ('vps_list', 'vps_exec'):
+        assert 'password' not in by_name[name]['inputSchema']['properties']
     assert len(catalog) == model_count + 1
     assert not {'integration_control', 'validations_accept'} & set(by_name)
     dashboard = by_name['workspace_status']

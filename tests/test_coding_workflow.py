@@ -29,7 +29,7 @@ def test_small_catalog_is_opt_in_and_complete():
     full, compact = tool_definitions(), tool_definitions('coding')
     assert {d['name'] for d in full} == set(TOOLS) - {'integration_control','validations_accept'}
     model_tools = [x for x in compact if x.get('_meta', {}).get('ui', {}).get('visibility') != ['app']]
-    assert len(model_tools) == len(CODING_TOOLS) == 28
+    assert len(model_tools) == len(CODING_TOOLS) == 30
     assert {x['name'] for x in model_tools} == set(CODING_TOOLS)
     assert {x['name'] for x in compact} == set(CODING_TOOLS) | {'workspace_status'}
     # App-only refresh schemas are host metadata, not model context. Preserve
@@ -241,3 +241,51 @@ def test_native_history_cleanup_purges_only_its_review_snapshots(native,action):
     assert not (store.directory/(review['review_ref']+'.json')).exists()
     assert (store.directory/(other['id']+'.json')).exists()
     with pytest.raises(DevError):obj.action('chat_review',project,{'id':sid,'review_ref':review['review_ref']})
+
+
+def test_compact_receipt_metadata_keeps_named_fields_and_constraints():
+    from shared.contracts import _compact_input_schema, _OPERATION
+    schema = {
+        'type': 'object', 'title': 'Generated title', 'additionalProperties': False,
+        'required': ['title', 'description', 'operation_id'],
+        'properties': {
+            'title': {'type': 'string', 'minLength': 1, 'default': 'literal'},
+            'description': {'type': 'string', 'description': 'Keep this useful field help'},
+            'operation_id': {**_OPERATION, 'minLength': 1},
+        },
+        'anyOf': [{'properties': {'pending': {'const': True}}, 'required': ['pending']}],
+    }
+    original = deepcopy(schema)
+    compact = _compact_input_schema(schema, output=True)
+    expected = deepcopy(schema)
+    expected.pop('title')
+    expected['properties']['operation_id'].pop('description')
+    assert compact == expected
+    assert schema == original
+    assert _compact_input_schema(schema)['properties']['operation_id']['description'] == _OPERATION['description']
+
+
+def test_compact_outputs_preserve_validation_and_authorization_contracts():
+    from shared.contracts import OUTPUT_SCHEMAS
+
+    def constraints(schema):
+        result = {k: deepcopy(v) for k, v in schema.items() if k not in {'title', 'description'}}
+        for key in ('properties', '$defs', 'patternProperties'):
+            if key in result:
+                result[key] = {name: constraints(value) for name, value in result[key].items()}
+        for key in ('items', 'additionalProperties', 'not'):
+            if isinstance(result.get(key), dict):
+                result[key] = constraints(result[key])
+        for key in ('anyOf', 'oneOf', 'allOf', 'prefixItems'):
+            if key in result:
+                result[key] = [constraints(value) for value in result[key]]
+        return result
+
+    original = deepcopy(OUTPUT_SCHEMAS)
+    full = {t['name']: t for t in tool_definitions()}
+    for compact in tool_definitions('coding'):
+        complete = full[compact['name']]
+        assert constraints(compact['outputSchema']) == constraints(complete['outputSchema'])
+        assert compact['annotations'] == complete['annotations']
+        assert compact['_meta']['securitySchemes'] == complete['_meta']['securitySchemes']
+    assert OUTPUT_SCHEMAS == original

@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
-VERSION = "1.9.1"
+VERSION = "1.10.1"
 
 
 class DevError(Exception):

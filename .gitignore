@@ -52,3 +52,4 @@ token*.txt
 !/docs/DEVTOOLS-FLOW-20260918.md
 !/docs/ARCHITECTURE.md
 !/docs/RELEASING.md
+!/docs/VPS.md
