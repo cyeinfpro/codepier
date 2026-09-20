@@ -132,7 +132,7 @@
 /* Short desktop windows keep the same cover identity; remove repeated vertical
    padding rather than shrinking the entire interface or hiding controls. */
 @media(min-width:901px) and (max-height:680px) {
-  .workspace-device-head { min-height:84px;padding:12px 18px; }
+  .workspace-device-head { min-height:84px;padding:8px 18px; }
   .workspace-device-title>div { margin-bottom:5px; }
   .workspace-device-title h2 { margin-bottom:4px;font-size:25px; }
   .workspace-device-symbol { width:54px;height:58px; }
