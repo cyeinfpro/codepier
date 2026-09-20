@@ -546,7 +546,14 @@ class Agent:
                 if exc.details.get('input_sent') is False:
                     result['error']['input_sent'] = False
         except Exception as exc:
-            result = {"ok": False, "error": {"code": "AGENT_ERROR", "message": str(exc)[:1500]}}
+            # Pydantic model errors may include raw input (including passwords).
+            from pydantic import ValidationError
+            if isinstance(exc, ValidationError):
+                issues = [{"field": '.'.join(map(str, e['loc'])), "message": e['msg']}
+                          for e in exc.errors()]
+                result = {"ok": False, "error": {"code": "INVALID_ARGUMENTS", "message": json.dumps(issues, ensure_ascii=False)[:1500]}}
+            else:
+                result = {"ok": False, "error": {"code": "AGENT_ERROR", "message": str(exc)[:1500]}}
         finally:
             self.cancelled.discard(id)
         self.finishing.add(id)
@@ -610,6 +617,15 @@ class Agent:
             work=asyncio.create_task(asyncio.to_thread(self.artifacts.register,id,project,args))
             try:return await asyncio.shield(work)
             except asyncio.CancelledError:return await work
+        if tool == "ssh_exec":
+            from agent.ssh import prepare_ssh, ssh_error
+            root, spec = self.engine.root(project, True)
+            command, env = prepare_ssh(self.config, project, spec, args)
+            result = await self.run_process(id, command, root, args['timeout_seconds'], stream=True,
+                                            task_env=env, full_access=True,
+                                            inherit_env=self.config['shell']['inherit_env'], execution_project=project)
+            return {**result, 'host': args['host'], 'port': args['port'], 'username': args['username'],
+                    'ssh_error': ssh_error(result)}
         if tool == "shell_exec":
             root, spec = self.engine.root(project, True)
             command, cwd, env = prepare_shell(self.config, project, spec, root, args)
@@ -668,6 +684,7 @@ class Agent:
 
     async def run_process(self, id, command, cwd, timeout, stream=False, task_env=None,
                           full_access=False, inherit_env=False, execution_project=None):
+        from shared.secret_output import SecretOutput
         environment = {k: v for k, v in os.environ.items() if inherit_env or k in {
             "PATH", "HOME", "USER", "USERNAME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "SYSTEMROOT", "SystemRoot",
             "COMSPEC", "PATHEXT", "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL", "SHELL", "NVM_DIR"}}
@@ -676,6 +693,7 @@ class Agent:
             environment.update({"GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "NO_COLOR": "1", "CI": "1"})
         # Full-access shell can override env; named tasks remain local-config-only.
         environment.update(task_env or {})
+        output_filter = SecretOutput(environment.get('SSHPASS', ''))
         if execution_project is not None:
             # Inspect the exact argv, cwd and environment used below, including
             # local task definitions, PATH overrides and resolved symlink targets.
@@ -719,11 +737,11 @@ class Agent:
                 # Read available bytes in larger batches; StreamReader.read does not wait to fill n.
                 chunk = await process.stdout.read(65536)
                 if not chunk:
-                    decoded_output = (decoded_output + decoder.decode(b"", final=True))[-131072:]
+                    decoded_output = (decoded_output + output_filter.feed(decoder.decode(b"", final=True), final=True))[-131072:]
                     snapshot(True)
                     return
                 total += len(chunk)
-                decoded_output = (decoded_output + decoder.decode(chunk))[-131072:]
+                decoded_output = (decoded_output + output_filter.feed(decoder.decode(chunk)))[-131072:]
                 snapshot()
                 # stdout may remain immediately readable; let heartbeat/cancel run.
                 await asyncio.sleep(0)
@@ -771,7 +789,7 @@ class Agent:
                 self.processes.pop(id, None)
         return {"exit_code": process.returncode, "output": decoded_output,
                 "output_truncated": total > 128 * 1024, "timed_out": timed_out, "cancelled": id in self.cancelled or self.journal.is_cancelled(id),
-                "duration_ms": round((time.monotonic() - start) * 1000), "command": command}
+                "duration_ms": round((time.monotonic() - start) * 1000), "command": [output_filter.redact(value) for value in command]}
 
     @staticmethod
     async def kill_process(process, include_finished=False):

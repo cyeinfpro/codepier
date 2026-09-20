@@ -92,7 +92,7 @@ def test_mcp_protocol_and_catalog(stack):
     r=stack.rpc('initialize',{'protocolVersion':'2025-11-25','capabilities':{},'clientInfo':{'name':'integration','version':'1'}})
     assert r.json()['result']['protocolVersion']=='2025-11-25'
     catalog=stack.rpc('tools/list').json()['result']['tools']
-    assert_task_catalog(catalog, 69)
+    assert_task_catalog(catalog, 70)
     assert not {'integration_control','validations_accept'} & {t['name'] for t in catalog}
     assert stack.rpc('ping').json()['result']=={}
     resources=stack.rpc('resources/list').json()['result']['resources']

@@ -11,7 +11,7 @@ import time
 from shared.util import DevError
 
 REF = re.compile(r'^[a-f0-9]{32}$')
-RESULT_TOOLS = {'show_changes', 'validation_run', 'artifacts_register', 'shell_exec', 'tasks_run'}
+RESULT_TOOLS = {'show_changes', 'validation_run', 'artifacts_register', 'shell_exec', 'ssh_exec', 'tasks_run'}
 RECENT_TOOLS = RESULT_TOOLS | {'apply_patch', 'fs_write', 'fs_edit', 'download_artifact', 'worktrees_create'}
 PRIVATE_MEDIA = {'computer_apps', 'computer_session_open', 'computer_observe', 'computer_action',
                  'computer_session_close', 'browser_open', 'browser_snapshot', 'browser_action', 'browser_close'}
