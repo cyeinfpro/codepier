@@ -152,6 +152,24 @@ def main():
                 assert progress()['at'] == stopped, 'disabled task restarted during maintenance'
                 time.sleep(.5)
             result['maintenance_stays_stopped'] = True
+        except Exception as exc:
+            result['error'] = str(exc)
+            result['last_progress'] = progress()
+            stderr = base/'logs/stderr.log'
+            if stderr.exists():
+                result['service_stderr_tail'] = stderr.read_text(encoding='utf-8', errors='replace')[-4000:]
+            try:
+                task = run(['schtasks.exe', '/Query', '/TN', name, '/V', '/FO', 'LIST'], check=False)
+                result['task_query'] = {'returncode': task.returncode,
+                                        'stdout_tail': task.stdout[-4000:],
+                                        'stderr_tail': task.stderr[-1000:]}
+            except Exception as query_error:
+                result['task_query_error'] = str(query_error)
+            if args.output:
+                args.output.parent.mkdir(parents=True, exist_ok=True)
+                args.output.write_text(json.dumps(result, indent=2), encoding='utf-8')
+            print(json.dumps(result, indent=2), file=sys.stderr, flush=True)
+            raise
         finally:
             if created:
                 lifecycle.set_windows_task_enabled(name, False)

@@ -269,6 +269,24 @@ while True:
 
 
 @pytest.mark.asyncio
+async def test_watchdog_heartbeat_has_margin_for_short_timeout(monkeypatch):
+    watchdog = service_watchdog.Watchdog(timeout=12, interval=.05,
+                                        terminate=lambda _code: pytest.fail('healthy loop was terminated'))
+    monkeypatch.setattr(service_watchdog, 'Watchdog', lambda: watchdog)
+    loop = asyncio.get_running_loop()
+    original = loop.call_later
+    delays = []
+
+    def call_later(delay, callback, *args, **kwargs):
+        delays.append(delay)
+        return original(delay, callback, *args, **kwargs)
+
+    monkeypatch.setattr(loop, 'call_later', call_later)
+    with service_watchdog.watch_event_loop():
+        assert delays[0] <= watchdog.timeout / 4
+
+
+@pytest.mark.asyncio
 async def test_watchdog_stops_when_service_exits(monkeypatch):
     watchdog = service_watchdog.Watchdog(timeout=.15, interval=.02,
                                         terminate=lambda _code: pytest.fail('watchdog leaked after exit'))

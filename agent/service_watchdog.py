@@ -60,7 +60,7 @@ def watch_event_loop():
     def beat():
         nonlocal timer
         watchdog.beat()
-        timer = loop.call_later(10, beat)
+        timer = loop.call_later(min(10, watchdog.timeout / 4), beat)
 
     beat()
     watchdog.thread.start()
