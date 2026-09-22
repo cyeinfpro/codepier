@@ -36,6 +36,7 @@ class LifecycleManager:
         self.config_getter = config_getter
         self.lock = asyncio.Lock()
         self.handoff_pending = False
+        self.maintenance_operation = None
         self.plan_dir = self.state_dir / "lifecycle"
         self.runtime_root = Path(__file__).resolve().parent.parent
         candidate = self.runtime_root.parent
@@ -337,22 +338,41 @@ class LifecycleManager:
             raise DevError('CLI_BUSY', '请先显式停止原生 CLI 会话再管理 Agent', 409,
                            sessions=[{'id': r['id'], 'project_id': r['project_id']} for r in live])
 
+    def check_activity(self, operation_id):
+        self.check_native_sessions()
+        getattr(self, 'activity_check', lambda _id: None)(operation_id)
+
     async def prepare(self, operation_id: str, action: str, args: dict, phase=lambda *a, **k: None) -> dict:
-        if self.handoff_pending:
+        if self.handoff_pending and self.maintenance_operation != operation_id:
             raise DevError("AGENT_MAINTENANCE", "Agent 正在交接更新，请等待原操作完成", 409)
         if action not in DEVICE_ACTIONS:
             raise DevError("UNKNOWN_TOOL", "未知 Agent 生命周期操作")
         if action not in self.actions():
             raise DevError("AGENT_NOT_MANAGED", self.describe().get("reason") or "当前 Agent 不支持一键生命周期管理")
         async with self.lock:
-            self.check_native_sessions()
-            if self.has_pending(operation_id):
-                plan = self._read_json(self._plan_path(operation_id))
-                return {"action": action, "stage": "prepared", "target_version": plan.get("target_version", ""),
-                        "message": "生命周期操作已经准备完成。"}
-            if action == "agent_update":
-                return await asyncio.to_thread(self._prepare_update, operation_id, args, phase)
-            return await asyncio.to_thread(self._prepare_control, operation_id, action)
+            if self.handoff_pending and self.maintenance_operation != operation_id:
+                raise DevError('AGENT_MAINTENANCE', 'Agent 已有维护操作，请恢复原操作', 409)
+            # Fence admission BEFORE the first await/download, and retain the
+            # fence until the durable plan is acknowledged or preparation fails.
+            self.handoff_pending = True
+            self.maintenance_operation = operation_id
+            try:
+                self.check_activity(operation_id)
+                if self.has_pending(operation_id):
+                    plan = self._read_json(self._plan_path(operation_id))
+                    return {"action": action, "stage": "prepared", "target_version": plan.get("target_version", ""),
+                            "message": "生命周期操作已经准备完成。"}
+                work = asyncio.create_task(asyncio.to_thread(
+                    self._prepare_update, operation_id, args, phase) if action == 'agent_update'
+                    else asyncio.to_thread(self._prepare_control, operation_id, action))
+                try:
+                    return await asyncio.shield(work)
+                except asyncio.CancelledError:
+                    return await work  # A preparing thread cannot be cancelled safely.
+            finally:
+                if not self.has_pending(operation_id):
+                    self.handoff_pending = False
+                    self.maintenance_operation = None
 
     def _launch_helper(self, operation_id: str, command: list[str]) -> None:
         kind, scope = self._service_kind()
@@ -401,12 +421,21 @@ class LifecycleManager:
                     element.text = value
                 return element
             user = subprocess.check_output(["whoami.exe"], text=True).strip()
+            logon = "InteractiveToken"
+            service = self._service_target()
+            if service and service.is_file():
+                installed = ET.fromstring(service.read_bytes())
+                principal_path = "{" + ns + "}Principals/{" + ns + "}Principal/"
+                logon = installed.findtext(principal_path + "{" + ns + "}LogonType", logon)
+                user = installed.findtext(principal_path + "{" + ns + "}UserId", user)
+                if logon not in {"S4U", "InteractiveToken"}:
+                    raise OSError("unsupported Windows service logon type for lifecycle handoff")
             task = ET.Element("{" + ns + "}Task", version="1.2")
             child(task, "Triggers")
             principal = child(child(task, "Principals"), "Principal")
             principal.set("id", "Author")
             child(principal, "UserId", user)
-            child(principal, "LogonType", "InteractiveToken")
+            child(principal, "LogonType", logon)
             child(principal, "RunLevel", "LeastPrivilege")
             settings = child(task, "Settings")
             child(settings, "MultipleInstancesPolicy", "IgnoreNew")
@@ -437,7 +466,9 @@ class LifecycleManager:
             return False
         claimed = path.with_suffix(".claimed")
         async with self.lock:
-            self.check_native_sessions()
+            self.handoff_pending = True
+            self.maintenance_operation = operation_id
+            self.check_activity(operation_id)
             if not path.is_file():
                 return False
             os.replace(path, claimed)
@@ -459,6 +490,6 @@ class LifecycleManager:
                 claimed.unlink(missing_ok=True)
                 return True
             except Exception:
-                self.handoff_pending = False
+                # The durable plan still exists: new work must remain fenced.
                 os.replace(claimed, path)
                 raise

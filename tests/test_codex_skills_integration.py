@@ -25,6 +25,7 @@ def prepared(stack):
     config=json.loads(stack.config_path.read_text());config['skills']={'codex_enabled':True,'codex_projects':[stack.project['id']]}
     stack.config_path.write_text(json.dumps(config))
     stack.env['HOME']=str(home)
+    stack.env.pop('CODEX_HOME',None)
     stack.start_agent()
     yield stack,folder
 

@@ -8,7 +8,7 @@ export function pageCommand(request,origins){
   const visible=el=>{const r=el.getBoundingClientRect(),s=getComputedStyle(el);return el.isConnected&&r.width>0&&r.height>0&&s.visibility!=='hidden'&&s.display!=='none'&&!el.closest('[inert],[aria-hidden="true"]');};
   const safe=el=>!el.matches('input[type="password"],input[type="hidden"],input[type="file"],[autocomplete*="password"],[autocomplete="one-time-code"],[autocomplete^="cc-"]');
   const label=el=>(el.getAttribute('aria-label')||el.labels?.[0]?.innerText||el.getAttribute('placeholder')||el.innerText||el.getAttribute('title')||'').trim().slice(0,500);
-  const fingerprint=el=>JSON.stringify([el.tagName,el.getAttribute('type'),label(el),el.getAttribute('href'),el.getAttribute('formaction'),el.form?.action,el.disabled,el.getAttribute('name')]);
+  const fingerprint=el=>JSON.stringify([el.tagName,el.getAttribute('type'),label(el),el.getAttribute('href'),el.getAttribute('formaction'),el.form?.action,el.disabled,el.getAttribute('name'),el instanceof HTMLSelectElement?[...el.options].map(o=>[o.label,o.value,o.disabled,!!o.closest('optgroup[disabled]')]):null]);
   try{
     allowed(location.href);
     if(!document.body)reject('BROWSER_DOCUMENT_UNAVAILABLE','页面尚未准备好');
@@ -16,15 +16,33 @@ export function pageCommand(request,origins){
     if(!state||state.document!==document){state={document,document_id:nonce(),token:null,elements:new Map(),url:location.href};Object.defineProperty(globalThis,'__codepierBrowserV1',{value:state,writable:true,configurable:true});}
     if(request.action==='snapshot'){
       state.token=nonce();state.url=location.href;state.elements=new Map();const elements=[];
-      const all=document.querySelectorAll('button,a[href],input,textarea,select,[role="button"],[role="link"],[contenteditable="true"],[tabindex]');
-      let considered=0,truncated=false;
+      const all=[...document.querySelectorAll('button,a[href],input,textarea,select,[role="button"],[role="link"],[contenteditable="true"],[tabindex]')].slice(0,5000);
+      const inViewport=el=>{const r=el.getBoundingClientRect();return r.bottom>0&&r.right>0&&r.top<innerHeight&&r.left<innerWidth;};
+      // Stable DOM order within each group, with actionable viewport targets first.
+      all.sort((a,b)=>Number(inViewport(b))-Number(inViewport(a)));
+      let considered=0,truncated=all.length===5000,optionBudget=32768;
       for(const el of all){
         if(++considered>5000){truncated=true;break;}
         if(!safe(el)||!visible(el))continue;
         if(elements.length>=200){truncated=true;break;}
         const id='e'+elements.length;state.elements.set(id,{el,fingerprint:fingerprint(el)});
         const type=el.getAttribute('type')||'',value=('value' in el?String(el.value):el.isContentEditable?el.innerText:'').slice(0,1000);
-        elements.push({id,tag:el.tagName.toLowerCase(),role:el.getAttribute('role')||'',label:label(el),type,value,disabled:!!el.disabled});
+        const item={id,tag:el.tagName.toLowerCase(),role:el.getAttribute('role')||'',label:label(el),type,value,disabled:!!el.disabled};
+        if(el instanceof HTMLSelectElement){
+          item.options=[];item.options_truncated=el.options.length>200;
+          for(let index=0;index<Math.min(200,el.options.length);index++){
+            const option=el.options[index];
+            // Opaque values must be exact. Never advertise a truncated value
+            // that could accidentally select a different, shorter option.
+            if(option.value.length>1000){item.options_truncated=true;continue;}
+            const entry={label:option.label.slice(0,500),value:option.value,disabled:!!option.disabled||!!option.closest('optgroup[disabled]'),selected:option.selected};
+            const size=JSON.stringify(entry).length;
+            if(size>optionBudget){item.options_truncated=true;break;}
+            optionBudget-=size;item.options.push(entry);
+          }
+          truncated=truncated||item.options_truncated;
+        }
+        elements.push(item);
       }
       const text=document.body.innerText||'';
       return {ok:true,data:{document_id:state.document_id,observation_token:state.token,url:location.href,title:document.title.slice(0,300),text:text.slice(0,24000),elements,content_truncated:truncated||text.length>24000}};
@@ -58,7 +76,7 @@ export function pageCommand(request,origins){
       else reject('BROWSER_ACTION_UNSUPPORTED','该控件不是可编辑文本');
       el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));
     }else if(operation.action==='select'){
-      if(!(el instanceof HTMLSelectElement)||![...el.options].some(o=>o.value===operation.value&&!o.disabled))reject('BROWSER_ACTION_UNSUPPORTED','选项不存在或不可用');
+      if(!(el instanceof HTMLSelectElement)||![...el.options].some(o=>o.value===operation.value&&!o.disabled&&!o.closest('optgroup[disabled]')))reject('BROWSER_ACTION_UNSUPPORTED','选项不存在或不可用');
       Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(el,operation.value);
       el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));
     }else if(operation.action==='key'){

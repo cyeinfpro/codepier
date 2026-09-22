@@ -125,6 +125,6 @@ def test_chat_pending_switch_drafts_reconnect_and_explicit_approval(chat_page):
     page.evaluate('chatSwitch(savedRow)')
     expect(page.locator('#chat-compose')).to_have_value('remember this session')
     assert 'cursor=100' in page.evaluate('streams.at(-1).url')
-    page.locator('.chat-sidebar-preferences [data-nav="overview"]').click()
+    page.locator('#chat-back').click()
     expect(page.locator('#page')).to_have_text('Management page')
     assert page.evaluate('streams.at(-1).closed')

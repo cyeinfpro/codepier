@@ -2,11 +2,11 @@
 
 **把 ChatGPT / MCP、浏览器管理面板和你自己的开发电脑连接起来，让 AI 在明确授权的项目边界内真正读取代码、修改文件、运行命令、管理原生 CLI、验证网页，并通过项目安全地操作已保存的 VPS。**
 
-[![Version](https://img.shields.io/badge/version-1.10.2-2563eb)](RELEASE.json)
+[![Version](https://img.shields.io/badge/version-1.10.3-2563eb)](RELEASE.json)
 [![Python](https://img.shields.io/badge/Python-3.13%20recommended-3776ab)](requirements.txt)
 [![License](https://img.shields.io/badge/license-MIT-16a34a)](LICENSE)
 
-> 当前仓库的 `RELEASE.json` 标记为 **1.10.2 / release-candidate / source-only**。源码状态不等同于已经公开发布或部署到你的 Hub / Agent。
+> 当前仓库的 `RELEASE.json` 标记为 **1.10.3 / release-candidate / source-only**。源码状态不等同于已经公开发布或部署到你的 Hub / Agent。
 
 CodePier 面向这样的开发方式：
 
@@ -120,6 +120,8 @@ Agent 运行在真正保存源码和开发工具的电脑上，负责：
 ```
 
 CodePier 不把“网络超时”直接当成“命令失败”。带副作用的长操作会返回持久 `operation_id`；客户端应继续查询原操作，而不是因为一次断线就重新执行。
+
+代码结构和引用检索在独立解析进程中运行，最多同时启动两个解析进程。解析崩溃或超时会返回当前请求的错误回执，Agent 继续保持连接；超时进程会被停止回收。直接结构查询的解析预算为 15 秒，结构搜索单文件为最多 5 秒，并受搜索总预算约束。若同一个已开始的只读请求连续三次在 Agent 退出时未完成，会停止自动重试，保留错误回执供排查。
 
 ### 2. 在 Web 面板持续工作
 
@@ -434,6 +436,18 @@ Agent CLI：
 
 详细安装、升级和卸载见 [Agent 安装说明](docs/AGENT_INSTALL.md)。
 
+Windows 安装完成后，Agent 使用无窗口后台任务运行，关闭终端不会退出；系统开机时无需登录桌面即可启动。安装器会请求一次 UAC 授权来注册开机任务，Agent 保持原安装账户的普通权限。进程退出后每分钟自动补拉，事件循环持续卡死 120 秒会退出并由系统重启，网络断线持续重连。升级和卸载期间自动补拉会暂停。
+
+旧版 Windows 源码安装先关闭前台 Agent 窗口，再运行新版 `deploy\start-agent.cmd`，会保留原配对、项目授权和历史并转入受管目录。旧版受管安装在本机执行新版升级命令后接受 UAC；随后可用以下命令修复后台启动：
+
+```powershell
+& "$env:USERPROFILE\.codepier-agent\codepier-agent.ps1" start
+```
+
+日志位于 `%USERPROFILE%\.codepier-agent\logs`。此模式采用 S4U 非交互登录，不保存 Windows 密码，也不提供交互桌面；依赖桌面登录的映射盘、Windows 集成网络认证或加密凭据需要另外配置。[Windows 任务安全上下文](https://learn.microsoft.com/en-us/windows/win32/taskschd/security-contexts-for-running-tasks)
+
+Windows 原生恢复验收：在管理员终端运行 `python scripts/check_windows_service.py --output dist/windows-service.json`。测试只创建临时任务，验证关闭启动进程后常驻、进程被杀或卡死后的恢复，以及维护期间不被补拉，最后清理临时任务。它不重启或注销电脑，重启后未登录时的上线情况需要在目标节点实测。
+
 ### 3. 创建项目映射
 
 CodePier 以“项目”作为主要授权边界。
@@ -652,7 +666,7 @@ codepier/
 
 仓库当前版本信息来自 [`RELEASE.json`](RELEASE.json)：
 
-- **Version:** 1.10.2
+- **Version:** 1.10.3
 - **Date:** 2026-09-21
 - **Status:** release-candidate
 - **Source only:** true

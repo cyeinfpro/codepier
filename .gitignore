@@ -53,3 +53,4 @@ token*.txt
 !/docs/ARCHITECTURE.md
 !/docs/RELEASING.md
 !/docs/VPS.md
+!/docs/LONG_OPERATIONS.md

@@ -17,6 +17,7 @@ export function mountDashboard(parent, ctx) {
   let detailRevision = 0;
   let timer = 0;
   let detailTimer = 0;
+  let resumeDetail = null;
   let started = Date.now();
   let nextWorkflowCursor = null;
   let nextEvidenceOffset = null;
@@ -59,6 +60,7 @@ export function mountDashboard(parent, ctx) {
 
   function closeDetail() {
     detailRevision++;
+    resumeDetail = null;
     clearTimeout(detailTimer);
     inspector.replaceChildren(); inspector.hidden = true;
   }
@@ -78,7 +80,7 @@ export function mountDashboard(parent, ctx) {
     }
     const active = snapshot?.workflow?.state === 'active' ||
       [...evidence, ...(snapshot?.recent_operations || [])].some(item => item.pending);
-    if (active) timer = setTimeout(() => void refresh(), REFRESH_MS);
+    timer = setTimeout(() => void refresh(), active ? REFRESH_MS : REFRESH_MS * 2);
   }
   async function refresh({workflowCursor = '', appendTasks = false, offset = 0, appendEvidence = false} = {}) {
     if (!alive()) return;
@@ -137,7 +139,7 @@ export function mountDashboard(parent, ctx) {
     void refresh();
   });
   auto.addEventListener('change', () => { started = Date.now(); if (auto.checked) void refresh(); else clearTimeout(timer); });
-  function visible() { if (document.hidden) clearTimeout(timer); else if (auto.checked && alive()) void refresh(); }
+  function visible() { if (document.hidden) { clearTimeout(timer); clearTimeout(detailTimer); } else if (alive()) { if (auto.checked) void refresh(); resumeDetail?.(); } }
   document.addEventListener('visibilitychange', visible);
 
   function renderOverview() {
@@ -313,11 +315,12 @@ export function mountDashboard(parent, ctx) {
         pending = op.pending === true;
         if (pending && watch.checked && !document.hidden && Date.now() - since < WATCH_LIMIT_MS)
           detailTimer = setTimeout(() => void read(), 2000);
-        else if (pending && Date.now() - since >= WATCH_LIMIT_MS) status.textContent += ' · 自动跟踪已暂停，请手动读取原操作。';
+        else if (pending && Date.now() - since >= WATCH_LIMIT_MS) { watch.checked = false; status.textContent += ' · 自动跟踪已暂停，请手动读取原操作。'; }
       } catch (error) {
         if (child.alive()) { status.textContent = '读取失败，保留上次日志：' + error.message; watch.checked = false; }
       } finally { busy = false; }
     }
+    resumeDetail = () => { if (child.alive() && watch.checked && pending && Date.now() - since < WATCH_LIMIT_MS) void read(); };
     watch.addEventListener('change', () => { if (watch.checked && pending) void read(); else clearTimeout(detailTimer); });
     inspector.append(button('刷新原操作', read));
     await read();

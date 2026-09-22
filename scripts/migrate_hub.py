@@ -152,6 +152,8 @@ def prepare(path,docker):
         proxy_plans = proxy.preflight(config, legacy, docker, LEGACY_PROJECT)
         if prior:
             save(path, prior, proxy_trust=proxy_plans)
+    if proxy_plans:
+        proxy.source_preflight(path.parent, proxy.trust(config))
     legacy_running=any(c.get('State',{}).get('Running') for c in legacy)
     if unfinished:
         expected={p['destination'] for p in prior.get('volumes',[])}
@@ -215,10 +217,13 @@ def prepare(path,docker):
 
 
 def main():
-    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('action',choices=['prepare','write-boundary','proxy-trust','commit','rollback'])
+    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('action',choices=['prepare','probe-volume','write-boundary','proxy-trust','commit','rollback'])
     parser.add_argument('--root',type=Path,default=Path.cwd());args=parser.parse_args();root=args.root.resolve();path=root/STATE
     os.chdir(root);os.environ['COMPOSE_PROJECT_NAME']='codepier';docker=Docker()
     try:
+        if args.action=='probe-volume':
+            plans,_=inspect_layout(docker.json(['compose','config','--format','json']),[])
+            print(plans[0]['destination']);return 0
         if args.action=='prepare':result=prepare(path,docker)
         elif args.action=='rollback':result=rollback(path,docker)
         elif args.action=='proxy-trust':

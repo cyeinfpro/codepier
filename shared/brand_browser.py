@@ -96,9 +96,13 @@ def remove_created(journal):
 
 def migrate(base,old,new,config,journal,api):
     relocate,read=api['relocate_path'],api['read_json']
-    state=Path(relocate(config.get('state_dir') or str(old/'state'),old,new));receipt_path=state/'browser-bridge/install-receipt.json'
-    if not receipt_path.is_file():return
+    # Match Agent path normalization before relocating an owned installation.
+    # Expanding after relocation would leave ~/.../relay-agent pointing at the
+    # retired directory and silently skip its receipt.
+    configured_state=Path(config.get('state_dir') or old/'state').expanduser().resolve()
+    state=Path(relocate(str(configured_state),old,new));receipt_path=state/'browser-bridge/install-receipt.json'
     if receipt_path.is_symlink():raise RuntimeError('Browser receipt is a symlink')
+    if not receipt_path.is_file():return
     receipt=read(receipt_path)
     if receipt.get('config') not in {str(old/'config.json'),str(new/'config.json')}:raise RuntimeError('Browser receipt belongs to another Agent')
     files=receipt.get('files')

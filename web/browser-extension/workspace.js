@@ -31,7 +31,14 @@ export class BrowserWorkspace{
   async save(){await this.api.storage.local.set({codepierWorkspace:this.state});}
   async counts(){
     await this.load();const live=[];
-    for(const row of this.state.pool){try{await this.api.tabs.get(row.tab_id);live.push(row);}catch{/* Closed by user. */}}
+    for(const row of this.state.pool){try{
+      const tab=await this.api.tabs.get(row.tab_id);
+      // Keep active lease records for explicit, honest cleanup. Idle entries
+      // no longer owned are relinquished, never navigated or closed remotely.
+      // Chrome exposes pendingUrl until a newly created/reset idle page commits.
+      // A pending user navigation takes precedence over the previous idle URL.
+      if(row.lease_id||(!tab.active&&tab.windowId===row.window_id&&(tab.pendingUrl||tab.url)===this.api.runtime.getURL('idle.html')))live.push(row);
+    }catch{/* Closed by user. */}}
     this.state.pool=live;await this.save();
     return {pool_size:live.length,available:live.filter(r=>!r.lease_id).length,leased:live.filter(r=>r.lease_id).length};
   }
@@ -124,7 +131,7 @@ export class BrowserWorkspace{
       let row;
       for(const candidate of this.state.pool){
         if(candidate.lease_id)continue;
-        try{const tab=await this.owned(candidate);if(tab.url===this.api.runtime.getURL('idle.html')){row=candidate;break;}}catch{}
+        try{const tab=await this.owned(candidate);if((tab.pendingUrl||tab.url)===this.api.runtime.getURL('idle.html')){row=candidate;break;}}catch{}
       }
       if(!row)throw failure('BROWSER_POOL_EMPTY','没有可用的后台标签页，请在扩展中准备标签页；远程调用不会创建窗口');
       Object.assign(row,{lease_id:request.lease_id,expires:request.expires*1000,ttl:request.expires*1000-this.clock(),site});await this.save();

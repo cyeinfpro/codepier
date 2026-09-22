@@ -47,6 +47,20 @@ class Records:
             raise DevError('RECORD_NOT_FOUND','记录不属于当前项目映射和授权',404)
         return json.loads(row['body'])
 
+    def project_entries(self,kind,project):
+        """Internal owner cleanup only; normal reads keep exact workspace binding."""
+        if not project.get('_integration_admin'):
+            raise DevError('INTEGRATION_FORBIDDEN','整项目清理需要本机主理人权限',403)
+        expected=binding(project);result=[]
+        with self.journal.lock:
+            rows=self.journal.db.execute('SELECT binding,body FROM integration_records WHERE kind=?',(kind,)).fetchall()
+        for row in rows:
+            actual=json.loads(row['binding'])
+            if all(actual.get(k)==expected.get(k) for k in ('project','root','device')):
+                bound={**project,'_workspace_id':actual['workspace'],'_integration_owner':actual['owner']}
+                result.append((bound,json.loads(row['body'])))
+        return result
+
     def list(self,kind,project,limit=100):
         j=self.journal;bound=binding(project)
         # Filter authorization before applying the visible limit.

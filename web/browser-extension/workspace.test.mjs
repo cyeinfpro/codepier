@@ -79,3 +79,31 @@ test('isolated top-frame scripting contains only the closed page operation',asyn
 for(const value of ['file:///private','https://u:p@allowed.test','https://allowed.test/\nprivate','https://allowed.test\\evil']){
  test('invalid URL rejected '+JSON.stringify(value),()=>assert.throws(()=>siteOf(value)));
 }
+
+test('new idle tabs remain reserved before their navigation commits',async()=>{
+ const f=fixture(),create=f.api.tabs.create;
+ f.api.tabs.create=async values=>{const tab=await create(values);tab.pendingUrl=tab.url;tab.url='';tab.status='loading';return tab;};
+ await f.ready();assert.equal((await f.workspace.localStatus()).available,2);
+ await f.workspace.prepare(2);assert.equal(f.events.filter(event=>event[0]==='create').length,2);
+ const opened=await f.workspace.execute(f.command('open',{url:'https://allowed.test/',expires:130}));
+ assert.equal(opened.opened,true);
+});
+
+for(const changed of ['navigation','pending-navigation','active','window','closed']){
+ test('idle tabs claimed by a human are replaced only by local pool preparation: '+changed,async()=>{
+  const f=fixture();await f.ready();const idle=[...f.tabs.keys()][0],human=f.tabs.get(idle);
+  if(changed==='navigation')human.url='https://personal.invalid/';
+  if(changed==='pending-navigation')human.pendingUrl='https://personal.invalid/';
+  if(changed==='active')human.active=true;
+  if(changed==='window')human.windowId=2;
+  if(changed==='closed')f.tabs.delete(idle);
+  f.events.length=0;
+  assert.equal((await f.workspace.localStatus()).pool_size,1);
+  assert.equal(f.events.length,0);
+  await f.workspace.prepare(2);
+  assert.equal((await f.workspace.localStatus()).available,2);
+  assert.equal(f.events.filter(event=>event[0]==='create').length,1);
+  assert.ok(!f.events.some(event=>event[0]==='update'&&event[1]===idle));
+  if(changed==='navigation')assert.equal(f.tabs.get(idle).url,'https://personal.invalid/');
+ });
+}

@@ -37,7 +37,7 @@ def test_small_catalog_is_opt_in_and_complete():
     full_model_tools = [x for x in full if x.get('_meta', {}).get('ui', {}).get('visibility') != ['app']]
     assert len(json.dumps(model_tools)) < len(json.dumps(full_model_tools))*.4
     assert next(x for x in compact if x['name']=='operations_wait')['inputSchema']['properties']['output_limit']['default']==8000
-    assert next(x for x in tool_definitions() if x['name']=='operations_wait')['inputSchema']['properties']['output_limit']['default']==131072
+    assert next(x for x in tool_definitions() if x['name']=='operations_wait')['inputSchema']['properties']['output_limit']['default']==8000
 
 
 def test_context_reuses_payload_but_detects_rule_policy_and_owner_change(workspace):

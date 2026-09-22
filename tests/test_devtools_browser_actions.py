@@ -13,7 +13,7 @@ def browser_page(tools_page):
       window.fixtureLease='c'.repeat(32);window.browserLeases=[];window.observations=0;window.poolAvailable=2;
       toolHandlers.browser_status=async()=>({enabled:true,connected:true,profile_bound:true,origins:['https://example.test'],pool:{available:poolAvailable},active_leases:browserLeases});
       toolHandlers.browser_open=async()=>{browserLeases=[{lease_id:fixtureLease,state:'ready',expires_at:Date.now()/1000+900}];return {lease_id:fixtureLease,opened:true};};
-      toolHandlers.browser_snapshot=async args=>({lease_id:args.lease_id,observation_id:(++observations).toString(16).padStart(32,'0'),expires_at:Date.now()/1000+900,title:'Synthetic verification form',url:'https://example.test/form',text:'Fixture text <script>not executable</script>',elements:[{id:'field-one',tag:'input',label:'Synthetic field'}]});
+      toolHandlers.browser_snapshot=async args=>({lease_id:args.lease_id,observation_id:(++observations).toString(16).padStart(32,'0'),expires_at:Date.now()/1000+900,title:'Synthetic verification form',url:'https://example.test/form',text:'Fixture text <script>not executable</script>',elements:[{id:'field-one',tag:'input',label:'Synthetic field'},{id:'plan-one',tag:'select',label:'Delivery',options:[{label:'Option one',value:'option-one',disabled:false},{label:'Unavailable',value:'blocked-option',disabled:true}]}]});
       toolHandlers.browser_action=async args=>({lease_id:args.lease_id,action_outcome:'confirmed',observation_consumed:true,business_outcome_verified:false});
       toolHandlers.browser_close=async args=>{browserLeases=[];return {lease_id:args.lease_id,released:true,tab_cleanup_confirmed:false};};
     }''')
@@ -35,11 +35,24 @@ def test_every_page_action_confirms_once_and_observes_again(browser_page,action,
     first=page.evaluate('observations')
     assert first==1
     page.select_option('[data-i-form=browser-action] [name=action]',action)
-    if action in {'click','fill','select'}:
-        page.select_option('[name=element_id]','field-one')
+    target = 'plan-one' if action == 'select' else 'field-one'
+    if action in {'click','fill','select','key'}:
+        page.select_option('[name=element_id]',target)
     else:
         expect(page.locator('[name=element_id]')).to_be_hidden()
-    if action in {'fill','select','key','navigate'}:
+    if action == 'select':
+        page.select_option('[name=option_value]',label='Option one')
+        # HTML option.disabled is the native constraint. Playwright's generic
+        # disabled matcher does not classify option elements as form controls.
+        unavailable=page.locator('[name=option_value] option',has_text='Unavailable')
+        assert unavailable.evaluate('(option)=>option.disabled')
+        page.locator('[name=option_value]').evaluate('(select)=>{select.value="1";select.dispatchEvent(new Event("change",{bubbles:true}));}')
+        page.click('[data-i-form=browser-action] button[type=submit]')
+        expect(page.locator('[data-i-form=browser-action] .integration-form-error')).to_contain_text('请选择刚观察到的可用选项')
+        assert page.evaluate("toolCalls.filter(row=>row.tool==='browser_action').length")==0
+        expect(page.locator('#i-confirm-form')).to_have_count(0)
+        page.select_option('[name=option_value]',label='Option one')
+    if action in {'fill','key','navigate'}:
         page.fill('[data-i-form=browser-action] [name=value]',value)
     else:
         expect(page.locator('[data-i-form=browser-action] [name=value]')).to_be_hidden()
@@ -51,7 +64,7 @@ def test_every_page_action_confirms_once_and_observes_again(browser_page,action,
     expect(page.locator('#i-result')).to_contain_text('网页动作回执')
     args=page.evaluate("toolCalls.find(r=>r.tool==='browser_action').arguments")
     assert args['action']==action and args['observation_id']=='0'*31+'1'
-    assert args['value']==value and args['element_id']==('field-one' if action in {'click','fill','select'} else '')
+    assert args['value']==value and args['element_id']==(target if action in {'click','fill','select','key'} else '')
     assert page.evaluate("toolCalls.filter(r=>r.tool==='browser_action').length")==1
     assert page.locator('#i-browser-page script').count()==0
     expect(page.locator('.integration-page-text').first).to_contain_text('<script>not executable</script>')

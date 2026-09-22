@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('install','upgrade','uninstall','status')][string]$Action = 'install',
+  [ValidateSet('install','upgrade','uninstall','status','start')][string]$Action = 'install',
   [string]$Hub,
   [string]$Token,
   [string]$Sha256,
@@ -31,6 +31,7 @@ if (Test-Path -LiteralPath $InstallDir) {
 if (-not [IO.Path]::IsPathRooted($InstallDir)) { throw 'Install directory must be absolute' }
 if ($Action -eq 'uninstall' -and -not (Test-Path -LiteralPath $InstallDir)) { Write-Host 'Agent is not installed; nothing to remove.'; return }
 if ($NoService -and $Action -ne 'install') { throw '-NoService is only valid for installation' }
+if ($Action -eq 'start' -and $Hub) { throw 'Use the installed management command for start, without -Hub' }
 function Confirm-CodePierRemoval {
   if ($Action -eq 'uninstall') {
     for ($i=0; $i -lt 60; $i++) {
@@ -47,7 +48,8 @@ if ($Action -ne 'install' -and -not $Hub) {
   if (-not (Test-Path -LiteralPath $Python)) { $Python = (Get-Command python -ErrorAction Stop).Source }
   $Python = (& $Python -c 'import sys; print(getattr(sys, "_base_executable", None) or sys.executable)' | Select-Object -Last 1)
   if ($LASTEXITCODE -ne 0 -or -not $Python) { throw 'No external Python interpreter found' }
-  $CodePierArgs = @($Helper, ('--'+$Action), '--install-dir', $InstallDir)
+  $CodePierFlag = if ($Action -eq 'start') { '--start-service' } else { '--'+$Action }
+  $CodePierArgs = @($Helper, $CodePierFlag, '--install-dir', $InstallDir)
   if ($Yes) { $CodePierArgs += '--yes' }
   if ($ExpectedDevice) { $CodePierArgs += @('--expected-device', $ExpectedDevice) }
   & $Python @CodePierArgs

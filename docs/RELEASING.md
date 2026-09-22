@@ -10,8 +10,8 @@
 
 ```bash
 .venv/bin/python scripts/check_release.py
-.venv/bin/python scripts/build_source_bundle.py --public --output dist/codepier-1.10.2-source.zip
-.venv/bin/python scripts/check_release.py --bundle dist/codepier-1.10.2-source.zip
+.venv/bin/python scripts/build_source_bundle.py --public --output dist/codepier-1.10.3-source.zip
+.venv/bin/python scripts/check_release.py --bundle dist/codepier-1.10.3-source.zip
 ```
 
 重复构建并比较 ZIP 的 SHA-256，确认同一源码输入产生相同归档。归档中的 `MANIFEST.sha256` 必须覆盖全部源文件；外部 `.manifest.json` 提供逐文件清单。检查公开包内没有运行状态、个人服务地址、历史部署证据或凭据。模式扫描不能替代对新增文件和截图的人工检查。
@@ -30,7 +30,7 @@ macOS 下，浏览器原生宿主若从 Downloads 等受限制目录启动，可
 
 建议分支名 `main`。在 GitHub 启用私密漏洞报告、依赖安全告警与分支保护，并把 CI 设为合并条件；禁止把生产凭据暴露给 PR 工作流。工作流只检查和构建，不会创建 Release 或部署服务。
 
-首次推送后必须核对 GitHub 中真实运行的 CI 结果；本机通过不能冒充远端 CI 通过。随后由维护者确认 `v1.10.2` 标签、发布说明和经过校验的源代码包，再执行公开发布。准备完成与已经发布是两个不同状态。
+首次推送后必须核对 GitHub 中真实运行的 CI 结果；本机通过不能冒充远端 CI 通过。随后由维护者确认 `v1.10.3` 标签、发布说明和经过校验的源代码包，再执行公开发布。准备完成与已经发布是两个不同状态。
 
 ## 发布后
 

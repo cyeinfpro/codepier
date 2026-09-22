@@ -2,7 +2,7 @@ name: codepier
 services:
   hub:
     build: .
-    image: codepier:1.10.2
+    image: codepier:1.10.3
     restart: unless-stopped
     init: true
     ports:

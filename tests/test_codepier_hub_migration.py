@@ -158,6 +158,7 @@ def test_ambiguous_installation_refuses_before_stop(tmp_path,problem):
 def test_proxy_plan_is_durable_before_cutover_and_reused_on_resume(tmp_path,monkeypatch):
     docker=Docker();path=tmp_path/upgrade.STATE
     plan=[{'network':'default','target':'codepier_default','old_gateway':'172.20.0.1','ip_version':4}]
+    (tmp_path/'.env').write_text('FORWARDED_ALLOW_IPS=127.0.0.1\n',encoding='utf-8')
     monkeypatch.setattr(upgrade.proxy,'preflight',lambda *args:copy.deepcopy(plan))
     original_worker=docker.worker
     def check_journal(*args):

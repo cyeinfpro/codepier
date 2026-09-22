@@ -5,6 +5,7 @@ import contextlib
 import hashlib
 import json
 import copy
+from collections import deque
 import jsonschema
 import os
 from pathlib import Path
@@ -78,6 +79,8 @@ class Protocol:
         self.send, self.emit, self.finish, self.persist = send, emit, finish, persist
         self.active = None
         self.turn = None
+        self.turn_start_call = None
+        self.closed_turns = deque(maxlen=64)
         self.thread = row.get('native_thread', '')
         self.ready = False
         self.pending = {}
@@ -147,7 +150,7 @@ class Protocol:
             self.turn_settings=dict(self.next_settings)
             self.turn_settings_receipt=self.next_settings_receipt
             params = {'threadId': self.thread, 'input': [{'type': 'text', 'text': text}] + images, **self.turn_settings}
-            self.call('turn/start', params)
+            self.turn_start_call = self.call('turn/start', params)
 
     def save_settings(self):
         self.row['chat_settings']=json.dumps({'actual': self.settings, 'next': self.next_settings, 'defaults': self.defaults, 'next_receipt': self.next_settings_receipt})
@@ -248,6 +251,11 @@ class Protocol:
         if not op: return False
         self.operation_deadlines.pop(m.get('id'),None)
         receipt,name=op
+        if name == 'compact' and receipt != self.compaction_receipt:
+            # Completion events can precede the RPC acknowledgement. An old
+            # acknowledgement cannot settle a later compaction command.
+            self.calls.pop(m.get('id'), None)
+            return True
         success=m.get('success',False) if self.provider=='pi' else 'error' not in m
         state='completed' if success else 'error'
         if name=='compact' and self.provider=='codex' and success:
@@ -380,13 +388,19 @@ class Protocol:
 
     def settled(self, status='completed', error=''):
         if not self.active:
+            if self.provider == 'codex' and self.turn:
+                self.closed_turns.append(self.turn)
+                self.turn = None
             return
         status = 'interrupted' if self.interrupted else ('error' if self.failure else status)
         self.finish(self.active, status)
         self.emit('done', status=status, text=error or self.failure or '')
         for key in list(self.pending):
             self.emit('approval', request_id=key, resolved=True, resolution='closed')
+        if self.provider == 'codex' and self.turn:
+            self.closed_turns.append(self.turn)
         self.active = self.turn = None
+        self.turn_start_call = None
         self.pending.clear()
         if self.provider=='pi': self.call('get_session_stats')
 
@@ -466,8 +480,14 @@ class Protocol:
             if message.get('stopReason') in ('error', 'aborted'):
                 self.failure = message.get('errorMessage', 'Native response failed')
                 self.emit('error', text=self.failure)
+        elif kind == 'auto_retry_end':
+            if m.get('success') is True:
+                self.failure = ''
+                self.emit('status', text='原生重试已成功')
+            elif m.get('success') is False:
+                self.failure = m.get('errorMessage') or self.failure or 'Native retries exhausted'
         elif kind and kind.startswith('tool_execution_'):
-            self.emit('tool', tool_id=m.get('toolCallId', ''), name=m.get('toolName', ''), status=kind.removeprefix('tool_execution_'), text=json.dumps(m.get('result', m.get('partialResult', m.get('args', {}))), ensure_ascii=False))
+            self.emit('tool', tool_id=m.get('toolCallId', ''), name=m.get('toolName', ''), status='error' if m.get('isError') is True else kind.removeprefix('tool_execution_'), isError=m.get('isError') is True, text=json.dumps(m.get('result', m.get('partialResult', m.get('args', {}))), ensure_ascii=False))
         elif kind == 'extension_ui_request':
             if m.get('method') in ('select', 'confirm', 'input', 'editor'):
                 self.pending[str(m['id'])] = json.loads(json.dumps(m))
@@ -485,6 +505,11 @@ class Protocol:
         method, params = m.get('method', ''), m.get('params', {})
         if self.thread and params.get('threadId') and params['threadId'] != self.thread:
             return
+        turn_id = params.get('turnId') or (params.get('turn') or {}).get('id')
+        if turn_id and (turn_id in self.closed_turns or self.turn and turn_id != self.turn):
+            # Native events can lag behind completion and a queued follow-up.
+            # They must never change that follow-up's text, approvals or state.
+            return
         if 'id' in m and method:
             self.pending[str(m['id'])] = json.loads(json.dumps(m))
             self.emit('approval', request_id=str(m['id']), method=method, text=params.get('reason', method), details=params,
@@ -492,6 +517,8 @@ class Protocol:
             return
         if 'id' in m:
             tag = self.calls.pop(m['id'], '')
+            if tag == 'turn/start' and (not self.active or m['id'] != self.turn_start_call):
+                return
             if tag.startswith('settings_'):
                 self.settings_response(tag, 'error' not in m)
                 if 'error' in m:
@@ -538,6 +565,10 @@ class Protocol:
                     self.call('model/list', {'cursor': data['nextCursor']})
             elif tag == 'turn/start':
                 self.turn = data['turn']['id']
+                # A matching start reply is authoritative even if a native
+                # implementation reuses a turn identifier.
+                with contextlib.suppress(ValueError):
+                    self.closed_turns.remove(self.turn)
                 if self.turn_settings:
                     self.settings.update(self.turn_settings)
                     if 'effort' in self.turn_settings: self.settings['reasoningEffort']=self.turn_settings['effort']
@@ -569,6 +600,11 @@ class Protocol:
                 if method=='item/completed':
                     if self.compaction_receipt: self.finish(self.compaction_receipt,'completed')
                     self.compaction_receipt=None
+                    if not self.active:
+                        # This completion releases queued prompts/commands now;
+                        # retire the idle compaction turn before admitting them.
+                        self.turn = self.turn or turn_id
+                        self.settled()
             if item.get('type')=='agentMessage' and method=='item/completed' and item.get('text'):
                 self.emit('message',text=item['text'],item_id=item.get('id',''))
             if item.get('type') not in ('agentMessage', 'userMessage', 'reasoning'):
@@ -584,7 +620,15 @@ class Protocol:
             self.turn = params['turn']['id']
         elif method == 'turn/completed':
             turn = params.get('turn', {})
-            self.settled({'failed': 'error', 'interrupted': 'interrupted'}.get(turn.get('status'), 'completed'), (turn.get('error') or {}).get('message', ''))
+            if not self.turn:
+                self.turn = turn.get('id')
+            state = {'failed': 'error', 'interrupted': 'interrupted'}.get(turn.get('status'), 'completed')
+            error = (turn.get('error') or {}).get('message', '')
+            if not self.active and self.compaction_receipt:
+                self.finish(self.compaction_receipt, state)
+                self.emit('command_result', receipt=self.compaction_receipt, name='compact', state=state, text=error)
+                self.compaction_receipt = None
+            self.settled(state, error)
         elif method == 'error':
             self.emit('error', text=(params.get('error') or {}).get('message', 'Native error'))
 
@@ -658,6 +702,7 @@ def run(directory, sid, config_path=None):
         if row['provider'] == 'pi':
             from agent.native_pi_bridge import prepare_shell_guard
             argv += ['--extension', str(prepare_shell_guard(Path(directory)))]
+        from agent.owned_process_group import child_exited, stop_owned_group
         child = subprocess.Popen(argv, cwd=row['cwd'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=os.name != 'nt', bufsize=0)
         for pipe in (child.stdout, child.stderr):
             os.set_blocking(pipe.fileno(), False)
@@ -667,11 +712,23 @@ def run(directory, sid, config_path=None):
         db.execute("UPDATE sessions SET status='running',worker_pid=?,child_pid=?,heartbeat=?,updated=? WHERE id=?", (os.getpid(), child.pid, time.time(), time.time(), sid))
         db.commit()
         protocol = Protocol(row['provider'], row, send, emit, finish, persist)
+        def receive_output(data):
+            buffer = buffers[child.stdout]
+            buffer.extend(data)
+            while b'\n' in buffer:
+                line, _, remaining = buffer.partition(b'\n')
+                buffer[:] = remaining
+                if line.strip():
+                    if len(line) > MAX_LINE:
+                        raise RuntimeError('Native JSON line quota exceeded')
+                    protocol.receive(json.loads(line))
+            if len(buffer) > MAX_LINE:
+                raise RuntimeError('Native JSON line quota exceeded')
         protocol.start()
         heartbeat = 0
         initialize_deadline = time.monotonic() + 60
         last_history_check = 0
-        while child.poll() is None and not stop:
+        while not child_exited(child.pid) and not stop:
             now = time.time()
             if not protocol.ready and time.monotonic() > initialize_deadline:
                 raise RuntimeError('Native initialization timed out after 60 seconds; inspect node-local CLI')
@@ -730,6 +787,9 @@ def run(directory, sid, config_path=None):
                     del outgoing[:n]
                 except BlockingIOError:
                     pass
+                except BrokenPipeError:
+                    if not child_exited(child.pid):
+                        raise
             for key, _ in selector.select(.025):
                 data = os.read(key.fileobj.fileno(), 65536)
                 if not data:
@@ -738,17 +798,18 @@ def run(directory, sid, config_path=None):
                 if key.fileobj is child.stderr:
                     # Runtime stderr can contain credentials/config. It is not chat.
                     continue
-                buffer = buffers[key.fileobj]
-                buffer.extend(data)
-                while b'\n' in buffer:
-                    line, _, remaining = buffer.partition(b'\n')
-                    buffer[:] = remaining
-                    if line.strip():
-                        if len(line) > MAX_LINE:
-                            raise RuntimeError('Native JSON line quota exceeded')
-                        protocol.receive(json.loads(line))
-                if len(buffer) > MAX_LINE:
-                    raise RuntimeError('Native JSON line quota exceeded')
+                receive_output(data)
+        if not stop:
+            # waitpid/poll observes process exit, not pipe exhaustion. Preserve
+            # final messages and completion receipts already written by the CLI.
+            while True:
+                try:
+                    data = os.read(child.stdout.fileno(), 65536)
+                except BlockingIOError:
+                    break
+                if not data:
+                    break
+                receive_output(data)
         if not protocol.ready and not stop:
             raise RuntimeError('Native CLI exited before initialization; check login/configuration in node-local CLI')
         if protocol.active:
@@ -764,26 +825,10 @@ def run(directory, sid, config_path=None):
     finally:
         try:
             if child:
-                def signal_owned(number):
-                    # Only signal our live unreaped direct child/group, never a
-                    # persisted PID. It may exit between poll/getpgid/killpg.
-                    if child.poll() is not None:
-                        return
-                    with contextlib.suppress(ProcessLookupError):
-                        if os.name != 'nt' and os.getpgid(child.pid) == child.pid:
-                            os.killpg(child.pid, number)
-                        else:
-                            child.send_signal(number)
                 try:
-                    signal_owned(signal.SIGTERM)
-                    try:
-                        child.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        signal_owned(signal.SIGKILL)
-                        try:
-                            child.wait(timeout=5)
-                        except subprocess.TimeoutExpired:
-                            status, error = 'orphaned', 'Owned native child has not exited; inspect Agent host'
+                    cleaned, child.returncode = stop_owned_group(child.pid, grouped=True)
+                    if not cleaned:
+                        status, error = 'orphaned', 'Owned native process group cleanup is unverified; inspect Agent host'
                 finally:
                     for pipe in (child.stdin, child.stdout, child.stderr):
                         with contextlib.suppress(OSError):

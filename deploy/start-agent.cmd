@@ -1,11 +1,12 @@
 @echo off
 cd /d "%~dp0.."
-if not exist ".venv\Scripts\python.exe" (
-  echo Run install-agent.ps1 first.
-  pause
-  exit /b 1
+set "codepier_base=%USERPROFILE%\.codepier-agent"
+if not exist "%codepier_base%" if exist "%USERPROFILE%\.remote-dev-agent" set "codepier_base=%USERPROFILE%\.remote-dev-agent"
+if exist "%codepier_base%\runtime\agent\service_watchdog.py" (
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "deploy\install-from-hub.ps1" -Action start -InstallDir "%codepier_base%"
+) else (
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "deploy\install-agent.ps1"
 )
-".venv\Scripts\python.exe" -m agent run
 set "agent_exit_code=%errorlevel%"
-pause
+if not "%agent_exit_code%"=="0" pause
 exit /b %agent_exit_code%

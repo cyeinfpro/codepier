@@ -1,6 +1,10 @@
 'use strict';
 // Window presentation only. Native operations remain in chat.js / chat-panels.js.
 // No conversations, credentials, prompts or attachments are persisted here.
+function chatWorkspaceBar() {
+  const back='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m10 5-7 7 7 7M3 12h18"/></svg>';
+  return `<button type="button" id="chat-back" class="chat-back-button" data-nav="overview" title="返回面板，当前会话和草稿会保留">${back}<span>返回面板</span></button>`;
+}
 function chatRememberView() {
   if (!$('#chat-root') || !ChatUI.listeners) return;
   if (ChatUI.frame) { cancelAnimationFrame(ChatUI.frame); chatFlush(); }
@@ -63,6 +67,9 @@ function chatMountChrome() {
   window.visualViewport?.addEventListener('scroll',chatScheduleLayout,{signal});
   root.addEventListener('keydown',chatInteractionKey,{signal});
   root.addEventListener('click',e=>{
+    if(e.target.closest('.chat-overflow summary')&&root.classList.contains('drawer-open'))chatDrawer(false,true);
+    if($('#chat-options').classList.contains('is-open')&&!e.target.closest('#chat-options,#chat-popover,#chat-options-toggle'))chatOptions(false,!e.target.closest('button,summary,input,select'));
+    const action=e.target.closest('[data-chat-action]');if(action){const target=$('#'+action.dataset.chatAction);if(action.dataset.chatAction==='chat-inspector-toggle')c.inspectorOrigin=$('.chat-overflow summary');target?.click();}
     const menu=$('.chat-overflow');
     if(menu?.open&&(!menu.contains(e.target)||e.target.closest('button')))menu.open=false;
   },{signal});
@@ -70,8 +77,20 @@ function chatMountChrome() {
     const menu=$('.chat-overflow');if(menu?.open&&!menu.contains(e.target))menu.open=false;
   },{signal});
   c.mobileMedia=matchMedia('(max-width: 760px)');
-  c.mobileMedia.addEventListener('change',()=>{chatDrawer(false,true);chatInspector(c.inspector);chatScheduleLayout();},{signal});
-  chatSyncChrome();
+  c.mobileMedia.addEventListener('change',()=>{const panel=$('#chat-options'),directoryOpen=!$('#chat-popover').hidden&&c.popoverAnchor==='chat-cwd-button',restore=panel.classList.contains('is-open')||panel.contains(document.activeElement)||directoryOpen;if(directoryOpen)chatClosePopover();chatOptions(false,restore);chatDrawer(false,true);chatInspector(c.inspector);chatResizeComposer();chatScheduleLayout();},{signal});
+  chatOptions(false);chatSyncChrome();
+}
+// A compact, non-modal settings sheet; native controls keep their state and handlers.
+function chatOptions(open,restoreFocus=false) {
+  const panel=$('#chat-options');if(!panel)return;
+  const mobile=innerWidth<=760;open=!!open&&mobile;
+  if(open){chatClosePopover();chatDrawer(false,true);if(ChatUI.inspector)chatInspector('');$('#chat-slash').hidden=true;$('.chat-overflow').open=false;}
+  panel.classList.toggle('is-open',open);panel.setAttribute('role',mobile?'dialog':'region');
+  panel.setAttribute('aria-hidden',String(mobile&&!open));
+  $('#chat-options-toggle').setAttribute('aria-expanded',String(open));$('#chat-options-shade').hidden=!open;
+  if(open)$('#chat-options-close').focus({preventScroll:true});
+  else if(restoreFocus){const target=mobile?$('#chat-options-toggle'):$('#chat-model-picker');target.focus({preventScroll:true});}
+  chatScheduleLayout();
 }
 function chatUnmountChrome() {
   ChatUI.dialogCancel?.(); ChatUI.dialogCancel=null;
@@ -116,7 +135,8 @@ function chatSyncChrome() {
   $('#chat-inspector-toggle').setAttribute('aria-expanded',String(!!c.inspector));
   const send=$('#chat-send');
   const target=chatProjectInfo(c.project,c.selected||{}),localCommand=chatLocalCommand(v.draft)&&!v.pending;
-  const blocked=v.resumeBusy&&'正在恢复会话'||v.pending&&'上一条消息待确认，请重试原请求'||!localCommand&&(target.reason||v.settingOp&&!['error'].includes(v.settingOp.state)&&'请等待模型设置确认'||v.files.some(f=>!f.ready)&&'请等待附件上传完成，或重试失败的附件');
+  const processBlocked=({stopping:'正在等待会话进程退出',orphaned:'会话进程状态待核实，请先检查节点'})[c.selected?.status];
+  const blocked=v.resumeBusy&&'正在恢复会话'||v.pending&&'上一条消息待确认，请重试原请求'||!localCommand&&(processBlocked||target.reason||v.settingOp&&!['error'].includes(v.settingOp.state)&&'请等待模型设置确认'||v.files.some(f=>!f.ready)&&'请等待附件上传完成，或重试失败的附件');
   send.disabled=!!v.busy||!!blocked||(!v.draft.trim()&&!v.files.length);
   send.title=blocked||(localCommand?'执行界面指令':v.busy?'正在确认发送':!v.draft.trim()&&!v.files.length?'输入消息或添加附件后发送':v.active&&v.mode==='steer'?'立即补充':'发送消息');
   send.setAttribute('aria-label',v.busy?'正在确认发送':v.active&&v.mode==='steer'?'立即补充':'发送消息');
@@ -136,12 +156,12 @@ function chatSyncChrome() {
     'chat-rename':!row?'先打开一条会话':'',
     'chat-export':!row?'先打开一条会话':'',
     'chat-export-json':!row?'先打开一条会话':'',
-    'chat-resume':v.resumeBusy?'正在恢复会话':!row?'先打开一条会话':live?'会话仍在运行，直接继续发送即可':v.busy?'正在确认发送':target.reason,
+    'chat-resume':v.resumeBusy?'正在恢复会话':!row?'先打开一条会话':live?'会话仍在运行，直接继续发送即可':v.busy?'正在确认发送':v.pending?'上一条消息待确认，请重试原请求':target.reason,
     'chat-stop':!row?'先打开一条会话':!live?'会话已经停止':row.status==='stopping'?'正在等待进程退出':target.reason,
     'chat-delete':!row?'先打开一条会话':live?'请先停止会话并确认进程退出':''
   };
   for(const [id,reason] of Object.entries(availability)){const button=$('#'+id);button.disabled=!!reason;button.title=reason||button.textContent;}
-  for(const button of root.querySelectorAll('.chat-file button'))button.disabled=!!v.busy||!!v.pending;
+  [...root.querySelectorAll('.chat-file')].forEach((chip,index)=>{for(const button of chip.querySelectorAll('button'))button.disabled=chatFileLocked(v,v.files[index]);});
   chatScheduleLayout();
 }
 function chatTrapFocus(e,root) {
@@ -161,6 +181,7 @@ function chatInteractionKey(e) {
     if(!box.hidden){e.preventDefault();chatClosePopover(true);return;}
     if(!$('#chat-slash').hidden){e.preventDefault();$('#chat-slash').hidden=true;return;}
     if($('.chat-overflow')?.open){e.preventDefault();$('.chat-overflow').open=false;$('.chat-overflow summary').focus();return;}
+    if($('#chat-options').classList.contains('is-open')){e.preventDefault();chatOptions(false,true);return;}
     if(root.classList.contains('drawer-open')){e.preventDefault();chatDrawer(false);return;}
     if(c.inspector){e.preventDefault();chatInspector('');return;}
     if(!$('#chat-find-bar').hidden){e.preventDefault();chatFindToggle(false);return;}
@@ -177,12 +198,13 @@ function chatInteractionKey(e) {
       rows[next].scrollIntoView({block:'nearest'});if(focused>=0)rows[next].focus({preventScroll:true});
     }
     chatTrapFocus(e,box);
-  }else if(root.classList.contains('drawer-open'))chatTrapFocus(e,$('.chat-sidebar'));
+  }else if($('#chat-options').classList.contains('is-open'))chatTrapFocus(e,$('#chat-options'));
+  else if(root.classList.contains('drawer-open'))chatTrapFocus(e,$('.chat-sidebar'));
   else if(c.inspector&&innerWidth<=1100)chatTrapFocus(e,$('#chat-inspector'));
 }
 function chatDialog({title,body='',value,confirmLabel='确定',danger=false}) {
   ChatUI.dialogCancel?.();chatClosePopover();
-  const root=$('#chat-root'),returnFocus=document.activeElement?.closest('.chat-overflow')?.querySelector('summary')||document.activeElement;
+  const root=$('#chat-root'),returnFocus=$('.chat-overflow')?.open?$('.chat-overflow summary'):document.activeElement;
   if(!root)return Promise.resolve(null);
   const dialog=document.createElement('dialog');dialog.className='chat-sheet';
   const form=document.createElement('form'),heading=document.createElement('h2'),description=document.createElement('p'),actions=document.createElement('div');

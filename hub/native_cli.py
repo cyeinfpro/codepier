@@ -261,7 +261,7 @@ def make_native_router(auth,runtime):
             if row['mode']!='chat': raise DevError('CLI_TERMINAL_SESSION','Terminal output is not chat',409)
             boundary=db.execute('SELECT COALESCE(MAX(offset+length(data)),0) FROM output WHERE session=?',(sid,)).fetchone()[0]
         async def content():
-            cursor=0; buffer=bytearray(); first=True
+            cursor=0; buffer=bytearray(); first=True; messages=OrderedDict(); message_bytes=0; serial=0
             yield '[' if format=='json' else '# Chat export\n\n'
             while cursor<boundary:
                 service.session_project(sid,auth.admin(request))
@@ -283,11 +283,26 @@ def make_native_router(auth,runtime):
                         if format=='json':
                             yield ('' if first else ',')+json.dumps(safe,ensure_ascii=False)
                             first=False
-                        elif safe.get('text'):
-                            yield str(safe.get('type','event'))+'\n\n'+safe['text']+'\n\n'
+                        elif isinstance(safe.get('text'),str):
+                            kind=safe.get('type','event');item=safe.get('item_id');serial+=1
+                            key=(safe.get('receipt'),item or 'assistant','message') if kind in {'delta','message'} else (
+                                (safe.get('receipt'),item,kind) if item else ('event',serial,kind))
+                            previous=messages.get(key,{'type':'message' if kind=='delta' else kind,'text':''})
+                            text=previous['text']+safe['text'] if kind=='delta' else safe['text']
+                            message_bytes+=len(text.encode('utf-8'))-len(previous['text'].encode('utf-8'))
+                            if message_bytes>TOTAL_QUOTA:raise DevError('CLI_EXPORT_LIMIT','对话导出超过存储预算')
+                            messages[key]={'type':previous['type'],'text':text}
+                        if format=='md' and safe.get('type')=='done':
+                            for message in messages.values():
+                                yield message['type']+'\n\n'+message['text']+'\n\n'
+                            messages.clear();message_bytes=0
                     if len(buffer)>1048576: raise DevError('CLI_CHAT_PROTOCOL','Export event exceeds limit',409)
                 await asyncio.sleep(0)
             if format=='json': yield ']'
+            else:
+                service.session_project(sid,auth.admin(request))
+                for message in messages.values():
+                    yield message['type']+'\n\n'+message['text']+'\n\n'
         return StreamingResponse(content(),media_type='application/json' if format=='json' else 'text/plain',headers={
             'Content-Disposition':f'attachment; filename="chat-{sid}.{format}"',
             'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','X-Chat-Export-Boundary':str(boundary)})

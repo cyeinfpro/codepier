@@ -1,6 +1,7 @@
 from __future__ import annotations
 import argparse
 import asyncio
+from contextlib import nullcontext
 import json
 import os
 import signal
@@ -20,9 +21,11 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     init = sub.add_parser("init", help="导入面板下载的配对文件")
     init.add_argument("--pairing-file")
+    init.add_argument("--re-pair", action="store_true", help="仅更新同一设备的配对凭据，保留目录、任务与能力配置")
     init.add_argument("--allow", action="append", help="可多次指定本机授权目录")
     init.add_argument("--hub")
-    sub.add_parser("run", help="连接并保持运行")
+    run_parser = sub.add_parser("run", help="连接并保持运行（前台诊断）")
+    run_parser.add_argument("--supervised", action="store_true", help=argparse.SUPPRESS)
     config = sub.add_parser("configure", help="修改地址、端口或目录授权；运行中的 Agent 会自动重连")
     config.add_argument("--hub")
     config.add_argument("--allow", action="append", help="替换授权目录列表")
@@ -43,8 +46,8 @@ def main():
     from shared.brand_migration import default_base
     path = (Path(args.config).expanduser() if args.config else default_base()/'config.json').resolve()
     if args.command == "init":
-        if path.exists():
-            parser.error(f"配置已存在：{path}；修改地址请使用 configure，重新配对请先备份并移走原配置")
+        if path.exists() and not args.re_pair:
+            parser.error(f"配置已存在：{path}；修改地址请使用 configure，重新配对请使用 init --re-pair --pairing-file，保留原目录授权和任务配置")
         pairing = Path(args.pairing_file or input("面板下载的配对 JSON 文件路径：").strip().strip('"')).expanduser()
         try:
             c = json.loads(pairing.read_text(encoding="utf-8"))
@@ -53,6 +56,27 @@ def main():
         required = {"device_id", "secret", "hub_url"}
         if not isinstance(c, dict) or not required.issubset(c):
             parser.error("配对文件缺少 device_id / secret / hub_url")
+        if args.re_pair:
+            try:
+                if args.allow is not None:
+                    raise ValueError('--re-pair 不接受 --allow；原目录授权不会改变')
+                before=path.read_bytes();existing=json.loads(before)
+                validate_config(existing,path)
+                if existing.get('device_id')!=c['device_id']:
+                    raise ValueError('配对文件不属于此设备；原配置未修改')
+                replacement={**existing,'secret':c['secret'],'hub_url':args.hub or c['hub_url']}
+                validate_config(replacement,path)
+                from datetime import datetime,timezone
+                backup=path.with_name(path.name+'.before-repair-'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ'))
+                with backup.open('xb') as stream:
+                    os.chmod(backup,0o600);stream.write(before);stream.flush();os.fsync(stream.fileno())
+                if path.read_bytes()!=before:
+                    raise ValueError('配置在核对期间已改变；未覆盖更新，请重新核对')
+                atomic_json(path,replacement)
+            except (OSError,ValueError,RecursionError) as exc:
+                parser.error(str(exc))
+            print('同一设备已重新配对；目录授权、任务、能力配置与历史路径均已保留。请按原维护流程重启 Agent。')
+            return
         c = {k: c[k] for k in ("device_id", "secret", "hub_url", "name") if k in c}
         c["hub_url"] = args.hub or c["hub_url"]
         roots = args.allow or [input("授权项目的父目录（例如 D:\\Projects 或 /home/me/projects）：").strip().strip('"')]
@@ -142,14 +166,16 @@ def main():
     else:
         from agent.runner import Agent
         async def run():
-            agent = Agent(path)
-            loop = asyncio.get_running_loop()
-            for sig in (signal.SIGINT, signal.SIGTERM):
-                try:
-                    loop.add_signal_handler(sig, lambda: asyncio.create_task(agent.stop()))
-                except (NotImplementedError, RuntimeError):
-                    pass
-            await agent.run()
+            from agent.service_watchdog import watch_event_loop
+            with watch_event_loop() if args.supervised else nullcontext():
+                agent = Agent(path)
+                loop = asyncio.get_running_loop()
+                for sig in (signal.SIGINT, signal.SIGTERM):
+                    try:
+                        loop.add_signal_handler(sig, lambda: asyncio.create_task(agent.stop()))
+                    except (NotImplementedError, RuntimeError):
+                        pass
+                await agent.run()
         try:
             asyncio.run(run())
         except KeyboardInterrupt:

@@ -22,7 +22,7 @@ def test_every_sidebar_control_remains_visible_on_short_screens(chat_page,width,
     p=chat_page;p.set_viewport_size({'width':width,'height':height})
     p.click('#chat-history-toggle')
     p.select_option('#chat-history-filter','running')
-    for selector in ['#chat-new','#chat-history-project','#chat-history-search','#chat-history-filter','#chat-history-clear','#chat-command-menu','#chat-appearance','.chat-sidebar-preferences [data-nav="overview"]']:
+    for selector in ['#chat-back','#chat-new','#chat-history-project','#chat-history-search','#chat-history-filter','#chat-history-clear','#chat-command-menu','#chat-appearance','.chat-sidebar-preferences [data-nav="projects"]']:
         box=p.locator(selector).bounding_box()
         assert box and box['height']>0 and box['y']>=0 and box['y']+box['height']<=height+1,(selector,box)
     assert p.locator('#chat-history').bounding_box()['height']>=40

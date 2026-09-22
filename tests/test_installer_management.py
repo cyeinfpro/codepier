@@ -272,16 +272,23 @@ def test_failed_service_stop_does_not_delete_runtime_or_service(installation, mo
     assert f.service.exists() and (f.base / 'config.json').exists()
 
 
-def test_update_preserves_generated_windows_service_wrapper(installation, monkeypatch):
+@pytest.mark.parametrize('watchdog', [True, False])
+def test_update_refreshes_windows_wrapper_and_supports_older_packages(installation, monkeypatch, watchdog):
     f = installation
     wrapper = f.base / 'runtime/run-service.py'
     wrapper.write_text('# original service wrapper\n')
     candidate = f.base / '.runtime-update-test'
     installer.unpack(f.archive, f.sha, candidate)
+    if not watchdog:
+        (candidate / 'agent/service_watchdog.py').unlink()
     for name in ['stop_service', 'start_service', 'verify_service', '_wait_for_exit']:
         monkeypatch.setattr(helper, name, lambda *_a, **_k: None)
     helper.apply_update(f.base, candidate, 0)
-    assert wrapper.read_text() == '# original service wrapper\n'
+    if watchdog:
+        assert 'from agent.service_watchdog import run_service' in wrapper.read_text()
+        assert (f.base / '.runtime-previous/run-service.py').read_text() == '# original service wrapper\n'
+    else:
+        assert wrapper.read_text() == '# original service wrapper\n'
     assert (f.base / 'agentctl').is_file()
     assert (f.base / 'agentctl.ps1').is_file()
 

@@ -21,7 +21,7 @@ from hub.diagnostics import Diagnostics
 from hub.artifacts import ArtifactService
 from hub.native_cli import NativeService
 from shared.agent_lifecycle import DEVICE_ACTIONS, public_management
-from shared.contracts import TOOLS, PROCESS_TOOLS, MUTATING
+from shared.contracts import TOOLS, PROCESS_TOOLS, MUTATING, OPERATION_WAIT_SECONDS, OPERATION_OUTPUT_LIMIT
 from shared.computer_contracts import COMPUTER_TOOLS
 from shared.computer_media import scrub_expired, purge_database
 from shared.crypto import SecureChannel, digest, token
@@ -98,6 +98,8 @@ class Runtime:
         self.native = NativeService(self)
         self.connections: dict[str, Connection] = {}
         self.futures: dict[str, asyncio.Future] = {}
+        # Read waiters never own/cancel execution or retain a command's result.
+        self.operation_waiters: dict[str, set[asyncio.Event]] = {}
         self.watchers: set[asyncio.Queue] = set()
         self.dispatch_lock = asyncio.Lock()
         self.delivery_slots = asyncio.Semaphore(8)
@@ -168,12 +170,49 @@ class Runtime:
     def list_projects(self, principal):
         return [self.project_public(p) for p in self.store.all("SELECT p.*,d.name AS device_name FROM projects p JOIN devices d ON d.id=p.device_id ORDER BY p.alias_key") if self.visible_project(p, principal)]
 
-    def operation(self, id: str, principal: Principal, view: dict | None = None):
-        row = self.store.one("SELECT * FROM operations WHERE id=?", (id,))
+    def operation_row(self, id: str, principal: Principal, *, status_only=False):
+        columns = "id,grant_id,project_id,tool,state" if status_only else "*"
+        row = self.store.one(f"SELECT {columns} FROM operations WHERE id=?", (id,))
         if not row or (not principal.admin and (row["grant_id"] != principal.grant_id or row["project_id"] and "*" not in principal.projects and row["project_id"] not in principal.projects)):
             raise DevError("OPERATION_NOT_FOUND", "找不到此授权范围内的操作", 404)
         if row['tool'] in COMPUTER_TOOLS - {'computer_status'} and 'computer' not in principal.scopes:
             raise DevError('INSUFFICIENT_SCOPE', '读取桌面操作结果仍需 computer 权限', 403)
+        return row
+
+    async def wait_operation(self, id: str, principal: Principal, seconds: int):
+        event = asyncio.Event()
+        waiters = self.operation_waiters.setdefault(id, set())
+        waiters.add(event)
+        try:
+            # Register before checking the durable state so completion cannot
+            # fall between the check and subscription. Reauthorize on return.
+            row = self.operation_row(id, principal, status_only=True)
+            if seconds > 0 and not self.stopping and row["state"] in ACTIVE | {"unknown"}:
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(event.wait(), seconds)
+        finally:
+            waiters.discard(event)
+            if not waiters:
+                self.operation_waiters.pop(id, None)
+
+    def notify_operation(self, id: str):
+        for event in self.operation_waiters.get(id, ()):
+            event.set()
+
+    @staticmethod
+    def operation_next_call(id: str, *, pending: bool, after_output_seq=None, fetch_result=False):
+        if not pending and not fetch_result:
+            return None
+        args = {"operation_id": id, "include_output": True, "include_result": True,
+                "output_limit": OPERATION_OUTPUT_LIMIT}
+        if pending:
+            args["wait_seconds"] = OPERATION_WAIT_SECONDS
+            if after_output_seq is not None:
+                args["after_output_seq"] = after_output_seq
+        return {"name": "operations_wait" if pending else "operations_get", "arguments": args}
+
+    def operation(self, id: str, principal: Principal, view: dict | None = None):
+        row = self.operation_row(id, principal)
         result = dict(row)
         options = view or {}
         include_result = options.get("include_result", True)
@@ -215,6 +254,12 @@ class Runtime:
         result["pending"] = row["state"] in ACTIVE or row["state"] == "unknown"
         result["next"] = "operations_wait" if result["pending"] else None
         result["retry_after_seconds"] = 2 if result["pending"] else None
+        result["elapsed_seconds"] = round(max(0, (time.time() if result["pending"] else row["updated"]) - row["created"]), 1)
+        # Only advance the log cursor after delivering output (or confirming a
+        # cursor the caller already has); compact status reads must not skip it.
+        cursor = row["output_seq"] if include_output and limit > 0 or unchanged else options.get("after_output_seq")
+        result["next_call"] = self.operation_next_call(id, pending=result["pending"], after_output_seq=cursor,
+                                                       fetch_result=not include_result and bool(row["result"]))
         return result
 
     def list_operations(self, args, principal):
@@ -293,12 +338,8 @@ class Runtime:
         elif name == "workflows_list":
             result = self.workflows.list(args, principal)
         elif name in {"operations_get", "operations_wait"}:
-            result = self.operation(args["operation_id"], principal, {**args, "include_output": False, "include_result": False})
-            if name == "operations_wait" and result["pending"]:
-                until = time.monotonic() + args["wait_seconds"]
-                while result["pending"] and time.monotonic() < until and not self.stopping:
-                    await asyncio.sleep(min(.25, max(0, until - time.monotonic())))
-                    result = self.operation(args["operation_id"], principal, {**args, "include_output": False, "include_result": False})
+            if name == "operations_wait":
+                await self.wait_operation(args["operation_id"], principal, args["wait_seconds"])
             result = self.operation(args["operation_id"], principal, args)
         elif name == "operations_cancel":
             return await self.cancel(args["operation_id"], principal)
@@ -414,7 +455,7 @@ class Runtime:
                 if name in TOOLS:
                     self.integrations.guard(name, args, project, principal)
                 if name in (COMPUTER_TOOLS - {"computer_session_close"}) | {"browser_open", "browser_snapshot", "browser_action"} and not self.online(project["device_id"]):
-                    raise DevError("COMPUTER_OFFLINE", "设备不在线，不排队保存延迟桌面操作；恢复后重新观察", 409)
+                    raise DevError("COMPUTER_OFFLINE", "设备不在线，不排队保存延迟桌面操作；恢复后重新观察", 409, admitted=False)
                 if name in DEVICE_ACTIONS and not self.online(project["device_id"]):
                     raise DevError("DEVICE_OFFLINE", "设备当前离线；生命周期操作未排队", 409)
                 device = self.store.one("SELECT enabled FROM devices WHERE id=?", (project["device_id"],))
@@ -458,11 +499,13 @@ class Runtime:
                 return self.unwrap(id, result)
             except asyncio.TimeoutError:
                 pass
-        op = self.store.one("SELECT state,deadline,result FROM operations WHERE id=?", (id,))
+        op = self.store.one("SELECT state,deadline,result,created,updated FROM operations WHERE id=?", (id,))
         if op["result"]:
             return self.unwrap(id, json.loads(op["result"]))
         pending = op["state"] in ACTIVE or op["state"] == "unknown"
         return {"operation_id": id, "pending": pending, "state": op["state"], "next": "operations_wait" if pending else None, "retry_after_seconds": 2 if pending else None,
+                "next_call": self.operation_next_call(id, pending=pending),
+                "elapsed_seconds": round(max(0, (time.time() if pending else op["updated"]) - op["created"]), 1),
                 "deadline": op["deadline"], "note": "已持久保存。网络恢复后继续同一操作；请查询 operation_id，不要换新幂等键重复提交。"}
 
     def expire_waiter(self, id, future):
@@ -685,6 +728,8 @@ class Runtime:
             (state, encoded, error.get("message"), output, time.time(), int(output != (op.get("output") or "")), op["id"]))
         if not changed.rowcount:
             return
+        # Notify after commit, even if auxiliary auditing subsequently fails.
+        self.notify_operation(op["id"])
         self.store.audit(op["actor"], op["tool"], op["project_id"] or op["device_id"], state,
             {"operation_id": op["id"], "duration_ms": round((time.time() - op["created"]) * 1000),
              "error": error.get("message"), "path": data.get("path"), "backup_id": data.get("backup_id"), "exit_code": data.get("exit_code")})
@@ -851,6 +896,8 @@ class Runtime:
 
     async def stop(self):
         self.stopping = True
+        for id in self.operation_waiters:
+            self.notify_operation(id)
         self.artifacts.close()
         self.wake.set()
         if self.worker:

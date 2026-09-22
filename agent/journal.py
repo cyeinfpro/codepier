@@ -9,6 +9,8 @@ from pathlib import Path
 from shared.crypto import digest
 from shared.util import DevError, fsync_directory
 
+MAX_INTERRUPTED_READS = 3
+
 class Journal:
     def __init__(self, state_dir: Path):
         self.directory = state_dir.resolve()
@@ -30,7 +32,8 @@ class Journal:
             self.db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             self.db.execute("CREATE TABLE IF NOT EXISTS cancellations (id TEXT PRIMARY KEY, at REAL NOT NULL)")
             columns = {r[1] for r in self.db.execute("PRAGMA table_info(calls)")}
-            for name, definition in {"tool": "TEXT", "output": "TEXT NOT NULL DEFAULT ''", "output_seq": "INTEGER NOT NULL DEFAULT 0"}.items():
+            for name, definition in {"tool": "TEXT", "output": "TEXT NOT NULL DEFAULT ''", "output_seq": "INTEGER NOT NULL DEFAULT 0",
+                                     "recovery_attempts": "INTEGER NOT NULL DEFAULT 0"}.items():
                 if name not in columns:
                     self.db.execute(f"ALTER TABLE calls ADD COLUMN {name} {definition}")
             backup_columns = {r[1] for r in self.db.execute("PRAGMA table_info(backups)")}
@@ -44,6 +47,11 @@ class Journal:
             self.db.execute("UPDATE calls SET status='retryable' WHERE status='accepted'")
             from shared.contracts import TOOLS
             reads = [name for name, tool in TOOLS.items() if tool.scope == 'read']
+            # Only count reads that actually began. A poison request must not
+            # kill every replacement Agent indefinitely; preserve its receipt.
+            self.db.execute("UPDATE calls SET recovery_attempts=recovery_attempts+1 WHERE status='running' AND tool IN (%s)" % ','.join('?' for _ in reads), reads)
+            self.db.execute("UPDATE calls SET status='interrupted',acked=0,result=? WHERE status='running' AND tool IN (%s) AND recovery_attempts>=?" % ','.join('?' for _ in reads), [
+                json.dumps({"ok": False, "error": {"code": "AGENT_RESTART_LIMIT", "message": f"此只读请求已连续 {MAX_INTERRUPTED_READS} 次在 Agent 退出时未完成；已停止自动重试，请检查文件与日志后再发起新请求"}}), *reads, MAX_INTERRUPTED_READS])
             self.db.execute("UPDATE calls SET status='retryable' WHERE status='running' AND tool IN (%s)" % ','.join('?' for _ in reads), reads)
             self.db.execute("UPDATE calls SET status='interrupted',acked=0,result=? WHERE status='running'", (json.dumps({"ok": False, "error": {"code": "INTERRUPTED", "message": "Agent 进程在操作执行期间停止；网络重连不会重跑它。请检查文件或测试进程后再决定下一步。"}}),))
         self.journal_id = self.db.execute("SELECT value FROM meta WHERE key='journal_id'").fetchone()[0]

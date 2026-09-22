@@ -15,20 +15,21 @@ function chatRichInline(parent, text) {
   parent.append(document.createTextNode(text.slice(end)));
 }
 function chatRichBlocks(text) {
-  const lines=text.split('\n'),out=[];let i=0;
+  const lines=text.split('\n'),out=[],offsets=[];let position=0;for(const line of lines){offsets.push(position);position+=line.length+1;}let i=0;
   while(i<lines.length){
     if(!lines[i].trim()){i++;continue;}
+    const blockStart=i;
     const fence=lines[i].match(/^\s*(`{3,}|~{3,})(.*)$/);
-    if(fence){const marker=fence[1],start=i++,body=[];while(i<lines.length&&!lines[i].trim().startsWith(marker))body.push(lines[i++]);const closed=i<lines.length;if(closed)i++;out.push({type:'code',text:body.join('\n'),language:fence[2].trim().slice(0,40),raw:lines.slice(start,i).join('\n'),closed});continue;}
+    if(fence){const marker=fence[1],start=i++,body=[];while(i<lines.length&&!lines[i].trim().startsWith(marker))body.push(lines[i++]);const closed=i<lines.length;if(closed)i++;out.push({start:offsets[blockStart],type:'code',text:body.join('\n'),language:fence[2].trim().slice(0,40),raw:lines.slice(start,i).join('\n'),closed});continue;}
     const heading=lines[i].match(/^(#{1,6})\s+(.+)$/);
-    if(heading){out.push({type:'h'+Math.min(heading[1].length+1,6),text:heading[2],raw:lines[i++]});continue;}
-    if(/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(lines[i])){out.push({type:'hr',text:'',raw:lines[i++]});continue;}
-    if(i+1<lines.length&&lines[i].includes('|')&&/^\s*\|?\s*:?-{3,}/.test(lines[i+1])){const start=i,rows=[lines[i]];i+=2;while(i<lines.length&&lines[i].includes('|')&&lines[i].trim())rows.push(lines[i++]);out.push({type:'table',rows,raw:lines.slice(start,i).join('\n')});continue;}
+    if(heading){out.push({start:offsets[blockStart],type:'h'+Math.min(heading[1].length+1,6),text:heading[2],raw:lines[i++]});continue;}
+    if(/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(lines[i])){out.push({start:offsets[blockStart],type:'hr',text:'',raw:lines[i++]});continue;}
+    if(i+1<lines.length&&lines[i].includes('|')&&/^\s*\|?\s*:?-{3,}/.test(lines[i+1])){const start=i,rows=[lines[i]];i+=2;while(i<lines.length&&lines[i].includes('|')&&lines[i].trim())rows.push(lines[i++]);out.push({start:offsets[blockStart],type:'table',rows,raw:lines.slice(start,i).join('\n')});continue;}
     const list=lines[i].match(/^\s*(?:([-+*])|\d+[.)])\s+(.+)$/);
-    if(list){const ordered=!list[1],start=i,rows=[];while(i<lines.length){const m=lines[i].match(/^\s*(?:([-+*])|\d+[.)])\s+(.+)$/);if(!m||(!m[1])!==ordered)break;rows.push(m[2]);i++;}out.push({type:ordered?'ol':'ul',rows,raw:lines.slice(start,i).join('\n')});continue;}
-    if(/^>\s?/.test(lines[i])){const start=i,rows=[];while(i<lines.length&&/^>\s?/.test(lines[i]))rows.push(lines[i++].replace(/^>\s?/,''));out.push({type:'blockquote',text:rows.join('\n'),raw:lines.slice(start,i).join('\n')});continue;}
+    if(list){const ordered=!list[1],start=i,rows=[];while(i<lines.length){const m=lines[i].match(/^\s*(?:([-+*])|\d+[.)])\s+(.+)$/);if(!m||(!m[1])!==ordered)break;rows.push(m[2]);i++;}out.push({start:offsets[blockStart],type:ordered?'ol':'ul',rows,raw:lines.slice(start,i).join('\n')});continue;}
+    if(/^>\s?/.test(lines[i])){const start=i,rows=[];while(i<lines.length&&/^>\s?/.test(lines[i]))rows.push(lines[i++].replace(/^>\s?/,''));out.push({start:offsets[blockStart],type:'blockquote',text:rows.join('\n'),raw:lines.slice(start,i).join('\n')});continue;}
     const start=i++;while(i<lines.length&&lines[i].trim()&&!/^\s*(#{1,6}\s|`{3,}|~{3,}|>\s?|[-+*]\s|\d+[.)]\s)/.test(lines[i])&&!(i+1<lines.length&&lines[i].includes('|')&&/^\s*\|?\s*:?-{3,}/.test(lines[i+1])))i++;
-    out.push({type:'p',text:lines.slice(start,i).join('\n'),raw:lines.slice(start,i).join('\n')});
+    out.push({start:offsets[blockStart],type:'p',text:lines.slice(start,i).join('\n'),raw:lines.slice(start,i).join('\n')});
   }
   return out;
 }
@@ -48,15 +49,16 @@ function chatRichReconcile(node,next) {
 function chatRichMarkdown(holder,text) {
   let blocks;const previous=holder._chatBlocks,source=holder._chatSource;
   if(previous?.length&&source&&text.startsWith(source)){
-    const tail=source.lastIndexOf(previous.at(-1).raw);
-    blocks=tail>=0?[...previous.slice(0,-1),...chatRichBlocks(text.slice(tail))]:chatRichBlocks(text);
+    // A partial next list marker/table separator can merge the preceding block.
+    const keep=Math.max(0,previous.length-2),tail=previous[keep].start??0;
+    blocks=[...previous.slice(0,keep),...chatRichBlocks(text.slice(tail)).map(block=>({...block,start:block.start+tail}))];
   }else blocks=chatRichBlocks(text);
   holder._chatSource=text;holder._chatBlocks=blocks;
   blocks.forEach((block,index)=>{
     let node=holder.children[index];
     if(node&&node._chatRaw===block.raw)return;
     if(node&&node._chatType===block.type&&block.type==='code'){
-      const code=node.querySelector('code');if(code.firstChild?.nodeType===3&&block.text.startsWith(code.textContent))code.firstChild.appendData(block.text.slice(code.textContent.length));else code.textContent=block.text;node.querySelector('button')._copyText=block.text;node._chatRaw=block.raw;return;
+      node.querySelector('.chat-code-head span').textContent=block.language||'代码';const code=node.querySelector('code');if(code.firstChild?.nodeType===3&&block.text.startsWith(code.textContent))code.firstChild.appendData(block.text.slice(code.textContent.length));else code.textContent=block.text;node.querySelector('button')._copyText=block.text;node._chatRaw=block.raw;return;
     }
     if(node&&node._chatType===block.type&&['p','blockquote'].includes(block.type)&&node.childNodes.length===1&&node.firstChild.nodeType===3&&block.text.startsWith(node.textContent)&&!/[`*_[\]]/.test(block.text)){node.firstChild.appendData(block.text.slice(node.textContent.length));node._chatRaw=block.raw;return;}
     const next=document.createElement(block.type==='code'?'section':block.type==='table'?'div':block.type);next._chatType=block.type;next._chatRaw=block.raw;

@@ -84,7 +84,8 @@ def test_create_edit_search_and_responsive_layout(browser,ui_stack,width):
         identifier=card.get_attribute('data-vps-card')
         saved=s.must(s.client.get('/api/vps/'+identifier))
         assert len(saved['project_ids'])==2
-        card.locator('[data-vps-action="edit"]').click()
+        # A normal held press must survive focus leaving the search field.
+        card.locator('[data-vps-action="edit"]').click(delay=200)
         expect(page.locator('#vps-form [name="password"]')).to_have_value('')
         page.locator('#vps-form .vps-extra summary').click()
         page.locator('#vps-form [name="notes"]').fill('已保存配置，无需再次输入密码')
@@ -140,10 +141,22 @@ def test_check_connection_real_operation_once_and_no_secret(browser,ui_stack):
         page.click('#vps-check-run')
         expect(page.locator('#vps-check-state')).to_contain_text('连接检查成功',timeout=30000)
         expect(page.locator('#vps-check-output')).to_contain_text('CODEPIER_VPS_OK')
-        expect(page.locator('#vps-check-run')).to_be_disabled()
-        expect(page.locator('#vps-check-run')).to_have_text('检查已结束')
+        # Completion unlocks an explicit new check; it must not automatically
+        # replay the previous command or reuse its idempotency key (audit F20).
+        button=page.locator('#vps-check-run')
+        expect(button).to_be_enabled()
+        expect(button).to_have_text('重新检查')
+        expect(page.locator('#vps-check-project')).to_be_enabled()
         assert len(submissions)==1
-        assert 'password' not in submissions[0]['arguments']
+        first_operation=re.findall(r'[a-f0-9]{32}',page.locator('#vps-check-state').inner_text())[-1]
+        button.click()
+        expect(page.locator('#vps-check-state')).not_to_contain_text(first_operation,timeout=30000)
+        expect(page.locator('#vps-check-state')).to_contain_text('连接检查成功',timeout=30000)
+        expect(button).to_be_enabled()
+        expect(button).to_have_text('重新检查')
+        assert len(submissions)==2
+        assert submissions[0]['arguments']['idempotency_key']!=submissions[1]['arguments']['idempotency_key']
+        assert all('password' not in submission['arguments'] for submission in submissions)
         assert PASSWORD not in json.dumps(submissions) and PASSWORD not in page.content()
     finally:page.close()
 
