@@ -22,6 +22,8 @@ from hub.artifacts import make_artifact_router
 from hub.agent_install import make_agent_install_router
 from hub.native_cli import make_native_router
 from hub.vps import make_vps_router
+from hub.panel_update import make_panel_update_router
+from shared.panel_maintenance import PanelMaintenance, PanelMaintenanceMiddleware
 from hub.mcp import make_router, VERSIONS
 from hub.oauth import OAuth
 from hub.runtime import Runtime, alias_key
@@ -159,6 +161,9 @@ def create_app(data_dir: str | None = None):
     app = FastAPI(title="CodePier Agent", version=VERSION, lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.store, app.state.runtime, app.state.auth = store, runtime, auth
     app.add_middleware(BodyLimit)
+    maintenance = PanelMaintenance(runtime, os.getenv("HUB_PANEL_UPDATE_SOCKET", ""))
+    runtime.panel_maintenance = maintenance
+    app.add_middleware(PanelMaintenanceMiddleware, gate=maintenance)
     from hub.integrations import CallTimingMiddleware
     app.add_middleware(CallTimingMiddleware, runtime=runtime)
 
@@ -195,7 +200,7 @@ def create_app(data_dir: str | None = None):
             ready = False
         if not ready:
             return JSONResponse({"status": "unavailable", "version": VERSION}, status_code=503)
-        return {"status": "ok", "version": VERSION}
+        return {"status": "ok", "version": VERSION, "panel_update": maintenance.status()}
 
     @app.get("/api/session")
     async def session(request: Request):
@@ -623,6 +628,7 @@ def create_app(data_dir: str | None = None):
         app.include_router(make_agent_install_router(runtime, auth))
         app.include_router(make_native_router(auth, runtime))
         app.include_router(make_vps_router(auth, runtime))
+        app.include_router(make_panel_update_router(auth, runtime))
         app.mount("/static", StaticFiles(directory=BASE / "web"), name="static")
     except BaseException:
         try:

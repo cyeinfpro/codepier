@@ -25,7 +25,7 @@ ROOT_FILES = {'codepier','codepier.ps1','install.sh','.dockerignore','.gitignore
 EXTENSIONS = {'.py','.js','.mjs','.cjs','.ts','.tsx','.html','.css','.json','.toml','.yaml','.yml',
               '.md','.txt','.sh','.ps1','.cmd','.bat','.svg','.png','.jpg','.jpeg','.webp','.ico',
               '.xml','.service','.plist','.example'}
-EXCLUDED_NAMES = {'__pycache__','node_modules','.git','.pytest_cache','.venv','.venv-compat',
+EXCLUDED_NAMES = {'.codepier-updater','__pycache__','node_modules','.git','.pytest_cache','.venv','.venv-compat',
                   'data','private','agent-state','hub-data','uploads','backups','checkpoints','.DS_Store',
                   '.work','dist','.ruff_cache','.mypy_cache','.idea','.vscode'}
 PRIVATE_NAMES = {'auth.json','config.json','pairing.json','master.key','.env','credentials.json'}
@@ -39,7 +39,7 @@ EVIDENCE_FILES = {'full-regression-final.xml','focused-verified.xml','worker-rea
                   'desktop-terminal.png','mobile-native-hardened.png','artifact-bundle.json'}
 
 
-REQUIRED_FILES = {'codepier','codepier.ps1','web/brand.js','shared/brand_migration.py','shared/brand_browser.py','agent/brand_upgrade.py','scripts/migrate_hub.py','scripts/migrate_hub_data.py','scripts/migrate_hub_networks.py','scripts/migrate_hub_proxy.py','scripts/rename_checkout.py','install.sh','deploy/install-hub.sh','scripts/install_agent.py','scripts/agent_lifecycle.py',
+REQUIRED_FILES = {'hub/panel_update.py','shared/panel_maintenance.py','web/panel-update.js','web/panel-update.css','scripts/panel_updater.py','scripts/panel_update_runtime.py','scripts/panel_update_source.py','codepier','codepier.ps1','web/brand.js','shared/brand_migration.py','shared/brand_browser.py','agent/brand_upgrade.py','scripts/migrate_hub.py','scripts/migrate_hub_data.py','scripts/migrate_hub_networks.py','scripts/migrate_hub_proxy.py','scripts/rename_checkout.py','install.sh','deploy/install-hub.sh','scripts/install_agent.py','scripts/agent_lifecycle.py',
                 'deploy/install-from-hub.sh','deploy/install-from-hub.ps1','agent/native_worker.py','agent/native_windows.py','agent/native_pi_bridge.py',
                 'agent/runner.py','hub/app.py','hub/native_cli.py','shared/native_cli.py',
                 'agent/chat_worker.py','agent/chat_catalog.py',
@@ -63,6 +63,7 @@ REQUIRED_FILES = {'codepier','codepier.ps1','web/brand.js','shared/brand_migrati
                 'web/mcp-apps/THIRD_PARTY_NOTICES.txt','docs/INTEGRATIONS-20260917.md'}
 
 PUBLIC_DOCS = {
+    'docs/PANEL_UPDATE.md',
     'docs/INTEGRATIONS-20260917.md', 'docs/MCP-WORKSPACE-DASHBOARD-20260917.md',
     'docs/DEVTOOLS-FLOW-20260918.md', 'docs/RELEASING.md', 'docs/VPS.md', 'docs/ARCHITECTURE.md', 'docs/LONG_OPERATIONS.md',
 }
