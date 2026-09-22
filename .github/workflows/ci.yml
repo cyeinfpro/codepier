@@ -49,7 +49,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-14]
+        # Playwright 1.63 uses frozen WebKit 2251 on macOS 14; use the
+        # supported macOS 15 build for the full Chromium/WebKit regression.
+        os: [ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     defaults:
@@ -73,6 +75,15 @@ jobs:
           .venv-compat/bin/python -m pip install --upgrade pip==26.2.1
           .venv-compat/bin/python -m pip install -r requirements-compat.txt
           .venv/bin/python -m playwright install --with-deps chromium webkit
+      - name: Install macOS Compose CLI for panel updater validation
+        if: runner.os == 'macOS'
+        run: |
+          if ! docker compose version >/dev/null 2>&1; then
+            brew install docker docker-compose
+            mkdir -p "$HOME/.docker/cli-plugins"
+            ln -sf "$(command -v docker-compose)" "$HOME/.docker/cli-plugins/docker-compose"
+          fi
+          docker compose version
       - name: Build browser resources
         run: |
           npm --prefix web/mcp-apps ci --ignore-scripts
@@ -86,7 +97,9 @@ jobs:
           npm --prefix web/mcp-apps audit
           .venv/bin/python scripts/check_release.py
       - name: Complete regression
-        run: .venv/bin/python scripts/check_full_regression.py --output dist/ci-results --workers 2 --timeout 900
+        # Keep macOS browser/desktop fixtures serial; independent pytest
+        # processes still share the runner's native window server.
+        run: .venv/bin/python scripts/check_full_regression.py --output dist/ci-results --workers ${{ runner.os == 'macOS' && 1 || 2 }} --timeout 900
       - name: Public source bundle
         run: |
           .venv/bin/python scripts/build_source_bundle.py --public --output dist/codepier-1.11.0-source.zip

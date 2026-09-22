@@ -1,11 +1,11 @@
 fastapi==0.141.1
 starlette==1.6.0
-uvicorn==0.48.0
+uvicorn==0.53.0
 websockets==17.1
 cryptography==50.0.1
 httpx==0.28.1
 pydantic==2.13.5
-tzdata==2026.2
+tzdata==2026.4
 # 0.26.0 Point getters corrupt references; see py-tree-sitter#487.
 tree-sitter==0.25.2
 tree-sitter-bash==0.25.1
