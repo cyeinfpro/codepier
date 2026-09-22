@@ -27,10 +27,10 @@ import uuid
 
 try:
     from .panel_update_source import DEFAULT_REPOSITORY, UpdateError, fetch, latest_release, repository_name, unpack_bundle, version_tuple
-    from .panel_update_runtime import DockerRuntime, atomic_bytes, atomic_json, data_volume, fingerprint, read_json, run
+    from .panel_update_runtime import DockerRuntime, atomic_bytes, atomic_json, data_volume, fingerprint, load_compose_config, read_json, run
 except ImportError:
     from panel_update_source import DEFAULT_REPOSITORY, UpdateError, fetch, latest_release, repository_name, unpack_bundle, version_tuple
-    from panel_update_runtime import DockerRuntime, atomic_bytes, atomic_json, data_volume, fingerprint, read_json, run
+    from panel_update_runtime import DockerRuntime, atomic_bytes, atomic_json, data_volume, fingerprint, load_compose_config, read_json, run
 
 TERMINAL = {'succeeded', 'failed', 'rolled_back', 'recovery_required'}
 CUTOVER_PHASES = {'stopping', 'copying', 'starting', 'verifying', 'committing', 'committed', 'rolling_back'}
@@ -431,7 +431,7 @@ def _install_locked(root, repository):
     command = ['docker', 'compose']
     for path in paths:
         command.extend(['-f', str(path)])
-    spec = json.loads(run(command + ['config', '--format', 'json'], cwd=root))
+    spec = load_compose_config(run(command + ['config', '--format', 'json'], cwd=root))
     data_volume(spec)
     project = spec.get('name', '')
     if not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,63}', project):

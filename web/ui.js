@@ -92,6 +92,24 @@ function uiFilterTools(){
   $$('[data-tool-name]').forEach(chip=>{chip.hidden=!chip.dataset.toolName.includes(query);if(!chip.hidden)count++;});
   const countNode=$('#tool-count');if(countNode)countNode.textContent=`${count} 项`;
 }
+// Preserve the original click target until a held pointer gesture finishes.
+// Replacing #page between pointerdown and pointerup makes browsers drop click.
+const uiPagePointers=new Set(),uiPagePointerWaiters=new Set();
+document.addEventListener('pointerdown',event=>{
+  if(event.button===0&&event.target.closest('#page'))uiPagePointers.add(event.pointerId);
+},true);
+function uiReleasePagePointer(event){
+  if(event.type==='blur')uiPagePointers.clear();else uiPagePointers.delete(event.pointerId);
+  if(!uiPagePointers.size)setTimeout(()=>{
+    for(const resolve of uiPagePointerWaiters)resolve();
+    uiPagePointerWaiters.clear();
+  },0); // Let the matching click dispatch before a background render resumes.
+}
+for(const type of ['pointerup','pointercancel'])window.addEventListener(type,uiReleasePagePointer,true);
+window.addEventListener('blur',uiReleasePagePointer);
+async function uiWaitForPagePointer(){
+  while(uiPagePointers.size)await new Promise(resolve=>uiPagePointerWaiters.add(resolve));
+}
 function uiCapturePage(){
   const page=$('#page');if(!page)return null;
   const active=document.activeElement;
