@@ -88,7 +88,9 @@ jobs:
           npm --prefix web/mcp-apps audit
           .venv/bin/python scripts/check_release.py
       - name: Complete regression
-        run: .venv/bin/python scripts/check_full_regression.py --output dist/ci-results --workers 2 --timeout 900
+        # Keep macOS browser/desktop fixtures serial; independent pytest
+        # processes still share the runner's native window server.
+        run: .venv/bin/python scripts/check_full_regression.py --output dist/ci-results --workers ${{ runner.os == 'macOS' && 1 || 2 }} --timeout 900
       - name: Public source bundle
         run: |
           .venv/bin/python scripts/build_source_bundle.py --public --output dist/codepier-1.10.3-source.zip
