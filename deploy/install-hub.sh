@@ -4,12 +4,14 @@ caller_directory=$PWD
 cd "$(dirname "$0")/.."
 root=$(pwd -P)
 host='' port='' username='' password_file='' noninteractive=0
+enable_panel_update=0
 usage() {
   cat <<'HELP'
 CodePier · 码头 — 面板安装与更新
   bash install.sh
   bash install.sh --host 192.0.2.20 --port 8765 --username admin --password-file /安全路径/admin-password --non-interactive
 选项：--host 主机名/IP  --port 端口  --username 管理员  --password-file 私密密码文件
+      --enable-panel-update 安装独立宿主机更新服务（Linux/systemd，需 root）
       --non-interactive 无人值守；首次安装必须提供 host 和密码文件或 CODEPIER_ADMIN_PASSWORD
 需要 Docker Engine、Compose 插件和主机 Python 3.9+（只使用标准库）。
 旧版更新自动迁移已识别的项目名与数据卷；保留账号、密钥、权限和历史。
@@ -24,6 +26,7 @@ while [[ $# -gt 0 ]]; do
       case "$1" in --host) host=$2;; --port) port=$2;; --username) username=$2;; --password-file) password_file=$2;; esac
       shift 2;;
     --non-interactive) noninteractive=1; shift;;
+    --enable-panel-update) enable_panel_update=1; shift;;
     --help|-h) usage; exit 0;;
     *) echo "未知选项：$1" >&2; usage >&2; exit 2;;
   esac
@@ -78,6 +81,21 @@ if [[ ! -f .env ]]; then
   mv "$env_tmp" .env
   env_tmp=''
 fi
+[[ ! -L "$root/.codepier-updater" && ! -L "$root/.codepier-updater/run" ]] || { echo "更新服务目录不能是符号链接" >&2; exit 1; }
+mkdir -p "$root/.codepier-updater/run"
+# The Hub must be able to check an absent marker even before the updater is enabled.
+chmod 0755 "$root/.codepier-updater/run"
+if ((enable_panel_update == 1)); then
+  [[ "$(uname -s)" == Linux && "$EUID" == 0 && -d /run/systemd/system ]] || { echo "启用面板更新需 Linux/systemd 宿主机 root 权限" >&2; exit 1; }
+  "$bootstrap_python" - "$root" <<'PYHOST'
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / 'scripts'))
+from panel_updater import secure_host_path
+secure_host_path(Path(sys.argv[1]))
+secure_host_path(Path(sys.executable))
+PYHOST
+fi
 docker compose config --quiet
 # Finish the image build while the old installation is still running.
 docker compose build hub
@@ -117,5 +135,8 @@ docker compose up -d --wait --wait-timeout 90
 "$bootstrap_python" scripts/migrate_hub.py commit --root "$root"
 migration_started=0
 echo 'CodePier 已启动且健康检查通过。查看日志：docker compose logs -f hub'
+if ((enable_panel_update == 1)); then
+  "$bootstrap_python" "$root/scripts/panel_updater.py" install --root "$root"
+fi
 echo '请确认云端及系统防火墙放行所选端口；家里无需开放入站端口。'
 echo 'HTTP 不保护浏览器密码与配对文件；首次初始化请使用可信网络或 SSH 转发。'

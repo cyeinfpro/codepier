@@ -1,0 +1,89 @@
+# 面板一键更新
+
+入口：**系统设置 → 面板更新**。先检查 GitHub 正式发布，再确认“一键更新面板及 Agent 文件”。此功能不会发布 GitHub Release，也不会自动执行未发布分支。
+
+## 首次启用
+
+支持 Linux/systemd 宿主机、Docker Compose v2、单实例 Hub、独立外部命名数据卷，以及默认 UID/GID 10001 的非 root Hub 容器。Compose 必须支持 `up --wait`。Rootless Docker、userns-remap、自定义 Hub 数据 bind mount、多副本 Hub、非 systemd 宿主机不属于当前支持范围；这些部署继续手动更新。
+
+先把包含本功能的源码部署到服务器。建议使用 `/opt/codepier`：部署目录、父目录和宿主机 Python 必须由 root 拥有，且组与其他用户不可写。不要在可由普通用户替换的目录中安装 root 服务。
+
+新安装或重新部署时可一次启用：
+
+```bash
+sudo bash install.sh --enable-panel-update
+```
+
+面板已经使用新版 Compose 启动后，也可在相同部署目录单独安装：
+
+```bash
+sudo python3 scripts/panel_updater.py install --root "$PWD"
+```
+
+安装器验证现有 Compose 选择、外部数据卷和只读更新套接字挂载，生成独立 systemd 服务，并检查 Hub 容器能否访问它。重装服务时会阻止新的更新提交；存在运行中或需人工恢复的操作时拒绝重装，不会直接杀死更新进程。
+
+`.codepier-updater/run` 以只读方式挂载到 `/run/codepier-updater`；仅此目录进入 Hub。Docker socket、宿主机配置副本、源码候选目录、历史日志都不暴露给网页进程。Hub 通过固定 Unix socket 协议提出检查和更新请求，不能传递任意命令、URL、Docker 参数或主机路径。
+
+默认来源固定为 `cyeinfpro/codepier`。自建 fork 只能由宿主机管理员在安装时通过 `--repository owner/repository` 设定，网页不能更换来源。重新安装自建 fork 的更新服务时应继续明确指定该参数。
+
+## 发布包要求
+
+使用 GitHub 的最新正式 Release；拒绝 draft、prerelease、同版本重装和自动降级。目标版本必须是三段式正式版本，并上传名为 `codepier-VERSION-source.zip` 的附件，不能只创建 Git tag。
+
+附件必须由源码打包器生成，含 `MANIFEST.sha256`，GitHub Release 资产元数据必须提供 SHA-256 digest 与准确字节数。更新器先校验 GitHub digest，再检查 ZIP 路径、大小、文件类型、重复文件、清单覆盖及源码版本。整个下载与解压设置上限；不会执行下载包中的宿主机安装脚本或 Compose 文件。
+
+正式发布前运行：
+
+```bash
+python scripts/check_release.py
+python scripts/build_source_bundle.py --public --output dist/codepier-VERSION-source.zip
+```
+
+上面的 `VERSION` 应替换为 `shared/util.py` 与 `RELEASE.json` 中一致的发布版本。发布流程仍由维护者执行，更新按钮不会自动创建或推送发布。
+
+没有正式 Release、缺少附件/digest、GitHub 限流、网络失败、发布内容在确认后改变时，面板会明确显示原因，不会退回 `main` 分支执行未校验代码。正向版本检查短暂缓存 60 秒，确认信息 15 分钟过期；过期后重新检查。
+
+## 更新顺序与数据保护
+
+更新服务独立于待替换的 Hub 运行。操作编号、请求幂等键和阶段状态持久保存在宿主机，关闭浏览器不会取消操作。
+
+1. 下载并校验候选源码，在独立镜像标签下构建。预检候选 Hub 的版本，并生成、校验配套 Agent 安装包；此时旧 Hub 继续服务。
+2. 启用宿主机拥有的维护标记，拒绝新操作和新 Agent WebSocket。等待已进入的请求、原生控制请求及排队/执行中的操作结束；未能排空时停止本次更新，不取消现有任务。
+3. 停止旧 Hub，把完整数据卷复制到新命名卷，验证文件内容、权限和 SQLite 完整性。账号、会话、配对、项目、附件、主密钥及其他运行数据随完整卷复制；原卷保持不变，作为回退备份。
+4. 使用安装时捕获的可信部署配置，只替换 Hub 镜像和数据卷。保持端口、环境变量、网络和现有代理配置，不重建无关服务。
+5. 检查新 Hub 健康状态、运行版本及 `/agent/manifest.json` 的版本、大小和 SHA-256。成功后更新 `.env` 中三个受管项：`CODEPIER_HUB_IMAGE`、`CODEPIER_HUB_SOURCE`、`CODEPIER_HUB_DATA_VOLUME`。其余设置保留。
+6. 先持久记录新版本已提交，再开放请求。提交前切换失败会恢复旧镜像与原数据卷；提交后绝不自动恢复旧数据，因为新版本可能已经接受新的写入。
+
+更新后服务器提供新的网页、Hub、Agent ZIP、安装脚本和生命周期文件。**已经安装在各台电脑上的 Agent 不会被强制更新或重启**；仍可使用节点管理中的 Agent 更新功能单独升级。
+
+更新器自身的宿主机控制代码与 Hub 镜像分离，不会被下载的 Release 在宿主机直接替换或执行。需要升级宿主机更新协议时，由管理员部署新安装器后重新安装该服务。
+
+## 断线与恢复
+
+浏览器提交回执丢失时只查询同一个请求编号，不自动重复 POST。若更新服务确认没有该编号，页面允许显式“重新提交原请求”，仍使用原幂等键。刷新页面会继续读取持久记录；完成后通过“刷新到新版本”重新加载网页，未保存输入会提示确认。
+
+守护进程重启不会重放未开始的下载或部署命令。切换前中断会标记失败；未提交的切换会尝试恢复原镜像和原数据。已提交的新版本只验证和恢复新版本，不回退旧数据。自动恢复不能完成时保持 `recovery_required`，保留保护标记与备份，并禁止再次更新。
+
+在原部署目录查看宿主机状态：
+
+```bash
+sudo python3 scripts/panel_updater.py status --root "$PWD"
+```
+
+实际服务名称保存在 `.codepier-updater/config.json` 的 `unit` 字段，也会在安装成功时输出。通过 `systemctl status` 与 `journalctl -u` 检查该服务；每次操作的详细命令输出在 `.codepier-updater/jobs/操作编号/commands.log`。这些文件可能包含敏感运行配置，只供宿主机管理员读取，不应公开上传。
+
+人工恢复前先阅读操作阶段和 `commit_decided`，核实镜像、当前数据卷及服务状态。停止该更新服务后，可运行：
+
+```bash
+sudo python3 scripts/panel_updater.py recover --root "$PWD"
+```
+
+完成核查后重新启动该 systemd 服务。不要为了恢复网页而直接删除维护标记、手工覆盖 `.env`、删除安装锁或把旧代码接到已迁移的数据卷上；已提交的新数据不能用旧备份直接替代。
+
+## 运维边界
+
+原镜像、原数据卷、候选源码与任务记录不会自动清理。主机源码区开始更新前至少需要 512 MiB 空闲空间，但 Docker 镜像层和完整数据副本还需要额外空间，容量取决于实际部署。数据副本不足、构建失败或配置被其他人修改都会终止或进入恢复流程。
+
+不要在更新期间手动运行另一条部署命令或执行 Docker prune。更新器与安装脚本共享部署锁；网页同时只接受一个操作，幂等键不能用于不同请求。记录达到上限后会要求管理员归档，不会自动删除备份。归档前确认哪些镜像、数据卷、源码目录和任务仍被当前配置引用，尤其不能删除 `CODEPIER_HUB_SOURCE` 所指向的在用源码。
+
+本功能不等同于异地备份。重要服务仍应有独立、已验证的备份与恢复方案。正式用于生产之前，应在与生产相同的 Linux/Docker/systemd 环境完成实际镜像构建、健康切换、故障回退及重启恢复验收。

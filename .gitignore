@@ -54,3 +54,6 @@ token*.txt
 !/docs/RELEASING.md
 !/docs/VPS.md
 !/docs/LONG_OPERATIONS.md
+
+.codepier-updater/
+!/docs/PANEL_UPDATE.md

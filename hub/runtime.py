@@ -393,6 +393,8 @@ class Runtime:
         return {"operation_id": id, "cancel_requested": True, "state": self.store.one("SELECT state FROM operations WHERE id=?", (id,))["state"], "next": "operations_wait"}
 
     async def dispatch_device_action(self, name: str, args: dict, device_id: str, principal: Principal):
+        if getattr(self, "panel_maintenance", None):
+            self.panel_maintenance.guard()
         if name not in DEVICE_ACTIONS or not principal.admin:
             raise DevError("INSUFFICIENT_SCOPE", "只有面板管理员可以管理 Agent 生命周期", 403)
         device = self.store.one("SELECT id,name,enabled,info FROM devices WHERE id=?", (device_id,))
@@ -418,6 +420,8 @@ class Runtime:
         return await self.dispatch(name, args, project, principal, background=True)
 
     async def dispatch(self, name: str, args: dict, project: dict, principal: Principal, background=False):
+        if getattr(self, "panel_maintenance", None):
+            self.panel_maintenance.guard()
         idem = args.get("idempotency_key")
         if name == "tasks_list" and not idem:
             # Resolve alias casing before identifying an unkeyed metadata query.
