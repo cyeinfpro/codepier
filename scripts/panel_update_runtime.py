@@ -95,6 +95,16 @@ def run(command, *, cwd, timeout=120, log=None):
     return raw.decode('utf-8', errors='replace').strip()
 
 
+def load_compose_config(raw):
+    """Decode the round-trip dollar escaping emitted by `docker compose config`.
+
+    Compose escapes all dollar signs in its JSON/YAML output after resolving
+    interpolation. Keep an unescaped internal model so save_compose escapes
+    exactly once, including values such as passwords and variable-like text.
+    """
+    return json.loads(raw.replace('$$', '$'))
+
+
 def save_compose(path, spec):
     """Compose interpolates JSON too: preserve literal dollars in trusted values."""
     def escaped(value):

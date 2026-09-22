@@ -10,7 +10,7 @@ import pytest
 
 from scripts import panel_updater as updater
 from scripts.panel_update_source import UpdateError
-from scripts.panel_update_runtime import DockerRuntime, atomic_json, fingerprint, read_json, save_compose
+from scripts.panel_update_runtime import DockerRuntime, atomic_json, fingerprint, load_compose_config, read_json, save_compose
 from shared.util import VERSION
 from tests.test_panel_update import TARGET, body_for, manager_fixture
 
@@ -111,7 +111,32 @@ def test_compose_cli_keeps_literal_dollars_without_docker_daemon(tmp_path):
     path=tmp_path/'target.json';save_compose(path,spec)
     result=subprocess.run([docker,'compose','--project-name','fixture','-f',str(path),'config','--format','json'],capture_output=True,text=True,timeout=15)
     assert result.returncode==0,result.stderr
-    assert json.loads(result.stdout)['services']['hub']['environment']['LITERAL']=='a$B${SECRET}$$'
+    # `config` serializes the resolved model with dollars escaped for reuse.
+    # Decode that transport representation, not the literal serialized string.
+    resolved=load_compose_config(result.stdout)
+    assert resolved['services']['hub']['environment']['LITERAL']=='a$B${SECRET}$$'
+    # Repeated snapshot/save cycles must never accumulate dollar escaping.
+    for _ in range(2):
+        save_compose(path,resolved)
+        result=subprocess.run([docker,'compose','--project-name','fixture','-f',str(path),'config','--format','json'],capture_output=True,text=True,timeout=15)
+        assert result.returncode==0,result.stderr
+        resolved=load_compose_config(result.stdout)
+        assert resolved['services']['hub']['environment']['LITERAL']=='a$B${SECRET}$$'
+
+
+def test_compose_config_decodes_values_and_keys_once(tmp_path):
+    spec={'services':{'hub':{'image':'fixture:local','environment':{
+        'DOLLAR$KEY':'a$B${SECRET}$$','JSON':'{"path":"C:\\\\folder","quote":"\\\"$value"}',
+        'UNICODE':'密码$保留','TRAILING':'$$$',
+    }}}}
+    raw=json.dumps(spec,ensure_ascii=False).replace('$','$$')
+    decoded=load_compose_config(raw)
+    assert decoded==spec
+    target=tmp_path/'target.json';save_compose(target,decoded)
+    saved=json.loads(target.read_text())['services']['hub']['environment']
+    assert set(saved)==set(spec['services']['hub']['environment'])
+    assert saved['DOLLAR$KEY']=='a$$B$${SECRET}$$$$'
+    assert read_json(target.with_suffix('.spec.json'))==spec
 
 
 def test_admission_fence_and_terminal_lock_cleanup(tmp_path):
