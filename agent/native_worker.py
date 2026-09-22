@@ -18,6 +18,7 @@ if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from shared.native_cli import database, identifier, SESSION_QUOTA, WorkerLock
 from agent.native_terminal import TerminalQueries
+from agent.owned_process_group import child_exited, stop_owned_group
 
 
 def run(directory, sid):
@@ -200,10 +201,8 @@ def run(directory, sid):
                     if exc.errno != errno.EIO:
                         raise
                     eof = True
-            done, result = os.waitpid(pid, os.WNOHANG)
-            if done:
-                reaped = True
-                exit_code = os.waitstatus_to_exitcode(result)
+            if child_exited(pid):
+                break  # Keep the leader unreaped until its whole group is stopped.
         # Drain only a bounded post-exit tail. A descendant holding the PTY open
         # must not keep a completed session/worker alive indefinitely.
         end = time.monotonic() + .25
@@ -224,35 +223,11 @@ def run(directory, sid):
         error = str(exc) if isinstance(exc, RuntimeError) else type(exc).__name__
     finally:
         if pid is not None and not reaped:
-            signal_child(signal.SIGTERM)
-            deadline = time.monotonic() + 2
-            while time.monotonic() < deadline:
-                try:
-                    done, result = os.waitpid(pid, os.WNOHANG)
-                except ChildProcessError:
-                    reaped = True
-                    break
-                if done:
-                    reaped = True
-                    exit_code = os.waitstatus_to_exitcode(result)
-                    break
-                time.sleep(.02)
+            reaped, exit_code = stop_owned_group(pid, grouped=True)
             if not reaped:
-                signal_child(signal.SIGKILL)
-                deadline = time.monotonic() + 2
-                while time.monotonic() < deadline:
-                    try:
-                        done, result = os.waitpid(pid, os.WNOHANG)
-                    except ChildProcessError:
-                        reaped = True
-                        break
-                    if done:
-                        reaped = True
-                        exit_code = os.waitstatus_to_exitcode(result)
-                        break
-                    time.sleep(.02)
-            if not reaped:
-                status, error = 'orphaned', 'Owned child has not exited; inspect the Agent host before maintenance'
+                status, error = 'orphaned', 'Owned native process group cleanup is unverified; inspect Agent host'
+            elif exit_code == 127:
+                error = 'Native executable could not start; inspect the classified bootstrap message'
         if fd is not None:
             with contextlib.suppress(OSError):
                 os.close(fd)

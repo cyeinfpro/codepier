@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import httpx
@@ -212,14 +213,17 @@ def fake_hub_installer(tmp_path, *, probe_status=0, start_status=0):
     for name in ("rename_checkout.py", "migrate_hub.py"):
         (tmp_path / "scripts" / name).write_text(
             "import os,sys\nfrom pathlib import Path\n"
-            "with Path(os.environ['DOCKER_LOG']).open('a') as f: f.write(Path(__file__).name+' '+' '.join(sys.argv[1:])+'\\n')\n")
+            "with Path(os.environ['DOCKER_LOG']).open('a') as f: f.write(Path(__file__).name+' '+' '.join(sys.argv[1:])+'\\n')\n"
+            "if len(sys.argv)>1 and sys.argv[1]=='probe-volume': print('codepier_hub_data')\n")
     (tmp_path / ".env").write_text("HUB_PUBLIC_URL=http://fixture:8765\n")
     fake = tmp_path / "bin/docker"
     fake.write_text("""#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$DOCKER_LOG"
 case "$*" in
   'compose version'|'compose config --quiet'|'compose build hub') exit 0 ;;
-  *'python -c '*) exit "$PROBE_STATUS" ;;
+  *'python -c '*)
+    [[ "$*" == *'--volume codepier_hub_data:/app/data:ro'* ]] || exit 98
+    exit "$PROBE_STATUS" ;;
   *'python -m hub init'*) exit 0 ;;
   'compose up '*) exit "$START_STATUS" ;;
 esac
@@ -230,7 +234,8 @@ exit 99
     result = subprocess.run(["bash", str(tmp_path / "deploy/install-hub.sh")],
         input="admin\n", text=True, capture_output=True, timeout=5,
         env={**os.environ, "PATH": str(tmp_path / "bin") + os.pathsep + os.environ["PATH"],
-             "DOCKER_LOG": str(log), "PROBE_STATUS": str(probe_status), "START_STATUS": str(start_status)})
+             "DOCKER_LOG": str(log), "PROBE_STATUS": str(probe_status), "START_STATUS": str(start_status),
+             "CODEPIER_BOOTSTRAP_PYTHON": sys.executable})
     return result, log.read_text()
 
 
@@ -246,7 +251,10 @@ def test_hub_new_volume_initializes_once_and_waits_for_health(tmp_path):
     assert result.returncode == 0
     assert log.count("python -m hub init") == 1
     assert "compose up -d --wait --wait-timeout 90" in log
-    assert log.index("migrate_hub.py proxy-trust") < log.index("compose up -d")
+    assert (log.index('--volume codepier_hub_data:/app/data:ro')
+            < log.index('migrate_hub.py proxy-trust')
+            < log.index('migrate_hub.py write-boundary')
+            < log.index('python -m hub init') < log.index('compose up -d'))
 
 
 def test_hub_health_failure_is_not_reported_as_started(tmp_path):

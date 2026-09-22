@@ -61,7 +61,7 @@ async function vpsCheck(id){
   const dialog=modal('检查连接 · '+v.name,`<p class="form-note">${esc(vpsEndpoint(v))} · ${esc(v.username)}。只读取主机、当前账号、系统和根目录磁盘用量，不修改服务器。</p><div class="field"><label>通过哪个项目连接</label><select id="vps-check-project">${projects.map(p=>`<option value="${esc(p.id)}">${esc(p.alias)} · ${esc(p.device_name)} · ${p.online?'在线':'离线（命令将排队）'}</option>`).join('')}</select></div>${projects.length?'':notice('没有已分配且允许执行的项目，请先分配项目并开启执行权限。')}<p id="vps-check-state" class="form-note" role="status">尚未执行</p><div class="code-box"><pre id="vps-check-output">等待连接检查</pre></div>`,`<button class="btn ghost" data-action="close-modal">关闭</button><button class="btn primary" id="vps-check-run" ${!projects.length||!v.enabled?'disabled':''}>开始检查</button>`);
   const button=$('#vps-check-run',dialog),status=$('#vps-check-state',dialog),output=$('#vps-check-output',dialog),select=$('#vps-check-project',dialog);
   let args=null,operation=null,finished=false;
-  button.onclick=async()=>{await busy(button,async()=>{
+  button.onclick=async()=>{if(finished){args=null;operation=null;finished=false;}await busy(button,async()=>{
     if(!args)args={project:select.value,vps:id,command:"printf 'CODEPIER_VPS_OK\\n'; hostname; id -un; uname -sr; df -h /",timeout_seconds:30,idempotency_key:'vps-check-'+uid()};
     select.disabled=true;
     try{
@@ -75,8 +75,8 @@ async function vpsCheck(id){
         status.textContent=(stateNames[op.state]||op.state)+' · '+operation;
         if(!op.pending){finished=true;const error=op.result?.error;status.textContent=(op.state==='succeeded'?'连接检查成功':(error?.message||op.error||'检查未完成'))+' · '+operation;return;}
       }
-    }catch(e){if(dialog.isConnected){status.textContent=e.message+(operation?' · 原操作 '+operation:'；点击恢复将沿用同一请求，不创建重复命令。');}}
-  });if(dialog.isConnected){button.textContent=finished?'检查已结束':'恢复本次检查';button.disabled=finished;}};
+    }catch(e){if(e.operation_id)operation=e.operation_id;if(dialog.isConnected&&session===S.session){status.textContent=e.message+(operation?' · 原操作 '+operation:'；点击恢复将沿用同一请求，不创建重复命令。');}}
+  });if(dialog.isConnected){button.textContent=finished?'重新检查':'恢复本次检查';button.disabled=false;select.disabled=!finished;}};
 }
 document.addEventListener('click',async e=>{
   const button=e.target.closest('[data-vps-action]');if(!button||button.disabled)return;

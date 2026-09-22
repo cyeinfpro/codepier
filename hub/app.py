@@ -66,6 +66,7 @@ class ProjectInput(Model):
     description: str = Field(default="", max_length=1000)
     mode: str = Field(default="write", pattern=r"^(read|write)$")
     allow_tasks: bool = False
+    idempotency_key: str = Field(default="", max_length=128, pattern=r"^[a-zA-Z0-9_.:-]*$")
 
 class ToolCall(Model):
     tool: str = Field(min_length=1, max_length=100)
@@ -201,14 +202,14 @@ def create_app(data_dir: str | None = None):
         configured = bool(store.one("SELECT id FROM users LIMIT 1"))
         try:
             row = auth.session(request)
-            return {"authenticated": True, "configured": configured, "username": row["username"], "csrf": row["csrf"], "version": VERSION}
+            return {"authenticated": True, "configured": configured, "username": row["username"], "user_id": row["user_id"], "csrf": row["csrf"], "version": VERSION}
         except DevError:
             return {"authenticated": False, "configured": configured, "version": VERSION}
 
     @app.post("/api/login")
     async def login(request: Request, body: Login):
         value = await auth.login(request, body.username, body.password)
-        response = JSONResponse({"username": value["username"], "csrf": value["csrf"]})
+        response = JSONResponse({"username": value["username"], "user_id": value["user_id"], "csrf": value["csrf"]})
         response.set_cookie("rd_session", value["cookie"], httponly=True, samesite="lax", secure=request.url.scheme == "https", max_age=SESSION_SECONDS, path="/")
         return response
 
@@ -315,6 +316,7 @@ def create_app(data_dir: str | None = None):
             raise DevError("INVALID_URL", str(exc)) from exc
         id, secret = uuid.uuid4().hex, token(32)
         store.execute("INSERT INTO devices(id,name,secret,created) VALUES (?,?,?,?)", (id, body.name, store.encrypt(secret), time.time()))
+        store.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", ("device_hub_url:"+id, hub_url))
         store.audit(principal.actor, "device.created", body.name)
         runtime.publish("device", {"id": id})
         return {"pairing": {"device_id": id, "name": body.name, "secret": secret, "hub_url": hub_url}, "note": "此密钥仅本次显示，下载后导入家里 Agent。"}
@@ -345,7 +347,7 @@ def create_app(data_dir: str | None = None):
         store.execute("UPDATE devices SET secret=? WHERE id=?", (store.encrypt(secret), id))
         await runtime.disconnect_device(id, "Device key rotated")
         store.audit(principal.actor, "device.key_rotated", id)
-        return {"pairing": {"device_id": id, "name": row["name"], "secret": secret, "hub_url": f"{request.url.scheme}://{request.url.netloc}"}}
+        return {"pairing": {"device_id": id, "name": row["name"], "secret": secret, "hub_url": (store.one("SELECT value FROM meta WHERE key=?", ("device_hub_url:"+id,)) or {"value":public_url()})["value"]}}
 
     @app.delete("/api/devices/{id}")
     async def delete_device(id: str, request: Request):
@@ -362,40 +364,86 @@ def create_app(data_dir: str | None = None):
     async def projects(request: Request):
         return {"projects": runtime.list_projects(auth.admin(request))}
 
-    async def save_project(body: ProjectInput, principal, id=None):
+    async def save_project(body: ProjectInput, principal, id=None, request=None):
         alias = body.alias.strip()
         if not re.fullmatch(r"[\w.-]{1,64}", alias, flags=re.UNICODE) or alias in {".", ".."}:
             raise DevError("INVALID_ALIAS", "别名可使用中英文、数字、短横线、下划线和点，不要使用空格或路径")
-        old = store.one("SELECT * FROM projects WHERE id=?", (id,)) if id else None
-        if id and not old:
-            raise DevError("NOT_FOUND", "项目映射不存在", 404)
-        exists = store.one("SELECT id FROM projects WHERE alias_key=?", (alias_key(alias),))
-        if exists and exists["id"] != id:
-            raise DevError("ALIAS_EXISTS", "这个别名已被使用（不区分大小写）", 409)
+        fields = body.model_dump(exclude={'idempotency_key'})
+        fields['alias'] = alias
+        fingerprint = digest(json.dumps([id,fields],sort_keys=True,ensure_ascii=False))
+        # A durable save receipt owns the validation and the mapping commit.
+        key = 'project_save:'+digest(principal.user_id+'\n'+(body.idempotency_key or fingerprint))
+        with store.lock, store.db:
+            saved = store.one("SELECT value FROM meta WHERE key=?", (key,))
+            plan = json.loads(saved['value']) if saved else None
+            if plan and plan['fingerprint'] != fingerprint:
+                raise DevError('IDEMPOTENCY_CONFLICT','保存回执已用于另一份项目配置',409)
+            if plan and plan.get('committed') and body.idempotency_key:
+                current = store.one('SELECT * FROM projects WHERE id=?',(plan['target'],))
+                if current != plan['committed']:
+                    raise DevError('PROJECT_CHANGED','原保存已完成，但项目随后改变；请刷新核对，未覆盖新配置',409)
+                return runtime.project_public(runtime.project(plan['target'],principal))
+            old = store.one("SELECT * FROM projects WHERE id=?", (id,)) if id else None
+            if id and not old:
+                raise DevError("NOT_FOUND", "项目映射不存在", 404)
+            exists = store.one("SELECT id FROM projects WHERE alias_key=?", (alias_key(alias),))
+            if exists and exists["id"] != id:
+                raise DevError("ALIAS_EXISTS", "这个别名已被使用（不区分大小写）", 409)
+            if not plan or plan.get('committed'):
+                plan = {'fingerprint':fingerprint,'validation_key':'project-validation-'+uuid.uuid4().hex,
+                        'target':id or uuid.uuid4().hex,'before':old,'created':time.time()}
+                store.db.execute('INSERT OR REPLACE INTO meta VALUES (?,?)',(key,json.dumps(plan,ensure_ascii=False)))
+            elif plan['before'] != old:
+                raise DevError('PROJECT_CHANGED','验证期间项目配置已改变，请刷新后重新编辑',409)
         project = {"device_id": body.device_id, "root": body.root, "alias": alias, "mode": body.mode, "allow_tasks": body.allow_tasks}
-        result = await runtime.dispatch("system_validate", {}, project, principal)
+        result = await runtime.dispatch("system_validate", {'idempotency_key':plan['validation_key']}, project, principal)
+        if request is not None:
+            auth.admin(request, True)
         if result.get("pending"):
-            raise DevError("VALIDATION_PENDING", "目录验证仍在进行，请稍后重新保存；尚未写入映射", 409)
+            raise DevError("VALIDATION_PENDING", "原目录验证仍在进行；继续保存会查询同一验证，不会新建重复请求", 409,
+                           operation_id=result['operation_id'],retryable=True)
         if body.mode == "write" and not result["writable"]:
-            raise DevError("LOCAL_READ_ONLY", "本机授权为只读，请修改本机配置或选择只读映射", 403)
+            raise DevError("LOCAL_READ_ONLY", "本机授权为只读，请修改本机配置或选择只读映射", 403,
+                           operation_id=result.get('operation_id'))
         if body.allow_tasks and not result["allow_tasks"]:
-            raise DevError("LOCAL_TASKS_DISABLED", "请先在家里 Agent 的对应 allowed_roots 中将 allow_tasks 设为 true", 403)
-        if id:
-            store.execute("UPDATE projects SET alias=?,alias_key=?,device_id=?,root=?,description=?,mode=?,allow_tasks=? WHERE id=?", (alias, alias_key(alias), body.device_id, result["root"], body.description, body.mode, int(body.allow_tasks), id))
-        else:
-            id = uuid.uuid4().hex
-            store.execute("INSERT INTO projects VALUES (?,?,?,?,?,?,?,?,?)", (id, alias, alias_key(alias), body.device_id, result["root"], body.description, body.mode, int(body.allow_tasks), time.time()))
-        store.audit(principal.actor, "project.updated" if old else "project.created", alias, detail={"root": result["root"], "mode": body.mode, "allow_tasks": body.allow_tasks})
-        runtime.publish("project", {"id": id})
-        return runtime.project_public(runtime.project(id, principal))
+            raise DevError("LOCAL_TASKS_DISABLED", "请先在家里 Agent 的对应 allowed_roots 中将 allow_tasks 设为 true", 403,
+                           operation_id=result.get('operation_id'))
+        with store.lock, store.db:
+            latest = json.loads(store.one('SELECT value FROM meta WHERE key=?',(key,))['value'])
+            if latest.get('committed'):
+                current = store.one('SELECT * FROM projects WHERE id=?',(latest['target'],))
+                if current != latest['committed']:
+                    raise DevError('PROJECT_CHANGED','原保存完成后项目已变化，请刷新核对',409)
+                return runtime.project_public(runtime.project(latest['target'],principal))
+            current = store.one('SELECT * FROM projects WHERE id=?',(id,)) if id else None
+            if current != plan['before']:
+                raise DevError('PROJECT_CHANGED','验证期间项目已改变；未覆盖另一窗口的更新',409)
+            # Validation yields to other panel requests. Recheck constraints in
+            # the same transaction that commits, not only before contacting Agent.
+            device = store.one('SELECT enabled FROM devices WHERE id=?',(body.device_id,))
+            if not device or not device['enabled']:
+                raise DevError('DEVICE_DISABLED','验证期间设备已停用或删除；未保存映射',409)
+            occupied = store.one('SELECT id FROM projects WHERE alias_key=?',(alias_key(alias),))
+            if occupied and occupied['id'] != plan['target']:
+                raise DevError('ALIAS_EXISTS','验证期间别名已被另一项目使用，请重新选择',409)
+            target = plan['target']
+            if id:
+                store.db.execute("UPDATE projects SET alias=?,alias_key=?,device_id=?,root=?,description=?,mode=?,allow_tasks=? WHERE id=?", (alias, alias_key(alias), body.device_id, result["root"], body.description, body.mode, int(body.allow_tasks), target))
+            else:
+                store.db.execute("INSERT INTO projects VALUES (?,?,?,?,?,?,?,?,?)", (target, alias, alias_key(alias), body.device_id, result["root"], body.description, body.mode, int(body.allow_tasks), time.time()))
+            latest['committed'] = store.one('SELECT * FROM projects WHERE id=?',(target,))
+            store.db.execute('UPDATE meta SET value=? WHERE key=?',(json.dumps(latest,ensure_ascii=False),key))
+        store.audit(principal.actor, "project.updated" if id else "project.created", alias, detail={"root": result["root"], "mode": body.mode, "allow_tasks": body.allow_tasks})
+        runtime.publish("project", {"id": target})
+        return runtime.project_public(runtime.project(target, principal))
 
     @app.post("/api/projects")
     async def add_project(request: Request, body: ProjectInput):
-        return await save_project(body, auth.admin(request, True))
+        return await save_project(body, auth.admin(request, True), request=request)
 
     @app.put("/api/projects/{id}")
     async def edit_project(id: str, request: Request, body: ProjectInput):
-        return await save_project(body, auth.admin(request, True), id)
+        return await save_project(body, auth.admin(request, True), id, request=request)
 
     @app.delete("/api/projects/{id}")
     async def delete_project(id: str, request: Request):

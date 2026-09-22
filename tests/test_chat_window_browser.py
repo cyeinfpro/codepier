@@ -8,7 +8,7 @@ import re
 import pytest
 from playwright.sync_api import expect
 from tests.test_chat_browser import chat_page, event
-from tests.test_chat_complete_browser import send
+from tests.test_chat_complete_browser import assert_composer_controls_fit, send
 
 ROOT=Path(__file__).resolve().parents[1]
 OUT=ROOT/'docs/evidence/cli-polish-20260915'
@@ -160,10 +160,7 @@ def test_layers_follow_actual_composer_and_viewport(chat_page,width,height):
     assert popup['y']+popup['height']<=anchor['y']+2 or popup['y']>=anchor['y']+anchor['height']-2
     p.screenshot(path=str(OUT/f'anchored-model-{width}.png'))
     p.press('#chat-model-search','Escape')
-    for sel in ['#chat-compose','#chat-model-picker','#chat-effort-select','#chat-send']:
-        box=p.locator(sel).bounding_box()
-        assert box and box['x']>=0 and box['x']+box['width']<=width+1
-        assert box['y']>=0 and box['y']+box['height']<=height+1,(sel,box)
+    assert_composer_controls_fit(p,width,height)
     assert p.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
 
 
@@ -275,6 +272,4 @@ def test_resize_does_not_turn_focus_scroll_into_extra_window_height(chat_page,wi
     assert before<0
     assert p.locator('#chat-root').bounding_box()['height']<=height+1
     p.click('#chat-model-picker');p.press('#chat-model-search','Escape')
-    for selector in ['#chat-compose','#chat-model-picker','#chat-effort-select','#chat-send']:
-        box=p.locator(selector).bounding_box()
-        assert box and box['y']>=0 and box['y']+box['height']<=height+1,(selector,box)
+    assert_composer_controls_fit(p,width,height)

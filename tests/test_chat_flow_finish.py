@@ -62,12 +62,12 @@ def test_delete_does_not_recreate_deleted_view(chat_page):
 
 
 def test_command_search_survives_catalog_updates_and_focus_returns(chat_page):
-    p=chat_page;p.set_viewport_size({'width':390,'height':844});p.click('#chat-commands')
+    p=chat_page;p.set_viewport_size({'width':390,'height':844});p.click('#chat-options-toggle');p.click('#chat-commands')
     expect(p.locator('#chat-inspector-close')).to_be_focused()
     p.fill('#chat-command-filter','review');p.evaluate('chatInspectorRender()')
     expect(p.locator('#chat-command-filter')).to_have_value('review')
     expect(p.locator('#chat-command-filter')).to_be_focused()
-    p.click('#chat-inspector-close');expect(p.locator('#chat-commands')).to_be_focused()
+    p.click('#chat-inspector-close');expect(p.locator('#chat-options-toggle')).to_be_focused()
 
 
 def test_returning_online_enables_send_without_refresh_or_losing_draft(chat_page):

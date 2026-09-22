@@ -117,7 +117,17 @@ class BrowserBroker:
         for item in data['elements']:
             if not isinstance(item,dict) or not isinstance(item.get('id'),str) or not 1<=len(item['id'])<=100:raise DevError('BROWSER_PROTOCOL','交互元素编号无效')
             if str(item.get('type','')).lower() in {'password','hidden','file'}:continue
-            elements.append({k:v[:1000] if isinstance(v,str) else v for k,v in item.items() if k in {'id','tag','role','label','type','value','disabled'} and type(v) in {str,bool}})
+            element={k:v[:1000] if isinstance(v,str) else v for k,v in item.items() if k in {'id','tag','role','label','type','value','disabled'} and type(v) in {str,bool}}
+            if element.get('tag') == 'select' and isinstance(item.get('options'),list):
+                if len(item['options'])>200:raise DevError('BROWSER_PROTOCOL','下拉选项超过快照预算')
+                options=[]
+                for option in item['options']:
+                    if not isinstance(option,dict) or not isinstance(option.get('value'),str) or len(option['value'])>1000 or not isinstance(option.get('label'),str):
+                        raise DevError('BROWSER_PROTOCOL','下拉选项格式无效')
+                    options.append({'label':option['label'][:500],'value':option['value'],
+                                    'disabled':bool(option.get('disabled')),'selected':bool(option.get('selected'))})
+                element.update(options=options,options_truncated=bool(item.get('options_truncated')))
+            elements.append(element)
         return {'url':data['url'],'title':str(data.get('title',''))[:300],'text':data['text'],'elements':elements,
                 'document_id':data['document_id'],'observation_token':data['observation_token'],
                 'content_truncated':bool(data.get('content_truncated')),'computer_expires_at':time.time()+900,
@@ -178,17 +188,27 @@ class BrowserBroker:
                     'next':{'tool':'browser_snapshot','arguments':{'project':args['project'],'workspace_id':args.get('workspace_id',''),'lease_id':lease_id}}}
 
     async def release_project(self,project):
-        # Only owner-driven emergency cleanup can span grants on the same mapping.
-        rows=self.records.list('browser',{**project,'_integration_admin':True},2000)
         result=[]
-        for row in rows:
-            if row['state']=='closed':continue
-            row.update(state='closed',observation_id=None,observation_token=None)
-            self.records.save('browser',row['lease_id'],{**project,'_integration_admin':True},row,replace=True)
-            try:
-                reply=await self.rpc('close',{'lease_id':row['lease_id']},timeout=2);confirmed=reply.get('tab_cleanup_confirmed') is True
-            except DevError:confirmed=False
-            result.append({'lease_id':row['lease_id'],'tab_cleanup_confirmed':confirmed})
+        entries=self.records.project_entries('browser',{**project,'_integration_admin':True})
+        for bound,saved in entries:
+            lease_id=saved['lease_id'];lock=self.locks.setdefault(lease_id,asyncio.Lock())
+            async with lock:
+                row=self.records.load('browser',lease_id,bound)
+                # Legacy closed receipts have no live lease to release. Only an
+                # explicit failed cleanup is eligible for another cleanup attempt.
+                if row['state']=='closed' and row.get('tab_cleanup_confirmed') is not False:
+                    continue
+                row.update(state='closed',observation_id=None,observation_token=None,tab_cleanup_confirmed=False)
+                self.records.save('browser',lease_id,bound,row,replace=True)
+                try:
+                    reply=await self.rpc('close',{'lease_id':lease_id},timeout=2)
+                    confirmed=reply.get('tab_cleanup_confirmed') is True
+                except DevError:
+                    confirmed=False
+                row['tab_cleanup_confirmed']=confirmed
+                self.records.save('browser',lease_id,bound,row,replace=True)
+                result.append({'lease_id':lease_id,'workspace_id':bound.get('_workspace_id',''),
+                               'tab_cleanup_confirmed':confirmed})
         return result
 
     async def close(self):

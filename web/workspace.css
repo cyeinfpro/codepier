@@ -167,7 +167,8 @@
   .mobile-dock button:hover,.mobile-dock button:focus-visible { background:#38343f;color:#fff; }
   .mobile-dock button.active { background:#f2edf8;color:#29252e; }
   .mobile-dock button:focus-visible { outline:2px solid #f3d970;outline-offset:1px; }
-  .chat-mode .mobile-dock,.main[inert]>.mobile-dock,body.ui-keyboard-open .mobile-dock,body:has(:is(input,textarea,select):focus) .mobile-dock,body:has(.modal) .mobile-dock { visibility:hidden;opacity:0;pointer-events:none;transform:translateY(calc(100% + 28px)); }
+  /* Follow actual keyboard coverage; focus changes must not reveal the dock mid-tap. */
+  .chat-mode .mobile-dock,.main[inert]>.mobile-dock,body.ui-keyboard-open .mobile-dock,body:has(.modal) .mobile-dock { visibility:hidden;opacity:0;pointer-events:none;transform:translateY(calc(100% + 28px)); }
 }
 @media(max-width:640px) {
   .workspace-stats { grid-template-columns:repeat(2,minmax(0,1fr));gap:10px; }

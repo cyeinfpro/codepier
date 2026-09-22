@@ -29,6 +29,10 @@ def needed(manager):
     kind,scope=manager._service_kind()
     if kind not in SERVICE_NAMES:
         return False
+    # A boot task requires an administrator to register under a new name. The
+    # noninteractive Agent must keep its working task until a local migration.
+    if kind == 'schtasks' and metadata.get('startup') == 'boot':
+        return False
     from shared.brand_migration import service_name
     return manager.base.name==LEGACY_DIRECTORY or service_name(manager.base,kind,scope)!=SERVICE_NAMES[kind][0]
 

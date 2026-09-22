@@ -174,7 +174,8 @@ def test_manifest_is_public_pinned_bounded_metadata_without_secrets(tmp_path):
 def test_windows_bootstrap_has_no_already_installed_gate_and_checks_cleanup():
     script = (ROOT / 'deploy/install-from-hub.ps1').read_text()
     assert 'Agent already installed' not in script
-    assert "[ValidateSet('install','upgrade','uninstall','status')]" in script
+    assert "[ValidateSet('install','upgrade','uninstall','status','start')]" in script
+    assert "$Action -eq 'start') { '--start-service' }" in script
     assert 'Confirm-CodePierRemoval' in script and 'Windows cleanup did not complete' in script
     assert 'if ($LASTEXITCODE -ne 0)' in script
 

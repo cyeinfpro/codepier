@@ -1,6 +1,7 @@
 """Syntax-aware navigation. Reference candidates are not LSP type resolution."""
 from __future__ import annotations
 import ast
+from bisect import bisect_right
 import json
 from pathlib import Path
 from shared.crypto import digest
@@ -12,7 +13,15 @@ MAX_NODES=100000
 MAX_METADATA_BYTES=2*1024*1024
 
 
-def analyze(path,source):
+def analyze(path,source,*,timeout=None):
+    # Native parsers (and ast.parse on pathological input) must not be able to
+    # terminate the Agent. Pass only already-authorized bytes to a bounded child.
+    from agent.symbol_worker import analyze_isolated
+    return analyze_isolated(path,source,timeout=timeout,max_nodes=MAX_NODES,
+                            max_metadata_bytes=MAX_METADATA_BYTES)
+
+
+def _analyze_in_process(path,source):
     used=0
     def append(collection,item):
         nonlocal used
@@ -24,7 +33,7 @@ def analyze(path,source):
     if language is None:
         raise DevError('UNSUPPORTED_LANGUAGE','结构检索目前支持 Python、JavaScript、TypeScript 和 TSX；其他文件使用文本搜索')
     if language=='python':
-        try:tree=ast.parse(source.decode('utf-8'),filename=path)
+        try:tree=ast.parse(source,filename=path)
         except (SyntaxError,ValueError,RecursionError) as exc:
             raise DevError('CODE_SYNTAX_ERROR','Python 源码不能完整解析，未伪造结构结果') from exc
         symbols=[];references=[];pending=[(tree,())];visited=0
@@ -61,6 +70,13 @@ def analyze(path,source):
         if tree.root_node.has_error:
             raise DevError('CODE_SYNTAX_ERROR','JavaScript/TypeScript 源码包含语法错误，未将恢复语法树当作完整结果')
         symbols=[];references=[];pending=[(tree.root_node,())];visited=0
+        # Derive byte coordinates from the immutable input. Do not retain or
+        # dereference transient native Point members: their binding lifetime can
+        # corrupt Python objects on large offsets, even in a one-shot worker.
+        line_starts = [0] + [index + 1 for index, byte in enumerate(source) if byte == 10]
+        def coordinates(byte):
+            row = bisect_right(line_starts, byte) - 1
+            return row + 1, byte - line_starts[row] + 1
         definitions={'function_declaration':'function','generator_function_declaration':'generator_function',
                      'class_declaration':'class','abstract_class_declaration':'class','interface_declaration':'interface',
                      'type_alias_declaration':'type','enum_declaration':'enum','method_definition':'method',
@@ -77,16 +93,19 @@ def analyze(path,source):
             if kind and name_node:
                 name=source[name_node.start_byte:name_node.end_byte].decode('utf-8')[:300]
                 qualified='.'.join((*parents,name));child_parents=(*parents,name)
-                append(symbols,{'name':name,'qualified_name':qualified,'kind':kind,'line':node.start_point.row+1,
-                                'end_line':node.end_point.row+1,'column':node.start_point.column+1,'container':'.'.join(parents)})
+                line, column = coordinates(node.start_byte)
+                end_line, _ = coordinates(node.end_byte)
+                append(symbols,{'name':name,'qualified_name':qualified,'kind':kind,'line':line,
+                                'end_line':end_line,'column':column,'container':'.'.join(parents)})
             if node.type in {'identifier','property_identifier','type_identifier','shorthand_property_identifier'}:
                 parent=node.parent
                 is_declaration=parent is not None and parent.child_by_field_name('name')==node and (
                     parent.type in definitions or parent.type in {'variable_declarator','required_parameter','optional_parameter','public_field_definition'})
                 if not is_declaration:
                     name=source[node.start_byte:node.end_byte].decode('utf-8')[:300]
-                    append(references,{'name':name,'kind':'syntactic_reference','line':node.start_point.row+1,
-                                       'column':node.start_point.column+1,'container':'.'.join(parents)})
+                    line, column = coordinates(node.start_byte)
+                    append(references,{'name':name,'kind':'syntactic_reference','line':line,
+                                       'column':column,'container':'.'.join(parents)})
             pending.extend((child,child_parents) for child in reversed(node.named_children))
         backend='tree-sitter'
     symbols.sort(key=lambda s:(s['line'],s['column'],s['name']))

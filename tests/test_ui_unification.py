@@ -209,7 +209,7 @@ def _native_management_round_trip(page: Page, draft: str) -> None:
     if page.viewport_size["width"] <= 760:
         page.locator("#chat-history-toggle").click()
         expect(page.locator("#chat-root")).to_have_class(re.compile(r"\bdrawer-open\b"))
-    page.locator('.chat-sidebar-preferences [data-nav="overview"]').click()
+    page.locator('#chat-back').click()
     expect(page.locator(".overview-grid")).to_be_visible()
     if page.viewport_size["width"] <= 900:
         page.locator(".mobile-menu").click()

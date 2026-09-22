@@ -140,4 +140,10 @@ def test_foreign_legacy_network_is_not_adopted(setup):
 
 def test_installer_updates_trust_after_network_creation_before_public_start():
     script = (Path(__file__).resolve().parents[1] / 'deploy/install-hub.sh').read_text()
-    assert script.index('docker compose run --rm --no-deps hub') < script.index('migrate_hub.py proxy-trust') < script.index('docker compose up -d')
+    # The first container probes read-only; writing/init requires repaired trust
+    # and the explicit no-rollback boundary before the public service starts.
+    phases = ['docker compose run --rm --no-deps --volume "$hub_data_volume:/app/data:ro"',
+              'migrate_hub.py proxy-trust', 'migrate_hub.py write-boundary',
+              'docker compose run --rm --no-deps hub', 'docker compose up -d']
+    positions = [script.index(phase) for phase in phases]
+    assert positions == sorted(positions)

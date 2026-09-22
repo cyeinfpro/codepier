@@ -84,20 +84,20 @@ function workflowEdit(w){
   },async r=>{closeModal(dialog);if(S.page==='workflows')await renderPage(false);await workflowDetail(r.workflow_id);});
 }
 async function workflowContext(){
-  const project=S.work.project,session=S.session;
+  const {project,workspace_id=''}=workTarget(),session=S.session;
   if(!project){toast('请先选择项目',true);return;}
   const loading=modal('项目上下文','<p class="muted">读取入口文档与技能索引…</p>');
   try{
-    const r=await settled(tool('project_context',{project}));
+    const r=await settled(tool('project_context',{project,workspace_id}));
     if(session!==S.session||!loading.isConnected||project!==S.work.project)return;
-    modal('项目上下文 · '+(r.project||''),notice('这是入口文档预览，不是全仓扫描。技能只建立索引，不会自动加载或执行。',true)+`<div class="spacer"></div><p class="muted tiny">${r.budget.preview_chars} / ${r.budget.max_chars} 字符 · ${r.documents.length} 份预览 · ${r.skills.length} 项技能${r.truncated?' · 含截断或未读取项':''}</p>${r.documents.map(d=>`<details class="context-document"><summary>${esc(d.path)} ${d.truncated?'· 已截断':''}</summary><pre>${esc(d.content)}</pre><button class="btn ghost small" data-wf-action="document" data-project="${esc(project)}" data-path="${esc(d.path)}">按页读取原文</button></details>`).join('')}<h3>技能索引</h3>${r.skills.map(s=>`<div class="context-skill"><div><strong>${esc(s.name)}</strong><p class="muted">${esc(s.description)}</p></div><button class="btn small" data-wf-action="document" data-project="${esc(project)}" data-path="${esc(s.path)}">读取</button></div>`).join('')||'<p class="muted">没有在指定目录发现技能文件。</p>'}<details class="context-document"><summary>执行能力、未读取项与扫描提示</summary><pre>${esc(json({execution:r.execution,remaining_documents:r.remaining_documents,warnings:r.warnings,scope:r.scope}))}</pre></details>`,'',true);
+    modal('项目上下文 · '+(r.project||''),notice('这是入口文档预览，不是全仓扫描。技能只建立索引，不会自动加载或执行。',true)+`<div class="spacer"></div><p class="muted tiny">${r.budget.preview_chars} / ${r.budget.max_chars} 字符 · ${r.documents.length} 份预览 · ${r.skills.length} 项技能${r.truncated?' · 含截断或未读取项':''}</p>${r.documents.map(d=>`<details class="context-document"><summary>${esc(d.path)} ${d.truncated?'· 已截断':''}</summary><pre>${esc(d.content)}</pre><button class="btn ghost small" data-wf-action="document" data-project="${esc(project)}" data-workspace="${esc(workspace_id)}" data-path="${esc(d.path)}">按页读取原文</button></details>`).join('')}<h3>技能索引</h3>${r.skills.map(s=>`<div class="context-skill"><div><strong>${esc(s.name)}</strong><p class="muted">${esc(s.description)}</p></div><button class="btn small" data-wf-action="document" data-project="${esc(project)}" data-workspace="${esc(workspace_id)}" data-path="${esc(s.path)}">读取</button></div>`).join('')||'<p class="muted">没有在指定目录发现技能文件。</p>'}<details class="context-document"><summary>执行能力、未读取项与扫描提示</summary><pre>${esc(json({execution:r.execution,remaining_documents:r.remaining_documents,warnings:r.warnings,scope:r.scope}))}</pre></details>`,'',true);
   }catch(error){if(loading.isConnected&&session===S.session)$('.modal-body',loading).innerHTML=notice(esc(error.message));throw error;}
 }
-async function workflowReadDocument(project,path,start=1){
+async function workflowReadDocument(project,path,start=1,workspace_id=''){
   const session=S.session,loading=modal(path,'<p class="muted">读取文档…</p>');
-  const r=await settled(tool('fs_read',{project,path,start_line:start,max_lines:400}));
+  const r=await settled(tool('fs_read',{project,workspace_id,path,start_line:start,max_lines:400}));
   if(session!==S.session||!loading.isConnected)return;
-  modal(path,`<p class="muted tiny">第 ${r.start_line}–${r.end_line} 行 / 共 ${r.total_lines} 行 · SHA ${esc(r.sha256.slice(0,16))}</p><div class="code-box"><pre>${esc(r.content)}</pre></div>`,r.next_start_line?`<button class="btn primary" data-wf-action="document" data-project="${esc(project)}" data-path="${esc(path)}" data-start="${r.next_start_line}">继续读取</button>`:'',true);
+  modal(path,`<p class="muted tiny">第 ${r.start_line}–${r.end_line} 行 / 共 ${r.total_lines} 行 · SHA ${esc(r.sha256.slice(0,16))}</p><div class="code-box"><pre>${esc(r.content)}</pre></div>`,r.next_start_line?`<button class="btn primary" data-wf-action="document" data-project="${esc(project)}" data-workspace="${esc(workspace_id)}" data-path="${esc(path)}" data-start="${r.next_start_line}">继续读取</button>`:'',true);
 }
 async function workflowEvidence(id){
   const session=S.session,loading=modal('操作证据','<p class="muted">读取实际执行记录…</p>');
@@ -114,7 +114,7 @@ document.addEventListener('click',async e=>{
       case 'detail':await workflowDetail(b.dataset.id);break;
       case 'older':await workflowDetail(b.dataset.id,Number(b.dataset.before));break;
       case 'context':await workflowContext();break;
-      case 'document':await workflowReadDocument(b.dataset.project,b.dataset.path,Number(b.dataset.start||1));break;
+      case 'document':await workflowReadDocument(b.dataset.project,b.dataset.path,Number(b.dataset.start||1),b.dataset.workspace||'');break;
       case 'evidence':await workflowEvidence(b.dataset.id);break;
       case 'next':if(w.next){w.history.push(w.cursor);w.cursor=w.next;await renderPage(false);}break;
       case 'prev':if(w.history.length){w.cursor=w.history.pop();await renderPage(false);}break;

@@ -32,7 +32,7 @@ def managed_service_name(base, kind, scope):
              'schtasks': ('CodePierAgent', 'RemoteDevAgent')}.get(kind)
     if not names: return ''
     metadata_path = base/'management.json'
-    metadata = json.loads(metadata_path.read_text()) if metadata_path.is_file() else {}
+    metadata = json.loads(metadata_path.read_text(encoding='utf-8')) if metadata_path.is_file() else {}
     name = metadata.get('service_name')
     if name:
         if name not in names: raise ValueError('Unrecognized managed service name')
@@ -54,7 +54,7 @@ def managed_service_name(base, kind, scope):
             value = plistlib.loads(target.read_bytes())
             matches = value.get('Label') == name and value.get('WorkingDirectory') == str(base/'runtime')
         else:
-            matches = 'WorkingDirectory='+str(base/'runtime').replace('%','%%') in target.read_text().splitlines()
+            matches = 'WorkingDirectory='+str(base/'runtime').replace('%','%%') in target.read_text(encoding='utf-8').splitlines()
         if matches: owned.append(name)
     if len(owned)>1: raise ValueError('Both legacy and CodePier services exist; inspect before updating')
     return owned[0] if owned else names[0]
@@ -149,6 +149,19 @@ def _service_target(base: Path, kind: str, scope: str) -> Path | None:
     return None
 
 
+def windows_task_script(name: str) -> str:
+    escaped = name.replace("'", "''")
+    return ("$ErrorActionPreference='Stop'; $s=New-Object -ComObject Schedule.Service; "
+            "$s.Connect(); $t=$s.GetFolder('\\').GetTask('"+escaped+"'); ")
+
+
+def set_windows_task_enabled(name: str, enabled: bool) -> None:
+    # Modify the registered task's Enabled property without re-registering its
+    # BootTrigger (which would require elevation in a noninteractive session).
+    script = windows_task_script(name)+"$t.Enabled="+("$true" if enabled else "$false")
+    _run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script], check=True)
+
+
 def service_is_running(base: Path) -> bool:
     kind, scope = _service(base)
     name = _service_name(base)
@@ -169,7 +182,9 @@ def service_is_running(base: Path) -> bool:
             raise RuntimeError("unknown systemd service state; refusing to remove files")
         return state not in {"inactive", "failed"}
     if kind == "schtasks":
-        script = "$t=Get-ScheduledTask -TaskName '" + name + "' -ErrorAction SilentlyContinue; if($t -and $t.State -eq 'Running'){exit 10}; exit 0"
+        # State can be Disabled while a previously started instance still runs.
+        # Inspect actual instances so maintenance waits for process termination.
+        script = windows_task_script(name)+"if($t.GetInstances(0).Count -gt 0){exit 10}; exit 0"
         code = _run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script])
         if code not in (0, 10):
             raise RuntimeError("cannot verify scheduled task state; refusing to remove files")
@@ -210,6 +225,8 @@ def stop_service(base: Path, *, remove: bool = False) -> None:
                 target.unlink(missing_ok=True)
             _run(command + ["daemon-reload"])
     elif kind == "schtasks":
+        # Prevent the periodic recovery trigger from racing an update/uninstall.
+        set_windows_task_enabled(name, False)
         _run(["schtasks.exe", "/End", "/TN", name])
         require_stopped(base)
         if remove:
@@ -236,6 +253,7 @@ def start_service(base: Path) -> None:
         _run(command + ["daemon-reload"], check=True)
         _run(command + ["start", name], check=True)
     elif kind == "schtasks":
+        set_windows_task_enabled(name, True)
         _run(["schtasks.exe", "/Run", "/TN", name], check=True)
     else:
         raise RuntimeError("managed service metadata is unavailable")
@@ -352,10 +370,18 @@ def apply_update(base: Path, candidate: Path, pid: int) -> None:
     runtime = base / "runtime"
     backup = base / ".runtime-previous"
     failed = base / ".runtime-failed"
-    # Windows tasks point at a generated wrapper, not a shipped package member.
+    # Regenerate the wrapper from the verified candidate so old Windows installs
+    # acquire the watchdog too. Older packages retain their original wrapper.
     wrapper = runtime / "run-service.py"
     if wrapper.is_file() and not (candidate / "run-service.py").exists():
-        shutil.copyfile(wrapper, candidate / "run-service.py")
+        if (candidate / "agent/service_watchdog.py").is_file():
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("codepier_candidate_installer", candidate / "scripts/install_agent.py")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            module.write_windows_wrapper(candidate)
+        else:
+            shutil.copyfile(wrapper, candidate / "run-service.py")
     previous_version = _version(runtime)
     old_stopped = False
     runtime_moved = False
@@ -398,6 +424,10 @@ def apply_update(base: Path, candidate: Path, pid: int) -> None:
             else:
                 # Stop/wait itself failed. An already-running launchd service
                 # must not be bootstrapped a second time merely to recover it.
+                if _service(base)[0] == "schtasks":
+                    # A failed stop may have disabled recovery even while the
+                    # old process is still alive. Restore its trigger as well.
+                    start_service(base)
                 try:
                     verify_service(base)
                 except Exception:
@@ -418,8 +448,13 @@ def apply_update(base: Path, candidate: Path, pid: int) -> None:
 
 
 def restart(base: Path, pid: int) -> None:
-    stop_service(base)
-    _wait_for_exit(pid)
+    try:
+        stop_service(base)
+        _wait_for_exit(pid)
+    except Exception:
+        if _service(base)[0] == "schtasks":
+            start_service(base)
+        raise
     _update_management(base, status="restarting", last_error="")
     start_service(base)
     verify_service(base)

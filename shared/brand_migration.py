@@ -342,8 +342,12 @@ def _retire_service(journal,backend,old=True):
 def _rollback(base,journal,backend):
     old,new=Path(journal['old_base']),Path(journal['new_base']); journal['stage']='rolling_back'
     write_json(base/JOURNAL,journal)
-    if journal.get('new_registered') or journal.get('stop_requested'): backend.stop_service(base)
-    if journal.get('new_definition_written'): _retire_service(journal,backend,old=False)
+    # Metadata may already name the new task before it has been registered.
+    # Never stop/delete that nonexistent identity while recovering the old one.
+    if journal.get('new_registered') or journal.get('new_start_requested'):
+        backend.stop_service(base)
+    if journal.get('new_definition_written') and (journal['kind'] != 'schtasks' or journal.get('new_registered')):
+        _retire_service(journal,backend,old=False)
     browser=getattr(backend,'brand_browser',None)
     if browser:
         browser.remove_created(journal)
@@ -464,7 +468,17 @@ def migrate_agent(base,pid,backend):
         journal.update(new_definition_written=True,new_definition_sha256=hashlib.sha256(definition).hexdigest()); write_json(base/JOURNAL,journal)
         if kind=='schtasks': _modify(base,journal,base/'service.xml',definition,journal['service_mode'])
         else: write_bytes(new_target,definition,journal['service_mode'])
-        journal.update(stage='starting',new_registered=True); write_json(base/JOURNAL,journal); _register_service(base,journal,backend)
+        journal.update(stage='registering',new_register_requested=True); write_json(base/JOURNAL,journal)
+        try:
+            _register_service(base,journal,backend)
+        except Exception:
+            # A failed task registration can have taken effect. Reconcile its
+            # existence before rollback, rather than assuming it was created.
+            if kind == 'schtasks' and backend._run(['schtasks.exe','/Query','/TN',canonical]) == 0:
+                journal['new_registered'] = True
+                write_json(base/JOURNAL,journal)
+            raise
+        journal.update(stage='starting',new_registered=True,new_start_requested=True); write_json(base/JOURNAL,journal)
         backend.start_service(base); backend.verify_service(base); backend.refresh_cli_commands(base)
         _retire_service(journal,backend)
         current=read_json(base/'config.json')

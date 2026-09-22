@@ -45,17 +45,21 @@ def write_config(path,before,value):
     return str(target)
 
 
-def configure(path,fragment,apply=False):
+def configure(path,fragment,apply=False,replace_projects=False):
     path=Path(path).expanduser().absolute();before,value=read_config(path)
     if not isinstance(fragment,dict):raise ValueError('配置片段必须是 JSON 对象')
     def merge(previous,patch):
         combined=copy.deepcopy(previous)
         for key,item in patch.items():
+            if key == 'projects' and isinstance(item,list) and isinstance(combined.get(key),list) and not replace_projects:
+                combined[key] = list(dict.fromkeys([*combined[key],*item]))
+                continue
             combined[key]=merge(combined.get(key,{}),item) if isinstance(item,dict) and isinstance(combined.get(key,{}),dict) else copy.deepcopy(item)
         return combined
     normalized=validate_integrations(merge(value.get('integrations',{}),fragment))
     result={'changed':False,'service_restarted':False,'planned_integrations':safe_summary(normalized),
             'before_sha256':hashlib.sha256(before).hexdigest(),
+            'project_merge':'replace explicitly' if replace_projects else 'additive; existing project grants retained',
             'activation':'文件已保存不等于运行程序已更新；本机控制与浏览器监听的启用需要正常重启 Agent。'}
     if apply:
         with InstanceLock(path.parent/'.integration-setup.lock'):
@@ -79,7 +83,7 @@ def restore(path,backup,expected_sha256,apply=False):
 def main():
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--config',required=True)
     commands=parser.add_subparsers(dest='action',required=True);commands.add_parser('status')
-    config=commands.add_parser('configure');config.add_argument('--settings',required=True);config.add_argument('--apply',action='store_true')
+    config=commands.add_parser('configure');config.add_argument('--settings',required=True);config.add_argument('--apply',action='store_true');config.add_argument('--replace-projects',action='store_true',help='Explicitly replace project allowlists instead of extending them')
     recovery=commands.add_parser('restore');recovery.add_argument('--backup',required=True);recovery.add_argument('--expected-sha256',required=True);recovery.add_argument('--apply',action='store_true')
     args=parser.parse_args()
     try:
@@ -89,7 +93,7 @@ def main():
         elif args.action=='configure':
             path=Path(args.settings).expanduser()
             if path.stat().st_size>1024*1024:raise ValueError('配置片段超过大小限制')
-            result=configure(args.config,json.loads(path.read_text()),args.apply)
+            result=configure(args.config,json.loads(path.read_text(encoding='utf-8')),args.apply,args.replace_projects)
         else:result=restore(args.config,args.backup,args.expected_sha256,args.apply)
     except (ValueError,OSError,RuntimeError) as exc:
         print(json.dumps({'error':str(exc),'service_restarted':False},ensure_ascii=False),file=sys.stderr);return 1

@@ -86,18 +86,25 @@ root=$(pwd -P)
 lock="$root/.codepier-install.lock"
 migration_started=1
 "$bootstrap_python" scripts/migrate_hub.py prepare --root "$root"
-# Even an initialization/probe container can create SQLite sidecars or a key;
-# cross the recovery boundary before mounting the verified new store writable.
-"$bootstrap_python" scripts/migrate_hub.py write-boundary --root "$root"
-if docker compose run --rm --no-deps hub python -c 'import os,sys,sqlite3; from pathlib import Path; p=Path(os.environ["HUB_DATA_DIR"])/"hub.sqlite3"; sys.exit(3) if not p.exists() else None; s=sqlite3.connect(p.as_uri()+"?mode=ro",uri=True); found=s.execute("SELECT id FROM users LIMIT 1").fetchone(); s.close(); sys.exit(0 if found else 3)'; then
+# Inspect with a genuinely read-only mount. A failed proxy migration or missing
+# initialization input still restores the legacy installation at this point.
+hub_data_volume=$("$bootstrap_python" scripts/migrate_hub.py probe-volume --root "$root")
+needs_init=0
+if docker compose run --rm --no-deps --volume "$hub_data_volume:/app/data:ro" hub python -c 'import os,sys,sqlite3; from pathlib import Path; p=Path(os.environ["HUB_DATA_DIR"])/"hub.sqlite3"; sys.exit(3) if not p.exists() else None; s=sqlite3.connect(p.as_uri()+"?mode=ro",uri=True); found=s.execute("SELECT id FROM users LIMIT 1").fetchone(); s.close(); sys.exit(0 if found else 3)'; then
   echo '检测到已有管理员，保留原账号和数据。'
 else
   probe_status=$?
   if ((probe_status != 3)); then echo '无法检查管理员或数据卷；没有尝试重新初始化。' >&2; exit "$probe_status"; fi
+  needs_init=1
   if [[ -z "$username" && "$noninteractive" == 0 ]]; then read -r -p '管理员用户名 [admin]：' username; fi
   if [[ "$noninteractive" == 1 && -z "${CODEPIER_ADMIN_PASSWORD:-}" ]]; then
     echo '首次无人值守初始化需要 --password-file 或 CODEPIER_ADMIN_PASSWORD；未创建账号。' >&2; exit 1
   fi
+fi
+# The read-only Compose probe created networks, but did not open a writable store.
+"$bootstrap_python" scripts/migrate_hub.py proxy-trust --root "$root"
+"$bootstrap_python" scripts/migrate_hub.py write-boundary --root "$root"
+if ((needs_init == 1)); then
   if [[ -n "${CODEPIER_ADMIN_PASSWORD:-}" ]]; then
     docker compose run --rm --no-deps -e CODEPIER_ADMIN_PASSWORD hub python -m hub init --username "${username:-admin}"
   else
@@ -105,9 +112,6 @@ else
   fi
   unset CODEPIER_ADMIN_PASSWORD RD_ADMIN_PASSWORD
 fi
-# Compose run has now created the new networks. Refresh only explicitly trusted
-# legacy host-proxy gateways before the public Hub loads its environment.
-"$bootstrap_python" scripts/migrate_hub.py proxy-trust --root "$root"
 # Preserve the caller's full Compose selection, including a configured HTTPS proxy.
 docker compose up -d --wait --wait-timeout 90
 "$bootstrap_python" scripts/migrate_hub.py commit --root "$root"

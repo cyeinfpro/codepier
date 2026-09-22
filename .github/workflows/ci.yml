@@ -14,6 +14,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  windows-agent-service:
+    name: Windows Agent background recovery
+    runs-on: windows-2025
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Parse Windows entry points
+        shell: pwsh
+        run: |
+          foreach ($file in @('deploy/install-agent.ps1', 'deploy/install-from-hub.ps1')) {
+            $parseErrors = $null
+            $tokens = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$parseErrors) | Out-Null
+            if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
+          }
+      - name: Verify real scheduled task recovery
+        run: python scripts/check_windows_service.py --output dist/windows-service.json
+      - name: Retain Windows service evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codepier-windows-service-${{ github.run_id }}
+          path: dist/windows-service.json
+          if-no-files-found: warn
+          retention-days: 14
   verify:
     name: Verify (${{ matrix.os }})
     strategy:
@@ -59,8 +89,8 @@ jobs:
         run: .venv/bin/python scripts/check_full_regression.py --output dist/ci-results --workers 2 --timeout 900
       - name: Public source bundle
         run: |
-          .venv/bin/python scripts/build_source_bundle.py --public --output dist/codepier-1.10.2-source.zip
-          .venv/bin/python scripts/check_release.py --bundle dist/codepier-1.10.2-source.zip --output dist/public-check.json
+          .venv/bin/python scripts/build_source_bundle.py --public --output dist/codepier-1.10.3-source.zip
+          .venv/bin/python scripts/check_release.py --bundle dist/codepier-1.10.3-source.zip --output dist/public-check.json
       - name: Retain isolated CI evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -72,7 +102,7 @@ jobs:
             !dist/ci-results/**/cache/**
             !dist/ci-results/collect-cache/**
             dist/public-check.json
-            dist/codepier-1.10.2-source.zip
-            dist/codepier-1.10.2-source.manifest.json
+            dist/codepier-1.10.3-source.zip
+            dist/codepier-1.10.3-source.manifest.json
           if-no-files-found: warn
           retention-days: 14

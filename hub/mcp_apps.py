@@ -8,6 +8,8 @@ RESOURCES={
  'ui://codepier/workspace-v1.html':('workspace-v1.html','CodePier 项目工作区'),
  'ui://codepier/changes-v1.html':('changes-v1.html','CodePier 固定改动审阅'),
 }
+LEGACY_RESOURCES={'ui://relay/workspace-v1.html':'ui://codepier/workspace-v1.html',
+                  'ui://relay/changes-v1.html':'ui://codepier/changes-v1.html'}
 ROOT=Path(__file__).resolve().parents[1]/'web'/'mcp-apps'
 
 
@@ -16,7 +18,7 @@ def list_resources():
 
 
 def read_resource(uri,public_url):
-    canonical={'ui://relay/workspace-v1.html':'ui://codepier/workspace-v1.html','ui://relay/changes-v1.html':'ui://codepier/changes-v1.html'}.get(uri,uri)
+    canonical=LEGACY_RESOURCES.get(uri,uri)
     spec=RESOURCES.get(canonical)
     if not spec:raise DevError('RESOURCE_NOT_FOUND','找不到此组件资源',404)
     path=ROOT/spec[0]

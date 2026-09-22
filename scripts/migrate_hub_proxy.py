@@ -66,6 +66,26 @@ def atomic_env(path, content, original_stat):
         Path(temporary).unlink(missing_ok=True)
 
 
+def source_preflight(root, current):
+    if KEY in os.environ:
+        raise RuntimeError('Unset exported FORWARDED_ALLOW_IPS and persist it in .env before gateway migration')
+    path = Path(root) / '.env'
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError('Proxy migration requires a regular .env file')
+    original_stat = path.stat()
+    original = path.read_bytes().decode('utf-8')
+    lines = original.splitlines(keepends=True)
+    matches = [i for i, line in enumerate(lines) if re.match(r'^\s*(?:export\s+)?FORWARDED_ALLOW_IPS\s*=', line)]
+    if len(matches) > 1:
+        raise RuntimeError('Duplicate FORWARDED_ALLOW_IPS entries; no configuration was modified')
+    if matches:
+        raw = lines[matches[0]].split('=', 1)[1]
+        parsed = shlex.split(raw, comments=True)
+        if '$' in raw or len(parsed) != 1 or tokens(parsed[0]) != tokens(current):
+            raise RuntimeError('FORWARDED_ALLOW_IPS is not a matching literal .env value; configure it explicitly')
+    return path, original_stat, original, lines, matches
+
+
 def apply(root, plans, docker):
     if not plans:
         return {'changed': False}
@@ -96,17 +116,7 @@ def apply(root, plans, docker):
     updated = ','.join(dict.fromkeys(replacements.get(item, item) for item in tokens(current)))
     if tokens(updated) == tokens(current):
         return {'changed': False}
-    if KEY in os.environ:
-        raise RuntimeError('Unset exported FORWARDED_ALLOW_IPS and persist it in .env before gateway migration')
-    path = Path(root) / '.env'
-    if path.is_symlink() or not path.is_file():
-        raise RuntimeError('Proxy migration requires a regular .env file')
-    original_stat = path.stat()
-    original = path.read_bytes().decode('utf-8')
-    lines = original.splitlines(keepends=True)
-    matches = [i for i, line in enumerate(lines) if re.match(r'^\s*(?:export\s+)?FORWARDED_ALLOW_IPS\s*=', line)]
-    if len(matches) > 1:
-        raise RuntimeError('Duplicate FORWARDED_ALLOW_IPS entries; no configuration was modified')
+    path, original_stat, original, lines, matches = source_preflight(root, current)
     if matches:
         index = matches[0]
         raw = lines[index].split('=', 1)[1]

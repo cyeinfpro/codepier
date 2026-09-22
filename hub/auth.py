@@ -95,7 +95,7 @@ class Auth:
             self.store.db.execute("DELETE FROM sessions WHERE expires<=?", (now,))
             self.store.db.execute("INSERT INTO sessions VALUES (?,?,?,?)", (digest(secret), user["id"], csrf, now + SESSION_SECONDS))
         self.store.audit("panel:" + username, "auth.login", status="ok", detail={"ip": ip})
-        return {"cookie": secret, "csrf": csrf, "username": username}
+        return {"cookie": secret, "csrf": csrf, "username": username, "user_id": user['id']}
 
     def issue_grant(self, principal: Principal, label: str, scopes: list[str], projects: list[str], days: int = 30, client_id=None):
         if "read" not in scopes or not set(scopes).issubset({"read", "write", "execute", "computer"}):

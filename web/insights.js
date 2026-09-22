@@ -50,30 +50,30 @@ async function artifactDetail(id){
   }catch(error){if(loading.isConnected&&session===S.session)$('.modal-body',loading).innerHTML=notice(esc(error.message));throw error;}
 }
 function openSearchSession(){
-  const project=S.work.project;if(!project){toast('请先选择项目',true);return;}
+  const {project,workspace_id=''}=workTarget();if(!project){toast('请先选择项目',true);return;}
   const dialog=modal('项目检索',`<form id="session-search-form"><div class="field"><label for="session-query">查找内容</label><input id="session-query" name="query" required maxlength="200"></div><div class="form-row"><div class="field"><label for="session-mode">查找方式</label><select id="session-mode" name="mode"><option value="text">文本</option><option value="symbols">函数、类与方法定义</option><option value="references">引用候选（非类型解析）</option></select></div><div class="field"><label for="session-path">范围</label><input id="session-path" name="path" value="." required></div></div><div class="field"><label for="session-glob">文件模式</label><input id="session-glob" name="file_glob" value="*" required></div><p class="form-note" data-workflow-hint>保存文件清单和扫描位置，按页推进。默认累计扫描预算 60 秒，最多 5000 个结果；会明确标记跳过与截断。</p></form>`,buttons('session-search-start','开始检索'));
-  bindWorkflowSubmit(dialog,$('#session-search-form'),$('#session-search-start'),'searches_start',()=>({project,...Object.fromEntries(new FormData($('#session-search-form')))}),async receipt=>{
+  bindWorkflowSubmit(dialog,$('#session-search-form'),$('#session-search-start'),'searches_start',()=>({project,workspace_id,...Object.fromEntries(new FormData($('#session-search-form')))}),async receipt=>{
     const session=S.session,r=await settled(Promise.resolve(receipt));
     if(session!==S.session||!dialog.isConnected)return;
-    closeModal(dialog);await searchSessionPage(project,r.search_id,0);
+    closeModal(dialog);await searchSessionPage(project,r.search_id,0,workspace_id);
   });
 }
-async function searchSessionPage(project,id,cursor){
+async function searchSessionPage(project,id,cursor,workspace_id=''){
   const session=S.session,loading=modal('检索结果','<p class="muted">续取已保存的检索结果…</p>');
   try{
-    const r=await settled(tool('searches_get',{project,search_id:id,cursor,limit:50}));
+    const r=await settled(tool('searches_get',{project,workspace_id,search_id:id,cursor,limit:50}));
     if(session!==S.session||!loading.isConnected)return;
-    modal('检索结果',`<div class="insight-status">${badge(r.state)}<span>已扫描 ${r.scanned_files} / ${r.file_count} 个文件 · 跳过 ${r.skipped_files}</span></div><p class="muted tiny">搜索 ${esc(id)} · 当前 ${r.result_count} 条结果${r.truncated?' · 已达预算，结果不完整':''}</p>${r.error?notice(esc(r.error)):''}<div class="search-results">${r.results.map(x=>`<article><div class="search-result-head"><strong>${esc(x.path)}:${x.line}</strong>${x.stale?'<span class="badge blocked">文件已变化</span>':''}</div>${x.qualified_name?`<p class="muted tiny">${esc(x.qualified_name)} · ${esc(x.kind)}</p>`:''}<pre>${esc(x.snippet)}</pre><button class="btn ghost small" data-insight="source" data-project="${esc(project)}" data-path="${esc(x.path)}" data-line="${x.line}">读取当前源码</button></article>`).join('')||'<p class="muted">本页暂无匹配；若扫描尚未完成，可继续下一段。</p>'}</div><p class="form-note">结果不是全仓原子快照。文件变化会标记 stale；结构引用只是语法候选，不保证跨文件类型关系。</p>`,`<button class="btn ghost" data-insight="search-page" data-project="${esc(project)}" data-id="${id}" data-cursor="0">回到第一页</button>${r.state==='running'?`<button class="btn danger" data-insight="search-cancel" data-project="${esc(project)}" data-id="${id}">停止检索</button>`:''}${r.has_more?`<button class="btn primary" data-insight="search-page" data-project="${esc(project)}" data-id="${id}" data-cursor="${r.cursor}">继续下一段</button>`:''}`,true);
+    modal('检索结果',`<div class="insight-status">${badge(r.state)}<span>已扫描 ${r.scanned_files} / ${r.file_count} 个文件 · 跳过 ${r.skipped_files}</span></div><p class="muted tiny">搜索 ${esc(id)} · 当前 ${r.result_count} 条结果${r.truncated?' · 已达预算，结果不完整':''}</p>${r.error?notice(esc(r.error)):''}<div class="search-results">${r.results.map(x=>`<article><div class="search-result-head"><strong>${esc(x.path)}:${x.line}</strong>${x.stale?'<span class="badge blocked">文件已变化</span>':''}</div>${x.qualified_name?`<p class="muted tiny">${esc(x.qualified_name)} · ${esc(x.kind)}</p>`:''}<pre>${esc(x.snippet)}</pre><button class="btn ghost small" data-insight="source" data-project="${esc(project)}" data-workspace="${esc(workspace_id)}" data-path="${esc(x.path)}" data-line="${x.line}">读取当前源码</button></article>`).join('')||'<p class="muted">本页暂无匹配；若扫描尚未完成，可继续下一段。</p>'}</div><p class="form-note">结果不是全仓原子快照。文件变化会标记 stale；结构引用只是语法候选，不保证跨文件类型关系。</p>`,`<button class="btn ghost" data-insight="search-page" data-project="${esc(project)}" data-workspace="${esc(workspace_id)}" data-id="${id}" data-cursor="0">回到第一页</button>${r.state==='running'?`<button class="btn danger" data-insight="search-cancel" data-project="${esc(project)}" data-workspace="${esc(workspace_id)}" data-id="${id}">停止检索</button>`:''}${r.has_more?`<button class="btn primary" data-insight="search-page" data-project="${esc(project)}" data-workspace="${esc(workspace_id)}" data-id="${id}" data-cursor="${r.cursor}">继续下一段</button>`:''}`,true);
   }catch(error){if(session===S.session&&loading.isConnected)$('.modal-body',loading).innerHTML=notice(esc(error.message));throw error;}
 }
 async function currentSymbols(){
-  const project=S.work.project,path=S.work.path;
+  const {project,workspace_id=''}=workTarget(),path=S.work.path;
   if(!project||!path){toast('先在工作台选择源码文件',true);return;}
   const session=S.session,loading=modal('代码结构','<p class="muted">解析当前文件的函数与类型…</p>');
   try{
-    const r=await settled(tool('code_symbols',{project,path,limit:1000}));
+    const r=await settled(tool('code_symbols',{project,workspace_id,path,limit:1000}));
     if(session!==S.session||!loading.isConnected)return;
-    modal('代码结构 · '+path,`<p class="muted tiny">${esc(r.language)} · ${esc(r.backend)} · SHA ${esc(r.sha256.slice(0,16))}${r.truncated?' · 结构结果已截断':''}</p><div class="symbol-list">${r.symbols.map(s=>`<button data-insight="source" data-project="${esc(project)}" data-path="${esc(path)}" data-line="${s.line}"><span><strong>${esc(s.qualified_name)}</strong><small>${esc(s.kind)}</small></span><span>${s.line}–${s.end_line}</span></button>`).join('')||'<p class="muted">该文件没有可识别的定义。</p>'}</div><p class="form-note">Python AST / Tree-sitter 语法结构，不是完整语言服务器。文件语法错误或语言不支持时会明确报错。</p>`,'',true);
+    modal('代码结构 · '+path,`<p class="muted tiny">${esc(r.language)} · ${esc(r.backend)} · SHA ${esc(r.sha256.slice(0,16))}${r.truncated?' · 结构结果已截断':''}</p><div class="symbol-list">${r.symbols.map(s=>`<button data-insight="source" data-project="${esc(project)}" data-workspace="${esc(workspace_id)}" data-path="${esc(path)}" data-line="${s.line}"><span><strong>${esc(s.qualified_name)}</strong><small>${esc(s.kind)}</small></span><span>${s.line}–${s.end_line}</span></button>`).join('')||'<p class="muted">该文件没有可识别的定义。</p>'}</div><p class="form-note">Python AST / Tree-sitter 语法结构，不是完整语言服务器。文件语法错误或语言不支持时会明确报错。</p>`,'',true);
   }catch(error){if(session===S.session&&loading.isConnected)$('.modal-body',loading).innerHTML=notice(esc(error.message));throw error;}
 }
 document.addEventListener('click',async e=>{
@@ -88,9 +88,9 @@ document.addEventListener('click',async e=>{
       case 'artifact-prev':if(w.history.length){w.cursor=w.history.pop();await renderPage(false);}break;
       case 'search':openSearchSession();break;
       case 'symbols':await currentSymbols();break;
-      case 'search-page':await searchSessionPage(b.dataset.project,b.dataset.id,Number(b.dataset.cursor));break;
-      case 'search-cancel':await settled(tool('searches_cancel',{project:b.dataset.project,search_id:b.dataset.id}));await searchSessionPage(b.dataset.project,b.dataset.id,0);break;
-      case 'source':await workflowReadDocument(b.dataset.project,b.dataset.path,Number(b.dataset.line||1));break;
+      case 'search-page':await searchSessionPage(b.dataset.project,b.dataset.id,Number(b.dataset.cursor),b.dataset.workspace||'');break;
+      case 'search-cancel':await settled(tool('searches_cancel',{project:b.dataset.project,workspace_id:b.dataset.workspace||'',search_id:b.dataset.id}));await searchSessionPage(b.dataset.project,b.dataset.id,0,b.dataset.workspace||'');break;
+      case 'source':await workflowReadDocument(b.dataset.project,b.dataset.path,Number(b.dataset.line||1),b.dataset.workspace||'');break;
     }
   }catch(error){toast(error.message,true);}
 });

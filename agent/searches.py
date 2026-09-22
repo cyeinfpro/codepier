@@ -93,7 +93,14 @@ class Searches:
                     matches=({'line':n,'kind':'text','name':'','snippet':line[:600]} for n,line in enumerate(lines,1)
                              if needle in (line if args['case_sensitive'] else line.casefold()))
                 else:
-                    parsed=analyze(path,data);items=parsed['symbols'] if args['mode']=='symbols' else parsed['references']
+                    remaining=args['timeout_seconds']-row['spent']-(time.monotonic()-begin)
+                    if remaining<=0:
+                        row.update(state='completed',truncated=1,error='SEARCH_BUDGET');break
+                    # The two-second page target is soft for one file. Do not
+                    # kill a healthy parser just because earlier files filled
+                    # the page; total search time and each worker stay bounded.
+                    parsed=analyze(path,data,timeout=min(5,remaining))
+                    items=parsed['symbols'] if args['mode']=='symbols' else parsed['references']
                     matches=({**item,'snippet':lines[item['line']-1][:600] if item['line']<=len(lines) else ''} for item in items
                              if needle in ((item.get('qualified_name') or item['name']) if args['case_sensitive'] else (item.get('qualified_name') or item['name']).casefold()))
                 for item in matches:
@@ -105,9 +112,12 @@ class Searches:
             except (DevError,OSError,UnicodeError) as exc:
                 if isinstance(exc,DevError) and exc.code in {'ROOT_CHANGED','ROOT_NOT_ALLOWED','PROTECTED_ROOT'}:
                     row.update(state='failed',truncated=1,error=exc.code);break
+                if isinstance(exc,DevError) and exc.code in {'PARSER_CRASHED','PARSER_TIMEOUT','PARSER_UNAVAILABLE','PARSER_FAILED','PARSER_BUSY'}:
+                    row['skipped']+=1
+                    row.update(state='failed',truncated=1,error=exc.code);break
                 row['skipped']+=1
             if row['state']!='running':break
-        if row['scanned']>=row['file_count']:row['state']='completed'
+        if row['state']=='running' and row['scanned']>=row['file_count']:row['state']='completed'
         row['spent']+=time.monotonic()-begin
         with self.journal.lock,self.journal.db:
             self.journal.db.executemany('INSERT INTO search_hits VALUES (?,?,?)',hits)

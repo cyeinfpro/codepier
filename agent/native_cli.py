@@ -149,6 +149,7 @@ class NativeCLI:
             result = self.catalog_cache.get(key, lambda: probe(cli, executable, cwd, env, model, include_commands=include_commands), bool(args.get('refresh')))
             if str(self.authorize(project)) != str(root): raise DevError('CLI_MAPPING_CHANGED', 'Mapping changed during catalog probe', 403)
             return result
+        live_sessions = self.live() if action == 'start' else []
         with self.connect_db() as db:
             if action == 'discover':
                 return self.discover()
@@ -156,10 +157,9 @@ class NativeCLI:
                 db.execute('BEGIN IMMEDIATE')
                 return self.upload(db,action,project,root,args)
             sid = identifier(args.get('id'))
-            if action != 'start':
-                # Lease validation and effect admission must share a transaction;
-                # another tab cannot acquire the writer lease between them.
-                db.execute('BEGIN IMMEDIATE')
+            # Start/history ownership and writer-lease admission are serialized
+            # in SQLite, including callers using another NativeCLI instance.
+            db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT * FROM sessions WHERE id=?',(sid,)).fetchone()
             if action == 'start':
                 signature=hashlib.sha256(json.dumps(args,sort_keys=True,separators=(',',':')).encode()).hexdigest()
@@ -179,7 +179,7 @@ class NativeCLI:
                     backend = capabilities()
                     if not backend['available']:
                         raise DevError('PTY_UNAVAILABLE',backend['reason'],409)
-                if len(self.live()) > 8:
+                if len(live_sessions) > 8:
                     raise DevError('CLI_LIMIT','最多同时运行 8 个原生会话',409)
                 if db.execute("SELECT count(*) FROM sessions WHERE status!='deleted'").fetchone()[0] >= 1000:
                     raise DevError('CLI_RETENTION_LIMIT','会话元数据达到 1000 条上限，请本机归档后维护',409)
@@ -236,6 +236,11 @@ class NativeCLI:
                         else:
                             native_thread=prior['native_thread']
                             if not native_thread: raise ValueError('Native thread was not confirmed; cannot resume')
+                if mode == 'chat' and native_thread:
+                    owners = db.execute('SELECT id,status FROM sessions WHERE mode=? AND provider=? AND native_thread=?',
+                                        ('chat', provider, native_thread)).fetchall()
+                    if any(owner['status'] in LIVE or worker_present(self.directory, owner['id']) for owner in owners):
+                        raise DevError('CLI_BUSY', '此原生历史已由另一存活会话占用，请打开已恢复的会话', 409)
                 bridge=mode=='terminal' and provider=='pi' and args.get('image_bridge',True)
                 if bridge:
                     argv[1:1]=['--extension',str(prepare_extension(self.directory))]
@@ -348,8 +353,26 @@ class NativeCLI:
                 raise DevError('CLI_NOT_FOUND', '会话记录已清理', 404)
             bound = {**project, '_coding_owner': 'native:'+row['id']}
             return read_review(self.agent.engine, bound, values)
+        def queued_snapshot(command):
+            payload=json.loads(command['payload'])
+            attachments=[]
+            for index,fid in enumerate(payload.get('attachment_ids',[])):
+                prior=(payload.get('attachments',[])+[{}]*10)[index]
+                entry={'file':fid,'name':prior.get('name','附件'),'size':prior.get('size',0),
+                       'sha256':prior.get('sha256',''),'mime':prior.get('mime',''),'ready':False}
+                try:
+                    saved=self.file_row(db,fid,project,root)
+                    entry['ready']=bool(saved['ready'] and Path(saved['path']).is_file())
+                except (DevError,ValueError,OSError):
+                    pass
+                if not entry['ready']:
+                    entry.update(error=True,errorMessage='附件已不可用，请移除后重新添加')
+                attachments.append(entry)
+            return dict(receipt=command['id'],kind=command['kind'],text=payload.get('text',''),
+                        attachments=attachments,attachment_ids=payload.get('attachment_ids',[]),
+                        state=command['state'],created=command['created'])
         if action=='chat_queue':
-            return {'commands':[dict(receipt=r['id'],kind=r['kind'],text=json.loads(r['payload']).get('text',''),state=r['state'],created=r['created']) for r in db.execute("SELECT * FROM commands WHERE session=? AND state IN ('queued','claimed') AND kind IN ('chat_prompt','chat_settings') ORDER BY rowid",(row['id'],))]}
+            return {'commands':[queued_snapshot(r) for r in db.execute("SELECT * FROM commands WHERE session=? AND state IN ('queued','claimed') AND kind IN ('chat_prompt','chat_settings') ORDER BY rowid",(row['id'],))]}
         receipt=identifier(args.get('receipt'))
         if action=='chat_cancel':
             target=identifier(args.get('target'))
@@ -357,7 +380,8 @@ class NativeCLI:
             old=db.execute('SELECT * FROM commands WHERE id=?',(receipt,)).fetchone()
             if old:
                 if (old['session'],old['kind'],old['payload'])!=(row['id'],action,packed): raise ValueError('Receipt conflict')
-                return {'receipt':receipt,'state':old['state'],'target':target}
+                target_row=db.execute('SELECT * FROM commands WHERE session=? AND id=?',(row['id'],target)).fetchone()
+                return {'receipt':receipt,'state':old['state'],'target':target,**({'message':queued_snapshot(target_row)} if target_row else {})}
             target_row=db.execute('SELECT * FROM commands WHERE session=? AND id=?',(row['id'],target)).fetchone()
             if not target_row: raise ValueError('Unknown queued command in this session')
             if target_row['state']=='claimed': raise DevError('CLI_CANNOT_CANCEL','cannot-cancel-use-interrupt',409)
@@ -365,7 +389,7 @@ class NativeCLI:
             if target_row['state'] not in ('queued','cancelled'): raise ValueError('Command is already settled')
             db.execute("UPDATE commands SET state='cancelled' WHERE session=? AND id=? AND state='queued'",(row['id'],target))
             db.execute('INSERT INTO commands VALUES (?,?,?,?,?,?)',(receipt,row['id'],action,packed,'completed',time.time()))
-            return {'receipt':receipt,'state':'completed','target':target,'target_state':'cancelled'}
+            return {'receipt':receipt,'state':'completed','target':target,'target_state':'cancelled','message':queued_snapshot(target_row)}
         payload={}
         files=[]
         existing=db.execute('SELECT * FROM commands WHERE id=?',(receipt,)).fetchone()

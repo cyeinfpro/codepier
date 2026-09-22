@@ -84,6 +84,15 @@ class Agent:
         self.transfer_tasks = set()
         self.integration_projects = {}
         self.integration_tool_names = {}
+        self.lifecycle.activity_check = self.check_maintenance_idle
+
+    def check_maintenance_idle(self, operation_id):
+        if getattr(self.computer, 'session', None):
+            raise DevError('COMPUTER_BUSY', '请先结束桌面控制会话，再维护 Agent', 409)
+        busy = [key for key, task in self.jobs.items() if key != operation_id and not task.done()]
+        if (busy or self.processes or any(not task.done() for task in self.transfer_tasks)
+                or any(not task.done() for task in self.kill_tasks)):
+            raise DevError('AGENT_BUSY', '设备仍有活动工作，维护交接尚未开始', 409)
 
     def load_config(self):
         try:

@@ -50,7 +50,7 @@ def snapshot():
                           'README.md', 'CHANGELOG.md', 'SECURITY.md', 'CONTRIBUTING.md', 'RELEASE.json'}):
             result[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
     for name in ('docs/INTEGRATIONS-20260917.md', 'docs/MCP-WORKSPACE-DASHBOARD-20260917.md',
-                 'docs/DEVTOOLS-FLOW-20260918.md', 'docs/ARCHITECTURE.md', 'docs/RELEASING.md', 'docs/VPS.md'):
+                 'docs/DEVTOOLS-FLOW-20260918.md', 'docs/ARCHITECTURE.md', 'docs/RELEASING.md', 'docs/VPS.md', 'docs/LONG_OPERATIONS.md'):
         path = ROOT / name
         if path.is_file() and not path.is_symlink():
             result[name] = hashlib.sha256(path.read_bytes()).hexdigest()

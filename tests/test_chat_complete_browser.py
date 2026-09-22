@@ -16,6 +16,30 @@ def send(page,text='Review this project'):
     return page.evaluate("requests.filter(x=>x.path.endsWith('/chat_prompt')).at(-1)")
 
 
+def assert_composer_controls_fit(page,width,height):
+    """Frequent actions stay visible; secondary mobile controls remain reachable."""
+    def within_viewport(selector):
+        control=page.locator(selector)
+        expect(control).to_be_visible()
+        box=control.bounding_box()
+        assert box and box['x']>=0 and box['x']+box['width']<=width+1,(selector,box)
+        assert box['y']>=0 and box['y']+box['height']<=height+1,(selector,box)
+
+    for selector in ['#chat-compose','#chat-model-picker','#chat-send']:
+        within_viewport(selector)
+    if width<=760:
+        expect(page.locator('#chat-options')).to_be_hidden()
+        within_viewport('#chat-options-toggle')
+        page.click('#chat-options-toggle')
+        expect(page.get_by_role('dialog',name='会话设置')).to_be_visible()
+        page.locator('#chat-effort-select').scroll_into_view_if_needed()
+    within_viewport('#chat-effort-select')
+    if width<=760:
+        page.keyboard.press('Escape')
+        expect(page.locator('#chat-options')).to_be_hidden()
+        expect(page.locator('#chat-options-toggle')).to_be_focused()
+
+
 def test_model_and_effort_are_selectable_before_first_message(chat_page):
     p=chat_page
     expect(p.locator('#chat-model-name')).to_have_text('Native Model')
@@ -67,10 +91,7 @@ def test_controls_and_searchable_model_panel_fit_every_viewport(chat_page,width,
     # Model cache hits can finish before the browser dispatches resize.
     p.wait_for_function("document.querySelector('#chat-root').getBoundingClientRect().bottom<=innerHeight+1")
     expect(p.locator('#chat-model-name')).to_have_text('Native Model')
-    for selector in ['#chat-compose','#chat-model-picker','#chat-effort-select','#chat-send']:
-        box=p.locator(selector).bounding_box()
-        assert box and box['x']>=0 and box['x']+box['width']<=width+1,(selector,box)
-        assert box['y']>=0 and box['y']+box['height']<=height+1,(selector,box)
+    assert_composer_controls_fit(p,width,height)
     assert p.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
     p.click('#chat-model-picker')
     expect(p.locator('#chat-model-search')).to_be_visible()

@@ -113,7 +113,6 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                 try:
                     if name in ADMIN_TOOLS:raise DevError('OWNER_REQUIRED','此操作只接受面板主理人或已启用的本机控制入口',403)
                     if profile=='coding' and name not in CODING_TOOLS and name not in APP_ONLY_TOOLS:raise DevError('TOOL_OUTSIDE_PROFILE','此工具在完整 /mcp 中可用；编码显示模式不改变权限',404)
-                    if profile=='coding' and name=='operations_wait':arguments={'output_limit':8000,**arguments}
                     if isinstance(arguments.get('project'),str):
                         project=runtime.project(arguments['project'],principal)
                         try:
@@ -140,7 +139,7 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
             elif method=='resources/read':
                 uri=params.get('uri')
                 if 'read' not in principal.scopes:raise DevError('INSUFFICIENT_SCOPE','缺少读取权限',403)
-                if uri in mcp_apps.RESOURCES:item=mcp_apps.read_resource(uri,public_url)
+                if uri in mcp_apps.RESOURCES or uri in mcp_apps.LEGACY_RESOURCES:item=mcp_apps.read_resource(uri,public_url)
                 elif uri=='rd://projects':item={'uri':uri,'mimeType':'application/json','text':json.dumps(runtime.list_projects(principal),ensure_ascii=False)}
                 elif uri=='rd://workflow':item={'uri':uri,'mimeType':'text/plain','text':instructions}
                 else:return failure(identifier,-32602 if modern else -32002,'Resource not found',404 if modern else 200)

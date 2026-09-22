@@ -72,6 +72,12 @@ def test_full_panel_direct_chat_actual_sse_history_and_responsive_layout(chat_st
             page.fill('#chat-compose','这段草稿在切换后保留。')
             page.screenshot(path=str(EVIDENCE/(cli+'-full-panel-desktop.png')))
             page.set_viewport_size({'width':390,'height':844})
+            # set_viewport_size can return before visualViewport's resize event.
+            # Wait for the application's layout, then assert actual geometry.
+            page.wait_for_function('''() => {
+                const root = document.querySelector('#chat-root').getBoundingClientRect();
+                return root.width <= innerWidth + 1 && root.bottom <= innerHeight + 1;
+            }''')
             assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+2')
             composer=page.locator('#chat-compose').bounding_box()
             assert composer and composer['y']+composer['height']<844
