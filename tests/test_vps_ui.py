@@ -179,6 +179,33 @@ def test_stale_edit_is_not_overwritten_and_text_is_escaped(browser,ui_stack):
     finally:page.close()
 
 
+def test_background_refresh_preserves_held_click_target(browser,ui_stack):
+    engine,_=browser;s=ui_stack;v=create_vps(s)
+    page=open_page(engine,s,390)
+    try:
+        page.fill('#vps-query',v['name'])
+        button=page.locator('[data-vps-card]:visible [data-vps-action="edit"]')
+        button.hover()
+        page.evaluate('''() => {document.addEventListener('pointerdown',event=>{
+          window.heldVpsButton=event.target.closest('[data-vps-action="edit"]');
+        },{once:true,capture:true});}''')
+        page.mouse.down()
+        assert page.evaluate('!!heldVpsButton && uiPagePointers.size===1')
+        page.evaluate('''() => {
+          const original=uiWaitForPagePointer;
+          uiWaitForPagePointer=()=>{document.body.dataset.refreshWaiting='true';return original();};
+          void renderPage(false).then(()=>{document.body.dataset.refreshFinished='true';});
+        }''')
+        expect(page.locator('body')).to_have_attribute('data-refresh-waiting','true')
+        assert page.evaluate('heldVpsButton.isConnected && !document.body.dataset.refreshFinished')
+        page.mouse.up()
+        expect(page.locator('#vps-form')).to_be_visible()
+        expect(page.locator('body')).to_have_attribute('data-refresh-finished','true')
+        expect(page.locator('#vps-form [name="name"]')).to_have_value(v['name'])
+    finally:
+        page.mouse.up();page.close()
+
+
 def test_background_refresh_does_not_discard_explicit_edit(browser,ui_stack):
     engine,_=browser;s=ui_stack;v=create_vps(s)
     page=open_page(engine,s);held=[]
