@@ -36,3 +36,5 @@ skills
 .coverage*
 htmlcov
 .DS_Store
+
+.codepier-updater

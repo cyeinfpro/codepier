@@ -40,6 +40,8 @@ class NativeService:
         return p
 
     async def request(self,action,project,args):
+        if getattr(self.runtime, "panel_maintenance", None):
+            self.runtime.panel_maintenance.guard()
         con=self.runtime.connections.get(project['device_id'])
         if not con or not self.runtime.online(project['device_id']):
             raise DevError('CLI_OFFLINE','节点离线；已同步历史可读，控制待重新连接后重试',409)
