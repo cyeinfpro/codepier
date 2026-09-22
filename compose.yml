@@ -1,14 +1,15 @@
 name: codepier
 services:
   hub:
-    build: .
-    image: codepier:1.10.3
+    build: "${CODEPIER_HUB_SOURCE:-.}"
+    image: "${CODEPIER_HUB_IMAGE:-codepier:1.11.0}"
     restart: unless-stopped
     init: true
     ports:
       - "${HUB_BIND_ADDRESS:-0.0.0.0}:${HUB_PORT:-8765}:8765"
     environment:
       HUB_DATA_DIR: /app/data
+      HUB_PANEL_UPDATE_SOCKET: /run/codepier-updater/updater.sock
       HUB_PORT: "8765"
       HUB_PUBLIC_URL: "${HUB_PUBLIC_URL:-http://127.0.0.1:8765}"
       MCP_PUBLIC_URL: "${MCP_PUBLIC_URL:-${HUB_PUBLIC_URL:-http://127.0.0.1:8765}}"
@@ -21,6 +22,10 @@ services:
       OAUTH_REDIRECT_HOSTS: "${OAUTH_REDIRECT_HOSTS:-chatgpt.com,chat.openai.com,platform.openai.com,localhost,127.0.0.1,::1}"
     volumes:
       - hub-data:/app/data
+      - type: bind
+        source: ./.codepier-updater/run
+        target: /run/codepier-updater
+        read_only: true
     security_opt:
       - no-new-privileges:true
     cap_drop:

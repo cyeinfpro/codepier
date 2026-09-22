@@ -85,3 +85,17 @@ def test_regression_processes_preserve_per_module_fixture_evidence():
 def test_license_is_in_the_container_distribution():
     root = Path(__file__).resolve().parents[1]
     assert 'COPY --chown=codepier:codepier LICENSE ./' in (root / 'Dockerfile').read_text()
+
+
+@pytest.mark.parametrize('image', ['codepier:{v}', '"${CODEPIER_HUB_IMAGE:-codepier:{v}}"'])
+def test_compose_default_version_accepts_managed_updates(tmp_path,image):
+    (tmp_path/'compose.yml').write_text('services:\n  hub:\n    image: '+image.replace('{v}',VERSION)+'\n')
+    check_release.check_compose_image(tmp_path,VERSION)
+
+
+@pytest.mark.parametrize('image', ['codepier:0.0.0', '"${CODEPIER_HUB_IMAGE:-codepier:0.0.0}"',
+    '"${CODEPIER_HUB_IMAGE}"', '"${OTHER_IMAGE:-codepier:{v}}"'])
+def test_compose_default_version_rejects_unpinned_or_stale_defaults(tmp_path,image):
+    (tmp_path/'compose.yml').write_text('services:\n  hub:\n    image: '+image.replace('{v}',VERSION)+'\n')
+    with pytest.raises(ValueError,match='Compose image version'):
+        check_release.check_compose_image(tmp_path,VERSION)

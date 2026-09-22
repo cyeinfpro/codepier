@@ -1,0 +1,10 @@
+/* Match the existing panel tokens without fixed viewport widths. */
+.panel-update { margin-block: 20px; min-width: 0; }
+.panel-update .panel-body { display: grid; gap: 16px; min-width: 0; }
+.panel-update .panel-body > * { min-width: 0; margin-block: 0; }
+.panel-update pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; }
+.panel-update dd, .panel-update .mono, #panel-update-state { overflow-wrap: anywhere; }
+.panel-update .actions { flex-wrap: wrap; }
+.panel-update [hidden] { display: none !important; }
+.panel-update details[open] > :not(summary) { margin-top: 12px; }
+@media (max-width: 480px) { .panel-update .actions .btn { width: 100%; white-space: normal; } }

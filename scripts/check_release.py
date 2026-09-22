@@ -79,6 +79,16 @@ def version(root):
     raise ValueError('Missing or invalid source VERSION')
 
 
+def check_compose_image(root, current_version):
+    text = (root / 'compose.yml').read_text(encoding='utf-8')
+    images = re.findall(r'^    image:\s*([^\n]+)$', text, re.M)
+    expected = 'codepier:' + current_version
+    allowed = {expected, '"' + expected + '"', "'" + expected + "'",
+               '"${CODEPIER_HUB_IMAGE:-' + expected + '}"'}
+    if len(images) != 1 or images[0].strip() not in allowed:
+        raise ValueError('Compose image version differs from source VERSION')
+
+
 def check_web_assets(root, current_version):
     """Validate real asset URLs, not obsolete per-feature cache strings."""
     class Assets(HTMLParser):
@@ -127,8 +137,7 @@ def check_source(root=ROOT):
     current_version = version(root)
     if release.get('name') != 'CodePier' or release.get('version') != current_version:
         raise ValueError('RELEASE.json does not match CodePier source identity')
-    if f'image: codepier:{current_version}' not in (root / 'compose.yml').read_text(encoding='utf-8'):
-        raise ValueError('Compose image version differs from source VERSION')
+    check_compose_image(root, current_version)
     browser_assets = check_web_assets(root, current_version)
     findings = []
     for name in files:
