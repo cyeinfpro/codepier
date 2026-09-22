@@ -75,6 +75,15 @@ jobs:
           .venv-compat/bin/python -m pip install --upgrade pip==26.2.1
           .venv-compat/bin/python -m pip install -r requirements-compat.txt
           .venv/bin/python -m playwright install --with-deps chromium webkit
+      - name: Install macOS Compose CLI for panel updater validation
+        if: runner.os == 'macOS'
+        run: |
+          if ! docker compose version >/dev/null 2>&1; then
+            brew install docker docker-compose
+            mkdir -p "$HOME/.docker/cli-plugins"
+            ln -sf "$(command -v docker-compose)" "$HOME/.docker/cli-plugins/docker-compose"
+          fi
+          docker compose version
       - name: Build browser resources
         run: |
           npm --prefix web/mcp-apps ci --ignore-scripts
