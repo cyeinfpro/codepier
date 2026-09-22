@@ -49,7 +49,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-14]
+        # Playwright 1.63 uses frozen WebKit 2251 on macOS 14; use the
+        # supported macOS 15 build for the full Chromium/WebKit regression.
+        os: [ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     defaults:
