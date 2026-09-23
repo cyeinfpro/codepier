@@ -763,7 +763,7 @@ class Runtime:
             connection.journal_id = hello.get("journal_id")
             connection.protocol = hello.get("delivery_protocol", 1)
             connection.native_protocol = 1 if hello.get("native_protocol") == 1 else 0
-            connection.native_chat_protocol = hello.get("native_chat_protocol") if type(hello.get("native_chat_protocol")) is int and hello["native_chat_protocol"] in (1, 2) else 0
+            connection.native_chat_protocol = hello.get("native_chat_protocol") if type(hello.get("native_chat_protocol")) is int and hello["native_chat_protocol"] in (1, 2, 3) else 0
             if (type(connection.protocol) is not int or connection.protocol != 2 or
                     not isinstance(connection.journal_id, str) or not 1 <= len(connection.journal_id) <= 128):
                 raise ValueError("Agent must support durable delivery protocol 2 with a journal ID")

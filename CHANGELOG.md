@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.12.0 — 2026-09-23 — Claude Code CLI 会话
+
+- CLI 会话新增 Claude Code，与 Pi、Codex 并列；支持节点本机动态模型目录、流式文本与思考、图片/文件、工具结果、交互提问和原生历史恢复。
+- 工具审批只响应实际观察到的原生请求，回答绑定当前回合和请求指纹，不注入跳过审批参数或永久权限规则。
+- 支持 Claude 模型切换、中断、排队跟进和 `/compact`；思考强度在新建/恢复时通过原生 `--effort` 生效，未验证的运行中即时修改与 steering 会显式禁用。
+- Agent 原生聊天协议提升到 3，Hub 保持对旧 Pi/Codex 协议兼容；旧 Agent 请求 Claude 时明确提示升级。
+- 新增确定性 Claude 协议 worker 测试、真实 HTTP/Hub/Agent Chromium/WebKit 流程测试与不发送模型请求的真实 Claude `initialize` 探测。
+
 ## 1.11.0 — 2026-09-23 — 面板一键更新
 
 - 系统设置增加 GitHub 正式版本检查、一键更新面板及 Agent 分发文件、持久进度和断线恢复。

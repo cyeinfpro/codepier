@@ -2,18 +2,18 @@
 
 **把 ChatGPT / MCP、浏览器管理面板和你自己的开发电脑连接起来，让 AI 在明确授权的项目边界内真正读取代码、修改文件、运行命令、管理原生 CLI、验证网页，并通过项目安全地操作已保存的 VPS。**
 
-[![Version](https://img.shields.io/badge/version-1.11.0-2563eb)](RELEASE.json)
+[![Version](https://img.shields.io/badge/version-1.12.0-2563eb)](RELEASE.json)
 [![Python](https://img.shields.io/badge/Python-3.13%20recommended-3776ab)](requirements.txt)
 [![License](https://img.shields.io/badge/license-MIT-16a34a)](LICENSE)
 
-> 当前仓库的 `RELEASE.json` 标记为 **1.11.0 / released / source-only**。源码状态不等同于已经公开发布或部署到你的 Hub / Agent。
+> 当前仓库的 `RELEASE.json` 标记为 **1.12.0 / released / source-only**。该版本发布源码，不等同于已经部署到你的 Hub / Agent。
 
 CodePier 面向这样的开发方式：
 
 - AI 或 ChatGPT 在云端，但源码、CLI、浏览器登录态和开发工具在你自己的电脑上。
 - 你希望远程开发能力以“项目”为边界，而不是默认暴露整台机器。
 - 你需要让一次开发任务跨网络中断、页面刷新或长时间执行后仍然可以恢复。
-- 你想在同一个面板里管理多个电脑、多个项目、Pi / Codex 原生会话，以及项目可用的 VPS。
+- 你想在同一个面板里管理多个电脑、多个项目、Pi / Codex / Claude 原生会话，以及项目可用的 VPS。
 - 你需要真实的测试、Git worktree、语言服务、浏览器验证和操作审计，而不是只让模型生成一段建议。
 
 ---
@@ -23,7 +23,7 @@ CodePier 面向这样的开发方式：
 | 能力 | 当前实现 |
 | --- | --- |
 | **项目级 MCP 开发** | 发现项目、读取/搜索代码、批量修改、SHA 校验、改动审阅、Shell、持久操作、任务、工作流、交付物和诊断。 |
-| **全局 Pi / Codex 会话** | 在网页侧栏跨项目查看原生 CLI 会话，保留项目归属、状态、历史、草稿、附件、模型与思考设置。 |
+| **全局 Pi / Codex / Claude 会话** | 在网页侧栏跨项目查看原生 CLI 会话，保留项目归属、状态、历史、草稿、附件、模型与思考设置。 |
 | **开发工具工作流** | 从代码导航、Git worktree、测试验收到任务交接与网页验证，保持同一项目/工作目录范围。 |
 | **持久操作与恢复** | 长任务返回 `operation_id`，支持排队、执行、查询、取消与断线后恢复，避免不确定结果被重复执行。 |
 | **VPS 管理** | 在面板保存 VPS，支持 VPS ↔ 项目多对多分配；ChatGPT 通过 `vps_list` / `vps_exec` 使用已授权连接。 |
@@ -61,7 +61,7 @@ CodePier 面向这样的开发方式：
         ├────────────────┤ ├────────────────┤ ├────────────────┤
         │ Local Projects │ │ Local Projects │ │ Local Projects │
         │ Shell / Git    │ │ Shell / Git    │ │ Shell / Git    │
-        │ Pi / Codex     │ │ Pi / Codex     │ │ Pi / Codex     │
+        │ Native CLI     │ │ Native CLI     │ │ Native CLI     │
         │ Browser / LSP  │ │ Browser / LSP  │ │ Browser / LSP  │
         └───────┬────────┘ └───────┬────────┘ └───────┬────────┘
                 │                  │                  │
@@ -85,7 +85,7 @@ Agent 运行在真正保存源码和开发工具的电脑上，负责：
 
 - 访问明确授权的项目目录。
 - 执行文件、Shell、Git、构建和测试操作。
-- 管理本机 Pi / Codex 原生 CLI。
+- 管理本机 Pi / Codex / Claude 原生 CLI。
 - 调用已配置的语言服务。
 - 承接浏览器桥接和可选桌面控制。
 - 从项目所在电脑发起 SSH / VPS 命令。
@@ -127,7 +127,7 @@ CodePier 不把“网络超时”直接当成“命令失败”。带副作用�
 
 Web 面板不只是设置页，也是一套远程开发工作区：
 
-- **全局 CLI 会话**：侧栏直接显示当前有权限项目的 Pi / Codex 会话，不需要先逐个进入项目。
+- **全局 CLI 会话**：侧栏直接显示当前有权限项目的 Pi / Codex / Claude 会话，不需要先逐个进入项目。
 - **新建会话**：先搜索/选择项目，再选择 CLI、模型、思考强度和工作目录；发送首条消息时才真正创建会话。
 - **离线历史**：Agent 离线时仍可浏览已经同步的历史记录。
 - **附件与草稿**：文件、图片、草稿和上传状态绑定到对应项目/会话，不因切换聊天而串线。
@@ -135,6 +135,10 @@ Web 面板不只是设置页，也是一套远程开发工作区：
 - **运行诊断**：查看设备、项目、操作和能力就绪状态，不把“能力可调用”误写成“测试已经通过”。
 
 ---
+
+## Claude Code 会话
+
+在 CLI 会话设置中选择 **Claude**，即可使用节点本机 Claude Code 的流式消息、模型目录、图片、工具审批、交互提问、中断和原生历史恢复。节点需安装并完成 Claude Code 原生登录，Hub / Agent 均需更新到包含本功能的源码。思考强度在新建或恢复时设置；运行中支持排队跟进，不提供未经验证的即时补充。详见 [Claude Code 会话说明](docs/CLAUDE_CLI.md)。
 
 ## 面板一键更新
 
@@ -246,9 +250,9 @@ vps_exec(
 
 ---
 
-## 原生 Pi / Codex 会话
+## 原生 Pi / Codex / Claude 会话
 
-CodePier 可以从浏览器面板管理 Agent 电脑上的原生 Pi 和 Codex CLI。
+CodePier 可以从浏览器面板管理 Agent 电脑上的原生 Pi、Codex 和 Claude Code CLI。
 
 当前会话工作流包括：
 
@@ -263,7 +267,7 @@ CodePier 可以从浏览器面板管理 Agent 电脑上的原生 Pi 和 Codex CL
 - 停止、恢复、删除网页记录、导出等状态化操作。
 - 保留原生线程/会话标识，不把网页记录伪装成本机 CLI 数据本身。
 
-CodePier 不替换 Pi / Codex 自己的账号、模型配置或本地认证；它使用 Agent 电脑上已经安装和配置的原生 CLI。
+CodePier 不替换 Pi / Codex / Claude 自己的账号、模型配置或本地认证；它使用 Agent 电脑上已经安装和配置的原生 CLI。
 
 ---
 
@@ -680,11 +684,11 @@ codepier/
 
 仓库当前版本信息来自 [`RELEASE.json`](RELEASE.json)：
 
-- **Version:** 1.11.0
-- **Date:** 2026-09-21
+- **Version:** 1.12.0
+- **Date:** 2026-09-23
 - **Status:** released
 - **Source only:** true
-- **Published:** false
+- **Published:** true
 - **Deployed:** false
 
 具体版本变化见 [CHANGELOG.md](CHANGELOG.md)。

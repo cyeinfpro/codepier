@@ -102,8 +102,8 @@ jobs:
         run: .venv/bin/python scripts/check_full_regression.py --output dist/ci-results --workers ${{ runner.os == 'macOS' && 1 || 2 }} --timeout 900
       - name: Public source bundle
         run: |
-          .venv/bin/python scripts/build_source_bundle.py --public --output dist/codepier-1.11.0-source.zip
-          .venv/bin/python scripts/check_release.py --bundle dist/codepier-1.11.0-source.zip --output dist/public-check.json
+          .venv/bin/python scripts/build_source_bundle.py --public --output dist/codepier-1.12.0-source.zip
+          .venv/bin/python scripts/check_release.py --bundle dist/codepier-1.12.0-source.zip --output dist/public-check.json
       - name: Retain isolated CI evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -115,7 +115,7 @@ jobs:
             !dist/ci-results/**/cache/**
             !dist/ci-results/collect-cache/**
             dist/public-check.json
-            dist/codepier-1.11.0-source.zip
-            dist/codepier-1.11.0-source.manifest.json
+            dist/codepier-1.12.0-source.zip
+            dist/codepier-1.12.0-source.manifest.json
           if-no-files-found: warn
           retention-days: 14
