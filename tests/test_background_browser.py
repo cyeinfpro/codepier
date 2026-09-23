@@ -119,6 +119,8 @@ def test_real_extension_native_host_and_mcp_browser_actions(tmp_path,website):
                 return next((page for page in context.pages if page.url==website+'/index.html'),None)
             owned_page=wait_for(navigated_page)
             owned_page.wait_for_load_state('load')
+            wait_for(lambda:popup.evaluate('''async url => (await chrome.tabs.query({})).some(
+                tab => tab.url === url && tab.status === 'complete')''',website+'/index.html'))
             snapshot=call('browser_snapshot',{'lease_id':lease})
             assert 'NEVER_RETURN_PASSWORD' not in json.dumps(snapshot)
             name=next(e for e in snapshot['elements'] if e['label']=='Name')
@@ -143,6 +145,8 @@ def test_real_extension_native_host_and_mcp_browser_actions(tmp_path,website):
             snapshot=call('browser_snapshot',{'lease_id':lease})
             call('browser_action',{'lease_id':lease,'observation_id':snapshot['observation_id'],'action':'navigate','value':website+'/index.html?verified=1'})
             expect(owned_page).to_have_url(website+'/index.html?verified=1')
+            wait_for(lambda:popup.evaluate('''async url => (await chrome.tabs.query({})).some(
+                tab => tab.url === url && tab.status === 'complete')''',website+'/index.html?verified=1'))
             assert popup.evaluate('async()=> (await chrome.tabs.query({active:true})).map(t=>t.id)')==original_active
             snapshot=call('browser_snapshot',{'lease_id':lease})
             call('browser_action',{'lease_id':lease,'observation_id':snapshot['observation_id'],'action':'navigate','value':'https://not-authorized.invalid/'},expect_failure=True)
