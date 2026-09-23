@@ -13,12 +13,24 @@ function vpsIntent(){
 function vpsEndpoint(v){return `${v.host.includes(':')?'['+v.host+']':v.host}:${v.port}`;}
 function vpsReplacePage(html){
   const page=$('#page'),next=document.createElement('template');next.innerHTML=html;
-  const existing=new Map($$('[data-vps-card]',page).map(card=>[card.dataset.vpsCard,card]));
-  for(const card of next.content.querySelectorAll('[data-vps-card]')){
+  const grid=$('.vps-grid',page),freshGrid=$('.vps-grid',next.content);
+  if(!grid||!freshGrid){page.replaceChildren(next.content);return;}
+  const existing=new Map($$('[data-vps-card]',grid).map(card=>[card.dataset.vpsCard,card]));
+  let cursor=grid.firstElementChild;
+  for(const card of [...freshGrid.children]){
     const previous=existing.get(card.dataset.vpsCard);
-    if(previous&&previous.outerHTML===card.outerHTML)card.replaceWith(previous);
+    const node=previous&&previous.outerHTML===card.outerHTML?previous:card;
+    if(node===cursor)cursor=cursor.nextElementSibling;
+    else if(cursor?.dataset.vpsCard===card.dataset.vpsCard){
+      const following=cursor.nextElementSibling;cursor.replaceWith(node);cursor=following;
+    }
+    else grid.insertBefore(node,cursor);
   }
-  page.replaceChildren(next.content);
+  while(cursor){const following=cursor.nextElementSibling;cursor.remove();cursor=following;}
+  const nodes=[...next.content.childNodes],index=nodes.indexOf(freshGrid);
+  for(const node of [...page.childNodes])if(node!==grid)node.remove();
+  grid.before(...nodes.slice(0,index));
+  grid.after(...nodes.slice(index+1));
 }
 async function vpsHTML(seq){
   const [items]=await Promise.all([vpsInventory(),loadBasics()]);
