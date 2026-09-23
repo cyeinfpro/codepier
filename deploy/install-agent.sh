@@ -19,5 +19,5 @@ fi
 [[ -n "$pairing" && -n "$root" ]] || { echo '配对文件和项目父目录不能为空' >&2; exit 1; }
 case "$pairing" in /*|~*) ;; *) pairing="$input_directory/$pairing" ;; esac
 case "$root" in /*|~*) ;; *) root="$input_directory/$root" ;; esac
-.venv/bin/python -m agent init --pairing-file "$pairing" --allow "$root"
+.venv/bin/python -m agent init --pairing-file "$pairing" --allow "$root" --shell "${3:-full}"
 printf '\n启动：%s/deploy/start-agent.sh\n修改地址：%s/.venv/bin/python -m agent configure --hub http://新IP:端口\n' "$PWD" "$PWD"

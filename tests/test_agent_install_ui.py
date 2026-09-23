@@ -95,7 +95,7 @@ def test_create_collects_explicit_root_and_displays_literal_command(install_page
     expect(page.locator('#agent-install-command')).to_have_value(state['command'])
     expect(page.locator('#agent-install-copy')).to_be_enabled()
     assert len(state['creates']) == 1 and set(state['creates'][0]) == {'name', 'hub_url'}
-    assert state['tickets'][0]['body'] == {'hub_url': state['creates'][0]['hub_url'], 'platform': platform, 'allow_root': root}
+    assert state['tickets'][0]['body'] == {'hub_url': state['creates'][0]['hub_url'], 'platform': platform, 'allow_root': root, 'enable_execution': True}
     expect(page.locator('.modal img')).to_have_count(0)
     expect(page.locator('#agent-install-status')).to_contain_text('前执行')
     assert page.evaluate('JSON.stringify({...localStorage,...sessionStorage})').find('PRIVATE-ONCE') == -1
@@ -103,6 +103,19 @@ def test_create_collects_explicit_root_and_displays_literal_command(install_page
         page.click('#download-pairing')
     pairing = json.loads(Path(download.value.path()).read_text())
     assert pairing['device_id'] in state['tickets'][0]['url'] and pairing['secret']
+
+
+def test_fresh_execution_opt_out_is_sent_and_explained(install_page):
+    page, state = install_page
+    open_form(page)
+    execution = page.locator('#device-form [name="enable_execution"]')
+    expect(execution).to_be_checked()
+    fill_form(page)
+    execution.uncheck()
+    page.click('#create-device')
+    expect(page.locator('#agent-install-command')).to_have_value(state['command'])
+    assert state['tickets'][0]['body']['enable_execution'] is False
+    expect(page.locator('.modal')).to_contain_text('关闭 Shell / 目录任务')
 
 
 def test_ticket_failure_retries_without_creating_a_second_device(install_page):
@@ -180,6 +193,8 @@ def test_existing_offline_device_issues_ticket_without_rotation(install_page, st
     page.evaluate('(id)=>deviceDetail(id)', pairing['device_id'])
     page.locator('.modal [data-action="agent-repair"]').click()
     expect(page.locator('#device-form input[name="name"]')).to_have_count(0)
+    expect(page.locator('#device-form input[name="enable_execution"]')).to_have_count(0)
+    expect(page.locator('#device-form')).to_contain_text('已有节点保留原执行权限')
     page.locator('#device-form input[name="allow_root"]').fill('/home/me/Projects')
     page.click('#create-device')
     expect(page.locator('#agent-install-command')).to_have_value(state['command'])

@@ -1,4 +1,4 @@
-param([string]$PairingFile, [string]$AllowRoot)
+param([string]$PairingFile, [string]$AllowRoot, [ValidateSet('full','disabled')][string]$Shell = 'full')
 $ErrorActionPreference = 'Stop'
 $InputDirectory = (Get-Location).Path
 $SourceDirectory = Split-Path $PSScriptRoot -Parent
@@ -15,7 +15,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $InstallDirectory 'config.json'))) {
   if (-not $AllowRoot) { $AllowRoot = Read-Host 'Allowed project parent directory, e.g. D:\Projects' }
   if (-not $PairingFile -or -not $AllowRoot) { throw 'Pairing file and allowed directory are required' }
 }
-$CodePierArgs = @((Join-Path $SourceDirectory 'scripts/install_agent.py'), '--source', $SourceDirectory)
+$CodePierArgs = @((Join-Path $SourceDirectory 'scripts/install_agent.py'), '--source', $SourceDirectory, '--shell', $Shell)
 if ($PairingFile) {
   if (-not [IO.Path]::IsPathRooted($PairingFile) -and -not $PairingFile.StartsWith('~')) { $PairingFile = Join-Path $InputDirectory $PairingFile }
   $CodePierArgs += @('--pairing-file', $PairingFile)

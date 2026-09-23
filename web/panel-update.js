@@ -1,7 +1,10 @@
 'use strict';
 // Only opaque request metadata is retained. No credentials, logs or source code.
 window.CodePierPanelUpdate=(()=>{
-  let generation=0,timer=null,reader=null,data=null,pending=null,submitting=false,note='';
+  let generation=0,timer=null,reader=null,data=null,pending=null,submitting=false,note='',owner=null,watching=false,reloadAttempted=false,deferredKey='';
+  // Captured from the script loaded with this document, never from a later API response.
+  const loadedVersion=new URL(document.currentScript?.src||location.href,location.href).searchParams.get('v')?.replace(/^codepier-/,'');
+  const reloadParameter='_codepier_updated';
   const terminal=new Set(['succeeded','failed','rolled_back','recovery_required']);
   const storageKey=()=>`codepier-panel-update:${sessionOwner(S.session)||'anonymous'}`;
   function savePending(value){pending=value;sessionValue(storageKey(),value?JSON.stringify(value):null);}
@@ -43,23 +46,58 @@ window.CodePierPanelUpdate=(()=>{
     $('#panel-update-history').hidden=!job?.events?.length;
     text('panel-update-events',(job?.events||[]).map(e=>`${timeText(e.at)}  ${e.message}`).join('\n'));
   }
-  function schedule(ms=2000){clearTimeout(timer);if(S.session&&S.page==='settings')timer=setTimeout(()=>load(),ms);}
+  function dirty(){
+    if(hasUnsavedChanges()||$('.modal')||$('button[aria-busy="true"]'))return true;
+    return $$('form input,form textarea,form select').some(field=>{
+      if(field.type==='hidden'||field.readOnly)return false;
+      if(['checkbox','radio'].includes(field.type))return field.checked!==field.defaultChecked;
+      if(field.tagName==='SELECT'){
+        const options=[...field.options],explicit=options.some(option=>option.defaultSelected);
+        return options.some((option,index)=>option.selected!==(option.defaultSelected||(!explicit&&index===0)));
+      }
+      return field.value!==field.defaultValue;
+    });
+  }
+  function successKey(job){return String(job?.id||job?.request_key||job?.target_version||'').slice(0,128)+':'+job?.target_version;}
+  function reloadPage(job){
+    if(reloadAttempted)return;
+    const url=new URL(location.href);url.searchParams.set(reloadParameter,successKey(job));
+    reloadAttempted=true;location.replace(url.href);
+  }
+  function refreshAfterUpdate(){
+    const job=data?.operation;
+    if(!data?.enabled||data.busy||submitting||pending||data.recovery_required||job?.kind!=='apply'||job.state!=='succeeded'||!/^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(job.target_version||''))return false;
+    if(data.running_version!==job.target_version){note='更新记录已完成，正在等待目标版本恢复服务；不会提前刷新或再次提交。';return true;}
+    const key=successKey(job);
+    // The URL marker also prevents loops when browser storage is unavailable.
+    if(reloadAttempted||loadedVersion===job.target_version||new URL(location.href).searchParams.get(reloadParameter)===key)return false;
+    if(dirty()){
+      note='新版已就绪。检测到未保存输入、草稿或进行中的界面操作，暂缓自动刷新；处理完后自动继续，也可点击“刷新到新版本”。';
+      if(S.page!=='settings'&&deferredKey!==key){deferredKey=key;toast(note);}
+      return true;
+    }
+    note='新版服务已恢复，正在自动刷新页面…';paint();reloadPage(job);return false;
+  }
+  function schedule(ms=2000){clearTimeout(timer);if(S.session&&sessionOwner(S.session)===owner&&(S.page==='settings'||watching))timer=setTimeout(()=>load(),ms);}
   async function load(){
-    const gen=generation;if(!S.session||S.page!=='settings'||!$('#panel-update'))return;
+    const gen=generation;if(!S.session||sessionOwner(S.session)!==owner||(S.page!=='settings'&&!watching))return;
+    clearTimeout(timer);timer=null;
     reader?.abort();const control=new AbortController();reader=control;
     try{
       const key=pending?.body?.idempotency_key;
-      const result=await api('/api/panel-update/status'+(key?'?request_key='+encodeURIComponent(key):''),{signal:control.signal,retryDelays:[],requestTimeout:10000});
-      if(gen!==generation)return;
-      data=result;
+      const result=await api('/api/panel-update/status'+(key?'?request_key='+encodeURIComponent(key):''),{signal:control.signal,retryDelays:[],requestTimeout:10000,cache:'no-store'});
+      if(gen!==generation||reader!==control)return;
+      const wasWatching=watching;data=result;
       if(result.enabled){
         if(pending&&result.request_found&&terminal.has(result.operation?.state))savePending(null);
         note=pending&&result.request_found===false?'宿主机未找到原请求记录。核实后可使用“重新提交原请求”；不会生成第二个更新编号。':'';
       }else if(pending){note='更新结果尚未核实。正在恢复连接；服务未连接不代表更新失败，请不要重新创建更新。';}
+      const awaiting=refreshAfterUpdate();
+      watching=!!(result.busy||pending||result.recovery_required||awaiting||(!result.enabled&&wasWatching));
       paint();
-      if(result.busy||pending||result.recovery_required)schedule(result.enabled?2000:4000);
+      if(watching||(!result.enabled&&result.code==='UPDATER_UNAVAILABLE'))schedule(result.enabled?2000:4000);
     }catch(error){
-      if(gen!==generation||error.name==='AbortError'||error.code==='SESSION_CHANGED')return;
+      if(gen!==generation||reader!==control||error.name==='AbortError'||error.code==='SESSION_CHANGED')return;
       note='连接暂时中断，正在恢复更新进度。不会自动重复提交更新。';paint();schedule(4000);
     }finally{if(reader===control)reader=null;}
   }
@@ -75,7 +113,7 @@ window.CodePierPanelUpdate=(()=>{
       }else savePending({action,body:{idempotency_key:'panel-check-'+uid()}});
     }
     const request=pending;if(!request)return;
-    submitting=true;note='正在提交并保存更新请求…';paint();
+    submitting=true;watching=true;note='正在提交并保存更新请求…';paint();
     try{
       await post('/api/panel-update/'+request.action,request.body);
       if(gen===generation)note='请求已保存，正在读取更新进度。';
@@ -85,24 +123,33 @@ window.CodePierPanelUpdate=(()=>{
       if(error.status>=400&&error.status<500){savePending(null);note=error.message;toast(error.message,true);}
       else if(gen===generation)note='提交回执暂未收到，正在按原请求编号核实。请不要重复点击更新。';
     }finally{
-      submitting=false;
-      if(gen===generation){paint();await load();}
+      if(gen===generation){submitting=false;paint();await load();}
     }
   }
-  function detach(){generation++;clearTimeout(timer);timer=null;reader?.abort();reader=null;data=null;note='';}
+  function detach(){
+    const currentOwner=sessionOwner(S.session);
+    // Page repaints must not starve a live update monitor or interrupt its POST.
+    if(owner===currentOwner&&watching){if(!timer&&!reader&&!submitting)schedule();return;}
+    generation++;clearTimeout(timer);timer=null;reader?.abort();reader=null;submitting=false;
+    if(owner!==currentOwner){pending=null;watching=false;owner=currentOwner;}
+    data=null;note='';
+  }
+  function resume(){
+    if(!S.session)return;
+    if(owner!==sessionOwner(S.session))detach();
+    pending=pending||restorePending();watching=watching||!!pending;
+    if(watching)schedule(0);
+  }
   function bind(){
-    detach();pending=restorePending();
+    detach();pending=pending||restorePending();watching=watching||!!pending;
     $('#panel-update-check').onclick=()=>submit('check');
     $('#panel-update-apply').onclick=()=>submit('apply');
     $('#panel-update-refresh').onclick=()=>load();
     $('#panel-update-retry').onclick=()=>submit(pending?.action,true);
     $('#panel-update-reload').onclick=()=>{
-      const address=$('#settings-form [name="public_url"]');
-      const password=$('#password-form');
-      const dirty=hasUnsavedChanges()||(address&&address.value!==S.settings.public_url)||[...(password?.querySelectorAll('input')||[])].some(i=>i.value);
-      if(!dirty||confirm('刷新将丢弃当前页面的未保存输入，继续？'))location.reload();
+      if(!dirty()||confirm('刷新将丢弃当前页面的未保存输入，继续？'))reloadPage(data?.operation);
     };
     paint();load();
   }
-  return {html,bind,detach};
+  return {html,bind,detach,resume};
 })();

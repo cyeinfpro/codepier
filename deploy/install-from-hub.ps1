@@ -4,6 +4,7 @@ param(
   [string]$Token,
   [string]$Sha256,
   [string]$AllowRoot,
+  [ValidateSet('full','disabled')][string]$Shell = 'full',
   [string]$InstallDir = (Join-Path $env:USERPROFILE '.codepier-agent'),
   [switch]$NoService,
   [switch]$Yes,
@@ -106,7 +107,7 @@ try {
   $Token = ''
   $CodePierArgs = @($Helper, '--archive', $Archive, '--sha256', $Sha256, '--hub', $Hub, '--install-dir', $InstallDir, '--uv', $CodePierUv)
   if ($Action -eq 'install') {
-    $CodePierArgs += @('--allow', $AllowRoot)
+    $CodePierArgs += @('--allow', $AllowRoot, '--shell', $Shell)
     if ($NoService) { $CodePierArgs += '--no-service' }
   } else { $CodePierArgs += ('--'+$Action) }
   if ($Yes) { $CodePierArgs += '--yes' }

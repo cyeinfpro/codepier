@@ -2,16 +2,16 @@
 
 **把 ChatGPT / MCP、浏览器管理面板和你自己的开发电脑连接起来，让 AI 在明确授权的项目边界内真正读取代码、修改文件、运行命令、管理原生 CLI、验证网页，并通过项目安全地操作已保存的 VPS。**
 
-[![Version](https://img.shields.io/badge/version-1.12.0-2563eb)](RELEASE.json)
+[![Version](https://img.shields.io/badge/version-1.13.0-2563eb)](RELEASE.json)
 [![Python](https://img.shields.io/badge/Python-3.13%20recommended-3776ab)](requirements.txt)
 [![License](https://img.shields.io/badge/license-MIT-16a34a)](LICENSE)
 
-> 当前仓库的 `RELEASE.json` 标记为 **1.12.0 / released / source-only**。该版本发布源码，不等同于已经部署到你的 Hub / Agent。
+> 当前仓库的 `RELEASE.json` 标记为 **1.13.0 / released / source-only**。该版本发布源码，不等同于已经部署到你的 Hub / Agent。
 
 CodePier 面向这样的开发方式：
 
 - AI 或 ChatGPT 在云端，但源码、CLI、浏览器登录态和开发工具在你自己的电脑上。
-- 你希望远程开发能力以“项目”为边界，而不是默认暴露整台机器。
+- 你希望按项目管理授权；完整 Shell 的权限边界是 Agent 的系统用户，不是项目目录沙箱。
 - 你需要让一次开发任务跨网络中断、页面刷新或长时间执行后仍然可以恢复。
 - 你想在同一个面板里管理多个电脑、多个项目、Pi / Codex / Claude 原生会话，以及项目可用的 VPS。
 - 你需要真实的测试、Git worktree、语言服务、浏览器验证和操作审计，而不是只让模型生成一段建议。
@@ -142,7 +142,7 @@ Web 面板不只是设置页，也是一套远程开发工作区：
 
 ## 面板一键更新
 
-在 **系统设置 → 面板更新** 中检查 GitHub 正式 Release，并一键更新网页、Hub 和配套 Agent 安装文件。更新会验证源码包 SHA-256、预检候选镜像、复制完整数据卷，并在切换失败时尝试恢复原镜像和原数据卷；刷新页面或网络中断后仍可查看同一操作的进度。
+在 **系统设置 → 面板更新** 中检查 GitHub 正式 Release，并一键更新网页、Hub 和配套 Agent 安装文件。更新会验证源码包 SHA-256、预检候选镜像、复制完整数据卷，并在切换失败时尝试恢复原镜像和原数据卷；刷新页面或网络中断后仍可查看同一操作的进度。新版就绪后自动刷新网页；未保存输入或草稿会暂缓刷新，处理后自动继续。更新中离开设置页仍会跟踪进度，失败、回退或版本尚未就绪时不会误刷新。
 
 首次需要在 Linux/systemd、Docker Compose 宿主机启用独立更新服务。部署目录建议使用 root 拥有且不可由其他用户写入的 `/opt/codepier`，在包含本功能的源码目录执行：
 
@@ -153,6 +153,18 @@ sudo bash install.sh --enable-panel-update
 已运行新版面板的服务器也可单独执行 `sudo python3 scripts/panel_updater.py install --root "$PWD"`。网页进程不挂载 Docker socket，不能指定任意下载地址或宿主机命令。
 
 **此入口更新服务器提供的 Agent 文件，不会强制升级或重启各台电脑上的 Agent。** 正式 Release 必须包含 `codepier-VERSION-source.zip` 及 GitHub SHA-256 元数据；没有合格的正式发布时会提示原因，不会直接执行 `main` 分支。支持范围、故障恢复及备份清理说明见 [面板更新文档](docs/PANEL_UPDATE.md)。
+
+## 持续项目授权与安装执行默认值
+
+**新增项目无需反复重新连接：** 在 **系统设置 → MCP 默认授权** 开启“默认选择全部现有及未来新增项目”。需要开发权限时，可同时预选读取、写入和执行；新应用接入仍需确认，且不会超出应用申请的范围，桌面控制独立选择。
+
+已经连好的 OAuth 连接，可明确勾选“同时将全部项目范围应用到已有有效 OAuth 连接”，确认后保存。项目范围从此包含未来新增项目，原凭据继续有效；不会增加已有连接的工具权限、延长有效期、恢复撤销授权或更改 PAT。单个 OAuth / PAT 可在 **MCP 接入 → 调整项目范围** 修改，无需换令牌。关闭默认选项只改变之后的预选；收回已有授权请逐项调整或撤销。项目映射、本机能力和客户端权限仍分别检查。
+
+**新装 Agent 默认具备执行能力：** 安装弹窗默认勾选 Shell 和目录任务，可以取消；POSIX 一键安装入口支持 `--shell disabled`，PowerShell 支持 `-Shell disabled`。完整 Shell 使用安装账号自己的系统权限，不是目录沙箱，不自动授予管理员或桌面控制权限。
+
+升级、修复和重新配对保留旧配置，包括原先关闭的执行能力。旧 Agent 需要开启时，在 **系统设置 → 已有 Agent 开启执行能力** 查看本机命令；使用原运行环境与配置，不要重新初始化。配置自动重载后，重新验证并保存面板项目的执行设置即可。
+
+这些行为需要部署包含本次改动的源码。首次部署后，已经打开的旧标签页需刷新一次以加载新逻辑；后续更新由新版页面自动刷新。本次源码功能不代表已经修改任何现用服务、Agent 配置或客户端授权。
 
 ## VPS 管理
 
@@ -684,7 +696,7 @@ codepier/
 
 仓库当前版本信息来自 [`RELEASE.json`](RELEASE.json)：
 
-- **Version:** 1.12.0
+- **Version:** 1.13.0
 - **Date:** 2026-09-23
 - **Status:** released
 - **Source only:** true

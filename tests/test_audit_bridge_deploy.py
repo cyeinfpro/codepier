@@ -281,5 +281,6 @@ def test_agent_installer_resolves_inputs_from_callers_directory(tmp_path, pairin
         env={**os.environ, "PYTHON": str(fake_python), "PYTHON_LOG": str(log)})
     assert result.returncode == 0, result.stdout + result.stderr
     arguments = log.read_text().splitlines()
-    assert arguments[-4:] == ["--pairing-file", pairing if pairing.startswith("~") else str(caller / pairing),
-                              "--allow", root if root.startswith("~") else str(caller / root)]
+    assert arguments[-6:] == ["--pairing-file", pairing if pairing.startswith("~") else str(caller / pairing),
+                              "--allow", root if root.startswith("~") else str(caller / root),
+                              "--shell", "full"]

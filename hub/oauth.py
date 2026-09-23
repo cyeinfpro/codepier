@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from hub.auth import Auth
+from hub.access import access_defaults, project_selection
 from hub.runtime import Runtime
 from shared.crypto import digest, token
 from shared.util import DevError, valid_json_value
@@ -187,10 +188,11 @@ class OAuth:
 
         @router.get("/api/oauth/requests/{id}")
         async def auth_details(id: str, request: Request):
-            self.auth.admin(request)
+            principal = self.auth.admin(request)
             row = self.get_request(id)
             return {"id": id, "client_name": row["client_name"], "client_id": row["client_id"], "redirect_uri": row["redirect_uri"],
-                    "scopes": json.loads(row["scopes"]), "resource": row["resource"], "expires": row["expires"]}
+                    "scopes": json.loads(row["scopes"]), "resource": row["resource"], "expires": row["expires"],
+                    "access_defaults": access_defaults(self.store, principal.user_id)}
 
         @router.post("/api/oauth/requests/{id}/decide")
         async def decide(id: str, request: Request):
@@ -211,9 +213,7 @@ class OAuth:
             projects = body.get("projects", [])
             if not isinstance(scopes, list) or any(not isinstance(x, str) for x in scopes) or "read" not in scopes or not set(scopes).issubset(set(json.loads(row["scopes"]))):
                 raise DevError("INVALID_SCOPE", "不得超出客户端申请的权限")
-            available = {p["id"] for p in self.store.all("SELECT id FROM projects")}
-            if not isinstance(projects, list) or any(not isinstance(x, str) for x in projects) or not projects or not set(projects).issubset(available):
-                raise DevError("INVALID_PROJECT", "必须显式选择现有项目；不会默认授权将来新增的项目")
+            projects = project_selection(self.store, projects, body.get("all_projects", False))
             gid, code = token(16), token()
             with self.store.lock, self.store.db:
                 self.auth.admin(request, True)
