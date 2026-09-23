@@ -51,7 +51,7 @@
   --chat-cover-task-muted:var(--ui-cover-task-muted,#e5d0b2);
   color-scheme:dark;
 }
-body.chat-mode {margin:0;overflow:hidden;background:var(--ui-bg,#f4f4f4);}
+body.chat-mode {position:fixed;inset:0;width:100%;margin:0;overflow:hidden;background:var(--ui-bg,#f4f4f4);}
 html[data-appearance="dark"] body.chat-mode,body.chat-mode[data-chat-appearance="dark"] {background:var(--ui-bg,#191919);}
 html:has(body.chat-mode) {scrollbar-gutter:auto;}
 .chat-mode .ambient,.chat-mode .shell>.sidebar,.chat-mode .main>.topbar,.chat-mode .sidebar-scrim,.chat-mode .mobile-dock {display:none!important;}
