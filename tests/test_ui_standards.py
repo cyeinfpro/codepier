@@ -107,8 +107,18 @@ def test_command_first_arrow_node_identity_and_filter_reset(stack, engine):
         browser = getattr(pw, engine).launch()
         page = browser.new_page(viewport={"width": 1440, "height": 1000})
         _login(page, stack)
+        page.evaluate("""() => {
+          const original=window.api;
+          window.api=(path,...args)=>path==='/api/projects'
+            ? new Promise(resolve=>window.releaseProjects=()=>{
+                window.api=original;
+                resolve({projects:[...S.projects,{id:'refresh-probe',alias:'刷新项目',device_name:'测试'}]});
+              })
+            : original(path,...args);
+        }""")
         page.locator('[data-ui="command"]').click()
         query = page.locator("#command-query")
+        page.wait_for_function("typeof window.releaseProjects==='function'")
         expect(query).to_have_attribute("role", "combobox")
         query.press("ArrowDown")
         expect(query).to_have_attribute("aria-activedescendant", "command-option-0")
@@ -116,6 +126,11 @@ def test_command_first_arrow_node_identity_and_filter_reset(stack, engine):
         page.evaluate("window.firstOption=document.querySelector('#command-option-0')")
         query.press("ArrowDown")
         expect(query).to_have_attribute("aria-activedescendant", "command-option-1")
+        page.evaluate("""async () => {
+          window.releaseProjects();
+          await new Promise(resolve=>setTimeout(resolve,0));
+        }""")
+        expect(page.get_by_role("option", name="刷新项目")).to_be_visible()
         assert page.evaluate("firstOption===document.querySelector('#command-option-0')")
         query.fill("no-such-location")
         assert query.get_attribute("aria-activedescendant") is None
