@@ -62,6 +62,9 @@ def test_desktop_essentials_fit_and_text_is_readable(stack,engine,scheme,width,h
                 assert page.locator('[data-action="open-project"]').count()==3
             if route=='devices':
                 within(page,'.workspace-device-actions',width,height)
+                assert page.locator('.workspace-device').first.evaluate('''card =>
+                    card.querySelector('.workspace-device-actions').getBoundingClientRect().bottom <=
+                    card.querySelector('.device-lifecycle').getBoundingClientRect().top + 1''')
             if route=='workbench':
                 within(page,'.work-controls,.taskbar,.terminal',width,height)
                 page.locator('[data-action="read-file"][data-path="src/main.py"]').click()
