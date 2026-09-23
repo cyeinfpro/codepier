@@ -11,7 +11,7 @@ import time
 
 CAPABILITIES = dict(steer=True, compact=True, commands=True, stats=True, auto_compaction=False, auto_retry=False)
 COMMANDS = {'pi': {'refresh', 'compact', 'abort_retry', 'set_auto_compaction', 'set_auto_retry'},
-            'codex': {'refresh', 'compact'}}
+            'codex': {'refresh', 'compact'}, 'claude': {'refresh', 'compact'}}
 
 
 def public_model(model):
@@ -28,9 +28,9 @@ def public_model(model):
 
 
 def commands(data, cli):
-    rows = data.get('commands', []) if cli == 'pi' else [s for group in data.get('data', []) for s in group.get('skills', [])]
+    rows = data.get('commands', []) if cli != 'codex' else [s for group in data.get('data', []) for s in group.get('skills', [])]
     return [dict(name=str(x['name'])[:200], description=str(x.get('description', ''))[:2000],
-                 source=str(x.get('source', 'native'))[:80] if cli == 'pi' else 'skill',
+                 source=str(x.get('source', 'native'))[:80] if cli != 'codex' else 'skill',
                  **({'invocation': '$' + str(x['name'])[:200]} if cli == 'codex' else {}))
             for x in rows[:500] if isinstance(x, dict) and isinstance(x.get('name'), str)]
 
@@ -42,7 +42,7 @@ def validate_settings(payload, cli):
         value = payload[key]
         if not isinstance(value, str) or len(value) > 200 or any(ord(c) < 32 for c in value):
             raise ValueError('Invalid native setting')
-        if key == 'effort' and value and value not in ({'off','minimal','low','medium','high','xhigh','max'} if cli == 'pi' else {'none','minimal','low','medium','high','xhigh'}):
+        if key == 'effort' and value and value not in ({'off','minimal','low','medium','high','xhigh','max'} if cli == 'pi' else {'low','medium','high','xhigh','max'} if cli == 'claude' else {'none','minimal','low','medium','high','xhigh'}):
             raise ValueError('Unsupported native effort')
         if key == 'model' and value and cli == 'pi' and ('/' not in value or not all(value.split('/', 1))):
             raise ValueError('Pi model must be provider/id')
@@ -67,15 +67,23 @@ class Probe:
             if time.monotonic() >= self.deadline: raise TimeoutError('Native catalog probe timed out')
             try: raw = raw[os.write(self.child.stdin.fileno(), raw):]
             except BlockingIOError: time.sleep(.005)
-    def call(self, method, params=None, pi=False, timeout=None):
+    def call(self, method, params=None, pi=False, timeout=None, claude=False):
         deadline=min(self.deadline,time.monotonic()+timeout) if timeout is not None else self.deadline
         self.serial += 1
         key = str(self.serial)
-        self.send({'id': key, **({'type': method, **(params or {})} if pi else {'method': method, 'params': params or {}})})
+        if claude:
+            self.send({'type': 'control_request', 'request_id': key, 'request': {'subtype': method, **(params or {})}})
+        else:
+            self.send({'id': key, **({'type': method, **(params or {})} if pi else {'method': method, 'params': params or {}})})
         while time.monotonic() < deadline:
             while b'\n' in self.buffer:
                 line, _, rest = self.buffer.partition(b'\n'); self.buffer[:] = rest
                 m = json.loads(line)
+                if claude:
+                    response = m.get('response') or {}
+                    if m.get('type') != 'control_response' or response.get('request_id') != key: continue
+                    if response.get('subtype') != 'success': raise ValueError(method + ' unavailable in installed Claude version')
+                    return response.get('response') or {}
                 if m.get('id') != key: continue
                 if m.get('error') or pi and not m.get('success'): raise ValueError(method + ' unavailable in installed native version')
                 return m.get('data' if pi else 'result') or {}
@@ -97,6 +105,9 @@ class Probe:
 
 def probe(cli, executable, cwd, env, model='', timeout=8, include_commands=True):
     validate_settings({'model': model}, cli)
+    if cli == 'claude':
+        from agent.claude_cli import probe as claude_probe
+        return claude_probe(executable, cwd, env, model, timeout, include_commands)
     result = dict(cli=cli, cwd=str(cwd), models=[], model=None, thinking_levels=[], commands=[], warnings=[], capabilities=dict(CAPABILITIES))
     if not include_commands: result.pop('commands')
     p = Probe([executable, '--mode', 'rpc', '--no-session'] if cli == 'pi' else [executable, 'app-server'], cwd, env, timeout)

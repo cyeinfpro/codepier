@@ -73,7 +73,7 @@ class NativeCLI:
     def discover(self):
         env = self.environment()
         result = {}
-        for name in ('pi','codex'):
+        for name in ('pi','codex','claude'):
             path = shutil.which(name,path=env.get('PATH'))
             if not path:
                 result[name] = {'available':False,'message':f'Install {name} locally or add its bin directory to shell.env.PATH; CodePier never installs it'}
@@ -133,7 +133,7 @@ class NativeCLI:
         root = self.authorize(project)
         if action == 'chat_catalog':
             cli = args.get('cli')
-            if cli not in ('pi', 'codex'): raise ValueError('CLI must be pi or codex')
+            if cli not in ('pi', 'codex', 'claude'): raise ValueError('CLI must be pi, codex or claude')
             cwd = self.agent.engine.path(root, args.get('cwd', '.'))
             if not cwd.is_dir(): raise ValueError('Invalid catalog cwd')
             model = validate_settings({'model': args.get('model', '')}, cli)['model']
@@ -190,8 +190,8 @@ class NativeCLI:
                 if not cwd.is_dir():
                     raise DevError('INVALID_CWD','项目子目录不存在；不会回退到 HOME')
                 provider = args.get('cli')
-                if provider not in ('pi','codex'):
-                    raise ValueError('CLI must be pi or codex')
+                if provider not in ('pi','codex','claude'):
+                    raise ValueError('CLI must be pi, codex or claude')
                 executable = shutil.which(provider,path=self.environment()['PATH'])
                 if not executable:
                     raise DevError('CLI_MISSING',f'本机未找到 {provider}；安装后将目录加入 shell.env.PATH',409)
@@ -236,6 +236,9 @@ class NativeCLI:
                         else:
                             native_thread=prior['native_thread']
                             if not native_thread: raise ValueError('Native thread was not confirmed; cannot resume')
+                if mode == 'chat' and provider == 'claude':
+                    from agent.claude_cli import launch as claude_launch
+                    argv = claude_launch(executable, settings.get('next', {}), native_thread)
                 if mode == 'chat' and native_thread:
                     owners = db.execute('SELECT id,status FROM sessions WHERE mode=? AND provider=? AND native_thread=?',
                                         ('chat', provider, native_thread)).fetchall()

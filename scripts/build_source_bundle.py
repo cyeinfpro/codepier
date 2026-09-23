@@ -42,7 +42,7 @@ EVIDENCE_FILES = {'full-regression-final.xml','focused-verified.xml','worker-rea
 REQUIRED_FILES = {'hub/panel_update.py','shared/panel_maintenance.py','web/panel-update.js','web/panel-update.css','scripts/panel_updater.py','scripts/panel_update_runtime.py','scripts/panel_update_source.py','codepier','codepier.ps1','web/brand.js','shared/brand_migration.py','shared/brand_browser.py','agent/brand_upgrade.py','scripts/migrate_hub.py','scripts/migrate_hub_data.py','scripts/migrate_hub_networks.py','scripts/migrate_hub_proxy.py','scripts/rename_checkout.py','install.sh','deploy/install-hub.sh','scripts/install_agent.py','scripts/agent_lifecycle.py',
                 'deploy/install-from-hub.sh','deploy/install-from-hub.ps1','agent/native_worker.py','agent/native_windows.py','agent/native_pi_bridge.py',
                 'agent/runner.py','hub/app.py','hub/native_cli.py','shared/native_cli.py',
-                'agent/chat_worker.py','agent/chat_catalog.py',
+                'agent/chat_worker.py','agent/chat_catalog.py','agent/claude_cli.py','agent/claude_protocol.py',
                 'web/index.html','web/chat.js','web/chat.css','web/chat-chrome.js',
                 'web/chat-history.js','web/chat-catalog.js',
                 'web/chat-markdown.js','web/chat-panels.js','web/native-hash.js',
@@ -63,7 +63,7 @@ REQUIRED_FILES = {'hub/panel_update.py','shared/panel_maintenance.py','web/panel
                 'web/mcp-apps/THIRD_PARTY_NOTICES.txt','docs/INTEGRATIONS-20260917.md'}
 
 PUBLIC_DOCS = {
-    'docs/PANEL_UPDATE.md',
+    'docs/PANEL_UPDATE.md', 'docs/CLAUDE_CLI.md',
     'docs/INTEGRATIONS-20260917.md', 'docs/MCP-WORKSPACE-DASHBOARD-20260917.md',
     'docs/DEVTOOLS-FLOW-20260918.md', 'docs/RELEASING.md', 'docs/VPS.md', 'docs/ARCHITECTURE.md', 'docs/LONG_OPERATIONS.md',
 }

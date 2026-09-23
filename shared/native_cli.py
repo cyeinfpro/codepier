@@ -180,12 +180,14 @@ def launch_argv(executable, provider, options, attachment_paths=()):
         if key == 'model':
             argv += ['--model', value]
         elif key == 'provider':
+            if provider == 'claude': raise ValueError('Claude uses its native provider configuration')
             argv += (['-c', 'model_provider=' + json.dumps(value)] if provider == 'codex' else ['--provider', value])
         else:
             allowed = {'minimal','low','medium','high','xhigh'} | ({'off','max'} if provider == 'pi' else {'none'})
+            if provider == 'claude': allowed = {'low','medium','high','xhigh','max'}
             if value not in allowed:
                 raise ValueError('Unsupported thinking level; use native selector')
-            argv += (['-c', 'model_reasoning_effort=' + json.dumps(value)] if provider == 'codex' else ['--thinking', value])
+            argv += (['-c', 'model_reasoning_effort=' + json.dumps(value)] if provider == 'codex' else ['--effort' if provider == 'claude' else '--thinking', value])
     extra = options.get('argv', [])
     if (not isinstance(extra, list) or len(extra) > 80 or any(not isinstance(a, str) or len(a) > 4096 or '\x00' in a for a in extra)):
         raise ValueError('Advanced arguments must be a JSON argv array')
@@ -194,6 +196,8 @@ def launch_argv(executable, provider, options, attachment_paths=()):
         if a in {'-C', '--cd', '--cwd'} or a.startswith(('--cd=', '--cwd=', '-C')):
             raise ValueError('Working directory is controlled by project mapping')
     argv += extra
+    if provider == 'claude' and attachment_paths:
+        raise ValueError('Use structured Claude chat to attach images or files')
     if provider == 'codex':
         for path in attachment_paths:
             argv += ['--image', str(path)]

@@ -65,6 +65,8 @@ def image_inputs(attachments, provider):
         if mime in {'image/png', 'image/jpeg', 'image/webp', 'image/gif'}:
             if provider == 'pi':
                 images.append({'type': 'image', 'data': base64.b64encode(path.read_bytes()).decode(), 'mimeType': mime})
+            elif provider == 'claude':
+                images.append({'type': 'image', 'source': {'type': 'base64', 'media_type': mime, 'data': base64.b64encode(path.read_bytes()).decode()}})
             else:
                 images.append({'type': 'localImage', 'path': str(path)})
         else:
@@ -711,7 +713,11 @@ def run(directory, sid, config_path=None):
         os.set_blocking(child.stdin.fileno(), False)
         db.execute("UPDATE sessions SET status='running',worker_pid=?,child_pid=?,heartbeat=?,updated=? WHERE id=?", (os.getpid(), child.pid, time.time(), time.time(), sid))
         db.commit()
-        protocol = Protocol(row['provider'], row, send, emit, finish, persist)
+        if row['provider'] == 'claude':
+            from agent.claude_protocol import ClaudeProtocol
+            protocol = ClaudeProtocol(row['provider'], row, send, emit, finish, persist)
+        else:
+            protocol = Protocol(row['provider'], row, send, emit, finish, persist)
         def receive_output(data):
             buffer = buffers[child.stdout]
             buffer.extend(data)
@@ -764,8 +770,11 @@ def run(directory, sid, config_path=None):
                     elif command['kind'] == 'chat_settings':
                         protocol.change_settings(command['id'], payload)
                     elif command['kind'] == 'chat_interrupt':
-                        protocol.interrupt()
-                        finish(command['id'], 'completed')
+                        if row['provider'] == 'claude':
+                            protocol.interrupt(command['id'])
+                        else:
+                            protocol.interrupt()
+                            finish(command['id'], 'completed')
                     elif command['kind'] == 'chat_answer':
                         protocol.answer(payload['request_id'], payload['answer'],payload if 'request_guard' in payload else None)
                         finish(command['id'], 'completed')

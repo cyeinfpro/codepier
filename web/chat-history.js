@@ -72,7 +72,7 @@ async function chatList() {
         meta.append(project,state);button.append(title,meta);
       }
       const info=chatProjectInfo(row.project_id||c.project,row),active=row.id===c.selected?.id;
-      const title=row.title||'未命名对话',cli=row.provider==='codex'?'Codex':'Pi';
+      const title=row.title||'未命名对话',cli=chatProviderName(row.provider);
       const state=info.online===false?'节点离线':chatStateName(row.status);
       button.className='chat-session'+(active?' active':'');
       if(active)button.setAttribute('aria-current','page');else button.removeAttribute('aria-current');

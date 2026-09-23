@@ -47,8 +47,10 @@ class NativeService:
             raise DevError('CLI_OFFLINE','节点离线；已同步历史可读，控制待重新连接后重试',409)
         if getattr(con,'native_protocol',0)!=1:
             raise DevError('CLI_AGENT_UPDATE_REQUIRED','此节点 Agent 尚不支持原生会话，请先在节点管理更新 Agent',409)
-        if (action.startswith('chat_') or action=='start' and args.get('mode')=='chat') and getattr(con,'native_chat_protocol',0) not in (1,2):
+        if (action.startswith('chat_') or action=='start' and args.get('mode')=='chat') and getattr(con,'native_chat_protocol',0) not in (1,2,3):
             raise DevError('CLI_CHAT_AGENT_UPDATE_REQUIRED','此节点 Agent 尚不支持结构化对话；请更新该节点 Agent 后重试',409)
+        if action in {'start', 'chat_catalog'} and args.get('cli') == 'claude' and getattr(con, 'native_chat_protocol', 0) < 3:
+            raise DevError('CLI_CHAT_AGENT_UPDATE_REQUIRED', '此节点的 Agent 尚不支持 Claude，请先更新 Agent', 409)
         if (action in {'chat_catalog','chat_command','chat_queue','chat_cancel','chat_steer'} or action=='start' and args.get('mode')=='chat' and (args.get('model') or args.get('effort'))) and getattr(con,'native_chat_protocol',0)<2:
             raise DevError('CLI_CHAT_AGENT_UPDATE_REQUIRED','此节点仍是基础聊天版 Agent；模型目录和完整控制需要更新 Agent，旧会话仍保留',409)
         if len(self.pending)>=64: raise DevError('CLI_BUSY','终端控制通道繁忙，请稍后重试',429)
@@ -85,7 +87,7 @@ class NativeService:
                     sid=identifier(row['id'])
                     p=self.runtime.store.one('SELECT * FROM projects WHERE id=? AND device_id=?',(row['project_id'],device))
                     if not p or p['root']!=row['root'] or p['mode']!='write' or not p['allow_tasks']: continue
-                    if row['device_id']!=device or row['provider'] not in ('pi','codex') or row['status'] not in LIVE|{'exited','interrupted','quota_error','cleared','deleted'}: continue
+                    if row['device_id']!=device or row['provider'] not in ('pi','codex','claude') or row['status'] not in LIVE|{'exited','interrupted','quota_error','cleared','deleted'}: continue
                     if any(not isinstance(row[k],str) or len(row[k])>2048 for k in ('title','cwd','root','error')): continue
                     prior=db.execute('SELECT * FROM sessions WHERE id=?',(sid,)).fetchone()
                     if prior and (prior['device_id'],prior['project_id'],prior['root'])!=(device,p['id'],p['root']): continue
