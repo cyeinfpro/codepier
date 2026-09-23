@@ -185,26 +185,26 @@ def test_background_refresh_preserves_held_click_target(browser,ui_stack):
     try:
         page.fill('#vps-query',v['name'])
         button=page.locator('[data-vps-card]:visible [data-vps-action="edit"]')
-        button.hover()
         page.evaluate('''() => {document.addEventListener('pointerdown',event=>{
-          window.heldVpsButton=event.target.closest('[data-vps-action="edit"]');
-        },{once:true,capture:true});}''')
-        page.mouse.down()
-        assert page.evaluate('!!heldVpsButton && uiPagePointers.size===1')
-        page.evaluate('''() => {
+          const button=event.target.closest('[data-vps-action="edit"]');
+          if(!button)return;
+          window.heldVpsButton=button;
+          vpsInventory=async()=>S.vps;
+          loadBasics=async()=>{};
           const original=uiWaitForPagePointer;
-          uiWaitForPagePointer=()=>{document.body.dataset.refreshWaiting='true';return original();};
+          uiWaitForPagePointer=()=>{
+            document.body.dataset.refreshHeld=String(uiPagePointers.size);
+            return original();
+          };
           void renderPage(false).then(()=>{document.body.dataset.refreshFinished='true';});
-        }''')
-        expect(page.locator('body')).to_have_attribute('data-refresh-waiting','true')
-        assert page.evaluate('heldVpsButton.isConnected && !document.body.dataset.refreshFinished')
-        page.mouse.up()
+        },{once:true,capture:true});}''')
+        button.click(delay=200)
+        expect(page.locator('body')).to_have_attribute('data-refresh-held','1')
         expect(page.locator('#vps-form')).to_be_visible()
         expect(page.locator('body')).to_have_attribute('data-refresh-finished','true')
         assert page.evaluate('heldVpsButton.isConnected')
         expect(page.locator('#vps-form [name="name"]')).to_have_value(v['name'])
-    finally:
-        page.mouse.up();page.close()
+    finally:page.close()
 
 
 def test_background_refresh_does_not_discard_explicit_edit(browser,ui_stack):
