@@ -189,6 +189,12 @@ def test_background_refresh_preserves_held_click_target(browser,ui_stack):
           const button=event.target.closest('[data-vps-action="edit"]');
           if(!button)return;
           window.heldVpsButton=button;
+          window.heldVpsDetachCount=0;
+          const card=button.closest('[data-vps-card]');
+          new MutationObserver(records=>{
+            if(records.some(record=>[...record.removedNodes].some(node=>node===card||node.contains?.(card))))
+              window.heldVpsDetachCount++;
+          }).observe(document.querySelector('#page'),{childList:true,subtree:true});
           vpsInventory=async()=>S.vps;
           loadBasics=async()=>{};
           const original=uiWaitForPagePointer;
@@ -203,6 +209,7 @@ def test_background_refresh_preserves_held_click_target(browser,ui_stack):
         expect(page.locator('#vps-form')).to_be_visible()
         expect(page.locator('body')).to_have_attribute('data-refresh-finished','true')
         assert page.evaluate('heldVpsButton.isConnected')
+        assert page.evaluate('heldVpsDetachCount')==0
         expect(page.locator('#vps-form [name="name"]')).to_have_value(v['name'])
     finally:page.close()
 
