@@ -201,6 +201,7 @@ def test_background_refresh_preserves_held_click_target(browser,ui_stack):
         page.mouse.up()
         expect(page.locator('#vps-form')).to_be_visible()
         expect(page.locator('body')).to_have_attribute('data-refresh-finished','true')
+        assert page.evaluate('heldVpsButton.isConnected')
         expect(page.locator('#vps-form [name="name"]')).to_have_value(v['name'])
     finally:
         page.mouse.up();page.close()

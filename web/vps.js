@@ -11,6 +11,15 @@ function vpsIntent(){
   return ()=>session===S.session&&page===S.page&&id===S.vpsIntent;
 }
 function vpsEndpoint(v){return `${v.host.includes(':')?'['+v.host+']':v.host}:${v.port}`;}
+function vpsReplacePage(html){
+  const page=$('#page'),next=document.createElement('template');next.innerHTML=html;
+  const existing=new Map($$('[data-vps-card]',page).map(card=>[card.dataset.vpsCard,card]));
+  for(const card of next.content.querySelectorAll('[data-vps-card]')){
+    const previous=existing.get(card.dataset.vpsCard);
+    if(previous&&previous.outerHTML===card.outerHTML)card.replaceWith(previous);
+  }
+  page.replaceChildren(next.content);
+}
 async function vpsHTML(seq){
   const [items]=await Promise.all([vpsInventory(),loadBasics()]);
   if(seq!==S.renderSeq)return '';
