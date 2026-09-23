@@ -24,6 +24,7 @@ def main():
     init.add_argument("--re-pair", action="store_true", help="仅更新同一设备的配对凭据，保留目录、任务与能力配置")
     init.add_argument("--allow", action="append", help="可多次指定本机授权目录")
     init.add_argument("--hub")
+    init.add_argument("--shell", choices=("full", "disabled"), help="新安装默认开启当前用户 Shell 和目录任务；disabled 同时关闭新目录任务。重新配对保持原权限")
     run_parser = sub.add_parser("run", help="连接并保持运行（前台诊断）")
     run_parser.add_argument("--supervised", action="store_true", help=argparse.SUPPRESS)
     config = sub.add_parser("configure", help="修改地址、端口或目录授权；运行中的 Agent 会自动重连")
@@ -58,8 +59,8 @@ def main():
             parser.error("配对文件缺少 device_id / secret / hub_url")
         if args.re_pair:
             try:
-                if args.allow is not None:
-                    raise ValueError('--re-pair 不接受 --allow；原目录授权不会改变')
+                if args.allow is not None or args.shell is not None:
+                    raise ValueError('--re-pair 不接受 --allow 或 --shell；原目录授权和执行能力不会改变')
                 before=path.read_bytes();existing=json.loads(before)
                 validate_config(existing,path)
                 if existing.get('device_id')!=c['device_id']:
@@ -82,7 +83,9 @@ def main():
         roots = args.allow or [input("授权项目的父目录（例如 D:\\Projects 或 /home/me/projects）：").strip().strip('"')]
         if not all(x and Path(x).expanduser().is_dir() for x in roots):
             parser.error("每个授权目录必须已经存在于这台电脑")
-        c["allowed_roots"] = [{"path": str(Path(x).expanduser().resolve()), "writable": True, "allow_tasks": False} for x in roots]
+        execution = args.shell != "disabled"
+        c["allowed_roots"] = [{"path": str(Path(x).expanduser().resolve()), "writable": True, "allow_tasks": execution} for x in roots]
+        c["shell"] = {"enabled": execution, "projects": ["*"] if execution else []}
         c["state_dir"] = str(path.parent / "state")
         c["tasks"] = {}
         try:
@@ -90,6 +93,7 @@ def main():
         except (ValueError, OSError) as exc:
             parser.error(str(exc))
         atomic_json(path, c)
+        print("本机 Shell / 目录任务：" + ("已开启。Shell 使用当前系统用户权限，不是目录沙箱；仍需面板项目与客户端执行授权。" if execution else "已关闭。"))
         print(f"已保存：{path}\n连接地址：{c['hub_url']}\n启动：python -m agent --config \"{path}\" run\n配对文件含设备密钥，请妥善保管或删除。")
         if os.name == "nt":
             print("Windows 请通过文件属性/NTFS ACL 限制配置目录权限，仅允许当前用户读取。")

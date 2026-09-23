@@ -1,5 +1,6 @@
 """Real Chromium/WebKit settings flows; host deploy responses are simulated."""
 import copy
+import re
 from pathlib import Path
 import time
 from urllib.parse import urlsplit
@@ -26,8 +27,10 @@ def ready():
             'operation':None,'request_found':None}
 
 
-def open_settings(browser,stack,state,width=1440,post_handler=None):
+def open_settings(browser,stack,state,width=1440,post_handler=None,init_script=None):
     page=browser.new_page(viewport={'width':width,'height':960 if width>500 else 844})
+    if init_script:
+        page.add_init_script(init_script)
     calls=[];errors=[]
     page.on('pageerror',lambda error:errors.append(str(error)))
     def route(r):
@@ -90,7 +93,8 @@ def test_update_confirmation_single_submission_restart_recovery_and_escaping(upd
         assert len(calls)==1
         state.update(busy=False,current_version='1.11.0',running_version='1.11.0',update_available=False)
         state['operation'].update(state='succeeded',phase='done',message='面板及 Agent 文件更新成功')
-        page.click('#panel-update-refresh')
+        # The existing page must discover completion and navigate without a user refresh.
+        expect(page).to_have_url(re.compile(r'_codepier_updated=.*#settings$'), timeout=15000)
         expect(page.locator('#panel-update-reload')).to_be_visible()
         expect(page.locator('#panel-update-state')).to_contain_text('更新成功')
         expect(page.locator('#panel-update-check')).to_be_enabled()

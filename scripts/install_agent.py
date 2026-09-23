@@ -737,7 +737,7 @@ def local_uninstall(base, args, current):
         print('Agent uninstalled. Panel records and project files were preserved.')
 
 
-def install_source(base, source, pairing_file=None, allowed=None, *, recover_stale_operations=False):
+def install_source(base, source, pairing_file=None, allowed=None, *, recover_stale_operations=False, shell="full"):
     """Import a Windows checkout into the Hub installer's managed layout.
 
     Preserve existing source-install configuration byte for byte. Never copy
@@ -808,7 +808,7 @@ def install_source(base, source, pairing_file=None, allowed=None, *, recover_sta
                 if current is None:
                     run([python, '-m', 'agent', '--config', base/'config.json', 'init',
                          '--pairing-file', Path(pairing_file).expanduser().resolve(),
-                         '--allow', Path(allowed).expanduser().resolve()], cwd=runtime)
+                         '--allow', Path(allowed).expanduser().resolve(), '--shell', shell], cwd=runtime)
                 prepared = True
             finally:
                 if not prepared:
@@ -833,6 +833,7 @@ def main():
     parser.add_argument('--uv');parser.add_argument('--install-dir',default=None)
     parser.add_argument('--source', help='Install a local Windows source package into the managed runtime')
     parser.add_argument('--pairing-file')
+    parser.add_argument('--shell', choices=('full', 'disabled'), default='full', help='Fresh installation execution mode; existing configuration is always preserved')
     parser.add_argument('--no-service',action='store_true')
     actions=parser.add_mutually_exclusive_group()
     for flag in ('--start-service','--upgrade','--uninstall','--status'):
@@ -879,7 +880,7 @@ def main():
     created=False
     try:
         if args.source:
-            install_source(base, args.source, args.pairing_file, args.allow, recover_stale_operations=args.recover_stale_operations);return
+            install_source(base, args.source, args.pairing_file, args.allow, recover_stale_operations=args.recover_stale_operations, shell=args.shell);return
         if args.upgrade:
             local_upgrade(base,args,current);return
         if args.uninstall:
@@ -957,7 +958,7 @@ def main():
         with tempfile.TemporaryDirectory(prefix='pairing-',dir=base) as temporary:
             pairing_file=Path(temporary)/'pairing.json'
             pairing_file.write_text(json.dumps(pairing),encoding='utf-8');pairing_file.chmod(0o600)
-            run([python,'-m','agent','--config',config,'init','--pairing-file',pairing_file,'--allow',allowed.resolve()],cwd=runtime)
+            run([python,'-m','agent','--config',config,'init','--pairing-file',pairing_file,'--allow',allowed.resolve(),'--shell',args.shell],cwd=runtime)
         kind, scope = service_identity()
         update_management(base, service=False, service_kind=kind if not args.no_service else 'none',
                           service_scope=scope if not args.no_service else 'none',

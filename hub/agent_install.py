@@ -61,6 +61,7 @@ class InstallTicketInput(BaseModel):
     hub_url: str = Field(min_length=1, max_length=500)
     platform: Literal['posix', 'windows']
     allow_root: str = Field(min_length=1, max_length=2048)
+    enable_execution: bool = True
 
     @model_validator(mode='before')
     @classmethod
@@ -90,7 +91,9 @@ def powershell_quote(value):
     return "'" + value.replace("'", "''") + "'"
 
 
-def install_command(platform, hub_url, enrollment_token, package_sha256, allow_root, bootstrap_sha256=None, *, action='install', expected_device='', install_dir=''):
+def install_command(platform, hub_url, enrollment_token, package_sha256, allow_root, bootstrap_sha256=None, *, action='install', expected_device='', install_dir='', enable_execution=True):
+    if type(enable_execution) is not bool:
+        raise ValueError('Execution option must be a boolean')
     if action not in {'install','upgrade','uninstall'}:
         raise ValueError('Unsupported installer action')
     if action != 'install' and not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', expected_device):
@@ -100,6 +103,8 @@ def install_command(platform, hub_url, enrollment_token, package_sha256, allow_r
     if platform == 'posix':
         values = ('--hub', hub_url, '--token', enrollment_token, '--sha256', package_sha256, '--allow', allow_root) if action == 'install' else (
             '--hub', hub_url, '--sha256', package_sha256, '--'+action, '--expected-device', expected_device)
+        if action == 'install':
+            values += ('--shell', 'full' if enable_execution else 'disabled')
         if install_dir:
             values += ('--install-dir', install_dir)
         args = ' '.join(shlex.quote(value) for value in values)
@@ -121,6 +126,8 @@ def install_command(platform, hub_url, enrollment_token, package_sha256, allow_r
     arguments = ' '.join(powershell_quote(value) for value in (hub_url, enrollment_token, package_sha256, allow_root))
     hub, ticket, sha, root = (powershell_quote(value) for value in (hub_url, enrollment_token, package_sha256, allow_root))
     maintenance = '' if action == 'install' else ' -Action '+action+' -ExpectedDevice '+powershell_quote(expected_device)
+    if action == 'install':
+        maintenance += ' -Shell '+powershell_quote('full' if enable_execution else 'disabled')
     if install_dir:
         maintenance += ' -InstallDir '+powershell_quote(install_dir)
     bootstrap_check = ''
@@ -283,7 +290,7 @@ def make_agent_install_router(runtime, auth, source_root=None):
             enrollment_token = 'rdi_'+token(32)
             bootstrap_sha256 = hashlib.sha256(package.scripts[PUBLIC_SCRIPTS[body.platform]]).hexdigest()
             command = install_command(body.platform, hub_url, enrollment_token, metadata['sha256'], allow_root,
-                                      bootstrap_sha256=bootstrap_sha256)
+                                      bootstrap_sha256=bootstrap_sha256, enable_execution=body.enable_execution)
             expires = now + TICKET_SECONDS
             fingerprint = digest(store.decrypt(device['secret']))
             store.db.execute('DELETE FROM agent_install_tickets WHERE expires<=? OR device_id=?', (now, device_id))
@@ -291,7 +298,7 @@ def make_agent_install_router(runtime, auth, source_root=None):
                 (digest(enrollment_token), device_id, fingerprint, hub_url, expires, now))
             store.db.execute('INSERT INTO audit(at,actor,action,target,status,detail) VALUES (?,?,?,?,?,?)',
                 (now, principal.actor, 'device.install_ticket', device_id, 'ok',
-                 json.dumps({'platform': body.platform, 'expires_at': expires, 'package_sha256': metadata['sha256']})))
+                 json.dumps({'platform': body.platform, 'expires_at': expires, 'package_sha256': metadata['sha256'], 'fresh_install_execution': body.enable_execution})))
         return JSONResponse({'command': command, 'platform': body.platform, 'expires_at': expires, 'package': metadata},
                             headers={'Cache-Control': 'no-store'})
 

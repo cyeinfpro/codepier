@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from hub.auth import Auth, SESSION_SECONDS
+from hub.access import access_defaults, make_access_router, project_selection
 from hub.artifacts import make_artifact_router
 from hub.agent_install import make_agent_install_router
 from hub.native_cli import make_native_router
@@ -77,7 +78,8 @@ class ToolCall(Model):
 class TokenInput(Model):
     label: str = Field(min_length=1, max_length=80)
     scopes: list[str] = Field(min_length=1, max_length=4)
-    projects: list[str] = Field(min_length=1, max_length=100)
+    projects: list[str] = Field(default_factory=list, max_length=1000)
+    all_projects: bool = False
     days: int = Field(default=30, ge=1, le=365)
 
 class PasswordInput(Model):
@@ -411,7 +413,7 @@ def create_app(data_dir: str | None = None):
             raise DevError("LOCAL_READ_ONLY", "本机授权为只读，请修改本机配置或选择只读映射", 403,
                            operation_id=result.get('operation_id'))
         if body.allow_tasks and not result["allow_tasks"]:
-            raise DevError("LOCAL_TASKS_DISABLED", "请先在家里 Agent 的对应 allowed_roots 中将 allow_tasks 设为 true", 403,
+            raise DevError("LOCAL_TASKS_DISABLED", "本机 Agent 尚未允许任务执行。新安装可默认启用；已有 Agent 请在本机使用原配置运行 configure --shell full，或仅把对应 allowed_roots.allow_tasks 设为 true。配置会自动重载，随后再次验证保存；面板不会越过本机授权", 403,
                            operation_id=result.get('operation_id'))
         with store.lock, store.db:
             latest = json.loads(store.one('SELECT value FROM meta WHERE key=?',(key,))['value'])
@@ -573,11 +575,9 @@ def create_app(data_dir: str | None = None):
     @app.post("/api/grants")
     async def add_grant(request: Request, body: TokenInput):
         principal = auth.admin(request, True)
-        # Panel requires explicit current project IDs; no future-project wildcard grant.
-        if "*" in body.projects:
-            raise DevError("INVALID_PROJECT", "请显式勾选要授权的现有项目")
-        result = auth.issue_grant(principal, body.label, body.scopes, body.projects, body.days)
-        store.audit(principal.actor, "token.created", body.label, detail={"grant_id": result["grant_id"], "scopes": body.scopes, "projects": body.projects})
+        projects = project_selection(store, body.projects, body.all_projects)
+        result = auth.issue_grant(principal, body.label, body.scopes, projects, body.days)
+        store.audit(principal.actor, "token.created", body.label, detail={"grant_id": result["grant_id"], "scopes": body.scopes, "projects": projects})
         return result
 
     @app.delete("/api/grants/{id}")
@@ -589,8 +589,8 @@ def create_app(data_dir: str | None = None):
 
     @app.get("/api/settings")
     async def settings(request: Request):
-        auth.admin(request)
-        return {"public_url": public_url(), "mcp_url": public_url() + "/mcp", "http_supported": True, "version": VERSION,
+        principal = auth.admin(request)
+        return {"access_defaults": access_defaults(store, principal.user_id), "public_url": public_url(), "mcp_url": public_url() + "/mcp", "http_supported": True, "version": VERSION,
             "protocol_versions": sorted(VERSIONS), "tools": tool_definitions(), "instructions": INSTRUCTIONS,
             "single_process": True, "reliability": {"queue_ttl_seconds": runtime.queue_seconds, "call_wait_seconds": runtime.wait_seconds, "delivery_retry_seconds": runtime.retry_seconds, "durable_queue": True}, "listen_port": int(os.getenv("HUB_PORT", "8765")), "data_dir": str(store.directory),
             "oauth": {"authorization_endpoint": public_url() + "/oauth/authorize", "token_endpoint": public_url() + "/oauth/token", "registration_endpoint": public_url() + "/oauth/register"}}
@@ -626,6 +626,7 @@ def create_app(data_dir: str | None = None):
         app.include_router(make_router(auth, runtime, public_url))
         app.include_router(make_artifact_router(auth, runtime))
         app.include_router(make_agent_install_router(runtime, auth))
+        app.include_router(make_access_router(auth, runtime))
         app.include_router(make_native_router(auth, runtime))
         app.include_router(make_vps_router(auth, runtime))
         app.include_router(make_panel_update_router(auth, runtime))

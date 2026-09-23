@@ -2,27 +2,28 @@
 # Served by the panel. Installs only for the account running this command.
 set -euo pipefail
 umask 077
-codepier_hub='' codepier_token='' codepier_sha='' codepier_allow=''
+codepier_hub='' codepier_token='' codepier_sha='' codepier_allow='' codepier_shell=full
 codepier_dir="$HOME/.codepier-agent"
 codepier_explicit_dir=0
 codepier_service=1 codepier_action=install codepier_yes=0 codepier_expected=''
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --hub|--token|--sha256|--allow|--install-dir|--expected-device)
+    --hub|--token|--sha256|--allow|--install-dir|--expected-device|--shell)
       [[ $# -ge 2 ]] || { echo 'Missing argument' >&2; exit 2; }
       case "$1" in
         --hub) codepier_hub=$2;; --token) codepier_token=$2;; --sha256) codepier_sha=$2;;
-        --allow) codepier_allow=$2;; --install-dir) codepier_dir=$2; codepier_explicit_dir=1;; --expected-device) codepier_expected=$2;;
+        --shell) codepier_shell=$2;; --allow) codepier_allow=$2;; --install-dir) codepier_dir=$2; codepier_explicit_dir=1;; --expected-device) codepier_expected=$2;;
       esac; shift 2;;
     install|upgrade|uninstall|status|--upgrade|--uninstall|--status)
       [[ "$codepier_action" == install ]] || { echo 'Choose only one action' >&2; exit 2; }
       codepier_action=${1#--}; shift;;
     --yes) codepier_yes=1; shift;;
-    --help|-h) echo 'Usage: bash install-from-hub.sh [install|upgrade|uninstall|status] [--install-dir PATH] [--yes for uninstall]'; exit 0;;
+    --help|-h) echo 'Usage: bash install-from-hub.sh [install|upgrade|uninstall|status] [--install-dir PATH] [--shell full|disabled for new installations] [--yes for uninstall]'; exit 0;;
     --no-service) codepier_service=0; shift;;
     *) echo 'Unknown installer option' >&2; exit 2;;
   esac
 done
+[[ "$codepier_shell" == full || "$codepier_shell" == disabled ]] || { echo "--shell must be full or disabled" >&2; exit 2; }
 # Only the known migration alias is accepted; custom paths are never guessed.
 if [[ "$codepier_explicit_dir" == 0 ]]; then
   codepier_old="$HOME/.remote-dev-agent"
@@ -103,7 +104,7 @@ export CODEPIER_INSTALL_TOKEN="$codepier_token"
 codepier_token=''
 codepier_args=(--archive "$codepier_tmp/agent.zip" --sha256 "$codepier_sha" --hub "$codepier_hub" --install-dir "$codepier_dir" --uv "$codepier_uv")
 if [[ "$codepier_action" == install ]]; then
-  codepier_args+=(--allow "$codepier_allow")
+  codepier_args+=(--allow "$codepier_allow" --shell "$codepier_shell")
   [[ "$codepier_service" == 1 ]] || codepier_args+=(--no-service)
 else
   codepier_args+=("--$codepier_action")

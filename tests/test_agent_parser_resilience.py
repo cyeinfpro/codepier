@@ -110,31 +110,64 @@ def test_parser_ignores_project_pythonpath_and_never_executes_source(tmp_path, m
 
 
 def test_parser_concurrency_and_admission_are_bounded(monkeypatch):
+    # Hold exactly two real children at stdin. Do not assume eight interpreter
+    # startups will all fit within the production two-second admission budget.
     created = []
     peak = 0
     lock = threading.Lock()
+    ready = threading.Event()
+    release = threading.Event()
     real_popen = subprocess.Popen
+
     def spawn(*args, **kwargs):
         nonlocal peak
         child = real_popen(*args, **kwargs)
         with lock:
             created.append(child)
+            initial = len(created) <= 2
             peak = max(peak, sum(p.poll() is None for p in created))
+            if len(created) == 2:
+                ready.set()
+        if initial and not release.wait(12):
+            child.kill()
+            child.wait()
+            raise AssertionError('Controlled parser children were not released')
         return child
-    worker_script(monkeypatch, 'import time; time.sleep(.1); print("{}")')
+
+    worker_script(monkeypatch, 'import sys; sys.stdin.buffer.read(); print("{}")')
     monkeypatch.setattr(symbol_worker.subprocess, 'Popen', spawn)
-    def check(_):
+
+    def check_failed():
         with pytest.raises(DevError) as error:
             analyze('fixture.ts', SOURCE)
         assert error.value.code == 'PARSER_FAILED'
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        list(pool.map(check, range(8)))
-    assert len(created) == 8 and peak <= 2
-    assert all(child.returncode is not None for child in created)
-    with symbol_worker._SLOTS, symbol_worker._SLOTS:
+
+    def check_busy():
         with pytest.raises(DevError) as error:
             analyze('fixture.ts', SOURCE, timeout=.02)
         assert error.value.code == 'PARSER_BUSY'
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        running = [pool.submit(check_failed) for _ in range(2)]
+        try:
+            assert ready.wait(10), 'Two parser workers did not start'
+            blocked = [pool.submit(check_busy) for _ in range(6)]
+            for future in blocked:
+                future.result(timeout=5)
+            assert len(created) == 2 and peak == 2
+        finally:
+            release.set()
+        for future in running:
+            future.result(timeout=15)
+        # Reclaimed slots admit subsequent batches; no rejected call was replayed.
+        for _ in range(3):
+            batch = [pool.submit(check_failed) for _ in range(2)]
+            for future in batch:
+                future.result(timeout=15)
+    assert len(created) == 8 and peak == 2
+    assert all(child.returncode is not None for child in created)
+    with symbol_worker._SLOTS, symbol_worker._SLOTS:
+        check_busy()
     assert len(created) == 8
 
 
