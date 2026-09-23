@@ -35,6 +35,17 @@ def test_panel_return_is_visible_with_history_hidden_or_open(chat_page, width, h
     assert not page.evaluate(r"requests.some(r => /\/(start|stop|chat_prompt)$/.test(r.path))")
 
 
+@pytest.mark.parametrize('chat_page', ['chromium', 'webkit'], indirect=True)
+def test_mobile_focus_cannot_scroll_chat_header_offscreen(chat_page):
+    page = chat_page
+    page.set_viewport_size({'width': 390, 'height': 844})
+    page.evaluate("document.body.style.height = '1200px'; window.scrollTo(0, 120)")
+    page.fill('#chat-compose', 'Draft during a viewport resize')
+    assert page.locator('#chat-back').bounding_box()['y'] >= 0
+    page.evaluate('chatViewport()')
+    assert page.locator('#chat-back').bounding_box()['y'] >= 0
+
+
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
 @pytest.mark.parametrize('scheme,width,height', [('light',1440,900), ('dark',390,844), ('light',320,568)])
 def test_real_panel_roundtrip_retains_session_draft_and_theme(stack, engine, scheme, width, height):
