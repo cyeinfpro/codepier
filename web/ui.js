@@ -162,7 +162,18 @@ async function uiCommand(){
     const selected=itemKey(filtered[active]),q=input.value.trim().toLocaleLowerCase();
     filtered=entries().filter(item=>(item.label+' '+item.id+' '+item.hint).toLocaleLowerCase().includes(q));
     active=reset?-1:filtered.findIndex(item=>itemKey(item)===selected);
-    results.innerHTML=filtered.map((item,i)=>`<button type="button" class="command-item" id="command-option-${i}" role="option" tabindex="-1" data-command-index="${i}" aria-selected="false">${icon(item.ico)}<span>${esc(item.label)}<small>${esc(item.hint)}</small></span>${icon('arrow')}</button>`).join('')||'<div class="empty" role="status">没有匹配的页面或项目</div>';
+    const previous=new Map($$('[data-command-key]',results).map(el=>[el.dataset.commandKey,el]));
+    const buttons=filtered.map((item,i)=>{
+      const key=itemKey(item),button=previous.get(key)||document.createElement('button');
+      button.type='button';button.className='command-item';button.id=`command-option-${i}`;
+      button.dataset.commandKey=key;button.dataset.commandIndex=String(i);
+      button.setAttribute('role','option');button.tabIndex=-1;button.setAttribute('aria-selected','false');
+      const content=`${icon(item.ico)}<span>${esc(item.label)}<small>${esc(item.hint)}</small></span>${icon('arrow')}`;
+      if(button.innerHTML!==content)button.innerHTML=content;
+      return button;
+    });
+    if(!buttons.length)results.innerHTML='<div class="empty" role="status">没有匹配的页面或项目</div>';
+    else if(buttons.length!==results.children.length||buttons.some((button,i)=>results.children[i]!==button))results.replaceChildren(...buttons);
     sync();
   }
   async function choose(index){
