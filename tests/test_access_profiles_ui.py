@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import os
+import re
 import uuid
 from urllib.parse import parse_qs, urlsplit
 
@@ -102,7 +103,10 @@ def test_oauth_profile_filters_scope_and_project_then_binds_real_token(profiles_
     sent = result.request.post_data_json
     assert sent['profile_id'] == profile['id'] and sent['profile_version'] == profile['version']
     assert sent['scopes'] == ['read', 'write'] and sent['projects'] == [stack.project['id']]
-    code = parse_qs(urlsplit(result.json()['redirect']).query)['code'][0]
+    # Chromium can discard the fetch body when consent navigates to the callback.
+    # Verify the real redirect rather than rereading a detached response body.
+    page.wait_for_url(re.compile(r'^http://localhost:12345/callback\?'))
+    code = parse_qs(urlsplit(page.url).query)['code'][0]
     token = stack.must(stack.client.post('/oauth/token', data={
         'grant_type': 'authorization_code', 'code': code, 'client_id': registration['client_id'],
         'redirect_uri': 'http://localhost:12345/callback', 'code_verifier': verifier}))['access_token']
