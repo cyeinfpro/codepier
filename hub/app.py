@@ -18,7 +18,9 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from hub.auth import Auth, SESSION_SECONDS
-from hub.access_profiles import make_profiles_router
+from hub.access_profiles import make_profiles_router, refresh_profile_principal
+from hub.roles import make_roles_router, require_role, role_project_scopes, require_new_mapping
+from shared.role_contracts import ROLE_SCOPE
 from hub.access import access_defaults, make_access_router, project_selection
 from hub.artifacts import make_artifact_router
 from hub.agent_install import make_agent_install_router
@@ -84,6 +86,9 @@ class TokenInput(Model):
     days: int = Field(default=30, ge=1, le=365)
     profile_id: str | None = Field(default=None, min_length=1, max_length=100)
     profile_version: int | None = Field(default=None, ge=1)
+    authorization_mode: str = Field(default='fixed', pattern=r'^(fixed|role)$')
+    role_version: int | None = Field(default=None, ge=1)
+    confirm_dynamic_role: bool = False
 
 class PasswordInput(Model):
     current_password: str = Field(min_length=1, max_length=256)
@@ -266,7 +271,7 @@ def create_app(data_dir: str | None = None):
             "today_operations": sum(counts.values()), "today_succeeded": counts.get("succeeded", 0), "today_failed": counts.get("failed", 0),
             "active_operations": store.one("SELECT count(*) AS n FROM operations WHERE state IN ('running','queued','reconnecting','cancelling')")["n"],
             "recent_operations": operation_rows(limit=8), "recent_audit": audit_rows(limit=6),
-            "mcp_url": public_url() + "/mcp", "version": VERSION, "tool_count": len(TOOLS), "timezone": str(tz)}
+            "mcp_url": public_url() + "/mcp", "role_mcp_url": public_url() + "/mcp?authorization=role", "version": VERSION, "tool_count": len(TOOLS), "timezone": str(tz)}
 
     def device_rows():
         rows = store.all("SELECT id,name,enabled,info,last_seen,created FROM devices ORDER BY created")
@@ -375,6 +380,11 @@ def create_app(data_dir: str | None = None):
         return {"projects": runtime.list_projects(auth.admin(request))}
 
     async def save_project(body: ProjectInput, principal, id=None, request=None):
+        principal = refresh_profile_principal(store, principal)
+        if not principal.admin:
+            if id is not None:
+                raise DevError('OWNER_REQUIRED', '角色委派仅允许新增映射，不允许替换现有映射', 403)
+            require_role(store, principal, 'projects.create', device_id=body.device_id, creation=body.model_dump())
         alias = body.alias.strip()
         if not re.fullmatch(r"[\w.-]{1,64}", alias, flags=re.UNICODE) or alias in {".", ".."}:
             raise DevError("INVALID_ALIAS", "别名可使用中英文、数字、短横线、下划线和点，不要使用空格或路径")
@@ -382,7 +392,7 @@ def create_app(data_dir: str | None = None):
         fields['alias'] = alias
         fingerprint = digest(json.dumps([id,fields],sort_keys=True,ensure_ascii=False))
         # A durable save receipt owns the validation and the mapping commit.
-        key = 'project_save:'+digest(principal.user_id+'\n'+(body.idempotency_key or fingerprint))
+        key = 'project_save:'+digest((principal.user_id if principal.admin else principal.actor)+'\n'+(body.idempotency_key or fingerprint))
         with store.lock, store.db:
             saved = store.one("SELECT value FROM meta WHERE key=?", (key,))
             plan = json.loads(saved['value']) if saved else None
@@ -392,13 +402,15 @@ def create_app(data_dir: str | None = None):
                 current = store.one('SELECT * FROM projects WHERE id=?',(plan['target'],))
                 if current != plan['committed']:
                     raise DevError('PROJECT_CHANGED','原保存已完成，但项目随后改变；请刷新核对，未覆盖新配置',409)
-                return runtime.project_public(runtime.project(plan['target'],principal))
+                return runtime.project_public(current)
             old = store.one("SELECT * FROM projects WHERE id=?", (id,)) if id else None
             if id and not old:
                 raise DevError("NOT_FOUND", "项目映射不存在", 404)
             exists = store.one("SELECT id FROM projects WHERE alias_key=?", (alias_key(alias),))
             if exists and exists["id"] != id:
                 raise DevError("ALIAS_EXISTS", "这个别名已被使用（不区分大小写）", 409)
+            if not principal.admin:
+                require_new_mapping(store, principal, body.device_id, body.root)
             if not plan or plan.get('committed'):
                 plan = {'fingerprint':fingerprint,'validation_key':'project-validation-'+uuid.uuid4().hex,
                         'target':id or uuid.uuid4().hex,'before':old,'created':time.time()}
@@ -419,12 +431,18 @@ def create_app(data_dir: str | None = None):
             raise DevError("LOCAL_TASKS_DISABLED", "本机 Agent 尚未允许任务执行。新安装可默认启用；已有 Agent 请在本机使用原配置运行 configure --shell full，或仅把对应 allowed_roots.allow_tasks 设为 true。配置会自动重载，随后再次验证保存；面板不会越过本机授权", 403,
                            operation_id=result.get('operation_id'))
         with store.lock, store.db:
+            store.db.execute('BEGIN IMMEDIATE')
+            principal = refresh_profile_principal(store, principal)
+            role = require_role(store, principal, 'projects.create', device_id=body.device_id,
+                                creation={**body.model_dump(), 'root': result['root']}) if not principal.admin else None
             latest = json.loads(store.one('SELECT value FROM meta WHERE key=?',(key,))['value'])
             if latest.get('committed'):
                 current = store.one('SELECT * FROM projects WHERE id=?',(latest['target'],))
                 if current != latest['committed']:
                     raise DevError('PROJECT_CHANGED','原保存完成后项目已变化，请刷新核对',409)
-                return runtime.project_public(runtime.project(latest['target'],principal))
+                return runtime.project_public(current)
+            if not principal.admin:
+                require_new_mapping(store, principal, body.device_id, result['root'])
             current = store.one('SELECT * FROM projects WHERE id=?',(id,)) if id else None
             if current != plan['before']:
                 raise DevError('PROJECT_CHANGED','验证期间项目已改变；未覆盖另一窗口的更新',409)
@@ -441,11 +459,21 @@ def create_app(data_dir: str | None = None):
                 store.db.execute("UPDATE projects SET alias=?,alias_key=?,device_id=?,root=?,description=?,mode=?,allow_tasks=? WHERE id=?", (alias, alias_key(alias), body.device_id, result["root"], body.description, body.mode, int(body.allow_tasks), target))
             else:
                 store.db.execute("INSERT INTO projects VALUES (?,?,?,?,?,?,?,?,?)", (target, alias, alias_key(alias), body.device_id, result["root"], body.description, body.mode, int(body.allow_tasks), time.time()))
+            if role:
+                store.db.execute('INSERT INTO role_created_projects(role_id,project_id,created) VALUES (?,?,?)',
+                                 (role['id'], target, time.time()))
             latest['committed'] = store.one('SELECT * FROM projects WHERE id=?',(target,))
             store.db.execute('UPDATE meta SET value=? WHERE key=?',(json.dumps(latest,ensure_ascii=False),key))
         store.audit(principal.actor, "project.updated" if id else "project.created", alias, detail={"root": result["root"], "mode": body.mode, "allow_tasks": body.allow_tasks})
         runtime.publish("project", {"id": target})
-        return runtime.project_public(runtime.project(target, principal))
+        return runtime.project_public(store.one('SELECT * FROM projects WHERE id=?', (target,)))
+
+    async def create_project_for_role(arguments, principal):
+        result = await save_project(ProjectInput.model_validate(arguments), principal)
+        return {**result, 'created_by_role': principal.role_id,
+                'role_access': sorted(role_project_scopes(store, principal, result['id']))}
+
+    runtime.project_creator = create_project_for_role
 
     @app.post("/api/projects")
     async def add_project(request: Request, body: ProjectInput):
@@ -578,10 +606,14 @@ def create_app(data_dir: str | None = None):
     @app.post("/api/grants")
     async def add_grant(request: Request, body: TokenInput):
         principal = auth.admin(request, True)
-        projects = project_selection(store, body.projects, body.all_projects)
+        if body.authorization_mode == 'role' and (body.projects or body.all_projects):
+            raise DevError('INVALID_PROJECT', '动态角色不保存首次项目清单；请在角色管理中配置')
+        projects = [] if body.authorization_mode == 'role' else project_selection(store, body.projects, body.all_projects)
         result = auth.issue_grant(principal, body.label, body.scopes, projects, body.days,
-                                  profile_id=body.profile_id, profile_version=body.profile_version)
-        store.audit(principal.actor, "token.created", body.label, detail={"grant_id": result["grant_id"], "scopes": body.scopes, "projects": projects})
+                                  profile_id=body.profile_id, profile_version=body.profile_version, authorization_mode=body.authorization_mode,
+                                  role_version=body.role_version, confirm_dynamic_role=body.confirm_dynamic_role)
+        store.audit(principal.actor, "token.created", body.label, detail={"grant_id": result["grant_id"], "scopes": body.scopes, "projects": projects,
+                    "authorization_mode": body.authorization_mode, "profile_id": body.profile_id, "role_version": body.role_version})
         return result
 
     @app.delete("/api/grants/{id}")
@@ -594,7 +626,7 @@ def create_app(data_dir: str | None = None):
     @app.get("/api/settings")
     async def settings(request: Request):
         principal = auth.admin(request)
-        return {"access_defaults": access_defaults(store, principal.user_id), "public_url": public_url(), "mcp_url": public_url() + "/mcp", "http_supported": True, "version": VERSION,
+        return {"access_defaults": access_defaults(store, principal.user_id), "public_url": public_url(), "mcp_url": public_url() + "/mcp", "role_mcp_url": public_url() + "/mcp?authorization=role", "http_supported": True, "version": VERSION,
             "protocol_versions": sorted(VERSIONS), "tools": tool_definitions(), "instructions": INSTRUCTIONS,
             "single_process": True, "reliability": {"queue_ttl_seconds": runtime.queue_seconds, "call_wait_seconds": runtime.wait_seconds, "delivery_retry_seconds": runtime.retry_seconds, "durable_queue": True}, "listen_port": int(os.getenv("HUB_PORT", "8765")), "data_dir": str(store.directory),
             "oauth": {"authorization_endpoint": public_url() + "/oauth/authorize", "token_endpoint": public_url() + "/oauth/token", "registration_endpoint": public_url() + "/oauth/register"}}
@@ -632,6 +664,7 @@ def create_app(data_dir: str | None = None):
         app.include_router(make_agent_install_router(runtime, auth))
         app.include_router(make_access_router(auth, runtime))
         app.include_router(make_profiles_router(auth, runtime))
+        app.include_router(make_roles_router(auth, runtime))
         app.include_router(make_native_router(auth, runtime))
         app.include_router(make_vps_router(auth, runtime))
         app.include_router(make_panel_update_router(auth, runtime))

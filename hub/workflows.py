@@ -5,6 +5,7 @@ Mutations, replay receipts and audit events commit in one SQLite transaction.
 """
 from __future__ import annotations
 from hub.access_profiles import effective_grant
+from hub.roles import role_project_scopes
 
 import base64
 import json
@@ -42,6 +43,7 @@ class Workflows:
             raise DevError("WORKFLOW_NOT_FOUND", "找不到此授权范围内的工作流", 404)
         project = self.runtime.project(row["project_id"], principal)
         changed = row["root"] != project["root"] or row["device_id"] != project["device_id"]
+        self.runtime.authorize(principal, 'write' if write else 'read', project_id=project['id'])
         if write:
             if project["mode"] != "write":
                 raise DevError("READ_ONLY", "项目已设为只读；不能更改工作流", 403)
@@ -50,7 +52,7 @@ class Workflows:
         row["steps"] = json.loads(row["steps"])
         row["project_alias"] = project["alias"]
         row["mapping_changed"] = changed
-        row["can_update"] = not changed and project["mode"] == "write" and "write" in principal.scopes
+        row["can_update"] = not changed and project["mode"] == "write" and "write" in role_project_scopes(self.store, principal, project["id"])
         row["assigned_to_mcp"] = row["grant_id"] is not None
         return row
 
@@ -165,6 +167,7 @@ class Workflows:
         with self.store.lock, self.store.db:
             self.store.db.execute("BEGIN IMMEDIATE")
             project = self.runtime.project(args["project"], principal)
+            self.runtime.authorize(principal, 'write', project_id=project['id'])
             if project["mode"] != "write":
                 raise DevError("READ_ONLY", "只读项目不能建立工作流", 403)
             requested = args["assignee_grant_id"]
@@ -175,6 +178,7 @@ class Workflows:
                 grant = self.store.one("SELECT * FROM grants WHERE id=?", (assignee,))
                 try:
                     scopes, allowed, _ = effective_grant(self.store, grant)
+                    self.runtime.authorize(self.runtime.grant_principal(grant), 'write', project_id=project['id'])
                 except DevError as exc:
                     raise DevError("INVALID_ASSIGNEE", "该授权或访问 Profile 已停用", 403) from exc
                 if not {"read", "write"}.issubset(scopes):

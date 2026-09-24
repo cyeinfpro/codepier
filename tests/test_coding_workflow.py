@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 from shared.contracts import TOOLS, tool_definitions
 from shared.coding_contracts import CODING_TOOLS
+from shared.role_contracts import ROLE_TOOLS
 from shared.crypto import digest
 from shared.util import DevError
 from shared.computer_media import mcp_result
@@ -27,7 +28,8 @@ def write(path, content, sha='new'):
 
 def test_small_catalog_is_opt_in_and_complete():
     full, compact = tool_definitions(), tool_definitions('coding')
-    assert {d['name'] for d in full} == set(TOOLS) - {'integration_control','validations_accept'}
+    assert {d['name'] for d in full} == set(TOOLS) - {'integration_control','validations_accept'} - ROLE_TOOLS
+    assert {d['name'] for d in tool_definitions(authorization='role')} == set(TOOLS) - {'integration_control','validations_accept'}
     model_tools = [x for x in compact if x.get('_meta', {}).get('ui', {}).get('visibility') != ['app']]
     assert len(model_tools) == len(CODING_TOOLS) == 33
     assert {x['name'] for x in model_tools} == set(CODING_TOOLS)

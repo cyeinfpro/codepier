@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, alias TEXT NOT NULL, a
 CREATE TABLE IF NOT EXISTS vps_connections (id TEXT PRIMARY KEY, name TEXT NOT NULL, name_key TEXT UNIQUE NOT NULL, host TEXT NOT NULL, port INTEGER NOT NULL CHECK(port BETWEEN 1 AND 65535), username TEXT NOT NULL, secret TEXT NOT NULL, host_key_policy TEXT NOT NULL DEFAULT 'strict', provider TEXT NOT NULL DEFAULT '', region TEXT NOT NULL DEFAULT '', system TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, version INTEGER NOT NULL DEFAULT 1, connection_revision INTEGER NOT NULL DEFAULT 1, created REAL NOT NULL, updated REAL NOT NULL, UNIQUE(host,port,username));
 CREATE TABLE IF NOT EXISTS vps_projects (vps_id TEXT NOT NULL REFERENCES vps_connections(id) ON DELETE CASCADE, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, binding_id TEXT NOT NULL, PRIMARY KEY(vps_id,project_id));
 CREATE INDEX IF NOT EXISTS vps_project_lookup ON vps_projects(project_id,vps_id);
+CREATE TABLE IF NOT EXISTS access_roles (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), label TEXT NOT NULL, label_key TEXT NOT NULL, policy TEXT NOT NULL, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)), version INTEGER NOT NULL CHECK(version>0), created REAL NOT NULL, updated REAL NOT NULL, create_key TEXT NOT NULL, create_fingerprint TEXT NOT NULL, UNIQUE(user_id,label_key), UNIQUE(user_id,create_key));
+CREATE TABLE IF NOT EXISTS role_created_projects (role_id TEXT NOT NULL REFERENCES access_roles(id), project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, created REAL NOT NULL, PRIMARY KEY(role_id,project_id));
 CREATE TABLE IF NOT EXISTS access_profiles (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), label TEXT NOT NULL, label_key TEXT NOT NULL, scopes TEXT NOT NULL, projects TEXT NOT NULL, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)), version INTEGER NOT NULL CHECK(version>0), created REAL NOT NULL, updated REAL NOT NULL, create_key TEXT NOT NULL, create_fingerprint TEXT NOT NULL, UNIQUE(user_id,label_key), UNIQUE(user_id,create_key));
 CREATE TABLE IF NOT EXISTS grants (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, label TEXT NOT NULL, client_id TEXT, scopes TEXT NOT NULL, projects TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS tokens (id TEXT PRIMARY KEY, hash TEXT UNIQUE NOT NULL, grant_id TEXT NOT NULL REFERENCES grants(id), kind TEXT NOT NULL, expires REAL NOT NULL, created REAL NOT NULL);
@@ -114,7 +116,7 @@ class Store:
                 self.db.execute(statement)
         self.db.execute("INSERT OR IGNORE INTO meta VALUES ('schema', '1')")
         version = self.db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0]
-        if version not in {"1", "2", "3", "4", "5", "6"}:
+        if version not in {"1", "2", "3", "4", "5", "6", "7"}:
             raise RuntimeError(f"Unsupported Hub database schema version: {version}")
         # Additive migration: v1 databases and their audit history remain readable.
         columns = {r[1] for r in self.db.execute("PRAGMA table_info(operations)")}
@@ -134,7 +136,16 @@ class Store:
         if "profile_id" not in grant_columns:
             self.db.execute("ALTER TABLE grants ADD COLUMN profile_id TEXT REFERENCES access_profiles(id)")
         self.db.execute("CREATE INDEX IF NOT EXISTS grants_profile ON grants(profile_id)")
-        self.db.execute("UPDATE meta SET value='6' WHERE key='schema'")
+        if "authorization_mode" not in grant_columns:
+            self.db.execute("ALTER TABLE grants ADD COLUMN authorization_mode TEXT NOT NULL DEFAULT 'fixed' CHECK(authorization_mode IN ('fixed','role'))")
+        if "role_id" not in grant_columns:
+            self.db.execute("ALTER TABLE grants ADD COLUMN role_id TEXT REFERENCES access_roles(id)")
+        profile_columns = {r[1] for r in self.db.execute("PRAGMA table_info(access_profiles)")}
+        if "role_id" not in profile_columns:
+            self.db.execute("ALTER TABLE access_profiles ADD COLUMN role_id TEXT REFERENCES access_roles(id)")
+        self.db.execute("CREATE INDEX IF NOT EXISTS profiles_role ON access_profiles(role_id)")
+        self.db.execute("CREATE INDEX IF NOT EXISTS grants_role ON grants(role_id)")
+        self.db.execute("UPDATE meta SET value='7' WHERE key='schema'")
 
     def execute(self, sql: str, args=()):
         with self.lock, self.db:

@@ -525,6 +525,10 @@ PROCESS_TOOLS |= {'validation_run', 'lsp_query', 'worktrees_create', 'worktrees_
 OUTPUT_SCHEMAS['vps_list'] = _object({'vps': {'type': 'array', 'items': {'type': 'object'}}, 'total': _INT, 'next_offset': _NULLABLE_INT}, ('vps', 'total', 'next_offset'))
 OUTPUT_SCHEMAS['vps_exec'] = OUTPUT_SCHEMAS['ssh_exec'].copy()
 
+from shared.role_contracts import register as register_roles, ROLE_SCOPE, ROLE_TOOLS
+register_roles(Tool, Empty, Args, TOOLS, OUTPUT_SCHEMAS)
+MUTATING.update({'projects_create'})
+
 # A remote call can return either its final payload or a durable pending receipt.
 # MCP structured tool errors also obey the advertised schema.
 for _name, _schema in list(OUTPUT_SCHEMAS.items()):
@@ -604,15 +608,18 @@ def _compact_input_schema(schema, *, output=False):
     return result
 
 
-def tool_definitions(profile="full"):
+def tool_definitions(profile="full", authorization="fixed"):
+    if authorization not in {'fixed', 'role'}:
+        raise ValueError('Unknown authorization mode')
     if profile not in {"full", "coding"}:
         raise ValueError("Unknown MCP tool profile")
     result = [{"name": name, "description": t.description, "inputSchema": t.model.model_json_schema(),
              "outputSchema": OUTPUT_SCHEMAS[name],
-             "annotations": {"readOnlyHint": t.scope == "read" or name in COMPUTER_READ_TOOLS, "destructiveHint": t.destructive,
+             "annotations": {"readOnlyHint": t.scope in {"read", "devices.read"} or name in COMPUTER_READ_TOOLS, "destructiveHint": t.destructive,
                              "idempotentHint": True, "openWorldHint": t.scope in {"execute", "computer"}},
              "_meta": {"securitySchemes": [{"type": "oauth2", "scopes": [t.scope]}]}}
-            for name, t in TOOLS.items() if name not in ADMIN_TOOLS and (profile == "full" or name in CODING_TOOLS or name in APP_ONLY_TOOLS)]
+            for name, t in TOOLS.items() if name not in ADMIN_TOOLS and (authorization == 'role' or name not in ROLE_TOOLS)
+            and (profile == "full" or name in CODING_TOOLS or name in APP_ONLY_TOOLS or authorization == 'role' and name in ROLE_TOOLS)]
     for definition in result:
         if definition['name'] == 'get_profile':
             definition['_meta']['openai/profile'] = True
@@ -620,4 +627,11 @@ def tool_definitions(profile="full"):
         for definition in result:
             definition['inputSchema'] = _compact_input_schema(definition['inputSchema'])
             definition['outputSchema'] = _compact_input_schema(definition['outputSchema'], output=True)
-    return [decorate_integration(item) for item in result]
+    result = [decorate_integration(item) for item in result]
+    if authorization == 'role':
+        for item in result:
+            schemes = [{'type': 'oauth2', 'scopes': [ROLE_SCOPE]}]
+            item['securitySchemes'] = schemes
+            item['_meta']['securitySchemes'] = schemes
+            item['_meta']['codepier/authorizationMode'] = 'role'
+    return result

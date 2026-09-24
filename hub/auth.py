@@ -8,6 +8,8 @@ from hub.store import Store
 from hub.access_profiles import effective_grant, validate_profile_consent
 from shared.crypto import digest, token, password_verify
 from shared.util import DevError
+from shared.role_contracts import ROLE_SCOPE
+from hub.roles import validate_role_consent
 
 SESSION_SECONDS = 12 * 3600
 
@@ -56,12 +58,13 @@ class Auth:
         value = value.strip()
         if not value or len(value) > 500:
             raise DevError("INVALID_TOKEN", "无效的凭据", 401)
-        row = self.store.one("SELECT t.*,g.user_id,g.label,g.scopes,g.projects,g.revoked,g.resource,g.profile_id FROM tokens t JOIN grants g ON g.id=t.grant_id WHERE t.hash=? AND t.kind IN ('access','pat') AND t.expires>? AND g.revoked=0", (digest(value), time.time()))
+        row = self.store.one("SELECT t.*,g.user_id,g.label,g.scopes,g.projects,g.revoked,g.resource,g.profile_id,g.authorization_mode,g.role_id FROM tokens t JOIN grants g ON g.id=t.grant_id WHERE t.hash=? AND t.kind IN ('access','pat') AND t.expires>? AND g.revoked=0", (digest(value), time.time()))
         if not row or (row["kind"] == "access" and self.resource and row["resource"] != self.resource()):
             raise DevError("INVALID_TOKEN", "凭据已过期或撤销", 401)
         scopes, projects, _ = effective_grant(self.store, row)
         return Principal("mcp:" + row["grant_id"] + ":" + row["label"], row["user_id"], scopes, projects,
-                         grant_id=row["grant_id"], profile_id=row["profile_id"])
+                         grant_id=row["grant_id"], profile_id=row["profile_id"],
+                         authorization_mode=row['authorization_mode'], role_id=row['role_id'])
 
     async def login(self, request: Request, username: str, password: str):
         self.check_origin(request)
@@ -100,10 +103,15 @@ class Auth:
         self.store.audit("panel:" + username, "auth.login", status="ok", detail={"ip": ip})
         return {"cookie": secret, "csrf": csrf, "username": username, "user_id": user['id']}
 
-    def issue_grant(self, principal: Principal, label: str, scopes: list[str], projects: list[str], days: int = 30, client_id=None, *, profile_id=None, profile_version=None):
-        if "read" not in scopes or not set(scopes).issubset({"read", "write", "execute", "computer"}):
+    def issue_grant(self, principal: Principal, label: str, scopes: list[str], projects: list[str], days: int = 30, client_id=None, *, profile_id=None, profile_version=None, authorization_mode='fixed', role_version=None, confirm_dynamic_role=False):
+        if authorization_mode == 'role':
+            if scopes != [ROLE_SCOPE] or projects:
+                raise DevError('INVALID_SCOPE', '动态角色仅接受 codepier.role_access，资源清单由角色实时决定')
+        elif authorization_mode != 'fixed':
+            raise DevError('INVALID_SCOPE', '未知授权模式')
+        elif "read" not in scopes or not set(scopes).issubset({"read", "write", "execute", "computer"}):
             raise DevError("INVALID_SCOPE", "权限必须包含 read，且只支持 read/write/execute/computer")
-        if not projects:
+        if not projects and authorization_mode != 'role':
             raise DevError("NO_PROJECTS", "至少选择一个项目")
         if "*" not in projects:
             found = {x["id"] for x in self.store.all("SELECT id FROM projects")}
@@ -113,7 +121,18 @@ class Auth:
         now = time.time()
         with self.store.lock, self.store.db:
             self.store.db.execute("BEGIN IMMEDIATE")
-            validate_profile_consent(self.store, principal.user_id, profile_id, scopes, projects, profile_version)
-            self.store.db.execute("INSERT INTO grants(id,user_id,label,client_id,scopes,projects,revoked,created,profile_id) VALUES (?,?,?,?,?,?,0,?,?)", (gid, principal.user_id, label, client_id, json.dumps(sorted(set(scopes))), json.dumps(projects), now, profile_id))
+            role_id = None
+            if authorization_mode == 'role':
+                role = validate_role_consent(self.store, principal.user_id, profile_id, profile_version, role_version, confirm_dynamic_role)
+                role_id = role['id']
+            else:
+                validate_profile_consent(self.store, principal.user_id, profile_id, scopes, projects, profile_version)
+            self.store.db.execute("INSERT INTO grants(id,user_id,label,client_id,scopes,projects,revoked,created,profile_id,authorization_mode,role_id) VALUES (?,?,?,?,?,?,0,?,?,?,?)", (gid, principal.user_id, label, client_id, json.dumps(sorted(set(scopes))), json.dumps(projects), now, profile_id, authorization_mode, role_id))
             self.store.db.execute("INSERT INTO tokens VALUES (?,?,?,'pat',?,?)", (tid, digest(secret), gid, now + days * 86400, now))
+            if role_id:
+                self.store.db.execute("INSERT INTO audit(at,actor,action,target,status,detail) VALUES (?,?,?,?,?,?)",
+                    (now, principal.actor, 'role.consent', gid, 'ok', json.dumps({
+                        'source': 'pat', 'profile_id': profile_id, 'role_id': role_id,
+                        'role_version': role['version'], 'policy': json.loads(role['policy']),
+                        'dynamic_resources_and_actions': True}, ensure_ascii=False)))
         return {"grant_id": gid, "token": secret, "expires": now + days * 86400}

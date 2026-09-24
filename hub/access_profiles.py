@@ -18,6 +18,7 @@ from pydantic import Field
 
 from hub.access import AccessModel, project_selection
 from shared.util import DevError
+from shared.role_contracts import ROLE_SCOPE
 
 SCOPES = frozenset({'read', 'write', 'execute', 'computer'})
 MAX_PROFILES = 200
@@ -49,6 +50,11 @@ def effective_grant(store, grant):
     if not grant or grant['revoked']:
         raise DevError('INVALID_TOKEN', '授权已撤销', 401)
     grant = dict(grant)
+    if grant.get('authorization_mode', 'fixed') == 'role':
+        from hub.roles import effective_role
+        return effective_role(store, grant)
+    if grant.get('authorization_mode', 'fixed') != 'fixed':
+        raise DevError('INVALID_TOKEN', '未知授权模式，未授予访问权限', 401)
     try:
         scopes, projects = stored_permissions(grant)
         profile = None
@@ -76,7 +82,8 @@ def refresh_profile_principal(store, principal):
     if not row or row['user_id'] != principal.user_id or row['profile_id'] != principal.profile_id:
         raise DevError('INVALID_TOKEN', '访问 Profile 的授权绑定已变化', 401)
     scopes, projects, _ = effective_grant(store, row)
-    return replace(principal, scopes=scopes, projects=projects)
+    return replace(principal, scopes=scopes, projects=projects,
+                   authorization_mode=row.get('authorization_mode', 'fixed'), role_id=row.get('role_id'))
 
 
 def validate_profile_consent(store, user_id, profile_id, scopes, projects, version):
@@ -124,7 +131,12 @@ def current_profile(store, principal):
 def access_context(store, principal):
     identity, scopes, projects, profile = current_profile(store, principal)
     rows = store.all('SELECT id,alias FROM projects ORDER BY alias_key')
-    return {'profile': identity, 'managed': profile is not None, 'scopes': sorted(scopes),
+    grant = store.one('SELECT * FROM grants WHERE id=?', (principal.grant_id,))
+    extra = {'authorization_mode': 'fixed'}
+    if grant.get('authorization_mode') == 'role':
+        from hub.roles import role_context
+        extra = role_context(store, grant)
+    return {**extra, 'profile': identity, 'managed': profile is not None, 'scopes': sorted(scopes),
             'projects': [row for row in rows if '*' in projects or row['id'] in projects],
             'all_projects': '*' in projects,
             'isolation': 'credential', 'chat_project_is_security_boundary': False,
@@ -132,14 +144,15 @@ def access_context(store, principal):
 
 
 def public_profile(row):
-    return {key: row[key] for key in ('id', 'label', 'version', 'created', 'updated')} | {
+    return {'role_id': row.get('role_id')} | {key: row[key] for key in ('id', 'label', 'version', 'created', 'updated')} | {
         'scopes': json.loads(row['scopes']), 'projects': json.loads(row['projects']),
         'enabled': bool(row['enabled']), 'all_projects': json.loads(row['projects']) == ['*']}
 
 
 class ProfileFields(AccessModel):
     label: str = Field(min_length=1, max_length=80)
-    scopes: list[str] = Field(min_length=1, max_length=4)
+    scopes: list[str] = Field(default_factory=lambda: ['read'], min_length=1, max_length=4)
+    role_id: str | None = Field(default=None, min_length=1, max_length=100)
     projects: list[str] = Field(default_factory=list, max_length=1000)
     all_projects: bool = False
     enabled: bool = True
@@ -153,14 +166,18 @@ class ProfileUpdate(ProfileFields):
     expected_version: int = Field(ge=1)
 
 
-def profile_values(store, body):
+def profile_values(store, body, user_id):
     label = body.label.strip()
     if not label or any(ord(char) < 32 or ord(char) == 127 for char in label):
         raise DevError('INVALID_PROFILE', '名称不能为空或包含控制字符')
     scopes = set(body.scopes)
     if 'read' not in scopes or not scopes <= SCOPES:
         raise DevError('INVALID_SCOPE', 'Profile 必须包含 read，且仅支持 read/write/execute/computer')
-    projects = project_selection(store, body.projects, body.all_projects)
+    if body.role_id:
+        role = store.one('SELECT id FROM access_roles WHERE id=? AND user_id=?', (body.role_id, user_id))
+        if not role:
+            raise DevError('ROLE_NOT_FOUND', '只能绑定自己的现有角色', 404)
+    projects = [] if body.role_id and not body.projects and not body.all_projects else project_selection(store, body.projects, body.all_projects)
     return label, unicodedata.normalize('NFKC', label).casefold(), sorted(scopes), projects
 
 
@@ -178,7 +195,15 @@ def make_profiles_router(auth, runtime):
         principal = auth.admin(request)
         rows = store.all('SELECT * FROM access_profiles WHERE user_id=? ORDER BY label_key,id LIMIT ?',
                          (principal.user_id, MAX_PROFILES))
-        return {'profiles': [public_profile(row) for row in rows], 'limit': MAX_PROFILES}
+        items = []
+        for row in rows:
+            item = public_profile(row)
+            if row.get('role_id'):
+                from hub.roles import public_role
+                role = store.one('SELECT * FROM access_roles WHERE id=? AND user_id=?', (row['role_id'], principal.user_id))
+                item['role'] = public_role(role, store) if role else None
+            items.append(item)
+        return {'profiles': items, 'limit': MAX_PROFILES}
 
     @router.get('/api/access-profiles/{profile_id}')
     async def read_profile(profile_id: str, request: Request):
@@ -202,20 +227,20 @@ def make_profiles_router(auth, runtime):
                 if old['create_fingerprint'] != fingerprint:
                     raise DevError('IDEMPOTENCY_CONFLICT', '此幂等键已用于其他 Profile 参数，请先核查原记录', 409)
                 return public_profile(old)
-            label, label_key, scopes, projects = profile_values(store, body)
+            label, label_key, scopes, projects = profile_values(store, body, principal.user_id)
             if store.one('SELECT count(*) AS n FROM access_profiles WHERE user_id=?', (principal.user_id,))['n'] >= MAX_PROFILES:
                 raise DevError('PROFILE_LIMIT', f'每个账号最多保存 {MAX_PROFILES} 个 Profile', 409)
             identifier, now = 'prf_' + uuid.uuid4().hex, time.time()
             try:
                 store.db.execute('''INSERT INTO access_profiles
-                    (id,user_id,label,label_key,scopes,projects,enabled,version,created,updated,create_key,create_fingerprint)
-                    VALUES (?,?,?,?,?,?,?,1,?,?,?,?)''',
+                    (id,user_id,label,label_key,scopes,projects,enabled,version,created,updated,create_key,create_fingerprint,role_id)
+                    VALUES (?,?,?,?,?,?,?,1,?,?,?,?,?)''',
                     (identifier, principal.user_id, label, label_key, json.dumps(scopes), json.dumps(projects),
-                     int(body.enabled), now, now, body.idempotency_key, fingerprint))
+                     int(body.enabled), now, now, body.idempotency_key, fingerprint, body.role_id))
             except sqlite3.IntegrityError as exc:
                 raise DevError('PROFILE_EXISTS', '此账号已有同名 Profile，请使用不同名称', 409) from exc
             profile_audit(store, principal.actor, 'profile.created', identifier,
-                          {'label': label, 'scopes': scopes, 'projects': projects, 'enabled': body.enabled})
+                          {'label': label, 'scopes': scopes, 'projects': projects, 'enabled': body.enabled, 'role_id': body.role_id})
             row = store.one('SELECT * FROM access_profiles WHERE id=?', (identifier,))
         return public_profile(row)
 
@@ -228,21 +253,21 @@ def make_profiles_router(auth, runtime):
             row = store.one('SELECT * FROM access_profiles WHERE id=? AND user_id=?', (profile_id, principal.user_id))
             if not row:
                 raise DevError('PROFILE_NOT_FOUND', '访问 Profile 不存在', 404)
-            label, label_key, scopes, projects = profile_values(store, body)
-            selected = (label, scopes, projects, body.enabled)
-            before = (row['label'], json.loads(row['scopes']), json.loads(row['projects']), bool(row['enabled']))
+            label, label_key, scopes, projects = profile_values(store, body, principal.user_id)
+            selected = (label, scopes, projects, body.enabled, body.role_id)
+            before = (row['label'], json.loads(row['scopes']), json.loads(row['projects']), bool(row['enabled']), row.get('role_id'))
             if row['version'] != body.expected_version and selected != before:
                 raise DevError('PROFILE_CHANGED', 'Profile 已在其他窗口修改，请重新读取后核对', 409)
             if selected != before:
                 try:
                     store.db.execute('''UPDATE access_profiles SET label=?,label_key=?,scopes=?,projects=?,enabled=?,
-                        version=version+1,updated=? WHERE id=?''',
-                        (label, label_key, json.dumps(scopes), json.dumps(projects), int(body.enabled), time.time(), profile_id))
+                        role_id=?,version=version+1,updated=? WHERE id=?''',
+                        (label, label_key, json.dumps(scopes), json.dumps(projects), int(body.enabled), body.role_id, time.time(), profile_id))
                 except sqlite3.IntegrityError as exc:
                     raise DevError('PROFILE_EXISTS', '此账号已有同名 Profile', 409) from exc
                 profile_audit(store, principal.actor, 'profile.updated', profile_id,
                               {'before': public_profile(row), 'label': label, 'scopes': scopes, 'projects': projects,
-                               'enabled': body.enabled, 'existing_grant_consent_unchanged': True})
+                                'enabled': body.enabled, 'role_id': body.role_id, 'existing_grant_consent_unchanged': True})
             row = store.one('SELECT * FROM access_profiles WHERE id=?', (profile_id,))
         runtime.wake.set()
         return public_profile(row)

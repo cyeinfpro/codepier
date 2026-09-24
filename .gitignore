@@ -60,3 +60,5 @@ token*.txt
 !/docs/CLAUDE_CLI.md
 
 !/docs/ACCESS_PROFILES.md
+
+!/docs/DYNAMIC_ROLES.md

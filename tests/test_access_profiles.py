@@ -340,7 +340,7 @@ def test_v5_migration_keeps_legacy_grants_tokens_and_master_key(tmp_path):
         assert current.pop('profile_id') is None and current == before
         assert upgraded.all('SELECT * FROM tokens') == tokens
         assert upgraded.one('SELECT count(*) AS n FROM access_profiles')['n'] == 0
-        assert upgraded.one("SELECT value FROM meta WHERE key='schema'")['value'] == '6'
+        assert upgraded.one("SELECT value FROM meta WHERE key='schema'")['value'] == '7'
         assert (directory / 'master.key').read_bytes() == key
         upgraded.close()
 

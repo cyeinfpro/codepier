@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased — Access Profiles
+## Unreleased — 动态角色与 Access Profiles
+
+- Profile 与共用 Role 分离；明确同意角色模式后，已有连接跟随当前项目/能力政策，支持全部未来项目、逐规则排除和本角色创建的项目。
+- 新增 codepier.role_access OAuth 范围、角色管理页、显式确认、版本/幂等及前后审计；旧 fixed grant 不静默转换。
+- 按具体操作与资源配对授权，防止「全项目读取 + A 执行」串成全项目执行。等待结果、派送、工作流及创建提交重新验权。
+- 新增 devices_list/projects_create 管理委派，限制设备、路径、映射模式及任务，保留 Agent 本机否决，防止用重叠映射绕过项目授权。
+- schema 7 增量迁移保留旧授权及主密钥。角色暂停返回政策拒绝而非反复 OAuth；重新绑定另一角色需要再次明确同意。
+- 新增真实临时 Hub/Agent、OAuth、迁移和浏览器矩阵测试；未声明生产部署或真实 ChatGPT 宿主验收。
+
+### Access Profiles 基础
 
 - 新增 owner 管理的稳定 Access Profile 身份、OAuth/PAT 绑定、管理页面和授权选择器。
 - 新增已认证 MCP `get_profile`（OpenAI profile 标记）与 `get_access_context`，完整/编码目录均可使用。
