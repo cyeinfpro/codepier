@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from hub.auth import Auth
+from hub.access_profiles import effective_grant, validate_profile_consent
 from hub.access import access_defaults, project_selection
 from hub.runtime import Runtime
 from shared.crypto import digest, token
@@ -105,12 +106,13 @@ class OAuth:
         return urlunsplit((u.scheme, u.netloc, u.path, u.query + ("&" if u.query else "") + extra, ""))
 
     def new_tokens(self, grant_id: str):
+        grant = self.store.one("SELECT * FROM grants WHERE id=?", (grant_id,))
+        scopes, _, _ = effective_grant(self.store, grant)
         now = time.time()
         access, refresh = "rda_" + token(), "rdr_" + token()
         self.store.db.execute("INSERT INTO tokens VALUES (?,?,?,'access',?,?)", (token(16), digest(access), grant_id, now + 3600, now))
         self.store.db.execute("INSERT INTO tokens VALUES (?,?,?,'refresh',?,?)", (token(16), digest(refresh), grant_id, now + 30 * 86400, now))
-        grant = self.store.db.execute("SELECT scopes FROM grants WHERE id=?", (grant_id,)).fetchone()
-        return {"access_token": access, "token_type": "Bearer", "expires_in": 3600, "refresh_token": refresh, "scope": " ".join(json.loads(grant["scopes"]))}
+        return {"access_token": access, "token_type": "Bearer", "expires_in": 3600, "refresh_token": refresh, "scope": " ".join(sorted(scopes))}
 
     @staticmethod
     async def json_object(request: Request):
@@ -214,17 +216,20 @@ class OAuth:
             if not isinstance(scopes, list) or any(not isinstance(x, str) for x in scopes) or "read" not in scopes or not set(scopes).issubset(set(json.loads(row["scopes"]))):
                 raise DevError("INVALID_SCOPE", "不得超出客户端申请的权限")
             projects = project_selection(self.store, projects, body.get("all_projects", False))
+            profile_id = body.get("profile_id")
             gid, code = token(16), token()
             with self.store.lock, self.store.db:
+                self.store.db.execute("BEGIN IMMEDIATE")
                 self.auth.admin(request, True)
+                validate_profile_consent(self.store, principal.user_id, profile_id, scopes, projects, body.get("profile_version"))
                 if row["resource"] != self.resource():
                     raise DevError("INVALID_TARGET", "资源标识已变化，请重新发起授权")
                 used = self.store.db.execute("UPDATE oauth_requests SET used=1 WHERE id=? AND used=0 AND expires>?", (id, time.time())).rowcount
                 if not used:
                     raise DevError("AUTH_REQUEST_EXPIRED", "授权请求已处理", 410)
-                self.store.db.execute("INSERT INTO grants(id,user_id,label,client_id,scopes,projects,revoked,created,resource) VALUES (?,?,?,?,?,?,0,?,?)", (gid, principal.user_id, row["client_name"], row["client_id"], json.dumps(sorted(set(scopes))), json.dumps(projects), time.time(), row["resource"]))
+                self.store.db.execute("INSERT INTO grants(id,user_id,label,client_id,scopes,projects,revoked,created,resource,profile_id) VALUES (?,?,?,?,?,?,0,?,?,?)", (gid, principal.user_id, row["client_name"], row["client_id"], json.dumps(sorted(set(scopes))), json.dumps(projects), time.time(), row["resource"], profile_id))
                 self.store.db.execute("INSERT INTO oauth_codes VALUES (?,?,?,?,?,?,?)", (digest(code), row["client_id"], row["redirect_uri"], row["challenge"], row["resource"], gid, time.time() + 300))
-            self.store.audit(principal.actor, "oauth.consent", row["client_name"], detail={"grant_id": gid, "scopes": scopes, "projects": projects})
+            self.store.audit(principal.actor, "oauth.consent", row["client_name"], detail={"grant_id": gid, "scopes": scopes, "projects": projects, "profile_id": profile_id})
             return {"redirect": self.redirect(row["redirect_uri"], {"code": code, "state": row["state"]})}
 
         @router.post("/oauth/token")
@@ -261,7 +266,7 @@ class OAuth:
                     return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
                 return JSONResponse(result, headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
             except DevError as exc:
-                return JSONResponse({"error": "invalid_request", "error_description": exc.message}, status_code=exc.status)
+                return JSONResponse({"error": "invalid_grant" if exc.code == "INVALID_TOKEN" else "invalid_request", "error_description": exc.message}, status_code=400 if exc.code == "INVALID_TOKEN" else exc.status)
 
         @router.post("/oauth/revoke")
         async def revoke(request: Request):

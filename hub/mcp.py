@@ -127,6 +127,7 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                 except DevError as exc:
                     value={'error':{'code':exc.code,'message':exc.message,**exc.details}}
                     result={'content':[{'type':'text','text':json.dumps(value,ensure_ascii=False)}],'structuredContent':value,'isError':True}
+                    if name == 'get_profile':result.pop('structuredContent')
                     if trace:trace['status']='tool_error';trace['operation_id']=exc.details.get('operation_id')
                     if exc.code=='INSUFFICIENT_SCOPE':
                         scopes=sorted({'read',TOOLS[name].scope}) if name in TOOLS else ['read']

@@ -9,6 +9,7 @@ import time
 import unicodedata
 import uuid
 from dataclasses import dataclass
+from hub.access_profiles import effective_grant, refresh_profile_principal, current_profile, access_context
 
 from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
@@ -44,6 +45,7 @@ class Principal:
     projects: list[str]
     grant_id: str | None = None
     admin: bool = False
+    profile_id: str | None = None
 
 
 def remote_codex_denial(name: str, args: dict, principal: Principal) -> str | None:
@@ -171,11 +173,12 @@ class Runtime:
         return [self.project_public(p) for p in self.store.all("SELECT p.*,d.name AS device_name FROM projects p JOIN devices d ON d.id=p.device_id ORDER BY p.alias_key") if self.visible_project(p, principal)]
 
     def operation_row(self, id: str, principal: Principal, *, status_only=False):
+        principal = refresh_profile_principal(self.store, principal)
         columns = "id,grant_id,project_id,tool,state" if status_only else "*"
         row = self.store.one(f"SELECT {columns} FROM operations WHERE id=?", (id,))
         if not row or (not principal.admin and (row["grant_id"] != principal.grant_id or row["project_id"] and "*" not in principal.projects and row["project_id"] not in principal.projects)):
             raise DevError("OPERATION_NOT_FOUND", "找不到此授权范围内的操作", 404)
-        if row['tool'] in COMPUTER_TOOLS - {'computer_status'} and 'computer' not in principal.scopes:
+        if row['tool'] in (COMPUTER_TOOLS - {'computer_status'}) | {'browser_open', 'browser_snapshot', 'browser_action', 'browser_close'} and 'computer' not in principal.scopes:
             raise DevError('INSUFFICIENT_SCOPE', '读取桌面操作结果仍需 computer 权限', 403)
         return row
 
@@ -285,6 +288,7 @@ class Runtime:
         return {"operations": rows[:args["limit"]], "next_before_created": rows[args["limit"]-1]["created"] if len(rows) > args["limit"] else None}
 
     async def invoke(self, name: str, raw: dict, principal: Principal):
+        principal = refresh_profile_principal(self.store, principal)
         tool = TOOLS.get(name)
         if not tool:
             raise DevError("UNKNOWN_TOOL", "不存在此工具", 404)
@@ -309,7 +313,11 @@ class Runtime:
             return self.integrations.handoff(args, principal)
         if name == 'activity_list':
             return self.integrations.activity(args, principal)
-        if name == "projects_list":
+        if name == "get_profile":
+            result = current_profile(self.store, principal)[0]
+        elif name == "get_access_context":
+            result = access_context(self.store, principal)
+        elif name == "projects_list":
             result = {"projects": self.list_projects(principal)}
         elif name == "vps_list":
             result = self.vps.list(args, principal)
@@ -544,8 +552,12 @@ class Runtime:
             return "排队操作的项目写入/任务权限已撤销"
         if op["grant_id"]:
             grant = self.store.one("SELECT * FROM grants WHERE id=?", (op["grant_id"],))
-            if not grant or grant["revoked"] or scope not in json.loads(grant["scopes"]) or not ("*" in json.loads(grant["projects"]) or op["project_id"] in json.loads(grant["projects"])):
-                return "排队操作的 MCP 授权已撤销或缩小"
+            try:
+                scopes, projects, _ = effective_grant(self.store, grant)
+            except DevError:
+                return "排队操作的 MCP 授权或访问 Profile 已撤销/停用"
+            if scope not in scopes or not ("*" in projects or op["project_id"] in projects):
+                return "排队操作的 MCP 授权或访问 Profile 已缩小"
         return None
 
     async def delivery_loop(self):
@@ -615,10 +627,14 @@ class Runtime:
             # Never trust a client-supplied origin, UA or project field. Durable
             # actor/grant columns originate from Auth, not tool arguments.
             panel = not op["grant_id"] and op["actor"].startswith("panel:")
-            grant = self.store.one('SELECT scopes FROM grants WHERE id=?', (op['grant_id'],)) if op['grant_id'] else None
+            grant = self.store.one('SELECT * FROM grants WHERE id=?', (op['grant_id'],)) if op['grant_id'] else None
+            try:
+                delivery_scopes = sorted(effective_grant(self.store, grant)[0]) if grant else []
+            except DevError:
+                delivery_scopes = []
             request['integration_context'] = {'owner': 'grant:'+op['grant_id'] if op['grant_id'] else op['actor'],
                 'admin': panel, 'device_id': op['device_id'],
-                'scopes': json.loads(grant['scopes']) if grant else (['read','write','execute','computer'] if panel else [])}
+                'scopes': delivery_scopes if grant else (['read','write','execute','computer'] if panel else [])}
             if not op['accepted_at'] and op['project_id'] and op['tool'] in TOOLS:
                 current_project = self.store.one('SELECT * FROM projects WHERE id=?', (op['project_id'],))
                 if current_project:

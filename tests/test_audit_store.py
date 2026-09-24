@@ -70,7 +70,7 @@ def test_many_concurrent_openers_complete_atomic_migration(tmp_path, legacy):
     try:
         assert all(store.decrypt(value) == "same-key" for value in encrypted)
         assert store.one("SELECT count(*) AS n FROM audit WHERE action='concurrent-open'")["n"] == 8
-        assert store.one("SELECT value FROM meta WHERE key='schema'")["value"] == "5"
+        assert store.one("SELECT value FROM meta WHERE key='schema'")["value"] == "6"
         assert "resource" in {row["name"] for row in store.all("PRAGMA table_info(grants)")}
         if legacy:
             assert store.one("SELECT action FROM audit WHERE action='before-upgrade'")
@@ -161,7 +161,7 @@ def test_interrupted_migration_rolls_back_and_can_retry(tmp_path, monkeypatch):
     store = Store(directory)
     try:
         assert store.one("SELECT action FROM audit")["action"] == "before-upgrade"
-        assert store.one("SELECT value FROM meta WHERE key='schema'")["value"] == "5"
+        assert store.one("SELECT value FROM meta WHERE key='schema'")["value"] == "6"
     finally:
         store.close()
 
@@ -192,7 +192,7 @@ def test_v2_grant_migration_preserves_existing_authorizations(tmp_path):
         assert grant["resource"] is None
         assert grant["scopes"] == '["read"]'
         assert grant["projects"] == '["project"]'
-        assert upgraded.one("SELECT value FROM meta WHERE key='schema'")["value"] == "5"
+        assert upgraded.one("SELECT value FROM meta WHERE key='schema'")["value"] == "6"
         assert (directory / "master.key").read_bytes() == key
     finally:
         upgraded.close()

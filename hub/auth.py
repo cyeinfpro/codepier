@@ -5,6 +5,7 @@ import time
 from fastapi import Request
 from hub.runtime import Principal
 from hub.store import Store
+from hub.access_profiles import effective_grant, validate_profile_consent
 from shared.crypto import digest, token, password_verify
 from shared.util import DevError
 
@@ -55,10 +56,12 @@ class Auth:
         value = value.strip()
         if not value or len(value) > 500:
             raise DevError("INVALID_TOKEN", "无效的凭据", 401)
-        row = self.store.one("SELECT t.*,g.user_id,g.label,g.scopes,g.projects,g.revoked,g.resource FROM tokens t JOIN grants g ON g.id=t.grant_id WHERE t.hash=? AND t.kind IN ('access','pat') AND t.expires>? AND g.revoked=0", (digest(value), time.time()))
+        row = self.store.one("SELECT t.*,g.user_id,g.label,g.scopes,g.projects,g.revoked,g.resource,g.profile_id FROM tokens t JOIN grants g ON g.id=t.grant_id WHERE t.hash=? AND t.kind IN ('access','pat') AND t.expires>? AND g.revoked=0", (digest(value), time.time()))
         if not row or (row["kind"] == "access" and self.resource and row["resource"] != self.resource()):
             raise DevError("INVALID_TOKEN", "凭据已过期或撤销", 401)
-        return Principal("mcp:" + row["grant_id"] + ":" + row["label"], row["user_id"], set(json.loads(row["scopes"])), json.loads(row["projects"]), grant_id=row["grant_id"])
+        scopes, projects, _ = effective_grant(self.store, row)
+        return Principal("mcp:" + row["grant_id"] + ":" + row["label"], row["user_id"], scopes, projects,
+                         grant_id=row["grant_id"], profile_id=row["profile_id"])
 
     async def login(self, request: Request, username: str, password: str):
         self.check_origin(request)
@@ -97,7 +100,7 @@ class Auth:
         self.store.audit("panel:" + username, "auth.login", status="ok", detail={"ip": ip})
         return {"cookie": secret, "csrf": csrf, "username": username, "user_id": user['id']}
 
-    def issue_grant(self, principal: Principal, label: str, scopes: list[str], projects: list[str], days: int = 30, client_id=None):
+    def issue_grant(self, principal: Principal, label: str, scopes: list[str], projects: list[str], days: int = 30, client_id=None, *, profile_id=None, profile_version=None):
         if "read" not in scopes or not set(scopes).issubset({"read", "write", "execute", "computer"}):
             raise DevError("INVALID_SCOPE", "权限必须包含 read，且只支持 read/write/execute/computer")
         if not projects:
@@ -109,6 +112,8 @@ class Auth:
         gid, tid, secret = token(16), token(16), "rd_" + token()
         now = time.time()
         with self.store.lock, self.store.db:
-            self.store.db.execute("INSERT INTO grants(id,user_id,label,client_id,scopes,projects,revoked,created) VALUES (?,?,?,?,?,?,0,?)", (gid, principal.user_id, label, client_id, json.dumps(sorted(set(scopes))), json.dumps(projects), now))
+            self.store.db.execute("BEGIN IMMEDIATE")
+            validate_profile_consent(self.store, principal.user_id, profile_id, scopes, projects, profile_version)
+            self.store.db.execute("INSERT INTO grants(id,user_id,label,client_id,scopes,projects,revoked,created,profile_id) VALUES (?,?,?,?,?,?,0,?,?)", (gid, principal.user_id, label, client_id, json.dumps(sorted(set(scopes))), json.dumps(projects), now, profile_id))
             self.store.db.execute("INSERT INTO tokens VALUES (?,?,?,'pat',?,?)", (tid, digest(secret), gid, now + days * 86400, now))
         return {"grant_id": gid, "token": secret, "expires": now + days * 86400}

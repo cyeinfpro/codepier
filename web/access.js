@@ -15,7 +15,7 @@ window.CodePierAccess=(()=>{
   }
   function html(){
     const defaults=S.settings?.access_defaults||{};
-    return `<section class="panel" id="access-settings" aria-labelledby="access-settings-title"><div class="panel-head"><h2 id="access-settings-title">${icon('shield')}MCP 默认授权</h2></div><div class="panel-body"><form id="access-settings-form"><div class="check-list"><label class="check"><input name="all_projects" type="checkbox" ${defaults.all_projects?'checked':''}>默认选择全部现有及未来新增项目</label><label class="check"><input name="developer_scopes" type="checkbox" ${defaults.developer_scopes?'checked':''}>默认勾选读取、写入和执行权限</label><label class="check"><input name="apply_to_existing" type="checkbox" ${defaults.all_projects?'':'disabled'}>同时将全部项目范围应用到已有有效 OAuth 连接</label></div><p class="form-note">默认值只预选新授权页面，应用接入仍需你确认，且不会超出客户端申请的权限；桌面控制不默认勾选。批量应用仅扩展当前账号已有 OAuth 连接的项目范围，不增加工具权限，不更换凭据，不延长有效期，也不影响 PAT。</p><p class="form-note">关闭默认选项不会自动撤销已有授权。可在“MCP 接入 → 调整项目范围”逐项收回未来项目或只保留指定项目。</p><div class="actions"><button class="btn primary" type="submit">保存授权设置</button><button class="btn ghost" type="button" data-nav="connect">管理已有连接</button></div><p id="access-settings-status" class="form-note" role="status"></p></form></div></section>`;
+    return `<section class="panel" id="access-settings" aria-labelledby="access-settings-title"><div class="panel-head"><h2 id="access-settings-title">${icon('shield')}MCP 默认授权</h2></div><div class="panel-body"><form id="access-settings-form"><div class="check-list"><label class="check"><input name="all_projects" type="checkbox" ${defaults.all_projects?'checked':''}>默认选择全部现有及未来新增项目</label><label class="check"><input name="developer_scopes" type="checkbox" ${defaults.developer_scopes?'checked':''}>默认勾选读取、写入和执行权限</label><label class="check"><input name="apply_to_existing" type="checkbox" ${defaults.all_projects?'':'disabled'}>同时将全部项目范围应用到已有有效 OAuth 连接</label></div><p class="form-note">默认值只预选新授权页面，应用接入仍需你确认，且不会超出客户端申请的权限；桌面控制不默认勾选。批量应用仅扩展当前账号已有传统 OAuth 连接（不含 Profile 连接）的项目范围，不增加工具权限，不更换凭据，不延长有效期，也不影响 PAT。</p><p class="form-note">关闭默认选项不会自动撤销已有授权。可在“MCP 接入 → 调整项目范围”逐项收回未来项目或只保留指定项目。</p><div class="actions"><button class="btn primary" type="submit">保存授权设置</button><button class="btn ghost" type="button" data-nav="connect">管理已有连接</button></div><p id="access-settings-status" class="form-note" role="status"></p></form></div></section>`;
   }
   function bind(){
     const form=$('#access-settings-form');if(!form)return;
@@ -26,7 +26,7 @@ window.CodePierAccess=(()=>{
       event.preventDefault();
       busy($('button[type="submit"]',form),async()=>{
         const body={all_projects:all.checked,developer_scopes:form.elements.developer_scopes.checked,apply_to_existing:apply.checked};
-        if(body.apply_to_existing&&!confirm('将当前账号所有有效 OAuth 连接改为可访问全部现有及未来新增项目？\n只扩展项目范围，现有工具权限和凭据保持不变。'))return;
+        if(body.apply_to_existing&&!confirm('将当前账号所有有效传统 OAuth 连接（不含 Profile）改为可访问全部现有及未来新增项目？\n只扩展项目范围，现有工具权限和凭据保持不变。'))return;
         const controls=$$('input',form);controls.forEach(field=>{field.disabled=true;});status.textContent='正在保存授权设置…';
         try{
           const result=await api('/api/settings/access',{method:'PUT',body:JSON.stringify(body)});

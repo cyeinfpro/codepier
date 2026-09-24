@@ -564,6 +564,12 @@ operation_id
 
 ---
 
+## Access Profiles：多连接身份
+
+可在管理面板「访问 Profiles」建立稳定的用途身份，在 OAuth / PAT 授权时绑定。支持同一 ChatGPT 账号连接多个 Profile，并通过 `get_profile` / `get_access_context` 区分身份和有效权限。Profile 是原 grant 的权限上限，不会替旧连接扩权，也不把 ChatGPT 聊天或 Project 变成安全边界。旧连接保留原行为。
+
+使用、迁移和安全边界见 [Access Profiles](docs/ACCESS_PROFILES.md)。此功能的源码存在不代表当前服务或 ChatGPT 工具目录已经更新。
+
 ## 安全模型
 
 CodePier 可以执行真实文件修改、Shell、浏览器和桌面操作，因此默认设计重点是**明确授权与可恢复审计**，而不是把远程执行伪装成沙箱。

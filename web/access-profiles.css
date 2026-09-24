@@ -1,0 +1,4 @@
+/* Reuse the panel's typography and responsive layouts. Long IDs never widen it. */
+#profiles-page .mono { overflow-wrap: anywhere; }
+#profiles-page .grant-row > button { flex-shrink: 0; }
+#access-profile-selector { max-width: 100%; }

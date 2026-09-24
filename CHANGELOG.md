@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — Access Profiles
+
+- 新增 owner 管理的稳定 Access Profile 身份、OAuth/PAT 绑定、管理页面和授权选择器。
+- 新增已认证 MCP `get_profile`（OpenAI profile 标记）与 `get_access_context`，完整/编码目录均可使用。
+- 有效权限为原 grant 同意与当前 Profile 上限的交集；停用、刷新、派送前复核和跨 grant 归属继续保留。
+- schema 6 增量迁移不重绑定旧授权；传统批量范围设置排除 Profile grant，避免绕过原同意。
+- 新增身份稳定性、越权、撤权、迁移、并发和桌面/手机浏览器回归。未声明生产部署或真实 ChatGPT 宿主验收。
+
 ## 1.13.0 — 2026-09-23 — 更新恢复、持续授权与安装执行默认值
 
 - 面板更新成功并确认目标 Hub 版本就绪后自动刷新；保护未保存输入、草稿和界面操作，切页、短暂断线和存储不可用时继续跟踪且防止刷新循环。

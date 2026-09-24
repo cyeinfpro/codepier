@@ -210,7 +210,15 @@ def test_stable_cursor_handles_tied_timestamps_and_event_paging(env):
 def test_output_schemas_cover_errors_and_remote_pending_receipts(name):
     schema = OUTPUT_SCHEMAS[name]
     Draft202012Validator.check_schema(schema)
-    Draft202012Validator(schema).validate({"error": {"code": "FAILURE", "message": "Expected tool error"}})
+    error = {"error": {"code": "FAILURE", "message": "Expected tool error"}}
+    if name == 'get_profile':
+        # Identity discovery uses the standard strict profile schema. Its errors
+        # are text/isError only; they must never masquerade as an identity.
+        assert schema['additionalProperties'] is False
+        assert not Draft202012Validator(schema).is_valid(error)
+        Draft202012Validator(schema).validate({'id': 'opaque-profile'})
+    else:
+        Draft202012Validator(schema).validate(error)
     assert not Draft202012Validator(schema).is_valid({})
     if not TOOLS[name].local:
         Draft202012Validator(schema).validate({"operation_id": "receipt", "pending": True, "state": "queued"})

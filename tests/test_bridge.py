@@ -5,7 +5,7 @@ from scripts.mcp_stdio_bridge import token_from_file
 from tests.support import BASE
 from tests.catalog_assertions import assert_task_catalog
 
-@pytest.mark.parametrize('profile,count',[(None,72),('coding',31)])
+@pytest.mark.parametrize('profile,count',[(None,74),('coding',33)])
 def test_stdio_bridge_initialize_tools_read(stack,tmp_path,profile,count):
     f=tmp_path/'token.txt';f.write_text(stack.pat);f.chmod(0o600)
     env={**os.environ,'CODEPIER_TOKEN_FILE':str(f),'CODEPIER_HUB_URL':stack.url}

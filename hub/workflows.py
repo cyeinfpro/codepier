@@ -4,6 +4,7 @@ This module stores progress; it never executes commands or asks a model to run.
 Mutations, replay receipts and audit events commit in one SQLite transaction.
 """
 from __future__ import annotations
+from hub.access_profiles import effective_grant
 
 import base64
 import json
@@ -171,12 +172,15 @@ class Workflows:
                 raise DevError("ASSIGNEE_FORBIDDEN", "MCP 调用不能为其他授权建立任务", 403)
             assignee = requested if principal.admin else principal.grant_id
             if principal.admin and assignee is not None:
-                grant = self.store.one("SELECT projects,scopes,revoked FROM grants WHERE id=?", (assignee,))
-                if not grant or grant["revoked"] or not {"read", "write"}.issubset(json.loads(grant["scopes"])):
+                grant = self.store.one("SELECT * FROM grants WHERE id=?", (assignee,))
+                try:
+                    scopes, allowed, _ = effective_grant(self.store, grant)
+                except DevError as exc:
+                    raise DevError("INVALID_ASSIGNEE", "该授权或访问 Profile 已停用", 403) from exc
+                if not {"read", "write"}.issubset(scopes):
                     raise DevError("INVALID_ASSIGNEE", "请选择未撤销且具有读取、写入权限的 MCP 授权", 403)
                 if not self.store.one("SELECT 1 AS active FROM tokens WHERE grant_id=? AND expires>? LIMIT 1", (assignee, time.time())):
                     raise DevError("INVALID_ASSIGNEE", "该授权已无有效令牌，请先重新建立可用的 MCP 连接", 403)
-                allowed = json.loads(grant["projects"])
                 if "*" not in allowed and project["id"] not in allowed:
                     raise DevError("INVALID_ASSIGNEE", "该 MCP 授权不能访问此项目", 403)
             fingerprint = digest(json.dumps({"action": "create", "args": args, "project_id": project["id"]}, sort_keys=True))

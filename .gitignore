@@ -58,3 +58,5 @@ token*.txt
 .codepier-updater/
 !/docs/PANEL_UPDATE.md
 !/docs/CLAUDE_CLI.md
+
+!/docs/ACCESS_PROFILES.md

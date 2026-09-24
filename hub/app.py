@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from hub.auth import Auth, SESSION_SECONDS
+from hub.access_profiles import make_profiles_router
 from hub.access import access_defaults, make_access_router, project_selection
 from hub.artifacts import make_artifact_router
 from hub.agent_install import make_agent_install_router
@@ -81,6 +82,8 @@ class TokenInput(Model):
     projects: list[str] = Field(default_factory=list, max_length=1000)
     all_projects: bool = False
     days: int = Field(default=30, ge=1, le=365)
+    profile_id: str | None = Field(default=None, min_length=1, max_length=100)
+    profile_version: int | None = Field(default=None, ge=1)
 
 class PasswordInput(Model):
     current_password: str = Field(min_length=1, max_length=256)
@@ -576,7 +579,8 @@ def create_app(data_dir: str | None = None):
     async def add_grant(request: Request, body: TokenInput):
         principal = auth.admin(request, True)
         projects = project_selection(store, body.projects, body.all_projects)
-        result = auth.issue_grant(principal, body.label, body.scopes, projects, body.days)
+        result = auth.issue_grant(principal, body.label, body.scopes, projects, body.days,
+                                  profile_id=body.profile_id, profile_version=body.profile_version)
         store.audit(principal.actor, "token.created", body.label, detail={"grant_id": result["grant_id"], "scopes": body.scopes, "projects": projects})
         return result
 
@@ -627,6 +631,7 @@ def create_app(data_dir: str | None = None):
         app.include_router(make_artifact_router(auth, runtime))
         app.include_router(make_agent_install_router(runtime, auth))
         app.include_router(make_access_router(auth, runtime))
+        app.include_router(make_profiles_router(auth, runtime))
         app.include_router(make_native_router(auth, runtime))
         app.include_router(make_vps_router(auth, runtime))
         app.include_router(make_panel_update_router(auth, runtime))

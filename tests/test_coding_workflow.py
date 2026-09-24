@@ -29,13 +29,15 @@ def test_small_catalog_is_opt_in_and_complete():
     full, compact = tool_definitions(), tool_definitions('coding')
     assert {d['name'] for d in full} == set(TOOLS) - {'integration_control','validations_accept'}
     model_tools = [x for x in compact if x.get('_meta', {}).get('ui', {}).get('visibility') != ['app']]
-    assert len(model_tools) == len(CODING_TOOLS) == 31
+    assert len(model_tools) == len(CODING_TOOLS) == 33
     assert {x['name'] for x in model_tools} == set(CODING_TOOLS)
     assert {x['name'] for x in compact} == set(CODING_TOOLS) | {'workspace_status'}
-    # App-only refresh schemas are host metadata, not model context. Preserve
-    # the original 60% model-context reduction rather than counting UI helpers.
+    # Account discovery adds two read-only tools to both catalogs. Preserve
+    # the original coding-surface reduction, and bound the new total overhead.
     full_model_tools = [x for x in full if x.get('_meta', {}).get('ui', {}).get('visibility') != ['app']]
-    assert len(json.dumps(model_tools)) < len(json.dumps(full_model_tools))*.4
+    identities = {'get_profile', 'get_access_context'}
+    assert len(json.dumps([x for x in model_tools if x['name'] not in identities])) < len(json.dumps([x for x in full_model_tools if x['name'] not in identities]))*.4
+    assert len(json.dumps(model_tools)) < len(json.dumps(full_model_tools))*.42
     assert next(x for x in compact if x['name']=='operations_wait')['inputSchema']['properties']['output_limit']['default']==8000
     assert next(x for x in tool_definitions() if x['name']=='operations_wait')['inputSchema']['properties']['output_limit']['default']==8000
 
