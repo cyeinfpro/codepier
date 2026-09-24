@@ -360,7 +360,7 @@ def test_v1_store_migration_retains_key_and_existing_records(tmp_path):
     db.execute("INSERT INTO meta VALUES ('schema','1')")
     db.execute("INSERT INTO audit(at,actor,action,status,detail) VALUES (1,'owner','existing-audit','ok','{}')");db.commit();db.close()
     store=Store(directory);secret=store.encrypt('persistent-key-test');keybytes=(directory/'master.key').read_bytes()
-    assert store.one("SELECT value FROM meta WHERE key='schema'")['value']=='5'
+    assert store.one("SELECT value FROM meta WHERE key='schema'")['value']=='6'
     assert store.one('SELECT action FROM audit')['action']=='existing-audit'
     assert {'payload','journal_id','accepted_at','cancel_requested','output_seq'}.issubset({r['name'] for r in store.all('PRAGMA table_info(operations)')})
     store.close();store=Store(directory)
