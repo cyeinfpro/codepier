@@ -49,7 +49,7 @@ def test_role_editor_and_profile_binding_keep_stable_identity(role_page,stack):
     page.locator('#role-form [name="label"]').fill(label+' stale')
     page.locator('button[form="role-form"]').click()
     expect(page.locator('#role-save-status')).to_contain_text('其他窗口修改')
-    page.locator('.modal [data-action="close-modal"]').click()
+    page.locator('.modal').get_by_role('button',name='取消',exact=True).click()
     page.evaluate("navigate('profiles')");expect(page.locator('#profile-create')).to_be_visible()
     page.click('#profile-create');profile_form=page.locator('#profile-form')
     profile_form.locator('[name="label"]').fill(label+' identity')
