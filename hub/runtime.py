@@ -330,6 +330,11 @@ class Runtime:
         except ValidationError as exc:
             issues = [{"field": ".".join(map(str, x["loc"])), "message": x["msg"]} for x in exc.errors()]
             raise DevError("INVALID_ARGUMENTS", json.dumps(issues, ensure_ascii=False)[:1500]) from exc
+        codex_denial = remote_codex_denial(name, args, principal)
+        if codex_denial:
+            self.store.audit(principal.actor, name, args.get("project", ""), status="denied",
+                             detail={"reason": "remote_codex_policy"})
+            raise DevError("CODEX_REMOTE_DISABLED", codex_denial, 403)
         if name in {'get_profile', 'get_access_context'}:
             self.authorize(principal, name)
         elif name == 'projects_create':
@@ -352,11 +357,6 @@ class Runtime:
             if args.get('project'):
                 scoped_project = self.project(args['project'], principal)
                 self.authorize(principal, tool.scope, project_id=scoped_project['id'])
-        codex_denial = remote_codex_denial(name, args, principal)
-        if codex_denial:
-            self.store.audit(principal.actor, name, args.get("project", ""), status="denied",
-                             detail={"reason": "remote_codex_policy"})
-            raise DevError("CODEX_REMOTE_DISABLED", codex_denial, 403)
         from shared.integration_contracts import ADMIN_TOOLS, REMOTE_TOOLS as INTEGRATION_REMOTE_TOOLS
         if name in ADMIN_TOOLS and not principal.admin:
             raise DevError('OWNER_REQUIRED', '此操作只允许面板主理人执行', 403)
