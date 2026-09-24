@@ -9,6 +9,9 @@ import time
 import unicodedata
 import uuid
 from dataclasses import dataclass
+from hub.access_profiles import effective_grant, refresh_profile_principal, current_profile, access_context
+from hub.roles import require_role, role_project_scopes, principal_grant
+from shared.role_contracts import ROLE_TOOLS
 
 from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
@@ -44,6 +47,9 @@ class Principal:
     projects: list[str]
     grant_id: str | None = None
     admin: bool = False
+    profile_id: str | None = None
+    authorization_mode: str = 'fixed'
+    role_id: str | None = None
 
 
 def remote_codex_denial(name: str, args: dict, principal: Principal) -> str | None:
@@ -155,27 +161,52 @@ class Runtime:
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(connection.socket.close(code=4003, reason=reason), 2)
 
+    def grant_principal(self, grant):
+        scopes, projects, _ = effective_grant(self.store, grant)
+        return Principal('mcp:' + grant['id'] + ':' + grant['label'], grant['user_id'], scopes, projects,
+                         grant_id=grant['id'], profile_id=grant.get('profile_id'),
+                         authorization_mode=grant.get('authorization_mode', 'fixed'), role_id=grant.get('role_id'))
+
+    def authorize(self, principal, action, *, project_id=None, device_id=None, creation=None):
+        try:
+            return require_role(self.store, principal, action, project_id=project_id, device_id=device_id, creation=creation)
+        except DevError as exc:
+            # Do not commit a caller's mutation transaction merely to log a denial.
+            if not self.store.db.in_transaction:
+                self.store.audit(principal.actor, 'role.denied', project_id or device_id or '', 'denied',
+                                 {'action': action, 'code': exc.code})
+            raise
+
     def visible_project(self, p: dict, principal: Principal):
         return principal.admin or "*" in principal.projects or p["id"] in principal.projects
 
     def project(self, value: str, principal: Principal):
+        principal = refresh_profile_principal(self.store, principal)
         row = self.store.one("SELECT p.*,d.name AS device_name,d.enabled AS device_enabled FROM projects p JOIN devices d ON d.id=p.device_id WHERE p.id=? OR p.alias_key=?", (value, alias_key(value)))
         if not row or not self.visible_project(row, principal):
             raise DevError("PROJECT_NOT_FOUND", "未找到已授权的项目别名，请先调用 projects_list", 404)
+        self.authorize(principal, 'read', project_id=row['id'])
         return row
 
     def project_public(self, p):
         return {k: p[k] for k in ("id", "alias", "device_id", "root", "description", "mode", "allow_tasks", "device_name") if k in p} | {"online": self.online(p["device_id"]), "allow_tasks": bool(p.get("allow_tasks"))}
 
     def list_projects(self, principal):
+        principal = refresh_profile_principal(self.store, principal)
+        self.authorize(principal, 'read')
         return [self.project_public(p) for p in self.store.all("SELECT p.*,d.name AS device_name FROM projects p JOIN devices d ON d.id=p.device_id ORDER BY p.alias_key") if self.visible_project(p, principal)]
 
     def operation_row(self, id: str, principal: Principal, *, status_only=False):
-        columns = "id,grant_id,project_id,tool,state" if status_only else "*"
+        principal = refresh_profile_principal(self.store, principal)
+        columns = "id,grant_id,project_id,device_id,tool,state" if status_only else "*"
         row = self.store.one(f"SELECT {columns} FROM operations WHERE id=?", (id,))
         if not row or (not principal.admin and (row["grant_id"] != principal.grant_id or row["project_id"] and "*" not in principal.projects and row["project_id"] not in principal.projects)):
             raise DevError("OPERATION_NOT_FOUND", "找不到此授权范围内的操作", 404)
-        if row['tool'] in COMPUTER_TOOLS - {'computer_status'} and 'computer' not in principal.scopes:
+        if row['project_id']:
+            self.authorize(principal, TOOLS[row['tool']].scope, project_id=row['project_id'])
+        elif row['tool'] == 'system_validate':
+            self.authorize(principal, 'projects.create', device_id=row['device_id'])
+        if row['tool'] in (COMPUTER_TOOLS - {'computer_status'}) | {'browser_open', 'browser_snapshot', 'browser_action', 'browser_close'} and 'computer' not in principal.scopes:
             raise DevError('INSUFFICIENT_SCOPE', '读取桌面操作结果仍需 computer 权限', 403)
         return row
 
@@ -285,18 +316,42 @@ class Runtime:
         return {"operations": rows[:args["limit"]], "next_before_created": rows[args["limit"]-1]["created"] if len(rows) > args["limit"] else None}
 
     async def invoke(self, name: str, raw: dict, principal: Principal):
+        principal = refresh_profile_principal(self.store, principal)
         tool = TOOLS.get(name)
         if not tool:
             raise DevError("UNKNOWN_TOOL", "不存在此工具", 404)
         if tool.scope not in principal.scopes:
             self.store.audit(principal.actor, name, status="denied", detail={"reason": "scope"})
-            raise DevError("INSUFFICIENT_SCOPE", f"该凭据缺少 {tool.scope} 权限", 403)
+            code = 'ROLE_POLICY_DENIED' if principal.authorization_mode == 'role' else 'INSUFFICIENT_SCOPE'
+            raise DevError(code, f"当前凭据/角色缺少 {tool.scope} 权限", 403)
         try:
             args = tool.model.model_validate(raw).model_dump()
             if args.get('workspace_id') == '': args.pop('workspace_id', None)
         except ValidationError as exc:
             issues = [{"field": ".".join(map(str, x["loc"])), "message": x["msg"]} for x in exc.errors()]
             raise DevError("INVALID_ARGUMENTS", json.dumps(issues, ensure_ascii=False)[:1500]) from exc
+        if name in {'get_profile', 'get_access_context'}:
+            self.authorize(principal, name)
+        elif name == 'projects_create':
+            self.authorize(principal, 'projects.create', device_id=args['device_id'], creation=args)
+            return await self.project_creator(args, principal)
+        elif name == 'devices_list':
+            self.authorize(principal, 'read')
+            devices = []
+            for device in self.store.all('SELECT id,name,enabled FROM devices ORDER BY name,id'):
+                try:
+                    require_role(self.store, principal, 'devices.read', device_id=device['id'])
+                except DevError as exc:
+                    if exc.code == 'ROLE_POLICY_DENIED':
+                        continue
+                    raise
+                devices.append({**device, 'enabled': bool(device['enabled']), 'online': self.online(device['id'])})
+            return {'devices': devices}
+        else:
+            self.authorize(principal, 'read')
+            if args.get('project'):
+                scoped_project = self.project(args['project'], principal)
+                self.authorize(principal, tool.scope, project_id=scoped_project['id'])
         codex_denial = remote_codex_denial(name, args, principal)
         if codex_denial:
             self.store.audit(principal.actor, name, args.get("project", ""), status="denied",
@@ -309,7 +364,11 @@ class Runtime:
             return self.integrations.handoff(args, principal)
         if name == 'activity_list':
             return self.integrations.activity(args, principal)
-        if name == "projects_list":
+        if name == "get_profile":
+            result = current_profile(self.store, principal)[0]
+        elif name == "get_access_context":
+            result = access_context(self.store, principal)
+        elif name == "projects_list":
             result = {"projects": self.list_projects(principal)}
         elif name == "vps_list":
             result = self.vps.list(args, principal)
@@ -377,6 +436,8 @@ class Runtime:
     async def cancel(self, id, principal):
         async with self.dispatch_lock:
             op = self.operation(id, principal)
+            if op['project_id']:
+                self.authorize(principal, 'execute', project_id=op['project_id'])
             if not op["pending"]:
                 return {"operation_id": id, "state": op["state"], "cancel_requested": False}
             if op["tool"] in DEVICE_ACTIONS:
@@ -426,16 +487,26 @@ class Runtime:
         if name == "tasks_list" and not idem:
             # Resolve alias casing before identifying an unkeyed metadata query.
             args = {**args, "project": project["alias"]}
+        principal = refresh_profile_principal(self.store, principal)
+        if project.get('id'):
+            self.authorize(principal, TOOLS[name].scope, project_id=project['id'])
+        elif name == 'system_validate' and not principal.admin:
+            self.authorize(principal, 'projects.create', device_id=project['device_id'], creation=project)
         snapshot = {k: project[k] for k in ("id", "alias", "root", "mode", "allow_tasks") if k in project}
         if name in {"open_workspace", "show_changes", "apply_patch"}:
             snapshot["_coding_owner"] = "grant:" + principal.grant_id if principal.grant_id else principal.actor
             snapshot["_coding_device"] = project["device_id"]
-            snapshot["_coding_scopes"] = sorted(principal.scopes)
+            snapshot["_coding_scopes"] = sorted(role_project_scopes(self.store, principal, project['id']))
         if name in COMPUTER_TOOLS:
             snapshot["_computer_owner"] = "grant:" + principal.grant_id if principal.grant_id else principal.actor
             snapshot["_computer_admin"] = principal.admin
         fingerprint = digest(json.dumps({"tool": name, "args": args, "project": snapshot, "device": project["device_id"]}, sort_keys=True, ensure_ascii=False))
         async with self.dispatch_lock:
+            principal = refresh_profile_principal(self.store, principal)
+            if project.get('id'):
+                self.authorize(principal, TOOLS[name].scope, project_id=project['id'])
+            elif name == 'system_validate' and not principal.admin:
+                self.authorize(principal, 'projects.create', device_id=project['device_id'], creation=project)
             old = self.store.one("SELECT * FROM operations WHERE actor=? AND idem=?", (principal.actor, idem)) if idem else None
             if name == "tasks_list" and not idem:
                 # Reuse only an outstanding metadata query from this exact grant.
@@ -452,7 +523,7 @@ class Runtime:
                     raise DevError("IDEMPOTENCY_CONFLICT", "幂等键已经用于不同请求；未执行新操作", 409, operation_id=old["id"])
                 id = old["id"]
                 if old["result"]:
-                    return self.unwrap(id, json.loads(old["result"]))
+                    return self.authorized_result(id, json.loads(old["result"]), principal)
                 # A retry wakes the durable worker; it does not allocate another operation.
                 self.store.execute("UPDATE operations SET next_attempt=0 WHERE id=?", (id,))
             else:
@@ -500,17 +571,27 @@ class Runtime:
         if not background and self.online(project["device_id"]):
             try:
                 result = await asyncio.wait_for(asyncio.shield(future), timeout=self.wait_seconds)
-                return self.unwrap(id, result)
+                return self.authorized_result(id, result, principal)
             except asyncio.TimeoutError:
                 pass
         op = self.store.one("SELECT state,deadline,result,created,updated FROM operations WHERE id=?", (id,))
         if op["result"]:
-            return self.unwrap(id, json.loads(op["result"]))
+            return self.authorized_result(id, json.loads(op["result"]), principal)
         pending = op["state"] in ACTIVE or op["state"] == "unknown"
         return {"operation_id": id, "pending": pending, "state": op["state"], "next": "operations_wait" if pending else None, "retry_after_seconds": 2 if pending else None,
                 "next_call": self.operation_next_call(id, pending=pending),
                 "elapsed_seconds": round(max(0, (time.time() if pending else op["updated"]) - op["created"]), 1),
                 "deadline": op["deadline"], "note": "已持久保存。网络恢复后继续同一操作；请查询 operation_id，不要换新幂等键重复提交。"}
+
+    def authorized_result(self, identifier, result, principal):
+        """A stored result is not authority to disclose it after a policy change."""
+        try:
+            self.operation_row(identifier, principal, status_only=True)
+        except DevError as exc:
+            # Keep the original receipt so a lost permission is not mistaken for
+            # a failed execution and replayed with a fresh idempotency key.
+            raise DevError(exc.code, exc.message, exc.status, operation_id=identifier) from exc
+        return self.unwrap(identifier, result)
 
     def expire_waiter(self, id, future):
         if self.futures.get(id) is future:
@@ -530,7 +611,16 @@ class Runtime:
         return {"operation_id": id, **(result.get("data") or {})}
 
     def permission_error(self, op, request):
-        if not op["project_id"]:  # Admin-only root validation has no mapping yet.
+        if not op["project_id"]:
+            if op['grant_id']:
+                try:
+                    grant = self.store.one('SELECT * FROM grants WHERE id=?', (op['grant_id'],))
+                    caller = self.grant_principal(grant)
+                    if op['tool'] != 'system_validate':
+                        return 'MCP 不允许设备生命周期操作'
+                    require_role(self.store, caller, 'projects.create', device_id=op['device_id'], creation=request['project'])
+                except DevError as exc:
+                    return exc.message
             return None
         project = self.store.one("SELECT * FROM projects WHERE id=?", (op["project_id"],))
         if not project or project["root"] != request["project"]["root"] or project["device_id"] != op["device_id"] or project["alias"] != request["project"].get("alias"):
@@ -544,8 +634,13 @@ class Runtime:
             return "排队操作的项目写入/任务权限已撤销"
         if op["grant_id"]:
             grant = self.store.one("SELECT * FROM grants WHERE id=?", (op["grant_id"],))
-            if not grant or grant["revoked"] or scope not in json.loads(grant["scopes"]) or not ("*" in json.loads(grant["projects"]) or op["project_id"] in json.loads(grant["projects"])):
-                return "排队操作的 MCP 授权已撤销或缩小"
+            try:
+                scopes, projects, _ = effective_grant(self.store, grant)
+                require_role(self.store, self.grant_principal(grant), scope, project_id=op['project_id'])
+            except DevError:
+                return "排队操作的 MCP 授权或访问 Profile 已撤销/停用"
+            if scope not in scopes or not ("*" in projects or op["project_id"] in projects):
+                return "排队操作的 MCP 授权或访问 Profile 已缩小"
         return None
 
     async def delivery_loop(self):
@@ -615,10 +710,16 @@ class Runtime:
             # Never trust a client-supplied origin, UA or project field. Durable
             # actor/grant columns originate from Auth, not tool arguments.
             panel = not op["grant_id"] and op["actor"].startswith("panel:")
-            grant = self.store.one('SELECT scopes FROM grants WHERE id=?', (op['grant_id'],)) if op['grant_id'] else None
+            grant = self.store.one('SELECT * FROM grants WHERE id=?', (op['grant_id'],)) if op['grant_id'] else None
+            try:
+                delivery_scopes = sorted(role_project_scopes(self.store, self.grant_principal(grant), op['project_id'])) if grant and op['project_id'] else []
+            except DevError:
+                delivery_scopes = []
+            if '_coding_scopes' in request['project'] and grant:
+                request['project']['_coding_scopes'] = delivery_scopes
             request['integration_context'] = {'owner': 'grant:'+op['grant_id'] if op['grant_id'] else op['actor'],
                 'admin': panel, 'device_id': op['device_id'],
-                'scopes': json.loads(grant['scopes']) if grant else (['read','write','execute','computer'] if panel else [])}
+                'scopes': delivery_scopes if grant else (['read','write','execute','computer'] if panel else [])}
             if not op['accepted_at'] and op['project_id'] and op['tool'] in TOOLS:
                 current_project = self.store.one('SELECT * FROM projects WHERE id=?', (op['project_id'],))
                 if current_project:

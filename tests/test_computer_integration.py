@@ -66,7 +66,7 @@ def test_scope_catalog_and_status_never_expand_existing_grants(desktop):
     assert status['capabilities_verified'] and len(status['native_tools'])==10
     assert status['screen_permissions_verified'] is False
     out=s.rpc('tools/list').json()['result']['tools']
-    assert_task_catalog(out, 72)
+    assert_task_catalog(out, 74)
     assert not {'integration_control','validations_accept'} & {t['name'] for t in out}
     definition=next(t for t in out if t['name']=='computer_action')
     assert set(definition['_meta']['securitySchemes'][0]['scopes'])=={'read','computer'}

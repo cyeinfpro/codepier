@@ -102,7 +102,7 @@ def make_access_router(auth, runtime):
             changed = []
             if body.apply_to_existing:
                 rows = store.db.execute('''SELECT g.id,g.projects FROM grants g
-                    WHERE g.user_id=? AND g.revoked=0 AND g.client_id IS NOT NULL
+                    WHERE g.user_id=? AND g.revoked=0 AND g.client_id IS NOT NULL AND g.profile_id IS NULL
                     AND EXISTS (SELECT 1 FROM tokens t WHERE t.grant_id=g.id AND t.kind IN ('access','refresh') AND t.expires>?)''',
                                         (principal.user_id, time.time())).fetchall()
                 for row in rows:
@@ -127,7 +127,7 @@ def make_access_router(auth, runtime):
                 raise DevError('NOT_FOUND', '授权不存在', 404)
             return {'id': grant_id, 'label': row['label'], 'scopes': json.loads(row['scopes']),
                     'projects': json.loads(row['projects']), 'revoked': bool(row['revoked']),
-                    'project_revision': grant_revision(store, grant_id)}
+                    'project_revision': grant_revision(store, grant_id), 'profile_id': row['profile_id']}
 
     @router.put('/api/grants/{grant_id}/projects')
     async def update_grant_projects(grant_id: str, request: Request, body: GrantProjectsInput):
@@ -138,6 +138,8 @@ def make_access_router(auth, runtime):
                                    (grant_id, principal.user_id)).fetchone()
             if not row:
                 raise DevError('NOT_FOUND', '授权不存在', 404)
+            if row['profile_id']:
+                raise DevError('PROFILE_MANAGED_GRANT', '此连接由访问 Profile 管理；扩大范围请重新 OAuth 授权', 409)
             if row['revoked']:
                 raise DevError('GRANT_REVOKED', '授权已撤销，不能通过编辑恢复', 409)
             before = json.loads(row['projects'])

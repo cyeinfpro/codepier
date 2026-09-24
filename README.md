@@ -564,6 +564,20 @@ operation_id
 
 ---
 
+## 动态访问角色（未发布源码功能）
+
+连接可以代表「主秘书」等稳定 Profile，并关联 owner 管理的 `secretary` 角色。角色型连接明确同意后，后续添加项目、授权未来项目、调整操作能力都直接生效，不需要重复 OAuth。主秘书、小秘书可以共享政策但保留各自 grant 的私有记录。
+
+面板进入 **访问角色 → 建立规则 → 访问 Profiles → 关联角色**。使用连接页的 `/mcp?authorization=role` 地址，并在授权时明确同意当前及未来角色政策。角色可以另获指定设备上的 `projects.create` 委派能力；创建仍经 Agent 本机目录验证，不允许修改自己的角色或重映射已有受限项目。
+
+旧固定授权不自动转换。角色不是 Shell 沙箱，也不把 ChatGPT 聊天硬性绑定到某个角色。使用、迁移和边界见 [动态角色授权](docs/DYNAMIC_ROLES.md)。
+
+## Access Profiles：多连接身份
+
+可在管理面板「访问 Profiles」建立稳定的用途身份，在 OAuth / PAT 授权时绑定。支持同一 ChatGPT 账号连接多个 Profile，并通过 `get_profile` / `get_access_context` 区分身份和有效权限。Profile 是原 grant 的权限上限，不会替旧连接扩权，也不把 ChatGPT 聊天或 Project 变成安全边界。旧连接保留原行为。
+
+使用、迁移和安全边界见 [Access Profiles](docs/ACCESS_PROFILES.md)。此功能的源码存在不代表当前服务或 ChatGPT 工具目录已经更新。
+
 ## 安全模型
 
 CodePier 可以执行真实文件修改、Shell、浏览器和桌面操作，因此默认设计重点是**明确授权与可恢复审计**，而不是把远程执行伪装成沙箱。

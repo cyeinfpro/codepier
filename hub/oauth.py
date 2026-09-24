@@ -15,10 +15,13 @@ from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from hub.auth import Auth
+from hub.access_profiles import effective_grant, validate_profile_consent
 from hub.access import access_defaults, project_selection
 from hub.runtime import Runtime
 from shared.crypto import digest, token
 from shared.util import DevError, valid_json_value
+from shared.role_contracts import ROLE_SCOPE
+from hub.roles import validate_role_consent, public_role
 
 
 class OAuth:
@@ -82,8 +85,8 @@ class OAuth:
         if resource != self.resource():
             raise DevError("INVALID_TARGET", "资源标识不匹配")
         scopes = params.get("scope", "read").split()
-        if not scopes or not set(scopes).issubset({"read", "write", "execute", "computer"}) or "read" not in scopes:
-            raise DevError("INVALID_SCOPE", "授权至少包含 read，仅支持 read/write/execute/computer")
+        if set(scopes) != {ROLE_SCOPE} and (not scopes or not set(scopes).issubset({"read", "write", "execute", "computer"}) or "read" not in scopes):
+            raise DevError("INVALID_SCOPE", "使用传统 read/write/execute/computer，或单独申请 codepier.role_access；两种模式不能混用")
         state = params.get("state", "")
         if len(state) > 2048:
             raise DevError("INVALID_STATE", "state 过长")
@@ -105,12 +108,15 @@ class OAuth:
         return urlunsplit((u.scheme, u.netloc, u.path, u.query + ("&" if u.query else "") + extra, ""))
 
     def new_tokens(self, grant_id: str):
+        grant = self.store.one("SELECT * FROM grants WHERE id=?", (grant_id,))
+        scopes, _, _ = effective_grant(self.store, grant)
+        if grant.get('authorization_mode') == 'role':
+            scopes = {ROLE_SCOPE}  # OAuth delegation is stable; capabilities are live policy.
         now = time.time()
         access, refresh = "rda_" + token(), "rdr_" + token()
         self.store.db.execute("INSERT INTO tokens VALUES (?,?,?,'access',?,?)", (token(16), digest(access), grant_id, now + 3600, now))
         self.store.db.execute("INSERT INTO tokens VALUES (?,?,?,'refresh',?,?)", (token(16), digest(refresh), grant_id, now + 30 * 86400, now))
-        grant = self.store.db.execute("SELECT scopes FROM grants WHERE id=?", (grant_id,)).fetchone()
-        return {"access_token": access, "token_type": "Bearer", "expires_in": 3600, "refresh_token": refresh, "scope": " ".join(json.loads(grant["scopes"]))}
+        return {"access_token": access, "token_type": "Bearer", "expires_in": 3600, "refresh_token": refresh, "scope": " ".join(sorted(scopes))}
 
     @staticmethod
     async def json_object(request: Request):
@@ -144,7 +150,7 @@ class OAuth:
         @router.get("/.well-known/oauth-protected-resource/mcp")
         async def protected_metadata():
             return JSONResponse({"resource": self.resource(), "authorization_servers": [self.public_url()],
-                "scopes_supported": ["read", "write", "execute", "computer"], "bearer_methods_supported": ["header"],
+                "scopes_supported": ["read", "write", "execute", "computer", ROLE_SCOPE], "bearer_methods_supported": ["header"],
                 "resource_name": "CodePier Agent"}, headers={"Access-Control-Allow-Origin": "*"})
 
         @router.get("/.well-known/oauth-authorization-server")
@@ -154,7 +160,7 @@ class OAuth:
                 "registration_endpoint": base + "/oauth/register", "revocation_endpoint": base + "/oauth/revoke",
                 "response_types_supported": ["code"], "grant_types_supported": ["authorization_code", "refresh_token"],
                 "token_endpoint_auth_methods_supported": ["none"], "code_challenge_methods_supported": ["S256"],
-                "scopes_supported": ["read", "write", "execute", "computer"]}, headers={"Access-Control-Allow-Origin": "*"})
+                "scopes_supported": ["read", "write", "execute", "computer", ROLE_SCOPE]}, headers={"Access-Control-Allow-Origin": "*"})
 
         @router.post("/oauth/register")
         async def register(request: Request):
@@ -211,20 +217,42 @@ class OAuth:
                 return {"redirect": self.redirect(row["redirect_uri"], {"error": "access_denied", "state": row["state"]})}
             scopes = body.get("scopes", [])
             projects = body.get("projects", [])
-            if not isinstance(scopes, list) or any(not isinstance(x, str) for x in scopes) or "read" not in scopes or not set(scopes).issubset(set(json.loads(row["scopes"]))):
-                raise DevError("INVALID_SCOPE", "不得超出客户端申请的权限")
-            projects = project_selection(self.store, projects, body.get("all_projects", False))
+            mode = body.get('authorization_mode', 'fixed')
+            if (not isinstance(scopes, list) or any(not isinstance(x, str) for x in scopes)
+                    or not set(scopes).issubset(set(json.loads(row['scopes'])))):
+                raise DevError('INVALID_SCOPE', '不得超出客户端申请的 OAuth 范围')
+            if mode == 'role':
+                if scopes != [ROLE_SCOPE] or projects or body.get('all_projects', False) is not False:
+                    raise DevError('INVALID_SCOPE', '角色授权仅使用 codepier.role_access；项目范围由角色政策决定')
+                projects = []
+            elif mode == 'fixed' and 'read' in scopes and set(scopes) <= {'read', 'write', 'execute', 'computer'}:
+                projects = project_selection(self.store, projects, body.get('all_projects', False))
+            else:
+                raise DevError('INVALID_SCOPE', '请明确选择传统固定授权或动态角色授权')
+            profile_id = body.get('profile_id')
             gid, code = token(16), token()
             with self.store.lock, self.store.db:
+                self.store.db.execute("BEGIN IMMEDIATE")
                 self.auth.admin(request, True)
+                role_id = None
+                if mode == 'role':
+                    role = validate_role_consent(self.store, principal.user_id, profile_id, body.get('profile_version'),
+                                                 body.get('role_version'), body.get('confirm_dynamic_role'))
+                    role_id = role['id']
+                else:
+                    validate_profile_consent(self.store, principal.user_id, profile_id, scopes, projects, body.get('profile_version'))
                 if row["resource"] != self.resource():
                     raise DevError("INVALID_TARGET", "资源标识已变化，请重新发起授权")
                 used = self.store.db.execute("UPDATE oauth_requests SET used=1 WHERE id=? AND used=0 AND expires>?", (id, time.time())).rowcount
                 if not used:
                     raise DevError("AUTH_REQUEST_EXPIRED", "授权请求已处理", 410)
-                self.store.db.execute("INSERT INTO grants(id,user_id,label,client_id,scopes,projects,revoked,created,resource) VALUES (?,?,?,?,?,?,0,?,?)", (gid, principal.user_id, row["client_name"], row["client_id"], json.dumps(sorted(set(scopes))), json.dumps(projects), time.time(), row["resource"]))
+                self.store.db.execute("INSERT INTO grants(id,user_id,label,client_id,scopes,projects,revoked,created,resource,profile_id,authorization_mode,role_id) VALUES (?,?,?,?,?,?,0,?,?,?,?,?)", (gid, principal.user_id, row["client_name"], row["client_id"], json.dumps(sorted(set(scopes))), json.dumps(projects), time.time(), row["resource"], profile_id, mode, role_id))
+                if mode == 'role':
+                    from hub.access_profiles import profile_audit
+                    profile_audit(self.store, principal.actor, 'role.consent', gid,
+                                  {'profile_id': profile_id, 'role': public_role(role), 'mode': mode, 'future_policy_changes_consented': True})
                 self.store.db.execute("INSERT INTO oauth_codes VALUES (?,?,?,?,?,?,?)", (digest(code), row["client_id"], row["redirect_uri"], row["challenge"], row["resource"], gid, time.time() + 300))
-            self.store.audit(principal.actor, "oauth.consent", row["client_name"], detail={"grant_id": gid, "scopes": scopes, "projects": projects})
+            self.store.audit(principal.actor, "oauth.consent", row["client_name"], detail={"grant_id": gid, "scopes": scopes, "projects": projects, "profile_id": profile_id, "authorization_mode": mode, "role_id": role_id})
             return {"redirect": self.redirect(row["redirect_uri"], {"code": code, "state": row["state"]})}
 
         @router.post("/oauth/token")
@@ -255,13 +283,16 @@ class OAuth:
                             # stolen. Reuse revokes the entire rotation family.
                             self.store.db.execute("UPDATE grants SET revoked=1 WHERE id=?", (row["grant_id"],))
                             return JSONResponse({"error": "invalid_grant"}, status_code=400)
+                        granted = self.store.one('SELECT scopes FROM grants WHERE id=?', (row['grant_id'],))
+                        if form.get('scope') is not None and set(form['scope'].split()) != set(json.loads(granted['scopes'])):
+                            return JSONResponse({'error': 'invalid_scope', 'error_description': 'Refresh cannot change the consented OAuth scope.'}, status_code=400)
                         self.store.db.execute("UPDATE tokens SET kind='refresh_used' WHERE hash=?", (row["hash"],))
                         result = self.new_tokens(row["grant_id"])
                 else:
                     return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
                 return JSONResponse(result, headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
             except DevError as exc:
-                return JSONResponse({"error": "invalid_request", "error_description": exc.message}, status_code=exc.status)
+                return JSONResponse({"error": "invalid_grant" if exc.code == "INVALID_TOKEN" else "invalid_request", "error_description": exc.message}, status_code=400 if exc.code == "INVALID_TOKEN" else exc.status)
 
         @router.post("/oauth/revoke")
         async def revoke(request: Request):

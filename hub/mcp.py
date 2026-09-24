@@ -16,6 +16,7 @@ from shared.contracts import INSTRUCTIONS,tool_definitions,TOOLS
 from shared.coding_contracts import CODING_TOOLS,CODING_INSTRUCTIONS
 from shared.integration_contracts import ADMIN_TOOLS,APP_ONLY_TOOLS
 from shared.util import DevError,VERSION,valid_json_value
+from shared.role_contracts import ROLE_SCOPE,ROLE_TOOLS
 from shared.computer_media import mcp_result
 from shared.mcp_protocol import MODERN,LEGACY,SUPPORTED,SERVER_INFO,ProtocolError,is_modern,validate_modern,complete,capabilities
 
@@ -54,10 +55,14 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
     async def mcp(request:Request):
         if not origin_allowed(request):return failure(None,-32000,'Origin not allowed',403)
         origin=request.headers.get('origin')
+        authorization=request.query_params.get('authorization','fixed')
+        if authorization not in {'fixed','role'}:return failure(None,-32602,'Unknown authorization mode',400)
+        auth_scope=ROLE_SCOPE if authorization=='role' else 'read'
         try:principal=auth.bearer(request)
         except DevError as exc:
             metadata=public_url()+'/.well-known/oauth-protected-resource/mcp'
-            return failure(None,-32001,exc.message,exc.status,headers={'WWW-Authenticate':f'Bearer resource_metadata="{metadata}", scope="read"'})
+            return failure(None,-32001,exc.message,exc.status,headers={'WWW-Authenticate':f'Bearer resource_metadata="{metadata}", scope="{auth_scope}"'})
+        if principal.authorization_mode=='role':authorization='role'
         if request.headers.get('content-type','').split(';',1)[0].strip().lower()!='application/json':
             return failure(None,-32600,'Content-Type must be application/json',415)
         accept=request.headers.get('accept','').lower()
@@ -104,7 +109,7 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                 result={'supportedVersions':SUPPORTED,'capabilities':capabilities(),'instructions':instructions,'ttlMs':0,'cacheScope':'private'}
             elif method=='tools/list':
                 if params.get('cursor'):return failure(identifier,-32602,'Tool catalog fits one page; no cursor is valid',400 if modern else 200)
-                result={'tools':tool_definitions(profile)}
+                result={'tools':tool_definitions(profile,authorization)}
             elif method=='tools/call':
                 name=params.get('name');arguments=params.get('arguments',{})
                 if not isinstance(name,str) or not isinstance(arguments,dict):return failure(identifier,-32602,'Expected tool name and arguments object',400 if modern else 200)
@@ -112,7 +117,7 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                 trace=None
                 try:
                     if name in ADMIN_TOOLS:raise DevError('OWNER_REQUIRED','此操作只接受面板主理人或已启用的本机控制入口',403)
-                    if profile=='coding' and name not in CODING_TOOLS and name not in APP_ONLY_TOOLS:raise DevError('TOOL_OUTSIDE_PROFILE','此工具在完整 /mcp 中可用；编码显示模式不改变权限',404)
+                    if profile=='coding' and name not in CODING_TOOLS and name not in APP_ONLY_TOOLS and not (authorization=='role' and name in ROLE_TOOLS):raise DevError('TOOL_OUTSIDE_PROFILE','此工具在完整 /mcp 中可用；编码显示模式不改变权限',404)
                     if isinstance(arguments.get('project'),str):
                         project=runtime.project(arguments['project'],principal)
                         try:
@@ -127,9 +132,10 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                 except DevError as exc:
                     value={'error':{'code':exc.code,'message':exc.message,**exc.details}}
                     result={'content':[{'type':'text','text':json.dumps(value,ensure_ascii=False)}],'structuredContent':value,'isError':True}
+                    if name == 'get_profile':result.pop('structuredContent')
                     if trace:trace['status']='tool_error';trace['operation_id']=exc.details.get('operation_id')
                     if exc.code=='INSUFFICIENT_SCOPE':
-                        scopes=sorted({'read',TOOLS[name].scope}) if name in TOOLS else ['read']
+                        scopes=[ROLE_SCOPE] if name in ROLE_TOOLS else sorted({'read',TOOLS[name].scope}) if name in TOOLS else ['read']
                         challenge='Bearer resource_metadata="'+public_url()+'/.well-known/oauth-protected-resource/mcp", error="insufficient_scope", scope="'+' '.join(scopes)+'"'
                         result['_meta']={'mcp/www_authenticate':[challenge]}
             elif method=='resources/list':

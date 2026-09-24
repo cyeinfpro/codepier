@@ -74,6 +74,7 @@ class ApplyPatch(CodingArgs):
 
 
 CODING_TOOLS = (
+    'get_profile', 'get_access_context',
     'projects_list', 'open_workspace', 'fs_tree', 'fs_read', 'fs_read_many', 'fs_search',
     'fs_mkdir', 'skills_list', 'skills_read', 'apply_patch', 'shell_exec', 'ssh_exec', 'vps_list', 'vps_exec',
     'operations_wait', 'operations_list', 'operations_cancel', 'show_changes',

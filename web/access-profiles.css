@@ -1,0 +1,13 @@
+/* Reuse the panel's typography and responsive layouts. Long IDs never widen it. */
+#profiles-page .mono { overflow-wrap: anywhere; }
+#profiles-page .grant-row > button { flex-shrink: 0; }
+#access-profile-selector { max-width: 100%; }
+
+#roles-page .mono, .role-policy-summary, .mcp-coding-entry code { overflow-wrap: anywhere; min-width: 0; }
+.role-rule { border: 1px solid var(--ui-border); border-radius: 12px; padding: 16px; margin: 16px 0; min-width: 0; }
+.role-rule legend { padding: 0 8px; font-weight: 600; }
+.role-rule .check-list { max-height: 200px; overflow: auto; }
+.role-rule details, .role-rule .field { margin-top: 12px; }
+#role-form select, #role-form textarea, #role-form input:not([type=checkbox]) { width: 100%; max-width: 100%; }
+#role-form > button { margin: 8px 0; }
+.role-policy-summary p { margin: 8px 0; }
