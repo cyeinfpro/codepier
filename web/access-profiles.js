@@ -79,6 +79,7 @@ window.CodePierProfiles=(()=>{
         // Computer is deliberately NOT prechecked, even for a desktop profile.
         fields.insertAdjacentHTML('beforeend',`<p class="form-note">Profile 上限：${esc(profile.label)} · 版本 ${profile.version}。下面可进一步缩小本次连接权限；桌面控制需要另行勾选。</p>`);
       }
+      uiLabelFields(fields);
       CodePierAccess.bindProjects(dialog);
     };
     select.addEventListener('change',update);update();
