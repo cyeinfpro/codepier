@@ -22,6 +22,7 @@ from pydantic import Field, ValidationError, model_validator
 from hub.access import AccessModel
 from shared.role_contracts import ROLE_SCOPE
 from shared.util import DevError
+from hub import iam
 
 CAPABILITIES = frozenset({'read', 'write', 'execute', 'computer'})
 MAX_ROLES = 200
@@ -112,7 +113,9 @@ def role_binding(store, grant):
         profile = store.one('SELECT * FROM access_profiles WHERE id=?', (grant['profile_id'],))
         role = store.one('SELECT * FROM access_roles WHERE id=?', (grant['role_id'],))
         if (not profile or not profile['enabled'] or profile['user_id'] != grant['user_id']
-                or profile.get('role_id') != grant['role_id'] or not role or role['user_id'] != grant['user_id']):
+                or profile.get('role_id') != grant['role_id'] or not role
+                or profile.get('space_id','legacy') != grant.get('space_id','legacy')
+                or role.get('space_id','legacy') != grant.get('space_id','legacy')):
             raise ValueError('role/profile binding changed')
         return role, _policy(role), profile
     except (ValueError, TypeError, KeyError) as exc:
@@ -134,13 +137,14 @@ def project_actions(policy, project_id, created=()):
 
 
 def effective_role(store, grant):
+    iam.validate_grant(store, grant)
     role, policy, profile = role_binding(store, grant)
     # A disabled role can still identify itself / refresh credentials, but has no
     # resource privileges. It is a policy stop, not an invitation to re-OAuth.
     scopes, projects = {'read'}, []
     if role['enabled']:
         created = created_ids(store, role['id'])
-        for row in store.all('SELECT id FROM projects'):
+        for row in store.all('SELECT id FROM projects WHERE space_id=?', (grant.get('space_id','legacy'),)):
             actions = project_actions(policy, row['id'], created)
             if actions:
                 projects.append(row['id'])
@@ -165,11 +169,22 @@ def principal_grant(store, principal):
 
 def require_role(store, principal, action, *, project_id=None, device_id=None, creation=None):
     """Additional gate, not a substitute for fixed scopes or Agent constraints."""
+    if iam.installed(store):
+        principal = iam.live_principal(store, principal)
+        if project_id is not None:
+            iam.require_project(store, principal, action, project_id)
+        if device_id is not None:
+            row = store.one('SELECT id FROM devices WHERE id=? AND space_id=?', (device_id, principal.space_id))
+            if not row:
+                raise DevError('ROLE_POLICY_DENIED', '当前角色未允许此设备操作', 403)
+            if not principal.grant_id:
+                iam.require_device(store, principal, device_id, creation=creation)
+                return None
     if principal.admin:
         return None
     grant = principal_grant(store, principal)
     if not grant:
-        if action in {'devices.read', 'projects.create'}:
+        if action in {'devices.read', 'projects.create'} and principal.grant_id:
             raise DevError('ROLE_REQUIRED', '此管理能力需要明确同意的动态角色授权', 403)
         return None
     role, policy, _ = role_binding(store, grant)
@@ -221,6 +236,8 @@ def require_new_mapping(store, principal, device_id, root):
 
 
 def role_project_scopes(store, principal, project_id):
+    if iam.installed(store) and not principal.grant_id:
+        return iam.human_project_actions(store, principal, project_id)
     grant = principal_grant(store, principal)
     if not grant:
         return set(principal.scopes)
@@ -231,7 +248,7 @@ def role_project_scopes(store, principal, project_id):
 def role_context(store, grant):
     role, policy, _ = role_binding(store, grant)
     created = created_ids(store, role['id'])
-    rows = store.all('SELECT id,alias FROM projects ORDER BY alias_key')
+    rows = store.all('SELECT id,alias FROM projects WHERE space_id=? ORDER BY alias_key', (grant.get('space_id','legacy'),))
     return {'authorization_mode': 'role', 'role': {'id': role['id'], 'label': role['label'], 'version': role['version'], 'enabled': bool(role['enabled'])},
             'project_permissions': [{'id': r['id'], 'alias': r['alias'], 'actions': sorted(actions)}
                 for r in rows if role['enabled'] and (actions := project_actions(policy, r['id'], created))],
@@ -239,13 +256,13 @@ def role_context(store, grant):
             'policy_follows_role': True, 'initial_consent_is_resource_ceiling': False}
 
 
-def validate_role_consent(store, user_id, profile_id, profile_version, role_version, confirmed):
+def validate_role_consent(store, user_id, profile_id, profile_version, role_version, confirmed, *, space_id="legacy"):
     if confirmed is not True:
         raise DevError('DYNAMIC_CONSENT_REQUIRED', '请明确同意角色未来的能力及项目变更，不会自动升级旧授权', 400)
-    profile = store.one('SELECT * FROM access_profiles WHERE id=? AND user_id=?', (profile_id, user_id))
+    profile = store.one('SELECT * FROM access_profiles WHERE id=? AND user_id=? AND space_id=?', (profile_id, user_id, space_id))
     if not profile or not profile['enabled'] or not profile.get('role_id'):
         raise DevError('INVALID_PROFILE', '请选择已启用并绑定角色的 Profile', 400)
-    role = store.one('SELECT * FROM access_roles WHERE id=? AND user_id=?', (profile['role_id'], user_id))
+    role = iam.role_eligible(store, user_id, profile['role_id'], space_id)
     if not role or not role['enabled']:
         raise DevError('ROLE_DISABLED', '角色不存在或已暂停', 409)
     if type(profile_version) is not int or profile_version != profile['version'] or type(role_version) is not int or role_version != role['version']:
@@ -263,12 +280,12 @@ def public_role(row, store=None):
     return result
 
 
-def role_values(store, body):
+def role_values(store, body, space_id="legacy"):
     label = body.label.strip()
     if not label or any(ord(c) < 32 or ord(c) == 127 for c in label):
         raise DevError('INVALID_ROLE', '名称不能为空或包含控制字符')
-    projects = {r['id'] for r in store.all('SELECT id FROM projects')}
-    devices = {r['id'] for r in store.all('SELECT id FROM devices')}
+    projects = {r['id'] for r in store.all('SELECT id FROM projects WHERE space_id=?', (space_id,))}
+    devices = {r['id'] for r in store.all('SELECT id FROM devices WHERE space_id=?', (space_id,))}
     if any(not set(rule.projects + rule.excluded_projects) <= projects for rule in body.project_rules):
         raise DevError('INVALID_PROJECT', '角色中包含已不存在的项目；请重新读取后明确移除旧引用')
     if any(not set(rule.devices) <= devices for rule in body.device_rules):
@@ -283,17 +300,19 @@ def make_roles_router(auth, runtime):
 
     @router.get('/api/access-roles')
     async def list_roles(request: Request):
-        owner = auth.admin(request)
-        rows = store.all('SELECT * FROM access_roles WHERE user_id=? ORDER BY label_key,id LIMIT ?', (owner.user_id, MAX_ROLES))
-        return {'roles': [public_role(row, store) for row in rows], 'limit': MAX_ROLES}
+        owner = auth.panel(request)
+        rows = store.all('SELECT * FROM access_roles WHERE space_id=? ORDER BY label_key,id LIMIT ?', (owner.space_id, MAX_ROLES)) if owner.admin else iam.assigned_roles(store, owner.user_id, owner.space_id)
+        return {'roles': [public_role(row, store if owner.admin else None) for row in rows], 'limit': MAX_ROLES}
 
     @router.get('/api/access-roles/{identifier}')
     async def get_role(identifier: str, request: Request):
-        owner = auth.admin(request)
-        row = store.one('SELECT * FROM access_roles WHERE id=? AND user_id=?', (identifier, owner.user_id))
+        owner = auth.panel(request)
+        row = store.one('SELECT * FROM access_roles WHERE id=? AND space_id=?', (identifier, owner.space_id))
+        if row and not owner.admin:
+            iam.role_eligible(store, owner.user_id, row['id'], owner.space_id, delegate=False)
         if not row:
             raise DevError('ROLE_NOT_FOUND', '角色不存在', 404)
-        return public_role(row, store)
+        return public_role(row, store if owner.admin else None)
 
     @router.post('/api/access-roles', status_code=201)
     async def create_role(request: Request, body: RoleCreate):
@@ -302,18 +321,18 @@ def make_roles_router(auth, runtime):
         with store.lock, store.db:
             store.db.execute('BEGIN IMMEDIATE')
             auth.admin(request, True)
-            old = store.one('SELECT * FROM access_roles WHERE user_id=? AND create_key=?', (owner.user_id, body.idempotency_key))
+            old = store.one('SELECT * FROM access_roles WHERE user_id=? AND space_id=? AND create_key=?', (owner.user_id, owner.space_id, body.idempotency_key))
             if old:
                 if old['create_fingerprint'] != fingerprint:
                     raise DevError('IDEMPOTENCY_CONFLICT', '幂等键已用于另一份角色配置', 409)
                 return public_role(old, store)
-            label, key, policy = role_values(store, body)
+            label, key, policy = role_values(store, body, owner.space_id)
             if store.one('SELECT count(*) AS n FROM access_roles WHERE user_id=?', (owner.user_id,))['n'] >= MAX_ROLES:
                 raise DevError('ROLE_LIMIT', '角色数量达到上限', 409)
             identifier, now = 'rol_' + uuid.uuid4().hex, time.time()
             try:
-                store.db.execute('INSERT INTO access_roles VALUES (?,?,?,?,?,?,1,?,?,?,?)',
-                    (identifier, owner.user_id, label, key, policy, int(body.enabled), now, now, body.idempotency_key, fingerprint))
+                store.db.execute('INSERT INTO access_roles(id,user_id,label,label_key,policy,enabled,version,created,updated,create_key,create_fingerprint,space_id,owner_user_id) VALUES (?,?,?,?,?,?,1,?,?,?,?,?,?)',
+                    (identifier, owner.user_id, label, key, policy, int(body.enabled), now, now, body.idempotency_key, fingerprint, owner.space_id, owner.user_id))
             except sqlite3.IntegrityError as exc:
                 raise DevError('ROLE_EXISTS', '已有同名角色', 409) from exc
             row = store.one('SELECT * FROM access_roles WHERE id=?', (identifier,))
@@ -326,10 +345,10 @@ def make_roles_router(auth, runtime):
         with store.lock, store.db:
             store.db.execute('BEGIN IMMEDIATE')
             auth.admin(request, True)
-            row = store.one('SELECT * FROM access_roles WHERE id=? AND user_id=?', (identifier, owner.user_id))
+            row = store.one('SELECT * FROM access_roles WHERE id=? AND space_id=?', (identifier, owner.space_id))
             if not row:
                 raise DevError('ROLE_NOT_FOUND', '角色不存在', 404)
-            label, key, policy = role_values(store, body)
+            label, key, policy = role_values(store, body, owner.space_id)
             same = (label, json.loads(policy), body.enabled) == (row['label'], json.loads(row['policy']), bool(row['enabled']))
             if body.expected_version != row['version'] and not same:
                 raise DevError('ROLE_CHANGED', '角色已在其他窗口修改，请重新读取后核对', 409)

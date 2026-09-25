@@ -47,6 +47,44 @@ class NativeCLI:
             raise DevError(*denial,403)
         return root
 
+    @staticmethod
+    def security(db, kind, rid, project, *, create=False):
+        """Trust only metadata on the authenticated Hub project envelope.
+
+        Tool args cannot choose an owner. Existing secured records remain denied
+        to older Hubs that omit ownership. Legacy local records may be adopted
+        only by the Hub-verified device owner or instance recovery operator.
+        """
+        rid=identifier(rid)
+        owner=project.get('_native_owner')
+        space=project.get('_native_space')
+        row=db.execute('SELECT * FROM native_security WHERE kind=? AND id=?',(kind,rid)).fetchone()
+        if owner is None:
+            if row:raise DevError('CLI_OWNER_REQUIRED','此会话需要支持多用户身份的 Hub',403)
+            return None
+        if not isinstance(owner,str) or not owner.startswith('user:') or len(owner)>300 or not isinstance(space,str) or not 1<=len(space)<=100:
+            raise DevError('CLI_OWNER_INVALID','本机请求缺少可信身份范围',403)
+        operator=project.get('_native_operator') is True
+        if row:
+            if row['space']!=space or row['owner']!=owner and not operator:
+                raise DevError('CLI_OWNER_DENIED','会话或附件不属于当前身份',403)
+            return row
+        table='sessions' if kind=='session' else 'attachments'
+        exists=db.execute('SELECT id FROM '+table+' WHERE id=?',(rid,)).fetchone()
+        if exists:
+            if project.get('_native_allow_legacy') is not True:
+                raise DevError('CLI_OWNER_DENIED','旧本机记录仅允许设备主理人明确访问',403)
+        elif not create:
+            raise DevError('CLI_NOT_FOUND','会话或附件不存在',404)
+        db.execute('INSERT INTO native_security(kind,id,owner,space) VALUES(?,?,?,?)',(kind,rid,owner,space))
+        return {'kind':kind,'id':rid,'owner':owner,'space':space}
+
+    @staticmethod
+    def security_metadata(db, row):
+        security=db.execute("SELECT owner,space FROM native_security WHERE kind='session' AND id=?",(row['id'],)).fetchone()
+        return {**public(row),'_native_owner':security['owner'] if security else '',
+                '_native_space':security['space'] if security else ''}
+
     def rows(self):
         self.children = [p for p in self.children if p.poll() is None]
         with self.connect_db() as db:
@@ -60,7 +98,7 @@ class NativeCLI:
                     db.execute("UPDATE sessions SET status='interrupted',error='Worker and child unavailable; use native resume',lease='',lease_until=0,updated=? WHERE id=?", (time.time(), row['id']))
                     db.execute("UPDATE commands SET state='uncertain' WHERE session=? AND state='claimed'", (row['id'],))
                     db.execute("UPDATE commands SET state='cancelled' WHERE session=? AND state='queued'", (row['id'],))
-            return [public(r) for r in db.execute('SELECT * FROM sessions ORDER BY created DESC,id')]
+            return [self.security_metadata(db,r) for r in db.execute('SELECT * FROM sessions ORDER BY created DESC,id')]
 
     def live(self):
         with self.launch_gate:
@@ -160,6 +198,7 @@ class NativeCLI:
             # Start/history ownership and writer-lease admission are serialized
             # in SQLite, including callers using another NativeCLI instance.
             db.execute('BEGIN IMMEDIATE')
+            self.security(db,'session',sid,project,create=action=='start')
             row = db.execute('SELECT * FROM sessions WHERE id=?',(sid,)).fetchone()
             if action == 'start':
                 signature=hashlib.sha256(json.dumps(args,sort_keys=True,separators=(',',':')).encode()).hexdigest()
@@ -168,6 +207,7 @@ class NativeCLI:
                     if row['launch_signature'] and row['launch_signature']!=signature:
                         raise DevError('CLI_START_CONFLICT','此会话编号已用于不同启动参数；请重新启动新会话',409)
                     return public(row)
+                if args.get('continue_session'):self.security(db,'session',args['continue_session'],project)
                 mode=args.get('mode','terminal')
                 if mode not in {'terminal','chat'}: raise ValueError('Invalid session mode')
                 if mode=='chat' and (args.get('argv') or args.get('provider') or args.get('attachments') or args.get('resume')):
@@ -488,6 +528,7 @@ class NativeCLI:
             raise DevError('CLI_MAPPING_CHANGED','项目映射已改变；请在原本机检查会话',403)
 
     def file_row(self,db,fid,project,root):
+        self.security(db,'file',fid,project)
         row=db.execute('SELECT * FROM attachments WHERE id=?',(identifier(fid),)).fetchone()
         if not row or row['project_id']!=project['id'] or row['root']!=str(root):
             raise DevError('ATTACHMENT_NOT_FOUND','附件不属于当前项目映射',404)
@@ -500,12 +541,15 @@ class NativeCLI:
         if action=='upload_list':
             result=[]
             for row in db.execute('SELECT * FROM attachments WHERE project_id=? AND root=? ORDER BY rowid DESC',(project['id'],str(root))):
+                try:self.security(db,'file',row['id'],project)
+                except DevError:continue
                 result.append({'file':row['id'],'name':row['name'],'size':row['size'],'sha256':row['sha'],
                                'received':row['received'],'ready':bool(row['ready']),
                                'path':row['path'] if row['ready'] else ''})
             return {'files':result}
         fid=identifier(args.get('file'))
         if action=='upload_begin':
+            self.security(db,'file',fid,project,create=True)
             name,size,sha=args.get('name'),args.get('size'),args.get('sha256')
             if not isinstance(name,str) or not 1<=len(name)<=255 or any(ord(c)<32 for c in name):
                 raise ValueError('Invalid display filename')
@@ -531,6 +575,7 @@ class NativeCLI:
         row=self.file_row(db,fid,project,root)
         if action=='upload_bind':
             sid=identifier(args.get('id'))
+            self.security(db,'session',sid,project)
             session=db.execute('SELECT * FROM sessions WHERE id=?',(sid,)).fetchone()
             if not session: raise DevError('CLI_NOT_FOUND','会话不存在',404)
             self.check_row(session,project,root)

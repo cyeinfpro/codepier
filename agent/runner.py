@@ -218,7 +218,7 @@ class Agent:
                           "version": VERSION, "build": self.build.describe(), "platform": platform.system(), "hostname": platform.node(),
                           "python": platform.python_version(), "roots": config["allowed_roots"], "capabilities": list(TOOLS),
                           "management": self.lifecycle.describe(), "device_actions": self.lifecycle.actions(),
-                          "journal_id": self.journal.journal_id, "delivery_protocol": 2, "native_protocol": 1, "native_chat_protocol": 3}))
+                          "journal_id": self.journal.journal_id, "delivery_protocol": 2, "native_protocol": 1, "native_chat_protocol": 3, "native_security_protocol": 1}))
             reply = channel.unpack(await asyncio.wait_for(socket.recv(), 10))
             if reply.get("type") != "ready":
                 raise ValueError("面板未确认 Agent 身份")

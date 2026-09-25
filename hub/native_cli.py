@@ -1,4 +1,4 @@
-"""Admin-only native terminal protocol and private durable offline cache."""
+"""User-owned native terminal protocol and private durable offline cache."""
 from __future__ import annotations
 import asyncio
 import base64
@@ -11,6 +11,7 @@ from fastapi import APIRouter, Request
 from starlette.responses import StreamingResponse
 from shared.native_cli import database, public, identifier, LIVE, TOTAL_QUOTA
 from shared.util import DevError
+from hub import iam
 
 
 class NativeService:
@@ -25,9 +26,51 @@ class NativeService:
 
     def project(self,value,principal):
         p=self.runtime.project(value,principal)
+        self.runtime.authorize(principal,'execute',project_id=p['id'])
+        self.runtime.authorize(principal,'write',project_id=p['id'])
         if not p['device_enabled'] or p['mode']!='write' or not p['allow_tasks']:
             raise DevError('CLI_FORBIDDEN','节点须启用，项目须允许写入与执行',403)
-        return p
+        device=self.runtime.store.one('SELECT owner_user_id FROM devices WHERE id=?',(p['device_id'],))
+        return {**p,'_native_owner':'user:'+principal.user_id,'_native_space':principal.space_id,
+                '_native_operator':bool(principal.instance_admin),
+                '_native_allow_legacy':bool(principal.instance_admin or device and device['owner_user_id']==principal.user_id)}
+
+    def ownership(self,sid,principal,project,*,create=False):
+        store=self.runtime.store
+        principal=iam.live_principal(store,principal)
+        row=store.one('SELECT * FROM native_ownership WHERE id=?',(sid,))
+        if row:
+            if row['space_id']!=principal.space_id or row['project_id']!=project['id'] or row['device_id']!=project['device_id']:
+                raise DevError('CLI_NOT_FOUND','找不到当前身份的会话',404)
+            if row['owner_user_id']!=principal.user_id and not principal.instance_admin:
+                raise DevError('CLI_NOT_FOUND','找不到当前身份的私有会话',404)
+            return row
+        if not create:
+            with closing(database(self.directory)) as db:
+                cached=db.execute('SELECT id,project_id,device_id FROM sessions WHERE id=?',(sid,)).fetchone()
+            if not cached or not project.get('_native_allow_legacy') or cached['project_id']!=project['id'] or cached['device_id']!=project['device_id']:
+                raise DevError('CLI_NOT_FOUND','找不到当前身份的会话',404)
+        # Adopt old cached records for their device owner, never whichever user
+        # happens to access a shared project first.
+        owner=principal.user_id
+        if not create:
+            device=store.one('SELECT owner_user_id FROM devices WHERE id=?',(project['device_id'],))
+            owner=device['owner_user_id'] if device else None
+            if not owner:raise DevError('CLI_OWNER_UNVERIFIED','旧会话归属需要管理员核实',409)
+        store.db.execute('INSERT INTO native_ownership(id,space_id,owner_user_id,project_id,device_id,created) VALUES(?,?,?,?,?,?)',
+                         (sid,principal.space_id,owner,project['id'],project['device_id'],time.time()))
+        return store.one('SELECT * FROM native_ownership WHERE id=?',(sid,))
+
+    def upload_owner(self,fid,principal,project,*,create=False):
+        identifier(fid);store=self.runtime.store
+        row=store.one('SELECT * FROM native_upload_ownership WHERE id=?',(fid,))
+        if row:
+            if row['space_id']!=principal.space_id or row['project_id']!=project['id'] or row['user_id']!=principal.user_id:
+                raise DevError('UPLOAD_NOT_FOUND','附件不属于当前身份',404)
+            return row
+        if not create:raise DevError('UPLOAD_NOT_FOUND','附件不属于当前身份',404)
+        store.db.execute('INSERT INTO native_upload_ownership VALUES(?,?,?,?,?)',(fid,principal.space_id,principal.user_id,project['id'],time.time()))
+        return {'id':fid,'space_id':principal.space_id,'user_id':principal.user_id,'project_id':project['id']}
 
     def session_project(self,sid,principal):
         identifier(sid)
@@ -35,6 +78,8 @@ class NativeService:
             r=db.execute('SELECT * FROM sessions WHERE id=?',(sid,)).fetchone()
         if not r: raise DevError('CLI_NOT_FOUND','未找到会话',404)
         p=self.project(r['project_id'],principal)
+        with self.runtime.store.transaction():
+            self.ownership(sid,principal,p)
         if p['device_id']!=r['device_id'] or p['root']!=r['root']:
             raise DevError('CLI_MAPPING_CHANGED','项目映射已改变；当前面板不能读取原会话',403)
         return p
@@ -45,6 +90,8 @@ class NativeService:
         con=self.runtime.connections.get(project['device_id'])
         if not con or not self.runtime.online(project['device_id']):
             raise DevError('CLI_OFFLINE','节点离线；已同步历史可读，控制待重新连接后重试',409)
+        if getattr(con,'native_security_protocol',0)!=1 and not (project.get('_native_operator') and project.get('_native_space')=='legacy'):
+            raise DevError('CLI_AGENT_UPDATE_REQUIRED','多用户原生会话要求升级 Agent 以校验会话/附件归属',409)
         if getattr(con,'native_protocol',0)!=1:
             raise DevError('CLI_AGENT_UPDATE_REQUIRED','此节点 Agent 尚不支持原生会话，请先在节点管理更新 Agent',409)
         if (action.startswith('chat_') or action=='start' and args.get('mode')=='chat') and getattr(con,'native_chat_protocol',0) not in (1,2,3):
@@ -105,6 +152,19 @@ class NativeService:
                             continue
                         if row['status'] not in {'cleared','deleted'} and row['updated'] < prior['updated']:
                             continue
+                    store=self.runtime.store
+                    owner=row.get('_native_owner','');space=row.get('_native_space','')
+                    bound=store.one('SELECT * FROM native_ownership WHERE id=?',(sid,))
+                    device_row=store.one('SELECT owner_user_id FROM devices WHERE id=?',(device,))
+                    fallback=device_row['owner_user_id'] if device_row else None
+                    if bound:
+                        if bound['space_id']!=p['space_id'] or bound['project_id']!=p['id'] or bound['device_id']!=device:continue
+                        if owner and (owner!='user:'+bound['owner_user_id'] or space!=p['space_id']):continue
+                        if not owner and bound['owner_user_id']!=fallback:continue
+                    else:
+                        uid=owner[5:] if owner.startswith('user:') and space==p['space_id'] else fallback if not owner else None
+                        if not uid or not store.one('SELECT id FROM users WHERE id=?',(uid,)):continue
+                        store.execute('INSERT OR IGNORE INTO native_ownership(id,space_id,owner_user_id,project_id,device_id,created) VALUES(?,?,?,?,?,?)',(sid,p['space_id'],uid,p['id'],device,time.time()))
                     normalized=public(row)
                     if normalized.get('mode','terminal') not in {'chat','terminal'}: continue
                     if prior and prior['mode']!=normalized.get('mode','terminal'): continue
@@ -209,7 +269,7 @@ def make_native_router(auth,runtime):
 
     @router.get('/sessions')
     async def sessions(request:Request,project:str='',provider:str='',status:str='',q:str='',offset:int=0,limit:int=40,mode:str=''):
-        principal=auth.admin(request)
+        principal=auth.panel(request)
         offset=max(0,offset);limit=max(1,min(limit,100));query=q[:200].strip().casefold()
         result=[];projects={}
         with closing(database(service.directory)) as db:
@@ -222,6 +282,9 @@ def make_native_router(auth,runtime):
                     except DevError: projects[pid]=None
                 p=projects[pid]
                 if not p or p['device_id']!=row['device_id'] or p['root']!=row['root']: continue
+                try:
+                    with runtime.store.transaction():service.ownership(row['id'],principal,p)
+                except DevError:continue
                 if project and p['id']!=project or provider and row['provider']!=provider or status and row['status']!=status: continue
                 if mode and row['mode']!=mode: continue
                 alias=p.get('alias','');node=p.get('device_name','')
@@ -241,7 +304,7 @@ def make_native_router(auth,runtime):
 
     @router.get('/sessions/{sid}/output')
     async def output(sid:str,request:Request,offset:int=0):
-        principal=auth.admin(request)
+        principal=auth.panel(request)
         service.session_project(sid,principal)
         if not 0<=offset<=2**40: raise DevError('CLI_OFFSET','无效回放偏移')
         with closing(database(service.directory)) as db:
@@ -257,7 +320,7 @@ def make_native_router(auth,runtime):
 
     @router.get('/sessions/{sid}/export')
     async def export(sid:str,request:Request,format:str='md'):
-        principal=auth.admin(request)
+        principal=auth.panel(request)
         service.session_project(sid,principal)
         if format not in ('md','json'): raise DevError('CLI_FORMAT','Export format must be md or json')
         with closing(database(service.directory)) as db:
@@ -268,7 +331,7 @@ def make_native_router(auth,runtime):
             cursor=0; buffer=bytearray(); first=True; messages=OrderedDict(); message_bytes=0; serial=0
             yield '[' if format=='json' else '# Chat export\n\n'
             while cursor<boundary:
-                service.session_project(sid,auth.admin(request))
+                service.session_project(sid,auth.panel(request))
                 with closing(database(service.directory)) as db:
                     current=db.execute('SELECT status FROM sessions WHERE id=?',(sid,)).fetchone()
                     if not current or current['status'] in ('cleared','deleted'): break
@@ -304,7 +367,7 @@ def make_native_router(auth,runtime):
                 await asyncio.sleep(0)
             if format=='json': yield ']'
             else:
-                service.session_project(sid,auth.admin(request))
+                service.session_project(sid,auth.panel(request))
                 for message in messages.values():
                     yield message['type']+'\n\n'+message['text']+'\n\n'
         return StreamingResponse(content(),media_type='application/json' if format=='json' else 'text/plain',headers={
@@ -313,7 +376,7 @@ def make_native_router(auth,runtime):
 
     @router.get('/sessions/{sid}/events')
     async def events(sid:str,request:Request,cursor:int=0):
-        principal=auth.admin(request)
+        principal=auth.panel(request)
         service.session_project(sid,principal)
         try:
             cursor=int(request.headers.get('last-event-id',cursor))
@@ -328,7 +391,7 @@ def make_native_router(auth,runtime):
                 try:
                     # Cookies can expire, sessions can be revoked and mappings can
                     # change while a response is open. Recheck on every wakeup.
-                    service.session_project(sid,auth.admin(request))
+                    service.session_project(sid,auth.panel(request))
                     revision=service.revision
                     if seen!=revision:
                         metadata,frames,next_cursor=service.event_batch(sid,cursor)
@@ -361,7 +424,7 @@ def make_native_router(auth,runtime):
 
     @router.post('/{action}')
     async def action(action:str,request:Request):
-        principal=auth.admin(request,True)
+        principal=auth.panel(request,True)
         body=await request.json()
         if not isinstance(body,dict) or not isinstance(body.get('args',{}),dict):
             raise DevError('CLI_INVALID','参数必须是对象')
@@ -374,13 +437,34 @@ def make_native_router(auth,runtime):
             except ValueError: raise DevError('CLI_INVALID','无效会话编号')
             p=service.session_project(args['id'],principal)
             if p['id']!=project['id']: raise DevError('CLI_MAPPING_CHANGED','会话不属于此项目',403)
+        with runtime.store.lock,runtime.store.db:
+            runtime.store.db.execute('BEGIN IMMEDIATE')
+            principal=auth.panel(request,True)
+            project=dict(service.project(project['id'],principal))
+            if action=='start':
+                identifier(args.get('id'))
+                # An old cached ID cannot be reserved as a newly created session.
+                with closing(database(service.directory)) as db:
+                    cached=db.execute('SELECT id FROM sessions WHERE id=?',(args['id'],)).fetchone()
+                service.ownership(args['id'],principal,project,create=not bool(cached))
+                if args.get('continue_session'):service.session_project(args['continue_session'],principal)
+            if action.startswith('upload_') and action!='upload_list':
+                service.upload_owner(args.get('file'),principal,project,create=action=='upload_begin')
+            for fid in args.get('attachments',[]):service.upload_owner(fid,principal,project)
         result=await service.request(action,project,args)
         # Recheck after await: an admin may have revoked/remapped while request was in flight.
-        principal=auth.admin(request,True)
+        principal=auth.panel(request,True)
         current=service.project(project['id'],principal)
         if (current['root'],current['device_id'])!=(project['root'],project['device_id']):
             raise DevError('CLI_MAPPING_CHANGED','操作期间映射改变；请在原节点检查',403)
+        if action=='upload_list':
+            allowed={r['id'] for r in runtime.store.all('SELECT id FROM native_upload_ownership WHERE user_id=? AND space_id=? AND project_id=?',(principal.user_id,principal.space_id,project['id']))}
+            result={'files':[f for f in result.get('files',[]) if f.get('file') in allowed]}
         if action=='start':
+            service.ownership(args['id'],principal,current)
+            if result.get('id')!=args['id'] or result.get('project_id')!=project['id']:
+                raise DevError('CLI_INVALID_REPLY','本机会话回执范围不一致',502)
+            result={**result,'_native_owner':project['_native_owner'],'_native_space':project['_native_space']}
             # Cache metadata immediately even before the first periodic sync.
             class NoAck:
                 async def send(self,body): pass
@@ -399,5 +483,6 @@ def make_native_router(auth,runtime):
             runtime.store.audit(principal.actor, 'native.'+action, args.get('id',args.get('file','')),
                                 detail={'project_id':project['id'],'device_id':project['device_id'],
                                         'receipt':args.get('receipt','')})
+        if isinstance(result,dict):result={k:v for k,v in result.items() if not k.startswith('_native_')}
         return result
     return router

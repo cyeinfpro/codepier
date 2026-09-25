@@ -2,6 +2,7 @@
 import time
 import json
 from shared.util import DevError
+from hub import iam
 
 class ComputerApprovals:
     def __init__(self, runtime):
@@ -62,10 +63,20 @@ class ComputerApprovals:
         self.pending[key]=row
         self.changed()
 
-    def list(self):
+    def permitted(self, row, principal):
+        try:
+            op=self.runtime.store.one('SELECT * FROM operations WHERE id=?',(row['operation_id'],))
+            current=iam.require_record(self.runtime.store,principal,op)
+            self.runtime.project(row['project_id'],current)
+            self.runtime.authorize(current,'computer',project_id=row['project_id'])
+            return True
+        except DevError:
+            return False
+
+    def list(self, principal=None):
         for key,row in list(self.pending.items()):
             if not self.live(row):self.remove(key)
-        return [{k:v for k,v in row.items() if k!='connection'} for row in self.pending.values()]
+        return [{k:v for k,v in row.items() if k!='connection'} for row in self.pending.values() if principal is None or self.permitted(row,principal)]
 
     async def decide(self, identifier, action, principal):
         if action not in {'accept','decline','cancel'}:
@@ -74,6 +85,8 @@ class ComputerApprovals:
         if not row or not self.live(row):
             self.remove(identifier)
             raise DevError('APPROVAL_EXPIRED','授权请求已过期、断线或会话已结束；请重新读屏',409)
+        if principal.grant_id or not self.permitted(row,principal):
+            raise DevError('APPROVAL_FORBIDDEN','只能处理自己的已授权桌面请求',403)
         # Consume before awaiting send: two panel tabs cannot race to decide twice.
         self.remove(identifier)
         await row['connection'].send({'type':'computer_approval_decision','request_id':identifier,

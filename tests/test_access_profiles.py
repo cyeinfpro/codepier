@@ -323,11 +323,13 @@ def test_profile_validation_does_not_trust_malformed_stored_scopes(api):
 
 def test_v5_migration_keeps_legacy_grants_tokens_and_master_key(tmp_path):
     directory = tmp_path / 'legacy'
-    store = Store(directory)
+    from tests.legacy_iam_fixture import legacy_store
+    store = legacy_store(directory)
     store.execute('DROP INDEX grants_profile')
     store.execute('ALTER TABLE grants DROP COLUMN profile_id')
     store.execute('DROP TABLE access_profiles')
     store.execute("UPDATE meta SET value='5' WHERE key='schema'")
+    store.execute("INSERT INTO users VALUES ('owner','legacy-owner','!fixture-only',1)")
     store.execute('''INSERT INTO grants(id,user_id,label,scopes,projects,created)
         VALUES ('legacy','owner','existing','["read"]','["*"]',1)''')
     store.execute("INSERT INTO tokens VALUES ('token','hash','legacy','pat',9999999999,1)")
@@ -337,10 +339,15 @@ def test_v5_migration_keeps_legacy_grants_tokens_and_master_key(tmp_path):
     for _ in range(2):
         upgraded = Store(directory)
         current = upgraded.one("SELECT * FROM grants WHERE id='legacy'")
-        assert current.pop('profile_id') is None and current == before
+        assert current.pop('profile_id') is None
+        assert current.pop('space_id') == 'legacy'
+        assert current.pop('owner_user_id') == 'owner'
+        assert current.pop('identity_id') is None
+        assert current.pop('user_epoch') == 1
+        assert current == before
         assert upgraded.all('SELECT * FROM tokens') == tokens
         assert upgraded.one('SELECT count(*) AS n FROM access_profiles')['n'] == 0
-        assert upgraded.one("SELECT value FROM meta WHERE key='schema'")['value'] == '7'
+        assert upgraded.one("SELECT value FROM meta WHERE key='schema'")['value'] == '8'
         assert (directory / 'master.key').read_bytes() == key
         upgraded.close()
 

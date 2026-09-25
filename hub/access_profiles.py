@@ -19,6 +19,7 @@ from pydantic import Field
 from hub.access import AccessModel, project_selection
 from shared.util import DevError
 from shared.role_contracts import ROLE_SCOPE
+from hub import iam
 
 SCOPES = frozenset({'read', 'write', 'execute', 'computer'})
 MAX_PROFILES = 200
@@ -50,6 +51,7 @@ def effective_grant(store, grant):
     if not grant or grant['revoked']:
         raise DevError('INVALID_TOKEN', '授权已撤销', 401)
     grant = dict(grant)
+    iam.validate_grant(store, grant)
     if grant.get('authorization_mode', 'fixed') == 'role':
         from hub.roles import effective_role
         return effective_role(store, grant)
@@ -60,7 +62,7 @@ def effective_grant(store, grant):
         profile = None
         if grant.get('profile_id'):
             profile = store.one('SELECT * FROM access_profiles WHERE id=?', (grant['profile_id'],))
-            if not profile or profile['user_id'] != grant['user_id'] or not profile['enabled']:
+            if not profile or profile['user_id'] != grant['user_id'] or not profile['enabled'] or profile.get('space_id','legacy') != grant.get('space_id','legacy'):
                 raise DevError('INVALID_TOKEN', '访问 Profile 已停用或不再属于此授权', 401)
             cap_scopes, cap_projects = stored_permissions(profile)
             scopes &= cap_scopes
@@ -69,6 +71,12 @@ def effective_grant(store, grant):
             raise ValueError('Invalid stored permission')
         if any(not isinstance(item, str) or not item for item in projects):
             raise ValueError('Invalid stored projects')
+        if iam.installed(store):
+            allowed = {row['id'] for row in store.all('SELECT id FROM projects WHERE space_id=?', (grant.get('space_id','legacy'),))}
+            projects = sorted(allowed if '*' in projects else allowed & set(projects))
+            from hub.runtime import Principal
+            owner = Principal('', grant['user_id'], set(), [], space_id=grant.get('space_id','legacy'))
+            projects = [pid for pid in projects if 'read' in iam.human_project_actions(store, owner, pid)]
         return scopes, projects, profile
     except (ValueError, TypeError, KeyError) as exc:
         raise DevError('INVALID_TOKEN', '授权策略记录无效；未授予访问权限', 401) from exc
@@ -76,17 +84,19 @@ def effective_grant(store, grant):
 
 def refresh_profile_principal(store, principal):
     """Recheck managed identities after waits without changing legacy callers."""
-    if principal.admin or not principal.profile_id:
+    principal = iam.live_principal(store, principal)
+    if principal.admin or not principal.grant_id:
         return principal
     row = store.one('SELECT * FROM grants WHERE id=?', (principal.grant_id,))
-    if not row or row['user_id'] != principal.user_id or row['profile_id'] != principal.profile_id:
+    if not row or row['user_id'] != principal.user_id or row['profile_id'] != principal.profile_id or row.get('space_id','legacy') != principal.space_id:
         raise DevError('INVALID_TOKEN', '访问 Profile 的授权绑定已变化', 401)
     scopes, projects, _ = effective_grant(store, row)
     return replace(principal, scopes=scopes, projects=projects,
-                   authorization_mode=row.get('authorization_mode', 'fixed'), role_id=row.get('role_id'))
+                   authorization_mode=row.get('authorization_mode', 'fixed'), role_id=row.get('role_id'),
+                   space_id=row.get('space_id','legacy'), user_epoch=row.get('user_epoch',1), identity_id=row.get('identity_id'))
 
 
-def validate_profile_consent(store, user_id, profile_id, scopes, projects, version):
+def validate_profile_consent(store, user_id, profile_id, scopes, projects, version, *, space_id="legacy"):
     """Called inside the same transaction that creates the grant."""
     if profile_id is None:
         if version is not None:
@@ -94,7 +104,7 @@ def validate_profile_consent(store, user_id, profile_id, scopes, projects, versi
         return None
     if not isinstance(profile_id, str) or not profile_id or len(profile_id) > 100:
         raise DevError('INVALID_PROFILE', '请选择有效的访问 Profile')
-    row = store.one('SELECT * FROM access_profiles WHERE id=? AND user_id=?', (profile_id, user_id))
+    row = store.one('SELECT * FROM access_profiles WHERE id=? AND user_id=? AND space_id=?', (profile_id, user_id, space_id))
     if not row:
         raise DevError('PROFILE_NOT_FOUND', '访问 Profile 不存在', 404)
     if not row['enabled']:
@@ -130,13 +140,13 @@ def current_profile(store, principal):
 
 def access_context(store, principal):
     identity, scopes, projects, profile = current_profile(store, principal)
-    rows = store.all('SELECT id,alias FROM projects ORDER BY alias_key')
+    rows = store.all('SELECT id,alias FROM projects WHERE space_id=? ORDER BY alias_key', (principal.space_id,))
     grant = store.one('SELECT * FROM grants WHERE id=?', (principal.grant_id,))
     extra = {'authorization_mode': 'fixed'}
     if grant.get('authorization_mode') == 'role':
         from hub.roles import role_context
         extra = role_context(store, grant)
-    return {**extra, 'profile': identity, 'managed': profile is not None, 'scopes': sorted(scopes),
+    return {**extra, 'space_id': principal.space_id, 'profile': identity, 'managed': profile is not None, 'scopes': sorted(scopes),
             'projects': [row for row in rows if '*' in projects or row['id'] in projects],
             'all_projects': '*' in projects,
             'isolation': 'credential', 'chat_project_is_security_boundary': False,
@@ -166,7 +176,7 @@ class ProfileUpdate(ProfileFields):
     expected_version: int = Field(ge=1)
 
 
-def profile_values(store, body, user_id):
+def profile_values(store, body, user_id, space_id="legacy"):
     label = body.label.strip()
     if not label or any(ord(char) < 32 or ord(char) == 127 for char in label):
         raise DevError('INVALID_PROFILE', '名称不能为空或包含控制字符')
@@ -174,17 +184,18 @@ def profile_values(store, body, user_id):
     if 'read' not in scopes or not scopes <= SCOPES:
         raise DevError('INVALID_SCOPE', 'Profile 必须包含 read，且仅支持 read/write/execute/computer')
     if body.role_id:
-        role = store.one('SELECT id FROM access_roles WHERE id=? AND user_id=?', (body.role_id, user_id))
-        if not role:
-            raise DevError('ROLE_NOT_FOUND', '只能绑定自己的现有角色', 404)
-    projects = [] if body.role_id and not body.projects and not body.all_projects else project_selection(store, body.projects, body.all_projects)
+        iam.role_eligible(store, user_id, body.role_id, space_id)
+    projects = [] if body.role_id and not body.projects and not body.all_projects else project_selection(store, body.projects, body.all_projects, space_id=space_id)
+    if not body.role_id and not iam.is_space_admin(store, user_id, space_id):
+        from hub.runtime import Principal
+        candidate = Principal('', user_id, set(), [], space_id=space_id)
+        if '*' in projects or any(not scopes <= iam.human_project_actions(store, candidate, pid) for pid in projects):
+            raise DevError('INSUFFICIENT_SCOPE', 'Profile 不能超出账号现有权限', 403)
     return label, unicodedata.normalize('NFKC', label).casefold(), sorted(scopes), projects
 
 
 def profile_audit(store, actor, action, profile_id, detail):
-    # Keep the audit in the caller's transaction (Store.audit commits its own).
-    store.db.execute('INSERT INTO audit(at,actor,action,target,status,detail) VALUES (?,?,?,?,?,?)',
-                     (time.time(), actor, action, profile_id, 'ok', json.dumps(detail, ensure_ascii=False)))
+    store.audit(actor, action, profile_id, detail=detail, commit=False)
 
 
 def make_profiles_router(auth, runtime):
@@ -192,51 +203,51 @@ def make_profiles_router(auth, runtime):
 
     @router.get('/api/access-profiles')
     async def list_profiles(request: Request):
-        principal = auth.admin(request)
-        rows = store.all('SELECT * FROM access_profiles WHERE user_id=? ORDER BY label_key,id LIMIT ?',
-                         (principal.user_id, MAX_PROFILES))
+        principal = auth.panel(request)
+        rows = store.all('SELECT * FROM access_profiles WHERE user_id=? AND space_id=? ORDER BY label_key,id LIMIT ?',
+                         (principal.user_id, principal.space_id, MAX_PROFILES))
         items = []
         for row in rows:
             item = public_profile(row)
             if row.get('role_id'):
                 from hub.roles import public_role
-                role = store.one('SELECT * FROM access_roles WHERE id=? AND user_id=?', (row['role_id'], principal.user_id))
-                item['role'] = public_role(role, store) if role else None
+                role = store.one('SELECT * FROM access_roles WHERE id=? AND space_id=?', (row['role_id'], principal.space_id))
+                item['role'] = public_role(role, store if principal.admin else None) if role else None
             items.append(item)
         return {'profiles': items, 'limit': MAX_PROFILES}
 
     @router.get('/api/access-profiles/{profile_id}')
     async def read_profile(profile_id: str, request: Request):
-        principal = auth.admin(request)
-        row = store.one('SELECT * FROM access_profiles WHERE id=? AND user_id=?', (profile_id, principal.user_id))
+        principal = auth.panel(request)
+        row = store.one('SELECT * FROM access_profiles WHERE id=? AND user_id=? AND space_id=?', (profile_id, principal.user_id, principal.space_id))
         if not row:
             raise DevError('PROFILE_NOT_FOUND', '访问 Profile 不存在', 404)
         return public_profile(row)
 
     @router.post('/api/access-profiles', status_code=201)
     async def create_profile(request: Request, body: ProfileCreate):
-        principal = auth.admin(request, True)
+        principal = auth.panel(request, True)
         fingerprint = hashlib.sha256(json.dumps(body.model_dump(exclude={'idempotency_key'}),
                                                 sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         with store.lock, store.db:
             store.db.execute('BEGIN IMMEDIATE')
-            auth.admin(request, True)
-            old = store.one('SELECT * FROM access_profiles WHERE user_id=? AND create_key=?',
-                            (principal.user_id, body.idempotency_key))
+            auth.panel(request, True)
+            old = store.one('SELECT * FROM access_profiles WHERE user_id=? AND space_id=? AND create_key=?',
+                            (principal.user_id, principal.space_id, body.idempotency_key))
             if old:
                 if old['create_fingerprint'] != fingerprint:
                     raise DevError('IDEMPOTENCY_CONFLICT', '此幂等键已用于其他 Profile 参数，请先核查原记录', 409)
                 return public_profile(old)
-            label, label_key, scopes, projects = profile_values(store, body, principal.user_id)
+            label, label_key, scopes, projects = profile_values(store, body, principal.user_id, principal.space_id)
             if store.one('SELECT count(*) AS n FROM access_profiles WHERE user_id=?', (principal.user_id,))['n'] >= MAX_PROFILES:
                 raise DevError('PROFILE_LIMIT', f'每个账号最多保存 {MAX_PROFILES} 个 Profile', 409)
             identifier, now = 'prf_' + uuid.uuid4().hex, time.time()
             try:
                 store.db.execute('''INSERT INTO access_profiles
-                    (id,user_id,label,label_key,scopes,projects,enabled,version,created,updated,create_key,create_fingerprint,role_id)
-                    VALUES (?,?,?,?,?,?,?,1,?,?,?,?,?)''',
+                    (id,user_id,label,label_key,scopes,projects,enabled,version,created,updated,create_key,create_fingerprint,role_id,space_id,owner_user_id)
+                    VALUES (?,?,?,?,?,?,?,1,?,?,?,?,?,?,?)''',
                     (identifier, principal.user_id, label, label_key, json.dumps(scopes), json.dumps(projects),
-                     int(body.enabled), now, now, body.idempotency_key, fingerprint, body.role_id))
+                     int(body.enabled), now, now, body.idempotency_key, fingerprint, body.role_id, principal.space_id, principal.user_id))
             except sqlite3.IntegrityError as exc:
                 raise DevError('PROFILE_EXISTS', '此账号已有同名 Profile，请使用不同名称', 409) from exc
             profile_audit(store, principal.actor, 'profile.created', identifier,
@@ -246,14 +257,14 @@ def make_profiles_router(auth, runtime):
 
     @router.put('/api/access-profiles/{profile_id}')
     async def update_profile(profile_id: str, request: Request, body: ProfileUpdate):
-        principal = auth.admin(request, True)
+        principal = auth.panel(request, True)
         with store.lock, store.db:
             store.db.execute('BEGIN IMMEDIATE')
-            auth.admin(request, True)
-            row = store.one('SELECT * FROM access_profiles WHERE id=? AND user_id=?', (profile_id, principal.user_id))
+            auth.panel(request, True)
+            row = store.one('SELECT * FROM access_profiles WHERE id=? AND user_id=? AND space_id=?', (profile_id, principal.user_id, principal.space_id))
             if not row:
                 raise DevError('PROFILE_NOT_FOUND', '访问 Profile 不存在', 404)
-            label, label_key, scopes, projects = profile_values(store, body, principal.user_id)
+            label, label_key, scopes, projects = profile_values(store, body, principal.user_id, principal.space_id)
             selected = (label, scopes, projects, body.enabled, body.role_id)
             before = (row['label'], json.loads(row['scopes']), json.loads(row['projects']), bool(row['enabled']), row.get('role_id'))
             if row['version'] != body.expected_version and selected != before:
