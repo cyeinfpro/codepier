@@ -35,6 +35,8 @@ const S = {
   auditStatus: '',
   auditQuery: '',
   auditNext: null,
+  grantPages: { current: 0, history: 0 },
+  grantHistoryOpen: false,
   work: {
     project: '',
     path: '',
@@ -1622,10 +1624,64 @@ function codingEndpoint() {
   url.searchParams.set('profile', 'coding');
   return url.href;
 }
+function grantListHTML() {
+  const now = Date.now() / 1000;
+  const historical = (g) =>
+    Boolean(
+      g.revoked ||
+      g.status === 'expired' ||
+      (g.expires && g.expires <= now && g.status !== 'pending'),
+    );
+  const current = S.grants.filter((g) => !historical(g));
+  const history = S.grants.filter(historical);
+  const row = (g) => {
+    const expired =
+      g.status === 'expired' || Boolean(g.expires && g.expires <= now && g.status !== 'pending');
+    const status = g.revoked
+      ? '已撤销'
+      : expired
+        ? '已过期'
+        : g.status === 'pending' || !g.expires
+          ? '待连接'
+          : '';
+    const projects = g.projects.map((id) => S.projects.find((p) => p.id === id)?.alias || id);
+    const scopeNames = { read: '读取', write: '写入', execute: '执行', computer: '桌面' };
+    const range = g.projects.includes('*')
+      ? '<span>全部项目（含未来新增）</span>'
+      : `<details class="grant-projects"><summary>${projects.length} 个项目</summary><div>${projects.map((name) => `<span>${esc(name)}</span>`).join('')}</div></details>`;
+    return `<article class="grant-row ${historical(g) ? 'grant-inactive' : ''}" data-grant-id="${esc(g.id)}"><div class="grant-info"><h3><span>${esc(g.label)}</span><span class="badge purple">${g.client_id ? 'OAuth' : 'PAT'}</span>${status ? `<span class="badge neutral">${status}</span>` : ''}</h3><div class="grant-meta"><span>${esc(g.scopes.map((scope) => scopeNames[scope] || scope).join(' · '))}</span>${range}</div><p>${g.status === 'pending' ? '等待客户端完成连接' : g.expires ? `${expired ? '已于' : '到期'} ${esc(timeText(g.expires))}${expired ? ' 过期' : ''}` : expired ? '已无有效凭据' : '尚未连接'}</p></div>${!g.revoked ? `<div class="actions">${!expired ? `<button class="btn small" data-action="edit-grant-projects" data-id="${esc(g.id)}">调整项目范围</button>` : ''}<button class="btn danger small" data-action="revoke-grant" data-id="${esc(g.id)}">撤销</button></div>` : ''}</article>`;
+  };
+  const list = (items, group) => {
+    const size = 5;
+    const pages = Math.max(1, Math.ceil(items.length / size));
+    const page = Math.max(0, Math.min(S.grantPages[group], pages - 1));
+    S.grantPages[group] = page;
+    return `<div class="grant-list" data-grant-group="${group}">${items
+      .slice(page * size, (page + 1) * size)
+      .map(row)
+      .join(
+        '',
+      )}</div>${pages > 1 ? `<nav class="pagination grant-pagination" aria-label="${group === 'current' ? '当前' : '历史'}授权分页"><span role="status">${page * size + 1}–${Math.min((page + 1) * size, items.length)} / ${items.length}</span><div class="actions"><button class="btn ghost small" data-action="grant-page" data-group="${group}" data-delta="-1" ${page === 0 ? 'disabled' : ''}>上一页</button><button class="btn ghost small" data-action="grant-page" data-group="${group}" data-delta="1" ${page === pages - 1 ? 'disabled' : ''}>下一页</button></div></nav>` : ''}`;
+  };
+  return `<div class="panel-head"><h2>${icon('key')}访问授权</h2><span class="badge neutral">${current.length} 当前授权</span></div><div class="panel-body">${current.length ? list(current, 'current') : empty(S.grants.length ? '暂无当前授权，历史记录保留在下方。' : '还没有访问授权。', 'new-grant', '创建凭据')}${history.length ? `<div class="grant-history"><button class="btn ghost grant-history-toggle" data-action="grant-history" aria-expanded="${S.grantHistoryOpen}" aria-controls="grant-history-list">${S.grantHistoryOpen ? '收起' : '查看'}历史授权 <span class="badge neutral">${history.length}</span><span class="muted">已撤销 / 已过期</span></button><div id="grant-history-list" ${S.grantHistoryOpen ? '' : 'hidden'}>${S.grantHistoryOpen ? list(history, 'history') : ''}</div></div>` : ''}</div>`;
+}
+function refreshGrantList(button) {
+  const focusAction = button.dataset.action;
+  const group = button.dataset.group;
+  const delta = button.dataset.delta;
+  const panel = $('#grant-panel');
+  if (!panel) return;
+  panel.innerHTML = grantListHTML();
+  const selector = `[data-action="${focusAction}"]${group ? `[data-group="${group}"][data-delta="${delta}"]` : ''}`;
+  const next = panel.querySelector(selector);
+  if (next && !next.disabled) next.focus({ preventScroll: true });
+  else
+    panel
+      .querySelector(`[data-action="grant-page"][data-group="${group}"]:not(:disabled)`)
+      ?.focus({ preventScroll: true });
+}
 function connectHTML() {
   const s = S.settings;
-  const grantRow = (g) =>
-    `<div class="grant-row ${g.revoked ? 'revoked' : ''}"><div><h3>${esc(g.label)} <span class="badge ${g.revoked ? 'neutral' : 'purple'}">${g.revoked ? '已撤销' : g.client_id ? 'OAuth' : 'PAT'}</span></h3><p>${esc(g.scopes.join(' / '))} · ${esc(g.projects.includes('*') ? '全部项目（含未来新增）' : g.projects.map((id) => S.projects.find((p) => p.id === id)?.alias || id).join(', '))}<br>到期 ${esc(timeText(g.expires))}</p></div>${!g.revoked ? `<div class="actions"><button class="btn small" data-action="edit-grant-projects" data-id="${esc(g.id)}">调整项目范围</button><button class="btn danger small" data-action="revoke-grant" data-id="${esc(g.id)}">撤销</button></div>` : ''}</div>`;
   const guide = `<div class="step"><span class="step-number">01</span><div><h3>设备上线，映射项目</h3><p>先在工作台读取文件，确认链路正常。</p></div></div><div class="step"><span class="step-number">02</span><div><h3>添加 MCP 连接</h3><p>公开 HTTPS 使用 OAuth；无域名时可选择官方 Secure MCP Tunnel，需账号具备相应权限。</p></div></div><div class="step"><span class="step-number">03</span><div><h3>选择项目与权限</h3><p>在客户端完成授权后，通过项目别名调用。详细步骤见项目内 <code>docs/CHATGPT.md</code>。</p></div></div>`;
   return (
     heading(
@@ -1635,7 +1691,7 @@ function connectHTML() {
       `<button class="btn primary" data-action="new-grant">${icon('key')}创建凭据</button>`,
     ) +
     `<div class="connect-grid"><section class="panel"><div class="panel-head"><h2>${icon('plug')}连接地址</h2><span class="badge neutral">MCP</span></div><div class="panel-body"><div class="eyebrow">STREAMABLE HTTP</div><div class="endpoint"><code>${esc(s.mcp_url)}</code><button class="icon-btn" data-action="copy-endpoint" aria-label="复制 MCP 地址">${icon('copy')}</button></div><div class="mcp-coding-entry"><div><strong>精简编码模式</strong><small>专注读码、修改与审阅，沿用原有授权。</small></div><button class="btn ghost small" data-action="copy-coding-endpoint">复制编码地址</button></div><div class="connection-route"><span>客户端</span>${icon('arrow')}<span>CodePier</span>${icon('arrow')}<span>本机项目</span></div>${notice('面板与 Agent 支持 HTTP。ChatGPT 直连需公开 HTTPS，或使用已获授权的 Secure MCP Tunnel。')}${uiHelp('接入步骤', guide)}</div></section>
-    <section class="panel"><div class="panel-head"><h2>${icon('key')}访问授权</h2><span class="badge neutral">${S.grants.filter((g) => !g.revoked).length} 未撤销</span></div><div class="panel-body">${S.grants.length ? S.grants.map(grantRow).join('') : empty('还没有访问授权。', 'new-grant', '创建凭据')}</div></section></div>` +
+    <section class="panel" id="grant-panel">${grantListHTML()}</section></div>` +
     uiHelp(
       `工具目录 · ${s.tools.length} 项`,
       `<div class="project-search"><input id="tool-query" type="search" aria-label="搜索工具" placeholder="搜索工具名称或权限"><small id="tool-count" role="status"></small></div><div class="tool-grid">${s.tools
@@ -1997,6 +2053,16 @@ panelActions.register(['copy-coding-endpoint'], async (b, e) => {
 panelActions.register(['new-grant'], async (b, e) => {
   await newGrant();
   return;
+});
+panelActions.register(['grant-history'], (button) => {
+  S.grantHistoryOpen = !S.grantHistoryOpen;
+  refreshGrantList(button);
+});
+panelActions.register(['grant-page'], (button) => {
+  const group = button.dataset.group;
+  if (!['current', 'history'].includes(group)) return;
+  S.grantPages[group] += Number(button.dataset.delta);
+  refreshGrantList(button);
 });
 panelActions.register(['edit-grant-projects'], async (b, e) => {
   await CodePierAccess.editGrant(b.dataset.id);

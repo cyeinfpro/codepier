@@ -210,3 +210,30 @@ def test_invalid_defaults_fail_closed_and_partial_public_url_update_preserves_de
     rejected = client.put('/api/settings/access', json={'all_projects': False, 'apply_to_existing': True})
     assert rejected.status_code == 400
     assert client.get('/api/settings').json()['access_defaults']['all_projects'] is True
+
+
+def test_grant_list_status_survives_expired_token_cleanup(api):
+    app, client, _ = api
+    store = app.state.store
+    grants = []
+    for label in ['active', 'expired', 'cleaned', 'used-refresh', 'pending', 'revoked']:
+        response = client.post('/api/grants', json={'label': label, 'scopes': ['read'], 'projects': ['project']})
+        assert response.status_code == 200, response.text
+        grants.append(response.json()['grant_id'])
+    active, expired, cleaned, used, pending, revoked = grants
+    store.execute('UPDATE tokens SET expires=? WHERE grant_id=?', (time.time() - 10, expired))
+    for identifier in [cleaned, pending]:
+        store.execute('DELETE FROM tokens WHERE grant_id=?', (identifier,))
+    store.execute("UPDATE tokens SET kind='refresh_used' WHERE grant_id=?", (used,))
+    store.execute('INSERT INTO oauth_codes VALUES (?,?,?,?,?,?,?)',
+                  ('fixture-pending-code', 'fixture-client', 'http://localhost/callback', 'challenge',
+                   'http://testserver/mcp', pending, time.time() + 300))
+    assert client.delete('/api/grants/' + revoked).status_code == 200
+    rows = {row['id']: row for row in client.get('/api/grants').json()['grants']}
+    assert [rows[identifier]['status'] for identifier in grants] == ['active', 'expired', 'expired', 'expired', 'pending', 'revoked']
+    assert rows[cleaned]['expires'] is None and rows[used]['expires'] is None
+    store.execute('DELETE FROM tokens WHERE grant_id=?', (expired,))
+    store.execute('DELETE FROM oauth_codes WHERE grant_id=?', (pending,))
+    rows = {row['id']: row for row in client.get('/api/grants').json()['grants']}
+    assert rows[expired]['status'] == rows[pending]['status'] == 'expired'
+    assert all('pending_until' not in row for row in rows.values())

@@ -134,3 +134,78 @@ def test_oauth_defaults_never_include_unrequested_scopes_or_submit_without_click
     assert not decisions
     assert stack.client.get('/api/oauth/requests/' + request_id).status_code == 200
     assert not errors, errors
+
+
+def test_grants_compact_history_pagination_and_project_disclosure(access_page, stack):
+    import time
+    page, errors, kind = access_page
+    now = time.time()
+    grants = [dict(id=f'{index:032x}', label=f'ChatGPT {index}', client_id='fixture-client',
+        scopes=['read', 'write', 'execute', 'computer'], projects=['*'], revoked=False,
+        status='active', expires=now + 86400, created=now - index) for index in range(20)]
+    grants[0]['projects'] = [f'project-{i}-with-a-long-name' for i in range(12)] + ['<img src=x onerror=alert(1)>']
+    grants[6].update(status='pending', expires=None)
+    for index in range(7, 20):
+        grants[index].update(status='expired' if index == 7 else 'revoked', revoked=index != 7, expires=now - 20)
+    mutations = []
+    page.on('request', lambda request: mutations.append(request.method)
+            if '/api/grants' in request.url and request.method != 'GET' else None)
+    page.route('**/api/grants', lambda route: route.fulfill(json={'grants': grants}))
+    page.evaluate("navigate('connect')")
+    panel = page.locator('#grant-panel')
+    current = panel.locator('[data-grant-group="current"]')
+    expect(panel.locator('.panel-head')).to_contain_text('7 当前授权')
+    expect(current.locator('.grant-row')).to_have_count(5)
+    toggle = panel.locator('[data-action="grant-history"]')
+    expect(toggle).to_have_attribute('aria-expanded', 'false')
+    expect(page.locator('#grant-history-list')).not_to_be_visible()
+    expect(panel.locator('[data-grant-group="history"] .grant-row')).to_have_count(0)
+    projects = current.locator('.grant-projects').first
+    expect(projects.locator('summary')).to_have_text('13 个项目')
+    expect(projects.locator('div')).not_to_be_visible()
+    projects.locator('summary').click()
+    expect(projects.locator('div')).to_contain_text('<img src=x onerror=alert(1)>')
+    expect(projects.locator('img')).to_have_count(0)
+    projects.locator('summary').click()
+    pager = panel.get_by_role('navigation', name='当前授权分页')
+    pager.get_by_role('button', name='下一页').click()
+    expect(current.locator('.grant-row')).to_have_count(2)
+    expect(current).to_contain_text('待连接')
+    expect(pager.get_by_role('button', name='下一页')).to_be_disabled()
+    # Keyboard activation, independently paginated history and focus retention.
+    toggle.focus()
+    toggle.press('Enter')
+    expect(toggle).to_have_attribute('aria-expanded', 'true')
+    expect(toggle).to_be_focused()
+    history = panel.locator('[data-grant-group="history"]')
+    expect(history.locator('.grant-row')).to_have_count(5)
+    expect(history).to_contain_text('已过期')
+    history_pager = panel.get_by_role('navigation', name='历史授权分页')
+    history_pager.get_by_role('button', name='下一页').click()
+    history_pager.get_by_role('button', name='下一页').click()
+    expect(history.locator('.grant-row')).to_have_count(3)
+    expect(current.locator('.grant-row')).to_have_count(2)
+    # Read-only refresh retains the open history and current pages.
+    page.evaluate('renderPage(false)')
+    expect(history.locator('.grant-row')).to_have_count(3)
+    expect(current.locator('.grant-row')).to_have_count(2)
+    toggle.click()
+    expect(history.locator('.grant-row')).to_have_count(0)
+    pager.get_by_role('button', name='上一页').click()
+    screenshots = Path('.work/grant-list/screenshots'); screenshots.mkdir(parents=True, exist_ok=True)
+    for width in [320, 390, 1280]:
+        page.set_viewport_size({'width': width, 'height': 900})
+        assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
+        for button in current.locator('.actions button').all():
+            rect = button.bounding_box()
+            assert rect and rect['width'] >= 40 and rect['x'] >= 0 and rect['x'] + rect['width'] <= width
+        if width != 320:
+            panel.screenshot(path=str(screenshots / f'{kind}-grants-{width}.png'))
+    # When the last current grants disappear, pagination clamps and history remains available.
+    for grant in grants:
+        grant.update(status='revoked', revoked=True)
+    page.evaluate('renderPage(false)')
+    expect(panel.locator('.panel-head')).to_contain_text('0 当前授权')
+    expect(panel).to_contain_text('暂无当前授权')
+    expect(panel.locator('[data-grant-group="current"] .grant-row')).to_have_count(0)
+    assert not mutations and not errors, (mutations, errors)
