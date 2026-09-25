@@ -421,7 +421,7 @@ def create_app(data_dir: str | None = None):
         fields['alias'] = alias
         fingerprint = digest(json.dumps([id,fields],sort_keys=True,ensure_ascii=False))
         # A durable save receipt owns the validation and the mapping commit.
-        key = 'project_save:'+digest((principal.user_id if principal.admin else principal.actor)+'\n'+(body.idempotency_key or fingerprint))
+        key = 'project_save:'+principal.space_id+':'+digest((principal.user_id if principal.admin else principal.actor)+'\n'+(body.idempotency_key or fingerprint))
         with store.lock, store.db:
             saved = store.one("SELECT value FROM meta WHERE key=?", (key,))
             plan = json.loads(saved['value']) if saved else None

@@ -348,6 +348,7 @@ def make_native_router(auth,runtime):
                         # and attachment filesystem paths are deliberately excluded.
                         safe={k:v for k,v in event.items() if k in ('type','receipt','parent_receipt','text','name','status','state','item_id','tool_id','steering') and isinstance(v,(str,bool,int,float,type(None)))}
                         if format=='json':
+                            service.session_project(sid,auth.panel(request))
                             yield ('' if first else ',')+json.dumps(safe,ensure_ascii=False)
                             first=False
                         elif isinstance(safe.get('text'),str):
@@ -361,6 +362,7 @@ def make_native_router(auth,runtime):
                             messages[key]={'type':previous['type'],'text':text}
                         if format=='md' and safe.get('type')=='done':
                             for message in messages.values():
+                                service.session_project(sid,auth.panel(request))
                                 yield message['type']+'\n\n'+message['text']+'\n\n'
                             messages.clear();message_bytes=0
                     if len(buffer)>1048576: raise DevError('CLI_CHAT_PROTOCOL','Export event exceeds limit',409)
@@ -369,6 +371,7 @@ def make_native_router(auth,runtime):
             else:
                 service.session_project(sid,auth.panel(request))
                 for message in messages.values():
+                    service.session_project(sid,auth.panel(request))
                     yield message['type']+'\n\n'+message['text']+'\n\n'
         return StreamingResponse(content(),media_type='application/json' if format=='json' else 'text/plain',headers={
             'Content-Disposition':f'attachment; filename="chat-{sid}.{format}"',
@@ -399,6 +402,7 @@ def make_native_router(auth,runtime):
                             yield 'event: session\ndata: '+json.dumps(metadata,ensure_ascii=False)+'\n\n'
                             last_metadata=metadata
                         for offset,item in frames:
+                            service.session_project(sid,auth.panel(request))
                             yield 'id: '+str(offset)+'\nevent: chat\ndata: '+json.dumps(item,ensure_ascii=False)+'\n\n'
                             cursor=offset
                         if frames:

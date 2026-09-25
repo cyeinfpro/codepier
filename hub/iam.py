@@ -56,6 +56,7 @@ def membership(store, user_id, space_id):
 
 def is_space_admin(store, user_id, space_id):
     try:
+        user_security(store, user_id)
         return LEVELS[membership(store, user_id, space_id)['level']] >= LEVELS['admin']
     except DevError:
         return False
@@ -158,6 +159,23 @@ def require_project(store, principal, action, project_id):
     project_in_space(store, principal, project_id)
     if (not principal.grant_id or principal.authorization_mode == 'fixed') and action not in human_project_actions(store, principal, project_id):
         raise DevError('ROLE_POLICY_DENIED', '当前账号未获授予此项目的操作权限', 403)
+
+
+
+def device_identity_active(store, device):
+    """Machine authentication is distinct from a browser login or an IdP token."""
+    if not device or not device.get('enabled'):
+        return False
+    owner=device.get('owner_user_id')
+    if owner is None:
+        # Compatibility for old device records: never extend this to new Spaces.
+        return device.get('space_id')=='legacy' and bool(store.one("SELECT 1 AS ok FROM spaces WHERE id='legacy' AND active=1"))
+    try:
+        user_security(store,owner)
+        membership(store,owner,device['space_id'])
+        return True
+    except DevError:
+        return False
 
 
 def require_device(store, principal, device_id, *, manage=False, creation=None):

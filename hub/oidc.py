@@ -184,17 +184,27 @@ class OIDCService:
     async def http_json(self,provider,method,url,**kwargs):
         self.check_endpoint(provider,url)
         try:
-            async with httpx.AsyncClient(transport=self.transport,timeout=httpx.Timeout(12,connect=5),follow_redirects=False,trust_env=False) as client:
-                async with client.stream(method,url,**kwargs) as response:
-                    if not 200<=response.status_code<300:raise DevError('OIDC_UPSTREAM_ERROR','身份提供者暂不可用或拒绝请求',502)
-                    raw=bytearray()
-                    async for chunk in response.aiter_bytes():
-                        raw.extend(chunk)
-                        if len(raw)>MAX_HTTP_BYTES:raise DevError('OIDC_UPSTREAM_ERROR','身份提供者响应超出限制',502)
-                    value=json.loads(raw)
-                    if not isinstance(value,dict):raise ValueError('Object required')
-                    return value
-        except (httpx.HTTPError,ValueError,UnicodeError) as exc:raise DevError('OIDC_UPSTREAM_ERROR','身份提供者通信失败',502) from exc
+            # Per-read deadlines alone allow an endless slow-drip response.
+            async with asyncio.timeout(15):
+                async with httpx.AsyncClient(transport=self.transport,timeout=httpx.Timeout(12,connect=5),follow_redirects=False,trust_env=False) as client:
+                    async with client.stream(method,url,**kwargs) as response:
+                        raw=bytearray()
+                        async for chunk in response.aiter_bytes():
+                            raw.extend(chunk)
+                            if len(raw)>MAX_HTTP_BYTES:raise DevError('OIDC_UPSTREAM_ERROR','身份提供者响应超出限制',502)
+                        if not 200<=response.status_code<300:
+                            try:error=json.loads(raw).get('error')
+                            except (ValueError,AttributeError):error=None
+                            if ((response.status_code==400 and error=='invalid_grant')
+                                    or (response.status_code==401 and error=='invalid_token'
+                                        and 'Authorization' in kwargs.get('headers',{}))):
+                                raise DevError('OIDC_CREDENTIAL_REJECTED','身份提供者已明确拒绝当前身份凭据',401)
+                            raise DevError('OIDC_UPSTREAM_ERROR','身份提供者暂不可用或拒绝请求',502)
+                        value=json.loads(raw)
+                        if not isinstance(value,dict):raise ValueError('Object required')
+                        return value
+        except (httpx.HTTPError,ValueError,UnicodeError,TimeoutError) as exc:
+            raise DevError('OIDC_UPSTREAM_ERROR','身份提供者通信失败',502) from exc
 
     async def metadata(self,provider,*,force=False):
         cached=self.store.one('SELECT * FROM oidc_cache WHERE provider_id=? AND version=? AND expires>?',(provider['id'],provider['version'],time.time()))
@@ -320,38 +330,56 @@ class OIDCService:
         if not identity or not identity['enabled'] or not identity['upstream_tokens']:return
         provider=self.provider(identity['provider_id'])
         user=iam.user_security(self.store,identity['user_id'])
-        meta,keys=await self.metadata(provider)
-        if not meta.get('userinfo_endpoint'):return
-        secured=json.loads(self.store.decrypt(identity['upstream_tokens']))
         expected_tokens=identity['upstream_tokens']
-        if secured['expires_at']<=time.time()+30:
-            if not secured.get('refresh_token'):return
-            tokens=await self.exchange(provider,meta,{'grant_type':'refresh_token','refresh_token':secured['refresh_token']})
-            if tokens.get('token_type','').lower()!='bearer' or not isinstance(tokens.get('access_token'),str):raise DevError('OIDC_TOKEN_INVALID','刷新未返回有效访问令牌',401)
-            if tokens.get('id_token'):
-                try:claims=validate_claims(tokens['id_token'],provider,keys,access_token=tokens['access_token'])
-                except DevError:
-                    _,keys=await self.metadata(provider,force=True)
-                    claims=validate_claims(tokens['id_token'],provider,keys,access_token=tokens['access_token'])
-                if claims['sub']!=identity['subject']:raise DevError('OIDC_SUBJECT_MISMATCH','刷新身份不一致',401)
-            life=tokens.get('expires_in',300)
-            if type(life) not in (int,float) or not math.isfinite(life) or not 1<=life<=30*86400:raise DevError('OIDC_TOKEN_INVALID','刷新有效期无效',401)
-            secured.update(access_token=tokens['access_token'],refresh_token=tokens.get('refresh_token',secured['refresh_token']),expires_at=time.time()+life)
-            encrypted=self.store.encrypt(json.dumps(secured))
-            with self.store.transaction():
-                if self.provider(provider['id'])['version']!=provider['version'] or iam.user_security(self.store,user['id'])['epoch']!=user['epoch']:return
-                changed=self.store.db.execute('UPDATE external_identities SET upstream_tokens=? WHERE id=? AND enabled=1 AND upstream_tokens=?',(encrypted,identifier,expected_tokens)).rowcount
-                if not changed:return  # A parallel login/unlink owns newer credentials.
-            expected_tokens=encrypted
-        info=await self.http_json(provider,'GET',meta['userinfo_endpoint'],headers={'Authorization':'Bearer '+secured['access_token']})
-        if info.get('sub')!=identity['subject']:raise DevError('OIDC_SUBJECT_MISMATCH','UserInfo 身份不一致',401)
-        groups=self.groups(provider,info)
-        with self.store.transaction():
+        def still_current():
             current=self.store.one('SELECT * FROM external_identities WHERE id=?',(identifier,))
-            if (not current or not current['enabled'] or current['upstream_tokens']!=expected_tokens
-                    or self.provider(provider['id'])['version']!=provider['version']
-                    or iam.user_security(self.store,user['id'])['epoch']!=user['epoch']):return
-            self.reconcile_groups(current,groups,provider)
+            configured=self.store.one('SELECT version,enabled FROM oidc_providers WHERE id=?',(provider['id'],))
+            account=self.store.one('SELECT epoch,active FROM iam_users WHERE user_id=?',(user['id'],))
+            return bool(current and current['enabled'] and current['upstream_tokens']==expected_tokens
+                        and configured and configured['enabled'] and configured['version']==provider['version']
+                        and account and account['active'] and account['epoch']==user['epoch'])
+        try:
+            meta,keys=await self.metadata(provider)
+            if not meta.get('userinfo_endpoint'):return
+            secured=json.loads(self.store.decrypt(identity['upstream_tokens']))
+            if secured['expires_at']<=time.time()+30:
+                if not secured.get('refresh_token'):return
+                tokens=await self.exchange(provider,meta,{'grant_type':'refresh_token','refresh_token':secured['refresh_token']})
+                if tokens.get('token_type','').lower()!='bearer' or not isinstance(tokens.get('access_token'),str):raise DevError('OIDC_TOKEN_INVALID','刷新未返回有效访问令牌',401)
+                if tokens.get('id_token'):
+                    try:claims=validate_claims(tokens['id_token'],provider,keys,access_token=tokens['access_token'])
+                    except DevError:
+                        _,keys=await self.metadata(provider,force=True)
+                        claims=validate_claims(tokens['id_token'],provider,keys,access_token=tokens['access_token'])
+                    if claims['sub']!=identity['subject']:raise DevError('OIDC_SUBJECT_MISMATCH','刷新身份不一致',401)
+                life=tokens.get('expires_in',300)
+                if type(life) not in (int,float) or not math.isfinite(life) or not 1<=life<=30*86400:raise DevError('OIDC_TOKEN_INVALID','刷新有效期无效',401)
+                secured.update(access_token=tokens['access_token'],refresh_token=tokens.get('refresh_token',secured['refresh_token']),expires_at=time.time()+life)
+                encrypted=self.store.encrypt(json.dumps(secured))
+                with self.store.transaction():
+                    if self.provider(provider['id'])['version']!=provider['version'] or iam.user_security(self.store,user['id'])['epoch']!=user['epoch']:return
+                    changed=self.store.db.execute('UPDATE external_identities SET upstream_tokens=? WHERE id=? AND enabled=1 AND upstream_tokens=?',(encrypted,identifier,expected_tokens)).rowcount
+                    if not changed:return  # A parallel login/unlink owns newer credentials.
+                expected_tokens=encrypted
+            info=await self.http_json(provider,'GET',meta['userinfo_endpoint'],headers={'Authorization':'Bearer '+secured['access_token']})
+            if info.get('sub')!=identity['subject']:raise DevError('OIDC_SUBJECT_MISMATCH','UserInfo 身份不一致',401)
+            groups=self.groups(provider,info)
+            with self.store.transaction():
+                current=self.store.one('SELECT * FROM external_identities WHERE id=?',(identifier,))
+                if (not current or not current['enabled'] or current['upstream_tokens']!=expected_tokens
+                        or self.provider(provider['id'])['version']!=provider['version']
+                        or iam.user_security(self.store,user['id'])['epoch']!=user['epoch']):return
+                self.reconcile_groups(current,groups,provider)
+
+        except DevError as exc:
+            # A response for old credentials/configuration must not disable an
+            # identity that was just reauthenticated, relinked or reconfigured.
+            if exc.code in {'OIDC_ADMISSION_DENIED','OIDC_SUBJECT_MISMATCH','OIDC_CREDENTIAL_REJECTED'}:
+                with self.store.transaction():
+                    if still_current():
+                        current=self.store.one('SELECT * FROM external_identities WHERE id=?',(identifier,))
+                        self.disable_identity(current,exc.code)
+            raise
 
     async def reconcile(self):
         async with self.sync_lock:
@@ -359,16 +387,11 @@ class OIDCService:
             for row in rows:
                 try:await self.sync_identity(row['id'])
                 except DevError as exc:
-                    # Transport outages don't silently remove manual membership,
-                    # but freshness is not extended. Explicit admission denial is
-                    # stronger and disables this identity immediately.
-                    if exc.code in {'OIDC_ADMISSION_DENIED','OIDC_SUBJECT_MISMATCH'}:
-                        with self.store.transaction():
-                            identity=self.store.one('SELECT * FROM external_identities WHERE id=?',(row['id'],))
-                            if identity and identity['enabled']:self.disable_identity(identity,exc.code)
+                    # Authoritative revocation is compare-and-set inside
+                    # sync_identity; outages do not extend freshness.
                     self.store.audit('oidc-worker','oidc.reconcile',row['id'],'denied',{'code':exc.code})
                 except (ValueError,TypeError,KeyError):
-                    self.store.execute('UPDATE external_identities SET fresh_until=0 WHERE id=?',(row['id'],))
+                    self.store.audit('oidc-worker','oidc.reconcile',row['id'],'denied',{'code':'OIDC_RECORD_INVALID'})
 
     async def start(self):
         self.stop_event.clear()

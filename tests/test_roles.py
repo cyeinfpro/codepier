@@ -272,10 +272,10 @@ def test_corrupt_stored_role_does_not_fall_back_to_grant_snapshot(api):
 
 def test_owner_cannot_bind_role_in_another_space(api):
     app,client,_=api
-    r=role(client)
-    app.state.store.execute('INSERT INTO users VALUES (?,?,?,?)',('other','other',password_hash('not-a-real-password'),time.time()))
     sid=client.post('/api/iam/spaces',json={'label':'Other space','idempotency_key':'other-space-001'}).json()['id']
-    app.state.store.execute('UPDATE access_roles SET user_id=?,space_id=? WHERE id=?',('other',sid,r['id']))
+    r=must(client.post('/api/access-roles',headers={'X-CodePier-Space':sid},json={
+        'label':'Other secretary','project_rules':[{'actions':['read'],'all_projects':True}],
+        'idempotency_key':'other-role-create'}),201)
     assert client.post('/api/access-profiles',json={'label':'no','role_id':r['id'],'idempotency_key':'foreign-role-001'}).status_code==404
 
 
@@ -457,7 +457,7 @@ def test_schema6_upgrade_keeps_fixed_grants_profiles_and_master_key(api,tmp_path
         db.execute("UPDATE meta SET value='6' WHERE key='schema'")
     new=Store(directory)
     try:
-        assert new.one("SELECT value FROM meta WHERE key='schema'")['value']=='8'
+        assert new.one("SELECT value FROM meta WHERE key='schema'")['value']=='9'
         grant=new.one('SELECT * FROM grants WHERE id=?',('old-grant',))
         assert grant['authorization_mode']=='fixed' and grant['role_id'] is None
         assert grant['profile_id']=='prf_old' and grant['scopes']=='["read"]'

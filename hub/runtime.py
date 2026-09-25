@@ -146,8 +146,8 @@ class Runtime:
         return bool(connection and not connection.unusable and time.time() - connection.last_seen < 45 and self.connection_authorized(device_id, connection))
 
     def connection_authorized(self, device_id, connection):
-        device = self.store.one("SELECT d.enabled,d.secret,s.active AS space_active,COALESCE(u.active,1) AS owner_active FROM devices d JOIN spaces s ON s.id=d.space_id LEFT JOIN iam_users u ON u.user_id=d.owner_user_id WHERE d.id=?", (device_id,))
-        return bool(device and device["enabled"] and device["space_active"] and device["owner_active"] and
+        device = self.store.one("SELECT id,enabled,secret,space_id,owner_user_id FROM devices WHERE id=?", (device_id,))
+        return bool(iam.device_identity_active(self.store, device) and
                     (getattr(connection, "device_secret", None) is None or connection.device_secret == device["secret"]))
 
     def detach_connection(self, device_id, connection):
@@ -472,8 +472,10 @@ class Runtime:
     async def dispatch_device_action(self, name: str, args: dict, device_id: str, principal: Principal):
         if getattr(self, "panel_maintenance", None):
             self.panel_maintenance.guard()
-        if name not in DEVICE_ACTIONS or not principal.admin:
-            raise DevError("INSUFFICIENT_SCOPE", "只有面板管理员可以管理 Agent 生命周期", 403)
+        principal = refresh_profile_principal(self.store, principal)
+        if name not in DEVICE_ACTIONS or principal.grant_id:
+            raise DevError("INSUFFICIENT_SCOPE", "Agent 生命周期只能由有设备管理权限的面板用户操作", 403)
+        iam.require_device(self.store, principal, device_id, manage=True)
         device = self.store.one("SELECT id,name,enabled,info FROM devices WHERE id=?", (device_id,))
         if not device:
             raise DevError("NOT_FOUND", "设备不存在", 404)
@@ -508,6 +510,10 @@ class Runtime:
             self.authorize(principal, TOOLS[name].scope, project_id=project['id'])
         elif name == 'system_validate' and not principal.admin:
             self.authorize(principal, 'projects.create', device_id=project['device_id'], creation=project)
+        elif name in DEVICE_ACTIONS:
+            if principal.grant_id:
+                raise DevError('INSUFFICIENT_SCOPE', 'MCP 不允许设备生命周期操作', 403)
+            iam.require_device(self.store, principal, project['device_id'], manage=True)
         snapshot = {k: project[k] for k in ("id", "alias", "root", "mode", "allow_tasks") if k in project}
         if name in {"open_workspace", "show_changes", "apply_patch"}:
             snapshot["_coding_owner"] = "grant:" + principal.grant_id if principal.grant_id else principal.actor
@@ -523,7 +529,11 @@ class Runtime:
                 self.authorize(principal, TOOLS[name].scope, project_id=project['id'])
             elif name == 'system_validate' and not principal.admin:
                 self.authorize(principal, 'projects.create', device_id=project['device_id'], creation=project)
-            old = self.store.one("SELECT * FROM operations WHERE actor=? AND idem=?", (principal.actor, idem)) if idem else None
+            elif name in DEVICE_ACTIONS:
+                if principal.grant_id:
+                    raise DevError('INSUFFICIENT_SCOPE', 'MCP 不允许设备生命周期操作', 403)
+                iam.require_device(self.store, principal, project['device_id'], manage=True)
+            old = self.store.one("SELECT * FROM operations WHERE space_id=? AND actor=? AND idem=?", (principal.space_id, principal.actor, idem)) if idem else None
             if name == "tasks_list" and not idem:
                 # Reuse only an outstanding metadata query from this exact grant.
                 # Explicit keys retain their own receipts; completed results are
@@ -535,6 +545,9 @@ class Runtime:
                     ORDER BY created LIMIT 1""",
                     (principal.actor, principal.grant_id, project["device_id"], project["id"], fingerprint, time.time()))
             if old:
+                # Replay is not an exception to current visibility, even when
+                # a caller already knows its own formerly permitted request key.
+                self.operation_row(old['id'], principal, status_only=True)
                 if old["fingerprint"] != fingerprint:
                     raise DevError("IDEMPOTENCY_CONFLICT", "幂等键已经用于不同请求；未执行新操作", 409, operation_id=old["id"])
                 id = old["id"]
@@ -592,6 +605,10 @@ class Runtime:
                 return self.authorized_result(id, result, principal)
             except asyncio.TimeoutError:
                 pass
+        try:
+            self.operation_row(id, principal, status_only=True)
+        except DevError as exc:
+            raise DevError(exc.code, exc.message, exc.status, operation_id=id) from exc
         op = self.store.one("SELECT state,deadline,result,created,updated FROM operations WHERE id=?", (id,))
         if op["result"]:
             return self.authorized_result(id, json.loads(op["result"]), principal)

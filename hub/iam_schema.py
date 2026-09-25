@@ -5,8 +5,9 @@ before COMMIT and restores enforcement immediately. Rebuilds remove global alias
 constraints, not resource IDs. No network or user admission occurs in migration.
 """
 from __future__ import annotations
+import json
 
-SCHEMA_VERSION = '8'
+SCHEMA_VERSION = '9'
 
 DDL = '''
 CREATE TABLE IF NOT EXISTS membership_blocks(space_id TEXT NOT NULL REFERENCES spaces(id),user_id TEXT NOT NULL REFERENCES users(id),blocked INTEGER NOT NULL DEFAULT 1,PRIMARY KEY(space_id,user_id));
@@ -115,6 +116,10 @@ def _rebuild(db, table, substitutions):
 def migrate(db):
     if db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0] == SCHEMA_VERSION:
         return
+    version = db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0]
+    if version == '8':
+        migrate_v9(db)
+        return
     for statement in DDL.split(';'):
         if statement.strip():
             db.execute(statement)
@@ -188,4 +193,42 @@ def migrate(db):
           WHEN (SELECT space_id FROM access_roles WHERE id=NEW.role_id)<>
                (SELECT space_id FROM projects WHERE id=NEW.project_id)
           BEGIN SELECT RAISE(ABORT,'cross-space created-project binding'); END""")
+    migrate_v9(db)
+
+
+def migrate_v9(db):
+    """Scope replay identity and freeze resource boundaries, preserving receipts."""
+    db.execute('DROP INDEX IF EXISTS op_idem')
+    db.execute('CREATE UNIQUE INDEX op_idem ON operations(space_id,actor,idem) WHERE idem IS NOT NULL')
+    _add(db, 'workflow_replays', {'space_id': "TEXT NOT NULL DEFAULT 'legacy' REFERENCES spaces(id)"})
+    db.execute('UPDATE workflow_replays SET space_id=(SELECT space_id FROM workflows WHERE id=workflow_replays.workflow_id)')
+    _rebuild(db, 'workflow_replays', [('PRIMARY KEY(actor,idem)', 'PRIMARY KEY(space_id,actor,idem)')])
+    for event in ('INSERT', 'UPDATE'):
+        db.execute(f"""CREATE TRIGGER IF NOT EXISTS iam_workflow_replays_{event.lower()} BEFORE {event} ON workflow_replays
+          WHEN (SELECT space_id FROM workflows WHERE id=NEW.workflow_id)<>NEW.space_id
+          BEGIN SELECT RAISE(ABORT,'cross-space workflow receipt'); END""")
+    # Retain pre-v9 project-save receipts under their verified Space. Their
+    # old digest already binds the human/grant, so only the namespace changes.
+    for entry in db.execute("SELECT key,value FROM meta WHERE key LIKE 'project_save:%'").fetchall():
+        if entry[0].count(':') != 1:
+            continue
+        try:
+            plan=json.loads(entry[1])
+            bound=plan.get('committed') or plan.get('before') or {}
+            space=bound.get('space_id')
+            if not space:
+                op=db.execute('SELECT DISTINCT space_id FROM operations WHERE idem=?',(plan.get('validation_key'),)).fetchall()
+                space=op[0][0] if len(op)==1 else None
+            if space and db.execute('SELECT 1 FROM spaces WHERE id=?',(space,)).fetchone():
+                db.execute('INSERT OR IGNORE INTO meta(key,value) VALUES(?,?)',('project_save:'+space+':'+entry[0].split(':',1)[1],entry[1]))
+        except (ValueError,TypeError,AttributeError):
+            pass  # Malformed/unbound metadata never establishes authority.
+    # There is no implicit transfer API. Moving a parent alone would orphan the
+    # security boundary of existing histories and grants; require an explicit,
+    # separately designed transfer transaction rather than in-place retargeting.
+    for table in ('devices','projects','vps_connections','access_roles','access_profiles',
+                  'grants','operations','workflows','artifacts','native_ownership','native_upload_ownership'):
+        db.execute(f"""CREATE TRIGGER IF NOT EXISTS iam_{table}_space_immutable BEFORE UPDATE OF space_id ON {table}
+          WHEN NEW.space_id<>OLD.space_id
+          BEGIN SELECT RAISE(ABORT,'resource Space is immutable'); END""")
     db.execute("UPDATE meta SET value=? WHERE key='schema'", (SCHEMA_VERSION,))

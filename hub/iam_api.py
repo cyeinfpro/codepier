@@ -162,6 +162,9 @@ def make_iam_router(auth,runtime):
     async def block_member(space_id:str,user_id:str,request:Request,body:BlockEdit):
         with store.lock,store.db:
             store.db.execute('BEGIN IMMEDIATE');p=admin(request,space_id,True)
+            target=iam.membership(store,user_id,space_id) if body.blocked else None
+            if target and target['level']=='owner' and iam.membership(store,p.user_id,space_id)['level']!='owner':
+                raise DevError('OWNER_REQUIRED','只有主理人可以暂停另一主理人',403)
             if body.blocked:owner_guard(space_id,user_id,'guest',False)
             store.db.execute('INSERT INTO membership_blocks VALUES(?,?,?) ON CONFLICT(space_id,user_id) DO UPDATE SET blocked=excluded.blocked',(space_id,user_id,int(body.blocked)))
             wake(p,'membership.suspension',user_id,body.model_dump())
@@ -238,6 +241,9 @@ def make_iam_router(auth,runtime):
             if row['version']!=body.expected_version:raise DevError('VERSION_CONFLICT','账号已变化',409)
             if row['active'] and row['instance_admin'] and (not body.active or not body.instance_admin):
                 if not store.one('SELECT 1 AS ok FROM iam_users WHERE user_id<>? AND instance_admin=1 AND active=1 LIMIT 1',(user_id,)):raise DevError('LAST_ADMIN','不能移除最后一位实例管理员',409)
+            if row['active'] and row['instance_admin'] and row['local_login'] and (not body.active or not body.instance_admin):
+                if not store.one('SELECT 1 AS ok FROM iam_users WHERE user_id<>? AND instance_admin=1 AND active=1 AND local_login=1 LIMIT 1',(user_id,)):
+                    raise DevError('LAST_RECOVERY_ADMIN','不能移除最后一位可本地登录的恢复管理员',409)
             if not body.active:
                 for m in store.all("SELECT m.space_id FROM memberships m JOIN spaces s ON s.id=m.space_id WHERE m.user_id=? AND m.active=1 AND m.level='owner' AND s.kind<>'personal'",(user_id,)):
                     owner_guard(m['space_id'],user_id,'guest',False)

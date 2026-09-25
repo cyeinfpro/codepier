@@ -125,7 +125,7 @@ class Workflows:
                 "templates": [{"id": k, **v} for k, v in TEMPLATES.items()]}
 
     def replay(self, args, principal, fingerprint):
-        old = self.store.one("SELECT * FROM workflow_replays WHERE actor=? AND idem=?", (principal.actor, args["idempotency_key"]))
+        old = self.store.one("SELECT * FROM workflow_replays WHERE space_id=? AND actor=? AND idem=?", (principal.space_id, principal.actor, args["idempotency_key"]))
         if old:
             self.load(old["workflow_id"], principal, write=True)
             if old["fingerprint"] != fingerprint:
@@ -135,8 +135,8 @@ class Workflows:
 
     def record(self, row, args, principal, fingerprint, action, summary, evidence):
         receipt = {"workflow_id": row["id"], "version": row["version"], "state": row["state"], "replayed": False, "next": "workflows_get"}
-        self.store.db.execute("INSERT INTO workflow_replays(actor,idem,fingerprint,workflow_id,receipt) VALUES (?,?,?,?,?)",
-                              (principal.actor, args["idempotency_key"], fingerprint, row["id"], json.dumps(receipt)))
+        self.store.db.execute("INSERT INTO workflow_replays(actor,idem,fingerprint,workflow_id,receipt,space_id) VALUES (?,?,?,?,?,?)",
+                              (principal.actor, args["idempotency_key"], fingerprint, row["id"], json.dumps(receipt), principal.space_id))
         self.store.db.execute("INSERT INTO workflow_events(workflow_id,action,summary,evidence,at,version) VALUES (?,?,?,?,?,?)",
                               (row["id"], action, summary, json.dumps(evidence, ensure_ascii=False), row["updated"], row["version"]))
         iam.audit(self.store, principal, 'workflows.' + action, row['id'], status=row['state'],
