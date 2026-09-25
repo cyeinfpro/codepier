@@ -64,8 +64,8 @@
   min-width: 0;
   padding: 3px 8px;
   border-radius: 7px;
-  background: var(--ui-cover-project);
-  color: var(--ui-cover-text);
+  background: hsl(var(--call-project-hue, 270) 55% 88%);
+  color: hsl(var(--call-project-hue, 270) 35% 24%);
 }
 .call-project-label {
   font-size: 11px;
@@ -305,4 +305,19 @@
   .call-chevron {
     transition: none;
   }
+}
+
+html[data-appearance='dark'] .call-project {
+  background: hsl(var(--call-project-hue, 270) 25% 26%);
+  color: hsl(var(--call-project-hue, 270) 60% 89%);
+}
+@media (prefers-color-scheme: dark) {
+  html:not([data-appearance]) .call-project {
+    background: hsl(var(--call-project-hue, 270) 25% 26%);
+    color: hsl(var(--call-project-hue, 270) 60% 89%);
+  }
+}
+html .call-project.call-project-unknown {
+  background: var(--ui-surface);
+  color: var(--ui-muted);
 }
