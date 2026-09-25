@@ -1,139 +1,134 @@
-# Multi-user / OIDC implementation status
+# Multi-user / OIDC implementation and acceptance
 
-**Integration checkpoint; full release acceptance is in progress. No live deployment or IdP configuration was changed.**
+The planned first-release application paths are implemented on PR #3. This is
+not the earlier standalone policy prototype. Use the **current exact-head CI
+results on the PR** as the acceptance record; older passing subsets are not a
+substitute for the full workflow. No main merge, service deployment or production
+IdP/ChatGPT configuration is implied by this document.
 
-Integrated source commit: `db36ddacebedca853c44b554373ea595e8d90ab1`.
-Base: `57f502d428472d8e7f6d71195a952b7157a8e5ea` plus the original PR #3 prototype.
+Base: `57f502d428472d8e7f6d71195a952b7157a8e5ea`.
+Setup, migration, recovery and Authentik instructions: [MULTIUSER_OIDC.md](MULTIUSER_OIDC.md).
 
-## Implemented and connected to the application
+## Implementation coverage
 
-This is no longer just the standalone `multiuser_policy.py` prototype. The real
-application integration extends the existing Role engine through `hub/iam.py`,
-`iam_schema.py`, `iam_api.py`, `oidc.py` and the existing Auth/runtime/routers.
-The prototype remains a separate policy contract; production requests use the
-persistent live IAM checks and the existing per-project Role rules.
+| Requirement | Connected implementation |
+| --- | --- |
+| Human identity and storage | `iam_schema.py`, `iam.py`, `auth.py`: transactional schema 9, user security state, personal/team Spaces, memberships and assignment provenance, ownership and Space-scoped aliases. |
+| OIDC login and account linking | `oidc.py`: discovery, confidential Authorization Code/S256 PKCE, state/nonce/browser binding, asymmetric ID-token/JWKS/audience/azp/time/at_hash checks, exact issuer/subject, explicit recent-auth linking and unlink tombstones. |
+| Human administration | `iam_api.py` and existing routers: ordinary users, separate instance/Space administration, membership/invitation/assignment management, owner/recovery protection, personal session management and suspension. |
+| Shared dynamic Roles | Existing Role/Profile/grant engine plus live IAM checks: private stable Profiles, shared Space Roles, explicit delegation eligibility and current action/resource policy. |
+| MCP authorization | `oauth.py`, `mcp.py`, `auth.py`: CodePier remains the downstream issuer; consent binds the human, session and Space; IdP Tokens never become Agent or MCP credentials. |
+| Resource and record isolation | Runtime and all existing panel/service routers enforce Space, current membership, project permissions and private record ownership; lists/counts/search/audit/downloads are scoped. |
+| Queues and streams | Current policy is rechecked before delivery, on awaited results, per native cached export/event item, for approvals, and for each authorized SSE subscriber. |
+| Devices and native execution | Per-Space enrollment/ownership; device-owner current status/membership gates; Hub and upgraded Agent both enforce native session/upload ownership. |
+| Groups and offboarding | Provider-scoped mappings, provenance, refresh/UserInfo reconciliation, bounded freshness, validated back-channel logout, user/membership/assignment revocation. |
+| User interfaces | `identity.js`, existing panel components: OIDC login/linking, per-tab Space selection, personal connections/sessions, members/invitations, assignments, providers/group maps and user suspension. |
+| Compatibility | Existing IDs, Token hashes, Profile/grant ownership, device credentials and master.key are preserved; old fixed grants do not silently become dynamic role grants. |
 
-- Transactional schema 9 migration: users' security state, personal/team Spaces,
-  source-tracked memberships and Role assignments, resource/history ownership,
-  Space-scoped aliases, cross-Space reference guards, external identities and
-  server-side OIDC state. Existing Profile/grant/resource IDs, Token hashes,
-  device credentials and the master encryption key are retained.
-- Ordinary panel users no longer automatically become administrators. Human
-  requests select a Space per request/tab and must retain current membership;
-  MCP credentials carry a fixed Space. Instance and Space administration differ.
-- Shared dynamic Roles: a user's Profile remains private/stable while an assigned
-  Role is shared within a Space. Both projects and capabilities can expand on
-  existing explicitly delegated connections without new OAuth. Role assignment,
-  delegation eligibility, membership, user suspension and current policy are
-  rechecked. All present/future projects is bounded by the grant's Space.
-- Generic OIDC Authorization Code + S256 PKCE with encrypted server-side state,
-  exact issuer/subject identity, nonce, signature/JWKS, audience/azp, at_hash,
-  expiry/issued-at and browser binding checks. Discovery/token endpoints are
-  limited to explicitly configured HTTPS origins; redirects are not followed.
-- Explicit account linking with recent authentication and tombstones preventing
-  a delayed callback from reviving an unlinked identity. No email auto-linking.
-  Existing local recovery login remains separate. JIT is opt-in, never first-login
-  administrator, and creates a private personal Space, not access to Legacy.
-- Provider-scoped group mappings with assignment provenance, administrator
-  membership blocks, bounded entitlement freshness and refresh reconciliation.
-  Validated back-channel logout and replay handling. Panel logout is distinct
-  from revoking all MCP connections. Local user suspension revokes sessions and
-  grants and fences queued work; already accepted external commands are not
-  represented as automatically rolled back.
-- Space-aware OAuth/PAT consent and refresh. Consent requests are bound to the
-  signed-in human, browser session and Space. IdP Tokens are never forwarded to
-  ChatGPT or Agents. Old fixed grants retain their fixed semantics.
-- Scoped dashboard/list/count/audit/export paths, operations and awaited results,
-  workflows, artifacts/downloads, VPS, approvals and filtered event streams.
-  Private histories do not become shared merely through Role/project membership.
-- Self-service device ownership within a Space. Native sessions/uploads are bound
-  to their human and Space on both Hub and updated Agent. Older Agent capability
-  versions cannot silently supply ordinary users with shared private sessions.
-- OIDC login, identity/session management, per-tab Space selection, membership,
-  invitations, Role assignment, provider/group mapping and user suspension UI,
-  retaining existing layout/accessibility components.
+Production authorization uses the persistent IAM checks and the existing Role
+engine. `multiuser_policy.py` remains a separate tested contract, not a second
+production policy engine or evidence that a prototype alone protects routes.
 
-## Checkpoint tests actually executed locally
+## Secretary behaviour retained
 
-The following are separate checkpoints, not a summed final-suite count:
+A human owns a Profile within a Space. The Profile links to a shared Role which
+that human is allowed to use/delegate. Existing role credentials may gain or lose
+**both projects and capabilities** as the Role changes, without a new grant or
+repeated OAuth. The first resource list is not a permanent ceiling.
 
-- 12 new real HTTP/database multi-user integration tests passed.
-- 39 new signed-provider OIDC HTTP tests passed. They cover PKCE, issuer/audience,
-  nonce, state/browser binding, callback replay, linking, group removal, freshness
-  expiry and logout-token replay. The provider is a deterministic RSA-signed test
-  adapter, NOT a live Authentik installation.
-- One new actual temporary Hub/Agent test passed: create/read a new project with
-  the same role Token, then remove assignment and prove a filesystem write cannot
-  occur; an unrelated Space is denied.
-- 97 legacy Roles/Profiles/continuous-access tests passed after updating genuine
-  old-schema fixtures to migrate through schema 9.
-- 162 workflow/workspace/VPS tests passed; 11 native history/SSE fixture tests
-  passed at subsequent checkpoints.
-- Python compilation, JavaScript syntax and git diff whitespace checks passed.
+All current/future projects means within that Role's Space. A shared Role does
+not implicitly share private transcripts, approvals, browser/desktop leases or
+other grants' histories. Assigning a different Role to a Profile is not the same
+as editing the existing Role and does not silently retarget old credentials.
 
-Local browser navigation is blocked by the execution environment. No local UI
-success is claimed. New Chromium/WebKit desktop/mobile tests have been added;
-GitHub Actions must supply the real-browser evidence. Local dependencies differ
-from repository pins and omit some optional parser/lint packages. Full pinned
-Linux/macOS regression and Windows Agent acceptance remain required.
+## Final hardening and regression coverage
 
-Exact-source checkpoint validation:
-https://github.com/tsunheimat/codepier/actions/runs/36110869167
+- Operation/workflow/project-save replay keys are Space-scoped and survive reopen.
+- Parent resource Space bindings cannot be changed underneath private histories.
+- Sensitive operations recheck current policy after asynchronous waits and
+  between individual native export/event frames, not just at initial admission.
+- Device lifecycle and authenticated connections require an active device owner
+  with current Space membership.
+- Only an owner can suspend **or restore** an owner; last active Space owner and
+  last local recovery administrator are protected.
+- Unlink cancels pending link transactions. An already-consumed callback awaiting
+  upstream data must recheck its transaction before provisioning and cannot undo
+  an unlink from another local session. A genuinely new explicit link still works.
+- OIDC communication has bounded total/read deadlines and response sizes. Stale
+  UserInfo/refresh failures cannot disable a newer login or overwrite provider
+  edits. Provider outages do not extend entitlement freshness.
+- Authentik's isolated fixture explicitly enables `authorization_code` and
+  `refresh_token`. Its API defaults to no grant types; discovery alone is not
+  evidence that a provider accepts authorization requests.
+- Browser failure evidence retains only safe navigation status/path and static
+  input metadata, never passwords, cookies, authorization codes or Token values.
 
-The earlier green run 36104514001 validated only the original prototype commit;
-it does NOT validate this integrated implementation.
+The new security regressions are in `tests/test_iam_final_regressions.py`.
 
-## Additional hardening completed
+## Reproducible acceptance
 
-- Space-scoped operation/workflow/project-save idempotency with migration and reopen checks.
-- Immutable resource Space bindings; no remapping existing history into another Space.
-- Current authorization after delayed receipts and per cached native stream/export item.
-- Device-owner membership gates for enrollment, connection and lifecycle controls.
-- Protected last local recovery administrator and Space-owner suspension authority.
-- Bounded OIDC HTTP total deadlines and compare-and-set protection against stale
-  UserInfo/refresh errors racing a new login or provider configuration.
-- Setup, group/offboarding, migration, rollback and recovery guide:
-  [MULTIUSER_OIDC.md](MULTIUSER_OIDC.md).
-- Actual disposable Authentik 2026.8.3 + Chromium acceptance added as a required CI job.
+Run the normal workflow, not only the isolated policy tests:
 
-A pinned GitHub repair run passed **183 tests**, including existing and new real
-Chromium/WebKit UI cases, with zero failures/errors/skips:
-https://github.com/tsunheimat/codepier/actions/runs/36115997440 .
-The source at that checkpoint was `ed33a27f092a85d2463e373444f208901a5abef8`.
-Subsequent local backend checkpoint: **234 passed**; newest hardening module
-**18 passed**. These overlapping checkpoints must not be summed.
+```sh
+python -m ruff check agent hub shared scripts tests
+python scripts/check_full_regression.py --output dist/ci-results --workers 2 --timeout 900
+python scripts/check_oidc_authentik.py --output dist/authentik-acceptance.json
+```
 
-## Remaining acceptance before release
+Use the repository's locked dependencies. Build browser resources and install
+Chromium/WebKit as specified in `.github/workflows/ci.yml`. That workflow includes
+full Ubuntu/macOS regression, dependency/release checks, public source packaging,
+real Windows scheduled-Agent recovery and a required isolated Authentik job.
+Use one worker for the macOS native/browser regression, as the workflow does.
 
-- Complete pinned-dependency full repository CI, fix failures, and inspect its
-  per-platform reports rather than inferring success from a selected test suite.
-- Validate against a real isolated Authentik provider and the intended ChatGPT
-  connection host; protocol-unit tests alone are not provider/host acceptance.
-- Publish final exact source hashes and full CI evidence. No live deployment or
-  production IdP/ChatGPT configuration is represented by repository acceptance.
+The isolated Authentik job starts a unique disposable Compose project, creates
+two ordinary users and a provider, exercises real browser login/PKCE, private
+Profiles, group assignment, separate downstream OAuth consent, existing-grant
+project expansion, Token refresh and target-user group removal. It does not use
+production credentials or change a deployed IdP.
 
-## Important boundaries
+During this continuation, the combined local IAM/OIDC/Role/Profile/migration
+suite passed **251 tests** on the hardening source. A separate pinned GitHub
+hardening run passed **82 tests**. They overlap, are checkpoints, and must not be
+summed or substituted for the current full cross-platform report.
 
-Roles, Space IDs and project mappings are not OS sandboxes. Shell/build commands,
-Codex login, SSH agents and browser profiles use the Agent OS-account environment.
-Use separate OS accounts, containers or VMs for mutually untrusted execution.
-The Hub operator remains a trusted administrative party.
+The source snapshot workflow archives only committed source with a commit ID and
+SHA256 checksum. Temporary hash-verified transfer payloads used during development
+are confined to a separate build branch, not this feature's source diff.
 
-Group changes are applied on verified reconciliation or login, with a configured
-freshness deadline; an IdP outage does not grant perpetual cached access. Generic
-OIDC alone is not instantaneous directory deprovisioning. Panel logout and OIDC
-back-channel session logout do not automatically revoke every MCP grant.
+## Deployment and trust boundaries
 
-No ChatGPT chat or Project is a trusted role selector or hard security boundary.
-The OAuth/CodePier credential determines the identity and Space.
+Provider records are disabled and admission is closed by default. Upgrade does
+not enable enrollment. Back up the old database and matching key before opening
+it with new code; also retain a consistent full data-directory snapshot including
+native caches. Roll back with the matching old code and complete old data, not by
+pointing old code at schema 9. Follow the setup guide before enrolling users.
 
-## Correction retained from earlier delivery
+Project/Role/Space policy is not an OS sandbox. Shell/build tools, browser
+profiles, SSH credentials and native CLI authentication retain the Agent OS-user
+trust boundary. Use separate OS accounts/containers/VMs for mutually untrusted
+execution. The instance operator remains a trusted recovery administrator.
 
-Earlier claimed OIDC ZIP/patch/checkpoint logs were not recoverable, and packaging
-commands had failed with FileNotFoundError. The unsupported 18/28/221 checkpoint
-claims are withdrawn. This integration was newly implemented, executed locally,
-and published as actual source; those earlier claims are not acceptance evidence.
+Generic OIDC is not instantaneous directory provisioning: group changes take
+effect after verified reconciliation/login or the configured freshness deadline.
+An outage does not preserve stale privileges indefinitely. Panel logout and
+OIDC back-channel logout do not automatically revoke every MCP grant; explicit
+account/grant suspension is distinct. Already accepted commands are not rolled
+back or guaranteed terminated merely by removing a permission.
 
-The source checkpoint transfer verified every preimage/result hash and performed
-only a non-force fast-forward of the feature branch. Temporary transfer payloads
-and workflow are NOT included in the feature source diff.
+Real production-provider configuration and the intended ChatGPT connection host
+must still be checked after deployment. Repository acceptance does not mean a
+live installation was changed. ChatGPT chats/Projects are not trusted role or
+Space selectors and do not provide hard credential isolation.
+
+Cross-Space Agent sharing, arbitrary external MCP/Kiln routing, Role inheritance,
+SCIM provisioning and multi-Hub high availability are outside this release's
+agreed scope; they are not prerequisites for the implemented OIDC/Spaces model.
+
+## Earlier delivery correction
+
+The earlier claimed OIDC ZIP/patch and 18/28/221 checkpoint logs were not
+recoverable and are not evidence. The integrated implementation was subsequently
+written and published on this PR. Only actual source and explicitly identified
+validation reports should be used; the old three-file-only description and the
+unsupported package links do not describe the current branch.
