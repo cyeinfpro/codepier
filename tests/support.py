@@ -114,6 +114,10 @@ class Stack:
             details=redact_text((self.directory/'hub.log').read_text(encoding='utf-8',errors='replace'))[-6000:]
             raise AssertionError(f'{exc}\n{details}') from exc
     def start_agent(self):
+        # A killed child can remain online in the Hub until its socket closes.
+        # Drain that connection before accepting online as the new child's readiness.
+        if self.agent is not None and self.agent.poll() is not None:
+            wait_for(lambda:not any(d['id']==self.device and d['online'] for d in self.client.get('/api/devices').json().get('devices',[])),timeout=16)
         self.agent=subprocess.Popen([sys.executable,'-m','agent','--config',str(self.config_path),'run'],cwd=BASE,env=self.env,stdout=self.agent_log,stderr=subprocess.STDOUT)
         wait_for(lambda:any(d['id']==self.device and d['online'] for d in self.client.get('/api/devices').json().get('devices',[])),timeout=16)
     def stop_agent(self):
