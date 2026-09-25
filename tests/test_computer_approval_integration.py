@@ -24,13 +24,13 @@ def approval_stack(tmp_path_factory):
         s.approval_pat=r['token']
         yield s
 
-def tool(s,name,args):
-    out=s.mcp(name,{'project':'Imago',**args},s.approval_pat)
+def tool(s,operation,args):
+    out=s.mcp('computer',{'operation':operation,'project':'Imago',**args},s.approval_pat)
     assert not out.get('isError'),out
     return out['structuredContent']
 
 def open_session(s):
-    return tool(s,'computer_session_open',{'app':'Fixture','ttl_seconds':60,'idempotency_key':uuid.uuid4().hex})['session_id']
+    return tool(s,'open',{'app':'Fixture','ttl_seconds':60,'idempotency_key':uuid.uuid4().hex})['session_id']
 
 def pending(s):
     return s.client.get('/api/computer/approvals').json()['approvals']
@@ -40,7 +40,7 @@ def test_http_encrypted_codepier_requires_human_panel_decision(approval_stack,de
     s=approval_stack;sid=open_session(s)
     try:
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            result=executor.submit(s.mcp,'computer_observe',{'project':'Imago','session_id':sid},s.approval_pat)
+            result=executor.submit(s.mcp,'computer',{'operation':'observe','project':'Imago','session_id':sid},s.approval_pat)
             rows=wait_for(lambda:pending(s),timeout=8);item=rows[0]
             assert item['session_id']==sid and item['app']=='Fixture'
             # Bearer MCP access cannot approve or list the human inbox.
@@ -56,7 +56,7 @@ def test_http_encrypted_codepier_requires_human_panel_decision(approval_stack,de
             assert bool(out.get('isError'))==(decision!='accept'),out
             if decision=='accept':assert out['structuredContent']['observation_id']
             wait_for(lambda:not pending(s),timeout=3)
-    finally:tool(s,'computer_session_close',{'session_id':sid,'idempotency_key':uuid.uuid4().hex})
+    finally:tool(s,'close',{'session_id':sid,'idempotency_key':uuid.uuid4().hex})
 
 def test_browser_consent_message_is_text_and_explicit(approval_stack):
     s=approval_stack
@@ -66,24 +66,24 @@ def test_browser_consent_message_is_text_and_explicit(approval_stack):
             page.goto(s.url);page.fill('#password',s.password);page.click('#login-form button')
             sid=open_session(s)
             with concurrent.futures.ThreadPoolExecutor() as executor:
-                result=executor.submit(s.mcp,'computer_observe',{'project':'Imago','session_id':sid},s.approval_pat)
+                result=executor.submit(s.mcp,'computer',{'operation':'observe','project':'Imago','session_id':sid},s.approval_pat)
                 expect(page.locator('#computer-approval-inbox')).to_be_visible(timeout=8000)
                 assert page.locator('#computer-approval-inbox img').count()==0
                 expect(page.locator('#computer-approval-inbox')).to_contain_text('Allow Fixture?')
                 page.get_by_role('button',name='拒绝',exact=True).click()
                 assert result.result(timeout=10)['isError']
                 expect(page.locator('#computer-approval-inbox')).not_to_be_visible(timeout=5000)
-            tool(s,'computer_session_close',{'session_id':sid,'idempotency_key':uuid.uuid4().hex})
+            tool(s,'close',{'session_id':sid,'idempotency_key':uuid.uuid4().hex})
         finally:browser.close()
 
 @pytest.mark.parametrize('reason',['stop','disconnect'])
 def test_pending_approval_invalidated_by_session_or_connection_end(approval_stack,reason):
     s=approval_stack;sid=open_session(s)
     with concurrent.futures.ThreadPoolExecutor() as executor:
-        result=executor.submit(s.mcp,'computer_observe',{'project':'Imago','session_id':sid},s.approval_pat)
+        result=executor.submit(s.mcp,'computer',{'operation':'observe','project':'Imago','session_id':sid},s.approval_pat)
         item=wait_for(lambda:pending(s),timeout=8)[0]
         if reason=='stop':
-            tool(s,'computer_session_close',{'session_id':sid,'idempotency_key':uuid.uuid4().hex})
+            tool(s,'close',{'session_id':sid,'idempotency_key':uuid.uuid4().hex})
         else:
             s.stop_agent()
         wait_for(lambda:not pending(s),timeout=5)

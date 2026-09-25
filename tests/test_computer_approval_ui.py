@@ -175,8 +175,8 @@ def test_real_sse_add_and_reconnect_refresh_the_human_inbox(browser, approval_st
             session = open_session(stack)
             try:
                 with concurrent.futures.ThreadPoolExecutor() as executor:
-                    result = executor.submit(stack.mcp, 'computer_observe',
-                                             {'project': 'Imago', 'session_id': session}, stack.approval_pat)
+                    result = executor.submit(stack.mcp, 'computer',
+                                             {'operation': 'observe', 'project': 'Imago', 'session_id': session}, stack.approval_pat)
                     wait_for(lambda: pending(stack), timeout=5)
                     if reconnect:
                         expect(page.locator('#computer-approval-inbox')).to_have_count(0)
@@ -186,7 +186,7 @@ def test_real_sse_add_and_reconnect_refresh_the_human_inbox(browser, approval_st
                     assert result.result(timeout=10)['isError']
                     expect(page.locator('#computer-approval-inbox')).to_have_count(0)
             finally:
-                tool(stack, 'computer_session_close', {'session_id': session, 'idempotency_key': uuid.uuid4().hex})
+                tool(stack, 'close', {'session_id': session, 'idempotency_key': uuid.uuid4().hex})
             page.wait_for_function('computerApprovals.request===null')
     finally:
         page.close()

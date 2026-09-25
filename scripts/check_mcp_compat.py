@@ -38,22 +38,23 @@ async def probe(url,token_file,project,mode='legacy'):
                 Draft202012Validator(schemas[name]).validate(value['structuredContent'])
                 checks.append({'tool':name,'is_error':value.get('isError',False),'schema_valid':True})
                 return value
-            resolved=await invoke('projects_resolve',{'project':project})
+            resolved=await invoke('workspace',{'operation':'resolve','project':project})
             assert not resolved.get('isError')
-            diagnosis=await invoke('diagnostics_get',{'project':project})
+            diagnosis=await invoke('process',{'operation':'diagnostics','project':project})
             assert diagnosis['structuredContent']['client_catalog']['matches'] is None
-            read=await invoke('fs_read',{'project':project,'path':'README.md','max_lines':20})
+            read=await invoke('read',{'project':project,'path':'README.md','limit':20})
             data=read['structuredContent']
             if data.get('pending'):
                 for _ in range(5):
-                    receipt=await invoke('operations_wait',{'operation_id':data['operation_id'],'wait_seconds':2})
-                    if not receipt['structuredContent']['pending']:
-                        assert receipt['structuredContent']['state']=='succeeded';break
+                    receipt=await invoke('process',{'operation':'wait','operation_ids':[data['operation_id']],'wait_seconds':2})
+                    operation=receipt['structuredContent']['operations'][0]
+                    if not operation['pending']:
+                        assert operation['state']=='succeeded';break
                 else:raise AssertionError('Read did not complete')
             else:assert 'content' in data
-            error=await invoke('fs_read',{'project':project,'path':'.env'})
+            error=await invoke('read',{'project':project,'path':'.env'})
             assert error.get('isError') and error['structuredContent']['error']['code']=='PROTECTED_PATH'
-            await invoke('artifacts_list',{'project':project})
+            await invoke('read',{'operation':'artifacts','project':project})
             resources=await client.list_resources();prompts=await client.list_prompts()
             assert resources.resources and prompts.prompts
             if client.protocol_version in {'2025-03-26','2025-06-18','2025-11-25'}:

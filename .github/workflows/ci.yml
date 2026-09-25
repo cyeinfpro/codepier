@@ -35,7 +35,9 @@ jobs:
       - name: Core pytest (explicit Windows subset, no browser)
         shell: pwsh
         run: |
-          .venv/Scripts/python -m pytest -q -m windows_core --strict-markers --junitxml=dist/windows/core.xml --tb=short
+          $CoreTests = .venv/Scripts/python -c "from tests.classification import WINDOWS_CORE; print('\n'.join('tests/' + name for name in sorted(WINDOWS_CORE)))"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .venv/Scripts/python -m pytest -q @CoreTests -m windows_core --strict-markers --junitxml=dist/windows/core.xml --tb=short
       - name: Real PowerShell argument and error behavior
         shell: pwsh
         run: .venv/Scripts/python scripts/check_windows_bootstrap.py --output dist/windows/bootstrap.json

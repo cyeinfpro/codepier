@@ -9,9 +9,10 @@ pytestmark = pytest.mark.smoke
 
 @pytest.fixture(scope='module', autouse=True)
 def shell_enabled(stack):
+    from agent.shell import default_command
     from shared.util import atomic_json
     stack.stop_agent()
-    stack.config['shell'] = {'enabled': True, 'projects': ['Imago'], 'command': ['/bin/sh', '-c']}
+    stack.config['shell'] = {'enabled': True, 'projects': ['Imago'], 'command': default_command()}
     atomic_json(stack.config_path, stack.config)
     stack.start_agent()
 
