@@ -87,7 +87,7 @@ class Stack:
         atomic_json(self.config_path,self.config); self.start_agent()
         self.projects=[]
         for p in (self.imago,self.nexus,self.lumen):
-            r=self.client.post('/api/projects',json={'alias':p.name,'root':str(p),'device_id':self.device,'description':p.name+' 本地联调示例','mode':'write','allow_tasks':True});self.must(r);self.projects.append(r.json())
+            self.projects.append(self.create_project({'alias':p.name,'root':str(p),'device_id':self.device,'description':p.name+' 本地联调示例','mode':'write','allow_tasks':True}))
         self.project=self.projects[0]
         r=self.client.post('/api/grants',json={'label':'ChatGPT · integration fixture','scopes':['read','write','execute'],'projects':[p['id'] for p in self.projects],'days':1});self.must(r)
         self.pat=r.json()['token'];self.grant=r.json()['grant_id']
@@ -95,6 +95,14 @@ class Stack:
     def must(r):
         assert r.is_success, f'{r.status_code}: {r.text[:1000]}'
         return r.json()
+    def create_project(self, body):
+        body={'idempotency_key':uuid.uuid4().hex,**body}
+        response=self.client.post('/api/projects',json=body)
+        if response.status_code==409 and response.json().get('error',{}).get('code')=='VALIDATION_PENDING':
+            operation=self.poll(response.json()['error']['operation_id'],timeout=45)
+            assert operation['state']=='succeeded',operation
+            response=self.client.post('/api/projects',json=body)
+        return self.must(response)
     def login(self):
         r=self.client.post('/api/login',json={'username':'admin','password':self.password});self.must(r);self.client.headers['X-RD-CSRF']=r.json()['csrf']
     def start_hub(self):
