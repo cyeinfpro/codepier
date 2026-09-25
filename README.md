@@ -2,11 +2,11 @@
 
 **把 ChatGPT / MCP、浏览器管理面板和你自己的开发电脑连接起来，让 AI 在明确授权的项目边界内真正读取代码、修改文件、运行命令、管理原生 CLI、验证网页，并通过项目安全地操作已保存的 VPS。**
 
-[![Version](https://img.shields.io/badge/version-1.14.0-2563eb)](RELEASE.json)
+[![Version](https://img.shields.io/badge/version-1.14.1-2563eb)](RELEASE.json)
 [![Python](https://img.shields.io/badge/Python-3.13%20recommended-3776ab)](requirements.txt)
 [![License](https://img.shields.io/badge/license-MIT-16a34a)](LICENSE)
 
-> 当前仓库的 `RELEASE.json` 标记为 **1.14.0 / released / source-only**。该版本发布源码，不等同于已经部署到你的 Hub / Agent。
+> 当前仓库的 `RELEASE.json` 标记为 **1.14.1 / released / source-only**。该版本发布源码，不等同于已经部署到你的 Hub / Agent。
 
 CodePier 面向这样的开发方式：
 
@@ -152,7 +152,7 @@ sudo bash install.sh --enable-panel-update
 
 已运行新版面板的服务器也可单独执行 `sudo python3 scripts/panel_updater.py install --root "$PWD"`。网页进程不挂载 Docker socket，不能指定任意下载地址或宿主机命令。
 
-**此入口更新服务器提供的 Agent 文件，不会强制升级或重启各台电脑上的 Agent。** 正式 Release 必须包含 `codepier-VERSION-source.zip` 及 GitHub SHA-256 元数据；没有合格的正式发布时会提示原因，不会直接执行 `main` 分支。支持范围、故障恢复及备份清理说明见 [面板更新文档](docs/PANEL_UPDATE.md)。
+**此入口更新服务器提供的 Agent 文件，不会强制升级或重启各台电脑上的 Agent。** 正式 Release 必须包含兼容面板更新的 `codepier-VERSION-source.zip` 及 GitHub SHA-256 元数据；开发与完整回归使用另附的 `codepier-VERSION-source-full.zip`；没有合格的正式发布时会提示原因，不会直接执行 `main` 分支。支持范围、故障恢复及备份清理说明见 [面板更新文档](docs/PANEL_UPDATE.md)。
 
 ## 持续项目授权与安装执行默认值
 
@@ -685,7 +685,7 @@ codepier/
 
 仓库当前版本信息来自 [`RELEASE.json`](RELEASE.json)：
 
-- **Version:** 1.14.0
+- **Version:** 1.14.1
 - **Date:** 2026-09-23
 - **Status:** released
 - **Source only:** true
