@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime
 from fastapi import Request, WebSocket
 from fastapi.responses import FileResponse, JSONResponse
-from shared.contracts import TOOLS
+from shared.core_contracts import CORE_TOOLS
 from shared.util import VERSION
 from hub.api.models import ComputerDecision, ToolCall
 from hub.api.devices import device_rows
@@ -46,7 +46,7 @@ def make_system_router(context: HubContext):
             "today_operations": sum(counts.values()), "today_succeeded": counts.get("succeeded", 0), "today_failed": counts.get("failed", 0),
             "active_operations": store.one("SELECT count(*) AS n FROM operations WHERE state IN ('running','queued','reconnecting','cancelling')")["n"],
             "recent_operations": operation_rows(store, limit=8), "recent_audit": audit_rows(store, limit=6),
-            "mcp_url": public_url() + "/mcp", "version": VERSION, "tool_count": len(TOOLS), "timezone": str(tz)}
+            "mcp_url": public_url() + "/mcp", "version": VERSION, "tool_count": len(CORE_TOOLS), "timezone": str(tz)}
 
     @router.post("/api/tools/call")
     async def call_tool(request: Request, body: ToolCall):

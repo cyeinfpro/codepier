@@ -1,5 +1,5 @@
 {
-  "version": "1.14.1",
+  "version": "1.14.2",
   "algorithm": "sha256",
   "assets": {
     "access.js": {
@@ -11,8 +11,8 @@
       "bytes": 27864
     },
     "app.js": {
-      "sha256": "b27a480af097c2aad957855d617413131959f0d6f8d3bdca0eff287212078a12",
-      "bytes": 101098
+      "sha256": "97f67c059d276467380e9d5132cc5ac30c61347cc27fc046db932952ed03ebf9",
+      "bytes": 101103
     },
     "appearance.js": {
       "sha256": "7fc8e8ffa85a4bb5836b8919cdf6ff12813cfb4a9e4736709f5858e5d8782bb1",
