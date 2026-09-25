@@ -200,19 +200,26 @@ def acceptance(output):
                     page.goto(hub_url)
                     page.locator('#oidc-login-buttons a').click()
                     try:
-                        page.locator('ak-stage-identification input[name="uidField"]').fill(user['username'])
+                        identification = page.locator('ak-stage-identification')
+                        identification.locator('input[name="uidField"]').fill(user['username'])
+                        identification.locator('button[type="submit"]').click()
+                        # The identification screen has a password-manager
+                        # helper input outside the real password stage. Wait
+                        # for the actual stage instead of filling that helper
+                        # while the previous stage's request is in flight.
+                        password_stage = page.locator('ak-stage-password')
+                        expect(password_stage).to_be_visible()
+                        password_stage.locator('input[name="password"]').fill(password)
+                        password_stage.locator('button[type="submit"]').click()
+                        page.wait_for_url(hub_url+'/**', timeout=60000)
                     except Exception:
                         u = urlsplit(page.url)
                         browser_diagnostics['page'] = {'origin': u.scheme + '://' + u.netloc, 'path': u.path}
-                        # Read only static input metadata through open shadow
-                        # roots. Never inspect field values or page text, which
-                        # could contain Tokens on an unexpected error page.
-                        browser_diagnostics['inputs'] = page.evaluate("""() => {const out=[];const visit=root=>{for(const node of root.querySelectorAll('*')){if(node.tagName==='INPUT')out.push({name:node.name,type:node.type,id:node.id});if(node.shadowRoot)visit(node.shadowRoot);}};visit(document);return out.slice(0,30);}""")
+                        # Read only static metadata through open shadow roots.
+                        # Never inspect field values or page text, which could
+                        # contain Tokens on an unexpected error page.
+                        browser_diagnostics['elements'] = page.evaluate("""() => {const out=[];const visit=root=>{for(const node of root.querySelectorAll('*')){if(node.tagName==='INPUT')out.push({tag:node.tagName,name:node.name,type:node.type,id:node.id,invalid:node.getAttribute('aria-invalid')});else if(node.tagName.startsWith('AK-STAGE-'))out.push({tag:node.tagName});if(node.shadowRoot)visit(node.shadowRoot);}};visit(document);return out.slice(0,40);}""")
                         raise
-                    page.locator('button[type="submit"]').click()
-                    page.locator('input[name="password"]').fill(password)
-                    page.locator('button[type="submit"]').click()
-                    page.wait_for_url(hub_url+'/**', timeout=60000)
                     expect(page.locator('#iam-active-space')).to_be_visible(timeout=30000)
                     cookies = {c['name']: c['value'] for c in context.cookies(hub_url)}
                     client = httpx.Client(base_url=hub_url, cookies=cookies, timeout=30)
