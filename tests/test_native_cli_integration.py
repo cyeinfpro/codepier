@@ -125,7 +125,7 @@ def test_real_chromium_terminal_mobile_detach_and_escape_policy(cli_stack):
         browser=p.chromium.launch();page=browser.new_page(viewport={'width':1400,'height':1000})
         errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
         try:
-            page.goto(s.url+'/#projects');page.fill('#password',s.password);page.click('#login-form button')
+            page.goto(s.url+'/#projects');page.fill('#username', 'admin');page.fill('#password',s.password);page.click('#login-form button')
             expect(page.locator('[data-native-launch="codex"]').first).to_be_visible()
             page.locator('[data-native-launch="codex"][data-project="'+s.project['id']+'"]').click()
             mount_archived_terminal(page)
@@ -157,7 +157,7 @@ def test_retired_terminal_hash_opens_chat_without_terminal_assets(cli_stack):
         browser=pw.chromium.launch();page=browser.new_page();assets=[]
         page.on('request',lambda request:assets.append(request.url))
         try:
-            page.goto(s.url+'/#terminal');page.fill('#password',s.password);page.click('#login-form button')
+            page.goto(s.url+'/#terminal');page.fill('#username', 'admin');page.fill('#password',s.password);page.click('#login-form button')
             expect(page.locator('#chat-root')).to_be_visible()
             assert page.evaluate('location.hash')=='#native'
             page.evaluate("navigate('terminal')")

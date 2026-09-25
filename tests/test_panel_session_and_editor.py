@@ -127,6 +127,7 @@ def test_chat_draft_warns_before_unload_and_explicit_logout_discards(app_page):
     page.evaluate("navigate('projects')")
     page.locator('[data-action=logout]').click()
     expect(page.locator('#login-form')).to_be_visible()
+    expect(page.locator('#username')).to_have_value('')
     assert page.evaluate('ChatUI.views.size') == 0
     assert page.evaluate('S.suspendedUser') is None
     login(page)

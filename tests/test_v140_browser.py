@@ -14,7 +14,7 @@ def test_browser_diagnostics_search_symbols_and_download(stack,tmp_path):
         page=browser.new_page(viewport={'width':1440,'height':1000},accept_downloads=True)
         errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
         try:
-            page.goto(stack.url+'/#diagnostics');page.fill('#password',stack.password);page.click('#login-form button')
+            page.goto(stack.url+'/#diagnostics');page.fill('#username', 'admin');page.fill('#password',stack.password);page.click('#login-form button')
             expect(page.locator('#page h1')).to_have_text('运行诊断')
             expect(page.locator('#page')).to_contain_text(VERSION)
             expect(page.locator('#page')).to_contain_text(str(len(tool_definitions()))+' 个工具')

@@ -27,7 +27,7 @@ def test_http_upload_reload_binding_input_batch_queries_and_export(cli_stack,tmp
         # to exercise the actual ordinary-HTTP fallback in this real browser.
         page.add_init_script("Object.defineProperty(window.crypto,'subtle',{get:()=>undefined,configurable:true})")
         try:
-            page.goto(s.url+'/#projects');page.fill('#password',s.password);page.click('#login-form button')
+            page.goto(s.url+'/#projects');page.fill('#username', 'admin');page.fill('#password',s.password);page.click('#login-form button')
             page.locator('[data-native-launch="codex"][data-project="'+s.project['id']+'"]').click()
             mount_archived_terminal(page)
             expect(page.locator('#native-root')).to_be_visible()

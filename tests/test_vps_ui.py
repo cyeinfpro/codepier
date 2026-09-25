@@ -32,7 +32,7 @@ def browser(request):
 def open_page(browser, stack, width=1440):
     page=browser.new_page(viewport={'width':width,'height':960 if width>500 else 844})
     page.goto(stack.url+'/#overview')
-    page.fill('#password',stack.password)
+    page.fill('#username', 'admin');page.fill('#password',stack.password)
     page.click('#login-form button')
     expect(page.locator('#page h1')).to_have_text('控制总览')
     if width <= 500:

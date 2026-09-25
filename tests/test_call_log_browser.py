@@ -57,6 +57,7 @@ def test_native_expansion_copy_xss_and_mobile(log_page):
     page,rows,details,requests=log_page
     entry=page.locator('[data-call-id]').first
     assert not page.locator('img').count()
+    assert entry.locator('.call-project strong').inner_text() == 'MCP'
     entry.locator('summary').first.focus()
     page.keyboard.press('Enter')
     page.get_by_text('实际执行（本次 Agent 计时）',exact=True).wait_for()
@@ -181,3 +182,18 @@ def test_export_is_explicitly_limited_to_the_visible_sanitized_page(log_page):
     exported=page.evaluate('JSON.parse(window.exported.content)')
     assert exported['scope']=='visible_page' and len(exported['calls'])==len(rows)
     assert 'args_summary' not in exported['calls'][0]
+
+
+def test_project_names_stay_visible_with_long_names_and_missing_metadata(log_page):
+    page, rows, _, _ = log_page
+    rows[0]['alias'] = 'LongProject-' * 20 + '<img src=x onerror=alert(1)>'
+    rows[1]['alias'] = None
+    page.evaluate('renderPage()')
+    for width in [320, 390, 1280]:
+        page.set_viewport_size({'width': width, 'height': 900})
+        project = page.locator('.call-project strong').first
+        assert project.inner_text() == rows[0]['alias']
+        assert page.locator('.call-project strong').nth(1).inner_text() == '未记录'
+        assert not page.locator('img').count()
+        assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
+        assert project.evaluate('(el)=>el.scrollWidth<=el.clientWidth+1')

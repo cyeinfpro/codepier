@@ -26,7 +26,7 @@ def test_production_boot_cannot_load_the_retired_terminal(stack, chat_browser_po
     try:
         page.goto(stack.url+'/#terminal',wait_until='domcontentloaded')
         expect(page.locator('#login-form')).to_be_visible()
-        page.locator('#password').fill(stack.password)
+        page.fill('#username', 'admin');page.locator('#password').fill(stack.password)
         page.locator('#login-form button[type=submit]').click()
         expect(page.locator('#chat-root')).to_be_visible()
         assert page.evaluate('S.page')=='native'

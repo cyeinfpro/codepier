@@ -24,6 +24,8 @@ def access_page(access_browser, stack):
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.goto(stack.url + '/#settings')
+    expect(page.locator('#username')).to_have_value('')
+    page.fill('#username', 'admin')
     page.fill('#password', stack.password)
     page.click('#login-form button')
     expect(page.locator('#access-settings-form')).to_be_visible()

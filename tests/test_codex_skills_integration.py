@@ -73,7 +73,7 @@ def test_browser_lists_reads_resources_and_mobile_layout(prepared,tmp_path):
         page=browser.new_page(viewport={'width':1440,'height':1000})
         errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
         try:
-            page.goto(stack.url+'/#workbench');page.fill('#password',stack.password);page.click('#login-form button')
+            page.goto(stack.url+'/#workbench');page.fill('#username', 'admin');page.fill('#password',stack.password);page.click('#login-form button')
             expect(page.locator('[data-local-skills]')).to_be_visible();page.click('[data-local-skills]')
             expect(page.locator('#local-skills-results')).to_contain_text('Codex 用户技能已授权')
             expect(page.locator('#local-skills-results')).to_contain_text('disabled-skill')

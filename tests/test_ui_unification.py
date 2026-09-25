@@ -58,7 +58,7 @@ def _asset_positions(html: str) -> dict[str, int]:
 def _login(page: Page, stack, route: str = "overview") -> None:
     page.goto(f"{stack.url}/#{route}", wait_until="domcontentloaded")
     expect(page.locator("#login-form")).to_be_visible()
-    page.locator("#password").fill(stack.password)
+    page.fill('#username', 'admin');page.locator("#password").fill(stack.password)
     page.locator("#login-form button[type=submit]").click()
     expect(page.locator(".shell")).to_be_visible()
     expect(page.locator(".skeleton")).to_have_count(0, timeout=15_000)

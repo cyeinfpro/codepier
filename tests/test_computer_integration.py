@@ -174,7 +174,7 @@ def test_browser_desktop_mobile_and_cleanup(desktop,tmp_path):
         page=browser.new_page(viewport={'width':1440,'height':1000});errors=[]
         page.on('pageerror',lambda error:errors.append(str(error)))
         try:
-            page.goto(s.url+'/#workbench');page.fill('#password',s.password);page.click('#login-form button')
+            page.goto(s.url+'/#workbench');page.fill('#username', 'admin');page.fill('#password',s.password);page.click('#login-form button')
             expect(page.locator('[data-computer-use]')).to_be_visible();page.click('[data-computer-use]')
             expect(page.locator('#computer-state')).to_have_text('本机已授权')
             page.locator('#computer-open-form input').fill('Fixture');page.locator('#computer-open-form button').click()

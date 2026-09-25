@@ -87,7 +87,7 @@ def test_browser_task_creation_evidence_gate_progress_context_and_responsiveness
         page.on('pageerror', lambda error: errors.append(str(error)))
         try:
             page.goto(stack.url + '/#workflows')
-            page.fill('#password', stack.password)
+            page.fill('#username', 'admin');page.fill('#password', stack.password)
             page.click('#login-form button')
             expect(page.locator('#page h1')).to_have_text('开发任务')
             page.click('[data-wf-action="create"]')
