@@ -26,7 +26,8 @@ def chat_stack(tmp_path_factory):
         atomic_json(s.config_path,s.config);s.start_agent()
         yield s
         with closing(database(s.directory/'agent-state/native-cli')) as db,db:
-            for row in db.execute("SELECT id FROM sessions WHERE status IN ('starting','running')"):
+            db.execute('BEGIN IMMEDIATE')
+            for row in db.execute("SELECT id FROM sessions WHERE status IN ('starting','running')").fetchall():
                 db.execute('INSERT INTO commands(id,session,kind,payload,created) VALUES (?,?,?,?,?)',(uuid.uuid4().hex,row['id'],'stop','{}',time.time()))
         def done():
             with closing(database(s.directory/'agent-state/native-cli')) as db:
