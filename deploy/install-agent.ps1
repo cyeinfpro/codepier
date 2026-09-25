@@ -25,7 +25,7 @@ if ($AllowRoot) {
   $CodePierArgs += @('--allow', $AllowRoot)
 }
 # The source installer may replace runtime, so use the external interpreter.
-$CodePierPython = (& $CodePierPython -c 'import sys; print(getattr(sys, "_base_executable", None) or sys.executable)' | Select-Object -Last 1)
+$CodePierPython = (& $CodePierPython -c "import sys; print(getattr(sys, '_base_executable', None) or sys.executable)" | Select-Object -Last 1)
 if ($LASTEXITCODE -ne 0 -or -not $CodePierPython) { throw 'No external Python interpreter found' }
 & $CodePierPython @CodePierArgs
 if ($LASTEXITCODE -ne 0) { throw 'Background Agent setup failed; inspect the error above. Existing configuration was preserved.' }
