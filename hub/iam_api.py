@@ -162,9 +162,15 @@ def make_iam_router(auth,runtime):
     async def block_member(space_id:str,user_id:str,request:Request,body:BlockEdit):
         with store.lock,store.db:
             store.db.execute('BEGIN IMMEDIATE');p=admin(request,space_id,True)
-            target=iam.membership(store,user_id,space_id) if body.blocked else None
-            if target and target['level']=='owner' and iam.membership(store,p.user_id,space_id)['level']!='owner':
-                raise DevError('OWNER_REQUIRED','只有主理人可以暂停另一主理人',403)
+            if body.blocked:
+                iam.membership(store,user_id,space_id)
+            # Restoration is a privilege increase too. A suspended owner's
+            # membership cannot be resolved by membership(), which rejects the
+            # block; inspect the stored owner assignment without bypassing the
+            # acting administrator's live checks.
+            target_owner=store.one("SELECT 1 AS ok FROM memberships WHERE space_id=? AND user_id=? AND level='owner'",(space_id,user_id))
+            if target_owner and iam.membership(store,p.user_id,space_id)['level']!='owner':
+                raise DevError('OWNER_REQUIRED','只有主理人可以暂停或恢复另一主理人',403)
             if body.blocked:owner_guard(space_id,user_id,'guest',False)
             store.db.execute('INSERT INTO membership_blocks VALUES(?,?,?) ON CONFLICT(space_id,user_id) DO UPDATE SET blocked=excluded.blocked',(space_id,user_id,int(body.blocked)))
             wake(p,'membership.suspension',user_id,body.model_dump())

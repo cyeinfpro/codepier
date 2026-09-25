@@ -70,6 +70,8 @@ def acceptance(output):
               'checks': [], 'status': 'running'}
     phase = 'startup'
     secret_values = []
+    page = None
+    browser_diagnostics = {}
     def secret():
         value = secrets.token_urlsafe(36)
         secret_values.append(value)
@@ -181,9 +183,25 @@ def acceptance(output):
                     context = browser.new_context()
                     page = context.new_page()
                     page.set_default_timeout(30000)
+                    def capture_navigation(response):
+                        # Status/path only; never persist authorization query,
+                        # cookies, submitted credentials, or response bodies.
+                        if response.request.is_navigation_request():
+                            u = urlsplit(response.url)
+                            browser_diagnostics['navigation'] = {'origin': u.scheme + '://' + u.netloc, 'path': u.path, 'status': response.status}
+                    page.on('response', capture_navigation)
                     page.goto(hub_url)
                     page.locator('#oidc-login-buttons a').click()
-                    page.locator('input[name="uidField"]').fill(user['username'])
+                    try:
+                        page.locator('ak-stage-identification input[name="uidField"]').fill(user['username'])
+                    except Exception:
+                        u = urlsplit(page.url)
+                        browser_diagnostics['page'] = {'origin': u.scheme + '://' + u.netloc, 'path': u.path}
+                        # Read only static input metadata through open shadow
+                        # roots. Never inspect field values or page text, which
+                        # could contain Tokens on an unexpected error page.
+                        browser_diagnostics['inputs'] = page.evaluate("""() => {const out=[];const visit=root=>{for(const node of root.querySelectorAll('*')){if(node.tagName==='INPUT')out.push({name:node.name,type:node.type,id:node.id});if(node.shadowRoot)visit(node.shadowRoot);}};visit(document);return out.slice(0,30);}""")
+                        raise
                     page.locator('button[type="submit"]').click()
                     page.locator('input[name="password"]').fill(password)
                     page.locator('button[type="submit"]').click()
@@ -270,6 +288,7 @@ def acceptance(output):
             result['status']='passed'
         except Exception as exc:
             result['status']='failed';result['phase']=phase
+            if browser_diagnostics:result['browser'] = browser_diagnostics
             # Only type and sanitized bounded text; no raw provider responses/logs.
             detail=str(exc)
             for value in secret_values:detail=detail.replace(value,'[redacted]')

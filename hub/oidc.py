@@ -267,12 +267,21 @@ class OIDCService:
         if revoke:
             self.store.db.execute('UPDATE grants SET revoked=1 WHERE identity_id=?',(identity['id'],))
             self.store.db.execute('UPDATE external_identities SET upstream_tokens=NULL WHERE id=?',(identity['id'],))
+            # Cancel link attempts begun before unlink, including a callback
+            # currently awaiting the provider. provision() rechecks this row in
+            # its final transaction. A new explicit link gets a new state.
+            self.store.db.execute('DELETE FROM oidc_transactions WHERE provider_id=? AND link_user_id=?',
+                                  (identity['provider_id'],identity['user_id']))
         self.runtime.publish('iam',{'user_id':identity['user_id']});self.runtime.wake.set()
 
     def provision(self,provider,claims,groups,txn,tokens):
         store=self.store;subject=claims['sub'];now=time.time()
         with store.lock,store.db:
             store.db.execute('BEGIN IMMEDIATE')
+            live_txn=store.one('SELECT 1 AS ok FROM oidc_transactions WHERE state_hash=? AND provider_id=? AND used=1 AND expires>?',
+                               (txn['state_hash'],provider['id'],now))
+            if not live_txn:
+                raise DevError('OIDC_STATE_INVALID','登录或关联已过期或被取消，请重新发起',400)
             current=self.provider(provider['id'])
             if current['version']!=txn['provider_version']:raise DevError('OIDC_CONFIG_CHANGED','身份配置已改变，请重新登录',409)
             identity=store.one('SELECT * FROM external_identities WHERE issuer=? AND subject=?',(provider['issuer'],subject))
