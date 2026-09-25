@@ -8,7 +8,9 @@ window.CodePierCallLog = (() => {
     owner = null,
     detailTurn = 0;
   const cache = new Map(),
-    opened = new Set();
+    opened = new Set(),
+    projectHues = new Map(),
+    projectIds = new Map();
   const st = () =>
     S.callLog ||
     (S.callLog = {
@@ -64,6 +66,8 @@ window.CodePierCallLog = (() => {
       detach();
       cache.clear();
       opened.clear();
+      projectHues.clear();
+      projectIds.clear();
       S.callLog = null;
       owner = S.session;
     }
@@ -80,6 +84,8 @@ window.CodePierCallLog = (() => {
     detach();
     cache.clear();
     opened.clear();
+    projectHues.clear();
+    projectIds.clear();
     owner = null;
     S.callLog = null;
   }
@@ -87,10 +93,35 @@ window.CodePierCallLog = (() => {
     `<code class="call-preview">${esc(r.summary || '没有可显示的参数摘要')}</code>`;
   const status = (r) =>
     `${badge(r.state)}<span class="call-duration">${active(r) ? '已历时' : '总历时'} ${duration(r.elapsed_ms)}</span>${r.exit_code !== null && r.exit_code !== undefined ? `<span>退出码 ${esc(r.exit_code)}</span>` : ''}`;
+  const projectKey = (r) =>
+    r.project_id || projectIds.get(r.alias) || (r.alias ? 'alias:' + r.alias : '');
+  function prepareProjectColors(projects, rows) {
+    for (const project of projects) projectIds.set(project.alias, project.id);
+    const keys = new Set([...projects.map((project) => project.id), ...rows.map(projectKey)]);
+    const palette = [270, 205, 145, 28, 340, 175, 55, 310, 110, 225, 0, 80];
+    const used = new Set(projectHues.values());
+    for (const key of [...keys].filter(Boolean).sort()) {
+      if (projectHues.has(key)) continue;
+      let hash = 0;
+      for (const char of key) hash = (Math.imul(hash, 31) + char.codePointAt(0)) >>> 0;
+      const start = hash % palette.length;
+      let hue = palette[start];
+      for (let index = 0; index < palette.length; index++) {
+        hue = palette[(start + index) % palette.length];
+        if (!used.has(hue)) break;
+      }
+      if (used.has(hue)) {
+        hue = hash % 360;
+        for (let index = 0; index < 360 && used.has(hue); index++) hue = (hue + 137) % 360;
+      }
+      projectHues.set(key, hue);
+      used.add(hue);
+    }
+  }
   function rowHTML(r) {
     const [tone, label] = group(r),
       saved = cache.get(r.id);
-    return `<details class="call-entry call-${tone}" data-call-id="${esc(r.id)}" ${opened.has(r.id) ? 'open' : ''}><summary aria-label="展开调用 项目 ${esc(r.alias || '未记录')} ${esc(r.tool)} ${esc(r.id)}"><span class="call-main"><span class="call-top"><span class="call-project"><span class="call-project-label">项目</span><strong>${esc(r.alias || '未记录')}</strong></span><span class="call-tool"><strong class="mono">${esc(r.tool)}</strong><span class="call-kind">${label}</span></span><span class="call-state">${status(r)}</span></span><span class="call-args">${summary(r)}</span><span class="call-meta"><time>${esc(stamp(r.created))}</time><span>${esc(r.device_name || '设备未记录')}</span><span>${source(r)}</span><code>#${esc(r.id.slice(0, 12))}</code><span class="call-filter-note" hidden>状态已变化，不再符合当前筛选</span></span></span><span class="call-chevron" aria-hidden="true">⌄</span></summary><div class="call-detail">${saved?.data ? detailHTML(saved.data) : '<p class="muted" role="status">展开后加载参数、输出与执行链路。</p>'}</div></details>`;
+    return `<details class="call-entry call-${tone}" data-call-id="${esc(r.id)}" ${opened.has(r.id) ? 'open' : ''}><summary aria-label="展开调用 项目 ${esc(r.alias || '未记录')} ${esc(r.tool)} ${esc(r.id)}"><span class="call-main"><span class="call-top"><span class="call-project${r.alias ? '' : ' call-project-unknown'}" style="--call-project-hue:${projectHues.get(projectKey(r)) ?? 270}"><span class="call-project-label">项目</span><strong>${esc(r.alias || '未记录')}</strong></span><span class="call-tool"><strong class="mono">${esc(r.tool)}</strong><span class="call-kind">${label}</span></span><span class="call-state">${status(r)}</span></span><span class="call-args">${summary(r)}</span><span class="call-meta"><time>${esc(stamp(r.created))}</time><span>${esc(r.device_name || '设备未记录')}</span><span>${source(r)}</span><code>#${esc(r.id.slice(0, 12))}</code><span class="call-filter-note" hidden>状态已变化，不再符合当前筛选</span></span></span><span class="call-chevron" aria-hidden="true">⌄</span></summary><div class="call-detail">${saved?.data ? detailHTML(saved.data) : '<p class="muted" role="status">展开后加载参数、输出与执行链路。</p>'}</div></details>`;
   }
   function section(title, value, name, { truncated = false, open = false } = {}) {
     const text = typeof value === 'string' ? value : json(value);
@@ -127,6 +158,7 @@ window.CodePierCallLog = (() => {
       filter = key(),
       r = await api('/api/call-log?' + filter);
     if (seq !== S.renderSeq || session !== S.session || filter !== key()) return '';
+    prepareProjectColors(r.projects || [], r.operations);
     st().rows = r.operations;
     st().next = r.next_cursor;
     st().incoming = false;

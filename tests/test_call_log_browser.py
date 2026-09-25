@@ -197,3 +197,46 @@ def test_project_names_stay_visible_with_long_names_and_missing_metadata(log_pag
         assert not page.locator('img').count()
         assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
         assert project.evaluate('(el)=>el.scrollWidth<=el.clientWidth+1')
+
+
+def test_project_colors_are_distinct_stable_and_readable(log_page):
+    import re
+    page, rows, _, _ = log_page
+    template = dict(rows[0])
+    rows[:] = [{**template, 'id': f'{i + 1:02x}' + '0' * 30, 'project_id': f'project-{i}',
+                'summary': 'command=pytest -q', 'created': 1790307840,
+                'alias': ['Imago', 'Lumen', 'Nexus', 'MCP'][i] if i < 4 else f'Project {i}'} for i in range(12)]
+    page.add_style_tag(path=str(ROOT/'web/tokens.css'))
+    page.add_style_tag(path=str(ROOT/'web/styles.css'))
+    page.evaluate('CodePierCallLog.clear();renderPage()')
+    def colors():
+        return page.locator('.call-entry').evaluate_all('''nodes => Object.fromEntries(nodes.map(node => {
+          const project=node.querySelector('.call-project');
+          return [node.dataset.callId, project.style.getPropertyValue('--call-project-hue')];
+        }))''')
+    original = colors()
+    assert len(set(original.values())) == 12
+    rows.reverse()
+    page.evaluate('renderPage()')
+    assert colors() == original
+    page.evaluate('CodePierCallLog.clear();renderPage()')
+    assert colors() == original
+    for theme in ['light', 'dark']:
+        page.evaluate('(theme)=>document.documentElement.dataset.appearance=theme', theme)
+        def luminance(color):
+            rgb = [int(part) / 255 for part in re.findall(r'\d+', color)[:3]]
+            linear = [x / 12.92 if x <= 0.04045 else ((x + 0.055) / 1.055) ** 2.4 for x in rgb]
+            return sum(x * weight for x, weight in zip(linear, [0.2126, 0.7152, 0.0722]))
+        for item in page.locator('.call-project').all():
+            style = item.evaluate('(el)=>({fg:getComputedStyle(el).color,bg:getComputedStyle(el).backgroundColor})')
+            a, b = sorted([luminance(style['fg']), luminance(style['bg'])])
+            assert (b + 0.05) / (a + 0.05) >= 4.5, (theme, style)
+    # Page changes keep each project's assigned color.
+    rows[:] = sorted(rows, key=lambda row: row['id'])[:4]
+    page.evaluate('renderPage()')
+    assert all(original[key] == value for key, value in colors().items())
+    page.set_viewport_size({'width': 1100, 'height': 900})
+    screenshots = Path('.work/audit-projects'); screenshots.mkdir(parents=True, exist_ok=True)
+    for theme in ['light', 'dark']:
+        page.evaluate('(theme)=>document.documentElement.dataset.appearance=theme', theme)
+        page.locator('.call-log').screenshot(path=str(screenshots/f'project-colors-{theme}.png'))
