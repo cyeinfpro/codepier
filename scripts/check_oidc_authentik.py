@@ -106,7 +106,7 @@ def acceptance(output):
             invalidation = one('flows/instances/?page_size=100', 'slug', 'default-provider-invalidation-flow')['pk']
             authentication = one('flows/instances/?page_size=100', 'slug', 'default-authentication-flow')['pk']
             keys = ak_call('GET', 'crypto/certificatekeypairs/?page_size=100')['results']
-            signing = next(x['pk'] for x in keys if x.get('has_key'))
+            signing = next(x['pk'] for x in keys if x.get('private_key_available'))
             mappings = ak_call('GET', 'propertymappings/provider/scope/?page_size=100')['results']
             scopes = [x['pk'] for x in mappings if x.get('scope_name') in ('openid', 'profile', 'email', 'offline_access')]
             group = ak_call('POST', 'core/groups/', {'name': 'codepier-acceptance-team'}, 201)
