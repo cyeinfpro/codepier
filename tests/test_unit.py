@@ -1,4 +1,3 @@
-from shared.computer_contracts import COMPUTER_READ_TOOLS
 import json, os, uuid, zipfile
 from pathlib import Path
 import pytest
@@ -53,14 +52,14 @@ def test_password_and_redaction():
     assert 'testsecret' not in json.dumps(safe_summary({'secret':'testsecret','content':'testsecret','path':'ok.py'}))
 
 def test_contracts():
-    definitions=tool_definitions();assert {d['name'] for d in definitions} == set(TOOLS) - {'integration_control','validations_accept'}
+    from shared.core_contracts import CORE_TOOLS
+    definitions=tool_definitions();assert {d['name'] for d in definitions} == CORE_TOOLS
     for tool in definitions:
         assert tool['inputSchema']['type']=='object'
         assert tool['inputSchema']['additionalProperties'] is False
         assert tool['outputSchema']['type']=='object'
         assert tool['outputSchema']['additionalProperties'] is True
-        assert all(branch.get('required') for branch in tool['outputSchema']['anyOf'])
-        assert tool['annotations']['readOnlyHint']==(TOOLS[tool['name']].scope=='read' or tool['name'] in COMPUTER_READ_TOOLS or tool['name'] in {'lsp_query','browser_snapshot'})
+        assert tool['annotations']['readOnlyHint']==(tool['name'] in {'read','vps'})
 
 def test_read_pagination_and_search(engine):
     e,p,r=engine

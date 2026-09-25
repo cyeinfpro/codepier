@@ -14,7 +14,7 @@ from shared.native_cli import database
 from shared.util import atomic_json
 from tests.support import running_stack, wait_for
 from tests.claude_fixture import FAKE_CLAUDE
-from tests.test_chat_browser import chat_page  # noqa: F401
+from tests.browser_support import chat_page  # noqa: F401
 from tests import test_chat_fullstack as fullstack
 
 

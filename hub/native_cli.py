@@ -1,5 +1,6 @@
 """Admin-only native terminal protocol and private durable offline cache."""
 from __future__ import annotations
+from hub.db_worker import database_endpoint, run_db
 import asyncio
 import base64
 from contextlib import closing
@@ -39,7 +40,7 @@ class NativeService:
             raise DevError('CLI_MAPPING_CHANGED','项目映射已改变；当前面板不能读取原会话',403)
         return p
 
-    async def request(self,action,project,args):
+    def _request_connection(self,action,project,args):
         if getattr(self.runtime, "panel_maintenance", None):
             self.runtime.panel_maintenance.guard()
         con=self.runtime.connections.get(project['device_id'])
@@ -53,6 +54,12 @@ class NativeService:
             raise DevError('CLI_CHAT_AGENT_UPDATE_REQUIRED', '此节点的 Agent 尚不支持 Claude，请先更新 Agent', 409)
         if (action in {'chat_catalog','chat_command','chat_queue','chat_cancel','chat_steer'} or action=='start' and args.get('mode')=='chat' and (args.get('model') or args.get('effort'))) and getattr(con,'native_chat_protocol',0)<2:
             raise DevError('CLI_CHAT_AGENT_UPDATE_REQUIRED','此节点仍是基础聊天版 Agent；模型目录和完整控制需要更新 Agent，旧会话仍保留',409)
+        return con
+
+    async def request(self, action, project, args):
+        con = await run_db(self.runtime.store, self._request_connection, action, project, args)
+        if self.runtime.connections.get(project['device_id']) is not con or getattr(con, 'unusable', False):
+            raise DevError('CLI_OFFLINE', '节点连接已变化，请先核对会话状态', 409)
         if len(self.pending)>=64: raise DevError('CLI_BUSY','终端控制通道繁忙，请稍后重试',429)
         request=uuid.uuid4().hex
         future=asyncio.get_running_loop().create_future()
@@ -77,6 +84,16 @@ class NativeService:
             if pending and pending[0] is connection and not pending[1].done():
                 pending[1].set_result(data.get('result',{}))
             return
+        persisted = await run_db(self.runtime.store, self._persist_sync, device, data)
+        if persisted is None:
+            return
+        offsets, changed = persisted
+        if changed:
+            async with self.changed:
+                self.changed.notify_all()
+        await connection.send({'type': 'native_ack', 'offsets': offsets})
+
+    def _persist_sync(self, device, data):
         rows=data.get('sessions',[]); chunks=data.get('chunks',[])
         if not isinstance(rows,list) or len(rows)>1000 or not isinstance(chunks,list) or len(chunks)>16:
             return
@@ -132,11 +149,9 @@ class NativeService:
                     db.execute('INSERT OR IGNORE INTO output VALUES (?,?,?)',(sid,offset,raw));offsets[sid]+=len(raw);changed=True
                 except (ValueError,KeyError,TypeError): continue
         if changed:
-            async with self.changed:
-                self.revision+=1
-                self.event_cache.clear()
-                self.changed.notify_all()
-        await connection.send({'type':'native_ack','offsets':offsets})
+            self.revision += 1
+            self.event_cache.clear()
+        return offsets, changed
 
     @staticmethod
     def search_transcript(db,sid,query):
@@ -208,7 +223,8 @@ def make_native_router(auth,runtime):
     service=runtime.native
 
     @router.get('/sessions')
-    async def sessions(request:Request,project:str='',provider:str='',status:str='',q:str='',offset:int=0,limit:int=40,mode:str=''):
+    @database_endpoint(runtime.store)
+    def sessions(request:Request,project:str='',provider:str='',status:str='',q:str='',offset:int=0,limit:int=40,mode:str=''):
         principal=auth.admin(request)
         offset=max(0,offset);limit=max(1,min(limit,100));query=q[:200].strip().casefold()
         result=[];projects={}
@@ -240,7 +256,8 @@ def make_native_router(auth,runtime):
         return {'sessions':page,'total':total,'offset':offset,'limit':limit}
 
     @router.get('/sessions/{sid}/output')
-    async def output(sid:str,request:Request,offset:int=0):
+    @database_endpoint(runtime.store)
+    def output(sid:str,request:Request,offset:int=0):
         principal=auth.admin(request)
         service.session_project(sid,principal)
         if not 0<=offset<=2**40: raise DevError('CLI_OFFSET','无效回放偏移')
@@ -257,22 +274,33 @@ def make_native_router(auth,runtime):
 
     @router.get('/sessions/{sid}/export')
     async def export(sid:str,request:Request,format:str='md'):
-        principal=auth.admin(request)
-        service.session_project(sid,principal)
-        if format not in ('md','json'): raise DevError('CLI_FORMAT','Export format must be md or json')
-        with closing(database(service.directory)) as db:
-            row=db.execute('SELECT * FROM sessions WHERE id=?',(sid,)).fetchone()
-            if row['mode']!='chat': raise DevError('CLI_TERMINAL_SESSION','Terminal output is not chat',409)
-            boundary=db.execute('SELECT COALESCE(MAX(offset+length(data)),0) FROM output WHERE session=?',(sid,)).fetchone()[0]
+        def export_boundary():
+            principal=auth.admin(request)
+            service.session_project(sid,principal)
+            if format not in ('md','json'): raise DevError('CLI_FORMAT','Export format must be md or json')
+            with closing(database(service.directory)) as db:
+                row=db.execute('SELECT * FROM sessions WHERE id=?',(sid,)).fetchone()
+                if row['mode']!='chat': raise DevError('CLI_TERMINAL_SESSION','Terminal output is not chat',409)
+                boundary=db.execute('SELECT COALESCE(MAX(offset+length(data)),0) FROM output WHERE session=?',(sid,)).fetchone()[0]
+            return boundary
+        boundary = await run_db(runtime.store, export_boundary)
+
+        def export_rows(cursor):
+            service.session_project(sid, auth.admin(request))
+            with closing(database(service.directory)) as db:
+                current = db.execute('SELECT status FROM sessions WHERE id=?', (sid,)).fetchone()
+                if not current or current['status'] in ('cleared', 'deleted'):
+                    return []
+                return db.execute('SELECT offset,data FROM output WHERE session=? AND offset+length(data)>? AND offset<? ORDER BY offset LIMIT 4', (sid, cursor, boundary)).fetchall()
+
+        def export_authorized():
+            service.session_project(sid, auth.admin(request))
+
         async def content():
             cursor=0; buffer=bytearray(); first=True; messages=OrderedDict(); message_bytes=0; serial=0
             yield '[' if format=='json' else '# Chat export\n\n'
             while cursor<boundary:
-                service.session_project(sid,auth.admin(request))
-                with closing(database(service.directory)) as db:
-                    current=db.execute('SELECT status FROM sessions WHERE id=?',(sid,)).fetchone()
-                    if not current or current['status'] in ('cleared','deleted'): break
-                    rows=db.execute('SELECT offset,data FROM output WHERE session=? AND offset+length(data)>? AND offset<? ORDER BY offset LIMIT 4',(sid,cursor,boundary)).fetchall()
+                rows = await run_db(runtime.store, export_rows, cursor)
                 if not rows: break
                 for row in rows:
                     if row['offset']>cursor: raise DevError('CLI_EXPORT_GAP','Persisted chat has a sync gap',409)
@@ -304,7 +332,7 @@ def make_native_router(auth,runtime):
                 await asyncio.sleep(0)
             if format=='json': yield ']'
             else:
-                service.session_project(sid,auth.admin(request))
+                await run_db(runtime.store, export_authorized)
                 for message in messages.values():
                     yield message['type']+'\n\n'+message['text']+'\n\n'
         return StreamingResponse(content(),media_type='application/json' if format=='json' else 'text/plain',headers={
@@ -313,13 +341,18 @@ def make_native_router(auth,runtime):
 
     @router.get('/sessions/{sid}/events')
     async def events(sid:str,request:Request,cursor:int=0):
-        principal=auth.admin(request)
-        service.session_project(sid,principal)
         try:
             cursor=int(request.headers.get('last-event-id',cursor))
-        except (TypeError,ValueError): raise DevError('CLI_OFFSET','无效事件游标')
-        if not 0<=cursor<=2**40: raise DevError('CLI_OFFSET','无效事件游标')
-        service.event_batch(sid,cursor)  # Fail before streaming response headers.
+        except (TypeError,ValueError):
+            raise DevError('CLI_OFFSET','无效事件游标')
+        if not 0<=cursor<=2**40:
+            raise DevError('CLI_OFFSET','无效事件游标')
+        def read_events(position, seen=-1):
+            service.session_project(sid, auth.admin(request))
+            revision = service.revision
+            batch = service.event_batch(sid, position) if seen != revision else None
+            return revision, batch
+        await run_db(runtime.store, read_events, cursor)
         async def stream():
             nonlocal cursor
             seen=-1;last_metadata=None
@@ -328,10 +361,9 @@ def make_native_router(auth,runtime):
                 try:
                     # Cookies can expire, sessions can be revoked and mappings can
                     # change while a response is open. Recheck on every wakeup.
-                    service.session_project(sid,auth.admin(request))
-                    revision=service.revision
-                    if seen!=revision:
-                        metadata,frames,next_cursor=service.event_batch(sid,cursor)
+                    revision, batch = await run_db(runtime.store, read_events, cursor, seen)
+                    if batch is not None:
+                        metadata,frames,next_cursor=batch
                         if metadata!=last_metadata:
                             yield 'event: session\ndata: '+json.dumps(metadata,ensure_ascii=False)+'\n\n'
                             last_metadata=metadata
@@ -361,43 +393,48 @@ def make_native_router(auth,runtime):
 
     @router.post('/{action}')
     async def action(action:str,request:Request):
-        principal=auth.admin(request,True)
+        await run_db(runtime.store, auth.admin, request, True)
         body=await request.json()
-        if not isinstance(body,dict) or not isinstance(body.get('args',{}),dict):
-            raise DevError('CLI_INVALID','参数必须是对象')
-        if action not in {'start','discover','lease','detach','input','resize','stop','rename','clear','delete','receipt','upload_begin','upload_chunk','upload_finish','upload_delete','upload_list','upload_bind','chat_prompt','chat_interrupt','chat_answer','chat_settings','chat_catalog','chat_command','chat_queue','chat_cancel','chat_steer','chat_review'}:
-            raise DevError('CLI_INVALID','未知终端动作')
-        project=dict(service.project(body.get('project',''),principal))
-        args=body.get('args',{})
-        if action not in {'start','discover','chat_catalog','upload_begin','upload_chunk','upload_finish','upload_delete','upload_list'}:
-            try: identifier(args.get('id'))
-            except ValueError: raise DevError('CLI_INVALID','无效会话编号')
-            p=service.session_project(args['id'],principal)
-            if p['id']!=project['id']: raise DevError('CLI_MAPPING_CHANGED','会话不属于此项目',403)
-        result=await service.request(action,project,args)
-        # Recheck after await: an admin may have revoked/remapped while request was in flight.
-        principal=auth.admin(request,True)
-        current=service.project(project['id'],principal)
-        if (current['root'],current['device_id'])!=(project['root'],project['device_id']):
-            raise DevError('CLI_MAPPING_CHANGED','操作期间映射改变；请在原节点检查',403)
-        if action=='start':
-            # Cache metadata immediately even before the first periodic sync.
-            class NoAck:
-                async def send(self,body): pass
-            await service.receive(project['device_id'],NoAck(),{'type':'native_sync','sessions':[result],'chunks':[]})
-        if action in {'clear','delete'}:
-            with closing(database(service.directory)) as db,db:
-                db.execute('DELETE FROM output WHERE session=?',(args['id'],))
-                db.execute('UPDATE sessions SET size=0,status=?,updated=? WHERE id=?',('deleted' if action=='delete' else 'cleared',time.time(),args['id']))
-            async with service.changed:
-                service.revision+=1
+        def prepare():
+            principal=auth.admin(request,True)
+            if not isinstance(body,dict) or not isinstance(body.get('args',{}),dict):
+                raise DevError('CLI_INVALID','参数必须是对象')
+            if action not in {'start','discover','lease','detach','input','resize','stop','rename','clear','delete','receipt','upload_begin','upload_chunk','upload_finish','upload_delete','upload_list','upload_bind','chat_prompt','chat_interrupt','chat_answer','chat_settings','chat_catalog','chat_command','chat_queue','chat_cancel','chat_steer','chat_review'}:
+                raise DevError('CLI_INVALID','未知终端动作')
+            project=dict(service.project(body.get('project',''),principal))
+            args=body.get('args',{})
+            if action not in {'start','discover','chat_catalog','upload_begin','upload_chunk','upload_finish','upload_delete','upload_list'}:
+                try: identifier(args.get('id'))
+                except ValueError: raise DevError('CLI_INVALID','无效会话编号')
+                p=service.session_project(args['id'],principal)
+                if p['id']!=project['id']: raise DevError('CLI_MAPPING_CHANGED','会话不属于此项目',403)
+            return project, args
+        project, args = await run_db(runtime.store, prepare)
+        result = await service.request(action, project, args)
+        def finish():
+            # Recheck after await: an admin may have revoked/remapped while request was in flight.
+            principal=auth.admin(request,True)
+            current=service.project(project['id'],principal)
+            if (current['root'],current['device_id'])!=(project['root'],project['device_id']):
+                raise DevError('CLI_MAPPING_CHANGED','操作期间映射改变；请在原节点检查',403)
+            if action == 'start':
+                service._persist_sync(project['device_id'], {'type': 'native_sync', 'sessions': [result], 'chunks': []})
+            if action in {'clear','delete'}:
+                with closing(database(service.directory)) as db,db:
+                    db.execute('DELETE FROM output WHERE session=?',(args['id'],))
+                    db.execute('UPDATE sessions SET size=0,status=?,updated=? WHERE id=?',('deleted' if action=='delete' else 'cleared',time.time(),args['id']))
+                service.revision += 1
                 service.event_cache.clear()
+            if action in {'start','stop','rename','clear','delete','upload_begin','upload_delete','upload_bind'}:
+                # No prompts, terminal output, argv, filenames or credentials enter
+                # the regular audit journal. Native content stays in its private DB.
+                runtime.store.audit(principal.actor, 'native.'+action, args.get('id',args.get('file','')),
+                                    detail={'project_id':project['id'],'device_id':project['device_id'],
+                                            'receipt':args.get('receipt','')})
+        await run_db(runtime.store, finish)
+        if action in {'start', 'clear', 'delete'}:
+            async with service.changed:
                 service.changed.notify_all()
-        if action in {'start','stop','rename','clear','delete','upload_begin','upload_delete','upload_bind'}:
-            # No prompts, terminal output, argv, filenames or credentials enter
-            # the regular audit journal. Native content stays in its private DB.
-            runtime.store.audit(principal.actor, 'native.'+action, args.get('id',args.get('file','')),
-                                detail={'project_id':project['id'],'device_id':project['device_id'],
-                                        'receipt':args.get('receipt','')})
         return result
+
     return router

@@ -1,6 +1,10 @@
 from __future__ import annotations
 import argparse
 import getpass
+import json
+from shared.config import ConfigurationError, DEFAULT_HUB_PORT
+from hub.config import HubConfig
+from shared.instance_lock import InstanceLock
 import os
 import sqlite3
 import tempfile
@@ -14,6 +18,14 @@ from shared.util import VERSION, fsync_directory
 
 
 def write_backup(store: Store, output: Path):
+    key_lock = InstanceLock(store.directory / ".keys.lock")
+    try:
+        return _write_backup(store, output)
+    finally:
+        key_lock.close()
+
+
+def _write_backup(store: Store, output: Path):
     """Publish a private, completed online backup without overwriting any file."""
     output.parent.mkdir(parents=True, exist_ok=True)
     # Keep staging on the output filesystem so exclusive publication is atomic.
@@ -31,6 +43,10 @@ def write_backup(store: Store, output: Path):
             with zipfile.ZipFile(handle, "w", zipfile.ZIP_DEFLATED) as z:
                 z.write(target, "hub.sqlite3")
                 z.write(store.directory / "master.key", "master.key")
+                keyring = store.directory / "master.keys.json"
+                if keyring.exists() or keyring.is_symlink():
+                    from hub.keyring import private_read
+                    z.writestr("master.keys.json", private_read(keyring))
             handle.flush()
             os.fsync(handle.fileno())
         # An output appearing during backup must not be overwritten or removed.
@@ -49,20 +65,33 @@ def main():
     reset.add_argument("--username", default="admin")
     run = sub.add_parser("run")
     run.add_argument("--host", default=os.getenv("HUB_HOST", "0.0.0.0"))
-    run.add_argument("--port", default=int(os.getenv("HUB_PORT", "8765")), type=int)
+    run.add_argument("--port", default=os.getenv("HUB_PORT", str(DEFAULT_HUB_PORT)), type=int)
     backup = sub.add_parser("backup", help="一致性备份数据库和 master.key；备份含敏感凭据")
     backup.add_argument("--output", required=True)
+    rekey = sub.add_parser("rekey", help="离线轮换主密钥；保留私密备份，可恢复中断；运行中的 Hub 不允许轮换")
+    rekey.add_argument("--resume", action="store_true", help="继续已记录的密钥轮换，不创建新的轮换")
     args = parser.parse_args()
     os.environ["HUB_DATA_DIR"] = str(Path(args.data_dir).expanduser().resolve())
     if args.command == "run":
         if not 1 <= args.port <= 65535:
             parser.error("端口范围应为 1–65535")
         os.environ["HUB_PORT"] = str(args.port)
+        try:
+            HubConfig.from_env()
+        except ConfigurationError as exc:
+            parser.error(str(exc))
         import uvicorn
         uvicorn.run("hub.app:create_app", factory=True, host=args.host, port=args.port, workers=1,
                     ws_max_size=16 * 1024 * 1024, proxy_headers=True,
                     forwarded_allow_ips=os.getenv("FORWARDED_ALLOW_IPS", "127.0.0.1"),
                     access_log=False, timeout_graceful_shutdown=10)
+        return
+    if args.command == "rekey":
+        from hub.keyring import rotate_key
+        try:
+            print(json.dumps(rotate_key(args.data_dir, resume=args.resume), ensure_ascii=False))
+        except (OSError, ValueError, RuntimeError) as exc:
+            parser.error(str(exc))
         return
     store = Store(args.data_dir)
     try:

@@ -101,7 +101,13 @@ async def test_decision_on_expired_request_publishes_removal_without_sending(inb
     approvals.receive('d', connection, data)
     changed(events)
     approvals.pending[data['request_id']]['expires_at'] = time.time() - 1
-    with pytest.raises(DevError):
+    with pytest.raises(DevError) as error:
         await approvals.decide(data['request_id'], 'accept', Principal('panel:admin', 'u', {'computer'}, ['*'], admin=True))
-    changed(events)
-    assert not sent
+    assert error.value.code == 'APPROVAL_EXPIRED'
+    # Worker invalidations are scheduled on the SSE queue's owning loop.
+    # Wait for that event, not an arbitrary delay or a test retry.
+    event = await asyncio.wait_for(events.get(), 2)
+    assert event['type'] == 'computer_approval'
+    assert event['data'] == {'changed': True}
+    assert set(event) == {'type', 'at', 'data'}
+    assert events.empty() and not sent

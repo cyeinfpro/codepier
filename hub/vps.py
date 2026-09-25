@@ -6,6 +6,7 @@ contain references, never the password. Existing Agent ssh_exec handles process
 permissions, streamed redaction, timeouts, cancellation and journal recovery.
 """
 from __future__ import annotations
+from hub.db_worker import database_endpoint
 
 import ipaddress
 import sqlite3
@@ -88,6 +89,7 @@ class VPSService:
         result = {key: row[key] for key in PUBLIC_FIELDS}
         result['enabled'] = bool(result['enabled'])
         result['has_password'] = True
+        result['target'] = 'vps:' + row['id']
         projects = self.store.all('''SELECT p.id,p.alias,p.device_id,d.name AS device_name,
             p.mode,p.allow_tasks FROM vps_projects vp JOIN projects p ON p.id=vp.project_id
             JOIN devices d ON d.id=p.device_id WHERE vp.vps_id=? ORDER BY p.alias_key''', (row['id'],))
@@ -130,6 +132,7 @@ class VPSService:
                 'next_offset': end if end < len(results) else None}
 
     def _validate_projects(self, identifiers):
+        self.store.require_transaction()
         if len(set(identifiers)) != len(identifiers):
             raise DevError('INVALID_PROJECTS', '项目分配列表不能重复')
         for identifier in identifiers:
@@ -137,6 +140,7 @@ class VPSService:
                 raise DevError('PROJECT_NOT_FOUND', '选择的项目已不存在，请刷新后重试', 404)
 
     def _bind(self, identifier, project_ids):
+        self.store.require_transaction()
         existing = {r[0] for r in self.store.db.execute('SELECT project_id FROM vps_projects WHERE vps_id=?', (identifier,))}
         for project_id in existing - set(project_ids):
             self.store.db.execute('DELETE FROM vps_projects WHERE vps_id=? AND project_id=?', (identifier, project_id))
@@ -247,10 +251,10 @@ class VPSService:
         if args.get('username'):
             rows = [r for r in rows if r['username'] == args['username']]
         if not rows:
-            raise DevError('VPS_NOT_FOUND', '未找到此项目已分配且启用的 VPS；请调用 vps_list 或在面板分配连接', 404)
+            raise DevError('VPS_NOT_FOUND', '未找到此项目已分配且启用的 VPS；请调用 vps 或在面板分配连接', 404)
         if len(rows) != 1:
             choices = ', '.join(f"{r['name']} ({r['host']}:{r['port']} / {r['username']})" for r in rows[:10])
-            raise DevError('VPS_AMBIGUOUS', '匹配到多个 VPS，请用 vps_list 查询并明确选择名称或 ID：' + choices, 409)
+            raise DevError('VPS_AMBIGUOUS', '匹配到多个 VPS，请用 vps 查询并明确选择名称或 ID：' + choices, 409)
         row = rows[0]
         return {'id': row['id'], 'connection_revision': row['connection_revision'], 'binding_id': row['binding_id']}
 
@@ -283,8 +287,8 @@ class VPSService:
                           username=row['username'], password=password,
                           command=args['command'], host_key_policy=row['host_key_policy'],
                           timeout_seconds=args['timeout_seconds'], idempotency_key=args['idempotency_key'])
-        return {**{k: v for k, v in request.items() if k != 'vps_ref'},
-                'tool': 'ssh_exec', 'args': command.model_dump()}
+        envelope = {k: v for k, v in request.items() if k != 'vps_ref'}
+        return {**envelope, 'core_ssh': command.model_dump()}
 
 
 def make_vps_router(auth, runtime):
@@ -292,34 +296,41 @@ def make_vps_router(auth, runtime):
     service = runtime.vps
 
     @router.get('/api/vps')
-    async def list_vps(request: Request, project: str = Query('', max_length=100), query: str = Query('', max_length=253), offset: int = Query(0, ge=0, le=100000), limit: int = Query(200, ge=1, le=200)):
+    @database_endpoint(runtime.store)
+    def list_vps(request: Request, project: str = Query('', max_length=100), query: str = Query('', max_length=253), offset: int = Query(0, ge=0, le=100000), limit: int = Query(200, ge=1, le=200)):
         principal = auth.admin(request)
         args = VPSList(project=project, query=query, offset=offset, limit=limit).model_dump()
         return service.list(args, principal)
 
     @router.post('/api/vps')
-    async def create_vps(request: Request, body: VPSInput):
+    @database_endpoint(runtime.store)
+    def create_vps(request: Request, body: VPSInput):
         return service.save(body, auth.admin(request, True))
 
     @router.get('/api/vps/{identifier}')
-    async def get_vps(identifier: str, request: Request):
+    @database_endpoint(runtime.store)
+    def get_vps(identifier: str, request: Request):
         auth.admin(request)
         return service.get(identifier)
 
     @router.put('/api/vps/{identifier}')
-    async def update_vps(identifier: str, request: Request, body: VPSInput):
+    @database_endpoint(runtime.store)
+    def update_vps(identifier: str, request: Request, body: VPSInput):
         return service.save(body, auth.admin(request, True), identifier)
 
     @router.put('/api/vps/{identifier}/projects')
-    async def assign_vps(identifier: str, request: Request, body: VPSAssignments):
+    @database_endpoint(runtime.store)
+    def assign_vps(identifier: str, request: Request, body: VPSAssignments):
         return service.assign(identifier, body, auth.admin(request, True))
 
     @router.put('/api/projects/{identifier}/vps')
-    async def assign_project(identifier: str, request: Request, body: ProjectVPSAssignments):
+    @database_endpoint(runtime.store)
+    def assign_project(identifier: str, request: Request, body: ProjectVPSAssignments):
         return service.project_assign(identifier, body, auth.admin(request, True))
 
     @router.delete('/api/vps/{identifier}')
-    async def delete_vps(identifier: str, request: Request, expected_version: int = Query(..., ge=1)):
+    @database_endpoint(runtime.store)
+    def delete_vps(identifier: str, request: Request, expected_version: int = Query(..., ge=1)):
         return service.delete(identifier, expected_version, auth.admin(request, True))
 
     return router

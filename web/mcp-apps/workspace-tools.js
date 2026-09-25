@@ -19,7 +19,7 @@ export function mountWorkspaceTools(parent, value, ctx) {
   info.append(button('检查项目就绪状态', async () => {
     readiness.replaceChildren(el('p', '正在检查，不会启动模型或修改设置…', 'muted'));
     try {
-      const result = await ctx.read('readiness_get', ctx.target);
+      const result = await ctx.read('workspace', {...ctx.target, operation: 'readiness'});
       if (!ctx.alive() || !result) return;
       readiness.replaceChildren();
       for (const check of result.checks || []) {
@@ -86,7 +86,7 @@ function mountUpload(parent, ctx, grantedScopes) {
   async function list(path, offset = 0, append = false) {
     if (locked()) return;
     const revision = ++browseRevision;
-    const result = await ctx.read('fs_tree', {...ctx.target, path, depth: 1, limit: 100, offset});
+    const result = await ctx.read('workspace', {operation: 'tree', ...ctx.target, path, depth: 1, limit: 100, offset});
     if (!ctx.alive() || revision !== browseRevision || locked() || !result) return;
     browsing = path; chooser.hidden = false;
     if (!append) chooser.replaceChildren(el('p', '当前浏览：' + path, 'path'));
@@ -107,7 +107,7 @@ function mountUpload(parent, ctx, grantedScopes) {
   browserButton = button('选择现有目录', () => list(directory));
   async function waitOriginal() {
     if (!operationId || !ctx.alive()) return;
-    const op = await ctx.request('operations_wait', {operation_id: operationId, wait_seconds: 1, output_limit: 0});
+    const op = await ctx.request('process', {operation: 'wait', operation_ids: [operationId], wait_seconds: 1, output_limit: 0});
     if (!ctx.alive()) return;
     if ((op.operation_id || op.id) !== operationId) throw new Error('返回的导入回执编号不一致。');
     if (op.pending) { output.replaceChildren(); notice(output, '原操作仍在导入：' + operationId + '。请继续读取同一回执。'); return; }
@@ -133,7 +133,8 @@ function mountUpload(parent, ctx, grantedScopes) {
     if (!ctx.alive() || !attempt) return;
     phase = 'submitting'; controls(); recover.replaceChildren();
     try {
-      const result = await ctx.request('download_artifact', attempt);
+      const {project, workspace_id, idempotency_key, ...options} = attempt;
+      const result = await ctx.request('write', {project, workspace_id, idempotency_key, operation: 'import', options});
       if (!ctx.alive()) return;
       if (result.pending) {
         operationId = result.operation_id; phase = 'pending';

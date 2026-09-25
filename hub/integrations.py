@@ -130,8 +130,8 @@ class CallTimingMiddleware:
         async def observed(message):
             await send(message)
             if message['type']=='http.response.body' and not message.get('more_body',False):
-                self.runtime.integrations.finish(scope.get('state',{}).get('codepier_call_trace'))
+                await self.runtime.store.run(self.runtime.integrations.finish,scope.get('state',{}).get('codepier_call_trace'))
         try:await self.app(scope,receive,observed)
         finally:
             trace=scope.get('state',{}).get('codepier_call_trace')
-            if trace and not trace['finished']:self.runtime.integrations.finish(trace,status='interrupted')
+            if trace and not trace['finished']:await self.runtime.store.run(self.runtime.integrations.finish,trace,status='interrupted')

@@ -3,7 +3,11 @@ import json
 import os
 import sqlite3
 import tempfile
-import threading
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
+from functools import partial
+from hub.store_contract import CheckedConnection, OwnedRLock
 import time
 from pathlib import Path
 from cryptography.fernet import Fernet
@@ -47,32 +51,37 @@ class Store:
         self.directory = Path(directory).resolve()
         self.directory.mkdir(parents=True, exist_ok=True)
         os.chmod(self.directory, 0o700)
-        self.db = sqlite3.connect(self.directory / "hub.sqlite3", check_same_thread=False, timeout=30)
-        self.db.row_factory = sqlite3.Row
-        self.lock = threading.RLock()
-        try:
-            # Changing a new database to WAL can return BUSY without invoking
-            # SQLite's busy handler when another opener is doing the same.
-            deadline = time.monotonic() + 30
-            while True:
-                try:
-                    self.db.execute("PRAGMA journal_mode=WAL")
-                    break
-                except sqlite3.OperationalError as exc:
-                    if getattr(exc, "sqlite_errorcode", None) != sqlite3.SQLITE_BUSY or time.monotonic() >= deadline:
-                        raise
-                    time.sleep(0.05)
-            self.db.execute("PRAGMA foreign_keys=ON")
-            with self.db:
-                # Serialize the reads that decide which migrations/key creation
-                # are needed with all writes made by other Store instances.
-                self.db.execute("BEGIN IMMEDIATE")
-                self._migrate()
-                self.cipher = self._load_cipher()
-            os.chmod(self.directory / "hub.sqlite3", 0o600)
-        except BaseException:
-            self.db.close()
-            raise
+        connection = sqlite3.connect(self.directory / "hub.sqlite3", check_same_thread=False, timeout=30)
+        connection.row_factory = sqlite3.Row
+        self.lock = OwnedRLock()
+        self.session_revision = 0
+        self._event_loop = None
+        self.db = CheckedConnection(connection, self.lock, self._security_write)
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hub-sqlite")
+        with self.lock:
+            try:
+                # Changing a new database to WAL can return BUSY without invoking
+                # SQLite's busy handler when another opener is doing the same.
+                deadline = time.monotonic() + 30
+                while True:
+                    try:
+                        self.db.execute("PRAGMA journal_mode=WAL")
+                        break
+                    except sqlite3.OperationalError as exc:
+                        if getattr(exc, "sqlite_errorcode", None) != sqlite3.SQLITE_BUSY or time.monotonic() >= deadline:
+                            raise
+                        time.sleep(0.05)
+                self.db.execute("PRAGMA foreign_keys=ON")
+                with self.db:
+                    # Serialize the reads that decide which migrations/key creation
+                    # are needed with all writes made by other Store instances.
+                    self.db.execute("BEGIN IMMEDIATE")
+                    self._migrate()
+                    self.cipher = self._load_cipher()
+                os.chmod(self.directory / "hub.sqlite3", 0o600)
+            except BaseException:
+                self.db.close()
+                raise
 
     def _load_cipher(self):
         key_path = self.directory / "master.key"
@@ -103,7 +112,8 @@ class Store:
                         os.close(directory_fd)
             finally:
                 os.unlink(temporary)
-        return Fernet(key_path.read_bytes().strip())
+        from hub.keyring import CipherSuite
+        return CipherSuite(self.directory, key_path.read_bytes().strip())
 
     def _migrate(self):
         # Execute DDL within the caller's transaction; executescript would
@@ -155,6 +165,58 @@ class Store:
         self.execute("INSERT INTO audit(at,actor,action,target,status,detail) VALUES (?,?,?,?,?,?)",
                      (time.time(), actor, action, target, status, json.dumps(detail or {}, ensure_ascii=False)))
 
+    def _security_write(self, sql):
+        # Conservative invalidation is safe even if the transaction rolls back.
+        # No SQL text or bound value is retained in this process-local revision.
+        import re
+        if re.search(r"\b(?:sessions|users)\b", sql, re.I):
+            self.session_revision += 1
+
+    def after_commit(self, callback):
+        if self.lock.owned:
+            self.db.after_commit(callback)
+        else:
+            callback()
+
+    def require_transaction(self):
+        self.lock.require()
+        if not self.db.depth:
+            raise RuntimeError("This helper requires an enclosing Store database context")
+
+    async def run(self, function, /, *args, **kwargs):
+        """Run a whole synchronous DB phase on this Store's single worker.
+
+        Cancellation waits for the admitted phase to settle before releasing the
+        caller's async admission lock. No transaction or thread lock crosses an
+        await; cancellation is not a claim that a durable write did not happen.
+        """
+        if self.lock.owned:
+            raise RuntimeError("Do not await Store.run while holding Store.lock")
+        self._event_loop = asyncio.get_running_loop()
+        context = copy_context()
+        call = partial(function, *args, **kwargs)
+        future = asyncio.get_running_loop().run_in_executor(self._executor, context.run, call)
+        try:
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            while not future.done():
+                try:
+                    await asyncio.shield(future)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            # Retrieve a failing job's exception without masking cancellation.
+            if not future.cancelled():
+                future.exception()
+            raise
+
+    async def aclose(self):
+        await asyncio.to_thread(self.close)
+
     def close(self):
+        if self.lock.owned:
+            raise RuntimeError("Release Store.lock before closing the database worker")
+        self._executor.shutdown(wait=True, cancel_futures=False)
         with self.lock:
             self.db.close()

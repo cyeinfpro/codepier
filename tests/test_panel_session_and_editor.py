@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from playwright.sync_api import expect
+from tests.javascript_support import panel_without_boot
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -21,9 +22,10 @@ def app_page(chat_browser_pool):
     page.goto('https://flow.fixture/')
     for name in ('tokens.css','styles.css','workspace.css','chat.css'):
         page.add_style_tag(path=str(ROOT / 'web' / name))
-    source = (ROOT / 'web/app.js').read_text(encoding='utf-8')
-    page.add_script_tag(content=source[:source.index('(async()=>{try{const page=location.hash')])
-    for name in ('ui.js','chat-markdown.js','chat-panels.js','chat-chrome.js',
+    for name in ('core/bundle.js', 'ui.js'):
+        page.add_script_tag(path=str(ROOT / 'web' / name))
+    page.add_script_tag(content=panel_without_boot())
+    for name in ('chat-markdown.js','chat-panels.js','chat-chrome.js',
                  'chat-history.js','chat-catalog.js','chat.js'):
         page.add_script_tag(path=str(ROOT / 'web' / name))
     page.evaluate('''async () => {

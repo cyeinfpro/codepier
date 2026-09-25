@@ -27,7 +27,7 @@ class NativeCLI:
         self.directory = agent.state_dir / 'native-cli'
         self.children = []
         self.offsets = {}
-        self.catalog_cache = CatalogCache()
+        self.catalog_cache = CatalogCache(path=self.directory / 'catalog-cache.json')
         self.sync_cursor = 0
         self.launch_gate = threading.Lock()
         self.pending_starts = {}
@@ -146,7 +146,7 @@ class NativeCLI:
             # response locally; the browser shares only model capabilities.
             environment_key = hashlib.sha256(json.dumps(env, sort_keys=True).encode()).hexdigest()
             key = (project['id'], project['device_id'], str(root), cli, str(cwd), model, include_commands, executable, environment_key)
-            result = self.catalog_cache.get(key, lambda: probe(cli, executable, cwd, env, model, include_commands=include_commands), bool(args.get('refresh')))
+            result = self.catalog_cache.get(key, lambda: probe(cli, executable, cwd, env, model, include_commands=include_commands), bool(args.get('refresh')), allow_stale=not include_commands)
             if str(self.authorize(project)) != str(root): raise DevError('CLI_MAPPING_CHANGED', 'Mapping changed during catalog probe', 403)
             return result
         live_sessions = self.live() if action == 'start' else []
@@ -591,6 +591,8 @@ class NativeCLI:
             response={'ok':False,'error':{'code':exc.code,'message':exc.message,**exc.details}}
         except (ValueError,TypeError,KeyError) as exc:
             response={'ok':False,'error':{'code':'CLI_INVALID','message':str(exc)[:300]}}
+        except TimeoutError:
+            response={'ok':False,'error':{'code':'CLI_TIMEOUT','message':'原生 CLI 响应超时；请稍后重试'}}
         except Exception:
             response={'ok':False,'error':{'code':'CLI_STORAGE','message':'原生会话存储或运行器错误；检查本机磁盘和权限'}}
         if self.agent.socket is socket:

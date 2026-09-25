@@ -67,6 +67,8 @@ def catalog(continuation_stack):
 
 
 def call(stack, catalog, profile, name, arguments):
+    from hub.core_tools import public_call
+    name, arguments = public_call(name, arguments)
     definition = catalog[profile][name]
     Draft202012Validator(definition["inputSchema"]).validate(arguments)
     result = rpc(stack, profile, "tools/call", {"name": name, "arguments": arguments})
@@ -75,7 +77,8 @@ def call(stack, catalog, profile, name, arguments):
 
 
 def follow(stack, catalog, profile, continuation, **overrides):
-    return call(stack, catalog, profile, continuation["name"], {**continuation["arguments"], **overrides})
+    result = call(stack, catalog, profile, continuation["name"], {**continuation["arguments"], **overrides})
+    return {**result, 'structuredContent': result['structuredContent']['operations'][0]}
 
 
 @pytest.mark.parametrize("profile,name", [("full", "shell_exec"), ("coding", "shell_exec"), ("full", "tasks_run")])
@@ -89,16 +92,16 @@ def test_paused_polling_resumes_original_operation_once(continuation_stack, cata
     receipt = submitted["structuredContent"]
     operation_id = receipt["operation_id"]
     assert receipt["pending"]
-    assert receipt["next_call"]["name"] == "operations_wait"
+    assert receipt["next_call"]["name"] == "process"
     assert receipt["next_call"]["arguments"] == {
-        "operation_id": operation_id, "wait_seconds": 10, "output_limit": 8000,
+        "operation": "wait", "operation_ids": [operation_id], "wait_seconds": 10, "output_limit": 8000,
         "include_result": True, "include_output": True,
     }
 
     # Shorten only this test's first wait to exercise an actual pending response.
     pending = follow(stack, catalog, profile, receipt["next_call"], wait_seconds=1)["structuredContent"]
     assert pending["pending"] and pending["result"] is None
-    assert pending["next_call"]["arguments"]["operation_id"] == operation_id
+    assert pending["next_call"]["arguments"]["operation_ids"] == [operation_id]
     assert pending["next_call"]["arguments"]["after_output_seq"] == pending["output_seq"]
 
     # No operation requests while the external caller is absent. The local
@@ -127,13 +130,13 @@ def test_compact_terminal_response_recovers_failure_evidence(continuation_stack,
     compact = follow(stack, catalog, profile, receipt["next_call"], include_output=False, include_result=False)["structuredContent"]
     assert compact["state"] == "failed" and not compact["pending"]
     assert "output" not in compact and "result" not in compact
-    assert compact["next_call"]["name"] == "operations_get"
-    assert compact["next_call"]["arguments"]["operation_id"] == receipt["operation_id"]
+    assert compact["next_call"]["name"] == "process" and compact["next_call"]["arguments"]["operation"] == "get"
+    assert compact["next_call"]["arguments"]["operation_ids"] == [receipt["operation_id"]]
     assert "after_output_seq" not in compact["next_call"]["arguments"]
 
     recovered = follow(stack, catalog, profile, compact["next_call"])
-    # Reading durable failure evidence succeeds even though the command failed.
-    assert not recovered["isError"], recovered
+    # Failed commands remain visibly failed when their durable evidence is read.
+    assert recovered["isError"], recovered
     terminal = recovered["structuredContent"]
     assert terminal["state"] == "failed" and terminal["next_call"] is None
     assert terminal["result"]["data"]["exit_code"] == 7

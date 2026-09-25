@@ -4,6 +4,8 @@ Public clients only (token_endpoint_auth_method=none). Explicit per-authorizatio
 consent; resource bound grants; no token forwarding; no wildcard redirect URLs.
 """
 from __future__ import annotations
+from hub.db_worker import database_endpoint
+from shared.config import env_csv
 import base64
 import hashlib
 import hmac
@@ -26,10 +28,11 @@ class OAuth:
         self.auth, self.runtime, self.store = auth, runtime, auth.store
         self.public_url = public_url
         self.auth.resource = self.resource
+        self.store.oauth_resource = self.resource
         # Older databases did not persist the audience. Bind existing OAuth
         # grants once, before a later public URL change can retarget them.
         self.store.execute("UPDATE grants SET resource=? WHERE client_id IS NOT NULL AND resource IS NULL", (self.resource(),))
-        self.redirect_hosts = {host.strip().lower() for host in os.getenv("OAUTH_REDIRECT_HOSTS", "chatgpt.com,chat.openai.com,platform.openai.com,localhost,127.0.0.1,::1").split(",") if host.strip()}
+        self.redirect_hosts = {host.lower() for host in env_csv("OAUTH_REDIRECT_HOSTS", "chatgpt.com,chat.openai.com,platform.openai.com,localhost,127.0.0.1,::1")}
         self.router = APIRouter()
         self.routes()
 
@@ -105,6 +108,7 @@ class OAuth:
         return urlunsplit((u.scheme, u.netloc, u.path, u.query + ("&" if u.query else "") + extra, ""))
 
     def new_tokens(self, grant_id: str):
+        self.store.require_transaction()
         now = time.time()
         access, refresh = "rda_" + token(), "rdr_" + token()
         self.store.db.execute("INSERT INTO tokens VALUES (?,?,?,'access',?,?)", (token(16), digest(access), grant_id, now + 3600, now))
@@ -142,13 +146,15 @@ class OAuth:
 
         @router.get("/.well-known/oauth-protected-resource")
         @router.get("/.well-known/oauth-protected-resource/mcp")
-        async def protected_metadata():
+        @database_endpoint(self.store)
+        def protected_metadata():
             return JSONResponse({"resource": self.resource(), "authorization_servers": [self.public_url()],
                 "scopes_supported": ["read", "write", "execute", "computer"], "bearer_methods_supported": ["header"],
                 "resource_name": "CodePier Agent"}, headers={"Access-Control-Allow-Origin": "*"})
 
         @router.get("/.well-known/oauth-authorization-server")
-        async def server_metadata():
+        @database_endpoint(self.store)
+        def server_metadata():
             base = self.public_url()
             return JSONResponse({"issuer": base, "authorization_endpoint": base + "/oauth/authorize", "token_endpoint": base + "/oauth/token",
                 "registration_endpoint": base + "/oauth/register", "revocation_endpoint": base + "/oauth/revoke",
@@ -158,27 +164,31 @@ class OAuth:
 
         @router.post("/oauth/register")
         async def register(request: Request):
-            self.throttle(request)
+            await self.store.run(self.throttle, request)
             body = await self.json_object(request)
-            name = body.get("client_name", "MCP client")
-            redirects = body.get("redirect_uris", [])
-            if not isinstance(name, str) or not 1 <= len(name) <= 100:
-                raise DevError("INVALID_CLIENT_METADATA", "client_name 长度应为 1–100")
-            if not isinstance(redirects, list) or not 1 <= len(redirects) <= 8:
-                raise DevError("INVALID_CLIENT_METADATA", "必须登记 1–8 个精确回调地址")
-            for redirect in redirects:
-                if not isinstance(redirect, str) or len(redirect) > 2048:
-                    raise DevError("INVALID_REDIRECT", "无效回调地址")
-                self.validate_redirect(redirect)
-            if body.get("token_endpoint_auth_method", "none") != "none":
-                raise DevError("INVALID_CLIENT_METADATA", "仅支持 public client + PKCE；token_endpoint_auth_method=none")
-            id = token(24)
-            self.store.execute("INSERT INTO oauth_clients VALUES (?,?,?,?)", (id, name, json.dumps(redirects), time.time()))
-            return JSONResponse({"client_id": id, "client_name": name, "redirect_uris": redirects, "token_endpoint_auth_method": "none",
-                "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"]}, status_code=201, headers={"Cache-Control": "no-store"})
+            def finish():
+                name = body.get("client_name", "MCP client")
+                redirects = body.get("redirect_uris", [])
+                if not isinstance(name, str) or not 1 <= len(name) <= 100:
+                    raise DevError("INVALID_CLIENT_METADATA", "client_name 长度应为 1–100")
+                if not isinstance(redirects, list) or not 1 <= len(redirects) <= 8:
+                    raise DevError("INVALID_CLIENT_METADATA", "必须登记 1–8 个精确回调地址")
+                for redirect in redirects:
+                    if not isinstance(redirect, str) or len(redirect) > 2048:
+                        raise DevError("INVALID_REDIRECT", "无效回调地址")
+                    self.validate_redirect(redirect)
+                if body.get("token_endpoint_auth_method", "none") != "none":
+                    raise DevError("INVALID_CLIENT_METADATA", "仅支持 public client + PKCE；token_endpoint_auth_method=none")
+                id = token(24)
+                self.store.execute("INSERT INTO oauth_clients VALUES (?,?,?,?)", (id, name, json.dumps(redirects), time.time()))
+                return JSONResponse({"client_id": id, "client_name": name, "redirect_uris": redirects, "token_endpoint_auth_method": "none",
+                    "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"]}, status_code=201, headers={"Cache-Control": "no-store"})
+
+            return await self.store.run(finish)
 
         @router.get("/oauth/authorize")
-        async def authorize(request: Request):
+        @database_endpoint(self.store)
+        def authorize(request: Request):
             self.throttle(request)
             params = dict(request.query_params)
             if len(request.query_params.multi_items()) != len(params):
@@ -187,7 +197,8 @@ class OAuth:
             return RedirectResponse("/?authorize=" + id, status_code=303)
 
         @router.get("/api/oauth/requests/{id}")
-        async def auth_details(id: str, request: Request):
+        @database_endpoint(self.store)
+        def auth_details(id: str, request: Request):
             principal = self.auth.admin(request)
             row = self.get_request(id)
             return {"id": id, "client_name": row["client_name"], "client_id": row["client_id"], "redirect_uri": row["redirect_uri"],
@@ -196,79 +207,89 @@ class OAuth:
 
         @router.post("/api/oauth/requests/{id}/decide")
         async def decide(id: str, request: Request):
-            principal = self.auth.admin(request, True)
-            row = self.get_request(id)
+            await self.store.run(self.auth.admin, request, True)
             body = await self.json_object(request)
-            if type(body.get("allow")) is not bool:
-                raise DevError("INVALID_REQUEST", "allow 必须为布尔值")
-            if body.get("allow") is not True:
+            def finish():
+                principal = self.auth.admin(request, True)
+                row = self.get_request(id)
+                if type(body.get("allow")) is not bool:
+                    raise DevError("INVALID_REQUEST", "allow 必须为布尔值")
+                if body.get("allow") is not True:
+                    with self.store.lock, self.store.db:
+                        self.auth.admin(request, True)
+                        used = self.store.db.execute("UPDATE oauth_requests SET used=1 WHERE id=? AND used=0 AND expires>?", (id, time.time())).rowcount
+                        if not used:
+                            raise DevError("AUTH_REQUEST_EXPIRED", "授权请求已处理", 410)
+                    self.store.audit(principal.actor, "oauth.consent", row["client_name"], "denied")
+                    return {"redirect": self.redirect(row["redirect_uri"], {"error": "access_denied", "state": row["state"]})}
+                scopes = body.get("scopes", [])
+                projects = body.get("projects", [])
+                if not isinstance(scopes, list) or any(not isinstance(x, str) for x in scopes) or "read" not in scopes or not set(scopes).issubset(set(json.loads(row["scopes"]))):
+                    raise DevError("INVALID_SCOPE", "不得超出客户端申请的权限")
+                projects = project_selection(self.store, projects, body.get("all_projects", False))
+                gid, code = token(16), token()
                 with self.store.lock, self.store.db:
                     self.auth.admin(request, True)
+                    if row["resource"] != self.resource():
+                        raise DevError("INVALID_TARGET", "资源标识已变化，请重新发起授权")
                     used = self.store.db.execute("UPDATE oauth_requests SET used=1 WHERE id=? AND used=0 AND expires>?", (id, time.time())).rowcount
                     if not used:
                         raise DevError("AUTH_REQUEST_EXPIRED", "授权请求已处理", 410)
-                self.store.audit(principal.actor, "oauth.consent", row["client_name"], "denied")
-                return {"redirect": self.redirect(row["redirect_uri"], {"error": "access_denied", "state": row["state"]})}
-            scopes = body.get("scopes", [])
-            projects = body.get("projects", [])
-            if not isinstance(scopes, list) or any(not isinstance(x, str) for x in scopes) or "read" not in scopes or not set(scopes).issubset(set(json.loads(row["scopes"]))):
-                raise DevError("INVALID_SCOPE", "不得超出客户端申请的权限")
-            projects = project_selection(self.store, projects, body.get("all_projects", False))
-            gid, code = token(16), token()
-            with self.store.lock, self.store.db:
-                self.auth.admin(request, True)
-                if row["resource"] != self.resource():
-                    raise DevError("INVALID_TARGET", "资源标识已变化，请重新发起授权")
-                used = self.store.db.execute("UPDATE oauth_requests SET used=1 WHERE id=? AND used=0 AND expires>?", (id, time.time())).rowcount
-                if not used:
-                    raise DevError("AUTH_REQUEST_EXPIRED", "授权请求已处理", 410)
-                self.store.db.execute("INSERT INTO grants(id,user_id,label,client_id,scopes,projects,revoked,created,resource) VALUES (?,?,?,?,?,?,0,?,?)", (gid, principal.user_id, row["client_name"], row["client_id"], json.dumps(sorted(set(scopes))), json.dumps(projects), time.time(), row["resource"]))
-                self.store.db.execute("INSERT INTO oauth_codes VALUES (?,?,?,?,?,?,?)", (digest(code), row["client_id"], row["redirect_uri"], row["challenge"], row["resource"], gid, time.time() + 300))
-            self.store.audit(principal.actor, "oauth.consent", row["client_name"], detail={"grant_id": gid, "scopes": scopes, "projects": projects})
-            return {"redirect": self.redirect(row["redirect_uri"], {"code": code, "state": row["state"]})}
+                    self.store.db.execute("INSERT INTO grants(id,user_id,label,client_id,scopes,projects,revoked,created,resource) VALUES (?,?,?,?,?,?,0,?,?)", (gid, principal.user_id, row["client_name"], row["client_id"], json.dumps(sorted(set(scopes))), json.dumps(projects), time.time(), row["resource"]))
+                    self.store.db.execute("INSERT INTO oauth_codes VALUES (?,?,?,?,?,?,?)", (digest(code), row["client_id"], row["redirect_uri"], row["challenge"], row["resource"], gid, time.time() + 300))
+                self.store.audit(principal.actor, "oauth.consent", row["client_name"], detail={"grant_id": gid, "scopes": scopes, "projects": projects})
+                return {"redirect": self.redirect(row["redirect_uri"], {"code": code, "state": row["state"]})}
+
+            return await self.store.run(finish)
 
         @router.post("/oauth/token")
         async def exchange(request: Request):
-            self.throttle(request)
+            await self.store.run(self.throttle, request)
             try:
                 form = await self.form(request)
-                if form.get("resource", self.resource()) != self.resource():
-                    return JSONResponse({"error": "invalid_target"}, status_code=400)
-                if form.get("grant_type") == "authorization_code":
-                    verifier = form.get("code_verifier", "")
-                    if not re.fullmatch(r"[A-Za-z0-9._~-]{43,128}", verifier):
-                        return JSONResponse({"error": "invalid_grant"}, status_code=400)
-                    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
-                    with self.store.lock, self.store.db:
-                        row = self.store.db.execute("SELECT c.*,g.revoked FROM oauth_codes c JOIN grants g ON g.id=c.grant_id WHERE c.hash=?", (digest(form.get("code", "")),)).fetchone()
-                        if not row or row["revoked"] or row["expires"] <= time.time() or row["client_id"] != form.get("client_id") or row["redirect_uri"] != form.get("redirect_uri") or row["resource"] != self.resource() or not hmac.compare_digest(row["challenge"], challenge):
+                def exchange_form():
+                    if form.get("resource", self.resource()) != self.resource():
+                        return JSONResponse({"error": "invalid_target"}, status_code=400)
+                    if form.get("grant_type") == "authorization_code":
+                        verifier = form.get("code_verifier", "")
+                        if not re.fullmatch(r"[A-Za-z0-9._~-]{43,128}", verifier):
                             return JSONResponse({"error": "invalid_grant"}, status_code=400)
-                        self.store.db.execute("DELETE FROM oauth_codes WHERE hash=?", (row["hash"],))
-                        result = self.new_tokens(row["grant_id"])
-                elif form.get("grant_type") == "refresh_token":
-                    with self.store.lock, self.store.db:
-                        row = self.store.db.execute("SELECT t.*,g.client_id,g.revoked,g.resource FROM tokens t JOIN grants g ON g.id=t.grant_id WHERE t.hash=? AND t.kind IN ('refresh','refresh_used')", (digest(form.get("refresh_token", "")),)).fetchone()
-                        if not row or row["revoked"] or row["expires"] <= time.time() or row["client_id"] != form.get("client_id") or row["resource"] != self.resource():
-                            return JSONResponse({"error": "invalid_grant"}, status_code=400)
-                        if row["kind"] == "refresh_used":
-                            # Both holders are indistinguishable after a token is
-                            # stolen. Reuse revokes the entire rotation family.
-                            self.store.db.execute("UPDATE grants SET revoked=1 WHERE id=?", (row["grant_id"],))
-                            return JSONResponse({"error": "invalid_grant"}, status_code=400)
-                        self.store.db.execute("UPDATE tokens SET kind='refresh_used' WHERE hash=?", (row["hash"],))
-                        result = self.new_tokens(row["grant_id"])
-                else:
-                    return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
-                return JSONResponse(result, headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
+                        challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+                        with self.store.lock, self.store.db:
+                            row = self.store.db.execute("SELECT c.*,g.revoked FROM oauth_codes c JOIN grants g ON g.id=c.grant_id WHERE c.hash=?", (digest(form.get("code", "")),)).fetchone()
+                            if not row or row["revoked"] or row["expires"] <= time.time() or row["client_id"] != form.get("client_id") or row["redirect_uri"] != form.get("redirect_uri") or row["resource"] != self.resource() or not hmac.compare_digest(row["challenge"], challenge):
+                                return JSONResponse({"error": "invalid_grant"}, status_code=400)
+                            self.store.db.execute("DELETE FROM oauth_codes WHERE hash=?", (row["hash"],))
+                            result = self.new_tokens(row["grant_id"])
+                    elif form.get("grant_type") == "refresh_token":
+                        with self.store.lock, self.store.db:
+                            row = self.store.db.execute("SELECT t.*,g.client_id,g.revoked,g.resource FROM tokens t JOIN grants g ON g.id=t.grant_id WHERE t.hash=? AND t.kind IN ('refresh','refresh_used')", (digest(form.get("refresh_token", "")),)).fetchone()
+                            if not row or row["revoked"] or row["expires"] <= time.time() or row["client_id"] != form.get("client_id") or row["resource"] != self.resource():
+                                return JSONResponse({"error": "invalid_grant"}, status_code=400)
+                            if row["kind"] == "refresh_used":
+                                # Both holders are indistinguishable after a token is
+                                # stolen. Reuse revokes the entire rotation family.
+                                self.store.db.execute("UPDATE grants SET revoked=1 WHERE id=?", (row["grant_id"],))
+                                return JSONResponse({"error": "invalid_grant"}, status_code=400)
+                            self.store.db.execute("UPDATE tokens SET kind='refresh_used' WHERE hash=?", (row["hash"],))
+                            result = self.new_tokens(row["grant_id"])
+                    else:
+                        return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
+                    return JSONResponse(result, headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
+
+                return await self.store.run(exchange_form)
             except DevError as exc:
                 return JSONResponse({"error": "invalid_request", "error_description": exc.message}, status_code=exc.status)
 
         @router.post("/oauth/revoke")
         async def revoke(request: Request):
-            self.throttle(request)
+            await self.store.run(self.throttle, request)
             form = await self.form(request)
-            row = self.store.one("SELECT t.grant_id,g.client_id FROM tokens t JOIN grants g ON g.id=t.grant_id WHERE t.hash=?", (digest(form.get("token", "")),))
-            if row and row["client_id"] == form.get("client_id"):
-                self.store.execute("UPDATE grants SET revoked=1 WHERE id=?", (row["grant_id"],))
-                self.store.audit("oauth:" + str(row["client_id"]), "oauth.revoke", row["grant_id"])
-            return JSONResponse({})
+            def finish():
+                row = self.store.one("SELECT t.grant_id,g.client_id FROM tokens t JOIN grants g ON g.id=t.grant_id WHERE t.hash=?", (digest(form.get("token", "")),))
+                if row and row["client_id"] == form.get("client_id"):
+                    self.store.execute("UPDATE grants SET revoked=1 WHERE id=?", (row["grant_id"],))
+                    self.store.audit("oauth:" + str(row["client_id"]), "oauth.revoke", row["grant_id"])
+                return JSONResponse({})
+
+            return await self.store.run(finish)

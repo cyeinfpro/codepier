@@ -8,7 +8,9 @@ import re
 import time
 import unicodedata
 import uuid
-from dataclasses import dataclass
+from hub.principal import Principal, refresh_principal
+from hub.dispatch_plan import DeferredCall
+from shared.config import RuntimeConfig
 
 from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
@@ -18,6 +20,7 @@ from hub.computer_approvals import ComputerApprovals
 from shared.computer_diagnostics import safe_detail
 from hub.workflows import Workflows
 from hub.diagnostics import Diagnostics
+from hub.call_log import operation_summary
 from hub.artifacts import ArtifactService
 from hub.native_cli import NativeService
 from shared.agent_lifecycle import DEVICE_ACTIONS, public_management
@@ -26,6 +29,7 @@ from shared.computer_contracts import COMPUTER_TOOLS
 from shared.computer_media import scrub_expired, purge_database
 from shared.crypto import SecureChannel, digest, token
 from shared.util import DevError, safe_summary
+from shared.tool_protocol import advertisement, catalog_digest, negotiate, require_compatible, validate_call_epoch, wire_version
 from shared.execution_policy import POLICY_VERSION, DENIAL_MESSAGE, InvocationInspector, hub_blocks_codex, computer_denial
 
 ACTIVE = {"queued", "running", "reconnecting", "cancelling"}
@@ -36,21 +40,13 @@ def alias_key(value: str):
     return unicodedata.normalize("NFKC", value).casefold()
 
 
-@dataclass
-class Principal:
-    actor: str
-    user_id: str
-    scopes: set[str]
-    projects: list[str]
-    grant_id: str | None = None
-    admin: bool = False
 
 
 def remote_codex_denial(name: str, args: dict, principal: Principal) -> str | None:
     """Inspect invocations, not mentions. Authentication decides the exemption."""
     if not hub_blocks_codex() or principal.admin:
         return None
-    if name == "shell_exec" and InvocationInspector(env=args.get("env")).shell(args.get("command", "")):
+    if name in {"shell_exec", "exec"} and InvocationInspector(env=args.get("env")).shell(args.get("command", "")):
         return DENIAL_MESSAGE
     if computer_denial(name, args):
         return "MCP 不允许启动 Codex Computer Use；probe=false 静态状态和关闭现有会话仍可使用"
@@ -68,6 +64,7 @@ class Connection:
         self.device_secret = None
         self.native_protocol = 0
         self.native_chat_protocol = 0
+        self.tool_protocol = None
 
     async def send(self, body):
         # A half-open peer must not hold the scheduler/send lock indefinitely.
@@ -88,6 +85,11 @@ class Connection:
 class Runtime:
     def __init__(self, store: Store):
         self.store = store
+        self._loop = None
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
         self.workflows = Workflows(self)
         from hub.integrations import HubIntegrations
         self.integrations = HubIntegrations(self)
@@ -108,24 +110,60 @@ class Runtime:
         self.worker = None
         self.computer_cleanup_at = 0.0
         self.computer_approvals = ComputerApprovals(self)
-        self.queue_seconds = max(5, min(float(os.getenv("HUB_QUEUE_TTL_SECONDS", "1800")), 86400))
-        self.wait_seconds = max(0, min(float(os.getenv("HUB_CALL_WAIT_SECONDS", "8")), 10))
-        self.retry_seconds = max(.2, min(float(os.getenv("HUB_DELIVERY_RETRY_SECONDS", "5")), 30))
+        config = RuntimeConfig.from_env()
+        self.queue_seconds = config.queue_seconds
+        self.wait_seconds = config.wait_seconds
+        self.retry_seconds = config.retry_seconds
 
     async def start(self):
+        self._loop = asyncio.get_running_loop()
         self.stopping = False
         # Requests and their IDs are durable; restarting the Hub is not a task failure.
-        self.store.execute("UPDATE operations SET state='reconnecting',next_attempt=0,transport_error='Hub restarted; reconciling with Agent' WHERE state IN ('running','reconnecting','cancelling') AND payload IS NOT NULL")
-        self.store.execute("UPDATE operations SET state='needs_review',error='Legacy operation has no durable request; inspect its outcome' WHERE state IN ('queued','running','reconnecting','cancelling','unknown','interrupted') AND payload IS NULL AND result IS NULL")
+        await self.store.run(self.store.execute, "UPDATE operations SET state='reconnecting',next_attempt=0,transport_error='Hub restarted; reconciling with Agent' WHERE state IN ('running','reconnecting','cancelling') AND payload IS NOT NULL")
+        await self.store.run(self.store.execute, "UPDATE operations SET state='needs_review',error='Legacy operation has no durable request; inspect its outcome' WHERE state IN ('queued','running','reconnecting','cancelling','unknown','interrupted') AND payload IS NULL AND result IS NULL")
         self.worker = asyncio.create_task(self.delivery_loop(), name="durable-delivery")
 
+    def on_loop(self, callback, *args):
+        loop = self._loop or self.store._event_loop
+        try:
+            current = asyncio.get_running_loop()
+        except RuntimeError:
+            current = None
+        if loop is None or current is loop:
+            callback(*args)
+        elif not loop.is_closed():
+            loop.call_soon_threadsafe(callback, *args)
+
+    def wake_delivery(self):
+        self.store.after_commit(lambda: self.on_loop(self.wake.set))
+
     def publish(self, kind: str, data=None):
+        self.store.after_commit(lambda: self.on_loop(self._publish, kind, data))
+
+    @staticmethod
+    def _signal_owner(owner, callback, *args):
+        loop = owner.get_loop() if hasattr(owner, "get_loop") else getattr(owner, "_loop", None)
+        try:
+            current = asyncio.get_running_loop()
+        except RuntimeError:
+            current = None
+        if loop is None or current is loop:
+            callback(*args)
+        elif not loop.is_closed():
+            loop.call_soon_threadsafe(callback, *args)
+
+    @staticmethod
+    def _enqueue(q, message):
+        if q.full():
+            with contextlib.suppress(asyncio.QueueEmpty):
+                q.get_nowait()
+        with contextlib.suppress(asyncio.QueueFull):
+            q.put_nowait(message)
+
+    def _publish(self, kind: str, data=None):
         message = {"type": kind, "at": time.time(), "data": data or {}}
         for q in list(self.watchers):
-            if q.full():
-                with contextlib.suppress(asyncio.QueueEmpty):
-                    q.get_nowait()
-            q.put_nowait(message)
+            self._signal_owner(q, self._enqueue, q, message)
 
     def online(self, device_id: str):
         connection = self.connections.get(device_id)
@@ -136,22 +174,36 @@ class Runtime:
         return bool(device and device["enabled"] and
                     (getattr(connection, "device_secret", None) is None or connection.device_secret == device["secret"]))
 
-    def detach_connection(self, device_id, connection):
+    def _detach_fence(self, device_id, connection):
         if self.connections.get(device_id) is not connection:
             return False
         self.connections.pop(device_id, None)
-        self.computer_approvals.drop(connection)
         connection.unusable = True
+        return True
+
+    def _record_disconnect(self, device_id, connection):
+        self.computer_approvals.drop(connection)
         with contextlib.suppress(Exception):
             self.store.execute("UPDATE operations SET state='reconnecting',transport_error='Agent disconnected; durable recovery pending',next_attempt=0 WHERE device_id=? AND state IN ('running','cancelling')", (device_id,))
         self.publish("device", {"id": device_id, "online": False})
+
+    def detach_connection(self, device_id, connection):
+        if not self._detach_fence(device_id, connection):
+            return False
+        self._record_disconnect(device_id, connection)
+        return True
+
+    async def detach(self, device_id, connection):
+        if not self._detach_fence(device_id, connection):
+            return False
+        await self.store.run(self._record_disconnect, device_id, connection)
         return True
 
     async def disconnect_device(self, device_id, reason):
         connection = self.connections.get(device_id)
         if connection:
             # Fence admission and late events before awaiting the close handshake.
-            self.detach_connection(device_id, connection)
+            await self.detach(device_id, connection)
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(connection.socket.close(code=4003, reason=reason), 2)
 
@@ -186,7 +238,7 @@ class Runtime:
         try:
             # Register before checking the durable state so completion cannot
             # fall between the check and subscription. Reauthorize on return.
-            row = self.operation_row(id, principal, status_only=True)
+            row = await self.store.run(self.operation_row, id, principal, status_only=True)
             if seconds > 0 and not self.stopping and row["state"] in ACTIVE | {"unknown"}:
                 with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(event.wait(), seconds)
@@ -196,8 +248,11 @@ class Runtime:
                 self.operation_waiters.pop(id, None)
 
     def notify_operation(self, id: str):
+        self.store.after_commit(lambda: self.on_loop(self._notify_operation, id))
+
+    def _notify_operation(self, id: str):
         for event in self.operation_waiters.get(id, ()):
-            event.set()
+            self._signal_owner(event, event.set)
 
     @staticmethod
     def operation_next_call(id: str, *, pending: bool, after_output_seq=None, fetch_result=False):
@@ -285,12 +340,40 @@ class Runtime:
         return {"operations": rows[:args["limit"]], "next_before_created": rows[args["limit"]-1]["created"] if len(rows) > args["limit"] else None}
 
     async def invoke(self, name: str, raw: dict, principal: Principal):
+        self._loop = asyncio.get_running_loop()
+        from shared.core_contracts import CORE_FACADES, CORE_ACTIONS
+        if name in CORE_FACADES or name in CORE_ACTIONS and raw.get('operation', 'file') != 'file':
+            from hub.core_tools import invoke as invoke_core
+            return await invoke_core(self, name, raw, principal)
+        prepared = await self.store.run(self._invoke, name, raw, principal)
+        if not isinstance(prepared, DeferredCall):
+            return prepared
+        if prepared.action == "cancel":
+            return await self.cancel(prepared.arguments["operation_id"], principal)
+        if prepared.action == "wait":
+            args = prepared.arguments
+            await self.wait_operation(args["operation_id"], principal, args["wait_seconds"])
+            return await self.store.run(self._read_after_wait, args, principal)
+        receipt = await self.dispatch(name, prepared.arguments, prepared.project, principal, background=name in PROCESS_TOOLS)
+        if name == 'exec' and receipt.get('pending') and prepared.arguments['yield_seconds']:
+            await self.wait_operation(receipt['operation_id'], principal, prepared.arguments['yield_seconds'])
+            return await self.store.run(self._read_after_wait, {'operation_id': receipt['operation_id'], 'output_limit': 8000}, principal)
+        return receipt
+
+    def _read_after_wait(self, args, principal):
+        principal = refresh_principal(self.store, principal)
+        result = self.operation(args["operation_id"], principal, args)
+        self.store.audit(principal.actor, "operations_wait", args["operation_id"])
+        return result
+
+    def _invoke(self, name: str, raw: dict, principal: Principal):
+        principal = refresh_principal(self.store, principal)
         tool = TOOLS.get(name)
         if not tool:
             raise DevError("UNKNOWN_TOOL", "不存在此工具", 404)
         if tool.scope not in principal.scopes:
             self.store.audit(principal.actor, name, status="denied", detail={"reason": "scope"})
-            raise DevError("INSUFFICIENT_SCOPE", f"该凭据缺少 {tool.scope} 权限", 403)
+            raise DevError("INSUFFICIENT_SCOPE", f"该凭据缺少 {tool.scope} 权限", 403, required_scope=tool.scope)
         try:
             args = tool.model.model_validate(raw).model_dump()
             if args.get('workspace_id') == '': args.pop('workspace_id', None)
@@ -311,7 +394,7 @@ class Runtime:
             return self.integrations.activity(args, principal)
         if name == "projects_list":
             result = {"projects": self.list_projects(principal)}
-        elif name == "vps_list":
+        elif name == "vps":
             result = self.vps.list(args, principal)
         elif name == "projects_resolve":
             result = self.project_public(self.project(args["project"], principal))
@@ -339,10 +422,10 @@ class Runtime:
             result = self.workflows.list(args, principal)
         elif name in {"operations_get", "operations_wait"}:
             if name == "operations_wait":
-                await self.wait_operation(args["operation_id"], principal, args["wait_seconds"])
+                return DeferredCall("wait", args)
             result = self.operation(args["operation_id"], principal, args)
         elif name == "operations_cancel":
-            return await self.cancel(args["operation_id"], principal)
+            return DeferredCall("cancel", args)
         else:
             project = self.project(args["project"], principal)
             if name in MUTATING and name != "computer_session_close" and project["mode"] != "write":
@@ -370,29 +453,37 @@ class Runtime:
                     raise DevError("ARTIFACT_SOURCE_INVALID","来源操作必须是同项目、同设备的真实成功操作",409)
             if name == "computer_session_close" and args.get("force") and not principal.admin:
                 raise DevError("COMPUTER_FORCE_DENIED", "只有面板管理员可以强制停止其他会话", 403)
-            return await self.dispatch(name, args, project, principal, background=name in PROCESS_TOOLS)
+            return DeferredCall("dispatch", args, project)
         self.store.audit(principal.actor, name, args.get("project", args.get("operation_id", args.get("workflow_id", ""))))
         return result
 
     async def cancel(self, id, principal):
         async with self.dispatch_lock:
-            op = self.operation(id, principal)
-            if not op["pending"]:
-                return {"operation_id": id, "state": op["state"], "cancel_requested": False}
-            if op["tool"] in DEVICE_ACTIONS:
-                raise DevError("NOT_CANCELLABLE", "Agent 生命周期操作不能在准备或交接过程中取消；请等待结果后再处理", 409)
-            if op["tool"] not in PROCESS_TOOLS and op["attempts"]:
-                raise DevError("NOT_CANCELLABLE", "已投递的文件操作不能中途撤销；可在完成后使用备份恢复")
-            self.store.execute("UPDATE operations SET cancel_requested=1,next_attempt=0 WHERE id=?", (id,))
-            if not op["attempts"]:
-                self.complete(op, {"ok": False, "error": {"code": "CANCELLED", "message": "操作尚未投递，已取消"}})
-            else:
-                self.store.execute("UPDATE operations SET state='cancelling',updated=? WHERE id=?", (time.time(), id))
+            return await self.store.run(self._cancel, id, principal)
+
+    def _cancel(self, id, principal):
+        principal = refresh_principal(self.store, principal)
+        op = self.operation(id, principal)
+        if not op["pending"]:
+            return {"operation_id": id, "state": op["state"], "cancel_requested": False}
+        if op["tool"] in DEVICE_ACTIONS:
+            raise DevError("NOT_CANCELLABLE", "Agent 生命周期操作不能在准备或交接过程中取消；请等待结果后再处理", 409)
+        if op["tool"] not in PROCESS_TOOLS and op["attempts"]:
+            raise DevError("NOT_CANCELLABLE", "已投递的文件操作不能中途撤销；可在完成后使用备份恢复")
+        self.store.execute("UPDATE operations SET cancel_requested=1,next_attempt=0 WHERE id=?", (id,))
+        if not op["attempts"]:
+            self.complete(op, {"ok": False, "error": {"code": "CANCELLED", "message": "操作尚未投递，已取消"}})
+        else:
+            self.store.execute("UPDATE operations SET state='cancelling',updated=? WHERE id=?", (time.time(), id))
         self.store.audit(principal.actor, "operations_cancel", id, detail={"cancel_requested": True, "durable": True})
-        self.wake.set()
+        self.wake_delivery()
         return {"operation_id": id, "cancel_requested": True, "state": self.store.one("SELECT state FROM operations WHERE id=?", (id,))["state"], "next": "operations_wait"}
 
     async def dispatch_device_action(self, name: str, args: dict, device_id: str, principal: Principal):
+        project = await self.store.run(self._device_action_project, name, args, device_id, principal)
+        return await self.dispatch(name, args, project, principal, background=True)
+
+    def _device_action_project(self, name: str, args: dict, device_id: str, principal: Principal):
         if getattr(self, "panel_maintenance", None):
             self.panel_maintenance.guard()
         if name not in DEVICE_ACTIONS or not principal.admin:
@@ -417,9 +508,41 @@ class Runtime:
             raise DevError("AGENT_UPGRADE_REQUIRED", reason, 409)
         project = {"id": None, "alias": "", "root": "", "mode": "write", "allow_tasks": False,
                    "device_id": device_id}
-        return await self.dispatch(name, args, project, principal, background=True)
+        return project
 
     async def dispatch(self, name: str, args: dict, project: dict, principal: Principal, background=False):
+        async with self.dispatch_lock:
+            id, completed = await self.store.run(self._admit_operation, name, args, project, principal, background)
+            if completed is not None:
+                return self.unwrap(id, completed)
+            future = self.futures.get(id)
+            if future is None:
+                future = asyncio.get_running_loop().create_future()
+                self.futures[id] = future
+                expiry = asyncio.get_running_loop().call_later(30, self.expire_waiter, id, future)
+                # Completed reads can hold multi-MiB results. Release the timer's
+                # future reference promptly rather than retaining every result
+                # for the full receipt-waiter lifetime.
+                future.add_done_callback(lambda done, handle=expiry: handle.cancel())
+        self.wake_delivery()
+        # Offline and long task submissions return a durable receipt immediately.
+        if not background and await self.store.run(self.online, project["device_id"]):
+            try:
+                result = await asyncio.wait_for(asyncio.shield(future), timeout=self.wait_seconds)
+                return self.unwrap(id, result)
+            except asyncio.TimeoutError:
+                pass
+        op = await self.store.run(self.store.one, "SELECT state,deadline,result,created,updated FROM operations WHERE id=?", (id,))
+        if op["result"]:
+            return self.unwrap(id, json.loads(op["result"]))
+        pending = op["state"] in ACTIVE or op["state"] == "unknown"
+        return {"operation_id": id, "pending": pending, "state": op["state"], "next": "operations_wait" if pending else None, "retry_after_seconds": 2 if pending else None,
+                "next_call": self.operation_next_call(id, pending=pending),
+                "elapsed_seconds": round(max(0, (time.time() if pending else op["updated"]) - op["created"]), 1),
+                "deadline": op["deadline"], "note": "已持久保存。网络恢复后继续同一操作；请查询 operation_id，不要换新幂等键重复提交。"}
+
+    def _admit_operation(self, name: str, args: dict, project: dict, principal: Principal, background=False):
+        principal = refresh_principal(self.store, principal)
         if getattr(self, "panel_maintenance", None):
             self.panel_maintenance.guard()
         idem = args.get("idempotency_key")
@@ -427,7 +550,7 @@ class Runtime:
             # Resolve alias casing before identifying an unkeyed metadata query.
             args = {**args, "project": project["alias"]}
         snapshot = {k: project[k] for k in ("id", "alias", "root", "mode", "allow_tasks") if k in project}
-        if name in {"open_workspace", "show_changes", "apply_patch"}:
+        if name in {"open_workspace", "show_changes", "apply_patch", "edit"}:
             snapshot["_coding_owner"] = "grant:" + principal.grant_id if principal.grant_id else principal.actor
             snapshot["_coding_device"] = project["device_id"]
             snapshot["_coding_scopes"] = sorted(principal.scopes)
@@ -435,7 +558,7 @@ class Runtime:
             snapshot["_computer_owner"] = "grant:" + principal.grant_id if principal.grant_id else principal.actor
             snapshot["_computer_admin"] = principal.admin
         fingerprint = digest(json.dumps({"tool": name, "args": args, "project": snapshot, "device": project["device_id"]}, sort_keys=True, ensure_ascii=False))
-        async with self.dispatch_lock:
+        with self.store.lock:
             old = self.store.one("SELECT * FROM operations WHERE actor=? AND idem=?", (principal.actor, idem)) if idem else None
             if name == "tasks_list" and not idem:
                 # Reuse only an outstanding metadata query from this exact grant.
@@ -452,10 +575,12 @@ class Runtime:
                     raise DevError("IDEMPOTENCY_CONFLICT", "幂等键已经用于不同请求；未执行新操作", 409, operation_id=old["id"])
                 id = old["id"]
                 if old["result"]:
-                    return self.unwrap(id, json.loads(old["result"]))
+                    return id, json.loads(old["result"])
                 # A retry wakes the durable worker; it does not allocate another operation.
                 self.store.execute("UPDATE operations SET next_attempt=0 WHERE id=?", (id,))
             else:
+                if self.online(project['device_id']):
+                    require_compatible(getattr(self.connections.get(project['device_id']), 'tool_protocol', None), name)
                 if name in TOOLS:
                     self.integrations.guard(name, args, project, principal)
                 if name in (COMPUTER_TOOLS - {"computer_session_close"}) | {"browser_open", "browser_snapshot", "browser_action"} and not self.online(project["device_id"]):
@@ -472,9 +597,10 @@ class Runtime:
                     raise DevError("DEVICE_BUSY", "该设备已有 64 个待完成操作，请先查询并等待已有操作", 429, retryable=True, retry_after_seconds=3)
                 id, now = uuid.uuid4().hex, time.time()
                 self.integrations.prepare(id, name, args, project, principal)
-                request = {"tool": name, "args": args, "project": snapshot}
-                if name == "vps_exec":
-                    request["vps_ref"] = self.vps.reference(args, project)
+                request = {"tool": name, "args": args, "project": snapshot, "tool_contract_version": wire_version(name)}
+                if name == "exec" and args["target"].startswith("vps:"):
+                    vps_args = {**args, "vps": args["target"][4:]}
+                    request["vps_ref"] = self.vps.reference(vps_args, project)
                 payload = self.store.encrypt(json.dumps(request, ensure_ascii=False))
                 lifecycle_ttl = 900 if name == "agent_update" else 120
                 deadline_seconds = (min(self.queue_seconds, 15) if name in {"computer_action", "browser_action"} else
@@ -482,35 +608,11 @@ class Runtime:
                                     min(self.queue_seconds, lifecycle_ttl) if name in DEVICE_ACTIONS else self.queue_seconds)
                 self.store.execute("INSERT INTO operations(id,device_id,project_id,actor,grant_id,tool,args_summary,fingerprint,idem,state,created,updated,payload,deadline) VALUES (?,?,?,?,?,?,?,?,?,'queued',?,?,?,?)",
                     (id, project["device_id"], project.get("id"), principal.actor, principal.grant_id, name,
-                     json.dumps(safe_summary(args), ensure_ascii=False), fingerprint, idem, now, now, payload, now + deadline_seconds))
-                self.store.audit(principal.actor, name, project.get("alias", ""), "queued", {"operation_id": id, "args": safe_summary(args)})
+                     json.dumps(operation_summary(args), ensure_ascii=False), fingerprint, idem, now, now, payload, now + deadline_seconds))
+                self.store.audit(principal.actor, name, project.get("alias", ""), "queued", {"operation_id": id, "args": operation_summary(args)})
                 self.diagnostics.record(id, "hub_received")
                 self.publish("operation", {"id": id, "state": "queued", "tool": name})
-            future = self.futures.get(id)
-            if future is None:
-                future = asyncio.get_running_loop().create_future()
-                self.futures[id] = future
-                expiry = asyncio.get_running_loop().call_later(30, self.expire_waiter, id, future)
-                # Completed reads can hold multi-MiB results. Release the timer's
-                # future reference promptly rather than retaining every result
-                # for the full receipt-waiter lifetime.
-                future.add_done_callback(lambda done, handle=expiry: handle.cancel())
-        self.wake.set()
-        # Offline and long task submissions return a durable receipt immediately.
-        if not background and self.online(project["device_id"]):
-            try:
-                result = await asyncio.wait_for(asyncio.shield(future), timeout=self.wait_seconds)
-                return self.unwrap(id, result)
-            except asyncio.TimeoutError:
-                pass
-        op = self.store.one("SELECT state,deadline,result,created,updated FROM operations WHERE id=?", (id,))
-        if op["result"]:
-            return self.unwrap(id, json.loads(op["result"]))
-        pending = op["state"] in ACTIVE or op["state"] == "unknown"
-        return {"operation_id": id, "pending": pending, "state": op["state"], "next": "operations_wait" if pending else None, "retry_after_seconds": 2 if pending else None,
-                "next_call": self.operation_next_call(id, pending=pending),
-                "elapsed_seconds": round(max(0, (time.time() if pending else op["updated"]) - op["created"]), 1),
-                "deadline": op["deadline"], "note": "已持久保存。网络恢复后继续同一操作；请查询 operation_id，不要换新幂等键重复提交。"}
+        return id, None
 
     def expire_waiter(self, id, future):
         if self.futures.get(id) is future:
@@ -535,7 +637,7 @@ class Runtime:
         project = self.store.one("SELECT * FROM projects WHERE id=?", (op["project_id"],))
         if not project or project["root"] != request["project"]["root"] or project["device_id"] != op["device_id"] or project["alias"] != request["project"].get("alias"):
             return "项目映射在排队期间被删除或修改，未在新的路径执行"
-        if op["tool"] == "vps_exec":
+        if "vps_ref" in request:
             denied = self.vps.permission_error(request, op["project_id"])
             if denied:
                 return denied
@@ -548,15 +650,18 @@ class Runtime:
                 return "排队操作的 MCP 授权已撤销或缩小"
         return None
 
+    def _purge_computer(self):
+        with self.store.lock, self.store.db:
+            purge_database(self.store.db, "operations")
+
     async def delivery_loop(self):
         while not self.stopping:
             self.wake.clear()
             try:
                 if time.monotonic() - self.computer_cleanup_at > 15:
-                    with self.store.lock, self.store.db:
-                        purge_database(self.store.db, 'operations')
+                    await self.store.run(self._purge_computer)
                     self.computer_cleanup_at = time.monotonic()
-                rows = self.store.all("SELECT id,device_id FROM operations WHERE state IN ('queued','running','reconnecting','cancelling') AND next_attempt<=? ORDER BY created LIMIT 128", (time.time(),))
+                rows = await self.store.run(self.store.all, "SELECT id,device_id FROM operations WHERE state IN ('queued','running','reconnecting','cancelling') AND next_attempt<=? ORDER BY created LIMIT 128", (time.time(),))
                 # Group per-device to retain submission order, without one dead link
                 # delaying other home computers.
                 devices = {}
@@ -569,7 +674,7 @@ class Runtime:
                 # A transient full/locked database must not kill the only worker
                 # merely because its error audit cannot be persisted either.
                 with contextlib.suppress(Exception):
-                    self.store.audit("hub", "delivery.error", status="error", detail={"type": type(exc).__name__})
+                    await self.store.run(self.store.audit, "hub", "delivery.error", status="error", detail={"type": type(exc).__name__})
             try:
                 await asyncio.wait_for(self.wake.wait(), 1)
             except asyncio.TimeoutError:
@@ -588,12 +693,24 @@ class Runtime:
                 raise
             except Exception as exc:
                 with contextlib.suppress(Exception):
-                    self.store.execute("UPDATE operations SET transport_error=?,next_attempt=? WHERE id=?", ("Delivery interrupted: " + type(exc).__name__, time.time() + self.retry_seconds, id))
+                    await self.store.run(self.store.execute, "UPDATE operations SET transport_error=?,next_attempt=? WHERE id=?", ("Delivery interrupted: " + type(exc).__name__, time.time() + self.retry_seconds, id))
                 # Retain the request and operation ID even if the send outcome is unknown.
 
     async def deliver(self, id):
-        packets = []
         async with self.dispatch_lock:
+            prepared = await self.store.run(self._prepare_delivery, id)
+        if prepared is None:
+            return
+        device_id, con, packets = prepared
+        for packet in packets:
+            authorized = await self.store.run(self.connection_authorized, device_id, con)
+            if self.connections.get(device_id) is not con or con.unusable or not authorized:
+                return
+            await con.send(packet)
+
+    def _prepare_delivery(self, id):
+        packets = []
+        with self.store.lock:
             op = self.store.one("SELECT * FROM operations WHERE id=?", (id,))
             if not op or op["state"] not in ACTIVE:
                 return
@@ -651,6 +768,16 @@ class Runtime:
             if not con or not self.online(op["device_id"]):
                 self.store.execute("UPDATE operations SET next_attempt=? WHERE id=?", (now + self.retry_seconds, id))
                 return
+            try:
+                validate_call_epoch(op['tool'], request.get('tool_contract_version'))
+                require_compatible(getattr(con, 'tool_protocol', None), op['tool'])
+            except DevError as exc:
+                if not op['attempts']:
+                    self.complete(op, {'ok': False, 'error': {'code': exc.code, 'message': exc.message}})
+                    return
+                # An older send may have executed: recover its receipt, not a
+                # newly interpreted call under changed tool semantics.
+                denied = denied or exc.message
             if op.get("journal_id") and op["journal_id"] != con.journal_id:
                 self.complete(op, {"ok": False, "error": {"code": "JOURNAL_CHANGED", "message": "Agent 操作账本已变化，不能证明旧操作是否执行；停止重放，请检查本机结果"}})
                 return
@@ -664,7 +791,7 @@ class Runtime:
             if op["accepted_at"] or expired or denied or op["cancel_requested"] and op["attempts"]:
                 packets.append({"type": "probe", "id": id})
             else:
-                if op["tool"] == "vps_exec":
+                if "vps_ref" in request:
                     try:
                         request = self.vps.transport(request, op["project_id"])
                     except DevError as exc:
@@ -678,11 +805,8 @@ class Runtime:
                 if request is not None:
                     self.store.execute("UPDATE operations SET attempts=attempts+1,journal_id=COALESCE(journal_id,?),updated=? WHERE id=?", (con.journal_id, now, id))
                     self.diagnostics.record(id, "dispatched")
-                    packets.append({"type": "call", "id": id, **request, "not_after": op["deadline"]})
-        for packet in packets:
-            if self.connections.get(op["device_id"]) is not con or con.unusable or not self.connection_authorized(op["device_id"], con):
-                return  # A fresh authenticated connection will replay the operation.
-            await con.send(packet)
+                    packets.append({"type": "call", "id": id, **request, "not_after": op["deadline"], "tool_contract_version": request.get("tool_contract_version", 1)})
+        return op["device_id"], con, packets
 
     def complete(self, op, result):
         # Callers may hold an old row while a newer result/output was committed.
@@ -717,14 +841,14 @@ class Runtime:
             state = "needs_review"
         elif error.get("code") == "CANCELLED" or data.get("cancelled"):
             state = "cancelled"
-        elif op["tool"] in {"tasks_run", "shell_exec", "ssh_exec", "vps_exec", "validation_run", "git_status", "git_diff", "git_log"} and result["ok"]:
+        elif op["tool"] in {"tasks_run", "shell_exec", "ssh_exec", "vps_exec", "exec", "validation_run", "git_status", "git_diff", "git_log"} and result["ok"]:
             if not data.get("command_ok", False):
                 state = "failed"
                 error = {"message": "本机任务执行超时" if data.get("timed_out") else f"本机任务退出码 {data.get('exit_code')}；请查看操作输出"}
         if op['tool'] in COMPUTER_TOOLS and data.get('native_is_error'):
             state = 'needs_review' if data.get('action_outcome') == 'uncertain' else 'failed'
             error = {'message': '原生桌面工具报错；检查本机权限与界面，勿盲目重放输入'}
-        if op['tool'] == 'apply_patch' and data.get('success') is False:
+        if op['tool'] in {'apply_patch', 'edit'} and data.get('success') is False:
             state = 'needs_review' if data.get('outcome') == 'partial' else 'failed'
             error = data.get('error') or {'message': '批量补丁未完成，请核查备份与回滚结果'}
         output = str(data.get("output", op.get("output", "")))[-131072:]
@@ -739,12 +863,114 @@ class Runtime:
              "error": error.get("message"), "path": data.get("path"), "backup_id": data.get("backup_id"), "exit_code": data.get("exit_code")})
         self.diagnostics.record(op["id"], "hub_completed")
         self.publish("operation", {"id": op["id"], "state": state, "tool": op["tool"]})
-        future = self.futures.pop(op["id"], None)
+        self.store.after_commit(lambda: self.on_loop(self._resolve_result, op["id"], result))
+
+    def _resolve_result(self, identifier, result):
+        future = self.futures.pop(identifier, None)
         if future and not future.done():
+            self._signal_owner(future, self._set_result, future, result)
+
+    @staticmethod
+    def _set_result(future, result):
+        if not future.done():
             future.set_result(result)
 
+    def _receive_operation_event(self, device_id, connection, data):
+        if self.connections.get(device_id) is not connection or not self.connection_authorized(device_id, connection):
+            return None
+        kind, id = data.get("type"), data.get("id")
+        op = self.store.one("SELECT * FROM operations WHERE id=? AND device_id=?", (id, device_id))
+        if not op:
+            if kind == "result" and isinstance(id, str):
+                return {"type": "ack", "id": id}
+            return None
+        if op["journal_id"] and op["journal_id"] != connection.journal_id:
+            # Outbox replay races with the delivery worker after hello.
+            # Apply the same epoch fence to inbound events as to calls.
+            self.complete(op, {"ok": False, "error": {"code": "JOURNAL_CHANGED", "message": "Agent 操作账本已变化，不能证明旧操作结果；请检查本机"}})
+            if kind == "result":
+                return {"type": "ack", "id": id}
+            return None
+        if kind == "trace":
+            self.diagnostics.ingest(id, data.get("trace"))
+            self.publish("trace", {"id": id})
+            return None
+        if kind in {"accepted", "started"} and op["state"] in ACTIVE:
+            state = "cancelling" if op["cancel_requested"] else "running" if kind == "started" else "queued"
+            self.store.execute("UPDATE operations SET accepted_at=COALESCE(accepted_at,?),state=?,transport_error=NULL,updated=? WHERE id=?", (time.time(), state, time.time(), id))
+            self.publish("operation", {"id": id, "state": state})
+        elif kind == "status" and op["state"] in ACTIVE:
+            if data.get("status") in {"running", "accepted"}:
+                state = "cancelling" if op["cancel_requested"] else "running" if data["status"] == "running" else "queued"
+                self.store.execute("UPDATE operations SET accepted_at=COALESCE(accepted_at,?),state=?,transport_error=NULL WHERE id=?", (time.time(), state, id))
+            elif data.get("status") in {"missing", "retryable"}:
+                # retryable is issued only for a read or a command that had
+                # not started before an Agent restart. Never rerun side effects.
+                if data["status"] == "missing" and op["accepted_at"]:
+                    self.complete(op, {"ok": False, "error": {"code": "JOURNAL_CHANGED", "message": "Agent 找不到已确认接收的操作记录；请检查本机，不自动重跑"}})
+                elif op["cancel_requested"] or op["deadline"] and time.time() > op["deadline"]:
+                    self.complete(op, {"ok": False, "error": {"code": "CANCELLED" if op["cancel_requested"] else "QUEUE_EXPIRED", "message": "Agent 确认没有开始执行，该排队操作已取消或过期"}})
+                else:
+                    # Revalidate current permissions in deliver() before replay.
+                    self.store.execute("UPDATE operations SET accepted_at=NULL,next_attempt=0,state='queued',attempts=0 WHERE id=?", (id,))
+                    self.wake_delivery()
+        elif kind == "output" and op["tool"] in PROCESS_TOOLS and op["state"] in ACTIVE | {"unknown", "needs_review"}:
+            if data.get("snapshot"):
+                seq = data.get("seq")
+                if type(seq) is not int or seq <= op["output_seq"]:
+                    return None
+                output = str(data.get("text", ""))[-131072:]
+            else:  # Legacy v1 Agent.
+                seq = op["output_seq"] + 1
+                output = (op["output"] + str(data.get("text", ""))[:8192])[-131072:]
+            self.store.execute("UPDATE operations SET output=?,output_seq=?,updated=? WHERE id=?", (output, seq, time.time(), id))
+            self.publish("output", {"id": id})
+        elif kind == "result":
+            result = data.get("result")
+            self.complete(op, result)
+            return {"type": "ack", "id": id}
+
+    def _heartbeat(self, device_id, connection, info, data):
+        if self.connections.get(device_id) is not connection or not self.connection_authorized(device_id, connection):
+            return
+        changed = False
+        build = data.get("build")
+        if isinstance(build, dict) and len(json.dumps(build)) <= 12000:
+            info["build"] = build
+            changed = True
+        actions = data.get("device_actions")
+        if isinstance(actions, list) and len(actions) <= 16 and all(isinstance(x, str) and len(x) <= 100 for x in actions):
+            info["device_actions"] = sorted(set(actions) & DEVICE_ACTIONS)
+            changed = True
+        management = public_management(data.get("management"))
+        if management != info.get("management"):
+            info["management"] = management
+            changed = True
+        if changed:
+            self.store.execute("UPDATE devices SET info=? WHERE id=?", (json.dumps(info, ensure_ascii=False), device_id))
+        return None
+
+
+    def _touch_agent(self, device_id, connection):
+        if self.connections.get(device_id) is not connection or not self.connection_authorized(device_id, connection):
+            return False
+        connection.last_seen = time.time()
+        self.store.execute("UPDATE devices SET last_seen=? WHERE id=?", (connection.last_seen, device_id))
+        return True
+
+    def _register_agent(self, device_id, connection, info, device):
+        if not self._touch_agent(device_id, connection):
+            return False
+        with self.store.lock, self.store.db:
+            self.store.execute("UPDATE devices SET info=?,last_seen=? WHERE id=?", (json.dumps(info, ensure_ascii=False), time.time(), device_id))
+            self.store.execute("UPDATE operations SET next_attempt=0 WHERE device_id=? AND state IN ('queued','running','reconnecting','cancelling')", (device_id,))
+            self.store.audit("device:" + device["name"], "device.connected", device_id)
+            self.publish("device", {"id": device_id, "online": True})
+            self.wake_delivery()
+        return True
+
     async def agent_socket(self, websocket: WebSocket, device_id: str):
-        device = self.store.one("SELECT * FROM devices WHERE id=?", (device_id,))
+        device = await self.store.run(self.store.one, "SELECT * FROM devices WHERE id=?", (device_id,))
         if not device or not device["enabled"]:
             await websocket.close(code=4404)
             return
@@ -760,6 +986,7 @@ class Runtime:
             hello = channel.unpack(await asyncio.wait_for(websocket.receive_text(), 10))
             if hello.get("type") != "hello":
                 raise ValueError("Invalid hello")
+            connection.tool_protocol = negotiate(hello)
             connection.journal_id = hello.get("journal_id")
             connection.protocol = hello.get("delivery_protocol", 1)
             connection.native_protocol = 1 if hello.get("native_protocol") == 1 else 0
@@ -767,7 +994,7 @@ class Runtime:
             if (type(connection.protocol) is not int or connection.protocol != 2 or
                     not isinstance(connection.journal_id, str) or not 1 <= len(connection.journal_id) <= 128):
                 raise ValueError("Agent must support durable delivery protocol 2 with a journal ID")
-            if self.stopping or not self.connection_authorized(device_id, connection):
+            if self.stopping or not await self.store.run(self.connection_authorized, device_id, connection):
                 return
             authenticated = True
             info = {k: safe_summary(hello[k], 1024) for k in ("name", "version", "platform", "hostname", "python", "roots", "journal_id", "delivery_protocol") if k in hello}
@@ -780,12 +1007,13 @@ class Runtime:
             info["management"] = public_management(hello.get("management"))
             info["native_protocol"] = connection.native_protocol
             info["native_chat_protocol"] = connection.native_chat_protocol
+            info["tool_protocol"] = connection.tool_protocol.public(catalog_digest())
             build = hello.get("build")
             if isinstance(build, dict) and len(json.dumps(build)) <= 12000:
                 info["build"] = build
             # Complete the handshake before making this connection available for calls.
-            await connection.send({"type": "ready", "heartbeat_seconds": 12, "delivery_protocol": 2})
-            if self.stopping or not self.connection_authorized(device_id, connection):
+            await connection.send({"type": "ready", "heartbeat_seconds": 12, "delivery_protocol": 2, **advertisement(catalog_digest())})
+            if self.stopping or not await self.store.run(self.connection_authorized, device_id, connection):
                 return
             old = self.connections.get(device_id)
             connection.last_seen = time.time()
@@ -794,40 +1022,21 @@ class Runtime:
                 old.unusable = True
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(old.socket.close(code=4001, reason="Replaced by new authenticated connection"), 2)
-            if self.connections.get(device_id) is not connection or not self.connection_authorized(device_id, connection):
+            if self.connections.get(device_id) is not connection or not await self.store.run(self.connection_authorized, device_id, connection):
                 return
-            self.store.execute("UPDATE devices SET info=?,last_seen=? WHERE id=?", (json.dumps(info, ensure_ascii=False), time.time(), device_id))
-            self.store.execute("UPDATE operations SET next_attempt=0 WHERE device_id=? AND state IN ('queued','running','reconnecting','cancelling')", (device_id,))
-            self.store.audit("device:" + device["name"], "device.connected", device_id)
-            self.publish("device", {"id": device_id, "online": True})
-            self.wake.set()
+            if not await self.store.run(self._register_agent, device_id, connection, info, device):
+                return
             while not self.stopping:
                 packet = await asyncio.wait_for(websocket.receive_text(), 45)
                 data = channel.unpack(packet)
-                if self.connections.get(device_id) is not connection or not self.connection_authorized(device_id, connection):
+                if not await self.store.run(self._touch_agent, device_id, connection):
                     break  # Fence a replaced socket before accepting its late events.
-                connection.last_seen = time.time()
-                self.store.execute("UPDATE devices SET last_seen=? WHERE id=?", (time.time(), device_id))
                 kind, id = data.get("type"), data.get("id")
                 if kind == "heartbeat":
-                    changed = False
-                    build = data.get("build")
-                    if isinstance(build, dict) and len(json.dumps(build)) <= 12000:
-                        info["build"] = build
-                        changed = True
-                    actions = data.get("device_actions")
-                    if isinstance(actions, list) and len(actions) <= 16 and all(isinstance(x, str) and len(x) <= 100 for x in actions):
-                        info["device_actions"] = sorted(set(actions) & DEVICE_ACTIONS)
-                        changed = True
-                    management = public_management(data.get("management"))
-                    if management != info.get("management"):
-                        info["management"] = management
-                        changed = True
-                    if changed:
-                        self.store.execute("UPDATE devices SET info=? WHERE id=?", (json.dumps(info, ensure_ascii=False), device_id))
+                    await self.store.run(self._heartbeat, device_id, connection, info, data)
                     continue
                 if kind in {"computer_approval", "computer_approval_closed"}:
-                    self.computer_approvals.receive(device_id,connection,data)
+                    await self.store.run(self.computer_approvals.receive,device_id,connection,data)
                     continue
                 if kind in {"native_reply", "native_sync"}:
                     await self.native.receive(device_id, connection, data)
@@ -835,66 +1044,20 @@ class Runtime:
                 if kind == "artifact_chunk":
                     self.artifacts.receive(connection,data)
                     continue
-                op = self.store.one("SELECT * FROM operations WHERE id=? AND device_id=?", (id, device_id))
-                if not op:
-                    if kind == "result" and isinstance(id, str):
-                        await connection.send({"type": "ack", "id": id})
-                    continue
-                if op["journal_id"] and op["journal_id"] != connection.journal_id:
-                    # Outbox replay races with the delivery worker after hello.
-                    # Apply the same epoch fence to inbound events as to calls.
-                    self.complete(op, {"ok": False, "error": {"code": "JOURNAL_CHANGED", "message": "Agent 操作账本已变化，不能证明旧操作结果；请检查本机"}})
-                    if kind == "result":
-                        await connection.send({"type": "ack", "id": id})
-                    continue
-                if kind == "trace":
-                    self.diagnostics.ingest(id, data.get("trace"))
-                    self.publish("trace", {"id": id})
-                    continue
-                if kind in {"accepted", "started"} and op["state"] in ACTIVE:
-                    state = "cancelling" if op["cancel_requested"] else "running" if kind == "started" else "queued"
-                    self.store.execute("UPDATE operations SET accepted_at=COALESCE(accepted_at,?),state=?,transport_error=NULL,updated=? WHERE id=?", (time.time(), state, time.time(), id))
-                    self.publish("operation", {"id": id, "state": state})
-                elif kind == "status" and op["state"] in ACTIVE:
-                    if data.get("status") in {"running", "accepted"}:
-                        state = "cancelling" if op["cancel_requested"] else "running" if data["status"] == "running" else "queued"
-                        self.store.execute("UPDATE operations SET accepted_at=COALESCE(accepted_at,?),state=?,transport_error=NULL WHERE id=?", (time.time(), state, id))
-                    elif data.get("status") in {"missing", "retryable"}:
-                        # retryable is issued only for a read or a command that had
-                        # not started before an Agent restart. Never rerun side effects.
-                        if data["status"] == "missing" and op["accepted_at"]:
-                            self.complete(op, {"ok": False, "error": {"code": "JOURNAL_CHANGED", "message": "Agent 找不到已确认接收的操作记录；请检查本机，不自动重跑"}})
-                        elif op["cancel_requested"] or op["deadline"] and time.time() > op["deadline"]:
-                            self.complete(op, {"ok": False, "error": {"code": "CANCELLED" if op["cancel_requested"] else "QUEUE_EXPIRED", "message": "Agent 确认没有开始执行，该排队操作已取消或过期"}})
-                        else:
-                            # Revalidate current permissions in deliver() before replay.
-                            self.store.execute("UPDATE operations SET accepted_at=NULL,next_attempt=0,state='queued',attempts=0 WHERE id=?", (id,))
-                            self.wake.set()
-                elif kind == "output" and op["tool"] in PROCESS_TOOLS and op["state"] in ACTIVE | {"unknown", "needs_review"}:
-                    if data.get("snapshot"):
-                        seq = data.get("seq")
-                        if type(seq) is not int or seq <= op["output_seq"]:
-                            continue
-                        output = str(data.get("text", ""))[-131072:]
-                    else:  # Legacy v1 Agent.
-                        seq = op["output_seq"] + 1
-                        output = (op["output"] + str(data.get("text", ""))[:8192])[-131072:]
-                    self.store.execute("UPDATE operations SET output=?,output_seq=?,updated=? WHERE id=?", (output, seq, time.time(), id))
-                    self.publish("output", {"id": id})
-                elif kind == "result":
-                    result = data.get("result")
-                    self.complete(op, result)
-                    await connection.send({"type": "ack", "id": id})
+                acknowledgement = await self.store.run(self._receive_operation_event, device_id, connection, data)
+                if acknowledgement is not None:
+                    await connection.send(acknowledgement)
+
         except (WebSocketDisconnect, asyncio.TimeoutError):
             pass
         except Exception as exc:
             with contextlib.suppress(Exception):
-                self.store.audit("device:" + device["name"], "device.protocol_error", device_id, "error", {"type": type(exc).__name__})
+                await self.store.run(self.store.audit, "device:" + device["name"], "device.protocol_error", device_id, "error", {"type": type(exc).__name__})
         finally:
-            if connection is not None and self.detach_connection(device_id, connection):
+            if connection is not None and await self.detach(device_id, connection):
                 if authenticated:
                     with contextlib.suppress(Exception):
-                        self.store.audit("device:" + device["name"], "device.disconnected", device_id, "offline")
+                        await self.store.run(self.store.audit, "device:" + device["name"], "device.disconnected", device_id, "offline")
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(websocket.close(), 2)
 
@@ -903,7 +1066,7 @@ class Runtime:
         for id in self.operation_waiters:
             self.notify_operation(id)
         self.artifacts.close()
-        self.wake.set()
+        self.wake_delivery()
         if self.worker:
             self.worker.cancel()
             with contextlib.suppress(asyncio.CancelledError):

@@ -7,7 +7,7 @@ import time
 import pytest
 from playwright.sync_api import expect, sync_playwright
 
-from tests.test_chat_browser import chat_page
+from tests.browser_support import chat_page
 from tests.test_ui_unification import _login, _layout, _set_scheme
 
 ROOT = Path(__file__).resolve().parents[1]

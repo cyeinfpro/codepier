@@ -19,7 +19,7 @@ def add_project(app, identifier='future'):
 
 def visible_projects(client, credential):
     response = rpc(client, credential, {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
-                                       'params': {'name': 'projects_list', 'arguments': {}}})
+                                       'params': {'name': 'workspace', 'arguments': {'operation': 'list'}}})
     assert response.status_code == 200, response.text
     result = response.json()['result']
     assert not result.get('isError'), result

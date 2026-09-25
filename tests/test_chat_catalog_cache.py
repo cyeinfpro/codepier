@@ -25,7 +25,7 @@ def test_cache_outlives_five_seconds_expires_and_returns_independent_values(monk
     now[0] += 60
     assert cache.get('catalog', loader)['models'] == [{'id': 'native'}]
     assert len(calls) == 1
-    now[0] += 241
+    now[0] += 86400
     cache.get('catalog', loader)
     assert len(calls) == 2
     cache.get('catalog', loader, refresh=True)
@@ -170,3 +170,45 @@ def test_agent_rechecks_authorization_even_when_catalog_is_cached(native, monkey
     with pytest.raises(Exception):
         obj.action('chat_catalog', project, {'cli': 'pi', 'include_commands': False})
     assert len(calls) == 1
+
+
+def test_persistent_catalog_survives_restart_and_failed_refresh(tmp_path):
+    path = tmp_path / 'catalog-cache.json'
+    key = ('project', 'device', 'claude', 'environment-hash')
+    original = {'models': [{'id': 'native'}]}
+    CatalogCache(path=path).get(key, lambda: original)
+
+    def fail():
+        raise TimeoutError('native slow')
+
+    cache = CatalogCache(path=path)
+    assert cache.get(key, fail) == original
+    stale = cache.get(key, fail, refresh=True, allow_stale=True)
+    assert stale['models'] == original['models'] and stale['catalog_stale']
+    assert stale['warnings']
+    assert not cache.pending
+    with pytest.raises(TimeoutError):
+        cache.get(('different-device',), fail, allow_stale=True)
+    assert cache.get(key, lambda: {'models': [{'id': 'new'}]}, refresh=True)['models'][0]['id'] == 'new'
+    assert CatalogCache(path=path).get(key, fail)['models'][0]['id'] == 'new'
+
+
+def test_expired_catalog_falls_back_without_extending_freshness(tmp_path, monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr('agent.chat_catalog.time.monotonic', lambda: now[0])
+    cache = CatalogCache(ttl=10, path=tmp_path / 'catalog-cache.json')
+    cache.get('key', lambda: {'models': [{'id': 'old'}]})
+    now[0] += 11
+    def fail():
+        raise TimeoutError('slow')
+    assert cache.get('key', fail, allow_stale=True)['catalog_stale']
+    assert cache.get('key', lambda: {'models': [{'id': 'new'}]})['models'][0]['id'] == 'new'
+
+
+def test_corrupt_or_unwritable_cache_does_not_block_discovery(tmp_path):
+    path = tmp_path / 'cache.json'
+    path.write_text('{broken')
+    assert CatalogCache(path=path).get('key', lambda: {'models': []}) == {'models': []}
+    path.unlink()
+    path.mkdir()
+    assert CatalogCache(path=path).get('key', lambda: {'models': []}) == {'models': []}

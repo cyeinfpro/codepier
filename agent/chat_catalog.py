@@ -1,6 +1,7 @@
 """Bounded, inference-free native discovery. Never return native connection config."""
 import copy
 import contextlib
+import hashlib
 import json
 import os
 import selectors
@@ -156,10 +157,23 @@ def probe(cli, executable, cwd, env, model='', timeout=8, include_commands=True)
 
 
 class CatalogCache:
-    def __init__(self, ttl=300):
+    def __init__(self, ttl=86400, path=None):
         self.ttl = ttl
+        self.path = path
         self.lock = threading.Lock(); self.entries = {}; self.pending = {}
-    def get(self, key, loader, refresh=False):
+        if path is not None:
+            try:
+                saved = json.loads(path.read_text())
+                for key, row in list(saved.items())[:64]:
+                    expires, value = row
+                    if isinstance(value, dict) and isinstance(value.get('models'), list):
+                        self.entries[key] = (time.monotonic() + min(ttl, expires - time.time()), value)
+            except (OSError, ValueError, TypeError, AttributeError):
+                self.entries.clear()
+
+    def get(self, key, loader, refresh=False, allow_stale=False):
+        if self.path is not None:
+            key = hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()
         with self.lock:
             entry = self.entries.get(key)
             if not refresh and entry and entry[0] > time.monotonic(): return copy.deepcopy(entry[1])
@@ -177,8 +191,21 @@ class CatalogCache:
             with self.lock:
                 if len(self.entries) >= 64: self.entries.pop(next(iter(self.entries)))
                 self.entries[key] = (time.monotonic()+self.ttl, value)
+                if self.path is not None:
+                    from shared.util import atomic_json
+                    # Cache persistence is best effort; a read-only/full disk must
+                    # not turn a successful native discovery into a failed one.
+                    with contextlib.suppress(OSError):
+                        atomic_json(self.path, {k: (time.time() + expires - time.monotonic(), data)
+                                                for k, (expires, data) in self.entries.items()})
             return copy.deepcopy(value)
         except Exception as exc:
+            if allow_stale and entry and entry[1].get('models'):
+                value = copy.deepcopy(entry[1])
+                value['catalog_stale'] = True
+                value.setdefault('warnings', []).append('模型目录刷新失败，正在使用上次成功读取的缓存；可稍后手动刷新。')
+                event.result = value
+                return copy.deepcopy(value)
             event.error = str(exc); raise
         finally:
             with self.lock:

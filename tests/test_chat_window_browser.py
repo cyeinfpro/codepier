@@ -7,7 +7,7 @@ import json
 import re
 import pytest
 from playwright.sync_api import expect
-from tests.test_chat_browser import chat_page, event
+from tests.browser_support import chat_page, event
 from tests.test_chat_complete_browser import assert_composer_controls_fit, send
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -15,14 +15,24 @@ OUT=ROOT/'docs/evidence/cli-polish-20260915'
 OUT.mkdir(parents=True,exist_ok=True)
 
 
-def test_production_boot_cannot_load_the_retired_terminal():
+def test_production_boot_cannot_load_the_retired_terminal(stack, chat_browser_pool):
     index=(ROOT/'web/index.html').read_text()
     app=(ROOT/'web/app.js').read_text()
     chat=(ROOT/'web/chat.js').read_text()
     for term in ['xterm','addon-fit','addon-search','/native-cli.js','/native-cli.css']:
         assert term not in index
     assert "['terminal','terminal'" not in app
-    assert "if(page==='terminal')page='native'" in app
+    page=chat_browser_pool('chromium').new_page()
+    try:
+        page.goto(stack.url+'/#terminal',wait_until='domcontentloaded')
+        expect(page.locator('#login-form')).to_be_visible()
+        page.locator('#password').fill(stack.password)
+        page.locator('#login-form button[type=submit]').click()
+        expect(page.locator('#chat-root')).to_be_visible()
+        assert page.evaluate('S.page')=='native'
+        assert page.evaluate('location.hash')=='#native'
+    finally:
+        page.context.close()
     assert '高级终端' not in chat and 'data-nav="terminal"' not in chat
     assert not (ROOT/'web/native-cli.js').exists()
     assert not (ROOT/'web/native-cli.css').exists()

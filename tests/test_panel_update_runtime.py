@@ -104,12 +104,13 @@ def test_environment_drift_detected_before_service_stop(tmp_path):
 
 def test_compose_cli_keeps_literal_dollars_without_docker_daemon(tmp_path):
     docker=shutil.which('docker')
-    if not docker:pytest.skip('Docker Compose CLI is not installed; daemon is not required')
-    version=subprocess.run([docker,'compose','version'],capture_output=True,text=True,timeout=10)
-    if version.returncode:pytest.skip('Docker CLI exists but the Compose plugin is unavailable')
+    standalone=shutil.which('docker-compose')
+    candidates=([[docker,'compose']] if docker else [])+([[standalone]] if standalone else [])
+    command=next((candidate for candidate in candidates if subprocess.run(candidate+['version'],capture_output=True,text=True,timeout=10).returncode==0),None)
+    if command is None:pytest.skip('Neither Docker Compose plugin nor standalone CLI is installed; a daemon is not required')
     spec={'services':{'hub':{'image':'fixture:local','environment':{'LITERAL':'a$B${SECRET}$$'}}}}
     path=tmp_path/'target.json';save_compose(path,spec)
-    result=subprocess.run([docker,'compose','--project-name','fixture','-f',str(path),'config','--format','json'],capture_output=True,text=True,timeout=15)
+    result=subprocess.run([*command,'--project-name','fixture','-f',str(path),'config','--format','json'],capture_output=True,text=True,timeout=15)
     assert result.returncode==0,result.stderr
     # `config` serializes the resolved model with dollars escaped for reuse.
     # Decode that transport representation, not the literal serialized string.
@@ -118,7 +119,7 @@ def test_compose_cli_keeps_literal_dollars_without_docker_daemon(tmp_path):
     # Repeated snapshot/save cycles must never accumulate dollar escaping.
     for _ in range(2):
         save_compose(path,resolved)
-        result=subprocess.run([docker,'compose','--project-name','fixture','-f',str(path),'config','--format','json'],capture_output=True,text=True,timeout=15)
+        result=subprocess.run([*command,'--project-name','fixture','-f',str(path),'config','--format','json'],capture_output=True,text=True,timeout=15)
         assert result.returncode==0,result.stderr
         resolved=load_compose_config(result.stdout)
         assert resolved['services']['hub']['environment']['LITERAL']=='a$B${SECRET}$$'

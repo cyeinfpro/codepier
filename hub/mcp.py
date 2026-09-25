@@ -6,17 +6,20 @@ exposes MCP sessions, GET streams or unimplemented MRTR/sampling/tasks.
 The panel's own persistent chat SSE is an independent application protocol.
 """
 from __future__ import annotations
+from shared.config import env_csv
+from hub.db_worker import database_endpoint
+from hub.principal import refresh_principal
 import json,os
 from fastapi import APIRouter,Request
 from fastapi.responses import JSONResponse,Response
 from hub.auth import Auth
 from hub.runtime import Runtime
 from hub import mcp_apps
-from shared.contracts import INSTRUCTIONS,tool_definitions,TOOLS
-from shared.coding_contracts import CODING_TOOLS,CODING_INSTRUCTIONS
+from shared.contracts import tool_definitions,TOOLS
+from shared.core_contracts import CORE_INSTRUCTIONS, CORE_TOOLS, REPLACED_MCP_TOOLS
+from hub.core_tools import result as core_result
 from shared.integration_contracts import ADMIN_TOOLS,APP_ONLY_TOOLS
 from shared.util import DevError,VERSION,valid_json_value
-from shared.computer_media import mcp_result
 from shared.mcp_protocol import MODERN,LEGACY,SUPPORTED,SERVER_INFO,ProtocolError,is_modern,validate_modern,complete,capabilities
 
 # Public legacy name retained for existing integrations importing it.
@@ -35,28 +38,32 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
     def origin_allowed(request):
         origin=request.headers.get('origin')
         allowed={f'{request.url.scheme}://{request.url.netloc}',public_url(),'https://chatgpt.com'}
-        allowed.update(v for v in os.getenv('MCP_ALLOWED_ORIGINS','').split(',') if v)
+        allowed.update(v for v in env_csv('MCP_ALLOWED_ORIGINS') if v)
         return not origin or origin in allowed
 
     @router.options('/mcp')
-    async def options(request:Request):
+    @database_endpoint(runtime.store)
+    def options(request:Request):
         if not origin_allowed(request):return failure(None,-32000,'Origin not allowed',403)
         return Response(status_code=204,headers={'Access-Control-Allow-Origin':request.headers.get('origin','*'),
             'Access-Control-Allow-Methods':'POST,GET,DELETE,OPTIONS',
             'Access-Control-Allow-Headers':'Authorization,Content-Type,Accept,MCP-Protocol-Version,Mcp-Method,Mcp-Name','Access-Control-Max-Age':'600'})
 
     @router.api_route('/mcp',methods=['GET','DELETE'])
-    async def unused(request:Request):
+    @database_endpoint(runtime.store)
+    def unused(request:Request):
         if not origin_allowed(request):return failure(None,-32000,'Origin not allowed',403)
         return Response(status_code=405,headers={'Allow':'POST, OPTIONS'})
 
     @router.post('/mcp')
     async def mcp(request:Request):
-        if not origin_allowed(request):return failure(None,-32000,'Origin not allowed',403)
+        if not await runtime.store.run(origin_allowed, request):return failure(None,-32000,'Origin not allowed',403)
         origin=request.headers.get('origin')
-        try:principal=auth.bearer(request)
+        public_base=await runtime.store.run(public_url)
+        request_public_url=lambda:public_base
+        try:principal=await runtime.store.run(auth.bearer, request)
         except DevError as exc:
-            metadata=public_url()+'/.well-known/oauth-protected-resource/mcp'
+            metadata=(await runtime.store.run(public_url))+'/.well-known/oauth-protected-resource/mcp'
             return failure(None,-32001,exc.message,exc.status,headers={'WWW-Authenticate':f'Bearer resource_metadata="{metadata}", scope="read"'})
         if request.headers.get('content-type','').split(';',1)[0].strip().lower()!='application/json':
             return failure(None,-32600,'Content-Type must be application/json',415)
@@ -86,11 +93,12 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
         else:
             version=request.headers.get('mcp-protocol-version')
             if version and version not in LEGACY:return failure(identifier,-32600,'Unsupported MCP-Protocol-Version',400)
-        profile=request.query_params.get('profile','full')
-        if profile not in {'full','coding'}:return failure(identifier,-32602,'Unknown MCP profile; choose full or coding',400)
-        instructions=CODING_INSTRUCTIONS if profile=='coding' else INSTRUCTIONS
+        profile=request.query_params.get('profile','core')
+        if profile not in {'core','full','coding'}:return failure(identifier,-32602,'Unknown MCP profile; choose core, full or coding',400)
+        instructions=CORE_INSTRUCTIONS
         if 'id' not in body:return Response(status_code=202)
         try:
+            principal=await runtime.store.run(refresh_principal,runtime.store,principal)
             if method=='initialize' and not modern:
                 offered=params.get('protocolVersion','')
                 if not isinstance(offered,str):return failure(identifier,-32602,'protocolVersion must be a string')
@@ -111,16 +119,16 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                 if modern and name not in TOOLS:return failure(identifier,-32602,'Unknown tool',400)
                 trace=None
                 try:
+                    if name in REPLACED_MCP_TOOLS:raise DevError('TOOL_REMOVED', '旧工具已移除，请使用 '+REPLACED_MCP_TOOLS[name], 404)
                     if name in ADMIN_TOOLS:raise DevError('OWNER_REQUIRED','此操作只接受面板主理人或已启用的本机控制入口',403)
-                    if profile=='coding' and name not in CODING_TOOLS and name not in APP_ONLY_TOOLS:raise DevError('TOOL_OUTSIDE_PROFILE','此工具在完整 /mcp 中可用；编码显示模式不改变权限',404)
                     if isinstance(arguments.get('project'),str):
-                        project=runtime.project(arguments['project'],principal)
+                        project=await runtime.store.run(runtime.project, arguments['project'], principal)
                         try:
-                            trace=runtime.integrations.begin(principal,project,name,metadata)
+                            trace=await runtime.store.run(runtime.integrations.begin,principal,project,name,metadata)
                             request.state.codepier_call_trace=trace
                         except Exception:runtime.integrations.write_errors+=1
                     value=await runtime.invoke(name,arguments,principal)
-                    result=mcp_apps.attach(mcp_result(name,value),name,arguments,value,public_url)
+                    result=await runtime.store.run(mcp_apps.attach,core_result(name,arguments,value),name,arguments,value,request_public_url)
                     if trace:
                         trace['operation_id']=value.get('operation_id')
                         trace['status']='tool_error' if result.get('isError') else 'complete'
@@ -129,8 +137,8 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                     result={'content':[{'type':'text','text':json.dumps(value,ensure_ascii=False)}],'structuredContent':value,'isError':True}
                     if trace:trace['status']='tool_error';trace['operation_id']=exc.details.get('operation_id')
                     if exc.code=='INSUFFICIENT_SCOPE':
-                        scopes=sorted({'read',TOOLS[name].scope}) if name in TOOLS else ['read']
-                        challenge='Bearer resource_metadata="'+public_url()+'/.well-known/oauth-protected-resource/mcp", error="insufficient_scope", scope="'+' '.join(scopes)+'"'
+                        scopes=sorted({'read',exc.details.get('required_scope', TOOLS[name].scope)}) if name in TOOLS else ['read']
+                        challenge='Bearer resource_metadata="'+public_base+'/.well-known/oauth-protected-resource/mcp", error="insufficient_scope", scope="'+' '.join(scopes)+'"'
                         result['_meta']={'mcp/www_authenticate':[challenge]}
             elif method=='resources/list':
                 result={'resources':[{'uri':'rd://projects','name':'Mapped projects','mimeType':'application/json'},
@@ -139,11 +147,11 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
             elif method=='resources/read':
                 uri=params.get('uri')
                 if 'read' not in principal.scopes:raise DevError('INSUFFICIENT_SCOPE','缺少读取权限',403)
-                if uri in mcp_apps.RESOURCES or uri in mcp_apps.LEGACY_RESOURCES:item=mcp_apps.read_resource(uri,public_url)
-                elif uri=='rd://projects':item={'uri':uri,'mimeType':'application/json','text':json.dumps(runtime.list_projects(principal),ensure_ascii=False)}
+                if uri in mcp_apps.RESOURCES or uri in mcp_apps.LEGACY_RESOURCES:item=await runtime.store.run(mcp_apps.read_resource,uri,request_public_url)
+                elif uri=='rd://projects':item={'uri':uri,'mimeType':'application/json','text':json.dumps(await runtime.store.run(project_resources,principal),ensure_ascii=False)}
                 elif uri=='rd://workflow':item={'uri':uri,'mimeType':'text/plain','text':instructions}
                 else:return failure(identifier,-32602 if modern else -32002,'Resource not found',404 if modern else 200)
-                auth.store.audit(principal.actor,'resources.read',uri);result={'contents':[item]}
+                await runtime.store.run(auth.store.audit,principal.actor,'resources.read',uri);result={'contents':[item]}
             elif method=='prompts/list':
                 result={'prompts':[{'name':'review_project','description':'Inspect a mapped project before making changes',
                     'arguments':[{'name':'project','description':'Project alias','required':True}]}]}
@@ -162,5 +170,9 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
             return JSONResponse({'jsonrpc':'2.0','id':identifier,'result':result},
                 headers={'Cache-Control':'no-store','Access-Control-Allow-Origin':origin or '*','Vary':'Authorization, MCP-Protocol-Version'})
         except DevError as exc:return failure(identifier,-32000,exc.message,exc.status if modern else 200,{'code':exc.code})
+
+    def project_resources(principal):
+        principal=refresh_principal(runtime.store,principal)
+        return runtime.list_projects(principal)
 
     return router
