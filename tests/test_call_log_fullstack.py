@@ -89,6 +89,9 @@ def test_real_panel_navigation_live_details_export_themes_and_logout(call_stack)
             page.locator('#login-form button[type=submit]').click()
             entry=page.locator('[data-call-id="'+operation['id']+'"]')
             entry.wait_for(timeout=20000)
+            assert entry.locator('.call-top > :first-child').get_attribute('class') == 'call-project'
+            assert entry.locator('.call-project strong').inner_text() == 'Imago'
+            assert '项目 Imago' in entry.locator('summary').first.get_attribute('aria-label')
             entry.locator('summary').first.click()
             entry.locator('.call-facts').wait_for()
             assert 'inputChars=' in entry.locator('.call-args').inner_text()
@@ -110,8 +113,17 @@ def test_real_panel_navigation_live_details_export_themes_and_logout(call_stack)
             assert any(x['id']==operation['id'] for x in exported['calls'])
             page.evaluate("document.documentElement.dataset.appearance='dark'")
             assert entry.evaluate("el=>getComputedStyle(el).backgroundColor")!='rgb(255, 255, 255)'
+            for width in [320, 390, 1280]:
+                page.set_viewport_size({'width':width,'height':844})
+                assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
+                project=entry.locator('.call-project').bounding_box()
+                assert project and project['x']>=0 and project['x']+project['width']<=width
+            screenshot=Path('.work/audit-projects');screenshot.mkdir(parents=True,exist_ok=True)
+            entry.locator('summary').first.click()
+            for appearance in ['light', 'dark']:
+                page.evaluate('(value)=>document.documentElement.dataset.appearance=value', appearance)
+                entry.screenshot(path=str(screenshot/f'project-compact-{appearance}.png'))
             page.set_viewport_size({'width':390,'height':844})
-            assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
             # Switch through existing events view and back, with all handlers intact.
             page.locator('[data-action="audit-mode"][data-mode="events"]').click()
             page.locator('[data-event-index]').first.wait_for()

@@ -63,7 +63,7 @@ def test_browser_consent_message_is_text_and_explicit(approval_stack):
     with sync_playwright() as p:
         browser=p.chromium.launch();page=browser.new_page()
         try:
-            page.goto(s.url);page.fill('#password',s.password);page.click('#login-form button')
+            page.goto(s.url);page.fill('#username', 'admin');page.fill('#password',s.password);page.click('#login-form button')
             sid=open_session(s)
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 result=executor.submit(s.mcp,'computer',{'operation':'observe','project':'Imago','session_id':sid},s.approval_pat)

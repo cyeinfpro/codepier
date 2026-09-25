@@ -163,7 +163,7 @@ def test_real_sse_add_and_reconnect_refresh_the_human_inbox(browser, approval_st
     page = browser.new_page()
     try:
         page.goto(stack.url)
-        page.fill('#password', stack.password)
+        page.fill('#username', 'admin');page.fill('#password', stack.password)
         page.click('#login-form button')
         expect(page.locator('#event-state')).to_have_text('实时通道已连接')
         page.wait_for_function('computerApprovals.request===null')

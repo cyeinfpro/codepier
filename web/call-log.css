@@ -1,34 +1,37 @@
 /* Semantic details/summary: keyboard-native and responsive audit flow. */
 .call-log {
   display: grid;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
 }
 .call-entry {
   border: 1px solid var(--ui-border);
-  border-left: 3px solid var(--ui-accent);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--ui-panel);
   min-width: 0;
   overflow: hidden;
 }
-.call-entry.call-read {
-  border-left-color: var(--ui-info);
+.call-entry.call-read .call-kind {
+  color: var(--ui-info);
+  background: var(--ui-info-bg);
 }
-.call-entry.call-write {
-  border-left-color: var(--ui-success);
+.call-entry.call-write .call-kind {
+  color: var(--ui-success);
+  background: var(--ui-success-bg);
 }
-.call-entry.call-edit {
-  border-left-color: var(--ui-warning);
+.call-entry.call-edit .call-kind {
+  color: var(--ui-warning);
+  background: var(--ui-warning-bg);
 }
-.call-entry.call-shell {
-  border-left-color: var(--ui-purple);
+.call-entry.call-shell .call-kind {
+  color: var(--ui-purple);
+  background: var(--ui-purple-bg);
 }
 .call-entry > summary {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 14px 16px;
+  padding: 10px 14px;
   cursor: pointer;
   list-style: none;
   min-height: 64px;
@@ -43,7 +46,7 @@
 }
 .call-main {
   display: grid;
-  gap: 8px;
+  gap: 5px;
   flex: 1;
   min-width: 0;
 }
@@ -53,9 +56,43 @@
   gap: 8px;
   flex-wrap: wrap;
 }
+.call-project {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 3px 8px;
+  border-radius: 7px;
+  background: var(--ui-cover-project);
+  color: var(--ui-cover-text);
+}
+.call-project-label {
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.call-project strong {
+  font-size: 15px;
+  font-weight: 750;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.call-tool {
+  display: inline-flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .call-kind {
-  font-size: 12px;
+  font-size: 11px;
   color: var(--ui-muted);
+  background: var(--ui-surface);
+  padding: 2px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
 }
 .call-state {
   display: flex;
@@ -75,13 +112,16 @@
 }
 .call-preview {
   display: -webkit-box;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 1;
   -webkit-box-orient: vertical;
   overflow: hidden;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
   font-size: 12px;
   line-height: 1.6;
+}
+.call-entry[open] > summary .call-preview {
+  -webkit-line-clamp: 2;
 }
 .call-meta {
   display: flex;
@@ -233,7 +273,7 @@
 }
 @media (max-width: 680px) {
   .call-entry > summary {
-    padding: 12px;
+    padding: 10px;
   }
   .call-detail {
     padding: 12px;

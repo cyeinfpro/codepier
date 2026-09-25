@@ -11,8 +11,8 @@
       "bytes": 27864
     },
     "app.js": {
-      "sha256": "3b3d9ca7704e60552d1d0eb10aaf870a1b49e69e04e17fc149d677e8403f7c62",
-      "bytes": 105017
+      "sha256": "eb6023aaa5eb20c9c694cc90fe1a33bd9b21b963c0e2e6ec5abe7ce023c07ad6",
+      "bytes": 105030
     },
     "appearance.js": {
       "sha256": "7fc8e8ffa85a4bb5836b8919cdf6ff12813cfb4a9e4736709f5858e5d8782bb1",
@@ -23,12 +23,12 @@
       "bytes": 1777
     },
     "call-log.css": {
-      "sha256": "087f39c159c16cc375917d3bf6f93fe5bb3ad0cfd990b3482b7269e1ea121356",
-      "bytes": 4849
+      "sha256": "6ad15b90af06ad796f7f7dff1692891dfffd2398608861bb6f30070bd19842c9",
+      "bytes": 5661
     },
     "call-log.js": {
-      "sha256": "ad23a5db20aff990e9f31bbb4d12d660b54ffb26013e839d8ab2e7ae616a05ed",
-      "bytes": 22532
+      "sha256": "3a4830de669ef7ccf25d56e05c8325b3dc5037c467870825c45bc7d05222878a",
+      "bytes": 22688
     },
     "chat-catalog.js": {
       "sha256": "d9fd71d7f502d1d3ccd2b0e7c0b526739ebc1199c947f39f78f7f4f5ccc28fec",
