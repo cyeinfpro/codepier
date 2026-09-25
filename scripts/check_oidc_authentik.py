@@ -167,8 +167,12 @@ def acceptance(output):
                 'name': 'CodePier isolated test', 'authorization_flow': authorization, 'authentication_flow': authentication,
                 'invalidation_flow': invalidation, 'client_type': 'confidential', 'client_id': client_id,
                 'client_secret': client_secret, 'signing_key': signing, 'include_claims_in_id_token': True,
+                # Authentik's API defaults grant_types to an empty list.
+                # Explicitly permit only the code and refresh flows we test.
+                'grant_types': ['authorization_code', 'refresh_token'],
                 'redirect_uris': [{'matching_mode': 'strict', 'url': callback}], 'property_mappings': scopes,
             }, 201)
+            assert set(ak_provider['grant_types']) == {'authorization_code', 'refresh_token'}
             ak_call('POST', 'core/applications/', {'name': 'CodePier isolated test', 'slug': 'codepier-test', 'provider': ak_provider['pk']}, 201)
             verified = required(owner.post('/api/iam/oidc/providers/'+provider['id']+'/check'))
             assert verified['issuer'] == provider_config['issuer'] and verified['callback'] == callback
@@ -189,6 +193,9 @@ def acceptance(output):
                         if response.request.is_navigation_request():
                             u = urlsplit(response.url)
                             browser_diagnostics['navigation'] = {'origin': u.scheme + '://' + u.netloc, 'path': u.path, 'status': response.status}
+                            error = parse_qs(u.query).get('error', [''])[0]
+                            if re.fullmatch(r'[a-z_]{1,64}', error):
+                                browser_diagnostics['oauth_error'] = error
                     page.on('response', capture_navigation)
                     page.goto(hub_url)
                     page.locator('#oidc-login-buttons a').click()

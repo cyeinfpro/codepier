@@ -86,7 +86,11 @@ source of truth and test your own deployment before broad enrollment.
 Create an OAuth2/OpenID provider and application for CodePier:
 
 - Confidential client with a generated client secret.
-- Authorization Code grant and S256 PKCE; no implicit flow is needed.
+- Explicitly enable the Authorization Code grant and S256 PKCE. Enable the Refresh
+  Token grant when requesting `offline_access`; no implicit flow is needed.
+  When provisioning Authentik through its API, set `grant_types` to
+  `["authorization_code", "refresh_token"]`: the API default is an empty list,
+  which rejects authorization before the login form even though discovery works.
 - An asymmetric signing key. CodePier accepts configured public RSA/EC signatures,
   not unsigned or symmetric ID Tokens.
 - A strict, exact callback URI, copied from CodePier after the provider record is
