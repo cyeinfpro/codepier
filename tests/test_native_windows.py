@@ -23,6 +23,23 @@ from shared.native_cli import database
 from tests.support import wait_for
 
 
+def test_real_agent_survives_legacy_redirected_log_encoding(tmp_path, monkeypatch):
+    from tests.support import running_stack
+    monkeypatch.setenv('PYTHONIOENCODING', 'cp1252:strict')
+    with running_stack(tmp_path / 'legacy-logs') as stack:
+        reply = stack.mcp('read', {'project': 'Imago', 'path': 'README.md'})
+        assert not reply.get('isError'), reply
+        data = reply['structuredContent']
+        if data.get('pending'):
+            operation = stack.poll(data['operation_id'], timeout=30)
+            assert operation['state'] == 'succeeded', operation
+            data = operation['result']['data']
+        assert 'Integration fixture' in data['content']
+        log = (stack.directory / 'agent.log').read_text(encoding='cp1252')
+        assert 'UnicodeEncodeError' not in log
+        assert '\\u5df2\\u8fde\\u63a5' in log
+
+
 class FakePTY:
     def __init__(self, *, stall=False, no_eof=False):
         self.pid = 23456
