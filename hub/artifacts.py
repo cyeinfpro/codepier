@@ -74,7 +74,7 @@ class ArtifactService:
 
     def public(self,row):
         return {k:row[k] for k in ('name','bytes','sha256','created','expires','project_id','source_operation_id')}|{
-            'artifact_id':row['id'],'download_path':'/api/artifacts/'+row['id']+'/download?space_id='+quote(row['space_id'],safe=''),
+            'artifact_id':row['id'],'space_id':row['space_id'],'download_path':'/api/artifacts/'+row['id']+'/download?space_id='+quote(row['space_id'],safe=''),
             'expired':row['expires']<=time.time(),'device_online':self.runtime.online(row['device_id']),
             'authentication':'Panel session or current read-scoped Bearer token; no anonymous URL',
             'immutable':True,'range_supported':True}

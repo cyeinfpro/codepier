@@ -243,7 +243,7 @@ def event_visible(runtime, principal, item):
     if kind == 'project':
         try: runtime.project(data.get('id'), principal); return True
         except DevError: return False
-    if kind in {'operation', 'operation_event'}:
+    if kind in {'operation', 'operation_event', 'output', 'trace'}:
         try: runtime.operation_row(data.get('id') or data.get('operation_id'), principal); return True
         except DevError: return False
     if kind == 'workflow':
@@ -257,7 +257,11 @@ def event_visible(runtime, principal, item):
             return True
         except DevError:return False
     if kind == 'computer_approval':
-        return bool(runtime.computer_approvals.list(principal))
+        # An invalidation has no native content. Requiring a currently nonempty
+        # inbox would suppress the last item's removal and leave stale controls.
+        audience = item.get('_audience') or {}
+        return (audience.get('space_id') == principal.space_id
+                and (audience.get('user_id') == principal.user_id or principal.instance_admin))
     # Unknown/global notifications are not broadcast to arbitrary members.
     return False
 

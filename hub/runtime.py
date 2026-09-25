@@ -131,8 +131,10 @@ class Runtime:
         self.store.execute("UPDATE operations SET state='needs_review',error='Legacy operation has no durable request; inspect its outcome' WHERE state IN ('queued','running','reconnecting','cancelling','unknown','interrupted') AND payload IS NULL AND result IS NULL")
         self.worker = asyncio.create_task(self.delivery_loop(), name="durable-delivery")
 
-    def publish(self, kind: str, data=None):
+    def publish(self, kind: str, data=None, *, audience=None):
         message = {"type": kind, "at": time.time(), "data": data or {}}
+        if audience is not None:
+            message['_audience'] = audience  # Server-only routing; stripped by SSE.
         for q in list(self.watchers):
             if q.full():
                 with contextlib.suppress(asyncio.QueueEmpty):
@@ -321,6 +323,15 @@ class Runtime:
         return {"operations": rows[:args["limit"]], "next_before_created": rows[args["limit"]-1]["created"] if len(rows) > args["limit"] else None}
 
     async def invoke(self, name: str, raw: dict, principal: Principal):
+        # Direct invocations and background tasks must not inherit another
+        # request/store's audit identity. The HTTP middleware alone is not enough.
+        key = iam.audit_context.set((self.store, principal.actor, principal.space_id, principal.user_id))
+        try:
+            return await self._invoke(name, raw, principal)
+        finally:
+            iam.audit_context.reset(key)
+
+    async def _invoke(self, name: str, raw: dict, principal: Principal):
         principal = refresh_profile_principal(self.store, principal)
         tool = TOOLS.get(name)
         if not tool:

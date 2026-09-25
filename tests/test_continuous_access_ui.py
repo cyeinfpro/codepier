@@ -132,5 +132,8 @@ def test_oauth_defaults_never_include_unrequested_scopes_or_submit_without_click
     expect(page.locator('.modal [name="scope"]')).to_have_count(1)
     expect(page.locator('.modal [name="scope"][value="read"]')).to_be_checked()
     assert not decisions
-    assert stack.client.get('/api/oauth/requests/' + request_id).status_code == 200
+    # Consent is pinned to the browser session that displayed it. Another
+    # administrator session must not be allowed to take over that transaction.
+    assert page.evaluate('(id)=>api("/api/oauth/requests/"+id).then(()=>200)', request_id) == 200
+    assert stack.client.get('/api/oauth/requests/' + request_id).status_code == 403
     assert not errors, errors

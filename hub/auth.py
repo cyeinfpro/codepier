@@ -72,7 +72,7 @@ class Auth:
         principal = Principal('panel:' + session['username'], session['user_id'], {'read'}, [],
                               space_id=space_id, identity_id=session['identity_id'], user_epoch=session['user_epoch'])
         principal = iam.live_principal(self.store, principal)
-        iam.audit_context.set((principal.space_id, principal.user_id))
+        iam.audit_context.set((self.store, principal.actor, principal.space_id, principal.user_id))
         return principal
 
     def admin(self, request: Request, write=False):
@@ -107,7 +107,7 @@ class Auth:
         if not row or (row["kind"] == "access" and self.resource and row["resource"] != self.resource()):
             raise DevError("INVALID_TOKEN", "凭据已过期或撤销", 401)
         scopes, projects, _ = effective_grant(self.store, row)
-        iam.audit_context.set((row["space_id"], row["user_id"]))
+        iam.audit_context.set((self.store, "mcp:" + row["grant_id"] + ":" + row["label"], row["space_id"], row["user_id"]))
         return Principal("mcp:" + row["grant_id"] + ":" + row["label"], row["user_id"], scopes, projects,
                          grant_id=row["grant_id"], profile_id=row["profile_id"],
                          authorization_mode=row['authorization_mode'], role_id=row['role_id'],

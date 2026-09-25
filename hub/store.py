@@ -189,14 +189,20 @@ class Store:
     def audit(self, actor: str, action: str, target: str = "", status: str = "ok", detail=None, *, commit=True):
         from hub.iam import audit_context
         context = audit_context.get()
-        sid, uid = context if context else ('legacy', None)
-        if actor.startswith('mcp:'):
+        # Context is trusted only for its originating Store AND actor. A task
+        # can outlive the HTTP request, and direct callers may use another Store.
+        scoped = bool(context and context[0] is self and context[1] == actor)
+        sid, uid = context[2:] if scoped else ('legacy', None)
+        if not scoped and actor.startswith('mcp:'):
             grant = self.one('SELECT space_id,user_id FROM grants WHERE id=?', (actor.split(':', 2)[1],))
             if grant: sid, uid = grant['space_id'], grant['user_id']
         elif actor.startswith('panel:') and uid is None:
             user = self.one('SELECT id FROM users WHERE username=?', (actor[6:],))
             if user: uid = user['id']
-        for table in ('operations','projects','devices','access_profiles','access_roles','workflows','artifacts','grants','vps_connections'):
+        # Do not retarget a scoped caller's audit entry using an untrusted ID
+        # from a denied cross-Space request. Also avoid loading operation bodies
+        # just to audit a thin status read.
+        for table in (() if scoped else ('operations','projects','devices','access_profiles','access_roles','workflows','artifacts','grants','vps_connections')):
             row = self.one(f'SELECT space_id,owner_user_id FROM {table} WHERE id=?', (target,)) if target else None
             if row:
                 sid = row['space_id']

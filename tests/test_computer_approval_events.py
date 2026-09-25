@@ -15,13 +15,15 @@ from shared.util import DevError
 def inbox(tmp_path):
     store = Store(tmp_path / 'hub')
     runtime = Runtime(store)
+    from tests.legacy_iam_fixture import seed_owner
+    seed_owner(store, 'u', 'admin')
     store.execute('INSERT INTO devices(id,name,secret,created) VALUES (?,?,?,?)',
                   ('d', 'Device', store.encrypt('fixture'), time.time()))
     store.execute('INSERT INTO projects(id,alias,alias_key,device_id,root,created) VALUES (?,?,?,?,?,?)',
                   ('p', 'Test', 'test', 'd', '/fixture', time.time()))
     request = {'project': {'id': 'p', 'alias': 'Test', 'root': '/fixture'}}
-    store.execute('INSERT INTO operations(id,device_id,project_id,actor,tool,args_summary,fingerprint,state,created,updated,payload) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-                  ('op', 'd', 'p', 'panel:admin', 'computer_observe', '{}', 'f', 'running', time.time(), time.time(), store.encrypt(json.dumps(request))))
+    store.execute('INSERT INTO operations(id,device_id,project_id,actor,tool,args_summary,fingerprint,state,created,updated,payload,owner_user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+                  ('op', 'd', 'p', 'panel:admin', 'computer_observe', '{}', 'f', 'running', time.time(), time.time(), store.encrypt(json.dumps(request)),'u'))
     sent = []
 
     async def send(data):
@@ -42,7 +44,8 @@ def changed(events):
     event = events.get_nowait()
     assert event['type'] == 'computer_approval'
     assert event['data'] == {'changed': True}
-    assert set(event) == {'type', 'at', 'data'}
+    assert set(event) == {'type', 'at', 'data', '_audience'}
+    assert event['_audience'] == {'space_id': 'legacy', 'user_id': 'u'}
     assert events.empty()
 
 

@@ -624,7 +624,7 @@ def create_app(data_dir: str | None = None):
                         except DevError:
                             break
                         if visible:
-                            yield "data: " + json.dumps(item, ensure_ascii=False) + "\n\n"
+                            yield "data: " + json.dumps({k: v for k, v in item.items() if k != "_audience"}, ensure_ascii=False) + "\n\n"
                     except asyncio.TimeoutError:
                         try: auth.panel(request)
                         except DevError: break

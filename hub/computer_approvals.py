@@ -9,15 +9,15 @@ class ComputerApprovals:
         self.runtime = runtime
         self.pending = {}
 
-    def changed(self):
+    def changed(self, row):
         # SSE only invalidates the panel's inbox. App names, native messages,
         # session IDs and decisions stay behind the authenticated inbox API.
-        self.runtime.publish('computer_approval', {'changed': True})
+        self.runtime.publish('computer_approval', {'changed': True}, audience=row['_audience'])
 
     def remove(self, identifier):
         row = self.pending.pop(identifier, None)
         if row is not None:
-            self.changed()
+            self.changed(row)
         return row
 
     def drop(self, connection):
@@ -58,10 +58,11 @@ class ComputerApprovals:
         if owner!=data['owner']:return
         if key in self.pending or len(self.pending)>=64:return
         row={k:data[k] for k in ['session_id','project_id','owner','app','operation_id','message','expires_at']}
-        row.update(request_id=key,device_id=device,connection=connection)
+        row.update(request_id=key,device_id=device,connection=connection,
+                   _audience={'space_id':op['space_id'],'user_id':op['owner_user_id']})
         if not self.live(row):return
         self.pending[key]=row
-        self.changed()
+        self.changed(row)
 
     def permitted(self, row, principal):
         try:
@@ -76,7 +77,7 @@ class ComputerApprovals:
     def list(self, principal=None):
         for key,row in list(self.pending.items()):
             if not self.live(row):self.remove(key)
-        return [{k:v for k,v in row.items() if k!='connection'} for row in self.pending.values() if principal is None or self.permitted(row,principal)]
+        return [{k:v for k,v in row.items() if k not in {'connection','_audience'}} for row in self.pending.values() if principal is None or self.permitted(row,principal)]
 
     async def decide(self, identifier, action, principal):
         if action not in {'accept','decline','cancel'}:
