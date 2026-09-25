@@ -682,7 +682,7 @@ function overviewHTML() {
       `成功 ${o.today_succeeded} · 失败 ${o.today_failed}`,
       '',
     ],
-    ['执行中', o.active_operations, '', 'terminal', `${o.tool_count} 项工具可用`, ''],
+    ['执行中', o.active_operations, '', 'terminal', `${o.tool_count} 项 MCP 工具可用`, ''],
   ];
   return (
     heading(

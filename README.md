@@ -2,11 +2,11 @@
 
 **把 ChatGPT / MCP、浏览器管理面板和你自己的开发电脑连接起来，让 AI 在明确授权的项目边界内真正读取代码、修改文件、运行命令、管理原生 CLI、验证网页，并通过项目安全地操作已保存的 VPS。**
 
-[![Version](https://img.shields.io/badge/version-1.14.1-2563eb)](RELEASE.json)
+[![Version](https://img.shields.io/badge/version-1.14.2-2563eb)](RELEASE.json)
 [![Python](https://img.shields.io/badge/Python-3.13%20recommended-3776ab)](requirements.txt)
 [![License](https://img.shields.io/badge/license-MIT-16a34a)](LICENSE)
 
-> 当前仓库的 `RELEASE.json` 标记为 **1.14.1 / released / source-only**。该版本发布源码，不等同于已经部署到你的 Hub / Agent。
+> 当前仓库的 `RELEASE.json` 标记为 **1.14.2 / released / source-only**。该版本发布源码，不等同于已经部署到你的 Hub / Agent。
 
 CodePier 面向这样的开发方式：
 
@@ -685,7 +685,7 @@ codepier/
 
 仓库当前版本信息来自 [`RELEASE.json`](RELEASE.json)：
 
-- **Version:** 1.14.1
+- **Version:** 1.14.2
 - **Date:** 2026-09-23
 - **Status:** released
 - **Source only:** true
