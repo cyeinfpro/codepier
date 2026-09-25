@@ -1,5 +1,5 @@
 from shared.util import VERSION
-from shared.contracts import TOOLS
+from shared.contracts import tool_definitions
 import hashlib
 import os
 from pathlib import Path
@@ -17,7 +17,7 @@ def test_browser_diagnostics_search_symbols_and_download(stack,tmp_path):
             page.goto(stack.url+'/#diagnostics');page.fill('#password',stack.password);page.click('#login-form button')
             expect(page.locator('#page h1')).to_have_text('运行诊断')
             expect(page.locator('#page')).to_contain_text(VERSION)
-            expect(page.locator('#page')).to_contain_text(str(len(TOOLS))+' 个工具')
+            expect(page.locator('#page')).to_contain_text(str(len(tool_definitions()))+' 个工具')
             page.screenshot(path=str(directory/'diagnostics-desktop.png'),full_page=True)
             page.click('[data-nav="artifacts"]');expect(page.locator('#page h1')).to_have_text('产物交付')
             page.click('[data-insight="register"]');page.fill('#artifact-path',filename);page.fill('#artifact-name','浏览器产物.txt')
