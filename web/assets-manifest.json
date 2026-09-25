@@ -119,8 +119,8 @@
       "bytes": 7583
     },
     "ui.js": {
-      "sha256": "529c7b3ce62075cf93f777d406e9fe29f06c2298d2964e51082d44fa3f44f01a",
-      "bytes": 17750
+      "sha256": "b6e34a9de72d60eddeac844e3a1e2bb061e78ad9b44fb762d5552bf69a24ee65",
+      "bytes": 17910
     },
     "vendor/js-sha256-1.0.0/sha256.min.js": {
       "sha256": "a050d794e170699bd1a69d33908d0942c68901cb88347016064b60b240f0067e",
@@ -139,8 +139,8 @@
       "bytes": 18892
     },
     "workspace.css": {
-      "sha256": "4352bd93838797be86522d77d3dfbc4af46ea0b3503345776421e419c8112f3c",
-      "bytes": 24758
+      "sha256": "d1230e77d2e28f878fd0d24ca17c80cc63353032592d74015eb48aaaef499093",
+      "bytes": 24897
     }
   },
   "template_sha256": "4ce126c65c96f488992af67dc8454e574db8b637cc70bde5d7bd4a04992fdaac"

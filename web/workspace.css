@@ -868,6 +868,10 @@
     background: #f2edf8;
     color: #29252e;
   }
+  /* A returning dock must not intercept the release of a page press. */
+  body.ui-page-press .mobile-dock {
+    pointer-events: none;
+  }
   .mobile-dock button:focus-visible {
     outline: 2px solid #f3d970;
     outline-offset: 1px;

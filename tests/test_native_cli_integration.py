@@ -32,7 +32,8 @@ def cli_stack(tmp_path_factory):
         yield s
         # Workers deliberately outlive Agent. Explicitly stop only this fixture's owned workers.
         with closing(database(s.directory/'agent-state'/'native-cli')) as db,db:
-            for row in db.execute("SELECT id FROM sessions WHERE status IN ('starting','running')"):
+            db.execute('BEGIN IMMEDIATE')
+            for row in db.execute("SELECT id FROM sessions WHERE status IN ('starting','running')").fetchall():
                 db.execute('INSERT INTO commands(id,session,kind,payload,created) VALUES (?,?,?,?,?)',(uuid.uuid4().hex,row['id'],'stop','{}',time.time()))
         def stopped():
             with closing(database(s.directory/'agent-state'/'native-cli')) as db:

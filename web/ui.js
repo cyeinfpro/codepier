@@ -184,7 +184,10 @@ const uiPagePointers = new Set(),
 document.addEventListener(
   'pointerdown',
   (event) => {
-    if (event.button === 0 && event.target.closest('#page')) uiPagePointers.add(event.pointerId);
+    if (event.button === 0 && event.target.closest('#page')) {
+      uiPagePointers.add(event.pointerId);
+      document.body.classList.add('ui-page-press');
+    }
   },
   true,
 );
@@ -193,6 +196,8 @@ function uiReleasePagePointer(event) {
   else uiPagePointers.delete(event.pointerId);
   if (!uiPagePointers.size)
     setTimeout(() => {
+      if (uiPagePointers.size) return;
+      document.body.classList.remove('ui-page-press');
       for (const resolve of uiPagePointerWaiters) resolve();
       uiPagePointerWaiters.clear();
     }, 0); // Let the matching click dispatch before a background render resumes.

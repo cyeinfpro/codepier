@@ -32,7 +32,8 @@ def claude_stack(tmp_path_factory):
         atomic_json(stack.config_path, stack.config); stack.start_agent()
         yield stack
         with closing(database(stack.directory / 'agent-state/native-cli')) as db, db:
-            for row in db.execute("SELECT id FROM sessions WHERE status IN ('starting','running')"):
+            db.execute('BEGIN IMMEDIATE')
+            for row in db.execute("SELECT id FROM sessions WHERE status IN ('starting','running')").fetchall():
                 db.execute('INSERT INTO commands(id,session,kind,payload,created) VALUES (?,?,?,?,?)', (uuid.uuid4().hex, row['id'], 'stop', '{}', time.time()))
         def done():
             with closing(database(stack.directory / 'agent-state/native-cli')) as db:
