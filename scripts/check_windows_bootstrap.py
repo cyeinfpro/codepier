@@ -51,7 +51,8 @@ def probe(directory):
             cwd=directory, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
         successful = should_call and exit_code == 0 and not keep
         if (result.returncode == 0) != successful or log.exists() != should_call:
-            raise AssertionError(f'Bootstrap case {index} returned unexpected result: {result.returncode}')
+            raise AssertionError(f'Bootstrap case {index} returned unexpected result: {result.returncode}; '
+                                 f'stdout={result.stdout[-4000:]!r}; stderr={result.stderr[-4000:]!r}')
         if should_call:
             arguments = json.loads(log.read_text(encoding='utf-8'))
             assert arguments == ['--start-service' if action == 'start' else '--' + action,

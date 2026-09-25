@@ -47,7 +47,7 @@ if ($Action -ne 'install' -and -not $Hub) {
   if (-not (Test-Path -LiteralPath $Helper)) { throw 'Use the installed agentctl.ps1 or the complete source package.' }
   $Python = Join-Path $InstallDir 'runtime/.venv/Scripts/python.exe'
   if (-not (Test-Path -LiteralPath $Python)) { $Python = (Get-Command python -ErrorAction Stop).Source }
-  $Python = (& $Python -c 'import sys; print(getattr(sys, "_base_executable", None) or sys.executable)' | Select-Object -Last 1)
+  $Python = (& $Python -c "import sys; print(getattr(sys, '_base_executable', None) or sys.executable)" | Select-Object -Last 1)
   if ($LASTEXITCODE -ne 0 -or -not $Python) { throw 'No external Python interpreter found' }
   $CodePierFlag = if ($Action -eq 'start') { '--start-service' } else { '--'+$Action }
   $CodePierArgs = @($Helper, $CodePierFlag, '--install-dir', $InstallDir)
