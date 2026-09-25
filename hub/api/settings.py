@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from hub.db_worker import database_endpoint
 from hub.api.context import HubContext
 import json
+import time
 from fastapi import Request
 from hub.access import access_defaults, project_selection
 from hub.mcp import VERSIONS
@@ -22,9 +23,17 @@ def make_settings_router(context: HubContext):
     @database_endpoint(store)
     def grants(request: Request):
         principal = auth.admin(request)
-        rows = store.all("SELECT g.*,(SELECT max(expires) FROM tokens t WHERE t.grant_id=g.id) AS expires FROM grants g WHERE g.user_id=? ORDER BY g.created DESC", (principal.user_id,))
+        rows = store.all("""SELECT g.*,
+            (SELECT max(expires) FROM tokens t WHERE t.grant_id=g.id AND t.kind IN ('access','refresh','pat')) AS expires,
+            (SELECT max(expires) FROM oauth_codes c WHERE c.grant_id=g.id) AS pending_until
+            FROM grants g WHERE g.user_id=? ORDER BY g.created DESC""", (principal.user_id,))
+        now = time.time()
         for row in rows:
             row["scopes"], row["projects"] = json.loads(row["scopes"]), json.loads(row["projects"])
+            row["status"] = ("revoked" if row["revoked"] else
+                "active" if row["expires"] and row["expires"] > now else
+                "pending" if row["pending_until"] and row["pending_until"] > now else "expired")
+            del row["pending_until"]
         return {"grants": rows}
 
     @router.post("/api/grants")
