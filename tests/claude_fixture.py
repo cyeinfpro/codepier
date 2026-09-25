@@ -27,14 +27,23 @@ def result(text='hello 世界',failed=False):
 def complete():
  global turn
  turn+=1;mid='msg-'+str(turn)
- emit({'type':'stream_event','event':{'type':'message_start','message':{'id':mid}}})
- emit({'type':'stream_event','event':{'type':'content_block_start','index':0,'content_block':{'type':'text','text':''}}})
+ def stream(event):emit({'type':'stream_event','event':event})
+ def final(block):emit({'type':'assistant','uuid':str(uuid.uuid4()),'message':{'id':mid,'content':[block]}})
+ stream({'type':'message_start','message':{'id':mid}})
+ stream({'type':'content_block_start','index':0,'content_block':{'type':'thinking','thinking':''}})
+ stream({'type':'content_block_delta','index':0,'delta':{'type':'thinking_delta','thinking':'fixture thought'}})
+ final({'type':'thinking','thinking':'fixture thought'})
+ stream({'type':'content_block_stop','index':0})
+ stream({'type':'content_block_start','index':1,'content_block':{'type':'text','text':''}})
  for text in ('hello ','世界'):
-  emit({'type':'stream_event','event':{'type':'content_block_delta','index':0,'delta':{'type':'text_delta','text':text}}})
- emit({'type':'stream_event','event':{'type':'content_block_start','index':1,'content_block':{'type':'thinking','thinking':''}}})
- emit({'type':'stream_event','event':{'type':'content_block_delta','index':1,'delta':{'type':'thinking_delta','thinking':'fixture thought'}}})
- emit({'type':'assistant','message':{'id':mid,'content':[{'type':'text','text':'hello 世界'}, {'type':'thinking','thinking':'fixture thought'},
-       {'type':'tool_use','id':'tool-'+str(turn),'name':'Read','input':{'file_path':'fixture-edit.txt'}}]}})
+  stream({'type':'content_block_delta','index':1,'delta':{'type':'text_delta','text':text}})
+ final({'type':'text','text':'hello 世界'})
+ stream({'type':'content_block_stop','index':1})
+ tool={'type':'tool_use','id':'tool-'+str(turn),'name':'Read','input':{'file_path':'fixture-edit.txt'}}
+ stream({'type':'content_block_start','index':2,'content_block':tool})
+ final(tool)
+ stream({'type':'content_block_stop','index':2})
+ stream({'type':'message_stop'})
  Path('fixture-edit.txt').write_text('fixture turn '+str(turn)+'\n')
  emit({'type':'user','message':{'role':'user','content':[{'type':'tool_result','tool_use_id':'tool-'+str(turn),'content':[{'type':'text','text':'fixture tool output'}]}]}})
  result()
