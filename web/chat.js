@@ -1487,6 +1487,26 @@ function chatEvent(e) {
     chatOutbox();
     $('#chat-interrupt').hidden = !v.active;
   }
+  // Older Claude adapters wrote every final block as message-id:0. Repair
+  // history replay only when one unfinished block in that same message matches.
+  if (
+    e.type === 'message' &&
+    !('block_index' in e) &&
+    (c.selected?.provider || c.provider) === 'claude' &&
+    typeof e.item_id === 'string' &&
+    e.item_id.endsWith(':0')
+  ) {
+    const prefix = e.item_id.slice(0, -1),
+      matches = [...v.items.values()].filter(
+        (item) =>
+          item.kind === 'assistant' &&
+          item.data.type === 'delta' &&
+          item.data.receipt === e.receipt &&
+          item.data.item_id?.startsWith(prefix) &&
+          item.text === e.text,
+      );
+    if (matches.length === 1) e = { ...e, item_id: matches[0].data.item_id };
+  }
   const kind = ['delta', 'message'].includes(e.type) ? 'assistant' : e.type,
     key =
       (e.receipt || 'session') + ':' + kind + ':' + (e.item_id || e.request_id || e.tool_id || '');
@@ -1592,11 +1612,7 @@ function chatRenderProcessGroups() {
     const live =
       !!v.active &&
       v.active === receipt &&
-      items.some(
-        (i) =>
-          i.kind === 'reasoning' ||
-          !['completed', 'end', 'succeeded', 'ok'].includes(i.data.status),
-      );
+      items.some((i) => !['completed', 'end', 'succeeded', 'ok'].includes(i.data.status));
     const counts = [tools ? tools + ' 项工具' : '', thoughts ? thoughts + ' 段思考' : '']
       .filter(Boolean)
       .join(' · ');
