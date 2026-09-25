@@ -46,6 +46,36 @@ def required(response, status=200):
     return response.json() if response.content else {}
 
 
+
+MCP_ACCEPTANCE_VERSION = '2025-11-25'
+
+
+def mcp_request(client, access_token, method, params=None, *, notification=False):
+    """Use the real legacy Streamable HTTP contract, including both media types.
+
+    Keep this explicit rather than relying on a panel client's default headers.
+    HTTP/authentication failures remain failures; do not retry or mask a 406.
+    """
+    body = {'jsonrpc': '2.0', 'method': method, 'params': params or {}}
+    if not notification:
+        body['id'] = uuid.uuid4().hex
+    return client.post('/mcp', headers={
+        'Authorization': 'Bearer ' + access_token,
+        'Accept': 'application/json, text/event-stream',
+        'Content-Type': 'application/json',
+        'MCP-Protocol-Version': MCP_ACCEPTANCE_VERSION,
+    }, json=body)
+
+
+def initialize_mcp(client, access_token):
+    reply = required(mcp_request(client, access_token, 'initialize', {
+        'protocolVersion': MCP_ACCEPTANCE_VERSION, 'capabilities': {},
+        'clientInfo': {'name': 'codepier-oidc-acceptance', 'version': '1'},
+    }))
+    assert reply['result']['protocolVersion'] == MCP_ACCEPTANCE_VERSION
+    required(mcp_request(client, access_token, 'notifications/initialized', notification=True), 202)
+
+
 def await_ready(predicate, seconds=300):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -264,39 +294,44 @@ def acceptance(output):
                 code = parse_qs(urlsplit(page.url).query)['code'][0]
                 tokens = required(alice.post('/oauth/token', data={'grant_type':'authorization_code','code':code,
                     'client_id':registration['client_id'],'redirect_uri':'http://localhost:19876/callback','code_verifier':verifier}))
-                def rpc(name, token_value=tokens['access_token']):
-                    return alice.post('/mcp', headers={'Authorization':'Bearer '+token_value},
-                        json={'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':name,'arguments':{}}})
-                assert required(rpc('get_profile'))['result']['structuredContent']['id'] == profiles[0]['id']
-                passed('separate_codepier_oauth_issuer_and_explicit_dynamic_role_consent')
-                phase = 'dynamic-resource-and-refresh'
-                # Seed an offline fixture mapping, not a real directory or credential.
-                db = sqlite3.connect(hub_dir/'hub.sqlite3', timeout=30)
-                with db:
-                    device = 'fixture-'+uuid.uuid4().hex
-                    db.execute('INSERT INTO devices(id,name,secret,space_id,owner_user_id,created) VALUES(?,?,?,?,?,?)',
-                               (device,'offline fixture','not-a-live-credential',sid,identities[0]['id'],time.time()))
-                    project_id = 'fixture-'+uuid.uuid4().hex
-                    db.execute('INSERT INTO projects(id,alias,alias_key,device_id,root,space_id,owner_user_id,created) VALUES(?,?,?,?,?,?,?,?)',
-                               (project_id,'new-project','new-project',device,str(folder/'unmapped'),sid,identities[0]['id'],time.time()))
-                assert project_id in {p['id'] for p in required(rpc('projects_list'))['result']['structuredContent']['projects']}
-                fresh = required(alice.post('/oauth/token', data={'grant_type':'refresh_token','refresh_token':tokens['refresh_token'],
-                    'client_id':registration['client_id']}))
-                assert fresh['refresh_token'] != tokens['refresh_token']
-                assert required(rpc('get_profile', fresh['access_token']))['result']['structuredContent']['id'] == profiles[0]['id']
-                passed('same_role_connection_gains_new_project_and_refresh_preserves_identity')
-                phase = 'real-group-removal'
-                ak_call('PATCH', f"core/users/{users[0][0]['pk']}/", {'groups': []})
-                with db:
-                    # Advance only the fixture's reconciliation schedule, not its policy/results.
-                    db.execute('UPDATE external_identities SET checked_at=0 WHERE user_id=?',(identities[0]['id'],))
-                required(owner.post('/api/iam/oidc/reconcile'))
-                assert rpc('projects_list').status_code == 403
-                assert all(s['id'] != sid for s in required(alice.get('/api/iam/me'))['spaces'])
-                assert any(s['id'] == sid for s in required(human_clients[1].get('/api/iam/me'))['spaces'])
-                passed('actual_idp_group_removal_revokes_team_and_existing_grant_only_for_target_user')
-                assert db.execute('PRAGMA foreign_key_check').fetchall() == []
-                db.close();ctx.close();browser.close()
+                # MCP is a separate client: never rely on a human panel cookie
+                # or X-CodePier-Space header to make downstream Tokens work.
+                with httpx.Client(base_url=hub_url, timeout=30) as mcp:
+                    initialize_mcp(mcp, tokens['access_token'])
+                    def rpc(name, token_value=tokens['access_token']):
+                        return mcp_request(mcp, token_value, 'tools/call', {'name': name, 'arguments': {}})
+                    assert required(rpc('get_profile'))['result']['structuredContent']['id'] == profiles[0]['id']
+                    passed('separate_codepier_oauth_issuer_and_explicit_dynamic_role_consent')
+                    phase = 'dynamic-resource-and-refresh'
+                    # Seed an offline fixture mapping, not a real directory or credential.
+                    db = sqlite3.connect(hub_dir/'hub.sqlite3', timeout=30)
+                    with db:
+                        device = 'fixture-'+uuid.uuid4().hex
+                        db.execute('INSERT INTO devices(id,name,secret,space_id,owner_user_id,created) VALUES(?,?,?,?,?,?)',
+                                   (device,'offline fixture','not-a-live-credential',sid,identities[0]['id'],time.time()))
+                        project_id = 'fixture-'+uuid.uuid4().hex
+                        db.execute('INSERT INTO projects(id,alias,alias_key,device_id,root,space_id,owner_user_id,created) VALUES(?,?,?,?,?,?,?,?)',
+                                   (project_id,'new-project','new-project',device,str(folder/'unmapped'),sid,identities[0]['id'],time.time()))
+                    assert project_id in {p['id'] for p in required(rpc('projects_list'))['result']['structuredContent']['projects']}
+                    fresh = required(alice.post('/oauth/token', data={'grant_type':'refresh_token','refresh_token':tokens['refresh_token'],
+                        'client_id':registration['client_id']}))
+                    assert fresh['refresh_token'] != tokens['refresh_token']
+                    assert required(rpc('get_profile', fresh['access_token']))['result']['structuredContent']['id'] == profiles[0]['id']
+                    passed('same_role_connection_gains_new_project_and_refresh_preserves_identity')
+                    phase = 'real-group-removal'
+                    ak_call('PATCH', f"core/users/{users[0][0]['pk']}/", {'groups': []})
+                    with db:
+                        # Advance only the fixture's reconciliation schedule, not its policy/results.
+                        db.execute('UPDATE external_identities SET checked_at=0 WHERE user_id=?',(identities[0]['id'],))
+                    required(owner.post('/api/iam/oidc/reconcile'))
+                    assert rpc('projects_list').status_code == 403
+                    assert rpc('projects_list', fresh['access_token']).status_code == 403
+                    assert all(s['id'] != sid for s in required(alice.get('/api/iam/me'))['spaces'])
+                    assert any(s['id'] == sid for s in required(human_clients[1].get('/api/iam/me'))['spaces'])
+                    passed('actual_idp_group_removal_revokes_team_and_existing_grant_only_for_target_user')
+                    assert db.execute('PRAGMA foreign_key_check').fetchall() == []
+                    db.close()
+                ctx.close();browser.close()
                 for client in human_clients:client.close()
             owner.close();ak.close()
             result['status']='passed'
