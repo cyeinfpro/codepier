@@ -30,13 +30,18 @@ sudo python3 scripts/panel_updater.py install --root "$PWD"
 
 使用 GitHub 的最新正式 Release；拒绝 draft、prerelease、同版本重装和自动降级。目标版本必须是三段式正式版本，并上传名为 `codepier-VERSION-source.zip` 的附件，不能只创建 Git tag。
 
+从 1.14.1 起，正式 Release 另附完整开发源码 `codepier-VERSION-source-full.zip`。面板仍选择 `source.zip`；该包仅省略旧更新器不接受的 8 个开发专用顶层配置文件，所有运行代码与依赖锁文件一致。完整开发与回归请使用 `source-full.zip`。1.14.0 的原附件不兼容 1.13.0 更新器；遇到“源码包包含未允许的顶层文件”时，重新检查正式 Release 并选择 1.14.1 或更新版本。检查结果可能缓存 60 秒。
+
 附件必须由源码打包器生成，含 `MANIFEST.sha256`，GitHub Release 资产元数据必须提供 SHA-256 digest 与准确字节数。更新器先校验 GitHub digest，再检查 ZIP 路径、大小、文件类型、重复文件、清单覆盖及源码版本。整个下载与解压设置上限；不会执行下载包中的宿主机安装脚本或 Compose 文件。
 
 正式发布前运行：
 
 ```bash
 python scripts/check_release.py
-python scripts/build_source_bundle.py --public --output dist/codepier-VERSION-source.zip
+python scripts/build_source_bundle.py --public
+python scripts/check_release.py --bundle dist/codepier-VERSION-source-full.zip
+python scripts/build_source_bundle.py --public --panel-update
+python scripts/check_release.py --panel-update --bundle dist/codepier-VERSION-source.zip
 ```
 
 上面的 `VERSION` 应替换为 `shared/util.py` 与 `RELEASE.json` 中一致的发布版本。发布流程仍由维护者执行，更新按钮不会自动创建或推送发布。

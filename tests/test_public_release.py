@@ -131,3 +131,45 @@ def test_regression_snapshot_covers_root_build_inputs(tmp_path, monkeypatch):
     before = runner.snapshot()
     path.write_text('dependency==2\n')
     assert before['requirements.txt'] != runner.snapshot()['requirements.txt']
+
+
+def test_panel_profile_requires_public_source(source_tree):
+    with pytest.raises(ValueError, match='public profile'):
+        bundle.build(source_tree / 'dist/panel.zip', panel_update=True)
+
+
+def test_real_release_upgrades_with_unmodified_1_13_updater(tmp_path):
+    """Synthetic minimal archives missed the 1.14.0 extra-root regression."""
+    import runpy
+    import uuid
+    from scripts import panel_update_source
+    paths = [bundle.ROOT / 'dist' / (uuid.uuid4().hex + suffix) for suffix in ['-full.zip', '-panel.zip']]
+    try:
+        full = bundle.build(paths[0], public=True)
+        panel = bundle.build(paths[1], public=True, panel_update=True)
+        expected = guard.public_files(bundle.ROOT)
+        assert guard.check_panel_update(paths[1], expected)['panel_updaters_verified'] == ['1.13.0', 'current']
+        with zipfile.ZipFile(paths[0]) as complete, zipfile.ZipFile(paths[1]) as compatible:
+            complete_names = set(complete.namelist()) - {'MANIFEST.sha256'}
+            compatible_names = set(compatible.namelist()) - {'MANIFEST.sha256'}
+            assert complete_names - compatible_names == bundle.PANEL_UPDATE_EXCLUDES
+            assert compatible_names < complete_names
+            for name in compatible_names:
+                assert complete.read(name) == compatible.read(name), name
+                assert complete.getinfo(name).external_attr == compatible.getinfo(name).external_attr, name
+        legacy = runpy.run_path(str(bundle.ROOT / 'tests/fixtures/panel_update_source_v1_13_0.py'))
+        release = {'version': bundle.source_version(), 'bytes': full['bytes'], 'sha256': full['sha256']}
+        with pytest.raises(legacy['UpdateError'], match='未允许的顶层文件'):
+            legacy['unpack_bundle'](paths[0], tmp_path / 'rejected', release)
+        assert not (tmp_path / 'rejected').exists()
+        # Unknown future root inputs must still fail instead of being silently omitted.
+        with zipfile.ZipFile(paths[1], 'a') as archive:
+            archive.writestr('future-root.toml', 'unknown = true\n')
+        release.update(bytes=paths[1].stat().st_size, sha256=hashlib.sha256(paths[1].read_bytes()).hexdigest())
+        with pytest.raises(panel_update_source.UpdateError, match='未允许的顶层文件'):
+            panel_update_source.unpack_bundle(paths[1], tmp_path / 'unknown', release)
+        assert panel['panel_update_profile'] and not full['panel_update_profile']
+    finally:
+        for path in paths:
+            path.unlink(missing_ok=True)
+            path.with_suffix('.manifest.json').unlink(missing_ok=True)

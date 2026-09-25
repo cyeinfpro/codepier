@@ -129,7 +129,9 @@ jobs:
         run: |
           VERSION=$(.venv/bin/python -c 'from scripts.build_source_bundle import source_version; print(source_version())')
           .venv/bin/python scripts/build_source_bundle.py --public
-          .venv/bin/python scripts/check_release.py --bundle "dist/codepier-${VERSION}-source.zip" --output dist/public-check.json
+          .venv/bin/python scripts/check_release.py --bundle "dist/codepier-${VERSION}-source-full.zip" --output dist/public-check.json
+          .venv/bin/python scripts/build_source_bundle.py --public --panel-update
+          .venv/bin/python scripts/check_release.py --panel-update --bundle "dist/codepier-${VERSION}-source.zip" --output dist/panel-update-check.json
       - name: Retain only selected regression receipts and coverage
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -159,9 +161,10 @@ jobs:
         with:
           name: public-source-${{ matrix.os }}
           path: |
-            dist/codepier-*-source.zip
-            dist/codepier-*-source.manifest.json
+            dist/codepier-*-source*.zip
+            dist/codepier-*-source*.manifest.json
             dist/public-check.json
+            dist/panel-update-check.json
           if-no-files-found: error
           retention-days: 14
 

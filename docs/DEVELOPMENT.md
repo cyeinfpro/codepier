@@ -1,5 +1,7 @@
 # 开发、构建与验证
 
+从 GitHub Release 下载源码开发时使用 `codepier-VERSION-source-full.zip`。`source.zip` 供旧面板更新器安装，省略了 8 个开发专用顶层文件，不能替代完整开发源码进行回归验收。
+
 ## 依赖与单一版本源
 
 运行环境推荐 Python 3.13，前端构建使用 Node.js 24。六套 requirements 的 `.in` 是审阅直接依赖的入口，`.txt` 是包含传递依赖、版本和哈希的可安装锁文件。不要手工删去哈希来绕过安装失败。兼容性 SDK 使用独立环境，避免污染 Hub 依赖。

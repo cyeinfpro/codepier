@@ -51,6 +51,14 @@ ROOT_FILES = {
     'requirements.txt',
     'ruff.toml',
 }
+# Development-only root inputs rejected by the installed 1.13 updater.
+# Keep this explicit: newly added roots must fail the compatibility gate.
+PANEL_UPDATE_EXCLUDES = frozenset({
+    '.prettierrc.json', 'pyproject.toml', 'requirements.in',
+    'requirements-agent.in', 'requirements-bridge.in', 'requirements-compat.in',
+    'requirements-dev.in', 'requirements-tools.in',
+})
+
 EXTENSIONS = {'.py','.js','.mjs','.cjs','.ts','.tsx','.html','.css','.json','.toml','.yaml','.yml',
               '.md','.txt','.sh','.ps1','.cmd','.bat','.svg','.png','.jpg','.jpeg','.webp','.ico',
               '.xml','.service','.plist','.example'}
@@ -241,7 +249,9 @@ def include(relative, *, public=False):
     return relative.suffix.lower() in EXTENSIONS or relative.name in {'LICENSE','Dockerfile','Caddyfile'}
 
 
-def build(destination, *, public=False):
+def build(destination, *, public=False, panel_update=False):
+    if panel_update and not public:
+        raise ValueError("Panel update bundles require the public profile")
     destination = destination.resolve()
     if ROOT not in destination.parents or destination.suffix.lower() != '.zip' or destination.relative_to(ROOT).parts[0] not in {'dist', '.work'}:
         raise ValueError('Bundle destination must be a ZIP inside dist/ or .work/, never a runtime source asset')
@@ -266,7 +276,7 @@ def build(destination, *, public=False):
         for name in sorted(names):
             source = current/name
             relative = source.relative_to(ROOT)
-            if not include(relative, public=public):
+            if not include(relative, public=public) or (panel_update and relative.as_posix() in PANEL_UPDATE_EXCLUDES):
                 continue
             before = source.lstat()
             if not stat.S_ISREG(before.st_mode) or source.is_symlink():
@@ -286,6 +296,8 @@ def build(destination, *, public=False):
                 raise RuntimeError('Source bundle exceeds 128 MiB uncompressed')
             files.append((relative.as_posix(),raw,before.st_mode & 0o777))
     required = REQUIRED_FILES - ({'LOCAL_RELEASE.json'} if public else set())
+    if panel_update:
+        required -= PANEL_UPDATE_EXCLUDES
     missing = required - {name for name,_,_ in files}
     if missing:
         raise RuntimeError('Bundle is missing runtime files: '+', '.join(sorted(missing)))
@@ -315,7 +327,7 @@ def build(destination, *, public=False):
         Path(temporary).unlink(missing_ok=True)
     result={'path':str(destination.relative_to(ROOT)),'bytes':destination.stat().st_size,
             'sha256':digest(destination.read_bytes()),'files':len(files)+1,'source_bytes':total,
-            'verified':True,'source_only':True,'public_profile':public,'excluded':'credentials, runtime DBs/state, environments, caches, old operation logs, font files, previous archives',
+            'verified':True,'source_only':True,'public_profile':public,'panel_update_profile':panel_update,'excluded':'credentials, runtime DBs/state, environments, caches, old operation logs, font files, previous archives',
             'skipped_selected_files':skipped,'inventory':inventory}
     metadata=destination.with_suffix('.manifest.json')
     metadata.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
@@ -334,10 +346,15 @@ def source_version():
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--output',type=Path,default=ROOT/'dist'/('codepier-'+source_version()+'-source.zip'))
+    parser.add_argument('--output',type=Path)
+    parser.add_argument('--panel-update',action='store_true',help='Build the update archive compatible with installed 1.13 updaters; requires --public')
     parser.add_argument('--public',action='store_true',help='Omit local release records and historical evidence; use this profile for GitHub')
     args=parser.parse_args()
-    print(json.dumps(build(args.output,public=args.public),ensure_ascii=False,indent=2))
+    if args.panel_update and not args.public:
+        parser.error('--panel-update requires --public')
+    suffix = '-source.zip' if args.panel_update else '-source-full.zip'
+    destination = args.output or ROOT/'dist'/('codepier-'+source_version()+suffix)
+    print(json.dumps(build(destination,public=args.public,panel_update=args.panel_update),ensure_ascii=False,indent=2))
 
 
 if __name__=='__main__':
