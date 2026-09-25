@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import expect, sync_playwright
 
-from tests.test_chat_browser import chat_page
+from tests.browser_support import chat_page
 from tests.test_ui_unification import _login, _navigate, _prepare_native_fixture
 
 

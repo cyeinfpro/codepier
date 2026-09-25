@@ -1,5 +1,6 @@
 """Explicit, durable project grants; defaults never bypass application consent."""
 from __future__ import annotations
+from hub.db_worker import database_endpoint
 
 import json
 import time
@@ -55,6 +56,7 @@ def grant_revision(store, grant_id):
 
 
 def bump_grant_revision(store, grant_id):
+    store.require_transaction()
     value = grant_revision(store, grant_id) + 1
     store.db.execute('INSERT INTO meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
                      ('grant_projects_revision:' + grant_id, str(value)))
@@ -90,7 +92,8 @@ def make_access_router(auth, runtime):
     store = runtime.store
 
     @router.put('/api/settings/access')
-    async def save_defaults(request: Request, body: AccessDefaultsInput):
+    @database_endpoint(runtime.store)
+    def save_defaults(request: Request, body: AccessDefaultsInput):
         principal = auth.admin(request, True)
         if body.apply_to_existing and not body.all_projects:
             raise DevError('INVALID_PROJECT', '批量应用仅用于明确开启全部项目；缩小授权请逐项调整')
@@ -114,12 +117,13 @@ def make_access_router(auth, runtime):
             store.audit(principal.actor, 'access.defaults_updated', detail={
                 **defaults, 'existing_oauth_grants': changed,
                 'scopes_unchanged': True, 'tokens_unchanged': True})
-        runtime.wake.set()
+        runtime.wake_delivery()
         return {'access_defaults': defaults, 'updated_grants': len(changed),
                 'note': '默认选项已保存；新连接仍需确认授权。已有连接的工具权限、凭据和有效期保持不变。'}
 
     @router.get('/api/grants/{grant_id}/projects')
-    async def read_grant_projects(grant_id: str, request: Request):
+    @database_endpoint(runtime.store)
+    def read_grant_projects(grant_id: str, request: Request):
         principal = auth.admin(request)
         with store.lock:
             row = store.one('SELECT * FROM grants WHERE id=? AND user_id=?', (grant_id, principal.user_id))
@@ -130,7 +134,8 @@ def make_access_router(auth, runtime):
                     'project_revision': grant_revision(store, grant_id)}
 
     @router.put('/api/grants/{grant_id}/projects')
-    async def update_grant_projects(grant_id: str, request: Request, body: GrantProjectsInput):
+    @database_endpoint(runtime.store)
+    def update_grant_projects(grant_id: str, request: Request, body: GrantProjectsInput):
         principal = auth.admin(request, True)
         with store.lock, store.db:
             auth.admin(request, True)
@@ -152,7 +157,7 @@ def make_access_router(auth, runtime):
                 revision = bump_grant_revision(store, grant_id)
                 store.audit(principal.actor, 'grant.projects_updated', grant_id,
                             detail={'before': before, 'projects': selected, 'scopes_unchanged': True})
-        runtime.wake.set()
+        runtime.wake_delivery()
         return {'id': grant_id, 'projects': selected, 'all_projects': selected == ['*'], 'project_revision': revision,
                 'note': '项目范围已更新，下次工具调用生效；无需重新连接。已开始的任务不会自动停止。'}
 

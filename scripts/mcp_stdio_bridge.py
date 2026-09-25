@@ -112,20 +112,22 @@ def prepare_request(request):
     if (prepared.get("method") == "tools/call" and isinstance(params, dict)
             and isinstance(params.get("name"), str) and params["name"] in IDEMPOTENT_TOOLS):
         args = params.setdefault("arguments", {})
+        if params['name'] == 'process' and isinstance(args, dict) and args.get('operation', 'list') not in {'search_start', 'search_cancel', 'validate'} or params['name'] == 'workspace' and isinstance(args, dict) and args.get('operation', 'list') in {'list', 'help'}:
+            return prepared
         if isinstance(args, dict) and (args.get("idempotency_key") is None or args.get("idempotency_key") == ""):
             args["idempotency_key"] = "bridge-" + uuid.uuid4().hex
     return prepared
 
 
-def forward(client, base, request, headers, *, retry_seconds=30, sleep=time.sleep, clock=time.monotonic, profile="full"):
+def forward(client, base, request, headers, *, retry_seconds=30, sleep=time.sleep, clock=time.monotonic, profile="core"):
     """Retry only transport failures, never a tool's SHA/permission/test error.
 
     request must already be prepared; generating keys inside this loop would
     duplicate writes/tests after a lost response.
     """
-    if profile not in {"full", "coding"}:
-        raise ValueError("MCP profile must be full or coding")
-    endpoint = base + "/mcp" + ("?profile=coding" if profile == "coding" else "")
+    if profile not in {"core", "full", "coding"}:
+        raise ValueError("MCP profile must be core, full or coding")
+    endpoint = base + "/mcp" + ("?profile=" + profile if profile != "core" else "")
     deadline = clock() + retry_seconds
     attempt = 0
     while True:
@@ -186,9 +188,9 @@ def main():
         if new not in os.environ and old in os.environ: os.environ[new] = os.environ[old]
     try:
         base = normalize_url(os.environ.get("CODEPIER_HUB_URL", "http://127.0.0.1:8765"))
-        profile = os.environ.get("CODEPIER_MCP_PROFILE", "full")
-        if profile not in {"full", "coding"}:
-            raise ValueError("CODEPIER_MCP_PROFILE must be full or coding")
+        profile = os.environ.get("CODEPIER_MCP_PROFILE", "core")
+        if profile not in {"core", "full", "coding"}:
+            raise ValueError("CODEPIER_MCP_PROFILE must be core, full or coding")
         token_file = Path(os.environ["CODEPIER_TOKEN_FILE"]).expanduser()
         token_from_file(token_file)
         retry_seconds = float(os.environ.get("CODEPIER_RETRY_SECONDS", "30"))

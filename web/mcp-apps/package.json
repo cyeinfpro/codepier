@@ -4,12 +4,15 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "node build.mjs"
+    "build": "node build-core.mjs && node build.mjs",
+    "format": "prettier --write ../*.js ../*.css ../core/*.mjs *.mjs",
+    "format:check": "prettier --check ../*.js ../*.css ../core/*.mjs *.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/ext-apps": "2.0.0"
   },
   "devDependencies": {
-    "esbuild": "0.28.2"
+    "esbuild": "0.28.2",
+    "prettier": "3.9.0"
   }
 }

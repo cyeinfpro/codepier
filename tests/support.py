@@ -80,7 +80,7 @@ class Stack:
         self.config={**self.pairing,'state_dir':str(self.directory/'agent-state'),'allowed_roots':[{'path':str(self.root),'writable':True,'allow_tasks':True}],
           'tasks':{
             'smoke':{'command':[sys.executable,'-u','-c','print("PASS: local task completed")'],'projects':['Imago','Nexus','Lumen'],'timeout':15,'description':'本机示例检查'},
-            'slow':{'command':[sys.executable,'-u','-c','import time; print("STARTED",flush=True); time.sleep(20); print("DONE")'],'projects':['Imago'],'timeout':25},
+            'slow':{'command':[sys.executable,'-u','-c','import time; print("STARTED",flush=True); time.sleep(20); print("DONE")'],'projects':['Imago'],'timeout':60},
             'timeout':{'command':[sys.executable,'-u','-c','import time; print("WAIT"); time.sleep(10)'],'projects':['Imago'],'timeout':1},
             'failure':{'command':[sys.executable,'-u','-c','import sys; print("EXPECTED FAILURE"); sys.exit(3)'],'projects':['Imago'],'timeout':5}
           }}

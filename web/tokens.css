@@ -66,9 +66,13 @@
   --ui-art-light: #f5efff;
   --ui-nav-selected: #27252b;
   --ui-nav-selected-text: #f8f7fa;
-  --ui-display-font: "Avenir Next", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
-  --ui-font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-  --ui-mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --ui-display-font:
+    'Avenir Next', 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    sans-serif;
+  --ui-font:
+    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei',
+    sans-serif;
+  --ui-mono: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
   /* Shared dimensions. Change these contracts, not page-specific copies. */
   --ui-space-1: 4px;
   --ui-space-2: 8px;
@@ -100,7 +104,7 @@
   --ui-scrim: rgb(20 20 20 / 36%);
   --ui-motion-fast: 140ms;
   --ui-motion-normal: 220ms;
-  --ui-ease: cubic-bezier(.2, .8, .2, 1);
+  --ui-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
 
   --ui-page-x: 28px;
   --ui-page-top: 20px;
@@ -109,7 +113,7 @@
   --ui-workspace-height: clamp(220px, calc(100dvh - 430px), 560px);
 }
 
-html[data-appearance="dark"] {
+html[data-appearance='dark'] {
   color-scheme: dark;
   --ui-bg: #191919;
   --ui-panel: #222222;
@@ -174,7 +178,6 @@ html[data-appearance="dark"] {
   --ui-cover-surface: rgb(255 255 255 / 7%);
   --ui-nav-selected: #ebe6f2;
   --ui-nav-selected-text: #27252b;
-
 }
 
 @media (prefers-color-scheme: dark) {
@@ -228,29 +231,43 @@ html[data-appearance="dark"] {
     --ui-message-bg: #343434;
     --ui-message-text: #e5e5e5;
     --ui-message-code-bg: #414141;
-  --ui-shadow: 0 16px 40px rgb(0 0 0 / 24%), 0 2px 8px rgb(0 0 0 / 12%);
-  --ui-scrim: rgb(0 0 0 / 46%);
-  --ui-cover-project: #40374f;
-  --ui-cover-device: #2d414c;
-  --ui-cover-task: #4c3c2c;
-  --ui-cover-note: #473346;
-  --ui-cover-live: #49422d;
-  --ui-cover-text: #f2edf8;
-  --ui-cover-muted: #d3c7e0;
-  --ui-cover-device-muted: #c1d8e4;
-  --ui-cover-task-muted: #e5d0b2;
-  --ui-cover-live-muted: #e6dbb8;
-  --ui-cover-surface: rgb(255 255 255 / 7%);
-  --ui-nav-selected: #ebe6f2;
-  --ui-nav-selected-text: #27252b;
-
+    --ui-shadow: 0 16px 40px rgb(0 0 0 / 24%), 0 2px 8px rgb(0 0 0 / 12%);
+    --ui-scrim: rgb(0 0 0 / 46%);
+    --ui-cover-project: #40374f;
+    --ui-cover-device: #2d414c;
+    --ui-cover-task: #4c3c2c;
+    --ui-cover-note: #473346;
+    --ui-cover-live: #49422d;
+    --ui-cover-text: #f2edf8;
+    --ui-cover-muted: #d3c7e0;
+    --ui-cover-device-muted: #c1d8e4;
+    --ui-cover-task-muted: #e5d0b2;
+    --ui-cover-live-muted: #e6dbb8;
+    --ui-cover-surface: rgb(255 255 255 / 7%);
+    --ui-nav-selected: #ebe6f2;
+    --ui-nav-selected-text: #27252b;
   }
 }
 
 @media (min-width: 901px) and (max-height: 800px) {
-  :root { --ui-page-top: 16px; --ui-panel-inset: 16px; --ui-page-title: 28px; }
+  :root {
+    --ui-page-top: 16px;
+    --ui-panel-inset: 16px;
+    --ui-page-title: 28px;
+  }
 }
-@media (max-width: 900px) { :root { --ui-page-x: 24px; --ui-topbar-height: 60px; } }
+@media (max-width: 900px) {
+  :root {
+    --ui-page-x: 24px;
+    --ui-topbar-height: 60px;
+  }
+}
 @media (max-width: 640px) {
-  :root { --ui-panel-inset: 16px; --ui-modal-inset: 10px; --ui-page-x: 16px; --ui-page-top: 18px; --ui-page-title: 26px; }
+  :root {
+    --ui-panel-inset: 16px;
+    --ui-modal-inset: 10px;
+    --ui-page-x: 16px;
+    --ui-page-top: 18px;
+    --ui-page-title: 26px;
+  }
 }

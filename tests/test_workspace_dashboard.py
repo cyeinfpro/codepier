@@ -18,18 +18,13 @@ from tests.test_mcp_apps_host import host_bundle
 
 
 def task(s, title):
-    result = s.mcp('workflows_create', {'project': 'Imago', 'title': title, 'goal': '检查真实任务证据',
-        'template': 'custom', 'steps': [{'title': '核查改动', 'acceptance': '固定快照可读取'},
-        {'title': '验证与交付', 'acceptance': '验证新鲜度并核对文件 SHA'}], 'idempotency_key': uuid.uuid4().hex})
+    result = s.mcp('workspace', {'project': 'Imago', 'idempotency_key': uuid.uuid4().hex, 'operation': 'workflow_create', 'options': {'title': title, 'goal': '检查真实任务证据', 'template': 'custom', 'steps': [{'title': '核查改动', 'acceptance': '固定快照可读取'}, {'title': '验证与交付', 'acceptance': '验证新鲜度并核对文件 SHA'}]}})
     assert not result['isError'], result
     return result['structuredContent']
 
 
 def checkpoint(s, workflow, evidence):
-    response = s.mcp('workflows_update', {'workflow_id': workflow['workflow_id'],
-        'expected_version': workflow['version'], 'action': 'checkpoint', 'step_id': 's1',
-        'step_state': 'running', 'summary': '已关联真实回执；失败、历史通过与交付状态分别展示。',
-        'evidence': evidence, 'idempotency_key': uuid.uuid4().hex})
+    response = s.mcp('workspace', {'idempotency_key': uuid.uuid4().hex, 'operation': 'workflow_update', 'options': {'workflow_id': workflow['workflow_id'], 'expected_version': workflow['version'], 'action': 'checkpoint', 'step_id': 's1', 'step_state': 'running', 'summary': '已关联真实回执；失败、历史通过与交付状态分别展示。', 'evidence': evidence}})
     assert not response['isError'], response
     return response['structuredContent']
 
@@ -62,7 +57,7 @@ def test_task_dashboard_real_receipts_diff_freshness_and_authenticated_download(
     validation = resolved(s, 'validation_run', {'command': 'printf dashboard_verified', 'label': '源码验证回执'})
     failed = resolved(s, 'shell_exec', {'command': 'printf real_failure_log; exit 7'}, expect='failed')
     workflow = checkpoint(s, workflow, [review['operation_id'], artifact['operation_id'], validation['operation_id'], failed['operation_id']])
-    card = s.mcp('workflows_get', {'workflow_id': workflow['workflow_id']})
+    card = s.mcp('workspace', {'operation': 'workflow_get', 'options': {'workflow_id': workflow['workflow_id']}})
     calls = []
     def host_tool(params):
         calls.append(copy.deepcopy(params))
@@ -113,7 +108,7 @@ def test_task_dashboard_real_receipts_diff_freshness_and_authenticated_download(
         app.get_by_text('附件导入', exact=True).click()
         assert app.locator('html').evaluate('(n)=>n.scrollWidth <= n.clientWidth + 1')
         assert app.locator('html').get_attribute('data-theme') == theme
-        assert all(call['name'] in {'workspace_status', 'operations_get', 'operations_wait', 'show_changes', 'validations_get', 'fs_tree'} for call in calls)
+        assert all(call['name'] in {'workspace', 'process', 'read'} for call in calls)
         assert all('baseline_ref' not in call.get('arguments', {}) for call in calls)
         assert not errors and not page.evaluate('window.codepierHostErrors')
         folder = BASE/'docs/evidence/workspace-dashboard-20260917/screenshots'; folder.mkdir(parents=True, exist_ok=True)
@@ -139,7 +134,7 @@ def test_sdk_task_switch_ignores_delayed_responses_and_failure_is_not_empty(host
     broken = {'active': False}
     def real_tool(params):
         if broken['active']: return {'structuredContent': {'error': {'code': 'CONNECTION_FAILED', 'message': 'fixture offline'}}, 'isError': True}
-        selected = {'a'*32: a, 'b'*32: b}.get(params['arguments'].get('workflow_id'))
+        selected = {'a'*32: a, 'b'*32: b}.get(params['arguments'].get('options', {}).get('workflow_id'))
         return response(fixture_workspace(selected, workflows=[a, b]))
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True); page = browser.new_page()
@@ -149,7 +144,7 @@ def test_sdk_task_switch_ignores_delayed_responses_and_failure_is_not_empty(host
         expect(app.get_by_label('选择任务')).to_have_value('')
         page.evaluate('''() => { window.codepierHostTool = async p => {
           const result = await window.codepierRealTool(p);
-          if (p.arguments.workflow_id === 'a'.repeat(32)) await new Promise(resolve=>setTimeout(resolve,900));
+          if (p.arguments.options.workflow_id === 'a'.repeat(32)) await new Promise(resolve=>setTimeout(resolve,900));
           return result;
         }; }''')
         app.get_by_label('自动刷新任务状态').uncheck()
@@ -175,15 +170,15 @@ def test_sdk_upload_recovery_uses_exact_key_and_locks_target(host_bundle, termin
     def host_tool(params):
         calls.append(copy.deepcopy(params))
         name = params['name']
-        if name == 'workspace_status': return response(fixture_workspace())
-        if name == 'download_artifact':
-            imports.append(copy.deepcopy(params['arguments']))
+        if name == 'workspace': return response(fixture_workspace())
+        if name == 'write':
+            imports.append({**copy.deepcopy(params['arguments']['options']), 'idempotency_key':params['arguments']['idempotency_key']})
             if len(imports) == 1: return {'structuredContent': {'error': {'code': 'TRANSPORT_UNKNOWN', 'message': 'fixture uncertain'}}, 'isError': True}
             if len(imports) == 3: return {'structuredContent': {'error': {'code': 'INSUFFICIENT_SCOPE', 'message': 'fixture permission changed'}}, 'isError': True}
             return response({'pending': True, 'operation_id': identifier, 'state': 'running'})
-        if name == 'operations_wait': return response({'id': identifier, 'operation_id': identifier,
+        if name == 'process': return response({'operations':[{'id': identifier, 'operation_id': identifier,
             'tool': 'download_artifact', 'state': terminal, 'pending': False,
-            'result': {'ok': terminal == 'succeeded', 'data': {'created': terminal == 'succeeded', 'path': imports[0]['path'], 'bytes': 4, 'sha256': 'd'*64}}})
+            'result': {'ok': terminal == 'succeeded', 'data': {'created': terminal == 'succeeded', 'path': imports[0]['path'], 'bytes': 4, 'sha256': 'd'*64}}}]})
         raise AssertionError(params)
     script = '<script>window.openai={uploadFile:async()=>({fileId:"fixture-file"}),getFileDownloadUrl:async()=>({downloadUrl:"https://files.oaiusercontent.com/fixture"})};</script>'
     with sync_playwright() as pw:
@@ -203,7 +198,7 @@ def test_sdk_upload_recovery_uses_exact_key_and_locks_target(host_bundle, termin
         expect(app.locator('#app')).to_contain_text('已保存 sample.txt' if terminal == 'succeeded' else '导入没有确认成功')
         expect(app.get_by_label('项目内目标路径')).to_be_enabled()
         assert len(imports) == 2 and imports[0] == imports[1]
-        assert [c['arguments']['operation_id'] for c in calls if c['name'] == 'operations_wait'] == [identifier]
+        assert [c['arguments']['operation_ids'][0] for c in calls if c['name'] == 'process'] == [identifier]
         app.get_by_role('button', name='保存文件', exact=True).click()
         expect(app.locator('#app')).to_contain_text('请求在执行前被拒绝')
         expect(app.get_by_label('项目内目标路径')).to_be_enabled()
@@ -228,7 +223,7 @@ def test_sdk_active_polling_stops_when_card_is_cancelled(host_bundle):
         expect(app.locator('#app')).to_contain_text('后台操作没有因此自动取消')
         count = len(calls)
         page.wait_for_timeout(6500)
-        assert len(calls) == count and set(calls) == {'workspace_status'}
+        assert len(calls) == count and set(calls) == {'workspace'}
         browser.close()
 
 
@@ -236,11 +231,11 @@ def test_coding_profile_app_tool_read_and_scope_enforcement(integrated_stack):
     s = integrated_stack
     headers = {'Authorization': 'Bearer ' + s.pat, 'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream'}
     result = s.client.post('/mcp?profile=coding', headers=headers, json={'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
-        'params': {'name': 'workspace_status', 'arguments': {'project': 'Imago'}}}).json()['result']
+        'params': {'name': 'workspace', 'arguments': {'operation':'dashboard','project': 'Imago'}}}).json()['result']
     assert not result['isError'] and result['structuredContent']['execution_started'] is False
     invalid = s.client.post('/api/grants', json={'label': 'dashboard-no-read', 'scopes': ['write'], 'projects': [s.project['id']], 'days': 1})
     assert not invalid.is_success  # The owner API itself requires the base read scope.
     grant = s.client.post('/api/grants', json={'label': 'dashboard-other-project', 'scopes': ['read'], 'projects': [s.projects[1]['id']], 'days': 1}).json()
-    denied = s.mcp('workspace_status', {'project': 'Imago'}, token_value=grant['token'])
+    denied = s.mcp('workspace', {'project': 'Imago', 'operation': 'dashboard', 'options': {}}, token_value=grant['token'])
     assert denied['isError'] and denied['structuredContent']['error']['code'] == 'PROJECT_NOT_FOUND'
     s.client.delete('/api/grants/' + grant['grant_id'])

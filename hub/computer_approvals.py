@@ -1,6 +1,7 @@
 """Panel-only human consent codepier. No MCP tool can decide native permission."""
 import time
 import json
+from hub.principal import refresh_principal
 from shared.util import DevError
 
 class ComputerApprovals:
@@ -67,7 +68,8 @@ class ComputerApprovals:
             if not self.live(row):self.remove(key)
         return [{k:v for k,v in row.items() if k!='connection'} for row in self.pending.values()]
 
-    async def decide(self, identifier, action, principal):
+    def _take_decision(self, identifier, action, principal):
+        principal=refresh_principal(self.runtime.store, principal)
         if action not in {'accept','decline','cancel'}:
             raise DevError('INVALID_DECISION','只支持允许、拒绝或取消')
         row=self.pending.get(identifier)
@@ -76,8 +78,14 @@ class ComputerApprovals:
             raise DevError('APPROVAL_EXPIRED','授权请求已过期、断线或会话已结束；请重新读屏',409)
         # Consume before awaiting send: two panel tabs cannot race to decide twice.
         self.remove(identifier)
+        return row, principal
+
+    async def decide(self, identifier, action, principal):
+        row, principal = await self.runtime.store.run(self._take_decision, identifier, action, principal)
+        if self.runtime.connections.get(row['device_id']) is not row['connection'] or getattr(row['connection'], 'unusable', False):
+            raise DevError('APPROVAL_EXPIRED', '授权连接已变化，请重新读屏', 409)
         await row['connection'].send({'type':'computer_approval_decision','request_id':identifier,
                                        'session_id':row['session_id'],'action':action})
-        self.runtime.store.audit(principal.actor,'computer.approval',identifier,detail={
+        await self.runtime.store.run(self.runtime.store.audit,principal.actor,'computer.approval',identifier,detail={
             'action':action,'project_id':row['project_id'],'operation_id':row['operation_id'],'app':row['app']})
         return {'ok':True,'action':action}

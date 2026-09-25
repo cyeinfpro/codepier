@@ -69,7 +69,7 @@ class Searches:
             return {'search_id':identifier,'state':state,'project_root':str(root),'expires':now+TTL,'file_count':len(paths),
                     'truncated':truncated,'next':'searches_get','execution':'Scanning advances on searches_get; no automatic background execution.'}
 
-    def advance(self,project,row):
+    def advance(self,project,row,minimum_results=0):
         args=json.loads(row['args']);root,_=self.engine.root(project);begin=time.monotonic()
         with self.journal.lock:
             files=self.journal.db.execute('SELECT seq,path FROM search_files WHERE search_id=? AND seq>? ORDER BY seq LIMIT 64',(row['id'],row['scanned'])).fetchall()
@@ -77,7 +77,7 @@ class Searches:
         needle=args['query'] if args['case_sensitive'] else args['query'].casefold();hits=[]
         for index,path in files:
             elapsed=time.monotonic()-begin
-            if elapsed>=2:break
+            if elapsed>=2 and row['result_count']>=minimum_results:break
             if row['spent']+elapsed>=args['timeout_seconds'] or row['read_bytes']>=READ_BUDGET:
                 row.update(state='completed',truncated=1,error='SEARCH_BUDGET');break
             row['scanned']=index
@@ -130,7 +130,7 @@ class Searches:
             if args['cursor']>row['result_count']:
                 raise DevError('INVALID_SEARCH_CURSOR','游标超过已保存结果范围，请使用上一页返回的游标',409)
             if row['state']=='running' and row['result_count']-args['cursor']<args['limit']:
-                self.advance(project,row)
+                self.advance(project,row,args['cursor']+args['limit'])
             with self.journal.lock:
                 hits=self.journal.db.execute('SELECT seq,payload FROM search_hits WHERE search_id=? AND seq>? ORDER BY seq LIMIT ?',
                     (row['id'],args['cursor'],args['limit']+1)).fetchall()

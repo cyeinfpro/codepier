@@ -110,9 +110,9 @@ def mcp_result(name: str, value: dict):
         nested=public.get('result')
         if name in {'operations_get','operations_wait'} and isinstance(nested,dict):scrub_expired(nested)
         else:scrub_expired(public)
-    desktop = name in COMPUTER_TOOLS
+    desktop = name in COMPUTER_TOOLS or name == 'read'
     target = public
-    if name in {'operations_get', 'operations_wait'} and public.get('tool') in COMPUTER_TOOLS:
+    if name in {'operations_get', 'operations_wait'} and public.get('tool') in COMPUTER_TOOLS | {'read'}:
         desktop = True
         nested = public.get('result')
         target = nested.get('data', {}) if isinstance(nested, dict) else {}
@@ -147,7 +147,7 @@ def purge_database(db, table: str, now: float | None = None):
         raise ValueError('Unknown result table')
     now = time.time() if now is None else now
     # SQLite JSON functions are available in supported Python builds; avoid touching non-computer rows.
-    rows = db.execute(f"SELECT id FROM {table} WHERE (tool LIKE 'computer_%' OR tool='browser_snapshot') AND result IS NOT NULL "
+    rows = db.execute(f"SELECT id FROM {table} WHERE (tool LIKE 'computer_%' OR tool IN ('browser_snapshot','read')) AND result IS NOT NULL "
                       "AND json_extract(result,'$.data.computer_expires_at')<=? "
                       "AND COALESCE(json_extract(result,'$.data.media_expired'),0)=0 LIMIT 64", (now,)).fetchall()
     for row in rows:

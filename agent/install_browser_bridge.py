@@ -81,10 +81,20 @@ def install(config_path,extension_id,profile_id,projects,origins,*,browser='chro
                 launcher=directory/'codepier-browser-host.exe';shutil.copyfile(native_executable,launcher);owned.append(launcher)
                 settings=directory/'codepier-browser-host.json';atomic_json(settings,{'descriptor':str(descriptor),'extension_id':extension_id});owned.append(settings)
             else:
+                # The native host is stdlib-only. Install its own immutable copy:
+                # moving/updating a checkout must not strand a browser registration.
+                native_script=directory/'codepier_browser_host.py'
+                with native_script.open('xb') as file:
+                    owned.append(native_script)
+                    file.write(Path(__file__).resolve().with_name('codepier_browser_host.py').read_bytes())
+                native_script.chmod(0o600)
                 launcher=directory/'host.sh'
-                command=shlex.join([sys.executable,str(ROOT/'agent/codepier_browser_host.py'),'--descriptor',str(descriptor),'--extension-id',extension_id])
-                with launcher.open('x') as file:file.write('#!/bin/sh\nexec '+command+' "$@"\n')
-                launcher.chmod(0o700);owned.append(launcher)
+                interpreter=str(Path(sys.executable).resolve())
+                command=shlex.join([interpreter,str(native_script),'--descriptor',str(descriptor),'--extension-id',extension_id])
+                with launcher.open('x') as file:
+                    owned.append(launcher)
+                    file.write('#!/bin/sh\ncd '+shlex.quote(str(directory))+' || exit 1\nexec '+command+' "$@"\n')
+                launcher.chmod(0o700)
             atomic_json(manifest,{'name':NAME,'description':'CodePier explicitly authorized browser bridge','path':str(launcher),
                                  'type':'stdio','allowed_origins':['chrome-extension://'+extension_id+'/']});owned.append(manifest)
             # Save a recoverable ownership receipt before changing config/registry.

@@ -12,10 +12,10 @@ let binding = {};
 let cleanup = () => {};
 
 function valueOf(result, name = '') {
-  const value = result?.structuredContent;
+  const value = name === 'process' && result?.structuredContent?.operations ? result.structuredContent.operations[0] : result?.structuredContent;
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('工具未返回结构化结果。');
   // A failed original operation is a valid read result: keep its status and logs.
-  const receipt = ['operations_get', 'operations_wait'].includes(name) &&
+  const receipt = name === 'process' &&
     typeof value.tool === 'string' && typeof value.state === 'string' && (value.id || value.operation_id);
   if (!receipt && (result.isError || value.error)) {
     const error = new Error(value.error?.message || (typeof value.error === 'string' ? value.error : '请求未完成，请检查原操作。'));
@@ -49,7 +49,7 @@ async function settle(value, alive) {
     if (!alive()) return null;
     if (Date.now() > deadline) throw new Error('读取仍在进行。请继续查询原操作 ' + value.operation_id + '，不要重新执行。');
     const id = value.operation_id;
-    const op = await request('operations_wait', {operation_id: id, wait_seconds: 1, output_limit: 2000});
+    const op = await request('process', {operation: 'wait', operation_ids: [id], wait_seconds: 1, output_limit: 2000});
     if (!alive()) return null;
     if ((op.operation_id || op.id) !== id) throw new Error('原操作编号不匹配，已停止读取。');
     const completed = decode(op);

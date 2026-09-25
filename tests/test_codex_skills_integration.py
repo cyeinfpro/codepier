@@ -31,7 +31,9 @@ def prepared(stack):
 
 
 def mcp(stack,name,args):
-    r=stack.mcp(name,args)
+    from hub.core_tools import public_call
+    public_name, public_args = public_call(name, args)
+    r=stack.mcp(public_name,public_args)
     assert not r.get('isError'),r
     value=r['structuredContent']
     Draft202012Validator(OUTPUT_SCHEMAS[name]).validate(value)
@@ -54,10 +56,10 @@ def test_real_mcp_reads_user_project_and_resource_without_executing(prepared):
     assert 'SHOULD_NOT_EXECUTE' in script['content']
     assert not (folder/'SHOULD_NOT_EXECUTE').exists()
     assert not mcp(stack,'skills_list',{'project':'Nexus'})['skills']
-    denied=stack.mcp('skills_read',{'project':'Nexus','skill_id':selected['skill_id']})
+    denied=stack.mcp('workspace',{'project': 'Nexus', 'skill_id': selected['skill_id'], 'operation': 'skill'})
     assert denied['isError']
     disabled=mcp(stack,'skills_list',{'project':'Imago','include_disabled':True,'query':'disabled'})['skills'][0]
-    denied=stack.mcp('skills_read',{'project':'Imago','skill_id':disabled['skill_id'],'explicit':True})
+    denied=stack.mcp('workspace',{'project': 'Imago', 'skill_id': disabled['skill_id'], 'explicit': True, 'operation': 'skill'})
     assert denied['isError'] and denied['structuredContent']['error']['code']=='SKILL_DISABLED'
     preview=mcp(stack,'project_context',{'project':'Imago','max_files':1,'max_chars':1000})
     assert len(preview['codex_skills'])==2 and preview['skills_catalog']['codex_enabled_for_project']

@@ -6,7 +6,7 @@ import pytest
 from playwright.sync_api import expect, sync_playwright
 from scripts.ui_comfort_audit import MEASURE
 from tests.test_ui_unification import _login, _navigate, _prepare_native_fixture, _set_scheme
-from tests.test_chat_browser import chat_page
+from tests.browser_support import chat_page
 
 ROOT=Path(__file__).resolve().parents[1]
 OUT=ROOT/'docs/evidence/ui-comfort-20260916/verification'

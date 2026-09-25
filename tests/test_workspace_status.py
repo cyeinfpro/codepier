@@ -8,8 +8,8 @@ import pytest
 
 from hub.mcp_apps import attach
 from shared.contracts import TOOLS, tool_definitions
-from shared.integration_contracts import APP_ONLY_TOOLS, REMOTE_TOOLS
-from shared.coding_contracts import CODING_TOOLS
+from shared.integration_contracts import REMOTE_TOOLS
+from shared.core_contracts import CORE_TOOLS
 from shared.util import DevError
 from tests.test_agentdock_workflows import env, call, create, update, operation
 
@@ -182,12 +182,12 @@ def test_app_only_catalog_and_explicit_workflow_widget_binding(env):
     assert 'workspace_status' not in REMOTE_TOOLS
     for profile in ('full', 'coding'):
         tools = {tool['name']: tool for tool in tool_definitions(profile)}
-        assert tools['workspace_status']['_meta']['ui']['visibility'] == ['app']
-        assert tools['workspace_status']['annotations']['readOnlyHint']
-    assert set(t['name'] for t in tool_definitions('coding')) == set(CODING_TOOLS) | APP_ONLY_TOOLS
+        assert 'workspace_status' not in tools
+        assert tools['workspace']['_meta']['ui']['visibility'] == ['model', 'app']
+    assert set(t['name'] for t in tool_definitions('coding')) == CORE_TOOLS
     receipt = create(env)
     value = call(env, 'workflows_get', workflow_id=receipt['workflow_id'])
     bound = attach({'structuredContent': value}, 'workflows_get', {'workflow_id': receipt['workflow_id']}, value, lambda: 'https://panel.example')
     meta = bound['_meta']['com.codepier/binding']
     assert meta['project'] == 'P' and meta['workflow_id'] == receipt['workflow_id'] and meta['kind'] == 'workspace'
-    assert tools['workspace_status']['securitySchemes'][0]['scopes'] == ['read']
+    assert tools['workspace']['securitySchemes'][0]['scopes'] == ['read']

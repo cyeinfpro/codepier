@@ -2,11 +2,11 @@
 
 **把 ChatGPT / MCP、浏览器管理面板和你自己的开发电脑连接起来，让 AI 在明确授权的项目边界内真正读取代码、修改文件、运行命令、管理原生 CLI、验证网页，并通过项目安全地操作已保存的 VPS。**
 
-[![Version](https://img.shields.io/badge/version-1.13.0-2563eb)](RELEASE.json)
+[![Version](https://img.shields.io/badge/version-1.14.0-2563eb)](RELEASE.json)
 [![Python](https://img.shields.io/badge/Python-3.13%20recommended-3776ab)](requirements.txt)
 [![License](https://img.shields.io/badge/license-MIT-16a34a)](LICENSE)
 
-> 当前仓库的 `RELEASE.json` 标记为 **1.13.0 / released / source-only**。该版本发布源码，不等同于已经部署到你的 Hub / Agent。
+> 当前仓库的 `RELEASE.json` 标记为 **1.14.0 / released / source-only**。该版本发布源码，不等同于已经部署到你的 Hub / Agent。
 
 CodePier 面向这样的开发方式：
 
@@ -26,7 +26,7 @@ CodePier 面向这样的开发方式：
 | **全局 Pi / Codex / Claude 会话** | 在网页侧栏跨项目查看原生 CLI 会话，保留项目归属、状态、历史、草稿、附件、模型与思考设置。 |
 | **开发工具工作流** | 从代码导航、Git worktree、测试验收到任务交接与网页验证，保持同一项目/工作目录范围。 |
 | **持久操作与恢复** | 长任务返回 `operation_id`，支持排队、执行、查询、取消与断线后恢复，避免不确定结果被重复执行。 |
-| **VPS 管理** | 在面板保存 VPS，支持 VPS ↔ 项目多对多分配；ChatGPT 通过 `vps_list` / `vps_exec` 使用已授权连接。 |
+| **VPS 管理** | 在面板保存 VPS，支持 VPS ↔ 项目多对多分配；ChatGPT 通过 `vps` / `exec` 使用已授权连接。 |
 | **直接 SSH** | 对没有保存到 VPS 管理的临时服务器，可使用 `ssh_exec` 显式提供主机、账号和密码。 |
 | **后台浏览器** | 通过浏览器扩展、原生消息宿主和项目级站点授权复用指定浏览器档案做网页观察与受控操作。 |
 | **Computer Use** | 在独立本机授权、项目权限和系统权限都满足时启用桌面控制，并支持本机紧急停止。 |
@@ -207,15 +207,15 @@ VPS 分配不会绕过项目执行权限。真正执行命令时，仍需要：
 先查询：
 
 ```text
-vps_list(project="Imago")
+vps(project="Imago")
 ```
 
 再执行：
 
 ```text
-vps_exec(
+exec(
   project="Imago",
-  vps="广州面板",
+  target="vps:<上一步返回的连接编号>",
   command="df -h",
   idempotency_key="..."
 )
@@ -244,21 +244,9 @@ vps_exec(
 
 ## 临时服务器：直接 SSH
 
-如果服务器没有保存进 VPS 管理，也可以使用 `ssh_exec` 直接连接。
+临时服务器可通过 `exec` 调用 Agent 上已经安装的 SSH 工具。密码传入 `env.SSHPASS` 等受控环境，不放进命令字符串；SSH 主机密钥仍需验证。经常使用的服务器建议保存到 VPS 管理并分配给项目，再使用 `vps` 返回的 `target`。
 
-该路径适合一次性或临时主机，需要在调用时明确提供：
-
-- 项目
-- 主机 / IP
-- SSH 端口
-- 用户名
-- 密码
-- 命令
-- 幂等键
-
-`ssh_exec` 与 `vps_exec` 都复用 CodePier 的持久操作、超时、取消、主机密钥校验和结果恢复机制。
-
-> 对经常使用的服务器，优先保存到 VPS 管理并分配给项目；这样后续调用不需要反复在聊天中传递密码。
+MCP 只提供九个入口，文件、命令、浏览器、桌面及所有专项能力的参数与并行规则见 [九个 MCP 工具](docs/CORE_TOOLS.md)。旧 MCP 工具名已移除。
 
 ---
 
@@ -625,6 +613,7 @@ npm --prefix web/mcp-apps run build
 
 ```bash
 .venv/bin/python scripts/build_integration_assets.py
+python scripts/build_web_assets.py
 ```
 
 代码检查：
@@ -696,7 +685,7 @@ codepier/
 
 仓库当前版本信息来自 [`RELEASE.json`](RELEASE.json)：
 
-- **Version:** 1.13.0
+- **Version:** 1.14.0
 - **Date:** 2026-09-23
 - **Status:** released
 - **Source only:** true
@@ -712,3 +701,7 @@ codepier/
 CodePier 使用 [MIT License](LICENSE)。
 
 项目包含的第三方前端依赖保留各自许可证，相关声明位于 `web/vendor/` 和 `web/mcp-apps/THIRD_PARTY_NOTICES.txt`。
+
+## 开发与排查入口
+
+[FAQ](docs/FAQ.md) · [开发与分层验证](docs/DEVELOPMENT.md) · [当前 CLI 会话规范](docs/CLI_SESSIONS.md) · [安全与密钥轮换](SECURITY.md)

@@ -1,18 +1,30 @@
-"""Static contract checks for conversation and desktop-approval UI tokens."""
+"""Check browser-parsed conversation/approval styles, not source whitespace."""
 from pathlib import Path
 import re
+import pytest
 
 
 ROOT = Path(__file__).parents[1]
-CHAT = (ROOT / 'web/chat.css').read_text()
-COMPUTER = (ROOT / 'web/computer.css').read_text()
+@pytest.fixture
+def styles(chat_browser_pool):
+    page = chat_browser_pool('chromium').new_page()
+    try:
+        page.set_content('<main></main>')
+        for name in ('chat.css', 'computer.css'):
+            page.add_style_tag(path=str(ROOT / 'web' / name))
+        # CSSOM preserves the effective declaration/token values while normalizing
+        # legal source quotation and spacing differences introduced by formatters.
+        yield page.evaluate("[...document.styleSheets].map(sheet=>[...sheet.cssRules].map(rule=>rule.cssText).join('\\n'))")
+    finally:
+        page.context.close()
 
 
 def compact(value):
-    return re.sub(r'\s+', '', value)
+    return re.sub(r'\s+', '', value).replace("'", '"')
 
 
-def test_chat_aliases_every_shared_design_token_with_standalone_fallbacks():
+def test_chat_aliases_every_shared_design_token_with_standalone_fallbacks(styles):
+    CHAT = styles[0]
     css = compact(CHAT)
     light = {'bg': ('panel', '#ffffff'),
  'side': ('side', '#fafafa'),
@@ -43,7 +55,8 @@ def test_chat_aliases_every_shared_design_token_with_standalone_fallbacks():
     assert '--chat-scrim:var(--ui-scrim,' in css
 
 
-def test_chat_dark_fallbacks_match_the_shared_contract():
+def test_chat_dark_fallbacks_match_the_shared_contract(styles):
+    CHAT = styles[0]
     css = compact(CHAT)
     selector = '.chat-workspace[data-appearance="dark"],html[data-appearance="dark"].chat-workspace'
     assert selector in css
@@ -67,19 +80,21 @@ def test_chat_dark_fallbacks_match_the_shared_contract():
         assert f'--chat-{chat_name}:var(--ui-{ui_name},{fallback})' in dark_block
 
 
-def test_conversation_keeps_focus_responsive_and_layer_contracts():
+def test_conversation_keeps_focus_responsive_and_layer_contracts(styles):
+    CHAT = styles[0]
     css = compact(CHAT)
     assert ':focus-visible' in CHAT
     assert '@media(max-width:760px)' in css
     assert '@media(max-width:360px)' in css
     assert '@media(max-height:520px)' in css
     assert '@media(prefers-reduced-motion:reduce)' in css
-    assert 'max-width:calc(100% - 20px)' in CHAT
+    assert 'max-width:calc(100%-20px)' in css
     assert 'var(--chat-scrim)' in CHAT
     assert 'pointer-events:none' in css
 
 
-def test_computer_surfaces_use_shared_tokens_and_semantic_states():
+def test_computer_surfaces_use_shared_tokens_and_semantic_states(styles):
+    COMPUTER = styles[1]
     css = compact(COMPUTER)
     for token in (
         'ui-panel', 'ui-raised', 'ui-surface', 'ui-line', 'ui-border',
@@ -90,7 +105,7 @@ def test_computer_surfaces_use_shared_tokens_and_semantic_states():
     ):
         assert f'var(--{token},' in css
     for state in ('pending', 'expired', 'unavailable'):
-        assert f'[data-state="{state}"]' in COMPUTER
+        assert f'[data-state="{state}"]' in css
     assert ':focus-visible' in COMPUTER
     assert '@media(max-width:680px)' in css
     assert 'max-height:calc(100dvh-16px)' in css

@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests.javascript_support import panel_without_boot
 
 ROOT = Path(__file__).resolve().parents[1]
 NODE = shutil.which("node")
@@ -38,7 +39,8 @@ const context = vm.createContext({document, console, URLSearchParams, AbortContr
   fetch:(...args)=>fetchImpl(...args),window:{addEventListener(){},isSecureContext:false},
   EventSource:class {constructor(){this.closed=false;}close(){this.closed=true;}}
 });
-let source=fs.readFileSync('web/app.js','utf8');source=source.slice(0,source.lastIndexOf('(async()=>{try{const page=location.hash'));
+const source=fs.readFileSync(process.argv[2],'utf8');
+vm.runInContext(fs.readFileSync('web/core/bundle.js','utf8'),context);
 vm.runInContext(fs.readFileSync('web/ui.js','utf8'),context);
 vm.runInContext(source,context);
 const run=s=>vm.runInContext(s,context);
@@ -143,7 +145,9 @@ scenario(process.argv[1]).then(()=>console.log('SCENARIO_COMPLETED')).catch(erro
     "event_connections_release_timer",
     "login_boot_failure_has_retry_surface",
 ])
-def test_web_async_recovery(scenario):
-    result = subprocess.run([NODE, "-e", HARNESS, scenario], cwd=ROOT, text=True, capture_output=True, timeout=15)
+def test_web_async_recovery(scenario, tmp_path):
+    fixture = tmp_path / "panel-without-boot.js"
+    fixture.write_text(panel_without_boot(), encoding="utf-8")
+    result = subprocess.run([NODE, "-e", HARNESS, scenario, str(fixture)], cwd=ROOT, text=True, capture_output=True, timeout=15)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "SCENARIO_COMPLETED" in result.stdout, "Scenario exited with an unresolved async operation: " + result.stdout + result.stderr

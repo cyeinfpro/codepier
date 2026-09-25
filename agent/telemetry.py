@@ -5,7 +5,7 @@ import sqlite3
 import time
 from shared.computer_diagnostics import COMPUTER_STAGES, safe_detail
 
-STAGES = {'accepted', 'waiting_project', 'waiting_worker', 'executing', 'persisting', 'result_ready'} | set(COMPUTER_STAGES)
+STAGES = {'accepted', 'waiting_project', 'waiting_resource', 'waiting_worker', 'executing', 'persisting', 'result_ready'} | set(COMPUTER_STAGES)
 
 class AgentTelemetry:
     def __init__(self, journal):

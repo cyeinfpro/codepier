@@ -4,7 +4,7 @@ No native model calls. Full-stack and installed-native smoke run separately.
 from pathlib import Path
 import pytest
 from playwright.sync_api import expect
-from tests.test_chat_browser import chat_page, event
+from tests.browser_support import chat_page, event
 ROOT=Path(__file__).resolve().parents[1]
 OUT=ROOT/'docs/evidence/chat-complete-20260915'
 

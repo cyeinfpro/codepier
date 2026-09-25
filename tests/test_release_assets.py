@@ -78,8 +78,10 @@ def test_owned_hub_exit_is_not_retried(monkeypatch):
 
 def test_regression_processes_preserve_per_module_fixture_evidence():
     from scripts import check_full_regression
-    source = Path(check_full_regression.__file__).read_text()
-    assert "'--basetemp='+str(directory/'tmp')" in source
+    command = check_full_regression.pytest_command(['python', '-m', 'pytest'], Path('evidence/module'), ['tests/test_example.py'])
+    assert '--basetemp=' + str(Path('evidence/module')/'tmp') in command
+    assert '--junitxml=' + str(Path('evidence/module')/'results.xml') in command
+    assert command[-1] == 'tests/test_example.py'
 
 
 def test_license_is_in_the_container_distribution():

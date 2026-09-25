@@ -92,14 +92,14 @@ def test_mcp_protocol_and_catalog(stack):
     r=stack.rpc('initialize',{'protocolVersion':'2025-11-25','capabilities':{},'clientInfo':{'name':'integration','version':'1'}})
     assert r.json()['result']['protocolVersion']=='2025-11-25'
     catalog=stack.rpc('tools/list').json()['result']['tools']
-    assert_task_catalog(catalog, 72)
+    assert_task_catalog(catalog, 9)
     assert not {'integration_control','validations_accept'} & {t['name'] for t in catalog}
     assert stack.rpc('ping').json()['result']=={}
     resources=stack.rpc('resources/list').json()['result']['resources']
     assert {r['uri'] for r in resources}=={'rd://projects','rd://workflow','ui://codepier/workspace-v1.html','ui://codepier/changes-v1.html'}
     assert 'Imago' in stack.rpc('resources/read',{'uri':'rd://projects'}).text
     assert stack.rpc('prompts/get',{'name':'review_project','arguments':{'project':'Imago'}}).json()['result']['messages']
-    assert stack.mcp('fs_read',{'project':'Imago','path':'README.md'})['structuredContent']['content'].startswith('# Imago')
+    assert stack.mcp('read',{'project':'Imago','path':'README.md'})['structuredContent']['content'].startswith('# Imago')
     assert stack.client.get('/mcp').status_code==405
     assert stack.client.delete('/mcp').status_code==405
     assert stack.rpc('ping',headers={'Accept':'application/json'}).status_code==406
@@ -111,9 +111,9 @@ def test_mcp_protocol_and_catalog(stack):
 
 def test_scoped_token_and_revocation(stack):
     token=stack.must(stack.client.post('/api/grants',json={'label':'read Imago only','scopes':['read'],'projects':[stack.project['id']],'days':1}))
-    read=stack.mcp('projects_list',token_value=token['token']);assert len(read['structuredContent']['projects'])==1
-    no_project=stack.mcp('fs_read',{'project':'Nexus','path':'README.md'},token['token']);assert no_project['isError']
-    no_write=stack.mcp('fs_write',{'project':'Imago','path':'blocked.txt','content':'bad','expected_sha256':'new','idempotency_key':ident()},token['token']);assert no_write['isError']
+    read=stack.mcp('workspace', {'operation': 'list'},token_value=token['token']);assert len(read['structuredContent']['projects'])==1
+    no_project=stack.mcp('read',{'project':'Nexus','path':'README.md'},token['token']);assert no_project['isError']
+    no_write=stack.mcp('write',{'project':'Imago','path':'blocked.txt','content':'bad','expected_sha256':'new','idempotency_key':ident()},token['token']);assert no_write['isError']
     stack.must(stack.client.delete('/api/grants/'+token['grant_id']))
     assert stack.rpc('ping',token_value=token['token']).status_code==401
 
@@ -134,7 +134,7 @@ def test_oauth_pkce_full_flow_refresh_and_replay(stack):
     form={'grant_type':'authorization_code','code':code,'client_id':reg['client_id'],'redirect_uri':args['redirect_uri'],'code_verifier':verifier,'resource':stack.url+'/mcp'}
     assert stack.client.post('/oauth/token',data={**form,'code_verifier':'x'*64}).status_code==400
     tokens=stack.must(stack.client.post('/oauth/token',data=form));assert 'access_token' in tokens
-    assert not stack.mcp('projects_list',token_value=tokens['access_token'])['isError']
+    assert not stack.mcp('workspace', {'operation': 'list'},token_value=tokens['access_token'])['isError']
     assert stack.client.post('/oauth/token',data=form).status_code==400
     refresh={'grant_type':'refresh_token','client_id':reg['client_id'],'refresh_token':tokens['refresh_token'],'resource':stack.url+'/mcp'}
     new=stack.must(stack.client.post('/oauth/token',data=refresh));assert new['refresh_token']!=tokens['refresh_token']
@@ -153,7 +153,7 @@ def test_oauth_malformed_register(stack,body):
     assert r.status_code in (400,429)
 
 def test_audit_tracks_real_mcp_and_diff(stack):
-    m=stack.mcp('fs_write',{'project':'Imago','path':'audit-example.txt','content':'Audited fixture\n','expected_sha256':'new','idempotency_key':ident()})
+    m=stack.mcp('write',{'project':'Imago','path':'audit-example.txt','content':'Audited fixture\n','expected_sha256':'new','idempotency_key':ident()})
     id=m['structuredContent']['operation_id'];r=stack.client.get('/api/operations/'+id).json()
     assert r['actor'].startswith('mcp:') and r['result']['data']['diff']
     assert 'Audited fixture' not in json.dumps(r['args_summary'])

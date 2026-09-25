@@ -5,6 +5,7 @@ never re-enrolls a device or changes its URL, credentials or project permissions
 """
 from __future__ import annotations
 import hashlib
+import logging
 import json
 import os
 from pathlib import Path
@@ -28,6 +29,7 @@ SERVICE_NAMES = {
     'schtasks': ('CodePierAgent', 'RemoteDevAgent'),
 }
 JOURNAL = '.codepier-migration.json'
+LOGGER = logging.getLogger(__name__)
 
 
 def read_json(path):
@@ -504,7 +506,8 @@ def migrate_agent(base,pid,backend):
                         metadata=read_json(location/'management.json')
                         metadata.update(status='error',brand_migration='recovery_required',brand_migration_error=type(recovery).__name__)
                         write_json(location/'management.json',metadata)
-                    except (OSError,ValueError): pass
+                    except (OSError,ValueError) as diagnostic_error:
+                        LOGGER.warning('Migration recovery journal could not be recorded (%s)', type(diagnostic_error).__name__)
                 raise RuntimeError('CodePier migration failed; recovery needs attention: '+str(recovery)) from exc
         else:
             _restore_files(base,journal); journal.update(stage='rolled_back',finished_at=time.time()); write_json(base/JOURNAL,journal)
@@ -512,4 +515,5 @@ def migrate_agent(base,pid,backend):
     finally:
         (lock/'owner.json').unlink(missing_ok=True)
         try: lock.rmdir()
-        except OSError: pass
+        except OSError as cleanup_error:
+            LOGGER.warning('Migration lock cleanup needs inspection (%s)', type(cleanup_error).__name__)

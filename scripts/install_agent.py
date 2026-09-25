@@ -672,7 +672,7 @@ def local_upgrade(base, args, current, *, repair_service=True):
             unpack(archive, sha, candidate)
             python = candidate/'.venv'/('Scripts/python.exe' if os.name=='nt' else 'bin/python')
             run([uv,'venv','--relocatable','--python',interpreter,candidate/'.venv'], timeout=600)
-            run([uv,'pip','install','--python',python,'-r',candidate/'requirements-agent.txt'], timeout=900)
+            run([uv,'pip','install','--require-hashes','--python',python,'-r',candidate/'requirements-agent.txt'], timeout=900)
             run([python,'-c','import agent.config, agent.runner, agent.lifecycle'], cwd=candidate, timeout=60)
             if (base/'config.json').read_bytes() != before:
                 raise ValueError('Configuration changed during preparation; no runtime was replaced. Retry after local edits finish.')
@@ -803,7 +803,7 @@ def install_source(base, source, pairing_file=None, allowed=None, *, recover_sta
                 unpack(archive, digest, runtime)
                 python = runtime/'.venv/Scripts/python.exe'
                 run([uv, 'venv', '--relocatable', '--python', interpreter, runtime/'.venv'])
-                run([uv, 'pip', 'install', '--python', python, '-r', runtime/'requirements-agent.txt'])
+                run([uv, 'pip', 'install', '--require-hashes', '--python', python, '-r', runtime/'requirements-agent.txt'])
                 run([python, '-c', 'import agent.config, agent.runner, agent.lifecycle'], cwd=runtime)
                 if current is None:
                     run([python, '-m', 'agent', '--config', base/'config.json', 'init',
@@ -915,7 +915,7 @@ def main():
                 unpack(args.archive,args.sha256,candidate)
                 candidate_python=candidate/'.venv'/('Scripts/python.exe' if os.name=='nt' else 'bin/python')
                 run([args.uv,'venv','--relocatable','--python',sys.executable,candidate/'.venv'])
-                run([args.uv,'pip','install','--python',candidate_python,'-r',candidate/'requirements-agent.txt'])
+                run([args.uv,'pip','install','--require-hashes','--python',candidate_python,'-r',candidate/'requirements-agent.txt'])
                 run([candidate_python,'-c','import agent.config, agent.runner, agent.lifecycle'],cwd=candidate)
                 pairing=enroll(args.hub,ticket);ticket=''
                 try: current=json.loads(config.read_text(encoding='utf-8'))
@@ -951,7 +951,7 @@ def main():
         runtime.mkdir();created=True
         unpack(args.archive,args.sha256,runtime)
         run([args.uv,'venv','--relocatable','--python',sys.executable,runtime/'.venv'])
-        run([args.uv,'pip','install','--python',python,'-r',runtime/'requirements-agent.txt'])
+        run([args.uv,'pip','install','--require-hashes','--python',python,'-r',runtime/'requirements-agent.txt'])
         run([python,'-c','import agent.config, agent.runner, agent.lifecycle'],cwd=runtime)
         print('Pairing with the panel…',flush=True)
         pairing=enroll(args.hub,ticket);ticket=''

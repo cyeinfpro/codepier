@@ -133,7 +133,7 @@ def test_check_connection_real_operation_once_and_no_secret(browser,ui_stack):
     def capture(request):
         if request.method=='POST' and request.url.endswith('/api/tools/call'):
             data=request.post_data_json
-            if data.get('tool')=='vps_exec':submissions.append(data)
+            if data.get('tool')=='exec':submissions.append(data)
     page.on('request',capture)
     try:
         page.fill('#vps-query',v['name'])

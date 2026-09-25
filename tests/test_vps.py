@@ -12,7 +12,8 @@ from pydantic import ValidationError
 from hub.runtime import Principal, Runtime
 from hub.store import Store
 from hub.vps import ProjectVPSAssignments, VPSAssignments, VPSInput
-from shared.contracts import VPSExec, tool_definitions
+from shared.contracts import tool_definitions
+from shared.core_contracts import Exec
 from shared.util import DevError, atomic_json
 from tests.test_ssh import PASSWORD, fake_transport
 
@@ -42,8 +43,8 @@ def edit_body(v, **changes):
     return VPSInput(**{**{k: v[k] for k in keys}, 'expected_version': v['version'], **changes})
 
 
-def execute_args(project, vps='', **changes):
-    return {'project': project, 'vps': vps, 'command': 'printf fixture-ok', 'idempotency_key': uuid.uuid4().hex, **changes}
+def execute_args(project, vps='0'*32, **changes):
+    return {'project': project, 'target': 'vps:'+vps, 'yield_seconds': 0, 'command': 'printf fixture-ok', 'idempotency_key': uuid.uuid4().hex, **changes}
 
 
 def test_saved_credential_encryption_many_to_many_and_visibility(inventory):
@@ -143,7 +144,7 @@ async def test_queued_reference_revocation_blocks_before_connection(inventory, c
     r, owner, projects = inventory
     v = r.vps.save(body(projects[:1]), owner)
     call = execute_args(projects[0], v['id'])
-    receipt = await r.invoke('vps_exec', call, owner)
+    receipt = await r.invoke('exec', call, owner)
     op = r.store.one('SELECT * FROM operations WHERE id=?', (receipt['operation_id'],))
     request = json.loads(r.store.decrypt(op['payload']))
     assert 'password' not in json.dumps(request) and PASSWORD not in json.dumps(request)
@@ -166,12 +167,12 @@ async def test_idempotency_reference_survives_metadata_edits_and_cancellation(in
     r, owner, projects = inventory
     v = r.vps.save(body(projects[:1]), owner)
     call = execute_args(projects[0], v['id'])
-    first = await r.invoke('vps_exec', call, owner)
+    first = await r.invoke('exec', call, owner)
     r.vps.save(edit_body(v, name='Renamed', notes='metadata change'), owner, v['id'])
-    replay = await r.invoke('vps_exec', call, owner)
+    replay = await r.invoke('exec', call, owner)
     assert replay['operation_id'] == first['operation_id']
     with pytest.raises(DevError) as caught:
-        await r.invoke('vps_exec', {**call, 'command': 'another command'}, owner)
+        await r.invoke('exec', {**call, 'command': 'another command'}, owner)
     assert caught.value.code == 'IDEMPOTENCY_CONFLICT'
     result = await r.cancel(first['operation_id'], owner)
     assert result['state'] == 'cancelled'
@@ -180,10 +181,10 @@ async def test_idempotency_reference_survives_metadata_edits_and_cancellation(in
 def test_transport_credential_not_in_saved_payload_and_delete_cascades(inventory):
     r, owner, projects = inventory
     v = r.vps.save(body(projects[:2]), owner)
-    args = VPSExec(**execute_args(projects[0], v['id'])).model_dump()
-    request = {'tool': 'vps_exec', 'args': args, 'project': {'root': '/fixture'}, 'vps_ref': r.vps.reference(args, r.project(projects[0], owner))}
+    args = Exec(**execute_args(projects[0], v['id'])).model_dump()
+    request = {'tool': 'exec', 'args': args, 'project': {'root': '/fixture'}, 'vps_ref': r.vps.reference({**args, 'vps': v['id']}, r.project(projects[0], owner))}
     packet = r.vps.transport(request, projects[0])
-    assert packet['tool'] == 'ssh_exec' and packet['args']['password'] == PASSWORD
+    assert packet['tool'] == 'exec' and packet['core_ssh']['password'] == PASSWORD
     assert 'vps_ref' not in packet and PASSWORD not in json.dumps(request)
     r.store.execute('DELETE FROM projects WHERE id=?', (projects[0],))
     assert r.vps.get(v['id'])['project_ids'] == [projects[1]]
@@ -205,13 +206,13 @@ def test_missing_master_key_with_only_vps_credentials(inventory):
 @pytest.mark.parametrize('profile', ['full', 'coding'])
 def test_catalog_has_secret_free_inputs(profile):
     tools = {t['name']: t for t in tool_definitions(profile)}
-    for name in ['vps_list', 'vps_exec']:
+    for name in ['vps', 'exec']:
         assert name in tools and 'password' not in tools[name]['inputSchema']['properties']
-    assert tools['vps_list']['annotations']['readOnlyHint']
-    assert not tools['vps_exec']['annotations']['readOnlyHint']
-    assert tools['vps_exec']['annotations']['destructiveHint']
+    assert tools['vps']['annotations']['readOnlyHint']
+    assert not tools['exec']['annotations']['readOnlyHint']
+    assert tools['exec']['annotations']['destructiveHint']
     with pytest.raises(ValidationError):
-        VPSExec(**execute_args('p', password='not-accepted'))
+        Exec(**execute_args('p', password='not-accepted'))
 
 
 @pytest.fixture(scope='module')
@@ -249,14 +250,14 @@ def test_mcp_saved_ssh_real_process_redaction_and_once_only(vps_stack):
     v = create_remote(s)
     filename = 'vps-once-'+uuid.uuid4().hex
     call = execute_args('Imago', v['id'], command=f'printf once >> {filename}; printf remote-ok')
-    result = s.mcp('vps_exec',call)
+    result = s.mcp('exec',call)
     assert not result.get('isError'),result
     receipt = result['structuredContent']
     opid = receipt['operation_id']
-    assert s.mcp('vps_exec',call)['structuredContent']['operation_id'] == opid
+    assert s.mcp('exec',call)['structuredContent']['operation_id'] == opid
     op = s.poll(opid, timeout=20)
     assert op['state'] == 'succeeded',op
-    assert op['tool'] == 'vps_exec' and op['result']['data']['exit_code'] == 0
+    assert op['tool'] == 'exec' and op['result']['data']['exit_code'] == 0
     assert 'remote-ok' in op['output'] and '<redacted>' in op['output']
     assert (s.imago / filename).read_text() == 'once'
     assert PASSWORD not in json.dumps(op)
@@ -272,21 +273,21 @@ def test_mcp_scope_and_assignments(vps_stack):
     s = vps_stack
     v = create_remote(s, project_ids=[s.projects[0]['id'],s.projects[1]['id']])
     grant = s.must(s.client.post('/api/grants',json={'label':'vps-read','scopes':['read'],'projects':[s.project['id']],'days':1}))
-    listed = s.mcp('vps_list', {'query':v['name']}, token_value=grant['token'])
+    listed = s.mcp('vps', {'query':v['name']}, token_value=grant['token'])
     assert not listed.get('isError'),listed
     row = listed['structuredContent']['vps'][0]
     assert row['project_ids'] == [s.project['id']]
     assert s.projects[1]['id'] not in json.dumps(listed)
-    denied = s.mcp('vps_exec',execute_args('Imago',v['id']),token_value=grant['token'])
+    denied = s.mcp('exec',execute_args('Imago',v['id']),token_value=grant['token'])
     assert denied['isError'] and denied['structuredContent']['error']['code'] == 'INSUFFICIENT_SCOPE'
-    denied = s.mcp('vps_exec',execute_args('Lumen',v['id']))
+    denied = s.mcp('exec',execute_args('Lumen',v['id']))
     assert denied['isError'] and denied['structuredContent']['error']['code'] == 'VPS_NOT_FOUND'
 
 
 def test_saved_ssh_remote_failure_and_timeout(vps_stack):
     s = vps_stack;v = create_remote(s)
     for command,timeout in [('exit 7',10),('sleep 5',1)]:
-        result = s.mcp('vps_exec',execute_args('Imago',v['id'],command=command,timeout_seconds=timeout))
+        result = s.mcp('exec',execute_args('Imago',v['id'],command=command,timeout_seconds=timeout))
         assert not result.get('isError'),result
         op = s.poll(result['structuredContent']['operation_id'],timeout=20)
         assert op['state'] == 'failed' and not op['result']['data']['command_ok']
@@ -298,7 +299,7 @@ def test_offline_queue_unassign_before_delivery(vps_stack):
     s.stop_agent()
     try:
         call = execute_args('Imago',v['id'],command='printf should-not-run')
-        result = s.mcp('vps_exec',call)
+        result = s.mcp('exec',call)
         assert not result.get('isError'),result
         opid = result['structuredContent']['operation_id']
         s.must(s.client.put('/api/vps/'+v['id']+'/projects',json={'project_ids':[],'expected_version':v['version']}))
@@ -310,7 +311,7 @@ def test_offline_queue_unassign_before_delivery(vps_stack):
 def test_coding_profile_actual_rpc_catalog_and_call(vps_stack):
     s = vps_stack
     headers={'Authorization':'Bearer '+s.pat,'MCP-Protocol-Version':'2025-11-25','Accept':'application/json, text/event-stream'}
-    payload={'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':'vps_list','arguments':{'project':'Imago'}}}
+    payload={'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':'vps','arguments':{'project':'Imago'}}}
     response=s.client.post('/mcp?profile=coding',headers=headers,json=payload)
     s.must(response)
     assert not response.json().get('error'),response.text
@@ -324,7 +325,7 @@ async def test_dispatched_revoked_request_only_probes_original_receipt(inventory
     """A send or ACK is not proof of no remote execution; never reconnect/replay."""
     r, owner, projects = inventory
     v = r.vps.save(body(projects[:1]), owner)
-    receipt = await r.invoke('vps_exec', execute_args(projects[0], v['id']), owner)
+    receipt = await r.invoke('exec', execute_args(projects[0], v['id']), owner)
     operation = receipt['operation_id']
     r.store.execute('UPDATE operations SET attempts=1,accepted_at=? WHERE id=?',
                     (time.time() if accepted else None, operation))

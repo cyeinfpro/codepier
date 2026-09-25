@@ -1,6 +1,6 @@
 """Playwright WebKit parity; exercises WebKit, not a claimed real iOS device."""
 import pytest
-from tests.test_chat_browser import chat_page
+from tests.browser_support import chat_page
 from tests import test_chat_window_browser as window
 
 @pytest.mark.parametrize('chat_page',['webkit'],indirect=True)

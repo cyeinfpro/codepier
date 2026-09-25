@@ -198,8 +198,8 @@ def test_retention_sanitizer_and_journal_purge(tmp_path):
 
 def test_catalog_scopes_and_audit_redaction():
     tools={t['name']:t for t in tool_definitions()}
-    assert COMPUTER_TOOLS.issubset(tools)
-    assert TOOLS['computer_observe'].scope=='computer' and tools['computer_observe']['annotations']['readOnlyHint']
+    assert 'computer' in tools and not COMPUTER_TOOLS.intersection(tools)
+    assert TOOLS['computer_observe'].scope=='computer' and not tools['computer']['annotations']['readOnlyHint']
     for name in NATIVE_ACTIONS:
         summary=safe_summary({'action':{'type':name,'text':'SECRET','value':'SECRET','key':'SECRET','prefix':'SECRET','suffix':'SECRET'}})
         assert 'SECRET' not in json.dumps(summary)

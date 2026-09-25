@@ -35,12 +35,15 @@ def rpc(stack,name,args=None,*,key=None,token=None,allow_error=False):
     args={'project':'Imago',**(args or {})}
     if name in {'computer_action','computer_session_open','computer_session_close'}:
         args.setdefault('idempotency_key',key or 'test-'+uuid.uuid4().hex)
-    out=stack.mcp(name,args,token or stack.computer_pat)
+    from hub.core_tools import public_call
+    public_name, public_args = public_call(name, args)
+    out=stack.mcp(public_name,public_args,token or stack.computer_pat)
     value=out['structuredContent']
     Draft202012Validator(OUTPUT_SCHEMAS[name]).validate(value)
     if value.get('pending'):
         for _ in range(12):
-            out=stack.mcp('operations_wait',{'operation_id':value['operation_id'],'wait_seconds':2},token or stack.computer_pat)
+            out=stack.mcp('process',{'wait_seconds': 2, 'operation': 'wait', 'operation_ids': [value['operation_id']]},token or stack.computer_pat)
+            out={**out, 'structuredContent':out['structuredContent']['operations'][0]}
             Draft202012Validator(OUTPUT_SCHEMAS['operations_wait']).validate(out['structuredContent'])
             if not out['structuredContent'].get('pending'):break
         value=out['structuredContent']
@@ -60,16 +63,18 @@ def release(stack,session):
 
 def test_scope_catalog_and_status_never_expand_existing_grants(desktop):
     s=desktop
-    out=s.mcp('computer_apps',{'project':'Imago'})
+    out=s.mcp('computer',{'project': 'Imago', 'operation': 'apps'})
     assert out['isError'] and out['structuredContent']['error']['code']=='INSUFFICIENT_SCOPE'
     status,_=rpc(s,'computer_status',{'probe':True})
     assert status['capabilities_verified'] and len(status['native_tools'])==10
     assert status['screen_permissions_verified'] is False
     out=s.rpc('tools/list').json()['result']['tools']
-    assert_task_catalog(out, 72)
+    assert_task_catalog(out, 9)
     assert not {'integration_control','validations_accept'} & {t['name'] for t in out}
-    definition=next(t for t in out if t['name']=='computer_action')
-    assert set(definition['_meta']['securitySchemes'][0]['scopes'])=={'read','computer'}
+    definition=next(t for t in out if t['name']=='computer')
+    assert set(definition['_meta']['securitySchemes'][0]['scopes'])=={'read'}
+    help=s.mcp('workspace',{'operation':'help','tool':'computer','action':'action'})['structuredContent']
+    assert help['scope']=='computer'
     assert definition['securitySchemes']==definition['_meta']['securitySchemes']
     metadata=s.client.get('/.well-known/oauth-authorization-server').json()
     assert 'computer' in metadata['scopes_supported']
@@ -94,7 +99,7 @@ def test_real_mcp_images_actions_idempotency_and_polling(desktop):
         _,bad=rpc(s,'computer_action',{**args,'idempotency_key':'other-'+uuid.uuid4().hex},allow_error=True)
         assert bad['isError']
         for name in ['operations_get','operations_wait']:
-            result=s.mcp(name,{'operation_id':action['operation_id']},s.computer_pat)
+            result=s.mcp('process',{'operation':name.removeprefix('operations_'),'operation_ids':[action['operation_id']]},s.computer_pat)
             assert any(b['type']=='image' for b in result['content'])
             assert encoded not in json.dumps(result['structuredContent'])
         for record in [s.client.get('/api/operations/'+action['operation_id']).json()]:
@@ -115,8 +120,8 @@ def test_cross_grant_force_and_result_access_boundaries(desktop):
         db=sqlite3.connect(s.hubdir/'hub.sqlite3')
         try:
             db.execute('UPDATE grants SET scopes=? WHERE id=?',(json.dumps(['read']),s.computer_grant));db.commit()
-            result=s.mcp('operations_get',{'operation_id':view['operation_id']},s.computer_pat)
-            assert result['isError'] and result['structuredContent']['error']['code']=='INSUFFICIENT_SCOPE'
+            result=s.mcp('process',{'operation': 'get', 'operation_ids': [view['operation_id']]},s.computer_pat)
+            assert result['isError'] and result['structuredContent']['operations'][0]['error']['code']=='INSUFFICIENT_SCOPE'
         finally:
             db.execute('UPDATE grants SET scopes=? WHERE id=?',(json.dumps(['read','computer']),s.computer_grant));db.commit();db.close()
     finally:release(s,session)
@@ -193,7 +198,7 @@ def test_stdio_bridge_preserves_screenshot_blocks(desktop,tmp_path):
     try:
         token=tmp_path/'computer-token.txt';token.write_text(s.computer_pat);token.chmod(0o600)
         requests=[{'jsonrpc':'2.0','id':1,'method':'initialize','params':{'protocolVersion':'2025-11-25','capabilities':{},'clientInfo':{'name':'fixture-bridge','version':'1'}}},
-            {'jsonrpc':'2.0','id':2,'method':'tools/call','params':{'name':'computer_observe','arguments':{'project':'Imago','session_id':session}}}]
+            {'jsonrpc':'2.0','id':2,'method':'tools/call','params':{'name':'computer','arguments':{'operation':'observe','project':'Imago','session_id':session}}}]
         env={**os.environ,'CODEPIER_HUB_URL':s.url,'CODEPIER_TOKEN_FILE':str(token)}
         result=subprocess.run([sys.executable,'-m','scripts.mcp_stdio_bridge'],input='\n'.join(json.dumps(r) for r in requests)+'\n',text=True,capture_output=True,env=env,timeout=25)
         assert result.returncode==0,result.stderr
@@ -201,7 +206,7 @@ def test_stdio_bridge_preserves_screenshot_blocks(desktop,tmp_path):
         responses=[json.loads(line) for line in result.stdout.splitlines()]
         output=responses[-1]['result'];data=output['structuredContent']
         if data.get('pending'):
-            output=s.mcp('operations_wait',{'operation_id':data['operation_id'],'wait_seconds':5},s.computer_pat)
+            output=s.mcp('process',{'wait_seconds': 5, 'operation': 'wait', 'operation_ids': [data['operation_id']]},s.computer_pat)
         assert not output['isError']
         assert any(b['type']=='image' for b in output['content'])
         encoded=next(b['data'] for b in output['content'] if b['type']=='image')

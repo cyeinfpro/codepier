@@ -27,12 +27,12 @@ def host_bundle(tmp_path_factory):
 @pytest.mark.parametrize('width',[1100,390])
 def test_sdk_cards_restore_pending_and_immutable_paginated_review(integrated_stack,host_bundle,width):
     s=integrated_stack;calls=[]
-    opened=s.mcp('open_workspace',{'project':'Imago','capture_baseline':True})
+    opened=s.mcp('workspace',{'project': 'Imago', 'capture_baseline': True, 'operation': 'open'})
     data=opened['structuredContent']
     if data.get('pending'):data=s.poll(data['operation_id'],timeout=30)['result']['data']
     fixture='apps-host-'+str(width)+'.txt'
     (s.imago/fixture).write_text(''.join(f'row {i:04d} immutable original text '+('x'*50)+'\n' for i in range(500))+'<img src=x onerror="window.INJECTED=true">\nEND_OF_FROZEN_REVIEW\n')
-    review=s.mcp('show_changes',{'project':'Imago','baseline_ref':data['baseline_ref']})
+    review=s.mcp('read',{'project': 'Imago', 'operation': 'changes', 'options': {'baseline_ref': data['baseline_ref']}})
     frozen=review['structuredContent']
     if frozen.get('pending'):frozen=s.poll(frozen['operation_id'],timeout=30)['result']['data']
     (s.imago/fixture).write_text('LATER_CONTENT_MUST_NOT_REPLACE_FROZEN_REVIEW\n')
@@ -41,7 +41,7 @@ def test_sdk_cards_restore_pending_and_immutable_paginated_review(integrated_sta
         response=s.mcp(params['name'],params.get('arguments',{}))
         # Deliver the legitimate initial receipt late, even when already settled.
         # This tests a host replay of an earlier pending projection, not fake data.
-        if params['name']=='show_changes' and not response['structuredContent'].get('pending'):
+        if params['name']=='read' and params.get('arguments',{}).get('operation')=='changes' and not response['structuredContent'].get('pending'):
             op=response['structuredContent']['operation_id']
             response={**response,'structuredContent':{'pending':True,'operation_id':op}}
         return response
@@ -58,7 +58,7 @@ def test_sdk_cards_restore_pending_and_immutable_paginated_review(integrated_sta
         app.get_by_text('项目与权限',exact=True).click()
         app.get_by_role('button',name='检查项目就绪状态').click()
         expect(app.locator('#app')).to_contain_text('native_model_turn',timeout=30000)
-        assert any(p['name']=='readiness_get' for p in calls)
+        assert any(p['name']=='workspace' and p['arguments'].get('operation')=='readiness' for p in calls)
         page.evaluate('html=>window.codepierMount(html)',(BASE/'web/mcp-apps/changes-v1.html').read_text())
         page.wait_for_function('window.codepierHostReady')
         restored=copy.deepcopy(review);restored['structuredContent']={'review_ref':frozen['review_ref'],'summary':frozen['summary'],'coverage':frozen['coverage']}
@@ -80,8 +80,8 @@ def test_sdk_cards_restore_pending_and_immutable_paginated_review(integrated_sta
         expect(app.locator('pre')).to_contain_text('END_OF_FROZEN_REVIEW')
         expect(app.locator('pre')).not_to_contain_text('LATER_CONTENT_MUST_NOT')
         assert app.locator('img').count()==0
-        assert all('baseline_ref' not in c['arguments'] for c in calls if c['name']=='show_changes')
-        assert any(c['name']=='operations_wait' for c in calls)
+        assert all('baseline_ref' not in c['arguments'] for c in calls if c['name']=='read')
+        assert any(c['name']=='process' and c['arguments'].get('operation')=='wait' for c in calls)
         assert not page.evaluate('window.codepierHostErrors') and not errors
         folder=BASE/'docs/evidence/workspace-dashboard-20260917/screenshots';folder.mkdir(parents=True,exist_ok=True)
         page.screenshot(path=str(folder/f'apps-review-{width}.png'),full_page=True)

@@ -14,10 +14,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  windows-agent-service:
-    name: Windows Agent background recovery
+  windows-core:
+    name: Windows core, bootstrap and background recovery
     runs-on: windows-2025
-    timeout-minutes: 12
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -25,35 +25,154 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.13'
-      - name: Parse Windows entry points
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - name: Install isolated hash-verified dependencies
         shell: pwsh
         run: |
-          foreach ($file in @('deploy/install-agent.ps1', 'deploy/install-from-hub.ps1')) {
-            $parseErrors = $null
-            $tokens = $null
-            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$parseErrors) | Out-Null
-            if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
-          }
-      - name: Verify real scheduled task recovery
-        run: python scripts/check_windows_service.py --output dist/windows-service.json
-      - name: Retain Windows service evidence
+          python -m venv .venv
+          .venv/Scripts/python -m pip install --require-hashes -r requirements-dev.txt
+      - name: Core pytest (explicit Windows subset, no browser)
+        shell: pwsh
+        run: |
+          .venv/Scripts/python -m pytest -q -m windows_core --strict-markers --junitxml=dist/windows/core.xml --tb=short
+      - name: Real PowerShell argument and error behavior
+        shell: pwsh
+        run: .venv/Scripts/python scripts/check_windows_bootstrap.py --output dist/windows/bootstrap.json
+      - name: Real temporary scheduled task recovery
+        shell: pwsh
+        run: .venv/Scripts/python scripts/check_windows_service.py --output dist/windows/service.json
+      - name: Retain Windows evidence (not a complete cross-platform suite)
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: codepier-windows-service-${{ github.run_id }}
-          path: dist/windows-service.json
+          name: windows-core-${{ github.run_id }}
+          path: |
+            dist/windows/*.xml
+            dist/windows/*.json
           if-no-files-found: warn
           retention-days: 14
+
   verify:
-    name: Verify (${{ matrix.os }})
+    name: Regression ${{ matrix.os }} shard ${{ matrix.shard }} of 4
     strategy:
       fail-fast: false
       matrix:
-        # Playwright 1.63 uses frozen WebKit 2251 on macOS 14; use the
-        # supported macOS 15 build for the full Chromium/WebKit regression.
         os: [ubuntu-24.04, macos-15]
+        shard: [0, 1, 2, 3]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.work/playwright-browsers
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/mcp-apps/package-lock.json
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .work/playwright-browsers
+          key: browsers-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('requirements-dev.txt') }}
+      - name: Fresh environments; cached downloads, never shared virtualenvs
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --require-hashes -r requirements-dev.txt
+          python -m venv .venv-compat
+          .venv-compat/bin/python -m pip install --require-hashes -r requirements-compat.txt
+          .venv/bin/python -m playwright install --with-deps chromium webkit
+      - name: macOS standalone Compose validation tool (no daemon)
+        if: runner.os == 'macOS'
+        run: |
+          if ! docker compose version >/dev/null 2>&1 && ! docker-compose version >/dev/null 2>&1; then
+            brew install docker-compose
+          fi
+          docker compose version || docker-compose version
+      - name: Verify reproducible browser build and release inputs
+        run: |
+          npm --prefix web/mcp-apps ci --ignore-scripts
+          npm --prefix web/mcp-apps run format:check
+          npm --prefix web/mcp-apps run build
+          .venv/bin/python scripts/build_integration_assets.py
+          .venv/bin/python scripts/build_web_assets.py --check
+          git diff --exit-code -- web
+          .venv/bin/python scripts/check_release.py
+      - name: Static and type checks
+        run: |
+          .venv/bin/python -m ruff check agent hub shared scripts tests
+          .venv/bin/python -m mypy
+          git diff --check
+      - name: Dependency advisories (one copy per OS)
+        if: matrix.shard == 0
+        run: |
+          .venv/bin/python -m pip_audit --local
+          .venv/bin/python -m pip_audit --path .venv-compat/lib/python3.13/site-packages
+          npm --prefix web/mcp-apps audit
+      - name: Exhaustive deterministic shard with coverage
+        run: |
+          .venv/bin/python scripts/check_full_regression.py --output dist/ci-results --workers 2 --timeout 1200 --shard-count 4 --shard-index ${{ matrix.shard }} --coverage
+      - name: Public source archive (version derived from source)
+        if: matrix.shard == 0
+        run: |
+          VERSION=$(.venv/bin/python -c 'from scripts.build_source_bundle import source_version; print(source_version())')
+          .venv/bin/python scripts/build_source_bundle.py --public
+          .venv/bin/python scripts/check_release.py --bundle "dist/codepier-${VERSION}-source.zip" --output dist/public-check.json
+      - name: Retain only selected regression receipts and coverage
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: regression-${{ matrix.os }}-${{ matrix.shard }}
+          include-hidden-files: true
+          path: |
+            dist/ci-results/summary.json
+            dist/ci-results/source-before.json
+            dist/ci-results/source-after.json
+            dist/ci-results/collection.json
+            dist/ci-results/collection.log
+            dist/ci-results/markers.json
+            dist/ci-results/plan.json
+            dist/ci-results/full-regression.xml
+            dist/ci-results/coverage.json
+            dist/ci-results/coverage.xml
+            dist/ci-results/.coverage
+            dist/ci-results/*/output.log
+            dist/ci-results/*/process.json
+            dist/ci-results/*/results.xml
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Retain checked public source archive
+        if: matrix.shard == 0 && success()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: public-source-${{ matrix.os }}
+          path: |
+            dist/codepier-*-source.zip
+            dist/codepier-*-source.manifest.json
+            dist/public-check.json
+          if-no-files-found: error
+          retention-days: 14
+
+  complete:
+    name: Complete evidence ${{ matrix.os }}
+    needs: verify
+    if: always() && !cancelled()
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     defaults:
       run:
         shell: bash
@@ -61,61 +180,38 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.13'
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          node-version: '24'
-      - name: Install isolated Python environments
+          pattern: regression-${{ matrix.os }}-*
+          path: .work/shards
+          merge-multiple: false
+      - name: Require all shards, exactly-once tests, matching sources and coverage
         run: |
           python -m venv .venv
-          .venv/bin/python -m pip install -r requirements-dev.txt -r requirements-tools.txt
-          python -m venv .venv-compat
-          .venv-compat/bin/python -m pip install --upgrade pip==26.2.1
-          .venv-compat/bin/python -m pip install -r requirements-compat.txt
-          .venv/bin/python -m playwright install --with-deps chromium webkit
-      - name: Install macOS Compose CLI for panel updater validation
-        if: runner.os == 'macOS'
+          .venv/bin/python -m pip install --require-hashes -r requirements-dev.txt
+          mapfile -t REPORTS < <(find .work/shards -name summary.json -type f | sort)
+          .venv/bin/python scripts/merge_regression.py "${REPORTS[@]}" --coverage --output dist/complete/summary.json
+      - name: Changed-statement coverage observation (no legacy global threshold)
+        env:
+          DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
-          if ! docker compose version >/dev/null 2>&1; then
-            brew install docker docker-compose
-            mkdir -p "$HOME/.docker/cli-plugins"
-            ln -sf "$(command -v docker-compose)" "$HOME/.docker/cli-plugins/docker-compose"
+          if [[ -z "$DIFF_BASE" || "$DIFF_BASE" =~ ^0+$ ]]; then
+            DIFF_BASE=$(git rev-parse HEAD^ 2>/dev/null || git rev-parse HEAD)
           fi
-          docker compose version
-      - name: Build browser resources
-        run: |
-          npm --prefix web/mcp-apps ci --ignore-scripts
-          npm --prefix web/mcp-apps run build
-          .venv/bin/python scripts/build_integration_assets.py
-      - name: Correctness and dependency checks
-        run: |
-          .venv/bin/python -m ruff check agent hub shared scripts tests
-          .venv/bin/python -m pip_audit --local
-          .venv/bin/python -m pip_audit --path .venv-compat/lib/python3.13/site-packages
-          npm --prefix web/mcp-apps audit
-          .venv/bin/python scripts/check_release.py
-      - name: Complete regression
-        # Keep macOS browser/desktop fixtures serial; independent pytest
-        # processes still share the runner's native window server.
-        run: .venv/bin/python scripts/check_full_regression.py --output dist/ci-results --workers ${{ runner.os == 'macOS' && 1 || 2 }} --timeout 900
-      - name: Public source bundle
-        run: |
-          .venv/bin/python scripts/build_source_bundle.py --public --output dist/codepier-1.13.0-source.zip
-          .venv/bin/python scripts/check_release.py --bundle dist/codepier-1.13.0-source.zip --output dist/public-check.json
-      - name: Retain isolated CI evidence
+          .venv/bin/python scripts/diff_coverage.py --coverage dist/complete/coverage.json --base "$DIFF_BASE" --output dist/complete/diff-coverage.json
+      - name: Retain complete-platform proof
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: codepier-${{ matrix.os }}-${{ github.run_id }}
+          name: complete-${{ matrix.os }}
           path: |
-            dist/ci-results/
-            !dist/ci-results/**/tmp/**
-            !dist/ci-results/**/cache/**
-            !dist/ci-results/collect-cache/**
-            dist/public-check.json
-            dist/codepier-1.13.0-source.zip
-            dist/codepier-1.13.0-source.manifest.json
-          if-no-files-found: warn
+            dist/complete/*.json
+            dist/complete/*.xml
+          if-no-files-found: error
           retention-days: 14

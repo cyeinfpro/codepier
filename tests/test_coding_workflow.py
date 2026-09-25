@@ -6,7 +6,6 @@ import time
 import pytest
 from pydantic import ValidationError
 from shared.contracts import TOOLS, tool_definitions
-from shared.coding_contracts import CODING_TOOLS
 from shared.crypto import digest
 from shared.util import DevError
 from shared.computer_media import mcp_result
@@ -25,19 +24,13 @@ def write(path, content, sha='new'):
     return dict(action='write', path=path, content=content, expected_sha256=sha)
 
 
-def test_small_catalog_is_opt_in_and_complete():
-    full, compact = tool_definitions(), tool_definitions('coding')
-    assert {d['name'] for d in full} == set(TOOLS) - {'integration_control','validations_accept'}
-    model_tools = [x for x in compact if x.get('_meta', {}).get('ui', {}).get('visibility') != ['app']]
-    assert len(model_tools) == len(CODING_TOOLS) == 31
-    assert {x['name'] for x in model_tools} == set(CODING_TOOLS)
-    assert {x['name'] for x in compact} == set(CODING_TOOLS) | {'workspace_status'}
-    # App-only refresh schemas are host metadata, not model context. Preserve
-    # the original 60% model-context reduction rather than counting UI helpers.
-    full_model_tools = [x for x in full if x.get('_meta', {}).get('ui', {}).get('visibility') != ['app']]
-    assert len(json.dumps(model_tools)) < len(json.dumps(full_model_tools))*.4
-    assert next(x for x in compact if x['name']=='operations_wait')['inputSchema']['properties']['output_limit']['default']==8000
-    assert next(x for x in tool_definitions() if x['name']=='operations_wait')['inputSchema']['properties']['output_limit']['default']==8000
+def test_all_catalog_profiles_share_the_nine_core_tools():
+    from shared.core_contracts import CORE_TOOLS, REPLACED_MCP_TOOLS
+    for profile in ('core', 'full', 'coding'):
+        tools = tool_definitions(profile)
+        assert {definition['name'] for definition in tools} == CORE_TOOLS
+        assert not CORE_TOOLS.intersection(REPLACED_MCP_TOOLS)
+    assert next(item for item in tool_definitions() if item['name'] == 'process')['inputSchema']['properties']['output_limit']['default'] == 8000
 
 
 def test_context_reuses_payload_but_detects_rule_policy_and_owner_change(workspace):

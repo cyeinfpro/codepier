@@ -1,3 +1,4 @@
+from tests.evidence import evidence_path
 from tests.support_legacy_terminal import mount_archived_terminal
 """Native protocol real Hub/Agent and real Chromium; only disposable fixture processes."""
 import base64
@@ -143,7 +144,7 @@ def test_real_chromium_terminal_mobile_detach_and_escape_policy(cli_stack):
             page.click('#native-detach');wait_for(lambda:len(read(s,selected))>before+30)
             page.set_viewport_size({'width':390,'height':844});expect(page.locator('#native-keys')).to_be_visible()
             assert page.evaluate('document.documentElement.scrollWidth<=window.innerWidth+2')
-            page.screenshot(path=str(Path('docs/evidence/chat-ui-20260915/mobile-terminal.png')))
+            page.screenshot(path=evidence_path(str(Path('docs/evidence/chat-ui-20260915/mobile-terminal.png'))))
             page.reload();expect(page.locator('#chat-compose')).to_be_visible();mount_archived_terminal(page);expect(page.locator('#native-list .native-session').first).to_be_visible(timeout=15000)
             assert errors==[]
         finally:browser.close()

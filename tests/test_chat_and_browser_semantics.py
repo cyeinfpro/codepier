@@ -6,7 +6,7 @@ model, authorized browser profile, SSH host or user file is touched.
 from pathlib import Path
 
 from playwright.sync_api import expect
-from tests.test_chat_browser import chat_page, event  # noqa: F401
+from tests.browser_support import chat_page, event  # noqa: F401
 
 ROOT = Path(__file__).resolve().parents[1]
 

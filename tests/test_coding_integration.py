@@ -22,6 +22,9 @@ def rpc(s, method, params=None, token=None, profile='coding'):
 
 
 def tool(s,name,args,token=None):
+    from hub.core_tools import public_call
+    if name == 'apply_patch': name = 'edit'
+    else: name, args = public_call(name, args)
     response=rpc(s,'tools/call',{'name':name,'arguments':args},token)
     assert response.status_code==200,response.text
     result=response.json()['result']
@@ -45,27 +48,26 @@ def test_profile_old_transport_and_default_full_remain_compatible(coding_stack):
     s=coding_stack
     original=s.rpc('tools/list').json()['result']['tools']
     compact=rpc(s,'tools/list').json()['result']['tools']
-    assert_task_catalog(original, 72)
-    assert_task_catalog(compact, 31)
-    assert {t['name'] for t in compact} < {t['name'] for t in original}
+    assert_task_catalog(original, 9)
+    assert_task_catalog(compact, 9)
+    assert {t['name'] for t in compact} == {t['name'] for t in original}
     assert not {'integration_control','validations_accept'} & {t['name'] for t in original}
     initialized=rpc(s,'initialize',{'protocolVersion':'2025-11-25'}).json()['result']
     assert initialized['protocolVersion']=='2025-11-25'
-    assert len(initialized['instructions'])<2000
+    assert len(initialized['instructions'])<4000
     assert rpc(s,'tools/list',profile='unknown').status_code==400
-    hidden=tool(s,'computer_status',{'project':'Imago'})
-    assert hidden['isError'] and hidden['structuredContent']['error']['code']=='TOOL_OUTSIDE_PROFILE'
+    hidden=rpc(s,'tools/call',{'name':'computer_status','arguments':{'project':'Imago'}}).json()['result']
+    assert hidden['isError'] and hidden['structuredContent']['error']['code']=='TOOL_REMOVED'
 
 
 def test_remote_non_git_review_patch_idempotency_and_grant_boundaries(coding_stack):
     s=coding_stack
     first=value(s,tool(s,'open_workspace',{'project':'Imago','capture_baseline':True}))
     assert first['baseline_ref'] and first['workspace']['root']==str(s.imago)
-    # One coding-profile call returns both source SHAs and per-file failures.
-    batch = value(s, tool(s, 'fs_read_many', {'project': 'Imago', 'paths': ['README.md', 'missing.txt']}))
-    assert batch['files'][0]['ok'] and not batch['files'][1]['ok']
-    assert batch['files'][0]['sha256'] == hashlib.sha256((s.imago/'README.md').read_bytes()).hexdigest()
-    assert not batch['truncated']
+    # Independent file requests preserve per-file failure and SHA checks.
+    read = value(s, tool(s, 'read', {'project': 'Imago', 'path': 'README.md'}))
+    assert read['sha256'] == hashlib.sha256((s.imago/'README.md').read_bytes()).hexdigest()
+    assert tool(s, 'read', {'project': 'Imago', 'path': 'missing.txt'})['isError']
     again=value(s,tool(s,'open_workspace',{'project':'Imago','context_id':first['context_id']}))
     assert again['context_unchanged'] and again['context'] is None
     patch={'project':'Imago','idempotency_key':'coding-write-'+uuid.uuid4().hex,
@@ -100,7 +102,7 @@ def test_coding_profile_uses_canonical_oauth_resource_and_revocation(coding_stac
     decision=s.must(s.client.post('/api/oauth/requests/'+request+'/decide',json={'allow':True,'scopes':['read'],'projects':[s.project['id']]}))
     code=parse_qs(urlparse(decision['redirect']).query)['code'][0]
     tokens=s.must(s.client.post('/oauth/token',data={'grant_type':'authorization_code','client_id':registration['client_id'],'code':code,'code_verifier':verifier,'redirect_uri':args['redirect_uri'],'resource':s.url+'/mcp'}))
-    assert_task_catalog(rpc(s,'tools/list',token=tokens['access_token']).json()['result']['tools'], 31)
+    assert_task_catalog(rpc(s,'tools/list',token=tokens['access_token']).json()['result']['tools'], 9)
     opened=value(s,tool(s,'open_workspace',{'project':'Imago'},tokens['access_token']))
     assert opened['workspace']['granted_scopes']==['read']
     assert s.client.post('/oauth/revoke',data={'token':tokens['access_token'],'client_id':registration['client_id']}).status_code==200

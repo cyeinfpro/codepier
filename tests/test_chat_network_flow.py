@@ -1,13 +1,13 @@
 """Exercise the production HTTP helper, not the component transport stub."""
 from pathlib import Path
-from tests.test_chat_browser import chat_page
+from tests.browser_support import chat_page
+from tests.javascript_support import panel_function
 
 ROOT=Path(__file__).resolve().parents[1]
 
 
 def production_api(page):
-    source=(ROOT/'web/app.js').read_text()
-    body=source[source.index('async function api('):source.index('\nconst post=')]
+    body=panel_function('api')
     # Return undefined: Playwright invokes a returned function expression.
     # Register the helper without accidentally issuing a request before mocks.
     page.evaluate('() => {window.productionAPI=('+body+');}')

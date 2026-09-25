@@ -3,7 +3,7 @@
 import pytest
 from playwright.sync_api import expect
 
-from tests.test_chat_browser import chat_page, event
+from tests.browser_support import chat_page, event
 
 
 MOBILE_VIEWPORTS = [(390, 844, .65), (320, 568, .55), (667, 375, .40)]

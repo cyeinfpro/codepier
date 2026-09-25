@@ -16,6 +16,7 @@ from fastapi import Request
 from fastapi.testclient import TestClient
 
 import hub.app as app_module
+import hub.api.accounts as accounts_module
 import hub.auth as auth_module
 from hub.app import BodyLimit, create_app
 from hub.auth import Auth
@@ -240,7 +241,7 @@ def test_password_change_rechecks_session_after_async_verification(api, monkeypa
     def verify(password, encoded):
         store.execute("DELETE FROM sessions")
         return True
-    monkeypatch.setattr(app_module, "password_verify", verify)
+    monkeypatch.setattr(accounts_module, "password_verify", verify)
     old_hash = store.one("SELECT password_hash FROM users WHERE id='owner'")["password_hash"]
     response = client.post("/api/account/password", json={"current_password": "original-password", "new_password": "new-password-value"})
     assert response.status_code == 401
@@ -334,7 +335,14 @@ def test_sse_watcher_cap_does_not_admit_extra_stream(api):
 
 def test_sse_start_send_failure_releases_watcher(api):
     app, _, _ = api
-    endpoint = next(route.endpoint for route in app.routes if getattr(route, "path", None) == "/api/events")
+    # Exercise the production router factory rather than FastAPI's private
+    # representation of included routes. HTTP registration has separate coverage.
+    from hub.api.activity import make_activity_router
+    from hub.api.context import HubContext
+    context = HubContext(app.state.store, app.state.runtime, app.state.auth,
+        app.state.config, app.state.runtime.panel_maintenance,
+        lambda: 'http://testserver', app_module.BASE)
+    endpoint = next(route.endpoint for route in make_activity_router(context).routes if route.path == '/api/events')
     async def scenario():
         scope = {"type": "http", "method": "GET", "scheme": "http", "server": ("testserver", 80), "path": "/api/events", "headers": [(b"cookie", b"rd_session=session")], "asgi": {"spec_version": "2.4"}}
         response = await endpoint(Request(scope))
@@ -352,7 +360,14 @@ def test_sse_start_send_failure_releases_watcher(api):
 
 def test_sse_session_revocation_while_waiting_drops_next_event(api):
     app, _, _ = api
-    endpoint = next(route.endpoint for route in app.routes if getattr(route, "path", None) == "/api/events")
+    # Exercise the production router factory rather than FastAPI's private
+    # representation of included routes. HTTP registration has separate coverage.
+    from hub.api.activity import make_activity_router
+    from hub.api.context import HubContext
+    context = HubContext(app.state.store, app.state.runtime, app.state.auth,
+        app.state.config, app.state.runtime.panel_maintenance,
+        lambda: 'http://testserver', app_module.BASE)
+    endpoint = next(route.endpoint for route in make_activity_router(context).routes if route.path == '/api/events')
     async def scenario():
         scope = {"type": "http", "method": "GET", "scheme": "http", "server": ("testserver", 80), "path": "/api/events", "headers": [(b"cookie", b"rd_session=session")]}
         async def receive():

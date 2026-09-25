@@ -9,9 +9,10 @@
 ## 创建公开源码包
 
 ```bash
+VERSION=$(.venv/bin/python -c 'from scripts.build_source_bundle import source_version; print(source_version())')
 .venv/bin/python scripts/check_release.py
-.venv/bin/python scripts/build_source_bundle.py --public --output dist/codepier-1.13.0-source.zip
-.venv/bin/python scripts/check_release.py --bundle dist/codepier-1.13.0-source.zip
+.venv/bin/python scripts/build_source_bundle.py --public
+.venv/bin/python scripts/check_release.py --bundle "dist/codepier-${VERSION}-source.zip"
 ```
 
 重复构建并比较 ZIP 的 SHA-256，确认同一源码输入产生相同归档。归档中的 `MANIFEST.sha256` 必须覆盖全部源文件；外部 `.manifest.json` 提供逐文件清单。检查公开包内没有运行状态、个人服务地址、历史部署证据或凭据。模式扫描不能替代对新增文件和截图的人工检查。
@@ -30,8 +31,14 @@ macOS 下，浏览器原生宿主若从 Downloads 等受限制目录启动，可
 
 建议分支名 `main`。在 GitHub 启用私密漏洞报告、依赖安全告警与分支保护，并把 CI 设为合并条件；禁止把生产凭据暴露给 PR 工作流。工作流只检查和构建，不会创建 Release 或部署服务。
 
-首次推送后必须核对 GitHub 中真实运行的 CI 结果；本机通过不能冒充远端 CI 通过。随后由维护者确认 `v1.13.0` 标签、发布说明和经过校验的源代码包，再执行公开发布。准备完成与已经发布是两个不同状态。
+首次推送后必须核对 GitHub 中真实运行的 CI 结果；本机通过不能冒充远端 CI 通过。随后由维护者确认与 VERSION 对应的 `v${VERSION}` 标签、发布说明和经过校验的源代码包，再执行公开发布。准备完成与已经发布是两个不同状态。
 
 ## 发布后
 
 在测试设备演练升级与回滚/恢复流程，再分批更新实际 Hub 和 Agent。分别核对运行版本、目录、服务名、数据完整性和权限。更新文档中的已知限制，不把未经验证的平台标记为支持验收完成。
+
+## 构建与证据门禁
+
+先按 [开发与验证](DEVELOPMENT.md) 安装哈希锁依赖，运行前端格式、类型检查、前端构建和资源清单生成。四片通过只能作为分片证据；每个平台必须合并完整收集清单和覆盖数据，所有测试恰好一次、零跳过、源码不变才算完整。diff coverage 是新增/修改可执行行的观察报告，不强加历史全仓 80% 门槛。
+
+公开源码仅选择审阅后的当前指南；相对链接、README 当前版本、SECURITY 支持分支、生成资源内容哈希和 Compose 版本必须一致。LOCAL_RELEASE.json 留作历史本地记录，不参与当前版本判定，也不证明现用服务已更新。生产密钥轮换需要独立离线维护，不由发布任务触发。

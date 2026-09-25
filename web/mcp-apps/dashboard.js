@@ -89,8 +89,8 @@ export function mountDashboard(parent, ctx) {
     clearTimeout(timer);
     refreshButton.disabled = true;
     try {
-      const data = await ctx.request('workspace_status', {...ctx.target, workflow_id: workflowId,
-        workflow_cursor: workflowCursor, evidence_offset: offset, limit: 12});
+      const data = await ctx.request('workspace', {...ctx.target, operation: 'dashboard', options: {workflow_id: workflowId,
+        workflow_cursor: workflowCursor, evidence_offset: offset, limit: 12}});
       if (!alive() || current !== revision || workflowId !== selected) return;
       if (data.workspace_id !== (ctx.target.workspace_id || '') ||
           (workflowId && data.workflow?.workflow_id !== workflowId) ||
@@ -237,7 +237,7 @@ export function mountDashboard(parent, ctx) {
   async function openReview(value) {
     const child = detailContext();
     try {
-      const result = await child.read('show_changes', {...ctx.target, review_ref: value.review_ref, limit: 40});
+      const result = await child.read('read', {...ctx.target, operation: 'changes', options: {review_ref: value.review_ref, limit: 40}});
       if (child.alive() && result) mountReview(inspector, result, child);
     } catch (error) { if (child.alive()) notice(inspector, error.message + '；不会重新冻结当前目录。', true); }
   }
@@ -245,7 +245,7 @@ export function mountDashboard(parent, ctx) {
     const child = detailContext();
     inspector.append(el('h3', '正在核对当前源码…'));
     try {
-      const result = await child.read('validations_get', {...ctx.target, validation_id: item.validation.validation_id});
+      const result = await child.read('process', {...ctx.target, operation: 'validation_get', options: {validation_id: item.validation.validation_id}});
       if (!child.alive() || !result) return;
       inspector.replaceChildren(el('h3', result.label || '验证报告'));
       const currentPass = result.state === 'passed' && result.source_current === true && result.current?.complete === true;
@@ -263,7 +263,7 @@ export function mountDashboard(parent, ctx) {
   }
   async function downloadArtifact(item) {
     const workflowId = selected;
-    const fresh = await ctx.request('workspace_status', {...ctx.target, workflow_id: workflowId, evidence_offset: item.pageOffset || 0, limit: 12});
+    const fresh = await ctx.request('workspace', {...ctx.target, operation: 'dashboard', options: {workflow_id: workflowId, evidence_offset: item.pageOffset || 0, limit: 12}});
     if (!alive() || selected !== workflowId) return;
     const artifact = [...fresh.evidence, ...fresh.recent_operations].find(entry => entry.artifact?.artifact_id === item.artifact.artifact_id)?.artifact;
     if (!artifact || artifact.unavailable || artifact.expired || artifact.expires * 1000 <= Date.now()) throw new Error('无法重新确认此交付物，请刷新记录；不会重新生成文件。');
@@ -296,7 +296,7 @@ export function mountDashboard(parent, ctx) {
       busy = true;
       clearTimeout(detailTimer);
       try {
-        const op = await ctx.request('operations_get', {operation_id: id, output_limit: 8000,
+        const op = await ctx.request('process', {operation: 'get', operation_ids: [id], output_limit: 8000,
           ...(sequence === undefined ? {} : {after_output_seq: sequence})});
         if (!child.alive()) return;
         if ((op.operation_id || op.id) !== id || op.project_id !== snapshot?.project_id ||

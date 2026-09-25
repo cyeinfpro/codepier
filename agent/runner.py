@@ -16,6 +16,9 @@ import time
 from pathlib import Path
 import websockets
 from agent.filesystem import FileEngine
+from agent.core_files import CoreFiles
+from agent.resource_queue import Claim, ResourceQueue, claims_for
+from shared.core_contracts import CORE_REMOTE
 from agent.journal import Journal
 from agent.telemetry import AgentTelemetry
 from agent.artifacts import Artifacts
@@ -33,6 +36,7 @@ from agent.shell import execution_info, prepare_shell
 from shared.contracts import TOOLS, MUTATING
 from shared.crypto import SecureChannel
 from shared.util import DevError, VERSION
+from shared.tool_protocol import advertisement, negotiate, validate_call_epoch
 from shared.execution_policy import enforce_argv, agent_blocks_codex, computer_denial, DENIAL_MESSAGE
 from shared.instance_lock import InstanceLock
 
@@ -75,6 +79,8 @@ class Agent:
         self._active_slots: dict[object, tuple[Path, bool]] = {}
         self._waiting_writes: list[tuple[object, Path]] = []
         self.semaphore = asyncio.Semaphore(4)
+        self.read_semaphore = asyncio.Semaphore(4)
+        self.resources = ResourceQueue()
         self.stop_event = asyncio.Event()
         self.connection_number = 0
         self.pending_output: dict[str, dict] = {}
@@ -218,10 +224,11 @@ class Agent:
                           "version": VERSION, "build": self.build.describe(), "platform": platform.system(), "hostname": platform.node(),
                           "python": platform.python_version(), "roots": config["allowed_roots"], "capabilities": list(TOOLS),
                           "management": self.lifecycle.describe(), "device_actions": self.lifecycle.actions(),
-                          "journal_id": self.journal.journal_id, "delivery_protocol": 2, "native_protocol": 1, "native_chat_protocol": 3}))
+                          "journal_id": self.journal.journal_id, "delivery_protocol": 2, "native_protocol": 1, "native_chat_protocol": 3, **advertisement(self.build.catalog_sha256)}))
             reply = channel.unpack(await asyncio.wait_for(socket.recv(), 10))
             if reply.get("type") != "ready":
                 raise ValueError("面板未确认 Agent 身份")
+            self.hub_protocol = negotiate(reply)
             if self.stop_event.is_set() or self.config is not config:
                 return
             self.socket, self.channel = socket, channel
@@ -373,6 +380,37 @@ class Agent:
 
     @contextlib.asynccontextmanager
     async def project_slot(self, root, write=True, operation_id=None):
+        path = Path(root).expanduser().resolve().as_posix()
+        if os.name == 'nt': path = path.casefold()
+        async with self._legacy_project_slot(root, write=write, operation_id=operation_id):
+            async with self.resources.slot(operation_id or 'local', [Claim('agent', 'path', path, write)],
+                    lambda blockers: self.phase(operation_id, 'waiting_resource', blocked_by=blockers) if operation_id else None):
+                yield
+
+    @contextlib.asynccontextmanager
+    async def execution_slot(self, identifier, tool, project, args, root, write, deadline):
+        # Only queue acquisition has this deadline. Once execution begins the
+        # command timeout / file commit rules own cancellation and durability.
+        timeout = max(0, deadline - time.time()) if deadline is not None else None
+        async with contextlib.AsyncExitStack() as stack:
+            try:
+                async with asyncio.timeout(timeout) as timer:
+                    if tool in CORE_REMOTE:
+                        claims = claims_for(self.engine, tool, project, args, root)
+                        await stack.enter_async_context(self.resources.slot(identifier, claims,
+                            lambda blockers: self.phase(identifier, 'waiting_resource', blocked_by=blockers)))
+                    else:
+                        await stack.enter_async_context(self.project_slot(root, write=write, operation_id=identifier))
+                    self.phase(identifier, 'waiting_worker')
+                    worker = self.read_semaphore if tool in {'read', 'write', 'edit'} else self.semaphore
+                    await stack.enter_async_context(worker)
+                    timer.reschedule(None)
+            except TimeoutError as exc:
+                raise DevError('QUEUE_EXPIRED', '超过首次执行期限，未开始操作') from exc
+            yield
+
+    @contextlib.asynccontextmanager
+    async def _legacy_project_slot(self, root, write=True, operation_id=None):
         """Coordinate overlapping project paths with shared reads and exclusive writes.
 
         Named tasks remain exclusive by default. A task explicitly marked
@@ -417,10 +455,12 @@ class Agent:
     async def handle(self, request):
         id = request["id"]
         not_after = request.get("not_after")
+        tool_contract_version = request.get("tool_contract_version")
         # Hub-authenticated delivery metadata is not part of the journal request
         # fingerprint: tightening policy must not break receipt recovery.
         execution_policy = request.get("execution_policy")
         integration_context = request.get('integration_context')
+        core_ssh = request.get('core_ssh')
         request = {k: request.get(k) for k in ("tool", "project", "args")}
         try:
             previous = self.journal.start(id, request)
@@ -441,9 +481,10 @@ class Agent:
             tool, project, args = request["tool"], request["project"], request["args"]
             if not isinstance(tool, str) or not isinstance(project, dict) or not isinstance(args, dict):
                 raise DevError("INVALID_REQUEST", "操作必须包含 tool、project 和 args 对象")
+            validate_call_epoch(tool, tool_contract_version)
             # Never accept a project/argument-supplied exemption. Legacy frames
             # without metadata still obey the independently configured local floor.
-            project = {**project, "_execution_policy": execution_policy, '_integration_admin': False, '_integration_owner': None}
+            project = {**project, "_execution_policy": execution_policy, "_core_ssh": core_ssh, '_integration_admin': False, '_integration_owner': None}
             if isinstance(integration_context, dict):
                 owner = integration_context.get('owner')
                 if not isinstance(owner, str) or not 1 <= len(owner) <= 600 or integration_context.get('device_id') != self.config['device_id']:
@@ -520,29 +561,27 @@ class Agent:
                 blockers = [self.slot_owners[token] for token, (active_root, active_write) in self._active_slots.items()
                             if token in self.slot_owners and self._projects_overlap(root, active_root) and (slot_write or active_write)]
                 self.phase(id, "waiting_project", blocked_by=blockers[:64])
-                async with self.project_slot(root, write=slot_write, operation_id=id):
-                    self.phase(id, "waiting_worker")
-                    async with self.semaphore:
-                        if id in self.cancelled or self.journal.is_cancelled(id) or self.stop_event.is_set():
-                            raise DevError("CANCELLED", "操作开始前已取消")
-                        if not_after is not None and time.time() > not_after:
-                            raise DevError("QUEUE_EXPIRED", "超过首次执行期限，尚未开始操作；请确认后重新提交")
-                        self.integrations.control.guard(tool, project)
-                        if args.get('workspace_id'): project = self.integrations.project(project, args)
-                        current_root, _ = self.engine.root(project, tool in MUTATING)
-                        if current_root != root:
-                            raise DevError("ROOT_CHANGED", "排队期间项目根目录发生变化，请确认映射后重新提交")
-                        self.journal.mark_running(id)
-                        await self.send({"type": "started", "id": id})
-                        if id in self.cancelled or self.journal.is_cancelled(id) or self.stop_event.is_set():
-                            raise DevError("CANCELLED", "操作开始前已取消")
-                        self.integrations.control.guard(tool, project)
-                        if args.get('workspace_id'): project = self.integrations.project(project, args)
-                        current_root, _ = self.engine.root(project, tool in MUTATING)
-                        if current_root != root:
-                            raise DevError("ROOT_CHANGED", "项目根目录发生变化，请确认映射后重新提交")
-                        self.phase(id, "executing")
-                        result = await self.execute(id, tool, project, args)
+                async with self.execution_slot(id, tool, project, args, root, slot_write, not_after):
+                    if id in self.cancelled or self.journal.is_cancelled(id) or self.stop_event.is_set():
+                        raise DevError("CANCELLED", "操作开始前已取消")
+                    if not_after is not None and time.time() > not_after:
+                        raise DevError("QUEUE_EXPIRED", "超过首次执行期限，尚未开始操作；请确认后重新提交")
+                    self.integrations.control.guard(tool, project)
+                    if args.get('workspace_id'): project = self.integrations.project(project, args)
+                    current_root, _ = self.engine.root(project, tool in MUTATING)
+                    if current_root != root:
+                        raise DevError("ROOT_CHANGED", "排队期间项目根目录发生变化，请确认映射后重新提交")
+                    self.journal.mark_running(id)
+                    await self.send({"type": "started", "id": id})
+                    if id in self.cancelled or self.journal.is_cancelled(id) or self.stop_event.is_set():
+                        raise DevError("CANCELLED", "操作开始前已取消")
+                    self.integrations.control.guard(tool, project)
+                    if args.get('workspace_id'): project = self.integrations.project(project, args)
+                    current_root, _ = self.engine.root(project, tool in MUTATING)
+                    if current_root != root:
+                        raise DevError("ROOT_CHANGED", "项目根目录发生变化，请确认映射后重新提交")
+                    self.phase(id, "executing")
+                    result = await self.execute(id, tool, project, args)
             result = {"ok": True, "data": result}
         except asyncio.CancelledError:
             result = {"ok": False, "error": {"code": "CANCELLED" if self.journal.is_cancelled(id) else "INTERRUPTED", "message": "操作已取消" if self.journal.is_cancelled(id) else "Agent 进程被停止；检查本机结果后再决定是否重做"}}
@@ -614,6 +653,31 @@ class Agent:
 
     async def execute(self, id, tool, project, args):
         from shared.integration_contracts import REMOTE_TOOLS
+        if tool == 'exec':
+            if args['task']:
+                from shared.contracts import Task
+                forwarded = Task.model_validate({k: v for k, v in args.items() if k in Task.model_fields}).model_dump()
+                result = await self.execute(id, 'tasks_run', project, forwarded)
+            elif args['target'] == 'agent':
+                from shared.contracts import ShellExec
+                forwarded = ShellExec.model_validate({k: v for k, v in args.items() if k in ShellExec.model_fields}).model_dump()
+                result = await self.execute(id, 'shell_exec', project, forwarded)
+            else:
+                from shared.contracts import SSHExec
+                if not isinstance(project.get('_core_ssh'), dict):
+                    raise DevError('VPS_TRANSPORT_MISSING', '缺少 Hub 验证的 VPS 连接，未执行命令', 409)
+                forwarded = SSHExec.model_validate(project['_core_ssh']).model_dump()
+                result = await self.execute(id, 'ssh_exec', project, forwarded)
+            output = result.get('output', '')
+            tail = '\n'.join(output.split('\n')[-2000:]).encode('utf-8')[-50 * 1024:].decode('utf-8', errors='ignore')
+            return {**result, 'output': tail, 'output_truncated': bool(result.get('output_truncated') or tail != output),
+                    'target': args['target'], 'resource_coordination': 'declared' if args['resources'] else 'independent'}
+        if tool in {'read', 'write', 'edit'}:
+            work = asyncio.create_task(asyncio.to_thread(CoreFiles(self.engine).call, tool, project, args))
+            try:
+                return await asyncio.shield(work)
+            except asyncio.CancelledError:
+                return await work
         if tool in REMOTE_TOOLS:
             return await self.integrations.execute(id, tool, project, args)
         if tool in {"searches_start", "searches_get", "searches_cancel"}:

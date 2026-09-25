@@ -13,9 +13,13 @@ from tests.support import wait_for
 
 
 def mcp(stack, name, args):
-    result = stack.mcp(name, args)
-    assert not result.get("isError"), result
+    from hub.core_tools import public_call
+    public_name, public_args = public_call(name, args)
+    result = stack.mcp(public_name, public_args)
     data = result["structuredContent"]
+    if public_name == 'process' and 'operations' in data:
+        data = data['operations'][0]
+    assert not isinstance(data.get('error'), dict), result
     Draft202012Validator(OUTPUT_SCHEMAS[name]).validate(data)
     return data
 
@@ -51,8 +55,7 @@ def test_real_command_failure_is_evidence_not_false_success(stack):
     assert not op["result"]["data"]["command_ok"]
     compact = mcp(stack, "operations_get", {"operation_id": op["id"], "include_result": False, "include_output": False})
     assert "output" not in compact and "result" not in compact
-    error = stack.mcp("workflows_update", {"workflow_id": receipt["workflow_id"], "expected_version": 1, "action": "checkpoint",
-        "step_id": "s1", "step_state": "completed", "summary": "Should be rejected", "evidence": [op["id"]], "idempotency_key": uuid.uuid4().hex})
+    error = stack.mcp('workspace', {'idempotency_key': uuid.uuid4().hex, 'operation': 'workflow_update', 'options': {'workflow_id': receipt['workflow_id'], 'expected_version': 1, 'action': 'checkpoint', 'step_id': 's1', 'step_state': 'completed', 'summary': 'Should be rejected', 'evidence': [op['id']]}})
     assert error["isError"] and error["structuredContent"]["error"]["code"] == "EVIDENCE_NOT_SUCCESSFUL"
     Draft202012Validator(OUTPUT_SCHEMAS["workflows_update"]).validate(error["structuredContent"])
 
@@ -174,5 +177,5 @@ def test_owner_panel_handoff_is_visible_to_selected_mcp_and_rejects_other_grants
     rows = mcp(stack, 'workflows_list', {'project': 'Imago'})['workflows']
     assert any(w['workflow_id'] == receipt['workflow_id'] for w in rows)
     assert mcp(stack, 'workflows_get', {'workflow_id': receipt['workflow_id']})['assigned_to_mcp']
-    denied = stack.mcp('workflows_create', {**wf_args('Denied handoff'), 'assignee_grant_id': 'not-this-grant'})
+    denied = stack.mcp('workspace', {**{k:v for k,v in ({**wf_args('Denied handoff'), 'assignee_grant_id': 'not-this-grant'}).items() if k in {'project','workspace_id','idempotency_key'}}, 'operation': 'workflow_create', 'options': {k:v for k,v in ({**wf_args('Denied handoff'), 'assignee_grant_id': 'not-this-grant'}).items() if k not in {'project','workspace_id','idempotency_key'}}})
     assert denied['isError'] and denied['structuredContent']['error']['code'] == 'ASSIGNEE_FORBIDDEN'

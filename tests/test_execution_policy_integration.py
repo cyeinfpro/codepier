@@ -26,25 +26,25 @@ def test_mcp_denial_and_panel_exemption_through_real_authenticated_transport(sta
 
     # Hub rejects the invocation before dispatch; no authentic model binary is used.
     args = {'project':'Imago', 'command':str(stub), 'idempotency_key':uuid.uuid4().hex}
-    rejected = stack.mcp('shell_exec', args)
+    rejected = stack.mcp('exec', {**(args), 'yield_seconds': 0})
     assert rejected['isError'] and rejected['structuredContent']['error']['code'] == 'CODEX_REMOTE_DISABLED'
     assert not (stack.imago/'stub-count').exists()
 
     # The task name does not disclose its executable; the Agent inspects local argv.
-    receipt = stack.mcp('tasks_run', {'project':'Imago', 'task':'protected-stub', 'idempotency_key':uuid.uuid4().hex})['structuredContent']
+    receipt = stack.mcp('exec', {'project': 'Imago', 'task': 'protected-stub', 'idempotency_key': uuid.uuid4().hex, 'yield_seconds': 0})['structuredContent']
     rejected_task = stack.poll(receipt['operation_id'])
     assert rejected_task['result']['error']['code'] == 'CODEX_REMOTE_DISABLED'
     assert not (stack.imago/'stub-count').exists()
 
     # Static lookup and text mentioning Codex remain legitimate MCP commands.
-    benign = stack.mcp('shell_exec', {'project':'Imago', 'command':"printf '%s' 'codex'", 'idempotency_key':uuid.uuid4().hex})['structuredContent']
+    benign = stack.mcp('exec', {'project': 'Imago', 'command': "printf '%s' 'codex'", 'idempotency_key': uuid.uuid4().hex, 'yield_seconds': 0})['structuredContent']
     completed = stack.poll(benign['operation_id'])
     assert completed['state'] == 'succeeded' and completed['output'] == 'codex'
-    info = stack.mcp('execution_info', {'project':'Imago'})['structuredContent']['execution_policy']
+    info = stack.mcp('workspace', {'project': 'Imago', 'operation': 'status'})['structuredContent']['execution_policy']
     assert info['effective_block_codex'] and info['local_block_codex'] and not info['os_sandbox']
-    read = stack.mcp('fs_read', {'project':'Imago', 'path':'README.md'})
+    read = stack.mcp('read', {'project':'Imago', 'path':'README.md'})
     assert not read.get('isError', False)
-    normal_task = stack.mcp('tasks_run', {'project':'Imago', 'task':'smoke', 'idempotency_key':uuid.uuid4().hex})['structuredContent']
+    normal_task = stack.mcp('exec', {'project': 'Imago', 'task': 'smoke', 'idempotency_key': uuid.uuid4().hex, 'yield_seconds': 0})['structuredContent']
     assert stack.poll(normal_task['operation_id'])['state'] == 'succeeded'
 
     # Cookie+CSRF-authenticated owner invocation is still allowed, using only our stub.
@@ -77,7 +77,7 @@ def test_agent_local_floor_still_blocks_with_hub_switch_disabled(stack):
     stack.config['mcp_policy'] = {'block_local_codex':True}
     atomic_json(stack.config_path, stack.config)
     stack.start_agent()
-    receipt = stack.mcp('shell_exec', {'project':'Imago', 'command':str(stub), 'idempotency_key':uuid.uuid4().hex})['structuredContent']
+    receipt = stack.mcp('exec', {'project': 'Imago', 'command': str(stub), 'idempotency_key': uuid.uuid4().hex, 'yield_seconds': 0})['structuredContent']
     result = stack.poll(receipt['operation_id'])
     assert result['result']['error']['code'] == 'CODEX_REMOTE_DISABLED'
     assert not (stack.imago/'never-created').exists()

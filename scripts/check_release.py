@@ -32,7 +32,7 @@ CREDENTIAL_PATTERNS = {
     'api-secret': re.compile(r'\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{32,}\b'),
 }
 TEXT_SUFFIXES = {'.py', '.js', '.mjs', '.css', '.html', '.json', '.md', '.txt',
-                 '.sh', '.ps1', '.cmd', '.yml', '.yaml', '.toml', '.example'}
+                 '.sh', '.ps1', '.cmd', '.yml', '.yaml', '.toml', '.example', '.in'}
 
 
 def public_files(root=ROOT):
@@ -128,6 +128,7 @@ def check_web_assets(root, current_version):
 def check_source(root=ROOT):
     files = public_files(root)
     required = REQUIRED_FILES - {'LOCAL_RELEASE.json'}
+    required |= PUBLIC_DOCS
     required |= {'README.md', 'LICENSE', 'SECURITY.md', 'CONTRIBUTING.md', 'CHANGELOG.md',
                  'RELEASE.json', '.github/workflows/ci.yml', 'docs/RELEASING.md'}
     missing = sorted(required - files.keys())
@@ -139,6 +140,11 @@ def check_source(root=ROOT):
         raise ValueError('RELEASE.json does not match CodePier source identity')
     check_compose_image(root, current_version)
     browser_assets = check_web_assets(root, current_version)
+    from scripts.release_policy import check_generated_assets, check_public_links, check_supported_branch, check_readme_version
+    check_generated_assets(root)
+    check_public_links(root, files)
+    check_supported_branch(root, current_version)
+    check_readme_version(root, current_version)
     findings = []
     for name in files:
         path = root / name
