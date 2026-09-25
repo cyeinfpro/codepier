@@ -1,4 +1,4 @@
-"""Transactional v8 multi-user migration; legacy credentials and keys stay intact.
+"""Transactional multi-user migration (current schema 9); legacy credentials and keys stay intact.
 
 The caller disables FK enforcement before BEGIN, validates foreign_key_check
 before COMMIT and restores enforcement immediately. Rebuilds remove global alias

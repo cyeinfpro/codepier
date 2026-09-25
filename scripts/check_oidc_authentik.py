@@ -99,16 +99,34 @@ def acceptance(output):
             await_ready(lambda: ak.get('/api/v3/core/users/me/').status_code == 200)
             def ak_call(method, path, body=None, status=200):
                 return required(ak.request(method, '/api/v3/' + path, json=body), status)
-            def one(path, field, value):
-                entries = ak_call('GET', path)['results']
-                return next(x for x in entries if x[field] == value)
-            authorization = one('flows/instances/?page_size=100', 'slug', 'default-provider-authorization-implicit-consent')['pk']
-            invalidation = one('flows/instances/?page_size=100', 'slug', 'default-provider-invalidation-flow')['pk']
-            authentication = one('flows/instances/?page_size=100', 'slug', 'default-authentication-flow')['pk']
-            keys = ak_call('GET', 'crypto/certificatekeypairs/?page_size=100')['results']
-            signing = next(x['pk'] for x in keys if x.get('private_key_available'))
+            # API authentication becomes ready before worker blueprints finish.
+            # Wait for actual required configuration, not an arbitrary sleep or
+            # an assumption that the built-in signing certificate is exposed.
+            phase = 'authentik-default-flows'
+            flow_slugs = {'default-provider-authorization-implicit-consent',
+                          'default-provider-invalidation-flow', 'default-authentication-flow'}
+            def flows_ready():
+                rows = ak_call('GET', 'flows/instances/?page_size=100')['results']
+                return flow_slugs <= {row['slug'] for row in rows}
+            await_ready(flows_ready)
+            flows = {row['slug']: row['pk'] for row in ak_call('GET', 'flows/instances/?page_size=100')['results']}
+            authorization = flows['default-provider-authorization-implicit-consent']
+            invalidation = flows['default-provider-invalidation-flow']
+            authentication = flows['default-authentication-flow']
+            phase = 'authentik-signing-key'
+            signing_key = ak_call('POST', 'crypto/certificatekeypairs/generate/', {
+                'common_name': 'codepier-acceptance-signing', 'validity_days': 1})
+            assert signing_key['private_key_available'] is True
+            signing = signing_key['pk']
+            phase = 'authentik-scope-mappings'
+            scope_names = {'openid', 'profile', 'email', 'offline_access'}
+            def scopes_ready():
+                rows = ak_call('GET', 'propertymappings/provider/scope/?page_size=100')['results']
+                return scope_names <= {row.get('scope_name') for row in rows}
+            await_ready(scopes_ready)
             mappings = ak_call('GET', 'propertymappings/provider/scope/?page_size=100')['results']
-            scopes = [x['pk'] for x in mappings if x.get('scope_name') in ('openid', 'profile', 'email', 'offline_access')]
+            scopes = [row['pk'] for row in mappings if row.get('scope_name') in scope_names]
+            phase = 'authentik-test-users'
             group = ak_call('POST', 'core/groups/', {'name': 'codepier-acceptance-team'}, 201)
             users = []
             for name in ('alice', 'bob'):

@@ -13,7 +13,7 @@ application integration extends the existing Role engine through `hub/iam.py`,
 The prototype remains a separate policy contract; production requests use the
 persistent live IAM checks and the existing per-project Role rules.
 
-- Transactional schema 8 migration: users' security state, personal/team Spaces,
+- Transactional schema 9 migration: users' security state, personal/team Spaces,
   source-tracked memberships and Role assignments, resource/history ownership,
   Space-scoped aliases, cross-Space reference guards, external identities and
   server-side OIDC state. Existing Profile/grant/resource IDs, Token hashes,
@@ -66,7 +66,7 @@ The following are separate checkpoints, not a summed final-suite count:
   the same role Token, then remove assignment and prove a filesystem write cannot
   occur; an unrelated Space is denied.
 - 97 legacy Roles/Profiles/continuous-access tests passed after updating genuine
-  old-schema fixtures to migrate through schema 8.
+  old-schema fixtures to migrate through schema 9.
 - 162 workflow/workspace/VPS tests passed; 11 native history/SSE fixture tests
   passed at subsequent checkpoints.
 - Python compilation, JavaScript syntax and git diff whitespace checks passed.
@@ -83,16 +83,34 @@ https://github.com/tsunheimat/codepier/actions/runs/36110869167
 The earlier green run 36104514001 validated only the original prototype commit;
 it does NOT validate this integrated implementation.
 
-## Remaining acceptance/hardening before release
+## Additional hardening completed
+
+- Space-scoped operation/workflow/project-save idempotency with migration and reopen checks.
+- Immutable resource Space bindings; no remapping existing history into another Space.
+- Current authorization after delayed receipts and per cached native stream/export item.
+- Device-owner membership gates for enrollment, connection and lifecycle controls.
+- Protected last local recovery administrator and Space-owner suspension authority.
+- Bounded OIDC HTTP total deadlines and compare-and-set protection against stale
+  UserInfo/refresh errors racing a new login or provider configuration.
+- Setup, group/offboarding, migration, rollback and recovery guide:
+  [MULTIUSER_OIDC.md](MULTIUSER_OIDC.md).
+- Actual disposable Authentik 2026.8.3 + Chromium acceptance added as a required CI job.
+
+A pinned GitHub repair run passed **183 tests**, including existing and new real
+Chromium/WebKit UI cases, with zero failures/errors/skips:
+https://github.com/tsunheimat/codepier/actions/runs/36115997440 .
+The source at that checkpoint was `ed33a27f092a85d2463e373444f208901a5abef8`.
+Subsequent local backend checkpoint: **234 passed**; newest hardening module
+**18 passed**. These overlapping checkpoints must not be summed.
+
+## Remaining acceptance before release
 
 - Complete pinned-dependency full repository CI, fix failures, and inspect its
   per-platform reports rather than inferring success from a selected test suite.
-- Exercise native ownership and revocation across streaming, downloads and
-  concurrent requests; check cross-Space idempotency and UI edge cases.
 - Validate against a real isolated Authentik provider and the intended ChatGPT
   connection host; protocol-unit tests alone are not provider/host acceptance.
-- Finish operational setup/migration/recovery documentation and publish final
-  source hashes and test results. Do not treat this checkpoint as a deployment.
+- Publish final exact source hashes and full CI evidence. No live deployment or
+  production IdP/ChatGPT configuration is represented by repository acceptance.
 
 ## Important boundaries
 
