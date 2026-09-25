@@ -81,7 +81,7 @@ def test_write_is_idempotent_and_audited(stack):
 def test_project_creation_keeps_explicit_read_boundary(stack):
     directory = stack.root / ('Smoke-' + uuid.uuid4().hex)
     directory.mkdir()
-    project = stack.must(stack.client.post('/api/projects', json={'alias':directory.name,'root':str(directory),'device_id':stack.device,'mode':'read','allow_tasks':False}))
+    project = stack.create_project({'alias':directory.name,'root':str(directory),'device_id':stack.device,'mode':'read','allow_tasks':False})
     assert project['mode'] == 'read' and not project['allow_tasks']
     stack.must(stack.client.delete('/api/projects/' + project['id']))
 
