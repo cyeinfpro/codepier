@@ -32,11 +32,24 @@ def live_group_members(pgid: int, *, timeout: float = 1) -> list[int]:
             if int(fields[2]) == pgid and fields[0] not in {'Z', 'X'}:
                 members.append(int(entry.name))
         return members
-    result = subprocess.run(['/bin/ps', '-axo', 'pid=,pgid=,stat='],
-                            capture_output=True, text=True, timeout=timeout, check=True)
-    return [int(fields[0]) for line in result.stdout.splitlines()
-            if len(fields := line.split()) >= 3 and int(fields[1]) == pgid
-            and not fields[2].startswith(('Z', 'X'))]
+    # Darwin supports selection by process group. Do not inspect every host
+    # process just to verify one owned group: unrelated load must not consume
+    # the short cleanup-observation budget. Linux uses /proc above because its
+    # ps -g option has different semantics.
+    command = (['/bin/ps', '-x', '-g', str(pgid), '-o', 'pid=,pgid=,stat=']
+               if sys.platform == 'darwin' else ['/bin/ps', '-axo', 'pid=,pgid=,stat='])
+    result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=True)
+    members = []
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split()
+        if len(fields) != 3:
+            raise ValueError('Incomplete process-group observation')
+        identifier, group = int(fields[0]), int(fields[1])
+        if group == pgid and not fields[2].startswith(('Z', 'X')):
+            members.append(identifier)
+    return members
 
 
 def stop_owned_group(pid: int, grace: float = 2, kill_timeout: float = 3, *, grouped: bool | None = None) -> tuple[bool, int | None]:
