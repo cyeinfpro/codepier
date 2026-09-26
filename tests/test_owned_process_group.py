@@ -85,3 +85,23 @@ def test_reaped_or_foreign_pid_never_receives_signal(owned_child, monkeypatch):
     monkeypatch.setattr(groups.os, 'waitpid', not_our_child)
     assert groups.stop_owned_group(4242, grouped=True) == (False, None)
     assert signals == []
+
+
+def test_darwin_surveys_only_the_owned_group_within_remaining_budget(monkeypatch):
+    monkeypatch.setattr(groups, 'sys', SimpleNamespace(platform='darwin'))
+
+    def ps(command, **kwargs):
+        assert command == ['/bin/ps', '-x', '-g', '4242', '-o', 'pid=,pgid=,stat=']
+        assert kwargs['timeout'] == .25 and kwargs['check'] is True
+        return SimpleNamespace(stdout='4242 4242 Z\n4243 4242 S+\n')
+
+    monkeypatch.setattr(groups.subprocess, 'run', ps)
+    assert groups.live_group_members(4242, timeout=.25) == [4243]
+
+
+@pytest.mark.parametrize('output', ['truncated\n', '4243 unknown S\n', '4243 4242\n'])
+def test_malformed_process_survey_cannot_prove_an_empty_group(monkeypatch, output):
+    monkeypatch.setattr(groups, 'sys', SimpleNamespace(platform='darwin'))
+    monkeypatch.setattr(groups.subprocess, 'run', lambda *a, **k: SimpleNamespace(stdout=output))
+    with pytest.raises(ValueError):
+        groups.live_group_members(4242)
