@@ -42,6 +42,38 @@ where they have membership. A Space administrator alone does not automatically
 receive other humans' private transcripts. The Hub host operator is trusted;
 this is not encryption against the machine administrator.
 
+## Breaking compatibility change: group claim source
+
+**Check this before upgrading a previously configured OIDC Hub.** Group admission
+(`required_group`) and group-to-Space/Role mappings require the configured claim
+as an explicit string list in **UserInfo**. ID-token-only group claims are not
+used as a fallback. Login is denied with `OIDC_GROUPS_UNAVAILABLE` when the claim
+is missing, including for an administrator using that external identity. The
+local recovery login is independent; test it before upgrading.
+
+**Microsoft Entra ID cannot be configured to return `groups` from its UserInfo
+endpoint.** Microsoft documents that this response is not customizable. Adding an
+optional group claim to the ID token will NOT make CodePier's UserInfo-based group
+authorization work. This release does not implement Microsoft Graph directory
+synchronization. Use a trusted identity broker providing verifiable UserInfo
+memberships, or retain the old installation until a provider-specific integration
+has been reviewed. Do not just remove `required_group` or enable open JIT to get
+past the error: that changes who is allowed to join.
+
+Entra OIDC without CodePier group-based admission/mappings is a separate use case;
+manual memberships can be managed in CodePier after explicit admission/linking.
+Providers without a UserInfo endpoint cannot maintain group entitlements in this
+release. This is a declared compatibility boundary, not an invitation to accept
+old signed ID-token groups indefinitely or renew freshness on failed syncs.
+
+For other IdPs, enable the claim in UserInfo only where the provider supports it.
+The provider editor and discovery-check dialog show this warning; discovery/JWKS
+success alone does not prove claim compatibility. The Hub emits a non-secret
+`OIDC_GROUPS_USERINFO_REQUIRED` warning at startup when group policies exist,
+including after reopening an existing schema-10 database.
+
+Reference: https://learn.microsoft.com/en-us/entra/identity-platform/userinfo
+
 ## Upgrade an existing single-owner Hub
 
 1. Record the existing source/container version. Run its backup command **before**
@@ -152,6 +184,15 @@ metadata/JWKS/token/UserInfo endpoints cannot require interactive bot challenges
 CodePier does not follow upstream HTTP redirects or send client secrets to an
 origin that was not explicitly configured. Restrict trusted reverse-proxy headers
 with `FORWARDED_ALLOW_IPS`; keep the public Hub URL and proxy scheme consistent.
+
+Configure `FORWARDED_ALLOW_IPS` with the actual controlled reverse-proxy source
+addresses, especially when the proxy is another container or host. The default
+trusts loopback only. Do not use `*` on a directly reachable Hub or trust arbitrary
+forwarded headers. Untrusted proxies/NAT clients intentionally share a socket-IP
+bucket. The 32-client/256-provider/global limits count **pending (`used=0`)** login
+transactions, not successful or already-consumed callbacks. Consumed rows are
+retained temporarily for replay/link-race checks, but no longer consume these
+slots. The separate 30-requests/minute socket-IP OAuth throttle still applies.
 
 Link the existing recovery administrator through **我的账号 -> 关联提供者** while
 recently signed in. Linking requires fresh IdP authentication and will not merge
@@ -349,3 +390,24 @@ those deployment-specific settings before inviting production users.
 References: OIDC Core https://openid.net/specs/openid-connect-core-1_0.html ;
 Back-channel logout https://openid.net/specs/openid-connect-backchannel-1_0.html ;
 Authentik provider https://docs.goauthentik.io/add-secure-apps/providers/oauth2/ .
+
+### Key rotation and temporary provider failures
+
+JWT claims must validate against a known signing key. Known good cached keys are
+tried before refresh limits. With a current verified discovery document, a signing
+key refresh fetches only its approved JWKS URL; a failed optional discovery check
+does not poison this path or erase cached keys. JWKS-only refresh never extends
+the discovery document's validity.
+
+Refresh is provider-wide single-flight, with at most two successful key-fetch
+probes per 60-second window. This allows a genuine rotation immediately after one
+garbage-key probe while keeping arbitrary invented kids from causing unlimited
+requests. Failed key fetches use a separate 10-second retry cooldown instead of
+consuming a successful refresh slot. Full discovery failures retain their own
+30-second cooldown. No cooldown skips signature, issuer, audience or time checks.
+
+There is an unavoidable bounded tradeoff: when the successful-probe budget is
+exhausted, a token signed by a genuinely **unseen** key may need to retry until the
+window resets. Existing keys cannot validate a new key's signature. Operators
+should publish new keys before signing with them and overlap rotations; the code
+does not claim zero-delay admission under an arbitrary-kid flood or IdP outage.

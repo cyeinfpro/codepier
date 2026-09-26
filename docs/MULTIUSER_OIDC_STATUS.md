@@ -9,6 +9,8 @@ IdP/ChatGPT configuration is implied by this document.
 Base: `57f502d428472d8e7f6d71195a952b7157a8e5ea`.
 Setup, migration, recovery and Authentik instructions: [MULTIUSER_OIDC.md](MULTIUSER_OIDC.md).
 
+Second-review corrections and compatibility decision: [PR3_SECOND_REVIEW_FIXES.md](PR3_SECOND_REVIEW_FIXES.md).
+
 ## Implementation coverage
 
 | Requirement | Connected implementation |

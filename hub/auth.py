@@ -182,8 +182,9 @@ class Auth:
             if authorization_mode == 'fixed' and not principal.admin:
                 if '*' in projects:
                     raise DevError('DYNAMIC_ROLE_REQUIRED', '未来项目委派请使用已分配的动态角色', 403)
+                permissions = iam.project_permissions(self.store, principal)
                 for project_id in projects:
-                    if not set(scopes) <= iam.human_project_actions(self.store, principal, project_id):
+                    if not set(scopes) <= permissions.get(project_id, set()):
                         raise DevError('INSUFFICIENT_SCOPE', '不能委派自己没有的项目权限', 403)
             self.store.db.execute("INSERT INTO grants(id,user_id,label,client_id,scopes,projects,revoked,created,profile_id,authorization_mode,role_id,space_id,owner_user_id,identity_id,user_epoch) VALUES (?,?,?,?,?,?,0,?,?,?,?,?,?,?,?)", (gid, principal.user_id, label, client_id, json.dumps(sorted(set(scopes))), json.dumps(projects), now, profile_id, authorization_mode, role_id, principal.space_id, principal.user_id, principal.identity_id, principal.user_epoch))
             self.store.db.execute("INSERT INTO tokens VALUES (?,?,?,'pat',?,?)", (tid, digest(secret), gid, now + days * 86400, now))

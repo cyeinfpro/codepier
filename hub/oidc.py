@@ -36,6 +36,8 @@ SKEW = 30
 LOGIN_TTL = 600
 LOGOUT_EVENT = 'http://schemas.openid.net/event/backchannel-logout'
 KEY_REFRESH_COOLDOWN = 60
+KEY_REFRESH_BURST = 2
+KEY_FAILURE_COOLDOWN = 10
 METADATA_FAILURE_COOLDOWN = 30
 LOGIN_CLIENT_LIMIT = 32
 LOGIN_PROVIDER_LIMIT = 256
@@ -189,7 +191,7 @@ class OIDCService:
         from hub.oidc_resilience import SyncScheduler
         self.scheduler=SyncScheduler(self)
         self.metadata_locks={};self.key_locks={}
-        self.metadata_failures={};self.key_refresh_after={}
+        self.metadata_failures={};self.key_refresh_after={};self.key_refresh_failures={}
         self.worker_audit_after=0.0
         self.inflight=asyncio.Semaphore(4)
         self.stop_event=asyncio.Event();self.worker=None
@@ -261,14 +263,57 @@ class OIDCService:
                 if current != keys:
                     try:return validate_claims(encoded,provider,current,**kwargs)
                     except SigningKeyRefreshRequired:pass
-                last=self.key_refresh_after.get(identifier)
-                if last and last[0]==version and last[1]>time.monotonic():
+                now=time.monotonic()
+                failed=self.key_refresh_failures.get(identifier)
+                if failed and failed[0]==version and failed[1]>now:
+                    raise DevError('OIDC_KEYS_UNAVAILABLE','签名密钥更新暂不可用，请稍后重试',503)
+                budget=self.key_refresh_after.get(identifier)
+                if not budget or budget[0]!=version or budget[1]<=now:
+                    budget=(version,now+KEY_REFRESH_COOLDOWN,KEY_REFRESH_BURST)
+                if budget[2]<=0:
                     raise original
-                # Reserve BEFORE the await, even when the network refresh fails.
-                # Arbitrarily many invented kids cannot force unbounded requests.
-                self.key_refresh_after[identifier]=(version,time.monotonic()+KEY_REFRESH_COOLDOWN)
-                _,current=await self.metadata(provider,force=True)
+                # A small provider-wide burst lets a genuine rotation follow a
+                # single garbage-kid probe; it is NOT an unbounded per-kid cache.
+                # Serialize requests and reserve capacity before network I/O.
+                self.key_refresh_after[identifier]=(version,budget[1],budget[2]-1)
+                try:
+                    current=await self.refresh_keys(provider)
+                except DevError as exc:
+                    # A failed fetch gets a short outage cooldown, not an entire
+                    # successful-refresh window. Valid cached keys remain usable.
+                    self.key_refresh_after[identifier]=budget
+                    self.key_refresh_failures[identifier]=(version,time.monotonic()+KEY_FAILURE_COOLDOWN)
+                    if exc.code=='OIDC_CONFIG_CHANGED':raise
+                    raise DevError('OIDC_KEYS_UNAVAILABLE','签名密钥更新暂不可用，请稍后重试',503) from exc
+                self.key_refresh_failures.pop(identifier,None)
                 return validate_claims(encoded,provider,current,**kwargs)
+
+    async def refresh_keys(self,provider):
+        """Refresh only JWKS at the previously verified discovery endpoint.
+
+        An unsuccessful optional discovery check must not prevent key rotation
+        using a still-valid discovery document. Serialize with full metadata
+        refreshes; never extend the discovery cache's expiry just by fetching keys.
+        """
+        async with self.metadata_locks.setdefault(provider['id'],asyncio.Lock()):
+            cached=self.store.one('SELECT * FROM oidc_cache WHERE provider_id=? AND version=? AND expires>?',
+                                  (provider['id'],provider['version'],time.time()))
+            if not cached:
+                # Discovery expired between validation and locking. A complete,
+                # verified fetch is required; no stale endpoints are trusted.
+                _,keys=await self._load_metadata(provider)
+                return keys
+            meta=json.loads(cached['metadata'])
+            keys=await self.http_json(provider,'GET',meta['jwks_uri'])
+            if not isinstance(keys.get('keys'),list) or not 1<=len(keys['keys'])<=32:
+                raise DevError('OIDC_KEYS_INVALID','身份提供者公钥格式无效',400)
+            with self.store.transaction():
+                current=self.provider(provider['id'])
+                if current['version']!=provider['version']:
+                    raise DevError('OIDC_CONFIG_CHANGED','身份提供者配置已变化，请重新发起请求',409)
+                self.store.db.execute('UPDATE oidc_cache SET jwks=? WHERE provider_id=? AND version=?',
+                                      (json.dumps(keys),provider['id'],provider['version']))
+            return keys
 
     async def _load_metadata(self,provider):
         meta=await self.http_json(provider,'GET',provider['discovery_url'])
@@ -314,6 +359,30 @@ class OIDCService:
             raise DevError('OIDC_GROUPS_UNAVAILABLE',
                            '群组授权要求 UserInfo 明确返回已配置的群组字段；请检查身份提供者映射',403)
         return self.groups(provider,info or {})
+
+    def group_compatibility(self,provider,meta=None):
+        """Administrative diagnostics only; never grant access from provider names."""
+        required=bool(provider['required_group'] or self.store.one(
+            'SELECT 1 AS ok FROM group_mappings WHERE provider_id=? LIMIT 1',(provider['id'],)))
+        warnings=[]
+        if required:
+            warnings.append('群组授权仅接受 UserInfo 中的已配置字段；发现成功不代表群组兼容。ID Token 群组不会作为后备。')
+            if urlsplit(provider['issuer']).hostname in {
+                    'login.microsoftonline.com','login.microsoftonline.us','login.partner.microsoftonline.cn'}:
+                warnings.append('Microsoft Entra UserInfo 不返回 groups 且不能自定义；此提供者的群组登录限制/映射不受支持。请使用可同步的身份代理，或另行设计 Graph 适配器；不要直接移除准入限制。')
+            if meta is not None and not meta.get('userinfo_endpoint'):
+                warnings.append('此提供者没有 UserInfo 端点；已配置的群组策略将拒绝登录。')
+        return {'group_policy_source':'userinfo','group_policy_required':required,'warnings':warnings}
+
+    def warn_group_compatibility(self):
+        # Runs once at Hub startup, including an upgrade/reopen of schema 10.
+        # No provider labels, group names or identity/credential data are logged.
+        if self.store.one("SELECT 1 AS ok FROM oidc_providers p WHERE p.required_group<>'' OR EXISTS (SELECT 1 FROM group_mappings m WHERE m.provider_id=p.id) LIMIT 1"):
+            import logging
+            logging.getLogger(__name__).warning(
+                'OIDC_GROUPS_USERINFO_REQUIRED: group policy requires UserInfo claims; '
+                'ID-token-only groups (including Microsoft Entra) are unsupported. '
+                'Review docs/MULTIUSER_OIDC.md before enabling OIDC admission; keep local recovery login.')
 
     def reconcile_groups(self,identity,groups,provider):
         """Called in a write transaction. Remove only this identity's sources."""
@@ -404,14 +473,16 @@ class OIDCService:
         client_hash=digest(('link:'+link_session['user_id']) if link_session else 'login:'+client_key)
         with self.store.transaction():
             self.store.db.execute('DELETE FROM oidc_transactions WHERE expires<=?',(now,))
+            # Consumed records remain replay/link-race tombstones until expiry,
+            # not active reservations. Never charge completed logins to capacity.
             limit=8 if link_session else LOGIN_CLIENT_LIMIT
-            if self.store.one('SELECT count(*) AS n FROM oidc_transactions WHERE client_hash=?',(client_hash,))['n']>=limit:
+            if self.store.one('SELECT count(*) AS n FROM oidc_transactions WHERE used=0 AND client_hash=?',(client_hash,))['n']>=limit:
                 raise DevError('OIDC_CLIENT_BUSY','此客户端已有过多登录请求；请完成现有请求或稍后重试',429)
-            if self.store.one('SELECT count(*) AS n FROM oidc_transactions')['n']>=LOGIN_TOTAL_LIMIT:
+            if self.store.one('SELECT count(*) AS n FROM oidc_transactions WHERE used=0')['n']>=LOGIN_TOTAL_LIMIT:
                 raise DevError('OIDC_BUSY','登录请求过多',429)
             if not link_session:
-                public=self.store.one('SELECT count(*) AS n FROM oidc_transactions WHERE link_user_id IS NULL')['n']
-                provider_count=self.store.one('SELECT count(*) AS n FROM oidc_transactions WHERE provider_id=? AND link_user_id IS NULL',(provider['id'],))['n']
+                public=self.store.one('SELECT count(*) AS n FROM oidc_transactions WHERE used=0 AND link_user_id IS NULL')['n']
+                provider_count=self.store.one('SELECT count(*) AS n FROM oidc_transactions WHERE used=0 AND provider_id=? AND link_user_id IS NULL',(provider['id'],))['n']
                 if public>=LOGIN_PUBLIC_LIMIT or provider_count>=LOGIN_PROVIDER_LIMIT:
                     raise DevError('OIDC_BUSY','登录请求过多',429)
             self.store.db.execute('''INSERT INTO oidc_transactions
@@ -463,6 +534,11 @@ class OIDCService:
                     if self.provider(provider['id'])['version']!=provider['version'] or iam.user_security(self.store,user['id'])['epoch']!=user['epoch']:return
                     changed=self.store.db.execute('UPDATE external_identities SET upstream_tokens=? WHERE id=? AND enabled=1 AND upstream_tokens=?',(encrypted,identifier,expected_tokens)).rowcount
                     if not changed:return  # A parallel login/unlink owns newer credentials.
+                    # Transfer only this attempt's credential generation in the
+                    # SAME transaction as the successful token CAS. A subsequent
+                    # UserInfo failure must retain retry history; a parallel login
+                    # must still invalidate this attempt's completion.
+                    self.scheduler.tokens_rotated(identity,provider,expected_tokens,encrypted)
                 expected_tokens=encrypted
             info=await self.http_json(provider,'GET',meta['userinfo_endpoint'],headers={'Authorization':'Bearer '+secured['access_token']})
             if info.get('sub')!=identity['subject']:raise DevError('OIDC_SUBJECT_MISMATCH','UserInfo 身份不一致',401)
@@ -489,6 +565,7 @@ class OIDCService:
             await self.scheduler.run()
 
     async def start(self):
+        self.warn_group_compatibility()
         self.stop_event.clear()
         async def work():
             while not self.stop_event.is_set():
@@ -563,7 +640,7 @@ class OIDCService:
             auth.instance(request,True);provider=self.provider(identifier,enabled=False)
             meta,keys=await self.metadata(provider,force=True)
             auth.instance(request,True)
-            return {'issuer':meta['issuer'],'signing_keys':len(keys['keys']),'callback':self.public_url()+'/auth/oidc/'+identifier+'/callback','backchannel_logout':self.public_url()+'/auth/oidc/'+identifier+'/backchannel-logout'}
+            return {'issuer':meta['issuer'],'signing_keys':len(keys['keys']),'callback':self.public_url()+'/auth/oidc/'+identifier+'/callback','backchannel_logout':self.public_url()+'/auth/oidc/'+identifier+'/backchannel-logout',**self.group_compatibility(provider,meta)}
 
         @router.get('/api/iam/oidc/targets')
         async def mapping_targets(request:Request):

@@ -214,7 +214,7 @@ def test_key_refresh_is_singleflight_and_rate_limited_across_arbitrary_tokens(oi
         return await asyncio.gather(*(service.verify_claims(value,provider,keys,nonce='') for value in tokens),return_exceptions=True)
     errors=asyncio.run(attacks())
     assert all(isinstance(error,DevError) for error in errors)
-    assert len(fake.requests)-before==2  # One discovery/JWKS pair, not 30 pairs.
+    assert len(fake.requests)-before==2  # At most two key-only probes, not 30 discovery/JWKS pairs.
 
 
 def test_real_key_rotation_revalidates_with_new_key(oidc):

@@ -200,7 +200,8 @@ def profile_values(store, body, user_id, space_id="legacy"):
     if not body.role_id and not iam.is_space_admin(store, user_id, space_id):
         from hub.runtime import Principal
         candidate = Principal('', user_id, set(), [], space_id=space_id)
-        if '*' in projects or any(not scopes <= iam.human_project_actions(store, candidate, pid) for pid in projects):
+        permissions = iam.project_permissions(store, candidate)
+        if '*' in projects or any(not scopes <= permissions.get(pid, set()) for pid in projects):
             raise DevError('INSUFFICIENT_SCOPE', 'Profile 不能超出账号现有权限', 403)
     return label, unicodedata.normalize('NFKC', label).casefold(), sorted(scopes), projects
 

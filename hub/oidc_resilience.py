@@ -87,6 +87,18 @@ class SyncScheduler:
                          'ok' if recovered else 'error',
                          {'code': code, 'suppressed': suppressed, 'provider_id': provider_id}, commit=False)
 
+    def tokens_rotated(self, identity, provider, previous, current):
+        """Carry retry ownership through OUR successful refresh, in its SQL txn.
+
+        Never read the current ciphertext after a wait to infer ownership: that
+        could be a new login. Only the winning identity CAS calls this method.
+        The attempted_at lease and accumulated failures deliberately stay intact.
+        """
+        self.store.db.execute('''UPDATE oidc_sync_state SET credential_hash=?
+            WHERE identity_id=? AND credential_hash=? AND provider_version=?
+              AND observed_checked_at=?''',
+            (digest(current), identity['id'], digest(previous), provider['version'], identity['checked_at']))
+
     def finish(self, snapshot, attempt, code):
         now = time.time()
         with self.store.transaction():
@@ -94,11 +106,13 @@ class SyncScheduler:
             configured = self.store.one('SELECT version,enabled FROM oidc_providers WHERE id=?', (snapshot['provider_id'],))
             account = self.store.one('SELECT epoch,active FROM iam_users WHERE user_id=?', (snapshot['user_id'],))
             state = self.store.one('SELECT * FROM oidc_sync_state WHERE identity_id=?', (snapshot['id'],))
-            if (not current or current['upstream_tokens'] != snapshot['upstream_tokens']
+            if (not current or not state or not current['upstream_tokens']
+                    or digest(current['upstream_tokens']) != state['credential_hash']
                     or not configured or not configured['enabled'] or configured['version'] != snapshot['provider_version']
                     or not account or not account['active'] or account['epoch'] != snapshot['user_epoch']
-                    or not state or state['attempted_at'] != attempt):
-                # A new login, token rotation or configuration now owns this
+                    or state['attempted_at'] != attempt
+                    or state['provider_version'] != snapshot['provider_version']):
+                # A new login, another attempt or configuration now owns this
                 # identity. Do not overwrite its scheduling/audit generation.
                 return
             previous_failures = state['failures']
@@ -127,9 +141,18 @@ class SyncScheduler:
                     code = outcome or ''
                 except DevError as exc:
                     code = exc.code
-                except (ValueError, TypeError, KeyError):
+                except Exception:
+                    # Includes Fernet InvalidToken and unexpected record errors.
+                    # Do not log the exception: it may contain credentials.
+                    # Cancellation/SystemExit remain outside Exception.
                     code = 'OIDC_RECORD_INVALID'
                 # Cancellation deliberately keeps the finite lease. It neither
                 # reports success nor renews a verified entitlement.
                 self.finish(snapshot, attempt, code)
-        await asyncio.gather(*(one(row) for row in self.due()))
+        # Also join siblings if claim/finish itself fails (e.g. a storage error).
+        # Releasing the outer sync lock before siblings exit permits overlapping
+        # batches. Cancellation still propagates after children finish cleanup.
+        results = await asyncio.gather(*(one(row) for row in self.due()), return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result

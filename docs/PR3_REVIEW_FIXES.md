@@ -1,5 +1,7 @@
 # PR #3: review fixes and regression evidence
 
+This records the first review delta. See [PR3_SECOND_REVIEW_FIXES.md](PR3_SECOND_REVIEW_FIXES.md) for follow-up corrections to scheduling, capacity, batch consent, and key-refresh behaviour.
+
 Reviewed baseline: `f8a34af4bca2370821ad4b11031cea37d3e351b7`.
 Implementation commit: `c8c6c3742e749561a81b4c7d695d91bbb8989bc3`.
 No deployment, merge, production identity-provider change or assertion relaxation.

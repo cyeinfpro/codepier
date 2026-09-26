@@ -56,6 +56,8 @@ def test_provider_form_is_closed_by_default_and_does_not_echo_secret(iam_page,st
     form=page.locator('#iam-form')
     expect(form.locator('[name="enabled"]')).not_to_be_checked()
     expect(form.locator('[name="admission"]')).to_have_value('closed')
+    expect(form).to_contain_text('Microsoft Entra')
+    expect(form).to_contain_text('UserInfo')
     identifier=uuid.uuid4().hex[:8];label='Test SSO '+identifier
     for name,value in [('label',label),('issuer','https://idp-'+identifier+'.example.invalid/'),('client_id','client-id'),('client_secret','test-ui-secret-not-a-real-credential')]:
         form.locator('[name="'+name+'"]').fill(value)

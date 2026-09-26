@@ -272,8 +272,9 @@ class OAuth:
                     if not principal.admin:
                         if '*' in projects:
                             raise DevError('ROLE_REQUIRED','普通成员的持续授权请选择获授予的动态角色',403)
+                        permissions=iam.project_permissions(self.store,principal)
                         for project_id in projects:
-                            if not set(scopes)<=iam.human_project_actions(self.store,principal,project_id):
+                            if not set(scopes)<=permissions.get(project_id,set()):
                                 raise DevError('DELEGATION_DENIED','不得委派超出当前账号的项目权限',403)
                 if row["resource"] != self.resource():
                     raise DevError("INVALID_TARGET", "资源标识已变化，请重新发起授权")

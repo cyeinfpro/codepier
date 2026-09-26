@@ -2,6 +2,10 @@
 
 ## Unreleased — 多用户、OIDC 与 Space 隔离
 
+- **升级兼容性警告：** required_group / 群组映射只接受 UserInfo 的群组字段；Microsoft Entra UserInfo 无法返回自定义 groups，仅配置 ID Token 群组不能修复。升级前验证本地恢复登录与身份代理；不能靠移除准入限制绕过。已有群组配置在 Hub 启动及管理页有明确提示。
+- 修复已消费 OIDC 回调仍占用待处理登录容量、损坏密文令同步批次提前退出、刷新令牌后丢失重试/恢复结果，以及批量 Profile/PAT/OAuth 授权的平方级计算。
+- 密钥轮换使用已验证 Discovery 的 JWKS 端点、有限突发预算与独立失败退避；有效缓存密钥优先使用，保持原签名及权限校验。
+
 - 接入通用 OIDC 授权码/S256 PKCE、签名/issuer/subject/nonce/audience 校验、服务端加密状态、显式账号关联和退出处理；禁止按邮箱自动合并，JIT 默认关闭并保留本机恢复账号。
 - 新增个人/团队 Space、来源可追溯的成员及角色分配、私有 Profile、OIDC 群组映射和有时效的权限校验；普通面板用户不再自动变成管理员。
 - 共用动态 Role 在当前 Space 内实时增减能力与项目，已有明确同意的角色连接无需重新授权；保留旧 fixed grant 语义与稳定身份。
