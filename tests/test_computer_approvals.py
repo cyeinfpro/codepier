@@ -41,10 +41,15 @@ async def test_pending_consent_fails_closed(reason):
     assert not approvals.pending
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('callback', ['matching','wrong-thread','wrong-server','url','fields','unknown'])
-async def test_appserver_callbacks_are_not_implicitly_approved(tmp_path,callback):
+@pytest.mark.parametrize('callback,boot_delay', [
+    *[(case, 0) for case in ('matching','wrong-thread','wrong-server','url','fields','unknown')],
+    pytest.param('wrong-server', 2.2, id='slow-startup-wrong-server'),
+])
+async def test_appserver_callbacks_are_not_implicitly_approved(tmp_path,callback,boot_delay):
     script=tmp_path/'fake.py'
-    script.write_text('''import sys,json
+    script.write_text('''import sys,json,time
+time.sleep(float(sys.argv[2]))
+print('FIXTURE_READY',flush=True)
 for line in sys.stdin:
  r=json.loads(line)
  if 'method' not in r:continue
@@ -62,8 +67,12 @@ for line in sys.stdin:
     client.thread_id='thread';calls=[]
     async def handler(message):calls.append(message);return {'action':'decline'}
     client.approval_handler=handler
-    client.process=await asyncio.create_subprocess_exec(sys.executable,str(script),callback,stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE,start_new_session=True)
+    client.process=await asyncio.create_subprocess_exec(sys.executable,str(script),callback,str(boot_delay),stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE,start_new_session=True)
     try:
+        # Spawn returns before Python/coverage startup has completed. This test
+        # measures callback authorization, not cold interpreter startup. Keep
+        # the RPC's two-second budget unchanged and bound fixture boot separately.
+        assert await asyncio.wait_for(client.process.stdout.readline(),15)==b'FIXTURE_READY\n'
         result=await client.request('mcpServer/tool/call',{})
         reply=result['reply']
         if callback=='matching':assert reply['result']['action']=='decline' and len(calls)==1
@@ -73,11 +82,14 @@ for line in sys.stdin:
 
 @pytest.mark.asyncio
 async def test_appserver_timeout_does_not_retry(tmp_path):
-    script=tmp_path/'blocked.py';script.write_text('import sys,time\nsys.stdin.readline()\ntime.sleep(30)\n')
+    script=tmp_path/'blocked.py';script.write_text('import sys,time\nprint("FIXTURE_READY",flush=True)\nsys.stdin.readline()\ntime.sleep(30)\n')
     client=AppServerClient({},.03)
     client.process=await asyncio.create_subprocess_exec(sys.executable,str(script),stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE,start_new_session=True)
-    with pytest.raises(DevError) as error:await client.request('mcpServer/tool/call',{})
-    assert error.value.code=='COMPUTER_TIMEOUT' and client.closed and client.process.returncode is not None
+    try:
+        assert await asyncio.wait_for(client.process.stdout.readline(),15)==b'FIXTURE_READY\n'
+        with pytest.raises(DevError) as error:await client.request('mcpServer/tool/call',{})
+        assert error.value.code=='COMPUTER_TIMEOUT' and client.closed and client.process.returncode is not None
+    finally:await client.close()
 
 @pytest.mark.asyncio
 async def test_hub_codepier_live_operation_and_panel_only_routes(tmp_path):
