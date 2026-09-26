@@ -35,6 +35,19 @@ MAX_HTTP_BYTES = 1024 * 1024
 SKEW = 30
 LOGIN_TTL = 600
 LOGOUT_EVENT = 'http://schemas.openid.net/event/backchannel-logout'
+KEY_REFRESH_COOLDOWN = 60
+METADATA_FAILURE_COOLDOWN = 30
+LOGIN_CLIENT_LIMIT = 32
+LOGIN_PROVIDER_LIMIT = 256
+LOGIN_PUBLIC_LIMIT = 872
+LOGIN_TOTAL_LIMIT = 1000
+
+
+class SigningKeyRefreshRequired(DevError):
+    """Internal retry category; semantic Token failures never request new keys."""
+    def __init__(self):
+        super().__init__('OIDC_TOKEN_INVALID','身份提供者返回的身份凭据未通过校验',401)
+
 
 
 def b64(value):
@@ -122,10 +135,15 @@ def validate_claims(encoded,provider,jwks,*,nonce=None,access_token=None,logout=
         header=jwt.get_unverified_header(encoded)
         algorithm=header.get('alg')
         if algorithm not in ALGORITHMS or any(k in header for k in ('jku','x5u','crit')):raise ValueError('Unsupported JWT header')
+        kid = header.get('kid')
+        if kid is not None and (not isinstance(kid,str) or not 1<=len(kid)<=256):
+            raise ValueError('Invalid key ID')
         keys=jwks.get('keys') if isinstance(jwks,dict) else None
         if not isinstance(keys,list) or not 1<=len(keys)<=32:raise ValueError('Invalid keyset')
         candidates=[k for k in keys if isinstance(k,dict) and k.get('use','sig')=='sig' and (not k.get('key_ops') or 'verify' in k['key_ops']) and (not k.get('alg') or k['alg']==algorithm) and (not header.get('kid') or k.get('kid')==header['kid'])]
-        if len(candidates)!=1:raise ValueError('Ambiguous or unknown signing key')
+        if not candidates and kid:
+            raise SigningKeyRefreshRequired()
+        if len(candidates)!=1:raise ValueError('Ambiguous or missing signing key')
         jwk=candidates[0]
         if any(k in jwk for k in ('d','p','q','dp','dq','qi','k')):raise ValueError('Public verification key required')
         key=jwt.PyJWK.from_dict(jwk,algorithm=algorithm).key
@@ -156,6 +174,8 @@ def validate_claims(encoded,provider,jwks,*,nonce=None,access_token=None,logout=
             expected=b64(hashed[:len(hashed)//2])
             if not isinstance(claims['at_hash'],str) or not hmac.compare_digest(claims['at_hash'],expected):raise ValueError('Invalid access token hash')
         return claims
+    except jwt.InvalidSignatureError as exc:
+        raise SigningKeyRefreshRequired() from exc
     except (jwt.PyJWTError,ValueError,TypeError,KeyError,AttributeError,UnicodeError) as exc:
         # Never echo claims, Tokens or provider response bodies.
         raise DevError('OIDC_TOKEN_INVALID','身份提供者返回的身份凭据未通过校验',401) from exc
@@ -166,6 +186,11 @@ class OIDCService:
         self.auth,self.runtime,self.store,self.public_url=auth,runtime,runtime.store,public_url
         self.transport=transport
         self.sync_lock=asyncio.Lock()
+        from hub.oidc_resilience import SyncScheduler
+        self.scheduler=SyncScheduler(self)
+        self.metadata_locks={};self.key_locks={}
+        self.metadata_failures={};self.key_refresh_after={}
+        self.worker_audit_after=0.0
         self.inflight=asyncio.Semaphore(4)
         self.stop_event=asyncio.Event();self.worker=None
         self.router=APIRouter();self.routes()
@@ -207,8 +232,45 @@ class OIDCService:
             raise DevError('OIDC_UPSTREAM_ERROR','身份提供者通信失败',502) from exc
 
     async def metadata(self,provider,*,force=False):
-        cached=self.store.one('SELECT * FROM oidc_cache WHERE provider_id=? AND version=? AND expires>?',(provider['id'],provider['version'],time.time()))
-        if cached and not force:return json.loads(cached['metadata']),json.loads(cached['jwks'])
+        identifier=provider['id'];version=provider['version']
+        async with self.metadata_locks.setdefault(identifier,asyncio.Lock()):
+            cached=self.store.one('SELECT * FROM oidc_cache WHERE provider_id=? AND version=? AND expires>?',
+                                  (identifier,version,time.time()))
+            if cached and not force:
+                return json.loads(cached['metadata']),json.loads(cached['jwks'])
+            failed=self.metadata_failures.get(identifier)
+            if failed and failed[0]==version and failed[1]>time.monotonic():
+                raise DevError('OIDC_UPSTREAM_ERROR','身份提供者暂不可用，请稍后重试',502)
+            try:
+                result=await self._load_metadata(provider)
+            except DevError:
+                self.metadata_failures[identifier]=(version,time.monotonic()+METADATA_FAILURE_COOLDOWN)
+                raise
+            self.metadata_failures.pop(identifier,None)
+            return result
+
+    async def verify_claims(self,encoded,provider,keys,**kwargs):
+        try:
+            return validate_claims(encoded,provider,keys,**kwargs)
+        except SigningKeyRefreshRequired as original:
+            identifier=provider['id'];version=provider['version']
+            async with self.key_locks.setdefault(identifier,asyncio.Lock()):
+                # Another waiter may already have refreshed. Use its keys without
+                # extending the cooldown or producing duplicate network requests.
+                _,current=await self.metadata(provider)
+                if current != keys:
+                    try:return validate_claims(encoded,provider,current,**kwargs)
+                    except SigningKeyRefreshRequired:pass
+                last=self.key_refresh_after.get(identifier)
+                if last and last[0]==version and last[1]>time.monotonic():
+                    raise original
+                # Reserve BEFORE the await, even when the network refresh fails.
+                # Arbitrarily many invented kids cannot force unbounded requests.
+                self.key_refresh_after[identifier]=(version,time.monotonic()+KEY_REFRESH_COOLDOWN)
+                _,current=await self.metadata(provider,force=True)
+                return validate_claims(encoded,provider,current,**kwargs)
+
+    async def _load_metadata(self,provider):
         meta=await self.http_json(provider,'GET',provider['discovery_url'])
         if meta.get('issuer')!=provider['issuer']:raise DevError('OIDC_ISSUER_MISMATCH','Discovery issuer 与配置不一致',400)
         for field in ('authorization_endpoint','token_endpoint','jwks_uri'):
@@ -222,7 +284,11 @@ class OIDCService:
         if meta.get('code_challenge_methods_supported') and 'S256' not in meta['code_challenge_methods_supported']:raise DevError('OIDC_PKCE_REQUIRED','身份提供者未支持 S256 PKCE',400)
         keys=await self.http_json(provider,'GET',meta['jwks_uri'])
         if not isinstance(keys.get('keys'),list) or not 1<=len(keys['keys'])<=32:raise DevError('OIDC_KEYS_INVALID','身份提供者公钥格式无效',400)
-        self.store.execute('INSERT INTO oidc_cache VALUES(?,?,?,?,?) ON CONFLICT(provider_id) DO UPDATE SET version=excluded.version,metadata=excluded.metadata,jwks=excluded.jwks,expires=excluded.expires',(provider['id'],provider['version'],json.dumps(meta),json.dumps(keys),time.time()+300))
+        with self.store.transaction():
+            current=self.provider(provider['id'])
+            if current['version']!=provider['version']:
+                raise DevError('OIDC_CONFIG_CHANGED','身份提供者配置已变化，请重新发起请求',409)
+            self.store.db.execute('INSERT INTO oidc_cache VALUES(?,?,?,?,?) ON CONFLICT(provider_id) DO UPDATE SET version=excluded.version,metadata=excluded.metadata,jwks=excluded.jwks,expires=excluded.expires',(provider['id'],provider['version'],json.dumps(meta),json.dumps(keys),time.time()+300))
         return meta,keys
 
     async def exchange(self,provider,meta,form):
@@ -237,6 +303,17 @@ class OIDCService:
         if not isinstance(groups,list) or len(groups)>1000 or any(not isinstance(g,str) or not 1<=len(g)<=200 for g in groups):raise DevError('OIDC_GROUPS_INVALID','身份群组格式无效',401)
         if provider['required_group'] and provider['required_group'] not in groups:raise DevError('OIDC_ADMISSION_DENIED','账号不属于允许登录的群组',403)
         return sorted(set(groups))
+
+    def userinfo_groups(self,provider,info):
+        policy_required=bool(provider['required_group'] or self.store.one(
+            'SELECT 1 AS ok FROM group_mappings WHERE provider_id=? LIMIT 1',(provider['id'],)))
+        if policy_required and (not isinstance(info,dict) or provider['group_claim'] not in info):
+            # Missing claims are not evidence of group removal. Reject a new
+            # login consistently; existing identities fail closed at freshness
+            # expiry without spuriously deleting their sessions on this response.
+            raise DevError('OIDC_GROUPS_UNAVAILABLE',
+                           '群组授权要求 UserInfo 明确返回已配置的群组字段；请检查身份提供者映射',403)
+        return self.groups(provider,info or {})
 
     def reconcile_groups(self,identity,groups,provider):
         """Called in a write transaction. Remove only this identity's sources."""
@@ -320,14 +397,34 @@ class OIDCService:
             store.audit('panel:'+user['username'],'oidc.linked' if link_user else 'oidc.login',identity['id'],detail={'provider_id':provider['id']},commit=False)
         return result
 
-    async def begin(self,provider,return_to,*,link_session=None):
-        meta,_=await self.metadata(provider)
+    async def begin(self,provider,return_to,*,link_session=None,client_key='internal'):
+        return_to=safe_return(return_to)
         state,browser,nonce,verifier=token(),token(),token(),token(48)
         state_hash=digest(state);now=time.time()
-        with self.store.lock,self.store.db:
-            self.store.db.execute('DELETE FROM oidc_transactions WHERE expires<?',(now,))
-            if self.store.one('SELECT count(*) AS n FROM oidc_transactions')['n']>=1000:raise DevError('OIDC_BUSY','登录请求过多',429)
-            self.store.db.execute('INSERT INTO oidc_transactions VALUES(?,?,?,?,?,?,?,?,?,?,0)',(state_hash,provider['id'],digest(browser),nonce,self.store.encrypt(verifier),safe_return(return_to),link_session['user_id'] if link_session else None,link_session['id_hash'] if link_session else None,provider['version'],now+LOGIN_TTL))
+        client_hash=digest(('link:'+link_session['user_id']) if link_session else 'login:'+client_key)
+        with self.store.transaction():
+            self.store.db.execute('DELETE FROM oidc_transactions WHERE expires<=?',(now,))
+            limit=8 if link_session else LOGIN_CLIENT_LIMIT
+            if self.store.one('SELECT count(*) AS n FROM oidc_transactions WHERE client_hash=?',(client_hash,))['n']>=limit:
+                raise DevError('OIDC_CLIENT_BUSY','此客户端已有过多登录请求；请完成现有请求或稍后重试',429)
+            if self.store.one('SELECT count(*) AS n FROM oidc_transactions')['n']>=LOGIN_TOTAL_LIMIT:
+                raise DevError('OIDC_BUSY','登录请求过多',429)
+            if not link_session:
+                public=self.store.one('SELECT count(*) AS n FROM oidc_transactions WHERE link_user_id IS NULL')['n']
+                provider_count=self.store.one('SELECT count(*) AS n FROM oidc_transactions WHERE provider_id=? AND link_user_id IS NULL',(provider['id'],))['n']
+                if public>=LOGIN_PUBLIC_LIMIT or provider_count>=LOGIN_PROVIDER_LIMIT:
+                    raise DevError('OIDC_BUSY','登录请求过多',429)
+            self.store.db.execute('''INSERT INTO oidc_transactions
+                (state_hash,provider_id,browser_hash,nonce,verifier,return_to,link_user_id,link_session_hash,provider_version,expires,used,client_hash)
+                VALUES(?,?,?,?,?,?,?,?,?,?,0,?)''',
+                (state_hash,provider['id'],digest(browser),nonce,self.store.encrypt(verifier),return_to,
+                 link_session['user_id'] if link_session else None,link_session['id_hash'] if link_session else None,
+                 provider['version'],now+LOGIN_TTL,client_hash))
+        try:
+            meta,_=await self.metadata(provider)
+        except BaseException:
+            self.store.execute('DELETE FROM oidc_transactions WHERE state_hash=?',(state_hash,))
+            raise
         callback=self.public_url()+'/auth/oidc/'+provider['id']+'/callback'
         params={'client_id':provider['client_id'],'redirect_uri':callback,'response_type':'code','scope':provider['scopes'],
                 'state':state,'nonce':nonce,'code_challenge':b64(hashlib.sha256(verifier.encode()).digest()),'code_challenge_method':'S256'}
@@ -336,7 +433,7 @@ class OIDCService:
 
     async def sync_identity(self,identifier):
         identity=self.store.one('SELECT * FROM external_identities WHERE id=?',(identifier,))
-        if not identity or not identity['enabled'] or not identity['upstream_tokens']:return
+        if not identity or not identity['enabled'] or not identity['upstream_tokens']:return 'OIDC_SYNC_UNAVAILABLE'
         provider=self.provider(identity['provider_id'])
         user=iam.user_security(self.store,identity['user_id'])
         expected_tokens=identity['upstream_tokens']
@@ -349,17 +446,14 @@ class OIDCService:
                         and account and account['active'] and account['epoch']==user['epoch'])
         try:
             meta,keys=await self.metadata(provider)
-            if not meta.get('userinfo_endpoint'):return
+            if not meta.get('userinfo_endpoint'):return 'OIDC_USERINFO_UNAVAILABLE'
             secured=json.loads(self.store.decrypt(identity['upstream_tokens']))
             if secured['expires_at']<=time.time()+30:
-                if not secured.get('refresh_token'):return
+                if not secured.get('refresh_token'):return 'OIDC_REAUTH_REQUIRED'
                 tokens=await self.exchange(provider,meta,{'grant_type':'refresh_token','refresh_token':secured['refresh_token']})
                 if tokens.get('token_type','').lower()!='bearer' or not isinstance(tokens.get('access_token'),str):raise DevError('OIDC_TOKEN_INVALID','刷新未返回有效访问令牌',401)
                 if tokens.get('id_token'):
-                    try:claims=validate_claims(tokens['id_token'],provider,keys,access_token=tokens['access_token'])
-                    except DevError:
-                        _,keys=await self.metadata(provider,force=True)
-                        claims=validate_claims(tokens['id_token'],provider,keys,access_token=tokens['access_token'])
+                    claims=await self.verify_claims(tokens['id_token'],provider,keys,access_token=tokens['access_token'])
                     if claims['sub']!=identity['subject']:raise DevError('OIDC_SUBJECT_MISMATCH','刷新身份不一致',401)
                 life=tokens.get('expires_in',300)
                 if type(life) not in (int,float) or not math.isfinite(life) or not 1<=life<=30*86400:raise DevError('OIDC_TOKEN_INVALID','刷新有效期无效',401)
@@ -372,7 +466,7 @@ class OIDCService:
                 expected_tokens=encrypted
             info=await self.http_json(provider,'GET',meta['userinfo_endpoint'],headers={'Authorization':'Bearer '+secured['access_token']})
             if info.get('sub')!=identity['subject']:raise DevError('OIDC_SUBJECT_MISMATCH','UserInfo 身份不一致',401)
-            groups=self.groups(provider,info)
+            groups=self.userinfo_groups(provider,info)
             with self.store.transaction():
                 current=self.store.one('SELECT * FROM external_identities WHERE id=?',(identifier,))
                 if (not current or not current['enabled'] or current['upstream_tokens']!=expected_tokens
@@ -392,15 +486,7 @@ class OIDCService:
 
     async def reconcile(self):
         async with self.sync_lock:
-            rows=self.store.all('SELECT i.id FROM external_identities i JOIN oidc_providers p ON p.id=i.provider_id JOIN iam_users u ON u.user_id=i.user_id WHERE i.enabled=1 AND p.enabled=1 AND u.active=1 AND i.checked_at<? ORDER BY i.checked_at LIMIT 32',(time.time()-60,))
-            for row in rows:
-                try:await self.sync_identity(row['id'])
-                except DevError as exc:
-                    # Authoritative revocation is compare-and-set inside
-                    # sync_identity; outages do not extend freshness.
-                    self.store.audit('oidc-worker','oidc.reconcile',row['id'],'denied',{'code':exc.code})
-                except (ValueError,TypeError,KeyError):
-                    self.store.audit('oidc-worker','oidc.reconcile',row['id'],'denied',{'code':'OIDC_RECORD_INVALID'})
+            await self.scheduler.run()
 
     async def start(self):
         self.stop_event.clear()
@@ -410,7 +496,9 @@ class OIDCService:
                 except asyncio.CancelledError:raise
                 except Exception:
                     # Keep the worker alive without leaking credential-bearing errors.
-                    self.store.audit('oidc-worker','oidc.worker_error',status='error')
+                    if time.monotonic()>=self.worker_audit_after:
+                        self.worker_audit_after=time.monotonic()+3600
+                        self.store.audit('oidc-worker','oidc.worker_error',status='error')
                 try:await asyncio.wait_for(self.stop_event.wait(),30)
                 except asyncio.TimeoutError:pass
         self.worker=asyncio.create_task(work(),name='oidc-entitlements')
@@ -522,7 +610,8 @@ class OIDCService:
         async def login_start(identifier:str,request:Request,return_to:str='/'):
             self.runtime.oauth.throttle(request)
             async with self.inflight:
-                location,state_hash,browser=await self.begin(self.provider(identifier),return_to)
+                location,state_hash,browser=await self.begin(self.provider(identifier),return_to,
+                    client_key=request.client.host if request.client else 'unknown')
             response=RedirectResponse(location,status_code=303)
             response.set_cookie('rd_oidc_'+state_hash[:24],browser,httponly=True,samesite='lax',secure=urlsplit(self.public_url()).scheme=='https',max_age=LOGIN_TTL,path='/auth/oidc/'+identifier+'/callback')
             response.headers['Cache-Control']='no-store';return response
@@ -571,21 +660,13 @@ class OIDCService:
                 meta,keys=await self.metadata(provider)
                 tokens=await self.exchange(provider,meta,{'grant_type':'authorization_code','code':code,'redirect_uri':self.public_url()+'/auth/oidc/'+identifier+'/callback','code_verifier':store.decrypt(txn['verifier'])})
                 if tokens.get('token_type','').lower()!='bearer' or not isinstance(tokens.get('access_token'),str):raise DevError('OIDC_TOKEN_INVALID','没有收到有效访问令牌',401)
-                try:claims=validate_claims(tokens.get('id_token'),provider,keys,nonce=txn['nonce'],access_token=tokens['access_token'])
-                except DevError:
-                    # One bounded fresh JWKS lookup supports signing-key rotation;
-                    # all claim/nonce/audience checks still run again.
-                    _,keys=await self.metadata(provider,force=True)
-                    claims=validate_claims(tokens.get('id_token'),provider,keys,nonce=txn['nonce'],access_token=tokens['access_token'])
+                claims=await self.verify_claims(tokens.get('id_token'),provider,keys,nonce=txn['nonce'],access_token=tokens['access_token'])
                 if txn['link_user_id'] and (type(claims.get('auth_time')) not in (int,float) or claims['auth_time']<txn['expires']-LOGIN_TTL-SKEW):raise DevError('OIDC_RECENT_LOGIN_REQUIRED','关联身份需要身份提供者近期认证',401)
-                group_claims=claims
+                info=None
                 if meta.get('userinfo_endpoint'):
                     info=await self.http_json(provider,'GET',meta['userinfo_endpoint'],headers={'Authorization':'Bearer '+tokens['access_token']})
                     if info.get('sub')!=claims['sub']:raise DevError('OIDC_SUBJECT_MISMATCH','UserInfo 与 ID Token 身份不同',401)
-                    # UserInfo group data, when present, is what periodic sync can
-                    # actually revalidate. Do not silently invent missing groups.
-                    if provider['group_claim'] in info:group_claims={**claims,provider['group_claim']:info[provider['group_claim']]}
-                groups=self.groups(provider,group_claims)
+                groups=self.userinfo_groups(provider,info)
                 value=self.provision(provider,claims,groups,txn,tokens)
             old_hash=digest(request.cookies.get('rd_session',''))
             store.execute('DELETE FROM sessions WHERE id_hash=?',(old_hash,))
@@ -603,10 +684,7 @@ class OIDCService:
             except (ValueError,UnicodeError) as exc:raise DevError('OIDC_LOGOUT_INVALID','无效注销参数',400) from exc
             if set(form)!={'logout_token'} or len(form['logout_token'])!=1:raise DevError('OIDC_LOGOUT_INVALID','无效注销参数',400)
             provider=self.provider(identifier);_,keys=await self.metadata(provider)
-            try:claims=validate_claims(form['logout_token'][0],provider,keys,logout=True)
-            except DevError:
-                _,keys=await self.metadata(provider,force=True)
-                claims=validate_claims(form['logout_token'][0],provider,keys,logout=True)
+            claims=await self.verify_claims(form['logout_token'][0],provider,keys,logout=True)
             with store.lock,store.db:
                 store.db.execute('BEGIN IMMEDIATE')
                 store.db.execute('DELETE FROM oidc_logout_replays WHERE expires<?',(time.time(),))

@@ -13,6 +13,7 @@ from contextvars import ContextVar
 
 audit_context = ContextVar("codepier_audit_context", default=None)
 from dataclasses import replace
+from hub.iam_read import read_decision, read_scope, memo, principal_key
 
 from shared.util import DevError
 
@@ -92,9 +93,21 @@ def validate_grant(store, grant):
         role_eligible(store, grant['user_id'], grant['role_id'], grant.get('space_id', 'legacy'))
 
 
+@read_decision
 def live_principal(store, principal):
     if not installed(store):
         return principal
+    cache = memo(store)
+    key = principal_key(principal)
+    if key in cache:
+        return cache[key]
+    result = _live_principal(store, principal)
+    cache[key] = result
+    cache[principal_key(result)] = result
+    return result
+
+
+def _live_principal(store, principal):
     user = user_security(store, principal.user_id)
     member = membership(store, principal.user_id, principal.space_id)
     if principal.user_epoch is not None and user['epoch'] != principal.user_epoch:
@@ -111,14 +124,13 @@ def live_principal(store, principal):
     # Only server-originated panel principals reach this branch. Member roles are
     # recomputed after awaits; an old in-memory admin flag is never authoritative.
     elevated = LEVELS[member['level']] >= LEVELS['admin']
-    projects = store.all('SELECT id FROM projects WHERE space_id=?', (principal.space_id,))
     provisional = replace(principal, admin=elevated, instance_admin=bool(user['instance_admin']), user_epoch=user['epoch'])
+    permissions = project_permissions(store, provisional, elevated=elevated)
     scopes = {'read'}
     visible = []
-    for project in projects:
-        actions = human_project_actions(store, provisional, project['id'])
+    for project_id, actions in permissions.items():
         if actions:
-            visible.append(project['id']); scopes.update(actions)
+            visible.append(project_id); scopes.update(actions)
     if elevated:
         scopes |= CAPABILITIES
     return replace(provisional, scopes=scopes, projects=visible)
@@ -131,17 +143,38 @@ def assigned_roles(store, user_id, space_id):
           AND r.enabled=1 AND (a.expires IS NULL OR a.expires>?)''', (space_id, user_id, now))
 
 
-def human_project_actions(store, principal, project_id):
-    project = store.one('SELECT space_id FROM projects WHERE id=?', (project_id,))
-    if not project or project['space_id'] != principal.space_id:
-        return set()
-    if is_space_admin(store, principal.user_id, principal.space_id):
-        return set(CAPABILITIES)
-    from hub.roles import _policy, project_actions, created_ids
-    result = set()
-    for role in assigned_roles(store, principal.user_id, principal.space_id):
-        result |= project_actions(_policy(role), project_id, created_ids(store, role['id']))
+@read_decision
+def project_permissions(store, principal, *, elevated=None):
+    """One batched read of projects, assigned policies and created-project IDs."""
+    cache = memo(store)
+    key = ('project_permissions', principal.user_id, principal.space_id)
+    if cache is not None and key in cache:
+        return cache[key]
+    if elevated is None:
+        elevated = is_space_admin(store, principal.user_id, principal.space_id)
+    projects = store.all('SELECT id FROM projects WHERE space_id=?', (principal.space_id,))
+    result = {row['id']: set(CAPABILITIES) if elevated else set() for row in projects}
+    if not elevated:
+        from hub.roles import _policy, project_actions
+        roles = assigned_roles(store, principal.user_id, principal.space_id)
+        created = {r['id']: set() for r in roles}
+        if roles:
+            placeholders = ','.join('?' for _ in roles)
+            rows = store.all('SELECT role_id,project_id FROM role_created_projects WHERE role_id IN (' + placeholders + ')', tuple(created))
+            for row in rows:
+                created[row['role_id']].add(row['project_id'])
+        for role in roles:
+            policy = _policy(role)
+            for project_id in result:
+                result[project_id].update(project_actions(policy, project_id, created[role['id']]))
+    if cache is not None:
+        cache[key] = result
     return result
+
+
+@read_decision
+def human_project_actions(store, principal, project_id):
+    return set(project_permissions(store, principal).get(project_id, ()))
 
 
 def project_in_space(store, principal, project_id):
@@ -151,6 +184,7 @@ def project_in_space(store, principal, project_id):
     return row
 
 
+@read_decision
 def require_project(store, principal, action, project_id):
     if not installed(store):
         return
@@ -178,6 +212,7 @@ def device_identity_active(store, device):
         return False
 
 
+@read_decision
 def require_device(store, principal, device_id, *, manage=False, creation=None):
     principal = live_principal(store, principal)
     row = store.one('SELECT * FROM devices WHERE id=? AND space_id=?', (device_id, principal.space_id))
@@ -226,6 +261,7 @@ def record_visible(store, principal, row):
             or row.get('visibility') == 'space')
 
 
+@read_decision
 def require_record(store, principal, row, *, kind='OPERATION'):
     principal = live_principal(store, principal)
     if not record_visible(store, principal, row):
@@ -250,6 +286,7 @@ def private_sql(principal, alias=''):
     return clause, args
 
 
+@read_decision
 def event_visible(runtime, principal, item):
     """Event contents are not emitted until current authorization is checked."""
     kind, data = item.get('type'), item.get('data') or {}

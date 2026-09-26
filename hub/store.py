@@ -122,7 +122,7 @@ class Store:
                 self.db.execute(statement)
         self.db.execute("INSERT OR IGNORE INTO meta VALUES ('schema', '1')")
         version = self.db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0]
-        if version not in {"1", "2", "3", "4", "5", "6", "7", "8", "9"}:
+        if version not in {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"}:
             raise RuntimeError(f"Unsupported Hub database schema version: {version}")
         # Additive migration: v1 databases and their audit history remain readable.
         columns = {r[1] for r in self.db.execute("PRAGMA table_info(operations)")}
@@ -186,7 +186,7 @@ class Store:
     def decrypt(self, value: str):
         return self.cipher.decrypt(value.encode()).decode()
 
-    def audit(self, actor: str, action: str, target: str = "", status: str = "ok", detail=None, *, commit=True):
+    def audit(self, actor: str, action: str, target: str = "", status: str = "ok", detail=None, *, commit=True, target_kind=None):
         from hub.iam import audit_context
         context = audit_context.get()
         # Context is trusted only for its originating Store AND actor. A task
@@ -202,11 +202,17 @@ class Store:
         # Do not retarget a scoped caller's audit entry using an untrusted ID
         # from a denied cross-Space request. Also avoid loading operation bodies
         # just to audit a thin status read.
-        for table in (() if scoped else ('operations','projects','devices','access_profiles','access_roles','workflows','artifacts','grants','vps_connections')):
-            row = self.one(f'SELECT space_id,owner_user_id FROM {table} WHERE id=?', (target,)) if target else None
+        tables = {'operation': 'operations', 'project': 'projects', 'device': 'devices',
+                  'profile': 'access_profiles', 'role': 'access_roles', 'workflow': 'workflows',
+                  'artifact': 'artifacts', 'grant': 'grants', 'vps': 'vps_connections'}
+        if target_kind is not None and target_kind not in tables:
+            raise ValueError('Unknown audit target kind')
+        # A verified caller scope (including MCP) takes precedence even when the
+        # target is an ID in another Space. Free-form names/URLs never cause lookup.
+        if target_kind and target and not scoped and not actor.startswith('mcp:'):
+            row = self.one(f'SELECT space_id,owner_user_id FROM {tables[target_kind]} WHERE id=?', (target,))
             if row:
                 sid = row['space_id']
-                break
         sql = 'INSERT INTO audit(at,actor,action,target,status,detail,space_id,owner_user_id) VALUES(?,?,?,?,?,?,?,?)'
         args = (time.time(), actor, action, target, status, json.dumps(detail or {}, ensure_ascii=False), sid, uid)
         if commit:

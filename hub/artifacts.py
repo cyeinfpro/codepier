@@ -64,6 +64,7 @@ class ArtifactService:
             (identifier,op['project_id'],op['device_id'],op['grant_id'],op['actor'],payload['project']['root'],
              name,size,sha,created,expires,payload['args'].get('source_operation_id',''),op['space_id'],op['owner_user_id']))
 
+    @iam.read_decision
     def row(self,identifier,principal):
         row=self.runtime.store.one('SELECT * FROM artifacts WHERE id=?',(identifier,))
         principal=iam.require_record(self.runtime.store,principal,row,kind='ARTIFACT')

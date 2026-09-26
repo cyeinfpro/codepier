@@ -64,7 +64,7 @@ python -m hub --data-dir /srv/codepier/data backup \
   --output /secure-backups/codepier-before-multiuser.zip
 ```
 
-Migration is transactional to schema **9**. It retains existing user, resource,
+Migration is transactional to schema **10**. It retains existing user, resource,
 Profile, Role and grant IDs, Token hashes, device credentials and encryption key.
 Legacy resources enter `legacy`; later OIDC users get a separate personal Space
 and do not automatically become members of Legacy. Project aliases become unique
@@ -73,7 +73,7 @@ reopening the database. Cross-Space references and in-place resource Space chang
 are rejected; renaming a resource is not a way to move it across a security boundary.
 
 **Rollback:** stop the new Hub, restore the previous application version and its
-matching complete pre-upgrade data backup. Do not point old code at schema 9 or
+matching complete pre-upgrade data backup. Do not point old code at schema 10 or
 replace only the encryption key. Preserve newer data separately before rollback.
 Already executed external commands cannot be undone by restoring the Hub database.
 

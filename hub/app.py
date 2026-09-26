@@ -286,6 +286,10 @@ def create_app(data_dir: str | None = None):
             "mcp_url": public_url() + "/mcp", "role_mcp_url": public_url() + "/mcp?authorization=role", "version": VERSION, "tool_count": len(TOOLS), "timezone": str(tz)}
 
     def device_rows(principal):
+        with iam.read_scope(store):
+            return scoped_device_rows(principal)
+
+    def scoped_device_rows(principal):
         candidates = store.all("SELECT id,name,enabled,info,last_seen,created,owner_user_id FROM devices WHERE space_id=? ORDER BY created",(principal.space_id,))
         rows=[]
         for row in candidates:

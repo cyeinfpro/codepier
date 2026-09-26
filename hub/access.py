@@ -136,7 +136,9 @@ def make_access_router(auth, runtime):
     async def update_grant_projects(grant_id: str, request: Request, body: GrantProjectsInput):
         principal = auth.panel(request, True)
         with store.lock, store.db:
-            auth.panel(request, True)
+            principal = auth.panel(request, True)
+            if not principal.admin:
+                raise DevError("ROLE_REQUIRED", "成员请使用已分配的动态角色；不能扩展旧固定凭据", 403)
             row = store.db.execute('SELECT * FROM grants WHERE id=? AND user_id=? AND space_id=?',
                                    (grant_id, principal.user_id, principal.space_id)).fetchone()
             if not row:
@@ -148,8 +150,6 @@ def make_access_router(auth, runtime):
             before = json.loads(row['projects'])
             revision = grant_revision(store, grant_id)
             selected = project_selection(store, body.projects, body.all_projects, space_id=principal.space_id)
-            if not principal.admin:
-                raise DevError("ROLE_REQUIRED", "成员请使用已分配的动态角色；不能扩展旧固定凭据", 403)
             # Replaying the same successful update is harmless. A stale dialog
             # must not overwrite another window's intervening scope reduction.
             if (before != body.expected_projects or revision != body.expected_revision) and before != selected:

@@ -38,6 +38,7 @@ class Workflows:
         self.runtime = runtime
         self.store = runtime.store
 
+    @iam.read_decision
     def load(self, identifier, principal, *, write=False):
         row = self.store.one("SELECT * FROM workflows WHERE id=?", (identifier,))
         principal = iam.require_record(self.store, principal, row, kind='WORKFLOW')

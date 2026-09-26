@@ -13,7 +13,7 @@ Setup, migration, recovery and Authentik instructions: [MULTIUSER_OIDC.md](MULTI
 
 | Requirement | Connected implementation |
 | --- | --- |
-| Human identity and storage | `iam_schema.py`, `iam.py`, `auth.py`: transactional schema 9, user security state, personal/team Spaces, memberships and assignment provenance, ownership and Space-scoped aliases. |
+| Human identity and storage | `iam_schema.py`, `iam.py`, `auth.py`: transactional schema 10, user security state, personal/team Spaces, memberships and assignment provenance, ownership and Space-scoped aliases. |
 | OIDC login and account linking | `oidc.py`: discovery, confidential Authorization Code/S256 PKCE, state/nonce/browser binding, asymmetric ID-token/JWKS/audience/azp/time/at_hash checks, exact issuer/subject, explicit recent-auth linking and unlink tombstones. |
 | Human administration | `iam_api.py` and existing routers: ordinary users, separate instance/Space administration, membership/invitation/assignment management, owner/recovery protection, personal session management and suspension. |
 | Shared dynamic Roles | Existing Role/Profile/grant engine plus live IAM checks: private stable Profiles, shared Space Roles, explicit delegation eligibility and current action/resource policy. |
@@ -26,8 +26,9 @@ Setup, migration, recovery and Authentik instructions: [MULTIUSER_OIDC.md](MULTI
 | Compatibility | Existing IDs, Token hashes, Profile/grant ownership, device credentials and master.key are preserved; old fixed grants do not silently become dynamic role grants. |
 
 Production authorization uses the persistent IAM checks and the existing Role
-engine. `multiuser_policy.py` remains a separate tested contract, not a second
-production policy engine or evidence that a prototype alone protects routes.
+engine. The unused standalone multiuser_policy prototype and its in-memory-only
+tests were removed during PR review; regressions now exercise these production
+paths. See PR3_REVIEW_FIXES.md for the review-specific changes and validation.
 
 ## Secretary behaviour retained
 
@@ -102,7 +103,7 @@ Provider records are disabled and admission is closed by default. Upgrade does
 not enable enrollment. Back up the old database and matching key before opening
 it with new code; also retain a consistent full data-directory snapshot including
 native caches. Roll back with the matching old code and complete old data, not by
-pointing old code at schema 9. Follow the setup guide before enrolling users.
+pointing old code at schema 10. Follow the setup guide before enrolling users.
 
 Project/Role/Space policy is not an OS sandbox. Shell/build tools, browser
 profiles, SSH credentials and native CLI authentication retain the Agent OS-user

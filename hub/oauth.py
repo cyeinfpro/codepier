@@ -335,5 +335,5 @@ class OAuth:
             row = self.store.one("SELECT t.grant_id,g.client_id FROM tokens t JOIN grants g ON g.id=t.grant_id WHERE t.hash=?", (digest(form.get("token", "")),))
             if row and row["client_id"] == form.get("client_id"):
                 self.store.execute("UPDATE grants SET revoked=1 WHERE id=?", (row["grant_id"],))
-                self.store.audit("oauth:" + str(row["client_id"]), "oauth.revoke", row["grant_id"])
+                self.store.audit("oauth:" + str(row["client_id"]), "oauth.revoke", row["grant_id"], target_kind="grant")
             return JSONResponse({})

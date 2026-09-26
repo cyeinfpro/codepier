@@ -46,6 +46,7 @@ def stored_permissions(record):
     return set(raw_scopes), projects
 
 
+@iam.read_decision
 def effective_grant(store, grant):
     """Read current policy every time; never copy a wider profile into a token."""
     if not grant or grant['revoked']:
@@ -76,24 +77,34 @@ def effective_grant(store, grant):
             projects = sorted(allowed if '*' in projects else allowed & set(projects))
             from hub.runtime import Principal
             owner = Principal('', grant['user_id'], set(), [], space_id=grant.get('space_id','legacy'))
-            projects = [pid for pid in projects if 'read' in iam.human_project_actions(store, owner, pid)]
+            permissions = iam.project_permissions(store, owner)
+            projects = [pid for pid in projects if 'read' in permissions.get(pid, ())]
         return scopes, projects, profile
     except (ValueError, TypeError, KeyError) as exc:
         raise DevError('INVALID_TOKEN', '授权策略记录无效；未授予访问权限', 401) from exc
 
 
+@iam.read_decision
 def refresh_profile_principal(store, principal):
     """Recheck managed identities after waits without changing legacy callers."""
     principal = iam.live_principal(store, principal)
     if principal.admin or not principal.grant_id:
         return principal
+    cache = iam.memo(store)
+    key = ('refreshed_profile', iam.principal_key(principal))
+    if cache is not None and key in cache:
+        return cache[key]
     row = store.one('SELECT * FROM grants WHERE id=?', (principal.grant_id,))
     if not row or row['user_id'] != principal.user_id or row['profile_id'] != principal.profile_id or row.get('space_id','legacy') != principal.space_id:
         raise DevError('INVALID_TOKEN', '访问 Profile 的授权绑定已变化', 401)
     scopes, projects, _ = effective_grant(store, row)
-    return replace(principal, scopes=scopes, projects=projects,
-                   authorization_mode=row.get('authorization_mode', 'fixed'), role_id=row.get('role_id'),
-                   space_id=row.get('space_id','legacy'), user_epoch=row.get('user_epoch',1), identity_id=row.get('identity_id'))
+    result = replace(principal, scopes=scopes, projects=projects,
+                     authorization_mode=row.get('authorization_mode', 'fixed'), role_id=row.get('role_id'),
+                     space_id=row.get('space_id','legacy'), user_epoch=row.get('user_epoch',1), identity_id=row.get('identity_id'))
+    if cache is not None:
+        cache[key] = result
+        cache[('refreshed_profile', iam.principal_key(result))] = result
+    return result
 
 
 def validate_profile_consent(store, user_id, profile_id, scopes, projects, version, *, space_id="legacy"):

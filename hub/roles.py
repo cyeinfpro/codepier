@@ -167,6 +167,7 @@ def principal_grant(store, principal):
     return None
 
 
+@iam.read_decision
 def require_role(store, principal, action, *, project_id=None, device_id=None, creation=None):
     """Additional gate, not a substitute for fixed scopes or Agent constraints."""
     if iam.installed(store):

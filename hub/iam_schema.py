@@ -1,4 +1,4 @@
-"""Transactional multi-user migration (current schema 9); legacy credentials and keys stay intact.
+"""Transactional multi-user migration (current schema 10); legacy credentials and keys stay intact.
 
 The caller disables FK enforcement before BEGIN, validates foreign_key_check
 before COMMIT and restores enforcement immediately. Rebuilds remove global alias
@@ -7,7 +7,7 @@ constraints, not resource IDs. No network or user admission occurs in migration.
 from __future__ import annotations
 import json
 
-SCHEMA_VERSION = '9'
+SCHEMA_VERSION = '10'
 
 DDL = '''
 CREATE TABLE IF NOT EXISTS membership_blocks(space_id TEXT NOT NULL REFERENCES spaces(id),user_id TEXT NOT NULL REFERENCES users(id),blocked INTEGER NOT NULL DEFAULT 1,PRIMARY KEY(space_id,user_id));
@@ -117,8 +117,12 @@ def migrate(db):
     if db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0] == SCHEMA_VERSION:
         return
     version = db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0]
+    if version == '9':
+        migrate_v10(db)
+        return
     if version == '8':
         migrate_v9(db)
+        migrate_v10(db)
         return
     for statement in DDL.split(';'):
         if statement.strip():
@@ -194,6 +198,7 @@ def migrate(db):
                (SELECT space_id FROM projects WHERE id=NEW.project_id)
           BEGIN SELECT RAISE(ABORT,'cross-space created-project binding'); END""")
     migrate_v9(db)
+    migrate_v10(db)
 
 
 def migrate_v9(db):
@@ -231,4 +236,23 @@ def migrate_v9(db):
         db.execute(f"""CREATE TRIGGER IF NOT EXISTS iam_{table}_space_immutable BEFORE UPDATE OF space_id ON {table}
           WHEN NEW.space_id<>OLD.space_id
           BEGIN SELECT RAISE(ABORT,'resource Space is immutable'); END""")
+    db.execute("UPDATE meta SET value='9' WHERE key='schema'")
+
+
+def migrate_v10(db):
+    """Add durable retry/abuse-control state without extending any entitlement."""
+    db.execute("""CREATE TABLE IF NOT EXISTS oidc_sync_state (
+        identity_id TEXT PRIMARY KEY REFERENCES external_identities(id) ON DELETE CASCADE,
+        attempted_at REAL NOT NULL DEFAULT 0, next_attempt REAL NOT NULL DEFAULT 0,
+        failures INTEGER NOT NULL DEFAULT 0, code TEXT NOT NULL DEFAULT '',
+        credential_hash TEXT NOT NULL, provider_version INTEGER NOT NULL,
+        observed_checked_at REAL NOT NULL)""")
+    db.execute("""CREATE TABLE IF NOT EXISTS oidc_sync_audit (
+        provider_id TEXT NOT NULL REFERENCES oidc_providers(id) ON DELETE CASCADE,
+        code TEXT NOT NULL, emitted_at REAL NOT NULL, suppressed INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(provider_id,code))""")
+    _add(db, 'oidc_transactions', {'client_hash': "TEXT NOT NULL DEFAULT 'legacy'"})
+    db.execute('CREATE INDEX IF NOT EXISTS oidc_login_client ON oidc_transactions(client_hash,expires)')
+    db.execute('CREATE INDEX IF NOT EXISTS oidc_login_provider ON oidc_transactions(provider_id,expires)')
+    db.execute('CREATE INDEX IF NOT EXISTS oidc_sync_due ON oidc_sync_state(next_attempt,attempted_at)')
     db.execute("UPDATE meta SET value=? WHERE key='schema'", (SCHEMA_VERSION,))

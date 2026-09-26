@@ -55,7 +55,7 @@ def test_workflow_request_key_is_scoped_to_space_and_survives_restart(team):
     second=Store(app.state.store.directory)
     try:
         assert len(second.all('SELECT * FROM workflow_replays WHERE idem=?',(args['idempotency_key'],)))==2
-        assert second.one("SELECT value FROM meta WHERE key='schema'")['value']=='9'
+        assert second.one("SELECT value FROM meta WHERE key='schema'")['value']=='10'
         assert second.all('PRAGMA foreign_key_check')==[]
     finally:second.close()
 

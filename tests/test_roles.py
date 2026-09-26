@@ -457,7 +457,7 @@ def test_schema6_upgrade_keeps_fixed_grants_profiles_and_master_key(api,tmp_path
         db.execute("UPDATE meta SET value='6' WHERE key='schema'")
     new=Store(directory)
     try:
-        assert new.one("SELECT value FROM meta WHERE key='schema'")['value']=='9'
+        assert new.one("SELECT value FROM meta WHERE key='schema'")['value']=='10'
         grant=new.one('SELECT * FROM grants WHERE id=?',('old-grant',))
         assert grant['authorization_mode']=='fixed' and grant['role_id'] is None
         assert grant['profile_id']=='prf_old' and grant['scopes']=='["read"]'

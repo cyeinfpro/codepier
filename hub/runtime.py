@@ -189,6 +189,7 @@ class Runtime:
     def visible_project(self, p: dict, principal: Principal):
         return p.get("space_id", "legacy") == principal.space_id and (principal.admin or "*" in principal.projects or p["id"] in principal.projects)
 
+    @iam.read_decision
     def project(self, value: str, principal: Principal):
         principal = refresh_profile_principal(self.store, principal)
         row = self.store.one("SELECT p.*,d.name AS device_name,d.enabled AS device_enabled FROM projects p JOIN devices d ON d.id=p.device_id WHERE (p.id=? OR p.alias_key=?) AND p.space_id=?", (value, alias_key(value), principal.space_id))
@@ -200,11 +201,13 @@ class Runtime:
     def project_public(self, p):
         return {k: p[k] for k in ("id", "alias", "device_id", "root", "description", "mode", "allow_tasks", "device_name") if k in p} | {"online": self.online(p["device_id"]), "allow_tasks": bool(p.get("allow_tasks"))}
 
+    @iam.read_decision
     def list_projects(self, principal):
         principal = refresh_profile_principal(self.store, principal)
         self.authorize(principal, 'read')
         return [self.project_public(p) for p in self.store.all("SELECT p.*,d.name AS device_name FROM projects p JOIN devices d ON d.id=p.device_id WHERE p.space_id=? ORDER BY p.alias_key", (principal.space_id,)) if self.visible_project(p, principal)]
 
+    @iam.read_decision
     def operation_row(self, id: str, principal: Principal, *, status_only=False):
         principal = refresh_profile_principal(self.store, principal)
         columns = "id,grant_id,project_id,device_id,tool,state,space_id,owner_user_id,visibility" if status_only else "*"
@@ -893,9 +896,9 @@ class Runtime:
             return
         # Notify after commit, even if auxiliary auditing subsequently fails.
         self.notify_operation(op["id"])
-        self.store.audit(op["actor"], op["tool"], op["project_id"] or op["device_id"], state,
+        self.store.audit(op["actor"], op["tool"], op["id"], state,
             {"operation_id": op["id"], "duration_ms": round((time.time() - op["created"]) * 1000),
-             "error": error.get("message"), "path": data.get("path"), "backup_id": data.get("backup_id"), "exit_code": data.get("exit_code")})
+             "error": error.get("message"), "path": data.get("path"), "backup_id": data.get("backup_id"), "exit_code": data.get("exit_code")}, target_kind="operation")
         self.diagnostics.record(op["id"], "hub_completed")
         self.publish("operation", {"id": op["id"], "state": state, "tool": op["tool"]})
         future = self.futures.pop(op["id"], None)
@@ -959,7 +962,7 @@ class Runtime:
                 return
             self.store.execute("UPDATE devices SET info=?,last_seen=? WHERE id=?", (json.dumps(info, ensure_ascii=False), time.time(), device_id))
             self.store.execute("UPDATE operations SET next_attempt=0 WHERE device_id=? AND state IN ('queued','running','reconnecting','cancelling')", (device_id,))
-            self.store.audit("device:" + device["name"], "device.connected", device_id)
+            self.store.audit("device:" + device["name"], "device.connected", device_id, target_kind="device")
             self.publish("device", {"id": device_id, "online": True})
             self.wake.set()
             while not self.stopping:
@@ -1050,12 +1053,12 @@ class Runtime:
             pass
         except Exception as exc:
             with contextlib.suppress(Exception):
-                self.store.audit("device:" + device["name"], "device.protocol_error", device_id, "error", {"type": type(exc).__name__})
+                self.store.audit("device:" + device["name"], "device.protocol_error", device_id, "error", {"type": type(exc).__name__}, target_kind="device")
         finally:
             if connection is not None and self.detach_connection(device_id, connection):
                 if authenticated:
                     with contextlib.suppress(Exception):
-                        self.store.audit("device:" + device["name"], "device.disconnected", device_id, "offline")
+                        self.store.audit("device:" + device["name"], "device.disconnected", device_id, "offline", target_kind="device")
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(websocket.close(), 2)
 
