@@ -18,7 +18,7 @@ def child_exited(pid: int) -> bool:
     return os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
 
 
-def live_group_members(pgid: int) -> list[int]:
+def live_group_members(pgid: int, *, timeout: float = 1) -> list[int]:
     if sys.platform.startswith('linux'):
         members = []
         for entry in Path('/proc').iterdir():
@@ -33,7 +33,7 @@ def live_group_members(pgid: int) -> list[int]:
                 members.append(int(entry.name))
         return members
     result = subprocess.run(['/bin/ps', '-axo', 'pid=,pgid=,stat='],
-                            capture_output=True, text=True, timeout=1, check=True)
+                            capture_output=True, text=True, timeout=timeout, check=True)
     return [int(fields[0]) for line in result.stdout.splitlines()
             if len(fields := line.split()) >= 3 and int(fields[1]) == pgid
             and not fields[2].startswith(('Z', 'X'))]
@@ -51,7 +51,13 @@ def stop_owned_group(pid: int, grace: float = 2, kill_timeout: float = 3, *, gro
             grouped = os.getpgid(pid) == pid
         def send(number):
             nonlocal grouped
-            grouped = grouped or os.getpgid(pid) == pid
+            if not grouped:
+                try:
+                    grouped = os.getpgid(pid) == pid
+                except ProcessLookupError:
+                    if child_exited(pid):
+                        return
+                    raise
             try:
                 if grouped:
                     os.killpg(pid, number)
@@ -60,11 +66,13 @@ def stop_owned_group(pid: int, grace: float = 2, kill_timeout: float = 3, *, gro
             except ProcessLookupError:
                 pass
             except PermissionError:
-                # Darwin returns EPERM for a group containing only an unreaped
-                # zombie. Verify emptiness; a live inaccessible member still fails.
-                if not child_exited(pid) or live_group_members(pid):
+                # Darwin returns EPERM for an unreaped zombie-only group.
+                # This is NOT cleanup proof: the bounded survey below must still
+                # observe no live descendants before releasing the leader PID.
+                if not grouped or not child_exited(pid):
                     raise
-        send(signal.SIGTERM)
+        if not child_exited(pid):
+            send(signal.SIGTERM)
         deadline = time.monotonic() + grace
         while not child_exited(pid) and time.monotonic() < deadline:
             time.sleep(.02)
@@ -73,8 +81,15 @@ def stop_owned_group(pid: int, grace: float = 2, kill_timeout: float = 3, *, gro
         deadline = time.monotonic() + kill_timeout
         while True:
             exited = child_exited(pid)
-            members = live_group_members(pid) if grouped else ([] if exited else [pid])
-            if exited and not members:
+            try:
+                remaining = max(.001, min(1.0, deadline - time.monotonic()))
+                members = live_group_members(pid, timeout=remaining) if grouped else ([] if exited else [pid])
+            except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+                # A process-list race or transient survey timeout is unknown,
+                # not an empty group. Keep the PID pinned and observe again
+                # within the original deadline; never replay a stop command.
+                members = None
+            if exited and members == []:
                 _, status = os.waitpid(pid, 0)
                 return True, os.waitstatus_to_exitcode(status)
             if time.monotonic() >= deadline:

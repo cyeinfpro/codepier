@@ -172,7 +172,9 @@ def test_sdk_upload_recovery_uses_exact_key_and_locks_target(host_bundle, termin
         name = params['name']
         if name == 'workspace': return response(fixture_workspace())
         if name == 'write':
-            imports.append({**copy.deepcopy(params['arguments']['options']), 'idempotency_key':params['arguments']['idempotency_key']})
+            assert 'file' not in params['arguments']['options']
+            assert params['arguments']['file']['file_id'] == 'fixture-file'
+            imports.append({**copy.deepcopy(params['arguments']['options']), 'file':copy.deepcopy(params['arguments']['file']), 'idempotency_key':params['arguments']['idempotency_key']})
             if len(imports) == 1: return {'structuredContent': {'error': {'code': 'TRANSPORT_UNKNOWN', 'message': 'fixture uncertain'}}, 'isError': True}
             if len(imports) == 3: return {'structuredContent': {'error': {'code': 'INSUFFICIENT_SCOPE', 'message': 'fixture permission changed'}}, 'isError': True}
             return response({'pending': True, 'operation_id': identifier, 'state': 'running'})
@@ -239,3 +241,44 @@ def test_coding_profile_app_tool_read_and_scope_enforcement(integrated_stack):
     denied = s.mcp('workspace', {'project': 'Imago', 'operation': 'dashboard', 'options': {}}, token_value=grant['token'])
     assert denied['isError'] and denied['structuredContent']['error']['code'] == 'PROJECT_NOT_FOUND'
     s.client.delete('/api/grants/' + grant['grant_id'])
+
+
+@pytest.mark.parametrize('delivery', ['immediate', 'pending'])
+def test_sdk_terminal_source_denial_unlocks_without_replaying_upload(host_bundle, delivery):
+    calls = []
+    identifier = 'e' * 32
+    failure = {'code': 'ARTIFACT_SOURCE_DENIED', 'message': '来源主机尚未批准',
+               'source_host': 'unapproved.example.com', 'recovery': 'review_local_file_sources'}
+    receipt = {'operation_id': identifier, 'id': identifier, 'tool': 'download_artifact',
+               'state': 'failed', 'pending': False, 'result': {'ok': False, 'error': failure},
+               'error': failure['message']}
+    def host_tool(params):
+        calls.append(copy.deepcopy(params))
+        if params['name'] == 'workspace':
+            return response(fixture_workspace())
+        if params['name'] == 'write':
+            assert 'file' in params['arguments'] and 'file' not in params['arguments']['options']
+            return {'structuredContent': receipt, 'isError': True} if delivery == 'immediate' else response({'pending': True, 'operation_id': identifier, 'state': 'running'})
+        if params['name'] == 'process':
+            return {'structuredContent': {'operations': [receipt]}, 'isError': True}
+        raise AssertionError(params)
+    script = '<script>window.openai={uploadFile:async()=>({fileId:"fixture-file"}),getFileDownloadUrl:async()=>({downloadUrl:"https://unapproved.example.com/fixture?sig=PRIVATE_TICKET"})};</script>'
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.expose_function('codepierHostTool', host_tool)
+        html = (BASE/'web/mcp-apps/workspace-v1.html').read_text().replace('<script>', script+'<script>', 1)
+        app = mount(page, host_bundle, response({'workspace': {'project': 'Imago', 'project_id': 'p', 'granted_scopes': ['read', 'write']}}), html=html)
+        app.get_by_text('附件导入', exact=True).click()
+        app.get_by_label('选择要保存到项目的文件').set_input_files({'name': 'sample.txt', 'mimeType': 'text/plain', 'buffer': b'test'})
+        app.get_by_role('button', name='保存文件', exact=True).click()
+        if delivery == 'pending':
+            app.get_by_role('button', name='读取原导入结果').click()
+        expect(app.locator('#app')).to_contain_text('unapproved.example.com')
+        expect(app.locator('#app')).to_contain_text('来源主机尚未批准')
+        expect(app.get_by_label('项目内目标路径')).to_be_enabled()
+        expect(app.get_by_role('button', name='保存文件', exact=True)).to_be_enabled()
+        expect(app.get_by_role('button', name='用原回执恢复导入')).not_to_be_visible()
+        assert len([call for call in calls if call['name'] == 'write']) == 1
+        assert 'PRIVATE_TICKET' not in app.locator('#app').inner_text()
+        browser.close()

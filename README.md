@@ -2,7 +2,7 @@
 
 在自己的电脑上运行开发环境，通过 ChatGPT 或浏览器远程使用。
 
-[![Version](https://img.shields.io/badge/version-1.14.2-2563eb)](RELEASE.json)
+[![Version](https://img.shields.io/badge/version-1.14.3-2563eb)](RELEASE.json)
 [![Python](https://img.shields.io/badge/Python-3.13-3776ab)](requirements.txt)
 [![License](https://img.shields.io/badge/license-MIT-16a34a)](LICENSE)
 
@@ -58,10 +58,10 @@ ChatGPT / MCP 客户端                 浏览器管理面板
 
 服务器需要 Git、Bash、Docker Engine、Docker Compose v2，以及供安装脚本使用的 **Python 3.9+**。Compose 需要支持 `up --wait`；应用运行环境由 Docker 镜像提供，使用 Python 3.13。
 
-下面以正式版本 `v1.14.2` 为例。请在可信网络中完成 HTTP 初始安装；公网部署应先按[入门教程](docs/START-HERE.md)配置 HTTPS，不要通过裸公网 HTTP 输入密码或配对设备。
+下面以正式版本 `v1.14.3` 为例。请在可信网络中完成 HTTP 初始安装；公网部署应先按[入门教程](docs/START-HERE.md)配置 HTTPS，不要通过裸公网 HTTP 输入密码或配对设备。
 
 ```bash
-git clone --branch v1.14.2 --depth 1 https://github.com/cyeinfpro/codepier.git
+git clone --branch v1.14.3 --depth 1 https://github.com/cyeinfpro/codepier.git
 cd codepier
 bash install.sh
 ```
@@ -304,6 +304,8 @@ docs/        使用和维护文档
 
 ## 文档
 
+附件导入、来源策略和失败恢复见[文件导入指南](docs/FILE_IMPORT.md)。
+
 | 要做的事情 | 文档 |
 | --- | --- |
 | 从零安装并完成第一次调用 | [入门教程](docs/START-HERE.md) · [ChatGPT 接入](docs/CHATGPT.md) |
@@ -316,9 +318,9 @@ docs/        使用和维护文档
 
 ## 版本与许可
 
-当前仓库的 `RELEASE.json` 标记为 **1.14.2 / released / source-only**。`main` 可能包含正式发布后的改动；安装和更新请核对目标 Release，版本变化见 [CHANGELOG.md](CHANGELOG.md)。
+当前仓库的 `RELEASE.json` 标记为 **1.14.3 / released / source-only**。`main` 可能包含正式发布后的改动；安装和更新请核对目标 Release，版本变化见 [CHANGELOG.md](CHANGELOG.md)。
 
-- **Version:** 1.14.2
+- **Version:** 1.14.3
 - **License:** [MIT](LICENSE)
 
 第三方依赖保留各自许可证。前端依赖声明位于 `web/vendor/`，MCP Apps 的声明见 [THIRD_PARTY_NOTICES.txt](web/mcp-apps/THIRD_PARTY_NOTICES.txt)。

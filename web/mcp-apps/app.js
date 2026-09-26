@@ -18,9 +18,13 @@ function valueOf(result, name = '') {
   const receipt = name === 'process' &&
     typeof value.tool === 'string' && typeof value.state === 'string' && (value.id || value.operation_id);
   if (!receipt && (result.isError || value.error)) {
-    const error = new Error(value.error?.message || (typeof value.error === 'string' ? value.error : '请求未完成，请检查原操作。'));
-    error.code = value.error?.code;
-    error.operationId = /^[a-f0-9]{32}$/.test(value.operation_id || '') ? value.operation_id : null;
+    const detail = value.result?.error || (typeof value.error === 'object' ? value.error : null);
+    const error = new Error(detail?.message || (typeof value.error === 'string' ? value.error : '请求未完成，请检查原操作。'));
+    error.code = detail?.code;
+    error.details = detail;
+    error.operationState = value.state;
+    const identifier = value.operation_id || value.id || detail?.operation_id;
+    error.operationId = /^[a-f0-9]{32}$/.test(identifier || '') ? identifier : null;
     throw error;
   }
   return value;

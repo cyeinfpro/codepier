@@ -21,10 +21,10 @@ Docker 镜像提供 Hub 的 Python 3.13 运行环境，Agent 安装器准备独�
 
 ### 获取正式版本
 
-在服务器上下载源码。以下示例固定到 `v1.14.2`，其他正式版本可从 [Releases](https://github.com/cyeinfpro/codepier/releases) 选择：
+在服务器上下载源码。以下示例固定到 `v1.14.3`，其他正式版本可从 [Releases](https://github.com/cyeinfpro/codepier/releases) 选择：
 
 ```bash
-git clone --branch v1.14.2 --depth 1 https://github.com/cyeinfpro/codepier.git
+git clone --branch v1.14.3 --depth 1 https://github.com/cyeinfpro/codepier.git
 cd codepier
 ```
 

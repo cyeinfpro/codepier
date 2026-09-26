@@ -41,6 +41,10 @@ CodePier 对外只提供 `workspace`、`read`、`write`、`edit`、`exec`、`pro
 {"name":"read","arguments":{"operation":"changes","project":"Imago","options":{"baseline_ref":"打开工作区时取得的基线编号"}}}
 ```
 
+## 原生附件导入
+
+`write(operation="import")` 的 `file` 必须放在顶层；`options` 只填写目标路径和可选源 SHA-256。来源校验在 Agent 执行，只更新 Hub 不会更新旧 Agent 的允许列表。配置扩展、即时失败恢复、脱敏错误以及实际往返验收要求见[文件导入指南](FILE_IMPORT.md)。
+
 ## 并行与重叠操作
 
 新 `exec` 的独立命令共用最多 4 个命令执行槽，文件操作使用另一个 4 槽池。一个长命令不会占住整个项目；读文件也不等待命令槽。文件操作自动按真实路径协调，目录与其子路径视为重叠，跨嵌套项目映射仍会检查冲突。多文件编辑一次取得整组资源，避免互相持有部分锁。

@@ -105,6 +105,15 @@ function mountUpload(parent, ctx, grantedScopes) {
     if (result.scan_error) notice(chooser, '目录扫描未完成：' + String(result.scan_error), true);
   }
   browserButton = button('选择现有目录', () => list(directory));
+  function failureText(detail, fallback = '') {
+    const host = typeof detail?.source_host === 'string' && detail.source_host.length <= 253 && /^[a-z0-9.-]+$/.test(detail.source_host) ? detail.source_host : '';
+    const advice = {review_local_file_sources: '请更新来源策略或由主理人核验并批准此精确主机，不要关闭来源校验。',
+      refresh_native_file: '请重新选择文件以取得新的宿主下载链接。',
+      retry_later: '文件源暂时不可用，请稍后重新提交。',
+      check_agent_network: '请检查 Agent 的 DNS、网络和 TLS 环境。',
+      provide_native_file: '请通过宿主重新提供原生附件，不要手工拼接下载地址。'};
+    return [detail?.message || fallback, host ? '来源主机：' + host : '', advice[detail?.recovery] || ''].filter(Boolean).join(' ');
+  }
   async function waitOriginal() {
     if (!operationId || !ctx.alive()) return;
     const op = await ctx.request('process', {operation: 'wait', operation_ids: [operationId], wait_seconds: 1, output_limit: 0});
@@ -114,7 +123,7 @@ function mountUpload(parent, ctx, grantedScopes) {
     const data = op.result?.data;
     if (op.state !== 'succeeded' || op.result?.ok !== true) {
       phase = ['unknown', 'needs_review', 'interrupted'].includes(op.state) ? 'unknown' : 'failed';
-      output.replaceChildren(); notice(output, '导入没有确认成功：' + stateLabel(op.state) + '。原操作：' + operationId, true);
+      output.replaceChildren(); notice(output, '导入没有确认成功：' + stateLabel(op.state) + '。' + failureText(op.result?.error, typeof op.error === 'string' ? op.error : '') + ' 原操作：' + operationId, true);
       if (phase === 'failed') recover.replaceChildren();
       controls(); return;
     }
@@ -133,8 +142,8 @@ function mountUpload(parent, ctx, grantedScopes) {
     if (!ctx.alive() || !attempt) return;
     phase = 'submitting'; controls(); recover.replaceChildren();
     try {
-      const {project, workspace_id, idempotency_key, ...options} = attempt;
-      const result = await ctx.request('write', {project, workspace_id, idempotency_key, operation: 'import', options});
+      const {project, workspace_id, idempotency_key, file, ...options} = attempt;
+      const result = await ctx.request('write', {project, workspace_id, idempotency_key, file, operation: 'import', options});
       if (!ctx.alive()) return;
       if (result.pending) {
         operationId = result.operation_id; phase = 'pending';
@@ -145,6 +154,14 @@ function mountUpload(parent, ctx, grantedScopes) {
       if (!ctx.alive()) return;
       output.replaceChildren();
       if (error.operationId) operationId = error.operationId;
+      // A durable failed receipt is not an uncertain transport outcome. Keep
+      // the receipt visible but allow a new, user-initiated corrected upload.
+      if (error.operationState === 'failed') {
+        phase = 'failed';
+        notice(output, '导入没有确认成功：' + failureText(error.details, error.message) + (operationId ? ' 原操作：' + operationId : ''), true);
+        recover.replaceChildren();
+        return;
+      }
       if (!operationId && ['INVALID_ARGUMENTS', 'INSUFFICIENT_SCOPE', 'READ_ONLY', 'PROJECT_NOT_FOUND', 'TOOL_OUTSIDE_PROFILE', 'UNKNOWN_TOOL', 'AGENT_UPGRADE_REQUIRED', 'TASKS_DISABLED'].includes(error.code)) {
         phase = 'failed';
         notice(output, '请求在执行前被拒绝：' + error.message + '。请修正输入或授权后再提交。', true);
@@ -179,6 +196,6 @@ function mountUpload(parent, ctx, grantedScopes) {
   save.reconcileDisabled = controls;
   browserButton.reconcileDisabled = controls;
   parent.append(label, pathLabel, browserButton, chooser, save, output, recover,
-    el('p', '只保存到未使用的项目内路径。目录不会自动创建；不覆盖、不自动解压或执行。未知结果只恢复同一请求。', 'bottom-note'));
+    el('p', '只保存到未使用的项目内路径。缺少的父目录会自动创建；不覆盖、不自动解压或执行。未知结果只恢复同一请求。', 'bottom-note'));
   controls();
 }

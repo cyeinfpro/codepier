@@ -395,7 +395,9 @@ class Agent:
         async with contextlib.AsyncExitStack() as stack:
             try:
                 async with asyncio.timeout(timeout) as timer:
-                    if tool in CORE_REMOTE:
+                    # Imports publish one destination. A project-wide writer
+                    # here also stalls unrelated projects under a mapped parent.
+                    if tool in CORE_REMOTE or tool == 'download_artifact':
                         claims = claims_for(self.engine, tool, project, args, root)
                         await stack.enter_async_context(self.resources.slot(identifier, claims,
                             lambda blockers: self.phase(identifier, 'waiting_resource', blocked_by=blockers)))

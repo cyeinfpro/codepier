@@ -172,6 +172,7 @@ REQUIRED_FILES = {
 }
 
 PUBLIC_DOCS = {
+    'docs/FILE_IMPORT.md',
     'docs/CORE_TOOLS.md',
     'docs/AGENT_INSTALL.md',
     'docs/AGENT_LIFECYCLE.md',
