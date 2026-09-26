@@ -252,7 +252,8 @@ def test_dns_failure_is_distinguishable_without_returning_raw_error(monkeypatch)
     assert TICKET not in json.dumps(error.value.details) + error.value.message
 
 
-@pytest.mark.parametrize('ip', ['127.0.0.1', '10.0.0.1', '169.254.169.254', '224.0.0.1', '::1', 'ff0e::1'])
+@pytest.mark.parametrize('ip', ['127.0.0.1', '10.0.0.1', '169.254.169.254', '224.0.0.1',
+    '::1', 'ff0e::1', 'fec0::1', 'feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff'])
 def test_private_or_multicast_dns_never_opens_socket(monkeypatch, ip):
     family = socket.AF_INET6 if ':' in ip else socket.AF_INET
     monkeypatch.setattr(socket, 'getaddrinfo', lambda *args, **kwargs: [(family, socket.SOCK_STREAM, 6, '', (ip, 443))])
@@ -338,15 +339,35 @@ def test_raw_redirect_controls_are_rejected_before_urljoin(transport, location):
     assert len(transport[1]) == 1 and all(connection.closed for connection in transport[2])
 
 
-def test_mixed_dns_answers_are_all_validated_before_connect(monkeypatch):
+@pytest.mark.parametrize('ip', ['127.0.0.1', 'fec0::1'])
+def test_mixed_dns_answers_are_all_validated_before_connect(monkeypatch, ip):
+    family = socket.AF_INET6 if ':' in ip else socket.AF_INET
     monkeypatch.setattr(socket, 'getaddrinfo', lambda *args, **kwargs: [
         (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('1.1.1.1', 443)),
-        (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('127.0.0.1', 443))])
+        (family, socket.SOCK_STREAM, 6, '', (ip, 443))])
     monkeypatch.setattr(socket, 'socket', lambda *args, **kwargs: pytest.fail('Do not connect even to the public answer'))
     with pytest.raises(DevError) as error:
         incoming.PublicTLSConnection('files.oaiusercontent.com', 443).connect()
     assert error.value.details['reason'] == 'non_public_address'
 
+
+
+def test_public_ipv6_is_pinned_without_changing_tls_identity(monkeypatch):
+    address = ('2606:4700:4700::1111', 443, 0, 0)
+    monkeypatch.setattr(socket, 'getaddrinfo', lambda *args, **kwargs: [
+        (socket.AF_INET6, socket.SOCK_STREAM, 6, '', address)])
+    connections, tls_names = [], []
+    sock = SimpleNamespace(settimeout=lambda value: None, connect=connections.append, close=lambda: None)
+    monkeypatch.setattr(socket, 'socket', lambda *args, **kwargs: sock)
+    connection = incoming.PublicTLSConnection('files.oaiusercontent.com', 443)
+    def wrap(raw, *, server_hostname):
+        assert raw is sock
+        tls_names.append(server_hostname)
+        return sock
+    connection._context = SimpleNamespace(wrap_socket=wrap)
+    connection.connect()
+    assert connections == [address] and tls_names == ['files.oaiusercontent.com']
+    connection.close()
 
 
 def test_saved_default_configuration_follows_future_registry(monkeypatch):

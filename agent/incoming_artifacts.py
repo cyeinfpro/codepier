@@ -66,8 +66,11 @@ class PublicTLSConnection(http.client.HTTPSConnection):
             raise DevError('ARTIFACT_NETWORK', '文件下载主机 DNS 解析失败；未发布目标文件', 502,
                 **metadata, reason='dns_failed', stage='dns', recovery='check_agent_network') from None
         try:
+            # IPv6's deprecated fec0::/10 site-local range is deliberately
+            # excluded from ipaddress.is_private and can report is_global.
             public = bool(addresses) and all(
                 (address := ipaddress.ip_address(a[4][0])).is_global and not address.is_multicast
+                and not getattr(address, 'is_site_local', False)
                 and '%' not in a[4][0] for a in addresses)
         except (ValueError, IndexError):
             public = False
