@@ -2,7 +2,7 @@ name: codepier
 services:
   hub:
     build: "${CODEPIER_HUB_SOURCE:-.}"
-    image: "${CODEPIER_HUB_IMAGE:-codepier:1.14.2}"
+    image: "${CODEPIER_HUB_IMAGE:-codepier:1.14.3}"
     restart: unless-stopped
     init: true
     ports:

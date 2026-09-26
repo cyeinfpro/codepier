@@ -261,9 +261,15 @@ async def test_complete_capability_discovery_and_no_unmapped_public_tool(runtime
         for operation, backend in operations.items():
             help = await instance.invoke('workspace', {'operation': 'help', 'tool': name, 'action': operation}, principal)
             assert help['scope'] == TOOLS[backend].scope
-            assert help['arguments_location'] == 'options'
+            native_import = name == 'write' and operation == 'import'
+            assert help['arguments_location'] == ('top-level' if native_import else 'options')
             assert help['inputSchema']['additionalProperties'] is False
-            assert not {'project', 'workspace_id', 'idempotency_key'} & help['inputSchema']['properties'].keys()
+            if native_import:
+                assert 'file' in help['inputSchema']['required']
+                assert 'path' in help['inputSchema']['properties']['options']['required']
+                assert 'file' not in help['inputSchema']['properties']['options']['properties']
+            else:
+                assert not {'project', 'workspace_id', 'idempotency_key'} & help['inputSchema']['properties'].keys()
 
 
 @pytest.mark.asyncio

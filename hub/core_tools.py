@@ -74,6 +74,22 @@ def help_result(tool='', action=''):
                 schema['properties']['options']['required'] = required_extra
                 required.add('options')
         schema['required'] = sorted(required | {'operation'})
+    if tool == 'write' and action == 'import':
+        # openai/fileParams resolves ONLY top-level fields. A nested file in
+        # options is retained for legacy callers, never recommended/generated.
+        options_schema = copy.deepcopy(schema)
+        definitions = options_schema.pop('$defs', {})
+        native = options_schema['properties'].pop('file')
+        options_schema['required'].remove('file')
+        schema = {'type': 'object', 'additionalProperties': False, '$defs': definitions,
+            'properties': {
+                'operation': {'type': 'string', 'const': 'import'},
+                'project': {'type': 'string', 'minLength': 1, 'maxLength': 100},
+                'workspace_id': {'type': 'string', 'pattern': r'^(|[a-f0-9]{32})$'},
+                'idempotency_key': {'type': 'string', 'minLength': 8, 'maxLength': 128},
+                'file': native, 'options': options_schema},
+            'required': ['operation', 'project', 'idempotency_key', 'file', 'options']}
+        advanced = False
     return {'tool': tool, 'operation': action, 'scope': TOOLS[target].scope,
             'arguments_location': 'options' if advanced else 'top-level',
             'requires_project': any('project' in TOOLS[n].model.model_fields and TOOLS[n].model.model_fields['project'].is_required() for n in (target, tool)),
@@ -87,6 +103,8 @@ def public_call(target, arguments):
             if target == backend:
                 args = dict(arguments)
                 outer = {key: args.pop(key) for key in ('project', 'workspace_id', 'idempotency_key') if key in args}
+                if name == 'write' and operation == 'import' and 'file' in args:
+                    outer['file'] = args.pop('file')
                 return name, {**outer, 'operation': operation, 'options': args}
     for operation, backend in WORKSPACE.items():
         if target == backend:

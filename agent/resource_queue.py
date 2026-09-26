@@ -67,7 +67,7 @@ def claims_for(engine, tool, project, args, root):
     if tool == 'edit' and args.get('changes'):
         paths = [change['path'] for change in args['changes']] + [change['destination'] for change in args['changes'] if change.get('destination')]
         return [Claim('agent', 'path', os.path.normcase(engine.path(root, path, False).resolve().as_posix()), True) for path in paths]
-    if tool in {'read', 'write', 'edit'}:
+    if tool in {'read', 'write', 'edit', 'download_artifact'}:
         path = engine.path(root, args['path'], False).resolve()
         return [Claim('agent', 'path', path.as_posix().casefold() if os.name == 'nt' else path.as_posix(), tool != 'read')]
     if tool != 'exec':

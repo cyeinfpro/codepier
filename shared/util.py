@@ -8,7 +8,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from shared.audit_redaction import redact_command, redact_text
 
-VERSION = "1.14.2"
+VERSION = "1.14.3"
 
 
 class DevError(Exception):
@@ -124,7 +124,8 @@ def safe_summary(value, limit: int = 500):
         if isinstance(value.get("command"), str):
             value = {**value, "command": redact_command(value["command"])}
         if 'download_url' in value and 'file_id' in value:
-            return {'native_file': '<private file reference>', 'size': value.get('size')}
+            from shared.file_sources import source_metadata
+            return {'native_file': '<private file reference>', 'size': value.get('size'), **source_metadata(value['download_url'])}
         if isinstance(value.get('action'), str) and value['action'] in {'fill','key','navigate','select'}:
             return {k: ('<private input>' if k in {'value','url'} else safe_summary(v,limit)) for k,v in value.items()}
         if isinstance(value.get("action"), dict) and value["action"].get("type") in {"type_text", "set_value", "select_text", "press_key", "perform_secondary_action", "click", "drag", "scroll"}:

@@ -85,7 +85,7 @@ class Mutation(Project):
 class Write(Mutation):
     operation: Literal['file', 'import', 'artifact'] = 'file'
     options: dict[str, Any] = Field(default_factory=dict, description='Specialized operation arguments; discover with workspace.help.')
-    file: NativeFile | None = Field(default=None, description='Native host attachment, only for operation=import. Destination goes in options.path.')
+    file: NativeFile | None = Field(default=None, description='Native host attachment, only for operation=import. Keep file at top-level, never inside options. Destination goes in options.path.')
     path: str = Field(default='', max_length=1024)
     content: str = Field(default='', max_length=1048576)
     expected_sha256: str = Field(default='', pattern=r'^(|new|[a-f0-9]{64})$')
