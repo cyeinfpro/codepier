@@ -12,6 +12,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, Request
 from fastapi.responses import Response, StreamingResponse
 from hub.workflows import encode_cursor, decode_cursor
+from hub import iam
 from shared.util import DevError
 
 CHUNK=256*1024
@@ -59,14 +60,14 @@ class ArtifactService:
                 raise DevError('ARTIFACT_CONFLICT','产物编号对应的已保存内容不同')
             return
         payload=json.loads(self.runtime.store.decrypt(op['payload']))
-        self.runtime.store.execute('INSERT INTO artifacts VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+        self.runtime.store.execute('INSERT INTO artifacts(id,project_id,device_id,grant_id,actor,root,name,bytes,sha256,created,expires,source_operation_id,space_id,owner_user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
             (identifier,op['project_id'],op['device_id'],op['grant_id'],op['actor'],payload['project']['root'],
-             name,size,sha,created,expires,payload['args'].get('source_operation_id','')))
+             name,size,sha,created,expires,payload['args'].get('source_operation_id',''),op['space_id'],op['owner_user_id']))
 
+    @iam.read_decision
     def row(self,identifier,principal):
         row=self.runtime.store.one('SELECT * FROM artifacts WHERE id=?',(identifier,))
-        if not row or (not principal.admin and (principal.grant_id is None or row['grant_id']!=principal.grant_id)):
-            raise DevError('ARTIFACT_NOT_FOUND','找不到当前授权范围的产物',404)
+        principal=iam.require_record(self.runtime.store,principal,row,kind='ARTIFACT')
         project=self.runtime.project(row['project_id'],principal)
         if project['root']!=row['root'] or project['device_id']!=row['device_id']:
             raise DevError('ARTIFACT_MAPPING_CHANGED','项目映射已经变化，旧产物不能在新映射下下载',409)
@@ -74,7 +75,7 @@ class ArtifactService:
 
     def public(self,row):
         return {k:row[k] for k in ('name','bytes','sha256','created','expires','project_id','source_operation_id')}|{
-            'artifact_id':row['id'],'download_path':'/api/artifacts/'+row['id']+'/download',
+            'artifact_id':row['id'],'space_id':row['space_id'],'download_path':'/api/artifacts/'+row['id']+'/download?space_id='+quote(row['space_id'],safe=''),
             'expired':row['expires']<=time.time(),'device_online':self.runtime.online(row['device_id']),
             'authentication':'Panel session or current read-scoped Bearer token; no anonymous URL',
             'immutable':True,'range_supported':True}
@@ -83,12 +84,11 @@ class ArtifactService:
         return self.public(self.row(args['artifact_id'],principal)[0])
 
     def list(self,args,principal):
-        clauses=[];values=[]
-        if not principal.admin:
-            clauses.append('a.grant_id=?');values.append(principal.grant_id)
-            if '*' not in principal.projects:
-                clauses.append('a.project_id IN (%s)'%(','.join('?' for _ in principal.projects) or 'NULL'))
-                values.extend(principal.projects)
+        principal=iam.live_principal(self.runtime.store,principal)
+        clause,values=iam.private_sql(principal,'a.');clauses=[clause]
+        if '*' not in principal.projects:
+            clauses.append('a.project_id IN (%s)'%(','.join('?' for _ in principal.projects) or 'NULL'))
+            values.extend(principal.projects)
         if args['project']:
             project=self.runtime.project(args['project'],principal)
             clauses.append('a.project_id=?');values.append(project['id'])
@@ -153,7 +153,7 @@ class ArtifactService:
 def make_artifact_router(auth,runtime):
     router=APIRouter();service=runtime.artifacts
     def principal(request):
-        owner=auth.bearer(request) if request.headers.get('authorization') else auth.admin(request)
+        owner=auth.bearer(request) if request.headers.get('authorization') else auth.panel(request)
         if 'read' not in owner.scopes:
             raise DevError('INSUFFICIENT_SCOPE','下载需要读取权限',403)
         if not request.headers.get('authorization'):auth.check_origin(request)
@@ -191,6 +191,7 @@ def make_artifact_router(auth,runtime):
         try:
             offset=(start//CHUNK)*CHUNK
             first=await service.chunk(row,project,offset)
+            service.row(identifier,principal(request))
             runtime.store.audit(owner.actor,'artifact.download',identifier,detail={'start':start,'end':end,'bytes':row['bytes']})
         except BaseException:
             release();raise
@@ -203,6 +204,9 @@ def make_artifact_router(auth,runtime):
                     current_row,current_project=service.row(identifier,current_owner)
                     if current_row['expires']<=time.time():raise DevError('ARTIFACT_EXPIRED','产物已过期',410)
                     if current!=offset:binary=await service.chunk(current_row,current_project,current)
+                    # Authorization can change during an Agent round trip.
+                    checked,_=service.row(identifier,principal(request))
+                    if checked['expires']<=time.time():raise DevError('ARTIFACT_EXPIRED','产物已过期',410)
                     yield binary[max(0,start-current):min(len(binary),end-current+1)]
                     current+=CHUNK
             finally:

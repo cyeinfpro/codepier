@@ -8,6 +8,7 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from shared.util import DevError, valid_json_value
+from hub import iam
 
 
 def access_defaults(store, user_id):
@@ -22,7 +23,7 @@ def access_defaults(store, user_id):
     return {key: value.get(key) is True for key in ('all_projects', 'developer_scopes')}
 
 
-def project_selection(store, projects, all_projects=False):
+def project_selection(store, projects, all_projects=False, *, space_id="legacy"):
     if type(all_projects) is not bool:
         raise DevError('INVALID_PROJECT', '全部项目选项必须是布尔值')
     if (not isinstance(projects, list) or len(projects) > 1000
@@ -31,7 +32,7 @@ def project_selection(store, projects, all_projects=False):
     # The wildcard requires an explicit UI/API decision; it is not a project ID.
     if '*' in projects:
         raise DevError('INVALID_PROJECT', '请通过“全部现有及未来项目”选项明确授权')
-    available = {row['id'] for row in store.all('SELECT id FROM projects')}
+    available = {row['id'] for row in store.all('SELECT id FROM projects WHERE space_id=?', (space_id,))}
     if not set(projects).issubset(available):
         raise DevError('INVALID_PROJECT', '项目已删除或不存在，请刷新项目列表')
     if all_projects:
@@ -91,20 +92,22 @@ def make_access_router(auth, runtime):
 
     @router.put('/api/settings/access')
     async def save_defaults(request: Request, body: AccessDefaultsInput):
-        principal = auth.admin(request, True)
+        principal = auth.panel(request, True)
+        if body.apply_to_existing and not principal.admin:
+            raise DevError('SPACE_ADMIN_REQUIRED', '批量授权需要空间管理员', 403)
         if body.apply_to_existing and not body.all_projects:
             raise DevError('INVALID_PROJECT', '批量应用仅用于明确开启全部项目；缩小授权请逐项调整')
         defaults = body.model_dump(exclude={'apply_to_existing'})
         with store.lock, store.db:
-            auth.admin(request, True)
+            auth.panel(request, True)
             store.db.execute('INSERT INTO meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
                              ('mcp_access_defaults:' + principal.user_id, json.dumps(defaults)))
             changed = []
             if body.apply_to_existing:
                 rows = store.db.execute('''SELECT g.id,g.projects FROM grants g
-                    WHERE g.user_id=? AND g.revoked=0 AND g.client_id IS NOT NULL AND g.profile_id IS NULL
+                    WHERE g.user_id=? AND g.space_id=? AND g.revoked=0 AND g.client_id IS NOT NULL AND g.profile_id IS NULL
                     AND EXISTS (SELECT 1 FROM tokens t WHERE t.grant_id=g.id AND t.kind IN ('access','refresh') AND t.expires>?)''',
-                                        (principal.user_id, time.time())).fetchall()
+                                        (principal.user_id, principal.space_id, time.time())).fetchall()
                 for row in rows:
                     if json.loads(row['projects']) == ['*']:
                         continue
@@ -120,9 +123,9 @@ def make_access_router(auth, runtime):
 
     @router.get('/api/grants/{grant_id}/projects')
     async def read_grant_projects(grant_id: str, request: Request):
-        principal = auth.admin(request)
+        principal = auth.panel(request)
         with store.lock:
-            row = store.one('SELECT * FROM grants WHERE id=? AND user_id=?', (grant_id, principal.user_id))
+            row = store.one('SELECT * FROM grants WHERE id=? AND user_id=? AND space_id=?', (grant_id, principal.user_id, principal.space_id))
             if not row:
                 raise DevError('NOT_FOUND', '授权不存在', 404)
             return {'id': grant_id, 'label': row['label'], 'scopes': json.loads(row['scopes']),
@@ -131,11 +134,13 @@ def make_access_router(auth, runtime):
 
     @router.put('/api/grants/{grant_id}/projects')
     async def update_grant_projects(grant_id: str, request: Request, body: GrantProjectsInput):
-        principal = auth.admin(request, True)
+        principal = auth.panel(request, True)
         with store.lock, store.db:
-            auth.admin(request, True)
-            row = store.db.execute('SELECT * FROM grants WHERE id=? AND user_id=?',
-                                   (grant_id, principal.user_id)).fetchone()
+            principal = auth.panel(request, True)
+            if not principal.admin:
+                raise DevError("ROLE_REQUIRED", "成员请使用已分配的动态角色；不能扩展旧固定凭据", 403)
+            row = store.db.execute('SELECT * FROM grants WHERE id=? AND user_id=? AND space_id=?',
+                                   (grant_id, principal.user_id, principal.space_id)).fetchone()
             if not row:
                 raise DevError('NOT_FOUND', '授权不存在', 404)
             if row['profile_id']:
@@ -144,7 +149,7 @@ def make_access_router(auth, runtime):
                 raise DevError('GRANT_REVOKED', '授权已撤销，不能通过编辑恢复', 409)
             before = json.loads(row['projects'])
             revision = grant_revision(store, grant_id)
-            selected = project_selection(store, body.projects, body.all_projects)
+            selected = project_selection(store, body.projects, body.all_projects, space_id=principal.space_id)
             # Replaying the same successful update is harmless. A stale dialog
             # must not overwrite another window's intervening scope reduction.
             if (before != body.expected_projects or revision != body.expected_revision) and before != selected:

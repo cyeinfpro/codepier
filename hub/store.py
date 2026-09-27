@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+from contextlib import contextmanager
 import os
 import sqlite3
 import tempfile
@@ -28,7 +29,7 @@ CREATE TABLE IF NOT EXISTS oauth_clients (id TEXT PRIMARY KEY, name TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS oauth_requests (id TEXT PRIMARY KEY, client_id TEXT NOT NULL, redirect_uri TEXT NOT NULL, challenge TEXT NOT NULL, state TEXT NOT NULL, scopes TEXT NOT NULL, resource TEXT NOT NULL, expires REAL NOT NULL, used INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS oauth_codes (hash TEXT PRIMARY KEY, client_id TEXT NOT NULL, redirect_uri TEXT NOT NULL, challenge TEXT NOT NULL, resource TEXT NOT NULL, grant_id TEXT NOT NULL, expires REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, device_id TEXT, project_id TEXT, actor TEXT NOT NULL, grant_id TEXT, tool TEXT NOT NULL, args_summary TEXT NOT NULL, fingerprint TEXT NOT NULL, idem TEXT, state TEXT NOT NULL, result TEXT, error TEXT, output TEXT NOT NULL DEFAULT '', created REAL NOT NULL, updated REAL NOT NULL);
-CREATE UNIQUE INDEX IF NOT EXISTS op_idem ON operations(actor, idem) WHERE idem IS NOT NULL;
+
 CREATE INDEX IF NOT EXISTS op_recent ON operations(created DESC);
 CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY AUTOINCREMENT, at REAL NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, target TEXT, status TEXT NOT NULL, detail TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS audit_recent ON audit(at DESC);
@@ -53,6 +54,7 @@ class Store:
         self.db = sqlite3.connect(self.directory / "hub.sqlite3", check_same_thread=False, timeout=30)
         self.db.row_factory = sqlite3.Row
         self.lock = threading.RLock()
+        self.iam_enabled = True
         try:
             # Changing a new database to WAL can return BUSY without invoking
             # SQLite's busy handler when another opener is doing the same.
@@ -65,13 +67,17 @@ class Store:
                     if getattr(exc, "sqlite_errorcode", None) != sqlite3.SQLITE_BUSY or time.monotonic() >= deadline:
                         raise
                     time.sleep(0.05)
-            self.db.execute("PRAGMA foreign_keys=ON")
+            self.db.execute("PRAGMA foreign_keys=OFF")
             with self.db:
                 # Serialize the reads that decide which migrations/key creation
                 # are needed with all writes made by other Store instances.
                 self.db.execute("BEGIN IMMEDIATE")
                 self._migrate()
                 self.cipher = self._load_cipher()
+                violations = self.db.execute("PRAGMA foreign_key_check").fetchall()
+                if violations:
+                    raise RuntimeError("Hub migration has invalid foreign-key relationships")
+            self.db.execute("PRAGMA foreign_keys=ON")
             os.chmod(self.directory / "hub.sqlite3", 0o600)
         except BaseException:
             self.db.close()
@@ -116,7 +122,7 @@ class Store:
                 self.db.execute(statement)
         self.db.execute("INSERT OR IGNORE INTO meta VALUES ('schema', '1')")
         version = self.db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0]
-        if version not in {"1", "2", "3", "4", "5", "6", "7"}:
+        if version not in {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"}:
             raise RuntimeError(f"Unsupported Hub database schema version: {version}")
         # Additive migration: v1 databases and their audit history remain readable.
         columns = {r[1] for r in self.db.execute("PRAGMA table_info(operations)")}
@@ -145,10 +151,24 @@ class Store:
             self.db.execute("ALTER TABLE access_profiles ADD COLUMN role_id TEXT REFERENCES access_roles(id)")
         self.db.execute("CREATE INDEX IF NOT EXISTS profiles_role ON access_profiles(role_id)")
         self.db.execute("CREATE INDEX IF NOT EXISTS grants_role ON grants(role_id)")
-        self.db.execute("UPDATE meta SET value='7' WHERE key='schema'")
+        from hub.iam_schema import migrate
+        migrate(self.db)
+
+    @contextmanager
+    def transaction(self, *, immediate=True):
+        """Join an existing transaction without independently committing it."""
+        with self.lock:
+            outer = self.db.in_transaction
+            if not outer:self.db.execute('BEGIN IMMEDIATE' if immediate else 'BEGIN')
+            try:
+                yield self.db
+                if not outer:self.db.commit()
+            except BaseException:
+                if not outer:self.db.rollback()
+                raise
 
     def execute(self, sql: str, args=()):
-        with self.lock, self.db:
+        with self.transaction():
             return self.db.execute(sql, args)
 
     def one(self, sql: str, args=()):
@@ -166,9 +186,39 @@ class Store:
     def decrypt(self, value: str):
         return self.cipher.decrypt(value.encode()).decode()
 
-    def audit(self, actor: str, action: str, target: str = "", status: str = "ok", detail=None):
-        self.execute("INSERT INTO audit(at,actor,action,target,status,detail) VALUES (?,?,?,?,?,?)",
-                     (time.time(), actor, action, target, status, json.dumps(detail or {}, ensure_ascii=False)))
+    def audit(self, actor: str, action: str, target: str = "", status: str = "ok", detail=None, *, commit=True, target_kind=None):
+        from hub.iam import audit_context
+        context = audit_context.get()
+        # Context is trusted only for its originating Store AND actor. A task
+        # can outlive the HTTP request, and direct callers may use another Store.
+        scoped = bool(context and context[0] is self and context[1] == actor)
+        sid, uid = context[2:] if scoped else ('legacy', None)
+        if not scoped and actor.startswith('mcp:'):
+            grant = self.one('SELECT space_id,user_id FROM grants WHERE id=?', (actor.split(':', 2)[1],))
+            if grant: sid, uid = grant['space_id'], grant['user_id']
+        elif actor.startswith('panel:') and uid is None:
+            user = self.one('SELECT id FROM users WHERE username=?', (actor[6:],))
+            if user: uid = user['id']
+        # Do not retarget a scoped caller's audit entry using an untrusted ID
+        # from a denied cross-Space request. Also avoid loading operation bodies
+        # just to audit a thin status read.
+        tables = {'operation': 'operations', 'project': 'projects', 'device': 'devices',
+                  'profile': 'access_profiles', 'role': 'access_roles', 'workflow': 'workflows',
+                  'artifact': 'artifacts', 'grant': 'grants', 'vps': 'vps_connections'}
+        if target_kind is not None and target_kind not in tables:
+            raise ValueError('Unknown audit target kind')
+        # A verified caller scope (including MCP) takes precedence even when the
+        # target is an ID in another Space. Free-form names/URLs never cause lookup.
+        if target_kind and target and not scoped and not actor.startswith('mcp:'):
+            row = self.one(f'SELECT space_id,owner_user_id FROM {tables[target_kind]} WHERE id=?', (target,))
+            if row:
+                sid = row['space_id']
+        sql = 'INSERT INTO audit(at,actor,action,target,status,detail,space_id,owner_user_id) VALUES(?,?,?,?,?,?,?,?)'
+        args = (time.time(), actor, action, target, status, json.dumps(detail or {}, ensure_ascii=False), sid, uid)
+        if commit:
+            self.execute(sql, args)
+        else:
+            self.db.execute(sql, args)
 
     def close(self):
         with self.lock:

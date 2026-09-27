@@ -8,6 +8,12 @@
 
 > 当前仓库的 `RELEASE.json` 标记为 **1.13.0 / released / source-only**。该版本发布源码，不等同于已经部署到你的 Hub / Agent。
 
+## 多用户与 OIDC（未发布功能）
+
+当前功能分支已接入通用 OIDC 登录、个人/团队 **Space**、空间成员与共用动态 Role、用户私有 Profile、设备归属及跨空间 API/历史/事件隔离。OIDC 只认证人，CodePier 继续签发自己的 MCP 凭据。秘书 Role 后续增加 project 或操作能力，已有角色连接无需重新 OAuth。
+
+先查看 [多用户/OIDC 安装、授权与恢复](docs/MULTIUSER_OIDC.md) 及 [验证状态](docs/MULTIUSER_OIDC_STATUS.md)。原单 owner 数据增量迁移至 schema 9；升级前保留匹配的数据库、主密钥和完整数据备份。提供者默认关闭，升级不会自动开放注册。只安装已核对完整 CI 的提交；这不表示你的 Hub 已部署，也不把 project/Role 当成 OS 沙箱。
+
 CodePier 面向这样的开发方式：
 
 - AI 或 ChatGPT 在云端，但源码、CLI、浏览器登录态和开发工具在你自己的电脑上。

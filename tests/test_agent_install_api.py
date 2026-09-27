@@ -71,15 +71,19 @@ def test_package_is_deterministic_and_excludes_private_files(tmp_path):
 def test_ticket_is_single_use_rotated_and_secret_never_in_command(tmp_path):
     package_tree(tmp_path / 'source')
     store = Store(tmp_path / 'hub')
+    from tests.legacy_iam_fixture import seed_owner
+    seed_owner(store,'u','admin')
     secret = 's' * 48
     device_id = 'd' * 32
     store.execute('INSERT INTO devices(id,name,secret,created) VALUES (?,?,?,?)',
                   (device_id, 'Laptop', store.encrypt(secret), 1))
 
     class Auth:
-        def admin(self, request, write=False):
+        def panel(self, request, write=False):
             return Principal('panel:admin', 'u', {'read', 'write', 'computer'}, ['*'], admin=True)
 
+    from tests.legacy_iam_fixture import attach_session_security
+    attach_session_security(store)
     runtime = SimpleNamespace(store=store)
     app = FastAPI()
     @app.exception_handler(DevError)
@@ -130,6 +134,8 @@ def _real_auth_app(tmp_path, *, enabled=True):
     cookie, csrf = 'session-cookie', 'session-csrf'
     store.execute('INSERT INTO sessions(id_hash,user_id,csrf,expires) VALUES (?,?,?,?)',
                   (digest(cookie), 'u1', csrf, time.time() + 3600))
+    from tests.legacy_iam_fixture import attach_session_security
+    attach_session_security(store)
     runtime = SimpleNamespace(store=store)
     app = FastAPI()
     @app.exception_handler(DevError)
@@ -183,13 +189,15 @@ def test_agent_lifecycle_endpoints_pin_package_and_require_exact_uninstall_name(
     source = tmp_path / 'source'
     package_tree(source)
     store = Store(tmp_path / 'hub')
+    from tests.legacy_iam_fixture import seed_owner
+    seed_owner(store,'u','admin')
     device_id = 'd' * 32
     store.execute('INSERT INTO devices(id,name,secret,enabled,created) VALUES (?,?,?,?,?)',
                   (device_id, 'Studio Mac', store.encrypt('s' * 48), 1, time.time()))
     calls = []
 
     class AdminAuth:
-        def admin(self, request, write=False):
+        def panel(self, request, write=False):
             return Principal('panel:admin', 'u', {'read', 'write', 'computer'}, ['*'], admin=True)
 
     class Runtime:

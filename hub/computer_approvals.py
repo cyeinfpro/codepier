@@ -2,21 +2,22 @@
 import time
 import json
 from shared.util import DevError
+from hub import iam
 
 class ComputerApprovals:
     def __init__(self, runtime):
         self.runtime = runtime
         self.pending = {}
 
-    def changed(self):
+    def changed(self, row):
         # SSE only invalidates the panel's inbox. App names, native messages,
         # session IDs and decisions stay behind the authenticated inbox API.
-        self.runtime.publish('computer_approval', {'changed': True})
+        self.runtime.publish('computer_approval', {'changed': True}, audience=row['_audience'])
 
     def remove(self, identifier):
         row = self.pending.pop(identifier, None)
         if row is not None:
-            self.changed()
+            self.changed(row)
         return row
 
     def drop(self, connection):
@@ -57,15 +58,26 @@ class ComputerApprovals:
         if owner!=data['owner']:return
         if key in self.pending or len(self.pending)>=64:return
         row={k:data[k] for k in ['session_id','project_id','owner','app','operation_id','message','expires_at']}
-        row.update(request_id=key,device_id=device,connection=connection)
+        row.update(request_id=key,device_id=device,connection=connection,
+                   _audience={'space_id':op['space_id'],'user_id':op['owner_user_id']})
         if not self.live(row):return
         self.pending[key]=row
-        self.changed()
+        self.changed(row)
 
-    def list(self):
+    def permitted(self, row, principal):
+        try:
+            op=self.runtime.store.one('SELECT * FROM operations WHERE id=?',(row['operation_id'],))
+            current=iam.require_record(self.runtime.store,principal,op)
+            self.runtime.project(row['project_id'],current)
+            self.runtime.authorize(current,'computer',project_id=row['project_id'])
+            return True
+        except DevError:
+            return False
+
+    def list(self, principal=None):
         for key,row in list(self.pending.items()):
             if not self.live(row):self.remove(key)
-        return [{k:v for k,v in row.items() if k!='connection'} for row in self.pending.values()]
+        return [{k:v for k,v in row.items() if k not in {'connection','_audience'}} for row in self.pending.values() if principal is None or self.permitted(row,principal)]
 
     async def decide(self, identifier, action, principal):
         if action not in {'accept','decline','cancel'}:
@@ -74,6 +86,8 @@ class ComputerApprovals:
         if not row or not self.live(row):
             self.remove(identifier)
             raise DevError('APPROVAL_EXPIRED','授权请求已过期、断线或会话已结束；请重新读屏',409)
+        if principal.grant_id or not self.permitted(row,principal):
+            raise DevError('APPROVAL_FORBIDDEN','只能处理自己的已授权桌面请求',403)
         # Consume before awaiting send: two panel tabs cannot race to decide twice.
         self.remove(identifier)
         await row['connection'].send({'type':'computer_approval_decision','request_id':identifier,

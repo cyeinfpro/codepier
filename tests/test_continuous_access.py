@@ -12,7 +12,7 @@ from tests.test_audit_api import api, oauth_tokens, rpc
 
 
 def add_project(app, identifier='future'):
-    app.state.store.execute('INSERT INTO projects VALUES (?,?,?,?,?,?,?,?,?)',
+    app.state.store.execute('INSERT INTO projects(id,alias,alias_key,device_id,root,description,mode,allow_tasks,created) VALUES (?,?,?,?,?,?,?,?,?)',
                             (identifier, identifier, identifier, 'device', '/tmp/' + identifier,
                              '', 'write', 0, time.time()))
 

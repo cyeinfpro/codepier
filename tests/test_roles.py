@@ -270,11 +270,12 @@ def test_corrupt_stored_role_does_not_fall_back_to_grant_snapshot(api):
     assert call(client,t['token']).status_code==401
 
 
-def test_owner_cannot_bind_another_owners_role(api):
+def test_owner_cannot_bind_role_in_another_space(api):
     app,client,_=api
-    r=role(client)
-    app.state.store.execute('INSERT INTO users VALUES (?,?,?,?)',('other','other',password_hash('not-a-real-password'),time.time()))
-    app.state.store.execute('UPDATE access_roles SET user_id=? WHERE id=?',('other',r['id']))
+    sid=client.post('/api/iam/spaces',json={'label':'Other space','idempotency_key':'other-space-001'}).json()['id']
+    r=must(client.post('/api/access-roles',headers={'X-CodePier-Space':sid},json={
+        'label':'Other secretary','project_rules':[{'actions':['read'],'all_projects':True}],
+        'idempotency_key':'other-role-create'}),201)
     assert client.post('/api/access-profiles',json={'label':'no','role_id':r['id'],'idempotency_key':'foreign-role-001'}).status_code==404
 
 
@@ -433,7 +434,8 @@ def test_schema6_upgrade_keeps_fixed_grants_profiles_and_master_key(api,tmp_path
     from hub.store import Store
     from shared.crypto import token as secret_token
     directory=tmp_path/'old-store'
-    old=Store(directory)
+    from tests.legacy_iam_fixture import legacy_store
+    old=legacy_store(directory)
     old.execute('INSERT INTO users VALUES (?,?,?,?)',('old-owner','old-owner',password_hash('test-owner-password'),time.time()))
     old.execute('INSERT INTO access_profiles(id,user_id,label,label_key,scopes,projects,enabled,version,created,updated,create_key,create_fingerprint) VALUES (?,?,?,?,?,?,1,1,?,?,?,?)',
         ('prf_old','old-owner','Old identity','old identity','["read"]','[]',time.time(),time.time(),'old-key','old-fingerprint'))
@@ -455,7 +457,7 @@ def test_schema6_upgrade_keeps_fixed_grants_profiles_and_master_key(api,tmp_path
         db.execute("UPDATE meta SET value='6' WHERE key='schema'")
     new=Store(directory)
     try:
-        assert new.one("SELECT value FROM meta WHERE key='schema'")['value']=='7'
+        assert new.one("SELECT value FROM meta WHERE key='schema'")['value']=='10'
         grant=new.one('SELECT * FROM grants WHERE id=?',('old-grant',))
         assert grant['authorization_mode']=='fixed' and grant['role_id'] is None
         assert grant['profile_id']=='prf_old' and grant['scopes']=='["read"]'

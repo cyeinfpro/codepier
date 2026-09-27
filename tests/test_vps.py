@@ -20,12 +20,14 @@ from tests.test_ssh import PASSWORD, fake_transport
 @pytest.fixture
 def inventory(tmp_path):
     store = Store(tmp_path / 'data')
+    from tests.legacy_iam_fixture import seed_owner
+    seed_owner(store,'owner','fixture')
     device = uuid.uuid4().hex
     store.execute('INSERT INTO devices(id,name,secret,created) VALUES (?,?,?,?)', (device, 'Fixture Agent', store.encrypt('fixture-device'), time.time()))
     projects = []
     for alias in ('Alpha', 'Beta', 'Gamma'):
         identifier = uuid.uuid4().hex
-        store.execute('INSERT INTO projects VALUES (?,?,?,?,?,?,?,?,?)', (identifier, alias, alias.lower(), device, str(tmp_path / alias), '', 'write', 1, time.time()))
+        store.execute('INSERT INTO projects(id,alias,alias_key,device_id,root,description,mode,allow_tasks,created) VALUES (?,?,?,?,?,?,?,?,?)', (identifier, alias, alias.lower(), device, str(tmp_path / alias), '', 'write', 1, time.time()))
         projects.append(identifier)
     runtime = Runtime(store)
     owner = Principal('panel:fixture', 'owner', {'read', 'write', 'execute'}, [], admin=True)
@@ -53,7 +55,9 @@ def test_saved_credential_encryption_many_to_many_and_visibility(inventory):
     assert set(v['project_ids']) == set(projects[:2])
     raw = r.store.one('SELECT * FROM vps_connections WHERE id=?', (v['id'],))
     assert raw['secret'] != PASSWORD and r.store.decrypt(raw['secret']) == PASSWORD
-    caller = Principal('mcp:one', 'owner', {'read'}, [projects[0]])
+    from tests.legacy_iam_fixture import seed_grant
+    seed_grant(r.store,'one','owner',['read'],[projects[0]])
+    caller = Principal('mcp:one', 'owner', {'read'}, [projects[0]],grant_id='one')
     result = r.vps.list({'project': '', 'query': '', 'offset': 0, 'limit': 50}, caller)
     assert len(result['vps']) == 1 and result['vps'][0]['project_ids'] == [projects[0]]
     assert projects[1] not in json.dumps(result) and other['id'] not in json.dumps(result)
@@ -81,7 +85,7 @@ def test_update_keeps_password_and_cas_rejects_lost_updates(inventory):
     assert before == r.store.one('SELECT secret FROM vps_connections WHERE id=?', (v['id'],))['secret']
     with pytest.raises(DevError, match='其他窗口'):
         r.vps.save(edit_body(v, password='new-fixture'), owner, v['id'])
-    assert r.vps.get(v['id'])['notes'] == 'deploy directory /srv/app'
+    assert r.vps.get(v['id'],owner)['notes'] == 'deploy directory /srv/app'
     rotated = r.vps.save(edit_body(updated, password='new-fixture'), owner, v['id'])
     assert rotated['connection_revision'] == 2
 
@@ -131,8 +135,8 @@ def test_project_side_assignment_preserves_other_projects(inventory):
     v = r.vps.save(body(projects[:2]), owner)
     other = r.vps.save(VPSInput(name='Second', host='second.invalid', password=PASSWORD, project_ids=projects[1:2]), owner)
     r.vps.project_assign(projects[0], ProjectVPSAssignments(vps_ids=[other['id']], expected_vps_ids=[v['id']]), owner)
-    assert r.vps.get(v['id'])['project_ids'] == [projects[1]]
-    assert set(r.vps.get(other['id'])['project_ids']) == set(projects[:2])
+    assert r.vps.get(v['id'],owner)['project_ids'] == [projects[1]]
+    assert set(r.vps.get(other['id'],owner)['project_ids']) == set(projects[:2])
     with pytest.raises(DevError):
         r.vps.project_assign(projects[0], ProjectVPSAssignments(vps_ids=[], expected_vps_ids=[v['id']]), owner)
 
@@ -186,7 +190,7 @@ def test_transport_credential_not_in_saved_payload_and_delete_cascades(inventory
     assert packet['tool'] == 'ssh_exec' and packet['args']['password'] == PASSWORD
     assert 'vps_ref' not in packet and PASSWORD not in json.dumps(request)
     r.store.execute('DELETE FROM projects WHERE id=?', (projects[0],))
-    assert r.vps.get(v['id'])['project_ids'] == [projects[1]]
+    assert r.vps.get(v['id'],owner)['project_ids'] == [projects[1]]
     r.vps.delete(v['id'], v['version'], owner)
     assert not r.store.all('SELECT * FROM vps_projects')
 

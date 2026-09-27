@@ -34,8 +34,10 @@ def api(tmp_path, monkeypatch):
     store = app.state.store
     store.execute("INSERT INTO users VALUES (?,?,?,?)", ("owner", "admin", password_hash("original-password"), time.time()))
     store.execute("INSERT INTO sessions VALUES (?,?,?,?)", (digest("session"), "owner", "csrf", time.time() + 3600))
+    from tests.legacy_iam_fixture import attach_session_security
+    attach_session_security(store)
     store.execute("INSERT INTO devices(id,name,secret,created) VALUES (?,?,?,?)", ("device", "fixture", store.encrypt("x" * 43), time.time()))
-    store.execute("INSERT INTO projects VALUES (?,?,?,?,?,?,?,?,?)", ("project", "fixture", "fixture", "device", "/tmp/fixture", "", "write", 0, time.time()))
+    store.execute("INSERT INTO projects(id,alias,alias_key,device_id,root,description,mode,allow_tasks,created) VALUES (?,?,?,?,?,?,?,?,?)", ("project", "fixture", "fixture", "device", "/tmp/fixture", "", "write", 0, time.time()))
     principal = Principal("panel:admin", "owner", {"read", "write"}, ["*"], admin=True)
     pat = app.state.auth.issue_grant(principal, "fixture", ["read"], ["project"])["token"]
     with TestClient(app) as client:

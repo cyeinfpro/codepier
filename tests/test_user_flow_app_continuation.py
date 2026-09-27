@@ -23,7 +23,7 @@ def app_page(chat_browser_pool):
         page.add_style_tag(path=str(ROOT / 'web' / name))
     source = (ROOT / 'web/app.js').read_text(encoding='utf-8')
     page.add_script_tag(content=source[:source.index('(async()=>{try{const page=location.hash')])
-    for name in ('ui.js','chat-markdown.js','chat-panels.js','chat-chrome.js',
+    for name in ('ui.js','identity.js','chat-markdown.js','chat-panels.js','chat-chrome.js',
                  'chat-history.js','chat-catalog.js','chat.js'):
         page.add_script_tag(path=str(ROOT / 'web' / name))
     page.evaluate('''async () => {
@@ -40,6 +40,10 @@ def app_page(chat_browser_pool):
           headers:{'Content-Type':'application/json'}});
         if(path==='/api/fixture-expire')return response({error:{code:'UNAUTHORIZED',message:'Session expired'}},401);
         if(path==='/api/login')return response(nextLogin);
+        if(path==='/api/auth/providers')return response({providers:[]});
+        if(path==='/api/iam/me')return response({id:S.session.user_id,username:S.session.username,
+          instance_admin:true,spaces:[{id:'legacy',label:'Fixture Space',level:'owner',active:true}],
+          disabled_spaces:[],identities:[],sessions:[]});
         if(path==='/api/logout')return response({ok:true});
         if(path==='/api/devices')return response({devices:fixtureDevices});
         if(path.startsWith('/api/projects')&&method!=='GET'){

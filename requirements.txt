@@ -14,3 +14,6 @@ tree-sitter-typescript==0.23.2
 PyYAML==6.0.3
 jsonschema==4.26.0
 pywinpty==3.0.5; sys_platform == "win32"
+
+# Asymmetric ID-token/JWKS verification for human OIDC login.
+PyJWT[crypto]==2.13.0

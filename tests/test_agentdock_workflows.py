@@ -19,10 +19,17 @@ from shared.util import DevError
 @pytest.fixture
 def env(tmp_path):
     store = Store(tmp_path / "hub")
+    from tests.legacy_iam_fixture import seed_owner
+    seed_owner(store,'u','fixture')
+    seed_owner(store,'viewer','other')
     store.execute("INSERT INTO devices(id,name,secret,created) VALUES ('d','fixture','fixture',?)", (time.time(),))
     for id in ("p", "p2"):
         store.execute("INSERT INTO projects(id,alias,alias_key,device_id,root,allow_tasks,created) VALUES (?,?,?,'d',?,1,?)",
                       (id, id.upper(), id, str(tmp_path / id), time.time()))
+    from tests.legacy_iam_fixture import seed_grant
+    seed_grant(store,'g')
+    seed_grant(store,'other')
+    seed_grant(store,'g2')
     runtime = Runtime(store)
     principal = Principal("mcp:g:fixture", "u", {"read", "write", "execute"}, ["p", "p2"], "g")
     yield runtime, principal
@@ -30,9 +37,17 @@ def env(tmp_path):
 
 
 def call(env, name, **args):
-    result = asyncio.run(env[0].invoke(name, args, env[1]))
-    Draft202012Validator(OUTPUT_SCHEMAS[name]).validate(result)
-    return result
+    # Persist the fixture's intended credential policy: runtime now deliberately
+    # re-reads grants instead of trusting a modified in-memory Principal.
+    store,principal=env[0].store,env[1]
+    original=store.one('SELECT scopes,projects FROM grants WHERE id=?',(principal.grant_id,)) if principal.grant_id else None
+    if original:store.execute('UPDATE grants SET scopes=?,projects=? WHERE id=?',(json.dumps(sorted(principal.scopes)),json.dumps(principal.projects),principal.grant_id))
+    try:
+        result = asyncio.run(env[0].invoke(name, args, principal))
+        Draft202012Validator(OUTPUT_SCHEMAS[name]).validate(result)
+        return result
+    finally:
+        if original:store.execute('UPDATE grants SET scopes=?,projects=? WHERE id=?',(original['scopes'],original['projects'],principal.grant_id))
 
 
 def create(env, **args):
@@ -144,7 +159,7 @@ def test_block_resume_single_current_step_and_permission_isolation(env):
         update(env, receipt, step_id="s1", step_state="pending")
     receipt = update(env, receipt, action="resume", summary="Owner decision recorded")
     for principal in (dataclasses.replace(env[1], grant_id="other"), dataclasses.replace(env[1], projects=[]),
-                      dataclasses.replace(env[1], grant_id=None)):
+                      dataclasses.replace(env[1], actor="panel:other", user_id="viewer", grant_id=None)):
         with pytest.raises(DevError):
             get((env[0], principal), receipt)
         assert not call((env[0], principal), "workflows_list")["workflows"]
@@ -257,7 +272,7 @@ def test_final_output_advances_cursor_and_command_ok_is_not_transport_ok(env):
 
 def test_owner_can_explicitly_handoff_to_scoped_mcp_grant(env):
     runtime, principal = env
-    runtime.store.execute("INSERT INTO grants(id,user_id,label,scopes,projects,created) VALUES ('g','u','Fixture','[\"read\",\"write\"]','[\"p\"]',?)", (time.time(),))
+    runtime.store.execute("UPDATE grants SET label='Fixture',scopes='[\"read\",\"write\"]',projects='[\"p\"]' WHERE id='g'")
     runtime.store.execute("INSERT INTO tokens(id,hash,grant_id,kind,expires,created) VALUES ('t','test-only','g','pat',?,?)", (time.time()+3600,time.time()))
     admin = dataclasses.replace(principal, actor='panel:u', grant_id=None, admin=True)
     receipt = create((runtime, admin), assignee_grant_id='g')
