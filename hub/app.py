@@ -18,6 +18,9 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from hub.auth import Auth, SESSION_SECONDS
+from hub import iam
+from hub.iam_api import make_iam_router, spaces_for
+from hub.oidc import OIDCService
 from hub.access_profiles import make_profiles_router, refresh_profile_principal
 from hub.roles import make_roles_router, require_role, role_project_scopes, require_new_mapping
 from shared.role_contracts import ROLE_SCOPE
@@ -158,9 +161,11 @@ def create_app(data_dir: str | None = None):
     async def lifespan(app):
         try:
             await runtime.start()
+            await oidc.start()
             yield
         finally:
             try:
+                await oidc.stop()
                 await runtime.stop()
             finally:
                 try:
@@ -171,6 +176,7 @@ def create_app(data_dir: str | None = None):
     app = FastAPI(title="CodePier Agent", version=VERSION, lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.store, app.state.runtime, app.state.auth = store, runtime, auth
     app.add_middleware(BodyLimit)
+    app.add_middleware(iam.AuditContextMiddleware)
     maintenance = PanelMaintenance(runtime, os.getenv("HUB_PANEL_UPDATE_SOCKET", ""))
     runtime.panel_maintenance = maintenance
     app.add_middleware(PanelMaintenanceMiddleware, gate=maintenance)
@@ -198,7 +204,7 @@ def create_app(data_dir: str | None = None):
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
-        if request.url.path.startswith(("/api", "/oauth")):
+        if request.url.path.startswith(("/api", "/oauth", "/auth")):
             response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -217,7 +223,7 @@ def create_app(data_dir: str | None = None):
         configured = bool(store.one("SELECT id FROM users LIMIT 1"))
         try:
             row = auth.session(request)
-            return {"authenticated": True, "configured": configured, "username": row["username"], "user_id": row["user_id"], "csrf": row["csrf"], "version": VERSION}
+            return {"authenticated": True, "configured": configured, "username": row["username"], "user_id": row["user_id"], "csrf": row["csrf"], "version": VERSION, "instance_admin": row["instance_admin"], "spaces": spaces_for(store,row["user_id"])}
         except DevError:
             return {"authenticated": False, "configured": configured, "version": VERSION}
 
@@ -230,16 +236,18 @@ def create_app(data_dir: str | None = None):
 
     @app.post("/api/logout")
     async def logout(request: Request):
-        principal = auth.admin(request, True)
-        store.execute("DELETE FROM sessions WHERE id_hash=?", (digest(request.cookies.get("rd_session", "")),))
-        store.audit(principal.actor, "auth.logout")
+        session = auth.session_write(request)
+        store.execute("DELETE FROM sessions WHERE id_hash=?", (session['id_hash'],))
+        store.audit('panel:'+session['username'], "auth.logout")
         response = JSONResponse({"ok": True})
         response.delete_cookie("rd_session", path="/")
         return response
 
     @app.post("/api/account/password")
     async def password(request: Request, body: PasswordInput):
-        principal = auth.admin(request, True)
+        principal = auth.panel(request, True)
+        if not iam.user_security(store,principal.user_id)["local_login"]:
+            raise DevError("OIDC_ONLY_ACCOUNT", "外部账号请在身份提供者修改密码", 403)
         row = store.one("SELECT password_hash FROM users WHERE id=?", (principal.user_id,))
         if not await asyncio.to_thread(password_verify, body.current_password, row["password_hash"]):
             raise DevError("PASSWORD_INCORRECT", "当前密码不正确", 403)
@@ -247,7 +255,7 @@ def create_app(data_dir: str | None = None):
         with store.lock, store.db:
             # Verification and hashing yield to other requests. A competing
             # password reset or logout must invalidate this in-flight request.
-            auth.admin(request, True)
+            auth.panel(request, True)
             changed = store.db.execute("UPDATE users SET password_hash=? WHERE id=? AND password_hash=?", (hashed, principal.user_id, row["password_hash"])).rowcount
             if not changed:
                 raise DevError("PASSWORD_CHANGED", "密码已变化，请重新登录后重试", 409)
@@ -258,23 +266,36 @@ def create_app(data_dir: str | None = None):
 
     @app.get("/api/overview")
     async def overview(request: Request):
-        principal = auth.admin(request)
+        principal = auth.panel(request)
         try:
             tz = ZoneInfo(os.getenv("TZ", "Asia/Taipei"))
         except Exception:
             tz = ZoneInfo("UTC")
         today = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-        devices = device_rows()
+        devices = device_rows(principal)
         projects = runtime.list_projects(principal)
-        counts = {r["state"]: r["n"] for r in store.all("SELECT state,count(*) AS n FROM operations WHERE created>=? GROUP BY state", (today,))}
+        clause, args = iam.private_sql(principal)
+        if not principal.admin:
+            clause += ' AND (project_id IS NULL OR project_id IN (%s))' % (','.join('?' for _ in principal.projects) or 'NULL')
+            args.extend(principal.projects)
+        counts = {r['state']:r['n'] for r in store.all('SELECT state,count(*) AS n FROM operations WHERE '+clause+' AND created>=? GROUP BY state', (*args,today))}
         return {"devices": devices, "projects": projects, "online_devices": sum(1 for d in devices if d["online"]),
             "today_operations": sum(counts.values()), "today_succeeded": counts.get("succeeded", 0), "today_failed": counts.get("failed", 0),
-            "active_operations": store.one("SELECT count(*) AS n FROM operations WHERE state IN ('running','queued','reconnecting','cancelling')")["n"],
-            "recent_operations": operation_rows(limit=8), "recent_audit": audit_rows(limit=6),
+            "active_operations": store.one("SELECT count(*) AS n FROM operations WHERE "+clause+" AND state IN ('running','queued','reconnecting','cancelling')",args)["n"],
+            "recent_operations": operation_rows(principal,limit=8), "recent_audit": audit_rows(principal,limit=6),
             "mcp_url": public_url() + "/mcp", "role_mcp_url": public_url() + "/mcp?authorization=role", "version": VERSION, "tool_count": len(TOOLS), "timezone": str(tz)}
 
-    def device_rows():
-        rows = store.all("SELECT id,name,enabled,info,last_seen,created FROM devices ORDER BY created")
+    def device_rows(principal):
+        with iam.read_scope(store):
+            return scoped_device_rows(principal)
+
+    def scoped_device_rows(principal):
+        candidates = store.all("SELECT id,name,enabled,info,last_seen,created,owner_user_id FROM devices WHERE space_id=? ORDER BY created",(principal.space_id,))
+        rows=[]
+        for row in candidates:
+            try: iam.require_device(store,principal,row['id'])
+            except DevError: continue
+            rows.append(row)
         lifecycle_names = tuple(sorted(DEVICE_ACTIONS))
         for row in rows:
             try:
@@ -283,6 +304,7 @@ def create_app(data_dir: str | None = None):
                 info = {}
             if not isinstance(info, dict):
                 info = {}
+            row["can_manage"] = bool(principal.admin or row.get('owner_user_id')==principal.user_id)
             row["info"] = info
             row["online"] = runtime.online(row["id"])
             row["project_count"] = store.one("SELECT count(*) AS n FROM projects WHERE device_id=?", (row["id"],))["n"]
@@ -294,6 +316,9 @@ def create_app(data_dir: str | None = None):
                 "SELECT id,tool,state,created,updated,error FROM operations WHERE device_id=? AND tool IN (?,?,?) ORDER BY created DESC LIMIT 1",
                 (row["id"], *lifecycle_names),
             )
+            if latest:
+                try: runtime.operation_row(latest['id'],principal)
+                except DevError: latest=None
             reason = str(management.get("reason") or "")[:300]
             if row["online"] and not actions and not reason:
                 reason = "当前 Agent 版本尚未声明一键管理能力，请重新执行一次安装命令完成基础升级"
@@ -319,18 +344,22 @@ def create_app(data_dir: str | None = None):
 
     @app.get("/api/devices")
     async def devices(request: Request):
-        auth.admin(request)
-        return {"devices": device_rows()}
+        principal=auth.panel(request)
+        return {"devices": device_rows(principal)}
 
     @app.post("/api/devices")
     async def create_device(request: Request, body: DeviceCreate):
-        principal = auth.admin(request, True)
+        principal = auth.panel(request, True)
         try:
             hub_url = normalize_url(body.hub_url)
         except ValueError as exc:
             raise DevError("INVALID_URL", str(exc)) from exc
+        if iam.membership(store,principal.user_id,principal.space_id)['level']=='guest':
+            raise DevError('DEVICE_CREATE_DENIED','访客不能登记设备',403)
+        if store.one('SELECT count(*) AS n FROM devices WHERE space_id=?',(principal.space_id,))['n']>=200:
+            raise DevError('DEVICE_LIMIT','空间设备数量达到上限',409)
         id, secret = uuid.uuid4().hex, token(32)
-        store.execute("INSERT INTO devices(id,name,secret,created) VALUES (?,?,?,?)", (id, body.name, store.encrypt(secret), time.time()))
+        store.execute("INSERT INTO devices(id,name,secret,created,space_id,owner_user_id) VALUES (?,?,?,?,?,?)", (id, body.name, store.encrypt(secret), time.time(),principal.space_id,principal.user_id))
         store.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", ("device_hub_url:"+id, hub_url))
         store.audit(principal.actor, "device.created", body.name)
         runtime.publish("device", {"id": id})
@@ -338,7 +367,8 @@ def create_app(data_dir: str | None = None):
 
     @app.patch("/api/devices/{id}")
     async def update_device(id: str, request: Request, body: DeviceUpdate):
-        principal = auth.admin(request, True)
+        principal = auth.panel(request, True)
+        iam.require_device(store,principal,id,manage=True)
         row = store.one("SELECT * FROM devices WHERE id=?", (id,))
         if not row:
             raise DevError("NOT_FOUND", "设备不存在", 404)
@@ -354,7 +384,8 @@ def create_app(data_dir: str | None = None):
 
     @app.post("/api/devices/{id}/rotate")
     async def rotate_device(id: str, request: Request):
-        principal = auth.admin(request, True)
+        principal = auth.panel(request, True)
+        iam.require_device(store,principal,id,manage=True)
         row = store.one("SELECT name FROM devices WHERE id=?", (id,))
         if not row:
             raise DevError("NOT_FOUND", "设备不存在", 404)
@@ -366,7 +397,8 @@ def create_app(data_dir: str | None = None):
 
     @app.delete("/api/devices/{id}")
     async def delete_device(id: str, request: Request):
-        principal = auth.admin(request, True)
+        principal = auth.panel(request, True)
+        iam.require_device(store,principal,id,manage=True)
         if store.one("SELECT id FROM projects WHERE device_id=? LIMIT 1", (id,)):
             raise DevError("DEVICE_HAS_PROJECTS", "请先移除这个设备的项目映射", 409)
         store.execute("UPDATE devices SET enabled=0 WHERE id=?", (id,))
@@ -377,10 +409,11 @@ def create_app(data_dir: str | None = None):
 
     @app.get("/api/projects")
     async def projects(request: Request):
-        return {"projects": runtime.list_projects(auth.admin(request))}
+        return {"projects": runtime.list_projects(auth.panel(request))}
 
     async def save_project(body: ProjectInput, principal, id=None, request=None):
         principal = refresh_profile_principal(store, principal)
+        iam.require_device(store,principal,body.device_id,creation=body.model_dump())
         if not principal.admin:
             if id is not None:
                 raise DevError('OWNER_REQUIRED', '角色委派仅允许新增映射，不允许替换现有映射', 403)
@@ -392,7 +425,7 @@ def create_app(data_dir: str | None = None):
         fields['alias'] = alias
         fingerprint = digest(json.dumps([id,fields],sort_keys=True,ensure_ascii=False))
         # A durable save receipt owns the validation and the mapping commit.
-        key = 'project_save:'+digest((principal.user_id if principal.admin else principal.actor)+'\n'+(body.idempotency_key or fingerprint))
+        key = 'project_save:'+principal.space_id+':'+digest((principal.user_id if principal.admin else principal.actor)+'\n'+(body.idempotency_key or fingerprint))
         with store.lock, store.db:
             saved = store.one("SELECT value FROM meta WHERE key=?", (key,))
             plan = json.loads(saved['value']) if saved else None
@@ -403,10 +436,10 @@ def create_app(data_dir: str | None = None):
                 if current != plan['committed']:
                     raise DevError('PROJECT_CHANGED','原保存已完成，但项目随后改变；请刷新核对，未覆盖新配置',409)
                 return runtime.project_public(current)
-            old = store.one("SELECT * FROM projects WHERE id=?", (id,)) if id else None
+            old = store.one("SELECT * FROM projects WHERE id=? AND space_id=?", (id,principal.space_id)) if id else None
             if id and not old:
                 raise DevError("NOT_FOUND", "项目映射不存在", 404)
-            exists = store.one("SELECT id FROM projects WHERE alias_key=?", (alias_key(alias),))
+            exists = store.one("SELECT id FROM projects WHERE alias_key=? AND space_id=?", (alias_key(alias),principal.space_id))
             if exists and exists["id"] != id:
                 raise DevError("ALIAS_EXISTS", "这个别名已被使用（不区分大小写）", 409)
             if not principal.admin:
@@ -420,7 +453,7 @@ def create_app(data_dir: str | None = None):
         project = {"device_id": body.device_id, "root": body.root, "alias": alias, "mode": body.mode, "allow_tasks": body.allow_tasks}
         result = await runtime.dispatch("system_validate", {'idempotency_key':plan['validation_key']}, project, principal)
         if request is not None:
-            auth.admin(request, True)
+            auth.panel(request, True)
         if result.get("pending"):
             raise DevError("VALIDATION_PENDING", "原目录验证仍在进行；继续保存会查询同一验证，不会新建重复请求", 409,
                            operation_id=result['operation_id'],retryable=True)
@@ -433,6 +466,7 @@ def create_app(data_dir: str | None = None):
         with store.lock, store.db:
             store.db.execute('BEGIN IMMEDIATE')
             principal = refresh_profile_principal(store, principal)
+            iam.require_device(store,principal,body.device_id,creation={**body.model_dump(),"root":result["root"]})
             role = require_role(store, principal, 'projects.create', device_id=body.device_id,
                                 creation={**body.model_dump(), 'root': result['root']}) if not principal.admin else None
             latest = json.loads(store.one('SELECT value FROM meta WHERE key=?',(key,))['value'])
@@ -451,14 +485,14 @@ def create_app(data_dir: str | None = None):
             device = store.one('SELECT enabled FROM devices WHERE id=?',(body.device_id,))
             if not device or not device['enabled']:
                 raise DevError('DEVICE_DISABLED','验证期间设备已停用或删除；未保存映射',409)
-            occupied = store.one('SELECT id FROM projects WHERE alias_key=?',(alias_key(alias),))
+            occupied = store.one('SELECT id FROM projects WHERE alias_key=? AND space_id=?',(alias_key(alias),principal.space_id))
             if occupied and occupied['id'] != plan['target']:
                 raise DevError('ALIAS_EXISTS','验证期间别名已被另一项目使用，请重新选择',409)
             target = plan['target']
             if id:
                 store.db.execute("UPDATE projects SET alias=?,alias_key=?,device_id=?,root=?,description=?,mode=?,allow_tasks=? WHERE id=?", (alias, alias_key(alias), body.device_id, result["root"], body.description, body.mode, int(body.allow_tasks), target))
             else:
-                store.db.execute("INSERT INTO projects VALUES (?,?,?,?,?,?,?,?,?)", (target, alias, alias_key(alias), body.device_id, result["root"], body.description, body.mode, int(body.allow_tasks), time.time()))
+                store.db.execute("INSERT INTO projects(id,alias,alias_key,device_id,root,description,mode,allow_tasks,created,space_id,owner_user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)", (target, alias, alias_key(alias), body.device_id, result["root"], body.description, body.mode, int(body.allow_tasks), time.time(),principal.space_id,principal.user_id))
             if role:
                 store.db.execute('INSERT INTO role_created_projects(role_id,project_id,created) VALUES (?,?,?)',
                                  (role['id'], target, time.time()))
@@ -477,7 +511,7 @@ def create_app(data_dir: str | None = None):
 
     @app.post("/api/projects")
     async def add_project(request: Request, body: ProjectInput):
-        return await save_project(body, auth.admin(request, True), request=request)
+        return await save_project(body, auth.panel(request, True), request=request)
 
     @app.put("/api/projects/{id}")
     async def edit_project(id: str, request: Request, body: ProjectInput):
@@ -486,17 +520,22 @@ def create_app(data_dir: str | None = None):
     @app.delete("/api/projects/{id}")
     async def delete_project(id: str, request: Request):
         principal = auth.admin(request, True)
-        store.execute("DELETE FROM projects WHERE id=?", (id,))
+        iam.project_in_space(store,principal,id)
+        store.execute("DELETE FROM projects WHERE id=? AND space_id=?", (id,principal.space_id))
         store.audit(principal.actor, "project.unmapped", id, detail={"local_files_deleted": False})
         runtime.publish("project", {"id": id})
         return {"ok": True, "note": "仅删除映射，不删除本机文件；已开始的任务不会自动撤销。"}
 
     @app.post("/api/tools/call")
     async def call_tool(request: Request, body: ToolCall):
-        return await runtime.invoke(body.tool, body.arguments, auth.admin(request, True))
+        return await runtime.invoke(body.tool, body.arguments, auth.panel(request, True))
 
-    def operation_rows(limit=40, offset=0, status="", project="", source=""):
-        where, args = [], []
+    def operation_rows(principal,limit=40, offset=0, status="", project="", source=""):
+        clause,args=iam.private_sql(principal,'o.')
+        where=[clause]
+        if not principal.admin:
+            where.append('(o.project_id IS NULL OR o.project_id IN (%s))' % (','.join('?' for _ in principal.projects) or 'NULL'))
+            args.extend(principal.projects)
         if status:
             where.append("o.state=?")
             args.append(status)
@@ -513,17 +552,19 @@ def create_app(data_dir: str | None = None):
 
     @app.get("/api/operations")
     async def operations(request: Request, limit: int = 40, offset: int = Query(default=0, le=2**63 - 1), status: str = "", project: str = "", source: str = ""):
-        auth.admin(request)
+        principal=auth.panel(request)
         limit, offset = max(1, min(limit, 100)), max(0, offset)
-        rows = operation_rows(limit + 1, offset, status, project, source)
+        rows = operation_rows(principal,limit + 1, offset, status, project, source)
         return {"operations": rows[:limit], "next_offset": offset + limit if len(rows) > limit else None}
 
     @app.get("/api/operations/{id}")
     async def operation(id: str, request: Request):
-        return runtime.operation(id, auth.admin(request))
+        return runtime.operation(id, auth.panel(request))
 
-    def audit_rows(limit=40, offset=0, query="", status="", source=""):
-        where, args = [], []
+    def audit_rows(principal,limit=40, offset=0, query="", status="", source=""):
+        where,args=['space_id=?'],[principal.space_id]
+        if not principal.admin:
+            where.append('owner_user_id=?');args.append(principal.user_id)
         if query:
             where.append("(actor LIKE ? OR action LIKE ? OR target LIKE ?)")
             args += ["%" + query[:100] + "%"] * 3
@@ -541,15 +582,15 @@ def create_app(data_dir: str | None = None):
 
     @app.get("/api/audit")
     async def audit(request: Request, limit: int = 40, offset: int = Query(default=0, le=2**63 - 1), q: str = "", status: str = "", source: str = ""):
-        auth.admin(request)
+        principal=auth.panel(request)
         limit, offset = max(1, min(limit, 100)), max(0, offset)
-        rows = audit_rows(limit + 1, offset, q, status, source)
+        rows = audit_rows(principal,limit + 1, offset, q, status, source)
         return {"events": rows[:limit], "next_offset": offset + limit if len(rows) > limit else None}
 
     @app.get("/api/audit-export")
     async def audit_export(request: Request, q: str = "", status: str = "", source: str = "", offset: int = Query(default=0, le=2**63 - 1)):
-        principal = auth.admin(request)
-        rows = audit_rows(10000, max(0, offset), q, status, source)
+        principal = auth.panel(request)
+        rows = audit_rows(principal,10000, max(0, offset), q, status, source)
         out = io.StringIO()
         writer = csv.writer(out)
         writer.writerow(["id", "utc_time", "actor", "action", "target", "status", "detail"])
@@ -564,6 +605,7 @@ def create_app(data_dir: str | None = None):
     @app.get("/api/events")
     async def events(request: Request):
         session = auth.session(request)
+        auth.panel(request)
         if len(runtime.watchers) >= 100:
             raise DevError("TOO_MANY_STREAMS", "实时连接过多", 429)
         q = asyncio.Queue(maxsize=100)
@@ -580,8 +622,16 @@ def create_app(data_dir: str | None = None):
                         item = await asyncio.wait_for(q.get(), 15)
                         if not store.one("SELECT id_hash FROM sessions WHERE id_hash=? AND expires>?", (session["id_hash"], time.time())):
                             break
-                        yield "data: " + json.dumps(item, ensure_ascii=False) + "\n\n"
+                        try:
+                            principal=auth.panel(request)
+                            visible=iam.event_visible(runtime,principal,item)
+                        except DevError:
+                            break
+                        if visible:
+                            yield "data: " + json.dumps({k: v for k, v in item.items() if k != "_audience"}, ensure_ascii=False) + "\n\n"
                     except asyncio.TimeoutError:
+                        try: auth.panel(request)
+                        except DevError: break
                         yield ": heartbeat\n\n"
             finally:
                 runtime.watchers.discard(q)
@@ -597,18 +647,18 @@ def create_app(data_dir: str | None = None):
 
     @app.get("/api/grants")
     async def grants(request: Request):
-        principal = auth.admin(request)
-        rows = store.all("SELECT g.*,(SELECT max(expires) FROM tokens t WHERE t.grant_id=g.id) AS expires FROM grants g WHERE g.user_id=? ORDER BY g.created DESC", (principal.user_id,))
+        principal = auth.panel(request)
+        rows = store.all("SELECT g.*,(SELECT max(expires) FROM tokens t WHERE t.grant_id=g.id) AS expires FROM grants g WHERE g.user_id=? AND g.space_id=? ORDER BY g.created DESC", (principal.user_id,principal.space_id,))
         for row in rows:
             row["scopes"], row["projects"] = json.loads(row["scopes"]), json.loads(row["projects"])
         return {"grants": rows}
 
     @app.post("/api/grants")
     async def add_grant(request: Request, body: TokenInput):
-        principal = auth.admin(request, True)
+        principal = auth.panel(request, True)
         if body.authorization_mode == 'role' and (body.projects or body.all_projects):
             raise DevError('INVALID_PROJECT', '动态角色不保存首次项目清单；请在角色管理中配置')
-        projects = [] if body.authorization_mode == 'role' else project_selection(store, body.projects, body.all_projects)
+        projects = [] if body.authorization_mode == 'role' else project_selection(store, body.projects, body.all_projects, space_id=principal.space_id)
         result = auth.issue_grant(principal, body.label, body.scopes, projects, body.days,
                                   profile_id=body.profile_id, profile_version=body.profile_version, authorization_mode=body.authorization_mode,
                                   role_version=body.role_version, confirm_dynamic_role=body.confirm_dynamic_role)
@@ -618,22 +668,22 @@ def create_app(data_dir: str | None = None):
 
     @app.delete("/api/grants/{id}")
     async def revoke_grant(id: str, request: Request):
-        principal = auth.admin(request, True)
-        store.execute("UPDATE grants SET revoked=1 WHERE id=? AND user_id=?", (id, principal.user_id))
+        principal = auth.panel(request, True)
+        store.execute("UPDATE grants SET revoked=1 WHERE id=? AND user_id=? AND space_id=?", (id, principal.user_id, principal.space_id))
         store.audit(principal.actor, "token.revoked", id)
         return {"ok": True}
 
     @app.get("/api/settings")
     async def settings(request: Request):
-        principal = auth.admin(request)
+        principal = auth.panel(request)
         return {"access_defaults": access_defaults(store, principal.user_id), "public_url": public_url(), "mcp_url": public_url() + "/mcp", "role_mcp_url": public_url() + "/mcp?authorization=role", "http_supported": True, "version": VERSION,
             "protocol_versions": sorted(VERSIONS), "tools": tool_definitions(), "instructions": INSTRUCTIONS,
-            "single_process": True, "reliability": {"queue_ttl_seconds": runtime.queue_seconds, "call_wait_seconds": runtime.wait_seconds, "delivery_retry_seconds": runtime.retry_seconds, "durable_queue": True}, "listen_port": int(os.getenv("HUB_PORT", "8765")), "data_dir": str(store.directory),
+            "single_process": True, "reliability": {"queue_ttl_seconds": runtime.queue_seconds, "call_wait_seconds": runtime.wait_seconds, "delivery_retry_seconds": runtime.retry_seconds, "durable_queue": True}, "listen_port": int(os.getenv("HUB_PORT", "8765")), "data_dir": str(store.directory) if principal.instance_admin else "", "space_id":principal.space_id, "space_admin":principal.admin,"instance_admin":principal.instance_admin,
             "oauth": {"authorization_endpoint": public_url() + "/oauth/authorize", "token_endpoint": public_url() + "/oauth/token", "registration_endpoint": public_url() + "/oauth/register"}}
 
     @app.put("/api/settings")
     async def update_settings(request: Request, body: SettingsInput):
-        principal = auth.admin(request, True)
+        principal = auth.instance(request, True)
         try:
             value = normalize_url(body.public_url)
         except ValueError as exc:
@@ -644,12 +694,12 @@ def create_app(data_dir: str | None = None):
 
     @app.get("/api/computer/approvals")
     async def computer_approvals(request: Request):
-        auth.admin(request)
-        return {"approvals": runtime.computer_approvals.list()}
+        principal=auth.panel(request)
+        return {"approvals": runtime.computer_approvals.list(principal)}
 
     @app.post("/api/computer/approvals/{identifier}")
     async def computer_decision(identifier: str, request: Request, body: ComputerDecision):
-        principal = auth.admin(request, True)
+        principal = auth.panel(request, True)
         return await runtime.computer_approvals.decide(identifier, body.action, principal)
 
     @app.websocket("/agent/ws/{device_id}")
@@ -658,6 +708,11 @@ def create_app(data_dir: str | None = None):
 
     try:
         oauth = OAuth(auth, runtime, public_url)
+        runtime.oauth = oauth
+        oidc = OIDCService(auth,runtime,public_url)
+        app.state.oidc = oidc
+        app.include_router(oidc.router)
+        app.include_router(make_iam_router(auth,runtime))
         app.include_router(oauth.router)
         app.include_router(make_router(auth, runtime, public_url))
         app.include_router(make_artifact_router(auth, runtime))

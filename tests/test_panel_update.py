@@ -300,6 +300,8 @@ def make_auth_app(root, client):
     store=Store(root/'hub')
     store.execute('INSERT INTO users(id,username,password_hash,created) VALUES (?,?,?,?)',('u1','admin','unused',time.time()))
     store.execute('INSERT INTO sessions(id_hash,user_id,csrf,expires) VALUES (?,?,?,?)',(digest('cookie'),'u1','csrf',time.time()+3600))
+    from tests.legacy_iam_fixture import attach_session_security
+    attach_session_security(store)
     app=FastAPI();runtime=SimpleNamespace(store=store)
     @app.exception_handler(DevError)
     async def error(request,exc): return JSONResponse({'error':{'code':exc.code,'message':exc.message}},status_code=exc.status)

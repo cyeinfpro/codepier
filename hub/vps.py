@@ -18,6 +18,7 @@ from pydantic import Field, model_validator
 
 from shared.contracts import Args, SSHExec, VPSList
 from shared.util import DevError
+from hub import iam
 
 
 PUBLIC_FIELDS = ('id', 'name', 'host', 'port', 'username', 'host_key_policy',
@@ -97,11 +98,23 @@ class VPSService:
         result['project_ids'] = [p['id'] for p in result['projects']]
         return result
 
-    def get(self, identifier):
-        row = self.store.one(f'SELECT {PUBLIC_SQL} FROM vps_connections v WHERE v.id=?', (identifier,))
+    def get(self, identifier, principal):
+        principal=iam.live_principal(self.store,principal)
+        row = self.store.one(f'SELECT {PUBLIC_SQL} FROM vps_connections v WHERE v.id=? AND v.space_id=?', (identifier,principal.space_id))
         if not row:
             raise DevError('VPS_NOT_FOUND', '未找到 VPS 连接', 404)
-        return self.public(row)
+        visible={p['id'] for p in self.runtime.list_projects(principal)}
+        if not principal.admin and not self.store.one('SELECT 1 AS ok FROM vps_projects WHERE vps_id=? AND project_id IN (%s)' % (','.join('?' for _ in visible) or 'NULL'),(identifier,*sorted(visible))):
+            raise DevError('VPS_NOT_FOUND','未找到已授权 VPS',404)
+        return self.public(row,visible)
+
+    def manage(self,principal,identifier=None):
+        principal=iam.live_principal(self.store,principal)
+        if principal.grant_id or not principal.admin:
+            raise DevError('SPACE_ADMIN_REQUIRED','VPS 管理需要当前空间管理员',403)
+        if identifier and not self.store.one('SELECT 1 AS ok FROM vps_connections WHERE id=? AND space_id=?',(identifier,principal.space_id)):
+            raise DevError('VPS_NOT_FOUND','未找到当前空间 VPS',404)
+        return principal
 
     def list(self, args, principal):
         projects = self.runtime.list_projects(principal)
@@ -112,11 +125,11 @@ class VPSService:
         if permitted is not None and not permitted:
             return {'vps': [], 'total': 0, 'next_offset': None}
         params = tuple(sorted(permitted)) if permitted is not None else ()
-        where = ''
+        where = ' WHERE v.space_id=?'
         if permitted is not None:
             placeholders = ','.join('?' for _ in params)
-            where = f' WHERE EXISTS (SELECT 1 FROM vps_projects vp WHERE vp.vps_id=v.id AND vp.project_id IN ({placeholders}))'
-        rows = self.store.all(f'SELECT {PUBLIC_SQL} FROM vps_connections v{where} ORDER BY v.name_key,v.id', params)
+            where += f' AND EXISTS (SELECT 1 FROM vps_projects vp WHERE vp.vps_id=v.id AND vp.project_id IN ({placeholders}))'
+        rows = self.store.all(f'SELECT {PUBLIC_SQL} FROM vps_connections v{where} ORDER BY v.name_key,v.id', (principal.space_id,*params))
         results = []
         for row in rows:
             if query and not any(query in name_key(str(row[key])) for key in ('name', 'host', 'provider', 'region')):
@@ -129,11 +142,11 @@ class VPSService:
         return {'vps': [self.public(row, None if principal.admin else visible) for row in results[offset:end]], 'total': len(results),
                 'next_offset': end if end < len(results) else None}
 
-    def _validate_projects(self, identifiers):
+    def _validate_projects(self, identifiers, principal):
         if len(set(identifiers)) != len(identifiers):
             raise DevError('INVALID_PROJECTS', '项目分配列表不能重复')
         for identifier in identifiers:
-            if not self.store.db.execute('SELECT 1 FROM projects WHERE id=?', (identifier,)).fetchone():
+            if not self.store.db.execute('SELECT 1 FROM projects WHERE id=? AND space_id=?', (identifier,principal.space_id)).fetchone():
                 raise DevError('PROJECT_NOT_FOUND', '选择的项目已不存在，请刷新后重试', 404)
 
     def _bind(self, identifier, project_ids):
@@ -144,6 +157,7 @@ class VPSService:
             self.store.db.execute('INSERT INTO vps_projects VALUES (?,?,?)', (identifier, project_id, uuid.uuid4().hex))
 
     def save(self, body, principal, identifier=None):
+        principal=self.manage(principal,identifier)
         data = body.model_dump()
         existing_id = identifier
         identifier = identifier or uuid.uuid4().hex
@@ -151,6 +165,7 @@ class VPSService:
         try:
             with self.store.lock, self.store.db:
                 self.store.db.execute('BEGIN IMMEDIATE')
+                principal=self.manage(principal,existing_id)
                 old = self.store.db.execute('SELECT * FROM vps_connections WHERE id=?', (identifier,)).fetchone()
                 if existing_id and not old:
                     raise DevError('VPS_NOT_FOUND', 'VPS 已删除，请刷新列表', 404)
@@ -158,7 +173,7 @@ class VPSService:
                     raise DevError('VPS_VERSION_CONFLICT', 'VPS 已在其他窗口修改，请重新打开后保存；未覆盖现有配置', 409)
                 if not old and body.password is None:
                     raise DevError('VPS_PASSWORD_REQUIRED', '新建 VPS 需要填写 SSH 密码')
-                self._validate_projects(body.project_ids)
+                self._validate_projects(body.project_ids,principal)
                 secret = self.store.encrypt(body.password) if body.password is not None else old['secret']
                 version = old['version'] + 1 if old else 1
                 connection_changed = old and (body.password is not None or any(data[k] != old[k] for k in ('host', 'port', 'username', 'host_key_policy', 'enabled')))
@@ -172,8 +187,8 @@ class VPSService:
                         WHERE id=?''', (*values, identifier))
                 else:
                     self.store.db.execute('''INSERT INTO vps_connections(name,name_key,host,port,username,secret,
-                        host_key_policy,provider,region,system,notes,enabled,version,connection_revision,updated,id,created)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''', (*values, identifier, now))
+                        host_key_policy,provider,region,system,notes,enabled,version,connection_revision,updated,id,created,space_id,owner_user_id)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''', (*values, identifier, now,principal.space_id,principal.user_id))
                 self._bind(identifier, body.project_ids)
         except sqlite3.IntegrityError as exc:
             raise DevError('VPS_EXISTS', 'VPS 名称或相同地址、端口、账号的连接已存在', 409) from exc
@@ -181,28 +196,32 @@ class VPSService:
                          detail={'project_ids': body.project_ids, 'version': version,
                                  'credential_changed': body.password is not None})
         self.runtime.publish('vps', {'id': identifier})
-        return self.get(identifier)
+        return self.get(identifier,principal)
 
     def assign(self, identifier, body, principal):
+        principal=self.manage(principal,identifier)
         with self.store.lock, self.store.db:
             self.store.db.execute('BEGIN IMMEDIATE')
+            principal=self.manage(principal,identifier)
             row = self.store.db.execute('SELECT version FROM vps_connections WHERE id=?', (identifier,)).fetchone()
             if not row:
                 raise DevError('VPS_NOT_FOUND', '未找到 VPS 连接', 404)
             if row['version'] != body.expected_version:
                 raise DevError('VPS_VERSION_CONFLICT', '分配已被修改，请刷新后重试', 409)
-            self._validate_projects(body.project_ids)
+            self._validate_projects(body.project_ids,principal)
             self._bind(identifier, body.project_ids)
             self.store.db.execute('UPDATE vps_connections SET version=version+1,updated=? WHERE id=?', (time.time(), identifier))
         self.store.audit(principal.actor, 'vps.assigned', identifier, detail={'project_ids': body.project_ids})
         self.runtime.publish('vps', {'id': identifier})
-        return self.get(identifier)
+        return self.get(identifier,principal)
 
     def project_assign(self, project_id, body, principal):
+        principal=self.manage(principal)
         project = self.runtime.project(project_id, principal)
         with self.store.lock, self.store.db:
             self.store.db.execute('BEGIN IMMEDIATE')
-            self._validate_projects([project['id']])
+            self.manage(principal)
+            self._validate_projects([project['id']],principal)
             existing = {r[0] for r in self.store.db.execute('SELECT vps_id FROM vps_projects WHERE project_id=?', (project['id'],))}
             if existing != set(body.expected_vps_ids):
                 raise DevError('VPS_VERSION_CONFLICT', '项目的 VPS 分配已变化，请刷新后重试', 409)
@@ -210,7 +229,7 @@ class VPSService:
             if len(target) != len(body.vps_ids):
                 raise DevError('INVALID_VPS', 'VPS 列表不能重复')
             for identifier in target:
-                if not self.store.db.execute('SELECT 1 FROM vps_connections WHERE id=?', (identifier,)).fetchone():
+                if not self.store.db.execute('SELECT 1 FROM vps_connections WHERE id=? AND space_id=?', (identifier,principal.space_id)).fetchone():
                     raise DevError('VPS_NOT_FOUND', '所选 VPS 已删除，请刷新后重试', 404)
             for identifier in existing - target:
                 self.store.db.execute('DELETE FROM vps_projects WHERE project_id=? AND vps_id=?', (project['id'], identifier))
@@ -223,8 +242,10 @@ class VPSService:
         return {'ok': True, 'vps_ids': sorted(target)}
 
     def delete(self, identifier, version, principal):
+        principal=self.manage(principal,identifier)
         with self.store.lock, self.store.db:
             self.store.db.execute('BEGIN IMMEDIATE')
+            principal=self.manage(principal,identifier)
             row = self.store.db.execute('SELECT version FROM vps_connections WHERE id=?', (identifier,)).fetchone()
             if not row:
                 return {'ok': True}
@@ -293,33 +314,32 @@ def make_vps_router(auth, runtime):
 
     @router.get('/api/vps')
     async def list_vps(request: Request, project: str = Query('', max_length=100), query: str = Query('', max_length=253), offset: int = Query(0, ge=0, le=100000), limit: int = Query(200, ge=1, le=200)):
-        principal = auth.admin(request)
+        principal = auth.panel(request)
         args = VPSList(project=project, query=query, offset=offset, limit=limit).model_dump()
         return service.list(args, principal)
 
     @router.post('/api/vps')
     async def create_vps(request: Request, body: VPSInput):
-        return service.save(body, auth.admin(request, True))
+        return service.save(body, auth.panel(request, True))
 
     @router.get('/api/vps/{identifier}')
     async def get_vps(identifier: str, request: Request):
-        auth.admin(request)
-        return service.get(identifier)
+        return service.get(identifier,auth.panel(request))
 
     @router.put('/api/vps/{identifier}')
     async def update_vps(identifier: str, request: Request, body: VPSInput):
-        return service.save(body, auth.admin(request, True), identifier)
+        return service.save(body, auth.panel(request, True), identifier)
 
     @router.put('/api/vps/{identifier}/projects')
     async def assign_vps(identifier: str, request: Request, body: VPSAssignments):
-        return service.assign(identifier, body, auth.admin(request, True))
+        return service.assign(identifier, body, auth.panel(request, True))
 
     @router.put('/api/projects/{identifier}/vps')
     async def assign_project(identifier: str, request: Request, body: ProjectVPSAssignments):
-        return service.project_assign(identifier, body, auth.admin(request, True))
+        return service.project_assign(identifier, body, auth.panel(request, True))
 
     @router.delete('/api/vps/{identifier}')
     async def delete_vps(identifier: str, request: Request, expected_version: int = Query(..., ge=1)):
-        return service.delete(identifier, expected_version, auth.admin(request, True))
+        return service.delete(identifier, expected_version, auth.panel(request, True))
 
     return router

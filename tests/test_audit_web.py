@@ -41,6 +41,8 @@ const context = vm.createContext({document, console, URLSearchParams, AbortContr
 let source=fs.readFileSync('web/app.js','utf8');source=source.slice(0,source.lastIndexOf('(async()=>{try{const page=location.hash'));
 vm.runInContext(fs.readFileSync('web/ui.js','utf8'),context);
 vm.runInContext(source,context);
+vm.runInContext(fs.readFileSync('web/identity.js','utf8'),context);
+context.CodePierIdentity=context.window.CodePierIdentity;
 const run=s=>vm.runInContext(s,context);
 const response=(body,status=200)=>({ok:status>=200&&status<300,status,json:async()=>body});
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b});return {promise,resolve,reject};};
@@ -116,7 +118,7 @@ async function scenario(name){
   }else if(name==='event_connections_release_timer'){
     editor();fetchImpl=async()=>response({});run('connectEvents()');const first=run('S.events');first.onmessage({data:JSON.stringify({type:'device'})});const id=run('S.eventTimer');assert.ok(timers.has(id));run('connectEvents()');assert.equal(first.closed,true);assert.equal(timers.has(id),false);
   }else if(name==='login_boot_failure_has_retry_surface'){
-    editor();fetchImpl=async()=>{throw Error('offline');};await run('bootAuthenticated()');assert.match(elements.get('#page').innerHTML,/重试/);assert.ok(run('S.events'));
+    editor();fetchImpl=async()=>{throw Error('offline');};await run('bootAuthenticated()');assert.match(elements.get('#app').innerHTML,/retry-identity/);assert.equal(run('S.events'),null);assert.equal(run('S.space_id'),null);
   }else throw Error(name);
 }
 scenario(process.argv[1]).then(()=>console.log('SCENARIO_COMPLETED')).catch(error=>{console.error(error);process.exitCode=1;});

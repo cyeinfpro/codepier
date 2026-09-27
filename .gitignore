@@ -62,3 +62,6 @@ token*.txt
 !/docs/ACCESS_PROFILES.md
 
 !/docs/DYNAMIC_ROLES.md
+
+!/docs/MULTIUSER_OIDC.md
+!/docs/MULTIUSER_OIDC_STATUS.md

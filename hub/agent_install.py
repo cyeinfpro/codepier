@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from shared.crypto import digest, token
+from hub import iam
 from shared.util import DevError, VERSION, normalize_url, valid_json_value
 
 TICKET_SECONDS = 15 * 60
@@ -244,7 +245,8 @@ def make_agent_install_router(runtime, auth, source_root=None):
 
     @router.post('/api/devices/{device_id}/agent-commands')
     async def agent_commands(device_id: str, request: Request, body: AgentCommandInput):
-        auth.admin(request, True)
+        principal=auth.panel(request, True)
+        iam.require_device(store,principal,device_id,manage=True)
         if not store.one('SELECT id FROM devices WHERE id=?', (device_id,)):
             raise DevError('NOT_FOUND', '设备不存在', 404)
         try:
@@ -273,7 +275,8 @@ def make_agent_install_router(runtime, auth, source_root=None):
 
     @router.post('/api/devices/{device_id}/install-ticket')
     async def install_ticket(device_id: str, request: Request, body: InstallTicketInput):
-        principal = auth.admin(request, True)
+        principal = auth.panel(request, True)
+        iam.require_device(store,principal,device_id,manage=True)
         try:
             hub_url = normalize_url(body.hub_url)
         except ValueError as exc:
@@ -281,7 +284,7 @@ def make_agent_install_router(runtime, auth, source_root=None):
         allow_root = validate_root(body.allow_root, body.platform)
         now = time.time()
         with store.lock, store.db:
-            device = store.db.execute('SELECT name,secret,enabled FROM devices WHERE id=?', (device_id,)).fetchone()
+            device = store.db.execute('SELECT d.name,d.secret,d.enabled,d.space_id,d.owner_user_id,s.active AS space_active,COALESCE(u.active,1) AS owner_active FROM devices d JOIN spaces s ON s.id=d.space_id LEFT JOIN iam_users u ON u.user_id=d.owner_user_id WHERE d.id=?', (device_id,)).fetchone()
             if not device:
                 raise DevError('NOT_FOUND', '设备不存在', 404)
             if not device['enabled']:
@@ -296,14 +299,13 @@ def make_agent_install_router(runtime, auth, source_root=None):
             store.db.execute('DELETE FROM agent_install_tickets WHERE expires<=? OR device_id=?', (now, device_id))
             store.db.execute('INSERT INTO agent_install_tickets VALUES (?,?,?,?,?,?)',
                 (digest(enrollment_token), device_id, fingerprint, hub_url, expires, now))
-            store.db.execute('INSERT INTO audit(at,actor,action,target,status,detail) VALUES (?,?,?,?,?,?)',
-                (now, principal.actor, 'device.install_ticket', device_id, 'ok',
-                 json.dumps({'platform': body.platform, 'expires_at': expires, 'package_sha256': metadata['sha256'], 'fresh_install_execution': body.enable_execution})))
+            iam.audit(store,principal,'device.install_ticket',device_id,detail={'platform':body.platform,'expires_at':expires,'package_sha256':metadata['sha256'],'fresh_install_execution':body.enable_execution})
         return JSONResponse({'command': command, 'platform': body.platform, 'expires_at': expires, 'package': metadata},
                             headers={'Cache-Control': 'no-store'})
 
     async def lifecycle_action(device_id: str, request: Request, body: DeviceLifecycleInput, action: str):
-        principal = auth.admin(request, True)
+        principal = auth.panel(request, True)
+        iam.require_device(store,principal,device_id,manage=True)
         device = store.one('SELECT name FROM devices WHERE id=?', (device_id,))
         if not device:
             raise DevError('NOT_FOUND', '设备不存在', 404)
@@ -341,16 +343,16 @@ def make_agent_install_router(runtime, auth, source_root=None):
                                       (digest(enrollment_token), now)).fetchone()
             if not ticket:
                 raise DevError('INSTALL_TICKET_INVALID', '安装凭据无效、已使用或已过期，请重新生成安装命令', 401)
-            device = store.db.execute('SELECT name,secret,enabled FROM devices WHERE id=?', (ticket['device_id'],)).fetchone()
-            if not device or not device['enabled']:
+            device = store.db.execute('SELECT d.name,d.secret,d.enabled,d.space_id,d.owner_user_id,s.active AS space_active,COALESCE(u.active,1) AS owner_active FROM devices d JOIN spaces s ON s.id=d.space_id LEFT JOIN iam_users u ON u.user_id=d.owner_user_id WHERE d.id=?', (ticket['device_id'],)).fetchone()
+            if not iam.device_identity_active(store, dict(device) if device else None):
                 raise DevError('INSTALL_TICKET_INVALID', '设备已停用或被移除，请在面板重新确认', 401)
             secret = store.decrypt(device['secret'])
             if not hmac.compare_digest(digest(secret), ticket['secret_fingerprint']):
                 raise DevError('INSTALL_TICKET_INVALID', '设备密钥已变化，请重新生成安装命令', 401)
             pairing = {'device_id': ticket['device_id'], 'name': device['name'], 'secret': secret, 'hub_url': ticket['hub_url']}
             store.db.execute('DELETE FROM agent_install_tickets WHERE token_hash=?', (digest(enrollment_token),))
-            store.db.execute('INSERT INTO audit(at,actor,action,target,status,detail) VALUES (?,?,?,?,?,?)',
-                             (now, 'installer', 'device.enrolled', ticket['device_id'], 'ok', '{}'))
+            store.db.execute('INSERT INTO audit(at,actor,action,target,status,detail,space_id,owner_user_id) VALUES (?,?,?,?,?,?,?,?)',
+                             (now, 'installer', 'device.enrolled', ticket['device_id'], 'ok', '{}', device['space_id'], device['owner_user_id']))
         return JSONResponse(pairing, headers={'Cache-Control': 'no-store', 'Pragma': 'no-cache'})
 
     return router

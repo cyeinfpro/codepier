@@ -1,4 +1,4 @@
-"""Single-owner OAuth authorization code + S256 PKCE, DCR and rotating refresh tokens.
+"""Space-bound multi-user OAuth authorization code + S256 PKCE, DCR and rotating refresh tokens.
 
 Public clients only (token_endpoint_auth_method=none). Explicit per-authorization
 consent; resource bound grants; no token forwarding; no wildcard redirect URLs.
@@ -22,6 +22,7 @@ from shared.crypto import digest, token
 from shared.util import DevError, valid_json_value
 from shared.role_contracts import ROLE_SCOPE
 from hub.roles import validate_role_consent, public_role
+from hub import iam
 
 
 class OAuth:
@@ -91,7 +92,7 @@ class OAuth:
         if len(state) > 2048:
             raise DevError("INVALID_STATE", "state 过长")
         id = token(24)
-        self.store.execute("INSERT INTO oauth_requests VALUES (?,?,?,?,?,?,?,?,0)",
+        self.store.execute("INSERT INTO oauth_requests(id,client_id,redirect_uri,challenge,state,scopes,resource,expires,used) VALUES (?,?,?,?,?,?,?,?,0)",
              (id, client_id, redirect, challenge, state, json.dumps(sorted(set(scopes))), resource, time.time() + 600))
         return id
 
@@ -99,6 +100,25 @@ class OAuth:
         row = self.store.one("SELECT r.*,c.name AS client_name FROM oauth_requests r JOIN oauth_clients c ON c.id=r.client_id WHERE r.id=? AND r.used=0 AND r.expires>?", (id, time.time()))
         if not row:
             raise DevError("AUTH_REQUEST_EXPIRED", "授权请求已过期或已经处理，请从 ChatGPT 重新连接", 410)
+        return row
+
+    def bound_request(self, identifier, request, principal, *, select_space=False):
+        """Pin consent to the authenticated human and browser session.
+
+        A Space selection can change only while rendering a fresh consent page
+        in the same login session. Approval must match that page's Space.
+        Client identifiers or OAuth scopes never confer Space membership.
+        """
+        session=self.auth.session(request)
+        row=self.get_request(identifier)
+        if row['bound_user_id'] is not None and (row['bound_user_id']!=principal.user_id or row['bound_session_hash']!=session['id_hash']):
+            raise DevError('CONSENT_IDENTITY_CHANGED','授权属于另一登录会话；请重新发起连接',403)
+        if row['bound_user_id'] is None or select_space:
+            self.store.db.execute('UPDATE oauth_requests SET bound_user_id=?,bound_session_hash=?,space_id=? WHERE id=? AND used=0',
+                                  (principal.user_id,session['id_hash'],principal.space_id,identifier))
+            row.update(bound_user_id=principal.user_id,bound_session_hash=session['id_hash'],space_id=principal.space_id)
+        if row['space_id']!=principal.space_id:
+            raise DevError('CONSENT_SPACE_CHANGED','空间已改变；请重新读取授权页面',409)
         return row
 
     @staticmethod
@@ -194,22 +214,29 @@ class OAuth:
 
         @router.get("/api/oauth/requests/{id}")
         async def auth_details(id: str, request: Request):
-            principal = self.auth.admin(request)
-            row = self.get_request(id)
-            return {"id": id, "client_name": row["client_name"], "client_id": row["client_id"], "redirect_uri": row["redirect_uri"],
+            with self.store.lock,self.store.db:
+                self.store.db.execute('BEGIN IMMEDIATE')
+                principal = self.auth.panel(request)
+                row = self.bound_request(id,request,principal,select_space=True)
+            return {"id": id,"space_id":principal.space_id,"user_id":principal.user_id,"username":self.auth.session(request)['username'], "client_name": row["client_name"], "client_id": row["client_id"], "redirect_uri": row["redirect_uri"],
                     "scopes": json.loads(row["scopes"]), "resource": row["resource"], "expires": row["expires"],
                     "access_defaults": access_defaults(self.store, principal.user_id)}
 
         @router.post("/api/oauth/requests/{id}/decide")
         async def decide(id: str, request: Request):
-            principal = self.auth.admin(request, True)
-            row = self.get_request(id)
+            principal = self.auth.panel(request, True)
             body = await self.json_object(request)
+            # Parsing yields; re-read the session before deciding whose consent this is.
+            with self.store.lock,self.store.db:
+                self.store.db.execute('BEGIN IMMEDIATE')
+                principal=self.auth.panel(request,True)
+                row=self.bound_request(id,request,principal)
             if type(body.get("allow")) is not bool:
                 raise DevError("INVALID_REQUEST", "allow 必须为布尔值")
             if body.get("allow") is not True:
                 with self.store.lock, self.store.db:
-                    self.auth.admin(request, True)
+                    principal=self.auth.panel(request, True)
+                    self.bound_request(id,request,principal)
                     used = self.store.db.execute("UPDATE oauth_requests SET used=1 WHERE id=? AND used=0 AND expires>?", (id, time.time())).rowcount
                     if not used:
                         raise DevError("AUTH_REQUEST_EXPIRED", "授权请求已处理", 410)
@@ -226,27 +253,35 @@ class OAuth:
                     raise DevError('INVALID_SCOPE', '角色授权仅使用 codepier.role_access；项目范围由角色政策决定')
                 projects = []
             elif mode == 'fixed' and 'read' in scopes and set(scopes) <= {'read', 'write', 'execute', 'computer'}:
-                projects = project_selection(self.store, projects, body.get('all_projects', False))
+                projects = project_selection(self.store, projects, body.get('all_projects', False),space_id=principal.space_id)
             else:
                 raise DevError('INVALID_SCOPE', '请明确选择传统固定授权或动态角色授权')
             profile_id = body.get('profile_id')
             gid, code = token(16), token()
             with self.store.lock, self.store.db:
                 self.store.db.execute("BEGIN IMMEDIATE")
-                self.auth.admin(request, True)
+                principal=self.auth.panel(request, True)
+                row=self.bound_request(id,request,principal)
                 role_id = None
                 if mode == 'role':
                     role = validate_role_consent(self.store, principal.user_id, profile_id, body.get('profile_version'),
-                                                 body.get('role_version'), body.get('confirm_dynamic_role'))
+                                                 body.get('role_version'), body.get('confirm_dynamic_role'),space_id=principal.space_id)
                     role_id = role['id']
                 else:
-                    validate_profile_consent(self.store, principal.user_id, profile_id, scopes, projects, body.get('profile_version'))
+                    validate_profile_consent(self.store, principal.user_id, profile_id, scopes, projects, body.get('profile_version'),space_id=principal.space_id)
+                    if not principal.admin:
+                        if '*' in projects:
+                            raise DevError('ROLE_REQUIRED','普通成员的持续授权请选择获授予的动态角色',403)
+                        permissions=iam.project_permissions(self.store,principal)
+                        for project_id in projects:
+                            if not set(scopes)<=permissions.get(project_id,set()):
+                                raise DevError('DELEGATION_DENIED','不得委派超出当前账号的项目权限',403)
                 if row["resource"] != self.resource():
                     raise DevError("INVALID_TARGET", "资源标识已变化，请重新发起授权")
                 used = self.store.db.execute("UPDATE oauth_requests SET used=1 WHERE id=? AND used=0 AND expires>?", (id, time.time())).rowcount
                 if not used:
                     raise DevError("AUTH_REQUEST_EXPIRED", "授权请求已处理", 410)
-                self.store.db.execute("INSERT INTO grants(id,user_id,label,client_id,scopes,projects,revoked,created,resource,profile_id,authorization_mode,role_id) VALUES (?,?,?,?,?,?,0,?,?,?,?,?)", (gid, principal.user_id, row["client_name"], row["client_id"], json.dumps(sorted(set(scopes))), json.dumps(projects), time.time(), row["resource"], profile_id, mode, role_id))
+                self.store.db.execute("INSERT INTO grants(id,user_id,label,client_id,scopes,projects,revoked,created,resource,profile_id,authorization_mode,role_id,space_id,owner_user_id,identity_id,user_epoch) VALUES (?,?,?,?,?,?,0,?,?,?,?,?,?,?,?,?)", (gid, principal.user_id, row["client_name"], row["client_id"], json.dumps(sorted(set(scopes))), json.dumps(projects), time.time(), row["resource"], profile_id, mode, role_id,principal.space_id,principal.user_id,principal.identity_id,principal.user_epoch))
                 if mode == 'role':
                     from hub.access_profiles import profile_audit
                     profile_audit(self.store, principal.actor, 'role.consent', gid,
@@ -301,5 +336,5 @@ class OAuth:
             row = self.store.one("SELECT t.grant_id,g.client_id FROM tokens t JOIN grants g ON g.id=t.grant_id WHERE t.hash=?", (digest(form.get("token", "")),))
             if row and row["client_id"] == form.get("client_id"):
                 self.store.execute("UPDATE grants SET revoked=1 WHERE id=?", (row["grant_id"],))
-                self.store.audit("oauth:" + str(row["client_id"]), "oauth.revoke", row["grant_id"])
+                self.store.audit("oauth:" + str(row["client_id"]), "oauth.revoke", row["grant_id"], target_kind="grant")
             return JSONResponse({})

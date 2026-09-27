@@ -85,6 +85,7 @@ def main():
                 store.db.execute("BEGIN IMMEDIATE")
                 if user:
                     store.db.execute("UPDATE users SET password_hash=? WHERE id=?", (hashed, user["id"]))
+                    store.db.execute('UPDATE iam_users SET local_login=1,active=1,epoch=epoch+1,version=version+1 WHERE user_id=?',(user['id'],))
                     store.db.execute("DELETE FROM sessions WHERE user_id=?", (user["id"],))
                     store.db.execute("UPDATE grants SET revoked=1 WHERE user_id=?", (user["id"],))
                 else:

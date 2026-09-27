@@ -119,3 +119,30 @@ jobs:
             dist/codepier-1.13.0-source.manifest.json
           if-no-files-found: warn
           retention-days: 14
+
+  oidc-authentik:
+    name: Real Authentik OIDC acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.13'
+      - name: Install locked OIDC and browser test tools
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements-dev.txt
+          .venv/bin/python -m playwright install --with-deps chromium
+      - name: Real isolated provider, two users, OAuth consent and offboarding
+        run: .venv/bin/python scripts/check_oidc_authentik.py --output dist/authentik-acceptance.json
+      - name: Retain non-secret acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: codepier-authentik-${{ github.run_id }}
+          path: dist/authentik-acceptance.json
+          if-no-files-found: warn
+          retention-days: 14

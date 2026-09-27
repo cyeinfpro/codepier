@@ -88,7 +88,7 @@ def test_long_names_empty_states_and_colored_card_actions(stack,engine,width,hei
     with sync_playwright() as pw:
         browser=getattr(pw,engine).launch();page=browser.new_page(viewport={'width':width,'height':height},reduced_motion='reduce')
         # Synthetic project data must not be replaced by live event refreshes.
-        page.route('**/api/events', lambda route: route.abort())
+        page.route('**/api/events?*', lambda route: route.abort())
         _login(page,stack,'projects')
         page.evaluate('''() => {
           S.projects=S.projects.map(p=>({...p,alias:'长项目名称_'.repeat(12),description:'说明文字 '.repeat(20),root:'/project/'+('long-path/'.repeat(40))}));
