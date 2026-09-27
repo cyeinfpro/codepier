@@ -59,7 +59,7 @@ def test_stdio_modern_retries_transport_id_not_business_operation():
 
 def test_validation_cannot_certify_an_unrelated_cwd(integrated_stack):
     s=integrated_stack;outside=s.directory/'unrelated';outside.mkdir(exist_ok=True)
-    response=s.mcp('validation_run',{'project':'Imago','command':'printf no > MUST_NOT_EXIST','cwd':str(outside),'idempotency_key':uuid.uuid4().hex})['structuredContent']
+    response=s.mcp('process',{'project': 'Imago', 'idempotency_key': uuid.uuid4().hex, 'operation': 'validate', 'options': {'command': 'printf no > MUST_NOT_EXIST', 'cwd': str(outside)}})['structuredContent']
     if response.get('pending'):
         op=s.poll(response['operation_id']);assert op['state']=='failed' and op['result']['error']['code']=='VALIDATION_CWD',op
     else:assert response['error']['code']=='VALIDATION_CWD'

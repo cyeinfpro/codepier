@@ -4,7 +4,7 @@
 async function nativeSha256(bytes) {
   if (globalThis.crypto?.subtle) {
     const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
-    return Array.from(digest, x => x.toString(16).padStart(2, '0')).join('');
+    return Array.from(digest, (x) => x.toString(16).padStart(2, '0')).join('');
   }
   if (typeof globalThis.sha256 !== 'function') {
     throw new Error('附件校验组件未加载，请刷新面板后重试');

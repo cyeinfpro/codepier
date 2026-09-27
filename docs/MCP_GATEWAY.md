@@ -1,3 +1,10 @@
+> Integration update: this feature now uses the upstream 1.14.3 core. Gateway
+> defaults to enabled, with no remote tools unless configured and explicitly
+> authorized. New Role PAT/OAuth consent accepts `confirm_external_mcp: true`.
+> The native public catalog is nine core tools plus two identity tools. Details:
+> [Upstream integration](UPSTREAM_INTEGRATION.md). Earlier standalone-feature
+> validation counts below are historical, not certification of the new tree.
+
 # MCP Gateway — reviewed multi-backend tool routing
 
 Status: first implementation on `9366b23` (1.13 + multi-user IAM), **disabled by

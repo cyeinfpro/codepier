@@ -74,3 +74,22 @@ def visible_tools(store, principal):
             if tool['name'] in rule.tools and key not in seen and discovered.get(tool['name']) == fingerprint(tool):
                 seen.add(key); visible.append((binding, tool))
     return visible
+
+
+def consent_grant(store, principal, grant_id, expected_role_version):
+    """Explicit downstream delegation, in the same transaction as issuance."""
+    import time
+    store.require_transaction()
+    grant = store.one('SELECT * FROM grants WHERE id=? AND user_id=? AND space_id=?',
+                      (grant_id, principal.user_id, principal.space_id))
+    if not grant or grant['authorization_mode'] != 'role':
+        raise DevError('GATEWAY_ROLE_REQUIRED', '外部 MCP 委派要求动态 Role 授权', 403)
+    iam.validate_grant(store, grant)
+    role, _, _ = role_binding(store, grant)
+    if not role['enabled'] or role['version'] != expected_role_version:
+        raise DevError('ROLE_CHANGED', '角色政策已改变，请重新阅读再同意', 409)
+    store.db.execute("""INSERT INTO gateway_consents(grant_id,user_id,space_id,profile_id,role_id,consent_version,created)
+        VALUES(?,?,?,?,?,1,?) ON CONFLICT(grant_id) DO UPDATE SET consent_version=1,created=excluded.created""",
+        (grant_id, principal.user_id, principal.space_id, grant['profile_id'], grant['role_id'], time.time()))
+    store.audit(principal.actor, 'gateway.delegation_consented', grant_id,
+                detail={'role_id': role['id'], 'role_version': role['version'], 'future_reviewed_connector_rules': True}, commit=False)

@@ -234,7 +234,7 @@ TOOL_TITLES = {
     'fs_search': '搜索代码', 'fs_mkdir': '创建目录', 'fs_preview': '预览改动',
     'fs_write': '写入文件', 'fs_edit': '编辑文件', 'apply_patch': '批量修改',
     'skills_list': '查找技能', 'skills_read': '读取技能',
-    'shell_exec': '命令回执', 'ssh_exec': 'SSH 回执', 'vps_list': '查找服务器', 'vps_exec': '服务器回执',
+    'shell_exec': '命令回执', 'ssh_exec': 'SSH 回执', 'vps': '查找服务器', 'exec': '执行命令',
     'operations_wait': '等待结果', 'operations_get': '读取结果',
     'operations_list': '查找操作', 'operations_cancel': '取消操作', 'show_changes': '查看改动',
     'download_artifact': '导入附件', 'artifacts_register': '登记交付物',
@@ -259,7 +259,7 @@ def decorate(definition):
     definition['securitySchemes'] = schemes
     definition['_meta']['securitySchemes'] = schemes
     # Keep existing app instances able to read tools, without opening a new card.
-    if name in {'operations_get', 'operations_wait', 'readiness_get', 'validations_get', 'fs_tree', 'download_artifact',
+    if name in {'workspace', 'process', 'read', 'write', 'operations_get', 'operations_wait', 'readiness_get', 'validations_get', 'fs_tree', 'download_artifact',
                 'open_workspace', 'show_changes', 'workflows_get'}:
         definition['_meta']['ui'] = {'visibility':['model','app']}
         definition['_meta']['openai/widgetAccessible'] = True
@@ -267,7 +267,7 @@ def decorate(definition):
         definition['_meta']['ui'] = {'visibility':['app']}
         definition['_meta']['openai/visibility'] = 'private'
         definition['_meta']['openai/widgetAccessible'] = True
-    if name == 'download_artifact':
+    if name in {'download_artifact', 'write'}:
         definition['_meta']['openai/fileParams'] = ['file']
         definition['annotations']['openWorldHint'] = True
     if name in READ_WITH_SCOPE:

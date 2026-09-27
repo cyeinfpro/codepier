@@ -146,7 +146,7 @@ def test_cli_full_access_keeps_identity_and_task_config(shell_agent):
 
 
 def test_shell_mcp_is_an_execute_write_action():
-    definition = next(t for t in tool_definitions() if t["name"] == "shell_exec")
+    definition = next(t for t in tool_definitions() if t["name"] == "exec")
     assert not definition["annotations"]["readOnlyHint"]
     assert definition["annotations"]["destructiveHint"] and definition["annotations"]["openWorldHint"]
     assert set(definition["_meta"]["securitySchemes"][0]["scopes"]) == {"read", "execute"}
@@ -161,6 +161,10 @@ async def test_remote_codex_policy_blocks_before_dispatch_but_preserves_admin_an
 
         def audit(self, *args, **kwargs):
             self.rows.append((args, kwargs))
+
+        async def run(self, function, /, *args, **kwargs):
+            # Match the Store worker interface; all policy assertions stay real.
+            return await asyncio.to_thread(function, *args, **kwargs)
 
     store = AuditStore()
     runtime = object.__new__(Runtime)
@@ -242,32 +246,32 @@ def test_real_mcp_shell_streaming_replay_restart_cancel_and_scope(stack):
     stack.config["shell"] = {"enabled": True, "projects": ["Imago"], "command": ["/bin/sh", "-c"]}
     atomic_json(stack.config_path, stack.config)
     stack.start_agent()
-    info = stack.mcp("execution_info", {"project": "Imago"})
+    info = stack.mcp("workspace", {"project": "Imago", "operation": "status"})
     assert info["structuredContent"]["shell"]["enabled"]
-    args = {"project": "Imago", "command": "printf started; printf once >> shell-count; sleep 3; printf done; exit 7", "idempotency_key": uuid.uuid4().hex}
-    receipt = stack.mcp("shell_exec", args)["structuredContent"]
+    args = {"project": "Imago", "command": "printf started; printf once >> shell-count; sleep 3; printf done; exit 7", "idempotency_key": uuid.uuid4().hex, "yield_seconds": 0}
+    receipt = stack.mcp("exec", args)["structuredContent"]
     opid = receipt["operation_id"]
     assert receipt["pending"]
     wait_for(lambda: "started" in stack.client.get('/api/operations/' + opid).json()["output"])
-    assert stack.mcp("shell_exec", args)["structuredContent"]["operation_id"] == opid
+    assert stack.mcp("exec", args)["structuredContent"]["operation_id"] == opid
     stack.hub.terminate(); stack.hub.wait(timeout=12); stack.start_hub(); stack.login()
     completed = stack.poll(opid, timeout=15)
     assert completed["state"] == "failed" and completed["result"]["data"]["exit_code"] == 7
     assert "done" in completed["output"] and (stack.imago / "shell-count").read_text() == "once"
-    cancelled = stack.mcp("shell_exec", {"project": "Imago", "command": "printf cancel-start; sleep 20; touch must-not-exist", "idempotency_key": uuid.uuid4().hex})["structuredContent"]["operation_id"]
+    cancelled = stack.mcp("exec", {"project": "Imago", "command": "printf cancel-start; sleep 20; touch must-not-exist", "idempotency_key": uuid.uuid4().hex})["structuredContent"]["operation_id"]
     wait_for(lambda: "cancel-start" in stack.client.get('/api/operations/' + cancelled).json()["output"])
-    stack.mcp("operations_cancel", {"operation_id": cancelled})
+    stack.mcp("process", {"operation": "cancel", "operation_ids": [cancelled]})
     assert stack.poll(cancelled)["state"] == "cancelled"
     assert not (stack.imago / "must-not-exist").exists()
     grant = stack.must(stack.client.post('/api/grants', json={"label": "shell-read-only", "scopes": ["read"], "projects": [stack.project['id']], "days": 1}))
-    denied = stack.mcp("shell_exec", {**args, "idempotency_key": uuid.uuid4().hex}, token_value=grant["token"])
+    denied = stack.mcp("exec", {**args, "idempotency_key": uuid.uuid4().hex}, token_value=grant["token"])
     assert denied["isError"] and "execute" in denied["content"][0]["text"]
 
 
 def test_offline_shell_revoked_before_delivery_does_not_execute(stack):
     stack.stop_agent()
     grant = stack.must(stack.client.post('/api/grants', json={"label": "shell-revoke", "scopes": ["read", "execute"], "projects": [stack.project['id']], "days": 1}))
-    receipt = stack.mcp("shell_exec", {"project": "Imago", "command": "touch revoked-shell", "idempotency_key": uuid.uuid4().hex}, token_value=grant["token"])["structuredContent"]
+    receipt = stack.mcp("exec", {"project": "Imago", "command": "touch revoked-shell", "idempotency_key": uuid.uuid4().hex}, token_value=grant["token"])["structuredContent"]
     stack.must(stack.client.delete('/api/grants/' + grant['grant_id']))
     stack.start_agent()
     assert stack.poll(receipt["operation_id"])["state"] == "failed"

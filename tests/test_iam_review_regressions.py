@@ -30,11 +30,22 @@ def projects(store,count):
                 (f'load-{n}',f'load-{n}',f'load-{n}','device-team',f'/tmp/load-{n}',time.time()))
 
 
+from contextvars import ContextVar
+_query_measurement = ContextVar('iam_query_measurement', default=None)
+
+
 def queries(store,call):
-    statements=[]
-    store.db.set_trace_callback(statements.append)
+    # Store's maintenance worker shares the connection, not this request's cost.
+    # The request context follows TestClient and Store.run across thread boundaries.
+    statements=[];marker=object();token=_query_measurement.set(marker)
+    def trace(sql):
+        if _query_measurement.get() is marker:statements.append(sql)
+    with store.lock:
+        store.db.set_trace_callback(trace)
     try:result=call()
-    finally:store.db.set_trace_callback(None)
+    finally:
+        with store.lock:store.db.set_trace_callback(None)
+        _query_measurement.reset(token)
     return result,[x for x in statements if x.lstrip().upper().startswith(('SELECT','WITH'))]
 
 
@@ -49,6 +60,7 @@ def test_live_principal_query_count_does_not_scale_with_projects_or_roles(team,r
     large,large_sql=queries(store,lambda:iam.live_principal(store,principal()))
     record_property("selects_11_projects_4_roles",len(small_sql))
     record_property("selects_251_projects_4_roles",len(large_sql))
+    assert small_sql and large_sql  # context filtering must not hide measured work
     assert len(small.projects)==11 and len(large.projects)==251
     assert len(large_sql)<=len(small_sql)+1 and len(large_sql)<=10
     assert 'write' in large.scopes

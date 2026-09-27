@@ -51,7 +51,8 @@ def error(response, code):
     result = response.json()['result']
     assert result['isError'], result
     value = result.get('structuredContent') or json.loads(result['content'][0]['text'])
-    assert value['error']['code'] == code, value
+    errors = value.get('operations', [value])
+    assert len(errors) == 1 and errors[0]['error']['code'] == code, value
     assert 'mcp/www_authenticate' not in result.get('_meta', {})
     return value
 
@@ -159,11 +160,11 @@ def test_role_rebinding_does_not_silently_change_existing_identity_authority(api
     assert call(client,t['token']).status_code == 401
 
 
-def role_oauth(client,r,p):
+def role_oauth(client,r,p,**extra):
     cid,rid,verifier=start_oauth(client,ROLE_SCOPE)
     decision=must(client.post('/api/oauth/requests/'+rid+'/decide',json={'allow':True,'scopes':[ROLE_SCOPE],
         'authorization_mode':'role','profile_id':p['id'],'profile_version':p['version'],
-        'role_version':r['version'],'confirm_dynamic_role':True}))
+        'role_version':r['version'],'confirm_dynamic_role':True,**extra}))
     code=parse_qs(urlsplit(decision['redirect']).query)['code'][0]
     result=must(client.post('/oauth/token',data={'grant_type':'authorization_code','code':code,'client_id':cid,
         'redirect_uri':'http://localhost:12345/callback','code_verifier':verifier}))
@@ -216,7 +217,8 @@ def test_role_catalog_oauth_schemes_and_entry_challenge(api,catalog):
     assert ROLE_SCOPE in unauth.headers['WWW-Authenticate']
     result=must(client.post(endpoint,json={'jsonrpc':'2.0','id':1,'method':'tools/list'},headers={
         'Authorization':'Bearer '+t['token'],'Accept':'application/json, text/event-stream'}))['result']['tools']
-    assert {'devices_list','projects_create','get_profile'} <= {tool['name'] for tool in result}
+    assert {'workspace','get_profile','get_access_context'} <= {tool['name'] for tool in result}
+    assert not {'devices_list','projects_create'} & {tool['name'] for tool in result}
     for tool in result:
         assert tool['securitySchemes']==tool['_meta']['securitySchemes']==[{'type':'oauth2','scopes':[ROLE_SCOPE]}]
     assert next(tool for tool in result if tool['name']=='get_profile')['_meta']['openai/profile'] is True

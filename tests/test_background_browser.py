@@ -15,6 +15,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import threading
+import tempfile
 import time
 import uuid
 
@@ -54,7 +55,17 @@ def test_extension_contract_suite_and_javascript_syntax():
         assert checked.returncode==0,checked.stderr
 
 
-def test_real_extension_native_host_and_mcp_browser_actions(tmp_path,website):
+@pytest.fixture
+def native_workspace():
+    # A native host is a different OS application. Repository-local basetemp
+    # under macOS Downloads is not a suitable installation location for it.
+    # Use owned synthetic data in the system temp directory; never change TCC.
+    with tempfile.TemporaryDirectory(prefix='codepier-native-fixture-') as directory:
+        yield Path(directory).resolve()
+
+
+def test_real_extension_native_host_and_mcp_browser_actions(native_workspace,website):
+    tmp_path = native_workspace
     if os.name=='nt':pytest.skip('Windows needs the separately built native executable; this end-to-end fixture uses the POSIX launcher')
     extension=tmp_path/'extension';shutil.copytree(BASE/'web/browser-extension',extension)
     manifest=json.loads((extension/'manifest.json').read_text());manifest['host_permissions']=['http://127.0.0.1/*']
@@ -78,7 +89,7 @@ def test_real_extension_native_host_and_mcp_browser_actions(tmp_path,website):
         executor=ThreadPoolExecutor(max_workers=1)
         def native_call(name,args=None,*,token=None,expect_failure=False):
             data={'project':'Imago',**(args or {})};data.setdefault('idempotency_key',uuid.uuid4().hex)
-            response=s.mcp(name,data,token_value=token or grant['token'])
+            response=s.mcp('browser', {**data, 'operation': name.removeprefix('browser_')}, token_value=token or grant['token'])
             result=response['structuredContent']
             if result.get('pending'):
                 op=s.poll(result['operation_id'],timeout=40)

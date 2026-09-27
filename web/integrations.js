@@ -1,209 +1,1719 @@
 'use strict';
 // One authenticated tool path. Context and mutation receipts survive UI navigation;
 // the panel never starts a model, expands local permissions or replays unknown input.
-window.CodePierIntegrations=(()=>{
- const U=()=>window.CodePierIntegrationUI;
- const tabs=[['overview','开始工作'],['validation','测试验收'],['handoff','任务衔接'],['navigation','代码导航'],['worktrees','隔离目录'],['browser','网页验证'],['status','运行诊断'],['setup','配置引导']];
- const titles={project_read:'项目读取',project_write:'项目修改',shell:'命令执行',native_model_turn:'原生模型对话',host_file_roundtrip:'聊天附件传输',host_mcp_apps:'聊天内改动卡片',browser:'后台浏览器'};
- let mounted=null;
- const mapping=id=>{const p=S.projects.find(p=>p.id===id);return JSON.stringify([id,p?.device_id,p?.root]);};
- function state(){
-  if(!S.integrations||S.integrations.session!==S.session){
-   const receipts=new Map();try{for(const r of JSON.parse(sessionValue('codepier-integration-receipts')||'[]'))if(r&&typeof r.key==='string'&&typeof r.project==='string'&&typeof r.name==='string')receipts.set(r.key,{...r,restored:true,busy:false});}catch{}
-   S.integrations={session:S.session,project:S.work.project||S.projects[0]?.id||'',workspace_id:'',tab:'overview',drafts:{},submissions:receipts,trees:[],workflow_id:'',ready:null};
-  }return S.integrations;
- }
- function saveReceipts(v){if(v.session!==S.session)return;for(const [key,entry] of v.submissions)if(entry.done)v.submissions.delete(key);const rows=[...v.submissions.values()].filter(r=>!r.done).map(r=>({key:r.key,project:r.project,workspace_id:r.workspace_id,name:r.name,operation_id:r.operation_id||'',created:r.created,phase:r.phase||'uncertain'}));sessionValue('codepier-integration-receipts',JSON.stringify(rows.slice(-40)));}
- function detach(){mounted?.abort();mounted=null;if($('#i-confirm-form'))closeModal($('.modal'));}
- function inherit(from){const v=state();if(v.explicit){v.explicit=false;return;}let source;if(from==='workbench')source=S.work;else if(from==='native'&&typeof ChatUI!=='undefined')source={project:ChatUI.project,workspace_id:''};if(source?.project&&S.projects.some(p=>p.id===source.project)){v.project=source.project;v.workspace_id=source.workspace_id||'';v.tab='overview';v.trees=[];v.workflow_id='';}}
- async function open(options={}){const v=state(),before={project:v.project,workspace_id:v.workspace_id,tab:v.tab,workflow_id:v.workflow_id};const p=S.projects.find(p=>p.id===options.project||p.alias===options.project);if(options.project&&!p)throw new Error('项目映射已变化，请重新选择项目。');v.project=p?.id||v.project;v.workspace_id=options.workspace_id||'';v.tab=tabs.some(t=>t[0]===options.tab)?options.tab:'overview';v.workflow_id=options.workflow_id||'';v.trees=[];v.explicit=true;if(options.path){const k=mapping(v.project)+'/'+v.workspace_id+'/navigation';v.drafts[k]={...(v.drafts[k]||{}),path:options.path,line:String(options.line||1),column:String(options.column||1)};}await navigate('integrations');if(S.page!=='integrations')Object.assign(v,before);v.explicit=false;}
- const field=(name,title,control)=>`<label class="integration-field"><span>${esc(title)}</span>${control||`<input name="${name}" autocomplete="off">`}</label>`;
- const input=(name,title,value='',extra='')=>field(name,title,`<input name="${name}" value="${esc(value)}" autocomplete="off" ${extra}>`);
- const action=(id,text,extra='')=>U().button(id,text,extra);
- const jump=(tab,text)=>U().jump(tab,text);
- const form=(id,title,fields,submit,help='')=>`<section class="panel integration-section"><h2>${esc(title)}</h2>${help?`<p class="integration-help">${esc(help)}</p>`:''}<form data-i-form="${id}" class="integration-form">${fields}<p class="integration-form-error" role="alert" hidden></p><div class="integration-form-actions"><button class="btn primary" type="submit">${esc(submit)}</button><span class="integration-form-hint" role="status"></span></div></form></section>`;
- function html(){const v=state();if(!S.projects.some(p=>p.id===v.project)){v.project=S.projects[0]?.id||'';v.workspace_id='';v.trees=[];}if(!tabs.some(t=>t[0]===v.tab))v.tab='overview';const p=S.projects.find(p=>p.id===v.project),directory=v.workspace_id?(v.trees.find(t=>t.workspace_id===v.workspace_id&&t.state==='ready')?.path||'隔离目录 '+v.workspace_id.slice(0,12)+' · 路径待核对'):(p?.root||'');
-  return heading('开发工具','DEVELOPMENT / WORKFLOW','围绕当前项目检查、验证与继续工作。',action('refresh','重新检查'))+`<section class="integration-center" id="integration-center"><div class="integration-context"><label>工作项目<select id="i-project" aria-label="工作项目">${S.projects.map(p=>`<option value="${esc(p.id)}" ${p.id===v.project?'selected':''}>${esc(p.alias)} · ${esc(p.device_name||'')} · ${p.online?'在线':'离线'}</option>`).join('')}</select></label><label>操作目录<select id="i-workspace" aria-label="操作目录"><option value="">原项目目录</option>${v.trees.filter(t=>t.state==='ready').map(t=>`<option value="${esc(t.workspace_id)}" ${t.workspace_id===v.workspace_id?'selected':''}>${esc(t.label||t.workspace_id.slice(0,12))}</option>`).join('')}${v.workspace_id&&!v.trees.some(t=>t.workspace_id===v.workspace_id)?`<option value="${esc(v.workspace_id)}" selected>隔离目录 ${esc(v.workspace_id.slice(0,12))} · 待核对</option>`:''}</select></label><div class="integration-scope"><strong>${esc(p?.device_name||'尚未选择设备')}</strong><span>${v.workspace_id?'隔离目录 · 不会自动合并':'原项目 · 保留现有授权'}</span><code title="${esc(directory)}">${esc(directory)}</code></div></div><nav class="integration-tabs" role="tablist" aria-label="开发工具分类">${tabs.map(([id,name])=>`<button type="button" id="i-tab-${id}" data-i-tab="${id}" role="tab" aria-controls="i-body" aria-selected="${v.tab===id}" aria-pressed="${v.tab===id}" tabindex="${v.tab===id?0:-1}">${esc(name)}</button>`).join('')}</nav><div id="i-status" role="status" aria-live="polite"></div><div id="i-receipts"></div><div id="i-body" role="tabpanel" aria-labelledby="i-tab-${v.tab}" tabindex="0"></div></section>`;
- }
- function bind(){
-  detach();const controller=mounted=new AbortController(),v=state(),root=$('#integration-center');if(!root)return;
-  const session=S.session,seq=S.renderSeq,project=v.project,workspace_id=v.workspace_id,scope=mapping(project),tab=v.tab,p=S.projects.find(p=>p.id===project);
-  const body=$('#i-body',root),status=$('#i-status',root);
-  const current=()=>!controller.signal.aborted&&root.isConnected&&S.session===session&&seq===S.renderSeq&&S.page==='integrations'&&v.project===project&&v.workspace_id===workspace_id&&mapping(project)===scope;
-  const target=()=>({project,...workspace_id?{workspace_id}:{}});
-  const info=(text,error=false)=>{if(current()){status.textContent=text;status.className='integration-feedback'+(error?' error':'');}};
-  const call=(name,args,read=true)=>api('/api/tools/call',{method:'POST',body:JSON.stringify({tool:name,arguments:args}),requestTimeout:12000,retryDelays:[],retrySafe:false,...read?{signal:controller.signal}:{}});
-  function argsFor(name,args){if(['workflows_handoff','workflows_get','operations_get','operations_wait','operations_list'].includes(name))return {...args};if(['activity_list','workflows_list'].includes(name))return {project,...args};return {...target(),...args};}
-  function resolveReply(r,name){if(r?.error)throw Object.assign(new Error(r.error.message||'工具请求失败'),r.error,{definitive:true});if(r?.pending)return r;if(r?.state&&['failed','cancelled','needs_review','interrupted'].includes(r.state)&&!r.result)throw Object.assign(new Error(r.error||U().label(r.state)),{operation_id:r.id,definitive:r.state!=='needs_review'});if(r?.result){if(r.state==='succeeded'&&r.result.ok||name==='validation_run'&&r.result.data?.validation_id)return {operation_id:r.id,...r.result.data};throw Object.assign(new Error(r.result.error?.message||r.error||U().label(r.state)),{code:r.result.error?.code,operation_id:r.id,definitive:true});}return r;}
-  async function track(entry,reply){
-   if(reply?.operation_id)entry.operation_id=reply.operation_id;
-   if(!reply?.pending){const result=resolveReply(reply,entry.name);entry.done=true;entry.phase='confirmed';entry.result=result;saveReceipts(v);return result;}
-   entry.phase='pending';saveReceipts(v);receipts();
-   const deadline=Date.now()+22000;
-   while(current()&&Date.now()<deadline){
-    const op=await call('operations_wait',{operation_id:entry.operation_id,wait_seconds:2,output_limit:12000});
-    if(!op.pending){const r=resolveReply(op,entry.name);entry.done=true;entry.result=r;entry.phase='confirmed';saveReceipts(v);receipts();return r;}
-    entry.phase=op.state||'pending';if(current())info(U().label(entry.phase)+' · 可以离开此页，原操作仍会保留');await pause(300);
-   }
-   receipts();return null;
-  }
-  async function request(name,args={},mutating=false){
-   if(!current())return null;const context=argsFor(name,args);let entry;
-   if(mutating){
-    const signature=JSON.stringify([scope,context,name]);
-    entry=[...v.submissions.values()].find(r=>!r.done&&r.signature===signature);
-    const other=[...v.submissions.values()].find(r=>!r.done&&r.project===project&&r.workspace_id===workspace_id&&r.name===name&&r!==entry);
-    if(other)throw new Error('这类操作还有待确认的原请求。请先在上方查询原结果，不要换参数重复提交。');
-    if(!entry){entry={name,project,workspace_id,scope,signature,key:'panel-integration-'+uid(),created:Date.now()/1000,phase:'sending'};entry.args={...context,idempotency_key:entry.key};v.submissions.set(entry.key,entry);saveReceipts(v);}
-    if(entry.busy){info('原请求正在确认，请勿重复提交');return null;}entry.busy=true;receipts();
-   }
-   try{
-    if(mutating){const r=await track(entry,entry.operation_id?{pending:true,operation_id:entry.operation_id}:await call(name,entry.args,false));return current()?r:null;}
-    const remote=!['activity_list','workflows_list','workflows_handoff','workflows_get'].includes(name)&&!name.startsWith('operations_');
-    let r=resolveReply(await call(name,{...context,...remote?{idempotency_key:'panel-integration-read-'+uid()}:{}}),name);
-    if(r?.pending){const until=Date.now()+22000,id=r.operation_id;while(current()&&Date.now()<until){const op=await call('operations_wait',{operation_id:id,wait_seconds:2,output_limit:16000});if(!op.pending){r=resolveReply(op,name);break;}await pause(250);}if(r.pending)throw Object.assign(new Error('读取仍在等待本机，可稍后重试或查看原操作。'),{operation_id:id});}
-    return current()?r:null;
-   }catch(error){if(entry){const rejected=error.definitive||(error.admitted===false&&!error.operation_id);entry.phase=rejected?'failed':'uncertain';entry.error=U().errorText(error);if(rejected)entry.done=true;saveReceipts(v);}throw error;}
-   finally{if(entry){entry.busy=false;receipts();}}
-  }
-  async function recover(entry){if(entry.busy||!current())return;entry.busy=true;receipts();try{
-    if(!entry.operation_id){const found=await call('operations_list',{project:entry.project,idempotency_key:entry.key,limit:1});if(!current())return;entry.operation_id=found.operations?.[0]?.id||'';if(!entry.operation_id){info('尚未查到原操作。'+(entry.args?'可用“重试同一请求”继续核查，参数与幂等键不会改变。':'这是一条刷新前的请求，仅保留查询信息；请核对操作审计，不会自动重放。'));entry.checkedMissing=true;return;}}
-    const r=await track(entry,{pending:true,operation_id:entry.operation_id});if(r&&current()){output(r,'原操作结果 · 未重新执行');info('原结果已核实');}
-   }catch(error){entry.error=U().errorText(error);if(error.definitive){entry.done=true;entry.phase='failed';}else entry.phase='uncertain';info(entry.error,true);}finally{entry.busy=false;saveReceipts(v);receipts();}}
-  function receipts(){if(!current())return;const box=$('#i-receipts',root);box.replaceChildren();const pending=[...v.submissions.values()].filter(r=>!r.done&&r.project===project&&(r.workspace_id||'')===workspace_id);if(!pending.length)return;
-   const h=document.createElement('h2');h.textContent='待确认的操作';box.append(h);
-   for(const r of pending){const row=document.createElement('article');row.className='integration-receipt';const text=document.createElement('div'),strong=document.createElement('strong'),small=document.createElement('small');strong.textContent=({validation_run:'测试验收',worktrees_create:'创建隔离目录',worktrees_remove:'移除隔离目录',browser_action:'网页动作',browser_open:'打开网页',browser_close:'释放页面',integration_control:'接入控制',validations_accept:'人工验收决定'})[r.name]||r.name;small.textContent=(r.error||U().label(r.phase))+' · '+(r.operation_id||'提交回执待核查');text.append(strong,small);row.append(text);const b=document.createElement('button');b.type='button';b.className='btn ghost small';b.disabled=r.busy;b.textContent=r.busy?'正在核查…':'查询原结果';b.onclick=()=>recover(r);row.append(b);
-    if(r.operation_id){const a=document.createElement('button');a.className='btn ghost small';a.dataset.action='operation-detail';a.dataset.id=r.operation_id;a.textContent='操作详情';row.append(a);}
-    if(r.checkedMissing&&r.args&&r.scope===scope){const retry=document.createElement('button');retry.type='button';retry.className='btn ghost small';retry.textContent='重试同一请求';retry.disabled=r.busy;retry.onclick=async()=>{if(!await U().confirmAction({title:'重试原请求',text:'只发送之前完全相同的参数和幂等键，不创建另一项操作。'}))return;if(!current())return;r.busy=true;receipts();try{const value=await track(r,await call(r.name,r.args,false));if(value&&current())output(value,'原请求结果');}catch(error){if(error.definitive)r.done=true;info(U().errorText(error),true);}finally{r.busy=false;saveReceipts(v);receipts();}};row.append(retry);}
-    box.append(row);
-   }
-  }
-  function output(value,title){if(!current()||!value)return;const box=$('#i-result',body);if(!box)return;box.replaceChildren();return U().result(box,value,title);}
-  function wire(fn){return async e=>{const button=e.currentTarget;if(button.disabled)return;const old=button.textContent;button.disabled=true;button.setAttribute('aria-busy','true');try{await fn(e);}catch(error){if(current()&&error.name!=='AbortError')info(U().errorText(error),true);}finally{if(button.isConnected){button.disabled=button.dataset.blocked==='true';button.removeAttribute('aria-busy');if(!button.textContent)button.textContent=old;}}};}
-  const draft=()=>v.drafts[scope+'/'+workspace_id+'/'+tab]??={};
-  function rememberForms(){const saved=draft();for(const el of $$('input[name],textarea[name],select[name]',body)){if(Object.hasOwn(saved,el.name))el.value=saved[el.name];el.addEventListener('input',()=>saved[el.name]=el.value,{signal:controller.signal});el.addEventListener('change',()=>saved[el.name]=el.value,{signal:controller.signal});}}
-  function submit(id,fn){const f=$(`[data-i-form="${id}"]`,body);f.addEventListener('submit',async e=>{e.preventDefault();const b=$('button[type=submit]',f),error=$('.integration-form-error',f),hint=$('.integration-form-hint',f);if(b.disabled||!f.reportValidity()||!current())return;const values=Object.fromEntries(new FormData(f)),original=b.textContent;b.disabled=true;b.setAttribute('aria-busy','true');f.setAttribute('aria-busy','true');error.hidden=true;hint.textContent='正在处理…';try{await fn(values);}catch(exc){if(current()&&exc.name!=='AbortError'){error.textContent=U().errorText(exc);error.hidden=false;info(U().errorText(exc),true);}}finally{if(f.isConnected){b.disabled=b.dataset.blocked==='true';b.textContent=original;b.removeAttribute('aria-busy');f.removeAttribute('aria-busy');hint.textContent='';}}},{signal:controller.signal});f.addEventListener('input',()=>{const e=$('.integration-form-error',f);if(e)e.hidden=true;},{signal:controller.signal});}
-  async function section(selector,load){const box=$(selector,body);if(!box)return;const ticket=box.dataset.ticket=uid();box.setAttribute('aria-busy','true');try{await load(box,()=>current()&&box.isConnected&&box.dataset.ticket===ticket);}catch(error){if(!current()||box.dataset.ticket!==ticket||error.name==='AbortError')return;box.innerHTML=U().note('暂时无法读取',U().errorText(error),action('section-retry','重新读取'),'warning');$('[data-i-action=section-retry]',box).onclick=wire(()=>section(selector,load));if(error.operation_id)box.insertAdjacentHTML('beforeend',`<button class="btn ghost small" data-action="operation-detail" data-id="${esc(error.operation_id)}">查看原操作</button>`);}finally{if(box.isConnected&&box.dataset.ticket===ticket)box.setAttribute('aria-busy','false');}}
-  async function changeTab(id){if(!tabs.some(t=>t[0]===id))return;v.tab=id;await renderPage(false);const selected=$(`[data-i-tab="${id}"]`);selected?.focus({preventScroll:true});const strip=selected?.closest('.integration-tabs');if(strip){const item=selected.getBoundingClientRect(),bounds=strip.getBoundingClientRect();if(item.left<bounds.left)strip.scrollLeft-=bounds.left-item.left;else if(item.right>bounds.right)strip.scrollLeft+=item.right-bounds.right;}}
-  function blockForm(id,reason){const f=$(`[data-i-form="${id}"]`,body);if(!f)return;const b=$('button[type=submit]',f);b.dataset.blocked=String(!!reason);b.disabled=!!reason;b.title=reason||'';$('.integration-form-hint',f).textContent=reason||'';}
-  async function confirm(title,text,command='',typed='',danger=false){const yes=await U().confirmAction({title,text,command,typed,danger,confirmLabel:danger?'确认操作':'确认并继续'});return yes&&current();}
-  async function openEditor(path='',line=1,column=1,ws=workspace_id){
-   const same=S.work.project===project&&(S.work.workspace_id||'')===ws;
-   if(S.work.dirty&&(!same||path&&path!==S.work.path)){if(!await confirm('保留还是替换编辑草稿？','打开目标文件或目录将丢弃工作台中尚未保存的草稿。取消后可先回工作台保存。'))return;}
-   if(!current())return;
-   if(!same)resetWork(project,ws);else if(S.work.dirty&&path&&path!==S.work.path)S.work.dirty=false;
-   await navigate('workbench');if(S.page!=='workbench'||S.work.project!==project||(S.work.workspace_id||'')!==ws||S.session!==session)return;
-   if(path&&S.work.path!==path){if(!await readFile(path))return;}
-   const el=$('#code-editor');if(path&&el&&S.work.path===path){const lines=el.value.split('\n');const index=Math.min(Math.max(0,line-1),lines.length-1),offset=lines.slice(0,index).reduce((n,s)=>n+s.length+1,0)+[...lines[index]].slice(0,Math.max(0,column-1)).join('').length;el.focus();el.setSelectionRange(offset,offset);el.scrollTop=Math.max(0,(index-4)*(parseFloat(getComputedStyle(el).lineHeight)||20));el.dispatchEvent(new Event('scroll'));}
-  }
-  async function toChat(text=''){
-   if(workspace_id)throw new Error('原生 CLI 目前不能使用这个受管隔离目录编号。请在隔离目录工作台编辑和验收，或明确切回原项目。');
-   if(!current())return;const provider=typeof ChatUI!=='undefined'?ChatUI.provider:'pi';await chatOpenProject(project,provider);if(S.page!=='native'||S.session!==session||ChatUI.project!==project)return;
-   if(text){if(await chatReplaceDraft(text))toast('交接说明已放入草稿；检查后发送才会开始执行。');}
-  }
-  const readinessActions=()=>jump('setup','查看配置步骤')+`<button type="button" class="btn ghost small" data-action="device-detail" data-id="${esc(p?.device_id||'')}">管理目标设备</button>`;
-  async function checks(box,valid){const r=await request('readiness_get');if(!r||!valid())return;v.ready={scope,workspace_id,data:r};
-   const actionable=(r.checks||[]).filter(c=>['project_read','project_write','shell'].includes(c.name)),basic=actionable.length===3&&actionable.every(c=>c.state==='ready');
-   box.innerHTML=U().note(basic?'基础开发工具已就绪':'有项目能力需要检查',basic?'可以按现有授权读取、编辑并执行命令；具体任务仍需实际验收。':'下方状态来自当前授权和目标 Agent；不会自动提升权限。',basic?jump('validation','开始一次验收'):readinessActions(),basic?'success':'warning');
-   if(r.build?.restart_required)box.insertAdjacentHTML('beforeend',U().note('磁盘更新尚未完全生效','正在运行的 Agent 与磁盘源码不同。请先结束活动任务，再由主理人到设备管理核对更新或重启。',`<button class="btn ghost small" data-action="device-detail" data-id="${esc(p?.device_id||'')}">查看设备</button>`,'warning'));
-   if(r.admission?.paused)box.insertAdjacentHTML('beforeend',U().note('该项目已暂停新的 MCP 修改','管理面板的只读检查和原操作回执保留。原生会话是否停止需要单独核实。',jump('status','查看接入控制'),'warning'));
-   box.insertAdjacentHTML('beforeend',(r.checks||[]).map(c=>`<div class="integration-check"><strong>${esc(titles[c.name]||c.name)}</strong>${U().badge(c.state)}<small>${esc(c.reason||({ready:'已满足这项调用的就绪条件',disabled:'需要本机主理人配置后重新检查',denied:'当前授权不允许此操作',unknown:'权限或运行条件尚未得到确认',missing:'请检查目标设备上的程序路径'}[c.state]||''))}</small></div>`).join(''));
-   const ls=r.language_servers||{},br=r.browser||{};box.insertAdjacentHTML('beforeend',`<div class="integration-optional"><div><strong>代码语义查询</strong>${U().badge(ls.semantic_queries_available?'available':'disabled',ls.semantic_queries_available?'已配置 · 查询时核验':'尚未配置')}${jump(ls.semantic_queries_available?'navigation':'setup',ls.semantic_queries_available?'查询代码':'配置语言服务')}</div><div><strong>后台网页验证</strong>${U().badge(br.connected?'available':br.enabled?'not_connected':'disabled',br.connected?'已连接 · 打开前核验':'')}${jump(br.connected?'browser':'setup',br.connected?'验证页面':'查看连接步骤')}</div></div><p class="integration-help">当前结果只代表本次凭据；面板管理员就绪不等于每个 MCP 授权都已就绪。</p>`);U().details(box,'授权、源码与运行环境',r);
-  }
-  function taskRow(w){const id=w.workflow_id||w.id;return `<article class="integration-row"><div><strong>${esc(w.title)}</strong><small>${esc(U().label(w.state))} · ${esc(timeText(w.updated||w.created))}</small><p class="integration-help">${esc(w.goal||'')}</p>${w.progress?`<small>${w.progress.completed} / ${w.progress.total} 步已完成</small>`:''}</div><div class="actions">${action('handoff','查看并衔接',`data-id="${esc(id)}"`)}<button class="btn ghost small" data-wf-action="detail" data-id="${esc(id)}">任务详情</button></div></article>`;}
-  async function showHandoff(id){const token=handoffEpoch=uid();info('正在读取原任务与断点…');const [r,w]=await Promise.all([request('workflows_handoff',{workflow_id:id}),request('workflows_get',{workflow_id:id})]);if(!r||!w||!current()||token!==handoffEpoch)return;if(w.project_id&&w.project_id!==project)throw new Error('任务不属于当前项目，请重新选择。');const box=$('#i-result',body);box.replaceChildren();
-   const section=document.createElement('section');section.className='panel integration-section';const uncertain=r.pending_or_uncertain||[],changed=r.mapping_changed||w.mapping_changed,otherWorkspace=!!w.workspace_id&&w.workspace_id!==workspace_id;
-   section.innerHTML=`<div class="integration-section-head"><h2>${esc(w.title||'任务交接')}</h2>${U().badge(r.state)}</div><h3>原目标</h3><p class="integration-prose">${esc(r.original_goal||'未记录')}</p>${r.summary?`<h3>最近断点</h3><p class="integration-prose">${esc(r.summary)}</p>`:''}${changed?U().note('项目映射已经变化','只能核对历史记录，请先为当前设备或目录建立新的任务。','','warning'):''}${otherWorkspace?U().note('此任务绑定了另一隔离目录','以下仅供读取交接；先核对任务目录，不会把隔离任务投递到原目录。','','warning'):''}<div class="integration-grid"><div><h3>已完成的记录</h3>${(r.completed||[]).map(s=>`<article class="integration-step"><strong>${esc(s.title)}</strong><p>${esc(s.summary||'无额外摘要')}</p></article>`).join('')||'<p class="integration-help">尚无已完成步骤。</p>'}</div><div><h3>接下来需要处理</h3>${(r.remaining||[]).map(s=>`<article class="integration-step"><strong>${esc(s.title)}</strong><p>${esc(s.acceptance||s.summary||'请先核对原任务要求')}</p></article>`).join('')||'<p class="integration-help">没有未完成步骤；这不代表已经部署。</p>'}</div></div>${uncertain.length?`<h3>需核查的项目近期操作</h3><p class="integration-help">这些操作来自项目近期记录，不代表全部属于这项任务。请先查询原回执，不要重复执行。</p>${uncertain.map(o=>`<article class="integration-row"><div><strong>${esc(o.tool)}</strong><small>${esc(U().label(o.state))}</small><code>${esc(o.operation_id)}</code></div><button class="btn ghost small" data-action="operation-detail" data-id="${esc(o.operation_id)}">查询原操作</button></article>`).join('')}`:''}<div class="actions">${action('handoff-copy','复制交接说明')}${action('handoff-chat','带到 CLI 草稿',`${changed||otherWorkspace||workspace_id?'disabled':''} title="只填写草稿，确认发送后才开始执行"`)}<button class="btn ghost small" data-wf-action="detail" data-id="${esc(id)}">打开完整任务</button>${jump('validation','核对当前验收')}</div><p class="integration-help">不猜测它对应哪条 CLI 会话，不自动运行模型或重放命令。隔离任务请在相应工作目录处理。</p>`;
-   box.append(section);const text=U().handoffText(r,w.title);$('[data-i-action=handoff-copy]',section).onclick=wire(()=>copy(text));$('[data-i-action=handoff-chat]',section).onclick=wire(()=>toChat(text));U().details(section,'交接来源与原始记录',r);section.tabIndex=-1;section.focus({preventScroll:true});info('任务交接已读取 · 未启动执行');
-  }
-  let handoffEpoch='';
-  async function workflowList(selector,limit=20){let cursor='',history=[];const load=async(box,valid)=>{const r=await request('workflows_list',{limit,cursor});if(!r||!valid())return;box.innerHTML=(r.workflows||[]).map(taskRow).join('')||empty('这个项目还没有开发任务。');box.insertAdjacentHTML('beforeend',`<div class="integration-list-footer">${action('new-workflow','建立开发任务',p.mode==='write'?'':'disabled title="当前项目为只读"')}<span class="integration-help">每页最多 ${limit} 项 · 只读取进度，不自动执行</span><div class="actions">${action('workflow-prev','上一页',history.length?'':'disabled')}${action('workflow-next','下一页',r.next_cursor?'':'disabled')}</div></div>`);$('[data-i-action=new-workflow]',box).onclick=wire(async()=>{workflowState().project=project;await workflowCreate();});for(const b of $$('[data-i-action=handoff]',box))b.onclick=wire(()=>showHandoff(b.dataset.id));$('[data-i-action=workflow-prev]',box).onclick=wire(async()=>{cursor=history.pop()||'';await section(selector,load);});$('[data-i-action=workflow-next]',box).onclick=wire(async()=>{history.push(cursor);cursor=r.next_cursor;await section(selector,load);});};await section(selector,load);}
-  async function validationList(selector){await section(selector,async(box,valid)=>{const r=await request('validations_list');if(!r||!valid())return;const rows=r.validations||[];box.innerHTML=rows.map(record=>`<article class="integration-row"><div><strong>${esc(record.label||'未命名验收')}</strong><small>历史：${esc(U().label(record.historical_state))} · ${esc(timeText(record.created))}</small><small>退出码 ${esc(record.exit_code??'未记录')} · 当前源码尚未重新核对</small></div>${action('validation-detail','核对详情',`data-id="${esc(record.validation_id)}"`)}</article>`).join('')||empty('还没有版本绑定验收。填写命令并确认运行后，记录会显示在这里。');box.insertAdjacentHTML('beforeend',`<p class="integration-help">最近最多 ${esc(r.limit||100)} 条；历史通过不等于当前版本通过。</p>`);for(const b of $$('[data-i-action=validation-detail]',box))b.onclick=wire(()=>showValidation(b.dataset.id));});}
-  let validationEpoch='';
-  async function showValidation(id){const ticket=validationEpoch=uid();info('正在重新核对源码…');const r=await request('validations_get',{validation_id:id});if(!r||!current()||ticket!==validationEpoch)return;const card=output(r,'当前验收：'+U().label(r.state));
-   const outputBox=document.createElement('div');outputBox.className='integration-evidence-output';card.insertBefore(outputBox,$('details',card));outputBox.innerHTML='<p class="integration-help">正在读取原操作输出…</p>';
-   const controls=document.createElement('div');controls.className='integration-review-controls';controls.innerHTML=`<label class="integration-field">人工复核备注<textarea id="i-validation-note" maxlength="2000" rows="2" placeholder="记录实际检查的内容或拒绝原因"></textarea></label><label class="integration-checkbox"><input id="i-validation-reviewed" type="checkbox">我已核对当前源码与原操作输出</label><div class="actions">${action('validation-accept','接受当前验收','disabled')}${action('validation-reject','拒绝此验收')}${action('validation-recheck','重新核对源码')}</div><p class="integration-help">${r.state==='passed'?'接受只记录你的人工决定，不代表已部署。':'当前结果不可接受；可以记录拒绝原因或重新运行验收。'}</p>`;card.append(controls);
-   let outputRead=false;const accept=$('[data-i-action=validation-accept]',controls),review=$('#i-validation-reviewed',controls);const availability=()=>{accept.disabled=r.state!=='passed'||r.accepted_current||!review.checked||!outputRead;accept.dataset.blocked=String(accept.disabled);};review.onchange=availability;
-   for(const decision of ['accept','reject'])$(`[data-i-action="validation-${decision}"]`,controls).onclick=wire(async()=>{const note=$('#i-validation-note',controls).value;if(!await confirm(decision==='accept'?'接受当前版本的验收？':'拒绝这条验收？','提交时会再次核对源码。人工决定不会自动部署、合并或继续模型任务。'))return;const response=await request('validations_accept',{validation_id:id,confirm:id,decision,note},true);if(response){output(response,'人工验收决定');if($('#i-validations',body))await validationList('#i-validations');}});
-   $('[data-i-action=validation-recheck]',controls).onclick=wire(()=>showValidation(id));
-   try{const op=await request('operations_get',{operation_id:r.execution_operation_id||id,output_limit:24000});if(!op||!current()||ticket!==validationEpoch||!card.isConnected)return;outputBox.replaceChildren();const h=document.createElement('h4');h.textContent=op.output_truncated||op.result?.data?.output_truncated?'原操作输出（保留尾部）':'原操作输出';const pre=document.createElement('pre');pre.className='integration-page-text';pre.textContent=op.output||op.result?.data?.output||'原操作没有文本输出。';outputBox.append(h,pre);outputRead=true;availability();}catch(error){if(current()&&card.isConnected){outputBox.innerHTML=U().note('暂未取得原输出',U().errorText(error),action('retry-output','重新读取'),'warning');$('[data-i-action=retry-output]',outputBox).onclick=wire(()=>showValidation(id));}}
-   if(current())info('本次源码核对：'+U().label(r.state));
-  }
-  async function load(){
-   if(!p){body.innerHTML=U().note('先选择一个工作项目','把已接入设备上的目录映射为项目，再进行读取、编辑和验收。','<button class="btn primary" data-action="add-project">添加项目映射</button>');return;}
-   const offline=p.online===false?U().note('目标设备当前离线','历史任务可以查看。本机检查与执行需等待设备连接；不会把离线当作任务失败。',`<button class="btn ghost small" data-action="device-detail" data-id="${esc(p.device_id)}">查看设备连接</button>`,'warning'):'';
-   if(tab==='overview'){
-    body.innerHTML=offline+`<div class="integration-hero"><div><span class="eyebrow">当前工作项目</span><h2>${esc(p.alias)}</h2><p>选择下一步，工具会沿用上方的项目与操作目录。</p></div><div class="actions">${action('start-chat','进入 CLI 草稿',workspace_id?'disabled title="原生 CLI 不支持受管隔离目录编号"':'')}${action('edit','打开工作台')}</div></div><div class="integration-action-grid">${[['validation','检查这次修改','运行测试或构建，核对当前版本'],['handoff','继续已有任务','读取目标、断点与原操作证据'],['browser','验证网页效果','连接授权页面，观察后确认动作'],['navigation','理解代码关系','查定义、引用与调用关系']].map(([id,title,text])=>`<button class="integration-action-card" data-i-jump="${id}"><strong>${title}</strong><span>${text}</span><small>进入 ${tabs.find(t=>t[0]===id)[1]} →</small></button>`).join('')}</div><div class="integration-grid"><section class="panel integration-section"><div class="integration-section-head"><h2>项目就绪状态</h2>${jump('status','详细诊断')}</div><div id="i-checks">正在核对当前环境…</div></section><section class="panel integration-section"><div class="integration-section-head"><h2>项目开发任务</h2>${jump('handoff','全部任务')}</div><div id="i-workflows">正在读取任务…</div></section></div><div id="i-result"></div>`;
-    $('[data-i-action=start-chat]',body).onclick=wire(()=>toChat());$('[data-i-action=edit]',body).onclick=wire(()=>openEditor());await Promise.all([section('#i-checks',checks),workflowList('#i-workflows',5)]);
-   }else if(tab==='status'){
-    body.innerHTML=offline+`<section class="panel integration-section"><h2>项目就绪状态</h2><div id="i-checks">正在核对当前环境…</div></section><section class="panel integration-section"><h2>最近 MCP 工具调用</h2><p class="integration-help">服务耗时是处理请求的时间；调用间隔可能包含网络、宿主或用户操作，不等于模型思考时间。并发和缺少关联信息时不计算间隔。</p><div id="i-activity"></div></section><details class="panel integration-section integration-control"><summary>接入控制 · 暂停、恢复与紧急停止</summary><p>影响当前整个项目的新 MCP 修改和执行；读取、原回执与管理面板保留。不会关闭 Agent。</p><div class="actions">${action('pause','暂停 MCP')}${action('resume','恢复 MCP')}${action('stop','紧急停止')}</div><label class="integration-checkbox"><input type="checkbox" id="i-native-stop">紧急停止时也停止本项目的 Pi/Codex 会话</label><p class="integration-help">仅处理有归属记录的进程；未确认退出不显示为停止成功。隔离目录内不可进行项目级控制。</p></details><div id="i-result"></div>`;
-    for(const name of ['pause','resume','stop']){const b=$(`[data-i-action="${name}"]`,body);b.disabled=!!workspace_id;b.title=workspace_id?'请切回原项目目录再控制整个项目':'';b.onclick=wire(async()=>{const include_native=!!$('#i-native-stop',body).checked;if(!await confirm(name==='stop'?'紧急停止当前项目？':name==='pause'?'暂停新的 MCP 修改？':'恢复新的 MCP 修改？',`${p.alias} · ${p.device_name}。${name==='stop'?(include_native?'同时包含本项目原生会话，其他项目不受影响。':'不包含原生 Pi/Codex 会话。'):'保持原有权限，不改变本机配置。'}`,'',p.alias,name!=='resume'))return;const r=await request('integration_control',{action:name,confirm:p.alias,include_native},true);if(r){output(r,'接入控制结果');await section('#i-checks',checks);}});}
-    let before=null;const activities=async(box,valid,more=false)=>{const r=await request('activity_list',{limit:30,...more&&before?{before_id:before}:{}});if(!r||!valid())return;const rows=(r.activities||[]).map(a=>`<tr><td><code>${esc(a.tool)}</code><small>${esc(timeText(a.started))}</small></td><td>${esc(U().label(a.status))}</td><td>${a.service_ms==null?'未确认':esc(a.service_ms)+' ms'}</td><td>${a.next_call_gap_ms==null?'不可用':esc(a.next_call_gap_ms)+' ms'}${a.transition==='overlap'?'<small>调用重叠</small>':''}</td><td>${a.operation_id?`<button class="btn ghost small" data-action="operation-detail" data-id="${esc(a.operation_id)}">记录</button>`:''}</td></tr>`).join('');if(!more)box.innerHTML='<div class="integration-table" role="region" aria-label="工具调用记录" tabindex="0"><table class="data-table"><thead><tr><th>调用</th><th>状态</th><th>服务耗时</th><th>后续间隔</th><th>证据</th></tr></thead><tbody></tbody></table></div>'+action('activity-more','更多调用');$('tbody',box).insertAdjacentHTML('beforeend',rows||'<tr><td colspan="5">还没有调用记录。</td></tr>');before=r.next_before_id;const b=$('[data-i-action=activity-more]',box);b.hidden=!before;b.onclick=wire(()=>activities(box,()=>current()&&box.isConnected,true));};await Promise.all([section('#i-checks',checks),section('#i-activity',activities)]);
-   }else if(tab==='validation'){
-    body.innerHTML=offline+form('validate','验证当前修改',input('label','验收名称','测试与构建','required maxlength="160"')+input('timeout_seconds','最长运行秒数','900','type="number" min="1" max="86400" required')+field('command','在选定目录执行的命令','<textarea name="command" rows="4" required maxlength="65536" placeholder="例如 python -m pytest -q；执行前会再次确认"></textarea>')+`<div class="integration-presets">仅填入示例：${action('preset-python','Python 测试')}${action('preset-node','前端构建')}</div>`,'确认并运行验收','执行前后会记录源码指纹。命令以 Agent 系统账号权限运行，不是沙箱；这里不会替你自动选择或运行测试。')+`<section class="panel integration-section"><div class="integration-section-head"><h2>验收记录</h2>${action('validation-refresh','刷新记录')}</div><div id="i-validations">正在读取记录…</div></section><div id="i-result"></div>`;
-    rememberForms();for(const [name,command] of [['python','python -m pytest -q'],['node','npm run build']])$(`[data-i-action="preset-${name}"]`,body).onclick=wire(async()=>{const el=$('[name=command]',body);if(el.value.trim()&&!await confirm('替换命令草稿？','原命令尚未运行，替换后仍需你确认执行。'))return;el.value=command;el.dispatchEvent(new Event('input'));el.focus();});
-    submit('validate',async values=>{const command=values.command.trim(),label=values.label.trim(),timeout_seconds=U().integer(values.timeout_seconds,'最长运行秒数',1,86400);if(!command||!label)throw new Error('请填写命令与验收名称。');if(!await confirm('运行这条验收命令？',`${p.alias} · ${p.device_name} · ${workspace_id?'隔离目录 '+workspace_id:'原项目目录'}。最长 ${timeout_seconds} 秒。关闭页面不会停止已提交的命令。`,command))return;const r=await request('validation_run',{command,label,timeout_seconds},true);if(r){output(r,'命令结果：'+U().label(r.state));await validationList('#i-validations');}});$('[data-i-action=validation-refresh]',body).onclick=wire(()=>validationList('#i-validations'));await validationList('#i-validations');
-   }else if(tab==='handoff'){
-    body.innerHTML=`<section class="panel integration-section"><h2>继续已有任务</h2><p class="integration-help">先读取原目标和断点，再选择复制说明、放入 CLI 草稿或打开完整任务。不会自动重新执行结果不明的命令。</p><div id="i-workflows">正在读取任务…</div></section><div id="i-result"></div>`;await workflowList('#i-workflows');if(v.workflow_id&&current())await showHandoff(v.workflow_id);
-   }else if(tab==='worktrees'){
-    body.innerHTML=offline+U().note('把实验性修改放到独立目录','需要已有提交的 Git 项目；原目录未提交修改不会复制，不会自动合并、初始化 Git 或扩大目录权限。',jump('setup','查看本机配置'))+form('worktree','新建隔离工作目录',input('label','目录名称','','maxlength="100" placeholder="例如 修复上传流程"')+input('base_ref','起始 Git 引用','HEAD','required maxlength="200"'),'创建工作目录')+`<section class="panel integration-section"><div class="integration-section-head"><h2>已有工作目录</h2>${action('trees-refresh','刷新目录')}</div><div id="i-trees">正在核对目录…</div></section><div id="i-result"></div>`;
-    const trees=()=>section('#i-trees',async(box,valid)=>{const r=await request('worktrees_list',{workspace_id:''});if(!r||!valid())return;v.trees=r.workspaces||[];const selector=$('#i-workspace',root);selector.innerHTML='<option value="">原项目目录</option>'+v.trees.filter(t=>t.state==='ready').map(t=>`<option value="${esc(t.workspace_id)}">${esc(t.label||t.workspace_id.slice(0,12))}</option>`).join('');if(workspace_id&&!v.trees.some(t=>t.workspace_id===workspace_id&&t.state==='ready'))selector.insertAdjacentHTML('beforeend',`<option value="${esc(workspace_id)}">当前隔离目录不可用 · 请核对</option>`);selector.value=workspace_id;
-     box.innerHTML=v.trees.map(t=>`<article class="integration-row"><div><strong>${esc(t.label||t.workspace_id)}</strong><small>${esc(U().label(t.state))} · ${t.dirty?'有未提交修改':t.state==='ready'?'目录干净':'待核对'}</small><code>${esc(t.path||'')}</code><small>${t.error?esc(t.error):t.source_dirty?'创建时未复制原目录未提交改动':''}</small></div><div class="actions">${action('tree-open','进入编辑',`data-id="${esc(t.workspace_id)}" ${t.state!=='ready'?'disabled':''}`)}${action('tree-remove','移除',`data-id="${esc(t.workspace_id)}" ${t.state!=='ready'||t.dirty?'disabled':''} title="${t.dirty?'请先处理未提交改动':'只删除已确认干净的受管隔离目录'}"`)}</div></article>`).join('')||empty('尚无隔离目录。日常开发可继续使用原项目目录。');for(const b of $$('[data-i-action=tree-open]',box))b.onclick=wire(()=>openEditor('',1,1,b.dataset.id));for(const b of $$('[data-i-action=tree-remove]',box))b.onclick=wire(async()=>{const item=v.trees.find(t=>t.workspace_id===b.dataset.id);if(!await confirm('移除这个隔离目录？','只移除受管隔离目录，原项目保留。有改动或活动任务时后端仍会拒绝。',item?.path||b.dataset.id,'',true))return;const r=await request('worktrees_remove',{workspace_id:'',target_workspace_id:b.dataset.id,confirm:b.dataset.id},true);if(r){output(r,'目录移除结果');if(workspace_id===b.dataset.id){v.workspace_id='';await renderPage(false);}else await trees();}});});
-    rememberForms();submit('worktree',async values=>{const ref=values.base_ref.trim();if(!ref||ref.startsWith('-')||/[\r\n\x00]/.test(ref))throw new Error('请填写有效的 Git 引用，例如 HEAD 或已有提交编号。');if(!await confirm('创建独立工作目录？','固定所选提交，不复制未提交修改，不自动合并到原项目。',ref))return;const r=await request('worktrees_create',{workspace_id:'',label:values.label.trim(),base_ref:ref},true);if(r){output(r,'隔离目录已创建');await trees();}});$('[data-i-action=trees-refresh]',body).onclick=wire(trees);await trees();
-   }else if(tab==='navigation'){
-    const options=[['definition','定义跳转'],['references','查找引用'],['hover','类型说明'],['symbols','文件符号'],['workspace_symbols','项目符号'],['diagnostics','文件诊断'],['incoming_calls','调用方'],['outgoing_calls','被调用方']];
-    body.innerHTML=offline+`<section class="panel integration-section"><div class="integration-section-head"><h2>语言服务</h2>${jump('setup','配置语言服务')}</div><div id="i-lsp-status">正在检查本机配置…</div></section>`+form('lsp','查询代码关系',field('action','查询类型',`<select name="action">${options.map(([id,title])=>`<option value="${id}">${title}</option>`).join('')}</select>`)+input('path','项目内文件路径','','maxlength="1024" placeholder="例如 src/main.py"')+input('language','语言标识（文件查询可自动识别）','','maxlength="40" placeholder="例如 python"')+input('line','行','1','type="number" min="1" max="1000000"')+input('column','列（按 Unicode 字符计数）','1','type="number" min="1" max="1000000"')+input('query','项目符号关键词','','maxlength="200"'),'查询','分析本机已保存的文件，不分析未保存的编辑草稿。使用真实语言服务，不把文本同名搜索当作语义结果。')+'<div id="i-result"></div>';
-    rememberForms();const f=$('[data-i-form=lsp]',body),a=f.elements.action;
-    const fields=()=>{const workspace=a.value==='workspace_symbols',position=['definition','references','hover','incoming_calls','outgoing_calls'].includes(a.value);for(const [name,shown,required] of [['path',!workspace,!workspace],['language',true,workspace],['query',workspace,workspace],['line',position,position],['column',position,position]]){f.elements[name].closest('label').hidden=!shown;f.elements[name].required=required;}};a.addEventListener('change',fields);fields();blockForm('lsp','先检查本机语言服务');
-    submit('lsp',async values=>{const workspace=values.action==='workspace_symbols',position=['definition','references','hover','incoming_calls','outgoing_calls'].includes(values.action);const args={action:values.action,path:workspace?'':U().relativePath(values.path),language:values.language.trim(),query:values.query.trim(),line:position?U().integer(values.line,'行',1,1000000):1,column:position?U().integer(values.column,'列',1,1000000):1,limit:100};if(workspace&&(!args.language||!args.query))throw new Error('项目符号查询需要语言标识与关键词。');const ticket=navigationEpoch=uid(),r=await request('lsp_query',args);if(!r||!current()||ticket!==navigationEpoch)return;const card=output(r,'语义查询结果');
-     if(!r.source_current)card.insertAdjacentHTML('afterbegin',U().note('当前源码一致性尚未确认','请重新查询后再据此修改；打开文件只读取当前文件，不保证旧位置仍相同。','','warning'));
-     if(r.truncated)card.insertAdjacentHTML('beforeend',U().note('结果超过本次范围',`本次最多显示 ${args.limit} 项；省略 ${r.omitted??'未知'} 项。缩小文件或关键词范围再查询。`));
-     if(!r.items?.length&&!r.text)card.insertAdjacentHTML('beforeend',`<p class="integration-help">${values.action==='diagnostics'?(r.diagnostics_fresh?'本次语言服务分析没有返回诊断；这不是测试通过。':'尚未确认新的诊断结果。'):'本次查询没有返回结果；这不证明整个项目没有相关代码。'}</p>`);
-     const list=document.createElement('div');list.className='integration-symbols';for(const item of r.items||[]){const start=item.range?.start||{},line=Number(start.line||item.line||1),column=Number(start.column||1);const row=document.createElement('article');row.className='integration-row';const text=document.createElement('div'),name=document.createElement('strong'),description=document.createElement('p');name.textContent=item.name||item.message||item.path||'语义结果';description.className='integration-help';description.textContent=[item.path?`${item.path} : ${line}:${column}`:'',item.message&&item.name?item.message:'',item.detail||''].filter(Boolean).join(' · ');text.append(name,description);row.append(text);if(item.path){const b=document.createElement('button');b.type='button';b.className='btn ghost small';b.textContent='打开并定位';b.onclick=wire(()=>openEditor(item.path,line,column));row.append(b);}list.append(row);}card.append(list);info('查询已完成 · 结果链接保留当前项目与目录');});
-    await section('#i-lsp-status',async(box,valid)=>{const r=await request('lsp_status');if(!r||!valid())return;box.innerHTML=r.semantic_queries_available?U().note('已找到配置的语言服务','查询时会启动受控语言服务进程并核实权限。程序存在不等于分析已经完成。','','success'):U().note('尚未启用语义查询','先在目标设备安装语言服务，并配置到这个项目。配置完成后重新检查，无需反复刷新整个页面。',jump('setup','开始配置'),'warning');for(const server of r.servers||[])box.insertAdjacentHTML('beforeend',`<p class="integration-help">${esc(server.language||server.name||'语言服务')} · ${esc(server.reason||server.executable||'已配置')}</p>`);U().details(box,'语言服务配置摘要',r);blockForm('lsp',r.semantic_queries_available?'':'先配置可用的语言服务');});
-   }else if(tab==='browser'){
-    body.innerHTML=offline+`<section class="panel integration-section"><div class="integration-section-head"><h2>后台网页验证</h2>${jump('setup','连接浏览器')}</div><div id="i-browser-status">正在读取浏览器连接…</div></section>`+form('browser-open','打开一个授权页面',input('url','网页地址','','type="url" required maxlength="4096" placeholder="https://你的授权站点/页面"'),'使用空闲标签页','只使用本机扩展准备好的后台标签页，不创建或激活浏览器窗口。')+`<section class="panel integration-section"><div class="integration-section-head"><h2>正在验证的页面</h2>${action('browser-refresh','刷新连接与页面')}</div><div id="i-leases"></div><div id="i-browser-page"></div></section><div id="i-result"></div>`;
-    let observation=null,browserInfo=null,observeTicket=0;
-    const urlValue=value=>{let url;try{url=new URL(value);}catch{throw new Error('请填写完整的 http 或 https 网页地址。');}if(!['http:','https:'].includes(url.protocol)||url.username||url.password)throw new Error('只支持不含账号密码的 http / https 地址。');if(browserInfo?.origins?.length&&!browserInfo.origins.includes(url.origin))throw new Error('这个站点不在当前项目的授权列表中。请由本机主理人核对准确站点和端口。');return url.href;};
-    const browserState=()=>section('#i-browser-status',async(box,valid)=>{const r=await request('browser_status');if(!r||!valid())return;browserInfo=r;const reason=!r.enabled?'未启用：请先在本机完成扩展与项目授权。':!r.connected?'未连接：请检查 Chrome 扩展和本机连接桥。':!r.profile_bound?'尚未绑定浏览器档案。':r.pool?.available===0?'没有空闲标签页：在扩展中点击“准备标签页”。':r.pool?.available==null?'空闲标签页状态尚未确认，请重新检查。':'';
-     box.innerHTML=U().note(reason?'浏览器需要准备':'可以打开授权页面',reason||'只控制当前服务分配的后台标签页；你切换到该标签页时会让出控制。',reason?jump('setup','查看连接步骤'):'',reason?'warning':'success')+`<div class="integration-browser-facts"><span>${r.connected?'已连接':'未连接'}</span><span>空闲标签页：${esc(r.pool?.available??'未确认')}</span><span>档案：${r.profile_bound?'已绑定':'未绑定'}</span></div><p class="integration-help">授权站点：${esc(r.origins?.join('、')||'尚无授权站点')}</p>`;U().details(box,'浏览器诊断',r);blockForm('browser-open',reason);
-     const leases=$('#i-leases',body);leases.innerHTML=(r.active_leases||[]).map(l=>`<article class="integration-row"><div><strong>后台页面 ${esc(l.lease_id.slice(0,8))}</strong><small>${esc(U().label(l.state))} · 到期 ${esc(timeText(l.expires_at||l.expires))}</small></div><div class="actions">${action('snapshot','观察页面',`data-id="${esc(l.lease_id)}"`)}${action('browser-close','释放页面',`data-id="${esc(l.lease_id)}"`)}</div></article>`).join('')||empty('没有正在验证的页面。先打开一个已授权地址。');for(const b of $$('[data-i-action=snapshot]',leases))b.onclick=wire(()=>snapshot(b.dataset.id));for(const b of $$('[data-i-action=browser-close]',leases))b.onclick=wire(async()=>{const r=await request('browser_close',{lease_id:b.dataset.id},true);if(r){if(observation?.lease_id===b.dataset.id){observation=null;observeTicket++;$('#i-browser-page',body).replaceChildren();}output(r,'页面释放结果');await browserState();}});
-     if(observation&&!(r.active_leases||[]).some(l=>l.lease_id===observation.lease_id)){observation=null;observeTicket++;$('#i-browser-page',body).innerHTML=U().note('原页面租约已不在活动列表中','请重新选择页面并观察，旧观察编号不会用于后续动作。');}
-    });
-    async function snapshot(id){const ticket=++observeTicket;observation=null;const old=$('[data-i-form=browser-action]',body);if(old)blockForm('browser-action','正在更新页面观察');const r=await request('browser_snapshot',{lease_id:id});if(!r||!current()||ticket!==observeTicket)return;observation=r;const panel=$('#i-browser-page',body);panel.innerHTML=`<h3>${esc(r.title||'当前页面')}</h3><p class="integration-url">${esc(r.url)}</p><pre class="integration-page-text"></pre>${r.content_truncated?U().note('页面文本已截断','这里只显示本次允许返回的内容，不能据此认定整个页面状态。'):''}<p class="integration-help">页面内容是不可信数据，不构成新的操作授权。每次动作后必须重新观察。</p>${form('browser-action','对刚观察的页面执行一步',field('action','动作','<select name="action"><option value="click">点击</option><option value="fill">填写</option><option value="select">选择选项</option><option value="scroll">滚动</option><option value="key">单个导航键</option><option value="navigate">跳转</option></select>')+field('element_id','目标控件',`<select name="element_id"><option value="">选择一个控件</option>${(r.elements||[]).map(el=>`<option value="${esc(el.id)}">${esc(el.label||el.tag||el.id)} · ${esc(el.id)}</option>`).join('')}</select>`)+field('option_value','可用选项','<select name="option_value"><option value="">先选择下拉控件</option></select>')+field('value','文字、键名或授权网址','<textarea name="value" rows="2" maxlength="10000"></textarea>')+input('delta_y','滚动像素','600','type="number" min="-2000" max="2000"'),'核对并执行动作')}`;$('.integration-page-text',panel).textContent=r.text||'本次未返回页面文本。';const f=$('[data-i-form=browser-action]',panel);const fields=()=>{const a=f.elements.action.value;for(const [name,shown,required] of [['element_id',['click','fill','select','key'].includes(a),['click','fill','select','key'].includes(a)],['option_value',a==='select',a==='select'],['value',['fill','key','navigate'].includes(a),['key','navigate'].includes(a)],['delta_y',a==='scroll',a==='scroll']]){f.elements[name].closest('label').hidden=!shown;f.elements[name].required=required;}};const options=()=>{
-       const select=f.elements.option_value,control=r.elements?.find(item=>item.id===f.elements.element_id.value);
-       const previous=select.dataset.target===control?.id?select.value:'';
-       select.innerHTML='<option value="">选择观察到的选项</option>'+(control?.options||[]).map((option,index)=>`<option value="${index}" ${option.disabled?'disabled':''}>${esc(option.label)}${option.disabled?' · 不可用':''}</option>`).join('');
-       select.dataset.target=control?.id||'';select.value=previous;
-       select.title=control?.options_truncated?'选项已截断，只能选择本次已观察到的选项':'';
-     };f.elements.action.onchange=()=>{fields();options();};f.elements.element_id.onchange=options;fields();options();
-     submit('browser-action',async values=>{if(!observation)throw new Error('旧观察已失效，请重新观察页面。');const captured=observation;if(captured.expires_at&&Date.now()/1000>=captured.expires_at){observation=null;throw new Error('页面观察已过期，请重新观察后再操作。');}const args={lease_id:captured.lease_id,observation_id:captured.observation_id,action:values.action,element_id:['click','fill','select','key'].includes(values.action)?values.element_id:'',value:['fill','select','key','navigate'].includes(values.action)?values.value:'',delta_y:values.action==='scroll'?U().integer(values.delta_y,'滚动像素',-2000,2000):0};if(values.action==='select'){
-       const control=captured.elements?.find(item=>item.id===args.element_id),index=Number(values.option_value);
-       const option=values.option_value!==''&&Number.isInteger(index)?control?.options?.[index]:null;
-       if(!option||option.disabled)throw new Error('请选择刚观察到的可用选项；无法观察时请重新读取页面。');
-       args.value=option.value;
-     }if(values.action==='navigate')args.value=urlValue(args.value);if(['click','fill','select','key'].includes(args.action)&&!args.element_id)throw new Error('请选择刚观察到的目标控件。');if(!await confirm('确认这一步网页动作',`${p.alias} · ${captured.url}。请核对目标；点击可能提交网站表单，回执不等于网站业务成功。`,`${args.action} ${args.element_id}\n${args.value||args.delta_y||''}`))return;if(observation!==captured)throw new Error('页面观察已更新，请重新核对。');observation=null;blockForm('browser-action','动作已提交；请查询回执后重新观察');const result=await request('browser_action',args,true);if(result){output(result,'网页动作回执');await snapshot(id);}});
+window.CodePierIntegrations = (() => {
+  const U = () => window.CodePierIntegrationUI;
+  const tabs = [
+    ['overview', '开始工作'],
+    ['validation', '测试验收'],
+    ['handoff', '任务衔接'],
+    ['navigation', '代码导航'],
+    ['worktrees', '隔离目录'],
+    ['browser', '网页验证'],
+    ['status', '运行诊断'],
+    ['setup', '配置引导'],
+  ];
+  const titles = {
+    project_read: '项目读取',
+    project_write: '项目修改',
+    shell: '命令执行',
+    native_model_turn: '原生模型对话',
+    host_file_roundtrip: '聊天附件传输',
+    host_mcp_apps: '聊天内改动卡片',
+    browser: '后台浏览器',
+  };
+  let mounted = null;
+  const mapping = (id) => {
+    const p = S.projects.find((p) => p.id === id);
+    return JSON.stringify([id, p?.device_id, p?.root]);
+  };
+  function state() {
+    if (!S.integrations || S.integrations.session !== S.session) {
+      const receipts = new Map();
+      try {
+        for (const r of JSON.parse(sessionValue('codepier-integration-receipts') || '[]'))
+          if (
+            r &&
+            typeof r.key === 'string' &&
+            typeof r.project === 'string' &&
+            typeof r.name === 'string'
+          )
+            receipts.set(r.key, { ...r, restored: true, busy: false });
+      } catch {}
+      S.integrations = {
+        session: S.session,
+        project: S.work.project || S.projects[0]?.id || '',
+        workspace_id: '',
+        tab: 'overview',
+        drafts: {},
+        submissions: receipts,
+        trees: [],
+        workflow_id: '',
+        ready: null,
+      };
     }
-    rememberForms();blockForm('browser-open','先检查浏览器连接');submit('browser-open',async values=>{const url=urlValue(values.url);const r=await request('browser_open',{url},true);if(r){output(r,'页面已打开');await browserState();if(current()&&r.lease_id)await snapshot(r.lease_id);}});$('[data-i-action=browser-refresh]',body).onclick=wire(browserState);await browserState();
-   }else if(tab==='setup'){
-    body.innerHTML=U().note('只为目标设备生成操作指引',`${p.device_name||'当前设备'} · ${p.alias}。此页不会安装程序、改变真实 Agent 配置、授权网站或重启服务。`,readinessActions())+`<div class="integration-setup-grid"><section class="panel integration-section"><span class="eyebrow">可选能力 / 代码导航</span><h2>连接本机语言服务</h2><ol class="integration-steps"><li><strong>在目标设备安装语言服务</strong><p>例如 Python 使用已安装的 Pyright。填写可执行文件的完整路径，避免服务启动环境与终端不同。</p></li><li><strong>生成本项目配置片段</strong><p>下方表单只生成 JSON。不会替换完整 Agent 配置，也不会修改其他项目授权。</p></li><li><strong>本机预览，再明确应用</strong><p>使用 Agent 的 Python 环境，在其运行目录执行下方示例，替换尖括号里的路径。默认只预览，核对后再添加 --apply。</p><pre class="integration-page-text">python -m agent.setup_integrations --config "&lt;Agent 配置文件路径&gt;" configure --settings "&lt;下载的配置片段路径&gt;"</pre></li><li><strong>按维护流程重启，再检查</strong><p>先结束活动任务，再由主理人确认重启。磁盘配置与运行进程的状态分别核对。</p>${jump('navigation','重新检查语言服务')}</li></ol></section><section class="panel integration-section"><span class="eyebrow">可选能力 / 网页验证</span><h2>连接后台浏览器</h2><ol class="integration-steps"><li><strong>安装浏览器扩展</strong><p>下载并解压到长期保留的目录。在 Chrome 扩展管理中加载已解压扩展。</p><a class="btn ghost small" href="/static/browser-extension.zip" download>浏览器扩展源码包</a></li><li><strong>绑定档案、项目与准确站点</strong><p>从扩展取得扩展编号和档案编号；按安装说明使用 agent.install_browser_bridge 在本机预览，核对后添加 --apply。站点端口不同属于不同授权范围。</p></li><li><strong>准备空闲标签页</strong><p>由你在扩展中授权网站并点击“准备标签页”。远程调用不会自行创建或激活窗口。</p></li><li><strong>检查连接并观察页面</strong><p>连接成功后输入已授权网址。先观察，再核对具体动作。</p>${jump('browser','重新检查浏览器')}</li></ol></section></div>`+form('settings','生成语言服务配置片段',input('language','语言标识','python','required maxlength="40"')+field('command','语言服务命令与参数（JSON 数组）','<textarea name="command" rows="3" required>["pyright-langserver","--stdio"]</textarea>'),'生成并下载片段','只作用于所选项目；请自行确认程序已经安装，推荐使用绝对路径。')+`<details class="panel integration-section"><summary>隔离目录与本机控制的配置边界</summary><p>隔离目录只适用于有提交的 Git 项目。默认位置在源项目旁的 CodePier-Worktrees；必须已在本机允许写入的范围内。授权不足时，不会自动扩大授权。</p><p>本机暂停接口需要主理人显式启用 integrations.local_control。面板接入控制和本机接口是不同入口，浏览器连接成功不等于本机控制已启用。</p><div class="actions">${jump('worktrees','管理隔离目录')}${jump('status','核对运行状态')}</div></details><section class="panel integration-section"><h2>安装、维护与卸载说明</h2><p>配置、应用、生效与实测是不同阶段。下载说明包含完整参数、平台边界和卸载流程。</p><a class="btn ghost small" href="/static/integration-guide.md" download>安装与使用说明</a></section><div id="i-result"></div>`;
-    rememberForms();submit('settings',async values=>{const data=U().settings(values.language,values.command,p.alias);output(data,'配置片段已生成 · 尚未应用');download('codepier-integrations-example.json',JSON.stringify(data,null,2)+'\n');info('配置已下载；完成本机预览与应用后，返回相应功能重新检查。');});
-   }
+    return S.integrations;
   }
-  let navigationEpoch='';
-  root.addEventListener('click',e=>{const b=e.target.closest('[data-i-jump]');if(b&&!b.disabled&&root.contains(b))changeTab(b.dataset.iJump).catch(error=>info(U().errorText(error),true));},{signal:controller.signal});
-  for(const b of $$('[data-i-tab]',root))b.addEventListener('click',()=>changeTab(b.dataset.iTab).catch(error=>info(U().errorText(error),true)),{signal:controller.signal});
-  $('.integration-tabs',root).addEventListener('keydown',e=>{if(e.isComposing||e.keyCode===229||!['ArrowLeft','ArrowRight','Home','End'].includes(e.key))return;const buttons=$$('[data-i-tab]',root),index=buttons.indexOf(e.target);if(index<0)return;e.preventDefault();const next=e.key==='Home'?0:e.key==='End'?buttons.length-1:(index+(e.key==='ArrowRight'?1:-1)+buttons.length)%buttons.length;changeTab(buttons[next].dataset.iTab).catch(error=>info(U().errorText(error),true));},{signal:controller.signal});
-  $('#i-project',root).onchange=async e=>{v.project=e.target.value;v.workspace_id='';v.workflow_id='';v.trees=[];v.ready=null;await renderPage(false);$('#i-project')?.focus({preventScroll:true});};
-  $('#i-workspace',root).onchange=async e=>{v.workspace_id=e.target.value;v.workflow_id='';v.ready=null;await renderPage(false);$('#i-workspace')?.focus({preventScroll:true});};
-  $('[data-i-action=refresh]')?.addEventListener('click',wire(async()=>{await renderPage(false);$('[data-i-action=refresh]')?.focus({preventScroll:true});}),{signal:controller.signal});
-  receipts();load().catch(error=>{if(current()&&error.name!=='AbortError'){info(U().errorText(error),true);if(!body.children.length)body.innerHTML=U().note('暂时无法加载',U().errorText(error),jump('overview','回到开始工作'),'warning');}});
- }
- document.addEventListener('click',e=>{const b=e.target.closest('[data-devtools]');if(!b||b.disabled||!S.session)return;if(b.closest('.modal'))closeModal();let project=b.dataset.project||'',workspace_id=b.dataset.workspace||'',path=b.dataset.path||'',line=1,column=1;
-  if(!project&&S.page==='workbench'){project=S.work.project;workspace_id=S.work.workspace_id||'';path=S.work.path;const el=$('#code-editor');if(el){const prefix=el.value.slice(0,el.selectionStart),lines=prefix.split('\n');line=lines.length;column=[...lines.at(-1)].length+1;}}
-  if(!project&&S.page==='native'&&typeof ChatUI!=='undefined')project=ChatUI.project;
-  if(!project&&['native','workbench'].includes(S.page)){toast('请先选择工作项目，再进入开发工具。',true);return;}
-  open({project,workspace_id,path,line,column,tab:b.dataset.devtools||'overview',workflow_id:b.dataset.workflow||''}).catch(error=>toast(U().errorText(error),true));
- });
- return {html,bind,open,inherit,detach};
+  function saveReceipts(v) {
+    if (v.session !== S.session) return;
+    for (const [key, entry] of v.submissions) if (entry.done) v.submissions.delete(key);
+    const rows = [...v.submissions.values()]
+      .filter((r) => !r.done)
+      .map((r) => ({
+        key: r.key,
+        project: r.project,
+        workspace_id: r.workspace_id,
+        name: r.name,
+        operation_id: r.operation_id || '',
+        created: r.created,
+        phase: r.phase || 'uncertain',
+      }));
+    sessionValue('codepier-integration-receipts', JSON.stringify(rows.slice(-40)));
+  }
+  function detach() {
+    mounted?.abort();
+    mounted = null;
+    if ($('#i-confirm-form')) closeModal($('.modal'));
+  }
+  function inherit(from) {
+    const v = state();
+    if (v.explicit) {
+      v.explicit = false;
+      return;
+    }
+    let source;
+    if (from === 'workbench') source = S.work;
+    else if (from === 'native' && typeof ChatUI !== 'undefined')
+      source = { project: ChatUI.project, workspace_id: '' };
+    if (source?.project && S.projects.some((p) => p.id === source.project)) {
+      v.project = source.project;
+      v.workspace_id = source.workspace_id || '';
+      v.tab = 'overview';
+      v.trees = [];
+      v.workflow_id = '';
+    }
+  }
+  async function open(options = {}) {
+    const v = state(),
+      before = {
+        project: v.project,
+        workspace_id: v.workspace_id,
+        tab: v.tab,
+        workflow_id: v.workflow_id,
+      };
+    const p = S.projects.find((p) => p.id === options.project || p.alias === options.project);
+    if (options.project && !p) throw new Error('项目映射已变化，请重新选择项目。');
+    v.project = p?.id || v.project;
+    v.workspace_id = options.workspace_id || '';
+    v.tab = tabs.some((t) => t[0] === options.tab) ? options.tab : 'overview';
+    v.workflow_id = options.workflow_id || '';
+    v.trees = [];
+    v.explicit = true;
+    if (options.path) {
+      const k = mapping(v.project) + '/' + v.workspace_id + '/navigation';
+      v.drafts[k] = {
+        ...(v.drafts[k] || {}),
+        path: options.path,
+        line: String(options.line || 1),
+        column: String(options.column || 1),
+      };
+    }
+    await navigate('integrations');
+    if (S.page !== 'integrations') Object.assign(v, before);
+    v.explicit = false;
+  }
+  const field = (name, title, control) =>
+    `<label class="integration-field"><span>${esc(title)}</span>${control || `<input name="${name}" autocomplete="off">`}</label>`;
+  const input = (name, title, value = '', extra = '') =>
+    field(name, title, `<input name="${name}" value="${esc(value)}" autocomplete="off" ${extra}>`);
+  const action = (id, text, extra = '') => U().button(id, text, extra);
+  const jump = (tab, text) => U().jump(tab, text);
+  const form = (id, title, fields, submit, help = '') =>
+    `<section class="panel integration-section"><h2>${esc(title)}</h2>${help ? `<p class="integration-help">${esc(help)}</p>` : ''}<form data-i-form="${id}" class="integration-form">${fields}<p class="integration-form-error" role="alert" hidden></p><div class="integration-form-actions"><button class="btn primary" type="submit">${esc(submit)}</button><span class="integration-form-hint" role="status"></span></div></form></section>`;
+  function html() {
+    const v = state();
+    if (!S.projects.some((p) => p.id === v.project)) {
+      v.project = S.projects[0]?.id || '';
+      v.workspace_id = '';
+      v.trees = [];
+    }
+    if (!tabs.some((t) => t[0] === v.tab)) v.tab = 'overview';
+    const p = S.projects.find((p) => p.id === v.project),
+      directory = v.workspace_id
+        ? v.trees.find((t) => t.workspace_id === v.workspace_id && t.state === 'ready')?.path ||
+          '隔离目录 ' + v.workspace_id.slice(0, 12) + ' · 路径待核对'
+        : p?.root || '';
+    return (
+      heading(
+        '开发工具',
+        'DEVELOPMENT / WORKFLOW',
+        '围绕当前项目检查、验证与继续工作。',
+        action('refresh', '重新检查'),
+      ) +
+      `<section class="integration-center" id="integration-center"><div class="integration-context"><label>工作项目<select id="i-project" aria-label="工作项目">${S.projects.map((p) => `<option value="${esc(p.id)}" ${p.id === v.project ? 'selected' : ''}>${esc(p.alias)} · ${esc(p.device_name || '')} · ${p.online ? '在线' : '离线'}</option>`).join('')}</select></label><label>操作目录<select id="i-workspace" aria-label="操作目录"><option value="">原项目目录</option>${v.trees
+        .filter((t) => t.state === 'ready')
+        .map(
+          (t) =>
+            `<option value="${esc(t.workspace_id)}" ${t.workspace_id === v.workspace_id ? 'selected' : ''}>${esc(t.label || t.workspace_id.slice(0, 12))}</option>`,
+        )
+        .join(
+          '',
+        )}${v.workspace_id && !v.trees.some((t) => t.workspace_id === v.workspace_id) ? `<option value="${esc(v.workspace_id)}" selected>隔离目录 ${esc(v.workspace_id.slice(0, 12))} · 待核对</option>` : ''}</select></label><div class="integration-scope"><strong>${esc(p?.device_name || '尚未选择设备')}</strong><span>${v.workspace_id ? '隔离目录 · 不会自动合并' : '原项目 · 保留现有授权'}</span><code title="${esc(directory)}">${esc(directory)}</code></div></div><nav class="integration-tabs" role="tablist" aria-label="开发工具分类">${tabs.map(([id, name]) => `<button type="button" id="i-tab-${id}" data-i-tab="${id}" role="tab" aria-controls="i-body" aria-selected="${v.tab === id}" aria-pressed="${v.tab === id}" tabindex="${v.tab === id ? 0 : -1}">${esc(name)}</button>`).join('')}</nav><div id="i-status" role="status" aria-live="polite"></div><div id="i-receipts"></div><div id="i-body" role="tabpanel" aria-labelledby="i-tab-${v.tab}" tabindex="0"></div></section>`
+    );
+  }
+  function bind() {
+    detach();
+    const controller = (mounted = new AbortController()),
+      v = state(),
+      root = $('#integration-center');
+    if (!root) return;
+    const session = S.session,
+      seq = S.renderSeq,
+      project = v.project,
+      workspace_id = v.workspace_id,
+      scope = mapping(project),
+      tab = v.tab,
+      p = S.projects.find((p) => p.id === project);
+    const body = $('#i-body', root),
+      status = $('#i-status', root);
+    const current = () =>
+      !controller.signal.aborted &&
+      root.isConnected &&
+      S.session === session &&
+      seq === S.renderSeq &&
+      S.page === 'integrations' &&
+      v.project === project &&
+      v.workspace_id === workspace_id &&
+      mapping(project) === scope;
+    const target = () => ({ project, ...(workspace_id ? { workspace_id } : {}) });
+    const info = (text, error = false) => {
+      if (current()) {
+        status.textContent = text;
+        status.className = 'integration-feedback' + (error ? ' error' : '');
+      }
+    };
+    const call = (name, args, read = true) =>
+      api('/api/tools/call', {
+        method: 'POST',
+        body: JSON.stringify({ tool: name, arguments: args }),
+        requestTimeout: 12000,
+        retryDelays: [],
+        retrySafe: false,
+        ...(read ? { signal: controller.signal } : {}),
+      });
+    function argsFor(name, args) {
+      if (
+        [
+          'workflows_handoff',
+          'workflows_get',
+          'operations_get',
+          'operations_wait',
+          'operations_list',
+        ].includes(name)
+      )
+        return { ...args };
+      if (['activity_list', 'workflows_list'].includes(name)) return { project, ...args };
+      return { ...target(), ...args };
+    }
+    function resolveReply(r, name) {
+      if (r?.error)
+        throw Object.assign(new Error(r.error.message || '工具请求失败'), r.error, {
+          definitive: true,
+        });
+      if (r?.pending) return r;
+      if (
+        r?.state &&
+        ['failed', 'cancelled', 'needs_review', 'interrupted'].includes(r.state) &&
+        !r.result
+      )
+        throw Object.assign(new Error(r.error || U().label(r.state)), {
+          operation_id: r.id,
+          definitive: r.state !== 'needs_review',
+        });
+      if (r?.result) {
+        if (
+          (r.state === 'succeeded' && r.result.ok) ||
+          (name === 'validation_run' && r.result.data?.validation_id)
+        )
+          return { operation_id: r.id, ...r.result.data };
+        throw Object.assign(new Error(r.result.error?.message || r.error || U().label(r.state)), {
+          code: r.result.error?.code,
+          operation_id: r.id,
+          definitive: true,
+        });
+      }
+      return r;
+    }
+    async function track(entry, reply) {
+      if (reply?.operation_id) entry.operation_id = reply.operation_id;
+      if (!reply?.pending) {
+        const result = resolveReply(reply, entry.name);
+        entry.done = true;
+        entry.phase = 'confirmed';
+        entry.result = result;
+        saveReceipts(v);
+        return result;
+      }
+      entry.phase = 'pending';
+      saveReceipts(v);
+      receipts();
+      const deadline = Date.now() + 22000;
+      while (current() && Date.now() < deadline) {
+        const op = await call('operations_wait', {
+          operation_id: entry.operation_id,
+          wait_seconds: 2,
+          output_limit: 12000,
+        });
+        if (!op.pending) {
+          const r = resolveReply(op, entry.name);
+          entry.done = true;
+          entry.result = r;
+          entry.phase = 'confirmed';
+          saveReceipts(v);
+          receipts();
+          return r;
+        }
+        entry.phase = op.state || 'pending';
+        if (current()) info(U().label(entry.phase) + ' · 可以离开此页，原操作仍会保留');
+        await pause(300);
+      }
+      receipts();
+      return null;
+    }
+    async function request(name, args = {}, mutating = false) {
+      if (!current()) return null;
+      const context = argsFor(name, args);
+      let entry;
+      if (mutating) {
+        const signature = JSON.stringify([scope, context, name]);
+        entry = [...v.submissions.values()].find((r) => !r.done && r.signature === signature);
+        const other = [...v.submissions.values()].find(
+          (r) =>
+            !r.done &&
+            r.project === project &&
+            r.workspace_id === workspace_id &&
+            r.name === name &&
+            r !== entry,
+        );
+        if (other)
+          throw new Error('这类操作还有待确认的原请求。请先在上方查询原结果，不要换参数重复提交。');
+        if (!entry) {
+          entry = {
+            name,
+            project,
+            workspace_id,
+            scope,
+            signature,
+            key: 'panel-integration-' + uid(),
+            created: Date.now() / 1000,
+            phase: 'sending',
+          };
+          entry.args = { ...context, idempotency_key: entry.key };
+          v.submissions.set(entry.key, entry);
+          saveReceipts(v);
+        }
+        if (entry.busy) {
+          info('原请求正在确认，请勿重复提交');
+          return null;
+        }
+        entry.busy = true;
+        receipts();
+      }
+      try {
+        if (mutating) {
+          const r = await track(
+            entry,
+            entry.operation_id
+              ? { pending: true, operation_id: entry.operation_id }
+              : await call(name, entry.args, false),
+          );
+          return current() ? r : null;
+        }
+        const remote =
+          !['activity_list', 'workflows_list', 'workflows_handoff', 'workflows_get'].includes(
+            name,
+          ) && !name.startsWith('operations_');
+        let r = resolveReply(
+          await call(name, {
+            ...context,
+            ...(remote ? { idempotency_key: 'panel-integration-read-' + uid() } : {}),
+          }),
+          name,
+        );
+        if (r?.pending) {
+          const until = Date.now() + 22000,
+            id = r.operation_id;
+          while (current() && Date.now() < until) {
+            const op = await call('operations_wait', {
+              operation_id: id,
+              wait_seconds: 2,
+              output_limit: 16000,
+            });
+            if (!op.pending) {
+              r = resolveReply(op, name);
+              break;
+            }
+            await pause(250);
+          }
+          if (r.pending)
+            throw Object.assign(new Error('读取仍在等待本机，可稍后重试或查看原操作。'), {
+              operation_id: id,
+            });
+        }
+        return current() ? r : null;
+      } catch (error) {
+        if (entry) {
+          const rejected = error.definitive || (error.admitted === false && !error.operation_id);
+          entry.phase = rejected ? 'failed' : 'uncertain';
+          entry.error = U().errorText(error);
+          if (rejected) entry.done = true;
+          saveReceipts(v);
+        }
+        throw error;
+      } finally {
+        if (entry) {
+          entry.busy = false;
+          receipts();
+        }
+      }
+    }
+    async function recover(entry) {
+      if (entry.busy || !current()) return;
+      entry.busy = true;
+      receipts();
+      try {
+        if (!entry.operation_id) {
+          const found = await call('operations_list', {
+            project: entry.project,
+            idempotency_key: entry.key,
+            limit: 1,
+          });
+          if (!current()) return;
+          entry.operation_id = found.operations?.[0]?.id || '';
+          if (!entry.operation_id) {
+            info(
+              '尚未查到原操作。' +
+                (entry.args
+                  ? '可用“重试同一请求”继续核查，参数与幂等键不会改变。'
+                  : '这是一条刷新前的请求，仅保留查询信息；请核对操作审计，不会自动重放。'),
+            );
+            entry.checkedMissing = true;
+            return;
+          }
+        }
+        const r = await track(entry, { pending: true, operation_id: entry.operation_id });
+        if (r && current()) {
+          output(r, '原操作结果 · 未重新执行');
+          info('原结果已核实');
+        }
+      } catch (error) {
+        entry.error = U().errorText(error);
+        if (error.definitive) {
+          entry.done = true;
+          entry.phase = 'failed';
+        } else entry.phase = 'uncertain';
+        info(entry.error, true);
+      } finally {
+        entry.busy = false;
+        saveReceipts(v);
+        receipts();
+      }
+    }
+    function receipts() {
+      if (!current()) return;
+      const box = $('#i-receipts', root);
+      box.replaceChildren();
+      const pending = [...v.submissions.values()].filter(
+        (r) => !r.done && r.project === project && (r.workspace_id || '') === workspace_id,
+      );
+      if (!pending.length) return;
+      const h = document.createElement('h2');
+      h.textContent = '待确认的操作';
+      box.append(h);
+      for (const r of pending) {
+        const row = document.createElement('article');
+        row.className = 'integration-receipt';
+        const text = document.createElement('div'),
+          strong = document.createElement('strong'),
+          small = document.createElement('small');
+        strong.textContent =
+          {
+            validation_run: '测试验收',
+            worktrees_create: '创建隔离目录',
+            worktrees_remove: '移除隔离目录',
+            browser_action: '网页动作',
+            browser_open: '打开网页',
+            browser_close: '释放页面',
+            integration_control: '接入控制',
+            validations_accept: '人工验收决定',
+          }[r.name] || r.name;
+        small.textContent =
+          (r.error || U().label(r.phase)) + ' · ' + (r.operation_id || '提交回执待核查');
+        text.append(strong, small);
+        row.append(text);
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'btn ghost small';
+        b.disabled = r.busy;
+        b.textContent = r.busy ? '正在核查…' : '查询原结果';
+        b.onclick = () => recover(r);
+        row.append(b);
+        if (r.operation_id) {
+          const a = document.createElement('button');
+          a.className = 'btn ghost small';
+          a.dataset.action = 'operation-detail';
+          a.dataset.id = r.operation_id;
+          a.textContent = '操作详情';
+          row.append(a);
+        }
+        if (r.checkedMissing && r.args && r.scope === scope) {
+          const retry = document.createElement('button');
+          retry.type = 'button';
+          retry.className = 'btn ghost small';
+          retry.textContent = '重试同一请求';
+          retry.disabled = r.busy;
+          retry.onclick = async () => {
+            if (
+              !(await U().confirmAction({
+                title: '重试原请求',
+                text: '只发送之前完全相同的参数和幂等键，不创建另一项操作。',
+              }))
+            )
+              return;
+            if (!current()) return;
+            r.busy = true;
+            receipts();
+            try {
+              const value = await track(r, await call(r.name, r.args, false));
+              if (value && current()) output(value, '原请求结果');
+            } catch (error) {
+              if (error.definitive) r.done = true;
+              info(U().errorText(error), true);
+            } finally {
+              r.busy = false;
+              saveReceipts(v);
+              receipts();
+            }
+          };
+          row.append(retry);
+        }
+        box.append(row);
+      }
+    }
+    function output(value, title) {
+      if (!current() || !value) return;
+      const box = $('#i-result', body);
+      if (!box) return;
+      box.replaceChildren();
+      return U().result(box, value, title);
+    }
+    function wire(fn) {
+      return async (e) => {
+        const button = e.currentTarget;
+        if (button.disabled) return;
+        const old = button.textContent;
+        button.disabled = true;
+        button.setAttribute('aria-busy', 'true');
+        try {
+          await fn(e);
+        } catch (error) {
+          if (current() && error.name !== 'AbortError') info(U().errorText(error), true);
+        } finally {
+          if (button.isConnected) {
+            button.disabled = button.dataset.blocked === 'true';
+            button.removeAttribute('aria-busy');
+            if (!button.textContent) button.textContent = old;
+          }
+        }
+      };
+    }
+    const draft = () => (v.drafts[scope + '/' + workspace_id + '/' + tab] ??= {});
+    function rememberForms() {
+      const saved = draft();
+      for (const el of $$('input[name],textarea[name],select[name]', body)) {
+        if (Object.hasOwn(saved, el.name)) el.value = saved[el.name];
+        el.addEventListener('input', () => (saved[el.name] = el.value), {
+          signal: controller.signal,
+        });
+        el.addEventListener('change', () => (saved[el.name] = el.value), {
+          signal: controller.signal,
+        });
+      }
+    }
+    function submit(id, fn) {
+      const f = $(`[data-i-form="${id}"]`, body);
+      f.addEventListener(
+        'submit',
+        async (e) => {
+          e.preventDefault();
+          const b = $('button[type=submit]', f),
+            error = $('.integration-form-error', f),
+            hint = $('.integration-form-hint', f);
+          if (b.disabled || !f.reportValidity() || !current()) return;
+          const values = Object.fromEntries(new FormData(f)),
+            original = b.textContent;
+          b.disabled = true;
+          b.setAttribute('aria-busy', 'true');
+          f.setAttribute('aria-busy', 'true');
+          error.hidden = true;
+          hint.textContent = '正在处理…';
+          try {
+            await fn(values);
+          } catch (exc) {
+            if (current() && exc.name !== 'AbortError') {
+              error.textContent = U().errorText(exc);
+              error.hidden = false;
+              info(U().errorText(exc), true);
+            }
+          } finally {
+            if (f.isConnected) {
+              b.disabled = b.dataset.blocked === 'true';
+              b.textContent = original;
+              b.removeAttribute('aria-busy');
+              f.removeAttribute('aria-busy');
+              hint.textContent = '';
+            }
+          }
+        },
+        { signal: controller.signal },
+      );
+      f.addEventListener(
+        'input',
+        () => {
+          const e = $('.integration-form-error', f);
+          if (e) e.hidden = true;
+        },
+        { signal: controller.signal },
+      );
+    }
+    async function section(selector, load) {
+      const box = $(selector, body);
+      if (!box) return;
+      const ticket = (box.dataset.ticket = uid());
+      box.setAttribute('aria-busy', 'true');
+      try {
+        await load(box, () => current() && box.isConnected && box.dataset.ticket === ticket);
+      } catch (error) {
+        if (!current() || box.dataset.ticket !== ticket || error.name === 'AbortError') return;
+        box.innerHTML = U().note(
+          '暂时无法读取',
+          U().errorText(error),
+          action('section-retry', '重新读取'),
+          'warning',
+        );
+        $('[data-i-action=section-retry]', box).onclick = wire(() => section(selector, load));
+        if (error.operation_id)
+          box.insertAdjacentHTML(
+            'beforeend',
+            `<button class="btn ghost small" data-action="operation-detail" data-id="${esc(error.operation_id)}">查看原操作</button>`,
+          );
+      } finally {
+        if (box.isConnected && box.dataset.ticket === ticket)
+          box.setAttribute('aria-busy', 'false');
+      }
+    }
+    async function changeTab(id) {
+      if (!tabs.some((t) => t[0] === id)) return;
+      v.tab = id;
+      await renderPage(false);
+      const selected = $(`[data-i-tab="${id}"]`);
+      selected?.focus({ preventScroll: true });
+      const strip = selected?.closest('.integration-tabs');
+      if (strip) {
+        const item = selected.getBoundingClientRect(),
+          bounds = strip.getBoundingClientRect();
+        if (item.left < bounds.left) strip.scrollLeft -= bounds.left - item.left;
+        else if (item.right > bounds.right) strip.scrollLeft += item.right - bounds.right;
+      }
+    }
+    function blockForm(id, reason) {
+      const f = $(`[data-i-form="${id}"]`, body);
+      if (!f) return;
+      const b = $('button[type=submit]', f);
+      b.dataset.blocked = String(!!reason);
+      b.disabled = !!reason;
+      b.title = reason || '';
+      $('.integration-form-hint', f).textContent = reason || '';
+    }
+    async function confirm(title, text, command = '', typed = '', danger = false) {
+      const yes = await U().confirmAction({
+        title,
+        text,
+        command,
+        typed,
+        danger,
+        confirmLabel: danger ? '确认操作' : '确认并继续',
+      });
+      return yes && current();
+    }
+    async function openEditor(path = '', line = 1, column = 1, ws = workspace_id) {
+      const same = S.work.project === project && (S.work.workspace_id || '') === ws;
+      if (S.work.dirty && (!same || (path && path !== S.work.path))) {
+        if (
+          !(await confirm(
+            '保留还是替换编辑草稿？',
+            '打开目标文件或目录将丢弃工作台中尚未保存的草稿。取消后可先回工作台保存。',
+          ))
+        )
+          return;
+      }
+      if (!current()) return;
+      if (!same) resetWork(project, ws);
+      else if (S.work.dirty && path && path !== S.work.path) S.work.dirty = false;
+      await navigate('workbench');
+      if (
+        S.page !== 'workbench' ||
+        S.work.project !== project ||
+        (S.work.workspace_id || '') !== ws ||
+        S.session !== session
+      )
+        return;
+      if (path && S.work.path !== path) {
+        if (!(await readFile(path))) return;
+      }
+      const el = $('#code-editor');
+      if (path && el && S.work.path === path) {
+        const lines = el.value.split('\n');
+        const index = Math.min(Math.max(0, line - 1), lines.length - 1),
+          offset =
+            lines.slice(0, index).reduce((n, s) => n + s.length + 1, 0) +
+            [...lines[index]].slice(0, Math.max(0, column - 1)).join('').length;
+        el.focus();
+        el.setSelectionRange(offset, offset);
+        el.scrollTop = Math.max(
+          0,
+          (index - 4) * (parseFloat(getComputedStyle(el).lineHeight) || 20),
+        );
+        el.dispatchEvent(new Event('scroll'));
+      }
+    }
+    async function toChat(text = '') {
+      if (workspace_id)
+        throw new Error(
+          '原生 CLI 目前不能使用这个受管隔离目录编号。请在隔离目录工作台编辑和验收，或明确切回原项目。',
+        );
+      if (!current()) return;
+      const provider = typeof ChatUI !== 'undefined' ? ChatUI.provider : 'pi';
+      await chatOpenProject(project, provider);
+      if (S.page !== 'native' || S.session !== session || ChatUI.project !== project) return;
+      if (text) {
+        if (await chatReplaceDraft(text)) toast('交接说明已放入草稿；检查后发送才会开始执行。');
+      }
+    }
+    const readinessActions = () =>
+      jump('setup', '查看配置步骤') +
+      `<button type="button" class="btn ghost small" data-action="device-detail" data-id="${esc(p?.device_id || '')}">管理目标设备</button>`;
+    async function checks(box, valid) {
+      const r = await request('readiness_get');
+      if (!r || !valid()) return;
+      v.ready = { scope, workspace_id, data: r };
+      const actionable = (r.checks || []).filter((c) =>
+          ['project_read', 'project_write', 'shell'].includes(c.name),
+        ),
+        basic = actionable.length === 3 && actionable.every((c) => c.state === 'ready');
+      box.innerHTML = U().note(
+        basic ? '基础开发工具已就绪' : '有项目能力需要检查',
+        basic
+          ? '可以按现有授权读取、编辑并执行命令；具体任务仍需实际验收。'
+          : '下方状态来自当前授权和目标 Agent；不会自动提升权限。',
+        basic ? jump('validation', '开始一次验收') : readinessActions(),
+        basic ? 'success' : 'warning',
+      );
+      if (r.build?.restart_required)
+        box.insertAdjacentHTML(
+          'beforeend',
+          U().note(
+            '磁盘更新尚未完全生效',
+            '正在运行的 Agent 与磁盘源码不同。请先结束活动任务，再由主理人到设备管理核对更新或重启。',
+            `<button class="btn ghost small" data-action="device-detail" data-id="${esc(p?.device_id || '')}">查看设备</button>`,
+            'warning',
+          ),
+        );
+      if (r.admission?.paused)
+        box.insertAdjacentHTML(
+          'beforeend',
+          U().note(
+            '该项目已暂停新的 MCP 修改',
+            '管理面板的只读检查和原操作回执保留。原生会话是否停止需要单独核实。',
+            jump('status', '查看接入控制'),
+            'warning',
+          ),
+        );
+      box.insertAdjacentHTML(
+        'beforeend',
+        (r.checks || [])
+          .map(
+            (c) =>
+              `<div class="integration-check"><strong>${esc(titles[c.name] || c.name)}</strong>${U().badge(c.state)}<small>${esc(c.reason || { ready: '已满足这项调用的就绪条件', disabled: '需要本机主理人配置后重新检查', denied: '当前授权不允许此操作', unknown: '权限或运行条件尚未得到确认', missing: '请检查目标设备上的程序路径' }[c.state] || '')}</small></div>`,
+          )
+          .join(''),
+      );
+      const ls = r.language_servers || {},
+        br = r.browser || {};
+      box.insertAdjacentHTML(
+        'beforeend',
+        `<div class="integration-optional"><div><strong>代码语义查询</strong>${U().badge(ls.semantic_queries_available ? 'available' : 'disabled', ls.semantic_queries_available ? '已配置 · 查询时核验' : '尚未配置')}${jump(ls.semantic_queries_available ? 'navigation' : 'setup', ls.semantic_queries_available ? '查询代码' : '配置语言服务')}</div><div><strong>后台网页验证</strong>${U().badge(br.connected ? 'available' : br.enabled ? 'not_connected' : 'disabled', br.connected ? '已连接 · 打开前核验' : '')}${jump(br.connected ? 'browser' : 'setup', br.connected ? '验证页面' : '查看连接步骤')}</div></div><p class="integration-help">当前结果只代表本次凭据；面板管理员就绪不等于每个 MCP 授权都已就绪。</p>`,
+      );
+      U().details(box, '授权、源码与运行环境', r);
+    }
+    function taskRow(w) {
+      const id = w.workflow_id || w.id;
+      return `<article class="integration-row"><div><strong>${esc(w.title)}</strong><small>${esc(U().label(w.state))} · ${esc(timeText(w.updated || w.created))}</small><p class="integration-help">${esc(w.goal || '')}</p>${w.progress ? `<small>${w.progress.completed} / ${w.progress.total} 步已完成</small>` : ''}</div><div class="actions">${action('handoff', '查看并衔接', `data-id="${esc(id)}"`)}<button class="btn ghost small" data-wf-action="detail" data-id="${esc(id)}">任务详情</button></div></article>`;
+    }
+    async function showHandoff(id) {
+      const token = (handoffEpoch = uid());
+      info('正在读取原任务与断点…');
+      const [r, w] = await Promise.all([
+        request('workflows_handoff', { workflow_id: id }),
+        request('workflows_get', { workflow_id: id }),
+      ]);
+      if (!r || !w || !current() || token !== handoffEpoch) return;
+      if (w.project_id && w.project_id !== project)
+        throw new Error('任务不属于当前项目，请重新选择。');
+      const box = $('#i-result', body);
+      box.replaceChildren();
+      const section = document.createElement('section');
+      section.className = 'panel integration-section';
+      const uncertain = r.pending_or_uncertain || [],
+        changed = r.mapping_changed || w.mapping_changed,
+        otherWorkspace = !!w.workspace_id && w.workspace_id !== workspace_id;
+      section.innerHTML = `<div class="integration-section-head"><h2>${esc(w.title || '任务交接')}</h2>${U().badge(r.state)}</div><h3>原目标</h3><p class="integration-prose">${esc(r.original_goal || '未记录')}</p>${r.summary ? `<h3>最近断点</h3><p class="integration-prose">${esc(r.summary)}</p>` : ''}${changed ? U().note('项目映射已经变化', '只能核对历史记录，请先为当前设备或目录建立新的任务。', '', 'warning') : ''}${otherWorkspace ? U().note('此任务绑定了另一隔离目录', '以下仅供读取交接；先核对任务目录，不会把隔离任务投递到原目录。', '', 'warning') : ''}<div class="integration-grid"><div><h3>已完成的记录</h3>${(r.completed || []).map((s) => `<article class="integration-step"><strong>${esc(s.title)}</strong><p>${esc(s.summary || '无额外摘要')}</p></article>`).join('') || '<p class="integration-help">尚无已完成步骤。</p>'}</div><div><h3>接下来需要处理</h3>${(r.remaining || []).map((s) => `<article class="integration-step"><strong>${esc(s.title)}</strong><p>${esc(s.acceptance || s.summary || '请先核对原任务要求')}</p></article>`).join('') || '<p class="integration-help">没有未完成步骤；这不代表已经部署。</p>'}</div></div>${uncertain.length ? `<h3>需核查的项目近期操作</h3><p class="integration-help">这些操作来自项目近期记录，不代表全部属于这项任务。请先查询原回执，不要重复执行。</p>${uncertain.map((o) => `<article class="integration-row"><div><strong>${esc(o.tool)}</strong><small>${esc(U().label(o.state))}</small><code>${esc(o.operation_id)}</code></div><button class="btn ghost small" data-action="operation-detail" data-id="${esc(o.operation_id)}">查询原操作</button></article>`).join('')}` : ''}<div class="actions">${action('handoff-copy', '复制交接说明')}${action('handoff-chat', '带到 CLI 草稿', `${changed || otherWorkspace || workspace_id ? 'disabled' : ''} title="只填写草稿，确认发送后才开始执行"`)}<button class="btn ghost small" data-wf-action="detail" data-id="${esc(id)}">打开完整任务</button>${jump('validation', '核对当前验收')}</div><p class="integration-help">不猜测它对应哪条 CLI 会话，不自动运行模型或重放命令。隔离任务请在相应工作目录处理。</p>`;
+      box.append(section);
+      const text = U().handoffText(r, w.title);
+      $('[data-i-action=handoff-copy]', section).onclick = wire(() => copy(text));
+      $('[data-i-action=handoff-chat]', section).onclick = wire(() => toChat(text));
+      U().details(section, '交接来源与原始记录', r);
+      section.tabIndex = -1;
+      section.focus({ preventScroll: true });
+      info('任务交接已读取 · 未启动执行');
+    }
+    let handoffEpoch = '';
+    async function workflowList(selector, limit = 20) {
+      let cursor = '',
+        history = [];
+      const load = async (box, valid) => {
+        const r = await request('workflows_list', { limit, cursor });
+        if (!r || !valid()) return;
+        box.innerHTML =
+          (r.workflows || []).map(taskRow).join('') || empty('这个项目还没有开发任务。');
+        box.insertAdjacentHTML(
+          'beforeend',
+          `<div class="integration-list-footer">${action('new-workflow', '建立开发任务', p.mode === 'write' ? '' : 'disabled title="当前项目为只读"')}<span class="integration-help">每页最多 ${limit} 项 · 只读取进度，不自动执行</span><div class="actions">${action('workflow-prev', '上一页', history.length ? '' : 'disabled')}${action('workflow-next', '下一页', r.next_cursor ? '' : 'disabled')}</div></div>`,
+        );
+        $('[data-i-action=new-workflow]', box).onclick = wire(async () => {
+          workflowState().project = project;
+          await workflowCreate();
+        });
+        for (const b of $$('[data-i-action=handoff]', box))
+          b.onclick = wire(() => showHandoff(b.dataset.id));
+        $('[data-i-action=workflow-prev]', box).onclick = wire(async () => {
+          cursor = history.pop() || '';
+          await section(selector, load);
+        });
+        $('[data-i-action=workflow-next]', box).onclick = wire(async () => {
+          history.push(cursor);
+          cursor = r.next_cursor;
+          await section(selector, load);
+        });
+      };
+      await section(selector, load);
+    }
+    async function validationList(selector) {
+      await section(selector, async (box, valid) => {
+        const r = await request('validations_list');
+        if (!r || !valid()) return;
+        const rows = r.validations || [];
+        box.innerHTML =
+          rows
+            .map(
+              (record) =>
+                `<article class="integration-row"><div><strong>${esc(record.label || '未命名验收')}</strong><small>历史：${esc(U().label(record.historical_state))} · ${esc(timeText(record.created))}</small><small>退出码 ${esc(record.exit_code ?? '未记录')} · 当前源码尚未重新核对</small></div>${action('validation-detail', '核对详情', `data-id="${esc(record.validation_id)}"`)}</article>`,
+            )
+            .join('') || empty('还没有版本绑定验收。填写命令并确认运行后，记录会显示在这里。');
+        box.insertAdjacentHTML(
+          'beforeend',
+          `<p class="integration-help">最近最多 ${esc(r.limit || 100)} 条；历史通过不等于当前版本通过。</p>`,
+        );
+        for (const b of $$('[data-i-action=validation-detail]', box))
+          b.onclick = wire(() => showValidation(b.dataset.id));
+      });
+    }
+    let validationEpoch = '';
+    async function showValidation(id) {
+      const ticket = (validationEpoch = uid());
+      info('正在重新核对源码…');
+      const r = await request('validations_get', { validation_id: id });
+      if (!r || !current() || ticket !== validationEpoch) return;
+      const card = output(r, '当前验收：' + U().label(r.state));
+      const outputBox = document.createElement('div');
+      outputBox.className = 'integration-evidence-output';
+      card.insertBefore(outputBox, $('details', card));
+      outputBox.innerHTML = '<p class="integration-help">正在读取原操作输出…</p>';
+      const controls = document.createElement('div');
+      controls.className = 'integration-review-controls';
+      controls.innerHTML = `<label class="integration-field">人工复核备注<textarea id="i-validation-note" maxlength="2000" rows="2" placeholder="记录实际检查的内容或拒绝原因"></textarea></label><label class="integration-checkbox"><input id="i-validation-reviewed" type="checkbox">我已核对当前源码与原操作输出</label><div class="actions">${action('validation-accept', '接受当前验收', 'disabled')}${action('validation-reject', '拒绝此验收')}${action('validation-recheck', '重新核对源码')}</div><p class="integration-help">${r.state === 'passed' ? '接受只记录你的人工决定，不代表已部署。' : '当前结果不可接受；可以记录拒绝原因或重新运行验收。'}</p>`;
+      card.append(controls);
+      let outputRead = false;
+      const accept = $('[data-i-action=validation-accept]', controls),
+        review = $('#i-validation-reviewed', controls);
+      const availability = () => {
+        accept.disabled =
+          r.state !== 'passed' || r.accepted_current || !review.checked || !outputRead;
+        accept.dataset.blocked = String(accept.disabled);
+      };
+      review.onchange = availability;
+      for (const decision of ['accept', 'reject'])
+        $(`[data-i-action="validation-${decision}"]`, controls).onclick = wire(async () => {
+          const note = $('#i-validation-note', controls).value;
+          if (
+            !(await confirm(
+              decision === 'accept' ? '接受当前版本的验收？' : '拒绝这条验收？',
+              '提交时会再次核对源码。人工决定不会自动部署、合并或继续模型任务。',
+            ))
+          )
+            return;
+          const response = await request(
+            'validations_accept',
+            { validation_id: id, confirm: id, decision, note },
+            true,
+          );
+          if (response) {
+            output(response, '人工验收决定');
+            if ($('#i-validations', body)) await validationList('#i-validations');
+          }
+        });
+      $('[data-i-action=validation-recheck]', controls).onclick = wire(() => showValidation(id));
+      try {
+        const op = await request('operations_get', {
+          operation_id: r.execution_operation_id || id,
+          output_limit: 24000,
+        });
+        if (!op || !current() || ticket !== validationEpoch || !card.isConnected) return;
+        outputBox.replaceChildren();
+        const h = document.createElement('h4');
+        h.textContent =
+          op.output_truncated || op.result?.data?.output_truncated
+            ? '原操作输出（保留尾部）'
+            : '原操作输出';
+        const pre = document.createElement('pre');
+        pre.className = 'integration-page-text';
+        pre.textContent = op.output || op.result?.data?.output || '原操作没有文本输出。';
+        outputBox.append(h, pre);
+        outputRead = true;
+        availability();
+      } catch (error) {
+        if (current() && card.isConnected) {
+          outputBox.innerHTML = U().note(
+            '暂未取得原输出',
+            U().errorText(error),
+            action('retry-output', '重新读取'),
+            'warning',
+          );
+          $('[data-i-action=retry-output]', outputBox).onclick = wire(() => showValidation(id));
+        }
+      }
+      if (current()) info('本次源码核对：' + U().label(r.state));
+    }
+    async function load() {
+      if (!p) {
+        body.innerHTML = U().note(
+          '先选择一个工作项目',
+          '把已接入设备上的目录映射为项目，再进行读取、编辑和验收。',
+          '<button class="btn primary" data-action="add-project">添加项目映射</button>',
+        );
+        return;
+      }
+      const offline =
+        p.online === false
+          ? U().note(
+              '目标设备当前离线',
+              '历史任务可以查看。本机检查与执行需等待设备连接；不会把离线当作任务失败。',
+              `<button class="btn ghost small" data-action="device-detail" data-id="${esc(p.device_id)}">查看设备连接</button>`,
+              'warning',
+            )
+          : '';
+      if (tab === 'overview') {
+        body.innerHTML =
+          offline +
+          `<div class="integration-hero"><div><span class="eyebrow">当前工作项目</span><h2>${esc(p.alias)}</h2><p>选择下一步，工具会沿用上方的项目与操作目录。</p></div><div class="actions">${action('start-chat', '进入 CLI 草稿', workspace_id ? 'disabled title="原生 CLI 不支持受管隔离目录编号"' : '')}${action('edit', '打开工作台')}</div></div><div class="integration-action-grid">${[
+            ['validation', '检查这次修改', '运行测试或构建，核对当前版本'],
+            ['handoff', '继续已有任务', '读取目标、断点与原操作证据'],
+            ['browser', '验证网页效果', '连接授权页面，观察后确认动作'],
+            ['navigation', '理解代码关系', '查定义、引用与调用关系'],
+          ]
+            .map(
+              ([id, title, text]) =>
+                `<button class="integration-action-card" data-i-jump="${id}"><strong>${title}</strong><span>${text}</span><small>进入 ${tabs.find((t) => t[0] === id)[1]} →</small></button>`,
+            )
+            .join(
+              '',
+            )}</div><div class="integration-grid"><section class="panel integration-section"><div class="integration-section-head"><h2>项目就绪状态</h2>${jump('status', '详细诊断')}</div><div id="i-checks">正在核对当前环境…</div></section><section class="panel integration-section"><div class="integration-section-head"><h2>项目开发任务</h2>${jump('handoff', '全部任务')}</div><div id="i-workflows">正在读取任务…</div></section></div><div id="i-result"></div>`;
+        $('[data-i-action=start-chat]', body).onclick = wire(() => toChat());
+        $('[data-i-action=edit]', body).onclick = wire(() => openEditor());
+        await Promise.all([section('#i-checks', checks), workflowList('#i-workflows', 5)]);
+      } else if (tab === 'status') {
+        body.innerHTML =
+          offline +
+          `<section class="panel integration-section"><h2>项目就绪状态</h2><div id="i-checks">正在核对当前环境…</div></section><section class="panel integration-section"><h2>最近 MCP 工具调用</h2><p class="integration-help">服务耗时是处理请求的时间；调用间隔可能包含网络、宿主或用户操作，不等于模型思考时间。并发和缺少关联信息时不计算间隔。</p><div id="i-activity"></div></section><details class="panel integration-section integration-control"><summary>接入控制 · 暂停、恢复与紧急停止</summary><p>影响当前整个项目的新 MCP 修改和执行；读取、原回执与管理面板保留。不会关闭 Agent。</p><div class="actions">${action('pause', '暂停 MCP')}${action('resume', '恢复 MCP')}${action('stop', '紧急停止')}</div><label class="integration-checkbox"><input type="checkbox" id="i-native-stop">紧急停止时也停止本项目的 Pi/Codex 会话</label><p class="integration-help">仅处理有归属记录的进程；未确认退出不显示为停止成功。隔离目录内不可进行项目级控制。</p></details><div id="i-result"></div>`;
+        for (const name of ['pause', 'resume', 'stop']) {
+          const b = $(`[data-i-action="${name}"]`, body);
+          b.disabled = !!workspace_id;
+          b.title = workspace_id ? '请切回原项目目录再控制整个项目' : '';
+          b.onclick = wire(async () => {
+            const include_native = !!$('#i-native-stop', body).checked;
+            if (
+              !(await confirm(
+                name === 'stop'
+                  ? '紧急停止当前项目？'
+                  : name === 'pause'
+                    ? '暂停新的 MCP 修改？'
+                    : '恢复新的 MCP 修改？',
+                `${p.alias} · ${p.device_name}。${name === 'stop' ? (include_native ? '同时包含本项目原生会话，其他项目不受影响。' : '不包含原生 Pi/Codex 会话。') : '保持原有权限，不改变本机配置。'}`,
+                '',
+                p.alias,
+                name !== 'resume',
+              ))
+            )
+              return;
+            const r = await request(
+              'integration_control',
+              { action: name, confirm: p.alias, include_native },
+              true,
+            );
+            if (r) {
+              output(r, '接入控制结果');
+              await section('#i-checks', checks);
+            }
+          });
+        }
+        let before = null;
+        const activities = async (box, valid, more = false) => {
+          const r = await request('activity_list', {
+            limit: 30,
+            ...(more && before ? { before_id: before } : {}),
+          });
+          if (!r || !valid()) return;
+          const rows = (r.activities || [])
+            .map(
+              (a) =>
+                `<tr><td><code>${esc(a.tool)}</code><small>${esc(timeText(a.started))}</small></td><td>${esc(U().label(a.status))}</td><td>${a.service_ms == null ? '未确认' : esc(a.service_ms) + ' ms'}</td><td>${a.next_call_gap_ms == null ? '不可用' : esc(a.next_call_gap_ms) + ' ms'}${a.transition === 'overlap' ? '<small>调用重叠</small>' : ''}</td><td>${a.operation_id ? `<button class="btn ghost small" data-action="operation-detail" data-id="${esc(a.operation_id)}">记录</button>` : ''}</td></tr>`,
+            )
+            .join('');
+          if (!more)
+            box.innerHTML =
+              '<div class="integration-table" role="region" aria-label="工具调用记录" tabindex="0"><table class="data-table"><thead><tr><th>调用</th><th>状态</th><th>服务耗时</th><th>后续间隔</th><th>证据</th></tr></thead><tbody></tbody></table></div>' +
+              action('activity-more', '更多调用');
+          $('tbody', box).insertAdjacentHTML(
+            'beforeend',
+            rows || '<tr><td colspan="5">还没有调用记录。</td></tr>',
+          );
+          before = r.next_before_id;
+          const b = $('[data-i-action=activity-more]', box);
+          b.hidden = !before;
+          b.onclick = wire(() => activities(box, () => current() && box.isConnected, true));
+        };
+        await Promise.all([section('#i-checks', checks), section('#i-activity', activities)]);
+      } else if (tab === 'validation') {
+        body.innerHTML =
+          offline +
+          form(
+            'validate',
+            '验证当前修改',
+            input('label', '验收名称', '测试与构建', 'required maxlength="160"') +
+              input(
+                'timeout_seconds',
+                '最长运行秒数',
+                '900',
+                'type="number" min="1" max="86400" required',
+              ) +
+              field(
+                'command',
+                '在选定目录执行的命令',
+                '<textarea name="command" rows="4" required maxlength="65536" placeholder="例如 python -m pytest -q；执行前会再次确认"></textarea>',
+              ) +
+              `<div class="integration-presets">仅填入示例：${action('preset-python', 'Python 测试')}${action('preset-node', '前端构建')}</div>`,
+            '确认并运行验收',
+            '执行前后会记录源码指纹。命令以 Agent 系统账号权限运行，不是沙箱；这里不会替你自动选择或运行测试。',
+          ) +
+          `<section class="panel integration-section"><div class="integration-section-head"><h2>验收记录</h2>${action('validation-refresh', '刷新记录')}</div><div id="i-validations">正在读取记录…</div></section><div id="i-result"></div>`;
+        rememberForms();
+        for (const [name, command] of [
+          ['python', 'python -m pytest -q'],
+          ['node', 'npm run build'],
+        ])
+          $(`[data-i-action="preset-${name}"]`, body).onclick = wire(async () => {
+            const el = $('[name=command]', body);
+            if (
+              el.value.trim() &&
+              !(await confirm('替换命令草稿？', '原命令尚未运行，替换后仍需你确认执行。'))
+            )
+              return;
+            el.value = command;
+            el.dispatchEvent(new Event('input'));
+            el.focus();
+          });
+        submit('validate', async (values) => {
+          const command = values.command.trim(),
+            label = values.label.trim(),
+            timeout_seconds = U().integer(values.timeout_seconds, '最长运行秒数', 1, 86400);
+          if (!command || !label) throw new Error('请填写命令与验收名称。');
+          if (
+            !(await confirm(
+              '运行这条验收命令？',
+              `${p.alias} · ${p.device_name} · ${workspace_id ? '隔离目录 ' + workspace_id : '原项目目录'}。最长 ${timeout_seconds} 秒。关闭页面不会停止已提交的命令。`,
+              command,
+            ))
+          )
+            return;
+          const r = await request('validation_run', { command, label, timeout_seconds }, true);
+          if (r) {
+            output(r, '命令结果：' + U().label(r.state));
+            await validationList('#i-validations');
+          }
+        });
+        $('[data-i-action=validation-refresh]', body).onclick = wire(() =>
+          validationList('#i-validations'),
+        );
+        await validationList('#i-validations');
+      } else if (tab === 'handoff') {
+        body.innerHTML = `<section class="panel integration-section"><h2>继续已有任务</h2><p class="integration-help">先读取原目标和断点，再选择复制说明、放入 CLI 草稿或打开完整任务。不会自动重新执行结果不明的命令。</p><div id="i-workflows">正在读取任务…</div></section><div id="i-result"></div>`;
+        await workflowList('#i-workflows');
+        if (v.workflow_id && current()) await showHandoff(v.workflow_id);
+      } else if (tab === 'worktrees') {
+        body.innerHTML =
+          offline +
+          U().note(
+            '把实验性修改放到独立目录',
+            '需要已有提交的 Git 项目；原目录未提交修改不会复制，不会自动合并、初始化 Git 或扩大目录权限。',
+            jump('setup', '查看本机配置'),
+          ) +
+          form(
+            'worktree',
+            '新建隔离工作目录',
+            input('label', '目录名称', '', 'maxlength="100" placeholder="例如 修复上传流程"') +
+              input('base_ref', '起始 Git 引用', 'HEAD', 'required maxlength="200"'),
+            '创建工作目录',
+          ) +
+          `<section class="panel integration-section"><div class="integration-section-head"><h2>已有工作目录</h2>${action('trees-refresh', '刷新目录')}</div><div id="i-trees">正在核对目录…</div></section><div id="i-result"></div>`;
+        const trees = () =>
+          section('#i-trees', async (box, valid) => {
+            const r = await request('worktrees_list', { workspace_id: '' });
+            if (!r || !valid()) return;
+            v.trees = r.workspaces || [];
+            const selector = $('#i-workspace', root);
+            selector.innerHTML =
+              '<option value="">原项目目录</option>' +
+              v.trees
+                .filter((t) => t.state === 'ready')
+                .map(
+                  (t) =>
+                    `<option value="${esc(t.workspace_id)}">${esc(t.label || t.workspace_id.slice(0, 12))}</option>`,
+                )
+                .join('');
+            if (
+              workspace_id &&
+              !v.trees.some((t) => t.workspace_id === workspace_id && t.state === 'ready')
+            )
+              selector.insertAdjacentHTML(
+                'beforeend',
+                `<option value="${esc(workspace_id)}">当前隔离目录不可用 · 请核对</option>`,
+              );
+            selector.value = workspace_id;
+            box.innerHTML =
+              v.trees
+                .map(
+                  (t) =>
+                    `<article class="integration-row"><div><strong>${esc(t.label || t.workspace_id)}</strong><small>${esc(U().label(t.state))} · ${t.dirty ? '有未提交修改' : t.state === 'ready' ? '目录干净' : '待核对'}</small><code>${esc(t.path || '')}</code><small>${t.error ? esc(t.error) : t.source_dirty ? '创建时未复制原目录未提交改动' : ''}</small></div><div class="actions">${action('tree-open', '进入编辑', `data-id="${esc(t.workspace_id)}" ${t.state !== 'ready' ? 'disabled' : ''}`)}${action('tree-remove', '移除', `data-id="${esc(t.workspace_id)}" ${t.state !== 'ready' || t.dirty ? 'disabled' : ''} title="${t.dirty ? '请先处理未提交改动' : '只删除已确认干净的受管隔离目录'}"`)}</div></article>`,
+                )
+                .join('') || empty('尚无隔离目录。日常开发可继续使用原项目目录。');
+            for (const b of $$('[data-i-action=tree-open]', box))
+              b.onclick = wire(() => openEditor('', 1, 1, b.dataset.id));
+            for (const b of $$('[data-i-action=tree-remove]', box))
+              b.onclick = wire(async () => {
+                const item = v.trees.find((t) => t.workspace_id === b.dataset.id);
+                if (
+                  !(await confirm(
+                    '移除这个隔离目录？',
+                    '只移除受管隔离目录，原项目保留。有改动或活动任务时后端仍会拒绝。',
+                    item?.path || b.dataset.id,
+                    '',
+                    true,
+                  ))
+                )
+                  return;
+                const r = await request(
+                  'worktrees_remove',
+                  { workspace_id: '', target_workspace_id: b.dataset.id, confirm: b.dataset.id },
+                  true,
+                );
+                if (r) {
+                  output(r, '目录移除结果');
+                  if (workspace_id === b.dataset.id) {
+                    v.workspace_id = '';
+                    await renderPage(false);
+                  } else await trees();
+                }
+              });
+          });
+        rememberForms();
+        submit('worktree', async (values) => {
+          const ref = values.base_ref.trim();
+          if (!ref || ref.startsWith('-') || /[\r\n\x00]/.test(ref))
+            throw new Error('请填写有效的 Git 引用，例如 HEAD 或已有提交编号。');
+          if (
+            !(await confirm(
+              '创建独立工作目录？',
+              '固定所选提交，不复制未提交修改，不自动合并到原项目。',
+              ref,
+            ))
+          )
+            return;
+          const r = await request(
+            'worktrees_create',
+            { workspace_id: '', label: values.label.trim(), base_ref: ref },
+            true,
+          );
+          if (r) {
+            output(r, '隔离目录已创建');
+            await trees();
+          }
+        });
+        $('[data-i-action=trees-refresh]', body).onclick = wire(trees);
+        await trees();
+      } else if (tab === 'navigation') {
+        const options = [
+          ['definition', '定义跳转'],
+          ['references', '查找引用'],
+          ['hover', '类型说明'],
+          ['symbols', '文件符号'],
+          ['workspace_symbols', '项目符号'],
+          ['diagnostics', '文件诊断'],
+          ['incoming_calls', '调用方'],
+          ['outgoing_calls', '被调用方'],
+        ];
+        body.innerHTML =
+          offline +
+          `<section class="panel integration-section"><div class="integration-section-head"><h2>语言服务</h2>${jump('setup', '配置语言服务')}</div><div id="i-lsp-status">正在检查本机配置…</div></section>` +
+          form(
+            'lsp',
+            '查询代码关系',
+            field(
+              'action',
+              '查询类型',
+              `<select name="action">${options.map(([id, title]) => `<option value="${id}">${title}</option>`).join('')}</select>`,
+            ) +
+              input(
+                'path',
+                '项目内文件路径',
+                '',
+                'maxlength="1024" placeholder="例如 src/main.py"',
+              ) +
+              input(
+                'language',
+                '语言标识（文件查询可自动识别）',
+                '',
+                'maxlength="40" placeholder="例如 python"',
+              ) +
+              input('line', '行', '1', 'type="number" min="1" max="1000000"') +
+              input(
+                'column',
+                '列（按 Unicode 字符计数）',
+                '1',
+                'type="number" min="1" max="1000000"',
+              ) +
+              input('query', '项目符号关键词', '', 'maxlength="200"'),
+            '查询',
+            '分析本机已保存的文件，不分析未保存的编辑草稿。使用真实语言服务，不把文本同名搜索当作语义结果。',
+          ) +
+          '<div id="i-result"></div>';
+        rememberForms();
+        const f = $('[data-i-form=lsp]', body),
+          a = f.elements.action;
+        const fields = () => {
+          const workspace = a.value === 'workspace_symbols',
+            position = [
+              'definition',
+              'references',
+              'hover',
+              'incoming_calls',
+              'outgoing_calls',
+            ].includes(a.value);
+          for (const [name, shown, required] of [
+            ['path', !workspace, !workspace],
+            ['language', true, workspace],
+            ['query', workspace, workspace],
+            ['line', position, position],
+            ['column', position, position],
+          ]) {
+            f.elements[name].closest('label').hidden = !shown;
+            f.elements[name].required = required;
+          }
+        };
+        a.addEventListener('change', fields);
+        fields();
+        blockForm('lsp', '先检查本机语言服务');
+        submit('lsp', async (values) => {
+          const workspace = values.action === 'workspace_symbols',
+            position = [
+              'definition',
+              'references',
+              'hover',
+              'incoming_calls',
+              'outgoing_calls',
+            ].includes(values.action);
+          const args = {
+            action: values.action,
+            path: workspace ? '' : U().relativePath(values.path),
+            language: values.language.trim(),
+            query: values.query.trim(),
+            line: position ? U().integer(values.line, '行', 1, 1000000) : 1,
+            column: position ? U().integer(values.column, '列', 1, 1000000) : 1,
+            limit: 100,
+          };
+          if (workspace && (!args.language || !args.query))
+            throw new Error('项目符号查询需要语言标识与关键词。');
+          const ticket = (navigationEpoch = uid()),
+            r = await request('lsp_query', args);
+          if (!r || !current() || ticket !== navigationEpoch) return;
+          const card = output(r, '语义查询结果');
+          if (!r.source_current)
+            card.insertAdjacentHTML(
+              'afterbegin',
+              U().note(
+                '当前源码一致性尚未确认',
+                '请重新查询后再据此修改；打开文件只读取当前文件，不保证旧位置仍相同。',
+                '',
+                'warning',
+              ),
+            );
+          if (r.truncated)
+            card.insertAdjacentHTML(
+              'beforeend',
+              U().note(
+                '结果超过本次范围',
+                `本次最多显示 ${args.limit} 项；省略 ${r.omitted ?? '未知'} 项。缩小文件或关键词范围再查询。`,
+              ),
+            );
+          if (!r.items?.length && !r.text)
+            card.insertAdjacentHTML(
+              'beforeend',
+              `<p class="integration-help">${values.action === 'diagnostics' ? (r.diagnostics_fresh ? '本次语言服务分析没有返回诊断；这不是测试通过。' : '尚未确认新的诊断结果。') : '本次查询没有返回结果；这不证明整个项目没有相关代码。'}</p>`,
+            );
+          const list = document.createElement('div');
+          list.className = 'integration-symbols';
+          for (const item of r.items || []) {
+            const start = item.range?.start || {},
+              line = Number(start.line || item.line || 1),
+              column = Number(start.column || 1);
+            const row = document.createElement('article');
+            row.className = 'integration-row';
+            const text = document.createElement('div'),
+              name = document.createElement('strong'),
+              description = document.createElement('p');
+            name.textContent = item.name || item.message || item.path || '语义结果';
+            description.className = 'integration-help';
+            description.textContent = [
+              item.path ? `${item.path} : ${line}:${column}` : '',
+              item.message && item.name ? item.message : '',
+              item.detail || '',
+            ]
+              .filter(Boolean)
+              .join(' · ');
+            text.append(name, description);
+            row.append(text);
+            if (item.path) {
+              const b = document.createElement('button');
+              b.type = 'button';
+              b.className = 'btn ghost small';
+              b.textContent = '打开并定位';
+              b.onclick = wire(() => openEditor(item.path, line, column));
+              row.append(b);
+            }
+            list.append(row);
+          }
+          card.append(list);
+          info('查询已完成 · 结果链接保留当前项目与目录');
+        });
+        await section('#i-lsp-status', async (box, valid) => {
+          const r = await request('lsp_status');
+          if (!r || !valid()) return;
+          box.innerHTML = r.semantic_queries_available
+            ? U().note(
+                '已找到配置的语言服务',
+                '查询时会启动受控语言服务进程并核实权限。程序存在不等于分析已经完成。',
+                '',
+                'success',
+              )
+            : U().note(
+                '尚未启用语义查询',
+                '先在目标设备安装语言服务，并配置到这个项目。配置完成后重新检查，无需反复刷新整个页面。',
+                jump('setup', '开始配置'),
+                'warning',
+              );
+          for (const server of r.servers || [])
+            box.insertAdjacentHTML(
+              'beforeend',
+              `<p class="integration-help">${esc(server.language || server.name || '语言服务')} · ${esc(server.reason || server.executable || '已配置')}</p>`,
+            );
+          U().details(box, '语言服务配置摘要', r);
+          blockForm('lsp', r.semantic_queries_available ? '' : '先配置可用的语言服务');
+        });
+      } else if (tab === 'browser') {
+        body.innerHTML =
+          offline +
+          `<section class="panel integration-section"><div class="integration-section-head"><h2>后台网页验证</h2>${jump('setup', '连接浏览器')}</div><div id="i-browser-status">正在读取浏览器连接…</div></section>` +
+          form(
+            'browser-open',
+            '打开一个授权页面',
+            input(
+              'url',
+              '网页地址',
+              '',
+              'type="url" required maxlength="4096" placeholder="https://你的授权站点/页面"',
+            ),
+            '使用空闲标签页',
+            '只使用本机扩展准备好的后台标签页，不创建或激活浏览器窗口。',
+          ) +
+          `<section class="panel integration-section"><div class="integration-section-head"><h2>正在验证的页面</h2>${action('browser-refresh', '刷新连接与页面')}</div><div id="i-leases"></div><div id="i-browser-page"></div></section><div id="i-result"></div>`;
+        let observation = null,
+          browserInfo = null,
+          observeTicket = 0;
+        const urlValue = (value) => {
+          let url;
+          try {
+            url = new URL(value);
+          } catch {
+            throw new Error('请填写完整的 http 或 https 网页地址。');
+          }
+          if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password)
+            throw new Error('只支持不含账号密码的 http / https 地址。');
+          if (browserInfo?.origins?.length && !browserInfo.origins.includes(url.origin))
+            throw new Error('这个站点不在当前项目的授权列表中。请由本机主理人核对准确站点和端口。');
+          return url.href;
+        };
+        const browserState = () =>
+          section('#i-browser-status', async (box, valid) => {
+            const r = await request('browser_status');
+            if (!r || !valid()) return;
+            browserInfo = r;
+            const reason = !r.enabled
+              ? '未启用：请先在本机完成扩展与项目授权。'
+              : !r.connected
+                ? '未连接：请检查 Chrome 扩展和本机连接桥。'
+                : !r.profile_bound
+                  ? '尚未绑定浏览器档案。'
+                  : r.pool?.available === 0
+                    ? '没有空闲标签页：在扩展中点击“准备标签页”。'
+                    : r.pool?.available == null
+                      ? '空闲标签页状态尚未确认，请重新检查。'
+                      : '';
+            box.innerHTML =
+              U().note(
+                reason ? '浏览器需要准备' : '可以打开授权页面',
+                reason || '只控制当前服务分配的后台标签页；你切换到该标签页时会让出控制。',
+                reason ? jump('setup', '查看连接步骤') : '',
+                reason ? 'warning' : 'success',
+              ) +
+              `<div class="integration-browser-facts"><span>${r.connected ? '已连接' : '未连接'}</span><span>空闲标签页：${esc(r.pool?.available ?? '未确认')}</span><span>档案：${r.profile_bound ? '已绑定' : '未绑定'}</span></div><p class="integration-help">授权站点：${esc(r.origins?.join('、') || '尚无授权站点')}</p>`;
+            U().details(box, '浏览器诊断', r);
+            blockForm('browser-open', reason);
+            const leases = $('#i-leases', body);
+            leases.innerHTML =
+              (r.active_leases || [])
+                .map(
+                  (l) =>
+                    `<article class="integration-row"><div><strong>后台页面 ${esc(l.lease_id.slice(0, 8))}</strong><small>${esc(U().label(l.state))} · 到期 ${esc(timeText(l.expires_at || l.expires))}</small></div><div class="actions">${action('snapshot', '观察页面', `data-id="${esc(l.lease_id)}"`)}${action('browser-close', '释放页面', `data-id="${esc(l.lease_id)}"`)}</div></article>`,
+                )
+                .join('') || empty('没有正在验证的页面。先打开一个已授权地址。');
+            for (const b of $$('[data-i-action=snapshot]', leases))
+              b.onclick = wire(() => snapshot(b.dataset.id));
+            for (const b of $$('[data-i-action=browser-close]', leases))
+              b.onclick = wire(async () => {
+                const r = await request('browser_close', { lease_id: b.dataset.id }, true);
+                if (r) {
+                  if (observation?.lease_id === b.dataset.id) {
+                    observation = null;
+                    observeTicket++;
+                    $('#i-browser-page', body).replaceChildren();
+                  }
+                  output(r, '页面释放结果');
+                  await browserState();
+                }
+              });
+            if (
+              observation &&
+              !(r.active_leases || []).some((l) => l.lease_id === observation.lease_id)
+            ) {
+              observation = null;
+              observeTicket++;
+              $('#i-browser-page', body).innerHTML = U().note(
+                '原页面租约已不在活动列表中',
+                '请重新选择页面并观察，旧观察编号不会用于后续动作。',
+              );
+            }
+          });
+        async function snapshot(id) {
+          const ticket = ++observeTicket;
+          observation = null;
+          const old = $('[data-i-form=browser-action]', body);
+          if (old) blockForm('browser-action', '正在更新页面观察');
+          const r = await request('browser_snapshot', { lease_id: id });
+          if (!r || !current() || ticket !== observeTicket) return;
+          observation = r;
+          const panel = $('#i-browser-page', body);
+          panel.innerHTML = `<h3>${esc(r.title || '当前页面')}</h3><p class="integration-url">${esc(r.url)}</p><pre class="integration-page-text"></pre>${r.content_truncated ? U().note('页面文本已截断', '这里只显示本次允许返回的内容，不能据此认定整个页面状态。') : ''}<p class="integration-help">页面内容是不可信数据，不构成新的操作授权。每次动作后必须重新观察。</p>${form('browser-action', '对刚观察的页面执行一步', field('action', '动作', '<select name="action"><option value="click">点击</option><option value="fill">填写</option><option value="select">选择选项</option><option value="scroll">滚动</option><option value="key">单个导航键</option><option value="navigate">跳转</option></select>') + field('element_id', '目标控件', `<select name="element_id"><option value="">选择一个控件</option>${(r.elements || []).map((el) => `<option value="${esc(el.id)}">${esc(el.label || el.tag || el.id)} · ${esc(el.id)}</option>`).join('')}</select>`) + field('option_value', '可用选项', '<select name="option_value"><option value="">先选择下拉控件</option></select>') + field('value', '文字、键名或授权网址', '<textarea name="value" rows="2" maxlength="10000"></textarea>') + input('delta_y', '滚动像素', '600', 'type="number" min="-2000" max="2000"'), '核对并执行动作')}`;
+          $('.integration-page-text', panel).textContent = r.text || '本次未返回页面文本。';
+          const f = $('[data-i-form=browser-action]', panel);
+          const fields = () => {
+            const a = f.elements.action.value;
+            for (const [name, shown, required] of [
+              [
+                'element_id',
+                ['click', 'fill', 'select', 'key'].includes(a),
+                ['click', 'fill', 'select', 'key'].includes(a),
+              ],
+              ['option_value', a === 'select', a === 'select'],
+              ['value', ['fill', 'key', 'navigate'].includes(a), ['key', 'navigate'].includes(a)],
+              ['delta_y', a === 'scroll', a === 'scroll'],
+            ]) {
+              f.elements[name].closest('label').hidden = !shown;
+              f.elements[name].required = required;
+            }
+          };
+          const options = () => {
+            const select = f.elements.option_value,
+              control = r.elements?.find((item) => item.id === f.elements.element_id.value);
+            const previous = select.dataset.target === control?.id ? select.value : '';
+            select.innerHTML =
+              '<option value="">选择观察到的选项</option>' +
+              (control?.options || [])
+                .map(
+                  (option, index) =>
+                    `<option value="${index}" ${option.disabled ? 'disabled' : ''}>${esc(option.label)}${option.disabled ? ' · 不可用' : ''}</option>`,
+                )
+                .join('');
+            select.dataset.target = control?.id || '';
+            select.value = previous;
+            select.title = control?.options_truncated
+              ? '选项已截断，只能选择本次已观察到的选项'
+              : '';
+          };
+          f.elements.action.onchange = () => {
+            fields();
+            options();
+          };
+          f.elements.element_id.onchange = options;
+          fields();
+          options();
+          submit('browser-action', async (values) => {
+            if (!observation) throw new Error('旧观察已失效，请重新观察页面。');
+            const captured = observation;
+            if (captured.expires_at && Date.now() / 1000 >= captured.expires_at) {
+              observation = null;
+              throw new Error('页面观察已过期，请重新观察后再操作。');
+            }
+            const args = {
+              lease_id: captured.lease_id,
+              observation_id: captured.observation_id,
+              action: values.action,
+              element_id: ['click', 'fill', 'select', 'key'].includes(values.action)
+                ? values.element_id
+                : '',
+              value: ['fill', 'select', 'key', 'navigate'].includes(values.action)
+                ? values.value
+                : '',
+              delta_y:
+                values.action === 'scroll'
+                  ? U().integer(values.delta_y, '滚动像素', -2000, 2000)
+                  : 0,
+            };
+            if (values.action === 'select') {
+              const control = captured.elements?.find((item) => item.id === args.element_id),
+                index = Number(values.option_value);
+              const option =
+                values.option_value !== '' && Number.isInteger(index)
+                  ? control?.options?.[index]
+                  : null;
+              if (!option || option.disabled)
+                throw new Error('请选择刚观察到的可用选项；无法观察时请重新读取页面。');
+              args.value = option.value;
+            }
+            if (values.action === 'navigate') args.value = urlValue(args.value);
+            if (['click', 'fill', 'select', 'key'].includes(args.action) && !args.element_id)
+              throw new Error('请选择刚观察到的目标控件。');
+            if (
+              !(await confirm(
+                '确认这一步网页动作',
+                `${p.alias} · ${captured.url}。请核对目标；点击可能提交网站表单，回执不等于网站业务成功。`,
+                `${args.action} ${args.element_id}\n${args.value || args.delta_y || ''}`,
+              ))
+            )
+              return;
+            if (observation !== captured) throw new Error('页面观察已更新，请重新核对。');
+            observation = null;
+            blockForm('browser-action', '动作已提交；请查询回执后重新观察');
+            const result = await request('browser_action', args, true);
+            if (result) {
+              output(result, '网页动作回执');
+              await snapshot(id);
+            }
+          });
+        }
+        rememberForms();
+        blockForm('browser-open', '先检查浏览器连接');
+        submit('browser-open', async (values) => {
+          const url = urlValue(values.url);
+          const r = await request('browser_open', { url }, true);
+          if (r) {
+            output(r, '页面已打开');
+            await browserState();
+            if (current() && r.lease_id) await snapshot(r.lease_id);
+          }
+        });
+        $('[data-i-action=browser-refresh]', body).onclick = wire(browserState);
+        await browserState();
+      } else if (tab === 'setup') {
+        body.innerHTML =
+          U().note(
+            '只为目标设备生成操作指引',
+            `${p.device_name || '当前设备'} · ${p.alias}。此页不会安装程序、改变真实 Agent 配置、授权网站或重启服务。`,
+            readinessActions(),
+          ) +
+          `<div class="integration-setup-grid"><section class="panel integration-section"><span class="eyebrow">可选能力 / 代码导航</span><h2>连接本机语言服务</h2><ol class="integration-steps"><li><strong>在目标设备安装语言服务</strong><p>例如 Python 使用已安装的 Pyright。填写可执行文件的完整路径，避免服务启动环境与终端不同。</p></li><li><strong>生成本项目配置片段</strong><p>下方表单只生成 JSON。不会替换完整 Agent 配置，也不会修改其他项目授权。</p></li><li><strong>本机预览，再明确应用</strong><p>使用 Agent 的 Python 环境，在其运行目录执行下方示例，替换尖括号里的路径。默认只预览，核对后再添加 --apply。</p><pre class="integration-page-text">python -m agent.setup_integrations --config "&lt;Agent 配置文件路径&gt;" configure --settings "&lt;下载的配置片段路径&gt;"</pre></li><li><strong>按维护流程重启，再检查</strong><p>先结束活动任务，再由主理人确认重启。磁盘配置与运行进程的状态分别核对。</p>${jump('navigation', '重新检查语言服务')}</li></ol></section><section class="panel integration-section"><span class="eyebrow">可选能力 / 网页验证</span><h2>连接后台浏览器</h2><ol class="integration-steps"><li><strong>安装浏览器扩展</strong><p>下载并解压到长期保留的目录。在 Chrome 扩展管理中加载已解压扩展。</p><a class="btn ghost small" href="/static/browser-extension.zip" download>浏览器扩展源码包</a></li><li><strong>绑定档案、项目与准确站点</strong><p>从扩展取得扩展编号和档案编号；按安装说明使用 agent.install_browser_bridge 在本机预览，核对后添加 --apply。站点端口不同属于不同授权范围。</p></li><li><strong>准备空闲标签页</strong><p>由你在扩展中授权网站并点击“准备标签页”。远程调用不会自行创建或激活窗口。</p></li><li><strong>检查连接并观察页面</strong><p>连接成功后输入已授权网址。先观察，再核对具体动作。</p>${jump('browser', '重新检查浏览器')}</li></ol></section></div>` +
+          form(
+            'settings',
+            '生成语言服务配置片段',
+            input('language', '语言标识', 'python', 'required maxlength="40"') +
+              field(
+                'command',
+                '语言服务命令与参数（JSON 数组）',
+                '<textarea name="command" rows="3" required>["pyright-langserver","--stdio"]</textarea>',
+              ),
+            '生成并下载片段',
+            '只作用于所选项目；请自行确认程序已经安装，推荐使用绝对路径。',
+          ) +
+          `<details class="panel integration-section"><summary>隔离目录与本机控制的配置边界</summary><p>隔离目录只适用于有提交的 Git 项目。默认位置在源项目旁的 CodePier-Worktrees；必须已在本机允许写入的范围内。授权不足时，不会自动扩大授权。</p><p>本机暂停接口需要主理人显式启用 integrations.local_control。面板接入控制和本机接口是不同入口，浏览器连接成功不等于本机控制已启用。</p><div class="actions">${jump('worktrees', '管理隔离目录')}${jump('status', '核对运行状态')}</div></details><section class="panel integration-section"><h2>安装、维护与卸载说明</h2><p>配置、应用、生效与实测是不同阶段。下载说明包含完整参数、平台边界和卸载流程。</p><a class="btn ghost small" href="/static/integration-guide.md" download>安装与使用说明</a></section><div id="i-result"></div>`;
+        rememberForms();
+        submit('settings', async (values) => {
+          const data = U().settings(values.language, values.command, p.alias);
+          output(data, '配置片段已生成 · 尚未应用');
+          download('codepier-integrations-example.json', JSON.stringify(data, null, 2) + '\n');
+          info('配置已下载；完成本机预览与应用后，返回相应功能重新检查。');
+        });
+      }
+    }
+    let navigationEpoch = '';
+    root.addEventListener(
+      'click',
+      (e) => {
+        const b = e.target.closest('[data-i-jump]');
+        if (b && !b.disabled && root.contains(b))
+          changeTab(b.dataset.iJump).catch((error) => info(U().errorText(error), true));
+      },
+      { signal: controller.signal },
+    );
+    for (const b of $$('[data-i-tab]', root))
+      b.addEventListener(
+        'click',
+        () => changeTab(b.dataset.iTab).catch((error) => info(U().errorText(error), true)),
+        { signal: controller.signal },
+      );
+    $('.integration-tabs', root).addEventListener(
+      'keydown',
+      (e) => {
+        if (
+          e.isComposing ||
+          e.keyCode === 229 ||
+          !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)
+        )
+          return;
+        const buttons = $$('[data-i-tab]', root),
+          index = buttons.indexOf(e.target);
+        if (index < 0) return;
+        e.preventDefault();
+        const next =
+          e.key === 'Home'
+            ? 0
+            : e.key === 'End'
+              ? buttons.length - 1
+              : (index + (e.key === 'ArrowRight' ? 1 : -1) + buttons.length) % buttons.length;
+        changeTab(buttons[next].dataset.iTab).catch((error) => info(U().errorText(error), true));
+      },
+      { signal: controller.signal },
+    );
+    $('#i-project', root).onchange = async (e) => {
+      v.project = e.target.value;
+      v.workspace_id = '';
+      v.workflow_id = '';
+      v.trees = [];
+      v.ready = null;
+      await renderPage(false);
+      $('#i-project')?.focus({ preventScroll: true });
+    };
+    $('#i-workspace', root).onchange = async (e) => {
+      v.workspace_id = e.target.value;
+      v.workflow_id = '';
+      v.ready = null;
+      await renderPage(false);
+      $('#i-workspace')?.focus({ preventScroll: true });
+    };
+    $('[data-i-action=refresh]')?.addEventListener(
+      'click',
+      wire(async () => {
+        await renderPage(false);
+        $('[data-i-action=refresh]')?.focus({ preventScroll: true });
+      }),
+      { signal: controller.signal },
+    );
+    receipts();
+    load().catch((error) => {
+      if (current() && error.name !== 'AbortError') {
+        info(U().errorText(error), true);
+        if (!body.children.length)
+          body.innerHTML = U().note(
+            '暂时无法加载',
+            U().errorText(error),
+            jump('overview', '回到开始工作'),
+            'warning',
+          );
+      }
+    });
+  }
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-devtools]');
+    if (!b || b.disabled || !S.session) return;
+    if (b.closest('.modal')) closeModal();
+    let project = b.dataset.project || '',
+      workspace_id = b.dataset.workspace || '',
+      path = b.dataset.path || '',
+      line = 1,
+      column = 1;
+    if (!project && S.page === 'workbench') {
+      project = S.work.project;
+      workspace_id = S.work.workspace_id || '';
+      path = S.work.path;
+      const el = $('#code-editor');
+      if (el) {
+        const prefix = el.value.slice(0, el.selectionStart),
+          lines = prefix.split('\n');
+        line = lines.length;
+        column = [...lines.at(-1)].length + 1;
+      }
+    }
+    if (!project && S.page === 'native' && typeof ChatUI !== 'undefined') project = ChatUI.project;
+    if (!project && ['native', 'workbench'].includes(S.page)) {
+      toast('请先选择工作项目，再进入开发工具。', true);
+      return;
+    }
+    open({
+      project,
+      workspace_id,
+      path,
+      line,
+      column,
+      tab: b.dataset.devtools || 'overview',
+      workflow_id: b.dataset.workflow || '',
+    }).catch((error) => toast(U().errorText(error), true));
+  });
+  return { html, bind, open, inherit, detach };
 })();

@@ -159,8 +159,10 @@ def update_policy(b, r, rules):
         'connector_rules': rules, 'expected_version': r['version']}))
 
 
-def test_gateway_is_opt_in_for_instance_and_each_existing_grant(team):
+def test_gateway_is_native_routing_with_kill_switch_and_explicit_grant_consent(team):
     app, b = team
+    assert b['owner'].get('/api/mcp-gateway').json()['enabled']
+    app.state.gateway.enabled = False
     assert not b['owner'].get('/api/mcp-gateway').json()['enabled']
     assert b['owner'].post('/api/mcp-gateway/connectors', json={'label': 'no', 'endpoint': 'https://mcp.example/mcp'}).status_code == 403
     app.state.gateway.enabled = True
@@ -168,7 +170,7 @@ def test_gateway_is_opt_in_for_instance_and_each_existing_grant(team):
     app.state.gateway.pool = RemotePool(resolver=public_dns, transport=httpx.MockTransport(backend.handle))
     c = connector(b); a = account(b, c); binding = publish(b, a)
     r, p, g = authorize(b, binding, consent=False)
-    assert error_code(call(b['alice'], g['token'], 'kiln__echo', {'value': 'x'})) == 'GATEWAY_CONSENT_REQUIRED'
+    assert error_code(call(b['alice'], g['token'], 'kiln__echo', {'value': 'x'})) == 'UNKNOWN_TOOL'
     listing = result(rpc(b['alice'], g['token'], 'tools/list', {}))
     assert 'kiln__echo' not in {tool['name'] for tool in listing['tools']}
     assert backend.effects == 0
@@ -205,7 +207,7 @@ def test_private_accounts_and_receipts_never_cross_users_or_grants(gw):
     assign(b['owner'], r, 'bob')
     bp = profile(b['bob'], r, 'Bob'); bg = must(credential(b['bob'], r, bp))
     must(b['bob'].post('/api/mcp-gateway/grants/' + bg['grant_id'] + '/consent', json={'confirmed': True, 'expected_role_version': r['version']}))
-    assert error_code(call(b['bob'], bg['token'], 'kiln__echo', {'value': 'x'})) == 'GATEWAY_TOOL_NOT_FOUND'
+    assert error_code(call(b['bob'], bg['token'], 'kiln__echo', {'value': 'x'})) == 'UNKNOWN_TOOL'
     assert b['owner'].post('/api/mcp-gateway/accounts/' + a['id'] + '/discover').status_code == 404
     assert a['id'] not in b['bob'].get('/api/mcp-gateway').text
     first = result(call(b['alice'], g['token'], 'kiln__echo', {'value': 'private'}))
@@ -220,8 +222,8 @@ def test_two_backends_same_tool_names_and_no_action_resource_product(gw):
     r = update_policy(b, r, [{'binding_id': binding['id'], 'tools': ['echo']}, {'binding_id': binding2['id'], 'tools': ['run']}])
     assert result(call(b['alice'], g['token'], 'kiln__echo', {'value': 'x'}))['structuredContent']['account'] == 'Bearer UPSTREAM_TOKEN_A'
     assert result(call(b['alice'], g['token'], 'research__run'))['structuredContent']['account'] == 'Bearer UPSTREAM_TOKEN_B'
-    assert error_code(call(b['alice'], g['token'], 'kiln__run')) == 'GATEWAY_TOOL_NOT_FOUND'
-    assert error_code(call(b['alice'], g['token'], 'research__echo', {'value': 'x'})) == 'GATEWAY_TOOL_NOT_FOUND'
+    assert error_code(call(b['alice'], g['token'], 'kiln__run')) == 'UNKNOWN_TOOL'
+    assert error_code(call(b['alice'], g['token'], 'research__echo', {'value': 'x'})) == 'UNKNOWN_TOOL'
 
 
 def test_legacy_sessions_isolate_grants_even_for_shared_account(gw):
@@ -280,7 +282,7 @@ def test_schema_discovery_never_silently_republishes(gw):
     app, b, backend, _, a, binding, _, _, g = configured(gw)
     backend.tools[0]['inputSchema']['required'] = []
     must(b['alice'].post('/api/mcp-gateway/accounts/' + a['id'] + '/discover'))
-    assert error_code(call(b['alice'], g['token'], 'kiln__echo', {'value': 'x'})) in ('GATEWAY_SCHEMA_REVIEW_REQUIRED', 'GATEWAY_TOOL_NOT_FOUND')
+    assert error_code(call(b['alice'], g['token'], 'kiln__echo', {'value': 'x'})) in ('GATEWAY_SCHEMA_REVIEW_REQUIRED', 'UNKNOWN_TOOL')
     assert backend.effects == 0
 
 

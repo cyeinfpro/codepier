@@ -1,0 +1,2 @@
+# Independent official MCP client; test-only environment.
+mcp==2.2.0

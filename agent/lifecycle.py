@@ -296,7 +296,7 @@ class LifecycleManager:
             python = candidate / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
             phase("preparing_update", target_version=target_version)
             self._run([uv, "venv", "--relocatable", "--python", helper_python, candidate / ".venv"])
-            self._run([uv, "pip", "install", "--python", python, "-r", candidate / "requirements-agent.txt"])
+            self._run([uv, "pip", "install", "--require-hashes", "--python", python, "-r", candidate / "requirements-agent.txt"])
             self._run([python, "-c", "import agent.config, agent.runner, agent.lifecycle"], cwd=candidate, timeout=90)
             helper = self._copy_helper(operation_id, candidate)
             self._write_plan(operation_id, {

@@ -88,11 +88,27 @@ async def test_pathological_schema_worker_is_bounded_and_capacity_recovers():
 
 
 @pytest.mark.asyncio
-async def test_cancelled_schema_worker_is_reaped_and_capacity_recovers():
+async def test_cancelled_schema_worker_is_reaped_and_capacity_recovers(monkeypatch):
+    # Wait for actual IPC admission, not a machine-speed-dependent sleep.
     validator = Validator(timeout=8)
-    task = asyncio.create_task(validator.validate({'type': 'object'}, {}))
-    await asyncio.sleep(.1)
+    entered = asyncio.Event()
+    real_spawn = asyncio.create_subprocess_exec
+    workers = []
+    async def spawn(*args, **kwargs):
+        process = await real_spawn(*args, **kwargs)
+        workers.append(process)
+        communicate = process.communicate
+        async def observed(data):
+            entered.set()
+            return await communicate(data)
+        process.communicate = observed
+        return process
+    monkeypatch.setattr(asyncio, 'create_subprocess_exec', spawn)
+    schema = {'type': 'object', 'properties': {'text': {'type': 'string', 'pattern': '^(a+)+$'}}}
+    task = asyncio.create_task(validator.validate(schema, {'text': 'a' * 1000 + '!'}))
+    await asyncio.wait_for(entered.wait(), 5)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
     assert validator.active == 0
+    assert len(workers) == 1 and workers[0].returncode is not None

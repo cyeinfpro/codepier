@@ -5,6 +5,7 @@ caller a panel administrator; identities, operation ownership and local gates st
 separate. No model-supplied role selector is accepted by the runtime.
 """
 from __future__ import annotations
+from hub.db_worker import database_endpoint
 
 import hashlib
 import json
@@ -319,13 +320,15 @@ def make_roles_router(auth, runtime):
     router, store = APIRouter(), runtime.store
 
     @router.get('/api/access-roles')
-    async def list_roles(request: Request):
+    @database_endpoint(store)
+    def list_roles(request: Request):
         owner = auth.panel(request)
         rows = store.all('SELECT * FROM access_roles WHERE space_id=? ORDER BY label_key,id LIMIT ?', (owner.space_id, MAX_ROLES)) if owner.admin else iam.assigned_roles(store, owner.user_id, owner.space_id)
         return {'roles': [public_role(row, store if owner.admin else None) for row in rows], 'limit': MAX_ROLES}
 
     @router.get('/api/access-roles/{identifier}')
-    async def get_role(identifier: str, request: Request):
+    @database_endpoint(store)
+    def get_role(identifier: str, request: Request):
         owner = auth.panel(request)
         row = store.one('SELECT * FROM access_roles WHERE id=? AND space_id=?', (identifier, owner.space_id))
         if row and not owner.admin:
@@ -335,7 +338,8 @@ def make_roles_router(auth, runtime):
         return public_role(row, store if owner.admin else None)
 
     @router.post('/api/access-roles', status_code=201)
-    async def create_role(request: Request, body: RoleCreate):
+    @database_endpoint(store)
+    def create_role(request: Request, body: RoleCreate):
         owner = auth.admin(request, True)
         fingerprint = hashlib.sha256(json.dumps(body.model_dump(exclude={'idempotency_key'}), sort_keys=True).encode()).hexdigest()
         with store.lock, store.db:
@@ -360,7 +364,8 @@ def make_roles_router(auth, runtime):
         return public_role(row, store)
 
     @router.put('/api/access-roles/{identifier}')
-    async def update_role(identifier: str, request: Request, body: RoleUpdate):
+    @database_endpoint(store)
+    def update_role(identifier: str, request: Request, body: RoleUpdate):
         owner = auth.admin(request, True)
         with store.lock, store.db:
             store.db.execute('BEGIN IMMEDIATE')
@@ -383,7 +388,7 @@ def make_roles_router(auth, runtime):
                     raise DevError('ROLE_EXISTS', '已有同名角色', 409) from exc
                 row = store.one('SELECT * FROM access_roles WHERE id=?', (identifier,))
                 profile_audit(store, owner.actor, 'role.updated', identifier, {'before': before, 'after': public_role(row, store), 'applies_to_existing_role_grants': True})
-        runtime.wake.set()
+        runtime.wake_delivery()
         return public_role(row, store)
 
     return router

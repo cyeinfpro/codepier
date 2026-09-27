@@ -74,5 +74,6 @@ def principal_key(principal):
     return ('principal', principal.user_id, principal.space_id, principal.grant_id,
             principal.profile_id, principal.role_id, principal.authorization_mode,
             principal.user_epoch, principal.identity_id, principal.actor,
+            principal.session_hash, principal.token_hash,
             principal.admin, principal.instance_admin,
             frozenset(principal.scopes), frozenset(principal.projects))
