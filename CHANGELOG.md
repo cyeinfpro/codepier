@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased — 多 MCP Gateway 第一阶段
+
+- 在独立 `hub/gateway/` 中增加远端 MCP 帐户、经审核的命名空间工具、即时 Role 规则、每 grant 明确同意及加密回执；默认关闭，不扩大既有 fixed/role grant。
+- 内建工具继续走原 Runtime；外部工具保留 schema、独立路由，不向后端透传 CodePier token、Cookie、前端元数据或身份标记。保持 `get_profile`；访问上下文增加外部能力摘要。
+- 增加固定服务 endpoint、管理员批准的内网 CIDR、全 DNS 答案校验、IP 固定与原 Host/TLS SNI、禁止重定向和环境代理，以及后端帐户/授权隔离的有限连接池。
+- 支持 2026-07-28 与 legacy Streamable HTTP 的 JSON/SSE 工具响应；只用只读探测协商，不自动重发调用。多回合请求/资源代理等未实现能力明确失败。
+- 工具发现与发布分离，已发现的 schema 改变阻止旧发布工具继续调用；参数/结果 schema 在有界子进程验证。收回权限后拒绝派送或隐藏迟到结果。
+- 在现有 Panel 增加 MCP 网关页面，原 Role 编辑器保留 connector_rules；添加工具分页、同名工具消歧、回执恢复与配置/调用审计。
+- 独立 gateway_schema=1；原 IAM schema=10 不变。此功能不是 upstream 1.14 合并、生产部署或真实外部服务验收。详见 docs/MCP_GATEWAY.md。
+
 ## Unreleased — 多用户、OIDC 与 Space 隔离
 
 - **升级兼容性警告：** required_group / 群组映射只接受 UserInfo 的群组字段；Microsoft Entra UserInfo 无法返回自定义 groups，仅配置 ID Token 群组不能修复。升级前验证本地恢复登录与身份代理；不能靠移除准入限制绕过。已有群组配置在 Hub 启动及管理页有明确提示。

@@ -8,6 +8,12 @@
 
 > 当前仓库的 `RELEASE.json` 标记为 **1.13.0 / released / source-only**。该版本发布源码，不等同于已经部署到你的 Hub / Agent。
 
+## 多 MCP Gateway（未发布、默认关闭）
+
+新增独立 MCP Gateway：在现有入口聚合多个已批准的远端 MCP，保留工具 schema、使用命名空间避免撞名，并沿用 User / Space / Profile / Role / Grant 的即时权限。外部帐户凭据与 CodePier token 分离；原有连接不会因升级自动得到外部服务权限。
+
+设置 `CODEPIER_MCP_GATEWAY=1` 后可在 **MCP 网关** 管理服务、后端帐户、工具发布、角色规则和逐 grant 委派同意。请先阅读 [MCP Gateway 安装、边界与验收](docs/MCP_GATEWAY.md)。本次是在当前 1.13/IAM 基线上新增接入层，**不包含 upstream 1.14 架构合并**；未部署、未连接真实 Kiln，也未实现后端 OAuth 浏览器流程、stdio 或通用资源沙箱。
+
 ## 多用户与 OIDC（未发布功能）
 
 当前功能分支已接入通用 OIDC 登录、个人/团队 **Space**、空间成员与共用动态 Role、用户私有 Profile、设备归属及跨空间 API/历史/事件隔离。OIDC 只认证人，CodePier 继续签发自己的 MCP 凭据。秘书 Role 后续增加 project 或操作能力，已有角色连接无需重新 OAuth。

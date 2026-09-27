@@ -5,7 +5,7 @@ window.CodePierRoles=(()=>{
   const names=(ids,items)=>ids.map(id=>items.find(p=>p.id===id)?.alias||items.find(p=>p.id===id)?.name||id).join('、');
   function summary(role){
     if(!role)return '<p class="form-note">角色已不存在。</p>';
-    return `<div class="role-policy-summary"><p><strong>${esc(role.label)}</strong> · 版本 ${role.version} · ${role.enabled?'已启用':'已暂停'}</p>${role.project_rules.map(rule=>`<p>${esc(rule.actions.map(a=>labels[a]).join(' / '))} → ${esc(rule.all_projects?'全部现有及未来项目':names(rule.projects,S.projects)||'')}${rule.created_projects?' + 本角色创建的项目':''}${rule.excluded_projects.length?'；此规则排除 '+esc(names(rule.excluded_projects,S.projects)):''}</p>`).join('')}${role.device_rules.map(rule=>`<p>${esc(rule.actions.map(a=>labels[a]).join(' / '))} → ${esc(names(rule.devices,S.devices))}${rule.actions.includes('projects.create')?`；新映射上限 ${esc(rule.max_project_mode)}${rule.allow_tasks?' + 任务':''}；${esc(rule.root_prefixes.length?rule.root_prefixes.join('、'):'Agent 本机允许的目录')}`:''}</p>`).join('')}</div>`;
+    return `<div class="role-policy-summary"><p><strong>${esc(role.label)}</strong> · 版本 ${role.version} · ${role.enabled?'已启用':'已暂停'}</p>${role.project_rules.map(rule=>`<p>${esc(rule.actions.map(a=>labels[a]).join(' / '))} → ${esc(rule.all_projects?'全部现有及未来项目':names(rule.projects,S.projects)||'')}${rule.created_projects?' + 本角色创建的项目':''}${rule.excluded_projects.length?'；此规则排除 '+esc(names(rule.excluded_projects,S.projects)):''}</p>`).join('')}${role.device_rules.map(rule=>`<p>${esc(rule.actions.map(a=>labels[a]).join(' / '))} → ${esc(names(rule.devices,S.devices))}${rule.actions.includes('projects.create')?`；新映射上限 ${esc(rule.max_project_mode)}${rule.allow_tasks?' + 任务':''}；${esc(rule.root_prefixes.length?rule.root_prefixes.join('、'):'Agent 本机允许的目录')}`:''}</p>`).join('')}${role.connector_rules?.length?`<p>MCP 工具规则：${esc(role.connector_rules.map(rule=>rule.binding_id+' → '+rule.tools.join(', ')).join('；'))}。请在 MCP 网关管理。</p>`:''}</div>`;
   }
   async function html(){
     const result=await api('/api/access-roles');
@@ -42,6 +42,7 @@ window.CodePierRoles=(()=>{
           const body={label:form.elements.label.value,enabled:form.elements.enabled.checked,
             project_rules:$$('[data-project-rule]',form).map(b=>({actions:selected(b,'action'),projects:selected(b,'project'),all_projects:$('[name="all_projects"]',b).checked,created_projects:$('[name="created_projects"]',b).checked,excluded_projects:selected(b,'excluded')})),
             device_rules:$$('[data-device-rule]',form).map(b=>({actions:selected(b,'action'),devices:selected(b,'device'),root_prefixes:$('[name="root_prefixes"]',b).value.split('\n').map(s=>s.trim()).filter(Boolean),max_project_mode:$('[name="max_project_mode"]',b).value,allow_tasks:$('[name="allow_tasks"]',b).checked})),
+            connector_rules:role?.connector_rules||[],
             ...(role?{expected_version:role.version}:{idempotency_key:key})};
           const controls=$$('input,select,textarea,button',form),disabled=controls.map(x=>x.disabled);controls.forEach(x=>{x.disabled=true;});status.textContent='正在保存政策…';
           try{

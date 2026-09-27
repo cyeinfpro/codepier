@@ -64,9 +64,22 @@ class DeviceRule(AccessModel):
         return self
 
 
+class ConnectorRule(AccessModel):
+    binding_id: str = Field(pattern=r'^gwb_[a-f0-9]{32}$')
+    tools: list[str] = Field(min_length=1, max_length=128)
+
+    @model_validator(mode='after')
+    def exact_tools(self):
+        from hub.gateway.catalog import TOOL_NAME
+        if len(set(self.tools)) != len(self.tools) or any(not TOOL_NAME.fullmatch(name) for name in self.tools):
+            raise ValueError('MCP 工具必须是明确且不重复的原始名称，不支持通配符')
+        return self
+
+
 class RolePolicy(AccessModel):
     project_rules: list[ProjectRule] = Field(default_factory=list, max_length=32)
     device_rules: list[DeviceRule] = Field(default_factory=list, max_length=32)
+    connector_rules: list[ConnectorRule] = Field(default_factory=list, max_length=32)
 
 
 class RoleFields(RolePolicy):
@@ -291,7 +304,13 @@ def role_values(store, body, space_id="legacy"):
         raise DevError('INVALID_PROJECT', '角色中包含已不存在的项目；请重新读取后明确移除旧引用')
     if any(not set(rule.devices) <= devices for rule in body.device_rules):
         raise DevError('INVALID_DEVICE', '角色中包含不存在的设备')
+    for rule in body.connector_rules:
+        binding = store.one('SELECT tools FROM gateway_bindings WHERE id=? AND space_id=?', (rule.binding_id, space_id))
+        if not binding or not set(rule.tools) <= {tool['name'] for tool in json.loads(binding['tools'])}:
+            raise DevError('GATEWAY_RULE_INVALID', 'MCP 规则必须引用当前空间已批准的工具与 binding')
     policy = body.model_dump(include={'project_rules', 'device_rules'})
+    if body.connector_rules:
+        policy['connector_rules'] = [rule.model_dump() for rule in body.connector_rules]
     return label, unicodedata.normalize('NFKC', label).casefold(), json.dumps(policy, sort_keys=True, ensure_ascii=False)
 
 
@@ -349,6 +368,8 @@ def make_roles_router(auth, runtime):
             row = store.one('SELECT * FROM access_roles WHERE id=? AND space_id=?', (identifier, owner.space_id))
             if not row:
                 raise DevError('ROLE_NOT_FOUND', '角色不存在', 404)
+            if 'connector_rules' not in body.model_fields_set:
+                body = body.model_copy(update={'connector_rules': _policy(row).connector_rules})
             label, key, policy = role_values(store, body, owner.space_id)
             same = (label, json.loads(policy), body.enabled) == (row['label'], json.loads(row['policy']), bool(row['enabled']))
             if body.expected_version != row['version'] and not same:

@@ -37,6 +37,7 @@ window.CodePierIdentity=(()=>{
     if(!me?.instance_admin)$$('[data-nav="identity-admin"]').forEach(n=>n.hidden=true);
   }
   async function switchSpace(id){
+    window.CodePierGateway?.reset();
     const prior=S.space_id;
     if(id===prior)return;
     if(hasUnsavedChanges()&&!confirm('切换空间将清除当前标签页的草稿、附件和待确认请求。其他标签页不受影响。继续？')){const choice=$('#iam-active-space');if(choice)choice.value=prior;return;}

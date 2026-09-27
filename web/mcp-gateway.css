@@ -1,0 +1,11 @@
+#gateway-page .gw-wrap { overflow-wrap: anywhere; white-space: pre-wrap; }
+#gateway-page .grant-row { gap: 16px; flex-wrap: wrap; }
+#gateway-page .grant-row > div:first-child { flex: 1 1 260px; min-width: 0; }
+.gw-tools { max-height: 48vh; overflow: auto; }
+.gw-tools details { padding: 10px 0; }
+.gw-tools summary { cursor: pointer; }
+.gw-tools pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; }
+@media (max-width: 640px) {
+  #gateway-page .actions { width: 100%; flex-wrap: wrap; }
+  #gateway-page .mono { font-size: 12px; }
+}
