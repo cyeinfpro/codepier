@@ -165,8 +165,13 @@ def create_app(data_dir: str | None = None):
             yield
         finally:
             try:
-                await oidc.stop()
-                await runtime.stop()
+                try:
+                    await oidc.stop()
+                finally:
+                    try:
+                        await runtime.gateway.close()
+                    finally:
+                        await runtime.stop()
             finally:
                 try:
                     store.close()
@@ -707,6 +712,11 @@ def create_app(data_dir: str | None = None):
         await runtime.agent_socket(websocket, device_id)
 
     try:
+        from hub.gateway.service import Gateway
+        from hub.gateway.registry import make_router as make_gateway_router
+        runtime.gateway = Gateway(store)
+        app.state.gateway = runtime.gateway
+        app.include_router(make_gateway_router(auth, runtime))
         oauth = OAuth(auth, runtime, public_url)
         runtime.oauth = oauth
         oidc = OIDCService(auth,runtime,public_url)

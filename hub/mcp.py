@@ -94,6 +94,8 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
         profile=request.query_params.get('profile','full')
         if profile not in {'full','coding'}:return failure(identifier,-32602,'Unknown MCP profile; choose full or coding',400)
         instructions=CODING_INSTRUCTIONS if profile=='coding' else INSTRUCTIONS
+        if runtime.gateway.enabled:
+            instructions += ' External MCP tools use reviewed namespace__name exports and backend account permissions, not a project filesystem sandbox. Save each CodePier call_id. On timeout or unknown outcome use gateway_call_get with the original call_id; never repeat a possibly executed tool call to repair a connection. Backend account authentication failures do not mean your CodePier login expired. An existing role grant requires explicit gateway delegation consent.'
         if 'id' not in body:return Response(status_code=202)
         try:
             if method=='initialize' and not modern:
@@ -108,31 +110,40 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                 if set(params)-{'_meta'}:return failure(identifier,-32602,'Discovery accepts only standard metadata',400)
                 result={'supportedVersions':SUPPORTED,'capabilities':capabilities(),'instructions':instructions,'ttlMs':0,'cacheScope':'private'}
             elif method=='tools/list':
-                if params.get('cursor'):return failure(identifier,-32602,'Tool catalog fits one page; no cursor is valid',400 if modern else 200)
-                result={'tools':tool_definitions(profile,authorization)}
+                if runtime.gateway.enabled:
+                    result=runtime.gateway.list_tools(auth.bearer(request),tool_definitions(profile,authorization),params.get('cursor'))
+                else:
+                    if params.get('cursor'):return failure(identifier,-32602,'Tool catalog fits one page; no cursor is valid',400 if modern else 200)
+                    result={'tools':tool_definitions(profile,authorization)}
             elif method=='tools/call':
                 name=params.get('name');arguments=params.get('arguments',{})
                 if not isinstance(name,str) or not isinstance(arguments,dict):return failure(identifier,-32602,'Expected tool name and arguments object',400 if modern else 200)
-                if modern and name not in TOOLS:return failure(identifier,-32602,'Unknown tool',400)
+                external = name not in TOOLS and runtime.gateway.enabled
+                if modern and name not in TOOLS and not external:return failure(identifier,-32602,'Unknown tool',400)
                 trace=None
                 try:
-                    if name in ADMIN_TOOLS:raise DevError('OWNER_REQUIRED','此操作只接受面板主理人或已启用的本机控制入口',403)
-                    if profile=='coding' and name not in CODING_TOOLS and name not in APP_ONLY_TOOLS and not (authorization=='role' and name in ROLE_TOOLS):raise DevError('TOOL_OUTSIDE_PROFILE','此工具在完整 /mcp 中可用；编码显示模式不改变权限',404)
-                    if isinstance(arguments.get('project'),str):
-                        project=runtime.project(arguments['project'],principal)
-                        try:
-                            trace=runtime.integrations.begin(principal,project,name,metadata)
-                            request.state.codepier_call_trace=trace
-                        except Exception:runtime.integrations.write_errors+=1
-                    value=await runtime.invoke(name,arguments,principal)
-                    result=mcp_apps.attach(mcp_result(name,value),name,arguments,value,public_url)
-                    if trace:
-                        trace['operation_id']=value.get('operation_id')
-                        trace['status']='tool_error' if result.get('isError') else 'complete'
+                    if external:
+                        result=await runtime.gateway.call(principal,name,arguments,lambda:auth.bearer(request),metadata.get('codepier/idempotencyKey'))
+                    else:
+                        if name in ADMIN_TOOLS:raise DevError('OWNER_REQUIRED','此操作只接受面板主理人或已启用的本机控制入口',403)
+                        if profile=='coding' and name not in CODING_TOOLS and name not in APP_ONLY_TOOLS and not (authorization=='role' and name in ROLE_TOOLS):raise DevError('TOOL_OUTSIDE_PROFILE','此工具在完整 /mcp 中可用；编码显示模式不改变权限',404)
+                        if isinstance(arguments.get('project'),str):
+                            project=runtime.project(arguments['project'],principal)
+                            try:
+                                trace=runtime.integrations.begin(principal,project,name,metadata)
+                                request.state.codepier_call_trace=trace
+                            except Exception:runtime.integrations.write_errors+=1
+                        value=await runtime.invoke(name,arguments,principal)
+                        if name == 'get_access_context' and runtime.gateway.enabled:value={**value,'mcp_gateway':runtime.gateway.context(auth.bearer(request))}
+                        result=mcp_apps.attach(mcp_result(name,value),name,arguments,value,public_url)
+                        if trace:
+                            trace['operation_id']=value.get('operation_id')
+                            trace['status']='tool_error' if result.get('isError') else 'complete'
                 except DevError as exc:
                     value={'error':{'code':exc.code,'message':exc.message,**exc.details}}
                     result={'content':[{'type':'text','text':json.dumps(value,ensure_ascii=False)}],'structuredContent':value,'isError':True}
-                    if name == 'get_profile':result.pop('structuredContent')
+                    if name == 'get_profile' or external:result.pop('structuredContent')
+                    if exc.details.get('call_id'):result['_meta']={'codepier/callId':exc.details['call_id']}
                     if trace:trace['status']='tool_error';trace['operation_id']=exc.details.get('operation_id')
                     if exc.code=='INSUFFICIENT_SCOPE':
                         scopes=[ROLE_SCOPE] if name in ROLE_TOOLS else sorted({'read',TOOLS[name].scope}) if name in TOOLS else ['read']

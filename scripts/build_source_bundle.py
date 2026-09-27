@@ -65,7 +65,14 @@ REQUIRED_FILES = {'hub/access_profiles.py','shared/access_profile_contracts.py',
 REQUIRED_FILES |= {'hub/iam.py', 'hub/iam_schema.py', 'hub/iam_api.py', 'hub/oidc.py',
                    'web/identity.js', 'web/identity.css', 'docs/MULTIUSER_OIDC.md'}
 
+REQUIRED_FILES |= {'hub/gateway/__init__.py', 'hub/gateway/schema.py', 'hub/gateway/catalog.py',
+                   'hub/gateway/network.py', 'hub/gateway/policy.py', 'hub/gateway/remote.py',
+                   'hub/gateway/registry.py', 'hub/gateway/service.py', 'hub/gateway/validation.py',
+                   'hub/gateway/validate_worker.py', 'web/mcp-gateway.js', 'web/mcp-gateway.css',
+                   'docs/MCP_GATEWAY.md'}
+
 PUBLIC_DOCS = {
+    'docs/MCP_GATEWAY.md',
     'docs/MULTIUSER_OIDC.md', 'docs/DYNAMIC_ROLES.md',
     'docs/ACCESS_PROFILES.md',
     'docs/PANEL_UPDATE.md', 'docs/CLAUDE_CLI.md',

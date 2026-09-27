@@ -153,6 +153,8 @@ class Store:
         self.db.execute("CREATE INDEX IF NOT EXISTS grants_role ON grants(role_id)")
         from hub.iam_schema import migrate
         migrate(self.db)
+        from hub.gateway.schema import migrate as migrate_gateway
+        migrate_gateway(self.db)
 
     @contextmanager
     def transaction(self, *, immediate=True):

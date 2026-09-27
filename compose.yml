@@ -8,6 +8,7 @@ services:
     ports:
       - "${HUB_BIND_ADDRESS:-0.0.0.0}:${HUB_PORT:-8765}:8765"
     environment:
+      CODEPIER_MCP_GATEWAY: ${CODEPIER_MCP_GATEWAY:-0}
       HUB_DATA_DIR: /app/data
       HUB_PANEL_UPDATE_SOCKET: /run/codepier-updater/updater.sock
       HUB_PORT: "8765"
