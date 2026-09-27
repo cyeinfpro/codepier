@@ -18,7 +18,7 @@ OUT = Path(os.getenv('CODEPIER_UI_SCREENSHOTS', 'docs/evidence/ui-20260913/scree
 
 def login(page, stack, route='overview'):
     page.goto(stack.url + '/#' + route)
-    page.fill('#password', stack.password)
+    page.fill('#username', 'admin');page.fill('#password', stack.password)
     page.click('#login-form button')
     expect(page.locator('#page h1')).to_have_text(PAGES[route])
 
@@ -58,7 +58,7 @@ def test_all_pages_layout_and_screenshots(stack, width, height):
         expect(page.locator('#login-form')).to_be_visible()
         assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
         page.screenshot(path=str(OUT/f'{width}-login.png'),full_page=True,animations='disabled')
-        page.fill('#password', stack.password)
+        page.fill('#username', 'admin');page.fill('#password', stack.password)
         page.click('#login-form button')
         expect(page.locator('.stats')).to_be_visible()
         measurements={}
@@ -161,8 +161,9 @@ def test_project_search_disclosure_tools_and_modal_focus(stack):
         assert page.evaluate('codingEndpoint()').endswith('/mcp?profile=coding')
         expect(page.locator('.tool-chip').first).to_be_hidden()
         page.locator('summary').filter(has_text='工具目录').click()
-        page.fill('#tool-query','skills_')
-        expect(page.locator('.tool-chip:visible')).to_have_count(2)
+        page.fill('#tool-query','workspace')
+        expect(page.locator('.tool-chip:visible')).to_have_count(1)
+        expect(page.locator('.tool-chip:visible')).to_contain_text('workspace')
         layout(page,'expanded-tools')
         navigate(page,'workbench')
         page.locator('.tool-menu summary').click()

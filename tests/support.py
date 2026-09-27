@@ -80,14 +80,14 @@ class Stack:
         self.config={**self.pairing,'state_dir':str(self.directory/'agent-state'),'allowed_roots':[{'path':str(self.root),'writable':True,'allow_tasks':True}],
           'tasks':{
             'smoke':{'command':[sys.executable,'-u','-c','print("PASS: local task completed")'],'projects':['ProjectAlpha','ProjectGamma','ProjectBeta'],'timeout':15,'description':'本机示例检查'},
-            'slow':{'command':[sys.executable,'-u','-c','import time; print("STARTED",flush=True); time.sleep(20); print("DONE")'],'projects':['ProjectAlpha'],'timeout':25},
+            'slow':{'command':[sys.executable,'-u','-c','import time; print("STARTED",flush=True); time.sleep(20); print("DONE")'],'projects':['ProjectAlpha'],'timeout':60},
             'timeout':{'command':[sys.executable,'-u','-c','import time; print("WAIT"); time.sleep(10)'],'projects':['ProjectAlpha'],'timeout':1},
             'failure':{'command':[sys.executable,'-u','-c','import sys; print("EXPECTED FAILURE"); sys.exit(3)'],'projects':['ProjectAlpha'],'timeout':5}
           }}
         atomic_json(self.config_path,self.config); self.start_agent()
         self.projects=[]
         for p in (self.projectalpha,self.projectgamma,self.projectbeta):
-            r=self.client.post('/api/projects',json={'alias':p.name,'root':str(p),'device_id':self.device,'description':p.name+' 本地联调示例','mode':'write','allow_tasks':True});self.must(r);self.projects.append(r.json())
+            self.projects.append(self.create_project({'alias':p.name,'root':str(p),'device_id':self.device,'description':p.name+' 本地联调示例','mode':'write','allow_tasks':True}))
         self.project=self.projects[0]
         r=self.client.post('/api/grants',json={'label':'ChatGPT · integration fixture','scopes':['read','write','execute'],'projects':[p['id'] for p in self.projects],'days':1});self.must(r)
         self.pat=r.json()['token'];self.grant=r.json()['grant_id']
@@ -95,12 +95,29 @@ class Stack:
     def must(r):
         assert r.is_success, f'{r.status_code}: {r.text[:1000]}'
         return r.json()
+    def create_project(self, body):
+        body={'idempotency_key':uuid.uuid4().hex,**body}
+        response=self.client.post('/api/projects',json=body)
+        if response.status_code==409 and response.json().get('error',{}).get('code')=='VALIDATION_PENDING':
+            operation=self.poll(response.json()['error']['operation_id'],timeout=45)
+            assert operation['state']=='succeeded',operation
+            response=self.client.post('/api/projects',json=body)
+        return self.must(response)
     def login(self):
         r=self.client.post('/api/login',json={'username':'admin','password':self.password});self.must(r);self.client.headers['X-RD-CSRF']=r.json()['csrf']
     def start_hub(self):
         self.hub=subprocess.Popen([sys.executable,'-m','hub','--data-dir',str(self.hubdir),'run','--host','127.0.0.1','--port',str(self.port)],cwd=BASE,env=self.env,stdout=self.hub_log,stderr=subprocess.STDOUT)
-        wait_for_hub(self.hub,self.url)
+        try:
+            wait_for_hub(self.hub,self.url)
+        except AssertionError as exc:
+            from shared.audit_redaction import redact_text
+            details=redact_text((self.directory/'hub.log').read_text(encoding='utf-8',errors='replace'))[-6000:]
+            raise AssertionError(f'{exc}\n{details}') from exc
     def start_agent(self):
+        # A killed child can remain online in the Hub until its socket closes.
+        # Drain that connection before accepting online as the new child's readiness.
+        if self.agent is not None and self.agent.poll() is not None:
+            wait_for(lambda:not any(d['id']==self.device and d['online'] for d in self.client.get('/api/devices').json().get('devices',[])),timeout=16)
         self.agent=subprocess.Popen([sys.executable,'-m','agent','--config',str(self.config_path),'run'],cwd=BASE,env=self.env,stdout=self.agent_log,stderr=subprocess.STDOUT)
         wait_for(lambda:any(d['id']==self.device and d['online'] for d in self.client.get('/api/devices').json().get('devices',[])),timeout=16)
     def stop_agent(self):

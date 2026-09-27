@@ -1,11 +1,17 @@
-FROM python:3.13-slim-bookworm
+# The multi-architecture manifest is verified when updating this pin.
+FROM python:3.13.15-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26 AS dependencies
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+COPY requirements.txt /tmp/requirements.txt
+RUN python -m venv /opt/venv \
+    && /opt/venv/bin/python -m pip install --no-cache-dir --require-hashes -r /tmp/requirements.txt
+
+FROM python:3.13.15-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26 AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1 \
     HUB_DATA_DIR=/app/data HUB_PORT=8765 TZ=Asia/Taipei
 WORKDIR /app
-COPY requirements.txt ./
-RUN python -m pip install --no-cache-dir --upgrade pip==26.2.1 \
-    && python -m pip install --no-cache-dir -r requirements.txt \
-    && groupadd --gid 10001 codepier \
+COPY --from=dependencies /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+RUN groupadd --gid 10001 codepier \
     && useradd --uid 10001 --gid codepier --create-home --shell /usr/sbin/nologin codepier \
     && mkdir -p /app/data && chown codepier:codepier /app/data
 COPY --chown=codepier:codepier hub ./hub

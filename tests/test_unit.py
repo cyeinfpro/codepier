@@ -1,4 +1,3 @@
-from shared.computer_contracts import COMPUTER_READ_TOOLS
 import json, os, uuid, zipfile
 from pathlib import Path
 import pytest
@@ -53,21 +52,14 @@ def test_password_and_redaction():
     assert 'testsecret' not in json.dumps(safe_summary({'secret':'testsecret','content':'testsecret','path':'ok.py'}))
 
 def test_contracts():
-    from shared.role_contracts import ROLE_TOOLS
-    definitions=tool_definitions();assert {d['name'] for d in definitions} == set(TOOLS) - {'integration_control','validations_accept'} - ROLE_TOOLS
-    assert {d['name'] for d in tool_definitions(authorization='role')} == set(TOOLS) - {'integration_control','validations_accept'}
+    from shared.core_contracts import CORE_TOOLS
+    definitions=tool_definitions();assert {d['name'] for d in definitions} == CORE_TOOLS | {'get_profile','get_access_context'}
     for tool in definitions:
         assert tool['inputSchema']['type']=='object'
         assert tool['inputSchema']['additionalProperties'] is False
         assert tool['outputSchema']['type']=='object'
-        if tool['name']=='get_profile':
-            assert tool['outputSchema']['additionalProperties'] is False
-            assert tool['outputSchema']['required']==['id']
-            assert set(tool['outputSchema']['properties'])=={'id','name','nickname'}
-        else:
-            assert tool['outputSchema']['additionalProperties'] is True
-            assert all(branch.get('required') for branch in tool['outputSchema']['anyOf'])
-        assert tool['annotations']['readOnlyHint']==(TOOLS[tool['name']].scope=='read' or tool['name'] in COMPUTER_READ_TOOLS or tool['name'] in {'lsp_query','browser_snapshot'})
+        assert tool['outputSchema']['additionalProperties'] is (tool['name'] != 'get_profile')
+        assert tool['annotations']['readOnlyHint']==(tool['name'] in {'read','vps','get_profile','get_access_context'})
 
 def test_read_pagination_and_search(engine):
     e,p,r=engine

@@ -42,7 +42,7 @@ def open_settings(browser,stack,state,width=1440,post_handler=None,init_script=N
         else:r.fulfill(json=copy.deepcopy(state))
     page.route('**/api/panel-update/**',route)
     page.goto(stack.url+'/#settings')
-    page.fill('#password',stack.password);page.click('#login-form button')
+    page.fill('#username', 'admin');page.fill('#password',stack.password);page.click('#login-form button')
     expect(page.locator('#page h1')).to_have_text('系统设置')
     expect(page.locator('#panel-update')).to_be_visible()
     return page,calls,errors

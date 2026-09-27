@@ -4,6 +4,7 @@ Every mutation is CSRF-protected and serialized with its current authorization,
 optimistic version and last-owner check. Tokens/IdP credentials are never listed.
 """
 from __future__ import annotations
+from hub.db_worker import database_endpoint
 import json
 import time
 import uuid
@@ -77,10 +78,11 @@ def make_iam_router(auth,runtime):
     def wake(p,action,target='',detail=None):
         iam.audit(store,p,action,target,detail=detail)
         runtime.publish('iam',{'space_id':p.space_id,'user_id':target or p.user_id})
-        runtime.wake.set()
+        runtime.wake_delivery()
 
     @router.get('/me')
-    async def me(request:Request):
+    @database_endpoint(store)
+    def me(request:Request):
         session=auth.session(request);u=iam.user_security(store,session['user_id'])
         ids=store.all('SELECT i.id,i.provider_id,p.label,i.enabled,i.fresh_until FROM external_identities i JOIN oidc_providers p ON p.id=i.provider_id WHERE i.user_id=?',(u['id'],))
         return {'id':u['id'],'username':u['username'],'display_name':u['display_name'] or u['username'],
@@ -89,12 +91,14 @@ def make_iam_router(auth,runtime):
                 'disabled_spaces':store.all("SELECT DISTINCT s.* FROM spaces s JOIN memberships m ON m.space_id=s.id WHERE m.user_id=? AND m.level='owner' AND m.active=1 AND s.active=0 AND NOT EXISTS(SELECT 1 FROM membership_blocks b WHERE b.space_id=m.space_id AND b.user_id=m.user_id AND b.blocked=1)",(u['id'],))}
 
     @router.get('/spaces')
-    async def spaces(request:Request):
+    @database_endpoint(store)
+    def spaces(request:Request):
         s=auth.session(request)
         return {'spaces':spaces_for(store,s['user_id'])}
 
     @router.post('/spaces',status_code=201)
-    async def create_space(request:Request,body:SpaceCreate):
+    @database_endpoint(store)
+    def create_space(request:Request,body:SpaceCreate):
         p=auth.panel(request,True)
         fingerprint=digest(json.dumps(body.model_dump(exclude={'idempotency_key'}),sort_keys=True))
         with store.lock,store.db:
@@ -113,7 +117,8 @@ def make_iam_router(auth,runtime):
         return result
 
     @router.put('/spaces/{space_id}')
-    async def edit_space(space_id:str,request:Request,body:SpaceEdit):
+    @database_endpoint(store)
+    def edit_space(space_id:str,request:Request,body:SpaceEdit):
         with store.lock,store.db:
             store.db.execute('BEGIN IMMEDIATE');p=admin(request,space_id,True)
             if iam.membership(store,p.user_id,space_id)['level']!='owner':raise DevError('OWNER_REQUIRED','只有主理人可修改空间',403)
@@ -124,7 +129,8 @@ def make_iam_router(auth,runtime):
         return store.one('SELECT * FROM spaces WHERE id=?',(space_id,))
 
     @router.post('/spaces/{space_id}/restore')
-    async def restore_space(space_id:str,request:Request,body:SpaceEdit):
+    @database_endpoint(store)
+    def restore_space(space_id:str,request:Request,body:SpaceEdit):
         with store.transaction():
             session=auth.session_write(request)
             iam.check_identity(store,session['identity_id'])
@@ -134,17 +140,19 @@ def make_iam_router(auth,runtime):
             if row['version']!=body.expected_version:raise DevError('VERSION_CONFLICT','空间已变化',409)
             store.db.execute('UPDATE spaces SET active=1,version=version+1 WHERE id=?',(space_id,))
             store.audit('panel:'+session['username'],'space.restored',space_id,commit=False)
-            runtime.wake.set();runtime.publish('iam',{'user_id':session['user_id'],'space_id':space_id})
+            runtime.wake_delivery();runtime.publish('iam',{'user_id':session['user_id'],'space_id':space_id})
         return store.one('SELECT * FROM spaces WHERE id=?',(space_id,))
 
     @router.get('/spaces/{space_id}/members')
-    async def members(space_id:str,request:Request):
+    @database_endpoint(store)
+    def members(space_id:str,request:Request):
         admin(request,space_id)
         rows=store.all('SELECT m.*,u.username,s.display_name,s.active AS user_active,COALESCE(b.blocked,0) AS blocked FROM memberships m JOIN users u ON u.id=m.user_id JOIN iam_users s ON s.user_id=u.id LEFT JOIN membership_blocks b ON b.space_id=m.space_id AND b.user_id=m.user_id WHERE m.space_id=? ORDER BY u.username,m.source',(space_id,))
         return {'members':rows}
 
     @router.put('/spaces/{space_id}/members/{user_id}')
-    async def set_member(space_id:str,user_id:str,request:Request,body:MemberEdit):
+    @database_endpoint(store)
+    def set_member(space_id:str,user_id:str,request:Request,body:MemberEdit):
         with store.lock,store.db:
             store.db.execute('BEGIN IMMEDIATE');p=admin(request,space_id,True)
             iam.user_security(store,user_id)
@@ -159,7 +167,8 @@ def make_iam_router(auth,runtime):
         return store.one("SELECT * FROM memberships WHERE space_id=? AND user_id=? AND source='manual'",(space_id,user_id))
 
     @router.put('/spaces/{space_id}/members/{user_id}/suspension')
-    async def block_member(space_id:str,user_id:str,request:Request,body:BlockEdit):
+    @database_endpoint(store)
+    def block_member(space_id:str,user_id:str,request:Request,body:BlockEdit):
         with store.lock,store.db:
             store.db.execute('BEGIN IMMEDIATE');p=admin(request,space_id,True)
             if body.blocked:
@@ -177,7 +186,8 @@ def make_iam_router(auth,runtime):
         return {'blocked':body.blocked}
 
     @router.get('/spaces/{space_id}/assignments')
-    async def assignments(space_id:str,request:Request):
+    @database_endpoint(store)
+    def assignments(space_id:str,request:Request):
         p=auth.panel(request)
         if p.space_id!=space_id:raise DevError('SPACE_FORBIDDEN','空间不匹配',403)
         where='space_id=?';args=[space_id]
@@ -185,7 +195,8 @@ def make_iam_router(auth,runtime):
         return {'assignments':store.all('SELECT * FROM role_assignments WHERE '+where,args)}
 
     @router.put('/spaces/{space_id}/assignments/{role_id}/{user_id}')
-    async def set_assignment(space_id:str,role_id:str,user_id:str,request:Request,body:AssignmentEdit):
+    @database_endpoint(store)
+    def set_assignment(space_id:str,role_id:str,user_id:str,request:Request,body:AssignmentEdit):
         with store.lock,store.db:
             store.db.execute('BEGIN IMMEDIATE');p=admin(request,space_id,True)
             iam.membership(store,user_id,space_id)
@@ -197,19 +208,22 @@ def make_iam_router(auth,runtime):
         return store.one("SELECT * FROM role_assignments WHERE role_id=? AND user_id=? AND source='manual'",(role_id,user_id))
 
     @router.get('/spaces/{space_id}/invites')
-    async def invitations(space_id:str,request:Request):
+    @database_endpoint(store)
+    def invitations(space_id:str,request:Request):
         admin(request,space_id)
         return {'invitations':store.all('SELECT hash AS id,level,created_by,expires,used_by,created FROM space_invites WHERE space_id=? ORDER BY created DESC LIMIT 200',(space_id,))}
 
     @router.delete('/spaces/{space_id}/invites/{identifier}')
-    async def revoke_invite(space_id:str,identifier:str,request:Request):
+    @database_endpoint(store)
+    def revoke_invite(space_id:str,identifier:str,request:Request):
         with store.transaction():
             p=admin(request,space_id,True)
             store.db.execute('DELETE FROM space_invites WHERE hash=? AND space_id=?',(identifier,space_id));wake(p,'invitation.revoked',space_id)
         return {'ok':True}
 
     @router.post('/spaces/{space_id}/invites',status_code=201)
-    async def create_invite(space_id:str,request:Request,body:InviteCreate):
+    @database_endpoint(store)
+    def create_invite(space_id:str,request:Request,body:InviteCreate):
         p=admin(request,space_id,True)
         if store.one('SELECT kind FROM spaces WHERE id=?',(space_id,))['kind']=='personal':raise DevError('PERSONAL_SPACE_PRIVATE','个人空间不发送团队邀请',403)
         secret='cpi_'+token();now=time.time()
@@ -220,7 +234,8 @@ def make_iam_router(auth,runtime):
         return {'invitation':secret,'expires':now+body.days*86400,'note':'Only displayed once; accept while signed in to the intended account.'}
 
     @router.post('/invites/accept')
-    async def accept_invite(request:Request,body:InviteAccept):
+    @database_endpoint(store)
+    def accept_invite(request:Request,body:InviteAccept):
         p=auth.panel(request,True)
         with store.lock,store.db:
             store.db.execute('BEGIN IMMEDIATE');p=auth.panel(request,True)
@@ -234,7 +249,8 @@ def make_iam_router(auth,runtime):
         return {'space_id':row['space_id']}
 
     @router.get('/users')
-    async def users(request:Request):
+    @database_endpoint(store)
+    def users(request:Request):
         auth.instance(request)
         return {'users':store.all('SELECT u.id,u.username,u.created,s.active,s.instance_admin,s.local_login,s.version,s.display_name FROM users u JOIN iam_users s ON s.user_id=u.id ORDER BY u.created')}
 
@@ -263,12 +279,14 @@ def make_iam_router(auth,runtime):
         return {'id':user_id,**body.model_dump(exclude={'expected_version'}),'version':body.expected_version+1}
 
     @router.get('/sessions')
-    async def sessions(request:Request):
+    @database_endpoint(store)
+    def sessions(request:Request):
         session=auth.session(request)
         return {'sessions':store.all('SELECT s.id_hash AS id,s.expires,ss.authenticated_at,ss.identity_id FROM sessions s LEFT JOIN session_security ss ON ss.session_hash=s.id_hash WHERE s.user_id=? AND s.expires>?',(session['user_id'],time.time())),'current':session['id_hash']}
 
     @router.delete('/sessions/{identifier}')
-    async def delete_session(identifier:str,request:Request):
+    @database_endpoint(store)
+    def delete_session(identifier:str,request:Request):
         with store.transaction():
             session=auth.session_write(request)
             store.db.execute('DELETE FROM sessions WHERE id_hash=? AND user_id=?',(identifier,session['user_id']))
@@ -276,7 +294,8 @@ def make_iam_router(auth,runtime):
         return {'ok':True}
 
     @router.put('/share/{kind}/{identifier}')
-    async def share(kind:str,identifier:str,request:Request,body:ShareEdit):
+    @database_endpoint(store)
+    def share(kind:str,identifier:str,request:Request,body:ShareEdit):
         table={'workflow':'workflows','artifact':'artifacts'}.get(kind)
         if not table:raise DevError('INVALID_RESOURCE','只支持共享工作流或产物，不共享交互会话',400)
         with store.lock,store.db:

@@ -4,6 +4,7 @@ Only the authenticated panel can mint tickets. The permanent device key travels
 in a one-time POST response, never in an installer URL, command, or package.
 """
 from __future__ import annotations
+from hub.db_worker import database_endpoint
 
 import hashlib
 import hmac
@@ -227,24 +228,28 @@ def make_agent_install_router(runtime, auth, source_root=None):
     router = APIRouter()
 
     @router.get('/agent/install.sh')
-    async def posix_script():
+    @database_endpoint(runtime.store)
+    def posix_script():
         bundle = package.build()
         return Response(bundle.scripts[PUBLIC_SCRIPTS['posix']], media_type='text/plain',
                         headers={'Cache-Control': 'no-store'})
 
     @router.get('/agent/install.ps1')
-    async def windows_script():
+    @database_endpoint(runtime.store)
+    def windows_script():
         bundle = package.build()
         return Response(bundle.scripts[PUBLIC_SCRIPTS['windows']], media_type='text/plain',
                         headers={'Cache-Control': 'no-store'})
 
     @router.get('/agent/manifest.json')
-    async def agent_manifest():
+    @database_endpoint(runtime.store)
+    def agent_manifest():
         # Public source metadata only; no enrollment, identity, credential or local path.
         return JSONResponse(package.metadata(''), headers={'Cache-Control': 'no-store'})
 
     @router.post('/api/devices/{device_id}/agent-commands')
-    async def agent_commands(device_id: str, request: Request, body: AgentCommandInput):
+    @database_endpoint(runtime.store)
+    def agent_commands(device_id: str, request: Request, body: AgentCommandInput):
         principal=auth.panel(request, True)
         iam.require_device(store,principal,device_id,manage=True)
         if not store.one('SELECT id FROM devices WHERE id=?', (device_id,)):
@@ -263,7 +268,8 @@ def make_agent_install_router(runtime, auth, source_root=None):
                             headers={'Cache-Control': 'no-store'})
 
     @router.get('/agent/agent.zip')
-    async def agent_package(sha256: str = Query(pattern=r'^[a-f0-9]{64}$')):
+    @database_endpoint(runtime.store)
+    def agent_package(sha256: str = Query(pattern=r'^[a-f0-9]{64}$')):
         bundle = package.build()
         if not hmac.compare_digest(sha256, bundle.sha256):
             raise DevError('INSTALL_PACKAGE_CHANGED', '此命令对应的 Agent 安装包已变化，请在面板重新生成安装命令', 409)
@@ -274,7 +280,8 @@ def make_agent_install_router(runtime, auth, source_root=None):
         })
 
     @router.post('/api/devices/{device_id}/install-ticket')
-    async def install_ticket(device_id: str, request: Request, body: InstallTicketInput):
+    @database_endpoint(runtime.store)
+    def install_ticket(device_id: str, request: Request, body: InstallTicketInput):
         principal = auth.panel(request, True)
         iam.require_device(store,principal,device_id,manage=True)
         try:
@@ -331,7 +338,8 @@ def make_agent_install_router(runtime, auth, source_root=None):
         return await lifecycle_action(device_id, request, body, 'agent_uninstall')
 
     @router.post('/agent/enroll')
-    async def enroll(request: Request):
+    @database_endpoint(runtime.store)
+    def enroll(request: Request):
         header = request.headers.get('authorization', '')
         scheme, separator, enrollment_token = header.partition(' ')
         if (not separator or scheme.lower() != 'bearer'

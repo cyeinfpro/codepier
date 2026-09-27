@@ -7,6 +7,7 @@ is advertised. Legacy sessions are isolated by credential binding AND grant.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import time
 import uuid
@@ -219,9 +220,11 @@ class Session:
         async with self.lock:
             self.used = time.monotonic()
             await self.initialize()
-            # This callback executes a complete, non-awaiting authorization phase
+            # This callback executes a complete worker-owned authorization phase
             # AFTER initialization/queueing, immediately before the side effect.
-            before_send()
+            check = before_send()
+            if inspect.isawaitable(check):
+                await check
             return await self.rpc('tools/call', {'name': name, 'arguments': arguments})
 
 

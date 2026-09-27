@@ -11,7 +11,7 @@ from tests.test_chat_sse import service, TestAuth, request, sync  # noqa: F401
 from tests.test_devtools_browser_actions import browser_page  # noqa: F401
 from tests.test_devtools_flow import tools_page  # noqa: F401
 from tests.test_integrations_stack import integrated_stack  # noqa: F401
-from tests.test_user_flow_audit_fixes_20260922 import records_fixture
+from tests.test_project_cleanup_and_recovery import records_fixture
 
 ROOT=Path(__file__).resolve().parents[1]
 
@@ -75,7 +75,7 @@ vm.createContext(context);vm.runInContext(fs.readFileSync(process.argv[1],'utf8'
  assert.equal(elements['#vps-check-run'].textContent,'重新检查');
  assert.equal(elements['#vps-check-project'].disabled,false);
  await elements['#vps-check-run'].onclick();
- assert.deepEqual(calls.map(c=>c.name),['vps_exec','operations_wait','vps_exec']);
+ assert.deepEqual(calls.map(c=>c.name),['exec','operations_wait','exec']);
  assert.equal(calls[1].args.operation_id,'fixture-operation');
  assert.notEqual(calls[0].args.idempotency_key,calls[2].args.idempotency_key);
 })().catch(error=>{console.error(error);process.exitCode=1;});

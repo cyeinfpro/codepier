@@ -14,8 +14,11 @@ from shared.native_cli import database
 from shared.util import atomic_json
 from tests.support import running_stack, wait_for
 from tests.claude_fixture import FAKE_CLAUDE
-from tests.test_chat_browser import chat_page  # noqa: F401
+from tests.browser_support import chat_page  # noqa: F401
 from tests import test_chat_fullstack as fullstack
+from tests.browser_support import event
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(scope='module')
@@ -32,7 +35,8 @@ def claude_stack(tmp_path_factory):
         atomic_json(stack.config_path, stack.config); stack.start_agent()
         yield stack
         with closing(database(stack.directory / 'agent-state/native-cli')) as db, db:
-            for row in db.execute("SELECT id FROM sessions WHERE status IN ('starting','running')"):
+            db.execute('BEGIN IMMEDIATE')
+            for row in db.execute("SELECT id FROM sessions WHERE status IN ('starting','running')").fetchall():
                 db.execute('INSERT INTO commands(id,session,kind,payload,created) VALUES (?,?,?,?,?)', (uuid.uuid4().hex, row['id'], 'stop', '{}', time.time()))
         def done():
             with closing(database(stack.directory / 'agent-state/native-cli')) as db:
@@ -110,3 +114,49 @@ def test_claude_provider_label_and_capability_switch_no_stale_steer(chat_page):
     expect(page.locator('#chat-empty p')).to_contain_text('Codex')
     page.wait_for_function('() => !chatView().catalogLoading')
     expect(page.locator('#chat-send-mode option[value="steer"]')).to_be_enabled()
+
+
+@pytest.mark.parametrize('chat_page', ['chromium', 'webkit'], indirect=True)
+def test_legacy_claude_history_reconciles_only_matching_message_blocks(chat_page):
+    page=chat_page
+    page.select_option('#chat-provider','claude')
+    page.fill('#chat-compose','history');page.click('#chat-send')
+    receipt=page.evaluate("requests.find(r=>r.path.endsWith('/chat_prompt')).args.receipt")
+    for cursor, (kind, item_id) in enumerate([
+        ('delta','msg-a:1'),('message','msg-a:0'),
+        ('delta','msg-a:2'),('message','msg-a:0'),
+        ('delta','msg-b:1'),('message','msg-b:0'),
+    ],1):
+        event(page,'chat',{'type':kind,'item_id':item_id,'receipt':receipt,'text':'same legitimate text'},cursor)
+    expect(page.locator('.chat-message-assistant')).to_have_count(3)
+    assert page.locator('.chat-message-assistant .chat-message-body').all_text_contents()==['same legitimate text']*3
+
+
+@pytest.mark.parametrize('chat_page', ['chromium', 'webkit'], indirect=True)
+@pytest.mark.parametrize('width,height',[(1440,1000),(900,700),(390,844),(320,568)])
+def test_cli_composer_and_interrupt_fit_with_panel_styles(chat_page,width,height,tmp_path):
+    page=chat_page
+    # Reproduce the real panel cascade, including global select width:100%.
+    for name in ('tokens.css','styles.css','chat.css'):
+        page.add_style_tag(path=str(ROOT/'web'/name))
+    page.select_option('#chat-provider','claude')
+    page.set_viewport_size({'width':width,'height':height})
+    page.fill('#chat-compose','hold');page.click('#chat-send')
+    receipt=page.evaluate("requests.find(r=>r.path.endsWith('/chat_prompt')).args.receipt")
+    event(page,'chat',{'type':'user','receipt':receipt,'text':'hold'},10)
+    event(page,'chat',{'type':'tool','receipt':receipt,'tool_id':'t','name':'Bash','status':'start','text':'fixture'},20)
+    page.fill('#chat-compose','第一行内容不会被圆角遮挡。\n第二行仍然可以编辑。')
+    page.wait_for_function('() => document.querySelector("#chat-root").getBoundingClientRect().bottom <= innerHeight+1')
+    button=page.locator('#chat-interrupt')
+    expect(button).to_be_visible()
+    bounds=button.bounding_box()
+    assert bounds and bounds['height']<=48,bounds
+    for selector in ('#chat-compose','#chat-interrupt','#chat-send'):
+        box=page.locator(selector).bounding_box()
+        assert box and box['x']>=0 and box['y']>=0 and box['x']+box['width']<=width+1 and box['y']+box['height']<=height+1,(selector,box)
+    expect(page.locator('.chat-composer')).to_have_css('border-top-left-radius','12px')
+    expect(page.locator('#chat-compose')).to_have_css('border-top-left-radius','0px')
+    if width>760:
+        expect(button.locator('span')).to_have_css('white-space','nowrap')
+    assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
+    page.screenshot(path=str(tmp_path/f'composer-{width}.png'))

@@ -16,13 +16,15 @@ import os
 from pathlib import Path
 import re
 import stat
+import runpy
+import tempfile
 import sys
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from scripts.build_source_bundle import DIRECTORIES, EXCLUDED_NAMES, REQUIRED_FILES, PUBLIC_DOCS, include
+from scripts.build_source_bundle import DIRECTORIES, EXCLUDED_NAMES, REQUIRED_FILES, PUBLIC_DOCS, PANEL_UPDATE_EXCLUDES, include
 
 
 CREDENTIAL_PATTERNS = {
@@ -32,7 +34,7 @@ CREDENTIAL_PATTERNS = {
     'api-secret': re.compile(r'\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{32,}\b'),
 }
 TEXT_SUFFIXES = {'.py', '.js', '.mjs', '.css', '.html', '.json', '.md', '.txt',
-                 '.sh', '.ps1', '.cmd', '.yml', '.yaml', '.toml', '.example'}
+                 '.sh', '.ps1', '.cmd', '.yml', '.yaml', '.toml', '.example', '.in'}
 
 
 def public_files(root=ROOT):
@@ -128,6 +130,7 @@ def check_web_assets(root, current_version):
 def check_source(root=ROOT):
     files = public_files(root)
     required = REQUIRED_FILES - {'LOCAL_RELEASE.json'}
+    required |= PUBLIC_DOCS
     required |= {'README.md', 'LICENSE', 'SECURITY.md', 'CONTRIBUTING.md', 'CHANGELOG.md',
                  'RELEASE.json', '.github/workflows/ci.yml', 'docs/RELEASING.md'}
     missing = sorted(required - files.keys())
@@ -139,6 +142,11 @@ def check_source(root=ROOT):
         raise ValueError('RELEASE.json does not match CodePier source identity')
     check_compose_image(root, current_version)
     browser_assets = check_web_assets(root, current_version)
+    from scripts.release_policy import check_generated_assets, check_public_links, check_supported_branch, check_readme_version
+    check_generated_assets(root)
+    check_public_links(root, files)
+    check_supported_branch(root, current_version)
+    check_readme_version(root, current_version)
     findings = []
     for name in files:
         path = root / name
@@ -250,15 +258,36 @@ def check_archive(path, expected):
             'bytes': before.st_size, 'verified_against_current_source': True}
 
 
+def check_panel_update(path, expected):
+    """Verify actual release bytes with both the frozen 1.13 and current updater."""
+    from scripts import panel_update_source
+    files = {name: item for name, item in expected.items() if name not in PANEL_UPDATE_EXCLUDES}
+    result = check_archive(path, files)
+    with zipfile.ZipFile(path) as archive:
+        version = json.loads(archive.read('RELEASE.json'))['version']
+    release = {'version': version, 'bytes': result['bytes'], 'sha256': result['sha256']}
+    legacy = runpy.run_path(str(ROOT / 'tests/fixtures/panel_update_source_v1_13_0.py'))
+    with tempfile.TemporaryDirectory(prefix='codepier-upgrade-check-') as directory:
+        for label, unpack in [('1.13.0', legacy['unpack_bundle']), ('current', panel_update_source.unpack_bundle)]:
+            try:
+                unpack(path, Path(directory) / label, release)
+            except Exception as exc:
+                raise ValueError('Panel updater compatibility failed: ' + label + ': ' + str(exc)) from exc
+    return {**result, 'panel_updaters_verified': ['1.13.0', 'current']}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--bundle', type=Path)
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--panel-update', action='store_true', help='Verify the panel update profile and installed updater compatibility')
     args = parser.parse_args()
+    if args.panel_update and not args.bundle:
+        parser.error('--panel-update requires --bundle')
     try:
         result, files = check_source()
         if args.bundle:
-            result.update(check_archive(args.bundle, files))
+            result.update(check_panel_update(args.bundle, files) if args.panel_update else check_archive(args.bundle, files))
         result['passed'] = True
     except (OSError, ValueError, EOFError, zipfile.BadZipFile) as exc:
         result = {'passed': False, 'error': str(exc)}

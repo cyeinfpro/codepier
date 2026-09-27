@@ -15,6 +15,11 @@ DEFAULT = Path.home() / ".codepier-agent" / "config.json"
 
 
 def main():
+    # Redirected Windows service logs can use a legacy code page. Logging a
+    # localized status line must never tear down an authenticated connection.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, 'reconfigure'):
+            stream.reconfigure(errors='backslashreplace')
     parser = argparse.ArgumentParser(description="CodePier 家用 Agent — 只主动连接，不开放家里端口")
     parser.add_argument("--version", action="version", version=VERSION)
     parser.add_argument("--config", default=None, help="配置路径（放在子命令之前）")

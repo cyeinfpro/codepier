@@ -135,6 +135,7 @@ class Workflows:
         return None
 
     def record(self, row, args, principal, fingerprint, action, summary, evidence):
+        self.store.require_transaction()
         receipt = {"workflow_id": row["id"], "version": row["version"], "state": row["state"], "replayed": False, "next": "workflows_get"}
         self.store.db.execute("INSERT INTO workflow_replays(actor,idem,fingerprint,workflow_id,receipt,space_id) VALUES (?,?,?,?,?,?)",
                               (principal.actor, args["idempotency_key"], fingerprint, row["id"], json.dumps(receipt), principal.space_id))

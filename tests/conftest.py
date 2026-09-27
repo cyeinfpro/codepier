@@ -12,7 +12,22 @@ def pytest_addoption(parser):
                      help='Reuse engines in a synchronous UI-only batch; contexts remain isolated.')
 
 
+@pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config, items):
+    from tests.classification import REGRESSION_EXCLUSIVE, WINDOWS_CORE, module_tiers
+    for item in items:
+        browser, integration = module_tiers(str(item.path))
+        browser = browser or 'chat_browser_pool' in item.fixturenames
+        integration = integration or 'stack' in item.fixturenames
+        if browser:
+            item.add_marker(pytest.mark.browser)
+        if integration:
+            item.add_marker(pytest.mark.integration)
+            item.add_marker(pytest.mark.slow)
+        if item.path.name in WINDOWS_CORE:
+            item.add_marker(pytest.mark.windows_core)
+        if item.path.name in REGRESSION_EXCLUSIVE:
+            item.add_marker(pytest.mark.serial_regression)
     if config.getoption('--chat-browser-reuse'):
         import inspect
         if any(item.get_closest_marker('asyncio') or item.get_closest_marker('anyio')
