@@ -25,6 +25,7 @@ def app_page(chat_browser_pool):
     for name in ('core/bundle.js', 'ui.js'):
         page.add_script_tag(path=str(ROOT / 'web' / name))
     page.add_script_tag(content=panel_without_boot())
+    page.add_script_tag(path=str(ROOT / 'web' / 'identity.js'))
     for name in ('chat-markdown.js','chat-panels.js','chat-chrome.js',
                  'chat-history.js','chat-catalog.js','chat.js'):
         page.add_script_tag(path=str(ROOT / 'web' / name))
