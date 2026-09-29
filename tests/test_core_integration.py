@@ -77,7 +77,8 @@ def test_short_exec_and_files_during_another_command(core_stack):
             live, _ = finish(stack, live)
         assert live['build']['runtime']['version'] and live['running_jobs'] >= 1
         diagnostics, _ = call(stack, 'process', {'operation': 'diagnostics', 'project': 'ProjectAlpha'})
-        assert diagnostics['tool_count'] == 9
+        assert diagnostics['tool_count'] == 11
+        assert diagnostics['native_core_tool_count'] == 9
         created, _ = call(stack, 'write', {'path': 'nested/new.txt', 'content': 'alpha\nbeta\n', 'expected_sha256': 'new', 'idempotency_key': uuid.uuid4().hex})
         read, _ = call(stack, 'read', {'path': 'nested/new.txt'})
         edited, _ = call(stack, 'edit', {'path': 'nested/new.txt', 'expected_sha256': read['sha256'],
