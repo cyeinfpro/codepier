@@ -20,7 +20,7 @@ def iam_page(iam_browser,request,stack):
     context=iam_browser.new_context(viewport=request.param)
     page=context.new_page();errors=[]
     page.on('pageerror',lambda err:errors.append(str(err)))
-    page.goto(stack.url+'/#identity');page.fill('#password',stack.password);page.click('#login-form button')
+    page.goto(stack.url+'/#identity');page.fill('#username','admin');page.fill('#password',stack.password);page.click('#login-form button')
     expect(page.locator('#page h1')).to_have_text('我的账号')
     yield page,errors
     assert not errors,errors

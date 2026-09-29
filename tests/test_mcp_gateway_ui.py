@@ -19,13 +19,11 @@ def gateway_browser(request):
 
 
 @pytest.mark.parametrize('width', [1280, 390])
-def test_gateway_panel_end_to_end(gw, gateway_browser, width, tmp_path, monkeypatch):
+def test_gateway_panel_end_to_end(gw, gateway_browser, width, tmp_path):
     app, b, backend = gw
-    monkeypatch.setenv('HUB_PUBLIC_URL', 'http://127.0.0.1:8765')
     r = role(b['owner'], label='UI secretary', project_rules=[])
     page = gateway_browser.new_page(viewport={'width': width, 'height': 900})
     errors = []; page.on('pageerror', lambda error: errors.append(str(error)))
-    page.context.add_cookies([{'name': 'rd_session', 'value': b['owner'].cookie, 'domain': '127.0.0.1', 'path': '/'}])
     page.add_init_script("sessionStorage.setItem('codepier-space:owner','team')")
     def route(request_route):
         req = request_route.request; parts = urlsplit(req.url)
@@ -35,13 +33,17 @@ def test_gateway_panel_end_to_end(gw, gateway_browser, width, tmp_path, monkeypa
         # static files are served by the real app, not canned JSON responses.
         if parts.path.endswith('/events'):
             request_route.fulfill(status=200, content_type='text/event-stream', body=''); return
-        response = b['owner'].client.request(req.method, parts.path + ('?' + parts.query if parts.query else ''),
+        response = b['owner'].client.request(req.method, req.url,
                     headers=req.all_headers(), content=req.post_data_buffer, follow_redirects=False)
         headers = {k: v for k, v in response.headers.items() if k not in ('content-length', 'content-encoding')}
         request_route.fulfill(status=response.status_code, headers=headers, body=response.content)
     page.route('**/*', route)
     try:
         page.goto('http://127.0.0.1:8765/#mcp-gateway')
+        expect(page.locator('#login-form')).to_be_visible()
+        page.fill('#username', 'owner')
+        page.fill('#password', 'fixture-password-only')
+        page.click('#login-form button')
         expect(page.locator('#gateway-page')).to_be_visible()
         page.click('[data-gw="connector"]')
         page.fill('#gw-form [name="label"]', 'UI MCP <not markup>')

@@ -169,6 +169,7 @@ async def test_remote_codex_policy_blocks_before_dispatch_but_preserves_admin_an
     store = AuditStore()
     runtime = object.__new__(Runtime)
     runtime.store = store
+    runtime._loop = None
     principal = Principal("mcp:test:ChatGPT", "user", {"read", "execute", "computer"}, ["*"])
     monkeypatch.setenv("MCP_BLOCK_LOCAL_CODEX", "true")
 
