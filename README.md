@@ -1,5 +1,7 @@
 # CodePier · 码头
 
+> **此分支是未发布、未部署的 fork 整合版**：基于 upstream 1.14.3，加入多用户 IAM/OIDC、Spaces、动态 Roles 和多 MCP Gateway。开发与验收边界见 [整合说明](docs/UPSTREAM_INTEGRATION.md)。不要用原版自动安装命令覆盖本分支的自定义功能。
+
 在自己的电脑上运行开发环境，通过 ChatGPT 或浏览器远程使用。
 
 [![Version](https://img.shields.io/badge/version-1.14.4-2563eb)](RELEASE.json)
@@ -77,6 +79,8 @@ curl --fail http://127.0.0.1:8765/healthz
 
 也可以从 [Releases](https://github.com/cyeinfpro/codepier/releases) 下载源码包。手动安装和开发建议使用 `codepier-VERSION-source-full.zip`；`source.zip` 用于兼容面板更新器。环境变量见 [`.env.example`](.env.example)。
 
+不在服务器上构建镜像的部署方式（例如 Kubernetes/k3s）可直接拉取 CI 发布到 `ghcr.io/<仓库所有者>/codepier` 的 Hub 镜像，标签为版本号；k3s 单文件清单见 `deploy/k3s/deployment.yaml`，可用环境变量播种 OIDC 提供者并让首次 SSO 登录成为实例管理员。镜像在发布前经过启动验证，构建与校验过程见[发布流程](docs/RELEASING.md)。
+
 ### 2. 接入开发电脑
 
 在面板打开 **设备节点 → 接入电脑**，选择系统，填写设备名称、这台电脑能访问的 Hub 地址，以及一个已经存在的绝对授权目录。复制生成的命令，在目标电脑的本机终端执行。
@@ -129,7 +133,7 @@ https://hub.example.com/mcp
 
 耗时操作会返回 `operation_id`。页面刷新或网络中断后，应继续查询这个编号，而不是再次发送相同命令。界面显示已接收、排队或 HTTP 请求成功，并不代表测试已经通过。
 
-MCP 对外提供九个工具：
+MCP 提供以下九个核心开发工具：
 
 | 工具 | 用途 |
 | --- | --- |
@@ -142,6 +146,8 @@ MCP 对外提供九个工具：
 | `vps` | 查询当前项目可用的服务器连接。 |
 | `browser` | 打开、观察和操作已授权网页。 |
 | `computer` | 在独立授权下观察和操作本机应用。 |
+
+另有 `get_profile` 和 `get_access_context` 用于查询稳定身份与当前权限。明确同意外部 MCP 委派的动态角色连接，还会显示经审核且已获授权的网关工具，见 [MCP 网关](docs/MCP_GATEWAY.md)。
 
 专项参数通过 `workspace` 的 `help` 操作按需发现。文件修改使用读取时取得的 SHA 检查冲突；新建文件使用 `expected_sha256="new"`。`exec` 是非交互式命令入口，不是可持续输入的 SSH 终端。完整示例和并行规则见 [MCP 工具参考](docs/CORE_TOOLS.md)。
 
@@ -324,3 +330,10 @@ docs/        使用和维护文档
 - **License:** [MIT](LICENSE)
 
 第三方依赖保留各自许可证。前端依赖声明位于 `web/vendor/`，MCP Apps 的声明见 [THIRD_PARTY_NOTICES.txt](web/mcp-apps/THIRD_PARTY_NOTICES.txt)。
+
+## 本分支：多用户身份与多 MCP 网关
+
+基于 upstream 1.14.3，整合 Spaces、OIDC、动态 Roles、稳定 Profiles 与多 MCP Gateway。
+首次部署前请阅读 [多用户/OIDC](docs/MULTIUSER_OIDC.md)、[动态角色](docs/DYNAMIC_ROLES.md) 和 [MCP 网关](docs/MCP_GATEWAY.md)。
+
+这是未部署的整合开发版本；不保留旧版对外 native 工具目录。

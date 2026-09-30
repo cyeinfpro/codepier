@@ -141,6 +141,8 @@ def test_reset_password_rolls_back_when_revocation_fails(tmp_path, monkeypatch):
     old_hash = password_hash("previous-password")
     store.execute("INSERT INTO users VALUES ('owner','admin',?,0)", (old_hash,))
     store.execute("INSERT INTO sessions VALUES ('session','owner','csrf',9999999999)")
+    from tests.legacy_iam_fixture import attach_session_security
+    attach_session_security(store)
     store.execute("CREATE TRIGGER fail_revocation BEFORE DELETE ON sessions BEGIN SELECT RAISE(ABORT, 'injected revoke failure'); END")
     monkeypatch.setenv("RD_ADMIN_PASSWORD", "replacement-password")
     monkeypatch.setattr(sys, "argv", ["hub", "--data-dir", str(directory), "reset-password"])

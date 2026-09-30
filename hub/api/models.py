@@ -55,6 +55,13 @@ class TokenInput(Model):
     projects: list[str] = Field(default_factory=list, max_length=1000)
     all_projects: bool = False
     days: int = Field(default=30, ge=1, le=365)
+    profile_id: str | None = Field(default=None, min_length=1, max_length=100)
+    profile_version: int | None = Field(default=None, ge=1)
+    authorization_mode: str = Field(default='fixed', pattern=r'^(fixed|role)$')
+    role_version: int | None = Field(default=None, ge=1)
+    confirm_dynamic_role: bool = False
+    confirm_external_mcp: bool = Field(default=False, strict=True)
+
 
 
 class PasswordInput(Model):

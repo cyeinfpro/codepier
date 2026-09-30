@@ -22,7 +22,10 @@ from shared.instance_lock import InstanceLock
 
 RING_FILE = "master.keys.json"
 JOURNAL_FILE = "rekey.json"
-CIPHER_COLUMNS = (("devices", "secret"), ("operations", "payload"), ("vps_connections", "secret"))
+CIPHER_COLUMNS = (("devices", "secret"), ("operations", "payload"), ("vps_connections", "secret"),
+                  ("oidc_providers", "client_secret"), ("external_identities", "upstream_tokens"),
+                  ("oidc_transactions", "verifier"), ("gateway_secrets", "secret"), ("gateway_accounts", "secret"),
+                  ("gateway_calls", "result"))
 
 
 def key_id(key: bytes) -> str:
@@ -208,12 +211,21 @@ def rotate_key(directory: str | Path, *, resume: bool = False) -> dict:
         with store.lock, store.db:
             store.db.execute("BEGIN IMMEDIATE")
             for table, column in CIPHER_COLUMNS:
-                cursor = store.db.execute(f"SELECT id,{column} FROM {table} WHERE {column} IS NOT NULL")
+                if column not in {row[1] for row in store.db.execute(f"PRAGMA table_info({table})").fetchall()}:
+                    continue
+                primary = "state_hash" if table == "oidc_transactions" else "id"
+                cursor = store.db.execute(f"SELECT {primary} AS id,{column} FROM {table} WHERE {column} IS NOT NULL AND {column} != ''")
                 while rows := cursor.fetchmany(128):
                     for row in rows:
                         plaintext = store.decrypt(row[column])
                         encrypted = store.encrypt(plaintext)
-                        store.db.execute(f"UPDATE {table} SET {column}=? WHERE id=?", (encrypted, row["id"]))
+                        store.db.execute(f"UPDATE {table} SET {column}=? WHERE {primary}=?", (encrypted, row["id"]))
+                        if table == 'external_identities' and column == 'upstream_tokens':
+                            # Re-encryption changes ciphertext, not identity ownership.
+                            # Carry only the matching scheduler generation, atomically.
+                            store.db.execute('UPDATE oidc_sync_state SET credential_hash=? WHERE identity_id=? AND credential_hash=?',
+                                (hashlib.sha256(encrypted.encode()).hexdigest(), row['id'],
+                                 hashlib.sha256(row[column].encode()).hexdigest()))
                         changed += 1
             store.audit("hub:offline", "keys.rotated", active, detail={"records": changed})
         _stage(directory, journal, "database_committed")

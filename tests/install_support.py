@@ -38,6 +38,8 @@ def _real_auth_app(tmp_path, *, enabled=True):
     cookie, csrf = 'session-cookie', 'session-csrf'
     store.execute('INSERT INTO sessions(id_hash,user_id,csrf,expires) VALUES (?,?,?,?)',
                   (digest(cookie), 'u1', csrf, time.time() + 3600))
+    from tests.legacy_iam_fixture import attach_session_security
+    attach_session_security(store)
     runtime = SimpleNamespace(store=store)
     app = FastAPI()
     @app.exception_handler(DevError)

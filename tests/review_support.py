@@ -12,6 +12,7 @@ from hub.store import Store
 from shared.crypto import token
 from shared.tool_protocol import wire_version
 from shared.util import atomic_json
+from tests.legacy_iam_fixture import seed_owner
 
 
 DATA = b'imported fixture'
@@ -34,9 +35,10 @@ def local_agent(tmp_path):
 @pytest.fixture
 def runtime(tmp_path):
     store = Store(tmp_path / 'hub')
+    seed_owner(store, 'owner', 'admin')
     store.execute("INSERT INTO devices(id,name,secret,created) VALUES ('dev','home',?,?)",
                   (store.encrypt(token()), time.time()))
-    store.execute("INSERT INTO projects VALUES ('proj','ProjectAlpha','projectalpha','dev','/tmp/fixture','','write',1,?)",
+    store.execute("INSERT INTO projects(id,alias,alias_key,device_id,root,description,mode,allow_tasks,created) VALUES ('proj','ProjectAlpha','projectalpha','dev','/tmp/fixture','','write',1,?)",
                   (time.time(),))
     instance = Runtime(store)
     instance.wait_seconds = 0

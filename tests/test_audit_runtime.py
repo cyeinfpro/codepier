@@ -19,10 +19,12 @@ from shared.util import DevError
 @pytest.fixture
 def runtime(tmp_path):
     store = Store(tmp_path / "hub")
+    from tests.legacy_iam_fixture import seed_owner
+    seed_owner(store,'owner','owner')
     secret = token()
     store.execute("INSERT INTO devices(id,name,secret,created) VALUES ('dev','home',?,?)",
                   (store.encrypt(secret), time.time()))
-    store.execute("INSERT INTO projects VALUES ('proj','Project','project','dev','/tmp/project','','write',1,?)",
+    store.execute("INSERT INTO projects(id,alias,alias_key,device_id,root,description,mode,allow_tasks,created) VALUES ('proj','Project','project','dev','/tmp/project','','write',1,?)",
                   (time.time(),))
     runtime = Runtime(store)
     runtime.wait_seconds = 0

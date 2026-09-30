@@ -168,15 +168,18 @@ async def test_shutdown_wakes_readers_without_cancelling_command(runtime):
 @pytest.mark.asyncio
 async def test_wait_rechecks_receipt_authorization_before_exposing_result(runtime):
     r, admin = runtime
-    p = replace(admin, admin=False, actor='client', grant_id=None)
+    from tests.legacy_iam_fixture import seed_grant
+    seed_grant(r.store, 'reader-grant', admin.user_id, projects=('proj',))
+    p = replace(admin, admin=False, actor='mcp:reader-grant:fixture', grant_id='reader-grant')
     identifier = (await submit(r, p))['operation_id']
     reader = asyncio.create_task(r.invoke('operations_wait', {'operation_id': identifier}, p))
     try:
         await registered(r, identifier, 1)
         r.store.execute("UPDATE operations SET grant_id='different-grant' WHERE id=?", (identifier,))
         finish(r, identifier, output='private result')
-        with pytest.raises(DevError, match='找不到此授权范围内的操作'):
+        with pytest.raises(DevError) as denied:
             await asyncio.wait_for(reader, 1)
+        assert denied.value.code == 'OPERATION_NOT_FOUND'
         assert not r.operation_waiters
         with pytest.raises(DevError):
             await r.invoke('operations_wait', {'operation_id': identifier}, p)

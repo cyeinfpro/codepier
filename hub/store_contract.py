@@ -64,9 +64,19 @@ class CheckedConnection:
             self._lock.require()
 
     @property
+    def total_changes(self):
+        self._require()
+        return self._connection.total_changes
+
+    @property
     def in_transaction(self):
         self._require()
         return self._connection.in_transaction
+
+    def set_trace_callback(self, callback):
+        """Diagnostics obey the same connection ownership as query execution."""
+        self._require()
+        return self._connection.set_trace_callback(callback)
 
     def execute(self, sql, parameters=()):
         self._require()

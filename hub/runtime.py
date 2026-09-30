@@ -8,6 +8,10 @@ import re
 import time
 import unicodedata
 import uuid
+from hub.access_profiles import effective_grant, refresh_profile_principal, current_profile, access_context
+from hub.roles import require_role, role_project_scopes, principal_grant
+from hub import iam
+from shared.role_contracts import ROLE_TOOLS
 from hub.principal import Principal, refresh_principal
 from hub.dispatch_plan import DeferredCall
 from shared.config import RuntimeConfig
@@ -65,6 +69,7 @@ class Connection:
         self.device_secret = None
         self.native_protocol = 0
         self.native_chat_protocol = 0
+        self.native_security_protocol = 0
         self.tool_protocol = None
 
     async def send(self, body):
@@ -138,8 +143,8 @@ class Runtime:
     def wake_delivery(self):
         self.store.after_commit(lambda: self.on_loop(self.wake.set))
 
-    def publish(self, kind: str, data=None):
-        self.store.after_commit(lambda: self.on_loop(self._publish, kind, data))
+    def publish(self, kind: str, data=None, *, audience=None):
+        self.store.after_commit(lambda: self.on_loop(self._publish, kind, data, audience))
 
     @staticmethod
     def _signal_owner(owner, callback, *args):
@@ -161,8 +166,10 @@ class Runtime:
         with contextlib.suppress(asyncio.QueueFull):
             q.put_nowait(message)
 
-    def _publish(self, kind: str, data=None):
+    def _publish(self, kind: str, data=None, audience=None):
         message = {"type": kind, "at": time.time(), "data": data or {}}
+        if audience is not None:
+            message['_audience'] = audience  # Server-only routing; stripped by SSE.
         for q in list(self.watchers):
             self._signal_owner(q, self._enqueue, q, message)
 
@@ -171,8 +178,8 @@ class Runtime:
         return bool(connection and not connection.unusable and time.time() - connection.last_seen < 45 and self.connection_authorized(device_id, connection))
 
     def connection_authorized(self, device_id, connection):
-        device = self.store.one("SELECT enabled,secret FROM devices WHERE id=?", (device_id,))
-        return bool(device and device["enabled"] and
+        device = self.store.one("SELECT id,enabled,secret,space_id,owner_user_id FROM devices WHERE id=?", (device_id,))
+        return bool(iam.device_identity_active(self.store, device) and
                     (getattr(connection, "device_secret", None) is None or connection.device_secret == device["secret"]))
 
     def _detach_fence(self, device_id, connection):
@@ -208,27 +215,56 @@ class Runtime:
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(connection.socket.close(code=4003, reason=reason), 2)
 
-    def visible_project(self, p: dict, principal: Principal):
-        return principal.admin or "*" in principal.projects or p["id"] in principal.projects
+    def grant_principal(self, grant):
+        scopes, projects, _ = effective_grant(self.store, grant)
+        return Principal('mcp:' + grant['id'] + ':' + grant['label'], grant['user_id'], scopes, projects,
+                         grant_id=grant['id'], profile_id=grant.get('profile_id'),
+                         authorization_mode=grant.get('authorization_mode', 'fixed'), role_id=grant.get('role_id'),
+                         space_id=grant.get('space_id','legacy'), identity_id=grant.get('identity_id'), user_epoch=grant.get('user_epoch',1))
 
+    def authorize(self, principal, action, *, project_id=None, device_id=None, creation=None):
+        try:
+            return require_role(self.store, principal, action, project_id=project_id, device_id=device_id, creation=creation)
+        except DevError as exc:
+            # Do not commit a caller's mutation transaction merely to log a denial.
+            with self.store.lock:
+                if not self.store.db.in_transaction:
+                    self.store.audit(principal.actor, 'role.denied', project_id or device_id or '', 'denied',
+                                     {'action': action, 'code': exc.code})
+            raise
+
+    def visible_project(self, p: dict, principal: Principal):
+        return p.get("space_id", "legacy") == principal.space_id and (principal.admin or "*" in principal.projects or p["id"] in principal.projects)
+
+    @iam.read_decision
     def project(self, value: str, principal: Principal):
-        row = self.store.one("SELECT p.*,d.name AS device_name,d.enabled AS device_enabled FROM projects p JOIN devices d ON d.id=p.device_id WHERE p.id=? OR p.alias_key=?", (value, alias_key(value)))
+        principal = refresh_profile_principal(self.store, principal)
+        row = self.store.one("SELECT p.*,d.name AS device_name,d.enabled AS device_enabled FROM projects p JOIN devices d ON d.id=p.device_id WHERE (p.id=? OR p.alias_key=?) AND p.space_id=?", (value, alias_key(value), principal.space_id))
         if not row or not self.visible_project(row, principal):
             raise DevError("PROJECT_NOT_FOUND", "未找到已授权的项目别名，请先调用 projects_list", 404)
+        self.authorize(principal, 'read', project_id=row['id'])
         return row
 
     def project_public(self, p):
         return {k: p[k] for k in ("id", "alias", "device_id", "root", "description", "mode", "allow_tasks", "device_name") if k in p} | {"online": self.online(p["device_id"]), "allow_tasks": bool(p.get("allow_tasks"))}
 
+    @iam.read_decision
     def list_projects(self, principal):
-        return [self.project_public(p) for p in self.store.all("SELECT p.*,d.name AS device_name FROM projects p JOIN devices d ON d.id=p.device_id ORDER BY p.alias_key") if self.visible_project(p, principal)]
+        principal = refresh_profile_principal(self.store, principal)
+        self.authorize(principal, 'read')
+        return [self.project_public(p) for p in self.store.all("SELECT p.*,d.name AS device_name FROM projects p JOIN devices d ON d.id=p.device_id WHERE p.space_id=? ORDER BY p.alias_key", (principal.space_id,)) if self.visible_project(p, principal)]
 
+    @iam.read_decision
     def operation_row(self, id: str, principal: Principal, *, status_only=False):
-        columns = "id,grant_id,project_id,tool,state" if status_only else "*"
+        principal = refresh_profile_principal(self.store, principal)
+        columns = "id,grant_id,project_id,device_id,tool,state,space_id,owner_user_id,visibility" if status_only else "*"
         row = self.store.one(f"SELECT {columns} FROM operations WHERE id=?", (id,))
-        if not row or (not principal.admin and (row["grant_id"] != principal.grant_id or row["project_id"] and "*" not in principal.projects and row["project_id"] not in principal.projects)):
-            raise DevError("OPERATION_NOT_FOUND", "找不到此授权范围内的操作", 404)
-        if row['tool'] in COMPUTER_TOOLS - {'computer_status'} and 'computer' not in principal.scopes:
+        principal = iam.require_record(self.store, principal, row)
+        if row['project_id']:
+            self.authorize(principal, TOOLS[row['tool']].scope, project_id=row['project_id'])
+        elif row['tool'] == 'system_validate':
+            self.authorize(principal, 'projects.create', device_id=row['device_id'])
+        if row['tool'] in (COMPUTER_TOOLS - {'computer_status'}) | {'browser_open', 'browser_snapshot', 'browser_action', 'browser_close'} and 'computer' not in principal.scopes:
             raise DevError('INSUFFICIENT_SCOPE', '读取桌面操作结果仍需 computer 权限', 403)
         return row
 
@@ -319,13 +355,12 @@ class Runtime:
         return result
 
     def list_operations(self, args, principal):
-        clauses, values = [], []
-        if not principal.admin:
-            clauses.append("grant_id=?")
-            values.append(principal.grant_id)
-            if "*" not in principal.projects:
-                clauses.append("(project_id IS NULL OR project_id IN (%s))" % (",".join("?" for _ in principal.projects) or "NULL"))
-                values.extend(principal.projects)
+        principal = refresh_profile_principal(self.store, principal)
+        clause, values = iam.private_sql(principal)
+        clauses = [clause]
+        if not principal.admin and '*' not in principal.projects:
+            clauses.append('(project_id IS NULL OR project_id IN (%s))' % (','.join('?' for _ in principal.projects) or 'NULL'))
+            values.extend(principal.projects)
         if args["project"]:
             clauses.append("project_id=?")
             values.append(self.project(args["project"], principal)["id"])
@@ -341,7 +376,15 @@ class Runtime:
         return {"operations": rows[:args["limit"]], "next_before_created": rows[args["limit"]-1]["created"] if len(rows) > args["limit"] else None}
 
     async def invoke(self, name: str, raw: dict, principal: Principal):
-        self._loop = asyncio.get_running_loop()
+        context = iam.audit_context.set((self.store, principal.actor, principal.space_id, principal.user_id))
+        try:
+            return await self._invoke_async(name, raw, principal)
+        finally:
+            iam.audit_context.reset(context)
+
+    async def _invoke_async(self, name: str, raw: dict, principal: Principal):
+        if self._loop is None or self._loop.is_closed():
+            self._loop = asyncio.get_running_loop()
         from shared.core_contracts import CORE_FACADES, CORE_ACTIONS
         if name in CORE_FACADES or name in CORE_ACTIONS and raw.get('operation', 'file') != 'file':
             from hub.core_tools import invoke as invoke_core
@@ -349,6 +392,8 @@ class Runtime:
         prepared = await self.store.run(self._invoke, name, raw, principal)
         if not isinstance(prepared, DeferredCall):
             return prepared
+        if prepared.action == "project_create":
+            return await self.project_creator(prepared.arguments, principal)
         if prepared.action == "cancel":
             return await self.cancel(prepared.arguments["operation_id"], principal)
         if prepared.action == "wait":
@@ -374,7 +419,8 @@ class Runtime:
             raise DevError("UNKNOWN_TOOL", "不存在此工具", 404)
         if tool.scope not in principal.scopes:
             self.store.audit(principal.actor, name, status="denied", detail={"reason": "scope"})
-            raise DevError("INSUFFICIENT_SCOPE", f"该凭据缺少 {tool.scope} 权限", 403, required_scope=tool.scope)
+            code = 'ROLE_POLICY_DENIED' if principal.authorization_mode == 'role' else 'INSUFFICIENT_SCOPE'
+            raise DevError(code, f"当前凭据/角色缺少 {tool.scope} 权限", 403, required_scope=tool.scope)
         try:
             args = tool.model.model_validate(raw).model_dump()
             if args.get('workspace_id') == '': args.pop('workspace_id', None)
@@ -386,6 +432,28 @@ class Runtime:
             self.store.audit(principal.actor, name, args.get("project", ""), status="denied",
                              detail={"reason": "remote_codex_policy"})
             raise DevError("CODEX_REMOTE_DISABLED", codex_denial, 403)
+        if name in {'get_profile', 'get_access_context'}:
+            self.authorize(principal, name)
+        elif name == 'projects_create':
+            self.authorize(principal, 'projects.create', device_id=args['device_id'], creation=args)
+            return DeferredCall("project_create", args, None)
+        elif name == 'devices_list':
+            self.authorize(principal, 'read')
+            devices = []
+            for device in self.store.all('SELECT id,name,enabled FROM devices WHERE space_id=? ORDER BY name,id',(principal.space_id,)):
+                try:
+                    require_role(self.store, principal, 'devices.read', device_id=device['id'])
+                except DevError as exc:
+                    if exc.code == 'ROLE_POLICY_DENIED':
+                        continue
+                    raise
+                devices.append({**device, 'enabled': bool(device['enabled']), 'online': self.online(device['id'])})
+            return {'devices': devices}
+        else:
+            self.authorize(principal, 'read')
+            if args.get('project'):
+                scoped_project = self.project(args['project'], principal)
+                self.authorize(principal, tool.scope, project_id=scoped_project['id'])
         from shared.integration_contracts import ADMIN_TOOLS, REMOTE_TOOLS as INTEGRATION_REMOTE_TOOLS
         if name in ADMIN_TOOLS and not principal.admin:
             raise DevError('OWNER_REQUIRED', '此操作只允许面板主理人执行', 403)
@@ -393,7 +461,11 @@ class Runtime:
             return self.integrations.handoff(args, principal)
         if name == 'activity_list':
             return self.integrations.activity(args, principal)
-        if name == "projects_list":
+        if name == "get_profile":
+            result = current_profile(self.store, principal)[0]
+        elif name == "get_access_context":
+            result = access_context(self.store, principal)
+        elif name == "projects_list":
             result = {"projects": self.list_projects(principal)}
         elif name == "vps":
             result = self.vps.list(args, principal)
@@ -452,7 +524,7 @@ class Runtime:
                 source=self.operation(args["source_operation_id"],principal,{"include_output":False,"include_result":False})
                 if source["project_id"]!=project["id"] or source["device_id"]!=project["device_id"] or source["state"]!="succeeded":
                     raise DevError("ARTIFACT_SOURCE_INVALID","来源操作必须是同项目、同设备的真实成功操作",409)
-            if name == "computer_session_close" and args.get("force") and not principal.admin:
+            if name == "computer_session_close" and args.get("force") and not principal.instance_admin:
                 raise DevError("COMPUTER_FORCE_DENIED", "只有面板管理员可以强制停止其他会话", 403)
             return DeferredCall("dispatch", args, project)
         self.store.audit(principal.actor, name, args.get("project", args.get("operation_id", args.get("workflow_id", ""))))
@@ -465,6 +537,8 @@ class Runtime:
     def _cancel(self, id, principal):
         principal = refresh_principal(self.store, principal)
         op = self.operation(id, principal)
+        if op['project_id']:
+            self.authorize(principal, 'execute', project_id=op['project_id'])
         if not op["pending"]:
             return {"operation_id": id, "state": op["state"], "cancel_requested": False}
         if op["tool"] in DEVICE_ACTIONS:
@@ -491,8 +565,10 @@ class Runtime:
     def _device_action_project(self, name: str, args: dict, device_id: str, principal: Principal):
         if getattr(self, "panel_maintenance", None):
             self.panel_maintenance.guard()
-        if name not in DEVICE_ACTIONS or not principal.admin:
-            raise DevError("INSUFFICIENT_SCOPE", "只有面板管理员可以管理 Agent 生命周期", 403)
+        principal = refresh_profile_principal(self.store, principal)
+        if name not in DEVICE_ACTIONS or principal.grant_id:
+            raise DevError("INSUFFICIENT_SCOPE", "Agent 生命周期只能由有设备管理权限的面板用户操作", 403)
+        iam.require_device(self.store, principal, device_id, manage=True)
         device = self.store.one("SELECT id,name,enabled,info FROM devices WHERE id=?", (device_id,))
         if not device:
             raise DevError("NOT_FOUND", "设备不存在", 404)
@@ -519,7 +595,7 @@ class Runtime:
         async with self.dispatch_lock:
             id, completed = await self.store.run(self._admit_operation, name, args, project, principal, background)
             if completed is not None:
-                return self.unwrap(id, completed)
+                return await self.store.run(self.authorized_result, id, completed, principal)
             future = self.futures.get(id)
             if future is None:
                 future = asyncio.get_running_loop().create_future()
@@ -534,12 +610,20 @@ class Runtime:
         if not background and await self.store.run(self.online, project["device_id"]):
             try:
                 result = await asyncio.wait_for(asyncio.shield(future), timeout=self.wait_seconds)
-                return self.unwrap(id, result)
+                return await self.store.run(self.authorized_result, id, result, principal)
             except asyncio.TimeoutError:
                 pass
-        op = await self.store.run(self.store.one, "SELECT state,deadline,result,created,updated FROM operations WHERE id=?", (id,))
-        if op["result"]:
-            return self.unwrap(id, json.loads(op["result"]))
+        return await self.store.run(self._pending_receipt, id, principal)
+
+    def _pending_receipt(self, id, principal):
+        with iam.read_scope(self.store):
+            try:
+                self.operation_row(id, principal, status_only=True)
+            except DevError as exc:
+                raise DevError(exc.code, exc.message, exc.status, operation_id=id) from exc
+            op = self.store.one("SELECT state,deadline,result,created,updated FROM operations WHERE id=?", (id,))
+            if op["result"]:
+                return self.authorized_result(id, json.loads(op["result"]), principal)
         pending = op["state"] in ACTIVE or op["state"] == "unknown"
         return {"operation_id": id, "pending": pending, "state": op["state"], "next": "operations_wait" if pending else None, "retry_after_seconds": 2 if pending else None,
                 "next_call": self.operation_next_call(id, pending=pending),
@@ -554,17 +638,26 @@ class Runtime:
         if name == "tasks_list" and not idem:
             # Resolve alias casing before identifying an unkeyed metadata query.
             args = {**args, "project": project["alias"]}
+        principal = refresh_profile_principal(self.store, principal)
+        if project.get('id'):
+            self.authorize(principal, TOOLS[name].scope, project_id=project['id'])
+        elif name == 'system_validate' and not principal.admin:
+            self.authorize(principal, 'projects.create', device_id=project['device_id'], creation=project)
+        elif name in DEVICE_ACTIONS:
+            if principal.grant_id:
+                raise DevError('INSUFFICIENT_SCOPE', 'MCP 不允许设备生命周期操作', 403)
+            iam.require_device(self.store, principal, project['device_id'], manage=True)
         snapshot = {k: project[k] for k in ("id", "alias", "root", "mode", "allow_tasks") if k in project}
         if name in {"open_workspace", "show_changes", "apply_patch", "edit"}:
             snapshot["_coding_owner"] = "grant:" + principal.grant_id if principal.grant_id else principal.actor
             snapshot["_coding_device"] = project["device_id"]
-            snapshot["_coding_scopes"] = sorted(principal.scopes)
+            snapshot["_coding_scopes"] = sorted(role_project_scopes(self.store, principal, project['id']))
         if name in COMPUTER_TOOLS:
             snapshot["_computer_owner"] = "grant:" + principal.grant_id if principal.grant_id else principal.actor
             snapshot["_computer_admin"] = principal.admin
         fingerprint = digest(json.dumps({"tool": name, "args": args, "project": snapshot, "device": project["device_id"]}, sort_keys=True, ensure_ascii=False))
         with self.store.lock:
-            old = self.store.one("SELECT * FROM operations WHERE actor=? AND idem=?", (principal.actor, idem)) if idem else None
+            old = self.store.one("SELECT * FROM operations WHERE space_id=? AND actor=? AND idem=?", (principal.space_id, principal.actor, idem)) if idem else None
             if name == "tasks_list" and not idem:
                 # Reuse only an outstanding metadata query from this exact grant.
                 # Explicit keys retain their own receipts; completed results are
@@ -576,6 +669,9 @@ class Runtime:
                     ORDER BY created LIMIT 1""",
                     (principal.actor, principal.grant_id, project["device_id"], project["id"], fingerprint, time.time()))
             if old:
+                # Replay is not an exception to current visibility, even when
+                # a caller already knows its own formerly permitted request key.
+                self.operation_row(old['id'], principal, status_only=True)
                 if old["fingerprint"] != fingerprint:
                     raise DevError("IDEMPOTENCY_CONFLICT", "幂等键已经用于不同请求；未执行新操作", 409, operation_id=old["id"])
                 id = old["id"]
@@ -602,7 +698,9 @@ class Runtime:
                     raise DevError("DEVICE_BUSY", "该设备已有 64 个待完成操作，请先查询并等待已有操作", 429, retryable=True, retry_after_seconds=3)
                 id, now = uuid.uuid4().hex, time.time()
                 self.integrations.prepare(id, name, args, project, principal)
-                request = {"tool": name, "args": args, "project": snapshot, "tool_contract_version": wire_version(name)}
+                request = {"tool": name, "args": args, "project": snapshot, "tool_contract_version": wire_version(name),
+                           "principal_context": {"user_id": principal.user_id, "space_id": principal.space_id,
+                           "user_epoch": principal.user_epoch, "identity_id": principal.identity_id}}
                 if name == "exec" and args["target"].startswith("vps:"):
                     vps_args = {**args, "vps": args["target"][4:]}
                     request["vps_ref"] = self.vps.reference(vps_args, project)
@@ -611,13 +709,23 @@ class Runtime:
                 deadline_seconds = (min(self.queue_seconds, 15) if name in {"computer_action", "browser_action"} else
                                     min(self.queue_seconds, 60) if name in COMPUTER_TOOLS | {"browser_open", "browser_snapshot"} else
                                     min(self.queue_seconds, lifecycle_ttl) if name in DEVICE_ACTIONS else self.queue_seconds)
-                self.store.execute("INSERT INTO operations(id,device_id,project_id,actor,grant_id,tool,args_summary,fingerprint,idem,state,created,updated,payload,deadline) VALUES (?,?,?,?,?,?,?,?,?,'queued',?,?,?,?)",
+                self.store.execute("INSERT INTO operations(id,device_id,project_id,actor,grant_id,tool,args_summary,fingerprint,idem,state,created,updated,payload,deadline,space_id,owner_user_id) VALUES (?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?)",
                     (id, project["device_id"], project.get("id"), principal.actor, principal.grant_id, name,
-                     json.dumps(operation_summary(args), ensure_ascii=False), fingerprint, idem, now, now, payload, now + deadline_seconds))
+                     json.dumps(operation_summary(args), ensure_ascii=False), fingerprint, idem, now, now, payload, now + deadline_seconds, principal.space_id, principal.user_id))
                 self.store.audit(principal.actor, name, project.get("alias", ""), "queued", {"operation_id": id, "args": operation_summary(args)})
                 self.diagnostics.record(id, "hub_received")
                 self.publish("operation", {"id": id, "state": "queued", "tool": name})
         return id, None
+
+    def authorized_result(self, identifier, result, principal):
+        """A stored result is not authority to disclose it after a policy change."""
+        try:
+            self.operation_row(identifier, principal, status_only=True)
+        except DevError as exc:
+            # Keep the original receipt so a lost permission is not mistaken for
+            # a failed execution and replayed with a fresh idempotency key.
+            raise DevError(exc.code, exc.message, exc.status, operation_id=identifier) from exc
+        return self.unwrap(identifier, result)
 
     def expire_waiter(self, id, future):
         if self.futures.get(id) is future:
@@ -636,8 +744,38 @@ class Runtime:
         scrub_expired(result)
         return {"operation_id": id, **(result.get("data") or {})}
 
+    def operation_principal(self, op, request=None):
+        if op.get('grant_id'):
+            grant = self.store.one('SELECT * FROM grants WHERE id=?', (op['grant_id'],))
+            return self.grant_principal(grant)
+        context = (request or {}).get('principal_context') or {}
+        owner = op.get('owner_user_id')
+        if not owner:
+            raise DevError('ACCOUNT_DISABLED', '原操作缺少可信用户归属', 401)
+        principal = Principal(op['actor'], owner, {'read'}, [], space_id=op.get('space_id','legacy'),
+                              user_epoch=context.get('user_epoch'), identity_id=context.get('identity_id'))
+        return iam.live_principal(self.store, principal)
+
     def permission_error(self, op, request):
-        if not op["project_id"]:  # Admin-only root validation has no mapping yet.
+        try:
+            caller = self.operation_principal(op, request)
+            if op['project_id']:
+                self.authorize(caller, TOOLS[op['tool']].scope, project_id=op['project_id'])
+            else:
+                iam.require_device(self.store, caller, op['device_id'], manage=op['tool'] != 'system_validate',
+                                   creation=request['project'] if op['tool'] == 'system_validate' else None)
+        except DevError as exc:
+            return exc.message
+        if not op["project_id"]:
+            if op['grant_id']:
+                try:
+                    grant = self.store.one('SELECT * FROM grants WHERE id=?', (op['grant_id'],))
+                    caller = self.grant_principal(grant)
+                    if op['tool'] != 'system_validate':
+                        return 'MCP 不允许设备生命周期操作'
+                    require_role(self.store, caller, 'projects.create', device_id=op['device_id'], creation=request['project'])
+                except DevError as exc:
+                    return exc.message
             return None
         project = self.store.one("SELECT * FROM projects WHERE id=?", (op["project_id"],))
         if not project or project["root"] != request["project"]["root"] or project["device_id"] != op["device_id"] or project["alias"] != request["project"].get("alias"):
@@ -651,8 +789,13 @@ class Runtime:
             return "排队操作的项目写入/任务权限已撤销"
         if op["grant_id"]:
             grant = self.store.one("SELECT * FROM grants WHERE id=?", (op["grant_id"],))
-            if not grant or grant["revoked"] or scope not in json.loads(grant["scopes"]) or not ("*" in json.loads(grant["projects"]) or op["project_id"] in json.loads(grant["projects"])):
-                return "排队操作的 MCP 授权已撤销或缩小"
+            try:
+                scopes, projects, _ = effective_grant(self.store, grant)
+                require_role(self.store, self.grant_principal(grant), scope, project_id=op['project_id'])
+            except DevError:
+                return "排队操作的 MCP 授权或访问 Profile 已撤销/停用"
+            if scope not in scopes or not ("*" in projects or op["project_id"] in projects):
+                return "排队操作的 MCP 授权或访问 Profile 已缩小"
         return None
 
     def _purge_computer(self):
@@ -736,15 +879,23 @@ class Runtime:
             denied = self.permission_error(op, request)
             # Never trust a client-supplied origin, UA or project field. Durable
             # actor/grant columns originate from Auth, not tool arguments.
-            panel = not op["grant_id"] and op["actor"].startswith("panel:")
-            grant = self.store.one('SELECT scopes FROM grants WHERE id=?', (op['grant_id'],)) if op['grant_id'] else None
+            panel = not op['grant_id'] and op['actor'].startswith('panel:')
+            grant = self.store.one('SELECT * FROM grants WHERE id=?', (op['grant_id'],)) if op['grant_id'] else None
+            try:
+                delivery_principal = self.operation_principal(op, request)
+                delivery_scopes = sorted(role_project_scopes(self.store, delivery_principal, op['project_id'])) if op['project_id'] else []
+                delivery_admin = delivery_principal.admin
+            except DevError:
+                delivery_scopes, delivery_admin = [], False
+                delivery_principal = Principal(op["actor"], "", set(), [], grant_id=op["grant_id"])
+            if '_coding_scopes' in request['project']:
+                request['project']['_coding_scopes'] = delivery_scopes
             request['integration_context'] = {'owner': 'grant:'+op['grant_id'] if op['grant_id'] else op['actor'],
-                'admin': panel, 'device_id': op['device_id'],
-                'scopes': json.loads(grant['scopes']) if grant else (['read','write','execute','computer'] if panel else [])}
+                'admin': delivery_admin, 'device_id': op['device_id'], 'scopes': delivery_scopes}
             if not op['accepted_at'] and op['project_id'] and op['tool'] in TOOLS:
                 current_project = self.store.one('SELECT * FROM projects WHERE id=?', (op['project_id'],))
                 if current_project:
-                    try:self.integrations.guard(op['tool'], request['args'], current_project, Principal(op['actor'],'',set(),[],grant_id=op['grant_id'],admin=panel))
+                    try:self.integrations.guard(op['tool'], request['args'], current_project, delivery_principal)
                     except DevError as exc:denied = denied or exc.message
             request["execution_policy"] = {"version": POLICY_VERSION,
                 "origin": "panel" if panel else "mcp",
@@ -868,9 +1019,9 @@ class Runtime:
             return
         # Notify after commit, even if auxiliary auditing subsequently fails.
         self.notify_operation(op["id"])
-        self.store.audit(op["actor"], op["tool"], op["project_id"] or op["device_id"], state,
+        self.store.audit(op["actor"], op["tool"], op["id"], state,
             {"operation_id": op["id"], "duration_ms": round((time.time() - op["created"]) * 1000),
-             "error": error.get("message"), "path": data.get("path"), "backup_id": data.get("backup_id"), "exit_code": data.get("exit_code")})
+             "error": error.get("message"), "path": data.get("path"), "backup_id": data.get("backup_id"), "exit_code": data.get("exit_code")}, target_kind="operation")
         self.diagnostics.record(op["id"], "hub_completed")
         self.publish("operation", {"id": op["id"], "state": state, "tool": op["tool"]})
         self.store.after_commit(lambda: self.on_loop(self._resolve_result, op["id"], result))
@@ -1017,6 +1168,8 @@ class Runtime:
                 info["device_actions"] = sorted(set(actions) & DEVICE_ACTIONS)
             info["management"] = public_management(hello.get("management"))
             info["cancel_pending_protocol"] = connection.cancel_pending_protocol
+            connection.native_security_protocol = 1 if hello.get("native_security_protocol") == 1 else 0
+            info["native_security_protocol"] = connection.native_security_protocol
             info["native_protocol"] = connection.native_protocol
             info["native_chat_protocol"] = connection.native_chat_protocol
             info["tool_protocol"] = connection.tool_protocol.public(catalog_digest())
@@ -1064,12 +1217,12 @@ class Runtime:
             pass
         except Exception as exc:
             with contextlib.suppress(Exception):
-                await self.store.run(self.store.audit, "device:" + device["name"], "device.protocol_error", device_id, "error", {"type": type(exc).__name__})
+                await self.store.run(self.store.audit, "device:" + device["name"], "device.protocol_error", device_id, "error", {"type": type(exc).__name__}, target_kind="device")
         finally:
             if connection is not None and await self.detach(device_id, connection):
                 if authenticated:
                     with contextlib.suppress(Exception):
-                        await self.store.run(self.store.audit, "device:" + device["name"], "device.disconnected", device_id, "offline")
+                        await self.store.run(self.store.audit, "device:" + device["name"], "device.disconnected", device_id, "offline", target_kind="device")
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(websocket.close(), 2)
 
@@ -1090,5 +1243,5 @@ class Runtime:
         await asyncio.gather(*(close_connection(c) for c in list(self.connections.values())))
         for future in self.futures.values():
             if not future.done():
-                future.cancel()
+                self._signal_owner(future, future.cancel)
         self.futures.clear()

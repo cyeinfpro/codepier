@@ -91,6 +91,16 @@ def check_compose_image(root, current_version):
         raise ValueError('Compose image version differs from source VERSION')
 
 
+def check_k3s_image(root, current_version):
+    """Every image in the k3s manifest is the published Hub image at the source VERSION."""
+    text = (root / 'deploy/k3s/deployment.yaml').read_text(encoding='utf-8')
+    images = re.findall(r'^\s+(?:-\s+)?image:\s*([^\n]+)$', text, re.M)
+    pattern = re.compile(r'^["\']?ghcr\.io/[a-z0-9][a-z0-9._-]*/codepier:' + re.escape(current_version)
+                         + r'(?:@sha256:[a-f0-9]{64})?["\']?$')
+    if not images or any(not pattern.fullmatch(image.split('#', 1)[0].strip()) for image in images):
+        raise ValueError('k3s manifest image differs from source VERSION')
+
+
 def check_web_assets(root, current_version):
     """Validate real asset URLs, not obsolete per-feature cache strings."""
     class Assets(HTMLParser):
@@ -132,7 +142,7 @@ def check_source(root=ROOT):
     required = REQUIRED_FILES - {'LOCAL_RELEASE.json'}
     required |= PUBLIC_DOCS
     required |= {'README.md', 'LICENSE', 'SECURITY.md', 'CONTRIBUTING.md', 'CHANGELOG.md',
-                 'RELEASE.json', '.github/workflows/ci.yml', 'docs/RELEASING.md'}
+                 'RELEASE.json', '.github/workflows/ci.yml', 'docs/RELEASING.md', 'deploy/k3s/deployment.yaml'}
     missing = sorted(required - files.keys())
     if missing:
         raise ValueError('Missing public release inputs: ' + ', '.join(missing))
@@ -141,6 +151,7 @@ def check_source(root=ROOT):
     if release.get('name') != 'CodePier' or release.get('version') != current_version:
         raise ValueError('RELEASE.json does not match CodePier source identity')
     check_compose_image(root, current_version)
+    check_k3s_image(root, current_version)
     browser_assets = check_web_assets(root, current_version)
     from scripts.release_policy import check_generated_assets, check_public_links, check_supported_branch, check_readme_version
     check_generated_assets(root)

@@ -1,0 +1,191 @@
+name: Container image
+
+# Builds the deploy-ready Hub image from the repository Dockerfile and publishes
+# it to GHCR. Deployments (Kubernetes/k3s, Compose with CODEPIER_HUB_IMAGE) pull
+# this image instead of building on the server with install.sh. The workflow
+# gates on the release consistency check and a real boot of the candidate under
+# the same hardening as compose.yml; it never creates a Release or deploys.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  REGISTRY_IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  image:
+    name: Build, boot-test and publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Release inputs must agree with source VERSION (host Python, standard library only)
+        id: source
+        shell: bash
+        run: |
+          mkdir -p dist/image
+          VERSION=$(python3 -c 'from scripts.build_source_bundle import source_version; print(source_version())')
+          python3 scripts/check_release.py --output dist/image/release-check.json
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$VERSION" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match source VERSION $VERSION"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Image tags and OCI metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        env:
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
+        with:
+          images: ${{ env.REGISTRY_IMAGE }}
+          flavor: |
+            latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix=sha-
+          labels: |
+            org.opencontainers.image.title=CodePier Hub
+            org.opencontainers.image.description=CodePier Hub panel and MCP endpoint; non-root single instance with state in /app/data
+            org.opencontainers.image.version=${{ steps.source.outputs.version }}
+          annotations: |
+            org.opencontainers.image.title=CodePier Hub
+            org.opencontainers.image.version=${{ steps.source.outputs.version }}
+
+      - name: Build the linux/amd64 candidate into the local daemon
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: codepier:candidate
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,ignore-error=true
+          provenance: false
+          sbom: false
+
+      - name: Candidate must boot healthy from an empty data directory under the Compose hardening
+        id: boot
+        shell: bash
+        env:
+          VERSION: ${{ steps.source.outputs.version }}
+        run: |
+          docker run --detach --name candidate --read-only --tmpfs /tmp:size=64m,mode=1777 \
+            --cap-drop ALL --security-opt no-new-privileges:true --publish 127.0.0.1:8765:8765 \
+            --env HUB_PUBLIC_URL=http://127.0.0.1:8765 codepier:candidate
+          body=''
+          for _ in $(seq 1 30); do
+            if body=$(curl --silent --show-error --fail --max-time 3 http://127.0.0.1:8765/healthz); then
+              break
+            fi
+            sleep 2
+          done
+          [[ -n "$body" ]] || { echo '::error::Hub did not report healthy within 60 seconds'; exit 1; }
+          python3 - "$body" <<'PY'
+          import json, os, sys
+          health = json.loads(sys.argv[1])
+          expected = os.environ['VERSION']
+          if health.get('status') != 'ok' or health.get('version') != expected:
+              raise SystemExit(f"healthz reported status {health.get('status')!r} version {health.get('version')!r}; expected ok {expected!r}")
+          if health.get('panel_update') != {'maintenance': False, 'ready': False}:
+              raise SystemExit('Unexpected maintenance state without a host updater: ' + json.dumps(health.get('panel_update')))
+          print(json.dumps(health, ensure_ascii=False))
+          PY
+          curl --silent --show-error --fail --max-time 5 --output /dev/null http://127.0.0.1:8765/agent/manifest.json
+          [[ "$(docker exec candidate id -u)" == 10001 ]] || { echo '::error::Hub is not running as UID 10001'; exit 1; }
+
+      - name: Candidate logs and cleanup
+        if: always()
+        shell: bash
+        run: |
+          docker logs candidate 2>&1 | tail -n 100 || true
+          docker rm --force --volumes candidate >/dev/null 2>&1 || true
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request' && !(github.event_name == 'push' && github.event.forced)
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build linux/amd64 and linux/arm64; publish only for non-forced, non-PR events
+        id: publish
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' && !(github.event_name == 'push' && github.event.forced) }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,ignore-error=true
+          provenance: mode=max
+          sbom: true
+
+      - name: Record the published reference (pin deployments to the digest)
+        if: github.event_name != 'pull_request' && !(github.event_name == 'push' && github.event.forced)
+        shell: bash
+        env:
+          DIGEST: ${{ steps.publish.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+          VERSION: ${{ steps.source.outputs.version }}
+        run: |
+          image=${REGISTRY_IMAGE,,}
+          {
+            echo '## CodePier Hub image'
+            echo
+            echo "Source VERSION: \`$VERSION\`"
+            echo
+            echo 'Pinned reference for deployments:'
+            echo
+            echo '```'
+            echo "$image@$DIGEST"
+            echo '```'
+            echo
+            echo 'Tags:'
+            echo
+            printf -- '- `%s`\n' $TAGS
+          } >> "$GITHUB_STEP_SUMMARY"
+          python3 - "$image" <<'PY' > dist/image/image.json
+          import json, os, sys
+          print(json.dumps({'image': sys.argv[1], 'digest': os.environ['DIGEST'], 'version': os.environ['VERSION'],
+                            'tags': os.environ['TAGS'].split()}, indent=2))
+          PY
+
+      - name: Retain image reference and release check
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-${{ github.run_id }}
+          path: dist/image/*.json
+          if-no-files-found: warn
+          retention-days: 14
