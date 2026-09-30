@@ -1,5 +1,7 @@
 # Upstream 1.14.3 + IAM + MCP Gateway integration
 
+> Historical implementation record from the contribution branch. The features were merged in upstream PR #14 and are included in 1.15.0. Current release validation is recorded in the GitHub Release; the older acceptance counts and unreleased status below describe that earlier checkpoint.
+
 This is an **unreleased fork integration**, not an upstream release or deployment.
 The repository was not deployed when this integration was requested. Public MCP
 API changes are intentional; no live Hub data or external accounts were changed.
