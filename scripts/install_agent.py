@@ -375,8 +375,8 @@ def start_service(base, python):
         if target.exists() and plistlib.loads(target.read_bytes()).get('ProgramArguments') != command:
             raise ValueError('Existing launch service belongs to a different Agent configuration')
         data = {'Label':name,'ProgramArguments':command,'WorkingDirectory':str(runtime),
-                'RunAtLoad':True,'KeepAlive':True,'ThrottleInterval':10,
-                'EnvironmentVariables':{'PYTHONUNBUFFERED':'1','PATH':os.environ.get('PATH','/usr/bin:/bin')},
+                'RunAtLoad':True,'KeepAlive':True,'ThrottleInterval':10,'ProcessType':'Standard',
+                'EnvironmentVariables':{'PYTHONUNBUFFERED':'1','CODEPIER_SUPERVISED':'1','PATH':os.environ.get('PATH','/usr/bin:/bin')},
                 'StandardOutPath':str(logs/'stdout.log'),'StandardErrorPath':str(logs/'stderr.log')}
         target.write_bytes(plistlib.dumps(data)); target.chmod(0o600)
         domain=f'gui/{os.getuid()}/{name}'
@@ -426,7 +426,7 @@ def start_service(base, python):
         target.parent.mkdir(parents=True,exist_ok=True)
         content = ('[Unit]\nDescription=CodePier Agent\nAfter=network-online.target\nWants=network-online.target\n'
             '[Service]\nType=simple\nWorkingDirectory='+str(runtime).replace('%','%%')+'\nExecStart='+
-            ' '.join(systemd_quote(x) for x in command)+'\nRestart=always\nRestartSec=5\nUMask=0077\nEnvironment=PYTHONUNBUFFERED=1\n'
+            ' '.join(systemd_quote(x) for x in command)+'\nRestart=always\nRestartSec=5\nUMask=0077\nEnvironment=PYTHONUNBUFFERED=1\nEnvironment=CODEPIER_SUPERVISED=1\n'
             '[Install]\nWantedBy='+('multi-user.target' if os.geteuid()==0 else 'default.target')+'\n')
         target.write_text(content);target.chmod(0o600)
         run(systemctl()+['daemon-reload']);run(systemctl()+['enable','--now',name])

@@ -9,6 +9,13 @@ import threading
 import time
 
 
+def is_supervised():
+    """Recognize old launchd installations without rewriting their identity."""
+    return (os.environ.get('CODEPIER_SUPERVISED') == '1'
+            or os.environ.get('XPC_SERVICE_NAME') in
+            {'com.codepier.agent', 'com.example.remote-dev-agent'})
+
+
 class Watchdog:
     def __init__(self, *, timeout=120.0, interval=5.0, clock=time.monotonic,
                  terminate=os._exit):
@@ -36,7 +43,7 @@ class Watchdog:
     def monitor(self):
         while not self.stopped.wait(self.interval):
             if self.stalled():
-                # Exiting is deliberate: Task Scheduler owns restart/backoff.
+                # Exiting is deliberate: the service manager owns restart/backoff.
                 # Do not wait for the event loop or stdout locks on this path.
                 try:
                     os.write(sys.stderr.fileno(), b"CodePier: event loop stalled; restarting service.\n")
