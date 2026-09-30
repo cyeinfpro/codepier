@@ -41,7 +41,7 @@ COMPOSE_FILE=compose.yml:deploy/compose.https.yml bash install.sh
 
 需要 Docker Engine、可用的 Compose 构建/启动组件，以及主机 Python 3.9 以上版本。主机 Python 只运行标准库迁移器，不需要安装项目依赖。可以通过 `CODEPIER_BOOTSTRAP_PYTHON` 指定它。首次无人值守安装继续支持 `--host`、`--port`、`--username`、`--password-file` 和 `--non-interactive`。`CODEPIER_ADMIN_PASSWORD` 优先，原 `RD_ADMIN_PASSWORD` 仍作为兼容输入；密码不写入进程参数或 `.env`。
 
-安装器先验证配置并构建新镜像，旧服务在构建阶段继续运行。确认原 Hub、数据卷、代理服务和其他卷没有归属冲突后，才停止旧容器，记录它们原来的重启策略，复制原数据到独立备份卷和新卷。原卷只读，文件逐一校验 SHA-256，SQLite 检查完整性，WAL 中尚未合并进主文件的记录也保留。服务用户 UID/GID 仍为 10001，避免改显示用户名后丢失数据访问权限。
+安装器先验证配置并构建新镜像，旧服务在构建阶段继续运行。确认原 Hub、数据卷、代理服务和其他卷没有归属冲突后，才停止旧容器，记录它们原来的重启策略，复制原数据到独立备份卷和新卷。原卷只读，文件逐一校验 SHA-256，SQLite 检查完整性，WAL 中尚未合并进主文件的记录也保留。新 Hub 以 UID/GID 0 运行，新 Hub 数据卷归 root；原卷和备份卷保留旧所有权，供恢复旧容器使用。
 
 显式外部卷避免直接 `docker compose up` 在旧数据之外悄悄创建一个空面板。旧 HTTPS 代理使用固定子网时，只有确认属于原 Compose 项目、没有其他容器占用的桥接网络才会被记录、断开并移除；失败恢复保留原 IP、别名和网络设置。不会删除其他项目网络、修改主机防火墙或更换域名与证书。
 

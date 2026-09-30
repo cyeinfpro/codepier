@@ -32,7 +32,7 @@ def regular_tree(root):
     return result
 
 
-def copy_tree(source,destination,manifest,*,require_db=False):
+def copy_tree(source,destination,manifest,*,require_db=False,preserve_owner=True):
     if destination.is_symlink() or not destination.is_dir() or any(destination.iterdir()):raise RuntimeError('Destination or backup is not empty; refusing to merge or overwrite')
     for base,dirs,files in os.walk(source,followlinks=False):
         relative=Path(base).relative_to(source);target=destination/relative;target.mkdir(parents=True,exist_ok=True)
@@ -41,9 +41,15 @@ def copy_tree(source,destination,manifest,*,require_db=False):
         for name in files:
             src,dst=Path(base)/name,target/name
             if src.is_symlink() or not src.is_file():raise RuntimeError('Source changed during copy')
-            shutil.copy2(src,dst,follow_symlinks=False);info=src.stat();os.chown(dst,info.st_uid,info.st_gid)
+            shutil.copy2(src,dst,follow_symlinks=False)
+            if preserve_owner:
+                info=src.stat();os.chown(dst,info.st_uid,info.st_gid)
             with dst.open('rb') as stream:os.fsync(stream.fileno())
-        info=Path(base).stat();shutil.copystat(base,target,follow_symlinks=False);os.chown(target,info.st_uid,info.st_gid)
+        info=Path(base).stat();shutil.copystat(base,target,follow_symlinks=False)
+        if preserve_owner:
+            os.chown(target,info.st_uid,info.st_gid)
+        else:
+            os.chown(target,os.geteuid(),os.getegid())
     if regular_tree(destination)!=manifest:raise RuntimeError('Volume SHA-256 verification failed')
     database=destination/'hub.sqlite3'
     if require_db:
@@ -88,7 +94,10 @@ def copy_store(source,destination,backup,source_name,backup_name,*,require_db=Tr
         if target.is_symlink() or any(target.iterdir()):raise RuntimeError('Destination/backup is not empty')
     manifest=regular_tree(source)
     if require_db and not {'hub.sqlite3','master.key'}<=set(manifest):raise RuntimeError('Legacy volume has no complete Hub database and master key')
-    copy_tree(source,backup,manifest,require_db=require_db);copy_tree(source,destination,manifest,require_db=require_db)
+    copy_tree(source,backup,manifest,require_db=require_db)
+    # The backup remains usable by the old UID; the new Hub volume belongs to
+    # the migration worker (root in the container).
+    copy_tree(source,destination,manifest,require_db=require_db,preserve_owner=not require_db)
     if regular_tree(source)!=manifest:raise RuntimeError('Source changed during migration; destination is not approved')
     report={'schema':1,'product':'CodePier','stage':'verified-copy','created_at':time.time(),'source_volume':source_name,
             'backup_volume':backup_name,'files':manifest,'hub_database':require_db}
@@ -106,7 +115,7 @@ def main():
         print(json.dumps({'product':'CodePier','stage':value['stage']}));return
     if action in {'initialize','initialize-tree'}:
         if destination.is_symlink() or any(destination.iterdir()):raise RuntimeError('New volume is not empty')
-        if action=='initialize':os.chown(destination,10001,10001)
+        if action=='initialize':os.chown(destination,os.geteuid(),os.getegid())
         destination.chmod(0o700);marker(destination,{'schema':1,'product':'CodePier','stage':'initialized','created_at':time.time()});return
     if action not in {'copy','copy-tree'} or len(sys.argv)!=4:raise RuntimeError('Invalid migration worker arguments')
     print(json.dumps(copy_store(Path('/source'),destination,Path('/backup'),sys.argv[2],sys.argv[3],require_db=action=='copy')))

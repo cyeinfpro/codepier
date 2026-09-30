@@ -4,7 +4,7 @@
 
 ## 首次启用
 
-支持 Linux/systemd 宿主机、Docker Compose v2、单实例 Hub、独立外部命名数据卷，以及默认 UID/GID 10001 的非 root Hub 容器。Compose 必须支持 `up --wait`。Rootless Docker、userns-remap、自定义 Hub 数据 bind mount、多副本 Hub、非 systemd 宿主机不属于当前支持范围；这些部署继续手动更新。
+支持 Linux/systemd 宿主机、Docker Compose v2、单实例 Hub、独立外部命名数据卷，以及以 UID/GID 0 运行的 Hub 容器。更新器以 root 复制旧数据到新卷，新卷归 root；旧卷及其 UID 10001 所有权保留用于回退。Compose 必须支持 `up --wait`。Rootless Docker、userns-remap、自定义 Hub 数据 bind mount、多副本 Hub、非 systemd 宿主机不属于当前支持范围；这些部署继续手动更新。
 
 先把包含本功能的源码部署到服务器。建议使用 `/opt/codepier`：部署目录、父目录和宿主机 Python 必须由 root 拥有，且组与其他用户不可写。不要在可由普通用户替换的目录中安装 root 服务。
 

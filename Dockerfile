@@ -11,18 +11,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /app
 COPY --from=dependencies /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
-RUN groupadd --gid 10001 codepier \
-    && useradd --uid 10001 --gid codepier --create-home --shell /usr/sbin/nologin codepier \
-    && mkdir -p /app/data && chown codepier:codepier /app/data
-COPY --chown=codepier:codepier hub ./hub
-COPY --chown=codepier:codepier shared ./shared
-COPY --chown=codepier:codepier web ./web
-COPY --chown=codepier:codepier agent ./agent
-COPY --chown=codepier:codepier scripts ./scripts
-COPY --chown=codepier:codepier deploy ./deploy
-COPY --chown=codepier:codepier requirements-agent.txt ./
-COPY --chown=codepier:codepier LICENSE ./
-USER 10001:10001
+RUN mkdir -p /app/data
+COPY hub ./hub
+COPY shared ./shared
+COPY web ./web
+COPY agent ./agent
+COPY scripts ./scripts
+COPY deploy ./deploy
+COPY requirements-agent.txt ./
+COPY LICENSE ./
+USER 0:0
 VOLUME /app/data
 EXPOSE 8765
 HEALTHCHECK --interval=30s --timeout=4s --start-period=15s --retries=3 \

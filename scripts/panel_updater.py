@@ -364,6 +364,8 @@ def serve(root):
         socket.unlink(missing_ok=True)
         with Server(str(socket), Handler) as server:
             server.manager = manager
+            # Keep the legacy group for a UID 10001 Hub during rollback. The
+            # current root Hub connects as the socket owner.
             os.chown(socket, 0, 10001)
             socket.chmod(0o660)
             server.serve_forever(poll_interval=0.5)
@@ -484,7 +486,7 @@ def _install_locked(root, repository):
             break
         except UpdateError:
             if attempt == 9:
-                raise UpdateError('UPDATER_SOCKET_UNREACHABLE', '更新服务已启动，但 Hub 无法访问更新套接字；请核对 UID 10001、只读挂载及 Docker userns 配置', 500)
+                raise UpdateError('UPDATER_SOCKET_UNREACHABLE', '更新服务已启动，但 Hub 无法访问更新套接字；请核对容器 UID、只读挂载及 Docker userns 配置', 500)
             time.sleep(1)
     print('面板更新服务已安装：' + unit)
     print('入口：系统设置 → 面板更新。仅使用固定 GitHub 正式 Release；不会自动更新在线 Agent。')

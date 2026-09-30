@@ -17,6 +17,7 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from scripts.migrate_hub import Docker
 from scripts import migrate_hub_networks as networks
+from shared.util import VERSION
 
 
 def main():
@@ -29,15 +30,16 @@ def main():
             docker.run(command,check=False)
     try:
         for volume in volumes:docker.create_volume(volume,prefix)
-        seed="import sqlite3,pathlib,os; p=pathlib.Path('/fixture'); s=sqlite3.connect(p/'hub.sqlite3'); s.execute('CREATE TABLE users(id TEXT PRIMARY KEY)'); s.execute(\"INSERT INTO users VALUES ('original-user')\"); s.commit(); s.close(); (p/'master.key').write_text('fixture-only-not-a-real-key'); (p/'attachment.bin').write_bytes(bytes(range(256))*16); [os.chown(q,10001,10001) for q in p.iterdir()]; os.chown(p,10001,10001)"
+        seed="import sqlite3,pathlib,os; p=pathlib.Path('/fixture'); s=sqlite3.connect(p/'hub.sqlite3'); s.execute('CREATE TABLE users(id TEXT PRIMARY KEY)'); s.execute(\"INSERT INTO users VALUES ('original-user')\"); s.commit(); s.close(); (p/'master.key').write_text('fixture-only-not-a-real-key'); (p/'attachment.bin').write_bytes(bytes(range(256))*16); [os.chmod(q,0o600) for q in p.iterdir()]; [os.chown(q,10001,10001) for q in p.iterdir()]; os.chown(p,10001,10001); os.chmod(p,0o700)"
         docker.run(['run','--rm','--network=none','--user','0:0','--mount','type=volume,src='+old+',dst=/fixture','--entrypoint','python',args.image,'-c',seed])
         copied=docker.worker(args.image,'copy',new,old,backup);result=json.loads(copied.stdout)
         assert result['backup_verified'] and result['destination_verified'] and result['sqlite_integrity']=='ok'
-        for volume in (old,new,backup):
+        for volume,owner in ((old,10001),(new,0),(backup,10001)):
             check="import sqlite3,pathlib,json; p=pathlib.Path('/fixture'); s=sqlite3.connect((p/'hub.sqlite3').as_uri()+'?mode=ro',uri=True); assert s.execute('SELECT id FROM users').fetchall()==[('original-user',)]; s.close(); assert (p/'master.key').read_text()=='fixture-only-not-a-real-key'; print(json.dumps({'uid':p.stat().st_uid,'verified':True}))"
-            response=docker.run(['run','--rm','--network=none','--read-only','--user','10001:10001','--mount','type=volume,src='+volume+',dst=/fixture,readonly','--entrypoint','python',args.image,'-c',check])
-            assert json.loads(response.stdout)['verified']
-        report['cases'].append({'case':'read-only-old-volume-to-canonical-and-backup','result':'passed',**result,'service_uid_can_read':True})
+            capabilities=[] if owner==0 else ['--cap-add=DAC_OVERRIDE']
+            response=docker.run(['run','--rm','--network=none','--read-only','--user','0:0','--cap-drop=ALL',*capabilities,'--mount','type=volume,src='+volume+',dst=/fixture,readonly','--entrypoint','python',args.image,'-c',check])
+            assert json.loads(response.stdout)=={'uid':owner,'verified':True}
+        report['cases'].append({'case':'read-only-old-volume-to-canonical-and-backup','result':'passed',**result,'root_uid_can_read':True})
         try:docker.worker(args.image,'copy',new,old,backup)
         except RuntimeError:report['cases'].append({'case':'occupied-destination-refused','result':'passed'})
         else:raise AssertionError('A repeated copy merged an occupied destination')
@@ -59,16 +61,35 @@ def main():
         docker.run(['run','--rm','--network=none','--mount','type=volume,src='+hub_volume+',dst=/app/data',
                     '-e','CODEPIER_ADMIN_PASSWORD=fixture-only-installation-password','--entrypoint','python',args.image,'-m','hub','init','--username','fixture'])
         docker.run(['run','-d','--name',hub_container,'--network=none','--label','com.codepier.fixture='+prefix,
-                    '--health-interval=1s','--health-start-period=0s','--health-retries=20','--mount','type=volume,src='+hub_volume+',dst=/app/data',args.image])
+                    '--read-only','--tmpfs','/tmp:size=64m,mode=1777','--cap-drop=ALL','--security-opt=no-new-privileges',
+                    '--health-interval=1s','--health-start-period=0s','--health-retries=20',
+                    '--mount','type=volume,src='+hub_volume+',dst=/app/data,volume-nocopy',args.image])
         for _ in range(50):
             state=docker.json(['inspect',hub_container])[0]['State']
             if state.get('Health',{}).get('Status')=='healthy':break
             if not state.get('Running'):raise AssertionError('Fixture Hub exited during startup')
             time.sleep(.3)
         else:raise AssertionError('Fixture Hub did not become healthy')
-        check="import json,urllib.request; h=json.load(urllib.request.urlopen('http://127.0.0.1:8765/healthz')); m=json.load(urllib.request.urlopen('http://127.0.0.1:8765/agent/manifest.json')); assert h['version']=='1.9.0' and m['version']=='1.9.0'; print(json.dumps({'version':h['version'],'agent_package_bytes':m['bytes']}))"
+        check="import json,urllib.request; h=json.load(urllib.request.urlopen('http://127.0.0.1:8765/healthz')); m=json.load(urllib.request.urlopen('http://127.0.0.1:8765/agent/manifest.json')); assert h['version']=="+repr(VERSION)+" and m['version']=="+repr(VERSION)+"; print(json.dumps({'version':h['version'],'agent_package_bytes':m['bytes']}))"
         healthy=json.loads(docker.run(['exec',hub_container,'python','-c',check]).stdout)
         report['cases'].append({'case':'canonical-volume-hub-startup-and-agent-package','result':'passed',**healthy})
+        # Exercise a direct image upgrade using a complete old-owned Hub store.
+        docker.run(['stop','--time','5',hub_container]);docker.run(['rm','-v',hub_container])
+        docker.run(['run','--rm','--network=none','--user','0:0','--mount','type=volume,src='+hub_volume+',dst=/app/data,volume-nocopy',
+                    '--entrypoint','sh',args.image,'-c','chown -R 10001:10001 /app/data && chmod 0700 /app/data'])
+        docker.run(['run','-d','--name',hub_container,'--network=none','--read-only','--tmpfs','/tmp:size=64m,mode=1777',
+                    '--cap-drop=ALL','--cap-add=DAC_OVERRIDE','--cap-add=FOWNER','--security-opt=no-new-privileges',
+                    '--mount','type=volume,src='+hub_volume+',dst=/app/data,volume-nocopy',args.image])
+        for _ in range(50):
+            state=docker.json(['inspect',hub_container])[0]['State']
+            if state.get('Health',{}).get('Status')=='healthy':break
+            if not state.get('Running'):raise AssertionError('Root Hub exited on an old-owned volume')
+            time.sleep(.3)
+        else:raise AssertionError('Root Hub did not become healthy on an old-owned volume')
+        check="import json,os,urllib.request; from pathlib import Path; p=Path('/app/data'); h=json.load(urllib.request.urlopen('http://127.0.0.1:8765/healthz')); assert h['status']=='ok'; print(json.dumps({'process_uid':os.geteuid(),'volume_uid':p.stat().st_uid,'version':h['version']}))"
+        observed=json.loads(docker.run(['exec',hub_container,'python','-c',check]).stdout)
+        assert observed['process_uid']==0 and observed['volume_uid']==10001 and observed['version']==VERSION
+        report['cases'].append({'case':'root-hub-on-existing-uid-10001-volume','result':'passed',**observed})
         report.update(passed=len(report['cases']),failed=0,docker_version=docker.run(['version','--format','{{.Server.Version}}']).stdout.strip())
     finally:cleanup()
     args.output.parent.mkdir(parents=True,exist_ok=True);args.output.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n');print(json.dumps(report,ensure_ascii=False,indent=2))

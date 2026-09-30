@@ -2,6 +2,7 @@
 from __future__ import annotations
 import copy
 import json
+import os
 import shutil
 from pathlib import Path
 import sqlite3
@@ -28,6 +29,8 @@ def test_verified_copy_preserves_database_ids_keys_and_files(tmp_path):
     result=worker.copy_store(source,dest,backup,'old-data','backup-data')
     assert result['sqlite_integrity']=='ok' and result['backup_verified'] and result['destination_verified']
     assert worker.regular_tree(source)==before
+    assert dest.stat().st_uid==os.geteuid()
+    assert backup.stat().st_uid==source.stat().st_uid
     for directory in (dest,backup):
         assert (directory/'master.key').read_bytes()==(source/'master.key').read_bytes()
         db=sqlite3.connect(directory/'hub.sqlite3')
@@ -143,13 +146,14 @@ def test_new_writes_never_roll_back_to_stale_history_and_retry_uses_new_store(tm
     assert not any(c[:2]==['worker','copy'] for c in docker.commands[before:])
 
 
-@pytest.mark.parametrize('problem',['duplicate-hubs','custom-bind','not-external','wrong-project','both-data'])
+@pytest.mark.parametrize('problem',['duplicate-hubs','custom-bind','not-external','wrong-project','both-data','explicit-user'])
 def test_ambiguous_installation_refuses_before_stop(tmp_path,problem):
     docker=Docker()
     if problem=='duplicate-hubs':docker.old.append(copy.deepcopy(docker.old[0]))
     elif problem=='custom-bind':docker.old[0]['Mounts'][0]['Type']='bind'
     elif problem=='not-external':docker.config['volumes']['hub-data']['external']=False
     elif problem=='wrong-project':docker.config['name']='other'
+    elif problem=='explicit-user':docker.config['services']['hub']['user']='10001:10001'
     else:docker.volumes['codepier-hub-data']={'Labels':{}}
     with pytest.raises(RuntimeError):upgrade.prepare(tmp_path/upgrade.STATE,docker)
     assert not docker.stopped and not any(c[0]=='stop' for c in docker.commands)

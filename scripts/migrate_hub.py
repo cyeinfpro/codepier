@@ -74,6 +74,8 @@ def volume_name(value):
 def inspect_layout(config,legacy):
     if config.get('name')!='codepier':raise RuntimeError('Installer must use the CodePier Compose project name')
     hub=config.get('services',{}).get('hub',{})
+    if str(hub.get('user','')).strip() not in {'','0','0:0','root','root:root','root:0','0:root'}:
+        raise RuntimeError('Hub Compose explicitly selects a non-root user; change it to root before migration')
     mounts=[x for x in hub.get('volumes',[]) if x.get('target')=='/app/data']
     if len(mounts)!=1 or mounts[0].get('type')!='volume':raise RuntimeError('Custom Hub data bind mounts are preserved; configure an explicit named volume before managed migration')
     declared=config.get('volumes',{}).get(mounts[0]['source'],{})

@@ -20,7 +20,7 @@ def deployment(root):
     (root/'.env').write_text('HUB_PUBLIC_URL=https://panel.example\nSECRET=\'keep$me\'\n')
     (root/'compose.yml').write_text('# trusted deployment\n')
     spec={'name':'fixture','services':{'hub':{'image':'codepier:'+VERSION,'build':{'context':str(root)},
-        'user':'10001:10001','environment':{'HUB_PORT':'8765','HUB_PANEL_UPDATE_SOCKET':'/run/codepier-updater/updater.sock','SECRET':'keep$me'},
+        'environment':{'HUB_PORT':'8765','HUB_PANEL_UPDATE_SOCKET':'/run/codepier-updater/updater.sock','SECRET':'keep$me'},
         'ports':[{'target':8765,'published':'18888','host_ip':'127.0.0.1','protocol':'tcp'}],
         'read_only':True,'cap_drop':['ALL'],'security_opt':['no-new-privileges:true'],
         'volumes':[{'type':'volume','source':'hub-data','target':'/app/data'},
@@ -71,7 +71,10 @@ def test_real_runtime_pipeline_preserves_proxy_ports_configuration_and_backup(tm
     old=read_json(home/'jobs'/job['id']/'old.spec.json')
     target=read_json(home/'jobs'/job['id']/'target.spec.json')
     assert old['services']['hub']['image'].startswith('sha256:')
+    assert 'user' not in old['services']['hub']
     assert 'build' not in target['services']['hub']
+    assert target['services']['hub']['user']=='0:0'
+    assert {'DAC_OVERRIDE','FOWNER'}<=set(target['services']['hub']['cap_add'])
     assert target['services']['proxy']==spec['services']['proxy']
     assert target['services']['hub']['ports']==spec['services']['hub']['ports']
     assert target['services']['hub']['environment']==spec['services']['hub']['environment']
@@ -84,6 +87,10 @@ def test_real_runtime_pipeline_preserves_proxy_ports_configuration_and_backup(tm
     starts=[c for c in docker.commands if 'up' in c]
     assert len(starts)==1 and starts[0][-1]=='hub' and '--no-deps' in starts[0] and '--no-build' in starts[0]
     assert '--pull' in starts[0] and 'never' in starts[0]
+    copies=[c for c in docker.commands if c[:2]==['docker','run'] and '/backup' in c[-1]]
+    assert len(copies)==1 and copies[0][copies[0].index('--user')+1]=='0:0'
+    assert copies[0].count('--cap-add')==2
+    assert 'type=volume,src='+job['new_volume']+',dst=/app/data,volume-nocopy' in copies[0]
     assert not any('rm' in c or 'down' in c or 'prune' in c for c in docker.commands)
     assert not any('sh' in c or 'bash' in c for c in docker.commands)
     runtime.rollback(job)
@@ -100,6 +107,15 @@ def test_environment_drift_detected_before_service_stop(tmp_path):
     (tmp_path/'compose.yml').write_text('# edited by operator\n')
     with pytest.raises(UpdateError) as e:runtime.quiesce(job)
     assert e.value.code=='DEPLOYMENT_CHANGED' and not docker.commands and not runtime.gate.exists()
+
+
+def test_explicit_legacy_user_is_rejected_before_cutover(tmp_path):
+    home,config,job,spec=deployment(tmp_path);spec['services']['hub']['user']='10001:10001'
+    current=read_json(home/'current.json');current['compose']=spec;atomic_json(home/'current.json',current)
+    docker=DockerBoundary(tmp_path,spec)
+    runtime=DockerRuntime(tmp_path,home,config,execute=docker)
+    with pytest.raises(UpdateError) as error:runtime.prepare(job,home/'releases')
+    assert error.value.code=='UNSUPPORTED_DEPLOYMENT' and not docker.commands
 
 
 def test_compose_cli_keeps_literal_dollars_without_docker_daemon(tmp_path):

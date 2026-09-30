@@ -237,6 +237,8 @@ class DockerRuntime:
                 raise UpdateError('DEPLOYMENT_CHANGED', '宿主机部署配置已改变；请重新安装更新服务后再操作', 409)
         spec = copy.deepcopy(current['compose'])
         key, old_volume = data_volume(spec)
+        if str(spec['services']['hub'].get('user', '')).strip() not in {'', '0', '0:0', 'root', 'root:root', 'root:0', '0:root'}:
+            raise UpdateError('UNSUPPORTED_DEPLOYMENT', 'Compose 显式指定了非 root Hub 用户；请先手动更新部署配置', 409)
         path = self.home / 'jobs' / job['id']
         save_compose(path / 'old.json', spec)
         atomic_bytes(path / 'env.before', (self.root / '.env').read_bytes())
@@ -264,6 +266,8 @@ class DockerRuntime:
         image = 'codepier-update:' + job['id']
         target = copy.deepcopy(spec)
         target['services']['hub']['image'] = image
+        target['services']['hub']['user'] = '0:0'
+        target['services']['hub']['cap_add'] = sorted(set(target['services']['hub'].get('cap_add', [])) | {'DAC_OVERRIDE', 'FOWNER'})
         target['volumes'][key]['name'] = new_volume
         save_compose(path / 'target.json', target)
         return {'old_volume': old_volume, 'new_volume': new_volume, 'old_image': container['Image'],
@@ -310,10 +314,13 @@ class DockerRuntime:
         if job['new_volume'] in existing:
             raise UpdateError('VOLUME_EXISTS', '候选数据卷已存在；拒绝覆盖或混合数据', 409)
         self.command(['docker', 'volume', 'create', '--label', 'com.codepier.update=' + job['id'], job['new_volume']], job=job)
-        raw = self.command(['docker', 'run', '--rm', '--network', 'none', '--read-only', '--user', '10001:10001',
-                            '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
-                            '--volume', job['old_volume'] + ':/backup:ro',
-                            '--volume', job['new_volume'] + ':/app/data',
+        # The old image can default to UID 10001. Copy as root so the target
+        # volume is root-owned; retain the untouched source for rollback.
+        raw = self.command(['docker', 'run', '--rm', '--network', 'none', '--read-only', '--user', '0:0',
+                            '--cap-drop', 'ALL', '--cap-add', 'DAC_OVERRIDE', '--cap-add', 'FOWNER',
+                            '--security-opt', 'no-new-privileges',
+                            '--mount', 'type=volume,src=' + job['old_volume'] + ',dst=/backup,readonly,volume-nocopy',
+                            '--mount', 'type=volume,src=' + job['new_volume'] + ',dst=/app/data,volume-nocopy',
                             '--entrypoint', 'python', job['old_image'], '-c', COPY_DATA], timeout=1800, job=job)
         return json.loads(raw)
 

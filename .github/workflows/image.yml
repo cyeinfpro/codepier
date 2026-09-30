@@ -72,7 +72,7 @@ jobs:
             type=sha,prefix=sha-
           labels: |
             org.opencontainers.image.title=CodePier Hub
-            org.opencontainers.image.description=CodePier Hub panel and MCP endpoint; non-root single instance with state in /app/data
+            org.opencontainers.image.description=CodePier Hub panel and MCP endpoint; root single instance with state in /app/data
             org.opencontainers.image.version=${{ steps.source.outputs.version }}
           annotations: |
             org.opencontainers.image.title=CodePier Hub
@@ -98,7 +98,8 @@ jobs:
           VERSION: ${{ steps.source.outputs.version }}
         run: |
           docker run --detach --name candidate --read-only --tmpfs /tmp:size=64m,mode=1777 \
-            --cap-drop ALL --security-opt no-new-privileges:true --publish 127.0.0.1:8765:8765 \
+            --cap-drop ALL --cap-add DAC_OVERRIDE --cap-add FOWNER \
+            --security-opt no-new-privileges:true --publish 127.0.0.1:8765:8765 \
             --env HUB_PUBLIC_URL=http://127.0.0.1:8765 codepier:candidate
           body=''
           for _ in $(seq 1 30); do
@@ -119,7 +120,13 @@ jobs:
           print(json.dumps(health, ensure_ascii=False))
           PY
           curl --silent --show-error --fail --max-time 5 --output /dev/null http://127.0.0.1:8765/agent/manifest.json
-          [[ "$(docker exec candidate id -u)" == 10001 ]] || { echo '::error::Hub is not running as UID 10001'; exit 1; }
+          [[ "$(docker exec candidate id -u)" == 0 ]] || { echo '::error::Hub is not running as UID 0'; exit 1; }
+
+      - name: Candidate must boot from legacy-owned data and a root-owned copy
+        shell: bash
+        run: |
+          python3 scripts/check_codepier_migration_docker.py \
+            --image codepier:candidate --output dist/image/root-volume-check.json
 
       - name: Candidate logs and cleanup
         if: always()

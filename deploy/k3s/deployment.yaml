@@ -113,18 +113,16 @@ spec:
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 20
       securityContext:
-        runAsNonRoot: true
-        runAsUser: 10001
-        runAsGroup: 10001
+        runAsUser: 0
+        runAsGroup: 0
         seccompProfile:
           type: RuntimeDefault
       initContainers:
-        # local-path provisions a root-owned directory and hostPath volumes ignore fsGroup.
-        # The Hub chmods its data directory to 0700 at start, which requires owning it.
-        # Same image as the Hub, so no additional pull; only CHOWN and FOWNER are granted.
+        # Convert existing UID 10001 data as well as the root directory before the
+        # root Hub starts without capabilities. The old volume must be backed up first.
         - name: data-ownership
           image: ghcr.io/tsunheimat/codepier:1.14.3
-          command: ["sh", "-c", "chown 10001:10001 /app/data && chmod 0700 /app/data"]
+          command: ["sh", "-c", "chown -R 0:0 /app/data && chmod 0700 /app/data"]
           securityContext:
             runAsNonRoot: false
             runAsUser: 0
@@ -133,7 +131,7 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
-              add: ["CHOWN", "FOWNER"]
+              add: ["CHOWN", "FOWNER", "DAC_OVERRIDE"]
           volumeMounts:
             - name: data
               mountPath: /app/data

@@ -3,6 +3,7 @@ services:
   hub:
     build: "${CODEPIER_HUB_SOURCE:-.}"
     image: "${CODEPIER_HUB_IMAGE:-codepier:1.14.3}"
+    user: "0:0"
     restart: unless-stopped
     init: true
     ports:
@@ -31,6 +32,10 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # Existing Hub volumes can still contain UID 10001 files with mode 0600/0700.
+    cap_add:
+      - DAC_OVERRIDE
+      - FOWNER
     read_only: true
     tmpfs:
       - /tmp:size=64m,mode=1777
