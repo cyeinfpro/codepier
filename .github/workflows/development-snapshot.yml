@@ -1,0 +1,32 @@
+name: Development source snapshot
+
+on:
+  push:
+    branches: [feat/multiuser-oidc]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Archive committed source only
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/source-snapshot"
+          git rev-parse HEAD > "$RUNNER_TEMP/source-snapshot/COMMIT.txt"
+          git archive --format=zip --output="$RUNNER_TEMP/source-snapshot/source.zip" HEAD
+          cd "$RUNNER_TEMP/source-snapshot"
+          sha256sum source.zip > SHA256SUMS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: codepier-source-${{ github.sha }}
+          path: ${{ runner.temp }}/source-snapshot/
+          if-no-files-found: error
+          retention-days: 14

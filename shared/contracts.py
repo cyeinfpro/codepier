@@ -497,6 +497,9 @@ OUTPUT_SCHEMAS.update({
     'apply_patch': _object({**_RECEIPT, 'success': _BOOL, 'outcome': _STR, 'atomic': _BOOL, 'files': {'type': 'array'}, 'rollback_errors': {'type': 'array'}, 'error': {'type': 'object'}}, ('operation_id', 'success', 'outcome', 'files')),
 })
 
+from shared.access_profile_contracts import register as register_access_profiles
+register_access_profiles(Tool, Empty, TOOLS, OUTPUT_SCHEMAS)
+
 from shared.integration_contracts import register as register_integrations, decorate as decorate_integration, ADMIN_TOOLS, READ_WITH_SCOPE, APP_ONLY_TOOLS
 register_integrations(Tool, TOOLS, OUTPUT_SCHEMAS)
 from shared.core_contracts import register as register_core, CORE_TOOLS, CORE_INSTRUCTIONS, REPLACED_MCP_TOOLS
@@ -506,9 +509,18 @@ PROCESS_TOOLS |= {'exec', 'validation_run', 'lsp_query', 'worktrees_create', 'wo
 
 OUTPUT_SCHEMAS['vps'] = _object({'vps': {'type': 'array', 'items': {'type': 'object'}}, 'total': _INT, 'next_offset': _NULLABLE_INT}, ('vps', 'total', 'next_offset'))
 
+from shared.role_contracts import register as register_roles, ROLE_SCOPE, ROLE_TOOLS
+register_roles(Tool, Empty, Args, TOOLS, OUTPUT_SCHEMAS)
+READ_WITH_SCOPE = READ_WITH_SCOPE | {'devices_list'}
+MUTATING = {name for name, tool in TOOLS.items() if tool.scope != 'read' and name not in COMPUTER_READ_TOOLS | READ_WITH_SCOPE}
+
 # A remote call can return either its final payload or a durable pending receipt.
 # MCP structured tool errors also obey the advertised schema.
 for _name, _schema in list(OUTPUT_SCHEMAS.items()):
+    if _name == 'get_profile':
+        # OpenAI identity discovery requires the exact standard success schema.
+        # Errors use isError + text content, never a fabricated profile identity.
+        continue
     # Keep each variant's field constraints inside that variant. A successful
     # worktree's state='ready' and next={tool,arguments} must not reject the
     # transport's state='queued' and next='operations_wait'. Conversely, allowing
@@ -581,15 +593,17 @@ def _compact_input_schema(schema, *, output=False):
     return result
 
 
-def tool_definitions(profile="full"):
+def tool_definitions(profile="core", authorization="fixed"):
+    if authorization not in {"fixed", "role"}:
+        raise ValueError("Unknown authorization mode")
     if profile not in {"core", "full", "coding"}:
         raise ValueError("Unknown MCP tool profile")
     result = [{"name": name, "description": t.description, "inputSchema": t.model.model_json_schema(),
              "outputSchema": OUTPUT_SCHEMAS[name],
-             "annotations": {"readOnlyHint": t.scope == "read" or name in COMPUTER_READ_TOOLS, "destructiveHint": t.destructive,
+             "annotations": {"readOnlyHint": t.scope in {"read", "devices.read"} or name in COMPUTER_READ_TOOLS, "destructiveHint": t.destructive,
                              "idempotentHint": True, "openWorldHint": t.scope in {"execute", "computer"}},
              "_meta": {"securitySchemes": [{"type": "oauth2", "scopes": [t.scope]}]}}
-            for name, t in TOOLS.items() if name in CORE_TOOLS]
+            for name, t in TOOLS.items() if name in CORE_TOOLS or name in {"get_profile", "get_access_context"}]
     if profile in {"full", "coding", "core"}:
         for definition in result:
             definition['inputSchema'] = _compact_input_schema(definition['inputSchema'])
@@ -598,4 +612,13 @@ def tool_definitions(profile="full"):
         if item["name"] in {"workspace", "browser", "computer", "process"}:
             item["annotations"]["readOnlyHint"] = False
             item["annotations"]["openWorldHint"] = True
-    return [decorate_integration(item) for item in result]
+    result = [decorate_integration(item) for item in result]
+    for item in result:
+        if item['name'] == 'get_profile':
+            item['_meta']['openai/profile'] = True
+        if authorization == 'role':
+            schemes = [{'type': 'oauth2', 'scopes': [ROLE_SCOPE]}]
+            item['securitySchemes'] = schemes
+            item['_meta']['securitySchemes'] = schemes
+            item['_meta']['codepier/authorizationMode'] = 'role'
+    return result

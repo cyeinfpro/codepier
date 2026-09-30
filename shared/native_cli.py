@@ -33,7 +33,7 @@ def database(directory):
         db.execute('PRAGMA journal_mode=WAL')
     db.execute('PRAGMA synchronous=FULL')
     db.execute('PRAGMA secure_delete=ON')
-    if db.execute('PRAGMA user_version').fetchone()[0] >= 3:
+    if db.execute('PRAGMA user_version').fetchone()[0] >= 4:
         os.chmod(path, 0o600)
         return db
     db.executescript('''
@@ -67,7 +67,10 @@ def database(directory):
     db.execute('CREATE TABLE IF NOT EXISTS session_files (session TEXT, file TEXT, PRIMARY KEY(session,file))')
     db.execute('CREATE INDEX IF NOT EXISTS native_commands_pending ON commands(session,state)')
     db.execute('CREATE INDEX IF NOT EXISTS native_attachments_project ON attachments(project_id)')
-    db.execute('PRAGMA user_version=3')
+    db.execute('''CREATE TABLE IF NOT EXISTS native_security (
+        kind TEXT NOT NULL CHECK(kind IN ('session','file')), id TEXT NOT NULL,
+        owner TEXT NOT NULL, space TEXT NOT NULL, PRIMARY KEY(kind,id))''')
+    db.execute('PRAGMA user_version=4')
     db.commit()
     os.chmod(path, 0o600)
     return db

@@ -4,6 +4,9 @@ This module stores progress; it never executes commands or asks a model to run.
 Mutations, replay receipts and audit events commit in one SQLite transaction.
 """
 from __future__ import annotations
+from hub.access_profiles import effective_grant
+from hub.roles import role_project_scopes
+from hub import iam
 
 import base64
 import json
@@ -35,12 +38,17 @@ class Workflows:
         self.runtime = runtime
         self.store = runtime.store
 
+    @iam.read_decision
     def load(self, identifier, principal, *, write=False):
         row = self.store.one("SELECT * FROM workflows WHERE id=?", (identifier,))
-        if not row or not principal.admin and (principal.grant_id is None or row["grant_id"] != principal.grant_id):
-            raise DevError("WORKFLOW_NOT_FOUND", "找不到此授权范围内的工作流", 404)
+        principal = iam.require_record(self.store, principal, row, kind='WORKFLOW')
+        if write and not principal.instance_admin:
+            owned = row['grant_id'] == principal.grant_id if principal.grant_id else row['owner_user_id'] == principal.user_id
+            if not owned:
+                raise DevError('WORKFLOW_READ_ONLY', '共享工作流只授予查看；修改仍需原身份', 403)
         project = self.runtime.project(row["project_id"], principal)
         changed = row["root"] != project["root"] or row["device_id"] != project["device_id"]
+        self.runtime.authorize(principal, 'write' if write else 'read', project_id=project['id'])
         if write:
             if project["mode"] != "write":
                 raise DevError("READ_ONLY", "项目已设为只读；不能更改工作流", 403)
@@ -49,7 +57,7 @@ class Workflows:
         row["steps"] = json.loads(row["steps"])
         row["project_alias"] = project["alias"]
         row["mapping_changed"] = changed
-        row["can_update"] = not changed and project["mode"] == "write" and "write" in principal.scopes
+        row["can_update"] = (principal.instance_admin or (row['grant_id'] == principal.grant_id if principal.grant_id else row['owner_user_id'] == principal.user_id)) and not changed and project["mode"] == "write" and "write" in role_project_scopes(self.store, principal, project["id"])
         row["assigned_to_mcp"] = row["grant_id"] is not None
         return row
 
@@ -88,13 +96,12 @@ class Workflows:
                     "next_before_event_id": events[-1]["id"] if more else None}
 
     def list(self, args, principal):
-        clauses, values = ["EXISTS (SELECT 1 FROM projects p WHERE p.id=w.project_id)"], []
-        if not principal.admin:
-            clauses.append("w.grant_id=?")
-            values.append(principal.grant_id)
-            if "*" not in principal.projects:
-                clauses.append("w.project_id IN (%s)" % (",".join("?" for _ in principal.projects) or "NULL"))
-                values.extend(principal.projects)
+        principal = iam.live_principal(self.store, principal)
+        clause, values = iam.private_sql(principal, 'w.')
+        clauses = [clause, "EXISTS (SELECT 1 FROM projects p WHERE p.id=w.project_id)"]
+        if "*" not in principal.projects:
+            clauses.append("w.project_id IN (%s)" % (",".join("?" for _ in principal.projects) or "NULL"))
+            values.extend(principal.projects)
         if args["project"]:
             clauses.append("w.project_id=?")
             values.append(self.runtime.project(args["project"], principal)["id"])
@@ -119,7 +126,7 @@ class Workflows:
                 "templates": [{"id": k, **v} for k, v in TEMPLATES.items()]}
 
     def replay(self, args, principal, fingerprint):
-        old = self.store.one("SELECT * FROM workflow_replays WHERE actor=? AND idem=?", (principal.actor, args["idempotency_key"]))
+        old = self.store.one("SELECT * FROM workflow_replays WHERE space_id=? AND actor=? AND idem=?", (principal.space_id, principal.actor, args["idempotency_key"]))
         if old:
             self.load(old["workflow_id"], principal, write=True)
             if old["fingerprint"] != fingerprint:
@@ -130,13 +137,12 @@ class Workflows:
     def record(self, row, args, principal, fingerprint, action, summary, evidence):
         self.store.require_transaction()
         receipt = {"workflow_id": row["id"], "version": row["version"], "state": row["state"], "replayed": False, "next": "workflows_get"}
-        self.store.db.execute("INSERT INTO workflow_replays(actor,idem,fingerprint,workflow_id,receipt) VALUES (?,?,?,?,?)",
-                              (principal.actor, args["idempotency_key"], fingerprint, row["id"], json.dumps(receipt)))
+        self.store.db.execute("INSERT INTO workflow_replays(actor,idem,fingerprint,workflow_id,receipt,space_id) VALUES (?,?,?,?,?,?)",
+                              (principal.actor, args["idempotency_key"], fingerprint, row["id"], json.dumps(receipt), principal.space_id))
         self.store.db.execute("INSERT INTO workflow_events(workflow_id,action,summary,evidence,at,version) VALUES (?,?,?,?,?,?)",
                               (row["id"], action, summary, json.dumps(evidence, ensure_ascii=False), row["updated"], row["version"]))
-        self.store.db.execute("INSERT INTO audit(at,actor,action,target,status,detail) VALUES (?,?,?,?,?,?)",
-                              (row["updated"], principal.actor, "workflows." + action, row["id"], row["state"],
-                               json.dumps({"workflow_id": row["id"], "version": row["version"], "evidence_count": len(evidence)})))
+        iam.audit(self.store, principal, 'workflows.' + action, row['id'], status=row['state'],
+                  detail={'workflow_id': row['id'], 'version': row['version'], 'evidence_count': len(evidence)})
         return receipt
 
     def evidence(self, identifiers, row, principal, *, must_succeed=False):
@@ -165,6 +171,7 @@ class Workflows:
         with self.store.lock, self.store.db:
             self.store.db.execute("BEGIN IMMEDIATE")
             project = self.runtime.project(args["project"], principal)
+            self.runtime.authorize(principal, 'write', project_id=project['id'])
             if project["mode"] != "write":
                 raise DevError("READ_ONLY", "只读项目不能建立工作流", 403)
             requested = args["assignee_grant_id"]
@@ -172,12 +179,18 @@ class Workflows:
                 raise DevError("ASSIGNEE_FORBIDDEN", "MCP 调用不能为其他授权建立任务", 403)
             assignee = requested if principal.admin else principal.grant_id
             if principal.admin and assignee is not None:
-                grant = self.store.one("SELECT projects,scopes,revoked FROM grants WHERE id=?", (assignee,))
-                if not grant or grant["revoked"] or not {"read", "write"}.issubset(json.loads(grant["scopes"])):
+                grant = self.store.one("SELECT * FROM grants WHERE id=? AND user_id=? AND space_id=?", (assignee, principal.user_id, principal.space_id))
+                if not grant:
+                    raise DevError('INVALID_ASSIGNEE', '只能委派给自己在当前空间中的连接', 403)
+                try:
+                    scopes, allowed, _ = effective_grant(self.store, grant)
+                    self.runtime.authorize(self.runtime.grant_principal(grant), 'write', project_id=project['id'])
+                except DevError as exc:
+                    raise DevError("INVALID_ASSIGNEE", "该授权或访问 Profile 已停用", 403) from exc
+                if not {"read", "write"}.issubset(scopes):
                     raise DevError("INVALID_ASSIGNEE", "请选择未撤销且具有读取、写入权限的 MCP 授权", 403)
                 if not self.store.one("SELECT 1 AS active FROM tokens WHERE grant_id=? AND expires>? LIMIT 1", (assignee, time.time())):
                     raise DevError("INVALID_ASSIGNEE", "该授权已无有效令牌，请先重新建立可用的 MCP 连接", 403)
-                allowed = json.loads(grant["projects"])
                 if "*" not in allowed and project["id"] not in allowed:
                     raise DevError("INVALID_ASSIGNEE", "该 MCP 授权不能访问此项目", 403)
             fingerprint = digest(json.dumps({"action": "create", "args": args, "project_id": project["id"]}, sort_keys=True))
@@ -187,9 +200,9 @@ class Workflows:
             source = args["steps"] if args["template"] == "custom" else TEMPLATES[args["template"]]["steps"]
             steps = [{"id": f"s{i+1}", **s, "state": "pending", "summary": "", "evidence": []} for i, s in enumerate(source)]
             now, identifier = time.time(), uuid.uuid4().hex
-            self.store.db.execute("INSERT INTO workflows(id,project_id,device_id,root,actor,grant_id,title,goal,template,state,steps,summary,version,created,updated) VALUES (?,?,?,?,?,?,?,?,?,'active',?,'',1,?,?)",
+            self.store.db.execute("INSERT INTO workflows(id,project_id,device_id,root,actor,grant_id,title,goal,template,state,steps,summary,version,created,updated,space_id,owner_user_id) VALUES (?,?,?,?,?,?,?,?,?,'active',?,'',1,?,?,?,?)",
                                   (identifier, project["id"], project["device_id"], project["root"], principal.actor, assignee,
-                                   args["title"], args["goal"], args["template"], json.dumps(steps, ensure_ascii=False), now, now))
+                                   args["title"], args["goal"], args["template"], json.dumps(steps, ensure_ascii=False), now, now, principal.space_id, principal.user_id))
             return self.record({"id": identifier, "version": 1, "state": "active", "updated": now}, args, principal, fingerprint, "create", args["goal"], [])
 
     def update(self, args, principal):

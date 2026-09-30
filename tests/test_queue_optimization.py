@@ -66,7 +66,9 @@ async def test_metadata_coalescing_respects_receipt_boundaries(runtime, change):
     elif change == 'actor':
         p = replace(p, actor='different-owner')
     elif change == 'grant':
-        p = replace(p, grant_id='different-grant')
+        from tests.legacy_iam_fixture import seed_grant
+        seed_grant(r.store, 'different-grant', p.user_id, projects=('proj',))
+        p = replace(p, grant_id='different-grant', admin=False)
     elif change == 'root':
         r.store.execute("UPDATE projects SET root='/tmp/other' WHERE id='proj'")
     elif change == 'explicit':

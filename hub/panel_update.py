@@ -64,7 +64,7 @@ def make_panel_update_router(auth, runtime, client=None):
 
     @router.get('/status')
     async def status(request: Request, request_key: str = Query(default='', max_length=128, pattern=r'^[A-Za-z0-9._:-]*$')):
-        auth.admin(request)
+        auth.instance(request)
         if request_key and len(request_key) < 8:
             raise DevError('INVALID_KEY', '更新请求编号无效')
         try:
@@ -77,7 +77,7 @@ def make_panel_update_router(auth, runtime, client=None):
         return {**data, 'running_version': VERSION}
 
     async def submit(request, body, action):
-        principal = auth.admin(request, True)
+        principal = auth.instance(request, True)
         payload = body.model_dump(exclude={'confirmation'})
         if action == 'apply' and body.confirmation != body.version:
             raise DevError('CONFIRMATION_REQUIRED', '请明确确认所检查的目标版本', 409)

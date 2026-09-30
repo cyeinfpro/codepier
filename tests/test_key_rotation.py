@@ -62,7 +62,7 @@ def test_rotation_changes_all_ciphertexts_retains_recoverable_backup_and_can_rep
     backup = directory / result['backup']
     assert_readable(backup)
     with sqlite3.connect(directory / 'hub.sqlite3') as db:
-        for table, column in keyring.CIPHER_COLUMNS:
+        for table, column in (('devices','secret'),('operations','payload'),('vps_connections','secret')):
             value = db.execute(f'SELECT {column} FROM {table}').fetchone()[0]
             assert value.startswith('cp1:' + result['key_id'] + ':')
             with pytest.raises(InvalidToken):

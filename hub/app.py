@@ -8,6 +8,13 @@ from pathlib import Path
 from fastapi import FastAPI
 from hub.static_assets import ReleaseAssets
 
+from hub import iam
+from hub.iam_api import make_iam_router
+from hub.oidc import OIDCService
+from hub.access_profiles import make_profiles_router
+from hub.roles import make_roles_router
+from hub.gateway.service import Gateway
+from hub.gateway.registry import make_router as make_gateway_router
 from hub.auth import Auth
 from hub.config import HubConfig
 from hub.runtime import Runtime
@@ -46,18 +53,29 @@ def create_app(data_dir: str | None = None):
     try:
         store = Store(directory)
         runtime, auth = Runtime(store), Auth(store)
+        runtime.gateway = Gateway(store)
         def public_url():
             row = store.one("SELECT value FROM meta WHERE key='public_url'")
             return normalize_url(row["value"] if row else config.public_url)
+
+        runtime.oauth = OAuth(auth, runtime, public_url)
+        oidc = OIDCService(auth, runtime, public_url, seed=config.oidc_seed, bootstrap_admin=config.oidc_bootstrap_admin)
 
         @asynccontextmanager
         async def lifespan(app):
             try:
                 await runtime.start()
+                await oidc.start()
                 yield
             finally:
                 try:
-                    await runtime.stop()
+                    try:
+                        await oidc.stop()
+                    finally:
+                        try:
+                            await runtime.gateway.close()
+                        finally:
+                            await runtime.stop()
                 finally:
                     try:
                         await store.aclose()
@@ -68,6 +86,9 @@ def create_app(data_dir: str | None = None):
         app.state.store, app.state.runtime, app.state.auth, app.state.config = store, runtime, auth, config
         maintenance = PanelMaintenance(runtime, os.getenv("HUB_PANEL_UPDATE_SOCKET", ""))
         runtime.panel_maintenance = maintenance
+        app.state.oidc = oidc
+        app.state.gateway = runtime.gateway
+        app.add_middleware(iam.AuditContextMiddleware)
         app.add_middleware(BodyLimit)
         app.add_middleware(PanelMaintenanceMiddleware, gate=maintenance)
         app.add_middleware(CallTimingMiddleware, runtime=runtime)
@@ -76,7 +97,10 @@ def create_app(data_dir: str | None = None):
         for make in (make_accounts_router, make_devices_router, make_projects_router,
                      make_activity_router, make_settings_router, make_system_router):
             app.include_router(make(context))
-        app.include_router(OAuth(auth, runtime, public_url).router)
+        app.include_router(oidc.router)
+        for make in (make_iam_router, make_profiles_router, make_roles_router, make_gateway_router):
+            app.include_router(make(auth, runtime))
+        app.include_router(runtime.oauth.router)
         app.include_router(make_router(auth, runtime, public_url))
         for make in (make_artifact_router, make_access_router, make_native_router,
                      make_vps_router, make_panel_update_router):

@@ -40,13 +40,23 @@ def agent(tmp_path):
 @pytest.fixture
 def runtime(tmp_path):
     store = Store(tmp_path / 'hub')
+    from tests.legacy_iam_fixture import seed_owner
+    seed_owner(store,'owner','admin')
     store.execute("INSERT INTO devices(id,name,secret,created) VALUES ('dev','home',?,?)", (store.encrypt(token()), time.time()))
-    store.execute("INSERT INTO projects VALUES ('proj','Fixture','fixture','dev','/tmp/fixture','','write',1,?)", (time.time(),))
+    store.execute("INSERT INTO projects(id,alias,alias_key,device_id,root,description,mode,allow_tasks,created) VALUES ('proj','Fixture','fixture','dev','/tmp/fixture','','write',1,?)", (time.time(),))
     instance = Runtime(store)
     instance.wait_seconds = 0
     principal = Principal('panel:admin', 'owner', {'read', 'write', 'execute', 'computer'}, ['*'], admin=True)
     yield instance, principal
     store.close()
+
+
+def reader_principal(instance):
+    # Scope tests use an actual persisted fixed grant. A panel principal's
+    # in-memory admin flag is intentionally NOT authoritative under live IAM.
+    from tests.legacy_iam_fixture import seed_grant
+    seed_grant(instance.store,'reader','owner',scopes=('read',),projects=('proj',))
+    return Principal('mcp:reader:test','owner',{'read'},['proj'],grant_id='reader')
 
 
 def request(project, name, **args):
@@ -64,7 +74,7 @@ def file_call(agent, name, **args):
 
 def test_catalog_compact_and_legacy_compatibility():
     core = tool_definitions('core')
-    assert {t['name'] for t in core} == {'workspace', 'read', 'write', 'edit', 'exec', 'process', 'vps', 'browser', 'computer'}
+    assert {t['name'] for t in core} == {'workspace', 'read', 'write', 'edit', 'exec', 'process', 'vps', 'browser', 'computer', 'get_profile', 'get_access_context'}
     assert len(json.dumps(core).encode()) < 35000
     assert {'browser', 'computer', 'exec', 'edit'} <= {t['name'] for t in tool_definitions('full')}
     assert not {'browser_open', 'computer_action', 'vps_exec', 'fs_read', 'shell_exec'} & {t['name'] for t in tool_definitions('full')}
@@ -188,7 +198,7 @@ async def test_resource_overlap_fairness_cancellation_and_disjoint_paths():
 @pytest.mark.asyncio
 async def test_facades_enforce_action_scopes_and_process_waits_are_parallel(runtime, monkeypatch):
     instance, principal = runtime
-    caller = replace(principal, admin=False, scopes={'read'})
+    caller = reader_principal(instance)
     with pytest.raises(DevError) as denied:
         await instance.invoke('computer', {'operation': 'apps', 'project': 'Fixture'}, caller)
     assert denied.value.code == 'INSUFFICIENT_SCOPE' and denied.value.details['required_scope'] == 'computer'
@@ -254,9 +264,9 @@ def test_bridge_does_not_invent_lookup_filters_or_workspace_arguments():
 @pytest.mark.asyncio
 async def test_complete_capability_discovery_and_no_unmapped_public_tool(runtime):
     instance, principal = runtime
-    assert set(TOOLS) - CORE_TOOLS - set(REPLACED_MCP_TOOLS) == {'integration_control', 'validations_accept'}
+    assert set(TOOLS) - CORE_TOOLS - set(REPLACED_MCP_TOOLS) == {'integration_control', 'validations_accept', 'get_profile', 'get_access_context'}
     for profile in ('core', 'coding', 'full'):
-        assert {t['name'] for t in tool_definitions(profile)} == CORE_TOOLS
+        assert {t['name'] for t in tool_definitions(profile)} == CORE_TOOLS | {'get_profile', 'get_access_context'}
     for name, operations in CORE_ACTIONS.items():
         for operation, backend in operations.items():
             help = await instance.invoke('workspace', {'operation': 'help', 'tool': name, 'action': operation}, principal)
@@ -282,7 +292,7 @@ async def test_complete_capability_discovery_and_no_unmapped_public_tool(runtime
 ])
 async def test_advanced_aliases_do_not_bypass_scopes(runtime, name, operation, options):
     instance, principal = runtime
-    reader = replace(principal, admin=False, scopes={'read'})
+    reader = reader_principal(instance)
     with pytest.raises(DevError) as denied:
         await instance.invoke(name, {'operation': operation, 'project': 'Fixture',
             'options': options, 'idempotency_key': 'advanced-operation'}, reader)

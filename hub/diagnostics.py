@@ -4,7 +4,7 @@ import json
 import sqlite3
 import time
 from shared.build_info import BuildIdentity
-from shared.contracts import TOOLS
+from shared.contracts import TOOLS, tool_definitions
 from shared.core_contracts import CORE_TOOLS
 from shared.util import DevError
 from shared.computer_diagnostics import COMPUTER_STAGES, safe_detail
@@ -103,4 +103,5 @@ class Diagnostics:
         return {'hub':hub,'devices':devices,'warnings':warnings,
                 'client_catalog':{'reported':actual or None,'matches':actual==hub['catalog_sha256'] if actual else None,
                                   'note':'No client hash means unknown; this endpoint cannot inspect the ChatGPT UI cache.'},
-                'tool_count':len(CORE_TOOLS),'schema':runtime.store.one("SELECT value FROM meta WHERE key='schema'")['value'],'diagnostic_write_errors':self.errors}
+                'tool_count':len(tool_definitions()),'native_core_tool_count':len(CORE_TOOLS),
+                'schema':runtime.store.one("SELECT value FROM meta WHERE key='schema'")['value'],'diagnostic_write_errors':self.errors}

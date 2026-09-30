@@ -9,6 +9,8 @@ from __future__ import annotations
 from shared.config import env_csv
 from hub.db_worker import database_endpoint
 from hub.principal import refresh_principal
+from hub.tool_router import ToolRouter
+from shared.role_contracts import ROLE_SCOPE
 import json,os
 from fastapi import APIRouter,Request
 from fastapi.responses import JSONResponse,Response
@@ -28,6 +30,7 @@ VERSIONS=set(LEGACY)
 
 def make_router(auth:Auth,runtime:Runtime,public_url):
     router=APIRouter()
+    tools = ToolRouter(runtime.store, runtime.gateway)
 
     def failure(identifier,code,message,status=200,data=None,headers=None):
         error={'code':code,'message':message}
@@ -61,10 +64,13 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
         origin=request.headers.get('origin')
         public_base=await runtime.store.run(public_url)
         request_public_url=lambda:public_base
+        authorization=request.query_params.get('authorization','fixed')
+        if authorization not in {'fixed','role'}:return failure(None,-32602,'Unknown authorization mode',400)
+        auth_scope=ROLE_SCOPE if authorization=='role' else 'read'
         try:principal=await runtime.store.run(auth.bearer, request)
         except DevError as exc:
             metadata=(await runtime.store.run(public_url))+'/.well-known/oauth-protected-resource/mcp'
-            return failure(None,-32001,exc.message,exc.status,headers={'WWW-Authenticate':f'Bearer resource_metadata="{metadata}", scope="read"'})
+            return failure(None,-32001,exc.message,exc.status,headers={'WWW-Authenticate':f'Bearer resource_metadata="{metadata}", scope="{auth_scope}"'})
         if request.headers.get('content-type','').split(';',1)[0].strip().lower()!='application/json':
             return failure(None,-32600,'Content-Type must be application/json',415)
         accept=request.headers.get('accept','').lower()
@@ -111,33 +117,41 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                 if set(params)-{'_meta'}:return failure(identifier,-32602,'Discovery accepts only standard metadata',400)
                 result={'supportedVersions':SUPPORTED,'capabilities':capabilities(),'instructions':instructions,'ttlMs':0,'cacheScope':'private'}
             elif method=='tools/list':
-                if params.get('cursor'):return failure(identifier,-32602,'Tool catalog fits one page; no cursor is valid',400 if modern else 200)
-                result={'tools':tool_definitions(profile)}
+                result=await runtime.store.run(tools.list_tools, principal, params.get('cursor'))
             elif method=='tools/call':
                 name=params.get('name');arguments=params.get('arguments',{})
                 if not isinstance(name,str) or not isinstance(arguments,dict):return failure(identifier,-32602,'Expected tool name and arguments object',400 if modern else 200)
-                if modern and name not in TOOLS:return failure(identifier,-32602,'Unknown tool',400)
                 trace=None
+                route=None
                 try:
-                    if name in REPLACED_MCP_TOOLS:raise DevError('TOOL_REMOVED', '旧工具已移除，请使用 '+REPLACED_MCP_TOOLS[name], 404)
-                    if name in ADMIN_TOOLS:raise DevError('OWNER_REQUIRED','此操作只接受面板主理人或已启用的本机控制入口',403)
-                    if isinstance(arguments.get('project'),str):
-                        project=await runtime.store.run(runtime.project, arguments['project'], principal)
-                        try:
-                            trace=await runtime.store.run(runtime.integrations.begin,principal,project,name,metadata)
-                            request.state.codepier_call_trace=trace
-                        except Exception:runtime.integrations.write_errors+=1
-                    value=await runtime.invoke(name,arguments,principal)
-                    result=await runtime.store.run(mcp_apps.attach,core_result(name,arguments,value),name,arguments,value,request_public_url)
-                    if trace:
-                        trace['operation_id']=value.get('operation_id')
-                        trace['status']='tool_error' if result.get('isError') else 'complete'
+                    route=await runtime.store.run(tools.resolve, principal, name)
+                    if route.backend == 'remote':
+                        result=await runtime.gateway.call(principal,name,arguments,lambda:auth.bearer(request),
+                                                          request_key=metadata.get('codepier/idempotencyKey'))
+                    else:
+                        if arguments.get('project') and isinstance(arguments['project'],str):
+                            project=await runtime.store.run(runtime.project, arguments['project'], principal)
+                            try:
+                                trace=await runtime.store.run(runtime.integrations.begin,principal,project,name,metadata)
+                                request.state.codepier_call_trace=trace
+                            except Exception:runtime.integrations.write_errors+=1
+                        value=await runtime.invoke(name,arguments,principal)
+                        principal=await runtime.store.run(auth.bearer,request)
+                        if name == 'get_access_context':
+                            value={**value,'gateway':await runtime.store.run(runtime.gateway.context,principal)}
+                        result=await runtime.store.run(mcp_apps.attach,core_result(name,arguments,value),name,arguments,value,request_public_url)
+                        if trace:
+                            trace['operation_id']=value.get('operation_id')
+                            trace['status']='tool_error' if result.get('isError') else 'complete'
                 except DevError as exc:
+                    if exc.code=='UNKNOWN_TOOL' and modern:return failure(identifier,-32602,'Unknown tool',400)
                     value={'error':{'code':exc.code,'message':exc.message,**exc.details}}
                     result={'content':[{'type':'text','text':json.dumps(value,ensure_ascii=False)}],'structuredContent':value,'isError':True}
+                    if name == 'get_profile' or route and route.backend=='remote':result.pop('structuredContent',None)
+                    if exc.details.get('call_id'):result['_meta']={'codepier/callId':exc.details['call_id']}
                     if trace:trace['status']='tool_error';trace['operation_id']=exc.details.get('operation_id')
                     if exc.code=='INSUFFICIENT_SCOPE':
-                        scopes=sorted({'read',exc.details.get('required_scope', TOOLS[name].scope)}) if name in TOOLS else ['read']
+                        scopes=[ROLE_SCOPE] if principal.authorization_mode=='role' else sorted({'read',exc.details.get('required_scope', TOOLS[name].scope)}) if name in TOOLS else ['read']
                         challenge='Bearer resource_metadata="'+public_base+'/.well-known/oauth-protected-resource/mcp", error="insufficient_scope", scope="'+' '.join(scopes)+'"'
                         result['_meta']={'mcp/www_authenticate':[challenge]}
             elif method=='resources/list':
