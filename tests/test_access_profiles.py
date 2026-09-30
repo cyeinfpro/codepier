@@ -42,6 +42,9 @@ def pat(client, profile, scopes=None, projects=None, **extra):
 
 
 def call(client, token, name='get_profile', arguments=None, endpoint='/mcp'):
+    # IAM tests name domain operations; transport now uses the 1.14 public facade.
+    from tests.core_transport import public_call
+    name, arguments = public_call(name, arguments or {})
     payload = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
                'params': {'name': name, 'arguments': arguments or {}}}
     return client.post(endpoint, json=payload, headers={'Authorization': 'Bearer ' + token,
@@ -147,7 +150,7 @@ def test_refresh_reconnect_and_scope_upgrade_keep_profile_id_but_not_grant_owner
         fingerprint,state,created,updated) VALUES (?,?,?,?,?,?,'{}','','succeeded',?,?)''',
         ('op-private', 'device', 'project', 'mcp:' + first_grant['id'], first_grant['id'], 'fs_read', now, now))
     refused = call(client, second['access_token'], 'operations_get', {'operation_id': 'op-private'}).json()['result']
-    assert refused['isError'] and refused['structuredContent']['error']['code'] == 'OPERATION_NOT_FOUND'
+    assert refused['isError'] and refused['structuredContent']['operations'][0]['error']['code'] == 'OPERATION_NOT_FOUND'
     assert runtime is not None
 
 
@@ -365,7 +368,7 @@ def test_narrowing_computer_scope_blocks_original_operation_media(api, tool):
     assert change(client, profile, scopes=['read']).status_code == 200
     result = call(client, credential['token'], 'operations_get', {'operation_id': 'media-private'})
     assert 'PRIVATE_BROWSER_MEDIA' not in result.text
-    assert result.json()['result']['structuredContent']['error']['code'] == 'INSUFFICIENT_SCOPE'
+    assert result.json()['result']['structuredContent']['operations'][0]['error']['code'] == 'INSUFFICIENT_SCOPE'
 
 
 @pytest.mark.parametrize('field,value', [

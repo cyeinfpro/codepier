@@ -13,7 +13,7 @@ import zipfile
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.test_agent_install_api import _real_auth_app
+from tests.install_support import _real_auth_app
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -171,13 +171,8 @@ def test_manifest_is_public_pinned_bounded_metadata_without_secrets(tmp_path):
         store.close()
 
 
-def test_windows_bootstrap_has_no_already_installed_gate_and_checks_cleanup():
-    script = (ROOT / 'deploy/install-from-hub.ps1').read_text()
-    assert 'Agent already installed' not in script
-    assert "[ValidateSet('install','upgrade','uninstall','status','start')]" in script
-    assert "$Action -eq 'start') { '--start-service' }" in script
-    assert 'Confirm-CodePierRemoval' in script and 'Windows cleanup did not complete' in script
-    assert 'if ($LASTEXITCODE -ne 0)' in script
+# PowerShell parameter mapping and cleanup errors are exercised by the real
+# Windows process in scripts/check_windows_bootstrap.py, not source substrings.
 
 
 def test_windows_scripts_are_safe_for_legacy_powershell_encoding():

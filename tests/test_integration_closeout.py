@@ -75,7 +75,7 @@ def test_readiness_does_not_present_project_configuration_as_caller_authority(in
         'projects':[s.project['id']], 'days':1,
     }).json()
     try:
-        result = s.mcp('readiness_get', {'project':'ProjectAlpha'}, token_value=grant['token'])['structuredContent']
+        result = s.mcp('workspace', {'project': 'ProjectAlpha', 'operation': 'readiness'}, token_value=grant['token'])['structuredContent']
         if result.get('pending'):
             operation = s.poll(result['operation_id'])
             assert operation['state'] == 'succeeded', operation

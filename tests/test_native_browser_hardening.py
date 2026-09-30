@@ -1,3 +1,4 @@
+from tests.evidence import evidence_path
 """Archived terminal compatibility/security coverage.
 The production panel no longer mounts this application. The old renderer is
 explicitly injected ONLY into this test to guard retained transport behavior.
@@ -26,7 +27,7 @@ def test_http_upload_reload_binding_input_batch_queries_and_export(cli_stack,tmp
         # to exercise the actual ordinary-HTTP fallback in this real browser.
         page.add_init_script("Object.defineProperty(window.crypto,'subtle',{get:()=>undefined,configurable:true})")
         try:
-            page.goto(s.url+'/#projects');page.fill('#password',s.password);page.click('#login-form button')
+            page.goto(s.url+'/#projects');page.fill('#username', 'admin');page.fill('#password',s.password);page.click('#login-form button')
             page.locator('[data-native-launch="codex"][data-project="'+s.project['id']+'"]').click()
             mount_archived_terminal(page)
             expect(page.locator('#native-root')).to_be_visible()
@@ -70,10 +71,10 @@ def test_http_upload_reload_binding_input_batch_queries_and_export(cli_stack,tmp
             with page.expect_download() as download_info:page.click('#native-export')
             download=download_info.value;destination=tmp_path/'native.ansi';download.save_as(destination)
             assert b'ECHO:BATCHED-INPUT' in destination.read_bytes()
-            page.screenshot(path='docs/evidence/chat-ui-20260915/desktop-terminal.png',full_page=True)
+            page.screenshot(path=evidence_path('docs/evidence/chat-ui-20260915/desktop-terminal.png'),full_page=True)
             page.set_viewport_size({'width':390,'height':844})
             page.wait_for_timeout(300)
-            page.screenshot(path='docs/evidence/chat-ui-20260915/mobile-native-hardened.png',full_page=True)
+            page.screenshot(path=evidence_path('docs/evidence/chat-ui-20260915/mobile-native-hardened.png'),full_page=True)
             overflow=page.evaluate("[...document.querySelectorAll('body *')].map(e=>({tag:e.tagName,id:e.id,class:e.className,x:e.getBoundingClientRect().x,w:e.getBoundingClientRect().width,right:e.getBoundingClientRect().right})).filter(x=>x.right>innerWidth+2&&x.w>0).slice(0,30)")
             assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+2'),overflow
             page.on('dialog',lambda dialog:dialog.accept())

@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import pytest
 from pathlib import Path
 from scripts.check_release import check_web_assets
 from shared.util import VERSION
@@ -57,7 +58,7 @@ def _asset_positions(html: str) -> dict[str, int]:
 def _login(page: Page, stack, route: str = "overview") -> None:
     page.goto(f"{stack.url}/#{route}", wait_until="domcontentloaded")
     expect(page.locator("#login-form")).to_be_visible()
-    page.locator("#password").fill(stack.password)
+    page.fill('#username', 'admin');page.locator("#password").fill(stack.password)
     page.locator("#login-form button[type=submit]").click()
     expect(page.locator(".shell")).to_be_visible()
     expect(page.locator(".skeleton")).to_have_count(0, timeout=15_000)
@@ -217,7 +218,7 @@ def _native_management_round_trip(page: Page, draft: str) -> None:
     expect(page.locator("#chat-compose")).to_have_value(draft)
 
 
-def exercise_matrix(stack, output: Path, *, screenshots: bool = True) -> dict:
+def exercise_matrix(stack, output: Path, *, screenshots: bool = True, schemes=SCHEMES, viewports=VIEWPORTS) -> dict:
     """Run the complete visual matrix and return machine-readable evidence."""
     _prepare_native_fixture(stack)
     output.mkdir(parents=True, exist_ok=True)
@@ -233,8 +234,8 @@ def exercise_matrix(stack, output: Path, *, screenshots: bool = True) -> dict:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         try:
-            for scheme in SCHEMES:
-                for width, height in VIEWPORTS:
+            for scheme in schemes:
+                for width, height in viewports:
                     context = browser.new_context(
                         viewport={"width": width, "height": height},
                         color_scheme=scheme,
@@ -351,14 +352,19 @@ def test_contract_assets_load_in_the_required_order():
     assert all(asset.split("?", 1)[0] in current_assets for asset in changed_assets), changed_assets
 
 
-def test_theme_viewport_conversation_matrix(stack, tmp_path):
+@pytest.mark.isolated_case
+@pytest.mark.parametrize('scheme', SCHEMES)
+@pytest.mark.parametrize('viewport', VIEWPORTS, ids=lambda value: f'{value[0]}x{value[1]}')
+def test_theme_viewport_conversation_matrix(stack, tmp_path, scheme, viewport):
     output = (
         SCREENSHOTS
         if os.getenv("CODEPIER_UI_UNIFICATION_SCREENSHOTS")
         else tmp_path / "ui-unification"
     )
-    report = exercise_matrix(stack, output)
-    assert len(report["cases"]) == len(SCHEMES) * len(VIEWPORTS)
+    # Each case owns both its screenshots and capture-report.json when sharded.
+    output = output / f'{scheme}-{viewport[0]}x{viewport[1]}' / 'screenshots'
+    report = exercise_matrix(stack, output, schemes=(scheme,), viewports=(viewport,))
+    assert len(report["cases"]) == 1
     assert len(report["screenshots"]) == len(report["cases"]) * (
         len(MANAGEMENT_ROUTES) + 1
     )

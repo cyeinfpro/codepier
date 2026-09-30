@@ -47,16 +47,15 @@ def test_remote_contracts_accept_pending_and_errors_without_weakening_success(na
 def test_public_catalogue_uses_text_without_auto_cards_or_owner_controls(profile):
     definitions={d['name']:d for d in tool_definitions(profile)}
     assert not set(definitions)&ADMIN_TOOLS
-    assert definitions['download_artifact']['_meta']['openai/fileParams']==['file']
+    assert definitions['write']['_meta']['openai/fileParams']==['file']
     for definition in definitions.values():
         assert 'resourceUri' not in definition['_meta'].get('ui', {})
         assert 'openai/outputTemplate' not in definition['_meta']
-    for name in ('open_workspace', 'show_changes'):
+    for name in ('workspace', 'read'):
         assert definitions[name]['_meta']['openai/widgetAccessible'] is True
-    assert definitions['lsp_query']['annotations']['readOnlyHint']
-    assert set(definitions['lsp_query']['securitySchemes'][0]['scopes'])=={'read','execute'}
-    for name in ('fs_read','shell_exec','lsp_query'):
-        assert 'ui' not in definitions[name]['_meta']
+    from hub.core_tools import help_result
+    assert help_result('read', 'lsp')['scope'] == 'execute'
+    assert 'ui' not in definitions['exec']['_meta']
 
 
 def test_native_import_publishes_exact_binary_creates_parents_and_never_overwrites(workspace):

@@ -32,7 +32,7 @@ def browser(request):
 def open_page(browser, stack, width=1440):
     page=browser.new_page(viewport={'width':width,'height':960 if width>500 else 844})
     page.goto(stack.url+'/#overview')
-    page.fill('#password',stack.password)
+    page.fill('#username', 'admin');page.fill('#password',stack.password)
     page.click('#login-form button')
     expect(page.locator('#page h1')).to_have_text('控制总览')
     if width <= 500:
@@ -133,7 +133,7 @@ def test_check_connection_real_operation_once_and_no_secret(browser,ui_stack):
     def capture(request):
         if request.method=='POST' and request.url.endswith('/api/tools/call'):
             data=request.post_data_json
-            if data.get('tool')=='vps_exec':submissions.append(data)
+            if data.get('tool')=='exec':submissions.append(data)
     page.on('request',capture)
     try:
         page.fill('#vps-query',v['name'])
@@ -211,6 +211,34 @@ def test_background_refresh_preserves_held_click_target(browser,ui_stack):
         assert page.evaluate('heldVpsButton.isConnected')
         assert page.evaluate('heldVpsDetachCount')==0
         expect(page.locator('#vps-form [name="name"]')).to_have_value(v['name'])
+    finally:page.close()
+
+
+def test_returning_mobile_dock_preserves_held_page_click(browser,ui_stack):
+    engine,_=browser;s=ui_stack;v=create_vps(s)
+    page=open_page(engine,s,390)
+    try:
+        page.fill('#vps-query',v['name'])
+        page.evaluate('''() => {
+          const dock=document.querySelector('.mobile-dock');
+          dock.style.cssText='visibility:hidden;opacity:0;pointer-events:none;transform:translateY(100px)';
+          const button=document.querySelector('[data-vps-card]:not([hidden]) [data-vps-action="edit"]');
+          window.scrollTo(0,scrollY+button.getBoundingClientRect().bottom-innerHeight+5);
+          button.addEventListener('pointerdown',()=>{
+            dock.removeAttribute('style');
+          },{once:true});
+        }''')
+        expect(page.locator('.mobile-dock')).to_have_css('opacity','0')
+        button=page.locator('[data-vps-card]:visible [data-vps-action="edit"]')
+        bounds=button.bounding_box()
+        assert bounds and bounds['y']+bounds['height']/2>800
+        page.mouse.move(bounds['x']+bounds['width']/2,bounds['y']+bounds['height']/2)
+        page.mouse.down()
+        expect(page.locator('.mobile-dock')).to_have_css('transform','none')
+        page.mouse.up()
+        expect(page.locator('#vps-form')).to_be_visible()
+        expect(page.locator('#vps-form [name="name"]')).to_have_value(v['name'])
+        expect(page.locator('body')).not_to_have_class(re.compile(r'\bui-page-press\b'))
     finally:page.close()
 
 

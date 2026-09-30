@@ -25,6 +25,7 @@ from fastapi.responses import RedirectResponse, JSONResponse
 from pydantic import Field, model_validator
 from typing import Literal
 
+from hub.db_worker import database_endpoint
 from hub.access import AccessModel
 from hub import iam
 from shared.crypto import digest, token
@@ -236,7 +237,7 @@ class OIDCService:
     async def metadata(self,provider,*,force=False):
         identifier=provider['id'];version=provider['version']
         async with self.metadata_locks.setdefault(identifier,asyncio.Lock()):
-            cached=self.store.one('SELECT * FROM oidc_cache WHERE provider_id=? AND version=? AND expires>?',
+            cached=await self.store.run(self.store.one,'SELECT * FROM oidc_cache WHERE provider_id=? AND version=? AND expires>?',
                                   (identifier,version,time.time()))
             if cached and not force:
                 return json.loads(cached['metadata']),json.loads(cached['jwks'])
@@ -296,7 +297,7 @@ class OIDCService:
         refreshes; never extend the discovery cache's expiry just by fetching keys.
         """
         async with self.metadata_locks.setdefault(provider['id'],asyncio.Lock()):
-            cached=self.store.one('SELECT * FROM oidc_cache WHERE provider_id=? AND version=? AND expires>?',
+            cached=await self.store.run(self.store.one,'SELECT * FROM oidc_cache WHERE provider_id=? AND version=? AND expires>?',
                                   (provider['id'],provider['version'],time.time()))
             if not cached:
                 # Discovery expired between validation and locking. A complete,
@@ -307,12 +308,14 @@ class OIDCService:
             keys=await self.http_json(provider,'GET',meta['jwks_uri'])
             if not isinstance(keys.get('keys'),list) or not 1<=len(keys['keys'])<=32:
                 raise DevError('OIDC_KEYS_INVALID','身份提供者公钥格式无效',400)
-            with self.store.transaction():
-                current=self.provider(provider['id'])
-                if current['version']!=provider['version']:
-                    raise DevError('OIDC_CONFIG_CHANGED','身份提供者配置已变化，请重新发起请求',409)
-                self.store.db.execute('UPDATE oidc_cache SET jwks=? WHERE provider_id=? AND version=?',
-                                      (json.dumps(keys),provider['id'],provider['version']))
+            def save_keys():
+                with self.store.transaction():
+                    current=self.provider(provider['id'])
+                    if current['version']!=provider['version']:
+                        raise DevError('OIDC_CONFIG_CHANGED','身份提供者配置已变化，请重新发起请求',409)
+                    self.store.db.execute('UPDATE oidc_cache SET jwks=? WHERE provider_id=? AND version=?',
+                                          (json.dumps(keys),provider['id'],provider['version']))
+            await self.store.run(save_keys)
             return keys
 
     async def _load_metadata(self,provider):
@@ -329,15 +332,22 @@ class OIDCService:
         if meta.get('code_challenge_methods_supported') and 'S256' not in meta['code_challenge_methods_supported']:raise DevError('OIDC_PKCE_REQUIRED','身份提供者未支持 S256 PKCE',400)
         keys=await self.http_json(provider,'GET',meta['jwks_uri'])
         if not isinstance(keys.get('keys'),list) or not 1<=len(keys['keys'])<=32:raise DevError('OIDC_KEYS_INVALID','身份提供者公钥格式无效',400)
-        with self.store.transaction():
-            current=self.provider(provider['id'])
-            if current['version']!=provider['version']:
-                raise DevError('OIDC_CONFIG_CHANGED','身份提供者配置已变化，请重新发起请求',409)
-            self.store.db.execute('INSERT INTO oidc_cache VALUES(?,?,?,?,?) ON CONFLICT(provider_id) DO UPDATE SET version=excluded.version,metadata=excluded.metadata,jwks=excluded.jwks,expires=excluded.expires',(provider['id'],provider['version'],json.dumps(meta),json.dumps(keys),time.time()+300))
+        def save_metadata():
+            with self.store.transaction():
+                current=self.provider(provider['id'])
+                if current['version']!=provider['version']:
+                    raise DevError('OIDC_CONFIG_CHANGED','身份提供者配置已变化，请重新发起请求',409)
+                self.store.db.execute('INSERT INTO oidc_cache VALUES(?,?,?,?,?) ON CONFLICT(provider_id) DO UPDATE SET version=excluded.version,metadata=excluded.metadata,jwks=excluded.jwks,expires=excluded.expires',(provider['id'],provider['version'],json.dumps(meta),json.dumps(keys),time.time()+300))
+        await self.store.run(save_metadata)
         return meta,keys
 
     async def exchange(self,provider,meta,form):
-        secret=self.store.decrypt(provider['client_secret'])
+        def credentials():
+            current=self.provider(provider['id'])
+            if current['version']!=provider['version']:
+                raise DevError('OIDC_CONFIG_CHANGED','身份提供者配置已变化，请重试',409)
+            return self.store.decrypt(current['client_secret'])
+        secret=await self.store.run(credentials)
         if 'client_secret_basic' in meta.get('token_endpoint_auth_methods_supported',['client_secret_basic']):
             from urllib.parse import quote_plus
             return await self.http_json(provider,'POST',meta['token_endpoint'],data=form,auth=httpx.BasicAuth(quote_plus(provider['client_id']),quote_plus(secret)))
@@ -397,7 +407,7 @@ class OIDCService:
             if mapping['role_id']:
                 store.db.execute('INSERT INTO role_assignments(role_id,user_id,space_id,source,may_delegate,active,expires) VALUES(?,?,?,?,?,1,?) ON CONFLICT(role_id,user_id,source) DO UPDATE SET may_delegate=excluded.may_delegate,active=1,expires=excluded.expires,version=role_assignments.version+1',(mapping['role_id'],identity['user_id'],mapping['space_id'],source,mapping['may_delegate'],expires))
         store.db.execute("UPDATE external_identities SET groups_json=?,checked_at=?,fresh_until=?,enabled=1,disabled_reason='' WHERE id=?",(json.dumps(groups),time.time(),expires,identity['id']))
-        self.runtime.wake.set();self.runtime.publish('iam',{'user_id':identity['user_id']})
+        self.runtime.wake_delivery();self.runtime.publish('iam',{'user_id':identity['user_id']})
 
     def disable_identity(self, identity, reason, *, revoke=False):
         """Keep a subject tombstone: unlink must never permit email-style takeover.
@@ -418,12 +428,11 @@ class OIDCService:
             # its final transaction. A new explicit link gets a new state.
             self.store.db.execute('DELETE FROM oidc_transactions WHERE provider_id=? AND link_user_id=?',
                                   (identity['provider_id'],identity['user_id']))
-        self.runtime.publish('iam',{'user_id':identity['user_id']});self.runtime.wake.set()
+        self.runtime.publish('iam',{'user_id':identity['user_id']});self.runtime.wake_delivery()
 
     def provision(self,provider,claims,groups,txn,tokens):
         store=self.store;subject=claims['sub'];now=time.time()
-        with store.lock,store.db:
-            store.db.execute('BEGIN IMMEDIATE')
+        with store.transaction():
             live_txn=store.one('SELECT 1 AS ok FROM oidc_transactions WHERE state_hash=? AND provider_id=? AND used=1 AND expires>?',
                                (txn['state_hash'],provider['id'],now))
             if not live_txn:
@@ -471,43 +480,54 @@ class OIDCService:
         state,browser,nonce,verifier=token(),token(),token(),token(48)
         state_hash=digest(state);now=time.time()
         client_hash=digest(('link:'+link_session['user_id']) if link_session else 'login:'+client_key)
-        with self.store.transaction():
-            self.store.db.execute('DELETE FROM oidc_transactions WHERE expires<=?',(now,))
-            # Consumed records remain replay/link-race tombstones until expiry,
-            # not active reservations. Never charge completed logins to capacity.
-            limit=8 if link_session else LOGIN_CLIENT_LIMIT
-            if self.store.one('SELECT count(*) AS n FROM oidc_transactions WHERE used=0 AND client_hash=?',(client_hash,))['n']>=limit:
-                raise DevError('OIDC_CLIENT_BUSY','此客户端已有过多登录请求；请完成现有请求或稍后重试',429)
-            if self.store.one('SELECT count(*) AS n FROM oidc_transactions WHERE used=0')['n']>=LOGIN_TOTAL_LIMIT:
-                raise DevError('OIDC_BUSY','登录请求过多',429)
-            if not link_session:
-                public=self.store.one('SELECT count(*) AS n FROM oidc_transactions WHERE used=0 AND link_user_id IS NULL')['n']
-                provider_count=self.store.one('SELECT count(*) AS n FROM oidc_transactions WHERE used=0 AND provider_id=? AND link_user_id IS NULL',(provider['id'],))['n']
-                if public>=LOGIN_PUBLIC_LIMIT or provider_count>=LOGIN_PROVIDER_LIMIT:
+        def reserve():
+            with self.store.transaction():
+                self.store.db.execute('DELETE FROM oidc_transactions WHERE expires<=?',(now,))
+                # Consumed records remain replay/link-race tombstones until expiry,
+                # not active reservations. Never charge completed logins to capacity.
+                limit=8 if link_session else LOGIN_CLIENT_LIMIT
+                if self.store.one('SELECT count(*) AS n FROM oidc_transactions WHERE used=0 AND client_hash=?',(client_hash,))['n']>=limit:
+                    raise DevError('OIDC_CLIENT_BUSY','此客户端已有过多登录请求；请完成现有请求或稍后重试',429)
+                if self.store.one('SELECT count(*) AS n FROM oidc_transactions WHERE used=0')['n']>=LOGIN_TOTAL_LIMIT:
                     raise DevError('OIDC_BUSY','登录请求过多',429)
-            self.store.db.execute('''INSERT INTO oidc_transactions
-                (state_hash,provider_id,browser_hash,nonce,verifier,return_to,link_user_id,link_session_hash,provider_version,expires,used,client_hash)
-                VALUES(?,?,?,?,?,?,?,?,?,?,0,?)''',
-                (state_hash,provider['id'],digest(browser),nonce,self.store.encrypt(verifier),return_to,
-                 link_session['user_id'] if link_session else None,link_session['id_hash'] if link_session else None,
-                 provider['version'],now+LOGIN_TTL,client_hash))
+                if not link_session:
+                    public=self.store.one('SELECT count(*) AS n FROM oidc_transactions WHERE used=0 AND link_user_id IS NULL')['n']
+                    provider_count=self.store.one('SELECT count(*) AS n FROM oidc_transactions WHERE used=0 AND provider_id=? AND link_user_id IS NULL',(provider['id'],))['n']
+                    if public>=LOGIN_PUBLIC_LIMIT or provider_count>=LOGIN_PROVIDER_LIMIT:
+                        raise DevError('OIDC_BUSY','登录请求过多',429)
+                self.store.db.execute('''INSERT INTO oidc_transactions
+                    (state_hash,provider_id,browser_hash,nonce,verifier,return_to,link_user_id,link_session_hash,provider_version,expires,used,client_hash)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,0,?)''',
+                    (state_hash,provider['id'],digest(browser),nonce,self.store.encrypt(verifier),return_to,
+                     link_session['user_id'] if link_session else None,link_session['id_hash'] if link_session else None,
+                     provider['version'],now+LOGIN_TTL,client_hash))
+        await self.store.run(reserve)
         try:
             meta,_=await self.metadata(provider)
         except BaseException:
-            self.store.execute('DELETE FROM oidc_transactions WHERE state_hash=?',(state_hash,))
+            await self.store.run(self.store.execute,'DELETE FROM oidc_transactions WHERE state_hash=?',(state_hash,))
             raise
-        callback=self.public_url()+'/auth/oidc/'+provider['id']+'/callback'
+        callback=(await self.store.run(self.public_url))+'/auth/oidc/'+provider['id']+'/callback'
         params={'client_id':provider['client_id'],'redirect_uri':callback,'response_type':'code','scope':provider['scopes'],
                 'state':state,'nonce':nonce,'code_challenge':b64(hashlib.sha256(verifier.encode()).digest()),'code_challenge_method':'S256'}
         if link_session:params.update(prompt='login',max_age='0')
         return meta['authorization_endpoint']+('?' if '?' not in meta['authorization_endpoint'] else '&')+urlencode(params),state_hash,browser
 
     async def sync_identity(self,identifier):
-        identity=self.store.one('SELECT * FROM external_identities WHERE id=?',(identifier,))
-        if not identity or not identity['enabled'] or not identity['upstream_tokens']:return 'OIDC_SYNC_UNAVAILABLE'
-        provider=self.provider(identity['provider_id'])
-        user=iam.user_security(self.store,identity['user_id'])
+        def snapshot():
+            with iam.read_scope(self.store):
+                identity=self.store.one('SELECT * FROM external_identities WHERE id=?',(identifier,))
+                if not identity or not identity['enabled'] or not identity['upstream_tokens']:
+                    return None
+                provider=self.provider(identity['provider_id'])
+                user=iam.user_security(self.store,identity['user_id'])
+                secured=json.loads(self.store.decrypt(identity['upstream_tokens']))
+                return identity,provider,user,secured
+        initial=await self.store.run(snapshot)
+        if initial is None:return 'OIDC_SYNC_UNAVAILABLE'
+        identity,provider,user,secured=initial
         expected_tokens=identity['upstream_tokens']
+
         def still_current():
             current=self.store.one('SELECT * FROM external_identities WHERE id=?',(identifier,))
             configured=self.store.one('SELECT version,enabled FROM oidc_providers WHERE id=?',(provider['id'],))
@@ -515,10 +535,34 @@ class OIDCService:
             return bool(current and current['enabled'] and current['upstream_tokens']==expected_tokens
                         and configured and configured['enabled'] and configured['version']==provider['version']
                         and account and account['active'] and account['epoch']==user['epoch'])
+
+        def transfer_tokens():
+            with self.store.transaction():
+                if not still_current():return None
+                encrypted=self.store.encrypt(json.dumps(secured))
+                changed=self.store.db.execute('UPDATE external_identities SET upstream_tokens=? WHERE id=? AND enabled=1 AND upstream_tokens=?',(encrypted,identifier,expected_tokens)).rowcount
+                if not changed:return None
+                # The winning CAS alone owns this attempt after refresh. Never
+                # infer ownership from a post-await read of a newer login token.
+                self.scheduler.tokens_rotated(identity,provider,expected_tokens,encrypted)
+                return encrypted
+
+        def finish_groups(info):
+            with self.store.transaction():
+                if not still_current():return
+                groups=self.userinfo_groups(provider,info)
+                current=self.store.one('SELECT * FROM external_identities WHERE id=?',(identifier,))
+                self.reconcile_groups(current,groups,provider)
+
+        def reject_current(code):
+            with self.store.transaction():
+                if still_current():
+                    current=self.store.one('SELECT * FROM external_identities WHERE id=?',(identifier,))
+                    self.disable_identity(current,code)
+
         try:
             meta,keys=await self.metadata(provider)
             if not meta.get('userinfo_endpoint'):return 'OIDC_USERINFO_UNAVAILABLE'
-            secured=json.loads(self.store.decrypt(identity['upstream_tokens']))
             if secured['expires_at']<=time.time()+30:
                 if not secured.get('refresh_token'):return 'OIDC_REAUTH_REQUIRED'
                 tokens=await self.exchange(provider,meta,{'grant_type':'refresh_token','refresh_token':secured['refresh_token']})
@@ -529,35 +573,17 @@ class OIDCService:
                 life=tokens.get('expires_in',300)
                 if type(life) not in (int,float) or not math.isfinite(life) or not 1<=life<=30*86400:raise DevError('OIDC_TOKEN_INVALID','刷新有效期无效',401)
                 secured.update(access_token=tokens['access_token'],refresh_token=tokens.get('refresh_token',secured['refresh_token']),expires_at=time.time()+life)
-                encrypted=self.store.encrypt(json.dumps(secured))
-                with self.store.transaction():
-                    if self.provider(provider['id'])['version']!=provider['version'] or iam.user_security(self.store,user['id'])['epoch']!=user['epoch']:return
-                    changed=self.store.db.execute('UPDATE external_identities SET upstream_tokens=? WHERE id=? AND enabled=1 AND upstream_tokens=?',(encrypted,identifier,expected_tokens)).rowcount
-                    if not changed:return  # A parallel login/unlink owns newer credentials.
-                    # Transfer only this attempt's credential generation in the
-                    # SAME transaction as the successful token CAS. A subsequent
-                    # UserInfo failure must retain retry history; a parallel login
-                    # must still invalidate this attempt's completion.
-                    self.scheduler.tokens_rotated(identity,provider,expected_tokens,encrypted)
+                encrypted=await self.store.run(transfer_tokens)
+                if encrypted is None:return
                 expected_tokens=encrypted
+            # Do not use a stale account snapshot after metadata/refresh waits.
+            if not await self.store.run(still_current):return
             info=await self.http_json(provider,'GET',meta['userinfo_endpoint'],headers={'Authorization':'Bearer '+secured['access_token']})
             if info.get('sub')!=identity['subject']:raise DevError('OIDC_SUBJECT_MISMATCH','UserInfo 身份不一致',401)
-            groups=self.userinfo_groups(provider,info)
-            with self.store.transaction():
-                current=self.store.one('SELECT * FROM external_identities WHERE id=?',(identifier,))
-                if (not current or not current['enabled'] or current['upstream_tokens']!=expected_tokens
-                        or self.provider(provider['id'])['version']!=provider['version']
-                        or iam.user_security(self.store,user['id'])['epoch']!=user['epoch']):return
-                self.reconcile_groups(current,groups,provider)
-
+            await self.store.run(finish_groups,info)
         except DevError as exc:
-            # A response for old credentials/configuration must not disable an
-            # identity that was just reauthenticated, relinked or reconfigured.
             if exc.code in {'OIDC_ADMISSION_DENIED','OIDC_SUBJECT_MISMATCH','OIDC_CREDENTIAL_REJECTED'}:
-                with self.store.transaction():
-                    if still_current():
-                        current=self.store.one('SELECT * FROM external_identities WHERE id=?',(identifier,))
-                        self.disable_identity(current,exc.code)
+                await self.store.run(reject_current,exc.code)
             raise
 
     async def reconcile(self):
@@ -565,7 +591,7 @@ class OIDCService:
             await self.scheduler.run()
 
     async def start(self):
-        self.warn_group_compatibility()
+        await self.store.run(self.warn_group_compatibility)
         self.stop_event.clear()
         async def work():
             while not self.stop_event.is_set():
@@ -575,7 +601,7 @@ class OIDCService:
                     # Keep the worker alive without leaking credential-bearing errors.
                     if time.monotonic()>=self.worker_audit_after:
                         self.worker_audit_after=time.monotonic()+3600
-                        self.store.audit('oidc-worker','oidc.worker_error',status='error')
+                        await self.store.run(self.store.audit,'oidc-worker','oidc.worker_error',status='error')
                 try:await asyncio.wait_for(self.stop_event.wait(),30)
                 except asyncio.TimeoutError:pass
         self.worker=asyncio.create_task(work(),name='oidc-entitlements')
@@ -594,15 +620,17 @@ class OIDCService:
             response.headers['Cache-Control']='no-store';return response
 
         @router.get('/api/auth/providers')
-        async def providers():
+        @database_endpoint(store)
+        def providers():
             return {'providers':store.all('SELECT id,label FROM oidc_providers WHERE enabled=1 ORDER BY label')}
 
         @router.get('/api/iam/oidc/providers')
-        async def provider_admin(request:Request):
+        @database_endpoint(store)
+        def provider_admin(request:Request):
             auth.instance(request)
             return {'providers':[public_provider(r) for r in store.all('SELECT * FROM oidc_providers ORDER BY created')]}
 
-        async def save_provider(request,body,identifier=None):
+        def save_provider(request,body,identifier=None):
             p=auth.instance(request,True)
             with store.lock,store.db:
                 store.db.execute('BEGIN IMMEDIATE');p=auth.instance(request,True)
@@ -630,31 +658,41 @@ class OIDCService:
             return public_provider(self.provider(identifier,enabled=False))
 
         @router.post('/api/iam/oidc/providers',status_code=201)
-        async def create_provider(request:Request,body:ProviderInput):return await save_provider(request,body)
+        async def create_provider(request:Request,body:ProviderInput):return await store.run(save_provider,request,body)
 
         @router.put('/api/iam/oidc/providers/{identifier}')
-        async def edit_provider(identifier:str,request:Request,body:ProviderInput):return await save_provider(request,body,identifier)
+        async def edit_provider(identifier:str,request:Request,body:ProviderInput):return await store.run(save_provider,request,body,identifier)
 
         @router.post('/api/iam/oidc/providers/{identifier}/check')
         async def check_provider(identifier:str,request:Request):
-            auth.instance(request,True);provider=self.provider(identifier,enabled=False)
+            def prepare():
+                auth.instance(request,True)
+                return self.provider(identifier,enabled=False)
+            provider=await store.run(prepare)
             meta,keys=await self.metadata(provider,force=True)
-            auth.instance(request,True)
-            return {'issuer':meta['issuer'],'signing_keys':len(keys['keys']),'callback':self.public_url()+'/auth/oidc/'+identifier+'/callback','backchannel_logout':self.public_url()+'/auth/oidc/'+identifier+'/backchannel-logout',**self.group_compatibility(provider,meta)}
+            def result():
+                auth.instance(request,True)
+                if self.provider(identifier,enabled=False)['version']!=provider['version']:
+                    raise DevError('OIDC_CONFIG_CHANGED','身份提供者配置已变化，请重试',409)
+                return {'issuer':meta['issuer'],'signing_keys':len(keys['keys']),'callback':self.public_url()+'/auth/oidc/'+identifier+'/callback','backchannel_logout':self.public_url()+'/auth/oidc/'+identifier+'/backchannel-logout',**self.group_compatibility(provider,meta)}
+            return await store.run(result)
 
         @router.get('/api/iam/oidc/targets')
-        async def mapping_targets(request:Request):
+        @database_endpoint(store)
+        def mapping_targets(request:Request):
             auth.instance(request)
             return {'spaces':store.all("SELECT id,label FROM spaces WHERE active=1 AND kind='team'"),
                     'roles':store.all("SELECT r.id,r.label,r.space_id FROM access_roles r JOIN spaces s ON s.id=r.space_id WHERE s.active=1 AND s.kind='team'")}
 
         @router.get('/api/iam/oidc/providers/{identifier}/mappings')
-        async def mappings(identifier:str,request:Request):
+        @database_endpoint(store)
+        def mappings(identifier:str,request:Request):
             auth.instance(request)
             return {'mappings':store.all('SELECT * FROM group_mappings WHERE provider_id=?',(identifier,))}
 
         @router.post('/api/iam/oidc/providers/{identifier}/mappings',status_code=201)
-        async def create_mapping(identifier:str,request:Request,body:GroupMappingInput):
+        @database_endpoint(store)
+        def create_mapping(identifier:str,request:Request,body:GroupMappingInput):
             p=auth.instance(request,True);self.provider(identifier,enabled=False)
             with store.lock,store.db:
                 store.db.execute('BEGIN IMMEDIATE');auth.instance(request,True)
@@ -667,7 +705,8 @@ class OIDCService:
             return store.one('SELECT * FROM group_mappings WHERE id=?',(mid,))
 
         @router.delete('/api/iam/oidc/mappings/{identifier}')
-        async def delete_mapping(identifier:str,request:Request):
+        @database_endpoint(store)
+        def delete_mapping(identifier:str,request:Request):
             with store.lock,store.db:
                 store.db.execute('BEGIN IMMEDIATE');p=auth.instance(request,True)
                 row=store.one('SELECT * FROM group_mappings WHERE id=?',(identifier,))
@@ -680,30 +719,33 @@ class OIDCService:
 
         @router.post('/api/iam/oidc/reconcile')
         async def synchronize(request:Request):
-            auth.instance(request,True);await self.reconcile();auth.instance(request,True)
+            await store.run(auth.instance,request,True)
+            await self.reconcile()
+            await store.run(auth.instance,request,True)
             return {'ok':True,'note':'Provider outages do not extend entitlement freshness.'}
 
         @router.get('/auth/oidc/{identifier}/start')
         async def login_start(identifier:str,request:Request,return_to:str='/'):
-            self.runtime.oauth.throttle(request)
+            await store.run(self.runtime.oauth.throttle,request)
             async with self.inflight:
-                location,state_hash,browser=await self.begin(self.provider(identifier),return_to,
+                location,state_hash,browser=await self.begin(await store.run(self.provider,identifier),return_to,
                     client_key=request.client.host if request.client else 'unknown')
             response=RedirectResponse(location,status_code=303)
-            response.set_cookie('rd_oidc_'+state_hash[:24],browser,httponly=True,samesite='lax',secure=urlsplit(self.public_url()).scheme=='https',max_age=LOGIN_TTL,path='/auth/oidc/'+identifier+'/callback')
+            response.set_cookie('rd_oidc_'+state_hash[:24],browser,httponly=True,samesite='lax',secure=urlsplit(await store.run(self.public_url)).scheme=='https',max_age=LOGIN_TTL,path='/auth/oidc/'+identifier+'/callback')
             response.headers['Cache-Control']='no-store';return response
 
         @router.post('/api/iam/oidc/{identifier}/link')
         async def link_start(identifier:str,request:Request,body:LinkInput):
-            session=auth.session_write(request)
+            session=await store.run(auth.session_write,request)
             if time.time()-session['authenticated_at']>300:raise DevError('RECENT_LOGIN_REQUIRED','关联身份前请先重新登录当前账号',403)
-            async with self.inflight:location,state_hash,browser=await self.begin(self.provider(identifier),body.return_to,link_session=session)
+            async with self.inflight:location,state_hash,browser=await self.begin(await store.run(self.provider,identifier),body.return_to,link_session=session)
             response=JSONResponse({'redirect':location})
-            response.set_cookie('rd_oidc_'+state_hash[:24],browser,httponly=True,samesite='lax',secure=urlsplit(self.public_url()).scheme=='https',max_age=LOGIN_TTL,path='/auth/oidc/'+identifier+'/callback')
+            response.set_cookie('rd_oidc_'+state_hash[:24],browser,httponly=True,samesite='lax',secure=urlsplit(await store.run(self.public_url)).scheme=='https',max_age=LOGIN_TTL,path='/auth/oidc/'+identifier+'/callback')
             return response
 
         @router.delete('/api/iam/identities/{identifier}')
-        async def unlink(identifier:str,request:Request):
+        @database_endpoint(store)
+        def unlink(identifier:str,request:Request):
             with store.transaction():
                 session=auth.session_write(request)
                 if time.time()-session['authenticated_at']>300:raise DevError('RECENT_LOGIN_REQUIRED','解除关联前请重新登录',403)
@@ -723,19 +765,24 @@ class OIDCService:
             state=params.get('state','');code=params.get('code','')
             if not isinstance(state,str) or not 20<=len(state)<=200:raise DevError('OIDC_STATE_INVALID','登录状态无效',400)
             state_hash=digest(state);cookie_name='rd_oidc_'+state_hash[:24]
-            with store.lock,store.db:
-                store.db.execute('BEGIN IMMEDIATE')
-                txn=store.one('SELECT * FROM oidc_transactions WHERE state_hash=? AND provider_id=? AND expires>? AND used=0',(state_hash,identifier,time.time()))
-                if not txn or not hmac.compare_digest(txn['browser_hash'],digest(request.cookies.get(cookie_name,''))):raise DevError('OIDC_STATE_INVALID','登录状态已过期、已使用或不属于本浏览器',400)
-                if txn['link_user_id'] and digest(request.cookies.get('rd_session',''))!=txn['link_session_hash']:raise DevError('LINK_SESSION_EXPIRED','关联期间账号已切换',401)
-                store.db.execute('UPDATE oidc_transactions SET used=1 WHERE state_hash=?',(state_hash,))
+            def consume():
+                with store.lock,store.db:
+                    store.db.execute('BEGIN IMMEDIATE')
+                    txn=store.one('SELECT * FROM oidc_transactions WHERE state_hash=? AND provider_id=? AND expires>? AND used=0',(state_hash,identifier,time.time()))
+                    if not txn or not hmac.compare_digest(txn['browser_hash'],digest(request.cookies.get(cookie_name,''))):raise DevError('OIDC_STATE_INVALID','登录状态已过期、已使用或不属于本浏览器',400)
+                    if txn['link_user_id'] and digest(request.cookies.get('rd_session',''))!=txn['link_session_hash']:raise DevError('LINK_SESSION_EXPIRED','关联期间账号已切换',401)
+                    store.db.execute('UPDATE oidc_transactions SET used=1 WHERE state_hash=?',(state_hash,))
+                return txn
+            txn=await store.run(consume)
             if params.get('error') or not 1<=len(code)<=4096:raise DevError('OIDC_LOGIN_DENIED','身份提供者未完成登录',400)
             async with self.inflight:
-                provider=self.provider(identifier)
+                provider=await store.run(self.provider,identifier)
                 if provider['version']!=txn['provider_version']:raise DevError('OIDC_CONFIG_CHANGED','登录期间配置变化',409)
                 if 'iss' in params and params['iss']!=provider['issuer']:raise DevError('OIDC_ISSUER_MISMATCH','回调身份来源不匹配',401)
                 meta,keys=await self.metadata(provider)
-                tokens=await self.exchange(provider,meta,{'grant_type':'authorization_code','code':code,'redirect_uri':self.public_url()+'/auth/oidc/'+identifier+'/callback','code_verifier':store.decrypt(txn['verifier'])})
+                def exchange_form():
+                    return {'grant_type':'authorization_code','code':code,'redirect_uri':self.public_url()+'/auth/oidc/'+identifier+'/callback','code_verifier':store.decrypt(txn['verifier'])}
+                tokens=await self.exchange(provider,meta,await store.run(exchange_form))
                 if tokens.get('token_type','').lower()!='bearer' or not isinstance(tokens.get('access_token'),str):raise DevError('OIDC_TOKEN_INVALID','没有收到有效访问令牌',401)
                 claims=await self.verify_claims(tokens.get('id_token'),provider,keys,nonce=txn['nonce'],access_token=tokens['access_token'])
                 if txn['link_user_id'] and (type(claims.get('auth_time')) not in (int,float) or claims['auth_time']<txn['expires']-LOGIN_TTL-SKEW):raise DevError('OIDC_RECENT_LOGIN_REQUIRED','关联身份需要身份提供者近期认证',401)
@@ -743,34 +790,42 @@ class OIDCService:
                 if meta.get('userinfo_endpoint'):
                     info=await self.http_json(provider,'GET',meta['userinfo_endpoint'],headers={'Authorization':'Bearer '+tokens['access_token']})
                     if info.get('sub')!=claims['sub']:raise DevError('OIDC_SUBJECT_MISMATCH','UserInfo 与 ID Token 身份不同',401)
-                groups=self.userinfo_groups(provider,info)
-                value=self.provision(provider,claims,groups,txn,tokens)
-            old_hash=digest(request.cookies.get('rd_session',''))
-            store.execute('DELETE FROM sessions WHERE id_hash=?',(old_hash,))
-            response=cookie(RedirectResponse(txn['return_to'],status_code=303),value['cookie'])
+                def finish_login():
+                    with store.transaction():
+                        groups=self.userinfo_groups(provider,info)
+                        value=self.provision(provider,claims,groups,txn,tokens)
+                        old_hash=digest(request.cookies.get('rd_session',''))
+                        store.db.execute('DELETE FROM sessions WHERE id_hash=?',(old_hash,))
+                        return cookie(RedirectResponse(txn['return_to'],status_code=303),value['cookie'])
+                response=await store.run(finish_login)
             response.delete_cookie(cookie_name,path='/auth/oidc/'+identifier+'/callback')
             return response
 
         @router.post('/auth/oidc/{identifier}/backchannel-logout')
         async def backchannel(identifier:str,request:Request):
-            self.runtime.oauth.throttle(request)
+            await store.run(self.runtime.oauth.throttle,request)
             raw=await request.body()
             if len(raw)>65536 or request.headers.get('content-type','').split(';')[0]!='application/x-www-form-urlencoded':raise DevError('OIDC_LOGOUT_INVALID','无效注销通知',400)
             from urllib.parse import parse_qs
             try:form=parse_qs(raw.decode('utf-8'),keep_blank_values=True,max_num_fields=2)
             except (ValueError,UnicodeError) as exc:raise DevError('OIDC_LOGOUT_INVALID','无效注销参数',400) from exc
             if set(form)!={'logout_token'} or len(form['logout_token'])!=1:raise DevError('OIDC_LOGOUT_INVALID','无效注销参数',400)
-            provider=self.provider(identifier);_,keys=await self.metadata(provider)
+            provider=await store.run(self.provider,identifier)
+            _,keys=await self.metadata(provider)
             claims=await self.verify_claims(form['logout_token'][0],provider,keys,logout=True)
-            with store.lock,store.db:
-                store.db.execute('BEGIN IMMEDIATE')
-                store.db.execute('DELETE FROM oidc_logout_replays WHERE expires<?',(time.time(),))
-                if store.one('SELECT 1 AS ok FROM oidc_logout_replays WHERE provider_id=? AND jti=?',(identifier,claims['jti'])):raise DevError('OIDC_LOGOUT_REPLAY','注销通知已处理',400)
-                store.db.execute('INSERT INTO oidc_logout_replays VALUES(?,?,?)',(identifier,claims['jti'],time.time()+LOGIN_TTL))
-                where='i.provider_id=?';args=[identifier]
-                if claims.get('sub'):where+=' AND i.subject=?';args.append(claims['sub'])
-                if claims.get('sid'):where+=' AND ss.provider_sid=?';args.append(claims['sid'])
-                ids=store.all('SELECT ss.session_hash FROM session_security ss JOIN external_identities i ON i.id=ss.identity_id WHERE '+where,args)
-                for row in ids:store.db.execute('DELETE FROM sessions WHERE id_hash=?',(row['session_hash'],))
-                store.audit('oidc:'+identifier,'oidc.backchannel_logout',status='ok',detail={'sessions':len(ids)},commit=False)
+            def finish_logout():
+                with store.lock,store.db:
+                    store.db.execute('BEGIN IMMEDIATE')
+                    if self.provider(identifier)['version']!=provider['version']:
+                        raise DevError('OIDC_CONFIG_CHANGED','身份提供者配置已变化，请重试',409)
+                    store.db.execute('DELETE FROM oidc_logout_replays WHERE expires<?',(time.time(),))
+                    if store.one('SELECT 1 AS ok FROM oidc_logout_replays WHERE provider_id=? AND jti=?',(identifier,claims['jti'])):raise DevError('OIDC_LOGOUT_REPLAY','注销通知已处理',400)
+                    store.db.execute('INSERT INTO oidc_logout_replays VALUES(?,?,?)',(identifier,claims['jti'],time.time()+LOGIN_TTL))
+                    where='i.provider_id=?';args=[identifier]
+                    if claims.get('sub'):where+=' AND i.subject=?';args.append(claims['sub'])
+                    if claims.get('sid'):where+=' AND ss.provider_sid=?';args.append(claims['sid'])
+                    ids=store.all('SELECT ss.session_hash FROM session_security ss JOIN external_identities i ON i.id=ss.identity_id WHERE '+where,args)
+                    for row in ids:store.db.execute('DELETE FROM sessions WHERE id_hash=?',(row['session_hash'],))
+                    store.audit('oidc:'+identifier,'oidc.backchannel_logout',status='ok',detail={'sessions':len(ids)},commit=False)
+            await store.run(finish_logout)
             return JSONResponse({'ok':True},headers={'Cache-Control':'no-store'})

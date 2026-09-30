@@ -4,6 +4,7 @@ import copy,re
 from pathlib import Path
 from urllib.parse import urlsplit
 from shared.util import valid_json_value
+from shared.file_sources import DEFAULT_MAX_IMPORT_BYTES, MAX_IMPORT_BYTES, normalize_file_hosts
 
 
 def origin(value):
@@ -35,14 +36,14 @@ def validate_integrations(raw):
     if raw is None:raw={}
     if not isinstance(raw,dict) or not valid_json_value(raw):raise ValueError('integrations 必须是 JSON 对象')
     c=copy.deepcopy(raw)
-    if set(c)-{'max_import_bytes','file_hosts','worktree_directory','language_servers','browser','local_control'}:
+    if set(c)-{'max_import_bytes','file_hosts','extra_file_hosts','worktree_directory','language_servers','browser','local_control'}:
         raise ValueError('integrations 包含未知配置项')
-    limit=c.setdefault('max_import_bytes',128*1024*1024)
-    if type(limit) is not int or not 1<=limit<=512*1024*1024:raise ValueError('max_import_bytes 必须为 1–512 MiB 内的字节数')
-    hosts=c.setdefault('file_hosts',['files.oaiusercontent.com','cdn.openai.com'])
-    strings(hosts,'file_hosts',20)
-    if any(not re.fullmatch(r'[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?',h) or '..' in h or '.' not in h for h in hosts):
-        raise ValueError('file_hosts 只接受精确小写 ASCII 主机名，不能使用通配符')
+    limit=c.setdefault('max_import_bytes',DEFAULT_MAX_IMPORT_BYTES)
+    if type(limit) is not int or not 1<=limit<=MAX_IMPORT_BYTES:raise ValueError('max_import_bytes 必须为 1–512 MiB 内的字节数')
+    # Do not persist today's defaults as an explicit owner restriction.
+    # Absent lists must continue to follow the versioned registry on upgrades.
+    for key in ('file_hosts','extra_file_hosts'):
+        if key in c:c[key]=normalize_file_hosts(c[key],key)
     directory=c.setdefault('worktree_directory','')
     if not isinstance(directory,str) or '\x00' in directory or directory and not Path(directory).expanduser().is_absolute():
         raise ValueError('worktree_directory 必须为空或绝对路径')

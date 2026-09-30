@@ -298,8 +298,9 @@ def acceptance(output):
                 # or X-CodePier-Space header to make downstream Tokens work.
                 with httpx.Client(base_url=hub_url, timeout=30) as mcp:
                     initialize_mcp(mcp, tokens['access_token'])
-                    def rpc(name, token_value=tokens['access_token']):
-                        return mcp_request(mcp, token_value, 'tools/call', {'name': name, 'arguments': {}})
+                    def rpc(name, token_value=None, arguments=None):
+                        return mcp_request(mcp, token_value or tokens['access_token'], 'tools/call',
+                                           {'name': name, 'arguments': arguments or {}})
                     assert required(rpc('get_profile'))['result']['structuredContent']['id'] == profiles[0]['id']
                     passed('separate_codepier_oauth_issuer_and_explicit_dynamic_role_consent')
                     phase = 'dynamic-resource-and-refresh'
@@ -312,7 +313,8 @@ def acceptance(output):
                         project_id = 'fixture-'+uuid.uuid4().hex
                         db.execute('INSERT INTO projects(id,alias,alias_key,device_id,root,space_id,owner_user_id,created) VALUES(?,?,?,?,?,?,?,?)',
                                    (project_id,'new-project','new-project',device,str(folder/'unmapped'),sid,identities[0]['id'],time.time()))
-                    assert project_id in {p['id'] for p in required(rpc('projects_list'))['result']['structuredContent']['projects']}
+                    projects = required(rpc('workspace', arguments={'operation':'list'}))['result']['structuredContent']['projects']
+                    assert project_id in {p['id'] for p in projects}
                     fresh = required(alice.post('/oauth/token', data={'grant_type':'refresh_token','refresh_token':tokens['refresh_token'],
                         'client_id':registration['client_id']}))
                     assert fresh['refresh_token'] != tokens['refresh_token']
@@ -324,8 +326,8 @@ def acceptance(output):
                         # Advance only the fixture's reconciliation schedule, not its policy/results.
                         db.execute('UPDATE external_identities SET checked_at=0 WHERE user_id=?',(identities[0]['id'],))
                     required(owner.post('/api/iam/oidc/reconcile'))
-                    assert rpc('projects_list').status_code == 403
-                    assert rpc('projects_list', fresh['access_token']).status_code == 403
+                    assert rpc('workspace', arguments={'operation':'list'}).status_code == 403
+                    assert rpc('workspace', fresh['access_token'], {'operation':'list'}).status_code == 403
                     assert all(s['id'] != sid for s in required(alice.get('/api/iam/me'))['spaces'])
                     assert any(s['id'] == sid for s in required(human_clients[1].get('/api/iam/me'))['spaces'])
                     passed('actual_idp_group_removal_revokes_team_and_existing_grant_only_for_target_user')

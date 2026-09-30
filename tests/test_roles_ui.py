@@ -26,7 +26,7 @@ def role_browser(request):
 def role_page(role_browser,request,stack):
     page=role_browser.new_page(viewport=request.param)
     errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
-    page.goto(stack.url+'/#roles');page.fill('#password',stack.password);page.click('#login-form button')
+    page.goto(stack.url+'/#roles');page.fill('#username','admin');page.fill('#password',stack.password);page.click('#login-form button')
     expect(page.locator('#roles-page')).to_be_visible()
     yield page,errors
     page.close()

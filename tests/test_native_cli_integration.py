@@ -1,3 +1,4 @@
+from tests.evidence import evidence_path
 from tests.support_legacy_terminal import mount_archived_terminal
 """Native protocol real Hub/Agent and real Chromium; only disposable fixture processes."""
 import base64
@@ -31,7 +32,8 @@ def cli_stack(tmp_path_factory):
         yield s
         # Workers deliberately outlive Agent. Explicitly stop only this fixture's owned workers.
         with closing(database(s.directory/'agent-state'/'native-cli')) as db,db:
-            for row in db.execute("SELECT id FROM sessions WHERE status IN ('starting','running')"):
+            db.execute('BEGIN IMMEDIATE')
+            for row in db.execute("SELECT id FROM sessions WHERE status IN ('starting','running')").fetchall():
                 db.execute('INSERT INTO commands(id,session,kind,payload,created) VALUES (?,?,?,?,?)',(uuid.uuid4().hex,row['id'],'stop','{}',time.time()))
         def stopped():
             with closing(database(s.directory/'agent-state'/'native-cli')) as db:
@@ -123,7 +125,7 @@ def test_real_chromium_terminal_mobile_detach_and_escape_policy(cli_stack):
         browser=p.chromium.launch();page=browser.new_page(viewport={'width':1400,'height':1000})
         errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
         try:
-            page.goto(s.url+'/#projects');page.fill('#password',s.password);page.click('#login-form button')
+            page.goto(s.url+'/#projects');page.fill('#username', 'admin');page.fill('#password',s.password);page.click('#login-form button')
             expect(page.locator('[data-native-launch="codex"]').first).to_be_visible()
             page.locator('[data-native-launch="codex"][data-project="'+s.project['id']+'"]').click()
             mount_archived_terminal(page)
@@ -143,7 +145,7 @@ def test_real_chromium_terminal_mobile_detach_and_escape_policy(cli_stack):
             page.click('#native-detach');wait_for(lambda:len(read(s,selected))>before+30)
             page.set_viewport_size({'width':390,'height':844});expect(page.locator('#native-keys')).to_be_visible()
             assert page.evaluate('document.documentElement.scrollWidth<=window.innerWidth+2')
-            page.screenshot(path=str(Path('docs/evidence/chat-ui-20260915/mobile-terminal.png')))
+            page.screenshot(path=evidence_path(str(Path('docs/evidence/chat-ui-20260915/mobile-terminal.png'))))
             page.reload();expect(page.locator('#chat-compose')).to_be_visible();mount_archived_terminal(page);expect(page.locator('#native-list .native-session').first).to_be_visible(timeout=15000)
             assert errors==[]
         finally:browser.close()
@@ -155,7 +157,7 @@ def test_retired_terminal_hash_opens_chat_without_terminal_assets(cli_stack):
         browser=pw.chromium.launch();page=browser.new_page();assets=[]
         page.on('request',lambda request:assets.append(request.url))
         try:
-            page.goto(s.url+'/#terminal');page.fill('#password',s.password);page.click('#login-form button')
+            page.goto(s.url+'/#terminal');page.fill('#username', 'admin');page.fill('#password',s.password);page.click('#login-form button')
             expect(page.locator('#chat-root')).to_be_visible()
             assert page.evaluate('location.hash')=='#native'
             page.evaluate("navigate('terminal')")

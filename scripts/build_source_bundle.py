@@ -10,6 +10,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import stat
 import tempfile
@@ -17,18 +18,54 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 DIRECTORIES = {'agent','hub','shared','web','scripts','deploy','skills','tests','docs','.github'}
-ROOT_FILES = {'codepier','codepier.ps1','install.sh','.dockerignore','.gitignore','.env.example','Dockerfile','compose.yml','LICENSE',
-              'README.md','CHANGELOG.md','LOCAL_RELEASE.json','RELEASE.json',
-              'SECURITY.md','CONTRIBUTING.md','.gitattributes','ruff.toml',
-              'requirements.txt','requirements-agent.txt','requirements-bridge.txt',
-              'requirements-dev.txt','requirements-compat.txt','requirements-tools.txt'}
+ROOT_FILES = {
+    '.dockerignore',
+    '.env.example',
+    '.gitattributes',
+    '.gitignore',
+    '.prettierrc.json',
+    'CHANGELOG.md',
+    'CONTRIBUTING.md',
+    'Dockerfile',
+    'LICENSE',
+    'LOCAL_RELEASE.json',
+    'README.md',
+    'RELEASE.json',
+    'SECURITY.md',
+    'codepier',
+    'codepier.ps1',
+    'compose.yml',
+    'install.sh',
+    'pyproject.toml',
+    'requirements-agent.in',
+    'requirements-agent.txt',
+    'requirements-bridge.in',
+    'requirements-bridge.txt',
+    'requirements-compat.in',
+    'requirements-compat.txt',
+    'requirements-dev.in',
+    'requirements-dev.txt',
+    'requirements-tools.in',
+    'requirements-tools.txt',
+    'requirements.in',
+    'requirements.txt',
+    'ruff.toml',
+}
+# Development-only root inputs rejected by the installed 1.13 updater.
+# Keep this explicit: newly added roots must fail the compatibility gate.
+PANEL_UPDATE_EXCLUDES = frozenset({
+    '.prettierrc.json', 'pyproject.toml', 'requirements.in',
+    'requirements-agent.in', 'requirements-bridge.in', 'requirements-compat.in',
+    'requirements-dev.in', 'requirements-tools.in',
+})
+
 EXTENSIONS = {'.py','.js','.mjs','.cjs','.ts','.tsx','.html','.css','.json','.toml','.yaml','.yml',
               '.md','.txt','.sh','.ps1','.cmd','.bat','.svg','.png','.jpg','.jpeg','.webp','.ico',
               '.xml','.service','.plist','.example'}
-EXCLUDED_NAMES = {'.codepier-updater','__pycache__','node_modules','.git','.pytest_cache','.venv','.venv-compat',
+EXCLUDED_NAMES = {'.rekey','.codepier-updater','__pycache__','node_modules','.git','.pytest_cache','.venv','.venv-compat',
                   'data','private','agent-state','hub-data','uploads','backups','checkpoints','.DS_Store',
                   '.work','dist','.ruff_cache','.mypy_cache','.idea','.vscode'}
-PRIVATE_NAMES = {'auth.json','config.json','pairing.json','master.key','.env','credentials.json'}
+PRIVATE_NAMES = {'master.keys.json','next-keyring.json','rekey.json','auth.json','config.json','pairing.json','master.key','.env','credentials.json'}
 INTEGRATION_EVIDENCE_FILES = {'verification.json','feature-matrix.json','source-changes.json',
     'full-regression.xml','targeted.xml','real-lsp.json','browser-final.xml','apps-final.xml',
     'distribution-check.json'}
@@ -39,38 +76,129 @@ EVIDENCE_FILES = {'full-regression-final.xml','focused-verified.xml','worker-rea
                   'desktop-terminal.png','mobile-native-hardened.png','artifact-bundle.json'}
 
 
-REQUIRED_FILES = {'hub/access_profiles.py','shared/access_profile_contracts.py','web/access-profiles.js','web/access-profiles.css','docs/ACCESS_PROFILES.md','hub/panel_update.py','shared/panel_maintenance.py','web/panel-update.js','web/panel-update.css','scripts/panel_updater.py','scripts/panel_update_runtime.py','scripts/panel_update_source.py','codepier','codepier.ps1','web/brand.js','shared/brand_migration.py','shared/brand_browser.py','agent/brand_upgrade.py','scripts/migrate_hub.py','scripts/migrate_hub_data.py','scripts/migrate_hub_networks.py','scripts/migrate_hub_proxy.py','scripts/rename_checkout.py','install.sh','deploy/install-hub.sh','scripts/install_agent.py','scripts/agent_lifecycle.py',
-                'deploy/install-from-hub.sh','deploy/install-from-hub.ps1','agent/native_worker.py','agent/native_windows.py','agent/native_pi_bridge.py',
-                'agent/runner.py','hub/app.py','hub/native_cli.py','shared/native_cli.py',
-                'agent/chat_worker.py','agent/chat_catalog.py','agent/claude_cli.py','agent/claude_protocol.py',
-                'web/index.html','web/chat.js','web/chat.css','web/chat-chrome.js',
-                'web/chat-history.js','web/chat-catalog.js',
-                'web/chat-markdown.js','web/chat-panels.js','web/native-hash.js',
-                'requirements-agent.txt',
-                'agent/integrations.py','agent/incoming_artifacts.py','agent/lsp_navigation.py',
-                'agent/background_browser.py','agent/integration_local.py','agent/source_versions.py',
-                'agent/workspaces.py','agent/integration_state.py','agent/integration_control.py',
-                'agent/setup_integrations.py','agent/install_browser_bridge.py',
-                'agent/codepier_browser_host.py','agent/codepier_control.py',
-                'hub/integrations.py','hub/mcp_apps.py','hub/workspace_status.py','shared/mcp_protocol.py',
-                'web/mcp-apps/app.js','web/mcp-apps/app.css','web/mcp-apps/dashboard.js',
-                'web/mcp-apps/review.js','web/mcp-apps/workspace-tools.js','web/mcp-apps/ui.js',
-                'docs/MCP-WORKSPACE-DASHBOARD-20260917.md',
-                'shared/integration_contracts.py','web/integrations.js','web/integrations.css',
-                'web/integration-ui.js','web/integration-flow.css','docs/DEVTOOLS-FLOW-20260918.md',
-                'web/browser-extension.zip','web/integration-assets.json','web/integration-guide.md',
-                'web/mcp-apps/workspace-v1.html','web/mcp-apps/changes-v1.html',
-                'web/mcp-apps/THIRD_PARTY_NOTICES.txt','docs/INTEGRATIONS-20260917.md'}
-
-REQUIRED_FILES |= {'hub/iam.py', 'hub/iam_schema.py', 'hub/iam_api.py', 'hub/oidc.py',
-                   'web/identity.js', 'web/identity.css', 'docs/MULTIUSER_OIDC.md'}
+REQUIRED_FILES = {
+    'hub/principal.py', 'hub/tool_router.py', 'hub/gateway/service.py', 'hub/iam.py', 'hub/oidc.py',
+    'hub/access_profiles.py','shared/access_profile_contracts.py','web/access-profiles.js',
+    'web/access-profiles.css','docs/ACCESS_PROFILES.md','web/identity.js','web/mcp-gateway.js',
+    '.prettierrc.json',
+    'agent/background_browser.py',
+    'agent/brand_upgrade.py',
+    'agent/chat_catalog.py',
+    'agent/chat_worker.py',
+    'agent/claude_cli.py',
+    'agent/claude_protocol.py',
+    'agent/codepier_browser_host.py',
+    'agent/codepier_control.py',
+    'agent/incoming_artifacts.py',
+    'agent/install_browser_bridge.py',
+    'agent/integration_control.py',
+    'agent/integration_local.py',
+    'agent/integration_state.py',
+    'agent/integrations.py',
+    'agent/lsp_navigation.py',
+    'agent/native_pi_bridge.py',
+    'agent/native_windows.py',
+    'agent/native_worker.py',
+    'agent/runner.py',
+    'agent/setup_integrations.py',
+    'agent/source_versions.py',
+    'agent/workspaces.py',
+    'codepier',
+    'codepier.ps1',
+    'deploy/install-from-hub.ps1',
+    'deploy/install-from-hub.sh',
+    'deploy/install-hub.sh',
+    'docs/DEVTOOLS-FLOW-20260918.md',
+    'docs/INTEGRATIONS-20260917.md',
+    'docs/MCP-WORKSPACE-DASHBOARD-20260917.md',
+    'hub/app.py',
+    'hub/call_log.py',
+    'hub/integrations.py',
+    'hub/mcp_apps.py',
+    'hub/native_cli.py',
+    'hub/panel_update.py',
+    'hub/workspace_status.py',
+    'install.sh',
+    'pyproject.toml',
+    'requirements-agent.txt',
+    'scripts/agent_lifecycle.py',
+    'scripts/install_agent.py',
+    'scripts/migrate_hub.py',
+    'scripts/migrate_hub_data.py',
+    'scripts/migrate_hub_networks.py',
+    'scripts/migrate_hub_proxy.py',
+    'scripts/panel_update_runtime.py',
+    'scripts/panel_update_source.py',
+    'scripts/panel_updater.py',
+    'scripts/rename_checkout.py',
+    'shared/audit_redaction.py',
+    'shared/brand_browser.py',
+    'shared/brand_migration.py',
+    'shared/integration_contracts.py',
+    'shared/mcp_protocol.py',
+    'shared/native_cli.py',
+    'shared/panel_maintenance.py',
+    'web/assets-manifest.json',
+    'web/brand.js',
+    'web/call-log.js',
+    'web/call-log.css',
+    'web/browser-extension.zip',
+    'web/chat-catalog.js',
+    'web/chat-chrome.js',
+    'web/chat-history.js',
+    'web/chat-markdown.js',
+    'web/chat-panels.js',
+    'web/chat.css',
+    'web/chat.js',
+    'web/core/bundle.js',
+    'web/core/index.mjs',
+    'web/index.html',
+    'web/index.source.html',
+    'web/integration-assets.json',
+    'web/integration-flow.css',
+    'web/integration-guide.md',
+    'web/integration-ui.js',
+    'web/integrations.css',
+    'web/integrations.js',
+    'web/mcp-apps/THIRD_PARTY_NOTICES.txt',
+    'web/mcp-apps/app.css',
+    'web/mcp-apps/app.js',
+    'web/mcp-apps/changes-v1.html',
+    'web/mcp-apps/dashboard.js',
+    'web/mcp-apps/review.js',
+    'web/mcp-apps/ui.js',
+    'web/mcp-apps/workspace-tools.js',
+    'web/mcp-apps/workspace-v1.html',
+    'web/native-hash.js',
+    'web/panel-update.css',
+    'web/panel-update.js',
+}
 
 PUBLIC_DOCS = {
-    'docs/MULTIUSER_OIDC.md', 'docs/DYNAMIC_ROLES.md',
-    'docs/ACCESS_PROFILES.md',
-    'docs/PANEL_UPDATE.md', 'docs/CLAUDE_CLI.md',
-    'docs/INTEGRATIONS-20260917.md', 'docs/MCP-WORKSPACE-DASHBOARD-20260917.md',
-    'docs/DEVTOOLS-FLOW-20260918.md', 'docs/RELEASING.md', 'docs/VPS.md', 'docs/ARCHITECTURE.md', 'docs/LONG_OPERATIONS.md',
+    'docs/MCP_GATEWAY.md', 'docs/MULTIUSER_OIDC.md', 'docs/DYNAMIC_ROLES.md', 'docs/ACCESS_PROFILES.md', 'docs/UPSTREAM_INTEGRATION.md',
+    'docs/FILE_IMPORT.md',
+    'docs/CORE_TOOLS.md',
+    'docs/AGENT_INSTALL.md',
+    'docs/AGENT_LIFECYCLE.md',
+    'docs/ARCHITECTURE.md',
+    'docs/CHATGPT.md',
+    'docs/CALL_LOG.md',
+    'docs/CLAUDE_CLI.md',
+    'docs/CLI-GLOBAL-FLOW-20260918.md',
+    'docs/CLI_SESSIONS.md',
+    'docs/CODEPIER-MIGRATION.md',
+    'docs/COMPUTER_USE.md',
+    'docs/DEVELOPMENT.md',
+    'docs/DEVTOOLS-FLOW-20260918.md',
+    'docs/FAQ.md',
+    'docs/INTEGRATIONS-20260917.md',
+    'docs/LONG_OPERATIONS.md',
+    'docs/MCP-WORKSPACE-DASHBOARD-20260917.md',
+    'docs/PANEL_UPDATE.md',
+    'docs/RELEASING.md',
+    'docs/SECURITY.md',
+    'docs/START-HERE.md',
+    'docs/VPS.md',
 }
 
 
@@ -126,7 +254,9 @@ def include(relative, *, public=False):
     return relative.suffix.lower() in EXTENSIONS or relative.name in {'LICENSE','Dockerfile','Caddyfile'}
 
 
-def build(destination, *, public=False):
+def build(destination, *, public=False, panel_update=False):
+    if panel_update and not public:
+        raise ValueError("Panel update bundles require the public profile")
     destination = destination.resolve()
     if ROOT not in destination.parents or destination.suffix.lower() != '.zip' or destination.relative_to(ROOT).parts[0] not in {'dist', '.work'}:
         raise ValueError('Bundle destination must be a ZIP inside dist/ or .work/, never a runtime source asset')
@@ -151,7 +281,7 @@ def build(destination, *, public=False):
         for name in sorted(names):
             source = current/name
             relative = source.relative_to(ROOT)
-            if not include(relative, public=public):
+            if not include(relative, public=public) or (panel_update and relative.as_posix() in PANEL_UPDATE_EXCLUDES):
                 continue
             before = source.lstat()
             if not stat.S_ISREG(before.st_mode) or source.is_symlink():
@@ -171,6 +301,8 @@ def build(destination, *, public=False):
                 raise RuntimeError('Source bundle exceeds 128 MiB uncompressed')
             files.append((relative.as_posix(),raw,before.st_mode & 0o777))
     required = REQUIRED_FILES - ({'LOCAL_RELEASE.json'} if public else set())
+    if panel_update:
+        required -= PANEL_UPDATE_EXCLUDES
     missing = required - {name for name,_,_ in files}
     if missing:
         raise RuntimeError('Bundle is missing runtime files: '+', '.join(sorted(missing)))
@@ -200,19 +332,34 @@ def build(destination, *, public=False):
         Path(temporary).unlink(missing_ok=True)
     result={'path':str(destination.relative_to(ROOT)),'bytes':destination.stat().st_size,
             'sha256':digest(destination.read_bytes()),'files':len(files)+1,'source_bytes':total,
-            'verified':True,'source_only':True,'public_profile':public,'excluded':'credentials, runtime DBs/state, environments, caches, old operation logs, font files, previous archives',
+            'verified':True,'source_only':True,'public_profile':public,'panel_update_profile':panel_update,'excluded':'credentials, runtime DBs/state, environments, caches, old operation logs, font files, previous archives',
             'skipped_selected_files':skipped,'inventory':inventory}
     metadata=destination.with_suffix('.manifest.json')
     metadata.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
     return {key:value for key,value in result.items() if key!='inventory'}
 
 
+def source_version():
+    import ast
+    tree = ast.parse((ROOT/'shared/util.py').read_text(encoding='utf-8'))
+    values = [ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign)
+              and any(isinstance(target, ast.Name) and target.id == 'VERSION' for target in node.targets)]
+    if len(values) != 1 or not isinstance(values[0], str) or not re.fullmatch(r'\d+\.\d+\.\d+', values[0]):
+        raise ValueError('Invalid source VERSION')
+    return values[0]
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--output',type=Path,default=ROOT/'dist/codepier-1.9.1-source.zip')
+    parser.add_argument('--output',type=Path)
+    parser.add_argument('--panel-update',action='store_true',help='Build the update archive compatible with installed 1.13 updaters; requires --public')
     parser.add_argument('--public',action='store_true',help='Omit local release records and historical evidence; use this profile for GitHub')
     args=parser.parse_args()
-    print(json.dumps(build(args.output,public=args.public),ensure_ascii=False,indent=2))
+    if args.panel_update and not args.public:
+        parser.error('--panel-update requires --public')
+    suffix = '-source.zip' if args.panel_update else '-source-full.zip'
+    destination = args.output or ROOT/'dist'/('codepier-'+source_version()+suffix)
+    print(json.dumps(build(destination,public=args.public,panel_update=args.panel_update),ensure_ascii=False,indent=2))
 
 
 if __name__=='__main__':

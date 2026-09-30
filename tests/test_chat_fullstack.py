@@ -26,7 +26,8 @@ def chat_stack(tmp_path_factory):
         atomic_json(s.config_path,s.config);s.start_agent()
         yield s
         with closing(database(s.directory/'agent-state/native-cli')) as db,db:
-            for row in db.execute("SELECT id FROM sessions WHERE status IN ('starting','running')"):
+            db.execute('BEGIN IMMEDIATE')
+            for row in db.execute("SELECT id FROM sessions WHERE status IN ('starting','running')").fetchall():
                 db.execute('INSERT INTO commands(id,session,kind,payload,created) VALUES (?,?,?,?,?)',(uuid.uuid4().hex,row['id'],'stop','{}',time.time()))
         def done():
             with closing(database(s.directory/'agent-state/native-cli')) as db:
@@ -53,8 +54,9 @@ def test_full_panel_direct_chat_actual_sse_history_and_responsive_layout(chat_st
             assert not any('/api/native/start' in r or '/api/native/input' in r for r in requests)
             page.press('#chat-compose','Enter')
             expect(page.locator('.chat-message-assistant')).to_contain_text('hello',timeout=15000)
-            expect(page.locator('.chat-process')).to_be_visible()
-            page.locator('.chat-process > summary').first.click()
+            process=page.locator('.chat-process').filter(has=page.locator('.chat-message-tool'))
+            expect(process).to_be_visible()
+            process.locator(':scope > summary').click()
             expect(page.locator('.chat-message-tool')).to_be_visible()
             expect(page.locator('#chat-compose')).to_have_value('')
             from urllib.parse import urlsplit, parse_qs

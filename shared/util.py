@@ -6,7 +6,9 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
-VERSION = "1.13.0"
+from shared.audit_redaction import redact_command, redact_text
+
+VERSION = "1.14.3"
 
 
 class DevError(Exception):
@@ -117,8 +119,13 @@ def atomic_json(path: Path, data: dict) -> None:
 def safe_summary(value, limit: int = 500):
     """Do not copy file contents, credentials or command output into audit inputs."""
     if isinstance(value, dict):
+        # Scrub the complete command before truncating, without changing the
+        # request that will be executed. Inline environment values stay private.
+        if isinstance(value.get("command"), str):
+            value = {**value, "command": redact_command(value["command"])}
         if 'download_url' in value and 'file_id' in value:
-            return {'native_file': '<private file reference>', 'size': value.get('size')}
+            from shared.file_sources import source_metadata
+            return {'native_file': '<private file reference>', 'size': value.get('size'), **source_metadata(value['download_url'])}
         if isinstance(value.get('action'), str) and value['action'] in {'fill','key','navigate','select'}:
             return {k: ('<private input>' if k in {'value','url'} else safe_summary(v,limit)) for k,v in value.items()}
         if isinstance(value.get("action"), dict) and value["action"].get("type") in {"type_text", "set_value", "select_text", "press_key", "perform_secondary_action", "click", "drag", "scroll"}:
@@ -127,10 +134,13 @@ def safe_summary(value, limit: int = 500):
         if "env" in value and isinstance(value["env"], dict):
             return {k: ({name: "<redacted>" for name in v} if k == "env" else safe_summary({k: v}, limit)[k]) for k, v in value.items()}
         return {k: (f"<{len(str(v))} chars>" if any(s in k.lower() for s in
-                     ("content", "secret", "token", "password", "old_text", "new_text", "verifier"))
+                     ("content", "secret", "token", "password", "old_text", "new_text", "verifier",
+                      "passwd", "passphrase", "api_key", "apikey", "api-key", "authorization",
+                      "cookie", "credential", "private_key", "headers"))
                     else safe_summary(v, limit)) for k, v in value.items()}
     if isinstance(value, list):
         return [safe_summary(v, limit) for v in value[:30]]
     if isinstance(value, str):
+        value = redact_text(value)
         return value[:limit] + ("…" if len(value) > limit else "")
     return value

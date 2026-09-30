@@ -25,6 +25,7 @@ def profiles_page(profiles_browser, request, stack):
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.goto(stack.url + '/#profiles')
+    page.fill('#username', 'admin')
     page.fill('#password', stack.password)
     page.click('#login-form button')
     expect(page.locator('#profiles-page')).to_be_visible()
