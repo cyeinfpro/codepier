@@ -79,6 +79,8 @@ curl --fail http://127.0.0.1:8765/healthz
 
 也可以从 [Releases](https://github.com/cyeinfpro/codepier/releases) 下载源码包。手动安装和开发建议使用 `codepier-VERSION-source-full.zip`；`source.zip` 用于兼容面板更新器。环境变量见 [`.env.example`](.env.example)。
 
+不在服务器上构建镜像的部署方式（例如 Kubernetes/k3s）可直接拉取 CI 发布到 `ghcr.io/<仓库所有者>/codepier` 的 Hub 镜像，标签为版本号；k3s 单文件清单见 `deploy/k3s/deployment.yaml`。镜像在发布前经过启动验证，构建与校验过程见[发布流程](docs/RELEASING.md)。
+
 ### 2. 接入开发电脑
 
 在面板打开 **设备节点 → 接入电脑**，选择系统，填写设备名称、这台电脑能访问的 Hub 地址，以及一个已经存在的绝对授权目录。复制生成的命令，在目标电脑的本机终端执行。
