@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — 容器镜像发布
+
+- 新增 `.github/workflows/image.yml`：CI 构建 Hub 镜像并发布到 GHCR（linux/amd64、linux/arm64，附 SBOM 与构建来源证明），不再要求在服务器上用安装脚本现场构建。
+- 发布前在工作流内核对源码版本与 Git 标签，并用 Compose 同等加固参数从空数据目录启动候选镜像，检查 `/healthz`、运行版本、维护状态、`/agent/manifest.json` 与 UID；Pull Request 只构建不发布。
+- 新增 `deploy/k3s/deployment.yaml`：单副本 Recreate、local-path RWO 数据卷、与 Compose 同等的非 root/只读根文件系统加固、Traefik Ingress，不启用宿主机更新服务；`scripts/check_release.py` 同步核对该清单的镜像版本。
+- Compose 与安装脚本路径不变；未创建 Release，也不部署服务。
+
 ## Unreleased fork integration — 2026-09-27
 
 - Merge the complete upstream 1.14.3 line with IAM and multi-MCP Gateway; retain both parent histories.
