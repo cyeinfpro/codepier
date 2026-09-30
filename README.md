@@ -4,7 +4,7 @@
 
 在自己的电脑上运行开发环境，通过 ChatGPT 或浏览器远程使用。
 
-[![Version](https://img.shields.io/badge/version-1.15.0-2563eb)](RELEASE.json)
+[![Version](https://img.shields.io/badge/version-1.15.1-2563eb)](RELEASE.json)
 [![Python](https://img.shields.io/badge/Python-3.13-3776ab)](requirements.txt)
 [![License](https://img.shields.io/badge/license-MIT-16a34a)](LICENSE)
 
@@ -60,10 +60,10 @@ ChatGPT / MCP 客户端                 浏览器管理面板
 
 服务器需要 Git、Bash、Docker Engine、Docker Compose v2，以及供安装脚本使用的 **Python 3.9+**。Compose 需要支持 `up --wait`；应用运行环境由 Docker 镜像提供，使用 Python 3.13。
 
-下面以正式版本 `v1.15.0` 为例。请在可信网络中完成 HTTP 初始安装；公网部署应先按[入门教程](docs/START-HERE.md)配置 HTTPS，不要通过裸公网 HTTP 输入密码或配对设备。
+下面以正式版本 `v1.15.1` 为例。请在可信网络中完成 HTTP 初始安装；公网部署应先按[入门教程](docs/START-HERE.md)配置 HTTPS，不要通过裸公网 HTTP 输入密码或配对设备。
 
 ```bash
-git clone --branch v1.15.0 --depth 1 https://github.com/cyeinfpro/codepier.git
+git clone --branch v1.15.1 --depth 1 https://github.com/cyeinfpro/codepier.git
 cd codepier
 bash install.sh
 ```
@@ -324,16 +324,16 @@ docs/        使用和维护文档
 
 ## 版本与许可
 
-当前仓库的 `RELEASE.json` 标记为 **1.15.0 / released / source-and-image**。`main` 可能包含正式发布后的改动；安装和更新请核对目标 Release，版本变化见 [CHANGELOG.md](CHANGELOG.md)。
+当前仓库的 `RELEASE.json` 标记为 **1.15.1 / released / source-and-image**。`main` 可能包含正式发布后的改动；安装和更新请核对目标 Release，版本变化见 [CHANGELOG.md](CHANGELOG.md)。
 
-- **Version:** 1.15.0
+- **Version:** 1.15.1
 - **License:** [MIT](LICENSE)
 
 第三方依赖保留各自许可证。前端依赖声明位于 `web/vendor/`，MCP Apps 的声明见 [THIRD_PARTY_NOTICES.txt](web/mcp-apps/THIRD_PARTY_NOTICES.txt)。
 
 ## 多用户身份与多 MCP 网关
 
-1.15.0 整合 Spaces、OIDC、动态角色、稳定 Profiles 与多 MCP 网关，并保留 1.14.4 的排队、附件和恢复修复。
+1.15.1 修复 Agent 媒体清理阻塞心跳与服务恢复问题；保留 1.15.0 的 Spaces、OIDC、动态角色、稳定 Profiles 与多 MCP 网关，以及 1.14.4 的排队、附件和恢复修复。
 首次部署前请阅读 [多用户/OIDC](docs/MULTIUSER_OIDC.md)、[动态角色](docs/DYNAMIC_ROLES.md) 和 [MCP 网关](docs/MCP_GATEWAY.md)。
 
 公开工具目录为九个核心开发工具、两个身份工具及经明确授权的网关工具；旧独立工具入口不恢复。发布不会自动升级现用 Hub 或 Agent。

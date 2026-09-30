@@ -257,6 +257,7 @@ class Computer:
         self.session = None
         self.generation = 0
         self.guard = None
+        self.media_cleanup = None
         self.stopping = False
 
     def make_client(self, info, timeout, approval_timeout=60):
@@ -363,12 +364,25 @@ class Computer:
                 await self._stop('expired_or_revoked')
             count += 1
             if self.journal is not None and count % 15 == 0:
-                # Cleanup failures must not disable the session-expiry watchdog.
-                try:
-                    with self.journal.lock, self.journal.db:
-                        purge_database(self.journal.db, 'calls')
-                except (OSError, sqlite3.Error):
-                    pass
+                # Disk cleanup must not delay either network heartbeats or the
+                # one-second session-revocation check. Never overlap batches.
+                if self.media_cleanup is None or self.media_cleanup.done():
+                    self.media_cleanup = asyncio.create_task(asyncio.to_thread(self._purge_media))
+
+    def _purge_media(self):
+        # Use a separate WAL connection: holding journal.lock in a worker would
+        # still block the event loop the next time it accesses the journal.
+        try:
+            with contextlib.closing(sqlite3.connect(self.journal.directory / 'agent.sqlite3', timeout=.1)) as db:
+                db.row_factory = sqlite3.Row
+                with db:
+                    # Serialize the read/modify/write with result delivery so a
+                    # concurrent update cannot be replaced by a stale result.
+                    db.execute('BEGIN IMMEDIATE')
+                    purge_database(db, 'calls')
+        except (OSError, sqlite3.Error):
+            # A busy DB is retried on the next tick, without killing the guard.
+            pass
 
     def status(self, project):
         c = self.settings()
@@ -572,3 +586,5 @@ class Computer:
         if self.guard and self.guard is not asyncio.current_task():
             self.guard.cancel()
             await asyncio.gather(self.guard, return_exceptions=True)
+        if self.media_cleanup:
+            await asyncio.shield(self.media_cleanup)

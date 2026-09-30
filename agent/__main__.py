@@ -175,8 +175,8 @@ def main():
     else:
         from agent.runner import Agent
         async def run():
-            from agent.service_watchdog import watch_event_loop
-            with watch_event_loop() if args.supervised else nullcontext():
+            from agent.service_watchdog import is_supervised, watch_event_loop
+            with watch_event_loop() if args.supervised or is_supervised() else nullcontext():
                 agent = Agent(path)
                 loop = asyncio.get_running_loop()
                 for sig in (signal.SIGINT, signal.SIGTERM):
