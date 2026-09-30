@@ -28,6 +28,8 @@ from typing import Literal
 from hub.db_worker import database_endpoint
 from hub.access import AccessModel
 from hub import iam
+from hub.config import OIDC_SEED_PROVIDER_ID
+from shared.config import ConfigurationError
 from shared.crypto import digest, token
 from shared.util import DevError
 
@@ -185,9 +187,10 @@ def validate_claims(encoded,provider,jwks,*,nonce=None,access_token=None,logout=
 
 
 class OIDCService:
-    def __init__(self,auth,runtime,public_url,*,transport=None):
+    def __init__(self,auth,runtime,public_url,*,transport=None,seed=None,bootstrap_admin=False):
         self.auth,self.runtime,self.store,self.public_url=auth,runtime,runtime.store,public_url
         self.transport=transport
+        self.seed,self.bootstrap_admin=seed,bootstrap_admin
         self.sync_lock=asyncio.Lock()
         from hub.oidc_resilience import SyncScheduler
         self.scheduler=SyncScheduler(self)
@@ -430,6 +433,50 @@ class OIDCService:
                                   (identity['provider_id'],identity['user_id']))
         self.runtime.publish('iam',{'user_id':identity['user_id']});self.runtime.wake_delivery()
 
+    def write_provider(self,body,identifier,old,audit,*,allow_issuer_change=False):
+        """Persist a validated provider inside the caller's transaction and return its id."""
+        store=self.store
+        if old and body.issuer!=old['issuer'] and not allow_issuer_change:raise DevError('ISSUER_IMMUTABLE','Issuer 是身份边界，请建立新提供者而不是改写',409)
+        if not old and not body.client_secret:raise DevError('CLIENT_SECRET_REQUIRED','需要客户端密钥',400)
+        if not old and store.one('SELECT count(*) AS n FROM oidc_providers')['n']>=16:raise DevError('PROVIDER_LIMIT','最多16个身份提供者',409)
+        identifier=identifier or 'idp_'+uuid.uuid4().hex
+        secret=store.encrypt(body.client_secret) if body.client_secret else old['client_secret']
+        values=(body.label,body.issuer,body.client_id,secret,body.discovery_url,int(body.enabled),body.admission,body.group_claim,body.required_group,body.scopes,json.dumps(body.endpoint_origins),body.freshness_seconds)
+        if old:
+            store.db.execute('UPDATE oidc_providers SET label=?,issuer=?,client_id=?,client_secret=?,discovery_url=?,enabled=?,admission=?,group_claim=?,required_group=?,scopes=?,endpoint_origins=?,freshness_seconds=?,version=version+1 WHERE id=?',(*values,identifier))
+            store.db.execute('DELETE FROM oidc_cache WHERE provider_id=?',(identifier,))
+            # A changed provider may reduce admission/group policy. Old
+            # entitlement snapshots are not grandfathered indefinitely.
+            store.db.execute('UPDATE external_identities SET fresh_until=0,checked_at=0 WHERE provider_id=?',(identifier,))
+            for identity in store.all('SELECT * FROM external_identities WHERE provider_id=?',(identifier,)):
+                prefix='oidc:'+identity['id']+':'
+                for table in ('memberships','role_assignments'):
+                    store.db.execute(f'UPDATE {table} SET active=0,version=version+1 WHERE substr(source,1,?)=?',(len(prefix),prefix))
+        else:
+            store.db.execute('INSERT INTO oidc_providers(id,label,issuer,client_id,client_secret,discovery_url,enabled,admission,group_claim,required_group,scopes,endpoint_origins,freshness_seconds,created) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(identifier,*values,time.time()))
+        audit('oidc.provider_updated' if old else 'oidc.provider_created',identifier,{'enabled':body.enabled,'issuer':body.issuer})
+        return identifier
+
+    def seed_provider(self):
+        """Reconcile the CODEPIER_OIDC_* provider; the environment is authoritative for it."""
+        if self.seed is None:return None
+        body=self.seed.provider_input()
+        store=self.store
+        with store.transaction():
+            old=store.one('SELECT * FROM oidc_providers WHERE id=?',(OIDC_SEED_PROVIDER_ID,))
+            if old and old['issuer']!=body.issuer and store.one('SELECT 1 AS ok FROM external_identities WHERE provider_id=?',(OIDC_SEED_PROVIDER_ID,)):
+                # Identities are bound to the issuer; silently rebinding them would merge accounts.
+                raise ConfigurationError('CODEPIER_OIDC_ISSUER changed while identities are linked to the seeded provider; restore the issuer or unlink them first')
+            if old and self.seed_unchanged(old,body):return old['id']
+            def audit(action,target,detail):store.audit('local-env',action,target,detail=detail,commit=False)
+            return self.write_provider(body,OIDC_SEED_PROVIDER_ID,old,audit,allow_issuer_change=True)
+
+    def seed_unchanged(self,old,body):
+        current=(old['label'],old['issuer'],old['client_id'],self.store.decrypt(old['client_secret']),old['discovery_url'],bool(old['enabled']),
+                 old['admission'],old['group_claim'],old['required_group'],old['scopes'],json.loads(old['endpoint_origins']),old['freshness_seconds'])
+        return current==(body.label,body.issuer,body.client_id,body.client_secret,body.discovery_url,body.enabled,body.admission,
+                         body.group_claim,body.required_group,body.scopes,body.endpoint_origins,body.freshness_seconds)
+
     def provision(self,provider,claims,groups,txn,tokens):
         store=self.store;subject=claims['sub'];now=time.time()
         with store.transaction():
@@ -440,7 +487,7 @@ class OIDCService:
             current=self.provider(provider['id'])
             if current['version']!=txn['provider_version']:raise DevError('OIDC_CONFIG_CHANGED','身份配置已改变，请重新登录',409)
             identity=store.one('SELECT * FROM external_identities WHERE issuer=? AND subject=?',(provider['issuer'],subject))
-            link_user=txn.get('link_user_id')
+            link_user=txn.get('link_user_id');bootstrap=False
             if link_user:
                 session=store.one('SELECT * FROM sessions WHERE id_hash=? AND user_id=? AND expires>?',(txn['link_session_hash'],link_user,now))
                 security=store.one('SELECT * FROM session_security WHERE session_hash=?',(txn['link_session_hash'],))
@@ -451,15 +498,23 @@ class OIDCService:
                 raise DevError('IDENTITY_UNLINKED','此身份已解除关联；请登录原账号后明确重新关联',403)
             if not identity:
                 if not link_user and provider['admission']!='jit':raise DevError('OIDC_ADMISSION_CLOSED','未开放自动加入；请由管理员先安排账号关联',403)
-                if not store.one('SELECT 1 AS ok FROM iam_users WHERE instance_admin=1 AND active=1'):raise DevError('BOOTSTRAP_REQUIRED','必须先初始化本地恢复管理员',403)
+                if not store.one('SELECT 1 AS ok FROM iam_users WHERE instance_admin=1 AND active=1'):
+                    # With first-login bootstrap the first admitted human becomes the instance
+                    # administrator; the transaction serializes competing first logins.
+                    if link_user or not self.bootstrap_admin:raise DevError('BOOTSTRAP_REQUIRED','必须先初始化本地恢复管理员',403)
+                    bootstrap=True
                 if not link_user and store.one('SELECT count(*) AS n FROM users')['n']>=10000:raise DevError('USER_LIMIT','用户数量已达到实例限制',409)
                 user_id=link_user or 'usr_'+uuid.uuid4().hex
                 if not link_user:
                     # An unusable password marker: external accounts are NEVER
                     # assigned a generated local password or linked by email.
                     store.db.execute('INSERT INTO users(id,username,password_hash,created) VALUES(?,?,?,?)',(user_id,'oidc-'+uuid.uuid4().hex,'!oidc-only',now))
-                    store.db.execute('UPDATE iam_users SET local_login=0,instance_admin=0,display_name=? WHERE user_id=?',(str(claims.get('name') or claims.get('preferred_username') or 'OIDC user')[:100],user_id))
-                    store.db.execute("DELETE FROM memberships WHERE user_id=? AND space_id='legacy'",(user_id,))
+                    store.db.execute('UPDATE iam_users SET local_login=0,instance_admin=?,display_name=? WHERE user_id=?',(int(bootstrap),str(claims.get('name') or claims.get('preferred_username') or 'OIDC user')[:100],user_id))
+                    if bootstrap:
+                        # The bootstrap administrator owns Legacy exactly like a CLI-created one.
+                        store.db.execute("UPDATE memberships SET level='owner',active=1,version=version+1 WHERE user_id=? AND space_id='legacy'",(user_id,))
+                    else:
+                        store.db.execute("DELETE FROM memberships WHERE user_id=? AND space_id='legacy'",(user_id,))
                     iam.create_personal_space(store,user_id,'Personal')
                 iid='idn_'+uuid.uuid4().hex
                 store.db.execute('INSERT INTO external_identities(id,issuer,subject,provider_id,user_id,checked_at,fresh_until,created) VALUES(?,?,?,?,?,?,?,?)',(iid,provider['issuer'],subject,provider['id'],user_id,now,now+provider['freshness_seconds'],now))
@@ -473,6 +528,8 @@ class OIDCService:
             store.db.execute('UPDATE external_identities SET upstream_tokens=? WHERE id=?',(store.encrypt(json.dumps(secured)),identity['id']))
             result=self.auth.new_session(user['id'],identity_id=identity['id'],provider_sid=claims.get('sid'))
             store.audit('panel:'+user['username'],'oidc.linked' if link_user else 'oidc.login',identity['id'],detail={'provider_id':provider['id']},commit=False)
+            if bootstrap:
+                store.audit('panel:'+user['username'],'oidc.bootstrap_admin',identity['id'],detail={'provider_id':provider['id']},commit=False)
         return result
 
     async def begin(self,provider,return_to,*,link_session=None,client_key='internal'):
@@ -591,6 +648,7 @@ class OIDCService:
             await self.scheduler.run()
 
     async def start(self):
+        await self.store.run(self.seed_provider)
         await self.store.run(self.warn_group_compatibility)
         self.stop_event.clear()
         async def work():
@@ -634,27 +692,11 @@ class OIDCService:
             p=auth.instance(request,True)
             with store.lock,store.db:
                 store.db.execute('BEGIN IMMEDIATE');p=auth.instance(request,True)
+                if identifier==OIDC_SEED_PROVIDER_ID and self.seed is not None:raise DevError('PROVIDER_ENV_MANAGED','该身份提供者由部署环境变量管理；请修改部署配置后重启 Hub',409)
                 old=self.provider(identifier,enabled=False) if identifier else None
                 if old and body.expected_version!=old['version']:raise DevError('VERSION_CONFLICT','身份提供者配置已修改',409)
-                if old and body.issuer!=old['issuer']:raise DevError('ISSUER_IMMUTABLE','Issuer 是身份边界，请建立新提供者而不是改写',409)
-                if not old and not body.client_secret:raise DevError('CLIENT_SECRET_REQUIRED','需要客户端密钥',400)
-                if not old and store.one('SELECT count(*) AS n FROM oidc_providers')['n']>=16:raise DevError('PROVIDER_LIMIT','最多16个身份提供者',409)
-                identifier=identifier or 'idp_'+uuid.uuid4().hex
-                secret=store.encrypt(body.client_secret) if body.client_secret else old['client_secret']
-                values=(body.label,body.issuer,body.client_id,secret,body.discovery_url,int(body.enabled),body.admission,body.group_claim,body.required_group,body.scopes,json.dumps(body.endpoint_origins),body.freshness_seconds)
-                if old:
-                    store.db.execute('UPDATE oidc_providers SET label=?,issuer=?,client_id=?,client_secret=?,discovery_url=?,enabled=?,admission=?,group_claim=?,required_group=?,scopes=?,endpoint_origins=?,freshness_seconds=?,version=version+1 WHERE id=?',(*values,identifier))
-                    store.db.execute('DELETE FROM oidc_cache WHERE provider_id=?',(identifier,))
-                    # A changed provider may reduce admission/group policy. Old
-                    # entitlement snapshots are not grandfathered indefinitely.
-                    store.db.execute('UPDATE external_identities SET fresh_until=0,checked_at=0 WHERE provider_id=?',(identifier,))
-                    for identity in store.all('SELECT * FROM external_identities WHERE provider_id=?',(identifier,)):
-                        prefix='oidc:'+identity['id']+':'
-                        for table in ('memberships','role_assignments'):
-                            store.db.execute(f'UPDATE {table} SET active=0,version=version+1 WHERE substr(source,1,?)=?',(len(prefix),prefix))
-                else:
-                    store.db.execute('INSERT INTO oidc_providers(id,label,issuer,client_id,client_secret,discovery_url,enabled,admission,group_claim,required_group,scopes,endpoint_origins,freshness_seconds,created) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(identifier,*values,time.time()))
-                iam.audit(store,p,'oidc.provider_updated' if old else 'oidc.provider_created',identifier,detail={'enabled':body.enabled,'issuer':body.issuer})
+                def audit(action,target,detail):iam.audit(store,p,action,target,detail=detail)
+                identifier=self.write_provider(body,identifier,old,audit)
             return public_provider(self.provider(identifier,enabled=False))
 
         @router.post('/api/iam/oidc/providers',status_code=201)
