@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 import zipfile
 
-DEFAULT_REPOSITORY = 'cyeinfpro/codepier'
+DEFAULT_REPOSITORY = 'tsunheimat/codepier'
 MAX_ARCHIVE = 128 * 1024 * 1024
 MAX_FILE = 8 * 1024 * 1024
 MAX_FILES = 10000

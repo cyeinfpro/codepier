@@ -2,7 +2,7 @@
 
 ## 发布前
 
-源码版本以 `shared/util.py` 为准；同步 `RELEASE.json`、Compose 镜像标签与发布说明。为发布验证建立独立 Python 环境，运行 Python 依赖审计、npm 审计、Ruff、全部测试模块、MCP Apps 构建和安装脚本语法检查。不要升级现用服务来代替源码验收。
+源码版本以 `shared/util.py` 为准；同步 `RELEASE.json`、Compose 与 k3s 清单的镜像标签及发布说明。为发布验证建立独立 Python 环境，运行 Python 依赖审计、npm 审计、Ruff、全部测试模块、MCP Apps 构建和安装脚本语法检查。不要升级现用服务来代替源码验收。
 
 完整回归使用新的证据目录。确认报告中的所有收集用例都执行通过，没有意外跳过、失败、超时、强制终止或源码变化。真实 Windows/macOS/Linux 服务安装卸载、Docker 数据迁移及外部 MCP 客户端需要单独的隔离演练；仅有模拟测试时必须明确标注。
 
@@ -33,9 +33,19 @@ macOS 下，浏览器原生宿主若从 Downloads 等受限制目录启动，可
 
 使用公开包解压后的干净目录建立仓库，不要在混有私人资料的旧工作目录直接执行 `git add .`。检查暂存差异和文件列表，确认许可证、第三方声明、README 相对链接和执行权限完整。维护者确认仓库所有者、名称、可见性和 Git 提交身份后，才创建远程仓库并推送。
 
-建议分支名 `main`。在 GitHub 启用私密漏洞报告、依赖安全告警与分支保护，并把 CI 设为合并条件；禁止把生产凭据暴露给 PR 工作流。工作流只检查和构建，不会创建 Release 或部署服务。
+建议分支名 `main`。在 GitHub 启用私密漏洞报告、依赖安全告警与分支保护，并把 CI 设为合并条件；禁止把生产凭据暴露给 PR 工作流。CI 工作流只检查和构建；容器镜像工作流把通过启动验证的 Hub 镜像发布到 GHCR，但同样不会创建 Release 或部署服务。
 
 首次推送后必须核对 GitHub 中真实运行的 CI 结果；本机通过不能冒充远端 CI 通过。随后由维护者确认与 VERSION 对应的 `v${VERSION}` 标签、发布说明和经过校验的源代码包，再执行公开发布。准备完成与已经发布是两个不同状态。
+
+## 容器镜像
+
+`.github/workflows/image.yml` 用仓库根目录的 `Dockerfile` 构建 Hub 镜像并发布到 `ghcr.io/<仓库所有者>/codepier`；Kubernetes/k3s 等部署直接拉取该镜像，不再依赖 `install.sh` 在服务器上现场构建。触发条件：推送 `main`、推送 `v*.*.*` 标签、Pull Request（只构建不发布）以及手动运行（发布当前分支名标签）。
+
+发布前的门禁在同一任务内完成：宿主机 Python 运行 `scripts/check_release.py` 核对源码版本、RELEASE.json、Compose 与文档一致；标签必须等于 `v${VERSION}`；先构建 linux/amd64 候选镜像，用与 `compose.yml` 相同的只读根文件系统、tmpfs `/tmp`、`cap_drop ALL` 和 `no-new-privileges` 从空数据目录启动，要求 `/healthz` 在 60 秒内返回 `ok` 且版本与源码一致、未处于维护状态、`/agent/manifest.json` 可用、进程 UID 为 10001。任一检查失败即不发布。
+
+通过后构建 linux/amd64 与 linux/arm64 清单并推送，附带 SBOM 与构建来源证明；依赖锁文件由 `uv pip compile --universal` 生成，两种架构都使用同一组哈希校验的 wheel。标签：正式版本 `VERSION`、`MAJOR.MINOR` 与 `latest`；`main` 及手动运行的分支使用分支名；所有构建另加 `sha-<短提交>`。任务摘要与 `image-<run id>` 工件记录 `镜像@sha256 摘要`，部署应固定该摘要而不是可变标签。
+
+镜像工作流不运行完整回归；正式标签只能在同一提交的 CI 全绿后创建，这与上文发布顺序一致。首次推送生成的 GHCR 包默认私有：需要在包设置中公开，或为集群配置 imagePullSecret。Compose 安装脚本仍走本地构建路径，不受影响。k3s 单文件部署清单见 `deploy/k3s/deployment.yaml`（单副本 Recreate、local-path 数据卷、非 root 只读容器、Traefik Ingress、不启用宿主机更新服务）；其镜像标签由 `scripts/check_release.py` 与源码版本一同核对。
 
 ## 发布后
 

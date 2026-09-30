@@ -15,12 +15,20 @@ const nav = [
   ['workflows', 'history', '开发任务', '05'],
   ['audit', 'audit', '操作审计', '06'],
   ['connect', 'plug', 'MCP 接入', '07'],
+  ['profiles', 'shield', '访问 Profiles', '14'],
+  ['roles', 'shield', '访问角色', '15'],
+  ['mcp-gateway', 'network', 'MCP 网关', '19'],
   ['diagnostics', 'activity', '运行诊断', '08'],
   ['integrations', 'network', '开发工具', '12'],
   ['artifacts', 'download', '产物交付', '09'],
+  ['identity', 'key', '我的账号', '16'],
+  ['members', 'shield', '空间成员', '17'],
+  ['identity-admin', 'shield', '身份管理', '18'],
   ['settings', 'settings', '系统设置', '10'],
 ];
 const S = {
+  space_id: null,
+  identity: null,
   session: null,
   page: 'overview',
   overview: null,
@@ -104,7 +112,7 @@ function stopEvents() {
 }
 function sessionOwner(session) {
   return session?.user_id
-    ? 'id:' + session.user_id
+    ? 'id:' + session.user_id + ':space:' + (S.space_id || 'legacy')
     : session?.username
       ? 'name:' + session.username
       : null;
@@ -164,6 +172,10 @@ function endSession(discard = false) {
   S.readGeneration = (S.readGeneration || 0) + 1;
   S.treeGeneration = (S.treeGeneration || 0) + 1;
   if (discard) discardLocalWork();
+  window.CodePierGateway?.reset();
+  window.CodePierIdentity?.reset();
+  S.identity = null;
+  S.space_id = null;
   renderLogin();
 }
 async function api(path, options = {}) {
@@ -175,16 +187,18 @@ async function api(path, options = {}) {
     ...request
   } = options;
   const session = S.session,
+    space = S.space_id,
     method = (request.method || 'GET').toUpperCase();
   const safe = method === 'GET' || retrySafe;
   const headers = {
+    ...(space ? { 'X-CodePier-Space': space } : {}),
     ...(request.body ? { 'Content-Type': 'application/json' } : {}),
     ...(session?.csrf ? { 'X-RD-CSRF': session.csrf } : {}),
     ...request.headers,
   };
   const delays = retryDelays;
   for (let attempt = 0; ; attempt++) {
-    if (session !== S.session) throw sessionChanged();
+    if (session !== S.session || space !== S.space_id) throw sessionChanged();
     let res, body;
     if (externalSignal?.aborted) throw new DOMException('Request cancelled', 'AbortError');
     const controller = new AbortController();
@@ -210,7 +224,7 @@ async function api(path, options = {}) {
       externalSignal?.removeEventListener('abort', abort);
     }
     if (externalSignal?.aborted) throw new DOMException('Request cancelled', 'AbortError');
-    if (session !== S.session) throw sessionChanged();
+    if (session !== S.session || space !== S.space_id) throw sessionChanged();
     if (res) {
       if (res.status === 401 && path != '/api/login') endSession();
       if (res.ok && body !== null && body !== undefined) return body;
@@ -364,8 +378,9 @@ function renderLogin(configured = true) {
   closeModal();
   document.title = '登录 · CodePier';
   $('#app').innerHTML =
-    `<main class="login-screen"><section class="login-art">${brand}<div class="eyebrow">CodePier / 远程开发</div><h1>连接你的<br><span>开发现场</span></h1><p>AI 与本地代码对接、任务停靠的地方。</p><div class="login-orbit" aria-hidden="true"><span class="brand-mark" aria-hidden="true">C</span><span class="login-orbit-caption">MCP · CodePier · AGENT</span></div></section><section class="login-panel"><div class="eyebrow">CodePier / 登录</div><h2>登录控制台</h2><p>使用管理员账号继续</p>${appearanceControl()}${!configured ? notice('请先在服务器运行 <code>python -m hub init</code> 初始化账号。') : ''}<form id="login-form"><div class="field"><label for="username">账号</label><input id="username" name="username" autocomplete="username" placeholder="输入账号" required maxlength="80"></div><div class="field"><label for="password">密码</label><input id="password" name="password" type="password" autocomplete="current-password" required maxlength="256" placeholder="输入密码"></div><p id="login-error" class="error-text" role="alert"></p><button class="btn primary" type="submit">进入控制台 ${icon('arrow')}</button></form><div class="spacer"></div>${location.protocol === 'http:' ? notice('HTTP 连接未加密，请在可信网络或 SSH 转发中使用。') : '<span class="badge">HTTPS 连接</span>'}<div class="login-footer">自托管 · 由管理员控制</div></section></main>`;
+    `<main class="login-screen"><section class="login-art">${brand}<div class="eyebrow">CodePier / 远程开发</div><h1>连接你的<br><span>开发现场</span></h1><p>AI 与本地代码对接、任务停靠的地方。</p><div class="login-orbit" aria-hidden="true"><span class="brand-mark" aria-hidden="true">C</span><span class="login-orbit-caption">MCP · CodePier · AGENT</span></div></section><section class="login-panel"><div class="eyebrow">CodePier / 登录</div><h2>登录控制台</h2><p>使用外部身份或本地账号继续</p><div id="oidc-login-buttons" aria-label="外部身份登录"></div>${appearanceControl()}${!configured ? notice('请先在服务器运行 <code>python -m hub init</code> 初始化账号。') : ''}<form id="login-form"><div class="field"><label for="username">账号</label><input id="username" name="username" autocomplete="username" placeholder="输入账号" required maxlength="80"></div><div class="field"><label for="password">密码</label><input id="password" name="password" type="password" autocomplete="current-password" required maxlength="256" placeholder="输入密码"></div><p id="login-error" class="error-text" role="alert"></p><button class="btn primary" type="submit">进入控制台 ${icon('arrow')}</button></form><div class="spacer"></div>${location.protocol === 'http:' ? notice('HTTP 连接未加密，请在可信网络或 SSH 转发中使用。') : '<span class="badge">HTTPS 连接</span>'}<div class="login-footer">自托管 · 由管理员控制</div></section></main>`;
   uiLabelFields($('#login-form'));
+  CodePierIdentity.loginButtons();
   $('#login-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const b = $('button[type=submit]', e.target);
@@ -391,7 +406,20 @@ function renderShell() {
   const groups = [
     ['工作区', ['overview', 'devices', 'projects', 'vps']],
     ['开发', ['native', 'workbench', 'integrations', 'workflows', 'artifacts', 'audit']],
-    ['系统', ['connect', 'diagnostics', 'settings']],
+    [
+      '系统',
+      [
+        'connect',
+        'profiles',
+        'roles',
+        'mcp-gateway',
+        'identity',
+        'members',
+        'identity-admin',
+        'diagnostics',
+        'settings',
+      ],
+    ],
   ];
   const navigation = groups
     .map(
@@ -416,10 +444,11 @@ function renderShell() {
     )
     .join('');
   $('#app').innerHTML =
-    `<a class="skip-link" href="#page">跳到主要内容</a><div class="shell"><aside class="sidebar" id="sidebar" aria-label="主导航"><button class="icon-btn mobile-close" data-action="toggle-menu" aria-label="收起菜单">${icon('close')}</button>${brand}<nav class="nav" aria-label="主导航">${navigation}</nav><div class="side-bottom">${appearanceControl()}<div class="transport"><div class="transport-top"><i class="dot offline" id="event-dot"></i><span id="event-state">正在连接实时通道…</span></div></div><div class="user-box"><span class="avatar">${esc(S.session.username?.[0]?.toUpperCase() || 'A')}</span><div>${esc(S.session.username)}<br><small class="tiny">管理员</small></div><button class="icon-btn" data-action="logout" aria-label="退出登录">${icon('logout')}</button></div></div></aside><button class="sidebar-scrim" data-ui="close-menu" aria-label="关闭导航" tabindex="-1" hidden></button><main class="main"><header class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-menu" data-action="toggle-menu" aria-controls="sidebar" aria-expanded="false" aria-label="展开菜单">${icon('menu')}</button><span class="breadcrumb-prefix">CodePier</span><span>/</span><span id="breadcrumb-page" aria-live="polite">${chosen[2]}</span></div><div class="top-right"><span class="clock" id="clock"></span><button class="quick-jump" data-ui="command" aria-label="快速前往页面或项目">${icon('search')}<span>快速前往</span><kbd>${/Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl'} K</kbd></button><button class="icon-btn" data-computer-use aria-label="桌面控制">${icon('device')}</button><button class="icon-btn" data-action="refresh" aria-label="刷新">${icon('refresh')}</button></div></header><div id="page" class="page" tabindex="-1"></div><nav class="mobile-dock" aria-label="移动快捷导航">${dock}<button type="button" data-action="toggle-menu" aria-controls="sidebar" aria-expanded="false" aria-label="更多页面">${icon('menu')}<span>更多</span></button></nav></main></div>`;
+    `<a class="skip-link" href="#page">跳到主要内容</a><div class="shell"><aside class="sidebar" id="sidebar" aria-label="主导航"><button class="icon-btn mobile-close" data-action="toggle-menu" aria-label="收起菜单">${icon('close')}</button>${brand}<nav class="nav" aria-label="主导航">${navigation}</nav><div class="side-bottom">${CodePierIdentity.selector()}${appearanceControl()}<div class="transport"><div class="transport-top"><i class="dot offline" id="event-dot"></i><span id="event-state">正在连接实时通道…</span></div></div><div class="user-box"><span class="avatar">${esc(S.session.username?.[0]?.toUpperCase() || 'A')}</span><div>${esc(S.session.username)}<br><small class="tiny">${esc(CodePierIdentity.current()?.level || '用户')}</small></div><button class="icon-btn" data-action="logout" aria-label="退出登录">${icon('logout')}</button></div></div></aside><button class="sidebar-scrim" data-ui="close-menu" aria-label="关闭导航" tabindex="-1" hidden></button><main class="main"><header class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-menu" data-action="toggle-menu" aria-controls="sidebar" aria-expanded="false" aria-label="展开菜单">${icon('menu')}</button><span class="breadcrumb-prefix">CodePier</span><span>/</span><span id="breadcrumb-page" aria-live="polite">${chosen[2]}</span></div><div class="top-right"><span class="clock" id="clock"></span><button class="quick-jump" data-ui="command" aria-label="快速前往页面或项目">${icon('search')}<span>快速前往</span><kbd>${/Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl'} K</kbd></button><button class="icon-btn" data-computer-use aria-label="桌面控制">${icon('device')}</button><button class="icon-btn" data-action="refresh" aria-label="刷新">${icon('refresh')}</button></div></header><div id="page" class="page" tabindex="-1"></div><nav class="mobile-dock" aria-label="移动快捷导航">${dock}<button type="button" data-action="toggle-menu" aria-controls="sidebar" aria-expanded="false" aria-label="更多页面">${icon('menu')}<span>更多</span></button></nav></main></div>`;
   updateClock();
   uiSetMenu(false, false);
   uiSyncNavigation();
+  CodePierIdentity.bindShell();
 }
 function updateClock() {
   const n = $('#clock');
@@ -446,6 +475,21 @@ function restoreTaskSubmission() {
   }
 }
 async function bootAuthenticated() {
+  try {
+    await CodePierIdentity.bootstrap();
+  } catch (error) {
+    // Membership discovery must fail closed, while preserving an explicit retry
+    // surface. Never start resource streams using a guessed/default Space.
+    stopEvents();
+    if (typeof stopComputerApprovals === 'function') stopComputerApprovals();
+    if (!S.session) return;
+    CodePierIdentity.reset();
+    S.identity = null;
+    S.space_id = null;
+    $('#app').innerHTML =
+      `<main class="boot"><div id="page" role="alert">${brand}${notice(esc(error.message))}<button class="btn primary" data-action="retry-identity">重试身份与空间校验</button><button class="btn ghost" data-action="logout">退出登录</button></div></main>`;
+    return;
+  }
   if (S.suspendedUser && S.suspendedUser !== sessionOwner(S.session)) discardLocalWork();
   S.suspendedUser = null;
   S.work.operation = S.work.operation || sessionValue('codepier-operation');
@@ -464,7 +508,9 @@ async function bootAuthenticated() {
 function connectEvents() {
   stopEvents();
   const session = S.session,
-    events = (S.events = new EventSource('/api/events'));
+    events = (S.events = new EventSource(
+      '/api/events?' + new URLSearchParams({ space_id: S.space_id || '' }),
+    ));
   const current = () => S.events === events && S.session === session;
   events.onopen = () => {
     if (!current()) return;
@@ -523,6 +569,9 @@ function connectEvents() {
           CodePierCallLog.refresh(true).catch(() => {});
       }, 500);
       return;
+    }
+    if (m.type === 'iam') {
+      CodePierIdentity.refresh().catch((error) => toast(error.message, true));
     }
     if (['operation', 'device', 'project', 'workflow', 'vps'].includes(m.type)) {
       clearTimeout(S.eventTimer);
@@ -588,7 +637,9 @@ async function renderPage(showLoading = true) {
     $('#page').innerHTML = '<div class="skeleton" role="status" aria-label="正在加载页面"></div>';
   try {
     let html = '';
-    if (page === 'overview') {
+    if (['identity', 'members', 'identity-admin'].includes(page)) {
+      html = await CodePierIdentity.html(page);
+    } else if (page === 'overview') {
       S.overview = await api('/api/overview');
       S.projects = S.overview.projects;
       S.devices = S.overview.devices;
@@ -610,6 +661,14 @@ async function renderPage(showLoading = true) {
       html = await workflowsHTML(seq);
     } else if (page === 'audit') {
       html = await auditHTML(seq);
+    } else if (page === 'mcp-gateway') {
+      html = await CodePierGateway.html();
+    } else if (page === 'roles') {
+      await loadBasics();
+      html = await CodePierRoles.html();
+    } else if (page === 'profiles') {
+      await loadBasics();
+      html = await CodePierProfiles.html();
     } else if (page === 'connect') {
       S.settings = await api('/api/settings');
       await loadBasics();
@@ -640,6 +699,10 @@ async function renderPage(showLoading = true) {
       CP.dom.replacePage($('#page'), html);
     else $('#page').innerHTML = html;
     uiPageReady(showLoading, presentation);
+    if (['identity', 'members', 'identity-admin'].includes(page)) CodePierIdentity.bind();
+    if (page === 'mcp-gateway') CodePierGateway.bind();
+    if (page === 'roles') CodePierRoles.bind();
+    if (page === 'profiles') CodePierProfiles.bind();
     if (page === 'vps') bindVps();
     if (page === 'workbench') bindWorkbench();
     if (page === 'workflows') bindWorkflows();
@@ -648,6 +711,7 @@ async function renderPage(showLoading = true) {
     if (page === 'diagnostics') bindDiagnostics();
     if (page === 'artifacts') bindArtifacts();
     if (page === 'settings') bindSettings();
+    CodePierIdentity.applyCapabilities();
   } catch (e) {
     if (seq === S.renderSeq && S.session)
       $('#page').innerHTML =
@@ -1686,7 +1750,7 @@ async function operationDetail(id) {
 }
 function codingEndpoint() {
   const url = new URL(S.settings.mcp_url, location.href);
-  url.searchParams.set('profile', 'coding');
+  url.searchParams.set('profile', 'core');
   return url.href;
 }
 function grantListHTML() {
@@ -1711,10 +1775,13 @@ function grantListHTML() {
           : '';
     const projects = g.projects.map((id) => S.projects.find((p) => p.id === id)?.alias || id);
     const scopeNames = { read: '读取', write: '写入', execute: '执行', computer: '桌面' };
-    const range = g.projects.includes('*')
-      ? '<span>全部项目（含未来新增）</span>'
-      : `<details class="grant-projects"><summary>${projects.length} 个项目</summary><div>${projects.map((name) => `<span>${esc(name)}</span>`).join('')}</div></details>`;
-    return `<article class="grant-row ${historical(g) ? 'grant-inactive' : ''}" data-grant-id="${esc(g.id)}"><div class="grant-info"><h3><span>${esc(g.label)}</span><span class="badge purple">${g.client_id ? 'OAuth' : 'PAT'}</span>${status ? `<span class="badge neutral">${status}</span>` : ''}</h3><div class="grant-meta"><span>${esc(g.scopes.map((scope) => scopeNames[scope] || scope).join(' · '))}</span>${range}</div><p>${g.status === 'pending' ? '等待客户端完成连接' : g.expires ? `${expired ? '已于' : '到期'} ${esc(timeText(g.expires))}${expired ? ' 过期' : ''}` : expired ? '已无有效凭据' : '尚未连接'}</p></div>${!g.revoked ? `<div class="actions">${!expired ? `<button class="btn small" data-action="edit-grant-projects" data-id="${esc(g.id)}">调整项目范围</button>` : ''}<button class="btn danger small" data-action="revoke-grant" data-id="${esc(g.id)}">撤销</button></div>` : ''}</article>`;
+    const range =
+      g.authorization_mode === 'role'
+        ? '<span>范围及能力以当前动态角色为准</span>'
+        : g.projects.includes('*')
+          ? '<span>全部项目（含未来新增）</span>'
+          : `<details class="grant-projects"><summary>${projects.length} 个项目</summary><div>${projects.map((name) => `<span>${esc(name)}</span>`).join('')}</div></details>`;
+    return `<article class="grant-row ${historical(g) ? 'grant-inactive' : ''}" data-grant-id="${esc(g.id)}"><div class="grant-info"><h3><span>${esc(g.label)}</span><span class="badge purple">${g.client_id ? 'OAuth' : 'PAT'}</span>${status ? `<span class="badge neutral">${status}</span>` : ''}</h3><div class="grant-meta">${g.profile_id ? `<span>Profile：${esc(g.profile_id)}</span>` : ''}<span>${esc(g.scopes.map((scope) => scopeNames[scope] || scope).join(' · '))}</span>${range}</div><p>${g.status === 'pending' ? '等待客户端完成连接' : g.expires ? `${expired ? '已于' : '到期'} ${esc(timeText(g.expires))}${expired ? ' 过期' : ''}` : expired ? '已无有效凭据' : '尚未连接'}</p></div>${!g.revoked ? `<div class="actions">${!expired && !g.profile_id ? `<button class="btn small" data-action="edit-grant-projects" data-id="${esc(g.id)}">调整项目范围</button>` : ''}<button class="btn danger small" data-action="revoke-grant" data-id="${esc(g.id)}">撤销</button></div>` : ''}</article>`;
   };
   const list = (items, group) => {
     const size = 5;
@@ -1753,9 +1820,9 @@ function connectHTML() {
       'MCP 接入',
       'CONNECTION / ACCESS',
       '',
-      `<button class="btn primary" data-action="new-grant">${icon('key')}创建凭据</button>`,
+      `<button class="btn primary" data-action="new-grant">${icon('key')}创建凭据</button><button class="btn ghost" data-nav="profiles">管理访问 Profiles</button>`,
     ) +
-    `<div class="connect-grid"><section class="panel"><div class="panel-head"><h2>${icon('plug')}连接地址</h2><span class="badge neutral">MCP</span></div><div class="panel-body"><div class="eyebrow">STREAMABLE HTTP</div><div class="endpoint"><code>${esc(s.mcp_url)}</code><button class="icon-btn" data-action="copy-endpoint" aria-label="复制 MCP 地址">${icon('copy')}</button></div><div class="mcp-coding-entry"><div><strong>精简编码模式</strong><small>专注读码、修改与审阅，沿用原有授权。</small></div><button class="btn ghost small" data-action="copy-coding-endpoint">复制编码地址</button></div><div class="connection-route"><span>客户端</span>${icon('arrow')}<span>CodePier</span>${icon('arrow')}<span>本机项目</span></div>${notice('面板与 Agent 支持 HTTP。ChatGPT 直连需公开 HTTPS，或使用已获授权的 Secure MCP Tunnel。')}${uiHelp('接入步骤', guide)}</div></section>
+    `<div class="connect-grid"><section class="panel"><div class="panel-head"><h2>${icon('plug')}连接地址</h2><span class="badge neutral">MCP</span></div><div class="panel-body"><div class="eyebrow">STREAMABLE HTTP</div><div class="endpoint"><code>${esc(s.mcp_url)}</code><button class="icon-btn" data-action="copy-endpoint" aria-label="复制 MCP 地址">${icon('copy')}</button></div><div class="mcp-coding-entry"><div><strong>核心开发工具</strong><small>统一九工具入口；实际权限由当前角色决定。</small></div><button class="btn ghost small" data-action="copy-coding-endpoint">复制核心地址</button></div><div class="mcp-coding-entry"><div><strong>动态角色连接</strong><small>明确委派已分配角色的当前与后续能力。</small></div><button class="btn ghost small" data-action="copy-role-endpoint">复制角色地址</button></div><div class="connection-route"><span>客户端</span>${icon('arrow')}<span>CodePier</span>${icon('arrow')}<span>本机项目</span></div>${notice('面板与 Agent 支持 HTTP。ChatGPT 直连需公开 HTTPS，或使用已获授权的 Secure MCP Tunnel。')}${uiHelp('接入步骤', guide)}</div></section>
     <section class="panel" id="grant-panel">${grantListHTML()}</section></div>` +
     uiHelp(
       `工具目录 · ${s.tools.length} 项`,
@@ -1788,12 +1855,18 @@ function checked(name) {
 }
 async function newGrant() {
   await loadBasics();
+  const profiles = (await api('/api/access-profiles')).profiles;
   modal(
     '创建限定范围访问凭据',
-    `<form id="grant-form"><div class="form-row"><div class="field"><label>凭据名称</label><input name="label" required maxlength="80" placeholder="例如 ChatGPT Tunnel"></div><div class="field"><label>有效天数</label><input name="days" type="number" min="1" max="365" value="30" required></div></div>${permissionsHTML(S.projects)}${notice('凭据只显示一次，不会写入浏览器持久存储。适用于 stdio bridge、MCP Inspector 或支持 Bearer 的客户端；ChatGPT 直连使用 OAuth。')}</form>`,
+    `<form id="grant-form"><div class="form-row"><div class="field"><label>凭据名称</label><input name="label" required maxlength="80" placeholder="例如 ChatGPT Tunnel"></div><div class="field"><label>有效天数</label><input name="days" type="number" min="1" max="365" value="30" required></div></div>${CodePierProfiles.selectorHTML(profiles)}<div data-profile-permissions></div>${notice('凭据只显示一次，不会写入浏览器持久存储。适用于 stdio bridge、MCP Inspector 或支持 Bearer 的客户端；ChatGPT 直连使用 OAuth。')}</form>`,
     buttons('create-grant', '创建凭据'),
   );
-  CodePierAccess.bindProjects($('.modal'));
+  const profileBinding = CodePierProfiles.bindSelector(
+    $('.modal'),
+    profiles,
+    ['read', 'write', 'execute', 'computer', 'codepier.role_access'],
+    S.settings?.access_defaults || {},
+  );
   $('#create-grant').onclick = () =>
     busy($('#create-grant'), async () => {
       const f = $('#grant-form');
@@ -1803,6 +1876,7 @@ async function newGrant() {
         days: Number(f.elements.days.value),
         scopes: checked('scope'),
         ...CodePierAccess.selection(),
+        ...profileBinding(),
       });
       modal(
         '保存你的访问凭据',
@@ -1816,20 +1890,27 @@ async function newGrant() {
 async function consentModal(id) {
   try {
     const r = await api('/api/oauth/requests/' + encodeURIComponent(id));
+    const profiles = (await api('/api/access-profiles')).profiles;
     modal(
       '确认 MCP 应用授权',
-      `<p class="form-note"><strong>${esc(r.client_name)}</strong> 正在申请访问你的本机项目。</p><dl class="kv"><dt>客户端</dt><dd><code>${esc(r.client_id)}</code></dd><dt>回调地址</dt><dd>${esc(r.redirect_uri)}</dd><dt>资源</dt><dd>${esc(r.resource)}</dd></dl>${permissionsHTML(S.projects, r.scopes, r.access_defaults || {})}${notice('只有你确认的项目范围会被授权；全部项目选项会包含未来新增项目。请核对应用名称、回调地址和工具权限。')}`,
+      `<p class="form-note"><strong>${esc(r.client_name)}</strong> 正在申请访问你的本机项目。</p><dl class="kv"><dt>客户端</dt><dd><code>${esc(r.client_id)}</code></dd><dt>回调地址</dt><dd>${esc(r.redirect_uri)}</dd><dt>资源</dt><dd>${esc(r.resource)}</dd></dl>${CodePierProfiles.selectorHTML(profiles)}<div data-profile-permissions></div>${notice('固定授权按本次同意限制；动态角色授权会跟随之后的角色能力和项目变更。请核对身份、角色、应用及回调地址。')}`,
       `<button class="btn ghost" id="deny-consent">拒绝</button><button class="btn primary" id="allow-consent">允许所选范围</button>`,
       false,
       false,
     );
-    CodePierAccess.bindProjects($('.modal'));
+    const profileBinding = CodePierProfiles.bindSelector(
+      $('.modal'),
+      profiles,
+      r.scopes,
+      r.access_defaults || {},
+    );
     const decide = (allow) =>
       busy(allow ? $('#allow-consent') : $('#deny-consent'), async () => {
         const out = await post(`/api/oauth/requests/${encodeURIComponent(id)}/decide`, {
           allow,
           scopes: checked('scope'),
           ...CodePierAccess.selection(),
+          ...(allow ? profileBinding() : {}),
         });
         location.assign(out.redirect);
       });
@@ -1842,6 +1923,15 @@ async function consentModal(id) {
 }
 function settingsHTML() {
   const s = S.settings;
+  if (!S.identity?.instance_admin)
+    return (
+      heading('账号设置', 'ACCOUNT / SETTINGS') +
+      notice(
+        '实例设置仅供实例管理员使用。管理自己的登录身份、会话和空间，请打开「我的账号」。',
+        true,
+      ) +
+      `<button class="btn primary" data-nav="identity">我的账号</button>`
+    );
   return (
     heading('系统设置', 'SYSTEM / SETTINGS') +
     `<div class="settings-grid"><section class="panel"><div class="panel-head"><h2>${icon('plug')}对外地址</h2></div><div class="panel-body"><form id="settings-form"><div class="field"><label>基础地址</label><input name="public_url" value="${esc(s.public_url)}" required><small>HTTP / HTTPS 均可，不带 /mcp。</small></div>${notice('只修改 MCP / OAuth 标识，不改变监听端口或 Agent 地址。变更后请重新连接并授权。')}<div class="spacer"></div><button class="btn primary" type="submit">保存地址</button></form>${uiHelp('服务信息', `<dl class="kv"><dt>版本</dt><dd>${esc(s.version)}</dd><dt>监听端口</dt><dd>${s.listen_port}（容器内）</dd><dt>MCP 协议</dt><dd>${esc(s.protocol_versions.join(' / '))}</dd><dt>数据目录</dt><dd><code>${esc(s.data_dir)}</code></dd></dl>`)}</div></section><section class="panel"><div class="panel-head"><h2>${icon('lock')}管理员密码</h2></div><div class="panel-body"><form id="password-form"><div class="field"><label>当前密码</label><input name="current_password" type="password" required autocomplete="current-password"></div><div class="field"><label>新密码</label><input name="new_password" type="password" minlength="12" maxlength="256" required autocomplete="new-password" placeholder="至少 12 位"></div><div class="field"><label>确认新密码</label><input name="confirm_password" type="password" minlength="12" required autocomplete="new-password" aria-describedby="password-match-error"><p id="password-match-error" class="field-error" role="status" hidden></p></div><p class="form-note">修改后退出全部浏览器登录，并撤销 MCP 授权；设备密钥不变。</p><button class="btn" type="submit">更新密码并退出</button></form></div></section></div>` +
@@ -1855,6 +1945,7 @@ function settingsHTML() {
   );
 }
 function bindSettings() {
+  if (!S.identity?.instance_admin) return;
   CodePierAccess.bind();
   CodePierPanelUpdate.bind();
   const passwordForm = $('#password-form');
@@ -2141,6 +2232,12 @@ panelActions.register(['revoke-grant'], async (b, e) => {
     await renderPage(false);
   }
   return;
+});
+panelActions.register(['retry-identity'], async () => {
+  await bootAuthenticated();
+});
+panelActions.register(['copy-role-endpoint'], async () => {
+  await copy(S.settings.role_mcp_url);
 });
 document.addEventListener('click', async (e) => {
   try {

@@ -17,7 +17,7 @@ npm --prefix web/mcp-apps ci --ignore-scripts
 
 Linux 还需 Playwright 对应系统依赖，可在隔离 CI 运行 install --with-deps。Python 下载缓存、npm 包缓存和浏览器二进制可以缓存；虚拟环境不跨平台复用。Mac 的 Compose 检查支持 docker compose 和独立 docker-compose，不要求 Docker daemon。
 
-依赖更新时修改 `.in`，显式运行 `python scripts/lock_requirements.py --exclude-newer YYYY-MM-DD`，审阅六份锁文件，再在新环境安装并测试。解析只允许 wheel，不执行源代码发行包的构建脚本。`--check` 仅对比，不覆盖。版本源是 `shared/util.py` 的 VERSION；RELEASE.json、README 当前版本、Compose、支持分支与生成资源由发布检查核对。LOCAL_RELEASE.json 仅是本地历史记录，不是当前源码或部署状态的权威。
+依赖更新时修改 `.in`，显式运行 `python scripts/lock_requirements.py --exclude-newer YYYY-MM-DD`，审阅六份锁文件，再在新环境安装并测试。解析只允许 wheel，不执行源代码发行包的构建脚本。`--check` 仅对比，不覆盖。版本源是 `shared/util.py` 的 VERSION；RELEASE.json、README 当前版本、Compose 与 k3s 清单镜像、支持分支与生成资源由发布检查核对。LOCAL_RELEASE.json 仅是本地历史记录，不是当前源码或部署状态的权威。
 
 ## 前端构建与格式
 

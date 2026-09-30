@@ -6,6 +6,8 @@ import asyncio
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from hub.auth import SESSION_SECONDS
+from hub import iam
+from hub.iam_api import spaces_for
 from shared.crypto import digest, password_hash, password_verify
 from shared.util import DevError, VERSION
 from hub.api.models import Login, PasswordInput
@@ -24,7 +26,7 @@ def make_accounts_router(context: HubContext):
         configured = bool(store.one("SELECT id FROM users LIMIT 1"))
         try:
             row = auth.session(request)
-            return {"authenticated": True, "configured": configured, "username": row["username"], "user_id": row["user_id"], "csrf": row["csrf"], "version": VERSION}
+            return {"authenticated": True, "configured": configured, "username": row["username"], "user_id": row["user_id"], "csrf": row["csrf"], "version": VERSION, "instance_admin": row["instance_admin"], "spaces": spaces_for(store, row["user_id"])}
         except DevError:
             return {"authenticated": False, "configured": configured, "version": VERSION}
 
@@ -38,17 +40,20 @@ def make_accounts_router(context: HubContext):
     @router.post("/api/logout")
     @database_endpoint(store)
     def logout(request: Request):
-        principal = auth.admin(request, True)
-        store.execute("DELETE FROM sessions WHERE id_hash=?", (digest(request.cookies.get("rd_session", "")),))
-        store.audit(principal.actor, "auth.logout")
+        session = auth.session_write(request)
+        store.execute("DELETE FROM sessions WHERE id_hash=?", (session['id_hash'],))
+        store.audit('panel:'+session['username'], "auth.logout")
         response = JSONResponse({"ok": True})
         response.delete_cookie("rd_session", path="/")
         return response
 
+
     @router.post("/api/account/password")
     async def password(request: Request, body: PasswordInput):
         def read_account():
-            principal = auth.admin(request, True)
+            principal = auth.panel(request, True)
+            if not iam.user_security(store, principal.user_id)['local_login']:
+                raise DevError('OIDC_ONLY_ACCOUNT', '外部账号请在身份提供者修改密码', 403)
             row = store.one("SELECT password_hash FROM users WHERE id=?", (principal.user_id,))
             return principal, row
 
@@ -60,7 +65,7 @@ def make_accounts_router(context: HubContext):
             with store.lock, store.db:
                 # Verification and hashing yield to other requests. A competing
                 # password reset or logout must invalidate this in-flight request.
-                auth.admin(request, True)
+                auth.panel(request, True)
                 changed = store.db.execute("UPDATE users SET password_hash=? WHERE id=? AND password_hash=?", (hashed, principal.user_id, row["password_hash"])).rowcount
                 if not changed:
                     raise DevError("PASSWORD_CHANGED", "密码已变化，请重新登录后重试", 409)

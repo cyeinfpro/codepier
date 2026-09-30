@@ -1300,7 +1300,7 @@ function chatConnect() {
     '/api/native/sessions/' +
       encodeURIComponent(id) +
       '/events?' +
-      new URLSearchParams({ project: c.project, cursor: c.cursor }),
+      new URLSearchParams({ space_id: S.space_id || '', project: c.project, cursor: c.cursor }),
   );
   c.source = source;
   const receive = (e) => {
@@ -2201,7 +2201,11 @@ function chatExport(format) {
     return;
   }
   const a = document.createElement('a');
-  a.href = '/api/native/sessions/' + encodeURIComponent(sid) + '/export?format=' + format;
+  a.href =
+    '/api/native/sessions/' +
+    encodeURIComponent(sid) +
+    '/export?' +
+    new URLSearchParams({ format, space_id: S.space_id || '' });
   a.download = 'conversation.' + format;
   a.click();
   chatStatus('正在导出此会话的完整已同步记录');

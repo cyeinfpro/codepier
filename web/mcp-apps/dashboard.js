@@ -269,7 +269,11 @@ export function mountDashboard(parent, ctx) {
     if (!artifact || artifact.unavailable || artifact.expired || artifact.expires * 1000 <= Date.now()) throw new Error('无法重新确认此交付物，请刷新记录；不会重新生成文件。');
     if (!artifact.device_online) throw new Error('交付物保存在离线设备上，恢复连接后再下载原文件。');
     const base = panelUrl(ctx.panelUrl);
-    const path = '/api/artifacts/' + artifact.artifact_id + '/download';
+    // The server pins the Space in this authenticated link. Construct it from
+    // bounded identifiers rather than accepting an arbitrary returned URL.
+    if (artifact.space_id != null && !/^[A-Za-z0-9_-]{1,100}$/.test(artifact.space_id)) throw new Error('下载空间标识无效。');
+    const path = '/api/artifacts/' + artifact.artifact_id + '/download' +
+      (artifact.space_id != null ? '?space_id=' + encodeURIComponent(artifact.space_id) : '');
     if (!base || !/^[a-f0-9]{32}$/.test(artifact.artifact_id) || artifact.download_path !== path) throw new Error('没有可信的下载入口，请在管理面板按交付物编号下载。');
     const url = new URL(path, base);
     if (url.origin !== base.origin) throw new Error('下载地址不属于当前面板。');

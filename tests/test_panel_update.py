@@ -61,7 +61,7 @@ def bundle_bytes(*, change=None, extra=None, bad_manifest=False):
 def release_for(raw):
     return {'repository': source.DEFAULT_REPOSITORY, 'release_id': 21, 'asset_id': 31,
             'version': TARGET, 'tag': 'v' + TARGET, 'sha256': hashlib.sha256(raw).hexdigest(),
-            'bytes': len(raw), 'url': f'https://github.com/cyeinfpro/codepier/releases/download/v{TARGET}/codepier-{TARGET}-source.zip',
+            'bytes': len(raw), 'url': f'https://github.com/{source.DEFAULT_REPOSITORY}/releases/download/v{TARGET}/codepier-{TARGET}-source.zip',
             'notes': '<img src=x onerror=alert(1)>', 'published_at': '2026-09-22T00:00:00Z', 'checked_at': time.time()}
 
 
@@ -300,6 +300,8 @@ def make_auth_app(root, client):
     store=Store(root/'hub')
     store.execute('INSERT INTO users(id,username,password_hash,created) VALUES (?,?,?,?)',('u1','admin','unused',time.time()))
     store.execute('INSERT INTO sessions(id_hash,user_id,csrf,expires) VALUES (?,?,?,?)',(digest('cookie'),'u1','csrf',time.time()+3600))
+    from tests.legacy_iam_fixture import attach_session_security
+    attach_session_security(store)
     app=FastAPI();runtime=SimpleNamespace(store=store)
     @app.exception_handler(DevError)
     async def error(request,exc): return JSONResponse({'error':{'code':exc.code,'message':exc.message}},status_code=exc.status)

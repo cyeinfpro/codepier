@@ -271,7 +271,7 @@ async def test_catalog_hub_rechecks_mapping_after_await(service):
     obj,project,sid=service
     auth=TestAuth()
     endpoint=next(r.endpoint for r in make_native_router(auth,obj.runtime).routes if r.path=='/api/native/{action}')
-    async def native_request(action,p,args):
+    async def native_request(action,p,args,*,reauthenticate=None):
         project['root']='/changed'
         return {'models':[]}
     obj.request=native_request

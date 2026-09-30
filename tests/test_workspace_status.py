@@ -151,11 +151,11 @@ def test_artifact_metadata_rechecks_mapping_and_never_exposes_credentials(env):
         ('artifacts_register', json.dumps({'ok': True, 'data': {'artifact_id': identifier}}), identifier))
     now = time.time()
     root = runtime.project('P', env[1])['root']
-    runtime.store.execute('INSERT INTO artifacts VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+    runtime.store.execute('INSERT INTO artifacts(id,project_id,device_id,grant_id,actor,root,name,bytes,sha256,created,expires,source_operation_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
         (identifier, 'p', 'd', 'g', env[1].actor, root, 'source.zip', 42, 'a' * 64, now, now + 60, ''))
     receipt = update(env, receipt, evidence=[identifier])
     artifact = dashboard(env, receipt)['evidence'][0]['artifact']
-    assert artifact['download_path'] == '/api/artifacts/' + identifier + '/download'
+    assert artifact['download_path'] == '/api/artifacts/' + identifier + '/download?space_id=legacy'
     assert artifact['immutable'] and not artifact['expired']
     runtime.store.execute('UPDATE artifacts SET expires=? WHERE id=?', (now - 1, identifier))
     assert dashboard(env, receipt)['evidence'][0]['artifact']['expired']
@@ -184,7 +184,7 @@ def test_app_only_catalog_and_explicit_workflow_widget_binding(env):
         tools = {tool['name']: tool for tool in tool_definitions(profile)}
         assert 'workspace_status' not in tools
         assert tools['workspace']['_meta']['ui']['visibility'] == ['model', 'app']
-    assert set(t['name'] for t in tool_definitions('coding')) == CORE_TOOLS
+    assert set(t['name'] for t in tool_definitions('coding')) == CORE_TOOLS | {'get_profile','get_access_context'}
     receipt = create(env)
     value = call(env, 'workflows_get', workflow_id=receipt['workflow_id'])
     bound = attach({'structuredContent': value}, 'workflows_get', {'workflow_id': receipt['workflow_id']}, value, lambda: 'https://panel.example')

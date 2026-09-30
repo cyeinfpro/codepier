@@ -77,6 +77,9 @@ EVIDENCE_FILES = {'full-regression-final.xml','focused-verified.xml','worker-rea
 
 
 REQUIRED_FILES = {
+    'hub/principal.py', 'hub/tool_router.py', 'hub/gateway/service.py', 'hub/iam.py', 'hub/oidc.py',
+    'hub/access_profiles.py','shared/access_profile_contracts.py','web/access-profiles.js',
+    'web/access-profiles.css','docs/ACCESS_PROFILES.md','web/identity.js','web/mcp-gateway.js',
     '.prettierrc.json',
     'agent/background_browser.py',
     'agent/brand_upgrade.py',
@@ -172,6 +175,7 @@ REQUIRED_FILES = {
 }
 
 PUBLIC_DOCS = {
+    'docs/MCP_GATEWAY.md', 'docs/MULTIUSER_OIDC.md', 'docs/DYNAMIC_ROLES.md', 'docs/ACCESS_PROFILES.md', 'docs/UPSTREAM_INTEGRATION.md',
     'docs/FILE_IMPORT.md',
     'docs/CORE_TOOLS.md',
     'docs/AGENT_INSTALL.md',
