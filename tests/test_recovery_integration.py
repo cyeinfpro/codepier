@@ -49,16 +49,16 @@ def test_offline_mcp_read_write_survive_hub_restart(stack):
     name='offline-'+key()+'.py';k=key()
     args={'project':'Imago','path':name,'content':'# queued once\n','expected_sha256':'new','idempotency_key':k}
     try:
-        write=s.mcp('fs_write',args);assert not write['isError']
+        write=s.mcp('write',args);assert not write['isError']
         receipt=write['structuredContent'];assert receipt['pending'] and receipt['state']=='queued'
-        read=s.mcp('fs_read',{'project':'Imago','path':'README.md','idempotency_key':key()})['structuredContent']
+        read=s.mcp('read',{'project':'Imago','path':'README.md','idempotency_key':key()})['structuredContent']
         abrupt_hub_stop(s);s.start_hub()
-        recovered=s.mcp('operations_list',{'project':'Imago','idempotency_key':k})['structuredContent']
+        recovered=s.mcp('process',{'project': 'Imago', 'idempotency_key': k, 'operation': 'list'})['structuredContent']
         assert recovered['operations'][0]['id']==receipt['operation_id']
     finally: s.start_agent()
     assert s.poll(receipt['operation_id'],20)['state']=='succeeded'
     assert '# Imago' in s.poll(read['operation_id'],10)['result']['data']['content']
-    again=s.mcp('fs_write',args)['structuredContent'];assert again['operation_id']==receipt['operation_id']
+    again=s.mcp('write',args)['structuredContent'];assert again['operation_id']==receipt['operation_id']
     assert (s.imago/name).read_text()=='# queued once\n'
     assert len(s.fs('history_list',path=name)['backups'])==1
 
@@ -68,10 +68,10 @@ def test_actual_pytest_survives_running_hub_crash_without_restart(stack):
     code=f'import pathlib,time,os,sys; p=pathlib.Path({counter!r}); p.open("a").write("x"); print("PYTEST_STARTED",flush=True); time.sleep(4); os.execv(sys.executable,[sys.executable,"-m","pytest","-q"])'
     install_task(s,name,[sys.executable,'-u','-c',code])
     k=key();args={'project':'Imago','task':name,'idempotency_key':k}
-    receipt=s.mcp('tasks_run',args)['structuredContent']
+    receipt=s.mcp('exec',{**(args), 'yield_seconds': 0})['structuredContent']
     wait_for(lambda:(s.imago/counter).exists())
     abrupt_hub_stop(s);time.sleep(.3);restart_hub(s)
-    repeated=s.mcp('tasks_run',args)['structuredContent'];assert repeated['operation_id']==receipt['operation_id']
+    repeated=s.mcp('exec',{**(args), 'yield_seconds': 0})['structuredContent'];assert repeated['operation_id']==receipt['operation_id']
     op=s.poll(receipt['operation_id'],25)
     assert op['state']=='succeeded' and op['result']['data']['exit_code']==0
     assert 'passed' in op['output'] and (s.imago/counter).read_text()=='x'
@@ -99,7 +99,7 @@ def test_completion_while_hub_down_is_replayed_not_reexecuted(stack):
 def test_concurrent_lost_response_retries_write_one_backup(stack):
     s=stack;name='concurrent-'+key()+'.txt';args={'project':'Imago','path':name,'expected_sha256':'new','content':'one intentional write','idempotency_key':key()}
     def call(_):
-        response=s.mcp('fs_write',args);assert not response['isError'];return response['structuredContent']['operation_id']
+        response=s.mcp('write',args);assert not response['isError'];return response['structuredContent']['operation_id']
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool: ids=list(pool.map(call,range(12)))
     assert len(set(ids))==1 and s.poll(ids[0])['state']=='succeeded'
     assert (s.imago/name).read_text()=='one intentional write'
@@ -124,7 +124,7 @@ def test_pending_grant_revocation_prevents_delayed_write(stack):
     name='revoked-'+key()+'.txt'
     s.stop_agent();wait_for(lambda:not online(s))
     try:
-        receipt=s.mcp('fs_write',{'project':'Imago','path':name,'content':'must not write','expected_sha256':'new','idempotency_key':key()},grant['token'])['structuredContent']
+        receipt=s.mcp('write',{'project':'Imago','path':name,'content':'must not write','expected_sha256':'new','idempotency_key':key()},grant['token'])['structuredContent']
         s.must(s.client.delete('/api/grants/'+grant['grant_id']))
     finally:s.start_agent()
     op=s.poll(receipt['operation_id'],15)
@@ -183,8 +183,8 @@ def test_multiple_hub_restarts_keep_completed_write_receipt(stack):
 
 
 def test_operations_list_cannot_cross_token_scope(stack):
-    s=stack;receipt=s.mcp('fs_read',{'project':'Imago','path':'README.md','idempotency_key':key()})['structuredContent']
+    s=stack;receipt=s.mcp('read',{'project':'Imago','path':'README.md','idempotency_key':key()})['structuredContent']
     grant=s.must(s.client.post('/api/grants',json={'label':'different-grant','scopes':['read'],'projects':[s.project['id']],'days':1}))
-    result=s.mcp('operations_list',{'project':'Imago'},grant['token'])['structuredContent']
+    result=s.mcp('process',{'project': 'Imago', 'operation': 'list'},grant['token'])['structuredContent']
     assert receipt['operation_id'] not in [x['id'] for x in result['operations']]
-    assert s.mcp('operations_wait',{'operation_id':receipt['operation_id'],'wait_seconds':0},grant['token'])['isError']
+    assert s.mcp('process',{'wait_seconds': 0, 'operation': 'wait', 'operation_ids': [receipt['operation_id']]},grant['token'])['isError']

@@ -122,7 +122,7 @@ class FileEngine:
         except OSError as exc:
             raise DevError("DURABILITY_UNCONFIRMED", "文件系统已改变，但目录落盘失败；请先核查当前文件和备份，勿盲目重试", 500) from exc
 
-    def read_bytes(self, path: Path, missing: bool = False) -> bytes | None:
+    def read_bytes(self, path: Path, missing: bool = False, *, max_bytes: int = MAX_FILE) -> bytes | None:
         try:
             flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
             fd = os.open(path, flags)
@@ -140,18 +140,18 @@ class FileEngine:
                 raise DevError("NOT_FILE", "只能读取普通文件")
             if s.st_nlink > 1:
                 raise DevError("HARDLINK_BLOCKED", "不读写有多个硬链接的文件", 403)
-            if s.st_size > MAX_FILE:
-                raise DevError("FILE_TOO_LARGE", "单个文件上限为 1 MiB；请在本机拆分处理")
+            if s.st_size > max_bytes:
+                raise DevError("FILE_TOO_LARGE", f"单个文件上限为 {max_bytes} bytes；请用 exec 拆分读取")
             chunks, size = [], 0
-            while size <= MAX_FILE:
-                block = os.read(fd, min(65536, MAX_FILE + 1 - size))
+            while size <= max_bytes:
+                block = os.read(fd, min(65536, max_bytes + 1 - size))
                 if not block:
                     break
                 chunks.append(block)
                 size += len(block)
             data = b"".join(chunks)
-            if len(data) > MAX_FILE:
-                raise DevError("FILE_TOO_LARGE", "文件超过 1 MiB")
+            if len(data) > max_bytes:
+                raise DevError("FILE_TOO_LARGE", f"文件超过 {max_bytes} bytes")
             latest = os.fstat(fd)
             if (s.st_size, s.st_mtime_ns, s.st_ctime_ns) != (latest.st_size, latest.st_mtime_ns, latest.st_ctime_ns):
                 raise DevError("FILE_CHANGED", "文件在读取期间改变，请重新读取", 409)

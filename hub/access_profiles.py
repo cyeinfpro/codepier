@@ -4,6 +4,7 @@ The grant, not the profile, continues to own operations, workflows and leases.
 A ChatGPT conversation/project name is never an authorization input.
 """
 from __future__ import annotations
+from hub.db_worker import database_endpoint
 
 import hashlib
 import json
@@ -75,7 +76,7 @@ def effective_grant(store, grant):
         if iam.installed(store):
             allowed = {row['id'] for row in store.all('SELECT id FROM projects WHERE space_id=?', (grant.get('space_id','legacy'),))}
             projects = sorted(allowed if '*' in projects else allowed & set(projects))
-            from hub.runtime import Principal
+            from hub.principal import Principal
             owner = Principal('', grant['user_id'], set(), [], space_id=grant.get('space_id','legacy'))
             permissions = iam.project_permissions(store, owner)
             projects = [pid for pid in projects if 'read' in permissions.get(pid, ())]
@@ -198,7 +199,7 @@ def profile_values(store, body, user_id, space_id="legacy"):
         iam.role_eligible(store, user_id, body.role_id, space_id)
     projects = [] if body.role_id and not body.projects and not body.all_projects else project_selection(store, body.projects, body.all_projects, space_id=space_id)
     if not body.role_id and not iam.is_space_admin(store, user_id, space_id):
-        from hub.runtime import Principal
+        from hub.principal import Principal
         candidate = Principal('', user_id, set(), [], space_id=space_id)
         permissions = iam.project_permissions(store, candidate)
         if '*' in projects or any(not scopes <= permissions.get(pid, set()) for pid in projects):
@@ -214,7 +215,8 @@ def make_profiles_router(auth, runtime):
     router, store = APIRouter(), runtime.store
 
     @router.get('/api/access-profiles')
-    async def list_profiles(request: Request):
+    @database_endpoint(store)
+    def list_profiles(request: Request):
         principal = auth.panel(request)
         rows = store.all('SELECT * FROM access_profiles WHERE user_id=? AND space_id=? ORDER BY label_key,id LIMIT ?',
                          (principal.user_id, principal.space_id, MAX_PROFILES))
@@ -229,7 +231,8 @@ def make_profiles_router(auth, runtime):
         return {'profiles': items, 'limit': MAX_PROFILES}
 
     @router.get('/api/access-profiles/{profile_id}')
-    async def read_profile(profile_id: str, request: Request):
+    @database_endpoint(store)
+    def read_profile(profile_id: str, request: Request):
         principal = auth.panel(request)
         row = store.one('SELECT * FROM access_profiles WHERE id=? AND user_id=? AND space_id=?', (profile_id, principal.user_id, principal.space_id))
         if not row:
@@ -237,7 +240,8 @@ def make_profiles_router(auth, runtime):
         return public_profile(row)
 
     @router.post('/api/access-profiles', status_code=201)
-    async def create_profile(request: Request, body: ProfileCreate):
+    @database_endpoint(store)
+    def create_profile(request: Request, body: ProfileCreate):
         principal = auth.panel(request, True)
         fingerprint = hashlib.sha256(json.dumps(body.model_dump(exclude={'idempotency_key'}),
                                                 sort_keys=True, ensure_ascii=False).encode()).hexdigest()
@@ -268,7 +272,8 @@ def make_profiles_router(auth, runtime):
         return public_profile(row)
 
     @router.put('/api/access-profiles/{profile_id}')
-    async def update_profile(profile_id: str, request: Request, body: ProfileUpdate):
+    @database_endpoint(store)
+    def update_profile(profile_id: str, request: Request, body: ProfileUpdate):
         principal = auth.panel(request, True)
         with store.lock, store.db:
             store.db.execute('BEGIN IMMEDIATE')
@@ -292,7 +297,7 @@ def make_profiles_router(auth, runtime):
                               {'before': public_profile(row), 'label': label, 'scopes': scopes, 'projects': projects,
                                 'enabled': body.enabled, 'role_id': body.role_id, 'existing_grant_consent_unchanged': True})
             row = store.one('SELECT * FROM access_profiles WHERE id=?', (profile_id,))
-        runtime.wake.set()
+        runtime.wake_delivery()
         return public_profile(row)
 
     return router

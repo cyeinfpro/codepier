@@ -1,0 +1,35 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers"
+asyncio_mode = "strict"
+markers = [
+  "browser: requires a real isolated Playwright browser or its shared browser fixture",
+  "integration: exercises processes, transports, or a real Hub/Agent stack",
+  "slow: browser or multi-process acceptance; exclude for the shortest feedback loop",
+  "smoke: bounded login/project/Agent/tool/audit golden path",
+  "windows_core: portable core plus Windows-specific recovery contracts run in Windows CI",
+  "isolated_case: independent expensive parameter case that can run in its own pytest process",
+  "serial_regression: timing or restart-sensitive module that must not overlap another full-regression process",
+]
+
+[tool.coverage.run]
+source = ["agent", "hub", "shared", "scripts"]
+branch = true
+parallel = true
+relative_files = true
+patch = ["subprocess"]
+omit = ["tests/*", "*/site-packages/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+[tool.mypy]
+python_version = "3.13"
+# Expand deliberately; this is an incremental contract/configuration gate,
+# not a claim that the legacy application has been fully type-checked.
+files = ["shared/config.py", "hub/config.py", "scripts/regression_plan.py"]
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+follow_imports = "silent"

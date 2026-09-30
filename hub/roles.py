@@ -5,6 +5,7 @@ caller a panel administrator; identities, operation ownership and local gates st
 separate. No model-supplied role selector is accepted by the runtime.
 """
 from __future__ import annotations
+from hub.db_worker import database_endpoint
 
 import hashlib
 import json
@@ -64,9 +65,22 @@ class DeviceRule(AccessModel):
         return self
 
 
+class ConnectorRule(AccessModel):
+    binding_id: str = Field(pattern=r'^gwb_[a-f0-9]{32}$')
+    tools: list[str] = Field(min_length=1, max_length=128)
+
+    @model_validator(mode='after')
+    def exact_tools(self):
+        from hub.gateway.catalog import TOOL_NAME
+        if len(set(self.tools)) != len(self.tools) or any(not TOOL_NAME.fullmatch(name) for name in self.tools):
+            raise ValueError('MCP 工具必须是明确且不重复的原始名称，不支持通配符')
+        return self
+
+
 class RolePolicy(AccessModel):
     project_rules: list[ProjectRule] = Field(default_factory=list, max_length=32)
     device_rules: list[DeviceRule] = Field(default_factory=list, max_length=32)
+    connector_rules: list[ConnectorRule] = Field(default_factory=list, max_length=32)
 
 
 class RoleFields(RolePolicy):
@@ -291,7 +305,13 @@ def role_values(store, body, space_id="legacy"):
         raise DevError('INVALID_PROJECT', '角色中包含已不存在的项目；请重新读取后明确移除旧引用')
     if any(not set(rule.devices) <= devices for rule in body.device_rules):
         raise DevError('INVALID_DEVICE', '角色中包含不存在的设备')
+    for rule in body.connector_rules:
+        binding = store.one('SELECT tools FROM gateway_bindings WHERE id=? AND space_id=?', (rule.binding_id, space_id))
+        if not binding or not set(rule.tools) <= {tool['name'] for tool in json.loads(binding['tools'])}:
+            raise DevError('GATEWAY_RULE_INVALID', 'MCP 规则必须引用当前空间已批准的工具与 binding')
     policy = body.model_dump(include={'project_rules', 'device_rules'})
+    if body.connector_rules:
+        policy['connector_rules'] = [rule.model_dump() for rule in body.connector_rules]
     return label, unicodedata.normalize('NFKC', label).casefold(), json.dumps(policy, sort_keys=True, ensure_ascii=False)
 
 
@@ -300,13 +320,15 @@ def make_roles_router(auth, runtime):
     router, store = APIRouter(), runtime.store
 
     @router.get('/api/access-roles')
-    async def list_roles(request: Request):
+    @database_endpoint(store)
+    def list_roles(request: Request):
         owner = auth.panel(request)
         rows = store.all('SELECT * FROM access_roles WHERE space_id=? ORDER BY label_key,id LIMIT ?', (owner.space_id, MAX_ROLES)) if owner.admin else iam.assigned_roles(store, owner.user_id, owner.space_id)
         return {'roles': [public_role(row, store if owner.admin else None) for row in rows], 'limit': MAX_ROLES}
 
     @router.get('/api/access-roles/{identifier}')
-    async def get_role(identifier: str, request: Request):
+    @database_endpoint(store)
+    def get_role(identifier: str, request: Request):
         owner = auth.panel(request)
         row = store.one('SELECT * FROM access_roles WHERE id=? AND space_id=?', (identifier, owner.space_id))
         if row and not owner.admin:
@@ -316,7 +338,8 @@ def make_roles_router(auth, runtime):
         return public_role(row, store if owner.admin else None)
 
     @router.post('/api/access-roles', status_code=201)
-    async def create_role(request: Request, body: RoleCreate):
+    @database_endpoint(store)
+    def create_role(request: Request, body: RoleCreate):
         owner = auth.admin(request, True)
         fingerprint = hashlib.sha256(json.dumps(body.model_dump(exclude={'idempotency_key'}), sort_keys=True).encode()).hexdigest()
         with store.lock, store.db:
@@ -341,7 +364,8 @@ def make_roles_router(auth, runtime):
         return public_role(row, store)
 
     @router.put('/api/access-roles/{identifier}')
-    async def update_role(identifier: str, request: Request, body: RoleUpdate):
+    @database_endpoint(store)
+    def update_role(identifier: str, request: Request, body: RoleUpdate):
         owner = auth.admin(request, True)
         with store.lock, store.db:
             store.db.execute('BEGIN IMMEDIATE')
@@ -349,6 +373,8 @@ def make_roles_router(auth, runtime):
             row = store.one('SELECT * FROM access_roles WHERE id=? AND space_id=?', (identifier, owner.space_id))
             if not row:
                 raise DevError('ROLE_NOT_FOUND', '角色不存在', 404)
+            if 'connector_rules' not in body.model_fields_set:
+                body = body.model_copy(update={'connector_rules': _policy(row).connector_rules})
             label, key, policy = role_values(store, body, owner.space_id)
             same = (label, json.loads(policy), body.enabled) == (row['label'], json.loads(row['policy']), bool(row['enabled']))
             if body.expected_version != row['version'] and not same:
@@ -362,7 +388,7 @@ def make_roles_router(auth, runtime):
                     raise DevError('ROLE_EXISTS', '已有同名角色', 409) from exc
                 row = store.one('SELECT * FROM access_roles WHERE id=?', (identifier,))
                 profile_audit(store, owner.actor, 'role.updated', identifier, {'before': before, 'after': public_role(row, store), 'applies_to_existing_role_grants': True})
-        runtime.wake.set()
+        runtime.wake_delivery()
         return public_role(row, store)
 
     return router

@@ -18,6 +18,7 @@ from shared.contracts import OUTPUT_SCHEMAS
 from shared.mcp_protocol import MODERN, PREFIX
 from jsonschema import Draft202012Validator
 from tests.support import running_stack, wait_for, BASE
+from hub.core_tools import public_call
 
 
 @pytest.fixture(scope='module')
@@ -38,7 +39,8 @@ def integrated_stack(tmp_path_factory):
 def resolved(s,name,args=None,*,panel=False,expect='succeeded'):
     args={'project':'Imago',**(args or {})}
     if name not in {'activity_list','workflows_handoff'}:args.setdefault('idempotency_key',uuid.uuid4().hex)
-    result=s.call(name,args) if panel else s.mcp(name,args)['structuredContent']
+    public_name, public_args = public_call(name, args)
+    result=s.call(name,args) if panel else s.mcp(public_name,public_args)['structuredContent']
     if result.get('pending'):
         operation=s.poll(result['operation_id'],timeout=35)
         assert operation['state']==expect,operation
@@ -68,11 +70,11 @@ def test_legacy_and_modern_protocols_are_distinct_and_share_permissions(integrat
     assert new.status_code==200,new.text
     result=new.json()['result'];assert result['resultType']=='complete' and MODERN in result['supportedVersions']
     tools=modern(s,'tools/list').json()['result']['tools']
-    assert 'download_artifact' in {t['name'] for t in tools}
+    assert 'write' in {t['name'] for t in tools}
     assert not {'integration_control','validations_accept'}&{t['name'] for t in tools}
-    read=modern(s,'tools/call',{'name':'fs_read','arguments':{'project':'Imago','path':'README.md'}})
+    read=modern(s,'tools/call',{'name':'read','arguments':{'project':'Imago','path':'README.md'}})
     assert read.status_code==200 and not read.json()['result']['isError'],read.text
-    mismatch=modern(s,'tools/call',{'name':'fs_read','arguments':{'project':'Imago','path':'README.md'}},**{'Mcp-Name':'fs_delete'})
+    mismatch=modern(s,'tools/call',{'name':'read','arguments':{'project':'Imago','path':'README.md'}},**{'Mcp-Name':'edit'})
     assert mismatch.status_code>=400 and 'error' in mismatch.json()
     assert modern(s,'initialize').json().get('error')
     bad=modern(s,'tools/call',{'name':'integration_control','arguments':{'project':'Imago','action':'resume','confirm':'Imago','idempotency_key':uuid.uuid4().hex}})
@@ -91,12 +93,12 @@ def test_apps_resources_are_real_built_documents_and_bound_to_snapshots(integrat
     card=s.rpc('resources/read',{'uri':'ui://codepier/changes-v1.html'}).json()['result']['contents'][0]
     assert card['mimeType']=='text/html;profile=mcp-app' and '<script>' in card['text']
     assert card['_meta']['ui']['csp']['connectDomains']==[]
-    opened=s.mcp('open_workspace',{'project':'Imago','capture_baseline':True})
+    opened=s.mcp('workspace',{'project': 'Imago', 'capture_baseline': True, 'operation': 'open'})
     assert opened['_meta']['com.codepier/binding']['project']=='Imago'
     data=opened['structuredContent']
     if data.get('pending'):data=s.poll(data['operation_id'])['result']['data']
     (s.imago/'card-snapshot.txt').write_text('before later changes\n')
-    review=s.mcp('show_changes',{'project':'Imago','baseline_ref':data['baseline_ref']})
+    review=s.mcp('read',{'project': 'Imago', 'operation': 'changes', 'options': {'baseline_ref': data['baseline_ref']}})
     value=review['structuredContent']
     if value.get('pending'):value=s.poll(value['operation_id'])['result']['data']
     first=resolved(s,'show_changes',{'review_ref':value['review_ref'],'path':'card-snapshot.txt'})
@@ -114,11 +116,11 @@ def test_worktree_is_real_isolated_scoped_and_safe_to_remove(integrated_stack):
     result=resolved(s,'fs_write',{'workspace_id':workspace,'path':'isolated.txt','content':'only this worktree','expected_sha256':'new'})
     assert (target/'isolated.txt').read_text()=='only this worktree' and not (s.imago/'isolated.txt').exists()
     issued=s.client.post('/api/grants',json={'label':'other-worktree-owner','scopes':['read','write','execute'],'projects':[s.project['id']],'days':1}).json()
-    denied=s.mcp('fs_read',{'project':'Imago','workspace_id':workspace,'path':'README.md'},token_value=issued['token'])
+    denied=s.mcp('read',{'project':'Imago','workspace_id':workspace,'path':'README.md'},token_value=issued['token'])
     if denied['structuredContent'].get('pending'):
         assert s.poll(denied['structuredContent']['operation_id'])['state']=='failed'
     else:assert denied['isError']
-    removal=s.mcp('worktrees_remove',{'project':'Imago','target_workspace_id':workspace,'confirm':workspace,'idempotency_key':uuid.uuid4().hex})['structuredContent']
+    removal=s.mcp('workspace',{'project': 'Imago', 'idempotency_key': uuid.uuid4().hex, 'operation': 'worktree_remove', 'options': {'target_workspace_id': workspace, 'confirm': workspace}})['structuredContent']
     if removal.get('pending'):assert s.poll(removal['operation_id'])['state']=='failed'
     else:assert removal.get('error')
     assert target.exists()
@@ -128,7 +130,7 @@ def test_worktree_is_real_isolated_scoped_and_safe_to_remove(integrated_stack):
     assert len(hits['results'])==1
     archive=resolved(s,'artifacts_register',{'workspace_id':workspace,'path':'isolated.txt'})
     assert s.client.get(archive['download_path']).content==b'only this worktree'
-    resolved(s,'fs_delete',{'workspace_id':workspace,'path':'isolated.txt','expected_sha256':result['sha256']})
+    resolved(s,'apply_patch',{'workspace_id':workspace,'changes':[{'action':'delete','path':'isolated.txt','expected_sha256':result['sha256']}]})
     deleted=resolved(s,'worktrees_remove',{'target_workspace_id':workspace,'confirm':workspace})
     assert deleted['removed'] and not target.exists()
     assert s.client.get(archive['download_path']).content==b'only this worktree'
@@ -176,9 +178,9 @@ def test_pause_keeps_reads_and_receipts_but_blocks_new_remote_writes(integrated_
     try:
         assert paused['paused']
         assert resolved(s,'fs_read',{'path':'README.md'})['content']==previous['content']
-        denied=s.mcp('fs_write',{'project':'Imago','path':'paused-write.txt','content':'no','expected_sha256':'new','idempotency_key':uuid.uuid4().hex})
+        denied=s.mcp('write',{'project':'Imago','path':'paused-write.txt','content':'no','expected_sha256':'new','idempotency_key':uuid.uuid4().hex})
         assert denied['isError'] and not (s.imago/'paused-write.txt').exists()
-        assert not s.mcp('operations_get',{'operation_id':previous['operation_id']})['isError']
+        assert not s.mcp('process',{'operation': 'get', 'operation_ids': [previous['operation_id']]})['isError']
         state=resolved(s,'readiness_get');assert state['admission']['paused']
     finally:
         assert not resolved(s,'integration_control',{'action':'resume','confirm':'Imago'},panel=True)['paused']
@@ -187,7 +189,7 @@ def test_pause_keeps_reads_and_receipts_but_blocks_new_remote_writes(integrated_
 def test_emergency_stop_targets_owned_process_not_the_agent(integrated_stack):
     s=integrated_stack
     command=shlex.quote(sys.executable)+' -u -c '+shlex.quote('import time; print("STOP-FIXTURE-READY",flush=True); time.sleep(90)')
-    receipt=s.mcp('shell_exec',{'project':'Imago','command':command,'idempotency_key':uuid.uuid4().hex})['structuredContent']
+    receipt=s.mcp('exec',{'project': 'Imago', 'command': command, 'idempotency_key': uuid.uuid4().hex, 'yield_seconds': 0})['structuredContent']
     wait_for(lambda:'STOP-FIXTURE-READY' in s.client.get('/api/operations/'+receipt['operation_id']).json().get('output',''),timeout=15)
     try:
         stopped=resolved(s,'integration_control',{'action':'stop','confirm':'Imago','include_native':False},panel=True)
@@ -200,25 +202,25 @@ def test_emergency_stop_targets_owned_process_not_the_agent(integrated_stack):
 def test_activity_is_real_timing_not_model_thinking_and_is_scoped(integrated_stack):
     s=integrated_stack
     for _ in range(2):
-        result=s.rpc('tools/call',{'name':'fs_read','arguments':{'project':'Imago','path':'README.md'},'_meta':{'openai/session':'PRIVATE_HOST_HINT'}})
+        result=s.rpc('tools/call',{'name':'read','arguments':{'project':'Imago','path':'README.md'},'_meta':{'openai/session':'PRIVATE_HOST_HINT'}})
         assert not result.json()['result']['isError'];time.sleep(.02)
     items=resolved(s,'activity_list')['activities']
-    reads=[x for x in items if x['tool']=='fs_read' and x['window_key']]
+    reads=[x for x in items if x['tool']=='read' and x['window_key']]
     assert len(reads)>=2 and any(x['next_call_gap_ms'] is not None for x in reads)
     assert all(x['service_ms'] is not None and x['status']!='running' for x in reads)
     assert 'PRIVATE_HOST_HINT' not in json.dumps(items)
     grant=s.client.post('/api/grants',json={'label':'other-observer','scopes':['read'],'projects':[s.project['id']],'days':1}).json()
-    own=s.mcp('activity_list',{'project':'Imago'},token_value=grant['token'])['structuredContent']['activities']
-    assert all(row['tool']=='activity_list' and row['window_key'] is None for row in own)
+    own=s.mcp('process',{'operation':'activity','project':'Imago'},token_value=grant['token'])['structuredContent']['activities']
+    assert all(row['tool']=='process' and row['window_key'] is None for row in own)
     s.client.delete('/api/grants/'+grant['grant_id'])
 
 
 def test_handoff_preserves_goal_and_does_not_start_execution(integrated_stack):
     s=integrated_stack
-    created=s.mcp('workflows_create',{'project':'Imago','title':'Handoff fixture','goal':'Keep original intent','idempotency_key':uuid.uuid4().hex})['structuredContent']
-    result=s.mcp('workflows_handoff',{'workflow_id':created['workflow_id']})['structuredContent']
+    created=s.mcp('workspace',{'project': 'Imago', 'idempotency_key': uuid.uuid4().hex, 'operation': 'workflow_create', 'options': {'title': 'Handoff fixture', 'goal': 'Keep original intent'}})['structuredContent']
+    result=s.mcp('workspace',{'operation': 'handoff', 'options': {'workflow_id': created['workflow_id']}})['structuredContent']
     assert result['original_goal']=='Keep original intent' and not result['execution_started']
-    assert result['remaining'] and result['next']['tool']=='workflows_get'
+    assert result['remaining'] and result['next']['tool']=='workspace' and result['next']['arguments']['operation']=='workflow_get'
 
 
 def test_local_owner_control_is_loopback_authenticated_and_journaled(integrated_stack):

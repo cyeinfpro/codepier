@@ -21,7 +21,7 @@ export function mountReview(parent, value, ctx) {
   parent.append(files, tools);
   let next = value.next_offset ?? 0;
   async function read(args) {
-    const result = await ctx.read('show_changes', {...ctx.target, review_ref: reference, ...args});
+    const result = await ctx.read('read', {...ctx.target, operation: 'changes', options: {review_ref: reference, ...args}});
     if (!alive() || !result) return null;
     if (result.review_ref !== reference) throw new Error('快照编号发生变化，已停止读取。');
     return result;

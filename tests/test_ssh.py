@@ -154,7 +154,7 @@ async def test_invalid_password_never_leaks_validation_input(shell_agent):
 
 def test_ssh_catalog_and_error_classification():
     for profile in ('full', 'coding'):
-        tool = next(t for t in tool_definitions(profile) if t['name'] == 'ssh_exec')
+        tool = next(t for t in tool_definitions(profile) if t['name'] == 'exec')
         assert not tool['annotations']['readOnlyHint']
         assert tool['annotations']['destructiveHint'] and tool['annotations']['openWorldHint']
         assert set(tool['securitySchemes'][0]['scopes']) == {'read', 'execute'}
@@ -192,32 +192,38 @@ def test_mcp_ssh_recovery_cancel_scope_and_secret_storage(stack):
     stack.config['shell'] = {'enabled': True, 'projects': ['Imago'], 'command': ['/bin/sh', '-c'], 'env': {'PATH': path}}
     atomic_json(stack.config_path, stack.config)
     stack.start_agent()
-    call = args(project='Imago', command='printf once >> ssh-count; sleep 2; printf remote-ok')
-    receipt = stack.mcp('ssh_exec', call)['structuredContent']
+    from tests.test_vps import create_remote
+    remote = create_remote(stack)
+    invalid_remote = create_remote(stack, password='wrong')
+    def execution(command='printf remote-ok', wrong=False):
+        return {'project':'Imago','target':'vps:'+ (invalid_remote if wrong else remote)['id'],
+                'command':command,'yield_seconds':0,'idempotency_key':uuid.uuid4().hex}
+    call = execution(command='printf once >> ssh-count; sleep 2; printf remote-ok')
+    receipt = stack.mcp('exec', call)['structuredContent']
     opid = receipt['operation_id']
     assert receipt['pending']
     wait_for(lambda: 'transport-ready' in stack.client.get('/api/operations/' + opid).json()['output'])
-    assert stack.mcp('ssh_exec', call)['structuredContent']['operation_id'] == opid
+    assert stack.mcp('exec', call)['structuredContent']['operation_id'] == opid
     stack.hub.terminate(); stack.hub.wait(timeout=12); stack.start_hub(); stack.login()
     completed = stack.poll(opid, timeout=15)
     assert completed['state'] == 'succeeded'
     assert completed['result']['data']['command_ok']
     assert PASSWORD not in json.dumps(completed)
     assert (stack.imago / 'ssh-count').read_text() == 'once'
-    failed = stack.mcp('ssh_exec', args(project='Imago', password='wrong'))['structuredContent']['operation_id']
+    failed = stack.mcp('exec', execution(wrong=True))['structuredContent']['operation_id']
     result = stack.poll(failed)
     assert result['state'] == 'failed' and result['result']['data']['ssh_error'] == 'SSH_AUTH_FAILED'
-    cancelled = stack.mcp('ssh_exec', args(project='Imago', command='sleep 20; touch must-not-exist'))['structuredContent']['operation_id']
+    cancelled = stack.mcp('exec', execution(command='sleep 20; touch must-not-exist'))['structuredContent']['operation_id']
     wait_for(lambda: 'transport-ready' in stack.client.get('/api/operations/' + cancelled).json()['output'])
-    stack.mcp('operations_cancel', {'operation_id': cancelled})
+    stack.mcp('process', {'operation': 'cancel', 'operation_ids': [cancelled]})
     assert stack.poll(cancelled)['state'] == 'cancelled'
     assert not (stack.imago / 'must-not-exist').exists()
     grant = stack.must(stack.client.post('/api/grants', json={'label': 'ssh-readonly', 'scopes': ['read'], 'projects': [stack.project['id']], 'days': 1}))
-    denied = stack.mcp('ssh_exec', args(project='Imago'), token_value=grant['token'])
+    denied = stack.mcp('exec', execution(), token_value=grant['token'])
     assert denied['isError'] and 'execute' in denied['content'][0]['text']
     stack.stop_agent()
     grant = stack.must(stack.client.post('/api/grants', json={'label': 'ssh-revoke', 'scopes': ['read', 'execute'], 'projects': [stack.project['id']], 'days': 1}))
-    queued = stack.mcp('ssh_exec', args(project='Imago', command='touch revoked-ssh'), token_value=grant['token'])['structuredContent']['operation_id']
+    queued = stack.mcp('exec', execution(command='touch revoked-ssh'), token_value=grant['token'])['structuredContent']['operation_id']
     stack.must(stack.client.delete('/api/grants/' + grant['grant_id']))
     stack.start_agent()
     assert stack.poll(queued)['state'] == 'failed'

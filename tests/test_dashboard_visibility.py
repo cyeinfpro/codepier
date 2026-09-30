@@ -11,7 +11,8 @@ def test_empty_dashboard_discovers_a_new_task_without_manual_refresh(host_bundle
     calls=[];started=False;task=fixture_task('a'*32,'Created after opening')
     def host_tool(params):
         calls.append(params['name'])
-        assert params['name']=='workspace_status'
+        assert params['name']=='workspace'
+        assert params['arguments']['operation']=='dashboard'
         return response(fixture_workspace(workflows=[task] if started else []))
     page.expose_function('codepierHostTool',host_tool)
     try:
@@ -32,10 +33,14 @@ def test_hidden_log_following_resumes_when_the_card_becomes_visible(host_bundle,
     evidence=[{'operation_id':operation,'tool':'shell_exec','state':'running','pending':True,'updated':time.time()}]
     def host_tool(params):
         calls.append(params['name'])
-        if params['name']=='workspace_status':return response(fixture_workspace(task,evidence,[task]))
-        assert params['name']=='operations_get'
-        return response({'id':operation,'operation_id':operation,'tool':'shell_exec','project_id':'p',
-            'state':'running','pending':True,'args_summary':{},'output':state['output'],'output_seq':state['seq']})
+        if params['name']=='workspace':
+            assert params['arguments']['operation']=='dashboard'
+            return response(fixture_workspace(task,evidence,[task]))
+        assert params['name']=='process'
+        assert params['arguments']['operation']=='get'
+        assert params['arguments']['operation_ids']==[operation]
+        return response({'operations':[{'id':operation,'operation_id':operation,'tool':'shell_exec','project_id':'p',
+            'state':'running','pending':True,'args_summary':{},'output':state['output'],'output_seq':state['seq']}]})
     page.expose_function('codepierHostTool',host_tool)
     try:
         app=mount(page,host_bundle,response({'workspace':{'project':'Imago','project_id':'p'},'workflow_id':task['workflow_id']}))
@@ -44,14 +49,14 @@ def test_hidden_log_following_resumes_when_the_card_becomes_visible(host_bundle,
         frame=page.locator('#app-frame').element_handle().content_frame()
         frame.evaluate('''() => {Object.defineProperty(document,'hidden',{configurable:true,get:()=>true});
           document.dispatchEvent(new Event('visibilitychange'));}''')
-        before=calls.count('operations_get')
+        before=calls.count('process')
         page.wait_for_timeout(2200)
-        assert calls.count('operations_get')==before
+        assert calls.count('process')==before
         state.update(output='new log on visibility restoration',seq=2)
         frame.evaluate('''() => {Object.defineProperty(document,'hidden',{configurable:true,get:()=>false});
           document.dispatchEvent(new Event('visibilitychange'));}''')
         expect(app.locator('.inspector > pre')).to_have_text(state['output'])
-        assert calls.count('operations_get')>before
+        assert calls.count('process')>before
         expect(app.locator('.inspector input[type=checkbox]')).to_be_checked()
         assert not page.evaluate('window.codepierHostErrors')
     finally:page.context.close()

@@ -1,7 +1,7 @@
 """Final button-level regressions, using isolated native transport fixtures."""
 import pytest
 from playwright.sync_api import expect
-from tests.test_chat_browser import chat_page,event
+from tests.browser_support import chat_page,event
 from tests.test_chat_complete_browser import send
 
 

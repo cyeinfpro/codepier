@@ -124,7 +124,9 @@ def test_real_worker_stream_final_dedup_usage_and_continuation(worker):
     messages = [e for e in events if e['type'] == 'message']
     assert ''.join(e['text'] for e in deltas) == 'hello 世界'
     assert len(messages) == 1 and messages[0]['item_id'] == deltas[0]['item_id']
-    assert len([e for e in events if e['type'] == 'reasoning']) == 1
+    reasoning = [e for e in events if e['type'] == 'reasoning']
+    assert ''.join(e['text'] for e in reasoning) == 'fixture thought'
+    assert reasoning[-1]['status'] == 'end'
     assert len([e for e in events if e['type'] == 'user']) == 1
     assert any(e['type'] == 'tool' and e['status'] == 'end' for e in events)
     stats = next(e['stats'] for e in events if e['type'] == 'stats')
@@ -135,6 +137,47 @@ def test_real_worker_stream_final_dedup_usage_and_continuation(worker):
     wait_for(lambda: w.state(second) == 'completed', 8)
     wire = [json.loads(x) for x in (w.root / 'claude-wire.jsonl').read_text().splitlines()]
     assert [m for m in wire if m['type'] == 'user'][-1]['session_id'] == native_id
+
+
+def test_split_blocks_keep_stream_identity_and_distinct_repeated_text():
+    p, sent, events, done = protocol();p.prompt('turn', {'text':'inspect'})
+    def stream(value):p.receive({'type':'stream_event','event':value})
+    stream({'type':'message_start','message':{'id':'main-message'}})
+    stream({'type':'content_block_start','index':0,'content_block':{'type':'thinking','thinking':''}})
+    stream({'type':'content_block_stop','index':0})
+    for index in (1, 2):
+        stream({'type':'content_block_start','index':index,'content_block':{'type':'text','text':''}})
+        stream({'type':'content_block_delta','index':index,'delta':{'type':'text_delta','text':'same'}})
+        frame={'type':'assistant','uuid':f'block-{index}','message':{'id':'main-message','content':[{'type':'text','text':'same complete'}]}}
+        p.receive(frame);p.receive(frame)
+        stream({'type':'content_block_stop','index':index})
+    deltas=[e for e in events if e['type']=='delta']
+    finals=[e for e in events if e['type']=='message']
+    assert [e['item_id'] for e in deltas]==['main-message:1','main-message:2']
+    assert [e['item_id'] for e in finals]==['main-message:1','main-message:1','main-message:2','main-message:2']
+    assert all(e['text']=='same complete' for e in finals)
+
+
+def test_final_only_subagent_blocks_do_not_overwrite_each_other_or_main():
+    p, sent, events, done = protocol();p.prompt('turn', {'text':'inspect'})
+    for parent in ('tool-a','tool-b'):
+        for index in (0,1):
+            p.receive({'type':'assistant','uuid':f'final-{index}','parent_tool_use_id':parent,
+                       'message':{'id':'shared-message','content':[{'type':'text','text':f'{parent} block {index}'}]}})
+    finals=[e for e in events if e['type']=='message']
+    assert len({e['item_id'] for e in finals})==4
+
+
+def test_accumulated_snapshot_still_replaces_original_stream_blocks():
+    p, sent, events, done = protocol();p.prompt('turn', {'text':'inspect'})
+    for value in ({'type':'message_start','message':{'id':'snapshot'}},
+                  {'type':'content_block_start','index':0,'content_block':{'type':'thinking','thinking':''}},
+                  {'type':'content_block_start','index':1,'content_block':{'type':'text','text':''}},
+                  {'type':'content_block_delta','index':1,'delta':{'type':'text_delta','text':'partial'}}):
+        p.receive({'type':'stream_event','event':value})
+    p.receive({'type':'assistant','message':{'id':'snapshot','content':[
+        {'type':'thinking','thinking':'thought'},{'type':'text','text':'complete'}]}})
+    assert next(e for e in events if e['type']=='message')['item_id']=='snapshot:1'
 
 
 def test_worker_queue_interrupt_ack_and_error_result(worker):

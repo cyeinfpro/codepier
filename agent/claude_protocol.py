@@ -10,7 +10,7 @@ import hashlib
 import json
 import time
 import uuid
-from collections import deque
+from collections import OrderedDict, deque
 
 from agent.chat_catalog import validate_settings
 from agent.chat_worker import Protocol, image_inputs
@@ -32,6 +32,7 @@ class ClaudeProtocol(Protocol):
         self.settings['capabilities'] = dict(CAPS)
         self.defaults = {'model': '', 'effort': ''}
         self.streams = {}
+        self.message_streams = OrderedDict()
         self.thoughts = {}
         self.tools = {}
         self.closed_results = deque(maxlen=128)
@@ -72,6 +73,7 @@ class ClaudeProtocol(Protocol):
         images, files = image_inputs(payload.get('attachments', []), 'claude')
         self.active, self.interrupted, self.failure = receipt, False, None
         self.streams.clear(); self.thoughts.clear(); self.tools.clear()
+        self.message_streams.clear()
         self.had_text = False
         self.emit('user', receipt=receipt, text=text,
                   attachments=[{'name': a.get('name', ''), 'mime': a.get('mime', '')}
@@ -260,13 +262,17 @@ class ClaudeProtocol(Protocol):
         parent = frame.get('parent_tool_use_id') or 'main'
         if kind == 'message_start':
             mid = (event.get('message') or {}).get('id') or str(uuid.uuid4())
-            self.streams[parent] = {'id': str(mid), 'blocks': {}}
+            stream = {'id': str(mid), 'blocks': {}, 'finalized': set(), 'finals': {}}
+            self.streams[parent] = stream
+            self.message_streams[parent, str(mid)] = stream
+            if len(self.message_streams) > 128:
+                self.message_streams.popitem(last=False)
             return
         stream = self.streams.get(parent)
         if not stream:
             return
         index = event.get('index', 0)
-        key = stream['id'] + ':' + str(index)
+        key = self.block_key(parent, stream['id'], index)
         if kind == 'content_block_start':
             block = copy.deepcopy(event.get('content_block') or {})
             stream['blocks'][index] = block
@@ -285,6 +291,8 @@ class ClaudeProtocol(Protocol):
                 block['_json'] = block.get('_json', '') + str(delta.get('partial_json', ''))
         elif kind == 'content_block_stop':
             block = stream['blocks'].get(index, {})
+            if block.get('type') == 'thinking' and key in self.thoughts:
+                self.emit('reasoning', item_id=key, text='', status='end')
             if block.get('type') == 'tool_use' and block.get('_json'):
                 try:
                     block['input'] = json.loads(block.pop('_json'))
@@ -292,18 +300,45 @@ class ClaudeProtocol(Protocol):
                     return
                 self.tool(block)
 
+    @staticmethod
+    def block_key(parent, mid, index):
+        return (parent + ':' if parent != 'main' else '') + str(mid) + ':' + str(index)
+
     def assistant(self, frame):
         message = frame.get('message') or {}
         parent = frame.get('parent_tool_use_id') or 'main'
         mid = message.get('id') or self.streams.get(parent, {}).get('id') or frame.get('uuid') or str(uuid.uuid4())
-        for index, block in enumerate(message.get('content', [])):
+        content = message.get('content', [])
+        stream = self.message_streams.get((parent, str(mid)))
+        identity = frame.get('uuid')
+        known = stream['finals'].get(identity, {}) if stream and identity else {}
+        resolved = {}
+        for offset, block in enumerate(content):
             if not isinstance(block, dict):
                 continue
-            key = str(mid) + ':' + str(index)
+            index = known.get(offset)
+            if stream and index is None:
+                # Claude emits one assistant frame per completed block, before
+                # content_block_stop. Its content[0] is not stream block zero.
+                candidates = [i for i, value in stream['blocks'].items()
+                              if value.get('type') == block.get('type')
+                              and (block.get('type') != 'tool_use' or value.get('id') == block.get('id'))]
+                if len(content) > 1 and offset in candidates:
+                    index = offset  # Also accept accumulated message snapshots.
+                else:
+                    index = next((i for i in candidates if i not in stream['finalized']), None)
+            if index is not None:
+                key = self.block_key(parent, mid, index)
+                stream['finalized'].add(index)
+                resolved[offset] = index
+            else:
+                # Subagent/final-only frames have no partial stream. Their UUID
+                # distinguishes separate blocks sharing the same API message ID.
+                key = self.block_key(parent, identity or mid, offset)
             if block.get('type') == 'text' and isinstance(block.get('text'), str):
                 self.had_text = True
                 # Final content replaces the matching partial block, not appends.
-                self.emit('message', item_id=key, text=block['text'])
+                self.emit('message', item_id=key, block_index=index, text=block['text'])
             elif block.get('type') == 'thinking' and isinstance(block.get('thinking'), str):
                 previous = self.thoughts.get(key, '')
                 text = block['thinking']
@@ -312,6 +347,8 @@ class ClaudeProtocol(Protocol):
                 self.thoughts[key] = text
             elif block.get('type') == 'tool_use':
                 self.tool(block)
+        if stream and identity:
+            stream['finals'][identity] = resolved
         if frame.get('error'):
             self.failure = str(frame['error'])
             self.emit('error', text=self.failure)

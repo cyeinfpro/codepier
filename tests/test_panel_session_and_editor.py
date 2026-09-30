@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from playwright.sync_api import expect
+from tests.javascript_support import panel_without_boot
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -21,9 +22,11 @@ def app_page(chat_browser_pool):
     page.goto('https://flow.fixture/')
     for name in ('tokens.css','styles.css','workspace.css','chat.css'):
         page.add_style_tag(path=str(ROOT / 'web' / name))
-    source = (ROOT / 'web/app.js').read_text(encoding='utf-8')
-    page.add_script_tag(content=source[:source.index('(async()=>{try{const page=location.hash')])
-    for name in ('ui.js','identity.js','chat-markdown.js','chat-panels.js','chat-chrome.js',
+    for name in ('core/bundle.js', 'ui.js'):
+        page.add_script_tag(path=str(ROOT / 'web' / name))
+    page.add_script_tag(content=panel_without_boot())
+    page.add_script_tag(path=str(ROOT / 'web' / 'identity.js'))
+    for name in ('chat-markdown.js','chat-panels.js','chat-chrome.js',
                  'chat-history.js','chat-catalog.js','chat.js'):
         page.add_script_tag(path=str(ROOT / 'web' / name))
     page.evaluate('''async () => {
@@ -129,6 +132,7 @@ def test_chat_draft_warns_before_unload_and_explicit_logout_discards(app_page):
     page.evaluate("navigate('projects')")
     page.locator('[data-action=logout]').click()
     expect(page.locator('#login-form')).to_be_visible()
+    expect(page.locator('#username')).to_have_value('')
     assert page.evaluate('ChatUI.views.size') == 0
     assert page.evaluate('S.suspendedUser') is None
     login(page)

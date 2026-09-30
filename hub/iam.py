@@ -108,6 +108,8 @@ def live_principal(store, principal):
 
 
 def _live_principal(store, principal):
+    from hub.principal import validate_credential
+    principal = validate_credential(store, principal)
     user = user_security(store, principal.user_id)
     member = membership(store, principal.user_id, principal.space_id)
     if principal.user_epoch is not None and user['epoch'] != principal.user_epoch:

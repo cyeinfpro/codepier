@@ -22,19 +22,19 @@
 
 ## 在 ChatGPT 中调用
 
-部署新版 Hub 并刷新连接工具目录后，完整 /mcp 与精简 /mcp?profile=coding 均提供 vps_list 和 vps_exec。
+部署新版 Hub 并刷新连接工具目录后，所有 MCP 目录统一使用 `vps` 查询、`exec` 执行；旧名字已移除。详见 [九个 MCP 工具](CORE_TOOLS.md)。
 
-vps_list 参数示例：
+`vps` 参数示例：
 
     {"project":"Imago","query":"广州"}
 
 返回已授权项目关联的名称、IP、端口、账号、启停状态及可见项目。不返回密码，不暴露未授权项目的名称或编号。支持 offset / limit 分页，按 next_offset 继续。
 
-vps_exec 参数示例：
+`exec` 参数示例：
 
-    {"project":"Imago","vps":"广州面板","command":"df -h","timeout_seconds":30,"idempotency_key":"unique-intent-example-001"}
+    {"project":"Imago","target":"vps:<列表返回的连接编号>","command":"df -h","timeout_seconds":30,"idempotency_key":"unique-intent-example-001"}
 
-vps 可以使用列表返回的 ID、准确名称或 IP / 域名。ID 优先准确匹配，不被其他连接的同名文字遮蔽。只有项目恰好分配了一条启用连接时才可省略 vps。多个匹配返回 VPS_AMBIGUOUS，不自动执行全部连接；用 ID，或可选 port / username 筛选明确目标。筛选参数不能覆盖保存的配置。
+使用列表返回的精确 `target`，不再按名称或 IP 隐式选择。多个端口或账号要先从列表中选定连接，不能覆盖已保存配置。
 
 可以直接说：**“SSH 到 Imago 的广州面板，检查磁盘。”** 或 **“连接已保存的这台 IP，检查服务状态。”** 客户端先查询授权连接，确定项目和目标后执行，不需要再次发送密码。工具调用仍受客户端正常的执行确认与授权约束。
 
@@ -44,7 +44,7 @@ vps 可以使用列表返回的 ID、准确名称或 IP / 域名。ID 优先准�
 
 Agent 离线时，操作进入原有持久队列；关闭弹窗不取消已提交操作，结果可在 **操作审计** 中按 operation_id 查询。恢复使用原幂等键与回执，不重复创建命令。
 
-提交命令后，用 operations_wait / operations_get 查询原回执。相同请求重试保留原幂等键；不同命令使用同一键会被拒绝。超时、认证失败、主机密钥问题和非零退出均保留真实结果，不把失败当成功。
+提交命令后，用 `process(operation="wait"/"get", operation_ids=[...])` 查询原回执。相同请求重试保留原幂等键；不同命令使用同一键会被拒绝。超时、认证失败、主机密钥问题和非零退出均保留真实结果，不把失败当成功。
 
 取消会停止本地 SSH 传输，但不保证远程进程停止或回滚。不要因断线就用新键重跑结果不明的写命令。
 
@@ -60,6 +60,6 @@ Agent 离线时，操作进入原有持久队列；关闭弹窗不取消已提�
 
 ## 更新与验证范围
 
-本功能需要更新 Hub 服务端和静态页面。Agent 复用已有 ssh_exec 路径，具备该能力且已安装 ssh / sshpass 的 Agent 可承接；旧 Agent 缺少能力时应正常升级。本功能不会自动重启或停止生产 Agent。
+本功能需要更新 Hub 服务端和静态页面。Hub 和 Agent 都需要更新到支持新 exec 工具契约的版本，Agent 还需已安装 ssh / sshpass。旧 Agent 会返回明确的升级提示，不会猜测新参数的含义。本功能不会自动重启或停止生产 Agent。
 
 自动化测试使用隔离 Hub、Agent 和模拟 SSH 可执行程序，实际验证子进程、加密通道、回执与输出处理；Chromium/WebKit 测试实际操作面板。这不等同于已经登录真实 VPS，也不代表已经部署生产。

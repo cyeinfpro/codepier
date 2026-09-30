@@ -130,7 +130,7 @@ class SyncScheduler:
         semaphore = asyncio.Semaphore(SYNC_CONCURRENCY)
         async def one(snapshot):
             async with semaphore:
-                attempt = self.claim(snapshot)
+                attempt = await self.store.run(self.claim,snapshot)
                 if attempt is None:
                     return
                 code = ''
@@ -148,11 +148,12 @@ class SyncScheduler:
                     code = 'OIDC_RECORD_INVALID'
                 # Cancellation deliberately keeps the finite lease. It neither
                 # reports success nor renews a verified entitlement.
-                self.finish(snapshot, attempt, code)
+                await self.store.run(self.finish,snapshot,attempt,code)
         # Also join siblings if claim/finish itself fails (e.g. a storage error).
         # Releasing the outer sync lock before siblings exit permits overlapping
         # batches. Cancellation still propagates after children finish cleanup.
-        results = await asyncio.gather(*(one(row) for row in self.due()), return_exceptions=True)
+        rows = await self.store.run(self.due)
+        results = await asyncio.gather(*(one(row) for row in rows), return_exceptions=True)
         for result in results:
             if isinstance(result, BaseException):
                 raise result

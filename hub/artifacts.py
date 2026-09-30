@@ -1,5 +1,6 @@
 """Scoped artifact metadata and backpressured, authenticated HTTP downloads."""
 from __future__ import annotations
+from hub.db_worker import database_endpoint
 import asyncio
 import base64
 import hashlib
@@ -160,7 +161,8 @@ def make_artifact_router(auth,runtime):
         return owner
 
     @router.get('/api/artifacts/{identifier}')
-    async def metadata(identifier:str,request:Request):
+    @database_endpoint(runtime.store)
+    def metadata(identifier:str,request:Request):
         return service.get({'artifact_id':identifier},principal(request))
 
     @router.api_route('/api/artifacts/{identifier}/download',methods=['GET','HEAD'])

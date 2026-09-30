@@ -45,7 +45,7 @@ def test_actual_artifact_snapshot_and_range_downloads(stack,tmp_path):
     token_file=tmp_path/'token.txt';token_file.write_text(stack.pat);token_file.chmod(0o600)
     # Panel-created artifacts do not implicitly transfer ownership to a MCP grant.
     with pytest.raises(httpx.HTTPStatusError):download(stack.url,identifier,token_file,tmp_path/'denied.zip')
-    mcp=stack.mcp('artifacts_register',{'project':'Imago','path':filename,'idempotency_key':uuid.uuid4().hex})
+    mcp=stack.mcp('write',{'project': 'Imago', 'idempotency_key': uuid.uuid4().hex, 'operation': 'artifact', 'options': {'path': filename}})
     assert not mcp['isError'];metadata=mcp['structuredContent']
     if metadata.get('pending'):
         op=stack.poll(metadata['operation_id']);metadata=op['result']['data']
@@ -95,12 +95,12 @@ def test_true_agent_search_sessions_diagnostics_and_restart(stack):
 def test_search_and_artifact_do_not_cross_grants(stack):
     name='scope-'+uuid.uuid4().hex+'.txt';(stack.imago/name).write_text('needle')
     issued=stack.client.post('/api/grants',json={'label':'isolated-v140','scopes':['read','write'],'projects':[stack.project['id']],'days':1}).json()
-    search=stack.mcp('searches_start',{'project':'Imago','query':'needle','file_glob':name})['structuredContent']
+    search=stack.mcp('process',{'project': 'Imago', 'operation': 'search_start', 'options': {'query': 'needle', 'file_glob': name}})['structuredContent']
     if search.get('pending'):
         op=stack.poll(search['operation_id']);search=op['result']['data']
-    other=stack.mcp('searches_get',{'project':'Imago','search_id':search['search_id']},token_value=issued['token'])
+    other=stack.mcp('process',{'project': 'Imago', 'operation': 'search_get', 'options': {'search_id': search['search_id']}},token_value=issued['token'])
     assert other['isError'] and other['structuredContent']['error']['code']=='OPERATION_NOT_FOUND'
-    artifact=stack.mcp('artifacts_register',{'project':'Imago','path':name,'idempotency_key':uuid.uuid4().hex})['structuredContent']
+    artifact=stack.mcp('write',{'project': 'Imago', 'idempotency_key': uuid.uuid4().hex, 'operation': 'artifact', 'options': {'path': name}})['structuredContent']
     if artifact.get('pending'):artifact=stack.poll(artifact['operation_id'])['result']['data']
     with httpx.Client() as client:
         rejected=client.get(stack.url+artifact['download_path'],headers={'Authorization':'Bearer '+issued['token']})
@@ -111,7 +111,7 @@ def test_search_and_artifact_do_not_cross_grants(stack):
 def test_cli_resumes_partial_and_rejects_corrupt_prefix(stack,tmp_path):
     from scripts.download_artifact import download
     content=bytes(range(251))*5000;name='resume-'+uuid.uuid4().hex+'.bin';(stack.imago/name).write_bytes(content)
-    result=stack.mcp('artifacts_register',{'project':'Imago','path':name,'idempotency_key':uuid.uuid4().hex})['structuredContent']
+    result=stack.mcp('write',{'project': 'Imago', 'idempotency_key': uuid.uuid4().hex, 'operation': 'artifact', 'options': {'path': name}})['structuredContent']
     if result.get('pending'):result=stack.poll(result['operation_id'])['result']['data']
     identity={k:result[k] for k in ('artifact_id','sha256','bytes')}
     token=tmp_path/'private-token.txt';token.write_text(stack.pat);token.chmod(0o600)

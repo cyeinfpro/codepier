@@ -8,6 +8,7 @@ from agent.source_versions import Validations
 from agent.workspaces import Workspaces
 from agent.integration_control import Controls
 from agent.incoming_artifacts import import_artifact
+from shared.file_sources import FILE_SOURCE_POLICY_VERSION, DEFAULT_MAX_IMPORT_BYTES, file_source_hosts
 from agent import lsp_navigation
 
 class Integrations:
@@ -97,6 +98,10 @@ class Integrations:
             if browser_state=='ready' and not browser.get('connected'):browser_state='not_connected'
             return {'build':self.agent.build.describe(),'execution':execution,'admission':admission,
                 'language_servers':languages,'browser':browser,'capabilities':sorted(REMOTE_TOOLS),
+                'file_import':{'source_policy_version':FILE_SOURCE_POLICY_VERSION,
+                    'allowed_hosts':list(file_source_hosts(self.agent.config.get('integrations',{}))),
+                    'max_bytes':self.agent.config.get('integrations',{}).get('max_import_bytes',DEFAULT_MAX_IMPORT_BYTES),
+                    'host_roundtrip':'not_run'},
                 'checks':[{'name':'project_read','state':'ready'},
                     {'name':'project_write','state':available('write',project.get('mode')=='write' and spec.get('writable',True),'denied')},
                     {'name':'shell','state':shell_state},
