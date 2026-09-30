@@ -139,7 +139,8 @@ def test_diagnostics_and_cli_redact_values_and_default_to_disabled(shell_agent):
 def test_cli_full_access_keeps_identity_and_task_config(shell_agent):
     agent, _ = shell_agent
     old = copy.deepcopy(agent.config)
-    subprocess.run([sys.executable, "-m", "agent", "--config", str(agent.config_path), "configure", "--shell", "full"], capture_output=True, check=True, timeout=5)
+    # This checks configuration preservation, not a five-second cold import SLA.
+    subprocess.run([sys.executable, "-m", "agent", "--config", str(agent.config_path), "configure", "--shell", "full"], capture_output=True, check=True, timeout=45)
     c = json.loads(agent.config_path.read_text())
     assert c["shell"]["enabled"] and c["shell"]["projects"] == ["*"]
     assert c["secret"] == old["secret"] and c["tasks"] == old["tasks"] and c["state_dir"] == old["state_dir"]
@@ -255,7 +256,8 @@ def test_real_mcp_shell_streaming_replay_restart_cancel_and_scope(stack):
     wait_for(lambda: "started" in stack.client.get('/api/operations/' + opid).json()["output"])
     assert stack.mcp("exec", args)["structuredContent"]["operation_id"] == opid
     stack.hub.terminate(); stack.hub.wait(timeout=12); stack.start_hub(); stack.login()
-    completed = stack.poll(opid, timeout=15)
+    # The original Agent may be inside its valid 30–31 s reconnect backoff.
+    completed = stack.poll(opid, timeout=45)
     assert completed["state"] == "failed" and completed["result"]["data"]["exit_code"] == 7
     assert "done" in completed["output"] and (stack.imago / "shell-count").read_text() == "once"
     cancelled = stack.mcp("exec", {"project": "Imago", "command": "printf cancel-start; sleep 20; touch must-not-exist", "idempotency_key": uuid.uuid4().hex})["structuredContent"]["operation_id"]

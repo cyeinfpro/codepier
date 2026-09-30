@@ -231,8 +231,9 @@ exit 99
 """)
     fake.chmod(0o700)
     log = tmp_path / "docker.log"
+    # Shell-flow assertions include several cold Python fixture invocations.
     result = subprocess.run(["bash", str(tmp_path / "deploy/install-hub.sh")],
-        input="admin\n", text=True, capture_output=True, timeout=5,
+        input="admin\n", text=True, capture_output=True, timeout=45,
         env={**os.environ, "PATH": str(tmp_path / "bin") + os.pathsep + os.environ["PATH"],
              "DOCKER_LOG": str(log), "PROBE_STATUS": str(probe_status), "START_STATUS": str(start_status),
              "CODEPIER_BOOTSTRAP_PYTHON": sys.executable})

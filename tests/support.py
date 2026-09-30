@@ -45,6 +45,24 @@ def wait_for_hub(process,url,timeout=45):
     raise AssertionError(f'Fixture Hub did not become healthy within {timeout}s: {last}; inspect its preserved hub.log')
 
 
+def wait_for_agent(process, is_online, timeout=45):
+    """Observe one owned Agent through bounded cold-start/reconnect latency."""
+    end = time.monotonic() + timeout
+    last = 'not online'
+    while time.monotonic() < end:
+        code = process.poll()
+        if code is not None:
+            raise AssertionError(f'Fixture Agent exited with code {code}; inspect its agent.log')
+        try:
+            if is_online():
+                return
+            last = 'not online'
+        except (httpx.HTTPError, ValueError) as exc:
+            last = type(exc).__name__
+        time.sleep(.1)
+    raise AssertionError(f'Fixture Agent did not become online within {timeout}s: {last}; inspect its preserved agent.log')
+
+
 class Stack:
     def __init__(self, directory):
         self.directory=Path(directory); self.directory.mkdir(parents=True,exist_ok=True)
@@ -119,7 +137,13 @@ class Stack:
         if self.agent is not None and self.agent.poll() is not None:
             wait_for(lambda:not any(d['id']==self.device and d['online'] for d in self.client.get('/api/devices').json().get('devices',[])),timeout=16)
         self.agent=subprocess.Popen([sys.executable,'-m','agent','--config',str(self.config_path),'run'],cwd=BASE,env=self.env,stdout=self.agent_log,stderr=subprocess.STDOUT)
-        wait_for(lambda:any(d['id']==self.device and d['online'] for d in self.client.get('/api/devices').json().get('devices',[])),timeout=16)
+        try:
+            wait_for_agent(self.agent, lambda:any(d['id']==self.device and d['online']
+                           for d in self.client.get('/api/devices',timeout=1).json().get('devices',[])))
+        except AssertionError as exc:
+            from shared.audit_redaction import redact_text
+            details=redact_text((self.directory/'agent.log').read_text(encoding='utf-8',errors='replace'))[-6000:]
+            raise AssertionError(f'{exc}\n{details}') from exc
     def stop_agent(self):
         if getattr(self,'agent',None) and self.agent.poll() is None:
             self.agent.terminate()

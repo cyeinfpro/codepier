@@ -71,13 +71,13 @@ async function scenario(name){
     move.resolve(response({destination:'moved.txt',sha256:'sha-base'}));await pending;
     assert.equal(work().path,'moved.txt');assert.equal(work().content,'typed while moving');assert.equal(work().original,'base');assert.equal(work().dirty,true);
   }else if(name==='restore_failed_reload_keeps_dirty'){
-    editor();type('unsaved draft');let reads=0;
+    editor();type('unsaved draft');modalAdapter();run('modal()');let reads=0;
     fetchImpl=async(path,options)=>{const tool=JSON.parse(options.body).tool;if(tool==='fs_read')return ++reads===1?response({sha256:'current'}):Promise.reject(Error('offline'));return response({sha256:'restored'});};
-    await assert.rejects(run("restoreBackup('backup','old.txt')"),/网络暂时不可用/);
+    await assert.rejects(run("restoreBackup('backup','old.txt',workDialogScope())"),/网络暂时不可用/);
     assert.equal(work().content,'unsaved draft');assert.equal(work().dirty,true);
   }else if(name==='restore_preserves_input_during_mutation'){
-    editor();const restore=deferred();fetchImpl=async(path,options)=>JSON.parse(options.body).tool==='fs_read'?response({sha256:'current'}):restore.promise;
-    const pending=run("restoreBackup('backup','old.txt')");await tick();type('new draft during restore');restore.resolve(response({sha256:'restored'}));await pending;
+    editor();modalAdapter();run('modal()');const restore=deferred();fetchImpl=async(path,options)=>JSON.parse(options.body).tool==='fs_read'?response({sha256:'current'}):restore.promise;
+    const pending=run("restoreBackup('backup','old.txt',workDialogScope())");await tick();type('new draft during restore');restore.resolve(response({sha256:'restored'}));await pending;
     assert.equal(work().content,'new draft during restore');assert.equal(work().dirty,true);
   }else if(name==='save_does_not_rebase_reopened_file'){
     editor();type('first draft');modalAdapter();const write=deferred();

@@ -44,7 +44,8 @@ def test_browser_diagnostics_search_symbols_and_download(stack,tmp_path):
             page.locator('.modal [data-action="close-modal"]').first.click()
             page.click('[data-insight="search"]');page.fill('#session-query','greeting');page.select_option('#session-mode','symbols');page.fill('#session-glob','*.py')
             page.click('#session-search-start');expect(page.locator('#modal-title')).to_have_text('检索结果')
-            expect(page.locator('.search-results')).to_contain_text('greeting')
+            # The UI follows the original durable operation through background indexing.
+            expect(page.locator('.search-results')).to_contain_text('greeting',timeout=30000)
             page.screenshot(path=str(directory/'search-desktop.png'),full_page=True)
             page.set_viewport_size({'width':390,'height':844})
             assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')

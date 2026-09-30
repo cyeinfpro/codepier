@@ -27,7 +27,16 @@ def approval_stack(tmp_path_factory):
 def tool(s,operation,args):
     out=s.mcp('computer',{'operation':operation,'project':'Imago',**args},s.approval_pat)
     assert not out.get('isError'),out
-    return out['structuredContent']
+    data=out['structuredContent']
+    if data.get('pending'):
+        # The MCP wait window may end before cold fixture startup. Recover the
+        # same durable operation; never open a second computer session.
+        operation=s.poll(data['operation_id'],timeout=30)
+        assert operation['state']=='succeeded',operation
+        result=operation.get('result') or {}
+        assert result.get('ok'),operation
+        return result['data']
+    return data
 
 def open_session(s):
     return tool(s,'open',{'app':'Fixture','ttl_seconds':60,'idempotency_key':uuid.uuid4().hex})['session_id']
@@ -91,3 +100,47 @@ def test_pending_approval_invalidated_by_session_or_connection_end(approval_stac
         assert response.status_code==409
         result.result(timeout=12)
     if reason=='disconnect':s.start_agent()
+
+
+class ApprovalReceiptStub:
+    def __init__(self, initial, terminal):
+        self.initial = initial
+        self.terminal = terminal
+        self.calls = 0
+        self.polls = []
+        self.approval_pat = 'synthetic'
+
+    def mcp(self, name, args, token):
+        self.calls += 1
+        assert name == 'computer' and args['operation'] == 'open'
+        assert token == self.approval_pat
+        return self.initial
+
+    def poll(self, operation_id, timeout):
+        self.polls.append(operation_id)
+        assert 0 < timeout <= 30
+        return self.terminal
+
+
+@pytest.mark.parametrize('state', ['queued', 'running'])
+def test_approval_tool_helper_waits_same_operation_without_resubmitting(state):
+    fixture = ApprovalReceiptStub(
+        {'structuredContent': {'operation_id': 'pending-open', 'pending': True, 'state': state}},
+        {'state': 'succeeded', 'result': {'ok': True, 'data': {'session_id': 'opened-once'}}})
+    assert tool(fixture, 'open', {}) == {'session_id': 'opened-once'}
+    assert fixture.calls == 1 and fixture.polls == ['pending-open']
+
+
+def test_approval_tool_helper_keeps_terminal_failure_visible():
+    fixture = ApprovalReceiptStub(
+        {'structuredContent': {'operation_id': 'failed-open', 'pending': True}},
+        {'state': 'failed', 'result': {'ok': False, 'error': {'code': 'FIXTURE_FAILURE'}}})
+    with pytest.raises(AssertionError, match='FIXTURE_FAILURE'):
+        tool(fixture, 'open', {})
+    assert fixture.calls == 1 and fixture.polls == ['failed-open']
+
+
+def test_approval_tool_helper_preserves_immediate_result():
+    fixture = ApprovalReceiptStub({'structuredContent': {'session_id': 'immediate'}}, None)
+    assert tool(fixture, 'open', {}) == {'session_id': 'immediate'}
+    assert fixture.calls == 1 and fixture.polls == []
