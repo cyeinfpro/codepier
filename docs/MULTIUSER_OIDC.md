@@ -203,6 +203,44 @@ New accounts get a private personal Space, not instance administration or Legacy
 `CODEPIER_OIDC_INSECURE_TEST_LOOPBACK=1` exists solely for disposable loopback CI.
 Do not enable it in the deployed Hub. It is not a production TLS workaround.
 
+## Environment-seeded provider and first-login administrator
+
+Container deployments (see `deploy/k3s/deployment.yaml`) can declare one provider
+through the process environment instead of the panel. When `CODEPIER_OIDC_ISSUER` is
+set, the Hub validates the settings exactly like the administration API and creates or
+updates provider `idp_env` at every start. The environment is authoritative for that
+provider: the panel answers `PROVIDER_ENV_MANAGED` to edits while the variables are
+present, changes take effect on the next start, and an unchanged environment neither
+rewrites the provider nor invalidates entitlements. Changing the issuer is refused at
+startup while identities are linked to it, because identities are bound to the issuer.
+Removing the variables keeps the provider and makes it editable in the panel again.
+
+| Variable | Meaning |
+|---|---|
+| `CODEPIER_OIDC_ISSUER` | Exact issuer; enables seeding. Callback: `HUB_PUBLIC_URL/auth/oidc/idp_env/callback`. |
+| `CODEPIER_OIDC_CLIENT_ID`, `CODEPIER_OIDC_CLIENT_SECRET` | Required together with the issuer. |
+| `CODEPIER_OIDC_LABEL` | Login button label; default `SSO`. |
+| `CODEPIER_OIDC_SCOPES` | Default `openid profile email`. |
+| `CODEPIER_OIDC_GROUP_CLAIM`, `CODEPIER_OIDC_REQUIRED_GROUP` | As in the panel; default claim `groups`, no required group. |
+| `CODEPIER_OIDC_DISCOVERY_URL`, `CODEPIER_OIDC_ENDPOINT_ORIGINS` | Optional override and extra exact origins (comma-separated). |
+| `CODEPIER_OIDC_FRESHNESS_SECONDS`, `CODEPIER_OIDC_ENABLED` | Defaults 900 and true. Admission is always `jit`. |
+| `CODEPIER_OIDC_BOOTSTRAP_ADMIN` | `off` (default) or `first-login`. |
+
+With `CODEPIER_OIDC_BOOTSTRAP_ADMIN=first-login`, and only while no active instance
+administrator exists, the first identity admitted through any enabled provider is
+created as the instance administrator and owner of the Legacy Space, audited as
+`oidc.bootstrap_admin`. Every later login is an ordinary user with a personal Space.
+Admission itself is unchanged: `required_group` still decides who may log in at all, so
+set it before the first login when the IdP has other users. Concurrent first logins are
+serialized by the provisioning transaction; exactly one identity is promoted. Without
+this setting the previous behavior remains: new identities are refused with
+`BOOTSTRAP_REQUIRED` until a local administrator exists.
+
+Instance authority still cannot be granted by an IdP group after bootstrap; promote
+further administrators in **身份管理**. Keep a local recovery administrator: `python -m
+hub init` adds one whenever no local-login account exists (see Recovery), so an IdP
+outage cannot lock the instance.
+
 ## Team Spaces, invitations and shared secretary Roles
 
 1. Under **我的账号**, create a team Space. Select it in **当前空间**.
@@ -344,8 +382,10 @@ python -m hub --data-dir /srv/codepier/data reset-password --username admin
 
 The interactive password prompt avoids command-line secrets. Reset revokes that
 account's sessions/grants and reenables local login. It does not transfer other
-users' identities or change the IdP issuer. Do not run `init` against an already
-initialized database or delete the encryption key to work around login errors.
+users' identities or change the IdP issuer. `init` adds a local recovery
+administrator only while no local-login account exists (for example after
+first-login OIDC bootstrap); otherwise use `reset-password`. Do not delete the
+encryption key to work around login errors.
 
 Common errors:
 

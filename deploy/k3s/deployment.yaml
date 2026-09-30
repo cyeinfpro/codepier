@@ -4,8 +4,14 @@
 #   - codepier.example.com  → your public host (Ingress host and HUB_PUBLIC_URL must match)
 #   - image                 → the reference recorded by the "Container image" workflow;
 #                             pin the digest: ghcr.io/<owner>/codepier:VERSION@sha256:...
+#   - Secret codepier-oidc  → your IdP issuer, client id and secret. Register the callback
+#                             https://<host>/auth/oidc/idp_env/callback at the IdP.
 #
-# First run only, once the pod is Ready (same command the Compose installer runs):
+# First run: open https://<host>/ and sign in through the seeded SSO provider. With
+# CODEPIER_OIDC_BOOTSTRAP_ADMIN=first-login (ConfigMap) the first admitted identity becomes
+# the instance administrator; CODEPIER_OIDC_REQUIRED_GROUP bounds who is admitted at all,
+# and the window closes once an administrator exists. Without SSO, or to add a local
+# recovery administrator later (recommended: an IdP outage must not lock you out):
 #   kubectl -n codepier exec -it deploy/codepier-hub -- python -m hub init --username admin
 #
 # Upgrade: change the image reference, re-apply, `kubectl -n codepier rollout status deploy/codepier-hub`.
@@ -45,6 +51,29 @@ data:
   HUB_DELIVERY_RETRY_SECONDS: "5"
   MCP_BLOCK_LOCAL_CODEX: "false"
   CODEPIER_MCP_GATEWAY: "1"
+  # first-login: while no active instance administrator exists, the first admitted OIDC
+  # identity is promoted (audited as oidc.bootstrap_admin). No effect once one exists.
+  CODEPIER_OIDC_BOOTSTRAP_ADMIN: first-login
+---
+# One provider declared by the environment (id idp_env). While these variables are set the
+# environment is authoritative: the panel refuses edits (PROVIDER_ENV_MANAGED) and changes
+# apply on the next restart. Delete this Secret to run without SSO seeding; an already
+# created provider then stays and becomes editable in 身份管理.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: codepier-oidc
+  namespace: codepier
+type: Opaque
+stringData:
+  CODEPIER_OIDC_LABEL: Company SSO
+  # Exact issuer from the discovery document, e.g. https://auth.example.com/application/o/codepier/
+  CODEPIER_OIDC_ISSUER: https://auth.example.com/application/o/codepier/
+  CODEPIER_OIDC_CLIENT_ID: codepier
+  CODEPIER_OIDC_CLIENT_SECRET: replace-with-the-idp-client-secret
+  CODEPIER_OIDC_SCOPES: openid profile email
+  # Optional: only members of this IdP group may sign in, and therefore bootstrap.
+  CODEPIER_OIDC_REQUIRED_GROUP: ""
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -119,6 +148,9 @@ spec:
           envFrom:
             - configMapRef:
                 name: codepier-hub
+            - secretRef:
+                name: codepier-oidc
+                optional: true
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

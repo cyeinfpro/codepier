@@ -37,6 +37,18 @@ def env_float(name: str, default: float, minimum: float, maximum: float) -> floa
     return value
 
 
+def env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigurationError(f"{name} must be true or false")
+
+
 def env_csv(name: str, default: str = "") -> tuple[str, ...]:
     return tuple(dict.fromkeys(part.strip() for part in os.getenv(name, default).split(",") if part.strip()))
 

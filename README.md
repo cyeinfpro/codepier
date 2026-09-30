@@ -79,7 +79,7 @@ curl --fail http://127.0.0.1:8765/healthz
 
 也可以从 [Releases](https://github.com/cyeinfpro/codepier/releases) 下载源码包。手动安装和开发建议使用 `codepier-VERSION-source-full.zip`；`source.zip` 用于兼容面板更新器。环境变量见 [`.env.example`](.env.example)。
 
-不在服务器上构建镜像的部署方式（例如 Kubernetes/k3s）可直接拉取 CI 发布到 `ghcr.io/<仓库所有者>/codepier` 的 Hub 镜像，标签为版本号；k3s 单文件清单见 `deploy/k3s/deployment.yaml`。镜像在发布前经过启动验证，构建与校验过程见[发布流程](docs/RELEASING.md)。
+不在服务器上构建镜像的部署方式（例如 Kubernetes/k3s）可直接拉取 CI 发布到 `ghcr.io/<仓库所有者>/codepier` 的 Hub 镜像，标签为版本号；k3s 单文件清单见 `deploy/k3s/deployment.yaml`，可用环境变量播种 OIDC 提供者并让首次 SSO 登录成为实例管理员。镜像在发布前经过启动验证，构建与校验过程见[发布流程](docs/RELEASING.md)。
 
 ### 2. 接入开发电脑
 
