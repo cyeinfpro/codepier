@@ -5,6 +5,7 @@ The native file object is transport input, never part of a returned receipt.
 """
 from __future__ import annotations
 import contextlib,hashlib,http.client,ipaddress,os,socket,ssl,stat,time,uuid
+import threading
 from pathlib import Path
 from urllib.parse import urlsplit,urljoin
 from agent.filesystem import relative_path
@@ -55,16 +56,52 @@ def remaining_timeout(deadline):
     return min(15, remaining)
 
 
+# getaddrinfo has no portable timeout. Bound callers AND outstanding resolvers;
+# daemon workers cannot delay shutdown if the OS resolver itself stays stuck.
+_DNS_SLOTS = threading.BoundedSemaphore(4)
+
+
+def resolve_addresses(host, port, deadline):
+    metadata = {'source_host': host, 'source_scheme': 'https', 'request_sent': False}
+    timeout = remaining_timeout(deadline)
+    expires = time.monotonic() + timeout
+    slots = _DNS_SLOTS
+    if not slots.acquire(timeout=timeout):
+        raise DevError('ARTIFACT_TIMEOUT', 'DNS 解析资源繁忙；未请求文件、未发布目标', 504,
+            **metadata, reason='dns_timeout', stage='dns', recovery='check_agent_network')
+    done = threading.Event()
+    result = []
+
+    def resolve():
+        try:
+            result.append(socket.getaddrinfo(host, port, type=socket.SOCK_STREAM))
+        except Exception:
+            result.append(None)
+        finally:
+            slots.release()
+            done.set()
+
+    try:
+        threading.Thread(target=resolve, name='codepier-import-dns', daemon=True).start()
+    except BaseException:
+        slots.release()
+        raise
+    if not done.wait(max(0, expires - time.monotonic())):
+        raise DevError('ARTIFACT_TIMEOUT', '文件下载主机 DNS 解析超时；未发布目标', 504,
+            **metadata, reason='dns_timeout', stage='dns', recovery='check_agent_network')
+    if not result or result[0] is None:
+        raise DevError('ARTIFACT_NETWORK', '文件下载主机 DNS 解析失败；未发布目标文件', 502,
+            **metadata, reason='dns_failed', stage='dns', recovery='check_agent_network')
+    remaining_timeout(deadline)
+    return result[0]
+
+
 class PublicTLSConnection(http.client.HTTPSConnection):
     def connect(self):
         metadata = {'source_host': self.host, 'source_scheme': 'https', 'request_sent': False}
         # Resolve once, validate ALL answers, connect only to those exact IPs.
         # Original hostname remains the TLS identity. Never inherit proxies.
-        try:
-            addresses = socket.getaddrinfo(self.host, self.port, type=socket.SOCK_STREAM)
-        except OSError:
-            raise DevError('ARTIFACT_NETWORK', '文件下载主机 DNS 解析失败；未发布目标文件', 502,
-                **metadata, reason='dns_failed', stage='dns', recovery='check_agent_network') from None
+        addresses = resolve_addresses(self.host, self.port, getattr(self, 'download_deadline', None))
         try:
             # IPv6's deprecated fec0::/10 site-local range is deliberately
             # excluded from ipaddress.is_private and can report is_global.
@@ -304,7 +341,11 @@ def import_artifact(engine,project,args,*,stream=None):
     hosts=file_source_hosts(config)
     validate_url(file['download_url'],hosts)
     total=0;sha=hashlib.sha256()
-    with engine.mutation_lock,AnchoredDestination(engine,root,relative) as target:
+    # Pin/create the staging destination and publish under the mutation lock,
+    # but never hold the global lock across DNS/network/download waits.
+    with contextlib.ExitStack() as cleanup:
+        with engine.mutation_lock:
+            target = cleanup.enter_context(AnchoredDestination(engine,root,relative))
         for block in (stream if stream is not None else download_chunks(file,hosts,limit)):
             if not isinstance(block,bytes):raise DevError('ARTIFACT_STREAM','下载流类型错误')
             total+=len(block)
@@ -313,6 +354,8 @@ def import_artifact(engine,project,args,*,stream=None):
         if expected_size is not None and total!=expected_size:raise DevError('ARTIFACT_SIZE','原生文件大小与下载结果不一致')
         actual=sha.hexdigest()
         if args.get('expected_sha256') and args['expected_sha256']!=actual:raise DevError('ARTIFACT_INTEGRITY','SHA-256 不匹配，未发布文件')
-        engine.root(project,True);target.publish()
+        with engine.mutation_lock:
+            engine.root(project,True)
+            target.publish()
     return {'path':relative,'bytes':total,'sha256':actual,'created':True,'overwritten':False,
             'extracted':False,'executed':False,'name':destination.name}

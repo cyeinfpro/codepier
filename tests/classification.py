@@ -22,6 +22,8 @@ REGRESSION_EXCLUSIVE = {
     'test_chat_review_worker.py', 'test_chat_stability_async.py', 'test_chat_mobile_immersion.py',
     'test_chat_webkit_browser.py', 'test_chat_worker.py', 'test_chat_window_browser.py',
     'test_codepier_ui.py', 'test_agent_install_ui.py',
+    # The first form query cold-starts the LSP fixture with a strict 5 s budget.
+    'test_devtools_flow.py',
 }
 
 @lru_cache(maxsize=None)
@@ -29,11 +31,14 @@ def module_tiers(filename):
     path = Path(filename)
     tree = ast.parse(path.read_text(encoding='utf-8'))
     imports = set()
+    shared_stack = False
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module:
             imports.add(node.module)
+            if node.module == 'tests.support' and any(alias.name in {'running_stack', 'Stack'} for alias in node.names):
+                shared_stack = True
         elif isinstance(node, ast.Import):
             imports.update(alias.name for alias in node.names)
     browser = any(name.startswith('playwright') or name == 'tests.browser_support' for name in imports)
-    integration = browser or bool(imports & {'subprocess', 'multiprocessing'})
+    integration = browser or shared_stack or bool(imports & {'subprocess', 'multiprocessing'})
     return browser, integration

@@ -60,7 +60,8 @@ def _login(page: Page, stack, route: str = "overview") -> None:
     expect(page.locator("#login-form")).to_be_visible()
     page.fill('#username', 'admin');page.locator("#password").fill(stack.password)
     page.locator("#login-form button[type=submit]").click()
-    expect(page.locator(".shell")).to_be_visible()
+    # Login and the first page load share the same bounded readiness budget.
+    expect(page.locator(".shell")).to_be_visible(timeout=15_000)
     expect(page.locator(".skeleton")).to_have_count(0, timeout=15_000)
 
 

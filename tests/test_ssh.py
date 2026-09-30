@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import sqlite3
@@ -205,13 +206,15 @@ def test_mcp_ssh_recovery_cancel_scope_and_secret_storage(stack):
     wait_for(lambda: 'transport-ready' in stack.client.get('/api/operations/' + opid).json()['output'])
     assert stack.mcp('exec', call)['structuredContent']['operation_id'] == opid
     stack.hub.terminate(); stack.hub.wait(timeout=12); stack.start_hub(); stack.login()
-    completed = stack.poll(opid, timeout=15)
+    # Hub readiness can precede the Agent's next 30–31 s reconnect attempt.
+    completed = stack.poll(opid, timeout=45)
     assert completed['state'] == 'succeeded'
     assert completed['result']['data']['command_ok']
     assert PASSWORD not in json.dumps(completed)
     assert (stack.projectalpha / 'ssh-count').read_text() == 'once'
     failed = stack.mcp('exec', execution(wrong=True))['structuredContent']['operation_id']
-    result = stack.poll(failed)
+    # A cold fixture transport can outlast the short synchronous MCP window.
+    result = stack.poll(failed, timeout=30)
     assert result['state'] == 'failed' and result['result']['data']['ssh_error'] == 'SSH_AUTH_FAILED'
     cancelled = stack.mcp('exec', execution(command='sleep 20; touch must-not-exist'))['structuredContent']['operation_id']
     wait_for(lambda: 'transport-ready' in stack.client.get('/api/operations/' + cancelled).json()['output'])
@@ -231,5 +234,5 @@ def test_mcp_ssh_recovery_cancel_scope_and_secret_storage(stack):
     # Inspect actual persisted rows, not only the API's filtered projection.
     for dbpath in (stack.directory / 'agent-state' / 'agent.sqlite3', stack.hubdir / 'hub.sqlite3'):
         assert dbpath.exists()
-        with sqlite3.connect(dbpath) as db:
+        with contextlib.closing(sqlite3.connect(dbpath)) as db:
             assert PASSWORD not in '\n'.join(db.iterdump())

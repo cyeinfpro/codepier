@@ -98,3 +98,20 @@ def test_no_teardown_skip_or_missing_phase_can_make_a_green_receipt(mode, expect
     assert outcome[NODES[0]] == expected and not duplicates
     _, duplicates = classify_events([NODES[0]], {NODES[0]: events + [events[0]]})
     assert duplicates == [NODES[0]]
+
+
+def test_large_collection_has_linear_node_parsing_budget():
+    class CountedNode(str):
+        splits = 0
+
+        def split(self, *args, **kwargs):
+            type(self).splits += 1
+            return super().split(*args, **kwargs)
+
+    nodes = [CountedNode(f'tests/test_module_{module:04d}.py::test_case_{case}')
+             for module in range(1000) for case in range(10)]
+    jobs = plan_jobs(nodes)
+    assert len(jobs) == 1000
+    assert sum(len(job['nodeids']) for job in jobs) == len(nodes)
+    assert all(job['selectors'] == [job['module']] for job in jobs)
+    assert CountedNode.splits <= 3 * len(nodes)

@@ -1,10 +1,10 @@
 {
   "name": "CodePier",
-  "version": "1.14.3",
-  "date": "2026-09-26",
-  "status": "released",
+  "version": "1.14.4",
+  "date": "2026-09-30",
+  "status": "source-ready",
   "source_only": true,
-  "published": true,
+  "published": false,
   "deployed": false,
   "release_notes": "CHANGELOG.md",
   "release_checklist": "docs/RELEASING.md"

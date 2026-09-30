@@ -60,7 +60,8 @@ def test_all_pages_layout_and_screenshots(stack, width, height):
         page.screenshot(path=str(OUT/f'{width}-login.png'),full_page=True,animations='disabled')
         page.fill('#username', 'admin');page.fill('#password', stack.password)
         page.click('#login-form button')
-        expect(page.locator('.stats')).to_be_visible()
+        # Authenticate and finish the initial overview load before measuring layout.
+        expect(page.locator('.stats')).to_be_visible(timeout=15000)
         measurements={}
         for name in PAGES:
             navigate(page,name)

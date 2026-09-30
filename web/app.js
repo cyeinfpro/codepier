@@ -946,6 +946,7 @@ async function projectModal(id = null, device = '') {
   }
 }
 function resetWork(project, workspace_id = '') {
+  S.workGeneration = (S.workGeneration || 0) + 1;
   S.fileGeneration = (S.fileGeneration || 0) + 1;
   S.readGeneration = (S.readGeneration || 0) + 1;
   S.treeGeneration = (S.treeGeneration || 0) + 1;
@@ -1293,12 +1294,51 @@ async function moveFile() {
       toast('文件已移动');
     });
 }
-async function searchFiles(query, offset = 0) {
-  const project = S.work.project;
+// One identity spans the request and its rendered controls. A later request,
+// workspace reset, navigation, session change or modal dismissal invalidates it.
+function workDialogScope(extra = {}) {
+  return Object.freeze({
+    ...workTarget(),
+    workspace_id: S.work.workspace_id || '',
+    session: S.session,
+    page: S.page,
+    pageEpoch: S.renderSeq,
+    workEpoch: S.workGeneration || 0,
+    modalIntent: S.modalIntent || 0,
+    request: (S.workDialogGeneration = (S.workDialogGeneration || 0) + 1),
+    ...extra,
+  });
+}
+function workDialogCurrent(scope) {
+  return (
+    !!scope &&
+    !!scope.session &&
+    S.session === scope.session &&
+    S.page === scope.page &&
+    S.page === 'workbench' &&
+    S.renderSeq === scope.pageEpoch &&
+    S.work.project === scope.project &&
+    (S.work.workspace_id || '') === scope.workspace_id &&
+    (S.workGeneration || 0) === scope.workEpoch &&
+    S.workDialogGeneration === scope.request &&
+    (S.modalIntent || 0) === scope.modalIntent
+  );
+}
+async function searchFiles(query, offset = 0, previous = null) {
+  if (!S.work.project || (previous && !workDialogCurrent(previous))) return;
+  const scope = workDialogScope({ query });
   try {
-    const r = await settled(wtool('fs_search', { query, offset, limit: 100 }));
-    if (S.work.project !== project) return;
-    modal(
+    const r = await settled(
+      tool('fs_search', {
+        project: scope.project,
+        workspace_id: scope.workspace_id,
+        query,
+        offset,
+        limit: 100,
+      }),
+    );
+    if (!workDialogCurrent(scope)) return;
+    const dialog = modal(
       '搜索 · ' + query,
       `<p class="form-note">${esc(json({ matches: r.matches?.length, files_scanned: r.scanned_files, truncated: r.truncated }))}</p>${(r.matches || []).map((x) => `<button class="search-hit" data-action="search-read" data-path="${esc(x.path)}"><code>${esc(x.path)} : ${x.line}</code><p>${esc(x.text)}</p></button>`).join('') || empty('没有找到匹配项。')}<p class="form-note">${r.truncated ? '搜索已到达返回数或扫描预算限制，不代表全仓已扫描。' : '此结果仅覆盖文件工具允许访问的文本文件。'}</p>`,
       r.next_offset !== null && r.next_offset !== undefined
@@ -1306,31 +1346,48 @@ async function searchFiles(query, offset = 0) {
         : '',
       true,
     );
-    if ($('#search-more')) $('#search-more').onclick = () => searchFiles(query, r.next_offset);
+    const displayed = Object.freeze({ ...scope, modalIntent: S.modalIntent || 0 });
+    for (const hit of $$('.search-hit', dialog)) hit.workScope = displayed;
+    const more = $('#search-more', dialog);
+    if (more) more.onclick = () => searchFiles(query, r.next_offset, displayed);
   } catch (e) {
-    toast(e.message, true);
+    if (workDialogCurrent(scope)) toast(e.message, true);
   }
 }
 async function historyModal() {
-  const project = S.work.project;
   if (!S.work.project) throw new Error('请先选择项目');
-  const r = await settled(wtool('history_list', { path: S.work.path || '', limit: 50 }));
-  if (S.work.project !== project) return;
-  S.historyProject = project;
-  S.historyWorkspace = S.work.workspace_id || '';
+  const scope = workDialogScope({ path: S.work.path || '' });
+  let r;
+  try {
+    r = await settled(
+      tool('history_list', {
+        project: scope.project,
+        workspace_id: scope.workspace_id,
+        path: scope.path,
+        limit: 50,
+      }),
+    );
+  } catch (error) {
+    if (workDialogCurrent(scope)) throw error;
+    return;
+  }
+  if (!workDialogCurrent(scope)) return;
   const rows = r.backups || r.entries || [];
-  modal(
+  const dialog = modal(
     '本机修改备份',
     `<p class="form-note">恢复某次操作前的文件内容。恢复也会建立新的备份；移动文件的备份只恢复原路径，不会自动删除新路径。</p>${rows.length ? rows.map((b) => `<div class="history-row"><div><code>${esc(b.path)}</code><p>${esc(timeText(b.at))} · ${esc(b.id.slice(0, 10))}</p></div><button class="btn small" data-action="restore-backup" data-id="${esc(b.id)}" data-path="${esc(b.path)}">恢复前版本</button></div>`).join('') : empty('这个范围还没有文件备份。')}`,
     '',
     true,
   );
+  const displayed = Object.freeze({ ...scope, modalIntent: S.modalIntent || 0 });
+  for (const button of $$('[data-action=restore-backup]', dialog)) button.workScope = displayed;
 }
-async function restoreBackup(id, path) {
+async function restoreBackup(id, path, scope) {
   if (S.restoring) return;
-  const project = S.historyProject || S.work.project,
-    workspace_id = S.historyWorkspace || '',
-    dialog = $('.modal'),
+  if (!workDialogCurrent(scope))
+    throw new Error('当前项目、工作目录或备份窗口已经变化，请重新打开备份。');
+  const { project, workspace_id } = scope;
+  const dialog = $('.modal'),
     generation = S.fileGeneration || 0,
     revision = S.editRevision || 0;
   if (project !== S.work.project || workspace_id !== (S.work.workspace_id || ''))
@@ -1345,7 +1402,9 @@ async function restoreBackup(id, path) {
       if (error.code !== 'NOT_FOUND') throw error;
     }
     if (
-      project !== S.work.project ||
+      !workDialogCurrent(scope) ||
+      $('.modal') !== dialog ||
+      !dialog?.isConnected ||
       generation !== (S.fileGeneration || 0) ||
       revision !== (S.editRevision || 0)
     )
@@ -1362,7 +1421,10 @@ async function restoreBackup(id, path) {
     );
     closeModal(dialog);
     if (
+      S.session === scope.session &&
       S.work.project === project &&
+      (S.work.workspace_id || '') === workspace_id &&
+      (S.workGeneration || 0) === scope.workEpoch &&
       generation === (S.fileGeneration || 0) &&
       revision === (S.editRevision || 0)
     ) {
@@ -1371,7 +1433,10 @@ async function restoreBackup(id, path) {
       } catch (error) {
         if (error.code !== 'NOT_FOUND') throw error;
         if (
+          S.session === scope.session &&
           S.work.project === project &&
+          (S.work.workspace_id || '') === workspace_id &&
+          (S.workGeneration || 0) === scope.workEpoch &&
           generation === (S.fileGeneration || 0) &&
           revision === (S.editRevision || 0)
         ) {
@@ -1938,7 +2003,8 @@ panelActions.register(['read-file'], async (b, e) => {
   return;
 });
 panelActions.register(['search-read'], async (b, e) => {
-  closeModal();
+  if (!b.isConnected || !workDialogCurrent(b.workScope)) return;
+  closeModal(b.closest('.modal'));
   await readFile(b.dataset.path);
   return;
 });
@@ -1967,7 +2033,8 @@ panelActions.register(['history'], async (b, e) => {
   return;
 });
 panelActions.register(['restore-backup'], async (b, e) => {
-  await restoreBackup(b.dataset.id, b.dataset.path);
+  if (!b.isConnected) return;
+  await restoreBackup(b.dataset.id, b.dataset.path, b.workScope);
   return;
 });
 panelActions.register(['checkpoint'], async (b, e) => {

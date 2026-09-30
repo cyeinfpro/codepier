@@ -28,10 +28,12 @@ def plan_jobs(nodeids, markers=None, *, shard_index=0, shard_count=1):
         raise ValueError("Collection contains duplicate node IDs")
     markers = markers or {}
     grouped: dict[str, list[str]] = {}
+    by_module: dict[str, list[str]] = {}
     for nodeid in nodeids:
         module = nodeid.split("::", 1)[0]
         if not module.startswith("tests/") or ".." in Path(module).parts:
             raise ValueError("Unexpected test path")
+        by_module.setdefault(module, []).append(nodeid)
         key = nodeid if "isolated_case" in markers.get(nodeid, []) else module
         grouped.setdefault(key, []).append(nodeid)
     jobs = []
@@ -44,7 +46,7 @@ def plan_jobs(nodeids, markers=None, *, shard_index=0, shard_count=1):
             name += "--" + fingerprint(key)[:16]
         # A module containing isolated cases must select the remaining node IDs,
         # not run the complete module again and duplicate those cases.
-        full_module = [n for n in nodeids if n.split("::", 1)[0] == module]
+        full_module = by_module[module]
         selectors = [module] if selected == full_module else selected
         marker_names = {marker for nodeid in selected for marker in markers.get(nodeid, [])}
         exclusive = "serial_regression" in marker_names

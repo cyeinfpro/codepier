@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+
+from shared.util import DevError
 
 
 @dataclass(frozen=True)
@@ -63,15 +66,41 @@ class ResourceQueue:
                 self.condition.notify_all()
 
 
+PATH_READ_TOOLS = frozenset({'fs_tree', 'fs_read', 'fs_read_many', 'fs_search'})
+
+
+def canonical_path(path):
+    name = Path(path).expanduser().resolve().as_posix()
+    # macOS commonly uses case-insensitive APFS. Conservatively alias case even
+    # on case-sensitive volumes: extra serialization is safer than missing a
+    # conflict, including paths whose final component does not yet exist.
+    return name.casefold() if os.name == 'nt' or sys.platform == 'darwin' else name
+
+
 def claims_for(engine, tool, project, args, root):
+    if tool in PATH_READ_TOOLS:
+        paths = args['paths'] if tool == 'fs_read_many' else [args['path']]
+        try:
+            return [Claim('agent', 'path', canonical_path(engine.path(root, path)), False) for path in paths]
+        except (DevError, OSError):
+            if tool != 'fs_read_many':
+                raise
+            # Batch reads report path failures per item. Keep a conservative
+            # claim if a rejected path becomes readable while this job waits.
+            return [Claim('agent', 'path', canonical_path(root), False)]
     if tool == 'edit' and args.get('changes'):
         paths = [change['path'] for change in args['changes']] + [change['destination'] for change in args['changes'] if change.get('destination')]
-        return [Claim('agent', 'path', os.path.normcase(engine.path(root, path, False).resolve().as_posix()), True) for path in paths]
+        return [Claim('agent', 'path', canonical_path(engine.path(root, path, False)), True) for path in paths]
     if tool in {'read', 'write', 'edit', 'download_artifact'}:
         path = engine.path(root, args['path'], False).resolve()
-        return [Claim('agent', 'path', path.as_posix().casefold() if os.name == 'nt' else path.as_posix(), tool != 'read')]
+        return [Claim('agent', 'path', canonical_path(path), tool != 'read')]
     if tool != 'exec':
         return []
+    if args.get('task'):
+        task = engine.config.get('tasks', {}).get(args['task'], {})
+        # This is local task policy, never caller-declared resource policy.
+        # Public exec(task=...) must preserve legacy tasks_run's exclusion.
+        return [Claim('agent', 'path', canonical_path(root), not task.get('allow_read_concurrency', False))]
     remote = project.get('_core_ssh')
     namespace = f"ssh:{remote['host']}:{remote['port']}" if remote else 'agent'
     cwd = Path(args['cwd']).expanduser()
@@ -85,13 +114,10 @@ def claims_for(engine, tool, project, args, root):
                 # Relative remote paths are scoped conservatively under '/', as
                 # the login shell's real cwd is not available before execution.
                 if '..' in PurePosixPath(name).parts:
-                    from shared.util import DevError
                     raise DevError('INVALID_RESOURCE', '远程资源路径不接受 ..，请使用绝对路径')
                 name = '/' if not PurePosixPath(name).is_absolute() else str(PurePosixPath(name))
             else:
                 path = Path(name).expanduser()
-                name = (path if path.is_absolute() else cwd / path).resolve().as_posix()
-                if os.name == 'nt':
-                    name = name.casefold()
+                name = canonical_path(path if path.is_absolute() else cwd / path)
         claims.append(Claim(namespace, resource['kind'], name, resource['mode'] == 'write'))
     return claims
