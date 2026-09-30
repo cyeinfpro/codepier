@@ -1,0 +1,266 @@
+# CodePier Hub on k3s — single-file manifest (kubectl apply -f deploy/k3s/deployment.yaml).
+#
+# Edit before applying:
+#   - codepier.example.com  → your public host (Ingress host and HUB_PUBLIC_URL must match)
+#   - image                 → the reference recorded by the "Container image" workflow;
+#                             pin the digest: ghcr.io/<owner>/codepier:VERSION@sha256:...
+#   - Secret codepier-oidc  → your IdP issuer, client id and secret. Register the callback
+#                             https://<host>/auth/oidc/idp_env/callback at the IdP.
+#
+# First run: open https://<host>/ and sign in through the seeded SSO provider. With
+# CODEPIER_OIDC_BOOTSTRAP_ADMIN=first-login (ConfigMap) the first admitted identity becomes
+# the instance administrator; CODEPIER_OIDC_REQUIRED_GROUP bounds who is admitted at all,
+# and the window closes once an administrator exists. Without SSO, or to add a local
+# recovery administrator later (recommended: an IdP outage must not lock you out):
+#   kubectl -n codepier exec -it deploy/codepier-hub -- python -m hub init --username admin
+#
+# Upgrade: change the image reference, re-apply, `kubectl -n codepier rollout status deploy/codepier-hub`.
+# Changing the ConfigMap needs `kubectl -n codepier rollout restart deploy/codepier-hub`.
+# Back up before upgrading: kubectl -n codepier exec deploy/codepier-hub -- python -m hub backup --output /tmp/backup.zip
+#
+# Constraints carried over from compose.yml and the Hub process model:
+#   - Exactly one replica with Recreate: the Hub takes an exclusive flock on /app/data/.hub.lock
+#     and SQLite runs in WAL mode, so a second pod on the same volume would fail to start.
+#   - ReadWriteOnce on local block storage (k3s local-path). Not NFS: flock and WAL are unreliable there.
+#   - No HUB_PANEL_UPDATE_SOCKET: the in-panel updater is a Compose/systemd host feature and stays
+#     disabled here; the Settings page reports it as not enabled.
+#   - Traefik terminates TLS. The NetworkPolicy limits ingress to its pods; keep the
+#     k3s network-policy controller enabled and adjust selectors if Traefik is relocated.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: codepier
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: codepier-hub
+  namespace: codepier
+data:
+  HUB_DATA_DIR: /app/data
+  HUB_PORT: "8765"
+  # Public origin for the panel, OAuth, MCP and Agent installers; must equal the Ingress host.
+  HUB_PUBLIC_URL: https://codepier.example.com
+  # MCP_PUBLIC_URL: https://mcp.example.com   # only when MCP is served from a different origin
+  TZ: Asia/Taipei
+  # k3s default --cluster-cidr; the NetworkPolicy below restricts traffic to Traefik.
+  FORWARDED_ALLOW_IPS: 10.42.0.0/16
+  OAUTH_REDIRECT_HOSTS: chatgpt.com,chat.openai.com,platform.openai.com,localhost,127.0.0.1,::1
+  HUB_QUEUE_TTL_SECONDS: "1800"
+  HUB_CALL_WAIT_SECONDS: "8"
+  HUB_DELIVERY_RETRY_SECONDS: "5"
+  MCP_BLOCK_LOCAL_CODEX: "false"
+  CODEPIER_MCP_GATEWAY: "1"
+  # first-login: while no active instance administrator exists, the first admitted OIDC
+  # identity is promoted (audited as oidc.bootstrap_admin). No effect once one exists.
+  CODEPIER_OIDC_BOOTSTRAP_ADMIN: first-login
+---
+# One provider declared by the environment (id idp_env). While these variables are set the
+# environment is authoritative: the panel refuses edits (PROVIDER_ENV_MANAGED) and changes
+# apply on the next restart. Delete this Secret to run without SSO seeding; an already
+# created provider then stays and becomes editable in 身份管理.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: codepier-oidc
+  namespace: codepier
+type: Opaque
+stringData:
+  CODEPIER_OIDC_LABEL: Company SSO
+  # Exact issuer from the discovery document, e.g. https://auth.example.com/application/o/codepier/
+  CODEPIER_OIDC_ISSUER: https://auth.example.com/application/o/codepier/
+  CODEPIER_OIDC_CLIENT_ID: codepier
+  CODEPIER_OIDC_CLIENT_SECRET: replace-with-the-idp-client-secret
+  CODEPIER_OIDC_SCOPES: openid profile email
+  # Optional: only members of this IdP group may sign in, and therefore bootstrap.
+  CODEPIER_OIDC_REQUIRED_GROUP: ""
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: codepier-hub-data
+  namespace: codepier
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: codepier-hub
+  namespace: codepier
+  labels:
+    app.kubernetes.io/name: codepier
+    app.kubernetes.io/component: hub
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: codepier
+      app.kubernetes.io/component: hub
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: codepier
+        app.kubernetes.io/component: hub
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 20
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # local-path provisions a root-owned directory and hostPath volumes ignore fsGroup.
+        # The Hub chmods its data directory to 0700 at start, which requires owning it.
+        # Same image as the Hub, so no additional pull; only CHOWN and FOWNER are granted.
+        - name: data-ownership
+          image: ghcr.io/cyeinfpro/codepier:1.14.4
+          command: ["sh", "-c", "chown 10001:10001 /app/data && chmod 0700 /app/data"]
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN", "FOWNER"]
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+      containers:
+        - name: hub
+          image: ghcr.io/cyeinfpro/codepier:1.14.4
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8765
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: codepier-hub
+            - secretRef:
+                name: codepier-oidc
+                optional: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            - name: tmp
+              mountPath: /tmp
+          # /healthz answers 503 until the delivery worker runs and SQLite responds,
+          # and again while shutting down, so it serves readiness and liveness alike.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 3
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 4
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 4
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: codepier-hub-data
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: codepier-hub
+  namespace: codepier
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: codepier
+    app.kubernetes.io/component: hub
+  ports:
+    - name: http
+      port: 8765
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: codepier-hub-ingress
+  namespace: codepier
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: codepier
+      app.kubernetes.io/component: hub
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: traefik
+      ports:
+        - protocol: TCP
+          port: 8765
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: codepier-hub
+  namespace: codepier
+  annotations:
+    # HTTPS only: the panel must not accept passwords or pairing files over plain HTTP.
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - codepier.example.com
+      secretName: codepier-hub-tls
+  rules:
+    - host: codepier.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: codepier-hub
+                port:
+                  name: http

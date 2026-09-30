@@ -115,7 +115,14 @@ class HubIntegrations:
     def activity(self,args,principal):
         project=self.runtime.project(args['project'],principal)
         clauses=['project=?','root=?','device=?'];values=[project['id'],project['root'],project['device_id']]
-        if not principal.admin:clauses.append('grant_id=?');values.append(principal.grant_id)
+        from hub import iam
+        if principal.grant_id:
+            clauses.append('grant_id=?');values.append(principal.grant_id)
+        elif iam.installed(self.store) and not principal.instance_admin:
+            clauses.append('(actor=? OR grant_id IN (SELECT id FROM grants WHERE user_id=? AND space_id=?))')
+            values.extend((principal.actor,principal.user_id,principal.space_id))
+        elif not iam.installed(self.store) and not principal.admin:
+            clauses.append('grant_id=?');values.append(principal.grant_id)
         if args['before_id'] is not None:clauses.append('id<?');values.append(args['before_id'])
         rows=self.store.all('SELECT id,tool,window_key,started,service_ms,next_call_gap_ms,cycle_ms,status,transition,operation_id,meaningful FROM mcp_activity WHERE '+' AND '.join(clauses)+' ORDER BY id DESC LIMIT ?',(*values,args['limit']+1))
         more=len(rows)>args['limit'];rows=rows[:args['limit']]

@@ -97,8 +97,10 @@ def main():
     try:
         if args.command in {"init", "reset-password"}:
             user = store.one("SELECT * FROM users WHERE username=?", (args.username,))
-            if args.command == "init" and store.one("SELECT id FROM users LIMIT 1"):
-                parser.error("面板已经初始化。重置请使用 reset-password")
+            if args.command == "init" and user:
+                parser.error("账号已存在；创建恢复管理员请使用新的账号名，重置请使用 reset-password")
+            if args.command == "init" and store.one("SELECT 1 AS ok FROM iam_users WHERE local_login=1"):
+                parser.error("面板已有本地登录账号。重置请使用 reset-password")
             if args.command == "reset-password" and not user:
                 parser.error("账号不存在")
             password = os.getenv("CODEPIER_ADMIN_PASSWORD", os.getenv("RD_ADMIN_PASSWORD"))
@@ -112,14 +114,22 @@ def main():
             with store.lock, store.db:
                 # Serialize local CLI initialization with other initializers.
                 store.db.execute("BEGIN IMMEDIATE")
+                if args.command == "init" and store.one("SELECT 1 AS ok FROM users WHERE username=?", (args.username,)):
+                    parser.error("账号已存在；创建恢复管理员请使用新的账号名")
                 if user:
                     store.db.execute("UPDATE users SET password_hash=? WHERE id=?", (hashed, user["id"]))
+                    store.db.execute('UPDATE iam_users SET local_login=1,active=1,epoch=epoch+1,version=version+1 WHERE user_id=?',(user['id'],))
                     store.db.execute("DELETE FROM sessions WHERE user_id=?", (user["id"],))
                     store.db.execute("UPDATE grants SET revoked=1 WHERE user_id=?", (user["id"],))
                 else:
-                    if store.db.execute("SELECT id FROM users LIMIT 1").fetchone():
-                        parser.error("面板已经初始化。重置请使用 reset-password")
-                    store.db.execute("INSERT INTO users VALUES (?,?,?,?)", (uuid.uuid4().hex, args.username, hashed, time.time()))
+                    if store.db.execute("SELECT 1 FROM iam_users WHERE local_login=1 LIMIT 1").fetchone():
+                        parser.error("面板已有本地登录账号。重置请使用 reset-password")
+                    user_id = uuid.uuid4().hex
+                    store.db.execute("INSERT INTO users VALUES (?,?,?,?)", (user_id, args.username, hashed, time.time()))
+                    # A recovery administrator added after OIDC bootstrap holds the same
+                    # instance authority and Legacy ownership as the very first account.
+                    store.db.execute("UPDATE iam_users SET local_login=1,instance_admin=1 WHERE user_id=?", (user_id,))
+                    store.db.execute("UPDATE memberships SET level='owner' WHERE user_id=? AND space_id='legacy'", (user_id,))
             store.audit("local-cli", "account." + args.command, args.username)
             print(f"账号 {args.username} 已就绪。没有默认密码。")
         elif args.command == "backup":

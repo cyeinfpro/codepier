@@ -15,6 +15,7 @@ import time
 from fastapi import Query, Request
 
 from hub.db_worker import database_endpoint
+from hub import iam
 from shared.audit_redaction import display_value, redact_text
 
 TERMINAL = {"succeeded", "failed", "cancelled", "needs_review", "interrupted"}
@@ -147,11 +148,15 @@ def register_call_log(app, runtime, auth):
     @app.get("/api/call-log")
     @database_endpoint(store)
     def call_log(request: Request, limit: int = Query(40, ge=1, le=100), cursor: str = Query("", max_length=1024), q: str = Query("", max_length=200), source: str = Query("", max_length=20), status: str = Query("", max_length=30), project: str = Query("", max_length=100), tool: str = Query("", max_length=100), watch: str = Query("", max_length=4096), include_filters: bool = True):
-        auth.admin(request)
+        principal = auth.panel(request)
         if source not in {"", "mcp", "panel"} or status not in STATES | {""}:
             raise DevError("INVALID_FILTER", "无效的调用来源或状态")
-        filters = {"q": q.strip(), "source": source, "status": status, "project": project, "tool": tool}
-        where, values = [], []
+        filters = {"q": q.strip(), "source": source, "status": status, "project": project, "tool": tool, "space": principal.space_id, "user": principal.user_id, "epoch": principal.user_epoch}
+        clause, scope_args = iam.private_sql(principal, 'o.')
+        if not principal.admin:
+            clause += ' AND (o.project_id IS NULL OR o.project_id IN (%s))' % (','.join('?' for _ in principal.projects) or 'NULL')
+            scope_args.extend(principal.projects)
+        where, values = [clause], list(scope_args)
         for column, value in (("o.state", status), ("o.project_id", project), ("o.tool", tool)):
             if value:
                 where.append(column + "=?")
@@ -182,13 +187,13 @@ def register_call_log(app, runtime, auth):
         updates = []
         if watched:
             base = "SELECT o.id,o.project_id,o.device_id,o.tool,o.actor,o.state,o.created,o.updated,o.args_summary,o.error,o.attempts,p.alias,d.name AS device_name FROM operations o LEFT JOIN projects p ON p.id=o.project_id LEFT JOIN devices d ON d.id=o.device_id"
-            updates = store.all(base + " WHERE o.id IN (" + ",".join("?" for _ in watched) + ")", tuple(watched))
-        return {"updates": [public_row(row, observed) for row in updates], "operations": [public_row(row, observed) for row in rows], "next_cursor": _cursor(rows[-1]["created"], rows[-1]["id"], filters) if more else None, "observed_at": observed, "projects": store.all("SELECT id,alias FROM projects ORDER BY alias,id") if include_filters else [], "tools": [x["tool"] for x in store.all("SELECT DISTINCT tool FROM operations ORDER BY tool LIMIT 200")] if include_filters else []}
+            updates = store.all(base + " WHERE " + clause + " AND o.id IN (" + ",".join("?" for _ in watched) + ")", (*scope_args, *watched))
+        return {"updates": [public_row(row, observed) for row in updates], "operations": [public_row(row, observed) for row in rows], "next_cursor": _cursor(rows[-1]["created"], rows[-1]["id"], filters) if more else None, "observed_at": observed, "projects": [{k: row[k] for k in ('id', 'alias')} for row in runtime.list_projects(principal)] if include_filters else [], "tools": [x["tool"] for x in store.all("SELECT DISTINCT o.tool FROM operations o WHERE " + clause + " ORDER BY o.tool LIMIT 200", scope_args)] if include_filters else []}
 
     @app.get("/api/call-log/{identifier}")
     @database_endpoint(store)
     def call_log_detail(identifier: str, request: Request):
-        principal = auth.admin(request)
+        principal = auth.panel(request)
         original = runtime.operation(identifier, principal)
         row = public_row({key: value for key, value in original.items() if key not in {"result", "output"}})
         sections = {}

@@ -1,6 +1,8 @@
 # 九个 MCP 工具
 
-CodePier 对外只提供 `workspace`、`read`、`write`、`edit`、`exec`、`process`、`vps`、`browser`、`computer`。旧的独立 MCP 工具入口已移除，调用会返回 `TOOL_REMOVED`；`full`、`coding` 目录也不恢复旧入口。面板和 Agent 内部仍复用原有执行、权限和持久化实现。
+CodePier 的九个核心开发工具为 `workspace`、`read`、`write`、`edit`、`exec`、`process`、`vps`、`browser`、`computer`。旧的独立 MCP 工具入口已移除，调用会返回 `TOOL_REMOVED`；`full`、`coding` 目录也不恢复旧入口。面板和 Agent 内部仍复用原有执行、权限和持久化实现。
+
+身份工具 `get_profile`、`get_access_context` 额外提供稳定身份和实时权限摘要。经明确同意的动态角色连接还可使用已审核的外部 MCP 工具及 `gateway_call_get` 回执查询，详见 [MCP 网关](MCP_GATEWAY.md)。
 
 ## 常用流程
 
@@ -22,7 +24,7 @@ CodePier 对外只提供 `workspace`、`read`、`write`、`edit`、`exec`、`pro
 
 | 工具 | 操作 |
 | --- | --- |
-| `workspace` | `list/open/skills/skill/tasks/status/readiness/tree/help`；`resolve/context/dashboard`；`worktree_create/worktree_list/worktree_remove`；`workflow_create/workflow_list/workflow_get/workflow_update/handoff`；`lsp_status` |
+| `workspace` | `devices/project_create/list/open/skills/skill/tasks/status/readiness/tree/help`；`resolve/context/dashboard`；`worktree_create/worktree_list/worktree_remove`；`workflow_create/workflow_list/workflow_get/workflow_update/handoff`；`lsp_status` |
 | `read` | 默认 `file`；`changes/artifact/artifacts/history/symbols/lsp` |
 | `write` | 默认 `file`；`import/artifact` |
 | `edit` | 默认 `file`；`restore/checkpoint` |

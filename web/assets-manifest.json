@@ -2,17 +2,25 @@
   "version": "1.14.4",
   "algorithm": "sha256",
   "assets": {
+    "access-profiles.css": {
+      "sha256": "9a3be821b011684e980fcba6c4dc5f511f5aeaf53cab5b33b4d4e2bf846738f0",
+      "bytes": 871
+    },
+    "access-profiles.js": {
+      "sha256": "957b08126ec189f7c3e399d1462235329991a5d03ecef0a0410e511781ada317",
+      "bytes": 12197
+    },
     "access.js": {
-      "sha256": "e4b4457ce7e1d87e34009d2b74064eb27b54a2c2f2b36f7bcd2ee5679c8c2e41",
-      "bytes": 8321
+      "sha256": "882cc651d47231a39278d099732325fab396e89895b2643cc4d0751d7c8e9b77",
+      "bytes": 8380
     },
     "agent-install.js": {
       "sha256": "275b69ed4e92a99d36f09b845eb475c51dd21642caac98910921a0279a304be8",
       "bytes": 27864
     },
     "app.js": {
-      "sha256": "74b4c82d87fa06467ac406d204ea0ae1a8a4a046b5587103196c9eb725a9ac0f",
-      "bytes": 107456
+      "sha256": "d54afc1a719e4c35d9754ae5445de7b0c3ba9a07bb351145b8a2e36a54a40675",
+      "bytes": 111738
     },
     "appearance.js": {
       "sha256": "7fc8e8ffa85a4bb5836b8919cdf6ff12813cfb4a9e4736709f5858e5d8782bb1",
@@ -55,8 +63,8 @@
       "bytes": 74061
     },
     "chat.js": {
-      "sha256": "5242ac3651e5b7631b06cb72fd48d6cadc6a4bfed10e51ce52eb9132db9875b7",
-      "bytes": 93355
+      "sha256": "2ae94c6575ed2177e1d6a05e117144aacdac656aabb5e52d49554bc0343b95e6",
+      "bytes": 93445
     },
     "computer.css": {
       "sha256": "3bfd6993ecee11cf6c23d78cc7b4f9acd6759ffaccc5e241ff06e156da7dfcac",
@@ -73,6 +81,14 @@
     "favicon.svg": {
       "sha256": "f99761d39d805b7f995e20bb44df1b1adfe17fc9cef8caf47c965e1af713032f",
       "bytes": 296
+    },
+    "identity.css": {
+      "sha256": "d5e95f83682dbdfaff251d95592f5948004b0148113377ce66b542f0e9143a36",
+      "bytes": 446
+    },
+    "identity.js": {
+      "sha256": "a9aa62bbf6b3b8bec34798fd58cc12c73ad476916511b85057563ae208139d03",
+      "bytes": 30762
     },
     "insights.js": {
       "sha256": "48a848f7c7d41ffdf04201db41063e46f022ca5a5dc22d1f268f9b2144471e22",
@@ -94,6 +110,14 @@
       "sha256": "80be28e7513f1730a61f32e79892724a3e77d4e8b91ec94dfa360bd286b31c02",
       "bytes": 86231
     },
+    "mcp-gateway.css": {
+      "sha256": "9113eda3b71d27192808b0f46629548dc5a3048d2bc1b2be34f1284ffa0e8527",
+      "bytes": 613
+    },
+    "mcp-gateway.js": {
+      "sha256": "9a097bdb838b2795cbecb72879393a577182b6464e3fee3e527f27e2b9d34223",
+      "bytes": 17117
+    },
     "native-hash.js": {
       "sha256": "6f324844279a6dff5f75fda7b284b05319a70a3142f95d253a5e91dae9ddfbb3",
       "bytes": 583
@@ -105,6 +129,10 @@
     "panel-update.js": {
       "sha256": "f201a58c37e0dfb8b22c453e5901a0351a5978b596688d24f5ec6ec38d32379c",
       "bytes": 14459
+    },
+    "roles.js": {
+      "sha256": "07293621586483a3be41b1edf9279451bcae096fb86c8ee5c95af55b3c776a4f",
+      "bytes": 11549
     },
     "skills.js": {
       "sha256": "92a4fb865f98d7a62f36083ef585863365f81cd4654d4dd7f72def23bf8037f8",
@@ -143,5 +171,5 @@
       "bytes": 24897
     }
   },
-  "template_sha256": "4ce126c65c96f488992af67dc8454e574db8b637cc70bde5d7bd4a04992fdaac"
+  "template_sha256": "5ee1460e0a087e7e395298a1f71eb0f919207af9a2c66cbcd879541a88b053a7"
 }

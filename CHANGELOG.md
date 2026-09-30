@@ -1,5 +1,68 @@
 # Changelog
 
+## Unreleased — 容器镜像发布
+
+- 整合主分支 1.14.4 的恢复、排队与浏览器时序修复，同时保留未开始任务撤权和原生会话安全协议。k3s 默认镜像改为主仓库当前版本，并通过 NetworkPolicy 限制只有 Traefik 可访问受信代理入口。
+- 修复停用用户时同步数据库事务阻塞事件循环，以及本地恢复管理员初始化可能覆盖已有 SSO 账号的问题；添加故障回归。
+- 将新增 PyJWT 依赖升级至 2.15.0 并重新生成哈希锁文件；真实 OIDC 验收支持独立 Docker Compose，主分支故障回归 fixture 适配实际 IAM 身份与扩展后的数据库字段。
+- 新增 `.github/workflows/image.yml`：CI 构建 Hub 镜像并发布到 GHCR（linux/amd64、linux/arm64，附 SBOM 与构建来源证明），不再要求在服务器上用安装脚本现场构建。
+- 发布前在工作流内核对源码版本与 Git 标签，并用 Compose 同等加固参数从空数据目录启动候选镜像，检查 `/healthz`、运行版本、维护状态、`/agent/manifest.json` 与 UID；Pull Request 只构建不发布。
+- 新增 `deploy/k3s/deployment.yaml`：单副本 Recreate、local-path RWO 数据卷、与 Compose 同等的非 root/只读根文件系统加固、Traefik Ingress，不启用宿主机更新服务；`scripts/check_release.py` 同步核对该清单的镜像版本。
+- 新增 `CODEPIER_OIDC_*` 环境变量播种唯一身份提供者 `idp_env`（环境为权威来源，变量存在时面板拒绝编辑），以及 `CODEPIER_OIDC_BOOTSTRAP_ADMIN=first-login`：没有实例管理员时，首个通过准入的 OIDC 登录成为实例管理员并拥有 Legacy 空间，审计 `oidc.bootstrap_admin`，窗口随即关闭；默认关闭，行为不变。`hub init` 在没有本地登录账号时可补建本地恢复管理员。
+- Compose 与安装脚本路径不变；未创建 Release，也不部署服务。
+
+## Unreleased fork integration — 2026-09-27
+
+- Merge the complete upstream 1.14.3 line with IAM and multi-MCP Gateway; retain both parent histories.
+- One Principal refresh, checked Store/DB-worker execution, explicit public tool routing and scoped call logs.
+- Nine native tools plus two stable identity tools; removed public aliases remain internal only.
+- First PAT/OAuth consent can explicitly include external MCP; no silent expansion of older grants.
+- Rotate all OIDC/Gateway ciphertexts and keep routing/idempotency keys stable.
+- Rebuild IAM/Gateway UI through the upstream source/hash pipeline. No release or deployment.
+- See docs/UPSTREAM_INTEGRATION.md for compatibility and incomplete platform validation.
+
+## Unreleased — 多 MCP Gateway 第一阶段
+
+- 在独立 `hub/gateway/` 中增加远端 MCP 帐户、经审核的命名空间工具、即时 Role 规则、每 grant 明确同意及加密回执；默认关闭，不扩大既有 fixed/role grant。
+- 内建工具继续走原 Runtime；外部工具保留 schema、独立路由，不向后端透传 CodePier token、Cookie、前端元数据或身份标记。保持 `get_profile`；访问上下文增加外部能力摘要。
+- 增加固定服务 endpoint、管理员批准的内网 CIDR、全 DNS 答案校验、IP 固定与原 Host/TLS SNI、禁止重定向和环境代理，以及后端帐户/授权隔离的有限连接池。
+- 支持 2026-07-28 与 legacy Streamable HTTP 的 JSON/SSE 工具响应；只用只读探测协商，不自动重发调用。多回合请求/资源代理等未实现能力明确失败。
+- 工具发现与发布分离，已发现的 schema 改变阻止旧发布工具继续调用；参数/结果 schema 在有界子进程验证。收回权限后拒绝派送或隐藏迟到结果。
+- 在现有 Panel 增加 MCP 网关页面，原 Role 编辑器保留 connector_rules；添加工具分页、同名工具消歧、回执恢复与配置/调用审计。
+- 独立 gateway_schema=1；原 IAM schema=10 不变。此功能不是 upstream 1.14 合并、生产部署或真实外部服务验收。详见 docs/MCP_GATEWAY.md。
+
+## Unreleased — 多用户、OIDC 与 Space 隔离
+
+- **升级兼容性警告：** required_group / 群组映射只接受 UserInfo 的群组字段；Microsoft Entra UserInfo 无法返回自定义 groups，仅配置 ID Token 群组不能修复。升级前验证本地恢复登录与身份代理；不能靠移除准入限制绕过。已有群组配置在 Hub 启动及管理页有明确提示。
+- 修复已消费 OIDC 回调仍占用待处理登录容量、损坏密文令同步批次提前退出、刷新令牌后丢失重试/恢复结果，以及批量 Profile/PAT/OAuth 授权的平方级计算。
+- 密钥轮换使用已验证 Discovery 的 JWKS 端点、有限突发预算与独立失败退避；有效缓存密钥优先使用，保持原签名及权限校验。
+
+- 接入通用 OIDC 授权码/S256 PKCE、签名/issuer/subject/nonce/audience 校验、服务端加密状态、显式账号关联和退出处理；禁止按邮箱自动合并，JIT 默认关闭并保留本机恢复账号。
+- 新增个人/团队 Space、来源可追溯的成员及角色分配、私有 Profile、OIDC 群组映射和有时效的权限校验；普通面板用户不再自动变成管理员。
+- 共用动态 Role 在当前 Space 内实时增减能力与项目，已有明确同意的角色连接无需重新授权；保留旧 fixed grant 语义与稳定身份。
+- 为项目、VPS、设备、操作、工作流、交付物、原生会话、审计和事件添加归属/访问检查；等待、派送和缓存流逐项重验，避免撤权后读到迟到结果。
+- schema 9 迁移保留既有 ID、Token、设备密钥和主密钥；别名及操作/工作流请求键按 Space 隔离，禁止在原地跨 Space 重定向资源。
+- 新增本机设备自助注册/归属、原生私有会话能力检查、用户/空间暂停、最后主理人/本机恢复管理员保护，以及原布局内的身份和成员管理界面。
+- 增加多用户、OIDC 协议、真实临时 Hub/Agent、浏览器矩阵和独立 Authentik 验收；完整原 CI 保留，不以局部套件替代全量验证。
+- 提供升级、群组/撤权、备份回退和恢复说明；此条目不是生产部署或特定 ChatGPT 宿主配置成功的声明。
+
+## Unreleased — 动态角色与 Access Profiles
+
+- Profile 与共用 Role 分离；明确同意角色模式后，已有连接跟随当前项目/能力政策，支持全部未来项目、逐规则排除和本角色创建的项目。
+- 新增 codepier.role_access OAuth 范围、角色管理页、显式确认、版本/幂等及前后审计；旧 fixed grant 不静默转换。
+- 按具体操作与资源配对授权，防止「全项目读取 + A 执行」串成全项目执行。等待结果、派送、工作流及创建提交重新验权。
+- 新增 devices_list/projects_create 管理委派，限制设备、路径、映射模式及任务，保留 Agent 本机否决，防止用重叠映射绕过项目授权。
+- schema 7 增量迁移保留旧授权及主密钥。角色暂停返回政策拒绝而非反复 OAuth；重新绑定另一角色需要再次明确同意。
+- 新增真实临时 Hub/Agent、OAuth、迁移和浏览器矩阵测试；未声明生产部署或真实 ChatGPT 宿主验收。
+
+### Access Profiles 基础
+
+- 新增 owner 管理的稳定 Access Profile 身份、OAuth/PAT 绑定、管理页面和授权选择器。
+- 新增已认证 MCP `get_profile`（OpenAI profile 标记）与 `get_access_context`，完整/编码目录均可使用。
+- 有效权限为原 grant 同意与当前 Profile 上限的交集；停用、刷新、派送前复核和跨 grant 归属继续保留。
+- schema 6 增量迁移不重绑定旧授权；传统批量范围设置排除 Profile grant，避免绕过原同意。
+- 新增身份稳定性、越权、撤权、迁移、并发和桌面/手机浏览器回归。未声明生产部署或真实 ChatGPT 宿主验收。
+
 ## 1.14.4 — 2026-09-30 — 排队、附件恢复与工作区时序修复
 
 - 下载和 DNS 等待不再持有全局文件写锁；目标路径继续互斥，原子发布前复核授权、路径和文件身份。DNS 解析具有调用时限和并发上限。

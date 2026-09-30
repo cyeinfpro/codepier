@@ -14,6 +14,7 @@ from shared.util import DevError
 from agent.runner import Agent
 from hub.runtime import Runtime, Principal
 from hub.store import Store
+from tests.legacy_iam_fixture import seed_owner
 
 
 @pytest.mark.parametrize('old_hub', [True, False], ids=['legacy-hub-wire', 'current-hub-wire'])
@@ -27,10 +28,11 @@ async def test_bidirectional_wire_matrix_preserves_one_write_and_recovery(tmp_pa
         'allowed_roots':[{'path':str(root),'writable':True,'allow_tasks':True}],'tasks':{}}))
     agent = Agent(config)
     store = Store(tmp_path / 'hub')
+    seed_owner(store)
     runtime = Runtime(store);runtime.wait_seconds = 0
     try:
         store.execute("INSERT INTO devices(id,name,secret,created) VALUES ('dev','fixture',?,?)", (store.encrypt(secret), time.time()))
-        store.execute("INSERT INTO projects VALUES ('proj','Fixture','fixture','dev',?,'','write',1,?)", (str(root), time.time()))
+        store.execute("INSERT INTO projects(id,alias,alias_key,device_id,root,description,mode,allow_tasks,created) VALUES ('proj','Fixture','fixture','dev',?,'','write',1,?)", (str(root), time.time()))
         principal = Principal('panel:owner','owner',{'read','write','execute'},['*'],admin=True)
         challenge = token(32)
         hub_channel = SecureChannel(secret, challenge, 'dev', 'hub')
@@ -121,10 +123,11 @@ def test_invalid_call_epoch_is_rejected(epoch):
 async def test_pending_payload_keeps_original_semantics_after_upgrade(tmp_path, monkeypatch, sent):
     from shared import tool_protocol
     store = Store(tmp_path / 'hub')
+    seed_owner(store)
     runtime = Runtime(store);runtime.wait_seconds = 0
     try:
         store.execute("INSERT INTO devices(id,name,secret,created) VALUES ('dev','fixture',?,?)", (store.encrypt(token()), time.time()))
-        store.execute("INSERT INTO projects VALUES ('proj','Fixture','fixture','dev','/fixture','','write',1,?)", (time.time(),))
+        store.execute("INSERT INTO projects(id,alias,alias_key,device_id,root,description,mode,allow_tasks,created) VALUES ('proj','Fixture','fixture','dev','/fixture','','write',1,?)", (time.time(),))
         principal = Principal('panel:owner','owner',{'read','write','execute'},['*'],admin=True)
         receipt = await runtime.invoke('fs_write', {'project':'Fixture','path':'once','content':'one','expected_sha256':'new','idempotency_key':'epoch-fence'}, principal)
         row = store.one('SELECT payload FROM operations WHERE id=?', (receipt['operation_id'],))

@@ -21,7 +21,8 @@ class EvidenceStore:
             CREATE TABLE operations (id TEXT PRIMARY KEY, project_id TEXT, device_id TEXT,
                 tool TEXT, actor TEXT, state TEXT, created REAL, updated REAL,
                 args_summary TEXT, error TEXT, attempts INTEGER DEFAULT 1,
-                result TEXT, output TEXT, payload TEXT);
+                result TEXT, output TEXT, payload TEXT, space_id TEXT DEFAULT 'legacy',
+                owner_user_id TEXT DEFAULT 'owner', visibility TEXT DEFAULT 'private', grant_id TEXT);
             CREATE TABLE projects (id TEXT PRIMARY KEY, alias TEXT);
             CREATE TABLE devices (id TEXT PRIMARY KEY, name TEXT);
             INSERT INTO projects VALUES ('p1', 'MCP'), ('p2', 'Other');
@@ -43,11 +44,14 @@ def log_api():
     store = EvidenceStore()
     calls = []
     class Admin:
-        def admin(self, request):
+        def panel(self, request):
             if request.headers.get('X-Test-Admin') != 'yes':
                 raise DevError('UNAUTHORIZED', '需要管理员登录', 401)
-            return SimpleNamespace(admin=True, actor='panel:test')
+            return SimpleNamespace(admin=True, instance_admin=True, actor='panel:test',
+                space_id='legacy', user_id='owner', user_epoch=1,grant_id=None)
     class Runtime:
+        def list_projects(self, principal):
+            return store.all('SELECT * FROM projects')
         def operation(self, identifier, principal):
             rows=store.all('SELECT * FROM operations WHERE id=?',(identifier,))
             if not rows:
