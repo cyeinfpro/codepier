@@ -128,5 +128,6 @@ class HubConfig:
         bootstrap = os.getenv("CODEPIER_OIDC_BOOTSTRAP_ADMIN", "off").strip().lower()
         if bootstrap not in {"off", "first-login"}:
             raise ConfigurationError("CODEPIER_OIDC_BOOTSTRAP_ADMIN must be off or first-login")
-        return cls(port, timezone, public_url, RuntimeConfig.from_env(), OIDCSeed.from_env(),
-                   bootstrap == "first-login", oidc_public_url)
+        return cls(port=port, timezone=timezone, public_url=public_url, runtime=RuntimeConfig.from_env(),
+                   oidc_seed=OIDCSeed.from_env(), oidc_public_url=oidc_public_url,
+                   oidc_bootstrap_admin=bootstrap == "first-login")
