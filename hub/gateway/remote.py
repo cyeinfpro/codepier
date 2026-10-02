@@ -21,6 +21,7 @@ from shared.mcp_protocol import MODERN, LEGACY, PREFIX, request_headers
 from shared.util import DevError, valid_json_value
 
 MAX_RESPONSE = 2 * 1024 * 1024
+MAX_SESSION_AGE = 900  # Refresh pinned DNS between independent operations, never during one.
 CLIENT_INFO = {'name': 'codepier-mcp-gateway', 'version': '1'}
 
 
@@ -50,12 +51,14 @@ class Session:
         self.version = None
         self.session_id = None
         self.used = time.monotonic()
+        self.connected_at = self.used
+        self.invalid = False
 
     async def close(self):
-        if self.client is not None:
-            await self.client.aclose()
-            self.client = None
+        client, self.client = self.client, None
         self.version = self.session_id = None
+        if client is not None:
+            await client.aclose()
 
     async def connect(self):
         if self.client is not None:
@@ -66,6 +69,8 @@ class Session:
         self.client = httpx.AsyncClient(
             timeout=httpx.Timeout(20, connect=5), follow_redirects=False, trust_env=False,
             limits=httpx.Limits(max_connections=1, max_keepalive_connections=1), transport=self.transport)
+        self.connected_at = time.monotonic()
+        self.invalid = False
 
     async def rpc(self, method, params=None, *, version=None, notification=False):
         await self.connect()
@@ -129,6 +134,9 @@ class Session:
                     self.session_id = sid
                 return value['result']
         except httpx.HTTPError as exc:
+            # The result may be unknown. Retire the transport, not the receipt;
+            # only a later independently authorized operation may connect again.
+            self.invalid = True
             raise BackendError('GATEWAY_BACKEND_TRANSPORT', '后端连接中断或超时；操作结果可能未知，未自动重发') from exc
 
     async def read_response(self, response, mime, request_id):
@@ -166,6 +174,10 @@ class Session:
         return decode_json(bytes(raw))
 
     async def initialize(self):
+        # tools/call serialize here under the session lock. Existing queued
+        # owners may finish using this object, but cannot reuse its stale pin.
+        if self.invalid or (self.client is not None and time.monotonic() - self.connected_at >= MAX_SESSION_AGE):
+            await self.close()
         if self.version:
             return
         protocol = self.connector['protocol']
@@ -261,6 +273,10 @@ class RemotePool:
                 self.active[key] = remaining
             else:
                 self.active.pop(key, None)
+                session = self.sessions.get(key)
+                if session is not None and session.invalid:
+                    self.sessions.pop(key)
+                    await session.close()
 
     async def close(self):
         for session in list(self.sessions.values()):
