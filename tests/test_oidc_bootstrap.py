@@ -28,7 +28,7 @@ def seed_env(monkeypatch,fake,**overrides):
 def fresh_app(directory,fake):
     app=create_app(str(directory))
     app.state.oidc.transport=httpx.MockTransport(fake.handle)
-    fake.callback='http://testserver/auth/oidc/'+OIDC_SEED_PROVIDER_ID+'/callback'
+    fake.callback='http://testserver/auth/oidc/callback'
     return app
 
 
@@ -40,7 +40,7 @@ def sso_login(client,fake,subject):
     params=parse_qs(urlsplit(response.headers['location']).query)
     fake.nonce=params['nonce'][0];fake.expected_verifier=params['code_challenge'][0]
     cookie=response.headers['set-cookie'].split(';',1)[0]
-    result=client.get('/auth/oidc/'+OIDC_SEED_PROVIDER_ID+'/callback',params={'state':params['state'][0],'code':'authorization-code'},
+    result=client.get('/auth/oidc/callback',params={'state':params['state'][0],'code':'authorization-code'},
                       headers={'Cookie':cookie},follow_redirects=False)
     client.cookies.clear()
     return result
