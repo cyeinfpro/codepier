@@ -104,13 +104,13 @@ class HubConfig:
     public_url: str
     runtime: RuntimeConfig
     oidc_seed: OIDCSeed | None = None
+    # first-login: while no active instance administrator exists, the first admitted
+    # OIDC identity receives instance authority. The window closes by itself.
+    oidc_bootstrap_admin: bool = False
     # Human OIDC callbacks belong to the Hub/panel origin, not the optional
     # MCP/OAuth public origin. Keeping this separate makes the redirect URI
     # deterministic before an administrator or provider exists.
     oidc_public_url: str = ""
-    # first-login: while no active instance administrator exists, the first admitted
-    # OIDC identity receives instance authority. The window closes by itself.
-    oidc_bootstrap_admin: bool = False
 
     @classmethod
     def from_env(cls) -> HubConfig:
