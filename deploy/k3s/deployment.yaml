@@ -4,8 +4,9 @@
 #   - codepier.example.com  → your public host (Ingress host and HUB_PUBLIC_URL must match)
 #   - image                 → the reference recorded by the "Container image" workflow;
 #                             pin the digest: ghcr.io/<owner>/codepier:VERSION@sha256:...
-#   - Secret codepier-oidc  → your IdP issuer, client id and secret. Register the callback
-#                             https://<host>/auth/oidc/idp_env/callback at the IdP.
+#   - Secret codepier-oidc  → your IdP issuer, client id and secret. The callback is
+#                             always https://<host>/auth/oidc/callback; register it at the IdP
+#                             before CodePier is started. No provider ID is needed.
 #
 # First run: open https://<host>/ and sign in through the seeded SSO provider. With
 # CODEPIER_OIDC_BOOTSTRAP_ADMIN=first-login (ConfigMap) the first admitted identity becomes
