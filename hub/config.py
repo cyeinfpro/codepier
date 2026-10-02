@@ -104,6 +104,10 @@ class HubConfig:
     public_url: str
     runtime: RuntimeConfig
     oidc_seed: OIDCSeed | None = None
+    # Human OIDC callbacks belong to the Hub/panel origin, not the optional
+    # MCP/OAuth public origin. Keeping this separate makes the redirect URI
+    # deterministic before an administrator or provider exists.
+    oidc_public_url: str = ""
     # first-login: while no active instance administrator exists, the first admitted
     # OIDC identity receives instance authority. The window closes by itself.
     oidc_bootstrap_admin: bool = False
@@ -112,12 +116,17 @@ class HubConfig:
     def from_env(cls) -> HubConfig:
         port = env_int("HUB_PORT", DEFAULT_HUB_PORT, 1, 65535)
         timezone = env_timezone()
+        try:
+            oidc_public_url = normalize_url(os.getenv("HUB_PUBLIC_URL") or DEFAULT_PUBLIC_URL)
+        except ValueError:
+            raise ConfigurationError("HUB_PUBLIC_URL must be an HTTP(S) base URL without credentials, a query or a fragment") from None
         setting = "MCP_PUBLIC_URL" if os.getenv("MCP_PUBLIC_URL") else "HUB_PUBLIC_URL"
         try:
-            public_url = normalize_url(os.getenv(setting) or DEFAULT_PUBLIC_URL)
+            public_url = normalize_url(os.getenv(setting) or oidc_public_url)
         except ValueError:
             raise ConfigurationError(f"{setting} must be an HTTP(S) base URL without credentials, a query or a fragment") from None
         bootstrap = os.getenv("CODEPIER_OIDC_BOOTSTRAP_ADMIN", "off").strip().lower()
         if bootstrap not in {"off", "first-login"}:
             raise ConfigurationError("CODEPIER_OIDC_BOOTSTRAP_ADMIN must be off or first-login")
-        return cls(port, timezone, public_url, RuntimeConfig.from_env(), OIDCSeed.from_env(), bootstrap == "first-login")
+        return cls(port, timezone, public_url, RuntimeConfig.from_env(), OIDCSeed.from_env(),
+                   bootstrap == "first-login", oidc_public_url)
