@@ -157,6 +157,20 @@ def test_invalid_seed_settings_fail_before_startup_naming_only_the_setting(monke
     assert not value or value not in text.replace(setting,'')
 
 
+def test_oidc_callback_uses_hub_public_url_not_mcp_public_url(tmp_path,monkeypatch):
+    fake=Provider();seed_env(monkeypatch,fake)
+    monkeypatch.setenv('MCP_PUBLIC_URL','https://mcp.example.test')
+    config=HubConfig.from_env()
+    assert config.public_url=='https://mcp.example.test'
+    assert config.oidc_public_url=='http://testserver'
+    app=fresh_app(tmp_path/'hub',fake)
+    with TestClient(app,raise_server_exceptions=True) as client:
+        response=client.get('/auth/oidc/'+OIDC_SEED_PROVIDER_ID+'/start',params={'return_to':'/'},follow_redirects=False)
+        assert response.status_code==303,response.text
+        params=parse_qs(urlsplit(response.headers['location']).query)
+        assert params['redirect_uri']==['http://testserver/auth/oidc/callback']
+
+
 def test_no_seed_means_no_provider_and_no_bootstrap(tmp_path,monkeypatch):
     fake=Provider();seed_env(monkeypatch,fake,CODEPIER_OIDC_ISSUER=None)
     assert HubConfig.from_env().oidc_seed is None
