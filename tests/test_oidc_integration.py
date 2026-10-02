@@ -117,14 +117,14 @@ def login(oidc):
 
 
 def test_provider_check_returns_stable_callback(oidc):
-    app,b,fake,row,_=oidc
+    _,b,_,row,_=oidc
     result=must(b['owner'].post('/api/iam/oidc/providers/'+row['id']+'/check'))
     assert result['callback']=='http://testserver/auth/oidc/callback'
     assert result['backchannel_logout']=='http://testserver/auth/oidc/'+row['id']+'/backchannel-logout'
 
 
 def test_legacy_callback_alias_rejects_wrong_provider_without_consuming_state(oidc):
-    app,b,fake,row,_=oidc
+    _,b,_,row,_=oidc
     state,response=start(oidc)
     cookie=response.headers['set-cookie'].split(';',1)[0]
     wrong=b['owner'].get('/auth/oidc/not-'+row['id']+'/callback',params={'state':state,'code':'authorization-code'},
