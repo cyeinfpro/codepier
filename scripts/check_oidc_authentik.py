@@ -192,7 +192,7 @@ def acceptance(output):
                                'client_id': client_id, 'client_secret': client_secret, 'enabled': True,
                                'admission': 'jit', 'scopes': 'openid profile email offline_access', 'freshness_seconds': 300}
             provider = required(owner.post('/api/iam/oidc/providers', json=provider_config), 201)
-            callback = hub_url + '/auth/oidc/' + provider['id'] + '/callback'
+            callback = hub_url + '/auth/oidc/callback'
             ak_provider = ak_call('POST', 'providers/oauth2/', {
                 'name': 'CodePier isolated test', 'authorization_flow': authorization, 'authentication_flow': authentication,
                 'invalidation_flow': invalidation, 'client_type': 'confidential', 'client_id': client_id,

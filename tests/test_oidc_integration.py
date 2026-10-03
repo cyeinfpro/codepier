@@ -76,7 +76,7 @@ def oidc(team):
     config={'label':'Test SSO','issuer':fake.issuer,'client_id':fake.client_id,'client_secret':'private-client-secret',
             'admission':'jit','enabled':True,'freshness_seconds':300}
     row=must(browsers['owner'].post('/api/iam/oidc/providers',json=config),201)
-    fake.callback='http://testserver/auth/oidc/'+row['id']+'/callback'
+    fake.callback='http://testserver/auth/oidc/callback'
     return app,browsers,fake,row,config
 
 
@@ -101,7 +101,7 @@ def callback(oidc,state,response,*,browser=None,cookie_override=None):
     app,b,fake,row,_=oidc
     browser=browser or b['owner']
     cookie=response.headers['set-cookie'].split(';',1)[0]
-    return browser.get('/auth/oidc/'+row['id']+'/callback',params={'state':state,'code':'authorization-code'},
+    return browser.get('/auth/oidc/callback',params={'state':state,'code':'authorization-code'},
                        headers={'Cookie':cookie_override if cookie_override is not None else cookie+'; rd_session='+browser.cookie},follow_redirects=False)
 
 
@@ -114,6 +114,24 @@ def login(oidc):
     session=app.state.store.one('SELECT * FROM sessions WHERE id_hash=?',(__import__('shared.crypto',fromlist=['digest']).digest(secret),))
     personal=app.state.store.one("SELECT space_id FROM memberships WHERE user_id=? AND level='owner'",(session['user_id'],))['space_id']
     return Browser(b['owner'].client,secret,session['csrf'],personal),session
+
+
+def test_provider_check_returns_stable_callback(oidc):
+    _,b,_,row,_=oidc
+    result=must(b['owner'].post('/api/iam/oidc/providers/'+row['id']+'/check'))
+    assert result['callback']=='http://testserver/auth/oidc/callback'
+    assert result['backchannel_logout']=='http://testserver/auth/oidc/'+row['id']+'/backchannel-logout'
+
+
+def test_legacy_callback_alias_rejects_wrong_provider_without_consuming_state(oidc):
+    _,b,_,row,_=oidc
+    state,response=start(oidc)
+    cookie=response.headers['set-cookie'].split(';',1)[0]
+    wrong=b['owner'].get('/auth/oidc/not-'+row['id']+'/callback',params={'state':state,'code':'authorization-code'},
+                         headers={'Cookie':cookie+'; rd_session='+b['owner'].cookie},follow_redirects=False)
+    assert wrong.status_code==400
+    accepted=callback(oidc,state,response)
+    assert accepted.status_code==303,accepted.text
 
 
 def test_complete_oidc_login_provisions_nonadmin_private_space_and_encrypts_tokens(oidc):
