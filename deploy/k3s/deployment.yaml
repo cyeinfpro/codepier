@@ -2,8 +2,9 @@
 #
 # Edit before applying:
 #   - codepier.example.com  → your public host (Ingress host and HUB_PUBLIC_URL must match)
-#   - image                 → the reference recorded by the "Container image" workflow;
-#                             pin the digest: ghcr.io/<owner>/codepier:VERSION@sha256:...
+#   - image                 → defaults to ghcr.io/tsunheimat/codepier:latest, which is
+#                             refreshed after every successful main build. For reproducible
+#                             production rollouts, replace it with the digest recorded by CI.
 #   - Secret codepier-oidc  → your IdP issuer, client id and secret. The callback is
 #                             always https://<host>/auth/oidc/callback; register it at the IdP
 #                             before CodePier is started. No provider ID is needed.
@@ -122,7 +123,8 @@ spec:
         # Convert existing UID 10001 data as well as the root directory before the
         # root Hub starts without capabilities. The old volume must be backed up first.
         - name: data-ownership
-          image: ghcr.io/tsunheimat/codepier:1.14.3
+          image: ghcr.io/tsunheimat/codepier:latest
+          imagePullPolicy: Always
           command: ["sh", "-c", "chown -R 0:0 /app/data && chmod 0700 /app/data"]
           securityContext:
             runAsNonRoot: false
@@ -138,8 +140,8 @@ spec:
               mountPath: /app/data
       containers:
         - name: hub
-          image: ghcr.io/tsunheimat/codepier:1.14.3
-          imagePullPolicy: IfNotPresent
+          image: ghcr.io/tsunheimat/codepier:latest
+          imagePullPolicy: Always
           ports:
             - name: http
               containerPort: 8765
