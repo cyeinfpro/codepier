@@ -43,9 +43,9 @@ macOS 下，浏览器原生宿主若从 Downloads 等受限制目录启动，可
 
 发布前的门禁在同一任务内完成：宿主机 Python 运行 `scripts/check_release.py` 核对源码版本、RELEASE.json、Compose 与文档一致；标签必须等于 `v${VERSION}`；先构建 linux/amd64 候选镜像，用与 `compose.yml` 相同的只读根文件系统、tmpfs `/tmp`、`cap_drop ALL` 加 `DAC_OVERRIDE`/`FOWNER` 和 `no-new-privileges` 从空数据目录启动，要求 `/healthz` 在 60 秒内返回 `ok` 且版本与源码一致、未处于维护状态、`/agent/manifest.json` 可用、进程 UID 为 0。随后使用隔离数据卷验证 UID 10001 旧数据复制与 root 启动。任一检查失败即不发布。
 
-通过后构建 linux/amd64 与 linux/arm64 清单并推送，附带 SBOM 与构建来源证明；依赖锁文件由 `uv pip compile --universal` 生成，两种架构都使用同一组哈希校验的 wheel。标签：正式版本 `VERSION`、`MAJOR.MINOR` 与 `latest`；`main` 及手动运行的分支使用分支名；所有构建另加 `sha-<短提交>`。任务摘要与 `image-<run id>` 工件记录 `镜像@sha256 摘要`，部署应固定该摘要而不是可变标签。
+通过后构建 linux/amd64 与 linux/arm64 清单并推送，附带 SBOM 与构建来源证明；依赖锁文件由 `uv pip compile --universal` 生成，两种架构都使用同一组哈希校验的 wheel。标签：每次成功的 `main` 构建都会同时更新 `latest`、`main` 与 `sha-<短提交>`，并且只有 `main` 有权更新 `latest`；正式 `vVERSION` 标签另外发布 `VERSION`、`MAJOR.MINOR` 与 `sha-<短提交>`，不会把 `latest` 指回较旧的 release commit。其他手动运行的分支只使用分支名与 SHA 标签。任务摘要与 `image-<run id>` 工件记录 `镜像@sha256 摘要`；需要完全可重现的生产部署仍应固定该摘要，而不是依赖可变标签。
 
-镜像工作流不运行完整回归；正式标签只能在同一提交的 CI 全绿后创建，这与上文发布顺序一致。首次推送生成的 GHCR 包默认私有：需要在包设置中公开，或为集群配置 imagePullSecret。Compose 安装脚本仍走本地构建路径，不受影响。k3s 单文件部署清单见 `deploy/k3s/deployment.yaml`（单副本 Recreate、local-path 数据卷、root 运行且根文件系统只读、Traefik Ingress、不启用宿主机更新服务）；其镜像标签由 `scripts/check_release.py` 与源码版本一同核对。
+镜像工作流不运行完整回归；正式标签只能在同一提交的 CI 全绿后创建，这与上文发布顺序一致。首次推送生成的 GHCR 包默认私有：需要在包设置中公开，或为集群配置 imagePullSecret。Compose 安装脚本仍走本地构建路径，不受影响。k3s 单文件部署清单见 `deploy/k3s/deployment.yaml`（单副本 Recreate、local-path 数据卷、root 运行且根文件系统只读、Traefik Ingress、不启用宿主机更新服务）；checked-in 清单默认跟随 `:latest` 并使用 `imagePullPolicy: Always`，因此重新 apply/rollout 会获取最近一次成功的 `main` 镜像。
 
 ## 发布后
 
