@@ -92,13 +92,16 @@ def check_compose_image(root, current_version):
 
 
 def check_k3s_image(root, current_version):
-    """Every image in the k3s manifest is the published Hub image at the source VERSION."""
+    """The checked-in rolling k3s manifest follows the image published from main."""
+    del current_version  # release tags remain available, but the default manifest tracks main/latest.
     text = (root / 'deploy/k3s/deployment.yaml').read_text(encoding='utf-8')
     images = re.findall(r'^\s+(?:-\s+)?image:\s*([^\n]+)$', text, re.M)
-    pattern = re.compile(r'^["\']?ghcr\.io/[a-z0-9][a-z0-9._-]*/codepier:' + re.escape(current_version)
-                         + r'(?:@sha256:[a-f0-9]{64})?["\']?$')
+    pattern = re.compile(r'^["\']?ghcr\.io/[a-z0-9][a-z0-9._-]*/codepier:latest["\']?$')
     if not images or any(not pattern.fullmatch(image.split('#', 1)[0].strip()) for image in images):
-        raise ValueError('k3s manifest image differs from source VERSION')
+        raise ValueError('k3s manifest must track the latest main image')
+    policies = re.findall(r'^\s+imagePullPolicy:\s*([^\n]+)$', text, re.M)
+    if len(policies) != len(images) or any(policy.split('#', 1)[0].strip() != 'Always' for policy in policies):
+        raise ValueError('k3s latest images must use imagePullPolicy Always')
 
 
 def check_web_assets(root, current_version):
