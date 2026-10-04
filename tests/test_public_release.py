@@ -123,6 +123,29 @@ def test_import_cleanup_does_not_replace_primary_exception(monkeypatch):
     assert closed == [20, 21] and primary.__notes__
 
 
+def test_k3s_release_manifest_tracks_latest_with_always_pull(tmp_path):
+    manifest = tmp_path / 'deploy/k3s/deployment.yaml'
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("""initContainers:
+  - name: data-ownership
+    image: ghcr.io/example/codepier:latest
+    imagePullPolicy: Always
+containers:
+  - name: hub
+    image: ghcr.io/example/codepier:latest
+    imagePullPolicy: Always
+""", encoding='utf-8')
+    guard.check_k3s_image(tmp_path, '1.14.3')
+
+    manifest.write_text(manifest.read_text().replace(':latest', ':1.14.3', 1), encoding='utf-8')
+    with pytest.raises(ValueError, match='latest main image'):
+        guard.check_k3s_image(tmp_path, '1.14.3')
+
+    manifest.write_text(manifest.read_text().replace(':1.14.3', ':latest').replace('Always', 'IfNotPresent', 1), encoding='utf-8')
+    with pytest.raises(ValueError, match='imagePullPolicy Always'):
+        guard.check_k3s_image(tmp_path, '1.14.3')
+
+
 def test_regression_snapshot_covers_root_build_inputs(tmp_path, monkeypatch):
     from scripts import check_full_regression as runner
     monkeypatch.setattr(runner, 'ROOT', tmp_path)
