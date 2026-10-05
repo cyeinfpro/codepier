@@ -2,7 +2,8 @@
 
 Legacy: 2025 initialize/notifications. Modern: 2026 per-request metadata,
 mirrored headers, server/discover and CompleteResult envelopes. Neither era
-exposes MCP sessions, GET streams or unimplemented MRTR/sampling/tasks.
+exposes MCP sessions, GET streams or unimplemented MRTR/sampling. Modern Tasks
+adapt native exec receipts only when each request declares the extension.
 The panel's own persistent chat SSE is an independent application protocol.
 """
 from __future__ import annotations
@@ -17,9 +18,12 @@ from fastapi.responses import JSONResponse,Response
 from hub.auth import Auth
 from hub.runtime import Runtime
 from hub import mcp_apps
+from hub.mcp_request_audit import mark, request_id
+from hub.mcp_tasks import TaskService, CreatedTask, METHODS as TASK_METHODS, EXTENSION as TASK_EXTENSION, supported as task_supported, arguments as task_arguments
 from shared.contracts import tool_definitions,TOOLS
 from shared.core_contracts import CORE_INSTRUCTIONS, CORE_TOOLS, REPLACED_MCP_TOOLS
 from hub.core_tools import result as core_result
+from shared.mcp_presentation import present, error_view
 from shared.integration_contracts import ADMIN_TOOLS,APP_ONLY_TOOLS
 from shared.util import DevError,VERSION,valid_json_value
 from shared.mcp_protocol import MODERN,LEGACY,SUPPORTED,SERVER_INFO,ProtocolError,is_modern,validate_modern,complete,capabilities
@@ -31,10 +35,12 @@ VERSIONS=set(LEGACY)
 def make_router(auth:Auth,runtime:Runtime,public_url):
     router=APIRouter()
     tools = ToolRouter(runtime.store, runtime.gateway)
+    tasks = TaskService(runtime)
 
     def failure(identifier,code,message,status=200,data=None,headers=None):
-        error={'code':code,'message':message}
-        if data is not None:error['data']=data
+        mark('rejected',error_code=code,outcome='protocol_error')
+        error={'code':code,'message':error_view(message)}
+        if data is not None:error['data']=error_view(data)
         return JSONResponse({'jsonrpc':'2.0','id':identifier,'error':error},status_code=status,
            headers={'Cache-Control':'no-store','Access-Control-Allow-Origin':'*','Access-Control-Expose-Headers':'WWW-Authenticate',**(headers or {})})
 
@@ -67,10 +73,12 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
         authorization=request.query_params.get('authorization','fixed')
         if authorization not in {'fixed','role'}:return failure(None,-32602,'Unknown authorization mode',400)
         auth_scope=ROLE_SCOPE if authorization=='role' else 'read'
+        mark('authenticate')
         try:principal=await runtime.store.run(auth.bearer, request)
         except DevError as exc:
             metadata=(await runtime.store.run(public_url))+'/.well-known/oauth-protected-resource/mcp'
             return failure(None,-32001,exc.message,exc.status,headers={'WWW-Authenticate':f'Bearer resource_metadata="{metadata}", scope="{auth_scope}"'})
+        mark('authenticated')
         if request.headers.get('content-type','').split(';',1)[0].strip().lower()!='application/json':
             return failure(None,-32600,'Content-Type must be application/json',415)
         accept=request.headers.get('accept','').lower()
@@ -86,6 +94,7 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
             return failure(None,-32600,'Invalid request ID',400)
         modern=is_modern(body,request.headers)
         method=body['method'];params=body.get('params',{})
+        mark('parsed',method=method)
         if not isinstance(params,dict):return failure(identifier,-32602,'params must be an object',400 if modern else 200)
         metadata=params.get('_meta',{})
         if not isinstance(metadata,dict):return failure(identifier,-32602,'_meta must be an object',400 if modern else 200)
@@ -99,6 +108,7 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
         else:
             version=request.headers.get('mcp-protocol-version')
             if version and version not in LEGACY:return failure(identifier,-32600,'Unsupported MCP-Protocol-Version',400)
+        mark('protocol_validated',protocol='modern' if modern else 'legacy')
         profile=request.query_params.get('profile','core')
         if profile not in {'core','full','coding'}:return failure(identifier,-32602,'Unknown MCP profile; choose core, full or coding',400)
         instructions=CORE_INSTRUCTIONS
@@ -110,12 +120,23 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                 if not isinstance(offered,str):return failure(identifier,-32602,'protocolVersion must be a string')
                 result={'protocolVersion':offered if offered in LEGACY else '2025-11-25',
                     'capabilities':{'tools':{'listChanged':False},'resources':{'subscribe':False,'listChanged':False},
-                        'prompts':{'listChanged':False},'extensions':capabilities()['extensions']},
-                    'serverInfo':{**SERVER_INFO,'title':'CodePier Agent'},'instructions':instructions}
+                        'prompts':{'listChanged':False},'extensions':capabilities(modern=False)['extensions']},
+                    'serverInfo':dict(SERVER_INFO),'instructions':instructions}
             elif method=='ping' and not modern:result={}
             elif method=='server/discover' and modern:
                 if set(params)-{'_meta'}:return failure(identifier,-32602,'Discovery accepts only standard metadata',400)
                 result={'supportedVersions':SUPPORTED,'capabilities':capabilities(),'instructions':instructions,'ttlMs':0,'cacheScope':'private'}
+            elif modern and method in TASK_METHODS:
+                if not task_supported(metadata):
+                    return failure(identifier,-32021,'Missing required client capability',400,
+                        {'requiredCapabilities':{'extensions':{TASK_EXTENSION:{}}}})
+                task_id=task_arguments(method,params)
+                result=await tasks.call(method,task_id,principal)
+                principal=await runtime.store.run(auth.bearer,request)
+                # Refresh the original credential again after cooperative cancel.
+                latest=await runtime.store.run(tasks.get,task_id,principal)
+                if method=='tasks/get':result=latest
+                if method=='tasks/cancel':mark('task_cancel_acknowledged',operation_id=task_id)
             elif method=='tools/list':
                 result=await runtime.store.run(tools.list_tools, principal, params.get('cursor'))
             elif method=='tools/call':
@@ -125,7 +146,9 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                 route=None
                 try:
                     route=await runtime.store.run(tools.resolve, principal, name)
+                    mark('route_resolved',tool=name)
                     if route.backend == 'remote':
+                        mark('invoke_started')
                         result=await runtime.gateway.call(principal,name,arguments,lambda:auth.bearer(request),
                                                           request_key=metadata.get('codepier/idempotencyKey'))
                     else:
@@ -135,6 +158,7 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                                 trace=await runtime.store.run(runtime.integrations.begin,principal,project,name,metadata)
                                 request.state.codepier_call_trace=trace
                             except Exception:runtime.integrations.write_errors+=1
+                        mark('invoke_started')
                         value=await runtime.invoke(name,arguments,principal)
                         principal=await runtime.store.run(auth.bearer,request)
                         if name == 'get_access_context':
@@ -143,9 +167,16 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                         if trace:
                             trace['operation_id']=value.get('operation_id')
                             trace['status']='tool_error' if result.get('isError') else 'complete'
+                        if modern and name=='exec' and task_supported(metadata):
+                            created=await runtime.store.run(tasks.create,value,arguments,principal)
+                            if created is not None:result=created
+                    observed=result.body if isinstance(result,CreatedTask) else result
+                    mark('tool_returned',operation_id=value.get('operation_id') if route.backend!='remote' else None,
+                         outcome='tool_error' if observed.get('isError') else 'complete')
                 except DevError as exc:
+                    mark('tool_error',error_code=exc.code,outcome='tool_error',operation_id=exc.details.get('operation_id'))
                     if exc.code=='UNKNOWN_TOOL' and modern:return failure(identifier,-32602,'Unknown tool',400)
-                    value={'error':{'code':exc.code,'message':exc.message,**exc.details}}
+                    value={'error':error_view({'code':exc.code,'message':exc.message,**exc.details})}
                     result={'content':[{'type':'text','text':json.dumps(value,ensure_ascii=False)}],'structuredContent':value,'isError':True}
                     if name == 'get_profile' or route and route.backend=='remote':result.pop('structuredContent',None)
                     if exc.details.get('call_id'):result['_meta']={'codepier/callId':exc.details['call_id']}
@@ -180,13 +211,20 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                 if method in {'server/discover','tools/list','prompts/list','resources/list','resources/read','resources/templates/list'}:
                     # Protected project data must never be cached by shared proxies.
                     result={**result,'ttlMs':0,'cacheScope':'private'}
-                result=complete(result)
+                if isinstance(result,CreatedTask):
+                    result={**complete(result.body),'resultType':'task'}
+                else:
+                    result=complete(result)
+            correlation=request_id()
+            if modern and correlation:
+                result={**result,'_meta':{**result.get('_meta',{}),'com.codepier/requestId':correlation}}
             return JSONResponse({'jsonrpc':'2.0','id':identifier,'result':result},
                 headers={'Cache-Control':'no-store','Access-Control-Allow-Origin':origin or '*','Vary':'Authorization, MCP-Protocol-Version'})
-        except DevError as exc:return failure(identifier,-32000,exc.message,exc.status if modern else 200,{'code':exc.code})
+        except ProtocolError as exc:return failure(identifier,exc.code,exc.message,400,exc.data)
+        except DevError as exc:return failure(identifier,-32000,error_view(exc.message),exc.status if modern else 200,{'code':exc.code})
 
     def project_resources(principal):
         principal=refresh_principal(runtime.store,principal)
-        return runtime.list_projects(principal)
+        return present('workspace', {}, {'projects':runtime.list_projects(principal)})['projects']
 
     return router

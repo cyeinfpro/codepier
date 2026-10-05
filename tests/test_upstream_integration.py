@@ -18,6 +18,7 @@ from hub.gateway.service import Gateway
 from hub.store import Store
 from shared.crypto import digest
 from shared.core_contracts import CORE_TOOLS
+from shared.query_contracts import QUERY_TOOLS
 from tests.test_iam_integration import team as team, shared_role, assign
 from tests.test_mcp_gateway import gw as gw, configured, connector, account, publish
 from tests.test_oidc_integration import oidc as oidc, start
@@ -77,7 +78,7 @@ def test_native_catalog_is_nine_core_plus_stable_identity(team):
     response=b['alice'].post('/mcp',headers={'Authorization':'Bearer '+g['token'],'Accept':'application/json, text/event-stream'},json={
         'jsonrpc':'2.0','id':1,'method':'tools/list','params':{}})
     tools=response.json()['result']['tools']
-    assert {t['name'] for t in tools}==CORE_TOOLS|{'get_profile','get_access_context'}
+    assert {t['name'] for t in tools}==CORE_TOOLS|QUERY_TOOLS|{'get_profile','get_access_context'}
     assert next(t for t in tools if t['name']=='get_profile')['_meta']['openai/profile'] is True
 
 
