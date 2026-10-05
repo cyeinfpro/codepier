@@ -14,7 +14,7 @@ import uuid
 import httpx
 import pytest
 from shared.util import atomic_json
-from shared.contracts import OUTPUT_SCHEMAS
+from shared.contracts import OUTPUT_SCHEMAS, tool_definitions
 from shared.mcp_protocol import MODERN, PREFIX
 from jsonschema import Draft202012Validator
 from tests.support import running_stack, wait_for, BASE
@@ -42,11 +42,15 @@ def resolved(s,name,args=None,*,panel=False,expect='succeeded'):
     public_name, public_args = public_call(name, args)
     result=s.call(name,args) if panel else s.mcp(public_name,public_args)['structuredContent']
     if result.get('pending'):
-        operation=s.poll(result['operation_id'],timeout=35)
+        def terminal():
+            operation=s.mcp('process', {'operation':'wait','operation_ids':[result['operation_id']], 'wait_seconds':5})['structuredContent']['operations'][0]
+            return operation if not operation.get('pending') else None
+        operation=s.poll(result['operation_id'],timeout=35) if panel else wait_for(terminal,35)
         assert operation['state']==expect,operation
         result={**(operation.get('result') or {}).get('data',{}),'operation_id':operation['id']}
     assert not result.get('error'),result
-    Draft202012Validator(OUTPUT_SCHEMAS[name]).validate(result)
+    schema=OUTPUT_SCHEMAS[name] if panel else next(item['outputSchema'] for item in tool_definitions() if item['name']==public_name)
+    Draft202012Validator(schema).validate(result)
     return result
 
 
@@ -86,6 +90,9 @@ def test_apps_resources_are_real_built_documents_and_bound_to_snapshots(integrat
     # New calls stay text-only; saved app instances can still resolve their resources.
     for profile in ('full', 'coding'):
         for definition in modern(s, 'tools/list', profile=profile).json()['result']['tools']:
+            if definition['name'] == 'workbench':
+                assert definition['_meta']['openai/ui']['entrypoints'] == [{'type': 'global'}, {'type': 'thread'}]
+                continue
             assert 'resourceUri' not in definition['_meta'].get('ui', {})
             assert 'openai/outputTemplate' not in definition['_meta']
     listing=s.rpc('resources/list').json()['result']['resources']
@@ -109,10 +116,12 @@ def test_apps_resources_are_real_built_documents_and_bound_to_snapshots(integrat
 def test_worktree_is_real_isolated_scoped_and_safe_to_remove(integrated_stack):
     s=integrated_stack
     created=resolved(s,'worktrees_create',{'label':'isolated fixture'})
-    workspace=created['workspace_id'];target=Path(created['path'])
+    workspace=created['workspace_id'];target=Path(s.poll(created['operation_id'])['result']['data']['path'])
+    assert created['path']=='.'
     assert target.exists() and target!=s.imago and created['source_dirty']
     opened=resolved(s,'open_workspace',{'workspace_id':workspace})
-    assert opened['workspace']['root']==str(target)
+    assert opened['workspace']['root']=='.'
+    assert s.poll(opened['operation_id'])['result']['data']['workspace']['root']==str(target)
     result=resolved(s,'fs_write',{'workspace_id':workspace,'path':'isolated.txt','content':'only this worktree','expected_sha256':'new'})
     assert (target/'isolated.txt').read_text()=='only this worktree' and not (s.imago/'isolated.txt').exists()
     issued=s.client.post('/api/grants',json={'label':'other-worktree-owner','scopes':['read','write','execute'],'projects':[s.project['id']],'days':1}).json()

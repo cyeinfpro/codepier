@@ -26,9 +26,10 @@ def write(path, content, sha='new'):
 
 def test_all_catalog_profiles_share_the_nine_core_tools():
     from shared.core_contracts import CORE_TOOLS, REPLACED_MCP_TOOLS
+    from shared.query_contracts import QUERY_TOOLS
     for profile in ('core', 'full', 'coding'):
         tools = tool_definitions(profile)
-        assert {definition['name'] for definition in tools} == CORE_TOOLS | {'get_profile','get_access_context'}
+        assert {definition['name'] for definition in tools} == CORE_TOOLS | QUERY_TOOLS | {'get_profile','get_access_context'}
         assert not CORE_TOOLS.intersection(REPLACED_MCP_TOOLS)
     assert next(item for item in tool_definitions() if item['name'] == 'process')['inputSchema']['properties']['output_limit']['default'] == 8000
 

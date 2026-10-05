@@ -49,6 +49,9 @@ def test_public_catalogue_uses_text_without_auto_cards_or_owner_controls(profile
     assert not set(definitions)&ADMIN_TOOLS
     assert definitions['write']['_meta']['openai/fileParams']==['file']
     for definition in definitions.values():
+        if definition['name'] == 'workbench':
+            assert definition['_meta']['openai/ui']['entrypoints'] == [{'type': 'global'}, {'type': 'thread'}]
+            continue
         assert 'resourceUri' not in definition['_meta'].get('ui', {})
         assert 'openai/outputTemplate' not in definition['_meta']
     for name in ('workspace', 'read'):

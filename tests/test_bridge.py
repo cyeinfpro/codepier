@@ -4,8 +4,10 @@ import pytest
 from scripts.mcp_stdio_bridge import token_from_file
 from tests.support import BASE
 from tests.catalog_assertions import assert_task_catalog
+from shared.core_contracts import CORE_TOOLS
+from shared.query_contracts import QUERY_TOOLS
 
-@pytest.mark.parametrize('profile,count',[(None,11),('coding',11)])
+@pytest.mark.parametrize('profile,count',[(None,13),('coding',13)])
 def test_stdio_bridge_initialize_tools_read(stack,tmp_path,profile,count):
     f=tmp_path/'token.txt';f.write_text(stack.pat);f.chmod(0o600)
     env={**os.environ,'CODEPIER_TOKEN_FILE':str(f),'CODEPIER_HUB_URL':stack.url}
@@ -21,7 +23,7 @@ def test_stdio_bridge_initialize_tools_read(stack,tmp_path,profile,count):
     assert replies[0]['result']['serverInfo']['name']=='codepier-agent'
     assert_task_catalog(replies[1]['result']['tools'], count)
     names={t['name'] for t in replies[1]['result']['tools']}
-    assert {'workspace','read','write','edit','exec','process','browser','computer','vps','get_profile','get_access_context'} == names
+    assert CORE_TOOLS | QUERY_TOOLS | {'get_profile','get_access_context'} == names
     assert not {'integration_control','validations_accept'} & names
     assert all('securitySchemes' not in t.get('_meta',{}) for t in replies[1]['result']['tools'])
     assert '# Imago' in replies[2]['result']['structuredContent']['content']

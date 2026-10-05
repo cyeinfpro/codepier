@@ -8,10 +8,11 @@ window.codepierMount=async(html)=>{
  const frame=document.createElement('iframe');frame.id='app-frame';frame.title='CodePier app acceptance';
  frame.setAttribute('sandbox','allow-scripts');frame.style.cssText='width:100%;height:850px;border:0';document.body.append(frame);
  const bridge=new AppBridge(null,{name:'CodePier isolated SDK acceptance host',version:'1.0.0'},
-   {serverTools:{},serverResources:{},openLinks:{}},{hostContext:{theme:window.codepierHostTheme||'light',displayMode:'inline'}});
+   {serverTools:{},serverResources:{},openLinks:{},...(window.codepierHostCapabilities||{})},{hostContext:{theme:window.codepierHostTheme||'light',displayMode:'inline',...(window.codepierInitialHostContext||{})}});
  bridge.oninitialized=()=>{window.codepierHostReady=true;};
  bridge.onerror=error=>window.codepierHostErrors.push(String(error));
  bridge.oncalltool=params=>window.codepierHostTool(params);
+ if(window.codepierUpdateContext)bridge.onupdatemodelcontext=params=>window.codepierUpdateContext(params);
  bridge.onopenlink=async(params)=>{window.codepierOpenedLinks.push(params.url);return {};};
  await bridge.connect(new PostMessageTransport(frame.contentWindow,frame.contentWindow));
  window.codepierBridge=bridge;frame.srcdoc=html;
