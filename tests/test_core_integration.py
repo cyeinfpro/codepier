@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 from tests.support import running_stack, wait_for
 from shared.util import atomic_json
+from shared.core_contracts import CORE_TOOLS
+from shared.query_contracts import QUERY_TOOLS
 
 pytestmark = [pytest.mark.integration, pytest.mark.skipif(os.name == 'nt', reason='POSIX shell fixture')]
 
@@ -49,15 +51,14 @@ def finish(stack, receipt, token=None):
 
 def test_default_catalog_and_removed_aliases(core_stack):
     stack = core_stack
-    assert {t['name'] for t in stack.rpc('tools/list').json()['result']['tools']} == {
-        'workspace', 'read', 'write', 'edit', 'exec', 'process', 'vps', 'browser', 'computer', 'get_profile', 'get_access_context'}
+    assert {t['name'] for t in stack.rpc('tools/list').json()['result']['tools']} == CORE_TOOLS | QUERY_TOOLS | {'get_profile', 'get_access_context'}
     for retired in ['fs_read', 'shell_exec', 'operations_get', 'browser_status', 'computer_apps', 'vps_list', 'vps_exec']:
         response = stack.mcp(retired, {'project': 'Imago'})
         assert response['isError']
     full = stack.client.post('/mcp?profile=full', headers={'Accept': 'application/json, text/event-stream',
         'Authorization': 'Bearer ' + stack.pat}, json={'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'})
     names = {t['name'] for t in full.json()['result']['tools']}
-    assert len(names) == 11 and 'edit' in names and 'apply_patch' not in names and 'computer' in names and 'computer_action' not in names
+    assert len(names) == 14 and 'edit' in names and 'apply_patch' not in names and 'computer' in names and 'computer_action' not in names
 
 
 def test_short_exec_and_files_during_another_command(core_stack):
@@ -77,7 +78,7 @@ def test_short_exec_and_files_during_another_command(core_stack):
             live, _ = finish(stack, live)
         assert live['build']['runtime']['version'] and live['running_jobs'] >= 1
         diagnostics, _ = call(stack, 'process', {'operation': 'diagnostics', 'project': 'Imago'})
-        assert diagnostics['tool_count'] == 11
+        assert diagnostics['tool_count'] == 14
         assert diagnostics['native_core_tool_count'] == 9
         created, _ = call(stack, 'write', {'path': 'nested/new.txt', 'content': 'alpha\nbeta\n', 'expected_sha256': 'new', 'idempotency_key': uuid.uuid4().hex})
         read, _ = call(stack, 'read', {'path': 'nested/new.txt'})

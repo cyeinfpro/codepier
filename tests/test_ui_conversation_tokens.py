@@ -93,7 +93,7 @@ def test_conversation_keeps_focus_responsive_and_layer_contracts(styles):
     assert 'pointer-events:none' in css
 
 
-def test_computer_surfaces_use_shared_tokens_and_semantic_states(styles):
+def test_computer_surfaces_use_shared_tokens_and_semantic_states(styles, chat_browser_pool):
     COMPUTER = styles[1]
     css = compact(COMPUTER)
     for token in (
@@ -108,6 +108,15 @@ def test_computer_surfaces_use_shared_tokens_and_semantic_states(styles):
         assert f'[data-state="{state}"]' in css
     assert ':focus-visible' in COMPUTER
     assert '@media(max-width:680px)' in css
-    assert 'max-height:calc(100dvh-16px)' in css
+    # CSSOM may reorder equivalent calc terms; verify the effective mobile
+    # constraint rather than one browser version's serialization.
+    page = chat_browser_pool('chromium').new_page(viewport={'width': 390, 'height': 800})
+    try:
+        page.set_content('<aside id="computer-approval-inbox"></aside>')
+        page.add_style_tag(path=str(ROOT / 'web' / 'computer.css'))
+        assert page.locator('#computer-approval-inbox').evaluate(
+            '(node) => parseFloat(getComputedStyle(node).maxHeight)') == 784
+    finally:
+        page.context.close()
     assert '#54e7cc' not in COMPUTER.lower()
     assert 'border:2px' not in css
