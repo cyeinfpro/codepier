@@ -20,7 +20,7 @@ class Workbench(ComputerArgs):
 
 
 class ProjectQuery(Workspace):
-    operation: Literal['list', 'open', 'tasks', 'status', 'readiness',
+    operation: Literal['list', 'open', 'help', 'tree', 'skills', 'skill', 'tasks', 'status', 'readiness',
                        'dashboard', 'workflow_list', 'workflow_get'] = 'list'
     capture_baseline: Literal[False] = False
 
@@ -40,7 +40,7 @@ def register(tool, tools, schemas):
     query_schemas = build_core_output_schemas(schemas, include_queries=True)
     specs = {
         'workbench': (Workbench, 'Open the CodePier project workbench explicitly. Accepts {} and returns only authorized projects; the user must select a project and task. Never starts execution.', True),
-        'project_query': (ProjectQuery, 'Read authorized projects, project context without a baseline, configured tasks, readiness, dashboards and saved workflows. No writes, commands or implicit project/task selection.', False),
+        'project_query': (ProjectQuery, 'Read authorized projects, project context without a baseline, directory trees, skills, tool help, configured tasks, readiness, dashboards and saved workflows. Prefer this for read-only project discovery. No writes, commands or implicit project/task selection.', False),
         'task_query': (TaskQuery, 'Read or wait for existing authorized operation receipts, logs and traces; list diagnostics/activity. Never starts, cancels, or retries execution.', True),
     }
     for name, (model, description, local) in specs.items():

@@ -92,7 +92,7 @@ def test_mcp_protocol_and_catalog(stack):
     r=stack.rpc('initialize',{'protocolVersion':'2025-11-25','capabilities':{},'clientInfo':{'name':'integration','version':'1'}})
     assert r.json()['result']['protocolVersion']=='2025-11-25'
     catalog=stack.rpc('tools/list').json()['result']['tools']
-    assert_task_catalog(catalog, 13)
+    assert_task_catalog(catalog, 14)
     overview=stack.client.get("/api/overview")
     assert overview.status_code==200
     assert overview.json()["tool_count"]==len(catalog)

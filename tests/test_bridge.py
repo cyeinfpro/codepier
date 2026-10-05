@@ -7,7 +7,7 @@ from tests.catalog_assertions import assert_task_catalog
 from shared.core_contracts import CORE_TOOLS
 from shared.query_contracts import QUERY_TOOLS
 
-@pytest.mark.parametrize('profile,count',[(None,13),('coding',13)])
+@pytest.mark.parametrize('profile,count',[(None,14),('coding',14)])
 def test_stdio_bridge_initialize_tools_read(stack,tmp_path,profile,count):
     f=tmp_path/'token.txt';f.write_text(stack.pat);f.chmod(0o600)
     env={**os.environ,'CODEPIER_TOKEN_FILE':str(f),'CODEPIER_HUB_URL':stack.url}

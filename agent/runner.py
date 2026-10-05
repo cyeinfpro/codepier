@@ -418,7 +418,11 @@ class Agent:
                     else:
                         await stack.enter_async_context(self.project_slot(root, write=write, operation_id=identifier))
                     self.phase(identifier, 'waiting_worker')
-                    worker = self.read_semaphore if tool in {'read', 'write', 'edit'} else self.semaphore
+                    # The panel still uses legacy bounded file reads. Give them
+                    # the existing file-I/O lane, just like core read, so long
+                    # commands cannot starve directory navigation. Resource locks
+                    # above still exclude conflicting writes; searches stay heavy.
+                    worker = self.read_semaphore if tool in {'read', 'write', 'edit', 'fs_tree', 'fs_read', 'fs_read_many'} else self.semaphore
                     await stack.enter_async_context(worker)
                     timer.reschedule(None)
             except TimeoutError as exc:

@@ -37,7 +37,7 @@ def help_result(tool='', action=''):
         'computer': COMPUTER}
     if not tool or not action:
         return {'tools': {name: {'operations': sorted(actions),
-            'help': {'tool': 'workspace', 'arguments': {'operation': 'help', 'tool': name, 'action': '<operation>'}}}
+            'help': {'tool': 'project_query', 'arguments': {'operation': 'help', 'tool': name, 'action': '<operation>'}}}
             for name, actions in catalogs.items() if not tool or name == tool},
             'note': 'Specialized operations use options. Common operations use top-level arguments, with additional filters in options as shown by each help schema. All scopes and node opt-ins are checked on every call.'}
     target = catalogs.get(tool, {}).get(action)
@@ -99,6 +99,22 @@ def help_result(tool='', action=''):
 
 
 def public_call(target, arguments):
+    name, args = _public_call(target, arguments)
+    # A receipt/discovery hint must not send a read through a mixed mutation
+    # tool. Validate against the query allowlist, including baseline rejection;
+    # never relabel a mutating call or change its authorization requirements.
+    query = {'workspace': 'project_query', 'process': 'task_query'}.get(name)
+    if query:
+        try:
+            TOOLS[query].model.model_validate(args)
+        except ValidationError:
+            pass
+        else:
+            return query, args
+    return name, args
+
+
+def _public_call(target, arguments):
     for name, actions in CORE_ACTIONS.items():
         for operation, backend in actions.items():
             if target == backend:
@@ -242,7 +258,7 @@ def compact_receipt(value):
                 name, args = public_call(call[field], call['arguments'])
                 value[key] = {**call, field: name, 'arguments': args}
     if isinstance(value.get('next'), str) and value['next'] in {'operations_get', 'operations_wait'}:
-        value['next'] = 'process'
+        value['next'] = 'task_query'
     nested = value.get('result')
     if isinstance(nested, dict) and isinstance(nested.get('data'), dict):
         compact_receipt(nested['data'])

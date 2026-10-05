@@ -33,8 +33,9 @@ def runtime(tmp_path):
     store.close()
 
 
-def test_entrypoint_metadata_and_conservative_facades():
-    definitions = {item['name']: item for item in tool_definitions()}
+@pytest.mark.parametrize('profile', ['core', 'full', 'coding'])
+def test_entrypoint_metadata_and_conservative_facades(profile):
+    definitions = {item['name']: item for item in tool_definitions(profile)}
     assert QUERY_TOOLS <= definitions.keys()
     for name in QUERY_TOOLS:
         item = definitions[name]
@@ -45,6 +46,10 @@ def test_entrypoint_metadata_and_conservative_facades():
     assert entry['title'] != 'CodePier'
     assert entry['_meta']['openai/ui']['entrypoints'] == [{'type': 'global'}, {'type': 'thread'}]
     assert entry['_meta']['ui']['resourceUri'] == 'ui://codepier/workspace-v1.html'
+    assert entry['_meta']['ui']['visibility'] == ['model', 'app']
+    assert entry['_meta'].get('openai/visibility', 'public') == 'public'
+    assert entry['_meta']['openai/outputTemplate'] == entry['_meta']['ui']['resourceUri']
+    assert entry['securitySchemes'] == [{'type': 'oauth2', 'scopes': ['read']}]
     Draft202012Validator(entry['inputSchema']).validate({})
     for name in ('workspace', 'process', 'browser', 'computer'):
         assert definitions[name]['annotations']['readOnlyHint'] is False

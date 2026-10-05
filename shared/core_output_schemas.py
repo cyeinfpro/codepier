@@ -300,7 +300,8 @@ def build_core_output_schemas(legacy, *, include_queries=False):
                      pending=False),
     }
     if include_queries:
-        result['project_query'] = union([project_list, *variants(
+        result['project_query'] = union([project_list, help_index, help_detail, *variants(
+            'fs_tree', 'skills_list', 'skills_read',
             'open_workspace', 'tasks_list', 'execution_info', 'readiness_get',
             'workspace_status', 'workflows_list', 'workflows_get')])
         result['task_query'] = union([process[0], *variants(

@@ -15,6 +15,8 @@
 
 等待结果只对已返回的日志设置 `after_output_seq`，减少重复输出。终态结果补读不携带这个游标，以便取回最终日志。`output_truncated=true` 仍表示输出不完整；需要更多日志时，可显式使用 `operations_get`，其默认上限仍为 131072 个字符。
 
+公开 MCP 的 `next_call` 将内部 `operations_wait/get` 映射为只读 `task_query` 的 `wait/get`，`operation_ids` 保留原编号。这样等待和补读不会被引导到含取消、执行能力的混合 `process` 工具；内部面板 API 继续使用原方法名。
+
 等待请求被取消或网络断开，不等同于 `operations_cancel`。停止操作必须显式请求取消；Agent 本身停止、命令超时和真实执行失败仍可能使任务结束。单次短等待与命令的 `timeout_seconds` 是独立限制。
 
 ## 排队范围、取消与撤权
