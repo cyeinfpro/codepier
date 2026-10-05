@@ -443,7 +443,7 @@ CC-BY-4.0. See https://creativecommons.org/licenses/by/4.0/legalcode for
 the full license text.
 
 ========================================================================
-@modelcontextprotocol/ext-apps@2.0.0
+@modelcontextprotocol/ext-apps@2.0.3
 License: MIT
 
 -- LICENSE --

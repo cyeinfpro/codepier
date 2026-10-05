@@ -408,4 +408,8 @@ def test_real_durable_queue_rechecks_disabled_profile_before_any_dispatch(api):
         assert json.loads(after['result'])['error']['code'] == 'AUTHORIZATION_CHANGED'
         with pytest.raises(DevError, match='Profile'):
             runtime.operation(identifier, principal)
-    asyncio.run(scenario())
+    # Runtime locks and delivery worker belong to TestClient's event loop.
+    # A second asyncio.run loop can strand a contended dispatch lock forever.
+    async def bounded_scenario():
+        await asyncio.wait_for(scenario(), timeout=10)
+    client.portal.call(bounded_scenario)

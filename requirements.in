@@ -1,6 +1,6 @@
 fastapi==0.141.1
 starlette==1.7.0
-uvicorn==0.53.0
+uvicorn==0.54.0
 websockets==17.1
 cryptography==50.0.1
 httpx==0.28.1
@@ -16,4 +16,4 @@ jsonschema==4.26.0
 pywinpty==3.0.5; sys_platform == "win32"
 
 # OIDC ID-token verification (fork IAM extension).
-PyJWT[crypto]==2.15.0
+PyJWT[crypto]==2.15.1
