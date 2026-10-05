@@ -2,6 +2,7 @@
 from __future__ import annotations
 import hashlib,hmac,json,secrets,time
 from shared.util import DevError
+from hub.mcp_request_audit import request_id
 from shared.contracts import TOOLS,MUTATING
 from shared.integration_contracts import ADMIN_TOOLS
 
@@ -14,6 +15,8 @@ class HubIntegrations:
         self.write_errors=0
         self.store.execute('CREATE TABLE IF NOT EXISTS integration_admission (project TEXT PRIMARY KEY,root TEXT NOT NULL,device TEXT NOT NULL,paused INTEGER NOT NULL,last_operation TEXT NOT NULL,updated REAL NOT NULL,phase TEXT NOT NULL)')
         self.store.execute('CREATE TABLE IF NOT EXISTS mcp_activity (id INTEGER PRIMARY KEY AUTOINCREMENT,project TEXT NOT NULL,root TEXT NOT NULL,device TEXT NOT NULL,grant_id TEXT,actor TEXT NOT NULL,window_key TEXT,tool TEXT NOT NULL,started REAL NOT NULL,service_ms INTEGER,next_call_gap_ms INTEGER,cycle_ms INTEGER,status TEXT NOT NULL,transition TEXT NOT NULL,operation_id TEXT,meaningful INTEGER NOT NULL)')
+        if 'request_id' not in {r['name'] for r in self.store.all('PRAGMA table_info(mcp_activity)')}:
+            self.store.execute('ALTER TABLE mcp_activity ADD COLUMN request_id TEXT')
         self.store.execute('CREATE INDEX IF NOT EXISTS mcp_activity_scope ON mcp_activity(grant_id,project,id)')
 
     def state(self,project):
@@ -87,8 +90,8 @@ class HubIntegrations:
                 delta=max(0,round((now-prior['ended'])*1000));cycle=max(0,round((now-prior['started'])*1000))
                 self.store.execute('UPDATE mcp_activity SET next_call_gap_ms=?,cycle_ms=? WHERE id=?',(delta,cycle,prior['id']))
                 transition='serial'
-        row=self.store.execute('INSERT INTO mcp_activity(project,root,device,grant_id,actor,window_key,tool,started,status,transition,meaningful) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-            (project['id'],project['root'],project['device_id'],principal.grant_id,principal.actor,key,name,time.time(),'running',transition,int(meaningful)))
+        row=self.store.execute('INSERT INTO mcp_activity(project,root,device,grant_id,actor,window_key,tool,started,status,transition,meaningful,request_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+            (project['id'],project['root'],project['device_id'],principal.grant_id,principal.actor,key,name,time.time(),'running',transition,int(meaningful),request_id()))
         trace={'id':row.lastrowid,'key':key,'started':now,'meaningful':meaningful,'transition':transition,'finished':False,'status':'complete','operation_id':None}
         if meaningful and key:self.active.setdefault(key,{})[trace['id']]=trace
         return trace
@@ -124,7 +127,7 @@ class HubIntegrations:
         elif not iam.installed(self.store) and not principal.admin:
             clauses.append('grant_id=?');values.append(principal.grant_id)
         if args['before_id'] is not None:clauses.append('id<?');values.append(args['before_id'])
-        rows=self.store.all('SELECT id,tool,window_key,started,service_ms,next_call_gap_ms,cycle_ms,status,transition,operation_id,meaningful FROM mcp_activity WHERE '+' AND '.join(clauses)+' ORDER BY id DESC LIMIT ?',(*values,args['limit']+1))
+        rows=self.store.all('SELECT id,tool,request_id,window_key,started,service_ms,next_call_gap_ms,cycle_ms,status,transition,operation_id,meaningful FROM mcp_activity WHERE '+' AND '.join(clauses)+' ORDER BY id DESC LIMIT ?',(*values,args['limit']+1))
         more=len(rows)>args['limit'];rows=rows[:args['limit']]
         return {'activities':rows,'next_before_id':rows[-1]['id'] if more and rows else None,'write_errors':self.write_errors,
             'timing_note':'service_ms 为请求进入工具服务到响应交接；next_call_gap_ms 为服务外间隔，不是模型思考时间。',

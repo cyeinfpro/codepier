@@ -1,2 +1,4 @@
 # Independent official MCP client; test-only environment.
+# Pin the bootstrap installer too, so fresh SDK environments pass the same audit.
+pip==26.2.1
 mcp==2.2.0
