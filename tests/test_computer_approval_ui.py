@@ -166,7 +166,9 @@ def test_real_sse_add_and_reconnect_refresh_the_human_inbox(browser, approval_st
         page.fill('#username', 'admin');page.fill('#password', stack.password)
         page.click('#login-form button')
         expect(page.locator('#event-state')).to_have_text('实时通道已连接')
-        page.wait_for_function('computerApprovals.request===null')
+        # Poll through the automation protocol: wait_for_function's page-side
+        # string eval can violate the production CSP on Chromium/macOS.
+        wait_for(lambda: page.evaluate('computerApprovals.request===null'))
         for reconnect in (False, True):
             # Disable the fallback so only the production SSE hooks can discover this request.
             page.evaluate('clearTimeout(computerApprovals.timer)')
@@ -187,6 +189,6 @@ def test_real_sse_add_and_reconnect_refresh_the_human_inbox(browser, approval_st
                     expect(page.locator('#computer-approval-inbox')).to_have_count(0)
             finally:
                 tool(stack, 'close', {'session_id': session, 'idempotency_key': uuid.uuid4().hex})
-            page.wait_for_function('computerApprovals.request===null')
+            wait_for(lambda: page.evaluate('computerApprovals.request===null'))
     finally:
         page.close()
