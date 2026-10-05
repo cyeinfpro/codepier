@@ -85,6 +85,47 @@ def test_legacy_and_modern_protocols_are_distinct_and_share_permissions(integrat
     assert bad.json()['result']['isError']
 
 
+@pytest.mark.parametrize('profile', ['core', 'full', 'coding'])
+@pytest.mark.parametrize('protocol', ['legacy', 'modern'])
+def test_workbench_opener_is_renderable_from_wire_catalog(integrated_stack, profile, protocol):
+    s = integrated_stack
+    def rpc(method, params=None):
+        if protocol == 'modern':
+            response = modern(s, method, params, profile=profile)
+        else:
+            response = s.client.post('/mcp?profile=' + profile,
+                headers={'Authorization': 'Bearer ' + s.pat,
+                         'Accept': 'application/json, text/event-stream',
+                         'MCP-Protocol-Version': '2025-11-25'},
+                json={'jsonrpc': '2.0', 'id': uuid.uuid4().hex,
+                      'method': method, 'params': params or {}})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert 'error' not in body, body
+        return body['result']
+
+    catalog = rpc('tools/list')['tools']
+    opener = next(tool for tool in catalog if tool['name'] == 'workbench')
+    # App-only tools cannot be used as ChatGPT's model-invoked widget opener.
+    assert 'model' in opener['_meta']['ui']['visibility']
+    assert 'app' in opener['_meta']['ui']['visibility']
+    assert opener['_meta'].get('openai/visibility', 'public') == 'public'
+    assert opener['annotations']['readOnlyHint'] is True
+    assert opener['securitySchemes'] == [{'type': 'oauth2', 'scopes': ['read']}]
+    uri = opener['_meta']['ui']['resourceUri']
+    assert opener['_meta']['openai/outputTemplate'] == uri
+    assert uri in {resource['uri'] for resource in rpc('resources/list')['resources']}
+    document = rpc('resources/read', {'uri': uri})['contents'][0]
+    assert document['mimeType'] == 'text/html;profile=mcp-app'
+    assert '<script>' in document['text']
+    result = rpc('tools/call', {'name': 'workbench', 'arguments': {}})
+    assert not result.get('isError'), result
+    Draft202012Validator(opener['outputSchema']).validate(result['structuredContent'])
+    assert result['_meta']['com.codepier/binding']['kind'] == 'workbench'
+    assert result['structuredContent']['projects']
+    assert all(project['root'] == '.' for project in result['structuredContent']['projects'])
+
+
 def test_apps_resources_are_real_built_documents_and_bound_to_snapshots(integrated_stack):
     s=integrated_stack
     # New calls stay text-only; saved app instances can still resolve their resources.
@@ -229,7 +270,7 @@ def test_handoff_preserves_goal_and_does_not_start_execution(integrated_stack):
     created=s.mcp('workspace',{'project': 'ProjectAlpha', 'idempotency_key': uuid.uuid4().hex, 'operation': 'workflow_create', 'options': {'title': 'Handoff fixture', 'goal': 'Keep original intent'}})['structuredContent']
     result=s.mcp('workspace',{'operation': 'handoff', 'options': {'workflow_id': created['workflow_id']}})['structuredContent']
     assert result['original_goal']=='Keep original intent' and not result['execution_started']
-    assert result['remaining'] and result['next']['tool']=='workspace' and result['next']['arguments']['operation']=='workflow_get'
+    assert result['remaining'] and result['next']['tool']=='project_query' and result['next']['arguments']['operation']=='workflow_get'
 
 
 def test_local_owner_control_is_loopback_authenticated_and_journaled(integrated_stack):

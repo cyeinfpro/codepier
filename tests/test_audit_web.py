@@ -118,7 +118,7 @@ async function scenario(name){
   }else if(name==='old_poll_does_not_restart_after_logout'){
     editor();const old=deferred();fetchImpl=()=>old.promise;run("trackTask('op')");const pending=run('pollTask()');run('S.session=null');old.resolve(response({id:'op',state:'queued',pending:true}));await pending;assert.equal(run('S.poll'),null);
   }else if(name==='event_connections_release_timer'){
-    editor();fetchImpl=async()=>response({});run('connectEvents()');const first=run('S.events');first.onmessage({data:JSON.stringify({type:'device'})});const id=run('S.eventTimer');assert.ok(timers.has(id));run('connectEvents()');assert.equal(first.closed,true);assert.equal(timers.has(id),false);
+    editor();fetchImpl=async()=>response({});run("S.page='projects';connectEvents()");const first=run('S.events');first.onmessage({data:JSON.stringify({type:'device'})});const id=run('S.eventTimer');assert.ok(timers.has(id));run('connectEvents()');assert.equal(first.closed,true);assert.equal(timers.has(id),false);
   }else if(name==='login_boot_failure_has_retry_surface'){
     editor();fetchImpl=async()=>{throw Error('offline');};await run('bootAuthenticated()');assert.match(elements.get('#app').innerHTML,/retry-identity/);assert.equal(run('S.events'),null);assert.equal(run('S.space_id'),null);
   }else throw Error(name);

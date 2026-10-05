@@ -227,7 +227,10 @@ async function api(path, options = {}) {
     if (session !== S.session || space !== S.space_id) throw sessionChanged();
     if (res) {
       if (res.status === 401 && path != '/api/login') endSession();
-      if (res.ok && body !== null && body !== undefined) return body;
+      if (res.ok && body !== null && body !== undefined) {
+        if (method !== 'GET' && method !== 'HEAD') invalidateBasics();
+        return body;
+      }
       if (
         !res.ok &&
         (!safe || ![408, 429, 500, 502, 503, 504].includes(res.status) || attempt >= delays.length)
@@ -454,10 +457,31 @@ function updateClock() {
   const n = $('#clock');
   if (n) n.textContent = new Date().toLocaleString('zh-CN', { hour12: false });
 }
+function invalidateBasics() {
+  S.basicsRevision = (S.basicsRevision || 0) + 1;
+}
 async function loadBasics() {
-  const [d, p] = await Promise.all([api('/api/devices'), api('/api/projects')]);
-  S.devices = d.devices;
-  S.projects = p.projects;
+  const session = S.session,
+    space = S.space_id,
+    revision = S.basicsRevision || 0;
+  const pending = S.basicsRequest;
+  if (pending?.session === session && pending.space === space && pending.revision === revision)
+    return pending.promise;
+  const request = { session, space, revision, promise: null };
+  request.promise = Promise.all([api('/api/devices'), api('/api/projects')])
+    .then(([d, p]) => {
+      if (S.session !== session || S.space_id !== space) throw sessionChanged();
+      // A completed mutation or mapping event invalidates in-flight snapshots.
+      // Join a fresh read rather than publishing data from before that change.
+      if ((S.basicsRevision || 0) !== revision) return loadBasics();
+      S.devices = d.devices;
+      S.projects = p.projects;
+    })
+    .finally(() => {
+      if (S.basicsRequest === request) S.basicsRequest = null;
+    });
+  S.basicsRequest = request;
+  return request.promise;
 }
 function restoreTaskSubmission() {
   if (S.taskSubmission) return;
@@ -512,28 +536,51 @@ function connectEvents() {
       '/api/events?' + new URLSearchParams({ space_id: S.space_id || '' }),
     ));
   const current = () => S.events === events && S.session === session;
+  let opened = false,
+    refreshing = false,
+    refreshAgain = null;
+  const refreshPanel = async (page = S.page) => {
+    if (!current() || S.page !== page || $('.modal')) return;
+    if (refreshing) {
+      refreshAgain = page;
+      return;
+    }
+    refreshing = true;
+    try {
+      await renderPage(false);
+    } catch (error) {
+      if (current()) toast(error.message, true);
+    } finally {
+      refreshing = false;
+      if (refreshAgain && current() && refreshAgain === S.page) {
+        const pendingPage = refreshAgain;
+        refreshAgain = null;
+        clearTimeout(S.eventTimer);
+        S.eventTimer = setTimeout(() => {
+          S.eventTimer = null;
+          refreshPanel(pendingPage);
+        }, 500);
+      }
+    }
+  };
   events.onopen = () => {
     if (!current()) return;
     networkState('实时通道已连接', true);
     if (typeof computerApprovalsConnection === 'function') computerApprovalsConnection(true);
-    loadBasics()
-      .then(() => {
-        if (
-          current() &&
-          S.page === 'audit' &&
-          S.auditMode === 'operations' &&
-          window.CodePierCallLog
-        )
-          return CodePierCallLog.refresh(true);
-        if (
-          current() &&
-          ['overview', 'devices', 'projects', 'audit', 'workflows', 'vps'].includes(S.page) &&
-          !$('.modal')
-        )
-          return renderPage(false);
-      })
-      .catch(() => {});
     if (S.work.operation) pollTask().catch(() => {});
+    // Boot already renders the selected page. Only a reconnection needs a
+    // second snapshot; otherwise it races and repeats the expensive overview.
+    if (!opened) {
+      opened = true;
+      return;
+    }
+    if (S.page === 'audit' && S.auditMode === 'operations' && window.CodePierCallLog)
+      loadBasics()
+        .then(() => current() && CodePierCallLog.refresh(true))
+        .catch(() => {});
+    else if (['overview', 'devices', 'projects', 'audit', 'workflows', 'vps'].includes(S.page))
+      refreshPanel();
+    else loadBasics().catch(() => {});
   };
   events.onerror = () => {
     if (current()) {
@@ -549,6 +596,7 @@ function connectEvents() {
     } catch {
       return;
     }
+    if (['device', 'project'].includes(m.type)) invalidateBasics();
     if (m.type === 'computer_approval' && typeof refreshComputerApprovals === 'function')
       refreshComputerApprovals();
     if (
@@ -573,15 +621,22 @@ function connectEvents() {
     if (m.type === 'iam') {
       CodePierIdentity.refresh().catch((error) => toast(error.message, true));
     }
-    if (['operation', 'device', 'project', 'workflow', 'vps'].includes(m.type)) {
+    // Refresh only pages whose data changed. Command output/state does not
+    // change project/device mappings; rebuilding them on every operation makes
+    // ordinary navigation compete with the live audit stream.
+    const dependencies = {
+      overview: ['operation', 'device', 'project'],
+      devices: ['device', 'project'],
+      projects: ['device', 'project'],
+      workflows: ['workflow', 'project', 'device'],
+      vps: ['vps', 'project', 'device'],
+    };
+    if (dependencies[S.page]?.includes(m.type)) {
+      const page = S.page;
       clearTimeout(S.eventTimer);
       S.eventTimer = setTimeout(() => {
-        if (
-          current() &&
-          ['overview', 'devices', 'projects', 'workflows', 'vps'].includes(S.page) &&
-          !$('.modal')
-        )
-          renderPage(false).catch((error) => toast(error.message, true));
+        S.eventTimer = null;
+        if (current() && S.page === page) refreshPanel(page);
       }, 500);
     }
   };

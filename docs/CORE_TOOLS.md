@@ -18,7 +18,11 @@ CodePier 的九个核心开发工具为 `workspace`、`read`、`write`、`edit`�
 
 额外的 `workbench({})` 是用户主动打开的 MCP Apps 入口，在支持 OpenAI MCP Extensions 的宿主注册 global/thread 工作台。初次结果仅列出当前授权项目；即使只有一个项目也必须明确选择，再复用项目面板、任务证据和固定改动审阅。切换项目或返回列表会停止旧视图刷新，迟到结果不能覆盖新选择。宿主没有入口支持时，仍可使用文字工具；工具目录元数据不能证明某个 ChatGPT 客户端已经支持此入口。
 
-`project_query` 只允许 `list/open/tasks/status/readiness/dashboard/workflow_list/workflow_get`；`open` 不允许捕获基线。项目和任务仍必须明确选择，所有调用复用实时授权。`task_query` 只允许 `list/get/wait/trace/diagnostics/activity`，读取原操作，不执行、取消或重跑。参数及返回结构与对应的 `workspace`、`process` 操作一致；任务查询指 CodePier 已有操作回执，并非 MCP 标准 Tasks 协议。
+工作台入口同时声明 `ui.visibility: ["model", "app"]`，使用户能够在对话中请求打开小组件；不要把绑定 UI 的入口设为仅 `app` 可见，否则 ChatGPT 可能提示“这些私有工具无法渲染其小组件”。可见性只控制工具发现，不会公开项目或绕过 OAuth 与项目授权。遇到此提示，应先部署包含修复的 Hub，再刷新客户端连接的工具目录；新入口必须同时包含上述可见性及 `ui.resourceUri`，只刷新旧 Hub 的目录不会修复。源码回归不等于真实 ChatGPT 宿主渲染验收。
+
+`project_query` 只允许 `list/open/help/tree/skills/skill/tasks/status/readiness/dashboard/workflow_list/workflow_get`；`open` 不允许捕获基线。项目和任务仍必须明确选择，所有调用复用实时授权。`task_query` 只允许 `list/get/wait/trace/diagnostics/activity`，读取原操作，不执行、取消或重跑。参数及返回结构与对应的 `workspace`、`process` 操作一致；任务查询指 CodePier 已有操作回执，并非 MCP 标准 Tasks 协议。
+
+只读发现从 `project_query` 开始，目录和技能读取无需调用混合工具。公开回执的等待、补读和追踪继续指向 `task_query`，保留原操作编号；捕获基线仍使用 `workspace`，显式取消仍使用 `process`。这些路由不改变实际授权，也不能保证宿主不再出现取消或拒绝提示。
 
 这三个专用入口标注为只读；混合读写的 `workspace/process/browser/computer` 保持保守的非只读注解。通用工具和两个查询工具不会自动弹卡，只有专用工作台绑定 UI 资源。九个核心工具的 `outputSchema` 描述实际成功、错误、持久 pending 变体；错误/等待不是成功，仍须核对原操作编号、状态和退出码。
 

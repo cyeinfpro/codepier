@@ -265,7 +265,10 @@ def decorate(definition):
         definition['_meta']['ui'] = {'visibility':['model','app']}
         definition['_meta']['openai/widgetAccessible'] = True
     if name == 'workbench':
-        definition['_meta']['ui'] = {'resourceUri': 'ui://codepier/workspace-v1.html', 'visibility': ['app']}
+        # Widget openers must be model-visible; app-only is for UI callbacks.
+        # Visibility controls discovery, while OAuth and project grants still
+        # authorize every call, including sidebar/thread entrypoints.
+        definition['_meta']['ui'] = {'resourceUri': 'ui://codepier/workspace-v1.html', 'visibility': ['model', 'app']}
         definition['_meta']['openai/ui'] = {'entrypoints': [{'type': 'global'}, {'type': 'thread'}]}
         definition['_meta']['openai/outputTemplate'] = 'ui://codepier/workspace-v1.html'
         definition['_meta']['openai/widgetAccessible'] = True

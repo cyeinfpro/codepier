@@ -1,5 +1,5 @@
 {
-  "version": "1.16.0",
+  "version": "1.16.1",
   "algorithm": "sha256",
   "assets": {
     "access-profiles.css": {
@@ -19,8 +19,8 @@
       "bytes": 27864
     },
     "app.js": {
-      "sha256": "0db4f737510b08f736f028c0a5f8e774eec0f7c96d9489762e8bf4f40da245aa",
-      "bytes": 111766
+      "sha256": "094a8e1a272a7be8011dba11731e979204327c2b8d7a7e83be53fce3c632be3e",
+      "bytes": 113985
     },
     "appearance.js": {
       "sha256": "7fc8e8ffa85a4bb5836b8919cdf6ff12813cfb4a9e4736709f5858e5d8782bb1",

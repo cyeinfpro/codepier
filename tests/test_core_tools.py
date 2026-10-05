@@ -167,7 +167,8 @@ async def test_accepted_queue_expires_before_lock_release(agent, queue):
     call = request(project, 'read' if queue == 'resource' else 'fs_read', path='file')
     call['not_after'] = time.time() + .1
     if queue == 'worker':
-        instance.semaphore = asyncio.Semaphore(0)
+        # Legacy file reads use the same bounded I/O lane as core read.
+        instance.read_semaphore = asyncio.Semaphore(0)
         await asyncio.wait_for(instance.handle(call), 1)
     else:
         async with instance.project_slot(root, write=True, operation_id='holder'):

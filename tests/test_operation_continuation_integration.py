@@ -92,7 +92,7 @@ def test_paused_polling_resumes_original_operation_once(continuation_stack, cata
     receipt = submitted["structuredContent"]
     operation_id = receipt["operation_id"]
     assert receipt["pending"]
-    assert receipt["next_call"]["name"] == "process"
+    assert receipt["next_call"]["name"] == "task_query"
     assert receipt["next_call"]["arguments"] == {
         "operation": "wait", "operation_ids": [operation_id], "wait_seconds": 10, "output_limit": 8000,
         "include_result": True, "include_output": True,
@@ -130,7 +130,7 @@ def test_compact_terminal_response_recovers_failure_evidence(continuation_stack,
     compact = follow(stack, catalog, profile, receipt["next_call"], include_output=False, include_result=False)["structuredContent"]
     assert compact["state"] == "failed" and not compact["pending"]
     assert "output" not in compact and "result" not in compact
-    assert compact["next_call"]["name"] == "process" and compact["next_call"]["arguments"]["operation"] == "get"
+    assert compact["next_call"]["name"] == "task_query" and compact["next_call"]["arguments"]["operation"] == "get"
     assert compact["next_call"]["arguments"]["operation_ids"] == [receipt["operation_id"]]
     assert "after_output_seq" not in compact["next_call"]["arguments"]
 
