@@ -10,8 +10,9 @@ MODERN='2026-07-28'
 LEGACY=frozenset({'2025-03-26','2025-06-18','2025-11-25'})
 SUPPORTED=[MODERN,'2025-11-25','2025-06-18','2025-03-26']
 PREFIX='io.modelcontextprotocol/'
-SERVER_INFO={'name':'codepier-agent','version':VERSION,'title':'CodePier'}
+SERVER_INFO={'name':'codepier-agent','version':VERSION,'title':'CodePier Workspace'}
 MIME='text/html;profile=mcp-app'
+TASK_METHODS=frozenset({'tasks/get','tasks/update','tasks/cancel'})
 
 class ProtocolError(Exception):
     def __init__(self,code,message,data=None):self.code,self.message,self.data=code,message,data
@@ -61,13 +62,13 @@ def validate_modern(body,headers):
             raise ProtocolError(-32602,'Invalid extension declaration')
     if headers.get('mcp-protocol-version')!=version or headers.get('mcp-method')!=body['method']:
         raise ProtocolError(-32020,'MCP-Protocol-Version and Mcp-Method must match the request body')
-    field='uri' if body['method']=='resources/read' else 'name' if body['method'] in {'tools/call','prompts/get'} else None
+    field='taskId' if body['method'] in TASK_METHODS else 'uri' if body['method']=='resources/read' else 'name' if body['method'] in {'tools/call','prompts/get'} else None
     if field:
         value=params.get(field)
         if not isinstance(value,str):raise ProtocolError(-32602,'Required request name/uri must be a string')
         if decode_header(headers.get('mcp-name'))!=value:raise ProtocolError(-32020,'Mcp-Name must match the request body')
     # No MRTR capability is advertised. Never accept a purported approval continuation.
-    if 'requestState' in params or 'inputResponses' in params:
+    if 'requestState' in params or 'inputResponses' in params and body['method'] != 'tasks/update':
         raise ProtocolError(-32602,'This server does not issue MRTR input requests')
     return meta
 
@@ -76,7 +77,7 @@ def request_headers(body):
     params=body.get('params',{});meta=params.get('_meta',{})
     version=meta.get(PREFIX+'protocolVersion')
     result={'MCP-Protocol-Version':version,'Mcp-Method':body['method']}
-    field='uri' if body['method']=='resources/read' else 'name' if body['method'] in {'tools/call','prompts/get'} else None
+    field='taskId' if body['method'] in TASK_METHODS else 'uri' if body['method']=='resources/read' else 'name' if body['method'] in {'tools/call','prompts/get'} else None
     if field and isinstance(params.get(field),str):result['Mcp-Name']=encode_header(params[field])
     return result
 
@@ -85,5 +86,7 @@ def complete(result):
     return {**result,'resultType':'complete','_meta':{**result.get('_meta',{}),PREFIX+'serverInfo':SERVER_INFO}}
 
 
-def capabilities():
-    return {'tools':{},'resources':{},'prompts':{},'extensions':{'io.modelcontextprotocol/ui':{'mimeTypes':[MIME]}}}
+def capabilities(*, modern=True):
+    extensions={'io.modelcontextprotocol/ui':{'mimeTypes':[MIME]}}
+    if modern: extensions['io.modelcontextprotocol/tasks']={}
+    return {'tools':{},'resources':{},'prompts':{},'extensions':extensions}

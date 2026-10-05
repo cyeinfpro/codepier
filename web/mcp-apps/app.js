@@ -3,19 +3,24 @@ import {el, button, notice} from './ui.js';
 import {mountDashboard} from './dashboard.js';
 import {mountReview} from './review.js';
 import {mountWorkspaceTools} from './workspace-tools.js';
+import {mountWorkbench} from './workbench.js';
+import {contextCoordinator, mountSelectedContext} from './selected-context.js';
 
 const app = new App({name: 'CodePier Task Workspace', version: '1.1.0'});
 const root = document.getElementById('app');
+const selectedContext = contextCoordinator(app);
 let generation = 0;
 let input = {};
 let binding = {};
 let cleanup = () => {};
+let workbench = null;
 
 function valueOf(result, name = '') {
-  const value = name === 'process' && result?.structuredContent?.operations ? result.structuredContent.operations[0] : result?.structuredContent;
+  const operationTool = ['process', 'task_query'].includes(name);
+  const value = operationTool && result?.structuredContent?.operations ? result.structuredContent.operations[0] : result?.structuredContent;
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('工具未返回结构化结果。');
   // A failed original operation is a valid read result: keep its status and logs.
-  const receipt = name === 'process' &&
+  const receipt = operationTool &&
     typeof value.tool === 'string' && typeof value.state === 'string' && (value.id || value.operation_id);
   if (!receipt && (result.isError || value.error)) {
     const detail = value.result?.error || (typeof value.error === 'object' ? value.error : null);
@@ -47,13 +52,13 @@ function decode(op) {
   }
   return {...op.result.data, operation_id: op.operation_id || op.id};
 }
-async function settle(value, alive) {
+async function settle(value, alive, query = request) {
   const deadline = Date.now() + 120000;
   while (value?.pending) {
     if (!alive()) return null;
     if (Date.now() > deadline) throw new Error('读取仍在进行。请继续查询原操作 ' + value.operation_id + '，不要重新执行。');
     const id = value.operation_id;
-    const op = await request('process', {operation: 'wait', operation_ids: [id], wait_seconds: 1, output_limit: 2000});
+    const op = await query('process', {operation: 'wait', operation_ids: [id], wait_seconds: 1, output_limit: 2000});
     if (!alive()) return null;
     if ((op.operation_id || op.id) !== id) throw new Error('原操作编号不匹配，已停止读取。');
     const completed = decode(op);
@@ -82,21 +87,42 @@ function render(value, g) {
     }
     void recover(); return;
   }
+  // Keep query-only aliases scoped to the workbench; existing cards preserve
+  // their established tool contract and permissions.
+  const query = (name, args) => {
+    if (workbench && name === 'workspace' && ['list', 'open', 'dashboard', 'workflow_list', 'workflow_get', 'tasks', 'status', 'readiness'].includes(args.operation))
+      name = 'project_query';
+    if (workbench && name === 'process' && ['list', 'get', 'wait', 'trace', 'diagnostics', 'activity'].includes(args.operation))
+      name = 'task_query';
+    return request(name, args);
+  };
+  async function read(name, args, additionalAlive = () => true) {
+    const valid = () => alive() && additionalAlive();
+    if (!valid()) return null;
+    const response = await query(name, args);
+    return valid() ? settle(response, valid, query) : null;
+  }
+  if (workbench && Array.isArray(value.projects)) {
+    cleanup = mountWorkbench(root, value, {
+      alive, read,
+      onProjects: projects => { if (alive()) workbench.projects = projects; },
+      onSelect: opened => {
+        if (!alive()) return;
+        stop(); render(opened, generation);
+      }
+    });
+    return;
+  }
   const project = value.workspace?.project || value.project_alias || binding.project || input.project;
   const projectId = value.workspace?.project_id || value.project_id || null;
   const workspaceId = binding.workspace_id || value.workspace?.workspace_id || input.workspace_id || '';
   const ctx = {
-    app, alive, request,
+    app, alive, request: query,
     target: {project: projectId || project, ...(workspaceId ? {workspace_id: workspaceId} : {})},
     projectId,
     workflowId: binding.workflow_id || value.workflow_id || input.workflow_id || '',
     panelUrl: binding.panel_url || '',
-    async read(name, args, additionalAlive = () => true) {
-      const valid = () => alive() && additionalAlive();
-      if (!valid()) return null;
-      const response = await request(name, args);
-      return valid() ? settle(response, valid) : null;
-    }
+    read
   };
   if (!project) { notice(root, '没有已核实的项目绑定，请重新打开项目或任务。', true); return; }
   if ((binding.kind || document.body.dataset.kind) === 'changes') {
@@ -106,29 +132,37 @@ function render(value, g) {
     const header = el('header', undefined, 'workspace-header');
     header.append(el('span', 'CodePier / TASK WORKSPACE', 'eyebrow'), el('h1', project),
       el('p', '任务进度 · 执行证据 · 结果交付', 'muted'));
+    if (workbench) header.append(button('返回项目选择', () => {
+      if (!alive()) return;
+      const projects = workbench.projects;
+      stop(); render({projects}, generation);
+    }));
     root.append(header);
     const dashboard = el('div'); root.append(dashboard);
-    cleanup = mountDashboard(dashboard, ctx);
+    const stopDashboard = mountDashboard(dashboard, ctx);
+    const stopContext = mountSelectedContext(root, ctx, selectedContext, project);
+    cleanup = () => { stopDashboard(); stopContext(); };
     const secondary = el('section', undefined, 'secondary-tools'); root.append(secondary);
     mountWorkspaceTools(secondary, value, ctx);
   }
   root.append(el('p', '只读刷新不启动模型或命令 · 证据不等于完整验收 · 管理操作保持原有权限', 'bottom-note'));
 }
 app.ontoolinput = params => {
-  stop(); input = params.arguments || {};
+  stop(); workbench = null; binding = {}; input = params.arguments || {};
   root.replaceChildren(el('p', '正在读取所选项目或任务…', 'muted'));
   root.setAttribute('aria-busy', 'true');
 };
 app.ontoolresult = result => {
   stop(); binding = {...(result._meta?.['com.codepier/binding'] || result._meta?.['me.infpro.relay/binding'])};
+  workbench = binding.kind === 'workbench' ? {projects: []} : null;
   try { render(valueOf(result), generation); }
   catch (error) { root.replaceChildren(); notice(root, error.message, true); root.setAttribute('aria-busy', 'false'); }
 };
-app.onhostcontextchanged = theme;
+app.onhostcontextchanged = context => { if (context?.theme !== undefined) theme(context); selectedContext.hostChanged(context); };
 app.ontoolcancelled = () => { stop(); root.replaceChildren(); notice(root, '卡片显示已结束，后台操作没有因此自动取消。请按原操作编号核实。'); };
 app.onteardown = async () => { stop(); return {}; };
 void (async () => {
-  try { await app.connect(); theme(app.getHostContext()); }
+  try { await app.connect(); theme(app.getHostContext()); selectedContext.hostChanged(app.getHostContext()); }
   catch {
     stop(); root.replaceChildren();
     notice(root, '当前页面不支持 MCP Apps，或组件连接失败。工具的文字结果仍可使用。', true);

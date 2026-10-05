@@ -33,6 +33,11 @@ def read_resource(uri,public_url):
 
 
 def attach(result,name,args,value,public_url):
+    if name == 'workbench':
+        binding = {'kind': 'workbench', 'panel_url': public_url()}
+        result['_meta'] = {**result.get('_meta', {}), 'com.codepier/binding': binding}
+        return result
+    if name == 'project_query': name = 'workspace'
     if name == 'workspace' and args.get('operation') == 'open': name = 'open_workspace'
     if name == 'workspace' and args.get('operation') == 'workflow_get': name = 'workflows_get'; args = {**args, **args.get('options', {})}
     if name == 'read' and args.get('operation') == 'changes': name = 'show_changes'; args = {**args, **args.get('options', {})}

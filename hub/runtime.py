@@ -385,6 +385,10 @@ class Runtime:
     async def _invoke_async(self, name: str, raw: dict, principal: Principal):
         if self._loop is None or self._loop.is_closed():
             self._loop = asyncio.get_running_loop()
+        from shared.query_contracts import QUERY_TOOLS
+        if name in QUERY_TOOLS:
+            from hub.core_tools import invoke_query
+            return await invoke_query(self, name, raw, principal)
         from shared.core_contracts import CORE_FACADES, CORE_ACTIONS
         if name in CORE_FACADES or name in CORE_ACTIONS and raw.get('operation', 'file') != 'file':
             from hub.core_tools import invoke as invoke_core

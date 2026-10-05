@@ -3,7 +3,8 @@ from __future__ import annotations
 import sqlite3
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
+from hub.mcp_request_audit import error_headers
 from shared.util import DevError
 
 
@@ -48,6 +49,14 @@ class BodyLimit:
 
 
 def install_http_behaviors(app):
+    @app.exception_handler(Exception)
+    async def unexpected_error(request, exc):
+        # Preserve the framework default 500 body and exception propagation.
+        # ServerErrorMiddleware sits outside user middleware, so attach the
+        # already-generated ID here as well. Never expose exception text.
+        headers = error_headers(request.scope) if request.url.path == "/mcp" else {}
+        return PlainTextResponse("Internal Server Error", status_code=500, headers=headers)
+
     @app.exception_handler(DevError)
     async def dev_error(request, exc: DevError):
         return JSONResponse({"error": {"code": exc.code, "message": exc.message, **exc.details}}, status_code=exc.status)

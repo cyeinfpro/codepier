@@ -36,6 +36,7 @@ from hub.native_cli import make_native_router
 from hub.vps import make_vps_router
 from hub.panel_update import make_panel_update_router
 from hub.integrations import CallTimingMiddleware
+from hub.mcp_request_audit import MCPRequestAuditMiddleware
 from hub.mcp import make_router
 from hub.oauth import OAuth
 from shared.panel_maintenance import PanelMaintenance, PanelMaintenanceMiddleware
@@ -93,6 +94,7 @@ def create_app(data_dir: str | None = None):
         app.add_middleware(PanelMaintenanceMiddleware, gate=maintenance)
         app.add_middleware(CallTimingMiddleware, runtime=runtime)
         install_http_behaviors(app)
+        app.add_middleware(MCPRequestAuditMiddleware)
         context = HubContext(store, runtime, auth, config, maintenance, public_url, BASE)
         for make in (make_accounts_router, make_devices_router, make_projects_router,
                      make_activity_router, make_settings_router, make_system_router):

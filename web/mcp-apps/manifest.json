@@ -2,12 +2,12 @@
   "sdk": "@modelcontextprotocol/ext-apps@2.0.0",
   "outputs": {
     "workspace-v1.html": {
-      "bytes": 669217,
-      "sha256": "3e5c0a31e4f686bbd28bef6385f3648f8be0eb67f3033d0ed9210591e93c750d"
+      "bytes": 681947,
+      "sha256": "a9a309612481f130b5560e177d2458c59a396bbeca5eb81d6a9dddbf703a2bf4"
     },
     "changes-v1.html": {
-      "bytes": 669212,
-      "sha256": "39ab81b575d248b3f9d77e0a6b1a2a4043eefd9d132ed411c8ebb0dd21480c05"
+      "bytes": 681942,
+      "sha256": "a089588bd2e216b04785a81f393ee8c2c19cf10f16553d019ab0f7001f301663"
     }
   }
 }
