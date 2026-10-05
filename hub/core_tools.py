@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from shared.contracts import TOOLS
 from shared.core_contracts import CORE_TOOLS, CORE_ACTIONS
 from shared.computer_media import mcp_result
+from shared.mcp_presentation import present
 from shared.util import DevError
 
 WORKSPACE = {'list': 'projects_list', 'open': 'open_workspace', 'skills': 'skills_list',
@@ -38,7 +39,7 @@ def help_result(tool='', action=''):
         return {'tools': {name: {'operations': sorted(actions),
             'help': {'tool': 'workspace', 'arguments': {'operation': 'help', 'tool': name, 'action': '<operation>'}}}
             for name, actions in catalogs.items() if not tool or name == tool},
-            'note': 'Specialized operations use options. Common operations use top-level arguments, with additional filters in options as shown by each help schema. All scopes and local opt-ins are checked on every call.'}
+            'note': 'Specialized operations use options. Common operations use top-level arguments, with additional filters in options as shown by each help schema. All scopes and node opt-ins are checked on every call.'}
     target = catalogs.get(tool, {}).get(action)
     if not target:
         raise DevError('UNKNOWN_OPERATION', '未找到工具操作，请先读取 workspace.help 目录')
@@ -136,6 +137,15 @@ def public_description(description):
     import re
     from shared.core_contracts import REPLACED_MCP_TOOLS
     return re.sub(r'\b[a-z][a-z_]+\b', lambda match: REPLACED_MCP_TOOLS.get(match[0], match[0]), description)
+
+
+async def invoke_query(runtime, name, raw, principal):
+    model = validate(name, raw)
+    if name == 'workbench':
+        # The existing endpoint refreshes grants/roles and filters project access.
+        return await runtime.invoke('projects_list', {}, principal)
+    target = 'workspace' if name == 'project_query' else 'process'
+    return await runtime.invoke(target, model.model_dump(exclude_unset=True), principal)
 
 
 async def invoke(runtime, name, raw, principal):
@@ -240,6 +250,8 @@ def compact_receipt(value):
 
 
 def result(name, arguments, value):
+    value = present(name, arguments, value)
+    name = {'project_query': 'workspace', 'task_query': 'process'}.get(name, name)
     if name in CORE_TOOLS:
         value = compact_receipt(copy.deepcopy(value))
     if name in {'browser', 'computer'}:

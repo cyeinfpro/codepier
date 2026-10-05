@@ -53,13 +53,14 @@ def test_password_and_redaction():
 
 def test_contracts():
     from shared.core_contracts import CORE_TOOLS
-    definitions=tool_definitions();assert {d['name'] for d in definitions} == CORE_TOOLS | {'get_profile','get_access_context'}
+    from shared.query_contracts import QUERY_TOOLS
+    definitions=tool_definitions();assert {d['name'] for d in definitions} == CORE_TOOLS | QUERY_TOOLS | {'get_profile','get_access_context'}
     for tool in definitions:
         assert tool['inputSchema']['type']=='object'
         assert tool['inputSchema']['additionalProperties'] is False
         assert tool['outputSchema']['type']=='object'
         assert tool['outputSchema']['additionalProperties'] is (tool['name'] != 'get_profile')
-        assert tool['annotations']['readOnlyHint']==(tool['name'] in {'read','vps','get_profile','get_access_context'})
+        assert tool['annotations']['readOnlyHint']==(tool['name'] in {'read','vps','get_profile','get_access_context'} | QUERY_TOOLS)
 
 def test_read_pagination_and_search(engine):
     e,p,r=engine

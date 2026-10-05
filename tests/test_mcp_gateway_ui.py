@@ -24,7 +24,25 @@ def test_gateway_panel_end_to_end(gw, gateway_browser, width, tmp_path):
     r = role(b['owner'], label='UI secretary', project_rules=[])
     page = gateway_browser.new_page(viewport={'width': width, 'height': 900})
     errors = []; page.on('pageerror', lambda error: errors.append(str(error)))
-    page.add_init_script("sessionStorage.setItem('codepier-space:owner','team')")
+    page.add_init_script("""
+        sessionStorage.setItem('codepier-space:owner','team');
+        // This adapter does not exercise SSE transport. An empty fulfilled
+        // stream races WebKit's reload teardown and produces a CORS pageerror.
+        // Keep real browser security and every HTTP/IAM request unchanged.
+        window.fixtureEventStreams = [];
+        window.EventSource = class extends EventTarget {
+            static CONNECTING = 0; static OPEN = 1; static CLOSED = 2;
+            constructor(url) {
+                super();
+                const parsed = new URL(url, location.href);
+                if (parsed.origin !== location.origin || parsed.pathname !== '/api/events')
+                    throw new Error('Unexpected fixture EventSource destination');
+                this.url = parsed.href; this.readyState = 1;
+                window.fixtureEventStreams.push(this);
+            }
+            close() { this.readyState = 2; }
+        };
+    """)
     def route(request_route):
         req = request_route.request; parts = urlsplit(req.url)
         if parts.hostname != '127.0.0.1':
@@ -76,6 +94,7 @@ def test_gateway_panel_end_to_end(gw, gateway_browser, width, tmp_path):
         assert 'PRIVATE_UI_TOKEN' not in page.locator('body').inner_text()
         assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
         page.screenshot(path=str(tmp_path / 'gateway-panel.png'), full_page=True)
+        assert page.evaluate("fixtureEventStreams.length > 0 && fixtureEventStreams.every(s => new URL(s.url).searchParams.get('space_id') === 'team')")
         assert not errors, errors
     finally:
         page.close()
