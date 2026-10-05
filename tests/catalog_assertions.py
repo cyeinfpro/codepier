@@ -1,12 +1,15 @@
-"""All public MCP profiles contain the same nine native tools plus two stable identity tools."""
+"""Public catalogs contain core tools, explicit queries and stable identity tools."""
 from shared.core_contracts import CORE_TOOLS, REPLACED_MCP_TOOLS
+from shared.query_contracts import QUERY_TOOLS
 
 
-def assert_task_catalog(catalog, model_count=11):
+def assert_task_catalog(catalog, model_count=13):
     names = {tool['name'] for tool in catalog}
-    assert len(catalog) == len(names) == model_count == 11
-    assert names == CORE_TOOLS | {'get_profile','get_access_context'}
+    assert len(catalog) == len(names) == 14
+    assert names == CORE_TOOLS | QUERY_TOOLS | {'get_profile','get_access_context'}
     assert not names.intersection(REPLACED_MCP_TOOLS)
+    visible = [tool for tool in catalog if tool.get('_meta', {}).get('ui', {}).get('visibility', ['model', 'app']) != ['app']]
+    assert len(visible) == model_count == 13
+    assert {tool['name'] for tool in catalog if tool not in visible} == {'workbench'}
     for tool in catalog:
-        assert tool.get('_meta', {}).get('ui', {}).get('visibility', ['model', 'app']) != ['app']
         assert 'password' not in tool['inputSchema']['properties']

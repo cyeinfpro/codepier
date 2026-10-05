@@ -10,6 +10,7 @@ from hub.mcp_apps import attach
 from shared.contracts import TOOLS, tool_definitions
 from shared.integration_contracts import REMOTE_TOOLS
 from shared.core_contracts import CORE_TOOLS
+from shared.query_contracts import QUERY_TOOLS
 from shared.util import DevError
 from tests.test_agentdock_workflows import env, call, create, update, operation
 
@@ -184,7 +185,7 @@ def test_app_only_catalog_and_explicit_workflow_widget_binding(env):
         tools = {tool['name']: tool for tool in tool_definitions(profile)}
         assert 'workspace_status' not in tools
         assert tools['workspace']['_meta']['ui']['visibility'] == ['model', 'app']
-    assert set(t['name'] for t in tool_definitions('coding')) == CORE_TOOLS | {'get_profile','get_access_context'}
+    assert set(t['name'] for t in tool_definitions('coding')) == CORE_TOOLS | QUERY_TOOLS | {'get_profile','get_access_context'}
     receipt = create(env)
     value = call(env, 'workflows_get', workflow_id=receipt['workflow_id'])
     bound = attach({'structuredContent': value}, 'workflows_get', {'workflow_id': receipt['workflow_id']}, value, lambda: 'https://panel.example')
