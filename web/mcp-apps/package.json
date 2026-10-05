@@ -9,7 +9,7 @@
     "format:check": "prettier --check ../*.js ../*.css ../core/*.mjs *.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/ext-apps": "2.0.0"
+    "@modelcontextprotocol/ext-apps": "2.0.3"
   },
   "devDependencies": {
     "esbuild": "0.28.2",
