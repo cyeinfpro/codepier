@@ -4,7 +4,7 @@ import hashlib
 import uuid
 import jsonschema
 from shared.contracts import tool_definitions
-from tests.support import running_stack
+from tests.support import running_stack, wait_for
 from tests.catalog_assertions import assert_task_catalog
 import pytest
 
@@ -38,7 +38,10 @@ def value(s,result):
     assert not result['isError'],result
     data=result['structuredContent']
     if data.get('pending'):
-        operation=s.poll(data['operation_id'],timeout=20)
+        def terminal():
+            operation=s.mcp('process', {'operation':'wait','operation_ids':[data['operation_id']], 'wait_seconds':5})['structuredContent']['operations'][0]
+            return operation if not operation.get('pending') else None
+        operation=wait_for(terminal,20)
         assert operation['state']=='succeeded',operation
         return {'operation_id':operation['id'],**operation['result']['data']}
     return data
@@ -48,8 +51,8 @@ def test_profile_old_transport_and_default_full_remain_compatible(coding_stack):
     s=coding_stack
     original=s.rpc('tools/list').json()['result']['tools']
     compact=rpc(s,'tools/list').json()['result']['tools']
-    assert_task_catalog(original, 11)
-    assert_task_catalog(compact, 11)
+    assert_task_catalog(original, 13)
+    assert_task_catalog(compact, 13)
     assert {t['name'] for t in compact} == {t['name'] for t in original}
     assert not {'integration_control','validations_accept'} & {t['name'] for t in original}
     initialized=rpc(s,'initialize',{'protocolVersion':'2025-11-25'}).json()['result']
@@ -63,7 +66,8 @@ def test_profile_old_transport_and_default_full_remain_compatible(coding_stack):
 def test_remote_non_git_review_patch_idempotency_and_grant_boundaries(coding_stack):
     s=coding_stack
     first=value(s,tool(s,'open_workspace',{'project':'Imago','capture_baseline':True}))
-    assert first['baseline_ref'] and first['workspace']['root']==str(s.imago)
+    assert first['baseline_ref'] and first['workspace']['root']=='.'
+    assert s.call('projects_resolve', {'project':'Imago'})['root']==str(s.imago)
     # Independent file requests preserve per-file failure and SHA checks.
     read = value(s, tool(s, 'read', {'project': 'Imago', 'path': 'README.md'}))
     assert read['sha256'] == hashlib.sha256((s.imago/'README.md').read_bytes()).hexdigest()
@@ -102,7 +106,7 @@ def test_coding_profile_uses_canonical_oauth_resource_and_revocation(coding_stac
     decision=s.must(s.client.post('/api/oauth/requests/'+request+'/decide',json={'allow':True,'scopes':['read'],'projects':[s.project['id']]}))
     code=parse_qs(urlparse(decision['redirect']).query)['code'][0]
     tokens=s.must(s.client.post('/oauth/token',data={'grant_type':'authorization_code','client_id':registration['client_id'],'code':code,'code_verifier':verifier,'redirect_uri':args['redirect_uri'],'resource':s.url+'/mcp'}))
-    assert_task_catalog(rpc(s,'tools/list',token=tokens['access_token']).json()['result']['tools'], 11)
+    assert_task_catalog(rpc(s,'tools/list',token=tokens['access_token']).json()['result']['tools'], 13)
     opened=value(s,tool(s,'open_workspace',{'project':'Imago'},tokens['access_token']))
     assert opened['workspace']['granted_scopes']==['read']
     assert s.client.post('/oauth/revoke',data={'token':tokens['access_token'],'client_id':registration['client_id']}).status_code==200
