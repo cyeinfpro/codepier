@@ -26,7 +26,8 @@
 #   - ReadWriteOnce on local block storage (k3s local-path). Not NFS: flock and WAL are unreliable there.
 #   - No HUB_PANEL_UPDATE_SOCKET: the in-panel updater is a Compose/systemd host feature and stays
 #     disabled here; the Settings page reports it as not enabled.
-#   - Traefik terminates TLS and is the only trusted proxy (FORWARDED_ALLOW_IPS = k3s pod CIDR).
+#   - Traefik terminates TLS. The NetworkPolicy limits ingress to its pods; keep the
+#     k3s network-policy controller enabled and adjust selectors if Traefik is relocated.
 ---
 apiVersion: v1
 kind: Namespace
@@ -45,7 +46,7 @@ data:
   HUB_PUBLIC_URL: https://codepier.example.com
   # MCP_PUBLIC_URL: https://mcp.example.com   # only when MCP is served from a different origin
   TZ: Asia/Taipei
-  # k3s default --cluster-cidr; Traefik pods are the only source allowed to set X-Forwarded-*.
+  # k3s default --cluster-cidr; the NetworkPolicy below restricts traffic to Traefik.
   FORWARDED_ALLOW_IPS: 10.42.0.0/16
   OAUTH_REDIRECT_HOSTS: chatgpt.com,chat.openai.com,platform.openai.com,localhost,127.0.0.1,::1
   HUB_QUEUE_TTL_SECONDS: "1800"
@@ -213,6 +214,29 @@ spec:
     - name: http
       port: 8765
       targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: codepier-hub-ingress
+  namespace: codepier
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: codepier
+      app.kubernetes.io/component: hub
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: traefik
+      ports:
+        - protocol: TCP
+          port: 8765
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress

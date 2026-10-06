@@ -37,7 +37,7 @@ const context = vm.createContext({document, console, URLSearchParams, AbortContr
   setTimeout(fn,ms){const id=++timerId;timers.set(id,{fn,ms});if([500,1000,2000,4000].includes(ms))queueMicrotask(()=>{if(timers.delete(id))fn();});return id;},
   clearTimeout:id=>timers.delete(id),clearInterval:id=>timers.delete(id),setInterval:()=>++timerId,
   fetch:(...args)=>fetchImpl(...args),window:{addEventListener(){},isSecureContext:false},
-  EventSource:class {constructor(){this.closed=false;}close(){this.closed=true;}}
+  EventSource:class extends EventTarget {constructor(){super();this.closed=false;}close(){this.closed=true;}}
 });
 const source=fs.readFileSync(process.argv[2],'utf8');
 vm.runInContext(fs.readFileSync('web/core/bundle.js','utf8'),context);
@@ -73,13 +73,13 @@ async function scenario(name){
     move.resolve(response({destination:'moved.txt',sha256:'sha-base'}));await pending;
     assert.equal(work().path,'moved.txt');assert.equal(work().content,'typed while moving');assert.equal(work().original,'base');assert.equal(work().dirty,true);
   }else if(name==='restore_failed_reload_keeps_dirty'){
-    editor();type('unsaved draft');let reads=0;
+    editor();type('unsaved draft');modalAdapter();run('modal()');let reads=0;
     fetchImpl=async(path,options)=>{const tool=JSON.parse(options.body).tool;if(tool==='fs_read')return ++reads===1?response({sha256:'current'}):Promise.reject(Error('offline'));return response({sha256:'restored'});};
-    await assert.rejects(run("restoreBackup('backup','old.txt')"),/网络暂时不可用/);
+    await assert.rejects(run("restoreBackup('backup','old.txt',workDialogScope())"),/网络暂时不可用/);
     assert.equal(work().content,'unsaved draft');assert.equal(work().dirty,true);
   }else if(name==='restore_preserves_input_during_mutation'){
-    editor();const restore=deferred();fetchImpl=async(path,options)=>JSON.parse(options.body).tool==='fs_read'?response({sha256:'current'}):restore.promise;
-    const pending=run("restoreBackup('backup','old.txt')");await tick();type('new draft during restore');restore.resolve(response({sha256:'restored'}));await pending;
+    editor();modalAdapter();run('modal()');const restore=deferred();fetchImpl=async(path,options)=>JSON.parse(options.body).tool==='fs_read'?response({sha256:'current'}):restore.promise;
+    const pending=run("restoreBackup('backup','old.txt',workDialogScope())");await tick();type('new draft during restore');restore.resolve(response({sha256:'restored'}));await pending;
     assert.equal(work().content,'new draft during restore');assert.equal(work().dirty,true);
   }else if(name==='save_does_not_rebase_reopened_file'){
     editor();type('first draft');modalAdapter();const write=deferred();
@@ -118,7 +118,7 @@ async function scenario(name){
   }else if(name==='old_poll_does_not_restart_after_logout'){
     editor();const old=deferred();fetchImpl=()=>old.promise;run("trackTask('op')");const pending=run('pollTask()');run('S.session=null');old.resolve(response({id:'op',state:'queued',pending:true}));await pending;assert.equal(run('S.poll'),null);
   }else if(name==='event_connections_release_timer'){
-    editor();fetchImpl=async()=>response({});run('connectEvents()');const first=run('S.events');first.onmessage({data:JSON.stringify({type:'device'})});const id=run('S.eventTimer');assert.ok(timers.has(id));run('connectEvents()');assert.equal(first.closed,true);assert.equal(timers.has(id),false);
+    editor();fetchImpl=async()=>response({});run("S.page='projects';connectEvents()");const first=run('S.events');first.onmessage({data:JSON.stringify({type:'device'})});const id=run('S.eventTimer');assert.ok(timers.has(id));run('connectEvents()');assert.equal(first.closed,true);assert.equal(timers.has(id),false);
   }else if(name==='login_boot_failure_has_retry_surface'){
     editor();fetchImpl=async()=>{throw Error('offline');};await run('bootAuthenticated()');assert.match(elements.get('#app').innerHTML,/retry-identity/);assert.equal(run('S.events'),null);assert.equal(run('S.space_id'),null);
   }else throw Error(name);

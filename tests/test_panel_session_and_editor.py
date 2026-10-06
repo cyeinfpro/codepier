@@ -54,6 +54,9 @@ def app_page(chat_browser_pool):
           return response(fixtureProjects[0]);
         }
         if(path==='/api/projects')return response({projects:fixtureProjects});
+        if(path.startsWith('/api/native/access?'))return window.fixtureNativeDenied
+          ? response({error:{code:'CLI_FORBIDDEN',message:'Native permission revoked'}},403)
+          : response({allowed:true,project_id:new URL(path,location.origin).searchParams.get('project')});
         if(path.startsWith('/api/native/sessions?'))return response({sessions:[]});
         if(path.endsWith('/chat_catalog'))return response({cli:'pi',models:[{
           id:'fixture-model',provider:'fixture',name:'Fixture Model',reasoning:true,
@@ -154,6 +157,8 @@ def test_old_project_save_cannot_close_or_replace_new_dialog(app_page):
     page.fill('#project-form [name=alias]','FirstSave')
     page.click('#save-project')
     page.wait_for_function('!!window.finishOldSave')
+    # Explicitly leave an in-flight editor; the late save still must not replace the next view.
+    page.once('dialog', lambda dialog: dialog.accept())
     page.locator('.modal-header [data-action=close-modal]').click()
     page.locator('[data-action=add-project]').first.click()
     page.fill('#project-form [name=alias]','SecondUnsavedMapping')
@@ -235,3 +240,64 @@ def test_crlf_editor_changes_only_the_requested_line(app_page):
                                [edited.replace('\r\n','\n'),original])
     assert result == edited
     assert len(result.splitlines()) == 2100
+
+
+def test_same_account_relogin_rechecks_project_read_before_restoring_private_views(app_page):
+    page=app_page
+    page.fill('#chat-compose','REVOKED_PROJECT_PRIVATE_DRAFT')
+    page.evaluate("""() => {
+      S.work.project='project-one';S.work.path='private.py';
+      S.work.content='REVOKED_PROJECT_PRIVATE_SOURCE';S.work.original=S.work.content;
+      S.work.console='REVOKED_PROJECT_PRIVATE_OUTPUT';S.work.dirty=true;
+      const view=chatView();
+      view.pending={receipt:'private-pending',text:'REVOKED_PROJECT_PRIVATE_REQUEST'};
+      view.files.push({name:'private.png',preview:URL.createObjectURL(new Blob(['fixture']))});
+    }""")
+    expire(page)
+    page.evaluate("fixtureProjects=[]")
+    login(page)
+    assert 'REVOKED_PROJECT_PRIVATE' not in page.locator('body').inner_text()
+    assert page.evaluate('S.work.content')==''
+    assert page.evaluate('S.work.console')==''
+    assert not page.evaluate("""[...ChatUI.views.values()].some(v =>
+      v.draft.includes('REVOKED_PROJECT_PRIVATE') ||
+      v.pending?.text?.includes('REVOKED_PROJECT_PRIVATE') ||
+      v.files.some(f=>f.name==='private.png'))""")
+    assert not page.evaluate("calls.some(c=>c.path.endsWith('/start')||c.path.endsWith('/chat_prompt'))")
+
+
+def test_same_account_relogin_drops_native_cache_after_execute_revocation(app_page):
+    page=app_page
+    page.fill('#chat-compose','PRIVATE_NATIVE_EXECUTE_REVOKED')
+    page.evaluate("S.work.project='project-one';S.work.content='readable editor draft'")
+    expire(page)
+    page.evaluate("fixtureNativeDenied=true")
+    login(page)
+    assert 'PRIVATE_NATIVE_EXECUTE_REVOKED' not in page.locator('body').inner_text()
+    assert not page.evaluate("[...ChatUI.views.values()].some(v=>v.draft.includes('PRIVATE_NATIVE'))")
+    assert page.evaluate('S.work.content')=='readable editor draft'
+    assert not page.evaluate("calls.some(c=>c.path.endsWith('/start')||c.path.endsWith('/chat_prompt'))")
+
+
+def test_network_failure_keeps_suspended_draft_hidden_until_authority_recheck(app_page):
+    page=app_page
+    page.fill('#chat-compose','PRIVATE_NETWORK_SUSPENDED')
+    expire(page)
+    page.evaluate("""() => {
+      window.recheckOffline=true;const original=api;
+      api=async(path,options={})=>{
+        if(recheckOffline && path.startsWith('/api/native/access?'))
+          throw Object.assign(new Error('Fixture offline'),{status:503});
+        return original(path,options);
+      };
+    }""")
+    page.fill('#username','admin');page.fill('#password','fixture-password-only')
+    page.locator('#login-form button[type=submit]').click()
+    expect(page.locator('[data-action=retry-identity]')).to_be_visible()
+    assert 'PRIVATE_NETWORK_SUSPENDED' not in page.locator('body').inner_text()
+    assert page.evaluate("[...ChatUI.views.values()].some(v=>v.draft==='PRIVATE_NETWORK_SUSPENDED')")
+    assert page.evaluate('!!S.suspendedUser')
+    page.evaluate('recheckOffline=false')
+    page.locator('[data-action=retry-identity]').click()
+    expect(page.locator('#chat-compose')).to_have_value('PRIVATE_NETWORK_SUSPENDED')
+    assert not page.evaluate("calls.some(c=>c.path.endsWith('/start')||c.path.endsWith('/chat_prompt'))")

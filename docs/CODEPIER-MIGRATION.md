@@ -20,7 +20,7 @@
 | Hub、HTTPS 数据卷 | `codepier-hub-data`、`codepier-caddy-data`、`codepier-caddy-config` |
 | 浏览器原生宿主 | `com.codepier.browser`；可执行文件 `codepier-browser-host` / `.exe` |
 | 本机控制模块 | `agent.codepier_control`、`agent.codepier_browser_host` |
-| 新项目卡片资源 | `ui://codepier/workspace-v1.html`、`ui://codepier/changes-v1.html` |
+| 历史卡片资源 | `ui://codepier/changes-v1.html` 保留固定审阅兼容；`workspace-v1.html` 已退役，仅提供静态说明 |
 | 源码安装包 | `codepier-1.9.0-source.zip` |
 
 MCP、Hub、Agent、Python、Codex、Pi、Docker 等协议或组件名称不是旧产品名，不进行错误替换。第三方依赖、版权声明和真实历史报告也不伪改。

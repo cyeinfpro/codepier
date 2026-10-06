@@ -1,5 +1,7 @@
 # Upstream 1.14.3 + IAM + MCP Gateway integration
 
+> Historical implementation record from the contribution branch. The features were merged in upstream PR #14 and are included in 1.15.0. Current release validation is recorded in the GitHub Release; the older acceptance counts and unreleased status below describe that earlier checkpoint.
+
 This is an **unreleased fork integration**, not an upstream release or deployment.
 The repository was not deployed when this integration was requested. Public MCP
 API changes are intentional; no live Hub data or external accounts were changed.
@@ -117,7 +119,7 @@ python scripts/build_web_assets.py --check
 ```
 
 Hub dependencies retain the upstream hash-locked sets plus the universal
-`PyJWT[crypto]==2.13.0` wheel needed by IAM. Python requirements are installed from
+`PyJWT[crypto]==2.15.0` wheel needed by IAM. Python requirements are installed from
 reviewed pins; the network-dependent universal lock regeneration must be checked
 in CI before a release. No deployed environment is updated by these commands.
 

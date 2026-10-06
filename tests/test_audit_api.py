@@ -381,8 +381,9 @@ def test_sse_session_revocation_while_waiting_drops_next_event(api):
         await asyncio.sleep(.01)
         app.state.store.execute("DELETE FROM sessions")
         app.state.runtime.publish("sensitive", {"value": "must not send"})
+        assert await waiting == "event: access_revoked\ndata: {}\n\n"
         with pytest.raises(StopAsyncIteration):
-            await waiting
+            await anext(iterator)
         assert not app.state.runtime.watchers
     asyncio.run(scenario())
 

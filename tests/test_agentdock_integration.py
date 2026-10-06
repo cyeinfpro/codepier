@@ -17,7 +17,7 @@ def mcp(stack, name, args):
     public_name, public_args = public_call(name, args)
     result = stack.mcp(public_name, public_args)
     data = result["structuredContent"]
-    if public_name == 'process' and 'operations' in data:
+    if public_name in {'process', 'task_query'} and 'operations' in data:
         data = data['operations'][0]
     assert not isinstance(data.get('error'), dict), result
     Draft202012Validator(OUTPUT_SCHEMAS[name]).validate(data)

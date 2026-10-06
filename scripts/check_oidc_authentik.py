@@ -16,6 +16,7 @@ import os
 import re
 from pathlib import Path
 import secrets
+import shutil
 import socket
 import sqlite3
 import subprocess
@@ -31,6 +32,15 @@ from playwright.sync_api import sync_playwright, expect
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from shared.role_contracts import ROLE_SCOPE
+
+
+def compose_command():
+    """Match the supported developer setup, including standalone macOS Compose."""
+    for command in (['docker', 'compose'], ['docker-compose']):
+        if shutil.which(command[0]) and subprocess.run(
+                [*command, 'version'], capture_output=True, timeout=15).returncode == 0:
+            return command
+    raise RuntimeError('Docker Compose v2 is required for isolated OIDC acceptance')
 
 
 def free_port():
@@ -117,7 +127,7 @@ def acceptance(output):
                'TEST_BOOTSTRAP_TOKEN': secret(), 'TEST_BOOTSTRAP_HASH': password_hash(secret()),
                'TEST_AUTHENTIK_PORT': str(free_port())}
         project = 'codepier-oidc-test-' + uuid.uuid4().hex[:12]
-        compose = ['docker', 'compose', '-f', str(ROOT/'tests/fixtures/oidc-authentik/compose.yml'), '-p', project]
+        compose = [*compose_command(), '-f', str(ROOT/'tests/fixtures/oidc-authentik/compose.yml'), '-p', project]
         def docker(*args, check=True):
             return subprocess.run([*compose, *args], env=env, capture_output=True, text=True,
                                   timeout=360, check=check)

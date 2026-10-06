@@ -228,6 +228,7 @@ def register(Tool, tools, schemas):
 
 
 TOOL_TITLES = {
+    'project_query': '查询项目', 'task_query': '查询执行记录',
     'projects_list': '查找项目', 'projects_resolve': '查找项目',
     'open_workspace': '项目概览', 'project_context': '读取项目', 'workspace_status': '任务状态',
     'fs_tree': '查看目录', 'fs_read': '读取文件', 'fs_read_many': '批量读取文件',
@@ -259,7 +260,7 @@ def decorate(definition):
     definition['securitySchemes'] = schemes
     definition['_meta']['securitySchemes'] = schemes
     # Keep existing app instances able to read tools, without opening a new card.
-    if name in {'workspace', 'process', 'read', 'write', 'operations_get', 'operations_wait', 'readiness_get', 'validations_get', 'fs_tree', 'download_artifact',
+    if name in {'project_query', 'task_query', 'workspace', 'process', 'read', 'write', 'operations_get', 'operations_wait', 'readiness_get', 'validations_get', 'fs_tree', 'download_artifact',
                 'open_workspace', 'show_changes', 'workflows_get'}:
         definition['_meta']['ui'] = {'visibility':['model','app']}
         definition['_meta']['openai/widgetAccessible'] = True

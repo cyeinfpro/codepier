@@ -312,3 +312,27 @@ def test_systemd_service_quotes_user_selected_paths(tmp_path, monkeypatch):
     assert all('"' in line for line in content.splitlines() if line.startswith("ExecStart="))
     assert command[0] == str(python)
     assert calls[-1][-1] == "codepier-agent.service"
+    assert 'Environment=CODEPIER_SUPERVISED=1' in content
+
+
+def test_launchd_service_enables_recovery_without_changing_legacy_command(tmp_path, monkeypatch):
+    import plistlib
+    home = tmp_path / 'home'
+    base = home / '.codepier-agent'
+    runtime = base / 'runtime'
+    runtime.mkdir(parents=True)
+    python = runtime / '.venv/bin/python'
+    monkeypatch.setattr(install_agent.Path, 'home', classmethod(lambda cls: home))
+    monkeypatch.setattr(install_agent.sys, 'platform', 'darwin')
+    monkeypatch.setattr(install_agent, 'run', lambda *args, **kwargs: None)
+    monkeypatch.setattr(install_agent.subprocess, 'run', lambda *args, **kwargs: subprocess.CompletedProcess(args, 1))
+    monkeypatch.setattr(install_agent.subprocess, 'check_output', lambda *args, **kwargs: 'state = running')
+    monkeypatch.setattr(install_agent.time, 'sleep', lambda seconds: None)
+    target = home / 'Library/LaunchAgents/com.codepier.agent.plist'
+    target.parent.mkdir(parents=True)
+    command = [str(python), '-m', 'agent', '--config', str(base / 'config.json'), 'run']
+    target.write_bytes(plistlib.dumps({'ProgramArguments': command}))
+    assert install_agent.start_service(base, python) == command
+    service = plistlib.loads(target.read_bytes())
+    assert service['EnvironmentVariables']['CODEPIER_SUPERVISED'] == '1'
+    assert service['KeepAlive'] and service['ProcessType'] == 'Standard'

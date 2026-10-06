@@ -64,6 +64,7 @@ class Connection:
         self.last_seen = time.time()
         self.journal_id = None
         self.protocol = 1
+        self.cancel_pending_protocol = 0
         self.unusable = False
         self.device_secret = None
         self.native_protocol = 0
@@ -384,6 +385,10 @@ class Runtime:
     async def _invoke_async(self, name: str, raw: dict, principal: Principal):
         if self._loop is None or self._loop.is_closed():
             self._loop = asyncio.get_running_loop()
+        from shared.query_contracts import QUERY_TOOLS
+        if name in QUERY_TOOLS:
+            from hub.core_tools import invoke_query
+            return await invoke_query(self, name, raw, principal)
         from shared.core_contracts import CORE_FACADES, CORE_ACTIONS
         if name in CORE_FACADES or name in CORE_ACTIONS and raw.get('operation', 'file') != 'file':
             from hub.core_tools import invoke as invoke_core
@@ -542,8 +547,12 @@ class Runtime:
             return {"operation_id": id, "state": op["state"], "cancel_requested": False}
         if op["tool"] in DEVICE_ACTIONS:
             raise DevError("NOT_CANCELLABLE", "Agent 生命周期操作不能在准备或交接过程中取消；请等待结果后再处理", 409)
-        if op["tool"] not in PROCESS_TOOLS and op["attempts"]:
+        cancellable_reads = {'read', 'fs_tree', 'fs_read', 'fs_read_many', 'fs_search', 'project_context'}
+        if op["tool"] not in PROCESS_TOOLS | cancellable_reads and op["attempts"]:
             raise DevError("NOT_CANCELLABLE", "已投递的文件操作不能中途撤销；可在完成后使用备份恢复")
+        # The Agent atomically cancels accepted jobs still waiting for resources.
+        # A read already executing may instead finish; never claim it was stopped
+        # until the durable Agent result confirms cancellation.
         self.store.execute("UPDATE operations SET cancel_requested=1,next_attempt=0 WHERE id=?", (id,))
         if not op["attempts"]:
             self.complete(op, {"ok": False, "error": {"code": "CANCELLED", "message": "操作尚未投递，已取消"}})
@@ -871,7 +880,7 @@ class Runtime:
             except Exception:
                 self.complete(op, {"ok": False, "error": {"code": "RECOVERY_DATA_INVALID", "message": "持久请求无法解密，请检查 Hub 数据库与 master.key 是否配套"}})
                 return
-            denied = self.permission_error(op, request) if not op["accepted_at"] else None
+            denied = self.permission_error(op, request)
             # Never trust a client-supplied origin, UA or project field. Durable
             # actor/grant columns originate from Auth, not tool arguments.
             panel = not op['grant_id'] and op['actor'].startswith('panel:')
@@ -939,6 +948,11 @@ class Runtime:
             # the same operation; it cannot be mistaken for an unsent cancellation.
             if op["cancel_requested"]:
                 packets.append({"type": "cancel", "id": id})
+            elif denied and op["attempts"] and getattr(con, 'cancel_pending_protocol', 0) == 1:
+                # A capability-gated conditional fence is safe even if the
+                # accepted/started ACK was lost. The Agent ignores it once
+                # running; never turn revocation into an unconditional kill.
+                packets.append({"type": "cancel_pending", "id": id})
             if op["accepted_at"] or expired or denied or op["cancel_requested"] and op["attempts"]:
                 packets.append({"type": "probe", "id": id})
             else:
@@ -1140,6 +1154,7 @@ class Runtime:
             connection.tool_protocol = negotiate(hello)
             connection.journal_id = hello.get("journal_id")
             connection.protocol = hello.get("delivery_protocol", 1)
+            connection.cancel_pending_protocol = 1 if type(hello.get("cancel_pending_protocol")) is int and hello["cancel_pending_protocol"] == 1 else 0
             connection.native_protocol = 1 if hello.get("native_protocol") == 1 else 0
             connection.native_chat_protocol = hello.get("native_chat_protocol") if type(hello.get("native_chat_protocol")) is int and hello["native_chat_protocol"] in (1, 2, 3) else 0
             if (type(connection.protocol) is not int or connection.protocol != 2 or
@@ -1156,6 +1171,7 @@ class Runtime:
             if isinstance(actions, list) and len(actions) <= 16 and all(isinstance(x, str) and len(x) <= 100 for x in actions):
                 info["device_actions"] = sorted(set(actions) & DEVICE_ACTIONS)
             info["management"] = public_management(hello.get("management"))
+            info["cancel_pending_protocol"] = connection.cancel_pending_protocol
             connection.native_security_protocol = 1 if hello.get("native_security_protocol") == 1 else 0
             info["native_security_protocol"] = connection.native_security_protocol
             info["native_protocol"] = connection.native_protocol

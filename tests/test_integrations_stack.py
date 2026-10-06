@@ -14,7 +14,7 @@ import uuid
 import httpx
 import pytest
 from shared.util import atomic_json
-from shared.contracts import OUTPUT_SCHEMAS
+from shared.contracts import OUTPUT_SCHEMAS, tool_definitions
 from shared.mcp_protocol import MODERN, PREFIX
 from jsonschema import Draft202012Validator
 from tests.support import running_stack, wait_for, BASE
@@ -42,11 +42,15 @@ def resolved(s,name,args=None,*,panel=False,expect='succeeded'):
     public_name, public_args = public_call(name, args)
     result=s.call(name,args) if panel else s.mcp(public_name,public_args)['structuredContent']
     if result.get('pending'):
-        operation=s.poll(result['operation_id'],timeout=35)
+        def terminal():
+            operation=s.mcp('process', {'operation':'wait','operation_ids':[result['operation_id']], 'wait_seconds':5})['structuredContent']['operations'][0]
+            return operation if not operation.get('pending') else None
+        operation=s.poll(result['operation_id'],timeout=35) if panel else wait_for(terminal,35)
         assert operation['state']==expect,operation
         result={**(operation.get('result') or {}).get('data',{}),'operation_id':operation['id']}
     assert not result.get('error'),result
-    Draft202012Validator(OUTPUT_SCHEMAS[name]).validate(result)
+    schema=OUTPUT_SCHEMAS[name] if panel else next(item['outputSchema'] for item in tool_definitions() if item['name']==public_name)
+    Draft202012Validator(schema).validate(result)
     return result
 
 
@@ -81,6 +85,41 @@ def test_legacy_and_modern_protocols_are_distinct_and_share_permissions(integrat
     assert bad.json()['result']['isError']
 
 
+@pytest.mark.parametrize('profile', ['core', 'full', 'coding'])
+@pytest.mark.parametrize('protocol', ['legacy', 'modern'])
+def test_text_project_queries_remain_usable_without_workbench(integrated_stack, profile, protocol):
+    s = integrated_stack
+    def rpc(method, params=None):
+        if protocol == 'modern':
+            response = modern(s, method, params, profile=profile)
+        else:
+            response = s.client.post('/mcp?profile=' + profile,
+                headers={'Authorization': 'Bearer ' + s.pat,
+                         'Accept': 'application/json, text/event-stream',
+                         'MCP-Protocol-Version': '2025-11-25'},
+                json={'jsonrpc': '2.0', 'id': uuid.uuid4().hex,
+                      'method': method, 'params': params or {}})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert 'error' not in body, body
+        return body['result']
+
+    catalog = rpc('tools/list')['tools']
+    definitions = {tool['name']: tool for tool in catalog}
+    assert 'workbench' not in definitions
+    assert 'ui://codepier/workspace-v1.html' not in {item['uri'] for item in rpc('resources/list')['resources']}
+    result = rpc('tools/call', {'name': 'project_query', 'arguments': {}})
+    assert not result.get('isError'), result
+    Draft202012Validator(definitions['project_query']['outputSchema']).validate(result['structuredContent'])
+    assert 'com.codepier/binding' not in result.get('_meta', {})
+    assert result['structuredContent']['projects']
+    assert all(project['root'] == '.' for project in result['structuredContent']['projects'])
+    retired = rpc('tools/call', {'name': 'workbench', 'arguments': {}})
+    assert retired['isError']
+    assert retired['structuredContent']['error']['code'] == 'TOOL_REMOVED'
+    assert 'project_query' in retired['structuredContent']['error']['message']
+
+
 def test_apps_resources_are_real_built_documents_and_bound_to_snapshots(integrated_stack):
     s=integrated_stack
     # New calls stay text-only; saved app instances can still resolve their resources.
@@ -89,12 +128,13 @@ def test_apps_resources_are_real_built_documents_and_bound_to_snapshots(integrat
             assert 'resourceUri' not in definition['_meta'].get('ui', {})
             assert 'openai/outputTemplate' not in definition['_meta']
     listing=s.rpc('resources/list').json()['result']['resources']
-    assert {'ui://codepier/workspace-v1.html','ui://codepier/changes-v1.html'}<={r['uri'] for r in listing}
+    assert 'ui://codepier/changes-v1.html' in {r['uri'] for r in listing}
+    assert 'ui://codepier/workspace-v1.html' not in {r['uri'] for r in listing}
     card=s.rpc('resources/read',{'uri':'ui://codepier/changes-v1.html'}).json()['result']['contents'][0]
     assert card['mimeType']=='text/html;profile=mcp-app' and '<script>' in card['text']
     assert card['_meta']['ui']['csp']['connectDomains']==[]
     opened=s.mcp('workspace',{'project': 'Imago', 'capture_baseline': True, 'operation': 'open'})
-    assert opened['_meta']['com.codepier/binding']['project']=='Imago'
+    assert 'com.codepier/binding' not in opened.get('_meta', {})
     data=opened['structuredContent']
     if data.get('pending'):data=s.poll(data['operation_id'])['result']['data']
     (s.imago/'card-snapshot.txt').write_text('before later changes\n')
@@ -109,10 +149,12 @@ def test_apps_resources_are_real_built_documents_and_bound_to_snapshots(integrat
 def test_worktree_is_real_isolated_scoped_and_safe_to_remove(integrated_stack):
     s=integrated_stack
     created=resolved(s,'worktrees_create',{'label':'isolated fixture'})
-    workspace=created['workspace_id'];target=Path(created['path'])
+    workspace=created['workspace_id'];target=Path(s.poll(created['operation_id'])['result']['data']['path'])
+    assert created['path']=='.'
     assert target.exists() and target!=s.imago and created['source_dirty']
     opened=resolved(s,'open_workspace',{'workspace_id':workspace})
-    assert opened['workspace']['root']==str(target)
+    assert opened['workspace']['root']=='.'
+    assert s.poll(opened['operation_id'])['result']['data']['workspace']['root']==str(target)
     result=resolved(s,'fs_write',{'workspace_id':workspace,'path':'isolated.txt','content':'only this worktree','expected_sha256':'new'})
     assert (target/'isolated.txt').read_text()=='only this worktree' and not (s.imago/'isolated.txt').exists()
     issued=s.client.post('/api/grants',json={'label':'other-worktree-owner','scopes':['read','write','execute'],'projects':[s.project['id']],'days':1}).json()
@@ -220,7 +262,7 @@ def test_handoff_preserves_goal_and_does_not_start_execution(integrated_stack):
     created=s.mcp('workspace',{'project': 'Imago', 'idempotency_key': uuid.uuid4().hex, 'operation': 'workflow_create', 'options': {'title': 'Handoff fixture', 'goal': 'Keep original intent'}})['structuredContent']
     result=s.mcp('workspace',{'operation': 'handoff', 'options': {'workflow_id': created['workflow_id']}})['structuredContent']
     assert result['original_goal']=='Keep original intent' and not result['execution_started']
-    assert result['remaining'] and result['next']['tool']=='workspace' and result['next']['arguments']['operation']=='workflow_get'
+    assert result['remaining'] and result['next']['tool']=='project_query' and result['next']['arguments']['operation']=='workflow_get'
 
 
 def test_local_owner_control_is_loopback_authenticated_and_journaled(integrated_stack):
@@ -239,3 +281,17 @@ def test_local_owner_control_is_loopback_authenticated_and_journaled(integrated_
         assert first==again and first['data']['paused']
         resumed=client.post('/control',headers=headers,json={**args,'action':'resume','idempotency_key':uuid.uuid4().hex}).json()
         assert resumed['ok'] and not resumed['data']['paused']
+
+
+def test_coding_profile_dashboard_query_keeps_scope_enforcement(integrated_stack):
+    s = integrated_stack
+    headers = {'Authorization': 'Bearer ' + s.pat, 'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream'}
+    result = s.client.post('/mcp?profile=coding', headers=headers, json={'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+        'params': {'name': 'workspace', 'arguments': {'operation':'dashboard','project': 'Imago'}}}).json()['result']
+    assert not result['isError'] and result['structuredContent']['execution_started'] is False
+    invalid = s.client.post('/api/grants', json={'label': 'dashboard-no-read', 'scopes': ['write'], 'projects': [s.project['id']], 'days': 1})
+    assert not invalid.is_success  # The owner API itself requires the base read scope.
+    grant = s.client.post('/api/grants', json={'label': 'dashboard-other-project', 'scopes': ['read'], 'projects': [s.projects[1]['id']], 'days': 1}).json()
+    denied = s.mcp('workspace', {'project': 'Imago', 'operation': 'dashboard', 'options': {}}, token_value=grant['token'])
+    assert denied['isError'] and denied['structuredContent']['error']['code'] == 'PROJECT_NOT_FOUND'
+    s.client.delete('/api/grants/' + grant['grant_id'])

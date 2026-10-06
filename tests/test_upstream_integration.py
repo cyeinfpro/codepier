@@ -18,6 +18,7 @@ from hub.gateway.service import Gateway
 from hub.store import Store
 from shared.crypto import digest
 from shared.core_contracts import CORE_TOOLS
+from shared.query_contracts import QUERY_TOOLS
 from tests.test_iam_integration import team as team, shared_role, assign
 from tests.test_mcp_gateway import gw as gw, configured, connector, account, publish
 from tests.test_oidc_integration import oidc as oidc, start
@@ -77,7 +78,7 @@ def test_native_catalog_is_nine_core_plus_stable_identity(team):
     response=b['alice'].post('/mcp',headers={'Authorization':'Bearer '+g['token'],'Accept':'application/json, text/event-stream'},json={
         'jsonrpc':'2.0','id':1,'method':'tools/list','params':{}})
     tools=response.json()['result']['tools']
-    assert {t['name'] for t in tools}==CORE_TOOLS|{'get_profile','get_access_context'}
+    assert {t['name'] for t in tools}==CORE_TOOLS|QUERY_TOOLS|{'get_profile','get_access_context'}
     assert next(t for t in tools if t['name']=='get_profile')['_meta']['openai/profile'] is True
 
 
@@ -162,3 +163,31 @@ def test_oidc_entitlement_sql_runs_off_asgi_loop(oidc,monkeypatch):
     monkeypatch.setattr(app.state.oidc,'reconcile_groups',record)
     calling_thread=threading.get_ident();run_sync(app)
     assert seen and calling_thread not in seen
+
+
+def test_user_suspension_sql_runs_in_worker_and_disconnects_after_commit(team, monkeypatch):
+    app, browsers = team
+    store = app.state.store
+    original = store._security_write
+    writes = []
+    def observe(sql):
+        if sql.startswith('UPDATE iam_users SET active='):
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError('User suspension blocks the ASGI event loop')
+            writes.append(sql)
+        return original(sql)
+    monkeypatch.setattr(store.db, '_on_write', observe)
+    store.execute("UPDATE devices SET owner_user_id='alice' WHERE id='device-team'")
+    disconnected = []
+    async def disconnect(identifier, reason):
+        state = await store.run(store.one, 'SELECT active FROM iam_users WHERE user_id=?', ('alice',))
+        assert state['active'] == 0
+        disconnected.append(identifier)
+    monkeypatch.setattr(app.state.runtime, 'disconnect_device', disconnect)
+    must(browsers['owner'].put('/api/iam/users/alice', json={
+        'active': False, 'instance_admin': False, 'expected_version': 1}))
+    assert writes and disconnected == ['device-team']

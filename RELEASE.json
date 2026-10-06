@@ -1,13 +1,11 @@
 {
   "name": "CodePier",
-  "version": "1.14.3",
-  "date": "2026-09-27",
-  "status": "development",
-  "source_only": true,
-  "published": false,
+  "version": "1.17.0",
+  "date": "2026-10-06",
+  "status": "released",
+  "source_only": false,
+  "published": true,
   "deployed": false,
   "release_notes": "CHANGELOG.md",
-  "release_checklist": "docs/RELEASING.md",
-  "distribution": "tsunheimat/codepier",
-  "upstream_commit": "84e24d53b33ca24e3d54609f65df8c14c347f29e"
+  "release_checklist": "docs/RELEASING.md"
 }

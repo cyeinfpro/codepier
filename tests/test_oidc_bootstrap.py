@@ -198,3 +198,16 @@ def test_local_recovery_administrator_can_be_added_after_sso_bootstrap(tmp_path,
         with pytest.raises(SystemExit):
             cli.main()
         assert app.state.store.one('SELECT count(*) AS n FROM iam_users WHERE instance_admin=1 AND active=1')['n']==2
+
+
+def test_recovery_init_cannot_silently_reset_an_existing_sso_user(tmp_path, monkeypatch):
+    fake = Provider(); seed_env(monkeypatch, fake)
+    app = fresh_app(tmp_path / 'hub', fake)
+    with TestClient(app, raise_server_exceptions=True) as client:
+        session_of(client, sso_login(client, fake, 'external-admin'))
+        member, _ = session_of(client, sso_login(client, fake, 'external-member'))
+        monkeypatch.setenv('CODEPIER_ADMIN_PASSWORD', 'recovery-password-123')
+        monkeypatch.setattr(sys, 'argv', ['hub', '--data-dir', str(tmp_path / 'hub'), 'init', '--username', member['username']])
+        with pytest.raises(SystemExit):
+            cli.main()
+        assert app.state.store.one('SELECT local_login FROM iam_users WHERE user_id=?', (member['id'],))['local_login'] == 0

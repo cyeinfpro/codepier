@@ -254,7 +254,12 @@ def test_mkdir_cannot_create_missing_readonly_ancestors(engine):
     assert not readonly.exists()
 
 
-def test_deep_search_and_checkpoint_do_not_silently_stop_at_100_levels(engine):
+def test_deep_search_and_checkpoint_do_not_silently_stop_at_100_levels(engine, monkeypatch):
+    # This is a traversal/topology contract, not a host-speed benchmark. Keep
+    # deadline behavior deterministic under coverage or a contended filesystem;
+    # the separate deadline test below exercises real exhaustion paths.
+    monkeypatch.setattr(filesystem, "time",
+                        SimpleNamespace(monotonic=lambda: 0.0, time=filesystem.time.time))
     e, project, root = engine
     deep = root.joinpath(*(["d"] * 105))
     deep.mkdir(parents=True)
@@ -470,3 +475,26 @@ def test_unsupported_filename_does_not_break_json_or_checkpoint(engine, monkeypa
     with zipfile.ZipFile(checkpoint["local_archive"]) as archive:
         assert archive.read("files/good.txt") == b"needle"
         assert all("invalid" not in name and "colon:" not in name for name in archive.namelist())
+
+
+@pytest.mark.parametrize("operation", ["search", "tree", "checkpoint"])
+def test_directory_scan_deadline_is_enforced_without_matching_files(engine, monkeypatch, operation):
+    e, project, root = engine
+    for index in range(4):
+        (root / f"deadline-empty-{index}").mkdir()
+    ticks = iter([0.0, 100.0])
+    monkeypatch.setattr(filesystem, "time",
+                        SimpleNamespace(monotonic=lambda: next(ticks, 100.0),
+                                        time=filesystem.time.time))
+    if operation == "search":
+        result = e.search(project, search_args(file_glob="*.unmatched"))
+        assert result["truncated"] and result["scan_error"] == "SCAN_LIMIT"
+        assert not result["matches"]
+    elif operation == "tree":
+        result = e.tree(project, TOOLS["fs_tree"].model(project="test").model_dump())
+        assert result["truncated"] and result["scan_error"] == "SCAN_LIMIT"
+    else:
+        with pytest.raises(DevError) as error:
+            e.checkpoint(project, {"label": "deadline"})
+        assert error.value.code == "CHECKPOINT_LIMIT"
+        assert not list(e.journal.checkpoints.iterdir())

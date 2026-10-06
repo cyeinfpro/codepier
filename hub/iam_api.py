@@ -256,26 +256,28 @@ def make_iam_router(auth,runtime):
 
     @router.put('/users/{user_id}')
     async def edit_user(user_id:str,request:Request,body:UserEdit):
-        with store.lock,store.db:
-            store.db.execute('BEGIN IMMEDIATE');p=auth.instance(request,True)
-            row=store.one('SELECT * FROM iam_users WHERE user_id=?',(user_id,))
-            if not row:raise DevError('USER_NOT_FOUND','账号不存在',404)
-            if row['version']!=body.expected_version:raise DevError('VERSION_CONFLICT','账号已变化',409)
-            if row['active'] and row['instance_admin'] and (not body.active or not body.instance_admin):
-                if not store.one('SELECT 1 AS ok FROM iam_users WHERE user_id<>? AND instance_admin=1 AND active=1 LIMIT 1',(user_id,)):raise DevError('LAST_ADMIN','不能移除最后一位实例管理员',409)
-            if row['active'] and row['instance_admin'] and row['local_login'] and (not body.active or not body.instance_admin):
-                if not store.one('SELECT 1 AS ok FROM iam_users WHERE user_id<>? AND instance_admin=1 AND active=1 AND local_login=1 LIMIT 1',(user_id,)):
-                    raise DevError('LAST_RECOVERY_ADMIN','不能移除最后一位可本地登录的恢复管理员',409)
-            if not body.active:
-                for m in store.all("SELECT m.space_id FROM memberships m JOIN spaces s ON s.id=m.space_id WHERE m.user_id=? AND m.active=1 AND m.level='owner' AND s.kind<>'personal'",(user_id,)):
-                    owner_guard(m['space_id'],user_id,'guest',False)
-            store.db.execute('UPDATE iam_users SET active=?,instance_admin=?,version=version+1,epoch=epoch+1 WHERE user_id=?',(int(body.active),int(body.instance_admin),user_id))
-            store.db.execute('DELETE FROM sessions WHERE user_id=?',(user_id,))
-            store.db.execute('UPDATE grants SET revoked=1 WHERE user_id=?',(user_id,))
-            wake(p,'user.updated',user_id,body.model_dump())
-        if not body.active:
-            for device in store.all('SELECT id FROM devices WHERE owner_user_id=?',(user_id,)):
-                await runtime.disconnect_device(device['id'],'Owner account suspended')
+        def update():
+            with store.lock,store.db:
+                store.db.execute('BEGIN IMMEDIATE');p=auth.instance(request,True)
+                row=store.one('SELECT * FROM iam_users WHERE user_id=?',(user_id,))
+                if not row:raise DevError('USER_NOT_FOUND','账号不存在',404)
+                if row['version']!=body.expected_version:raise DevError('VERSION_CONFLICT','账号已变化',409)
+                if row['active'] and row['instance_admin'] and (not body.active or not body.instance_admin):
+                    if not store.one('SELECT 1 AS ok FROM iam_users WHERE user_id<>? AND instance_admin=1 AND active=1 LIMIT 1',(user_id,)):raise DevError('LAST_ADMIN','不能移除最后一位实例管理员',409)
+                if row['active'] and row['instance_admin'] and row['local_login'] and (not body.active or not body.instance_admin):
+                    if not store.one('SELECT 1 AS ok FROM iam_users WHERE user_id<>? AND instance_admin=1 AND active=1 AND local_login=1 LIMIT 1',(user_id,)):
+                        raise DevError('LAST_RECOVERY_ADMIN','不能移除最后一位可本地登录的恢复管理员',409)
+                if not body.active:
+                    for m in store.all("SELECT m.space_id FROM memberships m JOIN spaces s ON s.id=m.space_id WHERE m.user_id=? AND m.active=1 AND m.level='owner' AND s.kind<>'personal'",(user_id,)):
+                        owner_guard(m['space_id'],user_id,'guest',False)
+                store.db.execute('UPDATE iam_users SET active=?,instance_admin=?,version=version+1,epoch=epoch+1 WHERE user_id=?',(int(body.active),int(body.instance_admin),user_id))
+                store.db.execute('DELETE FROM sessions WHERE user_id=?',(user_id,))
+                store.db.execute('UPDATE grants SET revoked=1 WHERE user_id=?',(user_id,))
+                wake(p,'user.updated',user_id,body.model_dump())
+                return store.all('SELECT id FROM devices WHERE owner_user_id=?', (user_id,)) if not body.active else []
+        devices = await store.run(update)
+        for device in devices:
+            await runtime.disconnect_device(device['id'], 'Owner account suspended')
         return {'id':user_id,**body.model_dump(exclude={'expected_version'}),'version':body.expected_version+1}
 
     @router.get('/sessions')

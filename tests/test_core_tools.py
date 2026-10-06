@@ -18,6 +18,7 @@ from shared.contracts import TOOLS, tool_definitions
 from shared.crypto import digest, token
 from shared.tool_protocol import wire_version, negotiate, require_compatible
 from shared.core_contracts import CORE_ACTIONS, REPLACED_MCP_TOOLS, CORE_TOOLS
+from shared.query_contracts import QUERY_TOOLS
 from shared.util import DevError, atomic_json
 from tests.fake_computer_provider import png, frame
 from shared.computer_media import normalize_content
@@ -74,8 +75,9 @@ def file_call(agent, name, **args):
 
 def test_catalog_compact_and_legacy_compatibility():
     core = tool_definitions('core')
-    assert {t['name'] for t in core} == {'workspace', 'read', 'write', 'edit', 'exec', 'process', 'vps', 'browser', 'computer', 'get_profile', 'get_access_context'}
-    assert len(json.dumps(core).encode()) < 35000
+    assert {t['name'] for t in core} == CORE_TOOLS | QUERY_TOOLS | {'get_profile', 'get_access_context'}
+    # Typed outcomes plus explicit query tools: measured ~85 KB; retain a bounded catalog.
+    assert len(json.dumps(core).encode()) < 95000
     assert {'browser', 'computer', 'exec', 'edit'} <= {t['name'] for t in tool_definitions('full')}
     assert not {'browser_open', 'computer_action', 'vps_exec', 'fs_read', 'shell_exec'} & {t['name'] for t in tool_definitions('full')}
     with pytest.raises(DevError, match='不兼容'):
@@ -165,7 +167,8 @@ async def test_accepted_queue_expires_before_lock_release(agent, queue):
     call = request(project, 'read' if queue == 'resource' else 'fs_read', path='file')
     call['not_after'] = time.time() + .1
     if queue == 'worker':
-        instance.semaphore = asyncio.Semaphore(0)
+        # Legacy file reads use the same bounded I/O lane as core read.
+        instance.read_semaphore = asyncio.Semaphore(0)
         await asyncio.wait_for(instance.handle(call), 1)
     else:
         async with instance.project_slot(root, write=True, operation_id='holder'):
@@ -264,9 +267,9 @@ def test_bridge_does_not_invent_lookup_filters_or_workspace_arguments():
 @pytest.mark.asyncio
 async def test_complete_capability_discovery_and_no_unmapped_public_tool(runtime):
     instance, principal = runtime
-    assert set(TOOLS) - CORE_TOOLS - set(REPLACED_MCP_TOOLS) == {'integration_control', 'validations_accept', 'get_profile', 'get_access_context'}
+    assert set(TOOLS) - CORE_TOOLS - QUERY_TOOLS - set(REPLACED_MCP_TOOLS) == {'integration_control', 'validations_accept', 'get_profile', 'get_access_context'}
     for profile in ('core', 'coding', 'full'):
-        assert {t['name'] for t in tool_definitions(profile)} == CORE_TOOLS | {'get_profile', 'get_access_context'}
+        assert {t['name'] for t in tool_definitions(profile)} == CORE_TOOLS | QUERY_TOOLS | {'get_profile', 'get_access_context'}
     for name, operations in CORE_ACTIONS.items():
         for operation, backend in operations.items():
             help = await instance.invoke('workspace', {'operation': 'help', 'tool': name, 'action': operation}, principal)

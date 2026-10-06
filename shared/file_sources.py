@@ -55,6 +55,40 @@ def file_source_hosts(config: dict) -> tuple[str, ...]:
     return tuple(dict.fromkeys([*base, *extra]))
 
 
+def safe_import_error_detail(details: dict) -> dict:
+    """Keep only bounded, source-safe diagnostics through durable receipts."""
+    result = {}
+    enums = {
+        'reason': {'invalid_url', 'unsupported_scheme', 'host_not_allowed',
+                   'dns_failed', 'dns_timeout', 'non_public_address', 'connect_failed',
+                   'tls_failed', 'source_access_or_expiry', 'http_error', 'transfer_failed'},
+        'stage': {'source_validation', 'redirect_validation', 'dns', 'connect', 'response', 'transfer'},
+        'recovery': {'review_local_file_sources', 'provide_native_file', 'check_agent_network',
+                     'refresh_native_file', 'retry_later', 'check_file_source'},
+    }
+    for key, values in enums.items():
+        value = details.get(key)
+        if isinstance(value, str) and value in values:
+            result[key] = value
+    host = details.get('source_host')
+    if host == '':
+        result['source_host'] = ''
+    elif isinstance(host, str):
+        try:
+            result['source_host'] = normalize_file_host(host)
+        except ValueError:
+            pass
+    scheme = details.get('source_scheme')
+    if isinstance(scheme, str) and re.fullmatch(r'[a-z][a-z0-9+.-]{0,31}|', scheme):
+        result['source_scheme'] = scheme
+    if type(details.get('request_sent')) is bool:
+        result['request_sent'] = details['request_sent']
+    status = details.get('http_status')
+    if type(status) is int and 100 <= status <= 599:
+        result['http_status'] = status
+    return result
+
+
 def source_metadata(value: object) -> dict[str, str]:
     """Return bounded scheme/host only, even for a rejected or malformed URL."""
     result = {'source_scheme': '', 'source_host': ''}

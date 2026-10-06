@@ -58,7 +58,7 @@ class Diagnostics:
             for identifier in detail.get('blocked_by',[]):
                 try:
                     block=runtime.operation(identifier,principal,{'include_output':False,'include_result':False})
-                    if block['device_id']==op['device_id'] and block['pending']:
+                    if block['device_id']==op['device_id']:
                         visible.append({'operation_id':identifier,'tool':block['tool'],'state':block['state']})
                 except DevError:
                     pass

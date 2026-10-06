@@ -17,7 +17,7 @@ from pathlib import Path
 import websockets
 from agent.filesystem import FileEngine
 from agent.core_files import CoreFiles
-from agent.resource_queue import Claim, ResourceQueue, claims_for
+from agent.resource_queue import Claim, ResourceQueue, claims_for, canonical_path, PATH_READ_TOOLS
 from shared.core_contracts import CORE_REMOTE
 from agent.journal import Journal
 from agent.telemetry import AgentTelemetry
@@ -36,6 +36,7 @@ from agent.shell import execution_info, prepare_shell
 from shared.contracts import TOOLS, MUTATING
 from shared.crypto import SecureChannel
 from shared.util import DevError, VERSION
+from shared.file_sources import safe_import_error_detail
 from shared.tool_protocol import advertisement, negotiate, validate_call_epoch
 from shared.execution_policy import enforce_argv, agent_blocks_codex, computer_denial, DENIAL_MESSAGE
 from shared.instance_lock import InstanceLock
@@ -224,7 +225,7 @@ class Agent:
                           "version": VERSION, "build": self.build.describe(), "platform": platform.system(), "hostname": platform.node(),
                           "python": platform.python_version(), "roots": config["allowed_roots"], "capabilities": list(TOOLS),
                           "management": self.lifecycle.describe(), "device_actions": self.lifecycle.actions(),
-                          "journal_id": self.journal.journal_id, "delivery_protocol": 2, "native_protocol": 1, "native_chat_protocol": 3, "native_security_protocol": 1, **advertisement(self.build.catalog_sha256)}))
+                          "journal_id": self.journal.journal_id, "delivery_protocol": 2, "cancel_pending_protocol": 1, "native_security_protocol": 1, "native_protocol": 1, "native_chat_protocol": 3, **advertisement(self.build.catalog_sha256)}))
             reply = channel.unpack(await asyncio.wait_for(socket.recv(), 10))
             if reply.get("type") != "ready":
                 raise ValueError("面板未确认 Agent 身份")
@@ -243,7 +244,7 @@ class Agent:
                 async for packet in socket:
                     data = channel.unpack(packet)
                     kind = data.get("type")
-                    if kind in {"call", "probe", "ack", "cancel"}:
+                    if kind in {"call", "probe", "ack", "cancel", "cancel_pending"}:
                         id = data.get("id", "")
                         if not isinstance(id, str) or not id or len(id) > 100:
                             raise ValueError("Invalid operation ID")
@@ -305,6 +306,8 @@ class Agent:
                                 await socket.close(code=1000, reason="Agent lifecycle change")
                     elif kind == "cancel":
                         self.cancel_call(id)
+                    elif kind == "cancel_pending":
+                        self.cancel_pending_call(id)
             finally:
                 self.computer_approvals.cancel()
                 native_sync.cancel()
@@ -317,6 +320,18 @@ class Agent:
                 finally:
                     if self.socket is socket:
                         self.socket = self.channel = None
+
+    def cancel_pending_call(self, id):
+        """Fence revoked work only before execution; never kill running work.
+
+        Called synchronously on the event loop, as is mark_running. There is no
+        await between the journal check and cancellation, so a start cannot race
+        through this decision. Missing/retryable IDs retain a durable fence.
+        """
+        if id in self.finishing or self.journal.status(id)['status'] not in {'accepted', 'missing', 'retryable'}:
+            return False
+        self.cancel_call(id)
+        return True
 
     def cancel_call(self, id):
         self.journal.cancel(id)
@@ -380,8 +395,7 @@ class Agent:
 
     @contextlib.asynccontextmanager
     async def project_slot(self, root, write=True, operation_id=None):
-        path = Path(root).expanduser().resolve().as_posix()
-        if os.name == 'nt': path = path.casefold()
+        path = canonical_path(root)
         async with self._legacy_project_slot(root, write=write, operation_id=operation_id):
             async with self.resources.slot(operation_id or 'local', [Claim('agent', 'path', path, write)],
                     lambda blockers: self.phase(operation_id, 'waiting_resource', blocked_by=blockers) if operation_id else None):
@@ -397,14 +411,18 @@ class Agent:
                 async with asyncio.timeout(timeout) as timer:
                     # Imports publish one destination. A project-wide writer
                     # here also stalls unrelated projects under a mapped parent.
-                    if tool in CORE_REMOTE or tool == 'download_artifact':
+                    if tool in CORE_REMOTE or tool == 'download_artifact' or tool in PATH_READ_TOOLS:
                         claims = claims_for(self.engine, tool, project, args, root)
                         await stack.enter_async_context(self.resources.slot(identifier, claims,
                             lambda blockers: self.phase(identifier, 'waiting_resource', blocked_by=blockers)))
                     else:
                         await stack.enter_async_context(self.project_slot(root, write=write, operation_id=identifier))
                     self.phase(identifier, 'waiting_worker')
-                    worker = self.read_semaphore if tool in {'read', 'write', 'edit'} else self.semaphore
+                    # The panel still uses legacy bounded file reads. Give them
+                    # the existing file-I/O lane, just like core read, so long
+                    # commands cannot starve directory navigation. Resource locks
+                    # above still exclude conflicting writes; searches stay heavy.
+                    worker = self.read_semaphore if tool in {'read', 'write', 'edit', 'fs_tree', 'fs_read', 'fs_read_many'} else self.semaphore
                     await stack.enter_async_context(worker)
                     timer.reschedule(None)
             except TimeoutError as exc:
@@ -589,6 +607,8 @@ class Agent:
             result = {"ok": False, "error": {"code": "CANCELLED" if self.journal.is_cancelled(id) else "INTERRUPTED", "message": "操作已取消" if self.journal.is_cancelled(id) else "Agent 进程被停止；检查本机结果后再决定是否重做"}}
         except DevError as exc:
             result = {"ok": False, "error": {"code": exc.code, "message": exc.message}}
+            if request.get('tool') == 'download_artifact':
+                result['error'].update(safe_import_error_detail(exc.details))
             if isinstance(request.get('tool'), str) and request['tool'] in COMPUTER_TOOLS:
                 result['error'].update(safe_detail(exc.details))
                 if exc.details.get('next') == 'computer_observe':
@@ -673,7 +693,7 @@ class Agent:
             output = result.get('output', '')
             tail = '\n'.join(output.split('\n')[-2000:]).encode('utf-8')[-50 * 1024:].decode('utf-8', errors='ignore')
             return {**result, 'output': tail, 'output_truncated': bool(result.get('output_truncated') or tail != output),
-                    'target': args['target'], 'resource_coordination': 'declared' if args['resources'] else 'independent'}
+                    'target': args['target'], 'resource_coordination': 'configured_task' if args['task'] else 'declared' if args['resources'] else 'independent'}
         if tool in {'read', 'write', 'edit'}:
             work = asyncio.create_task(asyncio.to_thread(CoreFiles(self.engine).call, tool, project, args))
             try:

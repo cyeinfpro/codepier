@@ -1,6 +1,50 @@
 # 九个 MCP 工具
 
-CodePier 对外只提供 `workspace`、`read`、`write`、`edit`、`exec`、`process`、`vps`、`browser`、`computer`。旧的独立 MCP 工具入口已移除，调用会返回 `TOOL_REMOVED`；`full`、`coding` 目录也不恢复旧入口。面板和 Agent 内部仍复用原有执行、权限和持久化实现。
+CodePier 的九个核心开发工具为 `workspace`、`read`、`write`、`edit`、`exec`、`process`、`vps`、`browser`、`computer`。旧的独立 MCP 工具入口已移除，调用会返回 `TOOL_REMOVED`；`full`、`coding` 目录也不恢复旧入口。面板和 Agent 内部仍复用原有执行、权限和持久化实现。
+
+身份工具 `get_profile`、`get_access_context` 额外提供稳定身份和实时权限摘要。经明确同意的动态角色连接还可使用已审核的外部 MCP 工具及 `gateway_call_get` 回执查询，详见 [MCP 网关](MCP_GATEWAY.md)。
+
+## 工作区与宿主信息
+
+原生 MCP 默认按“项目工作区、执行节点”返回信息。项目的 `root`、上下文的 `project_root` 和工作目录记录的 `path` 为 `.`，表示当前项目或 `workspace_id` 对应的目录，不能据此把不同项目或工作目录合并。节点 ID 保持可调用，显示名称变为稳定代号；节点名称、账户名、UID、系统类型、工具安装路径及凭据环境变量存在情况不再出现在默认执行概览中。`execution.tools` 的值为可用性布尔值；Shell 保留必要的程序名称、权限状态、超时限制和真实的非沙箱边界。
+
+技能目录按 `skill_id` 发现；带 ID 的技能摘要 `path/resource_path` 为相对技能资源的 `SKILL.md`，应通过 `workspace(operation="skill", skill_id=..., resource_path="SKILL.md")` 读取，不能作为项目根目录下的文件读取。显式读取技能时仍返回执行脚本所需的真实资源位置。项目内不带 ID 的技能路径仍相对于项目。具名任务目录保留任务名、说明、工作子目录和可用性，省略启动命令及环境变量清单。
+
+同一展示规则覆盖 `workspace`、`project_query`、`process/task_query` 轮询、`rd://projects` 资源及标准 Tasks 终态。工具结果的 `content` 和 `structuredContent` 使用同一份投影，不把完整宿主信息复制到 `_meta`。HTTP 面板、Agent 协议、审计、SHA、上下文指纹及持久回执仍使用真实数据；投影只作用于返回副本。错误元数据中的常见账户主目录前缀替换为 `[account-home]`，保留错误码和诊断后缀。
+
+这是减少默认宿主元数据的展示约定，不提供匿名化或隔离保证。源码、文档预览、补丁、命令输出、调用者提供的参数、明确请求的技能资源、原生界面和外部 MCP 结果保留原义，仍可能显示环境信息。`exec` 使用执行账号权限；需要宿主隔离时，应实际部署专用容器或虚拟机。修改工具描述后需在客户端刷新工具目录；已有对话中的旧结果不会被改写。
+
+## 只读查询
+
+ChatGPT 内的项目选择与任务看板已移除。`workbench` 不再出现在工具目录，旧调用按既有迁移约定返回 `TOOL_REMOVED`，提示改用 `project_query`。旧工作区资源仅返回无脚本、无工具调用的退役说明，不再列入资源目录。网页管理面板、项目上下文、工作流、原操作及证据存储不受影响。
+
+`project_query` 只允许 `list/open/help/tree/skills/skill/tasks/status/readiness/dashboard/workflow_list/workflow_get`；`open` 不允许捕获基线。项目和任务仍必须明确选择，所有调用复用实时授权。`task_query` 只允许 `list/get/wait/trace/diagnostics/activity`，读取原操作，不执行、取消或重跑。参数及返回结构与对应的 `workspace`、`process` 操作一致；任务查询指 CodePier 已有操作回执，并非 MCP 标准 Tasks 协议。
+
+只读发现从 `project_query` 开始，目录和技能读取无需调用混合工具。公开回执的等待、补读和追踪继续指向 `task_query`，保留原操作编号；捕获基线仍使用 `workspace`，显式取消仍使用 `process`。这些路由不改变实际授权，也不能保证宿主不再出现取消或拒绝提示。
+
+这两个专用入口标注为只读；混合读写的 `workspace/process/browser/computer` 保持保守的非只读注解。工具目录不注册 global/thread 工作台或自动展示模板。九个核心工具的 `outputSchema` 描述实际成功、错误、持久 pending 变体；错误/等待不是成功，仍须核对原操作编号、状态和退出码。
+
+## 标准 Tasks
+
+现代 `2026-07-28` 客户端在每次请求的 `_meta["io.modelcontextprotocol/clientCapabilities"].extensions` 中声明 `"io.modelcontextprotocol/tasks": {}` 后，原生 `exec` 的真实 pending 回执可返回扁平 `resultType: "task"`。它复用原操作与幂等键，不新建执行器；未声明能力的请求及 legacy 连接保持原有结果。声明能力不强制把已完成的调用变为异步。
+
+使用 `tasks/get` 读取状态与最终工具结果，`tasks/cancel` 请求合作式取消；`Mcp-Name` 必须镜像 `params.taskId`。取消确认不等于进程已经停止，SSH 远端副作用仍不保证回滚。工具退出非零属于 `completed` 加 `result.isError=true`，不是 JSON-RPC 层的 `failed`。本版没有需要用户输入的任务；`tasks/update` 对未知 `inputResponses` 做经授权的空确认，不把输入当作批准。不实现旧草案的 `tasks/list` 或 `tasks/result`。
+
+Task 绑定原 operation、Space、用户和确切创建 grant，每次查询/取消及 await 后重验权限；新连接不会因同属一个用户而继承旧任务。终态随 operation 更新在同一数据库事务内冻结，Agent 后续恢复不会让 Task 倒退或替换已冻结结果。任务记录沿用 Hub 数据库备份和原操作的生命周期，`ttlMs=null` 表示不设定时过期；它不是绕过撤权的长期访问授权。该追加表不改变 OAuth、PKCE、资源标识、角色或下游同意。
+
+项目上下文继续通过 `project_query(operation="open")` 和 `workspace(operation="context")` 读取；文件内容使用带 SHA 的 `read`。原工作台专用的“选定上下文”按钮随看板移除，附件导入契约 `write(operation="import")` 保持不变。
+
+参考 [Tasks 2026-07-28](https://github.com/modelcontextprotocol/ext-tasks/blob/main/specification/2026-07-28/tasks.md)。本阶段没有接入标准 Tasks 输入请求/MRTR、OpenAI扩展表单、文件编辑器或宿主文件写入。后续需要单独实现请求状态绑定、明确确认、字段能力协商、版本/etag冲突与相应真实宿主验收，不能把这些入口视为已实现。
+
+## 请求关联与分阶段诊断
+
+到达 Hub 的每个 `/mcp` HTTP 请求都会生成独立的服务端随机 ID，通过 `X-CodePier-Request-ID` 响应头返回；现代成功/工具错误结果同时在 `_meta["com.codepier/requestId"]` 返回。客户端自带 ID 不会覆盖它。legacy 结果正文保持不变。ID 只用于排障，不能代替授权、操作编号或幂等键，也不能据此重放结果不明的写入。
+
+`codepier_mcp_request` 结构化日志覆盖入口、认证、解析、协议校验、授权路由、执行、返回和响应交接。日志只含服务端 ID、枚举阶段/状态、白名单协议方法、已解析且限长的工具标签、有效操作编号、耗时与错误码；不新增记录请求正文、参数、命令、令牌、Cookie、URL、身份信息或异常文本。原项目活动记录在现有权限过滤下提供同一 `request_id`；认证或格式检查前失败无需先创建活动记录。
+
+诊断按进程全局令牌桶采样，持续最多5请求/秒、突发50请求，每请求最多12条事件，保留终结事件；超额数量每60秒汇总一次。采样不影响请求处理和响应 ID。日志缺失可能来自采样、代理或宿主拦截，不能单独证明用户取消。只有真正到达服务器的请求才能获得这个 ID；这项源码改动无法解释或修复宿主在发出请求前生成的“用户取消”提示。
+
+传输断开/协程中断记为 `transport_interrupted`，不等于显式 `tasks/cancel`，不会触发业务取消或重跑；取消方法只记录经授权的确认，仍需查询原操作终态。生产部署后才能观测这些新字段，本地验证不能证明生产或所有 ChatGPT 客户端已使用它们。
 
 ## 常用流程
 
@@ -22,7 +66,7 @@ CodePier 对外只提供 `workspace`、`read`、`write`、`edit`、`exec`、`pro
 
 | 工具 | 操作 |
 | --- | --- |
-| `workspace` | `list/open/skills/skill/tasks/status/readiness/tree/help`；`resolve/context/dashboard`；`worktree_create/worktree_list/worktree_remove`；`workflow_create/workflow_list/workflow_get/workflow_update/handoff`；`lsp_status` |
+| `workspace` | `devices/project_create/list/open/skills/skill/tasks/status/readiness/tree/help`；`resolve/context/dashboard`；`worktree_create/worktree_list/worktree_remove`；`workflow_create/workflow_list/workflow_get/workflow_update/handoff`；`lsp_status` |
 | `read` | 默认 `file`；`changes/artifact/artifacts/history/symbols/lsp` |
 | `write` | 默认 `file`；`import/artifact` |
 | `edit` | 默认 `file`；`restore/checkpoint` |

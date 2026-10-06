@@ -114,6 +114,15 @@ def _rebuild(db, table, substitutions):
 
 
 def migrate(db):
+    _migrate(db)
+    # Panel counts and recent activity must not fetch every large operation
+    # payload through the space-only index. Include the privacy predicates
+    # so owner/grant-scoped counts are covered too; authorization is unchanged.
+    db.execute("CREATE INDEX IF NOT EXISTS operations_panel_recent ON operations(space_id,created DESC,state,owner_user_id,visibility,grant_id,project_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS operations_panel_active ON operations(space_id,state,owner_user_id,visibility,grant_id,project_id)")
+
+
+def _migrate(db):
     if db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0] == SCHEMA_VERSION:
         return
     version = db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0]

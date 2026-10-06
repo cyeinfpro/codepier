@@ -97,6 +97,8 @@ def main():
     try:
         if args.command in {"init", "reset-password"}:
             user = store.one("SELECT * FROM users WHERE username=?", (args.username,))
+            if args.command == "init" and user:
+                parser.error("账号已存在；创建恢复管理员请使用新的账号名，重置请使用 reset-password")
             if args.command == "init" and store.one("SELECT 1 AS ok FROM iam_users WHERE local_login=1"):
                 parser.error("面板已有本地登录账号。重置请使用 reset-password")
             if args.command == "reset-password" and not user:
@@ -112,6 +114,8 @@ def main():
             with store.lock, store.db:
                 # Serialize local CLI initialization with other initializers.
                 store.db.execute("BEGIN IMMEDIATE")
+                if args.command == "init" and store.one("SELECT 1 AS ok FROM users WHERE username=?", (args.username,)):
+                    parser.error("账号已存在；创建恢复管理员请使用新的账号名")
                 if user:
                     store.db.execute("UPDATE users SET password_hash=? WHERE id=?", (hashed, user["id"]))
                     store.db.execute('UPDATE iam_users SET local_login=1,active=1,epoch=epoch+1,version=version+1 WHERE user_id=?',(user['id'],))

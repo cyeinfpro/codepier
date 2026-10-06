@@ -1,28 +1,29 @@
 # CodePier · 码头
 
-> **此分支是未发布、未部署的 fork 整合版**：基于 upstream 1.14.3，加入多用户 IAM/OIDC、Spaces、动态 Roles 和多 MCP Gateway。开发与验收边界见 [整合说明](docs/UPSTREAM_INTEGRATION.md)。不要用原版自动安装命令覆盖本分支的自定义功能。
+让 ChatGPT 通过 MCP 插件使用你的本地项目：读代码、改文件、跑测试，也能接入浏览器、桌面和远程服务器。
 
-在自己的电脑上运行开发环境，通过 ChatGPT 或浏览器远程使用。
-
-[![Version](https://img.shields.io/badge/version-1.14.3-2563eb)](RELEASE.json)
+[![Version](https://img.shields.io/badge/version-1.17.0-2563eb)](RELEASE.json)
 [![Python](https://img.shields.io/badge/Python-3.13-3776ab)](requirements.txt)
 [![License](https://img.shields.io/badge/license-MIT-16a34a)](LICENSE)
 
-CodePier 是一个自托管的远程开发工具。它把运行在服务器上的 **Hub**、开发电脑上的 **Agent** 和 MCP 客户端连接起来，让你在对话中读取代码、修改文件、运行测试，也可以在网页里继续本机的 Pi、Codex 或 Claude Code 会话。
+CodePier 是自托管的开发工具连接层。**Hub** 提供 MCP 接口和管理面板，**Agent** 在你的电脑上访问文件、运行命令。接入 ChatGPT 后，可以直接围绕真实项目完成检查、修改和验证；也可以在网页里继续本机的 Pi、Codex 或 Claude Code 会话。
 
 项目不需要先搬到云端，开发电脑也不需要开放公网入站端口。代码、Git 和命令行工具仍在原来的机器上运行；被读取的内容、执行结果和会话记录会按使用流程传递给 Hub 或客户端。
 
-[快速开始](#快速开始) · [完整入门教程](docs/START-HERE.md) · [日常使用](#日常使用) · [文档](#文档) · [版本发布](https://github.com/cyeinfpro/codepier/releases)
+[快速开始](#快速开始) · [日常使用](#日常使用) · [权限与数据](#权限与数据) · [更新与备份](#更新与备份) · [文档](#文档) · [版本发布](https://github.com/cyeinfpro/codepier/releases)
 
 ## 可以用它做什么
 
 | 场景 | 功能 |
 | --- | --- |
-| 在对话中处理项目 | 读取和搜索源码、按 SHA 校验修改文件、审阅差异、运行命令与具名任务，保留执行回执。 |
+| 在 ChatGPT 中处理本地项目 | 读取和搜索源码、按 SHA 校验修改文件、审阅差异、运行命令与具名任务，保留执行回执。 |
+| 查看项目和任务进度 | 只读查询目录、Skills、权限与操作状态；在支持 MCP Apps 的客户端主动打开工作台、审阅改动和选择上下文。 |
 | 在浏览器中继续开发 | 跨项目查看 Pi / Codex / Claude 会话，选择模型与工作目录，发送文件和图片，处理工具审批，恢复已同步历史。 |
 | 管理多台开发电脑和服务器 | 按设备映射项目；保存 VPS 连接并分配给项目，由项目所在的 Agent 发起 SSH。 |
 | 验证修改结果 | 使用 Git worktree 隔离工作目录，查询本机语言服务，运行绑定源码版本的验收，验证真实网页。 |
-| 排查一次调用 | 查看参数摘要、输出、返回结果、退出码和执行阶段，按项目、工具、来源或状态筛选。 |
+| 和团队一起使用 | 个人与团队 Space、成员邀请、OIDC 登录、动态角色及私有 Access Profile；按需共享工作流和交付物。 |
+| 接入其他 MCP 服务 | 在同一入口使用已审核的外部工具，按后端账号、角色规则和每个连接的明确同意控制访问。 |
+| 排查一次调用 | 查看输出、返回结果、退出码和执行阶段；断线后继续查询原操作，使用请求关联 ID 辅助排障。 |
 | 维护安装环境 | 面板检查正式 Release 并更新 Hub；Agent 支持安装、修复升级、状态检查和卸载。 |
 
 CodePier 不提供模型服务，也不代替原生 CLI 的账号和订阅。Hub 与 Agent 本身不需要模型 API Key；Pi、Codex、Claude Code 的认证和费用由各自的配置决定。只使用 MCP 文件与命令工具时，不必安装这些 CLI。
@@ -52,6 +53,19 @@ ChatGPT / MCP 客户端                 浏览器管理面板
 
 项目映射限制文件工具的访问范围，但**完整 Shell 不是项目目录沙箱**：命令使用 Agent 运行账号的系统权限。启用执行权限前，请确认该账号能够访问哪些文件和凭据。
 
+## 平台与运行环境
+
+| 部分 | 当前实现与要求 |
+| --- | --- |
+| Hub | Docker Compose 部署，应用使用 Python 3.13；提供 Linux amd64 / arm64 镜像和 k3s 单副本清单。 |
+| Agent | macOS、Windows、Linux 安装与维护入口；安装器准备独立 Python 3.13 环境。 |
+| 原生 CLI | 复用 Agent 账号下已安装并登录的 Pi、Codex、Claude Code；具体能力取决于 CLI 和平台。 |
+| 浏览器 | 需要配置本机扩展、原生消息宿主、浏览器档案和网站授权。 |
+| 桌面控制 | 独立授权的可选能力；当前已验证的原生提供方平台为 macOS，Windows/Linux 桌面后端尚未验证。 |
+| 开发与测试 | Python 3.13、Node.js 24；Linux/macOS 分片完整回归，Windows 运行明确的核心与后台恢复子集。 |
+
+平台代码和 CI 覆盖不等于每台真实设备都完成了安装、重启与升级验收。系统服务、浏览器及桌面权限仍需在目标机器检查，见 [Agent 安装](docs/AGENT_INSTALL.md)、[Computer Use](docs/COMPUTER_USE.md) 和[开发与验证](docs/DEVELOPMENT.md)。
+
 ## 快速开始
 
 首次使用按“部署 Hub → 接入电脑 → 添加项目 → 连接客户端”的顺序完成。需要 HTTPS 配置、逐步检查或遇到错误时，参照[完整入门教程](docs/START-HERE.md)。
@@ -60,10 +74,10 @@ ChatGPT / MCP 客户端                 浏览器管理面板
 
 服务器需要 Git、Bash、Docker Engine、Docker Compose v2，以及供安装脚本使用的 **Python 3.9+**。Compose 需要支持 `up --wait`；应用运行环境由 Docker 镜像提供，使用 Python 3.13。
 
-下面以正式版本 `v1.14.3` 为例。请在可信网络中完成 HTTP 初始安装；公网部署应先按[入门教程](docs/START-HERE.md)配置 HTTPS，不要通过裸公网 HTTP 输入密码或配对设备。
+下面以正式版本 `v1.17.0` 为例。请在可信网络中完成 HTTP 初始安装；公网部署应先按[入门教程](docs/START-HERE.md)配置 HTTPS，不要通过裸公网 HTTP 输入密码或配对设备。
 
 ```bash
-git clone --branch v1.14.3 --depth 1 https://github.com/cyeinfpro/codepier.git
+git clone --branch v1.17.0 --depth 1 https://github.com/cyeinfpro/codepier.git
 cd codepier
 bash install.sh
 ```
@@ -79,7 +93,7 @@ curl --fail http://127.0.0.1:8765/healthz
 
 也可以从 [Releases](https://github.com/cyeinfpro/codepier/releases) 下载源码包。手动安装和开发建议使用 `codepier-VERSION-source-full.zip`；`source.zip` 用于兼容面板更新器。环境变量见 [`.env.example`](.env.example)。
 
-不在服务器上构建镜像的部署方式（例如 Kubernetes/k3s）可直接拉取 CI 发布到 `ghcr.io/<仓库所有者>/codepier` 的 Hub 镜像。每次成功的 `main` 构建都会更新 `:latest`（同时保留 `:main` 与 `:sha-<短提交>`）；正式 release 另外提供版本标签。k3s 单文件清单默认跟随 `:latest` 并强制重新拉取，可用环境变量播种 OIDC 提供者并让首次 SSO 登录成为实例管理员；需要可重现部署时应改为 CI 记录的 digest。镜像在发布前经过启动验证，构建与校验过程见[发布流程](docs/RELEASING.md)。
+不在服务器上构建镜像的部署方式（例如 Kubernetes/k3s）可直接拉取 CI 发布到 `ghcr.io/<仓库所有者>/codepier` 的 Hub 镜像。每次成功的 `main` 构建都会更新 `:latest`（同时保留 `:main` 与 `:sha-<短提交>`）；正式 release 另外提供版本标签。k3s 单文件清单 [`deploy/k3s/deployment.yaml`](deploy/k3s/deployment.yaml) 默认跟随 `:latest` 并强制重新拉取；需要可重现部署时应改为 CI 记录的 digest。Compose 可通过 `CODEPIER_HUB_IMAGE` 选择镜像，首次安装与数据初始化仍应遵循[入门教程](docs/START-HERE.md)。OIDC 环境变量播种和首次 SSO 管理员初始化需显式配置，见[多用户/OIDC 指南](docs/MULTIUSER_OIDC.md)。镜像在发布前经过启动验证，构建与校验过程见[发布流程](docs/RELEASING.md)。
 
 ### 2. 接入开发电脑
 
@@ -113,7 +127,7 @@ curl --fail http://127.0.0.1:8765/healthz
 https://hub.example.com/mcp
 ```
 
-先在 **系统设置 → 公开地址** 保存实际 HTTPS 基地址，不加 `/mcp`。在 ChatGPT 中开启开发者模式，通过 Plugins 添加 MCP 连接，填写完整 MCP URL，按 CodePier 的 OAuth 流程登录并确认项目范围和工具权限。客户端入口和账号条件见[接入教程](docs/CHATGPT.md)及 [OpenAI 官方说明](https://developers.openai.com/plugins/deploy/connect-chatgpt)。
+先在 **系统设置 → 公开地址** 保存实际 HTTPS 基地址，不加 `/mcp`。在 ChatGPT 的 Plugins 中添加 MCP 连接，填写完整 MCP URL，按 CodePier 的 OAuth 流程登录并确认项目范围和工具权限。客户端入口、开发者设置和账号条件以 [OpenAI 官方说明](https://developers.openai.com/plugins/deploy/connect-chatgpt)为准；CodePier 配置见[接入教程](docs/CHATGPT.md)。
 
 连接完成后，在新对话中启用 CodePier，先尝试一个只读请求：
 
@@ -131,9 +145,19 @@ https://hub.example.com/mcp
 
 一个完整的流程通常是：打开项目并读取说明，确认现有改动，读取或搜索相关源码，修改后审阅差异，再运行测试。涉及多个步骤的工作可以保存为工作流，记录目标、进度、未解决问题和关联操作，便于之后继续。
 
-耗时操作会返回 `operation_id`。页面刷新或网络中断后，应继续查询这个编号，而不是再次发送相同命令。界面显示已接收、排队或 HTTP 请求成功，并不代表测试已经通过。
+耗时操作会返回 `operation_id`。页面刷新或网络中断后，用 `task_query` 继续查询原编号；明确取消使用 `process`。不要换一个幂等键重跑结果不明的命令。是否完成要看终态、退出码和实际输出。
 
-MCP 对外提供九个工具：
+### MCP 工具
+
+当前原生目录由九个核心开发工具、两个只读查询和两个身份工具组成；外部网关工具按授权另行提供。
+
+| 入口 | 用途 |
+| --- | --- |
+| `project_query` | 只读发现项目，查询目录、Skills、工具帮助、权限、配置任务和工作流；不捕获改动基线。 |
+| `task_query` | 读取、等待和追踪原操作回执，不执行、取消或重跑命令。 |
+| `get_profile` / `get_access_context` | 确认当前连接的稳定身份、项目范围及有效权限。 |
+
+九个核心开发工具：
 
 | 工具 | 用途 |
 | --- | --- |
@@ -147,7 +171,11 @@ MCP 对外提供九个工具：
 | `browser` | 打开、观察和操作已授权网页。 |
 | `computer` | 在独立授权下观察和操作本机应用。 |
 
-专项参数通过 `workspace` 的 `help` 操作按需发现。文件修改使用读取时取得的 SHA 检查冲突；新建文件使用 `expected_sha256="new"`。`exec` 是非交互式命令入口，不是可持续输入的 SSH 终端。完整示例和并行规则见 [MCP 工具参考](docs/CORE_TOOLS.md)。
+只读发现和专项参数优先使用 `project_query` 的 `help` 操作；捕获基线、创建 worktree 或更新工作流仍使用 `workspace`。文件修改使用读取时取得的 SHA 检查冲突；新建文件使用 `expected_sha256="new"`。`exec` 是非交互式命令入口，不提供 PTY/stdin 会话。独立命令可以并行，访问相同文件或服务时应显式声明资源；这些锁不约束外部编辑器或人工操作。
+
+ChatGPT 内的项目选择和任务看板已移除；直接在聊天中使用工具即可。项目上下文、保存的工作流、执行证据、附件导入和网页管理面板继续保留。旧 `workbench` 调用返回迁移提示，更新后请刷新客户端工具目录。
+
+支持能力协商的客户端可使用 MCP 2026 Tasks 查询和取消原生 `exec`；未声明能力的客户端继续使用持久回执。取消确认不代表进程已停止，也不保证远端 SSH 副作用回滚。工具升级后需要刷新客户端目录。完整协议范围、参数和示例见 [MCP 工具参考](docs/CORE_TOOLS.md)。
 
 ### 在面板中使用 Pi、Codex 或 Claude Code
 
@@ -191,15 +219,34 @@ Agent 离线时仍可阅读已同步历史，但不能继续本机执行。未�
 
 ## 权限与数据
 
-CodePier 的权限需要分层理解：**Agent 本机配置**决定可用目录和能力，**项目映射**决定项目开放什么，**OAuth / PAT** 决定当前客户端可以使用哪些项目和工具。浏览器和桌面还各有自己的本机授权。
+### 项目、账号和执行边界
 
-经常新增项目时，可在 **系统设置 → MCP 默认授权** 预选“全部现有及未来新增项目”。已有连接可以在 **MCP 接入 → 调整项目范围** 中修改；也可以明确确认，将全部项目范围应用到已有有效 OAuth 连接，无需为每个新项目重连。
+CodePier 的权限分层生效：**用户与 Space 成员关系**决定资源归属和可见性，**Agent 本机配置**决定可用目录和能力，**项目映射**决定项目开放什么，**OAuth / PAT 的固定范围或动态角色**决定当前连接能做什么。浏览器和桌面还各有自己的本机授权。
+
+ChatGPT 的项目名、对话名或工具参数不会切换凭据身份，也不会自动建立隔离。使用 `get_profile` 和 `get_access_context` 核对实际连接。MCP 默认减少账户名、绝对根路径等宿主元数据，但源码、命令输出和明确读取的资源仍可能包含这些信息。
+
+**完整 Shell、构建脚本和原生 CLI 使用 Agent 运行账号的系统权限。** 项目目录、Space 和角色都不能替代 OS 沙箱；互不信任的用户应使用独立系统账号、容器或虚拟机。
+
+使用固定范围连接、经常新增项目时，可在 **系统设置 → MCP 默认授权** 预选“全部现有及未来新增项目”。已有连接可以在 **MCP 接入 → 调整项目范围** 中修改；也可以明确确认，将全部项目范围应用到已有有效 OAuth 连接，无需为每个新项目重连。
 
 这只调整项目范围，不增加已有凭据的工具权限，也不恢复已撤销授权。关闭默认选项只影响之后的预选；需要收回已有访问权时，应缩小对应连接的范围或撤销连接。
 
 请只映射必要目录，使用可信 HTTPS，并妥善保管 Hub 数据、Agent 配置和模型凭据。Shell 使用系统账号权限；原生 CLI 也沿用自己的执行和审批策略。读取的源码、网页和工具输出都可能包含不可信内容，不能把其中的文字当成新的操作授权。完整说明见 [安全指南](SECURITY.md)。
 
+### 多用户协作与外部 MCP
+
+- **个人与团队 Space**：团队空间支持邀请成员、分配角色，明确共享工作流和交付物。共用角色不会公开个人会话历史；交互式 CLI、浏览器和桌面会话不会因此变成共享会话。
+- **OIDC 登录**：支持授权码/PKCE、显式账号关联、经验证的群组映射和撤权。群组授权以 UserInfo 为来源，需核对提供者兼容性，并保留本地恢复管理员。
+- **动态角色**：成员获准委派后，可以用自己的 Access Profile 建立角色连接。明确同意后，后续请求按当前角色规则检查；旧 fixed grant 保持原授权语义，不会自动迁移。
+- **MCP 网关**：支持多个 HTTP MCP 后端、私有或明确共享的后端账号、已审核工具与角色规则。只有明确同意外部委派的连接才会获得对应工具。网关默认启用不等于已连接任何后端。
+
+外部工具能访问什么，还取决于后端凭据。CodePier 不为任意外部服务提供通用项目沙箱，也不把不确定的外部调用自动重放。当前网关未实现后端 OAuth 登录刷新、stdio 进程托管或 MCP Apps 代理，详见[网关指南](docs/MCP_GATEWAY.md)。
+
+团队配置、分享 API 和迁移步骤见[多用户/OIDC](docs/MULTIUSER_OIDC.md)与[动态角色](docs/DYNAMIC_ROLES.md)。
+
 ## 更新与备份
+
+从 1.15 之前的版本升级时，先备份数据库及配套密钥并阅读[迁移与恢复指南](docs/MULTIUSER_OIDC.md)。旧版本回退需要匹配的源码和备份，不能让旧程序直接打开已迁移的新数据库。
 
 ### 更新面板
 
@@ -251,7 +298,7 @@ chmod 600 "./backups/$backup"
 
 **节点在线，但命令仍提示没有权限。** 检查 Agent 的 Shell / 目录任务配置、项目执行设置和客户端 `execute` 权限。旧 Agent 升级会保留原先关闭的执行设置；面板的“已有 Agent 开启执行能力”提供对应本机命令。
 
-**新增项目后，ChatGPT 看不到它。** 检查当前连接的项目范围。限定项目的连接需要调整范围；只有明确选择了未来项目范围，新增项目才会自动包含在内。工具目录变化则需要单独刷新客户端元数据。
+**新增项目后，ChatGPT 看不到它。** 用 `get_access_context` 检查连接。固定范围连接需要调整项目范围；已同意未来项目范围或符合当前动态角色规则的新项目才会可见。工具目录变化需要另外刷新客户端元数据。
 
 **请求超时，不知道有没有执行。** 保存并查询原 `operation_id`，到调用流水查看实际状态和输出。不要换一个幂等键重复执行。取消 SSH 的本机进程也不保证远端命令已经停止或回滚。
 
@@ -263,11 +310,13 @@ chmod 600 "./backups/$backup"
 
 ## 本地开发
 
-使用 Python 3.13 和 Node.js 24。以下命令在完整源码目录执行：
+使用 Python 3.13 和 Node.js 24。以下为 macOS / Linux 命令；Windows 的虚拟环境入口位于 `.venv\Scripts\`。请在完整源码目录执行：
 
 ```bash
 python3.13 -m venv .venv
 .venv/bin/python -m pip install --require-hashes -r requirements-dev.txt -r requirements-tools.txt
+python3.13 -m venv .venv-compat
+.venv-compat/bin/python -m pip install --require-hashes -r requirements-compat.txt
 .venv/bin/python -m playwright install chromium webkit
 npm --prefix web/mcp-apps ci --ignore-scripts
 npm --prefix web/mcp-apps run build
@@ -314,24 +363,20 @@ docs/        使用和维护文档
 | --- | --- |
 | 从零安装并完成第一次调用 | [入门教程](docs/START-HERE.md) · [ChatGPT 接入](docs/CHATGPT.md) |
 | 安装、修复或迁移 Agent | [安装与维护](docs/AGENT_INSTALL.md) · [生命周期](docs/AGENT_LIFECYCLE.md) · [旧版命名迁移](docs/CODEPIER-MIGRATION.md) |
-| 使用 MCP 与处理长任务 | [工具参考](docs/CORE_TOOLS.md) · [持久操作](docs/LONG_OPERATIONS.md) |
+| 使用 MCP、工作台与长任务 | [当前工具参考](docs/CORE_TOOLS.md) · [持久操作](docs/LONG_OPERATIONS.md) |
+| 配置团队、身份与其他 MCP 服务 | [多用户/OIDC](docs/MULTIUSER_OIDC.md) · [动态角色](docs/DYNAMIC_ROLES.md) · [MCP 网关](docs/MCP_GATEWAY.md) |
 | 使用原生会话和远程服务器 | [CLI 会话](docs/CLI_SESSIONS.md) · [Claude Code](docs/CLAUDE_CLI.md) · [VPS](docs/VPS.md) |
 | 配置网页验证和桌面控制 | [本机集成](docs/INTEGRATIONS-20260917.md) · [Computer Use](docs/COMPUTER_USE.md) |
 | 更新、排错和检查记录 | [面板更新](docs/PANEL_UPDATE.md) · [调用流水](docs/CALL_LOG.md) · [FAQ](docs/FAQ.md) |
-| 理解架构或参与开发 | [架构](docs/ARCHITECTURE.md) · [开发与验证](docs/DEVELOPMENT.md) · [发布流程](docs/RELEASING.md) |
+| 部署或参与开发 | [环境配置](.env.example) · [架构](docs/ARCHITECTURE.md) · [开发与验证](docs/DEVELOPMENT.md) · [发布流程](docs/RELEASING.md) |
 
 ## 版本与许可
 
-当前仓库的 `RELEASE.json` 标记为 **1.14.3 / released / source-only**。`main` 可能包含正式发布后的改动；安装和更新请核对目标 Release，版本变化见 [CHANGELOG.md](CHANGELOG.md)。
+当前仓库的 `RELEASE.json` 标记为 **1.17.0 / released / source-and-image**。1.17 统一管理页面、字段和手机全页编辑，补强工作区隐私与会话恢复；ChatGPT 旧工作台组件已退役，Web 远程工作台、只读查询、标准 Tasks 和改动审阅继续保留。详见 [CHANGELOG.md](CHANGELOG.md)。
 
-- **Version:** 1.14.3
+`main` 可能包含正式发布后的改动。安装和更新请核对目标 [Release](https://github.com/cyeinfpro/codepier/releases)；GitHub 提交或 Release 发布不会自动升级现用 Hub 与 Agent。
+
+- **Version:** 1.17.0
 - **License:** [MIT](LICENSE)
 
 第三方依赖保留各自许可证。前端依赖声明位于 `web/vendor/`，MCP Apps 的声明见 [THIRD_PARTY_NOTICES.txt](web/mcp-apps/THIRD_PARTY_NOTICES.txt)。
-
-## 本分支：多用户身份与多 MCP 网关
-
-基于 upstream 1.14.3，整合 Spaces、OIDC、动态 Roles、稳定 Profiles 与多 MCP Gateway。
-首次部署前请阅读 [多用户/OIDC](docs/MULTIUSER_OIDC.md)、[动态角色](docs/DYNAMIC_ROLES.md) 和 [MCP 网关](docs/MCP_GATEWAY.md)。
-
-这是未部署的整合开发版本；不保留旧版对外 native 工具目录。

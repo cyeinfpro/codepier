@@ -308,7 +308,11 @@ def test_create_project_with_delegation_new_resource_and_same_token(api,monkeypa
                     device_rules=[{'actions':['devices.read','projects.create'],'devices':['device'],'max_project_mode':'write','root_prefixes':['/tmp/new-roots']}])
     assert visible_projects(client,t['token'])==set()
     devices=data(call(client,t['token'],'devices_list'))['devices']
-    assert devices==[{'id':'device','name':'fixture','enabled':True,'online':False}]
+    label=devices[0]['name']
+    assert label.startswith('node-') and label!='fixture'
+    assert devices==[{'id':'device','name':label,'enabled':True,'online':False}]
+    assert data(call(client,t['token'],'devices_list'))['devices']==devices
+    assert client.get('/api/devices').json()['devices'][0]['name']=='fixture'
     calls=[]
     async def validate(name,args,project,who,**kwargs):
         calls.append((name,who.admin))
@@ -317,6 +321,8 @@ def test_create_project_with_delegation_new_resource_and_same_token(api,monkeypa
     args={'alias':'new-work','device_id':'device','root':'/tmp/new-roots/work','mode':'write','idempotency_key':'role-create-work-1'}
     created=data(call(client,t['token'],'projects_create',args))
     assert created['created_by_role']==r['id'] and created['role_access']==['read','write']
+    assert created['root']=='.'
+    assert app.state.store.one('SELECT root FROM projects WHERE id=?',(created['id'],))['root']==args['root']
     assert visible_projects(client,t['token'])=={created['id']}
     replay=data(call(client,t['token'],'projects_create',args))
     assert replay['id']==created['id'] and calls==[('system_validate',False)]

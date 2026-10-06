@@ -1,64 +1,71 @@
 # Changelog
 
-## Unreleased — 容器镜像发布
+## 1.17.0 · 2026-10-06 · 面板统一设计与工作区隐私
 
-- 新增 `.github/workflows/image.yml`：CI 构建 Hub 镜像并发布到 GHCR（linux/amd64、linux/arm64，附 SBOM 与构建来源证明），不再要求在服务器上用安装脚本现场构建。
-- 发布前在工作流内核对源码版本与 Git 标签，并用 Compose 同等加固参数从空数据目录启动候选镜像，检查 `/healthz`、运行版本、维护状态、`/agent/manifest.json` 与 UID；Pull Request 只构建不发布。
-- 新增 `deploy/k3s/deployment.yaml`：单副本 Recreate、local-path RWO 数据卷、与 Compose 同等的非 root/只读根文件系统加固、Traefik Ingress，不启用宿主机更新服务；`scripts/check_release.py` 同步核对该清单的镜像版本。
-- 新增 `CODEPIER_OIDC_*` 环境变量播种唯一身份提供者 `idp_env`（环境为权威来源，变量存在时面板拒绝编辑），以及 `CODEPIER_OIDC_BOOTSTRAP_ADMIN=first-login`：没有实例管理员时，首个通过准入的 OIDC 登录成为实例管理员并拥有 Legacy 空间，审计 `oidc.bootstrap_admin`，窗口随即关闭；默认关闭，行为不变。`hub init` 在没有本地登录账号时可补建本地恢复管理员。
-- Compose 与安装脚本路径不变；未创建 Release，也不部署服务。
+- 统一全部 Web 面板的布局、字段、菜单与状态样式；重组账号、成员、身份管理、OIDC、Profile、角色规则和 MCP 网关。网关使用服务与账号、已发布工具、我的委派及调用记录分区，工具审核支持搜索和已选摘要，默认不选择任何工具。
+- 手机复杂编辑和长详情采用全页返回与固定操作区；保留键盘导航、浅深主题、未保存修改、提交中及结果不明提示。角色逐条规则编辑保留独立资源范围、版本冲突检查和当前/未来授权风险说明。
+- 修复会话及 Space 权限变化后旧私有内容残留；同账号重新登录前重验工作台项目与原生会话所需权限，网络失败时隔离草稿，不显示或自动重发。修复审计导出未选择当前 Space 的问题。
+- 统一文件工具、技能、搜索结果、备份列表与产物的敏感路径策略，保护已知凭据文件和本地助手历史目录；示例/模板文件和项目技能目录仍可正常使用。不会删除历史文件、备份或既有回执。
+- 退役 ChatGPT 旧工作台小组件和 `workbench` 入口，保留 `project_query`、`task_query`、改动审阅卡及 Web 远程工作台。升级后刷新客户端工具目录，不恢复已退役入口。
+- 修复异步响应覆盖新编辑器、规则切换丢点击、列表筛选与焦点刷新丢失，以及网关凭据未知结果后误以空值重复提交的问题。
+- **升级边界：** 保留已有身份、授权、数据库与配套密钥；明确撤权会清理当前页面私有草稿，不能收回已下载或复制的数据。升级前备份完整数据与密钥。此次不自动部署或更新现用 Hub/Agent，真实宿主、设备与账号接线仍需按目标环境验收。
 
-## Unreleased fork integration — 2026-09-27
 
-- Merge the complete upstream 1.14.3 line with IAM and multi-MCP Gateway; retain both parent histories.
-- One Principal refresh, checked Store/DB-worker execution, explicit public tool routing and scoped call logs.
-- Nine native tools plus two stable identity tools; removed public aliases remain internal only.
-- First PAT/OAuth consent can explicitly include external MCP; no silent expansion of older grants.
-- Rotate all OIDC/Gateway ciphertexts and keep routing/idempotency keys stable.
-- Rebuild IAM/Gateway UI through the upstream source/hash pipeline. No release or deployment.
-- See docs/UPSTREAM_INTEGRATION.md for compatibility and incomplete platform validation.
+## 1.16.1 · 2026-10-06
 
-## Unreleased — 多 MCP Gateway 第一阶段
+- 只读项目发现补齐目录、技能和帮助入口；等待、补读和追踪提示使用专用只读工具，继续查询原操作编号，避免无谓转入混合读写入口。真实取消、写入和基线捕获仍保留原权限边界；宿主生成的取消提示仍需请求与回执证据诊断。
+- 工作台入口同时对模型和组件可见，修复仅组件可见时无法从对话渲染小组件的问题。
+- 优化面板活动统计索引、文件读取排队和事件刷新，减少长命令对目录浏览的阻塞及无关页面的重复渲染；保持项目锁和数据权限约束。
+- 合入 MCP Apps SDK 2.0.3、Uvicorn 0.54.0、Ruff 0.16.9、PyJWT 2.15.1、Cryptography 50.0.2 与 FastAPI 0.142.2；重新生成跨平台 wheel 哈希锁和 SDK 构建元数据，恢复 Windows 条件依赖。
+- 修复授权队列测试跨事件循环竞争导致的 macOS 挂起，以及严格 CSP 下浏览器测试的页面内求值错误；保留真实撤权检查、生产 CSP 和明确超时失败。
 
-- 在独立 `hub/gateway/` 中增加远端 MCP 帐户、经审核的命名空间工具、即时 Role 规则、每 grant 明确同意及加密回执；默认关闭，不扩大既有 fixed/role grant。
-- 内建工具继续走原 Runtime；外部工具保留 schema、独立路由，不向后端透传 CodePier token、Cookie、前端元数据或身份标记。保持 `get_profile`；访问上下文增加外部能力摘要。
-- 增加固定服务 endpoint、管理员批准的内网 CIDR、全 DNS 答案校验、IP 固定与原 Host/TLS SNI、禁止重定向和环境代理，以及后端帐户/授权隔离的有限连接池。
-- 支持 2026-07-28 与 legacy Streamable HTTP 的 JSON/SSE 工具响应；只用只读探测协商，不自动重发调用。多回合请求/资源代理等未实现能力明确失败。
-- 工具发现与发布分离，已发现的 schema 改变阻止旧发布工具继续调用；参数/结果 schema 在有界子进程验证。收回权限后拒绝派送或隐藏迟到结果。
-- 在现有 Panel 增加 MCP 网关页面，原 Role 编辑器保留 connector_rules；添加工具分页、同名工具消歧、回执恢复与配置/调用审计。
-- 独立 gateway_schema=1；原 IAM schema=10 不变。此功能不是 upstream 1.14 合并、生产部署或真实外部服务验收。详见 docs/MCP_GATEWAY.md。
 
-## Unreleased — 多用户、OIDC 与 Space 隔离
+## 1.16.0 — 2026-10-05 — MCP 工作台、任务协议与工作区隐私
 
-- **升级兼容性警告：** required_group / 群组映射只接受 UserInfo 的群组字段；Microsoft Entra UserInfo 无法返回自定义 groups，仅配置 ID Token 群组不能修复。升级前验证本地恢复登录与身份代理；不能靠移除准入限制绕过。已有群组配置在 Hub 启动及管理页有明确提示。
-- 修复已消费 OIDC 回调仍占用待处理登录容量、损坏密文令同步批次提前退出、刷新令牌后丢失重试/恢复结果，以及批量 Profile/PAT/OAuth 授权的平方级计算。
-- 密钥轮换使用已验证 Discovery 的 JWKS 端点、有限突发预算与独立失败退避；有效缓存密钥优先使用，保持原签名及权限校验。
+- 新增显式 `workbench` 入口和只读 `project_query`、`task_query`，复用已有授权、项目与任务选择；支持全局/会话入口的宿主可打开工作台，不自动执行命令或发起模型回合。
+- 为核心工具提供覆盖成功、错误、持久等待和原生媒体的输出 schema，修复交付物时间戳与搜索错误码的变体冲突；补充真实 HTTP、SDK、Hub/Agent 与 Chromium/WebKit 回归。
+- 支持经能力协商的 MCP 2026 Tasks：原生 `exec` 绑定原操作和创建 grant，查询、取消和返回前重验权限，终态原子冻结；旧客户端继续使用原持久回执。
+- 工作台可由用户主动添加有限的项目文件片段到选定上下文，重新核验项目权限和文件 SHA；处理切换、隐藏、取消与宿主移除事件，避免迟到内容恢复旧选择。
+- 为 MCP HTTP 请求增加服务端关联 ID 与限量分阶段诊断，辅助定位认证、协议、执行和传输中断；不新增记录参数、命令、令牌或异常正文，也不把断开连接当作取消。
+- 原生 MCP 默认按工作区/执行节点呈现，收敛执行账户、系统类型、真实根目录、工具安装路径和技能目录摘要；节点名称使用稳定代号。直接返回、轮询、Tasks 和项目资源使用同一投影，保留项目/工作目录绑定、真实权限、源码、日志及原始审计。
+- 修复 MCP 网关复用过期固定 DNS 会话的问题，撤销旧连接并保留后端与授权边界。
+- SDK 兼容测试环境固定 pip 26.2.1，避免继承 Python 自带的旧安装器；依赖继续通过哈希锁安装和审计。
+- **升级说明：** 更新后刷新客户端工具目录；项目根目录 `.` 以项目或 `workspace_id` 为作用域，技能摘要通过 `skill_id` 读取。新增 MCP Tasks schema 1 保留现有操作与身份；升级前备份数据库及配套密钥，回退使用配套源码和备份。
+- 宿主元数据收敛不提供匿名化或 OS 沙箱保证；源码、命令输出、显式技能资源和原生界面仍可能显示环境。宿主扩展支持、实际 Hub/Agent 部署及真实设备升级需单独验证。
 
-- 接入通用 OIDC 授权码/S256 PKCE、签名/issuer/subject/nonce/audience 校验、服务端加密状态、显式账号关联和退出处理；禁止按邮箱自动合并，JIT 默认关闭并保留本机恢复账号。
-- 新增个人/团队 Space、来源可追溯的成员及角色分配、私有 Profile、OIDC 群组映射和有时效的权限校验；普通面板用户不再自动变成管理员。
-- 共用动态 Role 在当前 Space 内实时增减能力与项目，已有明确同意的角色连接无需重新授权；保留旧 fixed grant 语义与稳定身份。
-- 为项目、VPS、设备、操作、工作流、交付物、原生会话、审计和事件添加归属/访问检查；等待、派送和缓存流逐项重验，避免撤权后读到迟到结果。
-- schema 9 迁移保留既有 ID、Token、设备密钥和主密钥；别名及操作/工作流请求键按 Space 隔离，禁止在原地跨 Space 重定向资源。
-- 新增本机设备自助注册/归属、原生私有会话能力检查、用户/空间暂停、最后主理人/本机恢复管理员保护，以及原布局内的身份和成员管理界面。
-- 增加多用户、OIDC 协议、真实临时 Hub/Agent、浏览器矩阵和独立 Authentik 验收；完整原 CI 保留，不以局部套件替代全量验证。
-- 提供升级、群组/撤权、备份回退和恢复说明；此条目不是生产部署或特定 ChatGPT 宿主配置成功的声明。
+## 1.15.1 — 2026-09-30 — Agent 心跳与服务恢复稳定性
 
-## Unreleased — 动态角色与 Access Profiles
+- 媒体到期清理使用独立 SQLite WAL 连接在后台执行，不再阻塞 Agent 心跳和会话撤权检查；同一时刻仅运行一批清理。
+- 为媒体到期字段建立局部索引，避免每轮清理重新扫描和解析全部历史文件读取结果；保留执行回执及确认状态。
+- 识别现有与旧名称 macOS launchd 服务并启用事件循环 watchdog；新安装的 macOS/Linux 服务显式启用相同恢复机制，不改变旧服务命令或配置身份。
+- 增加历史规模预算、后台清理不阻塞 Journal/租约监控、旧服务识别和安装器配置回归。
+- 此版本仅发布源码及镜像；现有 Hub/Agent 部署和真实设备升级验收独立进行。
 
-- Profile 与共用 Role 分离；明确同意角色模式后，已有连接跟随当前项目/能力政策，支持全部未来项目、逐规则排除和本角色创建的项目。
-- 新增 codepier.role_access OAuth 范围、角色管理页、显式确认、版本/幂等及前后审计；旧 fixed grant 不静默转换。
-- 按具体操作与资源配对授权，防止「全项目读取 + A 执行」串成全项目执行。等待结果、派送、工作流及创建提交重新验权。
-- 新增 devices_list/projects_create 管理委派，限制设备、路径、映射模式及任务，保留 Agent 本机否决，防止用重叠映射绕过项目授权。
-- schema 7 增量迁移保留旧授权及主密钥。角色暂停返回政策拒绝而非反复 OAuth；重新绑定另一角色需要再次明确同意。
-- 新增真实临时 Hub/Agent、OAuth、迁移和浏览器矩阵测试；未声明生产部署或真实 ChatGPT 宿主验收。
+## 1.15.0 — 2026-09-30 — 多用户身份、OIDC、MCP 网关与容器发布
 
-### Access Profiles 基础
+- 合并 PR #14，保留 1.14.4 的排队、附件恢复和浏览器时序修复，同时保留未开始任务撤权与原生会话安全协议。
+- 新增个人/团队 Space、共享动态角色、私有 Access Profile 和稳定身份工具。项目、设备、操作、会话、产物及审计按身份与 Space 隔离，派送及返回结果前重验当前权限。
+- 角色授权需要明确同意；旧 fixed grant 不静默转换。新增项目/设备管理委派，限制设备、目录、模式和任务，保留 Agent 本机权限约束。
+- 接入 OIDC 授权码/S256 PKCE、签名与声明校验、显式账号关联、群组同步、撤权和本地恢复账号。支持环境变量播种提供者，以及显式开启首次登录管理员初始化。
+- 新增多 MCP 网关：经审核的命名空间工具、按后端账号隔离连接、每 grant 明确同意、实时角色校验和加密回执。网关启用不扩大既有授权，未知结果不会自动重放。
+- 新增 GHCR linux/amd64 与 linux/arm64 镜像、SBOM 和构建来源证明；发布前验证空卷启动、健康、版本、Agent 清单与非 root 身份。
+- 新增 k3s 单副本 Recreate/local-path 部署清单，使用主仓库当前镜像；只读根文件系统、最小 capabilities 和限制 Traefik 入口的 NetworkPolicy，不启用宿主机面板更新器。
+- 修复用户停用事务阻塞事件循环、恢复管理员初始化覆盖已有 SSO 账号、协议合并丢失及故障 fixture 与 IAM 数据结构不兼容的问题。PyJWT 升至 2.15.0，哈希锁文件经仓库脚本生成。
+- **升级与回退：** IAM schema 10 / gateway schema 1 保留既有 ID、Token、设备密钥与 master.key；升级前备份完整数据库及配套密钥。回退必须恢复旧源码及旧备份，不能让旧版本直接打开新 schema。
+- **OIDC 群组兼容：** 群组策略只接受 UserInfo 的群组字段；仅 ID Token groups 不足以授权，Microsoft Entra UserInfo 的群组限制不受支持。保留本地恢复登录，升级前验证提供者映射。
+- 正式发布交付两种源码 ZIP、逐文件清单和版本化镜像；生产部署、真实设备升级及 k3s 集群验收独立进行。详细能力和迁移见多用户、角色及网关指南。
 
-- 新增 owner 管理的稳定 Access Profile 身份、OAuth/PAT 绑定、管理页面和授权选择器。
-- 新增已认证 MCP `get_profile`（OpenAI profile 标记）与 `get_access_context`，完整/编码目录均可使用。
-- 有效权限为原 grant 同意与当前 Profile 上限的交集；停用、刷新、派送前复核和跨 grant 归属继续保留。
-- schema 6 增量迁移不重绑定旧授权；传统批量范围设置排除 Profile grant，避免绕过原同意。
-- 新增身份稳定性、越权、撤权、迁移、并发和桌面/手机浏览器回归。未声明生产部署或真实 ChatGPT 宿主验收。
+## 1.14.4 — 2026-09-30 — 排队、附件恢复与工作区时序修复
+
+- 下载和 DNS 等待不再持有全局文件写锁；目标路径继续互斥，原子发布前复核授权、路径和文件身份。DNS 解析具有调用时限和并发上限。
+- 修复公开 exec 具名任务绕过本地独占/读并发策略；目录树、搜索和批量读取按实际路径排队，取消等待中的只读请求不会中断正在提交的写入。
+- 新增经连接能力协商的未开始任务撤权保护；Agent 原子判断 accepted 状态，保留 running/finishing 和真实终态。旧 Agent 仍只查询回执，不承诺新撤权语义。
+- 原生附件先持久保存身份与配额预留，再创建文件；覆盖插入/提交失败、崩溃和同 ID 重试。旧无记录文件保留并给出恢复指引，不自动删除或覆盖。
+- 导入错误的来源主机、失败阶段、HTTP 状态和恢复提示完整通过 Agent/Hub 持久回执传递；严格白名单排除下载票据、对象路径和文件 ID。
+- 搜索和备份历史响应绑定项目、工作区、会话、导航及弹窗生命周期，防止旧响应覆盖新页面、过期点击和恢复完成后的错误刷新。
+- 统一 macOS 大小写路径互斥，保留已结束阻塞者的授权诊断链；回归规划器以一次模块索引替代重复全表扫描。
+- 新增故障注入、取消/重连、浏览器时序和一万用例规划预算回归。发布验证与现用服务升级分别记录，本次源码不自动更新 Hub/Agent。
+
 ## 1.14.3 — 2026-09-26 — 原生附件导入兼容与失败恢复
 
 - 修复真实宿主文件指向已核验的 Azure 存储账户时，被旧默认来源列表拒绝的问题；统一配置与下载的来源策略，只增加精确主机，不放行整个云存储域名。

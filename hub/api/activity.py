@@ -6,7 +6,6 @@ import asyncio
 import csv
 import io
 import json
-import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from fastapi import Query, Request
@@ -103,17 +102,25 @@ def make_activity_router(context: HubContext):
 
     @router.get("/api/events")
     async def events(request: Request):
-        def session_snapshot():
-            with store.lock:
-                return auth.session(request), auth.panel(request), store.session_revision
-        session, principal, revision = await store.run(session_snapshot)
+        def snapshot(item=None):
+            # One current authority decision for each frame/idle heartbeat.
+            # Only an invalidation marker, never old event data, crosses a
+            # lost-membership/session boundary.
+            with iam.read_scope(store):
+                principal = auth.panel(request)
+                permissions = iam.project_permissions(store, principal)
+                access = frozenset((project, action) for project, actions in permissions.items() for action in actions)
+                access |= frozenset(('@', flag) for flag, allowed in [
+                    ('space_admin', principal.admin), ('instance_admin', principal.instance_admin)] if allowed)
+                visible = item is not None and iam.event_visible(runtime, principal, item)
+                return access, visible
+        access, _ = await store.run(snapshot)
         if len(runtime.watchers) >= 100:
             raise DevError("TOO_MANY_STREAMS", "实时连接过多", 429)
         q = asyncio.Queue(maxsize=100)
         runtime.watchers.add(q)
         async def stream():
-            nonlocal session, principal, revision
-            next_check = time.monotonic() + 15
+            nonlocal access
             try:
                 yield "event: ready\ndata: {}\n\n"
                 while not runtime.stopping:
@@ -123,28 +130,19 @@ def make_activity_router(context: HubContext):
                         item = await asyncio.wait_for(q.get(), 15)
                     except asyncio.TimeoutError:
                         item = None
-                    if time.time() >= session["expires"]:
+                    try:
+                        current_access, visible = await store.run(snapshot, item)
+                    except DevError:
+                        yield "event: access_revoked\ndata: {}\n\n"
                         break
-                    # Session writes invalidate immediately in-process; a local
-                    # CLI reset/independent writer is detected within 15 seconds.
-                    if revision != store.session_revision or time.monotonic() >= next_check:
-                        try:
-                            session, principal, revision = await store.run(session_snapshot)
-                        except DevError:
-                            break
-                        next_check = time.monotonic() + 15
+                    if not access <= current_access:
+                        yield "event: access_revoked\ndata: {}\n\n"
+                        break
+                    access = current_access
                     if item is None:
                         yield ": heartbeat\n\n"
-                    else:
-                        def visible_event():
-                            current = auth.panel(request)
-                            return iam.event_visible(runtime, current, item)
-                        try:
-                            visible = await store.run(visible_event)
-                        except DevError:
-                            break
-                        if visible:
-                            yield "data: " + json.dumps({k:v for k,v in item.items() if k != '_audience'}, ensure_ascii=False) + "\n\n"
+                    elif visible:
+                        yield "data: " + json.dumps({k:v for k,v in item.items() if k != '_audience'}, ensure_ascii=False) + "\n\n"
             finally:
                 runtime.watchers.discard(q)
         class EventStream(StreamingResponse):

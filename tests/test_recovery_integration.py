@@ -1,6 +1,7 @@
 """Real-process disruption tests, not a live ChatGPT or Oracle deployment."""
 from __future__ import annotations
 import concurrent.futures
+from contextlib import closing
 import copy
 import json
 import os
@@ -13,14 +14,14 @@ from pathlib import Path
 import pytest
 from hub.store import Store
 from shared.util import atomic_json
-from tests.support import wait_for
+from tests.support import wait_for, wait_for_agent
 
 
 def key(): return uuid.uuid4().hex
 
 
 def online(s):
-    return any(d['id']==s.device and d['online'] for d in s.client.get('/api/devices').json()['devices'])
+    return any(d['id']==s.device and d['online'] for d in s.client.get('/api/devices',timeout=1).json()['devices'])
 
 
 def abrupt_hub_stop(s):
@@ -28,11 +29,13 @@ def abrupt_hub_stop(s):
 
 
 def restart_hub(s):
-    s.start_hub();wait_for(lambda:online(s),timeout=20)
+    s.start_hub()
+    # A healthy Hub can appear during the original Agent's valid 30–31 s backoff.
+    wait_for_agent(s.agent,lambda:online(s))
 
 
 def agent_record(s,id):
-    with sqlite3.connect(s.directory/'agent-state'/'agent.sqlite3') as db:
+    with closing(sqlite3.connect(s.directory/'agent-state'/'agent.sqlite3')) as db:
         db.row_factory=sqlite3.Row
         row=db.execute('SELECT * FROM calls WHERE id=?',(id,)).fetchone()
         return dict(row) if row else None

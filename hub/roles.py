@@ -389,6 +389,7 @@ def make_roles_router(auth, runtime):
                 row = store.one('SELECT * FROM access_roles WHERE id=?', (identifier,))
                 profile_audit(store, owner.actor, 'role.updated', identifier, {'before': before, 'after': public_role(row, store), 'applies_to_existing_role_grants': True})
         runtime.wake_delivery()
+        runtime.publish('iam', {'space_id': owner.space_id})
         return public_role(row, store)
 
     return router

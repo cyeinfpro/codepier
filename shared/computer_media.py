@@ -15,6 +15,11 @@ MAX_CONTENT_BYTES = 5 * 1024 * 1024
 MAX_TEXT_CHARS = 100000
 MEDIA_TTL_SECONDS = 900
 
+# `read` can contain either an ordinary file or desktop media. Index the expiry
+# once instead of parsing every historical file result on each cleanup tick.
+MEDIA_PENDING = "(tool LIKE 'computer_%' OR tool IN ('browser_snapshot','read')) AND result IS NOT NULL AND COALESCE(json_extract(result,'$.data.media_expired'),0)=0"
+MEDIA_EXPIRY = "json_extract(result,'$.data.computer_expires_at')"
+
 
 def dimensions(raw: bytes, mime: str):
     if mime == 'image/png' and raw.startswith(b'\x89PNG\r\n\x1a\n') and len(raw) >= 24:
@@ -146,10 +151,10 @@ def purge_database(db, table: str, now: float | None = None):
     if table not in {'calls', 'operations'}:
         raise ValueError('Unknown result table')
     now = time.time() if now is None else now
-    # SQLite JSON functions are available in supported Python builds; avoid touching non-computer rows.
-    rows = db.execute(f"SELECT id FROM {table} WHERE (tool LIKE 'computer_%' OR tool IN ('browser_snapshot','read')) AND result IS NOT NULL "
-                      "AND json_extract(result,'$.data.computer_expires_at')<=? "
-                      "AND COALESCE(json_extract(result,'$.data.media_expired'),0)=0 LIMIT 64", (now,)).fetchall()
+    # Both predicates must match the partial index. Scrubbing removes the row
+    # from the index while retaining its receipt and acknowledgement state.
+    db.execute(f"CREATE INDEX IF NOT EXISTS {table}_media_expiry ON {table}({MEDIA_EXPIRY}) WHERE {MEDIA_PENDING}")
+    rows = db.execute(f"SELECT id FROM {table} WHERE {MEDIA_PENDING} AND {MEDIA_EXPIRY}<=? LIMIT 64", (now,)).fetchall()
     for row in rows:
         stored = db.execute(f'SELECT result FROM {table} WHERE id=?', (row['id'],)).fetchone()
         if not stored:

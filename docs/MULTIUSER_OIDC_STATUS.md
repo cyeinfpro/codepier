@@ -1,5 +1,7 @@
 # Multi-user / OIDC implementation and acceptance
 
+> Historical implementation record from the contribution branch. The features were merged in upstream PR #14 and are included in 1.15.0. Current release validation is recorded in the GitHub Release; the older acceptance counts and unreleased status below describe that earlier checkpoint.
+
 The planned first-release application paths are implemented on PR #3. This is
 not the earlier standalone policy prototype. Use the **current exact-head CI
 results on the PR** as the acceptance record; older passing subsets are not a

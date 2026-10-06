@@ -10,6 +10,7 @@ from hub.mcp_apps import attach
 from shared.contracts import TOOLS, tool_definitions
 from shared.integration_contracts import REMOTE_TOOLS
 from shared.core_contracts import CORE_TOOLS
+from shared.query_contracts import QUERY_TOOLS
 from shared.util import DevError
 from tests.test_agentdock_workflows import env, call, create, update, operation
 
@@ -173,21 +174,20 @@ def test_distribution_allows_only_reviewed_dashboard_evidence():
     for path in (prefix/'raw.log', prefix/'fixture-credentials.json', prefix/'screenshots/private.png',
                  Path('web/fonts/private.woff2'), Path('web/fonts/private.ttf'), Path('.env')):
         assert not include(path)
-    for path in ('hub/workspace_status.py', 'web/mcp-apps/dashboard.js', 'web/mcp-apps/ui.js'):
+    for path in ('hub/workspace_status.py', 'web/mcp-apps/ui.js'):
         assert include(Path(path))
 
 
-def test_app_only_catalog_and_explicit_workflow_widget_binding(env):
+def test_dashboard_query_and_workflow_remain_available_without_widget(env):
     assert TOOLS['workspace_status'].local and TOOLS['workspace_status'].scope == 'read'
     assert 'workspace_status' not in REMOTE_TOOLS
     for profile in ('full', 'coding'):
         tools = {tool['name']: tool for tool in tool_definitions(profile)}
         assert 'workspace_status' not in tools
         assert tools['workspace']['_meta']['ui']['visibility'] == ['model', 'app']
-    assert set(t['name'] for t in tool_definitions('coding')) == CORE_TOOLS | {'get_profile','get_access_context'}
+    assert set(t['name'] for t in tool_definitions('coding')) == CORE_TOOLS | QUERY_TOOLS | {'get_profile','get_access_context'}
     receipt = create(env)
     value = call(env, 'workflows_get', workflow_id=receipt['workflow_id'])
     bound = attach({'structuredContent': value}, 'workflows_get', {'workflow_id': receipt['workflow_id']}, value, lambda: 'https://panel.example')
-    meta = bound['_meta']['com.codepier/binding']
-    assert meta['project'] == 'P' and meta['workflow_id'] == receipt['workflow_id'] and meta['kind'] == 'workspace'
+    assert bound == {'structuredContent': value}
     assert tools['workspace']['securitySchemes'][0]['scopes'] == ['read']

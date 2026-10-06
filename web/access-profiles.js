@@ -12,7 +12,7 @@ window.CodePierProfiles = (() => {
           `<div class="grant-row"><div><h3>${esc(p.label)} <span class="badge ${p.enabled ? 'purple' : 'neutral'}">${p.enabled ? '已启用' : '已停用'}</span></h3><p>${p.role_id ? '角色：' + esc(p.role?.label || p.role_id) + ' · 新角色连接跟随当前政策' : esc(p.scopes.map((s) => scopeNames[s]).join(' / '))} · ${esc(p.all_projects ? '全部现有及未来项目' : p.projects.map((id) => S.projects.find((x) => x.id === id)?.alias || '已移除项目').join(', '))}</p><small class="mono">${esc(p.id)}</small></div><button class="btn small" data-profile-edit="${esc(p.id)}">编辑 / 停用</button></div>`,
       )
       .join('');
-    return `<div id="profiles-page">${heading('访问 Profiles', 'ACCESS PROFILES / CONNECTION IDENTITY', '', `<button class="btn primary" id="profile-create">${icon('key')}新建 Profile</button>`)}${notice(boundary)}<section class="panel"><div class="panel-head"><h2>可重复连接的权限身份</h2><span class="badge neutral">${result.profiles.length} / ${result.limit}</span></div><div class="panel-body"><p class="form-note">先建立例如「NewAPI Dev」「Codex Review」，再在 OAuth 或创建 PAT 时选择。名称可改，身份 ID 不变。绑定角色的新连接可动态增减权限和项目；传统固定连接仍按原 grant 上限。停用会拒绝后续调用和尚未派送的操作，已开始的任务不会自动停止。</p>${cards || empty('还没有 Profile；现有连接继续按原 grant 授权。')}</div></section><div class="actions"><button class="btn ghost" data-nav="connect">查看 MCP 连接</button></div></div>`;
+    return `<div id="profiles-page">${heading('访问 Profiles', 'ACCESS PROFILES / CONNECTION IDENTITY', '', `<button class="btn primary" id="profile-create">${icon('key')}新建 Profile</button>`)}${notice(boundary, true)}<section class="panel"><div class="panel-head"><h2>可重复连接的权限身份</h2><span class="badge neutral">${result.profiles.length} / ${result.limit}</span></div><div class="panel-body"><p class="form-note">先建立例如「NewAPI Dev」「Codex Review」，再在 OAuth 或创建 PAT 时选择。名称可改，身份 ID 不变。绑定角色的新连接可动态增减权限和项目；传统固定连接仍按原 grant 上限。停用会拒绝后续调用和尚未派送的操作，已开始的任务不会自动停止。</p>${cards || empty('还没有 Profile；现有连接继续按原 grant 授权。')}</div></section><div class="actions"><button class="btn ghost" data-nav="connect">查看 MCP 连接</button></div></div>`;
   }
   function bind() {
     $('#profile-create').onclick = () => edit();
@@ -31,7 +31,7 @@ window.CodePierProfiles = (() => {
       const key = crypto.randomUUID();
       const dialog = modal(
         saved ? '编辑访问 Profile' : '新建访问 Profile',
-        `<form id="profile-form"><div class="field"><label for="profile-label">名称</label><input id="profile-label" name="label" required maxlength="80" value="${esc(saved?.label || '')}" placeholder="例如 NewAPI Dev / Codex Review"></div><div class="field"><label class="check"><input name="enabled" type="checkbox" ${!saved || saved.enabled ? 'checked' : ''}>启用此身份</label></div><div class="field"><label for="profile-role">关联角色</label><select id="profile-role" name="role_id"><option value="">不关联（固定授权）</option>${roles.map((role) => `<option value="${esc(role.id)}" ${saved?.role_id === role.id ? 'selected' : ''}>${esc(role.label)}${role.enabled ? '' : ' · 已暂停'}</option>`).join('')}</select><small>关联角色不会静默转换旧 grant。改绑另一个角色会令旧角色连接失效，需要明确重新授权。</small></div><div data-fixed-policy>${permissionsHTML(S.projects, allScopes, {})}</div><p class="form-note">${esc(boundary)}</p><p class="form-note">固定连接仍取首次同意与 Profile 上限的交集；角色连接跟随关联角色的最新政策，包括新增项目。停用身份不等于停止命令，重新启用也不会复活已撤销的 grant。</p><p id="profile-save-status" class="form-note" role="status"></p></form>`,
+        `<form id="profile-form" class="profile-editor-grid"><section class="form-section"><h3>连接身份</h3><div class="field"><label for="profile-label">名称</label><input id="profile-label" name="label" required maxlength="80" value="${esc(saved?.label || '')}" placeholder="例如 NewAPI Dev / Codex Review"></div><div class="field"><label class="check"><input name="enabled" type="checkbox" ${!saved || saved.enabled ? 'checked' : ''}>启用此身份</label></div><div class="field"><label for="profile-role">关联角色</label><select id="profile-role" name="role_id"><option value="">不关联（固定授权）</option>${roles.map((role) => `<option value="${esc(role.id)}" ${saved?.role_id === role.id ? 'selected' : ''}>${esc(role.label)}${role.enabled ? '' : ' · 已暂停'}</option>`).join('')}</select><small>关联角色不会静默转换旧 grant。改绑另一个角色会令旧角色连接失效，需要明确重新授权。</small></div></section><section class="form-section" data-fixed-policy><h3>固定授权范围</h3>${permissionsHTML(S.projects, allScopes, {})}</section><section class="form-section" data-role-policy hidden><h3>当前角色政策</h3><div data-role-summary></div><p class="form-note">角色的后续能力与项目变化会作用于已同意的角色连接。</p></section><section class="form-section form-review profile-policy-note"><h3>影响范围</h3><p class="form-note">${esc(boundary)}</p><p class="form-note">固定连接仍取首次同意与 Profile 上限的交集；角色连接跟随关联角色的最新政策，包括新增项目。停用身份不等于停止命令，重新启用也不会复活已撤销的 grant。</p><p id="profile-save-status" class="form-note" role="status"></p></section></form>`,
         `<button class="btn ghost" data-action="close-modal">取消</button><button class="btn primary" type="submit" form="profile-form">保存 Profile</button>`,
       );
       const form = $('#profile-form', dialog),
@@ -50,6 +50,10 @@ window.CodePierProfiles = (() => {
         fixed = $('[data-fixed-policy]', dialog);
       const updateMode = () => {
         fixed.hidden = !!roleSelect.value;
+        $('[data-role-policy]', dialog).hidden = !roleSelect.value;
+        $('[data-role-summary]', dialog).innerHTML = roleSelect.value
+          ? CodePierRoles.summary(roles.find((role) => role.id === roleSelect.value))
+          : '';
       };
       roleSelect.onchange = updateMode;
       updateMode();

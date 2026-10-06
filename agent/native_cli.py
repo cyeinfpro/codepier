@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -537,6 +538,32 @@ class NativeCLI:
             raise ValueError('Unsafe attachment path')
         return row
 
+    def materialize_upload(self, row):
+        """Materialize only a durable reservation; never adopt an unregistered file."""
+        path = Path(row['path'])
+        path.parent.mkdir(mode=0o700, exist_ok=True)
+        if path.parent.is_symlink():
+            raise ValueError('Unsafe upload directory')
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            if row['received'] or row['ready']:
+                raise DevError('ATTACHMENT_RECOVERY_REQUIRED',
+                               '已接收的附件文件丢失；请检查本机存储并重新选择附件',409,
+                               recovery='inspect_local_upload')
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os,'O_NOFOLLOW',0), 0o600)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ValueError('Unsafe attachment file')
+        if not row['received'] <= info.st_size <= row['size']:
+            raise DevError('ATTACHMENT_RECOVERY_REQUIRED',
+                           '附件文件与上传记录不一致；请检查本机存储并重新选择附件',409,
+                           recovery='inspect_local_upload')
+
     def upload(self,db,action,project,root,args):
         if action=='upload_list':
             result=[]
@@ -561,6 +588,7 @@ class NativeCLI:
             if old:
                 self.file_row(db,fid,project,root)
                 if (old['name'],old['size'],old['sha'])!=(name,size,sha): raise ValueError('Upload ID conflict')
+                self.materialize_upload(old)
                 return {'file':fid,'received':old['received'],'ready':bool(old['ready'])}
             if db.execute('SELECT COALESCE(sum(size),0) FROM attachments').fetchone()[0]+size>200*1024*1024:
                 raise DevError('ATTACHMENT_QUOTA','附件预留空间达到 200 MiB；请清理附件',409)
@@ -569,9 +597,24 @@ class NativeCLI:
             suffix=Path(name).suffix.lower()
             if not re.fullmatch(r'\.[a-z0-9]{1,8}',suffix): suffix='.bin'
             path=folder/(fid+suffix)
-            fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600); os.close(fd)
+            # A legacy orphan has no ownership proof. Preserve it and return a
+            # recovery action instead of deleting, overwriting, or adopting it.
+            if any(folder.glob(fid+'.*')) or db.execute('SELECT 1 FROM session_files WHERE file=?',(fid,)).fetchone():
+                raise DevError('ATTACHMENT_RECOVERY_REQUIRED',
+                               '此上传编号存在未登记文件或会话引用；请移除待发送附件后重新选择，并在本机检查遗留文件',409,
+                               recovery='reselect_attachment')
             db.execute('INSERT INTO attachments(id,project_id,root,name,size,sha,path) VALUES (?,?,?,?,?,?,?)',(fid,project['id'],str(root),name,size,sha,str(path)))
-            return {'file':fid,'received':0,'ready':False}
+            # Reserve identity and quota durably BEFORE touching the file. A
+            # failed INSERT/commit leaves no file; a later crash leaves a
+            # registered zero-byte upload that the same ID can safely resume.
+            db.commit()
+            db.execute('BEGIN IMMEDIATE')
+            # Another connection may have resumed/deleted this reservation
+            # while the transaction was released. Recheck ownership and inputs.
+            row=self.file_row(db,fid,project,root)
+            if (row['name'],row['size'],row['sha'])!=(name,size,sha): raise ValueError('Upload ID conflict')
+            self.materialize_upload(row)
+            return {'file':fid,'received':row['received'],'ready':bool(row['ready'])}
         row=self.file_row(db,fid,project,root)
         if action=='upload_bind':
             sid=identifier(args.get('id'))
