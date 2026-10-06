@@ -108,24 +108,7 @@ window.CodePierIdentity = (() => {
     S.space_id = id;
     S.session = { ...S.session, spaces: me.spaces };
     S.renderSeq++;
-    Object.assign(S, {
-      overview: null,
-      projects: [],
-      devices: [],
-      settings: null,
-      grants: [],
-      integrations: null,
-      workflow: null,
-      delivery: null,
-      vps: [],
-      vpsQuery: '',
-      vpsProject: '',
-      auditOffset: 0,
-      auditQuery: '',
-      auditStatus: '',
-      auditSource: '',
-      uiProjectQuery: '',
-    });
+    clearSpaceSnapshots();
     S.suspendedUser = null;
     sessionValue('codepier-integration-receipts', null);
     sessionValue('codepier-space:' + me.id, id);
@@ -146,6 +129,12 @@ window.CodePierIdentity = (() => {
       stopEvents();
       window.CodePierCallLog?.clear();
       window.CodePierGateway?.reset();
+      window.CodePierPanelUpdate?.detach();
+      window.CodePierIntegrations?.detach();
+      if (typeof stopComputerApprovals === 'function') stopComputerApprovals();
+      clearTimeout(S.poll);
+      S.poll = null;
+      clearSpaceSnapshots();
       S.space_id = null;
       S.session = { ...S.session, spaces: me.spaces };
       S.renderSeq++;
@@ -173,7 +162,7 @@ window.CodePierIdentity = (() => {
         status.textContent = '正在保存…';
         try {
           const result = await save(form);
-          if (S.session !== login || S.space_id !== space) return;
+          if (S.session !== login || S.space_id !== space || !dialog.isConnected) return;
           closeModal(dialog);
           if (options.done) await options.done(result);
           else {
@@ -212,13 +201,13 @@ window.CodePierIdentity = (() => {
           me.display_name,
           `<button class="btn primary" data-iam="new-space">新建团队空间</button><button class="btn" data-iam="accept-invite">接受邀请</button>`,
         ) +
-        `<section class="panel"><div class="panel-head"><h2>空间</h2></div><div class="panel-body"><p class="form-note">空间选择仅作用于当前标签页。MCP 连接固定绑定授权空间，不会跟随这里的切换。</p>${me.spaces.map((s) => `<div class="grant-row"><div><h3>${esc(s.label)}</h3><small>${esc(levels[s.level])} · ${esc(s.kind)}</small></div><button class="btn small" data-iam-space="${esc(s.id)}">${s.id === S.space_id ? '当前空间' : '进入空间'}</button></div>`).join('') || empty('目前没有可用空间。')}${(me.disabled_spaces || []).map((s) => `<div class="grant-row"><span>${esc(s.label)} · 已停用</span><button class="btn" data-iam-restore="${esc(s.id)}">恢复空间</button></div>`).join('')}</div></section>` +
+        `<section class="panel"><div class="panel-head"><h2>空间</h2></div><div class="panel-body"><p class="form-note">空间选择仅作用于当前标签页。MCP 连接固定绑定授权空间，不会跟随这里的切换。</p>${me.spaces.map((s) => `<div class="grant-row"><div><h3>${esc(s.label)}</h3><small>${esc(levels[s.level])} · ${s.kind === 'team' ? '团队空间' : '个人空间'}</small></div><button class="btn small" data-iam-space="${esc(s.id)}">${s.id === S.space_id ? '当前空间' : '进入空间'}</button></div>`).join('') || empty('目前没有可用空间。')}${(me.disabled_spaces || []).map((s) => `<div class="grant-row"><span>${esc(s.label)} · 已停用</span><button class="btn" data-iam-restore="${esc(s.id)}">恢复空间</button></div>`).join('')}</div></section>` +
         `<section class="panel"><div class="panel-head"><h2>登录身份</h2></div><div class="panel-body"><p>${me.local_login ? '本地密码登录已启用。' : '本账号仅使用外部身份登录。'}</p>${me.identities.map((i) => `<div class="grant-row"><div><strong>${esc(i.label)}</strong><p>${i.enabled ? '已关联' : '已停用 / 已解除关联'} · 权限有效至 ${esc(timeText(i.fresh_until))}</p></div><button class="btn danger small" data-iam-unlink="${esc(i.id)}">解除关联</button></div>`).join('')}<div class="actions">${providers.map((p) => `<button class="btn" data-iam-link="${esc(p.id)}">关联 ${esc(p.label)}</button><a class="btn ghost" href="/auth/oidc/${encodeURIComponent(p.id)}/start?return_to=%2F%23identity">重新认证</a>`).join('')}</div><p class="form-note">关联 / 解除关联要求近期登录。不会按邮箱自动合并账号；解除关联会撤销该身份的会话和 MCP 凭据。</p></div></section>` +
         `<section class="panel"><div class="panel-head"><h2>登录会话</h2></div><div class="panel-body">${sessionData.sessions.map((s) => `<div class="grant-row"><div><strong>${s.id === sessionData.current ? '当前浏览器' : '其他浏览器'}</strong><p>到期 ${esc(timeText(s.expires))}</p></div><button class="btn danger small" data-iam-session="${esc(s.id)}">退出此会话</button></div>`).join('')}</div></section>`
       );
     }
     if (page === 'members') {
-      if (!admin()) return notice('只有空间管理员可以管理成员与角色分配。');
+      if (!admin()) return uiPermissionState('空间成员', '只有空间管理员可以管理成员与角色分配。');
       const sid = encodeURIComponent(S.space_id),
         out = await Promise.all([
           api(`/api/iam/spaces/${sid}/members`),
@@ -242,7 +231,7 @@ window.CodePierIdentity = (() => {
         `<section class="panel"><div class="panel-head"><h2>邀请</h2></div><div class="panel-body">${invites.map((i) => `<div class="grant-row"><span>${esc(levels[i.level])} · ${i.used_by ? '已使用' : '未使用'} · ${esc(timeText(i.expires))}</span><button class="btn danger small" data-iam-invite="${esc(i.id)}">撤销</button></div>`).join('') || empty('没有邀请。')}</div></section>`
       );
     }
-    if (!me.instance_admin) return notice('需要实例管理员权限。');
+    if (!me.instance_admin) return uiPermissionState('身份管理', '需要实例管理员权限。');
     const out = await Promise.all([api('/api/iam/users'), api('/api/iam/oidc/providers')]);
     users = out[0].users;
     providers = out[1].providers;
@@ -312,6 +301,7 @@ window.CodePierIdentity = (() => {
   function providerEdit(id) {
     const p = providers.find((p) => p.id === id);
     const body =
+      '<div class="form-sections"><section class="form-section"><h3>连接信息</h3><p class="form-note">先填写身份提供者的基本连接信息。</p><div class="form-grid">' +
       field('label', '显示名称', p?.label || '', 'required maxlength="80"') +
       field('issuer', '精确 Issuer', p?.issuer || '', 'required type="url"') +
       field('client_id', 'Client ID', p?.client_id || '', 'required') +
@@ -321,26 +311,7 @@ window.CodePierIdentity = (() => {
         '',
         'type="password" autocomplete="new-password" ' + (p ? '' : 'required'),
       ) +
-      field(
-        'discovery_url',
-        'Discovery URL（留空使用默认）',
-        p?.discovery_url || '',
-        'type="url"',
-      ) +
-      field('scopes', 'OIDC scopes', p?.scopes || 'openid profile', 'required') +
-      field('group_claim', '群组 claim', p?.group_claim || 'groups', 'required') +
-      field('required_group', '允许登录的群组（可空）', p?.required_group || '') +
-      field(
-        'freshness_seconds',
-        '权限校验最大有效期（秒）',
-        p?.freshness_seconds || 900,
-        'type="number" min="60" max="86400" required',
-      ) +
-      field(
-        'endpoint_origins',
-        '额外批准的端点来源（逗号分隔）',
-        p?.endpoint_origins?.join(', ') || '',
-      ) +
+      '</div></section><section class="form-section"><h3>登录准入与群组</h3><div class="form-grid">' +
       select(
         'admission',
         '未知外部用户加入策略',
@@ -350,12 +321,36 @@ window.CodePierIdentity = (() => {
         ],
         p?.admission || 'closed',
       ) +
-      check('enabled', '启用外部登录', !!p?.enabled) +
+      field('required_group', '允许登录的群组（可空）', p?.required_group || '') +
+      field('group_claim', '群组 claim', p?.group_claim || 'groups', 'required') +
+      field(
+        'freshness_seconds',
+        '权限校验最大有效期（秒）',
+        p?.freshness_seconds || 900,
+        'type="number" min="60" max="86400" required',
+      ) +
+      '</div>' +
       notice(
         '群组限制/映射要求 UserInfo 返回字段；Microsoft Entra 的 UserInfo 不支持 groups，不能靠添加 ID Token claim 修复。请先验证兼容性；不要直接移除准入限制。',
         true,
       ) +
-      notice('使用 TLS、精确回调和 issuer。不会从邮箱自动关联账号；请保留本地恢复管理员。', true);
+      '</section><details class="form-section form-advanced"><summary>高级连接配置</summary><div class="form-grid">' +
+      field(
+        'discovery_url',
+        'Discovery URL（留空使用默认）',
+        p?.discovery_url || '',
+        'type="url"',
+      ) +
+      field('scopes', 'OIDC scopes', p?.scopes || 'openid profile', 'required') +
+      field(
+        'endpoint_origins',
+        '额外批准的端点来源（逗号分隔）',
+        p?.endpoint_origins?.join(', ') || '',
+      ) +
+      '</div></details><section class="form-section form-review"><h3>启用与安全检查</h3>' +
+      check('enabled', '启用外部登录', !!p?.enabled) +
+      notice('使用 TLS、精确回调和 issuer。不会从邮箱自动关联账号；请保留本地恢复管理员。', true) +
+      '</section></div>';
     const dialog = form(
       p ? '编辑 OIDC 提供者' : '添加 OIDC 提供者',
       body,
@@ -380,12 +375,15 @@ window.CodePierIdentity = (() => {
   }
   async function mappingEditor(id) {
     const login = S.session,
-      space = S.space_id;
+      space = S.space_id,
+      page = S.page,
+      intent = (S.modalIntent = (S.modalIntent || 0) + 1);
     const [mapping, targets] = await Promise.all([
       api('/api/iam/oidc/providers/' + id + '/mappings'),
       api('/api/iam/oidc/targets'),
     ]);
-    if (login !== S.session || space !== S.space_id) return;
+    if (login !== S.session || space !== S.space_id || page !== S.page || intent !== S.modalIntent)
+      return;
     const existing = mapping.mappings
       .map(
         (m) =>
@@ -394,11 +392,14 @@ window.CodePierIdentity = (() => {
       .join('');
     const dialog = form(
       'OIDC 群组映射',
-      existing +
+      '<section class="form-section"><h3>已有映射</h3>' +
+        (existing || '<p class="muted">尚未配置群组映射。</p>') +
+        '</section><section class="form-section"><h3>添加映射</h3>' +
         notice(
           '群组映射仅支持 UserInfo claim；仅在 ID Token 返回群组的提供者（包括 Microsoft Entra）不兼容。',
           true,
         ) +
+        '<div class="form-grid">' +
         field('group_name', '精确群组名称', '', 'required') +
         select(
           'space_id',
@@ -425,8 +426,10 @@ window.CodePierIdentity = (() => {
           ],
           '',
         ) +
+        '</div>' +
         check('may_delegate', '允许委派选定角色') +
-        notice('只移除本映射产生的资格；人工权限独立保留。群组不能授予实例管理员权限。'),
+        notice('只移除本映射产生的资格；人工权限独立保留。群组不能授予实例管理员权限。') +
+        '</section>',
       (f) =>
         post('/api/iam/oidc/providers/' + id + '/mappings', {
           group_name: f.elements.group_name.value,
@@ -450,6 +453,7 @@ window.CodePierIdentity = (() => {
         (button.onclick = () =>
           busy(button, async () => {
             await api('/api/iam/oidc/mappings/' + button.dataset.deleteMap, { method: 'DELETE' });
+            if (login !== S.session || space !== S.space_id || !dialog.isConnected) return;
             closeModal(dialog);
             await mappingEditor(id);
           })),
@@ -518,7 +522,18 @@ window.CodePierIdentity = (() => {
       (x) =>
         (x.onclick = () =>
           busy(x, async () => {
+            const login = S.session,
+              space = S.space_id,
+              page = S.page;
+            const intent = (S.modalIntent = (S.modalIntent || 0) + 1);
             const out = await post('/api/iam/oidc/providers/' + x.dataset.iamCheck + '/check');
+            if (
+              login !== S.session ||
+              space !== S.space_id ||
+              page !== S.page ||
+              intent !== S.modalIntent
+            )
+              return;
             modal(
               'OIDC 发现已验证',
               `${(out.warnings || []).map((text) => notice(esc(text), true)).join('')}<p>签名密钥：${out.signing_keys}</p><p>精确回调：</p><div class="code-box iam-wrap">${esc(out.callback)}</div><p>Back-channel logout：</p><div class="code-box iam-wrap">${esc(out.backchannel_logout)}</div>`,
@@ -657,6 +672,9 @@ window.CodePierIdentity = (() => {
   }
   return {
     loginButtons,
+    canNavigate: (page) =>
+      page === 'members' ? admin() : page === 'identity-admin' ? !!me?.instance_admin : true,
+    levelLabel: (level) => levels[level] || '用户',
     bootstrap,
     selector,
     bindShell,

@@ -92,14 +92,14 @@ def test_mcp_protocol_and_catalog(stack):
     r=stack.rpc('initialize',{'protocolVersion':'2025-11-25','capabilities':{},'clientInfo':{'name':'integration','version':'1'}})
     assert r.json()['result']['protocolVersion']=='2025-11-25'
     catalog=stack.rpc('tools/list').json()['result']['tools']
-    assert_task_catalog(catalog, 14)
+    assert_task_catalog(catalog, 13)
     overview=stack.client.get("/api/overview")
     assert overview.status_code==200
     assert overview.json()["tool_count"]==len(catalog)
     assert not {'integration_control','validations_accept'} & {t['name'] for t in catalog}
     assert stack.rpc('ping').json()['result']=={}
     resources=stack.rpc('resources/list').json()['result']['resources']
-    assert {r['uri'] for r in resources}=={'rd://projects','rd://workflow','ui://codepier/workspace-v1.html','ui://codepier/changes-v1.html'}
+    assert {r['uri'] for r in resources}=={'rd://projects','rd://workflow','ui://codepier/changes-v1.html'}
     assert 'Imago' in stack.rpc('resources/read',{'uri':'rd://projects'}).text
     assert stack.rpc('prompts/get',{'name':'review_project','arguments':{'project':'Imago'}}).json()['result']['messages']
     assert stack.mcp('read',{'project':'Imago','path':'README.md'})['structuredContent']['content'].startswith('# Imago')

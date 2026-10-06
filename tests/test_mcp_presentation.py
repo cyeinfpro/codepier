@@ -184,7 +184,7 @@ def test_http_discovery_resources_and_errors_use_one_projection(api, monkeypatch
         return client.post('/mcp', json=body, headers={
             'Authorization': 'Bearer ' + pat, 'Accept': 'application/json, text/event-stream',
             **request_headers(body)}).json()['result']
-    for name in ('workspace', 'project_query', 'workbench'):
+    for name in ('workspace', 'project_query'):
         result = call('tools/call', {'name': name, 'arguments': {}})
         assert ROOT not in json.dumps(result) and 'Private MacBook' not in json.dumps(result)
         assert result['structuredContent']['projects'][0]['root'] == '.'

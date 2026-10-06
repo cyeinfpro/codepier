@@ -87,7 +87,7 @@ def test_legacy_and_modern_protocols_are_distinct_and_share_permissions(integrat
 
 @pytest.mark.parametrize('profile', ['core', 'full', 'coding'])
 @pytest.mark.parametrize('protocol', ['legacy', 'modern'])
-def test_workbench_opener_is_renderable_from_wire_catalog(integrated_stack, profile, protocol):
+def test_text_project_queries_remain_usable_without_workbench(integrated_stack, profile, protocol):
     s = integrated_stack
     def rpc(method, params=None):
         if protocol == 'modern':
@@ -105,25 +105,19 @@ def test_workbench_opener_is_renderable_from_wire_catalog(integrated_stack, prof
         return body['result']
 
     catalog = rpc('tools/list')['tools']
-    opener = next(tool for tool in catalog if tool['name'] == 'workbench')
-    # App-only tools cannot be used as ChatGPT's model-invoked widget opener.
-    assert 'model' in opener['_meta']['ui']['visibility']
-    assert 'app' in opener['_meta']['ui']['visibility']
-    assert opener['_meta'].get('openai/visibility', 'public') == 'public'
-    assert opener['annotations']['readOnlyHint'] is True
-    assert opener['securitySchemes'] == [{'type': 'oauth2', 'scopes': ['read']}]
-    uri = opener['_meta']['ui']['resourceUri']
-    assert opener['_meta']['openai/outputTemplate'] == uri
-    assert uri in {resource['uri'] for resource in rpc('resources/list')['resources']}
-    document = rpc('resources/read', {'uri': uri})['contents'][0]
-    assert document['mimeType'] == 'text/html;profile=mcp-app'
-    assert '<script>' in document['text']
-    result = rpc('tools/call', {'name': 'workbench', 'arguments': {}})
+    definitions = {tool['name']: tool for tool in catalog}
+    assert 'workbench' not in definitions
+    assert 'ui://codepier/workspace-v1.html' not in {item['uri'] for item in rpc('resources/list')['resources']}
+    result = rpc('tools/call', {'name': 'project_query', 'arguments': {}})
     assert not result.get('isError'), result
-    Draft202012Validator(opener['outputSchema']).validate(result['structuredContent'])
-    assert result['_meta']['com.codepier/binding']['kind'] == 'workbench'
+    Draft202012Validator(definitions['project_query']['outputSchema']).validate(result['structuredContent'])
+    assert 'com.codepier/binding' not in result.get('_meta', {})
     assert result['structuredContent']['projects']
     assert all(project['root'] == '.' for project in result['structuredContent']['projects'])
+    retired = rpc('tools/call', {'name': 'workbench', 'arguments': {}})
+    assert retired['isError']
+    assert retired['structuredContent']['error']['code'] == 'TOOL_REMOVED'
+    assert 'project_query' in retired['structuredContent']['error']['message']
 
 
 def test_apps_resources_are_real_built_documents_and_bound_to_snapshots(integrated_stack):
@@ -131,18 +125,16 @@ def test_apps_resources_are_real_built_documents_and_bound_to_snapshots(integrat
     # New calls stay text-only; saved app instances can still resolve their resources.
     for profile in ('full', 'coding'):
         for definition in modern(s, 'tools/list', profile=profile).json()['result']['tools']:
-            if definition['name'] == 'workbench':
-                assert definition['_meta']['openai/ui']['entrypoints'] == [{'type': 'global'}, {'type': 'thread'}]
-                continue
             assert 'resourceUri' not in definition['_meta'].get('ui', {})
             assert 'openai/outputTemplate' not in definition['_meta']
     listing=s.rpc('resources/list').json()['result']['resources']
-    assert {'ui://codepier/workspace-v1.html','ui://codepier/changes-v1.html'}<={r['uri'] for r in listing}
+    assert 'ui://codepier/changes-v1.html' in {r['uri'] for r in listing}
+    assert 'ui://codepier/workspace-v1.html' not in {r['uri'] for r in listing}
     card=s.rpc('resources/read',{'uri':'ui://codepier/changes-v1.html'}).json()['result']['contents'][0]
     assert card['mimeType']=='text/html;profile=mcp-app' and '<script>' in card['text']
     assert card['_meta']['ui']['csp']['connectDomains']==[]
     opened=s.mcp('workspace',{'project': 'Imago', 'capture_baseline': True, 'operation': 'open'})
-    assert opened['_meta']['com.codepier/binding']['project']=='Imago'
+    assert 'com.codepier/binding' not in opened.get('_meta', {})
     data=opened['structuredContent']
     if data.get('pending'):data=s.poll(data['operation_id'])['result']['data']
     (s.imago/'card-snapshot.txt').write_text('before later changes\n')
@@ -289,3 +281,17 @@ def test_local_owner_control_is_loopback_authenticated_and_journaled(integrated_
         assert first==again and first['data']['paused']
         resumed=client.post('/control',headers=headers,json={**args,'action':'resume','idempotency_key':uuid.uuid4().hex}).json()
         assert resumed['ok'] and not resumed['data']['paused']
+
+
+def test_coding_profile_dashboard_query_keeps_scope_enforcement(integrated_stack):
+    s = integrated_stack
+    headers = {'Authorization': 'Bearer ' + s.pat, 'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream'}
+    result = s.client.post('/mcp?profile=coding', headers=headers, json={'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+        'params': {'name': 'workspace', 'arguments': {'operation':'dashboard','project': 'Imago'}}}).json()['result']
+    assert not result['isError'] and result['structuredContent']['execution_started'] is False
+    invalid = s.client.post('/api/grants', json={'label': 'dashboard-no-read', 'scopes': ['write'], 'projects': [s.project['id']], 'days': 1})
+    assert not invalid.is_success  # The owner API itself requires the base read scope.
+    grant = s.client.post('/api/grants', json={'label': 'dashboard-other-project', 'scopes': ['read'], 'projects': [s.projects[1]['id']], 'days': 1}).json()
+    denied = s.mcp('workspace', {'project': 'Imago', 'operation': 'dashboard', 'options': {}}, token_value=grant['token'])
+    assert denied['isError'] and denied['structuredContent']['error']['code'] == 'PROJECT_NOT_FOUND'
+    s.client.delete('/api/grants/' + grant['grant_id'])

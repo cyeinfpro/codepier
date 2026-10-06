@@ -1,1 +1,215 @@
-*{box-sizing:border-box}body{margin:0;padding:20px;width:360px;max-width:100vw;background:#fff;color:#242424;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}header{display:flex;gap:12px;align-items:center}header strong{font-size:22px;letter-spacing:-1px}header span,.hint,dt{color:#626262}section{border-top:1px solid #e6e6e6;margin-top:18px;padding-top:12px}h2{font-size:15px}button,input{font:inherit;border:1px solid #ccc;border-radius:9px;padding:8px 10px;background:#fff;color:inherit}button{cursor:pointer;margin:4px 4px 4px 0}button:hover{background:#f2f2f2}button:disabled{opacity:.6}input{width:100%;margin:5px 0}input[type=number]{width:64px}dd{margin:3px 0 9px;overflow-wrap:anywhere;font:12px/1.5 ui-monospace,monospace}li{overflow-wrap:anywhere}ul{padding-left:18px}#error{color:#a52121}.hint{font-size:12px}button:focus-visible,input:focus-visible{outline:2px solid #574ac0;outline-offset:2px}@media(prefers-color-scheme:dark){body{background:#222;color:#ececec}header span,.hint,dt{color:#b9b9b9}button,input{background:#292929;border-color:#555}button:hover{background:#333}section{border-color:#484848}#error{color:#ffb2b2}}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  padding: 20px;
+  width: 360px;
+  max-width: 100vw;
+  background: #fff;
+  color: #242424;
+  font:
+    14px/1.5 -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    sans-serif;
+}
+header {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+header strong {
+  font-size: 22px;
+  letter-spacing: -1px;
+}
+header span,
+.hint,
+dt {
+  color: #626262;
+}
+section {
+  border-top: 1px solid #e6e6e6;
+  margin-top: 18px;
+  padding-top: 12px;
+}
+h2 {
+  font-size: 15px;
+}
+button,
+input {
+  font: inherit;
+  border: 1px solid #ccc;
+  border-radius: 9px;
+  padding: 8px 10px;
+  background: #fff;
+  color: inherit;
+}
+button {
+  cursor: pointer;
+  margin: 4px 4px 4px 0;
+}
+button:hover {
+  background: #f2f2f2;
+}
+button:disabled {
+  opacity: 0.6;
+}
+input {
+  width: 100%;
+  margin: 5px 0;
+}
+input[type='number'] {
+  width: 64px;
+}
+dd {
+  margin: 3px 0 9px;
+  overflow-wrap: anywhere;
+  font:
+    12px/1.5 ui-monospace,
+    monospace;
+}
+li {
+  overflow-wrap: anywhere;
+}
+ul {
+  padding-left: 18px;
+}
+#error {
+  color: #a52121;
+}
+.hint {
+  font-size: 12px;
+}
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid #574ac0;
+  outline-offset: 2px;
+}
+@media (prefers-color-scheme: dark) {
+  body {
+    background: #222;
+    color: #ececec;
+  }
+  header span,
+  .hint,
+  dt {
+    color: #b9b9b9;
+  }
+  button,
+  input {
+    background: #292929;
+    border-color: #555;
+  }
+  button:hover {
+    background: #333;
+  }
+  section {
+    border-color: #484848;
+  }
+  #error {
+    color: #ffb2b2;
+  }
+}
+/* Shared panel rhythm with popup and normal-page layouts kept distinct. */
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif;
+  line-height: 1.6;
+}
+.extension-popup {
+  width: 380px;
+  max-width: 100vw;
+}
+button,
+input {
+  min-height: 44px;
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+button:focus-visible,
+input:focus-visible {
+  outline: 3px solid #746018;
+}
+#prepare,
+#allow-form button {
+  background: #f3d970;
+  color: #29261c;
+  border-color: transparent;
+}
+#release {
+  color: #a13c35;
+}
+section {
+  margin-top: 20px;
+  padding-top: 16px;
+}
+h2 {
+  font-size: 16px;
+  margin: 0 0 10px;
+}
+li {
+  padding: 8px 0;
+  border-bottom: 1px solid #e3e3e3;
+}
+[hidden] {
+  display: none !important;
+}
+.extension-idle {
+  width: auto;
+  max-width: 640px;
+  margin: 10vh auto;
+  padding: 32px;
+}
+.extension-idle h1 {
+  font-size: 28px;
+  line-height: 1.4;
+  margin: 28px 0 16px;
+}
+.extension-idle p {
+  color: #606060;
+  font-size: 15px;
+}
+.idle-status {
+  display: inline-block;
+  padding: 6px 12px;
+  background: #f0f0f0;
+  border-radius: 99px;
+  margin-top: 20px;
+}
+@media (prefers-color-scheme: dark) {
+  #prepare,
+  #allow-form button {
+    background: #d1bd75;
+    color: #27241b;
+  }
+  #release {
+    color: #e3a39b;
+  }
+  .extension-idle p {
+    color: #b9b9b9;
+  }
+  .idle-status {
+    background: #2b2b2b;
+  }
+  li {
+    border-color: #515151;
+  }
+  button:focus-visible,
+  input:focus-visible {
+    outline-color: #d1bd75;
+  }
+}
+@media (max-width: 420px) {
+  .extension-idle {
+    margin: 32px auto;
+    padding: 24px;
+  }
+  .extension-popup {
+    padding: 16px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  * {
+    scroll-behavior: auto !important;
+  }
+}

@@ -159,7 +159,7 @@ def event_page(chat_browser_pool):
         await new Promise(r=>setTimeout(r,window.renderDelay||0));inflight--;
       };
       window.loadBasics=async()=>{basicCalls++;};
-      window.EventSource=class {constructor(){window.stream=this;}close(){this.closed=true;}};
+      window.EventSource=class extends EventTarget {constructor(){super();window.stream=this;}close(){this.closed=true;}};
     }""")
     for name in ('invalidateBasics', 'stopEvents', 'connectEvents'):
         page.add_script_tag(content=panel_function(name))

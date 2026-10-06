@@ -130,8 +130,6 @@ class Skills:
         """On POSIX, pin each ancestor descriptor and reject links at every step."""
         rel = relative_path(relative, False)
         parts = Path(rel).parts
-        if parts[-1].lower() in {'auth.json', 'credentials.json', 'secrets.json'}:
-            raise DevError('PROTECTED_PATH', '技能读取不公开凭据文件', 403)
         root = Path(root)
         self.forbidden(root)
         descriptors = []
@@ -356,7 +354,6 @@ class Skills:
                             else:limited=True
                         elif entry.is_file(follow_symlinks=False):
                             if len(items)>=200:limited=True;break
-                            if Path(rel).name.lower() in {'auth.json','credentials.json','secrets.json'}:continue
                             info=entry.stat(follow_symlinks=False)
                             if info.st_nlink==1:items.append({'path':rel,'bytes':info.st_size,'kind':'script' if rel.startswith('scripts/') else 'resource'})
                     queue.extend(sorted(children))

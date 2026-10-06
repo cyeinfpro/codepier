@@ -121,17 +121,43 @@ jobs:
           .venv/bin/python -m pip_audit --local
           .venv/bin/python -m pip_audit --path .venv-compat/lib/python3.13/site-packages
           npm --prefix web/mcp-apps audit
-      - name: Exhaustive deterministic shard with coverage
-        run: |
-          .venv/bin/python scripts/check_full_regression.py --output dist/ci-results --workers 2 --timeout 1200 --shard-count 4 --shard-index ${{ matrix.shard }} --coverage
-      - name: Public source archive (version derived from source)
-        if: matrix.shard == 0
+      - name: Build and bind the public source archive to this commit
+        id: archive
         run: |
           VERSION=$(.venv/bin/python -c 'from scripts.build_source_bundle import source_version; print(source_version())')
           .venv/bin/python scripts/build_source_bundle.py --public
-          .venv/bin/python scripts/check_release.py --bundle "dist/codepier-${VERSION}-source-full.zip" --output dist/public-check.json
+          .venv/bin/python scripts/check_release.py --bundle "dist/codepier-$VERSION-source-full.zip" --output dist/public-check.json
           .venv/bin/python scripts/build_source_bundle.py --public --panel-update
-          .venv/bin/python scripts/check_release.py --panel-update --bundle "dist/codepier-${VERSION}-source.zip" --output dist/panel-update-check.json
+          .venv/bin/python scripts/check_release.py --panel-update --bundle "dist/codepier-$VERSION-source.zip" --output dist/panel-update-check.json
+          ACCEPTANCE="$RUNNER_TEMP/codepier-public-$GITHUB_RUN_ID-${{ matrix.shard }}"
+          BUNDLE="$GITHUB_WORKSPACE/dist/codepier-$VERSION-source-full.zip"
+          .venv/bin/python scripts/release_acceptance.py prepare --root "$GITHUB_WORKSPACE" --archive "$BUNDLE" --destination "$ACCEPTANCE" --proof "$GITHUB_WORKSPACE/dist/ci-results/archive-proof.json" --commit "$GITHUB_SHA"
+          ln -s "$GITHUB_WORKSPACE/.venv" "$ACCEPTANCE/.venv"
+          ln -s "$GITHUB_WORKSPACE/.venv-compat" "$ACCEPTANCE/.venv-compat"
+          ln -s "$GITHUB_WORKSPACE/web/mcp-apps/node_modules" "$ACCEPTANCE/web/mcp-apps/node_modules"
+          echo "root=$ACCEPTANCE" >> "$GITHUB_OUTPUT"
+          echo "bundle=$BUNDLE" >> "$GITHUB_OUTPUT"
+      - name: Exhaustive deterministic shard from the verified public archive
+        env:
+          ACCEPTANCE: ${{ steps.archive.outputs.root }}
+          MCP_COMPAT_PYTHON: ${{ github.workspace }}/.venv-compat/bin/python
+        run: |
+          cd "$ACCEPTANCE"
+          .venv/bin/python - <<'PY'
+          from pathlib import Path
+          import agent.config, hub.config, tests.support, scripts.regression_plan
+          root = Path.cwd().resolve()
+          for module in (agent.config, hub.config, tests.support, scripts.regression_plan):
+              assert Path(module.__file__).resolve().is_relative_to(root), module.__name__
+          PY
+          .venv/bin/python scripts/check_full_regression.py --output "$GITHUB_WORKSPACE/dist/ci-results" --workers 2 --timeout 1200 --shard-count 4 --shard-index ${{ matrix.shard }} --coverage
+      - name: Verify archive and all extracted public files after regression
+        if: always() && steps.archive.outcome == 'success'
+        env:
+          ACCEPTANCE: ${{ steps.archive.outputs.root }}
+          BUNDLE: ${{ steps.archive.outputs.bundle }}
+        run: |
+          .venv/bin/python scripts/release_acceptance.py finish --root "$ACCEPTANCE" --archive "$BUNDLE" --proof "$GITHUB_WORKSPACE/dist/ci-results/archive-proof.json"
       - name: Retain only selected regression receipts and coverage
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -139,6 +165,7 @@ jobs:
           name: regression-${{ matrix.os }}-${{ matrix.shard }}
           include-hidden-files: true
           path: |
+            dist/ci-results/archive-proof.json
             dist/ci-results/summary.json
             dist/ci-results/source-before.json
             dist/ci-results/source-after.json
@@ -202,6 +229,7 @@ jobs:
           .venv/bin/python -m pip install --require-hashes -r requirements-dev.txt
           mapfile -t REPORTS < <(find .work/shards -name summary.json -type f | sort)
           .venv/bin/python scripts/merge_regression.py "${REPORTS[@]}" --coverage --output dist/complete/summary.json
+          .venv/bin/python scripts/release_acceptance.py verify --commit "$GITHUB_SHA" --output dist/complete/archive-proof.json "${REPORTS[@]}"
       - name: Changed-statement coverage observation (no legacy global threshold)
         env:
           DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}

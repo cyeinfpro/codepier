@@ -10,25 +10,21 @@ CodePier 的九个核心开发工具为 `workspace`、`read`、`write`、`edit`�
 
 技能目录按 `skill_id` 发现；带 ID 的技能摘要 `path/resource_path` 为相对技能资源的 `SKILL.md`，应通过 `workspace(operation="skill", skill_id=..., resource_path="SKILL.md")` 读取，不能作为项目根目录下的文件读取。显式读取技能时仍返回执行脚本所需的真实资源位置。项目内不带 ID 的技能路径仍相对于项目。具名任务目录保留任务名、说明、工作子目录和可用性，省略启动命令及环境变量清单。
 
-同一展示规则覆盖 `workspace`、`workbench`、`project_query`、`process/task_query` 轮询、`rd://projects` 资源及标准 Tasks 终态。工具结果的 `content` 和 `structuredContent` 使用同一份投影，不把完整宿主信息复制到 `_meta`。HTTP 面板、Agent 协议、审计、SHA、上下文指纹及持久回执仍使用真实数据；投影只作用于返回副本。错误元数据中的常见账户主目录前缀替换为 `[account-home]`，保留错误码和诊断后缀。
+同一展示规则覆盖 `workspace`、`project_query`、`process/task_query` 轮询、`rd://projects` 资源及标准 Tasks 终态。工具结果的 `content` 和 `structuredContent` 使用同一份投影，不把完整宿主信息复制到 `_meta`。HTTP 面板、Agent 协议、审计、SHA、上下文指纹及持久回执仍使用真实数据；投影只作用于返回副本。错误元数据中的常见账户主目录前缀替换为 `[account-home]`，保留错误码和诊断后缀。
 
 这是减少默认宿主元数据的展示约定，不提供匿名化或隔离保证。源码、文档预览、补丁、命令输出、调用者提供的参数、明确请求的技能资源、原生界面和外部 MCP 结果保留原义，仍可能显示环境信息。`exec` 使用执行账号权限；需要宿主隔离时，应实际部署专用容器或虚拟机。修改工具描述后需在客户端刷新工具目录；已有对话中的旧结果不会被改写。
 
-## 显式工作台与只读查询
+## 只读查询
 
-额外的 `workbench({})` 是用户主动打开的 MCP Apps 入口，在支持 OpenAI MCP Extensions 的宿主注册 global/thread 工作台。初次结果仅列出当前授权项目；即使只有一个项目也必须明确选择，再复用项目面板、任务证据和固定改动审阅。切换项目或返回列表会停止旧视图刷新，迟到结果不能覆盖新选择。宿主没有入口支持时，仍可使用文字工具；工具目录元数据不能证明某个 ChatGPT 客户端已经支持此入口。
-
-工作台入口同时声明 `ui.visibility: ["model", "app"]`，使用户能够在对话中请求打开小组件；不要把绑定 UI 的入口设为仅 `app` 可见，否则 ChatGPT 可能提示“这些私有工具无法渲染其小组件”。可见性只控制工具发现，不会公开项目或绕过 OAuth 与项目授权。遇到此提示，应先部署包含修复的 Hub，再刷新客户端连接的工具目录；新入口必须同时包含上述可见性及 `ui.resourceUri`，只刷新旧 Hub 的目录不会修复。源码回归不等于真实 ChatGPT 宿主渲染验收。
+ChatGPT 内的项目选择与任务看板已移除。`workbench` 不再出现在工具目录，旧调用按既有迁移约定返回 `TOOL_REMOVED`，提示改用 `project_query`。旧工作区资源仅返回无脚本、无工具调用的退役说明，不再列入资源目录。网页管理面板、项目上下文、工作流、原操作及证据存储不受影响。
 
 `project_query` 只允许 `list/open/help/tree/skills/skill/tasks/status/readiness/dashboard/workflow_list/workflow_get`；`open` 不允许捕获基线。项目和任务仍必须明确选择，所有调用复用实时授权。`task_query` 只允许 `list/get/wait/trace/diagnostics/activity`，读取原操作，不执行、取消或重跑。参数及返回结构与对应的 `workspace`、`process` 操作一致；任务查询指 CodePier 已有操作回执，并非 MCP 标准 Tasks 协议。
 
 只读发现从 `project_query` 开始，目录和技能读取无需调用混合工具。公开回执的等待、补读和追踪继续指向 `task_query`，保留原操作编号；捕获基线仍使用 `workspace`，显式取消仍使用 `process`。这些路由不改变实际授权，也不能保证宿主不再出现取消或拒绝提示。
 
-这三个专用入口标注为只读；混合读写的 `workspace/process/browser/computer` 保持保守的非只读注解。通用工具和两个查询工具不会自动弹卡，只有专用工作台绑定 UI 资源。九个核心工具的 `outputSchema` 描述实际成功、错误、持久 pending 变体；错误/等待不是成功，仍须核对原操作编号、状态和退出码。
+这两个专用入口标注为只读；混合读写的 `workspace/process/browser/computer` 保持保守的非只读注解。工具目录不注册 global/thread 工作台或自动展示模板。九个核心工具的 `outputSchema` 描述实际成功、错误、持久 pending 变体；错误/等待不是成功，仍须核对原操作编号、状态和退出码。
 
-参考 [OpenAI MCP Extensions 入口规范](https://github.com/openai/mcp-extensions/blob/main/docs/spec.md)；本阶段不新增 SDK 依赖、不改变认证、角色、下游同意、SHA 或幂等边界。
-
-## 标准 Tasks 与选定上下文
+## 标准 Tasks
 
 现代 `2026-07-28` 客户端在每次请求的 `_meta["io.modelcontextprotocol/clientCapabilities"].extensions` 中声明 `"io.modelcontextprotocol/tasks": {}` 后，原生 `exec` 的真实 pending 回执可返回扁平 `resultType: "task"`。它复用原操作与幂等键，不新建执行器；未声明能力的请求及 legacy 连接保持原有结果。声明能力不强制把已完成的调用变为异步。
 
@@ -36,7 +32,7 @@ CodePier 的九个核心开发工具为 `workspace`、`read`、`write`、`edit`�
 
 Task 绑定原 operation、Space、用户和确切创建 grant，每次查询/取消及 await 后重验权限；新连接不会因同属一个用户而继承旧任务。终态随 operation 更新在同一数据库事务内冻结，Agent 后续恢复不会让 Task 倒退或替换已冻结结果。任务记录沿用 Hub 数据库备份和原操作的生命周期，`ttlMs=null` 表示不设定时过期；它不是绕过撤权的长期访问授权。该追加表不改变 OAuth、PKCE、资源标识、角色或下游同意。
 
-工作台的“选定上下文”只在用户点击后调用现有 SDK 的 `ui/update-model-context`，不调用 `ui/message` 或启动模型。最多三个项目内相对路径片段，每段最多200行/8KB，总计24KB；预览与添加分开，添加时重新核验项目可见性及文件SHA。内容带项目ID、相对路径、SHA和实际行范围，不发送绝对本机路径。切换/隐藏/取消和宿主附件移除会使待添加结果失效；旧响应不会自动恢复已移除附件。宿主未同时声明文本上下文和 `openai/modelContext` 移除通知能力时显示文字回退。
+项目上下文继续通过 `project_query(operation="open")` 和 `workspace(operation="context")` 读取；文件内容使用带 SHA 的 `read`。原工作台专用的“选定上下文”按钮随看板移除，附件导入契约 `write(operation="import")` 保持不变。
 
 参考 [Tasks 2026-07-28](https://github.com/modelcontextprotocol/ext-tasks/blob/main/specification/2026-07-28/tasks.md)。本阶段没有接入标准 Tasks 输入请求/MRTR、OpenAI扩展表单、文件编辑器或宿主文件写入。后续需要单独实现请求状态绑定、明确确认、字段能力协商、版本/etag冲突与相应真实宿主验收，不能把这些入口视为已实现。
 
