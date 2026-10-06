@@ -39,6 +39,7 @@ CORE_ACTIONS = {
 # Retained as private implementation contracts for the panel/Agent protocol,
 # never advertised or callable as MCP aliases, including in extended catalogs.
 REPLACED_MCP_TOOLS = {
+    'workbench': 'project_query',  # Retired ChatGPT workspace opener.
     **dict.fromkeys(('projects_list', 'projects_resolve', 'open_workspace', 'project_context',
         'execution_info', 'skills_list', 'skills_read', 'tasks_list', 'readiness_get'), 'workspace'),
     **dict.fromkeys(('fs_read', 'fs_read_many'), 'read'),

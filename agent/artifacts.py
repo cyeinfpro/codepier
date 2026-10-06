@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 from shared.util import DevError, fsync_directory
+from agent.filesystem import protected
 
 CHUNK = 256 * 1024
 MAX_BYTES = 512 * 1024 * 1024
@@ -133,6 +134,8 @@ class Artifacts:
             row=self.journal.db.execute('SELECT * FROM artifact_snapshots WHERE id=?',(identifier,)).fetchone()
             if not row or row['root']!=str(root):
                 raise DevError('ARTIFACT_NOT_FOUND','当前项目没有此产物',404)
+            if protected(row['path']):
+                raise DevError('PROTECTED_PATH','产物来源属于凭据或私有运行目录，不能下载',403)
             if row['expires']<=time.time():
                 raise DevError('ARTIFACT_EXPIRED','产物快照已过期，请重新登记',410)
             if offset>=row['bytes']:

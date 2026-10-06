@@ -141,6 +141,32 @@ function discardLocalWork() {
   sessionValue('codepier-operation', null);
   sessionValue('codepier-task-submission', null);
 }
+function clearSpaceSnapshots() {
+  invalidateBasics();
+  Object.assign(S, {
+    overview: null,
+    projects: [],
+    devices: [],
+    settings: null,
+    grants: [],
+    integrations: null,
+    workflow: null,
+    delivery: null,
+    vps: [],
+    vpsQuery: '',
+    vpsProject: '',
+    auditRows: [],
+    auditOffset: 0,
+    auditQuery: '',
+    auditStatus: '',
+    auditSource: '',
+    auditNext: null,
+    uiProjectQuery: '',
+    managementTabs: {},
+    managementFilters: {},
+    basicsRequest: null,
+  });
+}
 function endSession(discard = false) {
   window.CodePierCallLog?.clear();
   window.CodePierAccess?.detach();
@@ -150,6 +176,14 @@ function endSession(discard = false) {
   const owner = sessionOwner(S.session);
   discard = discard || !owner;
   S.suspendedUser = discard ? null : owner;
+  S.suspendedMappings = discard
+    ? null
+    : new Map(
+        (S.projects || []).map((project) => [
+          project.id,
+          { root: project.root, device_id: project.device_id },
+        ]),
+      );
   window.CodePierIntegrations?.detach();
   S.integrations = null;
   sessionValue('codepier-integration-receipts', null);
@@ -161,13 +195,7 @@ function endSession(discard = false) {
   S.poll = null;
   S.session = null;
   S.renderSeq++;
-  S.integrations = null;
-  S.workflow = null;
-  S.delivery = null;
-  S.uiProjectQuery = '';
-  S.vps = [];
-  S.vpsQuery = '';
-  S.vpsProject = '';
+  clearSpaceSnapshots();
   if (typeof stopComputerApprovals === 'function') stopComputerApprovals();
   S.readGeneration = (S.readGeneration || 0) + 1;
   S.treeGeneration = (S.treeGeneration || 0) + 1;
@@ -181,6 +209,7 @@ function endSession(discard = false) {
 async function api(path, options = {}) {
   const {
     retrySafe = false,
+    discardOnAuthFailure = false,
     retryDelays = [500, 1000, 2000, 4000],
     requestTimeout = 15000,
     signal: externalSignal,
@@ -226,7 +255,7 @@ async function api(path, options = {}) {
     if (externalSignal?.aborted) throw new DOMException('Request cancelled', 'AbortError');
     if (session !== S.session || space !== S.space_id) throw sessionChanged();
     if (res) {
-      if (res.status === 401 && path != '/api/login') endSession();
+      if (res.status === 401 && path != '/api/login') endSession(discardOnAuthFailure);
       if (res.ok && body !== null && body !== undefined) {
         if (method !== 'GET' && method !== 'HEAD') invalidateBasics();
         return body;
@@ -447,7 +476,7 @@ function renderShell() {
     )
     .join('');
   $('#app').innerHTML =
-    `<a class="skip-link" href="#page">跳到主要内容</a><div class="shell"><aside class="sidebar" id="sidebar" aria-label="主导航"><button class="icon-btn mobile-close" data-action="toggle-menu" aria-label="收起菜单">${icon('close')}</button>${brand}<nav class="nav" aria-label="主导航">${navigation}</nav><div class="side-bottom">${CodePierIdentity.selector()}${appearanceControl()}<div class="transport"><div class="transport-top"><i class="dot offline" id="event-dot"></i><span id="event-state">正在连接实时通道…</span></div></div><div class="user-box"><span class="avatar">${esc(S.session.username?.[0]?.toUpperCase() || 'A')}</span><div>${esc(S.session.username)}<br><small class="tiny">${esc(CodePierIdentity.current()?.level || '用户')}</small></div><button class="icon-btn" data-action="logout" aria-label="退出登录">${icon('logout')}</button></div></div></aside><button class="sidebar-scrim" data-ui="close-menu" aria-label="关闭导航" tabindex="-1" hidden></button><main class="main"><header class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-menu" data-action="toggle-menu" aria-controls="sidebar" aria-expanded="false" aria-label="展开菜单">${icon('menu')}</button><span class="breadcrumb-prefix">CodePier</span><span>/</span><span id="breadcrumb-page" aria-live="polite">${chosen[2]}</span></div><div class="top-right"><span class="clock" id="clock"></span><button class="quick-jump" data-ui="command" aria-label="快速前往页面或项目">${icon('search')}<span>快速前往</span><kbd>${/Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl'} K</kbd></button><button class="icon-btn" data-computer-use aria-label="桌面控制">${icon('device')}</button><button class="icon-btn" data-action="refresh" aria-label="刷新">${icon('refresh')}</button></div></header><div id="page" class="page" tabindex="-1"></div><nav class="mobile-dock" aria-label="移动快捷导航">${dock}<button type="button" data-action="toggle-menu" aria-controls="sidebar" aria-expanded="false" aria-label="更多页面">${icon('menu')}<span>更多</span></button></nav></main></div>`;
+    `<a class="skip-link" href="#page">跳到主要内容</a><div class="shell"><aside class="sidebar" id="sidebar" aria-label="主导航"><button class="icon-btn mobile-close" data-action="toggle-menu" aria-label="收起菜单">${icon('close')}</button>${brand}<nav class="nav" aria-label="主导航">${navigation}</nav><div class="side-bottom">${CodePierIdentity.selector()}${appearanceControl()}<div class="transport"><div class="transport-top"><i class="dot offline" id="event-dot"></i><span id="event-state">正在连接实时通道…</span></div></div><div class="user-box"><span class="avatar">${esc(S.session.username?.[0]?.toUpperCase() || 'A')}</span><div>${esc(S.session.username)}<br><small class="tiny">${esc(CodePierIdentity.levelLabel(CodePierIdentity.current()?.level))}</small></div><button class="icon-btn" data-action="logout" aria-label="退出登录">${icon('logout')}</button></div></div></aside><button class="sidebar-scrim" data-ui="close-menu" aria-label="关闭导航" tabindex="-1" hidden></button><main class="main"><header class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-menu" data-action="toggle-menu" aria-controls="sidebar" aria-expanded="false" aria-label="展开菜单">${icon('menu')}</button><span class="breadcrumb-prefix">CodePier</span><span>/</span><span id="breadcrumb-page" aria-live="polite">${chosen[2]}</span></div><div class="top-right"><span class="clock" id="clock"></span><button class="quick-jump" data-ui="command" aria-label="快速前往页面或项目">${icon('search')}<span>快速前往</span><kbd>${/Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl'} K</kbd></button><button class="icon-btn" data-computer-use aria-label="桌面控制">${icon('device')}</button><button class="icon-btn" data-action="refresh" aria-label="刷新">${icon('refresh')}</button></div></header><div id="page" class="page" tabindex="-1"></div><nav class="mobile-dock" aria-label="移动快捷导航">${dock}<button type="button" data-action="toggle-menu" aria-controls="sidebar" aria-expanded="false" aria-label="更多页面">${icon('menu')}<span>更多</span></button></nav></main></div>`;
   updateClock();
   uiSetMenu(false, false);
   uiSyncNavigation();
@@ -498,6 +527,75 @@ function restoreTaskSubmission() {
     /* Ignore corrupt browser storage. */
   }
 }
+async function revalidateSuspendedWork() {
+  await loadBasics();
+  if (!Array.isArray(S.projects)) throw new Error('没有收到有效的项目权限清单，请重新校验。');
+  const projects = new Map(S.projects.map((project) => [project.id, project]));
+  const sameMapping = (id) => {
+    const current = projects.get(id),
+      prior = S.suspendedMappings?.get(id);
+    return (
+      !!current &&
+      (!prior || (prior.root === current.root && prior.device_id === current.device_id))
+    );
+  };
+  if (S.work.project && !sameMapping(S.work.project)) {
+    resetWork('');
+    S.work.operation = null;
+    S.work.console = '';
+    S.taskSubmission = null;
+    sessionValue('codepier-operation', null);
+    sessionValue('codepier-task-submission', null);
+  }
+  if (typeof ChatUI === 'undefined') return;
+  const cachedProjects = [
+    ...new Set([...ChatUI.views.keys()].map((key) => key.split('\n')[0]).filter(Boolean)),
+  ];
+  const allowed = new Set();
+  for (const id of cachedProjects) {
+    if (!sameMapping(id)) continue;
+    try {
+      const access = await api('/api/native/access?' + new URLSearchParams({ project: id }));
+      if (access.allowed !== true || access.project_id !== id)
+        throw new Error('没有收到有效的会话权限确认，请重新校验。');
+      allowed.add(id);
+    } catch (error) {
+      if (![403, 404].includes(error.status)) throw error;
+    }
+  }
+  for (const [key, view] of ChatUI.views) {
+    const project = key.split('\n')[0];
+    if (!project || allowed.has(project)) continue;
+    for (const file of view.files || []) {
+      file.removed = true;
+      if (file.preview) URL.revokeObjectURL(file.preview);
+    }
+    Object.assign(view, {
+      draft: '',
+      files: [],
+      pending: null,
+      order: [],
+      queue: [],
+      recoveredQueueDrafts: [],
+      recoveredQueueDraft: null,
+    });
+    view.items?.clear();
+    view.outbox?.clear();
+    ChatUI.views.delete(key);
+  }
+  ChatUI.rows = ChatUI.rows.filter((row) => allowed.has(row.project_id || ChatUI.project));
+  ChatUI.recentProjects = (ChatUI.recentProjects || []).filter((id) =>
+    allowed.has(typeof id === 'string' ? id : id.id),
+  );
+  ChatUI.catalogCache.clear();
+  if (ChatUI.project && !allowed.has(ChatUI.project)) {
+    ChatUI.project = '';
+    ChatUI.selected = null;
+    ChatUI.cwd = '';
+    ChatUI.historyProject = '';
+  }
+}
+
 async function bootAuthenticated() {
   try {
     await CodePierIdentity.bootstrap();
@@ -515,7 +613,19 @@ async function bootAuthenticated() {
     return;
   }
   if (S.suspendedUser && S.suspendedUser !== sessionOwner(S.session)) discardLocalWork();
+  if (S.suspendedUser && S.suspendedUser === sessionOwner(S.session)) {
+    try {
+      await revalidateSuspendedWork();
+    } catch (error) {
+      if (!S.session) return;
+      stopEvents();
+      $('#app').innerHTML =
+        `<main class="boot"><div id="page" role="alert">${brand}${notice(esc(error.message))}<p>草稿仍隔离在本标签页中；重新确认权限前不会恢复显示或重发请求。</p><button class="btn primary" data-action="retry-identity">重新校验工作区权限</button><button class="btn ghost" data-action="logout">退出登录</button></div></main>`;
+      return;
+    }
+  }
   S.suspendedUser = null;
+  S.suspendedMappings = null;
   S.work.operation = S.work.operation || sessionValue('codepier-operation');
   restoreTaskSubmission();
   renderShell();
@@ -537,6 +647,7 @@ function connectEvents() {
     ));
   const current = () => S.events === events && S.session === session;
   let opened = false,
+    checkingAccess = false,
     refreshing = false,
     refreshAgain = null;
   const refreshPanel = async (page = S.page) => {
@@ -582,10 +693,41 @@ function connectEvents() {
       refreshPanel();
     else loadBasics().catch(() => {});
   };
+  events.addEventListener('access_revoked', () => {
+    if (!current()) return;
+    endSession(true);
+    toast('当前工作区权限已变化。私有内容已清除，请重新验证身份。', true);
+  });
   events.onerror = () => {
     if (current()) {
       networkState('正在重新连接…');
       if (typeof computerApprovalsConnection === 'function') computerApprovalsConnection(false);
+      // A reconnect can be rejected before an SSE invalidation frame exists.
+      // An ordinary network failure does not erase unsaved local work.
+      if (!checkingAccess) {
+        checkingAccess = true;
+        api('/api/projects', { retryDelays: [], discardOnAuthFailure: true })
+          .then(({ projects }) => {
+            if (current() && S.projects.some((old) => !projects.some((p) => p.id === old.id)))
+              endSession(true);
+          })
+          .catch((error) => {
+            if (
+              current() &&
+              [
+                'SPACE_FORBIDDEN',
+                'SPACE_NOT_FOUND',
+                'ENTITLEMENTS_STALE',
+                'IDENTITY_DISABLED',
+                'ACCOUNT_DISABLED',
+              ].includes(error.code)
+            )
+              endSession(true);
+          })
+          .finally(() => {
+            checkingAccess = false;
+          });
+      }
     }
   };
   events.onmessage = (e) => {
@@ -645,6 +787,8 @@ async function navigate(page) {
   S.vpsIntent = (S.vpsIntent || 0) + 1;
   if (page === 'terminal') page = 'native';
   if (!S.session || !$('#page') || !nav.some((x) => x[0] === page)) return;
+  if (page !== S.page && $('.modal') && !panelDialogs.requestClose(null, { navigation: true }))
+    return;
   if (
     S.page === 'workbench' &&
     S.work.dirty &&
@@ -2050,7 +2194,7 @@ async function busy(button, fn) {
 }
 const panelActions = CP.actions.create();
 panelActions.register(['close-modal'], async (b, e) => {
-  closeModal();
+  panelDialogs.requestClose();
   return;
 });
 panelActions.register(['toggle-menu'], async (b, e) => {
@@ -2244,9 +2388,15 @@ panelActions.register(['audit-next'], async (b, e) => {
 });
 panelActions.register(['export-audit'], async (b, e) => {
   {
+    if (!S.space_id) throw new Error('请先选择仍可访问的工作空间。');
     const url =
       '/api/audit-export?' +
-      new URLSearchParams({ source: S.auditSource, q: S.auditQuery, offset: '0' });
+      new URLSearchParams({
+        space_id: S.space_id || '',
+        source: S.auditSource,
+        q: S.auditQuery,
+        offset: '0',
+      });
     const a = document.createElement('a');
     a.href = url;
     a.download = 'codepier-audit.csv';

@@ -1,12 +1,12 @@
 {
   "outputs": {
     "browser-extension.zip": {
-      "sha256": "a9e08ab15a557ba17d4571cf98350b21a5b75ade87c2f00d1c2c0cb18c984fb1",
-      "bytes": 12204
+      "sha256": "a1b8089d61da78c950bc0b7ca8c4cbf8c6dddb9f30da636a3f1c70aa5f4d4f01",
+      "bytes": 13093
     },
     "integration-guide.md": {
-      "sha256": "380d4fc3dc33294719a8804484ae413d1d9a44f26509ee7223cb93d8f9093513",
-      "bytes": 14859
+      "sha256": "857889037cd6d2bf4bdccb8c947aa41fa8ba3e7a9edd8249f707f652b916f207",
+      "bytes": 14843
     }
   },
   "extension_sources": {
@@ -14,10 +14,10 @@
     "background.js": "b8c11868de7d7536539fb3669f751f6e7c6208f584674d52a3be3d7102a55be9",
     "workspace.js": "ecfb5936f3011b67ab518489343efbf3ef62bf8ede69e899bc434ab0b7550c07",
     "page.js": "25f11964f5e3f9702e4bf14a1bb43fa99a2a03610bb496081a1b2087275d794e",
-    "popup.html": "c6ecde7f6f23179fc72e6e8712ba0abd182732eb75d3ec213ac10b90c3b3d811",
-    "popup.js": "218da59d2b823b4268ca8833e045461882e1c8803f95424ecbb1d854add23137",
-    "popup.css": "117f7486176280b318aa2de0ee76f0c3c6b05fade881491a6f1f17be2c0643c7",
-    "idle.html": "4c3f26511815cb894b6b510c75e9dd14a64735aa86cb70d53e78fb7ba676389d"
+    "popup.html": "9f9215adfff9676b2efec4f18eabc6bc269cfc949dbf5e9efc4a47c90decbea5",
+    "popup.js": "27e5004f4838670a6349287402edb13b4101d8db95b9d29f4137d8f2ada337e5",
+    "popup.css": "fa9d7eee75bc30ca7ac50d787137bf987d663cbe4fd1c5ebed6c05282cc0d659",
+    "idle.html": "849c864fb4b6403c7056d4a5fa0aa8f176bb2dd01bd6291a0370b3c2c8013868"
   },
   "contains_credentials": false
 }

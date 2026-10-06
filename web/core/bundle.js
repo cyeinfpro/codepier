@@ -283,7 +283,54 @@ var CP = (() => {
     focusable: uiFocusable
   }) {
     const lifetime = createPanel({ owner: () => S.session });
-    function closeModal(expected = null) {
+    let editorRoute = null, pendingBack = false, pendingEditor = null;
+    const enterEditor = () => {
+      editorRoute = { id: uid() };
+      history.pushState({ ...history.state, codepierEditor: editorRoute.id }, "", location.href);
+    };
+    window.addEventListener("popstate", () => {
+      if (pendingBack) {
+        pendingBack = false;
+        if (pendingEditor?.isConnected && S.session) enterEditor();
+        pendingEditor = null;
+        return;
+      }
+      if (editorRoute && history.state?.codepierEditor !== editorRoute.id) {
+        if (!canClose($(".modal"))) {
+          history.pushState({ ...history.state, codepierEditor: editorRoute.id }, "", location.href);
+          return;
+        }
+        editorRoute = null;
+        closeModal(null, true);
+      }
+    });
+    function canClose(dialog) {
+      if (!dialog) return true;
+      if (!dialog.classList.contains("modal-editor") && !dialog.querySelector('[data-submission="uncertain"]'))
+        return true;
+      const busy2 = !!dialog.querySelector('[aria-busy="true"]');
+      if (!busy2 && dialog.dataset.editorDirty !== "true" && !dialog.querySelector('[data-submission="uncertain"]'))
+        return true;
+      return confirm(
+        busy2 ? "\u4ECD\u5728\u63D0\u4EA4\u5F53\u524D\u64CD\u4F5C\u3002\u79BB\u5F00\u4E0D\u4F1A\u53D6\u6D88\u5DF2\u63D0\u4EA4\u7684\u8BF7\u6C42\uFF1B\u8BF7\u7A0D\u540E\u6838\u5BF9\u7ED3\u679C\u3002\u7EE7\u7EED\u79BB\u5F00\uFF1F" : "\u8F93\u5165\u5C1A\u672A\u4FDD\u5B58\uFF0C\u6216\u4FDD\u5B58\u7ED3\u679C\u672A\u786E\u8BA4\u3002\u79BB\u5F00\u5C06\u4E22\u5F03\u672C\u9875\u8F93\u5165\uFF1B\u5DF2\u63D0\u4EA4\u7684\u64CD\u4F5C\u4E0D\u4F1A\u53D6\u6D88\u3002\u7EE7\u7EED\u79BB\u5F00\uFF1F"
+      );
+    }
+    function requestClose(expected = null, { navigation = false } = {}) {
+      const dialog = $(".modal");
+      if (expected && expected !== dialog) return false;
+      if (!canClose(dialog)) return false;
+      if (navigation && editorRoute) {
+        if (history.state?.codepierEditor === editorRoute.id) {
+          const state = { ...history.state };
+          delete state.codepierEditor;
+          history.replaceState(state, "", location.href);
+        }
+        editorRoute = null;
+      }
+      closeModal(expected);
+      return true;
+    }
+    function closeModal(expected = null, preserveRoute = false) {
       if (expected && $(".modal") !== expected) return;
       S.vpsIntent = (S.vpsIntent || 0) + 1;
       S.modalIntent = (S.modalIntent || 0) + 1;
@@ -294,6 +341,14 @@ var CP = (() => {
       document.body.style.overflow = $(".sidebar.open") ? "hidden" : "";
       let focus = S.modalLastFocus;
       S.modalLastFocus = null;
+      if (!preserveRoute && editorRoute) {
+        const owned = history.state?.codepierEditor === editorRoute.id;
+        editorRoute = null;
+        if (owned) {
+          pendingBack = true;
+          history.back();
+        }
+      }
       if (focus?.isConnected && !focus.getClientRects().length)
         focus = focus.closest(".tool-menu")?.querySelector("summary");
       if (focus?.isConnected && focus.getClientRects().length && !focus.closest("[inert]"))
@@ -301,23 +356,63 @@ var CP = (() => {
     }
     function modal(title, body, footer = "", large = false, closable = true) {
       const origin = $(".modal") ? S.modalLastFocus : document.activeElement;
-      closeModal();
+      closeModal(null, true);
       S.modalLastFocus = origin;
       $("#modal-root").innerHTML = `<div class="modal-backdrop"><section class="modal ${large ? "large" : ""}" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabindex="-1"><header class="modal-header"><h2 id="modal-title">${esc(title)}</h2>${closable ? `<button class="icon-btn" data-action="close-modal" aria-label="\u5173\u95ED">${icon("close")}</button>` : ""}</header><div class="modal-body">${body}</div>${footer ? `<footer class="modal-footer">${footer}</footer>` : ""}</section></div>`;
       document.body.style.overflow = "hidden";
       $("#app").inert = true;
       const dialog = $(".modal");
+      const complex = dialog.querySelector(
+        '#role-form,#profile-form,#vps-form,#project-form,#device-form,#device-rename,#agent-command-form,#grant-form,#workflow-create-form,#workflow-update-form,#artifact-form,.gw-tools,#gw-form [name="networks"],#iam-issuer,#iam-group_name'
+      );
+      if (complex || large) {
+        dialog.classList.add("modal-editor");
+        dialog.dataset.presentation = complex ? "editor" : dialog.querySelector("#computer-open-form") ? "tool" : "reader";
+        if (!complex) {
+          const content = dialog.querySelector(".modal-body");
+          content.tabIndex = 0;
+          content.setAttribute("role", "region");
+          content.setAttribute("aria-label", title + "\u5185\u5BB9");
+        }
+        if (complex) {
+          dialog.dataset.editorForm = complex.closest("form")?.id || complex.id;
+          const dirty = (event) => {
+            const control = event.target;
+            if (control.matches?.("input[name],select[name],textarea[name],#device-rename") && !control.readOnly)
+              dialog.dataset.editorDirty = "true";
+          };
+          dialog.addEventListener("input", dirty);
+          dialog.addEventListener("change", dirty);
+        }
+        if (closable) {
+          const back = dialog.querySelector('.modal-header [data-action="close-modal"]');
+          back.classList.add("editor-back");
+          back.setAttribute("aria-label", "\u8FD4\u56DE\u4E0A\u4E00\u9875");
+          back.innerHTML = '<span class="editor-back-label">\u2190 \u8FD4\u56DE</span><span class="editor-close-icon">' + icon("close") + "</span>";
+          if (!editorRoute) {
+            if (pendingBack) pendingEditor = dialog;
+            else enterEditor();
+          }
+        }
+      }
       uiLabelFields(dialog);
       const key2 = (e) => {
         if (e.key === "Escape" && closable) {
           e.preventDefault();
-          closeModal(dialog);
+          requestClose(dialog);
           return;
         }
         uiTrapTab(e, dialog);
       };
       const scope = lifetime.mount(dialog);
       scope.listen(document, "keydown", key2);
+      const editorBack = dialog.querySelector(".editor-back");
+      if (editorBack) {
+        const mobile = matchMedia("(max-width:640px)");
+        const syncLabel = () => editorBack.setAttribute("aria-label", mobile.matches ? "\u8FD4\u56DE\u4E0A\u4E00\u9875" : "\u5173\u95ED");
+        syncLabel();
+        scope.listen(mobile, "change", syncLabel);
+      }
       S.modalCleanup = () => scope.dispose();
       const editable = $(
         "input:not(:disabled),textarea:not(:disabled),select:not(:disabled)",
@@ -328,7 +423,7 @@ var CP = (() => {
       });
       return dialog;
     }
-    return { modal, closeModal };
+    return { modal, closeModal, requestClose };
   }
 
   // ../core/actions.mjs

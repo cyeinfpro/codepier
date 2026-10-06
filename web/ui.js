@@ -105,8 +105,20 @@ function uiSetPane(pane, focus = false) {
   }
 }
 function uiLabelFields(root) {
-  $$('.field > label', root).forEach((label) => {
-    const field = label.closest('.field');
+  $$('.field', root).forEach((field) => {
+    const label = field.matches('label') ? field : $(':scope > label', field);
+    if (!label || label.classList.contains('check')) return;
+    let caption = label;
+    if (label === field) {
+      caption = $(':scope > .field-label', label);
+      if (!caption) {
+        caption = document.createElement('span');
+        caption.className = 'field-label';
+        const text = [...label.childNodes].filter((node) => node.nodeType === Node.TEXT_NODE);
+        caption.append(...text);
+        label.prepend(caption);
+      }
+    }
     const group = $(':scope > .check-list', field);
     if (group && !label.control) {
       if (!label.id) label.id = 'group-' + uid();
@@ -118,12 +130,12 @@ function uiLabelFields(root) {
     if (!control) return;
     if (!control.id) control.id = 'field-' + uid();
     if (!label.contains(control)) label.htmlFor = control.id;
-    if (control.required && !$('.field-required', label)) {
+    if (control.required && !$('.field-required', caption)) {
       const mark = document.createElement('span');
       mark.className = 'field-required';
       mark.textContent = '必填';
       mark.setAttribute('aria-hidden', 'true');
-      label.append(mark);
+      caption.append(mark);
     }
     const descriptions = new Set(
       (control.getAttribute('aria-describedby') || '').split(/\s+/).filter(Boolean),
@@ -140,8 +152,14 @@ document.addEventListener(
   'invalid',
   (e) => {
     const control = e.target;
-    if (control.matches?.('.field input,.field select,.field textarea'))
+    if (control.matches?.('.field input,.field select,.field textarea')) {
       control.setAttribute('aria-invalid', 'true');
+      let disclosure = control.closest('details:not([open])');
+      while (disclosure) {
+        disclosure.open = true;
+        disclosure = disclosure.parentElement?.closest('details:not([open])');
+      }
+    }
   },
   true,
 );
@@ -230,6 +248,7 @@ function uiPageReady(animate = false, presentation = null) {
   if (!page) return;
   document.title = `${nav.find((n) => n[0] === S.page)?.[2] || '控制台'} · CodePier`;
   page.dataset.page = S.page;
+  page.classList.remove('management-page');
   if (animate) {
     page.classList.remove('page-arrive');
     void page.offsetWidth;
@@ -249,6 +268,7 @@ function uiPageReady(animate = false, presentation = null) {
       });
     });
   });
+  uiManagementLayout(page);
   uiLabelFields(page);
   const projectInput = $('#project-query');
   if (projectInput) {
@@ -296,7 +316,9 @@ async function uiCommand() {
     filtered = [],
     active = -1;
   const entries = () => [
-    ...nav.map(([id, ico, label]) => ({ id, ico, label, kind: 'page', hint: '页面' })),
+    ...nav
+      .filter(([id]) => CodePierIdentity.canNavigate(id))
+      .map(([id, ico, label]) => ({ id, ico, label, kind: 'page', hint: '页面' })),
     ...projects.map((p) => ({
       id: p.id,
       ico: 'folder',
@@ -469,3 +491,245 @@ if (window.visualViewport) {
   window.visualViewport.addEventListener('scroll', uiSyncVisualViewport);
   uiSyncVisualViewport();
 }
+
+// Shared management composition. Only presentation state is retained in memory.
+function uiPermissionState(title, reason) {
+  return (
+    heading(title, '', '当前空间的访问权限') +
+    `<section class="permission-state"><span class="permission-symbol">${icon('lock')}</span><h2>此页面需要相应的管理权限</h2><p>${esc(reason)}</p><p class="muted">当前空间：${esc(CodePierIdentity.current()?.label || '未选择')}</p><button class="btn" data-nav="identity">返回我的账号</button></section>`
+  );
+}
+function uiSectionTabs(host, groups) {
+  const key = S.page;
+  const tabs = S.managementTabs || (S.managementTabs = {});
+  const bar = document.createElement('nav');
+  bar.className = 'management-tabs';
+  bar.setAttribute('role', 'tablist');
+  bar.setAttribute('aria-label', '页面分区');
+  const content = document.createElement('div');
+  content.className = 'management-tab-content';
+  const choose = (id, focus = false) => {
+    tabs[key] = id;
+    for (const button of bar.children) {
+      const active = button.dataset.section === id;
+      button.setAttribute('aria-selected', String(active));
+      button.tabIndex = active ? 0 : -1;
+      if (active && focus) button.focus();
+    }
+    for (const panel of content.children) panel.hidden = panel.dataset.section !== id;
+  };
+  for (const group of groups) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = group.label;
+    button.id = 'section-tab-' + group.id;
+    button.dataset.section = group.id;
+    button.setAttribute('role', 'tab');
+    button.setAttribute('aria-controls', 'section-panel-' + group.id);
+    button.onclick = () => choose(group.id);
+    const pane = document.createElement('section');
+    pane.id = 'section-panel-' + group.id;
+    pane.className = 'management-grid';
+    pane.dataset.section = group.id;
+    pane.setAttribute('role', 'tabpanel');
+    pane.setAttribute('aria-labelledby', button.id);
+    pane.tabIndex = 0;
+    pane.append(...group.panels);
+    bar.append(button);
+    content.append(pane);
+  }
+  bar.onkeydown = (event) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    const current = [...bar.children].indexOf(document.activeElement);
+    if (current < 0) return;
+    event.preventDefault();
+    const next =
+      event.key === 'Home'
+        ? 0
+        : event.key === 'End'
+          ? groups.length - 1
+          : (current + (event.key === 'ArrowRight' ? 1 : -1) + groups.length) % groups.length;
+    choose(groups[next].id, true);
+  };
+  host.append(bar, content);
+  choose(groups.some((g) => g.id === tabs[key]) ? tabs[key] : groups[0].id);
+}
+function uiManagementLayout(page) {
+  if (
+    !['identity', 'members', 'identity-admin', 'profiles', 'roles', 'mcp-gateway'].includes(S.page)
+  )
+    return;
+  const host = $('#profiles-page,#roles-page,#gateway-page', page) || page;
+  host.classList.add('management-page');
+  const panels = $$(':scope > .panel', host);
+  if (panels.length > 1 && S.page === 'mcp-gateway') {
+    uiSectionTabs(host, [
+      { id: 'services', label: '服务与账号', panels: panels.slice(0, 2) },
+      { id: 'tools', label: '已发布工具', panels: panels.slice(2, 3) },
+      { id: 'delegation', label: '我的委派', panels: panels.slice(3, 4) },
+      { id: 'activity', label: '调用记录', panels: panels.slice(4) },
+    ]);
+  } else if (panels.length > 1) {
+    const grid = document.createElement('div');
+    grid.className = 'management-grid management-grid-' + S.page;
+    panels[0].before(grid);
+    grid.append(...panels);
+  }
+  $$('.grant-row', host).forEach((row) => {
+    const main = row.firstElementChild;
+    if (main?.tagName === 'DIV') main.classList.add('grant-info');
+  });
+  $$('.panel-body', host).forEach((body, index) => {
+    const rows = $$(':scope > .grant-row', body);
+    if (rows.length < 5) return;
+    const filter = document.createElement('div');
+    filter.className = 'entity-filter';
+    const input = document.createElement('input');
+    input.type = 'search';
+    const filters = S.managementFilters || (S.managementFilters = {});
+    const filterKey = S.page + ':' + index;
+    input.id = 'management-filter-' + S.page + '-' + index;
+    input.value = filters[filterKey] || '';
+    input.placeholder = '搜索名称、范围或标识';
+    input.setAttribute('aria-label', '筛选' + (body.previousElementSibling?.textContent || '列表'));
+    const count = document.createElement('span');
+    count.setAttribute('role', 'status');
+    const update = () => {
+      const query = input.value.trim().toLocaleLowerCase();
+      filters[filterKey] = input.value;
+      let visible = 0;
+      rows.forEach((row) => {
+        row.hidden = !row.textContent.toLocaleLowerCase().includes(query);
+        if (!row.hidden) visible++;
+      });
+      count.textContent = `${visible} / ${rows.length} 项`;
+    };
+    input.oninput = update;
+    filter.append(input, count);
+    body.prepend(filter);
+    update();
+  });
+}
+
+// One rule at a time, without removing any control from the submitting form.
+function uiPolicyEditor(dialog, preferLast = false) {
+  const form = $('#role-form', dialog);
+  if (!form) return;
+  let layout = $('.policy-layout', form);
+  if (!layout) {
+    layout = document.createElement('div');
+    layout.className = 'policy-layout';
+    const navigation = document.createElement('aside');
+    navigation.className = 'policy-navigation';
+    navigation.innerHTML =
+      '<h3>权限规则</h3><p class="form-note">每条规则独立限定资源；选择一条进行编辑。</p><div class="policy-rule-list"></div><div class="policy-add-actions"></div>';
+    const body = document.createElement('div');
+    body.className = 'policy-content';
+    const projectRules = $('#role-project-rules', form),
+      devices = $('#role-device-rules', form);
+    projectRules.before(layout);
+    body.append(projectRules, devices);
+    $('.policy-add-actions', navigation).append(
+      $('#role-add-project-rule', form),
+      $('#role-add-device-rule', form),
+    );
+    layout.append(navigation, body);
+  }
+  const list = $('.policy-rule-list', layout),
+    rules = $$('fieldset.role-rule', form);
+  let selected = Number(dialog.dataset.policyIndex || 0);
+  if (preferLast instanceof Element) {
+    selected = rules.indexOf(preferLast);
+    dialog.dataset.editorDirty = 'true';
+  } else if (preferLast) selected = rules.length - 1;
+  selected = Math.max(0, Math.min(selected, rules.length - 1));
+  const existing = new Map([...list.children].map((button) => [button.dataset.ruleKey, button]));
+  const buttons = [];
+  const choose = (index, focus = false) => {
+    dialog.dataset.policyIndex = String(index);
+    rules.forEach((rule, i) => {
+      rule.hidden = i !== index;
+    });
+    [...list.children].forEach((button, i) => {
+      button.setAttribute('aria-pressed', String(i === index));
+      if (focus && i === index) button.focus();
+    });
+  };
+  rules.forEach((rule, index) => {
+    rule.dataset.policyKey ||= uid();
+    const button = existing.get(rule.dataset.policyKey) || document.createElement('button');
+    button.type = 'button';
+    button.dataset.ruleKey = rule.dataset.policyKey;
+    let title = button.querySelector('span'),
+      description = button.querySelector('small');
+    if (!title) {
+      title = document.createElement('span');
+      description = document.createElement('small');
+      button.append(title, description);
+    }
+    title.textContent = `${index + 1} · ${rule.hasAttribute('data-project-rule') ? '项目规则' : '设备委派'}`;
+    const update = () => {
+      const label = rule._policyButton?.querySelector('small');
+      if (!label) return;
+      const all = $('[name="all_projects"]', rule)?.checked;
+      const resources = $$('[name="project"]:checked,[name="device"]:checked', rule).length;
+      label.textContent = all
+        ? '全部当前与未来项目'
+        : resources
+          ? `已选择 ${resources} 项资源`
+          : '尚未选择资源';
+    };
+    rule._policyButton = button;
+    button.onclick = () => choose(index, true);
+    if (!rule.dataset.policyBound) {
+      rule.addEventListener('change', update);
+      rule.dataset.policyBound = 'true';
+    }
+    update();
+    buttons.push(button);
+  });
+  let cursor = list.firstElementChild;
+  for (const button of buttons) {
+    if (button === cursor) cursor = cursor.nextElementSibling;
+    else list.insertBefore(button, cursor);
+  }
+  for (const button of [...list.children]) if (!buttons.includes(button)) button.remove();
+  let empty = $('.policy-empty', layout);
+  if (!empty) {
+    empty = document.createElement('p');
+    empty.className = 'policy-empty';
+    empty.textContent = '先添加项目规则或设备委派，再选择允许的能力与资源。';
+    $('.policy-content', layout).append(empty);
+  }
+  empty.hidden = rules.length > 0;
+  choose(selected);
+  uiLabelFields(form);
+}
+
+// Menu movement follows the visible items; native select controls remain native.
+document.addEventListener('keydown', (event) => {
+  if (event.defaultPrevented || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key))
+    return;
+  const menu = event.target.closest?.('.tool-menu,.chat-overflow');
+  if (!menu) return;
+  const origin = menu.querySelector('summary');
+  if (!menu.open && event.target !== origin) return;
+  event.preventDefault();
+  menu.open = true;
+  const items = [...menu.querySelectorAll('button:not(:disabled),a[href]')].filter(
+    (item) => item.getClientRects().length,
+  );
+  if (!items.length) return;
+  const index = items.indexOf(document.activeElement);
+  const next =
+    event.key === 'Home'
+      ? 0
+      : event.key === 'End'
+        ? items.length - 1
+        : index < 0
+          ? event.key === 'ArrowUp'
+            ? items.length - 1
+            : 0
+          : (index + (event.key === 'ArrowUp' ? -1 : 1) + items.length) % items.length;
+  items[next].focus();
+});

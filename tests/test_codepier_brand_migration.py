@@ -138,7 +138,7 @@ def test_legacy_mcp_resources_and_binding_remain_readable():
         old=mcp_apps.read_resource('ui://relay/'+kind+'-v1.html',lambda:'https://hub.example')
         new=mcp_apps.read_resource('ui://codepier/'+kind+'-v1.html',lambda:'https://hub.example')
         assert old['text']==new['text'] and 'CodePier' in new['text']
-    result=mcp_apps.attach({},'open_workspace',{'project':'fixture'},{},lambda:'https://hub.example')
+    result=mcp_apps.attach({},'show_changes',{'project':'fixture'},{},lambda:'https://hub.example')
     assert result['_meta']['com.codepier/binding']==result['_meta']['me.infpro.relay/binding']
     assert all(x['uri'].startswith('ui://codepier/') for x in mcp_apps.list_resources())
 

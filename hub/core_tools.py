@@ -157,9 +157,6 @@ def public_description(description):
 
 async def invoke_query(runtime, name, raw, principal):
     model = validate(name, raw)
-    if name == 'workbench':
-        # The existing endpoint refreshes grants/roles and filters project access.
-        return await runtime.invoke('projects_list', {}, principal)
     target = 'workspace' if name == 'project_query' else 'process'
     return await runtime.invoke(target, model.model_dump(exclude_unset=True), principal)
 

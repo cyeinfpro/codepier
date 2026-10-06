@@ -20,8 +20,8 @@ const result = await build({
 const js = result.outputFiles[0].text.replace(/<\/script/gi, '<\\/script');
 const css = await readFile('app.css', 'utf8');
 const outputs = {};
-for (const kind of ['workspace', 'changes']) {
-  const html = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CodePier · ${kind === 'workspace' ? '项目工作区' : '改动审阅'}</title><style>${css}</style><body data-kind="${kind}"><main id="app" aria-busy="true"><p class="muted">正在连接项目…</p></main><script>${js}</script></body></html>`;
+for (const kind of ['changes']) {
+  const html = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CodePier · 改动审阅</title><style>${css}</style><body data-kind="${kind}"><main id="app" aria-busy="true"><p class="muted">正在连接项目…</p></main><script>${js}</script></body></html>`;
   await writeFile(`${kind}-v1.html`, html);
   outputs[`${kind}-v1.html`] = {
     bytes: Buffer.byteLength(html),

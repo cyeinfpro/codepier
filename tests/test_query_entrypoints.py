@@ -1,14 +1,11 @@
 """Read-only entrypoints retain runtime authorization and never launch work."""
 import asyncio
-import json
 import time
 
 import pytest
-from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
 from hub.core_tools import result as core_result
-from hub.mcp_apps import attach
 from hub.runtime import Runtime, Principal
 from hub.store import Store
 from shared.contracts import TOOLS, tool_definitions
@@ -42,25 +39,15 @@ def test_entrypoint_metadata_and_conservative_facades(profile):
         assert item['annotations']['readOnlyHint'] is True
         assert item['annotations']['destructiveHint'] is False
         assert item['annotations']['openWorldHint'] is False
-    entry = definitions['workbench']
-    assert entry['title'] != 'CodePier'
-    assert entry['_meta']['openai/ui']['entrypoints'] == [{'type': 'global'}, {'type': 'thread'}]
-    assert entry['_meta']['ui']['resourceUri'] == 'ui://codepier/workspace-v1.html'
-    assert entry['_meta']['ui']['visibility'] == ['model', 'app']
-    assert entry['_meta'].get('openai/visibility', 'public') == 'public'
-    assert entry['_meta']['openai/outputTemplate'] == entry['_meta']['ui']['resourceUri']
-    assert entry['securitySchemes'] == [{'type': 'oauth2', 'scopes': ['read']}]
-    Draft202012Validator(entry['inputSchema']).validate({})
+    assert 'workbench' not in definitions
     for name in ('workspace', 'process', 'browser', 'computer'):
         assert definitions[name]['annotations']['readOnlyHint'] is False
     for name, definition in definitions.items():
-        if name != 'workbench':
-            assert 'resourceUri' not in definition['_meta'].get('ui', {})
-            assert 'openai/outputTemplate' not in definition['_meta']
+        assert 'resourceUri' not in definition['_meta'].get('ui', {})
+        assert 'openai/outputTemplate' not in definition['_meta']
 
 
 @pytest.mark.parametrize('name,args', [
-    ('workbench', {'project': 'Visible'}),
     ('project_query', {'operation': 'workflow_create'}),
     ('project_query', {'operation': 'project_create'}),
     ('project_query', {'operation': 'open', 'project': 'Visible', 'capture_baseline': True}),
@@ -75,9 +62,9 @@ def test_query_allowlists_reject_mutations(name, args):
 
 
 @pytest.mark.asyncio
-async def test_workbench_filters_projects_and_revalidates_revoked_grants(runtime):
+async def test_project_query_filters_projects_and_revalidates_revoked_grants(runtime):
     instance, principal = runtime
-    initial = await instance.invoke('workbench', {}, principal)
+    initial = await instance.invoke('project_query', {}, principal)
     assert [p['alias'] for p in initial['projects']] == ['Visible']
     assert not instance.store.all('SELECT id FROM operations')
     queried = await instance.invoke('project_query', {}, principal)
@@ -87,7 +74,7 @@ async def test_workbench_filters_projects_and_revalidates_revoked_grants(runtime
     assert not instance.store.all('SELECT id FROM operations')
     instance.store.execute("UPDATE grants SET revoked=1 WHERE id='reader'")
     with pytest.raises(DevError):
-        await instance.invoke('workbench', {}, principal)
+        await instance.invoke('project_query', {}, principal)
 
 
 @pytest.mark.asyncio
@@ -111,11 +98,3 @@ async def test_query_keeps_batch_wait_parallel_and_existing_receipts(runtime, mo
     rendered = core_result('task_query', args, value)
     assert len(rendered['structuredContent']['operations']) == 2
     assert not instance.store.all('SELECT id FROM operations')
-
-
-def test_workbench_binding_has_no_invented_project_or_task():
-    result = attach({'structuredContent': {'projects': []}}, 'workbench', {},
-                    {'projects': []}, lambda: 'https://example.invalid')
-    binding = result['_meta']['com.codepier/binding']
-    assert binding == {'kind': 'workbench', 'panel_url': 'https://example.invalid'}
-    assert 'project' not in json.dumps(binding)

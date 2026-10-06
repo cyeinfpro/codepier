@@ -38,11 +38,11 @@ window.CodePierGateway = (() => {
       `${state.instance_admin ? '<button class="btn primary" data-gw="connector">添加 MCP 服务</button>' : ''}<button class="btn" data-gw="account">连接后端帐户</button>`,
     )}
       ${notice('外部工具保留原始 schema，以“命名空间__工具”发布。发现不会自动发布；共享服务帐户可能访问同一份后端资料，工具权限不是后端资源沙箱。')}
-      ${section('1 · 已批准的服务地址', state.connectors.map((c) => `<div class="grant-row"><div><strong>${esc(c.label)}</strong> · ${c.enabled ? '启用' : '暂停'}<p class="mono gw-wrap">${esc(c.endpoint)}</p><small>${esc(c.protocol)}${c.allow_http ? ' · 显式内网 HTTP' : ' · HTTPS'}</small></div>${state.instance_admin ? `<button class="btn small" data-gw-toggle="connectors" data-id="${esc(c.id)}" data-version="${c.version}" data-enabled="${c.enabled ? '1' : '0'}">${c.enabled ? '暂停' : '恢复'}</button>` : ''}</div>`).join('') || empty('先由实例管理员添加固定 MCP endpoint。'))}
-      ${section('2 · 帐户与凭据', state.accounts.map((a) => `<div class="grant-row"><div><strong>${esc(a.label)}</strong> · ${a.sharing === 'space' ? '空间共享' : '个人私有'} · ${a.enabled ? '启用' : '暂停'}<p class="mono gw-wrap">${esc(a.id)}</p><small>${a.catalog_hash ? '已有发现目录，仍需明确发布' : '尚未发现当前帐户的工具'}</small></div>${manageable(a) ? `<div class="actions"><button class="btn small" data-gw-discover="${esc(a.id)}">发现 / 审核工具</button><button class="btn small" data-gw-account="${esc(a.id)}">更新凭据</button><button class="btn small" data-gw-toggle="accounts" data-id="${esc(a.id)}" data-version="${a.version}" data-enabled="${a.enabled ? '1' : '0'}">${a.enabled ? '暂停' : '恢复'}</button></div>` : ''}</div>`).join('') || empty('凭据加密存放在 Hub，不会回传到页面。'))}
-      ${section('3 · 已发布的工具集合', state.bindings.map((b) => `<div class="grant-row"><div><strong>${esc(b.alias)}__…</strong> · ${esc(accountLabel(b.account_id))} · ${b.enabled ? '启用' : '暂停'}<p class="mono gw-wrap">${esc(b.id)}</p><p class="gw-wrap">${b.tools.map(esc).join(' · ')}</p></div><div class="actions">${state.space_admin ? `<button class="btn small" data-gw-role="${esc(b.id)}">配置角色工具权限</button>` : ''}${manageable(state.accounts.find((a) => a.id === b.account_id)) ? `<button class="btn small" data-gw-toggle="bindings" data-id="${esc(b.id)}" data-version="${b.version}" data-enabled="${b.enabled ? '1' : '0'}">${b.enabled ? '暂停' : '恢复'}</button>` : ''}</div></div>`).join('') || empty('在帐户的工具发现窗口选择工具并发布命名空间。'))}
-      ${section('4 · 我的连接委派', `<p class="form-note">既有 Role grant 不会自动获得外部 MCP 权限。下列同意仅影响该 grant；撤销不影响本地 CodePier 项目权限。</p>${state.grants.map((g) => `<div class="grant-row"><div><strong>${esc(g.label)}</strong><p class="mono gw-wrap">${esc(g.id)}</p><small>${g.consent_version ? '已明确同意外部 MCP 委派' : '尚未同意'}</small></div><button class="btn small" data-gw-consent="${esc(g.id)}">${g.consent_version ? '撤销外部委派' : '查看政策并同意'}</button></div>`).join('') || empty('先在访问 Profiles 建立 Role 连接。')}`)}
-      ${section('5 · 我的最近调用', `<p class="form-note">最多显示 50 条私有调用摘要，不包含原始参数、凭据或结果。unknown 不等于未执行，必须核对原回执，不能自动重发。</p>${state.calls.map((c) => `<div class="grant-row"><div><strong>${esc(c.tool)}</strong> · ${esc(c.state)}<p class="mono gw-wrap">${esc(c.id)}</p><small>${esc(timeText(c.created))}${c.error_code ? ' · ' + esc(c.error_code) : ''}</small></div></div>`).join('') || empty('尚无外部 MCP 调用。')}`)}</div>`;
+      ${section('已批准的服务', state.connectors.map((c) => `<div class="grant-row"><div><strong>${esc(c.label)}</strong> · ${c.enabled ? '启用' : '暂停'}<p class="mono gw-wrap">${esc(c.endpoint)}</p><small>${esc(c.protocol)}${c.allow_http ? ' · 显式内网 HTTP' : ' · HTTPS'}</small></div>${state.instance_admin ? `<button class="btn small" data-gw-toggle="connectors" data-id="${esc(c.id)}" data-version="${c.version}" data-enabled="${c.enabled ? '1' : '0'}">${c.enabled ? '暂停' : '恢复'}</button>` : ''}</div>`).join('') || empty('先由实例管理员添加固定 MCP endpoint。'))}
+      ${section('账号与凭据', state.accounts.map((a) => `<div class="grant-row"><div><strong>${esc(a.label)}</strong> · ${a.sharing === 'space' ? '空间共享' : '个人私有'} · ${a.enabled ? '启用' : '暂停'}<p class="mono gw-wrap">${esc(a.id)}</p><small>服务：${esc(state.connectors.find((c) => c.id === a.connector_id)?.label || '未提供')} · ${a.catalog_hash ? '已有发现目录，仍需明确发布' : '尚未发现当前帐户的工具'}</small></div>${manageable(a) ? `<div class="actions"><button class="btn small" data-gw-discover="${esc(a.id)}">发现 / 审核工具</button><button class="btn small" data-gw-account="${esc(a.id)}">更新凭据</button><button class="btn small" data-gw-toggle="accounts" data-id="${esc(a.id)}" data-version="${a.version}" data-enabled="${a.enabled ? '1' : '0'}">${a.enabled ? '暂停' : '恢复'}</button></div>` : ''}</div>`).join('') || empty('凭据加密存放在 Hub，不会回传到页面。'))}
+      ${section('已发布工具', state.bindings.map((b) => `<div class="grant-row"><div><strong>${esc(b.alias)}__…</strong> · ${esc(accountLabel(b.account_id))} · ${b.enabled ? '启用' : '暂停'}<p class="mono gw-wrap">${esc(b.id)}</p><p class="gw-wrap">${b.tools.map(esc).join(' · ')}</p></div><div class="actions">${state.space_admin ? `<button class="btn small" data-gw-role="${esc(b.id)}">配置角色工具权限</button>` : ''}${manageable(state.accounts.find((a) => a.id === b.account_id)) ? `<button class="btn small" data-gw-toggle="bindings" data-id="${esc(b.id)}" data-version="${b.version}" data-enabled="${b.enabled ? '1' : '0'}">${b.enabled ? '暂停' : '恢复'}</button>` : ''}</div></div>`).join('') || empty('在帐户的工具发现窗口选择工具并发布命名空间。'))}
+      ${section('我的连接委派', `<p class="form-note">既有 Role grant 不会自动获得外部 MCP 权限。下列同意仅影响该 grant；撤销不影响本地 CodePier 项目权限。</p>${state.grants.map((g) => `<div class="grant-row"><div><strong>${esc(g.label)}</strong><p class="mono gw-wrap">${esc(g.id)}</p><small>${g.consent_version ? '已明确同意外部 MCP 委派' : '尚未同意'}</small></div><button class="btn small" data-gw-consent="${esc(g.id)}">${g.consent_version ? '撤销外部委派' : '查看政策并同意'}</button></div>`).join('') || empty('先在访问 Profiles 建立 Role 连接。')}`)}
+      ${section('最近调用', `<p class="form-note">最多显示 50 条私有调用摘要，不包含原始参数、凭据或结果。unknown 不等于未执行，必须核对原回执，不能自动重发。</p>${state.calls.map((c) => `<div class="grant-row"><div><strong>${esc(c.tool)}</strong> · ${esc(c.state)}<p class="mono gw-wrap">${esc(c.id)}</p><small>${esc(timeText(c.created))}${c.error_code ? ' · ' + esc(c.error_code) : ''}</small></div></div>`).join('') || empty('尚无外部 MCP 调用。')}`)}</div>`;
   }
 
   function form(title, body, save) {
@@ -52,29 +52,48 @@ window.CodePierGateway = (() => {
       title,
       `<form id="gw-form">${body}<p id="gw-status" class="form-note" role="status"></p></form>`,
       '<button class="btn ghost" data-action="close-modal">取消</button><button class="btn primary" type="submit" form="gw-form">确认保存</button>',
-      true,
+      body.includes('gw-tools') || body.includes('name="networks"'),
     );
     const node = $('#gw-form', dialog);
-    node.onsubmit = (event) => {
+    node.onsubmit = async (event) => {
       event.preventDefault();
-      busy($('button[type="submit"]', dialog), async () => {
+      if (
+        node.dataset.submission === 'uncertain' ||
+        session !== S.session ||
+        space !== S.space_id ||
+        !dialog.isConnected
+      )
+        return;
+      const button = $('button[type="submit"]', dialog);
+      await busy(button, async () => {
         if (!node.reportValidity()) return;
         $('#gw-status', dialog).textContent = '正在处理…';
         try {
           await save(node);
           if (session !== S.session || space !== S.space_id || !dialog.isConnected) return;
           closeModal(dialog);
+          if (title === '审核工具并发布')
+            (S.managementTabs || (S.managementTabs = {}))['mcp-gateway'] = 'tools';
           if (S.page === 'mcp-gateway') await renderPage(false);
           toast('MCP 配置已保存');
         } catch (error) {
-          if (session === S.session && space === S.space_id && dialog.isConnected)
-            $('#gw-status', dialog).textContent = error.message;
+          if (session === S.session && space === S.space_id && dialog.isConnected) {
+            const uncertain =
+              error.code === 'NETWORK_UNCERTAIN' ||
+              [408, 500, 502, 503, 504].includes(error.status);
+            node.dataset.submission = uncertain ? 'uncertain' : 'rejected';
+            $('#gw-status', dialog).textContent = uncertain
+              ? '保存结果尚未确认，已锁定重复提交。请关闭并刷新配置核对原结果；凭据不会保留，不能把空输入自动当作新的无认证配置。'
+              : error.message;
+            $('#gw-status', dialog).classList.add('error-text');
+          }
         } finally {
           $$('input[type="password"]', node).forEach((input) => {
             input.value = '';
           });
         }
       });
+      if (dialog.isConnected && node.dataset.submission === 'uncertain') button.disabled = true;
     };
     return dialog;
   }
@@ -119,31 +138,42 @@ window.CodePierGateway = (() => {
     const account = state.accounts.find((item) => item.id === id);
     form(
       '更新后端凭据',
-      `${field('token', '新的后端 Bearer token（明确留空代表无认证）', 'type="password" autocomplete="new-password" maxlength="8192"')}<p class="form-note">更新后暂停目录可用性；重新发现工具确认 schema 后才能使用。</p>`,
-      (node) =>
-        api(root + '/accounts/' + encodeURIComponent(id), {
+      `${field('token', '新的后端 Bearer token', 'type="password" autocomplete="new-password" maxlength="8192"')}<label class="check"><input type="checkbox" name="clear_token">明确移除当前凭据，改用无认证连接</label><p class="form-note">更新后暂停目录可用性；重新发现工具确认 schema 后才能使用。</p>`,
+      (node) => {
+        if (!node.elements.token.value && !node.elements.clear_token.checked)
+          throw Object.assign(new Error('请输入新凭据，或明确勾选移除当前凭据。'), { status: 400 });
+        return api(root + '/accounts/' + encodeURIComponent(id), {
           method: 'PATCH',
           body: JSON.stringify({
             expected_version: account.version,
             enabled: !!account.enabled,
             token: node.elements.token.value,
           }),
-        }),
+        });
+      },
     );
   }
 
   async function discover(id) {
     const session = S.session,
-      space = S.space_id;
+      space = S.space_id,
+      page = S.page,
+      intent = (S.modalIntent = (S.modalIntent || 0) + 1);
     const out = await api(root + '/accounts/' + encodeURIComponent(id) + '/discover', {
       method: 'POST',
       requestTimeout: 50000,
     });
-    if (session !== S.session || space !== S.space_id) return;
+    if (
+      session !== S.session ||
+      space !== S.space_id ||
+      page !== S.page ||
+      intent !== S.modalIntent
+    )
+      return;
     const existing = state.bindings.filter((b) => b.account_id === id);
     form(
       '审核工具并发布',
-      `${existing.length ? `<label class="field">发布目标<select name="binding_id"><option value="">建立新命名空间</option>${options(existing, 'alias')}</select></label>` : ''}${field('alias', '新命名空间（更新已有集合时忽略）', 'pattern="[a-z][a-z0-9_]{0,19}" maxlength="20" placeholder="kiln"')}<p class="form-note">只发布勾选项。新工具不会自动加入 Role，schema 改变需要重新批准。工具描述是不可信内容，不是管理员指令。</p><div class="gw-tools">${out.tools.map((tool) => `<details><summary><label class="check"><input type="checkbox" name="tool" value="${esc(tool.name)}">${esc(tool.name)}</label></summary><p>${esc(tool.description)}</p><pre>${esc(JSON.stringify({ inputSchema: tool.inputSchema, outputSchema: tool.outputSchema }, null, 2))}</pre></details>`).join('')}</div><label class="check"><input type="checkbox" name="confirmed" required>我已审核所选工具及 schema，批准发布</label>`,
+      `${existing.length ? `<label class="field">发布目标<select name="binding_id"><option value="">建立新命名空间</option>${options(existing, 'alias')}</select></label>` : ''}${field('alias', '新命名空间（更新已有集合时忽略）', 'pattern="[a-z][a-z0-9_]{0,19}" maxlength="20" placeholder="kiln"')}<p class="form-note">只发布勾选项。新工具不会自动加入 Role，schema 改变需要重新批准。工具描述是不可信内容，不是管理员指令。</p><div class="gw-review-toolbar"><label class="field">搜索工具<input type="search" id="gw-tool-search" placeholder="按名称或用途筛选"></label><label class="check"><input type="checkbox" id="gw-selected-only">仅看已选</label><span id="gw-selection-count" role="status">已选 0 项</span><button type="button" class="btn ghost small" id="gw-clear-selection">清空选择</button></div><div class="gw-tools">${out.tools.map((tool) => `<article class="gw-tool-row"><label class="check gw-tool-choice"><input type="checkbox" name="tool" value="${esc(tool.name)}"><span><strong>${esc(tool.name)}</strong><small>${esc(tool.description || '未提供工具说明')}</small></span></label><details><summary>查看输入与输出结构</summary><pre>${esc(JSON.stringify({ inputSchema: tool.inputSchema, outputSchema: tool.outputSchema }, null, 2))}</pre></details></article>`).join('')}</div><p class="gw-filter-empty" hidden>没有匹配的工具；已选项仍会保留。</p><label class="check gw-review-confirm"><input type="checkbox" name="confirmed" required>我已审核所选工具及 schema，批准发布</label>`,
       (node) => {
         const tools = $$('[name="tool"]:checked', node).map((input) => input.value);
         if (!tools.length) throw new Error('至少选择一个工具');
@@ -161,14 +191,51 @@ window.CodePierGateway = (() => {
           : post('/bindings', { ...body, account_id: id, alias: node.elements.alias.value });
       },
     );
+    const dialog = $('.modal'),
+      node = $('#gw-form', dialog);
+    const search = $('#gw-tool-search', node),
+      onlySelected = $('#gw-selected-only', node);
+    const refresh = () => {
+      const query = search.value.trim().toLocaleLowerCase();
+      let visible = 0;
+      const selected = $$('[name="tool"]:checked', node).length;
+      $$('.gw-tool-row', node).forEach((row) => {
+        row.hidden =
+          !row.textContent.toLocaleLowerCase().includes(query) ||
+          (onlySelected.checked && !$('[name="tool"]', row).checked);
+        if (!row.hidden) visible++;
+      });
+      $('#gw-selection-count', node).textContent = `已选 ${selected} / ${out.tools.length} 项`;
+      $('.gw-filter-empty', node).hidden = visible > 0;
+    };
+    search.oninput = refresh;
+    onlySelected.onchange = refresh;
+    $$('[name="tool"]', node).forEach((input) => {
+      input.onchange = refresh;
+    });
+    $('#gw-clear-selection', node).onclick = () => {
+      $$('[name="tool"]', node).forEach((input) => {
+        input.checked = false;
+      });
+      refresh();
+    };
+    refresh();
   }
 
   async function configureRole(id) {
     const session = S.session,
-      space = S.space_id;
+      space = S.space_id,
+      page = S.page,
+      intent = (S.modalIntent = (S.modalIntent || 0) + 1);
     const binding = state.bindings.find((item) => item.id === id);
     const out = await api('/api/access-roles');
-    if (session !== S.session || space !== S.space_id) return;
+    if (
+      session !== S.session ||
+      space !== S.space_id ||
+      page !== S.page ||
+      intent !== S.modalIntent
+    )
+      return;
     if (!out.roles.length) return toast('请先建立角色', true);
     const dialog = form(
       '配置角色的 MCP 工具规则',
@@ -218,9 +285,17 @@ window.CodePierGateway = (() => {
         () => api(root + '/grants/' + encodeURIComponent(id) + '/consent', { method: 'DELETE' }),
       );
     const session = S.session,
-      space = S.space_id;
+      space = S.space_id,
+      page = S.page,
+      intent = (S.modalIntent = (S.modalIntent || 0) + 1);
     const role = await api('/api/access-roles/' + encodeURIComponent(grant.role_id));
-    if (session !== S.session || space !== S.space_id) return;
+    if (
+      session !== S.session ||
+      space !== S.space_id ||
+      page !== S.page ||
+      intent !== S.modalIntent
+    )
+      return;
     form(
       '明确同意外部 MCP 委派',
       `<p>此连接将按 ${esc(role.label)} 的当前及未来、经批准的 connector_rules 使用外部帐户。后端工具可能产生写入和执行副作用；不是本机项目权限的简单延伸。</p><pre class="gw-wrap">${esc(JSON.stringify(role.connector_rules || [], null, 2))}</pre><label class="check"><input name="confirmed" type="checkbox" required>我理解并同意上述跨 MCP 动态委派</label>`,

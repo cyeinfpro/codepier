@@ -22,7 +22,7 @@ window.CodePierRoles = (() => {
   }
   async function html() {
     const result = await api('/api/access-roles');
-    return `<div id="roles-page">${heading('访问角色', 'LIVE ROLE POLICY', '', `<button class="btn primary" id="role-create">新建角色</button>`)}${notice(note)}<section class="panel"><div class="panel-head"><h2>共用政策 · 独立身份</h2><span class="badge neutral">${result.roles.length} / ${result.limit}</span></div><div class="panel-body">${result.roles.map((role) => `<div class="grant-row"><div>${summary(role)}<small>${role.bound_profiles} 个身份 · ${role.active_grants} 个未撤销角色授权</small><p class="mono">${esc(role.id)}</p></div><button class="btn small" data-role-edit="${esc(role.id)}">编辑 / 暂停</button></div>`).join('') || empty('先建立 secretary 等角色，再将主秘书、小秘书 Profile 绑定到它。')}</div></section><div class="actions"><button class="btn" data-nav="profiles">管理身份 Profiles</button><button class="btn ghost" data-nav="connect">查看角色 MCP 地址</button></div></div>`;
+    return `<div id="roles-page">${heading('访问角色', 'LIVE ROLE POLICY', '', `<button class="btn primary" id="role-create">新建角色</button>`)}${notice(note, true)}<section class="panel"><div class="panel-head"><h2>共用政策 · 独立身份</h2><span class="badge neutral">${result.roles.length} / ${result.limit}</span></div><div class="panel-body">${result.roles.map((role) => `<div class="grant-row"><div>${summary(role)}<small>${role.bound_profiles} 个身份 · ${role.active_grants} 个未撤销角色授权</small><p class="mono">${esc(role.id)}</p></div><button class="btn small" data-role-edit="${esc(role.id)}">编辑 / 暂停</button></div>`).join('') || empty('先建立 secretary 等角色，再将主秘书、小秘书 Profile 绑定到它。')}</div></section><div class="actions"><button class="btn" data-nav="profiles">管理身份 Profiles</button><button class="btn ghost" data-nav="connect">查看角色 MCP 地址</button></div></div>`;
   }
   function bind() {
     $('#role-create').onclick = () => edit();
@@ -81,19 +81,29 @@ window.CodePierRoles = (() => {
       );
       const form = $('#role-form', dialog),
         status = $('#role-save-status', dialog);
-      const wire = () =>
+      const wire = (preferLast = false) => {
         $$('[data-remove-rule]', dialog).forEach((b) => {
-          b.onclick = () => b.closest('fieldset').remove();
+          b.onclick = () => {
+            b.closest('fieldset').remove();
+            dialog.dataset.editorDirty = 'true';
+            uiPolicyEditor(dialog);
+            (
+              dialog.querySelector('.policy-rule-list button[aria-pressed="true"]') ||
+              dialog.querySelector('#role-add-project-rule')
+            ).focus();
+          };
         });
+        uiPolicyEditor(dialog, preferLast);
+      };
       $('#role-add-project-rule', dialog).onclick = () => {
         if ($$('[data-project-rule]', dialog).length >= 32) return;
         $('#role-project-rules', dialog).insertAdjacentHTML('beforeend', projectRule());
-        wire();
+        wire($('#role-project-rules', dialog).lastElementChild);
       };
       $('#role-add-device-rule', dialog).onclick = () => {
         if ($$('[data-device-rule]', dialog).length >= 32) return;
         $('#role-device-rules', dialog).insertAdjacentHTML('beforeend', deviceRule());
-        wire();
+        wire($('#role-device-rules', dialog).lastElementChild);
       };
       wire();
       form.onsubmit = (event) => {

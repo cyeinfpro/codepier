@@ -222,7 +222,65 @@ export function createModal({
   focusable: uiFocusable,
 }) {
   const lifetime = createPanel({ owner: () => S.session });
-  function closeModal(expected = null) {
+  let editorRoute = null,
+    pendingBack = false,
+    pendingEditor = null;
+  const enterEditor = () => {
+    editorRoute = { id: uid() };
+    history.pushState({ ...history.state, codepierEditor: editorRoute.id }, '', location.href);
+  };
+  window.addEventListener('popstate', () => {
+    if (pendingBack) {
+      pendingBack = false;
+      if (pendingEditor?.isConnected && S.session) enterEditor();
+      pendingEditor = null;
+      return;
+    }
+    if (editorRoute && history.state?.codepierEditor !== editorRoute.id) {
+      if (!canClose($('.modal'))) {
+        history.pushState({ ...history.state, codepierEditor: editorRoute.id }, '', location.href);
+        return;
+      }
+      editorRoute = null;
+      closeModal(null, true);
+    }
+  });
+  function canClose(dialog) {
+    if (!dialog) return true;
+    if (
+      !dialog.classList.contains('modal-editor') &&
+      !dialog.querySelector('[data-submission="uncertain"]')
+    )
+      return true;
+    const busy = !!dialog.querySelector('[aria-busy="true"]');
+    if (
+      !busy &&
+      dialog.dataset.editorDirty !== 'true' &&
+      !dialog.querySelector('[data-submission="uncertain"]')
+    )
+      return true;
+    return confirm(
+      busy
+        ? '仍在提交当前操作。离开不会取消已提交的请求；请稍后核对结果。继续离开？'
+        : '输入尚未保存，或保存结果未确认。离开将丢弃本页输入；已提交的操作不会取消。继续离开？',
+    );
+  }
+  function requestClose(expected = null, { navigation = false } = {}) {
+    const dialog = $('.modal');
+    if (expected && expected !== dialog) return false;
+    if (!canClose(dialog)) return false;
+    if (navigation && editorRoute) {
+      if (history.state?.codepierEditor === editorRoute.id) {
+        const state = { ...history.state };
+        delete state.codepierEditor;
+        history.replaceState(state, '', location.href);
+      }
+      editorRoute = null;
+    }
+    closeModal(expected);
+    return true;
+  }
+  function closeModal(expected = null, preserveRoute = false) {
     if (expected && $('.modal') !== expected) return;
     S.vpsIntent = (S.vpsIntent || 0) + 1;
     S.modalIntent = (S.modalIntent || 0) + 1;
@@ -233,6 +291,14 @@ export function createModal({
     document.body.style.overflow = $('.sidebar.open') ? 'hidden' : '';
     let focus = S.modalLastFocus;
     S.modalLastFocus = null;
+    if (!preserveRoute && editorRoute) {
+      const owned = history.state?.codepierEditor === editorRoute.id;
+      editorRoute = null;
+      if (owned) {
+        pendingBack = true;
+        history.back();
+      }
+    }
     if (focus?.isConnected && !focus.getClientRects().length)
       focus = focus.closest('.tool-menu')?.querySelector('summary');
     if (focus?.isConnected && focus.getClientRects().length && !focus.closest('[inert]'))
@@ -240,24 +306,75 @@ export function createModal({
   }
   function modal(title, body, footer = '', large = false, closable = true) {
     const origin = $('.modal') ? S.modalLastFocus : document.activeElement;
-    closeModal();
+    closeModal(null, true);
     S.modalLastFocus = origin;
     $('#modal-root').innerHTML =
       `<div class="modal-backdrop"><section class="modal ${large ? 'large' : ''}" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabindex="-1"><header class="modal-header"><h2 id="modal-title">${esc(title)}</h2>${closable ? `<button class="icon-btn" data-action="close-modal" aria-label="关闭">${icon('close')}</button>` : ''}</header><div class="modal-body">${body}</div>${footer ? `<footer class="modal-footer">${footer}</footer>` : ''}</section></div>`;
     document.body.style.overflow = 'hidden';
     $('#app').inert = true;
     const dialog = $('.modal');
+    const complex = dialog.querySelector(
+      '#role-form,#profile-form,#vps-form,#project-form,#device-form,#device-rename,#agent-command-form,#grant-form,#workflow-create-form,#workflow-update-form,#artifact-form,.gw-tools,#gw-form [name="networks"],#iam-issuer,#iam-group_name',
+    );
+    if (complex || large) {
+      dialog.classList.add('modal-editor');
+      dialog.dataset.presentation = complex
+        ? 'editor'
+        : dialog.querySelector('#computer-open-form')
+          ? 'tool'
+          : 'reader';
+      if (!complex) {
+        const content = dialog.querySelector('.modal-body');
+        content.tabIndex = 0;
+        content.setAttribute('role', 'region');
+        content.setAttribute('aria-label', title + '内容');
+      }
+      if (complex) {
+        dialog.dataset.editorForm = complex.closest('form')?.id || complex.id;
+        const dirty = (event) => {
+          const control = event.target;
+          if (
+            control.matches?.('input[name],select[name],textarea[name],#device-rename') &&
+            !control.readOnly
+          )
+            dialog.dataset.editorDirty = 'true';
+        };
+        dialog.addEventListener('input', dirty);
+        dialog.addEventListener('change', dirty);
+      }
+      if (closable) {
+        const back = dialog.querySelector('.modal-header [data-action="close-modal"]');
+        back.classList.add('editor-back');
+        back.setAttribute('aria-label', '返回上一页');
+        back.innerHTML =
+          '<span class="editor-back-label">← 返回</span><span class="editor-close-icon">' +
+          icon('close') +
+          '</span>';
+        if (!editorRoute) {
+          if (pendingBack) pendingEditor = dialog;
+          else enterEditor();
+        }
+      }
+    }
     uiLabelFields(dialog);
     const key = (e) => {
       if (e.key === 'Escape' && closable) {
         e.preventDefault();
-        closeModal(dialog);
+        requestClose(dialog);
         return;
       }
       uiTrapTab(e, dialog);
     };
     const scope = lifetime.mount(dialog);
     scope.listen(document, 'keydown', key);
+    const editorBack = dialog.querySelector('.editor-back');
+    if (editorBack) {
+      const mobile = matchMedia('(max-width:640px)');
+      const syncLabel = () =>
+        editorBack.setAttribute('aria-label', mobile.matches ? '返回上一页' : '关闭');
+      syncLabel();
+      scope.listen(mobile, 'change', syncLabel);
+    }
     S.modalCleanup = () => scope.dispose();
     // Establish focus while opening; a delayed callback could steal focus after
     // the user has already moved to another field or started submitting the form.
@@ -270,5 +387,5 @@ export function createModal({
     });
     return dialog;
   }
-  return { modal, closeModal };
+  return { modal, closeModal, requestClose };
 }

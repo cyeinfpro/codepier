@@ -85,7 +85,9 @@ def test_gateway_panel_end_to_end(gw, gateway_browser, width, tmp_path):
         r = must(b['owner'].get('/api/access-roles/' + r['id']))
         assert r['connector_rules'][0]['tools'] == ['echo']
         p = profile(b['owner'], r, 'UI profile'); g = must(credential(b['owner'], r, p))
-        page.reload(); expect(page.locator('[data-gw-consent]')).to_be_visible()
+        page.reload(); expect(page.locator('#gateway-page')).to_be_visible()
+        page.get_by_role('tab', name='我的委派', exact=True).click()
+        expect(page.locator('[data-gw-consent]')).to_be_visible()
         page.click('[data-gw-consent]')
         expect(page.locator('#gw-form [name="confirmed"]')).not_to_be_checked()
         page.check('#gw-form [name="confirmed"]')

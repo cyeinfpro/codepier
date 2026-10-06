@@ -284,6 +284,15 @@ def make_native_router(auth,runtime):
     router=APIRouter(prefix='/api/native')
     service=runtime.native
 
+    @router.get('/access')
+    @database_endpoint(runtime.store)
+    def access(request:Request,project:str):
+        # A read-only authority check for restoring suspended browser drafts.
+        # Use the same current write/execute/mapping boundary as every native action.
+        principal=auth.panel(request)
+        current=service.project(project,principal)
+        return {'allowed':True,'project_id':current['id']}
+
     @router.get('/sessions')
     @database_endpoint(runtime.store)
     def sessions(request:Request,project:str='',provider:str='',status:str='',q:str='',offset:int=0,limit:int=40,mode:str=''):

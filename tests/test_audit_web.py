@@ -37,7 +37,7 @@ const context = vm.createContext({document, console, URLSearchParams, AbortContr
   setTimeout(fn,ms){const id=++timerId;timers.set(id,{fn,ms});if([500,1000,2000,4000].includes(ms))queueMicrotask(()=>{if(timers.delete(id))fn();});return id;},
   clearTimeout:id=>timers.delete(id),clearInterval:id=>timers.delete(id),setInterval:()=>++timerId,
   fetch:(...args)=>fetchImpl(...args),window:{addEventListener(){},isSecureContext:false},
-  EventSource:class {constructor(){this.closed=false;}close(){this.closed=true;}}
+  EventSource:class extends EventTarget {constructor(){super();this.closed=false;}close(){this.closed=true;}}
 });
 const source=fs.readFileSync(process.argv[2],'utf8');
 vm.runInContext(fs.readFileSync('web/core/bundle.js','utf8'),context);

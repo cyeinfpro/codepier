@@ -25,11 +25,17 @@ CHECKPOINT_ARTIFACTS = {".next", ".mypy_cache", ".pytest_cache", ".ruff_cache", 
 
 
 def protected(relative: str) -> bool:
-    for part in PurePosixPath(relative).parts:
-        low = part.lower()
+    parts = tuple(part.lower() for part in PurePosixPath(relative).parts)
+    private_runtime = {'.codex': {'sessions', 'archived_sessions'},
+                       '.claude': {'projects'}}
+    if any(parts[index + 1] in private_runtime.get(part, ())
+           for index, part in enumerate(parts[:-1])):
+        return True
+    for low in parts:
         if low in IGNORED_DIRS or low.startswith(".rd-"):
             return True
-        if low in {".env", ".npmrc", ".pypirc", ".netrc", "id_rsa", "id_ed25519"}:
+        if low in {".env", ".npmrc", ".pypirc", ".netrc", "id_rsa", "id_ed25519",
+                   "auth.json", "credentials.json", ".credentials.json", "secrets.json"}:
             return True
         if low.startswith(".env.") and not low.endswith((".example", ".sample", ".template")):
             return True
@@ -680,7 +686,8 @@ class FileEngine:
         if tool == "history_list":
             root, _ = self.root(project)
             path = relative_path(args["path"]) if args["path"] else ""
-            return {"backups": self.journal.history(str(root), path, args["limit"])}
+            return {"backups": [row for row in self.journal.history(str(root), path, args["limit"])
+                                if not protected(row["path"])]}
         if tool == "history_restore":
             root, _ = self.root(project, True)
             row, data = self.journal.backup(str(root), args["backup_id"])

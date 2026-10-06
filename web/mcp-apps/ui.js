@@ -31,17 +31,8 @@ export function disclosure(parent, title, open = false) {
   parent.append(node);
   return body;
 }
-export const stateLabel = (state) => ({
-  active: '进行中', running: '执行中', queued: '已排队', reconnecting: '等待重连',
-  cancelling: '正在取消', succeeded: '操作成功', failed: '失败', cancelled: '已取消',
-  needs_review: '需核实', interrupted: '已中断', unknown: '状态未确认',
-  pending: '待处理', completed: '已完成', skipped: '已跳过', blocked: '受阻',
-  passed: '通过', stale: '源码已变化', unverified: '未验证', executing: '执行中',
-  ready: '可用', disabled: '未启用', denied: '未获授权', missing: '程序缺失',
-  not_connected: '未连接', not_run: '未实测', paused: '已暂停'
-}[state] || '未确认');
 export function badge(state, text) {
-  return el('span', text || stateLabel(state), 'chip state-' + (/^[a-z_]+$/.test(state || '') ? state : 'unknown'));
+  return el('span', text || '未确认', 'chip state-' + (/^[a-z_]+$/.test(state || '') ? state : 'unknown'));
 }
 export function bytes(value) {
   if (!Number.isFinite(value)) return '大小未知';
@@ -51,12 +42,6 @@ export function bytes(value) {
 }
 export function timestamp(seconds) {
   return Number.isFinite(seconds) ? new Date(seconds * 1000).toLocaleString('zh-CN', {hour12: false}) : '时间未记录';
-}
-export function panelUrl(value) {
-  try {
-    const url = new URL(value);
-    return ['https:', 'http:'].includes(url.protocol) && !url.username && !url.password ? url : null;
-  } catch { return null; }
 }
 export function coverageDetails(parent, coverage, title = '快照覆盖范围') {
   if (!coverage) return;

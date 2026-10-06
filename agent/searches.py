@@ -6,6 +6,7 @@ import stat
 import threading
 import time
 from agent.symbols import analyze
+from agent.filesystem import protected
 from shared.crypto import digest
 from shared.util import DevError
 
@@ -137,6 +138,8 @@ class Searches:
         more=len(hits)>args['limit'];hits=hits[:args['limit']];files={};results=[];root,_=self.engine.root(project)
         for hit in hits:
             item=json.loads(hit[1]);path=item['path']
+            # Retained hits predate today's path policy; do not replay protected text.
+            if protected(path):continue
             if path not in files:
                 try:files[path]=digest(self.engine.read_bytes(self.engine.path(root,path,False)))
                 except (DevError,OSError):files[path]=None

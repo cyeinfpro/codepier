@@ -59,6 +59,7 @@ def test_field_semantics_invalid_reset_and_clear_search(stack, engine):
           return uiFocusable(document.querySelector('.modal')).map(el=>el.id);
         }""")
         assert not set(hidden) & {"negative-tab", "invisible", "fieldset-disabled"}
+        page.once("dialog", lambda dialog: dialog.accept())
         page.keyboard.press("Escape")
         assert not page.locator("#app").evaluate("el=>el.inert")
         page.evaluate("newGrant()")

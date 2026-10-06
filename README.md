@@ -2,7 +2,7 @@
 
 让 ChatGPT 通过 MCP 插件使用你的本地项目：读代码、改文件、跑测试，也能接入浏览器、桌面和远程服务器。
 
-[![Version](https://img.shields.io/badge/version-1.16.1-2563eb)](RELEASE.json)
+[![Version](https://img.shields.io/badge/version-1.17.0-2563eb)](RELEASE.json)
 [![Python](https://img.shields.io/badge/Python-3.13-3776ab)](requirements.txt)
 [![License](https://img.shields.io/badge/license-MIT-16a34a)](LICENSE)
 
@@ -74,10 +74,10 @@ ChatGPT / MCP 客户端                 浏览器管理面板
 
 服务器需要 Git、Bash、Docker Engine、Docker Compose v2，以及供安装脚本使用的 **Python 3.9+**。Compose 需要支持 `up --wait`；应用运行环境由 Docker 镜像提供，使用 Python 3.13。
 
-下面以正式版本 `v1.16.1` 为例。请在可信网络中完成 HTTP 初始安装；公网部署应先按[入门教程](docs/START-HERE.md)配置 HTTPS，不要通过裸公网 HTTP 输入密码或配对设备。
+下面以正式版本 `v1.17.0` 为例。请在可信网络中完成 HTTP 初始安装；公网部署应先按[入门教程](docs/START-HERE.md)配置 HTTPS，不要通过裸公网 HTTP 输入密码或配对设备。
 
 ```bash
-git clone --branch v1.16.1 --depth 1 https://github.com/cyeinfpro/codepier.git
+git clone --branch v1.17.0 --depth 1 https://github.com/cyeinfpro/codepier.git
 cd codepier
 bash install.sh
 ```
@@ -93,7 +93,7 @@ curl --fail http://127.0.0.1:8765/healthz
 
 也可以从 [Releases](https://github.com/cyeinfpro/codepier/releases) 下载源码包。手动安装和开发建议使用 `codepier-VERSION-source-full.zip`；`source.zip` 用于兼容面板更新器。环境变量见 [`.env.example`](.env.example)。
 
-使用预构建镜像时，正式版本地址为 `ghcr.io/cyeinfpro/codepier:1.16.1`，生产部署建议固定镜像摘要。k3s 单文件清单见 [`deploy/k3s/deployment.yaml`](deploy/k3s/deployment.yaml)；Compose 可通过 `CODEPIER_HUB_IMAGE` 选择镜像，首次安装与数据初始化仍应遵循[入门教程](docs/START-HERE.md)。OIDC 环境变量播种和首次 SSO 管理员初始化需显式配置，见[多用户/OIDC 指南](docs/MULTIUSER_OIDC.md)。
+使用预构建镜像时，正式版本地址为 `ghcr.io/cyeinfpro/codepier:1.17.0`，生产部署建议固定镜像摘要。k3s 单文件清单见 [`deploy/k3s/deployment.yaml`](deploy/k3s/deployment.yaml)；Compose 可通过 `CODEPIER_HUB_IMAGE` 选择镜像，首次安装与数据初始化仍应遵循[入门教程](docs/START-HERE.md)。OIDC 环境变量播种和首次 SSO 管理员初始化需显式配置，见[多用户/OIDC 指南](docs/MULTIUSER_OIDC.md)。
 
 ### 2. 接入开发电脑
 
@@ -147,15 +147,14 @@ https://hub.example.com/mcp
 
 耗时操作会返回 `operation_id`。页面刷新或网络中断后，用 `task_query` 继续查询原编号；明确取消使用 `process`。不要换一个幂等键重跑结果不明的命令。是否完成要看终态、退出码和实际输出。
 
-### MCP 工具与工作台
+### MCP 工具
 
-当前原生目录由九个核心开发工具、两个只读查询、一个显式工作台和两个身份工具组成；外部网关工具按授权另行提供。
+当前原生目录由九个核心开发工具、两个只读查询和两个身份工具组成；外部网关工具按授权另行提供。
 
 | 入口 | 用途 |
 | --- | --- |
 | `project_query` | 只读发现项目，查询目录、Skills、工具帮助、权限、配置任务和工作流；不捕获改动基线。 |
 | `task_query` | 读取、等待和追踪原操作回执，不执行、取消或重跑命令。 |
-| `workbench` | 用户主动打开项目工作台，再选择项目和任务；打开本身不启动执行。 |
 | `get_profile` / `get_access_context` | 确认当前连接的稳定身份、项目范围及有效权限。 |
 
 九个核心开发工具：
@@ -174,7 +173,7 @@ https://hub.example.com/mcp
 
 只读发现和专项参数优先使用 `project_query` 的 `help` 操作；捕获基线、创建 worktree 或更新工作流仍使用 `workspace`。文件修改使用读取时取得的 SHA 检查冲突；新建文件使用 `expected_sha256="new"`。`exec` 是非交互式命令入口，不提供 PTY/stdin 会话。独立命令可以并行，访问相同文件或服务时应显式声明资源；这些锁不约束外部编辑器或人工操作。
 
-工作台支持项目状态、任务证据、固定改动审阅，以及用户主动选择的有限文件片段上下文。是否显示工作台和选定上下文取决于客户端支持；文字工具可以独立使用。普通查询和读写不会每次弹出卡片。
+ChatGPT 内的项目选择和任务看板已移除；直接在聊天中使用工具即可。项目上下文、保存的工作流、执行证据、附件导入和网页管理面板继续保留。旧 `workbench` 调用返回迁移提示，更新后请刷新客户端工具目录。
 
 支持能力协商的客户端可使用 MCP 2026 Tasks 查询和取消原生 `exec`；未声明能力的客户端继续使用持久回执。取消确认不代表进程已停止，也不保证远端 SSH 副作用回滚。工具升级后需要刷新客户端目录。完整协议范围、参数和示例见 [MCP 工具参考](docs/CORE_TOOLS.md)。
 
@@ -373,11 +372,11 @@ docs/        使用和维护文档
 
 ## 版本与许可
 
-当前仓库的 `RELEASE.json` 标记为 **1.16.1 / released / source-and-image**。1.16 系列提供工作台、只读查询、标准 Tasks 和请求诊断；1.16.1 补齐只读发现/回执恢复，修复工作台可见性并优化面板响应。详见 [CHANGELOG.md](CHANGELOG.md)。
+当前仓库的 `RELEASE.json` 标记为 **1.17.0 / released / source-and-image**。1.17 统一管理页面、字段和手机全页编辑，补强工作区隐私与会话恢复；ChatGPT 旧工作台组件已退役，Web 远程工作台、只读查询、标准 Tasks 和改动审阅继续保留。详见 [CHANGELOG.md](CHANGELOG.md)。
 
 `main` 可能包含正式发布后的改动。安装和更新请核对目标 [Release](https://github.com/cyeinfpro/codepier/releases)；GitHub 提交或 Release 发布不会自动升级现用 Hub 与 Agent。
 
-- **Version:** 1.16.1
+- **Version:** 1.17.0
 - **License:** [MIT](LICENSE)
 
 第三方依赖保留各自许可证。前端依赖声明位于 `web/vendor/`，MCP Apps 的声明见 [THIRD_PARTY_NOTICES.txt](web/mcp-apps/THIRD_PARTY_NOTICES.txt)。
