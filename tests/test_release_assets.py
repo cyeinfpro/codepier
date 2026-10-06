@@ -105,29 +105,35 @@ def test_compose_default_version_rejects_unpinned_or_stale_defaults(tmp_path,ima
         check_release.check_compose_image(tmp_path,VERSION)
 
 
-def _k3s_manifest(tmp_path, init_image, hub_image):
+def _k3s_manifest(tmp_path, init_image, hub_image, policy='Always'):
     (tmp_path/'deploy/k3s').mkdir(parents=True)
     (tmp_path/'deploy/k3s/deployment.yaml').write_text('spec:\n  initContainers:\n    - name: data-ownership\n      image: '
-        + init_image + '\n  containers:\n    - name: hub\n      image: ' + hub_image + ' # pinned\n')
+        + init_image + '\n      imagePullPolicy: ' + policy + '\n  containers:\n    - name: hub\n      image: ' + hub_image
+        + ' # rolling\n      imagePullPolicy: ' + policy + '\n')
 
 
-@pytest.mark.parametrize('image', ['ghcr.io/tsunheimat/codepier:{v}', '"ghcr.io/example-org/codepier:{v}@sha256:' + '0'*64 + '"'])
-def test_k3s_manifest_accepts_published_image_at_source_version(tmp_path,image):
-    image = image.replace('{v}',VERSION)
+@pytest.mark.parametrize('image', ['ghcr.io/tsunheimat/codepier:latest', '"ghcr.io/example-org/codepier:latest"'])
+def test_k3s_manifest_accepts_rolling_latest_image(tmp_path,image):
     _k3s_manifest(tmp_path, image, image)
     check_release.check_k3s_image(tmp_path,VERSION)
 
 
-@pytest.mark.parametrize('image', ['ghcr.io/tsunheimat/codepier:0.0.0', 'codepier:{v}', 'ghcr.io/tsunheimat/codepier:latest',
-    'ghcr.io/tsunheimat/codepier@sha256:' + '0'*64, 'ghcr.io/tsunheimat/codepier:{v}@sha256:short'])
-def test_k3s_manifest_rejects_stale_or_floating_images(tmp_path,image):
+@pytest.mark.parametrize('image', ['ghcr.io/tsunheimat/codepier:{v}', 'ghcr.io/tsunheimat/codepier:0.0.0', 'codepier:latest',
+    'ghcr.io/tsunheimat/codepier@sha256:' + '0'*64, 'ghcr.io/tsunheimat/codepier:{v}@sha256:' + '0'*64])
+def test_k3s_manifest_rejects_pinned_or_unpublished_images(tmp_path,image):
     image = image.replace('{v}',VERSION)
     _k3s_manifest(tmp_path, image, image)
-    with pytest.raises(ValueError,match='k3s manifest image'):
+    with pytest.raises(ValueError,match='latest main image'):
         check_release.check_k3s_image(tmp_path,VERSION)
 
 
 def test_k3s_manifest_requires_every_container_to_match(tmp_path):
-    _k3s_manifest(tmp_path, 'ghcr.io/tsunheimat/codepier:' + VERSION, 'ghcr.io/tsunheimat/codepier:0.0.0')
-    with pytest.raises(ValueError,match='k3s manifest image'):
+    _k3s_manifest(tmp_path, 'ghcr.io/tsunheimat/codepier:latest', 'ghcr.io/tsunheimat/codepier:' + VERSION)
+    with pytest.raises(ValueError,match='latest main image'):
+        check_release.check_k3s_image(tmp_path,VERSION)
+
+
+def test_k3s_manifest_requires_always_pull_for_latest(tmp_path):
+    _k3s_manifest(tmp_path, 'ghcr.io/tsunheimat/codepier:latest', 'ghcr.io/tsunheimat/codepier:latest', 'IfNotPresent')
+    with pytest.raises(ValueError,match='imagePullPolicy Always'):
         check_release.check_k3s_image(tmp_path,VERSION)
