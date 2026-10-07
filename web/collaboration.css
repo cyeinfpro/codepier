@@ -1,0 +1,367 @@
+.collaboration {
+  max-width: 1540px;
+  margin: 0 auto;
+  min-width: 0;
+}
+.collaboration h1 {
+  font-size: clamp(26px, 3vw, 38px);
+  letter-spacing: -0.045em;
+  margin: 8px 0;
+  line-height: 1.15;
+}
+.collaboration h2 {
+  font-size: 16px;
+  letter-spacing: -0.015em;
+  margin: 0 0 12px;
+}
+.collaboration p {
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.collaboration small,
+.cc-hint,
+.cc-empty,
+.cc-facts dt {
+  color: var(--muted, #68717b);
+  font-size: 12px;
+  line-height: 1.65;
+}
+.cc-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 5px 0 22px;
+}
+.cc-heading p {
+  margin: 8px 0 0;
+}
+.cc-eyebrow {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted, #68717b);
+}
+.cc-scope {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  padding: 18px 0;
+  border-top: 1px solid var(--line, #dce0e5);
+}
+.cc-scope .cc-field {
+  flex: 1 1 170px;
+  max-width: 320px;
+}
+.cc-field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+  font-size: 12px;
+}
+.cc-field > span {
+  font-weight: 600;
+}
+.collaboration input:not([type='checkbox']),
+.collaboration select,
+.collaboration textarea {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  font: inherit;
+  font-size: 13px;
+  color: inherit;
+  padding: 11px 12px;
+  border: 1px solid var(--line, #dce0e5);
+  border-radius: 10px;
+  background: var(--surface, var(--panel, Canvas));
+}
+.collaboration textarea {
+  resize: vertical;
+  line-height: 1.6;
+}
+.collaboration input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  vertical-align: middle;
+  margin: 0 6px 2px 0;
+}
+.collaboration :is(button, input, select, textarea, summary, a):focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 3px;
+}
+.cc-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+  align-items: center;
+  padding: 14px 0 22px;
+  font-size: 12px;
+}
+.cc-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  border-bottom: 1px solid var(--line, #dce0e5);
+  margin-bottom: 22px;
+  padding-bottom: 14px;
+}
+.cc-tabs .btn {
+  flex: 0 0 auto;
+}
+.cc-tabs .is-active {
+  font-weight: 700;
+  border-color: currentColor;
+}
+.cc-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 300px);
+  gap: 22px;
+  align-items: start;
+}
+.cc-main,
+.cc-sidebar,
+.cc-stack,
+.cc-conversation {
+  min-width: 0;
+}
+.cc-stack,
+.cc-sidebar {
+  display: grid;
+  gap: 16px;
+}
+.cc-card,
+.cc-composer {
+  padding: 22px;
+  border: 1px solid var(--line, #dce0e5);
+  border-radius: 15px;
+  background: var(--surface, var(--panel, Canvas));
+  min-width: 0;
+}
+.cc-intro {
+  max-width: 750px;
+  padding: 30px;
+}
+.cc-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.cc-row > strong,
+.cc-row > small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.cc-row h2 {
+  margin-bottom: 0;
+}
+.cc-status {
+  display: inline-flex;
+  max-width: 100%;
+  padding: 5px 9px;
+  border: 1px solid var(--line, #dce0e5);
+  border-radius: 7px;
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.cc-feed {
+  border: 1px solid var(--line, #dce0e5);
+  border-radius: 15px;
+  padding: 0 22px;
+  margin-bottom: 18px;
+  background: var(--surface, var(--panel, Canvas));
+}
+.cc-feed > .cc-empty {
+  padding: 32px 0;
+}
+.cc-message {
+  padding: 22px 0;
+  border-bottom: 1px solid var(--line, #dce0e5);
+}
+.cc-message:last-of-type {
+  border-bottom: 0;
+}
+.cc-prose {
+  white-space: pre-wrap;
+}
+.cc-composer,
+.cc-form {
+  display: grid;
+  gap: 16px;
+}
+.cc-form {
+  padding-top: 20px;
+}
+.cc-two {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+}
+.cc-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 15px;
+}
+.cc-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px 24px;
+  margin: 18px 0;
+}
+.cc-facts dt {
+  margin-bottom: 4px;
+}
+.cc-facts dd {
+  margin: 0;
+  font-size: 12px;
+}
+.cc-goal {
+  padding: 16px 0;
+  border-bottom: 1px solid var(--line, #dce0e5);
+}
+.cc-goal:first-of-type {
+  padding-top: 4px;
+}
+.cc-goal:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+.cc-goal > strong {
+  display: block;
+  font-size: 13px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.cc-goal p {
+  margin: 6px 0 12px;
+  font-size: 12px;
+}
+.cc-goal .btn {
+  margin-top: 10px;
+}
+.cc-rule {
+  border-bottom: 1px solid var(--line, #dce0e5);
+  padding: 12px 0;
+  font-size: 12px;
+}
+.collaboration summary {
+  cursor: pointer;
+  line-height: 1.6;
+  font-size: 13px;
+  font-weight: 600;
+}
+.cc-json {
+  max-width: 100%;
+  max-height: 420px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 16px;
+  font-size: 11px;
+  line-height: 1.65;
+  border: 1px solid var(--line, #dce0e5);
+  border-radius: 10px;
+  background: transparent;
+}
+.cc-detail {
+  padding-top: 12px;
+}
+.cc-targets {
+  font-size: 12px;
+}
+.cc-approval {
+  display: grid;
+  gap: 14px;
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line, #dce0e5);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.cc-approval .btn {
+  justify-self: start;
+}
+.cc-feedback {
+  font-size: 12px;
+  margin: 0;
+}
+.cc-feedback:not(:empty) {
+  padding: 12px 0;
+}
+.cc-feedback.is-error {
+  font-weight: 650;
+  border-left: 3px solid currentColor;
+  padding-left: 12px;
+}
+.cc-empty {
+  padding: 14px 0;
+}
+@media (max-width: 1100px) {
+  .cc-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .cc-sidebar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 640px) {
+  .cc-heading {
+    padding-bottom: 14px;
+  }
+  .cc-scope {
+    gap: 10px;
+  }
+  .cc-scope .cc-field {
+    flex: 1 1 130px;
+    max-width: none;
+  }
+  .cc-two,
+  .cc-sidebar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .cc-card,
+  .cc-composer,
+  .cc-intro {
+    padding: 16px;
+    border-radius: 12px;
+  }
+  .cc-feed {
+    padding: 0 16px;
+  }
+  .cc-summary {
+    gap: 10px 16px;
+  }
+  .collaboration input:not([type='checkbox']),
+  .collaboration select,
+  .collaboration textarea {
+    font-size: 16px;
+  }
+  .cc-tabs .btn {
+    padding-inline: 10px;
+    min-height: 42px;
+  }
+  .cc-actions .btn {
+    flex: 1 1 130px;
+    white-space: normal;
+  }
+  .cc-row > small {
+    flex: 1 1 100%;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .collaboration * {
+    scroll-behavior: auto;
+  }
+}
+
+/* Keep native select targets usable in mobile WebKit as well as Chromium. */
+.collaboration .cc-field select {
+  min-height: 44px;
+  height: 44px;
+}

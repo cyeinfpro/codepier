@@ -47,6 +47,8 @@ BASE = Path(__file__).resolve().parent.parent
 
 
 def create_app(data_dir: str | None = None):
+    from hub.collaboration.config import CollaborationConfig
+    CollaborationConfig.from_env()  # Reject inconsistent gates before opening the database.
     config = HubConfig.from_env()
     directory = Path(data_dir or os.getenv("HUB_DATA_DIR", str(BASE / "data"))).resolve()
     instance_lock = InstanceLock(directory / ".hub.lock")
@@ -67,6 +69,7 @@ def create_app(data_dir: str | None = None):
             try:
                 await runtime.start()
                 await oidc.start()
+                await runtime.collaboration.loops.start()
                 yield
             finally:
                 try:
@@ -74,7 +77,10 @@ def create_app(data_dir: str | None = None):
                         await oidc.stop()
                     finally:
                         try:
-                            await runtime.gateway.close()
+                            try:
+                                await runtime.collaboration.loops.stop()
+                            finally:
+                                await runtime.gateway.close()
                         finally:
                             await runtime.stop()
                 finally:
@@ -108,6 +114,8 @@ def create_app(data_dir: str | None = None):
                      make_vps_router, make_panel_update_router):
             app.include_router(make(auth, runtime))
         app.include_router(make_agent_install_router(runtime, auth))
+        from hub.collaboration.api import make_router as make_collaboration_router
+        app.include_router(make_collaboration_router(auth, runtime))
         register_call_log(app, runtime, auth)
         app.mount("/static", ReleaseAssets(directory=BASE / "web"), name="static")
         return app

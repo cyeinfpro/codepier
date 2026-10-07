@@ -25,7 +25,8 @@ JOURNAL_FILE = "rekey.json"
 CIPHER_COLUMNS = (("devices", "secret"), ("operations", "payload"), ("vps_connections", "secret"),
                   ("oidc_providers", "client_secret"), ("external_identities", "upstream_tokens"),
                   ("oidc_transactions", "verifier"), ("gateway_secrets", "secret"), ("gateway_accounts", "secret"),
-                  ("gateway_calls", "result"))
+                  ("gateway_calls", "result"), ("collaboration_secrets", "secret"),
+                  ("mcp_event_subscriptions", "secret"))
 
 
 def key_id(key: bytes) -> str:

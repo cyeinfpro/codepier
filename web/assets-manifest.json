@@ -19,8 +19,8 @@
       "bytes": 27864
     },
     "app.js": {
-      "sha256": "408e77f4c38ad856954a7ab7da624427d1cda3e9f92a08df4863fc5478482f2a",
-      "bytes": 119104
+      "sha256": "f9c942ced6fefa9ad05ebfe99a00e8ce97f68d7641ca5265f588d0bc31cbeb80",
+      "bytes": 119657
     },
     "appearance.js": {
       "sha256": "7fc8e8ffa85a4bb5836b8919cdf6ff12813cfb4a9e4736709f5858e5d8782bb1",
@@ -65,6 +65,14 @@
     "chat.js": {
       "sha256": "2ae94c6575ed2177e1d6a05e117144aacdac656aabb5e52d49554bc0343b95e6",
       "bytes": 93445
+    },
+    "collaboration.css": {
+      "sha256": "b93479c0e647e59a6fa70f4aa25dd946ad58fea48b481c7f03e8dba2a153dee2",
+      "bytes": 6523
+    },
+    "collaboration.js": {
+      "sha256": "e4118b5b3205ec541357ecdcc5b7bd2105021825e9d13d01b62e7a6adc89baf2",
+      "bytes": 33821
     },
     "computer.css": {
       "sha256": "3bfd6993ecee11cf6c23d78cc7b4f9acd6759ffaccc5e241ff06e156da7dfcac",
@@ -171,5 +179,5 @@
       "bytes": 24897
     }
   },
-  "template_sha256": "5ee1460e0a087e7e395298a1f71eb0f919207af9a2c66cbcd879541a88b053a7"
+  "template_sha256": "5f07149ce4655474b2fec60796a6b657b902b541b4a6fb37b871f4059479e0ae"
 }

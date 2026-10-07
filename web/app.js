@@ -13,6 +13,7 @@ const nav = [
   ['vps', 'cloud', 'VPS 管理', '13'],
   ['workbench', 'code', '远程工作台', '04'],
   ['workflows', 'history', '开发任务', '05'],
+  ['collaboration', 'network', '协作中心', '20'],
   ['audit', 'audit', '操作审计', '06'],
   ['connect', 'plug', 'MCP 接入', '07'],
   ['profiles', 'shield', '访问 Profiles', '14'],
@@ -437,7 +438,10 @@ function renderShell() {
   const chosen = nav.find((x) => x[0] === S.page);
   const groups = [
     ['工作区', ['overview', 'devices', 'projects', 'vps']],
-    ['开发', ['native', 'workbench', 'integrations', 'workflows', 'artifacts', 'audit']],
+    [
+      '开发',
+      ['native', 'workbench', 'collaboration', 'integrations', 'workflows', 'artifacts', 'audit'],
+    ],
     [
       '系统',
       [
@@ -811,6 +815,7 @@ async function navigate(page) {
   }
 }
 async function renderPage(showLoading = true) {
+  window.CodePierCollaboration?.detach();
   window.CodePierCallLog?.detach();
   window.CodePierAccess?.detach();
   window.CodePierPanelUpdate?.detach();
@@ -855,6 +860,9 @@ async function renderPage(showLoading = true) {
       await loadBasics();
       if (!S.work.project && S.projects.length) S.work.project = S.projects[0].id;
       html = workbenchHTML();
+    } else if (page === 'collaboration') {
+      await loadBasics();
+      html = await CodePierCollaboration.html(seq);
     } else if (page === 'workflows') {
       await loadBasics();
       html = await workflowsHTML(seq);
@@ -905,6 +913,7 @@ async function renderPage(showLoading = true) {
     if (page === 'vps') bindVps();
     if (page === 'workbench') bindWorkbench();
     if (page === 'workflows') bindWorkflows();
+    if (page === 'collaboration') CodePierCollaboration.bind();
     if (page === 'audit') bindAudit();
     if (page === 'integrations') CodePierIntegrations.bind();
     if (page === 'diagnostics') bindDiagnostics();
@@ -1018,7 +1027,7 @@ function projectsHTML() {
   const rows = S.projects
     .map(
       (p, index) =>
-        `<article class="panel workspace-project-row" data-cp-key="project:${esc(p.id)}" data-project-row data-project-search="${esc((p.alias + ' ' + p.root + ' ' + p.device_name + ' ' + (p.description || '')).toLocaleLowerCase())}"><header class="workspace-project-head"><span class="project-index" aria-hidden="true">${icon('folder')}</span><div><span class="project-cover-label">PROJECT</span><h2>${esc(p.alias)}</h2>${p.description ? `<p>${esc(p.description)}</p>` : ''}</div>${onlineBadge(p.online)}</header><div class="workspace-project-path"><span>本机路径</span><code title="${esc(p.root)}">${esc(p.root)}</code></div><dl class="workspace-project-facts"><div><dt>设备</dt><dd>${esc(p.device_name)}</dd></div><div><dt>文件权限</dt><dd><span class="badge ${p.mode === 'write' ? 'purple' : 'neutral'}">${p.mode === 'write' ? '可编辑' : '只读'}</span></dd></div><div><dt>任务执行</dt><dd><span class="badge neutral">${p.allow_tasks ? '已授权' : '未授权'}</span></dd></div></dl><footer class="workspace-project-actions"><div class="actions">${typeof chatProjectButtons === 'function' ? chatProjectButtons(p.id) : ''}<button class="btn primary small" data-action="open-project" data-id="${esc(p.id)}">工作台 ${icon('arrow')}</button></div><button class="btn ghost small" data-vps-action="project" data-project="${esc(p.id)}">${icon('cloud')}VPS 分配</button><button class="icon-btn" data-action="edit-project" data-id="${esc(p.id)}" aria-label="编辑 ${esc(p.alias)} 项目映射">${icon('edit')}</button></footer></article>`,
+        `<article class="panel workspace-project-row" data-cp-key="project:${esc(p.id)}" data-project-row data-project-search="${esc((p.alias + ' ' + p.root + ' ' + p.device_name + ' ' + (p.description || '')).toLocaleLowerCase())}"><header class="workspace-project-head"><span class="project-index" aria-hidden="true">${icon('folder')}</span><div><span class="project-cover-label">PROJECT</span><h2>${esc(p.alias)}</h2>${p.description ? `<p>${esc(p.description)}</p>` : ''}</div>${onlineBadge(p.online)}</header><div class="workspace-project-path"><span>本机路径</span><code title="${esc(p.root)}">${esc(p.root)}</code></div><dl class="workspace-project-facts"><div><dt>设备</dt><dd>${esc(p.device_name)}</dd></div><div><dt>文件权限</dt><dd><span class="badge ${p.mode === 'write' ? 'purple' : 'neutral'}">${p.mode === 'write' ? '可编辑' : '只读'}</span></dd></div><div><dt>任务执行</dt><dd><span class="badge neutral">${p.allow_tasks ? '已授权' : '未授权'}</span></dd></div></dl><footer class="workspace-project-actions"><div class="actions">${typeof chatProjectButtons === 'function' ? chatProjectButtons(p.id) : ''}<button class="btn small" data-action="project-collaboration" data-id="${esc(p.id)}">${icon('network')}协作</button><button class="btn primary small" data-action="open-project" data-id="${esc(p.id)}">工作台 ${icon('arrow')}</button></div><button class="btn ghost small" data-vps-action="project" data-project="${esc(p.id)}">${icon('cloud')}VPS 分配</button><button class="icon-btn" data-action="edit-project" data-id="${esc(p.id)}" aria-label="编辑 ${esc(p.alias)} 项目映射">${icon('edit')}</button></footer></article>`,
     )
     .join('');
   return (
@@ -2263,6 +2272,9 @@ panelActions.register(['add-project'], async (b, e) => {
 panelActions.register(['edit-project'], async (b, e) => {
   await projectModal(b.dataset.id);
   return;
+});
+panelActions.register(['project-collaboration'], async (b) => {
+  await CodePierCollaboration.open(b.dataset.id);
 });
 panelActions.register(['open-project'], async (b, e) => {
   if (S.work.dirty && !confirm('打开项目将丢弃当前未保存草稿，继续？')) return;

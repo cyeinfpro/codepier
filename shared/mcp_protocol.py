@@ -62,7 +62,7 @@ def validate_modern(body,headers):
             raise ProtocolError(-32602,'Invalid extension declaration')
     if headers.get('mcp-protocol-version')!=version or headers.get('mcp-method')!=body['method']:
         raise ProtocolError(-32020,'MCP-Protocol-Version and Mcp-Method must match the request body')
-    field='taskId' if body['method'] in TASK_METHODS else 'uri' if body['method']=='resources/read' else 'name' if body['method'] in {'tools/call','prompts/get'} else None
+    field='taskId' if body['method'] in TASK_METHODS else 'uri' if body['method']=='resources/read' else 'name' if body['method'] in {'tools/call','prompts/get','events/subscribe','events/unsubscribe'} else None
     if field:
         value=params.get(field)
         if not isinstance(value,str):raise ProtocolError(-32602,'Required request name/uri must be a string')
@@ -77,7 +77,7 @@ def request_headers(body):
     params=body.get('params',{});meta=params.get('_meta',{})
     version=meta.get(PREFIX+'protocolVersion')
     result={'MCP-Protocol-Version':version,'Mcp-Method':body['method']}
-    field='taskId' if body['method'] in TASK_METHODS else 'uri' if body['method']=='resources/read' else 'name' if body['method'] in {'tools/call','prompts/get'} else None
+    field='taskId' if body['method'] in TASK_METHODS else 'uri' if body['method']=='resources/read' else 'name' if body['method'] in {'tools/call','prompts/get','events/subscribe','events/unsubscribe'} else None
     if field and isinstance(params.get(field),str):result['Mcp-Name']=encode_header(params[field])
     return result
 

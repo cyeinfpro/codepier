@@ -91,6 +91,8 @@ class Connection:
 class Runtime:
     def __init__(self, store: Store):
         self.store = store
+        from hub.collaboration.lifecycle import install as install_collaboration
+        install_collaboration(self)
         self._loop = None
         try:
             self._loop = asyncio.get_running_loop()
@@ -385,6 +387,9 @@ class Runtime:
     async def _invoke_async(self, name: str, raw: dict, principal: Principal):
         if self._loop is None or self._loop.is_closed():
             self._loop = asyncio.get_running_loop()
+        from shared.collaboration_contracts import TOOL_MODELS as COLLABORATION_TOOLS
+        if name in COLLABORATION_TOOLS:
+            return await self.store.run(self.collaboration.invoke, name, raw, principal)
         from shared.query_contracts import QUERY_TOOLS
         if name in QUERY_TOOLS:
             from hub.core_tools import invoke_query

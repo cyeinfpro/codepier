@@ -25,6 +25,10 @@ class ToolRouter:
     def definitions(self, principal):
         principal = refresh_principal(self.store, principal)
         native = tool_definitions(authorization=principal.authorization_mode)
+        collaboration = getattr(self.store, "collaboration", None)
+        if collaboration is not None and collaboration.config.enabled:
+            from shared.collaboration_contracts import tool_definitions as collaboration_tools
+            native += collaboration_tools(authorization=principal.authorization_mode)
         external = self.gateway.tools(principal)
         names = [item['name'] for item in native + external]
         if len(names) != len(set(names)):
