@@ -1,5 +1,5 @@
 ========================================================================
-@modelcontextprotocol/client@2.0.0
+@modelcontextprotocol/client@2.2.0
 License: MIT
 
 -- LICENSE --
@@ -221,7 +221,7 @@ CC-BY-4.0. See https://creativecommons.org/licenses/by/4.0/legalcode for
 the full license text.
 
 ========================================================================
-@modelcontextprotocol/core@2.0.0
+@modelcontextprotocol/core@2.2.0
 License: MIT
 
 -- LICENSE --

@@ -15,6 +15,12 @@ def test_mcp_apps_generated_metadata_matches_declared_dependency():
     assert manifest['sdk'] == f'@modelcontextprotocol/ext-apps@{version}'
     notices = (directory / 'THIRD_PARTY_NOTICES.txt').read_text()
     assert notices.endswith('\n') and not notices.endswith('\n\n')
+    lock = json.loads((directory / 'package-lock.json').read_text())
+    for name in ('client', 'core'):
+        package = '@modelcontextprotocol/' + name
+        selected = lock['packages']['node_modules/' + package]['version']
+        declarations = [line for line in notices.splitlines() if line.startswith(package + '@')]
+        assert declarations == [package + '@' + selected], 'Rebuild Apps after changing the SDK lock'
 
 
 def test_template_lowering_preserves_runtime_string_bytes():
