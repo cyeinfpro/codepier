@@ -27,7 +27,8 @@
     "source_changed_during_run": [],
     "unexpected_tests": [],
     "duplicate_phases": [],
-    "module_failures": []
+    "module_failures": [],
+    "commit": "8f3eae36a50d007c550852cf40f6fb0959f5769a"
   },
   "targeted": {
     "operation_id": "f722017ecbe541f29c13e022445a083c",
@@ -116,5 +117,46 @@
     "old_database_snapshot_restore_drill"
   ],
   "acceptance_matrix": "docs/COLLABORATION_ACCEPTANCE_20261007.md",
-  "note": "Passing pytest cases do not imply all design A01-A34 scenarios were executed. Refer to scoped evidence and blocked/not_run entries."
+  "note": "Passing pytest cases do not imply all design A01-A34 scenarios were executed. Refer to scoped evidence and blocked/not_run entries.",
+  "sdk_security_followup": {
+    "advisory": "GHSA-6qxp-vccf-f47h",
+    "cve": "CVE-2026-104850",
+    "first_push_commit": "8f3eae36a50d007c550852cf40f6fb0959f5769a",
+    "first_ci_run": 37554064767,
+    "first_ci_failure": "npm audit: existing @modelcontextprotocol/client 2.0.0",
+    "updated_existing_packages": {
+      "@modelcontextprotocol/client": "2.2.0",
+      "@modelcontextprotocol/core": "2.2.0"
+    },
+    "added_dependencies": [],
+    "runtime_installation": false,
+    "audit_suppressed": false,
+    "lockfile_sha256": "6b7faf47f2efb387eee4b98d3adefe3829bf8999a92a0e428b9d81856709b285",
+    "lockfile_audit": {
+      "operation_id": "451a7605ed774b50814e1c4260935753",
+      "exit_code": 0,
+      "known_vulnerabilities": 0
+    },
+    "registry_tarball_integrity": {
+      "operation_id": "17596fb2b55a4495b486cd777243b194",
+      "verified": true
+    },
+    "targeted": {
+      "operation_id": "a6a240d79c984b268ca1a89387090e7c",
+      "passed": 36,
+      "failed": 0,
+      "seconds": 25.87,
+      "exit_code": 0
+    },
+    "fresh_sdk_build_and_ci": "pending next normal push-triggered workflow at time of this record",
+    "latest_source_bundle": {
+      "path": ".work/collaboration-20261006/codepier-collaboration-source-full-sdk-fixed.zip",
+      "bytes": 2357007,
+      "sha256": "49063653e0445860efe063544b4f4a0ae30b9f527669ce762f42e63b2d927490",
+      "files": 626,
+      "verified": true,
+      "source_only": true,
+      "public_profile": true
+    }
+  }
 }
