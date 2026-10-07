@@ -388,6 +388,8 @@ class Runtime:
         if self._loop is None or self._loop.is_closed():
             self._loop = asyncio.get_running_loop()
         from shared.collaboration_contracts import TOOL_MODELS as COLLABORATION_TOOLS
+        if name == 'collaboration_work_execute':
+            return await self.collaboration.coordination.execute(raw, principal)
         if name in COLLABORATION_TOOLS:
             return await self.store.run(self.collaboration.invoke, name, raw, principal)
         from shared.query_contracts import QUERY_TOOLS
@@ -886,6 +888,7 @@ class Runtime:
                 self.complete(op, {"ok": False, "error": {"code": "RECOVERY_DATA_INVALID", "message": "持久请求无法解密，请检查 Hub 数据库与 master.key 是否配套"}})
                 return
             denied = self.permission_error(op, request)
+            denied = denied or self.collaboration.coordination.operation_denial(op)
             # Never trust a client-supplied origin, UA or project field. Durable
             # actor/grant columns originate from Auth, not tool arguments.
             panel = not op['grant_id'] and op['actor'].startswith('panel:')

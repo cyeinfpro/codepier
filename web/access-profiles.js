@@ -23,11 +23,18 @@ window.CodePierProfiles = (() => {
   async function edit(id = null) {
     const login = S.session,
       page = S.page,
+      space = S.space_id,
       intent = S.modalIntent || 0;
     try {
       const saved = id ? await api('/api/access-profiles/' + encodeURIComponent(id)) : null;
       const roles = (await api('/api/access-roles')).roles;
-      if (S.session !== login || S.page !== page || (S.modalIntent || 0) !== intent) return;
+      if (
+        S.session !== login ||
+        S.space_id !== space ||
+        S.page !== page ||
+        (S.modalIntent || 0) !== intent
+      )
+        return;
       const key = crypto.randomUUID();
       const dialog = modal(
         saved ? '编辑访问 Profile' : '新建访问 Profile',
@@ -88,7 +95,13 @@ window.CodePierProfiles = (() => {
               method: id ? 'PUT' : 'POST',
               body: JSON.stringify(body),
             });
-            if (S.session !== login || !dialog.isConnected) return;
+            if (
+              S.session !== login ||
+              S.space_id !== space ||
+              S.page !== page ||
+              !dialog.isConnected
+            )
+              return;
             closeModal(dialog);
             toast('Profile 已保存；角色政策对角色连接生效，旧固定授权不自动转换');
             if (S.page === page) await renderPage(false);
@@ -143,8 +156,8 @@ window.CodePierProfiles = (() => {
         );
         const scopes = requested.filter((s) => profile.scopes.includes(s));
         fields.innerHTML = permissionsHTML(projects, scopes, {
-          developer_scopes: true,
-          all_projects: profile.all_projects,
+          developer_scopes: false,
+          all_projects: false,
         });
         if (!profile.all_projects) {
           $('[name="all_projects"]', fields).closest('label').hidden = true;
@@ -191,5 +204,62 @@ window.CodePierProfiles = (() => {
       return { profile_id: profile.id, profile_version: profile.version };
     };
   }
-  return { html, bind, edit, selectorHTML, bindSelector };
+  async function preview(id) {
+    const login = S.session,
+      space = S.space_id,
+      page = S.page;
+    const dialog = modal('连接实际访问结果', '<p role="status">正在读取当前权限…</p>', '', true);
+    const intent = S.modalIntent;
+    const current = () =>
+      login === S.session &&
+      space === S.space_id &&
+      page === S.page &&
+      dialog.isConnected &&
+      intent === S.modalIntent;
+    try {
+      const r = await api('/api/grants/' + encodeURIComponent(id) + '/access-preview');
+      if (!current()) return;
+      const mode =
+        {
+          fixed: '固定授权（fixed）',
+          fixedProfile: '固定 Profile（fixedProfile）：原同意 ∩ 当前上限',
+          role: '动态角色（role）：明确同意的当前及未来政策',
+        }[r.grant.mode] || r.grant.mode;
+      const state =
+        {
+          active: '有效',
+          revoked: '已撤销',
+          expired: '已过期',
+          pending: '等待连接完成',
+          paused: '角色已暂停',
+          blocked: '当前已阻止',
+          refresh_required: '等待客户端刷新凭据',
+          unavailable: '没有可用凭据',
+        }[r.grant.state] || r.grant.state;
+      const body = `<div data-access-preview><dl class="kv"><dt>连接持有人</dt><dd>${esc(r.owner.label)} <small class="mono">${esc(r.owner.id)}</small></dd><dt>当前空间</dt><dd>${esc(r.space.label)}</dd><dt>连接</dt><dd>${esc(r.grant.label)}</dd><dt>授权模式</dt><dd>${esc(mode)}</dd><dt>状态 / 到期</dt><dd>${esc(state)} · ${r.grant.expires_at ? esc(timeText(r.grant.expires_at)) : '尚无有效凭据'}${r.grant.revoked ? ' · 已撤销' : ''}</dd>${r.profile ? `<dt>Profile</dt><dd>${esc(r.profile.label)} · ${esc(r.profile.id)}</dd>` : ''}${r.role ? `<dt>角色</dt><dd>${esc(r.role.label)}</dd>` : ''}</dl>${r.grant.reason?.message ? notice(esc(r.grant.reason.message)) : ''}${notice('以下是当前 Hub 权限检查。没有执行任何工具；Agent 本机政策、在线状态、具体路径/命令和审批仍在实际调用时检查。撤销不等于杀死已经运行的进程。')}${
+        r.projects
+          .map(
+            (p) =>
+              `<section class="form-section"><h3>${esc(p.alias)}</h3><dl class="kv">${allScopes
+                .map((scope) => {
+                  const a = p.actions[scope];
+                  return `<dt>${esc(scopeNames[scope])}</dt><dd><strong>${a.allowed ? 'Hub 允许' : '拒绝'}</strong> · ${esc(a.reason?.message || a.reason?.code || a.status)}</dd>`;
+                })
+                .join('')}</dl></section>`,
+          )
+          .join('') || empty('当前空间没有可显示的项目权限。')
+      }${r.runtime_checks?.message ? notice(esc(r.runtime_checks.message)) : ''}<p class="form-note">校验时间：${esc(timeText(r.checked_at))}。角色或 Profile 变化后请刷新结果。</p></div>`;
+      const result = modal(
+        '连接实际访问结果',
+        body,
+        '<button class="btn ghost" data-action="close-modal">关闭</button><button class="btn primary" data-refresh-access>刷新结果</button>',
+        true,
+      );
+      $('[data-refresh-access]', result).onclick = () => preview(id);
+    } catch (error) {
+      if (!current()) return;
+      modal('连接实际访问结果', notice(esc(error.message), true), '', true);
+    }
+  }
+  return { html, bind, edit, selectorHTML, bindSelector, preview };
 })();

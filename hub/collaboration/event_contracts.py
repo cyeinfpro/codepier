@@ -1,11 +1,12 @@
-"""Closed wire contracts for the four versioned collaboration events."""
+"""Closed wire contracts for the versioned collaboration events."""
 from typing import Literal
 from pydantic import Field
 from shared.collaboration_contracts import Model, Identifier, Queue, JobKind, Severity
-from hub.collaboration.common import TASK_EVENT, RESULT_EVENT, INCIDENT_EVENT, STATUS_EVENT
+from hub.collaboration.common import TASK_EVENT, RESULT_EVENT, INCIDENT_EVENT, STATUS_EVENT, MESSAGE_EVENT, WORK_EVENT
 
 
 class EventFilters(Model):
+    slot_id: Identifier | None = None
     project_id: Identifier
     environment_id: str = Field(min_length=1, max_length=64, pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]*$')
     severity_min: Severity | None = None
@@ -16,12 +17,28 @@ class TaskFilters(EventFilters):
     queue: Queue
 
 
+class MessageFilters(Model):
+    conversation_id: Identifier
+    project_id: Identifier
+    environment_id: str = Field(min_length=1, max_length=64, pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]*$')
+    slot_id: Identifier
+
+
+class WorkFilters(Model):
+    conversation_id: Identifier
+    goal_id: Identifier
+    approval_id: Identifier
+    project_id: Identifier
+    environment_id: str = Field(min_length=1, max_length=64, pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]*$')
+
+
 class Delivery(Model):
-    mode: Literal['webhook']
+    mode: Literal['webhook', 'poll', 'push'] = 'webhook'
     url: str = Field(min_length=1, max_length=2048)
 
 
 class SignedDelivery(Delivery):
+    mode: Literal['webhook', 'poll', 'push']
     secret: str = Field(min_length=1, max_length=100)
 
 
@@ -30,7 +47,8 @@ class Subscribe(Model):
     arguments: dict
     delivery: SignedDelivery
     cursor: str | None = Field(default=None, max_length=2048)
-    ttlMs: int | None = Field(default=86400000, ge=1000)
+    ttlMs: int | None = 86400000
+    maxAgeMs: int | None = Field(default=None, ge=0)
 
 
 class Unsubscribe(Model):
@@ -92,14 +110,37 @@ class StatusPayload(BasePayload):
     recovery_state: str = Field(min_length=1, max_length=64)
 
 
-PAYLOADS = {TASK_EVENT: TaskPayload, RESULT_EVENT: ResultPayload,
+class MessagePayload(BasePayload):
+    conversation_id: Identifier
+    room_id: Identifier
+    message_id: Identifier
+    message_version: int = Field(ge=1)
+    recipient_slot_id: Identifier
+    thread_root_id: Identifier
+
+
+class WorkPayload(BasePayload):
+    conversation_id: Identifier
+    goal_id: Identifier
+    approval_id: Identifier
+    work_item_id: Identifier | None = None
+    work_item_version: int | None = Field(default=None, ge=1)
+    target_project_id: Identifier
+    recipient_grant_id: Identifier
+    reason: Literal['work_available', 'peer_message']
+    message_id: Identifier | None = None
+
+
+PAYLOADS = {WORK_EVENT: WorkPayload, MESSAGE_EVENT: MessagePayload, TASK_EVENT: TaskPayload, RESULT_EVENT: ResultPayload,
             INCIDENT_EVENT: IncidentPayload, STATUS_EVENT: StatusPayload}
-FILTERS = {TASK_EVENT: TaskFilters, RESULT_EVENT: EventFilters,
+FILTERS = {WORK_EVENT: WorkFilters, MESSAGE_EVENT: MessageFilters, TASK_EVENT: TaskFilters, RESULT_EVENT: EventFilters,
            INCIDENT_EVENT: EventFilters, STATUS_EVENT: EventFilters}
 
 
 def definitions():
     descriptions = {
+        WORK_EVENT: 'An approved goal has work or a peer message for this exact connection. Requires separate native opt-in. Re-read current approval, work and capabilities; delivery never authorizes execution and a test creates no work.',
+        MESSAGE_EVENT: 'An owner explicitly mentioned this exact room slot. Requires separate opt-in; read the bounded room message. This creates no task and a connector reply must not wake peers.',
         TASK_EVENT: 'A bounded read-only task is available in the authorized project queue. Read its current state before claiming. A test payload creates no work.',
         RESULT_EVENT: 'Validated analysis was saved. Read and acknowledge the result; this does not prove business recovery.',
         INCIDENT_EVENT: 'A deterministic monitoring incident changed state. Recovery is established by probes, not model assertions.',

@@ -62,7 +62,10 @@ def create_app(data_dir: str | None = None):
             return normalize_url(row["value"] if row else config.public_url)
 
         runtime.oauth = OAuth(auth, runtime, public_url)
-        oidc = OIDCService(auth, runtime, public_url, seed=config.oidc_seed, bootstrap_admin=config.oidc_bootstrap_admin)
+        def oidc_public_url():
+            return config.oidc_public_url or config.public_url
+
+        oidc = OIDCService(auth, runtime, oidc_public_url, seed=config.oidc_seed, bootstrap_admin=config.oidc_bootstrap_admin, legacy_public_url=public_url)
 
         @asynccontextmanager
         async def lifespan(app):

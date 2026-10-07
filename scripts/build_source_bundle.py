@@ -78,8 +78,12 @@ EVIDENCE_FILES = {'full-regression-final.xml','focused-verified.xml','worker-rea
 
 REQUIRED_FILES = {
     'hub/collaboration/service.py', 'hub/collaboration/events.py', 'hub/collaboration/monitor.py',
+    'hub/collaboration/chatroom.py', 'hub/collaboration/conversations.py',
+    'hub/collaboration/coordination.py', 'hub/collaboration/coordination_schema.py',
+    'hub/access_preview.py', 'web/collaboration-goals.js',
+    'hub/collaboration/joining.py', 'hub/collaboration/event_errors.py',
     'shared/collaboration_contracts.py', 'web/collaboration.js', 'web/collaboration.css',
-    'docs/COLLABORATION.md', 'docs/designs/COLLABORATION_V0_2.md',
+    'docs/COLLABORATION.md', 'docs/COLLABORATION_CHATROOM.md', 'docs/designs/COLLABORATION_V0_2.md',
     'hub/principal.py', 'hub/tool_router.py', 'hub/gateway/service.py', 'hub/iam.py', 'hub/oidc.py',
     'hub/access_profiles.py','shared/access_profile_contracts.py','web/access-profiles.js',
     'web/access-profiles.css','docs/ACCESS_PROFILES.md','web/identity.js','web/mcp-gateway.js',
@@ -176,6 +180,7 @@ REQUIRED_FILES = {
 
 PUBLIC_DOCS = {
     'docs/COLLABORATION.md',
+    'docs/COLLABORATION_CHATROOM.md',
     'docs/designs/COLLABORATION_V0_2.md',
     'docs/MCP_GATEWAY.md', 'docs/MULTIUSER_OIDC.md', 'docs/DYNAMIC_ROLES.md', 'docs/ACCESS_PROFILES.md', 'docs/UPSTREAM_INTEGRATION.md',
     'docs/FILE_IMPORT.md',

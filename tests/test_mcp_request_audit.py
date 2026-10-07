@@ -56,6 +56,41 @@ def test_malformed_body_is_redacted_before_activity(api, events, payload):
     assert pat not in json.dumps(events)
 
 
+@pytest.mark.parametrize('header,expected', [
+    ('events/subscribe', 'events/subscribe'), (SECRET, None),
+])
+def test_unauthenticated_method_hint_is_bounded_and_never_parsed(api, events, header, expected):
+    app, client, _ = api
+    response = client.post('/mcp', content=SECRET, headers={'Mcp-Method': header})
+    assert response.status_code == 401
+    assert all(e['rpc_method'] == 'unknown' for e in events)
+    assert all(e.get('rpc_method_hint') == expected for e in events)
+    assert SECRET not in json.dumps(events)
+    assert not app.state.store.all('SELECT * FROM mcp_activity')
+
+
+def test_duplicate_method_hints_are_ignored(api, events):
+    _, client, _ = api
+    response = client.post('/mcp', content=SECRET,
+                           headers=[('Mcp-Method', 'events/subscribe'), ('Mcp-Method', SECRET)])
+    assert response.status_code == 401
+    assert all('rpc_method_hint' not in e for e in events)
+    assert SECRET not in json.dumps(events)
+
+
+def test_method_hint_does_not_replace_parsed_method(api, events):
+    _, client, pat = api
+    body = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list',
+            'params': {'_meta': {PREFIX + 'protocolVersion': MODERN, PREFIX + 'clientCapabilities': {}}}}
+    response = client.post('/mcp', json=body, headers={
+        'Authorization': 'Bearer ' + pat, 'Accept': 'application/json, text/event-stream',
+        'MCP-Protocol-Version': MODERN, 'Mcp-Method': 'events/subscribe'})
+    assert response.status_code == 400
+    assert events[-1]['rpc_method'] == 'tools/list'
+    assert events[-1]['rpc_method_hint'] == 'events/subscribe'
+    assert not any(e['stage'] == 'event_callback_failed' for e in events)
+
+
 def test_oversized_body_id_precedes_authentication(api, events):
     app, client, _ = api
     response = client.post("/mcp", content=b"x", headers={"Content-Length": str(7 * 1024 * 1024)})
@@ -228,3 +263,15 @@ def test_sampling_still_returns_ids_without_logging_request_content(events):
         assert re.fullmatch(rb"[a-f0-9]{32}", dict(sent[0]["headers"])[audit.HEADER])
     asyncio.run(scenario())
     assert events == []
+
+
+@pytest.mark.parametrize('method', ['events/list', 'events/subscribe', 'events/unsubscribe'])
+def test_event_method_diagnostics_use_only_fixed_nonsecret_names(events, method):
+    trace = audit.Trace(True, 'POST')
+    trace.record('parsed', method=method, protocol='modern')
+    assert events[-1]['rpc_method'] == method
+    trace.record('protocol_validated', method=method + '/' + SECRET)
+    assert events[-1]['rpc_method'] == 'unknown'
+    assert SECRET not in json.dumps(events)
+    assert set(events[0]) <= {'request_id', 'stage', 'previous_stage', 'http_method',
+                             'rpc_method', 'protocol', 'outcome', 'elapsed_ms'}

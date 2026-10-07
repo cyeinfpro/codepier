@@ -125,8 +125,10 @@ Create an OAuth2/OpenID provider and application for CodePier:
   which rejects authorization before the login form even though discovery works.
 - An asymmetric signing key. CodePier accepts configured public RSA/EC signatures,
   not unsigned or symmetric ID Tokens.
-- A strict, exact callback URI, copied from CodePier after the provider record is
-  created. No wildcard, first-use callback registration or regular expression.
+- A strict, exact callback URI derived only from the Hub public URL:
+  `https://YOUR-HUB/auth/oidc/callback`. It can be registered before CodePier
+  starts or any provider/admin exists. No wildcard, first-use callback
+  registration or regular expression.
 - The `openid` and `profile` mappings. Add `email` only when useful for display.
   Include/request `offline_access` for continued verified group reconciliation
   after the upstream access Token expires; it is not necessary to request email
@@ -171,15 +173,27 @@ Open **身份管理** (Identity administration) as the instance administrator, t
 | Freshness seconds | Maximum entitlement age, 60–86400; default 900. |
 | Extra endpoint origins | Only necessary for IdPs using other HTTPS origins. No wildcards. |
 
-Use **测试发现** (Test discovery). It verifies discovery/JWKS and returns exact:
+The login callback is always derived from `HUB_PUBLIC_URL`, so it is known before
+SSO is configured and does not contain a CodePier provider ID:
 
 ```text
-https://YOUR-HUB/auth/oidc/PROVIDER-ID/callback
+https://YOUR-HUB/auth/oidc/callback
+```
+
+Register that callback in Authentik before the first CodePier startup if desired.
+When upgrading an existing installation, add this exact URI to the IdP allowlist
+before switching versions, and keep the old provider-specific URI until in-flight
+logins expire. The legacy callback route remains available for those transactions.
+`MCP_PUBLIC_URL` and the panel's MCP/OAuth public-URL setting do not change the
+OIDC callback. **测试发现** (Test discovery) verifies discovery/JWKS and returns
+that callback plus the provider-specific optional back-channel logout URL:
+
+```text
+https://YOUR-HUB/auth/oidc/callback
 https://YOUR-HUB/auth/oidc/PROVIDER-ID/backchannel-logout
 ```
 
-Register the callback in Authentik; optionally configure its back-channel logout
-URL. The IdP and Hub must reach each other through normal TLS; server-to-server
+The IdP and Hub must reach each other through normal TLS; server-to-server
 metadata/JWKS/token/UserInfo endpoints cannot require interactive bot challenges.
 CodePier does not follow upstream HTTP redirects or send client secrets to an
 origin that was not explicitly configured. Restrict trusted reverse-proxy headers
@@ -208,8 +222,10 @@ Do not enable it in the deployed Hub. It is not a production TLS workaround.
 Container deployments (see `deploy/k3s/deployment.yaml`) can declare one provider
 through the process environment instead of the panel. When `CODEPIER_OIDC_ISSUER` is
 set, the Hub validates the settings exactly like the administration API and creates or
-updates provider `idp_env` at every start. The environment is authoritative for that
-provider: the panel answers `PROVIDER_ENV_MANAGED` to edits while the variables are
+updates provider `idp_env` at every start. `idp_env` is an internal database
+identifier only; it is not part of the redirect URI and does not need to be entered
+in the IdP. The environment is authoritative for that provider: the panel answers
+`PROVIDER_ENV_MANAGED` to edits while the variables are
 present, changes take effect on the next start, and an unchanged environment neither
 rewrites the provider nor invalidates entitlements. Changing the issuer is refused at
 startup while identities are linked to it, because identities are bound to the issuer.
@@ -217,7 +233,7 @@ Removing the variables keeps the provider and makes it editable in the panel aga
 
 | Variable | Meaning |
 |---|---|
-| `CODEPIER_OIDC_ISSUER` | Exact issuer; enables seeding. Callback: `HUB_PUBLIC_URL/auth/oidc/idp_env/callback`. |
+| `CODEPIER_OIDC_ISSUER` | Exact issuer; enables seeding. Callback is always `HUB_PUBLIC_URL/auth/oidc/callback`. |
 | `CODEPIER_OIDC_CLIENT_ID`, `CODEPIER_OIDC_CLIENT_SECRET` | Required together with the issuer. |
 | `CODEPIER_OIDC_LABEL` | Login button label; default `SSO`. |
 | `CODEPIER_OIDC_SCOPES` | Default `openid profile email`. |

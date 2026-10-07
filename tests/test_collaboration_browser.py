@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 from playwright.sync_api import expect
-from tests.test_collaboration_http import collaboration_stack
+from tests.collaboration_support import collaboration_stack  # noqa: F401
 
 pytestmark = [pytest.mark.browser, pytest.mark.integration, pytest.mark.slow]
 
@@ -39,15 +39,13 @@ def test_collaboration_panel_complete_readonly_flow(collaboration_stack, chat_br
         page.locator('[data-cc-action="create-room"]').click()
         expect(page.locator('#cc-command')).to_be_visible()
         page.locator('[data-cc-view="agents"]').click()
+        page.locator('.cc-advanced > summary').click()
         page.get_by_text('登记智能体用途', exact=True).click()
         page.locator('#cc-agent [name="label"]').fill('巡检 Work')
         page.locator('#cc-agent [name="grant_id"]').select_option(grant['grant_id'])
         page.locator('#cc-agent button[type="submit"]').click()
         expect(page.locator('.cc-main')).to_contain_text('用途绑定有效')
         page.locator('[data-cc-view="discussion"]').click()
-        option = page.locator('#cc-command [name="assignee"] option').nth(1)
-        agent_id = option.get_attribute('value')
-        page.locator('#cc-command [name="assignee"]').select_option(agent_id)
         payload = '检查这次超时，保留事实与假设。<img src=x onerror="window.collaborationXss=true">'
         page.locator('#cc-command [name="request"]').fill(payload)
         # Navigation preserves only this in-memory draft, not private browser data.
@@ -59,6 +57,21 @@ def test_collaboration_panel_complete_readonly_flow(collaboration_stack, chat_br
         expect(page.locator('#cc-command [name="request"]')).to_have_value('')
         assert not page.evaluate('Boolean(window.collaborationXss)')
         assert page.locator('.cc-feed img').count() == 0
+        overview = stack.must(stack.client.get('/api/collaboration', params={
+            'project': stack.project['id'], 'environment_id': 'production'}))
+        assert len(overview['jobs']) == 0  # Ordinary discussion never creates a task.
+        page.locator('.cc-feed [data-cc-action="convert"]').first.click()
+        expect(page.locator('#cc-task-review')).to_be_visible()
+        page.locator('#cc-task-review [name="target_project"]').select_option(stack.project['id'])
+        option = page.locator('#cc-task-review [name="assignee"] option').nth(1)
+        agent_id = option.get_attribute('value')
+        page.locator('#cc-task-review [name="assignee"]').select_option(agent_id)
+        page.locator('#cc-task-review button[type="submit"]').click()
+        assert len(stack.must(stack.client.get('/api/collaboration', params={
+            'project': stack.project['id'], 'environment_id': 'production'}))['jobs']) == 0
+        page.locator('#cc-task-review [name="confirm"]').check()
+        page.locator('#cc-task-review button[type="submit"]').evaluate('(button) => {button.click();button.click();}')
+        expect(page.locator('#cc-drawer')).not_to_be_visible()
         overview = stack.must(stack.client.get('/api/collaboration', params={
             'project': stack.project['id'], 'environment_id': 'production'}))
         assert len(overview['jobs']) == 1
@@ -110,11 +123,10 @@ def test_collaboration_panel_complete_readonly_flow(collaboration_stack, chat_br
         # issue the old instruction under the replacement session's CSRF.
         page.locator('[data-cc-view="discussion"]').click()
         expect(page.locator('[data-cc-view="discussion"]')).to_have_attribute('aria-pressed', 'true')
-        page.locator('#cc-command [name="assignee"]').select_option(agent_id)
         page.locator('#cc-command [name="request"]').fill('Must not be sent after session replacement')
         command_requests = []
         page.on('request', lambda request: command_requests.append(request.url)
-                if request.url.endswith('/api/collaboration/command') else None)
+                if request.url.endswith('/api/collaboration/message') else None)
         page.evaluate('''() => {
             window.ccOriginalSession = S.session;
             window.ccOriginalDigest = crypto.subtle.digest.bind(crypto.subtle);

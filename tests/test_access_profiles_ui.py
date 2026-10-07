@@ -93,6 +93,8 @@ def test_oauth_profile_filters_scope_and_project_then_binds_real_token(profiles_
     dialog = page.locator('.modal')
     expect(dialog.locator('[name="scope"][value="execute"]')).to_have_count(0)
     expect(dialog.locator('[name="scope"][value="computer"]')).not_to_be_checked()
+    expect(dialog.locator('[name="scope"][value="write"]')).not_to_be_checked()
+    dialog.locator('[name="scope"][value="write"]').check()
     expect(dialog.locator('[name="all_projects"]')).to_be_disabled()
     expect(dialog.locator('[name="project"]')).to_have_count(1)
     expect(dialog.locator('[name="project"]')).to_be_checked()

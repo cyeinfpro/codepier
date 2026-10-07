@@ -136,6 +136,13 @@ def make_access_router(auth, runtime):
                     'projects': json.loads(row['projects']), 'revoked': bool(row['revoked']),
                     'project_revision': grant_revision(store, grant_id), 'profile_id': row['profile_id']}
 
+    @router.get('/api/grants/{grant_id}/access-preview')
+    @database_endpoint(runtime.store)
+    def read_grant_access_preview(grant_id: str, request: Request):
+        from hub.access_preview import grant_access_preview
+        return grant_access_preview(store, auth.panel(request), grant_id,
+                                    expected_resource=auth.resource() if auth.resource else None)
+
     @router.put('/api/grants/{grant_id}/projects')
     @database_endpoint(runtime.store)
     def update_grant_projects(grant_id: str, request: Request, body: GrantProjectsInput):

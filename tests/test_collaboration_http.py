@@ -7,14 +7,7 @@ from tests.test_mcp_tasks_http import modern
 from tests.test_collaboration_service import key
 
 
-@pytest.fixture
-def collaboration_stack(tmp_path, monkeypatch):
-    monkeypatch.setenv('CODEPIER_COLLABORATION_ENABLED', 'true')
-    monkeypatch.setenv('CODEPIER_MCP_EVENTS_ENABLED', 'true')
-    monkeypatch.setenv('CODEPIER_MONITOR_COLLECTOR_ENABLED', 'false')
-    monkeypatch.setenv('CODEPIER_ANALYSIS_DISPATCH_ENABLED', 'false')
-    with running_stack(tmp_path / 'collaboration-http') as stack:
-        yield stack
+from tests.collaboration_support import collaboration_stack
 
 
 def test_panel_and_mcp_share_persisted_records_but_not_owner_authority(collaboration_stack):
@@ -57,8 +50,15 @@ def test_events_discovery_and_old_clients_are_not_conflated(collaboration_stack)
     grant = s.must(s.client.post('/api/grants', json={'label': 'events readonly fixture',
                    'scopes': ['read'], 'projects': [s.project['id']], 'days': 1}))
     catalog = modern(s, 'events/list', token=grant['token']).json()['result']
-    assert len(catalog['events']) == 4 and catalog['resultType'] == 'complete'
+    assert {event['name'] for event in catalog['events']} == set(__import__('hub.collaboration.common', fromlist=['EVENTS']).EVENTS) and catalog['resultType'] == 'complete'
     args = {'name': 'codepier.collaboration.task_available.v1', 'arguments': {},
             'delivery': {'mode': 'webhook', 'url': 'https://callback.invalid', 'secret': 'invalid'}}
     invalid = modern(s, 'events/subscribe', args, token=grant['token'], headers={'Mcp-Name': 'wrong'})
     assert invalid.json()['error']['code'] == -32020
+
+
+def test_events_catalog_reuses_existing_read_write_execute_grant(collaboration_stack):
+    s=collaboration_stack
+    grant=s.must(s.client.post('/api/grants',json={'label':'Existing broad fixture','scopes':['read','write','execute'],'projects':[s.project['id']],'days':1}))
+    catalog=modern(s,'events/list',token=grant['token']).json()['result']
+    assert {event['name'] for event in catalog['events']} == set(__import__('hub.collaboration.common', fromlist=['EVENTS']).EVENTS) and catalog['resultType']=='complete'

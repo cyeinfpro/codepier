@@ -17,6 +17,12 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from scripts.migrate_hub import Docker
 from scripts import migrate_hub_networks as networks
+from shared.util import VERSION
+
+
+def health_probe():
+    """Validate both artifacts against this source version, never an old release."""
+    return "import json,urllib.request; h=json.load(urllib.request.urlopen('http://127.0.0.1:8765/healthz')); m=json.load(urllib.request.urlopen('http://127.0.0.1:8765/agent/manifest.json')); assert h['version']=="+repr(VERSION)+" and m['version']=="+repr(VERSION)+"; print(json.dumps({'version':h['version'],'agent_package_bytes':m['bytes']}))"
 
 
 def main():
@@ -29,14 +35,14 @@ def main():
             docker.run(command,check=False)
     try:
         for volume in volumes:docker.create_volume(volume,prefix)
-        seed="import sqlite3,pathlib,os; p=pathlib.Path('/fixture'); s=sqlite3.connect(p/'hub.sqlite3'); s.execute('CREATE TABLE users(id TEXT PRIMARY KEY)'); s.execute(\"INSERT INTO users VALUES ('original-user')\"); s.commit(); s.close(); (p/'master.key').write_text('fixture-only-not-a-real-key'); (p/'attachment.bin').write_bytes(bytes(range(256))*16); [os.chown(q,10001,10001) for q in p.iterdir()]; os.chown(p,10001,10001)"
+        seed="import sqlite3,pathlib,os; p=pathlib.Path('/fixture'); s=sqlite3.connect(p/'hub.sqlite3'); s.execute('CREATE TABLE users(id TEXT PRIMARY KEY)'); s.execute(\"INSERT INTO users VALUES ('original-user')\"); s.commit(); s.close(); (p/'master.key').write_text('fixture-only-not-a-real-key'); (p/'attachment.bin').write_bytes(bytes(range(256))*16); [os.chmod(q,0o600) for q in p.iterdir()]; [os.chown(q,10001,10001) for q in p.iterdir()]; os.chown(p,10001,10001); os.chmod(p,0o700)"
         docker.run(['run','--rm','--network=none','--user','0:0','--mount','type=volume,src='+old+',dst=/fixture','--entrypoint','python',args.image,'-c',seed])
         copied=docker.worker(args.image,'copy',new,old,backup);result=json.loads(copied.stdout)
         assert result['backup_verified'] and result['destination_verified'] and result['sqlite_integrity']=='ok'
         for volume in (old,new,backup):
             check="import sqlite3,pathlib,json; p=pathlib.Path('/fixture'); s=sqlite3.connect((p/'hub.sqlite3').as_uri()+'?mode=ro',uri=True); assert s.execute('SELECT id FROM users').fetchall()==[('original-user',)]; s.close(); assert (p/'master.key').read_text()=='fixture-only-not-a-real-key'; print(json.dumps({'uid':p.stat().st_uid,'verified':True}))"
             response=docker.run(['run','--rm','--network=none','--read-only','--user','10001:10001','--mount','type=volume,src='+volume+',dst=/fixture,readonly','--entrypoint','python',args.image,'-c',check])
-            assert json.loads(response.stdout)['verified']
+            assert json.loads(response.stdout)=={'uid':10001,'verified':True}
         report['cases'].append({'case':'read-only-old-volume-to-canonical-and-backup','result':'passed',**result,'service_uid_can_read':True})
         try:docker.worker(args.image,'copy',new,old,backup)
         except RuntimeError:report['cases'].append({'case':'occupied-destination-refused','result':'passed'})
@@ -59,14 +65,15 @@ def main():
         docker.run(['run','--rm','--network=none','--mount','type=volume,src='+hub_volume+',dst=/app/data',
                     '-e','CODEPIER_ADMIN_PASSWORD=fixture-only-installation-password','--entrypoint','python',args.image,'-m','hub','init','--username','fixture'])
         docker.run(['run','-d','--name',hub_container,'--network=none','--label','com.codepier.fixture='+prefix,
-                    '--health-interval=1s','--health-start-period=0s','--health-retries=20','--mount','type=volume,src='+hub_volume+',dst=/app/data',args.image])
+                    '--read-only','--tmpfs','/tmp:size=64m,mode=1777','--cap-drop=ALL','--security-opt=no-new-privileges',
+                    '--health-interval=1s','--health-start-period=0s','--health-retries=20','--mount','type=volume,src='+hub_volume+',dst=/app/data,volume-nocopy',args.image])
         for _ in range(50):
             state=docker.json(['inspect',hub_container])[0]['State']
             if state.get('Health',{}).get('Status')=='healthy':break
             if not state.get('Running'):raise AssertionError('Fixture Hub exited during startup')
             time.sleep(.3)
         else:raise AssertionError('Fixture Hub did not become healthy')
-        check="import json,urllib.request; h=json.load(urllib.request.urlopen('http://127.0.0.1:8765/healthz')); m=json.load(urllib.request.urlopen('http://127.0.0.1:8765/agent/manifest.json')); assert h['version']=='1.9.0' and m['version']=='1.9.0'; print(json.dumps({'version':h['version'],'agent_package_bytes':m['bytes']}))"
+        check=health_probe()
         healthy=json.loads(docker.run(['exec',hub_container,'python','-c',check]).stdout)
         report['cases'].append({'case':'canonical-volume-hub-startup-and-agent-package','result':'passed',**healthy})
         report.update(passed=len(report['cases']),failed=0,docker_version=docker.run(['version','--format','{{.Server.Version}}']).stdout.strip())

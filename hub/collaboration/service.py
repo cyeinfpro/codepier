@@ -1,7 +1,7 @@
 """One bounded transaction service shared by panel, MCP and monitoring.
 
-There is no process/file-write adapter. Grants, not labels, own task leases;
-owner commands and agent proposals have distinct server-derived origins.
+Legacy monitor tasks stay read-only. Separately approved goal work reuses the
+Runtime execution policy. Grants own leases; model proposals cannot approve them.
 """
 from __future__ import annotations
 import json
@@ -28,6 +28,14 @@ class CollaborationService:
         self.runtime, self.store = runtime, runtime.store
         self.config = config or CollaborationConfig.from_env()
         self.clock = clock
+        from hub.collaboration.joining import JoiningService
+        self.joining = JoiningService(self)
+        from hub.collaboration.chatroom import ChatroomService
+        self.chatroom = ChatroomService(self)
+        from hub.collaboration.conversations import ConversationService
+        self.conversations = ConversationService(self)
+        from hub.collaboration.coordination import CoordinationService
+        self.coordination = CoordinationService(self)
         self.events = None
         self.monitor = None
         self.secret = b''
@@ -49,7 +57,7 @@ class CollaborationService:
         if not principal.admin or principal.grant_id is not None:
             raise DevError('OWNER_REQUIRED', '此操作需要已登录面板的空间管理员确认', 403)
 
-    def scope(self, principal, args, *, create=False, optional=False):
+    def scope(self, principal, args, *, create=False, optional=False, notification=False):
         self.guard()
         principal = refresh_principal(self.store, principal)
         project = self.runtime.project(args['project'], principal)
@@ -57,12 +65,23 @@ class CollaborationService:
             owner_user_id=? AND project_id=? AND environment_id=?''',
             (principal.space_id, principal.user_id, project['id'], args['environment_id']))
         if room is None and create:
-            self.owner(principal)
+            if notification:
+                # A subscription needs only a passive, tenant-scoped record container.
+                # It never creates agents, tasks, monitor plans or execution authority.
+                self.notification_reader(principal)
+                count = self.store.one('SELECT COUNT(*) AS n FROM collaboration_rooms WHERE space_id=? AND owner_user_id=? AND project_id=?',
+                                       (principal.space_id, principal.user_id, project['id']))['n']
+                if count >= 64:
+                    raise DevError('ROOM_LIMIT', '项目环境记录已达上限，请先在面板核查', 409)
+            else:
+                self.owner(principal)
             identifier = new_id()
             self.store.execute('''INSERT INTO collaboration_rooms
                 (id,space_id,owner_user_id,project_id,environment_id,created) VALUES (?,?,?,?,?,?)''',
                 (identifier, principal.space_id, principal.user_id, project['id'], args['environment_id'], self.clock()))
             room = self.store.one('SELECT * FROM collaboration_rooms WHERE id=?', (identifier,))
+        if room is not None and create:
+            self.conversations.ensure_default(room)
         if room is None and not optional:
             raise DevError('ROOM_NOT_FOUND', '请先在面板开启这个项目环境的协作室', 404)
         return principal, room
@@ -73,7 +92,7 @@ class CollaborationService:
             raise DevError('ROOM_PAUSED', '协作室已暂停；不接受新任务或领取', 409)
         return current
 
-    def grant_principal(self, room, grant_id, *, snapshot=None):
+    def grant_reader(self, room, grant_id, *, snapshot=None):
         grant = self.store.one('SELECT * FROM grants WHERE id=?', (grant_id,))
         if not grant or grant['user_id'] != room['owner_user_id'] or grant.get('space_id', 'legacy') != room['space_id']:
             raise DevError('WORKER_BINDING_INVALID', '没有可用于此协作室的授权', 403)
@@ -88,8 +107,18 @@ class CollaborationService:
                     raise DevError('WORKER_BINDING_INVALID', '原订阅的身份绑定已改变', 403)
         principal = refresh_principal(self.store, principal)
         self.runtime.project(room['project_id'], principal)
+        self.notification_reader(principal)
+        return principal
+
+    def grant_principal(self, room, grant_id, *, snapshot=None):
+        principal = self.grant_reader(room, grant_id, snapshot=snapshot)
         self.readonly_worker(principal)
         return principal
+
+    @staticmethod
+    def notification_reader(principal):
+        if not principal.grant_id or 'read' not in principal.scopes:
+            raise DevError('SUBSCRIPTION_READ_REQUIRED', '订阅需要当前项目的 MCP 读取授权', 403)
 
     @staticmethod
     def principal_snapshot(principal):
@@ -235,6 +264,9 @@ class CollaborationService:
             def take():
                 self.live_room(room)
                 self.check_plan(room, job)
+                source_id = json.loads(job['context']).get('origin_message_id')
+                if source_id:
+                    self.object('collaboration_messages', room, source_id)
                 if job['version'] != args['expected_version']:
                     raise DevError('STALE_VERSION', '任务已改变，请重新读取任务版本', 409)
                 if job['state'] != 'queued':
@@ -471,10 +503,16 @@ class CollaborationService:
                            'outcome': result['outcome'], 'requires_decision': result['outcome'] in {'action_required', 'blocked', 'inconclusive'},
                            'evidence_refs': sorted(refs), 'severity': incident['severity'] if incident else None,
                            'rule_id': incident['rule_id'] if incident else None})
+                origin_message = json.loads(job['context']).get('origin_message_id')
+                if not origin_message and job['goal_id']:
+                    origin_message = self.object('collaboration_goals', room, job['goal_id'])['source_message_id']
+                result_conversation = self.object('collaboration_messages', room, origin_message)['conversation_id'] if origin_message else room['id']
+                thread_root = (self.object('collaboration_messages', room, origin_message)['thread_root_id']
+                               if origin_message else new_id())
                 self.store.execute('''INSERT INTO collaboration_messages
-                    (id,room_id,thread_id,author,origin,source_id,kind,body,state,goal_id,created)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
-                    (new_id(), room['id'], job['goal_id'] or job['id'], principal.grant_id, 'mcp', 'result:' + identifier,
+                    (id,room_id,conversation_id,thread_id,author,origin,source_id,kind,body,state,goal_id,created)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)''',
+                    (new_id(), room['id'], result_conversation, thread_root, principal.grant_id, 'mcp', 'result:' + identifier,
                      'agent_result', canonical({'result_id': identifier, 'summary': result['summary'],
                      'outcome': result['outcome'], 'job_id': job['id']}), 'submitted', job['goal_id'], now))
                 # The result transaction never changes incident recovery state.
@@ -652,6 +690,8 @@ class CollaborationService:
                                       (event['id'], sub['id']))
             if delivery and delivery['state'] == 'accepted':
                 return 'awaiting_consumer' if self.clock() - delivery['accepted_at'] >= 300 else 'event_accepted'
+            if not delivery and event['seq'] <= sub['scan_seq']:
+                continue  # Before enrollment/replay floor, not awaiting delivery.
             states.append(delivery['state'] if delivery else 'event_queued')
         for status in ('leased', 'retry_wait', 'pending', 'event_queued', 'dead_letter', 'abandoned'):
             if status in states:
@@ -702,14 +742,14 @@ class CollaborationService:
                   'goals': ('collaboration_goals', 'created'), 'incidents': ('monitor_incidents', 'opened_at'),
                   'agents': ('collaboration_agents', 'created'), 'subscriptions': ('mcp_event_subscriptions', 'created')}
         table, column = tables[kind]
-        where, parameters = '', [room['id']]
+        where, parameters = (" AND conversation_id=?", [room['id'], room['id']]) if kind == 'messages' else ('', [room['id']])
         binding = digest([room['id'], principal.grant_id or 'panel', kind])
         if cursor:
             position = read_cursor(self.secret, binding, cursor)
             if (not isinstance(position, list) or len(position) != 2 or isinstance(position[0], bool)
                     or not isinstance(position[0], (float, int)) or not isinstance(position[1], str)):
                 raise DevError('INVALID_CURSOR', '分页游标格式不正确', 400)
-            where = f' AND ({column}<? OR ({column}=? AND id<?))'
+            where += f' AND ({column}<? OR ({column}=? AND id<?))'
             parameters.extend([position[0], position[0], position[1]])
         rows = self.store.all(f'SELECT * FROM {table} WHERE room_id=?{where} ORDER BY {column} DESC,id DESC LIMIT ?', (*parameters, limit + 1))
         selected = rows[:limit]
@@ -717,7 +757,7 @@ class CollaborationService:
         if kind == 'jobs':
             selected = [self.job_view(row) for row in selected]
         elif kind == 'messages':
-            selected = [{**row, 'body': redact(json.loads(row['body']))} for row in selected]
+            selected = self.chatroom.views(selected)
         elif kind == 'agents':
             selected = [self.agent_view(room, row) for row in selected]
         elif kind == 'subscriptions':
@@ -728,10 +768,47 @@ class CollaborationService:
         args = validate(contracts.Read, raw)
         with self.store.transaction(immediate=False):
             principal, room = self.scope(principal, args, optional=True)
+            if args['kind'] == 'rooms':
+                project = self.runtime.project(args['project'], principal)
+                rows = self.store.all('''SELECT id,project_id,environment_id,state,version,title,topic FROM collaboration_rooms
+                    WHERE space_id=? AND owner_user_id=? AND project_id=? ORDER BY created,id LIMIT 64''',
+                    (principal.space_id, principal.user_id, project['id']))
+                return {'items': rows, 'next_cursor': None}
             if not room:
                 return {'room': None, 'features': asdict(self.config), 'setup_required': True,
+                        'schema_version': 3, 'capabilities': self.chatroom.capabilities(),
                         'can_manage': bool(principal.admin and not principal.grant_id)}
             kind = args['kind']
+            if kind in {'coordination_goals', 'coordination_goal', 'coordination_options'}:
+                return self.coordination.listing(args, principal, room)
+            self.chatroom.same_room(room, args)
+            if kind in {'timeline', 'thread', 'search', 'members', 'changes', 'message_status'}:
+                return self.chatroom.read(args, principal, room)
+            if args['conversation_id']:
+                conversation = self.conversations.resolve(principal, room, args)
+                if kind == 'messages':
+                    return self.conversations.read({**args, 'kind': 'timeline'}, principal, room)
+                if kind in {'job', 'result'}:
+                    self.chatroom.check_object_conversation(room, conversation['id'], kind, args['id'])
+                if kind in {'jobs', 'goals'}:
+                    return self.chatroom.conversation_listing(principal, room, conversation['id'], kind, args['limit'], args['cursor'])
+                if kind == 'evidence':
+                    if args['result_id']:
+                        self.chatroom.check_object_conversation(room, conversation['id'], 'result', args['result_id'])
+                        result = self.result_view(self.object('collaboration_results', room, args['result_id']))
+                        refs = self.result_refs(result['body'])
+                    elif args['job_id']:
+                        self.chatroom.check_object_conversation(room, conversation['id'], 'job', args['job_id'])
+                        job = self.object('collaboration_jobs', room, args['job_id'])
+                        refs = set(json.loads(job['context']).get('evidence_refs', []))
+                        if job['incident_id']:
+                            refs.add(self.object('monitor_incidents', room, job['incident_id'])['evidence_id'])
+                    else:
+                        raise DevError('EVIDENCE_CONTEXT_REQUIRED', '聊天室证据读取需要关联任务或结果', 422)
+                    if args['id'] not in refs:
+                        raise DevError('EVIDENCE_CONTEXT_MISMATCH', '此证据不属于指定任务或结果', 403)
+            if kind == 'join_slots':
+                return {'items': self.joining.list(room, principal), 'next_cursor': None}
             if kind in {'messages', 'jobs', 'goals', 'incidents', 'agents', 'subscriptions'}:
                 return self.listing(principal, room, kind, args['limit'], args['cursor'])
             if kind == 'job':
@@ -760,20 +837,40 @@ class CollaborationService:
                 return self.monitor.plan_view(room) if self.monitor else {'state': 'unsupported'}
             result = {'room': room, 'features': asdict(self.config), 'setup_required': False,
                       'can_manage': bool(principal.admin and not principal.grant_id),
-                      'chat_identity_verified': False, 'production_actions_enabled': False}
+                      'chat_identity_verified': False, 'production_actions_enabled': False,
+                      'schema_version': 3, 'capabilities': self.chatroom.capabilities()}
             for item in ('messages', 'jobs', 'goals', 'incidents', 'agents', 'subscriptions'):
                 page = self.listing(principal, room, item, args['limit'])
                 result[item], result[item + '_next_cursor'] = page['items'], page['next_cursor']
+            conversation = self.conversations.resolve(principal, room, args)
+            result['conversation'] = self.conversations.view(principal, conversation)
+            result['selected_partition'] = {'project_id': room['project_id'], 'environment_id': room['environment_id'], 'room_id': room['id']}
+            if args['conversation_id']:
+                page = self.conversations.read({**args, 'kind': 'timeline'}, principal, room)
+                result['messages'], result['messages_next_cursor'] = page['items'], page['next_cursor']
+                result['visibility_token'] = page['visibility_token']
+                for item in ('jobs', 'goals'):
+                    page = self.chatroom.conversation_listing(principal, room, conversation['id'], item, args['limit'])
+                    result[item], result[item + '_next_cursor'] = page['items'], page['next_cursor']
+            result['join_slots'] = self.joining.list(room, principal)
             result['plan'] = self.monitor.plan_view(room) if self.monitor else None
             result['probes'] = self.monitor.probes_view(room, include_targets=bool(principal.admin and not principal.grant_id)) if self.monitor else []
             result['counts'] = {
                 'open_jobs': self.store.one("SELECT COUNT(*) AS n FROM collaboration_jobs WHERE room_id=? AND state IN ('queued','leased','running','retry_wait','blocked')", (room['id'],))['n'],
                 'open_incidents': self.store.one("SELECT COUNT(*) AS n FROM monitor_incidents WHERE room_id=? AND state!='resolved'", (room['id'],))['n'],
                 'pending_proposals': self.store.one("SELECT COUNT(*) AS n FROM collaboration_messages WHERE room_id=? AND state='awaiting_approval'", (room['id'],))['n']}
+            if args['conversation_id']:
+                result['counts']['open_jobs'] = self.store.one('''SELECT COUNT(*) AS n FROM collaboration_jobs j
+                    LEFT JOIN collaboration_goals g ON g.id=j.goal_id JOIN collaboration_messages m
+                    ON m.id=COALESCE(json_extract(j.context,'$.origin_message_id'),g.source_message_id)
+                    WHERE j.room_id=? AND m.conversation_id=? AND j.state IN ('queued','leased','running','retry_wait','blocked')''',
+                    (room['id'], conversation['id']))['n']
+                result['counts']['pending_proposals'] = self.store.one("SELECT COUNT(*) AS n FROM collaboration_messages WHERE room_id=? AND conversation_id=? AND state='awaiting_approval'", (room['id'], conversation['id']))['n']
             return result
 
     def reconcile(self):
         """Rotate a bounded scan; a full early batch cannot starve later rooms."""
+        self.coordination.reconcile()
         now = self.clock()
         after = getattr(self, '_reconcile_after', '')
         with self.store.transaction():
@@ -811,7 +908,9 @@ class CollaborationService:
 
     def invoke(self, name, raw, principal):
         self.guard()
-        handlers = {'collaboration_read': self.read, 'collaboration_command_create': self.command,
+        if name in contracts.COORDINATION_TOOL_MODELS:
+            return self.coordination.invoke(name, raw, principal)
+        handlers = {'collaboration_message_create': self.chatroom.create, 'collaboration_join': self.joining.join, 'collaboration_read': self.read, 'collaboration_command_create': self.command,
                     'collaboration_claim': self.claim, 'collaboration_heartbeat': self.heartbeat,
                     'collaboration_result': self.submit, 'collaboration_block': self.block, 'collaboration_ack': self.ack}
         if name in handlers:

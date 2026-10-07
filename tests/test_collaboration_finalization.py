@@ -44,6 +44,11 @@ async def test_display_requires_matching_current_subscription(collab):
     await events.tick()
     assert len(receiver.requests) == 1  # challenge only, no task matching the filter
     matching = await events.subscribe(args, worker)
+    assert service.delivery_status(job) == 'no_valid_subscription'  # Null cursor skips old tasks.
+    await events.tick()
+    assert len(receiver.requests) == 1
+    created = command(collab)[1]
+    job = service.object('collaboration_jobs', room, created['job_id'])
     assert service.delivery_status(job) == 'event_queued'
     await events.tick()
     assert service.delivery_status(job) == 'event_accepted'
@@ -70,3 +75,19 @@ def test_public_source_profile_contains_collaboration_and_reviewed_docs():
                  'hub/collaboration/monitor.py', 'shared/collaboration_contracts.py',
                  'web/collaboration.js', 'web/collaboration.css'):
         assert name in REQUIRED_FILES and include(Path(name), public=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('status,expected', [(204, 'event_accepted'), (410, 'dead_letter')])
+async def test_delivery_display_preserves_record_at_or_before_scan_cursor(collab, status, expected):
+    service, _, worker, _, room, _, _, _ = collab
+    events, receiver, args = setup_events(collab)
+    await events.subscribe(args, worker)
+    created = command(collab)[1]
+    receiver.status = status
+    await events.tick()
+    row = service.store.one('SELECT * FROM mcp_event_deliveries')
+    sub = service.store.one('SELECT scan_seq FROM mcp_event_subscriptions')
+    assert row['event_seq'] <= sub['scan_seq']
+    job = service.object('collaboration_jobs', room, created['job_id'])
+    assert service.delivery_status(job) == expected

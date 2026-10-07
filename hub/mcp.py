@@ -11,7 +11,7 @@ from shared.config import env_csv
 from hub.db_worker import database_endpoint
 from hub.principal import refresh_principal
 from shared.collaboration_contracts import TOOL_MODELS as COLLABORATION_TOOLS
-from hub.collaboration.events import CallbackEndpointError
+from hub.collaboration.event_errors import CallbackEndpointError, event_error
 from hub.tool_router import ToolRouter
 from shared.role_contracts import ROLE_SCOPE
 import json,os
@@ -133,9 +133,14 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
             elif modern and method in {'events/list','events/subscribe','events/unsubscribe'} and runtime.collaboration.config.events_enabled:
                 try:
                     result = await runtime.collaboration.events.call(method, {key:value for key,value in params.items() if key != '_meta'}, principal)
+                    principal = await runtime.store.run(auth.bearer,request)
+                    if method == 'events/list':
+                        mark('event_catalog_returned', event_count=len(result['events']))
                 except CallbackEndpointError as exc:
                     return failure(identifier,-32015,'Callback verification failed',400,{'reason':exc.reason})
-                principal = await runtime.store.run(auth.bearer,request)
+                except DevError as exc:
+                    code, data = event_error(exc)
+                    return failure(identifier,code,exc.message,exc.status,data)
             elif modern and method in TASK_METHODS:
                 if not task_supported(metadata):
                     return failure(identifier,-32021,'Missing required client capability',400,

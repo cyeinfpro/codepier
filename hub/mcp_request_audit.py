@@ -1,7 +1,8 @@
 """Bounded, redacted /mcp ingress diagnostics; correlation is never authority.
 
-No bodies, headers, URLs, arguments, commands, identities or exception messages
-are accepted by this module. Host-side rejections that never reach ASGI cannot
+No bodies, raw headers, URLs, arguments, commands, identities or exception messages
+are logged. The allowlisted Mcp-Method hint is unverified until body validation.
+Host-side rejections that never reach ASGI cannot
 produce an ID here. Transport interruption never cancels durable execution.
 """
 from __future__ import annotations
@@ -21,11 +22,12 @@ HEADER = b'x-codepier-request-id'
 MAX_EVENTS = 12
 METHODS = frozenset({'initialize', 'ping', 'server/discover', 'tools/list', 'tools/call',
     'resources/list', 'resources/read', 'resources/templates/list', 'prompts/list',
-    'prompts/get', 'tasks/get', 'tasks/update', 'tasks/cancel'})
+    'prompts/get', 'tasks/get', 'tasks/update', 'tasks/cancel',
+    'events/list', 'events/subscribe', 'events/unsubscribe'})
 STAGES = frozenset({'received', 'authenticate', 'authenticated', 'parsed',
     'protocol_validated', 'route_resolved', 'invoke_started', 'tool_returned',
-    'rejected', 'tool_error', 'task_cancel_acknowledged', 'response_started',
-    'transport_disconnected', 'unhandled_exception', 'finished'})
+    'rejected', 'tool_error', 'task_cancel_acknowledged', 'event_catalog_returned', 'response_started',
+    'transport_disconnected', 'unhandled_exception', 'event_callback_failed', 'finished'})
 ERRORS = frozenset({'INVALID_ARGUMENTS', 'INSUFFICIENT_SCOPE', 'INVALID_TOKEN',
     'UNKNOWN_TOOL', 'TOOL_REMOVED', 'UNKNOWN_OPERATION', 'PROJECT_NOT_FOUND',
     'DEVICE_OFFLINE', 'DEVICE_DISABLED', 'DEVICE_BUSY', 'IDEMPOTENCY_CONFLICT',
@@ -33,6 +35,8 @@ ERRORS = frozenset({'INVALID_ARGUMENTS', 'INSUFFICIENT_SCOPE', 'INVALID_TOKEN',
     'TASK_BINDING_INVALID', 'BODY_TOO_LARGE', 'OTHER'})
 OUTCOMES = frozenset({'complete', 'tool_error', 'protocol_error', 'http_error',
     'internal_error', 'transport_interrupted', 'response_incomplete'})
+CALLBACK_REASONS = frozenset({'connection_refused', 'timeout', 'tls_error',
+    'http_4xx', 'http_5xx', 'challenge_failed'})
 ID = re.compile(r'^[a-f0-9]{32}$')
 LABEL = re.compile(r'^[A-Za-z0-9_.:/-]{1,100}$')
 
@@ -69,12 +73,13 @@ class RateGate:
 
 
 class Trace:
-    def __init__(self, sampled, http_method):
+    def __init__(self, sampled, http_method, method_hint=None):
         self.identifier = uuid.uuid4().hex
         self.sampled = sampled
         self.http_method = http_method if isinstance(http_method, str) and http_method in {'POST', 'GET', 'DELETE', 'OPTIONS'} else 'OTHER'
         self.started = time.monotonic()
         self.method = 'unknown'
+        self.method_hint = method_hint if isinstance(method_hint, str) and method_hint in METHODS else None
         self.tool = None
         self.operation_id = None
         self.protocol = 'unknown'
@@ -85,7 +90,8 @@ class Trace:
         self.closed = False
 
     def record(self, stage, *, method=None, tool=None, operation_id=None,
-               protocol=None, error_code=None, outcome=None, http_status=None):
+               protocol=None, error_code=None, outcome=None, http_status=None,
+               callback_reason=None, callback_http_status=None, event_count=None):
         if self.closed or not isinstance(stage, str) or stage not in STAGES: return
         if method is not None: self.method = method if isinstance(method, str) and method in METHODS else 'unknown'
         if tool is not None: self.tool = tool if isinstance(tool, str) and LABEL.fullmatch(tool) else 'unknown'
@@ -101,6 +107,7 @@ class Trace:
         event = {'request_id': self.identifier, 'stage': stage, 'previous_stage': previous,
             'http_method': self.http_method, 'rpc_method': self.method, 'protocol': self.protocol,
             'outcome': self.outcome, 'elapsed_ms': max(0, round((time.monotonic() - self.started) * 1000))}
+        if self.method_hint: event['rpc_method_hint'] = self.method_hint
         if self.tool: event['tool'] = self.tool
         if self.operation_id: event['operation_id'] = self.operation_id
         if self.http_status is not None: event['http_status'] = self.http_status
@@ -108,6 +115,13 @@ class Trace:
             event['rpc_error_code'] = error_code
         elif error_code is not None:
             event['error_code'] = error_code if isinstance(error_code, str) and error_code in ERRORS else 'OTHER'
+        if stage == 'event_callback_failed':
+            if isinstance(callback_reason, str) and callback_reason in CALLBACK_REASONS:
+                event['callback_reason'] = callback_reason
+            if type(callback_http_status) is int and 100 <= callback_http_status <= 599:
+                event['callback_http_status'] = callback_http_status
+        if stage == 'event_catalog_returned' and type(event_count) is int and 0 <= event_count <= 10000:
+            event['event_count'] = event_count
         if stage == 'finished': event['omitted_events'] = self.omitted
         self.events += 1
         write_event(event)
@@ -145,7 +159,9 @@ class MCPRequestAuditMiddleware:
             return await self.app(scope, receive, send)
         sampled, suppressed = self.gate.admit()
         if suppressed: write_event({'stage': 'sampling_summary', 'suppressed_requests': suppressed})
-        trace = Trace(sampled, scope.get('method'))
+        hints = [value for name, value in scope.get('headers', []) if name.lower() == b'mcp-method']
+        hint = hints[0].decode('latin-1') if len(hints) == 1 else None
+        trace = Trace(sampled, scope.get('method'), hint)
         scope.setdefault('state', {})['codepier_request_id'] = trace.identifier
         context = _CURRENT.set(trace)
         disconnected = False

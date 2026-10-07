@@ -2,7 +2,7 @@
 
 让 ChatGPT 通过 MCP 插件使用你的本地项目：读代码、改文件、跑测试，也能接入浏览器、桌面和远程服务器。
 
-[![Version](https://img.shields.io/badge/version-1.18.0-2563eb)](RELEASE.json)
+[![Version](https://img.shields.io/badge/version-1.19.0-2563eb)](RELEASE.json)
 [![Python](https://img.shields.io/badge/Python-3.13-3776ab)](requirements.txt)
 [![License](https://img.shields.io/badge/license-MIT-16a34a)](LICENSE)
 
@@ -24,16 +24,18 @@ CodePier 是自托管的开发工具连接层。**Hub** 提供 MCP 接口和管�
 | 和团队一起使用 | 个人与团队 Space、成员邀请、OIDC 登录、动态角色及私有 Access Profile；按需共享工作流和交付物。 |
 | 接入其他 MCP 服务 | 在同一入口使用已审核的外部工具，按后端账号、角色规则和每个连接的明确同意控制访问。 |
 | 排查一次调用 | 查看输出、返回结果、退出码和执行阶段；断线后继续查询原操作，使用请求关联 ID 辅助排障。 |
-| 只读多智能体协作（默认关闭试点） | 独立讨论室、明确收件人、建议审批、持久任务与固定 HTTP 探针；MCP Events 服务端适配默认关闭，真实 Work/dot 路由仍需单独验收。 |
+| 聊天式协作（默认关闭） | 单/多项目房间、消息回复、明确提醒与目标驱动的本人多助手协作；CPJ 接入、发言、目标批准和通知收件分别管理。 |
 | 维护安装环境 | 面板检查正式 Release 并更新 Hub；Agent 支持安装、修复升级、状态检查和卸载。 |
 
 CodePier 不提供模型服务，也不代替原生 CLI 的账号和订阅。Hub 与 Agent 本身不需要模型 API Key；Pi、Codex、Claude Code 的认证和费用由各自的配置决定。只使用 MCP 文件与命令工具时，不必安装这些 CLI。
 
-### 协作中心只读试点
+### 聊天式协作室
 
-1.18 新增独立「协作中心」：面板指令、MCP 建议与监控异常共享目标、任务和证据。所有新功能默认关闭，不自动创建 ChatGPT 聊天、订阅或启用生产采集，也不授予代码修改和部署权限。当前交付固定 HTTP 探针与服务端 Events 适配，不包含分布式主机监控或自动代码修复；随 1.18 提供源码，真实 Work/dot 路由仍需单独验收。
+1.19 的协作主屏围绕独立房间、助手连接与连续消息组织。房间可关联一个或多个项目，也可中途添加项目；历史与任务保留原项目归属，所有读取继续按当前项目授权过滤。先讨论，明确目标后再由本人多个助手在已批准范围内拆解、交接与复核；只读助手可参与计划和审阅，执行步骤必须符合目标及当前连接能力。账号、团队邀请与连接权限结果也提供连续指引。
 
-使用、功能开关和停止流程见[协作中心说明](docs/COLLABORATION.md)，设计调整及边界见[实施设计 v0.2](docs/designs/COLLABORATION_V0_2.md)。有效订阅不代表模型在线，分析完成不代表业务恢复。
+CPJ 加入只登记通知位置，房间发言与目标执行分别明确启用。普通提醒和目标通知采用独立订阅，目标订阅绑定具体批准版本；旧监控任务保留原只读用途绑定。升级不自动扩大授权、创建原生聊天、订阅或生产采集。通知被平台接收不代表模型在线、已读或一定回复；Shell 仍使用执行账号权限，不是项目级操作系统沙箱。
+
+日常使用见[聊天室指南](docs/COLLABORATION_CHATROOM.md)，监控与原有任务规则见[协作中心说明](docs/COLLABORATION.md)。普通多人房间 ACL、通用文件上传和分布式主机监控不属于本版；真实宿主订阅与目标设备升级仍需按环境验收。
 
 ## 工作方式
 
@@ -81,10 +83,10 @@ ChatGPT / MCP 客户端                 浏览器管理面板
 
 服务器需要 Git、Bash、Docker Engine、Docker Compose v2，以及供安装脚本使用的 **Python 3.9+**。Compose 需要支持 `up --wait`；应用运行环境由 Docker 镜像提供，使用 Python 3.13。
 
-下面以正式版本 `v1.18.0` 为例。请在可信网络中完成 HTTP 初始安装；公网部署应先按[入门教程](docs/START-HERE.md)配置 HTTPS，不要通过裸公网 HTTP 输入密码或配对设备。
+下面以正式版本 `v1.19.0` 为例。请在可信网络中完成 HTTP 初始安装；公网部署应先按[入门教程](docs/START-HERE.md)配置 HTTPS，不要通过裸公网 HTTP 输入密码或配对设备。
 
 ```bash
-git clone --branch v1.18.0 --depth 1 https://github.com/cyeinfpro/codepier.git
+git clone --branch v1.19.0 --depth 1 https://github.com/cyeinfpro/codepier.git
 cd codepier
 bash install.sh
 ```
@@ -100,7 +102,7 @@ curl --fail http://127.0.0.1:8765/healthz
 
 也可以从 [Releases](https://github.com/cyeinfpro/codepier/releases) 下载源码包。手动安装和开发建议使用 `codepier-VERSION-source-full.zip`；`source.zip` 用于兼容面板更新器。环境变量见 [`.env.example`](.env.example)。
 
-使用预构建镜像时，正式版本地址为 `ghcr.io/cyeinfpro/codepier:1.18.0`，生产部署建议固定镜像摘要。k3s 单文件清单见 [`deploy/k3s/deployment.yaml`](deploy/k3s/deployment.yaml)；Compose 可通过 `CODEPIER_HUB_IMAGE` 选择镜像，首次安装与数据初始化仍应遵循[入门教程](docs/START-HERE.md)。OIDC 环境变量播种和首次 SSO 管理员初始化需显式配置，见[多用户/OIDC 指南](docs/MULTIUSER_OIDC.md)。
+使用预构建镜像时，正式版本地址为 `ghcr.io/cyeinfpro/codepier:1.19.0`，生产部署建议固定镜像摘要。k3s 单文件清单见 [`deploy/k3s/deployment.yaml`](deploy/k3s/deployment.yaml)；Compose 可通过 `CODEPIER_HUB_IMAGE` 选择镜像，首次安装与数据初始化仍应遵循[入门教程](docs/START-HERE.md)。OIDC 环境变量播种和首次 SSO 管理员初始化需显式配置，见[多用户/OIDC 指南](docs/MULTIUSER_OIDC.md)。
 
 ### 2. 接入开发电脑
 
@@ -379,11 +381,11 @@ docs/        使用和维护文档
 
 ## 版本与许可
 
-当前仓库的 `RELEASE.json` 标记为 **1.18.0 / released / source-and-image**。1.18 增加默认关闭的只读协作中心、固定 HTTP 探针和服务端 Events 适配，并同步 MCP SDK 安全更新与浏览器构建产物。真实 Work/dot 路由、生产监控和目标设备升级仍需单独验收；既有权限边界与工作台能力保持不变。详见 [CHANGELOG.md](CHANGELOG.md)。
+当前仓库的 `RELEASE.json` 标记为 **1.19.0 / released / source-and-image**。本版增加聊天式协作、独立发言与提醒授权、CPJ 接入恢复，并整合 Events 协议、OIDC 回调与迁移验收修复。正式可下载版本及产物以对应 [Release](https://github.com/cyeinfpro/codepier/releases) 为准；真实宿主接线、生产监控及目标设备升级需单独验收。详见 [CHANGELOG.md](CHANGELOG.md)。
 
 `main` 可能包含正式发布后的改动。安装和更新请核对目标 [Release](https://github.com/cyeinfpro/codepier/releases)；GitHub 提交或 Release 发布不会自动升级现用 Hub 与 Agent。
 
-- **Version:** 1.18.0
+- **Version:** 1.19.0
 - **License:** [MIT](LICENSE)
 
 第三方依赖保留各自许可证。前端依赖声明位于 `web/vendor/`，MCP Apps 的声明见 [THIRD_PARTY_NOTICES.txt](web/mcp-apps/THIRD_PARTY_NOTICES.txt)。

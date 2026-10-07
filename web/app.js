@@ -169,6 +169,7 @@ function clearSpaceSnapshots() {
   });
 }
 function endSession(discard = false) {
+  window.CodePierCollaboration?.clear();
   window.CodePierCallLog?.clear();
   window.CodePierAccess?.detach();
   window.CodePierPanelUpdate?.detach();
@@ -437,20 +438,28 @@ function renderLogin(configured = true) {
 function renderShell() {
   const chosen = nav.find((x) => x[0] === S.page);
   const groups = [
-    ['工作区', ['overview', 'devices', 'projects', 'vps']],
     [
-      '开发',
-      ['native', 'workbench', 'collaboration', 'integrations', 'workflows', 'artifacts', 'audit'],
-    ],
-    [
-      '系统',
+      '工作',
       [
-        'connect',
-        'profiles',
-        'roles',
-        'mcp-gateway',
+        'overview',
+        'projects',
+        'workbench',
+        'native',
+        'collaboration',
+        'workflows',
+        'artifacts',
+        'audit',
+      ],
+    ],
+    ['连接', ['connect', 'profiles', 'mcp-gateway', 'integrations']],
+    [
+      '设置',
+      [
         'identity',
         'members',
+        'roles',
+        'devices',
+        'vps',
         'identity-admin',
         'diagnostics',
         'settings',
@@ -1987,9 +1996,9 @@ function grantListHTML() {
       g.authorization_mode === 'role'
         ? '<span>范围及能力以当前动态角色为准</span>'
         : g.projects.includes('*')
-          ? '<span>全部项目（含未来新增）</span>'
-          : `<details class="grant-projects"><summary>${projects.length} 个项目</summary><div>${projects.map((name) => `<span>${esc(name)}</span>`).join('')}</div></details>`;
-    return `<article class="grant-row ${historical(g) ? 'grant-inactive' : ''}" data-grant-id="${esc(g.id)}"><div class="grant-info"><h3><span>${esc(g.label)}</span><span class="badge purple">${g.client_id ? 'OAuth' : 'PAT'}</span>${status ? `<span class="badge neutral">${status}</span>` : ''}</h3><div class="grant-meta">${g.profile_id ? `<span>Profile：${esc(g.profile_id)}</span>` : ''}<span>${esc(g.scopes.map((scope) => scopeNames[scope] || scope).join(' · '))}</span>${range}</div><p>${g.status === 'pending' ? '等待客户端完成连接' : g.expires ? `${expired ? '已于' : '到期'} ${esc(timeText(g.expires))}${expired ? ' 过期' : ''}` : expired ? '已无有效凭据' : '尚未连接'}</p></div>${!g.revoked ? `<div class="actions">${!expired && !g.profile_id ? `<button class="btn small" data-action="edit-grant-projects" data-id="${esc(g.id)}">调整项目范围</button>` : ''}<button class="btn danger small" data-action="revoke-grant" data-id="${esc(g.id)}">撤销</button></div>` : ''}</article>`;
+          ? '<span>原同意项目：全部项目（含未来新增）</span>'
+          : `<details class="grant-projects"><summary>原同意 ${projects.length} 个项目</summary><div>${projects.map((name) => `<span>${esc(name)}</span>`).join('')}</div></details>`;
+    return `<article class="grant-row ${historical(g) ? 'grant-inactive' : ''}" data-grant-id="${esc(g.id)}"><div class="grant-info"><h3><span>${esc(g.label)}</span><span class="badge purple">${g.client_id ? 'OAuth' : 'PAT'}</span>${status ? `<span class="badge neutral">${status}</span>` : ''}</h3><div class="grant-meta"><span>${g.authorization_mode === 'role' ? '动态角色（role）' : g.profile_id ? '固定 Profile（fixedProfile）' : '固定授权（fixed）'}</span>${g.profile_id ? `<span>Profile：${esc(g.profile_id)}</span>` : ''}<span>原同意能力：${esc(g.scopes.map((scope) => scopeNames[scope] || scope).join(' · '))}</span>${range}</div><p>${g.status === 'pending' ? '等待客户端完成连接' : g.expires ? `${expired ? '已于' : '到期'} ${esc(timeText(g.expires))}${expired ? ' 过期' : ''}` : expired ? '已无有效凭据' : '尚未连接'}</p></div><div class="actions"><button class="btn small" data-action="grant-access-preview" data-id="${esc(g.id)}">查看实际访问结果</button>${!g.revoked ? `${!expired && !g.profile_id ? `<button class="btn small" data-action="edit-grant-projects" data-id="${esc(g.id)}">调整项目范围</button>` : ''}<button class="btn danger small" data-action="revoke-grant" data-id="${esc(g.id)}">撤销</button>` : ''}</div></article>`;
   };
   const list = (items, group) => {
     const size = 5;
@@ -2027,9 +2036,10 @@ function connectHTML() {
     heading(
       'MCP 接入',
       'CONNECTION / ACCESS',
-      '',
+      '助手访问 CodePier · 客户端、Profile 与授权政策',
       `<button class="btn primary" data-action="new-grant">${icon('key')}创建凭据</button><button class="btn ghost" data-nav="profiles">管理访问 Profiles</button>`,
     ) +
+    `<section class="panel"><div class="panel-body"><h2>两种连接方向</h2><p>此页管理「助手访问 CodePier」：谁通过哪个客户端，以何种身份访问当前空间。</p><p>「CodePier 使用外部工具」单独管理网关账号与已审阅工具，不会由这里的 Profile 自动取得外部账号。</p><button class="btn ghost" data-nav="mcp-gateway">CodePier 使用外部工具</button></div></section>` +
     `<div class="connect-grid"><section class="panel"><div class="panel-head"><h2>${icon('plug')}连接地址</h2><span class="badge neutral">MCP</span></div><div class="panel-body"><div class="eyebrow">STREAMABLE HTTP</div><div class="endpoint"><code>${esc(s.mcp_url)}</code><button class="icon-btn" data-action="copy-endpoint" aria-label="复制 MCP 地址">${icon('copy')}</button></div><div class="mcp-coding-entry"><div><strong>核心开发工具</strong><small>统一九工具入口；实际权限由当前角色决定。</small></div><button class="btn ghost small" data-action="copy-coding-endpoint">复制核心地址</button></div><div class="mcp-coding-entry"><div><strong>动态角色连接</strong><small>明确委派已分配角色的当前与后续能力。</small></div><button class="btn ghost small" data-action="copy-role-endpoint">复制角色地址</button></div><div class="connection-route"><span>客户端</span>${icon('arrow')}<span>CodePier</span>${icon('arrow')}<span>本机项目</span></div>${notice('面板与 Agent 支持 HTTP。ChatGPT 直连需公开 HTTPS，或使用已获授权的 Secure MCP Tunnel。')}${uiHelp('接入步骤', guide)}</div></section>
     <section class="panel" id="grant-panel">${grantListHTML()}</section></div>` +
     uiHelp(
@@ -2062,9 +2072,15 @@ function checked(name) {
   return $$(`.modal input[name="${name}"]:checked`).map((x) => x.value);
 }
 async function newGrant() {
+  const login = S.session,
+    space = S.space_id,
+    page = S.page,
+    intent = S.modalIntent || 0;
+  const current = () => login === S.session && space === S.space_id && page === S.page;
   await loadBasics();
   const profiles = (await api('/api/access-profiles')).profiles;
-  modal(
+  if (!current() || intent !== (S.modalIntent || 0)) return;
+  const dialog = modal(
     '创建限定范围访问凭据',
     `<form id="grant-form"><div class="form-row"><div class="field"><label>凭据名称</label><input name="label" required maxlength="80" placeholder="例如 ChatGPT Tunnel"></div><div class="field"><label>有效天数</label><input name="days" type="number" min="1" max="365" value="30" required></div></div>${CodePierProfiles.selectorHTML(profiles)}<div data-profile-permissions></div>${notice('凭据只显示一次，不会写入浏览器持久存储。适用于 stdio bridge、MCP Inspector 或支持 Bearer 的客户端；ChatGPT 直连使用 OAuth。')}</form>`,
     buttons('create-grant', '创建凭据'),
@@ -2086,6 +2102,7 @@ async function newGrant() {
         ...CodePierAccess.selection(),
         ...profileBinding(),
       });
+      if (!current() || !dialog.isConnected) return;
       modal(
         '保存你的访问凭据',
         `${notice('复制后存入云端受权限保护的 token 文件。任何持有此凭据的人，都能执行已授权操作。')}<div class="spacer"></div><div class="code-box secret">${esc(r.token)}</div><p class="form-note">到期：${esc(timeText(r.expires))}。需要时可随时撤销。</p>`,
@@ -2096,10 +2113,16 @@ async function newGrant() {
     });
 }
 async function consentModal(id) {
+  const login = S.session,
+    space = S.space_id,
+    page = S.page,
+    intent = S.modalIntent || 0;
+  const current = () => login === S.session && space === S.space_id && page === S.page;
   try {
     const r = await api('/api/oauth/requests/' + encodeURIComponent(id));
     const profiles = (await api('/api/access-profiles')).profiles;
-    modal(
+    if (!current() || intent !== (S.modalIntent || 0)) return;
+    const dialog = modal(
       '确认 MCP 应用授权',
       `<p class="form-note"><strong>${esc(r.client_name)}</strong> 正在申请访问你的本机项目。</p><dl class="kv"><dt>客户端</dt><dd><code>${esc(r.client_id)}</code></dd><dt>回调地址</dt><dd>${esc(r.redirect_uri)}</dd><dt>资源</dt><dd>${esc(r.resource)}</dd></dl>${CodePierProfiles.selectorHTML(profiles)}<div data-profile-permissions></div>${notice('固定授权按本次同意限制；动态角色授权会跟随之后的角色能力和项目变更。请核对身份、角色、应用及回调地址。')}`,
       `<button class="btn ghost" id="deny-consent">拒绝</button><button class="btn primary" id="allow-consent">允许所选范围</button>`,
@@ -2120,7 +2143,7 @@ async function consentModal(id) {
           ...CodePierAccess.selection(),
           ...(allow ? profileBinding() : {}),
         });
-        location.assign(out.redirect);
+        if (current() && dialog.isConnected) location.assign(out.redirect);
       });
     $('#deny-consent').onclick = () => decide(false);
     $('#allow-consent').onclick = () => decide(true);
@@ -2128,6 +2151,9 @@ async function consentModal(id) {
     toast(e.message, true);
     history.replaceState(null, '', location.pathname + location.hash);
   }
+}
+function accountPasswordHTML() {
+  return `<section class="panel"><div class="panel-head"><h2>${icon('lock')}我的密码</h2></div><div class="panel-body"><form id="password-form"><div class="field"><label>当前密码</label><input name="current_password" type="password" required autocomplete="current-password"></div><div class="field"><label>新密码</label><input name="new_password" type="password" minlength="12" maxlength="256" required autocomplete="new-password" placeholder="至少 12 位"></div><div class="field"><label>确认新密码</label><input name="confirm_password" type="password" minlength="12" required autocomplete="new-password" aria-describedby="password-match-error"><p id="password-match-error" class="field-error" role="status" hidden></p></div><p class="form-note">仅修改你自己的密码。修改后退出全部浏览器登录，并撤销自己的 MCP 授权；已运行的操作不会自动停止。</p><button class="btn" type="submit">更新密码并退出</button></form></div></section>`;
 }
 function settingsHTML() {
   const s = S.settings;
@@ -2142,7 +2168,7 @@ function settingsHTML() {
     );
   return (
     heading('系统设置', 'SYSTEM / SETTINGS') +
-    `<div class="settings-grid"><section class="panel"><div class="panel-head"><h2>${icon('plug')}对外地址</h2></div><div class="panel-body"><form id="settings-form"><div class="field"><label>基础地址</label><input name="public_url" value="${esc(s.public_url)}" required><small>HTTP / HTTPS 均可，不带 /mcp。</small></div>${notice('只修改 MCP / OAuth 标识，不改变监听端口或 Agent 地址。变更后请重新连接并授权。')}<div class="spacer"></div><button class="btn primary" type="submit">保存地址</button></form>${uiHelp('服务信息', `<dl class="kv"><dt>版本</dt><dd>${esc(s.version)}</dd><dt>监听端口</dt><dd>${s.listen_port}（容器内）</dd><dt>MCP 协议</dt><dd>${esc(s.protocol_versions.join(' / '))}</dd><dt>数据目录</dt><dd><code>${esc(s.data_dir)}</code></dd></dl>`)}</div></section><section class="panel"><div class="panel-head"><h2>${icon('lock')}管理员密码</h2></div><div class="panel-body"><form id="password-form"><div class="field"><label>当前密码</label><input name="current_password" type="password" required autocomplete="current-password"></div><div class="field"><label>新密码</label><input name="new_password" type="password" minlength="12" maxlength="256" required autocomplete="new-password" placeholder="至少 12 位"></div><div class="field"><label>确认新密码</label><input name="confirm_password" type="password" minlength="12" required autocomplete="new-password" aria-describedby="password-match-error"><p id="password-match-error" class="field-error" role="status" hidden></p></div><p class="form-note">修改后退出全部浏览器登录，并撤销 MCP 授权；设备密钥不变。</p><button class="btn" type="submit">更新密码并退出</button></form></div></section></div>` +
+    `<div class="settings-grid"><section class="panel"><div class="panel-head"><h2>${icon('plug')}对外地址</h2></div><div class="panel-body"><form id="settings-form"><div class="field"><label>基础地址</label><input name="public_url" value="${esc(s.public_url)}" required><small>HTTP / HTTPS 均可，不带 /mcp。</small></div>${notice('只修改 MCP / OAuth 标识，不改变监听端口或 Agent 地址。变更后请重新连接并授权。')}<div class="spacer"></div><button class="btn primary" type="submit">保存地址</button></form>${uiHelp('服务信息', `<dl class="kv"><dt>版本</dt><dd>${esc(s.version)}</dd><dt>监听端口</dt><dd>${s.listen_port}（容器内）</dd><dt>MCP 协议</dt><dd>${esc(s.protocol_versions.join(' / '))}</dd><dt>数据目录</dt><dd><code>${esc(s.data_dir)}</code></dd></dl>`)}</div></section>${accountPasswordHTML()}</div>` +
     CodePierAccess.html() +
     CodePierPanelUpdate.html() +
     agentExecutionHelp() +
@@ -2156,15 +2182,7 @@ function bindSettings() {
   if (!S.identity?.instance_admin) return;
   CodePierAccess.bind();
   CodePierPanelUpdate.bind();
-  const passwordForm = $('#password-form');
-  passwordForm.addEventListener('input', () => {
-    const error = $('#password-match-error', passwordForm);
-    if (!error.hidden) {
-      error.hidden = true;
-      error.textContent = '';
-      passwordForm.elements.confirm_password.removeAttribute('aria-invalid');
-    }
-  });
+  bindPasswordForm();
   $('#settings-form').onsubmit = (e) => {
     e.preventDefault();
     busy($('button', e.target), async () => {
@@ -2176,6 +2194,18 @@ function bindSettings() {
       await renderPage(false);
     });
   };
+}
+function bindPasswordForm() {
+  const passwordForm = $('#password-form');
+  if (!passwordForm) return;
+  passwordForm.addEventListener('input', () => {
+    const error = $('#password-match-error', passwordForm);
+    if (!error.hidden) {
+      error.hidden = true;
+      error.textContent = '';
+      passwordForm.elements.confirm_password.removeAttribute('aria-invalid');
+    }
+  });
   $('#password-form').onsubmit = (e) => {
     e.preventDefault();
     const f = e.target;
@@ -2202,6 +2232,9 @@ async function busy(button, fn) {
   return CP.ui.busy(button, fn, toast);
 }
 const panelActions = CP.actions.create();
+panelActions.register(['grant-access-preview'], async (button) => {
+  await CodePierProfiles.preview(button.dataset.id);
+});
 panelActions.register(['close-modal'], async (b, e) => {
   panelDialogs.requestClose();
   return;

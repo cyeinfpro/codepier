@@ -66,7 +66,11 @@ def validate_modern(body,headers):
     if field:
         value=params.get(field)
         if not isinstance(value,str):raise ProtocolError(-32602,'Required request name/uri must be a string')
-        if decode_header(headers.get('mcp-name'))!=value:raise ProtocolError(-32020,'Mcp-Name must match the request body')
+        # Events do not require Mcp-Name in the HTTP transport specification.
+        # Accept its omission, but reject a supplied mirror that disagrees.
+        optional=body['method'] in {'events/subscribe','events/unsubscribe'}
+        if (not optional or headers.get('mcp-name') is not None) and decode_header(headers.get('mcp-name'))!=value:
+            raise ProtocolError(-32020,'Mcp-Name must match the request body')
     # No MRTR capability is advertised. Never accept a purported approval continuation.
     if 'requestState' in params or 'inputResponses' in params and body['method'] != 'tasks/update':
         raise ProtocolError(-32602,'This server does not issue MRTR input requests')

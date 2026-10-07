@@ -166,7 +166,7 @@ def test_grants_compact_history_pagination_and_project_disclosure(access_page, s
     expect(page.locator('#grant-history-list')).not_to_be_visible()
     expect(panel.locator('[data-grant-group="history"] .grant-row')).to_have_count(0)
     projects = current.locator('.grant-projects').first
-    expect(projects.locator('summary')).to_have_text('13 个项目')
+    expect(projects.locator('summary')).to_have_text('原同意 13 个项目')
     expect(projects.locator('div')).not_to_be_visible()
     projects.locator('summary').click()
     expect(projects.locator('div')).to_contain_text('<img src=x onerror=alert(1)>')

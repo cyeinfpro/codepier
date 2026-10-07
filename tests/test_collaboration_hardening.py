@@ -43,7 +43,9 @@ async def test_old_retention_cursor_reports_truncation_and_unsubscribe_is_owned(
     without_secret = {key: value for key, value in args.items() if key != 'ttlMs'}
     without_secret['delivery'] = {key: value for key, value in args['delivery'].items() if key != 'secret'}
     # Another valid project reader cannot unsubscribe the first grant's identity.
-    assert events.unsubscribe(without_secret, dot) == {}
+    with pytest.raises(DevError) as missing:
+        events.unsubscribe(without_secret, dot)
+    assert missing.value.code == 'SUBSCRIPTION_NOT_FOUND'
     assert s.store.one('SELECT state FROM mcp_event_subscriptions WHERE id=?', (initial['id'],))['state'] == 'active'
     events.unsubscribe(without_secret, worker)
     assert s.store.one('SELECT state FROM mcp_event_subscriptions WHERE id=?', (initial['id'],))['state'] == 'unsubscribed'

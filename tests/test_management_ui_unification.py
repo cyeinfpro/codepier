@@ -44,13 +44,23 @@ def test_all_nineteen_routes_reflow_in_each_theme(stack, chat_browser_pool, tmp_
             page.screenshot(path=str(tmp_path/f'{route}-{width}-{scheme}.png'),full_page=True)
         _navigate(page,'identity')
         panels=page.locator('.management-grid > .panel')
-        assert panels.count()==3
+        expect(panels.locator('.panel-head h2')).to_have_text([
+            '空间', '登录身份', '我的密码', '登录会话',
+        ])
+        expect(page.locator('#password-form')).to_be_visible()
         rects=panels.evaluate_all('(nodes)=>nodes.map(el=>{const r=el.getBoundingClientRect();return {x:r.x,y:r.y,w:r.width,h:r.height}})')
         if width>1000:
             assert rects[0]['x']<rects[2]['x']
-            assert rects[0]['w']<1000
+            assert all(rect['w']<1000 for rect in rects)
+            for index, first in enumerate(rects):
+                for second in rects[index+1:]:
+                    assert (first['x']+first['w']<=second['x']
+                            or second['x']+second['w']<=first['x']
+                            or first['y']+first['h']<=second['y']
+                            or second['y']+second['h']<=first['y'])
         else:
-            assert rects[1]['y']>=rects[0]['y']+rects[0]['h']+15
+            assert all(current['y']>=previous['y']+previous['h']+15
+                       for previous, current in zip(rects, rects[1:]))
         assert not errors,errors
     finally:
         context.close()

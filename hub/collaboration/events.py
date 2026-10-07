@@ -14,17 +14,14 @@ import time
 
 import httpx
 from hub.principal import refresh_principal
+from hub.mcp_request_audit import mark
+from hub.collaboration.event_errors import CallbackEndpointError, callback_reason
 from hub.collaboration import network
-from hub.collaboration.common import (TASK_EVENT, RESULT_EVENT, INCIDENT_EVENT, STATUS_EVENT,
+from hub.collaboration.common import (TASK_EVENT, RESULT_EVENT, INCIDENT_EVENT, STATUS_EVENT, MESSAGE_EVENT, WORK_EVENT,
     SEVERITIES, canonical, digest, read_cursor, sign_cursor, timestamp, validate)
 from hub.collaboration.event_contracts import FILTERS, PAYLOADS, Subscribe, Unsubscribe, definitions
 from shared.util import DevError
 
-
-class CallbackEndpointError(Exception):
-    def __init__(self, reason):
-        self.reason = reason
-        super().__init__('Callback verification failed')
 
 
 def signing_key(value):
@@ -64,23 +61,40 @@ class EventService:
         if set(raw) - {'cursor'} or raw.get('cursor') not in (None, ''):
             raise DevError('INVALID_CURSOR', '事件目录只有一页', 400)
         principal = refresh_principal(self.store, principal)
-        if not principal.grant_id or not principal.scopes <= {'read', 'devices.read'} or 'read' not in principal.scopes:
+        if not principal.grant_id or 'read' not in principal.scopes:
             return {'events': []}
         return {'events': definitions() if self.c.runtime.list_projects(principal) else []}
 
     def prepare(self, raw, principal, *, stopping=False):
         self.guard()
         args = validate(Unsubscribe if stopping else Subscribe, raw)
+        if args['delivery']['mode'] != 'webhook':
+            raise DevError('UNSUPPORTED_DELIVERY_MODE', '此事件仅支持 webhook 投递', 400,
+                           feature='deliveryMode', value=args['delivery']['mode'])
         if args['name'] not in FILTERS:
             raise DevError('EVENT_NOT_FOUND', '没有可订阅的此事件', 404)
         filters = validate(FILTERS[args['name']], args['arguments'])
-        principal, room = self.c.scope(principal, {'project': filters['project_id'], 'environment_id': filters['environment_id']})
-        self.c.readonly_worker(principal)
+        network.callback_url(args['delivery']['url'])
+        if not stopping:
+            signing_key(args['delivery']['secret'])
+        principal, room = self.c.scope(principal, {'project': filters['project_id'], 'environment_id': filters['environment_id']},
+                                       create=not stopping, notification=True)
+        self.c.notification_reader(principal)
+        if args['name'] == MESSAGE_EVENT:
+            self.c.conversations.resolve(principal, room, filters)
+        if args['name'] == WORK_EVENT and not stopping:
+            self.c.coordination.authorize_event(principal, filters)
+        if not stopping:
+            self.c.joining.subscription_guard(room, principal, filters, args['delivery'])
         if room['project_id'] != filters['project_id']:
             raise DevError('PROJECT_ID_REQUIRED', '事件过滤器需要不可变项目 ID，而非别名', 400)
         url = args['delivery']['url']
         network.callback_url(url)
         identity = digest([self.c.principal_snapshot(principal), url, args['name'], args['arguments']])
+        if not stopping and args['cursor'] is not None:
+            position = read_cursor(self.c.secret, identity, args['cursor'])
+            if isinstance(position, bool) or not isinstance(position, int) or position < 0:
+                raise DevError('INVALID_CURSOR', '事件游标格式不正确', 400)
         existing = self.store.one('SELECT * FROM mcp_event_subscriptions WHERE id=?', (identity,))
         if stopping:
             return args, principal, room, identity, existing, False
@@ -116,27 +130,43 @@ class EventService:
         if not cached:
             challenge = secrets.token_urlsafe(32)
             body = canonical({'type': 'verification', 'challenge': challenge}).encode()
-            headers = signed_headers('verification_' + secrets.token_hex(16), identifier, body,
+            headers = signed_headers('msg_verification_' + secrets.token_hex(16), identifier, body,
                                      [args['delivery']['secret']], verified_at)
+            reply_status = None
             try:
-                async with self._network_limit:
-                    reply = await self.sender(args['delivery']['url'], body, headers)
-                answer = json.loads(reply.body)
-                if (not 200 <= reply.status < 300 or not isinstance(answer, dict)
-                        or not isinstance(answer.get('challenge'), str)
-                        or not hmac.compare_digest(answer['challenge'].encode(), challenge.encode())
-                        or self.c.clock() - verified_at > 30):
-                    raise CallbackEndpointError('challenge_failed')
-            except (TimeoutError, httpx.TimeoutException):
-                raise CallbackEndpointError('timeout') from None
-            except (ValueError, UnicodeError, httpx.HTTPError, OSError, DevError):
-                raise CallbackEndpointError('challenge_failed') from None
+                try:
+                    async with self._network_limit:
+                        reply = await self.sender(args['delivery']['url'], body, headers)
+                    reply_status = reply.status
+                    if 400 <= reply.status < 500:
+                        raise CallbackEndpointError('http_4xx', reply.status)
+                    if 500 <= reply.status < 600:
+                        raise CallbackEndpointError('http_5xx', reply.status)
+                    answer = json.loads(reply.body)
+                    if (not 200 <= reply.status < 300 or not isinstance(answer, dict)
+                            or not isinstance(answer.get('challenge'), str)
+                            or not hmac.compare_digest(answer['challenge'].encode(), challenge.encode())
+                            or self.c.clock() - verified_at > 30):
+                        raise CallbackEndpointError('challenge_failed', reply.status)
+                except (TimeoutError, ValueError, UnicodeError, httpx.HTTPError, OSError, DevError) as exc:
+                    raise CallbackEndpointError(callback_reason(exc), reply_status) from None
+            except CallbackEndpointError as exc:
+                # Fixed categories only: never log callback URLs, bodies or secrets.
+                mark('event_callback_failed', callback_reason=exc.reason,
+                     callback_http_status=exc.http_status)
+                raise
         def commit():
             with self.store.transaction():
                 # Current authorization and owner pause win over an in-flight challenge.
                 current_principal, current_room = self.c.scope(principal, {'project': room['project_id'], 'environment_id': room['environment_id']})
-                self.c.readonly_worker(current_principal)
+                self.c.notification_reader(current_principal)
                 self.c.live_room(current_room)
+                current_filters = validate(FILTERS[args['name']], args['arguments'])
+                self.c.joining.subscription_guard(current_room, current_principal, current_filters, args['delivery'])
+                if args['name'] == MESSAGE_EVENT:
+                    self.c.conversations.resolve(current_principal, current_room, current_filters)
+                if args['name'] == WORK_EVENT:
+                    self.c.coordination.authorize_event(current_principal, current_filters)
                 if self.c.principal_snapshot(current_principal) != self.c.principal_snapshot(authenticated):
                     raise DevError('SUBSCRIPTION_IDENTITY_CHANGED', '回调验证期间身份发生变化，请重新确认连接', 409)
                 old = self.store.one('SELECT * FROM mcp_event_subscriptions WHERE id=?', (identifier,))
@@ -157,15 +187,21 @@ class EventService:
                 active = old and old['state'] == 'active' and old['expires_at'] > now
                 position, truncated = (old['ack_seq'] if old else 0), False
                 if not active:
-                    if args['cursor']:
+                    if args['cursor'] is None:
+                        # Omitted/null means now, including expired/unsubscribed
+                        # identities. Never replay history merely on enrollment.
+                        position = self.store.one('SELECT MAX(seq) AS n FROM mcp_event_outbox WHERE room_id=?', (room['id'],))['n'] or 0
+                    else:
                         position = read_cursor(self.c.secret, identifier, args['cursor'])
-                        if isinstance(position, bool) or not isinstance(position, int) or position < 0:
-                            raise DevError('INVALID_CURSOR', '事件游标格式不正确', 400)
-                    # Retain only seven days for replay. Old payloads remain audit
-                    # tombstones until bounded cleanup removes eligible deliveries.
-                    floor = self.store.one('SELECT MAX(seq) AS n FROM mcp_event_outbox WHERE room_id=? AND created<?', (room['id'], now - 7 * 86400))['n'] or 0
-                    truncated = position < floor
-                    position = max(position, floor)
+                        # Explicit replay alone observes maxAgeMs. Keep the seven
+                        # day server ceiling, announcing every skipped position.
+                        age_ms = 7 * 86400000
+                        if args['maxAgeMs'] is not None:
+                            age_ms = min(age_ms, args['maxAgeMs'])
+                        floor = self.store.one('SELECT MAX(seq) AS n FROM mcp_event_outbox WHERE room_id=? AND created<?',
+                                               (room['id'], now - age_ms / 1000))['n'] or 0
+                        truncated = position < floor
+                        position = max(position, floor)
                 if old:
                     self.store.execute('''UPDATE mcp_event_subscriptions SET principal=?,secret=?,key_digest=?,
                         expires_at=?,verified_until=?,state='active',version=version+1,updated=? WHERE id=?''',
@@ -188,6 +224,8 @@ class EventService:
                          min(lifetime, now + 1800), digest(stored['current']), position, position, now, now))
                 self.c.audit(room, current_principal.actor, 'subscription.saved', identifier, {'name': args['name']})
                 saved = self.store.one('SELECT * FROM mcp_event_subscriptions WHERE id=?', (identifier,))
+                self.c.joining.attach_subscription(current_room, current_principal,
+                    validate(FILTERS[args['name']], args['arguments']), saved, reset_verification=not active)
                 return {'id': identifier, 'refreshBefore': timestamp(lifetime),
                         'cursor': sign_cursor(self.c.secret, identifier, saved['ack_seq']), 'truncated': truncated}
         return await self.store.run(commit)
@@ -195,6 +233,8 @@ class EventService:
     def unsubscribe(self, raw, principal):
         with self.store.transaction():
             args, principal, room, identifier, existing, _ = self.prepare(raw, principal, stopping=True)
+            if not existing:
+                raise DevError('SUBSCRIPTION_NOT_FOUND', '没有匹配当前身份和过滤器的订阅', 404)
             if existing:
                 self.store.execute("UPDATE mcp_event_subscriptions SET state='unsubscribed',version=version+1,updated=? WHERE id=?", (self.c.clock(), identifier))
                 self.store.execute("UPDATE mcp_event_deliveries SET state='abandoned',lease_until=NULL,fence=fence+1,reason_code='unsubscribed' WHERE subscription_id=? AND state IN ('pending','retry_wait','leased')", (identifier,))
@@ -207,16 +247,17 @@ class EventService:
         handler = self.catalog if method == 'events/list' else self.unsubscribe
         return await self.store.run(handler, raw, principal)
 
-    def authorize(self, subscription, room):
-        principal = self.c.grant_principal(room, subscription['grant_id'], snapshot=json.loads(subscription['principal']))
+    def authorize(self, subscription, room, payload=None):
+        principal = self.c.grant_reader(room, subscription['grant_id'], snapshot=json.loads(subscription['principal']))
         self.c.live_room(room)
         filters = validate(FILTERS[subscription['name']], json.loads(subscription['arguments']))
-        if subscription['name'] == TASK_EVENT:
-            agents = self.c.bound_worker(principal, room)
-            if not any(agent['queue'] == filters['queue'] for agent in agents):
-                raise DevError('WORKER_BINDING_REQUIRED', '没有绑定到此队列的消费者', 403)
-        else:
-            self.c.bound_worker(principal, room, kind='dot')
+        self.c.joining.subscription_guard(room, principal, filters)
+        if subscription['name'] == MESSAGE_EVENT:
+            self.c.conversations.resolve(principal, room, filters)
+        if subscription['name'] == WORK_EVENT:
+            self.c.coordination.authorize_event(principal, filters, payload)
+        # Subscription consent binds notification filters, not a worker lease.
+        # Matching still enforces the event's target grant and queue below.
         return filters
 
     @staticmethod
@@ -226,6 +267,16 @@ class EventService:
         if event['target_grant_id'] and event['target_grant_id'] != subscription['grant_id']:
             return False
         payload = json.loads(event['data'])
+        if event['name'] == MESSAGE_EVENT and (not event['target_grant_id'] or not filters.get('slot_id')
+                or payload.get('recipient_slot_id') != filters['slot_id']
+                or not payload.get('conversation_id') or not filters.get('conversation_id')
+                or payload['conversation_id'] != filters['conversation_id']):
+            return False
+        if event['name'] == WORK_EVENT and (not event['target_grant_id']
+                or payload.get('recipient_grant_id') != subscription['grant_id']
+                or any(not filters.get(key) or payload.get(key) != filters[key]
+                       for key in ('project_id', 'environment_id', 'conversation_id', 'goal_id', 'approval_id'))):
+            return False
         if payload.get('test'):
             return payload.get('test_subscription_id') == subscription['id']
         if event['name'] == TASK_EVENT and filters['queue'] != event['queue']:
@@ -256,7 +307,7 @@ class EventService:
                 try:
                     filters = self.authorize(sub, room)
                 except DevError as exc:
-                    if exc.code in {'ROOM_PAUSED', 'WORKER_BINDING_REQUIRED'}:
+                    if exc.code in {'ROOM_PAUSED', 'WORKER_BINDING_REQUIRED', 'GOAL_INACTIVE'}:
                         continue
                     self.store.execute("UPDATE mcp_event_subscriptions SET state='revoked',version=version+1,updated=? WHERE id=?", (now, sub['id']))
                     continue
@@ -276,6 +327,13 @@ class EventService:
                     continue
                 event = self.store.one('SELECT * FROM mcp_event_outbox WHERE id=?', (delivery['event_id'],))
                 payload = validate(PAYLOADS[event['name']], json.loads(event['data']))
+                if event['name'] == WORK_EVENT:
+                    try:
+                        self.authorize(sub, room, payload)
+                    except DevError:
+                        self.store.execute("UPDATE mcp_event_deliveries SET state='abandoned',reason_code='obsolete_work' WHERE id=?", (delivery['id'],))
+                        self.advance(sub['id'])
+                        continue
                 if event['name'] == TASK_EVENT and not payload.get('test'):
                     if not self.c.config.analysis_dispatch_enabled:
                         continue
@@ -313,8 +371,8 @@ class EventService:
                     or delivery['state'] != 'leased' or (delivery['lease_until'] or 0) <= self.c.clock()):
                 return None
             room = self.store.one('SELECT * FROM collaboration_rooms WHERE id=?', (sub['room_id'],))
-            self.authorize(sub, room)
             event = self.store.one('SELECT * FROM mcp_event_outbox WHERE id=?', (delivery['event_id'],))
+            self.authorize(sub, room, json.loads(event['data']) if event['name'] == WORK_EVENT else None)
             if event['name'] == TASK_EVENT and not json.loads(event['data']).get('test'):
                 job = self.store.one('SELECT * FROM collaboration_jobs WHERE id=? AND room_id=?', (event['object_id'], room['id']))
                 if (not self.c.config.analysis_dispatch_enabled or not job or job['state'] != 'queued'
@@ -386,8 +444,16 @@ class EventService:
         base = {'test': True, 'test_subscription_id': subscription['id']}
         if subscription['name'] == TASK_EVENT:
             agent = self.store.one('SELECT id,kind FROM collaboration_agents WHERE room_id=? AND grant_id=? AND queue=? AND enabled=1 AND expires_at>?', (room['id'], subscription['grant_id'], filters['queue'], self.c.clock()))
-            base.update(job_id=identifier, job_version=1, queue=filters['queue'], assignee_agent_id=agent['id'],
-                        kind='analyze_incident' if agent['kind'] == 'work_cloud' else 'summarize_result', reason_code='subscription_test')
+            base.update(job_id=identifier, job_version=1, queue=filters['queue'], assignee_agent_id=agent['id'] if agent else identifier,
+                        kind='analyze_incident' if filters['queue'] == 'work-analysis' else 'summarize_result', reason_code='subscription_test')
+        elif subscription['name'] == WORK_EVENT:
+            base.update(conversation_id=filters['conversation_id'], goal_id=filters['goal_id'],
+                        approval_id=filters['approval_id'], work_item_id=identifier, work_item_version=1,
+                        target_project_id=room['project_id'], recipient_grant_id=subscription['grant_id'],
+                        reason='work_available', message_id=None)
+        elif subscription['name'] == MESSAGE_EVENT:
+            base.update(conversation_id=filters.get('conversation_id') or room['id'], room_id=room['id'], message_id=identifier, message_version=1,
+                        recipient_slot_id=filters['slot_id'], thread_root_id=identifier)
         elif subscription['name'] == RESULT_EVENT:
             base.update(result_id=identifier, job_id=identifier, job_version=1, incident_id=None, incident_version=None,
                         outcome='inconclusive', requires_decision=False, evidence_refs=[])

@@ -28,7 +28,7 @@ def seed_env(monkeypatch,fake,**overrides):
 def fresh_app(directory,fake):
     app=create_app(str(directory))
     app.state.oidc.transport=httpx.MockTransport(fake.handle)
-    fake.callback='http://testserver/auth/oidc/'+OIDC_SEED_PROVIDER_ID+'/callback'
+    fake.callback='http://testserver/auth/oidc/callback'
     return app
 
 
@@ -40,7 +40,7 @@ def sso_login(client,fake,subject):
     params=parse_qs(urlsplit(response.headers['location']).query)
     fake.nonce=params['nonce'][0];fake.expected_verifier=params['code_challenge'][0]
     cookie=response.headers['set-cookie'].split(';',1)[0]
-    result=client.get('/auth/oidc/'+OIDC_SEED_PROVIDER_ID+'/callback',params={'state':params['state'][0],'code':'authorization-code'},
+    result=client.get('/auth/oidc/callback',params={'state':params['state'][0],'code':'authorization-code'},
                       headers={'Cookie':cookie},follow_redirects=False)
     client.cookies.clear()
     return result
@@ -157,6 +157,20 @@ def test_invalid_seed_settings_fail_before_startup_naming_only_the_setting(monke
     assert not value or value not in text.replace(setting,'')
 
 
+def test_oidc_callback_uses_hub_public_url_not_mcp_public_url(tmp_path,monkeypatch):
+    fake=Provider();seed_env(monkeypatch,fake)
+    monkeypatch.setenv('MCP_PUBLIC_URL','https://mcp.example.test')
+    config=HubConfig.from_env()
+    assert config.public_url=='https://mcp.example.test'
+    assert config.oidc_public_url=='http://testserver'
+    app=fresh_app(tmp_path/'hub',fake)
+    with TestClient(app,raise_server_exceptions=True) as client:
+        response=client.get('/auth/oidc/'+OIDC_SEED_PROVIDER_ID+'/start',params={'return_to':'/'},follow_redirects=False)
+        assert response.status_code==303,response.text
+        params=parse_qs(urlsplit(response.headers['location']).query)
+        assert params['redirect_uri']==['http://testserver/auth/oidc/callback']
+
+
 def test_no_seed_means_no_provider_and_no_bootstrap(tmp_path,monkeypatch):
     fake=Provider();seed_env(monkeypatch,fake,CODEPIER_OIDC_ISSUER=None)
     assert HubConfig.from_env().oidc_seed is None
@@ -197,3 +211,18 @@ def test_recovery_init_cannot_silently_reset_an_existing_sso_user(tmp_path, monk
         with pytest.raises(SystemExit):
             cli.main()
         assert app.state.store.one('SELECT local_login FROM iam_users WHERE user_id=?', (member['id'],))['local_login'] == 0
+
+
+@pytest.mark.parametrize('bad',['https://user:secret@example.test','https://hub.example.test/?query=1','https://hub.example.test/#fragment'])
+def test_invalid_hub_origin_is_not_hidden_by_valid_mcp_origin(monkeypatch,bad):
+    monkeypatch.setenv('HUB_PUBLIC_URL',bad)
+    monkeypatch.setenv('MCP_PUBLIC_URL','https://mcp.example.test')
+    with pytest.raises(ConfigurationError,match='HUB_PUBLIC_URL'):
+        HubConfig.from_env()
+
+
+def test_hub_config_keeps_original_positional_arguments(monkeypatch):
+    monkeypatch.setenv('HUB_PUBLIC_URL','https://hub.example.test')
+    config=HubConfig.from_env()
+    legacy=HubConfig(config.port,config.timezone,config.public_url,config.runtime,None,True)
+    assert legacy.oidc_bootstrap_admin is True and legacy.oidc_public_url==''
