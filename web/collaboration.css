@@ -1,3 +1,133 @@
+/* Delivery records remain beside the saved message across refreshes and devices. */
+.cc-message-deliveries {
+  list-style: none;
+  margin: 10px 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.cc-message-deliveries li {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--muted, #68717b);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.cc-message-deliveries span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.cc-message-deliveries .btn {
+  min-height: 36px;
+  font-size: 12px;
+}
+.cc-mention-delegate {
+  display: grid;
+  gap: 5px;
+  width: 100%;
+  min-height: 52px;
+  padding: 12px;
+  text-align: left;
+}
+.cc-mention-delegate small {
+  color: inherit;
+  opacity: 0.8;
+  white-space: normal;
+}
+.cc-mention-options,
+.cc-mention-row {
+  display: grid;
+  gap: 8px;
+}
+.cc-mention-row {
+  padding-bottom: 12px;
+}
+.cc-mention-row > .btn {
+  justify-self: start;
+  min-height: 40px;
+}
+.cc-mention-row .cc-mention-option {
+  margin: 0;
+  width: 100%;
+}
+@media (max-width: 720px) {
+  .cc-message-deliveries .btn {
+    min-height: 44px;
+  }
+}
+#cc-delegation-policy {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  max-height: calc(100dvh - 160px);
+  gap: 0;
+}
+.cc-policy-fields {
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  gap: 12px;
+  padding: 0 2px 16px;
+}
+.cc-policy-submit {
+  display: grid;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--ui-line);
+  background: var(--ui-panel);
+}
+.cc-policy-summary {
+  font-size: 12px;
+  margin: 0;
+  color: var(--ui-muted);
+}
+.cc-policy-submit .btn {
+  min-height: 44px;
+}
+.cc-send-mode > span {
+  white-space: nowrap;
+}
+.cc-send-mode {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.collaboration .cc-send-mode select {
+  max-width: 220px;
+  min-height: 40px;
+  padding: 6px;
+}
+#cc-send-mode {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.cc-delegation-context {
+  padding: 8px 10px;
+  margin: 6px 0;
+  border: 1px solid var(--line, #dce0e5);
+  border-radius: 8px;
+  max-height: 160px;
+  overflow-y: auto;
+  font-size: 12px;
+}
+.cc-delegation-context p {
+  margin: 4px 0;
+}
+@media (max-width: 720px) {
+  #cc-send-mode {
+    flex-basis: 100%;
+  }
+  .collaboration .cc-send-mode select {
+    max-width: min(260px, 60vw);
+    min-height: 44px;
+    font-size: 16px;
+  }
+}
 /* Busy requests block actions, while drafts, cancellation and navigation stay usable. */
 .collaboration [data-cc-request-busy] {
   pointer-events: none;

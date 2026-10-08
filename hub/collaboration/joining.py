@@ -161,9 +161,11 @@ class JoiningService:
                 confirmed_event_id='',confirmed_at=NULL,confirmed_by='',test_after_seq=? WHERE subscription_id=?''',
                 (endpoint, subscription['key_digest'], watermark, subscription['id']))
         else:
-            count = self.store.one('SELECT COUNT(*) AS n FROM collaboration_join_routes WHERE slot_id=?', (identifier,))['n']
+            count = self.store.one("""SELECT COUNT(*) AS n FROM collaboration_join_routes r
+                JOIN mcp_event_subscriptions s ON s.id=r.subscription_id WHERE r.slot_id=?
+                AND s.state IN ('active','paused') AND s.expires_at>?""", (identifier, self.c.clock()))['n']
             if count >= 8:
-                raise DevError('JOIN_ROUTE_LIMIT', '一个位置最多保留 8 个宿主订阅；需要另一个聊天时请创建独立位置', 409)
+                raise DevError('JOIN_ROUTE_LIMIT', '一个位置最多同时保留 8 个有效宿主订阅；需要另一个聊天时请创建独立位置', 409)
             self.store.execute('''INSERT INTO collaboration_join_routes
                 (subscription_id,slot_id,endpoint_digest,credential_digest,test_after_seq,created) VALUES (?,?,?,?,?,?)''',
                 (subscription['id'], identifier, endpoint, subscription['key_digest'], watermark, self.c.clock()))
@@ -246,6 +248,7 @@ class JoiningService:
                 'routes': routes, 'subscription_requests': self.subscription_requests(room, slot) if state == 'registered' else [],
                 'subscription_instruction': self.subscription_instruction(room, slot, pending) if resumable else None,
                 'chat_identity_verified': False, 'worker_authorized': False,
+                'worker_authorized_scope': 'legacy_readonly_monitor_worker_only',
                 'notification_scope': 'project_shared',
                 'expected_events': sorted(expected), 'missing_events': missing,
                 'subscription_count': len(expected & received), 'expected_subscription_count': len(expected),

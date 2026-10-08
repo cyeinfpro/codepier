@@ -36,6 +36,8 @@ class CollaborationService:
         self.conversations = ConversationService(self)
         from hub.collaboration.coordination import CoordinationService
         self.coordination = CoordinationService(self)
+        from hub.collaboration.delegation import DelegationService
+        self.delegation = DelegationService(self)
         self.events = None
         self.monitor = None
         self.secret = b''
@@ -757,7 +759,7 @@ class CollaborationService:
         if kind == 'jobs':
             selected = [self.job_view(row) for row in selected]
         elif kind == 'messages':
-            selected = self.chatroom.views(selected)
+            selected = self.chatroom.views(selected, principal=principal)
         elif kind == 'agents':
             selected = [self.agent_view(room, row) for row in selected]
         elif kind == 'subscriptions':
@@ -776,9 +778,12 @@ class CollaborationService:
                 return {'items': rows, 'next_cursor': None}
             if not room:
                 return {'room': None, 'features': asdict(self.config), 'setup_required': True,
+                        'delegation': self.delegation.authority_descriptor(),
                         'schema_version': 3, 'capabilities': self.chatroom.capabilities(),
                         'can_manage': bool(principal.admin and not principal.grant_id)}
             kind = args['kind']
+            if kind == 'delegation_policies':
+                return self.delegation.listing(args, principal, room)
             if kind in {'coordination_goals', 'coordination_goal', 'coordination_options'}:
                 return self.coordination.listing(args, principal, room)
             self.chatroom.same_room(room, args)
@@ -844,6 +849,7 @@ class CollaborationService:
                 result[item], result[item + '_next_cursor'] = page['items'], page['next_cursor']
             conversation = self.conversations.resolve(principal, room, args)
             result['conversation'] = self.conversations.view(principal, conversation)
+            result['delegation'] = self.delegation.authority_descriptor()
             result['selected_partition'] = {'project_id': room['project_id'], 'environment_id': room['environment_id'], 'room_id': room['id']}
             if args['conversation_id']:
                 page = self.conversations.read({**args, 'kind': 'timeline'}, principal, room)
@@ -910,7 +916,7 @@ class CollaborationService:
         self.guard()
         if name in contracts.COORDINATION_TOOL_MODELS:
             return self.coordination.invoke(name, raw, principal)
-        handlers = {'collaboration_message_create': self.chatroom.create, 'collaboration_join': self.joining.join, 'collaboration_read': self.read, 'collaboration_command_create': self.command,
+        handlers = {'collaboration_delegation_read': self.delegation.read, 'collaboration_message_create': self.chatroom.create, 'collaboration_join': self.joining.join, 'collaboration_read': self.read, 'collaboration_command_create': self.command,
                     'collaboration_claim': self.claim, 'collaboration_heartbeat': self.heartbeat,
                     'collaboration_result': self.submit, 'collaboration_block': self.block, 'collaboration_ack': self.ack}
         if name in handlers:

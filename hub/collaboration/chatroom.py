@@ -14,7 +14,7 @@ class ChatroomService:
         self.c, self.store = collaboration, collaboration.store
 
     def capabilities(self):
-        return {'coordination_goals': True, 'plain_messages': True, 'message_notifications': self.c.config.events_enabled,
+        return {'coordination_goals': True, 'direct_delegation': True, 'message_remind': True, 'plain_messages': True, 'message_notifications': self.c.config.events_enabled,
                 'task_assignment': True, 'message_search': True, 'incremental_messages': True,
                 'read_cursors': True, 'attachments': False, 'human_memberships': False}
 
@@ -68,6 +68,10 @@ class ChatroomService:
 
     def view(self, row, delivery_map=None):
         body = redact(json.loads(row['body']))
+        if body.get('delegation'):
+            body['delegation']['delivery_status'] = self.c.delegation.delivery_status(body['delegation']['delegation_id'])
+            body['delegation']['progress'] = self.c.delegation.progress(body['delegation']['delegation_id'])
+            body['delegation']['retry_blocked_eligible'] = self.c.delegation.retry_blocked_eligible(body['delegation']['delegation_id'])
         if delivery_map is None:
             delivery_map = self.deliveries([row])
         for receipt in body.get('notifications', []):
@@ -130,11 +134,25 @@ class ChatroomService:
                 result[identifier] = {'state': 'recipient_unavailable'}
         return result
 
-    def views(self, rows):
+    def message_visible(self, principal, row):
+        for project_id in json.loads(row['body']).get('provenance_project_ids', []):
+            try:
+                self.c.runtime.project(project_id, principal)
+            except DevError:
+                return False
+        return True
+
+    def require_message_visible(self, principal, row):
+        if not self.message_visible(principal, row):
+            raise DevError('NOT_FOUND', '当前授权下没有这条消息', 404)
+
+    def views(self, rows, principal=None):
+        if principal is not None:
+            rows = [row for row in rows if self.message_visible(principal, row)]
         delivery_map = self.deliveries(rows)
         return [self.view(row, delivery_map) for row in rows]
 
-    def notify(self, room, message, principal, mentions):
+    def notify(self, room, message, principal, mentions, generation=''):
         receipts = []
         for mention in mentions:
             slot = self.c.joining.slot(room, mention['slot_id'])
@@ -162,7 +180,7 @@ class ChatroomService:
                     if count >= 30:
                         state = 'rate_limited'
                     else:
-                        object_id = message['id'] + ':' + slot['id']
+                        object_id = message['id'] + ':' + slot['id'] + (':' + generation if generation else '')
                         self.c.emit(room, MESSAGE_EVENT, object_id, 1,
                             {'conversation_id': message['conversation_id'], 'room_id': room['id'], 'message_id': message['id'], 'message_version': message['version'],
                              'recipient_slot_id': slot['id'], 'thread_root_id': message['thread_root_id']},
@@ -175,12 +193,16 @@ class ChatroomService:
 
     def create(self, raw, principal):
         args = validate(contracts.MessageCreate, raw)
+        if args['delegation'] is None:
+            args.pop('delegation')  # Preserve pre-delegation ordinary-message replay fingerprints.
         with self.store.transaction():
             principal, room = self.c.scope(principal, args)
             self.same_room(room, args)
             conversation = self.c.conversations.resolve(principal, room, args)
             args['conversation_id'] = conversation['id']
             self.writer(principal, room, conversation['id'])
+            if args.get('delegation'):
+                self.c.owner(principal)
             def save():
                 self.c.live_room(room)
                 origin = 'bound_connector' if principal.grant_id else 'panel_owner'
@@ -195,7 +217,8 @@ class ChatroomService:
                     if json.loads(old['body']).get('request_digest') != fingerprint:
                         raise DevError('SOURCE_MESSAGE_CONFLICT', '同一消息标识不能替换已保存内容', 409)
                     view = self.view(old)
-                    return {'message': view, 'notifications': view['body'].get('notifications', []), 'scheduled': False}
+                    return {'message': view, 'notifications': view['body'].get('notifications', []),
+                            **view['body'].get('delegation', {'scheduled': False})}
                 count = self.store.one('''SELECT COUNT(*) AS n FROM collaboration_messages
                     WHERE author=? AND room_id IN (SELECT id FROM collaboration_rooms
                     WHERE space_id=? AND owner_user_id=? AND project_id=?) AND created>?''',
@@ -220,11 +243,60 @@ class ChatroomService:
                     (identifier, room['id'], conversation['id'], root, root, args['reply_to_id'], author, origin,
                      args['client_message_id'], 'reply' if args['reply_to_id'] else 'text', canonical(body), 'saved', self.c.clock()))
                 message = self.c.object('collaboration_messages', room, identifier)
-                body['notifications'] = self.notify(room, message, principal, mentions)
+                receipt = {'scheduled': False}
+                if args.get('delegation'):
+                    receipt = self.c.delegation.send(principal, room, message, args)
+                    body['delegation'] = {**receipt, 'policy_id': args['delegation']['policy_id'],
+                                          'policy_version': args['delegation']['policy_version']}
+                    body['provenance_project_ids'] = [room['project_id']]
+                    body['notifications'] = []
+                else:
+                    body['notifications'] = self.notify(room, message, principal, mentions)
                 self.store.execute('UPDATE collaboration_messages SET body=? WHERE id=?', (canonical(body), identifier))
                 return {'message': self.view(self.c.object('collaboration_messages', room, identifier)),
-                        'notifications': body['notifications'], 'scheduled': False}
+                        'notifications': body['notifications'], **receipt}
             return self.c.mutation(principal, room, 'message_create:' + conversation['id'], args, save)
+
+    def is_delegation_source(self, message):
+        return bool(json.loads(message['body']).get('delegation') or self.store.one(
+            'SELECT 1 FROM delegation_requests WHERE message_id=?', (message['id'],)))
+
+    def remind(self, raw, principal):
+        args = validate(contracts.MessageRemind, raw)
+        with self.store.transaction():
+            principal, room = self.c.scope(principal, args)
+            self.c.owner(principal)
+            self.same_room(room, args)
+            conversation = self.c.conversations.resolve(principal, room, args)
+            message = self.c.object('collaboration_messages', room, args['message_id'])
+            self.require_message_visible(principal, message)
+            if (message['conversation_id'] != conversation['id'] or message['origin'] != 'panel_owner'
+                    or message['author'] != principal.user_id or message['kind'] not in {'text', 'reply'}):
+                raise DevError('MESSAGE_OWNER_REQUIRED', '只能提醒自己在当前聊天室保存的普通消息', 403)
+            if message['version'] != args['expected_message_version']:
+                raise DevError('STALE_VERSION', '消息已改变，请重新读取', 409)
+            body = json.loads(message['body'])
+            if self.is_delegation_source(message):
+                raise DevError('MESSAGE_KIND_INVALID', '已委托消息不能发送普通提醒；请使用 delegation-remind 继续派发原任务', 409)
+            mentioned = {item['slot_id']: item for item in body.get('mentions', [])}
+            if len(set(args['slot_ids'])) != len(args['slot_ids']) or not set(args['slot_ids']) <= set(mentioned):
+                raise DevError('MESSAGE_MENTION_REQUIRED', '只能提醒原消息已明确提及的位置', 403)
+            def save():
+                self.c.live_room(room)
+                receipts = {item['slot_id']: item for item in body.get('notifications', [])}
+                delivery = self.deliveries([message])
+                for slot_id in args['slot_ids']:
+                    current = receipts.get(slot_id, {})
+                    state = delivery.get(current.get('event_id'), {}).get('state', current.get('state'))
+                    if state in {'accepted', 'queued', 'delivering'}:
+                        continue
+                    receipts[slot_id] = self.notify(room, message, principal, [mentioned[slot_id]], generation=uuid.uuid4().hex)[0]
+                updated = {**body, 'notifications': list(receipts.values())}
+                self.store.execute('UPDATE collaboration_messages SET body=? WHERE id=?', (canonical(updated), message['id']))
+                return {'message_id': message['id']}
+            self.c.mutation(principal, room, 'message_remind:' + conversation['id'], args, save)
+            current = self.view(self.c.object('collaboration_messages', room, message['id']))
+            return {'message': current, 'notifications': current['body'].get('notifications', []), 'scheduled': False}
 
     def to_task(self, raw, principal):
         args = validate(contracts.MessageToTask, raw)
@@ -234,6 +306,11 @@ class ChatroomService:
             self.same_room(room, args)
             conversation = self.c.conversations.resolve(principal, room, args)
             args['conversation_id'] = conversation['id']
+            source = self.c.object('collaboration_messages', room, args['message_id'])
+            if source['conversation_id'] != conversation['id']:
+                raise DevError('CONVERSATION_MESSAGE_MISMATCH', '任务来源不属于此聊天室和项目', 409)
+            if self.is_delegation_source(source):
+                raise DevError('MESSAGE_ALREADY_DELEGATED', '这条消息已有直接委托；请查看原任务或用 delegation-remind 继续派发', 409)
             def save():
                 self.c.live_room(room)
                 source = self.c.object('collaboration_messages', room, args['message_id'])
@@ -323,14 +400,24 @@ class ChatroomService:
                     active = False
             agents = self.store.all('SELECT * FROM collaboration_agents WHERE room_id=? AND grant_id=? AND kind=?', (room['id'], raw['grant_id'], raw['kind']))
             eligible = [a['id'] for a in agents if self.c.agent_view(room, a)['binding_status'] == 'enabled']
-            notifications = bool(self.store.one('''SELECT s.id FROM mcp_event_subscriptions s
+            routes = self.store.all('''SELECT s.* FROM mcp_event_subscriptions s
                 JOIN collaboration_join_routes r ON r.subscription_id=s.id WHERE r.slot_id=? AND s.state='active'
-                AND s.expires_at>? AND s.name=? AND COALESCE(NULLIF(json_extract(s.arguments,'$.conversation_id'),''),s.room_id)=?
-                LIMIT 1''', (slot['id'], self.c.clock(), MESSAGE_EVENT, conversation['id'])))
+                AND s.expires_at>? AND s.name=? AND COALESCE(NULLIF(json_extract(s.arguments,'$.conversation_id'),''),s.room_id)=?''',
+                (slot['id'], self.c.clock(), MESSAGE_EVENT, conversation['id']))
+            valid_routes = []
+            if self.c.events and self.c.config.events_enabled:
+                for route in routes:
+                    try:
+                        self.c.events.authorize(route, room)
+                        valid_routes.append(route)
+                    except DevError:
+                        continue
+            notifications = bool(valid_routes)
             items.append({**slot, 'member_ref': 'slot:' + slot['id'], 'slot_id': slot['id'], 'grant_id': raw['grant_id'],
                           'worker_agent_id': eligible[0] if len(eligible) == 1 else None,
                           'can_speak': active, 'speaking_version': access['version'] if access else 0, 'speaking_expires_at': access['expires_at'] if access else None,
                           'message_notification_state': 'active' if notifications else 'not_subscribed',
+                          'message_notification_expires_at': min(raw['expires_at'], max(r['expires_at'] for r in valid_routes)) if valid_routes else None,
                           'message_subscription_request': {'name': MESSAGE_EVENT, 'arguments': {
                               'project_id': room['project_id'], 'environment_id': room['environment_id'], 'slot_id': slot['id'], 'conversation_id': conversation['id']}}})
         return {'items': items, 'next_cursor': None}
@@ -359,6 +446,7 @@ class ChatroomService:
                     raise DevError('NOT_FOUND', '没有找到这次提交的消息', 404)
             if row['conversation_id'] != conversation['id']:
                 raise DevError('NOT_FOUND', '此聊天室没有这条消息', 404)
+            self.require_message_visible(principal, row)
             view = self.view(row)
             return {'message': view, 'notifications': view['body'].get('notifications', [])}
         if kind == 'changes':
@@ -398,7 +486,7 @@ class ChatroomService:
         if not after:
             selected.reverse()
         high = selected[-1]['server_sequence'] if selected else (position if after else latest)
-        return {'items': self.views(selected),
+        return {'items': self.views(selected, principal=principal),
                 'next_cursor': self.cursor(principal, room, mode, selected[0]['server_sequence']) if not after and len(rows) > limit else None,
                 'after_cursor': self.cursor(principal, room, mode, high), 'has_more': len(rows) > limit,
                 'latest_sequence': latest, 'read_sequence': self.read_sequence(room, principal)}

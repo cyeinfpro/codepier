@@ -204,6 +204,7 @@ class ConversationService:
         where = 'conversation_id=? AND room_id IN (' + ','.join('?' for _ in ids) + ')'
         if mode == 'thread':
             root = self.c.object('collaboration_messages', room, args['id'])
+            self.c.chatroom.require_message_visible(principal, root)
             if root['conversation_id'] != conversation['id']:
                 raise DevError('THREAD_NOT_FOUND', '话题不属于这个聊天室', 404)
             where += ' AND thread_root_id=?'
@@ -236,7 +237,7 @@ class ConversationService:
         cursor = self.store.one('SELECT sequence FROM conversation_read_cursors WHERE conversation_id=? AND user_id=?',
                                 (conversation['id'], principal.user_id))
         baseline = max(conversation['history_sequence'], room['chat_history_sequence'] if conversation['id'] == room['id'] else 0)
-        return {'items': self.c.chatroom.views(selected), 'conversation': self.view(principal, conversation),
+        return {'items': self.c.chatroom.views(selected, principal=principal), 'conversation': self.view(principal, conversation),
                 'visibility_token': self.view(principal, conversation)['visibility_token'],
                 'next_cursor': sign_cursor(self.c.secret, binding, selected[0]['conversation_sequence']) if not after and len(rows) > args['limit'] else None,
                 'after_cursor': sign_cursor(self.c.secret, binding, high), 'has_more': len(rows) > args['limit'],
@@ -263,6 +264,13 @@ class ConversationService:
                     JOIN collaboration_messages m ON m.id=g.source_message_id WHERE g.id=c.object_id AND m.conversation_id=?)))
             ORDER BY c.sequence LIMIT ?''', (*ids, value, conversation['id'], conversation['id'], conversation['id'], args['limit'] + 1))
         selected = rows[:args['limit']]
-        return {'items': selected, 'next_cursor': sign_cursor(self.c.secret, binding, selected[-1]['sequence'] if selected else value),
+        visible = []
+        for change in selected:
+            if change['kind'] in {'message', 'message_delivery'}:
+                message = self.store.one('SELECT * FROM collaboration_messages WHERE id=?', (change['object_id'],))
+                if message and not self.c.chatroom.message_visible(principal, message):
+                    continue
+            visible.append(change)
+        return {'items': visible, 'next_cursor': sign_cursor(self.c.secret, binding, selected[-1]['sequence'] if selected else value),
                 'has_more': len(rows) > args['limit'], 'reset_required': False,
                 'visibility_token': self.view(principal, conversation)['visibility_token']}

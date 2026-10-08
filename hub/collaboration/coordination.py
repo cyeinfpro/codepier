@@ -58,6 +58,7 @@ class CoordinationService:
         else:
             self.c.owner(principal)
         if active:
+            self.c.delegation.authorize_goal(principal, room, goal)
             self.c.live_room(room)
             if goal['state'] != 'active' or not goal['approval_id'] or (goal['expires_at'] or 0) <= self.c.clock():
                 raise DevError('GOAL_INACTIVE', '目标未批准、已暂停或已到期；不能开始新步骤', 409)
@@ -126,9 +127,11 @@ class CoordinationService:
         spec = json.loads(goal['spec'])
         anchor = self.store.one('SELECT project_id,environment_id FROM collaboration_rooms WHERE id=?', (goal['room_id'],))
         count = self.store.one('SELECT COUNT(*) AS n FROM coordination_work WHERE goal_id=?', (goal['id'],))['n']
+        delegation = self.c.delegation.goal_metadata(goal)
         return {key: goal[key] for key in ('id', 'room_id', 'conversation_id', 'digest', 'version',
                 'state', 'approval_id', 'expires_at', 'created', 'updated')} | spec | {
-                'can_approve': bool(principal.admin and not principal.grant_id),
+                'can_approve': bool(principal.admin and not principal.grant_id and not delegation),
+                'delegation': delegation,
                 'anchor_project_id': anchor['project_id'], 'environment_id': anchor['environment_id'],
                 'usage': {'work_items': count, 'steps': goal['steps'], 'messages': goal['messages']}}
 
@@ -164,6 +167,8 @@ class CoordinationService:
         args = validate(contracts.GoalUpdate, raw)
         with self.store.transaction():
             principal, room, goal = self.scope(principal, args)
+            if self.c.delegation.goal_link(goal):
+                raise DevError('DELEGATION_IMMUTABLE', '原消息委托不能改写目标；请在明确设置范围内发送新委托', 409)
             if args['conversation_id'] != goal['conversation_id']:
                 raise DevError('GOAL_CONVERSATION_CHANGED', '不能移动既有目标的聊天室', 409)
             spec = self.candidate(args, principal, room)
@@ -186,6 +191,9 @@ class CoordinationService:
         with self.store.transaction():
             principal, room, goal = self.scope(principal, args)
             self.c.owner(principal)
+            link = self.c.delegation.goal_link(goal)
+            if link and link['approval_id']:
+                raise DevError('DELEGATION_IMMUTABLE', '原消息委托不能重新批准；请核对已有操作后发送新委托', 409)
             spec = json.loads(goal['spec'])
             # Current owner and every connection must already have every approved
             # capability. This approval creates no IAM grant or notification route.
@@ -263,6 +271,8 @@ class CoordinationService:
             self.c.owner(principal)
             def save():
                 self.version(goal, args)
+                if goal['state'] == ('paused' if args['action'] == 'pause' else 'cancelled'):
+                    return {'goal': self.view(goal, principal), 'operations': self.operations(goal)}
                 self.stop_work(goal, 'GOAL_' + args['action'].upper())
                 self.store.execute('UPDATE coordination_goals SET state=?,version=version+1,updated=? WHERE id=?',
                     ('paused' if args['action'] == 'pause' else 'cancelled', self.c.clock(), goal['id']))
@@ -319,7 +329,7 @@ class CoordinationService:
             for key in ('mention_grant_ids', 'provenance_project_ids'):
                 message[key] = json.loads(message[key])
             message['body_text'] = message.pop('body')
-        return {'goal': self.view(goal, principal), 'can_approve': bool(principal.admin and not principal.grant_id),
+        return {'goal': self.view(goal, principal), 'can_approve': bool(principal.admin and not principal.grant_id and not self.c.delegation.goal_link(goal)),
                 'work_items': [self.work_view(row) for row in rows], 'messages': messages, 'operations': self.operations(goal)}
 
     def listing(self, args, principal, room):
@@ -493,8 +503,7 @@ class CoordinationService:
                 supplied = args['arguments']
                 if supplied.get('project', item['project_id']) != item['project_id']:
                     raise DevError('WORK_PROJECT_MISMATCH', '执行参数必须使用工作项的唯一项目', 403)
-                if supplied.get('workspace_id') or supplied.get('target', 'agent') != 'agent':
-                    raise DevError('GOAL_TARGET_NOT_APPROVED', '此目标只批准原项目根目录和执行节点；其他工作区或 VPS 需要另行批准', 403)
+                target = self.c.delegation.target(principal, room, goal, args['tool'], supplied)
                 if supplied.get('operation', 'file') != 'file':
                     raise DevError('GOAL_OPERATION_NOT_SUPPORTED', '此入口只支持基本文件操作和 exec', 422)
                 if args['tool'] == 'exec' and supplied.get('task'):
@@ -502,6 +511,8 @@ class CoordinationService:
                 tool_args = {key: value for key, value in supplied.items() if key != 'operation'}
                 tool_args.update(project=item['project_id'], idempotency_key='goal:' + digest([
                     goal['id'], item['id'], item['attempt'], args['idempotency_key']]))
+                if args['tool'] == 'exec':
+                    tool_args['target'] = target
                 prepared = self.runtime._invoke(args['tool'], tool_args, principal)
                 if not isinstance(prepared, DeferredCall) or prepared.action != 'dispatch':
                     raise DevError('GOAL_OPERATION_NOT_SUPPORTED', '请求不能通过已验证的项目执行路径', 422)
@@ -564,6 +575,9 @@ class CoordinationService:
                     raise DevError('WORK_OPERATION_MISMATCH', '结果必须列出本尝试的全部真实操作，不能伪造或遗漏', 409)
                 if self.pending_operations(item):
                     raise DevError('WORK_OPERATION_PENDING', '持久操作尚未完成；不能宣称工作结束', 409)
+                if (args['outcome'] == 'succeeded' and self.c.delegation.goal_link(goal)
+                        and set(json.loads(item['required_capabilities'])) & {'write', 'execute'} and not actual):
+                    raise DevError('WORK_OPERATION_REQUIRED', '执行委托必须有真实操作回执，不能仅凭文字宣称完成', 409)
                 if args['outcome'] == 'succeeded' and any(state != 'succeeded' for state in actual.values()):
                     raise DevError('WORK_OPERATION_FAILED', '失败或取消的操作不能作为成功执行结果', 409)
                 inputs = list(dict.fromkeys([*json.loads(item['dependencies']), *args['input_work_item_ids']]))
@@ -574,6 +588,7 @@ class CoordinationService:
                 self.store.execute('''UPDATE coordination_work SET state=?,result=?,lease_until=NULL,
                     version=version+1,updated=? WHERE id=?''',
                     (args['outcome'], canonical(body), self.c.clock(), item['id']))
+                self.c.delegation.project_result(room, goal, item, body, principal)
                 if args['outcome'] == 'succeeded':
                     for dependent in self.store.all("SELECT * FROM coordination_work WHERE goal_id=? AND approval_id=? AND state='queued'",
                                                     (goal['id'], goal['approval_id'])):
@@ -610,6 +625,8 @@ class CoordinationService:
 
     def emit_work(self, room, goal, item):
         if any(self.work(goal, identifier)['state'] != 'succeeded' for identifier in json.loads(item['dependencies'])):
+            return
+        if self.c.delegation.emit_work(room, goal, item):
             return
         self.c.emit(room, WORK_EVENT, item['id'], item['version'],
             {'conversation_id': goal['conversation_id'], 'goal_id': goal['id'], 'approval_id': goal['approval_id'],
@@ -676,7 +693,8 @@ class CoordinationService:
                     continue
                 for item in self.store.all("SELECT * FROM coordination_work WHERE goal_id=? AND state IN ('leased','running') AND lease_until<=?", (goal['id'], now)):
                     pending = self.pending_operations(item)
-                    state = 'blocked' if pending or item['attempt'] >= spec['budget']['max_attempts'] else 'queued'
+                    admitted = self.store.one('SELECT 1 FROM coordination_operations WHERE work_item_id=? LIMIT 1', (item['id'],))
+                    state = 'blocked' if pending or admitted or item['attempt'] >= spec['budget']['max_attempts'] else 'queued'
                     self.store.execute("""UPDATE coordination_work SET state=?,reason_code='LEASE_EXPIRED',lease_until=NULL,
                         fencing_token=fencing_token+1,version=version+1,updated=? WHERE id=?""", (state, now, item['id']))
                     if state == 'queued':

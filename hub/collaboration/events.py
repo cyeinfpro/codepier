@@ -17,7 +17,7 @@ from hub.principal import refresh_principal
 from hub.mcp_request_audit import mark
 from hub.collaboration.event_errors import CallbackEndpointError, callback_reason
 from hub.collaboration import network
-from hub.collaboration.common import (TASK_EVENT, RESULT_EVENT, INCIDENT_EVENT, STATUS_EVENT, MESSAGE_EVENT, WORK_EVENT,
+from hub.collaboration.common import (TASK_EVENT, RESULT_EVENT, INCIDENT_EVENT, STATUS_EVENT, MESSAGE_EVENT, WORK_EVENT, DELEGATION_EVENT,
     SEVERITIES, canonical, digest, read_cursor, sign_cursor, timestamp, validate)
 from hub.collaboration.event_contracts import FILTERS, PAYLOADS, Subscribe, Unsubscribe, definitions
 from shared.util import DevError
@@ -82,6 +82,8 @@ class EventService:
         self.c.notification_reader(principal)
         if args['name'] == MESSAGE_EVENT:
             self.c.conversations.resolve(principal, room, filters)
+        if args['name'] == DELEGATION_EVENT and not stopping:
+            self.c.delegation.authorize_event(principal, filters)
         if args['name'] == WORK_EVENT and not stopping:
             self.c.coordination.authorize_event(principal, filters)
         if not stopping:
@@ -254,6 +256,8 @@ class EventService:
         self.c.joining.subscription_guard(room, principal, filters)
         if subscription['name'] == MESSAGE_EVENT:
             self.c.conversations.resolve(principal, room, filters)
+        if subscription['name'] == DELEGATION_EVENT:
+            self.c.delegation.authorize_event(principal, filters, payload)
         if subscription['name'] == WORK_EVENT:
             self.c.coordination.authorize_event(principal, filters, payload)
         # Subscription consent binds notification filters, not a worker lease.
@@ -276,6 +280,12 @@ class EventService:
                 or payload.get('recipient_grant_id') != subscription['grant_id']
                 or any(not filters.get(key) or payload.get(key) != filters[key]
                        for key in ('project_id', 'environment_id', 'conversation_id', 'goal_id', 'approval_id'))):
+            return False
+        if event['name'] == DELEGATION_EVENT and (not event['target_grant_id']
+                or payload.get('recipient_grant_id') != subscription['grant_id']
+                or payload.get('recipient_slot_id') != filters.get('slot_id')
+                or any(payload.get(key) != filters.get(key)
+                       for key in ('project_id', 'environment_id', 'conversation_id', 'policy_id', 'policy_version'))):
             return False
         if payload.get('test'):
             return payload.get('test_subscription_id') == subscription['id']
@@ -327,7 +337,7 @@ class EventService:
                     continue
                 event = self.store.one('SELECT * FROM mcp_event_outbox WHERE id=?', (delivery['event_id'],))
                 payload = validate(PAYLOADS[event['name']], json.loads(event['data']))
-                if event['name'] == WORK_EVENT:
+                if event['name'] in {WORK_EVENT, DELEGATION_EVENT}:
                     try:
                         self.authorize(sub, room, payload)
                     except DevError:
@@ -372,7 +382,7 @@ class EventService:
                 return None
             room = self.store.one('SELECT * FROM collaboration_rooms WHERE id=?', (sub['room_id'],))
             event = self.store.one('SELECT * FROM mcp_event_outbox WHERE id=?', (delivery['event_id'],))
-            self.authorize(sub, room, json.loads(event['data']) if event['name'] == WORK_EVENT else None)
+            self.authorize(sub, room, json.loads(event['data']) if event['name'] in {WORK_EVENT, DELEGATION_EVENT} else None)
             if event['name'] == TASK_EVENT and not json.loads(event['data']).get('test'):
                 job = self.store.one('SELECT * FROM collaboration_jobs WHERE id=? AND room_id=?', (event['object_id'], room['id']))
                 if (not self.c.config.analysis_dispatch_enabled or not job or job['state'] != 'queued'
@@ -446,6 +456,12 @@ class EventService:
             agent = self.store.one('SELECT id,kind FROM collaboration_agents WHERE room_id=? AND grant_id=? AND queue=? AND enabled=1 AND expires_at>?', (room['id'], subscription['grant_id'], filters['queue'], self.c.clock()))
             base.update(job_id=identifier, job_version=1, queue=filters['queue'], assignee_agent_id=agent['id'] if agent else identifier,
                         kind='analyze_incident' if filters['queue'] == 'work-analysis' else 'summarize_result', reason_code='subscription_test')
+        elif subscription['name'] == DELEGATION_EVENT:
+            base.update(conversation_id=filters['conversation_id'], policy_id=filters['policy_id'],
+                        policy_version=filters['policy_version'], delegation_id=identifier,
+                        message_id=identifier, message_version=1, goal_id=identifier, approval_id=identifier,
+                        work_item_id=identifier, work_item_version=1, recipient_slot_id=filters['slot_id'],
+                        recipient_grant_id=subscription['grant_id'])
         elif subscription['name'] == WORK_EVENT:
             base.update(conversation_id=filters['conversation_id'], goal_id=filters['goal_id'],
                         approval_id=filters['approval_id'], work_item_id=identifier, work_item_version=1,

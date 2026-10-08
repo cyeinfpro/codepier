@@ -208,6 +208,8 @@ def migrate(db):
     migrate_conversations(db)
     from hub.collaboration.coordination_schema import migrate as migrate_coordination
     migrate_coordination(db)
+    from hub.collaboration.delegation import migrate as migrate_delegation
+    migrate_delegation(db)
     db.execute("INSERT OR REPLACE INTO meta VALUES ('collaboration_schema','3')")
 
 def migrate_chatroom(db):

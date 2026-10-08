@@ -1,7 +1,7 @@
 """Real HTTP/modern MCP enrollment uses existing grants and panel CSRF."""
 import pytest
 
-from hub.collaboration.common import EVENTS, MESSAGE_EVENT, WORK_EVENT
+from hub.collaboration.common import EVENTS, MESSAGE_EVENT, WORK_EVENT, DELEGATION_EVENT
 from tests.collaboration_support import collaboration_stack
 from tests.collaboration_support import key
 from tests.test_mcp_tasks_http import modern
@@ -55,7 +55,11 @@ def test_event_discovery_advertises_slot_filter_without_assuming_host_binding(co
     for event in catalog['events']:
         schema = event['inputSchema']
         required = set(schema.get('required', []))
-        if event['name'] == WORK_EVENT:
+        if event['name'] == DELEGATION_EVENT:
+            assert set(schema['properties']) == {'project_id', 'environment_id', 'conversation_id',
+                                                 'slot_id', 'policy_id', 'policy_version'}
+            assert required == set(schema['properties'])
+        elif event['name'] == WORK_EVENT:
             assert set(schema['properties']) == {'project_id', 'environment_id', 'conversation_id', 'goal_id', 'approval_id'}
             assert required == set(schema['properties'])
         else:

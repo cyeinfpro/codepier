@@ -15,6 +15,7 @@ def make_router(auth, runtime):
             return {'features': asdict(service.config), 'components': service.health,
                     'schema_version': 3, 'capabilities': service.chatroom.capabilities(),
                     'can_manage': bool(principal.admin and not principal.grant_id),
+                    'delegation': service.delegation.authority_descriptor(),
                     'production_actions_enabled': False, 'platform_poc_verified': False}
         return await store.run(inspect)
 
@@ -39,7 +40,11 @@ def make_router(auth, runtime):
     async def mutate(operation: str, body: dict, request: Request):
         def perform():
             principal = auth.admin(request, True)
-            handlers = {'goal-create': service.coordination.create, 'goal-update': service.coordination.update,
+            handlers = {'delegation-policy': service.delegation.set_policy,
+                        'delegation-policy-control': service.delegation.control,
+                        'delegation-remind': service.delegation.remind,
+                        'message-remind': service.chatroom.remind,
+                        'goal-create': service.coordination.create, 'goal-update': service.coordination.update,
                         'goal-approve': service.coordination.approve, 'goal-control': service.coordination.control,
                         'goal-message': service.coordination.message, 'work-create': service.coordination.work_create,
                         'work-assign': service.coordination.work_assign,

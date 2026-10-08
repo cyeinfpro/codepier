@@ -170,7 +170,10 @@ window.CodePierCollaborationGoals = {
         E(g.version) +
         '</small><div class="cc-actions">' +
         button('goal-detail', '查看步骤与结果', g) +
-        (canApprove() && ['proposed', 'paused'].includes(g.state)
+        (canApprove() &&
+        !g.delegation &&
+        g.can_approve !== false &&
+        ['proposed', 'paused'].includes(g.state)
           ? button('goal-review', '审阅执行范围', g)
           : '') +
         '</div></article>'
@@ -535,6 +538,23 @@ window.CodePierCollaborationGoals = {
       );
     }
     function subscription(g) {
+      if (g.delegation) {
+        const request = g.delegation.subscription_request;
+        if (!request)
+          return empty('原委托范围已不可用。请核对已有操作，再重新审阅范围并发送新委托。');
+        const instruction = window.CodePierCollaborationDelegation.subscriptionInstruction(request);
+        return (
+          '<details class="cc-goal-subscription"><summary>连接本委托范围的通知</summary>' +
+          field(
+            '委托范围订阅指令',
+            '<textarea rows="5" readonly class="cc-goal-subscription-text">' +
+              E(instruction) +
+              '</textarea>',
+          ) +
+          button('goal-copy-subscription', '复制委托订阅指令') +
+          '</details>'
+        );
+      }
       if (g.state !== 'active' || !options?.work_event) return '';
       const filters = {
         project_id: g.anchor_project_id || state.project,
@@ -583,10 +603,13 @@ window.CodePierCollaborationGoals = {
         '</p><p class="cc-hint">' +
         E((g.project_ids || []).map(projectLabel).join(' · ')) +
         '。新加入房间的项目不属于此目标。</p><div class="cc-actions">' +
-        (canApprove() && ['proposed', 'paused'].includes(g.state)
+        (canApprove() &&
+        !g.delegation &&
+        g.can_approve !== false &&
+        ['proposed', 'paused'].includes(g.state)
           ? button('goal-review', '审阅执行范围', g)
           : '') +
-        (canManage() && !['cancelled', 'expired'].includes(g.state)
+        (canManage() && !g.delegation && !['cancelled', 'expired'].includes(g.state)
           ? button('goal-edit', '修订规划', g)
           : '') +
         (canApprove() && g.state === 'active' ? button('goal-pause', '暂停目标', g) : '') +
@@ -598,6 +621,18 @@ window.CodePierCollaborationGoals = {
           ? '已批准范围不保证助手在线。实际领取、操作与结果分别记录。'
           : '尚不接受新的目标执行；普通讨论和规划可以继续。') +
         '</p>' +
+        (g.delegation
+          ? '<section class="cc-delegation-origin" data-message-id="' +
+            E(g.delegation.source_message_id) +
+            '" data-project="' +
+            E(g.anchor_project_id || state.project) +
+            '" data-environment="' +
+            E(g.environment_id || state.environment) +
+            '">' +
+            button('source', '查看原委托消息', { id: g.delegation.source_message_id }) +
+            button('mention-connect', '查看委托范围与接通设置', { id: g.delegation.slot_id }) +
+            '<p class="cc-hint">此目标绑定原委托，不能修订或重新批准。暂停后若需继续，请核对已有操作，再发送新委托；已运行的实际操作不保证停止。</p></section>'
+          : '') +
         subscription(g) +
         '<div class="cc-row"><h3>步骤与结果</h3>' +
         button('goal-detail', '刷新步骤与结果', g) +
@@ -622,7 +657,7 @@ window.CodePierCollaborationGoals = {
               '</p></article>',
           )
           .join('') || empty('暂无目标内交接或复核消息。普通房间消息不会递归触发执行。')) +
-        (canApprove() && g.state === 'active'
+        (canApprove() && !g.delegation && g.state === 'active'
           ? '<form id="cc-goal-message" class="cc-form" data-id="' +
             E(g.id) +
             '">' +
