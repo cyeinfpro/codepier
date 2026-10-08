@@ -164,3 +164,49 @@ def test_schema_constraints_and_text_redaction():
             'close_when': {'operator': 'gt', 'value': 0.9}, 'require_recovery_probe': 'p'})
     assert redact({'password': 'synthetic-sensitive-value'})['password'] == '[REDACTED]'
     assert 'synthetic-token' not in redact('Authorization: Bearer synthetic-token')
+
+
+def test_public_job_evidence_keeps_original_budget_lease_and_fence(collab):
+    from shared.public_collaboration import request, tool_definitions
+    s, _, worker, _, room, _, clock, scope = collab
+    _, leased = claimed(collab)
+    identifier = 'bounded-evidence'
+    body = {'observed': 'fixture'}
+    s.store.execute('INSERT INTO monitor_evidence VALUES (?,?,?,?,?,?,?,?,?)',
+        (identifier, room['id'], None, canonical(body), digest(body), clock[0], clock[0] + 3600, 1, 'aggregate_probe'))
+    job = s.object('collaboration_jobs', room, leased['job_id'])
+    context = json.loads(job['context'])
+    context['evidence_refs'] = [identifier]
+    s.store.execute('UPDATE collaboration_jobs SET context=? WHERE id=?', (canonical(context), job['id']))
+    args = {**scope, 'kind': 'evidence', 'id': identifier, 'job_id': job['id'],
+            'attempt': leased['attempt'], 'fencing_token': leased['fencing_token']}
+    canonical_call = request('collaboration_read', args)
+    assert canonical_call['tool'] == 'collaboration_work'
+    definition = next(item for item in tool_definitions() if item['name'] == 'collaboration_work')
+    assert not definition['annotations']['readOnlyHint'] and not definition['annotations']['idempotentHint']
+    before = s.object('collaboration_jobs', room, job['id'])['tool_calls']
+    legacy = s.invoke('collaboration_read', args, worker)
+    assert s.object('collaboration_jobs', room, job['id'])['tool_calls'] == before + 1
+    current = s.invoke(canonical_call['tool'], canonical_call['arguments'], worker)
+    assert current == legacy
+    assert s.object('collaboration_jobs', room, job['id'])['tool_calls'] == before + 2
+    with pytest.raises(DevError) as denied:
+        s.invoke('collaboration_query', canonical_call['arguments'], worker)
+    assert denied.value.code == 'INVALID_ARGUMENTS'
+    for name, raw in (('collaboration_read', args), (canonical_call['tool'], canonical_call['arguments'])):
+        with pytest.raises(DevError) as denied:
+            s.invoke(name, {**raw, 'fencing_token': raw['fencing_token'] + 1}, worker)
+        assert denied.value.code == 'LEASE_EXPIRED'
+    assert s.object('collaboration_jobs', room, job['id'])['tool_calls'] == before + 2
+    maximum = context['budget']['max_tool_calls_per_job']
+    s.store.execute('UPDATE collaboration_jobs SET tool_calls=? WHERE id=?', (maximum, job['id']))
+    for name, raw in (('collaboration_read', args), (canonical_call['tool'], canonical_call['arguments'])):
+        with pytest.raises(DevError) as denied:
+            s.invoke(name, raw, worker)
+        assert denied.value.code == 'BUDGET_EXCEEDED'
+    assert s.object('collaboration_jobs', room, job['id'])['tool_calls'] == maximum
+    clock[0] = leased['lease_until'] + 1
+    for name, raw in (('collaboration_read', args), (canonical_call['tool'], canonical_call['arguments'])):
+        with pytest.raises(DevError) as denied:
+            s.invoke(name, raw, worker)
+        assert denied.value.code == 'LEASE_EXPIRED'

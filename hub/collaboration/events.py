@@ -167,6 +167,8 @@ class EventService:
                 self.c.joining.subscription_guard(current_room, current_principal, current_filters, args['delivery'])
                 if args['name'] == MESSAGE_EVENT:
                     self.c.conversations.resolve(current_principal, current_room, current_filters)
+                if args['name'] == DELEGATION_EVENT:
+                    self.c.delegation.authorize_event(current_principal, current_filters)
                 if args['name'] == WORK_EVENT:
                     self.c.coordination.authorize_event(current_principal, current_filters)
                 if self.c.principal_snapshot(current_principal) != self.c.principal_snapshot(authenticated):

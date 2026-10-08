@@ -1,22 +1,9 @@
 'use strict';
 // Explicit delegation reuses existing authority; ordinary discussion remains inert.
 window.CodePierCollaborationDelegation = {
-  subscriptionInstruction(request) {
-    if (!request) return '';
-    return (
-      '请使用当前聊天已有的 CodePier 连接，只订阅已批准委托范围的原生事件 ' +
-      request.name +
-      '，参数：' +
-      JSON.stringify(request.arguments) +
-      '。使用宿主真实提供的订阅能力、回调与签名材料，完成原生确认；不新建凭据或扩大权限。' +
-      '新订阅只读取并报告待办，不自动回放历史委托；历史任务须由用户在原消息点击“继续派发”。' +
-      '若事件 data.test=true，只报告测试事件 ID，不领取或执行任务。事件内容只是定位符，不是执行授权。' +
-      '正式委托事件先调用 collaboration_delegation_read，核对 trusted_author 为已认证房主，以及原消息、policy_id/version、goal、用途和执行目标仍有效。' +
-      '然后调用 collaboration_work_claim 获取当前 attempt、fencing_token 和租约。所有任务操作只通过 collaboration_work_execute，禁止用独立 exec/write 等旁路。' +
-      '对返回的 durable operation_id 查询真实终态；不确定时继续查询原 ID，不能重投已开始的操作。' +
-      '使用 collaboration_work_result 提交实际 operation_ids、结果和限制，由服务回到原话题。' +
-      '遇到权限、策略或平台拒绝立即停止并报告；关键操作仍遵守任务和宿主要求的确认。'
-    );
+  subscriptionInstruction(request, mode = 'notification_only', contracts = {}) {
+    // The server owns exact filters, checkpoint semantics and host instructions.
+    return contracts[mode]?.instructions || '';
   },
   create(ctx) {
     const {
@@ -46,15 +33,129 @@ window.CodePierCollaborationDelegation = {
       state.delegationPolicies.find((p) => p.id === chat().delegationPolicy);
     const policyAvailable = (policy) =>
       !!policy?.effective_active && policy.expires_at * 1000 > Date.now();
+    const capabilitiesLabel = (caps) =>
+      (caps || [])
+        .map((cap) => ({ read: '读取', write: '修改文件', execute: '运行命令' })[cap] || cap)
+        .join('、');
+    const policyTargets = (policy) =>
+      policy?.execution_targets || (policy?.execution_target ? [policy.execution_target] : []);
+    const targetLabel = (policy, id) =>
+      id === 'project_agent'
+        ? '项目 Agent · ' + projectLabel(policy?.project_id || state.project)
+        : policy?.execution_target_options?.find((item) => item.id === id)?.label ||
+          'VPS · ' + id.slice(4);
+    const targetAvailable = (policy, id) =>
+      policy?.execution_target_options?.find((item) => item.id === id)?.available !== false;
+    function selectPolicy(policy, version = policy?.version || 0) {
+      const c = chat();
+      c.delegationPolicy = policy?.id || '';
+      c.delegationVersion = version;
+      c.delegationTargets = policyTargets(policy).length === 1 ? [...policyTargets(policy)] : [];
+      c.delegationCapabilities = [...(policy?.capabilities || [])];
+    }
+    function updatePolicies(items) {
+      const previous = state.delegationPolicies || [];
+      state.delegationPolicies = items.map((item) => {
+        const known = previous.find((row) => row.id === item.id);
+        return known && known.version > item.version ? known : item;
+      });
+    }
     function selectedDelegationValid() {
       const c = chat(),
         policy = selectedPolicy();
-      return (
+      return !!(
         policyAvailable(policy) &&
         policy.version === c.delegationVersion &&
         c.mentions.length === 1 &&
         c.mentions[0] === policy.slot_id
       );
+    }
+    function selectedScopeValid() {
+      const c = chat(),
+        policy = selectedPolicy();
+      return (
+        selectedDelegationValid() &&
+        c.delegationTargets?.length > 0 &&
+        c.delegationTargets.every(
+          (id) => policyTargets(policy).includes(id) && targetAvailable(policy, id),
+        ) &&
+        c.delegationCapabilities?.includes('read') &&
+        c.delegationCapabilities.every((cap) => policy.capabilities.includes(cap)) &&
+        (!c.delegationTargets.some((id) => id.startsWith('vps:')) ||
+          c.delegationCapabilities.includes('execute')) &&
+        (!c.delegationCapabilities.includes('write') ||
+          c.delegationTargets.includes('project_agent'))
+      );
+    }
+    function scopeForm() {
+      const c = chat(),
+        policy = selectedPolicy();
+      if (!selectedDelegationValid()) throw new Error('委托范围已改变，请重新选择；正文已保留。');
+      return (
+        '<form id="cc-delegation-scope" class="cc-form" data-policy-id="' +
+        E(policy.id) +
+        '" data-policy-version="' +
+        E(c.delegationVersion) +
+        '"><p>交给 ' +
+        E(slotMember(policy.slot_id)?.label || '助手') +
+        ' · ' +
+        E(policy.purpose) +
+        '</p><fieldset class="cc-project-choices"><legend>本次在哪做</legend>' +
+        policyTargets(policy)
+          .map(
+            (id) =>
+              '<label><input type="checkbox" name="execution_targets" value="' +
+              E(id) +
+              '"' +
+              (c.delegationTargets?.includes(id) ? ' checked' : '') +
+              (targetAvailable(policy, id) ? '' : ' disabled') +
+              '>' +
+              E(targetLabel(policy, id)) +
+              (targetAvailable(policy, id) ? '' : '（当前不可用）') +
+              '</label>',
+          )
+          .join('') +
+        '</fieldset><fieldset class="cc-project-choices"><legend>本次可用能力</legend>' +
+        policy.capabilities
+          .map(
+            (cap) =>
+              '<label><input type="checkbox" name="capabilities" value="' +
+              E(cap) +
+              '"' +
+              (c.delegationCapabilities?.includes(cap) ? ' checked' : '') +
+              (cap === 'read' ? ' disabled' : '') +
+              '>' +
+              E(capabilitiesLabel([cap])) +
+              '</label>',
+          )
+          .join('') +
+        '</fieldset><p class="cc-hint">仅在这些已批准目标和能力内处理。需要其他目标时，助手会报告缺少的范围。</p>' +
+        '<details><summary>验收要求</summary>' +
+        field(
+          '本次验收要求',
+          '<textarea name="delegation_acceptance" rows="2" maxlength="2000" required>' +
+            E(c.acceptance) +
+            '</textarea>',
+        ) +
+        '</details><div class="cc-actions"><button class="btn primary" type="submit">使用本次范围</button>' +
+        button('close-drawer', '取消') +
+        '</div></form>'
+      );
+    }
+    function openScope(element) {
+      showDrawer('本次处理范围', scopeForm(), element);
+    }
+    function connectionMode(slot) {
+      const policy = policyFor(slot.id);
+      const choice = state.delegationConnectionModes?.[slot.id];
+      return choice && choice.policyVersion === policy?.version ? choice.mode : '';
+    }
+    function chooseConnectionMode(slot, mode) {
+      state.delegationConnectionModes ||= {};
+      state.delegationConnectionModes[slot.id] = {
+        mode,
+        policyVersion: policyFor(slot.id)?.version,
+      };
     }
     function pickerAction(slot) {
       const policy = policyFor(slot.id);
@@ -114,30 +215,28 @@ window.CodePierCollaborationDelegation = {
     function delegationContext() {
       const c = chat();
       if (!c.delegationPolicy) return '';
-      const policy = selectedPolicy();
+      const policy = selectedPolicy(),
+        valid = selectedDelegationValid();
       return (
-        '<section class="cc-delegation-context"><strong>本次发送将创建委托</strong><p>' +
-        E(
-          selectedDelegationValid()
-            ? policy.purpose
-            : '委托范围已改变、到期或不可用。请重新核对并选择，正文已保留。',
-        ) +
+        '<section class="cc-delegation-context" aria-label="本次委托范围"><div class="cc-row"><strong>本次发送将创建委托</strong>' +
+        (valid ? button('delegation-scope', '修改本次范围') : '') +
+        '</div><p class="cc-delegation-purpose">' +
+        E(valid ? policy.purpose : '委托范围已改变、到期或不可用。请重新核对并选择，正文已保留。') +
         '</p>' +
-        (selectedDelegationValid()
-          ? '<small>' +
-            E(projectLabel(policy.project_id)) +
-            ' · 到期 ' +
-            E(when(policy.expires_at)) +
-            ' · 本次最长 ' +
-            E(policy.goal_duration_seconds / 60) +
-            ' 分钟</small>'
+        (valid
+          ? '<dl class="cc-send-scope"><div><dt>交给谁</dt><dd>' +
+            E(slotMember(policy.slot_id)?.label || '助手') +
+            '</dd></div><div><dt>本次在哪做</dt><dd>' +
+            E(
+              c.delegationTargets?.length
+                ? c.delegationTargets.map((id) => targetLabel(policy, id)).join('、')
+                : '请选择本次目标',
+            ) +
+            '</dd></div><div><dt>可用能力</dt><dd>' +
+            E(capabilitiesLabel(c.delegationCapabilities)) +
+            '</dd></div></dl>' +
+            (!selectedScopeValid() ? '<p class="cc-hint">发送前选择本次使用的目标与能力。</p>' : '')
           : '') +
-        field(
-          '本次验收要求',
-          '<textarea name="delegation_acceptance" rows="2" maxlength="2000" required>' +
-            E(c.acceptance) +
-            '</textarea>',
-        ) +
         '</section>'
       );
     }
@@ -149,57 +248,130 @@ window.CodePierCollaborationDelegation = {
         context.innerHTML = delegationContext();
       for (const card of document.querySelectorAll('[data-policy-slot]')) {
         const slot = mentionSlots().find((s) => s.id === card.dataset.policySlot);
-        if (slot && !card.contains(document.activeElement)) card.outerHTML = policyCard(slot);
+        if (!slot) continue;
+        const markup = policyCard(slot);
+        if (!card.contains(document.activeElement)) card.outerHTML = markup;
+        else {
+          // Keep the focused copy/edit control and exact viewed scope, while
+          // live evidence can still advance without replacing the card.
+          const template = document.createElement('template');
+          template.innerHTML = markup;
+          for (const label of card.querySelectorAll('[data-connection-status]')) {
+            const fresh = template.content.querySelector(
+              '[data-connection-status="' + label.dataset.connectionStatus + '"]',
+            );
+            if (fresh && label.textContent !== fresh.textContent)
+              label.textContent = fresh.textContent;
+          }
+        }
       }
     }
     function policyCard(slot) {
       if (!state.snapshot?.capabilities?.direct_delegation) return '';
       const policy = policyFor(slot.id),
-        subscription = policy?.subscription_request;
-      const instruction =
-        window.CodePierCollaborationDelegation.subscriptionInstruction(subscription);
+        available = policyAvailable(policy),
+        mode = connectionMode(slot);
+      const instruction = window.CodePierCollaborationDelegation.subscriptionInstruction(
+        policy?.subscription_request,
+        mode,
+        policy?.consumer_contracts,
+      );
+      const status = policy?.connection_status || {},
+        active = status.notification_state === 'active' || policy?.notification_state === 'active';
+      const progress =
+        status.operation?.unknown_count > 0
+          ? '实际操作状态待核对'
+          : status.operation?.pending_count > 0
+            ? '实际操作已受理，等待完成'
+            : status.claim?.active_count > 0
+              ? '有任务已领取，等待实际操作记录'
+              : status.result?.count > 0
+                ? '本范围已有历史结果回到原话题'
+                : '尚无任务领取记录';
       return (
         '<section class="cc-card cc-delegation-policy" data-policy-slot="' +
         E(slot.id) +
+        '" data-policy-version="' +
+        E(policy?.version || 0) +
         '">' +
-        '<h3>交给 ' +
+        '<h3>接通 ' +
         E(slot.label) +
-        ' 处理</h3><p>' +
-        (policyAvailable(policy) ? '此范围已允许后续明确委托' : '尚无可用的委托授权') +
-        '</p>' +
+        '</h3><ol class="cc-connection-steps">' +
+        '<li><strong>当前连接</strong><span>' +
+        E(slot.state === 'registered' ? '已登记，使用现有项目授权' : '请先在原聊天使用加入码登记') +
+        '</span></li>' +
+        '<li><strong>允许范围</strong><span>' +
+        E(available ? '已确认 · ' + policy.purpose : '先确认一次允许的用途、目标和能力') +
+        '</span>' +
         (policy
-          ? '<p>' +
-            E(policy.purpose) +
-            '</p><small>版本 ' +
-            E(policy.version) +
+          ? '<small>' +
+            E(
+              policyTargets(policy)
+                .map((id) => targetLabel(policy, id))
+                .join('、'),
+            ) +
+            ' · ' +
+            E(capabilitiesLabel(policy.capabilities)) +
             ' · 到期 ' +
             E(when(policy.expires_at)) +
+            '</small>'
+          : '') +
+        '</li>' +
+        '<li><strong>原生接入</strong><span data-connection-status="notification">' +
+        (active ? '当前范围已订阅' : '等待对应聊天完成原生订阅') +
+        '</span><small>尚未核实宿主处理方式；在原聊天确认后生效。</small></li>' +
+        '<li><strong>实际处理</strong><span data-connection-status="progress">' +
+        E(progress) +
+        '</span><small>订阅有效不表示助手在线或正在执行。</small></li></ol>' +
+        (policy?.blocked_reason ? '<p class="cc-hint">' + E(policy.blocked_reason) + '</p>' : '') +
+        '<div class="cc-actions">' +
+        (state.snapshot?.can_manage
+          ? button(
+              'delegation-connect',
+              '接通并处理委托',
+              slot,
+              'data-mode="managed_execution"',
+            ).replace('class="btn"', 'class="btn primary"') +
+            (available
+              ? button('delegation-connect', '仅接收提醒', slot, 'data-mode="notification_only"')
+              : button('mention-notifications', '仅接收提醒', slot))
+          : '') +
+        '</div>' +
+        (instruction
+          ? '<section class="cc-connection-instruction" data-consumer-mode="' +
+            E(mode) +
+            '"><strong>' +
+            (mode === 'managed_execution' ? '已选择：处理范围内的明确委托' : '已选择：仅接收提醒') +
+            '</strong><p class="cc-hint">把接入说明复制到对应原聊天，在那里确认后生效。已有允许范围和有效订阅会被复用。</p>' +
+            button('delegation-copy', '复制接入说明', slot).replace(
+              'class="btn"',
+              'class="btn primary"',
+            ) +
+            '<details class="cc-instruction-details"><summary>查看完整接入说明</summary>' +
+            field(
+              '完整接入说明',
+              '<textarea class="cc-delegation-instruction" rows="4" readonly>' +
+                E(instruction) +
+                '</textarea>',
+            ) +
+            '</details></section>'
+          : '') +
+        (available
+          ? '<p class="cc-hint">范围内明确选择“交给助手处理”并发送即可。普通 @ 讨论不会创建委托。</p>'
+          : '') +
+        (policy && state.snapshot?.can_manage
+          ? '<details class="cc-connection-settings"><summary>修改允许范围与管理</summary>' +
+            button('delegation-setup', '修改允许范围', slot) +
+            (available ? button('delegation-pause', '暂停后续委托', policy) : '') +
+            '<small>版本 ' +
+            E(policy.version) +
             ' · 已用 ' +
             E(policy.usage?.delegations || 0) +
             ' / ' +
             E(policy.usage?.max_delegations || 0) +
-            ' 次</small>' +
-            (policy.blocked_reason ? '<p>' + E(policy.blocked_reason) + '</p>' : '')
+            ' 次。只有范围改变时才需重新审阅。</small></details>'
           : '') +
-        '<p>委托通知：' +
-        E(policy?.notification_state === 'active' ? '本范围的订阅有效' : '尚未接通当前范围') +
-        '</p>' +
-        '<p class="cc-hint">普通讨论只保存消息。明确选择“交给助手处理”并发送，才创建本次委托，并在本话题回报进度与结果。</p>' +
-        (state.snapshot?.can_manage
-          ? button('delegation-setup', policy ? '重新审阅委托范围' : '设置委托范围', slot)
-          : '') +
-        (state.snapshot?.can_manage && policyAvailable(policy)
-          ? button('delegation-pause', '暂停后续委托', policy)
-          : '') +
-        (instruction
-          ? field(
-              '发到对应聊天的委托订阅指令',
-              '<textarea class="cc-delegation-instruction" rows="5" readonly>' +
-                E(instruction) +
-                '</textarea>',
-            ) + button('delegation-copy', '复制委托订阅指令', slot)
-          : '') +
-        '<small>启用范围与订阅接通分别记录；排队不表示助手在线、已读或已执行。</small></section>'
+        '</section>'
       );
     }
     function messageCard(message) {
@@ -237,12 +409,29 @@ window.CodePierCollaborationDelegation = {
       };
       const status = d.delivery_status || 'not_dispatched';
       const retry = ['not_subscribed', 'dispatch_required', 'not_dispatched'].includes(status);
+      const next = {
+        not_subscribed: '接通对应聊天后，可继续派发这条已保存的委托。',
+        dispatch_required: '连接已接通，点击继续派发原任务。',
+        not_dispatched: '点击继续派发；不需要重发正文。',
+        queued: '等待宿主接收并让助手领取。',
+        accepted: '提醒已受理，尚未领取；可在接入页核对处理方式。',
+        leased: '助手已领取，正在等待实际操作记录。',
+        running: '按已选择范围处理，结果会回到这个话题。',
+        blocked: d.retry_blocked_eligible
+          ? '补齐阻塞条件后，可重试尚未开始的步骤。'
+          : '查看受阻原因与已有操作，再决定下一步。',
+        failed: '查看实际操作和失败原因，再决定是否发出新委托。',
+        policy_inactive: '原范围已暂停或到期，请核对允许范围。',
+        succeeded: '结果已回到原话题，请核对证据与限制。',
+      };
       return (
         '<section class="cc-linked-card cc-delegation-message" data-delegation-state="' +
         E(status) +
         '"><strong>' +
         E(names[status] || status) +
-        '</strong><p>领取、实际操作与回帖分别记录。</p>' +
+        '</strong><p>' +
+        E(next[status] || '领取、实际操作与回帖分别记录。') +
+        '</p>' +
         (d.progress?.counts
           ? '<small>共 ' +
             E(Object.values(d.progress.counts).reduce((sum, n) => sum + n, 0)) +
@@ -442,6 +631,26 @@ window.CodePierCollaborationDelegation = {
     }
     async function act(action, element) {
       const local = { local: true, message: '' };
+      if (action === 'delegation-scope') {
+        openScope(element);
+        return local;
+      }
+      if (action === 'delegation-connect') {
+        const slot = mentionSlots().find((item) => item.id === element.dataset.id);
+        if (!slot || !liveJoin(slot) || slot.state !== 'registered')
+          throw new Error('请先在原聊天使用加入码登记这个位置。');
+        const mode =
+          element.dataset.mode === 'notification_only' ? 'notification_only' : 'managed_execution';
+        chooseConnectionMode(slot, mode);
+        if (!policyAvailable(policyFor(slot.id))) return act('delegation-setup', element);
+        const records = await readDrawer('delegation_policies', '', '接通 ' + slot.label, element);
+        if (!records) return local;
+        updatePolicies(records.items || []);
+        chooseConnectionMode(slot, mode);
+        if (!policyAvailable(policyFor(slot.id))) return act('delegation-setup', element);
+        showDrawer('接通 ' + slot.label, policyCard(slot), element);
+        return local;
+      }
       if (action === 'delegation-remind' || action === 'delegation-retry-blocked') {
         const generation = state.generation;
         const retryBlocked = action === 'delegation-retry-blocked';
@@ -474,12 +683,13 @@ window.CodePierCollaborationDelegation = {
           throw new Error('当前服务尚未支持直接委托。');
         const records = await readDrawer('delegation_policies', '', '审阅委托范围', element);
         if (!records) return local;
-        state.delegationPolicies = records.items || [];
+        updatePolicies(records.items || []);
         const slot = mentionSlots().find((item) => item.id === element.dataset.id);
         if (!slot || !liveJoin(slot) || slot.state !== 'registered')
           throw new Error('请先接通这个仍有效的聊天位置，再设置委托。');
         const generation = state.generation,
-          epoch = state.drawerEpoch;
+          epoch = state.drawerEpoch,
+          policyVersion = policyFor(slot.id)?.version || 0;
         let targets = [],
           targetError = '';
         try {
@@ -493,23 +703,40 @@ window.CodePierCollaborationDelegation = {
           targetError = '已保存 VPS 列表暂不可用：' + error.message;
         }
         if (generation !== state.generation || epoch !== state.drawerEpoch) return local;
+        if ((policyFor(slot.id)?.version || 0) !== policyVersion) {
+          showDrawer('范围已更新', policyCard(slot), element);
+          return { local: true, message: '允许范围已更新，已显示当前版本；正文已保留。' };
+        }
         showDrawer('审阅委托范围', delegationForm(slot, targets, targetError), element);
         return local;
       }
       if (action === 'delegation-copy') {
-        const area = element
-          .closest('.cc-delegation-policy')
-          .querySelector('.cc-delegation-instruction');
-        area.focus();
-        area.select();
-        area.setSelectionRange(0, area.value.length);
+        const card = element.closest('.cc-delegation-policy');
+        const slot = mentionSlots().find((item) => item.id === card.dataset.policySlot);
+        const policy = slot && policyFor(slot.id);
+        if (!policyAvailable(policy) || Number(card.dataset.policyVersion) !== policy.version) {
+          if (slot) showDrawer('核对当前允许范围', policyCard(slot), element);
+          return {
+            local: true,
+            message: '允许范围已改变或不可用，请重新选择接入方式；正文已保留。',
+          };
+        }
+        const area = card.querySelector('.cc-delegation-instruction');
         try {
           if (navigator.clipboard?.writeText) {
             await navigator.clipboard.writeText(area.value);
-            return { local: true, message: '已复制委托订阅指令，请在对应原聊天完成原生确认。' };
+            return {
+              local: true,
+              message: '已复制接入指令，请在对应原聊天继续；已有范围和订阅会被复用。',
+            };
           }
         } catch {}
-        return { local: true, message: '已选中委托订阅指令，请使用系统复制。' };
+        const details = area.closest('details');
+        if (details) details.open = true;
+        area.focus();
+        area.select();
+        area.setSelectionRange(0, area.value.length);
+        return { local: true, message: '已展开并选中接入说明，请使用系统复制。' };
       }
       if (action === 'delegation-pause') {
         const generation = state.generation;
@@ -533,6 +760,40 @@ window.CodePierCollaborationDelegation = {
     }
     async function submit(form) {
       const data = Object.fromEntries(new FormData(form));
+      if (form.id === 'cc-delegation-scope') {
+        const c = chat(),
+          policy = selectedPolicy();
+        if (
+          !selectedDelegationValid() ||
+          form.dataset.policyId !== policy.id ||
+          Number(form.dataset.policyVersion) !== policy.version
+        )
+          throw new Error('允许范围已改变，请重新选择本次范围；正文已保留。');
+        const formData = new FormData(form),
+          targets = formData.getAll('execution_targets'),
+          capabilities = [
+            'read',
+            ...formData.getAll('capabilities').filter((cap) => cap !== 'read'),
+          ];
+        if (!targets.length) throw new Error('请选择本次在哪些已批准目标处理。');
+        if (
+          targets.some(
+            (id) => !policyTargets(policy).includes(id) || !targetAvailable(policy, id),
+          ) ||
+          capabilities.some((cap) => !policy.capabilities.includes(cap))
+        )
+          throw new Error('所选范围已不可用，请重新核对。');
+        if (targets.some((id) => id.startsWith('vps:')) && !capabilities.includes('execute'))
+          throw new Error('在 VPS 处理需要本次启用运行命令能力。');
+        if (capabilities.includes('write') && !targets.includes('project_agent'))
+          throw new Error('修改项目文件需要本次包含项目 Agent。');
+        c.delegationTargets = targets;
+        c.delegationCapabilities = capabilities;
+        c.acceptance = String(data.delegation_acceptance || c.acceptance).trim();
+        closeDrawer();
+        patchDelegationComposer();
+        return { local: true, message: '本次范围已选择，可直接发送委托。' };
+      }
       if (form.id === 'cc-delegation-policy') {
         if (!form.elements.confirm.checked) throw new Error('请先确认本次委托范围。');
         const formData = new FormData(form);
@@ -567,21 +828,26 @@ window.CodePierCollaborationDelegation = {
         });
         if (generation !== state.generation) return { local: true };
         if (result.policy)
-          state.delegationPolicies = [
+          updatePolicies([
             ...state.delegationPolicies.filter((p) => p.slot_id !== result.policy.slot_id),
             result.policy,
-          ];
+          ]);
         patchDelegationComposer();
         const slot = mentionSlots().find((s) => s.id === form.dataset.slot);
-        if (epoch === state.drawerEpoch && slot)
+        if (epoch === state.drawerEpoch && slot) {
+          chooseConnectionMode(
+            slot,
+            state.delegationConnectionModes?.[slot.id]?.mode || 'managed_execution',
+          );
           showDrawer(
             '委托范围已保存',
             policyCard(slot),
             document.querySelector('[data-cc-action="mentions"]'),
           );
+        }
         return {
           local: true,
-          message: '委托范围已保存。请在原聊天完成此范围的原生订阅，再明确选择委托发送。',
+          message: '委托范围已保存。复制接入指令到原聊天继续；以后在此范围内直接选择助手发送。',
         };
       }
 
@@ -593,6 +859,10 @@ window.CodePierCollaborationDelegation = {
       selectedPolicy,
       policyAvailable,
       selectedDelegationValid,
+      selectedScopeValid,
+      selectPolicy,
+      openScope,
+      updatePolicies,
       delegationComposer,
       delegationContext,
       patchDelegationComposer,

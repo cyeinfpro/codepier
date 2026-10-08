@@ -539,20 +539,10 @@ window.CodePierCollaborationGoals = {
     }
     function subscription(g) {
       if (g.delegation) {
-        const request = g.delegation.subscription_request;
-        if (!request)
-          return empty('原委托范围已不可用。请核对已有操作，再重新审阅范围并发送新委托。');
-        const instruction = window.CodePierCollaborationDelegation.subscriptionInstruction(request);
         return (
-          '<details class="cc-goal-subscription"><summary>连接本委托范围的通知</summary>' +
-          field(
-            '委托范围订阅指令',
-            '<textarea rows="5" readonly class="cc-goal-subscription-text">' +
-              E(instruction) +
-              '</textarea>',
-          ) +
-          button('goal-copy-subscription', '复制委托订阅指令') +
-          '</details>'
+          '<section class="cc-goal-subscription"><p class="cc-hint">继续使用原委托范围；接入与处理方式在同一处核对。</p>' +
+          button('mention-connect', '接通与处理方式', { id: g.delegation.slot_id }) +
+          '</section>'
         );
       }
       if (g.state !== 'active' || !options?.work_event) return '';

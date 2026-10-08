@@ -89,9 +89,10 @@ def test_code_is_identifier_not_new_authority_or_worker_binding(collab):
     assert not s.config.analysis_dispatch_enabled and not s.config.collector_enabled
     with pytest.raises(DevError):
         s.bound_worker(broad, collab[4])
-    definition = next(item for item in tool_definitions() if item['name'] == 'collaboration_join')
+    definition = next(item for item in tool_definitions() if item['name'] == 'collaboration')
     assert definition['annotations']['readOnlyHint'] is False
-    schema = definition['outputSchema']
+    from shared.collaboration_contracts import JoinResult
+    schema = JoinResult.model_json_schema()
     assert 'subscription_requests' in schema['required']
     assert schema['properties']['registered']['const'] is True
     assert schema['properties']['worker_authorized']['const'] is False

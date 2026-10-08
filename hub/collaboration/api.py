@@ -36,6 +36,22 @@ def make_router(auth, runtime):
             return {**result, 'components': service.health}
         return await store.run(inspect)
 
+    @router.get('/delegation-connection')
+    async def delegation_connection(request: Request, project: str, policy_id: str, policy_version: int,
+                                    environment_id: str = 'production', mode: str = 'notification_only'):
+        return await store.run(lambda: service.delegation.consumer.connection({
+            'project': project, 'environment_id': environment_id, 'policy_id': policy_id,
+            'policy_version': policy_version, 'mode': mode}, auth.panel(request)))
+
+    @router.get('/delegation-inbox')
+    async def delegation_inbox(request: Request, project: str, policy_id: str, policy_version: int,
+                               environment_id: str = 'production', mode: str = 'notification_only',
+                               checkpoint: str = '', cursor: str = '', limit: int = Query(default=40, ge=1, le=100)):
+        return await store.run(lambda: service.delegation.consumer.inbox({
+            'project': project, 'environment_id': environment_id, 'policy_id': policy_id,
+            'policy_version': policy_version, 'mode': mode, 'checkpoint': checkpoint,
+            'cursor': cursor, 'limit': limit}, auth.panel(request)))
+
     @router.post('/{operation}')
     async def mutate(operation: str, body: dict, request: Request):
         def perform():

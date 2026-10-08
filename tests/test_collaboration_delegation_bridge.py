@@ -31,7 +31,7 @@ LEGACY_EVENTS = {
 SECRET = 'whsec_' + base64.b64encode(b'bridge-fixture-signing-material!!').decode()
 
 
-def rpc(bridge, method, params=None, *, token=None):
+def rpc(bridge, method, params=None, *, token=None, profile='core'):
     params = dict(params or {})
     headers = {
         'Authorization': 'Bearer ' + (token or bridge.token),
@@ -46,7 +46,7 @@ def rpc(bridge, method, params=None, *, token=None):
         'io.modelcontextprotocol/protocolVersion': '2026-07-28',
         'io.modelcontextprotocol/clientCapabilities': {},
     }
-    return bridge.client.post('/mcp', headers=headers, json={
+    return bridge.client.post('/mcp?profile=' + profile, headers=headers, json={
         'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': params,
     })
 
@@ -162,14 +162,13 @@ def test_public_catalog_exposes_current_reply_and_delegation_contracts(bridge):
     assert discovered['ttlMs'] == 0 and discovered['cacheScope'] == 'private'
     listed = rpc(b, 'tools/list').json()['result']
     tools = {item['name']: item for item in listed['tools']}
-    assert {
-        'collaboration_message_create', 'collaboration_delegation_read',
-        'collaboration_goal_read', 'collaboration_work_claim',
-        'collaboration_work_execute', 'collaboration_work_result',
-    } <= tools.keys()
-    assert 'conversation_id' in tools['collaboration_read']['inputSchema']['properties']
-    assert {'timeline', 'thread', 'message_status'} <= set(
-        tools['collaboration_read']['inputSchema']['properties']['kind']['enum'])
+    assert {'collaboration_query', 'collaboration', 'collaboration_work'} <= tools.keys()
+    assert len(tools) == 16
+    query = tools['collaboration_query']['inputSchema']
+    assert {'timeline', 'thread', 'message_status', 'connection', 'inbox'} <= set(
+        query['discriminator']['mapping'])
+    assert tools['collaboration_query']['annotations']['readOnlyHint']
+    assert not tools['collaboration_work']['annotations']['readOnlyHint']
     assert not any(name in tools for name in (
         'collaboration_delegation_policy', 'collaboration_goal_approve', 'collaboration_message_remind'))
     for entry in tools.values():
@@ -317,7 +316,7 @@ def test_delegation_result_returns_to_original_thread_without_waking_peers(bridg
     }
     result = tool(b, 'collaboration_work_result', result_args)['work_item']
     assert result['state'] == 'succeeded' and result['result']['execution_verified'] is False
-    tool(b, 'collaboration_work_result', result_args)
+    tool(b, 'collaboration_work', {'action': 'result', **result_args})
     thread = tool(b, 'collaboration_read', {
         **b.scope, 'conversation_id': b.room['id'], 'kind': 'thread', 'id': posted['message']['id'],
     })['items']
@@ -474,7 +473,7 @@ def test_real_hub_agent_delegation_write_read_and_thread_result(collaboration_st
         'expected_version': work['version'], 'idempotency_key': key(),
     }
     work = tool(b, 'collaboration_work_claim', claim_args)['work_item']
-    repeated_claim = tool(b, 'collaboration_work_claim', claim_args)['work_item']
+    repeated_claim = tool(b, 'collaboration_work', {'action': 'claim', **claim_args})['work_item']
     assert repeated_claim['attempt'] == work['attempt']
     assert repeated_claim['fencing_token'] == work['fencing_token']
     lease = {
@@ -487,7 +486,7 @@ def test_real_hub_agent_delegation_write_read_and_thread_result(collaboration_st
         }, 'idempotency_key': key(),
     }
     written = tool(b, 'collaboration_work_execute', write_args)
-    repeated_write = tool(b, 'collaboration_work_execute', write_args)
+    repeated_write = tool(b, 'collaboration_work', {'action': 'execute', **write_args})
     assert repeated_write['operation_id'] == written['operation_id']
     write_receipt = s.poll(written['operation_id'])
     assert write_receipt['state'] == 'succeeded', write_receipt
@@ -496,7 +495,7 @@ def test_real_hub_agent_delegation_write_read_and_thread_result(collaboration_st
         **lease, 'tool': 'read', 'arguments': {'path': 'bridge-marker.txt'}, 'idempotency_key': key(),
     }
     observed = tool(b, 'collaboration_work_execute', read_args)
-    repeated_read = tool(b, 'collaboration_work_execute', read_args)
+    repeated_read = tool(b, 'collaboration_work', {'action': 'execute', **read_args})
     assert repeated_read['operation_id'] == observed['operation_id']
     read_receipt = s.poll(observed['operation_id'])
     assert read_receipt['state'] == 'succeeded', read_receipt
@@ -506,7 +505,7 @@ def test_real_hub_agent_delegation_write_read_and_thread_result(collaboration_st
         'operation_ids': [written['operation_id'], observed['operation_id']], 'idempotency_key': key(),
     }
     finished = tool(b, 'collaboration_work_result', result_args)['work_item']
-    tool(b, 'collaboration_work_result', result_args)
+    tool(b, 'collaboration_work', {'action': 'result', **result_args})
     assert finished['result']['execution_verified']
     assert finished['result']['acceptance_verified_by_owner'] is False
     thread = tool(b, 'collaboration_read', {
@@ -519,3 +518,95 @@ def test_real_hub_agent_delegation_write_read_and_thread_result(collaboration_st
     assert results[0]['body']['execution_verified'] is True
     final = tool(b, 'collaboration_delegation_read', {**b.scope, 'delegation_id': posted['delegation_id']})
     assert len(final['operations']) == 2
+    assert final['goal']['usage']['steps'] == 2
+
+
+def test_consumer_setup_and_inbox_are_read_only_over_panel_and_mcp(bridge):
+    b = bridge
+    policy = create_policy(b)
+    args = {**b.scope, 'policy_id': policy['id'], 'policy_version': policy['version'], 'mode': 'managed_execution'}
+    initial = tool(b, 'collaboration_delegation_connection_read', args)
+    assert initial['subscription_created'] is False and initial['permissions_changed'] is False
+    assert initial['consumer_contract']['mode_evidence'] == 'requested_only'
+    response = b.client.get('/api/collaboration/delegation-connection', params=args)
+    assert response.status_code == 200, response.text
+    assert response.json()['subscription_request'] == initial['subscription_request']
+    first = panel(b, 'message', message_args(b, policy=policy))
+    second = panel(b, 'message', message_args(b, policy=policy))
+    read_args = initial['inbox_request']['arguments']
+    pending = tool(b, initial['inbox_request']['tool'], {**read_args, 'limit': 1})
+    assert pending['next_cursor'] and pending['items'][0]['category'] == 'claimable'
+    rest = tool(b, initial['inbox_request']['tool'], {**read_args, 'limit': 1, 'cursor': pending['next_cursor']})
+    assert {pending['items'][0]['delegation_id'], rest['items'][0]['delegation_id']} == {
+        first['delegation_id'], second['delegation_id']}
+    response = b.client.get('/api/collaboration/delegation-inbox', params={key: value for key, value in read_args.items() if key != 'action'})
+    assert response.status_code == 200, response.text
+    assert response.json()['claimed'] is False
+    fresh = tool(b, 'collaboration_delegation_read', {**b.scope, 'delegation_id': first['delegation_id']})
+    assert fresh['work_items'][0]['state'] == 'queued' and fresh['work_items'][0]['attempt'] == 0
+    assert b.app.state.store.one('SELECT COUNT(*) AS n FROM mcp_event_subscriptions')['n'] == 0
+    changed_mode = tool(b, initial['inbox_request']['tool'], {**read_args, 'mode': 'notification_only'}, ok=False)
+    assert 'INVALID_CURSOR' in json.dumps(changed_mode)
+    legacy_changed_mode = tool(b, 'collaboration_delegation_inbox',
+        {**{key: value for key, value in read_args.items() if key != 'action'}, 'mode': 'notification_only'}, ok=False)
+    assert 'INVALID_CURSOR' in json.dumps(legacy_changed_mode)
+    from shared.public_collaboration import ADAPTERS
+    for request in (initial['consumer_contract']['read_request'], initial['inbox_request'],
+                    pending['resume_request'], pending['items'][0]['read_request'],
+                    pending['items'][0]['claim_request']):
+        ADAPTERS[request['tool']].validate_python(request['arguments'])
+
+
+
+def test_consumer_read_cannot_approve_or_retarget_another_grant(bridge):
+    b = bridge
+    policy = create_policy(b)
+    args = {**b.scope, 'policy_id': policy['id'], 'policy_version': policy['version'], 'mode': 'managed_execution'}
+    bad = tool(b, 'collaboration_delegation_connection_read', {**args, 'policy_version': policy['version'] + 1}, ok=False)
+    assert 'DELEGATION_POLICY_CHANGED' in json.dumps(bad)
+    invented = tool(b, 'collaboration_delegation_connection_read', {**args, 'approve': True}, ok=False)
+    assert 'INVALID_ARGUMENTS' in json.dumps(invented)
+
+
+def test_all_public_profiles_are_the_same_native_catalog_and_cached_aliases_still_work(bridge, monkeypatch):
+    from shared.public_collaboration import LEGACY_TOOLS
+    b = bridge
+    catalogs = []
+    for profile in ('core', 'full', 'coding'):
+        listing = rpc(b, 'tools/list', profile=profile).json()['result']['tools']
+        names = {item['name'] for item in listing}
+        assert len(listing) == len(names) == 16
+        assert not names.intersection(LEGACY_TOOLS)
+        catalogs.append(names)
+    assert catalogs[0] == catalogs[1] == catalogs[2]
+    old = tool(b, 'collaboration_read', {**b.scope, 'kind': 'join_slots'})
+    current = tool(b, 'collaboration_query', {**b.scope, 'action': 'join_slots'})
+    assert current == old
+    plan = tool(b, 'collaboration_query', {**b.scope, 'action': 'plan'})
+    assert plan == {'state': 'not_configured'}
+    assert tool(b, 'collaboration_read', {**b.scope, 'kind': 'plan'}) == plan
+    # Approved gateway entries are additional to the sixteen native entries.
+    runtime = b.app.state.runtime
+    monkeypatch.setattr(runtime.gateway, 'tools', lambda principal: [{
+        'name': 'fixture_remote_read', 'description': 'Synthetic approved gateway entry',
+        'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False},
+        'annotations': {'readOnlyHint': True},
+    }])
+    listing = rpc(b, 'tools/list').json()['result']['tools']
+    assert len(listing) == 17 and any(item['name'] == 'fixture_remote_read' for item in listing)
+
+
+def test_read_grant_cannot_execute_through_new_tool_or_hidden_alias(bridge):
+    b = bridge
+    grant = b.client.post('/api/grants', json={'label': 'Read-only catalog fixture',
+        'scopes': ['read'], 'projects': [b.scope['project']], 'days': 1}).json()
+    # Read-only discovery cannot turn arbitrary goal references into authority.
+    payload = {**b.scope, 'goal_id': 'unapproved', 'work_item_id': 'unapproved',
+        'attempt': 1, 'fencing_token': 1, 'idempotency_key': key(),
+        'tool': 'exec', 'arguments': {'command': 'printf must-not-run'}}
+    before = b.app.state.store.one('SELECT COUNT(*) AS n FROM operations')['n']
+    for name, args in (('collaboration_work', {'action': 'execute', **payload}),
+                       ('collaboration_work_execute', payload)):
+        denied = tool(b, name, args, token=grant['token'], ok=False)
+        assert denied['error']['code'] in {'GOAL_NOT_FOUND', 'GOAL_PARTICIPANT_REQUIRED', 'INSUFFICIENT_SCOPE'}
+    assert b.app.state.store.one('SELECT COUNT(*) AS n FROM operations')['n'] == before

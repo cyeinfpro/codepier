@@ -8,6 +8,7 @@ from hub.collaboration.common import DELEGATION_EVENT, canonical
 from hub.collaboration.schema import migrate
 from hub.vps import VPSInput
 from shared.util import DevError
+from shared.public_collaboration import resolve
 from tests.collaboration_support import collab, key  # noqa: F401
 
 
@@ -44,7 +45,7 @@ def claim(context, sent):
     s, _, actor, room, scope, _, _ = context
     goal = s.coordination.object(room, sent['goal_id'])
     item = s.coordination.work(goal, sent['work_item_id'])
-    return s.coordination.work_claim({**scope, 'goal_id': goal['id'], 'work_item_id': item['id'],
+    return s.invoke('collaboration_work', {'action': 'claim', **scope, 'goal_id': goal['id'], 'work_item_id': item['id'],
                                      'expected_version': item['version'], 'idempotency_key': key()}, actor)['work_item']
 
 
@@ -54,8 +55,9 @@ def lease(context, sent, item):
 
 
 def admit(context, sent, item, **arguments):
-    return context[0].coordination.admit({**lease(context, sent, item), 'tool': 'exec',
-                                        'arguments': {'command': 'printf isolated-delegation', **arguments}}, context[2])
+    _, raw = resolve('collaboration_work', {'action': 'execute', **lease(context, sent, item), 'tool': 'exec',
+                                          'arguments': {'command': 'printf isolated-delegation', **arguments}})
+    return context[0].coordination.admit(raw, context[2])
 
 
 def test_migration_and_ordinary_mentions_never_create_policy_or_goal(collab):
@@ -199,7 +201,9 @@ def test_multiple_saved_vps_require_explicit_target_and_exact_snapshot(collab):
     s, owner = collab[:2]
     first, second = saved_vps(s, owner, 'first'), saved_vps(s, owner, 'second')
     c = policy_fixture(collab, execution_targets=[first['target'], second['target']])
-    sent, _ = send(c)
+    deny('DELEGATION_TARGET_REQUIRED', send, c)
+    sent, _ = send(c, delegation={'policy_id': c[5]['id'], 'policy_version': c[5]['version'],
+        'acceptance': 'Check both selected targets.', 'execution_targets': [first['target'], second['target']]})
     item = claim(c, sent)
     deny('DELEGATION_TARGET_REQUIRED', admit, c, sent, item)
     deny('GOAL_TARGET_NOT_APPROVED', lambda: admit(c, sent, item, target='agent'))

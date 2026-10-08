@@ -10,7 +10,8 @@ from __future__ import annotations
 from shared.config import env_csv
 from hub.db_worker import database_endpoint
 from hub.principal import refresh_principal
-from shared.collaboration_contracts import TOOL_MODELS as COLLABORATION_TOOLS
+from shared.public_collaboration import PUBLIC_TOOLS, LEGACY_TOOLS
+COLLABORATION_TOOLS = PUBLIC_TOOLS | LEGACY_TOOLS
 from hub.collaboration.event_errors import CallbackEndpointError, event_error
 from hub.tool_router import ToolRouter
 from shared.role_contracts import ROLE_SCOPE

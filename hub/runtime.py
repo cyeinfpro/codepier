@@ -388,6 +388,8 @@ class Runtime:
         if self._loop is None or self._loop.is_closed():
             self._loop = asyncio.get_running_loop()
         from shared.collaboration_contracts import TOOL_MODELS as COLLABORATION_TOOLS
+        from shared.public_collaboration import resolve as resolve_collaboration
+        name, raw = resolve_collaboration(name, raw)
         if name == 'collaboration_work_execute':
             return await self.collaboration.coordination.execute(raw, principal)
         if name in COLLABORATION_TOOLS:

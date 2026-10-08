@@ -205,7 +205,16 @@ def test_structured_mentions_and_connection_access_review(collaboration_stack, c
         expect(page.locator('.cc-feed .cc-message-mentions')).to_contain_text('@通知位置 Work')
         page.locator('[data-cc-view="agents"]').click()
         card = page.locator(f'[data-speaking-slot="{slot["id"]}"]')
+
+        def reveal_access():
+            expect(page.locator('.collaboration')).not_to_have_attribute('aria-busy', 'true')
+            details = card.locator('xpath=ancestor::details[1]')
+            if details.get_attribute('open') is None:
+                details.locator(':scope > summary').click()
+            expect(card).to_be_visible()
+
         expect(card).to_contain_text('尚未获准')
+        reveal_access()
         card.locator('[data-cc-action="message-access"]').click()
         form = page.locator('#cc-message-access')
         expect(form.locator('[name="confirm"]')).not_to_be_checked()
@@ -218,6 +227,7 @@ def test_structured_mentions_and_connection_access_review(collaboration_stack, c
         expect(card).to_contain_text('已获准在本房间发言')
         members = stack.must(stack.client.get('/api/collaboration', params={**scope(stack), 'kind': 'members'}))['items']
         assert members[0]['can_speak'] and members[0]['speaking_version'] == 1
+        reveal_access()
         card.locator('summary').click()
         expect(card.locator('.cc-mention-instruction')).to_contain_text('codepier.collaboration.message_mentioned.v1')
         assert overview(stack)['agents'] == []  # Speaking still grants no task eligibility.
@@ -232,6 +242,7 @@ def test_structured_mentions_and_connection_access_review(collaboration_stack, c
         form.locator('button[type="submit"]').click()
         expect(page.locator('#cc-feedback')).to_contain_text('重新审阅')
         expect(page.locator('#cc-drawer')).not_to_be_visible()
+        reveal_access()
         card.locator('[data-cc-action="message-access"]').click()
         expect(form).to_have_attribute('data-version', '2')
         expect(form.locator('[name="confirm"]')).not_to_be_checked()
@@ -655,14 +666,14 @@ def test_older_background_poll_cannot_replace_new_foreground_snapshot(collaborat
         expect(page.locator('html')).to_have_attribute('data-old-poll-held', 'yes')
         register_notification_fixture(stack, '新快照里的通知连接')
         click_room_refresh(page)
-        expect(page.locator('.cc-member-strip')).to_contain_text('1 个通知位置')
+        expect(page.locator('.cc-member-strip')).to_contain_text('1 个助手连接')
         expect(page.locator('[data-cc-action="refresh"]')).to_be_enabled()
         page.locator('[data-cc-action="mentions"]').click()
         expect(page.locator('[data-cc-action="pick-mention"]')).to_contain_text('新快照里的通知连接')
         held[0][0].fulfill(response=held[0][1])
         page.evaluate('() => window.__ccHeldPoll')
         page.unroute('**/api/collaboration?*', hold_first_overview)
-        expect(page.locator('.cc-member-strip')).to_contain_text('1 个通知位置')
+        expect(page.locator('.cc-member-strip')).to_contain_text('1 个助手连接')
         expect(page.locator('#cc-drawer')).to_be_visible()
         page.locator('[data-cc-action="pick-mention"]').click()
         page.keyboard.press('Escape')

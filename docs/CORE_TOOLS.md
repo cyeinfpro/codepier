@@ -1,8 +1,41 @@
-# 九个 MCP 工具
+# MCP 工具与调用约定
 
-CodePier 的九个核心开发工具为 `workspace`、`read`、`write`、`edit`、`exec`、`process`、`vps`、`browser`、`computer`。旧的独立 MCP 工具入口已移除，调用会返回 `TOOL_REMOVED`；`full`、`coding` 目录也不恢复旧入口。面板和 Agent 内部仍复用原有执行、权限和持久化实现。
+基础目录有 13 个工具：九个开发原语 `workspace`、`read`、`write`、`edit`、`exec`、`process`、`vps`、`browser`、`computer`，两个专用只读查询 `project_query`、`task_query`，以及身份与当前权限 `get_profile`、`get_access_context`。协作开启后增加三个入口，标准目录合计 16 个；按授权可用的外部网关工具另外计算。
 
-身份工具 `get_profile`、`get_access_context` 额外提供稳定身份和实时权限摘要。经明确同意的动态角色连接还可使用已审核的外部 MCP 工具及 `gateway_call_get` 回执查询，详见 [MCP 网关](MCP_GATEWAY.md)。
+保留标准身份、原生附件写入和精确补丁各自的语义。此前已退役的旧开发工具仍返回 `TOOL_REMOVED`，`full`、`coding` 不恢复它们。1.20 对旧协作工具采用不同的兼容方式：旧名称不再出现在工具目录中，但已缓存客户端的调用继续进入相同权限检查和业务处理；不能用别名绕过功能开关或授权。
+
+经明确同意的动态角色连接还可使用已审核的外部 MCP 工具及 `gateway_call_get` 回执查询，详见 [MCP 网关](MCP_GATEWAY.md)。
+
+## 三个协作入口
+
+| 工具 | 用途与典型 action | 注解 |
+| --- | --- | --- |
+| `collaboration_query` | 读取房间/消息/目标/证据；`connection` 获取接入契约，`inbox` 协调当前待办，`delegation` 核对原委托，`plan_validate` 只校验监控草稿 | 只读 |
+| `collaboration` | `join`、`message`、`command`、`goal_create/update/message`、`plan_save`；登记连接、讨论与提案，不替房主批准权限 | 非只读 |
+| `collaboration_work` | 受管 `create/assign/claim/heartbeat/execute/result`；原只读分析的 `analysis_claim/analysis_heartbeat/analysis_result/analysis_block`、`job_evidence` 和 `ack` | 非只读；执行能力保持保守注解 |
+
+每个 action 有独立的精确输入分支，必填字段和允许字段按实际操作校验；`execute` 还按文件读取、写入、修改或命令步骤区分参数。没有用任意字典把未批准工具隐藏到只读入口。输出包含不同业务对象的扩展字段，不宣称所有输出都是闭合 schema。
+
+任务证据读取会按原规则消耗分析调用预算，因此 `job_evidence` 属于受管动作，不标为只读；不会为了减少工具而取消预算检查。
+
+新旧入口归一化后复用原业务幂等键、任务尝试、租约、fencing、当前规则和目标检查。同一个原操作不会因为换入口而再次准入。只读分析原有用途绑定、项目文件读写能力和实际 Shell 执行能力仍分别核对。
+
+新消费者读取 `collaboration_query(action="connection")` 返回的说明和精确过滤器。初次得到的检查点保存到宿主持久处理说明；后续唤醒调用 `collaboration_query(action="inbox")` 并复用原检查点。领取、续租、执行和结果分别通过 `collaboration_work` 的对应 action，不能借普通 `exec` 绕过批准或暂停。完整流程见 [聊天室指南](COLLABORATION_CHATROOM.md)。
+
+### 旧消费者迁移
+
+| 旧名称 | 新公开入口 |
+| --- | --- |
+| `collaboration_read` | `collaboration_query` 对应记录 action；任务证据改用 `collaboration_work(action="job_evidence")`，结果证据仍用 query 的 `result_evidence` |
+| `collaboration_goal_read`、`collaboration_delegation_read` | `collaboration_query` 的 `goal`、`delegation` |
+| `collaboration_delegation_connection_read`、`collaboration_delegation_inbox` | `collaboration_query` 的 `connection`、`inbox` |
+| `collaboration_join`、`collaboration_message_create`、`collaboration_command_create` | `collaboration` 的 `join`、`message`、`command` |
+| `collaboration_goal_create/update/message` | `collaboration` 对应的 `goal_create/update/message` |
+| `collaboration_work_create/assign/claim/heartbeat/execute/result` | `collaboration_work` 对应 action |
+| `collaboration_claim/heartbeat/result/block`、`collaboration_ack` | `collaboration_work` 的 `analysis_*`、`ack` |
+| `monitor_plan_validate`、`monitor_plan_save` | `collaboration_query(action="plan_validate")`、`collaboration(action="plan_save")` |
+
+升级不修改任何既有宿主自动化。客户端刷新目录后，固定写了旧函数名称的消费者应按映射更新调用，保持原模式、范围、事件身份和历史检查点；只改函数入口不代表同意从提醒升级为执行。后端兼容旧请求，不等于宿主已经发现新目录或迁移了旧提示。按原生确认流程核对真实收件和连续任务结果，不以目录计数代替验收。
 
 ## 工作区与宿主信息
 

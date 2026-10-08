@@ -14,7 +14,7 @@ def test_chat_tool_owner_permission_csrf_and_no_implicit_jobs(collaboration_stac
     assert status['schema_version'] == 3 and status['capabilities']['plain_messages']
     grant = s.must(s.client.post('/api/grants', json={'label': 'Chat fixture', 'scopes': ['read'], 'projects': [s.project['id']], 'days': 1}))
     catalog = modern(s, 'tools/list', token=grant['token']).json()['result']['tools']
-    assert any(tool['name'] == 'collaboration_message_create' for tool in catalog)
+    assert any(tool['name'] == 'collaboration' for tool in catalog)
     args = {**scope, 'room_id': room['id'], 'body_text': 'ordinary @Work', 'client_message_id': key(), 'idempotency_key': key()}
     assert s.client.post('/api/collaboration/message', json=args, headers={'X-RD-CSRF': 'invalid'}).status_code == 403
     posted = s.must(s.client.post('/api/collaboration/message', json=args))
@@ -44,7 +44,13 @@ def test_disabled_feature_does_not_discover_chat_tool(tmp_path, monkeypatch):
     monkeypatch.setenv('CODEPIER_COLLABORATION_ENABLED', 'false')
     with running_stack(tmp_path / 'disabled-chat') as s:
         catalog = modern(s, 'tools/list').json()['result']['tools']
-        assert all(tool['name'] != 'collaboration_message_create' for tool in catalog)
+        assert all(not tool['name'].startswith('collaboration') for tool in catalog)
+        assert len(catalog) == 13
+        for name in ('collaboration_query', 'collaboration', 'collaboration_work',
+                     'collaboration_read', 'collaboration_join', 'collaboration_work_execute'):
+            result = modern(s, 'tools/call', {'name': name, 'arguments': {}}).json()
+            assert result.get('error', {}).get('code') == -32602
+
 
 
 def test_http_default_room_add_project_and_independent_new_room(collaboration_stack):

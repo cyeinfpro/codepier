@@ -113,7 +113,7 @@ class JoiningService:
         return (f'@CodePier 我要在{host}持续接收协作通知，请继续完成已登记位置 {slot["id"]} 的事件订阅。'
                 '查找宿主的原生事件订阅/自动化能力，并读取可订阅事件源，选择实际提供下列事件的连接器标识；'
                 '不要从插件名称、插件 ID 或旧会话缓存推导 connector_id。'
-                f'用 collaboration_read 读取项目 {room["project_id"]}、环境 {room["environment_id"]} '
+                f'用 collaboration_query(action=join_slots) 读取项目 {room["project_id"]}、环境 {room["environment_id"]} '
                 '的 join_slots，核对当前授权、位置状态和仍缺少的订阅。'
                 '按宿主原生确认流程创建全部缺失的事件订阅，已存在的订阅保持原有身份，面板暂停的订阅需先由用户恢复。'
                 '收到通知后只读取当前状态并用中文简短汇总，不领取或执行业务任务；测试事件仅回复事件编号。'

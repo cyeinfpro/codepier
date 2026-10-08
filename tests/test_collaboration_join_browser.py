@@ -65,6 +65,17 @@ def refresh(page):
     page.locator('[data-cc-action="refresh"]').click()
     expect(page.locator('#cc-join-slot')).to_be_visible()
     expect(page.locator('#cc-feedback')).to_have_text('状态已刷新。')
+    open_monitor_details(page)
+
+
+def open_monitor_details(page):
+    expect(page.locator('#cc-join-slot')).to_be_visible()
+    expect(page.locator('.collaboration')).not_to_have_attribute('aria-busy', 'true')
+    # Monitor coverage remains an advanced, optional path for these legacy tests.
+    for summary in page.locator('.cc-join details > summary').filter(
+            has_text='高级：项目监控订阅与测试').all():
+        if summary.locator('..').get_attribute('open') is None:
+            summary.click()
 
 
 def join_existing_connection(stack, code):
@@ -99,7 +110,7 @@ def test_join_panel_create_copy_expiry_join_and_revoke(collaboration_stack, chat
     try:
         login(page, stack)
         open_room(page, stack)
-        expect(page.locator('.cc-join-steps li')).to_have_count(4)
+        expect(page.locator('.cc-join-intro')).to_contain_text('确认一次处理范围，复制一条接入指令')
         label = '协调 dot <img src=x onerror="window.joinXss=true">'
         card = create_slot(page, label)
         expect(card).to_be_visible()
@@ -165,6 +176,7 @@ def test_join_panel_create_copy_expiry_join_and_revoke(collaboration_stack, chat
         page.reload()
         expect(page.locator('#page h1')).to_have_text('协作中心')
         page.locator('[data-cc-view="agents"]').click()
+        open_monitor_details(page)
         expect(card.locator('.cc-status').first).to_have_text('等待宿主订阅')
         expect(card.locator('.cc-join-code')).to_have_count(0)
         resumed = card.locator('.cc-join-instruction').input_value()

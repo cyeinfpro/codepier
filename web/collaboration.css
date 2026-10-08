@@ -1538,3 +1538,96 @@ body:has(.cc-chat-shell) .mobile-dock {
 #cc-goal-approve .cc-actions {
   flex-wrap: wrap;
 }
+
+/* One connection path and a compact, always visible per-send scope. */
+.cc-connection-steps {
+  list-style: none;
+  padding: 0;
+  margin: 16px 0;
+  display: grid;
+  gap: 12px;
+}
+.cc-connection-steps li {
+  display: grid;
+  gap: 4px;
+  padding-left: 12px;
+  border-left: 2px solid var(--ui-line);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.cc-connection-steps strong {
+  color: var(--ui-muted);
+  font-size: 12px;
+}
+.cc-connection-instruction {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--ui-line);
+}
+.cc-connection-instruction .btn {
+  justify-self: start;
+  min-height: 44px;
+}
+.cc-connection-settings {
+  margin-top: 16px;
+}
+.cc-connection-settings > .btn {
+  margin: 12px 6px 12px 0;
+  min-height: 40px;
+}
+.cc-connection-settings > small {
+  display: block;
+}
+.cc-send-scope {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin: 8px 0 2px;
+}
+.cc-send-scope > div {
+  display: flex;
+  gap: 5px;
+  min-width: 0;
+}
+.cc-send-scope dt {
+  color: var(--ui-muted);
+  white-space: nowrap;
+}
+.cc-send-scope dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.cc-delegation-context {
+  max-height: 180px;
+}
+.cc-delegation-context .btn {
+  min-height: 32px;
+  padding: 3px 7px;
+  font-size: 12px;
+}
+.cc-delegation-purpose {
+  color: var(--ui-muted);
+}
+#cc-delegation-scope .cc-actions {
+  position: sticky;
+  bottom: 0;
+  background: var(--ui-panel);
+  padding-block: 12px;
+}
+#cc-delegation-scope .btn {
+  min-height: 44px;
+}
+@media (max-width: 720px) {
+  .cc-send-scope {
+    display: grid;
+    gap: 5px;
+  }
+  .cc-delegation-context .btn {
+    min-height: 40px;
+  }
+  .cc-connection-instruction .btn {
+    justify-self: stretch;
+  }
+}

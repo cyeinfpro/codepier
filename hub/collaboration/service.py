@@ -708,6 +708,17 @@ class CollaborationService:
                       allowed_actions=['collaboration_read', 'collaboration_heartbeat', 'collaboration_result', 'collaboration_block'])
         if job['kind'] == 'propose_monitor_plan':
             public['allowed_actions'].append('monitor_plan_save')
+        # Keep the legacy receipt field stable for cached consumers; current hosts
+        # use the exact tool/action hints rather than an unrestricted work tool.
+        public['canonical_actions'] = [
+            {'tool': 'collaboration_query', 'action': 'job'},
+            {'tool': 'collaboration_work', 'action': 'job_evidence'},
+            {'tool': 'collaboration_work', 'action': 'analysis_heartbeat'},
+            {'tool': 'collaboration_work', 'action': 'analysis_result'},
+            {'tool': 'collaboration_work', 'action': 'analysis_block'},
+        ]
+        if job['kind'] == 'propose_monitor_plan':
+            public['canonical_actions'].append({'tool': 'collaboration', 'action': 'plan_save'})
         if full:
             public['context'] = redact(json.loads(job['context']))
             public['results'] = [self.result_view(row) for row in self.store.all('SELECT * FROM collaboration_results WHERE job_id=? ORDER BY attempt', (job['id'],))]
@@ -724,6 +735,7 @@ class CollaborationService:
             self.grant_principal(room, row['grant_id'])
         except DevError:
             result['binding_status'] = 'authorization_unavailable'
+
         sub = self.store.one('''SELECT COUNT(*) AS n,MAX(last_accepted) AS last_accepted FROM mcp_event_subscriptions
             WHERE room_id=? AND grant_id=? AND state='active' AND expires_at>?''',
             (room['id'], row['grant_id'], self.clock()))
@@ -839,7 +851,7 @@ class CollaborationService:
                         raise DevError('TASK_CONTEXT_REQUIRED', '证据读取需要有效任务租约或 dot 的结果上下文', 403)
                 return self.evidence(room, args['id'])
             if kind == 'plan':
-                return self.monitor.plan_view(room) if self.monitor else {'state': 'unsupported'}
+                return (self.monitor.plan_view(room) or {'state': 'not_configured'}) if self.monitor else {'state': 'unsupported'}
             result = {'room': room, 'features': asdict(self.config), 'setup_required': False,
                       'can_manage': bool(principal.admin and not principal.grant_id),
                       'chat_identity_verified': False, 'production_actions_enabled': False,
@@ -914,9 +926,13 @@ class CollaborationService:
 
     def invoke(self, name, raw, principal):
         self.guard()
+        from shared.public_collaboration import resolve
+        name, raw = resolve(name, raw)
         if name in contracts.COORDINATION_TOOL_MODELS:
             return self.coordination.invoke(name, raw, principal)
-        handlers = {'collaboration_delegation_read': self.delegation.read, 'collaboration_message_create': self.chatroom.create, 'collaboration_join': self.joining.join, 'collaboration_read': self.read, 'collaboration_command_create': self.command,
+        handlers = {'collaboration_delegation_connection_read': self.delegation.consumer.connection,
+                    'collaboration_delegation_inbox': self.delegation.consumer.inbox,
+                    'collaboration_delegation_read': self.delegation.read, 'collaboration_message_create': self.chatroom.create, 'collaboration_join': self.joining.join, 'collaboration_read': self.read, 'collaboration_command_create': self.command,
                     'collaboration_claim': self.claim, 'collaboration_heartbeat': self.heartbeat,
                     'collaboration_result': self.submit, 'collaboration_block': self.block, 'collaboration_ack': self.ack}
         if name in handlers:

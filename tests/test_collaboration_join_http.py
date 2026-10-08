@@ -17,7 +17,7 @@ def test_panel_to_mcp_join_flow_preserves_authority_and_scope(collaboration_stac
     grant = s.must(s.client.post('/api/grants', json={'label': 'Existing synthetic connection',
                    'scopes': ['read', 'write', 'execute'], 'projects': [s.project['id']], 'days': 1}))
     catalog = modern(s, 'tools/list', token=grant['token']).json()['result']['tools']
-    definition = next(tool for tool in catalog if tool['name'] == 'collaboration_join')
+    definition = next(tool for tool in catalog if tool['name'] == 'collaboration')
     assert definition['annotations']['readOnlyHint'] is False
     args = {'code': item['join_code'], 'idempotency_key': key()}
     joined = modern(s, 'tools/call', {'name': 'collaboration_join', 'arguments': args}, token=grant['token']).json()['result']

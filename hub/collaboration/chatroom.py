@@ -195,6 +195,9 @@ class ChatroomService:
         args = validate(contracts.MessageCreate, raw)
         if args['delegation'] is None:
             args.pop('delegation')  # Preserve pre-delegation ordinary-message replay fingerprints.
+        if args.get('delegation'):
+            # Omitted subset fields keep pre-upgrade idempotency fingerprints.
+            args['delegation'] = {key: value for key, value in args['delegation'].items() if value is not None}
         with self.store.transaction():
             principal, room = self.c.scope(principal, args)
             self.same_room(room, args)

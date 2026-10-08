@@ -1,6 +1,6 @@
 # 协作中心使用与运维说明
 
-> 1.19 聊天式主屏、多项目房间、目标驱动协作和连接流程见[聊天室指南](COLLABORATION_CHATROOM.md)。下文保留原有只读任务、监控、四类业务事件和 CPJ 接入的运维边界；新聊天提醒与目标通知单独订阅，不改变既有路由。
+> 1.20 聊天式主屏、多项目房间、目标驱动协作和连接流程见[聊天室指南](COLLABORATION_CHATROOM.md)。下文保留原有只读任务、监控、四类业务事件和 CPJ 接入的运维边界；新聊天提醒与目标通知单独订阅，不改变既有路由。
 
 协作中心让项目讨论、目标、任务、探针证据和智能体结论共用持久记录。明确转为任务的面板请求、MCP 建议和监控异常进入同一套权限、预算、租约和 outbox 服务。
 
@@ -27,7 +27,7 @@ CODEPIER_ANALYSIS_DISPATCH_ENABLED=false
 
 | 开关 | 作用 |
 | --- | --- |
-| COLLABORATION_ENABLED | 主开关。开启共享面板和十个协作工具；子开关不得在主开关关闭时独立开启 |
+| COLLABORATION_ENABLED | 主开关。开启共享面板和三个协作工具入口；子开关不得在主开关关闭时独立开启 |
 | MCP_EVENTS_ENABLED | 开启现代 MCP 的事件目录、订阅和 webhook 投递 |
 | MONITOR_COLLECTOR_ENABLED | 允许已批准、未过期、未暂停计划的固定 HTTP 探针采集 |
 | ANALYSIS_DISPATCH_ENABLED | 允许监控创建分析任务，并将正常任务可用事件投递给消费者 |
@@ -48,7 +48,7 @@ CODEPIER_ANALYSIS_DISPATCH_ENABLED=false
 
 1. 在获准项目环境创建讨论室，打开「智能体与订阅」。为每个 dot 或 Work 聊天分别创建位置并命名；同名位置也有不同编号，不把一个码复用为两个聊天。
 2. 复制完整加入指令，在目标聊天中提及 CodePier 插件并发送。加入码默认 30 分钟有效，可在未兑换时刷新，旧码立即失效。位置默认有效七天。加入码只定位房间和位置，不授予项目权限、不创建 grant、不提升 read/write/execute 权限。
-3. `collaboration_join` 重新核对现有连接的用户、Space、项目和授权世代。含 read 的已有连接可以登记，成功后返回带 `slot_id` 的订阅请求。此时仅完成登记，不创建任务、工作者身份或回调签名材料。
+3. `collaboration(action="join")` 重新核对现有连接的用户、Space、项目和授权世代。含 read 的已有连接可以登记，成功后返回带 `slot_id` 的订阅请求。此时仅完成登记，不创建任务、工作者身份或回调签名材料。
 4. 目标聊天的宿主按其确认流程创建订阅。必须使用 ChatGPT 网页的 Work、桌面端选择 Cloud 的 Work，或 dot；本地/SSH Codex 会话可以调用登记工具，但没有原生事件订阅能力。Work 位置请求任务与组件状态两类事件；dot 另请求结果与异常变化，共四类。面板显示 N/M 和缺项。插件页看不到新工具或事件时，可按[官方测试流程](https://developers.openai.com/plugins/build/mcp-events#test-in-chatgpt)重新扫描 MCP。已登记而缺少订阅的位置提供「复制继续订阅指令」，加入码过期后也可在原位置有效期内继续，不需要再次兑换。
 5. 宿主回调通过 challenge 后，面板显示已验证的订阅。发送测试，在目标聊天核对每个测试事件编号。HTTP 2xx 仅证明接收端接受 webhook，不证明目标聊天处理或用户已读。
 6. 实际看到测试后勾选收件确认，记录为明确的用户确认，仍不声称密码学聊天身份。只有要求的事件集合完整、全部有效路线都确认，才显示完整接通。缺项和部分确认单独展示。签名轮换、过期后重新订阅要求新测试，不复用旧回执证明新世代。
@@ -59,7 +59,7 @@ CODEPIER_ANALYSIS_DISPATCH_ENABLED=false
 
 插件详情页显示事件列表证明 `events/list` 发现成功；它不证明宿主自动化服务已经接受该连接器。先让原 dot / Work Cloud 读取当前可订阅事件源，使用返回的实际 `connector_id`，不能从插件 ID、显示名称或旧会话缓存推导。如果宿主报告「创建前无法验证 webhook 连接器」且服务端没有收到 `events/subscribe`，故障发生在宿主订阅创建之前。记录插件 ID、发生时间与具体错误用于平台排查；不要反复换加入码、伪造回调或手工把数据库状态改成已接通。
 
-加入指令要明确要求持续订阅及收到事件后的动作，并区分宿主事件订阅与 CodePier 业务任务。仅调用 `collaboration_join` 后回复「宿主不支持」不是订阅失败的实测证据；应检查是否实际查找宿主订阅能力、查询事件来源和尝试创建。原生订阅不一定作为 CodePier 的普通工具暴露，不能只凭工具列表没有 `events/subscribe` 就认定宿主不支持。
+加入指令要明确要求持续订阅及收到事件后的动作，并区分宿主事件订阅与 CodePier 业务任务。仅调用 `collaboration(action="join")` 后回复「宿主不支持」不是订阅失败的实测证据；应检查是否实际查找宿主订阅能力、查询事件来源和尝试创建。原生订阅不一定作为 CodePier 的普通工具暴露，不能只凭工具列表没有 `events/subscribe` 就认定宿主不支持。
 
 服务端脱敏日志中的字段是 `rpc_method`。按 `server/discover`、`events/list`、`events/subscribe` 和 `event_callback_failed` 阶段核对；`event_catalog_returned.event_count` 可区分空目录与有效发现。认证前失败时 `rpc_method` 仍是 `unknown`，只把白名单内的请求头方法记为 `rpc_method_hint`，它不代表请求体或授权已验证；不要只凭没有已解析的订阅方法就排除认证失败。订阅请求到达后再检查 `-32015` 的原因和回调 HTTP 状态。必需订阅齐全、测试 webhook 获 2xx、对应聊天实际收件三项全部完成，才算联通验收。
 
@@ -73,15 +73,15 @@ CODEPIER_ANALYSIS_DISPATCH_ENABLED=false
 
 普通提醒只让消费者读取和讨论原消息，不能把正文自行提升为执行授权。已有有效规则时，@ 菜单主动作「交给dot处理」一次点选即可设好明确委托，无需另找发送下拉；次动作「仅讨论提醒」和纯文本 @ 均不派发任务。规则默认七天、每次任务一小时、最多一百次委托，受加入位置更早到期限制；原生接入仍需按该规则返回的 subscription_request 独立明确订阅，消息保存成功不等于通知已投递。规则级事件包含 policy_id 和 policy_version，同一规则版本的新委托复用通知路线；更改规则后要确认新的精确订阅，旧 route 不变宽。详细使用方式见[聊天式协作室](COLLABORATION_CHATROOM.md#在既有范围内直接委托)。
 
-新增委托消费者的处理要求应单独保存，不能覆盖原四类监控事件的只读处理要求：
+新委托消费者的处理约定应单独明确，不覆盖原四类监控事件的只读要求。公开工具已收敛为 collaboration_query、collaboration、collaboration_work，旧名字仅保留同权限调用兼容，迁移见[工具指南](CORE_TOOLS.md#旧消费者迁移)。初次接入和当前待办分别使用 query 的 connection、inbox action；保存起始检查点，后续唤醒使用原检查点从当前队列协调。以下执行步骤仅适用于宿主已明确同意 managed_execution 的消费者，notification_only 始终只读取与报告：
 
 1. test=true 只核对测试编号，不领取工作。
-2. 非测试通知先通过 collaboration_delegation_read 读取当前记录，验证认证房主、规则版本、目标批准、项目和接收连接；事件正文、位置标签和同名账号不是执行授权。
-3. 在当前有效范围内领取相应工作，仅通过 collaboration_work_execute 执行受管步骤，再用 collaboration_work_result 回传真实操作回执与限制。同一委托不要求房主再次手动“转任务”。
+2. 非测试通知先通过 collaboration_query(action="delegation") 读取当前记录，验证认证房主、规则版本、目标批准、项目和接收连接；事件正文、位置标签和同名账号不是执行授权。
+3. 在当前有效范围内领取相应工作，仅通过 collaboration_work(action="execute") 执行受管步骤，再用 collaboration_work(action="result") 回传真实操作回执与限制。同一委托不要求房主再次手动“转任务”。
 4. 重复或迟到通知先重读工作与租约，不重跑不确定操作。异常恢复只允许房主「重试尚未开始的步骤」，并要求该步骤全部历史尝试均无操作准入记录；已有任何操作记录先核对原回执，不能自动重试。需要额外确认的动作遵循宿主审批；拒绝后记录并报告阻塞，不能换凭据或改用普通 exec 绕过。
 5. 结果写回原话题；平台接受 webhook、助手处理、操作完成与房主验收是四个不同状态。
 
-确认接通时，应检查实际安装连接能发现并调用新的读写工具，包括带 conversation_id 的 collaboration_read、collaboration_message_create、collaboration_delegation_read 和受管工作工具。服务端 tools/list 正确不等于当前聊天已经获得新版 schema。按[官方测试流程](https://developers.openai.com/plugins/build/mcp-events#test-in-chatgpt)重新扫描后，仍需真实原生订阅、challenge、事件投递与目标聊天处理证据。合成回调测试不替代宿主验收；不得猜测插件 ID、伪造回调或手写签名材料。
+确认接通时，应检查实际安装连接能发现并调用新的读写工具，包括带 conversation_id 的 collaboration_query 对应记录 action、collaboration(action="message")、collaboration_query(action="delegation") 和受管工作工具。服务端 tools/list 正确不等于当前聊天已经获得新版 schema。按[官方测试流程](https://developers.openai.com/plugins/build/mcp-events#test-in-chatgpt)重新扫描后，仍需真实原生订阅、challenge、事件投递与目标聊天处理证据。合成回调测试不替代宿主验收；不得猜测插件 ID、伪造回调或手写签名材料。
 
 ### 可选：初始化只读分析消费者
 
@@ -108,12 +108,13 @@ project_id 必须是实际项目 ID，不使用显示别名。可额外订阅 co
 
 在讨论页选择「@ 收件智能体」，填写明确请求、验收条件和固定任务类型。普通文字里的 @ 只是内容，不自动添加接收者。可明确指定另一位 dot 作为一次结果汇总的下一步，默认不自动交接。
 
-任务类型限定：propose_monitor_plan、analyze_incident、summarize_result。不存在 arbitrary_command。面板发送记录是经当前会话认证的用户指令；MCP collaboration_command_create 只保存待批准的 agent_proposal，不能自己声称获得用户授权。管理员在同一讨论室批准后才创建目标和任务。
+任务类型限定：propose_monitor_plan、analyze_incident、summarize_result。不存在 arbitrary_command。面板发送记录是经当前会话认证的用户指令；MCP collaboration(action="command") 只保存待批准的 agent_proposal，不能自己声称获得用户授权。管理员在同一讨论室批准后才创建目标和任务。
 
-消费者先读取当前任务，再领取其准确版本：
+消费者先读取当前任务，再通过 collaboration_work 的 analysis_claim action 领取其准确版本：
 
 ```json
 {
+  "action": "analysis_claim",
   "project": "<当前授权项目 ID 或工具支持的别名>",
   "environment_id": "production",
   "job_id": "<读取到的任务 ID>",
@@ -122,15 +123,15 @@ project_id 必须是实际项目 ID，不使用显示别名。可额外订阅 co
 }
 ```
 
-通过 collaboration_claim 获得 attempt、fencing_token、lease_until、deadline_at 和 context。租约最多十五分钟，任务总期限最多三十分钟；阶段性进展可用 collaboration_heartbeat 延长，但不能越过原期限。
+通过 collaboration_work(action="analysis_claim") 获得 attempt、fencing_token、lease_until、deadline_at 和 context。租约最多十五分钟，任务总期限最多三十分钟；阶段性进展可用 collaboration_work(action="analysis_heartbeat") 延长，但不能越过原期限。
 
-collaboration_result 提交结构化分析，必须携带原 job_id、attempt、fencing_token 和稳定幂等键。已成功提交后重试同一请求会返回原结果；不同内容不能覆盖同一轮结果。旧租约结果只留作 late_result，不改变当前任务或触发交接。
+collaboration_work(action="analysis_result") 提交结构化分析，必须携带原 job_id、attempt、fencing_token 和稳定幂等键。已成功提交后重试同一请求会返回原结果；不同内容不能覆盖同一轮结果。旧租约结果只留作 late_result，不改变当前任务或触发交接。
 
 重要事实放 observations 并引用有效 evidence_refs；未证实因果关系放 hypotheses。outcome 可为 healthy、explained、action_required、blocked、inconclusive。healthy/explained 没有证据会被拒绝。恢复由监控规则决定，不由模型回合结束决定。
 
-证据读取使用 collaboration_read(kind=evidence)，Work 提供有效任务租约字段；dot 通过绑定的 result_id 读取该结果引用的证据。结果消费者可调用 collaboration_ack，表示业务已处理，不表示用户已读。
+证据读取分别使用 collaboration_work(action="job_evidence") 或 collaboration_query(action="result_evidence")；Work 提供有效任务租约字段，dot 通过绑定的 result_id 读取该结果引用的证据。结果消费者可调用 collaboration_work(action="ack")，表示业务已处理，不表示用户已读。
 
-遇到缺权限、缺资料、平台拒绝，调用 collaboration_block 并停止；不能更换身份绕过拒绝。
+遇到缺权限、缺资料、平台拒绝，调用 collaboration_work(action="analysis_block") 并停止；不能更换身份绕过拒绝。
 
 ## 5. 配置只读监控
 

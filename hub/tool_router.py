@@ -30,6 +30,10 @@ class ToolRouter:
             from shared.collaboration_contracts import tool_definitions as collaboration_tools
             native += collaboration_tools(authorization=principal.authorization_mode)
         external = self.gateway.tools(principal)
+        from shared.public_collaboration import LEGACY_TOOLS
+        if collaboration is not None and collaboration.config.enabled and any(
+                item['name'] in LEGACY_TOOLS for item in external):
+            raise DevError('TOOL_NAME_COLLISION', '远端工具不能覆盖兼容协作调用', 409)
         names = [item['name'] for item in native + external]
         if len(names) != len(set(names)):
             raise DevError('TOOL_NAME_COLLISION', '工具发布名称冲突；未选择任意后端', 409)
@@ -47,7 +51,13 @@ class ToolRouter:
             raise DevError('TOOL_REMOVED', '旧工具已移除，请使用 ' + REPLACED_MCP_TOOLS[name], 404)
         if name in ADMIN_TOOLS:
             raise DevError('OWNER_REQUIRED', '此操作只接受已授权的管理入口', 403)
-        _, native, external = self.definitions(principal)
+        principal, native, external = self.definitions(principal)
+        from shared.public_collaboration import LEGACY_TOOLS
+        collaboration = getattr(self.store, "collaboration", None)
+        if name in LEGACY_TOOLS and collaboration is not None and collaboration.config.enabled:
+            # Compatibility is a route, not an advertised tool. The same business
+            # handler still rechecks current scope, feature flags, grant and lease.
+            return ToolRoute('native', name)
         if any(item['name'] == name for item in native):
             return ToolRoute('native', name)
         if any(item['name'] == name for item in external):

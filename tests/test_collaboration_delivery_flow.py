@@ -14,6 +14,7 @@ import pytest
 from playwright.sync_api import expect
 
 from shared.mcp_protocol import MODERN, PREFIX, request_headers
+from shared.public_collaboration import request as public_collaboration_request
 from hub.collaboration.config import CollaborationConfig
 from hub.collaboration.events import EventService
 from hub.collaboration.network import Reply
@@ -179,6 +180,7 @@ def test_failed_mentions_persist_and_open_exact_repair_without_resending(collabo
         page.locator('#cc-message-input').fill('接通后继续写的草稿')
         receipt.locator('[data-cc-action="mention-connect"]').click()
         expect(page.locator('#cc-drawer')).to_contain_text('接通 协作 dot')
+        page.locator('#cc-drawer summary').filter(has_text='普通讨论提醒与回帖').click()
         expect(page.locator('.cc-mention-instruction')).to_be_visible()
         expect(page.locator('.cc-mention-instruction')).to_contain_text(slot['id'])
         expect(page.locator('.cc-mention-instruction')).to_contain_text('message_mentioned.v1')
@@ -229,10 +231,13 @@ def test_explicit_policy_and_delegation_keep_plain_chat_inert(collaboration_stac
         assert policies == []
         form.locator('[name="confirm"]').check()
         form.locator('button[type="submit"]').click()
-        expect(page.locator('.cc-delegation-instruction')).to_be_visible()
-        expect(page.locator('.cc-delegation-instruction')).to_contain_text('delegation_available.v1')
-        expect(page.locator('.cc-delegation-instruction')).to_contain_text('collaboration_work_execute')
-        expect(page.locator('.cc-delegation-instruction')).to_contain_text('data.test=true')
+        expect(page.locator('[data-cc-action="delegation-copy"]')).to_be_visible()
+        expect(page.locator('.cc-delegation-instruction')).not_to_be_visible()
+        saved_policy = stack.must(stack.client.get('/api/collaboration', params={
+            **scope(stack), 'kind': 'delegation_policies'}))['items'][0]
+        expect(page.locator('.cc-delegation-instruction')).to_have_value(
+            saved_policy['consumer_contracts']['managed_execution']['instructions'])
+        expect(page.locator('.cc-connection-instruction')).to_have_attribute('data-consumer-mode', 'managed_execution')
         page.keyboard.press('Escape')
         expect(page.locator('#cc-message-input')).to_have_value('委托表单期间仍保留的正文')
         expect(page.locator('[name="delegation_policy"]')).to_have_value('')
@@ -249,7 +254,10 @@ def test_explicit_policy_and_delegation_keep_plain_chat_inert(collaboration_stac
         page.locator('[name="delegation_policy"]').select_option(policy['id'])
         expect(page.locator('.cc-delegation-context')).to_contain_text('本次发送将创建委托')
         page.locator('#cc-message-input').fill('请读取 README 并报告实际内容')
+        page.locator('[data-cc-action="delegation-scope"]').click()
+        page.locator('#cc-delegation-scope summary').click()
         page.locator('[name="delegation_acceptance"]').fill('总结实际读取内容与限制')
+        page.locator('#cc-delegation-scope button[type="submit"]').click()
         page.locator('#cc-command button[type="submit"]').click()
         card = page.locator('.cc-delegation-message')
         expect(card).to_contain_text('任务已保存，尚未接通')
@@ -395,7 +403,9 @@ def test_retry_after_subscription_uses_new_intent_without_new_content(
 
 
 def host_tool(stack, name, arguments):
-    params = {'name': name, 'arguments': arguments,
+    public = public_collaboration_request(name, arguments)
+    assert public['tool'] in {'collaboration_query', 'collaboration', 'collaboration_work'}
+    params = {'name': public['tool'], 'arguments': public['arguments'],
               '_meta': {PREFIX + 'protocolVersion': MODERN, PREFIX + 'clientCapabilities': {}}}
     body = {'jsonrpc': '2.0', 'id': key(), 'method': 'tools/call', 'params': params}
     reply = stack.must(stack.client.post('/mcp', json=body, headers={
@@ -467,9 +477,14 @@ def test_host_reads_real_project_and_returns_one_reply_to_original_thread(
         expect(drawer.locator('[data-cc-action="goal-edit"]')).to_have_count(0)
         expect(drawer.locator('[data-cc-action="goal-review"]')).to_have_count(0)
         expect(drawer.locator('#cc-goal-message')).to_have_count(0)
-        drawer.locator('.cc-goal-subscription summary').click()
-        expect(drawer.locator('.cc-goal-subscription-text')).to_contain_text('delegation_available.v1')
-        assert 'work_available.v1' not in drawer.locator('.cc-goal-subscription-text').input_value()
+        drawer.locator('.cc-goal-subscription [data-cc-action="mention-connect"]').click()
+        expect(drawer.locator('.cc-delegation-policy')).to_be_visible()
+        drawer.locator('[data-mode="managed_execution"]').click()
+        expect(drawer.locator('.cc-delegation-instruction')).to_have_value(
+            policy['consumer_contracts']['managed_execution']['instructions'])
+        assert 'work_available.v1' not in drawer.locator('.cc-delegation-instruction').input_value()
+        page.keyboard.press('Escape')
+        result_card.locator('[data-cc-action="delegation-result"]').click()
         drawer.locator('.cc-work-operations details summary').click()
         expect(drawer).to_contain_text(operated['operation_id'])
         drawer.locator('[data-cc-action="goal-operation"]').click()
@@ -764,5 +779,251 @@ def test_focused_select_keeps_the_version_the_user_saw(collaboration_stack, chat
         goals = stack.must(stack.client.get('/api/collaboration', params={
             **scope(stack), 'kind': 'coordination_goals'}))['items']
         assert goals == []
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_connection_modes_reuse_scope_and_preserve_draft(
+        collaboration_stack, chat_browser_pool, tmp_path, engine):
+    stack = collaboration_stack
+    context = chat_browser_pool(engine).new_context(viewport={'width': 390, 'height': 844})
+    page = context.new_page()
+    posts = []
+    try:
+        room, slot, policy = policy_choice_fixture(page, stack)
+        register_fixture_subscription(stack, policy['subscription_request'])
+        refresh(page)
+        expect(page.locator('#cc-feedback')).to_contain_text('状态已刷新')
+        page.on('request', lambda request: posts.append(urlsplit(request.url).path)
+                if request.method == 'POST' else None)
+        area = page.locator('#cc-message-input')
+        area.fill('接入前已经写好的草稿')
+        page.locator('[data-cc-action="mentions"]').click()
+        page.locator('[data-cc-action="mention-connect"]').click()
+        drawer = page.locator('#cc-drawer')
+        expect(drawer.locator('#cc-delegation-policy')).to_have_count(0)
+        expect(drawer.locator('.cc-delegation-policy')).to_contain_text('当前范围已订阅')
+        expect(drawer.locator('.cc-delegation-policy')).to_contain_text('尚无任务领取记录')
+        expect(drawer.locator('.cc-join-card')).not_to_be_visible()
+        drawer.locator('[data-mode="notification_only"]').click()
+        instruction = drawer.locator('.cc-delegation-instruction')
+        expect(drawer.locator('.cc-connection-instruction')).to_have_attribute('data-consumer-mode', 'notification_only')
+        expect(instruction).to_have_value(policy['consumer_contracts']['notification_only']['instructions'])
+        expect(instruction).not_to_be_visible()
+        drawer.locator('.cc-instruction-details summary').click()
+        instruction.focus()
+        instruction.evaluate('(node) => node.dataset.retained = "yes"')
+        # Refresh through the actual control without stealing focus.
+        page.locator('[data-cc-action="refresh"]').evaluate('(node) => node.click()')
+        expect(page.locator('#cc-feedback')).to_contain_text('状态已刷新')
+        expect(instruction).to_be_focused()
+        expect(instruction).to_have_attribute('data-retained', 'yes')
+        drawer.locator('[data-mode="managed_execution"]').click()
+        expect(drawer.locator('.cc-connection-instruction')).to_have_attribute('data-consumer-mode', 'managed_execution')
+        expect(instruction).to_have_value(policy['consumer_contracts']['managed_execution']['instructions'])
+        expect(instruction).not_to_be_visible()
+        page.evaluate("""() => Object.defineProperty(navigator, 'clipboard', {
+            configurable: true, value: {writeText: async (value) => { window.fixtureCopied = value; }}
+        })""")
+        copy = drawer.locator('[data-cc-action="delegation-copy"]')
+        copy.evaluate("""(node) => node.addEventListener('click', () => {
+            window.fixtureCopyFocusAtClick = document.activeElement;
+        }, {capture: true, once: true})""")
+        copy.click()
+        expect(page.locator('#cc-feedback')).to_contain_text('已复制')
+        # WebKit does not focus buttons on pointer clicks. Verify that our
+        # handler preserves the browser's actual focus at the click boundary.
+        assert page.evaluate('document.activeElement === window.fixtureCopyFocusAtClick')
+        expect(instruction).not_to_be_visible()
+        assert page.evaluate('window.fixtureCopied') == policy['consumer_contracts']['managed_execution']['instructions']
+        screenshot(page, engine + '-connection-managed-mobile.png', tmp_path)
+        page.set_viewport_size({'width': 1440, 'height': 900})
+        screenshot(page, engine + '-connection-managed-desktop.png', tmp_path)
+        page.keyboard.press('Escape')
+        expect(area).to_have_value('接入前已经写好的草稿')
+        assert not any(path.endswith('/delegation-policy') or path.endswith('/delegation-policy-control') for path in posts)
+        latest = stack.must(stack.client.get('/api/collaboration', params={
+            **scope(stack), 'kind': 'delegation_policies'}))['items'][0]
+        assert latest['version'] == policy['version']
+        assert latest['connection_status']['consumer_mode'] == 'unknown'
+        assert messages(stack) == []
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_multiple_targets_choose_per_send_subset_and_double_click_creates_one(
+        collaboration_stack, chat_browser_pool, tmp_path, engine):
+    stack = collaboration_stack
+    context = chat_browser_pool(engine).new_context(viewport={'width': 390, 'height': 844})
+    page = context.new_page()
+    try:
+        login(page, stack)
+        slot = join_slot(stack)
+        room = stack.must(stack.client.get('/api/collaboration', params=scope(stack)))['room']
+        vps = stack.must(stack.client.post('/api/vps', json={
+            'name': '合成检查服务器', 'host': 'delegation-browser.example.invalid',
+            'username': 'fixture', 'password': 'synthetic-browser-fixture-only',
+            'project_ids': [stack.project['id']]}))
+        policy = stack.must(stack.client.post('/api/collaboration/delegation-policy', json={
+            **scope(stack), 'conversation_id': room['id'], 'slot_id': slot['id'],
+            'expected_version': 0, 'purpose': '检查已选择的项目或服务器并报告。',
+            'capabilities': ['read', 'write', 'execute'], 'acknowledge_unsandboxed_exec': True,
+            'execution_targets': ['project_agent', vps['target']],
+            'idempotency_key': key()}))['policy']
+        refresh(page)
+        page.locator('#cc-message-input').fill('请检查这台 VPS 的状态并报告')
+        page.locator('[data-cc-action="mentions"]').click()
+        page.locator('[data-cc-action="pick-delegation"]').click()
+        form = page.locator('#cc-delegation-scope')
+        expect(form).to_be_visible()
+        expect(form.locator('[name="execution_targets"]:checked')).to_have_count(0)
+        expect(form).to_contain_text('合成检查服务器')
+        form.locator('[data-cc-action="close-drawer"]').click()
+        expect(page.locator('#cc-message-input')).to_have_value('请检查这台 VPS 的状态并报告')
+        expect(page.locator('.cc-send-scope')).to_contain_text('请选择本次目标')
+        page.locator('#cc-command button[type="submit"]').click()
+        expect(form).to_be_visible()
+        assert messages(stack) == []
+        form.locator('[name="execution_targets"][value="' + vps['target'] + '"]').check()
+        form.locator('[name="capabilities"][value="write"]').uncheck()
+        form.locator('button[type="submit"]').click()
+        summary = page.locator('.cc-send-scope')
+        expect(summary).to_contain_text('协作 dot')
+        expect(summary).to_contain_text('合成检查服务器')
+        expect(summary).to_contain_text('读取、运行命令')
+        expect(summary).not_to_contain_text('项目 Agent')
+        screenshot(page, engine + '-selected-scope-mobile.png', tmp_path)
+        with page.expect_request('**/api/collaboration/message') as sent:
+            page.locator('#cc-command button[type="submit"]').evaluate('(button) => {button.click(); button.click();}')
+        payload = sent.value.post_data_json['delegation']
+        assert payload['execution_targets'] == [vps['target']]
+        assert payload['capabilities'] == ['read', 'execute']
+        expect(page.locator('#cc-message-input')).to_have_value('')
+        assert len(messages(stack)) == 1
+        delegated = messages(stack)[0]['body']['delegation']
+        fresh = host_tool(stack, 'collaboration_delegation_read', {
+            **scope(stack), 'delegation_id': delegated['delegation_id']})
+        assert fresh['policy']['execution_targets'] == ['project_agent', vps['target']]
+        assert fresh['request_scope']['capabilities'] == ['read', 'execute']
+        assert fresh['request_scope']['execution_targets'] == [vps['target']]
+        assert len(fresh['work_items']) == 1
+        assert fresh['work_items'][0]['required_capabilities'] == ['read', 'execute']
+        assert policy['version'] == payload['policy_version']
+        assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_one_target_is_visible_and_natural_language_does_not_change_authority(
+        collaboration_stack, chat_browser_pool, tmp_path, engine):
+    stack = collaboration_stack
+    context = chat_browser_pool(engine).new_context(viewport={'width': 1440, 'height': 900})
+    page = context.new_page()
+    try:
+        _, _, policy = policy_choice_fixture(page, stack)
+        page.locator('[data-cc-action="mentions"]').click()
+        page.locator('[data-cc-action="pick-delegation"]').click()
+        expect(page.locator('#cc-delegation-scope')).to_have_count(0)
+        expect(page.locator('.cc-send-scope')).to_contain_text('项目 Agent')
+        expect(page.locator('.cc-send-scope')).to_contain_text('读取')
+        area = page.locator('#cc-message-input')
+        area.fill('看看 VPS 上的服务，需要别的目标时告诉我')
+        screenshot(page, engine + '-single-target-desktop.png', tmp_path)
+        with page.expect_request('**/api/collaboration/message') as sent:
+            page.locator('#cc-command button[type="submit"]').click()
+        payload = sent.value.post_data_json
+        assert payload['delegation']['execution_targets'] == ['project_agent']
+        assert payload['delegation']['capabilities'] == ['read']
+        assert payload['delegation']['policy_version'] == policy['version']
+        assert payload['delegation']['acceptance'] == '完成请求，并报告实际检查、结果和限制'
+        expect(area).to_have_value('')
+        assert len(messages(stack)) == 1
+        assert messages(stack)[0]['body']['body_text'] == payload['body_text']
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_unknown_operation_projection_never_claims_running(
+        collaboration_stack, chat_browser_pool, engine):
+    stack = collaboration_stack
+    context = chat_browser_pool(engine).new_context(viewport={'width': 1440, 'height': 900})
+    page = context.new_page()
+    try:
+        policy_choice_fixture(page, stack)
+
+        def unknown_projection(route):
+            response = route.fetch()
+            value = response.json()
+            for policy in value.get('items', []):
+                policy['connection_status']['operation'] = {
+                    'state': 'unknown', 'pending_count': 1, 'unknown_count': 1}
+            route.fulfill(response=response, json=value)
+
+        page.route('**/api/collaboration?*kind=delegation_policies*', unknown_projection)
+        page.locator('[data-cc-action="mentions"]').click()
+        page.locator('[data-cc-action="mention-connect"]').click()
+        card = page.locator('#cc-drawer .cc-delegation-policy')
+        expect(card).to_contain_text('实际操作状态待核对')
+        expect(card).not_to_contain_text('有实际操作正在运行')
+        expect(card).not_to_contain_text('可自动执行')
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_focused_connection_updates_evidence_and_rejects_stale_copy(
+        collaboration_stack, chat_browser_pool, engine):
+    stack = collaboration_stack
+    context = chat_browser_pool(engine).new_context(viewport={'width': 1440, 'height': 900})
+    page = context.new_page()
+    projection = {'unknown': False}
+    try:
+        room, slot, policy = policy_choice_fixture(page, stack)
+
+        def statuses(route):
+            response = route.fetch()
+            value = response.json()
+            if projection['unknown']:
+                for item in value.get('items', []):
+                    item['connection_status']['operation'] = {
+                        'state': 'unknown', 'pending_count': 1, 'unknown_count': 1}
+            route.fulfill(response=response, json=value)
+
+        page.route('**/api/collaboration?*kind=delegation_policies*', statuses)
+        page.locator('#cc-message-input').fill('状态刷新期间保留的正文')
+        page.locator('[data-cc-action="mentions"]').click()
+        page.locator('[data-cc-action="mention-connect"]').click()
+        drawer = page.locator('#cc-drawer')
+        drawer.locator('[data-mode="managed_execution"]').click()
+        copy = drawer.locator('[data-cc-action="delegation-copy"]')
+        copy.focus()
+        copy.evaluate('(node) => node.dataset.retained = "yes"')
+        projection['unknown'] = True
+        page.locator('[data-cc-action="refresh"]').evaluate('(node) => node.click()')
+        expect(page.locator('#cc-feedback')).to_contain_text('状态已刷新')
+        expect(drawer.locator('[data-connection-status="progress"]')).to_have_text('实际操作状态待核对')
+        expect(copy).to_be_focused()
+        expect(copy).to_have_attribute('data-retained', 'yes')
+        updated = revise_policy(stack, room, slot, policy)
+        assert updated['version'] > policy['version']
+        page.locator('[data-cc-action="refresh"]').evaluate('(node) => node.click()')
+        expect(page.locator('#cc-feedback')).to_contain_text('状态已刷新')
+        expect(copy).to_be_focused()
+        expect(drawer.locator('[data-policy-slot]')).to_have_attribute('data-policy-version', str(policy['version']))
+        page.evaluate("""() => Object.defineProperty(navigator, 'clipboard', {
+            configurable: true, value: {writeText: async () => { window.staleCopyCalled = true; }}
+        })""")
+        copy.click()
+        expect(drawer.locator('[data-policy-slot]')).to_have_attribute('data-policy-version', str(updated['version']))
+        expect(drawer.locator('.cc-connection-instruction')).to_have_count(0)
+        expect(page.locator('#cc-feedback')).to_contain_text('重新选择接入方式')
+        assert page.evaluate('window.staleCopyCalled !== true')
+        page.keyboard.press('Escape')
+        expect(page.locator('#cc-message-input')).to_have_value('状态刷新期间保留的正文')
+        assert messages(stack) == []
     finally:
         context.close()
