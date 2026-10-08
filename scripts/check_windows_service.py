@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -58,6 +59,67 @@ def wait_process_exit(pid, seconds=25):
         kernel.CloseHandle(handle)
 
 
+def write_agent_stub(runtime):
+    """Write the exact disposable process exercised by acceptance and regressions."""
+    (runtime/'agent/__main__.py').write_text('''import asyncio,json,os,time
+from pathlib import Path
+from agent import service_watchdog
+from scripts.agent_lifecycle import set_windows_task_enabled
+original = service_watchdog.Watchdog
+service_watchdog.Watchdog = lambda: original(timeout=12, interval=.5)
+base = Path(__file__).resolve().parents[2]
+async def write_progress():
+    temporary = base/'progress.tmp'
+    temporary.write_text(json.dumps({'pid':os.getpid(),'at':time.time()}))
+    deadline = time.monotonic()+2
+    while True:
+        try:
+            temporary.replace(base/'progress.json')
+            return
+        except PermissionError as exc:
+            # Windows readers may briefly hold a handle without FILE_SHARE_DELETE.
+            # Bound only known sharing/access conflicts; real failures still exit.
+            if getattr(exc, 'winerror', None) not in (5, 32, 33) or time.monotonic() >= deadline:
+                raise
+            await asyncio.sleep(.05)
+def main():
+    async def run():
+        with service_watchdog.watch_event_loop():
+            while True:
+                await write_progress()
+                if (base/'check-maintenance').exists():
+                    (base/'check-maintenance').unlink()
+                    for enabled in (False, True):
+                        set_windows_task_enabled((base/'task-name').read_text(), enabled)
+                    (base/'maintenance-checked').touch()
+                if (base/'hang').exists():
+                    while True: time.sleep(.2)
+                await asyncio.sleep(.2)
+    asyncio.run(run())
+''', encoding='utf-8')
+
+
+def read_progress(base):
+    try:
+        progress = json.loads((base/'progress.json').read_text())
+    except (OSError, ValueError):
+        return {}
+    if (not isinstance(progress, dict)
+            or type(progress.get('pid')) is not int or progress['pid'] <= 0
+            or type(progress.get('at')) not in (int, float)
+            or not math.isfinite(progress['at']) or progress['at'] <= 0):
+        return {}
+    return progress
+
+
+def restarted_progress(base, previous):
+    progress = read_progress(base)
+    if (progress and progress['pid'] != previous['pid']
+            and progress['at'] > previous['at']):
+        return progress
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path)
@@ -81,40 +143,14 @@ def main():
         (runtime/'agent/__init__.py').write_text('')
         shutil.copyfile(ROOT/'agent/service_watchdog.py', runtime/'agent/service_watchdog.py')
         (base/'task-name').write_text(name)
-        (runtime/'agent/__main__.py').write_text('''import asyncio,json,os,time
-from pathlib import Path
-from agent import service_watchdog
-from scripts.agent_lifecycle import set_windows_task_enabled
-original = service_watchdog.Watchdog
-service_watchdog.Watchdog = lambda: original(timeout=12, interval=.5)
-base = Path(__file__).resolve().parents[2]
-def main():
-    async def run():
-        with service_watchdog.watch_event_loop():
-            while True:
-                temporary = base/'progress.tmp'
-                temporary.write_text(json.dumps({'pid':os.getpid(),'at':time.time()}))
-                temporary.replace(base/'progress.json')
-                if (base/'check-maintenance').exists():
-                    (base/'check-maintenance').unlink()
-                    for enabled in (False, True):
-                        set_windows_task_enabled((base/'task-name').read_text(), enabled)
-                    (base/'maintenance-checked').touch()
-                if (base/'hang').exists():
-                    while True: time.sleep(.2)
-                await asyncio.sleep(.2)
-    asyncio.run(run())
-''', encoding='utf-8')
+        write_agent_stub(runtime)
         run([sys.executable, '-m', 'venv', '--without-pip', runtime/'.venv'])
         python = runtime/'.venv/Scripts/python.exe'
         installer.write_windows_wrapper(runtime)
         definition = base/'service.xml'
         definition.write_bytes(installer.windows_task_xml(base, python, name, installer.windows_user_sid()))
         def progress():
-            try:
-                return json.loads((base/'progress.json').read_text())
-            except (OSError, ValueError):
-                return {}
+            return read_progress(base)
         created = False
         try:
             # A separate schtasks process starts the task and exits immediately.
@@ -131,7 +167,7 @@ def main():
             result['noninteractive_account_can_manage_recovery'] = True
             # Simulate closing/killing the Agent, without cancelling its task.
             run(['taskkill.exe', '/PID', str(first['pid']), '/F'])
-            second = wait(lambda: p if (p := progress()).get('pid') != first['pid'] else None)
+            second = wait(lambda: restarted_progress(base, first))
             result['killed_process_recovered'] = True
             print('Windowless startup and killed-process recovery passed.', flush=True)
             (base/'hang').touch()
@@ -139,7 +175,7 @@ def main():
             # following timer launch so the new instance can stay healthy.
             wait_process_exit(second['pid'])
             (base/'hang').unlink()
-            third = wait(lambda: p if (p := progress()).get('pid') != second['pid'] else None)
+            third = wait(lambda: restarted_progress(base, second))
             assert third['pid'] not in {first['pid'], second['pid']}
             result['stalled_process_recovered'] = True
             lifecycle.set_windows_task_enabled(name, False)

@@ -349,3 +349,190 @@ def test_source_adoption_refuses_live_foreground_process(tmp_path, monkeypatch):
         with pytest.raises(ValueError, match='foreground Agent'):
             installer.install_source(base, ROOT)
     assert not (base/'runtime').exists()
+
+
+@pytest.fixture
+def acceptance_stub(tmp_path, monkeypatch):
+    from scripts import check_windows_service as acceptance
+    runtime = tmp_path/'runtime'
+    (runtime/'agent').mkdir(parents=True)
+    acceptance.write_agent_stub(runtime)
+    # The real generated module configures Watchdog; restore it after this test.
+    monkeypatch.setattr(service_watchdog, 'Watchdog', service_watchdog.Watchdog)
+    source = runtime/'agent/__main__.py'
+    namespace = {'__file__': str(source), '__name__': 'acceptance_stub'}
+    exec(compile(source.read_text(encoding='utf-8'), str(source), 'exec'), namespace)
+    return acceptance, namespace, source
+
+
+def sharing_error(winerror):
+    error = PermissionError('simulated Windows file sharing conflict')
+    error.winerror = winerror
+    return error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('winerror', [5, 32, 33])
+async def test_acceptance_stub_retries_sharing_conflict_and_yields(
+        acceptance_stub, monkeypatch, tmp_path, winerror):
+    acceptance, namespace, _ = acceptance_stub
+    previous = {'pid': 1, 'at': 1}
+    (tmp_path/'progress.json').write_text(json.dumps(previous))
+    original_replace = Path.replace
+    original_sleep = asyncio.sleep
+    attempts, pauses, heartbeat = [], [], []
+
+    def replace(path, target):
+        attempts.append(target)
+        if len(attempts) <= 2:
+            # Failed replacement must leave the previous complete snapshot intact.
+            assert acceptance.read_progress(tmp_path) == previous
+            raise sharing_error(winerror)
+        return original_replace(path, target)
+
+    async def pause(seconds):
+        pauses.append(seconds)
+        await original_sleep(0)
+
+    async def beat():
+        heartbeat.append(True)
+
+    monkeypatch.setattr(Path, 'replace', replace)
+    namespace['asyncio'] = SimpleNamespace(sleep=pause)
+    beat_task = asyncio.create_task(beat())
+    await namespace['write_progress']()
+    assert beat_task.done() and heartbeat == [True]
+    assert len(attempts) == 3 and pauses == [.05, .05]
+    progress = acceptance.restarted_progress(tmp_path, previous)
+    assert progress and progress['pid'] == namespace['os'].getpid()
+    assert not (tmp_path/'progress.tmp').exists()
+
+
+@pytest.mark.asyncio
+async def test_acceptance_stub_sharing_conflict_has_bounded_original_failure(
+        acceptance_stub, monkeypatch, tmp_path):
+    acceptance, namespace, _ = acceptance_stub
+    previous = {'pid': 1, 'at': 1}
+    (tmp_path/'progress.json').write_text(json.dumps(previous))
+    error = sharing_error(5)
+    now, attempts = [0.0], []
+
+    def replace(_path, _target):
+        attempts.append(now[0])
+        raise error
+
+    async def pause(seconds):
+        assert seconds == .05
+        now[0] += .5
+
+    namespace['time'] = SimpleNamespace(time=lambda: 10.0, monotonic=lambda: now[0])
+    namespace['asyncio'] = SimpleNamespace(sleep=pause)
+    monkeypatch.setattr(Path, 'replace', replace)
+    with pytest.raises(PermissionError) as caught:
+        await namespace['write_progress']()
+    assert caught.value is error
+    assert now[0] == 2.0 and attempts == [0.0, .5, 1.0, 1.5, 2.0]
+    assert acceptance.read_progress(tmp_path) == previous
+    assert acceptance.restarted_progress(tmp_path, previous) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('error', [
+    PermissionError('ordinary permission denied'),
+    sharing_error(87),
+    OSError('disk failure'),
+    RuntimeError('unexpected writer failure'),
+])
+async def test_acceptance_stub_does_not_retry_unrelated_failure(
+        acceptance_stub, monkeypatch, error):
+    _, namespace, _ = acceptance_stub
+    attempts = []
+
+    def replace(_path, _target):
+        attempts.append(True)
+        raise error
+
+    async def pause(_seconds):
+        pytest.fail('unrelated errors must not retry')
+
+    namespace['asyncio'] = SimpleNamespace(sleep=pause)
+    monkeypatch.setattr(Path, 'replace', replace)
+    with pytest.raises(type(error)) as caught:
+        await namespace['write_progress']()
+    assert caught.value is error
+    assert attempts == [True]
+
+
+def test_acceptance_stub_persistent_conflict_exits_process(acceptance_stub):
+    _, _, source = acceptance_stub
+    program = """import runpy, sys
+from pathlib import Path
+def denied(*_args):
+    error = PermissionError('persistent progress write failure')
+    error.winerror = 5
+    raise error
+namespace = runpy.run_path(sys.argv[1])
+Path.replace = denied
+namespace['main']()
+"""
+    completed = subprocess.run([sys.executable, '-c', program, str(source)],
+                               cwd=ROOT, capture_output=True, text=True, timeout=8)
+    assert completed.returncode == 1
+    assert 'PermissionError: persistent progress write failure' in completed.stderr
+    assert 'event loop stalled' not in completed.stderr
+
+
+@pytest.mark.parametrize('snapshot', [
+    '{}', 'null', '[]', '{"at":2}', '{"pid":2}', '{"pid":0,"at":2}',
+    '{"pid":true,"at":2}', '{"pid":"2","at":2}', '{"pid":2,"at":"2"}',
+    '{"pid":2,"at":false}', '{"pid":2,"at":NaN}', '{"pid":2,"at":Infinity}',
+    '{"pid":2,"at":0}', '{"pid":',
+])
+def test_acceptance_invalid_progress_never_proves_recovery(tmp_path, snapshot):
+    from scripts import check_windows_service as acceptance
+    (tmp_path/'progress.json').write_text(snapshot)
+    assert acceptance.read_progress(tmp_path) == {}
+    assert acceptance.restarted_progress(tmp_path, {'pid': 1, 'at': 1}) is None
+
+
+def test_acceptance_unreadable_progress_recovers_without_false_restart(tmp_path, monkeypatch):
+    from scripts import check_windows_service as acceptance
+    previous = {'pid': 1, 'at': 1}
+    assert acceptance.restarted_progress(tmp_path, previous) is None
+    current = {'pid': 2, 'at': 2}
+    path = tmp_path/'progress.json'
+    path.write_text(json.dumps(current))
+    original_read = Path.read_text
+    attempts = []
+
+    def read(target, *args, **kwargs):
+        attempts.append(target)
+        if len(attempts) == 1:
+            raise sharing_error(32)
+        return original_read(target, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'read_text', read)
+    assert acceptance.restarted_progress(tmp_path, previous) is None
+    assert acceptance.restarted_progress(tmp_path, previous) == current
+
+
+@pytest.mark.parametrize('current', [{'pid': 1, 'at': 2}, {'pid': 2, 'at': 1}])
+def test_acceptance_recovery_requires_new_pid_and_new_progress(tmp_path, current):
+    from scripts import check_windows_service as acceptance
+    (tmp_path/'progress.json').write_text(json.dumps(current))
+    assert acceptance.restarted_progress(tmp_path, {'pid': 1, 'at': 1}) is None
+
+
+def test_acceptance_missing_progress_still_times_out(tmp_path, monkeypatch):
+    from scripts import check_windows_service as acceptance
+    now = [0.0]
+
+    def sleep(seconds):
+        now[0] += seconds
+
+    monkeypatch.setattr(acceptance, 'time', SimpleNamespace(
+        monotonic=lambda: now[0], sleep=sleep))
+    with pytest.raises(RuntimeError, match='acceptance timed out'):
+        acceptance.wait(lambda: acceptance.restarted_progress(
+            tmp_path, {'pid': 1, 'at': 1}), seconds=1)
+    assert now[0] == 1.0
