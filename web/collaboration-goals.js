@@ -90,14 +90,14 @@ window.CodePierCollaborationGoals = {
       ))
         node.innerHTML = empty('连接或项目范围已改变，请重新读取。');
     }
-    async function load(snapshot = state.snapshot) {
+    async function load(snapshot = state.snapshot, sourceCurrent = () => true) {
       if (!snapshot?.room || !snapshot.capabilities?.coordination_goals) {
         clear();
         return;
       }
       const t = token(),
         request = ++loading;
-      const fresh = () => current(t) && request === loading;
+      const fresh = () => current(t) && request === loading && sourceCurrent();
       try {
         // Read the authority projection first. Never reuse an earlier goals
         // response after observing revocation or a changed project projection.
@@ -109,7 +109,7 @@ window.CodePierCollaborationGoals = {
         });
         if (projection && projection !== nextProjection) {
           privateClear();
-          return load(snapshot);
+          return load(snapshot, sourceCurrent);
         }
         options = nextOptions;
         projection = nextProjection;
@@ -441,7 +441,8 @@ window.CodePierCollaborationGoals = {
             E(g.digest) +
             '"><label><input type="checkbox" name="confirm" required> 我以房主身份确认此版本、项目、连接、能力、有效期与预算</label>' +
             '<div class="cc-actions"><button type="submit" class="btn primary">确认启用此目标执行</button>' +
-            button('close-drawer', '取消，保持未启用') +
+            button('close-drawer', '关闭审阅') +
+            '<p class="cc-hint">提交确认后，关闭窗口不会撤销已提交的请求。</p>' +
             '</div></form>'
           : empty('仅房主可确认启用执行。'))
       );

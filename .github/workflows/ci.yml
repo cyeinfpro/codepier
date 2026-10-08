@@ -87,7 +87,22 @@ jobs:
         with:
           path: .work/playwright-browsers
           key: browsers-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('requirements-dev.txt') }}
+      - name: Bound Linux APT download waits
+        if: runner.os == 'Linux'
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          # Playwright uses sudo for apt-get; filesystem options survive that boundary.
+          sudo tee /etc/apt/apt.conf.d/99-codepier-ci-network >/dev/null <<'APT'
+          Acquire::http::Timeout "30";
+          Acquire::https::Timeout "30";
+          Acquire::Retries "2";
+          APT
+          sudo apt-config dump | grep -Fx 'Acquire::http::Timeout "30";'
+          sudo apt-config dump | grep -Fx 'Acquire::https::Timeout "30";'
+          sudo apt-config dump | grep -Fx 'Acquire::Retries "2";'
       - name: Fresh environments; cached downloads, never shared virtualenvs
+        timeout-minutes: 15
         run: |
           python -m venv .venv
           .venv/bin/python -m pip install --require-hashes -r requirements-dev.txt
@@ -260,7 +275,22 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: '3.13'
+      - name: Bound Linux APT download waits
+        if: runner.os == 'Linux'
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          # Playwright uses sudo for apt-get; filesystem options survive that boundary.
+          sudo tee /etc/apt/apt.conf.d/99-codepier-ci-network >/dev/null <<'APT'
+          Acquire::http::Timeout "30";
+          Acquire::https::Timeout "30";
+          Acquire::Retries "2";
+          APT
+          sudo apt-config dump | grep -Fx 'Acquire::http::Timeout "30";'
+          sudo apt-config dump | grep -Fx 'Acquire::https::Timeout "30";'
+          sudo apt-config dump | grep -Fx 'Acquire::Retries "2";'
       - name: Install locked OIDC and browser test tools
+        timeout-minutes: 15
         run: |
           python -m venv .venv
           .venv/bin/python -m pip install -r requirements-dev.txt

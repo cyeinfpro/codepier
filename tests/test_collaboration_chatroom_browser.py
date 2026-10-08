@@ -1,6 +1,7 @@
 """Chat-first UX against the real isolated Hub; no real native host is contacted."""
 import os
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from playwright.sync_api import expect
@@ -389,5 +390,547 @@ def test_conversation_stale_add_review_and_visible_permission_reset(collaboratio
         expect(page.locator('.cc-project-chip')).to_have_count(1)
         expect(page.locator('.cc-project-chip')).to_have_attribute('data-cc-partition', other['id'])
         expect(page.locator('.cc-context-rail')).to_be_empty()
+    finally:
+        context.close()
+
+
+def register_notification_fixture(stack, label):
+    slot = stack.must(stack.client.post('/api/collaboration/join-slot', json={
+        **scope(stack), 'label': label, 'kind': 'work_cloud', 'idempotency_key': key()}))['slot']
+    joined = stack.mcp('collaboration_join', {'code': slot['join_code'], 'idempotency_key': key()})
+    assert not joined.get('isError'), joined
+    return slot
+
+
+def click_room_refresh(page):
+    if not page.locator('[data-cc-action="refresh"]').is_visible():
+        page.locator('[data-cc-more]').click()
+    page.locator('[data-cc-action="refresh"]').click()
+
+
+def hold_drawer_frames(page):
+    page.evaluate("""() => {
+      window.__ccFrameOriginal = window.requestAnimationFrame;
+      window.__ccCloseFrames = [];
+      delete document.documentElement.dataset.closeFrameHeld;
+      window.requestAnimationFrame = callback => {
+        window.__ccCloseFrames.push(callback);
+        document.documentElement.dataset.closeFrameHeld = 'yes';
+        return 0;
+      };
+    }""")
+
+
+def release_drawer_frames(page):
+    page.evaluate("""() => {
+      window.requestAnimationFrame = window.__ccFrameOriginal;
+      window.__ccCloseFrames.splice(0).forEach(callback => callback(performance.now()));
+    }""")
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_delayed_drawer_close_focus_does_not_steal_composer_input(collaboration_stack, chat_browser_pool, engine):
+    stack = collaboration_stack
+    context = chat_browser_pool(engine).new_context(viewport={'width': 1440, 'height': 900})
+    page = context.new_page()
+    sent = []
+    page.on('request', lambda request: sent.append(request.post_data_json)
+            if request.method == 'POST' and urlsplit(request.url).path == '/api/collaboration/message' else None)
+    try:
+        login(page, stack)
+        slot = register_notification_fixture(stack, '关闭菜单后的连接')
+        click_room_refresh(page)
+        page.locator('[data-cc-action="mentions"]').click()
+        option = page.locator('[data-cc-action="pick-mention"]')
+        option.click()
+        expect(option).to_have_attribute('aria-pressed', 'true')
+        # Flush opening focus before controlling just the native close frame.
+        page.evaluate('() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+        hold_drawer_frames(page)
+        page.keyboard.press('Escape')
+        expect(page.locator('#cc-drawer')).not_to_be_visible()
+        expect(page.locator('html')).to_have_attribute('data-close-frame-held', 'yes')
+        area = page.locator('#cc-message-input')
+        # WebKit fill and ordinary typing both focus first, then insert text.
+        # Deliver delayed close restoration between those two real input steps.
+        area.focus()
+        release_drawer_frames(page)
+        focused = area.evaluate('(node) => document.activeElement === node')
+        page.keyboard.insert_text('关闭菜单后输入并发送')
+        page.locator('#cc-command button[type="submit"]').click()
+        if not focused:
+            print('CLOSE_FOCUS_EVIDENCE', {'focused': focused, 'draft': area.input_value(),
+                                         'send_requests': len(sent), 'messages': len(overview(stack)['messages']),
+                                         'mentions': page.locator('.cc-mention-chip').count()})
+        assert focused, 'A delayed closed drawer must not steal the newer composer focus.'
+        expect(page.locator('#cc-feedback')).to_contain_text('部分提醒未送达')
+        expect(page.locator('.cc-feed')).to_contain_text('关闭菜单后输入并发送')
+        expect(area).to_have_value('')
+        expect(page.locator('.cc-mention-chip')).to_have_count(0)
+        messages = overview(stack)['messages']
+        assert len(sent) == len(messages) == 1
+        assert messages[0]['mentions'] == [{'slot_id': slot['id'], 'display_snapshot': '关闭菜单后的连接'}]
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_drawer_focus_lifecycle_respects_reopen_navigation_and_new_focus(collaboration_stack, chat_browser_pool, engine):
+    stack = collaboration_stack
+    context = chat_browser_pool(engine).new_context(viewport={'width': 1440, 'height': 900})
+    page = context.new_page()
+    try:
+        login(page, stack)
+        register_notification_fixture(stack, '焦点生命周期连接')
+        click_room_refresh(page)
+        mentions = page.locator('[data-cc-action="mentions"]')
+        page.locator('#cc-message-input').fill('打开菜单前的草稿')
+        mentions.click()
+        page.keyboard.press('Escape')
+        expect(page.locator('#cc-drawer')).not_to_be_visible()
+        expect(mentions).to_be_focused()  # Normal keyboard dismissal remains accessible.
+        expect(page.locator('#cc-message-input')).to_have_value('打开菜单前的草稿')
+
+        hold_drawer_frames(page)
+        mentions.click()
+        expect(page.locator('html')).to_have_attribute('data-close-frame-held', 'yes')
+        option = page.locator('[data-cc-action="pick-mention"]')
+        option.focus()
+        release_drawer_frames(page)
+        expect(option).to_be_focused()  # Opening RAF cannot undo a newer focus choice.
+
+        hold_drawer_frames(page)
+        page.keyboard.press('Escape')
+        expect(page.locator('#cc-drawer')).not_to_be_visible()
+        expect(page.locator('html')).to_have_attribute('data-close-frame-held', 'yes')
+        mentions.click()  # Reopen before the old close restoration runs.
+        option.focus()
+        release_drawer_frames(page)
+        expect(page.locator('#cc-drawer')).to_be_visible()
+        expect(option).to_be_focused()
+
+        hold_drawer_frames(page)
+        page.keyboard.press('Escape')
+        expect(page.locator('#cc-drawer')).not_to_be_visible()
+        expect(page.locator('html')).to_have_attribute('data-close-frame-held', 'yes')
+        tab = page.locator('[data-cc-view="agents"]')
+        tab.click()
+        expect(page.locator('[data-speaking-slot]')).to_have_count(1)
+        tab.focus()
+        release_drawer_frames(page)
+        expect(tab).to_be_focused()
+        expect(page.locator('#cc-drawer')).not_to_be_visible()
+
+        # Delay only the completion callback of an already committed real render.
+        # Returning to the same view later does not give the old callback focus.
+        page.evaluate("""() => {
+          const render = renderPage;
+          let first = true;
+          renderPage = async (...args) => {
+            const result = await render(...args);
+            if (first) {
+              first = false;
+              document.documentElement.dataset.tabRenderHeld = 'yes';
+              await new Promise(resolve => { window.__ccReleaseTabRender = resolve; });
+            }
+            return result;
+          };
+        }""")
+        page.locator('[data-cc-view="discussion"]').click()
+        expect(page.locator('html')).to_have_attribute('data-tab-render-held', 'yes')
+        tab.click()
+        expect(page.locator('[data-speaking-slot]')).to_have_count(1)
+        page.locator('[data-cc-view="discussion"]').click()
+        area = page.locator('#cc-message-input')
+        area.fill('新视图里继续输入')
+        page.evaluate("""() => {
+          window.__ccReleaseTabRender();
+          return new Promise(resolve => requestAnimationFrame(resolve));
+        }""")
+        expect(area).to_be_focused()
+        expect(area).to_have_value('新视图里继续输入')
+        assert overview(stack)['messages'] == []
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_foreground_refresh_exposes_busy_actions_and_preserves_ime_draft(collaboration_stack, chat_browser_pool, engine):
+    stack = collaboration_stack
+    context = chat_browser_pool(engine).new_context(viewport={'width': 1440, 'height': 900})
+    page = context.new_page()
+    page.add_init_script("""(() => {
+      const schedule = window.setTimeout.bind(window);
+      window.setTimeout = (fn, delay, ...args) => {
+        const id = schedule(fn, delay, ...args);
+        if (delay === 5000 && typeof fn === 'function' && fn.name === 'poll')
+          window.__ccScheduledPoll = id;
+        return id;
+      };
+    })();""")
+    try:
+        login(page, stack)
+        page.evaluate('() => clearTimeout(window.__ccScheduledPoll)')
+        slot = register_notification_fixture(stack, '慢刷新后的通知连接')
+        held = []
+
+        def hold_overview(route):
+            query = parse_qs(urlsplit(route.request.url).query)
+            if query.get('kind') == ['overview'] and not held:
+                held.append([route, None])  # Reserve before route.fetch can dispatch another request.
+                held[0][1] = route.fetch()
+                page.locator('html').evaluate('(n) => n.dataset.chatRefreshHeld = "yes"')
+            else:
+                route.continue_()
+
+        page.route('**/api/collaboration?*', hold_overview)
+        click_room_refresh(page)
+        expect(page.locator('html')).to_have_attribute('data-chat-refresh-held', 'yes')
+        # Waiting is a product state: a fresh action must never look ready while
+        # its click would be silently dropped by the request lock.
+        mentions = page.locator('[data-cc-action="mentions"]')
+        expect(mentions).to_be_disabled()
+        expect(page.locator('[data-cc-view="jobs"]')).to_be_enabled()
+        expect(page.locator('.collaboration')).to_have_attribute('aria-busy', 'true')
+        area = page.locator('#cc-message-input')
+        expect(area).to_be_enabled()
+        area.fill('刷新期间继续输入中文')
+        area.dispatch_event('compositionstart')
+        area.dispatch_event('keydown', {'key': 'Enter', 'isComposing': True})
+        assert overview(stack)['messages'] == []
+        area.dispatch_event('compositionend')
+        held[0][0].fulfill(response=held[0][1])
+        # Keep interception alive through the following options/goals requests.
+        # Removing it at response release can strand a newly paused Chromium request.
+        expect(mentions).to_be_enabled()
+        page.unroute('**/api/collaboration?*', hold_overview)
+        mentions.click()
+        option = page.locator('[data-cc-action="pick-mention"]')
+        expect(option).to_have_attribute('aria-pressed', 'false')
+        expect(option).to_contain_text(slot['id'][-6:])
+        option.click()
+        expect(option).to_have_attribute('aria-pressed', 'true')
+        page.keyboard.press('Escape')
+        expect(area).to_have_value('刷新期间继续输入中文')
+        expect(page.locator('.cc-mention-chip')).to_have_text('@慢刷新后的通知连接 ×')
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_older_background_poll_cannot_replace_new_foreground_snapshot(collaboration_stack, chat_browser_pool, engine):
+    stack = collaboration_stack
+    context = chat_browser_pool(engine).new_context(viewport={'width': 1440, 'height': 900})
+    page = context.new_page()
+    # Invoke the real registered poll deterministically instead of sleeping five
+    # seconds. No API is mocked: only the first real overview response is held.
+    page.add_init_script("""(() => {
+      const schedule = window.setTimeout.bind(window);
+      window.setTimeout = (fn, delay, ...args) => {
+        const id = schedule(fn, delay, ...args);
+        if (delay === 5000 && typeof fn === 'function' && fn.name === 'poll') {
+          window.__ccRunRegisteredPoll = () => {
+            clearTimeout(id);
+            window.__ccHeldPoll = Promise.resolve(fn());
+          };
+        }
+        return id;
+      };
+    })();""")
+    try:
+        login(page, stack)
+        held = []
+
+        def hold_first_overview(route):
+            query = parse_qs(urlsplit(route.request.url).query)
+            if query.get('kind') == ['overview'] and not held:
+                held.append([route, None])  # Reserve before route.fetch can dispatch another request.
+                held[0][1] = route.fetch()
+                page.locator('html').evaluate('(n) => n.dataset.oldPollHeld = "yes"')
+            else:
+                route.continue_()
+
+        page.route('**/api/collaboration?*', hold_first_overview)
+        page.evaluate('() => { window.__ccRunRegisteredPoll(); }')
+        expect(page.locator('html')).to_have_attribute('data-old-poll-held', 'yes')
+        register_notification_fixture(stack, '新快照里的通知连接')
+        click_room_refresh(page)
+        expect(page.locator('.cc-member-strip')).to_contain_text('1 个通知位置')
+        expect(page.locator('[data-cc-action="refresh"]')).to_be_enabled()
+        page.locator('[data-cc-action="mentions"]').click()
+        expect(page.locator('[data-cc-action="pick-mention"]')).to_contain_text('新快照里的通知连接')
+        held[0][0].fulfill(response=held[0][1])
+        page.evaluate('() => window.__ccHeldPoll')
+        page.unroute('**/api/collaboration?*', hold_first_overview)
+        expect(page.locator('.cc-member-strip')).to_contain_text('1 个通知位置')
+        expect(page.locator('#cc-drawer')).to_be_visible()
+        page.locator('[data-cc-action="pick-mention"]').click()
+        page.keyboard.press('Escape')
+        expect(page.locator('.cc-mention-chip')).to_have_text('@新快照里的通知连接 ×')
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_pending_refresh_allows_navigation_and_failed_refresh_releases_actions(collaboration_stack, chat_browser_pool, engine):
+    stack = collaboration_stack
+    context = chat_browser_pool(engine).new_context(viewport={'width': 1440, 'height': 900})
+    page = context.new_page()
+    try:
+        login(page, stack)
+        page.locator('#cc-message-input').fill('导航与失败刷新期间保留的草稿')
+        held = []
+
+        def delay_overview(route):
+            query = parse_qs(urlsplit(route.request.url).query)
+            if query.get('kind') == ['overview'] and not held:
+                held.append([route, None])
+                held[0][1] = route.fetch()
+                page.locator('html').evaluate('(n) => n.dataset.navigationRefreshHeld = "yes"')
+            else:
+                route.continue_()
+
+        page.route('**/api/collaboration?*', delay_overview)
+        click_room_refresh(page)
+        expect(page.locator('html')).to_have_attribute('data-navigation-refresh-held', 'yes')
+        page.locator('[data-cc-view="jobs"]').click()
+        expect(page.locator('.cc-coordination-list')).to_be_visible()
+        held[0][0].fulfill(response=held[0][1])
+        page.unroute('**/api/collaboration?*', delay_overview)
+        expect(page.locator('[data-cc-view="jobs"]')).to_have_attribute('aria-pressed', 'true')
+        page.locator('[data-cc-view="discussion"]').click()
+        expect(page.locator('#cc-message-input')).to_have_value('导航与失败刷新期间保留的草稿')
+
+        def fail_overview(route):
+            if parse_qs(urlsplit(route.request.url).query).get('kind') == ['overview']:
+                route.fulfill(status=422, json={'error': {'code': 'TEST_REFRESH_FAILED', 'message': '合成刷新失败'}})
+            else:
+                route.continue_()
+
+        page.route('**/api/collaboration?*', fail_overview)
+        click_room_refresh(page)
+        expect(page.locator('#cc-feedback')).to_contain_text('合成刷新失败')
+        expect(page.locator('[data-cc-action="mentions"]')).to_be_enabled()
+        expect(page.locator('#cc-message-input')).to_have_value('导航与失败刷新期间保留的草稿')
+        page.unroute('**/api/collaboration?*', fail_overview)
+        page.locator('[data-cc-action="mentions"]').click()
+        expect(page.locator('#cc-drawer')).to_be_visible()
+        page.locator('#cc-drawer [data-cc-action="close-drawer"]').click()
+        expect(page.locator('#cc-drawer')).not_to_be_visible()
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_ordinary_drawer_close_suppresses_late_thread_response(collaboration_stack, chat_browser_pool, engine):
+    stack = collaboration_stack
+    context = chat_browser_pool(engine).new_context(viewport={'width': 1440, 'height': 900})
+    page = context.new_page()
+    try:
+        login(page, stack)
+        body = '普通话题关闭后不得重新出现的响应'
+        page.locator('#cc-message-input').fill(body)
+        page.locator('#cc-command button[type="submit"]').click()
+        expect(page.locator('.cc-feed')).to_contain_text(body)
+        held = []
+
+        def delay_thread(route):
+            if parse_qs(urlsplit(route.request.url).query).get('kind') == ['thread'] and not held:
+                held.append([route, None])
+                held[0][1] = route.fetch()
+                page.locator('html').evaluate('(n) => n.dataset.ordinaryThreadHeld = "yes"')
+            else:
+                route.continue_()
+
+        page.route('**/api/collaboration?*', delay_thread)
+        trigger = page.locator('.cc-feed [data-cc-action="thread"]').first
+        trigger.click()
+        expect(page.locator('html')).to_have_attribute('data-ordinary-thread-held', 'yes')
+        expect(page.locator('#cc-drawer')).to_be_visible()
+        close = page.locator('#cc-drawer [data-cc-action="close-drawer"]')
+        expect(close).to_be_enabled()
+        close.click()
+        expect(page.locator('#cc-drawer')).not_to_be_visible()
+        held[0][0].fulfill(response=held[0][1])
+        page.unroute('**/api/collaboration?*', delay_thread)
+        expect(trigger).to_be_enabled()
+        expect(page.locator('#cc-drawer')).not_to_be_visible()
+        expect(page.locator('#cc-drawer')).not_to_contain_text(body)
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize('failure_kind', ['timeline', 'overview', 'coordination_options'])
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_permission_loss_at_each_refresh_stage_clears_and_rebinds_remaining_project(
+        collaboration_stack, chat_browser_pool, engine, failure_kind):
+    stack = collaboration_stack
+    context = chat_browser_pool(engine).new_context(viewport={'width': 1440, 'height': 900})
+    page = context.new_page()
+    page.add_init_script("""(() => {
+      const schedule = window.setTimeout.bind(window);
+      window.setTimeout = (fn, delay, ...args) => {
+        const id = schedule(fn, delay, ...args);
+        if (delay === 5000 && typeof fn === 'function' && fn.name === 'poll')
+          window.__ccPermissionPoll = () => {clearTimeout(id);void fn();};
+        return id;
+      };
+    })();""")
+    try:
+        login(page, stack)
+        original = read_scope = scope(stack)
+        current = overview(stack)
+        conversation = current['conversation']
+        other = stack.projects[1]
+        stack.must(stack.client.post('/api/collaboration/conversation-project', json={
+            'conversation_id': conversation['id'], 'expected_version': conversation['version'],
+            'project': other['id'], 'environment_id': 'production', 'idempotency_key': key()}))
+        add_message(stack, current['room']['id'], '撤权后必须清除的旧项目记录')
+        other_scope = {'project': other['id'], 'environment_id': 'production',
+                       'conversation_id': conversation['id']}
+        other_room = stack.must(stack.client.get('/api/collaboration', params=other_scope))['room']
+        stack.must(stack.client.post('/api/collaboration/message', json={
+            **other_scope, 'room_id': other_room['id'], 'body_text': '仍获权项目的安全记录',
+            'client_message_id': key(), 'idempotency_key': key(), 'mentions': []}))
+        click_room_refresh(page)
+        expect(page.locator('.cc-project-chip')).to_have_count(2)
+        expect(page.locator('.cc-feed')).to_contain_text('撤权后必须清除的旧项目记录')
+        page.locator('#cc-message-input').fill('必须清除的旧项目草稿')
+        page.locator('.cc-feed [data-cc-action="thread"]').first.click()
+        expect(page.locator('#cc-drawer .cc-message')).not_to_have_count(0)
+
+        directory_attempts = []
+        def directory(route):
+            directory_attempts.append(True)
+            if failure_kind == 'coordination_options' and len(directory_attempts) == 1:
+                route.fulfill(status=422, json={'error': {'code': 'TEST_DIRECTORY_FAILED', 'message': '合成目录错误'}})
+                return
+            response = route.fetch()
+            body = response.json()
+            body['items'] = [room for room in body['items'] if room['id'] == conversation['id']]
+            for room in body['items']:
+                room['projects'] = [p for p in room['projects'] if p['project_id'] == other['id']]
+                room['visibility_token'] = 'fixture-remaining-project'
+            route.fulfill(response=response, json=body)
+
+        def current_authority(route):
+            query = parse_qs(urlsplit(route.request.url).query)
+            kind = query.get('kind', ['overview'])[0]
+            project = query.get('project', [''])[0]
+            if project == read_scope['project'] and kind == failure_kind:
+                route.fulfill(status=403, json={'error': {'code': 'PERMISSION_DENIED',
+                    'message': '原项目访问已撤回'}})
+                return
+            response = route.fetch()
+            body = response.json()
+            if project == other['id']:
+                if kind == 'timeline':
+                    body['items'] = [m for m in body['items'] if m['project_id'] == other['id']]
+                    body['visibility_token'] = 'fixture-remaining-project'
+                if kind == 'overview' and body.get('conversation'):
+                    body['conversation']['projects'] = [p for p in body['conversation']['projects']
+                                                        if p['project_id'] == other['id']]
+                if kind == 'coordination_options':
+                    for participant in body['participants']:
+                        participant['project_ids'] = [other['id']]
+                        participant['project_capabilities'] = {
+                            other['id']: participant.get('project_capabilities', {}).get(other['id'], ['read'])}
+            route.fulfill(response=response, json=body)
+
+        page.route('**/api/collaboration/conversations', directory)
+        page.route('**/api/collaboration?*', current_authority)
+        page.evaluate('() => window.__ccPermissionPoll()')
+        expect(page.locator('#cc-feedback')).to_contain_text('旧记录已清除')
+        expect(page.locator('#cc-drawer')).not_to_be_visible()
+        expect(page.locator('#cc-drawer')).to_be_empty()
+        expect(page.locator('.cc-feed')).not_to_contain_text('撤权后必须清除')
+        expect(page.locator('#cc-message-input')).to_have_value('')
+        expect(page.locator('#cc-message-input')).to_be_disabled()
+        expect(page.locator('#cc-command button[type="submit"]')).to_be_disabled()
+        if failure_kind == 'coordination_options':
+            expect(page.locator('#cc-feedback')).to_contain_text('房间目录读取失败')
+            retry = page.locator('[data-cc-action="retry-directory"]')
+            expect(retry).to_be_enabled()
+            retry.click()
+            expect(page.locator('#cc-feedback')).to_contain_text('请重新选择仍获权的项目')
+        remaining = page.locator(f'[data-cc-partition="{other["id"]}"]')
+        expect(remaining).to_be_enabled()
+        remaining.click()
+        expect(page.locator('.collaboration')).to_have_attribute('data-project', other['id'])
+        expect(page.locator('#cc-message-input')).to_be_enabled()
+        expect(page.locator('.cc-feed')).to_contain_text('仍获权项目的安全记录')
+        expect(page.locator('.cc-feed')).not_to_contain_text('撤权后必须清除')
+        assert original['project'] != other['id']
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize('pending_stage', ['visibility', 'directory'])
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_refresh_recovery_clears_before_waiting_and_respects_new_navigation(
+        collaboration_stack, chat_browser_pool, engine, pending_stage):
+    stack = collaboration_stack
+    context = chat_browser_pool(engine).new_context(viewport={'width': 1440, 'height': 900})
+    page = context.new_page()
+    page.add_init_script("""(() => {
+      const schedule = window.setTimeout.bind(window);
+      window.setTimeout = (fn, delay, ...args) => {
+        const id = schedule(fn, delay, ...args);
+        if (delay === 5000 && typeof fn === 'function' && fn.name === 'poll')
+          window.__ccRunRecoveryPoll = () => {
+            clearTimeout(id); window.__ccRecoveryPoll = Promise.resolve(fn());
+          };
+        return id;
+      };
+    })();""")
+    try:
+        login(page, stack)
+        body = '发现权限投影变化后立即移除的旧内容'
+        page.locator('#cc-message-input').fill(body)
+        page.locator('#cc-command button[type="submit"]').click()
+        expect(page.locator('.cc-feed')).to_contain_text(body)
+        expect(page.locator('#cc-command button[type="submit"]')).to_be_enabled()
+        held = []
+
+        def hold(route):
+            held.append([route, None])
+            held[0][1] = route.fetch()
+            page.locator('html').evaluate('(n) => n.dataset.recoveryStageHeld = "yes"')
+
+        def route_scope(route):
+            kind = parse_qs(urlsplit(route.request.url).query).get('kind', [''])[0]
+            if pending_stage == 'directory' and kind == 'overview':
+                route.fulfill(status=403, json={'error': {'code': 'PERMISSION_DENIED', 'message': '范围已撤回'}})
+            elif pending_stage == 'visibility' and kind == 'timeline':
+                response = route.fetch()
+                value = response.json()
+                value['visibility_token'] = 'fixture-changed-visible-records'
+                value['items'] = []
+                route.fulfill(response=response, json=value)
+            elif pending_stage == 'visibility' and kind == 'coordination_options' and not held:
+                hold(route)
+            else:
+                route.continue_()
+
+        def route_directory(route):
+            if pending_stage == 'directory' and not held:
+                hold(route)
+            else:
+                route.continue_()
+
+        page.route('**/api/collaboration?*', route_scope)
+        page.route('**/api/collaboration/conversations', route_directory)
+        page.evaluate('() => { window.__ccRunRecoveryPoll(); }')
+        expect(page.locator('html')).to_have_attribute('data-recovery-stage-held', 'yes')
+        expect(page.locator('.cc-feed')).not_to_contain_text(body)
+        expect(page.locator('#cc-message-input')).to_be_disabled()
+        page.get_by_role('button', name='项目映射', exact=True).click()
+        expect(page.locator('#page h1')).to_have_text('项目映射')
+        held[0][0].fulfill(response=held[0][1])
+        page.evaluate('() => window.__ccRecoveryPoll')
+        page.unroute('**/api/collaboration?*', route_scope)
+        page.unroute('**/api/collaboration/conversations', route_directory)
+        expect(page.locator('#page h1')).to_have_text('项目映射')
+        expect(page.locator('.collaboration')).to_have_count(0)
     finally:
         context.close()

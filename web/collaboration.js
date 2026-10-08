@@ -20,6 +20,8 @@ window.CodePierCollaboration = (() => {
     controller: null,
     generation: 0,
     busy: false,
+    busyCleanup: null,
+    refreshSequence: 0,
     requests: new Map(),
     chats: new Map(),
     rooms: [],
@@ -215,6 +217,9 @@ window.CodePierCollaboration = (() => {
 
   function detach() {
     rememberChat();
+    state.busyCleanup?.();
+    state.busyCleanup = null;
+    state.refreshSequence++;
     // renderPage(false) keeps the old DOM while fetching its replacement.
     // That detached view must not accept actions that a pending render can erase.
     const root = document.querySelector('.collaboration');
@@ -449,23 +454,42 @@ window.CodePierCollaboration = (() => {
   function showDrawer(title, content, trigger) {
     const dialog = document.querySelector('#cc-drawer');
     if (!dialog) return;
+    const epoch = ++state.drawerEpoch,
+      generation = state.generation;
     if (!dialog.contains(trigger || document.activeElement))
       state.drawerFocus =
         trigger?.closest('.cc-room-menu')?.querySelector('summary') ||
         trigger ||
         document.activeElement;
     dialog.innerHTML = `<header class="cc-drawer-header"><h2>${E(title)}</h2>${button('close-drawer', '关闭', {}, 'aria-label="关闭面板"')}</header><div class="cc-drawer-body">${content}</div>`;
-    if (!dialog.open) dialog.showModal();
+    if (!dialog.open) {
+      // Safari pointer clicks need not focus a button. Establish the actual
+      // opener before showModal so native dismissal returns to the right node.
+      const opener = state.drawerFocus;
+      if (opener?.isConnected && !opener.disabled && !opener.closest('[inert]'))
+        opener.focus({ preventScroll: true });
+      dialog.showModal();
+    }
     bindDetails();
-    requestAnimationFrame(() =>
-      dialog.querySelector('input:not([type="checkbox"]), textarea, select, button')?.focus(),
-    );
+    const target = dialog.querySelector('input:not([type="checkbox"]), textarea, select, button'),
+      focused = document.activeElement;
+    requestAnimationFrame(() => {
+      // A later input choice, replacement dialog or navigation owns its focus.
+      if (
+        epoch === state.drawerEpoch &&
+        generation === state.generation &&
+        dialog.isConnected &&
+        dialog.open &&
+        target?.isConnected &&
+        document.activeElement === focused
+      )
+        target.focus();
+    });
   }
   function closeDrawer() {
     state.drawerEpoch++;
     const dialog = document.querySelector('#cc-drawer');
     dialog?.close();
-    state.drawerFocus?.isConnected && state.drawerFocus.focus({ preventScroll: true });
   }
   function patchDraftContext() {
     const node = document.querySelector('#cc-draft-context');
@@ -574,19 +598,148 @@ window.CodePierCollaboration = (() => {
     if (submit) submit.disabled = true;
     patchDraftContext();
   }
+  function bindDeniedScope(pending = false) {
+    // Replace cleared markup so recovery never reactivates an old listener epoch.
+    state.busyCleanup?.();
+    state.busyCleanup = null;
+    const root = document.querySelector('.collaboration');
+    if (!root) return;
+    const rail = root.querySelector('.cc-room-rail');
+    if (rail) rail.outerHTML = roomRail('');
+    const next = root.cloneNode(true);
+    for (const node of next.querySelectorAll('button')) {
+      const partition = node.dataset.ccPartition,
+        room = node.dataset.ccRoom;
+      const allowedPartition =
+        partition &&
+        roomProjects().some(
+          (p) => p.project_id === partition && p.environment_id === node.dataset.environment,
+        );
+      const allowedRoom = room && state.rooms.some((r) => r.id === room);
+      const retry = node.dataset.ccAction === 'retry-directory' && !pending;
+      node.disabled = !allowedPartition && !allowedRoom && !retry;
+    }
+    root.replaceWith(next);
+    bind();
+    if (pending) next.setAttribute('aria-busy', 'true');
+  }
+  function showAccessRecovery(items, message, error = false, pending = false) {
+    state.rooms = items;
+    const conversation = items.find((room) => room.id === state.conversation);
+    state.snapshot = {
+      room: state.snapshot?.room,
+      conversation: conversation || { id: state.conversation, projects: [] },
+      can_manage: false,
+      capabilities: { plain_messages: false, coordination_goals: false },
+      agents: [],
+      jobs: [],
+      goals: [],
+      join_slots: [],
+      subscriptions: [],
+      messages: [],
+      probes: [],
+      incidents: [],
+      plan: null,
+      components: {},
+    };
+    state.members = [];
+    state.notes = message;
+    state.error = error;
+    const strip = document.querySelector('.cc-project-strip');
+    if (strip) {
+      strip.outerHTML = projectChips();
+      document
+        .querySelector('.cc-project-strip')
+        ?.insertAdjacentHTML(
+          'beforeend',
+          button('retry-directory', pending ? '正在读取房间目录…' : '重新读取房间目录'),
+        );
+    }
+    const members = document.querySelector('.cc-member-strip');
+    if (members) members.outerHTML = memberStrip();
+    const feedback = document.querySelector('#cc-feedback');
+    if (feedback) {
+      feedback.textContent = message;
+      feedback.classList.toggle('is-error', error);
+    }
+    bindDeniedScope(pending);
+  }
+  async function recoverAccess(allowCurrent = false) {
+    clearVisibility(chat());
+    const recovery = ++state.generation,
+      session = S.session,
+      space = S.space_id;
+    state.controller?.abort();
+    state.controller = new AbortController();
+    state.busy = false;
+    clearTimeout(state.timer);
+    const current = () =>
+      recovery === state.generation &&
+      session === S.session &&
+      space === S.space_id &&
+      S.page === 'collaboration';
+    showAccessRecovery([], '项目访问范围已改变，旧记录已清除。正在读取最新房间目录…', false, true);
+    try {
+      const directory = await api('/api/collaboration/conversations', {
+        signal: state.controller.signal,
+      });
+      if (!current()) return;
+      const available = (directory.items || []).find((room) => room.id === state.conversation);
+      if (
+        allowCurrent &&
+        available?.projects?.some(
+          (p) => p.project_id === state.project && p.environment_id === state.environment,
+        )
+      ) {
+        state.rooms = directory.items || [];
+        state.notes = '访问范围已更新。';
+        await renderPage(false);
+        return;
+      }
+      showAccessRecovery(
+        directory.items || [],
+        '项目访问范围已改变，旧记录已清除。请重新选择仍获权的项目。',
+      );
+    } catch (error) {
+      if (!current()) return;
+      showAccessRecovery(
+        [],
+        '旧记录已清除。房间目录读取失败：' + error.message + '。可重试或从项目映射重新进入。',
+        true,
+      );
+    }
+  }
   async function refreshChat(forceBottom = false) {
     if (!state.snapshot?.room || !state.snapshot.capabilities?.plain_messages) return;
     const gen = state.generation,
+      sequence = ++state.refreshSequence,
       c = chat(),
       room = state.snapshot.room.id;
+    const current = () =>
+      sequence === state.refreshSequence &&
+      gen === state.generation &&
+      S.session === state.session &&
+      S.space_id === state.space &&
+      c === chat();
     let timeline, overview;
     try {
       [timeline, overview] = await Promise.all([
         getRecord('timeline', '', '', { room_id: room, after: c.after, limit: '100' }),
         getRecord('overview', ''),
       ]);
+      if (!current()) return;
+      // A known projection change clears private records before unrelated reads.
+      if (c.visibility && c.visibility !== timeline.visibility_token) {
+        const allowed = overview.conversation?.projects?.some(
+          (p) => p.project_id === state.project && p.environment_id === state.environment,
+        );
+        clearVisibility(c, !!allowed);
+        await renderPage(false);
+        return;
+      }
+      await coordination.load(overview, current);
     } catch (error) {
-      if (gen !== state.generation || c !== chat()) return;
+      if (!current()) return;
       if (
         [
           'INVALID_CURSOR',
@@ -597,73 +750,16 @@ window.CodePierCollaboration = (() => {
         ].includes(error.code) ||
         [400, 403, 409].includes(error.status)
       ) {
-        clearVisibility(c);
-        // Invalidate all older detail/search/send completions immediately, before
-        // fetching the now-visible project directory.
-        const recovery = ++state.generation;
-        state.controller?.abort();
-        state.controller = new AbortController();
-        state.busy = false;
-        clearTimeout(state.timer);
-        state.notes = '项目访问范围已改变，旧记录已清除。请重新选择仍获权的项目。';
-        const directory = await api('/api/collaboration/conversations', {
-          signal: state.controller?.signal,
-        });
-        if (recovery !== state.generation) return;
-        state.rooms = directory.items || [];
-        const conversation = state.rooms.find((r) => r.id === state.conversation);
-        const allowed = conversation?.projects?.some(
-          (p) => p.project_id === state.project && p.environment_id === state.environment,
-        );
-        if (allowed && error.status !== 403) {
-          await renderPage(false);
-          return;
-        }
-        state.snapshot = {
-          ...state.snapshot,
-          conversation: conversation || { id: state.conversation, projects: [] },
-          agents: [],
-          jobs: [],
-          goals: [],
-          join_slots: [],
-          subscriptions: [],
-          capabilities: { ...state.snapshot.capabilities, plain_messages: false },
-        };
-        state.members = [];
-        const strip = document.querySelector('.cc-project-strip');
-        if (strip) strip.outerHTML = projectChips();
-        const members = document.querySelector('.cc-member-strip');
-        if (members) members.outerHTML = memberStrip();
-        const feedback = document.querySelector('#cc-feedback');
-        if (feedback) feedback.textContent = state.notes;
-        state.generation++;
-        state.controller?.abort();
-        clearTimeout(state.timer);
+        await recoverAccess(error.status !== 403);
         return;
       }
       throw error;
     }
-    if (
-      gen !== state.generation ||
-      S.session !== state.session ||
-      S.space_id !== state.space ||
-      c !== chat()
-    )
-      return;
-    if (c.visibility && c.visibility !== timeline.visibility_token) {
-      const allowed = overview.conversation?.projects?.some(
-        (p) => p.project_id === state.project && p.environment_id === state.environment,
-      );
-      clearVisibility(c, !!allowed);
-      await renderPage(false);
-      return;
-    }
+    if (!current()) return;
     c.visibility = timeline.visibility_token;
     mergeMessages(timeline.items || []);
     c.after = timeline.after_cursor || c.after;
     state.snapshot = overview;
-    await coordination.load(overview);
-    if (gen !== state.generation || c !== chat()) return;
     patchTimeline(forceBottom);
     const goals = document.querySelector('.cc-coordination-list');
     if (goals && !goals.contains(document.activeElement)) goals.outerHTML = coordination.list();
@@ -1227,9 +1323,8 @@ window.CodePierCollaboration = (() => {
         node.tabIndex = -1;
         node.focus({ preventScroll: true });
       } else {
-        const generation = state.generation,
-          result = await getRecord('thread', id);
-        if (generation === state.generation)
+        const result = await readDrawer('thread', id, '来源消息', element);
+        if (result)
           showDrawer(
             '来源消息',
             (result.items || []).map(messageMarkup).join('') || empty('来源当前不可访问。'),
@@ -1239,9 +1334,8 @@ window.CodePierCollaboration = (() => {
       return local;
     }
     if (action === 'thread') {
-      const generation = state.generation,
-        result = await getRecord('thread', element.dataset.id);
-      if (generation === state.generation)
+      const result = await readDrawer('thread', element.dataset.id, '话题与回复', element);
+      if (result)
         showDrawer(
           '话题与回复',
           (result.items || []).map(messageMarkup).join('') || empty('暂无更多回复。'),
@@ -1283,11 +1377,10 @@ window.CodePierCollaboration = (() => {
       return local;
     }
     if (action === 'result') {
-      const generation = state.generation,
-        kind = element.dataset.recordKind || 'job';
+      const kind = element.dataset.recordKind || 'job';
       if (kind === 'message') return act('thread', element);
-      const record = await getRecord(kind, element.dataset.id);
-      if (generation !== state.generation) return local;
+      const record = await readDrawer(kind, element.dataset.id, '任务、结果与证据', element);
+      if (!record) return local;
       const results = record.results || (record.body ? [record] : []);
       const job = record.job || record;
       showDrawer(
@@ -1319,13 +1412,62 @@ window.CodePierCollaboration = (() => {
       document.querySelector('.cc-new-messages').hidden = true;
       return local;
     }
+    if (action === 'retry-directory') {
+      await recoverAccess();
+      return local;
+    }
     if (action === 'refresh') {
-      state.notes = '状态已刷新。';
+      state.notes = '';
       state.error = false;
-      if (state.view === 'discussion' && state.snapshot?.capabilities?.plain_messages)
+      if (
+        state.view === 'discussion' &&
+        state.snapshot?.room &&
+        state.snapshot?.capabilities?.plain_messages
+      ) {
         await refreshChat();
-      else await renderPage(false);
-      return { local: true, message: '状态已刷新。' };
+        return { local: true, message: '状态已刷新。' };
+      }
+      const identity = [
+        S.session,
+        S.space_id,
+        state.project,
+        state.environment,
+        state.conversation,
+        state.view,
+      ];
+      const previousRoot = document.querySelector('.collaboration');
+      const rendering = renderPage(false);
+      const renderSequence = S.renderSeq,
+        generation = state.generation;
+      await rendering;
+      const root = document.querySelector('.collaboration');
+      const sameScope = [
+        S.session,
+        S.space_id,
+        state.project,
+        state.environment,
+        state.conversation,
+        state.view,
+      ].every((value, index) => value === identity[index]);
+      // renderPage can catch a failed read into an error page. Only a newly
+      // committed collaboration view owned by this render may announce success.
+      const feedback = root?.querySelector('#cc-feedback');
+      if (
+        sameScope &&
+        S.page === 'collaboration' &&
+        S.renderSeq === renderSequence &&
+        state.generation === generation &&
+        root !== previousRoot &&
+        !root?.inert &&
+        feedback &&
+        (!state.snapshot?.room || state.snapshot.capabilities?.plain_messages)
+      ) {
+        state.notes = '状态已刷新。';
+        state.error = false;
+        feedback.textContent = state.notes;
+        feedback.classList.remove('is-error');
+      }
+      return local;
     }
     if (action === 'create-room') return mutation('room', {});
     if (action.startsWith('join-')) {
@@ -1702,6 +1844,51 @@ window.CodePierCollaboration = (() => {
       });
     throw new Error('未知的协作表单。');
   }
+  function busyActions() {
+    const root = document.querySelector('.collaboration');
+    if (!root) return () => {};
+    const previous = new Map();
+    let released = false;
+    const navigation =
+      '[data-cc-room], [data-cc-partition], [data-cc-view], [data-cc-open-joins], [data-cc-action="close-drawer"]';
+    const mark = () => {
+      for (const node of root.querySelectorAll('button, input[type="submit"]')) {
+        if (node.matches(navigation) || previous.has(node)) continue;
+        previous.set(node, node.getAttribute('aria-disabled'));
+        node.setAttribute('aria-disabled', 'true');
+        node.setAttribute('data-cc-request-busy', '');
+      }
+    };
+    root.setAttribute('aria-busy', 'true');
+    mark();
+    const observer = new MutationObserver(mark);
+    observer.observe(root, { childList: true, subtree: true });
+    return () => {
+      if (released) return;
+      released = true;
+      observer.disconnect();
+      for (const [node, value] of previous) {
+        if (value === null) node.removeAttribute('aria-disabled');
+        else node.setAttribute('aria-disabled', value);
+        node.removeAttribute('data-cc-request-busy');
+      }
+      // A detached render owns the stronger inert state until replacement.
+      if (!root.inert) root.removeAttribute('aria-busy');
+    };
+  }
+  async function readDrawer(kind, id, title, trigger) {
+    showDrawer(title, empty('正在读取当前授权记录…'), trigger);
+    const generation = state.generation,
+      dismissed = state.drawerEpoch;
+    const current = () => generation === state.generation && dismissed === state.drawerEpoch;
+    try {
+      const result = await getRecord(kind, id);
+      return current() ? result : null;
+    } catch (error) {
+      if (current()) showDrawer(title, empty(error.message), trigger);
+      throw error;
+    }
+  }
   async function run(operation, trigger) {
     if (state.busy) return;
     const token = {},
@@ -1719,7 +1906,9 @@ window.CodePierCollaboration = (() => {
       state.environment === environment &&
       S.page === 'collaboration';
     state.busy = token;
-    trigger?.setAttribute('disabled', '');
+    state.refreshSequence++;
+    const releaseBusy = busyActions();
+    state.busyCleanup = releaseBusy;
     try {
       const result = await operation();
       if (!current()) return;
@@ -1738,7 +1927,8 @@ window.CodePierCollaboration = (() => {
     } finally {
       const stillCurrent = current();
       if (state.busy === token) state.busy = false;
-      trigger?.removeAttribute('disabled');
+      releaseBusy();
+      if (state.busyCleanup === releaseBusy) state.busyCleanup = null;
       const feedback = document.querySelector('#cc-feedback');
       if (feedback && stillCurrent) {
         feedback.textContent = state.notes;
@@ -1791,7 +1981,7 @@ window.CodePierCollaboration = (() => {
       state.viewportCleanup = () => viewport.removeEventListener('resize', resize);
     }
     root.addEventListener('click', (event) => {
-      if (!live()) return;
+      if (!live() || event.target.closest('button')?.disabled) return;
       const partition = event.target.closest('[data-cc-partition]');
       if (partition) {
         selectPartition(partition.dataset.ccPartition, partition.dataset.environment);
@@ -1812,20 +2002,39 @@ window.CodePierCollaboration = (() => {
       }
       const tab = event.target.closest('[data-cc-view], [data-cc-open-joins]');
       if (tab) {
-        if (state.busy) return;
         const selected = tab.dataset.ccView || 'agents';
         rememberChat();
         state.view = selected;
-        renderPage(false).then(() => {
-          if (S.page === 'collaboration' && state.view === selected)
-            document
-              .querySelector('.cc-tabs [aria-pressed="true"]')
-              ?.focus({ preventScroll: true });
+        const rendering = renderPage(false);
+        const renderSequence = S.renderSeq,
+          generation = state.generation,
+          session = S.session,
+          space = S.space_id;
+        rendering.then(() => {
+          const next = document.querySelector('.collaboration'),
+            focused = document.activeElement;
+          if (
+            S.page === 'collaboration' &&
+            state.view === selected &&
+            S.renderSeq === renderSequence &&
+            state.generation === generation &&
+            S.session === session &&
+            S.space_id === space &&
+            next &&
+            next !== root &&
+            !next.inert &&
+            (focused === document.body || focused === next || focused === next.parentElement)
+          )
+            next.querySelector('.cc-tabs [aria-pressed="true"]')?.focus({ preventScroll: true });
         });
         return;
       }
       const button = event.target.closest('[data-cc-action]');
       if (button) {
+        if (button.dataset.ccAction === 'close-drawer') {
+          closeDrawer();
+          return;
+        }
         const menu = button.closest('.cc-room-menu');
         if (menu) menu.open = false;
         run(() => act(button.dataset.ccAction, button), button);
@@ -1879,16 +2088,34 @@ window.CodePierCollaboration = (() => {
     });
     const dialog = root.querySelector('#cc-drawer');
     dialog?.addEventListener('close', () => {
-      if (!live()) return;
-      state.drawerEpoch++;
+      if (!live() || dialog.open) return;
+      const epoch = ++state.drawerEpoch,
+        target = state.drawerFocus,
+        focused = document.activeElement;
+      // Native close may already have restored focus. Never override a newer
+      // user choice made before the close event or its animation frame runs.
+      if (
+        focused !== document.body &&
+        focused !== root &&
+        focused !== root.parentElement &&
+        focused !== target &&
+        !dialog.contains(focused)
+      )
+        return;
       requestAnimationFrame(() => {
-        if (state.drawerFocus?.isConnected) state.drawerFocus.focus({ preventScroll: true });
+        if (
+          live() &&
+          epoch === state.drawerEpoch &&
+          !dialog.open &&
+          target?.isConnected &&
+          document.activeElement === focused
+        )
+          target.focus({ preventScroll: true });
       });
     });
     dialog?.addEventListener('cancel', () => {
       if (!live()) return;
       state.drawerEpoch++;
-      state.drawerFocus?.isConnected && state.drawerFocus.focus({ preventScroll: true });
     });
     const feed = root.querySelector('.cc-feed'),
       area = root.querySelector('#cc-message-input');
@@ -1914,7 +2141,7 @@ window.CodePierCollaboration = (() => {
     }
     bindDetails();
     expireInvitations(root);
-    if (state.snapshot?.room) {
+    if (state.snapshot?.room && state.snapshot.capabilities?.plain_messages) {
       const generation = state.generation;
       const poll = async () => {
         if (generation !== state.generation || S.page !== 'collaboration') return;
