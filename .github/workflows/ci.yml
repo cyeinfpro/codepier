@@ -93,7 +93,8 @@ jobs:
         shell: bash
         run: |
           # Playwright uses sudo for apt-get; filesystem options survive that boundary.
-          sudo tee /etc/apt/apt.conf.d/99-codepier-ci-network >/dev/null <<'APT'
+          # GitHub's zz-retries preset must load before our final timeout values.
+          sudo tee /etc/apt/apt.conf.d/zzz-codepier-ci-network >/dev/null <<'APT'
           Acquire::http::Timeout "30";
           Acquire::https::Timeout "30";
           Acquire::Retries "2";
@@ -281,7 +282,8 @@ jobs:
         shell: bash
         run: |
           # Playwright uses sudo for apt-get; filesystem options survive that boundary.
-          sudo tee /etc/apt/apt.conf.d/99-codepier-ci-network >/dev/null <<'APT'
+          # GitHub's zz-retries preset must load before our final timeout values.
+          sudo tee /etc/apt/apt.conf.d/zzz-codepier-ci-network >/dev/null <<'APT'
           Acquire::http::Timeout "30";
           Acquire::https::Timeout "30";
           Acquire::Retries "2";

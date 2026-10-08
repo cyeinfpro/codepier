@@ -9,7 +9,7 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-APT_FILE = '/etc/apt/apt.conf.d/99-codepier-ci-network'
+APT_FILE = '/etc/apt/apt.conf.d/zzz-codepier-ci-network'
 APT_OPTIONS = {
     'Acquire::http::Timeout': '30',
     'Acquire::https::Timeout': '30',
@@ -58,12 +58,22 @@ def test_ci_bounds_existing_linux_installations_without_changing_trust(job):
 
 
 @pytest.mark.parametrize('job', INSTALL_STEPS)
-@pytest.mark.parametrize('failure', [None, 'tee', 'apt-config', *APT_OPTIONS])
+@pytest.mark.parametrize('failure', [None, 'tee', 'apt-config', 'earlier-fragment', *APT_OPTIONS])
 def test_ci_root_config_is_verified_with_scrubbed_environment(tmp_path, job, failure):
     script = named_step(workflow_steps(job), 'Bound Linux APT download waits')['run']
+    apt_file = APT_FILE
+    if failure == 'earlier-fragment':
+        apt_file = '/etc/apt/apt.conf.d/99-codepier-ci-network'
+        script = script.replace(APT_FILE, apt_file)
     binary = tmp_path / 'bin'
     binary.mkdir()
-    config = tmp_path / 'simulated-root-apt.conf'
+    config_dir = tmp_path / 'simulated-root-apt.conf.d'
+    config_dir.mkdir()
+    # The actual Ubuntu 24.04 runner (ubuntu24/20260927.320) writes this
+    # late-loading preset in images/ubuntu/scripts/build/configure-apt.sh.
+    (config_dir / 'zz-retries').write_text(
+        'Acquire::Retries "1";\nAcquire::http::Timeout "15";\nAcquire::https::Timeout "15";\n')
+    config = config_dir / Path(apt_file).name
     calls = tmp_path / 'calls.jsonl'
     stub = binary / 'sudo'
     stub.write_text(f"""#!{sys.executable}
@@ -80,23 +90,27 @@ with calls.open('a') as output:
     output.write(json.dumps(args) + '\\n')
 # Simulate sudo's environment reset, including APT_CONFIG.
 os.environ.clear()
-if args == ['tee', {APT_FILE!r}]:
+if args == ['tee', {apt_file!r}]:
     if failure == 'tee':
         raise SystemExit(7)
     text = sys.stdin.read()
     config.write_text(text)
     sys.stdout.write(text)
 elif args == ['apt-config', 'dump']:
+    # APT loads fragments alphabetically; later values replace earlier ones.
+    values = {{}}
+    for fragment in sorted(config.parent.iterdir()):
+        for line in fragment.read_text().splitlines():
+            key, value = line.split(' ', 1)
+            values[key] = value.strip().removesuffix(';').strip('"')
+    if failure in {list(APT_OPTIONS)!r}:
+        values[failure] = '999'
+    text = ''.join(key + ' "' + value + '";\\n' for key, value in values.items())
+    sys.stdout.write(text)
     if failure == 'apt-config':
         # Even valid-looking output must not hide apt-config's failing exit code.
-        sys.stdout.write(config.read_text())
         sys.stdout.flush()
         raise SystemExit(9)
-    text = config.read_text()
-    if failure:
-        text = '\\n'.join(failure + ' "999";' if line.startswith(failure + ' ')
-                         else line for line in text.splitlines()) + '\\n'
-    sys.stdout.write(text)
 else:
     raise SystemExit('Refusing unexpected simulated root command: ' + repr(args))
 """)
@@ -119,8 +133,8 @@ else:
     else:
         assert config.read_text() == ''.join(f'{key} "{value}";\n' for key, value in APT_OPTIONS.items())
     observed = [json.loads(line) for line in calls.read_text().splitlines()]
-    assert observed[0] == ['tee', APT_FILE]
+    assert observed[0] == ['tee', apt_file]
     assert all(call == ['apt-config', 'dump'] for call in observed[1:])
-    expected_calls = {'tee': 1, 'apt-config': 2}
+    expected_calls = {'tee': 1, 'apt-config': 2, 'earlier-fragment': 2}
     expected_calls.update({key: index + 2 for index, key in enumerate(APT_OPTIONS)})
     assert len(observed) == expected_calls.get(failure, 4)
