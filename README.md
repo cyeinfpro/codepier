@@ -11,6 +11,10 @@ CodePier 是自托管的 MCP 服务和开发面板。**Hub** 负责接入与管�
 
 [快速开始](#5-分钟快速开始) · [使用文档](docs/README.md) · [版本下载](https://github.com/cyeinfpro/codepier/releases/latest)
 
+![使用合成项目与设备的控制总览](web/readme/overview.png)
+
+界面示例使用独立合成数据。
+
 ## 5 分钟快速开始
 
 下面是最短接入流程。首次镜像构建、下载和 HTTPS 配置可能需要更久；已有 Hub 可从第 2 步开始。

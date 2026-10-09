@@ -96,14 +96,78 @@ def systemd_quote(value):
     return '"'+str(value).replace('\\','\\\\').replace('"','\\"').replace('%','%%').replace('$','$$')+'"'
 
 
+def is_legacy_launchd_name(name):
+    """Recognize the historical label format without embedding an owner's name."""
+    return isinstance(name, str) and re.fullmatch(
+        r'com\.[A-Za-z0-9][A-Za-z0-9-]*\.remote-dev-agent', name) is not None
+
+
+def _read_owned_service_file(path):
+    """Read only an owner-controlled regular file, without following symlinks."""
+    path = Path(path)
+    before = path.lstat()
+    if (not stat.S_ISREG(before.st_mode)
+            or hasattr(os, 'getuid') and before.st_uid != os.getuid()):
+        raise ValueError('Managed service definition must be an owner-owned regular file')
+    fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+    with os.fdopen(fd, 'rb') as stream:
+        opened = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(opened.st_mode) or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+                or hasattr(os, 'getuid') and opened.st_uid != os.getuid()):
+            raise ValueError('Managed service definition changed or belongs to another owner')
+        limit = 1024 * 1024
+        if opened.st_size > limit:
+            raise ValueError('Managed service file exceeds the size limit')
+        raw = stream.read(limit + 1)
+        if len(raw) > limit:
+            raise ValueError('Managed service file exceeds the size limit')
+        return raw
+
+
+def _launchd_service_name(base, recorded=None, home=None):
+    # Keep this implementation identical in the two standalone bootstrap scripts.
+    canonical = 'com.codepier.agent'
+    if recorded and recorded != canonical and not is_legacy_launchd_name(recorded):
+        raise ValueError('Unrecognized managed service name')
+    home = Path.home() if home is None else Path(home)
+    folder = home/'Library/LaunchAgents'
+    if folder.is_symlink():
+        raise ValueError('Managed service directory must not be a symlink')
+    names = {canonical}
+    names.update(path.stem for path in folder.glob('*.plist') if is_legacy_launchd_name(path.stem))
+    if recorded:
+        names.add(recorded)
+    command = [str(base/'runtime/.venv/bin/python'), '-m', 'agent', '--config', str(base/'config.json'), 'run']
+    owned = []
+    for name in sorted(names):
+        target = folder/(name+'.plist')
+        try:
+            value = plistlib.loads(_read_owned_service_file(target))
+            matches = (isinstance(value, dict) and value.get('Label') == name
+                       and value.get('WorkingDirectory') == str(base/'runtime')
+                       and value.get('ProgramArguments') == command
+                       and value.get('Program') in (None, command[0]))
+        except (OSError, ValueError, TypeError, plistlib.InvalidFileException):
+            matches = False
+        if matches:
+            owned.append(name)
+        elif (name == recorded or name == canonical) and (target.exists() or target.is_symlink()):
+            raise ValueError('Recorded managed service ownership could not be verified')
+    if len(owned) > 1:
+        raise ValueError('Both legacy and CodePier services exist; inspect before updating')
+    if recorded and recorded != canonical and recorded not in owned:
+        raise ValueError('Recorded managed service definition is missing')
+    return owned[0] if owned else canonical
+
+
 def definition_owned(raw, base, kind, name):
     runtime, config = base/'runtime', base/'config.json'
     command = [str(runtime/'.venv/bin/python'), '-m', 'agent', '--config', str(config), 'run']
     try:
         if kind == 'launchd':
             value = plistlib.loads(raw)
-            return (value.get('Label') == name and value.get('WorkingDirectory') == str(runtime)
-                    and value.get('ProgramArguments') == command)
+            return (isinstance(value, dict) and value.get('Label') == name and value.get('WorkingDirectory') == str(runtime)
+                    and value.get('ProgramArguments') == command and value.get('Program') in (None, command[0]))
         if kind == 'systemd':
             lines = raw.decode().splitlines()
             return ('WorkingDirectory='+str(runtime).replace('%','%%') in lines
@@ -134,6 +198,13 @@ def service_name(base, kind, scope, home=None):
     if not names: raise RuntimeError('Unsupported managed Agent service')
     metadata = read_json(base/'management.json') if (base/'management.json').is_file() else {}
     recorded = metadata.get('service_name')
+    if kind == 'launchd':
+        if scope != 'user' or (base/'management.json').is_symlink():
+            raise RuntimeError('Unrecognized managed launchd metadata or scope')
+        try:
+            return _launchd_service_name(base, recorded, home)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
     if recorded:
         if recorded not in names: raise RuntimeError('Unknown managed service identity')
         return recorded
@@ -156,7 +227,7 @@ def new_definition(raw, old, new, kind):
     if kind == 'launchd':
         value = plistlib.loads(raw); value['Label'] = SERVICE_NAMES[kind][0]
         value['ProgramArguments'] = [relocate_path(x, old, new) for x in value['ProgramArguments']]
-        for key in ('WorkingDirectory','StandardOutPath','StandardErrorPath'):
+        for key in ('WorkingDirectory','StandardOutPath','StandardErrorPath','Program'):
             if key in value: value[key] = relocate_path(value[key], old, new)
         return plistlib.dumps(value)
     if kind == 'systemd':
@@ -257,6 +328,7 @@ def _restore_files(base,journal):
             raw=(base/journal['backup']/'files'/entry['backup']).read_bytes()
             if hashlib.sha256(raw).hexdigest()!=entry['sha256']: raise RuntimeError('Backup checksum mismatch')
             write_bytes(path,raw,entry['mode'])
+            entry['written'].append(entry['sha256']); write_json(base/JOURNAL,journal)
 
 
 def _relocate_owned_files(base,old,new,journal):
@@ -346,10 +418,13 @@ def _rollback(base,journal,backend):
     write_json(base/JOURNAL,journal)
     # Metadata may already name the new task before it has been registered.
     # Never stop/delete that nonexistent identity while recovering the old one.
-    if journal.get('new_registered') or journal.get('new_start_requested'):
+    if not journal.get('rollback_new_stopped') and (journal.get('new_registered') or journal.get('new_start_requested')):
         backend.stop_service(base)
-    if journal.get('new_definition_written') and (journal['kind'] != 'schtasks' or journal.get('new_registered')):
+        journal['rollback_new_stopped']=True; write_json(base/JOURNAL,journal)
+    if (not journal.get('rollback_new_retired') and journal.get('new_definition_written')
+            and (journal['kind'] != 'schtasks' or journal.get('new_registered'))):
         _retire_service(journal,backend,old=False)
+        journal['rollback_new_retired']=True; write_json(base/JOURNAL,journal)
     browser=getattr(backend,'brand_browser',None)
     if browser:
         browser.remove_created(journal)
@@ -359,7 +434,8 @@ def _rollback(base,journal,backend):
         _remove_alias(old,new)
         if old.exists(): raise RuntimeError('Original Agent path became occupied')
         os.replace(new,old); base=old
-    raw=(base/journal['backup']/'service.before').read_bytes()
+    backup=base/journal['backup']/'service.before'
+    raw=_read_owned_service_file(backup) if journal['kind']=='launchd' else backup.read_bytes()
     if hashlib.sha256(raw).hexdigest()!=journal['service_sha256']: raise RuntimeError('Service backup checksum mismatch')
     target=Path(journal['old_target'])
     if target.exists() and target.read_bytes()!=raw and hashlib.sha256(target.read_bytes()).hexdigest()!=journal.get('new_definition_sha256'):
@@ -367,22 +443,72 @@ def _rollback(base,journal,backend):
     write_bytes(target,raw,journal['service_mode'])
     metadata=read_json(base/'management.json')
     metadata.update(service_name=journal['old_name'],brand_migration='rollback',status='ready',brand_migration_error=journal.get('error','')[:500])
-    write_json(base/'management.json',metadata); _register_service(base,journal,backend,old=True)
+    _modify_json(base,journal,base/'management.json',metadata); _register_service(base,journal,backend,old=True)
     backend.start_service(base); backend.verify_service(base)
     journal.update(stage='rolled_back',finished_at=time.time()); write_json(base/JOURNAL,journal)
     return base
+
+
+def _validate_launchd_recovery(location, journal, old, new):
+    """Recovery may use a discovered label only with its original owned backup."""
+    name = journal.get('old_name')
+    if journal.get('scope') != 'user' or not (
+            name == SERVICE_NAMES['launchd'][0] or is_legacy_launchd_name(name)):
+        raise RuntimeError('Unrecognized interrupted launchd identity')
+    expected_old = service_target(old, 'launchd', 'user', name)
+    expected_new = service_target(new, 'launchd', 'user', SERVICE_NAMES['launchd'][0])
+    if (journal.get('old_target') != str(expected_old) or journal.get('new_target') != str(expected_new)
+            or expected_old.parent.is_symlink()):
+        raise RuntimeError('Unrecognized interrupted launchd target')
+    backup = Path(journal.get('backup', ''))
+    if (backup.is_absolute() or len(backup.parts) != 3
+            or backup.parts[:2] != ('backups', 'codepier-migration')
+            or not re.fullmatch(r'[0-9]{8}T[0-9]{6}-[a-f0-9]{8}', backup.name)):
+        raise RuntimeError('Unrecognized interrupted service backup')
+    _safe_base(location)
+    try:
+        if json.loads(_read_owned_service_file(location/JOURNAL)) != journal:
+            raise ValueError('Migration journal changed')
+        for directory in [location/backup, *(location/backup).parents]:
+            if directory == location:
+                break
+            if directory.is_symlink():
+                raise ValueError('Service backup directory must not be a symlink')
+        raw = _read_owned_service_file(location/backup/'service.before')
+        if (hashlib.sha256(raw).hexdigest() != journal.get('service_sha256')
+                or not definition_owned(raw, old, 'launchd', name)):
+            raise ValueError('Original service backup ownership could not be verified')
+        # Directory-only migration may rewrite the same plist path in place.
+        for target in {expected_old, expected_new}:
+            if not target.exists() and not target.is_symlink():
+                continue
+            current = _read_owned_service_file(target)
+            digest = hashlib.sha256(current).hexdigest()
+            original = (target == expected_old and digest == journal.get('service_sha256')
+                        and definition_owned(current, old, 'launchd', name))
+            migrated = (target == expected_new and digest == journal.get('new_definition_sha256')
+                        and definition_owned(current, new, 'launchd', SERVICE_NAMES['launchd'][0]))
+            if not original and not migrated:
+                raise ValueError('Service changed during interrupted migration')
+    except (OSError, ValueError, TypeError) as exc:
+        raise RuntimeError('Interrupted launchd ownership could not be verified; no service was changed') from exc
 
 
 def recover_agent(base,backend):
     for location in dict.fromkeys([base,canonical_base(base)]):
         path=location/JOURNAL
         if not path.is_file(): continue
-        journal=read_json(path)
+        journal=json.loads(_read_owned_service_file(path))
+        if not isinstance(journal, dict): raise RuntimeError('Invalid migration journal')
         if journal.get('stage') in {'completed','rolled_back'}: continue
         old,new=Path(journal.get('old_base','')),Path(journal.get('new_base',''))
         if (old!=base and new!=base or canonical_base(old)!=new or location.resolve() not in {old,new}
-            or journal.get('kind') not in SERVICE_NAMES or journal.get('old_name') not in SERVICE_NAMES[journal['kind']]):
+            or journal.get('kind') not in SERVICE_NAMES
+            or not (journal.get('old_name') in SERVICE_NAMES[journal['kind']]
+                    or journal['kind'] == 'launchd' and is_legacy_launchd_name(journal.get('old_name')))):
             raise RuntimeError('Unrecognized interrupted migration; no files were changed')
+        if journal['kind'] == 'launchd':
+            _validate_launchd_recovery(location.resolve(), journal, old, new)
         if backend._process_alive(int(journal.get('pid',0))): raise RuntimeError('Another migration is still running')
         if read_json(location/'config.json').get('device_id')!=journal.get('device_id'):
             raise RuntimeError('Migration journal belongs to another device')
@@ -432,7 +558,7 @@ def migrate_agent(base,pid,backend):
     if old!=new and (new.exists() or new.is_symlink()): raise RuntimeError('CodePier destination already exists; no files/services were merged')
     target=backend._service_target(base,kind,scope)
     if not target or target.is_symlink() or not target.is_file(): raise RuntimeError('Owned service definition is missing')
-    raw=target.read_bytes()
+    raw=_read_owned_service_file(target) if kind=='launchd' else target.read_bytes()
     if not definition_owned(raw,base,kind,name): raise RuntimeError('Service ownership check failed; no service was stopped')
     new_target=service_target(new,kind,scope,canonical)
     if new_target!=target and (new_target.exists() or new_target.is_symlink()): raise RuntimeError('CodePier service name is occupied')
@@ -505,7 +631,7 @@ def migrate_agent(base,pid,backend):
                         write_json(location/JOURNAL,journal)
                         metadata=read_json(location/'management.json')
                         metadata.update(status='error',brand_migration='recovery_required',brand_migration_error=type(recovery).__name__)
-                        write_json(location/'management.json',metadata)
+                        _modify_json(location,journal,location/'management.json',metadata)
                     except (OSError,ValueError) as diagnostic_error:
                         LOGGER.warning('Migration recovery journal could not be recorded (%s)', type(diagnostic_error).__name__)
                 raise RuntimeError('CodePier migration failed; recovery needs attention: '+str(recovery)) from exc

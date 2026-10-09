@@ -161,6 +161,10 @@ def test_enroll_maps_transport_and_http_failures_to_retryable_errors(monkeypatch
 
 
 def _invoke_main(monkeypatch, *, archive, digest, base, run, enroll, no_service=True):
+    # Installer orchestration tests must never inspect the runner's real services.
+    home = base.parent / 'isolated-home'
+    home.mkdir(exist_ok=True)
+    monkeypatch.setattr(install_agent.Path, 'home', classmethod(lambda cls: home))
     monkeypatch.setattr(install_agent, "run", run)
     monkeypatch.setattr(install_agent, "enroll", enroll)
     monkeypatch.setenv("CODEPIER_INSTALL_TOKEN", "rdi_test-token")
@@ -331,7 +335,8 @@ def test_launchd_service_enables_recovery_without_changing_legacy_command(tmp_pa
     target = home / 'Library/LaunchAgents/com.codepier.agent.plist'
     target.parent.mkdir(parents=True)
     command = [str(python), '-m', 'agent', '--config', str(base / 'config.json'), 'run']
-    target.write_bytes(plistlib.dumps({'ProgramArguments': command}))
+    target.write_bytes(plistlib.dumps({'Label': 'com.codepier.agent',
+                                      'WorkingDirectory': str(runtime), 'ProgramArguments': command}))
     assert install_agent.start_service(base, python) == command
     service = plistlib.loads(target.read_bytes())
     assert service['EnvironmentVariables']['CODEPIER_SUPERVISED'] == '1'

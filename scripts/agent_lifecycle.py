@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -23,6 +24,70 @@ import time
 LABEL = "com.codepier.agent"
 TASK = "CodePierAgent"
 UNIT = "codepier-agent.service"
+
+def is_legacy_launchd_name(name):
+    """Recognize the historical label format without embedding an owner's name."""
+    return isinstance(name, str) and re.fullmatch(
+        r'com\.[A-Za-z0-9][A-Za-z0-9-]*\.remote-dev-agent', name) is not None
+
+
+def _read_owned_service_file(path):
+    """Read only an owner-controlled regular file, without following symlinks."""
+    path = Path(path)
+    before = path.lstat()
+    if (not stat.S_ISREG(before.st_mode)
+            or hasattr(os, 'getuid') and before.st_uid != os.getuid()):
+        raise ValueError('Managed service definition must be an owner-owned regular file')
+    fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+    with os.fdopen(fd, 'rb') as stream:
+        opened = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(opened.st_mode) or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+                or hasattr(os, 'getuid') and opened.st_uid != os.getuid()):
+            raise ValueError('Managed service definition changed or belongs to another owner')
+        limit = 1024 * 1024
+        if opened.st_size > limit:
+            raise ValueError('Managed service file exceeds the size limit')
+        raw = stream.read(limit + 1)
+        if len(raw) > limit:
+            raise ValueError('Managed service file exceeds the size limit')
+        return raw
+
+
+def _launchd_service_name(base, recorded=None, home=None):
+    # Keep this implementation identical in the two standalone bootstrap scripts.
+    canonical = 'com.codepier.agent'
+    if recorded and recorded != canonical and not is_legacy_launchd_name(recorded):
+        raise ValueError('Unrecognized managed service name')
+    home = Path.home() if home is None else Path(home)
+    folder = home/'Library/LaunchAgents'
+    if folder.is_symlink():
+        raise ValueError('Managed service directory must not be a symlink')
+    names = {canonical}
+    names.update(path.stem for path in folder.glob('*.plist') if is_legacy_launchd_name(path.stem))
+    if recorded:
+        names.add(recorded)
+    command = [str(base/'runtime/.venv/bin/python'), '-m', 'agent', '--config', str(base/'config.json'), 'run']
+    owned = []
+    for name in sorted(names):
+        target = folder/(name+'.plist')
+        try:
+            value = plistlib.loads(_read_owned_service_file(target))
+            matches = (isinstance(value, dict) and value.get('Label') == name
+                       and value.get('WorkingDirectory') == str(base/'runtime')
+                       and value.get('ProgramArguments') == command
+                       and value.get('Program') in (None, command[0]))
+        except (OSError, ValueError, TypeError, plistlib.InvalidFileException):
+            matches = False
+        if matches:
+            owned.append(name)
+        elif (name == recorded or name == canonical) and (target.exists() or target.is_symlink()):
+            raise ValueError('Recorded managed service ownership could not be verified')
+    if len(owned) > 1:
+        raise ValueError('Both legacy and CodePier services exist; inspect before updating')
+    if recorded and recorded != canonical and recorded not in owned:
+        raise ValueError('Recorded managed service definition is missing')
+    return owned[0] if owned else canonical
+
 
 def managed_service_name(base, kind, scope):
     # Bootstrap runs before shared modules are installed. Keep this discovery
@@ -34,6 +99,10 @@ def managed_service_name(base, kind, scope):
     metadata_path = base/'management.json'
     metadata = json.loads(metadata_path.read_text(encoding='utf-8')) if metadata_path.is_file() else {}
     name = metadata.get('service_name')
+    if kind == 'launchd':
+        if scope != 'user' or metadata_path.is_symlink():
+            raise ValueError('Unrecognized managed launchd metadata or scope')
+        return _launchd_service_name(base, name)
     if name:
         if name not in names: raise ValueError('Unrecognized managed service name')
         return name
@@ -62,7 +131,11 @@ def managed_service_name(base, kind, scope):
 
 
 def _service_name(base):
-    return managed_service_name(base, *_service(base))
+    kind, scope = _service(base)
+    name = managed_service_name(base, kind, scope)
+    if kind == 'launchd' and not (Path.home()/'Library/LaunchAgents'/(name+'.plist')).is_file():
+        raise ValueError('Managed launchd service definition is missing')
+    return name
 
 
 def _run(command, *, check=False, timeout=45):

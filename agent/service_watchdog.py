@@ -8,12 +8,14 @@ import sys
 import threading
 import time
 
+from shared.brand_migration import is_legacy_launchd_name
+
 
 def is_supervised():
     """Recognize old launchd installations without rewriting their identity."""
+    service = os.environ.get('XPC_SERVICE_NAME')
     return (os.environ.get('CODEPIER_SUPERVISED') == '1'
-            or os.environ.get('XPC_SERVICE_NAME') in
-            {'com.codepier.agent', 'com.example.remote-dev-agent'})
+            or service == 'com.codepier.agent' or is_legacy_launchd_name(service))
 
 
 class Watchdog:

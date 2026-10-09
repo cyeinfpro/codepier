@@ -17,6 +17,7 @@ import urllib.request
 import zipfile
 
 from shared.agent_lifecycle import DEVICE_ACTIONS, MANAGEMENT_SCHEMA, MAX_AGENT_PACKAGE_BYTES
+from shared.brand_migration import is_legacy_launchd_name
 from shared.util import DevError, VERSION, atomic_json
 
 LABEL = "com.codepier.agent"
@@ -145,6 +146,12 @@ class LifecycleManager:
         uv = self._uv() is not None
         handoff = self._handoff_ready()
         kind, _ = self._service_kind()
+        legacy_installation = (
+            self.base.name == ".remote-dev-agent"
+            or metadata.get("service_name") in {"RemoteDevAgent", "remote-dev-agent.service"}
+            or is_legacy_launchd_name(metadata.get("service_name"))
+            or target is not None and (target.name == "remote-dev-agent.service" or is_legacy_launchd_name(target.stem))
+        )
         reason = ""
         if not service:
             reason = "未检测到受管自启动服务；请手动维护此 Agent"
@@ -160,7 +167,7 @@ class LifecycleManager:
             "layout": "managed-runtime",
             "installed_version": str(metadata.get("installed_version") or VERSION)[:80],
             "product": "CodePier",
-            "brand_migration": str(metadata.get("brand_migration") or ("pending" if self.base.name == ".remote-dev-agent" or metadata.get("service_name") in {"RemoteDevAgent","remote-dev-agent.service","com.example.remote-dev-agent"} or target and target.name in {"remote-dev-agent.service","com.example.remote-dev-agent.plist"} else "completed")),
+            "brand_migration": str(metadata.get("brand_migration") or ("pending" if legacy_installation else "completed")),
             "status": str(metadata.get("status", "ready"))[:40],
             "last_error": str(metadata.get("last_error", ""))[:500],
             "update_ready": bool(service and helper and external_python and uv and handoff),
