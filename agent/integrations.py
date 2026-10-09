@@ -4,6 +4,7 @@ import asyncio
 from shared.integration_contracts import REMOTE_TOOLS, INCOMING_UPLOAD_TOOLS
 from shared.util import DevError
 from agent.integration_state import Records
+from agent.integration_config import file_import_streaming_enabled
 from agent.source_versions import Validations
 from agent.workspaces import Workspaces
 from agent.integration_control import Controls
@@ -47,7 +48,7 @@ class Integrations:
         return self.workspaces.resolve(project,workspace_id) if workspace_id else project
 
     def upload_service(self):
-        if self.agent.config.get('integrations',{}).get('file_import_streaming') is not True:
+        if not file_import_streaming_enabled(self.agent.config.get('integrations',{})):
             raise DevError('FILE_IMPORT_DISABLED','节点未启用可续传文件导入；请由所有者审核后启用',403)
         if self.incoming_uploads is None:
             from agent.incoming_uploads import IncomingUploads
@@ -144,7 +145,7 @@ class Integrations:
                 'file_import':{**file_source_policy(self.agent.config.get('integrations',{})),
                     'source_check_supported':True,'host_roundtrip':'not_run',
                     'resumable_upload_supported':True,
-                    'resumable_upload_enabled':self.agent.config.get('integrations',{}).get('file_import_streaming') is True,
+                    'resumable_upload_enabled':file_import_streaming_enabled(self.agent.config.get('integrations',{})),
                     'upload_cleanup_errors':self.upload_cleanup_errors},
                 'checks':[{'name':'project_read','state':'ready'},
                     {'name':'project_write','state':available('write',project.get('mode')=='write' and spec.get('writable',True),'denied')},

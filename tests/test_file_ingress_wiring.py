@@ -299,16 +299,19 @@ async def test_startup_discovers_and_cleans_expired_spool_without_ingress_rpc(
         assert instance.config == original and instance.integrations.local_server is None
         assert instance.integrations.upload_cleanup_errors == 0
         send.assert_not_called()
-        with pytest.raises(DevError) as failure:
-            instance.integrations.upload_service()
-        assert failure.value.code == 'FILE_IMPORT_DISABLED'
+        if explicit_disabled:
+            with pytest.raises(DevError) as failure:
+                instance.integrations.upload_service()
+            assert failure.value.code == 'FILE_IMPORT_DISABLED'
+        else:
+            assert instance.integrations.upload_service() is instance.integrations.incoming_uploads
     finally:
         await instance.integrations.close()
     assert instance.integrations.upload_cleanup_task.done()
 
 
 @pytest.mark.asyncio
-async def test_startup_without_prior_uploads_does_not_create_spool_or_enable_ingress(agent):
+async def test_startup_without_prior_uploads_does_not_create_spool_or_materialize_default(agent):
     instance, _, _ = agent
     try:
         await instance.integrations.start()
@@ -321,8 +324,9 @@ async def test_startup_without_prior_uploads_does_not_create_spool_or_enable_ing
 
 
 @pytest.mark.asyncio
-async def test_startup_cleanup_error_is_counted_without_enabling_ingress(agent, monkeypatch):
+async def test_startup_cleanup_error_is_counted_without_overriding_explicit_disable(agent, monkeypatch):
     instance, _, _ = agent
+    instance.config.setdefault('integrations', {})['file_import_streaming'] = False
     IncomingUploads(instance.engine)
     monkeypatch.setattr(IncomingUploads, 'cleanup',
                         lambda self: (_ for _ in ()).throw(OSError('synthetic failure')))

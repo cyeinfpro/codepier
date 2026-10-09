@@ -77,9 +77,9 @@ def begin(b, raw=b"", **changes):
     return request, response.json()
 
 
-def test_gate_is_explicit_and_default_closed(ingress, monkeypatch):
+def test_gate_preserves_explicit_disable_and_rejects_malformed(ingress, monkeypatch):
     app, b, service, calls, _, _ = ingress
-    for value in (None, "", "1", "TRUE", "false", " true"):
+    for value in ("", "1", "TRUE", "false", " true"):
         if value is None:
             monkeypatch.delenv("CODEPIER_FILE_IMPORT_STREAMING")
         else:

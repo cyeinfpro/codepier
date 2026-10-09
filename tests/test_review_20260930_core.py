@@ -260,7 +260,15 @@ async def test_import_diagnostics_survive_agent_replay_and_hub_receipt(local_age
     assert agent.journal.status(call['id'])['result'] == first
     assert first['error']['recovery'] == 'refresh_native_file'
     assert first['error']['http_status'] == 403
-    receipt = await hub.invoke('download_artifact', {**call['args'], 'project': 'ProjectAlpha'}, principal)
+    # The public v1.22 entry requires the online authenticated relay; it must
+    # never silently fall back to a legacy Agent download when unavailable.
+    with pytest.raises(DevError) as offline:
+        await hub.invoke('download_artifact', {**call['args'], 'project': 'ProjectAlpha'}, principal)
+    assert offline.value.code == 'FILE_IMPORT_DEVICE_OFFLINE'
+    # Seed an already-accepted legacy receipt in this disposable Hub to verify
+    # historical Agent journal diagnostics still survive upgrade and recovery.
+    receipt = await hub.dispatch('download_artifact', call['args'],
+                                 hub.project('ProjectAlpha', principal), principal)
     row = hub.store.one('SELECT * FROM operations WHERE id=?', (receipt['operation_id'],))
     hub.complete(row, first)
     recovered = hub.operation(receipt['operation_id'], principal)

@@ -79,6 +79,13 @@ class AccessDefaultsInput(AccessModel):
     all_projects: bool
     developer_scopes: bool = False
     apply_to_existing: bool = False
+    expected_defaults: dict[str, bool] | None = None
+
+    @model_validator(mode='after')
+    def expected_keys(self):
+        if self.expected_defaults is not None and set(self.expected_defaults) != {'all_projects', 'developer_scopes'}:
+            raise ValueError('expected_defaults 必须包含原来的两个默认选项')
+        return self
 
 
 class GrantProjectsInput(AccessModel):
@@ -100,9 +107,12 @@ def make_access_router(auth, runtime):
             raise DevError('SPACE_ADMIN_REQUIRED', '批量授权需要空间管理员', 403)
         if body.apply_to_existing and not body.all_projects:
             raise DevError('INVALID_PROJECT', '批量应用仅用于明确开启全部项目；缩小授权请逐项调整')
-        defaults = body.model_dump(exclude={'apply_to_existing'})
+        defaults = body.model_dump(exclude={'apply_to_existing', 'expected_defaults'})
         with store.lock, store.db:
             auth.panel(request, True)
+            current = access_defaults(store, principal.user_id)
+            if body.expected_defaults is not None and current != body.expected_defaults and current != defaults:
+                raise DevError('SETTINGS_CHANGED', '默认选项已在其他窗口修改；请保留草稿并重新核对', 409)
             store.db.execute('INSERT INTO meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
                              ('mcp_access_defaults:' + principal.user_id, json.dumps(defaults)))
             changed = []

@@ -52,9 +52,9 @@ data:
   HUB_DELIVERY_RETRY_SECONDS: "5"
   MCP_BLOCK_LOCAL_CODEX: "false"
   CODEPIER_MCP_GATEWAY: "1"
-  # Opt-in file ingress; enable only after target Agents and source policy are reviewed.
-  CODEPIER_FILE_IMPORT_STREAMING: "false"
-  CODEPIER_NATIVE_FILE_RELAY: "false"
+  # Authenticated ingress defaults on; source providers remain explicit opt-in.
+  CODEPIER_FILE_IMPORT_STREAMING: "true"
+  CODEPIER_NATIVE_FILE_RELAY: "true"
   CODEPIER_NATIVE_FILE_PROVIDERS: "[]"
   # first-login: while no active instance administrator exists, the first admitted OIDC
   # identity is promoted (audited as oidc.bootstrap_admin). No effect once one exists.
@@ -128,7 +128,7 @@ spec:
         # The Hub chmods its data directory to 0700 at start, which requires owning it.
         # Same image as the Hub, so no additional pull; only CHOWN and FOWNER are granted.
         - name: data-ownership
-          image: ghcr.io/cyeinfpro/codepier:1.21.0
+          image: ghcr.io/cyeinfpro/codepier:1.22.0
           command: ["sh", "-c", "chown 10001:10001 /app/data && chmod 0700 /app/data"]
           securityContext:
             runAsNonRoot: false
@@ -144,7 +144,7 @@ spec:
               mountPath: /app/data
       containers:
         - name: hub
-          image: ghcr.io/cyeinfpro/codepier:1.21.0
+          image: ghcr.io/cyeinfpro/codepier:1.22.0
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

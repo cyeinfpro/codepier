@@ -25,7 +25,7 @@ const nav = [
   ['identity', 'key', '我的账号', '16'],
   ['members', 'shield', '空间成员', '17'],
   ['identity-admin', 'shield', '身份管理', '18'],
-  ['settings', 'settings', '系统设置', '10'],
+  ['settings', 'settings', '设置中心', '10'],
 ];
 const S = {
   space_id: null,
@@ -121,6 +121,7 @@ function sessionOwner(session) {
 function hasUnsavedChanges() {
   return (
     !!S.work.dirty ||
+    !!window.CodePierSettings?.dirty() ||
     (typeof ChatUI !== 'undefined' &&
       [...ChatUI.views.values()].some(
         (v) =>
@@ -134,6 +135,7 @@ function hasUnsavedChanges() {
   );
 }
 function discardLocalWork() {
+  window.CodePierSettings?.reset();
   if (typeof chatDetach === 'function') chatDetach(true);
   resetWork('');
   S.work.operation = null;
@@ -143,6 +145,7 @@ function discardLocalWork() {
   sessionValue('codepier-task-submission', null);
 }
 function clearSpaceSnapshots() {
+  window.CodePierSettings?.reset();
   invalidateBasics();
   Object.assign(S, {
     overview: null,
@@ -810,6 +813,10 @@ async function navigate(page) {
     history.replaceState(null, '', location.pathname + location.search + '#' + S.page);
     return;
   }
+  if (S.page === 'settings' && page !== S.page && !window.CodePierSettings?.requestLeave()) {
+    history.replaceState(null, '', location.pathname + location.search + '#settings');
+    return;
+  }
   if (page === 'integrations' && S.page !== page) window.CodePierIntegrations?.inherit(S.page);
   const changed = page !== S.page;
   S.page = page;
@@ -824,11 +831,13 @@ async function navigate(page) {
   }
 }
 async function renderPage(showLoading = true) {
+  window.CodePierSettings?.detach();
   window.CodePierCollaboration?.detach();
   window.CodePierCallLog?.detach();
   window.CodePierAccess?.detach();
   window.CodePierPanelUpdate?.detach();
   window.CodePierIntegrations?.detach();
+  if (S.page !== 'overview' || !S.session) window.CodePierTokenUsage?.resetDashboard();
   if (!S.session || !$('#page')) return;
   if (S.page === 'native') {
     const seq = ++S.renderSeq;
@@ -846,6 +855,7 @@ async function renderPage(showLoading = true) {
   if (typeof chatDetach === 'function') chatDetach();
   const seq = ++S.renderSeq;
   const page = S.page;
+  const tokenContinuation = page === 'overview' && !!$('#page [data-token-dashboard]');
   if (showLoading)
     $('#page').innerHTML = '<div class="skeleton" role="status" aria-label="正在加载页面"></div>';
   try {
@@ -854,6 +864,9 @@ async function renderPage(showLoading = true) {
       html = await CodePierIdentity.html(page);
     } else if (page === 'overview') {
       S.overview = await api('/api/overview');
+      const tokenView = await window.CodePierTokenUsage?.prepareDashboard(S.overview.token_usage, api, tokenContinuation, () => seq === S.renderSeq && !!S.session && S.page === 'overview');
+      if (tokenView === null) return;
+      if (tokenView) S.overview.token_usage = tokenView;
       S.projects = S.overview.projects;
       S.devices = S.overview.devices;
       html = overviewHTML();
@@ -901,7 +914,7 @@ async function renderPage(showLoading = true) {
       html = await artifactsHTML(seq);
     } else if (page === 'settings') {
       S.settings = await api('/api/settings');
-      html = settingsHTML();
+      html = await settingsHTML();
     }
     if (!showLoading) await uiWaitForPagePointer();
     if (seq !== S.renderSeq || !S.session) return;
@@ -916,6 +929,7 @@ async function renderPage(showLoading = true) {
     else $('#page').innerHTML = html;
     uiPageReady(showLoading, presentation);
     if (['identity', 'members', 'identity-admin'].includes(page)) CodePierIdentity.bind();
+    if (page === 'overview') window.CodePierTokenUsage?.bindDashboard($('#page'), api, S.overview.token_usage);
     if (page === 'mcp-gateway') CodePierGateway.bind();
     if (page === 'roles') CodePierRoles.bind();
     if (page === 'profiles') CodePierProfiles.bind();
@@ -978,7 +992,7 @@ function overviewHTML() {
       ? `<div class="attention-strip"><span>${icon('warning')} 今日 ${o.today_failed} 项操作失败</span><button class="btn ghost small" data-nav="audit">查看记录 ${icon('arrow')}</button></div>`
       : '') +
     `<div class="overview-grid workspace-overview editorial-board">
-      <section class="panel codepier-focus-card overview-summary" aria-label="工作区概览"><div class="overview-summary-heading"><h2>工作区概览</h2><span class="editorial-label">CodePier</span></div><div class="stats workspace-stats" aria-label="工作区统计">${stats.map(([label, value, suffix, ico, foot, tone]) => `<article class="stat workspace-stat ${tone}"><div class="stat-top"><span>${label}</span>${icon(ico)}</div><div class="stat-value">${esc(value)}<small>${esc(suffix)}</small></div><div class="stat-foot">${esc(foot)}</div></article>`).join('')}</div></section>
+      <section class="panel codepier-focus-card overview-summary" aria-label="工作区概览"><div class="overview-summary-heading"><h2>工作区概览</h2><span class="editorial-label">CodePier</span></div><div class="stats workspace-stats" aria-label="工作区统计">${stats.map(([label, value, suffix, ico, foot, tone]) => `<article class="stat workspace-stat ${tone}"><div class="stat-top"><span>${label}</span>${icon(ico)}</div><div class="stat-value">${esc(value)}<small>${esc(suffix)}</small></div><div class="stat-foot">${esc(foot)}</div></article>`).join('')}</div>${window.CodePierTokenUsage?.dashboard(o.token_usage) || ''}</section>
       <section class="panel workspace-operations"><div class="panel-head"><h2>最近操作</h2><button class="btn ghost small" data-nav="audit">查看全部 ${icon('arrow')}</button></div>${operationsTable(o.recent_operations.slice(0, 6))}</section>
       <section class="panel overview-projects workspace-recent-projects"><div class="panel-head"><h2>项目入口</h2><button class="icon-btn" data-nav="projects" aria-label="查看全部项目">${icon('arrow')}</button></div>${
         o.projects.length
@@ -2156,44 +2170,10 @@ function accountPasswordHTML() {
   return `<section class="panel"><div class="panel-head"><h2>${icon('lock')}我的密码</h2></div><div class="panel-body"><form id="password-form"><div class="field"><label>当前密码</label><input name="current_password" type="password" required autocomplete="current-password"></div><div class="field"><label>新密码</label><input name="new_password" type="password" minlength="12" maxlength="256" required autocomplete="new-password" placeholder="至少 12 位"></div><div class="field"><label>确认新密码</label><input name="confirm_password" type="password" minlength="12" required autocomplete="new-password" aria-describedby="password-match-error"><p id="password-match-error" class="field-error" role="status" hidden></p></div><p class="form-note">仅修改你自己的密码。修改后退出全部浏览器登录，并撤销自己的 MCP 授权；已运行的操作不会自动停止。</p><button class="btn" type="submit">更新密码并退出</button></form></div></section>`;
 }
 function settingsHTML() {
-  const s = S.settings;
-  if (!S.identity?.instance_admin)
-    return (
-      heading('账号设置', 'ACCOUNT / SETTINGS') +
-      notice(
-        '实例设置仅供实例管理员使用。管理自己的登录身份、会话和空间，请打开「我的账号」。',
-        true,
-      ) +
-      `<button class="btn primary" data-nav="identity">我的账号</button>`
-    );
-  return (
-    heading('系统设置', 'SYSTEM / SETTINGS') +
-    `<div class="settings-grid"><section class="panel"><div class="panel-head"><h2>${icon('plug')}对外地址</h2></div><div class="panel-body"><form id="settings-form"><div class="field"><label>基础地址</label><input name="public_url" value="${esc(s.public_url)}" required><small>HTTP / HTTPS 均可，不带 /mcp。</small></div>${notice('只修改 MCP / OAuth 标识，不改变监听端口或 Agent 地址。变更后请重新连接并授权。')}<div class="spacer"></div><button class="btn primary" type="submit">保存地址</button></form>${uiHelp('服务信息', `<dl class="kv"><dt>版本</dt><dd>${esc(s.version)}</dd><dt>监听端口</dt><dd>${s.listen_port}（容器内）</dd><dt>MCP 协议</dt><dd>${esc(s.protocol_versions.join(' / '))}</dd><dt>数据目录</dt><dd><code>${esc(s.data_dir)}</code></dd></dl>`)}</div></section>${accountPasswordHTML()}</div>` +
-    CodePierAccess.html() +
-    CodePierPanelUpdate.html() +
-    agentExecutionHelp() +
-    uiHelp(
-      '更改 Agent 连接地址',
-      `<p>在本机 Agent 目录执行：</p><div class="code-box"><pre>python -m agent configure --hub http://新的云端IP:新的端口</pre></div><p class="form-note">保持同一账号与配置文件。自定义配置需加 <code>--config /path/config.json</code>。更换端口前，先修改 Hub 的端口映射与防火墙；Agent 随配置变化自动重连。</p>`,
-    )
-  );
+  return CodePierSettings.html();
 }
 function bindSettings() {
-  if (!S.identity?.instance_admin) return;
-  CodePierAccess.bind();
-  CodePierPanelUpdate.bind();
-  bindPasswordForm();
-  $('#settings-form').onsubmit = (e) => {
-    e.preventDefault();
-    busy($('button', e.target), async () => {
-      const r = await api('/api/settings', {
-        method: 'PUT',
-        body: JSON.stringify({ public_url: e.target.elements.public_url.value }),
-      });
-      toast(r.note);
-      await renderPage(false);
-    });
-  };
+  CodePierSettings.bind();
 }
 function bindPasswordForm() {
   const passwordForm = $('#password-form');

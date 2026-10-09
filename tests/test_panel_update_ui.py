@@ -43,7 +43,7 @@ def open_settings(browser,stack,state,width=1440,post_handler=None,init_script=N
     page.route('**/api/panel-update/**',route)
     page.goto(stack.url+'/#settings')
     page.fill('#username', 'admin');page.fill('#password',stack.password);page.click('#login-form button')
-    expect(page.locator('#page h1')).to_have_text('系统设置')
+    expect(page.locator('#page h1')).to_have_text('设置中心')
     expect(page.locator('#panel-update')).to_be_visible()
     return page,calls,errors
 
@@ -88,7 +88,7 @@ def test_update_confirmation_single_submission_restart_recovery_and_escaping(upd
         expect(page.locator('#panel-update-apply')).to_be_disabled()
         assert len(calls)==1 and calls[0]['body']['confirmation']=='1.11.0'
         page.reload()
-        expect(page.locator('#page h1')).to_have_text('系统设置')
+        expect(page.locator('#page h1')).to_have_text('设置中心')
         expect(page.locator('#panel-update-state')).to_contain_text('正在构建')
         assert len(calls)==1
         state.update(busy=False,current_version='1.11.0',running_version='1.11.0',update_available=False)

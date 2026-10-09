@@ -4,7 +4,11 @@ from hub.db_worker import database_endpoint
 from hub.api.context import HubContext
 import json
 import time
-from fastapi import Request
+from fastapi import Request, Query
+from pydantic import Field
+import asyncio
+from collections import OrderedDict
+from hub.settings_snapshot import snapshot, selected_project, node_snapshot
 from hub.access import access_defaults, project_selection
 from hub.mcp import VERSIONS
 from hub import iam
@@ -13,12 +17,70 @@ from shared.util import DevError, VERSION, normalize_url
 from hub.api.models import TokenInput, SettingsInput
 
 
+class SettingsUpdateInput(SettingsInput):
+    expected_public_url: str | None = Field(default=None, min_length=1, max_length=500)
+
 
 def make_settings_router(context: HubContext):
     router = APIRouter()
     store, runtime, auth = context.store, context.runtime, context.auth
     config, maintenance = context.config, context.maintenance
     public_url, BASE = context.public_url, context.base
+    node_reads = OrderedDict()
+    node_lock = asyncio.Lock()
+
+    @router.get("/api/settings/catalog")
+    @database_endpoint(store)
+    def settings_catalog(request: Request, project: str = Query(default="", max_length=100)):
+        return snapshot(context, auth.panel(request), project)
+
+    @router.get("/api/settings/node")
+    async def settings_node(request: Request, project: str = Query(min_length=1, max_length=100)):
+        def scope():
+            principal = auth.panel(request)
+            target = dict(selected_project(runtime, principal, project))
+            target["_settings_permissions"] = tuple(sorted(iam.project_permissions(store, principal).get(target["id"], ())))
+            return principal, target
+        principal, target = await store.run(scope)
+        # Key includes the live mapping and role epoch, never a model selector.
+        key = (principal.user_id, principal.space_id, target["id"], target["device_id"],
+               target["root"], target["mode"], target["allow_tasks"],
+               principal.user_epoch, principal.identity_id, principal.admin,
+               tuple(sorted(principal.scopes)), target["_settings_permissions"])
+        if not runtime.online(target["device_id"]):
+            return {"state": "offline", "values": {}, "checked_at": time.time()}
+        async def inspect(previous=None):
+            if previous and previous.get("operation_id"):
+                def resume():
+                    current, current_target = scope()
+                    row = runtime.operation_row(previous["operation_id"], current)
+                    if row["tool"] != "readiness_get" or row["project_id"] != current_target["id"] or row["device_id"] != current_target["device_id"]:
+                        raise DevError("SETTINGS_SCOPE_CHANGED", "原检查不属于当前项目，请重新核对", 409)
+                    return runtime.operation(row["id"], current, {"include_output": False})
+                return node_snapshot(await store.run(resume))
+            return node_snapshot(await runtime.invoke("readiness_get", {"project": target["id"]}, principal))
+        async with node_lock:
+            now = time.monotonic()
+            for old_key, (created, task) in list(node_reads.items()):
+                if task.done() and now - created > 30:
+                    if task.cancelled() or task.exception() or task.result().get("state") != "pending":
+                        node_reads.pop(old_key, None)
+            entry = node_reads.get(key)
+            if entry and entry[1].done() and not entry[1].cancelled() and not entry[1].exception() and entry[1].result().get("state") == "pending":
+                entry = (now, asyncio.create_task(inspect(entry[1].result())))
+                node_reads[key] = entry
+            if not entry:
+                if len(node_reads) >= 128:
+                    raise DevError("SETTINGS_CHECK_LIMIT", "节点检查正在进行，请先核对原回执", 429)
+                entry = (now, asyncio.create_task(inspect()))
+                node_reads[key] = entry
+            task = entry[1]
+        result = await asyncio.shield(task)
+        current, current_target = await store.run(scope)
+        if (current_target["device_id"], current_target["root"], current_target["mode"], current_target["allow_tasks"], current_target["_settings_permissions"]) != (
+                target["device_id"], target["root"], target["mode"], target["allow_tasks"], target["_settings_permissions"]):
+            raise DevError("SETTINGS_SCOPE_CHANGED", "检查期间项目映射已变化，请重新核对", 409)
+        return {**result, "project_id": current_target["id"]}
 
     @router.get("/api/grants")
     @database_endpoint(store)
@@ -73,14 +135,19 @@ def make_settings_router(context: HubContext):
 
     @router.put("/api/settings")
     @database_endpoint(store)
-    def update_settings(request: Request, body: SettingsInput):
+    def update_settings(request: Request, body: SettingsUpdateInput):
         principal = auth.instance(request, True)
         try:
             value = normalize_url(body.public_url)
         except ValueError as exc:
             raise DevError("INVALID_URL", str(exc)) from exc
-        store.execute("INSERT INTO meta(key,value) VALUES ('public_url',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (value,))
-        store.audit(principal.actor, "settings.updated", detail={"public_url": value})
+        with store.transaction():
+            principal = auth.instance(request, True)
+            current = public_url()
+            if body.expected_public_url is not None and current != body.expected_public_url and current != value:
+                raise DevError("SETTINGS_CHANGED", "地址已在其他窗口修改；你的草稿已保留，请重新读取并核对", 409)
+            store.execute("INSERT INTO meta(key,value) VALUES ('public_url',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (value,))
+            store.audit(principal.actor, "settings.updated", detail={"public_url": value})
         return {"public_url": value, "note": "只更新 MCP/OAuth 对外标识；不改变监听端口或家里 Agent 的连接地址。已有 OAuth 连接建议撤销后重新连接。"}
 
 

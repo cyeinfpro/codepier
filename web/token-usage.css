@@ -1,0 +1,33 @@
+/* Scoped to the authorized tool-text usage view; no dashboard grid overrides. */
+.token-dashboard { margin-top: 1rem; padding-top: .9rem; border-top: 1px solid currentColor; border-color: color-mix(in srgb, currentColor 18%, transparent); }
+.token-dashboard-head, .token-dashboard-metrics, .token-dashboard-filters, .token-dashboard-legend { display: flex; flex-wrap: wrap; gap: .75rem 1.5rem; align-items: center; }
+.token-dashboard-head { justify-content: flex-start; gap: .5rem; }
+.token-dashboard-head h3 { margin: 0; font-size: .9rem; }
+.token-estimate-badge { display: inline-block; font-size: .65rem; line-height: 1.5; padding: .05rem .4rem; border: 1px solid currentColor; border-color: color-mix(in srgb, currentColor 30%, transparent); border-radius: 4px; opacity: .8; }
+.token-dashboard-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: .65rem 0 .3rem; align-items: start; }
+.token-dashboard-metric { flex: 1 1 10rem; min-width: 0; }
+.token-dashboard-metric > span, .token-dashboard-metric small { display: block; font-size: .8rem; line-height: 1.5; opacity: .85; }
+.token-dashboard-metric strong { display: block; margin: .25rem 0; font-size: clamp(1.35rem, 3vw, 1.75rem); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.token-dashboard-metric strong.is-unavailable { font-size: 1.1rem; line-height: 1.9; }
+.token-dashboard-note, .token-dashboard-status, .token-dashboard details > p, .token-dashboard > [role=status] { font-size: .8rem; line-height: 1.6; opacity: .85; margin: .5rem 0; }
+.token-dashboard details { margin-top: .35rem; }
+.token-dashboard summary { cursor: pointer; font-size: .8rem; padding: .25rem 0; }
+.token-dashboard summary:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; border-radius: 3px; }
+.token-usage-help[open] { padding-bottom: .25rem; }
+.token-dashboard-filters { align-items: end; margin: 1rem 0; }
+.token-dashboard-filters label { display: grid; gap: .3rem; flex: 1 1 9rem; min-width: 0; font-size: .8rem; }
+.token-dashboard-filters select { width: 100%; min-width: 0; }
+.token-dashboard-legend { gap: .4rem 1rem; font-size: .75rem; }
+.token-dashboard-legend span::before { content: ''; display: inline-block; width: .7rem; height: .7rem; margin-right: .35rem; border-radius: 2px; background: currentColor; }
+.token-dashboard-legend .is-output::before { opacity: .4; }
+.token-dashboard-legend .is-missing::before { background: transparent; border: 1px dashed currentColor; }
+.token-trend { list-style: none; padding: 0; margin: .75rem 0; display: grid; gap: .55rem; max-height: 20rem; overflow-y: auto; }
+.token-trend li { display: grid; grid-template-columns: minmax(4rem, 6rem) minmax(0, 1fr) minmax(6.5rem, 10rem); gap: .5rem; align-items: center; font-size: .75rem; }
+.token-trend time, .token-trend small { font-variant-numeric: tabular-nums; }
+.token-trend small { overflow-wrap: anywhere; line-height: 1.4; }
+.token-trend-bars { display: grid; gap: 3px; }
+.token-trend-bar { height: 6px; border-radius: 3px; width: var(--token-bar, 0%); background: currentColor;  }
+.token-trend-bar.is-output { opacity: .4; }
+.token-trend-missing { min-height: 6px; border: 1px dashed currentColor; opacity: .5; }
+.token-dashboard [role=status]:empty { display: none; }
+@media (max-width: 600px) { .token-dashboard { margin-top: 1rem; } .token-dashboard-head { align-items: start; } .token-dashboard-filters { gap: .75rem; } .token-dashboard-filters label { flex-basis: calc(50% - .75rem); } .token-trend li { grid-template-columns: 4.5rem minmax(0, 1fr) 6.5rem; } }

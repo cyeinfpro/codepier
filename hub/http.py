@@ -59,7 +59,10 @@ def install_http_behaviors(app):
 
     @app.exception_handler(DevError)
     async def dev_error(request, exc: DevError):
-        return JSONResponse({"error": {"code": exc.code, "message": exc.message, **exc.details}}, status_code=exc.status)
+        # OAuth authorization errors may be viewed as top-level browser pages.
+        # Be explicit for browsers that otherwise guess a locale encoding.
+        return JSONResponse({"error": {"code": exc.code, "message": exc.message, **exc.details}},
+                            status_code=exc.status, media_type="application/json; charset=utf-8")
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request, exc):

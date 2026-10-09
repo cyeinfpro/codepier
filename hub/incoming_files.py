@@ -11,7 +11,6 @@ import base64
 import hashlib
 import json
 import math
-import os
 from pathlib import PurePosixPath, PureWindowsPath
 import re
 import time
@@ -58,9 +57,10 @@ _FIELDS = ("actor", "grant_id", "owner_user_id", "space_id", "project_id",
            "device_id", "root", "workspace_id", "path", "bytes", "sha256", "begin_key")
 
 
-def ingress_enabled():
-    """Explicit deployment opt-in; unset and malformed settings fail closed."""
-    return os.environ.get("CODEPIER_FILE_IMPORT_STREAMING", "") == "true"
+def ingress_enabled(store=None):
+    """Resolve the same persistent policy used by the instance settings panel."""
+    from hub.file_import_settings import enabled
+    return enabled("streaming_enabled", store)
 
 
 def _error(code, message, status=400):
@@ -125,7 +125,7 @@ class IncomingFileService:
             ON incoming_file_imports(expires)""")
 
     def principal(self, auth, request):
-        if not ingress_enabled():
+        if not ingress_enabled(self.store):
             _error("FILE_IMPORT_DISABLED", "Streaming file import is not enabled", 404)
         principal = (auth.bearer(request) if request.headers.get("authorization")
                      else auth.panel(request, write=True))
@@ -135,7 +135,7 @@ class IncomingFileService:
         return principal
 
     def project(self, value, principal):
-        if not ingress_enabled():
+        if not ingress_enabled(self.store):
             _error("FILE_IMPORT_DISABLED", "Streaming file import is not enabled", 404)
         principal = refresh_principal(self.store, principal)
         if "write" not in principal.scopes:
@@ -226,7 +226,7 @@ class IncomingFileService:
         """
         if name not in TOOLS:
             return
-        if not ingress_enabled():
+        if not ingress_enabled(self.store):
             _error("FILE_IMPORT_DISABLED", "Streaming file import is not enabled", 404)
         principal = refresh_principal(self.store, principal)
         if name == "incoming_upload_begin":

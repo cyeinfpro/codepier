@@ -193,9 +193,9 @@ def test_real_http_ingress_reaches_agent_and_durable_outbox(ingress_stack, paylo
                         'bytes': len(payload), 'grant_id': stack.ingress_grant}]
 
 
-def test_default_off_hub_rejects_before_runtime_or_agent_admission(tmp_path):
+def test_explicit_off_hub_rejects_before_runtime_or_agent_admission(tmp_path):
     with pytest.MonkeyPatch.context() as environment:
-        environment.delenv('CODEPIER_FILE_IMPORT_STREAMING', raising=False)
+        environment.setenv('CODEPIER_FILE_IMPORT_STREAMING', 'false')
         environment.delenv('CODEPIER_NATIVE_FILE_RELAY', raising=False)
         with running_stack(tmp_path / 'disabled-ingress-transport') as stack:
             response = stack.client.post('/api/file-imports',

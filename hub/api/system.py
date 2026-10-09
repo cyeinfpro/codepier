@@ -1,5 +1,5 @@
 from __future__ import annotations
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from hub.db_worker import database_endpoint
 from hub.api.context import HubContext
 import sqlite3
@@ -13,6 +13,7 @@ from shared.util import VERSION
 from hub.api.models import ComputerDecision, ToolCall
 from hub.api.devices import device_rows
 from hub.api.activity import operation_rows, audit_rows
+from hub.token_dashboard import Period, token_dashboard
 
 
 
@@ -52,7 +53,17 @@ def make_system_router(context: HubContext):
             "today_operations": sum(counts.values()), "today_succeeded": counts.get("succeeded", 0), "today_failed": counts.get("failed", 0),
             "active_operations": store.one("SELECT count(*) AS n FROM operations WHERE "+clause+" AND state IN ('running','queued','reconnecting','cancelling')",args)["n"],
             "recent_operations": operation_rows(store, principal, limit=8), "recent_audit": audit_rows(store, principal, limit=6),
+            "token_usage": token_dashboard(runtime, principal, tz),
             "mcp_url": public_url() + "/mcp", "role_mcp_url": public_url() + "/mcp?authorization=role", "version": VERSION, "tool_count": len(tool_definitions()), "native_core_tool_count": len(CORE_TOOLS), "timezone": str(tz)}
+
+    @router.get("/api/token-usage")
+    @database_endpoint(store)
+    def token_usage(request: Request, period: Period = "today",
+                    project: str = Query(default="", max_length=128),
+                    connection: str = Query(default="", max_length=128),
+                    session: str = Query(default="", max_length=128)):
+        return token_dashboard(runtime, auth.panel(request), config.timezone,
+                               period=period, project=project, connection=connection, session=session)
 
     @router.post("/api/tools/call")
     async def call_tool(request: Request, body: ToolCall):

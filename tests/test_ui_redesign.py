@@ -11,7 +11,7 @@ PAGES = {
     'overview': '控制总览', 'devices': '设备节点', 'projects': '项目映射',
     'workbench': '远程工作台', 'workflows': '开发任务', 'audit': '操作审计',
     'connect': 'MCP 接入', 'diagnostics': '运行诊断', 'artifacts': '产物交付',
-    'settings': '系统设置',
+    'settings': '设置中心',
 }
 OUT = Path(os.getenv('CODEPIER_UI_SCREENSHOTS', 'docs/evidence/ui-20260913/screenshots'))
 
@@ -90,10 +90,10 @@ def test_command_palette_filter_focus_and_navigation(stack):
         page.locator('[data-ui="command"]').focus()
         page.keyboard.press('Control+k')
         expect(page.locator('#command-query')).to_be_focused()
-        page.fill('#command-query','系统设置')
+        page.fill('#command-query','设置中心')
         expect(page.locator('.command-item')).to_have_count(1)
         page.keyboard.press('Enter')
-        expect(page.locator('#page h1')).to_have_text('系统设置')
+        expect(page.locator('#page h1')).to_have_text('设置中心')
         page.locator('[data-ui="command"]').click()
         page.fill('#command-query','ProjectAlpha')
         expect(page.locator('.command-item')).to_have_count(1)
@@ -198,7 +198,7 @@ def test_reduced_motion_and_dirty_navigation_guard(stack):
         page.fill('#code-editor','unsaved source\n')
         page.on('dialog',lambda dialog:dialog.dismiss())
         page.keyboard.press('Control+k')
-        page.fill('#command-query','系统设置')
+        page.fill('#command-query','设置中心')
         page.keyboard.press('Enter')
         expect(page.locator('#page h1')).to_have_text('远程工作台')
         expect(page.locator('#code-editor')).to_have_value('unsaved source\n')

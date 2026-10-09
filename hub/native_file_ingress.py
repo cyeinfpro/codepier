@@ -8,16 +8,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
 import tempfile
 import time
 
 from agent.incoming_artifacts import download_chunks, validate_url
 from hub.db_worker import run_db
-from hub.incoming_files import CHUNK, IncomingFileService, ingress_enabled, _request_key, _step_key
+from hub.incoming_files import CHUNK, IncomingFileService, _request_key, _step_key
 from hub.core_tools import validate
 from shared.file_sources import (
-    file_source_policy, normalize_file_hosts, normalize_file_source_providers,
     safe_import_error_detail, source_metadata,
 )
 from shared.util import DevError
@@ -31,27 +29,18 @@ NATIVE_GLOBAL_RECORDS = 4096
 NATIVE_RETENTION = 7 * 86400
 
 
-def native_ingress_enabled():
-    return ingress_enabled() and os.environ.get("CODEPIER_NATIVE_FILE_RELAY", "") == "true"
+def native_ingress_enabled(store=None):
+    from hub.file_import_settings import enabled
+    return enabled("native_relay_enabled", store)
 
 
-def native_source_policy():
-    """Unconfigured profiles remain off; malformed deployment settings fail closed."""
-    config = {}
-    try:
-        if "CODEPIER_NATIVE_FILE_HOSTS" in os.environ:
-            config["file_hosts"] = normalize_file_hosts(
-                json.loads(os.environ["CODEPIER_NATIVE_FILE_HOSTS"]), "file_hosts")
-        if "CODEPIER_NATIVE_FILE_PROVIDERS" in os.environ:
-            config["file_source_providers"] = normalize_file_source_providers(
-                json.loads(os.environ["CODEPIER_NATIVE_FILE_PROVIDERS"]))
-    except (ValueError, TypeError, json.JSONDecodeError):
-        raise DevError("FILE_IMPORT_POLICY_INVALID", "Hub native-file source policy is invalid", 503) from None
-    return {**file_source_policy(config), "policy_scope": "hub"}
-
+def native_source_policy(store=None):
+    """The settings panel and all native download/preview paths share this resolver."""
+    from hub.file_import_settings import source_policy
+    return source_policy(store)
 
 def _service(runtime):
-    if not native_ingress_enabled():
+    if not native_ingress_enabled(runtime.store):
         raise DevError("FILE_IMPORT_DISABLED", "Native-file relay is not enabled", 403)
     service = getattr(runtime, "incoming_files", None)
     if service is None:
@@ -91,9 +80,9 @@ def _hub_source_error(exc):
 
 async def inspect_native_file(runtime, raw, principal):
     args = validate("inspect_file_source", raw).model_dump()
-    service = _service(runtime)
+    service = await run_db(runtime.store, _service, runtime)
     await run_db(service.store, runtime.project, args["project"], principal)
-    policy = native_source_policy()
+    policy = await run_db(service.store, native_source_policy, service.store)
     file = args["file"]
     size = file.get("size")
     result = {**policy, **source_metadata(file["download_url"]),
@@ -205,7 +194,7 @@ def _reserve_native(service, args, principal):
             # Existing/completed intent recovery above deliberately precedes URL
             # checks. New denied, oversized or offline requests reserve nothing.
             principal, project = _target(service, args, principal)
-            policy = native_source_policy()
+            policy = native_source_policy(service.store)
             try:
                 validate_url(file["download_url"], policy["allowed_hosts"],
                              providers=policy["file_source_providers"])
@@ -282,12 +271,12 @@ async def _finish_writer(work):
 
 async def import_native_file(runtime, raw, principal):
     args = validate("download_artifact", raw).model_dump()
-    service = _service(runtime)
+    service = await run_db(runtime.store, _service, runtime)
     principal, project, recovered = await run_db(service.store, _reserve_native, service, args, principal)
     if recovered is not None:
         return recovered
     principal, project = await run_db(service.store, _target, service, args, principal)
-    policy = native_source_policy()
+    policy = await run_db(service.store, native_source_policy, service.store)
     file = args["file"]
     try:
         validate_url(file["download_url"], policy["allowed_hosts"],

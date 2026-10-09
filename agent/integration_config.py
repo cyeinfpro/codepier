@@ -32,6 +32,11 @@ def strings(value,label,limit=100):
     return value
 
 
+def file_import_streaming_enabled(config):
+    """Missing follows the release default; explicit false/invalid stays closed."""
+    return isinstance(config,dict) and config.get('file_import_streaming',True) is True
+
+
 def validate_integrations(raw):
     if raw is None:raw={}
     if not isinstance(raw,dict) or not valid_json_value(raw):raise ValueError('integrations 必须是 JSON 对象')
@@ -47,7 +52,7 @@ def validate_integrations(raw):
     if 'file_source_providers' in c:
         c['file_source_providers']=normalize_file_source_providers(c['file_source_providers'])
     if 'file_import_streaming' in c and type(c['file_import_streaming']) is not bool:
-        raise ValueError('file_import_streaming 应为布尔值，默认关闭')
+        raise ValueError('file_import_streaming 应为布尔值；未设置时默认开启，false 明确关闭')
     directory=c.setdefault('worktree_directory','')
     if not isinstance(directory,str) or '\x00' in directory or directory and not Path(directory).expanduser().is_absolute():
         raise ValueError('worktree_directory 必须为空或绝对路径')

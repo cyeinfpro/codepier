@@ -27,6 +27,11 @@ from hub.roles import validate_role_consent, public_role
 from hub import iam
 
 
+# Discovery must never combine mutually exclusive fixed and role modes. MCP
+# clients may request every scope advertised by protected-resource metadata.
+LEGACY_OAUTH_SCOPES = ["read", "write", "execute", "computer"]
+
+
 class OAuth:
     def __init__(self, auth: Auth, runtime: Runtime, public_url):
         self.auth, self.runtime, self.store = auth, runtime, auth.store
@@ -173,10 +178,14 @@ class OAuth:
         @router.get("/.well-known/oauth-protected-resource")
         @router.get("/.well-known/oauth-protected-resource/mcp")
         @database_endpoint(self.store)
-        def protected_metadata():
+        def protected_metadata(request: Request):
+            mode = request.query_params.get("authorization", "fixed")
+            if mode not in {"fixed", "role"}:
+                raise DevError("INVALID_REQUEST", "Unknown authorization mode")
+            scopes = [ROLE_SCOPE] if mode == "role" else LEGACY_OAUTH_SCOPES
             return JSONResponse({"resource": self.resource(), "authorization_servers": [self.public_url()],
-                "scopes_supported": ["read", "write", "execute", "computer", ROLE_SCOPE], "bearer_methods_supported": ["header"],
-                "resource_name": "CodePier Agent"}, headers={"Access-Control-Allow-Origin": "*"})
+                "scopes_supported": scopes, "bearer_methods_supported": ["header"],
+                "resource_name": "CodePier Agent"}, headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-store"})
 
         @router.get("/.well-known/oauth-authorization-server")
         @database_endpoint(self.store)
@@ -186,7 +195,10 @@ class OAuth:
                 "registration_endpoint": base + "/oauth/register", "revocation_endpoint": base + "/oauth/revoke",
                 "response_types_supported": ["code"], "grant_types_supported": ["authorization_code", "refresh_token"],
                 "token_endpoint_auth_methods_supported": ["none"], "code_challenge_methods_supported": ["S256"],
-                "scopes_supported": ["read", "write", "execute", "computer", ROLE_SCOPE]}, headers={"Access-Control-Allow-Origin": "*"})
+                # RFC 8414 permits omitting supported scopes from this list.
+                # Role clients discover their sole scope through the selected
+                # resource metadata / challenge, never a mixed default list.
+                "scopes_supported": LEGACY_OAUTH_SCOPES}, headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-store"})
 
         @router.post("/oauth/register")
         async def register(request: Request):

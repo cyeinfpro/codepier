@@ -586,10 +586,10 @@ def test_inconsistent_final_receipt_never_reports_success(relay, change):
 
 
 @pytest.mark.parametrize("streaming,relay_enabled", [
-    (None, None), ("true", None), (None, "true"), ("false", "true"),
+    ("false", "true"),
     ("true", "false"), ("TRUE", "true"), ("true", "TRUE"), ("1", "true"), ("true", " true"),
 ])
-def test_dual_gate_is_explicit_and_default_closed(relay, monkeypatch, streaming, relay_enabled):
+def test_dual_gate_preserves_explicit_disable_and_rejects_malformed(relay, monkeypatch, streaming, relay_enabled):
     for name, value in (("CODEPIER_FILE_IMPORT_STREAMING", streaming),
                         ("CODEPIER_NATIVE_FILE_RELAY", relay_enabled)):
         if value is None:
@@ -604,7 +604,7 @@ def test_dual_gate_is_explicit_and_default_closed(relay, monkeypatch, streaming,
 
 @pytest.mark.parametrize("name", ["download_artifact", "inspect_file_source"])
 @pytest.mark.parametrize("enabled", [False, True])
-def test_runtime_routes_only_dual_enabled_native_tools(monkeypatch, name, enabled):
+def test_runtime_always_uses_hub_adapter_and_never_silent_legacy_fallback(monkeypatch, name, enabled):
     monkeypatch.setenv("CODEPIER_FILE_IMPORT_STREAMING", "true")
     monkeypatch.setenv("CODEPIER_NATIVE_FILE_RELAY", "true" if enabled else "false")
     calls = []
@@ -616,14 +616,17 @@ def test_runtime_routes_only_dual_enabled_native_tools(monkeypatch, name, enable
     def legacy(tool, raw, principal):
         calls.append(("legacy", raw, principal))
         return {"route": "legacy"}
-    runtime = SimpleNamespace(_loop=None, store=SimpleNamespace(run=run), _invoke=legacy)
+    runtime = SimpleNamespace(_loop=None, store=SimpleNamespace(run=run, one=lambda *args: None), _invoke=legacy)
     monkeypatch.setattr(native, "import_native_file", adapter)
     monkeypatch.setattr(native, "inspect_native_file", adapter)
     raw, principal = {"synthetic": True}, object()
-    result = asyncio.run(Runtime._invoke_async(runtime, name, raw, principal))
-    expected = "relay" if enabled else "legacy"
-    assert result == {"route": expected}
-    assert calls == [(expected, raw, principal)]
+    if not enabled:
+        expect_error("FILE_IMPORT_DISABLED", Runtime._invoke_async(runtime, name, raw, principal))
+        assert calls == []
+    else:
+        result = asyncio.run(Runtime._invoke_async(runtime, name, raw, principal))
+        assert result == {"route": "relay"}
+        assert calls == [("relay", raw, principal)]
 
 
 @pytest.mark.parametrize("redirect,allowed", [
@@ -785,9 +788,13 @@ def test_runtime_never_falls_back_after_enabled_relay_denial(monkeypatch, name):
     monkeypatch.setenv("CODEPIER_NATIVE_FILE_RELAY", "true")
     async def denied(*args):
         raise DevError("ARTIFACT_SOURCE_DENIED", "Synthetic policy rejection", 403)
-    async def forbidden_legacy(*args):
+    async def only_gate_read(function, *args):
+        assert function is native.native_ingress_enabled
+        return function(*args)
+    def forbidden_legacy(*args):
         pytest.fail("A denied relay must not fall back to node-side fetching")
-    runtime = SimpleNamespace(_loop=None, store=SimpleNamespace(run=forbidden_legacy))
+    runtime = SimpleNamespace(_loop=None,
+        store=SimpleNamespace(run=only_gate_read, one=lambda *args: None), _invoke=forbidden_legacy)
     monkeypatch.setattr(native, "import_native_file", denied)
     monkeypatch.setattr(native, "inspect_native_file", denied)
     expect_error("ARTIFACT_SOURCE_DENIED", Runtime._invoke_async(runtime, name, {}, object()))
@@ -814,7 +821,7 @@ def test_actual_stream_limit_without_content_length_never_begins(relay, monkeypa
             self.closed = True
 
     policy = {**native.native_source_policy(), "max_bytes": 3}
-    monkeypatch.setattr(native, "native_source_policy", lambda: policy)
+    monkeypatch.setattr(native, "native_source_policy", lambda store=None: policy)
     monkeypatch.setattr(incoming_artifacts, "PublicTLSConnection", Connection)
     monkeypatch.setattr(native, "download_chunks", incoming_artifacts.download_chunks)
     value = request()

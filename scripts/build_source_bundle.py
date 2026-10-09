@@ -17,7 +17,9 @@ import tempfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-DIRECTORIES = {'agent','hub','shared','web','scripts','deploy','skills','tests','docs','.github'}
+DIRECTORIES = {'agent','hub','shared','web','scripts','deploy','skills','tests','docs','.github','requirements'}
+DEPENDENCY_INPUTS = frozenset({'requirements.in', 'requirements-agent.in', 'requirements-bridge.in',
+                             'requirements-compat.in', 'requirements-dev.in', 'requirements-tools.in'})
 ROOT_FILES = {
     '.dockerignore',
     '.env.example',
@@ -37,27 +39,18 @@ ROOT_FILES = {
     'compose.yml',
     'install.sh',
     'pyproject.toml',
-    'requirements-agent.in',
     'requirements-agent.txt',
-    'requirements-bridge.in',
     'requirements-bridge.txt',
-    'requirements-compat.in',
     'requirements-compat.txt',
-    'requirements-dev.in',
     'requirements-dev.txt',
-    'requirements-tools.in',
     'requirements-tools.txt',
-    'requirements.in',
     'requirements.txt',
     'ruff.toml',
 }
-# Development-only root inputs rejected by the installed 1.13 updater.
+# Development inputs remain in the full source archive, never the legacy updater package.
 # Keep this explicit: newly added roots must fail the compatibility gate.
-PANEL_UPDATE_EXCLUDES = frozenset({
-    '.prettierrc.json', 'pyproject.toml', 'requirements.in',
-    'requirements-agent.in', 'requirements-bridge.in', 'requirements-compat.in',
-    'requirements-dev.in', 'requirements-tools.in',
-})
+PANEL_UPDATE_EXCLUDES = frozenset({'.prettierrc.json', 'pyproject.toml'} |
+                                 {'requirements/' + name for name in DEPENDENCY_INPUTS})
 
 EXTENSIONS = {'.py','.js','.mjs','.cjs','.ts','.tsx','.html','.css','.json','.toml','.yaml','.yml',
               '.md','.txt','.sh','.ps1','.cmd','.bat','.svg','.png','.jpg','.jpeg','.webp','.ico',
@@ -185,6 +178,8 @@ REQUIRED_FILES = {
 }
 
 PUBLIC_DOCS = {
+    'docs/README.md', 'docs/DEPENDENCIES.md', 'docs/SETTINGS_CENTER.md',
+    'docs/mcp-token-usage.md', 'docs/hub-file-import-settings.md',
     'docs/COLLABORATION.md',
     'docs/COLLABORATION_CHATROOM.md',
     'docs/designs/COLLABORATION_V0_2.md',
@@ -245,6 +240,8 @@ def include(relative, *, public=False):
         return relative.name in ROOT_FILES
     if parts[0] not in DIRECTORIES:
         return False
+    if parts[0] == 'requirements':
+        return len(parts) == 2 and relative.name in DEPENDENCY_INPUTS
     if parts[:2] == ('docs','evidence'):
         # Only reviewed, credential-free closeout evidence is distributable.
         # Never recursively include logs, descriptors, profiles or backup archives.

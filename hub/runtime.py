@@ -410,9 +410,11 @@ class Runtime:
             return await invoke_core(self, name, raw, principal)
         if name in {'download_artifact', 'inspect_file_source'}:
             from hub.native_file_ingress import native_ingress_enabled, import_native_file, inspect_native_file
-            if native_ingress_enabled():
-                adapter = import_native_file if name == 'download_artifact' else inspect_native_file
-                return await adapter(self, raw, principal)
+            if not await self.store.run(native_ingress_enabled, self.store):
+                # Disabling this entry never falls back to a different node policy.
+                raise DevError("FILE_IMPORT_DISABLED", "Hub native-file relay is disabled", 403)
+            adapter = import_native_file if name == 'download_artifact' else inspect_native_file
+            return await adapter(self, raw, principal)
         prepared = await self.store.run(self._invoke, name, raw, principal)
         if not isinstance(prepared, DeferredCall):
             return prepared

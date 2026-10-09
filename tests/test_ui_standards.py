@@ -89,7 +89,7 @@ def test_busy_preserves_geometry_name_nodes_and_duplicate_guard(stack, engine):
         expect(button).to_be_disabled()
         expect(button).to_have_attribute("aria-busy", "true")
         assert button.get_attribute("class").endswith("ui-busy")
-        expect(button).to_have_accessible_name("保存地址")
+        expect(button).to_have_accessible_name("保存并核对")
         current = button.bounding_box()
         assert abs(original["width"] - current["width"]) <= 1
         assert abs(original["height"] - current["height"]) <= 1
@@ -137,9 +137,9 @@ def test_command_first_arrow_node_identity_and_filter_reset(stack, engine):
         assert query.get_attribute("aria-activedescendant") is None
         query.press("Enter")
         expect(page.locator(".command-dialog")).to_be_visible()
-        query.fill("系统设置")
+        query.fill("设置中心")
         query.press("Enter")
-        expect(page.locator("#page h1")).to_have_text("系统设置")
+        expect(page.locator("#page h1")).to_have_text("设置中心")
         browser.close()
 
 
@@ -227,7 +227,7 @@ def test_password_mismatch_stays_at_field_without_submission(stack, engine):
         page = browser.new_page()
         submitted = []
         page.on("request", lambda req: submitted.append(req.url) if req.method == "POST" and "/api/account/password" in req.url else None)
-        _login(page, stack, "settings")
+        _login(page, stack, "identity")
         page.fill('[name="current_password"]', "only-a-test-password")
         page.fill('[name="new_password"]', "new-test-password-1")
         page.fill('[name="confirm_password"]', "new-test-password-2")

@@ -1,6 +1,6 @@
 # 统一文件入站：协议、限制与部署验收
 
-本页描述可选的新入站实现。源码和隔离测试通过不代表已部署，也不代表四种宿主都完成真实往返。所有新入口默认关闭；现有原生导入在未启用中转时仍使用 Agent 直取路径。
+本页描述当前源码（v1.22.0）的统一入站实现。源码和隔离测试通过不代表已部署，也不代表四种宿主都完成真实往返。已发布 v1.21.0 默认关闭；v1.22.0 Hub 和 Agent 在没有显式设置时默认开启认证入站，明确的 false 保持关闭。来源 provider 与本地读根仍需单独审核。新版关闭原生中转时明确拒绝，不静默回退 Agent 直取。
 
 ## 目标与路由
 
@@ -30,11 +30,11 @@
 
 | 位置 | 设置 | 默认 |
 | --- | --- | --- |
-| Hub | `CODEPIER_FILE_IMPORT_STREAMING=true` | 关闭认证入站 |
-| Hub | `CODEPIER_NATIVE_FILE_RELAY=true` | 关闭原生附件中转；还需上一个开关 |
+| Hub | `CODEPIER_FILE_IMPORT_STREAMING` | v1.22.0未设置时开启；显式 false 关闭 |
+| Hub | `CODEPIER_NATIVE_FILE_RELAY` | v1.22.0未设置时开启；还需上一个开关；显式 false 关闭 |
 | Hub | `CODEPIER_NATIVE_FILE_HOSTS` | 不设置则使用内置精确域名；JSON 数组显式替换基础列表 |
 | Hub | `CODEPIER_NATIVE_FILE_PROVIDERS` | 命名来源 JSON 数组，默认空 |
-| Agent | `integrations.file_import_streaming=true` | 不设置/false 为关闭 |
+| Agent | `integrations.file_import_streaming` | v1.22.0未设置时开启；显式 false 关闭 |
 | Agent 直取 | `integrations.file_source_providers` | 命名来源数组，默认空 |
 | 本地桥接 | `CODEPIER_FILE_IMPORT_ROOTS` | 绝对目录 JSON 数组；不设置则不展示本地上传工具 |
 
@@ -81,11 +81,11 @@ begin 的稳定键绑定用户/空间/目标/大小/摘要。同键改内容或�
 
 参考：[OpenAI 插件文件 API](https://developers.openai.com/plugins/reference#file-apis)、[Codex MCP 客户端](https://github.com/openai/codex/blob/main/codex-rs/codex-mcp/src/rmcp_client.rs)、[Codex 原生文件处理](https://github.com/openai/codex/blob/main/codex-rs/core/src/mcp_openai_file.rs)、[MCP 传输规范](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports)。MCP JSON-RPC 本身没有通用“自动读宿主文件”的能力。
 
-## 升级后由所有者启用
+## 升级、设置与回滚
 
-1. 按现有维护流程备份匹配版本的 Hub 数据、Agent 配置及状态，并等待活动写入完成。先更新 Hub，保留新开关关闭；再从新 Hub 更新各目标 Agent。
-2. 在每个需要接收文件的 Agent 原配置的 `integrations` 对象中，仅合并 `"file_import_streaming": true`，保留其他配置。确认当前运行版本和 `workspace(operation="readiness")` 返回 `file_import.resumable_upload_enabled=true`。
-3. 所有者审核原生来源范围后，在 Hub 部署环境设置以下三项，再按自己的部署流程重建/重启 Hub：
+1. 按现有维护流程备份匹配版本的 Hub 数据、Agent 配置及状态，并等待活动写入完成。先更新 Hub，再从新 Hub 更新目标 Agent。v1.22.0缺省开启入站；如需分阶段启用，升级前明确设置 false，升级不会抹去这个选择。
+2. Agent 未配置该项时跟随新版默认；显式关闭的节点需所有者在原配置 `integrations` 中仅合并 `"file_import_streaming": true`。保留其他配置，确认当前运行版本及 `workspace(operation="readiness")` 的 `file_import.resumable_upload_enabled=true`。这只控制已有项目写权限下的接收，不授予新项目或目录权限。
+3. v1.22.0在面板“设置中心”的文件设置中查看配置来源、编辑开关和审核来源列表，先预览精确变化再确认保存；只有实例管理员可以修改。保存值优先于显式环境变量，重置后恢复环境或版本默认，下一次调用生效。详情见 [Hub 入站设置](hub-file-import-settings.md)。v1.21.0 或部署环境管理可使用以下三项，并按自己的部署流程重建/重启 Hub：
 
 ```dotenv
 CODEPIER_FILE_IMPORT_STREAMING=true
@@ -93,14 +93,14 @@ CODEPIER_NATIVE_FILE_RELAY=true
 CODEPIER_NATIVE_FILE_PROVIDERS=["openai_sediment"]
 ```
 
-这三项会允许经过现有项目写权限校验的入站，并使该 Hub 的所有原生导入使用前述受限 OpenAI 子域族。没有审核来源时保持 provider 为 `[]`，只使用原有精确主机。它们不自动授予新项目权限，不打开任意 Internet 下载。发布包的 Compose 模板会转发这三项，默认仍为 `false/false/[]`；k3s 的 ConfigMap 同样默认关闭。修改环境必须实际进入运行进程，单改本机 shell 或下载新 ZIP 不等于生效。
+这三项会允许经过现有项目写权限校验的入站，并使该 Hub 的所有原生导入使用前述受限 OpenAI 子域族。没有审核来源时保持 provider 为 `[]`，只使用原有精确主机。它们不自动授予新项目权限，不打开任意 Internet 下载。发布包的 Compose 模板会转发这三项，v1.22.0默认为 `true/true/[]`；k3s ConfigMap 同样使用新默认。旧 `.env` 的显式 false 不会被源码默认覆盖。修改环境必须实际进入运行进程，单改本机 shell 或下载新 ZIP 不等于生效。
 
 若需自定义精确 `CODEPIER_NATIVE_FILE_HOSTS`，应在实际服务环境或 Compose override 中显式提供 JSON 数组。基础 Compose 不会把一个未设置的 HOSTS 变成空字符串，避免混淆“未配置”和“拒绝全部”的语义。`[]` 是有意不允许基础精确主机；已启用的 provider 仍独立生效。
 
 Hub 下载缓冲位于 `HUB_DATA_DIR` 所在的可写数据卷，不使用 Compose 的 64 MiB `/tmp`。为最大四个 128 MiB 缓冲及数据库队列/WAL留足空间；Agent 的两倍预留预算见上文。进程重启会断开连接，先确认没有未决发布。
 
 4. 刷新/重连客户端工具目录，再以合成文件测试。普通 MCP 客户端还需在其本地桥接环境配置已审核的 `CODEPIER_FILE_IMPORT_ROOTS`；原生插件入口不需要这个本地根设置，也不能替普通 MCP 客户端自动提供文件读取能力。
-5. 核对最终 `created=true`、完整字节数和 SHA-256，再导入实际资料。只升级软件而不启用新通道，仍保持旧来源限制。
+5. 核对最终 `created=true`、完整字节数和 SHA-256，再导入实际资料。升级不自动扩大来源：provider 仍为空，本地 ROOTS 仍为空；来源拒绝仍需所有者另行审查。
 
 回退时先停止提交新文件并核对所有未决操作，再关闭新入口，按原维护流程恢复匹配的软件和完整备份。保留上传 journal、Hub 操作和暂存证据；不要为了回滚而删除未知状态文件，也不要回退已经交付的项目文件。关闭入口后不能承诺继续通过该入口恢复回执，需要在重新启用或维护核查后处理。
 

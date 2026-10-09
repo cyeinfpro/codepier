@@ -15,7 +15,7 @@ def complete(state, version='1.11.0'):
                             'target_version': version, 'message': '更新成功', 'events': []})
 
 
-@pytest.mark.parametrize('dirty_field', ['address', 'password', 'access', 'draft'])
+@pytest.mark.parametrize('dirty_field', ['address', 'appearance', 'access', 'draft'])
 def test_auto_refresh_defers_unsaved_values_and_resumes_after_resolution(update_browser, stack, dirty_field):
     browser, _ = update_browser
     state = ready()
@@ -23,8 +23,8 @@ def test_auto_refresh_defers_unsaved_values_and_resumes_after_resolution(update_
     try:
         if dirty_field == 'address':
             page.fill('#settings-form [name="public_url"]', stack.url + '/unsaved')
-        elif dirty_field == 'password':
-            page.fill('#password-form [name="current_password"]', 'unsaved-password')
+        elif dirty_field == 'appearance':
+            page.locator('[data-settings-form="appearance"] select').select_option('dark')
         elif dirty_field == 'access':
             page.locator('#access-settings-form [name="all_projects"]').check()
         else:
@@ -36,9 +36,9 @@ def test_auto_refresh_defers_unsaved_values_and_resumes_after_resolution(update_
         if dirty_field == 'address':
             expect(page.locator('#settings-form [name="public_url"]')).to_have_value(stack.url + '/unsaved')
             page.fill('#settings-form [name="public_url"]', stack.url)
-        elif dirty_field == 'password':
-            expect(page.locator('#password-form [name="current_password"]')).to_have_value('unsaved-password')
-            page.fill('#password-form [name="current_password"]', '')
+        elif dirty_field == 'appearance':
+            expect(page.locator('[data-settings-form="appearance"] select')).to_have_value('dark')
+            page.locator('[data-settings-form="appearance"] select').select_option('auto')
         elif dirty_field == 'access':
             expect(page.locator('#access-settings-form [name="all_projects"]')).to_be_checked()
             page.locator('#access-settings-form [name="all_projects"]').uncheck()

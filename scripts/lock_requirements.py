@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
+INPUTS = ROOT / "requirements"
 NAMES = ("requirements-dev", "requirements", "requirements-agent", "requirements-bridge", "requirements-tools", "requirements-compat")
 POLICY = "--require-hashes\n--only-binary=:all:\n"
 
@@ -33,7 +34,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="codepier-lock-") as temporary:
         staging = Path(temporary)
         for name in NAMES:
-            command = [uv, "--no-config", "pip", "compile", str(ROOT / (name + ".in")),
+            command = [uv, "--no-config", "pip", "compile", str(INPUTS / (name + ".in")),
                        "--universal", "--python-version", "3.13", "--generate-hashes", "--no-build",
                        "--default-index", "https://pypi.org/simple", "--exclude-newer", args.exclude_newer,
                        "--no-annotate", "--no-header", "--output-file", str(staging / (name + ".txt"))]

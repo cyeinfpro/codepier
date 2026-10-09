@@ -986,31 +986,43 @@ window.CodePierIntegrations = (() => {
             }
           });
         }
-        let before = null;
+        let before = null,
+          loadedActivities = [],
+          loadingActivities = false;
         const activities = async (box, valid, more = false) => {
-          const r = await request('activity_list', {
-            limit: 30,
-            ...(more && before ? { before_id: before } : {}),
-          });
-          if (!r || !valid()) return;
-          const rows = (r.activities || [])
-            .map(
-              (a) =>
-                `<tr><td><code>${esc(a.tool)}</code><small>${esc(timeText(a.started))}</small></td><td>${esc(U().label(a.status))}</td><td>${a.service_ms == null ? '未确认' : esc(a.service_ms) + ' ms'}</td><td>${a.next_call_gap_ms == null ? '不可用' : esc(a.next_call_gap_ms) + ' ms'}${a.transition === 'overlap' ? '<small>调用重叠</small>' : ''}</td><td>${a.operation_id ? `<button class="btn ghost small" data-action="operation-detail" data-id="${esc(a.operation_id)}">记录</button>` : ''}</td></tr>`,
-            )
-            .join('');
-          if (!more)
-            box.innerHTML =
-              '<div class="integration-table" role="region" aria-label="工具调用记录" tabindex="0"><table class="data-table"><thead><tr><th>调用</th><th>状态</th><th>服务耗时</th><th>后续间隔</th><th>证据</th></tr></thead><tbody></tbody></table></div>' +
-              action('activity-more', '更多调用');
-          $('tbody', box).insertAdjacentHTML(
-            'beforeend',
-            rows || '<tr><td colspan="5">还没有调用记录。</td></tr>',
-          );
-          before = r.next_before_id;
-          const b = $('[data-i-action=activity-more]', box);
-          b.hidden = !before;
-          b.onclick = wire(() => activities(box, () => current() && box.isConnected, true));
+          if (loadingActivities) return;
+          loadingActivities = true;
+          try {
+            const r = await request('activity_list', {
+              limit: 30,
+              ...(more && before ? { before_id: before } : {}),
+            });
+            if (!r || !valid()) return;
+            const usage = window.CodePierTokenUsage;
+            loadedActivities = usage.mergeActivities(
+              more ? loadedActivities : [],
+              r.activities || [],
+            );
+            const rows = loadedActivities
+              .map(
+                (a) =>
+                  `<tr><td><code>${esc(a.tool)}</code><small>${esc(timeText(a.started))}</small></td><td>${esc(U().label(a.status))}</td><td>${a.service_ms == null ? '未确认' : esc(a.service_ms) + ' ms'}</td><td>${a.next_call_gap_ms == null ? '不可用' : esc(a.next_call_gap_ms) + ' ms'}${a.transition === 'overlap' ? '<small>调用重叠</small>' : ''}</td><td>${usage.cell(a.token_usage, 'input')}</td><td>${usage.cell(a.token_usage, 'output')}</td><td>${a.operation_id ? `<button class="btn ghost small" data-action="operation-detail" data-id="${esc(a.operation_id)}">记录</button>` : ''}</td></tr>`,
+              )
+              .join('');
+            if (!more)
+              box.innerHTML =
+                '<section id="i-token-usage" aria-label="当前已载入调用的工具文本估算"></section>' +
+                '<div class="integration-table" role="region" aria-label="工具调用记录" tabindex="0"><table class="data-table"><thead><tr><th>调用</th><th>状态</th><th>服务耗时</th><th>后续间隔</th><th>输入 Token 估算</th><th>输出 Token 估算</th><th>证据</th></tr></thead><tbody></tbody></table></div>' +
+                action('activity-more', '更多调用');
+            $('#i-token-usage', box).innerHTML = usage.summary(loadedActivities);
+            $('tbody', box).innerHTML = rows || '<tr><td colspan="7">还没有调用记录。</td></tr>';
+            before = r.next_before_id;
+            const b = $('[data-i-action=activity-more]', box);
+            b.hidden = !before || loadedActivities.length >= 10000;
+            b.onclick = wire(() => activities(box, () => current() && box.isConnected, true));
+          } finally {
+            loadingActivities = false;
+          }
         };
         await Promise.all([section('#i-checks', checks), section('#i-activity', activities)]);
       } else if (tab === 'validation') {

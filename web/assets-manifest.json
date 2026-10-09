@@ -1,5 +1,5 @@
 {
-  "version": "1.21.0",
+  "version": "1.22.0",
   "algorithm": "sha256",
   "assets": {
     "access-profiles.css": {
@@ -19,8 +19,8 @@
       "bytes": 27864
     },
     "app.js": {
-      "sha256": "5a19fef0defb51335e4daa58a5efc6a23035415f6211fe481b2e9766c2223524",
-      "bytes": 121532
+      "sha256": "096709bf6aa4ba3f85c781e4eb50c5932a1f017fa6c11b040cd18969a65468f7",
+      "bytes": 120277
     },
     "appearance.js": {
       "sha256": "7fc8e8ffa85a4bb5836b8919cdf6ff12813cfb4a9e4736709f5858e5d8782bb1",
@@ -123,8 +123,8 @@
       "bytes": 6622
     },
     "integrations.js": {
-      "sha256": "80be28e7513f1730a61f32e79892724a3e77d4e8b91ec94dfa360bd286b31c02",
-      "bytes": 86231
+      "sha256": "bb0a2cd1ac66e37e587e016d73d72356854f8e6f5ee867b490f69195ddb46023",
+      "bytes": 87027
     },
     "mcp-gateway.css": {
       "sha256": "7836668107f99f817b0b4391a604638760cc80292510ee3104cb6ac688a85b83",
@@ -150,6 +150,18 @@
       "sha256": "832649b780a3b592472ebaa16ccc4147fa77e95ab41b53e7400c5c092446977a",
       "bytes": 12022
     },
+    "settings-file-import.js": {
+      "sha256": "e0b12cb99441f12c8629fdeae01e275a82f545caf6900805ff76337ff7df3168",
+      "bytes": 10727
+    },
+    "settings.css": {
+      "sha256": "224d2256374f83b568fc49da3a9b19d58ee33e0ac8728eecb9735efa3b907386",
+      "bytes": 3034
+    },
+    "settings.js": {
+      "sha256": "0c5f861bd2079183eaa799d18fc65625a3092f1d44df62e3851e3bc3d87b0c54",
+      "bytes": 25341
+    },
     "skills.js": {
       "sha256": "92a4fb865f98d7a62f36083ef585863365f81cd4654d4dd7f72def23bf8037f8",
       "bytes": 6635
@@ -157,6 +169,14 @@
     "styles.css": {
       "sha256": "5875180cda4f60237acf32a78e534da988139ee00b5b0991b90b983b609d180d",
       "bytes": 80624
+    },
+    "token-usage.css": {
+      "sha256": "21d53420dbfa73c5042fabeacab1db492f0c62f256bbf42a67f640a283b3954a",
+      "bytes": 3575
+    },
+    "token-usage.js": {
+      "sha256": "73424c55a9850adda357408de0de1c15bbbd41acd7efda61b907cff851c8ad14",
+      "bytes": 17301
     },
     "tokens.css": {
       "sha256": "25dc64ad50f895bbad4d3daeee229f4b7b9299d65215f080509a9b33fd113319",
@@ -187,5 +207,5 @@
       "bytes": 24897
     }
   },
-  "template_sha256": "2b8ec58b073ea85bc311f198c80e77d43c493239561d9135e884803fef8490c5"
+  "template_sha256": "e2c945cec936f5508f6a62249b6a307a14422a1c5f70b4bac914fd6bd2f163ef"
 }

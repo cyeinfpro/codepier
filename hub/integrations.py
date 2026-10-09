@@ -5,6 +5,9 @@ from shared.util import DevError
 from hub.mcp_request_audit import request_id
 from shared.contracts import TOOLS,MUTATING
 from shared.integration_contracts import ADMIN_TOOLS, INCOMING_UPLOAD_TOOLS
+from shared.token_estimate import estimate_input, estimate_output, usage, summarize
+from hub.mcp_usage import MCPUsage, NOTE as USAGE_NOTE, activity_actor_scope
+from hub.principal import refresh_principal
 
 SAFE={'workspace_status','integration_control','readiness_get','browser_status','lsp_status','validations_get','validations_list',
       'computer_status','computer_session_close','browser_close','searches_get','searches_cancel','execution_info','agent_diagnostics','tasks_list'}
@@ -18,6 +21,9 @@ class HubIntegrations:
         if 'request_id' not in {r['name'] for r in self.store.all('PRAGMA table_info(mcp_activity)')}:
             self.store.execute('ALTER TABLE mcp_activity ADD COLUMN request_id TEXT')
         self.store.execute('CREATE INDEX IF NOT EXISTS mcp_activity_scope ON mcp_activity(grant_id,project,id)')
+        self.usage_metrics=None
+        try:self.usage_metrics=MCPUsage(self.store)
+        except Exception:self.write_errors+=1
 
     def state(self,project):
         row=self.store.one('SELECT * FROM integration_admission WHERE project=?',(project['id'],))
@@ -28,7 +34,7 @@ class HubIntegrations:
     def guard(self,name,args,project,principal):
         if name in INCOMING_UPLOAD_TOOLS:
             from hub.incoming_files import ingress_enabled
-            if not ingress_enabled():raise DevError('FILE_IMPORT_DISABLED','Hub 未启用可续传文件导入',403)
+            if not ingress_enabled(self.store):raise DevError('FILE_IMPORT_DISABLED','Hub 未启用可续传文件导入',403)
         if name in ADMIN_TOOLS and not principal.admin:raise DevError('OWNER_REQUIRED','此操作只允许面板主理人执行',403)
         if principal.admin or name in SAFE:return
         if name in MUTATING or TOOLS[name].scope in {'execute','computer'}:
@@ -73,7 +79,7 @@ class HubIntegrations:
             'next':unfinished[0]['next'] if unfinished else {'tool':'workflows_get','arguments':{'workflow_id':row['workflow_id']}},
             'execution_started':False,'trust':'摘要只是已保存的工作记录；重新读取当前代码核实，不得重放结果不明的写入。'}
 
-    def begin(self,principal,project,name,metadata):
+    def begin(self,principal,project,name,metadata,arguments=None):
         meaningful=name not in SAFE and name not in {'operations_get','operations_wait','operations_list','activity_list','diagnostics_get','operations_trace'}
         window=metadata.get('openai/session') if isinstance(metadata,dict) else None
         if not isinstance(window,str) or not 1<=len(window)<=512:window=None
@@ -97,7 +103,17 @@ class HubIntegrations:
             (project['id'],project['root'],project['device_id'],principal.grant_id,principal.actor,key,name,time.time(),'running',transition,int(meaningful),request_id()))
         trace={'id':row.lastrowid,'key':key,'started':now,'meaningful':meaningful,'transition':transition,'finished':False,'status':'complete','operation_id':None}
         if meaningful and key:self.active.setdefault(key,{})[trace['id']]=trace
+        try:
+            if arguments is not None:trace['token_usage']=usage(estimate_input(arguments))
+        except Exception:self.write_errors+=1
         return trace
+
+    def capture_output(self,trace,result):
+        if not trace:return
+        try:
+            metrics=trace.setdefault('token_usage',usage())
+            metrics['output']=estimate_output(result)
+        except Exception:self.write_errors+=1
 
     def finish(self,trace,*,status=None):
         if not trace or trace['finished']:return
@@ -117,22 +133,32 @@ class HubIntegrations:
             # Bounded retained metadata only; no tool arguments or outputs.
             self.store.execute('DELETE FROM mcp_activity WHERE id < (SELECT COALESCE(MAX(id),0)-10000 FROM mcp_activity)')
         except Exception:self.write_errors+=1
+        try:
+            if self.usage_metrics and trace.get('token_usage'):
+                self.usage_metrics.record(trace['id'],trace['token_usage'])
+        except Exception:self.write_errors+=1
+
+    def usage(self,args,principal):
+        return self.activity(args,principal)
 
     def activity(self,args,principal):
+        principal=refresh_principal(self.store,principal)
         project=self.runtime.project(args['project'],principal)
         clauses=['project=?','root=?','device=?'];values=[project['id'],project['root'],project['device_id']]
-        from hub import iam
-        if principal.grant_id:
-            clauses.append('grant_id=?');values.append(principal.grant_id)
-        elif iam.installed(self.store) and not principal.instance_admin:
-            clauses.append('(actor=? OR grant_id IN (SELECT id FROM grants WHERE user_id=? AND space_id=?))')
-            values.extend((principal.actor,principal.user_id,principal.space_id))
-        elif not iam.installed(self.store) and not principal.admin:
-            clauses.append('grant_id=?');values.append(principal.grant_id)
+        actor_clause, actor_values = activity_actor_scope(self.store, principal)
+        clauses.append(actor_clause); values.extend(actor_values)
         if args['before_id'] is not None:clauses.append('id<?');values.append(args['before_id'])
         rows=self.store.all('SELECT id,tool,request_id,window_key,started,service_ms,next_call_gap_ms,cycle_ms,status,transition,operation_id,meaningful FROM mcp_activity WHERE '+' AND '.join(clauses)+' ORDER BY id DESC LIMIT ?',(*values,args['limit']+1))
         more=len(rows)>args['limit'];rows=rows[:args['limit']]
-        return {'activities':rows,'next_before_id':rows[-1]['id'] if more and rows else None,'write_errors':self.write_errors,
+        for row in rows:row['token_usage']=None
+        token_summary=summarize(rows)
+        try:
+            if self.usage_metrics:token_summary=self.usage_metrics.enrich(rows)
+        except Exception:
+            self.write_errors+=1
+            for row in rows:row['token_usage']=None
+            token_summary=summarize(rows)
+        return {'token_usage_summary':token_summary,'token_usage_note':USAGE_NOTE,'activities':rows,'next_before_id':rows[-1]['id'] if more and rows else None,'write_errors':self.write_errors,
             'timing_note':'service_ms 为请求进入工具服务到响应交接；next_call_gap_ms 为服务外间隔，不是模型思考时间。',
             'correlation_note':'宿主关联元数据不可信，只作相关性观察，不授予权限；重启后不连接旧时间段。'}
 

@@ -40,7 +40,7 @@ def pytest_runtest_logreport(report):
 
 def snapshot():
     result = {}
-    for directory in ('agent','hub','shared','scripts','tests','web','deploy','skills','.github'):
+    for directory in ('agent','hub','shared','scripts','tests','web','deploy','skills','.github','requirements'):
         for path in sorted((ROOT/directory).rglob('*')):
             relative = path.relative_to(ROOT)
             if (not path.is_file() or path.is_symlink() or
