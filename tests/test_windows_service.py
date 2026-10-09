@@ -574,7 +574,8 @@ def test_live_task_unicode_transport_handles_utf16_declaration_in_utf8(windows_i
     '<Task>中文路径</Task>'.encode('cp936'),
     b'<!DOCTYPE Task [<!ENTITY x "text">]><Task>&x;</Task>',
     b'<Task/>' + b' '*(1024*1024),
-])
+], ids=['empty', 'malformed', 'nul', 'invalid-utf8', 'unexpected-utf16',
+        'legacy-codepage', 'dtd-entity', 'oversize'])
 def test_live_task_transport_rejects_ambiguous_or_invalid_xml_without_replacing(windows_install, monkeypatch, bad):
     base, python = windows_install
     saved = installer.windows_task_xml(base, python, 'CodePierAgent', SID)
