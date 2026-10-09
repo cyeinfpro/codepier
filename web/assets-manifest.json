@@ -19,8 +19,8 @@
       "bytes": 27864
     },
     "app.js": {
-      "sha256": "096709bf6aa4ba3f85c781e4eb50c5932a1f017fa6c11b040cd18969a65468f7",
-      "bytes": 120277
+      "sha256": "fa6a93342a8089569917021854c9b01e5d4af1cad99517f0a2edeb8a1aebd19d",
+      "bytes": 120324
     },
     "appearance.js": {
       "sha256": "7fc8e8ffa85a4bb5836b8919cdf6ff12813cfb4a9e4736709f5858e5d8782bb1",
@@ -151,16 +151,16 @@
       "bytes": 12022
     },
     "settings-file-import.js": {
-      "sha256": "e0b12cb99441f12c8629fdeae01e275a82f545caf6900805ff76337ff7df3168",
-      "bytes": 10727
+      "sha256": "5a692d6b03d2c48e46299f95fe160d5b4af5e8f9495eab48b7c1786dcecd4405",
+      "bytes": 12465
     },
     "settings.css": {
-      "sha256": "224d2256374f83b568fc49da3a9b19d58ee33e0ac8728eecb9735efa3b907386",
-      "bytes": 3034
+      "sha256": "dc7ba2bfa2ac853e782e44c3f156c4352f1998dead8e70af2e534e45a555b5f4",
+      "bytes": 3734
     },
     "settings.js": {
-      "sha256": "0c5f861bd2079183eaa799d18fc65625a3092f1d44df62e3851e3bc3d87b0c54",
-      "bytes": 25341
+      "sha256": "77dd6fa0352b4caecb2ef168192a792321374ce1fd338488b9bca56ae3ec11b8",
+      "bytes": 28640
     },
     "skills.js": {
       "sha256": "92a4fb865f98d7a62f36083ef585863365f81cd4654d4dd7f72def23bf8037f8",
@@ -171,12 +171,12 @@
       "bytes": 80624
     },
     "token-usage.css": {
-      "sha256": "21d53420dbfa73c5042fabeacab1db492f0c62f256bbf42a67f640a283b3954a",
-      "bytes": 3575
+      "sha256": "1229c9578f10e6dc87a519a2e34be0dbe4e27509468bf43e94220198daabea3c",
+      "bytes": 3846
     },
     "token-usage.js": {
-      "sha256": "73424c55a9850adda357408de0de1c15bbbd41acd7efda61b907cff851c8ad14",
-      "bytes": 17301
+      "sha256": "869bebd05d0cf0bff8d5a8b6f5262d5455f96e6c275fe496c7e2930bbcd4b8b5",
+      "bytes": 18799
     },
     "tokens.css": {
       "sha256": "25dc64ad50f895bbad4d3daeee229f4b7b9299d65215f080509a9b33fd113319",

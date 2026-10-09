@@ -864,7 +864,12 @@ async function renderPage(showLoading = true) {
       html = await CodePierIdentity.html(page);
     } else if (page === 'overview') {
       S.overview = await api('/api/overview');
-      const tokenView = await window.CodePierTokenUsage?.prepareDashboard(S.overview.token_usage, api, tokenContinuation, () => seq === S.renderSeq && !!S.session && S.page === 'overview');
+      const tokenView = await window.CodePierTokenUsage?.prepareDashboard(
+        S.overview.token_usage,
+        api,
+        tokenContinuation,
+        () => seq === S.renderSeq && !!S.session && S.page === 'overview',
+      );
       if (tokenView === null) return;
       if (tokenView) S.overview.token_usage = tokenView;
       S.projects = S.overview.projects;
@@ -929,7 +934,8 @@ async function renderPage(showLoading = true) {
     else $('#page').innerHTML = html;
     uiPageReady(showLoading, presentation);
     if (['identity', 'members', 'identity-admin'].includes(page)) CodePierIdentity.bind();
-    if (page === 'overview') window.CodePierTokenUsage?.bindDashboard($('#page'), api, S.overview.token_usage);
+    if (page === 'overview')
+      window.CodePierTokenUsage?.bindDashboard($('#page'), api, S.overview.token_usage);
     if (page === 'mcp-gateway') CodePierGateway.bind();
     if (page === 'roles') CodePierRoles.bind();
     if (page === 'profiles') CodePierProfiles.bind();
