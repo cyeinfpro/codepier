@@ -2,7 +2,7 @@
 
 让 ChatGPT 通过 MCP 插件使用你的本地项目：读代码、改文件、跑测试，也能接入浏览器、桌面和远程服务器。
 
-[![Version](https://img.shields.io/badge/version-1.22.0-2563eb)](RELEASE.json)
+[![Version](https://img.shields.io/badge/version-1.22.1-2563eb)](RELEASE.json)
 [![Python](https://img.shields.io/badge/Python-3.13-3776ab)](requirements.txt)
 [![License](https://img.shields.io/badge/license-MIT-16a34a)](LICENSE)
 
@@ -112,10 +112,10 @@ ChatGPT / MCP 客户端                 浏览器管理面板
 
 服务器需要 Git、Bash、Docker Engine、Docker Compose v2，以及供安装脚本使用的 **Python 3.9+**。Compose 需要支持 `up --wait`；应用运行环境由 Docker 镜像提供，使用 Python 3.13。
 
-以下安装命令以 `v1.22.0` 为目标；请先确认对应 Release 已发布。请在可信网络中完成 HTTP 初始安装；公网部署应先按[入门教程](docs/START-HERE.md)配置 HTTPS，不要通过裸公网 HTTP 输入密码或配对设备。
+以下安装命令以 `v1.22.1` 为目标；请先确认对应 Release 已发布。请在可信网络中完成 HTTP 初始安装；公网部署应先按[入门教程](docs/START-HERE.md)配置 HTTPS，不要通过裸公网 HTTP 输入密码或配对设备。
 
 ```bash
-git clone --branch v1.22.0 --depth 1 https://github.com/cyeinfpro/codepier.git
+git clone --branch v1.22.1 --depth 1 https://github.com/cyeinfpro/codepier.git
 cd codepier
 bash install.sh
 ```
@@ -131,7 +131,7 @@ curl --fail http://127.0.0.1:8765/healthz
 
 也可以从 [Releases](https://github.com/cyeinfpro/codepier/releases) 下载源码包。手动安装和开发建议使用 `codepier-VERSION-source-full.zip`；`source.zip` 用于兼容面板更新器。环境变量见 [`.env.example`](.env.example)。
 
-使用预构建镜像时，发布后对应的镜像地址为 `ghcr.io/cyeinfpro/codepier:1.22.0`，生产部署建议固定镜像摘要。k3s 单文件清单见 [`deploy/k3s/deployment.yaml`](deploy/k3s/deployment.yaml)；Compose 可通过 `CODEPIER_HUB_IMAGE` 选择镜像，首次安装与数据初始化仍应遵循[入门教程](docs/START-HERE.md)。OIDC 环境变量播种和首次 SSO 管理员初始化需显式配置，见[多用户/OIDC 指南](docs/MULTIUSER_OIDC.md)。
+使用预构建镜像时，发布后对应的镜像地址为 `ghcr.io/cyeinfpro/codepier:1.22.1`，生产部署建议固定镜像摘要。k3s 单文件清单见 [`deploy/k3s/deployment.yaml`](deploy/k3s/deployment.yaml)；Compose 可通过 `CODEPIER_HUB_IMAGE` 选择镜像，首次安装与数据初始化仍应遵循[入门教程](docs/START-HERE.md)。OIDC 环境变量播种和首次 SSO 管理员初始化需显式配置，见[多用户/OIDC 指南](docs/MULTIUSER_OIDC.md)。
 
 ### 2. 接入开发电脑
 
@@ -410,11 +410,11 @@ docs/        使用和维护文档
 
 ## 版本与许可
 
-当前仓库的 `RELEASE.json` 标记为 **1.22.0 / prepared / source-and-image**。本版提供默认关闭的统一文件入站、原生附件中转、普通 MCP 本地适配器与明确来源预检；包含有界容量、摘要校验和持久恢复。此文件记录源码打包阶段；正式发布状态与可下载产物以对应 [Release](https://github.com/cyeinfpro/codepier/releases) 为准。升级不启用新入口或命名来源，不更新现用 Hub/Agent；真实宿主与节点验收由部署者另行完成。详见 [CHANGELOG.md](CHANGELOG.md)。
+当前仓库的 `RELEASE.json` 标记为 **1.22.1 / prepared / source-and-image**。本版修复 Windows 安装器实时计划任务 XML 编码；保留统一设置、Token 估算与文件入站。入站未设置时默认开启，显式 false 保持关闭，命名来源仍需单独启用。此文件记录源码打包阶段；正式发布状态与可下载产物以对应 [Release](https://github.com/cyeinfpro/codepier/releases) 为准。源码发布不自动更新现用 Hub/Agent，也不自动扩大命名来源；真实宿主与节点验收由部署者另行完成。详见 [CHANGELOG.md](CHANGELOG.md)。
 
 `main` 可能包含正式发布后的改动。安装和更新请核对目标 [Release](https://github.com/cyeinfpro/codepier/releases)；GitHub 提交或 Release 发布不会自动升级现用 Hub 与 Agent。
 
-- **Version:** 1.22.0
+- **Version:** 1.22.1
 - **License:** [MIT](LICENSE)
 
 第三方依赖保留各自许可证。前端依赖声明位于 `web/vendor/`，MCP Apps 的声明见 [THIRD_PARTY_NOTICES.txt](web/mcp-apps/THIRD_PARTY_NOTICES.txt)。

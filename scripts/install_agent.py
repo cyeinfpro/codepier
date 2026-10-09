@@ -337,6 +337,36 @@ def register_windows_task(name, target):
         raise ValueError('Windows boot startup needs administrator approval. Run --start-service in a local terminal and accept UAC; the installed Agent was preserved.') from exc
 
 
+def query_windows_task_xml(name):
+    """Read the live task as Unicode, independent of the console/OEM code page.
+
+    schtasks /Query /XML can emit UTF-8 bytes while declaring UTF-16. The
+    Task Scheduler COM Xml property is a Unicode BSTR; explicitly transport it
+    as UTF-8, then parse text without guessing or replacing path characters.
+    """
+    import xml.etree.ElementTree as ET
+    quoted = "'" + str(name).replace("'", "''") + "'"
+    script = ("$ErrorActionPreference='Stop'; "
+              "[Console]::OutputEncoding=New-Object System.Text.UTF8Encoding($false); "
+              "$s=New-Object -ComObject Schedule.Service; $s.Connect(); "
+              "$t=$s.GetFolder('\\').GetTask(" + quoted + "); "
+              "[Console]::Write([string]$t.Xml)")
+    encoded = base64.b64encode(script.encode('utf-16-le')).decode('ascii')
+    raw = subprocess.check_output(
+        ['powershell.exe', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+        timeout=30)
+    try:
+        if not isinstance(raw, bytes) or not raw or len(raw) > 1024 * 1024:
+            raise ValueError('Invalid task XML response size')
+        text = raw.decode('utf-8-sig', errors='strict')
+        if chr(0) in text or '<!doctype' in text.lower() or '<!entity' in text.lower():
+            raise ValueError('Unsupported task XML content')
+        ET.fromstring(text)
+        return text
+    except (UnicodeError, ET.ParseError, ValueError) as exc:
+        raise ValueError('Cannot verify Windows scheduled task XML; the installed service was preserved.') from exc
+
+
 def windows_task_has_recovery(raw, user=None):
     import xml.etree.ElementTree as ET
     ns = {'t': 'http://schemas.microsoft.com/windows/2004/02/mit/task'}
@@ -399,7 +429,7 @@ def start_service(base, python):
         target = base/'service.xml'
         current = existing and windows_task_has_recovery(target.read_bytes(), user)
         if current:
-            live = subprocess.check_output(['schtasks.exe', '/Query', '/TN', name, '/XML'], timeout=30)
+            live = query_windows_task_xml(name)
             current = windows_task_has_recovery(live, user)
         pending = base/'service-pending.xml'
         if target.is_symlink() or pending.is_symlink():
@@ -515,7 +545,7 @@ def verify_service_ownership(base, *, allow_missing=False):
                      [str(runtime/'.venv/Scripts/python.exe'), str(runtime/'.venv/Scripts/pythonw.exe')]
                  and action.findtext('t:Arguments', namespaces=ns) == subprocess.list2cmdline([str(runtime/'run-service.py')]))
         # The live scheduled task, not just our saved XML, must also belong to us.
-        live = subprocess.check_output(['schtasks.exe','/Query','/TN',name,'/XML'], timeout=30)
+        live = query_windows_task_xml(name)
         live_action = ET.fromstring(live).find('t:Actions/t:Exec', ns)
         owned = owned and live_action is not None and all(
             action.findtext('t:'+field, namespaces=ns) == live_action.findtext('t:'+field, namespaces=ns)

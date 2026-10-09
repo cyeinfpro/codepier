@@ -134,7 +134,8 @@ def main():
               'scope': 'real Windows S4U task, windowless process and recovery',
               'reboot_before_login': 'not_tested'}
     with tempfile.TemporaryDirectory(prefix='codepier-service-test-') as folder:
-        base = Path(folder)
+        base = Path(folder)/"Agent 中文 é space"
+        base.mkdir()
         runtime = base/'runtime'
         (runtime/'agent').mkdir(parents=True)
         (runtime/'scripts').mkdir()
@@ -156,6 +157,15 @@ def main():
             # A separate schtasks process starts the task and exits immediately.
             run(['schtasks.exe', '/Create', '/TN', name, '/XML', definition])
             created = True
+            # Exercise the real installer ownership gate, not only Task Scheduler
+            # startup. The only substitution is this disposable task's name.
+            from unittest.mock import patch
+            with patch.object(installer, 'managed_service_name', return_value=name):
+                installer.verify_service_ownership(base)
+            exported = installer.query_windows_task_xml(name)
+            assert installer.windows_task_has_recovery(exported, installer.windows_user_sid())
+            result['installer_live_ownership_unicode'] = True
+            result['unicode_task_recovery_verified'] = True
             run(['schtasks.exe', '/Run', '/TN', name])
             first = wait(progress)
             wait(lambda: progress().get('at', 0) >= first['at']+15, seconds=25)
