@@ -866,7 +866,7 @@ def test_native_intent_record_quota_never_fetches(relay):
     with relay.store.transaction(immediate=True):
         relay.store.execute(
             "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<4095) "
-            "INSERT INTO native_file_ingress_requests SELECT printf('%064x',x),'synthetic',? FROM n",
+            "INSERT INTO native_file_ingress_requests(request_key,identity,created) SELECT printf('%064x',x),'synthetic',? FROM n",
             (time.time(),))
     value = request(idempotency_key="new-native-intent-key")
     expect_error("FILE_IMPORT_BUSY", native.import_native_file(relay.runtime, value, relay.principal))
@@ -900,7 +900,7 @@ def advance_completed_import_past_native_identity_ttl(relay, monkeypatch, *, wit
         relay.store.execute("UPDATE incoming_file_imports SET expires=?,state=\'reserved\'",
                             (day_zero + 86400,))
     # Include an unbound old record so this verifies collection actually ran.
-    relay.store.execute("INSERT INTO native_file_ingress_requests VALUES(?,?,?)",
+    relay.store.execute("INSERT INTO native_file_ingress_requests(request_key,identity,created) VALUES(?,?,?)",
                         ("f" * 64, "synthetic-orphan", day_zero))
     clock[0] = day_zero + 7.5 * 86400
     native._reserve_native(relay.runtime.incoming_files,
@@ -1060,3 +1060,217 @@ def test_native_lost_finish_reply_recovers_after_original_begin_expiry(relay, mo
     assert current["state"] == "finished"
     assert current["expires"] == first["expires"] > time.time()
     assert before == (len(relay.downloads), len(relay.runtime.calls), len(relay.temporary_files))
+
+
+def reserve_intent(relay, key, *, principal=None, **changes):
+    return native._reserve_native(relay.runtime.incoming_files,
+                                  request(idempotency_key=key, **changes),
+                                  principal or relay.principal)
+
+
+def allow_quota_test_owner(relay, monkeypatch):
+    """Keep project/scope checks while allowing a second synthetic identity."""
+    authorize = relay.runtime.authorize
+
+    def allowed(principal, scope, *, project_id=None):
+        authorize(replace(principal, user_id="owner-a", space_id="legacy"),
+                  scope, project_id=project_id)
+
+    monkeypatch.setattr(relay.runtime, "authorize", allowed)
+
+
+@pytest.mark.parametrize("reason,code", [
+    ("denied-url", "ARTIFACT_SOURCE_DENIED"),
+    ("oversize", "ARTIFACT_TOO_LARGE"),
+    ("offline", "FILE_IMPORT_DEVICE_OFFLINE"),
+    ("unsupported", "AGENT_UPGRADE_REQUIRED"),
+])
+def test_new_rejected_intents_never_consume_identity_rows(relay, reason, code):
+    value = request()
+    if reason == "denied-url":
+        value["file"]["download_url"] = "https://unapproved.invalid/file"
+    elif reason == "oversize":
+        value["file"]["size"] = native.native_source_policy()["max_bytes"] + 1
+    elif reason == "offline":
+        relay.runtime.connected = False
+    else:
+        relay.store.execute("UPDATE devices SET info=?", ('{"capabilities":[]}',))
+    for index in range(5):
+        value["idempotency_key"] = "rejected-native-intent-" + str(index)
+        expect_error(code, native.import_native_file(relay.runtime, value, relay.principal))
+    assert not relay.store.all("SELECT * FROM native_file_ingress_requests")
+    assert not relay.store.all("SELECT * FROM incoming_file_imports")
+    assert not relay.downloads and not relay.runtime.calls
+
+
+def test_native_new_key_hourly_limit_precedes_fetch_and_persists(relay, monkeypatch):
+    monkeypatch.setattr(native, "NATIVE_OWNER_HOURLY", 2)
+    reserve_intent(relay, "native-hourly-one")
+    reserve_intent(relay, "native-hourly-two")
+    relay.runtime.incoming_files = IncomingFileService(relay.runtime)
+    expect_error("FILE_IMPORT_BUSY", native.import_native_file(
+        relay.runtime, request(idempotency_key="native-hourly-three"), relay.principal))
+    assert not relay.downloads and not relay.runtime.calls
+    before = relay.store.all("SELECT * FROM native_file_ingress_requests ORDER BY request_key")
+    reserve_intent(relay, "native-hourly-one")
+    assert relay.store.all("SELECT * FROM native_file_ingress_requests ORDER BY request_key") == before
+    assert all(row["owner_user_id"] == "owner-a" and row["space_id"] == "legacy" for row in before)
+
+
+def test_native_hourly_window_reopens_without_dropping_identity(relay, monkeypatch):
+    monkeypatch.setattr(native, "NATIVE_OWNER_HOURLY", 1)
+    reserve_intent(relay, "native-old-hour-window")
+    relay.store.execute("UPDATE native_file_ingress_requests SET created=created-3601")
+    original = relay.store.one("SELECT * FROM native_file_ingress_requests")
+    reserve_intent(relay, "native-next-hour-window")
+    assert relay.store.one("SELECT * FROM native_file_ingress_requests WHERE request_key=?",
+                           (original["request_key"],)) == original
+    assert len(relay.store.all("SELECT * FROM native_file_ingress_requests")) == 2
+
+
+def test_native_pending_limit_counts_only_unadmitted_intents(relay, monkeypatch):
+    monkeypatch.setattr(native, "NATIVE_OWNER_PENDING", 1)
+    completed = run_import(relay)
+    assert completed["created"]
+    reserve_intent(relay, "native-unadmitted-one", path="pending-one.bin")
+    before = len(relay.downloads)
+    expect_error("FILE_IMPORT_BUSY", native.import_native_file(
+        relay.runtime, request(idempotency_key="native-unadmitted-two", path="pending-two.bin"),
+        relay.principal))
+    assert len(relay.downloads) == before
+    assert len(relay.store.all("SELECT * FROM native_file_ingress_requests")) == 2
+
+
+def test_native_total_limit_includes_completed_identity_rows(relay, monkeypatch):
+    monkeypatch.setattr(native, "NATIVE_OWNER_RECORDS", 2)
+    for index in range(2):
+        assert run_import(relay, request(idempotency_key="native-complete-" + str(index),
+                                         path="completed-" + str(index) + ".bin"))["created"]
+    before = (len(relay.downloads), len(relay.runtime.calls))
+    expect_error("FILE_IMPORT_BUSY", native.import_native_file(
+        relay.runtime, request(idempotency_key="native-complete-overflow", path="overflow.bin"),
+        relay.principal))
+    assert before == (len(relay.downloads), len(relay.runtime.calls))
+    assert len(relay.store.all("SELECT * FROM native_file_ingress_requests")) == 2
+
+
+def test_native_owner_quota_isolated_and_not_reset_by_another_actor(relay, monkeypatch):
+    allow_quota_test_owner(relay, monkeypatch)
+    monkeypatch.setattr(native, "NATIVE_OWNER_RECORDS", 1)
+    reserve_intent(relay, "native-owner-a-first")
+    with pytest.raises(DevError, match="owner quota"):
+        reserve_intent(relay, "native-owner-a-other-actor",
+                       principal=replace(relay.principal, actor="second-credential-same-owner"))
+    other = replace(relay.principal, actor="other-owner", user_id="owner-b")
+    reserve_intent(relay, "native-owner-b-first", principal=other)
+    rows = relay.store.all("SELECT * FROM native_file_ingress_requests")
+    assert {row["owner_user_id"] for row in rows} == {"owner-a", "owner-b"}
+    assert len(rows) == 2
+
+
+def test_native_owner_quotas_are_scoped_to_space_and_user(relay, monkeypatch):
+    allow_quota_test_owner(relay, monkeypatch)
+    monkeypatch.setattr(native, "NATIVE_OWNER_PENDING", 1)
+    reserve_intent(relay, "native-first-space-key")
+    other = replace(relay.principal, space_id="second-space")
+    reserve_intent(relay, "native-second-space-key", principal=other)
+    assert {row["space_id"] for row in relay.store.all("SELECT * FROM native_file_ingress_requests")} == {
+        "legacy", "second-space"}
+
+
+def test_completed_recovery_bypasses_full_new_intent_quotas_and_stale_url(relay, monkeypatch):
+    value = request()
+    first = run_import(relay, value)
+    save_finish_operation(relay)
+    before = relay.store.one("SELECT * FROM native_file_ingress_requests")
+    for name in ("NATIVE_OWNER_HOURLY", "NATIVE_OWNER_PENDING", "NATIVE_OWNER_RECORDS", "NATIVE_GLOBAL_RECORDS"):
+        monkeypatch.setattr(native, name, 0)
+    relay.runtime.connected = False
+    value["file"]["download_url"] = "https://expired-unapproved.invalid/old"
+    calls = (len(relay.downloads), len(relay.runtime.calls))
+    recovered = run_import(relay, value)
+    assert recovered["recovered"] and recovered["upload_id"] == first["upload_id"]
+    assert calls == (len(relay.downloads), len(relay.runtime.calls))
+    assert relay.store.one("SELECT * FROM native_file_ingress_requests") == before
+
+
+def make_legacy_native_table(relay, rows):
+    relay.store.execute("DROP TABLE IF EXISTS native_file_ingress_requests")
+    relay.store.execute("""CREATE TABLE native_file_ingress_requests (
+        request_key TEXT PRIMARY KEY,identity TEXT NOT NULL,created REAL NOT NULL)""")
+    for row in rows:
+        relay.store.execute("INSERT INTO native_file_ingress_requests VALUES(?,?,?)",
+                            (row["request_key"], row["identity"], row["created"]))
+
+
+def test_legacy_owner_migration_uses_manifest_and_preserves_unattributed_rows(relay):
+    run_import(relay)
+    known = relay.store.one("SELECT * FROM native_file_ingress_requests")
+    unknown = {"request_key": "f" * 64, "identity": "legacy-unattributed", "created": time.time()}
+    make_legacy_native_table(relay, [known, unknown])
+    native._native_schema(relay.runtime.incoming_files)
+    native._native_schema(relay.runtime.incoming_files)
+    rows = {row["request_key"]: row for row in relay.store.all("SELECT * FROM native_file_ingress_requests")}
+    assert rows[known["request_key"]] == known
+    assert rows[unknown["request_key"]] == {**unknown, "owner_user_id": None, "space_id": None}
+
+
+def test_legacy_unattributed_exact_recovery_can_bind_owner_without_new_quota(relay, monkeypatch):
+    reserve_intent(relay, "native-legacy-original")
+    original = relay.store.one("SELECT * FROM native_file_ingress_requests")
+    make_legacy_native_table(relay, [original])
+    for name in ("NATIVE_OWNER_HOURLY", "NATIVE_OWNER_PENDING", "NATIVE_OWNER_RECORDS", "NATIVE_GLOBAL_RECORDS"):
+        monkeypatch.setattr(native, name, 0)
+    reserve_intent(relay, "native-legacy-original")
+    assert relay.store.one("SELECT * FROM native_file_ingress_requests") == original
+
+
+def test_legacy_mismatched_identity_cannot_be_claimed_or_rewritten(relay):
+    reserve_intent(relay, "native-legacy-conflict")
+    original = relay.store.one("SELECT * FROM native_file_ingress_requests")
+    make_legacy_native_table(relay, [original])
+    with pytest.raises(DevError) as error:
+        reserve_intent(relay, "native-legacy-conflict", path="changed.bin")
+    assert error.value.code == "IDEMPOTENCY_CONFLICT"
+    row = relay.store.one("SELECT * FROM native_file_ingress_requests")
+    assert row == {**original, "owner_user_id": None, "space_id": None}
+
+
+@pytest.mark.parametrize("column,value", [("owner_user_id", "another-owner"), ("space_id", "another-space")])
+def test_native_persisted_owner_binding_cannot_be_reassigned(relay, column, value):
+    reserve_intent(relay, "native-owner-binding")
+    relay.store.execute("UPDATE native_file_ingress_requests SET " + column + "=?", (value,))
+    before = relay.store.one("SELECT * FROM native_file_ingress_requests")
+    with pytest.raises(DevError) as error:
+        reserve_intent(relay, "native-owner-binding")
+    assert error.value.code == "FILE_IMPORT_NOT_FOUND"
+    assert relay.store.one("SELECT * FROM native_file_ingress_requests") == before
+
+
+def test_legacy_unattributed_rows_still_count_toward_global_cap(relay, monkeypatch):
+    legacy = {"request_key": "e" * 64, "identity": "legacy-unattributed", "created": time.time()}
+    make_legacy_native_table(relay, [legacy])
+    monkeypatch.setattr(native, "NATIVE_GLOBAL_RECORDS", 1)
+    expect_error("FILE_IMPORT_BUSY", native.import_native_file(
+        relay.runtime, request(idempotency_key="native-global-overflow"), relay.principal))
+    row = relay.store.one("SELECT * FROM native_file_ingress_requests")
+    assert row == {**legacy, "owner_user_id": None, "space_id": None}
+    assert not relay.downloads and not relay.runtime.calls
+
+
+def test_native_quota_reservation_is_atomic_for_concurrent_new_keys(relay, monkeypatch):
+    monkeypatch.setattr(native, "NATIVE_OWNER_PENDING", 1)
+
+    async def scenario():
+        return await asyncio.gather(*[
+            relay.store.run(native._reserve_native, relay.runtime.incoming_files,
+                            request(idempotency_key="native-racing-key-" + str(index)),
+                            relay.principal)
+            for index in range(4)], return_exceptions=True)
+
+    results = asyncio.run(scenario())
+    assert sum(not isinstance(result, Exception) for result in results) == 1
+    assert all(not isinstance(result, Exception) or isinstance(result, DevError) and result.code == "FILE_IMPORT_BUSY"
+               for result in results)
+    assert len(relay.store.all("SELECT * FROM native_file_ingress_requests")) == 1
+    assert not relay.downloads and not relay.runtime.calls

@@ -24,6 +24,11 @@ from shared.util import DevError
 
 MAX_ACTIVE = 4
 TRANSFER_SECONDS = 300
+NATIVE_OWNER_HOURLY = 60
+NATIVE_OWNER_PENDING = 64
+NATIVE_OWNER_RECORDS = 512
+NATIVE_GLOBAL_RECORDS = 4096
+NATIVE_RETENTION = 7 * 86400
 
 
 def native_ingress_enabled():
@@ -142,37 +147,93 @@ async def _resolved(service, receipt, principal, deadline):
 
 
 
+def _native_schema(service):
+    """Upgrade old intent rows without discarding their immutable identities."""
+    store = service.store
+    with store.transaction(immediate=True):
+        store.execute("""CREATE TABLE IF NOT EXISTS native_file_ingress_requests (
+            request_key TEXT PRIMARY KEY, identity TEXT NOT NULL, created REAL NOT NULL,
+            owner_user_id TEXT, space_id TEXT)""")
+        columns = {row["name"] for row in store.all("PRAGMA table_info(native_file_ingress_requests)")}
+        for name in ("owner_user_id", "space_id"):
+            if name not in columns:
+                store.execute("ALTER TABLE native_file_ingress_requests ADD COLUMN " + name + " TEXT")
+        # Only a trusted, exact-key Hub manifest can attribute untouched legacy
+        # rows. Unattributed rows remain private and consume the global budget.
+        store.execute("""UPDATE native_file_ingress_requests
+            SET owner_user_id=(SELECT m.owner_user_id FROM incoming_file_imports m
+                              WHERE m.request_key=native_file_ingress_requests.request_key),
+                space_id=(SELECT m.space_id FROM incoming_file_imports m
+                          WHERE m.request_key=native_file_ingress_requests.request_key)
+            WHERE owner_user_id IS NULL AND space_id IS NULL
+              AND EXISTS (SELECT 1 FROM incoming_file_imports m
+                          WHERE m.request_key=native_file_ingress_requests.request_key)""")
+        store.execute("""CREATE INDEX IF NOT EXISTS native_file_ingress_owner
+            ON native_file_ingress_requests(space_id,owner_user_id,created)""")
+
+
 def _reserve_native(service, args, principal):
     """Bind native intent independently of short-lived signed URL text."""
-    principal, project = service.project(args["project"], principal)
-    file = args["file"]
-    source = (["expected_sha256", args["expected_sha256"]] if args.get("expected_sha256")
-              else ["native_file_id_sha256", hashlib.sha256(file["file_id"].encode()).hexdigest()])
-    identity = hashlib.sha256(json.dumps({
-        "source": source, "project": project["id"], "device": project["device_id"],
-        "root": project["root"], "workspace": args["workspace_id"], "path": args["path"],
-        "size": file.get("size"),
-    }, sort_keys=True).encode()).hexdigest()
-    key = _request_key(principal, args["idempotency_key"])
-    service.store.execute("""CREATE TABLE IF NOT EXISTS native_file_ingress_requests (
-        request_key TEXT PRIMARY KEY, identity TEXT NOT NULL, created REAL NOT NULL)""")
+    _native_schema(service)
     with service.store.transaction(immediate=True):
-        old = service.store.one("SELECT identity FROM native_file_ingress_requests WHERE request_key=?", (key,))
-        if old and old["identity"] != identity:
-            raise DevError("IDEMPOTENCY_CONFLICT", "Native import key identifies a different file or destination", 409)
-        if not old:
+        principal, project = service.project(args["project"], principal)
+        file = args["file"]
+        source = (["expected_sha256", args["expected_sha256"]] if args.get("expected_sha256")
+                  else ["native_file_id_sha256", hashlib.sha256(file["file_id"].encode()).hexdigest()])
+        identity = hashlib.sha256(json.dumps({
+            "source": source, "project": project["id"], "device": project["device_id"],
+            "root": project["root"], "workspace": args["workspace_id"], "path": args["path"],
+            "size": file.get("size"),
+        }, sort_keys=True).encode()).hexdigest()
+        key = _request_key(principal, args["idempotency_key"])
+        old = service.store.one("SELECT * FROM native_file_ingress_requests WHERE request_key=?", (key,))
+        if old:
+            if old["identity"] != identity:
+                raise DevError("IDEMPOTENCY_CONFLICT", "Native import key identifies a different file or destination", 409)
+            if old["owner_user_id"] is None and old["space_id"] is None:
+                # The request key was derived from this authenticated actor and
+                # Space, and its immutable identity matched. This is recovery,
+                # not a new intent; preserve the original timestamp and binding.
+                service.store.execute("""UPDATE native_file_ingress_requests
+                    SET owner_user_id=?,space_id=? WHERE request_key=?""",
+                    (principal.user_id, principal.space_id, key))
+            elif (old["owner_user_id"], old["space_id"]) != (principal.user_id, principal.space_id):
+                raise DevError("FILE_IMPORT_NOT_FOUND", "Native import does not belong to this identity", 404)
+        else:
             if service.store.one("SELECT 1 FROM incoming_file_imports WHERE request_key=?", (key,)):
                 raise DevError("IDEMPOTENCY_CONFLICT", "Native source identity is unavailable for this existing import key", 409)
+            # Existing/completed intent recovery above deliberately precedes URL
+            # checks. New denied, oversized or offline requests reserve nothing.
+            principal, project = _target(service, args, principal)
+            policy = native_source_policy()
+            try:
+                validate_url(file["download_url"], policy["allowed_hosts"],
+                             providers=policy["file_source_providers"])
+            except DevError as exc:
+                raise _hub_source_error(exc) from None
+            if file.get("size") is not None and file["size"] > policy["max_bytes"]:
+                raise DevError("ARTIFACT_TOO_LARGE", "Native attachment exceeds the Hub transfer limit")
             now = time.time()
             # Manifest cleanup owns terminal/recovery retention. A stale active
             # expiry can still have a durable finish awaiting reconciliation.
             service.store.execute("""DELETE FROM native_file_ingress_requests WHERE created<?
                 AND request_key NOT IN (SELECT request_key FROM incoming_file_imports)""",
-                                  (now - 7 * 86400,))
-            if service.store.one("SELECT COUNT(*) AS n FROM native_file_ingress_requests")["n"] >= 4096:
+                                  (now - NATIVE_RETENTION,))
+            counts = service.store.one("""SELECT COUNT(*) AS total,
+                COALESCE(SUM(CASE WHEN n.created>? THEN 1 ELSE 0 END),0) AS recent,
+                COALESCE(SUM(CASE WHEN NOT EXISTS (
+                    SELECT 1 FROM incoming_file_imports m WHERE m.request_key=n.request_key)
+                    THEN 1 ELSE 0 END),0) AS pending
+                FROM native_file_ingress_requests n WHERE n.space_id=? AND n.owner_user_id=?""",
+                (now - 3600, principal.space_id, principal.user_id))
+            if (counts["total"] >= NATIVE_OWNER_RECORDS or counts["recent"] >= NATIVE_OWNER_HOURLY
+                    or counts["pending"] >= NATIVE_OWNER_PENDING):
+                raise DevError("FILE_IMPORT_BUSY", "Native import owner quota reached; recover an existing key", 429)
+            if service.store.one("SELECT COUNT(*) AS n FROM native_file_ingress_requests")["n"] >= NATIVE_GLOBAL_RECORDS:
                 raise DevError("FILE_IMPORT_BUSY", "Native import metadata quota reached", 429)
-            service.store.execute("INSERT INTO native_file_ingress_requests VALUES(?,?,?)",
-                                  (key, identity, time.time()))
+            service.store.execute("""INSERT INTO native_file_ingress_requests
+                (request_key,identity,created,owner_user_id,space_id) VALUES(?,?,?,?,?)""",
+                (key, identity, now, principal.user_id, principal.space_id))
     manifest = service.store.one("SELECT * FROM incoming_file_imports WHERE request_key=?", (key,))
     if not manifest or not manifest["upload_id"]:
         return principal, project, None

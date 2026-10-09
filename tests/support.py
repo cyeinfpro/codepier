@@ -9,6 +9,20 @@ from shared.util import atomic_json
 
 BASE = Path(__file__).resolve().parent.parent
 
+
+def fixture_http_client(base_url):
+    """Keep fixture auth state without pooling idle control-side connections.
+
+    Browser actions can leave the test client's connections idle for long periods.
+    Each control request gets a fresh connection; errors still surface without
+    replaying requests. The browser and product HTTP transports are unchanged.
+    """
+    return httpx.Client(
+        base_url=base_url, timeout=35, trust_env=False,
+        limits=httpx.Limits(max_connections=100, max_keepalive_connections=0),
+    )
+
+
 def wait_for(fn, timeout=12):
     end=time.monotonic()+timeout
     last=None
@@ -90,7 +104,7 @@ class Stack:
         self.env={**os.environ,'HUB_PUBLIC_URL':self.url,'MCP_PUBLIC_URL':self.url,'HUB_DATA_DIR':str(self.hubdir),'PYTHONUNBUFFERED':'1'}
         self.hub=None; self.agent=None
         self.start_hub()
-        self.client=httpx.Client(base_url=self.url,timeout=35,trust_env=False)
+        self.client=fixture_http_client(self.url)
         self.login()
         r=self.client.post('/api/devices',json={'name':'Demo Device','hub_url':self.url}); self.must(r)
         self.pairing=r.json()['pairing']; self.device=self.pairing['device_id']
