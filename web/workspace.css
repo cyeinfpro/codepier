@@ -1104,6 +1104,20 @@
   line-height: 1.6;
   overflow-wrap: anywhere;
 }
+/* Keep the summary, Token figures and operation controls together on short
+   desktops. Details remain expandable; no values or actions are hidden. */
+@media (min-width: 901px) and (max-height: 800px) {
+  .editorial-board > .overview-summary {
+    padding-block: 16px;
+  }
+  .overview-summary-heading {
+    margin-bottom: 16px;
+  }
+  .overview-summary .stat-value {
+    font-size: 40px;
+    margin: 8px 0 6px;
+  }
+}
 @media (max-width: 640px) {
   .editorial-board > .overview-summary {
     padding: 22px 20px;
