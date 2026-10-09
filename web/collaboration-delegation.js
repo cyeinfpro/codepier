@@ -477,21 +477,20 @@ window.CodePierCollaborationDelegation = {
         budget = policy?.budget || {};
       const chosenTargets =
         policy?.execution_targets || (policy?.execution_target ? [policy.execution_target] : []);
-      const targetRows = [
-        ['project_agent', '当前项目 Agent · ' + projectLabel(state.project)],
-        ...targets.map((v) => [
-          'vps:' + v.id,
-          (v.name || 'VPS') +
-            ' · ' +
-            v.username +
-            '@' +
-            v.host +
-            ':' +
-            v.port +
-            (v.host_key_policy !== 'strict' ? '（需先核对主机身份）' : ''),
-          v.host_key_policy !== 'strict',
-        ]),
-      ];
+      const targetRows = targets.map((target) => [
+        target.id,
+        target.label +
+          (target.reason_code === 'VPS_DISABLED'
+            ? '（已停用）'
+            : target.reason_code === 'DELEGATION_HOST_KEY_REQUIRED'
+              ? '（需先核对主机身份）'
+              : ''),
+        !target.available,
+      ]);
+      for (const id of chosenTargets) {
+        if (!targets.some((target) => target.id === id))
+          targetRows.push([id, targetLabel(policy, id) + '（已不属于当前项目或不可用）', true]);
+      }
       return (
         '<form id="cc-delegation-policy" class="cc-form" data-slot="' +
         E(slot.id) +
@@ -531,6 +530,7 @@ window.CodePierCollaborationDelegation = {
           )
           .join('') +
         '</fieldset>' +
+        '<p class="cc-hint">以下目标已绑定当前项目。VPS 不会因项目已绑定而自动获准；请明确勾选。已有策略不会自动扩大。</p>' +
         '<fieldset class="cc-project-choices"><legend>固定执行目标（逐一明确选择）</legend>' +
         targetRows
           .map(
@@ -690,18 +690,10 @@ window.CodePierCollaborationDelegation = {
         const generation = state.generation,
           epoch = state.drawerEpoch,
           policyVersion = policyFor(slot.id)?.version || 0;
-        let targets = [],
-          targetError = '';
-        try {
-          const result = await api('/api/vps?' + new URLSearchParams({ project: state.project }));
-          targets = (result.vps || result.items || []).filter(
-            (v) =>
-              v.enabled &&
-              (v.project_ids || v.projects?.map((p) => p.id) || []).includes(state.project),
-          );
-        } catch (error) {
-          targetError = '已保存 VPS 列表暂不可用：' + error.message;
-        }
+        const targets = records.execution_target_candidates || [];
+        const targetError = targets.length
+          ? ''
+          : '服务尚未返回此项目的精确执行目标，请升级 Hub 后再设置；已有范围保持不变。';
         if (generation !== state.generation || epoch !== state.drawerEpoch) return local;
         if ((policyFor(slot.id)?.version || 0) !== policyVersion) {
           showDrawer('范围已更新', policyCard(slot), element);

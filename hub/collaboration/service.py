@@ -791,10 +791,13 @@ class CollaborationService:
             if not room:
                 return {'room': None, 'features': asdict(self.config), 'setup_required': True,
                         'delegation': self.delegation.authority_descriptor(),
+                        'delegation_recovery': self.delegation.consumer.recovery(args, principal),
                         'schema_version': 3, 'capabilities': self.chatroom.capabilities(),
                         'can_manage': bool(principal.admin and not principal.grant_id)}
             kind = args['kind']
             if kind == 'delegation_policies':
+                if args['query'].startswith('delegation-consumer-v1:'):
+                    return self.delegation.consumer.legacy_read(args, principal, room)
                 return self.delegation.listing(args, principal, room)
             if kind in {'coordination_goals', 'coordination_goal', 'coordination_options'}:
                 return self.coordination.listing(args, principal, room)
@@ -941,4 +944,3 @@ class CollaborationService:
             handler = self.monitor.validate_plan if name == 'monitor_plan_validate' else self.monitor.save_plan
             return handler(raw, principal)
         raise DevError('UNKNOWN_TOOL', '未实现的协作工具', 404)
-

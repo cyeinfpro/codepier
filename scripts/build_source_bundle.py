@@ -182,6 +182,7 @@ PUBLIC_DOCS = {
     'docs/mcp-token-usage.md', 'docs/hub-file-import-settings.md',
     'docs/COLLABORATION.md',
     'docs/COLLABORATION_CHATROOM.md',
+    'docs/DELEGATION_CONSUMER_RECOVERY.md',
     'docs/designs/COLLABORATION_V0_2.md',
     'docs/MCP_GATEWAY.md', 'docs/MULTIUSER_OIDC.md', 'docs/DYNAMIC_ROLES.md', 'docs/ACCESS_PROFILES.md', 'docs/UPSTREAM_INTEGRATION.md',
     'docs/FILE_IMPORT.md',

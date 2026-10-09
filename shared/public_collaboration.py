@@ -42,7 +42,7 @@ _RECORD_FIELDS = {
     'coordination_goals': ('conversation_id', 'cursor', 'limit'),
     'coordination_goal': ('conversation_id', 'id'),
     'coordination_options': ('conversation_id',),
-    'delegation_policies': ('conversation_id',),
+    'delegation_policies': ('conversation_id', 'room_id', 'id', 'query', 'after', 'cursor', 'limit'),
     'job_evidence': ('conversation_id', 'room_id', 'id', 'job_id', 'attempt', 'fencing_token'),
     'result_evidence': ('conversation_id', 'room_id', 'id', 'result_id'),
 }
@@ -57,7 +57,7 @@ def record_model(action, names):
     fields = {}
     for name in names:
         original = c.Read.model_fields[name]
-        if name in _REQUIRED_RECORD_FIELDS:
+        if name in _REQUIRED_RECORD_FIELDS and action != 'delegation_policies':
             fields[name] = ((int if name in {'attempt', 'fencing_token'} else str),
                            Field(ge=1, le=3 if name == 'attempt' else None) if name in {'attempt', 'fencing_token'}
                            else Field(min_length=1, max_length=200 if name == 'query' else 128))

@@ -36,3 +36,5 @@
 - [版本记录](../CHANGELOG.md)
 
 仓库根部保留 README、许可证、安全/贡献入口，以及安装、构建和旧更新器需要的固定文件。Hub、Agent、网页、部署和测试分别在自己的目录中；依赖开发输入集中在 requirements/。不要把运行配置、凭据、数据库或上传资料放进源码树。
+
+委托缺少 ID、旧工具目录与唤醒恢复见[委托接入与恢复](DELEGATION_CONSUMER_RECOVERY.md)。
