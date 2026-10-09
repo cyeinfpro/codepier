@@ -4,7 +4,7 @@ import hashlib,hmac,json,secrets,time
 from shared.util import DevError
 from hub.mcp_request_audit import request_id
 from shared.contracts import TOOLS,MUTATING
-from shared.integration_contracts import ADMIN_TOOLS
+from shared.integration_contracts import ADMIN_TOOLS, INCOMING_UPLOAD_TOOLS
 
 SAFE={'workspace_status','integration_control','readiness_get','browser_status','lsp_status','validations_get','validations_list',
       'computer_status','computer_session_close','browser_close','searches_get','searches_cancel','execution_info','agent_diagnostics','tasks_list'}
@@ -26,6 +26,9 @@ class HubIntegrations:
                 'last_operation':row['last_operation'] if current else None,'updated':row['updated'] if current else None}
 
     def guard(self,name,args,project,principal):
+        if name in INCOMING_UPLOAD_TOOLS:
+            from hub.incoming_files import ingress_enabled
+            if not ingress_enabled():raise DevError('FILE_IMPORT_DISABLED','Hub 未启用可续传文件导入',403)
         if name in ADMIN_TOOLS and not principal.admin:raise DevError('OWNER_REQUIRED','此操作只允许面板主理人执行',403)
         if principal.admin or name in SAFE:return
         if name in MUTATING or TOOLS[name].scope in {'execute','computer'}:

@@ -9,7 +9,7 @@ from hub import iam
 from hub.principal import refresh_principal
 from shared.contracts import tool_definitions
 from shared.core_contracts import REPLACED_MCP_TOOLS
-from shared.integration_contracts import ADMIN_TOOLS
+from shared.integration_contracts import ADMIN_TOOLS, INCOMING_UPLOAD_TOOLS
 from shared.util import DevError
 
 @dataclass(frozen=True)
@@ -47,6 +47,8 @@ class ToolRouter:
                     self.gateway.secret)
 
     def resolve(self, principal, name):
+        if name in INCOMING_UPLOAD_TOOLS:
+            raise DevError('UNKNOWN_TOOL', '文件字节通道仅接受认证上传入口，不能作为模型工具调用', 404)
         if name in REPLACED_MCP_TOOLS:
             raise DevError('TOOL_REMOVED', '旧工具已移除，请使用 ' + REPLACED_MCP_TOOLS[name], 404)
         if name in ADMIN_TOOLS:

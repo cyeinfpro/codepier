@@ -46,7 +46,11 @@ class Journal:
             # accepted means the command was durably received but never started.
             self.db.execute("UPDATE calls SET status='retryable' WHERE status='accepted'")
             from shared.contracts import TOOLS
-            reads = [name for name, tool in TOOLS.items() if tool.scope == 'read']
+            from shared.integration_contracts import INCOMING_UPLOAD_TOOLS
+            # These byte-ingress mutations have their own durable offset/identity
+            # state machine. Replay only this explicit set, never general writes.
+            reads = [name for name, tool in TOOLS.items()
+                     if tool.scope == 'read' or name in INCOMING_UPLOAD_TOOLS]
             # Only count reads that actually began. A poison request must not
             # kill every replacement Agent indefinitely; preserve its receipt.
             self.db.execute("UPDATE calls SET recovery_attempts=recovery_attempts+1 WHERE status='running' AND tool IN (%s)" % ','.join('?' for _ in reads), reads)

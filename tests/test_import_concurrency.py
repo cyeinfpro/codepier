@@ -55,7 +55,8 @@ async def test_import_and_sibling_reads_progress_during_unrelated_release(local_
     repository.mkdir()
     started, release = threading.Event(), threading.Event()
 
-    def stream(*args):
+    def stream(*args, providers=()):
+        assert not providers
         started.set()
         assert release.wait(10)
         yield DATA
@@ -86,7 +87,11 @@ async def test_import_and_sibling_reads_progress_during_unrelated_release(local_
 async def test_queued_import_preserves_destination_exclusion_without_blocking_siblings(
         local_agent, monkeypatch, held_path):
     agent, root = local_agent
-    monkeypatch.setattr('agent.incoming_artifacts.download_chunks', lambda *args: iter([DATA]))
+    def stream(*args, providers=()):
+        assert not providers
+        return iter([DATA])
+
+    monkeypatch.setattr('agent.incoming_artifacts.download_chunks', stream)
     call = download(root)
     task = None
     try:
@@ -112,7 +117,8 @@ async def test_duplicate_import_and_target_read_wait_for_atomic_publication(loca
     started, release = threading.Event(), threading.Event()
     downloads = []
 
-    def stream(*args):
+    def stream(*args, providers=()):
+        assert not providers
         downloads.append(True)
         started.set()
         assert release.wait(10)

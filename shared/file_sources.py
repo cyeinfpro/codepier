@@ -11,7 +11,7 @@ import re
 from types import MappingProxyType
 from urllib.parse import urlsplit
 
-FILE_SOURCE_POLICY_VERSION = '2026-09-26'
+FILE_SOURCE_POLICY_VERSION = '2026-10-09'
 FILE_SOURCE_PROVIDERS = MappingProxyType({
     'openai': (
         'files.oaiusercontent.com',
@@ -24,6 +24,11 @@ FILE_SOURCE_PROVIDERS = MappingProxyType({
 DEFAULT_FILE_HOSTS = tuple(dict.fromkeys(host for hosts in FILE_SOURCE_PROVIDERS.values() for host in hosts))
 DEFAULT_MAX_IMPORT_BYTES = 128 * 1024 * 1024
 MAX_IMPORT_BYTES = 512 * 1024 * 1024
+# Optional, named profiles are OFF by default and never inferred from a file.
+# Only a single label beneath OpenAI's own content domain is eligible. No
+# Azure/AWS suffix is trusted: those namespaces include unrelated tenants.
+FILE_SOURCE_PROFILE_NAMES = frozenset({'openai_sediment'})
+_OPENAI_SEDIMENT_HOST = re.compile(r'sdmntpr[a-z0-9]{1,56}\.oaiusercontent\.com\Z')
 _LABEL = re.compile(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z')
 
 
@@ -55,6 +60,34 @@ def file_source_hosts(config: dict) -> tuple[str, ...]:
     return tuple(dict.fromkeys([*base, *extra]))
 
 
+def normalize_file_source_providers(value: object) -> list[str]:
+    """Accept only explicit named profiles; never arbitrary regex/wildcards."""
+    if (not isinstance(value, (list, tuple)) or len(value) > 20
+            or any(not isinstance(item, str) or item not in FILE_SOURCE_PROFILE_NAMES for item in value)):
+        raise ValueError('file_source_providers 仅接受受支持的命名来源数组：openai_sediment')
+    return list(dict.fromkeys(value))
+
+
+def source_host_allowed(host: str, hosts, providers=()) -> bool:
+    """Match normalized exact hosts or a separately owner-enabled profile."""
+    host = normalize_file_host(host)
+    enabled = normalize_file_source_providers(providers)
+    return host in hosts or ('openai_sediment' in enabled and _OPENAI_SEDIMENT_HOST.fullmatch(host) is not None)
+
+
+def file_source_policy(config: dict) -> dict:
+    """Describe current exact-host policy without changing or guessing consent."""
+    return {
+        'source_policy_version': FILE_SOURCE_POLICY_VERSION,
+        'allowed_hosts': list(file_source_hosts(config)),
+        'max_bytes': config.get('max_import_bytes', DEFAULT_MAX_IMPORT_BYTES),
+        'policy_scope': 'execution_node',
+        'policy_mode': 'explicit' if 'file_hosts' in config else 'default',
+        'extra_hosts': normalize_file_hosts(config.get('extra_file_hosts', []), 'extra_file_hosts'),
+        'file_source_providers': normalize_file_source_providers(config.get('file_source_providers', [])),
+    }
+
+
 def safe_import_error_detail(details: dict) -> dict:
     """Keep only bounded, source-safe diagnostics through durable receipts."""
     result = {}
@@ -63,7 +96,7 @@ def safe_import_error_detail(details: dict) -> dict:
                    'dns_failed', 'dns_timeout', 'non_public_address', 'connect_failed',
                    'tls_failed', 'source_access_or_expiry', 'http_error', 'transfer_failed'},
         'stage': {'source_validation', 'redirect_validation', 'dns', 'connect', 'response', 'transfer'},
-        'recovery': {'review_local_file_sources', 'provide_native_file', 'check_agent_network',
+        'recovery': {'review_local_file_sources', 'review_hub_file_sources', 'provide_native_file', 'check_agent_network',
                      'refresh_native_file', 'retry_later', 'check_file_source'},
     }
     for key, values in enums.items():

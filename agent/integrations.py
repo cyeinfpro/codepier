@@ -1,14 +1,14 @@
 """Integration dispatch on the existing Agent, journal, project locks and policies."""
 from __future__ import annotations
 import asyncio
-from shared.integration_contracts import REMOTE_TOOLS
+from shared.integration_contracts import REMOTE_TOOLS, INCOMING_UPLOAD_TOOLS
 from shared.util import DevError
 from agent.integration_state import Records
 from agent.source_versions import Validations
 from agent.workspaces import Workspaces
 from agent.integration_control import Controls
-from agent.incoming_artifacts import import_artifact
-from shared.file_sources import FILE_SOURCE_POLICY_VERSION, DEFAULT_MAX_IMPORT_BYTES, file_source_hosts
+from agent.incoming_artifacts import import_artifact, inspect_file_source
+from shared.file_sources import file_source_policy
 from agent import lsp_navigation
 
 class Integrations:
@@ -18,6 +18,9 @@ class Integrations:
         self.workspaces=Workspaces(agent,self.records);self.validations=Validations(agent,self.records)
         self.control=Controls(agent);self.browser=BrowserBroker(agent,self.records)
         self.local_server=None
+        self.incoming_uploads=None
+        self.upload_cleanup_task=None
+        self.upload_cleanup_errors=0
         self.agent.journal.db.execute('CREATE TABLE IF NOT EXISTS integration_project_catalog (id TEXT PRIMARY KEY,body TEXT NOT NULL,updated REAL NOT NULL)')
 
     def remember_project(self,project):
@@ -43,13 +46,42 @@ class Integrations:
         workspace_id=args.get('workspace_id','')
         return self.workspaces.resolve(project,workspace_id) if workspace_id else project
 
+    def upload_service(self):
+        if self.agent.config.get('integrations',{}).get('file_import_streaming') is not True:
+            raise DevError('FILE_IMPORT_DISABLED','节点未启用可续传文件导入；请由所有者审核后启用',403)
+        if self.incoming_uploads is None:
+            from agent.incoming_uploads import IncomingUploads
+            self.incoming_uploads=IncomingUploads(self.agent.engine)
+        return self.incoming_uploads
+
+    async def cleanup_uploads(self):
+        while True:
+            await asyncio.sleep(300)
+            if self.incoming_uploads is not None:
+                try:await self.threaded(self.incoming_uploads.cleanup)
+                except (OSError,DevError):self.upload_cleanup_errors+=1
+
     async def start(self):
+        # Expiry maintenance is independent of admitting new uploads. A node
+        # restart or disabled ingress must not strand existing private spool.
+        with self.agent.journal.lock:
+            existing=self.agent.journal.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='incoming_uploads'").fetchone()
+        if existing:
+            from agent.incoming_uploads import IncomingUploads
+            self.incoming_uploads=IncomingUploads(self.agent.engine)
+            try:await self.threaded(self.incoming_uploads.cleanup)
+            except (OSError,DevError):self.upload_cleanup_errors+=1
+        self.upload_cleanup_task=asyncio.create_task(self.cleanup_uploads())
         if self.agent.config.get('integrations',{}).get('local_control') or self.agent.config.get('integrations',{}).get('browser',{}).get('enabled'):
             from agent.integration_local import LocalServer
             self.local_server=LocalServer(self.agent,self.browser)
             await self.local_server.start()
 
     async def close(self):
+        if self.upload_cleanup_task is not None:
+            import contextlib
+            self.upload_cleanup_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):await self.upload_cleanup_task
         await self.browser.close()
         if self.local_server:await self.local_server.close()
 
@@ -59,6 +91,17 @@ class Integrations:
         except asyncio.CancelledError:return await work
 
     async def execute(self,identifier,name,project,args):
+        if name in INCOMING_UPLOAD_TOOLS:
+            service=self.upload_service()
+            if name=='incoming_upload_begin':return await self.threaded(service.begin,identifier,project,args)
+            if name=='incoming_upload_chunk':
+                import base64,binascii
+                try:data=base64.b64decode(args['data'],validate=True)
+                except (ValueError,binascii.Error):raise DevError('UPLOAD_CHUNK_INVALID','无效的内部文件分块编码') from None
+                return await self.threaded(service.chunk,project,{**args,'data':data})
+            method=service.status if name=='incoming_upload_status' else service.finish
+            return await self.threaded(method,project,args)
+        if name=='inspect_file_source':return inspect_file_source(self.agent.engine,project,args)
         if name=='download_artifact':return await self.threaded(import_artifact,self.agent.engine,project,args)
         if name=='lsp_status':return lsp_navigation.status(self.agent.config,project)
         if name=='lsp_query':return await lsp_navigation.query(self.agent,identifier,project,args)
@@ -98,10 +141,11 @@ class Integrations:
             if browser_state=='ready' and not browser.get('connected'):browser_state='not_connected'
             return {'build':self.agent.build.describe(),'execution':execution,'admission':admission,
                 'language_servers':languages,'browser':browser,'capabilities':sorted(REMOTE_TOOLS),
-                'file_import':{'source_policy_version':FILE_SOURCE_POLICY_VERSION,
-                    'allowed_hosts':list(file_source_hosts(self.agent.config.get('integrations',{}))),
-                    'max_bytes':self.agent.config.get('integrations',{}).get('max_import_bytes',DEFAULT_MAX_IMPORT_BYTES),
-                    'host_roundtrip':'not_run'},
+                'file_import':{**file_source_policy(self.agent.config.get('integrations',{})),
+                    'source_check_supported':True,'host_roundtrip':'not_run',
+                    'resumable_upload_supported':True,
+                    'resumable_upload_enabled':self.agent.config.get('integrations',{}).get('file_import_streaming') is True,
+                    'upload_cleanup_errors':self.upload_cleanup_errors},
                 'checks':[{'name':'project_read','state':'ready'},
                     {'name':'project_write','state':available('write',project.get('mode')=='write' and spec.get('writable',True),'denied')},
                     {'name':'shell','state':shell_state},

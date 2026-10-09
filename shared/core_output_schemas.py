@@ -225,7 +225,7 @@ def build_core_output_schemas(legacy, *, include_queries=False):
             'artifacts_list', 'history_list', 'code_symbols', 'lsp_query')]
     # Import.created is a boolean; registered artifact.created is a timestamp.
     # Both must be declared before factoring shared fields across the facade.
-    write = [*variants('fs_write', 'download_artifact'),
+    write = [*variants('fs_write', 'download_artifact', 'inspect_file_source'),
              copy('artifacts_register', fields={'created': NUM, 'expires': NUM})]
     patch = copy('apply_patch', fields={
         'files': array(FILE_DIFF), 'patch_id': STR, 'added_lines': INT,

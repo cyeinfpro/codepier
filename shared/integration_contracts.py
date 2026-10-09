@@ -52,6 +52,31 @@ class NativeFile(Strict):
             value = {k:v for k,v in value.items() if not (k in {'mime_type','file_name','name'} and v is None)}
         return value
 
+INCOMING_UPLOAD_TOOLS = frozenset({
+    'incoming_upload_begin', 'incoming_upload_status',
+    'incoming_upload_chunk', 'incoming_upload_finish',
+})
+
+class IncomingUploadBegin(Mutation):
+    path: str = Field(min_length=1, max_length=1024)
+    size: int = Field(ge=0, le=512 * 1024 * 1024)
+    sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+
+class IncomingUploadStatus(ProjectArgs):
+    upload_id: str = Field(pattern=ID)
+
+class IncomingUploadChunk(Mutation):
+    upload_id: str = Field(pattern=ID)
+    offset: int = Field(ge=0, le=512 * 1024 * 1024)
+    data: str = Field(min_length=4, max_length=349528)
+    chunk_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+
+class IncomingUploadFinish(Mutation):
+    upload_id: str = Field(pattern=ID)
+
+class InspectFileSource(Mutation):
+    file: NativeFile
+
 class DownloadArtifact(Mutation):
     file: NativeFile
     path: str = Field(min_length=1, max_length=1024)
@@ -142,6 +167,11 @@ class BrowserClose(Mutation):
 
 SPECS = {
     'workspace_status': (WorkspaceStatus, 'read', 'Read a bounded project dashboard: explicitly selected workflow, authorized evidence references and separately labelled recent operations. No logs, model runs, filesystem scan or implicit acceptance. Historical validation is not current verification.', False, True),
+    'incoming_upload_begin': (IncomingUploadBegin, 'write', 'Internal authenticated byte ingress: reserve an owner-bound project upload. Not a model byte transport.', False, False),
+    'incoming_upload_status': (IncomingUploadStatus, 'write', 'Internal authenticated byte ingress: read durable progress under current write authority.', False, False),
+    'incoming_upload_chunk': (IncomingUploadChunk, 'write', 'Internal authenticated byte ingress: verify and persist one bounded chunk.', False, False),
+    'incoming_upload_finish': (IncomingUploadFinish, 'write', 'Internal authenticated byte ingress: verify all bytes and publish without overwrite.', False, False),
+    'inspect_file_source': (InspectFileSource, 'read', 'Preview native attachment source policy without DNS, download or target-file creation. Batch source_check results to review exact new hosts together; owner approval is required before any node-wide source extension. A host name or file_id is not provenance proof.', False, False),
     'download_artifact': (DownloadArtifact, 'write', 'Save a native host file into an unused project-relative path. Streamed with size/SHA checks, trusted HTTPS sources and anchored destination directories. No automatic extraction or execution. Pass the host file object directly.', False, False),
     'lsp_status': (ProjectArgs, 'read', 'Inspect locally configured language servers without starting them. Availability is not a successful semantic query.', False, False),
     'lsp_query': (LspQuery, 'execute', 'Query a configured, owner-approved language server for real definitions/references/types/diagnostics/call hierarchy. Starts a bounded process, no arbitrary server command or workspace edits. Explicit execute permission and local project opt-in required.', False, False),
@@ -178,6 +208,7 @@ def output_schema(name):
     nullable_number={'type':['number','null']};nullable_string={'type':['string','null']}
     fields={
       'workspace_status': {'project':string,'project_id':string,'workspace_id':string,'observed_at':{'type':'number'},'device_online':boolean,'workflow':{'type':['object','null']},'workflows':array,'evidence':array,'recent_operations':array,'next_workflow_cursor':nullable_string,'next_evidence_offset':{'type':['integer','null']},'execution_started':{'const':False}},
+      'inspect_file_source': {'checked':{'const':True},'source_allowed':boolean,'source_host':string,'source_scheme':string,'max_bytes':integer,'declared_size':{'type':['integer','null']},'size_allowed':{'type':['boolean','null']},'source_policy_version':string,'policy_scope':{'enum':['execution_node','hub']},'policy_mode':{'enum':['default','explicit']},'request_sent':{'const':False},'created':{'const':False},'host_roundtrip':{'const':'not_run'},'approval_required':boolean,'approval_target':obj},
       'download_artifact': {'path':string,'bytes':integer,'sha256':{'type':'string','pattern':'^[a-f0-9]{64}$'},'created':boolean,'overwritten':boolean,'extracted':boolean,'executed':boolean},
       'lsp_status': {'servers':array,'starts_process':boolean,'semantic_queries_available':boolean,'column_unit':string,'note':string},
       'lsp_query': {'action':string,'language':string,'backend':{'const':'lsp'},'precision':{'const':'semantic'},'items':array,'source_sha256':nullable_string,'source_current':boolean,'truncated':boolean,'omitted':integer,'column_unit':string,'text':string,'diagnostics_fresh':boolean},
@@ -200,6 +231,7 @@ def output_schema(name):
     }
     required={
       'workspace_status':['project','project_id','workspace_id','observed_at','workflow','workflows','evidence','recent_operations','execution_started'],
+      'inspect_file_source':['checked','source_allowed','source_host','source_scheme','max_bytes','declared_size','size_allowed','source_policy_version','policy_scope','policy_mode','request_sent','created','host_roundtrip','approval_required'],
       'download_artifact':['path','bytes','sha256','created','overwritten','extracted','executed'],
       'lsp_status':['servers','starts_process','semantic_queries_available'],
       'lsp_query':['action','language','backend','precision','items','source_current','truncated','omitted','column_unit'],
@@ -218,6 +250,11 @@ def output_schema(name):
       'browser_action':['lease_id','action_outcome','observation_consumed','next'],
       'browser_close':['lease_id','released','tab_cleanup_confirmed','other_tabs_touched'],
     }
+    if name in INCOMING_UPLOAD_TOOLS:
+        fields[name] = {'upload_id':string,'path':string,'bytes':integer,'received':integer,
+            'sha256':{'type':'string','pattern':r'^[a-f0-9]{64}$'},'state':string,
+            'expires':{'type':'number'},'created':boolean,'ready':boolean}
+        required[name] = list(fields[name])
     return {'type':'object','properties':fields[name],'required':required[name],'additionalProperties':True}
 
 
@@ -238,7 +275,7 @@ TOOL_TITLES = {
     'shell_exec': '命令回执', 'ssh_exec': 'SSH 回执', 'vps': '查找服务器', 'exec': '执行命令',
     'operations_wait': '等待结果', 'operations_get': '读取结果',
     'operations_list': '查找操作', 'operations_cancel': '取消操作', 'show_changes': '查看改动',
-    'download_artifact': '导入附件', 'artifacts_register': '登记交付物',
+    'inspect_file_source': '预检附件来源', 'download_artifact': '导入附件', 'artifacts_register': '登记交付物',
     'lsp_status': '代码服务状态', 'lsp_query': '查询代码',
     'worktrees_create': '创建工作目录', 'worktrees_list': '查看工作目录', 'worktrees_remove': '移除工作目录',
     'validation_run': '验证回执', 'validations_get': '核对验证', 'validations_list': '查看验证',
@@ -268,7 +305,7 @@ def decorate(definition):
         definition['_meta']['ui'] = {'visibility':['app']}
         definition['_meta']['openai/visibility'] = 'private'
         definition['_meta']['openai/widgetAccessible'] = True
-    if name in {'download_artifact', 'write'}:
+    if name in {'download_artifact', 'inspect_file_source', 'write'}:
         definition['_meta']['openai/fileParams'] = ['file']
         definition['annotations']['openWorldHint'] = True
     if name in READ_WITH_SCOPE:

@@ -18,6 +18,12 @@ CONTRACT_PROTOCOL = 1
 # Epoch 2 prevents legacy peers (which assume epoch 1 for every name)
 # from accepting primitives that they do not implement.
 TOOL_WIRE_VERSIONS: dict[str, int] = {name: 2 for name in ("read", "write", "edit", "exec")}
+# A preview must never degrade to an import on a legacy peer.
+TOOL_WIRE_VERSIONS['inspect_file_source'] = 2
+# Byte ingress is never emulated through CLI, shell or legacy file operations.
+TOOL_WIRE_VERSIONS.update({name: 2 for name in (
+    'incoming_upload_begin', 'incoming_upload_status',
+    'incoming_upload_chunk', 'incoming_upload_finish')})
 TOOL_MINIMUM_RELEASES: dict[str, tuple[int, int, int]] = {}
 MINIMUM_RELEASE = (1, 0, 0)
 

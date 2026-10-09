@@ -8,7 +8,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from shared.audit_redaction import redact_command, redact_text
 
-VERSION = "1.20.0"
+VERSION = "1.21.0"
 
 
 class DevError(Exception):
@@ -123,6 +123,9 @@ def safe_summary(value, limit: int = 500):
         # request that will be executed. Inline environment values stay private.
         if isinstance(value.get("command"), str):
             value = {**value, "command": redact_command(value["command"])}
+        if 'upload_id' in value and any(key in value for key in ('data', 'data_base64')):
+            return {key: ('<private binary chunk>' if key in {'data', 'data_base64'}
+                          else safe_summary(item, limit)) for key, item in value.items()}
         if 'download_url' in value and 'file_id' in value:
             from shared.file_sources import source_metadata
             return {'native_file': '<private file reference>', 'size': value.get('size'), **source_metadata(value['download_url'])}

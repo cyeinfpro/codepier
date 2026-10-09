@@ -264,7 +264,13 @@ class Runtime:
         principal = iam.require_record(self.store, principal, row)
         if row['project_id']:
             self.authorize(principal, TOOLS[row['tool']].scope, project_id=row['project_id'])
-        elif row['tool'] == 'system_validate':
+        from shared.integration_contracts import INCOMING_UPLOAD_TOOLS
+        if row['tool'] in INCOMING_UPLOAD_TOOLS:
+            service = getattr(self, 'incoming_files', None)
+            if service is None:
+                raise DevError('FILE_IMPORT_GATEWAY_REQUIRED', '上传回执绑定不可用', 403)
+            service.authorize_operation(row, principal)
+        if not row['project_id'] and row['tool'] == 'system_validate':
             self.authorize(principal, 'projects.create', device_id=row['device_id'])
         if row['tool'] in (COMPUTER_TOOLS - {'computer_status'}) | {'browser_open', 'browser_snapshot', 'browser_action', 'browser_close'} and 'computer' not in principal.scopes:
             raise DevError('INSUFFICIENT_SCOPE', '读取桌面操作结果仍需 computer 权限', 403)
@@ -402,6 +408,11 @@ class Runtime:
         if name in CORE_FACADES or name in CORE_ACTIONS and raw.get('operation', 'file') != 'file':
             from hub.core_tools import invoke as invoke_core
             return await invoke_core(self, name, raw, principal)
+        if name in {'download_artifact', 'inspect_file_source'}:
+            from hub.native_file_ingress import native_ingress_enabled, import_native_file, inspect_native_file
+            if native_ingress_enabled():
+                adapter = import_native_file if name == 'download_artifact' else inspect_native_file
+                return await adapter(self, raw, principal)
         prepared = await self.store.run(self._invoke, name, raw, principal)
         if not isinstance(prepared, DeferredCall):
             return prepared
@@ -670,6 +681,12 @@ class Runtime:
             snapshot["_computer_admin"] = principal.admin
         fingerprint = digest(json.dumps({"tool": name, "args": args, "project": snapshot, "device": project["device_id"]}, sort_keys=True, ensure_ascii=False))
         with self.store.lock:
+            from shared.integration_contracts import INCOMING_UPLOAD_TOOLS
+            if name in INCOMING_UPLOAD_TOOLS:
+                service = getattr(self, 'incoming_files', None)
+                if service is None:
+                    raise DevError('FILE_IMPORT_GATEWAY_REQUIRED', '文件导入必须通过已认证的上传入口', 403)
+                service.validate_admission(name, args, project, principal)
             old = self.store.one("SELECT * FROM operations WHERE space_id=? AND actor=? AND idem=?", (principal.space_id, principal.actor, idem)) if idem else None
             if name == "tasks_list" and not idem:
                 # Reuse only an outstanding metadata query from this exact grant.

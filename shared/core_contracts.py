@@ -27,7 +27,7 @@ CORE_ACTIONS = {
         'changes': 'show_changes', 'artifact': 'artifacts_get', 'artifacts': 'artifacts_list',
         'history': 'history_list', 'symbols': 'code_symbols', 'lsp': 'lsp_query',
     },
-    'write': {'import': 'download_artifact', 'artifact': 'artifacts_register'},
+    'write': {'import': 'download_artifact', 'source_check': 'inspect_file_source', 'artifact': 'artifacts_register'},
     'edit': {'restore': 'history_restore', 'checkpoint': 'project_checkpoint'},
     'process': {
         'agent': 'agent_diagnostics',
@@ -85,17 +85,17 @@ class Mutation(Project):
 
 
 class Write(Mutation):
-    operation: Literal['file', 'import', 'artifact'] = 'file'
+    operation: Literal['file', 'import', 'source_check', 'artifact'] = 'file'
     options: dict[str, Any] = Field(default_factory=dict, description='Specialized operation arguments; discover with workspace.help.')
-    file: NativeFile | None = Field(default=None, description='Native host attachment, only for operation=import. Keep file at top-level, never inside options. Destination goes in options.path.')
+    file: NativeFile | None = Field(default=None, description='Native host attachment for import or source_check. Keep file at top-level, never inside options. Import destination goes in options.path; source_check never downloads or saves.')
     path: str = Field(default='', max_length=1024)
     content: str = Field(default='', max_length=1048576)
     expected_sha256: str = Field(default='', pattern=r'^(|new|[a-f0-9]{64})$')
 
     @model_validator(mode='after')
     def file_target(self):
-        if self.file is not None and self.operation != 'import':
-            raise ValueError('Native file attachments require operation=import')
+        if self.file is not None and self.operation not in {'import', 'source_check'}:
+            raise ValueError('Native file attachments require operation=import or source_check')
         if self.operation == 'file' and (not self.path or not self.expected_sha256 or self.options):
             raise ValueError('file write requires path + expected_sha256 and does not accept options')
         return self

@@ -75,7 +75,7 @@ def help_result(tool='', action=''):
                 schema['properties']['options']['required'] = required_extra
                 required.add('options')
         schema['required'] = sorted(required | {'operation'})
-    if tool == 'write' and action == 'import':
+    if tool == 'write' and action in {'import', 'source_check'}:
         # openai/fileParams resolves ONLY top-level fields. A nested file in
         # options is retained for legacy callers, never recommended/generated.
         options_schema = copy.deepcopy(schema)
@@ -84,12 +84,12 @@ def help_result(tool='', action=''):
         options_schema['required'].remove('file')
         schema = {'type': 'object', 'additionalProperties': False, '$defs': definitions,
             'properties': {
-                'operation': {'type': 'string', 'const': 'import'},
+                'operation': {'type': 'string', 'const': action},
                 'project': {'type': 'string', 'minLength': 1, 'maxLength': 100},
                 'workspace_id': {'type': 'string', 'pattern': r'^(|[a-f0-9]{32})$'},
                 'idempotency_key': {'type': 'string', 'minLength': 8, 'maxLength': 128},
                 'file': native, 'options': options_schema},
-            'required': ['operation', 'project', 'idempotency_key', 'file', 'options']}
+            'required': ['operation', 'project', 'idempotency_key', 'file'] + (['options'] if options_schema.get('required') else [])}
         advanced = False
     return {'tool': tool, 'operation': action, 'scope': TOOLS[target].scope,
             'arguments_location': 'options' if advanced else 'top-level',
@@ -120,7 +120,7 @@ def _public_call(target, arguments):
             if target == backend:
                 args = dict(arguments)
                 outer = {key: args.pop(key) for key in ('project', 'workspace_id', 'idempotency_key') if key in args}
-                if name == 'write' and operation == 'import' and 'file' in args:
+                if name == 'write' and operation in {'import', 'source_check'} and 'file' in args:
                     outer['file'] = args.pop('file')
                 return name, {**outer, 'operation': operation, 'options': args}
     for operation, backend in WORKSPACE.items():
@@ -175,12 +175,12 @@ async def invoke(runtime, name, raw, principal):
     if target:
         fields = TOOLS[target].model.model_fields
         outer = {'operation', 'options', 'project', 'workspace_id', 'idempotency_key'}
-        if name == 'write' and action == 'import':
+        if name == 'write' and action in {'import', 'source_check'}:
             outer.add('file')
         if set(model.model_fields_set) - outer:
             raise DevError('INVALID_ARGUMENTS', '专项操作参数必须放在 options 中')
         options = dict(args['options'])
-        if name == 'write' and action == 'import' and args.get('file') is not None:
+        if name == 'write' and action in {'import', 'source_check'} and args.get('file') is not None:
             if 'file' in options:
                 raise DevError('INVALID_ARGUMENTS', 'file 不能在顶层和 options 中重复提供')
             options['file'] = args['file']

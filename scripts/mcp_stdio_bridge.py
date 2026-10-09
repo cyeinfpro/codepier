@@ -182,6 +182,86 @@ def forward(client, base, request, headers, *, retry_seconds=30, sleep=time.slee
                 raise
 
 
+
+LOCAL_UPLOAD_TOOL = "codepier_upload_local_file"
+
+
+def local_upload_roots(raw):
+    """Explicit local read authorization, independent of remote project scope."""
+    if not raw:
+        return []
+    value = json.loads(raw)
+    if (not isinstance(value, list) or len(value) > 32
+            or any(not isinstance(item, str) or not item or not Path(item).is_absolute() for item in value)):
+        raise ValueError("CODEPIER_FILE_IMPORT_ROOTS must be a bounded JSON array of absolute roots")
+    return [Path(item) for item in value]
+
+
+def local_upload_definition():
+    return {
+        "name": LOCAL_UPLOAD_TOOL,
+        "description": "Upload a real local file through this explicitly configured CodePier bridge. Only configured local read roots are allowed. Raw bytes stay outside model context. Uses current project write permissions; no execution, extraction, overwrite or new credentials. Query the same receipt after interruption.",
+        "inputSchema": {"type": "object", "additionalProperties": False,
+            "properties": {
+                "source": {"type": "string", "minLength": 1, "description": "Absolute local regular-file path within configured allowed roots."},
+                "project": {"type": "string", "minLength": 1},
+                "destination": {"type": "string", "minLength": 1, "description": "Unused project-relative destination path."},
+                "workspace_id": {"type": "string", "default": "", "pattern": r"^(|[a-f0-9]{32})$"},
+                "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 128},
+            }, "required": ["source", "project", "destination", "idempotency_key"]},
+        "annotations": {"readOnlyHint": False, "destructiveHint": False,
+                        "idempotentHint": True, "openWorldHint": True},
+    }
+
+
+def add_local_upload_tool(payload, roots, request):
+    if not roots or request.get("params", {}).get("cursor"):
+        return payload
+    result = payload.get("result")
+    if not isinstance(result, dict) or not isinstance(result.get("tools"), list):
+        return payload
+    if any(item.get("name") == LOCAL_UPLOAD_TOOL for item in result["tools"]):
+        raise ValueError("Local upload tool collides with remote catalog")
+    result["tools"].append(local_upload_definition())
+    return payload
+
+
+def handle_local_upload(client, base, request, headers, roots, retry_seconds):
+    """Client-side adapter only. Never forward a local path as a native URL."""
+    args = request["params"].get("arguments", {})
+    required = {"source", "project", "destination", "idempotency_key"}
+    allowed = required | {"workspace_id"}
+    if (not roots or not isinstance(args, dict) or set(args) - allowed or required - set(args)
+            or any(not isinstance(args[key], str) or not args[key] for key in required)
+            or not 8 <= len(args["idempotency_key"]) <= 128
+            or not isinstance(args.get("workspace_id", ""), str)
+            or not re.fullmatch(r"(|[a-f0-9]{32})", args.get("workspace_id", ""))):
+        error = {"code": "LOCAL_UPLOAD_DISABLED_OR_INVALID",
+                 "message": "Local upload needs explicit read roots and valid source/project/destination/idempotency fields",
+                 "retryable": False}
+        result = {"isError": True, "structuredContent": {"error": error},
+                  "content": [{"type": "text", "text": json.dumps(error)}]}
+    else:
+        from scripts.file_import_client import upload_local_file, FileImportError
+        try:
+            data = upload_local_file(client, base, headers, source=Path(args["source"]),
+                project=args["project"], destination=args["destination"],
+                idempotency_key=args["idempotency_key"], workspace_id=args.get("workspace_id", ""),
+                allowed_roots=roots, retry_seconds=retry_seconds)
+            result = {"isError": False, "structuredContent": data,
+                      "content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}]}
+        except FileImportError as exc:
+            error = {"code": exc.code, "message": str(exc), "retryable": exc.retryable}
+            for key in ("operation_id", "upload_id"):
+                if getattr(exc, key, None):
+                    error[key] = getattr(exc, key)
+            result = {"isError": True, "structuredContent": {"error": error},
+                      "content": [{"type": "text", "text": json.dumps(error)}]}
+    if is_modern(request):
+        result["resultType"] = "complete"
+    return {"jsonrpc": "2.0", "id": request.get("id"), "result": result}
+
+
 def main():
     for suffix in ('HUB_URL','TOKEN_FILE','MCP_PROFILE','RETRY_SECONDS'):
         new, old = 'CODEPIER_'+suffix, 'REMOTE_DEV_'+suffix
@@ -191,6 +271,7 @@ def main():
         profile = os.environ.get("CODEPIER_MCP_PROFILE", "core")
         if profile not in {"core", "full", "coding"}:
             raise ValueError("CODEPIER_MCP_PROFILE must be core, full or coding")
+        upload_roots = local_upload_roots(os.environ.get("CODEPIER_FILE_IMPORT_ROOTS", ""))
         token_file = Path(os.environ["CODEPIER_TOKEN_FILE"]).expanduser()
         token_from_file(token_file)
         retry_seconds = float(os.environ.get("CODEPIER_RETRY_SECONDS", "30"))
@@ -241,12 +322,16 @@ def main():
                 request = prepare_request(request)
                 headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream",
                            "Authorization": "Bearer " + token, "MCP-Protocol-Version": version}
-                payload = forward(client, base, request, headers, retry_seconds=retry_seconds, profile=profile)
+                if request["method"] == "tools/call" and request["params"].get("name") == LOCAL_UPLOAD_TOOL:
+                    payload = handle_local_upload(client, base, request, headers, upload_roots, retry_seconds)
+                else:
+                    payload = forward(client, base, request, headers, retry_seconds=retry_seconds, profile=profile)
                 if payload is None:
                     continue
                 if request["method"] == "initialize" and "result" in payload:
                     version = payload["result"]["protocolVersion"]
                 if request["method"] == "tools/list" and "result" in payload:
+                    payload = add_local_upload_tool(payload, upload_roots, request)
                     for tool in payload["result"]["tools"]:
                         tool.setdefault("_meta", {}).pop("securitySchemes", None)
                         tool.pop("securitySchemes", None)

@@ -99,6 +99,9 @@ def test_browser_listener_does_not_imply_owner_controls_enabled(workspace, enabl
         engine=engine, config={**engine.config, 'integrations':{'local_control':enabled}},
         build=SimpleNamespace(describe=lambda:{}),
     )
+    service.incoming_uploads = None
+    service.upload_cleanup_task = None
+    service.upload_cleanup_errors = 0
     service.local_server = object()  # It may exist solely for native browser messaging.
     service.browser = SimpleNamespace(status=lambda p:{'enabled':True, 'connected':True})
     service.control = SimpleNamespace(state=lambda p:{'paused':False})

@@ -19,6 +19,7 @@ from shared.crypto import digest, token
 from shared.tool_protocol import wire_version, negotiate, require_compatible
 from shared.core_contracts import CORE_ACTIONS, REPLACED_MCP_TOOLS, CORE_TOOLS
 from shared.query_contracts import QUERY_TOOLS
+from shared.integration_contracts import INCOMING_UPLOAD_TOOLS
 from shared.util import DevError, atomic_json
 from tests.fake_computer_provider import png, frame
 from shared.computer_media import normalize_content
@@ -267,19 +268,22 @@ def test_bridge_does_not_invent_lookup_filters_or_workspace_arguments():
 @pytest.mark.asyncio
 async def test_complete_capability_discovery_and_no_unmapped_public_tool(runtime):
     instance, principal = runtime
-    assert set(TOOLS) - CORE_TOOLS - QUERY_TOOLS - set(REPLACED_MCP_TOOLS) == {'integration_control', 'validations_accept', 'get_profile', 'get_access_context'}
+    assert set(TOOLS) - CORE_TOOLS - QUERY_TOOLS - set(REPLACED_MCP_TOOLS) - INCOMING_UPLOAD_TOOLS == {'integration_control', 'validations_accept', 'get_profile', 'get_access_context'}
     for profile in ('core', 'coding', 'full'):
         assert {t['name'] for t in tool_definitions(profile)} == CORE_TOOLS | QUERY_TOOLS | {'get_profile', 'get_access_context'}
     for name, operations in CORE_ACTIONS.items():
         for operation, backend in operations.items():
             help = await instance.invoke('workspace', {'operation': 'help', 'tool': name, 'action': operation}, principal)
             assert help['scope'] == TOOLS[backend].scope
-            native_import = name == 'write' and operation == 'import'
+            native_import = name == 'write' and operation in {'import', 'source_check'}
             assert help['arguments_location'] == ('top-level' if native_import else 'options')
             assert help['inputSchema']['additionalProperties'] is False
             if native_import:
                 assert 'file' in help['inputSchema']['required']
-                assert 'path' in help['inputSchema']['properties']['options']['required']
+                if operation == 'import':
+                    assert 'path' in help['inputSchema']['properties']['options']['required']
+                else:
+                    assert not help['inputSchema']['properties']['options'].get('required')
                 assert 'file' not in help['inputSchema']['properties']['options']['properties']
             else:
                 assert not {'project', 'workspace_id', 'idempotency_key'} & help['inputSchema']['properties'].keys()

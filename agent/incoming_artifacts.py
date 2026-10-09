@@ -13,14 +13,15 @@ from shared.util import DevError
 
 # Compatibility exports; configuration and runtime share the same registry.
 from shared.file_sources import (DEFAULT_FILE_HOSTS, DEFAULT_MAX_IMPORT_BYTES,
-    file_source_hosts, normalize_file_host, source_metadata)
+    file_source_hosts, file_source_policy, normalize_file_host, source_metadata, safe_import_error_detail,
+    normalize_file_source_providers, source_host_allowed)
 
 DEFAULT_HOSTS = DEFAULT_FILE_HOSTS
 MAX_BYTES = DEFAULT_MAX_IMPORT_BYTES
 DOWNLOAD_SECONDS = 180
 
 
-def validate_url(value, hosts, *, stage='source_validation'):
+def validate_url(value, hosts, *, stage='source_validation', providers=()):
     metadata = source_metadata(value)
     reason = 'invalid_url'
     try:
@@ -35,12 +36,12 @@ def validate_url(value, hosts, *, stage='source_validation'):
                 or parsed.port not in (None, 443)):
             raise ValueError()
         host = normalize_file_host(parsed.hostname or '')
-        if host not in hosts:
+        if not source_host_allowed(host, hosts, providers):
             reason = 'host_not_allowed'
             raise ValueError()
     except (ValueError, UnicodeError):
         recovery = 'review_local_file_sources' if reason == 'host_not_allowed' else 'provide_native_file'
-        message = ('文件下载主机不在本机允许的来源中；请核对来源策略或由主理人批准精确主机'
+        message = ('文件下载主机尚未获此节点批准；先用 source_check 预检并汇总同批来源，经本人核验批准后仅追加精确主机至 integrations.extra_file_hosts；不要覆盖 file_hosts 或关闭校验'
                    if reason == 'host_not_allowed' else '文件引用不是有效的原生 HTTPS 下载地址；请通过宿主重新提供文件')
         raise DevError('ARTIFACT_SOURCE_DENIED', message + '；未请求被拒绝的地址，未发布目标文件', 403,
             **metadata, reason=reason, stage=stage, request_sent=False, recovery=recovery) from None
@@ -136,11 +137,11 @@ class PublicTLSConnection(http.client.HTTPSConnection):
             **metadata, reason=reason, stage='connect', recovery='check_agent_network') from None
 
 
-def download_chunks(file, hosts, max_bytes):
+def download_chunks(file, hosts, max_bytes, *, providers=()):
     url = file['download_url']
     deadline = time.monotonic() + DOWNLOAD_SECONDS
     for redirects in range(4):
-        parsed, host = validate_url(url, hosts, stage='redirect_validation' if redirects else 'source_validation')
+        parsed, host = validate_url(url, hosts, stage='redirect_validation' if redirects else 'source_validation', providers=providers)
         connection = PublicTLSConnection(host, 443, timeout=remaining_timeout(deadline), context=ssl.create_default_context())
         connection.download_deadline = deadline
         try:
@@ -161,7 +162,7 @@ def download_chunks(file, hosts, max_bytes):
                         reason='invalid_url', stage='redirect_validation', request_sent=False,
                         recovery='provide_native_file')
                 url = urljoin(url, location)
-                validate_url(url, hosts, stage='redirect_validation')
+                validate_url(url, hosts, stage='redirect_validation', providers=providers)
                 continue
             if response.status != 200:
                 refresh = response.status in {401, 403, 404, 410}
@@ -330,6 +331,43 @@ class AnchoredDestination:
                 raise failures[0]
 
 
+def inspect_file_source(engine, project, args):
+    """Preview policy only: no DNS, network, directory creation or publication.
+
+    Keep this a distinct protocol operation. Older Agents reject an unknown
+    operation instead of mistaking an unsupported preview flag for an import.
+    """
+    engine.root(project)
+    config = engine.config.get('integrations', {})
+    policy = file_source_policy(config)
+    file = args['file']
+    size = file.get('size')
+    result = {**policy, **source_metadata(file['download_url']),
+        'checked': True, 'source_allowed': False,
+        'declared_size': size,
+        'size_allowed': None if size is None else size <= policy['max_bytes'],
+        'request_sent': False, 'created': False, 'host_roundtrip': 'not_run',
+        'approval_required': False,
+        'note': '仅检查当前来源策略和声明大小，未访问来源、验证 DNS/TLS/跳转或文件内容；真正导入时仍会重新校验。'}
+    try:
+        validate_url(file['download_url'], policy['allowed_hosts'], providers=policy['file_source_providers'])
+    except DevError as exc:
+        result.update(safe_import_error_detail(exc.details))
+        result['message'] = exc.message
+        if exc.details.get('reason') == 'host_not_allowed':
+            result['approval_required'] = True
+            result['approval_target'] = {
+                'config_key': 'integrations.extra_file_hosts',
+                'hosts': [result['source_host']],
+                'scope': 'execution_node',
+                'applies_to': 'all_projects_on_node',
+            }
+            result['trust'] = '来源主机是待核验输入，原生 file_id 和域名相似性都不构成可信证明；须本人独立核验并明确批准，不能自动更改策略。'
+    else:
+        result['source_allowed'] = True
+    return result
+
+
 def import_artifact(engine,project,args,*,stream=None):
     root,_=engine.root(project,True)
     relative=relative_path(args['path'],False);destination=engine.path(root,relative,False)
@@ -339,14 +377,15 @@ def import_artifact(engine,project,args,*,stream=None):
     file=args['file'];expected_size=file.get('size')
     if expected_size is not None and expected_size>limit:raise DevError('ARTIFACT_TOO_LARGE','原生文件大小超过本机上限')
     hosts=file_source_hosts(config)
-    validate_url(file['download_url'],hosts)
+    providers=normalize_file_source_providers(config.get('file_source_providers',[]))
+    validate_url(file['download_url'],hosts,providers=providers)
     total=0;sha=hashlib.sha256()
     # Pin/create the staging destination and publish under the mutation lock,
     # but never hold the global lock across DNS/network/download waits.
     with contextlib.ExitStack() as cleanup:
         with engine.mutation_lock:
             target = cleanup.enter_context(AnchoredDestination(engine,root,relative))
-        for block in (stream if stream is not None else download_chunks(file,hosts,limit)):
+        for block in (stream if stream is not None else download_chunks(file,hosts,limit,providers=providers)):
             if not isinstance(block,bytes):raise DevError('ARTIFACT_STREAM','下载流类型错误')
             total+=len(block)
             if total>limit:raise DevError('ARTIFACT_TOO_LARGE','下载超过本机文件大小上限')

@@ -31,6 +31,7 @@ from hub.api.system import make_system_router
 from hub.api.models import Model, ComputerDecision, Login, DeviceCreate, DeviceUpdate, ProjectInput, ToolCall, TokenInput, PasswordInput, SettingsInput
 from hub.access import make_access_router
 from hub.artifacts import make_artifact_router
+from hub.incoming_files import make_incoming_file_router
 from hub.agent_install import make_agent_install_router
 from hub.native_cli import make_native_router
 from hub.vps import make_vps_router
@@ -113,7 +114,7 @@ def create_app(data_dir: str | None = None):
             app.include_router(make(auth, runtime))
         app.include_router(runtime.oauth.router)
         app.include_router(make_router(auth, runtime, public_url))
-        for make in (make_artifact_router, make_access_router, make_native_router,
+        for make in (make_artifact_router, make_incoming_file_router, make_access_router, make_native_router,
                      make_vps_router, make_panel_update_router):
             app.include_router(make(auth, runtime))
         app.include_router(make_agent_install_router(runtime, auth))

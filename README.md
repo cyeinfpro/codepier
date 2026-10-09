@@ -2,7 +2,7 @@
 
 让 ChatGPT 通过 MCP 插件使用你的本地项目：读代码、改文件、跑测试，也能接入浏览器、桌面和远程服务器。
 
-[![Version](https://img.shields.io/badge/version-1.20.0-2563eb)](RELEASE.json)
+[![Version](https://img.shields.io/badge/version-1.21.0-2563eb)](RELEASE.json)
 [![Python](https://img.shields.io/badge/Python-3.13-3776ab)](requirements.txt)
 [![License](https://img.shields.io/badge/license-MIT-16a34a)](LICENSE)
 
@@ -31,11 +31,17 @@ CodePier 不提供模型服务，也不代替原生 CLI 的账号和订阅。Hub
 
 ### 聊天式协作室
 
-1.20 的协作主屏围绕独立房间、助手连接与连续消息组织。统一接入后，在已批准范围内选择助手、输入请求即可发送；本次执行位置与能力清楚可见，结果回到原话题。房间可关联一个或多个项目，也可中途添加项目；历史与任务保留原项目归属，所有读取继续按当前项目授权过滤。先讨论，明确目标后再由本人多个助手在已批准范围内拆解、交接与复核；只读助手可参与计划和审阅，执行步骤必须符合目标及当前连接能力。账号、团队邀请与连接权限结果也提供连续指引。
+协作主屏围绕独立房间、助手连接与连续消息组织。统一接入后，在已批准范围内选择助手、输入请求即可发送；本次执行位置与能力清楚可见，结果回到原话题。房间可关联一个或多个项目，也可中途添加项目；历史与任务保留原项目归属，所有读取继续按当前项目授权过滤。先讨论，明确目标后再由本人多个助手在已批准范围内拆解、交接与复核；只读助手可参与计划和审阅，执行步骤必须符合目标及当前连接能力。账号、团队邀请与连接权限结果也提供连续指引。
 
 CPJ 加入只登记连接位置，房主明确批准范围，宿主明确选择处理约定。直接委托无需先接通旧监控通知，受管结果回帖也无需授予通用房间发言权。普通提醒和目标通知采用独立订阅，目标订阅绑定具体批准版本；旧监控任务保留原只读用途绑定。升级不自动扩大授权、创建原生聊天、订阅或生产采集。通知被平台接收不代表模型在线、已读或一定回复；Shell 仍使用执行账号权限，不是项目级操作系统沙箱。
 
-日常使用见[聊天室指南](docs/COLLABORATION_CHATROOM.md)，监控与原有任务规则见[协作中心说明](docs/COLLABORATION.md)。普通多人房间 ACL、通用文件上传和分布式主机监控不属于本版；真实宿主订阅与目标设备升级仍需按环境验收。
+日常使用见[聊天室指南](docs/COLLABORATION_CHATROOM.md)，监控与原有任务规则见[协作中心说明](docs/COLLABORATION.md)。普通多人房间 ACL、房间附件上传和分布式主机监控不属于本版；真实宿主订阅与目标设备升级仍需按环境验收。
+
+### 统一文件入站（默认关闭）
+
+新增认证分块入站，供原生附件 Hub 中转和普通 MCP 本地 stdio 适配器共用。按字节接收普通文件，支持 0 B、Unicode 文件名及未知扩展名；不解压、不执行、不覆盖目标。Agent 单文件默认 128 MiB、配置最高 512 MiB，原生中转本阶段固定 128 MiB。
+
+开启前需明确配置 Hub、目标 Agent 与来源策略；命名来源 `openai_sediment` 默认不启用，精确主机、DNS、TLS 与重定向检查继续适用。普通 MCP 还需已有身份和批准的本地读根，本阶段适配器仅支持 POSIX。dot、ChatGPT、Codex、Work 新链路的真实往返与 Windows Agent 实机仍需独立验收。详见[协议、部署顺序和客户端矩阵](docs/FILE_IMPORT_INGRESS.md)。
 
 ## 工作方式
 
@@ -83,10 +89,10 @@ ChatGPT / MCP 客户端                 浏览器管理面板
 
 服务器需要 Git、Bash、Docker Engine、Docker Compose v2，以及供安装脚本使用的 **Python 3.9+**。Compose 需要支持 `up --wait`；应用运行环境由 Docker 镜像提供，使用 Python 3.13。
 
-以下安装命令以 `v1.20.0` 为目标；请先确认对应 Release 已发布。请在可信网络中完成 HTTP 初始安装；公网部署应先按[入门教程](docs/START-HERE.md)配置 HTTPS，不要通过裸公网 HTTP 输入密码或配对设备。
+以下安装命令以 `v1.21.0` 为目标；请先确认对应 Release 已发布。请在可信网络中完成 HTTP 初始安装；公网部署应先按[入门教程](docs/START-HERE.md)配置 HTTPS，不要通过裸公网 HTTP 输入密码或配对设备。
 
 ```bash
-git clone --branch v1.20.0 --depth 1 https://github.com/cyeinfpro/codepier.git
+git clone --branch v1.21.0 --depth 1 https://github.com/cyeinfpro/codepier.git
 cd codepier
 bash install.sh
 ```
@@ -102,7 +108,7 @@ curl --fail http://127.0.0.1:8765/healthz
 
 也可以从 [Releases](https://github.com/cyeinfpro/codepier/releases) 下载源码包。手动安装和开发建议使用 `codepier-VERSION-source-full.zip`；`source.zip` 用于兼容面板更新器。环境变量见 [`.env.example`](.env.example)。
 
-使用预构建镜像时，发布后对应的镜像地址为 `ghcr.io/cyeinfpro/codepier:1.20.0`，生产部署建议固定镜像摘要。k3s 单文件清单见 [`deploy/k3s/deployment.yaml`](deploy/k3s/deployment.yaml)；Compose 可通过 `CODEPIER_HUB_IMAGE` 选择镜像，首次安装与数据初始化仍应遵循[入门教程](docs/START-HERE.md)。OIDC 环境变量播种和首次 SSO 管理员初始化需显式配置，见[多用户/OIDC 指南](docs/MULTIUSER_OIDC.md)。
+使用预构建镜像时，发布后对应的镜像地址为 `ghcr.io/cyeinfpro/codepier:1.21.0`，生产部署建议固定镜像摘要。k3s 单文件清单见 [`deploy/k3s/deployment.yaml`](deploy/k3s/deployment.yaml)；Compose 可通过 `CODEPIER_HUB_IMAGE` 选择镜像，首次安装与数据初始化仍应遵循[入门教程](docs/START-HERE.md)。OIDC 环境变量播种和首次 SSO 管理员初始化需显式配置，见[多用户/OIDC 指南](docs/MULTIUSER_OIDC.md)。
 
 ### 2. 接入开发电脑
 
@@ -366,7 +372,7 @@ docs/        使用和维护文档
 
 ## 文档
 
-附件导入、来源策略和失败恢复见[文件导入指南](docs/FILE_IMPORT.md)。
+附件导入、来源策略和失败恢复见[文件导入指南](docs/FILE_IMPORT.md)；认证分块、原生中转、普通 MCP 本地适配器与部署边界见[统一文件入站](docs/FILE_IMPORT_INGRESS.md)。
 
 | 要做的事情 | 文档 |
 | --- | --- |
@@ -381,11 +387,11 @@ docs/        使用和维护文档
 
 ## 版本与许可
 
-当前仓库的 `RELEASE.json` 标记为 **1.20.0 / prepared / source-and-image**。本版统一委托接入、模式说明和持续待办消费，固定每次发送的目标与能力子集；协作/监控收为三个公开工具入口，保留旧调用兼容。此文件记录源码打包阶段；正式发布状态与可下载产物以对应 [Release](https://github.com/cyeinfpro/codepier/releases) 为准。升级不会自动启用委托规则、原生订阅或房间发言权限，真实 dot / Work Cloud 接收与处理需在目标宿主单独验收。详见 [CHANGELOG.md](CHANGELOG.md)。
+当前仓库的 `RELEASE.json` 标记为 **1.21.0 / prepared / source-and-image**。本版提供默认关闭的统一文件入站、原生附件中转、普通 MCP 本地适配器与明确来源预检；包含有界容量、摘要校验和持久恢复。此文件记录源码打包阶段；正式发布状态与可下载产物以对应 [Release](https://github.com/cyeinfpro/codepier/releases) 为准。升级不启用新入口或命名来源，不更新现用 Hub/Agent；真实宿主与节点验收由部署者另行完成。详见 [CHANGELOG.md](CHANGELOG.md)。
 
 `main` 可能包含正式发布后的改动。安装和更新请核对目标 [Release](https://github.com/cyeinfpro/codepier/releases)；GitHub 提交或 Release 发布不会自动升级现用 Hub 与 Agent。
 
-- **Version:** 1.20.0
+- **Version:** 1.21.0
 - **License:** [MIT](LICENSE)
 
 第三方依赖保留各自许可证。前端依赖声明位于 `web/vendor/`，MCP Apps 的声明见 [THIRD_PARTY_NOTICES.txt](web/mcp-apps/THIRD_PARTY_NOTICES.txt)。

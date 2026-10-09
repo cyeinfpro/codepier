@@ -21,7 +21,8 @@ async def test_slow_import_does_not_hold_global_write_lock(local_agent, monkeypa
     agent, root = local_agent
     started, release = threading.Event(), threading.Event()
 
-    def stream(*args):
+    def stream(*args, providers=()):
+        assert not providers
         started.set()
         assert release.wait(10)
         yield DATA
@@ -243,7 +244,8 @@ async def test_import_diagnostics_survive_agent_replay_and_hub_receipt(local_age
     call = download(root)
     secret = 'DO_NOT_LEAK_SOURCE_TICKET'
 
-    def fail(*args):
+    def fail(*args, providers=()):
+        assert not providers
         raise DevError('ARTIFACT_DOWNLOAD_FAILED', 'source rejected', 502,
                        source_host='files.oaiusercontent.com', source_scheme='https',
                        reason='source_access_or_expiry', stage='response', http_status=403,
