@@ -374,8 +374,21 @@ def windows_task_has_recovery(raw, user=None):
         task = ET.fromstring(raw)
     except ET.ParseError:
         return False
+    # Task Scheduler exports omit these default-valued elements. Defaults
+    # apply only when the containing structure exists, never to a missing task
+    # principal/trigger/settings or an explicitly empty/disabled/elevated field.
+    # https://learn.microsoft.com/en-us/windows/win32/taskschd/task-scheduler-schema
+    defaults = {'Principals/Principal/RunLevel': 'LeastPrivilege',
+                'Triggers/BootTrigger/Enabled': 'true',
+                'Triggers/TimeTrigger/Enabled': 'true',
+                'Settings/RunOnlyIfNetworkAvailable': 'false'}
     def value(path):
-        return task.findtext('/'.join('t:'+part for part in path.split('/')), namespaces=ns)
+        parts = path.split('/')
+        element = task.find('/'.join('t:'+part for part in parts), namespaces=ns)
+        if element is not None:
+            return element.text
+        parent = task.find('/'.join('t:'+part for part in parts[:-1]), namespaces=ns)
+        return defaults.get(path) if parent is not None else None
     if user is not None and value('Principals/Principal/UserId') != user:
         return False
     return (value('Principals/Principal/LogonType') == 'S4U'

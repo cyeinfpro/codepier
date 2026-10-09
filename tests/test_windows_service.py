@@ -600,3 +600,48 @@ def test_unicode_live_task_foreign_action_still_rejected(windows_install, monkey
     with pytest.raises(ValueError, match='different Agent'):
         installer.verify_service_ownership(base)
     assert (base/'service.xml').read_bytes() == saved
+
+
+EXPORTED_DEFAULT_PATHS = (
+    'Principals/Principal/RunLevel', 'Triggers/BootTrigger/Enabled',
+    'Triggers/TimeTrigger/Enabled', 'Settings/RunOnlyIfNetworkAvailable',
+)
+
+
+def task_field(root, path):
+    return root.find('/'.join('t:'+part for part in path.split('/')), NS)
+
+
+def test_windows_export_omitted_defaults_preserve_same_recovery_policy(windows_install):
+    base, python = windows_install
+    root = ET.fromstring(installer.windows_task_xml(base, python, 'CodePierAgent', SID))
+    for path in EXPORTED_DEFAULT_PATHS:
+        parent = task_field(root, path.rsplit('/', 1)[0])
+        parent.remove(task_field(root, path))
+    raw = ET.tostring(root, encoding='unicode')
+    assert installer.windows_task_has_recovery(raw, SID)
+    assert not installer.windows_task_has_recovery(raw, 'S-1-5-21-999-999-999-999')
+
+
+@pytest.mark.parametrize('path,value', [
+    ('Principals/Principal/RunLevel', 'HighestAvailable'),
+    ('Triggers/BootTrigger/Enabled', 'false'),
+    ('Triggers/TimeTrigger/Enabled', 'false'),
+    ('Settings/RunOnlyIfNetworkAvailable', 'true'),
+] + [(path, '') for path in EXPORTED_DEFAULT_PATHS])
+def test_windows_export_explicit_nondefault_or_empty_still_rejected(windows_install, path, value):
+    base, python = windows_install
+    root = ET.fromstring(installer.windows_task_xml(base, python, 'CodePierAgent', SID))
+    task_field(root, path).text = value
+    assert not installer.windows_task_has_recovery(ET.tostring(root, encoding='unicode'), SID)
+
+
+@pytest.mark.parametrize('path', [
+    'Principals/Principal', 'Triggers/BootTrigger', 'Triggers/TimeTrigger', 'Settings',
+])
+def test_missing_parent_cannot_gain_export_defaults(windows_install, path):
+    base, python = windows_install
+    root = ET.fromstring(installer.windows_task_xml(base, python, 'CodePierAgent', SID))
+    parent = task_field(root, path.rsplit('/', 1)[0]) if '/' in path else root
+    parent.remove(task_field(root, path))
+    assert not installer.windows_task_has_recovery(ET.tostring(root, encoding='unicode'), SID)
