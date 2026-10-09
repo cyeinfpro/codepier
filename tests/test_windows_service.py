@@ -22,6 +22,20 @@ NS = {'t': 'http://schemas.microsoft.com/windows/2004/02/mit/task'}
 SID = 'S-1-5-21-123-456-789-1001'
 
 
+def test_disposable_acceptance_runtime_imports_without_repository_fallback(tmp_path):
+    from scripts.check_windows_service import copy_runtime_support
+    runtime = tmp_path/'Agent 中文 é space'/'runtime'
+    copy_runtime_support(runtime)
+    command = ('import sys; sys.path.insert(0, '+repr(str(runtime))+'); '
+               'import agent.service_watchdog, scripts.agent_lifecycle, shared.brand_migration; '
+               'from pathlib import Path; '
+               'assert all(Path(m.__file__).is_relative_to('+repr(str(runtime))+') '
+               'for m in (agent.service_watchdog, scripts.agent_lifecycle, shared.brand_migration))')
+    result = subprocess.run([sys.executable, '-I', '-c', command], cwd=tmp_path,
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.fixture
 def windows_install(tmp_path, monkeypatch):
     base = tmp_path / "agent & $cash' 空间"

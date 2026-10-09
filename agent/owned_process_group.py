@@ -38,7 +38,15 @@ def live_group_members(pgid: int, *, timeout: float = 1) -> list[int]:
     # ps -g option has different semantics.
     command = (['/bin/ps', '-x', '-g', str(pgid), '-o', 'pid=,pgid=,stat=']
                if sys.platform == 'darwin' else ['/bin/ps', '-axo', 'pid=,pgid=,stat='])
-    result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=True)
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=True)
+    except subprocess.CalledProcessError as exc:
+        # Darwin ps returns 1 with both streams empty for a selector matching no
+        # processes. This occurs when an early stop beats the PTY child's setsid.
+        # Every diagnostic, other exit code or missing capture remains unknown.
+        if sys.platform == 'darwin' and exc.returncode == 1 and exc.stdout == '' and exc.stderr == '':
+            return []
+        raise
     members = []
     for line in result.stdout.splitlines():
         if not line.strip():

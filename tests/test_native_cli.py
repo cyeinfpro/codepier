@@ -1,6 +1,7 @@
 """Real PTY tests use isolated HOME/config and a fake interactive program, never paid prompts."""
 import base64
 from contextlib import closing
+import subprocess
 import hashlib
 import json
 import os
@@ -57,13 +58,26 @@ def native(tmp_path,monkeypatch):
         with closing(database(obj.directory)) as db,db: db.execute("UPDATE sessions SET lease='',lease_until=0 WHERE id=?",(row['id'],))
         obj.action('lease',project,{'id':row['id'],'writer':writer})
         obj.action('stop',project,{'id':row['id'],'writer':writer,'receipt':uuid.uuid4().hex})
-    wait_for(lambda:not obj.live(),8)
-    for child in obj.children:
-        if child.poll() is None:
-            child.terminate()
-            try: child.wait(timeout=5)
-            except Exception: child.kill()
-    journal.db.close()
+    try:
+        wait_for(lambda:not obj.live(),8)
+    except AssertionError as exc:
+        with closing(database(obj.directory)) as db:
+            sessions = [dict(row) for row in db.execute(
+                'SELECT status,worker_pid,child_pid,heartbeat,exit_code,error FROM sessions')]
+            commands = [dict(row) for row in db.execute('SELECT kind,state FROM commands')]
+        raise AssertionError('Owned fixture stop did not finish: '+repr({
+            'sessions': sessions, 'commands': commands,
+            'workers': [child.poll() for child in obj.children]})) from exc
+    finally:
+        # Preserve the failure, but never leak this fixture's retained children
+        # or SQLite handle into the next case when its stop assertion fails.
+        for child in obj.children:
+            if child.poll() is None:
+                child.terminate()
+                try: child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    child.kill(); child.wait(timeout=5)
+        journal.db.close()
 
 
 def start(native,**kwargs):

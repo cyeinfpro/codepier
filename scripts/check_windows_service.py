@@ -59,6 +59,16 @@ def wait_process_exit(pid, seconds=25):
         kernel.CloseHandle(handle)
 
 
+def copy_runtime_support(runtime):
+    """Keep the disposable runtime complete, including real stdlib imports."""
+    for package in ('agent', 'scripts', 'shared'):
+        (runtime/package).mkdir(parents=True, exist_ok=True)
+        (runtime/package/'__init__.py').write_text('', encoding='utf-8')
+    for relative in ('scripts/agent_lifecycle.py', 'agent/service_watchdog.py',
+                     'shared/brand_migration.py'):
+        shutil.copyfile(ROOT/relative, runtime/relative)
+
+
 def write_agent_stub(runtime):
     """Write the exact disposable process exercised by acceptance and regressions."""
     (runtime/'agent/__main__.py').write_text('''import asyncio,json,os,time
@@ -137,17 +147,16 @@ def main():
         base = Path(folder)/"Agent 中文 é space"
         base.mkdir()
         runtime = base/'runtime'
-        (runtime/'agent').mkdir(parents=True)
-        (runtime/'scripts').mkdir()
-        (runtime/'scripts/__init__.py').write_text('')
-        shutil.copyfile(ROOT/'scripts/agent_lifecycle.py', runtime/'scripts/agent_lifecycle.py')
-        (runtime/'agent/__init__.py').write_text('')
-        shutil.copyfile(ROOT/'agent/service_watchdog.py', runtime/'agent/service_watchdog.py')
+        copy_runtime_support(runtime)
         (base/'task-name').write_text(name)
         write_agent_stub(runtime)
         run([sys.executable, '-m', 'venv', '--without-pip', runtime/'.venv'])
         python = runtime/'.venv/Scripts/python.exe'
         installer.write_windows_wrapper(runtime)
+        # Fail immediately with a captured import error instead of waiting for
+        # pythonw.exe, which has no console before the log wrapper is imported.
+        run([python, '-I', '-c', 'import sys; sys.path.insert(0, '+repr(str(runtime))+'); '
+             'import agent.service_watchdog; import scripts.agent_lifecycle'])
         definition = base/'service.xml'
         definition.write_bytes(installer.windows_task_xml(base, python, name, installer.windows_user_sid()))
         def progress():

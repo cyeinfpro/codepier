@@ -105,3 +105,32 @@ def test_malformed_process_survey_cannot_prove_an_empty_group(monkeypatch, outpu
     monkeypatch.setattr(groups.subprocess, 'run', lambda *a, **k: SimpleNamespace(stdout=output))
     with pytest.raises(ValueError):
         groups.live_group_members(4242)
+
+
+def test_darwin_no_matching_group_is_not_a_failed_observation(owned_child, monkeypatch):
+    _, reaps, _ = owned_child
+    monkeypatch.setattr(groups, 'sys', SimpleNamespace(platform='darwin'))
+    def absent(*args, **kwargs):
+        raise subprocess.CalledProcessError(1, args[0], output='', stderr='')
+    def no_group(pid, number):
+        raise ProcessLookupError()
+    monkeypatch.setattr(groups.subprocess, 'run', absent)
+    monkeypatch.setattr(groups.os, 'killpg', no_group)
+    assert groups.stop_owned_group(4242, grouped=True) == (True, 0)
+    assert reaps == [(4242, 0)]
+
+
+@pytest.mark.parametrize('platform,code,stdout,stderr', [
+    ('darwin', 1, '', 'permission denied'),
+    ('darwin', 2, '', ''),
+    ('darwin', 1, 'incomplete', ''),
+    ('darwin', 1, None, None),
+    ('freebsd', 1, '', ''),
+])
+def test_nonempty_or_unknown_ps_failure_never_proves_cleanup(
+        owned_child, monkeypatch, platform, code, stdout, stderr):
+    monkeypatch.setattr(groups, 'sys', SimpleNamespace(platform=platform))
+    def failed(*args, **kwargs):
+        raise subprocess.CalledProcessError(code, args[0], output=stdout, stderr=stderr)
+    monkeypatch.setattr(groups.subprocess, 'run', failed)
+    assert groups.stop_owned_group(4242, grouped=True, grace=0, kill_timeout=.1)[0] is False
