@@ -163,8 +163,26 @@ def main():
             with patch.object(installer, 'managed_service_name', return_value=name):
                 installer.verify_service_ownership(base)
             exported = installer.query_windows_task_xml(name)
-            assert installer.windows_task_has_recovery(exported, installer.windows_user_sid())
             result['installer_live_ownership_unicode'] = True
+            sid = installer.windows_user_sid()
+            if not installer.windows_task_has_recovery(exported, sid):
+                import xml.etree.ElementTree as ET
+                ns = {'t': 'http://schemas.microsoft.com/windows/2004/02/mit/task'}
+                actual, expected = ET.fromstring(exported), ET.fromstring(definition.read_bytes())
+                paths = ('Principals/Principal/LogonType', 'Principals/Principal/RunLevel',
+                         'Triggers/BootTrigger/Enabled', 'Triggers/TimeTrigger/Enabled',
+                         'Triggers/TimeTrigger/Repetition/Interval', 'Triggers/TimeTrigger/Repetition/Duration',
+                         'Triggers/TimeTrigger/EndBoundary', 'Settings/MultipleInstancesPolicy',
+                         'Settings/ExecutionTimeLimit', 'Settings/DisallowStartIfOnBatteries',
+                         'Settings/StopIfGoingOnBatteries', 'Settings/RunOnlyIfNetworkAvailable',
+                         'Settings/StartWhenAvailable')
+                def field(root, path):
+                    return root.findtext('/'.join('t:'+part for part in path.split('/')), namespaces=ns)
+                result['recovery_profile_comparison'] = {path: {'expected': field(expected, path),
+                    'actual': field(actual, path)} for path in paths}
+                result['principal_sid_matches'] = field(actual, 'Principals/Principal/UserId') == sid
+                result['principal_is_sid'] = str(field(actual, 'Principals/Principal/UserId')).startswith('S-1-')
+                raise AssertionError('Exported recovery profile differs; inspect bounded field comparison')
             result['unicode_task_recovery_verified'] = True
             run(['schtasks.exe', '/Run', '/TN', name])
             first = wait(progress)
