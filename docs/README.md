@@ -6,6 +6,10 @@
 
 - [完整入门](START-HERE.md)：部署 Hub、接入电脑、映射项目、连接客户端
 - [Agent 安装与升级](AGENT_INSTALL.md)
+- [连接 ChatGPT 与其他 MCP 客户端](CHATGPT.md)
+- [MCP 工具参考](CORE_TOOLS.md)
+- [CLI 会话](CLI_SESSIONS.md)：Pi、Codex 和 Claude Code
+- [浏览器集成](INTEGRATIONS-20260917.md)与[桌面控制](COMPUTER_USE.md)
 - [统一设置中心](SETTINGS_CENTER.md)：个人、实例、项目和节点的设置入口
 - [文件入站](FILE_IMPORT_INGRESS.md)：限制、权限、客户端兼容证据、升级顺序
 - [Hub 入站设置](hub-file-import-settings.md)：预览、确认、保存、继承与关闭
@@ -16,9 +20,10 @@
 
 - [安全指南](../SECURITY.md)
 - [身份与 OIDC](MULTIUSER_OIDC.md)
-- [访问配置](ACCESS_PROFILES.md)
+- [访问配置](ACCESS_PROFILES.md)与[动态角色](DYNAMIC_ROLES.md)
+- [外部 MCP 网关](MCP_GATEWAY.md)
 - [协作室](COLLABORATION_CHATROOM.md)
-- [面板更新](PANEL_UPDATE.md)
+- [面板更新与备份](PANEL_UPDATE.md)
 - [长任务与回执恢复](LONG_OPERATIONS.md)
 - [VPS 连接](VPS.md)
 

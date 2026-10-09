@@ -98,3 +98,19 @@ sudo python3 scripts/panel_updater.py recover --root "$PWD"
 不要在更新期间手动运行另一条部署命令或执行 Docker prune。更新器与安装脚本共享部署锁；网页同时只接受一个操作，幂等键不能用于不同请求。记录达到上限后会要求管理员归档，不会自动删除备份。归档前确认哪些镜像、数据卷、源码目录和任务仍被当前配置引用，尤其不能删除 `CODEPIER_HUB_SOURCE` 所指向的在用源码。
 
 本功能不等同于异地备份。重要服务仍应有独立、已验证的备份与恢复方案。正式用于生产之前，应在与生产相同的 Linux/Docker/systemd 环境完成实际镜像构建、健康切换、故障回退及重启恢复验收。
+
+## 备份 Hub 数据
+
+Hub CLI 可以一致性备份数据库及对应主密钥。在部署目录执行：
+
+```bash
+backup="codepier-$(date +%Y%m%d-%H%M%S).zip"
+docker compose exec -T hub python -m hub backup --output "/app/data/backups/$backup"
+umask 077
+mkdir -p backups
+chmod 700 backups
+docker compose cp "hub:/app/data/backups/$backup" "./backups/$backup"
+chmod 600 "./backups/$backup"
+```
+
+将备份放到另一处可信存储，并验证可恢复性。数据库与对应密钥必须一起保留；这个 ZIP 不包含全部附件、Agent 本机状态或原生 CLI 配置。完整迁移还需规划数据卷、部署配置和各节点的备份。面板更新保留的旧数据卷也不能替代独立备份。
