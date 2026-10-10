@@ -2,7 +2,9 @@
 import asyncio
 import hashlib
 import json
+import os
 import sqlite3
+import subprocess
 import sys
 import time
 import uuid
@@ -23,8 +25,26 @@ def burst_capacity_ready(limits):
     return limits["reason"] == "adaptive" and limits["project_pending_limit"] >= 129
 
 
-def settings(stack):
-    return stack.must(stack.client.get("/api/settings/scheduler", params={"device": stack.device}))
+def admission_probe_due(now, previous):
+    return now - previous >= 3
+
+
+def owned_cpu_percent(stack):
+    """Diagnostic-only percentages for this test's three processes; no argv."""
+    roles = {os.getpid(): "test", stack.hub.pid: "hub", stack.agent.pid: "agent"}
+    try:
+        output = subprocess.check_output(
+            ["ps", "-p", ",".join(map(str, roles)), "-o", "pid=,pcpu="],
+            text=True, timeout=1,
+        )
+        return {roles[int(pid)]: float(cpu) for pid, cpu in
+                (line.split() for line in output.splitlines()) if int(pid) in roles}
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def settings(stack, client=None):
+    return stack.must((client or stack.client).get("/api/settings/scheduler", params={"device": stack.device}))
 
 
 async def burst(stack, requests):
@@ -63,31 +83,39 @@ def test_real_128_waiting_burst_other_project_cancel_restart_and_exact_drain(tmp
         observer = ResourceSampler()
         observed_at = time.monotonic()
         last_observation = -float("inf")
+        probe_count = 0
 
         def healthy():
-            nonlocal last_observation
-            state = settings(stack)
-            limits = state["durable_admission"]
+            nonlocal last_observation, probe_count
             now = time.monotonic()
-            if now - last_observation >= 3:
-                sample = observer.sample()
-                last_observation = now
-                reported = state["reported"] or {}
-                print(json.dumps({"admission_prerequisite": {
-                    "elapsed_seconds": round(now - observed_at, 3),
-                    "api_state": state["state"], "limits": limits,
-                    "reported_reason": reported.get("reason"),
-                    "reported_lanes": reported.get("lanes"),
-                    "independent_os_observer": {
-                        "source": sample.source, "cpu_busy": sample.cpu_busy,
-                        "memory_available": sample.memory_available,
-                        "memory_total": sample.memory_total, "io_stall": sample.io_stall,
-                        "age_seconds": round(time.monotonic() - sample.measured_at, 3),
-                    },
-                }}, sort_keys=True), flush=True)
+            if not admission_probe_due(now, last_observation):
+                return None
+            last_observation = now
+            probe_count += 1
+            state = settings(stack, probe_client)
+            limits = state["durable_admission"]
+            sample = observer.sample()
+            reported = state["reported"] or {}
+            print(json.dumps({"admission_prerequisite": {
+                "elapsed_seconds": round(now - observed_at, 3), "probe_count": probe_count,
+                "api_state": state["state"], "limits": limits,
+                "reported_reason": reported.get("reason"),
+                "reported_lanes": reported.get("lanes"),
+                "owned_ps_cpu_percent": owned_cpu_percent(stack), "cpu_count": os.cpu_count(),
+                "independent_os_observer": {
+                    "source": sample.source, "cpu_busy": sample.cpu_busy,
+                    "memory_available": sample.memory_available,
+                    "memory_total": sample.memory_total, "io_stall": sample.io_stall,
+                    "age_seconds": round(time.monotonic() - sample.measured_at, 3),
+                },
+            }}, sort_keys=True), flush=True)
             return state if burst_capacity_ready(limits) else None
-        # Uses genuine OS telemetry crossing the authenticated WebSocket.
-        expanded = wait_for(healthy, timeout=100)
+        # Observe no faster than the real sampler, with one reused connection.
+        # Actual authenticated Agent heartbeats still determine health/capacity.
+        with httpx.Client(base_url=stack.url, cookies=stack.client.cookies,
+                timeout=35, trust_env=False,
+                limits=httpx.Limits(max_connections=1, max_keepalive_connections=1)) as probe_client:
+            expanded = wait_for(healthy, timeout=100)
         assert sum(lane["capacity"] for lane in expanded["reported"]["lanes"].values()) < expanded["durable_admission"]["node_pending_limit"]
         held = stack.call("exec", {"project": "ProjectAlpha", "task": "admission_hold",
                                   "idempotency_key": uuid.uuid4().hex})

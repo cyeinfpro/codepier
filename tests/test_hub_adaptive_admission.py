@@ -30,6 +30,36 @@ def test_real_burst_prerequisite_uses_required_peak_not_host_size(limit, reason,
     assert burst_capacity_ready({"project_pending_limit": limit, "reason": reason}) is expected
 
 
+def test_real_burst_probe_cadence_bounds_control_requests():
+    from tests.test_hub_adaptive_admission_stack import admission_probe_due
+
+    previous, probes = -float("inf"), []
+    for tick in range(1000):
+        now = tick / 10
+        if admission_probe_due(now, previous):
+            previous = now
+            probes.append(now)
+    assert probes == list(range(0, 100, 3))
+    assert len(probes) == 34
+
+
+def test_real_burst_cpu_diagnostics_only_returns_owned_numeric_roles(monkeypatch):
+    from types import SimpleNamespace
+    from tests import test_hub_adaptive_admission_stack as case
+
+    monkeypatch.setattr(case.os, "getpid", lambda: 101)
+    captured = []
+
+    def output(argv, **kwargs):
+        captured.append((argv, kwargs))
+        return "101 7.5\n102 20.0\n103 1.0\n999 99.0\n"
+
+    monkeypatch.setattr(case.subprocess, "check_output", output)
+    stack = SimpleNamespace(hub=SimpleNamespace(pid=102), agent=SimpleNamespace(pid=103))
+    assert case.owned_cpu_percent(stack) == {"test": 7.5, "hub": 20.0, "agent": 1.0}
+    assert captured == [(["ps", "-p", "101,102,103", "-o", "pid=,pcpu="], {"text": True, "timeout": 1})]
+
+
 def snapshot(capacity=12, reason="healthy"):
     return {"scope": "node", "reason": reason, "running": 0, "queued": 0,
             "lanes": {lane: {"running": 0, "queued": 0, "capacity": capacity}
