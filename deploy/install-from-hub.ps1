@@ -62,6 +62,18 @@ function Confirm-CodePierRemoval {
     throw 'Agent directory still exists; Windows cleanup did not complete. Inspect file locks before retrying.'
   }
 }
+function Get-CodePierSHA256 {
+  param([Parameter(Mandatory=$true)][string]$Path)
+  # PowerShell.Utility may be unavailable in noninteractive Windows PowerShell
+  # 5.1 installations; use the built-in .NET SHA256 implementation instead.
+  $Stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+  try {
+    $Hasher = [Security.Cryptography.SHA256]::Create()
+    try {
+      return [BitConverter]::ToString($Hasher.ComputeHash($Stream)).Replace('-', '').ToLowerInvariant()
+    } finally { $Hasher.Dispose() }
+  } finally { $Stream.Dispose() }
+}
 function Complete-CodePierArchive {
   param([string]$PlanPath, [string]$Source)
   $PlanItem = Get-Item -LiteralPath $PlanPath -Force -ErrorAction Stop
@@ -94,7 +106,7 @@ function Complete-CodePierArchive {
       } else {
         if ([string]$ExpectedHash -cnotmatch '^[a-f0-9]{64}$' -or $null -eq $Item -or $Item.PSIsContainer -or
             ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
-            (Get-FileHash -LiteralPath $File -Algorithm SHA256).Hash.ToLowerInvariant() -cne [string]$ExpectedHash) { throw 'Agent files changed after confirmation; archive refused.' }
+            (Get-CodePierSHA256 -Path $File) -cne [string]$ExpectedHash) { throw 'Agent files changed after confirmation; archive refused.' }
       }
     }
     # Directory.Move never merges into a target created concurrently, unlike Move-Item.
@@ -170,7 +182,7 @@ try {
       Write-Host 'Preparing private Python installer...'
       $UvScript = Join-Path $CodePierTemp 'uv.ps1'
       Invoke-WebRequest -UseBasicParsing -TimeoutSec 120 -Uri 'https://astral.sh/uv/0.10.8/install.ps1' -OutFile $UvScript
-      if ((Get-FileHash -LiteralPath $UvScript -Algorithm SHA256).Hash.ToLowerInvariant() -cne '800560daa61893c1f00bdfdd4484f2d2db005965bfd7fbeafa2fad3a47aa9b9c') { throw 'Python installer checksum mismatch' }
+      if ((Get-CodePierSHA256 -Path $UvScript) -cne '800560daa61893c1f00bdfdd4484f2d2db005965bfd7fbeafa2fad3a47aa9b9c') { throw 'Python installer checksum mismatch' }
       $env:UV_UNMANAGED_INSTALL = $CodePierTools
       & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $UvScript
       if ($LASTEXITCODE -ne 0) { throw 'Python installer download failed' }
@@ -284,7 +296,7 @@ if __name__ == "__main__":
   Set-Content -LiteralPath $DownloadHelper -Value $CodePierDownload -Encoding UTF8
   & $CodePierPython $DownloadHelper $Hub $Sha256 $Archive $DownloadTimeoutSec $DownloadAttempts
   if ($LASTEXITCODE -ne 0) { throw 'Panel Agent package download did not complete; see the download stage above.' }
-  if ((Get-Item -LiteralPath $Archive).Length -gt 8388608 -or (Get-FileHash -LiteralPath $Archive -Algorithm SHA256).Hash.ToLowerInvariant() -cne $Sha256) { throw 'Agent package checksum mismatch; generate a new command in the panel.' }
+  if ((Get-Item -LiteralPath $Archive).Length -gt 8388608 -or (Get-CodePierSHA256 -Path $Archive) -cne $Sha256) { throw 'Agent package checksum mismatch; generate a new command in the panel.' }
   Add-Type -AssemblyName System.IO.Compression.FileSystem
   $Zip = [IO.Compression.ZipFile]::OpenRead($Archive)
   try {

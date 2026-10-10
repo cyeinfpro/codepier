@@ -34,7 +34,10 @@ def test_install_arguments_are_strict_and_shell_quoted():
     posix_pinned = install_command('posix', 'https://hub.invalid', 'rdi_token', 'a' * 64, '/tmp', bootstrap)
     assert bootstrap in posix_pinned and 'sha256sum' in posix_pinned and 'shasum -a 256' in posix_pinned
     windows_pinned = install_command('windows', 'https://hub.invalid', 'rdi_token', 'a' * 64, r'C:\tmp', bootstrap)
-    assert bootstrap in windows_pinned and 'Get-FileHash' in windows_pinned
+    assert bootstrap in windows_pinned and '[Security.Cryptography.SHA256]::Create()' in windows_pinned
+    assert 'Get-FileHash' not in windows_pinned
+    windows_bootstrap = (Path(__file__).resolve().parents[1] / 'deploy/install-from-hub.ps1').read_text(encoding='utf-8')
+    assert 'Get-CodePierSHA256' in windows_bootstrap and 'Get-FileHash' not in windows_bootstrap
     expected_node = 'd' * 32
     posix_node = install_command('posix', 'https://hub.invalid', 'rdi_token', 'a' * 64, '/tmp',
                                  expected_device=expected_node)

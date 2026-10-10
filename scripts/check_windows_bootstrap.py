@@ -89,7 +89,7 @@ def probe_archive_handoff(directory, executable):
     import hashlib
     directory=Path(directory)
     source=(ROOT/'deploy/install-from-hub.ps1').read_text(encoding='utf-8')
-    block=source[source.index('function Complete-CodePierArchive {'):source.index("if ($Action -ne 'install' -and -not $Hub) {")]
+    block=source[source.index('function Get-CodePierSHA256 {'):source.index("if ($Action -ne 'install' -and -not $Hub) {")]
     script=directory/'archive-finalize.ps1'
     script.write_text("param([string]$PlanPath,[string]$Source)\n$ErrorActionPreference='Stop'\n"+block+
                       "Complete-CodePierArchive -PlanPath $PlanPath -Source $Source\n",encoding='utf-8')

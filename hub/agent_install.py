@@ -142,8 +142,14 @@ def install_command(platform, hub_url, enrollment_token, package_sha256, allow_r
         maintenance += ' -InstallDir '+powershell_quote(install_dir)
     bootstrap_check = ''
     if bootstrap_sha256:
-        bootstrap_check = (" if ((Get-FileHash -LiteralPath $codepierInstallScript -Algorithm SHA256).Hash.ToLowerInvariant() -cne "
-                           +powershell_quote(bootstrap_sha256)+") { throw '安装脚本校验失败，请在面板重新生成安装命令' }; ")
+        bootstrap_check = (
+            " $codepierBootstrapStream = [IO.File]::OpenRead($codepierInstallScript); "
+            "try { $codepierBootstrapHasher = [Security.Cryptography.SHA256]::Create(); "
+            "try { $codepierBootstrapDigest = [BitConverter]::ToString($codepierBootstrapHasher.ComputeHash($codepierBootstrapStream)).Replace('-', '').ToLowerInvariant() } "
+            "finally { $codepierBootstrapHasher.Dispose() } } "
+            "finally { $codepierBootstrapStream.Dispose() }; "
+            "if ($codepierBootstrapDigest -cne " +powershell_quote(bootstrap_sha256)
+            +") { throw '安装脚本校验失败，请在面板重新生成安装命令' }; ")
     return ('& { $ErrorActionPreference = \'Stop\'; '
             '$codepierInstallTemp = Join-Path ([IO.Path]::GetTempPath()) (\'codepier-\' + [guid]::NewGuid().ToString(\'N\')); '
             'New-Item -ItemType Directory -Path $codepierInstallTemp | Out-Null; '
