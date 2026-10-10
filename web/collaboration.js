@@ -357,6 +357,7 @@ window.CodePierCollaboration = (() => {
         mentions: [],
         delegationPolicy: '',
         delegationVersion: 0,
+        delegationAutomatic: false,
         delegationTargets: [],
         delegationCapabilities: [],
         acceptance: '完成请求，并报告实际检查、结果和限制',
@@ -1575,7 +1576,11 @@ window.CodePierCollaboration = (() => {
         throw new Error('委托范围已改变，请重新打开 @ 选择器核对；正文已保留。');
       const c = chat();
       c.mentions = [element.dataset.id];
-      delegation.selectPolicy(policy);
+      delegation.selectPolicy(
+        policy,
+        policy.version,
+        policy.automatic_delegation === true && !c.reply,
+      );
       patchDraftContext();
       patchDelegationComposer();
       closeDrawer();
@@ -1595,6 +1600,7 @@ window.CodePierCollaboration = (() => {
             : [...c.mentions, id];
       c.delegationPolicy = '';
       c.delegationVersion = 0;
+      c.delegationAutomatic = false;
       element.setAttribute('aria-pressed', String(c.mentions.includes(id)));
       patchDraftContext();
       patchDelegationComposer();
@@ -1609,7 +1615,9 @@ window.CodePierCollaboration = (() => {
         if (!(await selectPartition(source.project_id, source.environment_id))) return local;
       }
       chat().reply = action === 'reply' ? element.dataset.id : '';
+      if (chat().delegationAutomatic) delegation.selectPolicy(null);
       patchDraftContext();
+      patchDelegationComposer();
       document.querySelector('#cc-message-input')?.focus();
       return local;
     }
@@ -1977,13 +1985,17 @@ window.CodePierCollaboration = (() => {
         }
         const acceptance = String(c.acceptance).trim();
         if (!acceptance) throw new Error('请填写本次委托的验收要求。');
-        payload.delegation = {
-          policy_id: c.delegationPolicy,
-          policy_version: c.delegationVersion,
-          execution_targets: [...c.delegationTargets],
-          capabilities: [...c.delegationCapabilities],
-          acceptance,
-        };
+        if (c.delegationAutomatic) {
+          payload.dispatch_mode = 'automatic';
+          payload.automatic_policy_version = c.delegationVersion;
+        } else
+          payload.delegation = {
+            policy_id: c.delegationPolicy,
+            policy_version: c.delegationVersion,
+            execution_targets: [...c.delegationTargets],
+            capabilities: [...c.delegationCapabilities],
+            acceptance,
+          };
       }
       const identity = await commandIdentity({ operation: 'message', ...payload });
       if (
@@ -2017,9 +2029,10 @@ window.CodePierCollaboration = (() => {
       if (form.elements.request.value.trim() === payload.body_text) {
         c.draft = '';
         c.reply = '';
-        c.mentions = [];
-        c.delegationPolicy = '';
-        c.delegationVersion = 0;
+        if (!c.delegationAutomatic) {
+          c.mentions = [];
+          delegation.selectPolicy(null);
+        }
         form.elements.request.value = '';
         patchDraftContext();
         patchDelegationComposer();
@@ -2052,7 +2065,7 @@ window.CodePierCollaboration = (() => {
       return {
         local: true,
         message:
-          (payload.delegation
+          (payload.delegation || payload.dispatch_mode === 'automatic'
             ? '委托已保存并创建目标；请查看实际领取、进度与结果，排队不表示已执行。'
             : payload.mentions.length
               ? `消息已保存。${failed ? '部分提醒未送达，可在连接中核对；请勿重发正文。' : '已按所选位置处理提醒；接收不代表已读或回应。'}`
@@ -2314,10 +2327,13 @@ window.CodePierCollaboration = (() => {
     if (event.target.name === 'request') c.draft = event.target.value;
     if (event.target.name === 'delegation_acceptance') c.acceptance = event.target.value;
     if (event.target.name === 'delegation_policy' && event.type === 'change') {
-      const policy = state.delegationPolicies.find((item) => item.id === event.target.value);
+      const automatic = event.target.value.startsWith('auto:');
+      const policyId = automatic ? event.target.value.slice(5) : event.target.value;
+      const policy = state.delegationPolicies.find((item) => item.id === policyId);
       delegation.selectPolicy(
         policy,
         Number(event.target.selectedOptions[0]?.dataset.policyVersion) || 0,
+        automatic,
       );
       patchDelegationComposer();
       if (selectedDelegationValid() && !delegation.selectedScopeValid())

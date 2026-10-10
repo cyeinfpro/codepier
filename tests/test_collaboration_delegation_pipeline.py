@@ -140,7 +140,8 @@ def test_project_target_candidates_are_exact_complete_and_never_expand_old_polic
 
 
 @pytest.mark.integration
-def test_old_catalog_real_agent_read_finishes_with_one_original_topic_result(collaboration_stack):
+@pytest.mark.parametrize('automatic_dispatch', [False, True])
+def test_old_catalog_real_agent_read_finishes_with_one_original_topic_result(collaboration_stack, automatic_dispatch):
     stack = collaboration_stack
     scope = {'project': stack.project['id'], 'environment_id': 'production'}
     def mcp(request):
@@ -156,17 +157,25 @@ def test_old_catalog_real_agent_read_finishes_with_one_original_topic_result(col
     policy = stack.must(stack.client.post('/api/collaboration/delegation-policy', json={
         **scope, 'conversation_id': room['id'], 'slot_id': slot['id'], 'expected_version': 0,
         'purpose': 'Read the isolated README', 'capabilities': ['read'], 'execution_targets': ['project_agent'],
-        'idempotency_key': key()}))['policy']
+        'automatic_delegation': automatic_dispatch, 'idempotency_key': key()}))['policy']
     connected = json.loads(json.dumps(mcp(policy['consumer_contracts']['managed_execution']['legacy_read_request'])))
     # Restart only the fixture Hub; saved configuration must remain usable.
     stack.hub.terminate()
     stack.hub.wait(timeout=12)
     stack.start_hub()
     assert mcp(connected['legacy_inbox_request'])['checkpoint'] == connected['checkpoint']
-    source = stack.must(stack.client.post('/api/collaboration/message', json={
-        **scope, 'room_id': room['id'], 'conversation_id': room['id'], 'body_text': 'Read README and report here',
-        'mentions': [{'slot_id': slot['id']}], 'client_message_id': key(), 'idempotency_key': key(),
-        'delegation': {'policy_id': policy['id'], 'policy_version': policy['version'], 'acceptance': 'Actual content receipt'}}))
+    dispatch = {'dispatch_mode': 'automatic', 'automatic_policy_version': policy['version']} if automatic_dispatch else {
+        'delegation': {'policy_id': policy['id'], 'policy_version': policy['version'], 'acceptance': 'Actual content receipt'}}
+    source_args = {**scope, 'room_id': room['id'], 'conversation_id': room['id'], 'body_text': 'Read README and report here',
+        'mentions': [{'slot_id': slot['id']}], 'client_message_id': key(), 'idempotency_key': key(), **dispatch}
+    source = stack.must(stack.client.post('/api/collaboration/message', json=source_args))
+    repeat = stack.must(stack.client.post('/api/collaboration/message', json=source_args))
+    assert repeat['delegation_id'] == source['delegation_id']
+    assert source['message']['body']['delegation']['automatic'] is automatic_dispatch
+    discovered = mcp({'tool': 'collaboration_query', 'arguments': {
+        'action': 'delegations', **scope, 'conversation_id': room['id']}})
+    assert len(discovered['items']) == 1 and discovered['items'][0]['delegation_id'] == source['delegation_id']
+    assert mcp(discovered['items'][0]['read_request'])['delegation']['id'] == source['delegation_id']
     inbox = mcp(connected['legacy_inbox_request'])
     item = inbox['items'][0]
     assert item['category'] == 'claimable'

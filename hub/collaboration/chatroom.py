@@ -193,6 +193,11 @@ class ChatroomService:
 
     def create(self, raw, principal):
         args = validate(contracts.MessageCreate, raw)
+        # Omitted new fields must keep old ordinary-message replay fingerprints.
+        if args['dispatch_mode'] == 'discussion':
+            args.pop('dispatch_mode')
+        if not args['automatic_policy_version']:
+            args.pop('automatic_policy_version')
         if args['delegation'] is None:
             args.pop('delegation')  # Preserve pre-delegation ordinary-message replay fingerprints.
         if args.get('delegation'):
@@ -204,7 +209,7 @@ class ChatroomService:
             conversation = self.c.conversations.resolve(principal, room, args)
             args['conversation_id'] = conversation['id']
             self.writer(principal, room, conversation['id'])
-            if args.get('delegation'):
+            if args.get('delegation') or args.get('dispatch_mode') == 'automatic':
                 self.c.owner(principal)
             def save():
                 self.c.live_room(room)
@@ -228,6 +233,9 @@ class ChatroomService:
                     (author, room['space_id'], room['owner_user_id'], room['project_id'], self.c.clock() - 60))['n']
                 if count >= 60:
                     raise DevError('MESSAGE_RATE_LIMIT', '发言过于频繁，请稍后再试', 429)
+                # Resolve only after the saved-message check: retries always keep their original ID.
+                automatic = self.c.delegation.automatic_request(principal, room, conversation, args)
+                selected_delegation = args.get('delegation') or automatic
                 identifier = uuid.uuid4().hex
                 root = identifier
                 if args['reply_to_id']:
@@ -247,10 +255,11 @@ class ChatroomService:
                      args['client_message_id'], 'reply' if args['reply_to_id'] else 'text', canonical(body), 'saved', self.c.clock()))
                 message = self.c.object('collaboration_messages', room, identifier)
                 receipt = {'scheduled': False}
-                if args.get('delegation'):
-                    receipt = self.c.delegation.send(principal, room, message, args)
-                    body['delegation'] = {**receipt, 'policy_id': args['delegation']['policy_id'],
-                                          'policy_version': args['delegation']['policy_version']}
+                if selected_delegation:
+                    receipt = self.c.delegation.send(principal, room, message, {**args, 'delegation': selected_delegation})
+                    body['delegation'] = {**receipt, 'policy_id': selected_delegation['policy_id'],
+                                          'policy_version': selected_delegation['policy_version'],
+                                          'automatic': automatic is not None}
                     body['provenance_project_ids'] = [room['project_id']]
                     body['notifications'] = []
                 else:

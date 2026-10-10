@@ -46,10 +46,11 @@ window.CodePierCollaborationDelegation = {
           'VPS · ' + id.slice(4);
     const targetAvailable = (policy, id) =>
       policy?.execution_target_options?.find((item) => item.id === id)?.available !== false;
-    function selectPolicy(policy, version = policy?.version || 0) {
+    function selectPolicy(policy, version = policy?.version || 0, automatic = false) {
       const c = chat();
       c.delegationPolicy = policy?.id || '';
       c.delegationVersion = version;
+      c.delegationAutomatic = !!policy && automatic;
       c.delegationTargets = policyTargets(policy).length === 1 ? [...policyTargets(policy)] : [];
       c.delegationCapabilities = [...(policy?.capabilities || [])];
     }
@@ -66,6 +67,7 @@ window.CodePierCollaborationDelegation = {
       return !!(
         policyAvailable(policy) &&
         policy.version === c.delegationVersion &&
+        (!c.delegationAutomatic || (policy.automatic_delegation === true && !c.reply)) &&
         c.mentions.length === 1 &&
         c.mentions[0] === policy.slot_id
       );
@@ -171,10 +173,12 @@ window.CodePierCollaborationDelegation = {
         String(
           chat().delegationPolicy === policy.id && chat().delegationVersion === policy.version,
         ) +
-        '"><strong>交给 ' +
+        '"><strong>' +
+        (policy.automatic_delegation ? '自动交给 ' : '交给 ') +
         E(slot.label) +
         ' 处理</strong><small>按已确认范围：' +
         E(policy.purpose) +
+        (policy.automatic_delegation ? ' · 后续新任务保留此助手，自动生成委托编号' : '') +
         '</small></button>'
       );
     }
@@ -193,12 +197,24 @@ window.CodePierCollaborationDelegation = {
             '" data-policy-version="' +
             E(policy.version) +
             '"' +
-            (c.delegationPolicy === policy.id ? ' selected' : '') +
+            (c.delegationPolicy === policy.id && !c.delegationAutomatic ? ' selected' : '') +
             (policyAvailable(policy) ? '' : ' disabled') +
             '>交给 ' +
             E(slotMember(policy.slot_id)?.label || '助手') +
             ' 处理' +
             (policyAvailable(policy) ? '' : '（授权不可用）') +
+            '</option>'
+          : '') +
+        (policy?.automatic_delegation
+          ? '<option value="auto:' +
+            E(policy.id) +
+            '" data-policy-version="' +
+            E(policy.version) +
+            '"' +
+            (c.delegationPolicy === policy.id && c.delegationAutomatic ? ' selected' : '') +
+            (policyAvailable(policy) && !c.reply ? '' : ' disabled') +
+            '>自动委托 · ' +
+            E(slotMember(policy.slot_id)?.label || '助手') +
             '</option>'
           : '') +
         (c.delegationPolicy && policy?.id !== c.delegationPolicy
@@ -219,10 +235,13 @@ window.CodePierCollaborationDelegation = {
         valid = selectedDelegationValid();
       return (
         '<section class="cc-delegation-context" aria-label="本次委托范围"><div class="cc-row"><strong>本次发送将创建委托</strong>' +
-        (valid ? button('delegation-scope', '修改本次范围') : '') +
+        (valid && !c.delegationAutomatic ? button('delegation-scope', '修改本次范围') : '') +
         '</div><p class="cc-delegation-purpose">' +
         E(valid ? policy.purpose : '委托范围已改变、到期或不可用。请重新核对并选择，正文已保留。') +
         '</p>' +
+        (c.delegationAutomatic
+          ? '<p class="cc-hint">自动委托已选择：每条新任务使用已确认范围，自动生成编号并供助手核验；发送后保留助手。回复与普通讨论不派发。</p>'
+          : '') +
         (valid
           ? '<dl class="cc-send-scope"><div><dt>交给谁</dt><dd>' +
             E(slotMember(policy.slot_id)?.label || '助手') +
@@ -357,7 +376,11 @@ window.CodePierCollaborationDelegation = {
             '</details></section>'
           : '') +
         (available
-          ? '<p class="cc-hint">范围内明确选择“交给助手处理”并发送即可。普通 @ 讨论不会创建委托。</p>'
+          ? '<p class="cc-hint">' +
+            (policy.automatic_delegation
+              ? '自动委托已开启：选择自动委托后，每条新任务自动生成编号；普通讨论与回复不派发。'
+              : '范围内明确选择“交给助手处理”并发送即可。普通 @ 讨论不会创建委托。') +
+            '</p>'
           : '') +
         (policy && state.snapshot?.can_manage
           ? '<details class="cc-connection-settings"><summary>修改允许范围与管理</summary>' +
@@ -441,6 +464,7 @@ window.CodePierCollaborationDelegation = {
           : '') +
         '<div class="cc-actions">' +
         button('delegation-result', '查看委托进度与结果', { id: d.goal_id }) +
+        button('delegation-id', '复制委托编号', { id: d.delegation_id }) +
         (status === 'blocked' && d.retry_blocked_eligible === true && state.snapshot?.can_manage
           ? button('delegation-retry-blocked', '重试尚未开始的步骤', { id: d.delegation_id })
           : '') +
@@ -548,7 +572,19 @@ window.CodePierCollaborationDelegation = {
         '</fieldset>' +
         (targetError ? '<p class="cc-hint">' + E(targetError) + '</p>' : '') +
         '<p class="cc-hint">项目文件读写作用于项目 Agent。选择 VPS 时只允许在这个已保存目标运行命令，不包含远端文件工具。</p>' +
-        '<details><summary>更多设置：有效期、次数与步骤预算</summary><div class="cc-two">' +
+        '<fieldset><legend>自动委托</legend><label><input name="automatic_delegation" type="checkbox"' +
+        (policy?.automatic_delegation ? ' checked' : '') +
+        '> 开启自动委托与编号传递</label><p class="cc-hint">仅一个已确认目标。选择自动委托后，新任务自动创建真实委托，助手仍须核验和领取；普通讨论与回复不派发。</p>' +
+        field(
+          '自动任务验收要求',
+          '<textarea name="automatic_acceptance" rows="2" maxlength="2000" required>' +
+            E(
+              policy?.automatic_acceptance ||
+                '按本条任务要求处理，并回复实际结果、证据和未完成项。',
+            ) +
+            '</textarea>',
+        ) +
+        '</fieldset><details><summary>更多设置：有效期、次数与步骤预算</summary><div class="cc-two">' +
         field(
           '授权有效期（分钟）',
           '<input name="duration_minutes" type="number" min="1" max="10080" value="10080" required>',
@@ -631,6 +667,28 @@ window.CodePierCollaborationDelegation = {
     }
     async function act(action, element) {
       const local = { local: true, message: '' };
+      if (action === 'delegation-id') {
+        const identifier = element.dataset.id;
+        if (!identifier) throw new Error('此消息尚无委托编号。');
+        try {
+          if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(identifier);
+            return { local: true, message: '已复制真实委托编号；助手应核验对应任务。' };
+          }
+        } catch {}
+        showDrawer(
+          '委托编号',
+          field(
+            '委托编号',
+            '<textarea class="cc-delegation-id" rows="2" readonly>' + E(identifier) + '</textarea>',
+          ),
+          element,
+        );
+        const area = document.querySelector('.cc-delegation-id');
+        area?.focus();
+        area?.select();
+        return { local: true, message: '已选中委托编号，请使用系统复制。' };
+      }
       if (action === 'delegation-scope') {
         openScope(element);
         return local;
@@ -793,6 +851,10 @@ window.CodePierCollaborationDelegation = {
         const targets = formData.getAll('execution_targets');
         if (!capabilities.includes('read')) throw new Error('委托须保留项目读取能力。');
         if (!targets.length) throw new Error('请明确选择至少一个执行目标。');
+        const automatic = form.elements.automatic_delegation.checked;
+        if (automatic && targets.length !== 1) throw new Error('自动委托须明确选择一个执行目标。');
+        if (automatic && !data.automatic_acceptance.trim())
+          throw new Error('请填写自动任务验收要求。');
         const acknowledged = form.elements.acknowledge_unsandboxed_exec.checked;
         if (capabilities.includes('execute') && !acknowledged)
           throw new Error('请明确确认命令执行账号权限与非沙箱边界。');
@@ -807,6 +869,8 @@ window.CodePierCollaborationDelegation = {
           expected_version: Number(form.dataset.version),
           purpose: data.purpose.trim(),
           capabilities,
+          automatic_delegation: automatic,
+          automatic_acceptance: data.automatic_acceptance.trim(),
           execution_targets: targets,
           duration_seconds: Number(data.duration_minutes) * 60,
           goal_duration_seconds: Number(data.goal_minutes) * 60,

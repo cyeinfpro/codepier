@@ -45,7 +45,7 @@ class Read(Scope):
     kind: Literal['overview', 'jobs', 'messages', 'goals', 'incidents', 'agents',
                   'subscriptions', 'join_slots', 'job', 'result', 'evidence', 'plan',
                   'rooms', 'timeline', 'thread', 'search', 'members', 'changes', 'message_status',
-                  'coordination_goals', 'coordination_goal', 'coordination_options', 'delegation_policies'] = 'overview'
+                  'coordination_goals', 'coordination_goal', 'coordination_options', 'delegation_policies', 'delegations'] = 'overview'
     id: str = Field(default='', max_length=128)
     cursor: str = Field(default='', max_length=2048)
     limit: int = Field(default=40, ge=1, le=100)
@@ -109,6 +109,18 @@ class MessageCreate(Scope):
     reply_to_id: str = Field(default='', max_length=128)
     mentions: list[SlotMention] = Field(default_factory=list, max_length=8)
     delegation: DelegationSend | None = None
+    dispatch_mode: Literal['discussion', 'automatic'] = 'discussion'
+    automatic_policy_version: int = Field(default=0, ge=0)
+
+    @model_validator(mode='after')
+    def explicit_dispatch(self):
+        if self.dispatch_mode == 'automatic' and self.automatic_policy_version < 1:
+            raise ValueError('Automatic dispatch requires the reviewed policy version')
+        if self.dispatch_mode == 'automatic' and (self.delegation is not None or self.reply_to_id or len(self.mentions) != 1):
+            raise ValueError('Automatic dispatch requires one recipient and a new task, not a reply or manual delegation')
+        if self.automatic_policy_version and self.dispatch_mode != 'automatic':
+            raise ValueError('An automatic policy version requires automatic dispatch')
+        return self
 
     @field_validator('body_text')
     @classmethod
@@ -694,6 +706,8 @@ TOOL_DESCRIPTIONS.update({
 
 
 class DelegationPolicySet(Scope):
+    automatic_delegation: bool = False
+    automatic_acceptance: str = Field(default='按本条任务要求处理，并回复实际结果、证据和未完成项。', min_length=1, max_length=2000)
     conversation_id: Identifier
     slot_id: Identifier
     expected_version: int = Field(ge=0)
@@ -717,6 +731,8 @@ class DelegationPolicySet(Scope):
         if 'execute' in self.capabilities and not self.acknowledge_unsandboxed_exec:
             raise ValueError('Explicit acknowledgement of execution-account permissions is required')
         targets = self.execution_targets or [self.execution_target]
+        if self.automatic_delegation and (len(targets) != 1 or not self.automatic_acceptance.strip()):
+            raise ValueError('Automatic delegation requires one confirmed execution target and nonblank acceptance')
         if len(set(targets)) != len(targets):
             raise ValueError('Execution targets must be unique')
         if any(target.startswith('vps:') for target in targets) and 'execute' not in self.capabilities:

@@ -73,3 +73,94 @@ def test_policy_choices_use_exact_project_snapshot_without_vps_api_or_auto_expan
         assert not errors and not vps_reads
     finally:
         context.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+@pytest.mark.parametrize('width', [390, 1440])
+def test_automatic_delegation_panel_preserves_recipient_and_real_id_without_dispatching_replies(
+        collaboration_stack, chat_browser_pool, engine, width, tmp_path):
+    stack = collaboration_stack
+    context = chat_browser_pool(engine).new_context(viewport={'width': width, 'height': 900})
+    page = context.new_page()
+    errors, sent = [], []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.on('request', lambda request: sent.append(request.post_data_json)
+            if request.method == 'POST' and request.url.endswith('/api/collaboration/message') else None)
+    try:
+        login(page, stack)
+        join_slot(stack)
+        refresh(page)
+        area = page.locator('#cc-message-input')
+        page.locator('[data-cc-action="mentions"]').click()
+        page.locator('[data-cc-action="pick-mention"]').click()
+        page.keyboard.press('Escape')
+        page.locator('#cc-send-mode [data-cc-action="delegation-setup"]').click()
+        form = page.locator('#cc-delegation-policy')
+        expect(form.locator('[name="automatic_delegation"]')).not_to_be_checked()
+        form.locator('[name="purpose"]').fill('Read fixture files and report evidence')
+        form.locator('[name="execution_targets"][value="project_agent"]').check()
+        form.locator('[name="automatic_delegation"]').check()
+        form.locator('[name="automatic_acceptance"]').fill('Report actual content and limits')
+        form.locator('[name="confirm"]').check()
+        form.locator('button[type="submit"]').click()
+        expect(page.locator('#cc-drawer')).to_contain_text('自动委托已开启')
+        policy = stack.must(stack.client.get('/api/collaboration', params={
+            **scope(stack), 'kind': 'delegation_policies'}))['items'][0]
+        assert policy['automatic_delegation'] is True
+        page.keyboard.press('Escape')
+        # Saving a rule does not change a discussion draft into an execution request.
+        expect(page.locator('[name="delegation_policy"]')).to_have_value('')
+        page.locator('[data-cc-action="mentions"]').click()
+        page.locator('[data-cc-action="pick-delegation"]').click()
+        mode = page.locator('[name="delegation_policy"]')
+        expect(mode).to_have_value('auto:' + policy['id'])
+        expect(page.locator('.cc-delegation-context')).to_contain_text('发送后保留助手')
+        expect(page.locator('[data-cc-action="delegation-scope"]')).to_have_count(0)
+        for text in ['first automatic fixture task', 'second automatic fixture task']:
+            area.fill(text)
+            page.locator('#cc-command button[type="submit"]').click()
+            expect(area).to_have_value('')
+            expect(mode).to_have_value('auto:' + policy['id'])
+            expect(page.locator('.cc-mention-chip')).to_contain_text('协作 dot')
+        rows = stack.must(stack.client.get('/api/collaboration', params=scope(stack)))['messages']
+        tasks = [row for row in rows if row['body'].get('delegation')]
+        assert len(tasks) == 2
+        ids = {row['body']['delegation']['delegation_id'] for row in tasks}
+        assert len(ids) == 2
+        assert all(row['body']['delegation']['automatic'] for row in tasks)
+        assert sent[0]['dispatch_mode'] == 'automatic' and 'delegation' not in sent[0]
+        retry = stack.must(stack.client.post('/api/collaboration/message', json=sent[0]))
+        assert retry['delegation_id'] in ids
+        assert len(stack.must(stack.client.get('/api/collaboration', params=scope(stack)))['messages']) == 2
+        # Clipboard unavailable: expose the real saved ID in a selectable field.
+        page.evaluate("Object.defineProperty(navigator, 'clipboard', {value: undefined, configurable: true})")
+        first = page.locator('.cc-message').filter(has_text='first automatic fixture task')
+        first.locator('[data-cc-action="delegation-id"]').click()
+        assert page.locator('.cc-delegation-id').input_value() in ids
+        page.keyboard.press('Escape')
+        first.locator('[data-cc-action="reply"]').click()
+        expect(mode).to_have_value('')
+        area.fill('ordinary reply stays a discussion')
+        page.locator('#cc-command button[type="submit"]').click()
+        expect(area).to_have_value('')
+        assert sent[-1]['reply_to_id'] and 'dispatch_mode' not in sent[-1]
+        rows = stack.must(stack.client.get('/api/collaboration', params=scope(stack)))['messages']
+        assert len(rows) == 3 and len([row for row in rows if row['body'].get('delegation')]) == 2
+        # A changed rule cannot silently apply to an already selected task.
+        page.locator('[data-cc-action="mentions"]').click()
+        page.locator('[data-cc-action="pick-delegation"]').click()
+        area.fill('retain after policy pause')
+        stack.must(stack.client.post('/api/collaboration/delegation-policy-control', json={
+            **scope(stack), 'policy_id': policy['id'], 'expected_version': policy['version'],
+            'action': 'pause', 'idempotency_key': key()}))
+        refresh(page)
+        expect(page.locator('.cc-delegation-context')).to_contain_text('已改变、到期或不可用')
+        page.locator('#cc-command button[type="submit"]').click()
+        expect(page.locator('#cc-feedback')).to_contain_text('正文已保留')
+        expect(area).to_have_value('retain after policy pause')
+        assert len(stack.must(stack.client.get('/api/collaboration', params=scope(stack)))['messages']) == 3
+        assert not errors
+        assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+        page.screenshot(path=str(tmp_path / f'automatic-{engine}-{width}.png'), full_page=True)
+    finally:
+        context.close()

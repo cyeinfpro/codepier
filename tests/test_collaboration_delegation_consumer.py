@@ -380,7 +380,7 @@ def test_every_public_query_action_is_read_only_in_real_business_tables(collab):
                    'observations': [{'claim': 'Fixture', 'evidence_refs': [evidence_id]}]}}, collab[2])
     queries = {action: {} for action in ('overview', 'rooms', 'jobs', 'messages', 'goals',
         'incidents', 'agents', 'subscriptions', 'join_slots', 'plan', 'timeline', 'members',
-        'changes', 'coordination_goals', 'coordination_options', 'delegation_policies')}
+        'changes', 'coordination_goals', 'coordination_options', 'delegation_policies', 'delegations')}
     queries.update({
         'job': {'id': job['id']}, 'result': {'id': result['result_id']},
         'thread': {'id': message['id']}, 'search': {'query': 'fixture'},

@@ -43,6 +43,7 @@ _RECORD_FIELDS = {
     'coordination_goal': ('conversation_id', 'id'),
     'coordination_options': ('conversation_id',),
     'delegation_policies': ('conversation_id', 'room_id', 'id', 'query', 'after', 'cursor', 'limit'),
+    'delegations': ('conversation_id', 'room_id', 'cursor', 'limit'),
     'job_evidence': ('conversation_id', 'room_id', 'id', 'job_id', 'attempt', 'fencing_token'),
     'result_evidence': ('conversation_id', 'room_id', 'id', 'result_id'),
 }

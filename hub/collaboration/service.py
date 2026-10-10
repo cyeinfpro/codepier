@@ -799,6 +799,8 @@ class CollaborationService:
                 if args['query'].startswith('delegation-consumer-v1:'):
                     return self.delegation.consumer.legacy_read(args, principal, room)
                 return self.delegation.listing(args, principal, room)
+            if kind == 'delegations':
+                return self.delegation.requests(args, principal, room)
             if kind in {'coordination_goals', 'coordination_goal', 'coordination_options'}:
                 return self.coordination.listing(args, principal, room)
             self.chatroom.same_room(room, args)

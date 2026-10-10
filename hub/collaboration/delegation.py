@@ -10,7 +10,8 @@ import uuid
 from dataclasses import asdict
 
 from hub.principal import Principal, refresh_principal
-from hub.collaboration.common import DELEGATION_EVENT, canonical, digest, redact, validate
+from hub.collaboration.common import DELEGATION_EVENT, canonical, digest, redact, validate, read_cursor, sign_cursor
+from shared.public_collaboration import request as public_request
 from shared import collaboration_contracts as contracts
 from shared.util import DevError
 
@@ -190,6 +191,8 @@ class DelegationService:
             'usage': {'delegations': policy['uses'], 'max_delegations': spec['max_delegations']},
             'subscription_request': {'name': DELEGATION_EVENT, 'arguments': filters},
             'subscription_required': True, 'chat_identity_verified': False,
+            'automatic_delegation': spec.get('automatic_delegation', False),
+            'automatic_acceptance': spec.get('automatic_acceptance', ''),
             'authority': self.authority_descriptor(),
             **self.consumer.presentation(policy, room, reason)}
 
@@ -216,6 +219,8 @@ class DelegationService:
             spec = {key: args[key] for key in ('purpose', 'capabilities', 'execution_target', 'acknowledge_unsandboxed_exec',
                     'duration_seconds', 'goal_duration_seconds', 'max_delegations', 'budget')}
             spec['purpose'] = redact(spec['purpose'].strip())
+            spec['automatic_delegation'] = args['automatic_delegation']
+            spec['automatic_acceptance'] = redact(args['automatic_acceptance'].strip())
             spec.update(project_snapshot=self.c.coordination.project_snapshot(project), execution_targets=targets,
                         execution_target=targets[0], target_snapshot=snapshots[targets[0]], target_snapshots=snapshots)
             snapshot = asdict(principal)
@@ -239,7 +244,13 @@ class DelegationService:
                      min(now + args['duration_seconds'], slot['expires_at']), now, now))
                 self.c.audit(room, principal.actor, 'delegation.policy_enabled', identifier, {'version': version, 'grant_id': slot['grant_id']})
                 return {'policy_id': identifier}
-            receipt = self.c.mutation(principal, room, 'delegation_policy_set:' + conversation['id'], args, save)
+            mutation_args = dict(args)
+            if (not args['automatic_delegation'] and args['automatic_acceptance'] ==
+                    contracts.DelegationPolicySet.model_fields['automatic_acceptance'].default):
+                # Old policy-save retries retain their original request fingerprint.
+                mutation_args.pop('automatic_delegation')
+                mutation_args.pop('automatic_acceptance')
+            receipt = self.c.mutation(principal, room, 'delegation_policy_set:' + conversation['id'], mutation_args, save)
             return {'policy': self.view(self.policy(room, receipt['policy_id']), principal, room)}
 
     def control(self, raw, principal):
@@ -301,6 +312,70 @@ class DelegationService:
                 'execution_target_candidates': self.target_candidates(principal, room) if not principal.grant_id else [],
                 'target_candidates_project_id': room['project_id'], 'target_discovery_changes_policy': False}
 
+    def automatic_request(self, principal, room, conversation, args):
+        """Resolve a user-selected automatic task against a previously confirmed rule."""
+        if args.get('dispatch_mode') != 'automatic':
+            return None
+        self.c.owner(principal)
+        if args.get('reply_to_id') or len(args['mentions']) != 1:
+            raise DevError('AUTOMATIC_TASK_REQUIRED', '自动委托只接收单个助手的新任务，回复与普通讨论不会自动执行', 422)
+        policy = self.store.one("""SELECT * FROM delegation_policies WHERE room_id=? AND conversation_id=? AND slot_id=?""",
+            (room['id'], conversation['id'], args['mentions'][0]['slot_id']))
+        if not policy or json.loads(policy['spec']).get('automatic_delegation') is not True:
+            raise DevError('AUTOMATIC_DELEGATION_NOT_CONFIGURED', '请房主先为此助手确认并开启自动委托；正文已保留', 409)
+        self.authorize_policy(principal, room, policy)
+        if args.get('automatic_policy_version') and args['automatic_policy_version'] != policy['version']:
+            raise DevError('DELEGATION_POLICY_CHANGED', '自动委托范围已改变，请核对当前范围；正文已保留', 409)
+        spec = json.loads(policy['spec'])
+        if len(spec['execution_targets']) != 1 or not spec.get('automatic_acceptance', '').strip():
+            raise DevError('AUTOMATIC_DELEGATION_SCOPE_REQUIRED', '自动委托需要一个已确认目标及验收要求', 409)
+        return {'policy_id': policy['id'], 'policy_version': policy['version'],
+                'execution_targets': list(spec['execution_targets']), 'capabilities': list(spec['capabilities']),
+                'acceptance': spec['automatic_acceptance']}
+
+    def read_request(self, room, identifier):
+        return public_request('collaboration_delegation_read', {'project': room['project_id'],
+            'environment_id': room['environment_id'], 'delegation_id': identifier})
+
+    def requests(self, args, principal, room):
+        """Discover only visible IDs; never enroll, reset a baseline, claim or execute."""
+        conversation = self.c.conversations.resolve(principal, room, args)
+        binding = digest(['delegation-discovery-v1', room['id'], conversation['id'], principal.grant_id or principal.user_id])
+        where = 'd.room_id=? AND d.conversation_id=?'
+        params = [room['id'], conversation['id']]
+        if principal.grant_id:
+            where += ' AND p.grant_id=?'
+            params.append(principal.grant_id)
+        else:
+            self.c.owner(principal)
+        if args['cursor']:
+            position = read_cursor(self.c.secret, binding, args['cursor'])
+            if (not isinstance(position, list) or len(position) != 2 or isinstance(position[0], bool)
+                    or not isinstance(position[0], (int, float)) or not isinstance(position[1], str)):
+                raise DevError('INVALID_CURSOR', '委托列表游标无效', 400)
+            where += ' AND (d.created<? OR (d.created=? AND d.id<?))'
+            params.extend([position[0], position[0], position[1]])
+        rows = self.store.all('SELECT d.* FROM delegation_requests d JOIN delegation_policies p ON p.id=d.policy_id '
+            + 'WHERE ' + where + ' ORDER BY d.created DESC,d.id DESC LIMIT ?', (*params, args['limit'] + 1))
+        selected, items = rows[:args['limit']], []
+        for row in selected:
+            goal = self.c.coordination.object(room, row['goal_id'])
+            try:
+                self.c.coordination.authorize(principal, room, goal)
+                self.authorize_policy(principal, room, self.policy(room, row['policy_id']), active=False)
+            except DevError as exc:
+                if exc.status not in (403, 404):
+                    raise
+                continue
+            request = self.read_request(room, row['id'])
+            items.append({'delegation_id': row['id'], 'message_id': row['message_id'], 'goal_id': row['goal_id'],
+                'policy_id': row['policy_id'], 'policy_version': row['policy_version'], 'created': row['created'],
+                'read_request': request, 'legacy_read_request': {'tool': 'collaboration_delegation_read',
+                    'arguments': {k: v for k, v in request['arguments'].items() if k != 'action'}}})
+        cursor = sign_cursor(self.c.secret, binding, [selected[-1]['created'], selected[-1]['id']]) if len(rows) > args['limit'] else None
+        return {'items': items, 'next_cursor': cursor, 'discovery_only': True, 'grants_authority': False,
+                'instructions': '使用每项 read_request 核验原委托；领取仍使用已保存的消费者基线、明确执行模式和原租约。列表不授予执行权限。'}
+
     def send(self, principal, room, message, args):
         """Called only in the original message transaction, never for historical replay."""
         self.c.owner(principal)
@@ -359,7 +434,8 @@ class DelegationService:
         self.store.execute('UPDATE collaboration_messages SET goal_id=? WHERE id=?', (goal['id'], message['id']))
         goal_row = self.c.coordination.object(room, goal['id'])
         self.emit_work(room, goal_row, self.c.coordination.work(goal_row, work['id']))
-        return {'scheduled': True, 'delegation_id': identifier, 'goal_id': goal['id'], 'work_item_id': work['id'],
+        return {'scheduled': True, 'delegation_id': identifier, 'read_request': self.read_request(room, identifier),
+                'goal_id': goal['id'], 'work_item_id': work['id'],
                 'execution_targets': targets, 'capabilities': capabilities, 'request_scope': request_scope}
 
     def retry_decision(self, goal, item):
