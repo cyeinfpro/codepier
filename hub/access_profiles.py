@@ -18,7 +18,8 @@ from fastapi import APIRouter, Request
 from pydantic import Field
 
 from hub.access import AccessModel, project_selection
-from shared.util import DevError
+from shared.util import DevError, VERSION
+from shared.access_profile_contracts import AUTHORIZATION_CONTEXT_VERSION, AUTHORIZATION_DOMAINS
 from shared.role_contracts import ROLE_SCOPE
 from hub import iam
 
@@ -158,11 +159,18 @@ def access_context(store, principal):
     if grant.get('authorization_mode') == 'role':
         from hub.roles import role_context
         extra = role_context(store, grant)
-    return {**extra, 'space_id': principal.space_id, 'profile': identity, 'managed': profile is not None, 'scopes': sorted(scopes),
+    return {**extra, 'space_id': principal.space_id, 'profile': identity,
+            'authorization_context_version': AUTHORIZATION_CONTEXT_VERSION, 'server_version': VERSION,
+            'access_profile_managed': profile is not None, 'managed': profile is not None,
+            'managed_field_meaning': 'access_profile_binding', 'authorization_domains': dict(AUTHORIZATION_DOMAINS),
+            'scopes': sorted(scopes),
             'projects': [row for row in rows if '*' in projects or row['id'] in projects],
             'all_projects': '*' in projects,
             'isolation': 'credential', 'chat_project_is_security_boundary': False,
-            'note': '实际权限还受项目和 Agent 本机限制；操作与租约继续按原 grant 隔离，不按聊天名称授权。'}
+            'note': 'access_profile_managed（兼容字段 managed）只表示访问 Profile 绑定，不表示委托执行模式。'
+                    '普通交互查询按当前凭据、项目及资源权限校验；处理受管任务仍须使用原委托与有效租约。'
+                    '宿主审批独立，本接口不判定或解除宿主拒绝；不能从任一字段推断任务已获准。'
+                    '实际权限还受项目和 Agent 本机限制；操作和租约按原凭据隔离，不按聊天名称授权。'}
 
 
 def public_profile(row):

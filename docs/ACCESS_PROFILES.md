@@ -94,6 +94,29 @@ OAuth 同意 `/api/oauth/requests/{id}/decide` 和 PAT 创建 `/api/grants` 可�
 
 官方接口参考：<https://developers.openai.com/plugins/build/auth>。
 
+## 授权上下文 v2：Profile 与任务委托是不同概念
+
+`get_access_context()` 的 `access_profile_managed` 只表示当前凭据是否绑定 Access Profile。旧字段 `managed` 保留为兼容别名，并在输出 schema 中标记 deprecated；两个字段返回相同布尔值。`managed_field_meaning` 固定为 `access_profile_binding`。不要把任一布尔值解释成宿主消费者模式、是否拥有任务委托，或免除审批的许可。
+
+响应还返回 `authorization_context_version: 2`、`server_version` 和 `authorization_domains`。前者用于识别此语义修复是否实际出现在响应中；`server_version` 只是响应代码的版本字符串，不证明客户端缓存的工具目录或 Git 提交已同步。
+
+四个授权概念分别描述为：
+
+- `access_profile`：凭据的访问 Profile 上限。
+- `interactive_queries`：普通交互查询使用当前凭据与资源权限。
+- `managed_tasks`：受管任务使用真实房主批准和当前工作租约。
+- `host_approval`：宿主审批独立，CodePier 的上下文接口不作判定。
+
+普通交互 `project_query`／`task_query` 的输入没有委托 ID 前置参数，仍检查凭据、项目和原操作可见性。已经交给受管任务的工作继续走原委托与租约链路；不能把它改用普通工具来规避原拒绝，也不能依据 `managed=false` 跳过任何校验。固定授权、动态角色和访问 Profile 状态均不等于任务执行模式。
+
+### 关联真实拒绝，而不是猜原因
+
+新旧协议的工具调用结果在 `_meta["com.codepier/requestId"]` 返回与 `X-CodePier-Request-ID` 响应头一致的服务端生成编号；它只用于查找同一请求的诊断记录，不授予访问权限，也不是 `delegation_id`。旧版 `ping` 的空响应保持不变。
+
+诊断保留固定白名单中的委托、批准和租约错误码，例如 `DELEGATION_NOT_FOUND`、`DELEGATION_GRANT_REQUIRED`、`WORK_LEASE_EXPIRED`；未知或任意文本仍归为 `OTHER`，不记录原始请求、令牌或正文。
+
+遇到拒绝时保留原工具、参数、错误码、请求号和原操作号。宿主在请求到达 CodePier 前拦截时，CodePier 无法为该请求生成回执。没有请求号本身也不能证明请求未到达：响应丢失、旧客户端或元数据未展示同样可能导致看不到编号。不要以另一个入口或另一个项目成功代替原失败请求的验收。
+
 ## 验证
 
 ```bash

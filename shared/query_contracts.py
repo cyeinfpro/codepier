@@ -33,8 +33,8 @@ def register(tool, tools, schemas):
     from shared.core_output_schemas import build_core_output_schemas
     query_schemas = build_core_output_schemas(schemas, include_queries=True)
     specs = {
-        'project_query': (ProjectQuery, 'Read authorized projects, project context without a baseline, directory trees, skills, tool help, configured tasks, readiness, dashboards and saved workflows. Prefer this for read-only project discovery. No writes, commands or implicit project/task selection.', False),
-        'task_query': (TaskQuery, 'Read or wait for existing authorized operation receipts, logs and traces; list diagnostics/activity. Never starts, cancels, or retries execution.', True),
+        'project_query': (ProjectQuery, 'Read authorized projects, project context without a baseline, directory trees, skills, tool help, configured tasks, readiness, dashboards and saved workflows. Prefer this for read-only project discovery. No writes, commands or implicit project/task selection. Standalone queries use current credential and resource permissions; managed task steps retain their original approval and lease. Host approval is independent.', False),
+        'task_query': (TaskQuery, 'Read or wait for existing authorized operation receipts, logs and traces; list diagnostics/activity. Never starts, cancels, or retries execution. Receipt visibility follows the original credential and resource checks; it neither creates delegation authority nor changes the host consumer mode.', True),
     }
     for name, (model, description, local) in specs.items():
         tools[name] = tool(model, 'read', description, False, local)

@@ -243,7 +243,8 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                 else:
                     result=complete(result)
             correlation=request_id()
-            if modern and correlation:
+            # Both protocol eras expose the server-generated ID; it correlates evidence, not authority.
+            if correlation and (modern or method == 'tools/call'):
                 result={**result,'_meta':{**result.get('_meta',{}),'com.codepier/requestId':correlation}}
             return JSONResponse({'jsonrpc':'2.0','id':identifier,'result':result},
                 headers={'Cache-Control':'no-store','Access-Control-Allow-Origin':origin or '*','Vary':'Authorization, MCP-Protocol-Version'})
