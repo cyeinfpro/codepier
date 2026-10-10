@@ -81,11 +81,23 @@ function Complete-CodePierArchive {
   $Plan = Get-Content -LiteralPath $PlanPath -Encoding UTF8 -Raw | ConvertFrom-Json
   $SourcePath = [IO.Path]::GetFullPath($Source).TrimEnd([IO.Path]::DirectorySeparatorChar)
   if ($Plan.schema -ne 1 -or [string]$Plan.lock_token -cnotmatch '^[a-f0-9]{32}$' -or -not $Plan.backup) { throw 'Invalid archive handoff schema.' }
-  $Target = [IO.Path]::GetFullPath([string]$Plan.backup)
-  $Prefix = '^' + [regex]::Escape((Split-Path -Path $SourcePath -Leaf) + '.recovery-') + '[0-9]{8}-[0-9]{6}-[a-f0-9]{8}$'
-  if (-not [string]::Equals($SourcePath, [string]$Plan.source, [StringComparison]::OrdinalIgnoreCase) -or
-      -not [string]::Equals((Split-Path -Path $SourcePath -Parent), (Split-Path -Path $Target -Parent), [StringComparison]::OrdinalIgnoreCase) -or
-      (Split-Path -Path $Target -Leaf) -cnotmatch $Prefix) { throw 'Archive handoff path verification failed.' }
+  $PlanSource = [IO.Path]::GetFullPath([string]$Plan.source).TrimEnd([IO.Path]::DirectorySeparatorChar)
+  $Target = [IO.Path]::GetFullPath([string]$Plan.backup).TrimEnd([IO.Path]::DirectorySeparatorChar)
+  # Use pure .NET path operations instead of Split-Path -Path: in Windows
+  # PowerShell 5.1 its provider may resolve non-existent archive destinations
+  # as wildcard paths and produce a different/missing leaf.
+  $SourceParent = [IO.Path]::GetDirectoryName($SourcePath)
+  $TargetParent = [IO.Path]::GetDirectoryName($Target)
+  $SourceLeaf = [IO.Path]::GetFileName($SourcePath)
+  $TargetLeaf = [IO.Path]::GetFileName($Target)
+  $Prefix = '^' + [regex]::Escape($SourceLeaf + '.recovery-') + '[0-9]{8}-[0-9]{6}-[a-f0-9]{8}$'
+  if (-not [string]::Equals($SourcePath, $PlanSource, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Archive handoff source verification failed.'
+  }
+  if (-not [string]::Equals($SourceParent, $TargetParent, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Archive handoff destination parent verification failed.'
+  }
+  if ($TargetLeaf -cnotmatch $Prefix) { throw 'Archive handoff backup name verification failed.' }
   $OwnedRoot = $SourcePath
   $LockVerified = $false
   try {
