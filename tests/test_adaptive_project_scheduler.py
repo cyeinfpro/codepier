@@ -177,9 +177,12 @@ def test_shrinking_limit_drains_active_work_without_cancelling_it():
     asyncio.run(run())
 
 
-def test_project_override_is_independent_but_does_not_bypass_node_limit():
+@pytest.mark.parametrize("cpu_count", [1, 2, 3, 8])
+def test_project_override_is_independent_but_does_not_bypass_node_limit(monkeypatch, cpu_count):
+    monkeypatch.setattr("shared.scheduler_config.os.cpu_count", lambda: cpu_count)
+
     async def run():
-        scheduler = ProjectScheduler({"initial": 8, "project_limits": {"A": 1, "B": 6}})
+        scheduler = ProjectScheduler({"initial": 8, "maximum": 8, "project_limits": {"A": 1, "B": 6}})
         async with scheduler.slot("a1", "A"):
             with pytest.raises(TimeoutError):
                 async with asyncio.timeout(.01):
@@ -191,6 +194,10 @@ def test_project_override_is_independent_but_does_not_bypass_node_limit():
                 assert scheduler.snapshot()["running"] == 7
                 async with scheduler.slot("c1", "C"):
                     assert scheduler.snapshot()["running"] == 8
+                    with pytest.raises(TimeoutError):
+                        async with asyncio.timeout(.01):
+                            async with scheduler.slot("d1", "D"):
+                                pytest.fail("node cap")
     asyncio.run(run())
 
 
