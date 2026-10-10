@@ -40,7 +40,11 @@ def login(page, stack):
     page.goto(stack.url + '/#projects')
     page.fill('#username', 'admin')
     page.fill('#password', stack.password)
-    page.click('#login-form button')
+    # Wait for the actual authentication response before asserting its destination.
+    # This preserves both checks without a fixed sleep or optional assertion.
+    with page.expect_response(lambda response: response.request.method == 'POST' and response.url.endswith('/api/login'), timeout=15000) as signed_in:
+        page.click('#login-form button')
+    assert signed_in.value.status == 200
     expect(page.locator('#page h1')).to_have_text('项目映射')
     page.locator(f'[data-action="project-collaboration"][data-id="{stack.project["id"]}"]').click()
     page.locator('[data-cc-action="create-room"]').click()

@@ -1,0 +1,490 @@
+/* Passive dot relay. Scope all styles to conversation UI and existing theme tokens. */
+.cc-chat-shell.cc-relay-focus {
+  grid-template-columns: 220px minmax(0, 1fr);
+  max-width: 1440px;
+}
+.cc-relay-focus .cc-context-rail,
+.cc-relay-focus .cc-tabs {
+  display: none;
+}
+.cc-relay-focus .cc-room-body {
+  min-height: 0;
+}
+.cc-relay-focus .cc-room-header {
+  padding: 20px 28px 8px;
+  border-bottom: 0;
+}
+.cc-relay-focus .cc-room-header h2 {
+  font-size: 20px;
+  letter-spacing: -0.03em;
+}
+.cc-relay-focus .cc-room-header p {
+  display: none;
+}
+.cc-relay-focus .cc-member-strip {
+  border: 0;
+  padding: 0 28px 12px;
+  font-size: 12px;
+}
+.cc-relay-focus .cc-project-strip {
+  padding: 0 28px 8px;
+}
+.cc-relay-focus[data-relay-multi='false'] .cc-project-strip {
+  display: none;
+}
+.cc-relay-focus .cc-rail-note {
+  margin-top: auto;
+  opacity: 0.6;
+}
+.cc-relay-focus #cc-feedback:not(.is-error) {
+  display: none;
+}
+.cc-relay-focus .cc-main {
+  border-top: 1px solid var(--ui-line);
+}
+.cc-relay-focus .cc-conversation {
+  max-width: 100%;
+}
+.cc-relay-focus .cc-feed {
+  padding: 24px max(24px, calc((100% - 860px) / 2));
+  overflow-anchor: none;
+  overscroll-behavior: contain;
+}
+.cc-relay-focus .cc-compose-wrap {
+  padding: 12px max(24px, calc((100% - 860px) / 2)) 14px;
+  border-top: 0;
+  background: var(--ui-panel);
+}
+.cc-relay-focus .cc-composer {
+  border: 1px solid var(--ui-line);
+  border-radius: 20px;
+  padding: 14px 16px 10px;
+  box-shadow: 0 4px 24px color-mix(in srgb, var(--ui-text) 5%, transparent);
+}
+.cc-relay-focus .cc-composer:focus-within {
+  border-color: color-mix(in srgb, var(--ui-purple) 55%, var(--ui-line));
+}
+.cc-relay-focus #cc-message-input {
+  padding: 8px 2px;
+  min-height: 52px;
+  max-height: 180px;
+  font-size: 15px;
+  line-height: 1.65;
+  resize: none;
+}
+.cc-relay-focus .cc-compose-controls {
+  align-items: center;
+  gap: 8px;
+}
+.cc-relay-focus .cc-compose-controls > small,
+.cc-relay-focus .cc-compose-help > span:first-child,
+.cc-relay-focus #cc-delegation-context {
+  display: none;
+}
+.cc-relay-focus .cc-compose-help {
+  justify-content: flex-end;
+  font-size: 10px;
+  opacity: 0.65;
+}
+.cc-relay-focus .cc-dot-send-mode {
+  font-size: 11px;
+  color: var(--ui-muted);
+}
+.cc-relay-focus .cc-dot-send-mode button {
+  border: 0;
+  padding: 5px 8px;
+  background: transparent;
+}
+.cc-relay-focus .cc-compose-controls > button {
+  min-height: 36px;
+}
+.cc-relay-focus .cc-compose-controls > button[type='submit'] {
+  margin-left: auto;
+  border-radius: 12px;
+  min-width: 70px;
+}
+.cc-relay-topic {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 6px;
+  font-size: 11px;
+  color: var(--ui-muted);
+}
+.cc-relay-topic button {
+  padding: 3px 8px;
+  font-size: 11px;
+  border: 0;
+  min-height: 28px;
+  background: transparent;
+}
+.cc-relay-network {
+  padding: 8px 16px;
+  font-size: 12px;
+  background: var(--ui-side);
+  border-bottom: 1px solid var(--ui-line);
+}
+.cc-relay-network[hidden] {
+  display: none;
+}
+.cc-relay-network.is-error {
+  color: var(--ui-text);
+}
+.cc-relay-turn {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 0 0 24px;
+  padding: 0;
+  border: 0;
+}
+.cc-relay-turn .cc-avatar {
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  border-radius: 10px;
+  font-size: 12px;
+}
+.cc-relay-turn .cc-message-content {
+  max-width: calc(100% - 40px);
+  min-width: 0;
+  flex: 1;
+}
+.cc-relay-turn .cc-message-meta {
+  gap: 9px;
+  align-items: center;
+  min-height: 24px;
+  margin-bottom: 8px;
+}
+.cc-relay-turn .cc-message-meta strong {
+  font-size: 12px;
+}
+.cc-relay-turn .cc-message-meta time,
+.cc-relay-turn .cc-message-meta small {
+  color: var(--ui-muted);
+  font-size: 10px;
+}
+.cc-relay-turn.is-owner {
+  flex-direction: row-reverse;
+  margin-left: 10%;
+}
+.cc-relay-turn.is-owner .cc-message-meta {
+  justify-content: flex-end;
+}
+.cc-relay-turn.is-owner .cc-rich-text {
+  background: var(--ui-side);
+  border-radius: 16px 4px 16px 16px;
+  padding: 10px 15px;
+}
+.cc-relay-turn.is-owner .cc-relay-delivery,
+.cc-relay-turn.is-owner .cc-message-actions {
+  justify-content: flex-end;
+}
+.cc-relay-turn .cc-prose {
+  font-size: 15px;
+  line-height: 1.75;
+  white-space: normal;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.cc-relay-turn .cc-prose p,
+.cc-relay-turn .cc-prose blockquote {
+  white-space: pre-wrap;
+}
+.cc-relay-turn .cc-prose > :first-child {
+  margin-top: 0;
+}
+.cc-relay-turn .cc-prose > :last-child {
+  margin-bottom: 0;
+}
+.cc-relay-turn .cc-prose p {
+  margin: 0 0 12px;
+}
+.cc-relay-turn .cc-prose h2,
+.cc-relay-turn .cc-prose h3,
+.cc-relay-turn .cc-prose h4 {
+  font-size: 1.1em;
+  line-height: 1.5;
+  margin: 18px 0 8px;
+}
+.cc-relay-turn .cc-prose ul,
+.cc-relay-turn .cc-prose ol {
+  padding-left: 1.5em;
+  margin: 10px 0;
+}
+.cc-relay-turn .cc-prose li {
+  margin: 4px 0;
+}
+.cc-relay-turn .cc-prose blockquote {
+  border-left: 3px solid var(--ui-line);
+  padding: 3px 12px;
+  margin: 12px 0;
+  color: var(--ui-muted);
+}
+.cc-relay-turn .cc-prose code {
+  font-size: 0.86em;
+  background: var(--ui-side);
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+.cc-relay-turn .chat-code {
+  border: 1px solid var(--ui-line);
+  border-radius: 12px;
+  margin: 14px 0;
+  overflow: hidden;
+}
+.cc-relay-turn .chat-code-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 7px 12px;
+  font: 11px system-ui;
+  background: var(--ui-side);
+}
+.cc-relay-turn .chat-code-head button {
+  background: transparent;
+  color: var(--ui-text);
+  padding: 5px 8px;
+  border: 0;
+  cursor: pointer;
+}
+.cc-relay-turn .chat-code pre {
+  margin: 0;
+  padding: 14px;
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: pre;
+  line-height: 1.65;
+}
+.cc-relay-turn .chat-code code {
+  background: none;
+  padding: 0;
+  border: 0;
+}
+.cc-relay-turn .chat-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 12px 0;
+  border: 1px solid var(--ui-line);
+  border-radius: 10px;
+}
+.cc-relay-turn table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+}
+.cc-relay-turn th,
+.cc-relay-turn td {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--ui-line);
+  text-align: left;
+  min-width: 80px;
+}
+.cc-relay-turn th {
+  background: var(--ui-side);
+}
+.cc-relay-turn .cc-relay-delivery {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-height: 4px;
+  margin-top: 7px;
+}
+.cc-relay-turn .cc-dot-receipt {
+  font-size: 10px;
+  color: var(--ui-muted);
+}
+.cc-relay-turn .cc-dot-receipt button {
+  font-size: 10px;
+  min-height: 26px;
+  padding: 3px 8px;
+  margin-left: 6px;
+}
+.cc-relay-turn .cc-message-actions {
+  display: flex;
+  gap: 3px;
+  margin-top: 6px;
+}
+.cc-relay-turn .cc-message-actions button {
+  font-size: 10px;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ui-muted);
+}
+.cc-relay-turn .cc-message-actions button:hover {
+  background: var(--ui-side);
+  color: var(--ui-text);
+}
+.cc-relay-quote {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  line-height: 1.6;
+  border: 0;
+  border-left: 2px solid var(--ui-line);
+  background: none;
+  color: var(--ui-muted);
+  padding: 3px 10px;
+  margin: 0 0 9px;
+  text-align: left;
+  cursor: pointer;
+}
+.cc-relay-quote > span {
+  font-weight: 600;
+  margin-right: 8px;
+}
+.cc-reply-evidence {
+  margin: 9px 0;
+}
+.cc-reply-evidence > summary {
+  font-size: 11px;
+  color: var(--ui-muted);
+  cursor: pointer;
+  padding: 6px 0;
+}
+.cc-reply-evidence .cc-linked-card {
+  margin-top: 8px;
+}
+.cc-relay-turn.is-receipt .cc-prose {
+  font-size: 12px;
+  color: var(--ui-muted);
+}
+.cc-relay-turn.is-receipt {
+  margin-bottom: 12px;
+}
+.cc-relay-pending {
+  margin: 0 0 22px auto;
+  max-width: 80%;
+  padding: 10px 15px;
+  background: var(--ui-side);
+  border: 1px dashed var(--ui-line);
+  border-radius: 16px;
+}
+.cc-relay-pending p {
+  margin: 0 0 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.7;
+}
+.cc-relay-pending > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  font-size: 11px;
+  color: var(--ui-muted);
+}
+.cc-relay-pending button {
+  font-size: 11px;
+  padding: 4px 8px;
+}
+.cc-relay-focus .cc-chat-empty {
+  min-height: 220px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.cc-relay-focus .cc-chat-empty p {
+  max-width: 320px;
+  margin-inline: auto;
+  line-height: 1.8;
+}
+@media (min-width: 1000px) {
+  .cc-relay-turn:not(:hover):not(:focus-within) .cc-message-actions {
+    opacity: 0.35;
+  }
+  .cc-relay-turn .cc-message-actions {
+    transition: opacity 0.15s;
+  }
+}
+@media (max-width: 1000px) {
+  .cc-chat-shell.cc-relay-focus {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .cc-relay-focus .cc-room-rail {
+    display: none;
+  }
+  .cc-relay-focus.is-room-list-open .cc-room-rail {
+    display: flex;
+  }
+}
+@media (max-width: 640px) {
+  .cc-relay-focus .cc-room-header {
+    padding: 12px 14px 5px;
+  }
+  .cc-relay-focus .cc-room-header h2 {
+    font-size: 17px;
+  }
+  .cc-relay-focus .cc-member-strip {
+    padding: 0 14px 8px;
+    gap: 6px;
+  }
+  .cc-relay-focus .cc-project-strip {
+    padding: 0 14px 6px;
+  }
+  .cc-relay-focus .cc-feed {
+    padding: 18px 12px;
+  }
+  .cc-relay-focus .cc-compose-wrap {
+    padding: 8px 10px max(8px, env(safe-area-inset-bottom));
+  }
+  .cc-relay-focus .cc-composer {
+    padding: 9px 12px;
+    border-radius: 17px;
+  }
+  .cc-relay-focus #cc-message-input {
+    font-size: 16px;
+  }
+  .cc-relay-focus .cc-compose-help {
+    display: none;
+  }
+  .cc-relay-turn {
+    gap: 8px;
+    margin-bottom: 20px;
+  }
+  .cc-relay-turn .cc-message-content {
+    max-width: calc(100% - 32px);
+  }
+  .cc-relay-turn .cc-avatar {
+    width: 24px;
+    height: 24px;
+    min-width: 24px;
+    border-radius: 8px;
+  }
+  .cc-relay-turn.is-owner {
+    margin-left: 4%;
+  }
+  .cc-relay-turn .cc-prose {
+    font-size: 15px;
+  }
+  .cc-relay-turn .cc-message-actions button {
+    min-height: 32px;
+    padding: 5px 9px;
+  }
+  .cc-relay-turn .chat-code pre {
+    font-size: 12px;
+  }
+  .cc-relay-focus .cc-dot-send-mode {
+    max-width: calc(100vw - 174px);
+  }
+  .cc-relay-focus .cc-dot-send-mode > button {
+    padding: 4px 5px;
+    font-size: 10px;
+  }
+  .cc-relay-pending {
+    max-width: 90%;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cc-relay-turn .cc-message-actions {
+    transition: none;
+  }
+}

@@ -38,6 +38,13 @@ def make_router(auth, runtime):
             return {**result, 'components': service.health}
         return await store.run(inspect)
 
+    @router.get('/relay-sync')
+    async def relay_sync(request: Request, project: str, environment_id: str = 'production',
+                         conversation_id: str = '', after: str = '', tracked: str = Query(default='', max_length=3100)):
+        return await store.run(lambda: service.dot_relay.sync({
+            'project': project, 'environment_id': environment_id,
+            'conversation_id': conversation_id, 'after': after}, auth.panel(request), tracked))
+
     @router.get('/delegation-connection')
     async def delegation_connection(request: Request, project: str, policy_id: str, policy_version: int,
                                     environment_id: str = 'production', mode: str = 'notification_only'):

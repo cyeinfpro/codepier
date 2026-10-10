@@ -1,5 +1,5 @@
 {
-  "version": "1.25.0",
+  "version": "1.26.0",
   "algorithm": "sha256",
   "assets": {
     "access-profiles.css": {
@@ -67,24 +67,32 @@
       "bytes": 93445
     },
     "collaboration-delegation.js": {
-      "sha256": "719ce4458f97f0cfc41b9a2f0c6b16e1b00564966bf0deb7a53fad25c2b18317",
-      "bytes": 43712
+      "sha256": "25af6019bbf46f768a71171960c56173fdd4c95e0576e669b981cb7664558d90",
+      "bytes": 44837
     },
     "collaboration-dots.js": {
-      "sha256": "5da0d79edfd2ce43e56dd08fb982463467b0a8cb53ffae861fa690649718e327",
-      "bytes": 15480
+      "sha256": "5134bda9a3d38355cc72ba70bcaee72980bba32a6a4056713d02f6aca621051b",
+      "bytes": 17295
     },
     "collaboration-goals.js": {
       "sha256": "d5572bb47e15fb3cb7483ee8de30ba1ff23875fb99b83446ad256d24e29c1c55",
       "bytes": 37439
+    },
+    "collaboration-relay.css": {
+      "sha256": "0e3b88c0405267fafcf7e3cf01fe78dbfff1c8874a7541dc0c66bdf6a0025c9f",
+      "bytes": 10385
+    },
+    "collaboration-relay.js": {
+      "sha256": "672fc015ddbabfd86963517153469036ae8cf0a5ed61aa50236251cb4da6ea3d",
+      "bytes": 23702
     },
     "collaboration.css": {
       "sha256": "470851ed65d50172df21ecfa440f0da304b293a3dd51c05e3e81bcfa2586b9d4",
       "bytes": 33179
     },
     "collaboration.js": {
-      "sha256": "f9320ee17f59dfd7fbc11196f37097547d423a9819b98e179d65aee4088d92e8",
-      "bytes": 130127
+      "sha256": "90019cd10f77e07f02c74d5b8641a6bc10c0061058ec1bebb48e37fc3e4de9f1",
+      "bytes": 133292
     },
     "computer.css": {
       "sha256": "3bfd6993ecee11cf6c23d78cc7b4f9acd6759ffaccc5e241ff06e156da7dfcac",
@@ -219,5 +227,5 @@
       "bytes": 25968
     }
   },
-  "template_sha256": "b5019efd17199ae4347d2cf1c83dbfb284b69a04fd4e4e1ccd296264f38c059d"
+  "template_sha256": "1a8ed66d102abc547d8ca4f34cecc4c66ee97ba88b699202eb8d1467ee5fbee7"
 }

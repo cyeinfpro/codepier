@@ -50,6 +50,7 @@ class EventService:
         self.sender = sender or network.webhook
         self._network_limit = asyncio.Semaphore(2)
         self._scan_after = ''
+        self._relay_recover_after = 0
         from hub.operation_events import OperationEvents
         self.operations = OperationEvents(self)
 
@@ -472,6 +473,9 @@ class EventService:
             await self.store.run(self.finish, item, None, 'network_error')
 
     async def tick(self):
+        if self.c.clock() >= self._relay_recover_after:
+            self._relay_recover_after = self.c.clock() + 5
+            await self.store.run(self.c.dot_relay.recover)
         items = await self.store.run(self.reserve)
         await asyncio.gather(*(self.deliver(item) for item in items))
 

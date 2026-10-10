@@ -310,7 +310,8 @@ class DelegationService:
         return {'items': items, 'next_cursor': None,
                 'delegation_recovery': self.consumer.recovery(args, principal, room, items),
                 'execution_target_candidates': self.target_candidates(principal, room) if not principal.grant_id else [],
-                'target_candidates_project_id': room['project_id'], 'target_discovery_changes_policy': False}
+                'target_candidates_project_id': room['project_id'], 'target_discovery_changes_policy': False,
+                'dot_setup_defaults': self.c.dots.setup_defaults(principal, room) if not principal.grant_id else None}
 
     def automatic_request(self, principal, room, conversation, args):
         """Resolve a user-selected automatic task against a previously confirmed rule."""
@@ -594,6 +595,7 @@ class DelegationService:
         if not link['approval_id']:
             return True  # The atomic send is still binding its initial approval.
         policy = self.policy(room, link['policy_id'])
+        self.c.dot_chat.wake_work(room, policy, link, item)
         self.c.emit(room, DELEGATION_EVENT, item['id'], item['version'],
             {'conversation_id': link['conversation_id'], 'policy_id': policy['id'], 'policy_version': link['policy_version'],
              'delegation_id': link['id'], 'message_id': link['message_id'], 'message_version': link['message_version'],

@@ -70,7 +70,7 @@ def send(stack, joined, text):
 
 
 def complete_real_task(stack, joined, delegation_id, number):
-    page = call(stack, joined['inbox_request'])
+    page = call(stack, joined.get('work_inbox_request') or joined['inbox_request'])
     item = next(row for row in page['items'] if row['delegation_id'] == delegation_id)
     assert item['category'] == 'claimable'
     trusted = call(stack, item['read_request'])
@@ -152,8 +152,9 @@ def test_panel_add_dot_type_mention_continue_thread_execute_and_report(
         expect(page.locator('#cc-delegation-policy')).to_have_count(0)
         label = '项目 dot'
         form.locator('[name="label"]').fill(label)
-        expect(form.locator('[name="confirm_tasks"]')).not_to_be_checked()
-        form.locator('[name="confirm_tasks"]').check()
+        expect(form.locator('[name="confirm_tasks"]')).to_have_count(0)
+        expect(form.locator('.cc-dot-consent')).to_contain_text('点击添加，即允许')
+        expect(form.locator('[name="access"]')).not_to_be_visible()
         form.locator('button[type="submit"]').click()
         card = page.locator('#cc-drawer [data-dot-card]')
         expect(card).to_be_visible()
@@ -175,7 +176,7 @@ def test_panel_add_dot_type_mention_continue_thread_execute_and_report(
         page.locator('#cc-drawer [data-cc-action="close-drawer"]').click()
         refresh(page)
         page.locator('.cc-dot-card [data-cc-action="dot-select"]').click()
-        expect(page.locator('#cc-send-mode')).to_contain_text('交给 @项目 dot')
+        expect(page.locator('#cc-send-mode')).to_contain_text('发给 @项目 dot')
         page.locator('[data-cc-action="dot-clear"]').click()
         area = page.locator('#cc-message-input')
         expect(area).to_be_enabled()
@@ -184,15 +185,18 @@ def test_panel_add_dot_type_mention_continue_thread_execute_and_report(
         area.press('Enter')
         expect(page.locator('#cc-dot-suggestions')).not_to_be_visible()
         expect(page.locator('.cc-mention-chip')).to_contain_text('@项目 dot')
-        expect(page.locator('#cc-send-mode')).to_contain_text('交给 @项目 dot')
+        expect(page.locator('#cc-send-mode')).to_contain_text('发给 @项目 dot')
         assert not saved  # Enter selected a dot; it did not submit an accidental task.
         area.fill('请创建文件并核对实际内容。')
         page.locator('#cc-command button[type="submit"]').click()
         expect(area).to_have_value('')
+        expect(page.locator('#cc-relay-outbox [data-pending-id]')).to_have_count(0, timeout=15000)
         expect(page.locator('.cc-mention-chip')).to_contain_text('@项目 dot')
-        assert len(saved) == 1 and saved[0]['dispatch_mode'] == 'automatic'
+        assert len(saved) == 1 and not saved[0].get('dispatch_mode') and not saved[0].get('delegation')
         first = next(row for row in overview(stack)['messages'] if row.get('client_message_id') == saved[0]['client_message_id'])
-        complete_real_task(stack, joined, first['body']['delegation']['delegation_id'], 1)
+        assert 'delegation' not in first['body']
+        task = call(stack, next(item for item in call(stack, joined['inbox_request'])['items'] if item['message_id'] == first['id'])['task_request'])
+        complete_real_task(stack, joined, task['delegation_id'], 1)
         refresh(page)
         expect(page.locator('.cc-message-list')).to_contain_text('第 1 项已完成，文件创建、读取和命令回执一致。')
         expect(page.locator('.cc-message-list')).to_contain_text('正在执行第 1 项文件检查。')
@@ -200,14 +204,16 @@ def test_panel_add_dot_type_mention_continue_thread_execute_and_report(
         # Reply in the original topic is an explicit follow-up task for CPD dots.
         page.locator(f'[data-cc-action="reply"][data-id="{first["id"]}"]').click()
         expect(page.locator('.cc-reply-preview')).to_be_visible()
-        expect(page.locator('#cc-send-mode')).to_contain_text('交给 @项目 dot')
+        expect(page.locator('#cc-send-mode')).to_contain_text('发给 @项目 dot')
         area.fill('继续，在同一话题创建第二个文件。')
         page.locator('#cc-command button[type="submit"]').click()
         expect(area).to_have_value('')
+        expect(page.locator('#cc-relay-outbox [data-pending-id]')).to_have_count(0, timeout=15000)
         assert len(saved) == 2 and saved[1]['reply_to_id'] == first['id']
-        assert saved[1]['delegation']['policy_id'] == joined['slot']['policy_id']
+        assert not saved[1].get('delegation') and not saved[1].get('dispatch_mode')
         followup = next(row for row in overview(stack)['messages'] if row.get('client_message_id') == saved[1]['client_message_id'])
-        complete_real_task(stack, joined, followup['body']['delegation']['delegation_id'], 2)
+        task = call(stack, next(item for item in call(stack, joined['inbox_request'])['items'] if item['message_id'] == followup['id'])['task_request'])
+        complete_real_task(stack, joined, task['delegation_id'], 2)
         refresh(page)
         expect(page.locator('.cc-message-list')).to_contain_text('第 2 项已完成，文件创建、读取和命令回执一致。')
         assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
@@ -217,6 +223,7 @@ def test_panel_add_dot_type_mention_continue_thread_execute_and_report(
         area.fill('这是一条普通讨论，不要执行。')
         page.locator('#cc-command button[type="submit"]').click()
         expect(area).to_have_value('')
+        expect(page.locator('#cc-relay-outbox [data-pending-id]')).to_have_count(0, timeout=15000)
         assert len(saved) == 3 and not saved[2].get('delegation') and not saved[2].get('dispatch_mode')
         assert not errors, errors
     finally:

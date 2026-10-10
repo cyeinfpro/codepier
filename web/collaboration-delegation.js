@@ -188,6 +188,18 @@ window.CodePierCollaborationDelegation = {
       if (!state.snapshot?.capabilities?.direct_delegation) return '';
       const c = chat(),
         policy = c.mentions.length === 1 ? policyFor(c.mentions[0]) : null;
+      const duplex =
+        c.mentions.length === 1 &&
+        mentionSlots().find((slot) => slot.id === c.mentions[0] && slot.duplex);
+      if (duplex)
+        return (
+          '<span class="cc-dot-send-mode">发给 @' +
+          E(duplex.label) +
+          button('dot-clear', '取消接收对象') +
+          '</span>'
+        );
+      if (state.snapshot?.capabilities?.duplex_dots && !c.mentions.length && !c.delegationPolicy)
+        return '';
       if (
         c.delegationPolicy &&
         mentionSlots().find((slot) => slot.id === policy?.slot_id)?.task_dot
@@ -242,6 +254,10 @@ window.CodePierCollaborationDelegation = {
     }
     function delegationContext() {
       const c = chat();
+      const duplex =
+        c.mentions.length === 1 &&
+        mentionSlots().find((slot) => slot.id === c.mentions[0] && slot.duplex);
+      if (duplex) return '<p class="cc-dot-scope-summary">直接发消息即可，dot 根据上下文处理。</p>';
       if (!c.delegationPolicy) return '';
       const policy = selectedPolicy(),
         valid = selectedDelegationValid();
@@ -288,6 +304,16 @@ window.CodePierCollaborationDelegation = {
       );
     }
     function patchDelegationComposer() {
+      const c = chat();
+      const tools = document.querySelector('#cc-task-compose-tools');
+      if (tools)
+        tools.hidden =
+          !!state.snapshot?.capabilities?.duplex_dots &&
+          mentionSlots().some((slot) => slot.duplex) &&
+          !c.delegationPolicy &&
+          (!c.mentions.length ||
+            c.mentions.every((id) => mentionSlots().some((slot) => slot.id === id && slot.duplex)));
+
       const mode = document.querySelector('#cc-send-mode');
       if (mode && !mode.contains(document.activeElement)) mode.innerHTML = delegationComposer();
       const context = document.querySelector('#cc-delegation-context');

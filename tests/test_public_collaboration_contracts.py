@@ -15,7 +15,7 @@ PLAN = {'intent': 'Monitor fixture', 'valid_until': '2030-01-01T00:00:00Z', 'rul
     'open_when': {'operator': 'lt', 'value': 0.9},
     'close_when': {'operator': 'gt', 'value': 0.99}, 'require_recovery_probe': 'probe'}]}
 VALUES = {
-    'dot_id': 'task-dot',
+    'dot_id': 'task-dot', 'message_id': 'message', 'confirm_task': True,
     'project': 'project', 'id': 'item', 'goal_id': 'goal', 'policy_id': 'policy', 'policy_version': 1,
     'delegation_id': 'delegation', 'checkpoint': 'signed-checkpoint', 'conversation_id': 'room', 'room_id': 'room',
     'work_item_id': 'work', 'job_id': 'job', 'result_id': 'result', 'query': 'search text',
