@@ -161,6 +161,16 @@ jobs:
           fi
           echo "root=$ACCEPTANCE" >> "$GITHUB_OUTPUT"
           echo "bundle=$BUNDLE" >> "$GITHUB_OUTPUT"
+      - name: Wait for genuine resource-runner readiness
+        if: matrix.shard == 4
+        timeout-minutes: 7
+        env:
+          ACCEPTANCE: ${{ steps.archive.outputs.root }}
+        run: |
+          # Provisioning/indexing can saturate a fresh hosted runner. Wait once
+          # before the real workload, never relax admission or retry failed tests.
+          cd "$ACCEPTANCE"
+          .venv/bin/python scripts/check_resource_readiness.py --timeout 300 --stable-seconds 15
       - name: Exhaustive deterministic shard from the verified public archive
         env:
           ACCEPTANCE: ${{ steps.archive.outputs.root }}
