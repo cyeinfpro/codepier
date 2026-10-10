@@ -846,6 +846,7 @@ TOOL_DESCRIPTIONS.update({
 
 
 class DotChatMessage(DotRead):
+    complete: bool = Field(default=True, description='False for an interim conversational reply: keep this owner message pending so the dot can continue reading, replying or preparing its authorized work. True finishes this message; never proves work success.')
     body_text: str = Field(min_length=1, max_length=4000)
     reply_to_id: str = Field(default='', max_length=128)
     idempotency_key: Key
@@ -874,7 +875,7 @@ class DotChatTask(DotRead):
 TOOL_MODELS.update({'collaboration_dot_message': DotChatMessage,
     'collaboration_dot_ack': DotChatAck, 'collaboration_dot_task': DotChatTask})
 TOOL_DESCRIPTIONS.update({
-    'collaboration_dot_message': 'Send a normal or proactive message to this explicitly owner-approved duplex dot room. Requires its existing bound connector, not a task lease. Use reply_to_id for the exact original message and reuse its reply_arguments key for retries. Never sync private chat history or wake peer bots.',
+    'collaboration_dot_message': 'Send a normal or proactive message to this explicitly owner-approved duplex dot room. Requires its existing bound connector, not a task lease. Use reply_to_id and the supplied reply_arguments key for final replies. For an interim reply use interim_reply_arguments with complete=false to keep the owner request pending while chatting and working; no panel mode switch or repeated user instruction is needed. Never sync private chat history or wake peer bots.',
     'collaboration_dot_ack': 'Acknowledge an addressed dot message. read records connector receipt but leaves it pending; handled explicitly finishes that message. Neither state proves human reading or task execution.',
     'collaboration_dot_task': 'Only after an explicitly authenticated owner message addressed to this duplex dot asks for actual work, attach one managed task using its existing owner-approved scope. User-approved host execution remains required; do not convert greetings or questions into work. Returns real delegation/inbox requests; claim and execute with the original leases, never general tools to bypass a refusal.',
 })

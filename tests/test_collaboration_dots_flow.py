@@ -152,8 +152,9 @@ def test_panel_add_dot_type_mention_continue_thread_execute_and_report(
         expect(page.locator('#cc-delegation-policy')).to_have_count(0)
         label = '项目 dot'
         form.locator('[name="label"]').fill(label)
-        expect(form.locator('[name="confirm_tasks"]')).not_to_be_checked()
-        form.locator('[name="confirm_tasks"]').check()
+        expect(form.locator('[name="confirm_tasks"]')).to_have_count(0)
+        expect(form.locator('.cc-dot-consent')).to_contain_text('点击添加，即允许')
+        expect(form.locator('[name="access"]')).not_to_be_visible()
         form.locator('button[type="submit"]').click()
         card = page.locator('#cc-drawer [data-dot-card]')
         expect(card).to_be_visible()

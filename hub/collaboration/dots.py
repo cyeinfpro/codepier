@@ -56,6 +56,26 @@ class DotService:
             self.c.owner(principal)
         return args, principal, room, slot, dot
 
+    def setup_defaults(self, principal, room):
+        """Discover existing owner/project limits; never create or change authority."""
+        self.c.owner(principal)
+        project = self.c.runtime.project(room['project_id'], principal)
+        available = []
+        for capability in ('read', 'write', 'execute'):
+            if capability == 'write' and project['mode'] != 'write':
+                continue
+            if capability == 'execute' and not project['allow_tasks']:
+                continue
+            try:
+                self.c.coordination.require_capability(principal, capability, project['id'])
+            except DevError as exc:
+                if exc.status != 403:
+                    raise
+            else:
+                available.append(capability)
+        return {'project_id': project['id'], 'capabilities': available,
+                'execution_target': 'project_agent', 'changes_authority': False}
+
     def create(self, raw, principal):
         args = validate(contracts.DotCreate, raw)
         if not args['duplex']:

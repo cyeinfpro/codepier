@@ -251,6 +251,7 @@ window.CodePierCollaboration = (() => {
     state.joinDraft = {};
     state.dotDraft = {};
     state.dotTargets = [];
+    state.dotDefaults = null;
     state.notes = '';
     state.error = false;
   }
@@ -539,7 +540,7 @@ window.CodePierCollaboration = (() => {
       root && root !== m.id
         ? button('source', '↗ 查看来源消息', { id: root }, 'class="cc-link"')
         : '';
-    return `<article class="cc-message" data-message-id="${E(m.id)}" data-project="${E(m.project_id || state.project)}" data-environment="${E(m.environment_id || state.environment)}" data-source-room="${E(m.source_room_id || m.room_id)}" data-sequence="${E(m.server_sequence || 0)}"><div class="cc-avatar ${['owner', 'panel_owner'].includes(m.author_kind) || m.kind === 'owner_command' ? 'is-human' : ''}" aria-hidden="true">${E(author.slice(0, 1))}</div><div class="cc-message-content"><div class="cc-message-meta"><strong>${E(author)}</strong><small>${['owner', 'panel_owner'].includes(m.author_kind) || m.kind === 'owner_command' ? '房主' : '通过已授权连接'}</small><time>${E(when(m.created || m.created_at))}</time><span class="cc-message-project">${E(projectLabel(m.project_id || state.project))}</span></div>${source}${mentions.length ? `<div class="cc-message-mentions">${mentions.map((v) => `<span>@${E(v.display_snapshot || v.label || (state.snapshot.join_slots || []).find((s) => s.id === v.slot_id)?.label || '通知位置')}</span>`).join('')}</div>` : ''}<p class="cc-prose">${E(messageText(m))}</p>${messageDeliveries(m)}${(m.dot_receipts || []).map((receipt) => `<small class="cc-dot-receipt">${E(receipt.state === 'handled' ? 'dot 已回报处理' : receipt.state === 'read' ? 'dot 连接已确认收件' : '等待 dot 接收')}</small>`).join('')}${delegation.messageCard(m)}${(job || isResult) && m.kind !== 'delegation_result' ? `<section class="cc-linked-card"><div class="cc-row"><strong>${isResult ? '分析结果' : '只读任务'}</strong>${badge(job?.state || m.state)}</div><p>${E(isResult ? body.summary || messageText(m) : job?.kind === 'summarize_result' ? '汇总结论' : job?.kind === 'propose_monitor_plan' ? '编制监控草稿' : '只读异常分析')}</p><small>讨论与任务分别记录 · 结果不代表业务已恢复</small><div class="cc-actions">${button('result', '查看结果与证据', { id: job?.id || m.job_id || body.job_id || resultId || m.id }, `data-record-kind="${job || m.job_id || body.job_id ? 'job' : resultId ? 'result' : 'message'}"`)}${source}</div></section>` : ''}<div class="cc-message-actions">${button('reply', '回复', m)}${state.snapshot.can_manage && !isResult && !body.delegation ? button('convert', '转为任务', m) : ''}${button('thread', '查看话题', { id: root || m.id })}${m.state === 'awaiting_approval' && state.snapshot.can_manage ? button('accept_proposal', '批准只读任务', m) + button('reject_proposal', '不批准', m) : ''}</div></div></article>`;
+    return `<article class="cc-message" data-message-id="${E(m.id)}" data-project="${E(m.project_id || state.project)}" data-environment="${E(m.environment_id || state.environment)}" data-source-room="${E(m.source_room_id || m.room_id)}" data-sequence="${E(m.server_sequence || 0)}"><div class="cc-avatar ${['owner', 'panel_owner'].includes(m.author_kind) || m.kind === 'owner_command' ? 'is-human' : ''}" aria-hidden="true">${E(author.slice(0, 1))}</div><div class="cc-message-content"><div class="cc-message-meta"><strong>${E(author)}</strong><small>${['owner', 'panel_owner'].includes(m.author_kind) || m.kind === 'owner_command' ? '房主' : '通过已授权连接'}</small><time>${E(when(m.created || m.created_at))}</time><span class="cc-message-project">${E(projectLabel(m.project_id || state.project))}</span></div>${source}${mentions.length ? `<div class="cc-message-mentions">${mentions.map((v) => `<span>@${E(v.display_snapshot || v.label || (state.snapshot.join_slots || []).find((s) => s.id === v.slot_id)?.label || '通知位置')}</span>`).join('')}</div>` : ''}<p class="cc-prose">${E(messageText(m))}</p>${messageDeliveries(m)}${(m.dot_receipts || []).map((receipt) => `<small class="cc-dot-receipt">${E(receipt.state === 'handled' ? 'dot 已回报处理' : receipt.state === 'read' ? 'dot 连接已确认收件' : '等待 dot 接收')}</small>`).join('')}${delegation.messageCard(m)}${(job || isResult) && m.kind !== 'delegation_result' ? `<section class="cc-linked-card"><div class="cc-row"><strong>${isResult ? '分析结果' : '只读任务'}</strong>${badge(job?.state || m.state)}</div><p>${E(isResult ? body.summary || messageText(m) : job?.kind === 'summarize_result' ? '汇总结论' : job?.kind === 'propose_monitor_plan' ? '编制监控草稿' : '只读异常分析')}</p><small>讨论与任务分别记录 · 结果不代表业务已恢复</small><div class="cc-actions">${button('result', '查看结果与证据', { id: job?.id || m.job_id || body.job_id || resultId || m.id }, `data-record-kind="${job || m.job_id || body.job_id ? 'job' : resultId ? 'result' : 'message'}"`)}${source}</div></section>` : ''}<div class="cc-message-actions">${button('reply', '回复', m)}${state.snapshot.can_manage && !isResult && !body.delegation && !dots.isConversationMessage(m) ? button('convert', '转为任务', m) : ''}${button('thread', '查看话题', { id: root || m.id })}${m.state === 'awaiting_approval' && state.snapshot.can_manage ? button('accept_proposal', '批准只读任务', m) + button('reject_proposal', '不批准', m) : ''}</div></div></article>`;
   }
   const delegation = window.CodePierCollaborationDelegation.create({
     state,
@@ -585,7 +586,7 @@ window.CodePierCollaboration = (() => {
     const d = state.snapshot,
       c = chat();
     const enabled = d.capabilities?.plain_messages && d.can_manage && d.room.state === 'active';
-    return `<section class="cc-conversation"><div class="cc-timeline-wrap"><div class="cc-feed" tabindex="0" aria-label="共享讨论记录"><div class="cc-history">${c.older ? button('older-messages', '加载更早消息') : ''}</div><div class="cc-message-list" role="log" aria-label="房间消息" aria-live="polite" aria-relevant="additions text">${c.messages.map(messageMarkup).join('') || `<div class="cc-chat-empty"><span class="cc-empty-symbol" aria-hidden="true">↗</span><h3>从一句话开始。</h3><p>说说你的想法，讨论会留在这个房间。</p><p>需要落实时，选择助手并交给它处理。</p>${d.join_slots?.length ? '<small>已登记助手连接；以实际领取与结果确认进度。</small>' : '<button type="button" class="btn" data-cc-action="open-members">添加 dot</button>'}</div>`}</div></div><button type="button" class="btn cc-new-messages" data-cc-action="latest" ${c.unread ? '' : 'hidden'}>${c.unread} 条新消息 ↓</button></div><div class="cc-compose-wrap"><form id="cc-command" class="cc-composer"><div id="cc-draft-context">${draftContext()}</div><div id="cc-delegation-context">${delegationContext()}</div><label class="cc-sr-only" for="cc-message-input">房间消息</label><textarea id="cc-message-input" name="request" rows="2" maxlength="3900" required ${enabled ? '' : 'disabled'} placeholder="${enabled ? '说说你的想法，或 @一个助手连接…' : '普通消息暂不可用，请核对房间与服务能力'}">${E(c.draft)}</textarea><div id="cc-dot-suggestions" class="cc-dot-suggestions" role="listbox" aria-label="选择任务 dot" hidden></div><div class="cc-compose-controls">${button('mentions', '@ 助手', {}, enabled && d.capabilities?.message_notifications ? '' : 'disabled')}${coordination.action()}<span id="cc-send-mode">${delegationComposer()}</span><small>来源 · ${E(projectLabel(state.project))}</small><button class="btn primary" type="submit" ${enabled ? '' : 'disabled'}>发送 ↑</button></div></form><div class="cc-compose-help"><span>像房间成员一样双向交流；消息和结果留在原话题</span><span class="cc-desktop-key">Enter 发送 · Shift + Enter 换行</span><span class="cc-mobile-key">Enter 换行</span></div></div></section>`;
+    return `<section class="cc-conversation"><div class="cc-timeline-wrap"><div class="cc-feed" tabindex="0" aria-label="共享讨论记录"><div class="cc-history">${c.older ? button('older-messages', '加载更早消息') : ''}</div><div class="cc-message-list" role="log" aria-label="房间消息" aria-live="polite" aria-relevant="additions text">${c.messages.map(messageMarkup).join('') || `<div class="cc-chat-empty"><span class="cc-empty-symbol" aria-hidden="true">↗</span><h3>从一句话开始。</h3><p>说说你的想法，讨论会留在这个房间。</p><p>需要落实时，选择助手并交给它处理。</p>${d.join_slots?.length ? '<small>已登记助手连接；以实际领取与结果确认进度。</small>' : '<button type="button" class="btn" data-cc-action="open-members">添加 dot</button>'}</div>`}</div></div><button type="button" class="btn cc-new-messages" data-cc-action="latest" ${c.unread ? '' : 'hidden'}>${c.unread} 条新消息 ↓</button></div><div class="cc-compose-wrap"><form id="cc-command" class="cc-composer"><div id="cc-draft-context">${draftContext()}</div><div id="cc-delegation-context">${delegationContext()}</div><label class="cc-sr-only" for="cc-message-input">房间消息</label><textarea id="cc-message-input" name="request" rows="2" maxlength="3900" required ${enabled ? '' : 'disabled'} placeholder="${enabled ? '说说你的想法，或 @一个助手连接…' : '普通消息暂不可用，请核对房间与服务能力'}">${E(c.draft)}</textarea><div id="cc-dot-suggestions" class="cc-dot-suggestions" role="listbox" aria-label="选择任务 dot" hidden></div><div class="cc-compose-controls">${button('mentions', '@ 助手', {}, enabled && d.capabilities?.message_notifications ? '' : 'disabled')}<span id="cc-task-compose-tools" ${dots.simpleComposer() ? 'hidden' : ''}>${coordination.action()}</span><span id="cc-send-mode">${delegationComposer()}</span><small>来源 · ${E(projectLabel(state.project))}</small><button class="btn primary" type="submit" ${enabled ? '' : 'disabled'}>发送 ↑</button></div></form><div class="cc-compose-help"><span>像房间成员一样双向交流；消息和结果留在原话题</span><span class="cc-desktop-key">Enter 发送 · Shift + Enter 换行</span><span class="cc-mobile-key">Enter 换行</span></div></div></section>`;
   }
   function memberStrip() {
     const slots = notificationSlots(),
@@ -957,6 +958,7 @@ window.CodePierCollaboration = (() => {
     state.members = members.items || [];
     delegation.updatePolicies(policies.items || []);
       state.dotTargets = policies.execution_target_candidates || [];
+      state.dotDefaults = policies.dot_setup_defaults || null;
     patchTimeline(forceBottom);
     patchMemberStatus();
     patchDelegationComposer();
@@ -1377,6 +1379,7 @@ window.CodePierCollaboration = (() => {
       state.members = members.items || [];
       delegation.updatePolicies(policies.items || []);
       state.dotTargets = policies.execution_target_candidates || [];
+      state.dotDefaults = policies.dot_setup_defaults || null;
     }
     await coordination.load(data);
     if (gen !== state.generation || session !== S.session || space !== S.space_id) return '';
@@ -1549,6 +1552,7 @@ window.CodePierCollaboration = (() => {
         if (generation !== state.generation || epoch !== state.drawerEpoch) return local;
         delegation.updatePolicies(policies.items || []);
       state.dotTargets = policies.execution_target_candidates || [];
+      state.dotDefaults = policies.dot_setup_defaults || null;
       }
       const slots = mentionSlots();
       if (mentionSlots().some((slot) => slot.task_dot)) {
@@ -1574,6 +1578,7 @@ window.CodePierCollaboration = (() => {
         if (generation !== state.generation || epoch !== state.drawerEpoch) return local;
         delegation.updatePolicies(policies.items || []);
       state.dotTargets = policies.execution_target_candidates || [];
+      state.dotDefaults = policies.dot_setup_defaults || null;
       }
       const slot = mentionSlots().find((item) => item.id === element.dataset.id);
       if (!slot) throw new Error('这个聊天位置已不可用，请在助手与连接中核对。');

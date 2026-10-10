@@ -310,7 +310,8 @@ class DelegationService:
         return {'items': items, 'next_cursor': None,
                 'delegation_recovery': self.consumer.recovery(args, principal, room, items),
                 'execution_target_candidates': self.target_candidates(principal, room) if not principal.grant_id else [],
-                'target_candidates_project_id': room['project_id'], 'target_discovery_changes_policy': False}
+                'target_candidates_project_id': room['project_id'], 'target_discovery_changes_policy': False,
+                'dot_setup_defaults': self.c.dots.setup_defaults(principal, room) if not principal.grant_id else None}
 
     def automatic_request(self, principal, room, conversation, args):
         """Resolve a user-selected automatic task against a previously confirmed rule."""

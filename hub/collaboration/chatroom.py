@@ -206,7 +206,7 @@ class ChatroomService:
             receipts.append({'slot_id': slot['id'], 'state': state, 'event_id': event_id})
         return receipts
 
-    def create(self, raw, principal, *, sender_dot_id=''):
+    def create(self, raw, principal, *, sender_dot_id='', complete_dot_message=True):
         args = validate(contracts.MessageCreate, raw)
         # Omitted new fields must keep old ordinary-message replay fingerprints.
         if args['dispatch_mode'] == 'discussion':
@@ -226,6 +226,8 @@ class ChatroomService:
             if sender_dot_id:
                 self.c.dot_chat.authorize_sender(principal, room, conversation, sender_dot_id)
                 args['_sender_dot_id'] = sender_dot_id
+                if not complete_dot_message:
+                    args['_dot_message_complete'] = False  # Preserve old final-reply fingerprints.
             else:
                 self.writer(principal, room, conversation['id'])
             if args.get('delegation') or args.get('dispatch_mode') == 'automatic':
@@ -271,6 +273,8 @@ class ChatroomService:
                 body = {'body_text': redact(args['body_text']), 'mentions': mentions, 'request_digest': fingerprint}
                 if sender_dot_id:
                     body['sender_dot_id'] = sender_dot_id
+                    if not complete_dot_message:
+                        body['dot_reply_complete'] = False
                 self.store.execute('''INSERT INTO collaboration_messages
                     (id,room_id,conversation_id,thread_id,thread_root_id,reply_to_id,author,origin,source_id,kind,body,state,created)
                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)''',
