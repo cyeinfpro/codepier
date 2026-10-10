@@ -597,7 +597,7 @@
   --cc-line: var(--ui-line);
   display: grid;
   grid-template-columns: 190px minmax(0, 1fr) 250px;
-  height: calc(100dvh - var(--ui-topbar-height) - 64px);
+  height: calc(100dvh - var(--cc-topbar-height, var(--ui-topbar-height)) - 64px);
   min-height: 480px;
   max-width: 1760px;
   border: 1px solid var(--ui-line);
@@ -1154,7 +1154,7 @@
     padding: 0;
   }
   .cc-chat-shell {
-    height: calc(100dvh - var(--ui-topbar-height) - 18px);
+    height: calc(100dvh - var(--cc-topbar-height, var(--ui-topbar-height)) - 18px);
     min-height: 360px;
     border-radius: 0;
     border-inline: 0;
@@ -1370,10 +1370,14 @@ body:has(.cc-chat-shell) .mobile-dock {
 }
 @media (max-width: 640px) {
   .cc-chat-shell {
-    height: calc(var(--cc-viewport-height, 100dvh) - var(--ui-topbar-height) - 18px);
+    height: calc(
+      var(--cc-viewport-height, 100dvh) - var(--cc-topbar-height, var(--ui-topbar-height)) - 18px
+    );
     min-height: min(
       360px,
-      calc(var(--cc-viewport-height, 100dvh) - var(--ui-topbar-height) - 18px)
+      calc(
+        var(--cc-viewport-height, 100dvh) - var(--cc-topbar-height, var(--ui-topbar-height)) - 18px
+      )
     );
   }
   .cc-room-header {

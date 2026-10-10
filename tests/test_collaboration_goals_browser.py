@@ -154,8 +154,14 @@ def test_goal_draft_owner_confirmation_conflict_refresh_and_mobile(collaboration
         assert initial_work[0]['required_capabilities'] == ['read']
         assert initial_work[0]['assignee_grant_id'] == stack.grant
         area.dispatch_event('compositionend')
-        for width in (390, 360):
+        for width in (390, 360, 320, 390):
             page.set_viewport_size({'width': width, 'height': 844 if width == 390 else 800})
+            page.wait_for_function("""() => {
+                const root = document.querySelector('.collaboration');
+                const bar = document.querySelector('.topbar');
+                return Math.abs(parseFloat(getComputedStyle(root).getPropertyValue('--cc-topbar-height'))
+                    - bar.getBoundingClientRect().height) < 1;
+            }""")
             area.fill('手机草稿')
             area.press('Enter')
             expect(area).to_have_value('手机草稿\n')

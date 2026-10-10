@@ -10,11 +10,17 @@ import uuid
 import httpx
 import pytest
 
+from agent.resource_pressure import ResourceSampler
 from shared.util import atomic_json
 from tests.support import running_stack, wait_for
 
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow, pytest.mark.serial_regression]
+
+
+def burst_capacity_ready(limits):
+    # 128 new reads plus the one running holder, independent of host CPU count.
+    return limits["reason"] == "adaptive" and limits["project_pending_limit"] >= 129
 
 
 def settings(stack):
@@ -52,10 +58,34 @@ def test_real_128_waiting_burst_other_project_cancel_restart_and_exact_drain(tmp
         first = settings(stack)
         assert first["durable_admission"]["project_pending_limit"] == 32
 
+        # Read-only independent OS observations diagnose an unmet prerequisite.
+        # They are not the Agent heartbeat and never feed or bypass admission.
+        observer = ResourceSampler()
+        observed_at = time.monotonic()
+        last_observation = -float("inf")
+
         def healthy():
+            nonlocal last_observation
             state = settings(stack)
             limits = state["durable_admission"]
-            return state if limits["reason"] == "adaptive" and limits["project_pending_limit"] >= 160 else None
+            now = time.monotonic()
+            if now - last_observation >= 3:
+                sample = observer.sample()
+                last_observation = now
+                reported = state["reported"] or {}
+                print(json.dumps({"admission_prerequisite": {
+                    "elapsed_seconds": round(now - observed_at, 3),
+                    "api_state": state["state"], "limits": limits,
+                    "reported_reason": reported.get("reason"),
+                    "reported_lanes": reported.get("lanes"),
+                    "independent_os_observer": {
+                        "source": sample.source, "cpu_busy": sample.cpu_busy,
+                        "memory_available": sample.memory_available,
+                        "memory_total": sample.memory_total, "io_stall": sample.io_stall,
+                        "age_seconds": round(time.monotonic() - sample.measured_at, 3),
+                    },
+                }}, sort_keys=True), flush=True)
+            return state if burst_capacity_ready(limits) else None
         # Uses genuine OS telemetry crossing the authenticated WebSocket.
         expanded = wait_for(healthy, timeout=100)
         assert sum(lane["capacity"] for lane in expanded["reported"]["lanes"].values()) < expanded["durable_admission"]["node_pending_limit"]
