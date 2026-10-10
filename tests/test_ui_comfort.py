@@ -88,7 +88,8 @@ def test_desktop_essentials_fit_and_text_is_readable(stack,engine,scheme,width,h
 
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
 @pytest.mark.parametrize('scheme', ['light', 'dark'])
-def test_short_desktop_token_states_keep_figures_notes_and_actions_reachable(stack, engine, scheme):
+@pytest.mark.parametrize('width,height', [(1180, 640), (1280, 720)])
+def test_short_desktop_token_states_keep_figures_notes_and_actions_reachable(stack, engine, scheme, width, height):
     """Exercise real overview layout with complete, missing and partial telemetry."""
     OUT.mkdir(parents=True, exist_ok=True)
 
@@ -104,7 +105,7 @@ def test_short_desktop_token_states_keep_figures_notes_and_actions_reachable(sta
     selected = {'name': 'unknown'}
     with sync_playwright() as pw:
         browser = getattr(pw, engine).launch()
-        page = browser.new_page(viewport={'width': 1180, 'height': 640},
+        page = browser.new_page(viewport={'width': width, 'height': height},
                                 color_scheme=scheme, reduced_motion='reduce')
         errors = []
         page.on('pageerror', lambda error: errors.append(str(error)))
@@ -142,13 +143,13 @@ def test_short_desktop_token_states_keep_figures_notes_and_actions_reachable(sta
                 details = card.locator('[data-token-filters]')
                 assert not details.evaluate('el => el.open')
                 expect(details.locator('summary').first).to_be_visible()
-                within(page, '.stats,.codepier-focus-card,.workspace-operations', 1180, 640)
+                within(page, '.stats,.codepier-focus-card,.workspace-operations', width, height)
                 within(page, '.token-dashboard-metric,.token-dashboard-note,'
-                             '[data-token-filters] > summary', 1180, 640)
+                             '.token-dashboard-limit,[data-token-filters] > summary', width, height)
                 report = page.evaluate(MEASURE)
-                assert report['documentWidth'] <= 1181
+                assert report['documentWidth'] <= width + 1
                 assert not report['failures'], (name, scheme, report['failures'])
-                page.screenshot(path=str(OUT / f'{engine}-{scheme}-1180-640-token-{name}.png'),
+                page.screenshot(path=str(OUT / f'{engine}-{scheme}-{width}-{height}-token-{name}.png'),
                                 animations='disabled')
             # Advanced settings stay collapsed until explicitly requested.
             details.locator('summary').first.click()

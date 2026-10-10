@@ -74,15 +74,16 @@ def priced_dashboard(percent=90, authority='test-authority', model='gpt-6-astra'
 
 @pytest.mark.parametrize('browser_kind', ['chromium', 'webkit'])
 @pytest.mark.parametrize('width', [1440, 390, 320])
-def test_compact_cost_cache_late_response_failure_and_mobile(chat_browser_pool, width, browser_kind):
+@pytest.mark.parametrize('scheme', ['light', 'dark'])
+def test_compact_cost_cache_late_response_failure_and_mobile(chat_browser_pool, width, browser_kind, scheme):
     root = Path(__file__).resolve().parents[1]
-    context = chat_browser_pool(browser_kind).new_context(viewport={'width': width, 'height': 900})
+    context = chat_browser_pool(browser_kind).new_context(viewport={'width': width, 'height': 900}, color_scheme=scheme)
     page = context.new_page()
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     try:
         page.set_content('<div id="fixture"></div>')
-        page.add_style_tag(content='body{margin:16px;background:#171717;color:#eee;font-family:sans-serif} #fixture{padding:20px;border-radius:24px;background:#40364f} *{box-sizing:border-box}')
+        page.add_style_tag(content='body{margin:16px;background:#f4f4f4;color:#232127;font-family:sans-serif} #fixture{padding:20px;border-radius:24px;background:#ccbafb} *{box-sizing:border-box} @media(prefers-color-scheme:dark){body{background:#171717;color:#eee} #fixture{background:#40364f}}')
         page.add_style_tag(path=str(root / 'web/token-usage.css'))
         page.add_script_tag(path=str(root / 'web/token-usage.js'))
         page.evaluate("""data => {
@@ -100,7 +101,7 @@ def test_compact_cost_cache_late_response_failure_and_mobile(chat_browser_pool, 
         assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
         evidence = root / '.work/token-cost-preview'
         evidence.mkdir(parents=True, exist_ok=True)
-        card.screenshot(path=str(evidence / f'compact-{browser_kind}-{width}.png'))
+        card.screenshot(path=str(evidence / f'compact-{scheme}-{browser_kind}-{width}.png'))
         expect(card.locator('.token-dashboard-limit')).to_be_visible()
         expect(card.locator('[data-token-filter=period]')).to_be_hidden()
         expect(card.locator('[data-token-export]')).to_be_hidden()
@@ -108,7 +109,7 @@ def test_compact_cost_cache_late_response_failure_and_mobile(chat_browser_pool, 
         expect(card.locator('[data-token-filter=period]')).to_be_hidden()
         expect(card.locator('[data-token-panel=breakdown] > p').first).to_be_hidden()
         expect(card.locator('[data-token-panel=trend] > p').first).to_be_hidden()
-        card.screenshot(path=str(evidence / f'details-{browser_kind}-{width}.png'))
+        card.screenshot(path=str(evidence / f'details-{scheme}-{browser_kind}-{width}.png'))
         card.locator('[data-token-panel=settings] > summary').click()
         expect(card.locator('.token-pricing-notes > p').first).to_be_hidden()
         assumption = card.locator('[data-token-filter=cache_read_percent]')

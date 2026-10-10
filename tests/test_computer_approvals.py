@@ -101,7 +101,7 @@ async def test_hub_codepier_live_operation_and_panel_only_routes(tmp_path):
     store.execute('INSERT INTO users VALUES (?,?,?,?)',('u','admin',password_hash('fixture-password-123'),time.time()))
     store.execute('INSERT INTO devices(id,name,secret,created) VALUES (?,?,?,?)',('d','Device',store.encrypt('s'),time.time()))
     store.execute('INSERT INTO projects(id,alias,alias_key,device_id,root,created) VALUES (?,?,?,?,?,?)',('p','Test','test','d','/fixture',time.time()))
-    request={'project':{'id':'p','alias':'Test','root':'/fixture'}}
+    request={'project':{'id':'p','alias':'Test','root':'/fixture'},'args':{}}
     store.execute('INSERT INTO operations(id,device_id,project_id,actor,tool,args_summary,fingerprint,state,created,updated,payload,owner_user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',('op','d','p','panel:admin','computer_observe','{}','f','running',time.time(),time.time(),store.encrypt(json.dumps(request)),'u'))
     sent=[]
     async def send(data):sent.append(data)

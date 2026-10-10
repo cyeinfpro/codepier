@@ -220,16 +220,19 @@ def test_preview_does_not_read_environment_or_mutate_input(monkeypatch):
 def test_preview_performs_no_io_or_process_activity(monkeypatch):
     def forbidden(*args, **kwargs):
         raise AssertionError("Preview attempted an external side effect")
-    for target, name in [
-        (builtins, "open"), (os, "open"), (socket, "create_connection"),
-        (socket, "getaddrinfo"), (subprocess, "Popen"), (sqlite3, "connect"),
-        (Path, "read_text"), (Path, "write_text"), (Path, "exists"),
-        (Path, "resolve"), (Path, "mkdir"),
-    ]:
-        monkeypatch.setattr(target, name, forbidden)
-    assert build_preview(example())["configuration_valid"] is True
-    assert build_preview(example(hub_url="https://unknown.invalid"))["configuration_valid"] is True
-    assert build_preview(example(hub_url="http://unknown.invalid"))["configuration_valid"] is False
+    # Restore process-wide I/O hooks before pytest/coverage writes its reports.
+    # The entire preview call still runs with every external side effect forbidden.
+    with monkeypatch.context() as guard:
+        for target, name in [
+            (builtins, "open"), (os, "open"), (socket, "create_connection"),
+            (socket, "getaddrinfo"), (subprocess, "Popen"), (sqlite3, "connect"),
+            (Path, "read_text"), (Path, "write_text"), (Path, "exists"),
+            (Path, "resolve"), (Path, "mkdir"),
+        ]:
+            guard.setattr(target, name, forbidden)
+        assert build_preview(example())["configuration_valid"] is True
+        assert build_preview(example(hub_url="https://unknown.invalid"))["configuration_valid"] is True
+        assert build_preview(example(hub_url="http://unknown.invalid"))["configuration_valid"] is False
 
 
 def test_safety_boundaries_are_present_even_when_input_is_invalid():

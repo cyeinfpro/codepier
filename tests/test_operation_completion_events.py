@@ -105,6 +105,23 @@ async def test_completion_wake_is_after_commit_and_never_on_rollback(harness, mo
     assert wakes == ['committed']
 
 
+def test_completion_without_event_adapter_commits_once(harness):
+    s, _, receiver, _, _, _ = harness
+    identifier = seed(harness)
+    s.events = None
+    op = s.store.one('SELECT * FROM operations WHERE id=?', (identifier,))
+    result = {'ok': True, 'data': {'content': 'completed'}}
+    s.runtime.complete(op, result)
+    first = s.store.one('SELECT * FROM operations WHERE id=?', (identifier,))
+    assert first['state'] == 'succeeded' and first['payload'] is None
+    assert json.loads(first['result']) == result
+    s.runtime.complete(first, {'ok': False, 'error': {'message': 'late result'}})
+    second = s.store.one('SELECT * FROM operations WHERE id=?', (identifier,))
+    assert second['state'] == first['state'] and second['result'] == first['result']
+    assert second['output_seq'] == first['output_seq']
+    assert outbox(harness) == [] and receiver.requests == []
+
+
 def test_catalog_and_closed_bounded_filters():
     definition = next(item for item in definitions() if item['name'] == OPERATION_EVENT)
     assert definition['delivery'] == ['webhook']

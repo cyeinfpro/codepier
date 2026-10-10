@@ -21,7 +21,7 @@ def inbox(tmp_path):
                   ('d', 'Device', store.encrypt('fixture'), time.time()))
     store.execute('INSERT INTO projects(id,alias,alias_key,device_id,root,created) VALUES (?,?,?,?,?,?)',
                   ('p', 'Test', 'test', 'd', '/fixture', time.time()))
-    request = {'project': {'id': 'p', 'alias': 'Test', 'root': '/fixture'}}
+    request = {'project': {'id': 'p', 'alias': 'Test', 'root': '/fixture'}, 'args': {}}
     store.execute('INSERT INTO operations(id,device_id,project_id,actor,tool,args_summary,fingerprint,state,created,updated,payload,owner_user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
                   ('op', 'd', 'p', 'panel:admin', 'computer_observe', '{}', 'f', 'running', time.time(), time.time(), store.encrypt(json.dumps(request)),'u'))
     sent = []
@@ -47,6 +47,16 @@ def changed(events):
     assert set(event) == {'type', 'at', 'data', '_audience'}
     assert event['_audience'] == {'space_id': 'legacy', 'user_id': 'u'}
     assert events.empty()
+
+
+def test_malformed_durable_request_does_not_create_approval(inbox):
+    approvals, connection, data, events, _ = inbox
+    store = approvals.runtime.store
+    malformed = {'project': {'id': 'p', 'alias': 'Test', 'root': '/fixture'}}
+    store.execute('UPDATE operations SET payload=? WHERE id=?',
+                  (store.encrypt(json.dumps(malformed)), 'op'))
+    approvals.receive('d', connection, data)
+    assert approvals.list() == [] and events.empty()
 
 
 @pytest.mark.parametrize('removal', ['closed', 'drop', 'expired', 'revoked'])

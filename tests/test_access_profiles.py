@@ -181,7 +181,7 @@ def test_profile_shrink_disables_queued_admission_and_refresh_without_killing_wo
     grant = grant_for(app, tokens['access_token'])
     project = store.one('SELECT * FROM projects WHERE id=?', ('project',))
     operation = {'project_id': 'project', 'device_id': 'device', 'tool': 'shell_exec', 'grant_id': grant['id']}
-    request = {'project': project}
+    request = {'project': project, 'args': {}}
     assert app.state.runtime.permission_error(operation, request) is None
     narrowed = change(client, profile, scopes=['read']).json()
     assert app.state.runtime.permission_error(operation, request) is not None

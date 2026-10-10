@@ -261,3 +261,18 @@
   margin-top: 0.65rem;
   font-size: 0.75rem;
 }
+/* Keep short desktop overviews within their existing screen-height budget.
+   Reclaim whitespace only; figures, context limits and controls keep their size. */
+@media (min-width: 901px) and (max-height: 800px) {
+  .overview-summary .token-dashboard {
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+  }
+  .overview-summary .token-dashboard-metrics {
+    margin-block: 0.35rem 0.15rem;
+  }
+  .overview-summary .token-dashboard-note,
+  .overview-summary .token-dashboard-limit {
+    margin-block: 0.25rem;
+  }
+}

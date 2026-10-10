@@ -24,7 +24,7 @@ EVENT_NAMES = {
     'codepier.monitor.status_changed.v1', 'codepier.monitor.result_ready.v1',
     'codepier.monitor.incident_changed.v1', 'codepier.collaboration.task_available.v1',
     'codepier.collaboration.message_mentioned.v1', 'codepier.collaboration.work_available.v1',
-    'codepier.collaboration.delegation_available.v1',
+    'codepier.collaboration.delegation_available.v1', 'codepier.operation.completed.v1',
 }
 EVENT = 'codepier.monitor.status_changed.v1'
 SECRET = 'whsec_' + base64.b64encode(b'fixture-only-signing-material-32b!').decode()

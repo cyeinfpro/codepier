@@ -29,6 +29,9 @@ def test_known_queue_reason_roundtrips_through_journal_and_hub(tmp_path, reason)
         stage TEXT,at REAL,elapsed_ms INTEGER,detail TEXT,UNIQUE(operation_id,source,seq))""")
     class Store:
         lock = threading.RLock()
+        def execute(self, sql, args=()):
+            with self.lock, db:
+                return db.execute(sql, args)
         def all(self, sql, args=()):
             return [dict(row) for row in db.execute(sql, args).fetchall()]
         def one(self, sql, args=()):

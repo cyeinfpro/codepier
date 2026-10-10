@@ -1181,7 +1181,10 @@ class Runtime:
                 (state, encoded, error.get("message"), output, time.time(), int(output != (op.get("output") or "")), op["id"]))
             if not changed.rowcount:
                 return
-            self.collaboration.events.operation_completed(op["id"])
+            # Passive/offline collaboration services may have no event adapter.
+            # Completion must still commit; configured adapters retain the atomic outbox.
+            if self.collaboration.events is not None:
+                self.collaboration.events.operation_completed(op["id"])
         # Capture only non-secret completion evidence from the old in-memory
         # request. The durable encrypted payload was already cleared above.
         try:
