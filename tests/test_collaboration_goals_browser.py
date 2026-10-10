@@ -1,6 +1,7 @@
 """Real goal UI + isolated Hub/Agent fixtures; no model or native subscriber is used."""
 import json
 import os
+import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -474,6 +475,35 @@ def test_goal_approval_refresh_keeps_old_surface_inert_until_replacement(collabo
         approval_saved = []
         held = []
         late_details = []
+        fresh_requests = []
+        timeline = []
+        releasing = False
+        observed_at = time.monotonic()
+        expected_scope = {}
+
+        def request_scope(request):
+            parsed = urlsplit(request.url)
+            query = parse_qs(parsed.query)
+            return parsed.path == '/api/collaboration' and query.get('kind') == ['coordination_goals'] and all(
+                query.get(name) == value for name, value in expected_scope.items())
+
+        def observe_request(request):
+            parsed = urlsplit(request.url)
+            if parsed.path.startswith('/api/collaboration'):
+                query = parse_qs(parsed.query)
+                timeline.append({'event': 'request', 'kind': query.get('kind', [''])[0],
+                                 'elapsed': round(time.monotonic() - observed_at, 3)})
+                if releasing and request_scope(request):
+                    fresh_requests.append(request)
+
+        def observe_response(response):
+            parsed = urlsplit(response.url)
+            if parsed.path.startswith('/api/collaboration'):
+                timeline.append({'event': 'response', 'kind': parse_qs(parsed.query).get('kind', [''])[0],
+                                 'status': response.status, 'elapsed': round(time.monotonic() - observed_at, 3)})
+
+        page.on('request', observe_request)
+        page.on('response', observe_response)
 
         def save_approval(route):
             response = route.fetch()
@@ -505,7 +535,24 @@ def test_goal_approval_refresh_keeps_old_surface_inert_until_replacement(collabo
         assert page.locator('#cc-drawer').evaluate('(n) => n.inert')
         page.locator('.cc-coordination-list [data-cc-action="goal-detail"]').dispatch_event('click')
         assert late_details == []
-        held[0][0].fulfill(response=held[0][1])
+        # Releasing options does not complete refresh: goals must be fetched next.
+        # Accept only a request started after this release, for this same scope
+        # and render generation, then retain the original five-second DOM checks.
+        query = parse_qs(urlsplit(held[0][0].request.url).query)
+        expected_scope = {name: query.get(name) for name in ('project', 'environment_id', 'conversation_id')}
+        assert expected_scope['project'] == [stack.project['id']]
+        assert expected_scope['conversation_id']
+        generation = page.evaluate('S.renderSeq')
+        releasing = True
+        with page.expect_response(lambda response: response.request in fresh_requests, timeout=15000) as refreshed:
+            with page.expect_event('requestfinished', predicate=lambda request: request in fresh_requests,
+                                   timeout=15000) as finished:
+                held[0][0].fulfill(response=held[0][1])
+        response = refreshed.value
+        assert response.request == finished.value and len(fresh_requests) == 1
+        assert response.status == 200
+        assert page.evaluate('S.renderSeq') == generation
+        assert any(item['id'] == goal['id'] and item['state'] == 'active' for item in response.json()['items'])
         page.unroute('**/api/collaboration?*', hold_refresh)
         page.unroute('**/api/collaboration/goal-approve', save_approval)
         expect(page.locator('#cc-drawer')).not_to_be_visible()
@@ -516,4 +563,6 @@ def test_goal_approval_refresh_keeps_old_surface_inert_until_replacement(collabo
         expect(page.locator('#cc-drawer')).not_to_be_visible()
         expect(page.locator('.cc-coordination-list')).to_contain_text('已暂停')
     finally:
+        if 'timeline' in locals():
+            print('APPROVAL_REFRESH_TIMELINE', json.dumps(timeline), flush=True)
         context.close()
