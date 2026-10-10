@@ -133,7 +133,7 @@ def test_short_desktop_token_states_keep_figures_notes_and_actions_reachable(sta
                     assert card.locator('.is-cost strong').inner_text().startswith('$')
                 note = card.locator('.token-dashboard-note').first
                 expect(note).to_be_visible()
-                expect(note).to_contain_text('GPT-6 Astra · Standard API · 输入缓存 90% 假设')
+                expect(note).to_contain_text('GPT-6 Astra · 输入缓存 90% 假设')
                 partial = card.locator('.token-dashboard-note').filter(has_text='仅已记录部分')
                 if name == 'partial':
                     expect(partial).to_be_visible()
@@ -150,8 +150,10 @@ def test_short_desktop_token_states_keep_figures_notes_and_actions_reachable(sta
                 assert not report['failures'], (name, scheme, report['failures'])
                 page.screenshot(path=str(OUT / f'{engine}-{scheme}-1180-640-token-{name}.png'),
                                 animations='disabled')
-            # Details still expose the original controls at the short height.
+            # Advanced settings stay collapsed until explicitly requested.
             details.locator('summary').first.click()
+            expect(card.locator('[data-token-filter=period]')).to_be_hidden()
+            card.locator('[data-token-panel=settings] > summary').click()
             expect(card.locator('[data-token-filter=period]')).to_be_visible()
             expect(card.locator('[data-token-filter=reference_model]')).to_be_visible()
             expect(card.locator('[data-token-filter=cache_read_percent]')).to_have_value('90')

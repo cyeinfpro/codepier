@@ -84,10 +84,8 @@
   font-variant-numeric: tabular-nums;
 }
 .token-pricing-details {
-  margin: 0.8rem 0;
-  padding: 0.75rem;
-  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
-  border-radius: 0.6rem;
+  margin: 0.6rem 0;
+  padding: 0;
 }
 .token-pricing-details p {
   margin: 0.4rem 0;
@@ -110,6 +108,10 @@
 }
 .token-dashboard details {
   margin-top: 0.35rem;
+}
+/* Keep nested open panels hidden when an ancestor disclosure is closed, including WebKit. */
+.token-dashboard details:not([open]) > :not(summary) {
+  display: none;
 }
 .token-dashboard summary {
   cursor: pointer;
@@ -224,4 +226,38 @@
   .token-trend li {
     grid-template-columns: 4.5rem minmax(0, 1fr) 6.5rem;
   }
+}
+
+.token-dashboard-limit {
+  margin: 0.4rem 0;
+  font-size: 0.8rem;
+  line-height: 1.6;
+}
+.token-dashboard-context {
+  overflow-wrap: anywhere;
+}
+.token-detail-panel {
+  padding: 0.35rem 0;
+  border-top: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+}
+.token-detail-panel:first-of-type {
+  margin-top: 0.5rem;
+}
+.token-detail-panel > summary {
+  font-weight: 500;
+}
+.token-cache-assumption {
+  margin: 0.5rem 0;
+}
+.token-cache-assumption select {
+  min-width: 0;
+  max-width: 20rem;
+  flex: 1 1 10rem;
+}
+.token-pricing-notes {
+  margin-top: 0.75rem;
+}
+.token-export {
+  margin-top: 0.65rem;
+  font-size: 0.75rem;
 }

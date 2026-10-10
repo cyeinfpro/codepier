@@ -210,35 +210,37 @@ window.CodePierTokenUsage = (() => {
         : null;
     return (
       '<div class="token-dashboard-metrics">' +
-      '<div class="token-dashboard-metric is-total"><span>总 Token</span><strong title="' +
+      '<div class="token-dashboard-metric is-total"><span>工具文本 Token</span><strong title="' +
       number(n) +
       ' Token">' +
       (n === null ? '未记录' : '约 ' + formatTokens(n)) +
       '</strong></div>' +
-      '<div class="token-dashboard-metric is-cost"><span>参考估价 · USD</span><strong>' +
+      '<div class="token-dashboard-metric is-cost"><span>参考费用 · USD（非账单）</span><strong>' +
       escape(formatUSD(amount)) +
       '</strong></div></div>' +
+      '<p class="token-dashboard-note token-dashboard-context">' +
+      number(value.wire_attempts) +
+      ' 次调用' +
       (cost?.pricing
-        ? '<p class="token-dashboard-note">' +
+        ? ' · ' +
           escape(cost.pricing.model_label || cost.pricing.model || '参考模型未知') +
-          ' · Standard API · 输入缓存 ' +
+          ' · 输入缓存 ' +
           escape(cost.pricing.cache_read_percent) +
-          '% 假设</p>'
+          '% 假设'
         : '') +
-      (n !== null && total.partial ? '<p class="token-dashboard-note">仅已记录部分</p>' : '')
+      (n !== null && total.partial ? ' · 仅已记录部分' : '') +
+      '</p><p class="token-dashboard-limit">未包含完整对话上下文，非实际账单。</p>'
     );
   }
 
-  function pricingDetails(cost, adjustable = false) {
+  function pricingDetails(cost, adjustable = false, expanded = false) {
     const p = cost?.pricing;
     if (!p || cost.kind !== 'reference_estimate')
       return '<p>参考估价未记录；实际模型用量：未提供。</p>';
     const rates = p.usd_per_million || {};
     const money = (value) => (Number.isFinite(value) && value >= 0 ? '$' + value : '未记录');
     return (
-      '<div class="token-pricing-details"><p><strong>' +
-      escape(p.model_label || p.model || '参考模型未知') +
-      ' 参考估价</strong> · Standard API 短上下文，USD / 1M Token。</p>' +
+      '<div class="token-pricing-details">' +
       (adjustable
         ? '<label class="token-cache-assumption">参考计价模型 <select data-token-filter="reference_model" aria-label="参考计价模型">' +
           (
@@ -264,6 +266,10 @@ window.CodePierTokenUsage = (() => {
           escape(p.cache_read_percent) +
           '"> %</span></label>'
         : '<p>模型输入缓存读取假设：' + escape(p.cache_read_percent) + '%。</p>') +
+      `<details class="token-pricing-notes" data-token-panel="pricing"${expanded ? ' open' : ''}><summary>计价依据与限制</summary>` +
+      '<p><strong>' +
+      escape(p.model_label || p.model || '参考模型未知') +
+      ' 参考估价</strong> · Standard API 短上下文，USD / 1M Token。</p>' +
       '<p>输入 ' +
       money(rates.input) +
       '，缓存读取 ' +
@@ -296,7 +302,7 @@ window.CodePierTokenUsage = (() => {
       escape(p.source_date || '未记录') +
       ' · ' +
       escape(p.version) +
-      '。</p></div>'
+      '。</p></details></div>'
     );
   }
 
@@ -428,6 +434,7 @@ window.CodePierTokenUsage = (() => {
         authority: data.authority_key,
         filters: filterValues(data),
         expanded: false,
+        panels: {},
         revision: 0,
       };
     }
@@ -464,11 +471,15 @@ window.CodePierTokenUsage = (() => {
       expanded =
         dashboardState?.authority === data?.authority_key ? dashboardState?.expanded : false;
     if (!data?.summary)
-      return '<div class="token-dashboard" data-token-dashboard><div class="token-dashboard-head"><h3>今日工具 Token</h3><span class="token-estimate-badge">估算</span></div><p role="status">统计暂不可用</p><details class="token-usage-help"><summary>统计说明</summary><p>实际模型用量未提供。</p></details></div>';
+      return '<div class="token-dashboard" data-token-dashboard><div class="token-dashboard-head"><h3>今日工具用量</h3><span class="token-estimate-badge">估算</span></div><p role="status">统计暂不可用</p><details class="token-usage-help"><summary>统计说明</summary><p>实际模型用量未提供。</p></details></div>';
     const value = data.summary,
       period = data.period || {},
       filters = data.filters || {};
     const title = { today: '今日', '7d': '近 7 天', '30d': '近 30 天' }[period.key] || '所选时间';
+    const panels =
+      dashboardState?.authority === data.authority_key ? dashboardState?.panels || {} : {};
+    const panel = (name, label) =>
+      `<details class="token-detail-panel" data-token-panel="${name}"${panels[name] ? ' open' : ''}><summary>${label}</summary>`;
     const select = (name, label, choices, selected, all = '') =>
       '<label>' +
       label +
@@ -483,10 +494,12 @@ window.CodePierTokenUsage = (() => {
       '</select></label>';
     return (
       '<div class="token-dashboard" data-token-dashboard>' +
-      `<div class="token-dashboard-head"><h3>${title}工具 Token</h3><span class="token-estimate-badge">估算</span></div>` +
+      `<div class="token-dashboard-head"><h3>${title}工具用量</h3><span class="token-estimate-badge">估算</span></div>` +
       headline(value) +
       (data.coverage?.collection_unavailable ? '<p role="status">估算读取暂不可用</p>' : '') +
-      `<details data-token-filters${expanded ? ' open' : ''}><summary><span>${number(value.wire_attempts)} 次记录</span> · 详情与筛选</summary><div class="token-dashboard-filters">` +
+      `<details data-token-filters${expanded ? ' open' : ''}><summary>查看详情</summary>` +
+      panel('settings', '筛选与估价设置') +
+      '<div class="token-dashboard-filters">' +
       select(
         'period',
         '时间范围',
@@ -507,12 +520,16 @@ window.CodePierTokenUsage = (() => {
       ) +
       select('session', '匿名窗口', data.options?.sessions || [], filters.session, '全部匿名窗口') +
       '</div>' +
+      pricingDetails(value.reference_cost, true, !!panels.pricing) +
+      '</details>' +
+      panel('breakdown', '请求与响应明细') +
       metricDetails(value, 'input', 'MCP 请求参数') +
       metricDetails(value, 'output', 'MCP 响应文本') +
-      pricingDetails(value.reference_cost, true) +
+      '</details>' +
+      panel('trend', '用量趋势') +
       trendHTML(data) +
-      '<button type="button" class="secondary" data-token-export>导出当前统计 JSON</button>' +
-      '<details class="token-usage-help"><summary>统计说明</summary>' +
+      '</details>' +
+      `<details class="token-usage-help token-detail-panel" data-token-panel="help"${panels.help ? ' open' : ''}><summary>统计说明</summary>` +
       '<p>' +
       escape(dateText(period.start, period.timezone)) +
       ' 至 ' +
@@ -531,7 +548,7 @@ window.CodePierTokenUsage = (() => {
       number(data.coverage?.estimate_retention_days) +
       ' 天，所选时间段可能不完整。算法 ' +
       escape(value.version || VERSION) +
-      '。</p></details></details>' +
+      '。</p></details><button type="button" class="secondary token-export" data-token-export>导出统计 JSON</button></details>' +
       '<p class="token-dashboard-status" role="status" aria-live="polite"></p></div>'
     );
   }
@@ -562,20 +579,23 @@ window.CodePierTokenUsage = (() => {
     const generation = ++bindingGeneration;
     const bind = () => {
       root._codepierTokenGeneration = generation;
-      const details = root.querySelector('[data-token-filters]');
-      if (details)
+      root.querySelectorAll('[data-token-filters], [data-token-panel]').forEach((details) => {
         details.ontoggle = () => {
+          const key = details.dataset.tokenPanel;
+          const previous = key ? !!state.panels[key] : state.expanded;
           if (
             details.isConnected &&
             details.closest('[data-token-dashboard]') === root &&
             root._codepierTokenGeneration === generation &&
             dashboardState === state &&
-            state.expanded !== details.open
+            previous !== details.open
           ) {
-            state.expanded = details.open;
+            if (key) state.panels[key] = details.open;
+            else state.expanded = details.open;
             state.revision += 1;
           }
         };
+      });
       root.onclick = (event) => {
         if (
           !event.target.closest('[data-token-export]') ||
@@ -635,7 +655,8 @@ window.CodePierTokenUsage = (() => {
             dashboardState !== state
           )
             return;
-          if (result.authority_key !== state.authority) {
+          const sameAuthority = result.authority_key === state.authority;
+          if (!sameAuthority) {
             result = await fetcher('/api/token-usage');
             if (
               current !== sequence ||
@@ -653,7 +674,15 @@ window.CodePierTokenUsage = (() => {
             dashboardState !== state
           )
             return;
-          state.expanded = !!captured.querySelector('[data-token-filters]')?.open;
+          if (sameAuthority) {
+            state.expanded = !!captured.querySelector('[data-token-filters]')?.open;
+            state.panels = Object.fromEntries(
+              [...captured.querySelectorAll('[data-token-panel]')].map((details) => [
+                details.dataset.tokenPanel,
+                details.open,
+              ]),
+            );
+          }
           data = result;
           state.filters = filterValues(result);
           const holder = document.createElement('div');

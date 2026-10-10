@@ -184,9 +184,9 @@ def dashboard_payload(rows=None, **changes):
 
 def test_dashboard_in_workspace_card_labels_scope_missing_and_actual():
     html = run_js('dashboard', dashboard_payload(rows=[row(token_usage=None)]))
-    assert '今日工具 Token' in html
+    assert '今日工具用量' in html
     assert '<span class="token-estimate-badge">估算</span>' in html
-    assert '<span>总 Token</span>' in html and '参考估价 · USD' in html
+    assert '<span>工具文本 Token</span>' in html and '参考费用 · USD（非账单）' in html
     assert 'MCP 请求参数' in html and 'MCP 响应文本' in html
     assert '实际模型用量' in html and '未提供' in html
     assert '未记录' in html and '约 0' not in html
@@ -260,7 +260,7 @@ def test_dashboard_compact_summary_keeps_details_and_missing_states():
     assert '实际模型用量' not in visible
     assert '次有记录' not in visible and '次未记录' not in visible
     assert '统计说明' in html
-    assert '1 次记录' in html
+    assert '1 次调用' in html
     assert 'codepier-text-v1' in html and '范围不是统计置信区间' in html
     partial = run_js('dashboard', dashboard_payload(rows=[
         row(token_usage=usage(input=metric(state='partial'))), row(2, token_usage=None)]))
@@ -308,7 +308,7 @@ def test_loaded_cost_merges_rows_once_and_never_adds_cache_tokens():
 def test_dashboard_reference_scope_and_cache_assumption_are_in_details():
     html = run_js('dashboard', dashboard_payload())
     visible, details = html.split('<details data-token-filters', 1)
-    assert '总 Token' in visible and '约 15' in visible and '$0.0003' in visible
+    assert '工具文本 Token' in visible and '约 15' in visible and '$0.0003' in visible
     assert 'MCP 请求参数' not in visible and '90% 假设' in visible
     assert 'GPT-6 Astra' in visible
     assert 'cache_read_percent' in details and 'value="90"' in details
@@ -358,3 +358,20 @@ def test_export_preserves_assumptions_and_only_current_authorized_aggregates():
     assert parsed['summary']['actual_usage'] is None
     assert 'must-not-export' not in exported and 'private-authority' not in exported
     assert 'options' not in parsed and 'secret' not in parsed
+
+
+def test_dashboard_essential_context_limit_remains_outside_collapsed_details():
+    html = run_js('dashboard', dashboard_payload())
+    visible, details = html.split('<details data-token-filters', 1)
+    assert '未包含完整对话上下文，非实际账单。' in visible
+    assert '1 次调用' in visible and '90% 假设' in visible
+    assert '<span>总 Token</span>' not in visible
+    assert 'Unicode' not in visible and '272K' not in visible
+    assert 'data-token-filter=' not in visible and 'data-token-export' not in visible
+    assert details.startswith('><summary>查看详情</summary>')
+    for name, label in [('settings', '筛选与估价设置'), ('breakdown', '请求与响应明细'),
+                        ('trend', '用量趋势'), ('pricing', '计价依据与限制')]:
+        assert f'data-token-panel="{name}"><summary>{label}</summary>' in details
+    assert 'data-token-panel="help"><summary>统计说明</summary>' in details
+    assert 'data-token-panel="settings" open' not in html
+    assert 'data-token-panel="trend" open' not in html
