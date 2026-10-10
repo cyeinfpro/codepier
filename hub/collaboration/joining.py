@@ -66,6 +66,8 @@ class JoiningService:
 
     def join(self, raw, principal):
         args = validate(contracts.JoinCode, raw)
+        if args['code'].startswith('CPD-'):
+            return self.c.dots.join(args, principal)
         with self.store.transaction():
             self.c.guard()
             principal = refresh_principal(self.store, principal)
@@ -205,6 +207,9 @@ class JoiningService:
         return result
 
     def view(self, room, slot, principal):
+        dot = self.c.dots.find(slot['id'])
+        if dot:
+            return self.c.dots.slot_view(room, slot, dot, principal)
         state = slot['state']
         if slot['expires_at'] <= self.c.clock() and state != 'revoked':
             state = 'expired'
@@ -256,9 +261,17 @@ class JoiningService:
                 'confirmation_event_ids': [row['test']['event_id'] for row in active]
                     if active and all(row['test'] and row['test']['state'] == 'accepted' for row in active) else []}
 
-    def list(self, room, principal):
-        return [self.view(room, row, principal) for row in self.store.all(
-            "SELECT * FROM collaboration_join_slots WHERE room_id=? ORDER BY (state='revoked' OR expires_at<=?),created DESC,id DESC LIMIT 64", (room['id'], self.c.clock()))]
+    def list(self, room, principal, conversation_id=''):
+        rows = self.store.all(
+            "SELECT * FROM collaboration_join_slots WHERE room_id=? ORDER BY (state='revoked' OR expires_at<=?),created DESC,id DESC LIMIT 64", (room['id'], self.c.clock()))
+        result = []
+        for row in rows:
+            dot = self.c.dots.find(row['id'])
+            if dot and ((conversation_id and dot['conversation_id'] != conversation_id)
+                        or (principal.grant_id and row['grant_id'] != principal.grant_id)):
+                continue
+            result.append(self.view(room, row, principal))
+        return result
 
     def control(self, raw, principal):
         args = validate(contracts.JoinSlotControl, raw)
@@ -272,6 +285,11 @@ class JoiningService:
                     raise DevError('STALE_VERSION', '这个智能体位置已改变；请刷新状态后重试', 409)
                 action = args['action']
                 if action == 'revoke':
+                    dot = self.c.dots.find(slot['id'])
+                    if dot and dot['policy_id']:
+                        policy = self.c.delegation.policy(room, dot['policy_id'])
+                        self.c.delegation.stop(policy, 'DOT_REVOKED')
+                        self.store.execute("UPDATE delegation_policies SET state='paused',version=version+1,updated=? WHERE id=?", (self.c.clock(), policy['id']))
                     self.store.execute("UPDATE collaboration_join_slots SET state='revoked' WHERE id=?", (slot['id'],))
                     self.store.execute("""UPDATE mcp_event_subscriptions SET state='revoked',version=version+1,updated=?
                         WHERE id IN (SELECT subscription_id FROM collaboration_join_routes WHERE slot_id=?)""", (self.c.clock(), slot['id']))
@@ -284,7 +302,8 @@ class JoiningService:
                         if current['state'] != 'invited':
                             raise DevError('JOIN_ALREADY_REGISTERED', '已登记的位置不更换连接；需要新聊天时请创建独立位置', 409)
                         self.store.execute('UPDATE collaboration_join_slots SET join_code=?,code_expires_at=? WHERE id=?',
-                                           (new_code(), min(self.c.clock() + 1800, current['expires_at']), slot['id']))
+                                           (new_code().replace('CPJ-', 'CPD-', 1) if self.c.dots.find(slot['id']) else new_code(),
+                                            min(self.c.clock() + 1800, current['expires_at']), slot['id']))
                     else:
                         routes = [row for row in self.routes(room, current) if row['available']]
                         if not routes:

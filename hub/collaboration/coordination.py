@@ -453,6 +453,9 @@ class CoordinationService:
                     (attempt, fence, until, now, item['id']))
                 self.store.execute('INSERT INTO coordination_attempts VALUES (?,?,?,?,?)',
                     (item['id'], attempt, fence, principal.grant_id, now))
+                self.c.delegation.project_progress(room, goal, self.work(goal, item['id']),
+                    '已领取任务，开始处理。', principal, 'delegation-received:' + item['id'] + ':' + str(attempt),
+                    system_receipt=True)
                 return {'work_item': self.work_view(self.work(goal, item['id']))}
             return self.mutation(principal, room, 'work_claim', args, take)
 
@@ -481,6 +484,25 @@ class CoordinationService:
                 self.store.execute('UPDATE coordination_work SET lease_until=?,updated=? WHERE id=?', (until, self.c.clock(), item['id']))
                 return {'work_item': self.work_view(self.work(goal, item['id']))}
             return self.mutation(principal, room, 'work_heartbeat', args, extend)
+
+    def progress(self, raw, principal):
+        args = validate(contracts.WorkProgress, raw)
+        with self.store.transaction():
+            principal, room, goal = self.scope(principal, args, active=True)
+            def save():
+                item = self.lease(principal, goal, args)
+                budget = json.loads(goal['spec'])['budget']
+                if goal['messages'] >= budget['max_messages']:
+                    raise DevError('GOAL_BUDGET_EXCEEDED', '目标通信预算已用尽，仍可提交真实最终结果', 409)
+                if not self.c.delegation.goal_link(goal):
+                    raise DevError('DELEGATION_REQUIRED', '原话题进展需要关联的房主任务；普通目标使用 goal_message', 409)
+                identifier = 'delegation-progress:' + digest([goal['id'], item['id'], item['attempt'], args['idempotency_key']])
+                self.c.delegation.project_progress(room, goal, item, args['summary'], principal, identifier)
+                until = min(goal['expires_at'], self.c.clock() + budget['lease_seconds'])
+                self.store.execute('UPDATE coordination_work SET lease_until=?,updated=? WHERE id=?', (until, self.c.clock(), item['id']))
+                self.store.execute('UPDATE coordination_goals SET messages=messages+1 WHERE id=?', (goal['id'],))
+                return {'message_id': identifier, 'work_item': self.work_view(self.work(goal, item['id']))}
+            return self.mutation(principal, room, 'work_progress', args, save)
 
     def admit(self, raw, principal):
         args = validate(contracts.WorkExecute, raw)
@@ -704,6 +726,6 @@ class CoordinationService:
         handlers = {'collaboration_goal_create': self.create, 'collaboration_goal_update': self.update,
             'collaboration_goal_read': self.read, 'collaboration_work_create': self.work_create,
             'collaboration_work_assign': self.work_assign, 'collaboration_work_claim': self.work_claim,
-            'collaboration_work_heartbeat': self.heartbeat, 'collaboration_work_result': self.result,
+            'collaboration_work_progress': self.progress, 'collaboration_work_heartbeat': self.heartbeat, 'collaboration_work_result': self.result,
             'collaboration_goal_message': self.message}
         return handlers[name](raw, principal)

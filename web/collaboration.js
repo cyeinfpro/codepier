@@ -249,6 +249,8 @@ window.CodePierCollaboration = (() => {
     state.delegationPolicies = [];
     state.draft = {};
     state.joinDraft = {};
+    state.dotDraft = {};
+    state.dotTargets = [];
     state.notes = '';
     state.error = false;
   }
@@ -396,13 +398,14 @@ window.CodePierCollaboration = (() => {
   const notificationSlots = () => (state.snapshot?.join_slots || []).filter(liveJoin);
   const slotMember = (id) => state.members.find((m) => m.slot_id === id || m.id === id);
   const mentionSlots = () =>
-    (state.snapshot?.join_slots || []).map((slot) => slotMember(slot.id) || slot);
+    (state.snapshot?.join_slots || []).map((slot) => ({ ...slot, ...slotMember(slot.id) }));
   function mentionReadiness(slot) {
     const member = slotMember(slot.id);
     if (state.snapshot?.room?.state !== 'active') return '房间已暂停，提醒不可投递';
     if (!liveJoin(slot)) return '位置已到期或撤销，需要重新接通';
     if (slot.state !== 'registered') return '尚未加入，先完成聊天连接';
     if (slot.status === 'authorization_unavailable') return '原连接授权不可用';
+    if (slot.task_dot) return slot.task_status?.notification_state === 'active' ? '任务订阅已连接，等待实际处理回执' : '任务订阅尚未完成；任务保留排队';
     if (!state.snapshot?.capabilities?.message_notifications) return '消息提醒服务未启用';
     if (!member) return '尚未核对房间提醒订阅';
     if (member.message_notification_state !== 'active') return '尚未订阅此房间的 @ 提醒';
@@ -471,6 +474,7 @@ window.CodePierCollaboration = (() => {
     );
   }
   function patchMemberStatus() {
+    dots.refreshCards();
     for (const node of document.querySelectorAll('[data-cc-mention-status]')) {
       const slot = mentionSlots().find((item) => item.id === node.dataset.ccMentionStatus);
       node.textContent = slot ? mentionReadiness(slot) : '位置已不可用，请重新核对';
@@ -520,7 +524,9 @@ window.CodePierCollaboration = (() => {
     const author =
       ['owner', 'panel_owner'].includes(m.author_kind) || m.kind === 'owner_command'
         ? '你'
-        : '助手连接';
+        : ['delegation_progress', 'delegation_result'].includes(m.kind) && m.display_name
+          ? m.display_name
+          : '助手连接';
     const root = m.thread_root_id || m.reply_to_id;
     const job = (state.snapshot?.jobs || []).find(
       (j) => j.id === (m.job_id || body.job_id) || j.context?.origin_message_id === m.id,
@@ -579,7 +585,7 @@ window.CodePierCollaboration = (() => {
     const d = state.snapshot,
       c = chat();
     const enabled = d.capabilities?.plain_messages && d.can_manage && d.room.state === 'active';
-    return `<section class="cc-conversation"><div class="cc-timeline-wrap"><div class="cc-feed" tabindex="0" aria-label="共享讨论记录"><div class="cc-history">${c.older ? button('older-messages', '加载更早消息') : ''}</div><div class="cc-message-list" role="log" aria-label="房间消息" aria-live="polite" aria-relevant="additions text">${c.messages.map(messageMarkup).join('') || `<div class="cc-chat-empty"><span class="cc-empty-symbol" aria-hidden="true">↗</span><h3>从一句话开始。</h3><p>说说你的想法，讨论会留在这个房间。</p><p>需要落实时，选择助手并交给它处理。</p>${d.join_slots?.length ? '<small>已登记助手连接；以实际领取与结果确认进度。</small>' : '<button type="button" class="btn" data-cc-action="open-members">添加 dot 或 Work 连接</button>'}</div>`}</div></div><button type="button" class="btn cc-new-messages" data-cc-action="latest" ${c.unread ? '' : 'hidden'}>${c.unread} 条新消息 ↓</button></div><div class="cc-compose-wrap"><form id="cc-command" class="cc-composer"><div id="cc-draft-context">${draftContext()}</div><div id="cc-delegation-context">${delegationContext()}</div><label class="cc-sr-only" for="cc-message-input">房间消息</label><textarea id="cc-message-input" name="request" rows="2" maxlength="4000" required ${enabled ? '' : 'disabled'} placeholder="${enabled ? '说说你的想法，或 @一个助手连接…' : '普通消息暂不可用，请核对房间与服务能力'}">${E(c.draft)}</textarea><div class="cc-compose-controls">${button('mentions', '@ 提醒', {}, enabled && d.capabilities?.message_notifications ? '' : 'disabled')}${coordination.action()}<span id="cc-send-mode">${delegationComposer()}</span><small>来源 · ${E(projectLabel(state.project))}</small><button class="btn primary" type="submit" ${enabled ? '' : 'disabled'}>发送 ↑</button></div></form><div class="cc-compose-help"><span>普通讨论只提醒；委托按已确认范围处理</span><span class="cc-desktop-key">Enter 发送 · Shift + Enter 换行</span><span class="cc-mobile-key">Enter 换行</span></div></div></section>`;
+    return `<section class="cc-conversation"><div class="cc-timeline-wrap"><div class="cc-feed" tabindex="0" aria-label="共享讨论记录"><div class="cc-history">${c.older ? button('older-messages', '加载更早消息') : ''}</div><div class="cc-message-list" role="log" aria-label="房间消息" aria-live="polite" aria-relevant="additions text">${c.messages.map(messageMarkup).join('') || `<div class="cc-chat-empty"><span class="cc-empty-symbol" aria-hidden="true">↗</span><h3>从一句话开始。</h3><p>说说你的想法，讨论会留在这个房间。</p><p>需要落实时，选择助手并交给它处理。</p>${d.join_slots?.length ? '<small>已登记助手连接；以实际领取与结果确认进度。</small>' : '<button type="button" class="btn" data-cc-action="open-members">添加 dot</button>'}</div>`}</div></div><button type="button" class="btn cc-new-messages" data-cc-action="latest" ${c.unread ? '' : 'hidden'}>${c.unread} 条新消息 ↓</button></div><div class="cc-compose-wrap"><form id="cc-command" class="cc-composer"><div id="cc-draft-context">${draftContext()}</div><div id="cc-delegation-context">${delegationContext()}</div><label class="cc-sr-only" for="cc-message-input">房间消息</label><textarea id="cc-message-input" name="request" rows="2" maxlength="3900" required ${enabled ? '' : 'disabled'} placeholder="${enabled ? '说说你的想法，或 @一个助手连接…' : '普通消息暂不可用，请核对房间与服务能力'}">${E(c.draft)}</textarea><div id="cc-dot-suggestions" class="cc-dot-suggestions" role="listbox" aria-label="选择任务 dot" hidden></div><div class="cc-compose-controls">${button('mentions', '@ 助手', {}, enabled && d.capabilities?.message_notifications ? '' : 'disabled')}${coordination.action()}<span id="cc-send-mode">${delegationComposer()}</span><small>来源 · ${E(projectLabel(state.project))}</small><button class="btn primary" type="submit" ${enabled ? '' : 'disabled'}>发送 ↑</button></div></form><div class="cc-compose-help"><span>选择 dot 后直接交办；进度和结果回到原话题</span><span class="cc-desktop-key">Enter 发送 · Shift + Enter 换行</span><span class="cc-mobile-key">Enter 换行</span></div></div></section>`;
   }
   function memberStrip() {
     const slots = notificationSlots(),
@@ -950,6 +956,7 @@ window.CodePierCollaboration = (() => {
     state.snapshot = overview;
     state.members = members.items || [];
     delegation.updatePolicies(policies.items || []);
+      state.dotTargets = policies.execution_target_candidates || [];
     patchTimeline(forceBottom);
     patchMemberStatus();
     patchDelegationComposer();
@@ -1017,6 +1024,7 @@ window.CodePierCollaboration = (() => {
   const joinInstruction = (slot) => {
     if (!liveJoin(slot) || state.snapshot?.room?.state !== 'active') return '';
     if (slot.state === 'registered') return slot.subscription_instruction || '';
+    if (slot.task_dot) return joinStatus(slot) === 'invited' ? slot.join_instruction || '' : '';
     return joinStatus(slot) === 'invited' && slot.join_instruction
       ? slot.join_instruction +
           (slot.kind === 'work_cloud'
@@ -1027,7 +1035,12 @@ window.CodePierCollaboration = (() => {
           ' 通知为项目共享，加入不授权领取或执行任务，也不证明聊天身份。'
       : '';
   };
+  const dots = window.CodePierCollaborationDots.create({state, E, field, button, when, projectLabel,
+    chat, mentionSlots, delegation, showDrawer, closeDrawer, mutation,
+    patchDraftContext, patchDelegationComposer, liveJoin, joinInstruction, joinStatus});
+
   function joinCard(slot) {
+    if (slot.task_dot) return dots.card(slot);
     const d = state.snapshot;
     const status = joinStatus(slot);
     const live = liveJoin(slot);
@@ -1186,8 +1199,13 @@ window.CodePierCollaboration = (() => {
     return `<section class="cc-card cc-speaking" data-speaking-slot="${E(slot.id)}"><h3>房间讨论能力</h3><p data-cc-speaking-status="${E(slot.id)}">${member.can_speak ? '这个连接已获准在本房间发言' : '这个连接尚未获准在本房间发言'}</p><p class="cc-hint">同一授权下的多个聊天共享这项许可。标签不证明独立聊天身份；通知订阅、房间发言和任务资格分别管理。</p>${member.speaking_expires_at ? `<small>发言许可到期：${E(when(member.speaking_expires_at))}</small>` : ''}${state.snapshot.can_manage && member.grant_id ? `<div class="cc-actions">${button('message-access', member.can_speak ? '撤回这个连接的发言许可' : '审阅并允许这个连接发言', { id: member.grant_id }, `data-enabled="${!member.can_speak}" data-speaking-version="${member.speaking_version || 0}"`)}</div>` : ''}${instruction ? `<details ${expanded ? 'open' : ''}><summary>独立订阅 @ 提醒</summary><p class="cc-hint">已有 CPJ 通知不会自动增加此事件。将以下指令发到对应的原聊天，完成新的宿主确认。</p><label class="cc-field"><span>@ 提醒订阅指令</span><textarea class="cc-mention-instruction" readonly rows="5">${E(instruction)}</textarea></label>${button('mention-copy', '复制 @ 提醒订阅指令')}<p data-cc-mention-status="${E(slot.id)}">${E(mentionReadiness(slot))}</p></details>` : ''}</section>`;
   }
   function joining() {
+    if (!state.snapshot?.capabilities?.task_dots) return legacyJoining();
+    const legacyOnly = state.snapshot.join_slots?.length && !state.snapshot.join_slots.some((slot) => slot.task_dot);
+    return dots.render() + '<details class="cc-card cc-dot-legacy" ' + (legacyOnly ? 'open' : '') + '><summary>高级：旧通知与 Work 连接</summary>' + legacyJoining() + '</details>';
+  }
+  function legacyJoining() {
     const d = state.snapshot;
-    const slots = d.join_slots || [];
+    const slots = (d.join_slots || []).filter((slot) => !slot.task_dot);
     const form =
       d.can_manage && d.room.state === 'active'
         ? '<form id="cc-join-slot" class="cc-form"><div class="cc-two">' +
@@ -1358,6 +1376,7 @@ window.CodePierCollaboration = (() => {
       state.rooms = rooms.items || [];
       state.members = members.items || [];
       delegation.updatePolicies(policies.items || []);
+      state.dotTargets = policies.execution_target_candidates || [];
     }
     await coordination.load(data);
     if (gen !== state.generation || session !== S.session || space !== S.space_id) return '';
@@ -1383,6 +1402,7 @@ window.CodePierCollaboration = (() => {
   }
 
   async function act(action, element) {
+    if (action.startsWith('dot-')) return dots.act(action, element);
     const local = { local: true, message: '' };
     if (action.startsWith('goal-')) return coordination.act(action, element);
     if (
@@ -1528,8 +1548,14 @@ window.CodePierCollaboration = (() => {
         const policies = await getRecord('delegation_policies', '');
         if (generation !== state.generation || epoch !== state.drawerEpoch) return local;
         delegation.updatePolicies(policies.items || []);
+      state.dotTargets = policies.execution_target_candidates || [];
       }
       const slots = mentionSlots();
+      if (mentionSlots().some((slot) => slot.task_dot)) {
+        const legacy = mentionSlots().filter((slot) => !slot.task_dot);
+        showDrawer('选择 dot', dots.picker() + (legacy.length ? '<details><summary>其他助手</summary>' + legacy.map((slot) => delegation.pickerAction(slot) + button('pick-mention', '@' + slot.label + ' 仅提醒', slot)).join('') + '</details>' : ''), element);
+        return local;
+      }
       showDrawer(
         '选择提醒对象',
         `<p>选择已确认范围内的委托，或仅发送讨论提醒。正文不会自动决定执行方式。</p><div class="cc-mention-options">${slots.map((s) => `<div class="cc-mention-row">${delegation.pickerAction(s)}<button type="button" class="cc-mention-option" data-cc-action="pick-mention" data-id="${E(s.id)}" aria-pressed="${chat().mentions.includes(s.id) && !chat().delegationPolicy}"><strong>仅讨论提醒 · ${E(s.label)}</strong><span>${s.kind === 'dot' ? 'dot' : 'Work'} · ${E(s.id.slice(-6))}</span><small data-cc-mention-status="${E(s.id)}">${E(mentionReadiness(s))}</small></button>${button('mention-connect', '接通与回帖设置', s)}</div>`).join('') || empty('还没有聊天连接。先添加 dot 或 Work。')}</div>${button('open-members', '添加或管理助手连接')}<p class="cc-hint">请使用此处的结构化选择。纯文本 @ 不会派发；名称不证明独立聊天身份。</p>`,
@@ -1547,9 +1573,14 @@ window.CodePierCollaboration = (() => {
         const policies = await getRecord('delegation_policies', '');
         if (generation !== state.generation || epoch !== state.drawerEpoch) return local;
         delegation.updatePolicies(policies.items || []);
+      state.dotTargets = policies.execution_target_candidates || [];
       }
       const slot = mentionSlots().find((item) => item.id === element.dataset.id);
       if (!slot) throw new Error('这个聊天位置已不可用，请在助手与连接中核对。');
+      if (slot.task_dot) {
+        showDrawer('接入 ' + slot.label, dots.card(slot), element);
+        return local;
+      }
       if (action === 'mention-notifications') {
         showDrawer(
           '仅接收提醒 · ' + slot.label,
@@ -1615,7 +1646,7 @@ window.CodePierCollaboration = (() => {
         if (!(await selectPartition(source.project_id, source.environment_id))) return local;
       }
       chat().reply = action === 'reply' ? element.dataset.id : '';
-      if (chat().delegationAutomatic) delegation.selectPolicy(null);
+      if (chat().delegationAutomatic && !dots.selected()) delegation.selectPolicy(null);
       patchDraftContext();
       patchDelegationComposer();
       document.querySelector('#cc-message-input')?.focus();
@@ -1887,6 +1918,7 @@ window.CodePierCollaboration = (() => {
     });
   }
   async function submit(form) {
+    if (form.id === 'cc-dot-create') return dots.submit(form);
     if (form.id.startsWith('cc-goal-')) return coordination.submit(form);
     const data = Object.fromEntries(new FormData(form));
     if (['cc-new-conversation', 'cc-add-project'].includes(form.id)) {
@@ -1985,7 +2017,7 @@ window.CodePierCollaboration = (() => {
         }
         const acceptance = String(c.acceptance).trim();
         if (!acceptance) throw new Error('请填写本次委托的验收要求。');
-        if (c.delegationAutomatic) {
+        if (c.delegationAutomatic && !(c.reply && dots.selected())) {
           payload.dispatch_mode = 'automatic';
           payload.automatic_policy_version = c.delegationVersion;
         } else
@@ -2322,6 +2354,7 @@ window.CodePierCollaboration = (() => {
   }
   function composerChanged(event) {
     delegation.change(event);
+    dots.change(event);
     if (event.target.form?.id !== 'cc-command') return;
     const c = chat();
     if (event.target.name === 'request') c.draft = event.target.value;
@@ -2446,6 +2479,7 @@ window.CodePierCollaboration = (() => {
       state.composing = false;
     });
     root.addEventListener('keydown', (event) => {
+      if (dots.keydown(event)) return;
       if (!live()) return;
       if (event.target.id !== 'cc-message-input') return;
       if (

@@ -58,7 +58,8 @@ def make_router(auth, runtime):
     async def mutate(operation: str, body: dict, request: Request):
         def perform():
             principal = auth.admin(request, True)
-            handlers = {'delegation-policy': service.delegation.set_policy,
+            handlers = {'dot': service.dots.create,
+                        'delegation-policy': service.delegation.set_policy,
                         'delegation-policy-control': service.delegation.control,
                         'delegation-remind': service.delegation.remind,
                         'message-remind': service.chatroom.remind,

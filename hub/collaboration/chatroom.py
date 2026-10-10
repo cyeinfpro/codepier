@@ -14,7 +14,7 @@ class ChatroomService:
         self.c, self.store = collaboration, collaboration.store
 
     def capabilities(self):
-        return {'coordination_goals': True, 'direct_delegation': True, 'message_remind': True, 'plain_messages': True, 'message_notifications': self.c.config.events_enabled,
+        return {'task_dots': True, 'work_progress': True, 'coordination_goals': True, 'direct_delegation': True, 'message_remind': True, 'plain_messages': True, 'message_notifications': self.c.config.events_enabled,
                 'task_assignment': True, 'message_search': True, 'incremental_messages': True,
                 'read_cursors': True, 'attachments': False, 'human_memberships': False}
 
@@ -87,6 +87,14 @@ class ChatroomService:
                   'client_message_id': row['source_id'], 'related_goal_id': row['goal_id'],
                   'job_id': body.get('job_id'), 'result_id': body.get('result_id'),
                   'source_message_id': body.get('source_message_id')}
+        if row['kind'] in {'delegation_progress', 'delegation_result'}:
+            bound = self.store.one('''SELECT s.label,s.id FROM delegation_requests d
+                JOIN delegation_policies p ON p.id=d.policy_id JOIN collaboration_join_slots s ON s.id=p.slot_id
+                WHERE d.id=? AND d.room_id=? AND p.grant_id=?''',
+                (body.get('delegation_id', ''), row['room_id'], row['author']))
+            if bound:
+                result['display_name'] = bound['label']
+                result['slot_id'] = bound['id']
         if row['kind'] in {'owner_command', 'agent_proposal'}:
             job = self.store.one('SELECT id FROM collaboration_jobs WHERE room_id=? AND business_key=?',
                                  (row['room_id'], 'command:' + row['id']))
@@ -401,7 +409,7 @@ class ChatroomService:
 
     def members(self, room, principal, conversation):
         items = []
-        for slot in self.c.joining.list(room, principal):
+        for slot in self.c.joining.list(room, principal, conversation['id']):
             raw = self.c.joining.slot(room, slot['id'])
             access = self.store.one('SELECT * FROM conversation_writers WHERE conversation_id=? AND room_id=? AND grant_id=?', (conversation['id'], room['id'], raw['grant_id']))
             active = bool(access and access['enabled'] and access['expires_at'] > self.c.clock())

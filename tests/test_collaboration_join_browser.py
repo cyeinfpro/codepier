@@ -42,6 +42,8 @@ def open_room(page, stack):
     page.locator('[data-cc-action="create-room"]').click()
     expect(page.locator('#cc-command')).to_be_visible()
     page.locator('[data-cc-open-joins]').click()
+    # CPJ notification setup is intentionally secondary to the new CPD task-dot flow.
+    page.locator('.cc-dot-legacy > summary').click()
     expect(page.locator('#cc-join-slot')).to_be_visible()
 
 
@@ -237,6 +239,7 @@ def test_join_panel_drafts_navigation_and_logout_fence(collaboration_stack, chat
 
         # The server saves once while its response is interrupted. A later page
         # must retain a newer draft, and retrying the original intent reuses it.
+        page.locator('.cc-dot-legacy > summary').click()
         held = []
         def hold_creation(route):
             if not held:

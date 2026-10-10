@@ -67,20 +67,24 @@
       "bytes": 93445
     },
     "collaboration-delegation.js": {
-      "sha256": "96e5f64543c6bd194366a1f2ade2e6f505ed4336c18cdf35a52d8694b90a4e24",
-      "bytes": 42616
+      "sha256": "89d46e50ac4eee358801af0cccd4ee720707572057f666fb0ac392dafab31385",
+      "bytes": 43417
+    },
+    "collaboration-dots.js": {
+      "sha256": "8ce777631275e24152683cf9a42dc9f81c0611dd03c01ffb8aee518dbc03953d",
+      "bytes": 14226
     },
     "collaboration-goals.js": {
       "sha256": "d5572bb47e15fb3cb7483ee8de30ba1ff23875fb99b83446ad256d24e29c1c55",
       "bytes": 37439
     },
     "collaboration.css": {
-      "sha256": "cc160a45d46f4bac15716a9224c86a7a46e993aaad9a1e7a7fd70e43be664167",
-      "bytes": 30585
+      "sha256": "206165ce131d6099d608149443c0224862a88c056db3315f9bc4f8d463a82455",
+      "bytes": 32861
     },
     "collaboration.js": {
-      "sha256": "38c5d0b0323624a672b5187f6abb47023768df4ac7978e1850a70de54fffc7df",
-      "bytes": 126664
+      "sha256": "5e6c611a495d39c285e1359494395bef7dc8f09dd097dfb441c26e7bbdc98094",
+      "bytes": 129092
     },
     "computer.css": {
       "sha256": "3bfd6993ecee11cf6c23d78cc7b4f9acd6759ffaccc5e241ff06e156da7dfcac",
@@ -215,5 +219,5 @@
       "bytes": 25968
     }
   },
-  "template_sha256": "a8030e5c87a86b238c54b1eaf7391391470b4a97cbf61fd5bcd993fed625f196"
+  "template_sha256": "b5019efd17199ae4347d2cf1c83dbfb284b69a04fd4e4e1ccd296264f38c059d"
 }

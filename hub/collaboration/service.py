@@ -38,6 +38,8 @@ class CollaborationService:
         self.coordination = CoordinationService(self)
         from hub.collaboration.delegation import DelegationService
         self.delegation = DelegationService(self)
+        from hub.collaboration.dots import DotService
+        self.dots = DotService(self)
         self.events = None
         self.monitor = None
         self.secret = b''
@@ -830,7 +832,7 @@ class CollaborationService:
                     if args['id'] not in refs:
                         raise DevError('EVIDENCE_CONTEXT_MISMATCH', '此证据不属于指定任务或结果', 403)
             if kind == 'join_slots':
-                return {'items': self.joining.list(room, principal), 'next_cursor': None}
+                return {'items': self.joining.list(room, principal, args['conversation_id']), 'next_cursor': None}
             if kind in {'messages', 'jobs', 'goals', 'incidents', 'agents', 'subscriptions'}:
                 return self.listing(principal, room, kind, args['limit'], args['cursor'])
             if kind == 'job':
@@ -875,7 +877,7 @@ class CollaborationService:
                 for item in ('jobs', 'goals'):
                     page = self.chatroom.conversation_listing(principal, room, conversation['id'], item, args['limit'])
                     result[item], result[item + '_next_cursor'] = page['items'], page['next_cursor']
-            result['join_slots'] = self.joining.list(room, principal)
+            result['join_slots'] = self.joining.list(room, principal, conversation['id'])
             result['plan'] = self.monitor.plan_view(room) if self.monitor else None
             result['probes'] = self.monitor.probes_view(room, include_targets=bool(principal.admin and not principal.grant_id)) if self.monitor else []
             result['counts'] = {
@@ -935,7 +937,9 @@ class CollaborationService:
         name, raw = resolve(name, raw)
         if name in contracts.COORDINATION_TOOL_MODELS:
             return self.coordination.invoke(name, raw, principal)
-        handlers = {'collaboration_delegation_connection_read': self.delegation.consumer.connection,
+        handlers = {'collaboration_dot_connection': self.dots.connection,
+                    'collaboration_dot_inbox': self.dots.inbox,
+                    'collaboration_delegation_connection_read': self.delegation.consumer.connection,
                     'collaboration_delegation_inbox': self.delegation.consumer.inbox,
                     'collaboration_delegation_read': self.delegation.read, 'collaboration_message_create': self.chatroom.create, 'collaboration_join': self.joining.join, 'collaboration_read': self.read, 'collaboration_command_create': self.command,
                     'collaboration_claim': self.claim, 'collaboration_heartbeat': self.heartbeat,

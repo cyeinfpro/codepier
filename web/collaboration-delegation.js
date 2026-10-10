@@ -67,7 +67,7 @@ window.CodePierCollaborationDelegation = {
       return !!(
         policyAvailable(policy) &&
         policy.version === c.delegationVersion &&
-        (!c.delegationAutomatic || (policy.automatic_delegation === true && !c.reply)) &&
+        (!c.delegationAutomatic || (policy.automatic_delegation === true && (!c.reply || mentionSlots().find((slot) => slot.id === policy.slot_id)?.task_dot))) &&
         c.mentions.length === 1 &&
         c.mentions[0] === policy.slot_id
       );
@@ -186,6 +186,8 @@ window.CodePierCollaborationDelegation = {
       if (!state.snapshot?.capabilities?.direct_delegation) return '';
       const c = chat(),
         policy = c.mentions.length === 1 ? policyFor(c.mentions[0]) : null;
+      if (c.delegationPolicy && mentionSlots().find((slot) => slot.id === policy?.slot_id)?.task_dot)
+        return '<span class="cc-dot-send-mode">交给 @' + E(mentionSlots().find((slot) => slot.id === policy.slot_id).label) + button('dot-clear', '取消交办') + '</span>';
       return (
         '<label class="cc-send-mode"><span class="cc-sr-only">发送方式</span><select name="delegation_policy" aria-label="发送方式">' +
         '<option value=""' +
@@ -233,6 +235,8 @@ window.CodePierCollaborationDelegation = {
       if (!c.delegationPolicy) return '';
       const policy = selectedPolicy(),
         valid = selectedDelegationValid();
+      const dot = mentionSlots().find((slot) => slot.id === policy?.slot_id && slot.task_dot);
+      if (dot) return '<p class="cc-dot-scope-summary">' + E(valid ? projectLabel(state.project) + ' · ' + capabilitiesLabel(c.delegationCapabilities) + (dot.task_status?.notification_state === 'active' ? ' · 任务订阅已接通' : ' · 尚未订阅，任务将保留排队') : 'dot 范围已改变，请重新选择；正文已保留。') + '</p>';
       return (
         '<section class="cc-delegation-context" aria-label="本次委托范围"><div class="cc-row"><strong>本次发送将创建委托</strong>' +
         (valid && !c.delegationAutomatic ? button('delegation-scope', '修改本次范围') : '') +
