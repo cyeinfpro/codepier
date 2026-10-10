@@ -31,7 +31,7 @@ window.CodePierCollaborationRelay = {
       const partial = m.body?.dot_reply_complete === false;
       return `<article class="cc-message cc-relay-turn ${human ? 'is-owner' : 'is-dot'} ${m.body?.system_receipt ? 'is-receipt' : ''}" data-message-id="${E(m.id)}" data-project="${E(m.project_id || state.project)}" data-environment="${E(m.environment_id || state.environment)}" data-source-room="${E(m.source_room_id || m.room_id)}" data-sequence="${E(m.server_sequence || 0)}" data-version="${E(m.version || 1)}">
         <div class="cc-avatar ${human ? 'is-human' : ''}" aria-hidden="true">${E(name.slice(0,1))}</div>
-        <div class="cc-message-content"><div class="cc-message-meta"><strong>${E(name)}</strong><time title="${E(new Date(m.created*1000).toLocaleString())}">${E(new Date(m.created*1000).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false}))}</time>${partial ? '<small>回复更新中</small>' : ''}</div>
+        <div class="cc-message-content"><div class="cc-message-meta"><strong>${E(name)}</strong><time title="${E(new Date(m.created*1000).toLocaleString())}">${E(new Date(m.created*1000).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false}))}</time>${partial ? '<small>阶段回复</small>' : ''}</div>
         ${source}<div class="cc-rich-text cc-prose" data-rich-message="${E(m.id)}">${E(messageText(m))}</div>
         <div class="cc-relay-delivery">${statuses(m)}</div>
         <div class="cc-relay-extra">${proof ? `<details class="cc-reply-evidence"><summary>查看执行记录</summary>${proof}</details>` : ''}</div>
@@ -76,9 +76,10 @@ window.CodePierCollaborationRelay = {
       root.classList.toggle('cc-relay-focus', focused());
       root.dataset.relayMulti = String((state.snapshot?.conversation?.projects?.length || 1) > 1);
       const control = root.querySelector('[data-cc-action="relay-management"]');
-      if (control) control.textContent = state.relayManagement ? '专注对话' : '管理视图';
+      if (control) { control.textContent = state.relayManagement ? '专注对话' : '管理视图'; control.hidden = !active(); }
       if (active()) {
-        const c=chat(), candidates=mentionSlots().filter(s=>s.duplex&&s.state==='registered'&&!['authorization_unavailable','revoked','expired','room_paused'].includes(s.status));
+        const c=chat(); c.relayUsed=true;
+        const candidates=mentionSlots().filter(s=>s.duplex&&s.state==='registered'&&!['authorization_unavailable','revoked','expired','room_paused'].includes(s.status));
         if(!c.mentions.length&&!c.reply&&!c.relayRecipientCleared&&candidates.length===1) {
           c.mentions=[candidates[0].id];delegation.selectPolicy(null);patchDraftContext();patchDelegationComposer();
         }
@@ -150,9 +151,10 @@ window.CodePierCollaborationRelay = {
       c.relayFlight=true;
       try {
         while (true) {
-          const e=currentPending(c)[0];
-          if (!e || !visible(e) || e.phase==='error' || e.due>Date.now()) break;
-          if (e.anchor && !e.anchor.message) break;
+          // Preserve order within a topic. A failed unrelated topic must not
+          // block the whole conversation; only unresolved children wait for it.
+          const e=currentPending(c).find(row=>row.phase!=='error'&&row.due<=Date.now()&&(!row.anchor||row.anchor.message));
+          if (!e || !visible(e)) break;
           if (e.anchor) e.payload.reply_to_id=e.anchor.message.thread_root_id || e.anchor.message.id;
           if (navigator.onLine===false) { e.phase='retry'; e.due=Date.now()+3000; network('当前离线，消息和草稿保留在本页。恢复连接后继续发送。',true); break; }
           e.phase='sending'; e.attempts++; paintOutbox(c);
@@ -166,7 +168,7 @@ window.CodePierCollaborationRelay = {
             if (!belongs(e)) break;
             // An auth/validation failure is not a connectivity retry.
             if (error.status && ![408,429,500,502,503,504].includes(error.status)) {
-              e.phase='error';e.error=error.message; break;
+              e.phase='error';e.error=error.message; continue;
             }
             e.phase='checking'; paintOutbox(c);
             try {
@@ -185,7 +187,7 @@ window.CodePierCollaborationRelay = {
         }
       } finally {
         c.relayFlight=false; paintOutbox(c);
-        const e=currentPending(c)[0]; clearTimeout(retryTimer);
+        const e=currentPending(c).filter(row=>row.phase==='retry'&&(!row.anchor||row.anchor.message)).sort((a,b)=>a.due-b.due)[0]; clearTimeout(retryTimer);
         if (e && visible(e) && e.phase==='retry') retryTimer=setTimeout(()=>void drain(c),Math.max(500,e.due-Date.now()));
       }
     }
@@ -241,7 +243,7 @@ window.CodePierCollaborationRelay = {
       detach();chrome();hydrate(root);paintOutbox();
       const wake=()=>{if(root.isConnected&&S.page==='collaboration'&&!document.hidden){const c=chat();for(const e of pending(c)) if(e.phase==='retry')e.due=0;void drain(c);if(active())void sync();}};
 
-      const select=()=>{if(root.isConnected&&window.getSelection()?.isCollapsed)patchTimeline();};
+      const select=()=>{if(active()&&!state.busy&&root.isConnected&&window.getSelection()?.isCollapsed)patchTimeline();};
       window.addEventListener('online',wake);document.addEventListener('visibilitychange',wake);
       document.addEventListener('selectionchange',select);
       root.addEventListener('input',e=>{if(e.target.id==='cc-message-input')autosize();});
@@ -258,7 +260,7 @@ window.CodePierCollaborationRelay = {
       if(name==='relay-copy') {const text=messageById(node.dataset.id);if(text)void navigator.clipboard.writeText(messageText(text)).then(()=>{if(node.isConnected)node.textContent='已复制';}).catch(()=>network('复制未成功，请选中文字复制。',true));}
       return true;
     }
-    window.addEventListener('beforeunload',event=>{if([...state.chats.values()].some(c=>c.draft||pending(c).length)){event.preventDefault();event.returnValue='';}});
+    window.addEventListener('beforeunload',event=>{if([...state.chats.values()].some(c=>c.relayUsed&&(c.draft||pending(c).length))){event.preventDefault();event.returnValue='';}});
     return {active,focused,capable,isRelayMessage,renderMessage,hydrate,patchMessage,toolbar,chrome,autosize,topicHint,
       canSend,send,sync,delay,detach,purge,bind,action,outboxMarkup,paintOutbox,network};
   },

@@ -241,3 +241,29 @@ def test_single_dot_is_visible_default_but_explicit_clear_is_respected(collabora
         no_work(stack)
     finally:
         context.close()
+
+
+def test_failed_message_does_not_block_an_independent_new_topic(collaboration_stack,chat_browser_pool):
+    stack=collaboration_stack
+    context=chat_browser_pool('chromium').new_context(viewport={'width':1440,'height':920})
+    page=context.new_page()
+    try:
+        joined=prepare(stack,page)
+        def reject_one(route):
+            if route.request.post_data_json['body_text']=='Only this message is rejected.':
+                route.fulfill(status=422,json={'error':{'code':'INVALID_ARGUMENTS','message':'test single message rejected'}})
+            else:
+                route.continue_()
+        page.route('**/api/collaboration/message',reject_one)
+        send(page,'Only this message is rejected.',settle=False)
+        expect(page.locator('[data-cc-action="relay-retry"]')).to_be_visible()
+        page.locator('[data-cc-action="relay-new-topic"]').click()
+        send(page,'A separate valid discussion.',settle=False)
+        expect(page.locator('.cc-message.is-owner .cc-rich-text')).to_have_text('A separate valid discussion.',timeout=10000)
+        expect(page.locator('#cc-relay-outbox [data-pending-id]')).to_have_count(1)
+        expect(page.locator('#cc-relay-outbox')).to_contain_text('Only this message is rejected.')
+        items=call(stack,joined['inbox_request'])['items']
+        assert len(items)==1 and items[0]['message']['thread_root_id']==items[0]['message_id']
+        no_work(stack)
+    finally:
+        context.close()
