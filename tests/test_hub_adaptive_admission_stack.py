@@ -17,7 +17,7 @@ from shared.util import atomic_json
 from tests.support import running_stack, wait_for
 
 
-pytestmark = [pytest.mark.integration, pytest.mark.slow, pytest.mark.serial_regression]
+pytestmark = [pytest.mark.integration, pytest.mark.slow, pytest.mark.serial_regression, pytest.mark.resource_regression]
 
 
 def burst_capacity_ready(limits):
@@ -39,6 +39,24 @@ def owned_cpu_percent(stack):
         )
         return {roles[int(pid)]: float(cpu) for pid, cpu in
                 (line.split() for line in output.splitlines()) if int(pid) in roles}
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def host_cpu_leaders():
+    """Bounded diagnostic only: executable basenames and CPU, never argv/paths."""
+    try:
+        output = subprocess.check_output(["ps", "-A", "-o", "pcpu=,comm="],
+                                         text=True, timeout=1)
+        rows = []
+        for line in output.splitlines():
+            cpu, command = line.strip().split(None, 1)
+            # comm is an executable path, not a command line. Do not emit paths.
+            name = command.rsplit("/", 1)[-1]
+            if not name or any(character.isspace() for character in name):
+                name = "[redacted-name]"
+            rows.append({"name": name[:80], "cpu_percent": float(cpu)})
+        return sorted(rows, key=lambda row: row["cpu_percent"], reverse=True)[:8]
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
 
@@ -102,6 +120,7 @@ def test_real_128_waiting_burst_other_project_cancel_restart_and_exact_drain(tmp
                 "reported_reason": reported.get("reason"),
                 "reported_lanes": reported.get("lanes"),
                 "owned_ps_cpu_percent": owned_cpu_percent(stack), "cpu_count": os.cpu_count(),
+                "host_ps_cpu_leaders": host_cpu_leaders(),
                 "independent_os_observer": {
                     "source": sample.source, "cpu_busy": sample.cpu_busy,
                     "memory_available": sample.memory_available,

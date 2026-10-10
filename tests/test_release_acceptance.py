@@ -10,7 +10,7 @@ import zipfile
 import pytest
 
 from scripts import release_acceptance as acceptance
-from scripts.regression_plan import fingerprint
+from scripts.regression_plan import RESOURCE_LAYOUT, RESOURCE_NODEIDS, fingerprint
 
 
 def inventory(root):
@@ -104,15 +104,15 @@ def reports(tmp_path):
     commit = 'a' * 40
     files = {'module.py': {'sha256': 'b' * 64, 'bytes': 4, 'mode': 0o644}}
     source = {'module.py': 'b' * 64}
-    nodes = ['tests/test_example.py::test_' + str(i) for i in range(4)]
+    nodes = ['tests/test_example.py::test_' + str(i) for i in range(4)] + sorted(RESOURCE_NODEIDS)
     proof = {'schema': 1, 'commit': commit, 'files': files, 'archive_sha256': 'c' * 64,
              'source_inventory_sha256': 'd' * 64, 'commit_binding_verified': True,
              'post_regression_source_verified': True}
     paths = []
-    for i in range(4):
+    for i in range(5):
         directory = tmp_path / str(i)
         directory.mkdir()
-        summary = {'verified': True, 'shard': {'index': i, 'count': 4}, 'full_collection': nodes,
+        summary = {'verified': True, 'layout': RESOURCE_LAYOUT, 'shard': {'index': i, 'count': 5}, 'full_collection': nodes,
                    'collection_sha256': fingerprint(nodes), 'source_inventory_sha256': fingerprint(source),
                    'outcomes': {nodes[i]: 'passed'}}
         path = directory / 'summary.json'
@@ -123,7 +123,7 @@ def reports(tmp_path):
     return paths, commit
 
 
-def test_four_complete_archive_shards_bind_one_commit(tmp_path):
+def test_five_complete_archive_shards_bind_one_commit(tmp_path):
     paths, commit = reports(tmp_path)
     assert acceptance.verify_reports(paths, commit)['verified']
 
@@ -160,9 +160,29 @@ def test_aggregate_rejects_missing_stale_or_mixed_evidence(tmp_path, change):
 
 def test_workflow_preserves_matrix_and_runs_extracted_source():
     workflow = (Path(__file__).resolve().parents[1] / '.github/workflows/ci.yml').read_text()
-    for fragment in ['os: [ubuntu-24.04, macos-15]', 'shard: [0, 1, 2, 3]',
+    for fragment in ['os: [ubuntu-24.04, macos-15]', 'shard: [0, 1, 2, 3, 4]', '--resource-shard', 'Resource admission',
                      'windows-core:', 'oidc-authentik:', 'release_acceptance.py prepare',
                      'release_acceptance.py finish', 'release_acceptance.py verify',
                      'cd "$ACCEPTANCE"', 'MCP_COMPAT_PYTHON:', '--coverage',
                      'dist/ci-results/archive-proof.json']:
         assert fragment in workflow
+
+
+@pytest.mark.parametrize('change', ['old_layout', 'resource_missing', 'resource_misplaced', 'extra_resource'])
+def test_release_requires_dedicated_resource_execution(tmp_path, change):
+    paths, commit = reports(tmp_path)
+    resource = next(iter(RESOURCE_NODEIDS))
+    data = [json.loads(path.read_text()) for path in paths]
+    if change == 'old_layout':
+        for value in data:
+            value['layout'] = 'ordinary'
+    elif change == 'resource_missing':
+        data[4]['outcomes'].clear()
+    elif change == 'resource_misplaced':
+        data[0]['outcomes'][resource] = data[4]['outcomes'].pop(resource)
+    else:
+        data[4]['outcomes']['tests/test_other.py::test_extra'] = 'passed'
+    for path, value in zip(paths, data):
+        acceptance.write_json(path, value)
+    with pytest.raises(ValueError):
+        acceptance.verify_reports(paths, commit)

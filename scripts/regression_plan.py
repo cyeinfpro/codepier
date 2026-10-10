@@ -20,13 +20,25 @@ def available_workers() -> int:
     return max(1, (getattr(os, "process_cpu_count", os.cpu_count)() or 1))
 
 
-def plan_jobs(nodeids, markers=None, *, shard_index=0, shard_count=1):
+RESOURCE_LAYOUT = "four-plus-resource-v1"
+RESOURCE_NODEIDS = frozenset({
+    "tests/test_hub_adaptive_admission_stack.py::test_real_128_waiting_burst_other_project_cancel_restart_and_exact_drain",
+})
+
+
+def plan_jobs(nodeids, markers=None, *, shard_index=0, shard_count=1, resource_shard=False):
     """Keep module fixtures together, except explicitly independent matrix cases."""
     if not 1 <= shard_count <= 64 or not 0 <= shard_index < shard_count:
         raise ValueError("Require 1 <= shard_count <= 64 and 0 <= shard_index < shard_count")
     if len(set(nodeids)) != len(nodeids):
         raise ValueError("Collection contains duplicate node IDs")
     markers = markers or {}
+    if resource_shard:
+        if shard_count != 5:
+            raise ValueError("Resource layout requires four ordinary shards and one resource shard")
+        marked = {node for node in nodeids if "resource_regression" in markers.get(node, [])}
+        if marked != RESOURCE_NODEIDS or not RESOURCE_NODEIDS <= set(nodeids):
+            raise ValueError("Resource test collection/markers differ from the explicit release contract")
     grouped: dict[str, list[str]] = {}
     by_module: dict[str, list[str]] = {}
     for nodeid in nodeids:
@@ -37,8 +49,18 @@ def plan_jobs(nodeids, markers=None, *, shard_index=0, shard_count=1):
         key = nodeid if "isolated_case" in markers.get(nodeid, []) else module
         grouped.setdefault(key, []).append(nodeid)
     jobs = []
+    ordinary_ordinal = 0
     for ordinal, (key, selected) in enumerate(sorted(grouped.items())):
-        if ordinal % shard_count != shard_index:
+        if resource_shard:
+            resource = bool(set(selected) & RESOURCE_NODEIDS)
+            if resource and not set(selected) <= RESOURCE_NODEIDS:
+                raise ValueError("Resource tests must own their complete isolated job")
+            assigned = 4 if resource else ordinary_ordinal % 4
+            if not resource:
+                ordinary_ordinal += 1
+        else:
+            assigned = ordinal % shard_count
+        if assigned != shard_index:
             continue
         module = selected[0].split("::", 1)[0]
         name = Path(module).with_suffix("").as_posix().removeprefix("tests/").replace("/", "__")
@@ -93,15 +115,26 @@ def merge_summaries(summaries):
     count = first["shard"]["count"]
     if len(summaries) != count or {s["shard"]["index"] for s in summaries} != set(range(count)):
         raise ValueError("Missing or duplicate shard reports")
+    layout = first.get("layout", "ordinary")
+    if layout not in {"ordinary", RESOURCE_LAYOUT} or (layout == RESOURCE_LAYOUT and count != 5):
+        raise ValueError("Unknown or incomplete regression layout")
     expected = first["full_collection"]
+    if layout == RESOURCE_LAYOUT and not RESOURCE_NODEIDS <= set(expected):
+        raise ValueError("Required resource tests are absent from collection")
     if len(expected) != len(set(expected)) or not expected:
         raise ValueError("Invalid full collection")
     outcomes: dict[str, str] = {}
     for summary in summaries:
-        if (summary["shard"]["count"] != count or summary["full_collection"] != expected or
+        if (summary.get("layout", "ordinary") != layout or
+                summary["shard"]["count"] != count or summary["full_collection"] != expected or
                 summary["collection_sha256"] != fingerprint(expected) or
                 summary["source_inventory_sha256"] != first["source_inventory_sha256"]):
             raise ValueError("Shard source or collection fingerprints differ")
+        if layout == RESOURCE_LAYOUT:
+            resource_outcomes = set(summary["outcomes"]) & RESOURCE_NODEIDS
+            if ((summary["shard"]["index"] == 4 and set(summary["outcomes"]) != RESOURCE_NODEIDS) or
+                    (summary["shard"]["index"] != 4 and resource_outcomes)):
+                raise ValueError("Resource tests must execute exactly once in the dedicated shard")
         if not summary.get("verified") or summary.get("source_changed_during_run"):
             raise ValueError("A shard is failed, skipped, incomplete or stale")
         if summary.get("unexpected_tests") or summary.get("duplicate_phases") or summary.get("module_failures"):
@@ -111,7 +144,7 @@ def merge_summaries(summaries):
         outcomes.update(summary["outcomes"])
     if set(outcomes) != set(expected) or any(value != "passed" for value in outcomes.values()):
         raise ValueError("Merged test outcomes are missing, unexpected or not passing")
-    return {"verified": True, "scope": "complete", "shards": count, "collected": len(expected),
+    return {"verified": True, "scope": "complete", "layout": layout, "shards": count, "collected": len(expected),
             "counts": {"passed": len(expected), "failed": 0, "skipped": 0, "missing": 0},
             "collection_sha256": fingerprint(expected),
             "source_inventory_sha256": first["source_inventory_sha256"]}

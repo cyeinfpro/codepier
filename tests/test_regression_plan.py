@@ -134,3 +134,70 @@ def test_large_collection_has_linear_node_parsing_budget():
     assert sum(len(job['nodeids']) for job in jobs) == len(nodes)
     assert all(job['selectors'] == [job['module']] for job in jobs)
     assert CountedNode.splits <= 3 * len(nodes)
+
+
+def resource_reports():
+    from scripts.regression_plan import RESOURCE_LAYOUT, RESOURCE_NODEIDS
+    nodes = NODES + sorted(RESOURCE_NODEIDS)
+    markers = MARKERS | {node: ['resource_regression', 'serial_regression'] for node in RESOURCE_NODEIDS}
+    result = []
+    for index in range(5):
+        jobs = plan_jobs(nodes, markers, shard_index=index, shard_count=5, resource_shard=True)
+        result.append({'layout': RESOURCE_LAYOUT, 'shard': {'index': index, 'count': 5},
+                       'full_collection': nodes, 'collection_sha256': fingerprint(nodes),
+                       'source_inventory_sha256': 'source-fixture', 'verified': True,
+                       'outcomes': {node: 'passed' for job in jobs for node in job['nodeids']}})
+    return result
+
+
+def test_resource_shard_is_exactly_once_and_has_no_preceding_jobs():
+    from scripts.regression_plan import RESOURCE_NODEIDS
+    reports = resource_reports()
+    assert set(reports[4]['outcomes']) == RESOURCE_NODEIDS
+    assert all(not set(report['outcomes']) & RESOURCE_NODEIDS for report in reports[:4])
+    assert merge_summaries(reports)['collected'] == len(NODES) + len(RESOURCE_NODEIDS)
+
+
+@pytest.mark.parametrize('problem', ['missing_marker', 'missing_test', 'extra_marked', 'extra_in_module', 'wrong_count'])
+def test_resource_layout_rejects_silent_collection_drift(problem):
+    from scripts.regression_plan import RESOURCE_NODEIDS
+    resource = next(iter(RESOURCE_NODEIDS))
+    nodes = NODES + [resource]
+    markers = MARKERS | {resource: ['resource_regression']}
+    count = 5
+    if problem == 'missing_marker':
+        markers.pop(resource)
+    elif problem == 'missing_test':
+        nodes.remove(resource)
+    elif problem == 'extra_marked':
+        markers[NODES[0]] = ['resource_regression']
+    elif problem == 'extra_in_module':
+        nodes.append(resource.split('::')[0] + '::test_unregistered')
+    else:
+        count = 4
+    with pytest.raises(ValueError):
+        plan_jobs(nodes, markers, shard_count=count, resource_shard=True)
+
+
+@pytest.mark.parametrize('problem', ['missing_shard', 'duplicate_shard', 'missing_case', 'duplicate_case',
+                                    'misplaced_resource', 'layout_mixed', 'failed_resource'])
+def test_resource_merge_rejects_incomplete_or_misplaced_evidence(problem):
+    from scripts.regression_plan import RESOURCE_NODEIDS
+    reports = resource_reports()
+    node = next(iter(RESOURCE_NODEIDS))
+    if problem == 'missing_shard':
+        reports.pop()
+    elif problem == 'duplicate_shard':
+        reports[4]['shard']['index'] = 0
+    elif problem == 'missing_case':
+        reports[4]['outcomes'].clear()
+    elif problem == 'duplicate_case':
+        reports[0]['outcomes'][node] = 'passed'
+    elif problem == 'misplaced_resource':
+        reports[0]['outcomes'][node] = reports[4]['outcomes'].pop(node)
+    elif problem == 'layout_mixed':
+        reports[4]['layout'] = 'ordinary'
+    else:
+        reports[4]['verified'] = False
+    with pytest.raises(ValueError):
+        merge_summaries(reports)

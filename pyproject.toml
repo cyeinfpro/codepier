@@ -9,6 +9,7 @@ markers = [
   "smoke: bounded login/project/Agent/tool/audit golden path",
   "windows_core: portable core plus Windows-specific recovery contracts run in Windows CI",
   "isolated_case: independent expensive parameter case that can run in its own pytest process",
+  "resource_regression: real OS capacity acceptance requiring its own fresh release CI runner",
   "serial_regression: timing or restart-sensitive module that must not overlap another full-regression process",
 ]
 

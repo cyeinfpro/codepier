@@ -22,7 +22,7 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from scripts.regression_plan import available_workers, classify_events, fingerprint, plan_jobs, pytest_command
+from scripts.regression_plan import RESOURCE_LAYOUT, available_workers, classify_events, fingerprint, plan_jobs, pytest_command
 PLUGIN = '''import json, os
 from pathlib import Path
 
@@ -89,6 +89,7 @@ def main():
     parser.add_argument('--workers', type=int, default=1, help='Concurrent isolated jobs, bounded by available CPUs')
     parser.add_argument('--shard-count', type=int, default=1)
     parser.add_argument('--shard-index', type=int, default=0)
+    parser.add_argument('--resource-shard', action='store_true', help='Use four ordinary shards plus one exact resource-test shard')
     parser.add_argument('--coverage', action='store_true', help='Capture parent/child Python coverage without a legacy whole-suite threshold')
     parser.add_argument('--timeout', type=int, default=900)
     args = parser.parse_args()
@@ -124,7 +125,7 @@ def main():
         return result.returncode
     full_collection = json.loads((output/'collection.json').read_text())
     markers = json.loads((output/'markers.json').read_text())
-    jobs = plan_jobs(full_collection, markers, shard_index=args.shard_index, shard_count=args.shard_count)
+    jobs = plan_jobs(full_collection, markers, shard_index=args.shard_index, shard_count=args.shard_count, resource_shard=args.resource_shard)
     selected = {nodeid for job in jobs for nodeid in job['nodeids']}
     expected = [nodeid for nodeid in full_collection if nodeid in selected]
     modules = sorted({job['module'] for job in jobs})
@@ -212,6 +213,7 @@ def main():
     counts = {state:sum(s==state for s in outcomes.values()) for state in ('passed','failed','skipped','missing')}
     summary = {'collected':len(expected),'total_collected':len(full_collection),'modules':len(modules),'jobs':len(jobs),'workers':args.workers,'limited_jobs':len(limited_jobs),'limited_workers':limited_workers,'exclusive_jobs':len(exclusive_jobs),'counts':counts,
                'shard':{'index':args.shard_index,'count':args.shard_count},
+               'layout':RESOURCE_LAYOUT if args.resource_shard else 'ordinary',
                'coverage_requested':args.coverage,'coverage_error':coverage_error,
                'scope':'complete' if args.shard_count == 1 else 'shard',
                'full_collection':full_collection,'collection_sha256':fingerprint(full_collection),

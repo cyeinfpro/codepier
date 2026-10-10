@@ -672,3 +672,21 @@ class DelegationService:
             (identifier, room['id'], link['conversation_id'], source['thread_root_id'], source['thread_root_id'],
              source['id'], principal.grant_id, 'bound_connector', identifier, 'delegation_result', canonical(result),
              body['outcome'], goal['id'], self.c.clock()))
+
+    def project_progress(self, room, goal, item, summary, principal, identifier, *, system_receipt=False):
+        link = self.goal_link(goal)
+        if not link:
+            return None
+        source = self.c.object('collaboration_messages', room, link['message_id'])
+        body = redact({'body_text': summary, 'summary': summary, 'delegation_id': link['id'],
+            'work_item_id': item['id'], 'source_message_id': source['id'], 'attempt': item['attempt'],
+            'fencing_token': item['fencing_token'], 'system_receipt': system_receipt,
+            'provenance_project_ids': sorted(set(json.loads(goal['spec'])['project_ids'])),
+            'mentions': [], 'notifications': [], 'execution_verified': False})
+        self.store.execute("""INSERT OR IGNORE INTO collaboration_messages
+            (id,room_id,conversation_id,thread_id,thread_root_id,reply_to_id,author,origin,source_id,kind,body,state,goal_id,created)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (identifier, room['id'], link['conversation_id'], source['thread_root_id'], source['thread_root_id'],
+             source['id'], principal.grant_id, 'bound_connector', identifier, 'delegation_progress', canonical(body),
+             'saved', goal['id'], self.c.clock()))
+        return identifier

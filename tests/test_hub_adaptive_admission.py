@@ -541,3 +541,28 @@ def test_wire_project_snapshot_cannot_refresh_node_admission(runtime):
     r._heartbeat("dev", peer, {}, {"scheduler": snapshot() | {"scope": "project"},
         "scheduler_revision": REVISION, "admission": telemetry(time.monotonic())})
     assert r._admission_budget("dev").node == 64
+
+
+def test_host_cpu_diagnostic_is_bounded_basename_only(monkeypatch):
+    import tests.test_hub_adaptive_admission_stack as stack_test
+    calls = []
+    def ps(command, **kwargs):
+        calls.append(command)
+        return '90.0 /private/example/worker\n80.0 /private/example/name with spaces\n' + ''.join(
+            f'{i}.0 /tmp/private/worker-{i}\n' for i in range(12))
+    monkeypatch.setattr(stack_test.subprocess, 'check_output', ps)
+    result = stack_test.host_cpu_leaders()
+    assert calls == [['ps', '-A', '-o', 'pcpu=,comm=']]
+    assert len(result) == 8
+    assert result[0] == {'name': 'worker', 'cpu_percent': 90.0}
+    assert result[1]['name'] == '[redacted-name]'
+    assert all('/' not in row['name'] and 'private' not in row['name'] for row in result)
+
+
+def test_host_cpu_diagnostic_unavailable_does_not_change_admission(monkeypatch):
+    import tests.test_hub_adaptive_admission_stack as stack_test
+    def failed(*args, **kwargs):
+        raise OSError('unavailable')
+    monkeypatch.setattr(stack_test.subprocess, 'check_output', failed)
+    assert stack_test.host_cpu_leaders() is None
+    assert not stack_test.burst_capacity_ready({'reason': 'pressure', 'project_pending_limit': 32})

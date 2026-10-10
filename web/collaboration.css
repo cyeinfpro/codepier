@@ -1635,3 +1635,141 @@ body:has(.cc-chat-shell) .mobile-dock {
     justify-self: stretch;
   }
 }
+
+/* One setup, one task route, one conversation. */
+.cc-dot-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 20px 0;
+}
+.cc-dot-steps > span {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.cc-dot-steps b {
+  display: grid;
+  place-items: center;
+  width: 25px;
+  height: 25px;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.cc-dot-title {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+}
+.cc-dot-title h3 {
+  overflow-wrap: anywhere;
+}
+.cc-dot-consent {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  line-height: 1.7;
+  font-size: 12px;
+}
+.cc-dot-consent input {
+  margin-top: 5px;
+  flex: 0 0 auto;
+}
+.cc-dot-evidence {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  padding: 12px 0;
+  font-size: 12px;
+}
+.cc-dot-instruction {
+  margin: 12px 0;
+}
+.cc-dot-instruction textarea {
+  width: 100%;
+  margin-top: 10px;
+  resize: vertical;
+}
+.cc-dot-card .cc-join-code {
+  font-size: clamp(14px, 2.5vw, 18px);
+  overflow-wrap: anywhere;
+}
+.cc-dot-picker {
+  display: grid;
+  gap: 10px;
+  margin: 16px 0;
+}
+.cc-dot-option {
+  display: grid;
+  gap: 5px;
+  text-align: left;
+  white-space: normal;
+}
+.cc-dot-send-mode {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+.cc-dot-send-mode button {
+  font-size: 11px;
+}
+.cc-dot-scope-summary {
+  margin: 0 0 8px;
+  font-size: 12px;
+  opacity: 0.85;
+}
+.cc-dot-suggestions {
+  display: grid;
+  gap: 3px;
+  max-height: 180px;
+  overflow: auto;
+  margin: 6px 0;
+  padding: 5px;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  border-radius: 9px;
+}
+.cc-dot-suggestions[hidden] {
+  display: none;
+}
+.cc-dot-suggestions button {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  text-align: left;
+  padding: 10px;
+  background: none;
+  color: inherit;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.cc-dot-suggestions button[aria-selected='true'] {
+  background: color-mix(in srgb, currentColor 12%, transparent);
+}
+.cc-dot-suggestions small {
+  opacity: 0.75;
+}
+@media (max-width: 600px) {
+  .cc-dot-steps {
+    gap: 6px;
+  }
+  .cc-dot-steps > span {
+    font-size: 11px;
+    gap: 4px;
+  }
+  .cc-dot-card .cc-actions {
+    flex-wrap: wrap;
+  }
+  .cc-dot-card .cc-actions button {
+    flex: 1 1 auto;
+  }
+  .cc-dot-suggestions button {
+    flex-direction: column;
+    gap: 4px;
+  }
+}

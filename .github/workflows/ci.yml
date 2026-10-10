@@ -56,12 +56,12 @@ jobs:
           retention-days: 14
 
   verify:
-    name: Regression ${{ matrix.os }} shard ${{ matrix.shard }} of 4
+    name: ${{ matrix.shard == 4 && 'Resource admission' || 'Regression' }} ${{ matrix.os }} shard ${{ matrix.shard }} of 5
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-15]
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     defaults:
@@ -78,17 +78,19 @@ jobs:
           python-version: '3.13'
           cache: pip
           cache-dependency-path: requirements*.txt
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - if: matrix.shard != 4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
           cache: npm
           cache-dependency-path: web/mcp-apps/package-lock.json
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - if: matrix.shard != 4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .work/playwright-browsers
           key: browsers-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('requirements-dev.txt') }}
       - name: Bound Linux APT download waits
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.shard != 4
         timeout-minutes: 2
         shell: bash
         run: |
@@ -109,15 +111,18 @@ jobs:
           .venv/bin/python -m pip install --require-hashes -r requirements-dev.txt
           python -m venv .venv-compat
           .venv-compat/bin/python -m pip install --require-hashes -r requirements-compat.txt
-          .venv/bin/python -m playwright install --with-deps chromium webkit
+          if [[ '${{ matrix.shard }}' != '4' ]]; then
+            .venv/bin/python -m playwright install --with-deps chromium webkit
+          fi
       - name: macOS standalone Compose validation tool (no daemon)
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && matrix.shard != 4
         run: |
           if ! docker compose version >/dev/null 2>&1 && ! docker-compose version >/dev/null 2>&1; then
             brew install docker-compose
           fi
           docker compose version || docker-compose version
       - name: Verify reproducible browser build and release inputs
+        if: matrix.shard != 4
         run: |
           npm --prefix web/mcp-apps ci --ignore-scripts
           npm --prefix web/mcp-apps run format:check
@@ -127,6 +132,7 @@ jobs:
           git diff --exit-code -- web
           .venv/bin/python scripts/check_release.py
       - name: Static and type checks
+        if: matrix.shard != 4
         run: |
           .venv/bin/python -m ruff check agent hub shared scripts tests
           .venv/bin/python -m mypy
@@ -150,7 +156,9 @@ jobs:
           .venv/bin/python scripts/release_acceptance.py prepare --root "$GITHUB_WORKSPACE" --archive "$BUNDLE" --destination "$ACCEPTANCE" --proof "$GITHUB_WORKSPACE/dist/ci-results/archive-proof.json" --commit "$GITHUB_SHA"
           ln -s "$GITHUB_WORKSPACE/.venv" "$ACCEPTANCE/.venv"
           ln -s "$GITHUB_WORKSPACE/.venv-compat" "$ACCEPTANCE/.venv-compat"
-          ln -s "$GITHUB_WORKSPACE/web/mcp-apps/node_modules" "$ACCEPTANCE/web/mcp-apps/node_modules"
+          if [[ '${{ matrix.shard }}' != '4' ]]; then
+            ln -s "$GITHUB_WORKSPACE/web/mcp-apps/node_modules" "$ACCEPTANCE/web/mcp-apps/node_modules"
+          fi
           echo "root=$ACCEPTANCE" >> "$GITHUB_OUTPUT"
           echo "bundle=$BUNDLE" >> "$GITHUB_OUTPUT"
       - name: Exhaustive deterministic shard from the verified public archive
@@ -166,7 +174,7 @@ jobs:
           for module in (agent.config, hub.config, tests.support, scripts.regression_plan):
               assert Path(module.__file__).resolve().is_relative_to(root), module.__name__
           PY
-          .venv/bin/python scripts/check_full_regression.py --output "$GITHUB_WORKSPACE/dist/ci-results" --workers 2 --timeout 1200 --shard-count 4 --shard-index ${{ matrix.shard }} --coverage
+          .venv/bin/python scripts/check_full_regression.py --output "$GITHUB_WORKSPACE/dist/ci-results" --workers 2 --timeout 1200 --shard-count 5 --shard-index ${{ matrix.shard }} --resource-shard --coverage
       - name: Verify archive and all extracted public files after regression
         if: always() && steps.archive.outcome == 'success'
         env:

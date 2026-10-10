@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from scripts.check_release import check_archive, check_source
-from scripts.regression_plan import fingerprint, merge_summaries
+from scripts.regression_plan import RESOURCE_LAYOUT, fingerprint, merge_summaries
 
 
 def write_json(path, value):
@@ -110,8 +110,8 @@ def finish(root, archive, proof):
 
 
 def verify_reports(reports, commit):
-    if len(reports) != 4:
-        raise ValueError('All four public-archive shards are required')
+    if len(reports) != 5:
+        raise ValueError('All four ordinary and the dedicated resource public-archive shards are required')
     summaries, proofs = [], []
     for report in map(Path, reports):
         summary = json.loads(report.read_text())
@@ -128,13 +128,15 @@ def verify_reports(reports, commit):
             raise ValueError('Regression did not use the verified public source')
         summaries.append(summary)
         proofs.append(proof)
-    merge_summaries(summaries)
+    merged = merge_summaries(summaries)
+    if merged["layout"] != RESOURCE_LAYOUT:
+        raise ValueError("Release evidence requires the dedicated resource layout")
     first = proofs[0]
     if any(proof != first for proof in proofs[1:]):
         raise ValueError('Shards tested different public archives')
     return {'verified': True, 'commit': commit, 'archive_sha256': first['archive_sha256'],
             'source_inventory_sha256': first['source_inventory_sha256'],
-            'public_files': len(first['files']), 'shards': 4}
+            'public_files': len(first['files']), 'shards': 5}
 
 
 def main():

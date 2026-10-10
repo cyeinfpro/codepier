@@ -378,6 +378,9 @@ def test_every_public_query_action_is_read_only_in_real_business_tables(collab):
         'fencing_token': leased['fencing_token'], 'idempotency_key': key(),
         'result': {'outcome': 'explained', 'summary': 'Synthetic fixture evidence',
                    'observations': [{'claim': 'Fixture', 'evidence_refs': [evidence_id]}]}}, collab[2])
+    dot = s.dots.create({**c.scope, 'label': 'Read-only query dot', 'confirm_tasks': True,
+        'capabilities': ['read'], 'idempotency_key': key()}, c.owner)['dot']
+    s.dots.join({'code': dot['join_code'], 'idempotency_key': key()}, c.actor)
     queries = {action: {} for action in ('overview', 'rooms', 'jobs', 'messages', 'goals',
         'incidents', 'agents', 'subscriptions', 'join_slots', 'plan', 'timeline', 'members',
         'changes', 'coordination_goals', 'coordination_options', 'delegation_policies', 'delegations')}
@@ -392,6 +395,7 @@ def test_every_public_query_action_is_read_only_in_real_business_tables(collab):
         'connection': {'policy_id': c.policy['id'], 'policy_version': c.policy['version'], 'mode': 'managed_execution'},
         'inbox': {k: v for k, v in connected['inbox_request']['arguments'].items() if k not in {'action', 'project', 'environment_id'}},
         'plan_validate': {'candidate': candidate},
+        'dot_connection': {'dot_id': dot['id']}, 'dot_inbox': {'dot_id': dot['id']},
     })
     assert set(queries) == set(ACTIONS['collaboration_query'])
     tables = [r['name'] for r in s.store.all(
@@ -402,6 +406,6 @@ def test_every_public_query_action_is_read_only_in_real_business_tables(collab):
         return {table: s.store.all('SELECT * FROM "' + table + '" ORDER BY rowid') for table in tables}
     before = snapshot()
     for action, arguments in queries.items():
-        actor = c.actor if action in {'goal', 'delegation', 'connection', 'inbox'} else c.owner
+        actor = c.actor if action in {'goal', 'delegation', 'connection', 'inbox', 'dot_connection', 'dot_inbox'} else c.owner
         assert s.invoke('collaboration_query', {'action': action, **c.scope, **arguments}, actor) is not None
         assert snapshot() == before, action
