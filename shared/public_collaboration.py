@@ -155,6 +155,7 @@ _QUERY = {
 _DISCUSSION = {
     'join': 'collaboration_join',
     'dot_message': 'collaboration_dot_message',
+    'dot_update': 'collaboration_dot_reply_update',
     'dot_ack': 'collaboration_dot_ack',
     'message': 'collaboration_message_create',
     'command': 'collaboration_command_create',

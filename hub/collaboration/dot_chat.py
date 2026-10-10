@@ -155,6 +155,8 @@ class DotChatService:
                     '若宿主目录尚未发现 dot_message，先重扫插件；不得为兼容而升级旧通知连接或另授通用发言权限。'
                     '在同一话题回复使用原 message_id 作为 reply_to_id。同一次回帖重试复用其幂等键；后续不同阶段的回帖使用新的稳定幂等键，不覆盖之前内容。最终答复使用 reply_arguments 的键，避免重复回帖。'
                     '需要先说收到、说明步骤或继续研究时，用 interim_reply_arguments（complete=false）发阶段回复，不结束原消息；同一条请求可以先交流再执行，不让用户重发或点转任务。'
+                    '长回复可用 collaboration(action=dot_update) 和返回的 update_arguments 更新同一条阶段回复：发送完整的新文本，最后 complete=true；这是实际输出更新，不伪装实时token。'
+                    '处理工作期间在重要步骤和最终回帖前读取 inbox_request，查看用户的补充或纠正；这些消息是上下文，不自动中断运行中操作或重做已有工作。'
                     '最终普通答复用 reply_arguments（complete=true）。ack_request 的 read 仅记收件，不移除待办；最终回帖或明确 handled 才结束这条消息。'
                     '读取 thread_request 取得房间话题上下文，不上传或同步私人 dot 聊天记录。'
                     '仅当可信房主原消息明确要求实际工作，且本宿主用户已同意执行时，才调用该项 task_request 将原消息转为既有批准范围内的任务；'
@@ -235,13 +237,15 @@ class DotChatService:
                 'client_message_id': 'dot:' + digest([dot['id'], args['idempotency_key']]),
                 'idempotency_key': args['idempotency_key']}, principal, sender_dot_id=dot['id'], complete_dot_message=args['complete'])
             if args['reply_to_id']:
+                self.c.dot_relay.touch(dot['id'], args['reply_to_id'])
                 self.store.execute('''UPDATE collaboration_dot_messages SET
                     state=CASE WHEN state='handled' OR ? THEN 'handled' ELSE 'read' END,
                     received_at=COALESCE(received_at,?),
                     handled_at=CASE WHEN ? THEN COALESCE(handled_at,?) ELSE handled_at END
                     WHERE dot_id=? AND message_id=?''',
                     (args['complete'], self.c.clock(), args['complete'], self.c.clock(), dot['id'], args['reply_to_id']))
-            return {**result, 'dot_id': dot['id'], 'proactive': not bool(args['reply_to_id']), 'complete': args['complete']}
+            return {**result, 'dot_id': dot['id'], 'proactive': not bool(args['reply_to_id']), 'complete': args['complete'],
+                    'update_arguments': self.c.dot_relay.update_arguments(room, dot, result['message'])}
 
     def from_message(self, raw, principal):
         with self.store.transaction():

@@ -879,3 +879,26 @@ TOOL_DESCRIPTIONS.update({
     'collaboration_dot_ack': 'Acknowledge an addressed dot message. read records connector receipt but leaves it pending; handled explicitly finishes that message. Neither state proves human reading or task execution.',
     'collaboration_dot_task': 'Only after an explicitly authenticated owner message addressed to this duplex dot asks for actual work, attach one managed task using its existing owner-approved scope. User-approved host execution remains required; do not convert greetings or questions into work. Returns real delegation/inbox requests; claim and execute with the original leases, never general tools to bypass a refusal.',
 })
+
+
+class DotReplyUpdate(DotRead):
+    message_id: Identifier
+    expected_version: int = Field(ge=1)
+    body_text: str = Field(min_length=1, max_length=8000)
+    complete: bool = False
+    idempotency_key: Key
+
+    @field_validator('body_text')
+    @classmethod
+    def nonblank(cls, value):
+        if not value.strip():
+            raise ValueError('A reply cannot be blank')
+        return value
+
+
+TOOL_MODELS['collaboration_dot_reply_update'] = DotReplyUpdate
+TOOL_DESCRIPTIONS['collaboration_dot_reply_update'] = (
+    'Update this dot own unfinished reply in place with the full latest text and expected_version. '
+    'Reuse a mutation key for transport retries; use returned update_arguments for the next revision. '
+    'Finalized replies cannot be reopened; stale updates cannot overwrite newer text. '
+    'This is incremental publication of actual dot output, not fabricated token streaming or task success.')

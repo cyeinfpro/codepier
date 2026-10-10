@@ -47,13 +47,14 @@ def test_panel_chat_proactive_dot_thread_reply_restart_and_no_task(
         area.fill('你好，我们先聊一下方案。')
         page.locator('#cc-command button[type="submit"]').click()
         expect(area).to_have_value('')
+        expect(page.locator('#cc-relay-outbox [data-pending-id]')).to_have_count(0, timeout=15000)
         expect(page.locator('#cc-send-mode')).to_contain_text('发给 @沟通 dot')
         first = call(stack, joined['inbox_request'])['items'][0]
         assert first['message']['body_text'] == '你好，我们先聊一下方案。'
         assert len(sent) == 1 and not sent[0].get('delegation') and not sent[0].get('dispatch_mode')
         call(stack, first['ack_request'])
         refresh(page)
-        expect(page.locator('.cc-dot-receipt')).to_contain_text('dot 连接已确认收件')
+        expect(page.locator('.cc-dot-receipt[data-relay-state="received"]')).to_have_text('已送达 dot')
         response = {'action': 'dot_message', **first['reply_arguments'], 'body_text': '你更重视速度，还是界面？'}
         replied = mcp(stack, 'collaboration', response)
         assert mcp(stack, 'collaboration', response)['message']['id'] == replied['message']['id']
@@ -65,6 +66,7 @@ def test_panel_chat_proactive_dot_thread_reply_restart_and_no_task(
         area.fill('先讨论界面，暂时不要修改。')
         page.locator('#cc-command button[type="submit"]').click()
         expect(area).to_have_value('')
+        expect(page.locator('#cc-relay-outbox [data-pending-id]')).to_have_count(0, timeout=15000)
         second = call(stack, joined['inbox_request'])['items'][0]
         assert second['message']['thread_root_id'] == first['message_id']
         mcp(stack, 'collaboration', {'action': 'dot_message', **second['reply_arguments'],
@@ -83,6 +85,7 @@ def test_panel_chat_proactive_dot_thread_reply_restart_and_no_task(
         area.fill('是的，优先手机端。')
         page.locator('#cc-command button[type="submit"]').click()
         expect(area).to_have_value('')
+        expect(page.locator('#cc-relay-outbox [data-pending-id]')).to_have_count(0, timeout=15000)
         before_restart = call(stack, joined['inbox_request'])['items'][0]
         assert before_restart['message']['thread_root_id'] == proactive['message']['id']
         stack.hub.terminate()

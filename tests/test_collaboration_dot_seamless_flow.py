@@ -54,6 +54,7 @@ def test_one_composer_interleaves_explanation_real_work_and_followup(task_stack,
         area.fill('能说说你准备怎么验证文件吗？先不要动代码。')
         page.locator('#cc-command button[type="submit"]').click()
         expect(area).to_have_value('')
+        expect(page.locator('#cc-relay-outbox [data-pending-id]')).to_have_count(0, timeout=15000)
         first = call(stack, joined['inbox_request'])['items'][0]
         mcp(stack, 'collaboration', {'action': 'dot_message', **first['reply_arguments'],
             'body_text': '先写测试文件，再读回，最后运行命令核对。'})
@@ -64,6 +65,7 @@ def test_one_composer_interleaves_explanation_real_work_and_followup(task_stack,
         area.fill('可以，按刚才的步骤做，先告诉我再执行。')
         page.locator('#cc-command button[type="submit"]').click()
         expect(area).to_have_value('')
+        expect(page.locator('#cc-relay-outbox [data-pending-id]')).to_have_count(0, timeout=15000)
         requested = call(stack, joined['inbox_request'])['items'][0]
         assert requested['message']['thread_root_id'] == first['message_id']
         history = call(stack, requested['thread_request'])
@@ -87,6 +89,7 @@ def test_one_composer_interleaves_explanation_real_work_and_followup(task_stack,
         area.fill('谢谢，解释一下刚才的检查结果就好，不用再执行。')
         page.locator('#cc-command button[type="submit"]').click()
         expect(area).to_have_value('')
+        expect(page.locator('#cc-relay-outbox [data-pending-id]')).to_have_count(0, timeout=15000)
         final = call(stack, joined['inbox_request'])['items'][0]
         mcp(stack, 'collaboration', {'action': 'dot_message', **final['reply_arguments'],
             'body_text': '文件内容、读回内容和命令输出一致，这次只作解释。'})

@@ -14,7 +14,7 @@ class ChatroomService:
         self.c, self.store = collaboration, collaboration.store
 
     def capabilities(self):
-        return {'duplex_dots': True, 'task_dots': True, 'work_progress': True, 'coordination_goals': True, 'direct_delegation': True, 'message_remind': True, 'plain_messages': True, 'message_notifications': self.c.config.events_enabled,
+        return {'native_dot_relay': True, 'duplex_dots': True, 'task_dots': True, 'work_progress': True, 'coordination_goals': True, 'direct_delegation': True, 'message_remind': True, 'plain_messages': True, 'message_notifications': self.c.config.events_enabled,
                 'task_assignment': True, 'message_search': True, 'incremental_messages': True,
                 'read_cursors': True, 'attachments': False, 'human_memberships': False}
 
@@ -89,6 +89,7 @@ class ChatroomService:
                   'source_message_id': body.get('source_message_id')}
         if body.get('duplex_recipients'):
             result['dot_receipts'] = self.c.dot_chat.receipts(row['id'])
+            result['relay_receipts'] = self.c.dot_relay.receipts(row)
         if body.get('sender_dot_id'):
             sender = self.store.one('SELECT label FROM collaboration_join_slots WHERE id=? AND room_id=? AND grant_id=?', (body['sender_dot_id'], row['room_id'], row['author']))
             if sender:

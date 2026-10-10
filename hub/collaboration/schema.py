@@ -214,6 +214,8 @@ def migrate(db):
     migrate_dots(db)
     from hub.collaboration.dot_chat import migrate as migrate_dot_chat
     migrate_dot_chat(db)
+    from hub.collaboration.dot_relay import migrate as migrate_dot_relay
+    migrate_dot_relay(db)
     db.execute("INSERT OR REPLACE INTO meta VALUES ('collaboration_schema','3')")
 
 def migrate_chatroom(db):

@@ -190,6 +190,7 @@ def test_panel_add_dot_type_mention_continue_thread_execute_and_report(
         area.fill('请创建文件并核对实际内容。')
         page.locator('#cc-command button[type="submit"]').click()
         expect(area).to_have_value('')
+        expect(page.locator('#cc-relay-outbox [data-pending-id]')).to_have_count(0, timeout=15000)
         expect(page.locator('.cc-mention-chip')).to_contain_text('@项目 dot')
         assert len(saved) == 1 and not saved[0].get('dispatch_mode') and not saved[0].get('delegation')
         first = next(row for row in overview(stack)['messages'] if row.get('client_message_id') == saved[0]['client_message_id'])
@@ -207,6 +208,7 @@ def test_panel_add_dot_type_mention_continue_thread_execute_and_report(
         area.fill('继续，在同一话题创建第二个文件。')
         page.locator('#cc-command button[type="submit"]').click()
         expect(area).to_have_value('')
+        expect(page.locator('#cc-relay-outbox [data-pending-id]')).to_have_count(0, timeout=15000)
         assert len(saved) == 2 and saved[1]['reply_to_id'] == first['id']
         assert not saved[1].get('delegation') and not saved[1].get('dispatch_mode')
         followup = next(row for row in overview(stack)['messages'] if row.get('client_message_id') == saved[1]['client_message_id'])
@@ -221,6 +223,7 @@ def test_panel_add_dot_type_mention_continue_thread_execute_and_report(
         area.fill('这是一条普通讨论，不要执行。')
         page.locator('#cc-command button[type="submit"]').click()
         expect(area).to_have_value('')
+        expect(page.locator('#cc-relay-outbox [data-pending-id]')).to_have_count(0, timeout=15000)
         assert len(saved) == 3 and not saved[2].get('delegation') and not saved[2].get('dispatch_mode')
         assert not errors, errors
     finally:

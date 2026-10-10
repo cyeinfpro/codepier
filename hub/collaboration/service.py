@@ -42,6 +42,8 @@ class CollaborationService:
         self.dots = DotService(self)
         from hub.collaboration.dot_chat import DotChatService
         self.dot_chat = DotChatService(self)
+        from hub.collaboration.dot_relay import DotRelay
+        self.dot_relay = DotRelay(self)
         self.events = None
         self.monitor = None
         self.secret = b''
@@ -939,7 +941,8 @@ class CollaborationService:
         name, raw = resolve(name, raw)
         if name in contracts.COORDINATION_TOOL_MODELS:
             return self.coordination.invoke(name, raw, principal)
-        handlers = {'collaboration_dot_message': self.dot_chat.message,
+        handlers = {'collaboration_dot_reply_update': self.dot_relay.update,
+                    'collaboration_dot_message': self.dot_chat.message,
                     'collaboration_dot_ack': self.dot_chat.acknowledge,
                     'collaboration_dot_task': self.dot_chat.from_message,
                     'collaboration_dot_connection': self.dots.connection,

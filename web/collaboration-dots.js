@@ -96,13 +96,14 @@ window.CodePierCollaborationDots = {
       }
       hideSuggestions();
       c.mentions = [slot.id];
+      c.relayRecipientCleared = false;
       if (slot.duplex) delegation.selectPolicy(null);
       else { c.acceptance = policy.automatic_acceptance; delegation.selectPolicy(policy, policy.version, true); }
       patchDraftContext(); patchDelegationComposer(); closeDrawer(); area?.focus();
     }
     async function act(action, element) {
       if (action === 'dot-clear') {
-        chat().mentions = []; delegation.selectPolicy(null); hideSuggestions(); patchDraftContext(); patchDelegationComposer();
+        chat().mentions = []; chat().relayRecipientCleared = true; chat().relayAnchor = null; delegation.selectPolicy(null); hideSuggestions(); patchDraftContext(); patchDelegationComposer();
       } else {
         const slot = slots().find((item) => item.id === element.dataset.id);
         if (!slot) throw new Error('当前房间已没有这个 dot。');

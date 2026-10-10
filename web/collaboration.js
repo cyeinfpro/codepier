@@ -218,6 +218,7 @@ window.CodePierCollaboration = (() => {
 
   function detach() {
     rememberChat();
+    relay.detach();
     state.busyCleanup?.();
     state.busyCleanup = null;
     state.refreshSequence++;
@@ -259,7 +260,9 @@ window.CodePierCollaboration = (() => {
     detach();
     resetScope();
     state.requests.clear();
+    for (const c of state.chats.values()) relay.purge(c);
     state.chats.clear();
+    state.relayManagement = false;
     state.rooms = [];
     state.members = [];
     state.drawerFocus = null;
@@ -475,6 +478,7 @@ window.CodePierCollaboration = (() => {
     );
   }
   function patchMemberStatus() {
+    relay.chrome();
     dots.refreshCards();
     for (const node of document.querySelectorAll('[data-cc-mention-status]')) {
       const slot = mentionSlots().find((item) => item.id === node.dataset.ccMentionStatus);
@@ -502,7 +506,7 @@ window.CodePierCollaboration = (() => {
       (m) =>
         (m.body?.notifications || []).some((receipt) =>
           ['queued', 'pending', 'delivering'].includes(receipt.state),
-        ) || (m.dot_receipts || []).some((receipt) => receipt.state !== 'handled') || delegation.pendingDelivery(m),
+        ) || m.body?.dot_reply_complete === false || (m.dot_receipts || []).some((receipt) => receipt.state !== 'handled') || delegation.pendingDelivery(m),
     );
     if (!pending.length) return;
     const start = (c.deliveryOffset || 0) % pending.length;
@@ -521,6 +525,8 @@ window.CodePierCollaboration = (() => {
       mergeMessages(records.flatMap((record) => (record.message ? [record.message] : [])));
   }
   function messageMarkup(m) {
+    const relayed = relay.renderMessage(m);
+    if (relayed) return relayed;
     const body = m.body || {};
     const author =
       ['owner', 'panel_owner'].includes(m.author_kind) || m.kind === 'owner_command'
@@ -575,7 +581,7 @@ window.CodePierCollaboration = (() => {
   function draftContext() {
     const c = chat(),
       reply = messageById(c.reply);
-    return `${c.reply ? `<div class="cc-reply-preview">回复：${E(reply ? messageText(reply).slice(0, 100) : '已选择的房间消息')}${button('clear-reply', '取消回复')}</div>` : ''}${c.mentions
+    return `${relay.topicHint()}${c.reply ? `<div class="cc-reply-preview">回复：${E(reply ? messageText(reply).slice(0, 100) : '已选择的房间消息')}${button('clear-reply', '取消回复')}</div>` : ''}${c.mentions
       .map((id) => {
         const slot = (state.snapshot.join_slots || []).find((s) => s.id === id);
         return `<button type="button" class="cc-mention-chip" data-cc-action="remove-mention" data-id="${E(id)}">@${E(slot?.label || '位置已不可用')} ×</button>`;
@@ -586,12 +592,14 @@ window.CodePierCollaboration = (() => {
     const d = state.snapshot,
       c = chat();
     const enabled = d.capabilities?.plain_messages && d.can_manage && d.room.state === 'active';
-    return `<section class="cc-conversation"><div class="cc-timeline-wrap"><div class="cc-feed" tabindex="0" aria-label="共享讨论记录"><div class="cc-history">${c.older ? button('older-messages', '加载更早消息') : ''}</div><div class="cc-message-list" role="log" aria-label="房间消息" aria-live="polite" aria-relevant="additions text">${c.messages.map(messageMarkup).join('') || `<div class="cc-chat-empty"><span class="cc-empty-symbol" aria-hidden="true">↗</span><h3>从一句话开始。</h3><p>说说你的想法，讨论会留在这个房间。</p><p>需要落实时，选择助手并交给它处理。</p>${d.join_slots?.length ? '<small>已登记助手连接；以实际领取与结果确认进度。</small>' : '<button type="button" class="btn" data-cc-action="open-members">添加 dot</button>'}</div>`}</div></div><button type="button" class="btn cc-new-messages" data-cc-action="latest" ${c.unread ? '' : 'hidden'}>${c.unread} 条新消息 ↓</button></div><div class="cc-compose-wrap"><form id="cc-command" class="cc-composer"><div id="cc-draft-context">${draftContext()}</div><div id="cc-delegation-context">${delegationContext()}</div><label class="cc-sr-only" for="cc-message-input">房间消息</label><textarea id="cc-message-input" name="request" rows="2" maxlength="3900" required ${enabled ? '' : 'disabled'} placeholder="${enabled ? '说说你的想法，或 @一个助手连接…' : '普通消息暂不可用，请核对房间与服务能力'}">${E(c.draft)}</textarea><div id="cc-dot-suggestions" class="cc-dot-suggestions" role="listbox" aria-label="选择任务 dot" hidden></div><div class="cc-compose-controls">${button('mentions', '@ 助手', {}, enabled && d.capabilities?.message_notifications ? '' : 'disabled')}<span id="cc-task-compose-tools" ${dots.simpleComposer() ? 'hidden' : ''}>${coordination.action()}</span><span id="cc-send-mode">${delegationComposer()}</span><small>来源 · ${E(projectLabel(state.project))}</small><button class="btn primary" type="submit" ${enabled ? '' : 'disabled'}>发送 ↑</button></div></form><div class="cc-compose-help"><span>像房间成员一样双向交流；消息和结果留在原话题</span><span class="cc-desktop-key">Enter 发送 · Shift + Enter 换行</span><span class="cc-mobile-key">Enter 换行</span></div></div></section>`;
+    return `<section class="cc-conversation"><div id="cc-relay-network" class="cc-relay-network" role="status" aria-live="polite" hidden></div><div class="cc-timeline-wrap"><div class="cc-feed" tabindex="0" aria-label="共享讨论记录"><div class="cc-history">${c.older ? button('older-messages', '加载更早消息') : ''}</div><div class="cc-message-list" role="log" aria-label="房间消息" aria-live="polite" aria-relevant="additions text">${c.messages.map(messageMarkup).join('') || `<div class="cc-chat-empty"><span class="cc-empty-symbol" aria-hidden="true">↗</span><h3>从一句话开始。</h3><p>说说你的想法，讨论会留在这个房间。</p><p>需要落实时，选择助手并交给它处理。</p>${d.join_slots?.length ? '<small>已登记助手连接；以实际领取与结果确认进度。</small>' : '<button type="button" class="btn" data-cc-action="open-members">添加 dot</button>'}</div>`}</div><div id="cc-relay-outbox">${relay.outboxMarkup(c)}</div></div><button type="button" class="btn cc-new-messages" data-cc-action="latest" ${c.unread ? '' : 'hidden'}>${c.unread} 条新消息 ↓</button></div><div class="cc-compose-wrap"><form id="cc-command" class="cc-composer"><div id="cc-draft-context">${draftContext()}</div><div id="cc-delegation-context">${delegationContext()}</div><label class="cc-sr-only" for="cc-message-input">房间消息</label><textarea id="cc-message-input" name="request" rows="2" maxlength="3900" required ${enabled ? '' : 'disabled'} placeholder="${enabled ? '说说你的想法，或 @一个助手连接…' : '普通消息暂不可用，请核对房间与服务能力'}">${E(c.draft)}</textarea><div id="cc-dot-suggestions" class="cc-dot-suggestions" role="listbox" aria-label="选择任务 dot" hidden></div><div class="cc-compose-controls">${button('mentions', '@ 助手', {}, enabled && d.capabilities?.message_notifications ? '' : 'disabled')}<span id="cc-task-compose-tools" ${dots.simpleComposer() ? 'hidden' : ''}>${coordination.action()}</span><span id="cc-send-mode">${delegationComposer()}</span><small>来源 · ${E(projectLabel(state.project))}</small><button class="btn primary" type="submit" ${enabled ? '' : 'disabled'}>发送 ↑</button></div></form><div class="cc-compose-help"><span>像房间成员一样双向交流；消息和结果留在原话题</span><span class="cc-desktop-key">Enter 发送 · Shift + Enter 换行</span><span class="cc-mobile-key">Enter 换行</span></div></div></section>`;
   }
   function memberStrip() {
     const slots = notificationSlots(),
       registered = slots.filter((slot) => slot.state === 'registered').length;
-    const label = registered
+    const label = slots.length === 1 && slots[0].duplex && registered
+      ? '与 ' + slots[0].label + ' 对话'
+      : registered
       ? '你与 ' +
         registered +
         ' 个助手连接' +
@@ -685,7 +693,9 @@ window.CodePierCollaboration = (() => {
   function mergeMessages(items) {
     const c = chat(),
       map = new Map(c.messages.map((m) => [m.id, m]));
-    for (const m of items) map.set(m.id, m);
+    for (const m of items) {
+      if ((map.get(m.id)?.version || 0) <= (m.version || 1)) map.set(m.id, m);
+    }
     c.messages = [...map.values()].sort(
       (a, b) =>
         (a.server_sequence || 0) - (b.server_sequence || 0) ||
@@ -704,26 +714,36 @@ window.CodePierCollaboration = (() => {
         [...list.querySelectorAll('[data-message-id]')].map((n) => n.dataset.messageId),
       );
     if (c.messages.length) list.querySelector('.cc-chat-empty')?.remove();
+    const nodes = new Map([...list.children].map(node => [node.dataset.messageId, node]));
+    const anchor = [...list.children].find(node => node.getBoundingClientRect().bottom >= feed.getBoundingClientRect().top);
+    const anchorTop = anchor?.getBoundingClientRect().top;
     let previous = null;
     for (const m of c.messages) {
-      let node = [...list.children].find((n) => n.dataset.messageId === m.id);
+      let node = nodes.get(m.id);
       const markup = messageMarkup(m);
       if (!node || node._ccMarkup !== markup) {
         const template = document.createElement('template');
         template.innerHTML = markup;
         const next = template.content.firstElementChild;
         next._ccMarkup = markup;
-        if (node) node.replaceWith(next);
-        else list.insertBefore(next, previous ? previous.nextSibling : list.firstChild);
-        node = next;
+        const patched = node && relay.patchMessage(node, next, m);
+        if (patched) {
+          if (patched !== 'defer') node._ccMarkup = markup;
+        } else {
+          if (node) node.replaceWith(next);
+          else list.insertBefore(next, previous ? previous.nextSibling : list.firstChild);
+          node = next;
+        }
       }
       previous = node;
     }
+    relay.hydrate(list);
     if (forceBottom || nearBottom) {
       feed.scrollTop = feed.scrollHeight;
       c.unread = 0;
     } else {
       feed.scrollTop = top;
+      if (relay.active() && anchor?.isConnected) feed.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
       c.unread += c.messages.filter((m) => !oldIds.has(m.id)).length;
     }
     c.scroll = feed.scrollTop;
@@ -752,6 +772,7 @@ window.CodePierCollaboration = (() => {
     });
   }
   function clearVisibility(c, keepDraft = false) {
+    relay.purge(c);
     coordination.clear();
     c.messages = [];
     c.after = '';
@@ -1040,6 +1061,10 @@ window.CodePierCollaboration = (() => {
   const dots = window.CodePierCollaborationDots.create({state, E, field, button, when, projectLabel,
     chat, mentionSlots, delegation, showDrawer, closeDrawer, mutation,
     patchDraftContext, patchDelegationComposer, liveJoin, joinInstruction, joinStatus});
+
+  const relay = window.CodePierCollaborationRelay.create({state, E, button, chat, chatScope,
+    mentionSlots, messageById, messageText, requestId, dots, delegation, patchTimeline,
+    patchDraftContext, patchDelegationComposer, mergeMessages, recoverAccess});
 
   function joinCard(slot) {
     if (slot.task_dot) return dots.card(slot);
@@ -1401,7 +1426,7 @@ window.CodePierCollaboration = (() => {
     ];
     const body = { discussion, jobs, monitor: monitoring, agents }[state.view]();
     const project = S.projects.find((p) => p.id === state.project);
-    return `<div class="collaboration cc-chat-shell ${state.view === 'discussion' ? 'is-discussion' : 'is-management'}" data-project="${E(state.project)}" data-environment="${E(state.environment)}" data-conversation="${E(state.conversation)}"><h1 class="cc-sr-only" tabindex="-1">协作中心</h1>${roomRail(selection)}<section class="cc-room-body"><header class="cc-room-header"><div><div class="cc-room-title"><h2>${E(data.conversation ? conversationTitle(data.conversation) : data.room.title || project?.alias || state.project)}</h2><span class="cc-status">${E(state.environment)}</span>${data.room.state === 'paused' ? badge('paused') : ''}</div><p>让讨论、决定和结果，在同一个地方相遇。</p></div><div class="cc-header-tools"><details class="cc-room-menu"><summary data-cc-more aria-label="房间更多选项">···</summary><div>${button('room-settings', '切换房间')}${button('new-conversation', '新建独立聊天室')}${coordination.action('创建协作目标')}${data.capabilities?.message_search ? button('search', '搜索消息') : ''}${button('context', '房间上下文')}${button('refresh', '刷新状态')}</div></details></div></header>${projectChips()}${memberStrip()}<nav class="cc-tabs" aria-label="协作中心视图">${tabs.map(([id, label]) => `<button class="btn ${id === state.view ? 'is-active' : ''}" data-cc-view="${id}" aria-pressed="${id === state.view}">${label}</button>`).join('')}</nav>${feedback}<div class="cc-main">${body}</div></section><aside class="cc-context-rail">${contextContents()}</aside><dialog id="cc-drawer" class="cc-drawer" aria-label="房间详情"></dialog></div>`;
+    return `<div class="collaboration cc-chat-shell ${state.view === 'discussion' ? 'is-discussion' : 'is-management'}" data-project="${E(state.project)}" data-environment="${E(state.environment)}" data-conversation="${E(state.conversation)}"><h1 class="cc-sr-only" tabindex="-1">协作中心</h1>${roomRail(selection)}<section class="cc-room-body"><header class="cc-room-header"><div><div class="cc-room-title"><h2>${E(data.conversation ? conversationTitle(data.conversation) : data.room.title || project?.alias || state.project)}</h2><span class="cc-status">${E(state.environment)}</span>${data.room.state === 'paused' ? badge('paused') : ''}</div><p>让讨论、决定和结果，在同一个地方相遇。</p></div><div class="cc-header-tools">${relay.toolbar()}<details class="cc-room-menu"><summary data-cc-more aria-label="房间更多选项">···</summary><div>${button('room-settings', '切换房间')}${button('new-conversation', '新建独立聊天室')}${coordination.action('创建协作目标')}${data.capabilities?.message_search ? button('search', '搜索消息') : ''}${button('context', '房间上下文')}${button('refresh', '刷新状态')}</div></details></div></header>${projectChips()}${memberStrip()}<nav class="cc-tabs" aria-label="协作中心视图">${tabs.map(([id, label]) => `<button class="btn ${id === state.view ? 'is-active' : ''}" data-cc-view="${id}" aria-pressed="${id === state.view}">${label}</button>`).join('')}</nav>${feedback}<div class="cc-main">${body}</div></section><aside class="cc-context-rail">${contextContents()}</aside><dialog id="cc-drawer" class="cc-drawer" aria-label="房间详情"></dialog></div>`;
   }
 
   async function act(action, element) {
@@ -1634,6 +1659,8 @@ window.CodePierCollaboration = (() => {
           : c.mentions.includes(id)
             ? c.mentions.filter((v) => v !== id)
             : [...c.mentions, id];
+      c.relayRecipientCleared = !c.mentions.length;
+      if (!c.mentions.length) c.relayAnchor = null;
       c.delegationPolicy = '';
       c.delegationVersion = 0;
       c.delegationAutomatic = false;
@@ -1651,6 +1678,7 @@ window.CodePierCollaboration = (() => {
         if (!(await selectPartition(source.project_id, source.environment_id))) return local;
       }
       chat().reply = action === 'reply' ? element.dataset.id : '';
+      if (action === 'clear-reply') chat().relayAnchor = null;
       const sender = source?.sender_dot_id && mentionSlots().find((slot) => slot.id === source.sender_dot_id && slot.duplex);
       if (sender) { chat().mentions = [sender.id]; delegation.selectPolicy(null); }
       if (chat().delegationAutomatic && !dots.selected()) delegation.selectPolicy(null);
@@ -2463,6 +2491,7 @@ window.CodePierCollaboration = (() => {
       }
       const button = event.target.closest('[data-cc-action]');
       if (button) {
+        if (relay.action(button.dataset.ccAction, button)) return;
         if (button.dataset.ccAction === 'close-drawer') {
           closeDrawer();
           return;
@@ -2475,7 +2504,10 @@ window.CodePierCollaboration = (() => {
     root.addEventListener('submit', (event) => {
       event.preventDefault();
       if (!live()) return;
-      if (event.target.checkValidity()) run(() => submit(event.target), event.submitter);
+      if (event.target.checkValidity()) {
+        if (event.target.id === 'cc-command' && relay.canSend()) relay.send(event.target);
+        else run(() => submit(event.target), event.submitter);
+      }
     });
     root.addEventListener('input', (event) => {
       if (!live()) return;
@@ -2573,6 +2605,7 @@ window.CodePierCollaboration = (() => {
       }
     }
     bindDetails();
+    relay.bind(root);
     expireInvitations(root);
     if (state.snapshot?.room && state.snapshot.capabilities?.plain_messages) {
       const generation = state.generation;
@@ -2580,7 +2613,8 @@ window.CodePierCollaboration = (() => {
         if (generation !== state.generation || S.page !== 'collaboration') return;
         try {
           if (!document.hidden && !state.busy) {
-            await refreshChat();
+            if (relay.focused()) await relay.sync();
+            else await refreshChat();
           }
         } catch (error) {
           if (generation === state.generation) {
@@ -2591,9 +2625,9 @@ window.CodePierCollaboration = (() => {
             }
           }
         }
-        if (generation === state.generation) state.timer = setTimeout(poll, 5000);
+        if (generation === state.generation) state.timer = setTimeout(poll, relay.focused() ? relay.delay() : 5000);
       };
-      state.timer = setTimeout(poll, 5000);
+      state.timer = setTimeout(poll, relay.active() ? 1200 : 5000);
     }
   }
 
