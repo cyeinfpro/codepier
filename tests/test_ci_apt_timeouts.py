@@ -33,7 +33,8 @@ def named_step(steps, name):
 def test_ci_bounds_existing_linux_installations_without_changing_trust(job):
     steps = workflow_steps(job)
     step = named_step(steps, 'Bound Linux APT download waits')
-    assert step['if'] == "runner.os == 'Linux'"
+    expected = "runner.os == 'Linux'" + (" && matrix.shard != 4" if job == 'verify' else "")
+    assert step['if'] == expected
     assert step['timeout-minutes'] == 2
     assert step['shell'] == 'bash'
     script = step['run']
@@ -138,3 +139,23 @@ else:
     expected_calls = {'tee': 1, 'apt-config': 2, 'earlier-fragment': 2}
     expected_calls.update({key: index + 2 for index, key in enumerate(APT_OPTIONS)})
     assert len(observed) == expected_calls.get(failure, 4)
+
+
+@pytest.mark.parametrize('shard', [0, 1, 2, 3, 4])
+def test_dedicated_resource_job_does_not_install_browsers(tmp_path, shard):
+    install = named_step(workflow_steps('verify'), INSTALL_STEPS['verify'])['run']
+    boundary = "if [[ '${{ matrix.shard }}' != '4' ]]; then"
+    assert install.count(boundary) == 1
+    script = install[install.index(boundary):].replace('${{ matrix.shard }}', str(shard))
+    # Execute the real conditional with an inert interpreter substitute.
+    binary = tmp_path / '.venv/bin'
+    binary.mkdir(parents=True)
+    python = binary / 'python'
+    python.write_text(f'#!{sys.executable}\nimport json,sys\nprint(json.dumps(sys.argv[1:]))\n')
+    python.chmod(0o755)
+    result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', script],
+                            cwd=tmp_path, text=True, capture_output=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    calls = [json.loads(line) for line in result.stdout.splitlines()]
+    expected = [['-m', 'playwright', 'install', '--with-deps', 'chromium', 'webkit']] if shard < 4 else []
+    assert calls == expected
