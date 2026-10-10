@@ -372,3 +372,106 @@ def test_production_hub_maintenance_and_health(tmp_path,monkeypatch):
         app.state.runtime.panel_maintenance.inflight=0
         (gate_dir/'maintenance.json').unlink()
         assert client.get('/healthz').json()['panel_update']['maintenance'] is False
+
+
+@pytest.mark.parametrize('choice',[None,False,True])
+@pytest.mark.parametrize('failure',[None,400,503])
+def test_agent_update_consent_and_bridge_errors(tmp_path,choice,failure):
+    class Bridge:
+        async def request(self,method,path,body=None):
+            if method=='POST':
+                assert 'update_agents' not in body
+                if failure:
+                    raise DevError('UPDATER_TEST','synthetic bridge failure',failure)
+                return {'operation':{'state':'queued'},'replayed':False}
+            return {'request_found':False}
+    app,store=make_auth_app(tmp_path,Bridge())
+    body={'idempotency_key':'consent-test-key','version':TARGET,'release_id':17,'sha256':'b'*64,
+          'confirmation':TARGET}
+    if choice is not None:body['update_agents']=choice
+    try:
+        with TestClient(app) as client:
+            client.cookies.set('rd_session','cookie')
+            response=client.post('/api/panel-update/apply',json=body,headers={'X-RD-CSRF':'csrf'})
+            assert response.status_code==(failure or 202),response.text
+            rows=store.all('SELECT * FROM panel_agent_rollouts')
+            if choice is True:
+                assert len(rows)==1
+                assert rows[0]['state']==('blocked' if failure==400 else 'waiting_panel')
+            else:
+                assert rows==[]
+            changed=client.post('/api/panel-update/apply',json={**body,'update_agents':choice is not True},
+                                headers={'X-RD-CSRF':'csrf'})
+            assert changed.status_code==409
+    finally:store.close()
+
+
+@pytest.mark.parametrize('failure',[400,503])
+def test_check_bridge_error_keeps_original_error_without_agent_intent(tmp_path,failure):
+    class Bridge:
+        async def request(self,*args,**kwargs):
+            raise DevError('UPDATER_TEST','synthetic check failure',failure)
+    app,store=make_auth_app(tmp_path,Bridge())
+    try:
+        with TestClient(app) as client:
+            client.cookies.set('rd_session','cookie')
+            response=client.post('/api/panel-update/check',json={'idempotency_key':'check-error-key'},
+                                 headers={'X-RD-CSRF':'csrf'})
+            assert response.status_code==failure
+            assert response.json()['error']['code']=='UPDATER_TEST'
+            assert store.all('SELECT * FROM panel_agent_rollouts')==[]
+            assert store.all('SELECT * FROM panel_update_consents')==[]
+    finally:store.close()
+
+
+@pytest.mark.parametrize('found',[True,None])
+def test_old_host_receipt_without_agent_consent_cannot_expand_authority(tmp_path,found):
+    calls=[]
+    class Bridge:
+        async def request(self,method,path,body=None):
+            calls.append(method)
+            return {'request_found':found,'operation':{'kind':'apply','state':'succeeded'}}
+    app,store=make_auth_app(tmp_path,Bridge())
+    try:
+        with TestClient(app) as client:
+            client.cookies.set('rd_session','cookie')
+            body={'idempotency_key':'legacy-apply-key','version':TARGET,'release_id':17,'sha256':'b'*64,
+                  'confirmation':TARGET,'update_agents':True}
+            response=client.post('/api/panel-update/apply',json=body,headers={'X-RD-CSRF':'csrf'})
+            assert response.status_code==(409 if found else 503)
+            assert calls==['GET']
+            assert store.all('SELECT * FROM panel_agent_rollouts')==[]
+            assert store.all('SELECT * FROM panel_update_consents')==[]
+    finally:store.close()
+
+
+def test_legacy_host_apply_then_new_hub_preserves_no_agent_authority(tmp_path,monkeypatch):
+    """Use the unchanged legacy host protocol and real UDS, without production services."""
+    import hub.panel_update as panel
+    manager,release=manager_fixture(tmp_path,monkeypatch)
+    manager.submit('apply',body_for(release,key='old-panel-apply-key'))
+    manager.perform(manager.current_job())
+    assert manager.current_job()['state']=='succeeded'
+    assert manager.current_job()['commit_decided'] is True
+    monkeypatch.setattr(panel,'VERSION',TARGET)
+    with tempfile.TemporaryDirectory(prefix='cp-legacy-update-',dir='/tmp') as directory:
+        socket=Path(directory)/'u.sock'
+        with updater.Server(str(socket),updater.Handler) as server:
+            server.manager=manager
+            thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+            app,store=make_auth_app(tmp_path,UpdaterClient(str(socket)))
+            try:
+                with TestClient(app) as client:
+                    client.cookies.set('rd_session','cookie')
+                    status=client.get('/api/panel-update/status').json()
+                    assert status['running_version']==TARGET
+                    assert status['operation']['state']=='succeeded'
+                    assert status['agent_rollout'] is None
+                    body={k:release[k] for k in ('version','release_id','sha256')}
+                    body.update(idempotency_key='old-panel-apply-key',confirmation=TARGET,update_agents=True)
+                    response=client.post('/api/panel-update/apply',json=body,headers={'X-RD-CSRF':'csrf'})
+                    assert response.status_code==409
+                    assert response.json()['error']['code']=='AGENT_CONSENT_NOT_RECORDED'
+                    assert store.all('SELECT * FROM panel_agent_rollouts')==[]
+            finally:
+                server.shutdown();thread.join(timeout=3);store.close()

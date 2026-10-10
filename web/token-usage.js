@@ -198,19 +198,49 @@ window.CodePierTokenUsage = (() => {
     );
   }
 
+  function contextEstimate(value) {
+    const context = value?.context_estimate;
+    if (
+      context?.kind !== 'context_scenario' ||
+      context.version !== 'codepier-context-v1' ||
+      context.scope !== 'retained_authorized_context_estimate' ||
+      !['partial', 'unavailable'].includes(context.state)
+    )
+      return null;
+    const total = context.total || {};
+    const n = integer(total.estimated_tokens),
+      low = integer(total.low),
+      high = integer(total.high);
+    if (n === null) return context.state === 'unavailable' ? context : null;
+    if (low === null || high === null || low > n || n > high) return null;
+    return context;
+  }
+
   function headline(value) {
-    const total = combined(value),
+    const context = contextEstimate(value);
+    const total = context?.total || combined(value),
       n = integer(total.estimated_tokens);
-    const cost = value.reference_cost;
+    const cost = context?.reference_cost || value.reference_cost;
     const amount =
       cost?.kind === 'reference_estimate' &&
-      cost.scope === 'visible_tool_text_equivalent' &&
+      cost.scope === (context ? 'context_scenario_equivalent' : 'visible_tool_text_equivalent') &&
       cost.currency === 'USD'
         ? integer(cost.amount_nano_usd)
         : null;
+    const range = context
+      ? n === null
+        ? '缺少工具记录，暂无法估算上下文。'
+        : '范围 ' +
+          formatTokens(total.low) +
+          '–' +
+          formatTokens(total.high) +
+          ' · 情景估算，历史可能不完整'
+      : '未包含完整对话上下文，非实际账单。';
     return (
       '<div class="token-dashboard-metrics">' +
-      '<div class="token-dashboard-metric is-total"><span>工具文本 Token</span><strong title="' +
+      '<div class="token-dashboard-metric is-total"><span>' +
+      (context ? '含上下文 Token' : '工具文本 Token') +
+      '</span><strong title="' +
       number(n) +
       ' Token">' +
       (n === null ? '未记录' : '约 ' + formatTokens(n)) +
@@ -228,8 +258,10 @@ window.CodePierTokenUsage = (() => {
           escape(cost.pricing.cache_read_percent) +
           '% 假设'
         : '') +
-      (n !== null && total.partial ? ' · 仅已记录部分' : '') +
-      '</p><p class="token-dashboard-limit">未包含完整对话上下文，非实际账单。</p>'
+      (!context && n !== null && total.partial ? ' · 仅已记录部分' : '') +
+      '</p><p class="token-dashboard-limit">' +
+      escape(range) +
+      '</p>'
     );
   }
 
@@ -290,7 +322,9 @@ window.CodePierTokenUsage = (() => {
         : '') +
       '<p>MCP 请求参数按模型输出计价；MCP 响应文本按后续模型输入计价。缓存是输入的一部分，不另加到总 Token；' +
       '此比例是假设，不是实测缓存命中率，也不由重复文本推断。没有缓存写入数据，不估算缓存写入费用。</p>' +
-      '<p>仅估算可见工具文本的等价成本；实际模型用量未知，不是完整会话或实际账单。完整请求超过 272K 输入时适用整请求长上下文价；' +
+      (cost.scope === 'context_scenario_equivalent'
+        ? '<p>按固定底座、历史重读与压缩情景估算等价 API 成本；实际模型用量未知，非实际账单。完整请求超过 272K 输入时适用整请求长上下文价；'
+        : '<p>仅估算可见工具文本的等价成本；实际模型用量未知，不是完整会话或实际账单。完整请求超过 272K 输入时适用整请求长上下文价；') +
       '不能从单次 MCP 文本大小判断。本参考未使用长上下文、加速档位、地区附加费或折扣。ChatGPT/Codex订阅及额度规则不同，不能用此值代替账单。</p>' +
       '<p>真实缓存命中、缓存写入、思考 Token：未知。切换参考模型只重算此情景，不改变实际执行模型。</p>' +
       '<p>官方来源：<a href="https://developers.openai.com/api/docs/models/' +
@@ -378,7 +412,12 @@ window.CodePierTokenUsage = (() => {
   }
 
   function trendHTML(data) {
-    const trend = Array.isArray(data?.trend) ? data.trend : [];
+    const useContext = !!contextEstimate(data?.summary);
+    const trend = (Array.isArray(data?.trend) ? data.trend : []).map((point) => {
+      if (!useContext) return point;
+      const context = contextEstimate(point);
+      return { ...point, input: context?.input || {}, output: context?.output || {} };
+    });
     if (!trend.length)
       return '<p class="token-dashboard-note">此范围没有保留的调用记录；缺失时段不会补成 0。</p>';
     const maximum = Math.max(
@@ -388,7 +427,9 @@ window.CodePierTokenUsage = (() => {
       ),
     );
     return (
-      '<div class="token-dashboard-legend"><span>MCP 请求参数</span><span class="is-output">MCP 响应文本</span><span class="is-missing">未记录</span></div>' +
+      (useContext
+        ? '<div class="token-dashboard-legend"><span>模型输入（含上下文）</span><span class="is-output">模型输出</span><span class="is-missing">未记录</span></div>'
+        : '<div class="token-dashboard-legend"><span>MCP 请求参数</span><span class="is-output">MCP 响应文本</span><span class="is-missing">未记录</span></div>') +
       '<ol class="token-trend" aria-label="有调用记录的时间桶；缺失不补零">' +
       trend
         .map((point) => {
@@ -404,9 +445,9 @@ window.CodePierTokenUsage = (() => {
             '</time><div class="token-trend-bars">' +
             bar('input') +
             bar('output') +
-            '</div><small>请求 ' +
+            (useContext ? '</div><small>输入 ' : '</div><small>请求 ') +
             formatTokens(point.input?.estimated_tokens) +
-            ' / 响应 ' +
+            (useContext ? ' / 输出 ' : ' / 响应 ') +
             formatTokens(point.output?.estimated_tokens) +
             '<br>' +
             number(point.wire_attempts) +
@@ -520,9 +561,18 @@ window.CodePierTokenUsage = (() => {
       ) +
       select('session', '匿名窗口', data.options?.sessions || [], filters.session, '全部匿名窗口') +
       '</div>' +
-      pricingDetails(value.reference_cost, true, !!panels.pricing) +
+      pricingDetails(
+        contextEstimate(value)?.reference_cost || value.reference_cost,
+        true,
+        !!panels.pricing,
+      ) +
       '</details>' +
       panel('breakdown', '请求与响应明细') +
+      (contextEstimate(value)
+        ? '<p><strong>工具文本 Token</strong>：约 ' +
+          formatTokens(combined(value).estimated_tokens) +
+          '。仅参数与返回，不包含历史重读。</p>'
+        : '') +
       metricDetails(value, 'input', 'MCP 请求参数') +
       metricDetails(value, 'output', 'MCP 响应文本') +
       '</details>' +
@@ -539,8 +589,11 @@ window.CodePierTokenUsage = (() => {
       ' · 当前保留的授权记录 ' +
       number(value.wire_attempts) +
       ' 次调用。</p>' +
-      '<p>实际模型用量未提供：没有可核验的模型实际用量接口。仅工具文本，二进制文件/图片字节不计入，' +
-      '不含工具定义，已识别的敏感字段和链接不计入。重试仍有传输文本成本；不是完整对话账单。粗略范围不是统计置信区间。</p>' +
+      (contextEstimate(value)
+        ? '<p>含上下文估算：固定底座约12K，近8轮完整保留，更早历史每轮保留98%，约64K触发压缩。工具调用和轮询合并只是情景假设，不能当作实测模型轮数。范围不是统计置信区间。</p>'
+        : '') +
+      '<p>实际模型用量未提供：没有可核验的模型实际用量接口。工具文本部分的二进制文件/图片字节不计入，' +
+      '工具定义只在上下文情景底座中近似计入。已识别的敏感字段和链接不计入工具文本；重试仍有传输文本成本，不是完整对话账单。粗略范围不是统计置信区间。</p>' +
       '<p>连接名称是授权标签，不代表已识别宿主产品；匿名窗口只表示相关性，可能因重启变化。</p>' +
       '<p>仅显示有保留调用的时间桶，缺失不补零；历史未记录不会补算。活动最多保留 ' +
       number(data.coverage?.activity_row_limit) +
@@ -557,7 +610,9 @@ window.CodePierTokenUsage = (() => {
     // Export only the already-authorized aggregate response. No row bodies,
     // credentials, connection labels, project paths, or raw request metadata.
     const value = {
-      kind: 'mcp_tool_text_reference_estimate',
+      kind: contextEstimate(data.summary)
+        ? 'mcp_context_scenario_estimate'
+        : 'mcp_tool_text_reference_estimate',
       exported_at: new Date().toISOString(),
       schema_version: data.schema_version || 2,
       period: data.period,

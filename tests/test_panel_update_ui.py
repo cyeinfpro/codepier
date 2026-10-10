@@ -160,3 +160,88 @@ def test_missing_receipt_retries_only_original_key_and_recovery_locks_controls(u
         expect(page.locator('#panel-update-retry')).to_be_hidden()
         assert not errors,errors
     finally:page.close()
+
+
+@pytest.mark.parametrize('width',[1440,390,320])
+@pytest.mark.parametrize('theme',['light','dark'])
+def test_global_update_entry_and_failure_banner_removal(update_browser,stack,width,theme):
+    browser,kind=update_browser
+    state=ready()
+    state['agent_rollout']={'state':'running','target_version':VERSION,'total':2,'completed':0,'message':'',
+        'nodes':[{'device_id':'synthetic-offline','name':'Synthetic offline <node>','state':'offline',
+                  'message':'离线待更新，重连后继续','version':'1.0.0','operation_id':''},
+                 {'device_id':'synthetic-busy','name':'Synthetic busy','state':'waiting_idle',
+                  'message':'等待现有写任务结束','version':'1.0.0','operation_id':''}]}
+    page,calls,errors=open_settings(browser,stack,state,width,
+        init_script=f"localStorage.setItem('codepier-appearance','{theme}')")
+    try:
+        def overview(route):
+            response=route.fetch()
+            value=response.json()
+            value['today_failed']=507
+            value['recent_operations']=[{'id':'synthetic-failure','tool':'fs_write','state':'failed',
+                'created':time.time(),'actor':'panel:admin','alias':'Synthetic project'}]
+            route.fulfill(response=response,json=value)
+        page.route('**/api/overview',overview)
+        page.evaluate("navigate('overview')")
+        expect(page.locator('#page h1')).to_have_text('控制总览')
+        expect(page.locator('.attention-strip')).to_have_count(0)
+        expect(page.locator('[data-cp-key="operation:synthetic-failure"] .badge.failed')).to_be_visible()
+        entry=page.locator('[data-panel-update-open]')
+        expect(entry).to_be_visible()
+        expect(entry).to_contain_text(VERSION)
+        box=entry.bounding_box()
+        assert box and box['y']>=0 and box['y']+box['height']<=150
+        topbar=page.locator('.topbar').bounding_box()
+        heading=page.locator('#page h1').bounding_box()
+        assert topbar and heading
+        assert box['y']+box['height']<=topbar['y']+topbar['height']+1
+        assert heading['y']>=box['y']+box['height']+8
+        assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
+        path=Path('.work/panel-agent-update/screenshots');path.mkdir(parents=True,exist_ok=True)
+        page.screenshot(path=str(path/f'{kind}-{theme}-{width}-entry.png'),animations='disabled')
+        entry.click()
+        expect(page.locator('#panel-update')).to_be_visible()
+        expect(page.locator('#panel-update-agents')).to_be_checked()
+        expect(page.locator('#panel-agent-rollout')).to_be_visible()
+        expect(page.locator('[data-agent-update-state="offline"]')).to_contain_text('Synthetic offline <node>')
+        expect(page.locator('[data-agent-update-state="waiting_idle"]')).to_contain_text('等待现有写任务结束')
+        assert page.locator('#panel-agent-rollout node').count()==0
+        page.screenshot(path=str(path/f'{kind}-{theme}-{width}-progress.png'),full_page=True,animations='disabled')
+        assert not errors,errors
+        assert not calls
+    finally:page.close()
+
+
+def test_agent_auto_update_opt_out_is_preserved_in_original_request(update_browser,stack):
+    browser,_=update_browser
+    state=ready()
+    def post(route,calls):
+        state.update(busy=True,request_found=True,operation={'id':'d'*32,'kind':'apply','state':'running',
+            'target_version':'1.11.0','message':'正在准备','events':[]})
+        route.fulfill(status=202,json={'operation':state['operation']})
+    page,calls,errors=open_settings(browser,stack,state,post_handler=post)
+    try:
+        page.uncheck('#panel-update-agents')
+        page.once('dialog',lambda dialog:dialog.accept())
+        page.click('#panel-update-apply')
+        expect(page.locator('#panel-update-agents')).to_be_disabled()
+        assert len(calls)==1 and calls[0]['body']['update_agents'] is False
+        page.reload();show_update_controls(page)
+        expect(page.locator('#panel-update-agents')).not_to_be_checked()
+        assert len(calls)==1
+        assert not errors,errors
+    finally:page.close()
+
+
+def test_top_update_entry_keeps_same_settings_draft(update_browser,stack):
+    browser,_=update_browser
+    page,calls,errors=open_settings(browser,stack,ready())
+    try:
+        field=page.locator('#settings-form [name="public_url"]')
+        field.evaluate("(el,value)=>{el.value=value;el.dispatchEvent(new Event('input',{bubbles:true}));}",stack.url+'/unsaved')
+        page.locator('[data-panel-update-open]').click()
+        expect(page.locator('#panel-update')).to_be_visible()
+        expect(field).to_have_value(stack.url+'/unsaved')
+        assert not calls and not errors,errors
+    finally:page.close()

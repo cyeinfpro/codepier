@@ -83,7 +83,13 @@ def view(store, runtime, principal, device_id):
     stale_project_limits = sorted(project_id for project_id in saved["config"].get("project_limits", {})
         if not store.one("SELECT id FROM projects WHERE id=? AND device_id=? AND space_id=?",
                          (project_id, device_id, principal.space_id)))
+    admission = runtime._admission_budget(device_id)
     return {"device_id": device_id, **saved, "reported": reported,
+            "durable_admission": {"node_pending_limit": admission.node,
+                "project_pending_limit": admission.project, "reason": admission.reason,
+                "new_heavy_admission_paused": admission.paused,
+                "overload_read_reserve": admission.overload_read_reserve,
+                "counts_include": ["queued", "running", "reconnecting", "cancelling"]},
             "stale_project_limits": stale_project_limits,
             "state": "offline" if not runtime.online(device_id) else "unsupported" if not supported else "applied" if applied else "rejected" if rejected else "pending"}
 

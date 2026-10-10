@@ -149,7 +149,7 @@ def test_reference_cost_api_default_adjustable_and_authority_scoped(api, monkeyp
     original = client.get('/api/token-usage').json()
     summary = original['summary']
     cost = summary['reference_cost']
-    assert original['schema_version'] == 2
+    assert original['schema_version'] == 3
     assert summary['total']['estimated_tokens'] == summary['input']['estimated_tokens'] + summary['output']['estimated_tokens']
     assert cost['amount_nano_usd'] == summary['input']['estimated_tokens'] * 50000 + summary['output']['estimated_tokens'] * 1900
     assert cost['pricing']['cache_read_percent'] == 90

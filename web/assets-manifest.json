@@ -19,8 +19,8 @@
       "bytes": 29617
     },
     "app.js": {
-      "sha256": "b7dc6fb8cc9c98972b3542baca3c6412167b71cec5fefaa21bc0f925b97ab0a7",
-      "bytes": 122058
+      "sha256": "c8ccb96f52db8e7da4b62e680c00af12addcf7763d33bba7ee399682e36eadb3",
+      "bytes": 121863
     },
     "appearance.js": {
       "sha256": "7fc8e8ffa85a4bb5836b8919cdf6ff12813cfb4a9e4736709f5858e5d8782bb1",
@@ -143,12 +143,12 @@
       "bytes": 583
     },
     "panel-update.css": {
-      "sha256": "0bebae5bca73d7f5b5a31fe0fbe2e0c382b5b56d358eeb2a91ef545db09b5991",
-      "bytes": 750
+      "sha256": "9f5f245f124444cd145645d347723b57edb753a6f1a3bedac2c4316c8417e00b",
+      "bytes": 2058
     },
     "panel-update.js": {
-      "sha256": "f201a58c37e0dfb8b22c453e5901a0351a5978b596688d24f5ec6ec38d32379c",
-      "bytes": 14459
+      "sha256": "c6cecf7a49c2bc5f1135386f81d500dfb90b03136c3fab1e9cca4990621b7e55",
+      "bytes": 19273
     },
     "roles.js": {
       "sha256": "832649b780a3b592472ebaa16ccc4147fa77e95ab41b53e7400c5c092446977a",
@@ -183,8 +183,8 @@
       "bytes": 6030
     },
     "token-usage.js": {
-      "sha256": "a27e78c1ba41a964ec5f3711cfe4ace844030287ef429c6f18084deefb2c887a",
-      "bytes": 29393
+      "sha256": "2cd7d8732aa46838d097e9f860b40a806869fea7c6f6bfd53d2a9e247aa0c11b",
+      "bytes": 32093
     },
     "tokens.css": {
       "sha256": "25dc64ad50f895bbad4d3daeee229f4b7b9299d65215f080509a9b33fd113319",

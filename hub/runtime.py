@@ -80,6 +80,8 @@ class Connection:
         self.native_chat_protocol = 0
         self.native_security_protocol = 0
         self.tool_protocol = None
+        from hub.admission_policy import AdmissionWindow
+        self.admission = AdmissionWindow()
 
     async def send(self, body, *, before_send=None):
         # A half-open peer must not hold the scheduler/send lock indefinitely.
@@ -714,7 +716,9 @@ class Runtime:
             snapshot["_computer_owner"] = "grant:" + principal.grant_id if principal.grant_id else principal.actor
             snapshot["_computer_admin"] = principal.instance_admin
         fingerprint = digest(json.dumps({"tool": name, "args": args, "project": snapshot, "device": project["device_id"]}, sort_keys=True, ensure_ascii=False))
-        with self.store.lock:
+        # Count, same-key recovery and durable insertion share one SQLite write
+        # transaction, including direct/multi-connection admission callers.
+        with self.store.transaction():
             from shared.integration_contracts import INCOMING_UPLOAD_TOOLS
             if name in INCOMING_UPLOAD_TOOLS:
                 service = getattr(self, 'incoming_files', None)
@@ -758,15 +762,6 @@ class Runtime:
                 active = self.store.one("SELECT count(*) AS n FROM operations WHERE device_id=? AND state IN ('queued','running','reconnecting','cancelling')", (project["device_id"],))["n"]
                 if name in DEVICE_ACTIONS and active:
                     raise DevError("DEVICE_BUSY", "该设备还有操作未完成；为避免更新或卸载中断任务，请先等待现有操作结束", 409)
-                if name != 'integration_control':
-                    project_active = self.store.one("SELECT count(*) AS n FROM operations WHERE device_id=? AND project_id IS ? AND state IN ('queued','running','reconnecting','cancelling')", (project["device_id"], project.get("id")))["n"]
-                    # Per-project queue bounds apply before the node safety cap.
-                    # Keep eight admission places for projects with no pending
-                    # work; one busy project cannot fill the entire node queue.
-                    if project_active >= 32:
-                        raise DevError("PROJECT_BUSY", "该项目已有 32 个待完成操作，请查询原回执并等待；其他项目仍可提交", 429, retryable=True, retry_after_seconds=3, queue_scope="project")
-                    if active >= 64 or (active >= 56 and project_active):
-                        raise DevError("DEVICE_BUSY", "节点待完成队列繁忙，正在为其他项目保留准入空间，请稍后查询原回执", 429, retryable=True, retry_after_seconds=3, queue_scope="node")
                 id, now = uuid.uuid4().hex, time.time()
                 self.integrations.prepare(id, name, args, project, principal)
                 request = {"tool": name, "args": args, "project": snapshot, "tool_contract_version": wire_version(name),
@@ -776,6 +771,9 @@ class Runtime:
                     vps_args = {**args, "vps": args["target"][4:]}
                     request["vps_ref"] = self.vps.reference(vps_args, project)
                 payload = self.store.encrypt(json.dumps(request, ensure_ascii=False))
+                from hub.admission_policy import check_admission, usage
+                check_admission(self._admission_budget(project["device_id"]),
+                    usage(self.store, project["device_id"], project.get("id")), name, len(payload))
                 lifecycle_ttl = 900 if name == "agent_update" else 120
                 deadline_seconds = (min(self.queue_seconds, 15) if name in {"computer_action", "browser_action"} else
                                     min(self.queue_seconds, 60) if name in COMPUTER_TOOLS | {"browser_open", "browser_snapshot"} else
@@ -787,6 +785,19 @@ class Runtime:
                 self.diagnostics.record(id, "hub_received")
                 self.publish("operation", {"id": id, "state": "queued", "tool": name})
         return id, None
+
+    def _admission_budget(self, device_id):
+        from hub.admission_policy import Budget
+        from hub.scheduler_settings import stored_config
+        con = self.connections.get(device_id)
+        if (con is None or not self.online(device_id) or not self.connection_authorized(device_id, con)
+                or getattr(con, "scheduler_protocol", 0) != 1 or not hasattr(con, "admission")):
+            return Budget()
+        try:
+            expected = stored_config(self.store, device_id)["revision"]
+        except DevError:
+            return Budget(reason="unavailable", paused=con.admission.paused)
+        return con.admission.current(time.monotonic(), expected)
 
     def authorized_result(self, identifier, result, principal):
         """A stored result is not authority to disclose it after a policy change."""
@@ -1300,6 +1311,15 @@ class Runtime:
                 candidate = packet(self.store, device_id)
                 if candidate["revision"] != info.get("scheduler_revision"):
                     desired = candidate
+                from hub.admission_policy import AdmissionWindow
+                if not hasattr(connection, "admission"):
+                    connection.admission = AdmissionWindow()
+                # Never reuse info["scheduler"] or an old revision when this
+                # heartbeat omits data. Only this current authenticated sample
+                # can refresh the in-memory receipt timestamp.
+                connection.admission.observe(data.get("scheduler"),
+                    data.get("admission") if data.get("scheduler_error", "") == "" else None,
+                    data.get("scheduler_revision"), candidate["revision"], time.monotonic())
             except DevError:
                 pass
         if changed:

@@ -180,6 +180,7 @@ class Agent:
                 await self.send({"type": "heartbeat", "at": time.time(), "running": len(self.jobs),
                                  "build": self.build.describe(), "management": self.lifecycle.describe(),
                                  **self.job_counts(), "scheduler": self.scheduler.snapshot(),
+                                 "admission": self.scheduler.admission_snapshot(),
                                  "scheduler_revision": self.scheduler_revision,
                                  "scheduler_error": self.scheduler_error,
                                  "device_actions": self.lifecycle.actions()})

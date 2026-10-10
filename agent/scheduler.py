@@ -229,6 +229,21 @@ class ProjectScheduler:
                     self.turn = Counter({key: value for key, value in self.turn.items() if key in live})
                     self.condition.notify_all()
 
+    def admission_snapshot(self):
+        """Versioned OS telemetry only for the authenticated Hub heartbeat.
+
+        Project diagnostics must not expose node-wide memory/CPU counters.
+        Absence/staleness leaves older Hub and Agent behavior unchanged.
+        """
+        sample = self.capacity.last_sample
+        now = self.capacity.clock()
+        if not isinstance(sample, Pressure) or not sample.valid(now):
+            return None
+        return {"version": 1, "sample": sample.measured_at,
+                "age_seconds": now - sample.measured_at, "source": sample.source,
+                "cpu_busy": sample.cpu_busy, "memory_available": sample.memory_available,
+                "memory_total": sample.memory_total, "io_stall": sample.io_stall}
+
     def snapshot(self, project=None):
         active = [entry for entry in self.active.values() if project is None or entry.project == project]
         waiting = [entry for entry in self.waiting if project is None or entry.project == project]

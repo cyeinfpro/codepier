@@ -76,12 +76,14 @@ def create_app(data_dir: str | None = None):
         async def lifespan(app):
             try:
                 await runtime.start()
+                await runtime.panel_agent_rollouts.start()
                 await oidc.start()
                 await runtime.collaboration.loops.start()
                 yield
             finally:
                 try:
                     try:
+                        await runtime.panel_agent_rollouts.stop()
                         await oidc.stop()
                     finally:
                         try:
