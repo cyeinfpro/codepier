@@ -350,14 +350,14 @@ def test_native_terminal_sessions_block_local_maintenance(installation):
 
 
 def test_legacy_windows_service_is_resolved_from_registered_remote_dev_task(tmp_path, monkeypatch):
-    base = tmp_path/'WinNas' / '.remote-dev-agent'
+    base = tmp_path/'LegacyFixture' / '.remote-dev-agent'
     runtime = base/'runtime'
     python = runtime/'.venv/Scripts/python.exe'
     python.parent.mkdir(parents=True)
     python.write_bytes(b'fixture')
     python.with_name('pythonw.exe').write_bytes(b'fixture')
-    (base/'config.json').write_text(json.dumps({'device_id':'5b2e64991e9a4d2d9eaa4b6b8f0ddf0e',
-                                                'name':'WinNas','hub_url':'https://hub.example'}))
+    (base/'config.json').write_text(json.dumps({'device_id':'0123456789abcdef0123456789abcdef',
+                                                'name':'LegacyFixture','hub_url':'https://hub.example'}))
     xml = installer.windows_task_xml(base, python, 'RemoteDevAgent', 'S-1-5-21-1234567')
     (base/'service.xml').write_bytes(xml)
     monkeypatch.setattr(installer,'service_identity',lambda:('schtasks','user'))
@@ -369,15 +369,15 @@ def test_legacy_windows_service_is_resolved_from_registered_remote_dev_task(tmp_
 
 
 def test_archive_owned_legacy_remote_dev_agent_preserves_original_node(tmp_path, monkeypatch):
-    """WinNas-style old directory and RemoteDevAgent task are not a foreign service."""
-    base = tmp_path/'WinNas'/'.remote-dev-agent'
+    """LegacyFixture-style old directory and RemoteDevAgent task are not a foreign service."""
+    base = tmp_path/'LegacyFixture'/'.remote-dev-agent'
     runtime = base/'runtime'
     python = runtime/'.venv/Scripts/python.exe'
     python.parent.mkdir(parents=True)
     python.write_bytes(b'fixture')
     python.with_name('pythonw.exe').write_bytes(b'fixture')
-    device_id = '5b2e64991e9a4d2d9eaa4b6b8f0ddf0e'
-    original = json.dumps({'device_id':device_id,'name':'WinNas','hub_url':'https://hub.example'})
+    device_id = '0123456789abcdef0123456789abcdef'
+    original = json.dumps({'device_id':device_id,'name':'LegacyFixture','hub_url':'https://hub.example'})
     (base/'config.json').write_text(original)
     (base/'management.json').write_text(json.dumps({'managed':True,'layout':'managed-runtime',
         'service_kind':'schtasks','service_scope':'user','service_name':'RemoteDevAgent'}))

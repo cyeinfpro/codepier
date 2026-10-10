@@ -84,16 +84,61 @@ def probe_download(directory, executable):
     return results
 
 
+def probe_archive_handoff(directory, executable):
+    """Real PowerShell and filesystem, synthetic data; no service/API calls."""
+    import hashlib
+    directory=Path(directory)
+    source=(ROOT/'deploy/install-from-hub.ps1').read_text(encoding='utf-8')
+    block=source[source.index('function Complete-CodePierArchive {'):source.index("if ($Action -ne 'install' -and -not $Hub) {")]
+    script=directory/'archive-finalize.ps1'
+    script.write_text("param([string]$PlanPath,[string]$Source)\n$ErrorActionPreference='Stop'\n"+block+
+                      "Complete-CodePierArchive -PlanPath $PlanPath -Source $Source\n",encoding='utf-8')
+    results=[]
+    for case in ('success','existing-target','changed-config','wrong-lock','missing-snapshot','foreign-parent'):
+        base=directory/('archive-'+case)
+        base.mkdir()
+        (base/'config.json').write_bytes(b'{"synthetic":true}')
+        lock=base/'.install.lock';lock.mkdir()
+        token='b'*32
+        (lock/'archive.json').write_text(json.dumps({'schema':1,'lock_token':token}))
+        target=base.with_name(base.name+'.recovery-20000101-000000-01234567')
+        files={'config.json':hashlib.sha256((base/'config.json').read_bytes()).hexdigest(),
+               'management.json':None,'service.xml':None}
+        plan={'schema':1,'source':str(base),'backup':str(target),'lock_token':token,'files':files}
+        if case=='existing-target':
+            target.mkdir();(target/'keep.txt').write_text('preserve')
+        elif case=='changed-config':
+            (base/'config.json').write_bytes(b'{"edited":true}')
+        elif case=='wrong-lock':
+            plan['lock_token']='c'*32
+        elif case=='missing-snapshot':
+            del plan['files']['config.json']
+        elif case=='foreign-parent':
+            plan['backup']=str(directory.parent/target.name)
+        handoff=directory/(case+'.json');handoff.write_text(json.dumps(plan))
+        result=subprocess.run([executable,'-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass',
+                               '-File',str(script),'-PlanPath',str(handoff),'-Source',str(base)],
+                              capture_output=True,timeout=30)
+        assert (result.returncode==0)==(case=='success'), (case,result.stdout[-4000:],result.stderr[-4000:])
+        if case=='success':
+            assert not base.exists() and (target/'config.json').read_bytes()==b'{"synthetic":true}'
+            assert not (target/'.install.lock').exists()
+        else:
+            assert base.exists()
+            if case=='existing-target':
+                assert (target/'keep.txt').read_text()=='preserve'
+                assert not (target/base.name).exists()
+        results.append({'case':case,'passed':True,'exit_code':result.returncode})
+    return results
+
+
 def probe(directory):
     directory = Path(directory)
     (directory / 'deploy').mkdir();(directory / 'scripts').mkdir()
     script = directory / 'deploy/install-from-hub.ps1'
     shutil.copyfile(ROOT / 'deploy/install-from-hub.ps1', script)
     helper = directory / 'scripts/install_agent.py'
-    helper.write_text("import json,os,sys,shutil\nfrom pathlib import Path\n"
-                     "Path(os.environ['FIXTURE_LOG']).write_text(json.dumps(sys.argv[1:]),encoding='utf-8')\n"
-                     "if '--uninstall' in sys.argv and not os.getenv('FIXTURE_KEEP'): shutil.rmtree(sys.argv[sys.argv.index('--install-dir')+1])\n"
-                     "raise SystemExit(int(os.getenv('FIXTURE_EXIT','0')))\n", encoding='utf-8')
+    helper.write_text("import hashlib,json,os,sys,shutil\nfrom pathlib import Path\nPath(os.environ['FIXTURE_LOG']).write_text(json.dumps(sys.argv[1:]),encoding='utf-8')\nbase=Path(sys.argv[sys.argv.index('--install-dir')+1])\nif '--uninstall' in sys.argv and not os.getenv('FIXTURE_KEEP'): shutil.rmtree(base)\nif '--archive-install' in sys.argv and not int(os.getenv('FIXTURE_EXIT','0')):\n    lock=base/'.install.lock';lock.mkdir()\n    token='a'*32\n    (lock/'archive.json').write_text(json.dumps({'schema':1,'lock_token':token}))\n    target=base.with_name(base.name+'.recovery-20000101-000000-01234567')\n    files={name:hashlib.sha256((base/name).read_bytes()).hexdigest() if (base/name).exists() else None for name in ('config.json','management.json','service.xml')}\n    plan={'schema':1,'source':str(base),'backup':str(target),'lock_token':token,'files':files}\n    Path(sys.argv[sys.argv.index('--archive-handoff-file')+1]).write_text(json.dumps(plan))\nraise SystemExit(int(os.getenv('FIXTURE_EXIT','0')))\n", encoding='utf-8')
     executable = shutil.which('powershell.exe')
     if executable is None:
         raise RuntimeError('Windows PowerShell 5.1 is required')
@@ -129,7 +174,7 @@ def probe(directory):
         ('start', ['-Hub', 'https://invalid.example'], 0, False, False),
     ]):
         base = directory / (f'fixture-{index} & cash $ [test]')
-        base.mkdir();config = base / 'config.json';config.write_bytes(b'{"synthetic":true}')
+        base.mkdir();config = base / 'config.json';config.write_bytes(b'{"synthetic":true,"device_id":"fixture-device"}')
         log = directory / f'args-{index}.json'
         env = {**os.environ, 'PATH': str(Path(sys.executable).parent) + os.pathsep + os.environ.get('PATH', ''),
                'FIXTURE_LOG': str(log), 'FIXTURE_EXIT': str(exit_code), 'PYTHONUTF8': '1'}
@@ -144,10 +189,20 @@ def probe(directory):
                                  f'stdout={result.stdout[-4000:]!r}; stderr={result.stderr[-4000:]!r}')
         if should_call:
             arguments = json.loads(log.read_text(encoding='utf-8'))
-            assert arguments == ['--start-service' if action == 'start' else '--archive-install' if action == 'archive' else '--' + action,
-                                 '--install-dir', str(base), '--expected-device', 'fixture-device']
-        if action != 'uninstall' or keep:
-            assert config.read_bytes() == b'{"synthetic":true}'
+            prefix = ['--start-service' if action == 'start' else '--archive-install' if action == 'archive' else '--' + action,
+                      '--install-dir', str(base), '--expected-device', 'fixture-device']
+            assert arguments[:len(prefix)] == prefix
+            if action == 'archive':
+                assert arguments[-2] == '--archive-handoff-file'
+                assert not Path(arguments[-1]).is_relative_to(base)
+            else:
+                assert arguments == prefix
+        if action == 'archive':
+            target=base.with_name(base.name+'.recovery-20000101-000000-01234567')
+            assert not base.exists() and (target/'config.json').read_bytes() == b'{"synthetic":true,"device_id":"fixture-device"}'
+            assert not (target/'.install.lock').exists()
+        elif action != 'uninstall' or keep:
+            assert config.read_bytes() == b'{"synthetic":true,"device_id":"fixture-device"}'
         else:
             assert not base.exists()
         if keep:
@@ -155,6 +210,7 @@ def probe(directory):
         results.append({'case': index, 'action': action, 'passed': True, 'exit_code': result.returncode})
     return {'passed': True, 'cases': results, 'real_powershell': True,
             'download_cases': probe_download(directory, executable),
+            'archive_cases': probe_archive_handoff(directory, executable),
             'python_installer': 'synthetic recorder; no services or external network used'}
 
 

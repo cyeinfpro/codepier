@@ -145,7 +145,10 @@ def run(args, **kwargs):
 
 
 def display_command(args):
-    return subprocess.list2cmdline(args) if os.name == 'nt' else shlex.join(args)
+    # Recovery hints are pasted into PowerShell, not into cmd.exe.
+    if os.name == 'nt':
+        return '& ' + ' '.join("'" + str(arg).replace("'", "''") + "'" for arg in args)
+    return shlex.join(args)
 
 
 def service_identity():
@@ -246,12 +249,16 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         raise ValueError('Panel enrollment redirected; regenerate using the final panel URL.')
 
 
-def enroll(hub, ticket):
+def enroll(hub, ticket, expected_device=''):
     parsed = urllib.parse.urlsplit(hub)
     if parsed.scheme not in {'https','http'} or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise ValueError('Invalid panel URL')
-    request = urllib.request.Request(hub.rstrip('/')+'/agent/enroll', data=b'', method='POST',
-                                    headers={'Authorization':'Bearer '+ticket, 'Content-Type':'application/json'})
+    headers={'Authorization':'Bearer '+ticket, 'Content-Type':'application/json'}
+    if expected_device:
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', expected_device):
+            raise ValueError('Invalid expected panel device identity.')
+        headers['X-CodePier-Expected-Device']=expected_device
+    request = urllib.request.Request(hub.rstrip('/')+'/agent/enroll', data=b'', method='POST', headers=headers)
     try:
         with urllib.request.build_opener(NoRedirect).open(request, timeout=30) as response:
             raw = response.read(16385)
@@ -259,13 +266,21 @@ def enroll(hub, ticket):
             raise ValueError('Invalid pairing response')
         pairing = json.loads(raw)
     except urllib.error.HTTPError as exc:
+        if exc.code == 409:
+            raise ValueError('Install ticket belongs to another device; no runtime was replaced. The ticket was not consumed by a compatible Hub.') from exc
         raise ValueError('Pairing ticket rejected or expired; generate a new command in the panel.') from exc
     except (urllib.error.URLError, TimeoutError) as exc:
         raise ValueError('Pairing response unavailable; generate a new command before retrying.') from exc
     if (not isinstance(pairing,dict) or not all(isinstance(pairing.get(k),str) and pairing[k] for k in ('device_id','secret','hub_url'))
         or pairing['hub_url'].rstrip('/') != hub.rstrip('/')):
         raise ValueError('Invalid pairing response')
+    check_pairing_device(pairing, expected_device)
     return {k:pairing[k] for k in ('device_id','name','secret','hub_url') if k in pairing}
+
+
+def check_pairing_device(pairing, expected_device):
+    if expected_device and pairing.get('device_id') != expected_device:
+        raise ValueError('Install ticket belongs to another device; no runtime was replaced.')
 
 
 def systemctl():
@@ -283,7 +298,7 @@ def service_preflight(base):
         old = folder/'remote-dev-agent.service'
         if old.exists() or old.is_symlink(): raise ValueError('A legacy Agent service exists; update its original installation instead.')
     elif kind == 'schtasks':
-        if subprocess.run(['schtasks.exe','/Query','/TN','RemoteDevAgent'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode == 0:
+        if windows_task_registered('RemoteDevAgent'):
             raise ValueError('A legacy Agent task exists; update its original installation instead.')
     if sys.platform == 'darwin':
         if os.geteuid() == 0:
@@ -293,8 +308,7 @@ def service_preflight(base):
         if target.exists():
             raise ValueError('An Agent launch service already exists; preserve or remove it before a new installation.')
     elif sys.platform == 'win32':
-        result = subprocess.run(['schtasks.exe','/Query','/TN',TASK], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if result.returncode == 0:
+        if windows_task_registered(TASK):
             raise ValueError('An Agent scheduled task already exists; preserve or remove it before a new installation.')
     elif sys.platform.startswith('linux'):
         if not shutil.which('systemctl'):
@@ -502,10 +516,18 @@ def start_service(base, python):
     elif sys.platform == 'win32':
         if not (runtime/'agent/service_watchdog.py').is_file():
             raise ValueError('Upgrade the Agent runtime with the current source installer before repairing Windows boot startup')
-        existing = subprocess.run(['schtasks.exe', '/Query', '/TN', name],
-                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30).returncode == 0
+        # Access/COM failures are not evidence of task absence. Never re-register
+        # with /F after an unverified query failure.
+        existing = windows_task_registered(name)
         if existing:
-            verify_service_ownership(base)
+            try:
+                verify_service_ownership(base)
+            except ValueError:
+                if (base/'service.xml').exists():
+                    raise
+                live=verify_windows_orphaned_registration(base,name)
+                with (base/'service.xml').open('xb') as stream:
+                    stream.write(live.encode('utf-16'))
             require_idle(base, read_installed_config(base))
         user = windows_user_sid()
         content = windows_task_xml(base, python, name, user)
@@ -776,7 +798,44 @@ def install_cli_links(base):
             target.chmod(0o700)
 
 
+def pending_windows_install(base):
+    if sys.platform != 'win32':
+        return False
+    path=base/'management.json'
+    if not path.exists():
+        return False
+    value=json.loads(_read_owned_service_file(path))
+    return (isinstance(value,dict) and value.get('managed') is True
+            and value.get('layout') == 'managed-runtime'
+            and value.get('service_kind') == 'schtasks' and value.get('service_scope') == 'user'
+            and value.get('status') in ('service_pending','service_error'))
+
+
+def resume_windows_service_install(base,current):
+    """Repair an owned, paired first install; never initialize or replace config."""
+    if not pending_windows_install(base):
+        return False
+    runtime=base/'runtime'
+    python=runtime/'.venv/Scripts/python.exe'
+    if not python.is_file() or not (runtime/'agent/service_watchdog.py').is_file():
+        raise ValueError('Pending Windows installation has an incomplete runtime; use the verified archive recovery command.')
+    before=(base/'config.json').read_bytes()
+    require_idle(base,current)
+    verify_windows_instance_is_stopped(base,current)
+    try:
+        start_service(base,python)
+        if (base/'config.json').read_bytes() != before:
+            raise ValueError('Agent configuration changed while resuming Windows startup.')
+        install_cli_links(base)
+        update_management(base,service=True,status='ready',last_error='')
+    except Exception as exc:
+        update_management(base,service=False,status='service_error',last_error=str(exc)[:500])
+        raise
+    return True
+
+
 def local_upgrade(base, args, current, *, repair_service=True):
+    resume_windows_service_install(base,current)
     verify_service_ownership(base)
     require_idle(base, current, recover_stale_operations=getattr(args,"recover_stale_operations",False))
     before = (base/'config.json').read_bytes()
@@ -861,8 +920,8 @@ def windows_task_registered(name):
     script = ("$ErrorActionPreference='Stop'; "
               "$service=New-Object -ComObject Schedule.Service; $service.Connect(); "
               "try { $null=$service.GetFolder('\\').GetTask("+quoted+"); exit 10 } "
-              "catch [System.Runtime.InteropServices.COMException] { "
-              "if ($_.Exception.HResult -in @(-2147024894,-2147216625)) { exit 0 }; exit 11 }")
+              "catch { $e=$_.Exception; for($i=0; $i -lt 8 -and $null -ne $e; $i++){ "
+              "if ($e.HResult -eq -2147024894) { exit 0 }; $e=$e.InnerException }; exit 11 }")
     encoded = base64.b64encode(script.encode('utf-16-le')).decode('ascii')
     result = subprocess.run(['powershell.exe','-NoProfile','-NonInteractive',
                              '-EncodedCommand',encoded],
@@ -910,6 +969,7 @@ def verify_windows_orphaned_registration(base, name):
         or principal.findtext('t:UserId',namespaces=namespace) != windows_user_sid()
         or principal.findtext('t:LogonType',namespaces=namespace) != 'S4U'):
         raise ValueError('Live scheduled task is not verified as this failed Agent; no files were changed.')
+    return live_xml
 
 
 def verify_windows_instance_is_stopped(base, current):
@@ -934,19 +994,60 @@ def verify_windows_instance_is_stopped(base, current):
         raise ValueError('An Agent instance still owns the state lock; do not archive a running Agent.') from exc
 
 
+def archive_fingerprints(base):
+    """Bounded snapshots contain hashes only, never pairing keys in a handoff."""
+    values = {}
+    for name in ('config.json','management.json','service.xml'):
+        path = base/name
+        if path.is_symlink() or getattr(path,'is_junction',lambda:False)():
+            raise ValueError('Archive metadata cannot be a link.')
+        values[name] = hashlib.sha256(_read_owned_service_file(path)).hexdigest() if path.exists() else None
+    return values
+
+
+def release_archive_lock(base, lock_token):
+    lock = base/'.install.lock'
+    owner = lock/'archive.json'
+    if not lock.exists():
+        return
+    if lock.is_symlink() or owner.is_symlink():
+        raise ValueError('Archive maintenance lock changed; manual review required.')
+    if not owner.exists():
+        lock.rmdir()
+        return
+    value = json.loads(owner.read_text(encoding='utf-8'))
+    if value.get('lock_token') != lock_token:
+        raise ValueError('Archive maintenance lock belongs to another invocation.')
+    owner.unlink()
+    lock.rmdir()
+
+
 def archive_windows_install(base, args):
-    """Explicit local recovery: preserve all installation bytes, never silently unpair."""
+    """Confirmed recovery with a lock surviving deferred Windows rename."""
     if sys.platform != 'win32':
         raise ValueError('Archiving a failed installation is supported only on Windows.')
-    if not base.is_dir() or base.is_symlink():
-        raise ValueError('No local Agent installation directory to archive.')
-    config = base/'config.json'
-    runtime = base/'runtime'
-    management = base/'management.json'
-    if not any(item.exists() for item in (config,runtime,management)):
+    base = validate_install_base(base)
+    if not base.is_dir() or not any((base/name).exists() for name in ('config.json','runtime','management.json')):
         raise ValueError('No recognizable Agent installation to archive.')
-    if (base/'.install.lock').exists():
-        raise ValueError('An Agent installation is already active or needs lock review; no files were changed.')
+    lock = base/'.install.lock'
+    try:
+        lock.mkdir()
+    except FileExistsError as exc:
+        raise ValueError('An Agent installation is already active or needs lock review; no files were changed.') from exc
+    lock_token = os.urandom(16).hex()
+    destination = base
+    transferred = False
+    try:
+        atomic_json_file(lock/'archive.json',{'schema':1,'lock_token':lock_token,'pid':os.getpid()})
+        before = archive_fingerprints(base)
+        destination, transferred = _archive_windows_install_locked(base,args,lock_token,before)
+    finally:
+        if not transferred:
+            release_archive_lock(destination,lock_token)
+
+
+def _archive_windows_install_locked(base,args,lock_token,before):
+    config, runtime, management = base/'config.json', base/'runtime', base/'management.json'
     handoff = Path(args.archive_handoff_file).expanduser() if getattr(args,'archive_handoff_file','') else None
     if handoff:
         if (not handoff.is_absolute() or handoff.exists() or handoff.is_symlink()
@@ -1002,10 +1103,25 @@ def archive_windows_install(base, args):
                             +hashlib.sha256(os.urandom(16)).hexdigest()[:8])
     if backup.exists():
         raise ValueError('Recovery backup already exists; no files were changed.')
+    if archive_fingerprints(base) != before:
+        raise ValueError('Agent configuration or service definition changed during confirmation; no service was stopped.')
+    if [name for name in (TASK,'RemoteDevAgent') if windows_task_registered(name)] != registered:
+        raise ValueError('Windows task registration changed during confirmation; archive refused.')
     if current:
         require_idle(base,current)
         verify_windows_instance_is_stopped(base,current)
     if registered:
+        try:
+            verify_service_ownership(base)
+        except ValueError:
+            if (base/'service.xml').exists():
+                raise
+            verify_windows_orphaned_registration(base,registered[0])
+        saved_service=(base/'service.xml').read_bytes() if (base/'service.xml').exists() else None
+        service_snapshot=base/('.recovery-service-'+lock_token+'.xml')
+        if saved_service is not None:
+            with service_snapshot.open('xb') as stream:
+                stream.write(saved_service);stream.flush();os.fsync(stream.fileno())
         # Use only the pinned package helper or a complete local source checkout.
         # A corrupt/obsolete installed runtime must not provide uninstall logic.
         if args.archive and args.sha256:
@@ -1019,18 +1135,30 @@ def archive_windows_install(base, args):
             if not helper_source.is_file():
                 raise ValueError('Verified service removal helper unavailable; no files were changed.')
             load_lifecycle_helper(helper_source).stop_service(base,remove=True)
-        if windows_task_registered(registered[0]):
-            raise ValueError('Scheduled task remains registered. Installation was preserved.')
+        if any(windows_task_registered(name) for name in (TASK,'RemoteDevAgent')):
+            raise ValueError('Scheduled task remains registered or changed. Installation was preserved.')
+        # stop_service(remove=True) removes its file as well as the registration.
+        # Preserve the exact saved definition inside the recovery archive.
+        if saved_service is not None and not (base/'service.xml').exists():
+            with (base/'service.xml').open('xb') as stream:
+                stream.write(saved_service)
+        if saved_service is not None:
+            service_snapshot.unlink()
+    if archive_fingerprints(base)['config.json'] != before['config.json']:
+        raise ValueError('Agent configuration changed while stopping service; original files were preserved.')
     if handoff:
         # The bootstrap owns the final rename after this interpreter exits;
         # Windows refuses to rename a directory containing a running python.exe.
-        atomic_json_file(handoff,{'source':str(base),'backup':str(backup)})
+        atomic_json_file(handoff,{'schema':1,'source':str(base),'backup':str(backup),
+                                 'lock_token':lock_token,'files':archive_fingerprints(base)})
         print('Agent archive checks complete. Waiting for PowerShell to release and move the directory.',flush=True)
-        return
+        return backup, True
     base.rename(backup)
     print('Agent installation archived: '+str(backup),flush=True)
     print('The old credentials and state are preserved inside this backup. '
           'Generate a fresh install command from the intended panel node.',flush=True)
+
+    return backup, False
 
 
 def install_source(base, source, pairing_file=None, allowed=None, *, recover_stale_operations=False, shell="full"):
@@ -1167,7 +1295,7 @@ def main():
         raise ValueError('Invalid expected panel device identity.')
     if args.upgrade or args.uninstall:
         current=read_installed_config(base)
-    elif args.expected_device and not args.source and not args.start_service and (base/'config.json').is_file():
+    elif args.expected_device and not args.source and (base/'config.json').is_file():
         # A panel install ticket is bound to a node. Check locally before
         # touching ACLs, installing dependencies, or redeeming the ticket.
         current=read_installed_config(base)
@@ -1217,6 +1345,8 @@ def main():
         if config.exists() or runtime.exists():
             if not config.is_file() or not runtime.is_dir() or not (runtime/'agent/__main__.py').is_file():
                 raise ValueError('Existing Agent layout is incomplete; no files were changed.')
+            current_config=read_installed_config(base)
+            resume_windows_service_install(base,current_config)
             definition = service_definition(base)
             if not definition or not definition.is_file():
                 raise ValueError('Existing Agent is not a managed service; stop it and repair manually instead of overwriting it.')
@@ -1232,7 +1362,10 @@ def main():
                 run([args.uv,'venv','--relocatable','--python',sys.executable,candidate/'.venv'])
                 run([args.uv,'pip','install','--require-hashes','--python',candidate_python,'-r',candidate/'requirements-agent.txt'])
                 run([candidate_python,'-c','import agent.config, agent.runner, agent.lifecycle'],cwd=candidate)
-                pairing=enroll(args.hub,ticket);ticket=''
+                if config.read_bytes() != current_before:
+                    raise ValueError('Configuration changed during preparation; ticket was not used.')
+                pairing=enroll(args.hub,ticket,current_config['device_id']);ticket=''
+                check_pairing_device(pairing,current_config['device_id'])
                 try: current=json.loads(config.read_text(encoding='utf-8'))
                 except (OSError,ValueError) as exc: raise ValueError('Existing Agent config is invalid; no runtime was replaced.') from exc
                 if not isinstance(current,dict) or current.get('device_id')!=pairing.get('device_id'):
@@ -1272,7 +1405,8 @@ def main():
         run([args.uv,'pip','install','--require-hashes','--python',python,'-r',runtime/'requirements-agent.txt'])
         run([python,'-c','import agent.config, agent.runner, agent.lifecycle'],cwd=runtime)
         print('Pairing with the panel…',flush=True)
-        pairing=enroll(args.hub,ticket);ticket=''
+        pairing=enroll(args.hub,ticket,args.expected_device);ticket=''
+        check_pairing_device(pairing,args.expected_device)
         with tempfile.TemporaryDirectory(prefix='pairing-',dir=base) as temporary:
             pairing_file=Path(temporary)/'pairing.json'
             pairing_file.write_text(json.dumps(pairing),encoding='utf-8');pairing_file.chmod(0o600)
@@ -1283,6 +1417,7 @@ def main():
                           installed_version=runtime_version(runtime), helper_python=str(Path(sys.executable).resolve()),
                           uv=str(Path(args.uv).expanduser().resolve()), installed_at=time.time(),
                           status='service_pending' if not args.no_service else 'ready', last_error='')
+        install_cli_links(base)
         if not args.no_service:
             try:
                 start_service(base,python)

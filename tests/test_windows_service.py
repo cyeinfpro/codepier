@@ -100,6 +100,7 @@ def test_uac_failure_keeps_previous_task_definition_and_wrapper(windows_install,
     wrapper = base/'runtime/run-service.py'
     wrapper.write_text('previous wrapper')
     monkeypatch.setattr(installer.sys, 'platform', 'win32')
+    monkeypatch.setattr(installer, 'windows_task_registered', lambda name: True)
     monkeypatch.setattr(installer.subprocess, 'run', lambda *_a, **_kw: SimpleNamespace(returncode=0))
     monkeypatch.setattr(installer, 'verify_service_ownership', lambda *_a: None)
     monkeypatch.setattr(installer, 'require_idle', lambda *_a: None)
@@ -119,6 +120,7 @@ def test_existing_boot_task_starts_without_requesting_uac_again(windows_install,
     saved = installer.windows_task_xml(base, python, 'CodePierAgent', SID)
     (base/'service.xml').write_bytes(saved)
     monkeypatch.setattr(installer.sys, 'platform', 'win32')
+    monkeypatch.setattr(installer, 'windows_task_registered', lambda name: True)
     monkeypatch.setattr(installer.subprocess, 'run', lambda *_a, **_kw: SimpleNamespace(returncode=0))
     monkeypatch.setattr(installer.subprocess, 'check_output', lambda *_a, **_kw: saved.decode('utf-16').encode('utf-8'))
     monkeypatch.setattr(installer, 'windows_user_sid', lambda: SID)
@@ -159,6 +161,7 @@ def test_foreign_task_is_not_replaced_or_stopped(windows_install, monkeypatch):
     other = ET.fromstring(saved)
     other.find('t:Actions/t:Exec/t:WorkingDirectory', NS).text = 'C:\\someone-else'
     monkeypatch.setattr(installer.sys, 'platform', 'win32')
+    monkeypatch.setattr(installer, 'windows_task_registered', lambda name: True)
     monkeypatch.setattr(installer.subprocess, 'run', lambda *_a, **_kw: SimpleNamespace(returncode=0))
     monkeypatch.setattr(installer.subprocess, 'check_output', lambda *_a, **_kw: ET.tostring(other))
     monkeypatch.setattr(installer, 'register_windows_task', lambda *_a: pytest.fail('must preserve foreign task'))

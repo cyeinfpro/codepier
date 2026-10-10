@@ -31,11 +31,28 @@ if (Test-Path -LiteralPath $InstallDir) {
     $InstallDir = $Canonical
   }
 }
-if (-not [IO.Path]::IsPathRooted($InstallDir)) { throw 'Install directory must be absolute' }
+if ($InstallDir -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)') { throw 'Install directory must be absolute, not drive-relative' }
+$InstallDir = [IO.Path]::GetFullPath($InstallDir).TrimEnd([IO.Path]::DirectorySeparatorChar)
+$HomeDir = [IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd([IO.Path]::DirectorySeparatorChar)
+if ($InstallDir -eq $HomeDir -or $HomeDir.StartsWith($InstallDir + '\', [StringComparison]::OrdinalIgnoreCase) -or
+    $InstallDir -eq [IO.Path]::GetPathRoot($InstallDir).TrimEnd([IO.Path]::DirectorySeparatorChar)) { throw 'Refusing a home directory, ancestor or filesystem root as Agent installation.' }
+if ($Yes -and $Action -ne 'uninstall') { throw '-Yes is valid only for uninstall; archive requires local confirmation.' }
+if ($ExpectedDevice -and $ExpectedDevice -cnotmatch '^[A-Za-z0-9_-]{1,100}$') { throw 'Invalid expected panel device identity' }
 if ($Action -eq 'uninstall' -and -not (Test-Path -LiteralPath $InstallDir)) { Write-Host 'Agent is not installed; nothing to remove.'; return }
 if ($Action -eq 'archive' -and -not (Test-Path -LiteralPath $InstallDir)) { throw 'No Agent installation to archive.' }
 if ($NoService -and $Action -ne 'install') { throw '-NoService is only valid for installation' }
 if ($Action -eq 'start' -and $Hub) { throw 'Use the installed management command for start, without -Hub' }
+if ($ExpectedDevice -and $Action -in @('install','upgrade','uninstall','start')) {
+    $ExistingConfig = Join-Path $InstallDir 'config.json'
+    if (Test-Path -LiteralPath $ExistingConfig -PathType Leaf) {
+      if ((Get-Item -LiteralPath $ExistingConfig -Force).Length -gt 1048576) { throw 'Existing Agent configuration is too large.' }
+      try { $ExistingIdentity = (Get-Content -LiteralPath $ExistingConfig -Raw -Encoding UTF8 | ConvertFrom-Json).device_id }
+      catch { throw 'Existing Agent config cannot be read; do not delete it.' }
+      if (-not $ExistingIdentity -or [string]$ExistingIdentity -cne $ExpectedDevice) {
+        throw 'This computer already records another Agent node. No installation started and the ticket was not used. If that was a failed install, generate a Windows archive recovery command in Device Nodes, confirm the local old device ID, and then reinstall. Do not delete config.json.'
+      }
+    }
+  }
 function Confirm-CodePierRemoval {
   if ($Action -eq 'uninstall') {
     for ($i=0; $i -lt 60; $i++) {
@@ -43,6 +60,61 @@ function Confirm-CodePierRemoval {
       Start-Sleep -Milliseconds 500
     }
     throw 'Agent directory still exists; Windows cleanup did not complete. Inspect file locks before retrying.'
+  }
+}
+function Complete-CodePierArchive {
+  param([string]$PlanPath, [string]$Source)
+  $PlanItem = Get-Item -LiteralPath $PlanPath -Force -ErrorAction Stop
+  if ($PlanItem.PSIsContainer -or $PlanItem.Length -gt 16384 -or ($PlanItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Invalid archive handoff file.' }
+  $Plan = Get-Content -LiteralPath $PlanPath -Encoding UTF8 -Raw | ConvertFrom-Json
+  $SourcePath = [IO.Path]::GetFullPath($Source).TrimEnd([IO.Path]::DirectorySeparatorChar)
+  if ($Plan.schema -ne 1 -or [string]$Plan.lock_token -cnotmatch '^[a-f0-9]{32}$' -or -not $Plan.backup) { throw 'Invalid archive handoff schema.' }
+  $Target = [IO.Path]::GetFullPath([string]$Plan.backup)
+  $Prefix = '^' + [regex]::Escape((Split-Path -Path $SourcePath -Leaf) + '.recovery-') + '[0-9]{8}-[0-9]{6}-[a-f0-9]{8}$'
+  if (-not [string]::Equals($SourcePath, [string]$Plan.source, [StringComparison]::OrdinalIgnoreCase) -or
+      -not [string]::Equals((Split-Path -Path $SourcePath -Parent), (Split-Path -Path $Target -Parent), [StringComparison]::OrdinalIgnoreCase) -or
+      (Split-Path -Path $Target -Leaf) -cnotmatch $Prefix) { throw 'Archive handoff path verification failed.' }
+  $OwnedRoot = $SourcePath
+  $LockVerified = $false
+  try {
+    foreach ($Path in @($SourcePath, (Join-Path $SourcePath '.install.lock'), (Join-Path $SourcePath '.install.lock/archive.json'))) {
+      $Item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+      if ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Archive source or maintenance lock became a link.' }
+    }
+    $Owner = Get-Content -LiteralPath (Join-Path $SourcePath '.install.lock/archive.json') -Encoding UTF8 -Raw | ConvertFrom-Json
+    if ([string]$Owner.lock_token -cne [string]$Plan.lock_token) { throw 'Archive maintenance lock ownership changed.' }
+    $LockVerified = $true
+    foreach ($Name in @('config.json', 'management.json', 'service.xml')) {
+      if (-not $Plan.files -or -not ($Plan.files.PSObject.Properties.Name -contains $Name)) { throw 'Incomplete archive file snapshot.' }
+      $ExpectedHash = $Plan.files.$Name
+      $File = Join-Path $SourcePath $Name
+      $Item = Get-Item -LiteralPath $File -Force -ErrorAction SilentlyContinue
+      if ($null -eq $ExpectedHash) {
+        if ($null -ne $Item) { throw 'Agent files changed after confirmation; archive refused.' }
+      } else {
+        if ([string]$ExpectedHash -cnotmatch '^[a-f0-9]{64}$' -or $null -eq $Item -or $Item.PSIsContainer -or
+            ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+            (Get-FileHash -LiteralPath $File -Algorithm SHA256).Hash.ToLowerInvariant() -cne [string]$ExpectedHash) { throw 'Agent files changed after confirmation; archive refused.' }
+      }
+    }
+    # Directory.Move never merges into a target created concurrently, unlike Move-Item.
+    Set-Location -LiteralPath ([IO.Path]::GetTempPath())
+    [IO.Directory]::Move($SourcePath, $Target)
+    $OwnedRoot = $Target
+    if ((Test-Path -LiteralPath $SourcePath) -or -not (Test-Path -LiteralPath $Target -PathType Container)) { throw 'Archive rename was not confirmed.' }
+    Write-Host ('Old Agent installation was preserved at: ' + $Target)
+    Write-Host 'Generate a fresh Windows install command for the intended panel node.'
+  } finally {
+    if ($LockVerified) {
+      $Lock = Join-Path $OwnedRoot '.install.lock'
+      $OwnerFile = Join-Path $Lock 'archive.json'
+      $Owner = Get-Content -LiteralPath $OwnerFile -Encoding UTF8 -Raw | ConvertFrom-Json
+      if ([string]$Owner.lock_token -ceq [string]$Plan.lock_token -and
+          -not ((Get-Item -LiteralPath $Lock -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        Remove-Item -LiteralPath $OwnerFile -ErrorAction Stop
+        [IO.Directory]::Delete($Lock, $false)
+      }
+    }
   }
 }
 if ($Action -ne 'install' -and -not $Hub) {
@@ -56,26 +128,28 @@ if ($Action -ne 'install' -and -not $Hub) {
   $CodePierArgs = @($Helper, $CodePierFlag, '--install-dir', $InstallDir)
   if ($Yes) { $CodePierArgs += '--yes' }
   if ($ExpectedDevice) { $CodePierArgs += @('--expected-device', $ExpectedDevice) }
-  & $Python @CodePierArgs
-  if ($LASTEXITCODE -ne 0) { throw 'Agent operation failed; see the error above.' }
-  Confirm-CodePierRemoval
+  if ($Action -eq 'archive') {
+    $LocalTemp = Join-Path ([IO.Path]::GetTempPath()) ('codepier-archive-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $LocalTemp | Out-Null
+    try {
+      $ArchiveHandoff = Join-Path $LocalTemp 'archive_handoff.json'
+      $CodePierArgs += @('--archive-handoff-file', $ArchiveHandoff)
+      & $Python @CodePierArgs
+      if ($LASTEXITCODE -ne 0) { throw 'Agent archive validation failed; see the error above.' }
+      Complete-CodePierArchive -PlanPath $ArchiveHandoff -Source $InstallDir
+    } finally { Remove-Item -LiteralPath $LocalTemp -Recurse -Force -ErrorAction SilentlyContinue }
+  } else {
+    & $Python @CodePierArgs
+    if ($LASTEXITCODE -ne 0) { throw 'Agent operation failed; see the error above.' }
+    Confirm-CodePierRemoval
+  }
   return
 }
 if ($Hub -notmatch '^https?://' -or $Sha256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Invalid panel URL or package checksum' }
 if ($Action -eq 'install') {
   if ($Token -notlike 'rdi_*') { throw 'Invalid install ticket' }
   if (-not [IO.Path]::IsPathRooted($AllowRoot) -or -not (Test-Path -LiteralPath $AllowRoot -PathType Container)) { throw 'Allowed directory must already exist and be absolute' }
-  if ($ExpectedDevice) {
-    if ($ExpectedDevice -cnotmatch '^[A-Za-z0-9_-]{1,100}$') { throw 'Invalid expected panel device identity' }
-    $ExistingConfig = Join-Path $InstallDir 'config.json'
-    if (Test-Path -LiteralPath $ExistingConfig -PathType Leaf) {
-      try { $ExistingIdentity = (Get-Content -LiteralPath $ExistingConfig -Raw -Encoding UTF8 | ConvertFrom-Json).device_id }
-      catch { throw 'Existing Agent config cannot be read; do not delete it.' }
-      if (-not $ExistingIdentity -or [string]$ExistingIdentity -cne $ExpectedDevice) {
-        throw 'This computer already records another Agent node. No installation started and the ticket was not used. If that was a failed install, generate a Windows archive recovery command in Device Nodes, confirm the local old device ID, and then reinstall. Do not delete config.json.'
-      }
-    }
-  }
+
 }
 # Existing installations are validated by Python and enter the atomic repair path.
 $CodePierTemp = Join-Path ([IO.Path]::GetTempPath()) ('codepier-agent-' + [guid]::NewGuid().ToString('N'))
@@ -234,26 +308,7 @@ if __name__ == "__main__":
   }
   & $CodePierPython @CodePierArgs
   if ($LASTEXITCODE -ne 0) { throw 'Agent operation did not complete; see the error above.' }
-  if ($Action -eq 'archive') {
-    if (-not (Test-Path -LiteralPath $ArchiveHandoff -PathType Leaf)) { throw 'Verified archive handoff missing; old installation was preserved.' }
-    $ArchivePlan = Get-Content -LiteralPath $ArchiveHandoff -Encoding UTF8 -Raw | ConvertFrom-Json
-    $ArchiveSource = [IO.Path]::GetFullPath($InstallDir).TrimEnd([IO.Path]::DirectorySeparatorChar)
-    $ArchiveTarget = [IO.Path]::GetFullPath([string]$ArchivePlan.backup)
-    $ArchiveParent = Split-Path -Path $ArchiveSource -Parent
-    $TargetParent = Split-Path -Path $ArchiveTarget -Parent
-    $BackupPrefix = '^' + [regex]::Escape((Split-Path -Path $ArchiveSource -Leaf) + '.recovery-') + '[0-9]{8}-[0-9]{6}-[a-f0-9]{8}$'
-    if (-not [string]::Equals($ArchiveSource, [string]$ArchivePlan.source, [StringComparison]::OrdinalIgnoreCase) -or
-        -not [string]::Equals($ArchiveParent, $TargetParent, [StringComparison]::OrdinalIgnoreCase) -or
-        (Split-Path -Path $ArchiveTarget -Leaf) -cnotmatch $BackupPrefix -or
-        (Test-Path -LiteralPath $ArchiveTarget)) { throw 'Archive handoff path verification failed; old installation was preserved.' }
-    # The managed Python executable lives inside InstallDir and must exit
-    # before Windows can move its parent directory. Release the working
-    # directory too, in case the user's terminal started inside InstallDir.
-    Set-Location -LiteralPath ([IO.Path]::GetTempPath())
-    Move-Item -LiteralPath $InstallDir -Destination $ArchiveTarget -ErrorAction Stop
-    Write-Host ('Old Agent installation was preserved at: ' + $ArchiveTarget)
-    Write-Host 'You can now run a newly generated install command for the intended panel node.'
-  }
+  if ($Action -eq 'archive') { Complete-CodePierArchive -PlanPath $ArchiveHandoff -Source $InstallDir }
   Confirm-CodePierRemoval
 } finally {
   Remove-Item Env:CODEPIER_INSTALL_TOKEN -ErrorAction SilentlyContinue

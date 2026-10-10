@@ -356,12 +356,17 @@ def make_agent_install_router(runtime, auth, source_root=None):
         if (not separator or scheme.lower() != 'bearer'
             or not re.fullmatch(r'rdi_[A-Za-z0-9_-]{43}', enrollment_token)):
             raise DevError('INSTALL_TICKET_INVALID', '安装凭据无效、已使用或已过期，请重新生成安装命令', 401)
+        expected_device = request.headers.get('x-codepier-expected-device', '')
+        if expected_device and not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', expected_device):
+            raise DevError('INSTALL_DEVICE_MISMATCH', '安装目标设备编号无效，票据未使用', 409)
         now = time.time()
         with store.lock, store.db:
             ticket = store.db.execute('SELECT * FROM agent_install_tickets WHERE token_hash=? AND expires>?',
                                       (digest(enrollment_token), now)).fetchone()
             if not ticket:
                 raise DevError('INSTALL_TICKET_INVALID', '安装凭据无效、已使用或已过期，请重新生成安装命令', 401)
+            if expected_device and not hmac.compare_digest(expected_device, ticket['device_id']):
+                raise DevError('INSTALL_DEVICE_MISMATCH', '票据与本机设备身份不一致，票据未使用；请选择原节点修复或使用本机归档恢复', 409)
             device = store.db.execute('SELECT d.name,d.secret,d.enabled,d.space_id,d.owner_user_id,s.active AS space_active,COALESCE(u.active,1) AS owner_active FROM devices d JOIN spaces s ON s.id=d.space_id LEFT JOIN iam_users u ON u.user_id=d.owner_user_id WHERE d.id=?', (ticket['device_id'],)).fetchone()
             if not iam.device_identity_active(store, dict(device) if device else None):
                 raise DevError('INSTALL_TICKET_INVALID', '设备已停用或被移除，请在面板重新确认', 401)

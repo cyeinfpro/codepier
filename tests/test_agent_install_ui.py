@@ -379,3 +379,35 @@ def test_command_management_closing_dialog_fences_late_response(install_page):
     page.wait_for_timeout(100)
     expect(page.locator('.modal')).to_have_count(0)
     assert 'late-uninstall' not in page.locator('body').inner_text()
+
+
+@pytest.mark.parametrize('dialog_kind', ['install','maintenance'])
+def test_space_switch_fences_late_installation_commands(install_page, dialog_kind):
+    page,state=install_page
+    original_space=page.evaluate('S.space_id')
+    held=[]
+    if dialog_kind=='install':
+        state['hold']=True
+        open_form(page);fill_form(page)
+        page.click('#create-device')
+        expect(page.locator('#agent-install-command')).to_be_visible()
+        page.wait_for_function("() => document.querySelector('#agent-install-refresh').disabled")
+        route=state['held'][0]
+        field=page.locator('#agent-install-command')
+        payload={'command':'STALE-SPACE-SECRET','expires_at':time.time()+900}
+    else:
+        page.route('**/api/devices/*/agent-commands',lambda route:held.append(route))
+        page.evaluate("showAgentMaintenanceCommands({...S.devices[0],info:{platform:'Windows'}})")
+        expect(page.locator('#agent-command-form')).to_be_visible()
+        page.wait_for_function("() => document.querySelector('#agent-command-generate').disabled")
+        route=held[0]
+        field=page.locator('#agent-command-upgrade')
+        payload={'commands':{'upgrade':'STALE-SPACE-SECRET','uninstall':'old','archive':'old'}}
+    page.evaluate("S.space_id='different-synthetic-space'")
+    with page.expect_response(lambda response: response.url==route.request.url) as response:
+        route.fulfill(json=payload)
+    response.value.finished()
+    page.evaluate('() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+    expect(field).to_have_value('')
+    assert 'STALE-SPACE-SECRET' not in page.locator('body').inner_text()
+    page.evaluate('(space)=>{S.space_id=space;closeModal();}',original_space)
