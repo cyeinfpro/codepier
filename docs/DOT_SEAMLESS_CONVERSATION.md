@@ -39,3 +39,20 @@
 这组测试的 dot 判断由明确标注的测试消费者发起，不是实际模型。代码侧验证不能替代真实目标 dot 对自然语言的自主判断及宿主收发验收；部署与真实宿主订阅确认仍需单独完成。
 
 参考官方 MCP Events 的宿主订阅与事件处理约定：<https://developers.openai.com/plugins/build/mcp-events>。
+
+
+## 本轮固定快照验收 · 2026-10-10
+
+应用提交 `f4ae56c`；分支 `feat/dot-collaboration-one-step-20261010`。下面结果来自该固定快照，测试期间没有改动被测应用或重建静态资源。
+
+| 检查 | 结果 | 证据 |
+| --- | --- | --- |
+| 全仓非 integration、非 browser 回归 | 3974 passed；2174 deselected；11 warnings；exit 0 | `.work/dot-refactor/seamless-full-unit.log` / `.xml`；操作 `16f92cdb5063459687e2f1d3de1c92cb` |
+| 选定新旧集成与浏览器回归 | 75 passed；exit 0 | `.work/dot-refactor/seamless-integration.log` / `.xml`；操作 `f2aa3b472b2a4caf8d9ca9dcaa0a34ca` |
+| 全仓 Ruff、静态资源清单 | 通过；无过期资源 | 操作 `54b589e128f44db4bff4f8320038da2e` |
+
+集成范围包括新无模式对话、原双向聊天、真实 Agent 文件与命令执行、旧加入码、旧委托、聊天主屏、协作目标及 AgentDock。Node 已检查 app/workflows/collaboration/collaboration-dots/collaboration-delegation。未选中测试不计为通过；11 条警告是既有测试接口弃用与 JUnit 属性兼容提示。
+
+桌面 Chromium 和手机 WebKit 的新流程实际执行“纯讨论 → 原话题上下文确认 → 阶段性回复 → 同一消息准备工作 → 真实 write/read/exec → 继续纯讨论”，没有在面板选择模式或提交委托表单。截图在 `.work/dot-refactor/screenshots/seamless-{engine}-{width}.png`。
+
+本轮尚未推送或部署生产。外部 dot 仍是明确标注的测试消费者，因此未取得真实原生 dot 的自主理解、收件与回帖证据，不据测试结果声称现网已接通。
