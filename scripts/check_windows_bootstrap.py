@@ -191,7 +191,13 @@ def probe(directory):
             arguments = json.loads(log.read_text(encoding='utf-8'))
             prefix = ['--start-service' if action == 'start' else '--archive-install' if action == 'archive' else '--' + action,
                       '--install-dir', str(base), '--expected-device', 'fixture-device']
-            assert arguments[:len(prefix)] == prefix
+            # PowerShell canonicalizes the absolute -InstallDir with .NET on
+            # Windows. Compare the resolved path, not its spelling/case; all
+            # flags and the exact target device must still match byte-for-byte.
+            assert len(arguments) >= len(prefix), (index, action, arguments)
+            assert arguments[:2] == prefix[:2], (index, action, arguments, prefix)
+            assert Path(arguments[2]).resolve() == base.resolve(), (index, action, arguments[2], str(base))
+            assert arguments[3:len(prefix)] == prefix[3:], (index, action, arguments, prefix)
             if action == 'archive':
                 assert arguments[-2] == '--archive-handoff-file'
                 assert not Path(arguments[-1]).is_relative_to(base)
