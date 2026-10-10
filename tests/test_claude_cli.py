@@ -188,7 +188,9 @@ def test_worker_queue_interrupt_ack_and_error_result(worker):
     wait_for(lambda: w.state(follow) == 'completed', 8)
     assert w.state(hold) == 'interrupted' and w.state(interrupt) == 'completed'
     failed = w.command('chat_prompt', {'text': 'error'})
-    wait_for(lambda: w.state(failed) == 'error', 8)
+    # Receipt state and the final event are persisted in separate transactions.
+    wait_for(lambda: w.state(failed) == 'error' and any(
+        e['type'] == 'done' and e.get('receipt') == failed and e['status'] == 'error' for e in w.events()), 8)
     assert any(e['type'] == 'done' and e.get('receipt') == failed and e['status'] == 'error' for e in w.events())
 
 
