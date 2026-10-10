@@ -4,6 +4,7 @@ import os
 import sys
 import uuid
 from pathlib import Path
+from time import monotonic
 
 import pytest
 from tests.support import running_stack, wait_for
@@ -41,12 +42,17 @@ def call(stack, name, args=None, token=None):
     return response['structuredContent'], response
 
 
-def finish(stack, receipt, token=None):
-    result, response = call(stack, 'process', {'operation': 'wait', 'operation_ids': [receipt['operation_id']], 'wait_seconds': 5}, token)
-    operation = result['operations'][0]
-    assert not operation.get('pending'), operation
-    assert operation['state'] == 'succeeded', operation
-    return operation['result']['data'], response
+def finish(stack, receipt, token=None, timeout=30):
+    identifier, deadline = receipt['operation_id'], monotonic() + timeout
+    operation = receipt
+    while monotonic() < deadline:
+        result, response = call(stack, 'process', {'operation': 'wait', 'operation_ids': [identifier], 'wait_seconds': 5}, token)
+        operation = result['operations'][0]
+        assert operation['operation_id'] == identifier, operation
+        if not operation.get('pending'):
+            assert operation['state'] == 'succeeded', operation
+            return operation['result']['data'], response
+    raise AssertionError(f'Original operation still pending after {timeout}s: {operation}')
 
 
 def test_default_catalog_and_removed_aliases(core_stack):
@@ -112,27 +118,48 @@ def test_declared_parent_resource_blocks_only_overlapping_write(core_stack):
     finish(stack, write)
 
 
-def test_computer_images_actions_and_browser_status(core_stack):
+@pytest.mark.parametrize('receipt_only', [False, True])
+def test_computer_images_actions_and_browser_status(core_stack, monkeypatch, receipt_only):
     stack = core_stack
     token = stack.desktop_token
+    original_mcp = stack.mcp
+    if receipt_only:
+        def without_inline_result(name, args=None, token_value=None):
+            response = original_mcp(name, args, token_value)
+            if name == 'computer' and not response.get('isError'):
+                receipt = response['structuredContent']
+                # Model an omitted inline result, not a second operation or a fake success.
+                return {**response, 'structuredContent': {'operation_id': receipt['operation_id'], 'pending': True},
+                        'content': [{'type': 'text', 'text': 'Poll the original durable operation'}]}
+            return response
+        monkeypatch.setattr(stack, 'mcp', without_inline_result)
     rejected = stack.mcp('computer', {'project': 'ProjectAlpha', 'operation': 'apps'})
     assert rejected['isError'] and 'computer' in rejected['_meta']['mcp/www_authenticate'][0]
     opened, _ = call(stack, 'computer', {'operation': 'open', 'app': 'Fixture', 'idempotency_key': uuid.uuid4().hex}, token)
+    if opened.get('pending'):
+        opened, _ = finish(stack, opened, token)
     session = opened['session_id']
+    initial_state = int((stack.provider / 'state.txt').read_text())
     try:
         observed, image = call(stack, 'computer', {'operation': 'observe', 'session_id': session}, token)
+        if observed.get('pending'):
+            observed, image = finish(stack, observed, token)
         assert any(block['type'] == 'image' for block in image['content'])
         args = {'operation': 'action', 'session_id': session, 'observation_id': observed['observation_id'],
             'action': {'type': 'type_text', 'text': 'Fixture input'}, 'idempotency_key': uuid.uuid4().hex}
         action, _ = call(stack, 'computer', args, token)
         repeat, _ = call(stack, 'computer', args, token)
         assert repeat['operation_id'] == action['operation_id']
-        assert (stack.provider / 'state.txt').read_text() == '1'
         _, polled = finish(stack, action, token)
+        assert (stack.provider / 'state.txt').read_text() == str(initial_state + 1)
         assert any(block['type'] == 'image' for block in polled['content'])
     finally:
-        call(stack, 'computer', {'operation': 'close', 'session_id': session, 'idempotency_key': uuid.uuid4().hex}, token)
+        closed, _ = call(stack, 'computer', {'operation': 'close', 'session_id': session, 'idempotency_key': uuid.uuid4().hex}, token)
+        if closed.get('pending'):
+            finish(stack, closed, token)
     browser, _ = call(stack, 'browser', {'operation': 'status'})
+    if browser.get('pending'):
+        browser, _ = finish(stack, browser)
     assert browser['enabled'] is False
     refused = stack.mcp('browser', {'project': 'ProjectAlpha', 'operation': 'open', 'url': 'https://example.invalid', 'idempotency_key': uuid.uuid4().hex})
     assert refused['isError']
