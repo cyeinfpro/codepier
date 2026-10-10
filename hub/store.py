@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 from functools import partial
 from hub.store_contract import CheckedConnection, OwnedRLock
+from hub.worker_metrics import WorkerMetrics
 import time
 from pathlib import Path
 from cryptography.fernet import Fernet
@@ -63,6 +64,7 @@ class Store:
         self._event_loop = None
         self.db = CheckedConnection(connection, self.lock, self._security_write)
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hub-sqlite")
+        self.worker_metrics = WorkerMetrics()
         with self.lock:
             try:
                 # Changing a new database to WAL can return BUSY without invoking
@@ -262,7 +264,20 @@ class Store:
         self._event_loop = asyncio.get_running_loop()
         context = copy_context()
         call = partial(function, *args, **kwargs)
-        future = asyncio.get_running_loop().run_in_executor(self._executor, context.run, call)
+        submitted = self.worker_metrics.submit()
+
+        def measured():
+            started = self.worker_metrics.start(submitted)
+            failed = False
+            try:
+                return context.run(call)
+            except BaseException:
+                failed = True
+                raise
+            finally:
+                self.worker_metrics.finish(started, failed=failed)
+
+        future = asyncio.get_running_loop().run_in_executor(self._executor, measured)
         try:
             return await asyncio.shield(future)
         except asyncio.CancelledError:

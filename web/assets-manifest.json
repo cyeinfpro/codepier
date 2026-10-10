@@ -1,5 +1,5 @@
 {
-  "version": "1.24.0",
+  "version": "1.25.0",
   "algorithm": "sha256",
   "assets": {
     "access-profiles.css": {
@@ -19,8 +19,8 @@
       "bytes": 29617
     },
     "app.js": {
-      "sha256": "74fb5cf59f889974d66ff884ab817704e82ea2e5bce0a2ea8f73976be58b7d3e",
-      "bytes": 121873
+      "sha256": "b7dc6fb8cc9c98972b3542baca3c6412167b71cec5fefaa21bc0f925b97ab0a7",
+      "bytes": 122058
     },
     "appearance.js": {
       "sha256": "7fc8e8ffa85a4bb5836b8919cdf6ff12813cfb4a9e4736709f5858e5d8782bb1",
@@ -90,6 +90,10 @@
       "sha256": "db9a11734e4424bafec66ce367bd9b206d6bf0d88f08c30d8034b235b50f58a9",
       "bytes": 17301
     },
+    "connection-setup.js": {
+      "sha256": "560d5124084b2db7836a2605961595b475f644e84809385b0e425628fc63938e",
+      "bytes": 9391
+    },
     "core/bundle.js": {
       "sha256": "b3276a8a99f2544cb41e2086a0a35fab53c177837bb5c244f48104944e38024a",
       "bytes": 23795
@@ -123,8 +127,8 @@
       "bytes": 6622
     },
     "integrations.js": {
-      "sha256": "bb0a2cd1ac66e37e587e016d73d72356854f8e6f5ee867b490f69195ddb46023",
-      "bytes": 87027
+      "sha256": "7bbd675aba9616b947a5d94e0c5c72df78f2783fe5a2154304e46977bf78e64f",
+      "bytes": 87287
     },
     "mcp-gateway.css": {
       "sha256": "7836668107f99f817b0b4391a604638760cc80292510ee3104cb6ac688a85b83",
@@ -175,12 +179,12 @@
       "bytes": 80624
     },
     "token-usage.css": {
-      "sha256": "e85ca6a04dbf261d46dc7d1c29cbe002b21594544ba09137cebaab3ceb1d880c",
-      "bytes": 4823
+      "sha256": "cd523f465e8f3b8c996ccc86236a6cf22972c759f05fcf02447107200d7f7c98",
+      "bytes": 5518
     },
     "token-usage.js": {
-      "sha256": "6a8b8f0daf1aef6f03fb9c66fe847b88a8a5e7562d386d721b1ba4e483f23e2b",
-      "bytes": 27976
+      "sha256": "a27e78c1ba41a964ec5f3711cfe4ace844030287ef429c6f18084deefb2c887a",
+      "bytes": 29393
     },
     "tokens.css": {
       "sha256": "25dc64ad50f895bbad4d3daeee229f4b7b9299d65215f080509a9b33fd113319",
@@ -211,5 +215,5 @@
       "bytes": 25968
     }
   },
-  "template_sha256": "485376eef4bacb0c00cb1cde30d4a34626cfedd2faf0c490988878b550d59685"
+  "template_sha256": "a8030e5c87a86b238c54b1eaf7391391470b4a97cbf61fd5bcd993fed625f196"
 }

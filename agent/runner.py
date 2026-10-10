@@ -38,12 +38,13 @@ from shared.computer_contracts import COMPUTER_TOOLS
 from shared.build_info import BuildIdentity
 from agent.config import validate_config
 from agent.shell import execution_info, prepare_shell
-from shared.contracts import TOOLS, MUTATING
+from shared.contracts import TOOLS, MUTATING, required_scope
 from shared.crypto import SecureChannel
 from shared.util import DevError, VERSION
 from shared.file_sources import safe_import_error_detail
 from shared.tool_protocol import advertisement, negotiate, validate_call_epoch
-from shared.execution_policy import enforce_argv, agent_blocks_codex, computer_denial, DENIAL_MESSAGE
+from shared.execution_policy import (enforce_argv, agent_blocks_codex, agent_blocks_computer,
+    computer_denial, codex_computer_target, DENIAL_MESSAGE, COMPUTER_DENIAL_MESSAGE, COMPUTER_DENIAL_CODE)
 from shared.instance_lock import InstanceLock
 
 
@@ -583,7 +584,7 @@ class Agent:
             validate_call_epoch(tool, tool_contract_version)
             # Never accept a project/argument-supplied exemption. Legacy frames
             # without metadata still obey the independently configured local floor.
-            project = {**project, "_execution_policy": execution_policy, "_core_ssh": core_ssh, '_integration_admin': False, '_integration_owner': None}
+            project = {**project, "_execution_policy": execution_policy, "_core_ssh": core_ssh, '_integration_admin': False, '_integration_owner': None, '_computer_scopes': []}
             if isinstance(integration_context, dict):
                 owner = integration_context.get('owner')
                 if not isinstance(owner, str) or not 1 <= len(owner) <= 600 or integration_context.get('device_id') != self.config['device_id']:
@@ -591,7 +592,7 @@ class Agent:
                 admin = integration_context.get('admin') is True and isinstance(execution_policy, dict) and execution_policy.get('origin') == 'panel'
                 project.update(_integration_owner=owner, _integration_admin=admin, _coding_owner=owner,
                     _coding_device=integration_context['device_id'], device_id=integration_context['device_id'],
-                    _coding_scopes=integration_context.get('scopes', []))
+                    _coding_scopes=integration_context.get('scopes', []), _computer_scopes=integration_context.get('scopes', []))
                 self.integrations.remember_project(project)
             if args.get('workspace_id'):
                 project = self.integrations.project(project, args)
@@ -634,8 +635,13 @@ class Agent:
             elif tool in COMPUTER_TOOLS:
                 args = TOOLS[tool].model.model_validate(args).model_dump()
                 self.engine.root(project, tool in MUTATING and tool != "computer_session_close")
-                if agent_blocks_codex(self.config, project) and computer_denial(tool, args):
+                if agent_blocks_codex(self.config, project) and codex_computer_target(tool, args, self.computer.session):
                     raise DevError("CODEX_REMOTE_DISABLED", DENIAL_MESSAGE, 403)
+                if agent_blocks_computer(self.config, project) and computer_denial(tool, args):
+                    raise DevError(COMPUTER_DENIAL_CODE, COMPUTER_DENIAL_MESSAGE, 403)
+                scopes = project.get('_computer_scopes')
+                if required_scope(tool, args) == 'computer' and (not isinstance(scopes, list) or 'computer' not in scopes):
+                    raise DevError('INSUFFICIENT_SCOPE', '原生 computer 调用需要当前已认证的 computer 权限', 403)
                 self.journal.mark_running(id)
                 await self.send({"type": "started", "id": id})
                 self.phase(id, "executing")

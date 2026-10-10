@@ -8,7 +8,7 @@ import shutil
 from pathlib import Path
 
 from shared.util import DevError
-from shared.execution_policy import POLICY_VERSION, agent_blocks_codex
+from shared.execution_policy import POLICY_VERSION, agent_blocks_codex, agent_blocks_computer, local_blocks_computer
 
 
 def default_command():
@@ -94,6 +94,9 @@ def execution_info(config, project, spec, root):
         "execution_policy": {"version": POLICY_VERSION,
                              "local_block_codex": config.get("mcp_policy", {}).get("block_local_codex", False),
                              "effective_block_codex": agent_blocks_codex(config, project),
+                             "local_block_native_computer": local_blocks_computer(config),
+                             "effective_block_native_computer": agent_blocks_computer(config, project),
+                             "split_capabilities": ["codex_model_cli", "native_computer"],
                              "enforcement": "static_invocation_guard",
                              "os_sandbox": False},
         "shell": {"enabled": denial is None, "configured_enabled": shell["enabled"],

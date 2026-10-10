@@ -2,7 +2,7 @@
 
 Only inspect executable positions, nested shell commands and recognized launch APIs.
 Never run an executable to identify it. Hub uses text-only inspection; Agent can also
-resolve symlinks and inspect explicitly invoked local scripts. See docs/MCP_EXECUTION_POLICY.md.
+resolve symlinks and inspect explicitly invoked local scripts. See docs/EXECUTION_CAPABILITIES.md.
 """
 from __future__ import annotations
 
@@ -14,25 +14,59 @@ from pathlib import Path
 
 from shared.util import DevError
 
-POLICY_VERSION = 1
-DENIAL_MESSAGE = "MCP 不允许启动本地 Codex；普通命令、文件读写和技能读取不受此规则限制，手动使用请在管理员面板操作"
+POLICY_VERSION = 2
+DENIAL_MESSAGE = "MCP 不允许启动本地 Codex 模型/CLI；原生 computer 能力按独立策略授权，普通命令和文件读写不受此规则限制"
+COMPUTER_DENIAL_MESSAGE = "MCP 不允许使用原生 computer 能力；probe=false 静态状态和关闭现有会话仍可使用"
+COMPUTER_DENIAL_CODE = "NATIVE_COMPUTER_REMOTE_DISABLED"
 _SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish"}
 _POWERSHELL = {"powershell", "pwsh"}
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
 def hub_blocks_codex() -> bool:
-    # Retain the existing deployment switch; local Agent policy is an independent floor.
+    # Retain the deployment switch for model/CLI invocation only.
     return os.getenv("MCP_BLOCK_LOCAL_CODEX", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def hub_blocks_computer() -> bool:
+    value = os.getenv("MCP_BLOCK_NATIVE_COMPUTER")
+    if value is None:
+        return False  # Native admission is independent; scope and local allowlists still apply.
+    # A misspelt explicit setting must not accidentally grant desktop access.
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def hub_execution_policy(*, panel: bool) -> dict:
+    """Authenticated transport metadata, never accepted from tool arguments."""
+    return {"version": POLICY_VERSION, "origin": "panel" if panel else "mcp",
+            "block_local_codex": not panel and hub_blocks_codex(),
+            "block_native_computer": not panel and hub_blocks_computer()}
+
+
 def validate_policy(value: object) -> dict:
-    if not isinstance(value, dict) or set(value) - {"block_local_codex"}:
-        raise ValueError("mcp_policy 只接受 block_local_codex 配置")
+    fields = {"block_local_codex", "block_native_computer"}
+    if not isinstance(value, dict) or set(value) - fields:
+        raise ValueError("mcp_policy 只接受 block_local_codex / block_native_computer 配置")
     result = {"block_local_codex": False, **value}
-    if type(result["block_local_codex"]) is not bool:
-        raise ValueError("mcp_policy.block_local_codex 必须是 true/false")
+    for field in fields & result.keys():
+        if type(result[field]) is not bool:
+            raise ValueError(f"mcp_policy.{field} 必须是 true/false")
+    # Preserve omission without rewriting configuration. Native admission has its
+    # own default; model/CLI changes cannot silently change the desktop floor.
     return result
+
+
+def local_blocks_computer(config: dict) -> bool:
+    policy = config.get("mcp_policy", {})
+    return policy.get("block_native_computer", False)
+
+
+def _valid_policy(policy: object) -> bool:
+    return (isinstance(policy, dict) and type(policy.get("version")) is int
+            and policy["version"] in {1, POLICY_VERSION}
+            and isinstance(policy.get("origin"), str) and policy["origin"] in {"panel", "mcp"}
+            and type(policy.get("block_local_codex")) is bool
+            and (policy["version"] == 1 or type(policy.get("block_native_computer")) is bool))
 
 
 def agent_blocks_codex(config: dict, project: dict) -> bool:
@@ -40,21 +74,46 @@ def agent_blocks_codex(config: dict, project: dict) -> bool:
     policy = project.get("_execution_policy")
     local = config.get("mcp_policy", {}).get("block_local_codex", False)
     if policy is None:
-        return local  # Backward compatibility; local=true also protects legacy Hubs.
-    if (not isinstance(policy, dict) or type(policy.get("version")) is not int
-            or policy.get("version") != POLICY_VERSION
-            or not isinstance(policy.get("origin"), str) or policy["origin"] not in {"panel", "mcp"}
-            or type(policy.get("block_local_codex")) is not bool):
+        return local  # Legacy model/CLI behavior; local=true remains a floor.
+    if not _valid_policy(policy):
         return True  # Malformed metadata never grants the panel exemption.
     if policy["origin"] == "panel":
         return False
     return local or policy["block_local_codex"]
 
 
+def agent_blocks_computer(config: dict, project: dict) -> bool:
+    policy = project.get("_execution_policy")
+    # Independent desktop admission requires both peers to speak the split
+    # policy. Legacy/missing/unknown metadata cannot grant this capability.
+    if not _valid_policy(policy) or policy["version"] != POLICY_VERSION:
+        return True
+    if policy["origin"] == "panel":
+        return False
+    return local_blocks_computer(config) or policy["block_native_computer"]
+
+
 def computer_denial(name: str, args: dict) -> bool:
     from shared.computer_contracts import COMPUTER_TOOLS
     return (name == "computer_status" and bool(args.get("probe"))) or (
         name in COMPUTER_TOOLS - {"computer_status", "computer_session_close"})
+
+
+def codex_computer_target(name: str, args: dict, session: dict | None = None) -> bool:
+    """Known Codex UI targets never inherit a native-provider CLI exemption.
+
+    This is not a semantic sandbox for arbitrary apps (including terminals).
+    Existing app allowlists, native consent and observation fences still apply.
+    """
+    app = args.get("app") if name == "computer_session_open" else None
+    if (name in {"computer_observe", "computer_action"} and isinstance(session, dict)
+            and session.get("id") == args.get("session_id")):
+        app = session.get("app")
+    if not isinstance(app, str):
+        return False
+    normalized = app.replace("\\", "/").strip().rstrip("/").casefold()
+    return (normalized in {"codex", "com.openai.codex"} or _codex(normalized)
+            or "codex.app" in normalized.split("/"))
 
 
 def _base(value: str) -> str:

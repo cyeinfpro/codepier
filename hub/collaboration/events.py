@@ -17,7 +17,7 @@ from hub.principal import refresh_principal
 from hub.mcp_request_audit import mark
 from hub.collaboration.event_errors import CallbackEndpointError, callback_reason
 from hub.collaboration import network
-from hub.collaboration.common import (TASK_EVENT, RESULT_EVENT, INCIDENT_EVENT, STATUS_EVENT, MESSAGE_EVENT, WORK_EVENT, DELEGATION_EVENT,
+from hub.collaboration.common import (TASK_EVENT, RESULT_EVENT, INCIDENT_EVENT, STATUS_EVENT, MESSAGE_EVENT, WORK_EVENT, DELEGATION_EVENT, OPERATION_EVENT,
     SEVERITIES, canonical, digest, read_cursor, sign_cursor, timestamp, validate)
 from hub.collaboration.event_contracts import FILTERS, PAYLOADS, Subscribe, Unsubscribe, definitions
 from shared.util import DevError
@@ -50,6 +50,19 @@ class EventService:
         self.sender = sender or network.webhook
         self._network_limit = asyncio.Semaphore(2)
         self._scan_after = ''
+        from hub.operation_events import OperationEvents
+        self.operations = OperationEvents(self)
+
+    def operation_completed(self, operation_id):
+        """Join the caller's completion transaction; never perform network I/O."""
+        return self.operations.completed(operation_id)
+
+    def subscription_snapshot(self, principal, args):
+        snapshot = self.c.principal_snapshot(principal)
+        if args['name'] == OPERATION_EVENT:
+            filters = validate(FILTERS[OPERATION_EVENT], args['arguments'])
+            snapshot['operation_event_binding'] = self.operations.authorize(principal, filters)
+        return snapshot
 
     def guard(self):
         self.c.guard()
@@ -80,6 +93,8 @@ class EventService:
         principal, room = self.c.scope(principal, {'project': filters['project_id'], 'environment_id': filters['environment_id']},
                                        create=not stopping, notification=True)
         self.c.notification_reader(principal)
+        if args['name'] == OPERATION_EVENT and not stopping:
+            self.operations.authorize(principal, filters)
         if args['name'] == MESSAGE_EVENT:
             self.c.conversations.resolve(principal, room, filters)
         if args['name'] == DELEGATION_EVENT and not stopping:
@@ -126,8 +141,9 @@ class EventService:
     async def subscribe(self, raw, principal):
         def begin():
             with self.store.transaction():
-                return self.prepare(raw, principal)
-        args, authenticated, room, identifier, previous, cached = await self.store.run(begin)
+                prepared = self.prepare(raw, principal)
+                return (*prepared, self.subscription_snapshot(prepared[1], prepared[0]))
+        args, authenticated, room, identifier, previous, cached, authenticated_snapshot = await self.store.run(begin)
         verified_at = self.c.clock()
         if not cached:
             challenge = secrets.token_urlsafe(32)
@@ -171,7 +187,8 @@ class EventService:
                     self.c.delegation.authorize_event(current_principal, current_filters)
                 if args['name'] == WORK_EVENT:
                     self.c.coordination.authorize_event(current_principal, current_filters)
-                if self.c.principal_snapshot(current_principal) != self.c.principal_snapshot(authenticated):
+                current_snapshot = self.subscription_snapshot(current_principal, args)
+                if current_snapshot != authenticated_snapshot:
                     raise DevError('SUBSCRIPTION_IDENTITY_CHANGED', '回调验证期间身份发生变化，请重新确认连接', 409)
                 old = self.store.one('SELECT * FROM mcp_event_subscriptions WHERE id=?', (identifier,))
                 if not old and self.store.one("SELECT COUNT(*) AS n FROM mcp_event_subscriptions WHERE room_id=? AND state IN ('active','paused')", (room['id'],))['n'] >= 32:
@@ -209,7 +226,7 @@ class EventService:
                 if old:
                     self.store.execute('''UPDATE mcp_event_subscriptions SET principal=?,secret=?,key_digest=?,
                         expires_at=?,verified_until=?,state='active',version=version+1,updated=? WHERE id=?''',
-                        (canonical(self.c.principal_snapshot(current_principal)), self.store.encrypt(canonical(stored)),
+                        (canonical(current_snapshot), self.store.encrypt(canonical(stored)),
                          digest(stored['current']), lifetime, min(lifetime, now + 1800), now, identifier))
                     if not active:
                         self.store.execute("UPDATE mcp_event_deliveries SET state='abandoned',lease_until=NULL,fence=fence+1,reason_code='subscription_replay_reset' WHERE subscription_id=? AND state IN ('pending','retry_wait','leased')", (identifier,))
@@ -223,13 +240,15 @@ class EventService:
                     self.store.execute('''INSERT INTO mcp_event_subscriptions
                         (id,room_id,principal,grant_id,name,arguments,secret,expires_at,verified_until,key_digest,
                          scan_seq,ack_seq,created,updated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-                        (identifier, room['id'], canonical(self.c.principal_snapshot(current_principal)), current_principal.grant_id,
+                        (identifier, room['id'], canonical(current_snapshot), current_principal.grant_id,
                          args['name'], canonical(args['arguments']), self.store.encrypt(canonical(stored)), lifetime,
                          min(lifetime, now + 1800), digest(stored['current']), position, position, now, now))
                 self.c.audit(room, current_principal.actor, 'subscription.saved', identifier, {'name': args['name']})
                 saved = self.store.one('SELECT * FROM mcp_event_subscriptions WHERE id=?', (identifier,))
                 self.c.joining.attach_subscription(current_room, current_principal,
                     validate(FILTERS[args['name']], args['arguments']), saved, reset_verification=not active)
+                if args['name'] == OPERATION_EVENT:
+                    self.operations.catch_up(saved, current_room, current_principal, current_filters)
                 return {'id': identifier, 'refreshBefore': timestamp(lifetime),
                         'cursor': sign_cursor(self.c.secret, identifier, saved['ack_seq']), 'truncated': truncated}
         return await self.store.run(commit)
@@ -256,6 +275,8 @@ class EventService:
         self.c.live_room(room)
         filters = validate(FILTERS[subscription['name']], json.loads(subscription['arguments']))
         self.c.joining.subscription_guard(room, principal, filters)
+        if subscription['name'] == OPERATION_EVENT:
+            self.operations.authorize(principal, filters, snapshot=json.loads(subscription['principal']), payload=payload)
         if subscription['name'] == MESSAGE_EVENT:
             self.c.conversations.resolve(principal, room, filters)
         if subscription['name'] == DELEGATION_EVENT:
@@ -289,6 +310,13 @@ class EventService:
                 or any(payload.get(key) != filters.get(key)
                        for key in ('project_id', 'environment_id', 'conversation_id', 'policy_id', 'policy_version'))):
             return False
+        if event['name'] == OPERATION_EVENT:
+            from hub.operation_events import OperationEvents
+            if (not event['target_grant_id'] or payload.get('recipient_grant_id') != subscription['grant_id']
+                    or payload.get('operation_id') not in filters['operation_ids']
+                    or any(payload.get(key) != filters[key] for key in ('project_id', 'environment_id'))
+                    or (not payload.get('test') and event['object_id'] != OperationEvents.object_id(subscription['id'], payload))):
+                return False
         if payload.get('test'):
             return payload.get('test_subscription_id') == subscription['id']
         if event['name'] == TASK_EVENT and filters['queue'] != event['queue']:
@@ -339,7 +367,7 @@ class EventService:
                     continue
                 event = self.store.one('SELECT * FROM mcp_event_outbox WHERE id=?', (delivery['event_id'],))
                 payload = validate(PAYLOADS[event['name']], json.loads(event['data']))
-                if event['name'] in {WORK_EVENT, DELEGATION_EVENT}:
+                if event['name'] in {WORK_EVENT, DELEGATION_EVENT, OPERATION_EVENT}:
                     try:
                         self.authorize(sub, room, payload)
                     except DevError:
@@ -384,7 +412,7 @@ class EventService:
                 return None
             room = self.store.one('SELECT * FROM collaboration_rooms WHERE id=?', (sub['room_id'],))
             event = self.store.one('SELECT * FROM mcp_event_outbox WHERE id=?', (delivery['event_id'],))
-            self.authorize(sub, room, json.loads(event['data']) if event['name'] in {WORK_EVENT, DELEGATION_EVENT} else None)
+            self.authorize(sub, room, json.loads(event['data']) if event['name'] in {WORK_EVENT, DELEGATION_EVENT, OPERATION_EVENT} else None)
             if event['name'] == TASK_EVENT and not json.loads(event['data']).get('test'):
                 job = self.store.one('SELECT * FROM collaboration_jobs WHERE id=? AND room_id=?', (event['object_id'], room['id']))
                 if (not self.c.config.analysis_dispatch_enabled or not job or job['state'] != 'queued'
@@ -454,7 +482,12 @@ class EventService:
         filters = self.authorize(subscription, room)
         identifier = 'test_' + secrets.token_hex(16)
         base = {'test': True, 'test_subscription_id': subscription['id']}
-        if subscription['name'] == TASK_EVENT:
+        if subscription['name'] == OPERATION_EVENT:
+            principal = self.c.grant_reader(room, subscription['grant_id'], snapshot=json.loads(subscription['principal']))
+            operation = self.operations.read(filters['operation_ids'][0], principal, filters)
+            base.update(operation_id=operation['id'], state='succeeded', output_seq=operation['output_seq'],
+                        workspace_id=operation['workspace_id'], recipient_grant_id=subscription['grant_id'], next_call=None)
+        elif subscription['name'] == TASK_EVENT:
             agent = self.store.one('SELECT id,kind FROM collaboration_agents WHERE room_id=? AND grant_id=? AND queue=? AND enabled=1 AND expires_at>?', (room['id'], subscription['grant_id'], filters['queue'], self.c.clock()))
             base.update(job_id=identifier, job_version=1, queue=filters['queue'], assignee_agent_id=agent['id'] if agent else identifier,
                         kind='analyze_incident' if filters['queue'] == 'work-analysis' else 'summarize_result', reason_code='subscription_test')

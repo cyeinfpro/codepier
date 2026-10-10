@@ -41,10 +41,12 @@ class ToolRouter:
 
     def list_tools(self, principal, cursor=None):
         principal, native, external = self.definitions(principal)
-        from hub.gateway.catalog import page
-        return page(native + external, cursor,
+        from hub.gateway.catalog import page, fingerprint
+        result = page(native + external, cursor,
                     [principal.space_id, principal.user_id, principal.grant_id, principal.profile_id],
                     self.gateway.secret)
+        result['_meta'] = {'com.codepier/catalogSha256': fingerprint(sorted(native + external, key=lambda item: item['name']))}
+        return result
 
     def resolve(self, principal, name):
         if name in INCOMING_UPLOAD_TOOLS:

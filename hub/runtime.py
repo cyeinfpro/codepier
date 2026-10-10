@@ -28,13 +28,15 @@ from hub.call_log import operation_summary
 from hub.artifacts import ArtifactService
 from hub.native_cli import NativeService
 from shared.agent_lifecycle import DEVICE_ACTIONS, public_management
-from shared.contracts import TOOLS, PROCESS_TOOLS, MUTATING, OPERATION_WAIT_SECONDS, OPERATION_OUTPUT_LIMIT
+from shared.contracts import TOOLS, PROCESS_TOOLS, MUTATING, OPERATION_WAIT_SECONDS, OPERATION_OUTPUT_LIMIT, required_scope
 from shared.computer_contracts import COMPUTER_TOOLS
 from shared.computer_media import scrub_expired, purge_database
 from shared.crypto import SecureChannel, digest, token
 from shared.util import DevError, safe_summary
 from shared.tool_protocol import advertisement, catalog_digest, negotiate, require_compatible, validate_call_epoch, wire_version
-from shared.execution_policy import POLICY_VERSION, DENIAL_MESSAGE, InvocationInspector, hub_blocks_codex, computer_denial
+from shared.execution_policy import (DENIAL_MESSAGE, COMPUTER_DENIAL_MESSAGE, COMPUTER_DENIAL_CODE,
+    InvocationInspector, hub_blocks_codex, hub_blocks_computer, hub_execution_policy,
+    computer_denial, codex_computer_target)
 
 ACTIVE = {"queued", "running", "reconnecting", "cancelling"}
 TERMINAL = {"succeeded", "failed", "cancelled", "needs_review", "interrupted"}
@@ -46,15 +48,22 @@ def alias_key(value: str):
 
 
 
-def remote_codex_denial(name: str, args: dict, principal: Principal) -> str | None:
-    """Inspect invocations, not mentions. Authentication decides the exemption."""
-    if not hub_blocks_codex() or principal.admin:
+def remote_execution_denial(name: str, args: dict, principal: Principal) -> tuple[str, str] | None:
+    """Independent invocation/desktop floors; authentication decides exemption."""
+    if principal.admin:
         return None
-    if name in {"shell_exec", "exec"} and InvocationInspector(env=args.get("env")).shell(args.get("command", "")):
-        return DENIAL_MESSAGE
-    if computer_denial(name, args):
-        return "MCP 不允许启动 Codex Computer Use；probe=false 静态状态和关闭现有会话仍可使用"
+    if hub_blocks_codex() and (codex_computer_target(name, args) or
+            name in {"shell_exec", "exec"} and InvocationInspector(env=args.get("env")).shell(args.get("command", ""))):
+        return "CODEX_REMOTE_DISABLED", DENIAL_MESSAGE
+    if hub_blocks_computer() and computer_denial(name, args):
+        return COMPUTER_DENIAL_CODE, COMPUTER_DENIAL_MESSAGE
     return None
+
+
+def remote_codex_denial(name: str, args: dict, principal: Principal) -> str | None:
+    """Compatibility accessor for callers that only need the denial message."""
+    denial = remote_execution_denial(name, args, principal)
+    return denial[1] if denial else None
 
 
 class Connection:
@@ -72,11 +81,15 @@ class Connection:
         self.native_security_protocol = 0
         self.tool_protocol = None
 
-    async def send(self, body):
+    async def send(self, body, *, before_send=None):
         # A half-open peer must not hold the scheduler/send lock indefinitely.
         async with self.lock:
             if self.unusable:
                 raise ConnectionError("Authenticated channel is no longer usable")
+            # Waiting for another writer must not retain an authorization decision.
+            # A rejected guard has not packed ciphertext or advanced its sequence.
+            if before_send is not None and not await before_send():
+                return False
             try:
                 await asyncio.wait_for(self.socket.send_text(self.channel.pack(body)), 4)
             except BaseException:
@@ -86,6 +99,7 @@ class Connection:
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(self.socket.close(code=1011), 1)
                 raise
+            return True
 
 
 class Runtime:
@@ -259,11 +273,16 @@ class Runtime:
     @iam.read_decision
     def operation_row(self, id: str, principal: Principal, *, status_only=False):
         principal = refresh_profile_principal(self.store, principal)
-        columns = "id,grant_id,project_id,device_id,tool,state,space_id,owner_user_id,visibility" if status_only else "*"
+        columns = "id,grant_id,project_id,device_id,tool,state,space_id,owner_user_id,visibility,args_summary" if status_only else "*"
         row = self.store.one(f"SELECT {columns} FROM operations WHERE id=?", (id,))
         principal = iam.require_record(self.store, principal, row)
+        try:
+            summary = json.loads(row['args_summary'])
+        except (TypeError, ValueError):
+            summary = None
+        scope = required_scope(row['tool'], summary) if row['tool'] in TOOLS else 'read'
         if row['project_id']:
-            self.authorize(principal, TOOLS[row['tool']].scope, project_id=row['project_id'])
+            self.authorize(principal, scope, project_id=row['project_id'])
         from shared.integration_contracts import INCOMING_UPLOAD_TOOLS
         if row['tool'] in INCOMING_UPLOAD_TOOLS:
             service = getattr(self, 'incoming_files', None)
@@ -272,7 +291,7 @@ class Runtime:
             service.authorize_operation(row, principal)
         if not row['project_id'] and row['tool'] == 'system_validate':
             self.authorize(principal, 'projects.create', device_id=row['device_id'])
-        if row['tool'] in (COMPUTER_TOOLS - {'computer_status'}) | {'browser_open', 'browser_snapshot', 'browser_action', 'browser_close'} and 'computer' not in principal.scopes:
+        if (scope == 'computer' or row['tool'] in {'browser_open', 'browser_snapshot', 'browser_action', 'browser_close'}) and 'computer' not in principal.scopes:
             raise DevError('INSUFFICIENT_SCOPE', '读取桌面操作结果仍需 computer 权限', 403)
         return row
 
@@ -360,6 +379,9 @@ class Runtime:
         cursor = row["output_seq"] if include_output and limit > 0 or unchanged else options.get("after_output_seq")
         result["next_call"] = self.operation_next_call(id, pending=result["pending"], after_output_seq=cursor,
                                                        fetch_result=not include_result and bool(row["result"]))
+        from shared.operation_recovery import operation_recovery
+        result['recovery'] = operation_recovery(result, online=bool(row['device_id'] and self.online(row['device_id'])),
+                                                after_output_seq=cursor)
         return result
 
     def list_operations(self, args, principal):
@@ -405,7 +427,8 @@ class Runtime:
             from hub.core_tools import invoke_query
             return await invoke_query(self, name, raw, principal)
         from shared.core_contracts import CORE_FACADES, CORE_ACTIONS
-        if name in CORE_FACADES or name in CORE_ACTIONS and raw.get('operation', 'file') != 'file':
+        if name in CORE_FACADES or (name in CORE_ACTIONS and raw.get('operation', 'file') != 'file'
+                and not (name == 'read' and raw.get('operation') == 'batch')):
             from hub.core_tools import invoke as invoke_core
             return await invoke_core(self, name, raw, principal)
         if name in {'download_artifact', 'inspect_file_source'}:
@@ -443,21 +466,22 @@ class Runtime:
         tool = TOOLS.get(name)
         if not tool:
             raise DevError("UNKNOWN_TOOL", "不存在此工具", 404)
-        if tool.scope not in principal.scopes:
-            self.store.audit(principal.actor, name, status="denied", detail={"reason": "scope"})
-            code = 'ROLE_POLICY_DENIED' if principal.authorization_mode == 'role' else 'INSUFFICIENT_SCOPE'
-            raise DevError(code, f"当前凭据/角色缺少 {tool.scope} 权限", 403, required_scope=tool.scope)
         try:
             args = tool.model.model_validate(raw).model_dump()
             if args.get('workspace_id') == '': args.pop('workspace_id', None)
         except ValidationError as exc:
             issues = [{"field": ".".join(map(str, x["loc"])), "message": x["msg"]} for x in exc.errors()]
             raise DevError("INVALID_ARGUMENTS", json.dumps(issues, ensure_ascii=False)[:1500]) from exc
-        codex_denial = remote_codex_denial(name, args, principal)
-        if codex_denial:
+        scope = required_scope(name, args)
+        if scope not in principal.scopes:
+            self.store.audit(principal.actor, name, status="denied", detail={"reason": "scope"})
+            code = 'ROLE_POLICY_DENIED' if principal.authorization_mode == 'role' else 'INSUFFICIENT_SCOPE'
+            raise DevError(code, f"当前凭据/角色缺少 {scope} 权限", 403, required_scope=scope)
+        policy_denial = remote_execution_denial(name, args, principal)
+        if policy_denial:
             self.store.audit(principal.actor, name, args.get("project", ""), status="denied",
-                             detail={"reason": "remote_codex_policy"})
-            raise DevError("CODEX_REMOTE_DISABLED", codex_denial, 403)
+                             detail={"reason": "remote_execution_policy", "code": policy_denial[0]})
+            raise DevError(policy_denial[0], policy_denial[1], 403)
         if name in {'get_profile', 'get_access_context'}:
             self.authorize(principal, name)
         elif name == 'projects_create':
@@ -479,7 +503,7 @@ class Runtime:
             self.authorize(principal, 'read')
             if args.get('project'):
                 scoped_project = self.project(args['project'], principal)
-                self.authorize(principal, tool.scope, project_id=scoped_project['id'])
+                self.authorize(principal, scope, project_id=scoped_project['id'])
         from shared.integration_contracts import ADMIN_TOOLS, REMOTE_TOOLS as INTEGRATION_REMOTE_TOOLS
         if name in ADMIN_TOOLS and not principal.admin:
             raise DevError('OWNER_REQUIRED', '此操作只允许面板主理人执行', 403)
@@ -647,11 +671,14 @@ class Runtime:
                 self.operation_row(id, principal, status_only=True)
             except DevError as exc:
                 raise DevError(exc.code, exc.message, exc.status, operation_id=id) from exc
-            op = self.store.one("SELECT state,deadline,result,created,updated FROM operations WHERE id=?", (id,))
+            op = self.store.one("SELECT state,deadline,result,created,updated,device_id,cancel_requested FROM operations WHERE id=?", (id,))
             if op["result"]:
                 return self.authorized_result(id, json.loads(op["result"]), principal)
         pending = op["state"] in ACTIVE or op["state"] == "unknown"
-        return {"operation_id": id, "pending": pending, "state": op["state"], "next": "operations_wait" if pending else None, "retry_after_seconds": 2 if pending else None,
+        from shared.operation_recovery import operation_recovery
+        recovery = operation_recovery({**op, "operation_id": id, "pending": pending, "result": None},
+                                      online=self.online(op["device_id"]))
+        return {"recovery": recovery, "operation_id": id, "pending": pending, "state": op["state"], "next": "operations_wait" if pending else None, "retry_after_seconds": 2 if pending else None,
                 "next_call": self.operation_next_call(id, pending=pending),
                 "elapsed_seconds": round(max(0, (time.time() if pending else op["updated"]) - op["created"]), 1),
                 "deadline": op["deadline"], "note": "已持久保存。网络恢复后继续同一操作；请查询 operation_id，不要换新幂等键重复提交。"}
@@ -666,7 +693,12 @@ class Runtime:
             args = {**args, "project": project["alias"]}
         principal = refresh_profile_principal(self.store, principal)
         if project.get('id'):
-            self.authorize(principal, TOOLS[name].scope, project_id=project['id'])
+            scope = required_scope(name, args)
+            if scope not in principal.scopes:
+                raise DevError('INSUFFICIENT_SCOPE', f'当前凭据缺少 {scope} 权限', 403, required_scope=scope)
+            if name == 'computer_session_close' and args.get('force') and not principal.instance_admin:
+                raise DevError('COMPUTER_FORCE_DENIED', '强制关闭需要当前面板管理员权限', 403)
+            self.authorize(principal, scope, project_id=project['id'])
         elif name == 'system_validate' and not principal.admin:
             self.authorize(principal, 'projects.create', device_id=project['device_id'], creation=project)
         elif name in DEVICE_ACTIONS:
@@ -680,7 +712,7 @@ class Runtime:
             snapshot["_coding_scopes"] = sorted(role_project_scopes(self.store, principal, project['id']))
         if name in COMPUTER_TOOLS:
             snapshot["_computer_owner"] = "grant:" + principal.grant_id if principal.grant_id else principal.actor
-            snapshot["_computer_admin"] = principal.admin
+            snapshot["_computer_admin"] = principal.instance_admin
         fingerprint = digest(json.dumps({"tool": name, "args": args, "project": snapshot, "device": project["device_id"]}, sort_keys=True, ensure_ascii=False))
         with self.store.lock:
             from shared.integration_contracts import INCOMING_UPLOAD_TOOLS
@@ -798,8 +830,10 @@ class Runtime:
     def permission_error(self, op, request):
         try:
             caller = self.operation_principal(op, request)
+            if op['tool'] == 'computer_session_close' and request['args'].get('force') and not caller.instance_admin:
+                return '强制关闭的面板管理员权限已撤销'
             if op['project_id']:
-                self.authorize(caller, TOOLS[op['tool']].scope, project_id=op['project_id'])
+                self.authorize(caller, required_scope(op['tool'], request['args']), project_id=op['project_id'])
             else:
                 iam.require_device(self.store, caller, op['device_id'], manage=op['tool'] != 'system_validate',
                                    creation=request['project'] if op['tool'] == 'system_validate' else None)
@@ -823,7 +857,7 @@ class Runtime:
             denied = self.vps.permission_error(request, op["project_id"])
             if denied:
                 return denied
-        scope = TOOLS[op["tool"]].scope
+        scope = required_scope(op["tool"], request["args"])
         if op["tool"] in MUTATING and op["tool"] != "computer_session_close" and project["mode"] != "write" or op["tool"] in PROCESS_TOOLS and not project["allow_tasks"]:
             return "排队操作的项目写入/任务权限已撤销"
         if op["grant_id"]:
@@ -841,61 +875,148 @@ class Runtime:
         with self.store.lock, self.store.db:
             purge_database(self.store.db, "operations")
 
+    def _delivery_candidates(self, busy_devices):
+        # Round-robin rank prevents one busy device's old backlog from hiding
+        # all other devices behind the global 128-row dispatch window.
+        excluded = ''
+        parameters = [time.time()]
+        if busy_devices:
+            excluded = ' AND device_id NOT IN (' + ','.join('?' for _ in busy_devices) + ')'
+            parameters.extend(busy_devices)
+        return self.store.all("""SELECT id,device_id FROM (
+            SELECT id,device_id,created,rowid AS row_order,
+                   ROW_NUMBER() OVER (PARTITION BY device_id ORDER BY created,rowid) AS turn
+            FROM operations WHERE state IN ('queued','running','reconnecting','cancelling')
+            AND next_attempt<=?""" + excluded + """)
+            ORDER BY turn,created,row_order LIMIT 128""", tuple(parameters))
+
     async def delivery_loop(self):
-        while not self.stopping:
-            self.wake.clear()
-            try:
-                if time.monotonic() - self.computer_cleanup_at > 15:
-                    await self.store.run(self._purge_computer)
-                    self.computer_cleanup_at = time.monotonic()
-                rows = await self.store.run(self.store.all, "SELECT id,device_id FROM operations WHERE state IN ('queued','running','reconnecting','cancelling') AND next_attempt<=? ORDER BY created LIMIT 128", (time.time(),))
-                # Group per-device to retain submission order, without one dead link
-                # delaying other home computers.
-                devices = {}
-                for row in rows:
-                    devices.setdefault(row["device_id"], []).append(row["id"])
-                await asyncio.gather(*(self.deliver_device(ids) for ids in devices.values()))
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                # A transient full/locked database must not kill the only worker
-                # merely because its error audit cannot be persisted either.
-                with contextlib.suppress(Exception):
-                    await self.store.run(self.store.audit, "hub", "delivery.error", status="error", detail={"type": type(exc).__name__})
-            try:
-                await asyncio.wait_for(self.wake.wait(), 1)
-            except asyncio.TimeoutError:
-                pass
+        active_devices = {}
+        try:
+            while not self.stopping:
+                self.wake.clear()
+                try:
+                    for device, task in list(active_devices.items()):
+                        if task.done():
+                            active_devices.pop(device)
+                            task.result()
+                    if time.monotonic() - self.computer_cleanup_at > 15:
+                        await self.store.run(self._purge_computer)
+                        self.computer_cleanup_at = time.monotonic()
+                    rows = await self.store.run(self._delivery_candidates, tuple(active_devices))
+                    devices = {}
+                    for row in rows:
+                        devices.setdefault(row["device_id"], []).append(row["id"])
+                    for device, identifiers in devices.items():
+                        task = asyncio.create_task(self.deliver_device(identifiers),
+                                                   name="device-delivery")
+                        active_devices[device] = task
+                        task.add_done_callback(lambda _: self.wake.set())
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # A failed audit must not kill the durable dispatcher.
+                    with contextlib.suppress(Exception):
+                        await self.store.run(self.store.audit, "hub", "delivery.error",
+                            status="error", detail={"type": type(exc).__name__})
+                try:
+                    await asyncio.wait_for(self.wake.wait(), 1)
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            tasks = list(active_devices.values())
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _delivery_failed(self, identifier, exc):
+        with contextlib.suppress(Exception):
+            await self.store.run(self.store.execute,
+                "UPDATE operations SET transport_error=?,next_attempt=? WHERE id=?",
+                ("Delivery interrupted: " + type(exc).__name__,
+                 time.time() + self.retry_seconds, identifier))
+        # Keep the original durable request and receipt when send outcome is unknown.
+
+    async def _prepare_for_send(self, identifier):
+        async with self.dispatch_lock:
+            return await self.store.run(self._prepare_delivery, identifier)
 
     async def deliver_device(self, ids):
-        for id in ids:
-            if self.stopping:
-                break
-            try:
-                # Each in-flight send holds a decrypted request. Bound that
-                # memory even when many devices reconnect with large edits.
-                async with self.delivery_slots:
-                    await self.deliver(id)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                with contextlib.suppress(Exception):
-                    await self.store.run(self.store.execute, "UPDATE operations SET transport_error=?,next_attempt=? WHERE id=?", ("Delivery interrupted: " + type(exc).__name__, time.time() + self.retry_seconds, id))
-                # Retain the request and operation ID even if the send outcome is unknown.
+        from hub.delivery_pipeline import ordered_delivery
+        await ordered_delivery(ids, prepare=self._prepare_for_send, send=self._send_prepared,
+            failed=self._delivery_failed, slots=self.delivery_slots,
+            stopping=lambda: self.stopping, prefetch=2)
 
     async def deliver(self, id):
-        async with self.dispatch_lock:
-            prepared = await self.store.run(self._prepare_delivery, id)
-        if prepared is None:
-            return
+        prepared = await self._prepare_for_send(id)
+        if prepared is not None:
+            await self._send_prepared(id, prepared)
+
+    @iam.read_decision
+    def _delivery_packet_current(self, identifier, device_id, con, packet):
+        # Preparation can overlap an earlier send. Recheck current authority
+        # immediately before this packet, without caching an authorization result.
+        with self.store.transaction():
+            if (self.connections.get(device_id) is not con or con.unusable
+                    or not self.connection_authorized(device_id, con)):
+                return False
+            op = self.store.one('SELECT * FROM operations WHERE id=?', (identifier,))
+            if not op or op['state'] not in ACTIVE:
+                return False
+            if packet['type'] != 'call':
+                return True
+            # The wire packet intentionally omits vps_ref. Use the original
+            # encrypted request for the final VPS version/binding check too.
+            request = json.loads(self.store.decrypt(op['payload']))
+            denied = self.permission_error(op, request)
+            denied = denied or self.collaboration.coordination.operation_denial(op)
+            panel = not op['grant_id'] and op['actor'].startswith('panel:')
+            principal = None
+            try:
+                principal = self.operation_principal(op, request)
+                if op['project_id']:
+                    project = self.store.one('SELECT * FROM projects WHERE id=?', (op['project_id'],))
+                    if project:
+                        self.integrations.guard(op['tool'], request['args'], project, principal)
+                policy = remote_execution_denial(op['tool'], request['args'],
+                    Principal(op['actor'], '', set(), [], grant_id=op['grant_id'], admin=panel))
+                denied = denied or (policy[1] if policy else None)
+                require_compatible(getattr(con, 'tool_protocol', None), op['tool'])
+            except DevError as exc:
+                denied = denied or exc.message
+            expired = bool(op['deadline'] and time.time() > op['deadline'])
+            if denied or expired or op['cancel_requested'] or op['accepted_at']:
+                # The preparation decision is durable; never reinterpret an
+                # earlier ambiguous attempt as definitely not sent. Next tick
+                # reconciles this same ID through the existing probe/cancel path.
+                self.store.execute('UPDATE operations SET next_attempt=? WHERE id=?',
+                                   (time.time(), identifier))
+                return False
+            scopes = sorted(role_project_scopes(self.store, principal, op['project_id'])) if op['project_id'] else []
+            if '_coding_scopes' in packet['project']:
+                packet['project']['_coding_scopes'] = scopes
+            if op['tool'] in COMPUTER_TOOLS:
+                packet['project']['_computer_admin'] = principal.instance_admin
+            packet['integration_context'] = {
+                'owner': 'grant:'+op['grant_id'] if op['grant_id'] else op['actor'],
+                'admin': principal.admin, 'device_id': op['device_id'], 'scopes': scopes}
+            packet['execution_policy'] = hub_execution_policy(panel=panel)
+            self.diagnostics.record(identifier, 'dispatched')
+            return True
+
+    async def _send_prepared(self, identifier, prepared):
         device_id, con, packets = prepared
         for packet in packets:
-            authorized = await self.store.run(self.connection_authorized, device_id, con)
-            if self.connections.get(device_id) is not con or con.unusable or not authorized:
+            async def current(packet=packet):
+                return await self.store.run(self._delivery_packet_current,
+                                            identifier, device_id, con, packet)
+            if not await con.send(packet, before_send=current):
                 return
-            await con.send(packet)
 
+    @iam.read_decision
     def _prepare_delivery(self, id):
+        # Reuse existing authorization memoization only within this synchronous
+        # phase. Every write invalidates it; no decision survives the next await.
         packets = []
         with self.store.lock:
             op = self.store.one("SELECT * FROM operations WHERE id=?", (id,))
@@ -937,15 +1058,15 @@ class Runtime:
                 if current_project:
                     try:self.integrations.guard(op['tool'], request['args'], current_project, delivery_principal)
                     except DevError as exc:denied = denied or exc.message
-            request["execution_policy"] = {"version": POLICY_VERSION,
-                "origin": "panel" if panel else "mcp",
-                "block_local_codex": not panel and hub_blocks_codex()}
+            request["execution_policy"] = hub_execution_policy(panel=panel)
             policy_denied = None
             if not op["accepted_at"]:
                 policy_code = "CODEX_REMOTE_DISABLED"
                 try:
-                    policy_denied = remote_codex_denial(op["tool"], request["args"],
+                    policy_denial = remote_execution_denial(op["tool"], request["args"],
                         Principal(op["actor"], "", set(), [], grant_id=op["grant_id"], admin=panel))
+                    if policy_denial:
+                        policy_code, policy_denied = policy_denial
                 except DevError as exc:
                     # Missing grammar/analysis limits are terminal for unsent work,
                     # not a transport fault that should remain queued forever.
@@ -1005,7 +1126,6 @@ class Runtime:
                         request = None
                 if request is not None:
                     self.store.execute("UPDATE operations SET attempts=attempts+1,journal_id=COALESCE(journal_id,?),updated=? WHERE id=?", (con.journal_id, now, id))
-                    self.diagnostics.record(id, "dispatched")
                     packets.append({"type": "call", "id": id, **request, "not_after": op["deadline"], "tool_contract_version": request.get("tool_contract_version", 1)})
         return op["device_id"], con, packets
 
@@ -1053,10 +1173,21 @@ class Runtime:
             state = 'needs_review' if data.get('outcome') == 'partial' else 'failed'
             error = data.get('error') or {'message': '批量补丁未完成，请核查备份与回滚结果'}
         output = str(data.get("output", op.get("output", "")))[-131072:]
-        changed = self.store.execute("UPDATE operations SET state=?,result=?,error=?,output=?,updated=?,output_seq=output_seq+?,payload=NULL,transport_error=NULL WHERE id=? AND state NOT IN ('succeeded','failed','cancelled')",
-            (state, encoded, error.get("message"), output, time.time(), int(output != (op.get("output") or "")), op["id"]))
-        if not changed.rowcount:
-            return
+        # Persist the terminal result and exact-subscription completion hint
+        # atomically. A failed outbox write must leave the original operation
+        # recoverable; unrelated evidence/audit failures stay outside this unit.
+        with self.store.transaction():
+            changed = self.store.execute("UPDATE operations SET state=?,result=?,error=?,output=?,updated=?,output_seq=output_seq+?,payload=NULL,transport_error=NULL WHERE id=? AND state NOT IN ('succeeded','failed','cancelled')",
+                (state, encoded, error.get("message"), output, time.time(), int(output != (op.get("output") or "")), op["id"]))
+            if not changed.rowcount:
+                return
+            self.collaboration.events.operation_completed(op["id"])
+        # Capture only non-secret completion evidence from the old in-memory
+        # request. The durable encrypted payload was already cleared above.
+        try:
+            self.diagnostics.connection.completed(op, result, state=state, completed_at=time.time())
+        except Exception:
+            self.diagnostics.connection.write_errors += 1
         # Notify after commit, even if auxiliary auditing subsequently fails.
         self.notify_operation(op["id"])
         self.store.audit(op["actor"], op["tool"], op["id"], state,

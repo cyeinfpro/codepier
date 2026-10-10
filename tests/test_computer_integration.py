@@ -65,6 +65,14 @@ def test_scope_catalog_and_status_never_expand_existing_grants(desktop):
     s=desktop
     out=s.mcp('computer',{'project': 'ProjectAlpha', 'operation': 'apps'})
     assert out['isError'] and out['structuredContent']['error']['code']=='INSUFFICIENT_SCOPE'
+    with sqlite3.connect(s.hubdir/'hub.sqlite3') as db:
+        before = db.execute('SELECT count(*) FROM operations').fetchone()[0]
+    _,denied=rpc(s,'computer_status',{'probe':True},token=s.pat,allow_error=True)
+    assert denied['isError'] and denied['structuredContent']['error']['code']=='INSUFFICIENT_SCOPE'
+    with sqlite3.connect(s.hubdir/'hub.sqlite3') as db:
+        assert db.execute('SELECT count(*) FROM operations').fetchone()[0] == before
+    static,_=rpc(s,'computer_status',{'probe':False},token=s.pat)
+    assert static['screen_permissions_verified'] is False
     status,_=rpc(s,'computer_status',{'probe':True})
     assert status['capabilities_verified'] and len(status['native_tools'])==10
     assert status['screen_permissions_verified'] is False

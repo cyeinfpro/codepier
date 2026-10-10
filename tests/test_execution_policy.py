@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import ValidationError
-from shared.execution_policy import InvocationInspector, agent_blocks_codex, validate_policy, enforce_argv
+from shared.execution_policy import InvocationInspector, agent_blocks_codex, validate_policy, enforce_argv, hub_execution_policy, COMPUTER_DENIAL_CODE
 from shared.contracts import ShellExec
 from shared.util import DevError, atomic_json
 from hub.runtime import Principal, remote_codex_denial
@@ -186,7 +186,7 @@ async def test_computer_probe_blocked_before_provider(shell_agent, monkeypatch):
     provider = AsyncMock()
     monkeypatch.setattr(agent.computer, 'execute', provider)
     await agent.handle(req)
-    assert agent.journal.status(req['id'])['result']['error']['code'] == 'CODEX_REMOTE_DISABLED'
+    assert agent.journal.status(req['id'])['result']['error']['code'] == COMPUTER_DENIAL_CODE
     provider.assert_not_called()
 
 
@@ -218,7 +218,7 @@ async def test_trusted_metadata_injected_outside_idempotency_payload(runtime, mo
         await until(lambda: r.online('dev'))
         await r.deliver(receipt['operation_id'])
         packet = next(x for x in socket.packets if x['type'] == 'call')
-        assert packet['execution_policy'] == policy('panel' if panel else 'mcp', not panel)
+        assert packet['execution_policy'] == hub_execution_policy(panel=panel)
         assert 'execution_policy' not in json.loads(r.store.decrypt(original['payload']))
         assert (await r.invoke('shell_exec', args, p))['operation_id'] == receipt['operation_id']
         assert r.store.one('SELECT fingerprint FROM operations WHERE id=?', (receipt['operation_id'],))['fingerprint'] == original['fingerprint']

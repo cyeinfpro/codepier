@@ -221,7 +221,16 @@ def build_core_output_schemas(legacy, *, include_queries=False):
     image_file = obj({**file_meta, **MEDIA},
                      ('operation_id', 'path', 'sha256', 'bytes', 'images',
                       'native_is_error', 'truncated', 'next_offset'))
-    read = [text_file, image_file, *variants('show_changes', 'artifacts_get',
+    batch_file = obj({**text_file['properties'], 'index': INT, 'ok': {'const': True},
+                      'budget_limited': BOOL},
+                     tuple(key for key in text_file['required'] if key != 'operation_id') + ('index', 'ok'))
+    batch_error = obj({'index': INT, 'path': STR, 'ok': {'const': False}, 'error': ERROR},
+                      ('index', 'path', 'ok', 'error'))
+    batch_read = obj({'operation_id': STR, 'batch': {'const': True},
+                      'files': array(either(batch_file, batch_error)), 'truncated': BOOL,
+                      'budget_limited': BOOL, 'payload_limit_bytes': INT},
+                     ('operation_id', 'batch', 'files', 'truncated'))
+    read = [text_file, image_file, batch_read, *variants('show_changes', 'artifacts_get',
             'artifacts_list', 'history_list', 'code_symbols', 'lsp_query')]
     # Import.created is a boolean; registered artifact.created is a timestamp.
     # Both must be declared before factoring shared fields across the facade.

@@ -7,6 +7,7 @@
 - [完整入门](START-HERE.md)：部署 Hub、接入电脑、映射项目、连接客户端
 - [Agent 安装与升级](AGENT_INSTALL.md)
 - [连接 ChatGPT 与其他 MCP 客户端](CHATGPT.md)
+- [连接改进验收](CONNECTION_ACCEPTANCE.md)：批读、连接证据、刷新提示、恢复与 Tunnel 的已验收边界
 - [MCP 工具参考](CORE_TOOLS.md)
 - [CLI 会话](CLI_SESSIONS.md)：Pi、Codex 和 Claude Code
 - [浏览器集成](INTEGRATIONS-20260917.md)与[桌面控制](COMPUTER_USE.md)
@@ -22,7 +23,9 @@
 - [安全指南](../SECURITY.md)
 - [身份与 OIDC](MULTIUSER_OIDC.md)
 - [访问配置](ACCESS_PROFILES.md)与[动态角色](DYNAMIC_ROLES.md)
-- [外部 MCP 网关](MCP_GATEWAY.md)
+- [外部 MCP 网关](MCP_GATEWAY.md)与[并发隔离](GATEWAY_CONCURRENCY.md)
+- [模型/CLI 与桌面能力策略](EXECUTION_CAPABILITIES.md)
+- [原操作完成提示](OPERATION_EVENTS.md)：精确订阅、事务 outbox 与宿主消费边界
 - [协作室](COLLABORATION_CHATROOM.md)
 - [面板更新与备份](PANEL_UPDATE.md)
 - [长任务与回执恢复](LONG_OPERATIONS.md)
@@ -33,6 +36,8 @@
 - [开发和验证](DEVELOPMENT.md)
 - [依赖输入与安装锁](DEPENDENCIES.md)
 - [发布流程](RELEASING.md)
+- [并发验收](CONCURRENCY_ACCEPTANCE.md)与[基准运行方法](PERFORMANCE_BENCHMARKS.md)
+- [多 Hub 扩展门槛](HORIZONTAL_SCALING.md)
 - [贡献说明](../CONTRIBUTING.md)
 - [版本记录](../CHANGELOG.md)
 

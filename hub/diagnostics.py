@@ -30,6 +30,8 @@ class Diagnostics:
         self.runtime = runtime
         self.build = BuildIdentity('hub')
         self.errors = 0
+        from hub.connection_evidence import ConnectionEvidence
+        self.connection = ConnectionEvidence(runtime)
 
     def record(self, identifier, stage, *, source='hub', seq=None, elapsed_ms=None, detail=None):
         store = self.runtime.store

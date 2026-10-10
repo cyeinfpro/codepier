@@ -29,6 +29,7 @@ from hub.call_log import register_call_log
 from hub.api.settings import make_settings_router
 from hub.api.file_import_settings import make_file_import_settings_router
 from hub.file_import_settings import initialize as initialize_file_import_settings
+from hub.api.connection import make_connection_router
 from hub.api.system import make_system_router
 from hub.api.models import Model, ComputerDecision, Login, DeviceCreate, DeviceUpdate, ProjectInput, ToolCall, TokenInput, PasswordInput, SettingsInput
 from hub.access import make_access_router
@@ -110,7 +111,7 @@ def create_app(data_dir: str | None = None):
         app.add_middleware(MCPRequestAuditMiddleware)
         context = HubContext(store, runtime, auth, config, maintenance, public_url, BASE)
         for make in (make_accounts_router, make_devices_router, make_projects_router,
-                     make_activity_router, make_settings_router, make_file_import_settings_router, make_system_router):
+                     make_activity_router, make_settings_router, make_file_import_settings_router, make_system_router, make_connection_router):
             app.include_router(make(context))
         app.include_router(oidc.router)
         for make in (make_iam_router, make_profiles_router, make_roles_router, make_gateway_router):

@@ -91,6 +91,18 @@ Task 绑定原 operation、Space、用户和确切创建 grant，每次查询/�
 
 文件路径相对于已授权项目。读取文本默认最多 2,000 行、50 KiB，按完整行截断，用 `next_offset` 继续并携带 `expected_sha256`；支持读取不超过 16 MiB 的文本文件。PNG/JPEG 返回原生 MCP 图片块，沿用现有图片大小和过期限制。其他二进制文件使用产物导出。
 
+### 有界批量文本读取
+
+`read(operation="batch")` 在同一项目、隔离目录和当前授权内，一次读取最多 8 个 UTF-8 文本文件。参数通过 `options.items` 传递；每项仅允许 `path`、`offset`、`limit` 和 `expected_sha256`，不能覆盖项目、Space、授权或工作目录。图片和其他二进制仍使用单文件读取/产物接口。
+
+```json
+{"name":"read","arguments":{"operation":"batch","project":"ProjectAlpha","workspace_id":"已有隔离目录编号","options":{"items":[{"path":"README.md"},{"path":"src/main.py","offset":1,"limit":100}]}}}
+```
+
+`files` 按输入顺序返回 `index`、`ok` 和结果或独立错误。成功项带 SHA、文本、`next_offset`；续读只重取对应文件，并带上该项 `expected_sha256`。路径保护、符号链接边界、文件类型、SHA 冲突逐项校验；失败项不会自动重试，其他成功项仍可返回。批次作为一个持久操作协调所有实际路径，沿用原 operation_id 续查。
+
+最终原生 MCP JSON-RPC 响应限制为 128 KiB（UTF-8），预算包括 text/structuredContent 两份内容、JSON 转义与包装元数据，不只是文件字节数。超过预算按完整行缩短文本并更新各项续读位置；无法在预算中容纳的元数据明确报错。不要把 `ok=true` 的部分读取误认为文件已全部返回。
+
 `write` 需要 `expected_sha256`，创建新文件用 `new`，自动创建父目录并保存备份。`edit` 的所有 `old_text` 都匹配同一份原文件；重复、缺失或重叠匹配不会修改文件。保留 UTF-8 BOM 和原文件换行。也可传入 `changes` 做带 SHA 检查的多文件写入、删除、移动，或用 `dry_run` 预览。
 
 ## 专项能力按需发现
@@ -100,7 +112,7 @@ Task 绑定原 operation、Space、用户和确切创建 grant，每次查询/�
 | 工具 | 操作 |
 | --- | --- |
 | `workspace` | `devices/project_create/list/open/skills/skill/tasks/status/readiness/tree/help`；`resolve/context/dashboard`；`worktree_create/worktree_list/worktree_remove`；`workflow_create/workflow_list/workflow_get/workflow_update/handoff`；`lsp_status` |
-| `read` | 默认 `file`；`changes/artifact/artifacts/history/symbols/lsp` |
+| `read` | 默认 `file`；`batch/changes/artifact/artifacts/history/symbols/lsp` |
 | `write` | 默认 `file`；`import/artifact` |
 | `edit` | 默认 `file`；`restore/checkpoint` |
 | `exec` | 本机命令、已配置任务、保存的 VPS 命令 |

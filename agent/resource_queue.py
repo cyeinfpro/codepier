@@ -88,6 +88,14 @@ def claims_for(engine, tool, project, args, root):
             # Batch reads report path failures per item. Keep a conservative
             # claim if a rejected path becomes readable while this job waits.
             return [Claim('agent', 'path', canonical_path(root), False)]
+    if tool == 'read' and args.get('operation') == 'batch':
+        try:
+            return [Claim('agent', 'path', canonical_path(engine.path(root, item['path'], False)), False)
+                    for item in args['options']['items']]
+        except (DevError, OSError):
+            # Per-item errors belong to the durable read result, not admission.
+            # Revalidate every path at execution, under a conservative root claim.
+            return [Claim('agent', 'path', canonical_path(root), False)]
     if tool == 'edit' and args.get('changes'):
         paths = [change['path'] for change in args['changes']] + [change['destination'] for change in args['changes'] if change.get('destination')]
         return [Claim('agent', 'path', canonical_path(engine.path(root, path, False)), True) for path in paths]

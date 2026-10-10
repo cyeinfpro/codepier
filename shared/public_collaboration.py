@@ -249,12 +249,13 @@ def request(name, arguments):
 
 def tool_definitions(authorization='fixed'):
     from shared.role_contracts import ROLE_SCOPE
+    from shared.schema_cache import schema_for
     if authorization not in {'fixed', 'role'}:
         raise ValueError('Unknown authorization mode')
     scope = ROLE_SCOPE if authorization == 'role' else 'read'
     result = []
     for name in ('collaboration_query', 'collaboration', 'collaboration_work'):
-        schema = {'type': 'object', **ADAPTERS[name].json_schema()}
+        schema = {'type': 'object', **schema_for(ADAPTERS[name])}
         result.append({
             'name': name, 'description': DESCRIPTIONS[name],
             'inputSchema': schema,

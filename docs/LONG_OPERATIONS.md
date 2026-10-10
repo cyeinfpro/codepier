@@ -19,6 +19,14 @@
 
 等待请求被取消或网络断开，不等同于 `operations_cancel`。停止操作必须显式请求取消；Agent 本身停止、命令超时和真实执行失败仍可能使任务结束。单次短等待与命令的 `timeout_seconds` 是独立限制。
 
+## 连接状态与任务状态分开判断
+
+面板 API 和原生 MCP 操作回执增加 `recovery`：`connection_state` 仅描述当前 Agent 连接，`task_state` 描述持久任务记录；`operation_id`、`after_output_seq` 保留原操作与输出位置。连接不可用不能把仍运行的任务改成失败。`task_outcome_confirmed=false` 的 interrupted/needs_review 也不能推断副作用已回滚。
+
+`next_action=query_original_operation` 表示按现有 `next_call` 查询原编号；自动重放和另建操作建议始终为 false。`cancel_requested` 只是取消意图，须等待 Agent 确认。授权拒绝、撤权、能力禁用返回 `stop_and_review_permission`，不会提供“重试绕过”的建议。SHA 冲突需先重新读取当前版本，其他无原编号的未知结果先核实，不盲目重复。
+
+面板连接/回执读取失败保留既有操作，提示继续查原编号；这既不停止 Agent，也不代表原任务失败。真实失败仍以终态和退出码为准。
+
 ## 排队范围、取消与撤权
 
 核心文件读取、目录树和文件搜索按实际请求路径参与资源协调。等待某个产物目录的只读请求不会阻挡无关源码文件的写入；相同路径及父子路径仍保留互斥和公平排队。具名任务通过 `exec(task=...)` 调用时遵守本地任务策略：默认项目独占，显式 `allow_read_concurrency=true` 只允许并行读，调用者不能通过 resources 缩小该任务的本地约束。

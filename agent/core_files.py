@@ -17,41 +17,68 @@ class CoreFiles:
     def __init__(self, engine):
         self.engine = engine
 
+    def read_one(self, root, args, *, text_only=False):
+        engine = self.engine
+        path = engine.path(root, args['path'], False)
+        data = engine.read_bytes(path, max_bytes=16 * 1024 * 1024)
+        sha = digest(data)
+        if args['expected_sha256'] and args['expected_sha256'] != sha:
+            raise DevError('SHA_CONFLICT', '分页读取期间文件改变，请从头重新读取', 409)
+        meta = {'path': path.relative_to(root).as_posix(), 'sha256': sha, 'bytes': len(data)}
+        mime = 'image/png' if data.startswith(b'\x89PNG\r\n\x1a\n') else 'image/jpeg' if data.startswith(b'\xff\xd8\xff') else None
+        if mime and text_only:
+            raise DevError('BINARY_FILE', '批量读取仅支持 UTF-8 文本；图片请单独读取')
+        if mime:
+            if args['offset'] != 1:
+                raise DevError('INVALID_OFFSET', '图片不支持文本行分页')
+            return {**meta, **normalize_content({'content': [{'type': 'image', 'mimeType': mime,
+                'data': base64.b64encode(data).decode('ascii')}]}), 'truncated': False, 'next_offset': None}
+        lines = engine.text(data).splitlines(keepends=True)
+        start = args['offset'] - 1
+        if start > 0 and start >= len(lines):
+            raise DevError('INVALID_OFFSET', 'offset 超出文件行数')
+        selected, size = [], 0
+        for line in lines[start:start + args['limit']]:
+            count = len(line.encode('utf-8'))
+            if size + count > OUTPUT_BYTES:
+                if not selected:
+                    raise DevError('LINE_TOO_LARGE', '此行超过 50 KiB，请用 exec 按字节截取；未返回半行')
+                break
+            selected.append(line)
+            size += count
+        end = start + len(selected)
+        more = end < len(lines)
+        return {**meta, 'content': ''.join(selected), 'offset': start + 1, 'end_line': end,
+                'total_lines': len(lines), 'truncated': more, 'next_offset': end + 1 if more else None}
+
+    def read_batch(self, root, args):
+        # One admitted operation, one root, no sub-dispatch or authorization retry.
+        # FileEngine retains all traversal, symlink, hardlink and secret guards.
+        files = []
+        for index, item in enumerate(args['options']['items']):
+            try:
+                value = self.read_one(root, item, text_only=True)
+                files.append({'index': index, 'ok': True, **value})
+            except DevError as exc:
+                files.append({'index': index, 'path': item['path'], 'ok': False,
+                              'error': {'code': exc.code, 'message': exc.message,
+                                        'retryable': False}})
+            except OSError:
+                # Do not return OS exceptions containing absolute host paths.
+                files.append({'index': index, 'path': item['path'], 'ok': False,
+                              'error': {'code': 'FILE_READ_FAILED',
+                                        'message': '无法读取此文件', 'retryable': False}})
+        return {'batch': True, 'files': files,
+                'truncated': any(item.get('truncated', False) for item in files)}
+
     def call(self, tool, project, args):
         engine = self.engine
         root, _ = engine.root(project, tool != 'read')
+        if tool == 'read':
+            return self.read_batch(root, args) if args.get('operation') == 'batch' else self.read_one(root, args)
         if tool == 'edit' and args.get('changes'):
             return engine.call('apply_patch', project, args)
         path = engine.path(root, args['path'], False)
-        if tool == 'read':
-            data = engine.read_bytes(path, max_bytes=16 * 1024 * 1024)
-            sha = digest(data)
-            if args['expected_sha256'] and args['expected_sha256'] != sha:
-                raise DevError('SHA_CONFLICT', '分页读取期间文件改变，请从头重新读取', 409)
-            meta = {'path': path.relative_to(root).as_posix(), 'sha256': sha, 'bytes': len(data)}
-            mime = 'image/png' if data.startswith(b'\x89PNG\r\n\x1a\n') else 'image/jpeg' if data.startswith(b'\xff\xd8\xff') else None
-            if mime:
-                if args['offset'] != 1:
-                    raise DevError('INVALID_OFFSET', '图片不支持文本行分页')
-                return {**meta, **normalize_content({'content': [{'type': 'image', 'mimeType': mime,
-                    'data': base64.b64encode(data).decode('ascii')}]}), 'truncated': False, 'next_offset': None}
-            lines = engine.text(data).splitlines(keepends=True)
-            start = args['offset'] - 1
-            if start > 0 and start >= len(lines):
-                raise DevError('INVALID_OFFSET', 'offset 超出文件行数')
-            selected, size = [], 0
-            for line in lines[start:start + args['limit']]:
-                count = len(line.encode('utf-8'))
-                if size + count > OUTPUT_BYTES:
-                    if not selected:
-                        raise DevError('LINE_TOO_LARGE', '此行超过 50 KiB，请用 exec 按字节截取；未返回半行')
-                    break
-                selected.append(line)
-                size += count
-            end = start + len(selected)
-            more = end < len(lines)
-            return {**meta, 'content': ''.join(selected), 'offset': start + 1, 'end_line': end,
-                    'total_lines': len(lines), 'truncated': more, 'next_offset': end + 1 if more else None}
         # Retain the engine's short mutation critical section for compatibility
         # with legacy writes. Async resource claims cover the complete operation.
         with engine.mutation_lock:

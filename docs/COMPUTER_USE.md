@@ -24,7 +24,7 @@ ChatGPT
 
 | CodePier 工具 | 作用 |
 | --- | --- |
-| `computer_status` | 安装、配置和会话状态；`probe=true` 只初始化原生接口并核验目录，不枚举应用或读屏 |
+| `computer_status` | 安装、配置和会话状态；`probe=false` 不启动 provider；`probe=true` 另需 computer scope，初始化原生接口并核验目录，不枚举应用或读屏 |
 | `computer_apps` | 调用原生 `list_apps`，其中可能包含近期使用的应用记录 |
 | `computer_session_open` | 为一个明确授权的应用建立短时会话，返回可用动作；本调用不读取画面 |
 | `computer_observe` | 调用 `get_app_state`，返回应用文本/辅助功能、原生图片块和新的观察编号 |
@@ -80,7 +80,9 @@ ChatGPT
 
 这条命令供本机所有者明确开启；现有部署的项目和应用范围以本机配置为准，升级不会自动扩权。可重复 `--computer-project` / `--computer-app` 指定多个条目，提供的列表会替换原列表。`*` 代表本机管理员明确授权全部条目，不是默认值。建议先用单项目、单应用完成验收。
 
-新配置默认如下，旧配置不带 `computer` 字段时同样关闭：
+从 1.25 起，Hub/Agent 的原生阻断默认 false，与 Codex 模型/CLI 禁令独立。已有 computer scope 及本机非空项目、应用白名单时，省略 `computer.enabled` 默认启用；明确 false 保持关闭，缺少任一白名单保持关闭。旧协议未支持拆分元数据时仍拒绝 provider 调用。升级不会替当前连接增加 computer scope，仍需正常授权同意；也不会安装 provider、部署服务或接受系统权限。详见 [能力策略](EXECUTION_CAPABILITIES.md)。
+
+空白本机配置的规范化默认如下，旧配置不带 `computer` 字段时同样关闭：
 
 ```json
 {

@@ -274,7 +274,9 @@ window.CodePierIntegrations = (() => {
           return r;
         }
         entry.phase = op.state || 'pending';
-        if (current()) info(U().label(entry.phase) + ' · 可以离开此页，原操作仍会保留');
+        entry.recovery = op.recovery;
+        if (current())
+          info(op.recovery?.message || U().label(entry.phase) + ' · 可以离开此页，原操作仍会保留');
         await pause(300);
       }
       receipts();
@@ -448,7 +450,12 @@ window.CodePierIntegrations = (() => {
             validations_accept: '人工验收决定',
           }[r.name] || r.name;
         small.textContent =
-          (r.error || U().label(r.phase)) + ' · ' + (r.operation_id || '提交回执待核查');
+          (r.recovery?.message ||
+            (r.phase === 'uncertain'
+              ? '连接或回执未确认，任务可能仍在运行；查询原结果。'
+              : r.error || U().label(r.phase))) +
+          ' · ' +
+          (r.operation_id || '提交回执待核查');
         text.append(strong, small);
         row.append(text);
         const b = document.createElement('button');

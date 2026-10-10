@@ -178,6 +178,9 @@ REQUIRED_FILES = {
 }
 
 PUBLIC_DOCS = {
+    'docs/CONNECTION_ACCEPTANCE.md', 'docs/CONCURRENCY_ACCEPTANCE.md',
+    'docs/EXECUTION_CAPABILITIES.md', 'docs/GATEWAY_CONCURRENCY.md',
+    'docs/OPERATION_EVENTS.md', 'docs/HORIZONTAL_SCALING.md', 'docs/PERFORMANCE_BENCHMARKS.md',
     'docs/README.md', 'docs/DEPENDENCIES.md', 'docs/SETTINGS_CENTER.md', 'docs/ADAPTIVE_SCHEDULER.md',
     'docs/mcp-token-usage.md', 'docs/hub-file-import-settings.md',
     'docs/COLLABORATION.md',

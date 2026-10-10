@@ -45,6 +45,36 @@ chmod 600 private/bridge.env
 
 在 Plugins 的连接方法中选择 Tunnel，选择对应条目或填写真实 tunnel_id。列表不可见时检查工作区关联和使用权限；不要通过更改 CodePier 认证策略规避平台权限。
 
+### 配置预览与验证边界
+
+接入向导的 Tunnel 预览复用上面的桥接入口，只接收 Tunnel 编号、配置名称、运行主机的绝对安装目录和 Hub 根地址。安装目录指能访问 Hub 的主机，不是当前选中的 Agent 项目目录。预览只做结构校验，不读取目标文件、不探测网络、不创建 PAT 或 runtime key，也不启动或保存配置。
+
+预览返回无秘密的 `bridge.env` 和官方 YAML 配置、建议保存路径与分步骤命令。配置名称只用于建议文件名，不会创建或覆盖 named profile。YAML 固定使用 `env:CONTROL_PLANE_API_KEY`，PAT 仍仅引用私有 `token.txt`；不要把任何凭据值输入预览表单、粘贴到命令参数或写入仓库。HTTP Hub 地址仅接受明确的回环地址，其他地址要求 HTTPS。当前模板使用 POSIX Bash 桥接入口，不代表 Windows 已验收。
+
+配置字段依据 2026-10-10 核对的 [官方 v0.0.16 配置参考](https://github.com/openai/tunnel-client/blob/v0.0.16/docs/configuration.md)：`config_version`、`control_plane`、`health`、`admin_ui` 和 `mcp.commands`。下载仍使用 [官方 latest](https://github.com/openai/tunnel-client/releases/latest)。升级后先核对已安装客户端帮助；环境变量和命令行可覆盖 YAML，不能仅凭预览断言实际运行配置一致。预览成功只表示结构有效，连接状态仍是“未核实”，真实验收仍“未运行”。
+
+stdio 桥接器为所有请求使用同一个 PAT，并移除客户端 OAuth 元数据。这是固定服务身份，不会按不同 ChatGPT 用户自动切换 OAuth 账号。接入前单独核对 PAT 的真实项目/工具范围，以及 Tunnel 关联的组织、工作区和受众；预览没有检查这些授权。公网 HTTPS/OAuth 路线继续保留。
+
+同一 `tunnel_id` 的 stdio 部署只允许一个活动 `tunnel-client`，升级期间也不能短暂重叠。先停止旧实例再启动替代实例；Kubernetes 仅设 `replicas: 1` 仍可能滚动增开，需按官方单实例部署指引处理。不要把客户端健康等同于请求路由正确。
+
+审阅已有文件后，由操作者在目标主机手工保存和核对私有文件权限。配置已有凭据之后再明确运行 `doctor` 与 `run`；doctor 可能联网，不是预览的离线校验。创建/修改 Tunnel 所需平台管理权限、运行/使用所需平台权限，以及 ChatGPT 工作区策略分别检查。OAuth 授权服务器不会自动通过 Tunnel 暴露，相关 OAuth 路线仍需单独验证其可达性。最后在 ChatGPT 发现工具并完成已授权只读调用，才有真实宿主验收证据；模拟测试不能替代这一步。
+
+## 接入自检和最小只读验收
+
+面板“MCP 接入”的向导先选择已有连接与项目，核对 Hub MCP 地址、当前 Space、连接所有者、Access Profile/角色和有效项目范围。它不会创建凭据、扩权限或代表 ChatGPT 完成登录。
+
+- ChatGPT 登录决定客户端账号与可用功能。
+- CodePier OAuth/PAT 决定这条连接在 Hub 内能访问什么。
+- 模型 API Key 用于模型服务计费和调用，不是 Hub、Agent 或 stdio 桥接器的必要凭据。官方 Tunnel 的控制平面运行凭据另行处理。
+
+自检逐层显示“当前有效授权 → 服务发现响应 → 工具目录返回 → 实际只读操作 → Agent 当前连接与声明能力”。每层显示服务端证据时间；证据超过 10 分钟或授权/映射版本变化时标为陈旧。Agent 在线仅说明连接存在，不能替代某条文件路径的真实读取结果。
+
+发现和目录记录只有服务器确实处理相关 MCP 请求后才产生。目录已返回不证明 ChatGPT 已扫描、启用工具或完成缓存刷新；这些宿主不可见状态始终显示未知。当前目录 SHA、最近实际返回的目录 SHA、服务版本、工具契约版本分开显示。手动填入客户端声称的 SHA 仅用于比对，不能把未知缓存状态变成已验证。
+
+最小验收：在目标 ChatGPT 会话启用已有 CodePier 连接，列出可见项目，再读取已授权项目的测试 README；保留原 operation_id，等待真实成功结果，然后回面板查看只读证据。不要以状态页请求本身冒充真实文件读取。若工具目录过旧，由操作者按客户端支持的 Refresh 流程操作后重复只读确认；服务端不承诺自动刷新。
+
+诊断 API 为 `GET /api/grants/{grant_id}/connection-status`，仅连接所属用户在当前 Space 的有效面板会话可读；可选 `project_id`、`workspace_id`、`client_catalog_sha256`。隔离目录还需当前连接可见的原创建回执。诊断数据不包含 token、文件内容、命令参数或秘密。
+
 ## 新增项目无需反复重新连接
 
 在“系统设置 → MCP 默认授权”可以默认预选全部现有及未来项目，以及读取、写入和执行。新应用仍需明确确认，不超过应用申请范围；桌面控制独立选择。

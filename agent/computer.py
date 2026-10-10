@@ -30,6 +30,10 @@ def validate_computer(value):
     if not isinstance(value, dict) or set(value) - set(defaults):
         raise ValueError('computer 必须是有效配置对象，不能包含未知字段')
     c = {**defaults, **value}
+    # An omitted enable switch can use existing local allowlists, never create
+    # them. Explicit false is an emergency/local-owner stop and is preserved.
+    if 'enabled' not in value:
+        c['enabled'] = bool(c['projects'] and c['allowed_apps'])
     if type(c['enabled']) is not bool:
         raise ValueError('computer.enabled 必须是 true/false')
     for key in ('projects', 'allowed_apps'):

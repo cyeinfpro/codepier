@@ -115,7 +115,7 @@ class Gateway:
     def _signature(self, plan):
         _, binding, account, connector, tool = plan
         return (binding['id'], binding['version'], account['id'], account['version'],
-                connector['id'], connector['version'], catalog.fingerprint(tool))
+                account['catalog_hash'], connector['id'], connector['version'], catalog.fingerprint(tool))
 
     async def discover(self, principal, account_id, reauthenticate):
         from hub.gateway.registry import managed_account
@@ -252,7 +252,7 @@ class Gateway:
 
         async def before_send():
             nonlocal dispatched
-            # Called by the transport AFTER negotiating/waiting on its session lock.
+            # Called AFTER negotiation and bounded FIFO admission, before sending.
             await self.store.run(current)
             dispatched = True
 
@@ -275,7 +275,9 @@ class Gateway:
                 identifier, cached = await self.store.run(admit)
                 if cached is not None:
                     return cached
-                key = ('call', principal.space_id, principal.user_id, principal.grant_id, binding['id'], account['id'], account['version'], connector['version'])
+                key = ('call', principal.space_id, principal.user_id, principal.grant_id,
+                       binding['id'], binding['version'], account['id'], account['version'],
+                       account['catalog_hash'], connector['id'], connector['version'])
                 session = await self.pool.get(key, connector, secret)
                 raw = await session.call(tool['name'], arguments, before_send)
                 value = result_value(raw, tool)

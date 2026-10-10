@@ -35,6 +35,7 @@ def help_result(tool='', action=''):
             'diagnostics': 'diagnostics_get', 'activity': 'activity_list'},
         'browser': {op: 'browser_' + op for op in ('status', 'open', 'snapshot', 'action', 'close')},
         'computer': COMPUTER}
+    catalogs['read']['batch'] = 'read'
     if not tool or not action:
         return {'tools': {name: {'operations': sorted(actions),
             'help': {'tool': 'project_query', 'arguments': {'operation': 'help', 'tool': name, 'action': '<operation>'}}}
@@ -75,6 +76,10 @@ def help_result(tool='', action=''):
                 schema['properties']['options']['required'] = required_extra
                 required.add('options')
         schema['required'] = sorted(required | {'operation'})
+    if tool == 'read' and action == 'batch':
+        from shared.core_contracts import ReadBatchOptions
+        schema = _compact_input_schema(ReadBatchOptions.model_json_schema())
+        advanced = True
     if tool == 'write' and action in {'import', 'source_check'}:
         # openai/fileParams resolves ONLY top-level fields. A nested file in
         # options is retained for legacy callers, never recommended/generated.
@@ -243,7 +248,8 @@ def failed(value):
     nested = value.get('result') or {}
     data = nested.get('data') or value
     return bool(value.get('error') or value.get('state') in {'failed', 'cancelled', 'needs_review', 'interrupted'}
-        or nested.get('ok') is False or data.get('command_ok') is False or data.get('success') is False)
+        or nested.get('ok') is False or data.get('command_ok') is False or data.get('success') is False
+        or data.get('batch') is True and any(item.get('ok') is False for item in data.get('files', [])))
 
 
 def compact_receipt(value):
@@ -260,6 +266,62 @@ def compact_receipt(value):
     if isinstance(nested, dict) and isinstance(nested.get('data'), dict):
         compact_receipt(nested['data'])
     return value
+
+
+
+def _batch_reads(public):
+    """Find only known read result locations, never inspect source text."""
+    if not isinstance(public, dict):
+        return []
+    if public.get('batch') is True and isinstance(public.get('files'), list):
+        return [public]
+    if public.get('tool') == 'read':
+        nested = public.get('result')
+        data = nested.get('data') if isinstance(nested, dict) else None
+        if isinstance(data, dict) and data.get('batch') is True and isinstance(data.get('files'), list):
+            return [data]
+    return [batch for item in public.get('operations', []) if isinstance(item, dict)
+            for batch in _batch_reads(item)]
+
+
+def bound_batch_response(payload):
+    """Bound the final JSON-RPC bytes, including both copies and all metadata.
+
+    Called once more by the MCP boundary after modern protocol and App metadata.
+    Only the presentation copy changes; the original authorized operation/result
+    remains available. Never split a UTF-8 character or a file line.
+    """
+    from shared.core_contracts import READ_BATCH_PAYLOAD_BYTES
+    rendered = payload.get('result', {})
+    if not _batch_reads(rendered.get('structuredContent')):
+        return payload
+    payload = copy.deepcopy(payload)
+    rendered = payload['result']
+    public = rendered['structuredContent']
+    batches = _batch_reads(public)
+
+    def size():
+        # Match Starlette JSONResponse, including JSON-in-JSON string escaping.
+        return len(json.dumps(payload, ensure_ascii=False, allow_nan=False,
+                              separators=(',', ':')).encode('utf-8'))
+
+    while size() > READ_BATCH_PAYLOAD_BYTES:
+        candidates = [(batch, item) for batch in batches for item in batch['files']
+                      if item.get('ok') is True and item.get('content')]
+        if not candidates:
+            raise DevError('READ_BATCH_RESPONSE_TOO_LARGE',
+                           '批量读取响应元数据超过 128 KiB；请减少 task_query 的操作数或单独读取文件')
+        batch, item = max(candidates, key=lambda pair: len(pair[1]['content'].encode('utf-8')))
+        lines = item['content'].splitlines(keepends=True)
+        # Halving the largest page converges quickly even for escape-heavy text.
+        kept = lines[:len(lines) // 2]
+        item.update(content=''.join(kept), end_line=item['offset'] - 1 + len(kept),
+                    next_offset=item['offset'] + len(kept), truncated=True,
+                    budget_limited=True)
+        batch.update(truncated=True, budget_limited=True,
+                     payload_limit_bytes=READ_BATCH_PAYLOAD_BYTES)
+        rendered['content'][0]['text'] = json.dumps(public, ensure_ascii=False)
+    return payload
 
 
 def result(name, arguments, value):
@@ -288,10 +350,11 @@ def result(name, arguments, value):
                     images.append(block)
                 else:
                     public['media_truncated'] = True
-        return {'content': [{'type': 'text', 'text': json.dumps(public, ensure_ascii=False)}, *images],
-                'structuredContent': public,
-                'isError': any(item['isError'] or failed(item['structuredContent']) for item in rendered)}
+        result = {'content': [{'type': 'text', 'text': json.dumps(public, ensure_ascii=False)}, *images],
+                  'structuredContent': public,
+                  'isError': any(item['isError'] or failed(item['structuredContent']) for item in rendered)}
+        return bound_batch_response({'jsonrpc': '2.0', 'id': None, 'result': result})['result']
     rendered = mcp_result(name, value)
     if name in CORE_TOOLS:
         rendered['isError'] = rendered['isError'] or failed(value)
-    return rendered
+    return bound_batch_response({'jsonrpc': '2.0', 'id': None, 'result': rendered})['result']

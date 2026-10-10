@@ -173,6 +173,8 @@ async def test_remote_codex_policy_blocks_before_dispatch_but_preserves_admin_an
     runtime._loop = None
     principal = Principal("mcp:test:ChatGPT", "user", {"read", "execute", "computer"}, ["*"])
     monkeypatch.setenv("MCP_BLOCK_LOCAL_CODEX", "true")
+    # The two explicit policies are independent; native no longer inherits model denial.
+    monkeypatch.setenv("MCP_BLOCK_NATIVE_COMPUTER", "true")
 
     attempts = [
         ("shell_exec", {"project": "MCP", "command": "/Users/test/.local/bin/codex exec task",
@@ -183,7 +185,7 @@ async def test_remote_codex_policy_blocks_before_dispatch_but_preserves_admin_an
     for name, args in attempts:
         with pytest.raises(DevError) as caught:
             await runtime.invoke(name, args, principal)
-        assert caught.value.code == "CODEX_REMOTE_DISABLED"
+        assert caught.value.code == ("CODEX_REMOTE_DISABLED" if name == "shell_exec" else "NATIVE_COMPUTER_REMOTE_DISABLED")
 
     assert len(store.rows) == len(attempts)
     assert all(row[1]["status"] == "denied" for row in store.rows)

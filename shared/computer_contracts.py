@@ -24,7 +24,7 @@ class ComputerProject(ComputerArgs):
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=128)
 
 class ComputerStatus(ComputerProject):
-    probe: bool = Field(default=False, description='Initialize the installed provider and read its tool catalog only; never capture a screen or list apps. Requires local Computer Use opt-in.')
+    probe: bool = Field(default=False, description='Initialize the installed provider and read its tool catalog only; never capture a screen or list apps. Requires computer scope and local Computer Use opt-in; probe=false remains read-only and never starts the provider.')
 
 class ComputerApps(ComputerProject):
     pass

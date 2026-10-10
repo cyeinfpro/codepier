@@ -172,6 +172,7 @@ function clearSpaceSnapshots() {
   });
 }
 function endSession(discard = false) {
+  window.CodePierConnectionSetup?.detach();
   window.CodePierCollaboration?.clear();
   window.CodePierCallLog?.clear();
   window.CodePierAccess?.detach();
@@ -843,6 +844,7 @@ async function navigate(page) {
   }
 }
 async function renderPage(showLoading = true) {
+  window.CodePierConnectionSetup?.detach();
   window.CodePierSettings?.detach();
   window.CodePierCollaboration?.detach();
   window.CodePierCallLog?.detach();
@@ -951,6 +953,7 @@ async function renderPage(showLoading = true) {
     if (page === 'mcp-gateway') CodePierGateway.bind();
     if (page === 'roles') CodePierRoles.bind();
     if (page === 'profiles') CodePierProfiles.bind();
+    if (page === 'connect') CodePierConnectionSetup.bind();
     if (page === 'vps') bindVps();
     if (page === 'workbench') bindWorkbench();
     if (page === 'workflows') bindWorkflows();
@@ -2115,6 +2118,7 @@ function connectHTML() {
     `<section class="panel"><div class="panel-body"><h2>两种连接方向</h2><p>此页管理「助手访问 CodePier」：谁通过哪个客户端，以何种身份访问当前空间。</p><p>「CodePier 使用外部工具」单独管理网关账号与已审阅工具，不会由这里的 Profile 自动取得外部账号。</p><button class="btn ghost" data-nav="mcp-gateway">CodePier 使用外部工具</button></div></section>` +
     `<div class="connect-grid"><section class="panel"><div class="panel-head"><h2>${icon('plug')}连接地址</h2><span class="badge neutral">MCP</span></div><div class="panel-body"><div class="eyebrow">STREAMABLE HTTP</div><div class="endpoint"><code>${esc(s.mcp_url)}</code><button class="icon-btn" data-action="copy-endpoint" aria-label="复制 MCP 地址">${icon('copy')}</button></div><div class="mcp-coding-entry"><div><strong>核心开发工具</strong><small>统一九工具入口；实际权限由当前角色决定。</small></div><button class="btn ghost small" data-action="copy-coding-endpoint">复制核心地址</button></div><div class="mcp-coding-entry"><div><strong>动态角色连接</strong><small>明确委派已分配角色的当前与后续能力。</small></div><button class="btn ghost small" data-action="copy-role-endpoint">复制角色地址</button></div><div class="connection-route"><span>客户端</span>${icon('arrow')}<span>CodePier</span>${icon('arrow')}<span>本机项目</span></div>${notice('面板与 Agent 支持 HTTP。ChatGPT 直连需公开 HTTPS，或使用已获授权的 Secure MCP Tunnel。')}${uiHelp('接入步骤', guide)}</div></section>
     <section class="panel" id="grant-panel">${grantListHTML()}</section></div>` +
+    CodePierConnectionSetup.html() +
     uiHelp(
       `工具目录 · ${s.tools.length} 项`,
       `<div class="project-search"><input id="tool-query" type="search" aria-label="搜索工具" placeholder="搜索工具名称或权限"><small id="tool-count" role="status"></small></div><div class="tool-grid">${s.tools
