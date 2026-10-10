@@ -5,6 +5,7 @@ import copy
 import json
 import os
 import sys
+import time
 import uuid
 from unittest.mock import AsyncMock
 
@@ -15,7 +16,7 @@ from shared.contracts import ShellExec
 from shared.util import DevError, atomic_json
 from hub.runtime import Principal, remote_codex_denial
 from tests.test_shell import shell_agent, shell_request
-from tests.test_audit_runtime import runtime, Socket, until
+from tests.test_audit_runtime import runtime, Socket
 
 
 BLOCKED = [
@@ -205,17 +206,34 @@ async def test_queue_is_rechecked_after_policy_tightens(runtime, monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('panel', [True, False])
-async def test_trusted_metadata_injected_outside_idempotency_payload(runtime, monkeypatch, panel):
+@pytest.mark.parametrize('registration_delay', [0, 1.1])
+async def test_trusted_metadata_injected_outside_idempotency_payload(runtime, monkeypatch, panel, registration_delay):
     r, admin, secret = runtime
     p = admin if panel else Principal('mcp:test:ChatGPT', 'owner', {'read','write','execute'}, ['*'])
     monkeypatch.setenv('MCP_BLOCK_LOCAL_CODEX', '1')
     args = {'project':'Project', 'command':'echo normal', 'idempotency_key':'metadata-receipt-test'}
     receipt = await r.invoke('shell_exec', args, p)
     original = r.store.one('SELECT fingerprint,payload FROM operations WHERE id=?', (receipt['operation_id'],))
+    # This checks authenticated metadata, not cold Store-worker latency.
+    # Observe real registration instead of busy-polling SQLite with a one-second
+    # deadline. The delayed case exercises a scheduler slower than that old limit;
+    # production handshake deadlines and authorization are left unchanged.
+    registered = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    register = r._register_agent
+    def observe_registration(*args):
+        if registration_delay:
+            time.sleep(registration_delay)  # Runs on the existing Store worker.
+        accepted = register(*args)
+        if accepted:
+            loop.call_soon_threadsafe(registered.set)
+        return accepted
+    monkeypatch.setattr(r, '_register_agent', observe_registration)
     socket = Socket(secret)
     reader = asyncio.create_task(r.agent_socket(socket, 'dev'))
     try:
-        await until(lambda: r.online('dev'))
+        await asyncio.wait_for(registered.wait(), 5)
+        assert r.online('dev')
         await r.deliver(receipt['operation_id'])
         packet = next(x for x in socket.packets if x['type'] == 'call')
         assert packet['execution_policy'] == hub_execution_policy(panel=panel)
