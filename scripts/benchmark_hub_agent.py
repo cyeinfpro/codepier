@@ -158,6 +158,12 @@ async def finish_original(client, data, failed, deadline):
     state = data.get('state', 'failed' if failed else 'succeeded')
     if state not in TERMINAL:
         raise ValueError('invalid_operation_state')
+    if 'result' in data:
+        result = data['result']
+        if not isinstance(result, dict):
+            raise ValueError('invalid_terminal_operation_result')
+        return identifier, result.get('data') or {}, failed or not (
+            state == 'succeeded' and result.get('ok') is True), polls, state
     return identifier, data, failed or state != 'succeeded', polls, state
 
 
@@ -331,7 +337,8 @@ async def disconnect_check(stack):
     """Disconnect an HTTP waiter after admission; recover ONLY its original ID."""
     import httpx
     key = uuid.uuid4().hex
-    headers = {'Authorization':'Bearer '+stack.pat,'MCP-Protocol-Version':'2025-11-25'}
+    headers = {'Authorization':'Bearer '+stack.pat,'MCP-Protocol-Version':'2025-11-25',
+               'Accept':'application/json, text/event-stream'}
     counter = stack.projectalpha/'bench'/'disconnect-count.txt'
     args = {'project':'ProjectAlpha','task':'bench_disconnect','yield_seconds':10,'idempotency_key':key}
     async with httpx.AsyncClient(base_url=stack.url,headers=headers,trust_env=False,timeout=90) as client:
@@ -346,7 +353,16 @@ async def disconnect_check(stack):
                 if row is not None and row['state']=='running':
                     break
                 await asyncio.sleep(.05)
-            if row is None or row['state']!='running' or call.done():
+            if call.done():
+                # Surface a rejected initial request instead of disguising it as
+                # a timing miss; never submit a replacement operation.
+                try:
+                    _, rejected = await call
+                except Exception as exc:
+                    return {'exercised':False,'passed':False,'reason':'initial_'+type(exc).__name__}
+                return {'exercised':False,'passed':False,
+                        'reason':'initial_request_rejected' if rejected else 'initial_waiter_already_returned'}
+            if row is None or row['state']!='running':
                 return {'exercised':False,'passed':False,'reason':'did_not_observe_active_waiter'}
             identifier = row['id']
             call.cancel()
@@ -364,6 +380,13 @@ async def disconnect_check(stack):
                 call.cancel()
             with contextlib.suppress(asyncio.CancelledError,Exception):
                 await call
+
+
+def task_command(seconds, filename):
+    """Synthetic fixture effect uses real newlines so duplicate counts remain exact."""
+    return ('import pathlib,time; time.sleep('+str(seconds)+'); p=pathlib.Path('
+            +repr('bench/'+filename)+'); f=p.open("a"); '
+            'f.write("executed"+chr(10)); f.close(); print("done")')
 
 
 def main():
@@ -429,7 +452,7 @@ def main():
             stack.stop_agent()
             for task, seconds, filename in [('bench_long',.4,'long-count.txt'),
                                              ('bench_disconnect',2,'disconnect-count.txt')]:
-                command = 'import pathlib,time; time.sleep('+str(seconds)+'); p=pathlib.Path("bench/'+filename+'"); f=p.open("a"); f.write("executed\\n"); f.close(); print("done")'
+                command = task_command(seconds, filename)
                 stack.config['tasks'][task] = {'command':[sys.executable,'-u','-c',command],
                     'projects':['ProjectAlpha'],'timeout':30,'allow_read_concurrency':True}
             atomic_json(stack.config_path,stack.config)

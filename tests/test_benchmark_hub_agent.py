@@ -206,3 +206,78 @@ async def test_warmup_failure_stops_before_resource_or_workload(monkeypatch, tmp
     with pytest.raises(RuntimeError, match='warmup_failed'):
         await benchmark.workload(stack, tmp_path, 'read', 1, 1, 1)
     assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('state,ok,outer_failed,expected_failed', [
+    ('succeeded', True, False, False),
+    ('succeeded', False, False, True),
+    ('failed', True, False, True),
+    ('succeeded', True, True, True),
+])
+async def test_immediate_durable_receipt_is_unwrapped(state, ok, outer_failed, expected_failed):
+    value = {'operation_id':'original', 'state':state, 'pending':False,
+             'result':{'ok':ok, 'data':{'exit_code':0}}}
+    identifier, result, failed, polls, actual_state = await benchmark.finish_original(
+        None, value, outer_failed, time.monotonic()+1)
+    assert identifier == 'original' and actual_state == state
+    assert result == {'exit_code':0} and polls == 0 and failed is expected_failed
+
+
+def test_synthetic_task_counts_each_real_effect(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path/'bench').mkdir()
+    command = benchmark.task_command(0, 'count.txt')
+    exec(command, {})
+    exec(command, {})
+    assert (tmp_path/'bench/count.txt').read_text().splitlines() == ['executed', 'executed']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('effects', [1, 2])
+async def test_disconnect_negotiates_accept_and_recovers_one_original(monkeypatch, tmp_path, effects):
+    import asyncio
+    from types import SimpleNamespace
+    database = tmp_path/'hub.sqlite3'
+    with sqlite3.connect(database) as db:
+        db.execute('CREATE TABLE operations(id TEXT,idem TEXT,state TEXT)')
+    (tmp_path/'bench').mkdir()
+    counter = tmp_path/'bench/disconnect-count.txt'
+    calls = []
+    async def rpc(client, name, args):
+        assert client.headers['accept'] == 'application/json, text/event-stream'
+        calls.append((name, args))
+        assert name == 'exec'
+        with sqlite3.connect(database) as db:
+            db.execute("INSERT INTO operations VALUES('original',?,'running')", (args['idempotency_key'],))
+        await asyncio.Event().wait()
+    async def finish(client, data, failed, deadline):
+        assert data == {'pending':True, 'operation_id':'original'} and not failed
+        counter.write_text('executed\n'*effects)
+        return 'original', {'exit_code':0}, False, 1, 'succeeded'
+    monkeypatch.setattr(benchmark, 'rpc', rpc)
+    monkeypatch.setattr(benchmark, 'finish_original', finish)
+    stack = SimpleNamespace(pat='synthetic', url='http://127.0.0.1:1',
+                            hubdir=tmp_path, projectalpha=tmp_path)
+    result = await benchmark.disconnect_check(stack)
+    assert result['exercised'] and result['operation_rows'] == 1
+    assert result['side_effect_count'] == effects and result['passed'] is (effects == 1)
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_disconnect_initial_http_failure_is_explicit_and_not_retried(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    with sqlite3.connect(tmp_path/'hub.sqlite3') as db:
+        db.execute('CREATE TABLE operations(id TEXT,idem TEXT,state TEXT)')
+    calls = []
+    async def rpc(client, name, args):
+        calls.append(name)
+        response = httpx.Response(406, request=httpx.Request('POST', 'http://127.0.0.1/mcp'))
+        response.raise_for_status()
+    monkeypatch.setattr(benchmark, 'rpc', rpc)
+    stack = SimpleNamespace(pat='synthetic', url='http://127.0.0.1:1',
+                            hubdir=tmp_path, projectalpha=tmp_path)
+    result = await benchmark.disconnect_check(stack)
+    assert result == {'exercised':False, 'passed':False, 'reason':'initial_HTTPStatusError'}
+    assert calls == ['exec']
