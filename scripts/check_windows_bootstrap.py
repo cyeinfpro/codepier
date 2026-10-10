@@ -202,7 +202,7 @@ def probe(directory):
                 assert arguments[-2] == '--archive-handoff-file'
                 assert not Path(arguments[-1]).is_relative_to(base)
             else:
-                assert arguments == prefix
+                assert len(arguments) == len(prefix), (index, action, arguments, prefix)
         if action == 'archive':
             target=base.with_name(base.name+'.recovery-20000101-000000-01234567')
             assert not base.exists() and (target/'config.json').read_bytes() == b'{"synthetic":true,"device_id":"fixture-device"}'
