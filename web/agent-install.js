@@ -1,7 +1,14 @@
 'use strict';
 // Installation commands and pairing material live only in the current dialog.
-function agentInstallFields(platform = 'posix', repair = false) {
-  return `<div class="field"><label>面板地址</label><input name="hub_url" value="${esc(location.origin)}" required placeholder="http://服务器IP:8765"><small>目标电脑通过这个地址连接面板。</small></div><div class="field"><label>目标电脑系统</label><select name="platform"><option value="posix" ${platform === 'posix' ? 'selected' : ''}>Linux / macOS</option><option value="windows" ${platform === 'windows' ? 'selected' : ''}>Windows</option></select></div><div class="field"><label>允许访问的目录</label><input name="allow_root" required maxlength="2048" autocomplete="off" spellcheck="false"><small>填写目标电脑上的完整目录路径。文件工具限制在授权目录内，完整 Shell 不受目录沙箱限制。</small></div>${repair ? '<p class="form-note">已有节点保留原执行权限，不会因为修复安装而打开已关闭的权限。旧版开启执行的方法见“系统设置 → 已有 Agent 开启执行能力”。</p>' : '<label class="check"><input name="enable_execution" type="checkbox" checked>安装时开启 Shell 与目录任务（默认）</label><p class="form-note">Shell 使用 Agent 当前系统用户的完整权限，不是目录沙箱；还需要面板项目与客户端的执行授权。桌面控制仍独立关闭。取消勾选可安装为无执行能力模式。</p>'}`;
+// Offline nodes have no verified OS; do not silently issue a POSIX command.
+function agentKnownPlatform(device) {
+  const observed = typeof device?.info?.platform === 'string' ? device.info.platform.trim().toLowerCase() : '';
+  if (observed === 'windows' || observed.startsWith('windows ')) return 'windows';
+  if (['linux', 'darwin', 'macos', 'mac os', 'mac os x'].includes(observed)) return 'posix';
+  return '';
+}
+function agentInstallFields(platform = '', repair = false) {
+  return `<div class="field"><label>面板地址</label><input name="hub_url" value="${esc(location.origin)}" required placeholder="http://服务器IP:8765"><small>目标电脑通过这个地址连接面板。</small></div><div class="field"><label>目标电脑系统</label><select name="platform" required><option value="" disabled ${platform ? '' : 'selected'}>请选择目标电脑系统</option><option value="posix" ${platform === 'posix' ? 'selected' : ''}>Linux / macOS</option><option value="windows" ${platform === 'windows' ? 'selected' : ''}>Windows PowerShell</option></select></div><div class="field"><label>允许访问的目录</label><input name="allow_root" required maxlength="2048" autocomplete="off" spellcheck="false"><small>填写目标电脑上的完整目录路径。文件工具限制在授权目录内，完整 Shell 不受目录沙箱限制。</small></div>${repair ? '<p class="form-note">已有节点保留原执行权限，不会因为修复安装而打开已关闭的权限。旧版开启执行的方法见“系统设置 → 已有 Agent 开启执行能力”。</p>' : '<label class="check"><input name="enable_execution" type="checkbox" checked>安装时开启 Shell 与目录任务（默认）</label><p class="form-note">Shell 使用 Agent 当前系统用户的完整权限，不是目录沙箱；还需要面板项目与客户端的执行授权。桌面控制仍独立关闭。取消勾选可安装为无执行能力模式。</p>'}`;
 }
 function agentExecutionHelp() {
   const posix =
@@ -17,7 +24,7 @@ async function agentInstallSetup(device = null) {
   const login = S.session;
   const dialog = modal(
     device ? '安装 / 修复 Agent · ' + device.name : '接入电脑',
-    `<form id="device-form">${device ? '' : '<div class="field"><label>设备名称</label><input name="name" placeholder="例如：Home-PC" required maxlength="80"></div>'}${agentInstallFields(device?.info?.platform === 'Windows' ? 'windows' : 'posix', !!device)}<p class="form-note">${device ? '在这台原节点执行新命令，会校验设备身份并安全修复或升级受管 Agent；授权目录、配置、状态和日志会保留。' : '仅用于首次接入新节点。如果电脑上的 CodePier 曾安装失败，先在设备节点 → 命令管理使用“Windows 失败安装恢复”，安全归档旧状态后再接入；如果已有正常 Agent，应在原节点修复或升级。不要直接删除 config.json。'}</p><p id="device-install-error" class="form-note" role="status"></p></form>`,
+    `<form id="device-form">${device ? '' : '<div class="field"><label>设备名称</label><input name="name" placeholder="例如：Home-PC" required maxlength="80"></div>'}${agentInstallFields(agentKnownPlatform(device), !!device)}<p class="form-note">${device ? '在这台原节点执行新命令，会校验设备身份并安全修复或升级受管 Agent；授权目录、配置、状态和日志会保留。' : '仅用于首次接入新节点。如果电脑上的 CodePier 曾安装失败，先在设备节点 → 命令管理使用“Windows 失败安装恢复”，安全归档旧状态后再接入；如果已有正常 Agent，应在原节点修复或升级。不要直接删除 config.json。'}</p><p id="device-install-error" class="form-note" role="status"></p></form>`,
     `<button class="btn ghost" data-action="close-modal">取消</button><button class="btn primary" id="create-device" type="submit" form="device-form">生成安装命令</button>`,
   );
   const form = $('#device-form', dialog),
@@ -31,7 +38,9 @@ async function agentInstallSetup(device = null) {
     form.elements.allow_root.placeholder =
       form.elements.platform.value === 'windows'
         ? '例如：D:\\Projects'
-        : '例如：/home/me/Projects 或 /Users/me/Projects';
+        : form.elements.platform.value === 'posix'
+          ? '例如：/home/me/Projects 或 /Users/me/Projects'
+          : '请先选择目标电脑系统';
     form.elements.allow_root.setCustomValidity('');
   };
   form.elements.platform.onchange = hint;
@@ -441,8 +450,8 @@ function agentLifecycleModal(device, action) {
 
 function showAgentMaintenanceCommands(device) {
   const login = S.session,
-    platform = device.info?.platform === 'Windows' ? 'windows' : 'posix';
-  const body = `<form id="agent-command-form"><p>在这台节点自己的终端执行。升级保留原身份、配置、授权目录和历史，不需要重新配对；卸载会在终端要求确认，不删除安装目录之外的项目文件。</p><div class="field"><label>面板地址</label><input name="hub_url" required value="${esc(location.origin)}"></div><div class="field"><label>目标电脑系统</label><select name="platform"><option value="posix" ${platform === 'posix' ? 'selected' : ''}>Linux / macOS</option><option value="windows" ${platform === 'windows' ? 'selected' : ''}>Windows PowerShell</option></select></div><div class="field"><label>Agent 安装目录（可选）</label><input name="install_dir" autocomplete="off" spellcheck="false" maxlength="2048" placeholder="留空使用当前用户的 .codepier-agent"><small>自定义安装时填写目标电脑上的绝对路径；不要填写项目目录。</small></div><p class="form-note">升级与卸载命令核对所选面板节点身份。Windows 失败安装归档命令只操作当前电脑：要求本机输入已有节点 ID、核实运行状态与任务归属，并完整保留备份；不自动接入面板。面板更新后旧命令可能失效，届时重新生成。复制不会执行任何操作。</p><div class="field"><label for="agent-command-upgrade">一键升级命令</label><textarea id="agent-command-upgrade" class="agent-install-command" rows="4" readonly spellcheck="false"></textarea><button class="btn small" type="button" data-copy-command="upgrade" disabled>复制升级命令</button></div><div class="field"><label for="agent-command-uninstall">一键卸载命令</label><textarea id="agent-command-uninstall" class="agent-install-command" rows="4" readonly spellcheck="false"></textarea><button class="btn small" type="button" data-copy-command="uninstall" disabled>复制卸载命令</button></div><div class="field" id="agent-command-archive-wrapper"><label for="agent-command-archive">Windows 失败安装恢复（归档备份）</label><small>适合首次安装失败、升级和卸载均无法进行的电脑。将检查本机正在运行的任务和节点身份，要求输入原 device_id 确认；如果验证通过，把现有 Agent 安装目录整体移到带时间戳的备份目录，保留密钥、日志、配置及状态，不删除 Hub 节点。完成后在面板重新生成新安装命令。请仅在目标 Windows 电脑本机操作。</small><textarea id="agent-command-archive" class="agent-install-command" rows="4" readonly spellcheck="false"></textarea><button class="btn small" type="button" data-copy-command="archive" disabled>复制恢复命令</button></div><p class="form-note">新版安装或升级后，还可以离线使用安装目录内的 agentctl uninstall（Windows：agentctl.ps1 uninstall）。卸载会删除 Agent 配置、密钥、日志和状态，请先备份需要的记录。</p><p id="agent-command-status" class="form-note" role="status"></p></form>`;
+    platform = agentKnownPlatform(device);
+  const body = `<form id="agent-command-form"><p>在这台节点自己的终端执行。升级保留原身份、配置、授权目录和历史，不需要重新配对；卸载会在终端要求确认，不删除安装目录之外的项目文件。</p><div class="field"><label>面板地址</label><input name="hub_url" required value="${esc(location.origin)}"></div><div class="field"><label>目标电脑系统</label><select name="platform" required><option value="" disabled ${platform ? '' : 'selected'}>请选择目标电脑系统</option><option value="posix" ${platform === 'posix' ? 'selected' : ''}>Linux / macOS</option><option value="windows" ${platform === 'windows' ? 'selected' : ''}>Windows PowerShell</option></select></div><div class="field"><label>Agent 安装目录（可选）</label><input name="install_dir" autocomplete="off" spellcheck="false" maxlength="2048" placeholder="留空使用当前用户的 .codepier-agent"><small>留空会检测受管安装目录，兼容旧版 .remote-dev-agent；自定义安装须填写绝对路径，不能填写项目目录。</small><p class="form-note">离线节点可能从未上报系统类型。Windows PowerShell 请选 Windows，不要复制含 bash、mktemp、trap 的命令。</p></div><p class="form-note">升级与卸载命令核对所选面板节点身份。Windows 失败安装归档命令只操作当前电脑：要求本机输入已有节点 ID、核实运行状态与任务归属，并完整保留备份；不自动接入面板。面板更新后旧命令可能失效，届时重新生成。复制不会执行任何操作。</p><div class="field"><label for="agent-command-upgrade">一键升级命令</label><textarea id="agent-command-upgrade" class="agent-install-command" rows="4" readonly spellcheck="false"></textarea><button class="btn small" type="button" data-copy-command="upgrade" disabled>复制升级命令</button></div><div class="field"><label for="agent-command-uninstall">一键卸载命令</label><textarea id="agent-command-uninstall" class="agent-install-command" rows="4" readonly spellcheck="false"></textarea><button class="btn small" type="button" data-copy-command="uninstall" disabled>复制卸载命令</button></div><div class="field" id="agent-command-archive-wrapper"><label for="agent-command-archive">Windows 失败安装恢复（归档备份）</label><small>适合首次安装失败、升级和卸载均无法进行的电脑。将检查本机正在运行的任务和节点身份，要求输入原 device_id 确认；如果验证通过，把现有 Agent 安装目录整体移到带时间戳的备份目录，保留密钥、日志、配置及状态，不删除 Hub 节点。完成后在面板重新生成新安装命令。请仅在目标 Windows 电脑本机操作。</small><textarea id="agent-command-archive" class="agent-install-command" rows="4" readonly spellcheck="false"></textarea><button class="btn small" type="button" data-copy-command="archive" disabled>复制恢复命令</button></div><p class="form-note">新版安装或升级后，还可以离线使用安装目录内的 agentctl uninstall（Windows：agentctl.ps1 uninstall）。卸载会删除 Agent 配置、密钥、日志和状态，请先备份需要的记录。</p><p id="agent-command-status" class="form-note" role="status"></p></form>`;
   const dialog = modal(
     '本机命令管理 · ' + device.name,
     body,
@@ -541,5 +550,6 @@ function showAgentMaintenanceCommands(device) {
     clear();
     cleanup?.();
   };
-  form.requestSubmit();
+  if (platform) form.requestSubmit();
+  else status.textContent = '当前节点尚未上报操作系统，请先选择目标系统再生成管理命令；Windows PowerShell 应选择 Windows。';
 }

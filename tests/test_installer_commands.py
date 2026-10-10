@@ -153,6 +153,10 @@ def test_management_api_authorization_no_ticket_and_expected_identity(tmp_path, 
                 else:
                     assert '-Action archive' in command and '-ExpectedDevice' not in command
                 assert secret not in command and 'rdi_' not in command
+                if platform == 'windows':
+                    assert 'powershell.exe' in command and 'bash ' not in command
+                else:
+                    assert 'bash ' in command and 'powershell.exe' not in command
             assert store.one('SELECT COUNT(*) AS n FROM agent_install_tickets')['n'] == 0
     finally:
         store.close()

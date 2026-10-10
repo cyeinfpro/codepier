@@ -87,6 +87,7 @@ def test_create_collects_explicit_root_and_displays_literal_command(install_page
     open_form(page)
     field = page.locator('#device-form input[name="allow_root"]')
     expect(field).to_have_value('')
+    expect(page.locator('#device-form select[name="platform"]')).to_have_value('')
     fill_form(page, platform, 'relative/path')
     page.click('#create-device')
     assert not state['creates']
@@ -198,6 +199,10 @@ def test_existing_offline_device_issues_ticket_without_rotation(install_page, st
     expect(page.locator('#device-form')).to_contain_text('已有节点保留原执行权限')
     expect(page.locator('#device-form')).to_contain_text('原节点')
     page.locator('#device-form input[name="allow_root"]').fill('/home/me/Projects')
+    expect(page.locator('#device-form select[name="platform"]')).to_have_value('')
+    page.click('#create-device')
+    assert not state['tickets']
+    page.locator('#device-form select[name="platform"]').select_option('posix')
     page.click('#create-device')
     expect(page.locator('#agent-install-command')).to_have_value(state['command'])
     assert not state['creates']
@@ -308,6 +313,31 @@ def test_command_management_is_literal_copy_only_and_supports_custom_directory(i
     assert requests[-1]['install_dir'] == '/Users/test/Custom Agent'
     assert len(requests) == 2 and not state['tickets'] and not state['creates']
     assert 'fixture-uninstall' not in page.evaluate('JSON.stringify({...localStorage,...sessionStorage})')
+
+
+def test_never_connected_node_does_not_autogenerate_posix_maintenance_command(install_page):
+    page, state = install_page
+    calls = []
+    def management(route):
+        calls.append(route.request.post_data_json)
+        route.fulfill(json={'commands': {'upgrade': 'WINDOWS-powershell-upgrade',
+                                         'uninstall': 'WINDOWS-powershell-uninstall',
+                                         'archive': 'WINDOWS-powershell-archive'}})
+    page.route('**/api/devices/*/agent-commands', management)
+    page.evaluate('showAgentMaintenanceCommands({...S.devices[0],info:{}})')
+    platform = page.locator('#agent-command-form select[name="platform"]')
+    expect(platform).to_have_value('')
+    expect(page.locator('#agent-command-status')).to_contain_text('尚未上报操作系统')
+    expect(page.locator('#agent-command-upgrade')).to_have_value('')
+    assert not calls
+    page.click('#agent-command-generate')
+    assert not calls
+    platform.select_option('windows')
+    page.click('#agent-command-generate')
+    expect(page.locator('#agent-command-upgrade')).to_have_value('WINDOWS-powershell-upgrade')
+    expect(page.locator('#agent-command-archive')).to_have_value('WINDOWS-powershell-archive')
+    assert calls and calls[0]['platform'] == 'windows'
+    assert not state['tickets'] and not state['creates']
 
 
 def test_windows_failed_install_recovery_command_is_explicit_and_copy_only(install_page):

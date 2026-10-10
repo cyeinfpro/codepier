@@ -349,6 +349,59 @@ def test_native_terminal_sessions_block_local_maintenance(installation):
         installer.require_idle(f.base, f.current)
 
 
+def test_legacy_windows_service_is_resolved_from_registered_remote_dev_task(tmp_path, monkeypatch):
+    base = tmp_path/'WinNas' / '.remote-dev-agent'
+    runtime = base/'runtime'
+    python = runtime/'.venv/Scripts/python.exe'
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b'fixture')
+    python.with_name('pythonw.exe').write_bytes(b'fixture')
+    (base/'config.json').write_text(json.dumps({'device_id':'5b2e64991e9a4d2d9eaa4b6b8f0ddf0e',
+                                                'name':'WinNas','hub_url':'https://hub.example'}))
+    xml = installer.windows_task_xml(base, python, 'RemoteDevAgent', 'S-1-5-21-1234567')
+    (base/'service.xml').write_bytes(xml)
+    monkeypatch.setattr(installer,'service_identity',lambda:('schtasks','user'))
+    monkeypatch.setattr(installer,'query_windows_task_xml',lambda name: xml.decode('utf-16'))
+    assert installer.managed_service_name(base,'schtasks','user') == 'RemoteDevAgent'
+    assert installer.service_definition(base) == base/'service.xml'
+    installer.verify_service_ownership(base)
+    assert not (base/'management.json').exists()
+
+
+def test_archive_owned_legacy_remote_dev_agent_preserves_original_node(tmp_path, monkeypatch):
+    """WinNas-style old directory and RemoteDevAgent task are not a foreign service."""
+    base = tmp_path/'WinNas'/'.remote-dev-agent'
+    runtime = base/'runtime'
+    python = runtime/'.venv/Scripts/python.exe'
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b'fixture')
+    python.with_name('pythonw.exe').write_bytes(b'fixture')
+    device_id = '5b2e64991e9a4d2d9eaa4b6b8f0ddf0e'
+    original = json.dumps({'device_id':device_id,'name':'WinNas','hub_url':'https://hub.example'})
+    (base/'config.json').write_text(original)
+    (base/'management.json').write_text(json.dumps({'managed':True,'layout':'managed-runtime',
+        'service_kind':'schtasks','service_scope':'user','service_name':'RemoteDevAgent'}))
+    xml = installer.windows_task_xml(base,python,'RemoteDevAgent','S-1-5-21-1234567')
+    (base/'service.xml').write_bytes(xml)
+    state = {'registered':True,'removed':False}
+    monkeypatch.setattr(installer.sys,'platform','win32')
+    monkeypatch.setattr(installer,'query_windows_task_xml',lambda name: xml.decode('utf-16'))
+    monkeypatch.setattr(installer,'windows_task_registered',lambda name: state['registered'] if name == 'RemoteDevAgent' else False)
+    monkeypatch.setattr(installer,'windows_user_sid',lambda:'S-1-5-21-1234567')
+    monkeypatch.setattr('builtins.input',lambda _prompt:device_id)
+    def fake_remove(target,*,remove):
+        assert target == base and remove
+        state['registered'] = False
+        state['removed'] = True
+    monkeypatch.setattr(installer,'load_lifecycle_helper',lambda _path:Namespace(stop_service=fake_remove))
+    installer.archive_windows_install(base,options())
+    assert state['removed']
+    backups = list(base.parent.glob('.remote-dev-agent.recovery-*'))
+    assert len(backups) == 1 and (backups[0]/'config.json').read_text() == original
+    assert (backups[0]/'service.xml').read_bytes() == xml
+    assert not base.exists()
+
+
 def test_windows_failed_install_archive_preserves_configuration_and_state(installation, monkeypatch, capsys):
     f = installation
     before = (f.base/'config.json').read_bytes()
