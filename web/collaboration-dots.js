@@ -7,9 +7,9 @@ window.CodePierCollaborationDots = {
       liveJoin, joinInstruction, joinStatus } = ctx;
     let token = null, activeOption = 0;
     const slots = () => mentionSlots().filter((slot) => slot.task_dot);
-    const selected = () => slots().find((slot) => slot.id === chat().mentions[0] && chat().delegationPolicy);
+    const selected = () => slots().find((slot) => slot.id === chat().mentions[0] && (slot.duplex || chat().delegationPolicy));
     const capsLabel = (caps) => (caps || []).map((cap) => ({read: '读取', write: '修改文件', execute: '运行命令'})[cap]).join('、');
-    const ready = (slot) => liveJoin(slot) && delegation.policyAvailable(delegation.policyFor(slot.id));
+    const ready = (slot) => liveJoin(slot) && (slot.duplex ? slot.state === 'registered' && !['authorization_unavailable', 'room_paused'].includes(joinStatus(slot)) : delegation.policyAvailable(delegation.policyFor(slot.id)));
     const transport = (slot) => slot.task_status?.notification_state === 'active';
     function statusText(slot) {
       const status = joinStatus(slot);
@@ -19,19 +19,19 @@ window.CodePierCollaborationDots = {
       if (status === 'expired') return '已到期';
       if (status === 'authorization_unavailable') return '需要核对原授权';
       if (status === 'room_paused') return '房间已暂停';
-      if (!transport(slot)) return '已绑定 · 等待任务订阅';
+      if (!transport(slot)) return slot.duplex ? '已绑定 · 等待消息订阅' : '已绑定 · 等待任务订阅';
       if (slot.task_status?.claim?.active_count) return '正在处理任务';
-      return '任务订阅已连接';
+      return slot.duplex ? '双向消息已连接' : '任务订阅已连接';
     }
     function card(slot) {
       const code = joinInstruction(slot), status = joinStatus(slot);
       const alive = liveJoin(slot), policy = delegation.policyFor(slot.id);
       const task = slot.task_status;
-      const explain = status === 'invited' ? '复制加入指令，发到你的 dot。完成一次宿主确认后，就能在这里直接交办。'
+      const explain = status === 'invited' ? '复制加入指令，发到你的 dot。完成一次宿主确认后，就能在这里持续交流和交办。'
         : status === 'code_expired' ? '刷新加入码后，将新指令发到目标 dot。'
         : status === 'authorization_unavailable' ? '原范围或连接已不可用：' + (slot.blocked_reason || '请核对项目授权')
-        : transport(slot) ? '面板 @ 它发送任务；领取、进度和结果会回复原消息。连接有效不等于模型已处理。'
-        : slot.state === 'registered' ? '绑定已完成。将恢复指令发到原 dot，补齐唯一的任务订阅，不必重新加入。'
+        : transport(slot) ? (slot.duplex ? '像房间成员一样双向交流：你发消息，它回复或主动提问；需要做事时再执行。' : '面板 @ 它发送任务；领取、进度和结果会回复原消息。连接有效不等于模型已处理。')
+        : slot.state === 'registered' ? '绑定已完成。将恢复指令发到原 dot，补齐原来的订阅，不必重新加入。'
         : '此 dot 不再接收新任务。已有操作保留原回执，不会重投。';
       return `<article class="cc-card cc-dot-card cc-join-card" data-cc-slot="${E(slot.id)}" data-dot-card="${E(slot.id)}">
         <div class="cc-row"><div class="cc-dot-title"><span class="cc-avatar" aria-hidden="true">●</span><h3>${E(slot.label)}</h3></div><span class="cc-status">${E(statusText(slot))}</span></div>
@@ -39,8 +39,8 @@ window.CodePierCollaborationDots = {
         ${code ? `<div class="cc-join-invitation">${slot.state === 'invited' ? `<div class="cc-row"><strong class="cc-join-code">${E(slot.join_code)}</strong><small>有效至 ${E(when(slot.code_expires_at))}</small></div>` : ''}
           <details class="cc-dot-instruction" ${slot.state === 'invited' ? 'open' : ''}><summary>${slot.state === 'invited' ? '加入指令' : '恢复原 dot 接入'}</summary><textarea class="cc-join-instruction" aria-label="dot 加入或恢复指令" rows="4" readonly>${E(code)}</textarea></details>
           <div class="cc-actions">${button('join-copy', slot.state === 'invited' ? '复制加入指令' : '复制恢复指令', slot)}${slot.state === 'invited' ? '' : button('dot-select', '@' + slot.label + ' 发消息', slot, ready(slot) ? '' : 'disabled')}</div></div>` : ''}
-        ${task ? `<div class="cc-dot-evidence" aria-label="实际协作状态"><span>任务订阅 ${transport(slot) ? '1 / 1' : '0 / 1'}</span><span>已领取 ${E(task.claim?.observed_count || 0)}</span><span>已回传 ${E(task.result?.count || 0)}</span></div>` : ''}
-        <small>任务范围有效至 ${E(when(policy?.expires_at || slot.expires_at))}；不新增账号权限。</small>
+        ${task ? `<div class="cc-dot-evidence" aria-label="实际协作状态"><span>${slot.duplex ? '消息订阅' : '任务订阅'} ${transport(slot) ? '1 / 1' : '0 / 1'}</span><span>已领取 ${E(task.claim?.observed_count || 0)}</span><span>已回传 ${E(task.result?.count || 0)}</span></div>` : ''}
+        <small>连接范围有效至 ${E(when(policy?.expires_at || slot.expires_at))}；不新增账号权限。</small>
         ${alive && state.snapshot.can_manage ? `<div class="cc-actions">${slot.state === 'invited' ? button('join-refresh_code', '刷新加入码', slot) : ''}${transport(slot) ? button('join-test', '测试通知链路', slot) : ''}${button('join-revoke', '移除 dot 并停止新任务', slot)}</div>` : ''}
         ${slot.routes?.some((route) => route.test) ? `<details><summary>通知测试回执</summary>${slot.routes.filter((route) => route.test).map((route) => `<p>事件 <code>${E(route.test.event_id)}</code> · ${E(route.test.state)}</p>`).join('')}<small>HTTP 接收不代表 dot 已读取；以原话题实际回复为准。</small></details>` : ''}
       </article>`;
@@ -50,16 +50,16 @@ window.CodePierCollaborationDots = {
       const candidates = state.dotTargets?.length ? state.dotTargets : [{id: 'project_agent', label: '当前项目 Agent', available: true}];
       const form = d.can_manage && d.room.state === 'active' ? `<form id="cc-dot-create" class="cc-form">
         ${field('dot 名称', `<input name="label" maxlength="80" value="${E(draft.label || '')}" placeholder="例如：项目助手" autocomplete="off" required>`)}
-        ${field('允许它做什么', `<select name="access"><option value="work" ${draft.access !== 'read' ? 'selected' : ''}>处理任务 · 读取、修改、运行命令</option><option value="read" ${draft.access === 'read' ? 'selected' : ''}>只读分析 · 不修改、不运行命令</option></select>`)}
+        ${field('允许它做什么', `<select name="access"><option value="work" ${draft.access !== 'read' ? 'selected' : ''}>聊天并处理任务 · 读取、修改、运行命令</option><option value="read" ${draft.access === 'read' ? 'selected' : ''}>聊天与只读分析 · 不修改、不运行命令</option></select>`)}
         <details><summary>执行位置</summary>${field('任务在哪执行', `<select name="execution_target">${candidates.map((item) => `<option value="${E(item.id)}" ${target === item.id ? 'selected' : ''} ${item.available ? '' : 'disabled'}>${E(item.label)}${item.available ? '' : '（不可用）'}</option>`).join('')}</select>`)}</details>
-        <label class="cc-dot-consent"><input name="confirm_tasks" type="checkbox" required>允许此 dot 按我在本房间 @ 交办的任务使用上述范围，只限已有项目权限。运行命令时使用执行账号权限，并非项目沙箱。</label>
+        <label class="cc-dot-consent"><input name="confirm_tasks" type="checkbox" required>允许此 dot 在本房间收发消息、主动发言，并在我明确交办时使用上述范围，只限已有项目权限。运行命令时使用执行账号权限，并非项目沙箱。</label>
         <button class="btn primary" type="submit">添加 dot，生成加入码</button><small>加入码 30 分钟有效，任务范围 7 天有效；可随时移除。</small></form>` : '<p class="cc-hint">由房间管理员在启用的房间添加 dot。</p>';
       return `<section class="cc-stack cc-dots" aria-label="任务 dot"><section class="cc-card"><span class="cc-eyebrow">你的项目助手</span><h2>添加 dot，然后直接 @ 它</h2>
-        <div class="cc-dot-steps"><span><b>1</b> 添加 dot</span><span><b>2</b> 发加入码</span><span><b>3</b> @ 交办与回传</span></div>${d.capabilities?.message_notifications ? '' : '<p class="cc-hint">事件服务尚未开启，暂不能自动唤醒 dot。已保存的任务仍会保留；管理员需开启 MCP Events。</p>'}${form}</section>${slots().map(card).join('')}</section>`;
+        <div class="cc-dot-steps"><span><b>1</b> 添加 dot</span><span><b>2</b> 发加入码</span><span><b>3</b> 双向交流</span></div>${d.capabilities?.message_notifications ? '' : '<p class="cc-hint">事件服务尚未开启，暂不能自动唤醒 dot。已保存的任务仍会保留；管理员需开启 MCP Events。</p>'}${form}</section>${slots().map(card).join('')}</section>`;
     }
     function picker() {
       const dots = slots().filter(liveJoin);
-      return `<p>选择 dot 后，直接发送任务。后续消息保留接收对象。</p><div class="cc-dot-picker">${dots.map((slot) => ready(slot)
+      return `<p>选择 dot 后直接发消息，可以讨论、追问或交办；后续消息保留接收对象。</p><div class="cc-dot-picker">${dots.map((slot) => ready(slot)
         ? `<button type="button" class="btn cc-dot-option" data-cc-action="dot-select" data-id="${E(slot.id)}"><strong>@${E(slot.label)}</strong><small>${E(statusText(slot))} · ${E(capsLabel(slot.capabilities))}</small></button>`
         : `<div class="cc-row"><span>${E(slot.label)} · ${E(statusText(slot))}</span>${button('dot-connect', '继续接入', slot)}</div>`).join('') || '<p>还没有可用的 dot。</p>'}</div>${button('open-members', '添加或管理 dot')}`;
     }
@@ -72,7 +72,7 @@ window.CodePierCollaborationDots = {
     }
     function choose(slot) {
       const policy = delegation.policyFor(slot.id);
-      if (!ready(slot) || policy.version !== slot.policy_version) throw new Error('dot 范围已改变，请重新选择；正文已保留。');
+      if (!ready(slot) || (!slot.duplex && policy.version !== slot.policy_version)) throw new Error('dot 范围已改变，请重新选择；正文已保留。');
       const c = chat(), area = document.querySelector('#cc-message-input');
       if (token && area && area.value === token.value && area.selectionStart === token.end) {
         area.setRangeText('', token.start, token.end, 'end');
@@ -80,8 +80,8 @@ window.CodePierCollaborationDots = {
       }
       hideSuggestions();
       c.mentions = [slot.id];
-      c.acceptance = policy.automatic_acceptance;
-      delegation.selectPolicy(policy, policy.version, true);
+      if (slot.duplex) delegation.selectPolicy(null);
+      else { c.acceptance = policy.automatic_acceptance; delegation.selectPolicy(policy, policy.version, true); }
       patchDraftContext(); patchDelegationComposer(); closeDrawer(); area?.focus();
     }
     async function act(action, element) {
@@ -107,7 +107,7 @@ window.CodePierCollaborationDots = {
       const generation = state.generation;
       const result = await mutation('dot', {conversation_id: state.conversation || state.snapshot.conversation?.id || state.snapshot.room.id,
         label: data.label.trim(), capabilities: work ? (target === 'project_agent' ? ['read', 'write', 'execute'] : ['read', 'execute']) : ['read'],
-        execution_target: target, acknowledge_unsandboxed_exec: work, confirm_tasks: true});
+        execution_target: target, acknowledge_unsandboxed_exec: work, confirm_tasks: true, duplex: true});
       if (generation !== state.generation) return {local: true};
       state.dotDraft = {};
       state.snapshot.join_slots = [result.dot, ...(state.snapshot.join_slots || []).filter((slot) => slot.id !== result.dot.id)];

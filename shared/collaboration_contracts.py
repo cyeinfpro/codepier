@@ -792,6 +792,7 @@ TOOL_DESCRIPTIONS.update({
 
 # A task dot is an explicit panel-owner setup, not an upgrade of a CPJ notice.
 class DotCreate(Scope):
+    duplex: bool = False  # New panel opt-in; never upgrade saved task-only codes.
     conversation_id: str = Field(default='', max_length=128)
     label: str = Field(min_length=1, max_length=80)
     capabilities: list[GoalCapability] = Field(default_factory=lambda: ['read'], min_length=1, max_length=3)
@@ -841,4 +842,39 @@ TOOL_DESCRIPTIONS.update({
     'collaboration_dot_connection': 'Recover this task dot and its exact native subscription request. Reuses its persisted original consumer checkpoint; never resets history, creates credentials or subscribes on behalf of the host.',
     'collaboration_dot_inbox': 'Read this task dot current inbox using its server-persisted enrollment checkpoint. Returned requests carry real delegation IDs and preserve the managed lease/target boundary. Requires explicit host consent to process tasks. Duplicate wakes reconcile original operations, not repeat them.',
     'collaboration_work_progress': 'Post bounded progress to the original owner task thread and renew the current live lease. Does not finish work or assert operation success; uses the original attempt, fence and idempotency key.',
+})
+
+
+class DotChatMessage(DotRead):
+    body_text: str = Field(min_length=1, max_length=4000)
+    reply_to_id: str = Field(default='', max_length=128)
+    idempotency_key: Key
+
+    @field_validator('body_text')
+    @classmethod
+    def not_blank(cls, value):
+        if not value.strip():
+            raise ValueError('A message cannot be blank')
+        return value
+
+
+class DotChatAck(DotRead):
+    message_id: Identifier
+    disposition: Literal['read', 'handled'] = 'read'
+    idempotency_key: Key
+
+
+class DotChatTask(DotRead):
+    message_id: Identifier
+    expected_version: int = Field(ge=1)
+    confirm_task: Literal[True]
+    idempotency_key: Key
+
+
+TOOL_MODELS.update({'collaboration_dot_message': DotChatMessage,
+    'collaboration_dot_ack': DotChatAck, 'collaboration_dot_task': DotChatTask})
+TOOL_DESCRIPTIONS.update({
+    'collaboration_dot_message': 'Send a normal or proactive message to this explicitly owner-approved duplex dot room. Requires its existing bound connector, not a task lease. Use reply_to_id for the exact original message and reuse its reply_arguments key for retries. Never sync private chat history or wake peer bots.',
+    'collaboration_dot_ack': 'Acknowledge an addressed dot message. read records connector receipt but leaves it pending; handled explicitly finishes that message. Neither state proves human reading or task execution.',
+    'collaboration_dot_task': 'Only after an explicitly authenticated owner message addressed to this duplex dot asks for actual work, attach one managed task using its existing owner-approved scope. User-approved host execution remains required; do not convert greetings or questions into work. Returns real delegation/inbox requests; claim and execute with the original leases, never general tools to bypass a refusal.',
 })

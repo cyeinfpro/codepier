@@ -594,6 +594,7 @@ class DelegationService:
         if not link['approval_id']:
             return True  # The atomic send is still binding its initial approval.
         policy = self.policy(room, link['policy_id'])
+        self.c.dot_chat.wake_work(room, policy, link, item)
         self.c.emit(room, DELEGATION_EVENT, item['id'], item['version'],
             {'conversation_id': link['conversation_id'], 'policy_id': policy['id'], 'policy_version': link['policy_version'],
              'delegation_id': link['id'], 'message_id': link['message_id'], 'message_version': link['message_version'],

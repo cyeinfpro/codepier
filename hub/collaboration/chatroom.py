@@ -14,7 +14,7 @@ class ChatroomService:
         self.c, self.store = collaboration, collaboration.store
 
     def capabilities(self):
-        return {'task_dots': True, 'work_progress': True, 'coordination_goals': True, 'direct_delegation': True, 'message_remind': True, 'plain_messages': True, 'message_notifications': self.c.config.events_enabled,
+        return {'duplex_dots': True, 'task_dots': True, 'work_progress': True, 'coordination_goals': True, 'direct_delegation': True, 'message_remind': True, 'plain_messages': True, 'message_notifications': self.c.config.events_enabled,
                 'task_assignment': True, 'message_search': True, 'incremental_messages': True,
                 'read_cursors': True, 'attachments': False, 'human_memberships': False}
 
@@ -87,6 +87,13 @@ class ChatroomService:
                   'client_message_id': row['source_id'], 'related_goal_id': row['goal_id'],
                   'job_id': body.get('job_id'), 'result_id': body.get('result_id'),
                   'source_message_id': body.get('source_message_id')}
+        if body.get('duplex_recipients'):
+            result['dot_receipts'] = self.c.dot_chat.receipts(row['id'])
+        if body.get('sender_dot_id'):
+            sender = self.store.one('SELECT label FROM collaboration_join_slots WHERE id=? AND room_id=? AND grant_id=?', (body['sender_dot_id'], row['room_id'], row['author']))
+            if sender:
+                result['display_name'] = sender['label']
+                result['sender_dot_id'] = body['sender_dot_id']
         if row['kind'] in {'delegation_progress', 'delegation_result'}:
             bound = self.store.one('''SELECT s.label,s.id FROM delegation_requests d
                 JOIN delegation_policies p ON p.id=d.policy_id JOIN collaboration_join_slots s ON s.id=p.slot_id
@@ -199,7 +206,7 @@ class ChatroomService:
             receipts.append({'slot_id': slot['id'], 'state': state, 'event_id': event_id})
         return receipts
 
-    def create(self, raw, principal):
+    def create(self, raw, principal, *, sender_dot_id=''):
         args = validate(contracts.MessageCreate, raw)
         # Omitted new fields must keep old ordinary-message replay fingerprints.
         if args['dispatch_mode'] == 'discussion':
@@ -216,7 +223,11 @@ class ChatroomService:
             self.same_room(room, args)
             conversation = self.c.conversations.resolve(principal, room, args)
             args['conversation_id'] = conversation['id']
-            self.writer(principal, room, conversation['id'])
+            if sender_dot_id:
+                self.c.dot_chat.authorize_sender(principal, room, conversation, sender_dot_id)
+                args['_sender_dot_id'] = sender_dot_id
+            else:
+                self.writer(principal, room, conversation['id'])
             if args.get('delegation') or args.get('dispatch_mode') == 'automatic':
                 self.c.owner(principal)
             def save():
@@ -248,20 +259,27 @@ class ChatroomService:
                 root = identifier
                 if args['reply_to_id']:
                     parent = self.c.object('collaboration_messages', room, args['reply_to_id'])
+                    if sender_dot_id:
+                        self.require_message_visible(principal, parent)
                     if parent['conversation_id'] != conversation['id']:
                         raise DevError('THREAD_NOT_FOUND', '不能跨聊天室或项目回复，请另发一条消息', 409)
                     root = parent['thread_root_id'] or parent['id']
                 mentions = []
-                for item in args['mentions']:
+                for item in self.c.dot_chat.recipients(room, args, principal):
                     slot = self.c.joining.slot(room, item['slot_id'])
                     mentions.append({'slot_id': slot['id'], 'display_snapshot': slot['label']})
                 body = {'body_text': redact(args['body_text']), 'mentions': mentions, 'request_digest': fingerprint}
+                if sender_dot_id:
+                    body['sender_dot_id'] = sender_dot_id
                 self.store.execute('''INSERT INTO collaboration_messages
                     (id,room_id,conversation_id,thread_id,thread_root_id,reply_to_id,author,origin,source_id,kind,body,state,created)
                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                     (identifier, room['id'], conversation['id'], root, root, args['reply_to_id'], author, origin,
                      args['client_message_id'], 'reply' if args['reply_to_id'] else 'text', canonical(body), 'saved', self.c.clock()))
                 message = self.c.object('collaboration_messages', room, identifier)
+                duplex = self.c.dot_chat.enqueue(room, message, mentions, principal)
+                if duplex:
+                    body['duplex_recipients'] = duplex
                 receipt = {'scheduled': False}
                 if selected_delegation:
                     receipt = self.c.delegation.send(principal, room, message, {**args, 'delegation': selected_delegation})
@@ -269,13 +287,13 @@ class ChatroomService:
                                           'policy_version': selected_delegation['policy_version'],
                                           'automatic': automatic is not None}
                     body['provenance_project_ids'] = [room['project_id']]
-                    body['notifications'] = []
+                    body['notifications'] = self.notify(room, message, principal, mentions) if duplex else []
                 else:
                     body['notifications'] = self.notify(room, message, principal, mentions)
                 self.store.execute('UPDATE collaboration_messages SET body=? WHERE id=?', (canonical(body), identifier))
                 return {'message': self.view(self.c.object('collaboration_messages', room, identifier)),
                         'notifications': body['notifications'], **receipt}
-            return self.c.mutation(principal, room, 'message_create:' + conversation['id'], args, save)
+            return self.c.mutation(principal, room, 'message_create:' + conversation['id'] + (':' + sender_dot_id if sender_dot_id else ''), args, save)
 
     def is_delegation_source(self, message):
         return bool(json.loads(message['body']).get('delegation') or self.store.one(

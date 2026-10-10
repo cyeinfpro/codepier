@@ -58,6 +58,8 @@ class DotService:
 
     def create(self, raw, principal):
         args = validate(contracts.DotCreate, raw)
+        if not args['duplex']:
+            args.pop('duplex')  # Preserve old task-only creation fingerprints.
         with self.store.transaction():
             principal, room = self.c.scope(principal, args, create=True)
             self.c.owner(principal)
@@ -70,6 +72,8 @@ class DotService:
             snapshot = asdict(principal)
             snapshot.update(scopes=[], session_hash='', token_hash='')
             setup = {key: args[key] for key in ('capabilities', 'execution_target', 'acknowledge_unsandboxed_exec')}
+            if args.get('duplex'):
+                setup['duplex'] = True
             setup.update(project_snapshot=self.c.coordination.project_snapshot(project), target_snapshot=target,
                          purpose='处理房主在此房间明确 @ 此 dot 交办的任务，并回复实际进展、结果和未完成项。')
             def save():
@@ -158,9 +162,11 @@ class DotService:
                                       'dot_id': receipt['id']}, principal)
             return {**result, 'registered': True, 'permissions_changed': False, 'chat_identity_verified': False,
                     'managed_scope_activated': True, 'approval_source': 'authenticated_panel_owner_setup',
-                    'next_step': '请宿主按用户确认创建返回的唯一任务订阅，并保存 consumer_configuration.wake_instructions。'
+                    'next_step': '请宿主按用户确认创建返回的唯一订阅，并保存 consumer_configuration.wake_instructions。'
                                  '用实际事件源的 connector_id；回调和签名材料由宿主生成。订阅确认后立即调用 inbox_request 读取一次，避免接入期间已排队任务遗漏。成功须以实际 dot 读取和回帖为证据。',
-                    'message': '已绑定原授权并接好面板批准的任务范围。还需本 dot 宿主确认任务处理并完成原生事件订阅。'}
+                    'message': ('已加入双向消息房间。请宿主确认原生消息订阅；普通回复与主动发言不需要任务编号。'
+                        if self.c.dot_chat.enabled(self.find(receipt['id'])) else
+                        '已绑定原授权并接好面板批准的任务范围。还需本 dot 宿主确认任务处理并完成原生事件订阅。')}
 
     def policy(self, room, dot):
         if not dot['policy_id'] or not dot['checkpoint']:
@@ -172,6 +178,9 @@ class DotService:
 
     @staticmethod
     def subscription(room, dot, policy):
+        if json.loads(dot['setup']).get('duplex'):
+            from hub.collaboration.dot_chat import DotChatService
+            return DotChatService.subscription(room, dot)
         return {'name': DELEGATION_EVENT, 'arguments': {
             'project_id': room['project_id'], 'environment_id': room['environment_id'],
             'conversation_id': dot['conversation_id'], 'slot_id': dot['id'],
@@ -186,6 +195,16 @@ class DotService:
     def connection(self, raw, principal):
         with self.store.transaction(immediate=False):
             _, principal, room, slot, dot = self.scope(raw, principal)
+            if self.c.dot_chat.enabled(dot):
+                self.c.dot_chat.authorize(principal, room, dot)
+                configuration = self.c.dot_chat.configuration(room, dot, principal)
+                subscription = self.c.dot_chat.subscription(room, dot)
+                return {'dot_id': dot['id'], 'slot': self.slot_view(room, slot, dot, principal),
+                    'subscription_request': subscription, 'subscription_requests': [subscription],
+                    'subscription_created': False, 'permissions_changed': False,
+                    'inbox_request': configuration['inbox_request'],
+                    'work_inbox_request': configuration['work_inbox_request'],
+                    'consumer_configuration': configuration}
             policy = self.policy(room, dot)
             self.c.delegation.authorize_policy(principal, room, policy)
             inbox = self.request(room, dot)
@@ -214,6 +233,8 @@ class DotService:
     def inbox(self, raw, principal):
         with self.store.transaction(immediate=False):
             args, principal, room, _, dot = self.scope(raw, principal, contracts.DotInbox)
+            if self.c.dot_chat.enabled(dot):
+                return self.c.dot_chat.inbox(raw, principal)
             policy = self.policy(room, dot)
             page = self.c.delegation.consumer.inbox({
                 **self.c.delegation.consumer.arguments(policy, room, 'managed_execution'),
@@ -238,7 +259,21 @@ class DotService:
                 status = 'subscription_verified' if progress['notification_state'] == 'active' else 'waiting_subscription'
             except DevError as exc:
                 reason, status = exc.code, 'authorization_unavailable'
-        routes = [r for r in routes if r['name'] == DELEGATION_EVENT]
+        chat_status, task_reason = None, reason
+        duplex = setup.get('duplex') is True
+        if duplex and state == 'registered':
+            try:
+                self.c.dot_chat.authorize(principal, room, dot)
+                chat_status = self.c.dot_chat.status(room, dot)
+                request = self.c.dot_chat.subscription(room, dot)
+                progress = {**(progress or {}), 'notification_state': chat_status['notification_state']}
+                reason = ''
+                status = 'subscription_verified' if chat_status['notification_state'] == 'active' else 'waiting_subscription'
+            except DevError as exc:
+                reason, status = exc.code, 'authorization_unavailable'
+        from hub.collaboration.common import MESSAGE_EVENT
+        expected_event = MESSAGE_EVENT if duplex else DELEGATION_EVENT
+        routes = [r for r in routes if r['name'] == expected_event]
         active = [r for r in routes if r['available']]
         owner = bool(principal.admin and not principal.grant_id)
         code = slot['join_code'] if owner and status == 'invited' else None
@@ -250,7 +285,19 @@ class DotService:
         resume = ('@CodePier 请恢复这个任务 dot 的原订阅和处理配置，不重新兑换加入码或重置基线。调用 '
                   + canonical(self.request(room, dot, 'dot_connection')) + '，按返回配置补齐原生订阅；'
                   '仅在本聊天已经同意任务处理的范围内继续，未同意时先确认。') if state == 'registered' else None
-        return {'id': slot['id'], 'dot_id': slot['id'], 'task_dot': True, 'label': slot['label'], 'kind': 'dot',
+        if duplex:
+            instruction = (f'@CodePier 请用加入码 {code} 以双向聊天成员身份加入面板房间。'
+                '我同意你持续接收发给你的消息，并通过插件回复、主动发言或提问。普通对话不需要建立任务。'
+                '只有本人明确要求实际工作时，才在面板已确认且当前连接已有的范围内处理。'
+                '调用 collaboration(action=join)，保存 consumer_configuration.wake_instructions，'
+                '由宿主按唯一 subscription_request 完成原生消息订阅，之后立即读取待办。'
+                '任务通过插件执行，消息、进度和结果回复原话题；不新建凭据，不同步私人聊天历史。') if code else None
+            resume = ('@CodePier 恢复这个已确认双向聊天 dot 的原消息订阅；不重新加入，不重置记录。调用 '
+                + canonical(self.request(room, dot, 'dot_connection')) + '，保存返回说明并立即读取待办。'
+                '继续按原同意范围交流与处理明确任务；仍需宿主原生确认。') if state == 'registered' else None
+        return {'id': slot['id'], 'dot_id': slot['id'], 'task_dot': True,
+                'duplex': duplex, 'chat_status': chat_status, 'task_blocked_reason': task_reason if duplex else '',
+ 'label': slot['label'], 'kind': 'dot',
                 'version': slot['version'], 'state': state, 'status': status, 'blocked_reason': reason,
                 'conversation_id': dot['conversation_id'], 'expires_at': slot['expires_at'],
                 'code_expires_at': slot['code_expires_at'], 'joined_at': slot['joined_at'], 'join_code': code,
@@ -258,10 +305,10 @@ class DotService:
                 'capabilities': setup['capabilities'], 'execution_target': setup['execution_target'],
                 'policy_id': dot['policy_id'], 'policy_version': dot['policy_version'],
                 'subscription_requests': [request] if request else [], 'routes': routes,
-                'expected_events': [DELEGATION_EVENT], 'expected_subscription_count': 1,
-                'subscription_count': int(bool(active)), 'missing_events': [] if active else [DELEGATION_EVENT],
-                'notification_scope': 'exact_dot_tasks', 'chat_identity_verified': False,
+                'expected_events': [expected_event], 'expected_subscription_count': 1,
+                'subscription_count': int(bool(active)), 'missing_events': [] if active else [expected_event],
+                'notification_scope': 'exact_dot_conversation' if duplex else 'exact_dot_tasks', 'chat_identity_verified': False,
                 'connection_complete': bool(active and all(r['chat_receipt_confirmed'] for r in active)),
                 'confirmation_event_ids': [r['test']['event_id'] for r in active]
                     if active and all(r['test'] and r['test']['state'] == 'accepted' for r in active) else [],
-                'task_status': progress, 'default_dispatch': 'automatic', 'approval_source': 'authenticated_panel_owner_setup'}
+                'task_status': progress, 'default_dispatch': 'discussion' if duplex else 'automatic', 'approval_source': 'authenticated_panel_owner_setup'}

@@ -186,6 +186,8 @@ window.CodePierCollaborationDelegation = {
       if (!state.snapshot?.capabilities?.direct_delegation) return '';
       const c = chat(),
         policy = c.mentions.length === 1 ? policyFor(c.mentions[0]) : null;
+      const duplex = c.mentions.length === 1 && mentionSlots().find((slot) => slot.id === c.mentions[0] && slot.duplex);
+      if (duplex) return '<span class="cc-dot-send-mode">发给 @' + E(duplex.label) + button('dot-clear', '取消接收对象') + '</span>';
       if (c.delegationPolicy && mentionSlots().find((slot) => slot.id === policy?.slot_id)?.task_dot)
         return '<span class="cc-dot-send-mode">交给 @' + E(mentionSlots().find((slot) => slot.id === policy.slot_id).label) + button('dot-clear', '取消交办') + '</span>';
       return (
@@ -232,6 +234,8 @@ window.CodePierCollaborationDelegation = {
     }
     function delegationContext() {
       const c = chat();
+      const duplex = c.mentions.length === 1 && mentionSlots().find((slot) => slot.id === c.mentions[0] && slot.duplex);
+      if (duplex) return '<p class="cc-dot-scope-summary">双向聊天 · 回复留在同一话题 · 明确交办才进入任务处理</p>';
       if (!c.delegationPolicy) return '';
       const policy = selectedPolicy(),
         valid = selectedDelegationValid();
