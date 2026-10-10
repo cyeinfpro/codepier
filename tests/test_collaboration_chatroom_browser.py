@@ -120,8 +120,14 @@ def test_chat_messages_drafts_ime_scroll_replies_and_task_gate(collaboration_sta
         expect(page.locator('.cc-new-messages')).not_to_be_visible()
         page.screenshot(animations='disabled', path=str(shots / f'{engine}-chatroom-desktop.png'))
 
-        for width in (390, 360):
+        for width in (390, 360, 320, 390):
             page.set_viewport_size({'width': width, 'height': 844 if width == 390 else 800})
+            page.wait_for_function("""() => {
+                const root = document.querySelector('.collaboration');
+                const bar = document.querySelector('.topbar');
+                return Math.abs(parseFloat(getComputedStyle(root).getPropertyValue('--cc-topbar-height'))
+                    - bar.getBoundingClientRect().height) < 1;
+            }""")
             area.fill('手机换行')
             area.press('Enter')
             expect(area).to_have_value('手机换行\n')

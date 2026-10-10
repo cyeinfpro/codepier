@@ -2347,13 +2347,31 @@ window.CodePierCollaboration = (() => {
     root.removeAttribute('aria-busy');
     const boundGeneration = state.generation;
     const live = () => root.isConnected && !root.inert && boundGeneration === state.generation;
+    state.viewportCleanup?.();
     const viewport = window.visualViewport;
-    if (viewport) {
-      const resize = () => root.style.setProperty('--cc-viewport-height', viewport.height + 'px');
-      viewport.addEventListener('resize', resize);
-      resize();
-      state.viewportCleanup = () => viewport.removeEventListener('resize', resize);
-    }
+    const topbar = document.querySelector('.topbar');
+    const resize = () => {
+      if (!live()) return;
+      root.style.setProperty(
+        '--cc-viewport-height',
+        (viewport?.height || window.innerHeight) + 'px',
+      );
+      if (topbar) {
+        // Scoped to the chat: never feed the measured size back into the topbar.
+        root.style.setProperty('--cc-topbar-height', topbar.getBoundingClientRect().height + 'px');
+      }
+    };
+    const topbarObserver =
+      topbar && typeof ResizeObserver !== 'undefined' ? new ResizeObserver(resize) : null;
+    topbarObserver?.observe(topbar);
+    viewport?.addEventListener('resize', resize);
+    window.addEventListener('resize', resize);
+    resize();
+    state.viewportCleanup = () => {
+      viewport?.removeEventListener('resize', resize);
+      window.removeEventListener('resize', resize);
+      topbarObserver?.disconnect();
+    };
     root.addEventListener('click', (event) => {
       if (!live() || event.target.closest('button')?.disabled) return;
       const partition = event.target.closest('[data-cc-partition]');

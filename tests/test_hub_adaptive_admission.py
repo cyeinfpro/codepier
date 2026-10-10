@@ -20,6 +20,16 @@ from tests.test_scheduler_queue_admission import project, submit
 REVISION = revision({})
 
 
+@pytest.mark.parametrize("limit,reason,expected", [
+    (154, "adaptive", True), (129, "adaptive", True), (128, "adaptive", False),
+    (32, "legacy", False), (154, "unavailable", False), (154, "pressure", False),
+])
+def test_real_burst_prerequisite_uses_required_peak_not_host_size(limit, reason, expected):
+    from tests.test_hub_adaptive_admission_stack import burst_capacity_ready
+
+    assert burst_capacity_ready({"project_pending_limit": limit, "reason": reason}) is expected
+
+
 def snapshot(capacity=12, reason="healthy"):
     return {"scope": "node", "reason": reason, "running": 0, "queued": 0,
             "lanes": {lane: {"running": 0, "queued": 0, "capacity": capacity}
