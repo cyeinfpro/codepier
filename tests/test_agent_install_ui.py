@@ -98,6 +98,7 @@ def test_create_collects_explicit_root_and_displays_literal_command(install_page
     assert state['tickets'][0]['body'] == {'hub_url': state['creates'][0]['hub_url'], 'platform': platform, 'allow_root': root, 'enable_execution': True}
     expect(page.locator('.modal img')).to_have_count(0)
     expect(page.locator('#agent-install-status')).to_contain_text('前执行')
+    expect(page.locator('.modal')).to_contain_text('原节点')
     assert page.evaluate('JSON.stringify({...localStorage,...sessionStorage})').find('PRIVATE-ONCE') == -1
     with page.expect_download() as download:
         page.click('#download-pairing')
@@ -195,6 +196,7 @@ def test_existing_offline_device_issues_ticket_without_rotation(install_page, st
     expect(page.locator('#device-form input[name="name"]')).to_have_count(0)
     expect(page.locator('#device-form input[name="enable_execution"]')).to_have_count(0)
     expect(page.locator('#device-form')).to_contain_text('已有节点保留原执行权限')
+    expect(page.locator('#device-form')).to_contain_text('原节点')
     page.locator('#device-form input[name="allow_root"]').fill('/home/me/Projects')
     page.click('#create-device')
     expect(page.locator('#agent-install-command')).to_have_value(state['command'])
@@ -306,6 +308,31 @@ def test_command_management_is_literal_copy_only_and_supports_custom_directory(i
     assert requests[-1]['install_dir'] == '/Users/test/Custom Agent'
     assert len(requests) == 2 and not state['tickets'] and not state['creates']
     assert 'fixture-uninstall' not in page.evaluate('JSON.stringify({...localStorage,...sessionStorage})')
+
+
+def test_windows_failed_install_recovery_command_is_explicit_and_copy_only(install_page):
+    page, state = install_page
+    command = 'fixture-archive -Action archive -SafeBackup'
+    requests = []
+    def management(route):
+        requests.append(route.request.post_data_json)
+        if requests[-1]['platform'] == 'windows':
+            route.fulfill(json={'commands': {'upgrade': 'upgrade', 'uninstall': 'uninstall',
+                                              'archive': command}})
+        else:
+            route.fulfill(json={'commands': {'upgrade': 'upgrade', 'uninstall': 'uninstall'}})
+    page.route('**/api/devices/*/agent-commands', management)
+    page.locator('[data-action="device-detail"]').first.click()
+    page.locator('[data-action="agent-commands"]').first.click()
+    expect(page.locator('#agent-command-archive-wrapper')).to_be_hidden()
+    page.locator('#agent-command-form [name="platform"]').select_option('windows')
+    expect(page.locator('#agent-command-archive-wrapper')).to_be_visible()
+    expect(page.locator('#agent-command-archive')).to_have_value('')
+    page.click('#agent-command-generate')
+    expect(page.locator('#agent-command-archive')).to_have_value(command)
+    expect(page.locator('#agent-command-form')).to_contain_text('保留密钥、日志、配置及状态')
+    assert requests[-1]['platform'] == 'windows'
+    assert not state['tickets'] and not state['creates']
 
 
 def test_command_management_closing_dialog_fences_late_response(install_page):

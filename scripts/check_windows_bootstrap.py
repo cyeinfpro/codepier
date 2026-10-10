@@ -98,9 +98,32 @@ def probe(directory):
     if executable is None:
         raise RuntimeError('Windows PowerShell 5.1 is required')
     results = []
+    # Native PowerShell must fail before it creates tool directories, downloads
+    # Python or calls the synthetic installer when a fresh-node ticket targets
+    # a machine that already belongs to another panel node.
+    existing = directory / 'existing-node'
+    existing.mkdir()
+    existing_config = existing / 'config.json'
+    original = json.dumps({'name': 'Original Agent', 'device_id': 'original-node',
+                           'hub_url': 'https://hub.invalid', 'secret': 'keep-private'})
+    existing_config.write_text(original, encoding='utf-8')
+    allow = directory / 'allowed'
+    allow.mkdir()
+    mismatch = subprocess.run([executable, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-File', str(script), '-Action', 'install', '-InstallDir', str(existing),
+        '-Hub', 'https://hub.invalid', '-Token', 'rdi_fixture', '-Sha256', 'a' * 64,
+        '-AllowRoot', str(allow), '-ExpectedDevice', 'different-node'],
+        cwd=directory, capture_output=True, timeout=30)
+    assert mismatch.returncode != 0, mismatch.stdout
+    assert b'ticket was not used' in mismatch.stderr, mismatch.stderr
+    assert existing_config.read_text(encoding='utf-8') == original
+    assert not (existing / 'tools').exists()
+    results.append({'case': 'wrong-device-early-rejection', 'passed': True,
+                    'exit_code': mismatch.returncode})
     for index, (action, extra, exit_code, should_call, keep) in enumerate([
         ('status', [], 0, True, False), ('start', [], 0, True, False),
         ('upgrade', [], 0, True, False), ('uninstall', [], 0, True, False),
+        ('archive', [], 0, True, False),
         ('start', [], 37, True, False), ('uninstall', [], 0, True, True),
         ('invalid-action', [], 0, False, False), ('start', ['-NoService'], 0, False, False),
         ('start', ['-Hub', 'https://invalid.example'], 0, False, False),
@@ -121,7 +144,7 @@ def probe(directory):
                                  f'stdout={result.stdout[-4000:]!r}; stderr={result.stderr[-4000:]!r}')
         if should_call:
             arguments = json.loads(log.read_text(encoding='utf-8'))
-            assert arguments == ['--start-service' if action == 'start' else '--' + action,
+            assert arguments == ['--start-service' if action == 'start' else '--archive-install' if action == 'archive' else '--' + action,
                                  '--install-dir', str(base), '--expected-device', 'fixture-device']
         if action != 'uninstall' or keep:
             assert config.read_bytes() == b'{"synthetic":true}'

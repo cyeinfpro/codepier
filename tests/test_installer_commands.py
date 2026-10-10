@@ -144,9 +144,14 @@ def test_management_api_authorization_no_ticket_and_expected_identity(tmp_path, 
             assert response.status_code == 200, response.text
             assert response.headers['cache-control'] == 'no-store'
             data = response.json()
-            assert set(data['commands']) == {'upgrade', 'uninstall'}
-            for command in data['commands'].values():
-                assert device_id in command and directory in command
+            assert set(data['commands']) == ({'upgrade', 'uninstall', 'archive'} if platform == 'windows'
+                                             else {'upgrade', 'uninstall'})
+            for action, command in data['commands'].items():
+                assert directory in command
+                if action != 'archive':
+                    assert device_id in command
+                else:
+                    assert '-Action archive' in command and '-ExpectedDevice' not in command
                 assert secret not in command and 'rdi_' not in command
             assert store.one('SELECT COUNT(*) AS n FROM agent_install_tickets')['n'] == 0
     finally:

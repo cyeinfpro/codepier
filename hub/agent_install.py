@@ -96,10 +96,12 @@ def powershell_quote(value):
 def install_command(platform, hub_url, enrollment_token, package_sha256, allow_root, bootstrap_sha256=None, *, action='install', expected_device='', install_dir='', enable_execution=True):
     if type(enable_execution) is not bool:
         raise ValueError('Execution option must be a boolean')
-    if action not in {'install','upgrade','uninstall'}:
+    if action not in {'install','upgrade','uninstall','archive'}:
         raise ValueError('Unsupported installer action')
-    if action != 'install' and not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', expected_device):
-        raise ValueError('A valid target device is required for maintenance commands')
+    if action == 'archive' and platform != 'windows':
+        raise ValueError('Local archive recovery is Windows-only')
+    if (expected_device or action in ('upgrade','uninstall')) and not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', expected_device):
+        raise ValueError('A valid target device identity is required')
     if bootstrap_sha256 is not None and not re.fullmatch(r'[a-f0-9]{64}', bootstrap_sha256):
         raise DevError('INSTALL_PACKAGE_CHANGED', '安装脚本校验值无效，请在面板重新生成安装命令', 409)
     if platform == 'posix':
@@ -107,6 +109,8 @@ def install_command(platform, hub_url, enrollment_token, package_sha256, allow_r
             '--hub', hub_url, '--sha256', package_sha256, '--'+action, '--expected-device', expected_device)
         if action == 'install':
             values += ('--shell', 'full' if enable_execution else 'disabled')
+            if expected_device:
+                values += ('--expected-device', expected_device)
         if install_dir:
             values += ('--install-dir', install_dir)
         args = ' '.join(shlex.quote(value) for value in values)
@@ -127,9 +131,13 @@ def install_command(platform, hub_url, enrollment_token, package_sha256, allow_r
                 bootstrap_check + ' && bash "$codepier_install_tmp/install.sh" ' + args + ')')
     arguments = ' '.join(powershell_quote(value) for value in (hub_url, enrollment_token, package_sha256, allow_root))
     hub, ticket, sha, root = (powershell_quote(value) for value in (hub_url, enrollment_token, package_sha256, allow_root))
-    maintenance = '' if action == 'install' else ' -Action '+action+' -ExpectedDevice '+powershell_quote(expected_device)
+    maintenance = '' if action == 'install' else ' -Action '+action
+    if action in ('upgrade','uninstall'):
+        maintenance += ' -ExpectedDevice '+powershell_quote(expected_device)
     if action == 'install':
         maintenance += ' -Shell '+powershell_quote('full' if enable_execution else 'disabled')
+        if expected_device:
+            maintenance += ' -ExpectedDevice '+powershell_quote(expected_device)
     if install_dir:
         maintenance += ' -InstallDir '+powershell_quote(install_dir)
     bootstrap_check = ''
@@ -262,8 +270,10 @@ def make_agent_install_router(runtime, auth, source_root=None):
         bundle = package.build()
         script_sha = hashlib.sha256(bundle.scripts[PUBLIC_SCRIPTS[body.platform]]).hexdigest()
         commands = {action: install_command(body.platform, hub_url, '', bundle.sha256, '', script_sha,
-                                            action=action, expected_device=device_id, install_dir=install_dir)
-                    for action in ('upgrade', 'uninstall')}
+                                            action=action, expected_device=device_id if action != 'archive' else '',
+                                            install_dir=install_dir)
+                    for action in (('upgrade', 'uninstall', 'archive') if body.platform == 'windows'
+                                   else ('upgrade', 'uninstall'))}
         return JSONResponse({'commands': commands, 'platform': body.platform, 'package': package.metadata(hub_url)},
                             headers={'Cache-Control': 'no-store'})
 
@@ -300,7 +310,8 @@ def make_agent_install_router(runtime, auth, source_root=None):
             enrollment_token = 'rdi_'+token(32)
             bootstrap_sha256 = hashlib.sha256(package.scripts[PUBLIC_SCRIPTS[body.platform]]).hexdigest()
             command = install_command(body.platform, hub_url, enrollment_token, metadata['sha256'], allow_root,
-                                      bootstrap_sha256=bootstrap_sha256, enable_execution=body.enable_execution)
+                                      bootstrap_sha256=bootstrap_sha256, expected_device=device_id,
+                                      enable_execution=body.enable_execution)
             expires = now + TICKET_SECONDS
             fingerprint = digest(store.decrypt(device['secret']))
             store.db.execute('DELETE FROM agent_install_tickets WHERE expires<=? OR device_id=?', (now, device_id))

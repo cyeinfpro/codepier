@@ -160,7 +160,7 @@ def test_enroll_maps_transport_and_http_failures_to_retryable_errors(monkeypatch
             install_agent.enroll("https://hub.example", "rdi_token")
 
 
-def _invoke_main(monkeypatch, *, archive, digest, base, run, enroll, no_service=True):
+def _invoke_main(monkeypatch, *, archive, digest, base, run, enroll, no_service=True, expected_device=None):
     # Installer orchestration tests must never inspect the runner's real services.
     home = base.parent / 'isolated-home'
     home.mkdir(exist_ok=True)
@@ -175,8 +175,29 @@ def _invoke_main(monkeypatch, *, archive, digest, base, run, enroll, no_service=
     ]
     if no_service:
         args.append("--no-service")
+    if expected_device is not None:
+        args.extend(["--expected-device", expected_device])
     monkeypatch.setattr(sys, "argv", args)
     install_agent.main()
+
+
+def test_panel_device_mismatch_is_rejected_before_any_dependency_or_ticket_use(tmp_path, monkeypatch):
+    archive, digest = write_archive(tmp_path)
+    base = tmp_path / "install"
+    base.mkdir()
+    (base / "runtime").mkdir()
+    config = base / "config.json"
+    original = json.dumps({"device_id": "original-node", "name": "Old Agent",
+                           "hub_url": "https://hub.example", "secret": "preserved"})
+    config.write_text(original)
+    with pytest.raises(ValueError, match="different panel node"):
+        _invoke_main(monkeypatch, archive=archive, digest=digest, base=base,
+                     expected_device="new-node",
+                     run=lambda *_args, **_kw: pytest.fail("dependencies must not run"),
+                     enroll=lambda *_args: pytest.fail("ticket must not be redeemed"))
+    assert config.read_text() == original
+    assert not list(base.glob(".runtime-update-manual-*"))
+    assert not (base / ".install.lock").exists()
 
 
 def test_main_removes_partial_runtime_after_dependency_failure(tmp_path, monkeypatch):
@@ -277,7 +298,7 @@ def test_existing_managed_install_uses_atomic_repair_path(tmp_path, monkeypatch)
     _invoke_main(
         monkeypatch, archive=archive, digest=digest, base=base, run=fake_run,
         enroll=lambda *_: {"device_id": "existing", "name": "Updated node", "secret": "new-secret",
-                           "hub_url": "https://hub.example"},
+                           "hub_url": "https://hub.example"}, expected_device="existing",
     )
 
     updated = json.loads(config.read_text())

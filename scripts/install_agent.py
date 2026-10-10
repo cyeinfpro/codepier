@@ -855,6 +855,184 @@ def local_uninstall(base, args, current):
         print('Agent uninstalled. Panel records and project files were preserved.')
 
 
+def windows_task_registered(name):
+    """Distinguish a missing task from a Task Scheduler access/error failure."""
+    quoted = "'" + name.replace("'", "''") + "'"
+    script = ("$ErrorActionPreference='Stop'; "
+              "$service=New-Object -ComObject Schedule.Service; $service.Connect(); "
+              "try { $null=$service.GetFolder('\\').GetTask("+quoted+"); exit 10 } "
+              "catch [System.Runtime.InteropServices.COMException] { "
+              "if ($_.Exception.HResult -in @(-2147024894,-2147216625)) { exit 0 }; exit 11 }")
+    encoded = base64.b64encode(script.encode('utf-16-le')).decode('ascii')
+    result = subprocess.run(['powershell.exe','-NoProfile','-NonInteractive',
+                             '-EncodedCommand',encoded],
+                            stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=30)
+    if result.returncode not in (0,10):
+        raise ValueError('Cannot verify Windows scheduled tasks; no Agent files were changed.')
+    return result.returncode == 10
+
+
+def verify_windows_orphaned_registration(base, name):
+    """Only rescue a task registered during a failed first boot setup.
+
+    The installer can crash after Task Scheduler registration but before the
+    local service.xml checkpoint is written. A live task must match the exact
+    installation path and original account; never trust the global task name.
+    """
+    import xml.etree.ElementTree as ET
+    management = base/'management.json'
+    if not management.is_file() or management.is_symlink():
+        raise ValueError('Cannot verify orphaned Agent service ownership.')
+    record = json.loads(management.read_text(encoding='utf-8'))
+    if (not isinstance(record,dict) or record.get('managed') is not True
+        or record.get('layout') != 'managed-runtime'
+        or record.get('status') not in {'service_pending','service_error'}
+        or record.get('service_kind') != 'schtasks'
+        or record.get('service_scope') != 'user'
+        or record.get('service_name',name) != name):
+        raise ValueError('Cannot verify orphaned Agent service ownership.')
+    namespace = {'t':'http://schemas.microsoft.com/windows/2004/02/mit/task'}
+    live_xml = query_windows_task_xml(name)
+    if not windows_task_has_recovery(live_xml,windows_user_sid()):
+        raise ValueError('Live task startup settings are not verified as this Agent.')
+    task = ET.fromstring(live_xml)
+    if len(task.findall('t:Actions/t:Exec',namespace)) != 1:
+        raise ValueError('Unexpected Windows task actions; no files were changed.')
+    action = task.find('t:Actions/t:Exec',namespace)
+    principal = task.find('t:Principals/t:Principal',namespace)
+    runtime = base/'runtime'
+    if (action is None or principal is None
+        or action.findtext('t:WorkingDirectory',namespaces=namespace) != str(runtime)
+        or action.findtext('t:Command',namespaces=namespace) not in
+            (str(runtime/'.venv/Scripts/python.exe'),str(runtime/'.venv/Scripts/pythonw.exe'))
+        or action.findtext('t:Arguments',namespaces=namespace) !=
+            subprocess.list2cmdline([str(runtime/'run-service.py')])
+        or principal.findtext('t:UserId',namespaces=namespace) != windows_user_sid()
+        or principal.findtext('t:LogonType',namespaces=namespace) != 'S4U'):
+        raise ValueError('Live scheduled task is not verified as this failed Agent; no files were changed.')
+
+
+def verify_windows_instance_is_stopped(base, current):
+    """Refuse archive if an Agent process still holds the state lock."""
+    state = Path(current.get('state_dir') or base/'state').expanduser()
+    lock = state/'.agent.lock'
+    if lock.is_symlink():
+        raise ValueError('Agent state lock is a symlink; manual review required.')
+    if os.name != 'nt' or not lock.exists():
+        return
+    import msvcrt
+    try:
+        with lock.open('r+b') as stream:
+            stream.seek(0)
+            msvcrt.locking(stream.fileno(),msvcrt.LK_NBLCK,1)
+            try:
+                pass
+            finally:
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(),msvcrt.LK_UNLCK,1)
+    except OSError as exc:
+        raise ValueError('An Agent instance still owns the state lock; do not archive a running Agent.') from exc
+
+
+def archive_windows_install(base, args):
+    """Explicit local recovery: preserve all installation bytes, never silently unpair."""
+    if sys.platform != 'win32':
+        raise ValueError('Archiving a failed installation is supported only on Windows.')
+    if not base.is_dir() or base.is_symlink():
+        raise ValueError('No local Agent installation directory to archive.')
+    config = base/'config.json'
+    runtime = base/'runtime'
+    management = base/'management.json'
+    if not any(item.exists() for item in (config,runtime,management)):
+        raise ValueError('No recognizable Agent installation to archive.')
+    if (base/'.install.lock').exists():
+        raise ValueError('An Agent installation is already active or needs lock review; no files were changed.')
+    handoff = Path(args.archive_handoff_file).expanduser() if getattr(args,'archive_handoff_file','') else None
+    if handoff:
+        if (not handoff.is_absolute() or handoff.exists() or handoff.is_symlink()
+            or not handoff.parent.is_dir() or handoff.parent.is_symlink()
+            or handoff.resolve().is_relative_to(base)):
+            raise ValueError('Invalid external Windows archive handoff path; no files were changed.')
+    elif Path(sys.executable).resolve().is_relative_to(base):
+        raise ValueError('The Python interpreter is inside this Agent installation. '
+                         'Use the panel Windows archive recovery command so PowerShell can move it after Python exits.')
+    for item in (config,runtime,management,base/'service.xml',base/'state'):
+        if item.is_symlink() or getattr(item,'is_junction',lambda:False)():
+            raise ValueError('Agent installation contains a symlink; preserve it for manual recovery.')
+    current = read_installed_config(base) if config.exists() else None
+    if current:
+        if args.expected_device and current['device_id'] != args.expected_device:
+            raise ValueError('This command belongs to a different device; no files were changed.')
+        require_idle(base,current)
+        verify_windows_instance_is_stopped(base,current)
+        roots = current.get('allowed_roots') or []
+        if not isinstance(roots,list):
+            raise ValueError('Existing allowed_roots configuration is invalid; manual review required.')
+        for root in roots:
+            path = root.get('path') if isinstance(root,dict) else root
+            if isinstance(path,str) and Path(path).expanduser().resolve().is_relative_to(base):
+                raise ValueError('An authorized project directory is inside the Agent installation. '
+                                 'Move it outside before archiving; nothing was changed.')
+    elif (base/'state').exists() and any((base/'state').iterdir()):
+        raise ValueError('Unpaired installation has state files; inspect these before archiving.')
+    registered = [name for name in (TASK,'RemoteDevAgent') if windows_task_registered(name)]
+    if registered:
+        if not current or len(registered) != 1 or registered[0] != managed_service_name(base,*service_identity()):
+            raise ValueError('An unverified Windows Agent task exists; nothing was changed.')
+        try:
+            verify_service_ownership(base)
+        except ValueError:
+            if (base/'service.xml').exists():
+                raise
+            verify_windows_orphaned_registration(base,registered[0])
+        # No other live command/session may be displaced. The owned task is
+        # disabled and removed only after explicit confirmation below.
+    marker = current['device_id'] if current else 'ARCHIVE INCOMPLETE'
+    print('Archive local Agent installation to a timestamped sibling backup: '+str(base),flush=True)
+    print('The local Agent service will be removed if it belongs to this directory. '
+          'Configuration, credentials, state and logs will NOT be deleted.',flush=True)
+    print('The panel node record and any external project files remain unchanged.',flush=True)
+    try:
+        answer = input('Type '+marker+' to confirm local archive: ')
+    except EOFError as exc:
+        raise ValueError('Local archive needs interactive confirmation; no files were changed.') from exc
+    if answer != marker:
+        raise ValueError('Archive cancelled; confirmation did not match.')
+    backup = base.with_name(base.name+'.recovery-'+time.strftime('%Y%m%d-%H%M%S')+'-'
+                            +hashlib.sha256(os.urandom(16)).hexdigest()[:8])
+    if backup.exists():
+        raise ValueError('Recovery backup already exists; no files were changed.')
+    if current:
+        require_idle(base,current)
+        verify_windows_instance_is_stopped(base,current)
+    if registered:
+        # Use only the pinned package helper or a complete local source checkout.
+        # A corrupt/obsolete installed runtime must not provide uninstall logic.
+        if args.archive and args.sha256:
+            with tempfile.TemporaryDirectory(prefix='codepier-archive-helper-') as folder:
+                checked = Path(folder)/'verified'
+                unpack(args.archive,args.sha256,checked)
+                helper = load_lifecycle_helper(checked/'scripts/agent_lifecycle.py')
+                helper.stop_service(base,remove=True)
+        else:
+            helper_source = Path(__file__).resolve().with_name('agent_lifecycle.py')
+            if not helper_source.is_file():
+                raise ValueError('Verified service removal helper unavailable; no files were changed.')
+            load_lifecycle_helper(helper_source).stop_service(base,remove=True)
+        if windows_task_registered(registered[0]):
+            raise ValueError('Scheduled task remains registered. Installation was preserved.')
+    if handoff:
+        # The bootstrap owns the final rename after this interpreter exits;
+        # Windows refuses to rename a directory containing a running python.exe.
+        atomic_json_file(handoff,{'source':str(base),'backup':str(backup)})
+        print('Agent archive checks complete. Waiting for PowerShell to release and move the directory.',flush=True)
+        return
+    base.rename(backup)
+    print('Agent installation archived: '+str(backup),flush=True)
+    print('The old credentials and state are preserved inside this backup. '
+          'Generate a fresh install command from the intended panel node.',flush=True)
+
+
 def install_source(base, source, pairing_file=None, allowed=None, *, recover_stale_operations=False, shell="full"):
     """Import a Windows checkout into the Hub installer's managed layout.
 
@@ -954,23 +1132,29 @@ def main():
     parser.add_argument('--shell', choices=('full', 'disabled'), default='full', help='Fresh installation execution mode; existing configuration is always preserved')
     parser.add_argument('--no-service',action='store_true')
     actions=parser.add_mutually_exclusive_group()
-    for flag in ('--start-service','--upgrade','--uninstall','--status'):
+    for flag in ('--start-service','--upgrade','--uninstall','--status','--archive-install'):
         actions.add_argument(flag,action='store_true')
     parser.add_argument('--yes',action='store_true',help='Explicitly confirm destructive local uninstall')
     parser.add_argument('--recover-stale-operations',action='store_true',help='After locally reviewing residual processes, reconcile a dead Agent journal without replaying commands; refuses a live Agent or native session')
     parser.add_argument('--expected-device',default='',help='Refuse commands copied from a different panel node')
+    parser.add_argument('--archive-handoff-file',default='',help='Windows bootstrap-only file for deferred archive after interpreter exit')
     args=parser.parse_args()
-    if args.source and (sys.platform != 'win32' or args.no_service or args.start_service or args.upgrade or args.uninstall or args.status):
+    if args.archive_handoff_file and not args.archive_install:
+        raise ValueError('--archive-handoff-file requires --archive-install')
+    if args.source and (sys.platform != 'win32' or args.no_service or args.start_service or args.upgrade or args.uninstall or args.status or args.archive_install):
         raise ValueError('--source is a Windows background installation action')
     os.umask(0o077)
     base=Path(args.install_dir).expanduser() if args.install_dir else default_install_base()
     if not base.is_absolute() or any(ord(c)<32 or ord(c)==127 for c in str(base)):
         raise ValueError('Install directory must be absolute and contain no control characters')
     base=validate_install_base(base)
-    if args.no_service and (args.upgrade or args.uninstall or args.status or args.start_service):
+    if args.no_service and (args.upgrade or args.uninstall or args.status or args.start_service or args.archive_install):
         raise ValueError('--no-service is only valid for a new installation')
     if args.yes and not args.uninstall:
         raise ValueError('--yes is only valid with --uninstall')
+    if args.archive_install:
+        archive_windows_install(base,args)
+        return
     if args.status:
         if not (base/'config.json').exists():
             print(json.dumps({'installed':False}));return
@@ -979,10 +1163,23 @@ def main():
                           'version':runtime_version(base/'runtime'),'install_dir':str(base)},ensure_ascii=False));return
     if args.uninstall and not base.exists():
         print('Agent is not installed; nothing to remove.');return
+    if args.expected_device and not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', args.expected_device):
+        raise ValueError('Invalid expected panel device identity.')
     if args.upgrade or args.uninstall:
         current=read_installed_config(base)
-        if args.expected_device and current['device_id']!=args.expected_device:
+    elif args.expected_device and not args.source and not args.start_service and (base/'config.json').is_file():
+        # A panel install ticket is bound to a node. Check locally before
+        # touching ACLs, installing dependencies, or redeeming the ticket.
+        current=read_installed_config(base)
+    else:
+        current=None
+    if args.expected_device and current and current['device_id']!=args.expected_device:
+        if args.upgrade or args.uninstall:
             raise ValueError('This command belongs to a different device; no files were changed.')
+        raise ValueError('A different panel node is already recorded on this computer; no files were changed. '
+                         'For a working Agent, select its original node to repair. For a failed installation, '
+                         'use the Windows archive recovery command with local confirmation, then reinstall. '
+                         'Do not delete config.json.')
     base.mkdir(parents=True,exist_ok=True)
     if os.name == 'nt':
         # Apply ACLs before creating any pairing/config material.
@@ -1039,7 +1236,10 @@ def main():
                 try: current=json.loads(config.read_text(encoding='utf-8'))
                 except (OSError,ValueError) as exc: raise ValueError('Existing Agent config is invalid; no runtime was replaced.') from exc
                 if not isinstance(current,dict) or current.get('device_id')!=pairing.get('device_id'):
-                    raise ValueError('Install ticket belongs to another device; no runtime was replaced.')
+                    raise ValueError('Install ticket belongs to another device; no runtime was replaced. '
+                                     'If the existing install failed, use the Windows archive recovery command '
+                                     'to preserve it and free the install directory before retrying. '
+                                     'Do not delete config.json.')
                 if config.read_bytes() != current_before:
                     raise ValueError('Configuration changed during preparation; no runtime was replaced.')
                 verify_service_ownership(base)

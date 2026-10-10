@@ -70,7 +70,7 @@ def installation(tmp_path, monkeypatch, bundle):
 
 
 def options(**patch):
-    args = dict(uv=None, archive=None, sha256=None, yes=False)
+    args = dict(uv=None, archive=None, sha256=None, yes=False, expected_device='')
     args.update(patch)
     return Namespace(**args)
 
@@ -347,6 +347,150 @@ def test_native_terminal_sessions_block_local_maintenance(installation):
         db.execute("INSERT INTO sessions VALUES ('orphaned')")
     with pytest.raises(ValueError, match='Native terminal sessions'):
         installer.require_idle(f.base, f.current)
+
+
+def test_windows_failed_install_archive_preserves_configuration_and_state(installation, monkeypatch, capsys):
+    f = installation
+    before = (f.base/'config.json').read_bytes()
+    (f.base/'state').mkdir()
+    (f.base/'state'/'evidence.txt').write_text('preserved')
+    monkeypatch.setattr(installer.sys, 'platform', 'win32')
+    monkeypatch.setattr(installer, 'windows_task_registered', lambda *_a: False)
+    monkeypatch.setattr('builtins.input', lambda prompt: f.current['device_id'])
+    installer.archive_windows_install(f.base, options())
+    backups = list(f.home.glob('.codepier-agent.recovery-*'))
+    assert len(backups) == 1 and not f.base.exists()
+    assert (backups[0]/'config.json').read_bytes() == before
+    assert (backups[0]/'state/evidence.txt').read_text() == 'preserved'
+    assert (f.project/'important.txt').read_text() == 'preserve this project'
+    assert 'recovery-' in capsys.readouterr().out
+
+
+def test_windows_archive_deferred_handoff_moves_only_after_python_exits(installation, monkeypatch, tmp_path):
+    f = installation
+    handoff = tmp_path/'handoff.json'
+    original = (f.base/'config.json').read_bytes()
+    monkeypatch.setattr(installer.sys,'platform','win32')
+    monkeypatch.setattr(installer,'windows_task_registered',lambda *_a: False)
+    monkeypatch.setattr('builtins.input',lambda _prompt: f.current['device_id'])
+    installer.archive_windows_install(f.base,options(archive_handoff_file=str(handoff)))
+    assert f.base.is_dir() and (f.base/'config.json').read_bytes() == original
+    plan = json.loads(handoff.read_text())
+    assert plan['source'] == str(f.base)
+    destination = Path(plan['backup'])
+    assert destination.parent == f.base.parent and not destination.exists()
+    # The native bootstrap performs this only after its managed Python exits.
+    f.base.rename(destination)
+    assert (destination/'config.json').read_bytes() == original and not f.base.exists()
+
+
+def test_windows_archive_rejects_handoff_inside_installation(installation, monkeypatch):
+    f = installation
+    monkeypatch.setattr(installer.sys,'platform','win32')
+    monkeypatch.setattr(installer,'windows_task_registered',lambda *_a: pytest.fail('do not query task'))
+    monkeypatch.setattr('builtins.input',lambda *_a: pytest.fail('do not prompt'))
+    with pytest.raises(ValueError,match='Invalid external Windows archive handoff'):
+        installer.archive_windows_install(f.base,options(archive_handoff_file=str(f.base/'handoff.json')))
+    assert f.base.exists()
+
+
+def test_windows_archive_wrong_confirmation_never_moves_or_disables_service(installation, monkeypatch):
+    f = installation
+    monkeypatch.setattr(installer.sys, 'platform', 'win32')
+    monkeypatch.setattr(installer, 'windows_task_registered', lambda *_a: False)
+    monkeypatch.setattr('builtins.input', lambda prompt: 'wrong-node')
+    original = (f.base/'config.json').read_bytes()
+    with pytest.raises(ValueError, match='confirmation did not match'):
+        installer.archive_windows_install(f.base, options())
+    assert (f.base/'config.json').read_bytes() == original
+    assert not list(f.home.glob('.codepier-agent.recovery-*'))
+
+
+def test_windows_archive_rejects_foreign_task_and_busy_journal(installation, monkeypatch):
+    f = installation
+    monkeypatch.setattr(installer.sys, 'platform', 'win32')
+    monkeypatch.setattr(installer, 'windows_task_registered', lambda name: name == installer.TASK)
+    monkeypatch.setattr(installer, 'verify_service_ownership',
+                        lambda *_a: (_ for _ in ()).throw(ValueError('not owned')))
+    monkeypatch.setattr('builtins.input', lambda *_a: pytest.fail('must fail before prompting'))
+    with pytest.raises(ValueError, match='Cannot verify orphaned'):
+        installer.archive_windows_install(f.base, options())
+    monkeypatch.setattr(installer, 'windows_task_registered', lambda *_a: False)
+    (f.base/'state').mkdir()
+    with sqlite3.connect(f.base/'state/agent.sqlite3') as db:
+        db.execute('CREATE TABLE calls(status TEXT)')
+        db.execute("INSERT INTO calls VALUES ('running')")
+    with pytest.raises(ValueError, match='active operations'):
+        installer.archive_windows_install(f.base, options())
+    assert f.base.exists()
+
+
+def test_windows_archive_uses_pinned_service_helper_and_keeps_backups(installation, monkeypatch):
+    f = installation
+    monkeypatch.setattr(installer.sys, 'platform', 'win32')
+    state = {'registered': True, 'removed': False}
+    def probe(name):
+        return state['registered'] if name == installer.TASK else False
+    monkeypatch.setattr(installer, 'windows_task_registered', probe)
+    monkeypatch.setattr(installer, 'managed_service_name', lambda *_a: installer.TASK)
+    monkeypatch.setattr(installer, 'verify_service_ownership', lambda *_a: None)
+    monkeypatch.setattr('builtins.input', lambda prompt: f.current['device_id'])
+    loaded = []
+    def load(path):
+        loaded.append(path)
+        def remove(base, *, remove):
+            assert remove and base == f.base
+            state['registered'] = False
+            state['removed'] = True
+        return Namespace(stop_service=remove)
+    monkeypatch.setattr(installer, 'load_lifecycle_helper', load)
+    installer.archive_windows_install(f.base, options(archive=str(f.archive),sha256=f.sha))
+    assert state['removed']
+    assert len(loaded) == 1 and 'codepier-archive-helper-' in str(loaded[0])
+    assert (f.project/'important.txt').exists()
+    assert len(list(f.home.glob('.codepier-agent.recovery-*'))) == 1
+
+
+def test_windows_orphaned_task_only_accepts_matching_live_registration(installation, monkeypatch):
+    import xml.etree.ElementTree as ET
+    f = installation
+    runtime = f.base/'runtime'
+    python = runtime/'.venv/Scripts/python.exe'
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b'fixture')
+    python.with_name('pythonw.exe').write_bytes(b'fixture')
+    record = json.loads((f.base/'management.json').read_text())
+    record.update(managed=True,layout='managed-runtime',status='service_pending',
+                  service_kind='schtasks',service_scope='user',service_name='CodePierAgent')
+    (f.base/'management.json').write_text(json.dumps(record))
+    user = 'S-1-5-21-1234567'
+    raw = installer.windows_task_xml(f.base,python,'CodePierAgent',user)
+    monkeypatch.setattr(installer,'windows_user_sid',lambda: user)
+    monkeypatch.setattr(installer,'query_windows_task_xml',lambda name: raw.decode('utf-16'))
+    installer.verify_windows_orphaned_registration(f.base,'CodePierAgent')
+    document = ET.fromstring(raw)
+    ns = {'t':'http://schemas.microsoft.com/windows/2004/02/mit/task'}
+    document.find('t:Actions/t:Exec/t:WorkingDirectory',ns).text = '/another/agent'
+    monkeypatch.setattr(installer,'query_windows_task_xml',lambda name: ET.tostring(document,encoding='unicode'))
+    with pytest.raises(ValueError,match='not verified'):
+        installer.verify_windows_orphaned_registration(f.base,'CodePierAgent')
+    record['status'] = 'ready'
+    (f.base/'management.json').write_text(json.dumps(record))
+    with pytest.raises(ValueError,match='Cannot verify orphaned'):
+        installer.verify_windows_orphaned_registration(f.base,'CodePierAgent')
+
+
+def test_unpaired_partial_windows_install_with_state_is_not_archived(tmp_path, monkeypatch):
+    base = tmp_path/'incomplete-agent'
+    (base/'runtime').mkdir(parents=True)
+    (base/'state').mkdir()
+    (base/'state'/'journal.txt').write_text('unknown')
+    monkeypatch.setattr(installer.sys, 'platform', 'win32')
+    monkeypatch.setattr(installer, 'windows_task_registered', lambda *_a: False)
+    monkeypatch.setattr('builtins.input', lambda *_a: pytest.fail('must not prompt'))
+    with pytest.raises(ValueError, match='state files'):
+        installer.archive_windows_install(base, options())
+    assert (base/'state/journal.txt').read_text() == 'unknown'
 
 
 def test_source_uninstall_uses_current_helper_not_old_installed_helper(installation, monkeypatch):

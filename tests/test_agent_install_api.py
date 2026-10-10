@@ -35,6 +35,21 @@ def test_install_arguments_are_strict_and_shell_quoted():
     assert bootstrap in posix_pinned and 'sha256sum' in posix_pinned and 'shasum -a 256' in posix_pinned
     windows_pinned = install_command('windows', 'https://hub.invalid', 'rdi_token', 'a' * 64, r'C:\tmp', bootstrap)
     assert bootstrap in windows_pinned and 'Get-FileHash' in windows_pinned
+    expected_node = 'd' * 32
+    posix_node = install_command('posix', 'https://hub.invalid', 'rdi_token', 'a' * 64, '/tmp',
+                                 expected_device=expected_node)
+    windows_node = install_command('windows', 'https://hub.invalid', 'rdi_token', 'a' * 64,
+                                   r'C:\tmp', expected_device=expected_node)
+    assert '--expected-device ' + expected_node in posix_node
+    assert "-ExpectedDevice '" + expected_node + "'" in windows_node
+    archived = install_command('windows', 'https://hub.invalid', '', 'a' * 64, '',
+                               action='archive')
+    assert '-Action archive' in archived and '-ExpectedDevice' not in archived and 'rdi_' not in archived
+    with pytest.raises(ValueError, match='Windows-only'):
+        install_command('posix', 'https://hub.invalid', '', 'a' * 64, '', action='archive')
+    with pytest.raises(ValueError, match='identity'):
+        install_command('windows', 'https://hub.invalid', 'rdi_token', 'a' * 64,
+                        r'C:\tmp', expected_device='bad;device')
     with pytest.raises(Exception):
         install_command('posix', 'https://hub.invalid', 'rdi_token', 'a' * 64, '/tmp', 'invalid')
 
@@ -85,6 +100,7 @@ def test_ticket_is_single_use_rotated_and_secret_never_in_command(tmp_path):
         data = ticket.json()
         assert data['package']['version']
         assert secret not in data['command']
+        assert '--expected-device ' + device_id in data['command']
         posix_bootstrap_sha = hashlib.sha256((tmp_path / 'source/deploy/install-from-hub.sh').read_bytes()).hexdigest()
         assert posix_bootstrap_sha in data['command']
         token_match = re.search(r'--token\s+(rdi_[A-Za-z0-9_-]{43})', data['command'])
@@ -99,6 +115,8 @@ def test_ticket_is_single_use_rotated_and_secret_never_in_command(tmp_path):
         assert second.status_code == 200
         windows_bootstrap_sha = hashlib.sha256((tmp_path / 'source/deploy/install-from-hub.ps1').read_bytes()).hexdigest()
         assert windows_bootstrap_sha in second.json()['command']
+        assert "-ExpectedDevice '" + device_id + "'" in second.json()['command']
+        assert secret not in second.json()['command']
         package_url = second.json()['package']['url']
         sha = parse_qs(urlsplit(package_url).query)['sha256'][0]
         downloaded = client.get(urlsplit(package_url).path+'?sha256='+sha)

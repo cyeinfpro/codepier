@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('install','upgrade','uninstall','status','start')][string]$Action = 'install',
+  [ValidateSet('install','upgrade','uninstall','status','start','archive')][string]$Action = 'install',
   [string]$Hub,
   [string]$Token,
   [string]$Sha256,
@@ -33,6 +33,7 @@ if (Test-Path -LiteralPath $InstallDir) {
 }
 if (-not [IO.Path]::IsPathRooted($InstallDir)) { throw 'Install directory must be absolute' }
 if ($Action -eq 'uninstall' -and -not (Test-Path -LiteralPath $InstallDir)) { Write-Host 'Agent is not installed; nothing to remove.'; return }
+if ($Action -eq 'archive' -and -not (Test-Path -LiteralPath $InstallDir)) { throw 'No Agent installation to archive.' }
 if ($NoService -and $Action -ne 'install') { throw '-NoService is only valid for installation' }
 if ($Action -eq 'start' -and $Hub) { throw 'Use the installed management command for start, without -Hub' }
 function Confirm-CodePierRemoval {
@@ -51,7 +52,7 @@ if ($Action -ne 'install' -and -not $Hub) {
   if (-not (Test-Path -LiteralPath $Python)) { $Python = (Get-Command python -ErrorAction Stop).Source }
   $Python = (& $Python -c "import sys; print(getattr(sys, '_base_executable', None) or sys.executable)" | Select-Object -Last 1)
   if ($LASTEXITCODE -ne 0 -or -not $Python) { throw 'No external Python interpreter found' }
-  $CodePierFlag = if ($Action -eq 'start') { '--start-service' } else { '--'+$Action }
+  $CodePierFlag = if ($Action -eq 'start') { '--start-service' } elseif ($Action -eq 'archive') { '--archive-install' } else { '--'+$Action }
   $CodePierArgs = @($Helper, $CodePierFlag, '--install-dir', $InstallDir)
   if ($Yes) { $CodePierArgs += '--yes' }
   if ($ExpectedDevice) { $CodePierArgs += @('--expected-device', $ExpectedDevice) }
@@ -64,6 +65,17 @@ if ($Hub -notmatch '^https?://' -or $Sha256 -cnotmatch '^[a-f0-9]{64}$') { throw
 if ($Action -eq 'install') {
   if ($Token -notlike 'rdi_*') { throw 'Invalid install ticket' }
   if (-not [IO.Path]::IsPathRooted($AllowRoot) -or -not (Test-Path -LiteralPath $AllowRoot -PathType Container)) { throw 'Allowed directory must already exist and be absolute' }
+  if ($ExpectedDevice) {
+    if ($ExpectedDevice -cnotmatch '^[A-Za-z0-9_-]{1,100}$') { throw 'Invalid expected panel device identity' }
+    $ExistingConfig = Join-Path $InstallDir 'config.json'
+    if (Test-Path -LiteralPath $ExistingConfig -PathType Leaf) {
+      try { $ExistingIdentity = (Get-Content -LiteralPath $ExistingConfig -Raw -Encoding UTF8 | ConvertFrom-Json).device_id }
+      catch { throw 'Existing Agent config cannot be read; do not delete it.' }
+      if (-not $ExistingIdentity -or [string]$ExistingIdentity -cne $ExpectedDevice) {
+        throw 'This computer already records another Agent node. No installation started and the ticket was not used. If that was a failed install, generate a Windows archive recovery command in Device Nodes, confirm the local old device ID, and then reinstall. Do not delete config.json.'
+      }
+    }
+  }
 }
 # Existing installations are validated by Python and enter the atomic repair path.
 $CodePierTemp = Join-Path ([IO.Path]::GetTempPath()) ('codepier-agent-' + [guid]::NewGuid().ToString('N'))
@@ -213,11 +225,35 @@ if __name__ == "__main__":
   if ($Action -eq 'install') {
     $CodePierArgs += @('--allow', $AllowRoot, '--shell', $Shell)
     if ($NoService) { $CodePierArgs += '--no-service' }
-  } else { $CodePierArgs += ('--'+$Action) }
+  } elseif ($Action -eq 'archive') { $CodePierArgs += '--archive-install' } else { $CodePierArgs += ('--'+$Action) }
   if ($Yes) { $CodePierArgs += '--yes' }
   if ($ExpectedDevice) { $CodePierArgs += @('--expected-device', $ExpectedDevice) }
+  if ($Action -eq 'archive') {
+    $ArchiveHandoff = Join-Path $CodePierTemp 'archive_handoff.json'
+    $CodePierArgs += @('--archive-handoff-file', $ArchiveHandoff)
+  }
   & $CodePierPython @CodePierArgs
   if ($LASTEXITCODE -ne 0) { throw 'Agent operation did not complete; see the error above.' }
+  if ($Action -eq 'archive') {
+    if (-not (Test-Path -LiteralPath $ArchiveHandoff -PathType Leaf)) { throw 'Verified archive handoff missing; old installation was preserved.' }
+    $ArchivePlan = Get-Content -LiteralPath $ArchiveHandoff -Encoding UTF8 -Raw | ConvertFrom-Json
+    $ArchiveSource = [IO.Path]::GetFullPath($InstallDir).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    $ArchiveTarget = [IO.Path]::GetFullPath([string]$ArchivePlan.backup)
+    $ArchiveParent = Split-Path -Path $ArchiveSource -Parent
+    $TargetParent = Split-Path -Path $ArchiveTarget -Parent
+    $BackupPrefix = '^' + [regex]::Escape((Split-Path -Path $ArchiveSource -Leaf) + '.recovery-') + '[0-9]{8}-[0-9]{6}-[a-f0-9]{8}$'
+    if (-not [string]::Equals($ArchiveSource, [string]$ArchivePlan.source, [StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals($ArchiveParent, $TargetParent, [StringComparison]::OrdinalIgnoreCase) -or
+        (Split-Path -Path $ArchiveTarget -Leaf) -cnotmatch $BackupPrefix -or
+        (Test-Path -LiteralPath $ArchiveTarget)) { throw 'Archive handoff path verification failed; old installation was preserved.' }
+    # The managed Python executable lives inside InstallDir and must exit
+    # before Windows can move its parent directory. Release the working
+    # directory too, in case the user's terminal started inside InstallDir.
+    Set-Location -LiteralPath ([IO.Path]::GetTempPath())
+    Move-Item -LiteralPath $InstallDir -Destination $ArchiveTarget -ErrorAction Stop
+    Write-Host ('Old Agent installation was preserved at: ' + $ArchiveTarget)
+    Write-Host 'You can now run a newly generated install command for the intended panel node.'
+  }
   Confirm-CodePierRemoval
 } finally {
   Remove-Item Env:CODEPIER_INSTALL_TOKEN -ErrorAction SilentlyContinue
