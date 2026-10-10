@@ -8,12 +8,22 @@ from shared.contracts import TOOLS, tool_definitions
 from shared.core_contracts import CORE_TOOLS
 from shared.util import DevError
 from shared.computer_diagnostics import COMPUTER_STAGES, safe_detail
+from shared.scheduler_config import QUEUE_REASONS, safe_queue_detail
 
 LABELS = {'hub_received':'Hub 已接收', 'dispatched':'已投递设备', 'accepted':'Agent 已接收',
           'waiting_resource':'等待共享文件或服务', 'waiting_project':'等待项目读写锁', 'waiting_worker':'等待本机执行槽', 'executing':'本机正在执行',
           'persisting':'结果正在落盘', 'result_ready':'结果已在本机保存', 'hub_completed':'Hub 已保存最终结果'}
 LABELS.update(COMPUTER_STAGES)
 AGENT_STAGES = set(LABELS)-{'hub_received','dispatched','hub_completed'}
+
+
+def event_detail(stage, detail):
+    return {**safe_detail(detail), **(safe_queue_detail(detail) if stage == 'waiting_worker' else {})}
+
+
+def stage_label(stage, detail):
+    queue = safe_queue_detail(detail) if stage == 'waiting_worker' else {}
+    return QUEUE_REASONS.get(queue.get('queue_reason'), LABELS.get(stage, stage))
 
 class Diagnostics:
     def __init__(self, runtime):
@@ -45,7 +55,7 @@ class Diagnostics:
             detail=event.get('detail');detail=detail if isinstance(detail,dict) else {}
             blocked=detail.get('blocked_by',[])
             blocked=[x for x in blocked[:64] if isinstance(x,str) and 1<=len(x)<=100] if isinstance(blocked,list) else []
-            self.record(identifier,event['stage'],source='agent',seq=seq,elapsed_ms=elapsed,detail={'blocked_by':blocked, **safe_detail(detail)})
+            self.record(identifier,event['stage'],source='agent',seq=seq,elapsed_ms=elapsed,detail={'blocked_by':blocked, **event_detail(event['stage'], detail)})
 
     def trace(self,args,principal):
         runtime=self.runtime
@@ -62,14 +72,14 @@ class Diagnostics:
                         visible.append({'operation_id':identifier,'tool':block['tool'],'state':block['state']})
                 except DevError:
                     pass
-            row['blocked_by']=visible;row['label']=LABELS.get(row['stage'],row['stage'])
-            row['detail']=safe_detail(detail)
-        last=runtime.store.one("SELECT stage,at FROM operation_events WHERE operation_id=? AND source='agent' ORDER BY seq DESC LIMIT 1",(op['id'],))
+            row['blocked_by']=visible;row['label']=stage_label(row['stage'],detail)
+            row['detail']=event_detail(row['stage'],detail)
+        last=runtime.store.one("SELECT stage,at,detail FROM operation_events WHERE operation_id=? AND source='agent' ORDER BY seq DESC LIMIT 1",(op['id'],))
         online=runtime.online(op['device_id']) if op['device_id'] else False
         if not op['pending']: reason='操作已结束；以最终状态和退出码为准'
         elif op['cancel_requested']: reason='取消请求已保存，等待本机确认'
         elif not online: reason='等待设备连接；已开始的本机任务不因此自动停止'
-        elif last: reason=LABELS[last['stage']]
+        elif last: reason=stage_label(last['stage'],json.loads(last['detail']))
         elif op['accepted_at']: reason='设备已接收，但当前 Agent 未提供阶段明细'
         else: reason='Hub 排队或等待设备接收确认'
         return {'operation_id':op['id'],'current':{'state':op['state'],'reason':reason,'online':online,

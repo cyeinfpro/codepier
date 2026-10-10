@@ -5,7 +5,7 @@ from hub.api.context import HubContext
 import json
 import time
 from fastapi import Request, Query
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 import asyncio
 from collections import OrderedDict
 from hub.settings_snapshot import snapshot, selected_project, node_snapshot
@@ -15,6 +15,13 @@ from hub import iam
 from shared.contracts import INSTRUCTIONS, tool_definitions
 from shared.util import DevError, VERSION, normalize_url
 from hub.api.models import TokenInput, SettingsInput
+
+
+class SchedulerSettingsInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    device_id: str = Field(min_length=1, max_length=100)
+    expected_revision: str = Field(pattern=r"^[a-f0-9]{64}$")
+    config: dict
 
 
 class SettingsUpdateInput(SettingsInput):
@@ -81,6 +88,32 @@ def make_settings_router(context: HubContext):
                 target["device_id"], target["root"], target["mode"], target["allow_tasks"], target["_settings_permissions"]):
             raise DevError("SETTINGS_SCOPE_CHANGED", "检查期间项目映射已变化，请重新核对", 409)
         return {**result, "project_id": current_target["id"]}
+
+    @router.get("/api/settings/scheduler")
+    @database_endpoint(store)
+    def scheduler_settings(request: Request, device: str = Query(min_length=1, max_length=100)):
+        from hub.scheduler_settings import view
+        return view(store, runtime, auth.panel(request), device)
+
+    @router.put("/api/settings/scheduler")
+    async def update_scheduler_settings(request: Request, body: SchedulerSettingsInput):
+        from hub.scheduler_settings import save, view
+        def persist():
+            with store.transaction():
+                principal = auth.panel(request, True)
+                return save(store, principal, body.device_id, body.config, body.expected_revision)
+        saved = await store.run(persist)
+        connection = runtime.connections.get(body.device_id)
+        if connection is not None and getattr(connection, "scheduler_protocol", 0) == 1:
+            authorized = await store.run(runtime.connection_authorized, body.device_id, connection)
+            if authorized:
+                try:
+                    await connection.send({"type": "scheduler_config", **saved})
+                except Exception:
+                    # Preferences are durable. The next authenticated heartbeat
+                    # or reconnect reconciles the same revision, without retrying work.
+                    pass
+        return await store.run(lambda: view(store, runtime, auth.panel(request, True), body.device_id))
 
     @router.get("/api/grants")
     @database_endpoint(store)

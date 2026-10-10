@@ -433,6 +433,32 @@ class InvocationInspector:
                 supported = function in {"subprocess.run", "subprocess.Popen", "subprocess.call", "subprocess.check_call", "subprocess.check_output", "subprocess.getoutput", "subprocess.getstatusoutput", "os.system", "os.popen"} or function.startswith(("os.exec", "os.spawn"))
                 if not supported:
                     continue
+                if function.startswith(("os.exec", "os.spawn")):
+                    # spawn*(mode, file, ...) has a leading mode; exec* does not.
+                    # These APIs receive an executable path, not shell text, and
+                    # argv[0] is a display name rather than a second executable.
+                    target_index = 1 if function.startswith("os.spawn") else 0
+                    target = (node.args[target_index] if len(node.args) > target_index else
+                              next((item.value for item in node.keywords if item.arg in {"path", "file"}), None))
+                    executable = literal(target)
+                    if isinstance(executable, str):
+                        if self.argv([executable], depth + 1):
+                            return True
+                        method = function.removeprefix("os.")
+                        if method.startswith(("execv", "spawnv")):
+                            vector = (node.args[target_index + 1] if len(node.args) > target_index + 1 else
+                                      next((item.value for item in node.keywords if item.arg == "args"), None))
+                            arguments = literal(vector)
+                        else:
+                            tail = node.args[target_index + 1:]
+                            if method.endswith("e") and tail:
+                                tail = tail[:-1]  # The final environment is not argv.
+                            arguments = [literal(item) for item in tail]
+                        if (isinstance(arguments, list) and arguments and
+                                all(isinstance(item, str) for item in arguments) and
+                                self.argv([executable, *arguments[1:]], depth + 1)):
+                            return True
+                    continue
                 target = node.args[0] if node.args else next((x.value for x in node.keywords if x.arg in {"args", "command"}), None)
                 value = literal(target)
                 if isinstance(value, str) and self.shell(value, depth + 1):

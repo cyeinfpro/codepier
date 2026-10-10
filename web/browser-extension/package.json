@@ -4,6 +4,6 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "test": "node --test workspace.test.mjs"
+    "test": "node --test workspace.test.mjs background.test.mjs cleanup.test.mjs"
   }
 }

@@ -11,6 +11,7 @@ from hub import iam
 from hub.mcp_usage import MAX_ROWS, RETENTION_SECONDS, activity_actor_scope
 from hub.principal import refresh_principal
 from shared.token_estimate import summarize
+from shared.token_cost import DEFAULT_CACHE_READ_PERCENT, DEFAULT_REFERENCE_MODEL, MODELS, pricing
 from shared.util import DevError
 
 Period = Literal["today", "7d", "30d"]
@@ -18,6 +19,8 @@ Period = Literal["today", "7d", "30d"]
 
 def token_dashboard(runtime, principal, timezone, *, period: Period = "today",
                     project: str = "", connection: str = "", session: str = "",
+                    cache_read_percent: int = DEFAULT_CACHE_READ_PERCENT,
+                    reference_model: str = DEFAULT_REFERENCE_MODEL,
                     now: float | None = None):
     """Resolve authority BEFORE selecting rows, and never aggregate the global table.
 
@@ -27,6 +30,12 @@ def token_dashboard(runtime, principal, timezone, *, period: Period = "today",
     """
     if period not in {"today", "7d", "30d"}:
         raise DevError("INVALID_PERIOD", "不支持的统计时间范围", 400)
+    if not isinstance(reference_model, str) or reference_model not in MODELS:
+        raise DevError("INVALID_REFERENCE_MODEL", "不支持的参考计价模型", 400)
+    try:
+        pricing(cache_read_percent, reference_model)
+    except ValueError as error:
+        raise DevError("INVALID_CACHE_ASSUMPTION", "缓存读取假设须为 0–100 的整数百分比", 400) from error
     store = runtime.store
     with iam.read_scope(store):
         principal = refresh_principal(store, principal)
@@ -80,7 +89,7 @@ def token_dashboard(runtime, principal, timezone, *, period: Period = "today",
             collection_unavailable = True
             for row in rows:
                 row["token_usage"] = None
-        total = summarize(rows)
+        total = summarize(rows, cache_read_percent=cache_read_percent, reference_model=reference_model)
         total["scope"] = "retained_authorized_project_activity"
         buckets = defaultdict(list)
         for row in rows:
@@ -92,11 +101,11 @@ def token_dashboard(runtime, principal, timezone, *, period: Period = "today",
             buckets[bucket].append(row)
         trend = []
         for bucket, items in sorted(buckets.items()):
-            point = summarize(items)
+            point = summarize(items, cache_read_percent=cache_read_percent, reference_model=reference_model)
             point["scope"] = total["scope"]
             trend.append({"started": bucket, **point})
         return {
-            "schema_version": 1, "authority_key": authority_key, "period": {"key": period, "start": lower, "end": upper,
+            "schema_version": 2, "authority_key": authority_key, "period": {"key": period, "start": lower, "end": upper,
                 "timezone": str(timezone), "bucket": "hour" if period == "today" else "day"},
             "filters": {"project": project, "connection": connection, "session": session},
             "options": {

@@ -1027,3 +1027,46 @@ def test_focused_connection_updates_evidence_and_rejects_stale_copy(
         assert messages(stack) == []
     finally:
         context.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_delegation_result_load_respects_drawer_dismissal_and_new_navigation(
+        chat_browser_pool, engine):
+    # Test the shipped module with a delayed authority refresh. The ordinary
+    # goal-detail reader has its own guard, but this earlier load must not
+    # reopen a dismissed thread or replace a newer drawer before reaching it.
+    context = chat_browser_pool(engine).new_context()
+    page = context.new_page()
+    try:
+        page.add_script_tag(path=str(
+            Path(__file__).resolve().parents[1] / 'web/collaboration-delegation.js'))
+        result = page.evaluate("""async () => {
+          const results = {};
+          for (const change of ['none', 'close', 'replace', 'navigate']) {
+            const state = {generation: 1, drawerEpoch: 5};
+            const calls = [];
+            let release;
+            const ui = CodePierCollaborationDelegation.create({
+              state,
+              coordination: {
+                load: () => new Promise(resolve => { release = resolve; }),
+                act: (action, element) => {
+                  calls.push({action, id: element.dataset.id});
+                  return {local: true};
+                }
+              }
+            });
+            const pending = ui.act('delegation-result', {dataset: {id: 'fixture-goal'}});
+            if (change === 'navigate') state.generation++;
+            else if (change !== 'none') state.drawerEpoch++;
+            release();
+            await pending;
+            results[change] = calls;
+          }
+          return results;
+        }""")
+        assert result == {
+            'none': [{'action': 'goal-detail', 'id': 'fixture-goal'}],
+            'close': [], 'replace': [], 'navigate': []}
+    finally:
+        context.close()

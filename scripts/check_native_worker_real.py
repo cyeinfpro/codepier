@@ -41,11 +41,44 @@ def output(obj,sid):
         return b''.join(r[0] for r in db.execute('SELECT data FROM output WHERE session=? ORDER BY offset',(sid,))).decode(errors='replace')
 
 
+def finish_case(obj, sid, child, journal, out, cli, project, writer):
+    """Evidence failures must not strand this invocation's owned worker."""
+    try:
+        screen = output(obj, sid)
+        with closing(database(obj.directory)) as db:
+            receipts = [dict(row) for row in db.execute(
+                'SELECT kind,state,length(payload) AS bytes FROM commands WHERE session=? ORDER BY rowid', (sid,))]
+            saved = db.execute('SELECT child_pid FROM sessions WHERE id=?', (sid,)).fetchone()
+            native_pid = saved[0] if saved else 0
+        out.mkdir(parents=True, exist_ok=True)
+        (out / f'worker-real-{cli}.ansi').write_text(screen)
+        return screen, receipts, native_pid
+    finally:
+        try:
+            if child is not None and child.poll() is None:
+                try:
+                    obj.action('lease', project, {'id': sid, 'writer': writer})
+                    obj.action('stop', project, {
+                        'id': sid, 'writer': writer, 'receipt': uuid.uuid4().hex})
+                    child.wait(timeout=8)
+                finally:
+                    if child.poll() is None:
+                        child.terminate()
+                        try:
+                            child.wait(timeout=8)
+                        except subprocess.TimeoutExpired:
+                            child.kill()
+                            child.wait(timeout=5)
+        finally:
+            journal.db.close()
+
+
 def main():
     if sys.platform!='darwin':raise RuntimeError('This real native fixture requires macOS Seatbelt; no unguarded fallback')
     result={'scope':'CodePier actual standalone worker + actual interactive CLI + local mock image payload',
             'mock':True,'paid_requests':False,'production_changed':False,'cases':[]}
     out=ROOT/'docs/evidence/native-cli-20260914'
+    out.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='codepier native worker ') as temp:
         base=Path(temp).resolve();profile=base/'network.sb'
         profile.write_text('(version 1)\n(allow default)\n(deny network*)\n(allow network-outbound (remote ip "localhost:*"))\n(allow network-bind (local ip "localhost:*"))\n(allow network-inbound (local ip "localhost:*"))\n')
@@ -124,16 +157,7 @@ trust_level = "trusted"
                 except Exception as exc:
                     errors.append(type(exc).__name__+': '+str(exc))
                 finally:
-                    screen=output(obj,sid)
-                    (out/f'worker-real-{cli}.ansi').write_text(screen)
-                    with closing(database(obj.directory)) as db:
-                        receipts=[dict(r) for r in db.execute('SELECT kind,state,length(payload) AS bytes FROM commands WHERE session=? ORDER BY rowid',(sid,))]
-                        saved=db.execute('SELECT child_pid FROM sessions WHERE id=?',(sid,)).fetchone();native_pid=saved[0] if saved else 0
-                    if child is not None and child.poll() is None:
-                        obj.action('lease',p,{'id':sid,'writer':writer})
-                        obj.action('stop',p,{'id':sid,'writer':writer,'receipt':uuid.uuid4().hex})
-                        child.wait(timeout=8)
-                    journal.db.close()
+                    screen, receipts, native_pid = finish_case(obj, sid, child, journal, out, cli, p, writer)
                 calls=fixture.REQUESTS[start:]
                 case={'cli':cli,'calls':calls,'errors':errors,'image_payload_observed':any(r['images'] for r in calls),
                       'first_request_image_count':len(calls[0]['images']) if calls else 0,

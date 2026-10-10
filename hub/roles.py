@@ -323,8 +323,11 @@ def make_roles_router(auth, runtime):
     @database_endpoint(store)
     def list_roles(request: Request):
         owner = auth.panel(request)
-        rows = store.all('SELECT * FROM access_roles WHERE space_id=? ORDER BY label_key,id LIMIT ?', (owner.space_id, MAX_ROLES)) if owner.admin else iam.assigned_roles(store, owner.user_id, owner.space_id)
-        return {'roles': [public_role(row, store if owner.admin else None) for row in rows], 'limit': MAX_ROLES}
+        # The creation cap is Space-wide. Include grandfathered roles above it
+        # so an existing Space never loses the ability to inspect/pause policy.
+        rows = store.all('SELECT * FROM access_roles WHERE space_id=? ORDER BY label_key,id', (owner.space_id,)) if owner.admin else iam.assigned_roles(store, owner.user_id, owner.space_id)
+        return {'roles': [public_role(row, store if owner.admin else None) for row in rows],
+                'limit': MAX_ROLES, 'total': len(rows)}
 
     @router.get('/api/access-roles/{identifier}')
     @database_endpoint(store)
@@ -351,8 +354,8 @@ def make_roles_router(auth, runtime):
                     raise DevError('IDEMPOTENCY_CONFLICT', '幂等键已用于另一份角色配置', 409)
                 return public_role(old, store)
             label, key, policy = role_values(store, body, owner.space_id)
-            if store.one('SELECT count(*) AS n FROM access_roles WHERE user_id=?', (owner.user_id,))['n'] >= MAX_ROLES:
-                raise DevError('ROLE_LIMIT', '角色数量达到上限', 409)
+            if store.one('SELECT count(*) AS n FROM access_roles WHERE space_id=?', (owner.space_id,))['n'] >= MAX_ROLES:
+                raise DevError('ROLE_LIMIT', '当前空间的角色数量达到上限', 409)
             identifier, now = 'rol_' + uuid.uuid4().hex, time.time()
             try:
                 store.db.execute('INSERT INTO access_roles(id,user_id,label,label_key,policy,enabled,version,created,updated,create_key,create_fingerprint,space_id,owner_user_id) VALUES (?,?,?,?,?,?,1,?,?,?,?,?,?)',

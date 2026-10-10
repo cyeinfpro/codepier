@@ -3,6 +3,8 @@ import asyncio
 import contextlib
 import codecs
 import json
+import hashlib
+import ipaddress
 import math
 import os
 import platform
@@ -18,6 +20,9 @@ import websockets
 from agent.filesystem import FileEngine
 from agent.core_files import CoreFiles
 from agent.resource_queue import Claim, ResourceQueue, claims_for, canonical_path, PATH_READ_TOOLS
+from agent.scheduler import ProjectScheduler
+from agent.resource_pressure import ResourceSampler
+from shared.scheduler_config import effective_scheduler, validate_scheduler_overrides
 from shared.core_contracts import CORE_REMOTE
 from agent.journal import Journal
 from agent.telemetry import AgentTelemetry
@@ -79,8 +84,11 @@ class Agent:
         self.active_roots: set[Path] = set()
         self._active_slots: dict[object, tuple[Path, bool]] = {}
         self._waiting_writes: list[tuple[object, Path]] = []
-        self.semaphore = asyncio.Semaphore(4)
-        self.read_semaphore = asyncio.Semaphore(4)
+        self.scheduler = ProjectScheduler(self.config.get("scheduler"))
+        self.resource_sampler = ResourceSampler()
+        self.scheduler_requested = {}
+        self.scheduler_revision = ""
+        self.scheduler_error = ""
         self.resources = ResourceQueue()
         self.stop_event = asyncio.Event()
         self.connection_number = 0
@@ -170,6 +178,9 @@ class Agent:
             while not self.stop_event.is_set():
                 await self.send({"type": "heartbeat", "at": time.time(), "running": len(self.jobs),
                                  "build": self.build.describe(), "management": self.lifecycle.describe(),
+                                 **self.job_counts(), "scheduler": self.scheduler.snapshot(),
+                                 "scheduler_revision": self.scheduler_revision,
+                                 "scheduler_error": self.scheduler_error,
                                  "device_actions": self.lifecycle.actions()})
                 await self.report_outbox()
                 await asyncio.sleep(12)
@@ -180,6 +191,48 @@ class Agent:
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(socket.close(), 1)
             raise
+
+    async def apply_scheduler_config(self, packet):
+        try:
+            if not isinstance(packet, dict):
+                raise ValueError("Invalid scheduler configuration packet")
+            requested = validate_scheduler_overrides(packet.get("config", {}))
+            expected = hashlib.sha256(json.dumps(requested, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            if packet.get("revision") != expected:
+                raise ValueError("Scheduler revision does not match configuration")
+            effective = effective_scheduler(self.config.get("scheduler"), requested)
+            # Replayed preferences/reconnects must not reset resource hysteresis.
+            if effective != self.scheduler.config:
+                await self.scheduler.reconfigure(effective)
+        except (ValueError, TypeError):
+            # Performance preferences are not a transport prerequisite. Preserve
+            # the last good limits/revision and keep receipt recovery available.
+            if not self.scheduler_error:
+                print("[Agent] 调度设置无效，保留原限额；认证连接继续使用。", file=sys.stderr)
+            self.scheduler_error = "SCHEDULER_SETTINGS_INVALID"
+            return False
+        self.scheduler_requested = requested
+        self.scheduler_revision = expected
+        self.scheduler_error = ""
+        return True
+
+    async def watch_scheduler(self):
+        while not self.stop_event.is_set():
+            try:
+                sample = await asyncio.wait_for(asyncio.to_thread(self.resource_sampler.sample), 2)
+            except (TimeoutError, OSError, ValueError, TypeError):
+                sample = None
+            await self.scheduler.update_pressure(sample)
+            try:
+                await asyncio.wait_for(self.stop_event.wait(), 3)
+            except TimeoutError:
+                pass
+
+    def job_counts(self):
+        # Journal states distinguish accepted queue entries from admitted work.
+        states = [self.journal.status(identifier)["status"] for identifier in self.jobs]
+        return {"running_jobs": states.count("running"),
+                "queued_jobs": states.count("accepted"), "jobs_total": len(self.jobs)}
 
     async def watch_config(self):
         # The file can be temporarily absent during an editor's save/replace.
@@ -202,6 +255,7 @@ class Agent:
                     if c == self.config:
                         old = current
                         continue
+                    await self.scheduler.reconfigure(effective_scheduler(c.get("scheduler"), self.scheduler_requested))
                     self.config = c
                     self.engine.config = c
                     old = current
@@ -225,11 +279,14 @@ class Agent:
                           "version": VERSION, "build": self.build.describe(), "platform": platform.system(), "hostname": platform.node(),
                           "python": platform.python_version(), "roots": config["allowed_roots"], "capabilities": list(TOOLS),
                           "management": self.lifecycle.describe(), "device_actions": self.lifecycle.actions(),
+                          "scheduler_protocol": 1,
                           "journal_id": self.journal.journal_id, "delivery_protocol": 2, "cancel_pending_protocol": 1, "native_security_protocol": 1, "native_protocol": 1, "native_chat_protocol": 3, **advertisement(self.build.catalog_sha256)}))
             reply = channel.unpack(await asyncio.wait_for(socket.recv(), 10))
             if reply.get("type") != "ready":
                 raise ValueError("面板未确认 Agent 身份")
             self.hub_protocol = negotiate(reply)
+            empty_revision = hashlib.sha256(b"{}").hexdigest()
+            await self.apply_scheduler_config(reply.get("scheduler_config", {"config": {}, "revision": empty_revision}))
             if self.stop_event.is_set() or self.config is not config:
                 return
             self.socket, self.channel = socket, channel
@@ -248,6 +305,9 @@ class Agent:
                         id = data.get("id", "")
                         if not isinstance(id, str) or not id or len(id) > 100:
                             raise ValueError("Invalid operation ID")
+                    if kind == "scheduler_config":
+                        await self.apply_scheduler_config(data)
+                        continue
                     if kind == "native_ack":
                         offsets = data.get("offsets", {})
                         if isinstance(offsets, dict):
@@ -422,8 +482,27 @@ class Agent:
                     # the existing file-I/O lane, just like core read, so long
                     # commands cannot starve directory navigation. Resource locks
                     # above still exclude conflicting writes; searches stay heavy.
-                    worker = self.read_semaphore if tool in {'read', 'write', 'edit', 'fs_tree', 'fs_read', 'fs_read_many'} else self.semaphore
-                    await stack.enter_async_context(worker)
+                    lane = "read" if tool in {'read', 'write', 'edit', 'fs_tree', 'fs_read', 'fs_read_many'} else "execution"
+                    # Match the typed execution dispatcher, including the panel's
+                    # legacy SSH entry. Never infer remote work from shell text.
+                    remote = args if tool == "ssh_exec" else None
+                    if tool == "exec" and not args.get("task") and args.get("target") != "agent":
+                        remote = project.get("_core_ssh")
+                    target = ""
+                    if isinstance(remote, dict):
+                        lane = "remote"
+                        host = str(remote["host"])
+                        try:
+                            host = str(ipaddress.ip_address(host))
+                        except ValueError:
+                            host = host.rstrip(".").lower()
+                        target = host + ":" + str(remote["port"])
+                    # Managed worktrees retain the authenticated parent project
+                    # ID; a new workspace cannot manufacture a new quota.
+                    project_id = project.get("id") or canonical_path(project.get("_original_root", root))
+                    await stack.enter_async_context(self.scheduler.slot(
+                        identifier, project_id, lane, target,
+                        lambda reason: self.phase(identifier, "waiting_worker", queue_reason=reason, lane=lane)))
                     timer.reschedule(None)
             except TimeoutError as exc:
                 raise DevError('QUEUE_EXPIRED', '超过首次执行期限，未开始操作') from exc
@@ -548,7 +627,9 @@ class Agent:
                 TOOLS[tool].model.model_validate(args)
                 root, spec = self.engine.root(project)
                 self.journal.mark_running(id)
-                result = ({"build": self.build.describe(), "running_jobs": len(self.jobs), "telemetry_errors": self.telemetry.errors}
+                result = ({"build": self.build.describe(), **self.job_counts(),
+                           "scheduler": self.scheduler.snapshot(project.get("id") or canonical_path(root)),
+                           "telemetry_errors": self.telemetry.errors}
                           if tool == "agent_diagnostics" else execution_info(self.config, project, spec, root))
             elif tool in COMPUTER_TOOLS:
                 args = TOOLS[tool].model.model_validate(args).model_dump()
@@ -938,6 +1019,7 @@ class Agent:
         self.computer.start_guard()
         watcher = asyncio.create_task(self.watch_config())
         sender = asyncio.create_task(self.output_sender())
+        scheduler_monitor = asyncio.create_task(self.watch_scheduler())
         stopping = asyncio.create_task(self.stop_event.wait())
         from agent.brand_upgrade import watch as watch_brand_upgrade
         branding = asyncio.create_task(watch_brand_upgrade(self))
@@ -965,9 +1047,10 @@ class Agent:
                 delay = min(delay * 2, 30)
         finally:
             self.stop_event.set()
+            await self.scheduler.close()
             await self.computer.close()
             await self.integrations.close()
-            background = [watcher, sender, stopping, branding] + ([connection] if connection else [])
+            background = [watcher, sender, stopping, branding, scheduler_monitor] + ([connection] if connection else [])
             for task in background:
                 task.cancel()
             await asyncio.gather(*background, return_exceptions=True)

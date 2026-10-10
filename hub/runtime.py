@@ -726,8 +726,15 @@ class Runtime:
                 active = self.store.one("SELECT count(*) AS n FROM operations WHERE device_id=? AND state IN ('queued','running','reconnecting','cancelling')", (project["device_id"],))["n"]
                 if name in DEVICE_ACTIONS and active:
                     raise DevError("DEVICE_BUSY", "该设备还有操作未完成；为避免更新或卸载中断任务，请先等待现有操作结束", 409)
-                if active >= 64 and name != 'integration_control':
-                    raise DevError("DEVICE_BUSY", "该设备已有 64 个待完成操作，请先查询并等待已有操作", 429, retryable=True, retry_after_seconds=3)
+                if name != 'integration_control':
+                    project_active = self.store.one("SELECT count(*) AS n FROM operations WHERE device_id=? AND project_id IS ? AND state IN ('queued','running','reconnecting','cancelling')", (project["device_id"], project.get("id")))["n"]
+                    # Per-project queue bounds apply before the node safety cap.
+                    # Keep eight admission places for projects with no pending
+                    # work; one busy project cannot fill the entire node queue.
+                    if project_active >= 32:
+                        raise DevError("PROJECT_BUSY", "该项目已有 32 个待完成操作，请查询原回执并等待；其他项目仍可提交", 429, retryable=True, retry_after_seconds=3, queue_scope="project")
+                    if active >= 64 or (active >= 56 and project_active):
+                        raise DevError("DEVICE_BUSY", "节点待完成队列繁忙，正在为其他项目保留准入空间，请稍后查询原回执", 429, retryable=True, retry_after_seconds=3, queue_scope="node")
                 id, now = uuid.uuid4().hex, time.time()
                 self.integrations.prepare(id, name, args, project, principal)
                 request = {"tool": name, "args": args, "project": snapshot, "tool_contract_version": wire_version(name),
@@ -1140,9 +1147,30 @@ class Runtime:
         if management != info.get("management"):
             info["management"] = management
             changed = True
+        desired = None
+        if getattr(connection, "scheduler_protocol", 0) == 1:
+            from hub.scheduler_settings import packet, public_snapshot
+            snapshot = public_snapshot(data.get("scheduler"))
+            if snapshot is not None:
+                info["scheduler"] = snapshot
+                changed = True
+            scheduler_error = data.get("scheduler_error")
+            if scheduler_error in ("", "SCHEDULER_SETTINGS_INVALID"):
+                info["scheduler_error"] = scheduler_error
+                changed = True
+            reported_revision = data.get("scheduler_revision")
+            if isinstance(reported_revision, str) and len(reported_revision) == 64 and all(char in "0123456789abcdef" for char in reported_revision):
+                info["scheduler_revision"] = reported_revision
+                changed = True
+            try:
+                candidate = packet(self.store, device_id)
+                if candidate["revision"] != info.get("scheduler_revision"):
+                    desired = candidate
+            except DevError:
+                pass
         if changed:
             self.store.execute("UPDATE devices SET info=? WHERE id=?", (json.dumps(info, ensure_ascii=False), device_id))
-        return None
+        return desired
 
 
     def _touch_agent(self, device_id, connection):
@@ -1158,7 +1186,7 @@ class Runtime:
         with self.store.lock, self.store.db:
             self.store.execute("UPDATE devices SET info=?,last_seen=? WHERE id=?", (json.dumps(info, ensure_ascii=False), time.time(), device_id))
             self.store.execute("UPDATE operations SET next_attempt=0 WHERE device_id=? AND state IN ('queued','running','reconnecting','cancelling')", (device_id,))
-            self.store.audit("device:" + device["name"], "device.connected", device_id)
+            self.store.audit("device:" + device["name"], "device.connected", device_id, target_kind="device")
             self.publish("device", {"id": device_id, "online": True})
             self.wake_delivery()
         return True
@@ -1185,6 +1213,7 @@ class Runtime:
             connection.protocol = hello.get("delivery_protocol", 1)
             connection.cancel_pending_protocol = 1 if type(hello.get("cancel_pending_protocol")) is int and hello["cancel_pending_protocol"] == 1 else 0
             connection.native_protocol = 1 if hello.get("native_protocol") == 1 else 0
+            connection.scheduler_protocol = 1 if type(hello.get("scheduler_protocol")) is int and hello["scheduler_protocol"] == 1 else 0
             connection.native_chat_protocol = hello.get("native_chat_protocol") if type(hello.get("native_chat_protocol")) is int and hello["native_chat_protocol"] in (1, 2, 3) else 0
             if (type(connection.protocol) is not int or connection.protocol != 2 or
                     not isinstance(connection.journal_id, str) or not 1 <= len(connection.journal_id) <= 128):
@@ -1204,13 +1233,21 @@ class Runtime:
             connection.native_security_protocol = 1 if hello.get("native_security_protocol") == 1 else 0
             info["native_security_protocol"] = connection.native_security_protocol
             info["native_protocol"] = connection.native_protocol
+            info["scheduler_protocol"] = connection.scheduler_protocol
             info["native_chat_protocol"] = connection.native_chat_protocol
             info["tool_protocol"] = connection.tool_protocol.public(catalog_digest())
             build = hello.get("build")
             if isinstance(build, dict) and len(json.dumps(build)) <= 12000:
                 info["build"] = build
             # Complete the handshake before making this connection available for calls.
-            await connection.send({"type": "ready", "heartbeat_seconds": 12, "delivery_protocol": 2, **advertisement(catalog_digest())})
+            scheduler = {}
+            if connection.scheduler_protocol == 1:
+                from hub.scheduler_settings import packet
+                try:
+                    scheduler = {"scheduler_config": await self.store.run(packet, self.store, device_id)}
+                except DevError:
+                    pass
+            await connection.send({"type": "ready", "heartbeat_seconds": 12, "delivery_protocol": 2, **scheduler, **advertisement(catalog_digest())})
             if self.stopping or not await self.store.run(self.connection_authorized, device_id, connection):
                 return
             old = self.connections.get(device_id)
@@ -1231,7 +1268,9 @@ class Runtime:
                     break  # Fence a replaced socket before accepting its late events.
                 kind, id = data.get("type"), data.get("id")
                 if kind == "heartbeat":
-                    await self.store.run(self._heartbeat, device_id, connection, info, data)
+                    preference = await self.store.run(self._heartbeat, device_id, connection, info, data)
+                    if preference is not None:
+                        await connection.send(preference)
                     continue
                 if kind in {"computer_approval", "computer_approval_closed"}:
                     await self.store.run(self.computer_approvals.receive,device_id,connection,data)

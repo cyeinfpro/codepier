@@ -15,6 +15,8 @@ WINDOWS_CORE = {
 # the contract under test, so the exhaustive runner gives each one the machine.
 REGRESSION_EXCLUSIVE = {
     'test_audit_agent.py', 'test_audit_bridge_deploy.py', 'test_computer_lifecycle.py',
+    # Real subprocess callbacks assert separate subsecond native/approval budgets.
+    'test_computer_timeout_diagnostics.py',
     'test_continuous_access_ui.py', 'test_native_cli.py', 'test_native_browser_hardening.py',
     'test_panel_update_autoreload.py', 'test_panel_update_ui.py', 'test_parser_recovery_integration.py',
     'test_reliability.py', 'test_symbol_parser_stability.py',

@@ -25,7 +25,7 @@ def endpoint(value, networks, allow_http=False):
             raise ValueError()
         if parts.scheme == 'http' and not allow_http:
             raise ValueError()
-        port = parts.port or (443 if parts.scheme == 'https' else 80)
+        port = parts.port if parts.port is not None else (443 if parts.scheme == 'https' else 80)
         if not 1 <= port <= 65535:
             raise ValueError()
         if len(networks) > 16:
@@ -55,7 +55,8 @@ async def resolve(host, port):
 async def pin(value, networks, allow_http=False, resolver=resolve):
     endpoint(value, networks, allow_http)
     parts = urlsplit(value)
-    addresses = await resolver(parts.hostname, parts.port or (443 if parts.scheme == 'https' else 80))
+    port = parts.port if parts.port is not None else (443 if parts.scheme == 'https' else 80)
+    addresses = await resolver(parts.hostname, port)
     if not addresses:
         raise DevError('GATEWAY_DNS_FAILED', 'MCP 后端没有可用地址', 502)
     approved = [ipaddress.ip_network(item) for item in networks]

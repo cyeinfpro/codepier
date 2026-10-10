@@ -11,7 +11,7 @@ from tests.test_audit_agent import local_agent
 @pytest.mark.asyncio
 async def test_tasks_list_bypasses_project_and_worker_locks(local_agent):
     agent, root = local_agent
-    agent.semaphore = asyncio.Semaphore(0)
+    agent.scheduler.capacity.limit = 0
     agent.config['tasks'] = {'check': {'command': ['python3'], 'projects': ['fixture'], 'env': {'PRIVATE': 'hidden'}}}
     async with agent.project_slot(root, write=True, operation_id='long-test'):
         await asyncio.wait_for(agent.handle({
@@ -45,7 +45,9 @@ async def test_unkeyed_metadata_queries_share_one_receipt_under_concurrent_load(
     assert r.store.one('SELECT count(*) n FROM operations')['n'] == 1
     original = receipts[0]['operation_id']
     # Even at admission capacity an existing receipt remains recoverable.
-    for i in range(63):
+    # Reach this project's admission bound; receipt recovery bypasses new
+    # admission without consuming the headroom reserved for other projects.
+    for i in range(31):
         await r.invoke('fs_read', {'project': 'ProjectAlpha', 'path': f'{i}.py'}, p)
     assert (await r.invoke('tasks_list', {'project': 'ProjectAlpha'}, p))['operation_id'] == original
 

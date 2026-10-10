@@ -361,6 +361,17 @@ function download(...args) {
   return CP.ui.download(...args);
 }
 async function copy(text) {
+  const session = S.session,
+    space = S.space_id,
+    page = S.page,
+    epoch = S.renderSeq,
+    intent = S.modalIntent || 0;
+  const current = () =>
+    S.session === session &&
+    S.space_id === space &&
+    S.page === page &&
+    S.renderSeq === epoch &&
+    (S.modalIntent || 0) === intent;
   try {
     if (navigator.clipboard && window.isSecureContext) await navigator.clipboard.writeText(text);
     else {
@@ -372,8 +383,9 @@ async function copy(text) {
       if (!document.execCommand('copy')) throw new Error('copy');
       el.remove();
     }
-    toast('已复制');
+    if (current()) toast('已复制');
   } catch {
+    if (!current()) return;
     modal('复制内容', `<textarea id="copy-text" rows="5" readonly>${esc(text)}</textarea>`);
     $('#copy-text').select();
   }
@@ -1458,7 +1470,8 @@ async function previewSave() {
       content: w.content,
       idempotency_key: uid(),
     },
-    generation = S.fileGeneration || 0;
+    generation = S.fileGeneration || 0,
+    scope = workDialogScope();
   S.previewing = true;
   try {
     const d = await settled(
@@ -1470,6 +1483,7 @@ async function previewSave() {
       }),
     );
     if (
+      !workDialogCurrent(scope) ||
       S.work.project !== snapshot.project ||
       S.work.path !== snapshot.path ||
       generation !== (S.fileGeneration || 0)
@@ -1485,10 +1499,17 @@ async function previewSave() {
       buttons('confirm-save', '确认写入'),
       true,
     );
-    const button = $('#confirm-save');
+    const button = $('#confirm-save'),
+      displayed = Object.freeze({ ...scope, modalIntent: S.modalIntent || 0 });
     button.disabled = !!d.diff_truncated;
     button.onclick = () =>
       busy(button, async () => {
+        if (
+          !workDialogCurrent(displayed) ||
+          S.work.path !== snapshot.path ||
+          generation !== (S.fileGeneration || 0)
+        )
+          throw new Error('当前文件或确认窗口已变化，请重新预览。');
         const r = await settled(tool('fs_write', snapshot));
         if (
           S.work.project === snapshot.project &&
@@ -1507,6 +1528,8 @@ async function previewSave() {
         toast('已写回本机，修改前内容已备份');
         await loadTree();
       });
+  } catch (error) {
+    if (workDialogCurrent(scope)) throw error;
   } finally {
     S.previewing = false;
   }
@@ -1611,12 +1634,14 @@ function workDialogScope(extra = {}) {
   });
 }
 function workDialogCurrent(scope) {
+  return S.page === 'workbench' && panelDialogCurrent(scope);
+}
+function panelDialogCurrent(scope) {
   return (
     !!scope &&
     !!scope.session &&
     S.session === scope.session &&
     S.page === scope.page &&
-    S.page === 'workbench' &&
     S.renderSeq === scope.pageEpoch &&
     S.work.project === scope.project &&
     (S.work.workspace_id || '') === scope.workspace_id &&
@@ -1768,9 +1793,17 @@ async function checkpoint() {
     )
   )
     return;
-  const r = await settled(
-    wtool('project_checkpoint', { label: 'Panel checkpoint', idempotency_key: uid() }),
-  );
+  const scope = workDialogScope();
+  let r;
+  try {
+    r = await settled(
+      wtool('project_checkpoint', { label: 'Panel checkpoint', idempotency_key: uid() }),
+    );
+  } catch (error) {
+    if (workDialogCurrent(scope)) throw error;
+    return;
+  }
+  if (!workDialogCurrent(scope)) return;
   modal(
     '源码检查点已保存',
     `${notice('检查点保存于家里 Agent 的状态目录。它是尽力读取的源码归档，不是原子文件系统快照。', true)}<div class="spacer"></div><div class="code-box"><pre>${esc(json(r))}</pre></div>`,
@@ -1780,7 +1813,19 @@ async function checkpoint() {
 }
 async function gitView(which) {
   if (!S.work.project) throw new Error('请先选择项目');
-  const r = await settled(wtool(which, which === 'git_diff' ? { staged: false } : {}));
+  const scope = workDialogScope(),
+    path = S.work.path,
+    generation = S.fileGeneration || 0;
+  const current = () =>
+    workDialogCurrent(scope) && S.work.path === path && (S.fileGeneration || 0) === generation;
+  let r;
+  try {
+    r = await settled(wtool(which, which === 'git_diff' ? { staged: false } : {}));
+  } catch (error) {
+    if (current()) throw error;
+    return;
+  }
+  if (!current()) return;
   modal(
     which === 'git_status' ? 'Git 状态' : 'Git 工作区差异',
     `<div class="code-box"><pre>${esc(r.output || '没有工作区改动')}</pre></div>`,
@@ -1976,7 +2021,15 @@ function bindAudit() {
   );
 }
 async function operationDetail(id) {
-  const r = await api('/api/operations/' + id);
+  const scope = workDialogScope();
+  let r;
+  try {
+    r = await api('/api/operations/' + id);
+  } catch (error) {
+    if (panelDialogCurrent(scope)) throw error;
+    return;
+  }
+  if (!panelDialogCurrent(scope)) return;
   modal(
     '操作详情 · ' + r.tool,
     `<dl class="kv"><dt>操作编号</dt><dd><code>${esc(r.id)}</code></dd><dt>状态</dt><dd>${badge(r.state)}</dd><dt>调用者</dt><dd>${esc(r.actor)}</dd><dt>投递次数</dt><dd>${r.attempts || 0}（重投不会创建新操作）</dd><dt>首次执行期限</dt><dd>${esc(timeText(r.deadline))}</dd><dt>恢复状态</dt><dd>${esc(r.transport_error || '无网络异常')}${r.cancel_requested ? ' · 已保存取消请求' : ''}</dd><dt>开始 / 更新</dt><dd>${esc(timeText(r.created))}<br>${esc(timeText(r.updated))}</dd></dl>${r.error ? notice(esc(r.error)) : ''}<div class="audit-detail-title">参数摘要</div><div class="code-box"><pre>${esc(json(r.args_summary))}</pre></div>${r.result?.data?.diff !== undefined ? `<div class="audit-detail-title">文件差异</div>${diffHTML(r.result.data)}` : ''}${r.output ? `<div class="audit-detail-title">任务输出（保留尾部）</div><div class="code-box"><pre>${esc(r.output)}</pre></div>` : ''}<div class="audit-detail-title">实际返回结果</div><div class="code-box"><pre>${esc(json(r.result))}</pre></div>`,

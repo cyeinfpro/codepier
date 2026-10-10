@@ -26,12 +26,14 @@ def make_router(auth, runtime):
     @router.get('')
     async def read(request: Request, project: str, environment_id: str = 'production',
                    kind: str = 'overview', id: str = '', cursor: str = '',
+                   result_id: str = '', job_id: str = '',
                    room_id: str = '', conversation_id: str = '', after: str = '', query: str = '', client_message_id: str = '',
                    limit: int = Query(default=40, ge=1, le=100)):
         def inspect():
             principal = auth.panel(request)
             result = service.read({'project': project, 'environment_id': environment_id,
                                    'kind': kind, 'id': id, 'cursor': cursor, 'limit': limit,
+                                   'result_id': result_id, 'job_id': job_id,
                                    'room_id': room_id, 'conversation_id': conversation_id, 'after': after, 'query': query, 'client_message_id': client_message_id}, principal)
             return {**result, 'components': service.health}
         return await store.run(inspect)

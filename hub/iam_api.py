@@ -13,6 +13,7 @@ from pydantic import Field
 from typing import Literal
 from hub.access import AccessModel
 from hub import iam
+from hub.principal import Principal
 from shared.crypto import token, digest
 from shared.util import DevError
 
@@ -236,12 +237,20 @@ def make_iam_router(auth,runtime):
     @router.post('/invites/accept')
     @database_endpoint(store)
     def accept_invite(request:Request,body:InviteAccept):
-        p=auth.panel(request,True)
         with store.lock,store.db:
-            store.db.execute('BEGIN IMMEDIATE');p=auth.panel(request,True)
+            store.db.execute('BEGIN IMMEDIATE')
+            # Joining a Space is an account-local recovery action: an existing
+            # membership (or a stale tab's Space selector) is not a prerequisite.
+            session=auth.session_write(request)
+            iam.check_identity(store,session['identity_id'])
             row=store.one('SELECT * FROM space_invites WHERE hash=? AND expires>? AND used_by IS NULL',(digest(body.invitation),time.time()))
             if not row:raise DevError('INVITATION_INVALID','邀请不存在、已过期或已使用',400)
             if not iam.is_space_admin(store,row['created_by'],row['space_id']):raise DevError('INVITATION_INVALID','邀请人已不具备管理权',400)
+            if store.one('SELECT 1 FROM membership_blocks WHERE space_id=? AND user_id=? AND blocked=1',(row['space_id'],session['user_id'])):
+                raise DevError('SPACE_FORBIDDEN','空间成员资格已暂停；请由空间管理员恢复',403)
+            # This value only scopes the audit/event to the invited Space. The
+            # invitation's exact level is the sole new membership authority.
+            p=Principal('panel:'+session['username'],session['user_id'],{'read'},[],space_id=row['space_id'])
             source='invite:'+digest(body.invitation)[:24]
             store.db.execute('INSERT INTO memberships(space_id,user_id,source,level) VALUES(?,?,?,?)',(row['space_id'],p.user_id,source,row['level']))
             store.db.execute('UPDATE space_invites SET used_by=? WHERE hash=?',(p.user_id,row['hash']))

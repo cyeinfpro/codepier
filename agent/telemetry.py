@@ -4,6 +4,7 @@ import json
 import sqlite3
 import time
 from shared.computer_diagnostics import COMPUTER_STAGES, safe_detail
+from shared.scheduler_config import safe_queue_detail
 
 STAGES = {'accepted', 'waiting_project', 'waiting_resource', 'waiting_worker', 'executing', 'persisting', 'result_ready'} | set(COMPUTER_STAGES)
 
@@ -22,6 +23,8 @@ class AgentTelemetry:
         allowed = {k: v for k, v in detail.items() if k in {'blocked_by', 'mode'}}
         if stage in COMPUTER_STAGES:
             allowed = safe_detail(detail)
+        elif stage == 'waiting_worker':
+            allowed.update(safe_queue_detail(detail))
         try:
             with self.journal.lock, self.journal.db:
                 seq = self.journal.db.execute('SELECT COALESCE(MAX(seq),0)+1 FROM execution_stages WHERE operation_id=?', (identifier,)).fetchone()[0]

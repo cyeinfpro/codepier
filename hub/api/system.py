@@ -61,9 +61,12 @@ def make_system_router(context: HubContext):
     def token_usage(request: Request, period: Period = "today",
                     project: str = Query(default="", max_length=128),
                     connection: str = Query(default="", max_length=128),
-                    session: str = Query(default="", max_length=128)):
+                    session: str = Query(default="", max_length=128),
+                    cache_read_percent: int = Query(default=90, ge=0, le=100),
+                    reference_model: str = Query(default="gpt-6-astra", max_length=64)):
         return token_dashboard(runtime, auth.panel(request), config.timezone,
-                               period=period, project=project, connection=connection, session=session)
+                               period=period, project=project, connection=connection, session=session,
+                               cache_read_percent=cache_read_percent, reference_model=reference_model)
 
     @router.post("/api/tools/call")
     async def call_tool(request: Request, body: ToolCall):

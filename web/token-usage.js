@@ -6,6 +6,105 @@ window.CodePierTokenUsage = (() => {
   const fields = ['estimated_tokens', 'low', 'high', 'characters', 'utf8_bytes'];
   const integer = (value) => (Number.isSafeInteger(value) && value >= 0 ? value : null);
   const number = (value) => integer(value)?.toLocaleString('zh-CN') ?? '未记录';
+  // Decimal K/M/B, two decimals at most, promoting again after rounding.
+  function formatTokens(value) {
+    if (integer(value) === null) return '未记录';
+    const n = BigInt(value),
+      scales = [1n, 1000n, 1000000n, 1000000000n];
+    let unit = 0;
+    while (unit < 3 && n >= scales[unit + 1]) unit += 1;
+    if (!unit) return String(value);
+    let rounded = (n * 100n + scales[unit] / 2n) / scales[unit];
+    if (rounded >= 100000n && unit < 3) {
+      unit += 1;
+      rounded = (n * 100n + scales[unit] / 2n) / scales[unit];
+    }
+    const fraction = String(rounded % 100n)
+      .padStart(2, '0')
+      .replace(/0+$/, '');
+    return String(rounded / 100n) + (fraction ? '.' + fraction : '') + ['', 'K', 'M', 'B'][unit];
+  }
+  function formatUSD(nano) {
+    if (integer(nano) === null) return '未记录';
+    if (nano > 0 && nano < 100000) return '< $0.0001';
+    const usd = nano / 1e9;
+    return (
+      '$' +
+      usd.toLocaleString('en-US', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: usd < 1 ? 4 : 2,
+      })
+    );
+  }
+  function combined(value) {
+    const sides = ['input', 'output'].map((direction) => value[direction] || {});
+    const sum = (field) => {
+      const counts = sides.map((item) => integer(item[field])).filter((n) => n !== null);
+      const total = counts.reduce((a, b) => a + b, 0);
+      return counts.length && Number.isSafeInteger(total) ? total : null;
+    };
+    return {
+      estimated_tokens: sum('estimated_tokens'),
+      low: sum('low'),
+      high: sum('high'),
+      partial: sides.some(
+        (item) =>
+          integer(item.estimated_tokens) === null ||
+          item.unavailable_attempts ||
+          item.partial_attempts ||
+          item.source_truncated_attempts,
+      ),
+    };
+  }
+  function costForRows(rows) {
+    let cost = null,
+      totalPico = 0n,
+      missing = 0,
+      incompatible = false;
+    for (const row of rows) {
+      const item = row.token_usage?.reference_cost;
+      if (
+        item?.kind !== 'reference_estimate' ||
+        item.scope !== 'visible_tool_text_equivalent' ||
+        item.currency !== 'USD' ||
+        !item.pricing?.version ||
+        integer(item.amount_nano_usd) === null ||
+        (!side(row.token_usage, 'input') && !side(row.token_usage, 'output'))
+      ) {
+        missing += 1;
+        continue;
+      }
+      if (
+        cost &&
+        (cost.version !== item.version ||
+          cost.pricing.model !== item.pricing.model ||
+          cost.pricing.cache_read_percent !== item.pricing.cache_read_percent)
+      )
+        incompatible = true;
+      cost = item;
+      const exact = item.amount_pico_usd_exact;
+      const pico =
+        typeof exact === 'string' && /^\d{1,40}$/.test(exact)
+          ? BigInt(exact)
+          : integer(item.amount_pico_usd) !== null
+            ? BigInt(item.amount_pico_usd)
+            : BigInt(item.amount_nano_usd) * 1000n;
+      totalPico += pico;
+    }
+    const total = Number(totalPico / 1000n);
+    return cost && !incompatible && Number.isSafeInteger(total)
+      ? {
+          kind: cost.kind,
+          scope: cost.scope,
+          currency: cost.currency,
+          version: cost.version,
+          pricing: cost.pricing,
+          amount_nano_usd: total,
+          amount_pico_usd_exact: String(totalPico),
+          partial: missing > 0 || rows.some((row) => row.token_usage?.reference_cost?.partial),
+        }
+      : null;
+  }
   const escape = (value) =>
     String(value).replace(
       /[&<>"']/g,
@@ -76,6 +175,8 @@ window.CodePierTokenUsage = (() => {
         overflow,
       };
     }
+    result.total = combined(result);
+    result.reference_cost = costForRows(rows);
     return result;
   }
 
@@ -85,7 +186,7 @@ window.CodePierTokenUsage = (() => {
     const partial = value.state === 'partial' || value.truncated;
     return (
       '<span>约 ' +
-      number(value.estimated_tokens) +
+      formatTokens(value.estimated_tokens) +
       '</span>' +
       '<small>范围 ' +
       number(value.low) +
@@ -97,24 +198,105 @@ window.CodePierTokenUsage = (() => {
     );
   }
 
-  function metricHTML(value, direction, label) {
-    const item = value[direction] || {},
-      n = integer(item.estimated_tokens);
-    const notes = [];
-    if (n !== null && item.unavailable_attempts)
-      notes.push(number(item.unavailable_attempts) + ' 次未记录');
-    if (item.partial_attempts) notes.push('部分文本');
-    if (item.source_truncated_attempts) notes.push('源工具截断');
+  function headline(value) {
+    const total = combined(value),
+      n = integer(total.estimated_tokens);
+    const cost = value.reference_cost;
+    const amount =
+      cost?.kind === 'reference_estimate' &&
+      cost.scope === 'visible_tool_text_equivalent' &&
+      cost.currency === 'USD'
+        ? integer(cost.amount_nano_usd)
+        : null;
     return (
-      '<div class="token-dashboard-metric"><span>' +
-      label +
-      '</span><strong' +
-      (n === null ? ' class="is-unavailable"' : '') +
-      '>' +
-      (n === null ? '未记录' : '约 ' + number(n)) +
-      '</strong>' +
-      (notes.length ? '<small>' + notes.join(' · ') + '</small>' : '') +
-      '</div>'
+      '<div class="token-dashboard-metrics">' +
+      '<div class="token-dashboard-metric is-total"><span>总 Token</span><strong title="' +
+      number(n) +
+      ' Token">' +
+      (n === null ? '未记录' : '约 ' + formatTokens(n)) +
+      '</strong></div>' +
+      '<div class="token-dashboard-metric is-cost"><span>参考估价 · USD</span><strong>' +
+      escape(formatUSD(amount)) +
+      '</strong></div></div>' +
+      (cost?.pricing
+        ? '<p class="token-dashboard-note">' +
+          escape(cost.pricing.model_label || cost.pricing.model || '参考模型未知') +
+          ' · Standard API · 输入缓存 ' +
+          escape(cost.pricing.cache_read_percent) +
+          '% 假设</p>'
+        : '') +
+      (n !== null && total.partial ? '<p class="token-dashboard-note">仅已记录部分</p>' : '')
+    );
+  }
+
+  function pricingDetails(cost, adjustable = false) {
+    const p = cost?.pricing;
+    if (!p || cost.kind !== 'reference_estimate')
+      return '<p>参考估价未记录；实际模型用量：未提供。</p>';
+    const rates = p.usd_per_million || {};
+    const money = (value) => (Number.isFinite(value) && value >= 0 ? '$' + value : '未记录');
+    return (
+      '<div class="token-pricing-details"><p><strong>' +
+      escape(p.model_label || p.model || '参考模型未知') +
+      ' 参考估价</strong> · Standard API 短上下文，USD / 1M Token。</p>' +
+      (adjustable
+        ? '<label class="token-cache-assumption">参考计价模型 <select data-token-filter="reference_model" aria-label="参考计价模型">' +
+          (
+            p.available_models || [
+              { id: p.model || 'gpt-6-astra', label: p.model_label || 'GPT-6 Astra' },
+            ]
+          )
+            .map(
+              (model) =>
+                '<option value="' +
+                escape(model.id) +
+                '"' +
+                (model.id === (p.model || 'gpt-6-astra') ? ' selected' : '') +
+                '>' +
+                escape(model.label) +
+                '</option>',
+            )
+            .join('') +
+          '</select></label>'
+        : '') +
+      (adjustable
+        ? '<label class="token-cache-assumption">模型输入缓存读取假设 <span><input type="number" min="0" max="100" step="1" inputmode="numeric" data-token-filter="cache_read_percent" aria-label="模型输入缓存读取假设百分比" value="' +
+          escape(p.cache_read_percent) +
+          '"> %</span></label>'
+        : '<p>模型输入缓存读取假设：' + escape(p.cache_read_percent) + '%。</p>') +
+      '<p>输入 ' +
+      money(rates.input) +
+      '，缓存读取 ' +
+      money(rates.cached_input) +
+      '，输出 ' +
+      money(rates.output) +
+      '；按此假设，输入综合单价 ' +
+      money(p.effective_input_usd_per_million) +
+      ' / 1M。</p>' +
+      (cost.breakdown
+        ? '<p>估价拆分：普通输入 ' +
+          escape(formatUSD(cost.breakdown.uncached_input?.amount_nano_usd)) +
+          '，缓存读取 ' +
+          escape(formatUSD(cost.breakdown.cached_input?.amount_nano_usd)) +
+          '，输出 ' +
+          escape(formatUSD(cost.breakdown.output?.amount_nano_usd)) +
+          '。</p>'
+        : '') +
+      '<p>MCP 请求参数按模型输出计价；MCP 响应文本按后续模型输入计价。缓存是输入的一部分，不另加到总 Token；' +
+      '此比例是假设，不是实测缓存命中率，也不由重复文本推断。没有缓存写入数据，不估算缓存写入费用。</p>' +
+      '<p>仅估算可见工具文本的等价成本；实际模型用量未知，不是完整会话或实际账单。完整请求超过 272K 输入时适用整请求长上下文价；' +
+      '不能从单次 MCP 文本大小判断。本参考未使用长上下文、加速档位、地区附加费或折扣。ChatGPT/Codex订阅及额度规则不同，不能用此值代替账单。</p>' +
+      '<p>真实缓存命中、缓存写入、思考 Token：未知。切换参考模型只重算此情景，不改变实际执行模型。</p>' +
+      '<p>官方来源：<a href="https://developers.openai.com/api/docs/models/' +
+      escape(
+        ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-luna'].includes(p.model) ? p.model : 'gpt-6-astra',
+      ) +
+      '" target="_blank" rel="noopener noreferrer">模型价格</a> · ' +
+      '<a href="https://developers.openai.com/api/docs/pricing" target="_blank" rel="noopener noreferrer">计价说明</a>；核对 ' +
+      escape(p.source_date || '未记录') +
+      ' · ' +
+      escape(p.version) +
+      '。</p></div>'
     );
   }
 
@@ -154,52 +336,26 @@ window.CodePierTokenUsage = (() => {
         dateText(Math.max(...times), 'UTC') +
         ' · UTC'
       : '时间范围未记录';
-    const metric = (direction, title) => {
-      const data = value[direction];
-      return (
-        '<div><strong>' +
-        title +
-        '</strong><p>' +
-        (data.estimated_tokens === null
-          ? '未记录'
-          : '约 ' + number(data.estimated_tokens) + ' Token') +
-        '</p><small>' +
-        (data.low === null ? '' : '粗略范围 ' + number(data.low) + '–' + number(data.high) + '；') +
-        number(data.measured_attempts) +
-        ' 次有记录，' +
-        number(data.unavailable_attempts) +
-        ' 次未记录' +
-        (data.partial_attempts ? '，' + number(data.partial_attempts) + ' 次仅部分文本' : '') +
-        (data.source_truncated_attempts
-          ? '，' + number(data.source_truncated_attempts) + ' 次源工具已截断'
-          : '') +
-        '</small><p class="integration-help">已计入 ' +
-        number(data.characters) +
-        ' 个 Unicode 字符 / ' +
-        number(data.utf8_bytes) +
-        ' 字节</p></div>'
-      );
-    };
     return (
-      '<div class="integration-section-head"><h3>工具文本 Token 估算</h3>' +
+      '<div class="token-dashboard token-loaded-summary"><div class="integration-section-head"><h3>已加载工具 Token</h3>' +
       '<span class="badge neutral">估算 · 非账单</span></div>' +
-      '<p class="integration-help">当前已载入 ' +
+      headline(value) +
+      '<details class="token-usage-help"><summary>详情 · 当前已载入 ' +
       number(value.wire_attempts) +
-      ' 次调用、' +
-      number(value.distinct_server_operation_ids) +
-      ' 个不同服务端操作编号。重试返回的文本仍计入调用量；操作编号仅作观察，不用于扣减 Token。</p>' +
-      '<p class="integration-help">' +
+      ' 次调用</summary>' +
+      '<p>' +
       escape(range) +
       '；只汇总已加载明细，不代表整个时间段。实际模型用量：未提供。</p>' +
-      '<div class="integration-grid">' +
-      metric('input', '输入估算') +
-      metric('output', '输出估算') +
-      '</div>' +
-      '<p class="integration-help">只统计经筛选的项目工具文本。不是整段宿主对话或模型计费；' +
-      '不含工具定义、图片与文件字节，已识别的敏感字段和链接不计入。历史缺失不会补算，范围不是统计置信区间。' +
-      '算法：' +
+      metricDetails(value, 'input', 'MCP 请求参数') +
+      metricDetails(value, 'output', 'MCP 响应文本') +
+      pricingDetails(value.reference_cost) +
+      '<p>' +
+      number(value.distinct_server_operation_ids) +
+      ' 个不同服务端操作编号。重试返回文本仍计入；操作编号不用于扣减 Token。</p>' +
+      '<p>只统计经筛选的项目工具文本。不是整段宿主对话或模型计费；不含工具定义、图片与文件字节，' +
+      '已识别的敏感字段和链接不计入。历史缺失不会补算，范围不是统计置信区间。算法 ' +
       escape(value.version) +
-      '。</p>'
+      '。</p></details></div>'
     );
   }
 
@@ -226,7 +382,7 @@ window.CodePierTokenUsage = (() => {
       ),
     );
     return (
-      '<div class="token-dashboard-legend"><span>输入估算</span><span class="is-output">输出估算</span><span class="is-missing">未记录</span></div>' +
+      '<div class="token-dashboard-legend"><span>MCP 请求参数</span><span class="is-output">MCP 响应文本</span><span class="is-missing">未记录</span></div>' +
       '<ol class="token-trend" aria-label="有调用记录的时间桶；缺失不补零">' +
       trend
         .map((point) => {
@@ -242,10 +398,10 @@ window.CodePierTokenUsage = (() => {
             '</time><div class="token-trend-bars">' +
             bar('input') +
             bar('output') +
-            '</div><small>入 ' +
-            number(point.input?.estimated_tokens) +
-            ' / 出 ' +
-            number(point.output?.estimated_tokens) +
+            '</div><small>请求 ' +
+            formatTokens(point.input?.estimated_tokens) +
+            ' / 响应 ' +
+            formatTokens(point.output?.estimated_tokens) +
             '<br>' +
             number(point.wire_attempts) +
             ' 次调用</small></li>'
@@ -256,6 +412,12 @@ window.CodePierTokenUsage = (() => {
     );
   }
 
+  const filterValues = (data) => ({
+    period: data.period?.key || 'today',
+    ...data.filters,
+    cache_read_percent: String(data.summary?.reference_cost?.pricing?.cache_read_percent ?? 90),
+    reference_model: data.summary?.reference_cost?.pricing?.model || 'gpt-6-astra',
+  });
   let dashboardState = null;
   function resetDashboard() {
     dashboardState = null;
@@ -264,7 +426,7 @@ window.CodePierTokenUsage = (() => {
     if (!continuing || !dashboardState || dashboardState.authority !== data.authority_key) {
       dashboardState = {
         authority: data.authority_key,
-        filters: { period: data.period?.key || 'today', ...data.filters },
+        filters: filterValues(data),
         expanded: false,
         revision: 0,
       };
@@ -277,7 +439,14 @@ window.CodePierTokenUsage = (() => {
       revision = state.revision;
     const filters = { ...state.filters };
     let result = initial;
-    if (filters.period !== 'today' || filters.project || filters.connection || filters.session) {
+    if (
+      filters.period !== 'today' ||
+      filters.project ||
+      filters.connection ||
+      filters.session ||
+      filters.cache_read_percent !== '90' ||
+      filters.reference_model !== 'gpt-6-astra'
+    ) {
       result = await fetcher('/api/token-usage?' + new URLSearchParams(filters));
       if (!valid() || dashboardState !== state || state.revision !== revision) return null;
       if (result.authority_key !== state.authority) {
@@ -315,12 +484,9 @@ window.CodePierTokenUsage = (() => {
     return (
       '<div class="token-dashboard" data-token-dashboard>' +
       `<div class="token-dashboard-head"><h3>${title}工具 Token</h3><span class="token-estimate-badge">估算</span></div>` +
-      '<div class="token-dashboard-metrics">' +
-      metricHTML(value, 'input', '输入') +
-      metricHTML(value, 'output', '输出') +
-      '</div>' +
+      headline(value) +
       (data.coverage?.collection_unavailable ? '<p role="status">估算读取暂不可用</p>' : '') +
-      `<details data-token-filters${expanded ? ' open' : ''}><summary><span>${number(value.wire_attempts)} 次记录</span> · 筛选与趋势</summary><div class="token-dashboard-filters">` +
+      `<details data-token-filters${expanded ? ' open' : ''}><summary><span>${number(value.wire_attempts)} 次记录</span> · 详情与筛选</summary><div class="token-dashboard-filters">` +
       select(
         'period',
         '时间范围',
@@ -341,7 +507,11 @@ window.CodePierTokenUsage = (() => {
       ) +
       select('session', '匿名窗口', data.options?.sessions || [], filters.session, '全部匿名窗口') +
       '</div>' +
+      metricDetails(value, 'input', 'MCP 请求参数') +
+      metricDetails(value, 'output', 'MCP 响应文本') +
+      pricingDetails(value.reference_cost, true) +
       trendHTML(data) +
+      '<button type="button" class="secondary" data-token-export>导出当前统计 JSON</button>' +
       '<details class="token-usage-help"><summary>统计说明</summary>' +
       '<p>' +
       escape(dateText(period.start, period.timezone)) +
@@ -352,8 +522,6 @@ window.CodePierTokenUsage = (() => {
       ' · 当前保留的授权记录 ' +
       number(value.wire_attempts) +
       ' 次调用。</p>' +
-      metricDetails(value, 'input', '输入') +
-      metricDetails(value, 'output', '输出') +
       '<p>实际模型用量未提供：没有可核验的模型实际用量接口。仅工具文本，二进制文件/图片字节不计入，' +
       '不含工具定义，已识别的敏感字段和链接不计入。重试仍有传输文本成本；不是完整对话账单。粗略范围不是统计置信区间。</p>' +
       '<p>连接名称是授权标签，不代表已识别宿主产品；匿名窗口只表示相关性，可能因重启变化。</p>' +
@@ -366,6 +534,22 @@ window.CodePierTokenUsage = (() => {
       '。</p></details></details>' +
       '<p class="token-dashboard-status" role="status" aria-live="polite"></p></div>'
     );
+  }
+
+  function exportJSON(data) {
+    // Export only the already-authorized aggregate response. No row bodies,
+    // credentials, connection labels, project paths, or raw request metadata.
+    const value = {
+      kind: 'mcp_tool_text_reference_estimate',
+      exported_at: new Date().toISOString(),
+      schema_version: data.schema_version || 2,
+      period: data.period,
+      filters: data.filters,
+      summary: data.summary,
+      trend: data.trend,
+      coverage: data.coverage,
+    };
+    return JSON.stringify(value, null, 2);
   }
 
   let bindingGeneration = 0;
@@ -381,14 +565,50 @@ window.CodePierTokenUsage = (() => {
       const details = root.querySelector('[data-token-filters]');
       if (details)
         details.ontoggle = () => {
-          if (dashboardState === state && state.expanded !== details.open) {
+          if (
+            details.isConnected &&
+            details.closest('[data-token-dashboard]') === root &&
+            root._codepierTokenGeneration === generation &&
+            dashboardState === state &&
+            state.expanded !== details.open
+          ) {
             state.expanded = details.open;
             state.revision += 1;
           }
         };
+      root.onclick = (event) => {
+        if (
+          !event.target.closest('[data-token-export]') ||
+          !root.isConnected ||
+          root._codepierTokenGeneration !== generation ||
+          dashboardState !== state
+        )
+          return;
+        try {
+          const url = URL.createObjectURL(
+            new Blob([exportJSON(data)], { type: 'application/json' }),
+          );
+          const link = document.createElement('a');
+          link.href = url;
+          link.download = 'codepier-mcp-tool-estimate.json';
+          link.click();
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
+        } catch {
+          root.querySelector('.token-dashboard-status').textContent = '导出失败，请重试。';
+        }
+      };
       root.onchange = async (event) => {
         const target = event.target.closest('[data-token-filter]');
         if (!target) return;
+        if (
+          target.dataset.tokenFilter === 'cache_read_percent' &&
+          (!/^\d{1,3}$/.test(target.value) || Number(target.value) > 100)
+        ) {
+          target.value = filterValues(data).cache_read_percent;
+          root.querySelector('.token-dashboard-status').textContent =
+            '请输入 0–100 的整数缓存比例。';
+          return;
+        }
         const captured = root,
           current = ++sequence;
         const filters = Object.fromEntries(
@@ -403,6 +623,7 @@ window.CodePierTokenUsage = (() => {
         }
         if (target.dataset.tokenFilter === 'connection') filters.session = '';
         state.filters = filters;
+        state.expanded = !!root.querySelector('[data-token-filters]')?.open;
         state.revision += 1;
         root.querySelector('.token-dashboard-status').textContent = '正在读取当前授权范围…';
         try {
@@ -432,8 +653,9 @@ window.CodePierTokenUsage = (() => {
             dashboardState !== state
           )
             return;
+          state.expanded = !!captured.querySelector('[data-token-filters]')?.open;
           data = result;
-          state.filters = { period: result.period.key, ...result.filters };
+          state.filters = filterValues(result);
           const holder = document.createElement('div');
           holder.innerHTML = dashboard(data, state.expanded);
           root = holder.firstElementChild;
@@ -447,13 +669,10 @@ window.CodePierTokenUsage = (() => {
             dashboardState !== state
           )
             return;
-          state.filters = { period: data.period.key, ...data.filters };
+          state.filters = filterValues(data);
           state.revision += 1;
           root.querySelectorAll('[data-token-filter]').forEach((select) => {
-            select.value =
-              select.dataset.tokenFilter === 'period'
-                ? data.period.key
-                : data.filters[select.dataset.tokenFilter] || '';
+            select.value = filterValues(data)[select.dataset.tokenFilter] || '';
           });
           root.querySelector('.token-dashboard-status').textContent =
             '统计读取失败，仍显示上一次结果。请重新选择或刷新。';
@@ -464,6 +683,9 @@ window.CodePierTokenUsage = (() => {
   }
 
   return {
+    formatTokens,
+    formatUSD,
+    exportJSON,
     mergeActivities,
     summarize,
     cell,

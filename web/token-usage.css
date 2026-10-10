@@ -60,6 +60,45 @@
   font-size: 1.1rem;
   line-height: 1.9;
 }
+.token-dashboard-metric.is-total strong {
+  font-size: clamp(1.6rem, 3vw, 2rem);
+  letter-spacing: -0.02em;
+}
+.token-dashboard-metric.is-cost {
+  justify-self: end;
+  text-align: right;
+}
+.token-dashboard-metric.is-cost strong {
+  font-size: clamp(1.2rem, 2.5vw, 1.6rem);
+}
+.token-cache-assumption {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  font-size: 0.8rem;
+}
+.token-cache-assumption input {
+  width: 5.5rem;
+  max-width: 100%;
+  font-variant-numeric: tabular-nums;
+}
+.token-pricing-details {
+  margin: 0.8rem 0;
+  padding: 0.75rem;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  border-radius: 0.6rem;
+}
+.token-pricing-details p {
+  margin: 0.4rem 0;
+  font-size: 0.8rem;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.token-pricing-details a {
+  color: inherit;
+  text-decoration: underline;
+}
 .token-dashboard-note,
 .token-dashboard-status,
 .token-dashboard details > p,
@@ -166,6 +205,10 @@
   display: none;
 }
 @media (max-width: 600px) {
+  .token-dashboard-metrics {
+    grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+    gap: 0.5rem;
+  }
   .token-dashboard {
     margin-top: 1rem;
   }

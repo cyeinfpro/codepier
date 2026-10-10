@@ -4,7 +4,9 @@ Container images, volumes, IPs, aliases and rollback connectivity are preserved.
 No firewall, host networking, external network or other project's network changes.
 """
 from __future__ import annotations
+import copy
 import ipaddress
+import re
 
 
 def preflight(config,containers,docker,legacy_project):
@@ -28,7 +30,9 @@ def preflight(config,containers,docker,legacy_project):
         labels=current.get('Labels') or {}
         if labels.get('com.docker.compose.project')=='codepier':continue
         if labels.get('com.docker.compose.project')!=legacy_project:raise RuntimeError('Configured proxy subnet overlaps an unrelated network; nothing was stopped')
-        if any(n.get('external') for _,n in overlaps):raise RuntimeError('An external network cannot be renamed automatically')
+        if any(n.get('external') or n.get('driver', 'bridge') != 'bridge' or
+               (n.get('ipam') or {}).get('driver', 'default') != 'default' for _,n in overlaps):
+            raise RuntimeError('External or custom replacement networks cannot be renamed automatically')
         if (current.get('Driver')!='bridge' or current.get('Scope')!='local' or current.get('Ingress')
                 or current.get('IPAM',{}).get('Driver','default')!='default'):
             raise RuntimeError('Legacy network uses a custom driver; migration was not started')
@@ -47,7 +51,8 @@ def preflight(config,containers,docker,legacy_project):
         selected.append({'name':current['Name'],'id':current['Id'],'driver':'bridge','labels':labels,
                          'ipam':current.get('IPAM',{}),'options':current.get('Options') or {},
                          'internal':bool(current.get('Internal')),'ipv6':bool(current.get('EnableIPv6')),
-                         'attachable':bool(current.get('Attachable')),'endpoints':endpoints,'remove_requested':False})
+                         'attachable':bool(current.get('Attachable')),'endpoints':endpoints,'remove_requested':False,
+                         'replacements':[{'key':key,'config':copy.deepcopy(value)} for key,value in overlaps]})
     return selected
 
 
@@ -91,3 +96,100 @@ def restore(records,docker):
             if endpoint['ipv6']:args+=['--ip6',endpoint['ipv6']]
             for alias in endpoint['aliases']:args+=['--alias',alias]
             args += [record['name'],endpoint['container']];docker.run(args)
+
+
+
+def prepare_probe(config, records, transaction, docker):
+    """Label only absent replacement networks before Compose creates them."""
+    if not re.fullmatch(r'[a-f0-9]{32}', transaction):
+        raise RuntimeError('Invalid network migration transaction')
+    config = copy.deepcopy(config)
+    names = set(docker.run(['network', 'ls', '--format', '{{.Name}}']).stdout.splitlines())
+    selected = {}
+    for record in records:
+        for replacement in record.get('replacements', []):
+            key, frozen = replacement['key'], replacement['config']
+            actual = config.get('networks', {}).get(key)
+            if actual != frozen:
+                raise RuntimeError('Replacement network configuration changed before probe')
+            name = actual.get('name')
+            if not name or name in names:
+                raise RuntimeError('Replacement network already exists; ownership is not this migration')
+            if key in selected:
+                continue
+            labels = dict(actual.get('labels') or {})
+            # Compose supplies its own reserved ownership labels.
+            required = {'com.codepier.migration': transaction}
+            if any(label in labels and labels[label] != value for label, value in required.items()):
+                raise RuntimeError('Replacement network has conflicting ownership labels')
+            labels.update(required)
+            expected = copy.deepcopy(actual)
+            expected['labels'] = labels
+            selected[key] = {'name': name, 'key': key, 'config': expected, 'id': None,
+                             'remove_requested': False, 'removed': False}
+    for row in selected.values():
+        config['networks'][row['key']]['labels'] = row['config']['labels']
+    return config, list(selected.values())
+
+
+def _replacement_matches(current, row, transaction):
+    expected = row['config']
+    labels = current.get('Labels') or {}
+    required = {**(expected.get('labels') or {}), 'com.codepier.migration': transaction,
+                'com.docker.compose.project': 'codepier', 'com.docker.compose.network': row['key']}
+    if (current.get('Name') != row['name'] or
+            not re.fullmatch(r'[a-f0-9]{64}', current.get('Id', '')) or
+            any(labels.get(key) != value for key, value in required.items()) or
+            current.get('Driver') != expected.get('driver', 'bridge') or current.get('Scope') != 'local' or
+            bool(current.get('Internal')) != bool(expected.get('internal')) or
+            bool(current.get('Attachable')) != bool(expected.get('attachable')) or
+            bool(current.get('EnableIPv6')) != bool(expected.get('enable_ipv6')) or
+            (current.get('Options') or {}) != (expected.get('driver_opts') or {})):
+        return False
+    actual_ipam, expected_ipam = current.get('IPAM') or {}, expected.get('ipam') or {}
+    if (actual_ipam.get('Driver', 'default') != expected_ipam.get('driver', 'default') or
+            (actual_ipam.get('Options') or {}) != (expected_ipam.get('options') or {})):
+        return False
+    actual_ranges = actual_ipam.get('Config') or []
+    expected_ranges = expected_ipam.get('config') or []
+    if len(actual_ranges) != len(expected_ranges):
+        return False
+    fields = {'subnet': 'Subnet', 'gateway': 'Gateway', 'ip_range': 'IPRange',
+              'aux_addresses': 'AuxiliaryAddresses'}
+    return all(any(all(actual.get(native) == value for key, value in wanted.items()
+                       if (native := fields.get(key)))
+                   for actual in actual_ranges) for wanted in expected_ranges)
+
+
+def observe_replacements(records, docker, transaction, save):
+    """Bind exact IDs only after transaction labels and frozen config agree."""
+    names = set(docker.run(['network', 'ls', '--format', '{{.Name}}']).stdout.splitlines()) if records else set()
+    for row in records:
+        if row['name'] not in names:
+            continue
+        current = docker.json(['network', 'inspect', row['name']])[0]
+        if (row.get('removed') or not _replacement_matches(current, row, transaction) or
+                row.get('id') not in (None, current['Id'])):
+            raise RuntimeError('Replacement network identity or ownership changed; nothing was removed')
+        if row.get('id') is None:
+            row['id'] = current['Id']
+            save()
+
+
+def remove_replacements(records, docker, transaction, save):
+    """Delete only this transaction's exact, unused network IDs."""
+    observe_replacements(records, docker, transaction, save)
+    names = set(docker.run(['network', 'ls', '--format', '{{.Name}}']).stdout.splitlines()) if records else set()
+    for row in records:
+        if row['name'] not in names:
+            continue
+        current = docker.json(['network', 'inspect', row['id']])[0]
+        if (current.get('Id') != row['id'] or not _replacement_matches(current, row, transaction) or
+                not isinstance(current.get('Containers'), dict) or current['Containers'] or
+                docker.run(['ps', '-aq', '--filter', 'network=' + row['id']]).stdout.strip()):
+            raise RuntimeError('Replacement network changed or is in use; nothing was removed')
+        row['remove_requested'] = True
+        save()
+        docker.run(['network', 'rm', row['id']])
+        row['removed'] = True
+        save()

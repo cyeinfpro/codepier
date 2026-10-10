@@ -731,9 +731,12 @@ window.CodePierCollaborationDelegation = {
         };
       }
       if (action === 'delegation-result') {
-        const generation = state.generation;
+        const generation = state.generation,
+          epoch = state.drawerEpoch;
         await coordination.load();
-        if (generation !== state.generation) return local;
+        // Closing or replacing the current drawer also cancels this earlier
+        // authority read, before goal-detail starts its own guarded request.
+        if (generation !== state.generation || epoch !== state.drawerEpoch) return local;
         return coordination.act('goal-detail', element);
       }
       if (action === 'delegation-setup') {

@@ -35,9 +35,10 @@ class AppServerClient(NativeClient):
         (home/'config.toml').write_text(config)
         env = {k:v for k,v in os.environ.items() if k in {'PATH','HOME','USER','TMPDIR','LANG','LC_ALL'}}
         env['CODEX_HOME'] = str(home)
-        spawning = asyncio.create_task(asyncio.create_subprocess_exec(binary, 'app-server',
+        from agent.computer_process import spawn_provider
+        spawning = asyncio.create_task(spawn_provider(binary, 'app-server',
             cwd=str(home), env=env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE, limit=8*1024*1024, start_new_session=os.name != 'nt'))
+            stderr=asyncio.subprocess.PIPE, limit=8*1024*1024))
         try:
             try:
                 self.process = await asyncio.shield(spawning)

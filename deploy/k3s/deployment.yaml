@@ -128,7 +128,7 @@ spec:
         # The Hub chmods its data directory to 0700 at start, which requires owning it.
         # Same image as the Hub, so no additional pull; only CHOWN and FOWNER are granted.
         - name: data-ownership
-          image: ghcr.io/cyeinfpro/codepier:1.23.0
+          image: ghcr.io/cyeinfpro/codepier:1.24.0
           command: ["sh", "-c", "chown 10001:10001 /app/data && chmod 0700 /app/data"]
           securityContext:
             runAsNonRoot: false
@@ -144,7 +144,7 @@ spec:
               mountPath: /app/data
       containers:
         - name: hub
-          image: ghcr.io/cyeinfpro/codepier:1.23.0
+          image: ghcr.io/cyeinfpro/codepier:1.24.0
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

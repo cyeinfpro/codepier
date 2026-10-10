@@ -536,6 +536,11 @@ def start_service(base, python):
                           recovery_interval_seconds=60, watchdog_timeout_seconds=120)
     else:
         target=(Path('/etc/systemd/system') if os.geteuid()==0 else Path.home()/'.config/systemd/user')/name
+        if target.parent.is_symlink():
+            raise ValueError('Managed service directory must not be a symlink')
+        if target.exists() or target.is_symlink():
+            # Repair may replace our definition, never another installation's.
+            verify_service_ownership(base)
         target.parent.mkdir(parents=True,exist_ok=True)
         content = ('[Unit]\nDescription=CodePier Agent\nAfter=network-online.target\nWants=network-online.target\n'
             '[Service]\nType=simple\nWorkingDirectory='+str(runtime).replace('%','%%')+'\nExecStart='+

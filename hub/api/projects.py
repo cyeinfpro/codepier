@@ -28,6 +28,11 @@ def make_projects_router(context: HubContext):
     def projects(request: Request):
         return {"projects": runtime.list_projects(auth.panel(request))}
 
+    @router.get("/api/projects/{id}/workflow-assignees")
+    @database_endpoint(store)
+    def workflow_assignees(id: str, request: Request):
+        return runtime.workflows.assignees(id, auth.panel(request))
+
     async def save_project(body: ProjectInput, principal, id=None, request=None):
         alias = body.alias.strip()
         if not re.fullmatch(r"[\w.-]{1,64}", alias, flags=re.UNICODE) or alias in {".", ".."}:
@@ -103,7 +108,7 @@ def make_projects_router(context: HubContext):
                     if current != latest['committed']:
                         raise DevError('PROJECT_CHANGED','原保存完成后项目已变化，请刷新核对',409)
                     return runtime.project_public(runtime.project(latest['target'],principal))
-                if role:
+                if not principal.admin:
                     require_new_mapping(store, principal, body.device_id, result['root'])
                 current = store.one('SELECT * FROM projects WHERE id=?',(id,)) if id else None
                 if current != plan['before']:
@@ -123,11 +128,14 @@ def make_projects_router(context: HubContext):
                     store.db.execute("INSERT INTO projects(id,alias,alias_key,device_id,root,description,mode,allow_tasks,created,space_id,owner_user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)", (target, alias, alias_key(alias), body.device_id, result["root"], body.description, body.mode, int(body.allow_tasks), time.time(),principal.space_id,principal.user_id))
                 if role:
                     store.db.execute('INSERT INTO role_created_projects(role_id,project_id,created) VALUES (?,?,?)', (role['id'],target,time.time()))
+                # A denied final read must roll back the mapping and its receipt,
+                # not leave an inaccessible project after returning an error.
+                saved_project = runtime.project_public(runtime.project(target, principal))
                 latest['committed'] = store.one('SELECT * FROM projects WHERE id=?',(target,))
                 store.db.execute('UPDATE meta SET value=? WHERE key=?',(json.dumps(latest,ensure_ascii=False),key))
             store.audit(principal.actor, "project.updated" if id else "project.created", alias, detail={"root": result["root"], "mode": body.mode, "allow_tasks": body.allow_tasks})
             runtime.publish("project", {"id": target})
-            return runtime.project_public(runtime.project(target, principal))
+            return saved_project
 
 
         return await store.run(commit_mapping)

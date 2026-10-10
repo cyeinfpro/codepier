@@ -24,6 +24,9 @@ export class BrowserWorkspace{
     if(saved==null){saved=(await this.api.storage.local.get('relayWorkspace')).relayWorkspace;migrated=saved!=null;}
     this.state=saved&&saved.version===1?saved:{version:1,profile_id:uuid(),origins:[],pool:[],seen:[]};
     if(!idPattern.test(this.state.profile_id)||!Array.isArray(this.state.pool)||!Array.isArray(this.state.origins)||!Array.isArray(this.state.seen))throw failure('BROWSER_DOCUMENT_UNAVAILABLE','扩展状态无效，请在本机重置扩展');
+    // Legacy/evicted receipts are unknown, never evidence of tab cleanup.
+    this.state.cleanup_receipts=(Array.isArray(this.state.cleanup_receipts)?this.state.cleanup_receipts:[])
+      .filter(r=>r&&idPattern.test(r.lease_id)&&typeof r.tab_cleanup_confirmed==='boolean').slice(-256);
     await this.save();
     if(migrated&&this.api.storage.local.remove)await this.api.storage.local.remove('relayWorkspace');
     return this.state;
@@ -97,17 +100,23 @@ export class BrowserWorkspace{
   }
   async release(id){
     await this.load();const row=this.state.pool.find(r=>r.lease_id===id);
-    if(!row)return {released:true,tab_cleanup_confirmed:true};
+    if(!row)return {released:true,tab_cleanup_confirmed:this.state.cleanup_receipts.find(r=>r.lease_id===id)?.tab_cleanup_confirmed===true};
+    const receipt={lease_id:id,tab_cleanup_confirmed:false};
+    this.state.cleanup_receipts=[...this.state.cleanup_receipts.filter(r=>r.lease_id!==id),receipt].slice(-256);
+    // Relinquish durably before input. A crash or failed final save must leave
+    // only an uncertain receipt, never authority to replay input on a user tab.
+    this.state.pool=this.state.pool.filter(r=>r!==row);
+    await this.save();
     let confirmed=false;
     try{
       await this.owned(row);
       await this.api.tabs.update(row.tab_id,{url:this.api.runtime.getURL('idle.html')});
-      Object.assign(row,{lease_id:null,expires:0,site:null});confirmed=true;
+      Object.assign(row,{lease_id:null,expires:0,site:null});this.state.pool.push(row);confirmed=true;
     }catch{
-      // Do not touch a foreground, moved or manually closed tab. Remove our
-      // ownership instead; status explicitly distinguishes this from cleanup.
-      this.state.pool=this.state.pool.filter(r=>r!==row);
+      // Foreground, moved or closed tabs stay relinquished. The uncertain
+      // receipt distinguishes releasing authority from confirmed tab cleanup.
     }
+    receipt.tab_cleanup_confirmed=confirmed;
     await this.save();return {released:true,tab_cleanup_confirmed:confirmed};
   }
   async expire(){await this.load();for(const row of [...this.state.pool])if(row.lease_id&&row.expires<=this.clock())await this.release(row.lease_id);}

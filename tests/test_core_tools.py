@@ -147,7 +147,7 @@ async def test_two_commands_start_together_and_reads_bypass_busy_workers(agent, 
             return {'exit_code': 0, 'output': 'done'}
         return await real_execute(identifier, tool, current, args)
     monkeypatch.setattr(instance, 'execute', execution)
-    instance.semaphore = asyncio.Semaphore(2)
+    await instance.scheduler.reconfigure({"adaptive": False, "initial": 3})
     jobs = [asyncio.create_task(instance.handle(request(project, 'exec', command='fixture', idempotency_key=uuid.uuid4().hex))) for _ in range(2)]
     try:
         await asyncio.wait_for(both.wait(), 1)
@@ -169,8 +169,9 @@ async def test_accepted_queue_expires_before_lock_release(agent, queue):
     call['not_after'] = time.time() + .1
     if queue == 'worker':
         # Legacy file reads use the same bounded I/O lane as core read.
-        instance.read_semaphore = asyncio.Semaphore(0)
-        await asyncio.wait_for(instance.handle(call), 1)
+        await instance.scheduler.reconfigure({"read_limit": 1})
+        async with instance.scheduler.slot("occupied-io", "other-project", "read"):
+            await asyncio.wait_for(instance.handle(call), 1)
     else:
         async with instance.project_slot(root, write=True, operation_id='holder'):
             await asyncio.wait_for(instance.handle(call), 1)

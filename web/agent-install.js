@@ -280,13 +280,17 @@ async function refreshAgentNodePages() {
   if (['overview', 'devices'].includes(S.page) && !$('.modal')) await renderPage(false);
 }
 async function trackAgentLifecycle(operationId, device, action) {
-  const deadline = Date.now() + 16 * 60 * 1000;
+  const deadline = Date.now() + 16 * 60 * 1000,
+    login = S.session,
+    space = S.space_id;
+  const current = () => S.session === login && S.space_id === space;
   try {
-    while (Date.now() < deadline && S.session) {
+    while (Date.now() < deadline && current() && login) {
       const operation = await tool('operations_wait', {
         operation_id: operationId,
         wait_seconds: 8,
       });
+      if (!current()) return;
       if (!operation.pending) {
         if (operation.state === 'succeeded' && operation.result?.ok) {
           const text =
@@ -309,6 +313,7 @@ async function trackAgentLifecycle(operationId, device, action) {
         await refreshAgentNodePages().catch(() => {});
         for (const delay of [3000, 8000]) {
           await pause(delay);
+          if (!current()) return;
           await refreshAgentNodePages().catch(() => {});
         }
         return;
@@ -316,6 +321,7 @@ async function trackAgentLifecycle(operationId, device, action) {
       await pause(400);
     }
   } catch (error) {
+    if (!current()) return;
     toast(
       `${agentActionLabel(action)}已保存为操作 ${operationId.slice(0, 12)}，状态刷新暂时中断：${error.message}`,
       true,
@@ -352,10 +358,13 @@ function agentLifecycleModal(device, action) {
   );
   const form = $('#agent-lifecycle-form', dialog),
     button = $('#agent-lifecycle-submit', dialog),
-    status = $('#agent-lifecycle-status', dialog);
+    status = $('#agent-lifecycle-status', dialog),
+    login = S.session,
+    space = S.space_id;
+  const currentDialog = () => dialog.isConnected && S.session === login && S.space_id === space;
   form.onsubmit = async (event) => {
     event.preventDefault();
-    if (button.disabled) return;
+    if (button.disabled || !currentDialog()) return;
     const confirmation =
       action === 'agent_uninstall' ? $('#agent-uninstall-confirm', dialog).value : '';
     if (action === 'agent_uninstall' && confirmation !== device.name) {
@@ -365,32 +374,62 @@ function agentLifecycleModal(device, action) {
       return;
     }
     const storage = `codepier-agent-lifecycle:${device.id}:${action}`;
-    const idempotencyKey = sessionValue(storage) || 'panel-' + uid();
+    const previousKey = sessionValue(storage),
+      idempotencyKey = previousKey || 'panel-' + uid();
     sessionValue(storage, idempotencyKey);
     const original = button.innerHTML;
     button.disabled = true;
     button.innerHTML = '<i class="spinner"></i> 正在提交';
     status.textContent = '正在把操作保存到面板，并核对节点状态…';
-    try {
-      const receipt = await api(`/api/devices/${encodeURIComponent(device.id)}/${spec.route}`, {
-        method: 'POST',
-        body: JSON.stringify({ idempotency_key: idempotencyKey, confirmation }),
-        retrySafe: true,
-        requestTimeout: 30000,
-      });
-      if (!receipt?.operation_id) throw new Error('面板没有返回可跟踪的操作编号。');
-      sessionValue(storage, null);
+    const acceptReceipt = async (receipt) => {
+      if (typeof receipt?.operation_id !== 'string' || !receipt.operation_id)
+        throw new Error('面板没有返回可跟踪的操作编号。');
+      // A dismissed dialog has not acknowledged this receipt. Keep its key so
+      // reopening the action recovers it instead of allocating another operation.
+      if (!currentDialog()) return;
+      if (sessionValue(storage) === idempotencyKey) sessionValue(storage, null);
       closeModal(dialog);
       toast(`${spec.label}已保存 · ${receipt.operation_id.slice(0, 12)}`);
       trackAgentLifecycle(receipt.operation_id, device, action);
       await refreshAgentNodePages().catch(() => {});
+    };
+    try {
+      // A prior click may have succeeded even when its HTTP response was lost.
+      // Recover the receipt before device-online checks or package-version changes.
+      if (previousKey) {
+        const found = await tool('operations_list', {
+          idempotency_key: idempotencyKey,
+          limit: 1,
+        });
+        if (!currentDialog()) return;
+        const operation = found.operations?.find(
+          (row) => row.device_id === device.id && row.tool === action,
+        );
+        if (operation) {
+          await acceptReceipt({ operation_id: operation.id });
+          return;
+        }
+      }
+      const receipt = await api(`/api/devices/${encodeURIComponent(device.id)}/${spec.route}`, {
+        method: 'POST',
+        body: JSON.stringify({ idempotency_key: idempotencyKey, confirmation }),
+        // One attempt per click makes an explicit admitted:false response meaningful.
+        // Manual recovery always reuses the saved key.
+        requestTimeout: 30000,
+      });
+      await acceptReceipt(receipt);
     } catch (error) {
-      if (error.code !== 'NETWORK_UNCERTAIN') sessionValue(storage, null);
-      if (dialog.isConnected) {
-        status.textContent =
-          error.code === 'NETWORK_UNCERTAIN'
-            ? '提交结果暂时无法确认。已保留同一幂等键；网络恢复后点击同一按钮会核实原操作，不会重复创建。'
-            : error.message;
+      if (S.session !== login || S.space_id !== space) return;
+      if (error.operation_id) {
+        await acceptReceipt({ operation_id: error.operation_id });
+        return;
+      }
+      const notAccepted = !previousKey && error.admitted === false;
+      if (notAccepted && sessionValue(storage) === idempotencyKey) sessionValue(storage, null);
+      if (currentDialog()) {
+        status.textContent = notAccepted
+          ? error.message
+          : `${error.message} 提交结果尚未确认；已保留同一幂等键，重试会先查找原操作，不会重复创建。`;
         button.disabled = false;
         button.innerHTML = original;
       }

@@ -11,6 +11,8 @@ import math
 import re
 import unicodedata
 
+from shared.token_cost import DEFAULT_CACHE_READ_PERCENT, DEFAULT_REFERENCE_MODEL, combined_total, reference_cost
+
 VERSION = "codepier-text-v1"
 MAX_CHARACTERS = 262_144
 MAX_NODES = 10_000
@@ -216,7 +218,7 @@ def usage(input_metric=None, output_metric=None):
             "actual_usage": None}
 
 
-def summarize(rows):
+def summarize(rows, *, cache_read_percent=DEFAULT_CACHE_READ_PERCENT, reference_model=DEFAULT_REFERENCE_MODEL):
     directions = {}
     for direction in ("input", "output"):
         metrics = [(row.get("token_usage") or {}).get(direction) or unavailable() for row in rows]
@@ -227,9 +229,12 @@ def summarize(rows):
             "partial_attempts": sum(metric["state"] == "partial" for metric in measured),
             "source_truncated_attempts": sum(metric["source_truncated"] for metric in measured),
         }
-    return {"version": VERSION, "kind": "estimate", "scope": "returned_activity_page",
+    result = {"version": VERSION, "kind": "estimate", "scope": "returned_activity_page",
             "wire_attempts": len(rows),
             "measured_attempts": sum(bool(row.get("token_usage")) for row in rows),
             "unavailable_attempts": sum(not row.get("token_usage") for row in rows),
             "distinct_server_operation_ids": len({row["operation_id"] for row in rows if row.get("operation_id")}),
             **directions, "actual_usage": None}
+    result["total"] = combined_total(result)
+    result["reference_cost"] = reference_cost(result, cache_read_percent, reference_model)
+    return result

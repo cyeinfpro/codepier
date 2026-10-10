@@ -54,7 +54,7 @@ def validate_modern(body,headers):
     if info is not None and (not isinstance(info,dict) or not isinstance(info.get('name'),str) or not isinstance(info.get('version'),str)):
         raise ProtocolError(-32602,'Invalid clientInfo')
     level=meta.get(PREFIX+'logLevel')
-    if level is not None and level not in {'debug','info','notice','warning','error','critical','alert','emergency'}:
+    if PREFIX+'logLevel' in meta and (not isinstance(level,str) or level not in {'debug','info','notice','warning','error','critical','alert','emergency'}):
         raise ProtocolError(-32602,'Invalid logLevel')
     if not isinstance(caps.get('extensions',{}),dict):raise ProtocolError(-32602,'Invalid extension capabilities')
     for name,value in caps.get('extensions',{}).items():

@@ -5,6 +5,7 @@ import json
 import time
 
 from shared.token_estimate import summarize
+from shared.token_cost import reference_cost
 from hub import iam
 
 MAX_ROWS = 10_000
@@ -69,4 +70,8 @@ class MCPUsage:
                 measured[item["activity_id"]] = json.loads(item["metrics"])
         for row in rows:
             row["token_usage"] = measured.get(row["id"])
+            if row["token_usage"]:
+                # Reprice only authorized visible text on read. Pricing metadata
+                # is never persisted as measured usage or inferred cache hits.
+                row["token_usage"]["reference_cost"] = reference_cost(row["token_usage"])
         return summarize(rows)

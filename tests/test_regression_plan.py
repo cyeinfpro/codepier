@@ -70,6 +70,25 @@ def test_serial_regression_marker_marks_only_its_job_exclusive():
     assert all(flagged[node] is False for node in NODES[:3])
 
 
+def test_computer_timeout_collection_runs_in_exclusive_job():
+    from types import SimpleNamespace
+    from tests.conftest import pytest_collection_modifyitems
+
+    module = 'tests/test_computer_timeout_diagnostics.py'
+    node = module + '::test_human_wait_does_not_consume_native_timeout[0.35]'
+    marker_names = []
+    item = SimpleNamespace(path=Path(__file__).with_name(Path(module).name), fixturenames=[],
+                           add_marker=lambda marker: marker_names.append(marker.name))
+    config = SimpleNamespace(getoption=lambda option: False)
+    pytest_collection_modifyitems(config, [item])
+
+    jobs = plan_jobs([node], {node: marker_names})
+    assert 'serial_regression' in marker_names
+    assert len(jobs) == 1
+    assert jobs[0]['exclusive'] is True and jobs[0]['limited'] is False
+    assert jobs[0]['nodeids'] == [node]
+
+
 def test_browser_and_integration_markers_use_limited_pool_without_exclusive_mode():
     markers = {NODES[0]: ['browser'], NODES[3]: ['integration']}
     jobs = plan_jobs(NODES, markers)

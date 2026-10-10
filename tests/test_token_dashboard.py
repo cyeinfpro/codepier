@@ -139,3 +139,55 @@ def test_panel_user_and_space_isolation_before_options_and_aggregate(team):
     other = must(browsers['bob'].get('/api/token-usage?connection=' + grants['alice']))
     assert other['summary']['wire_attempts'] == 0
     assert must(browsers['legacy'].get('/api/token-usage'))['summary']['wire_attempts'] == 0
+
+
+
+def test_reference_cost_api_default_adjustable_and_authority_scoped(api, monkeypatch):
+    app, client, token = api
+    materialize(monkeypatch, app)
+    call(client, token)
+    original = client.get('/api/token-usage').json()
+    summary = original['summary']
+    cost = summary['reference_cost']
+    assert original['schema_version'] == 2
+    assert summary['total']['estimated_tokens'] == summary['input']['estimated_tokens'] + summary['output']['estimated_tokens']
+    assert cost['amount_nano_usd'] == summary['input']['estimated_tokens'] * 50000 + summary['output']['estimated_tokens'] * 1900
+    assert cost['pricing']['cache_read_percent'] == 90
+    assert cost['actual_usage'] is None
+    no_cache = client.get('/api/token-usage?cache_read_percent=0').json()
+    assert no_cache['summary']['total'] == summary['total']
+    assert no_cache['summary']['reference_cost']['amount_nano_usd'] == summary['input']['estimated_tokens'] * 50000 + summary['output']['estimated_tokens'] * 10000
+    assert no_cache['trend'][0]['reference_cost']['pricing']['cache_read_percent'] == 0
+    for value in ('-1', '101', '90.5', 'nan', 'bad'):
+        assert client.get('/api/token-usage?cache_read_percent=' + value).status_code == 422
+    excluded = client.get('/api/token-usage?connection=not-visible').json()
+    assert excluded['summary']['reference_cost']['amount_nano_usd'] is None
+    assert excluded['summary']['total']['estimated_tokens'] is None
+    for invalid in (-1, 101, .5, True):
+        with pytest.raises(DevError):
+            read(app, token, cache_read_percent=invalid)
+
+
+@pytest.mark.parametrize('model,input_rate,output_rate', [('gpt-6-astra', 1900, 50000), ('gpt-6.1-sol', 290, 10000), ('gpt-6-luna', 19, 500)])
+def test_reference_model_api_filters_trends_and_no_store_mutation(api, monkeypatch, model, input_rate, output_rate):
+    app, client, token = api
+    materialize(monkeypatch, app)
+    call(client, token)
+    original = read(app, token)
+    with app.state.store.lock:
+        before = app.state.store.db.total_changes
+        selected = read(app, token, reference_model=model)
+        assert app.state.store.db.total_changes == before
+    response = client.get('/api/token-usage', params={'reference_model': model})
+    assert response.status_code == 200
+    summary = selected['summary']
+    assert summary['total'] == original['summary']['total']
+    assert summary['reference_cost']['pricing']['model'] == model
+    assert summary['reference_cost']['amount_nano_usd'] == (
+        summary['input']['estimated_tokens'] * output_rate + summary['output']['estimated_tokens'] * input_rate)
+    assert selected['trend'][0]['reference_cost']['pricing']['model'] == model
+    assert selected['authority_key'] == original['authority_key']
+    assert summary['reference_cost']['reasoning_tokens'] is None
+    assert summary['reference_cost']['cache_write_tokens'] is None
+    assert client.get('/api/token-usage?reference_model=unknown').status_code == 400
+    assert client.get('/api/token-usage?reference_model=' + 'x' * 65).status_code == 422

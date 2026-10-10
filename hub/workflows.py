@@ -5,7 +5,7 @@ Mutations, replay receipts and audit events commit in one SQLite transaction.
 """
 from __future__ import annotations
 from hub.access_profiles import effective_grant
-from hub.roles import role_project_scopes
+from hub.roles import role_project_scopes, require_role
 from hub import iam
 
 import base64
@@ -167,6 +167,47 @@ class Workflows:
             raise DevError("EVIDENCE_REQUIRED", "完成步骤必须关联至少一个本轮成功操作，并说明验收结论", 409)
         return evidence
 
+    def assignee_grant(self, project, principal, identifier):
+        """Use the same current policy for discovery and the final creation."""
+        grant = self.store.one("SELECT * FROM grants WHERE id=? AND user_id=? AND space_id=?",
+                               (identifier, principal.user_id, principal.space_id))
+        if not grant:
+            raise DevError('INVALID_ASSIGNEE', '只能委派给自己在当前空间中的连接', 403)
+        try:
+            scopes, allowed, _ = effective_grant(self.store, grant)
+            # Do not generate denied-operation audit writes while listing candidates.
+            require_role(self.store, self.runtime.grant_principal(grant), 'write', project_id=project['id'])
+        except DevError as exc:
+            raise DevError("INVALID_ASSIGNEE", "该授权或访问 Profile 已停用", 403) from exc
+        if not {"read", "write"}.issubset(scopes):
+            raise DevError("INVALID_ASSIGNEE", "请选择未撤销且具有读取、写入权限的 MCP 授权", 403)
+        if not self.store.one("SELECT 1 AS active FROM tokens WHERE grant_id=? AND expires>? LIMIT 1",
+                              (identifier, time.time())):
+            raise DevError("INVALID_ASSIGNEE", "该授权已无有效令牌，请先重新建立可用的 MCP 连接", 403)
+        if "*" not in allowed and project["id"] not in allowed:
+            raise DevError("INVALID_ASSIGNEE", "该 MCP 授权不能访问此项目", 403)
+        return grant
+
+    @iam.read_decision
+    def assignees(self, project_id, principal):
+        """Return only this owner's currently eligible connections, without credentials."""
+        principal = iam.live_principal(self.store, principal)
+        project = self.runtime.project(project_id, principal)
+        require_role(self.store, principal, 'write', project_id=project['id'])
+        if project["mode"] != "write":
+            raise DevError("READ_ONLY", "只读项目不能建立工作流", 403)
+        candidates = []
+        if principal.admin:
+            rows = self.store.all("SELECT id FROM grants WHERE user_id=? AND space_id=? AND revoked=0 ORDER BY created DESC,id",
+                                  (principal.user_id, principal.space_id))
+            for row in rows:
+                try:
+                    grant = self.assignee_grant(project, principal, row['id'])
+                except DevError:
+                    continue
+                candidates.append({key: grant[key] for key in ('id', 'label', 'authorization_mode')})
+        return {"project_id": project["id"], "assignees": candidates}
+
     def create(self, args, principal):
         with self.store.lock, self.store.db:
             self.store.db.execute("BEGIN IMMEDIATE")
@@ -179,20 +220,7 @@ class Workflows:
                 raise DevError("ASSIGNEE_FORBIDDEN", "MCP 调用不能为其他授权建立任务", 403)
             assignee = requested if principal.admin else principal.grant_id
             if principal.admin and assignee is not None:
-                grant = self.store.one("SELECT * FROM grants WHERE id=? AND user_id=? AND space_id=?", (assignee, principal.user_id, principal.space_id))
-                if not grant:
-                    raise DevError('INVALID_ASSIGNEE', '只能委派给自己在当前空间中的连接', 403)
-                try:
-                    scopes, allowed, _ = effective_grant(self.store, grant)
-                    self.runtime.authorize(self.runtime.grant_principal(grant), 'write', project_id=project['id'])
-                except DevError as exc:
-                    raise DevError("INVALID_ASSIGNEE", "该授权或访问 Profile 已停用", 403) from exc
-                if not {"read", "write"}.issubset(scopes):
-                    raise DevError("INVALID_ASSIGNEE", "请选择未撤销且具有读取、写入权限的 MCP 授权", 403)
-                if not self.store.one("SELECT 1 AS active FROM tokens WHERE grant_id=? AND expires>? LIMIT 1", (assignee, time.time())):
-                    raise DevError("INVALID_ASSIGNEE", "该授权已无有效令牌，请先重新建立可用的 MCP 连接", 403)
-                if "*" not in allowed and project["id"] not in allowed:
-                    raise DevError("INVALID_ASSIGNEE", "该 MCP 授权不能访问此项目", 403)
+                self.assignee_grant(project, principal, assignee)
             fingerprint = digest(json.dumps({"action": "create", "args": args, "project_id": project["id"]}, sort_keys=True))
             old = self.replay(args, principal, fingerprint)
             if old:

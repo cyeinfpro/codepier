@@ -11,9 +11,10 @@
 - [CLI 会话](CLI_SESSIONS.md)：Pi、Codex 和 Claude Code
 - [浏览器集成](INTEGRATIONS-20260917.md)与[桌面控制](COMPUTER_USE.md)
 - [统一设置中心](SETTINGS_CENTER.md)：个人、实例、项目和节点的设置入口
+- [自适应并发与队列](ADAPTIVE_SCHEDULER.md)：并发上下限、资源压力、项目公平和生效回执
 - [文件入站](FILE_IMPORT_INGRESS.md)：限制、权限、客户端兼容证据、升级顺序
 - [Hub 入站设置](hub-file-import-settings.md)：预览、确认、保存、继承与关闭
-- [Token 用量说明](mcp-token-usage.md)：工具文本估算、缺失与真实 usage 的边界
+- [Token 与费用估算](mcp-token-usage.md)：MCP 工具文本、90% 输入缓存假设、参考模型、价格分项和真实用量边界
 - [常见问题](FAQ.md)
 
 ## 权限、协作与维护

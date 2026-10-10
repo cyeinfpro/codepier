@@ -108,9 +108,10 @@ class NativeClient:
             raise DevError('COMPUTER_PROVIDER_MISSING', '未找到可执行的本机 Codex Computer Use；请在本机安装/启用后重试')
         env = {k: v for k, v in os.environ.items() if k in {'PATH', 'HOME', 'USER', 'TMPDIR', 'LANG', 'LC_ALL', 'XDG_RUNTIME_DIR', 'DISPLAY', 'SYSTEMROOT', 'SystemRoot'}}
         env['CODEX_HOME'] = self.info['codex_home']
-        spawning = asyncio.create_task(asyncio.create_subprocess_exec(self.info['launcher'], 'mcp',
+        from agent.computer_process import spawn_provider
+        spawning = asyncio.create_task(spawn_provider(self.info['launcher'], 'mcp',
             cwd=self.info['plugin_root'], env=env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE, limit=8*1024*1024, start_new_session=os.name != 'nt'))
+            stderr=asyncio.subprocess.PIPE, limit=8*1024*1024))
         try:
             self.process = await asyncio.shield(spawning)
         except asyncio.CancelledError:
@@ -224,6 +225,23 @@ class NativeClient:
     async def close(self):
         self.closed = True
         p = self.process
+        if p and getattr(p, 'codepier_supervised', False):
+            from agent.computer_process import CLEANUP_FAILED
+            try:
+                if p.returncode is None:
+                    with contextlib.suppress(ProcessLookupError):
+                        p.terminate()  # Only our live supervisor, never a historical provider PGID.
+                    try:
+                        await asyncio.wait_for(asyncio.shield(p.wait()), 8)
+                    except asyncio.TimeoutError as exc:
+                        raise DevError('COMPUTER_CLEANUP_UNCONFIRMED', '本机桌面运行器仍在清理自身进程；未确认停止，请核查本机后再建立新会话') from exc
+                if p.returncode == CLEANUP_FAILED:
+                    raise DevError('COMPUTER_CLEANUP_UNCONFIRMED', '本机桌面运行器未能确认自身子进程已停止，请在本机核查')
+            finally:
+                if self.stderr_task and self.stderr_task is not asyncio.current_task():
+                    self.stderr_task.cancel()
+                    await asyncio.gather(self.stderr_task, return_exceptions=True)
+            return
         if p and p.returncode is None:
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 if os.name != 'nt':

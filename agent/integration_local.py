@@ -45,6 +45,9 @@ class LocalServer:
             async with asyncio.timeout(5):body=json.loads(await reader.readexactly(size))
             if not isinstance(body,dict) or not valid_json_value(body):raise DevError('INVALID_JSON','请求格式无效')
             data=await self.route(path,body)
+        except asyncio.CancelledError:
+            writer.close();self.tasks.discard(task)
+            raise
         except DevError as exc:status=exc.status;data={'error':{'code':exc.code,'message':exc.message}}
         except (ValueError,UnicodeError,asyncio.IncompleteReadError,asyncio.LimitOverrunError,asyncio.TimeoutError):status=400;data={'error':{'code':'INVALID_HTTP','message':'本机请求格式无效或超时'}}
         except Exception:status=500;data={'error':{'code':'LOCAL_ERROR','message':'本机服务未确认结果，请核查原任务'}}
@@ -82,11 +85,21 @@ class LocalServer:
                '_coding_device':project['device_id'],'_execution_policy':{'origin':'panel'}}
         prior=self.agent.journal.start(identifier,{'tool':'integration_control','project':owner,'args':args})
         if prior is not None:return prior
+        cancelled=None
         try:
             self.agent.journal.mark_running(identifier)
             result={'ok':True,'data':await self.agent.integrations.control.action(identifier,owner,args)}
         except DevError as exc:result={'ok':False,'error':{'code':exc.code,'message':exc.message}}
+        except asyncio.CancelledError as exc:
+            cancelled=exc
+            result={'ok':False,'error':{'code':'INTERRUPTED','message':'本机控制在执行期间中断；结果未确认，不会重放，请先核查项目状态'}}
+        except Exception:
+            result={'ok':False,'error':{'code':'LOCAL_ERROR','message':'本机控制未取得可确认结果；不会重放，请先核查项目状态'}}
+        # Once execution began, an exception never makes a control safe to retry.
+        # Persist uncertainty without private exception text. A failed receipt
+        # write must propagate to the generic HTTP error, never claim success.
         self.agent.journal.finish(identifier,result);self.agent.journal.ack(identifier)
+        if cancelled is not None:raise cancelled
         return result
 
     async def close(self):

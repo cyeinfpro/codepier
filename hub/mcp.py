@@ -218,6 +218,7 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
             elif method=='resources/templates/list':result={'resourceTemplates':[]}
             elif method=='resources/read':
                 uri=params.get('uri')
+                if not isinstance(uri,str):return failure(identifier,-32602,'uri must be a string',400 if modern else 200)
                 if 'read' not in principal.scopes:raise DevError('INSUFFICIENT_SCOPE','缺少读取权限',403)
                 if uri in mcp_apps.RESOURCES or uri in mcp_apps.LEGACY_RESOURCES:item=await runtime.store.run(mcp_apps.read_resource,uri,request_public_url)
                 elif uri=='rd://projects':item={'uri':uri,'mimeType':'application/json','text':json.dumps(await runtime.store.run(project_resources,principal),ensure_ascii=False)}

@@ -50,6 +50,7 @@ mkdir "$lock" 2>/dev/null || { echo '另一个安装进程或未完成安装锁�
 printf '%s\n' "$$" > "$lock/pid"
 migration_started=0
 env_tmp=''
+probe_compose=''
 cleanup() {
   status=$?
   trap - EXIT
@@ -59,6 +60,7 @@ cleanup() {
     "$bootstrap_python" "$root/scripts/migrate_hub.py" rollback --root "$root" || true
   fi
   [[ -z "$env_tmp" ]] || rm -f -- "$env_tmp"
+  [[ -z "$probe_compose" ]] || rm -f -- "$probe_compose"
   unset CODEPIER_ADMIN_PASSWORD RD_ADMIN_PASSWORD
   if [[ -f "$lock/pid" && "$(cat "$lock/pid")" == "$$" ]]; then rm -f -- "$lock/pid"; rmdir "$lock" 2>/dev/null || true; fi
   exit "$status"
@@ -108,10 +110,13 @@ migration_started=1
 # initialization input still restores the legacy installation at this point.
 hub_data_volume=$("$bootstrap_python" scripts/migrate_hub.py probe-volume --root "$root")
 needs_init=0
-if docker compose run --rm --no-deps --volume "$hub_data_volume:/app/data:ro" hub python -c 'import os,sys,sqlite3; from pathlib import Path; p=Path(os.environ["HUB_DATA_DIR"])/"hub.sqlite3"; sys.exit(3) if not p.exists() else None; s=sqlite3.connect(p.as_uri()+"?mode=ro",uri=True); found=s.execute("SELECT id FROM users LIMIT 1").fetchone(); s.close(); sys.exit(0 if found else 3)'; then
+probe_compose=$("$bootstrap_python" scripts/migrate_hub.py probe-compose --root "$root")
+probe_status=0
+COMPOSE_FILE="$probe_compose" docker compose run --rm --no-deps --volume "$hub_data_volume:/app/data:ro" hub python -c 'import os,sys,sqlite3; from pathlib import Path; p=Path(os.environ["HUB_DATA_DIR"])/"hub.sqlite3"; sys.exit(3) if not p.exists() else None; s=sqlite3.connect(p.as_uri()+"?mode=ro",uri=True); found=s.execute("SELECT id FROM users LIMIT 1").fetchone(); s.close(); sys.exit(0 if found else 3)' || probe_status=$?
+"$bootstrap_python" scripts/migrate_hub.py probe-finished --root "$root"
+if ((probe_status == 0)); then
   echo '检测到已有管理员，保留原账号和数据。'
 else
-  probe_status=$?
   if ((probe_status != 3)); then echo '无法检查管理员或数据卷；没有尝试重新初始化。' >&2; exit "$probe_status"; fi
   needs_init=1
   if [[ -z "$username" && "$noninteractive" == 0 ]]; then read -r -p '管理员用户名 [admin]：' username; fi

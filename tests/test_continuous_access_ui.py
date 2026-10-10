@@ -28,6 +28,7 @@ def access_page(access_browser, stack):
     page.fill('#username', 'admin')
     page.fill('#password', stack.password)
     page.click('#login-form button')
+    page.locator('.settings-groups [data-settings-group="connect"]').click()
     expect(page.locator('#access-settings-form')).to_be_visible()
     try:
         yield page, errors, kind
@@ -41,6 +42,8 @@ def test_settings_preselect_new_grant_without_desktop_access_and_preserve_other_
     form = page.locator('#access-settings-form')
     expect(form.locator('[name="all_projects"]')).not_to_be_checked()
     expect(page.locator('#access-batch-form [name="apply_to_existing"]')).to_be_disabled()
+    page.locator('#settings-more > summary').click()
+    expect(page.locator('#settings-form')).to_be_visible()
     original_url = page.locator('#settings-form [name="public_url"]').input_value()
     page.fill('#settings-form [name="public_url"]', original_url + '/unsaved')
     form.locator('[name="all_projects"]').check()

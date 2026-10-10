@@ -1118,6 +1118,29 @@
     margin: 8px 0 6px;
   }
 }
+/* The cost-model note and partial-data notice remain visible alongside the
+   figures. Short desktops reclaim spacing, without shrinking text or controls. */
+@media (min-width: 901px) and (max-height: 680px) {
+  .editorial-board > .overview-summary {
+    padding-block: 8px;
+  }
+  .overview-summary-heading {
+    margin-bottom: 8px;
+  }
+  .overview-summary .stat-value {
+    margin: 6px 0 4px;
+  }
+  .overview-summary .token-dashboard {
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+  }
+  .overview-summary .token-dashboard-metrics {
+    margin-block: 0.35rem 0.15rem;
+  }
+  .overview-summary .token-dashboard-note {
+    margin-block: 0.25rem;
+  }
+}
 @media (max-width: 640px) {
   .editorial-board > .overview-summary {
     padding: 22px 20px;

@@ -7,6 +7,7 @@ history. No credentials are printed and no Docker socket is mounted in a worker.
 """
 from __future__ import annotations
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -117,7 +118,10 @@ def rollback(path,docker):
         save(path,state,stage='recovery_required',error='New Hub may have written data; both volumes retained. No stale database was restored.')
         raise RuntimeError(state['error'])
     errors=[]
-    try:networks.restore(state.get('networks',[]),docker)
+    try:
+        networks.remove_replacements(state.get('replacement_networks', []), docker,
+                                     state.get('transaction', ''), lambda: save(path, state))
+        networks.restore(state.get('networks',[]),docker)
     except Exception as exc:
         save(path,state,stage='recovery_required',error=str(exc));raise
     for row in reversed(state.get('containers',[])):
@@ -216,16 +220,67 @@ def prepare(path,docker):
         rollback(path,docker);raise
 
 
+
+def probe_compose(path, docker):
+    """Freeze the read-only probe config with transaction-owned replacement networks."""
+    path = Path(path)
+    state = json.loads(path.read_text()) if path.exists() else {}
+    mutable = state.get('stage') == 'prepared' and not state.get('write_boundary')
+    previous = state.get('probe_compose') if mutable else None
+    config = docker.json(['compose', 'config', '--format', 'json'])
+    source_sha = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
+    if previous:
+        if previous.get('source_sha256') != source_sha:
+            raise RuntimeError('Compose configuration changed after probe preparation')
+        saved = path.parent / previous['name']
+        if (saved.is_symlink() or saved.parent != path.parent or not saved.name.startswith('.codepier-probe-') or
+                not saved.is_file() or hashlib.sha256(saved.read_bytes()).hexdigest() != previous['sha256']):
+            raise RuntimeError('Previous Compose probe snapshot changed; inspect migration before retrying')
+        return saved
+    replacements = []
+    if mutable:
+        config, replacements = networks.prepare_probe(
+            config, state.get('networks', []), state['transaction'], docker)
+    fd, name = tempfile.mkstemp(prefix='.codepier-probe-', suffix='.json', dir=path.parent)
+    target = Path(name)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            # docker compose config already escapes literal dollars for round-trip use.
+            json.dump(config, stream, ensure_ascii=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if mutable:
+            save(path, state, replacement_networks=replacements,
+                 probe_compose={'name': target.name, 'sha256': hashlib.sha256(target.read_bytes()).hexdigest(),
+                                'source_sha256': source_sha})
+        return target
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
+
+
+def probe_finished(path, docker):
+    path = Path(path)
+    state = json.loads(path.read_text()) if path.exists() else {}
+    if state.get('stage') == 'prepared' and not state.get('write_boundary'):
+        networks.observe_replacements(state.get('replacement_networks', []), docker,
+                                      state['transaction'], lambda: save(path, state))
+    return {'stage': 'probe-checked'}
+
+
 def main():
-    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('action',choices=['prepare','probe-volume','write-boundary','proxy-trust','commit','rollback'])
+    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('action',choices=['prepare','probe-volume','probe-compose','probe-finished','write-boundary','proxy-trust','commit','rollback'])
     parser.add_argument('--root',type=Path,default=Path.cwd());args=parser.parse_args();root=args.root.resolve();path=root/STATE
     os.chdir(root);os.environ['COMPOSE_PROJECT_NAME']='codepier';docker=Docker()
     try:
+        if args.action=='probe-compose':
+            print(probe_compose(path, docker));return 0
         if args.action=='probe-volume':
             plans,_=inspect_layout(docker.json(['compose','config','--format','json']),[])
             print(plans[0]['destination']);return 0
         if args.action=='prepare':result=prepare(path,docker)
         elif args.action=='rollback':result=rollback(path,docker)
+        elif args.action=='probe-finished':result=probe_finished(path,docker)
         elif args.action=='proxy-trust':
             state=json.loads(path.read_text()) if path.exists() else {}
             result=proxy.apply(root,state.get('proxy_trust',[]),docker)

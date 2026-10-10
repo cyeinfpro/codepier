@@ -26,9 +26,10 @@ def callback_url(value):
         if not isinstance(value, str) or not 1 <= len(value) <= 2048 or any(ord(c) < 33 or ord(c) > 126 for c in value):
             raise ValueError()
         parsed = urlsplit(value)
+        port = 443 if parsed.port is None else parsed.port
         if (parsed.scheme != 'https' or not parsed.hostname or parsed.username is not None
                 or parsed.password is not None or parsed.fragment or '%' in parsed.hostname
-                or '\\' in value or not 1 <= (parsed.port or 443) <= 65535):
+                or '\\' in value or not 1 <= port <= 65535):
             raise ValueError()
         url = httpx.URL(value)
         if url.host != parsed.hostname or url.userinfo:
@@ -53,7 +54,7 @@ def public_address(value):
 
 async def callback_destination(url):
     parsed = callback_url(url)
-    addresses = await resolve(parsed.hostname, parsed.port or 443)
+    addresses = await resolve(parsed.hostname, 443 if parsed.port is None else parsed.port)
     if not addresses or not all(public_address(address) for address in addresses):
         raise DevError('CALLBACK_ADDRESS_REJECTED', '回调解析到了非公网单播地址，连接已拒绝', 400)
     return httpx.URL(url).copy_with(host=addresses[0]), parsed.netloc, parsed.hostname

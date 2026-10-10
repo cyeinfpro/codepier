@@ -7,6 +7,7 @@ from playwright.sync_api import expect, sync_playwright
 from scripts.ui_comfort_audit import MEASURE
 from tests.test_ui_unification import _login, _navigate, _prepare_native_fixture, _set_scheme
 from tests.browser_support import chat_page
+from shared.token_estimate import summarize, usage
 
 ROOT=Path(__file__).resolve().parents[1]
 OUT=ROOT/'docs/evidence/ui-comfort-20260916/verification'
@@ -83,6 +84,81 @@ def test_desktop_essentials_fit_and_text_is_readable(stack,engine,scheme,width,h
         (OUT/f'{engine}-{scheme}-{width}-{height}.json').write_text(json.dumps(measurements,ensure_ascii=False,indent=2))
         assert not errors,errors
         browser.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+@pytest.mark.parametrize('scheme', ['light', 'dark'])
+def test_short_desktop_token_states_keep_figures_notes_and_actions_reachable(stack, engine, scheme):
+    """Exercise real overview layout with complete, missing and partial telemetry."""
+    OUT.mkdir(parents=True, exist_ok=True)
+
+    def metric(n):
+        return dict(state='available', estimated_tokens=n, low=n, high=n,
+                    characters=n, utf8_bytes=n, source_truncated=False)
+
+    samples = {
+        'unknown': summarize([]),
+        'populated': summarize([{'id': 1, 'token_usage': usage(metric(1200), metric(3400))}]),
+        'partial': summarize([{'id': 1, 'token_usage': usage(metric(1200), None)}]),
+    }
+    selected = {'name': 'unknown'}
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch()
+        page = browser.new_page(viewport={'width': 1180, 'height': 640},
+                                color_scheme=scheme, reduced_motion='reduce')
+        errors = []
+        page.on('pageerror', lambda error: errors.append(str(error)))
+
+        def overview_fixture(route):
+            response = route.fetch()
+            data = response.json()
+            data['token_usage']['summary'] = samples[selected['name']]
+            route.fulfill(response=response, json=data)
+
+        page.route('**/api/overview', overview_fixture)
+        try:
+            _login(page, stack, 'projects')
+            _set_scheme(page, scheme)
+            for name, total in [('unknown', '未记录'), ('populated', '约 4.6K'),
+                                ('partial', '约 1.2K')]:
+                selected['name'] = name
+                _navigate(page, 'overview')
+                card = page.locator('.overview-summary [data-token-dashboard]')
+                expect(card.locator('.is-total strong')).to_have_text(total)
+                expect(card.locator('.is-total strong')).to_be_visible()
+                expect(card.locator('.is-cost strong')).to_be_visible()
+                if name == 'unknown':
+                    expect(card.locator('.is-cost strong')).to_have_text('未记录')
+                else:
+                    assert card.locator('.is-cost strong').inner_text().startswith('$')
+                note = card.locator('.token-dashboard-note').first
+                expect(note).to_be_visible()
+                expect(note).to_contain_text('GPT-6 Astra · Standard API · 输入缓存 90% 假设')
+                partial = card.locator('.token-dashboard-note').filter(has_text='仅已记录部分')
+                if name == 'partial':
+                    expect(partial).to_be_visible()
+                else:
+                    expect(partial).to_have_count(0)
+                details = card.locator('[data-token-filters]')
+                assert not details.evaluate('el => el.open')
+                expect(details.locator('summary').first).to_be_visible()
+                within(page, '.stats,.codepier-focus-card,.workspace-operations', 1180, 640)
+                within(page, '.token-dashboard-metric,.token-dashboard-note,'
+                             '[data-token-filters] > summary', 1180, 640)
+                report = page.evaluate(MEASURE)
+                assert report['documentWidth'] <= 1181
+                assert not report['failures'], (name, scheme, report['failures'])
+                page.screenshot(path=str(OUT / f'{engine}-{scheme}-1180-640-token-{name}.png'),
+                                animations='disabled')
+            # Details still expose the original controls at the short height.
+            details.locator('summary').first.click()
+            expect(card.locator('[data-token-filter=period]')).to_be_visible()
+            expect(card.locator('[data-token-filter=reference_model]')).to_be_visible()
+            expect(card.locator('[data-token-filter=cache_read_percent]')).to_have_value('90')
+            expect(card.locator('[data-token-export]')).to_be_visible()
+            assert not errors
+        finally:
+            browser.close()
 
 
 @pytest.mark.parametrize('scheme',['light','dark'])

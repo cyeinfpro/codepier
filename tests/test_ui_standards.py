@@ -78,8 +78,15 @@ def test_busy_preserves_geometry_name_nodes_and_duplicate_guard(stack, engine):
         browser = getattr(pw, engine).launch()
         page = browser.new_page(viewport={"width": 1440, "height": 1000})
         _login(page, stack, "settings")
+        # Follow the settings center navigation so the control is in the
+        # accessibility tree before testing the shared busy-state contract.
+        page.locator('.settings-groups [data-settings-group="connect"]').click()
+        page.locator("#settings-more > summary").click()
         button = page.locator('#settings-form button[type="submit"]')
+        expect(button).to_be_visible()
+        expect(button).to_have_accessible_name("保存并核对")
         original = button.bounding_box()
+        assert original and original["width"] > 0 and original["height"] > 0
         page.evaluate("""() => {
           const b=document.querySelector('#settings-form button[type="submit"]');
           window.savedButton=b;window.savedButtonChild=b.firstChild;window.busyCalls=0;

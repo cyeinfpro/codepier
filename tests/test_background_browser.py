@@ -48,7 +48,7 @@ def website(tmp_path):
 
 def test_extension_contract_suite_and_javascript_syntax():
     node=shutil.which('node');assert node,'Node is required for extension tests'
-    result=subprocess.run([node,'--test',str(BASE/'web/browser-extension/workspace.test.mjs'),str(BASE/'web/browser-extension/background.test.mjs')],cwd=BASE,capture_output=True,text=True,timeout=30)
+    result=subprocess.run([node,'--test',str(BASE/'web/browser-extension/workspace.test.mjs'),str(BASE/'web/browser-extension/background.test.mjs'),str(BASE/'web/browser-extension/cleanup.test.mjs')],cwd=BASE,capture_output=True,text=True,timeout=30)
     assert result.returncode==0,result.stdout+result.stderr
     for path in [BASE/'web/integrations.js',BASE/'web/app.js',*list((BASE/'web/browser-extension').glob('*.js'))]:
         checked=subprocess.run([node,'--check',str(path)],capture_output=True,text=True,timeout=15)

@@ -5,7 +5,7 @@ import pytest
 from playwright.sync_api import expect
 
 from shared.util import VERSION
-from tests.test_panel_update_ui import open_settings, ready, update_browser
+from tests.test_panel_update_ui import open_settings, ready, show_update_controls, update_browser
 
 
 def complete(state, version='1.11.0'):
@@ -15,12 +15,30 @@ def complete(state, version='1.11.0'):
                             'target_version': version, 'message': '更新成功', 'events': []})
 
 
+def show_draft_field(page, dirty_field):
+    if dirty_field == 'draft':
+        return
+    group = 'usage' if dirty_field == 'appearance' else 'connect'
+    page.locator(f'.settings-groups [data-settings-group="{group}"]').click()
+    if dirty_field == 'address':
+        more = page.locator('#settings-more')
+        if not more.evaluate('el => el.open'):
+            more.locator('summary').first.click()
+    selector = {
+        'address': '#settings-form',
+        'appearance': '[data-settings-form="appearance"]',
+        'access': '#access-settings-form',
+    }[dirty_field]
+    expect(page.locator(selector)).to_be_visible()
+
+
 @pytest.mark.parametrize('dirty_field', ['address', 'appearance', 'access', 'draft'])
 def test_auto_refresh_defers_unsaved_values_and_resumes_after_resolution(update_browser, stack, dirty_field):
     browser, _ = update_browser
     state = ready()
     page, calls, errors = open_settings(browser, stack, state)
     try:
+        show_draft_field(page, dirty_field)
         if dirty_field == 'address':
             page.fill('#settings-form [name="public_url"]', stack.url + '/unsaved')
         elif dirty_field == 'appearance':
@@ -29,10 +47,12 @@ def test_auto_refresh_defers_unsaved_values_and_resumes_after_resolution(update_
             page.locator('#access-settings-form [name="all_projects"]').check()
         else:
             page.evaluate('S.work.dirty=true')
+        show_update_controls(page)
         complete(state)
         page.click('#panel-update-refresh')
         expect(page.locator('#panel-update-note')).to_contain_text('暂缓自动刷新')
         assert '_codepier_updated=' not in page.url
+        show_draft_field(page, dirty_field)
         if dirty_field == 'address':
             expect(page.locator('#settings-form [name="public_url"]')).to_have_value(stack.url + '/unsaved')
             page.fill('#settings-form [name="public_url"]', stack.url)
@@ -45,6 +65,7 @@ def test_auto_refresh_defers_unsaved_values_and_resumes_after_resolution(update_
         else:
             page.evaluate('S.work.dirty=false')
         expect(page).to_have_url(re.compile(r'_codepier_updated=.*#settings$'), timeout=12000)
+        show_update_controls(page)
         expect(page.locator('#panel-update-state')).to_contain_text('更新成功')
         assert not calls and not errors, errors
     finally:
@@ -89,6 +110,7 @@ def test_completed_update_does_not_reload_loop_when_storage_is_unavailable(updat
         complete(state)
         page.click('#panel-update-refresh')
         expect(page).to_have_url(re.compile(r'_codepier_updated=.*#settings$'), timeout=12000)
+        show_update_controls(page)
         expect(page.locator('#panel-update-state')).to_contain_text('更新成功')
         page.click('#panel-update-refresh')
         page.wait_for_timeout(2400)

@@ -46,6 +46,101 @@ window.CodePierSettings = (() => {
     new_connection: '重新核对连接授权',
     provider_policy: '按提供者来源生效',
   };
+
+  const views = [
+    ['', '开始'],
+    ['devices', '设备'],
+    ['projects', '项目'],
+    ['connect', '接入'],
+    ['files', '文件'],
+    ['tasks', '任务'],
+    ['usage', '用量'],
+    ['advanced', '高级'],
+  ];
+  const viewItems = {
+    devices: ['device', 'roots'],
+    projects: ['project_mapping', 'vps', 'sharing', 'artifacts'],
+    connect: ['grants', 'access_defaults', 'profiles', 'gateway', 'oauth_policy', 'public_url'],
+    files: [
+      'hub_ingress',
+      'native_relay',
+      'hub_file_sources',
+      'node_ingress',
+      'node_file_sources',
+      'artifacts',
+    ],
+    tasks: [
+      'native_session',
+      'delegation',
+      'shell',
+      'skills',
+      'language_servers',
+      'worktrees',
+      'browser',
+      'computer',
+      'local_control',
+      'execution_policy',
+      'collaboration_features',
+      'collaboration_access',
+      'monitor',
+      'reliability',
+    ],
+    usage: ['usage_privacy', 'appearance'],
+    advanced: [
+      'account_security',
+      'spaces',
+      'roles',
+      'oidc',
+      'users',
+      'hub_process',
+      'maintenance',
+    ],
+  };
+  const mappedItems = new Set(Object.values(viewItems).flat());
+  const commonItems = new Set([
+    'device',
+    'project_mapping',
+    'grants',
+    'access_defaults',
+    'native_session',
+    'delegation',
+    'usage_privacy',
+    'appearance',
+    'account_security',
+    'spaces',
+  ]);
+  function startHTML() {
+    const steps = [
+      ['01', '连接节点', '让电脑与面板连通', 'devices', 'devices'],
+      ['02', '添加项目', '选择允许工作的目录', 'projects', 'projects'],
+      ['03', '接入工具', '连接客户端并确认范围', 'connect', 'connect'],
+      ['04', '派发任务', '开始工作并查看进度', 'collaboration', 'tasks'],
+      ['05', '查看用量', '查看调用、Token 与费用', 'overview', 'usage'],
+    ];
+    return (
+      '<section id="settings-start" aria-label="设置流程"><div class="settings-flow-grid">' +
+      steps
+        .map(
+          ([number, title, description, entry, view]) =>
+            '<article class="settings-flow-card"><span class="settings-step">' +
+            number +
+            '</span><h2>' +
+            title +
+            '</h2><p>' +
+            description +
+            '</p><div class="actions"><button type="button" class="btn primary" data-settings-entry="' +
+            entry +
+            '">打开</button><button type="button" class="btn ghost" data-settings-group="' +
+            view +
+            '">相关设置</button></div></article>',
+        )
+        .join('') +
+      '</div><div class="settings-shortcuts"><button type="button" class="btn" data-settings-group="files">文件传输</button>' +
+      '<button type="button" class="btn" data-settings-group="tasks">并发与排队</button>' +
+      '<button type="button" class="btn ghost" data-settings-group="advanced">账号与维护</button></div></section>'
+    );
+  }
+
   let state = {
       owner: '',
       project: '',
@@ -68,11 +163,17 @@ window.CodePierSettings = (() => {
     return (
       state.batchApply ||
       !!window.CodePierFileImportSettings?.dirty() ||
+      !!window.CodePierSchedulerSettings?.dirty() ||
       Object.keys(state.draft).some((key) => !equal(state.draft[key], state.base[key]))
     );
   }
+  function refreshDraftNote() {
+    const note = root?.querySelector('#settings-draft-note');
+    if (note) note.hidden = !dirty();
+  }
   function reset() {
     window.CodePierFileImportSettings?.reset();
+    window.CodePierSchedulerSettings?.reset();
     detach();
     state = {
       owner: '',
@@ -89,13 +190,18 @@ window.CodePierSettings = (() => {
   }
   function detach() {
     window.CodePierFileImportSettings?.detach();
+    window.CodePierSchedulerSettings?.detach();
     generation++;
     controller?.abort();
     controller = null;
     root = null;
   }
   function requestLeave() {
-    if (state.pending || window.CodePierFileImportSettings?.pending()) {
+    if (
+      state.pending ||
+      window.CodePierFileImportSettings?.pending() ||
+      window.CodePierSchedulerSettings?.pending()
+    ) {
       toast('设置保存仍在核对，请等待回执或重新读取后再离开。', true);
       return false;
     }
@@ -104,6 +210,7 @@ window.CodePierSettings = (() => {
     state.draft = clone(state.base);
     state.batchApply = false;
     window.CodePierFileImportSettings?.discard();
+    window.CodePierSchedulerSettings?.discard();
     return true;
   }
   function hydrate(data, replace = false) {
@@ -241,6 +348,7 @@ window.CodePierSettings = (() => {
         if (current()) {
           $('button', form).disabled = false;
           checkbox.disabled = !state.base.access_defaults.all_projects;
+          refreshDraftNote();
         }
       }
     });
@@ -258,19 +366,28 @@ window.CodePierSettings = (() => {
       ? item.effective_value
       : JSON.stringify(item.effective_value, null, 2);
   }
+
   function card(item) {
+    const content = item.editor === 'file_import' ? '' : editor(item);
     const mode = item.editable_here
-      ? '可在这里修改'
+      ? '可编辑'
       : item.edit_mode === 'local'
-        ? '本机配置'
+        ? '本机设置'
         : item.edit_mode === 'deployment'
-          ? '部署绑定'
+          ? '部署设置'
           : item.edit_mode === 'restricted'
-            ? '需实例管理员'
-            : item.risk === 'security'
-              ? '安全管理入口'
-              : '管理入口';
-    const content = editor(item);
+            ? '管理员'
+            : '';
+    const entry =
+      item.id === 'usage_privacy'
+        ? '<button type="button" class="btn" data-devtools="status" data-project="' +
+          esc(state.project) +
+          '">查看项目用量</button>'
+        : item.entry
+          ? '<button type="button" class="btn" data-settings-entry="' +
+            esc(item.entry) +
+            '">打开管理</button>'
+          : '';
     return (
       '<article class="panel settings-card" id="setting-' +
       esc(item.id) +
@@ -285,44 +402,26 @@ window.CodePierSettings = (() => {
       esc(mode) +
       '</span></div><div class="panel-body"><div class="settings-tags"><span>' +
       esc(scopeLabels[item.scope] || item.scope) +
-      '</span><span data-setting-source>' +
+      '</span></div>' +
+      content +
+      entry +
+      (item.id === 'access_defaults' && state.data.space_admin ? advancedHTML() : '') +
+      '<details class="settings-details"><summary>详情</summary><p>' +
+      esc(item.description) +
+      '</p><pre class="settings-value" data-setting-value>' +
+      esc(valueText(item)) +
+      '</pre><div class="settings-tags"><span data-setting-source>' +
       esc(sources[item.source] || item.source) +
       '</span><span>' +
       esc(activation[item.activation] || item.activation) +
-      '</span></div><p>' +
-      esc(item.description) +
-      '</p>' +
-      (content ||
-        '<pre class="settings-value" data-setting-value>' + esc(valueText(item)) + '</pre>') +
-      (item.id === 'access_defaults' && state.data.space_admin ? advancedHTML() : '') +
-      '<p class="form-note">管理者：' +
+      '</span></div><p>管理者：' +
       esc(item.owner) +
-      '</p>' +
-      (item.id === 'usage_privacy'
-        ? '<button type="button" class="btn ghost small" data-devtools="status" data-project="' +
-          esc(state.project) +
-          '">查看工具用量与覆盖范围</button>'
-        : item.entry
-          ? '<button type="button" class="btn ghost small" data-settings-entry="' +
-            esc(item.entry) +
-            '">打开' +
-            esc(item.risk === 'security' ? '安全管理' : '管理入口') +
-            '</button>'
-          : '') +
-      '<details class="settings-details"><summary>配置来源与字段</summary><p>' +
-      esc(item.fields.join(' · ')) +
       '</p><p>' +
-      esc(
-        item.source_kind === 'agent_config'
-          ? '在目标设备的现有 Agent 配置中核对；先预览，确认后再应用。不要替换整份配置或扩大其他项目权限。'
-          : item.source_kind === 'environment'
-            ? '由部署管理员修改现有环境配置，随后按生效方式重新检查。这里不会重写部署或启动服务。'
-            : '继续使用已有记录和安全 API，没有另存一份配置。',
-      ) +
+      esc(item.fields.join(' · ')) +
       '</p>' +
       (item.configured_value !== null
-        ? '<p>已配置值：' + esc(JSON.stringify(item.configured_value)) + '</p>'
-        : '<p>未返回显式配置值；不将未设置解释为关闭。</p>') +
+        ? '<p>已配置：' + esc(JSON.stringify(item.configured_value)) + '</p>'
+        : '') +
       '</details></div></article>'
     );
   }
@@ -358,7 +457,7 @@ window.CodePierSettings = (() => {
           '未核对',
       ) +
       '</span></li></ol>' +
-      '<p class="form-note">来源白名单、provider、实际附件传输还需分别通过检查。以上就绪状态不等于真实文件已上传。</p>' +
+      '<details class="settings-details"><summary>这些状态代表什么？</summary><p>接收与写入许可分别检查，附件来源也必须获准。就绪状态不能代替真实文件上传回执。</p></details>' +
       '<div class="actions"><button type="button" class="btn" id="settings-check-node" ' +
       (!state.project ? 'disabled' : '') +
       '>' +
@@ -394,18 +493,25 @@ window.CodePierSettings = (() => {
       throw sessionChanged();
     hydrate(data);
     const fileEditor = data.instance_admin ? await CodePierFileImportSettings.html() : '';
+    let schedulerEditor;
+    try {
+      schedulerEditor = await CodePierSchedulerSettings.html(state.project);
+    } catch (error) {
+      schedulerEditor =
+        '<section id="settings-scheduler" class="panel" role="status"><div class="panel-body">并行设置暂不可用：' +
+        esc(error.message) +
+        '</div></section>';
+    }
     if (ticket !== generation || S.session !== session || S.space_id !== space)
       throw sessionChanged();
+
     return (
-      heading(
-        '设置中心',
-        'SETTINGS / CONTROL',
-        '个人、空间、节点与部署设置，一处核对来源和生效方式。',
-      ) +
-      '<section id="settings-center" class="settings-center"><div class="settings-toolbar"><label class="field">搜索设置<input id="settings-search" type="search" placeholder="搜索功能、字段或权限…" value="' +
+      heading('设置中心', 'SETTINGS', '按你要做的事开始。') +
+      '<section id="settings-center" class="settings-center"><div class="settings-toolbar">' +
+      '<label class="field">搜索设置<input id="settings-search" type="search" placeholder="搜索功能或设置…" value="' +
       esc(state.query) +
-      '"></label>' +
-      '<label class="field">节点检查范围<select id="settings-project"><option value="">未选择项目（不检查节点）</option>' +
+      '"></label><label class="field" id="settings-project-field">项目<select id="settings-project">' +
+      '<option value="">选择项目</option>' +
       data.projects
         .map(
           (p) =>
@@ -420,32 +526,43 @@ window.CodePierSettings = (() => {
         )
         .join('') +
       '</select></label></div>' +
-      '<p class="form-note settings-scope-note">当前空间：' +
-      esc(data.space_id) +
-      '。个人预选属于你的账号，实例设置影响整个服务；项目选择只限定节点检查，不会改变配置作用域。</p>' +
-      '<nav class="settings-groups" aria-label="设置分组"><button type="button" data-settings-group="">全部</button>' +
-      data.groups
+      '<nav class="settings-groups" aria-label="设置场景">' +
+      views
         .map(
-          (g) =>
-            '<button type="button" data-settings-group="' +
-            esc(g.id) +
-            '">' +
-            esc(g.title) +
-            '</button>',
+          ([id, title]) =>
+            '<button type="button" data-settings-group="' + id + '">' + title + '</button>',
         )
         .join('') +
-      '</nav>' +
-      '<p id="settings-filter-status" class="form-note" role="status"></p><div id="settings-chain">' +
+      '</nav><p id="settings-draft-note" class="settings-draft-note" hidden role="status">有未保存的改动</p>' +
+      '<p id="settings-filter-status" class="form-note" role="status"></p>' +
+      startHTML() +
+      '<div id="settings-chain">' +
       chainHTML() +
       '</div>' +
-      fileEditor +
+      (fileEditor
+        ? '<details id="settings-file-editor-wrap" class="settings-section"><summary>接收与来源设置</summary>' +
+          fileEditor +
+          '</details>'
+        : '') +
+      schedulerEditor +
+      '<div class="settings-grid settings-catalog settings-common">' +
+      data.items
+        .filter((item) => commonItems.has(item.id))
+        .map(card)
+        .join('') +
+      '</div>' +
+      '<details id="settings-more" class="settings-section"><summary>更多设置 <span id="settings-more-count"></span></summary>' +
       '<div class="settings-grid settings-catalog">' +
-      data.items.map(card).join('') +
-      '</div><p id="settings-no-results" hidden>没有匹配的设置，试试功能名称或环境变量名。</p>' +
+      data.items
+        .filter((item) => !commonItems.has(item.id))
+        .map(card)
+        .join('') +
+      '</div></details><p id="settings-no-results" hidden>没有匹配的设置</p>' +
+      '<div id="settings-all-entry" hidden><button type="button" class="btn ghost" data-settings-group="all">查看全部设置</button></div>' +
       (data.instance_admin
-        ? '<section class="settings-maintenance" aria-label="面板维护">' +
+        ? '<details class="settings-maintenance settings-section" aria-label="面板维护"><summary>面板更新与诊断</summary>' +
           CodePierPanelUpdate.html() +
-          '</section>'
+          '</details>'
         : '') +
       '</section>'
     );
@@ -474,9 +591,13 @@ window.CodePierSettings = (() => {
       if (current()) $('.settings-save-status', form).textContent = text;
     };
     CodePierFileImportSettings.bind();
+    window.CodePierSchedulerSettings?.bind();
+
     function filter() {
       const q = state.query.trim().toLocaleLowerCase();
-      let count = 0;
+      const selected = new Set(viewItems[state.group] || []);
+      let count = 0,
+        advancedCount = 0;
       for (const item of state.data.items) {
         const text = [
           item.title,
@@ -488,31 +609,76 @@ window.CodePierSettings = (() => {
         ]
           .join(' ')
           .toLocaleLowerCase();
-        const shown = (!state.group || state.group === item.group) && (!q || text.includes(q));
-        const card = $('[data-setting-id="' + item.id + '"]', mounted);
-        if (card) card.hidden = !shown;
-        count += shown ? 1 : 0;
+        const shown = q
+          ? text.includes(q)
+          : state.group === 'all' ||
+            selected.has(item.id) ||
+            (state.group === 'advanced' && !mappedItems.has(item.id));
+        const node = $('[data-setting-id="' + item.id + '"]', mounted);
+        if (node) node.hidden = !shown;
+        if (shown) {
+          count++;
+          if (!commonItems.has(item.id)) advancedCount++;
+        }
       }
-      $$('[data-settings-group]', mounted).forEach((button) =>
+      $$('button[data-settings-group]', mounted).forEach((button) =>
         button.setAttribute('aria-pressed', String(button.dataset.settingsGroup === state.group)),
       );
-      $('#settings-filter-status', mounted).textContent =
-        '显示 ' + count + ' / ' + state.data.items.length + ' 项设置';
-      $('#settings-no-results', mounted).hidden = count !== 0;
-      $('#settings-chain', mounted).hidden = (!!state.group && state.group !== 'files') || !!q;
+      $('#settings-start', mounted).hidden = !!state.group || !!q;
+      $('#settings-project-field', mounted).hidden =
+        !q && !['devices', 'projects', 'files', 'tasks', 'usage', 'all'].includes(state.group);
+      $('#settings-draft-note', mounted).hidden = !dirty();
+      const more = $('#settings-more', mounted);
+      more.hidden = !advancedCount;
+      more.open = !!q || state.group === 'all';
+      $('#settings-more-count', mounted).textContent = advancedCount
+        ? '(' + advancedCount + ')'
+        : '';
+      const schedulerEditor = $('#settings-scheduler', mounted);
+      const schedulerVisible =
+        !!schedulerEditor &&
+        (q
+          ? /并行|并发|排队|调度|scheduler|concurrency/.test(q)
+          : state.group === 'tasks' || state.group === 'all');
+      if (schedulerEditor) schedulerEditor.hidden = !schedulerVisible;
+      count += schedulerVisible ? 1 : 0;
+      const filesVisible = q
+        ? /文件|入站|file|import|stream|relay|provider|hosts/.test(q)
+        : state.group === 'files' || state.group === 'all';
+      $('#settings-chain', mounted).hidden = !filesVisible;
       const fileEditor = $('#settings-file-import-editor', mounted);
-      if (fileEditor)
-        fileEditor.hidden =
-          (!!state.group && state.group !== 'files') ||
-          (!!q && !/文件|入站|file|import|stream|relay|provider|hosts/.test(q));
+      if (fileEditor) fileEditor.hidden = !filesVisible;
+      const fileWrap = $('#settings-file-editor-wrap', mounted);
+      if (fileWrap) {
+        fileWrap.hidden = !filesVisible;
+        if (q && filesVisible) fileWrap.open = true;
+      }
+      $('#settings-filter-status', mounted).textContent = q ? '找到 ' + count + ' 项设置' : '';
+      $('#settings-no-results', mounted).hidden = !q || count !== 0;
+      $('#settings-all-entry', mounted).hidden = !!q || state.group !== 'advanced';
+      const maintenance = $('.settings-maintenance', mounted);
+      if (maintenance)
+        maintenance.hidden = q
+          ? !/更新|版本|维护|update/.test(q)
+          : !['advanced', 'all'].includes(state.group);
     }
     listen($('#settings-search', mounted), 'input', (event) => {
       state.query = event.target.value;
       filter();
     });
-    for (const button of $$('[data-settings-group]', mounted))
+    for (const button of $$('button[data-settings-group]', mounted))
       listen(button, 'click', () => {
+        if (
+          state.pending ||
+          CodePierFileImportSettings.pending() ||
+          window.CodePierSchedulerSettings?.pending()
+        ) {
+          toast('正在保存，请稍候。', true);
+          return;
+        }
         state.group = button.dataset.settingsGroup;
+        state.query = '';
+        $('#settings-search', mounted).value = '';
         filter();
       });
     listen($('#settings-project', mounted), 'change', async (event) => {
@@ -538,6 +704,8 @@ window.CodePierSettings = (() => {
         state.query = '';
         $('#settings-search', mounted).value = '';
         filter();
+        const wrap = $('#settings-file-editor-wrap', mounted);
+        if (wrap) wrap.open = true;
         $('#settings-file-import-editor', mounted)?.scrollIntoView({
           behavior: 'smooth',
           block: 'start',
@@ -551,6 +719,8 @@ window.CodePierSettings = (() => {
           event.stopPropagation();
         }
       });
+    listen(mounted, 'input', refreshDraftNote);
+    listen(mounted, 'change', refreshDraftNote);
     bindAdvanced(mounted, current, listen);
     for (const form of $$('[data-settings-form]', mounted)) {
       const key = form.dataset.settingsForm;
@@ -658,10 +828,12 @@ window.CodePierSettings = (() => {
           );
         } finally {
           mountedState.pending = false;
-          if (current())
+          if (current()) {
             controls.forEach((control) => {
               control.disabled = false;
             });
+            refreshDraftNote();
+          }
         }
       });
     }
@@ -704,10 +876,10 @@ window.CodePierSettings = (() => {
     if (state.data.instance_admin) CodePierPanelUpdate.bind();
   }
   window.addEventListener('beforeunload', (event) => {
-    if (dirty() || state.pending) {
+    if (dirty() || state.pending || window.CodePierSchedulerSettings?.pending()) {
       event.preventDefault();
       event.returnValue = '';
     }
   });
-  return { html, bind, detach, reset, dirty, requestLeave };
+  return { html, bind, detach, reset, dirty, requestLeave, refreshDraftNote };
 })();

@@ -47,14 +47,24 @@ def test_disabled_storage_does_not_break_boot():
     assert all(x['unavailable'] for x in result)
 
 
-def test_extension_keeps_profile_permissions_lease_and_replay_ledger():
+@pytest.mark.parametrize('cleanup_receipts', [None, [
+    {'lease_id': 'e'*32, 'tab_cleanup_confirmed': False},
+    {'lease_id': 'f'*32, 'tab_cleanup_confirmed': True},
+]])
+def test_extension_keeps_profile_permissions_lease_and_replay_ledger(cleanup_receipts):
     saved={'version':1,'profile_id':'a'*32,'origins':['https://example.test'],
            'pool':[{'tab_id':7,'window_id':4,'lease_id':'b'*32,'expires':9999999999999}],'seen':['c'*32]}
+    if cleanup_receipts is not None:
+        saved['cleanup_receipts'] = cleanup_receipts
     script="""import {BrowserWorkspace} from './web/browser-extension/workspace.js';
 const values={relayWorkspace:SAVED};const local={async get(k){return {[k]:values[k]}},async set(v){Object.assign(values,v)},async remove(k){delete values[k]}};
 const workspace=new BrowserWorkspace({storage:{local}});const first=await workspace.load();const second=await new BrowserWorkspace({storage:{local}}).load();console.log(JSON.stringify({first,second,values}));"""
     result=run_node(script.replace('SAVED',json.dumps(saved)))
-    assert result['first']==saved and result['second']==saved and result['values']=={'codepierWorkspace':saved}
+    # Every existing field stays exact. The new ledger is additive; missing
+    # legacy cleanup evidence becomes an empty ledger, never a success receipt.
+    expected = {**saved, 'cleanup_receipts': cleanup_receipts or []}
+    assert result['first'] == expected and result['second'] == expected
+    assert result['values'] == {'codepierWorkspace': expected}
 
 
 def test_extension_write_failure_preserves_old_state():

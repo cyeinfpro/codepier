@@ -84,14 +84,8 @@ function bindWorkflowSubmit(dialog, form, button, name, readArgs, done) {
 }
 async function workflowCreate() {
   const session = S.session,
-    loading = modal('新建开发任务', '<p class="muted">读取可交接的授权…</p>');
-  const grants = (await api('/api/grants')).grants.filter(
-    (g) =>
-      !g.revoked &&
-      g.expires > Date.now() / 1000 &&
-      g.scopes.includes('read') &&
-      g.scopes.includes('write'),
-  );
+    loading = modal('新建开发任务', '<p class="muted">读取可用项目…</p>');
+  await loadBasics();
   if (session !== S.session || !loading.isConnected) return;
   const projects = S.projects.filter((p) => p.mode === 'write');
   if (!projects.length) {
@@ -102,29 +96,60 @@ async function workflowCreate() {
   const selected = workflowState().project || S.work.project;
   const dialog = modal(
     '新建开发任务',
-    `<form id="workflow-create-form"><div class="field"><label for="wf-project">项目</label><select id="wf-project" name="project">${projects.map((p) => `<option value="${esc(p.id)}" ${p.id === selected ? 'selected' : ''}>${esc(p.alias)}</option>`).join('')}</select></div><div class="field"><label for="wf-assignee">交接对象</label><select id="wf-assignee" name="assignee_grant_id"><option value="">仅面板管理，不交给 AI</option></select><small>所选授权可读取任务进度，不会自动执行。</small></div><div class="field"><label for="wf-title">任务名称</label><input id="wf-title" name="title" required maxlength="140" placeholder="例如：修复上传并验证"></div><div class="field"><label for="wf-goal">要完成什么</label><textarea id="wf-goal" name="goal" required maxlength="2000" rows="3"></textarea></div><div class="field"><label for="wf-template">检查清单</label><select id="wf-template" name="template"><option value="review_fix">检查与修复</option><option value="release">验证与发布</option></select><small>清单不自动执行命令。</small></div><p class="form-note" data-workflow-hint>不要在目标和摘要中填写密码、令牌或其他凭据。</p></form>`,
+    `<form id="workflow-create-form"><div class="field"><label for="wf-project">项目</label><select id="wf-project" name="project">${projects.map((p) => `<option value="${esc(p.id)}" ${p.id === selected ? 'selected' : ''}>${esc(p.alias)}</option>`).join('')}</select></div><div class="field"><label for="wf-assignee">交接对象</label><select id="wf-assignee" name="assignee_grant_id"><option value="">仅面板管理，不交给 AI</option></select><small id="wf-assignee-status" role="status">正在核对当前项目的可交接连接…</small><button class="btn ghost small" type="button" id="wf-assignee-refresh">重新核对连接</button></div><div class="field"><label for="wf-title">任务名称</label><input id="wf-title" name="title" required maxlength="140" placeholder="例如：修复上传并验证"></div><div class="field"><label for="wf-goal">要完成什么</label><textarea id="wf-goal" name="goal" required maxlength="2000" rows="3"></textarea></div><div class="field"><label for="wf-template">检查清单</label><select id="wf-template" name="template"><option value="review_fix">检查与修复</option><option value="release">验证与发布</option></select><small>清单不自动执行命令。</small></div><p class="form-note" data-workflow-hint>不要在目标和摘要中填写密码、令牌或其他凭据。</p></form>`,
     buttons('workflow-create-save', '建立任务'),
   );
-  const refreshAssignees = () => {
-    const select = $('#wf-assignee'),
-      old = select.value,
-      project = $('#wf-project').value;
-    select.innerHTML =
-      '<option value="">仅面板管理，不交给 AI</option>' +
-      grants
-        .filter((g) => g.projects.includes('*') || g.projects.includes(project))
-        .map((g) => `<option value="${esc(g.id)}">${esc(g.label)}</option>`)
-        .join('');
-    if ([...select.options].some((o) => o.value === old)) select.value = old;
+  let assigneeSequence = 0,
+    assigneesReady = false;
+  const select = $('#wf-assignee', dialog),
+    projectSelect = $('#wf-project', dialog),
+    status = $('#wf-assignee-status', dialog),
+    refresh = $('#wf-assignee-refresh', dialog);
+  const current = () => session === S.session && dialog.isConnected;
+  const refreshAssignees = async () => {
+    const ticket = ++assigneeSequence,
+      project = projectSelect.value,
+      old = select.value;
+    assigneesReady = false;
+    select.disabled = true;
+    refresh.disabled = true;
+    status.textContent = '正在按当前角色、Profile 与项目权限核对连接…';
+    try {
+      const result = await api(
+        '/api/projects/' + encodeURIComponent(project) + '/workflow-assignees',
+      );
+      if (!current() || ticket !== assigneeSequence || project !== projectSelect.value) return;
+      if (result.project_id !== project || !Array.isArray(result.assignees))
+        throw new Error('项目连接范围未核实，请重新读取。');
+      select.innerHTML =
+        '<option value="">仅面板管理，不交给 AI</option>' +
+        result.assignees
+          .map((g) => `<option value="${esc(g.id)}">${esc(g.label)}</option>`)
+          .join('');
+      if ([...select.options].some((option) => option.value === old)) select.value = old;
+      assigneesReady = true;
+      status.textContent = result.assignees.length
+        ? '已核对当前可读写的连接；建立任务时会再次检查权限，不会自动执行。'
+        : '当前没有可交接的有效连接，可选择仅面板管理。';
+    } catch (error) {
+      if (current() && ticket === assigneeSequence)
+        status.textContent = error.message + ' 请重新核对连接后再建立任务。';
+    } finally {
+      if (current() && ticket === assigneeSequence) {
+        select.disabled = !assigneesReady;
+        refresh.disabled = false;
+      }
+    }
   };
-  refreshAssignees();
-  $('#wf-project').onchange = refreshAssignees;
+  projectSelect.onchange = refreshAssignees;
+  refresh.onclick = refreshAssignees;
   bindWorkflowSubmit(
     dialog,
     $('#workflow-create-form'),
     $('#workflow-create-save'),
     'workflows_create',
     () => {
+      if (!assigneesReady) throw new Error('请先核实所选项目当前可交接的连接。');
       const args = Object.fromEntries(new FormData($('#workflow-create-form')));
       if (!args.assignee_grant_id) delete args.assignee_grant_id;
       return args;
@@ -135,6 +160,7 @@ async function workflowCreate() {
       await workflowDetail(r.workflow_id);
     },
   );
+  await refreshAssignees();
 }
 function workflowEvidenceHTML(items) {
   return (items || [])

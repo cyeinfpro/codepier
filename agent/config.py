@@ -12,6 +12,7 @@ from agent.skills import validate_skills
 from agent.computer import validate_computer
 from shared.execution_policy import validate_policy
 from agent.integration_config import validate_integrations
+from agent.scheduler import validate_scheduler
 
 
 def validate_config(value: object, config_path: Path) -> dict:
@@ -83,4 +84,5 @@ def validate_config(value: object, config_path: Path) -> dict:
     c["skills"] = validate_skills(c.get("skills", {}))
     c["computer"] = validate_computer(c.get("computer", {}))
     c["integrations"] = validate_integrations(c.get("integrations", {}))
+    c["scheduler"] = validate_scheduler(c.get("scheduler"))
     return c

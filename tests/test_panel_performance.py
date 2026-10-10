@@ -96,8 +96,10 @@ async def test_panel_reads_use_existing_io_lane_without_bypassing_resource_locks
     agent, root = local_agent
     (root / 'file.txt').write_text('fixture')
     project = {'root': str(root), 'alias': 'fixture', 'mode': 'write'}
-    for _ in range(4):
-        await agent.semaphore.acquire()
+    from contextlib import AsyncExitStack
+    holders = AsyncExitStack()
+    for index in range(agent.scheduler.lane_limit("execution")):
+        await holders.enter_async_context(agent.scheduler.slot(f"heavy-{index}", f"project-{index}"))
     entered = asyncio.Event()
     async def read():
         async with agent.execution_slot('fixture-read', tool, project, args, root, False, time.time() + 2):
@@ -115,9 +117,8 @@ async def test_panel_reads_use_existing_io_lane_without_bypassing_resource_locks
         await asyncio.wait_for(task, .5)
         assert entered.is_set()
     finally:
-        for _ in range(4):
-            agent.semaphore.release()
-    assert agent.read_semaphore._value == 4
+        await holders.aclose()
+    assert agent.scheduler.snapshot()["running"] == 0
     assert not agent.resources.active and not agent.resources.waiting
 
 
@@ -126,8 +127,10 @@ async def test_panel_read_queue_timeout_and_cancel_release_claims(local_agent):
     from shared.util import DevError
     agent, root = local_agent
     project = {'root': str(root), 'alias': 'fixture', 'mode': 'write'}
-    for _ in range(4):
-        await agent.read_semaphore.acquire()
+    from contextlib import AsyncExitStack
+    holders = AsyncExitStack()
+    for index in range(agent.scheduler.lane_limit("read")):
+        await holders.enter_async_context(agent.scheduler.slot(f"io-{index}", f"project-{index}", "read"))
     async def read(deadline):
         async with agent.execution_slot('fixture-read', 'fs_tree', project, {'path': '.'}, root, False, deadline):
             raise AssertionError('No I/O worker should be available')
@@ -139,8 +142,7 @@ async def test_panel_read_queue_timeout_and_cancel_release_claims(local_agent):
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
     finally:
-        for _ in range(4):
-            agent.read_semaphore.release()
+        await holders.aclose()
     assert not agent.resources.active and not agent.resources.waiting
 
 

@@ -153,11 +153,16 @@ class BrowserBroker:
         async with lock:
             row=self.records.load('browser',lease_id,project) if cleanup else self.lease(project,lease_id)
             if cleanup:
-                row.update(state='closed',observation_id=None,observation_token=None)
+                # Persist unconfirmed cleanup before the RPC: disconnects,
+                # cancellation or Agent restart must remain eligible for the
+                # owner project's later cleanup instead of looking legacy-closed.
+                row.update(state='closed',observation_id=None,observation_token=None,tab_cleanup_confirmed=False)
                 self.records.save('browser',lease_id,project,row,replace=True)
                 try:
                     result=await self.rpc('close',{'lease_id':lease_id});confirmed=result.get('tab_cleanup_confirmed') is True
                 except DevError:confirmed=False
+                row['tab_cleanup_confirmed']=confirmed
+                self.records.save('browser',lease_id,project,row,replace=True)
                 self.locks.pop(lease_id,None)
                 return {'lease_id':lease_id,'released':True,'tab_cleanup_confirmed':confirmed,'other_tabs_touched':False}
             if row['state']!='ready':raise DevError('BROWSER_LEASE_UNCONFIRMED','租约建立结果不明，请先释放并检查浏览器',409)

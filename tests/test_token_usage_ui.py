@@ -7,6 +7,8 @@ import subprocess
 
 import pytest
 
+from shared.token_cost import reference_cost
+
 ROOT = Path(__file__).resolve().parents[1]
 NODE = r"""
 const fs = require('fs'), vm = require('vm');
@@ -37,9 +39,11 @@ def metric(n=5, **changes):
 
 
 def usage(**changes):
-    return {'version': 'codepier-text-v1', 'kind': 'estimate',
-            'scope': 'project_tool_payload', 'input': metric(5),
-            'output': metric(10), 'actual_usage': None, **changes}
+    value = {'version': 'codepier-text-v1', 'kind': 'estimate',
+             'scope': 'project_tool_payload', 'input': metric(5),
+             'output': metric(10), 'actual_usage': None, **changes}
+    value['reference_cost'] = reference_cost(value)
+    return value
 
 
 def row(identifier=1, **changes):
@@ -182,7 +186,8 @@ def test_dashboard_in_workspace_card_labels_scope_missing_and_actual():
     html = run_js('dashboard', dashboard_payload(rows=[row(token_usage=None)]))
     assert '今日工具 Token' in html
     assert '<span class="token-estimate-badge">估算</span>' in html
-    assert '<span>输入</span>' in html and '<span>输出</span>' in html
+    assert '<span>总 Token</span>' in html and '参考估价 · USD' in html
+    assert 'MCP 请求参数' in html and 'MCP 响应文本' in html
     assert '实际模型用量' in html and '未提供' in html
     assert '未记录' in html and '约 0' not in html
     assert 'Asia/Shanghai' in html and '当前保留的授权记录' in html
@@ -251,7 +256,7 @@ const picked = {...original, period: {...original.period, key: '7d'}, filters: {
 def test_dashboard_compact_summary_keeps_details_and_missing_states():
     html = run_js('dashboard', dashboard_payload())
     visible = html.split('<details data-token-filters')[0]
-    assert visible.count('class="token-dashboard-metric"') == 2
+    assert visible.count('class="token-dashboard-metric ') == 2
     assert '实际模型用量' not in visible
     assert '次有记录' not in visible and '次未记录' not in visible
     assert '统计说明' in html
@@ -260,7 +265,96 @@ def test_dashboard_compact_summary_keeps_details_and_missing_states():
     partial = run_js('dashboard', dashboard_payload(rows=[
         row(token_usage=usage(input=metric(state='partial'))), row(2, token_usage=None)]))
     partial_visible = partial.split('<details data-token-filters')[0]
-    assert '1 次未记录' in partial_visible and '部分文本' in partial_visible
+    assert '仅已记录部分' in partial_visible
+    assert '1 次未记录' not in partial_visible and '部分文本' not in partial_visible
+    assert '1 次未记录' in partial and '部分文本' in partial
     empty = run_js('dashboard', dashboard_payload(rows=[]))
     assert '未记录' in empty.split('<details data-token-filters')[0]
     assert '约 0' not in empty
+
+
+
+@pytest.mark.parametrize('value,expected', [
+    (0, '0'), (999, '999'), (1000, '1K'), (1234, '1.23K'),
+    (999_994, '999.99K'), (999_995, '1M'), (1_000_000, '1M'),
+    (774_530_000, '774.53M'), (999_994_999, '999.99M'),
+    (999_995_000, '1B'), (1_000_000_000, '1B'),
+    (9_007_199_254_740_991, '9007199.25B'),
+    (None, '未记录'), (-1, '未记录'), (0.1, '未记录'),
+    ('１０００', '未记录'), ('1000', '未记录'), ('😃', '未记录'),
+    (2**53, '未记录'),
+])
+def test_unified_compact_decimal_formatter(value, expected):
+    assert run_js('formatTokens', value) == expected
+
+
+@pytest.mark.parametrize('value,expected', [(None, '未记录'), (0, '$0.00'),
+    (1, '< $0.0001'), (100000, '$0.0001'), (1900000000, '$1.90')])
+def test_usd_formatter_keeps_tiny_cost_visible(value, expected):
+    assert run_js('formatUSD', value) == expected
+
+
+def test_loaded_cost_merges_rows_once_and_never_adds_cache_tokens():
+    a, b = row(), row(2)
+    result = run_js('summarize', [a, b, a])
+    assert result['total']['estimated_tokens'] == 30
+    assert result['reference_cost']['amount_nano_usd'] == 538000
+    assert '约 30' in run_js('summary', [a, b])
+    assert '90%' in run_js('summary', [a, b])
+    b['token_usage']['reference_cost']['version'] = 'other-pricing'
+    assert run_js('summarize', [a, b])['reference_cost'] is None
+
+
+def test_dashboard_reference_scope_and_cache_assumption_are_in_details():
+    html = run_js('dashboard', dashboard_payload())
+    visible, details = html.split('<details data-token-filters', 1)
+    assert '总 Token' in visible and '约 15' in visible and '$0.0003' in visible
+    assert 'MCP 请求参数' not in visible and '90% 假设' in visible
+    assert 'GPT-6 Astra' in visible
+    assert 'cache_read_percent' in details and 'value="90"' in details
+    assert '不是实测缓存命中率' in details and '缓存写入' in details
+    assert '2026-10-10' in details and 'developers.openai.com' in details
+    assert 'Standard API' in details and '272K' in details
+
+
+def test_reference_model_change_does_not_mix_loaded_scenarios_and_is_visible():
+    a, b = row(), row(2)
+    b['token_usage']['reference_cost'] = reference_cost(b['token_usage'], reference_model='gpt-6-luna')
+    assert run_js('summarize', [a, b])['reference_cost'] is None
+    html = run_js('dashboard', dashboard_payload(rows=[b]))
+    assert 'GPT-6 Luna' in html.split('<details data-token-filters')[0]
+    assert 'reference_model' in html and 'value="gpt-6-luna" selected' in html
+    assert '思考 Token：未知' in html and '不改变实际执行模型' in html
+
+
+def test_exact_pico_costs_aggregate_before_nano_display_rounding():
+    rows = []
+    for identifier in range(1, 11):
+        value = usage(input=metric(1), output=metric(1))
+        value['reference_cost'] = reference_cost(value, 1, 'gpt-6-luna')
+        rows.append(row(identifier, token_usage=value))
+    cost = run_js('summarize', rows)['reference_cost']
+    assert cost['amount_pico_usd_exact'] == '5991000'
+    assert cost['amount_nano_usd'] == 5991
+
+
+def test_exact_cost_string_preserves_large_values_without_float_rounding():
+    value = usage()
+    value['reference_cost']['amount_nano_usd'] = 9007199254740
+    value['reference_cost']['amount_pico_usd'] = 9007199254740999
+    value['reference_cost']['amount_pico_usd_exact'] = '9007199254740999'
+    cost = run_js('summarize', [row(token_usage=value)])['reference_cost']
+    assert cost['amount_pico_usd_exact'] == '9007199254740999'
+
+
+def test_export_preserves_assumptions_and_only_current_authorized_aggregates():
+    data = dashboard_payload(secret='must-not-export', authority_key='private-authority',
+        options={'connections': [{'id': 'private-label', 'label': 'must-not-export'}]})
+    exported = run_js('exportJSON', data)
+    parsed = json.loads(exported)
+    assert parsed['kind'] == 'mcp_tool_text_reference_estimate'
+    assert parsed['summary']['reference_cost']['pricing']['cache_read_percent'] == 90
+    assert parsed['summary']['reference_cost']['pricing']['model'] == 'gpt-6-astra'
+    assert parsed['summary']['actual_usage'] is None
+    assert 'must-not-export' not in exported and 'private-authority' not in exported
+    assert 'options' not in parsed and 'secret' not in parsed

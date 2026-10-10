@@ -1,11 +1,15 @@
 """Real overview card at desktop/mobile; no fabricated zero or stale navigation."""
 import pytest
+from pathlib import Path
+
+from shared.token_estimate import summarize, usage
 from playwright.sync_api import expect
 
 
+@pytest.mark.parametrize('browser_kind', ['chromium', 'webkit'])
 @pytest.mark.parametrize('viewport', [{'width': 1440, 'height': 1000}, {'width': 390, 'height': 844}])
-def test_overview_token_filters_missing_data_and_navigation(chat_browser_pool, stack, viewport):
-    context = chat_browser_pool('chromium').new_context(viewport=viewport)
+def test_overview_token_filters_missing_data_and_navigation(chat_browser_pool, stack, viewport, browser_kind):
+    context = chat_browser_pool(browser_kind).new_context(viewport=viewport)
     page = context.new_page()
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
@@ -49,6 +53,101 @@ def test_overview_token_filters_missing_data_and_navigation(chat_browser_pool, s
         page.go_back()
         expect(page.locator('[data-token-dashboard]')).to_be_visible()
         expect(page.locator('[data-token-filter=period]')).to_have_value('today')
+        assert not errors
+    finally:
+        context.close()
+
+
+
+def priced_dashboard(percent=90, authority='test-authority', model='gpt-6-astra'):
+    def metric(n):
+        return dict(state='available', estimated_tokens=n, low=n, high=n,
+                    characters=n, utf8_bytes=n, source_truncated=False)
+    summary = summarize([{'id': 1, 'token_usage': usage(metric(10_976), metric(41_463))}], cache_read_percent=percent, reference_model=model)
+    return dict(summary=summary, authority_key=authority,
+                period=dict(key='today', start=0, end=3600, timezone='UTC', bucket='hour'),
+                filters=dict(project='', connection='', session=''),
+                options=dict(projects=[], connections=[], sessions=[]),
+                coverage=dict(activity_row_limit=10000, estimate_retention_days=30), trend=[])
+
+
+@pytest.mark.parametrize('browser_kind', ['chromium', 'webkit'])
+@pytest.mark.parametrize('width', [1440, 390, 320])
+def test_compact_cost_cache_late_response_failure_and_mobile(chat_browser_pool, width, browser_kind):
+    root = Path(__file__).resolve().parents[1]
+    context = chat_browser_pool(browser_kind).new_context(viewport={'width': width, 'height': 900})
+    page = context.new_page()
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    try:
+        page.set_content('<div id="fixture"></div>')
+        page.add_style_tag(content='body{margin:16px;background:#171717;color:#eee;font-family:sans-serif} #fixture{padding:20px;border-radius:24px;background:#40364f} *{box-sizing:border-box}')
+        page.add_style_tag(path=str(root / 'web/token-usage.css'))
+        page.add_script_tag(path=str(root / 'web/token-usage.js'))
+        page.evaluate("""data => {
+            window.pending = [];
+            const api = window.CodePierTokenUsage, box = document.querySelector('#fixture');
+            box.innerHTML = api.dashboard(data);
+            api.bindDashboard(box, url => new Promise((resolve, reject) => pending.push({url, resolve, reject})), data);
+        }""", priced_dashboard())
+        card = page.locator('[data-token-dashboard]')
+        expect(card.locator('.is-total')).to_contain_text('52.44K')
+        expect(card.locator('.is-cost')).to_contain_text('$0.6276')
+        expect(card.locator('.token-pricing-details')).to_be_hidden()
+        expect(card).to_contain_text('GPT-6 Astra · Standard API · 输入缓存 90% 假设')
+        assert card.locator('.is-total strong').evaluate('(el) => el.getBoundingClientRect().height < parseFloat(getComputedStyle(el).fontSize) * 1.6')
+        assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
+        evidence = root / '.work/token-cost-preview'
+        evidence.mkdir(parents=True, exist_ok=True)
+        card.screenshot(path=str(evidence / f'compact-{browser_kind}-{width}.png'))
+        card.locator('[data-token-filters] > summary').click()
+        assumption = card.locator('[data-token-filter=cache_read_percent]')
+        expect(assumption).to_have_value('90')
+        assumption.fill('0')
+        assumption.press('Tab')
+        page.wait_for_function('pending.length === 1')
+        assumption.fill('100')
+        assumption.press('Tab')
+        page.wait_for_function('pending.length === 2')
+        assert 'cache_read_percent=0' in page.evaluate('pending[0].url')
+        assert 'cache_read_percent=100' in page.evaluate('pending[1].url')
+        page.evaluate('data => pending[1].resolve(data)', priced_dashboard(100))
+        expect(assumption).to_have_value('100')
+        expect(card.locator('.is-cost')).to_contain_text('$0.5903')
+        page.evaluate('data => pending[0].resolve(data)', priced_dashboard(0))
+        expect(assumption).to_have_value('100')
+        expect(card.locator('.is-cost')).to_contain_text('$0.5903')
+        assumption.fill('101')
+        assumption.press('Tab')
+        expect(assumption).to_have_value('100')
+        expect(card.locator('[role=status]')).to_contain_text('0–100')
+        assert page.evaluate('pending.length') == 2
+        assumption.fill('50')
+        assumption.press('Tab')
+        page.wait_for_function('pending.length === 3')
+        page.evaluate("pending[2].reject(new Error('fixture failure'))")
+        expect(assumption).to_have_value('100')
+        expect(card.locator('[role=status]')).to_contain_text('上一次结果')
+        model = card.locator('[data-token-filter=reference_model]')
+        model.select_option('gpt-6-luna')
+        page.wait_for_function('pending.length === 4')
+        assert 'reference_model=gpt-6-luna' in page.evaluate('pending[3].url')
+        page.evaluate('data => pending[3].resolve(data)', priced_dashboard(100, model='gpt-6-luna'))
+        expect(model).to_have_value('gpt-6-luna')
+        expect(card).to_contain_text('GPT-6 Luna')
+        expect(assumption).to_have_value('100')
+        expect(card.locator('.is-total')).to_contain_text('52.44K')
+        expect(card).to_contain_text('估价拆分')
+        model.select_option('gpt-6.1-sol')
+        page.wait_for_function('pending.length === 5')
+        page.evaluate("pending[4].reject(new Error('fixture failure'))")
+        expect(model).to_have_value('gpt-6-luna')
+        with page.expect_download() as downloaded:
+            card.locator('[data-token-export]').click()
+        assert downloaded.value.suggested_filename == 'codepier-mcp-tool-estimate.json'
+        assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
+        card.locator('[data-token-filters] > summary').click()
+        expect(card.locator('.token-pricing-details')).to_be_hidden()
         assert not errors
     finally:
         context.close()

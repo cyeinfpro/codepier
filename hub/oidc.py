@@ -238,7 +238,7 @@ class OIDCService:
         except (httpx.HTTPError,ValueError,UnicodeError,TimeoutError) as exc:
             raise DevError('OIDC_UPSTREAM_ERROR','身份提供者通信失败',502) from exc
 
-    async def metadata(self,provider,*,force=False):
+    async def metadata(self,provider,*,force=False,allow_disabled=False):
         identifier=provider['id'];version=provider['version']
         async with self.metadata_locks.setdefault(identifier,asyncio.Lock()):
             cached=await self.store.run(self.store.one,'SELECT * FROM oidc_cache WHERE provider_id=? AND version=? AND expires>?',
@@ -249,7 +249,7 @@ class OIDCService:
             if failed and failed[0]==version and failed[1]>time.monotonic():
                 raise DevError('OIDC_UPSTREAM_ERROR','身份提供者暂不可用，请稍后重试',502)
             try:
-                result=await self._load_metadata(provider)
+                result=await self._load_metadata(provider,allow_disabled=allow_disabled)
             except DevError:
                 self.metadata_failures[identifier]=(version,time.monotonic()+METADATA_FAILURE_COOLDOWN)
                 raise
@@ -322,7 +322,7 @@ class OIDCService:
             await self.store.run(save_keys)
             return keys
 
-    async def _load_metadata(self,provider):
+    async def _load_metadata(self,provider,*,allow_disabled=False):
         meta=await self.http_json(provider,'GET',provider['discovery_url'])
         if meta.get('issuer')!=provider['issuer']:raise DevError('OIDC_ISSUER_MISMATCH','Discovery issuer 与配置不一致',400)
         for field in ('authorization_endpoint','token_endpoint','jwks_uri'):
@@ -338,7 +338,9 @@ class OIDCService:
         if not isinstance(keys.get('keys'),list) or not 1<=len(keys['keys'])<=32:raise DevError('OIDC_KEYS_INVALID','身份提供者公钥格式无效',400)
         def save_metadata():
             with self.store.transaction():
-                current=self.provider(provider['id'])
+                # Administrators may verify a draft provider before exposing its
+                # login button. Login and key-refresh paths still require enabled.
+                current=self.provider(provider['id'],enabled=not allow_disabled)
                 if current['version']!=provider['version']:
                     raise DevError('OIDC_CONFIG_CHANGED','身份提供者配置已变化，请重新发起请求',409)
                 self.store.db.execute('INSERT INTO oidc_cache VALUES(?,?,?,?,?) ON CONFLICT(provider_id) DO UPDATE SET version=excluded.version,metadata=excluded.metadata,jwks=excluded.jwks,expires=excluded.expires',(provider['id'],provider['version'],json.dumps(meta),json.dumps(keys),time.time()+300))
@@ -712,7 +714,7 @@ class OIDCService:
                 auth.instance(request,True)
                 return self.provider(identifier,enabled=False)
             provider=await store.run(prepare)
-            meta,keys=await self.metadata(provider,force=True)
+            meta,keys=await self.metadata(provider,force=True,allow_disabled=True)
             def result():
                 auth.instance(request,True)
                 if self.provider(identifier,enabled=False)['version']!=provider['version']:

@@ -178,7 +178,7 @@ REQUIRED_FILES = {
 }
 
 PUBLIC_DOCS = {
-    'docs/README.md', 'docs/DEPENDENCIES.md', 'docs/SETTINGS_CENTER.md',
+    'docs/README.md', 'docs/DEPENDENCIES.md', 'docs/SETTINGS_CENTER.md', 'docs/ADAPTIVE_SCHEDULER.md',
     'docs/mcp-token-usage.md', 'docs/hub-file-import-settings.md',
     'docs/COLLABORATION.md',
     'docs/COLLABORATION_CHATROOM.md',
