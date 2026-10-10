@@ -1,5 +1,5 @@
 {
-  "version": "1.26.0",
+  "version": "1.26.1",
   "algorithm": "sha256",
   "assets": {
     "access-profiles.css": {
