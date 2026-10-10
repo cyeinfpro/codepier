@@ -55,7 +55,9 @@ async def test_bidirectional_wire_matrix_preserves_one_write_and_recovery(tmp_pa
                 decoded = agent_channel.unpack(hub_channel.pack(ack))
                 agent.journal.ack(decoded['id'])
             return True
-        async def deliver(packet):
+        async def deliver(packet, *, before_send=None):
+            if before_send is not None and not await before_send():
+                return False
             outgoing = dict(packet)
             if old_hub: outgoing.pop('tool_contract_version', None)
             received = agent_channel.unpack(hub_channel.pack(outgoing))
@@ -63,6 +65,7 @@ async def test_bidirectional_wire_matrix_preserves_one_write_and_recovery(tmp_pa
             if old_agent: received.pop('tool_contract_version', None)
             if received['type'] == 'call': await agent.handle(received)
             elif received['type'] == 'probe': await agent.report_status(received['id'])
+            return True
         peer.send = deliver;agent.send = report
         args = {'project':'Fixture','path':'once.txt','content':'only once','expected_sha256':'new','idempotency_key':'wire-matrix'}
         receipt = await runtime.invoke('fs_write', args, principal)
@@ -133,7 +136,11 @@ async def test_pending_payload_keeps_original_semantics_after_upgrade(tmp_path, 
         row = store.one('SELECT payload FROM operations WHERE id=?', (receipt['operation_id'],))
         assert json.loads(store.decrypt(row['payload']))['tool_contract_version'] == 1
         packets = []
-        async def send(packet): packets.append(packet)
+        async def send(packet, *, before_send=None):
+            if before_send is not None and not await before_send():
+                return False
+            packets.append(packet)
+            return True
         runtime.connections['dev'] = SimpleNamespace(last_seen=time.time(), journal_id='journal', unusable=False, send=send)
         if sent:
             await runtime.deliver(receipt['operation_id'])

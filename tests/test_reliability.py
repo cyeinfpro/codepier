@@ -62,9 +62,12 @@ class Peer:
     def __init__(self):
         self.last_seen = time.time(); self.journal_id = 'journal-one'; self.unusable = False
         self.packets = []; self.gate = None
-    async def send(self, packet):
+    async def send(self, packet, *, before_send=None):
+        if before_send is not None and not await before_send():
+            return False
         self.packets.append(packet)
         if self.gate: await self.gate.wait()
+        return True
 
 
 def decoded(op):

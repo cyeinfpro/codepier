@@ -346,8 +346,11 @@ async def test_dispatched_revoked_request_only_probes_original_receipt(inventory
         journal_id = 'fixture-journal'
         unusable = False
 
-        async def send(self, packet):
+        async def send(self, packet, *, before_send=None):
+            if before_send is not None and not await before_send():
+                return False
             packets.append(packet)
+            return True
 
     def no_credential_resolution(*args, **kwargs):
         raise AssertionError('Dispatched requests must only recover the original receipt')

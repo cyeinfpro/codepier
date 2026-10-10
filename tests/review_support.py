@@ -55,8 +55,11 @@ class Peer:
         self.packets = []
         self.cancel_pending_protocol = cancel_pending_protocol
 
-    async def send(self, packet):
+    async def send(self, packet, *, before_send=None):
+        if before_send is not None and not await before_send():
+            return False
         self.packets.append(packet)
+        return True
 
 
 async def eventually(predicate, seconds=2):
