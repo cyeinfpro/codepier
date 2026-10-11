@@ -48,6 +48,8 @@ class CollaborationService:
         self.task_liveness = TaskLiveness(self)
         from hub.room_scope import RoomScopeService
         self.room_scope = RoomScopeService(self)
+        from hub.collaboration.channel_settings import ChannelSettings
+        self.channel_settings = ChannelSettings(self)
         from hub.collaboration.weixin import WeixinService
         self.weixin = WeixinService(self)
         from hub.collaboration.telegram import TelegramService
@@ -65,6 +67,10 @@ class CollaborationService:
                                        ('cursor', self.store.encrypt(secrets.token_hex(32))))
                     row = self.store.one("SELECT secret FROM collaboration_secrets WHERE id='cursor'")
                 self.secret = bytes.fromhex(self.store.decrypt(row['secret']))
+
+    def features(self, principal):
+        return {**asdict(self.config), **{channel + '_enabled': self.channel_settings.enabled(channel, principal)
+                for channel in ('weixin', 'telegram')}}
 
     def guard(self):
         if not self.config.enabled:
@@ -807,10 +813,10 @@ class CollaborationService:
                     (principal.space_id, principal.user_id, project['id']))
                 return {'items': rows, 'next_cursor': None}
             if not room:
-                return {'room': None, 'features': asdict(self.config), 'setup_required': True,
+                return {'room': None, 'features': self.features(principal), 'setup_required': True,
                         'delegation': self.delegation.authority_descriptor(),
                         'delegation_recovery': self.delegation.consumer.recovery(args, principal),
-                        'schema_version': 3, 'capabilities': self.chatroom.capabilities(),
+                        'schema_version': 3, 'capabilities': self.chatroom.capabilities(principal),
                         'can_manage': bool(principal.admin and not principal.grant_id)}
             kind = args['kind']
             if kind == 'delegation_policies':
@@ -875,10 +881,10 @@ class CollaborationService:
                 return self.evidence(room, args['id'])
             if kind == 'plan':
                 return (self.monitor.plan_view(room) or {'state': 'not_configured'}) if self.monitor else {'state': 'unsupported'}
-            result = {'room': room, 'features': asdict(self.config), 'setup_required': False,
+            result = {'room': room, 'features': self.features(principal), 'setup_required': False,
                       'can_manage': bool(principal.admin and not principal.grant_id),
                       'chat_identity_verified': False, 'production_actions_enabled': False,
-                      'schema_version': 3, 'capabilities': self.chatroom.capabilities()}
+                      'schema_version': 3, 'capabilities': self.chatroom.capabilities(principal)}
             for item in ('messages', 'jobs', 'goals', 'incidents', 'agents', 'subscriptions'):
                 page = self.listing(principal, room, item, args['limit'])
                 result[item], result[item + '_next_cursor'] = page['items'], page['next_cursor']

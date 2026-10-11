@@ -13,12 +13,12 @@ class ChatroomService:
     def __init__(self, collaboration):
         self.c, self.store = collaboration, collaboration.store
 
-    def capabilities(self):
+    def capabilities(self, principal=None):
         return {'task_liveness_v1': True, 'dot_receipts_v1': True, 'expired_result_archive': True,
                 'dot_message_v2': True, 'channel_attachment_manifest_v1': True,
                 'room_scope_v1': True, 'bounded_execution_v1': True, 'weixin_channel_v1': True,
-                'weixin_enabled': self.c.config.weixin_enabled, 'telegram_channel_v1': True,
-                'telegram_enabled': self.c.config.telegram_enabled, 'channel_mirror_v1': True,
+                'weixin_enabled': self.c.channel_settings.enabled('weixin', principal) if principal else self.c.config.weixin_enabled, 'telegram_channel_v1': True,
+                'telegram_enabled': self.c.channel_settings.enabled('telegram', principal) if principal else self.c.config.telegram_enabled, 'channel_mirror_v1': True,
                 'work_result_v2': True, 'host_outbox_durability_verified': False, 'room_os_sandbox_verified': False,
                 'native_dot_relay': True, 'duplex_dots': True, 'task_dots': True, 'work_progress': True, 'coordination_goals': True, 'direct_delegation': True, 'message_remind': True, 'plain_messages': True, 'message_notifications': self.c.config.events_enabled,
                 'task_assignment': True, 'message_search': True, 'incremental_messages': True,

@@ -27,13 +27,8 @@ class TelegramService:
 
         self.files = TelegramFiles(self)
 
-    def require_enabled(self):
-        if not self.c.config.telegram_enabled:
-            raise DevError(
-                "TELEGRAM_DISABLED",
-                "Telegram 通道默认关闭；须部署负责人启用后由房主安全配置",
-                409,
-            )
+    def require_enabled(self, owner):
+        self.c.channel_settings.require_enabled("telegram", owner)
 
     def owner(self, raw, principal, model, *, enabled=True):
         args = validate(model, raw)
@@ -43,7 +38,7 @@ class TelegramService:
             "id"
         ]
         if enabled:
-            self.require_enabled()
+            self.require_enabled(principal)
             self.c.live_room(room)
         return args, principal, room
 
@@ -350,8 +345,10 @@ class TelegramService:
                 and row["pairing_until"] > self.c.clock()
                 else ""
             )
+        setting = self.c.channel_settings.setting("telegram", principal)
         return {
-            "enabled": self.c.config.telegram_enabled,
+            "enabled": setting["enabled"],
+            "setting": setting,
             "mode": "long_poll",
             "private_only": True,
             "accounts": accounts,
@@ -363,12 +360,12 @@ class TelegramService:
 
     def claim_poll(self, aid):
         with self.store.transaction():
-            self.require_enabled()
             row = self.store.one(
                 "SELECT * FROM telegram_accounts WHERE id=? AND state='active'", (aid,)
             )
             now = self.c.clock()
-            if not row or row["poll_until"] > now or row["next_poll"] > now:
+            if (not row or not self.c.channel_settings.enabled("telegram", row)
+                    or row["poll_until"] > now or row["next_poll"] > now):
                 return None
             bindings = self.store.all(
                 "SELECT id,version FROM telegram_bindings WHERE account_id=? AND state IN ('pairing','awaiting_owner','active')",
@@ -697,14 +694,24 @@ class TelegramService:
                 (state, code, self.c.clock() + delay, row["id"]),
             )
 
+    def poll_current(self, claim):
+        self.require_enabled(claim)
+        row = self.store.one("SELECT * FROM telegram_accounts WHERE id=?", (claim["id"],))
+        if (not row or row["state"] != "active" or row["poll_fence"] != claim["poll_fence"]
+                or row["poll_until"] <= self.c.clock()):
+            raise DevError("TELEGRAM_POLL_FENCE_LOST", "原轮询世代已失效", 409)
+        return row
+
     async def poll_once(self, aid):
         claim = await self.store.run(self.claim_poll, aid)
         if not claim:
             return
         try:
+            await self.store.run(self.poll_current, claim)
             client = self.client_factory(self.store.decrypt(claim["secret"]))
             # Read-only verification also prevents racing an existing webhook.
             await client.verify(claim["bot_id"])
+            await self.store.run(self.poll_current, claim)
             updates = await client.updates(claim["offset"])
             await self.store.run(self.commit_updates, claim, updates)
         except asyncio.CancelledError:
@@ -718,12 +725,13 @@ class TelegramService:
             await self.store.run(self.poll_failed, claim, exc)
 
     async def tick(self):
-        if not self.c.config.telegram_enabled:
+        if not self.c.config.enabled:
             return
+        gate = self.c.channel_settings.sql_enabled("telegram", "a")
         rows = await self.store.run(
             lambda: self.store.all(
-                """SELECT id FROM telegram_accounts
-            WHERE state='active' AND next_poll<=? AND poll_until<=? ORDER BY next_poll,updated,id LIMIT 4""",
+                f"""SELECT a.id FROM telegram_accounts a
+            WHERE {gate} AND state='active' AND next_poll<=? AND poll_until<=? ORDER BY next_poll,updated,id LIMIT 4""",
                 (self.c.clock(), self.c.clock()),
             )
         )

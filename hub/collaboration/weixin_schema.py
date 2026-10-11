@@ -71,6 +71,9 @@ def migrate(db):
     for statement in SCHEMA.split(';'):
         if statement.strip():
             db.execute(statement)
+    enrollments = {r[1] for r in db.execute('PRAGMA table_info(weixin_enrollments)')}
+    if 'conversation_id' not in enrollments:
+        db.execute("ALTER TABLE weixin_enrollments ADD COLUMN conversation_id TEXT NOT NULL DEFAULT ''")
     columns = {r[1] for r in db.execute('PRAGMA table_info(weixin_bindings)')}
     if 'pairing_secret' not in columns:
         db.execute("ALTER TABLE weixin_bindings ADD COLUMN pairing_secret TEXT NOT NULL DEFAULT ''")
@@ -140,6 +143,10 @@ class QRStatus(Scope):
     enrollment_id: str = Field(min_length=1, max_length=100)
     expected_version: int = Field(ge=1)
     verify_code: str = Field(default='', max_length=32)
+
+
+class QRCancel(QRStatus):
+    idempotency_key: str = Field(min_length=8, max_length=128)
 
 
 class QRAccept(QRStatus):

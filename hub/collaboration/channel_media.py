@@ -329,7 +329,7 @@ class ChannelMedia:
                 self.store.execute('DELETE FROM channel_attachment_chunks WHERE attachment_id=?', (row['id'],))
 
     async def tick(self):
-        if not getattr(self.c.config, 'weixin_enabled', False):
+        if not self.c.config.enabled:
             return
         await self.store.run(self.expire)
         rows = await self.store.run(lambda: self.store.all("SELECT id FROM channel_attachments WHERE channel='weixin' AND state='pending' AND next_attempt<=? AND COALESCE(lease_until,0)<=? ORDER BY created,id LIMIT 2", (self.c.clock(), self.c.clock())))

@@ -102,7 +102,7 @@ def post(c, source="", text="完成", complete=True):
 def test_default_off_and_unprivileged_enrollment(collab):
     c = duplex(collab)
     assert not c.s.config.telegram_enabled
-    with pytest.raises(DevError, match="默认关闭"):
+    with pytest.raises(DevError, match="已关闭"):
         c.s.telegram.import_account(
             {
                 **c.scope,

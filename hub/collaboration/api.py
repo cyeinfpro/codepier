@@ -1,5 +1,4 @@
 """Panel entry: authenticated sessions, current project scopes and CSRF checks."""
-from dataclasses import asdict
 from fastapi import APIRouter, Query, Request, Response
 from urllib.parse import quote
 from shared.util import DevError
@@ -13,8 +12,8 @@ def make_router(auth, runtime):
     async def status(request: Request):
         def inspect():
             principal = auth.panel(request)
-            return {'features': asdict(service.config), 'components': service.health,
-                    'schema_version': 3, 'capabilities': service.chatroom.capabilities(),
+            return {'features': service.features(principal), 'components': service.health,
+                    'schema_version': 3, 'capabilities': service.chatroom.capabilities(principal),
                     'can_manage': bool(principal.admin and not principal.grant_id),
                     'delegation': service.delegation.authority_descriptor(),
                     'production_actions_enabled': False, 'platform_poc_verified': False}
@@ -110,7 +109,13 @@ def make_router(auth, runtime):
             'cursor': cursor, 'limit': limit}, auth.panel(request)))
 
     @router.post('/{operation}')
-    async def mutate(operation: str, body: dict, request: Request):
+    async def mutate(operation: str, body: dict, request: Request, response: Response):
+        response.headers['Cache-Control'] = 'private, no-store'
+        # QR provider I/O must never hold the Store transaction/thread lock.
+        if operation in {'weixin-qr-start', 'weixin-qr-status'}:
+            principal = await store.run(lambda: auth.admin(request, True))
+            handler = service.weixin.qr.start if operation == 'weixin-qr-start' else service.weixin.qr.status
+            return await handler(body, principal)
         def perform():
             principal = auth.admin(request, True)
             handlers = {'dot': service.dots.create,
@@ -123,6 +128,9 @@ def make_router(auth, runtime):
                         'telegram-files': service.telegram.files.approve,
                         'channel-delivery-control': service.channels.control,
                         'weixin-mirror-consent': service.channels.consent_weixin,
+                        'channel-settings': service.channel_settings.control,
+                        'weixin-qr-accept': service.weixin.qr.accept,
+                        'weixin-qr-cancel': service.weixin.qr.cancel,
                         'weixin-account': service.weixin.import_account,
                         'weixin-bind': service.weixin.bind,
                         'weixin-control': service.weixin.control,

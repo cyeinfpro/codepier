@@ -380,7 +380,7 @@ class ChannelMediaRouter:
             await self.store.run(fail)
 
     async def tick(self):
-        if not self.c.config.telegram_enabled:
+        if not self.c.config.enabled:
             return
         await self.store.run(self.legacy.expire)
 

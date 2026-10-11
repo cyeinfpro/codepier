@@ -156,3 +156,45 @@
 .cc-tg-settings code {
   overflow-wrap: anywhere;
 }
+
+/* QR pixels are generated locally by the Hub, never fetched from a QR service. */
+.cc-wx-onboarding,
+.cc-channel-switch {
+  margin: 12px 0;
+  padding: 16px;
+  border: 1px solid var(--ui-line);
+  border-radius: 12px;
+  background: var(--ui-panel);
+}
+.cc-wx-qr {
+  min-width: 0;
+}
+.cc-wx-qr-image {
+  display: block;
+  width: min(100%, 280px);
+  height: auto;
+  aspect-ratio: 1;
+  background: white;
+  margin: 16px auto;
+  image-rendering: pixelated;
+}
+.cc-wx-qr-notice {
+  border-left: 3px solid currentColor;
+  padding: 8px 12px;
+}
+.cc-wx-binding-guide {
+  padding: 12px;
+  border: 1px solid var(--ui-line);
+  border-radius: 8px;
+}
+.cc-wx-qr .cc-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+@media (max-width: 720px) {
+  .cc-wx-onboarding,
+  .cc-channel-switch {
+    padding: 12px;
+  }
+}

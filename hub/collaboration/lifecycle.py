@@ -28,14 +28,16 @@ class CollaborationLoops:
             operations.append(('events', self.service.events.tick, 2))
         if self.service.config.collector_enabled:
             operations.append(('collector', self.service.monitor.tick, 2))
-        if self.service.config.weixin_enabled:
+        # Owner switches are persisted and can change without a Hub restart.
+        # These bounded loops remain idle unless a current owner/account is enabled.
+        if self.service.config.enabled:
             operations.extend([('weixin_poll', self.service.weixin.tick, 1),
                                ('weixin_delivery', self.service.weixin.delivery.tick, 1),
                                ('weixin_media', self.service.weixin.media.tick, 2)])
-        if self.service.config.telegram_enabled:
+        if self.service.config.enabled:
             operations.extend([('telegram_poll', self.service.telegram.tick, 1),
                                ('telegram_media', self.service.channels.media.tick, 2)])
-        if self.service.config.telegram_enabled or self.service.config.weixin_enabled:
+        if self.service.config.enabled:
             operations.append(('channel_mirrors', self.service.channels.tick, 1))
         for name, operation, interval in operations:
             self.service.health.setdefault(name, {'enabled': True, 'running': False, 'reason_code': ''})

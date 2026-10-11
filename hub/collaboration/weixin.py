@@ -1,4 +1,4 @@
-"""Owner-approved, default-off external channel; messages are never authority."""
+"""Owner-approved external channel; messages are never execution authority."""
 from __future__ import annotations
 
 import asyncio
@@ -41,10 +41,11 @@ class WeixinService:
         from hub.collaboration.weixin_delivery import WeixinDelivery
         self.media = ChannelMedia(self)
         self.delivery = WeixinDelivery(self)
+        from hub.collaboration.weixin_qr import WeixinEnrollment
+        self.qr = WeixinEnrollment(self)
 
-    def require_enabled(self):
-        if not getattr(self.c.config, 'weixin_enabled', False):
-            raise DevError('WEIXIN_DISABLED', '微信通道默认关闭；需由部署负责人单独开启功能后再由房主配置', 409)
+    def require_enabled(self, owner):
+        self.c.channel_settings.require_enabled('weixin', owner)
 
     def owner(self, raw, principal, model, *, enabled=True):
         args = validate(model, raw)
@@ -54,7 +55,7 @@ class WeixinService:
         args['conversation_id'] = conversation['id']
         if enabled:
             self.c.live_room(room)
-            self.require_enabled()
+            self.require_enabled(principal)
         return args, principal, room
 
     def account(self, identifier, principal):
@@ -73,8 +74,9 @@ class WeixinService:
         return row
 
     def valid(self, identifier, *, pairing=False):
-        self.require_enabled()
         binding = self.store.one('SELECT * FROM weixin_bindings WHERE id=?', (identifier,))
+        if binding:
+            self.require_enabled(binding)
         allowed = {'active', 'pairing', 'awaiting_owner'} if pairing else {'active'}
         if not binding or binding['state'] not in allowed or binding['expires_at'] <= self.c.clock():
             raise DevError('WEIXIN_BINDING_INACTIVE', '原微信绑定已暂停、撤销或到期', 403)
@@ -192,7 +194,7 @@ class WeixinService:
                         raise DevError('WEIXIN_PAIRING_UNVERIFIED', '必须核对当前配对挑战实际返回的微信 peer 编号', 409)
                     state, peer = 'active', current['pending_peer_id']
                 elif action == 'resume':
-                    self.require_enabled()
+                    self.require_enabled(principal)
                     if current['state'] != 'paused' or not current['peer_id'] or current['expires_at'] <= self.c.clock():
                         raise DevError('WEIXIN_RESUME_DENIED', '只有原配对仍有效的暂停绑定可以恢复；不会重放历史消息', 409)
                     state, peer = 'active', current['peer_id']
@@ -258,7 +260,8 @@ class WeixinService:
                 if len(candidates) == 20:
                     break
             deliveries = self.delivery.listing(room['id'], args['conversation_id'])
-            return {'enabled': getattr(self.c.config, 'weixin_enabled', False), 'accounts': accounts,
+            setting = self.c.channel_settings.setting('weixin', principal)
+            return {'enabled': setting['enabled'], 'setting': setting, 'accounts': accounts,
                     'bindings': bindings, 'deliveries': deliveries, 'read_only': True,
                     'artifact_candidates': [r for r in artifacts['artifacts'] if not r['expired'] and r['bytes'] <= 32 * 1024 * 1024],
                     'artifact_candidates_more': bool(artifacts['next_cursor']), 'reply_candidates': candidates,
@@ -291,6 +294,7 @@ class WeixinService:
                     'binding_version': current['version'], 'generation': current['generation']}
 
     def poll_current(self, claim):
+        self.require_enabled(claim)
         account = self.store.one('SELECT * FROM weixin_accounts WHERE id=?', (claim['id'],))
         if (not account or account['poll_owner'] != claim['poll_owner'] or account['poll_fence'] != claim['poll_fence']
                 or account['state'] != 'active' or account['poll_until'] <= self.c.clock()):
@@ -470,6 +474,7 @@ class WeixinService:
         if not claim:
             return
         try:
+            await self.store.run(self.poll_current, claim)
             client = self.client_factory(claim['api_base'], self.store.decrypt(claim['secret']))
             response = await client.updates(self.store.decrypt(claim['cursor']))
             await self.store.run(self.commit_updates, claim, response)
@@ -480,11 +485,14 @@ class WeixinService:
             await self.store.run(self.poll_failed, claim, exc)
 
     async def tick(self):
-        if not getattr(self.c.config, 'weixin_enabled', False):
+        if getattr(self, 'qr', None):
+            await self.store.run(self.qr.expire)
+        if not self.c.config.enabled:
             return
-        accounts = await self.store.run(lambda: self.store.all('''SELECT a.id FROM weixin_accounts a
+        gate = self.c.channel_settings.sql_enabled('weixin', 'a')
+        accounts = await self.store.run(lambda: self.store.all(f'''SELECT a.id FROM weixin_accounts a
             JOIN weixin_bindings b ON b.account_id=a.id AND b.state IN ('pairing','awaiting_owner','active')
-            WHERE a.state='active' AND a.next_poll<=? AND COALESCE(a.poll_until,0)<=?
+            WHERE {gate} AND a.state='active' AND a.next_poll<=? AND COALESCE(a.poll_until,0)<=?
             ORDER BY a.next_poll,a.updated,a.id LIMIT 4''', (self.c.clock(), self.c.clock())))
         # Send/media run in independent lifecycle loops, not behind this long poll.
         await asyncio.gather(*(self.poll_once(row['id']) for row in accounts))

@@ -67,13 +67,14 @@ async def test_owner_pause_cannot_be_overridden_by_automatic_renewal(collab):
     assert resumed['state'] == 'active'
 
 
-def test_feature_defaults_are_off_and_inconsistent_flags_fail(monkeypatch):
+def test_master_default_off_keeps_channels_inactive_and_inconsistent_flags_fail(monkeypatch):
     from shared.config import ConfigurationError
     keys = ('CODEPIER_COLLABORATION_ENABLED', 'CODEPIER_MCP_EVENTS_ENABLED',
-            'CODEPIER_MONITOR_COLLECTOR_ENABLED', 'CODEPIER_ANALYSIS_DISPATCH_ENABLED')
+            'CODEPIER_MONITOR_COLLECTOR_ENABLED', 'CODEPIER_ANALYSIS_DISPATCH_ENABLED',
+            'CODEPIER_WEIXIN_ENABLED', 'CODEPIER_TELEGRAM_ENABLED')
     for variable in keys:
         monkeypatch.delenv(variable, raising=False)
-    assert CollaborationConfig.from_env() == CollaborationConfig()
+    assert CollaborationConfig.from_env() == CollaborationConfig(weixin_enabled=False)
     monkeypatch.setenv('CODEPIER_MCP_EVENTS_ENABLED', 'true')
     with pytest.raises(ConfigurationError):
         CollaborationConfig.from_env()

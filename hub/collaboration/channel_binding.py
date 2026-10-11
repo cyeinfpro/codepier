@@ -13,11 +13,13 @@ class ChannelBinding:
     def validate(self, channel, identifier, *, pairing=False):
         if channel == "weixin":
             return self.c.weixin.valid(identifier, pairing=pairing)
-        if channel != "telegram" or not self.c.config.telegram_enabled:
-            raise DevError("CHANNEL_DISABLED", "通道默认关闭或不受支持", 409)
+        if channel != "telegram":
+            raise DevError("CHANNEL_DISABLED", "通道不受支持", 409)
         row = self.store.one(
             "SELECT * FROM telegram_bindings WHERE id=?", (identifier,)
         )
+        if row:
+            self.c.telegram.require_enabled(row)
         states = {"active", "pairing", "awaiting_owner"} if pairing else {"active"}
         if not row or row["state"] not in states or row["expires_at"] <= self.c.clock():
             raise DevError(

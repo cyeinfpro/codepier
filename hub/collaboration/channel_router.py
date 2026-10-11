@@ -108,7 +108,7 @@ class ChannelRouter:
             if wx:
                 legacy = self.c.weixin.delivery.queue_reply(message)
         targets = []
-        if self.c.config.telegram_enabled:
+        if self.c.config.enabled:
             targets += [
                 ("telegram", r)
                 for r in self.store.all(
@@ -117,7 +117,7 @@ class ChannelRouter:
                     (message["room_id"], message["conversation_id"]),
                 )
             ]
-        if self.c.config.weixin_enabled:
+        if self.c.config.enabled:
             targets += [
                 ("weixin", r)
                 for r in self.store.all(
@@ -598,6 +598,8 @@ class ChannelRouter:
             await self.store.run(reject)
             return
         try:
+            await self.store.run(self.c.channel_settings.require_enabled,
+                                 claim["delivery"]["channel"], claim["account"])
             value = json.loads(claim["body"]).get("text", "")
             if claim["delivery"]["channel"] == "telegram":
                 client = self.c.telegram.client_factory(

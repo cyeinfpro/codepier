@@ -96,6 +96,502 @@ window.CodePierCollaborationChannels = {
         : '';
     }
 
+    // Enrollment is memory-only. No token, QR payload, or verification code is
+    // persisted in browser storage or interpolated into a remote image URL.
+    let qr = null,
+      qrTimer = null,
+      qrWatch = null;
+    const qrScope = (key) => ({
+      project: key.project,
+      environment_id: key.environment_id,
+      conversation_id: key.conversation_id,
+    });
+    const qrId = () =>
+      typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+            const r = crypto.getRandomValues(new Uint8Array(1))[0] & 15;
+            return (c === 'x' ? r : (r & 3) | 8).toString(16);
+          });
+    const qrLive = (q) =>
+      qr === q &&
+      current(q.key) &&
+      loaded === q.owner &&
+      loaded.epoch === state.drawerEpoch &&
+      !!document.querySelector('.cc-wx-qr');
+    const qrTerminal = (entry) => ['expired', 'cancelled', 'accepted'].includes(entry?.state);
+    const qrPolling = (entry) => ['starting', 'wait', 'scaned'].includes(entry?.state);
+    const qrRejected = (error) =>
+      error?.status >= 400 && error.status < 500 && ![408, 429].includes(error.status);
+    const qrRejectMessage = (error) =>
+      ({
+        WEIXIN_ACCOUNT_EXISTS:
+          '此机器人已登记，本次扫码未覆盖原凭据。请取消本次扫码，核对已有连接。',
+        WEIXIN_QR_NOT_CONFIRMED:
+          '本次扫码已过期、状态已改变或尚未确认。请查询原状态，或取消后重新扫码。',
+        WEIXIN_MAPPING_CHANGED: '当前项目范围已变化，本次操作未完成。请取消后重新读取通道设置。',
+        WEIXIN_SCANNER_MISMATCH: '扫码账号编号与本次确认不一致。请重新查询并核对本人账号。',
+        WEIXIN_VERIFY_CODE_INVALID: '验证码未被接受。请按手机微信显示的要求重新核对。',
+        WEIXIN_ENROLLMENT_NOT_FOUND: '此扫码请求已不可用。请重新读取当前通道设置。',
+      })[error?.code] || '服务端已拒绝此次操作。请核对当前身份、通道设置与扫码状态后重试。';
+    function qrTimersOff() {
+      clearTimeout(qrTimer);
+      clearInterval(qrWatch);
+      qrTimer = null;
+      qrWatch = null;
+    }
+    function qrDiscard(q) {
+      if (!q) return;
+      if (qr === q) {
+        qrTimersOff();
+        qr = null;
+      }
+      q.discarded = true;
+      // Never carry an old request into a new login, owner or room. A stale
+      // start/status response may only cancel its own enrollment in its scope.
+      if (
+        current(q.key) &&
+        q.entry?.enrollment_id &&
+        !qrTerminal(q.entry) &&
+        !q.busy &&
+        !q.cancelAttempted
+      ) {
+        q.cancelAttempted = true;
+        void mutation('weixin-qr-cancel', {
+          ...qrScope(q.key),
+          enrollment_id: q.entry.enrollment_id,
+          expected_version: q.entry.version,
+          idempotency_key: q.cancelKey,
+        }).catch(() => {}); // Server expiry is the fallback, never a fresh start.
+      }
+      q.acceptArgs = null;
+    }
+    function qrImage(entry) {
+      const image = entry?.qrcode_image || '';
+      return typeof image === 'string' &&
+        image.length <= 1500000 &&
+        /^data:image\/svg\+xml;base64,[A-Za-z0-9+/]+={0,2}$/.test(image)
+        ? '<img class="cc-wx-qr-image" alt="使用微信扫描此登录二维码" referrerpolicy="no-referrer" src="' +
+            E(image) +
+            '">'
+        : '';
+    }
+    function qrPanel(w) {
+      return (
+        '<section class="cc-wx-onboarding"><h4>扫码登录微信</h4>' +
+        '<p>用本人微信扫码、核对扫码账号，再绑定当前话题。无需手动查找机器人令牌。</p>' +
+        '<div class="cc-wx-qr">' +
+        qrMarkup(null, w) +
+        '</div></section>'
+      );
+    }
+    function qrMarkup(q, w = loaded?.weixin) {
+      if (!q)
+        return (
+          '<div data-channel-form="qr-start">' +
+          '<p>开始后，本服务向腾讯官方 iLink 申请一次性登录二维码。扫码确认后，登录凭据只在服务端短时保留；你再次核对账号并确认，才会加密保存供后续连接使用。二维码五分钟内有效。</p>' +
+          checkbox(
+            'qr_storage',
+            '我同意为此次连接处理登录凭据，并在核对扫码账号后加密保存，供本服务持续连接使用',
+            true,
+          ) +
+          '<p>请在手机微信授权页阅读并确认其展示的条款与资格要求。</p>' +
+          checkbox('qr_terms', '我会在手机微信授权页核对并确认展示的服务条款与使用资格', true) +
+          button('dot-channel-qr-start', '扫码登录微信', {}, w?.enabled ? '' : 'disabled') +
+          (!w?.enabled ? '<small>请先开启上方的微信通道开关。</small>' : '') +
+          '<small>此步骤不绑定话题、不创建 MCP 凭据，也不授予代码执行或文件外发权限。</small></div>'
+        );
+      const e = q.entry,
+        phase = e?.state || 'starting';
+      const captions = {
+        starting: '正在申请微信登录二维码…',
+        wait: '请用本人微信扫码',
+        scaned: '已扫码，请在微信中确认登录',
+        need_verifycode: '微信要求输入验证码',
+        confirmed: '微信已确认，请核对扫码账号',
+        expired: '二维码已过期',
+        cancelled: '本次扫码已取消',
+        verify_code_blocked: '验证码尝试已停止，请重新扫码',
+        binded_redirect: '此账号需要在微信中处理已有绑定',
+        attention: '扫码状态需要核对',
+        accepted: '登录凭据已保存',
+      };
+      const busy = q.busy ? 'disabled' : '';
+      const status =
+        '<p role="status" aria-live="polite">' + E(captions[phase] || captions.attention) + '</p>';
+      const notice = q.notice
+        ? '<p class="cc-wx-qr-notice" role="alert">' + E(q.notice) + '</p>'
+        : '';
+      if (!e)
+        return (
+          status +
+          notice +
+          (q.busy
+            ? ''
+            : q.startRejected
+              ? button('dot-channel-qr-reset', '返回扫码设置')
+              : button('dot-channel-qr-retry-start', '恢复本次二维码请求')) +
+          '<small>请求未确认前不会另建登录。关闭后停止处理，未完成登录会到期失效。</small>'
+        );
+      const expires = '<small>有效至 ' + stamp(e.expires_at) + '</small>';
+      let body = '';
+      if (['starting', 'wait', 'scaned'].includes(phase)) {
+        body = qrImage(e) || '<p>二维码暂不可显示，请查询本次状态；不会加载外部图片。</p>';
+      } else if (phase === 'need_verifycode' && !q.verifyUncertain) {
+        body =
+          '<div data-channel-form="qr-verify">' +
+          field(
+            '微信验证码',
+            '<input name="verify_code" maxlength="64" autocomplete="one-time-code" required>',
+          ) +
+          button('dot-channel-qr-verify', '提交本次验证码', {}, busy) +
+          '</div>';
+      } else if (phase === 'confirmed') {
+        body =
+          '<div data-channel-form="qr-accept"><p>扫码账号编号：<code>' +
+          E(e.scanner_id) +
+          '</code></p>' +
+          field(
+            '连接名称',
+            '<input name="label" value="我的微信" maxlength="80" required autocomplete="off">',
+          ) +
+          checkbox(
+            'qr_scanner',
+            '我已核对以上完整账号编号，确认是本人，已在微信授权页确认相关条款，并同意加密保存凭据供本服务持续连接使用',
+            true,
+          ) +
+          button(
+            'dot-channel-qr-accept',
+            q.acceptArgs ? '恢复原保存请求' : '确认本人并保存连接',
+            {},
+            busy,
+          ) +
+          '<small>保存后还需选择此话题的 dot、生成配对码并核对联系人。</small></div>';
+      } else if (phase === 'binded_redirect') {
+        body =
+          '<p>请先在微信客户端核对已有绑定，再取消本次请求并重新扫码。不会自动跳转或解除原绑定。</p>';
+      } else if (phase === 'attention') {
+        body = '<p>未确认完成登录。请查询原请求；不要在状态未知时创建新登录。</p>';
+      }
+      const controls =
+        phase === 'accepted'
+          ? button('dot-channel-qr-finish', '查看已保存连接并配对', {}, busy)
+          : q.acceptArgs
+            ? button('dot-channel-qr-status', '查询原保存状态', {}, busy)
+            : qrTerminal(e)
+              ? button('dot-channel-qr-new', '重新扫码', {}, busy)
+              : button('dot-channel-qr-status', '查询本次状态', {}, busy) +
+                button('dot-channel-qr-refresh', '取消旧码并重新扫码', {}, busy) +
+                button('dot-channel-qr-cancel', '取消本次扫码', {}, busy);
+      return status + notice + body + expires + '<div class="cc-actions">' + controls + '</div>';
+    }
+    function qrPaint(q, force = false) {
+      if (!qrLive(q)) return;
+      const target = document.querySelector('.cc-wx-qr');
+      // Preserve a partially entered code/name during unchanged status polls.
+      const signature = JSON.stringify([
+        q.entry?.state,
+        q.entry?.scanner_id,
+        q.notice,
+        q.entry?.qrcode_image,
+        !!q.acceptArgs,
+        !!q.verifyUncertain,
+      ]);
+      if (force || q.signature !== signature) {
+        target.innerHTML = qrMarkup(q);
+        q.signature = signature;
+      }
+      target.setAttribute('aria-busy', String(q.busy));
+      for (const input of target.querySelectorAll('button,input'))
+        input.disabled = q.busy || (!!q.acceptArgs && input.tagName === 'INPUT');
+    }
+    function qrSchedule(q) {
+      clearTimeout(qrTimer);
+      if (!qrLive(q) || !qrPolling(q.entry) || q.notice) return;
+      qrTimer = setTimeout(() => {
+        if (!qrLive(q)) {
+          qrDiscard(q);
+          return;
+        }
+        void qrStatus(q);
+      }, 2000);
+    }
+    function qrWatchScope(q) {
+      clearInterval(qrWatch);
+      qrWatch = setInterval(() => {
+        if (!qrLive(q)) qrDiscard(q);
+        else if (
+          !q.busy &&
+          !q.acceptArgs &&
+          q.entry &&
+          !qrTerminal(q.entry) &&
+          Number.isFinite(q.entry.expires_at) &&
+          Date.now() >= q.entry.expires_at * 1000
+        ) {
+          q.entry = { ...q.entry, state: 'expired', qrcode_image: '' };
+          clearTimeout(qrTimer);
+          qrPaint(q);
+        }
+      }, 250);
+    }
+    function qrReadResult(q, result) {
+      if (!result?.enrollment_id || !Number.isInteger(result.version))
+        throw new Error('登录状态格式不完整');
+      if (q.entry && result.enrollment_id !== q.entry.enrollment_id)
+        throw new Error('登录请求编号不匹配');
+      if (q.entry && result.version < q.entry.version) return;
+      // Explicit public fields only; never retain any unexpected token field.
+      q.entry = {
+        enrollment_id: result.enrollment_id,
+        state: result.state,
+        version: result.version,
+        expires_at: result.expires_at,
+        qrcode_image: result.qrcode_image,
+        scanner_id: result.scanner_id || '',
+        reason_code: result.reason_code || '',
+        account_id: result.account_id || '',
+      };
+      if (qrTerminal(q.entry)) q.acceptArgs = null;
+    }
+    async function qrStart(q) {
+      if (!qrLive(q) || q.busy) return local;
+      q.busy = true;
+      q.notice = '';
+      qrPaint(q);
+      try {
+        const result = await mutation('weixin-qr-start', {
+          ...qrScope(q.key),
+          idempotency_key: q.startKey,
+          confirm_credential_storage: true,
+          confirm_provider_terms: true,
+        });
+        qrReadResult(q, result);
+      } catch (error) {
+        q.startRejected = qrRejected(error);
+        q.notice = q.startRejected
+          ? qrRejectMessage(error)
+          : '申请结果暂未确认。请恢复本次请求，系统会沿用原请求编号，不会重复申请。';
+      } finally {
+        q.busy = false;
+      }
+      if (!qrLive(q)) {
+        qrDiscard(q);
+        return local;
+      }
+      qrPaint(q);
+      qrSchedule(q);
+      return local;
+    }
+    async function qrStatus(q, verifyCode = '') {
+      if (!qrLive(q) || q.busy || !q.entry || qrTerminal(q.entry)) return local;
+      q.busy = true;
+      q.notice = '';
+      qrPaint(q);
+      const args = {
+        ...qrScope(q.key),
+        enrollment_id: q.entry.enrollment_id,
+        expected_version: q.entry.version,
+        ...(verifyCode ? { verify_code: verifyCode } : {}),
+      };
+      try {
+        // Verification codes must not enter mutation's persistent retry map.
+        const result = await api('/api/collaboration/weixin-qr-status', {
+          method: 'POST',
+          body: JSON.stringify(args),
+          retrySafe: false,
+        });
+        qrReadResult(q, result);
+        q.verifyUncertain = false;
+      } catch (error) {
+        q.verifyUncertain = !qrRejected(error) && (!!verifyCode || q.verifyUncertain);
+        q.notice = qrRejected(error)
+          ? qrRejectMessage(error)
+          : verifyCode
+            ? '验证码提交结果暂未确认。请先查询本次状态，不会自动重交验证码。'
+            : '连接暂时中断。请查询本次状态，不会创建新二维码。';
+      } finally {
+        q.busy = false;
+      }
+      if (!qrLive(q)) {
+        qrDiscard(q);
+        return local;
+      }
+      if (q.entry.state === 'accepted' && q.entry.account_id)
+        return qrComplete(q, q.entry.account_id);
+      qrPaint(q);
+      qrSchedule(q);
+      return local;
+    }
+    async function qrCancel(q, refresh = false) {
+      if (!qrLive(q) || q.busy || !q.entry) return local;
+      q.busy = true;
+      q.notice = '';
+      clearTimeout(qrTimer);
+      qrPaint(q);
+      try {
+        qrReadResult(
+          q,
+          await mutation('weixin-qr-cancel', {
+            ...qrScope(q.key),
+            enrollment_id: q.entry.enrollment_id,
+            expected_version: q.entry.version,
+            idempotency_key: q.cancelKey,
+          }),
+        );
+        if (!qrTerminal(q.entry)) throw new Error('取消尚未确认');
+      } catch {
+        q.notice = '尚未确认旧二维码已取消。请查询原状态后重试，未创建新二维码。';
+        refresh = false;
+      } finally {
+        q.busy = false;
+      }
+      if (!qrLive(q)) {
+        qrDiscard(q);
+        return local;
+      }
+      if (q.entry.state === 'accepted') return qrComplete(q, q.entry.account_id);
+      if (refresh && qrTerminal(q.entry)) {
+        qrTimersOff();
+        qr = null;
+        document.querySelector('.cc-wx-qr').innerHTML = qrMarkup(null);
+      } else qrPaint(q);
+      return local;
+    }
+    async function qrAccept(q, data) {
+      if (!qrLive(q) || q.busy || q.entry?.state !== 'confirmed' || !q.entry.scanner_id)
+        return local;
+      if (!q.acceptArgs) {
+        if (!data.checked('qr_scanner')) return local;
+        q.acceptArgs = {
+          ...qrScope(q.key),
+          enrollment_id: q.entry.enrollment_id,
+          expected_version: q.entry.version,
+          idempotency_key: q.acceptKey,
+          label: data.value('label').trim(),
+          confirm_scanner_id: q.entry.scanner_id,
+          confirm_credential_storage: true,
+          confirm_provider_terms: true,
+        };
+      }
+      q.busy = true;
+      q.notice = '';
+      clearTimeout(qrTimer);
+      qrPaint(q);
+      let result;
+      try {
+        result = await mutation('weixin-qr-accept', q.acceptArgs);
+      } catch (error) {
+        if (qrRejected(error)) {
+          q.acceptArgs = null;
+          q.acceptKey = qrId();
+          q.entry = { ...q.entry, state: 'attention', scanner_id: '', qrcode_image: '' };
+          q.notice = qrRejectMessage(error);
+        } else
+          q.notice = '保存结果暂未确认。请恢复原保存请求或查询原保存状态，不要重新扫码或重复绑定。';
+      } finally {
+        q.busy = false;
+      }
+      if (!qrLive(q)) {
+        qrDiscard(q);
+        return local;
+      }
+      if (!result?.account_id) {
+        qrPaint(q);
+        return local;
+      }
+      return qrComplete(q, result.account_id);
+    }
+    async function qrComplete(q, accountId) {
+      if (!qrLive(q)) return local;
+      q.entry.state = 'accepted';
+      qrTimersOff();
+      qr = null;
+      await open(document.querySelector('[data-cc-action="dot-channel-open"]'), accountId);
+      return {
+        local: true,
+        message: '微信登录凭据已保存。请继续选择当前话题的 dot 并完成联系人配对。',
+      };
+    }
+    async function qrAct(action, element) {
+      const validate =
+        ['dot-channel-qr-start', 'dot-channel-qr-verify', 'dot-channel-qr-accept'].includes(
+          action,
+        ) && !qr?.acceptArgs;
+      const data = group(element, validate);
+      if (!data) return local;
+      if (action === 'dot-channel-qr-start') {
+        if (
+          !loaded.weixin.enabled ||
+          qr ||
+          !data.checked('qr_storage') ||
+          !data.checked('qr_terms')
+        )
+          return local;
+        qr = {
+          key: loaded.key,
+          owner: loaded,
+          startKey: qrId(),
+          cancelKey: qrId(),
+          acceptKey: qrId(),
+          busy: false,
+          entry: null,
+          notice: '',
+        };
+        qrWatchScope(qr);
+        return qrStart(qr);
+      }
+      const q = qr;
+      if (!q || !qrLive(q) || q.busy) return local;
+      if (action === 'dot-channel-qr-reset' && q.startRejected) {
+        qrTimersOff();
+        qr = null;
+        document.querySelector('.cc-wx-qr').innerHTML = qrMarkup(null);
+        return local;
+      }
+      if (action === 'dot-channel-qr-finish' && q.entry?.state === 'accepted')
+        return qrComplete(q, q.entry.account_id);
+      if (action === 'dot-channel-qr-retry-start') return qrStart(q);
+      if (action === 'dot-channel-qr-status') return qrStatus(q);
+      if (action === 'dot-channel-qr-verify') {
+        if (q.verifyUncertain || q.entry.state !== 'need_verifycode') return local;
+        const code = data.value('verify_code').trim();
+        data.root.querySelector('[name="verify_code"]').value = '';
+        return qrStatus(q, code);
+      }
+      if (action === 'dot-channel-qr-cancel') return qrCancel(q);
+      if (action === 'dot-channel-qr-refresh') return qrCancel(q, true);
+      if (action === 'dot-channel-qr-accept') return qrAccept(q, data);
+      if (action === 'dot-channel-qr-new' && qrTerminal(q.entry)) {
+        qrTimersOff();
+        qr = null;
+        document.querySelector('.cc-wx-qr').innerHTML = qrMarkup(null);
+      }
+      return local;
+    }
+    function channelSetting(channel, data) {
+      if (!data.setting) return '';
+      const name = channel === 'weixin' ? '微信' : 'Telegram';
+      return (
+        '<div class="cc-channel-switch" data-channel-form="setting-' +
+        channel +
+        '">' +
+        '<div class="cc-channel-heading"><strong>' +
+        name +
+        '通道开关</strong>' +
+        '<span class="cc-channel-pill">' +
+        (data.enabled ? '已开启' : '已关闭') +
+        '</span></div>' +
+        '<p>作用于你在此空间下的全部 ' +
+        name +
+        ' 连接。关闭后停止新收发；微信还会终止未完成扫码。已有凭据与绑定保留。尚未发送的回复会停止且不再补发；已提交请求无法召回，结果未知时不自动重发。重开可能按原进度补收入站消息，不代替配对或新增授权。</p>' +
+        button(
+          'dot-channel-setting-' + channel,
+          data.enabled ? '关闭 ' + name + ' 通道' : '开启 ' + name + ' 通道',
+        ) +
+        '</div>'
+      );
+    }
+
     function telegramPanel(t, w, slots) {
       if (!t) return '';
       const names = {
@@ -119,8 +615,8 @@ window.CodePierCollaborationChannels = {
             `<details class="cc-channel-delivery" ${d.state === 'needs_attention' ? 'open' : ''}><summary>${d.channel === 'telegram' ? 'Telegram' : '微信'} · ${listState(d.state)}</summary><small>原消息 ${E(d.message_id.slice(-8))} · 各目标独立记录；通道接受不等于已读。</small>${(d.parts || []).map((p) => `<p>${E(p.ordinal + 1)}. ${listState(p.state)} ${E(p.reason_code || '')}</p>`).join('')}<div data-channel-form="mirror-delivery">${(d.parts || []).some((p) => p.state === 'unknown') ? field('人工核对依据', '<input name="confirmation_note" maxlength="1000" required>') + button('dot-channel-mirror-confirm', '登记人工已收到', d) : ''}${button('dot-channel-mirror-cancel', '取消未发送部分', d)}</div></details>`,
         )
         .join('');
-      return `<section class="cc-tg-settings"><div class="cc-channel-heading"><h3>Telegram · 同一协作室</h3><span class="cc-channel-pill">${t.enabled ? '可配置' : '默认关闭'}</span></div><p>微信、Telegram 和面板共用一份消息与上下文。镜像不会新建任务。每个私聊明确绑定一个协作室，多个协作室请分别使用机器人；不支持群组和论坛。</p>
-        ${!t.enabled ? '<p>部署负责人开启 CODEPIER_TELEGRAM_ENABLED 后，房主才可在此安全登记已有机器人。</p>' : ''}
+      return `<section class="cc-tg-settings"><div class="cc-channel-heading"><h3>Telegram · 同一协作室</h3><span class="cc-channel-pill">${t.enabled ? '已开启' : '已关闭'}</span></div><p>微信、Telegram 和面板共用一份消息与上下文。镜像不会新建任务。每个私聊明确绑定一个协作室，多个协作室请分别使用机器人；不支持群组和论坛。</p>
+        ${channelSetting('telegram', t)}${!t.enabled ? '<p>开启 Telegram 通道后，在下方登记机器人并配对本人私聊。</p>' : ''}
         ${(t.accounts || [])
           .filter((a) => a.reason_code)
           .map(
@@ -129,7 +625,7 @@ window.CodePierCollaborationChannels = {
           )
           .join('')}
         ${bindings || '<p>当前协作室尚未绑定 Telegram。</p>'}
-        <details><summary>安全登记已有 Telegram 机器人</summary><div data-channel-form="tg-account">${field('名称', '<input name="label" maxlength="80" required autocomplete="off">')}${field('机器人数字编号', '<input name="bot_id" inputmode="numeric" pattern="[1-9][0-9]*" required autocomplete="off">')}${field('Bot Token', '<input type="password" name="token" maxlength="256" required autocomplete="new-password">')}${checkbox('credentials', '我确认在本服务加密保存此凭据，并接受 Telegram 的相关条款', true)}${button('dot-channel-tg-import', '确认登记 Telegram 凭据', {}, t.enabled ? '' : 'disabled')}<small>仅使用官方API长轮询；已有Webhook会阻止连接，系统不会自动删除或覆盖。</small></div></details>
+        <details class="cc-tg-connect"><summary>连接 Telegram 机器人</summary><div data-channel-form="tg-account">${field('名称', '<input name="label" maxlength="80" required autocomplete="off">')}${field('机器人数字编号', '<input name="bot_id" inputmode="numeric" pattern="[1-9][0-9]*" required autocomplete="off">')}${field('Bot Token', '<input type="password" name="token" maxlength="256" required autocomplete="new-password">')}${checkbox('credentials', '我确认在本服务加密保存此凭据，并接受 Telegram 的相关条款', true)}${button('dot-channel-tg-import', '确认登记 Telegram 凭据', {}, t.enabled ? '' : 'disabled')}<small>仅使用官方API长轮询；已有Webhook会阻止连接，系统不会自动删除或覆盖。</small></div></details>
         <details><summary>将本人私聊绑定此协作室</summary><div data-channel-form="tg-bind">${field(
           '已登记机器人',
           select(
@@ -212,9 +708,9 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
         )
         .join('');
       return `<div class="cc-channel-pane"><p class="cc-hint">当前项目：${E(state.project)} · ${E(state.environment)}。刷新仅查询证据，不重发消息、不领取任务。</p>${button('dot-channel-open', '重新核对状态')}
-      <section><h3>微信私聊通道</h3><p>${w.enabled ? '功能已开启；真实收发仍以每条回执为准。' : '功能默认关闭。部署负责人开启 CODEPIER_WEIXIN_ENABLED 后，才能登记已有授权机器人。'}</p><p>仅支持机器人私聊，不冒充原生群聊。外部文字不能自动变成房主的执行授权。</p>${bindings || '<p>当前房间尚未绑定微信。</p>'}
-      <details><summary>登记已有授权机器人</summary><div data-channel-form="account" class="cc-form">${field('名称', '<input name="label" maxlength="80" required autocomplete="off">')}${field('机器人编号', '<input name="bot_id" maxlength="256" required autocomplete="off">')}${field('已有授权令牌', '<input type="password" name="token" maxlength="16384" required autocomplete="new-password">')}${checkbox('confirm_credentials', '我确认保存此已授权凭据，并已核对服务条款与使用资格', true)}${button('dot-channel-import', '确认登记凭据', {}, w.enabled ? '' : 'disabled')}<small>凭据加密保存；不创建 MCP 凭据，也不会显示到消息中。</small></div></details>
-      <details><summary>绑定当前话题与 dot</summary><div data-channel-form="bind" class="cc-form">${field(
+      <section><h3>微信私聊通道</h3><p>${w.enabled ? '功能已开启；真实收发仍以每条回执为准。' : '微信通道已关闭。可在此开启，再扫码连接本人微信。'}</p><p>仅支持机器人私聊，不冒充原生群聊。外部文字不能自动变成房主的执行授权。</p>${channelSetting('weixin', w)}${qrPanel(w)}${bindings || '<p>当前房间尚未绑定微信。</p>'}
+      <details><summary>高级：登记已有授权机器人</summary><div data-channel-form="account" class="cc-form">${field('名称', '<input name="label" maxlength="80" required autocomplete="off">')}${field('机器人编号', '<input name="bot_id" maxlength="256" required autocomplete="off">')}${field('已有授权令牌', '<input type="password" name="token" maxlength="16384" required autocomplete="new-password">')}${checkbox('confirm_credentials', '我确认保存此已授权凭据，并已核对服务条款与使用资格', true)}${button('dot-channel-import', '确认登记凭据', {}, w.enabled ? '' : 'disabled')}<small>凭据加密保存；不创建 MCP 凭据，也不会显示到消息中。</small></div></details>
+      <p class="cc-wx-binding-guide" hidden></p><details class="cc-wx-bind"><summary>绑定当前话题与 dot</summary><div data-channel-form="bind" class="cc-form">${field(
         '已登记机器人',
         select(
           'account_id',
@@ -251,7 +747,8 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
         ),
       )}<fieldset><legend>当前环境的项目与逐项目能力</legend>${projects.map((p) => `<div class="cc-channel-project" data-project-id="${E(p.project_id)}"><label><input type="checkbox" name="project_selected" ${p.project_id === (state.snapshot.room.project_id || state.project) ? 'checked disabled' : ''}>${E(p.project_label || p.project_id)}</label>${checkbox('write', '允许项目文件写入')}${checkbox('execute', '允许此项目的 Agent 执行')}</div>`).join('')}</fieldset>${field('有效小时数', '<input type="number" name="hours" value="24" min="1" max="720" step="1" required>')}${checkbox('unsandboxed', '如选择执行，我明确接受 Agent 账户权限；这不是文件系统或网络沙箱')}${checkbox('confirm_scope', '我确认以本次选择替换此凭据的房间范围，且影响它的所有会话', true)}${button('dot-channel-scope-save', '确认设置范围')}<p>严格 OS 隔离尚未验证时不会放行执行。未选择执行时只允许获批文件工具。</p></div></details></section></div>`;
     }
-    async function open(element) {
+    async function open(element, selectedAccount = '') {
+      qrDiscard(qr);
       if (!allowed()) throw new Error('当前身份不能管理房间连接。');
       controller?.abort();
       controller = new AbortController();
@@ -282,6 +779,18 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
       loaded = { key, scopes, weixin, telegram };
       showDrawer('通道与执行边界', render(loaded), element);
       loaded.epoch = state.drawerEpoch;
+      if (selectedAccount) {
+        const select = document.querySelector('.cc-wx-bind [name="account_id"]');
+        if (select && [...select.options].some((option) => option.value === selectedAccount)) {
+          select.value = selectedAccount;
+          document.querySelector('.cc-wx-bind').open = true;
+          const guide = document.querySelector('.cc-wx-binding-guide');
+          guide.hidden = false;
+          guide.textContent =
+            '微信登录已保存。请选择当前话题的 dot，再生成配对码；核对实际联系人后才会启用通道。';
+          select.focus();
+        }
+      }
       return local;
     }
     function group(element, validate = true) {
@@ -307,6 +816,7 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
     async function act(action, element) {
       if (action === 'dot-channel-open') return open(element);
       if (saving) return local;
+      if (action.startsWith('dot-channel-qr-')) return qrAct(action, element);
       const data = group(
         element,
         ![
@@ -320,7 +830,25 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
         key = loaded.key;
       let operation, args;
 
-      if (action === 'dot-channel-tg-import') {
+      if (['dot-channel-setting-weixin', 'dot-channel-setting-telegram'].includes(action)) {
+        const channel = action.slice('dot-channel-setting-'.length);
+        const channelData = loaded[channel];
+        if (!channelData?.setting) throw new Error('请重新读取通道开关。');
+        if (
+          !window.confirm(
+            (channelData.enabled ? '关闭' : '开启') +
+              (channel === 'weixin' ? '微信' : 'Telegram') +
+              '通道？此设置影响你在当前空间下此通道的全部连接。关闭会停止尚未发送的回复且不再补发；已提交请求无法召回，结果未知时不自动重发。另一通道及已有绑定保持不变。',
+          )
+        )
+          return local;
+        operation = 'channel-settings';
+        args = {
+          channel,
+          enabled: !channelData.enabled,
+          expected_version: channelData.setting.version,
+        };
+      } else if (action === 'dot-channel-tg-import') {
         operation = 'telegram-account';
         const old = loaded.telegram.accounts.find((a) => a.bot_id === value('bot_id').trim());
         if (
@@ -546,12 +1074,13 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
         saving = false;
         if (root?.querySelector('[name="token"]')) root.querySelector('[name="token"]').value = '';
       }
-      if (!current(key)) return local;
+      if (!current(key) || loaded?.epoch !== state.drawerEpoch) return local;
       if (root?.querySelector('[name="token"]')) root.querySelector('[name="token"]').value = '';
       await open(document.querySelector('[data-cc-action="dot-channel-open"]'));
       return { local: true, message: '原配置或投递清单已保存；状态以新读取的证据为准。' };
     }
     function clear() {
+      qrDiscard(qr);
       controller?.abort();
       controller = null;
       loaded = null;

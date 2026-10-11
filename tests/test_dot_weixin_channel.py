@@ -60,14 +60,14 @@ def reply(c, w, account, body='真实回复'):
     return source, posted, deliveries[0]
 
 
-def test_default_off_never_enrolls_or_polls_provider(collab):
+def test_default_on_never_enrolls_or_polls_without_owner_account(collab):
     c = duplex(collab)
-    assert not c.s.config.weixin_enabled
-    with pytest.raises(DevError, match='默认关闭'):
-        c.s.weixin.import_account({**c.scope, 'label': 'fixture', 'bot_id': 'bot', 'token': 'fixture',
-            'confirm_credential_storage': True, 'confirm_provider_terms': True, 'idempotency_key': key()}, c.owner)
+    assert c.s.config.weixin_enabled
+    c.s.weixin.client_factory = lambda *args: pytest.fail('No account means no provider call')
+    assert c.s.weixin.listing(c.scope, c.owner)['enabled']
     asyncio.run(c.s.weixin.tick())
     assert not c.s.store.all('SELECT * FROM weixin_accounts')
+    assert not c.s.store.all('SELECT * FROM weixin_enrollments')
 
 
 def test_external_peer_is_not_owner_or_execution_authority_and_dedup_is_atomic(collab):

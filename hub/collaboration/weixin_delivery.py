@@ -35,7 +35,7 @@ class WeixinDelivery:
         return None
 
     def queue_reply(self, message):
-        if not getattr(self.c.config, 'weixin_enabled', False):
+        if not self.c.config.enabled:
             return None
         body = json.loads(message['body'])
         if message['origin'] != 'bound_connector' or not body.get('sender_dot_id') or body.get('dot_reply_complete') is False:
@@ -260,6 +260,7 @@ class WeixinDelivery:
                                                  filekey=saved['filekey'], key=bytes.fromhex(saved['upload_key']))
                 items = [item]
             wire = await self.store.run(self.mark_sending, claim, items)
+            await self.store.run(self.w.require_enabled, claim['account'])
             result = await client.send(wire['peer'], wire['context'], wire['client_id'], wire['items'])
             await self.store.run(self.finish, claim, result)
         except asyncio.CancelledError:
@@ -279,7 +280,7 @@ class WeixinDelivery:
             return [r['id'] for r in rows]
 
     async def tick(self):
-        if not getattr(self.c.config, 'weixin_enabled', False):
+        if not self.c.config.enabled:
             return
         await self.store.run(self.reconcile)
         # Select only the first unfinished part of each lane. A blocked lane's
