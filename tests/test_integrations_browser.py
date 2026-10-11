@@ -129,3 +129,145 @@ def test_integration_views_keep_readable_geometry(integrated_stack,engine,scheme
                 page.screenshot(path=str(OUT/f'{engine}-{scheme}-{width}-{name}.png'),animations='disabled')
         assert not errors,errors
         browser.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+@pytest.mark.parametrize('width,height', [(1366, 768), (390, 844), (320, 568)])
+def test_tabs_accept_latest_click_while_basics_read_is_pending(integrated_stack, engine, width, height):
+    """Visible tabs must stay interactive until their replacement is mounted."""
+    s = integrated_stack
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch()
+        page = browser.new_page(viewport={'width': width, 'height': height}, color_scheme='dark', reduced_motion='reduce')
+        errors = []
+        page.on('pageerror', lambda error: errors.append(str(error)))
+        held = []
+        try:
+            login(page, s)
+            tab(page, 'validation')
+            draft = page.locator('[data-i-form=validate] [name=command]')
+            draft.fill('printf retained-navigation-draft')
+            # Hold only the refresh read; existing content stays on screen.
+            page.route('**/api/projects', lambda route: held.append(route))
+            with page.expect_request('**/api/projects'):
+                page.locator('[data-i-tab=overview]').click()
+            for name in ['status', 'navigation', 'overview', 'validation']:
+                page.locator('[data-i-tab=' + name + ']').click()
+                assert page.evaluate('S.integrations.tab') == name
+            assert held
+            for route in held:
+                route.continue_()
+            page.unroute('**/api/projects')
+            expect(page.locator('#i-body')).to_have_attribute('aria-labelledby', 'i-tab-validation')
+            expect(page.locator('[data-i-form=validate] [name=command]')).to_have_value('printf retained-navigation-draft')
+            expect(page.locator('[data-i-tab=validation]')).to_be_focused()
+            tab(page, 'status')
+            tab(page, 'validation')
+            expect(page.locator('[data-i-form=validate] [name=command]')).to_have_value('printf retained-navigation-draft')
+            assert not errors, errors
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+@pytest.mark.parametrize('leave', ['navigate', 'logout'])
+def test_pending_tab_read_cannot_rebind_after_leaving(integrated_stack, engine, leave):
+    s = integrated_stack
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch()
+        page = browser.new_page(viewport={'width': 390, 'height': 844}, color_scheme='dark')
+        held = []
+        try:
+            login(page, s)
+            page.evaluate("window.oldIntegrationTab = document.querySelector('[data-i-tab=status]')")
+            page.route('**/api/projects', lambda route: held.append(route))
+            with page.expect_request('**/api/projects'):
+                page.locator('[data-i-tab=overview]').click()
+            if leave == 'navigate':
+                page.locator('[data-nav=overview]:visible').first.click()
+                expect(page.locator('#integration-center')).to_have_count(0)
+                assert page.evaluate('S.page') == 'overview'
+            else:
+                page.get_by_role('button', name='展开菜单', exact=True).click()
+                page.locator('[data-action=logout]').click()
+                expect(page.locator('#login-form')).to_be_visible()
+            before = page.evaluate("({page:S.page,tab:S.integrations?.tab || null,seq:S.renderSeq})")
+            page.evaluate('window.oldIntegrationTab.click()')
+            assert page.evaluate("({page:S.page,tab:S.integrations?.tab || null,seq:S.renderSeq})") == before
+            assert held
+            with page.expect_response('**/api/projects'):
+                for route in held:
+                    route.continue_()
+            page.unroute('**/api/projects')
+            # Drain the original render promise before checking its late result.
+            page.wait_for_function('!S.basicsRequest')
+            expect(page.locator('#integration-center')).to_have_count(0)
+            if leave == 'logout':
+                expect(page.locator('#login-form')).to_be_visible()
+                assert page.evaluate('S.session') is None
+            else:
+                assert page.evaluate('S.page') == 'overview'
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+@pytest.mark.parametrize('transition', ['tabs', 'leave-return'])
+def test_superseded_tab_render_cannot_steal_focus_after_aba(integrated_stack, engine, transition):
+    s = integrated_stack
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch()
+        page = browser.new_page(viewport={'width': 390, 'height': 844}, color_scheme='dark', reduced_motion='reduce')
+        held = []
+        request_count = 0
+
+        def hold_first_read(route):
+            nonlocal request_count
+            request_count += 1
+            if request_count == 1:
+                held.append(route)
+            else:
+                route.continue_()
+
+        try:
+            login(page, s)
+            tab(page, 'validation')
+            page.evaluate("""() => {
+                window.previousIntegrationRoot = document.querySelector('#integration-center');
+                const original = renderPage;
+                renderPage = (...args) => {
+                    const pending = original(...args);
+                    window.firstIntegrationRender ||= pending;
+                    return pending;
+                };
+            }""")
+            page.route('**/api/projects', hold_first_read)
+            with page.expect_request('**/api/projects'):
+                page.locator('[data-i-tab=validation]').click()
+            # A completed mapping event makes a newer read independent of R1.
+            page.evaluate('invalidateBasics()')
+            if transition == 'tabs':
+                page.locator('[data-i-tab=status]').click()
+                page.locator('[data-i-tab=validation]').click()
+            else:
+                page.locator('[data-nav=overview]:visible').first.click()
+                expect(page.locator('#integration-center')).to_have_count(0)
+                page.get_by_role('button', name='展开菜单', exact=True).click()
+                page.locator('#sidebar [data-nav=integrations]').click()
+            page.wait_for_function("""() => {
+                const root = document.querySelector('#integration-center');
+                return root && root !== window.previousIntegrationRoot &&
+                    root.querySelector('#i-body')?.getAttribute('aria-labelledby') === 'i-tab-validation';
+            }""")
+            command = page.locator('[data-i-form=validate] [name=command]')
+            command.fill('printf keep-new-focus')
+            expect(command).to_be_focused()
+            assert len(held) == 1 and request_count >= 2
+            held[0].continue_()
+            # Await the old render itself, including its chained fresh read.
+            page.evaluate('async () => { await window.firstIntegrationRender; }')
+            expect(command).to_be_focused()
+            expect(command).to_have_value('printf keep-new-focus')
+            expect(page.locator('#i-body')).to_have_attribute('aria-labelledby', 'i-tab-validation')
+        finally:
+            browser.close()

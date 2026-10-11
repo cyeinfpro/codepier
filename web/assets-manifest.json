@@ -19,8 +19,8 @@
       "bytes": 32712
     },
     "app.js": {
-      "sha256": "1dadac397a41c9d9e8361794c050acb0b6eed347b7da2e494a9e24a2cc68a05b",
-      "bytes": 121867
+      "sha256": "1a352ec9ff27b44b86f63660eb3176ce1c65f5cc5c2e00f007b17ce70920eeea",
+      "bytes": 122120
     },
     "appearance.js": {
       "sha256": "7fc8e8ffa85a4bb5836b8919cdf6ff12813cfb4a9e4736709f5858e5d8782bb1",
@@ -155,8 +155,8 @@
       "bytes": 6622
     },
     "integrations.js": {
-      "sha256": "7bbd675aba9616b947a5d94e0c5c72df78f2783fe5a2154304e46977bf78e64f",
-      "bytes": 87287
+      "sha256": "6cf5dfb11bafea03e1605ae24fe3b5234ac5edbe8677a89b14b5831339b232de",
+      "bytes": 87518
     },
     "mcp-gateway.css": {
       "sha256": "7836668107f99f817b0b4391a604638760cc80292510ee3104cb6ac688a85b83",

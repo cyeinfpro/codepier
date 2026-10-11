@@ -850,7 +850,10 @@ async function renderPage(showLoading = true) {
   window.CodePierCallLog?.detach();
   window.CodePierAccess?.detach();
   window.CodePierPanelUpdate?.detach();
-  window.CodePierIntegrations?.detach();
+  // Non-loading integration refreshes leave the old tabs visible while basics
+  // load. Keep their listeners until bind replaces them so clicks are not lost.
+  if (showLoading || !S.session || S.page !== 'integrations' || !$('#integration-center'))
+    window.CodePierIntegrations?.detach();
   if (S.page !== 'overview' || !S.session) window.CodePierTokenUsage?.resetDashboard();
   if (!S.session || !$('#page')) return;
   if (S.page === 'native') {

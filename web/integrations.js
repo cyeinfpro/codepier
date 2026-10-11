@@ -622,7 +622,16 @@ window.CodePierIntegrations = (() => {
     async function changeTab(id) {
       if (!tabs.some((t) => t[0] === id)) return;
       v.tab = id;
-      await renderPage(false);
+      const rendering = renderPage(false),
+        renderSeq = S.renderSeq;
+      await rendering;
+      if (
+        renderSeq !== S.renderSeq ||
+        S.session !== session ||
+        S.page !== 'integrations' ||
+        v.tab !== id
+      )
+        return;
       const selected = $(`[data-i-tab="${id}"]`);
       selected?.focus({ preventScroll: true });
       const strip = selected?.closest('.integration-tabs');
