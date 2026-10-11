@@ -27,6 +27,21 @@ def tab(page,name):
     expect(page.locator('#i-body')).to_have_attribute('aria-labelledby','i-tab-'+name)
 
 
+def capture_integration_renders(page):
+    # Await real render promises rather than string-predicate polling, which
+    # can require unsafe-eval under WebKit's strict application CSP.
+    page.evaluate("""() => {
+        window.integrationRenders = [];
+        window.previousIntegrationRoot = document.querySelector('#integration-center');
+        const original = renderPage;
+        renderPage = (...args) => {
+            const pending = original(...args);
+            window.integrationRenders.push(pending);
+            return pending;
+        };
+    }""")
+
+
 def test_panel_real_validation_semantics_navigation_and_draft_retention(integrated_stack):
     s=integrated_stack
     with sync_playwright() as pw:
@@ -179,6 +194,7 @@ def test_pending_tab_read_cannot_rebind_after_leaving(integrated_stack, engine, 
         held = []
         try:
             login(page, s)
+            capture_integration_renders(page)
             page.evaluate("window.oldIntegrationTab = document.querySelector('[data-i-tab=status]')")
             page.route('**/api/projects', lambda route: held.append(route))
             with page.expect_request('**/api/projects'):
@@ -200,7 +216,7 @@ def test_pending_tab_read_cannot_rebind_after_leaving(integrated_stack, engine, 
                     route.continue_()
             page.unroute('**/api/projects')
             # Drain the original render promise before checking its late result.
-            page.wait_for_function('!S.basicsRequest')
+            page.evaluate('async () => { await window.integrationRenders[0]; }')
             expect(page.locator('#integration-center')).to_have_count(0)
             if leave == 'logout':
                 expect(page.locator('#login-form')).to_be_visible()
@@ -232,15 +248,7 @@ def test_superseded_tab_render_cannot_steal_focus_after_aba(integrated_stack, en
         try:
             login(page, s)
             tab(page, 'validation')
-            page.evaluate("""() => {
-                window.previousIntegrationRoot = document.querySelector('#integration-center');
-                const original = renderPage;
-                renderPage = (...args) => {
-                    const pending = original(...args);
-                    window.firstIntegrationRender ||= pending;
-                    return pending;
-                };
-            }""")
+            capture_integration_renders(page)
             page.route('**/api/projects', hold_first_read)
             with page.expect_request('**/api/projects'):
                 page.locator('[data-i-tab=validation]').click()
@@ -254,18 +262,16 @@ def test_superseded_tab_render_cannot_steal_focus_after_aba(integrated_stack, en
                 expect(page.locator('#integration-center')).to_have_count(0)
                 page.get_by_role('button', name='展开菜单', exact=True).click()
                 page.locator('#sidebar [data-nav=integrations]').click()
-            page.wait_for_function("""() => {
-                const root = document.querySelector('#integration-center');
-                return root && root !== window.previousIntegrationRoot &&
-                    root.querySelector('#i-body')?.getAttribute('aria-labelledby') === 'i-tab-validation';
-            }""")
+            page.evaluate('async () => { await window.integrationRenders.at(-1); }')
+            assert page.evaluate("document.querySelector('#integration-center') !== window.previousIntegrationRoot")
+            expect(page.locator('#i-body')).to_have_attribute('aria-labelledby', 'i-tab-validation')
             command = page.locator('[data-i-form=validate] [name=command]')
             command.fill('printf keep-new-focus')
             expect(command).to_be_focused()
             assert len(held) == 1 and request_count >= 2
             held[0].continue_()
             # Await the old render itself, including its chained fresh read.
-            page.evaluate('async () => { await window.firstIntegrationRender; }')
+            page.evaluate('async () => { await window.integrationRenders[0]; }')
             expect(command).to_be_focused()
             expect(command).to_have_value('printf keep-new-focus')
             expect(page.locator('#i-body')).to_have_attribute('aria-labelledby', 'i-tab-validation')
