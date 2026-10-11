@@ -30,6 +30,11 @@ def make_router(auth, runtime):
         return await store.run(lambda: service.weixin.listing({'project': project,
             'environment_id': environment_id, 'conversation_id': conversation_id}, auth.panel(request)))
 
+    @router.get('/telegram')
+    async def telegram(request: Request, project: str, environment_id: str = 'production', conversation_id: str = ''):
+        return await store.run(lambda: service.telegram.listing({'project': project,
+            'environment_id': environment_id, 'conversation_id': conversation_id}, auth.panel(request)))
+
     def attachment_actor(request):
         # A supplied invalid Bearer token never falls back to a wider panel session.
         principal = auth.bearer(request) if request.headers.get('authorization') else auth.panel(request)
@@ -39,12 +44,12 @@ def make_router(auth, runtime):
 
     @router.get('/attachments/{identifier}')
     async def attachment(request: Request, identifier: str):
-        return await store.run(lambda: service.weixin.media.public(
-            service.weixin.media.row(identifier, attachment_actor(request))))
+        return await store.run(lambda: service.channels.media.public(
+            service.channels.media.row(identifier, attachment_actor(request))))
 
     @router.get('/attachments/{identifier}/content')
     async def attachment_content(request: Request, identifier: str):
-        content, row, start, end, partial = await store.run(lambda: service.weixin.media.content(
+        content, row, start, end, partial = await store.run(lambda: service.channels.media.content(
             identifier, attachment_actor(request), request.headers.get('range')))
         headers = {'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff',
             'Accept-Ranges': 'bytes', 'Vary': 'Authorization, Cookie', 'ETag': '"' + row['sha256'] + '"',
@@ -111,6 +116,13 @@ def make_router(auth, runtime):
             handlers = {'dot': service.dots.create,
                         'room-scope': service.room_scope.set,
                         'room-scope-control': service.room_scope.control,
+                        'telegram-account': service.telegram.import_account,
+                        'telegram-bind': service.telegram.bind,
+                        'telegram-control': service.telegram.control,
+                        'telegram-files-preview': service.telegram.files.preview,
+                        'telegram-files': service.telegram.files.approve,
+                        'channel-delivery-control': service.channels.control,
+                        'weixin-mirror-consent': service.channels.consent_weixin,
                         'weixin-account': service.weixin.import_account,
                         'weixin-bind': service.weixin.bind,
                         'weixin-control': service.weixin.control,

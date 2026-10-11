@@ -56,8 +56,8 @@ def test_send_is_nonblocking_lost_ack_does_not_duplicate_and_followups_keep_topi
     held,posts=[],[]
     try:
         joined=prepare(stack,page)
-        expect(page.locator('.cc-tabs')).not_to_be_visible()
-        expect(page.locator('.cc-context-rail')).not_to_be_visible()
+        expect(page.locator('.cc-workspace-nav')).to_be_visible()
+        expect(page.locator('.cc-context-rail')).to_have_count(0)
         def intercept(route):
             posts.append(route.request.post_data_json)
             if not held:
@@ -139,10 +139,13 @@ def test_incremental_reply_rich_text_copy_focus_and_plain_followup(collaboration
         assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
         directory=Path('.work/dot-refactor/screenshots');directory.mkdir(parents=True,exist_ok=True)
         page.screenshot(path=str(directory/f'relay-rich-{engine}-{width}.png'),full_page=True)
-        page.locator('[data-cc-action="relay-management"]').click()
-        expect(page.locator('.cc-tabs')).to_be_visible()
-        page.locator('[data-cc-action="relay-management"]').click()
-        expect(page.locator('.cc-tabs')).not_to_be_visible()
+        composer = page.locator('#cc-message-input').element_handle()
+        page.locator('[data-cc-view="jobs"]').click()
+        expect(page.locator('#cc-workspace-panel')).to_be_visible()
+        page.locator('[data-cc-view="discussion"]').click()
+        expect(page.locator('#cc-workspace-panel')).not_to_be_visible()
+        assert composer.evaluate('(e) => e.isConnected')
+        expect(page.locator('.cc-workspace-nav')).to_be_visible()
         assert not errors,errors
     finally:
         context.close()

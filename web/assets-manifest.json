@@ -67,20 +67,20 @@
       "bytes": 93445
     },
     "collaboration-channels.css": {
-      "sha256": "cf05b727b8d296f096cb402b5e95863eb7aa18912cfc4f9d6d7ef479228d308e",
-      "bytes": 2499
+      "sha256": "4ffb9f96477f011e387b04ff14faf6e659a05b3d9e55b6d673ccfe8ddd47a32f",
+      "bytes": 2991
     },
     "collaboration-channels.js": {
-      "sha256": "9f0cac6780c3a8de5551377a6ccaadd74a346254e162b9a5a290e955fb55793b",
-      "bytes": 21652
+      "sha256": "344ce56c6fd695ae14fb4067a8ba75baa4664d709b0f362d31938bfa5f80bbc5",
+      "bytes": 35359
     },
     "collaboration-delegation.js": {
       "sha256": "25af6019bbf46f768a71171960c56173fdd4c95e0576e669b981cb7664558d90",
       "bytes": 44837
     },
     "collaboration-dots.js": {
-      "sha256": "cc65662c10936e31b204a2b8f11f3c70ccca0b78ad6d424f2f9e8cd87a70d991",
-      "bytes": 19420
+      "sha256": "45e7e8edbba1e65efe79f70441a2a2b8f985896de41461a50d1fd01d125daaea",
+      "bytes": 19395
     },
     "collaboration-goals.js": {
       "sha256": "d5572bb47e15fb3cb7483ee8de30ba1ff23875fb99b83446ad256d24e29c1c55",
@@ -91,16 +91,24 @@
       "bytes": 10385
     },
     "collaboration-relay.js": {
-      "sha256": "3a692a9347a84017b59065346aae1f622f2ac8267e85aadf657267a3ade4b004",
-      "bytes": 27470
+      "sha256": "1f936bed20b51592a3e9494d5136f0d987ad417e174d18c82b0fd073e001b342",
+      "bytes": 27453
+    },
+    "collaboration-workspace.css": {
+      "sha256": "edc4aeedd1c81e08c801790a07803302bc780432e77899fa444ac23cca60a103",
+      "bytes": 16393
+    },
+    "collaboration-workspace.js": {
+      "sha256": "c06eec1c2fe57f953aed446e7afaf4ffde6946fd333b19bcb024bdcc662415a6",
+      "bytes": 21800
     },
     "collaboration.css": {
       "sha256": "1631bd7184f5275e778a4452db164ee41ea9b5949b8aac139030c84ec636bb10",
       "bytes": 33531
     },
     "collaboration.js": {
-      "sha256": "7f024cfa73a6186d2e9f6aa67eb11c614481fc5555c786912b1a3fbb2c1cf95a",
-      "bytes": 133849
+      "sha256": "f3012af09f949dc0ac2d211e5bdb30c9241ef05c90de170208df06f4748d1ddd",
+      "bytes": 135466
     },
     "computer.css": {
       "sha256": "3bfd6993ecee11cf6c23d78cc7b4f9acd6759ffaccc5e241ff06e156da7dfcac",
@@ -235,5 +243,5 @@
       "bytes": 25968
     }
   },
-  "template_sha256": "c94f69f384f387c3ab6c0c0e0a215ecf921bf360c1a6ae15a3526e68b2a26dbb"
+  "template_sha256": "c3240b7b9494c07635673bff2443fe767a9ca956c4912f7681db3181ab23889c"
 }

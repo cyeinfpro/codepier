@@ -166,7 +166,7 @@ class ChannelMedia:
         with self.store.transaction():
             row = self.store.one('SELECT * FROM channel_attachments WHERE id=?', (identifier,))
             now = self.c.clock()
-            if not row or row['state'] != 'pending' or row['next_attempt'] > now or (row['lease_until'] or 0) > now:
+            if not row or row.get('channel', 'weixin') != 'weixin' or row['state'] != 'pending' or row['next_attempt'] > now or (row['lease_until'] or 0) > now:
                 return None
             binding, account, owner, *_ = self.w.valid(row['binding_id'])
             self.row(identifier, owner)
@@ -332,5 +332,5 @@ class ChannelMedia:
         if not getattr(self.c.config, 'weixin_enabled', False):
             return
         await self.store.run(self.expire)
-        rows = await self.store.run(lambda: self.store.all("SELECT id FROM channel_attachments WHERE state='pending' AND next_attempt<=? AND COALESCE(lease_until,0)<=? ORDER BY created,id LIMIT 2", (self.c.clock(), self.c.clock())))
+        rows = await self.store.run(lambda: self.store.all("SELECT id FROM channel_attachments WHERE channel='weixin' AND state='pending' AND next_attempt<=? AND COALESCE(lease_until,0)<=? ORDER BY created,id LIMIT 2", (self.c.clock(), self.c.clock())))
         await asyncio.gather(*(self.materialize(row['id']) for row in rows))

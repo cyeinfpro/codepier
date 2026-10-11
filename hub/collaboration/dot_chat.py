@@ -202,7 +202,7 @@ class DotChatService:
                         'idempotency_key': 'dot-reply:' + digest([dot['id'], message['id']])},
                     'reply_v2_arguments': {**scope, 'reply_to_id': message['id'], 'message_schema_version': 2,
                         'idempotency_key': 'dot-reply-v2:' + digest([dot['id'], message['id']]),
-                        'attachment_approval_ids': self.c.weixin.media.shares.pending(message['id'], dot['id'])},
+                        'attachment_approval_ids': self.c.channels.media.shares.pending(message['id'], dot['id'])},
                     'interim_reply_arguments': {**scope, 'reply_to_id': message['id'], 'complete': False,
                         'idempotency_key': 'dot-interim:' + digest([dot['id'], message['id']])},
                     'ack_request': public_request('collaboration_dot_ack', {**scope, 'message_id': message['id'],
@@ -272,9 +272,9 @@ class DotChatService:
                     (args['complete'], self.c.clock(), args['complete'], self.c.clock(), dot['id'], args['reply_to_id']))
             stored = self.c.object('collaboration_messages', room, result['message']['id'])
             if version2 and args['attachment_approval_ids']:
-                self.c.weixin.media.attach_approved(args['attachment_approval_ids'], stored, principal)
+                self.c.channels.media.attach_approved(args['attachment_approval_ids'], stored, principal)
             self.c.task_liveness.record_receipt(dot, args, receipt_kind, {**stored, 'version': result['message']['version']})
-            self.c.weixin.delivery.queue_reply(stored)
+            self.c.channels.queue_reply(stored)
             if version2:
                 result = {**result, 'message': self.c.chatroom.view(stored), 'message_schema_version': 2}
             return {**result, 'receipt_request': public_request('collaboration_dot_delivery_receipt', {

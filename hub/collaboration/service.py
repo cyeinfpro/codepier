@@ -50,6 +50,10 @@ class CollaborationService:
         self.room_scope = RoomScopeService(self)
         from hub.collaboration.weixin import WeixinService
         self.weixin = WeixinService(self)
+        from hub.collaboration.telegram import TelegramService
+        from hub.collaboration.channel_router import ChannelRouter
+        self.telegram = TelegramService(self)
+        self.channels = ChannelRouter(self)
         self.events = None
         self.monitor = None
         self.secret = b''

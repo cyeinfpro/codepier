@@ -246,6 +246,7 @@ window.CodePierCollaboration = (() => {
     state.controller = null;
   }
   function resetScope() {
+    workspaceUI.clear();
     coordination.clear();
     dots.clearChannels();
     state.snapshot = null;
@@ -300,8 +301,9 @@ window.CodePierCollaboration = (() => {
     const generation = state.generation;
     // Credential imports retain a SHA-bound random retry ID, never a plaintext
     // token as a Map key. Login/room changes cancel the pre-send decision.
-    const credentialIdentity =
-      operation === 'weixin-account' ? await commandIdentity({ operation, ...payload }) : null;
+    const credentialIdentity = ['weixin-account', 'telegram-account'].includes(operation)
+      ? await commandIdentity({ operation, ...payload })
+      : null;
     if (generation !== state.generation) throw new Error('当前房间已变化，未发送旧配置。');
     const fingerprint =
       credentialIdentity?.storageKey || JSON.stringify([state.space, operation, payload]);
@@ -494,6 +496,7 @@ window.CodePierCollaboration = (() => {
   function patchMemberStatus() {
     relay.chrome();
     dots.refreshCards();
+    workspaceUI.refresh();
     for (const node of document.querySelectorAll('[data-cc-mention-status]')) {
       const slot = mentionSlots().find((item) => item.id === node.dataset.ccMentionStatus);
       node.textContent = slot ? mentionReadiness(slot) : '位置已不可用，请重新核对';
@@ -610,7 +613,7 @@ window.CodePierCollaboration = (() => {
     const d = state.snapshot,
       c = chat();
     const enabled = d.capabilities?.plain_messages && d.can_manage && d.room.state === 'active';
-    return `<section class="cc-conversation"><div id="cc-relay-network" class="cc-relay-network" role="status" aria-live="polite" hidden></div><div class="cc-timeline-wrap"><div class="cc-feed" tabindex="0" aria-label="共享讨论记录"><div class="cc-history">${c.older ? button('older-messages', '加载更早消息') : ''}</div><div class="cc-message-list" role="log" aria-label="房间消息" aria-live="polite" aria-relevant="additions text">${c.messages.map(messageMarkup).join('') || `<div class="cc-chat-empty"><span class="cc-empty-symbol" aria-hidden="true">↗</span><h3>从一句话开始。</h3><p>说说你的想法，讨论会留在这个房间。</p><p>需要落实时，选择助手并交给它处理。</p>${d.join_slots?.length ? '<small>已登记助手连接；以实际领取与结果确认进度。</small>' : '<button type="button" class="btn" data-cc-action="open-members">添加 dot</button>'}</div>`}</div><div id="cc-relay-outbox">${relay.outboxMarkup(c)}</div></div><button type="button" class="btn cc-new-messages" data-cc-action="latest" ${c.unread ? '' : 'hidden'}>${c.unread} 条新消息 ↓</button></div><div class="cc-compose-wrap"><form id="cc-command" class="cc-composer"><div id="cc-draft-context">${draftContext()}</div><div id="cc-delegation-context">${delegationContext()}</div><label class="cc-sr-only" for="cc-message-input">房间消息</label><textarea id="cc-message-input" name="request" rows="2" maxlength="3900" required ${enabled ? '' : 'disabled'} placeholder="${enabled ? '说说你的想法，或 @一个助手连接…' : '普通消息暂不可用，请核对房间与服务能力'}">${E(c.draft)}</textarea><div id="cc-dot-suggestions" class="cc-dot-suggestions" role="listbox" aria-label="选择任务 dot" hidden></div><div class="cc-compose-controls">${button('mentions', '@ 助手', {}, enabled && d.capabilities?.message_notifications ? '' : 'disabled')}<span id="cc-task-compose-tools" ${dots.simpleComposer() ? 'hidden' : ''}>${coordination.action()}</span><span id="cc-send-mode">${delegationComposer()}</span><small>来源 · ${E(projectLabel(state.project))}</small><button class="btn primary" type="submit" ${enabled ? '' : 'disabled'}>发送 ↑</button></div></form><div class="cc-compose-help"><span>像房间成员一样双向交流；消息和结果留在原话题</span><span class="cc-desktop-key">Enter 发送 · Shift + Enter 换行</span><span class="cc-mobile-key">Enter 换行</span></div></div></section>`;
+    return `<section class="cc-conversation"><div id="cc-relay-network" class="cc-relay-network" role="status" aria-live="polite" hidden></div><div class="cc-timeline-wrap"><div class="cc-feed" tabindex="0" aria-label="共享讨论记录"><div class="cc-history">${c.older ? button('older-messages', '加载更早消息') : ''}</div><div class="cc-message-list" role="log" aria-label="房间消息" aria-live="polite" aria-relevant="additions text">${c.messages.map(messageMarkup).join('') || workspaceUI.welcome()}</div><div id="cc-relay-outbox">${relay.outboxMarkup(c)}</div></div><button type="button" class="btn cc-new-messages" data-cc-action="latest" ${c.unread ? '' : 'hidden'}>${c.unread} 条新消息 ↓</button></div><div class="cc-compose-wrap"><form id="cc-command" class="cc-composer"><div id="cc-draft-context">${draftContext()}</div><div id="cc-delegation-context">${delegationContext()}</div><label class="cc-sr-only" for="cc-message-input">房间消息</label><textarea id="cc-message-input" name="request" rows="2" maxlength="3900" required ${enabled ? '' : 'disabled'} placeholder="${enabled ? '直接说说你想做什么，或 @ 选择助手…' : '普通消息暂不可用，请核对房间与服务能力'}">${E(c.draft)}</textarea><div id="cc-dot-suggestions" class="cc-dot-suggestions" role="listbox" aria-label="选择任务 dot" hidden></div><div class="cc-compose-controls">${button('mentions', '@ 助手', {}, enabled && d.capabilities?.message_notifications ? '' : 'disabled')}<span id="cc-task-compose-tools" ${dots.simpleComposer() ? 'hidden' : ''}>${coordination.action()}</span><span id="cc-send-mode">${delegationComposer()}</span><small>来源 · ${E(projectLabel(state.project))}</small><button class="btn primary" type="submit" ${enabled ? '' : 'disabled'}>发送 ↑</button></div></form><div class="cc-compose-help"><span>发送到 ${E(projectLabel(state.project))} · ${E(state.environment)}</span><span class="cc-desktop-key">Enter 发送 · Shift + Enter 换行</span><span class="cc-mobile-key">Enter 换行</span></div></div></section>`;
   }
   function memberStrip() {
     const slots = notificationSlots(),
@@ -653,17 +656,17 @@ window.CodePierCollaboration = (() => {
       : state.snapshot.conversation
         ? [state.snapshot.conversation]
         : [];
-    return `<aside class="cc-room-rail"><div class="cc-rail-heading"><strong>协作室</strong>${button('new-conversation', '＋', {}, 'aria-label="创建独立聊天室"')}<button class="btn cc-room-close" type="button" data-cc-action="close-rooms" aria-label="关闭房间列表">×</button></div><nav class="cc-room-list" aria-label="房间">${rooms
+    return `<aside id="cc-room-rail" class="cc-room-rail" aria-label="协作房间"><div class="cc-rail-heading"><strong>协作房间</strong>${button('new-conversation', '＋', {}, 'aria-label="创建独立聊天室"')}<button class="btn cc-room-close" type="button" data-cc-action="close-rooms" data-cc-workspace="close-rooms" aria-label="关闭房间列表">×</button></div><label class="cc-room-search-label"><span class="cc-sr-only">搜索房间</span><input id="cc-room-search" type="search" placeholder="搜索房间…" autocomplete="off"></label><nav class="cc-room-list" aria-label="房间">${rooms
       .map((r) => {
         const first = r.projects?.find(
           (p) => p.project_id === state.project && p.environment_id === state.environment,
         ) ||
           r.projects?.[0] || { project_id: r.project_id, environment_id: r.environment_id };
-        return `<button type="button" data-cc-room="${E(r.id)}" data-project="${E(first.project_id)}" data-environment="${E(first.environment_id)}" class="cc-room ${r.id === state.conversation ? 'is-current' : ''}"><span class="cc-room-icon" aria-hidden="true">${E((conversationTitle(r) || 'C').slice(0, 1))}</span><span><strong>${E(conversationTitle(r))}</strong><small>${r.projects?.length > 1 ? `${r.projects.length} 个项目` : E(first.environment_id)}</small></span></button>`;
+        return `<button type="button" data-cc-room="${E(r.id)}" data-project="${E(first.project_id)}" data-environment="${E(first.environment_id)}" class="cc-room ${r.id === state.conversation ? 'is-current' : ''}" aria-current="${r.id === state.conversation ? 'page' : 'false'}"><span class="cc-room-icon" aria-hidden="true">${E((conversationTitle(r) || 'C').slice(0, 1))}</span><span><strong>${E(conversationTitle(r))}<em class="cc-room-draft" hidden></em></strong><small>${r.projects?.length > 1 ? `${r.projects.length} 个项目` : E(first.environment_id)}</small></span></button>`;
       })
       .join(
         '',
-      )}</nav><p class="cc-rail-note"><strong>一个房间，共同讨论。</strong><br>项目可中途加入；消息与任务始终保留来源。</p><details class="cc-scope-details"><summary>打开项目默认房间</summary>${selection}</details></aside>`;
+      )}</nav><p class="cc-room-search-empty" hidden>没有匹配的房间，试试其他名称。</p><details class="cc-scope-details"><summary>打开项目默认房间</summary>${selection}</details></aside>`;
   }
   function showDrawer(title, content, trigger) {
     const dialog = document.querySelector('#cc-drawer');
@@ -780,6 +783,8 @@ window.CodePierCollaboration = (() => {
       !state.snapshot?.capabilities?.read_cursors ||
       document.hidden ||
       !feed ||
+      !feed.getClientRects().length ||
+      feed.closest('[inert]') ||
       feed.scrollHeight - feed.scrollTop - feed.clientHeight >= 70
     )
       return;
@@ -810,10 +815,7 @@ window.CodePierCollaboration = (() => {
       state.joinDraft = {};
       state.draft = {};
     }
-    if (state.view !== 'discussion') {
-      const main = document.querySelector('.cc-main');
-      if (main) main.innerHTML = empty('访问范围已改变，正在重新核对可见记录。');
-    }
+    workspaceUI.clear();
     closeDrawer();
     const drawer = document.querySelector('#cc-drawer');
     if (drawer) drawer.innerHTML = '';
@@ -1023,6 +1025,49 @@ window.CodePierCollaboration = (() => {
       document.querySelector('#cc-command button[type="submit"]').disabled = area.disabled;
     }
   }
+  let workspaceRefresh = null;
+  function refreshWorkspaceData() {
+    if (state.busy || !state.snapshot?.room || !state.snapshot.capabilities?.plain_messages) return;
+    if (workspaceRefresh?.generation === state.generation) return workspaceRefresh.promise;
+    const ticket = { generation: state.generation, promise: null };
+    workspaceRefresh = ticket;
+    const session = S.session,
+      space = S.space_id,
+      project = state.project,
+      environment = state.environment,
+      conversation = state.conversation;
+    const current = () =>
+      ticket.generation === state.generation &&
+      session === S.session &&
+      space === S.space_id &&
+      project === state.project &&
+      environment === state.environment &&
+      conversation === state.conversation &&
+      S.page === 'collaboration';
+    ticket.promise = (async () => {
+      await refreshChat();
+      if (!current()) return;
+      const directory = state.snapshot.conversation
+        ? await api('/api/collaboration/conversations', { signal: state.controller.signal })
+        : await getRecord('rooms', '');
+      if (!current()) return;
+      state.rooms = directory.items || [];
+      workspaceUI.refreshRooms(roomRail(''));
+      workspaceUI.refresh();
+    })()
+      .catch((error) => {
+        if (!current() || error.name === 'AbortError') return;
+        const feedback = document.querySelector('#cc-feedback');
+        if (feedback) {
+          feedback.textContent = '工作区状态暂时无法刷新，当前草稿已保留。' + error.message;
+          feedback.classList.add('is-error');
+        }
+      })
+      .finally(() => {
+        if (workspaceRefresh === ticket) workspaceRefresh = null;
+      });
+    return ticket.promise;
+  }
   function jobs() {
     const d = state.snapshot;
     return `<section class="cc-stack">${coordination.list()}<details class="cc-legacy-tasks" open><summary>只读任务记录</summary>${d.jobs.map((job) => `<article class="cc-card"><div class="cc-row"><strong>${E(job.kind === 'summarize_result' ? '结果汇总' : job.kind === 'propose_monitor_plan' ? '监控计划草稿' : '只读异常分析')}</strong>${badge(job.state)}</div><p>${E(text(job.delivery_status))}${job.reason_code ? ` · ${E(job.reason_code)}` : ''}</p><dl class="cc-facts"><div><dt>任务</dt><dd>${E(job.id.slice(-8))}</dd></div><div><dt>领取轮次</dt><dd>${job.attempt} / 3</dd></div><div><dt>期限</dt><dd>${E(when(job.deadline_at))}</dd></div></dl><details data-cc-detail="job" data-id="${E(job.id)}"><summary>上下文、结果与执行记录</summary><div class="cc-detail">展开后读取当前记录</div></details>${d.can_manage && !['succeeded', 'failed', 'cancelled', 'expired', 'dead_letter'].includes(job.state) ? `<div class="cc-actions">${['blocked', 'retry_wait'].includes(job.state) ? button('retry', '在原期限内解除阻塞', job) : ''}${button('cancel', '取消只读任务', job)}</div>` : ''}</article>`).join('') || empty('尚未创建任务。任务是否完成与业务是否恢复会分别显示。')}${d.jobs_next_cursor ? button('more', '加载更多任务', {}, 'data-kind="jobs"') : ''}</details></section>`;
@@ -1053,7 +1098,7 @@ window.CodePierCollaboration = (() => {
           `<article class="cc-card"><div class="cc-row"><strong>${E(incident.rule_id)} · 第 ${incident.episode} 次发生</strong>${badge(incident.state)}</div><p>${E(incident.severity)} · ${E(text(incident.analysis_state))}${incident.suppressed ? ' · 维护期仅抑制通知' : ''}</p><small>最近证据 ${E(when(incident.updated))} · 计划 v${incident.plan_version}</small><details data-cc-detail="evidence" data-project-diagnostic="true" data-id="${E(incident.evidence_id)}"><summary>查看脱敏探针证据</summary><div class="cc-detail">展开后读取当前授权证据</div></details></article>`,
       )
       .join('');
-    return `<section class="cc-stack"><p class="cc-hint">当前项目监控诊断：${E(projectLabel(state.project))} · ${E(state.environment)}。此处查看项目级监控，不扩展房间共享范围。</p>${current}${incidents || empty('暂无已确认异常；这不等于全部业务均健康。')}${d.incidents_next_cursor ? button('more', '加载更多异常', {}, 'data-kind="incidents"') : ''}${d.can_manage ? `<details class="cc-card"><summary>登记固定只读探针</summary><form id="cc-probe" class="cc-form">${field('名称', '<input name="label" maxlength="80" required>')}${field('固定 GET 地址', '<input name="url" type="url" maxlength="2048" placeholder="https://service.example/ready" required>')}<details><summary>受限内部服务配置</summary>${field('允许的私网 CIDR，每行一个', '<textarea name="networks" rows="2" placeholder="仅填写明确允许此探针访问的网段"></textarea>')}<label><input name="allow_http" type="checkbox"> 此固定内部目标允许明文 HTTP</label></details><label><input type="checkbox" required> 确认该 GET 不修改业务数据，地址不含凭据或客户内容</label><button type="submit" class="btn">登记探针，不启动采集</button></form></details><details class="cc-card"><summary>新建或修订监控草稿</summary><form id="cc-plan" class="cc-form"><div class="cc-two">${field('入口探针', `<select name="probe">${options(probes, state.draft.probe)}</select>`)}${field('独立恢复探针', `<select name="recovery">${options(probes, state.draft.recovery, '使用同一个固定探针')}</select>`)}</div>${field('异常分析对象', `<select name="monitor_assignee">${agentOptions('work_cloud', state.draft.monitor_assignee, '不自动创建分析任务')}</select>`)}${button('plan-template', '生成可审阅的初始配置')}${field('计划 JSON', `<textarea name="plan_json" rows="12" spellcheck="false" required placeholder="先生成配置，或粘贴需要审阅的声明式计划。">${E(state.draft.plan_json)}</textarea>`)}<small>初始配置只代表合成探针，不是全部用户请求的成功率。可以调整后先校验，再保存版本。</small><div class="cc-actions">${button('validate-plan', '只校验')}<button type="submit" class="btn">保存新草稿，不激活</button></div></form></details>` : ''}</section>`;
+    return `<section class="cc-stack"><div class="cc-monitor-status"><p class="cc-hint">当前项目监控诊断：${E(projectLabel(state.project))} · ${E(state.environment)}。此处查看项目级监控，不扩展房间共享范围。</p>${current}${incidents || empty('暂无已确认异常；这不等于全部业务均健康。')}${d.incidents_next_cursor ? button('more', '加载更多异常', {}, 'data-kind="incidents"') : ''}</div>${d.can_manage ? `<details class="cc-card"><summary>登记固定只读探针</summary><form id="cc-probe" class="cc-form">${field('名称', '<input name="label" maxlength="80" required>')}${field('固定 GET 地址', '<input name="url" type="url" maxlength="2048" placeholder="https://service.example/ready" required>')}<details><summary>受限内部服务配置</summary>${field('允许的私网 CIDR，每行一个', '<textarea name="networks" rows="2" placeholder="仅填写明确允许此探针访问的网段"></textarea>')}<label><input name="allow_http" type="checkbox"> 此固定内部目标允许明文 HTTP</label></details><label><input type="checkbox" required> 确认该 GET 不修改业务数据，地址不含凭据或客户内容</label><button type="submit" class="btn">登记探针，不启动采集</button></form></details><details class="cc-card"><summary>新建或修订监控草稿</summary><form id="cc-plan" class="cc-form"><div class="cc-two">${field('入口探针', `<select name="probe">${options(probes, state.draft.probe)}</select>`)}${field('独立恢复探针', `<select name="recovery">${options(probes, state.draft.recovery, '使用同一个固定探针')}</select>`)}</div>${field('异常分析对象', `<select name="monitor_assignee">${agentOptions('work_cloud', state.draft.monitor_assignee, '不自动创建分析任务')}</select>`)}${button('plan-template', '生成可审阅的初始配置')}${field('计划 JSON', `<textarea name="plan_json" rows="12" spellcheck="false" required placeholder="先生成配置，或粘贴需要审阅的声明式计划。">${E(state.draft.plan_json)}</textarea>`)}<small>初始配置只代表合成探针，不是全部用户请求的成功率。可以调整后先校验，再保存版本。</small><div class="cc-actions">${button('validate-plan', '只校验')}<button type="submit" class="btn">保存新草稿，不激活</button></div></form></details>` : ''}</section>`;
   }
 
   const joinStatus = (slot) => {
@@ -1098,6 +1143,7 @@ window.CodePierCollaboration = (() => {
     liveJoin,
     joinInstruction,
     joinStatus,
+    showConversation: () => workspaceUI.open('discussion'),
   });
 
   const relay = window.CodePierCollaborationRelay.create({
@@ -1117,6 +1163,22 @@ window.CodePierCollaboration = (() => {
     patchDelegationComposer,
     mergeMessages,
     recoverAccess,
+    onWorkspaceChange: () => workspaceUI.refresh(),
+  });
+
+  const workspaceUI = window.CodePierCollaborationWorkspace.create({
+    state,
+    E,
+    button,
+    chat,
+    mentionSlots,
+    projectLabel,
+    messageText,
+    renderJobs: jobs,
+    renderAgents: agents,
+    renderMonitor: monitoring,
+    bindDetails,
+    onOpen: refreshWorkspaceData,
   });
 
   function joinCard(slot) {
@@ -1479,15 +1541,8 @@ window.CodePierCollaboration = (() => {
     const feedback = `<p id="cc-feedback" class="cc-feedback ${state.error ? 'is-error' : ''}" role="status" aria-live="polite">${E(state.notes)}</p>`;
     if (!data.room)
       return `<div class="collaboration">${header}${selection}${feedback}<section class="cc-card cc-intro"><h2>开启这个项目的共享讨论室</h2><p>创建讨论室只保存协作记录，不代表授权采集、添加订阅或执行代码。</p>${data.can_manage ? button('create-room', '创建项目讨论室') : empty('请由项目所属空间的管理员创建讨论室。')}</section></div>`;
-    const tabs = [
-      ['discussion', '讨论'],
-      ['jobs', '目标与任务'],
-      ['monitor', '监控与诊断'],
-      ['agents', '助手与连接'],
-    ];
-    const body = { discussion, jobs, monitor: monitoring, agents }[state.view]();
     const project = S.projects.find((p) => p.id === state.project);
-    return `<div class="collaboration cc-chat-shell ${state.view === 'discussion' ? 'is-discussion' : 'is-management'}" data-project="${E(state.project)}" data-environment="${E(state.environment)}" data-conversation="${E(state.conversation)}"><h1 class="cc-sr-only" tabindex="-1">协作中心</h1>${roomRail(selection)}<section class="cc-room-body"><header class="cc-room-header"><div><div class="cc-room-title"><h2>${E(data.conversation ? conversationTitle(data.conversation) : data.room.title || project?.alias || state.project)}</h2><span class="cc-status">${E(state.environment)}</span>${data.room.state === 'paused' ? badge('paused') : ''}</div><p>让讨论、决定和结果，在同一个地方相遇。</p></div><div class="cc-header-tools">${relay.toolbar()}<details class="cc-room-menu"><summary data-cc-more aria-label="房间更多选项">···</summary><div>${button('room-settings', '切换房间')}${button('new-conversation', '新建独立聊天室')}${coordination.action('创建协作目标')}${data.capabilities?.message_search ? button('search', '搜索消息') : ''}${button('context', '房间上下文')}${button('refresh', '刷新状态')}</div></details></div></header>${projectChips()}${memberStrip()}<nav class="cc-tabs" aria-label="协作中心视图">${tabs.map(([id, label]) => `<button class="btn ${id === state.view ? 'is-active' : ''}" data-cc-view="${id}" aria-pressed="${id === state.view}">${label}</button>`).join('')}</nav>${feedback}<div class="cc-main">${body}</div></section><aside class="cc-context-rail">${contextContents()}</aside><dialog id="cc-drawer" class="cc-drawer" aria-label="房间详情"></dialog></div>`;
+    return `<div class="collaboration cc-chat-shell cc-workspace is-discussion" data-workspace-view="${E(state.view)}" data-project="${E(state.project)}" data-environment="${E(state.environment)}" data-conversation="${E(state.conversation)}"><h1 class="cc-sr-only" tabindex="-1">协作中心</h1>${roomRail(selection)}<button type="button" class="cc-room-backdrop" data-cc-workspace="close-rooms" aria-label="关闭房间列表" tabindex="-1"></button><section class="cc-room-body"><header class="cc-room-header"><button type="button" class="btn cc-room-mobile-toggle" data-cc-workspace="rooms" aria-controls="cc-room-rail" aria-expanded="false" aria-label="打开房间列表">☰</button><div class="cc-room-heading-copy"><span class="cc-eyebrow">协作中心 / ${E(projectLabel(state.project))}</span><div class="cc-room-title"><h2>${E(data.conversation ? conversationTitle(data.conversation) : data.room.title || project?.alias || state.project)}</h2><span class="cc-status">${E(state.environment)}</span>${data.room.state === 'paused' ? badge('paused') : ''}</div></div><div class="cc-header-tools">${data.capabilities?.message_search ? '<button type="button" class="btn" data-cc-action="search" aria-label="搜索房间消息"><span aria-hidden="true">⌕</span><span class="cc-search-label"> 搜索</span></button>' : ''}<details class="cc-room-menu"><summary data-cc-more aria-label="房间更多选项">···</summary><div>${button('room-settings', '切换房间')}${button('new-conversation', '新建独立聊天室')}${coordination.action('创建协作目标')}${button('context', '项目范围与上下文')}${button('refresh', '刷新状态')}</div></details></div></header>${projectChips()}${memberStrip()}${workspaceUI.navigation()}${workspaceUI.summary()}${feedback}<div class="cc-main"><div id="cc-discussion-host" class="cc-discussion-host">${discussion()}</div>${workspaceUI.panel()}</div></section><dialog id="cc-drawer" class="cc-drawer" aria-label="房间详情"></dialog></div>`;
   }
 
   async function act(action, element) {
@@ -1517,8 +1572,7 @@ window.CodePierCollaboration = (() => {
       }
     }
     if (action === 'close-rooms') {
-      document.querySelector('.cc-room-rail')?.classList.remove('is-open');
-      document.querySelector('[data-cc-more]')?.focus();
+      workspaceUI.rooms(false);
       return local;
     }
     if (action === 'new-conversation' || action === 'add-project') {
@@ -1591,9 +1645,8 @@ window.CodePierCollaboration = (() => {
       };
     }
     if (action === 'open-members') {
-      rememberChat();
-      state.view = 'agents';
-      await renderPage(false);
+      closeDrawer();
+      workspaceUI.open('agents', element);
       return local;
     }
     if (action === 'close-drawer') {
@@ -1613,7 +1666,7 @@ window.CodePierCollaboration = (() => {
     }
     if (action === 'room-settings') {
       const rail = document.querySelector('.cc-room-rail');
-      rail.classList.toggle('is-open');
+      workspaceUI.rooms(true, element);
       const details = rail.querySelector('details');
       details.open = true;
       details.querySelector('select')?.focus();
@@ -1769,6 +1822,7 @@ window.CodePierCollaboration = (() => {
       return local;
     }
     if (action === 'source') {
+      workspaceUI.open('discussion');
       const id = element.dataset.id;
       let node = [...document.querySelectorAll('.cc-feed [data-message-id]')].find(
         (n) => n.dataset.messageId === id,
@@ -2352,7 +2406,7 @@ window.CodePierCollaboration = (() => {
     const previous = new Map();
     let released = false;
     const navigation =
-      '[data-cc-room], [data-cc-partition], [data-cc-view], [data-cc-open-joins], [data-cc-action="close-drawer"]';
+      '[data-cc-room], [data-cc-partition], [data-cc-view], [data-cc-workspace-view], [data-cc-workspace], [data-cc-open-joins], [data-cc-action="close-drawer"]';
     const mark = () => {
       for (const node of root.querySelectorAll('button, input[type="submit"]')) {
         if (node.matches(navigation) || previous.has(node)) continue;
@@ -2419,7 +2473,9 @@ window.CodePierCollaboration = (() => {
           ? result.message
           : result?.job_id
             ? '指令已保存。' + text(result.delivery_status || result.state) + '。'
-            : '操作已保存，请以当前状态为准。';
+            : result?.local
+              ? ''
+              : '操作已保存，请以当前状态为准。';
       state.error = false;
       if (!result?.local) await renderPage(false);
     } catch (error) {
@@ -2471,9 +2527,13 @@ window.CodePierCollaboration = (() => {
   function composerChanged(event) {
     delegation.change(event);
     dots.change(event);
-    if (event.target.form?.id !== 'cc-command') return;
+    if (event.target.form?.id !== 'cc-command') {
+      workspaceUI.input(event);
+      return;
+    }
     const c = chat();
     if (event.target.name === 'request') c.draft = event.target.value;
+    workspaceUI.input(event);
     if (event.target.name === 'delegation_acceptance') c.acceptance = event.target.value;
     if (event.target.name === 'delegation_policy' && event.type === 'change') {
       const automatic = event.target.value.startsWith('auto:');
@@ -2501,6 +2561,7 @@ window.CodePierCollaboration = (() => {
     const topbar = document.querySelector('.topbar');
     const resize = () => {
       if (!live()) return;
+      workspaceUI.layout();
       root.style.setProperty(
         '--cc-viewport-height',
         (viewport?.height || window.innerHeight) + 'px',
@@ -2523,6 +2584,7 @@ window.CodePierCollaboration = (() => {
     };
     root.addEventListener('click', (event) => {
       if (!live() || event.target.closest('button')?.disabled) return;
+      if (workspaceUI.handleClick(event)) return;
       const partition = event.target.closest('[data-cc-partition]');
       if (partition) {
         selectPartition(partition.dataset.ccPartition, partition.dataset.environment);
@@ -2541,33 +2603,12 @@ window.CodePierCollaboration = (() => {
         renderPage(false);
         return;
       }
-      const tab = event.target.closest('[data-cc-view], [data-cc-open-joins]');
+      const tab = event.target.closest(
+        '[data-cc-view], [data-cc-workspace-view], [data-cc-open-joins]',
+      );
       if (tab) {
-        const selected = tab.dataset.ccView || 'agents';
         rememberChat();
-        state.view = selected;
-        const rendering = renderPage(false);
-        const renderSequence = S.renderSeq,
-          generation = state.generation,
-          session = S.session,
-          space = S.space_id;
-        rendering.then(() => {
-          const next = document.querySelector('.collaboration'),
-            focused = document.activeElement;
-          if (
-            S.page === 'collaboration' &&
-            state.view === selected &&
-            S.renderSeq === renderSequence &&
-            state.generation === generation &&
-            S.session === session &&
-            S.space_id === space &&
-            next &&
-            next !== root &&
-            !next.inert &&
-            (focused === document.body || focused === next || focused === next.parentElement)
-          )
-            next.querySelector('.cc-tabs [aria-pressed="true"]')?.focus({ preventScroll: true });
-        });
+        workspaceUI.open(tab.dataset.ccView || tab.dataset.ccWorkspaceView || 'agents', tab);
         return;
       }
       const button = event.target.closest('[data-cc-action]');
@@ -2617,8 +2658,9 @@ window.CodePierCollaboration = (() => {
       state.composing = false;
     });
     root.addEventListener('keydown', (event) => {
-      if (dots.keydown(event)) return;
       if (!live()) return;
+      if (workspaceUI.keydown(event)) return;
+      if (dots.keydown(event)) return;
       if (event.target.id !== 'cc-message-input') return;
       if (
         event.key === 'Enter' &&
@@ -2687,6 +2729,7 @@ window.CodePierCollaboration = (() => {
     }
     bindDetails();
     relay.bind(root);
+    workspaceUI.bind();
     expireInvitations(root);
     if (state.snapshot?.room && state.snapshot.capabilities?.plain_messages) {
       const generation = state.generation;
@@ -2695,7 +2738,7 @@ window.CodePierCollaboration = (() => {
         try {
           if (!document.hidden && !state.busy) {
             if (relay.focused()) await relay.sync();
-            else await refreshChat();
+            if (!relay.focused() || state.view !== 'discussion') await refreshChat();
           }
         } catch (error) {
           if (generation === state.generation) {

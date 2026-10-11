@@ -253,7 +253,7 @@ class WeixinService:
                 AND origin='bound_connector' ORDER BY created DESC,id DESC LIMIT 50''', (room['id'], args['conversation_id'])):
                 self.c.chatroom.require_message_visible(principal, message)
                 body = json.loads(message['body'])
-                if body.get('sender_dot_id') and body.get('dot_reply_complete') is not False and self.delivery.root_source(message):
+                if body.get('sender_dot_id') and body.get('dot_reply_complete') is not False and (source := self.delivery.root_source(message)) and json.loads(source['body']).get('external_origin', {}).get('channel') == 'weixin':
                     candidates.append({'id': message['id'], 'version': message['version'], 'body_text': body.get('body_text', '')[:120]})
                 if len(candidates) == 20:
                     break
@@ -361,7 +361,7 @@ class WeixinService:
         items = message.get('item_list', [])
         if not isinstance(items, list) or len(items) > 32:
             raise DevError('WEIXIN_ITEMS_INVALID', '外部消息分项超过上限', 422)
-        echo = bool(message.get('client_id') and self.store.one('SELECT 1 FROM weixin_parts WHERE client_id=?', (message['client_id'],)))
+        echo = bool(message.get('client_id') and (self.store.one('SELECT 1 FROM weixin_parts WHERE client_id=?', (message['client_id'],)) or self.store.one("SELECT 1 FROM channel_mirror_parts WHERE 'cpm-' || id=?", (message['client_id'],))))
         direct = not message.get('group_id') and type(message.get('message_type')) is int and message['message_type'] == 1 and not echo and peer != account['bot_id']
         if not direct:
             disposition = 'group_or_echo_quarantined'
@@ -433,6 +433,7 @@ class WeixinService:
                     VALUES (?,?,?,?,?) ON CONFLICT(account_id,generation,peer_id) DO UPDATE SET
                     token=excluded.token,observed_at=excluded.observed_at,version=version+1''',
                     (account['id'], binding['generation'], peer, self.store.encrypt(context), self.c.clock()))
+            self.c.channels.queue(self.c.object('collaboration_messages', room, message_id))
             disposition = 'message_committed'
         self.store.execute('INSERT INTO weixin_inbound_versions VALUES (?,?,?,?,?,?,?,?)',
             (*identity, version, source_hash, message_id, self.c.clock()))

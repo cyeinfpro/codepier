@@ -26,8 +26,9 @@
 - [外部 MCP 网关](MCP_GATEWAY.md)与[并发隔离](GATEWAY_CONCURRENCY.md)
 - [模型/CLI 与桌面能力策略](EXECUTION_CAPABILITIES.md)
 - [原操作完成提示](OPERATION_EVENTS.md)：精确订阅、事务 outbox 与宿主消费边界
-- [协作室](COLLABORATION_CHATROOM.md)
+- [协作室](COLLABORATION_CHATROOM.md)与[统一工作区交互](COLLABORATION_WORKSPACE_UX_2026-10-11.md)
 - [有界协作恢复与通道边界](COLLABORATION_RECOVERY.md)
+- [Telegram 与微信协作室同步](TELEGRAM_ROOM_SYNC.md)：本人私聊、独立投递与逐文件批准
 - [面板更新与备份](PANEL_UPDATE.md)
 - [长任务与回执恢复](LONG_OPERATIONS.md)
 - [VPS 连接](VPS.md)

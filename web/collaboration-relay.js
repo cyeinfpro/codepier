@@ -19,13 +19,13 @@ window.CodePierCollaborationRelay = {
       patchDelegationComposer,
       mergeMessages,
       recoverAccess,
+      onWorkspaceChange = () => {},
     } = ctx;
     let cleanup = null,
       retryTimer = null;
     const capable = () => !!state.snapshot?.capabilities?.native_dot_relay;
-    const active = () =>
-      capable() && state.view === 'discussion' && mentionSlots().some((s) => s.duplex);
-    const focused = () => active() && !state.relayManagement;
+    const active = () => capable() && mentionSlots().some((s) => s.duplex);
+    const focused = () => active();
     const belongs = (entry) =>
       entry.epoch === (entry.chat.relayEpoch || 0) &&
       entry.session === S.session &&
@@ -117,7 +117,7 @@ window.CodePierCollaborationRelay = {
       const partial = m.body?.dot_reply_complete === false;
       return `<article class="cc-message cc-relay-turn ${human ? 'is-owner' : 'is-dot'} ${m.body?.system_receipt ? 'is-receipt' : ''}" data-message-id="${E(m.id)}" data-project="${E(m.project_id || state.project)}" data-environment="${E(m.environment_id || state.environment)}" data-source-room="${E(m.source_room_id || m.room_id)}" data-sequence="${E(m.server_sequence || 0)}" data-version="${E(m.version || 1)}">
         <div class="cc-avatar ${human ? 'is-human' : ''}" aria-hidden="true">${E(name.slice(0, 1))}</div>
-        <div class="cc-message-content"><div class="cc-message-meta"><strong>${E(name)}</strong><time title="${E(new Date(m.created * 1000).toLocaleString())}">${E(new Date(m.created * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }))}</time>${partial ? '<small>阶段回复</small>' : ''}</div>
+        <div class="cc-message-content"><div class="cc-message-meta"><strong>${E(name)}</strong><time title="${E(new Date(m.created * 1000).toLocaleString())}">${E(new Date(m.created * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }))}</time>${partial ? '<small>阶段回复</small>' : ''}${m.source_channel ? `<span class="cc-channel-origin" data-source-channel="${E(m.source_channel)}">${E(m.source_channel === 'telegram' ? 'Telegram' : '微信')} · 同一协作室</span>` : ''}</div>
         ${source}<div class="cc-rich-text cc-prose" data-rich-message="${E(m.id)}">${E(messageText(m))}</div>
         <div class="cc-relay-attachments">${window.CodePierCollaborationChannels?.attachments(m, E) || ''}</div>
         <div class="cc-relay-delivery">${statuses(m)}</div>
@@ -201,10 +201,6 @@ window.CodePierCollaborationRelay = {
           patchDraftContext();
           patchDelegationComposer();
         }
-        const empty = root.querySelector('.cc-chat-empty');
-        if (empty)
-          empty.innerHTML =
-            '<h3>和 dot 直接聊</h3><p>提问、讨论、交办都在这里。<br>回复和进展会留在同一段对话。</p>';
       }
       autosize();
     }
@@ -331,6 +327,7 @@ window.CodePierCollaborationRelay = {
         paintOutbox(c);
         patchDraftContext();
         hydrate();
+        onWorkspaceChange();
       }
     }
     async function drain(c) {
@@ -501,6 +498,7 @@ window.CodePierCollaborationRelay = {
         hydrate();
         patchDelegationComposer();
         dots.refreshCards();
+        onWorkspaceChange();
         const area = document.querySelector('#cc-message-input');
         if (area) {
           area.disabled = result.room_state !== 'active' || !state.snapshot.can_manage;

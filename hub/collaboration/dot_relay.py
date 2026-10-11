@@ -66,7 +66,7 @@ class DotRelay:
                             (self.c.clock(), self.c.clock(), dot['id'], message['reply_to_id']))
                 stored = self.c.object('collaboration_messages', room, message['id'])
                 self.c.task_liveness.record_receipt(dot, args, 'update', stored)
-                self.c.weixin.delivery.queue_reply(stored)
+                self.c.channels.queue_reply(stored)
                 return {'message_id': message['id']}
 
             receipt = self.c.mutation(principal, room, 'dot_reply_update:' + dot['id'], args, save)

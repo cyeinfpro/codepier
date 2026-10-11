@@ -32,6 +32,11 @@ class CollaborationLoops:
             operations.extend([('weixin_poll', self.service.weixin.tick, 1),
                                ('weixin_delivery', self.service.weixin.delivery.tick, 1),
                                ('weixin_media', self.service.weixin.media.tick, 2)])
+        if self.service.config.telegram_enabled:
+            operations.extend([('telegram_poll', self.service.telegram.tick, 1),
+                               ('telegram_media', self.service.channels.media.tick, 2)])
+        if self.service.config.telegram_enabled or self.service.config.weixin_enabled:
+            operations.append(('channel_mirrors', self.service.channels.tick, 1))
         for name, operation, interval in operations:
             self.service.health.setdefault(name, {'enabled': True, 'running': False, 'reason_code': ''})
             self.tasks.append(asyncio.create_task(self.loop(name, operation, interval), name='collaboration:' + name))

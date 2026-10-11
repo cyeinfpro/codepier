@@ -406,7 +406,8 @@ def test_conversation_stale_add_review_and_visible_permission_reset(collaboratio
         expect(page.locator('#cc-message-input')).to_be_disabled()
         expect(page.locator('.cc-project-chip')).to_have_count(1)
         expect(page.locator('.cc-project-chip')).to_have_attribute('data-cc-partition', other['id'])
-        expect(page.locator('.cc-context-rail')).to_be_empty()
+        expect(page.locator('.cc-context-rail')).to_have_count(0)
+        expect(page.locator('#cc-workspace-panel [data-cc-panel]')).to_have_text(['', '', ''])
     finally:
         context.close()
 
@@ -538,32 +539,23 @@ def test_drawer_focus_lifecycle_respects_reopen_navigation_and_new_focus(collabo
         expect(tab).to_be_focused()
         expect(page.locator('#cc-drawer')).not_to_be_visible()
 
-        # Delay only the completion callback of an already committed real render.
-        # Returning to the same view later does not give the old callback focus.
+        # Workspace navigation no longer starts a whole-page render at all.
+        # Assert the stronger contract rather than waiting for an obsolete callback.
         page.evaluate("""() => {
           const render = renderPage;
-          let first = true;
-          renderPage = async (...args) => {
-            const result = await render(...args);
-            if (first) {
-              first = false;
-              document.documentElement.dataset.tabRenderHeld = 'yes';
-              await new Promise(resolve => { window.__ccReleaseTabRender = resolve; });
-            }
-            return result;
-          };
+          window.__ccNavigationRenders = 0;
+          renderPage = (...args) => { window.__ccNavigationRenders++; return render(...args); };
         }""")
+        original = page.locator('#cc-message-input').element_handle()
         page.locator('[data-cc-view="discussion"]').click()
-        expect(page.locator('html')).to_have_attribute('data-tab-render-held', 'yes')
         tab.click()
         expect(page.locator('[data-speaking-slot]')).to_have_count(1)
         page.locator('[data-cc-view="discussion"]').click()
         area = page.locator('#cc-message-input')
         area.fill('新视图里继续输入')
-        page.evaluate("""() => {
-          window.__ccReleaseTabRender();
-          return new Promise(resolve => requestAnimationFrame(resolve));
-        }""")
+        page.evaluate('() => new Promise(resolve => requestAnimationFrame(resolve))')
+        assert page.evaluate('window.__ccNavigationRenders') == 0
+        assert original.evaluate('(node) => node.isConnected')
         expect(area).to_be_focused()
         expect(area).to_have_value('新视图里继续输入')
         assert overview(stack)['messages'] == []
@@ -697,39 +689,42 @@ def test_pending_refresh_allows_navigation_and_failed_refresh_releases_actions(c
         login(page, stack)
         page.locator('#cc-message-input').fill('导航与失败刷新期间保留的草稿')
         held = []
+        phase = {'value': 'hold'}
 
-        def delay_overview(route):
-            query = parse_qs(urlsplit(route.request.url).query)
-            if query.get('kind') == ['overview'] and not held:
+        def matches_overview(url):
+            parsed = urlsplit(url)
+            return parsed.path == '/api/collaboration' and parse_qs(parsed.query).get('kind') == ['overview']
+
+        def overview_fixture(route):
+            # Keep one handler until context teardown. Removing a broad handler
+            # while sibling timeline/member requests were continuing caused a
+            # WebKit "Route is already handled" race in the test harness.
+            if phase['value'] == 'hold' and not held:
                 held.append([route, None])
                 held[0][1] = route.fetch()
                 page.locator('html').evaluate('(n) => n.dataset.navigationRefreshHeld = "yes"')
-            else:
-                route.continue_()
-
-        page.route('**/api/collaboration?*', delay_overview)
-        click_room_refresh(page)
-        expect(page.locator('html')).to_have_attribute('data-navigation-refresh-held', 'yes')
-        page.locator('[data-cc-view="jobs"]').click()
-        expect(page.locator('.cc-coordination-list')).to_be_visible()
-        held[0][0].fulfill(response=held[0][1])
-        page.unroute('**/api/collaboration?*', delay_overview)
-        expect(page.locator('[data-cc-view="jobs"]')).to_have_attribute('aria-pressed', 'true')
-        page.locator('[data-cc-view="discussion"]').click()
-        expect(page.locator('#cc-message-input')).to_have_value('导航与失败刷新期间保留的草稿')
-
-        def fail_overview(route):
-            if parse_qs(urlsplit(route.request.url).query).get('kind') == ['overview']:
+            elif phase['value'] == 'fail':
                 route.fulfill(status=422, json={'error': {'code': 'TEST_REFRESH_FAILED', 'message': '合成刷新失败'}})
             else:
                 route.continue_()
 
-        page.route('**/api/collaboration?*', fail_overview)
+        page.route(matches_overview, overview_fixture)
+        click_room_refresh(page)
+        expect(page.locator('html')).to_have_attribute('data-navigation-refresh-held', 'yes')
+        page.locator('[data-cc-view="jobs"]').click()
+        expect(page.locator('.cc-coordination-list')).to_be_visible()
+        phase['value'] = 'pass'
+        held[0][0].fulfill(response=held[0][1])
+        expect(page.locator('[data-cc-view="jobs"]')).to_have_attribute('aria-pressed', 'true')
+        page.locator('[data-cc-view="discussion"]').click()
+        expect(page.locator('#cc-message-input')).to_have_value('导航与失败刷新期间保留的草稿')
+
+        phase['value'] = 'fail'
         click_room_refresh(page)
         expect(page.locator('#cc-feedback')).to_contain_text('合成刷新失败')
         expect(page.locator('[data-cc-action="mentions"]')).to_be_enabled()
         expect(page.locator('#cc-message-input')).to_have_value('导航与失败刷新期间保留的草稿')
-        page.unroute('**/api/collaboration?*', fail_overview)
+        phase['value'] = 'pass'
         page.locator('[data-cc-action="mentions"]').click()
         expect(page.locator('#cc-drawer')).to_be_visible()
         page.locator('#cc-drawer [data-cc-action="close-drawer"]').click()

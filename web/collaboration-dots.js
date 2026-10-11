@@ -20,6 +20,7 @@ window.CodePierCollaborationDots = {
       liveJoin,
       joinInstruction,
       joinStatus,
+      showConversation,
     } = ctx;
     const channels = window.CodePierCollaborationChannels?.create(ctx);
     let token = null,
@@ -86,7 +87,7 @@ window.CodePierCollaborationDots = {
         <small>连接范围有效至 ${E(when(policy?.expires_at || slot.expires_at))}；不新增账号权限。</small>
         ${slot.scope_manifest ? `<details class="cc-dot-scope-proof"><summary>${slot.scope_manifest.ordinary_tools_room_scoped ? '普通工具已按此凭据限制到房间范围' : '普通工具尚未按房间强隔离'}</summary><p>${slot.scope_manifest.connection_exceeds_selected_room ? '原连接的有效项目范围大于当前房间。请在通道与执行边界中明确收窄。' : '以上为实际连接范围；不代表宿主其他连接器也受同样限制。'}</p><p>不是操作系统沙箱。宿主持久发件箱是否安装：尚未核验。</p>${slot.scope_manifest.reason_code ? `<p>${E(slot.scope_manifest.reason_code)}</p>` : ''}</details>` : ''}
         <p class="cc-hint">${slot.operation_timeout_seconds ? `单命令预算 ${E(slot.operation_timeout_seconds)} 秒；已开始命令在原预算内结束，失联不批准新步骤。` : '命令沿用原工作租约上限；没有自动升级长命令预算。'}</p>
-        ${alive && state.snapshot.can_manage ? `<div class="cc-actions">${slot.state === 'invited' ? button('join-refresh_code', '刷新加入码', slot) : ''}${transport(slot) ? button('join-test', '测试通知链路', slot) : ''}${button('join-revoke', '移除 dot 并停止新任务', slot)}</div>` : ''}
+        <details class="cc-dot-maintenance"><summary>连接维护与通知测试</summary>${alive && state.snapshot.can_manage ? `<div class="cc-actions">${slot.state === 'invited' ? button('join-refresh_code', '刷新加入码', slot) : ''}${transport(slot) ? button('join-test', '测试通知链路', slot) : ''}${button('join-revoke', '移除 dot 并停止新任务', slot)}</div>` : ''}
         ${
           slot.routes?.some((route) => route.test)
             ? `<details><summary>通知测试回执</summary>${slot.routes
@@ -100,6 +101,7 @@ window.CodePierCollaborationDots = {
                 )}<small>HTTP 接收不代表 dot 已读取；以原话题实际回复为准。</small></details>`
             : ''
         }
+        </details>
       </article>`;
     }
     function simpleComposer() {
@@ -147,8 +149,7 @@ window.CodePierCollaborationDots = {
         <p class="cc-dot-consent">点击添加，即允许此 dot 在本房间收发消息，并根据你的要求使用上述已有范围。运行命令使用执行账号权限，并非项目沙箱。</p>
         <button class="btn primary" type="submit">添加 dot，生成加入码</button></form>`
           : '<p class="cc-hint">由房间管理员在启用的房间添加 dot。</p>';
-      return `<section class="cc-stack cc-dots" aria-label="dot 成员"><section class="cc-card"><span class="cc-eyebrow">你的项目助手</span><h2>添加 dot，然后直接 @ 它</h2>
-        <div class="cc-dot-steps"><span><b>1</b> 添加 dot</span><span><b>2</b> 发加入码</span><span><b>3</b> 直接交流</span></div>${d.capabilities?.message_notifications ? '' : '<p class="cc-hint">事件服务尚未开启，暂不能自动唤醒 dot。已保存的消息仍会保留；管理员需开启 MCP Events。</p>'}${form}</section>${channels?.card() || ''}${slots().map(card).join('')}</section>`;
+      return `<section class="cc-stack cc-dots" aria-label="dot 成员">${slots().map(card).join('')}${channels?.card() || ''}<details class="cc-card cc-add-dot" ${slots().length ? '' : 'open'}><summary>${slots().length ? '＋ 添加另一个 dot' : '添加你的第一个 dot'}</summary><p class="cc-hint">添加 → 复制加入指令 → 回到对话。原聊天的宿主确认仍需在 dot 完成。</p>${d.capabilities?.message_notifications ? '' : '<p class="cc-hint">事件服务尚未开启，暂不能自动唤醒 dot。已保存消息不会丢失。</p>'}${form}</details></section>`;
     }
     function picker() {
       const dots = slots().filter(liveJoin);
@@ -213,12 +214,8 @@ window.CodePierCollaborationDots = {
         const slot = slots().find((item) => item.id === element.dataset.id);
         if (!slot) throw new Error('当前房间已没有这个 dot。');
         if (action === 'dot-select') {
-          const navigate = state.view !== 'discussion';
+          showConversation();
           choose(slot);
-          if (navigate) {
-            state.view = 'discussion';
-            return { local: false };
-          }
         } else if (action === 'dot-connect') showDrawer('接入 ' + slot.label, card(slot), element);
       }
       return { local: true };

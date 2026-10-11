@@ -224,6 +224,8 @@ def migrate(db):
     from hub.collaboration.channel_media import migrate as migrate_channel_media
     migrate_weixin(db)
     migrate_channel_media(db)
+    from hub.collaboration.telegram_schema import migrate as migrate_telegram
+    migrate_telegram(db)
     db.execute("INSERT OR REPLACE INTO meta VALUES ('collaboration_schema','3')")
 
 def migrate_chatroom(db):

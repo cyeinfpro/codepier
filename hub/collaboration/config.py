@@ -10,6 +10,7 @@ class CollaborationConfig:
     collector_enabled: bool = False
     analysis_dispatch_enabled: bool = False
     weixin_enabled: bool = False
+    telegram_enabled: bool = False
 
     @classmethod
     def from_env(cls):
@@ -17,7 +18,8 @@ class CollaborationConfig:
                      env_bool('CODEPIER_MCP_EVENTS_ENABLED', False),
                      env_bool('CODEPIER_MONITOR_COLLECTOR_ENABLED', False),
                      env_bool('CODEPIER_ANALYSIS_DISPATCH_ENABLED', False),
-                     env_bool('CODEPIER_WEIXIN_ENABLED', False))
-        if not result.enabled and any((result.events_enabled, result.collector_enabled, result.analysis_dispatch_enabled, result.weixin_enabled)):
+                     env_bool('CODEPIER_WEIXIN_ENABLED', False),
+                     env_bool('CODEPIER_TELEGRAM_ENABLED', False))
+        if not result.enabled and any((result.events_enabled, result.collector_enabled, result.analysis_dispatch_enabled, result.weixin_enabled, result.telegram_enabled)):
             raise ConfigurationError('Collaboration must be enabled before its events, collector or analysis dispatcher')
         return result
