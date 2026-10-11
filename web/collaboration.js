@@ -1008,14 +1008,20 @@ window.CodePierCollaboration = (() => {
     patchMemberStatus();
     patchDelegationComposer();
     const goals = document.querySelector('.cc-coordination-list');
-    if (goals && !goals.contains(document.activeElement)) goals.outerHTML = coordination.list();
+    // WebKit does not focus mouse-pressed buttons. Preserve their native
+    // activation target until pointer release, including unchanged refreshes.
+    if (goals && !goals.matches(':active') && !goals.contains(document.activeElement))
+      goals.outerHTML = coordination.list();
     markVisibleRead();
     const context = document.querySelector('.cc-context-rail');
-    if (context && !context.contains(document.activeElement)) context.innerHTML = contextContents();
+    if (context && !context.matches(':active') && !context.contains(document.activeElement))
+      context.innerHTML = contextContents();
     const strip = document.querySelector('.cc-member-strip');
-    if (strip && !strip.contains(document.activeElement)) strip.outerHTML = memberStrip();
+    if (strip && !strip.matches(':active') && !strip.contains(document.activeElement))
+      strip.outerHTML = memberStrip();
     const projects = document.querySelector('.cc-project-strip');
-    if (projects && !projects.contains(document.activeElement)) projects.outerHTML = projectChips();
+    if (projects && !projects.matches(':active') && !projects.contains(document.activeElement))
+      projects.outerHTML = projectChips();
     const area = document.querySelector('#cc-message-input');
     if (area) {
       area.disabled =

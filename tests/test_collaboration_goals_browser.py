@@ -436,6 +436,112 @@ def test_goal_all_pages_and_stale_page_cannot_replace_new_navigation(collaborati
 
 
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+@pytest.mark.parametrize('change,finish', [
+    ('unchanged', 'click'), ('changed', 'click'), ('changed', 'cancel'),
+])
+def test_goal_pointer_activation_survives_workspace_refresh(collaboration_stack, chat_browser_pool, engine, change, finish):
+    stack = collaboration_stack
+    context = chat_browser_pool(engine).new_context(viewport={'width': 1440, 'height': 900})
+    page = context.new_page()
+    page.add_init_script("""(() => {
+      let workspaceModule;
+      Object.defineProperty(window, 'CodePierCollaborationWorkspace', {
+        configurable: true,
+        get: () => workspaceModule,
+        set: (value) => {
+          const create = value.create;
+          value.create = function(options, ...args) {
+            return Reflect.apply(create, this, [{...options, onOpen(...openArgs) {
+              const pending = Reflect.apply(options.onOpen, this, openArgs);
+              window.goalPointerRefresh = pending;
+              return pending;
+            }}, ...args]);
+          };
+          workspaceModule = value;
+        },
+      });
+      window.goalPointerEvents = [];
+      for (const type of ['pointerdown', 'pointerup', 'click']) {
+        document.addEventListener(type, (event) => {
+          window.goalPointerEvents.push({type, action: event.target.closest('[data-cc-action]')?.dataset.ccAction,
+            connected: event.target.isConnected, inert: document.querySelector('.collaboration')?.inert,
+            renderSeq: typeof S === 'undefined' ? null : S.renderSeq});
+        }, true);
+      }
+    })();""")
+    held = []
+    errors = []
+    detail_requests = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.on('request', lambda request: detail_requests.append(request)
+            if parse_qs(urlsplit(request.url).query).get('kind') == ['coordination_goal'] else None)
+    try:
+        login(page, stack)
+        goal = create_in_ui(page, stack, '刷新期间保留真实指针目标', capabilities=('read',))
+
+        def delay_workspace_overview(route):
+            if parse_qs(urlsplit(route.request.url).query).get('kind') == ['overview'] and not held:
+                held.append(route)
+                page.locator('html').evaluate('(n) => n.dataset.goalPointerRefreshHeld = "yes"')
+            else:
+                route.continue_()
+
+        page.route('**/api/collaboration?*', delay_workspace_overview)
+        open_goals(page)
+        expect(page.locator('html')).to_have_attribute('data-goal-pointer-refresh-held', 'yes')
+        assert len(held) == 1
+        response = held[0].fetch()
+        assert response.ok, response.status
+        detail = page.locator(f'.cc-coordination-list [data-cc-action="goal-detail"][data-id="{goal["id"]}"]')
+        detail.scroll_into_view_if_needed()
+        original = detail.element_handle()
+        bounds = detail.bounding_box()
+        assert bounds
+        page.mouse.move(bounds['x'] + bounds['width'] / 2, bounds['y'] + bounds['height'] / 2)
+        page.evaluate('window.goalPointerEvents = []')
+        page.mouse.down()
+        assert original.evaluate("(node) => node.matches(':active')")
+        assert detail.evaluate("(node) => node.closest('.cc-workspace-records').matches(':active')")
+        if change == 'changed':
+            post(stack, 'goal-create', conversation_id=goal['conversation_id'],
+                 objective='按下期间新到的目标', acceptance='刷新后展示最新状态',
+                 project_ids=[stack.project['id']], participant_grant_ids=[stack.grant],
+                 coordinator_grant_id=stack.grant, capabilities=['read'])
+        held[0].fulfill(response=response)
+        page.evaluate('async () => { await window.goalPointerRefresh; }')
+        connected = original.evaluate('(node) => node.isConnected')
+        observed = page.evaluate('({events:window.goalPointerEvents, active:{tag:document.activeElement.tagName,id:document.activeElement.id}, inert:document.querySelector(".collaboration").inert})')
+        print('pointer-refresh observation:', json.dumps({'connected': connected, **observed}, ensure_ascii=False))
+        assert observed['events'] == [{'type': 'pointerdown', 'action': 'goal-detail',
+                                      'connected': True, 'inert': False,
+                                      'renderSeq': observed['events'][0]['renderSeq']}], observed
+        assert connected, observed
+        if change == 'changed':
+            expect(page.locator('.cc-coordination-list')).not_to_contain_text('按下期间新到的目标')
+        if finish == 'click':
+            with page.expect_request(lambda request: parse_qs(urlsplit(request.url).query).get('kind') == ['coordination_goal']):
+                page.mouse.up()
+            expect(page.locator('.cc-goal-detail')).to_contain_text('刷新期间保留真实指针目标')
+            assert len(detail_requests) == 1
+            page.keyboard.press('Escape')
+        else:
+            # A real drag-away release cancels activation without dispatch_event.
+            page.mouse.move(1, 1)
+            page.mouse.up()
+            assert detail_requests == []
+        expect(page.locator('#cc-drawer')).not_to_be_visible()
+        page.unroute('**/api/collaboration?*', delay_workspace_overview)
+        open_goals(page)
+        page.evaluate('async () => { await window.goalPointerRefresh; }')
+        if change == 'changed':
+            expect(page.locator('.cc-coordination-list')).to_contain_text('按下期间新到的目标')
+        assert len(detail_requests) == (1 if finish == 'click' else 0)
+        assert errors == []
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
 def test_goal_delayed_detail_dismissal_and_authority_projection_recheck(collaboration_stack, chat_browser_pool, engine):
     stack = collaboration_stack
     context = chat_browser_pool(engine).new_context(viewport={'width': 1440, 'height': 900})

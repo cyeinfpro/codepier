@@ -195,6 +195,7 @@ window.CodePierCollaborationWorkspace = {
       const selected = window.getSelection();
       if (
         !node ||
+        node.matches(':active') ||
         node.contains(document.activeElement) ||
         (selected && !selected.isCollapsed && node.contains(selected.anchorNode))
       )
@@ -202,7 +203,10 @@ window.CodePierCollaborationWorkspace = {
       if (node.innerHTML !== markup) node.innerHTML = markup;
     }
     function patchRecords(node, markup) {
-      if (!node || node._workspaceMarkup === markup) return;
+      // Focus restoration cannot restore a native click whose pressed target
+      // was removed. :active also covers WebKit buttons that never take focus.
+      // Do not cache skipped markup; the next refresh must still apply it.
+      if (!node || node.matches(':active') || node._workspaceMarkup === markup) return;
       const selected = window.getSelection();
       if (selected && !selected.isCollapsed && node.contains(selected.anchorNode)) return;
       const controls = (parent) => [...parent.querySelectorAll('button, summary')];
@@ -237,7 +241,7 @@ window.CodePierCollaborationWorkspace = {
     function refreshRooms(markup) {
       const node = root(),
         list = node?.querySelector('.cc-room-list');
-      if (!list) return;
+      if (!list || list.matches(':active')) return;
       const template = document.createElement('template');
       template.innerHTML = markup;
       const fresh = template.content.querySelector('.cc-room-list');
