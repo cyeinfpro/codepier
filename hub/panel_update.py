@@ -1,8 +1,11 @@
 """Panel-only bridge to the explicitly installed host updater; never a Docker API."""
 from __future__ import annotations
 
+import asyncio
+import copy
 import json
 import os
+import time
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -13,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from shared.util import DevError, VERSION
 from hub.panel_agent_rollout import PanelAgentRollouts
+from scripts.panel_update_source import UpdateError, latest_release, repository_name, version_tuple
 
 
 class CheckUpdate(BaseModel):
@@ -60,9 +64,49 @@ class UpdaterClient:
             raise DevError('UPDATER_UNAVAILABLE', '无法连接宿主机更新服务；已提交的更新结果需恢复连接后核实，请勿重复提交', 503) from exc
 
 
+class ReleaseDiscovery:
+    """One bounded, non-durable cache; never submits an updater operation."""
+    ttl = 300
+
+    def __init__(self):
+        self.lock = asyncio.Lock()
+        self.task = None
+        self.repository = None
+        self.cached = None
+        self.expires = 0
+
+    async def _refresh(self, repository):
+        try:
+            candidate = await asyncio.to_thread(latest_release, repository)
+            result = {'discovery_candidate': candidate, 'discovery_checked_at': candidate['checked_at'],
+                      'discovery_error': None}
+        except UpdateError as exc:
+            result = {'discovery_candidate': None, 'discovery_checked_at': None,
+                      'discovery_error': {'code': exc.code, 'message': exc.message}}
+        except Exception:
+            result = {'discovery_candidate': None, 'discovery_checked_at': None,
+                      'discovery_error': {'code': 'DISCOVERY_UNAVAILABLE', 'message': '暂时无法检查正式版本，请稍后重试'}}
+        self.cached = result
+        self.expires = time.monotonic() + self.ttl
+
+    async def get(self, repository):
+        repository_name(repository)
+        while True:
+            async with self.lock:
+                if self.repository == repository and self.cached is not None and time.monotonic() < self.expires:
+                    return copy.deepcopy(self.cached)
+                if self.task is None or self.task.done():
+                    self.repository, self.cached = repository, None
+                    self.task = asyncio.create_task(self._refresh(repository))
+                task = self.task
+            # A disconnected browser must not cancel the shared fetch or start duplicate threads.
+            await asyncio.shield(task)
+
+
 def make_panel_update_router(auth, runtime, client=None):
     router = APIRouter(prefix='/api/panel-update')
     bridge = client or UpdaterClient()
+    discovery = ReleaseDiscovery()
     rollouts = PanelAgentRollouts(runtime, bridge)
     runtime.panel_agent_rollouts = rollouts
 
@@ -83,6 +127,28 @@ def make_panel_update_router(auth, runtime, client=None):
         if not request_key and operation.get('kind') == 'apply':
             rollout = await runtime.store.run(rollouts.view, principal, operation.get('request_key', ''))
         return {**data, 'running_version': VERSION, 'agent_rollout': rollout}
+
+    @router.get('/available')
+    async def available(request: Request):
+        # Use the existing authenticated status path, including its pending operation.
+        data = await status(request, '')
+        if request.query_params:
+            raise DevError('INVALID_REQUEST', '版本发现不接受自定义来源或其他参数')
+        result = {'discovery_candidate': None, 'discovery_available': False,
+                  'discovery_checked_at': None, 'discovery_error': None}
+        if not data.get('enabled') or data.get('busy') or data.get('recovery_required'):
+            return {**data, **result}
+        try:
+            repository = repository_name(data.get('repository'))
+            result.update(await discovery.get(repository))
+            candidate = result['discovery_candidate']
+            result['discovery_available'] = bool(candidate and
+                version_tuple(candidate['version']) > version_tuple(VERSION))
+        except UpdateError as exc:
+            result.update(discovery_candidate=None, discovery_available=False,
+                          discovery_checked_at=None,
+                          discovery_error={'code': exc.code, 'message': exc.message})
+        return {**data, **result}
 
     async def submit(request, body, action):
         principal = auth.instance(request, True)

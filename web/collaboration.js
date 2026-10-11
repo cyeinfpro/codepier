@@ -219,6 +219,7 @@ window.CodePierCollaboration = (() => {
   function detach() {
     rememberChat();
     relay.detach();
+    dots.clearChannels();
     state.busyCleanup?.();
     state.busyCleanup = null;
     state.refreshSequence++;
@@ -246,6 +247,7 @@ window.CodePierCollaboration = (() => {
   }
   function resetScope() {
     coordination.clear();
+    dots.clearChannels();
     state.snapshot = null;
     state.delegationPolicies = [];
     state.draft = {};
@@ -295,8 +297,15 @@ window.CodePierCollaboration = (() => {
         : scope()),
       ...args,
     };
-    const fingerprint = JSON.stringify([state.space, operation, payload]);
-    let id = state.requests.get(fingerprint);
+    const generation = state.generation;
+    // Credential imports retain a SHA-bound random retry ID, never a plaintext
+    // token as a Map key. Login/room changes cancel the pre-send decision.
+    const credentialIdentity =
+      operation === 'weixin-account' ? await commandIdentity({ operation, ...payload }) : null;
+    if (generation !== state.generation) throw new Error('当前房间已变化，未发送旧配置。');
+    const fingerprint =
+      credentialIdentity?.storageKey || JSON.stringify([state.space, operation, payload]);
+    let id = credentialIdentity?.identifier || state.requests.get(fingerprint);
     if (!id) {
       id = requestId();
       state.requests.set(fingerprint, id);

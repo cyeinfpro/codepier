@@ -63,7 +63,7 @@ def test_context_contract_additive_legacy_compatibility_and_cost(api):
     assert result["total"]["estimated_tokens"] > value["summary"]["total"]["estimated_tokens"]
     assert result["total"]["estimated_tokens"] == result["input"]["estimated_tokens"] + result["output"]["estimated_tokens"]
     assert result["reference_cost"]["amount_nano_usd"] == (
-        result["input"]["estimated_tokens"] * 1900 + result["output"]["estimated_tokens"] * 50000)
+        result["input"]["estimated_tokens"] * 1450 + result["output"]["estimated_tokens"] * 50000)
     legacy = summarize([{"token_usage": usage(metric(100), metric(1000))}])
     for key in ("input", "output", "total", "reference_cost", "actual_usage"):
         assert value["summary"][key] == legacy[key]

@@ -31,7 +31,7 @@ def test_default_context_headline_range_and_folded_wire_details():
     assert "含上下文 Token" in html
     assert "206.49K" in html
     assert "范围 131.85K–363.3K" in html
-    assert "GPT-6 Astra · 输入缓存 90% 假设" in html
+    assert "GPT-6 Astra · 输入缓存 95% 假设" in html
     assert "历史可能不完整" in html
     assert "<strong>工具文本 Token</strong>：约 11K" in html
     assert "模型输入（含上下文）" in html

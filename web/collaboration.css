@@ -1773,3 +1773,20 @@ body:has(.cc-chat-shell) .mobile-dock {
     gap: 4px;
   }
 }
+
+/* Evidence is secondary to conversation; never obscure the composer. */
+.cc-task-liveness {
+  margin-top: 0.45rem;
+  max-width: 100%;
+  font-size: 0.82rem;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.cc-task-liveness summary {
+  cursor: pointer;
+}
+.cc-task-liveness > div,
+.cc-task-liveness > small {
+  display: block;
+  margin-top: 0.25rem;
+}

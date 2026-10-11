@@ -2,7 +2,7 @@
 from collections import defaultdict
 
 from shared.context_estimate import VERSION, SCENARIOS, estimate_context
-from shared.token_cost import reference_cost
+from shared.token_cost import DEFAULT_CACHE_READ_PERCENT, reference_cost
 
 
 def _counter(value):
@@ -70,7 +70,7 @@ def _summary(groups, coverage, cache_read_percent, reference_model):
     }
 
 
-def context_usage(rows, lower, upper, bucket_for, *, cache_read_percent=90,
+def context_usage(rows, lower, upper, bucket_for, *, cache_read_percent=DEFAULT_CACHE_READ_PERCENT,
                   reference_model="gpt-6-astra", collection_unavailable=False):
     """Warm retained history first; cut contributions only after one replay.
 

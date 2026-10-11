@@ -94,6 +94,8 @@ class DotService:
             setup = {key: args[key] for key in ('capabilities', 'execution_target', 'acknowledge_unsandboxed_exec')}
             if args.get('duplex'):
                 setup['duplex'] = True
+            if args.get('operation_timeout_seconds'):
+                setup['operation_timeout_seconds'] = args['operation_timeout_seconds']
             setup.update(project_snapshot=self.c.coordination.project_snapshot(project), target_snapshot=target,
                          purpose='处理房主在此房间明确 @ 此 dot 交办的任务，并回复实际进展、结果和未完成项。')
             def save():
@@ -171,7 +173,10 @@ class DotService:
                     'purpose': setup['purpose'], 'capabilities': setup['capabilities'],
                     'execution_target': setup['execution_target'],
                     'acknowledge_unsandboxed_exec': setup['acknowledge_unsandboxed_exec'],
-                    'automatic_delegation': True, 'idempotency_key': 'dot-policy:' + dot['id']}, owner)['policy']
+                    'automatic_delegation': True,
+                    **({'budget': {'operation_timeout_seconds': setup['operation_timeout_seconds']}}
+                       if setup.get('operation_timeout_seconds') else {}),
+                    'idempotency_key': 'dot-policy:' + dot['id']}, owner)['policy']
                 policy_row = self.c.delegation.policy(room, policy['id'])
                 baseline = self.c.delegation.consumer.checkpoint(policy_row, room, 'managed_execution')
                 self.store.execute('UPDATE collaboration_dots SET policy_id=?,policy_version=?,checkpoint=? WHERE id=?',
@@ -211,6 +216,26 @@ class DotService:
         return {'tool': 'collaboration_query', 'arguments': {
             'action': action, 'project': room['project_id'], 'environment_id': room['environment_id'],
             'dot_id': dot['id'], **extra}}
+
+    def scope_manifest(self, room, dot):
+        from hub.room_scope import descriptor
+        slot = self.c.joining.slot(room, dot['id'])
+        base = {'managed_work_scoped': True, 'ordinary_tools_room_scoped': False,
+                'os_sandbox_verified': False, 'host_other_connectors_controlled': False,
+                'host_outbox_verified': False, 'room_id': room['id'], 'conversation_id': dot['conversation_id']}
+        if not slot['grant_id']:
+            return {**base, 'credential_bound': False, 'state': 'not_joined'}
+        try:
+            actor = self.c.grant_reader(room, slot['grant_id'], snapshot=json.loads(slot['principal']))
+            scope = descriptor(self.store, actor)
+            conversation = self.c.conversations.object(actor, dot['conversation_id'])
+            selected = sorted({r['project_id'] for r in self.c.conversations.visible(actor, conversation)})
+            effective = sorted(actor.projects)
+            return {**base, **scope, 'state': 'active', 'selected_room_project_ids': selected,
+                    'effective_project_ids': effective,
+                    'connection_exceeds_selected_room': '*' in effective or bool(set(effective) - set(selected))}
+        except DevError as exc:
+            return {**base, 'credential_bound': False, 'state': 'authorization_unavailable', 'reason_code': exc.code}
 
     def connection(self, raw, principal):
         with self.store.transaction(immediate=False):
@@ -323,6 +348,8 @@ class DotService:
                 'code_expires_at': slot['code_expires_at'], 'joined_at': slot['joined_at'], 'join_code': code,
                 'join_instruction': instruction, 'subscription_instruction': resume,
                 'capabilities': setup['capabilities'], 'execution_target': setup['execution_target'],
+                'operation_timeout_seconds': setup.get('operation_timeout_seconds', 0),
+                'scope_manifest': self.scope_manifest(room, dot),
                 'policy_id': dot['policy_id'], 'policy_version': dot['policy_version'],
                 'subscription_requests': [request] if request else [], 'routes': routes,
                 'expected_events': [expected_event], 'expected_subscription_count': 1,

@@ -132,6 +132,63 @@ def probe_archive_handoff(directory, executable):
     return results
 
 
+def probe_generated_commands(directory, executable):
+    """Exercise the actual panel wrapper through native -File binding, offline."""
+    import hashlib
+    sys.path.insert(0, str(ROOT))
+    from hub.agent_install import install_command
+
+    directory = Path(directory)
+    results = []
+    for action in ('install', 'upgrade', 'uninstall', 'archive'):
+        stub = """param(
+          [string]$Hub, [string]$Token, [string]$Sha256, [string]$AllowRoot,
+          [string]$Action = 'install', [string]$ExpectedDevice,
+          [string]$InstallDir, [string]$Shell
+        )
+        [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+        $PSBoundParameters | ConvertTo-Json -Compress
+        """
+        stub_path = directory / 'synthetic installer.ps1'
+        stub_path.write_text(stub, encoding='utf-8-sig')
+        bootstrap_sha = hashlib.sha256(stub_path.read_bytes()).hexdigest()
+        command = install_command(
+            'windows', 'https://hub.invalid', 'rdi_synthetic' if action == 'install' else '',
+            'a' * 64, r"C:\Projects O'Brien" if action == 'install' else '',
+            bootstrap_sha, action=action,
+            expected_device='' if action == 'archive' else 'fixture-node',
+            install_dir=r"C:\Agent O'Brien", enable_execution=False)
+        source = str(stub_path).replace("'", "''")
+        driver = directory / 'driver.ps1'
+        driver.write_text(
+            "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)\n"
+            "function Invoke-WebRequest { param([switch]$UseBasicParsing, [string]$Uri, [string]$OutFile) "
+            "Copy-Item -LiteralPath '" + source + "' -Destination $OutFile }\n" + command,
+            encoding='utf-8-sig')
+        result = subprocess.run(
+            [executable, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+             '-File', str(driver)], capture_output=True, text=True, encoding='utf-8', timeout=30)
+        assert result.returncode == 0, result.stderr
+        received = json.loads(result.stdout.strip())
+        assert received['Hub'] == 'https://hub.invalid'
+        assert received['Sha256'] == 'a' * 64
+        assert received['InstallDir'] == r"C:\Agent O'Brien"
+        if action == 'install':
+            assert received['Token'] == 'rdi_synthetic'
+            assert received['AllowRoot'] == r"C:\Projects O'Brien"
+            assert received['Shell'] == 'disabled'
+            assert 'Action' not in received
+        else:
+            assert received['Action'] == action
+            assert not {'Token', 'AllowRoot', 'Shell'} & received.keys()
+        if action == 'archive':
+            assert 'ExpectedDevice' not in received
+        else:
+            assert received['ExpectedDevice'] == 'fixture-node'
+        results.append({'action': action, 'passed': True, 'exit_code': result.returncode})
+    return results
+
+
 def probe(directory):
     directory = Path(directory)
     (directory / 'deploy').mkdir();(directory / 'scripts').mkdir()
@@ -174,7 +231,7 @@ def probe(directory):
         ('start', ['-Hub', 'https://invalid.example'], 0, False, False),
     ]):
         base = directory / (f'fixture-{index} & cash $ [test]')
-        base.mkdir();config = base / 'config.json';config.write_bytes(b'{"synthetic":true,"device_id":"fixture-device"}')
+        base.mkdir();config = base / 'config.json';config.write_bytes(b'{"synthetic":true,"device_id":"fixture-device","hub_url":"https://hub.invalid"}')
         log = directory / f'args-{index}.json'
         env = {**os.environ, 'PATH': str(Path(sys.executable).parent) + os.pathsep + os.environ.get('PATH', ''),
                'FIXTURE_LOG': str(log), 'FIXTURE_EXIT': str(exit_code), 'PYTHONUTF8': '1'}
@@ -205,16 +262,17 @@ def probe(directory):
                 assert len(arguments) == len(prefix), (index, action, arguments, prefix)
         if action == 'archive':
             target=base.with_name(base.name+'.recovery-20000101-000000-01234567')
-            assert not base.exists() and (target/'config.json').read_bytes() == b'{"synthetic":true,"device_id":"fixture-device"}'
+            assert not base.exists() and (target/'config.json').read_bytes() == b'{"synthetic":true,"device_id":"fixture-device","hub_url":"https://hub.invalid"}'
             assert not (target/'.install.lock').exists()
         elif action != 'uninstall' or keep:
-            assert config.read_bytes() == b'{"synthetic":true,"device_id":"fixture-device"}'
+            assert config.read_bytes() == b'{"synthetic":true,"device_id":"fixture-device","hub_url":"https://hub.invalid"}'
         else:
             assert not base.exists()
         if keep:
             assert b'cleanup did not complete' in result.stderr
         results.append({'case': index, 'action': action, 'passed': True, 'exit_code': result.returncode})
     return {'passed': True, 'cases': results, 'real_powershell': True,
+            'generated_command_cases': probe_generated_commands(directory, executable),
             'download_cases': probe_download(directory, executable),
             'archive_cases': probe_archive_handoff(directory, executable),
             'python_installer': 'synthetic recorder; no services or external network used'}

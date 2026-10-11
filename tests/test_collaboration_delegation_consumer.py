@@ -381,6 +381,9 @@ def test_every_public_query_action_is_read_only_in_real_business_tables(collab):
     dot = s.dots.create({**c.scope, 'label': 'Read-only query dot', 'confirm_tasks': True,
         'capabilities': ['read'], 'idempotency_key': key()}, c.owner)['dot']
     s.dots.join({'code': dot['join_code'], 'idempotency_key': key()}, c.actor)
+    duplex_dot = s.dots.create({**c.scope, 'label': 'Recovery query dot', 'confirm_tasks': True,
+        'duplex': True, 'capabilities': ['read'], 'idempotency_key': key()}, c.owner)['dot']
+    s.dots.join({'code': duplex_dot['join_code'], 'idempotency_key': key()}, c.actor)
     queries = {action: {} for action in ('overview', 'rooms', 'jobs', 'messages', 'goals',
         'incidents', 'agents', 'subscriptions', 'join_slots', 'plan', 'timeline', 'members',
         'changes', 'coordination_goals', 'coordination_options', 'delegation_policies', 'delegations')}
@@ -396,16 +399,19 @@ def test_every_public_query_action_is_read_only_in_real_business_tables(collab):
         'inbox': {k: v for k, v in connected['inbox_request']['arguments'].items() if k not in {'action', 'project', 'environment_id'}},
         'plan_validate': {'candidate': candidate},
         'dot_connection': {'dot_id': dot['id']}, 'dot_inbox': {'dot_id': dot['id']},
+        'dot_recovery': {'dot_id': duplex_dot['id']},
+        'dot_receipt': {'dot_id': duplex_dot['id'], 'request_key': 'not-committed-query'},
+        'work_evidence': {'goal_id': delegated['goal_id'], 'work_item_id': delegated['work_item_id']},
     })
     assert set(queries) == set(ACTIONS['collaboration_query'])
     tables = [r['name'] for r in s.store.all(
         "SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE 'collaboration_%' "
         "OR name LIKE 'coordination_%' OR name LIKE 'delegation_%' OR name LIKE 'monitor_%' "
-        "OR name LIKE 'mcp_event_%' OR name LIKE 'conversation_%' OR name='operations')")]
+        "OR name LIKE 'mcp_event_%' OR name LIKE 'conversation_%' OR name LIKE 'dot_%' OR name='operations')")]
     def snapshot():
         return {table: s.store.all('SELECT * FROM "' + table + '" ORDER BY rowid') for table in tables}
     before = snapshot()
     for action, arguments in queries.items():
-        actor = c.actor if action in {'goal', 'delegation', 'connection', 'inbox', 'dot_connection', 'dot_inbox'} else c.owner
+        actor = c.actor if action in {'goal', 'delegation', 'connection', 'inbox', 'dot_connection', 'dot_inbox', 'dot_recovery', 'dot_receipt', 'work_evidence'} else c.owner
         assert s.invoke('collaboration_query', {'action': action, **c.scope, **arguments}, actor) is not None
         assert snapshot() == before, action

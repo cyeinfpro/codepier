@@ -15,7 +15,7 @@
 - [自适应并发与队列](ADAPTIVE_SCHEDULER.md)：并发上下限、资源压力、项目公平和生效回执
 - [文件入站](FILE_IMPORT_INGRESS.md)：限制、权限、客户端兼容证据、升级顺序
 - [Hub 入站设置](hub-file-import-settings.md)：预览、确认、保存、继承与关闭
-- [Token 与费用估算](mcp-token-usage.md)：MCP 工具文本、90% 输入缓存假设、参考模型、价格分项和真实用量边界
+- [Token 与费用估算](mcp-token-usage.md)：MCP 工具文本、95% 输入缓存假设、参考模型、价格分项和真实用量边界
 - [常见问题](FAQ.md)
 
 ## 权限、协作与维护
@@ -27,6 +27,7 @@
 - [模型/CLI 与桌面能力策略](EXECUTION_CAPABILITIES.md)
 - [原操作完成提示](OPERATION_EVENTS.md)：精确订阅、事务 outbox 与宿主消费边界
 - [协作室](COLLABORATION_CHATROOM.md)
+- [有界协作恢复与通道边界](COLLABORATION_RECOVERY.md)
 - [面板更新与备份](PANEL_UPDATE.md)
 - [长任务与回执恢复](LONG_OPERATIONS.md)
 - [VPS 连接](VPS.md)

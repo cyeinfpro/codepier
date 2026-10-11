@@ -240,7 +240,7 @@ def test_main_preserves_incomplete_existing_install_without_running_commands(tmp
     config.write_text('{"device_id":"existing"}')
 
     calls = []
-    with pytest.raises(ValueError, match="incomplete"):
+    with pytest.raises(ValueError, match="config is invalid"):
         _invoke_main(monkeypatch, archive=archive, digest=digest, base=base,
                      run=lambda *a, **k: calls.append((a, k)), enroll=lambda *_: None)
     assert config.read_text() == '{"device_id":"existing"}'
@@ -271,7 +271,7 @@ def test_fresh_install_records_lifecycle_metadata(tmp_path, monkeypatch):
     assert not (base / ".install.lock").exists()
 
 
-def test_existing_managed_install_uses_atomic_repair_path(tmp_path, monkeypatch):
+def test_existing_legacy_command_without_expected_node_uses_atomic_repair_path(tmp_path, monkeypatch):
     archive, digest = write_archive(tmp_path)
     base = tmp_path / "install"
     runtime = base / "runtime"
@@ -282,7 +282,7 @@ def test_existing_managed_install_uses_atomic_repair_path(tmp_path, monkeypatch)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
     config = base / "config.json"
-    config.write_text(json.dumps({"device_id": "existing", "secret": "old", "hub_url": "https://old.example",
+    config.write_text(json.dumps({"device_id": "existing", "secret": "old", "hub_url": "https://hub.example",
                                   "allowed_roots": [{"path": str(base), "writable": True}]}))
     service = tmp_path / "service.marker"
     service.write_text("managed")
@@ -298,7 +298,7 @@ def test_existing_managed_install_uses_atomic_repair_path(tmp_path, monkeypatch)
     _invoke_main(
         monkeypatch, archive=archive, digest=digest, base=base, run=fake_run,
         enroll=lambda *_: {"device_id": "existing", "name": "Updated node", "secret": "new-secret",
-                           "hub_url": "https://hub.example"}, expected_device="existing",
+                           "hub_url": "https://hub.example"},
     )
 
     updated = json.loads(config.read_text())

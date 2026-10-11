@@ -102,3 +102,37 @@
     gap: 6px;
   }
 }
+
+/* A nonmodal status surface never navigates or replaces the current page draft. */
+.panel-update-popover {
+  position: fixed;
+  z-index: 90;
+  top: 80px;
+  right: 16px;
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100dvh - 100px);
+  overflow: auto;
+  margin: 0;
+  background: var(--ui-panel);
+  color: var(--ui-text);
+  border: 1px solid var(--ui-line);
+  box-shadow: var(--ui-shadow);
+  scrollbar-color: var(--ui-soft) var(--ui-panel);
+}
+.panel-update-popover .panel-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+.panel-update-popover h2 {
+  margin: 0;
+}
+.panel-update-popover .panel-body {
+  padding: 16px;
+}
+@media (max-width: 480px) {
+  .panel-update-popover {
+    top: 120px;
+    max-height: calc(100dvh - 136px);
+  }
+}

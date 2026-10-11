@@ -20,6 +20,7 @@ VALUES = {
     'delegation_id': 'delegation', 'checkpoint': 'signed-checkpoint', 'conversation_id': 'room', 'room_id': 'room',
     'work_item_id': 'work', 'job_id': 'job', 'result_id': 'result', 'query': 'search text',
     'client_message_id': 'client-message', 'idempotency_key': 'stable-idempotency',
+    'request_key': 'stable-original-publication-key',
     'expected_version': 1, 'attempt': 1, 'fencing_token': 1, 'candidate': PLAN,
     'code': 'CPJ-AAAA-BBBB-CCCC-DDDD', 'body_text': 'Message text', 'request': 'Inspect project',
     'source_message_id': 'source-message', 'structured_mentions': [{'agent_id': 'agent'}],
@@ -39,7 +40,9 @@ def branch(schema, action):
 
 
 def example(tool, action):
-    schema = next(t['inputSchema'] for t in tool_definitions() if t['name'] == tool)
+    # Examples come from the authoritative action schema, not the broad host
+    # discovery envelope. This keeps every action-specific required-field check.
+    schema = ADAPTERS[tool].json_schema()
     spec = branch(schema, action)
     if action == 'execute':
         return {'action': action, **{key: VALUES[key] for key in
@@ -52,8 +55,9 @@ def example(tool, action):
 def test_every_action_accepts_exact_shape_and_rejects_missing_or_foreign_fields(tool, action):
     definition = next(t for t in tool_definitions() if t['name'] == tool)
     schema = definition['inputSchema']
-    validator = Draft202012Validator(schema)
+    validator = Draft202012Validator(ADAPTERS[tool].json_schema())
     raw = example(tool, action)
+    Draft202012Validator(schema).validate(raw)
     validator.validate(raw)
     ADAPTERS[tool].validate_python(raw)
     target, adapted = resolve(tool, raw)
@@ -86,7 +90,9 @@ def test_public_catalog_has_sixteen_native_tools_with_correct_hints(profile, aut
         Draft202012Validator.check_schema(item['inputSchema'])
         assert item['annotations']['readOnlyHint'] == (item['name'] == 'collaboration_query')
         assert item['annotations']['openWorldHint'] == (item['name'] == 'collaboration_work')
-        for spec in item['inputSchema']['$defs'].values():
+        assert item['inputSchema']['additionalProperties'] is False
+        assert set(item['inputSchema']['properties']['action']['enum']) == set(ACTIONS[item['name']])
+        for spec in ADAPTERS[item['name']].json_schema()['$defs'].values():
             if spec.get('type') == 'object':
                 assert spec['additionalProperties'] is False
         assert 'Legacy name to action' in item['description']

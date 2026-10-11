@@ -11,7 +11,17 @@ window.CodePierPanelUpdate = (() => {
     owner = null,
     watching = false,
     reloadAttempted = false,
-    deferredKey = '';
+    deferredKey = '',
+    nextCheckAt = 0,
+    checkFailures = 0,
+    discovery = null,
+    discovering = false,
+    intentNote = '',
+    accessDenied = false,
+    statusFailed = false,
+    agentConsent = true;
+  const checkTTL = 5 * 60 * 1000;
+  const failureDelay = () => Math.min(15 * 60 * 1000, 60000 * 2 ** Math.min(checkFailures - 1, 4));
   // Captured from the script loaded with this document, never from a later API response.
   const loadedVersion = new URL(
     document.currentScript?.src || location.href,
@@ -31,7 +41,12 @@ window.CodePierPanelUpdate = (() => {
       const value = JSON.parse(sessionValue(storageKey()) || 'null');
       return value &&
         ['check', 'apply'].includes(value.action) &&
-        /^[A-Za-z0-9._:-]{8,128}$/.test(value.body?.idempotency_key)
+        /^[A-Za-z0-9._:-]{8,128}$/.test(value.body?.idempotency_key) &&
+        (!value.intent ||
+          (/^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(value.intent.version || '') &&
+            Number.isInteger(value.intent.release_id) &&
+            /^[a-f0-9]{64}$/i.test(value.intent.sha256 || '') &&
+            typeof value.intent.update_agents === 'boolean'))
         ? value
         : null;
     } catch {
@@ -46,19 +61,202 @@ window.CodePierPanelUpdate = (() => {
           '</span><strong data-panel-update-status>检查更新</strong></button>'
       : '<span class="panel-update-version">v' + esc(version) + '</span>';
   }
+  function closeDetails(focus = true) {
+    document.getElementById('panel-update-popover')?.remove();
+    const trigger = document.querySelector('[data-panel-update-open]');
+    trigger?.setAttribute('aria-expanded', 'false');
+    if (focus) trigger?.focus({ preventScroll: true });
+  }
+  function showDetails() {
+    if (!document.getElementById('panel-update-popover')) {
+      const section = document.createElement('aside');
+      section.id = 'panel-update-popover';
+      section.className = 'panel panel-update panel-update-popover';
+      section.setAttribute('aria-labelledby', 'panel-update-float-title');
+      section.innerHTML = `<div class="panel-head"><h2 id="panel-update-float-title" tabindex="-1">面板更新</h2><button type="button" class="btn ghost" data-panel-update-close aria-label="关闭更新详情">关闭</button></div>
+        <div class="panel-body"><p class="form-note">顶部快捷更新仅更新面板、Hub 和 Agent 分发文件，不自动更新已安装的 Agent。下方勾选仅用于详情中的再次确认更新。</p><p id="panel-update-float-state" role="status" aria-live="polite"></p><p id="panel-update-float-note" class="form-note"></p>
+        <label class="panel-agent-consent"><input type="checkbox" id="panel-update-float-agents"> 面板更新成功后自动更新当前空间已授权的 Agent</label>
+        <div class="actions"><button type="button" class="btn primary" id="panel-update-float-apply">更新面板及已授权 Agent</button><button type="button" class="btn" id="panel-update-float-check">检查更新</button><button type="button" class="btn ghost" id="panel-update-float-refresh">刷新状态</button><button type="button" class="btn" id="panel-update-float-retry" hidden>重新提交原请求</button><button type="button" class="btn" id="panel-update-float-reload" hidden>刷新到新版本</button></div>
+        <details><summary>版本、发布说明与更新进度</summary><pre id="panel-update-float-details"></pre></details></div>`;
+      document.body.append(section);
+      $('#panel-update-float-apply').onclick = () => submit('apply');
+      $('#panel-update-float-check').onclick = () => submit('check');
+      $('#panel-update-float-refresh').onclick = () => load(true);
+      $('#panel-update-float-retry').onclick = () => submit(pending?.action, true);
+      $('#panel-update-float-reload').onclick = manualReload;
+      $('#panel-update-float-agents').onchange = (event) => setConsent(event.target.checked);
+    }
+    document.querySelector('[data-panel-update-open]')?.setAttribute('aria-expanded', 'true');
+    paint();
+    $('#panel-update-float-title')?.focus({ preventScroll: true });
+  }
   async function open() {
     if (!S.session?.instance_admin) return;
-    if (S.page !== 'settings') await navigate('settings');
-    if (S.page !== 'settings') return;
-    document.querySelector('.settings-groups [data-settings-group="advanced"]')?.click();
-    const section = document.querySelector('.settings-maintenance');
-    if (section) section.open = true;
-    document.getElementById('panel-update')?.scrollIntoView({ block: 'start' });
-    document.getElementById('panel-update-title')?.focus({ preventScroll: true });
+    showDetails();
+    if (canApply()) {
+      const c = availableCandidate();
+      const intent = {
+        version: c.version,
+        release_id: c.release_id,
+        sha256: c.sha256,
+        update_agents: false,
+      };
+      if (hostMatches(intent)) await submit('apply', false, false, true, intent);
+      else await submit('check', false, false, false, intent);
+    } else if (!submitting && !pending) await load();
   }
   document.addEventListener('click', (event) => {
-    if (event.target.closest('[data-panel-update-open]')) open();
+    if (event.target.closest('[data-panel-update-close]')) closeDetails();
+    else if (event.target.closest('[data-panel-update-open]')) open();
   });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && document.getElementById('panel-update-popover')) closeDetails();
+  });
+  function setConsent(value) {
+    agentConsent = value;
+    for (const id of ['panel-update-agents', 'panel-update-float-agents']) {
+      const node = document.getElementById(id);
+      if (node) node.checked = value;
+    }
+  }
+  function currentAgentScope() {
+    if (pending?.action === 'apply') return pending.body.update_agents === true;
+    if (pending?.action === 'check' && pending.intent) return pending.intent.update_agents === true;
+    return agentConsent;
+  }
+  function sameCandidate(a, b) {
+    return (
+      !!a &&
+      !!b &&
+      a.version === b.version &&
+      a.release_id === b.release_id &&
+      a.sha256 === b.sha256
+    );
+  }
+  function availableCandidate() {
+    if (discovery) return discovery.available && !discovery.error ? discovery.candidate : null;
+    return data?.update_available ? data.candidate : null;
+  }
+  function hostMatches(intent) {
+    const age = Date.now() - Number(data?.candidate?.checked_at) * 1000;
+    return (
+      data?.update_available && age >= 0 && age < 900000 && sameCandidate(intent, data.candidate)
+    );
+  }
+  function awaitingVersion() {
+    const job = data?.operation;
+    return (
+      job?.kind === 'apply' &&
+      job.state === 'succeeded' &&
+      /^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(job.target_version || '') &&
+      data.running_version !== job.target_version
+    );
+  }
+  function canApply() {
+    return (
+      data?.enabled &&
+      availableCandidate() &&
+      !awaitingVersion() &&
+      !data.busy &&
+      !data.recovery_required &&
+      !submitting &&
+      !pending &&
+      !discovering &&
+      !accessDenied &&
+      !statusFailed
+    );
+  }
+  function entryStatus() {
+    if (data?.recovery_required) return ['recovery_required', '需恢复'];
+    if (awaitingVersion()) return ['verifying', '等待服务恢复'];
+    if (discovering) return ['checking', '检查中'];
+    if (pending || submitting || data?.busy)
+      return (pending?.action || data?.operation?.kind) === 'check'
+        ? ['checking', '检查中']
+        : ['updating', '更新中'];
+    if (accessDenied || statusFailed) return ['unknown', '状态待核实'];
+    if (data?.enabled === false)
+      return ['unknown', data.code === 'UPDATER_NOT_CONFIGURED' ? '未启用' : '连接待恢复'];
+    const candidate = availableCandidate();
+    if (candidate) return ['available', '更新面板至 v' + candidate.version];
+    if (discovery?.error) return ['failed', '检查失败'];
+    if (data?.operation?.kind === 'check' && data.operation.state === 'failed')
+      return ['failed', '检查失败'];
+    if (data?.agent_rollout?.state === 'running')
+      return ['updating', 'Agent ' + data.agent_rollout.completed + '/' + data.agent_rollout.total];
+    if (
+      ['failed', 'rolled_back'].includes(data?.operation?.state) ||
+      data?.agent_rollout?.state === 'partial_failure'
+    )
+      return ['failed', '查看更新结果'];
+    const checked = Number(discovery?.checked_at || data?.candidate?.checked_at) * 1000;
+    if (
+      data?.enabled &&
+      !discovery?.error &&
+      checked > 0 &&
+      Date.now() - checked >= 0 &&
+      Date.now() - checked < checkTTL
+    )
+      return ['latest', '已是最新'];
+    return ['unknown', '尚未检查'];
+  }
+  function manualReload() {
+    if (!dirty() || confirm('刷新将丢弃当前页面的未保存输入，继续？')) reloadPage(data?.operation);
+  }
+  function paintDetails() {
+    if (!document.getElementById('panel-update-popover')) return;
+    const d = data || {},
+      job = d.operation,
+      busy = submitting || !!pending || !!d.busy;
+    text('panel-update-float-state', job?.message || d.reason || entryStatus()[1]);
+    text('panel-update-float-note', note);
+    $('#panel-update-float-note').hidden = !note;
+    $('#panel-update-float-apply').disabled = !canApply();
+    $('#panel-update-float-check').disabled =
+      !d.enabled || busy || d.recovery_required || accessDenied || awaitingVersion();
+    $('#panel-update-float-refresh').disabled = submitting;
+    $('#panel-update-float-agents').disabled = busy;
+    $('#panel-update-float-agents').checked = currentAgentScope();
+    $('#panel-update-float-retry').hidden = !(
+      pending &&
+      d.enabled &&
+      d.request_found === false &&
+      !d.busy &&
+      !d.recovery_required &&
+      !accessDenied
+    );
+    $('#panel-update-float-retry').disabled = submitting;
+    $('#panel-update-float-reload').hidden = !(
+      job?.kind === 'apply' &&
+      job.state === 'succeeded' &&
+      d.running_version === job.target_version
+    );
+    const rollout = d.agent_rollout,
+      candidate = availableCandidate() || d.candidate;
+    text(
+      'panel-update-float-details',
+      [
+        '运行版本：' + (d.running_version || loadedVersion || '未知'),
+        '更新来源：' + (d.repository || '未连接'),
+        '候选版本：' + (candidate?.version || '尚未检查'),
+        candidate ? 'SHA-256: ' + candidate.sha256 : '',
+        candidate?.notes || '',
+        job?.id ? '操作：' + job.id : '',
+        ...(job?.events || []).map((e) => timeText(e.at) + '  ' + e.message),
+        rollout
+          ? 'Agent 更新：' +
+            rollout.completed +
+            '/' +
+            rollout.total +
+            ' · ' +
+            (rollout.message || rollout.state)
+          : '',
+        ...(rollout?.nodes || []).map((n) => n.name + ' · ' + n.state + ' · ' + n.message),
+      ]
+        .filter(Boolean)
+        .join('\n'),
+    );
+  }
   function html() {
     return `<section class="panel panel-update" id="panel-update" aria-labelledby="panel-update-title">
     <div class="panel-head"><h2 id="panel-update-title" tabindex="-1">${icon('refresh')}面板更新</h2><span class="badge" id="panel-update-badge">读取中</span></div>
@@ -82,24 +280,25 @@ window.CodePierPanelUpdate = (() => {
     if (entry) {
       const version = data?.running_version || S.settings?.version || loadedVersion || '—';
       entry.querySelector('[data-panel-update-version]').textContent = 'v' + version;
-      const rollout = data?.agent_rollout;
-      const label =
-        submitting || pending || data?.busy
-          ? '更新中'
-          : rollout?.state === 'running'
-            ? 'Agent ' + rollout.completed + '/' + rollout.total
-            : rollout?.state === 'partial_failure' ||
-                data?.recovery_required ||
-                ['failed', 'rolled_back'].includes(data?.operation?.state)
-              ? '查看更新结果'
-              : data?.update_available
-                ? '有新版本'
-                : '检查更新';
+      const [state, label] = entryStatus();
       entry.querySelector('[data-panel-update-status]').textContent = label;
-      entry.dataset.state = data?.update_available
-        ? 'available'
-        : rollout?.state || data?.operation?.state || 'idle';
+      entry.dataset.state = state;
+      entry.title =
+        state === 'available'
+          ? '立即更新面板、Hub 和 Agent 分发文件；不自动更新已安装的 Agent。'
+          : '查看更新状态与进度';
+      entry.setAttribute(
+        'aria-label',
+        state === 'available'
+          ? label + '：更新面板、Hub 和 Agent 分发文件，不自动更新已安装的 Agent'
+          : '面板版本与更新：' + label,
+      );
+      entry.setAttribute(
+        'aria-expanded',
+        String(!!document.getElementById('panel-update-popover')),
+      );
     }
+    paintDetails();
     if (!document.getElementById('panel-update')) return;
     const d = data || {},
       job = d.operation,
@@ -140,14 +339,20 @@ window.CodePierPanelUpdate = (() => {
     );
     text('panel-update-note', note);
     $('#panel-update-note').hidden = !note;
-    $('#panel-update-check').disabled = !enabled || busy || d.recovery_required;
-    $('#panel-update-apply').disabled =
-      !enabled || busy || !d.update_available || d.recovery_required;
+    $('#panel-update-check').disabled =
+      !enabled || busy || d.recovery_required || accessDenied || awaitingVersion();
+    $('#panel-update-apply').disabled = !canApply();
     $('#panel-update-refresh').disabled = submitting;
     $('#panel-update-agents').disabled = busy;
-    if (pending?.action === 'apply')
-      $('#panel-update-agents').checked = pending.body.update_agents === true;
-    $('#panel-update-retry').hidden = !(pending && enabled && d.request_found === false && !d.busy);
+    $('#panel-update-agents').checked = currentAgentScope();
+    $('#panel-update-retry').hidden = !(
+      pending &&
+      enabled &&
+      d.request_found === false &&
+      !d.busy &&
+      !d.recovery_required &&
+      !accessDenied
+    );
     $('#panel-update-retry').disabled = submitting;
     $('#panel-update-reload').hidden = !(
       job?.kind === 'apply' &&
@@ -277,15 +482,20 @@ window.CodePierPanelUpdate = (() => {
   }
   function schedule(ms = 2000) {
     clearTimeout(timer);
-    if (S.session && sessionOwner(S.session) === owner && S.session.instance_admin)
+    if (!accessDenied && S.session && sessionOwner(S.session) === owner && S.session.instance_admin)
       timer = setTimeout(() => load(), ms);
   }
-  async function load() {
+  async function load(manual = false) {
+    if (manual) {
+      accessDenied = false;
+      nextCheckAt = 0;
+    }
     const gen = generation;
     if (!S.session || sessionOwner(S.session) !== owner || !S.session.instance_admin) return;
+    if (reader || submitting || accessDenied) return;
     clearTimeout(timer);
     timer = null;
-    reader?.abort();
+    let continueIntent = null;
     const control = new AbortController();
     reader = control;
     try {
@@ -297,15 +507,84 @@ window.CodePierPanelUpdate = (() => {
       if (gen !== generation || reader !== control) return;
       const wasWatching = watching;
       data = result;
+      statusFailed = false;
       if (result.enabled) {
-        if (pending && result.request_found && terminal.has(result.operation?.state))
+        if (
+          key &&
+          pending?.body?.idempotency_key === key &&
+          result.request_found &&
+          terminal.has(result.operation?.state)
+        ) {
+          if (pending.action === 'check' && result.operation.state === 'succeeded')
+            discovery = null;
+          if (pending.action === 'check' && pending.intent) {
+            if (
+              result.operation.kind === 'check' &&
+              result.operation.state === 'succeeded' &&
+              hostMatches(pending.intent)
+            )
+              continueIntent = pending.intent;
+            else
+              intentNote =
+                result.operation.state === 'succeeded'
+                  ? '发布版本或校验值已变化，未自动更新。请核对新版本后重新点击。'
+                  : '版本核查未成功，已停止本次更新。';
+          }
           savePending(null);
+        }
         note =
           pending && result.request_found === false
             ? '宿主机未找到原请求记录。核实后可使用“重新提交原请求”；不会生成第二个更新编号。'
-            : '';
+            : intentNote;
       } else if (pending) {
         note = '更新结果尚未核实。正在恢复连接；服务未连接不代表更新失败，请不要重新创建更新。';
+      }
+      if (!continueIntent && shouldDiscover()) {
+        nextCheckAt = Date.now() + checkTTL;
+        discovering = true;
+        paint();
+        try {
+          const available = await api('/api/panel-update/available', {
+            signal: control.signal,
+            retryDelays: [],
+            requestTimeout: 15000,
+            cache: 'no-store',
+          });
+          if (gen !== generation || reader !== control) return;
+          // A user may start an update while discovery is in flight. Never replace that receipt.
+          if (!pending && !submitting) {
+            discovery = {
+              candidate: available.discovery_candidate || null,
+              available: available.discovery_available === true,
+              checked_at: available.discovery_checked_at,
+              error: available.discovery_error || null,
+            };
+            if (discovery.error) {
+              checkFailures++;
+              nextCheckAt = Date.now() + failureDelay();
+              note = discovery.error.message || '检查正式发布失败，请稍后重试。';
+            } else checkFailures = 0;
+          }
+        } catch (error) {
+          if (
+            gen !== generation ||
+            reader !== control ||
+            error.name === 'AbortError' ||
+            error.code === 'SESSION_CHANGED'
+          )
+            return;
+          if (!pending && !submitting) {
+            discovery = { candidate: null, available: false, error: { message: error.message } };
+            checkFailures++;
+            nextCheckAt = Date.now() + failureDelay();
+            accessDenied = [401, 403, 404].includes(error.status);
+            note = accessDenied
+              ? '更新检查不可用，已停止自动检查，可手动刷新状态。'
+              : '检查正式发布失败，请稍后重试。';
+          }
+        } finally {
+          if (gen === generation) discovering = false;
+        }
       }
       const awaiting = refreshAfterUpdate();
       watching = !!(
@@ -328,27 +607,77 @@ window.CodePierPanelUpdate = (() => {
         error.code === 'SESSION_CHANGED'
       )
         return;
-      note = '连接暂时中断，正在恢复更新进度。不会自动重复提交更新。';
+      statusFailed = true;
+      accessDenied = [401, 403, 404].includes(error.status);
+      note = accessDenied
+        ? '当前会话无更新权限或服务不支持更新，已停止自动检查，可手动刷新状态。'
+        : '连接暂时中断，正在恢复更新进度。不会自动重复提交更新。';
       paint();
       schedule(4000);
     } finally {
       if (reader === control) reader = null;
     }
+    if (
+      continueIntent &&
+      gen === generation &&
+      !pending &&
+      !submitting &&
+      hostMatches(continueIntent)
+    )
+      await submit('apply', false, false, true, continueIntent);
   }
-  async function submit(action, reuse = false) {
-    if (submitting || (!reuse && pending) || !data?.enabled) return;
+  function shouldDiscover() {
+    if (
+      awaitingVersion() ||
+      document.hidden ||
+      !data?.enabled ||
+      data.busy ||
+      data.recovery_required ||
+      pending ||
+      submitting ||
+      accessDenied
+    )
+      return false;
+    const checked = Number(discovery?.checked_at || data.candidate?.checked_at) * 1000;
+    const fresh = checked > 0 && Date.now() >= checked && Date.now() - checked < checkTTL;
+    return !fresh && Date.now() >= nextCheckAt;
+  }
+  async function submit(action, reuse = false, automatic = false, direct = false, intent = null) {
+    if (
+      awaitingVersion() ||
+      !S.session?.instance_admin ||
+      accessDenied ||
+      submitting ||
+      (!reuse && pending) ||
+      !data?.enabled ||
+      data.busy ||
+      data.recovery_required
+    )
+      return;
     const gen = generation;
     if (!reuse) {
+      intentNote = '';
       if (action === 'apply') {
-        if (!data.update_available || data.busy || data.recovery_required) return;
-        const c = data.candidate;
-        const updateAgents = $('#panel-update-agents')?.checked === true;
+        if (intent ? !hostMatches(intent) : !canApply()) return;
+        const c = intent || availableCandidate();
+        if (!c) return;
+        const updateAgents = direct ? intent?.update_agents === true : agentConsent;
         if (
+          !direct &&
           !confirm(
             `从 ${data.repository} 更新到 ${c.version}？\n包含面板、Hub 和 Agent 分发文件。${updateAgents ? '健康检查成功后自动更新当前空间已授权受管 Agent，忙节点等待任务结束，离线节点重连后继续。' : '本次不自动更新 Agent。'}权限和配置保持原样。\n切换期间面板短暂维护，原数据卷保留为备份。`,
           )
         )
           return;
+        if (!hostMatches(c)) {
+          await submit('check', false, false, false, {
+            version: c.version,
+            release_id: c.release_id,
+            sha256: c.sha256,
+            update_agents: updateAgents,
+          });
+          return;
+        }
         savePending({
           action,
           body: {
@@ -360,8 +689,16 @@ window.CodePierPanelUpdate = (() => {
             update_agents: updateAgents,
           },
         });
-      } else savePending({ action, body: { idempotency_key: 'panel-check-' + uid() } });
+      } else
+        savePending({
+          action,
+          body: { idempotency_key: 'panel-check-' + uid() },
+          ...(intent ? { intent } : {}),
+        });
     }
+    if (action === 'check') nextCheckAt = Date.now() + checkTTL;
+    clearTimeout(timer);
+    timer = null;
     const request = pending;
     if (!request) return;
     submitting = true;
@@ -377,7 +714,12 @@ window.CodePierPanelUpdate = (() => {
       if (error.status >= 400 && error.status < 500) {
         savePending(null);
         note = error.message;
-        toast(error.message, true);
+        if (action === 'check') {
+          checkFailures++;
+          nextCheckAt = Date.now() + failureDelay();
+        }
+        if ([401, 403, 404].includes(error.status)) accessDenied = true;
+        if (!automatic) toast(error.message, true);
       } else if (gen === generation)
         note = '提交回执暂未收到，正在按原请求编号核实。请不要重复点击更新。';
     } finally {
@@ -388,20 +730,30 @@ window.CodePierPanelUpdate = (() => {
       }
     }
   }
-  function detach() {
-    const currentOwner = sessionOwner(S.session);
+  function detach(force = false) {
+    // Session teardown runs before S.session is cleared; it must bypass the repaint fast path.
+    const currentOwner = force ? null : sessionOwner(S.session);
     // Page repaints must not starve a live update monitor or interrupt its POST.
-    if (owner === currentOwner && S.session?.instance_admin) {
+    if (!force && owner === currentOwner && S.session?.instance_admin) {
       if (!timer && !reader && !submitting) schedule(watching ? 2000 : 30000);
       return;
     }
     generation++;
+    closeDetails(false);
+    nextCheckAt = 0;
+    checkFailures = 0;
+    discovery = null;
+    discovering = false;
+    intentNote = '';
+    accessDenied = false;
+    statusFailed = false;
+    agentConsent = true;
     clearTimeout(timer);
     timer = null;
     reader?.abort();
     reader = null;
     submitting = false;
-    if (owner !== currentOwner) {
+    if (force || owner !== currentOwner) {
       pending = null;
       watching = false;
       owner = currentOwner;
@@ -421,14 +773,12 @@ window.CodePierPanelUpdate = (() => {
     detach();
     pending = pending || restorePending();
     watching = watching || !!pending;
+    $('#panel-update-agents').onchange = (event) => setConsent(event.target.checked);
     $('#panel-update-check').onclick = () => submit('check');
     $('#panel-update-apply').onclick = () => submit('apply');
-    $('#panel-update-refresh').onclick = () => load();
+    $('#panel-update-refresh').onclick = () => load(true);
     $('#panel-update-retry').onclick = () => submit(pending?.action, true);
-    $('#panel-update-reload').onclick = () => {
-      if (!dirty() || confirm('刷新将丢弃当前页面的未保存输入，继续？'))
-        reloadPage(data?.operation);
-    };
+    $('#panel-update-reload').onclick = manualReload;
     paint();
     load();
   }

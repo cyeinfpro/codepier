@@ -216,6 +216,14 @@ def migrate(db):
     migrate_dot_chat(db)
     from hub.collaboration.dot_relay import migrate as migrate_dot_relay
     migrate_dot_relay(db)
+    from hub.collaboration.task_liveness import migrate as migrate_task_liveness
+    migrate_task_liveness(db)
+    from hub.room_scope import migrate as migrate_room_scope
+    migrate_room_scope(db)
+    from hub.collaboration.weixin_schema import migrate as migrate_weixin
+    from hub.collaboration.channel_media import migrate as migrate_channel_media
+    migrate_weixin(db)
+    migrate_channel_media(db)
     db.execute("INSERT OR REPLACE INTO meta VALUES ('collaboration_schema','3')")
 
 def migrate_chatroom(db):

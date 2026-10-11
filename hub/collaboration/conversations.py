@@ -81,6 +81,10 @@ class ConversationService:
         self.store.execute('INSERT OR IGNORE INTO conversation_projects VALUES (?,?,?)', (room['id'], room['id'], room['created']))
 
     def object(self, principal, identifier):
+        from hub.room_scope import current
+        restriction = current(self.store, principal.grant_id)
+        if restriction and restriction['conversation_id'] != identifier:
+            raise DevError('ROOM_SCOPE_CONVERSATION_DENIED', '当前连接仅属于原批准话题，不能按已知编号读取其他话题', 403)
         row = self.store.one('SELECT * FROM conversation_rooms WHERE id=? AND space_id=? AND owner_user_id=?',
                              (identifier, principal.space_id, principal.user_id))
         if not row:
@@ -88,6 +92,7 @@ class ConversationService:
         return row
 
     def visible(self, principal, conversation):
+        self.object(principal, conversation['id'])
         rows = self.store.all('''SELECT r.* FROM collaboration_rooms r JOIN conversation_projects p ON p.room_id=r.id
             WHERE p.conversation_id=? ORDER BY p.created,r.id''', (conversation['id'],))
         result = []

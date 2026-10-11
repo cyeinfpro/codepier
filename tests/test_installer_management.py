@@ -570,3 +570,211 @@ def test_local_status_alias_runs_without_any_network(installation):
     assert result.returncode == 0, result.stdout + result.stderr
     assert json.loads(result.stdout)['device_id'] == f.current['device_id']
     assert 'fixture-secret' not in result.stdout
+
+
+def panel_arguments(f, *, expected=True, hub=None, allow=None):
+    values = ['--archive', str(f.archive), '--sha256', f.sha,
+              '--hub', hub or f.current['hub_url'], '--uv', str(f.uv)]
+    if expected:
+        values += ['--expected-device', f.current['device_id']]
+    if allow is not None:
+        values += ['--allow', str(allow)]
+    return values
+
+
+def fake_upgrade_commands(f, monkeypatch, *, fail=False):
+    events = []
+    before = (f.base/'config.json').read_bytes()
+    def run(command, **kwargs):
+        command = [str(value) for value in command]
+        events.append(command)
+        if '--apply-update' in command:
+            assert (f.base/'config.json').read_bytes() == before
+            if fail:
+                raise subprocess.CalledProcessError(9, command)
+            candidate = Path(command[-1])
+            shutil.rmtree(f.base/'runtime')
+            candidate.rename(f.base/'runtime')
+    monkeypatch.setattr(installer, 'run', run)
+    monkeypatch.setattr(installer, 'enroll', lambda *_a: pytest.fail('same-node repair must not enroll'))
+    return events
+
+
+@pytest.mark.parametrize('ticket', [None, 'expired-install-ticket', 'rdi_unused_fixture'])
+@pytest.mark.parametrize('hub_suffix', ['', '/'])
+def test_same_node_panel_install_reuses_pairing_without_fresh_inputs(
+        installation, monkeypatch, ticket, hub_suffix):
+    f = installation
+    before = (f.base/'config.json').read_bytes()
+    events = fake_upgrade_commands(f, monkeypatch)
+    monkeypatch.delenv('CODEPIER_INSTALL_TOKEN', raising=False)
+    monkeypatch.delenv('RELAY_INSTALL_TOKEN', raising=False)
+    if ticket is not None:
+        monkeypatch.setenv('CODEPIER_INSTALL_TOKEN', ticket)
+    invoke(monkeypatch, f, *panel_arguments(f, hub=f.current['hub_url']+hub_suffix))
+    assert (f.base/'config.json').read_bytes() == before
+    assert any('--apply-update' in command for command in events)
+    assert not any('init' in command for command in events)
+    assert not (f.base/'.install.lock').exists()
+    assert 'CODEPIER_INSTALL_TOKEN' not in installer.os.environ
+    assert 'RELAY_INSTALL_TOKEN' not in installer.os.environ
+
+
+def test_same_node_install_preserves_existing_roots_and_shell(installation, monkeypatch):
+    f = installation
+    before = (f.base/'config.json').read_bytes()
+    fake_upgrade_commands(f, monkeypatch)
+    invoke(monkeypatch, f, *panel_arguments(f, allow=f.home/'missing-new-root'),
+           '--shell', 'disabled')
+    assert (f.base/'config.json').read_bytes() == before
+
+
+def test_same_node_failure_preserves_config_and_runtime(installation, monkeypatch):
+    f = installation
+    before = (f.base/'config.json').read_bytes()
+    (f.base/'runtime/original-marker').write_text('preserve')
+    fake_upgrade_commands(f, monkeypatch, fail=True)
+    with pytest.raises(subprocess.CalledProcessError):
+        invoke(monkeypatch, f, *panel_arguments(f))
+    assert (f.base/'config.json').read_bytes() == before
+    assert (f.base/'runtime/original-marker').read_text() == 'preserve'
+    assert not list(f.base.glob('.runtime-update-cli-*'))
+    assert not (f.base/'.install.lock').exists()
+
+
+@pytest.mark.parametrize('action', [[], ['--upgrade']])
+@pytest.mark.parametrize('expected', [True, False])
+def test_other_hub_refused_before_any_command_or_lock(installation, monkeypatch, action, expected):
+    f = installation
+    before = (f.base/'config.json').read_bytes()
+    monkeypatch.setattr(installer, 'run', lambda *_a, **_k: pytest.fail('must not run commands'))
+    monkeypatch.setattr(installer, 'enroll', lambda *_a: pytest.fail('must not redeem ticket'))
+    with pytest.raises(ValueError, match='different panel|different Hub'):
+        invoke(monkeypatch, f, *action, *panel_arguments(f, expected=expected, hub='https://other.invalid'))
+    assert (f.base/'config.json').read_bytes() == before
+    assert not (f.base/'.install.lock').exists()
+
+
+def test_other_node_refused_before_commands(installation, monkeypatch):
+    f = installation
+    monkeypatch.setattr(installer, 'run', lambda *_a, **_k: pytest.fail('must not run commands'))
+    with pytest.raises(ValueError, match='different panel node') as caught:
+        invoke(monkeypatch, f, *panel_arguments(f, expected=False), '--expected-device', 'other-node')
+    assert f.current['device_id'] in str(caught.value)
+    assert 'original node' in str(caught.value)
+    assert f.current['secret'] not in str(caught.value)
+    assert not (f.base/'.install.lock').exists()
+
+
+def test_without_expected_node_keeps_ticket_identity_check(installation, monkeypatch):
+    f = installation
+    before = (f.base/'config.json').read_bytes()
+    monkeypatch.setenv('CODEPIER_INSTALL_TOKEN', 'rdi_fixture')
+    monkeypatch.setattr(installer, 'run', lambda *_a, **_k: None)
+    monkeypatch.setattr(installer, 'local_upgrade', lambda *_a, **_k: pytest.fail('unverified reuse'))
+    calls = []
+    def enroll(hub, ticket, expected):
+        calls.append((hub, expected))
+        return {**f.current, 'device_id': 'other-node'}
+    monkeypatch.setattr(installer, 'enroll', enroll)
+    with pytest.raises(ValueError, match='another device'):
+        invoke(monkeypatch, f, *panel_arguments(f, expected=False, allow=f.project))
+    assert calls == [(f.current['hub_url'], f.current['device_id'])]
+    assert (f.base/'config.json').read_bytes() == before
+
+
+def test_missing_secret_does_not_silently_reuse_pairing(installation, monkeypatch):
+    f = installation
+    current = dict(f.current)
+    current.pop('secret')
+    (f.base/'config.json').write_text(json.dumps(current))
+    monkeypatch.delenv('CODEPIER_INSTALL_TOKEN', raising=False)
+    monkeypatch.delenv('RELAY_INSTALL_TOKEN', raising=False)
+    monkeypatch.setattr(installer, 'local_upgrade', lambda *_a, **_k: pytest.fail('unpaired reuse'))
+    with pytest.raises(ValueError, match='Invalid installation ticket'):
+        invoke(monkeypatch, f, *panel_arguments(f, allow=f.project))
+
+
+@pytest.mark.parametrize('problem', ['foreign-service', 'unmanaged'])
+def test_pairing_reuse_does_not_bypass_service_ownership(installation, monkeypatch, problem):
+    f = installation
+    if problem == 'foreign-service':
+        f.service.write_text('WorkingDirectory=/another/agent\n')
+    else:
+        f.service.unlink()
+        metadata = json.loads((f.base/'management.json').read_text())
+        metadata.update(service=False, service_kind='none', service_scope='none')
+        (f.base/'management.json').write_text(json.dumps(metadata))
+    monkeypatch.setattr(installer, 'run', lambda *_a, **_k: pytest.fail('unverified service'))
+    with pytest.raises(ValueError, match='different Agent|scope does not match|not a managed'):
+        invoke(monkeypatch, f, *panel_arguments(f))
+    assert not (f.base/'.install.lock').exists()
+
+
+def test_corrupt_existing_config_refused_without_commands(installation, monkeypatch):
+    f = installation
+    (f.base/'config.json').write_text('{bad json')
+    monkeypatch.setattr(installer, 'run', lambda *_a, **_k: pytest.fail('corrupt config'))
+    with pytest.raises(ValueError):
+        invoke(monkeypatch, f, *panel_arguments(f))
+    assert (f.base/'config.json').read_text() == '{bad json'
+    assert not (f.base/'.install.lock').exists()
+
+
+def test_windows_bootstrap_reuse_preflight_precedes_download():
+    text = (ROOT/'deploy/install-from-hub.ps1').read_text()
+    assert '$ReuseExistingPairing = $false' in text
+    assert '$ExistingConfigValue.hub_url' in text
+    assert "if ($Action -eq 'install' -and -not $ReuseExistingPairing)" in text
+    assert text.index('$ReuseExistingPairing = $false') < text.index('Preparing private Python installer')
+    assert 'select its original node' in text
+
+
+@pytest.mark.parametrize('status', ['service_pending', 'service_error'])
+def test_owned_windows_pending_runtime_is_replaced_before_starting_old_code(
+        installation, monkeypatch, status):
+    f = installation
+    monkeypatch.setattr(installer.sys, 'platform', 'win32')
+    monkeypatch.setattr(installer, 'service_identity', lambda: ('schtasks', 'user'))
+    monkeypatch.setattr(installer.shutil, 'which', lambda name: None)
+    old_python = f.base/'runtime/.venv/Scripts/python.exe'
+    old_python.parent.mkdir(parents=True)
+    old_python.touch()
+    old_python.with_name('pythonw.exe').touch()
+    raw = installer.windows_task_xml(f.base, old_python, 'CodePierAgent', 'S-1-5-21-123')
+    (f.base/'service.xml').write_bytes(raw)
+    metadata = json.loads((f.base/'management.json').read_text())
+    metadata.update(service_kind='schtasks', service_scope='user', status=status)
+    (f.base/'management.json').write_text(json.dumps(metadata))
+    # A paired, registered installation can have damaged old runtime files.
+    old_python.unlink()
+    (f.base/'runtime/agent/__main__.py').unlink()
+    monkeypatch.setattr(installer, 'query_windows_task_xml', lambda name: raw.decode('utf-16'))
+    monkeypatch.setattr(installer, 'resume_windows_service_install',
+                        lambda *_a: pytest.fail('must not try to boot broken old runtime'))
+    starts = []
+    monkeypatch.setattr(installer, 'start_service', lambda base, python: starts.append(base))
+    before = (f.base/'config.json').read_bytes()
+    events = fake_upgrade_commands(f, monkeypatch)
+    invoke(monkeypatch, f, *panel_arguments(f))
+    assert (f.base/'config.json').read_bytes() == before
+    assert (f.base/'runtime/agent/__main__.py').is_file()
+    assert 'service_watchdog' in (f.base/'runtime/run-service.py').read_text()
+    assert starts == [f.base]
+    assert any('--apply-update' in command for command in events)
+
+
+def test_unregistered_incomplete_pending_runtime_is_not_blindly_overwritten(
+        installation, monkeypatch):
+    f = installation
+    monkeypatch.setattr(installer.sys, 'platform', 'win32')
+    monkeypatch.setattr(installer, 'service_identity', lambda: ('schtasks', 'user'))
+    metadata = json.loads((f.base/'management.json').read_text())
+    metadata.update(service_kind='schtasks', service_scope='user', status='service_error')
+    (f.base/'management.json').write_text(json.dumps(metadata))
+    monkeypatch.setattr(installer, 'run', lambda *_a, **_k: pytest.fail('no verified registration'))
+    before = (f.base/'config.json').read_bytes()
+    with pytest.raises(ValueError, match='incomplete runtime'):
+        invoke(monkeypatch, f, *panel_arguments(f))
+    assert (f.base/'config.json').read_bytes() == before
+    assert not list(f.base.glob('.runtime-update-cli-*'))

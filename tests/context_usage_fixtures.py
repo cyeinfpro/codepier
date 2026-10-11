@@ -5,7 +5,7 @@ from hub.context_usage import context_usage
 from shared.token_estimate import summarize, usage
 
 
-def synthetic_dashboard(percent=90, model="gpt-6-astra", authority="context-fixture"):
+def synthetic_dashboard(percent=95, model="gpt-6-astra", authority="context-fixture"):
     def metric(n):
         return dict(state="available", estimated_tokens=n, low=n, high=n,
                     characters=n, utf8_bytes=n, source_truncated=False, truncated=False)

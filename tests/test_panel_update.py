@@ -25,6 +25,7 @@ from fastapi.testclient import TestClient
 
 from hub.auth import Auth
 from hub.panel_update import UpdaterClient, make_panel_update_router
+import hub.panel_update as panel
 from hub.store import Store
 from scripts import panel_update_source as source
 from scripts import panel_updater as updater
@@ -475,3 +476,168 @@ def test_legacy_host_apply_then_new_hub_preserves_no_agent_authority(tmp_path,mo
                     assert store.all('SELECT * FROM panel_agent_rollouts')==[]
             finally:
                 server.shutdown();thread.join(timeout=3);store.close()
+
+
+class LegacyBridge:
+    def __init__(self, manager):
+        self.manager = manager
+
+    async def request(self, method, path, body=None):
+        assert (method, path, body) == ('GET', '/status', None)
+        return self.manager.status()
+
+
+def test_discovery_does_not_consume_jobs_receipts_or_audit(tmp_path, monkeypatch):
+    manager, release = manager_fixture(tmp_path)
+    (manager.home / 'candidate.json').unlink()
+    calls = []
+    monkeypatch.setattr(panel, 'latest_release', lambda repo: calls.append(repo) or copy.deepcopy(release))
+    app, store = make_auth_app(tmp_path, LegacyBridge(manager))
+    def reject_audit(*args, **kwargs):
+        pytest.fail('Automatic discovery must not append audit operations')
+    monkeypatch.setattr(store, 'audit', reject_audit)
+    def snapshot():
+        return {str(p.relative_to(manager.home)): p.read_bytes()
+                for p in manager.home.rglob('*') if p.is_file()}
+    before = snapshot()
+    try:
+        with TestClient(app) as client:
+            assert client.get('/api/panel-update/available').status_code == 401
+            assert calls == []
+            client.cookies.set('rd_session', 'cookie')
+            for _ in range(1001):
+                response = client.get('/api/panel-update/available')
+                assert response.status_code == 200
+            data = response.json()
+            assert data['discovery_available'] is True
+            assert data['discovery_candidate'] == release
+            assert data['discovery_checked_at'] == release['checked_at']
+            assert data['discovery_error'] is None
+            assert data['candidate'] is None and data['operation'] is None
+            assert calls == [source.DEFAULT_REPOSITORY]
+            for query in ['repository=evil/repo', 'url=https://evil.invalid']:
+                assert client.get('/api/panel-update/available?' + query).status_code == 400
+            assert len(calls) == 1
+            assert store.all('SELECT * FROM panel_update_consents') == []
+            assert store.all('SELECT * FROM panel_agent_rollouts') == []
+    finally:
+        store.close()
+    assert before == snapshot()
+    assert list((manager.home / 'jobs').iterdir()) == []
+    assert list((manager.home / 'keys').iterdir()) == []
+
+
+def test_discovery_singleflight_cancellation_refresh_and_copy(monkeypatch):
+    calls, entered, released = [], threading.Event(), threading.Event()
+    def fetch(repo):
+        calls.append(repo)
+        entered.set()
+        assert released.wait(5)
+        return {'version': TARGET, 'checked_at': 42}
+    monkeypatch.setattr(panel, 'latest_release', fetch)
+    async def scenario():
+        cache = panel.ReleaseDiscovery()
+        first = asyncio.create_task(cache.get('owner/project'))
+        assert await asyncio.to_thread(entered.wait, 5)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        peers = [asyncio.create_task(cache.get('owner/project')) for _ in range(30)]
+        await asyncio.sleep(0)
+        released.set()
+        values = await asyncio.gather(*peers)
+        assert len(calls) == 1
+        values[0]['discovery_candidate']['version'] = '0.0.0'
+        assert (await cache.get('owner/project'))['discovery_candidate']['version'] == TARGET
+        cache.expires = 0
+        await cache.get('owner/project')
+        assert len(calls) == 2
+        await cache.get('owner/other')
+        assert calls[-1] == 'owner/other'
+        assert cache.repository == 'owner/other' and cache.ttl == 300
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('error', [
+    source.UpdateError('NO_RELEASE', 'No stable release', 502),
+    source.UpdateError('GITHUB_UNAVAILABLE', 'Rate limited', 502),
+    RuntimeError('private internal details'),
+])
+def test_discovery_failure_backoff_never_means_latest(monkeypatch, error):
+    calls = []
+    def fetch(repo):
+        calls.append(repo)
+        raise error
+    monkeypatch.setattr(panel, 'latest_release', fetch)
+    async def scenario():
+        cache = panel.ReleaseDiscovery()
+        for _ in range(20):
+            value = await cache.get('owner/project')
+            assert value['discovery_candidate'] is None
+            assert value['discovery_checked_at'] is None
+            assert value['discovery_error']
+            assert 'private internal details' not in str(value)
+        assert len(calls) == 1
+        cache.expires = 0
+        await cache.get('owner/project')
+        assert len(calls) == 2
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('mode', ['busy', 'recovery_required', 'disabled', 'unavailable', 'missing_repository', 'invalid_repository'])
+def test_discovery_preserves_host_state_and_skips_unsafe_sources(tmp_path, monkeypatch, mode):
+    manager, _ = manager_fixture(tmp_path)
+    operation = {'id': 'original', 'kind': 'check', 'state': 'running' if mode == 'busy' else 'recovery_required'}
+    calls = []
+    monkeypatch.setattr(panel, 'latest_release', lambda repo: calls.append(repo))
+    data = {**manager.status(), 'operation': operation}
+    if mode in {'busy', 'recovery_required'}:
+        data[mode] = True
+    elif mode == 'missing_repository':
+        data.pop('repository')
+    elif mode == 'invalid_repository':
+        data['repository'] = 'https://evil.invalid'
+    class Bridge:
+        async def request(self, method, path, body=None):
+            assert (method, path) == ('GET', '/status')
+            if mode in {'disabled', 'unavailable'}:
+                raise panel.DevError('UPDATER_NOT_CONFIGURED' if mode == 'disabled' else 'UPDATER_UNAVAILABLE',
+                                     'Unavailable', 503)
+            return copy.deepcopy(data)
+    app, store = make_auth_app(tmp_path, Bridge())
+    try:
+        with TestClient(app) as client:
+            client.cookies.set('rd_session', 'cookie')
+            response = client.get('/api/panel-update/available')
+            assert response.status_code == 200
+            value = response.json()
+            assert value['discovery_available'] is False and value['discovery_candidate'] is None
+            if mode in {'disabled', 'unavailable'}:
+                assert value['enabled'] is False and value['code'].startswith('UPDATER_')
+            else:
+                assert value['operation'] == operation
+            if mode in {'missing_repository', 'invalid_repository'}:
+                assert value['discovery_error']['code'] == 'INVALID_REPOSITORY'
+            assert calls == []
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize('version,available', [(panel.VERSION, False), ('0.0.0', False), (TARGET, True)])
+def test_discovery_version_comparison_and_host_repository(tmp_path, monkeypatch, version, available):
+    manager, release = manager_fixture(tmp_path)
+    original = manager.status()['candidate']
+    manager.config['repository'] = 'trusted/project'
+    release.update(version=version, repository='trusted/project')
+    calls = []
+    monkeypatch.setattr(panel, 'latest_release', lambda repo: calls.append(repo) or copy.deepcopy(release))
+    app, store = make_auth_app(tmp_path, LegacyBridge(manager))
+    try:
+        with TestClient(app) as client:
+            client.cookies.set('rd_session', 'cookie')
+            value = client.get('/api/panel-update/available').json()
+            assert value['discovery_available'] is available
+            assert calls == ['trusted/project']
+            assert value['candidate'] == original
+    finally:
+        store.close()

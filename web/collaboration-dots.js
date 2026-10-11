@@ -21,6 +21,7 @@ window.CodePierCollaborationDots = {
       joinInstruction,
       joinStatus,
     } = ctx;
+    const channels = window.CodePierCollaborationChannels?.create(ctx);
     let token = null,
       activeOption = 0;
     const slots = () => mentionSlots().filter((slot) => slot.task_dot);
@@ -83,6 +84,8 @@ window.CodePierCollaborationDots = {
         }
         ${task ? `<div class="cc-dot-evidence" aria-label="实际协作状态"><span>${slot.duplex ? '消息订阅' : '任务订阅'} ${transport(slot) ? '1 / 1' : '0 / 1'}</span><span>已领取 ${E(task.claim?.observed_count || 0)}</span><span>已回传 ${E(task.result?.count || 0)}</span></div>` : ''}
         <small>连接范围有效至 ${E(when(policy?.expires_at || slot.expires_at))}；不新增账号权限。</small>
+        ${slot.scope_manifest ? `<details class="cc-dot-scope-proof"><summary>${slot.scope_manifest.ordinary_tools_room_scoped ? '普通工具已按此凭据限制到房间范围' : '普通工具尚未按房间强隔离'}</summary><p>${slot.scope_manifest.connection_exceeds_selected_room ? '原连接的有效项目范围大于当前房间。请在通道与执行边界中明确收窄。' : '以上为实际连接范围；不代表宿主其他连接器也受同样限制。'}</p><p>不是操作系统沙箱。宿主持久发件箱是否安装：尚未核验。</p>${slot.scope_manifest.reason_code ? `<p>${E(slot.scope_manifest.reason_code)}</p>` : ''}</details>` : ''}
+        <p class="cc-hint">${slot.operation_timeout_seconds ? `单命令预算 ${E(slot.operation_timeout_seconds)} 秒；已开始命令在原预算内结束，失联不批准新步骤。` : '命令沿用原工作租约上限；没有自动升级长命令预算。'}</p>
         ${alive && state.snapshot.can_manage ? `<div class="cc-actions">${slot.state === 'invited' ? button('join-refresh_code', '刷新加入码', slot) : ''}${transport(slot) ? button('join-test', '测试通知链路', slot) : ''}${button('join-revoke', '移除 dot 并停止新任务', slot)}</div>` : ''}
         ${
           slot.routes?.some((route) => route.test)
@@ -137,13 +140,15 @@ window.CodePierCollaborationDots = {
         <details class="cc-dot-advanced"><summary>项目访问与执行位置（可选）</summary>
           ${field('使用范围', `<select name="access"><option value="work" ${draft.access !== 'read' ? 'selected' : ''}>沿用当前项目已有范围</option><option value="read" ${draft.access === 'read' ? 'selected' : ''}>仅使用读取权限</option></select>`)}
           ${field('执行位置', `<select name="execution_target">${candidates.map((item) => `<option value="${E(item.id)}" ${target === item.id ? 'selected' : ''} ${item.available ? '' : 'disabled'}>${E(item.label)}${item.available ? '' : '（不可用）'}</option>`).join('')}</select>`)}
+          ${defaults.includes('execute') ? field('单命令预算（秒，0 保持原租约上限）', `<input name="operation_timeout_seconds" type="number" min="0" max="86400" step="1" value="${E(draft.operation_timeout_seconds || 0)}" required>`) : ''}
+          <small>正数预算仅允许已经开始的命令在原期限内结束；重连或心跳不会延长，失联不能开始新步骤。需要已支持此协议的 Agent。</small>
           <small>加入码 30 分钟有效，原确认范围最多 7 天；可随时移除。这里调整的是访问范围，不是聊天/任务模式。</small>
         </details>
         <p class="cc-dot-consent">点击添加，即允许此 dot 在本房间收发消息，并根据你的要求使用上述已有范围。运行命令使用执行账号权限，并非项目沙箱。</p>
         <button class="btn primary" type="submit">添加 dot，生成加入码</button></form>`
           : '<p class="cc-hint">由房间管理员在启用的房间添加 dot。</p>';
       return `<section class="cc-stack cc-dots" aria-label="dot 成员"><section class="cc-card"><span class="cc-eyebrow">你的项目助手</span><h2>添加 dot，然后直接 @ 它</h2>
-        <div class="cc-dot-steps"><span><b>1</b> 添加 dot</span><span><b>2</b> 发加入码</span><span><b>3</b> 直接交流</span></div>${d.capabilities?.message_notifications ? '' : '<p class="cc-hint">事件服务尚未开启，暂不能自动唤醒 dot。已保存的消息仍会保留；管理员需开启 MCP Events。</p>'}${form}</section>${slots().map(card).join('')}</section>`;
+        <div class="cc-dot-steps"><span><b>1</b> 添加 dot</span><span><b>2</b> 发加入码</span><span><b>3</b> 直接交流</span></div>${d.capabilities?.message_notifications ? '' : '<p class="cc-hint">事件服务尚未开启，暂不能自动唤醒 dot。已保存的消息仍会保留；管理员需开启 MCP Events。</p>'}${form}</section>${channels?.card() || ''}${slots().map(card).join('')}</section>`;
     }
     function picker() {
       const dots = slots().filter(liveJoin);
@@ -192,6 +197,10 @@ window.CodePierCollaborationDots = {
       area?.focus();
     }
     async function act(action, element) {
+      if (action.startsWith('dot-channel-')) {
+        if (!channels) throw new Error('通道管理尚未加载，请刷新当前页面。');
+        return channels.act(action, element);
+      }
       if (action === 'dot-clear') {
         chat().mentions = [];
         chat().relayRecipientCleared = true;
@@ -226,6 +235,14 @@ window.CodePierCollaborationDots = {
         (target !== 'project_agent' && !capabilities.includes('execute'))
       )
         throw new Error('当前项目范围不允许这个执行位置；可以保留默认项目位置。');
+      const budget = Number(data.operation_timeout_seconds || 0);
+      if (
+        !Number.isInteger(budget) ||
+        budget < 0 ||
+        budget > 86400 ||
+        (budget > 0 && !capabilities.includes('execute'))
+      )
+        throw new Error('单命令预算需要明确执行权限；仅读取时请将预算设为0。');
       const generation = state.generation;
       const result = await mutation('dot', {
         conversation_id:
@@ -236,6 +253,7 @@ window.CodePierCollaborationDots = {
         acknowledge_unsandboxed_exec: capabilities.includes('execute'),
         confirm_tasks: true,
         duplex: true,
+        ...(budget ? { operation_timeout_seconds: budget } : {}),
       });
       if (generation !== state.generation) return { local: true };
       state.dotDraft = {};
@@ -333,6 +351,7 @@ window.CodePierCollaborationDots = {
       keydown,
       hideSuggestions,
       refreshCards,
+      clearChannels: () => channels?.clear(),
     };
   },
 };

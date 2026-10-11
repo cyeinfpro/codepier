@@ -619,7 +619,11 @@ def test_runtime_always_uses_hub_adapter_and_never_silent_legacy_fallback(monkey
     runtime = SimpleNamespace(_loop=None, store=SimpleNamespace(run=run, one=lambda *args: None), _invoke=legacy)
     monkeypatch.setattr(native, "import_native_file", adapter)
     monkeypatch.setattr(native, "inspect_native_file", adapter)
-    raw, principal = {"synthetic": True}, object()
+    # The router now validates the authenticated authority before selecting
+    # the native adapter. This routing-only fixture has no bound grant; live
+    # credential/room enforcement is exercised with a real Store in HTTP tests.
+    raw = {"synthetic": True}
+    principal = Principal('fixture-owner', 'owner-a', {'read', 'write'}, ['project-a'])
     if not enabled:
         expect_error("FILE_IMPORT_DISABLED", Runtime._invoke_async(runtime, name, raw, principal))
         assert calls == []
@@ -788,8 +792,10 @@ def test_runtime_never_falls_back_after_enabled_relay_denial(monkeypatch, name):
     monkeypatch.setenv("CODEPIER_NATIVE_FILE_RELAY", "true")
     async def denied(*args):
         raise DevError("ARTIFACT_SOURCE_DENIED", "Synthetic policy rejection", 403)
+    gate_reads = []
     async def only_gate_read(function, *args):
-        assert function is native.native_ingress_enabled
+        assert function is native.native_ingress_enabled or function.__name__ == 'authorize_ingress'
+        gate_reads.append(function.__name__)
         return function(*args)
     def forbidden_legacy(*args):
         pytest.fail("A denied relay must not fall back to node-side fetching")
@@ -797,7 +803,9 @@ def test_runtime_never_falls_back_after_enabled_relay_denial(monkeypatch, name):
         store=SimpleNamespace(run=only_gate_read, one=lambda *args: None), _invoke=forbidden_legacy)
     monkeypatch.setattr(native, "import_native_file", denied)
     monkeypatch.setattr(native, "inspect_native_file", denied)
-    expect_error("ARTIFACT_SOURCE_DENIED", Runtime._invoke_async(runtime, name, {}, object()))
+    principal = Principal('fixture-owner', 'owner-a', {'read', 'write'}, ['project-a'])
+    expect_error("ARTIFACT_SOURCE_DENIED", Runtime._invoke_async(runtime, name, {}, principal))
+    assert gate_reads == ['authorize_ingress', 'native_ingress_enabled']
 
 
 def test_actual_stream_limit_without_content_length_never_begins(relay, monkeypatch):

@@ -475,7 +475,8 @@ class EventService:
     async def tick(self):
         if self.c.clock() >= self._relay_recover_after:
             self._relay_recover_after = self.c.clock() + 5
-            await self.store.run(self.c.dot_relay.recover)
+            chat_wakes = await self.store.run(self.c.dot_relay.recover)
+            await self.store.run(lambda: self.c.task_liveness.recover(max_wakes=4 - chat_wakes))
         items = await self.store.run(self.reserve)
         await asyncio.gather(*(self.deliver(item) for item in items))
 

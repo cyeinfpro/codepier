@@ -588,6 +588,22 @@ def read_installed_config(base):
     return value
 
 
+def check_existing_panel_target(current, expected_device='', hub=''):
+    """Reject identity/Hub changes before preparing or replacing an installation."""
+    if expected_device and current['device_id'] != expected_device:
+        identity = current['device_id']
+        hint = (' Existing local device ID: '+identity+'.') if re.fullmatch(r'[A-Za-z0-9_-]{1,100}', identity) else ''
+        raise ValueError('This command belongs to a different device; a different panel node is already recorded on this computer. '
+                         'No files were changed and the ticket was not used.'+hint+
+                         ' To keep this Agent, select its original node and copy that node\'s install or upgrade command. '
+                         'To intentionally change nodes, use the Windows archive recovery command with local confirmation, '
+                         'then reinstall. Do not delete config.json.')
+    if hub and current['hub_url'].rstrip('/') != hub.rstrip('/'):
+        raise ValueError('This command belongs to a different panel (Hub); no files were changed and the ticket was not used. '
+                         'Select the original node on its original panel to upgrade. '
+                         'To intentionally move to another panel, archive the old installation with local confirmation first.')
+
+
 def validate_install_base(base):
     # Accept only the precise migration alias, never arbitrary symlinks.
     if base.name == '.remote-dev-agent' and (base.is_symlink() or getattr(base, 'is_junction', lambda: False)()) and base.resolve() == base.with_name('.codepier-agent'):
@@ -835,8 +851,16 @@ def resume_windows_service_install(base,current):
 
 
 def local_upgrade(base, args, current, *, repair_service=True):
-    resume_windows_service_install(base,current)
-    verify_service_ownership(base)
+    try:
+        verify_service_ownership(base)
+    except ValueError:
+        # An already-owned registration can update a damaged old runtime.
+        # Only an unregistered/incomplete first service setup needs resuming;
+        # never require the old executable to boot before staging its replacement.
+        if not pending_windows_install(base):
+            raise
+        resume_windows_service_install(base, current)
+        verify_service_ownership(base)
     require_idle(base, current, recover_stale_operations=getattr(args,"recover_stale_operations",False))
     before = (base/'config.json').read_bytes()
     interpreter, uv = external_python(base), find_uv(base, args.uv)
@@ -851,6 +875,8 @@ def local_upgrade(base, args, current, *, repair_service=True):
             run([uv,'venv','--relocatable','--python',interpreter,candidate/'.venv'], timeout=600)
             run([uv,'pip','install','--require-hashes','--python',python,'-r',candidate/'requirements-agent.txt'], timeout=900)
             run([python,'-c','import agent.config, agent.runner, agent.lifecycle'], cwd=candidate, timeout=60)
+            if sys.platform == 'win32' and (candidate/'agent/service_watchdog.py').is_file():
+                write_windows_wrapper(candidate)
             if (base/'config.json').read_bytes() != before:
                 raise ValueError('Configuration changed during preparation; no runtime was replaced. Retry after local edits finish.')
             require_idle(base, current, recover_stale_operations=getattr(args,"recover_stale_operations",False))
@@ -1295,19 +1321,14 @@ def main():
         raise ValueError('Invalid expected panel device identity.')
     if args.upgrade or args.uninstall:
         current=read_installed_config(base)
-    elif args.expected_device and not args.source and (base/'config.json').is_file():
+    elif (args.expected_device or args.hub) and not args.source and (base/'config.json').is_file():
         # A panel install ticket is bound to a node. Check locally before
         # touching ACLs, installing dependencies, or redeeming the ticket.
         current=read_installed_config(base)
     else:
         current=None
-    if args.expected_device and current and current['device_id']!=args.expected_device:
-        if args.upgrade or args.uninstall:
-            raise ValueError('This command belongs to a different device; no files were changed.')
-        raise ValueError('A different panel node is already recorded on this computer; no files were changed. '
-                         'For a working Agent, select its original node to repair. For a failed installation, '
-                         'use the Windows archive recovery command with local confirmation, then reinstall. '
-                         'Do not delete config.json.')
+    if current:
+        check_existing_panel_target(current, args.expected_device, args.hub)
     base.mkdir(parents=True,exist_ok=True)
     if os.name == 'nt':
         # Apply ACLs before creating any pairing/config material.
@@ -1322,6 +1343,11 @@ def main():
     python=runtime/'.venv'/('Scripts/python.exe' if os.name=='nt' else 'bin/python')
     created=False
     try:
+        if current:
+            # Recheck after acquiring the install lock; configuration can change
+            # between the early preflight and maintenance admission.
+            current = read_installed_config(base)
+            check_existing_panel_target(current, args.expected_device, args.hub)
         if args.source:
             install_source(base, args.source, args.pairing_file, args.allow, recover_stale_operations=args.recover_stale_operations, shell=args.shell);return
         if args.upgrade:
@@ -1336,6 +1362,18 @@ def main():
                               installed_version=runtime_version(runtime), status='ready', last_error='')
             install_cli_links(base)
             print('Agent service started. Check the node online state in the panel.')
+            return
+        if (current and args.expected_device and args.hub
+                and isinstance(current.get('secret'), str) and current['secret']):
+            # A command explicitly naming this paired node and Hub is an update.
+            # Keep config byte-identical: roots, shell, custom settings and the
+            # existing pairing are authoritative. No new install ticket is used.
+            if not all((args.archive, args.sha256, args.uv)):
+                raise ValueError('Incomplete installation options')
+            os.environ.pop('CODEPIER_INSTALL_TOKEN', None)
+            os.environ.pop('RELAY_INSTALL_TOKEN', None)
+            print('Existing node detected; upgrading with its saved configuration and pairing.')
+            local_upgrade(base, args, current)
             return
         if not all((args.archive,args.sha256,args.hub,args.allow,args.uv)):raise ValueError('Incomplete installation options')
         allowed=Path(args.allow).expanduser()

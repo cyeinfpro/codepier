@@ -175,6 +175,7 @@ jobs:
         env:
           ACCEPTANCE: ${{ steps.archive.outputs.root }}
           MCP_COMPAT_PYTHON: ${{ github.workspace }}/.venv-compat/bin/python
+          CODEPIER_LONG_BUDGET_TEST: "1"
         run: |
           cd "$ACCEPTANCE"
           .venv/bin/python - <<'PY'
@@ -184,7 +185,7 @@ jobs:
           for module in (agent.config, hub.config, tests.support, scripts.regression_plan):
               assert Path(module.__file__).resolve().is_relative_to(root), module.__name__
           PY
-          .venv/bin/python scripts/check_full_regression.py --output "$GITHUB_WORKSPACE/dist/ci-results" --workers 2 --timeout 1200 --shard-count 5 --shard-index ${{ matrix.shard }} --resource-shard --coverage
+          .venv/bin/python scripts/check_full_regression.py --output "$GITHUB_WORKSPACE/dist/ci-results" --workers 2 --timeout 2400 --shard-count 5 --shard-index ${{ matrix.shard }} --resource-shard --coverage
       - name: Verify archive and all extracted public files after regression
         if: always() && steps.archive.outcome == 'success'
         env:

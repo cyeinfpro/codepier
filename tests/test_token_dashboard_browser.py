@@ -60,7 +60,7 @@ def test_overview_token_filters_missing_data_and_navigation(chat_browser_pool, s
 
 
 
-def priced_dashboard(percent=90, authority='test-authority', model='gpt-6-astra'):
+def priced_dashboard(percent=95, authority='test-authority', model='gpt-6-astra'):
     def metric(n):
         return dict(state='available', estimated_tokens=n, low=n, high=n,
                     characters=n, utf8_bytes=n, source_truncated=False)
@@ -94,9 +94,9 @@ def test_compact_cost_cache_late_response_failure_and_mobile(chat_browser_pool, 
         }""", priced_dashboard())
         card = page.locator('[data-token-dashboard]')
         expect(card.locator('.is-total')).to_contain_text('52.44K')
-        expect(card.locator('.is-cost')).to_contain_text('$0.6276')
+        expect(card.locator('.is-cost')).to_contain_text('$0.6089')
         expect(card.locator('.token-pricing-details')).to_be_hidden()
-        expect(card).to_contain_text('GPT-6 Astra · 输入缓存 90% 假设')
+        expect(card).to_contain_text('GPT-6 Astra · 输入缓存 95% 假设')
         assert card.locator('.is-total strong').evaluate('(el) => el.getBoundingClientRect().height < parseFloat(getComputedStyle(el).fontSize) * 1.6')
         assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
         evidence = root / '.work/token-cost-preview'
@@ -113,7 +113,7 @@ def test_compact_cost_cache_late_response_failure_and_mobile(chat_browser_pool, 
         card.locator('[data-token-panel=settings] > summary').click()
         expect(card.locator('.token-pricing-notes > p').first).to_be_hidden()
         assumption = card.locator('[data-token-filter=cache_read_percent]')
-        expect(assumption).to_have_value('90')
+        expect(assumption).to_have_value('95')
         assumption.fill('0')
         assumption.press('Tab')
         page.wait_for_function('pending.length === 1')
@@ -180,7 +180,7 @@ def test_compact_cost_cache_late_response_failure_and_mobile(chat_browser_pool, 
         page.wait_for_function('pending.length === 7')
         page.evaluate('data => pending[6].resolve(data)', priced_dashboard(50, authority='new-authority'))
         page.wait_for_function('pending.length === 8')
-        page.evaluate('data => pending[7].resolve(data)', priced_dashboard(90, authority='new-authority'))
+        page.evaluate('data => pending[7].resolve(data)', priced_dashboard(95, authority='new-authority'))
         expect(card.locator('[data-token-filters]')).not_to_have_attribute('open', '')
         card.locator('[data-token-filters] > summary').click()
         expect(card.locator('[data-token-panel=settings]')).not_to_have_attribute('open', '')

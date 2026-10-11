@@ -57,6 +57,26 @@ def test_install_arguments_are_strict_and_shell_quoted():
         install_command('posix', 'https://hub.invalid', 'rdi_token', 'a' * 64, '/tmp', 'invalid')
 
 
+@pytest.mark.parametrize('action', ['upgrade', 'uninstall', 'archive'])
+def test_windows_maintenance_omits_install_only_arguments(action):
+    command = install_command(
+        'windows', 'https://hub.invalid', '', 'a' * 64, '', 'b' * 64,
+        action=action, expected_device='' if action == 'archive' else 'fixture-node',
+        install_dir=r"C:\Agent O'Brien")
+    assert '-Token' not in command
+    assert '-AllowRoot' not in command
+    assert '-Shell' not in command
+    assert '-Action ' + action in command
+    assert "-Hub 'https://hub.invalid'" in command
+    assert "-Sha256 '" + 'a' * 64 + "'" in command
+    assert 'b' * 64 in command
+    assert r"-InstallDir 'C:\Agent O''Brien'" in command
+    if action == 'archive':
+        assert '-ExpectedDevice' not in command
+    else:
+        assert "-ExpectedDevice 'fixture-node'" in command
+
+
 def test_package_is_deterministic_and_excludes_private_files(tmp_path):
     package_tree(tmp_path)
     (tmp_path / 'config.json').write_text('SECRET=config\n')

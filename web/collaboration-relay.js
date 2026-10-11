@@ -46,23 +46,64 @@ window.CodePierCollaborationRelay = {
     const isRelayMessage = (m) => capable() && dots.isConversationMessage(m);
     const labels = {
       saved: '已发送 · 等待 dot 接收',
-      received: '已送达 dot',
+      received: '插件已接收',
       replying: 'dot 正在回复',
       replied: '已回复',
       handled: 'dot 已确认处理',
-      working: 'dot 正在处理',
+      working: '任务处理中 · 查看执行证据',
       completed: '已完成',
       waiting_dot: '等待 dot 继续反馈',
       needs_attention: '需要关注 · 查看反馈',
       waiting_connection: '已保存 · 等待 dot 连接',
     };
+    function taskEvidence(m) {
+      const c = chat();
+      const tasks = c.relayTaskStates?.[m.id] || [];
+      const reasons = {
+        result_committed: '结果已保存',
+        original_operation_uncertain: '原操作结果待核验，请勿重复执行',
+        awaiting_result_publication: '执行已结束，等待结果回传',
+        original_operation_pending: '原操作尚未结束',
+        awaiting_consumer: '等待插件继续反馈',
+      };
+      const stamp = (value) =>
+        Number.isFinite(value)
+          ? new Date(value * 1000).toLocaleString('zh-CN', { hour12: false })
+          : '尚无回执';
+      const serverNow = Number.isFinite(c.relayServerNow)
+        ? c.relayServerNow + Math.max(0, performance.now() - c.relayReceivedAt) / 1000
+        : null;
+      return tasks
+        .map((t) => {
+          const observed =
+            (t.pending_count || t.uncertain_count) && Object.hasOwn(t, 'oldest_pending_verified_at')
+              ? t.oldest_pending_verified_at
+              : t.last_operation_verified_at;
+          const age = serverNow !== null && Number.isFinite(observed) ? serverNow - observed : null;
+          const freshness =
+            age === null || age < 0
+              ? '暂无实时状态证据'
+              : age < 45
+                ? '近期收到执行节点回执'
+                : '执行证据已过时，等待核对';
+          return `<details class="cc-task-liveness" data-work-id="${E(t.work_item_id)}"><summary>${E(reasons[t.wait_reason] || '等待核对原任务')} · ${E(freshness)}</summary>
+          <div>执行状态：${E(t.execution_state)}；结果保存：${t.delivery_state === 'committed' ? '已确认' : '待确认'}；验收：未由房主确认</div>
+          ${t.last_progress_summary ? `<div>最近进展：${E(t.last_progress_summary)}</div>` : ''}
+          <div>操作回执：${E(stamp(t.last_operation_verified_at))}；输出：${E(stamp(t.last_output_at))}</div>
+          <div>插件心跳：${E(stamp(t.last_consumer_heartbeat_at))}；节点联络：${E(stamp(t.last_node_contact_at))}</div>
+          <small>${t.scope_boundary?.ordinary_tools_room_scoped ? '普通工具已按服务器上的原凭据限制到房间范围' : '当前仅约束委托步骤，普通工具尚未按房间强隔离'}；不是操作系统沙箱。以上证据不表示模型持续在线。操作数：${E(t.operation_count)}；不确定：${E(t.uncertain_count)}</small>
+        </details>`;
+        })
+        .join('');
+    }
     function statuses(m) {
-      return (m.relay_receipts || [])
+      const badges = (m.relay_receipts || [])
         .map(
           (r) =>
             `<span class="cc-dot-receipt" data-relay-state="${E(r.state)}" title="状态来自实际插件回执，不代表模型持续在线">${E(labels[r.state] || '状态待同步')}${r.state === 'waiting_connection' ? button('dot-connect', '连接详情', { id: r.dot_id }) : ''}</span>`,
         )
         .join('');
+      return badges + taskEvidence(m);
     }
     function renderMessage(m) {
       if (!isRelayMessage(m)) return null;
@@ -78,6 +119,7 @@ window.CodePierCollaborationRelay = {
         <div class="cc-avatar ${human ? 'is-human' : ''}" aria-hidden="true">${E(name.slice(0, 1))}</div>
         <div class="cc-message-content"><div class="cc-message-meta"><strong>${E(name)}</strong><time title="${E(new Date(m.created * 1000).toLocaleString())}">${E(new Date(m.created * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }))}</time>${partial ? '<small>阶段回复</small>' : ''}</div>
         ${source}<div class="cc-rich-text cc-prose" data-rich-message="${E(m.id)}">${E(messageText(m))}</div>
+        <div class="cc-relay-attachments">${window.CodePierCollaborationChannels?.attachments(m, E) || ''}</div>
         <div class="cc-relay-delivery">${statuses(m)}</div>
         <div class="cc-relay-extra">${proof ? `<details class="cc-reply-evidence"><summary>查看执行记录</summary>${proof}</details>` : ''}</div>
         <div class="cc-message-actions">${button('reply', '回复', m)}${button('relay-copy', '复制', m)}${button('thread', '查看话题', { id: m.thread_root_id || m.id })}</div></div></article>`;
@@ -107,7 +149,12 @@ window.CodePierCollaborationRelay = {
         if (holder._chatSource === undefined) holder.replaceChildren();
         chatRichMarkdown(holder, messageText(m));
       }
-      for (const selector of ['.cc-message-meta', '.cc-relay-delivery', '.cc-relay-extra']) {
+      for (const selector of [
+        '.cc-message-meta',
+        '.cc-relay-delivery',
+        '.cc-relay-extra',
+        '.cc-relay-attachments',
+      ]) {
         const old = node.querySelector(selector),
           fresh = next.querySelector(selector);
         if (
@@ -126,7 +173,7 @@ window.CodePierCollaborationRelay = {
     }
     function toolbar() {
       return capable()
-        ? `${button('relay-management', state.relayManagement ? '专注对话' : '管理视图', {}, 'class="cc-relay-manage-toggle"')}`
+        ? `${button('relay-reconcile', '重新核对反馈', {}, 'title="只读核对当前反馈，不重发消息或领取任务"')}${button('relay-management', state.relayManagement ? '专注对话' : '管理视图', {}, 'class="cc-relay-manage-toggle"')}${state.snapshot?.can_manage && state.snapshot?.capabilities?.room_scope_v1 ? button('dot-channel-open', '通道与范围') : ''}`
         : '';
     }
     function chrome() {
@@ -375,7 +422,7 @@ window.CodePierCollaborationRelay = {
           retryTimer = setTimeout(() => void drain(c), Math.max(500, e.due - Date.now()));
       }
     }
-    async function sync() {
+    async function sync({ readOnly = false } = {}) {
       const c = chat(),
         gen = state.generation;
       if (c.relaySync) return;
@@ -394,6 +441,7 @@ window.CodePierCollaborationRelay = {
               ...c.messages.filter(
                 (m) =>
                   m.body?.dot_reply_complete === false ||
+                  (c.relayTaskStates?.[m.id] || []).some((t) => t.delivery_state !== 'committed') ||
                   (m.relay_receipts || []).some(
                     (r) =>
                       !['replied', 'completed', 'handled', 'needs_attention'].includes(r.state),
@@ -420,6 +468,15 @@ window.CodePierCollaborationRelay = {
           await recoverAccess(true);
           return;
         }
+        c.relayServerNow = result.server_now;
+        c.relayReceivedAt = performance.now();
+        c.relayTaskStates ||= {};
+        for (const id of new Set(
+          [...(result.updates || []), ...(result.items || [])].map((m) => m.id),
+        ))
+          c.relayTaskStates[id] = [];
+        for (const task of result.task_states || [])
+          (c.relayTaskStates[task.message_id] ||= []).push(task);
         c.visibility = result.visibility_token;
         c.after = result.after_cursor || c.after;
         mergeMessages([...(result.updates || []), ...(result.items || [])]);
@@ -458,9 +515,10 @@ window.CodePierCollaborationRelay = {
         }
         c.relayFailures = (c.relayFailures || 0) + 1;
         network('连接暂时中断，已发送的消息保留在服务端；正在恢复反馈。', true);
+        patchTimeline();
       } finally {
         c.relaySync = false;
-        if (c === chat() && S.page === 'collaboration') void drain(c);
+        if (!readOnly && c === chat() && S.page === 'collaboration') void drain(c);
       }
     }
     function delay() {
@@ -493,6 +551,9 @@ window.CodePierCollaborationRelay = {
       c.relayOutbox = [];
       c.relayAnchor = null;
       c.relayRecent = 0;
+      c.relayTaskStates = {};
+      c.relayServerNow = null;
+      c.relayReceivedAt = 0;
     }
     function bind(root) {
       detach();
@@ -540,6 +601,9 @@ window.CodePierCollaborationRelay = {
     }
     function action(name, node) {
       if (!name.startsWith('relay-')) return false;
+      if (name === 'relay-reconcile') {
+        void sync({ readOnly: true });
+      }
       if (name === 'relay-management') {
         state.relayManagement = !state.relayManagement;
         chrome();

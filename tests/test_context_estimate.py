@@ -35,8 +35,8 @@ class ContextReplayTests(unittest.TestCase):
     def test_cached_input_only(self):
         value = {"input_tokens": 1000, "output_tokens": 100}
         cost = reference_cost(value, input_rate=10, cached_input_rate=1, output_rate=50)
-        self.assertAlmostEqual(cost["estimated_usd"], .0069)
-        self.assertEqual(cost["estimated_cached_input_tokens"], 900)
+        self.assertAlmostEqual(cost["estimated_usd"], .00645)
+        self.assertEqual(cost["estimated_cached_input_tokens"], 950)
         self.assertIsNone(cost["actual_usage"])
         self.assertIsNone(cost["reasoning_tokens"])
 

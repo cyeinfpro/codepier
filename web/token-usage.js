@@ -462,7 +462,7 @@ window.CodePierTokenUsage = (() => {
   const filterValues = (data) => ({
     period: data.period?.key || 'today',
     ...data.filters,
-    cache_read_percent: String(data.summary?.reference_cost?.pricing?.cache_read_percent ?? 90),
+    cache_read_percent: String(data.summary?.reference_cost?.pricing?.cache_read_percent ?? 95),
     reference_model: data.summary?.reference_cost?.pricing?.model || 'gpt-6-astra',
   });
   let dashboardState = null;
@@ -492,7 +492,7 @@ window.CodePierTokenUsage = (() => {
       filters.project ||
       filters.connection ||
       filters.session ||
-      filters.cache_read_percent !== '90' ||
+      filters.cache_read_percent !== '95' ||
       filters.reference_model !== 'gpt-6-astra'
     ) {
       result = await fetcher('/api/token-usage?' + new URLSearchParams(filters));

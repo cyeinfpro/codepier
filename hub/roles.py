@@ -184,6 +184,8 @@ def principal_grant(store, principal):
 @iam.read_decision
 def require_role(store, principal, action, *, project_id=None, device_id=None, creation=None):
     """Additional gate, not a substitute for fixed scopes or Agent constraints."""
+    from hub.room_scope import require_action
+    require_action(store, principal, action, project_id=project_id, device_id=device_id)
     if iam.installed(store):
         principal = iam.live_principal(store, principal)
         if project_id is not None:

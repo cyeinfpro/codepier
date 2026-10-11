@@ -176,7 +176,7 @@ function endSession(discard = false) {
   window.CodePierCollaboration?.clear();
   window.CodePierCallLog?.clear();
   window.CodePierAccess?.detach();
-  window.CodePierPanelUpdate?.detach();
+  window.CodePierPanelUpdate?.detach(true);
   // Expiry suspends in-memory drafts, never persists message text or files.
   // Only the same authenticated account can recover them after signing in.
   const owner = sessionOwner(S.session);

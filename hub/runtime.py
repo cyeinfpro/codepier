@@ -391,7 +391,9 @@ class Runtime:
         clause, values = iam.private_sql(principal)
         clauses = [clause]
         if not principal.admin and '*' not in principal.projects:
-            clauses.append('(project_id IS NULL OR project_id IN (%s))' % (','.join('?' for _ in principal.projects) or 'NULL'))
+            from hub.room_scope import current
+            nullable = '' if current(self.store, principal.grant_id) else 'project_id IS NULL OR '
+            clauses.append('(' + nullable + 'project_id IN (%s))' % (','.join('?' for _ in principal.projects) or 'NULL'))
             values.extend(principal.projects)
         if args["project"]:
             clauses.append("project_id=?")
@@ -434,6 +436,12 @@ class Runtime:
             from hub.core_tools import invoke as invoke_core
             return await invoke_core(self, name, raw, principal)
         if name in {'download_artifact', 'inspect_file_source'}:
+            def authorize_ingress():
+                caller = refresh_principal(self.store, principal)
+                from hub.room_scope import require_tool
+                require_tool(self.store, caller, name, raw)
+                return caller
+            principal = await self.store.run(authorize_ingress)
             from hub.native_file_ingress import native_ingress_enabled, import_native_file, inspect_native_file
             if not await self.store.run(native_ingress_enabled, self.store):
                 # Disabling this entry never falls back to a different node policy.
@@ -474,6 +482,8 @@ class Runtime:
         except ValidationError as exc:
             issues = [{"field": ".".join(map(str, x["loc"])), "message": x["msg"]} for x in exc.errors()]
             raise DevError("INVALID_ARGUMENTS", json.dumps(issues, ensure_ascii=False)[:1500]) from exc
+        from hub.room_scope import require_tool
+        require_tool(self.store, principal, name, args)
         scope = required_scope(name, args)
         if scope not in principal.scopes:
             self.store.audit(principal.actor, name, status="denied", detail={"reason": "scope"})
@@ -841,6 +851,8 @@ class Runtime:
     def permission_error(self, op, request):
         try:
             caller = self.operation_principal(op, request)
+            from hub.room_scope import require_tool
+            require_tool(self.store, caller, op['tool'], request['args'])
             if op['tool'] == 'computer_session_close' and request['args'].get('force') and not caller.instance_admin:
                 return '强制关闭的面板管理员权限已撤销'
             if op['project_id']:
@@ -993,6 +1005,8 @@ class Runtime:
                     Principal(op['actor'], '', set(), [], grant_id=op['grant_id'], admin=panel))
                 denied = denied or (policy[1] if policy else None)
                 require_compatible(getattr(con, 'tool_protocol', None), op['tool'])
+                if request.get('bounded_execution') is not None and getattr(con, 'bounded_execution_protocol', 0) != 1:
+                    raise DevError('AGENT_BOUNDED_EXECUTION_REQUIRED', '当前连接不能确认原有界命令预算，禁止重投执行', 409)
             except DevError as exc:
                 denied = denied or exc.message
             expired = bool(op['deadline'] and time.time() > op['deadline'])
@@ -1099,6 +1113,8 @@ class Runtime:
             try:
                 validate_call_epoch(op['tool'], request.get('tool_contract_version'))
                 require_compatible(getattr(con, 'tool_protocol', None), op['tool'])
+                if request.get('bounded_execution') is not None and getattr(con, 'bounded_execution_protocol', 0) != 1:
+                    raise DevError('AGENT_BOUNDED_EXECUTION_REQUIRED', '当前连接不能确认原有界命令预算，禁止重投执行', 409)
             except DevError as exc:
                 if not op['attempts']:
                     self.complete(op, {'ok': False, 'error': {'code': exc.code, 'message': exc.message}})
@@ -1242,11 +1258,13 @@ class Runtime:
             self.publish("trace", {"id": id})
             return None
         if kind in {"accepted", "started"} and op["state"] in ACTIVE:
+            self.store.execute("UPDATE operations SET last_operation_verified_at=? WHERE id=?", (time.time(), id))
             state = "cancelling" if op["cancel_requested"] else "running" if kind == "started" else "queued"
             self.store.execute("UPDATE operations SET accepted_at=COALESCE(accepted_at,?),state=?,transport_error=NULL,updated=? WHERE id=?", (time.time(), state, time.time(), id))
             self.publish("operation", {"id": id, "state": state})
         elif kind == "status" and op["state"] in ACTIVE:
             if data.get("status") in {"running", "accepted"}:
+                self.store.execute("UPDATE operations SET last_operation_verified_at=? WHERE id=?", (time.time(), id))
                 state = "cancelling" if op["cancel_requested"] else "running" if data["status"] == "running" else "queued"
                 self.store.execute("UPDATE operations SET accepted_at=COALESCE(accepted_at,?),state=?,transport_error=NULL WHERE id=?", (time.time(), state, id))
             elif data.get("status") in {"missing", "retryable"}:
@@ -1269,11 +1287,16 @@ class Runtime:
             else:  # Legacy v1 Agent.
                 seq = op["output_seq"] + 1
                 output = (op["output"] + str(data.get("text", ""))[:8192])[-131072:]
-            self.store.execute("UPDATE operations SET output=?,output_seq=?,updated=? WHERE id=?", (output, seq, time.time(), id))
+            self.store.execute("UPDATE operations SET output=?,output_seq=?,updated=?,last_output_at=? WHERE id=?", (output, seq, time.time(), time.time(), id))
             self.publish("output", {"id": id})
         elif kind == "result":
             result = data.get("result")
             self.complete(op, result)
+            current = self.store.one("SELECT state FROM operations WHERE id=?", (id,))
+            if (op["state"] not in {"succeeded", "failed", "cancelled"} and current
+                    and current["state"] in {"succeeded", "failed", "cancelled"}
+                    and isinstance(result, dict) and type(result.get("ok")) is bool):
+                self.store.execute("UPDATE operations SET last_operation_verified_at=? WHERE id=?", (time.time(), id))
             return {"type": "ack", "id": id}
 
     def _heartbeat(self, device_id, connection, info, data):
@@ -1367,6 +1390,7 @@ class Runtime:
             connection.protocol = hello.get("delivery_protocol", 1)
             connection.cancel_pending_protocol = 1 if type(hello.get("cancel_pending_protocol")) is int and hello["cancel_pending_protocol"] == 1 else 0
             connection.native_protocol = 1 if hello.get("native_protocol") == 1 else 0
+            connection.bounded_execution_protocol = 1 if type(hello.get('bounded_execution_protocol')) is int and hello['bounded_execution_protocol'] == 1 else 0
             connection.scheduler_protocol = 1 if type(hello.get("scheduler_protocol")) is int and hello["scheduler_protocol"] == 1 else 0
             connection.native_chat_protocol = hello.get("native_chat_protocol") if type(hello.get("native_chat_protocol")) is int and hello["native_chat_protocol"] in (1, 2, 3) else 0
             if (type(connection.protocol) is not int or connection.protocol != 2 or
@@ -1384,6 +1408,7 @@ class Runtime:
                 info["device_actions"] = sorted(set(actions) & DEVICE_ACTIONS)
             info["management"] = public_management(hello.get("management"))
             info["cancel_pending_protocol"] = connection.cancel_pending_protocol
+            info['bounded_execution_protocol'] = connection.bounded_execution_protocol
             connection.native_security_protocol = 1 if hello.get("native_security_protocol") == 1 else 0
             info["native_security_protocol"] = connection.native_security_protocol
             info["native_protocol"] = connection.native_protocol

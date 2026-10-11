@@ -134,7 +134,7 @@ def test_short_desktop_token_states_keep_figures_notes_and_actions_reachable(sta
                     assert card.locator('.is-cost strong').inner_text().startswith('$')
                 note = card.locator('.token-dashboard-note').first
                 expect(note).to_be_visible()
-                expect(note).to_contain_text('GPT-6 Astra · 输入缓存 90% 假设')
+                expect(note).to_contain_text('GPT-6 Astra · 输入缓存 95% 假设')
                 partial = card.locator('.token-dashboard-note').filter(has_text='仅已记录部分')
                 if name == 'partial':
                     expect(partial).to_be_visible()
@@ -157,7 +157,7 @@ def test_short_desktop_token_states_keep_figures_notes_and_actions_reachable(sta
             card.locator('[data-token-panel=settings] > summary').click()
             expect(card.locator('[data-token-filter=period]')).to_be_visible()
             expect(card.locator('[data-token-filter=reference_model]')).to_be_visible()
-            expect(card.locator('[data-token-filter=cache_read_percent]')).to_have_value('90')
+            expect(card.locator('[data-token-filter=cache_read_percent]')).to_have_value('95')
             expect(card.locator('[data-token-export]')).to_be_visible()
             assert not errors
         finally:

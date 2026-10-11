@@ -129,8 +129,12 @@ def install_command(platform, hub_url, enrollment_token, package_sha256, allow_r
                 'curl --fail --silent --show-error --location --max-time 60 '
                 '--output "$codepier_install_tmp/install.sh" ' + shlex.quote(hub_url+'/agent/install.sh') +
                 bootstrap_check + ' && bash "$codepier_install_tmp/install.sh" ' + args + ')')
-    arguments = ' '.join(powershell_quote(value) for value in (hub_url, enrollment_token, package_sha256, allow_root))
     hub, ticket, sha, root = (powershell_quote(value) for value in (hub_url, enrollment_token, package_sha256, allow_root))
+    # Windows PowerShell drops empty strings at the native powershell.exe -File
+    # boundary. Maintenance does not enroll or change roots: omit these options.
+    arguments = '-Hub '+hub+' -Sha256 '+sha
+    if action == 'install':
+        arguments += ' -Token '+ticket+' -AllowRoot '+root
     maintenance = '' if action == 'install' else ' -Action '+action
     if action in ('upgrade','uninstall'):
         maintenance += ' -ExpectedDevice '+powershell_quote(expected_device)
@@ -157,7 +161,7 @@ def install_command(platform, hub_url, enrollment_token, package_sha256, allow_r
             'Invoke-WebRequest -UseBasicParsing -Uri ' + powershell_quote(hub_url+'/agent/install.ps1') +
             ' -OutFile $codepierInstallScript; '+bootstrap_check+
             '& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $codepierInstallScript '
-            '-Hub '+hub+' -Token '+ticket+' -Sha256 '+sha+' -AllowRoot '+root+maintenance+'; '
+            +arguments+maintenance+'; '
             'if ($LASTEXITCODE -ne 0) { throw \'Agent 安装失败，请查看上方错误\' } '
             '} finally { Remove-Item -LiteralPath $codepierInstallTemp -Recurse -Force } }')
 

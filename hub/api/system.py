@@ -10,6 +10,7 @@ from shared.core_contracts import CORE_TOOLS
 from shared.contracts import tool_definitions
 from hub import iam
 from shared.util import VERSION
+from shared.token_cost import DEFAULT_CACHE_READ_PERCENT
 from hub.api.models import ComputerDecision, ToolCall
 from hub.api.devices import device_rows
 from hub.api.activity import operation_rows, audit_rows
@@ -62,7 +63,7 @@ def make_system_router(context: HubContext):
                     project: str = Query(default="", max_length=128),
                     connection: str = Query(default="", max_length=128),
                     session: str = Query(default="", max_length=128),
-                    cache_read_percent: int = Query(default=90, ge=0, le=100),
+                    cache_read_percent: int = Query(default=DEFAULT_CACHE_READ_PERCENT, ge=0, le=100),
                     reference_model: str = Query(default="gpt-6-astra", max_length=64)):
         return token_dashboard(runtime, auth.panel(request), config.timezone,
                                period=period, project=project, connection=connection, session=session,

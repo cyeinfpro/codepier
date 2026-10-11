@@ -28,7 +28,12 @@ class CollaborationLoops:
             operations.append(('events', self.service.events.tick, 2))
         if self.service.config.collector_enabled:
             operations.append(('collector', self.service.monitor.tick, 2))
+        if self.service.config.weixin_enabled:
+            operations.extend([('weixin_poll', self.service.weixin.tick, 1),
+                               ('weixin_delivery', self.service.weixin.delivery.tick, 1),
+                               ('weixin_media', self.service.weixin.media.tick, 2)])
         for name, operation, interval in operations:
+            self.service.health.setdefault(name, {'enabled': True, 'running': False, 'reason_code': ''})
             self.tasks.append(asyncio.create_task(self.loop(name, operation, interval), name='collaboration:' + name))
 
     def wake_events(self):

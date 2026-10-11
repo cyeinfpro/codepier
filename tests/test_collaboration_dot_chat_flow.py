@@ -54,7 +54,9 @@ def test_panel_chat_proactive_dot_thread_reply_restart_and_no_task(
         assert len(sent) == 1 and not sent[0].get('delegation') and not sent[0].get('dispatch_mode')
         call(stack, first['ack_request'])
         refresh(page)
-        expect(page.locator('.cc-dot-receipt[data-relay-state="received"]')).to_have_text('已送达 dot')
+        receipt = page.locator('.cc-dot-receipt[data-relay-state="received"]')
+        expect(receipt).to_have_text('插件已接收')
+        expect(receipt).to_have_attribute('title', '状态来自实际插件回执，不代表模型持续在线')
         response = {'action': 'dot_message', **first['reply_arguments'], 'body_text': '你更重视速度，还是界面？'}
         replied = mcp(stack, 'collaboration', response)
         assert mcp(stack, 'collaboration', response)['message']['id'] == replied['message']['id']

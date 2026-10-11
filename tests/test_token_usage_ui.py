@@ -298,9 +298,9 @@ def test_loaded_cost_merges_rows_once_and_never_adds_cache_tokens():
     a, b = row(), row(2)
     result = run_js('summarize', [a, b, a])
     assert result['total']['estimated_tokens'] == 30
-    assert result['reference_cost']['amount_nano_usd'] == 538000
+    assert result['reference_cost']['amount_nano_usd'] == 529000
     assert '约 30' in run_js('summary', [a, b])
-    assert '90%' in run_js('summary', [a, b])
+    assert '95%' in run_js('summary', [a, b])
     b['token_usage']['reference_cost']['version'] = 'other-pricing'
     assert run_js('summarize', [a, b])['reference_cost'] is None
 
@@ -309,9 +309,9 @@ def test_dashboard_reference_scope_and_cache_assumption_are_in_details():
     html = run_js('dashboard', dashboard_payload())
     visible, details = html.split('<details data-token-filters', 1)
     assert '工具文本 Token' in visible and '约 15' in visible and '$0.0003' in visible
-    assert 'MCP 请求参数' not in visible and '90% 假设' in visible
+    assert 'MCP 请求参数' not in visible and '95% 假设' in visible
     assert 'GPT-6 Astra' in visible
-    assert 'cache_read_percent' in details and 'value="90"' in details
+    assert 'cache_read_percent' in details and 'value="95"' in details
     assert '不是实测缓存命中率' in details and '缓存写入' in details
     assert '2026-10-10' in details and 'developers.openai.com' in details
     assert 'Standard API' in details and '272K' in details
@@ -353,7 +353,7 @@ def test_export_preserves_assumptions_and_only_current_authorized_aggregates():
     exported = run_js('exportJSON', data)
     parsed = json.loads(exported)
     assert parsed['kind'] == 'mcp_tool_text_reference_estimate'
-    assert parsed['summary']['reference_cost']['pricing']['cache_read_percent'] == 90
+    assert parsed['summary']['reference_cost']['pricing']['cache_read_percent'] == 95
     assert parsed['summary']['reference_cost']['pricing']['model'] == 'gpt-6-astra'
     assert parsed['summary']['actual_usage'] is None
     assert 'must-not-export' not in exported and 'private-authority' not in exported
@@ -364,7 +364,7 @@ def test_dashboard_essential_context_limit_remains_outside_collapsed_details():
     html = run_js('dashboard', dashboard_payload())
     visible, details = html.split('<details data-token-filters', 1)
     assert '未包含完整对话上下文，非实际账单。' in visible
-    assert '1 次调用' in visible and '90% 假设' in visible
+    assert '1 次调用' in visible and '95% 假设' in visible
     assert '<span>总 Token</span>' not in visible
     assert 'Unicode' not in visible and '272K' not in visible
     assert 'data-token-filter=' not in visible and 'data-token-export' not in visible

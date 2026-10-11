@@ -449,8 +449,8 @@ class CoordinationService:
                 attempt, fence = item['attempt'] + 1, item['fencing_token'] + 1
                 until = min(goal['expires_at'], now + spec['budget']['lease_seconds'])
                 self.store.execute("""UPDATE coordination_work SET state='leased',attempt=?,fencing_token=?,
-                    lease_until=?,version=version+1,reason_code='',updated=? WHERE id=?""",
-                    (attempt, fence, until, now, item['id']))
+                    lease_until=?,version=version+1,reason_code='',updated=?,last_consumer_contact_at=? WHERE id=?""",
+                    (attempt, fence, until, now, now, item['id']))
                 self.store.execute('INSERT INTO coordination_attempts VALUES (?,?,?,?,?)',
                     (item['id'], attempt, fence, principal.grant_id, now))
                 self.c.delegation.project_progress(room, goal, self.work(goal, item['id']),
@@ -461,7 +461,7 @@ class CoordinationService:
 
     def pending_operations(self, item):
         return self.store.one("""SELECT 1 FROM coordination_operations c JOIN operations o ON o.id=c.operation_id
-            WHERE c.work_item_id=? AND o.state IN ('queued','running','reconnecting','cancelling','unknown') LIMIT 1""", (item['id'],))
+            WHERE c.work_item_id=? AND o.state NOT IN ('succeeded','failed','cancelled') LIMIT 1""", (item['id'],))
 
     def lease(self, principal, goal, args):
         item = self.work(goal, args['work_item_id'])
@@ -481,7 +481,7 @@ class CoordinationService:
             def extend():
                 item = self.lease(principal, goal, args)
                 until = min(goal['expires_at'], self.c.clock() + json.loads(goal['spec'])['budget']['lease_seconds'])
-                self.store.execute('UPDATE coordination_work SET lease_until=?,updated=? WHERE id=?', (until, self.c.clock(), item['id']))
+                self.store.execute('UPDATE coordination_work SET lease_until=?,updated=?,last_consumer_heartbeat_at=?,last_consumer_contact_at=? WHERE id=?', (until, self.c.clock(), self.c.clock(), self.c.clock(), item['id']))
                 return {'work_item': self.work_view(self.work(goal, item['id']))}
             return self.mutation(principal, room, 'work_heartbeat', args, extend)
 
@@ -499,13 +499,20 @@ class CoordinationService:
                 identifier = 'delegation-progress:' + digest([goal['id'], item['id'], item['attempt'], args['idempotency_key']])
                 self.c.delegation.project_progress(room, goal, item, args['summary'], principal, identifier)
                 until = min(goal['expires_at'], self.c.clock() + budget['lease_seconds'])
-                self.store.execute('UPDATE coordination_work SET lease_until=?,updated=? WHERE id=?', (until, self.c.clock(), item['id']))
+                summary = redact(args['summary'])
+                changed = ' '.join(summary.split()) != ' '.join(item.get('last_progress_summary', '').split())
+                progress_at = self.c.clock() if changed else item.get('last_progress_at')
+                self.store.execute('UPDATE coordination_work SET lease_until=?,updated=?,last_consumer_heartbeat_at=?,last_progress_at=?,last_progress_summary=?,last_consumer_contact_at=? WHERE id=?', (until, self.c.clock(), self.c.clock(), progress_at, summary, self.c.clock(), item['id']))
                 self.store.execute('UPDATE coordination_goals SET messages=messages+1 WHERE id=?', (goal['id'],))
                 return {'message_id': identifier, 'work_item': self.work_view(self.work(goal, item['id']))}
             return self.mutation(principal, room, 'work_progress', args, save)
 
     def admit(self, raw, principal):
         args = validate(contracts.WorkExecute, raw)
+        if args['operation_role'] == 'required':
+            args.pop('operation_role')  # Preserve pre-extension idempotency fingerprints.
+        if not args['supersedes_operation_id']:
+            args.pop('supersedes_operation_id')
         with self.store.transaction():
             principal, room, goal = self.scope(principal, args, active=True)
             spec = json.loads(goal['spec'])
@@ -517,6 +524,18 @@ class CoordinationService:
                 item = self.lease(principal, goal, args)
                 from shared.contracts import TOOLS
                 from hub.dispatch_plan import DeferredCall
+                role = args.get('operation_role', 'required')
+                supersedes = args.get('supersedes_operation_id', '')
+                if role == 'exploratory' and args['tool'] != 'read':
+                    raise DevError('WORK_EXPLORATION_READ_ONLY', '仅只读探索可声明为可补救步骤', 422)
+                if supersedes:
+                    previous = self.store.one('''SELECT c.*,o.state,o.tool FROM coordination_operations c
+                        JOIN operations o ON o.id=c.operation_id WHERE c.operation_id=?''', (supersedes,))
+                    if (args['tool'] != 'read' or not previous or previous['operation_role'] != 'exploratory'
+                            or previous['state'] != 'failed' or previous['tool'] != 'read'
+                            or any(previous[k] != item[k] for k in ('attempt', 'fencing_token', 'project_id'))
+                            or previous['work_item_id'] != item['id'] or previous['grant_id'] != principal.grant_id):
+                        raise DevError('WORK_SUPERSESSION_DENIED', '只能关联本尝试中已明确失败的只读探索；必要或不确定操作不能降级', 409)
                 capability = TOOLS[args['tool']].scope
                 if capability not in spec['capabilities'] or capability not in json.loads(item['required_capabilities']):
                     raise DevError('GOAL_CAPABILITY_DENIED', '目标没有批准此执行能力', 403)
@@ -538,9 +557,23 @@ class CoordinationService:
                 prepared = self.runtime._invoke(args['tool'], tool_args, principal)
                 if not isinstance(prepared, DeferredCall) or prepared.action != 'dispatch':
                     raise DevError('GOAL_OPERATION_NOT_SUPPORTED', '请求不能通过已验证的项目执行路径', 422)
+                execution_budget = None
                 if args['tool'] == 'exec':
-                    remaining = max(1, int(min(item['lease_until'], goal['expires_at']) - self.c.clock()))
-                    prepared.arguments['timeout_seconds'] = min(prepared.arguments['timeout_seconds'], remaining)
+                    ceiling = spec['budget'].get('operation_timeout_seconds', 0)
+                    if ceiling:
+                        from shared.bounded_execution import make_budget
+                        peer = self.runtime.connections.get(prepared.project['device_id'])
+                        if (peer is None or not self.runtime.online(prepared.project['device_id'])
+                                or not self.runtime.connection_authorized(prepared.project['device_id'], peer)
+                                or getattr(peer, 'bounded_execution_protocol', 0) != 1):
+                            raise DevError('AGENT_BOUNDED_EXECUTION_REQUIRED',
+                                '当前 Agent 尚未确认有界长命令协议；未执行命令，也未把批准期限偷偷降为租约期限', 409)
+                        execution_budget = make_budget(goal, item, principal.grant_id, self.c.clock(),
+                            prepared.arguments['timeout_seconds'], ceiling)
+                        prepared.arguments['timeout_seconds'] = execution_budget['timeout_seconds']
+                    else:
+                        remaining = max(1, int(min(item['lease_until'], goal['expires_at']) - self.c.clock()))
+                        prepared.arguments['timeout_seconds'] = min(prepared.arguments['timeout_seconds'], remaining)
                     prepared.arguments['yield_seconds'] = 0
                 if self.store.one('SELECT id FROM operations WHERE space_id=? AND actor=? AND idem=?',
                                   (principal.space_id, principal.actor, prepared.arguments['idempotency_key'])):
@@ -554,11 +587,26 @@ class CoordinationService:
                     (operation_id,goal_id,work_item_id,approval_id,attempt,fencing_token,project_id,grant_id,request_digest,created)
                     VALUES (?,?,?,?,?,?,?,?,?,?)''', (operation_id, goal['id'], item['id'], goal['approval_id'],
                     item['attempt'], item['fencing_token'], item['project_id'], principal.grant_id, digest(args), self.c.clock()))
-                self.store.execute('UPDATE operations SET deadline=MIN(deadline,?) WHERE id=?', (min(item['lease_until'], goal['expires_at']), operation_id))
+                self.store.execute('UPDATE coordination_operations SET operation_role=?,supersedes_operation_id=? WHERE operation_id=?',
+                                   (role, supersedes, operation_id))
+                start_deadline = min(item['lease_until'], goal['expires_at'])
+                if execution_budget is not None:
+                    # The immutable budget travels outside model-controlled args,
+                    # is journaled by capable Agents, and is never changed by heartbeat.
+                    request = json.loads(self.store.decrypt(operation['payload']))
+                    request['bounded_execution'] = execution_budget
+                    self.store.execute('UPDATE operations SET payload=? WHERE id=?',
+                        (self.store.encrypt(canonical(request)), operation_id))
+                    self.store.execute('UPDATE coordination_operations SET execution_budget=? WHERE operation_id=?',
+                        (canonical(execution_budget), operation_id))
+                    start_deadline = min(start_deadline, execution_budget['hard_until'])
+                self.store.execute('UPDATE operations SET deadline=MIN(deadline,?) WHERE id=?', (start_deadline, operation_id))
                 self.store.execute('UPDATE coordination_goals SET steps=steps+1 WHERE id=?', (goal['id'],))
-                self.store.execute("UPDATE coordination_work SET state='running',updated=? WHERE id=?", (self.c.clock(), item['id']))
+                self.store.execute("UPDATE coordination_work SET state='running',updated=?,last_consumer_contact_at=? WHERE id=?", (self.c.clock(), self.c.clock(), item['id']))
                 return {'operation_id': operation_id, 'work_item_id': item['id'], 'attempt': item['attempt'],
-                        'project_id': item['project_id']}
+                        'project_id': item['project_id'],
+                        'deadline_policy': execution_budget or {'version': 0, 'consumer_lease_bounded': True},
+                        'consumer_lease_until': item['lease_until'], 'goal_expires_at': goal['expires_at']}
             return self.mutation(principal, room, 'work_execute', args, execute)
 
     async def execute(self, raw, principal):
@@ -584,40 +632,113 @@ class CoordinationService:
         return sorted(projects)
 
     def result(self, raw, principal):
-        args = validate(contracts.WorkResult, raw)
+        return self._result(raw, principal)
+
+    def result_v2(self, raw, principal):
+        return self._result(raw, principal, version2=True)
+
+    def archive_result(self, raw, principal):
+        # Explicit v2 opt-in preserves legacy result/archival idempotency and
+        # strict success semantics while allowing a proven repaired exploration.
+        return self._result(raw, principal, archive=True,
+                            version2=raw.get('result_schema_version') == 2)
+
+    def archive_item(self, principal, goal, args):
+        item = self.work(goal, args['work_item_id'])
+        self.version(item, args)
+        self.work_capabilities(principal, goal, item)
+        attempt = self.store.one('SELECT * FROM coordination_attempts WHERE work_item_id=? AND attempt=?',
+                                 (item['id'], args['attempt']))
+        if (not principal.grant_id or item['assignee_grant_id'] != principal.grant_id
+                or not attempt or attempt['grant_id'] != principal.grant_id):
+            raise DevError('WORK_ASSIGNEE_REQUIRED', '归档仅限原尝试的当前授权连接', 403)
+        if (item['approval_id'] != goal['approval_id'] or item['state'] != 'blocked' or item['result']
+                or item['reason_code'] != 'LEASE_EXPIRED' or item['lease_until'] is not None
+                or item['attempt'] != args['attempt'] or attempt['fencing_token'] != args['fencing_token']
+                or item['fencing_token'] != args['fencing_token'] + 1):
+            raise DevError('WORK_ARCHIVE_FENCED', '只能归档未重领、未取消的原过期尝试；不能恢复租约或回退 fencing token', 409)
+        return item
+
+    @staticmethod
+    def recovered_explorations(rows):
+        by_id, covered = {row['id']: row for row in rows}, set()
+        for row in rows:
+            if row['state'] != 'succeeded':
+                continue
+            previous, visited = row['supersedes_operation_id'], set()
+            while previous and previous not in visited:
+                visited.add(previous)
+                original = by_id.get(previous)
+                if not original or original['operation_role'] != 'exploratory' or original['state'] != 'failed':
+                    break
+                covered.add(previous)
+                previous = original['supersedes_operation_id']
+        return covered
+
+    def _result(self, raw, principal, *, version2=False, archive=False):
+        model = (contracts.WorkArchiveResultV2 if archive and version2 else contracts.WorkArchiveResult
+                 if archive else contracts.WorkResultV2 if version2 else contracts.WorkResult)
+        args = validate(model, raw)
+        action = 'work_archive_result' if archive else 'work_result_v2' if version2 else 'work_result'
         with self.store.transaction():
             principal, room, goal = self.scope(principal, args, active=True)
             def save():
-                item = self.lease(principal, goal, args)
-                rows = self.store.all('''SELECT o.id,o.state FROM coordination_operations c JOIN operations o ON o.id=c.operation_id
+                item = self.archive_item(principal, goal, args) if archive else self.lease(principal, goal, args)
+                rows = self.store.all('''SELECT o.id,o.state,c.operation_role,c.supersedes_operation_id
+                    FROM coordination_operations c JOIN operations o ON o.id=c.operation_id
                     WHERE c.work_item_id=? AND c.attempt=? AND c.fencing_token=? AND c.grant_id=? AND c.project_id=?''',
-                    (item['id'], item['attempt'], item['fencing_token'], principal.grant_id, item['project_id']))
+                    (item['id'], args['attempt'], args['fencing_token'], principal.grant_id, item['project_id']))
                 actual = {row['id']: row['state'] for row in rows}
-                if set(args['operation_ids']) != set(actual):
+                if (set(args['operation_ids']) != set(actual)
+                        or (version2 or archive) and len(args['operation_ids']) != len(actual)):
                     raise DevError('WORK_OPERATION_MISMATCH', '结果必须列出本尝试的全部真实操作，不能伪造或遗漏', 409)
                 if self.pending_operations(item):
-                    raise DevError('WORK_OPERATION_PENDING', '持久操作尚未完成；不能宣称工作结束', 409)
+                    raise DevError('WORK_OPERATION_PENDING', '持久操作尚未确定完成；不能宣称工作结束', 409)
+                if archive and not actual:
+                    raise DevError('WORK_OPERATION_REQUIRED', '过期归档需要原尝试的真实操作回执', 409)
                 if (args['outcome'] == 'succeeded' and self.c.delegation.goal_link(goal)
                         and set(json.loads(item['required_capabilities'])) & {'write', 'execute'} and not actual):
                     raise DevError('WORK_OPERATION_REQUIRED', '执行委托必须有真实操作回执，不能仅凭文字宣称完成', 409)
-                if args['outcome'] == 'succeeded' and any(state != 'succeeded' for state in actual.values()):
-                    raise DevError('WORK_OPERATION_FAILED', '失败或取消的操作不能作为成功执行结果', 409)
+                covered = self.recovered_explorations(rows) if version2 else set()
+                if args['outcome'] == 'succeeded' and any(state != 'succeeded' and identifier not in covered
+                                                        for identifier, state in actual.items()):
+                    raise DevError('WORK_OPERATION_FAILED', '必要步骤失败、取消或未被实际补救的探索不能报告为成功', 409)
                 inputs = list(dict.fromkeys([*json.loads(item['dependencies']), *args['input_work_item_ids']]))
                 provenance = self.provenance(goal, inputs, [item['project_id']])
                 body = redact({key: args[key] for key in ('outcome', 'summary', 'operation_ids', 'limitations')}) | {
                     'input_work_item_ids': inputs, 'provenance_project_ids': provenance,
                     'execution_verified': bool(actual), 'acceptance_verified_by_owner': False}
+                if version2:
+                    body.update(result_schema_version=2, acceptance_status='unverified',
+                        execution_health='recovered_failures' if covered and args['outcome'] == 'succeeded'
+                            else 'failed' if any(state != 'succeeded' for state in actual.values())
+                            else 'all_operations_succeeded' if actual else 'no_execution_receipts',
+                        operation_dispositions=[{'operation_id': row['id'], 'state': row['state'],
+                            'role': row['operation_role'], 'supersedes_operation_id': row['supersedes_operation_id'],
+                            'recovered': row['id'] in covered} for row in rows])
+                if archive:
+                    body.update(late_archive=True, original_attempt=args['attempt'],
+                                original_fencing_token=args['fencing_token'], archived_at=self.c.clock())
+                if self.c.delegation.goal_link(goal):
+                    existing = self.store.one('SELECT id FROM collaboration_messages WHERE id=?',
+                        ('delegation-result:' + item['id'] + ':' + str(item['attempt']),))
+                    if existing:
+                        raise DevError('WORK_RESULT_PROJECTION_CONFLICT', '已有原尝试结果消息，先核对持久状态，不能覆盖或忽略冲突', 409)
                 self.store.execute('''UPDATE coordination_work SET state=?,result=?,lease_until=NULL,
                     version=version+1,updated=? WHERE id=?''',
                     (args['outcome'], canonical(body), self.c.clock(), item['id']))
                 self.c.delegation.project_result(room, goal, item, body, principal)
+                if archive:
+                    self.c.audit(room, principal.actor, 'work.expired_attempt_archived', item['id'],
+                                 {'original_attempt': args['attempt'], 'original_fencing_token': args['fencing_token'],
+                                  'current_fencing_token': item['fencing_token'], 'lease_restored': False})
                 if args['outcome'] == 'succeeded':
                     for dependent in self.store.all("SELECT * FROM coordination_work WHERE goal_id=? AND approval_id=? AND state='queued'",
                                                     (goal['id'], goal['approval_id'])):
                         if item['id'] in json.loads(dependent['dependencies']):
                             self.emit_work(room, goal, dependent)
                 return {'work_item': self.work_view(self.work(goal, item['id']))}
-            return self.mutation(principal, room, 'work_result', args, save)
+            return self.mutation(principal, room, action, args, save)
 
     def message(self, raw, principal):
         args = validate(contracts.GoalMessage, raw)
@@ -727,5 +848,6 @@ class CoordinationService:
             'collaboration_goal_read': self.read, 'collaboration_work_create': self.work_create,
             'collaboration_work_assign': self.work_assign, 'collaboration_work_claim': self.work_claim,
             'collaboration_work_progress': self.progress, 'collaboration_work_heartbeat': self.heartbeat, 'collaboration_work_result': self.result,
+            'collaboration_work_archive_result': self.archive_result, 'collaboration_work_result_v2': self.result_v2,
             'collaboration_goal_message': self.message}
         return handlers[name](raw, principal)

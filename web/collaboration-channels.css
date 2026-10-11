@@ -1,0 +1,131 @@
+/* Owner controls and attachment receipts stay separate from the chat composer. */
+.cc-channel-pane,
+.cc-relay-attachments,
+.cc-channel-binding,
+.cc-channel-project {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.cc-channel-pane {
+  line-height: 1.65;
+}
+.cc-channel-pane > section {
+  border-top: 1px solid var(--ui-line);
+  margin-top: 16px;
+  padding-top: 16px;
+}
+.cc-channel-pane h3,
+.cc-channel-pane h4 {
+  margin: 6px 0;
+}
+.cc-channel-pane p {
+  margin: 8px 0;
+}
+.cc-channel-pane details {
+  margin: 12px 0;
+}
+.cc-channel-pane details > summary,
+.cc-channel-delivery > summary,
+.cc-dot-scope-proof > summary {
+  cursor: pointer;
+  padding: 10px 0;
+  font-weight: 600;
+}
+.cc-channel-pane [data-channel-form] {
+  display: grid;
+  gap: 12px;
+  padding: 12px 0;
+}
+.cc-channel-binding,
+.cc-channel-project,
+.cc-channel-file {
+  padding: 14px;
+  border: 1px solid var(--ui-line);
+  border-radius: 12px;
+  background: var(--ui-panel);
+}
+.cc-channel-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-height: 34px;
+}
+.cc-channel-check input[type='checkbox'] {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  margin-top: 4px;
+}
+.cc-channel-pane input,
+.cc-channel-pane select,
+.cc-channel-pane textarea {
+  box-sizing: border-box;
+  max-width: 100%;
+}
+.cc-channel-pane fieldset {
+  min-width: 0;
+  border: 1px solid var(--ui-line);
+  border-radius: 10px;
+}
+.cc-channel-pane legend {
+  padding: 0 8px;
+}
+.cc-channel-pane .btn,
+.cc-channel-file .btn {
+  min-height: 44px;
+  white-space: normal;
+}
+.cc-channel-file {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 8px;
+}
+.cc-channel-file > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+.cc-channel-file small,
+.cc-channel-file > span,
+.cc-channel-pane small {
+  color: var(--ui-muted);
+  font-size: 12px;
+}
+.cc-channel-delivery {
+  font-size: 13px;
+  line-height: 1.6;
+}
+.cc-channel-part {
+  padding: 4px 0;
+  overflow-wrap: anywhere;
+}
+.cc-dot-scope-proof {
+  font-size: 13px;
+  line-height: 1.6;
+}
+.cc-channel-pane :focus-visible,
+.cc-channel-file a:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 3px;
+}
+@media (max-width: 720px) {
+  .cc-channel-file {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .cc-channel-pane .cc-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+  .cc-channel-pane .btn {
+    width: 100%;
+  }
+  .cc-channel-binding,
+  .cc-channel-project {
+    padding: 12px;
+  }
+}

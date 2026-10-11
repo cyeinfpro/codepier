@@ -9,7 +9,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 VERSION = "gpt6-standard-tool-text-2026-10-10-v2"
-DEFAULT_CACHE_READ_PERCENT = 90
+DEFAULT_CACHE_READ_PERCENT = 95
 DEFAULT_REFERENCE_MODEL = "gpt-6-astra"
 NANO_USD = 1_000_000_000
 PICO_USD = 1_000_000_000_000

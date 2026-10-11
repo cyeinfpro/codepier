@@ -2,7 +2,7 @@ name: codepier
 services:
   hub:
     build: "${CODEPIER_HUB_SOURCE:-.}"
-    image: "${CODEPIER_HUB_IMAGE:-codepier:1.26.1}"
+    image: "${CODEPIER_HUB_IMAGE:-codepier:1.27.0}"
     restart: unless-stopped
     init: true
     ports:
@@ -16,6 +16,8 @@ services:
       CODEPIER_MCP_EVENTS_ENABLED: "${CODEPIER_MCP_EVENTS_ENABLED:-false}"
       CODEPIER_MONITOR_COLLECTOR_ENABLED: "${CODEPIER_MONITOR_COLLECTOR_ENABLED:-false}"
       CODEPIER_ANALYSIS_DISPATCH_ENABLED: "${CODEPIER_ANALYSIS_DISPATCH_ENABLED:-false}"
+      CODEPIER_WEIXIN_ENABLED: "${CODEPIER_WEIXIN_ENABLED:-false}"
+      CODEPIER_WEIXIN_APPROVED_API_BASES: "${CODEPIER_WEIXIN_APPROVED_API_BASES:-}"
       HUB_DATA_DIR: /app/data
       HUB_PANEL_UPDATE_SOCKET: /run/codepier-updater/updater.sock
       HUB_PORT: "8765"

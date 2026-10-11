@@ -165,8 +165,10 @@ def test_public_catalog_exposes_current_reply_and_delegation_contracts(bridge):
     assert {'collaboration_query', 'collaboration', 'collaboration_work'} <= tools.keys()
     assert len(tools) == 16
     query = tools['collaboration_query']['inputSchema']
-    assert {'timeline', 'thread', 'message_status', 'connection', 'inbox'} <= set(
-        query['discriminator']['mapping'])
+    assert {'timeline', 'thread', 'message_status', 'connection', 'inbox', 'dot_connection', 'dot_inbox'} <= set(
+        query['properties']['action']['enum'])
+    assert 'oneOf' not in query and 'discriminator' not in query
+    assert tools['collaboration_query']['_meta']['codepier/inputSchemaVersion'] == 'object-envelope-v1'
     assert tools['collaboration_query']['annotations']['readOnlyHint']
     assert not tools['collaboration_work']['annotations']['readOnlyHint']
     assert not any(name in tools for name in (

@@ -57,7 +57,8 @@ def effective_grant(store, grant):
     iam.validate_grant(store, grant)
     if grant.get('authorization_mode', 'fixed') == 'role':
         from hub.roles import effective_role
-        return effective_role(store, grant)
+        from hub.room_scope import narrow_effective
+        return narrow_effective(store, grant, *effective_role(store, grant))
     if grant.get('authorization_mode', 'fixed') != 'fixed':
         raise DevError('INVALID_TOKEN', '未知授权模式，未授予访问权限', 401)
     try:
@@ -81,7 +82,8 @@ def effective_grant(store, grant):
             owner = Principal('', grant['user_id'], set(), [], space_id=grant.get('space_id','legacy'))
             permissions = iam.project_permissions(store, owner)
             projects = [pid for pid in projects if 'read' in permissions.get(pid, ())]
-        return scopes, projects, profile
+        from hub.room_scope import narrow_effective
+        return narrow_effective(store, grant, scopes, projects, profile)
     except (ValueError, TypeError, KeyError) as exc:
         raise DevError('INVALID_TOKEN', '授权策略记录无效；未授予访问权限', 401) from exc
 
@@ -159,7 +161,14 @@ def access_context(store, principal):
     if grant.get('authorization_mode') == 'role':
         from hub.roles import role_context
         extra = role_context(store, grant)
-    return {**extra, 'space_id': principal.space_id, 'profile': identity,
+    from hub.room_scope import descriptor
+    room_scope = descriptor(store, principal)
+    if room_scope['credential_bound'] and 'project_permissions' in extra:
+        ceilings = {r['project_id']: set(r['capabilities']) for r in room_scope['project_rules']}
+        extra['project_permissions'] = [{**r, 'actions': sorted(set(r['actions']) & ceilings.get(r['id'], set()))}
+            for r in extra['project_permissions'] if r['id'] in projects and r['id'] in ceilings]
+        extra['device_rules'] = []
+    return {**extra, 'space_id': principal.space_id, 'profile': identity, 'room_scope': room_scope,
             'authorization_context_version': AUTHORIZATION_CONTEXT_VERSION, 'server_version': VERSION,
             'access_profile_managed': profile is not None, 'managed': profile is not None,
             'managed_field_meaning': 'access_profile_binding', 'authorization_domains': dict(AUTHORIZATION_DOMAINS),

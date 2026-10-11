@@ -280,7 +280,7 @@ def replay(rows, scenario=SCENARIOS[1], *, include_tail=True):
     }
 
 
-def reference_cost(value, *, input_rate, cached_input_rate, output_rate, cache_percent=90):
+def reference_cost(value, *, input_rate, cached_input_rate, output_rate, cache_percent=95):
     """Injected USD/million rates. No internet, price catalog or side effects."""
     if type(cache_percent) is not int or not 0 <= cache_percent <= 100:
         raise ValueError("Cache percentage must be an integer from 0 to 100")

@@ -281,7 +281,7 @@ class Agent:
                           "version": VERSION, "build": self.build.describe(), "platform": platform.system(), "hostname": platform.node(),
                           "python": platform.python_version(), "roots": config["allowed_roots"], "capabilities": list(TOOLS),
                           "management": self.lifecycle.describe(), "device_actions": self.lifecycle.actions(),
-                          "scheduler_protocol": 1,
+                          "scheduler_protocol": 1, "bounded_execution_protocol": 1,
                           "journal_id": self.journal.journal_id, "delivery_protocol": 2, "cancel_pending_protocol": 1, "native_security_protocol": 1, "native_protocol": 1, "native_chat_protocol": 3, **advertisement(self.build.catalog_sha256)}))
             reply = channel.unpack(await asyncio.wait_for(socket.recv(), 10))
             if reply.get("type") != "ready":
@@ -562,7 +562,12 @@ class Agent:
         execution_policy = request.get("execution_policy")
         integration_context = request.get('integration_context')
         core_ssh = request.get('core_ssh')
+        bounded_execution = request.get('bounded_execution')
         request = {k: request.get(k) for k in ("tool", "project", "args")}
+        if bounded_execution is not None:
+            # Unlike mutable transport policy, a time budget is immutable work
+            # identity: changing it under the same operation ID is a conflict.
+            request['bounded_execution'] = bounded_execution
         try:
             previous = self.journal.start(id, request)
             if previous is not None:
@@ -577,15 +582,28 @@ class Agent:
         try:
             if self.lifecycle.handoff_pending or self.lifecycle.base and (self.lifecycle.base / ".install.lock").exists():
                 raise DevError("AGENT_MAINTENANCE", "Agent 正在本机安装、升级或卸载，请完成后重试", 409)
+            if bounded_execution is not None:
+                from shared.bounded_execution import validate_budget
+                bounded_execution = validate_budget(bounded_execution)
+                if (request.get('tool') != 'exec' or not isinstance(request.get('project'), dict)
+                        or request['project'].get('id') != bounded_execution['project_id']
+                        or not isinstance(request.get('args'), dict) or request['args'].get('task')
+                        or request['args'].get('timeout_seconds') != bounded_execution['timeout_seconds']
+                        or type(not_after) not in (int, float) or not math.isfinite(not_after)
+                        or not_after > min(bounded_execution['consumer_lease_until'], bounded_execution['hard_until'])):
+                    raise DevError('BOUNDED_EXECUTION_MISMATCH', '原命令预算和首次执行身份不匹配', 409)
             self.phase(id, "accepted")
-            await self.send({"type": "accepted", "id": id})
+            await self.send({"type": "accepted", "id": id,
+                             **({'bounded_execution': bounded_execution} if bounded_execution else {})})
             tool, project, args = request["tool"], request["project"], request["args"]
             if not isinstance(tool, str) or not isinstance(project, dict) or not isinstance(args, dict):
                 raise DevError("INVALID_REQUEST", "操作必须包含 tool、project 和 args 对象")
             validate_call_epoch(tool, tool_contract_version)
             # Never accept a project/argument-supplied exemption. Legacy frames
             # without metadata still obey the independently configured local floor.
-            project = {**project, "_execution_policy": execution_policy, "_core_ssh": core_ssh, '_integration_admin': False, '_integration_owner': None, '_computer_scopes': []}
+            project = {**project, "_execution_policy": execution_policy, "_core_ssh": core_ssh,
+                       '_bounded_execution': bounded_execution,
+                       '_integration_admin': False, '_integration_owner': None, '_computer_scopes': []}
             if isinstance(integration_context, dict):
                 owner = integration_context.get('owner')
                 if not isinstance(owner, str) or not 1 <= len(owner) <= 600 or integration_context.get('device_id') != self.config['device_id']:
@@ -761,6 +779,16 @@ class Agent:
         if self.socket is socket:
             await self.send({"type":"artifact_chunk","request_id":request["request_id"],"result":result})
 
+    @staticmethod
+    def bounded_timeout(project, local_timeout):
+        budget = project.get('_bounded_execution')
+        if budget is None:
+            return local_timeout
+        from shared.bounded_execution import execution_timeout
+        remaining = execution_timeout(budget, project_id=project.get('id'),
+                                      requested_seconds=budget['timeout_seconds'], now=time.time())
+        return min(local_timeout, remaining)
+
     async def execute(self, id, tool, project, args):
         from shared.integration_contracts import REMOTE_TOOLS
         if tool == 'exec':
@@ -781,6 +809,8 @@ class Agent:
             output = result.get('output', '')
             tail = '\n'.join(output.split('\n')[-2000:]).encode('utf-8')[-50 * 1024:].decode('utf-8', errors='ignore')
             return {**result, 'output': tail, 'output_truncated': bool(result.get('output_truncated') or tail != output),
+                    **({'execution_budget': project['_bounded_execution'], 'execution_budget_enforced': True}
+                       if project.get('_bounded_execution') else {}),
                     'target': args['target'], 'resource_coordination': 'configured_task' if args['task'] else 'declared' if args['resources'] else 'independent'}
         if tool in {'read', 'write', 'edit'}:
             work = asyncio.create_task(asyncio.to_thread(CoreFiles(self.engine).call, tool, project, args))
@@ -804,7 +834,8 @@ class Agent:
             from agent.ssh import prepare_ssh, ssh_error
             root, spec = self.engine.root(project, True)
             command, env = prepare_ssh(self.config, project, spec, args)
-            result = await self.run_process(id, command, root, args['timeout_seconds'], stream=True,
+            timeout = self.bounded_timeout(project, args['timeout_seconds'])
+            result = await self.run_process(id, command, root, timeout, stream=True,
                                             task_env=env, full_access=True,
                                             inherit_env=self.config['shell']['inherit_env'], execution_project=project)
             return {**result, 'host': args['host'], 'port': args['port'], 'username': args['username'],
@@ -812,7 +843,8 @@ class Agent:
         if tool == "shell_exec":
             root, spec = self.engine.root(project, True)
             command, cwd, env = prepare_shell(self.config, project, spec, root, args)
-            result = await self.run_process(id, command, cwd, args["timeout_seconds"], stream=True,
+            timeout = self.bounded_timeout(project, args['timeout_seconds'])
+            result = await self.run_process(id, command, cwd, timeout, stream=True,
                                             task_env=env, full_access=True,
                                             inherit_env=self.config["shell"]["inherit_env"], execution_project=project)
             return {**result, "cwd": str(cwd), "shell": command[:-1]}

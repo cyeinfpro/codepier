@@ -64,12 +64,19 @@ class DotRelay:
                             received_at=COALESCE(received_at,?),handled_at=COALESCE(handled_at,?)
                             WHERE dot_id=? AND message_id=?""",
                             (self.c.clock(), self.c.clock(), dot['id'], message['reply_to_id']))
+                stored = self.c.object('collaboration_messages', room, message['id'])
+                self.c.task_liveness.record_receipt(dot, args, 'update', stored)
+                self.c.weixin.delivery.queue_reply(stored)
                 return {'message_id': message['id']}
 
             receipt = self.c.mutation(principal, room, 'dot_reply_update:' + dot['id'], args, save)
             current = self.c.object('collaboration_messages', room, receipt['message_id'])
             view = self.c.chatroom.view(current)
+            from shared.public_collaboration import request as public_request
             return {'dot_id': dot['id'], 'message': view, 'scheduled': False,
+                    'receipt_request': public_request('collaboration_dot_delivery_receipt', {
+                        'project': room['project_id'], 'environment_id': room['environment_id'], 'dot_id': dot['id'],
+                        'kind': 'update', 'request_key': args['idempotency_key']}),
                     'complete': view['body'].get('dot_reply_complete') is not False,
                     'update_arguments': self.update_arguments(room, dot, current)}
 
@@ -223,9 +230,11 @@ class DotRelay:
             # state needed for this conversation, not repeated consumer prompts.
             keys = {'id', 'dot_id', 'label', 'duplex', 'task_dot', 'kind', 'conversation_id', 'capabilities', 'execution_target', 'default_dispatch', 'state', 'status', 'version', 'expires_at', 'code_expires_at',
                     'policy_id', 'policy_version', 'blocked_reason', 'task_blocked_reason', 'task_status',
-                    'chat_status', 'subscription_count'}
+                    'chat_status', 'subscription_count', 'scope_manifest', 'operation_timeout_seconds'}
             slots = [{key: value for key, value in slot.items() if key in keys}
                      for slot in self.c.joining.list(room, principal, conversation['id'])]
-            return {**timeline, 'updates': self.c.chatroom.views(rows, principal=principal),
+            task_states = self.c.task_liveness.for_messages([*rows, *timeline.get('items', [])], principal)
+            return {**timeline, 'task_states': task_states, 'server_now': self.c.clock(),
+                    'updates': self.c.chatroom.views(rows, principal=principal),
                     'join_slots': slots, 'room_state': room['state'],
                     'can_manage': bool(principal.admin and not principal.grant_id), 'read_only': True}

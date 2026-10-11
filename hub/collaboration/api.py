@@ -1,6 +1,7 @@
 """Panel entry: authenticated sessions, current project scopes and CSRF checks."""
 from dataclasses import asdict
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Query, Request, Response
+from urllib.parse import quote
 from shared.util import DevError
 
 
@@ -18,6 +19,41 @@ def make_router(auth, runtime):
                     'delegation': service.delegation.authority_descriptor(),
                     'production_actions_enabled': False, 'platform_poc_verified': False}
         return await store.run(inspect)
+
+    @router.get('/room-scopes')
+    async def room_scopes(request: Request, project: str, environment_id: str = 'production'):
+        return await store.run(lambda: service.room_scope.listing(
+            {'project': project, 'environment_id': environment_id}, auth.panel(request)))
+
+    @router.get('/weixin')
+    async def weixin(request: Request, project: str, environment_id: str = 'production', conversation_id: str = ''):
+        return await store.run(lambda: service.weixin.listing({'project': project,
+            'environment_id': environment_id, 'conversation_id': conversation_id}, auth.panel(request)))
+
+    def attachment_actor(request):
+        # A supplied invalid Bearer token never falls back to a wider panel session.
+        principal = auth.bearer(request) if request.headers.get('authorization') else auth.panel(request)
+        if 'read' not in principal.scopes:
+            raise DevError('INSUFFICIENT_SCOPE', '附件读取需要当前只读权限', 403)
+        return principal
+
+    @router.get('/attachments/{identifier}')
+    async def attachment(request: Request, identifier: str):
+        return await store.run(lambda: service.weixin.media.public(
+            service.weixin.media.row(identifier, attachment_actor(request))))
+
+    @router.get('/attachments/{identifier}/content')
+    async def attachment_content(request: Request, identifier: str):
+        content, row, start, end, partial = await store.run(lambda: service.weixin.media.content(
+            identifier, attachment_actor(request), request.headers.get('range')))
+        headers = {'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff',
+            'Accept-Ranges': 'bytes', 'Vary': 'Authorization, Cookie', 'ETag': '"' + row['sha256'] + '"',
+            'Content-Disposition': "attachment; filename*=UTF-8''" + quote(row['name'], safe=''),
+            'Content-Security-Policy': "sandbox; default-src 'none'"}
+        if partial:
+            headers['Content-Range'] = f"bytes {start}-{end}/{row['size']}"
+        return Response(content, status_code=206 if partial else 200,
+                        media_type='application/octet-stream', headers=headers)
 
     @router.get('/conversations')
     async def conversations(request: Request):
@@ -45,6 +81,13 @@ def make_router(auth, runtime):
             'project': project, 'environment_id': environment_id,
             'conversation_id': conversation_id, 'after': after}, auth.panel(request), tracked))
 
+    @router.get('/dot-recovery')
+    async def dot_recovery(request: Request, project: str, dot_id: str, environment_id: str = 'production',
+                           cursor: str = '', limit: int = Query(default=20, ge=1, le=50), include_completed: bool = False):
+        return await store.run(lambda: service.task_liveness.recovery({
+            'project': project, 'environment_id': environment_id, 'dot_id': dot_id,
+            'cursor': cursor, 'limit': limit, 'include_completed': include_completed}, auth.panel(request)))
+
     @router.get('/delegation-connection')
     async def delegation_connection(request: Request, project: str, policy_id: str, policy_version: int,
                                     environment_id: str = 'production', mode: str = 'notification_only'):
@@ -66,6 +109,15 @@ def make_router(auth, runtime):
         def perform():
             principal = auth.admin(request, True)
             handlers = {'dot': service.dots.create,
+                        'room-scope': service.room_scope.set,
+                        'room-scope-control': service.room_scope.control,
+                        'weixin-account': service.weixin.import_account,
+                        'weixin-bind': service.weixin.bind,
+                        'weixin-control': service.weixin.control,
+                        'weixin-owner-request': service.weixin.owner_request,
+                        'weixin-files': service.weixin.media.add_artifacts,
+                        'weixin-approve-files': service.weixin.media.approve,
+                        'weixin-delivery-control': service.weixin.delivery.control,
                         'delegation-policy': service.delegation.set_policy,
                         'delegation-policy-control': service.delegation.control,
                         'delegation-remind': service.delegation.remind,

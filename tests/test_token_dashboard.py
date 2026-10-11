@@ -151,8 +151,8 @@ def test_reference_cost_api_default_adjustable_and_authority_scoped(api, monkeyp
     cost = summary['reference_cost']
     assert original['schema_version'] == 3
     assert summary['total']['estimated_tokens'] == summary['input']['estimated_tokens'] + summary['output']['estimated_tokens']
-    assert cost['amount_nano_usd'] == summary['input']['estimated_tokens'] * 50000 + summary['output']['estimated_tokens'] * 1900
-    assert cost['pricing']['cache_read_percent'] == 90
+    assert cost['amount_nano_usd'] == summary['input']['estimated_tokens'] * 50000 + summary['output']['estimated_tokens'] * 1450
+    assert cost['pricing']['cache_read_percent'] == 95
     assert cost['actual_usage'] is None
     no_cache = client.get('/api/token-usage?cache_read_percent=0').json()
     assert no_cache['summary']['total'] == summary['total']
@@ -168,7 +168,7 @@ def test_reference_cost_api_default_adjustable_and_authority_scoped(api, monkeyp
             read(app, token, cache_read_percent=invalid)
 
 
-@pytest.mark.parametrize('model,input_rate,output_rate', [('gpt-6-astra', 1900, 50000), ('gpt-6.1-sol', 290, 10000), ('gpt-6-luna', 19, 500)])
+@pytest.mark.parametrize('model,input_rate,output_rate', [('gpt-6-astra', 1450, 50000), ('gpt-6.1-sol', 195, 10000), ('gpt-6-luna', 14.5, 500)])
 def test_reference_model_api_filters_trends_and_no_store_mutation(api, monkeypatch, model, input_rate, output_rate):
     app, client, token = api
     materialize(monkeypatch, app)
@@ -183,8 +183,10 @@ def test_reference_model_api_filters_trends_and_no_store_mutation(api, monkeypat
     summary = selected['summary']
     assert summary['total'] == original['summary']['total']
     assert summary['reference_cost']['pricing']['model'] == model
-    assert summary['reference_cost']['amount_nano_usd'] == (
-        summary['input']['estimated_tokens'] * output_rate + summary['output']['estimated_tokens'] * input_rate)
+    expected_pico = int((summary['input']['estimated_tokens'] * output_rate +
+                         summary['output']['estimated_tokens'] * input_rate) * 1000)
+    assert summary['reference_cost']['amount_pico_usd'] == expected_pico
+    assert summary['reference_cost']['amount_nano_usd'] == expected_pico // 1000
     assert selected['trend'][0]['reference_cost']['pricing']['model'] == model
     assert selected['authority_key'] == original['authority_key']
     assert summary['reference_cost']['reasoning_tokens'] is None

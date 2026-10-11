@@ -138,7 +138,7 @@ class Stack:
     def login(self):
         r=self.client.post('/api/login',json={'username':'admin','password':self.password});self.must(r);self.client.headers['X-RD-CSRF']=r.json()['csrf']
     def start_hub(self):
-        self.hub=subprocess.Popen([sys.executable,'-m','hub','--data-dir',str(self.hubdir),'run','--host','127.0.0.1','--port',str(self.port)],cwd=BASE,env=self.env,stdout=self.hub_log,stderr=subprocess.STDOUT)
+        self.hub=subprocess.Popen([os.environ.get('CODEPIER_TEST_STACK_PYTHON') or sys.executable,'-m','hub','--data-dir',str(self.hubdir),'run','--host','127.0.0.1','--port',str(self.port)],cwd=BASE,env=self.env,stdout=self.hub_log,stderr=subprocess.STDOUT)
         try:
             wait_for_hub(self.hub,self.url)
         except AssertionError as exc:
@@ -150,7 +150,7 @@ class Stack:
         # Drain that connection before accepting online as the new child's readiness.
         if self.agent is not None and self.agent.poll() is not None:
             wait_for(lambda:not any(d['id']==self.device and d['online'] for d in self.client.get('/api/devices').json().get('devices',[])),timeout=16)
-        self.agent=subprocess.Popen([sys.executable,'-m','agent','--config',str(self.config_path),'run'],cwd=BASE,env=self.env,stdout=self.agent_log,stderr=subprocess.STDOUT)
+        self.agent=subprocess.Popen([os.environ.get('CODEPIER_TEST_STACK_PYTHON') or sys.executable,'-m','agent','--config',str(self.config_path),'run'],cwd=BASE,env=self.env,stdout=self.agent_log,stderr=subprocess.STDOUT)
         try:
             wait_for_agent(self.agent, lambda:any(d['id']==self.device and d['online']
                            for d in self.client.get('/api/devices',timeout=1).json().get('devices',[])))

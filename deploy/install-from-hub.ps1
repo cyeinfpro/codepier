@@ -42,17 +42,33 @@ if ($Action -eq 'uninstall' -and -not (Test-Path -LiteralPath $InstallDir)) { Wr
 if ($Action -eq 'archive' -and -not (Test-Path -LiteralPath $InstallDir)) { throw 'No Agent installation to archive.' }
 if ($NoService -and $Action -ne 'install') { throw '-NoService is only valid for installation' }
 if ($Action -eq 'start' -and $Hub) { throw 'Use the installed management command for start, without -Hub' }
-if ($ExpectedDevice -and $Action -in @('install','upgrade','uninstall','start')) {
-    $ExistingConfig = Join-Path $InstallDir 'config.json'
-    if (Test-Path -LiteralPath $ExistingConfig -PathType Leaf) {
-      if ((Get-Item -LiteralPath $ExistingConfig -Force).Length -gt 1048576) { throw 'Existing Agent configuration is too large.' }
-      try { $ExistingIdentity = (Get-Content -LiteralPath $ExistingConfig -Raw -Encoding UTF8 | ConvertFrom-Json).device_id }
-      catch { throw 'Existing Agent config cannot be read; do not delete it.' }
-      if (-not $ExistingIdentity -or [string]$ExistingIdentity -cne $ExpectedDevice) {
-        throw 'This computer already records another Agent node. No installation started and the ticket was not used. If that was a failed install, generate a Windows archive recovery command in Device Nodes, confirm the local old device ID, and then reinstall. Do not delete config.json.'
-      }
+$ReuseExistingPairing = $false
+if (($ExpectedDevice -or $Hub) -and $Action -in @('install','upgrade','uninstall','start')) {
+  $ExistingConfig = Join-Path $InstallDir 'config.json'
+  if (Test-Path -LiteralPath $ExistingConfig -PathType Leaf) {
+    $ExistingConfigItem = Get-Item -LiteralPath $ExistingConfig -Force
+    if ($ExistingConfigItem.Length -gt 1048576 -or ($ExistingConfigItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+      throw 'Existing Agent configuration is too large or is a link; no installation started.'
     }
+    try { $ExistingConfigValue = Get-Content -LiteralPath $ExistingConfig -Raw -Encoding UTF8 | ConvertFrom-Json }
+    catch { throw 'Existing Agent config cannot be read; do not delete it.' }
+    $ExistingIdentity = $ExistingConfigValue.device_id
+    if (-not ($ExistingIdentity -is [string]) -or $ExistingIdentity -cnotmatch '^[A-Za-z0-9_-]{1,100}$' -or
+        -not ($ExistingConfigValue.hub_url -is [string]) -or -not $ExistingConfigValue.hub_url) {
+      throw 'Existing Agent config is invalid; no installation started. Do not delete config.json.'
+    }
+    if ($ExpectedDevice -and $ExistingIdentity -cne $ExpectedDevice) {
+      throw ('This computer already records another Agent node. No installation started and the ticket was not used. Existing local device ID: ' +
+        $ExistingIdentity + '. To keep this Agent, select its original node and copy that node''s install or upgrade command. ' +
+        'To intentionally change nodes, generate a Windows archive recovery command, confirm the local old device ID, and then reinstall. Do not delete config.json.')
+    }
+    if ($Hub -and $ExistingConfigValue.hub_url.TrimEnd('/') -cne $Hub.TrimEnd('/')) {
+      throw 'This command belongs to a different panel (Hub). No installation started and the ticket was not used. Select the original node on its original panel to upgrade. To intentionally move to another panel, archive the old installation with local confirmation first.'
+    }
+    $ReuseExistingPairing = ($Action -eq 'install' -and $ExpectedDevice -and $Hub -and
+      ($ExistingConfigValue.secret -is [string]) -and $ExistingConfigValue.secret.Length -gt 0)
   }
+}
 function Confirm-CodePierRemoval {
   if ($Action -eq 'uninstall') {
     for ($i=0; $i -lt 60; $i++) {
@@ -170,7 +186,7 @@ if ($Action -ne 'install' -and -not $Hub) {
   return
 }
 if ($Hub -notmatch '^https?://' -or $Sha256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Invalid panel URL or package checksum' }
-if ($Action -eq 'install') {
+if ($Action -eq 'install' -and -not $ReuseExistingPairing) {
   if ($Token -notlike 'rdi_*') { throw 'Invalid install ticket' }
   if (-not [IO.Path]::IsPathRooted($AllowRoot) -or -not (Test-Path -LiteralPath $AllowRoot -PathType Container)) { throw 'Allowed directory must already exist and be absolute' }
 
@@ -321,7 +337,7 @@ if __name__ == "__main__":
   $Token = ''
   $CodePierArgs = @($Helper, '--archive', $Archive, '--sha256', $Sha256, '--hub', $Hub, '--install-dir', $InstallDir, '--uv', $CodePierUv)
   if ($Action -eq 'install') {
-    $CodePierArgs += @('--allow', $AllowRoot, '--shell', $Shell)
+    if (-not $ReuseExistingPairing) { $CodePierArgs += @('--allow', $AllowRoot, '--shell', $Shell) }
     if ($NoService) { $CodePierArgs += '--no-service' }
   } elseif ($Action -eq 'archive') { $CodePierArgs += '--archive-install' } else { $CodePierArgs += ('--'+$Action) }
   if ($Yes) { $CodePierArgs += '--yes' }

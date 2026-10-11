@@ -12,6 +12,9 @@ from shared.util import DevError
 
 def grant_context(store, principal):
     principal = refresh_profile_principal(store, principal)
+    from hub.room_scope import current
+    if current(store, principal.grant_id):
+        raise DevError('ROOM_SCOPE_GATEWAY_DENIED', '当前房间连接未批准外部网关域；不能借角色的其他连接器绕过项目范围', 403)
     if not principal.grant_id or principal.authorization_mode != 'role':
         raise DevError('GATEWAY_ROLE_REQUIRED', '外部 MCP 仅接受明确同意的动态 Role 凭据', 403)
     grant = store.one('SELECT * FROM grants WHERE id=?', (principal.grant_id,))

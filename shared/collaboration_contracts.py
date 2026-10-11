@@ -563,6 +563,11 @@ GoalCapability = Literal['read', 'write', 'execute']
 
 
 class CoordinationBudget(Model):
+    # Zero is deliberately omitted from dumps: old approvals, proposal hashes
+    # and mutation retry fingerprints must remain byte-for-byte compatible.
+    operation_timeout_seconds: int = Field(default=0, ge=0, le=86400,
+        exclude_if=lambda value: value == 0,
+        description='Explicit owner-approved per-command ceiling. Zero keeps legacy lease-bounded execution. A positive ceiling requires bounded_execution_protocol=1; an already-started command may finish within its immutable budget after consumer loss, but no new step may start.')
     max_work_items: int = Field(default=20, ge=1, le=100)
     max_steps: int = Field(default=50, ge=1, le=500)
     max_messages: int = Field(default=40, ge=0, le=200)
@@ -659,6 +664,8 @@ class WorkLease(GoalRead):
 
 
 class WorkExecute(WorkLease):
+    operation_role: Literal['required', 'exploratory'] = 'required'
+    supersedes_operation_id: str = Field(default='', max_length=128)
     tool: Literal['read', 'write', 'edit', 'exec']
     arguments: dict
 
@@ -793,6 +800,8 @@ TOOL_DESCRIPTIONS.update({
 # A task dot is an explicit panel-owner setup, not an upgrade of a CPJ notice.
 class DotCreate(Scope):
     duplex: bool = False  # New panel opt-in; never upgrade saved task-only codes.
+    operation_timeout_seconds: int = Field(default=0, ge=0, le=86400, exclude_if=lambda value: value == 0,
+        description='Explicit per-command budget for this dot. Zero retains the old lease-bounded behavior; positive values require a capable Agent and permit only an already-started operation to finish within the original immutable budget after consumer loss.')
     conversation_id: str = Field(default='', max_length=128)
     label: str = Field(min_length=1, max_length=80)
     capabilities: list[GoalCapability] = Field(default_factory=lambda: ['read'], min_length=1, max_length=3)
@@ -805,6 +814,8 @@ class DotCreate(Scope):
     def approved_scope(self):
         if not self.label.strip():
             raise ValueError('A dot name is required')
+        if self.operation_timeout_seconds and 'execute' not in self.capabilities:
+            raise ValueError('A command budget requires explicitly approved execution capability')
         DelegationPolicySet(project=self.project, conversation_id=self.conversation_id or 'default',
             slot_id='pending', expected_version=0, purpose='Panel dot tasks', capabilities=self.capabilities,
             execution_target=self.execution_target, acknowledge_unsandboxed_exec=self.acknowledge_unsandboxed_exec,
@@ -859,6 +870,21 @@ class DotChatMessage(DotRead):
         return value
 
 
+class DotChatMessageV2(DotChatMessage):
+    message_schema_version: Literal[2] = 2
+    body_text: str = Field(min_length=1, max_length=8000)
+    attachment_approval_ids: list[Identifier] = Field(default_factory=list, max_length=16,
+        description='Exact owner-issued, unexpired approvals for sharing already-generated artifacts to this source message, dot and recipient. Neither paths nor arbitrary artifact IDs are accepted.')
+
+    @model_validator(mode='after')
+    def unique_approved_attachments(self):
+        if len(set(self.attachment_approval_ids)) != len(self.attachment_approval_ids):
+            raise ValueError('Attachment approvals must be unique and ordered')
+        if self.attachment_approval_ids and (not self.complete or not self.reply_to_id):
+            raise ValueError('Attachments require a final reply to the originally approved source message')
+        return self
+
+
 class DotChatAck(DotRead):
     message_id: Identifier
     disposition: Literal['read', 'handled'] = 'read'
@@ -902,3 +928,56 @@ TOOL_DESCRIPTIONS['collaboration_dot_reply_update'] = (
     'Reuse a mutation key for transport retries; use returned update_arguments for the next revision. '
     'Finalized replies cannot be reopened; stale updates cannot overwrite newer text. '
     'This is incremental publication of actual dot output, not fabricated token streaming or task success.')
+
+
+# Additive recovery actions. They never accept a lease or execution command.
+class DotRecovery(DotRead):
+    cursor: str = Field(default='', max_length=2048)
+    limit: int = Field(default=20, ge=1, le=50)
+    include_completed: bool = False
+
+
+class DotDeliveryReceipt(DotRead):
+    kind: Literal['message', 'message_v2', 'update'] = 'message'
+    request_key: Key
+
+
+class WorkEvidence(GoalRead):
+    work_item_id: Identifier
+    cursor: str = Field(default='', max_length=2048)
+    limit: int = Field(default=50, ge=1, le=100)
+
+
+class WorkArchiveResult(WorkResult):
+    expected_version: int = Field(ge=1)
+    result_schema_version: Literal[1, 2] = Field(default=1, exclude_if=lambda value: value == 1)
+
+
+class WorkArchiveResultV2(WorkArchiveResult):
+    result_schema_version: Literal[2] = 2
+
+
+class WorkResultV2(WorkResult):
+    result_schema_version: Literal[2] = 2
+
+
+TOOL_MODELS.update({
+    'collaboration_dot_message_v2': DotChatMessageV2,
+    'collaboration_dot_recovery': DotRecovery,
+    'collaboration_dot_delivery_receipt': DotDeliveryReceipt,
+    'collaboration_work_evidence': WorkEvidence,
+    'collaboration_work_archive_result': WorkArchiveResult,
+    'collaboration_work_result_v2': WorkResultV2,
+})
+COORDINATION_TOOL_MODELS.update({
+    'collaboration_work_archive_result': WorkArchiveResult,
+    'collaboration_work_result_v2': WorkResultV2,
+})
+TOOL_DESCRIPTIONS.update({
+    'collaboration_dot_message_v2': 'Publish a version-2 final or interim dot reply, up to 8000 characters. Optional attachments require exact owner-approved share IDs for this original source and recipient. Complete publication, attachment jobs and receipt commit atomically. Never creates artifact sharing authority, uploads private paths, or proves external delivery.',
+    'collaboration_dot_recovery': 'Read original work linked to this approved duplex dot, including work whose source inbox message is already handled. Follow every next_page_request and original operations_request; no claim, heartbeat, new execution, new subscription or new authority is implied. A read never refreshes observed evidence.',
+    'collaboration_dot_delivery_receipt': 'Look up the durable receipt for the exact original dot publication request_key and kind. committed proves server storage, not model thinking, owner acceptance or external channel delivery. Recover the same immutable host outbox entry; never invent a new key or claim unpersisted host output was saved.',
+    'collaboration_work_evidence': 'Read paginated original operation IDs, states and evidence times within the current authorized goal. No outputs or command arguments are returned. Unknown and needs_review are unresolved, not successful; follow original task_query permissions for detailed receipts.',
+    'collaboration_work_archive_result': 'Archive an original expired attempt result using its original attempt/fence and current expected_version. Requires still-active original approval, unchanged assignee, no newer attempt and all original operations settled. Never restores a lease, lowers a fence, starts execution or grants authority.',
+    'collaboration_work_result_v2': 'Finalize a live attempt while retaining every original operation and failure. Only a failed read declared exploratory at admission may be covered by an explicitly linked successful later read in the same attempt. Failed required operations and uncertain outcomes cannot be reported as succeeded. Owner acceptance remains unverified.',
+})

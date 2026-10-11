@@ -44,6 +44,12 @@ class CollaborationService:
         self.dot_chat = DotChatService(self)
         from hub.collaboration.dot_relay import DotRelay
         self.dot_relay = DotRelay(self)
+        from hub.collaboration.task_liveness import TaskLiveness
+        self.task_liveness = TaskLiveness(self)
+        from hub.room_scope import RoomScopeService
+        self.room_scope = RoomScopeService(self)
+        from hub.collaboration.weixin import WeixinService
+        self.weixin = WeixinService(self)
         self.events = None
         self.monitor = None
         self.secret = b''
@@ -92,6 +98,8 @@ class CollaborationService:
             self.conversations.ensure_default(room)
         if room is None and not optional:
             raise DevError('ROOM_NOT_FOUND', '请先在面板开启这个项目环境的协作室', 404)
+        from hub.room_scope import require_room
+        require_room(self.store, principal, room, args.get('conversation_id') or None)
         return principal, room
 
     def live_room(self, room):
@@ -941,8 +949,12 @@ class CollaborationService:
         name, raw = resolve(name, raw)
         if name in contracts.COORDINATION_TOOL_MODELS:
             return self.coordination.invoke(name, raw, principal)
-        handlers = {'collaboration_dot_reply_update': self.dot_relay.update,
+        handlers = {'collaboration_dot_recovery': self.task_liveness.recovery,
+                    'collaboration_dot_delivery_receipt': self.task_liveness.receipt,
+                    'collaboration_work_evidence': self.task_liveness.evidence,
+                    'collaboration_dot_reply_update': self.dot_relay.update,
                     'collaboration_dot_message': self.dot_chat.message,
+                    'collaboration_dot_message_v2': self.dot_chat.message_v2,
                     'collaboration_dot_ack': self.dot_chat.acknowledge,
                     'collaboration_dot_task': self.dot_chat.from_message,
                     'collaboration_dot_connection': self.dots.connection,

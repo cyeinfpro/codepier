@@ -14,7 +14,12 @@ class ChatroomService:
         self.c, self.store = collaboration, collaboration.store
 
     def capabilities(self):
-        return {'native_dot_relay': True, 'duplex_dots': True, 'task_dots': True, 'work_progress': True, 'coordination_goals': True, 'direct_delegation': True, 'message_remind': True, 'plain_messages': True, 'message_notifications': self.c.config.events_enabled,
+        return {'task_liveness_v1': True, 'dot_receipts_v1': True, 'expired_result_archive': True,
+                'dot_message_v2': True, 'channel_attachment_manifest_v1': True,
+                'room_scope_v1': True, 'bounded_execution_v1': True, 'weixin_channel_v1': True,
+                'weixin_enabled': self.c.config.weixin_enabled,
+                'work_result_v2': True, 'host_outbox_durability_verified': False, 'room_os_sandbox_verified': False,
+                'native_dot_relay': True, 'duplex_dots': True, 'task_dots': True, 'work_progress': True, 'coordination_goals': True, 'direct_delegation': True, 'message_remind': True, 'plain_messages': True, 'message_notifications': self.c.config.events_enabled,
                 'task_assignment': True, 'message_search': True, 'incremental_messages': True,
                 'read_cursors': True, 'attachments': False, 'human_memberships': False}
 
@@ -66,7 +71,7 @@ class ChatroomService:
                         'expires_at': expires, 'version': version + 1, 'chat_identity_verified': False}
             return self.c.mutation(principal, room, 'message_access:' + conversation['id'], args, save)
 
-    def view(self, row, delivery_map=None):
+    def view(self, row, delivery_map=None, attachment_map=None, channel_map=None):
         body = redact(json.loads(row['body']))
         if body.get('delegation'):
             body['delegation']['delivery_status'] = self.c.delegation.delivery_status(body['delegation']['delegation_id'])
@@ -108,6 +113,18 @@ class ChatroomService:
                                  (row['room_id'], 'command:' + row['id']))
             if job:
                 result['job_id'] = job['id']
+        attachments = (attachment_map.get(row['id'], []) if attachment_map is not None
+                       else self.c.weixin.media.for_message(row['id']))
+        if attachments:
+            result['attachments'] = attachments
+        channels = (channel_map.get(row['id'], []) if channel_map is not None
+                    else self.c.weixin.delivery.for_messages([row['id']]).get(row['id'], []))
+        if channels:
+            result['channel_deliveries'] = channels
+        if row['origin'] == 'external_channel':
+            result['display_name'] = '微信联系人'
+            result['author_kind'] = 'external_channel'
+            result['external_execution_authority'] = False
         return result
 
     def deliveries(self, rows):
@@ -166,7 +183,10 @@ class ChatroomService:
         if principal is not None:
             rows = [row for row in rows if self.message_visible(principal, row)]
         delivery_map = self.deliveries(rows)
-        return [self.view(row, delivery_map) for row in rows]
+        identifiers = [row['id'] for row in rows]
+        attachments = self.c.weixin.media.for_messages(identifiers)
+        channels = self.c.weixin.delivery.for_messages(identifiers)
+        return [self.view(row, delivery_map, attachments, channels) for row in rows]
 
     def notify(self, room, message, principal, mentions, generation=''):
         receipts = []
