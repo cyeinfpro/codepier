@@ -60,9 +60,11 @@ def test_send_is_nonblocking_lost_ack_does_not_duplicate_and_followups_keep_topi
         expect(page.locator('.cc-context-rail')).to_have_count(0)
         def intercept(route):
             posts.append(route.request.post_data_json)
-            if not held:
-                response=route.fetch()
-                held.append((route,response))
+            if len(posts) == 1:
+                # Hold before forwarding: prove the composer stays usable even
+                # when the first request has not reached the server yet.
+                held.append(route)
+                page.evaluate('window.firstRelayRequestHeld = true')
             else:
                 route.continue_()
         page.route('**/api/collaboration/message',intercept)
@@ -71,8 +73,16 @@ def test_send_is_nonblocking_lost_ack_does_not_duplicate_and_followups_keep_topi
         expect(page.locator('#cc-command button[type="submit"]')).to_be_enabled()
         expect(page.locator('.collaboration')).not_to_have_attribute('aria-busy','true')
         send(page,'补充一句，手机端优先。',settle=False)
-        assert held
-        held[0][0].abort('failed')  # server committed, browser did not receive the POST response
+        # Optimistic bubbles are not a server-commit barrier. Wait for the
+        # intercepted request, then explicitly commit it before losing its ACK.
+        page.wait_for_function('window.firstRelayRequestHeld === true')
+        assert len(held) == 1
+        expect(page.locator('#cc-relay-outbox [data-pending-id]')).to_have_count(2)
+        response = held[0].fetch()
+        assert response.ok, response.status
+        committed = response.json()['message']
+        assert committed['id'] and committed['client_message_id'] == posts[0]['client_message_id']
+        held[0].abort('failed')  # server committed, browser did not receive the POST response
         expect(page.locator('#cc-relay-outbox [data-pending-id]')).to_have_count(0,timeout=15000)
         messages=call(stack,joined['inbox_request'])['items']
         assert len(messages)==2
