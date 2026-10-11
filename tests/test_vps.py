@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -229,8 +230,56 @@ def vps_stack(stack):
 
 
 def create_remote(stack, **changes):
-    payload = {'name': 'Fixture-'+uuid.uuid4().hex[:8], 'host': 'vps.example.invalid', 'port': 10000+int(uuid.uuid4().hex[:3],16), 'password': PASSWORD, 'project_ids': [stack.project['id']], **changes}
+    # The module-scoped stack keeps saved endpoints across tests. Random ports
+    # collide; allocate each fixture identity once for this stack instead.
+    port = getattr(stack, '_next_vps_fixture_port', 10000)
+    assert port <= 65535, 'VPS fixture port range exhausted'
+    stack._next_vps_fixture_port = port + 1
+    payload = {'name': f'Fixture-{port}', 'host': 'vps.example.invalid', 'port': port, 'password': PASSWORD, 'project_ids': [stack.project['id']], **changes}
     return stack.must(stack.client.post('/api/vps', json=payload))
+
+
+@pytest.fixture
+def remote_fixture_stack(inventory):
+    runtime, owner, projects = inventory
+
+    def post(path, *, json):
+        assert path == '/api/vps'
+        return runtime.vps.save(VPSInput(**json), owner)
+
+    return SimpleNamespace(
+        project={'id': projects[0]},
+        client=SimpleNamespace(post=post),
+        must=lambda response: response,
+    )
+
+
+def test_create_remote_identity_does_not_depend_on_randomness(remote_fixture_stack, monkeypatch):
+    # Replace only this module's UUID source, leaving database IDs untouched.
+    monkeypatch.setitem(create_remote.__globals__, 'uuid', SimpleNamespace(uuid4=lambda: SimpleNamespace(hex='0' * 32)))
+    first = create_remote(remote_fixture_stack)
+    second = create_remote(remote_fixture_stack)
+    assert (first['name'], second['name']) == ('Fixture-10000', 'Fixture-10001')
+    assert (first['port'], second['port']) == (10000, 10001)
+    assert first['host'] == second['host'] == 'vps.example.invalid'
+    assert first['username'] == second['username'] == 'root'
+    assert first['id'] != second['id']
+
+
+def test_create_remote_preserves_explicit_overrides(remote_fixture_stack):
+    changes = {'name': 'Explicit fixture', 'host': 'explicit.invalid', 'port': 2222, 'username': 'fixture-user', 'project_ids': []}
+    saved = create_remote(remote_fixture_stack, **changes)
+    assert {key: saved[key] for key in changes} == changes
+    following = create_remote(remote_fixture_stack)
+    assert following['name'] == 'Fixture-10001' and following['port'] == 10001
+
+
+def test_create_remote_port_range_does_not_wrap(remote_fixture_stack):
+    remote_fixture_stack._next_vps_fixture_port = 65535
+    saved = create_remote(remote_fixture_stack)
+    assert saved['port'] == 65535
+    with pytest.raises(AssertionError, match='VPS fixture port range exhausted'):
+        create_remote(remote_fixture_stack)
 
 
 def test_http_admin_csrf_validation_no_secret_echo(vps_stack):

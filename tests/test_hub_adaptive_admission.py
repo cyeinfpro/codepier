@@ -19,6 +19,91 @@ from tests.test_scheduler_queue_admission import project, submit
 
 REVISION = revision({})
 
+class AdmissionPreparationClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+def preparation_state(reason="unavailable", limit=32, reported="healthy"):
+    return {"durable_admission": {"reason": reason, "project_pending_limit": limit},
+            "reported": {"reason": reported}}
+
+
+def test_admission_preparation_waits_for_real_ready_after_pressure():
+    from tests.test_hub_adaptive_admission_stack import wait_for_burst_capacity
+    clock = AdmissionPreparationClock()
+    seen = []
+    states = [preparation_state(), preparation_state(),
+              preparation_state("pressure", reported="resource_pressure"),
+              preparation_state(), preparation_state(),
+              preparation_state("adaptive", 129)]
+
+    def probe():
+        seen.append(clock())
+        return states[len(seen) - 1]
+
+    assert wait_for_burst_capacity(probe, clock=clock, sleep=clock.sleep) == states[-1]
+    assert seen == [0, 3, 6, 9, 12, 15]
+
+
+def test_admission_preparation_accepts_genuine_ready_after_old_budget():
+    from tests.test_hub_adaptive_admission_stack import wait_for_burst_capacity
+    clock = AdmissionPreparationClock()
+
+    def probe():
+        return preparation_state("adaptive", 129) if clock() >= 150 else preparation_state()
+
+    assert wait_for_burst_capacity(probe, clock=clock, sleep=clock.sleep)["durable_admission"]["reason"] == "adaptive"
+    assert clock() == 150
+
+
+@pytest.mark.parametrize("arrival", [300, 301])
+def test_admission_preparation_rejects_late_ready(arrival):
+    from tests.test_hub_adaptive_admission_stack import wait_for_burst_capacity
+    clock = AdmissionPreparationClock()
+
+    def probe():
+        clock.now = arrival
+        return preparation_state("adaptive", 129)
+
+    with pytest.raises(AssertionError, match="preparation timed out"):
+        wait_for_burst_capacity(probe, clock=clock, sleep=clock.sleep)
+
+
+@pytest.mark.parametrize("reason", ["pressure", "unavailable", "legacy"])
+def test_admission_preparation_persistent_unready_fails_once(reason):
+    from tests.test_hub_adaptive_admission_stack import wait_for_burst_capacity
+    clock = AdmissionPreparationClock()
+    seen = []
+
+    def probe():
+        seen.append(clock())
+        return preparation_state(reason, 256)
+
+    with pytest.raises(AssertionError, match=reason):
+        wait_for_burst_capacity(probe, clock=clock, sleep=clock.sleep)
+    assert clock() == 300
+    assert seen == list(range(0, 300, 3))
+
+
+def test_admission_preparation_errors_never_reuse_previous_success():
+    from tests.test_hub_adaptive_admission_stack import wait_for_burst_capacity
+    clock = AdmissionPreparationClock()
+
+    def probe():
+        raise OSError("fixture unavailable")
+
+    with pytest.raises(AssertionError, match="OSError"):
+        wait_for_burst_capacity(probe, clock=clock, sleep=clock.sleep)
+    assert clock() == 300
+
+
 
 @pytest.mark.parametrize("limit,reason,expected", [
     (154, "adaptive", True), (129, "adaptive", True), (128, "adaptive", False),

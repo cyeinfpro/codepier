@@ -29,6 +29,37 @@ def admission_probe_due(now, previous):
     return now - previous >= 3
 
 
+def wait_for_burst_capacity(probe, *, timeout=300, clock=time.monotonic, sleep=time.sleep):
+    """Absolute readiness-acceptance deadline; an in-flight read keeps its 35s timeout."""
+    deadline = clock() + timeout
+    previous = -float("inf")
+    last_state = None
+    last_error = None
+    probes = 0
+    while clock() < deadline:
+        now = clock()
+        if admission_probe_due(now, previous):
+            previous = now
+            probes += 1
+            ready = False
+            try:
+                last_state = probe()
+                ready = burst_capacity_ready(last_state["durable_admission"])
+                last_error = None
+            except (httpx.HTTPError, OSError, AssertionError, KeyError, TypeError, ValueError) as exc:
+                last_error = type(exc).__name__
+            # Slow/erroring observations cannot extend the single absolute budget.
+            if clock() >= deadline:
+                break
+            if ready:
+                return last_state
+        sleep(min(max(0, previous + 3 - clock()), max(0, deadline - clock())))
+    raise AssertionError("Admission preparation timed out: " + json.dumps({
+        "timeout_seconds": timeout, "probes": probes,
+        "last_state": last_state, "last_error": last_error,
+    }, sort_keys=True))
+
+
 def owned_cpu_percent(stack):
     """Diagnostic-only percentages for this test's three processes; no argv."""
     roles = {os.getpid(): "test", stack.hub.pid: "hub", stack.agent.pid: "agent"}
@@ -100,15 +131,11 @@ def test_real_128_waiting_burst_other_project_cancel_restart_and_exact_drain(tmp
         # They are not the Agent heartbeat and never feed or bypass admission.
         observer = ResourceSampler()
         observed_at = time.monotonic()
-        last_observation = -float("inf")
         probe_count = 0
 
-        def healthy():
-            nonlocal last_observation, probe_count
+        def observe_preparation():
+            nonlocal probe_count
             now = time.monotonic()
-            if not admission_probe_due(now, last_observation):
-                return None
-            last_observation = now
             probe_count += 1
             state = settings(stack, probe_client)
             limits = state["durable_admission"]
@@ -128,13 +155,13 @@ def test_real_128_waiting_burst_other_project_cancel_restart_and_exact_drain(tmp
                     "age_seconds": round(time.monotonic() - sample.measured_at, 3),
                 },
             }}, sort_keys=True), flush=True)
-            return state if burst_capacity_ready(limits) else None
+            return state
         # Observe no faster than the real sampler, with one reused connection.
         # Actual authenticated Agent heartbeats still determine health/capacity.
         with httpx.Client(base_url=stack.url, cookies=stack.client.cookies,
                 timeout=35, trust_env=False,
                 limits=httpx.Limits(max_connections=1, max_keepalive_connections=1)) as probe_client:
-            expanded = wait_for(healthy, timeout=100)
+            expanded = wait_for_burst_capacity(observe_preparation)
         assert sum(lane["capacity"] for lane in expanded["reported"]["lanes"].values()) < expanded["durable_admission"]["node_pending_limit"]
         held = stack.call("exec", {"project": "ProjectAlpha", "task": "admission_hold",
                                   "idempotency_key": uuid.uuid4().hex})
