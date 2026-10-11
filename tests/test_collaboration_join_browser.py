@@ -415,21 +415,48 @@ def test_join_panel_old_overview_cannot_replace_new_scope(collaboration_stack, c
         held = []
         def hold_overview(route):
             if not held:
-                response = route.fetch()
-                held.append((route, response))
+                # Reserve the real request before any network work can yield.
+                held.append(route)
                 page.locator('html').evaluate('(node) => { node.dataset.joinOldOverviewReady = "true"; }')
             else:
                 route.continue_()
-        page.route('**/api/collaboration?*', hold_overview)
+        page.route('**/api/collaboration?*kind=overview*', hold_overview)
         if not page.locator('[data-cc-action="refresh"]').is_visible():
             page.locator('[data-cc-more]').click()
-        page.locator('[data-cc-action="refresh"]').click()
+        page.evaluate("""() => {
+            const originalRenderPage = window.renderPage;
+            window.joinOldRenderingSettled = false;
+            window.renderPage = function () {
+                'use strict';
+                window.renderPage = originalRenderPage;
+                const rendering = Reflect.apply(originalRenderPage, this, arguments);
+                window.joinOldRendering = rendering;
+                const settled = () => { window.joinOldRenderingSettled = true; };
+                rendering.then(settled, settled);
+                return rendering;
+            };
+        }""")
+        with page.expect_request('**/api/collaboration?*kind=overview*') as old_request:
+            page.locator('[data-cc-action="refresh"]').click()
         expect(page.locator('html')).to_have_attribute('data-join-old-overview-ready', 'true')
+        assert len(held) == 1 and held[0].request.url == old_request.value.url
+        assert old_request.value.method == 'GET'
+        assert page.evaluate("""() => Boolean(window.joinOldRendering &&
+            typeof window.joinOldRendering.then === 'function')""")
+        response = held[0].fetch()
+        assert response.ok
+        assert any(slot['label'] == 'Private to original project'
+                   for slot in response.json()['join_slots'])
+        assert page.evaluate('window.joinOldRenderingSettled === false')
         page.evaluate('(project) => CodePierCollaboration.open(project)', stack.projects[1]['id'])
         expect(page.locator('#cc-scope [name="project"]')).to_have_value(stack.projects[1]['id'])
         expect(page.locator('[data-cc-action="create-room"]')).to_be_visible()
-        held[0][0].fulfill(response=held[0][1])
-        page.unroute('**/api/collaboration?*', hold_overview)
+        held[0].fulfill(response=response)
+        page.unroute('**/api/collaboration?*kind=overview*', hold_overview)
+        # Wait for the actual old renderer, not merely HTTP response receipt.
+        # detach() releases its busy marker before this renderer has settled.
+        page.evaluate('() => window.joinOldRendering')
+        assert page.evaluate('window.joinOldRenderingSettled === true')
         expect(page.locator('[data-cc-slot]')).to_have_count(0)
         expect(page.locator('#page')).not_to_contain_text('Private to original project')
         page.locator('#cc-scope [name="environment"]').fill('staging')

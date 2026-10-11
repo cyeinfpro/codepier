@@ -587,14 +587,16 @@ def test_foreground_refresh_exposes_busy_actions_and_preserves_ime_draft(collabo
             query = parse_qs(urlsplit(route.request.url).query)
             if query.get('kind') == ['overview'] and not held:
                 held.append([route, None])  # Reserve before route.fetch can dispatch another request.
-                held[0][1] = route.fetch()
                 page.locator('html').evaluate('(n) => n.dataset.chatRefreshHeld = "yes"')
             else:
                 route.continue_()
 
         page.route('**/api/collaboration?*', hold_overview)
-        click_room_refresh(page)
+        with page.expect_request(lambda request: parse_qs(urlsplit(request.url).query).get('kind') == ['overview']):
+            click_room_refresh(page)
         expect(page.locator('html')).to_have_attribute('data-chat-refresh-held', 'yes')
+        held[0][1] = held[0][0].fetch()
+        assert held[0][1].ok, held[0][1].status
         # Waiting is a product state: a fresh action must never look ready while
         # its click would be silently dropped by the request lock.
         mentions = page.locator('[data-cc-action="mentions"]')
@@ -654,14 +656,17 @@ def test_older_background_poll_cannot_replace_new_foreground_snapshot(collaborat
             query = parse_qs(urlsplit(route.request.url).query)
             if query.get('kind') == ['overview'] and not held:
                 held.append([route, None])  # Reserve before route.fetch can dispatch another request.
-                held[0][1] = route.fetch()
                 page.locator('html').evaluate('(n) => n.dataset.oldPollHeld = "yes"')
             else:
                 route.continue_()
 
         page.route('**/api/collaboration?*', hold_first_overview)
-        page.evaluate('() => { window.__ccRunRegisteredPoll(); }')
+        with page.expect_request(lambda request: parse_qs(urlsplit(request.url).query).get('kind') == ['overview']):
+            page.evaluate('() => { window.__ccRunRegisteredPoll(); }')
         expect(page.locator('html')).to_have_attribute('data-old-poll-held', 'yes')
+        # Capture the old server snapshot before registering the new connection.
+        held[0][1] = held[0][0].fetch()
+        assert held[0][1].ok, held[0][1].status
         register_notification_fixture(stack, '新快照里的通知连接')
         click_room_refresh(page)
         expect(page.locator('.cc-member-strip')).to_contain_text('1 个助手连接')
@@ -701,7 +706,6 @@ def test_pending_refresh_allows_navigation_and_failed_refresh_releases_actions(c
             # WebKit "Route is already handled" race in the test harness.
             if phase['value'] == 'hold' and not held:
                 held.append([route, None])
-                held[0][1] = route.fetch()
                 page.locator('html').evaluate('(n) => n.dataset.navigationRefreshHeld = "yes"')
             elif phase['value'] == 'fail':
                 route.fulfill(status=422, json={'error': {'code': 'TEST_REFRESH_FAILED', 'message': '合成刷新失败'}})
@@ -709,12 +713,17 @@ def test_pending_refresh_allows_navigation_and_failed_refresh_releases_actions(c
                 route.continue_()
 
         page.route(matches_overview, overview_fixture)
-        click_room_refresh(page)
+        with page.expect_request(lambda request: matches_overview(request.url)):
+            click_room_refresh(page)
         expect(page.locator('html')).to_have_attribute('data-navigation-refresh-held', 'yes')
+        held[0][1] = held[0][0].fetch()
+        assert held[0][1].ok, held[0][1].status
+        expect(page.locator('[data-cc-action="mentions"]')).to_be_disabled()
         page.locator('[data-cc-view="jobs"]').click()
         expect(page.locator('.cc-coordination-list')).to_be_visible()
         phase['value'] = 'pass'
         held[0][0].fulfill(response=held[0][1])
+        expect(page.locator('[data-cc-action="mentions"]')).to_be_enabled()
         expect(page.locator('[data-cc-view="jobs"]')).to_have_attribute('aria-pressed', 'true')
         page.locator('[data-cc-view="discussion"]').click()
         expect(page.locator('#cc-message-input')).to_have_value('导航与失败刷新期间保留的草稿')
@@ -749,15 +758,18 @@ def test_ordinary_drawer_close_suppresses_late_thread_response(collaboration_sta
         def delay_thread(route):
             if parse_qs(urlsplit(route.request.url).query).get('kind') == ['thread'] and not held:
                 held.append([route, None])
-                held[0][1] = route.fetch()
                 page.locator('html').evaluate('(n) => n.dataset.ordinaryThreadHeld = "yes"')
             else:
                 route.continue_()
 
         page.route('**/api/collaboration?*', delay_thread)
         trigger = page.locator('.cc-feed [data-cc-action="thread"]').first
-        trigger.click()
+        with page.expect_request(lambda request: parse_qs(urlsplit(request.url).query).get('kind') == ['thread']):
+            trigger.click()
         expect(page.locator('html')).to_have_attribute('data-ordinary-thread-held', 'yes')
+        held[0][1] = held[0][0].fetch()
+        assert held[0][1].ok, held[0][1].status
+        expect(trigger).to_be_disabled()
         expect(page.locator('#cc-drawer')).to_be_visible()
         close = page.locator('#cc-drawer [data-cc-action="close-drawer"]')
         expect(close).to_be_enabled()
@@ -906,7 +918,6 @@ def test_refresh_recovery_clears_before_waiting_and_respects_new_navigation(
 
         def hold(route):
             held.append([route, None])
-            held[0][1] = route.fetch()
             page.locator('html').evaluate('(n) => n.dataset.recoveryStageHeld = "yes"')
 
         def route_scope(route):
@@ -932,8 +943,13 @@ def test_refresh_recovery_clears_before_waiting_and_respects_new_navigation(
 
         page.route('**/api/collaboration?*', route_scope)
         page.route('**/api/collaboration/conversations', route_directory)
-        page.evaluate('() => { window.__ccRunRecoveryPoll(); }')
+        with page.expect_request(lambda request: (urlsplit(request.url).path == '/api/collaboration/conversations'
+                                                 if pending_stage == 'directory' else
+                                                 parse_qs(urlsplit(request.url).query).get('kind') == ['coordination_options'])):
+            page.evaluate('() => { window.__ccRunRecoveryPoll(); }')
         expect(page.locator('html')).to_have_attribute('data-recovery-stage-held', 'yes')
+        held[0][1] = held[0][0].fetch()
+        assert held[0][1].ok, held[0][1].status
         expect(page.locator('.cc-feed')).not_to_contain_text(body)
         expect(page.locator('#cc-message-input')).to_be_disabled()
         page.get_by_role('button', name='项目映射', exact=True).click()

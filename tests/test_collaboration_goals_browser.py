@@ -312,14 +312,19 @@ def test_goal_work_cards_show_real_fixture_operations_results_and_dependencies(c
         held_operation = []
 
         def delay_operation(route):
-            held_operation.append((route, route.fetch()))
+            held_operation.append(route)
             page.locator('html').evaluate('(n) => n.dataset.goalOperationHeld = "yes"')
 
         page.route('**/api/operations/' + operation_id, delay_operation)
-        card.locator('[data-cc-action="goal-operation"]').click()
+        with page.expect_request('**/api/operations/' + operation_id):
+            card.locator('[data-cc-action="goal-operation"]').click()
         expect(page.locator('html')).to_have_attribute('data-goal-operation-held', 'yes')
+        assert len(held_operation) == 1
+        operation_response = held_operation[0].fetch()
+        assert operation_response.ok, operation_response.status
         page.keyboard.press('Escape')
-        held_operation[0][0].fulfill(response=held_operation[0][1])
+        with page.expect_event('requestfinished', predicate=lambda request: request == held_operation[0].request):
+            held_operation[0].fulfill(response=operation_response)
         page.unroute('**/api/operations/' + operation_id, delay_operation)
         expect(page.locator('#cc-drawer')).not_to_be_visible()
         page.locator(f'.cc-coordination-list [data-cc-action="goal-detail"][data-id="{goal["id"]}"]').click()
@@ -354,6 +359,34 @@ def test_goal_all_pages_and_stale_page_cannot_replace_new_navigation(collaborati
     stack = collaboration_stack
     context = chat_browser_pool(engine).new_context(viewport={'width': 1440, 'height': 900})
     page = context.new_page()
+    # Observe the real workspace callback without changing its return value or
+    # scheduling. Navigation can abort its read, so requestfinished is not a
+    # completion barrier; the callback promise settles in both cases.
+    page.add_init_script("""(() => {
+      let workspaceModule;
+      Object.defineProperty(window, 'CodePierCollaborationWorkspace', {
+        configurable: true,
+        get: () => workspaceModule,
+        set: (value) => {
+          const create = value.create;
+          value.create = function(options, ...args) {
+            const observed = {
+              ...options,
+              onOpen: function(...openArgs) {
+                const pending = Reflect.apply(options.onOpen, this, openArgs);
+                const record = {promise: pending, settled: false};
+                window.goalWorkspaceRefresh = record;
+                if (pending && typeof pending.then === 'function')
+                  pending.then(() => { record.settled = true; }, () => { record.settled = true; });
+                return pending;
+              },
+            };
+            return Reflect.apply(create, this, [observed, ...args]);
+          };
+          workspaceModule = value;
+        },
+      });
+    })();""")
     try:
         login(page, stack)
         conversation = read(stack)['conversation']['id']
@@ -369,17 +402,28 @@ def test_goal_all_pages_and_stale_page_cannot_replace_new_navigation(collaborati
         def delay_second_page(route):
             query = parse_qs(urlsplit(route.request.url).query)
             if query.get('kind') == ['coordination_goals'] and query.get('cursor') and not held:
-                held.append((route, route.fetch()))
+                held.append(route)
                 page.locator('html').evaluate('(n) => n.dataset.goalPageHeld = "yes"')
             else:
                 route.continue_()
 
         page.route('**/api/collaboration?*', delay_second_page)
-        page.locator('[data-cc-view="discussion"]').click()
+        with page.expect_request(lambda request: parse_qs(urlsplit(request.url).query).get('kind') == ['coordination_goals']
+                                 and bool(parse_qs(urlsplit(request.url).query).get('cursor'))):
+            page.locator('[data-cc-view="discussion"]').click()
         expect(page.locator('html')).to_have_attribute('data-goal-page-held', 'yes')
+        assert len(held) == 1
+        # Freeze the old page snapshot before navigating to a new scope.
+        page_response = held[0].fetch()
+        assert page_response.ok, page_response.status
+        page.evaluate('() => { window.heldGoalPageRefresh = window.goalWorkspaceRefresh; }')
+        assert page.evaluate('typeof window.heldGoalPageRefresh?.promise?.then') == 'function'
+        assert page.evaluate('window.heldGoalPageRefresh.settled') is False
         page.evaluate("navigate('projects')")
         expect(page.locator('#page h1')).to_have_text('项目映射')
-        held[0][0].fulfill(response=held[0][1])
+        held[0].fulfill(response=page_response)
+        page.evaluate('async () => { await window.heldGoalPageRefresh.promise; }')
+        assert page.evaluate('window.heldGoalPageRefresh.settled') is True
         page.unroute('**/api/collaboration?*', delay_second_page)
         expect(page.locator('#page h1')).to_have_text('项目映射')
         expect(page.locator('.cc-coordination-list')).to_have_count(0)
@@ -405,22 +449,32 @@ def test_goal_delayed_detail_dismissal_and_authority_projection_recheck(collabor
         def delay_detail(route):
             query = parse_qs(urlsplit(route.request.url).query)
             if query.get('kind') == ['coordination_goal'] and not held:
-                held.append((route, route.fetch()))
+                held.append(route)
                 page.locator('html').evaluate('(n) => n.dataset.goalDetailHeld = "yes"')
             else:
                 route.continue_()
 
         page.route('**/api/collaboration?*', delay_detail)
-        page.locator(f'.cc-coordination-list [data-cc-action="goal-detail"][data-id="{goal["id"]}"]').click()
+        detail_button = page.locator(f'.cc-coordination-list [data-cc-action="goal-detail"][data-id="{goal["id"]}"]')
+        with page.expect_request(lambda request: parse_qs(urlsplit(request.url).query).get('kind') == ['coordination_goal']):
+            detail_button.click()
+        # Capture the request before reading from the server. The loading drawer
+        # is not evidence that route.fetch has returned.
         expect(page.locator('html')).to_have_attribute('data-goal-detail-held', 'yes')
+        assert len(held) == 1
+        expect(detail_button).to_be_disabled()
         expect(page.locator('#cc-drawer')).to_be_visible()
         page.keyboard.press('Escape')
         expect(page.locator('#cc-drawer')).not_to_be_visible()
-        held[0][0].fulfill(response=held[0][1])
+        response = held[0].fetch()
+        assert response.ok, response.status
+        assert response.json()['goal']['id'] == goal['id']
+        with page.expect_response(lambda response: parse_qs(urlsplit(response.url).query).get('kind') == ['coordination_goal']):
+            held[0].fulfill(response=response)
         page.unroute('**/api/collaboration?*', delay_detail)
         # Waiting on the API completion verifies the dismissed asynchronous read
         # cannot put its private detail back into the now-closed dialog.
-        expect(page.locator('.cc-coordination-list [data-cc-action="goal-detail"]').first).to_be_enabled()
+        expect(detail_button).to_be_enabled()
         expect(page.locator('#cc-drawer')).not_to_be_visible()
         expect(page.locator('#cc-drawer')).not_to_contain_text('关闭后不得重开目标详情')
 
@@ -515,7 +569,7 @@ def test_goal_approval_refresh_keeps_old_surface_inert_until_replacement(collabo
             if approval_saved and query.get('kind') == ['coordination_goal']:
                 late_details.append(route.request.url)
             if approval_saved and query.get('kind') == ['coordination_options'] and not held:
-                held.append((route, route.fetch()))
+                held.append(route)
                 page.locator('html').evaluate('(n) => n.dataset.approvalRefreshHeld = "yes"')
             else:
                 route.continue_()
@@ -524,8 +578,13 @@ def test_goal_approval_refresh_keeps_old_surface_inert_until_replacement(collabo
         page.route('**/api/collaboration?*', hold_refresh)
         form = page.locator('#cc-goal-approve')
         form.locator('[name="confirm"]').check()
-        form.locator('button[type="submit"]').click()
+        with page.expect_request(lambda request: bool(approval_saved)
+                                 and parse_qs(urlsplit(request.url).query).get('kind') == ['coordination_options']):
+            form.locator('button[type="submit"]').click()
         expect(page.locator('html')).to_have_attribute('data-approval-refresh-held', 'yes')
+        assert approval_saved and len(held) == 1
+        options_response = held[0].fetch()
+        assert options_response.ok, options_response.status
         # Saving has succeeded, but the replacement is intentionally not ready.
         # Keep the modal present and visibly busy rather than exposing old
         # enabled controls that could be clicked and then removed by this render.
@@ -538,7 +597,7 @@ def test_goal_approval_refresh_keeps_old_surface_inert_until_replacement(collabo
         # Releasing options does not complete refresh: goals must be fetched next.
         # Accept only a request started after this release, for this same scope
         # and render generation, then retain the original five-second DOM checks.
-        query = parse_qs(urlsplit(held[0][0].request.url).query)
+        query = parse_qs(urlsplit(held[0].request.url).query)
         expected_scope = {name: query.get(name) for name in ('project', 'environment_id', 'conversation_id')}
         assert expected_scope['project'] == [stack.project['id']]
         assert expected_scope['conversation_id']
@@ -547,7 +606,7 @@ def test_goal_approval_refresh_keeps_old_surface_inert_until_replacement(collabo
         with page.expect_response(lambda response: response.request in fresh_requests, timeout=15000) as refreshed:
             with page.expect_event('requestfinished', predicate=lambda request: request in fresh_requests,
                                    timeout=15000) as finished:
-                held[0][0].fulfill(response=held[0][1])
+                held[0].fulfill(response=options_response)
         response = refreshed.value
         assert response.request == finished.value and len(fresh_requests) == 1
         assert response.status == 200

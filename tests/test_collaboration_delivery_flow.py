@@ -682,6 +682,7 @@ def test_uncommitted_policy_refresh_keeps_old_intent_and_server_rejects_it(
     context = chat_browser_pool(engine).new_context(viewport={'width': 390, 'height': 844})
     page = context.new_page()
     held = []
+    held_options = []
     gate = {'seen_new_policy': False, 'held_options': False, 'freeze_following': False}
     try:
         room, slot, policy = policy_choice_fixture(page, stack)
@@ -705,9 +706,9 @@ def test_uncommitted_policy_refresh_keeps_old_intent_and_server_rejects_it(
 
         def options(route):
             if gate['seen_new_policy'] and not gate['held_options']:
-                response = route.fetch()
-                held.append((route, response))
+                # Capture the real request before fetch can dispatch another callback.
                 gate['held_options'] = True
+                held_options.append(route)
                 page.evaluate('document.documentElement.dataset.fixturePolicyRefreshHeld = "yes"')
             else:
                 route.continue_()
@@ -717,6 +718,11 @@ def test_uncommitted_policy_refresh_keeps_old_intent_and_server_rejects_it(
         updated = revise_policy(stack, room, slot, policy)
         assert updated['version'] > policy['version']
         expect(page.locator('html')).to_have_attribute('data-fixture-policy-refresh-held', 'yes', timeout=12000)
+        assert gate['seen_new_policy'] and len(held_options) == 1
+        options_route = held_options[0]
+        assert options_route.request.method == 'GET'
+        options_response = options_route.fetch()
+        assert options_response.ok
         option = page.locator('[name="delegation_policy"] option[value="' + policy['id'] + '"]')
         expect(option).to_have_attribute('data-policy-version', str(policy['version']))
         primary.click()
@@ -725,8 +731,8 @@ def test_uncommitted_policy_refresh_keeps_old_intent_and_server_rejects_it(
         expect(option).to_have_attribute('data-policy-version', str(policy['version']))
 
         # Releasing the old refresh after the click cannot rebind this intent.
-        route, response = held.pop(0)
-        route.fulfill(response=response)
+        options_route.fulfill(response=options_response)
+        held_options.clear()
         with page.expect_request('**/api/collaboration/message') as sent:
             with page.expect_response('**/api/collaboration/message') as rejected:
                 page.locator('#cc-command button[type="submit"]').click()
@@ -740,6 +746,8 @@ def test_uncommitted_policy_refresh_keeps_old_intent_and_server_rejects_it(
             **scope(stack), 'kind': 'coordination_goals'}))['items']
         assert goals == []
     finally:
+        for route in held_options:
+            route.abort()
         for route, response in held:
             route.fulfill(response=response)
         context.close()
