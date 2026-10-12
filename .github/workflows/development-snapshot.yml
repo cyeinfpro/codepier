@@ -24,7 +24,7 @@ jobs:
           git archive --format=zip --output="$RUNNER_TEMP/source-snapshot/source.zip" HEAD
           cd "$RUNNER_TEMP/source-snapshot"
           sha256sum source.zip > SHA256SUMS
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: codepier-source-${{ github.sha }}
           path: ${{ runner.temp }}/source-snapshot/
