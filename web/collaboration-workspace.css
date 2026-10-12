@@ -1,13 +1,13 @@
 /* Collaboration product shell: content first, persistent context, purposeful motion.
    Theme colors remain semantic; no backdrop blur on scrolling or reading surfaces. */
 .cc-workspace.cc-chat-shell {
-  --cc-radius-control: 10px;
+  --cc-radius-control: var(--ui-control-radius);
   --cc-radius-card: 16px;
-  --cc-radius-shell: 22px;
+  --cc-radius-shell: var(--ui-window-radius);
   --cc-motion-press: 90ms;
-  --cc-motion-feedback: 140ms;
-  --cc-motion-panel: 220ms;
-  --cc-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --cc-motion-feedback: var(--ui-motion-fast);
+  --cc-motion-panel: var(--ui-motion-normal);
+  --cc-ease: var(--ui-ease);
   --cc-surface-quiet: color-mix(in srgb, var(--ui-side) 72%, var(--ui-panel));
   --cc-shadow-control: 0 1px 3px color-mix(in srgb, var(--ui-text) 10%, transparent);
   grid-template-columns: 232px minmax(0, 1fr);
@@ -1077,6 +1077,12 @@
   .cc-workspace .cc-room-header .btn { min-height: 44px; min-width: 44px; }
   .cc-workspace .cc-relay-turn { margin-bottom: 22px; }
   .cc-workspace .cc-project-strip .btn, .cc-workspace .cc-project-chip { min-height: 36px; }
+}
+@media (max-width: 640px), (pointer: coarse) {
+  .cc-workspace .cc-project-strip .btn,
+  .cc-workspace :is(.cc-panel-scroll, .cc-drawer) summary {
+    min-height: var(--ui-touch-target);
+  }
 }
 @media (prefers-contrast: more) {
   .cc-workspace.cc-chat-shell, .cc-workspace .cc-card,

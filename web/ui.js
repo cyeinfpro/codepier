@@ -1,5 +1,55 @@
 'use strict';
 // Presentation-only helpers. No credentials, commands or writes are cached here.
+// Navigation filtering is local presentation only; capability checks remain authoritative.
+function uiFilterNavigation() {
+  const input = $('#navigation-query');
+  if (!input) return;
+  const query = input.value.trim().toLocaleLowerCase();
+  let count = 0;
+  $$('.nav [data-nav]').forEach((button) => {
+    const permitted = CodePierIdentity.canNavigate(button.dataset.nav);
+    const matches = (button.textContent + ' ' + button.dataset.nav)
+      .toLocaleLowerCase()
+      .includes(query);
+    button.hidden = !permitted || !matches;
+    if (!button.hidden) count++;
+  });
+  $$('.nav-group').forEach((group) => {
+    group.hidden = !$$('[data-nav]', group).some((button) => !button.hidden);
+  });
+  const status = $('#navigation-status');
+  if (status) {
+    status.hidden = !query;
+    status.textContent = count ? `找到 ${count} 个页面` : '没有匹配的页面，换个关键词试试';
+  }
+}
+document.addEventListener('input', (event) => {
+  if (event.target.id === 'navigation-query') uiFilterNavigation();
+});
+document.addEventListener(
+  'keydown',
+  (event) => {
+    if (event.key === 'Escape' && event.target.id === 'navigation-query' && event.target.value) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      event.target.value = '';
+      uiFilterNavigation();
+    }
+  },
+  true,
+);
+function uiLoadingPage(page) {
+  const title = nav.find((item) => item[0] === page)?.[2] || '页面';
+  return `<section class="page-loading" role="status" aria-label="正在加载${esc(title)}"><strong>${esc(title)}</strong><span>正在读取最新内容…</span><div class="skeleton" aria-hidden="true"></div></section>`;
+}
+function uiPageError(message, page) {
+  const root = $('#page');
+  if (!root) return;
+  root.removeAttribute('aria-busy');
+  const title = nav.find((item) => item[0] === page)?.[2] || '页面';
+  root.innerHTML = `<section class="page-error">${heading(title, '', '暂时无法读取内容，请重试。')}<div role="alert">${notice(esc(message))}</div><button class="btn primary" data-action="refresh">${icon('refresh')}重新加载</button></section>`;
+  $('h1', root)?.setAttribute('tabindex', '-1');
+}
 function uiHelp(title, body) {
   return `<details class="page-help"><summary>${icon('shield')}${esc(title)}</summary><div class="page-help-body">${body}</div></details>`;
 }
@@ -87,6 +137,11 @@ function uiSetMenu(value, restore = true, origin = null) {
         : $('.mobile-menu');
     if (restore && mobile && trigger?.isConnected) trigger.focus({ preventScroll: true });
     S.uiMenuTrigger = null;
+    const query = $('#navigation-query');
+    if (query?.value) {
+      query.value = '';
+      uiFilterNavigation();
+    }
   }
 }
 function uiSetPane(pane, focus = false) {
@@ -248,6 +303,7 @@ function uiPageReady(animate = false, presentation = null) {
   if (!page) return;
   document.title = `${nav.find((n) => n[0] === S.page)?.[2] || '控制台'} · CodePier`;
   page.dataset.page = S.page;
+  page.removeAttribute('aria-busy');
   page.classList.remove('management-page');
   if (animate) {
     page.classList.remove('page-arrive');

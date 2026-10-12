@@ -49,11 +49,11 @@
   --ui-message-bg: #ededed;
   --ui-message-text: #272727;
   --ui-message-code-bg: #e0e0e0;
-  --ui-cover-project: #cbbbfa;
-  --ui-cover-device: #c2ddf0;
-  --ui-cover-task: #f5ce91;
-  --ui-cover-note: #edcde5;
-  --ui-cover-live: #f3e298;
+  --ui-cover-project: #eeebf6;
+  --ui-cover-device: #eaf2f7;
+  --ui-cover-task: #f8efdf;
+  --ui-cover-note: #f4eaf0;
+  --ui-cover-live: #f7f0d7;
   --ui-cover-text: #242129;
   --ui-cover-muted: #4c435c;
   --ui-cover-device-muted: #3a5060;
@@ -67,8 +67,7 @@
   --ui-nav-selected: #27252b;
   --ui-nav-selected-text: #f8f7fa;
   --ui-display-font:
-    'Avenir Next', 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
-    sans-serif;
+    -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', 'PingFang SC', sans-serif;
   --ui-font:
     -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei',
     sans-serif;
@@ -82,8 +81,8 @@
   --ui-space-6: 24px;
   --ui-space-8: 32px;
   --ui-space-10: 40px;
-  --ui-text-xs: 11px;
-  --ui-text-sm: 12px;
+  --ui-text-xs: 12px;
+  --ui-text-sm: 13px;
   --ui-text-base: 14px;
   --ui-text-input: 16px;
   --ui-text-title: 18px;
@@ -93,22 +92,22 @@
   --ui-icon-size: 18px;
   --ui-icon-small: 16px;
   --ui-radius-small: 8px;
-  --ui-panel-radius-compact: 22px;
+  --ui-panel-radius-compact: 18px;
   --ui-panel-inset: 20px;
   --ui-modal-inset: 24px;
   --ui-focus-width: 3px;
-  --ui-control-radius: 999px;
-  --ui-panel-radius: 26px;
-  --ui-window-radius: 26px;
+  --ui-control-radius: 12px;
+  --ui-panel-radius: 20px;
+  --ui-window-radius: 20px;
   --ui-shadow: 0 12px 36px rgb(0 0 0 / 10%), 0 2px 6px rgb(0 0 0 / 5%);
   --ui-scrim: rgb(20 20 20 / 36%);
-  --ui-motion-fast: 140ms;
-  --ui-motion-normal: 220ms;
+  --ui-motion-fast: 120ms;
+  --ui-motion-normal: 180ms;
   --ui-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
 
   --ui-page-x: 28px;
   --ui-page-top: 20px;
-  --ui-page-title: 30px;
+  --ui-page-title: 28px;
   --ui-topbar-height: 56px;
   --ui-workspace-height: clamp(220px, calc(100dvh - 430px), 560px);
 }

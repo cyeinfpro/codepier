@@ -485,12 +485,12 @@ function renderShell() {
   const navigation = groups
     .map(
       ([label, ids]) =>
-        `<div class="nav-label">${label}</div>${ids
+        `<div class="nav-group"><div class="nav-label">${label}</div>${ids
           .map((id) => {
             const [, ico, title, n] = nav.find((row) => row[0] === id);
             return `<button class="${id === S.page ? 'active' : ''}" data-nav="${id}" ${id === S.page ? 'aria-current="page"' : ''}>${icon(ico)}<span>${title}</span><span class="nav-num">${n}</span></button>`;
           })
-          .join('')}`,
+          .join('')}</div>`,
     )
     .join('');
   const dock = [
@@ -505,11 +505,12 @@ function renderShell() {
     )
     .join('');
   $('#app').innerHTML =
-    `<a class="skip-link" href="#page">跳到主要内容</a><div class="shell"><aside class="sidebar" id="sidebar" aria-label="主导航"><button class="icon-btn mobile-close" data-action="toggle-menu" aria-label="收起菜单">${icon('close')}</button>${brand}<nav class="nav" aria-label="主导航">${navigation}</nav><div class="side-bottom">${CodePierIdentity.selector()}${appearanceControl()}<div class="transport"><div class="transport-top"><i class="dot offline" id="event-dot"></i><span id="event-state">正在连接实时通道…</span></div></div><div class="user-box"><span class="avatar">${esc(S.session.username?.[0]?.toUpperCase() || 'A')}</span><div>${esc(S.session.username)}<br><small class="tiny">${esc(CodePierIdentity.levelLabel(CodePierIdentity.current()?.level))}</small></div><button class="icon-btn" data-action="logout" aria-label="退出登录">${icon('logout')}</button></div></div></aside><button class="sidebar-scrim" data-ui="close-menu" aria-label="关闭导航" tabindex="-1" hidden></button><main class="main"><header class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-menu" data-action="toggle-menu" aria-controls="sidebar" aria-expanded="false" aria-label="展开菜单">${icon('menu')}</button><span class="breadcrumb-prefix">CodePier</span><span>/</span><span id="breadcrumb-page" aria-live="polite">${chosen[2]}</span></div><div class="top-right">${window.CodePierPanelUpdate?.entry() || ''}<span class="clock" id="clock"></span><button class="quick-jump" data-ui="command" aria-label="快速前往页面或项目">${icon('search')}<span>快速前往</span><kbd>${/Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl'} K</kbd></button><button class="icon-btn" data-computer-use aria-label="桌面控制">${icon('device')}</button><button class="icon-btn" data-action="refresh" aria-label="刷新">${icon('refresh')}</button></div></header><div id="page" class="page" tabindex="-1"></div><nav class="mobile-dock" aria-label="移动快捷导航">${dock}<button type="button" data-action="toggle-menu" aria-controls="sidebar" aria-expanded="false" aria-label="更多页面">${icon('menu')}<span>更多</span></button></nav></main></div>`;
+    `<a class="skip-link" href="#page">跳到主要内容</a><div class="shell"><aside class="sidebar" id="sidebar" aria-label="主导航"><button class="icon-btn mobile-close" data-action="toggle-menu" aria-label="收起菜单">${icon('close')}</button>${brand}<div class="nav-search" role="search">${icon('search')}<input id="navigation-query" type="search" autocomplete="off" placeholder="查找页面" aria-label="查找导航页面" aria-controls="primary-navigation"></div><p class="nav-search-status" id="navigation-status" role="status" hidden></p><nav class="nav" id="primary-navigation" aria-label="主导航">${navigation}</nav><div class="side-bottom">${CodePierIdentity.selector()}${appearanceControl()}<div class="transport"><div class="transport-top"><i class="dot offline" id="event-dot"></i><span id="event-state">正在连接实时通道…</span></div></div><div class="user-box"><span class="avatar">${esc(S.session.username?.[0]?.toUpperCase() || 'A')}</span><div>${esc(S.session.username)}<br><small class="tiny">${esc(CodePierIdentity.levelLabel(CodePierIdentity.current()?.level))}</small></div><button class="icon-btn" data-action="logout" aria-label="退出登录">${icon('logout')}</button></div></div></aside><button class="sidebar-scrim" data-ui="close-menu" aria-label="关闭导航" tabindex="-1" hidden></button><main class="main"><header class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-menu" data-action="toggle-menu" aria-controls="sidebar" aria-expanded="false" aria-label="展开菜单">${icon('menu')}</button><span class="breadcrumb-prefix">CodePier</span><span>/</span><span id="breadcrumb-page" aria-live="polite">${chosen[2]}</span></div><div class="top-right">${window.CodePierPanelUpdate?.entry() || ''}<span class="clock" id="clock"></span><button class="quick-jump" data-ui="command" aria-label="快速前往页面或项目">${icon('search')}<span>快速前往</span><kbd>${/Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl'} K</kbd></button><button class="icon-btn" data-computer-use aria-label="桌面控制">${icon('device')}</button><button class="icon-btn" data-action="refresh" aria-label="刷新">${icon('refresh')}</button></div></header><div id="page" class="page" tabindex="-1"></div><nav class="mobile-dock" aria-label="移动快捷导航">${dock}<button type="button" data-action="toggle-menu" aria-controls="sidebar" aria-expanded="false" aria-label="更多页面">${icon('menu')}<span>更多</span></button></nav></main></div>`;
   updateClock();
   uiSetMenu(false, false);
   uiSyncNavigation();
   CodePierIdentity.bindShell();
+  uiFilterNavigation();
 }
 function updateClock() {
   const n = $('#clock');
@@ -857,6 +858,7 @@ async function renderPage(showLoading = true) {
   if (S.page !== 'overview' || !S.session) window.CodePierTokenUsage?.resetDashboard();
   if (!S.session || !$('#page')) return;
   if (S.page === 'native') {
+    $('#page').removeAttribute('aria-busy');
     const seq = ++S.renderSeq;
     try {
       await chatPage();
@@ -873,8 +875,10 @@ async function renderPage(showLoading = true) {
   const seq = ++S.renderSeq;
   const page = S.page;
   const tokenContinuation = page === 'overview' && !!$('#page [data-token-dashboard]');
-  if (showLoading)
-    $('#page').innerHTML = '<div class="skeleton" role="status" aria-label="正在加载页面"></div>';
+  if (showLoading) {
+    $('#page').setAttribute('aria-busy', 'true');
+    $('#page').innerHTML = uiLoadingPage(page);
+  }
   try {
     let html = '';
     if (['identity', 'members', 'identity-admin'].includes(page)) {
@@ -968,10 +972,7 @@ async function renderPage(showLoading = true) {
     if (page === 'settings') bindSettings();
     CodePierIdentity.applyCapabilities();
   } catch (e) {
-    if (seq === S.renderSeq && S.session)
-      $('#page').innerHTML =
-        notice(esc(e.message)) +
-        `<div class="spacer"></div><button class="btn" data-action="refresh">重试</button>`;
+    if (seq === S.renderSeq && S.session) uiPageError(e.message, page);
   }
 }
 function operationsTable(rows) {

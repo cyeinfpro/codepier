@@ -178,12 +178,15 @@ def test_semantic_palette_pairing_including_hover_and_selection(stack,scheme):
         for fg,bg in [(x,x+'-bg') for x in ['danger','warning','success','info','purple']]+[('primary-text','primary'),('primary-text','primary-hover'),('message-text','message-bg')]:
             value=contrast(values[fg],values[bg]);rows.append((fg,bg,value));assert value>=4.5,(scheme,fg,bg,value)
         (OUT/f'{scheme}-palette.json').write_text(json.dumps(rows,indent=2))
-        # Reference-led entity covers are intentional. They remain paired and
-        # must not inherit the primary button color or cover the whole page.
-        expected={'.codepier-focus-card':'--ui-cover-project','.workspace-stat':'--ui-cover-project'}
+        # The workspace summary is a neutral data surface. Actual project
+        # entities retain their paired category cover; neither uses CTA color.
+        expected={'.overview-summary':'--ui-panel','.overview-summary .workspace-stat':'--ui-panel'}
         for selector,token in expected.items():
             for node in page.locator(selector).all():
                 assert node.evaluate("(el,token) => {const probe=document.createElement('span');probe.style.backgroundColor=getComputedStyle(document.documentElement).getPropertyValue(token);document.body.append(probe);const expected=getComputedStyle(probe).backgroundColor;probe.remove();return getComputedStyle(el).backgroundColor===expected;}",token)
+        _navigate(page, 'projects')
+        for node in page.locator('.workspace-project-head').all():
+            assert node.evaluate("(el) => {const probe=document.createElement('span');probe.style.backgroundColor=getComputedStyle(document.documentElement).getPropertyValue('--ui-cover-project');document.body.append(probe);const expected=getComputedStyle(probe).backgroundColor;probe.remove();return getComputedStyle(el).backgroundColor===expected;}")
         browser.close()
 
 
