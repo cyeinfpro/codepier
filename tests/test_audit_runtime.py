@@ -39,6 +39,7 @@ class Socket:
         self.hello = hello or {"type": "hello", "delivery_protocol": 2, "journal_id": "journal-one"}
         self.before_hello, self.after_ready = before_hello, after_ready
         self.incoming = asyncio.Queue()
+        self.outgoing = asyncio.Queue()
         self.packets = []
         self.closed = False
         self.first = True
@@ -52,8 +53,22 @@ class Socket:
     async def send_text(self, packet):
         data = self.channel.unpack(packet)
         self.packets.append(data)
+        self.outgoing.put_nowait(data)
         if data["type"] == "ready" and self.after_ready:
             self.after_ready()
+
+    async def wait_packets(self, kind, count=1, *, timeout=1):
+        # Await the transport event instead of keeping the loop continuously
+        # runnable with sleep(0), which competes with Store's DB worker under
+        # coverage/load. Preserve the original total deadline and exact count.
+        async def collect():
+            found = []
+            while len(found) < count:
+                packet = await self.outgoing.get()
+                if packet['type'] == kind:
+                    found.append(packet)
+            return found
+        return await asyncio.wait_for(collect(), timeout)
 
     async def receive_text(self):
         if self.first:
@@ -188,13 +203,16 @@ async def test_reconnect_outbox_cannot_bypass_journal_epoch_fence(runtime):
     r.store.execute("UPDATE operations SET attempts=1,journal_id='lost-journal' WHERE id=?", (receipt["operation_id"],))
     socket = Socket(secret)
     reader = asyncio.create_task(r.agent_socket(socket, "dev"))
-    await until(lambda: r.online("dev"))
-    socket.incoming.put_nowait({"type": "result", "id": receipt["operation_id"], "result": {"ok": True, "data": {"content": "foreign journal"}}})
-    await until(lambda: any(item["type"] == "ack" for item in socket.packets))
-    final = r.operation(receipt["operation_id"], p)
-    assert final["state"] == "needs_review" and final["result"]["error"]["code"] == "JOURNAL_CHANGED"
-    await socket.close()
-    await reader
+    try:
+        await until(lambda: r.online("dev"))
+        socket.incoming.put_nowait({"type": "result", "id": receipt["operation_id"], "result": {"ok": True, "data": {"content": "foreign journal"}}})
+        acknowledgements = await socket.wait_packets("ack")
+        assert acknowledgements[0]["id"] == receipt["operation_id"]
+        final = r.operation(receipt["operation_id"], p)
+        assert final["state"] == "needs_review" and final["result"]["error"]["code"] == "JOURNAL_CHANGED"
+    finally:
+        await socket.close()
+        await reader
 
 
 @pytest.mark.asyncio
@@ -240,13 +258,16 @@ async def test_replayed_interrupted_result_is_acknowledged_without_reauditing(ru
     receipt = await r.invoke("tasks_run", {"project": "Project", "task": "test", "idempotency_key": "interrupted-replay"}, p)
     socket = Socket(secret)
     reader = asyncio.create_task(r.agent_socket(socket, "dev"))
-    await until(lambda: r.online("dev"))
-    packet = {"type": "result", "id": receipt["operation_id"], "result": {"ok": False, "error": {"code": "INTERRUPTED", "message": "local restart"}}}
-    socket.incoming.put_nowait(packet)
-    socket.incoming.put_nowait(packet)
-    await until(lambda: len([item for item in socket.packets if item["type"] == "ack"]) == 2)
-    await socket.close()
-    await reader
+    try:
+        await until(lambda: r.online("dev"))
+        packet = {"type": "result", "id": receipt["operation_id"], "result": {"ok": False, "error": {"code": "INTERRUPTED", "message": "local restart"}}}
+        socket.incoming.put_nowait(packet)
+        socket.incoming.put_nowait(packet)
+        acknowledgements = await socket.wait_packets("ack", 2)
+        assert [item["id"] for item in acknowledgements] == [receipt["operation_id"]] * 2
+    finally:
+        await socket.close()
+        await reader
     assert r.operation(receipt["operation_id"], p)["state"] == "needs_review"
     assert r.store.one("SELECT count(*) AS n FROM audit WHERE status='needs_review'")["n"] == 1
 
@@ -258,13 +279,18 @@ async def test_malformed_result_does_not_poison_agent_outbox(runtime, result):
     receipt = await r.invoke("fs_read", {"project": "Project", "path": "README.md"}, p)
     socket = Socket(secret)
     reader = asyncio.create_task(r.agent_socket(socket, "dev"))
-    await until(lambda: r.online("dev"))
-    socket.incoming.put_nowait({"type": "result", "id": receipt["operation_id"], "result": result})
-    await until(lambda: any(item["type"] == "ack" for item in socket.packets))
-    assert r.online("dev")
-    assert r.operation(receipt["operation_id"], p)["state"] == "needs_review"
-    await socket.close()
-    await reader
+    try:
+        await until(lambda: r.online("dev"))
+        socket.incoming.put_nowait({"type": "result", "id": receipt["operation_id"], "result": result})
+        acknowledgements = await socket.wait_packets("ack")
+        assert acknowledgements[0]["id"] == receipt["operation_id"]
+        assert r.online("dev")
+        final = r.operation(receipt["operation_id"], p)
+        assert final["state"] == "needs_review"
+        assert final["result"]["error"]["code"] == "INVALID_AGENT_RESULT"
+    finally:
+        await socket.close()
+        await reader
 
 
 @pytest.mark.asyncio
@@ -313,3 +339,17 @@ async def test_scheduler_survives_temporary_storage_and_audit_failure(runtime, m
     r.wake.set()
     await until(lambda: not r.operation(receipt["operation_id"], p)["pending"])
     await r.stop()
+
+
+@pytest.mark.asyncio
+async def test_socket_ack_wait_keeps_packet_count_and_bounded_total_deadline():
+    socket = Socket(token())
+    socket.outgoing.put_nowait({"type": "ready"})
+    socket.outgoing.put_nowait({"type": "ack", "id": "first"})
+    socket.outgoing.put_nowait({"type": "heartbeat"})
+    socket.outgoing.put_nowait({"type": "ack", "id": "second"})
+    assert await socket.wait_packets("ack", 2) == [
+        {"type": "ack", "id": "first"}, {"type": "ack", "id": "second"}]
+    socket.outgoing.put_nowait({"type": "ack", "id": "only-one"})
+    with pytest.raises(TimeoutError):
+        await socket.wait_packets("ack", 2, timeout=0.02)
