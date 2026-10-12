@@ -1,11 +1,27 @@
 """Shared synthetic Weixin browser fixtures; never calls Tencent."""
 import os
+import re
 from pathlib import Path
 
 import pytest
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def full_styles(page):
+    index = (ROOT / "web/index.html").read_text()
+    names = re.findall(r'<link rel="stylesheet" href="/static/([^?"]+)', index)
+    assert "collaboration-channels.css" in names and "collaboration.css" in names
+    page.add_style_tag(content="\n".join((ROOT / "web" / name).read_text() for name in names))
+    page.evaluate("""() => {
+      const drawer=document.querySelector('#drawer');
+      drawer.removeAttribute('style');drawer.className='cc-drawer-body';
+      const dialog=document.createElement('dialog');dialog.id='cc-drawer';dialog.className='cc-drawer';
+      const header=document.createElement('header');header.className='cc-drawer-header';
+      header.innerHTML='<h2>消息连接 · 合成验收</h2>';
+      drawer.before(dialog);dialog.append(header,drawer);dialog.showModal();
+    }""")
 
 
 @pytest.fixture(params=["chromium", "webkit"])
@@ -69,8 +85,8 @@ def qr_page(request):
           window.E=value=>String(value??'').replace(/[&<>"']/g,
             x=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x]));
           window.channels=CodePierCollaborationChannels.create({
-            state,E,field:(label,input)=>'<label class="cc-field">'+E(label)+input+'</label>',
-            button:(action,label,item={},attrs='')=>'<button type="button" data-cc-action="'+E(action)+
+            state,E,field:(label,input)=>'<label class="cc-field"><span>'+E(label)+'</span>'+input+'</label>',
+            button:(action,label,item={},attrs='')=>'<button type="button" class="btn" data-cc-action="'+E(action)+
               '" data-id="'+E(item.id||'')+'" '+attrs+'>'+E(label)+'</button>',
             mentionSlots:()=>[{id:'dotA',label:'合成 dot',duplex:true,state:'registered'}],
             showDrawer:(title,body)=>{state.drawerEpoch++;document.querySelector('#drawer').innerHTML=body},
@@ -109,6 +125,7 @@ def qr_page(request):
           window.clickAction=action=>channels.act(action,document.querySelector('[data-cc-action="'+action+'"]'));
         }""")
         page.evaluate("channels.act('dot-channel-open',document.querySelector('#open'))")
+        page.evaluate("clickAction('dot-channel-view-weixin')")
         yield page, request.param
         page.evaluate("channels.clear()")
         assert not errors

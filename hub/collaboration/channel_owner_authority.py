@@ -25,8 +25,12 @@ class OwnerAuthority(Mutation):
     confirm_peer_id: str = Field(default='', max_length=256)
     confirm_owner_tasks: bool = False
     confirm_until_revoked: bool = False
-    budget_mode: Literal['lifetime', 'rolling_24h'] = 'lifetime'
+    budget_mode: Literal['lifetime', 'rolling_24h', 'unlimited'] = 'lifetime'
     confirm_daily_budget: bool = False
+    confirm_unlimited_budget: bool = Field(default=False, exclude_if=lambda value: not value)
+    max_delegations: int | None = Field(default=None, ge=1, strict=True, exclude_if=lambda value: value is None)
+    confirm_task_count_budget: bool = Field(default=False, exclude_if=lambda value: not value)
+    confirm_budget_change: bool = Field(default=False, exclude_if=lambda value: not value)
     expected_scope_digest: str = Field(default='', max_length=64)
 
     @model_validator(mode='after')
@@ -36,6 +40,14 @@ class OwnerAuthority(Mutation):
                 raise ValueError('Explicit owner identity, task scope and until-revoked consent are required')
             if self.budget_mode == 'rolling_24h' and not self.confirm_daily_budget:
                 raise ValueError('A recurring daily task budget requires explicit approval')
+            if self.budget_mode == 'unlimited' and not self.confirm_unlimited_budget:
+                raise ValueError('Removing the task count limit requires explicit approval')
+            if self.budget_mode == 'unlimited' and self.max_delegations is not None:
+                raise ValueError('An unlimited task count must not also specify a count limit')
+            if self.max_delegations is not None and not self.confirm_task_count_budget:
+                raise ValueError('A chosen task count limit requires explicit approval')
+            if self.confirm_budget_change and 'budget_mode' not in self.model_fields_set:
+                raise ValueError('Changing an existing task budget requires an explicit budget mode')
         return self
 
 
@@ -58,6 +70,19 @@ def migrate(db):
 
 
 class ChannelOwnerAuthority:
+    @staticmethod
+    def normalize(channel, binding):
+        if channel == 'weixin':
+            return binding
+        if channel != 'telegram':
+            raise DevError('CHANNEL_UNSUPPORTED', '不支持此本人任务通道', 422)
+        return {**binding, 'peer_id': binding['chat_id'], 'allow_replies': binding['mirror_enabled']}
+
+    def transport(self, channel):
+        if channel not in ('weixin', 'telegram'):
+            raise DevError('CHANNEL_UNSUPPORTED', '不支持此本人任务通道', 422)
+        return getattr(self.c, channel)
+
     def __init__(self, collaboration):
         self.c, self.store = collaboration, collaboration.store
 
@@ -68,8 +93,9 @@ class ChannelOwnerAuthority:
         if row.get('lifetime_mode') != 'until_revoked':
             return False
         identifier = row.get('lifetime_authorization_id', '')
-        if identifier.startswith('weixin-binding:'):
-            binding = self.store.one('SELECT * FROM weixin_bindings WHERE id=?', (identifier.split(':', 1)[1],))
+        if identifier.startswith(('weixin-binding:', 'telegram-binding:')):
+            channel = identifier.split('-binding:', 1)[0]
+            binding = self.store.one('SELECT * FROM ' + channel + '_bindings WHERE id=?', (identifier.split(':', 1)[1],))
             return bool(binding and row['id'] == binding['dot_id'] and binding['state'] != 'revoked'
                         and binding['lifetime_mode'] == 'until_revoked' and row.get('principal') == binding['dot_principal'])
         if not identifier:
@@ -84,7 +110,11 @@ class ChannelOwnerAuthority:
             return False
         if row['id'] == auth['policy_id'] and (row['version'] != auth['policy_version'] or row['digest'] != scope['policy_digest']):
             return False
-        binding = self.store.one('SELECT * FROM weixin_bindings WHERE id=?', (auth['binding_id'],))
+        channel = scope.get('channel', 'weixin')
+        if channel not in ('weixin', 'telegram'):
+            return False
+        binding = self.store.one('SELECT * FROM ' + channel + '_bindings WHERE id=?', (auth['binding_id'],))
+        binding = self.normalize(channel, binding) if binding else None
         return bool(binding and binding['state'] != 'revoked' and (auth['state'] == 'pending_revalidation' or binding['generation'] == scope['generation'])
                     and binding['account_id'] == scope['account_id'] and binding['peer_id'] == scope['peer_id'])
 
@@ -96,6 +126,7 @@ class ChannelOwnerAuthority:
             return None
         scope = json.loads(auth['scope'])
         return {k: auth[k] for k in ('id', 'version', 'state', 'policy_id', 'created')} | {
+            'channel': scope.get('channel', 'weixin'),
             'lifetime_mode': 'until_revoked', 'project_id': scope['project_id'],
             'capabilities': scope['capabilities'], 'execution_targets': scope['execution_targets'],
             'budget_mode': scope['budget_mode'], 'max_delegations': scope['max_delegations'],
@@ -104,7 +135,8 @@ class ChannelOwnerAuthority:
     def approval_digest(self, policy, dot, slot):
         return digest([policy['id'], policy['version'], policy['digest'], dot['setup_digest'], slot['principal']])
 
-    def options(self, binding):
+    def options(self, binding, *, channel='weixin'):
+        binding = self.normalize(channel, binding)
         try:
             if not binding['allow_replies']:
                 raise DevError('CHANNEL_OWNER_REPLIES_REQUIRED', '原绑定尚未批准回复，请明确重新建立允许回复的绑定', 409)
@@ -116,15 +148,19 @@ class ChannelOwnerAuthority:
                     'policy_id': policy['id'], 'policy_version': policy['version'],
                     'scope_digest': self.approval_digest(policy, dot, self.c.joining.slot(room, dot['id'])),
                     'project_id': binding['project_id'], 'capabilities': spec['capabilities'],
-                    'execution_targets': spec['execution_targets'], 'max_delegations': spec['max_delegations']}
+                    'execution_targets': spec['execution_targets'], 'max_delegations': spec['max_delegations'],
+                    'available_budget_modes': ['lifetime', 'rolling_24h', 'unlimited']}
         except (DevError, TypeError, KeyError) as exc:
             return {'binding_id': binding['id'], 'available': False,
                     'reason_code': exc.code if isinstance(exc, DevError) else 'DOT_JOIN_REQUIRED'}
 
-    def control(self, raw, principal):
+    def control(self, raw, principal, *, channel='weixin'):
+        transport = self.transport(channel)
         with self.store.transaction():
-            args, principal, room = self.c.weixin.owner(raw, principal, OwnerAuthority, enabled=False)
-            binding = self.c.weixin.binding(args['binding_id'], principal, room)
+            args, principal, room = transport.owner(raw, principal, OwnerAuthority, enabled=False)
+            binding = self.normalize(channel, transport.binding(args['binding_id'], principal, room))
+            if binding['conversation_id'] != args['conversation_id']:
+                raise DevError('CHANNEL_BINDING_SCOPE', '任务授权必须属于当前原话题', 403)
             def save():
                 if binding['version'] != args['expected_binding_version']:
                     raise DevError('STALE_VERSION', '微信绑定已改变，请重新核对本人和范围', 409)
@@ -136,13 +172,16 @@ class ChannelOwnerAuthority:
                         raise DevError('CHANNEL_OWNER_NOT_APPROVED', '没有可撤销的本人任务授权', 409)
                     self.revoke(binding['id'], 'owner_revoked')
                     return {'authorization_id': old['id']}
-                if old and old['state'] == 'active':
-                    raise DevError('CHANNEL_OWNER_ALREADY_APPROVED', '现有授权有效；更改范围需先明确撤销', 409)
+                updating_budget = bool(old and old['state'] == 'active')
+                if updating_budget and not args.get('confirm_budget_change'):
+                    raise DevError('CHANNEL_OWNER_ALREADY_APPROVED', '现有授权有效；修改任务数量需明确确认更新及停止未完成任务', 409)
+                if args.get('confirm_budget_change') and not updating_budget:
+                    raise DevError('CHANNEL_OWNER_NOT_APPROVED', '原本人任务授权已失效，请重新核对授权', 409)
                 if binding['state'] != 'active' or not hmac.compare_digest(binding['peer_id'].encode(), args['confirm_peer_id'].encode()):
                     raise DevError('WEIXIN_PAIRING_UNVERIFIED', '必须核对原绑定的真实本人私聊编号', 409)
                 if not binding['allow_replies']:
                     raise DevError('CHANNEL_OWNER_REPLIES_REQUIRED', '原绑定尚未批准回复，请明确重新建立允许回复的绑定', 409)
-                self.c.weixin.require_enabled(principal)
+                transport.require_enabled(principal)
                 dot = self.c.dots.find(binding['dot_id'])
                 slot = self.c.joining.slot(room, binding['dot_id'])
                 if not self.c.dot_chat.enabled(dot) or slot['state'] != 'registered':
@@ -155,11 +194,14 @@ class ChannelOwnerAuthority:
                 if self.approval_digest(policy, dot, slot) != args['expected_scope_digest']:
                     raise DevError('CHANNEL_OWNER_SCOPE_CHANGED', '显示的项目、能力或目标范围已变化，请重新审阅', 409)
                 spec = json.loads(policy['spec'])
-                account = self.c.weixin.account(binding['account_id'], principal)
+                account = transport.account(binding['account_id'], principal)
                 if (account['state'] != 'active' or account['generation'] != binding['generation']
                         or account['credential_version'] != binding['credential_version']):
                     raise DevError('WEIXIN_CREDENTIAL_CHANGED', '原账号凭据或世代已改变，需重新绑定', 403)
                 identifier, now = old['id'] if old else uuid.uuid4().hex, self.c.clock()
+                old_scope = json.loads(old['scope']) if updating_budget else {}
+                previous_limit = old_scope.get('max_delegations')
+                count_limit = args.get('max_delegations', previous_limit if previous_limit is not None else spec['max_delegations'])
                 scope = {'account_id': account['id'], 'peer_id': binding['peer_id'],
                          'credential_version': binding['credential_version'], 'generation': binding['generation'],
                          'project_id': binding['project_id'], 'environment_id': binding['environment_id'],
@@ -167,7 +209,26 @@ class ChannelOwnerAuthority:
                          'dot_setup_digest': dot['setup_digest'], 'grant_id': slot['grant_id'],
                          'policy_digest': policy['digest'], 'capabilities': spec['capabilities'],
                          'execution_targets': spec['execution_targets'], 'target_snapshots': spec['target_snapshots'],
-                         'budget_mode': args['budget_mode'], 'max_delegations': spec['max_delegations']}
+                         'budget_mode': args['budget_mode'],
+                         'max_delegations': None if args['budget_mode'] == 'unlimited' else count_limit}
+                if channel == 'telegram':
+                    scope['channel'] = 'telegram'
+                if updating_budget:
+                    count_fields = ('budget_mode', 'max_delegations')
+                    old_identity = {key: value for key, value in old_scope.items() if key not in count_fields}
+                    new_identity = {key: value for key, value in scope.items() if key not in count_fields}
+                    if (digest(old_scope) != old['scope_digest'] or old['policy_id'] != policy['id']
+                            or old['policy_version'] != policy['version'] or old_identity != new_identity):
+                        raise DevError('CHANNEL_OWNER_SCOPE_CHANGED', '修改任务数量不能改变原本人身份、项目、能力或执行目标', 409)
+                    if all(old_scope[key] == scope[key] for key in count_fields):
+                        # A repeated choice must not fence otherwise valid work.
+                        # Still validate the live channel and policy before any no-op.
+                        transport.valid(binding['id'])
+                        self.c.delegation.authorize_policy(actor, room, policy)
+                        return {'authorization_id': old['id']}
+                    # One explicit update is atomic. Old source attestations and
+                    # unfinished work cannot inherit the revised count budget.
+                    self.revoke(binding['id'], 'owner_budget_changed')
                 sequence = self.store.one('SELECT COALESCE(MAX(server_sequence),0) AS n FROM collaboration_messages WHERE room_id=?', (room['id'],))['n']
                 version = (old['version'] if old else 0) + 1
                 self.store.execute("""INSERT INTO channel_owner_authorizations
@@ -180,22 +241,22 @@ class ChannelOwnerAuthority:
                     (identifier, binding['id'], version, principal.user_id, principal.space_id, room['id'],
                      binding['conversation_id'], dot['id'], policy['id'], policy['version'],
                      canonical(scope), digest(scope), sequence, now, now))
-                self.store.execute("UPDATE weixin_bindings SET lifetime_mode='until_revoked',version=version+1,updated=? WHERE id=?", (now, binding['id']))
+                self.store.execute("UPDATE " + channel + "_bindings SET lifetime_mode='until_revoked',version=version+1,updated=? WHERE id=?", (now, binding['id']))
                 for table, key in (('collaboration_join_slots', dot['id']), ('delegation_policies', policy['id'])):
                     self.store.execute("UPDATE " + table + " SET lifetime_mode='until_revoked',lifetime_authorization_id=? WHERE id=?", (identifier, key))
                 # Full existing validation happens after the timing-only transition,
                 # inside this transaction: any changed identity/scope rolls it back.
-                self.c.weixin.valid(binding['id'])
+                transport.valid(binding['id'])
                 self.c.delegation.authorize_policy(actor, room, self.c.delegation.policy(room, policy['id']))
-                self.c.audit(room, principal.actor, 'weixin.owner_tasks_approved', identifier,
+                self.c.audit(room, principal.actor, channel + '.owner_tasks_approved', identifier,
                              {'binding_id': binding['id'], 'scope_digest': digest(scope),
                               'lifetime_mode': 'until_revoked', 'budget_mode': args['budget_mode'],
                               'creates_grant': False, 'historical_execution': False})
                 return {'authorization_id': identifier}
-            receipt = self.c.mutation(principal, room, 'weixin_owner_authority', args, save)
+            receipt = self.c.mutation(principal, room, channel + '_owner_authority', args, save)
             auth = self.store.one('SELECT * FROM channel_owner_authorizations WHERE id=?', (receipt['authorization_id'],))
             return {'owner_authorization': self.view(auth), 'binding_id': binding['id'],
-                    'binding_version': self.c.weixin.binding(binding['id'], principal, room)['version']}
+                    'binding_version': transport.binding(binding['id'], principal, room)['version']}
 
     def revoke(self, binding_id, reason):
         auth = self.current(binding_id)
@@ -204,10 +265,12 @@ class ChannelOwnerAuthority:
         self.store.execute("UPDATE channel_owner_authorizations SET state='revoked',version=version+1,updated=? WHERE id=?", (self.c.clock(), auth['id']))
         for table in ('collaboration_join_slots', 'delegation_policies'):
             self.store.execute("UPDATE " + table + " SET lifetime_mode='timed',lifetime_authorization_id='' WHERE lifetime_authorization_id=?", (auth['id'],))
-        binding = self.store.one('SELECT * FROM weixin_bindings WHERE id=?', (binding_id,))
+        channel = json.loads(auth['scope']).get('channel', 'weixin')
+        self.transport(channel)
+        binding = self.store.one('SELECT * FROM ' + channel + '_bindings WHERE id=?', (binding_id,))
         if binding and binding['lifetime_mode'] == 'until_revoked' and binding['state'] != 'revoked':
             self.store.execute("UPDATE collaboration_join_slots SET lifetime_mode='until_revoked',lifetime_authorization_id=? WHERE id=?",
-                               ('weixin-binding:' + binding_id, binding['dot_id']))
+                               (channel + '-binding:' + binding_id, binding['dot_id']))
         # An already-started operation has its own bounded cancellation protocol.
         # Stop new steps immediately; never claim this kills the OS process.
         links = self.store.all("""SELECT d.* FROM delegation_requests d JOIN channel_owner_messages m ON m.message_id=d.message_id
@@ -226,7 +289,8 @@ class ChannelOwnerAuthority:
                                (self.c.clock(), part['id']))
             self.c.weixin.delivery.refresh(part['delivery_id'])
         room = self.store.one('SELECT * FROM collaboration_rooms WHERE id=?', (auth['room_id'],))
-        self.c.audit(room, 'panel-owner:' + auth['owner_user_id'], 'weixin.owner_tasks_revoked', auth['id'], {'reason': reason})
+        self.c.channel_enrollment.invalidate(binding_id, reason)
+        self.c.audit(room, 'panel-owner:' + auth['owner_user_id'], channel + '.owner_tasks_revoked', auth['id'], {'reason': reason})
 
     def pending_revalidation(self, binding_id):
         auth = self.current(binding_id)
@@ -282,6 +346,35 @@ class ChannelOwnerAuthority:
         except DevError:
             self.store.execute('DELETE FROM channel_owner_messages WHERE message_id=?', (message['id'],))
 
+    def live(self, auth):
+        if not auth or auth['state'] != 'active':
+            raise DevError('CHANNEL_OWNER_REVOKED', '原本人任务授权已撤销或停止', 403)
+        scope = json.loads(auth['scope'])
+        channel = scope.get('channel', 'weixin')
+        if digest(scope) != auth['scope_digest']:
+            raise DevError('CHANNEL_OWNER_SCOPE_CHANGED', '原授权证据不完整', 403)
+        binding, account, owner, room, dot = self.transport(channel).valid(auth['binding_id'])
+        binding = self.normalize(channel, binding)
+        if (binding['peer_id'] != scope['peer_id'] or binding['account_id'] != scope['account_id']
+                or binding['generation'] != scope['generation'] or binding['credential_version'] != scope['credential_version']
+                or binding['dot_id'] != auth['dot_id'] or binding['room_id'] != auth['room_id']
+                or binding['conversation_id'] != auth['conversation_id'] or binding['project_id'] != scope['project_id']
+                or binding['environment_id'] != scope['environment_id'] or not binding['allow_replies']
+                or json.loads(binding['project_snapshot']) != scope['project_snapshot']
+                or owner.user_id != auth['owner_user_id'] or owner.space_id != auth['space_id']
+                or dot['setup_digest'] != scope['dot_setup_digest']
+                or (channel == 'telegram' and binding['user_id'] != scope['peer_id'])):
+            raise DevError('CHANNEL_OWNER_SCOPE_CHANGED', '原本人任务身份或范围已变化', 403)
+        slot = self.c.joining.slot(room, dot['id'])
+        policy = self.c.dots.policy(room, dot)
+        if (slot['grant_id'] != scope['grant_id'] or policy['id'] != auth['policy_id']
+                or policy['version'] != auth['policy_version'] or policy['digest'] != scope['policy_digest']):
+            raise DevError('CHANNEL_OWNER_SCOPE_CHANGED', '原本人任务委托范围已变化', 403)
+        actor = self.c.grant_reader(room, slot['grant_id'], snapshot=json.loads(binding['dot_principal']))
+        self.c.dots.approved_owner(room, dot, actor)
+        self.c.delegation.authorize_policy(actor, room, policy)
+        return binding, account, owner, room, dot
+
     def trusted(self, message):
         evidence = self.store.one('SELECT * FROM channel_owner_messages WHERE message_id=?', (message['id'],))
         if not evidence:
@@ -291,15 +384,17 @@ class ChannelOwnerAuthority:
             raise DevError('CHANNEL_OWNER_REVOKED', '原微信本人任务授权已撤销或更改', 403)
         scope, body = json.loads(auth['scope']), json.loads(message['body'])
         origin = body.get('external_origin', {})
+        channel = scope.get('channel', 'weixin')
         if (digest(scope) != auth['scope_digest'] or message['origin'] != 'external_channel'
-                or origin.get('channel') != 'weixin' or message['room_id'] != auth['room_id']
+                or origin.get('channel') != channel or message['room_id'] != auth['room_id']
                 or message['conversation_id'] != auth['conversation_id']
-                or message['author'] != 'weixin:' + scope['account_id'] + ':' + digest(scope['peer_id'])[:20]
+                or message['author'] != channel + ':' + scope['account_id'] + ':' + digest(scope['peer_id'])[:20]
                 or origin.get('binding_id') != auth['binding_id'] or origin.get('account_id') != scope['account_id']
                 or origin.get('generation') != scope['generation'] or origin.get('peer_id') != scope['peer_id']
+                or (channel == 'telegram' and origin.get('user_id') != scope['peer_id'])
                 or digest(body['body_text']) != evidence['message_digest']):
             raise DevError('CHANNEL_OWNER_SOURCE_CHANGED', '原微信消息来源或正文已变化', 409)
-        binding, account, owner, room, dot = self.c.weixin.valid(auth['binding_id'])
+        binding, account, owner, room, dot = self.live(auth)
         if (binding['peer_id'] != scope['peer_id'] or binding['account_id'] != scope['account_id']
                 or binding['generation'] != scope['generation'] or binding['dot_id'] != auth['dot_id']
                 or binding['room_id'] != auth['room_id'] or room['id'] != auth['room_id']
@@ -311,8 +406,12 @@ class ChannelOwnerAuthority:
                 or account['credential_version'] != scope['credential_version']
                 or account['generation'] != scope['generation']):
             raise DevError('CHANNEL_OWNER_SCOPE_CHANGED', '原本人任务身份或范围已变化', 403)
-        current = self.store.one("""SELECT message_id FROM weixin_inbound WHERE account_id=? AND generation=? AND peer_id=? AND external_id=?""",
-            (scope['account_id'], scope['generation'], scope['peer_id'], origin['external_message_id']))
+        if channel == 'weixin':
+            current = self.store.one("SELECT message_id FROM weixin_inbound WHERE account_id=? AND generation=? AND peer_id=? AND external_id=?",
+                (scope['account_id'], scope['generation'], scope['peer_id'], origin['external_message_id']))
+        else:
+            current = self.store.one("SELECT message_id FROM channel_message_map WHERE channel='telegram' AND binding_id=? AND generation=? AND external_id=?",
+                (auth['binding_id'], scope['generation'], 'in:' + origin['external_message_id']))
         # During the atomic ingest transaction the inbound ledger is committed
         # immediately after attestation; later callers always see the latest ID.
         if current and current['message_id'] != message['id']:
@@ -322,7 +421,7 @@ class ChannelOwnerAuthority:
                 or policy['digest'] != scope['policy_digest']):
             raise DevError('CHANNEL_OWNER_SCOPE_CHANGED', '原本人任务委托范围已改变', 403)
         return {'kind': 'verified_external_owner', 'authenticated': True, 'user_id': owner.user_id,
-                'channel': 'weixin', 'authorization_id': auth['id'], 'authorization_version': auth['version']}
+                'channel': channel, 'authorization_id': auth['id'], 'authorization_version': auth['version']}
 
     def author(self, message):
         if message['origin'] == 'panel_owner':
@@ -341,6 +440,16 @@ class ChannelOwnerAuthority:
             auth = self.store.one('SELECT * FROM channel_owner_authorizations WHERE id=?', (policy['lifetime_authorization_id'],))
             return json.loads(auth['scope'])['budget_mode']
         return 'lifetime'
+
+    def budget_limit(self, policy):
+        # Only explicit, current owner approval may remove the count limit.
+        # The signed policy and its per-task budgets remain unchanged.
+        if self.budget_mode(policy) == 'unlimited':
+            return None
+        if self.persistent(policy):
+            auth = self.store.one('SELECT * FROM channel_owner_authorizations WHERE id=?', (policy['lifetime_authorization_id'],))
+            return json.loads(auth['scope'])['max_delegations']
+        return json.loads(policy['spec'])['max_delegations']
 
     def budget_used(self, policy):
         if self.budget_mode(policy) == 'rolling_24h':

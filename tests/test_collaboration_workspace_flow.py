@@ -42,6 +42,8 @@ def test_inspector_keeps_live_composer_selection_reply_and_source(collaboration_
         page.locator('[data-cc-view="jobs"]').click()
         expect(page.locator('#cc-workspace-panel')).to_be_visible()
         expect(page.locator('.cc-progress-card')).to_have_count(1)
+        expect(page.locator('.cc-progress-card')).not_to_be_visible()
+        page.locator('.cc-message-receipts > summary').click()
         # Keep a filter focused while the real remote receipt changes.
         page.locator('[data-cc-progress-filter="all"]').click()
         reply = mcp(stack, 'collaboration', {'action': 'dot_message', **incoming['reply_arguments'],
@@ -70,6 +72,7 @@ def test_inspector_keeps_live_composer_selection_reply_and_source(collaboration_
         expect(form).not_to_be_visible()
         page.locator('.cc-add-dot > summary').click()
         form.locator('[name="label"]').fill('保留中的新助手名称')
+        page.locator('[data-cc-view="jobs"]').click()
         page.locator('[data-cc-view="monitor"]').click()
         page.locator('summary', has_text='登记固定只读探针').click()
         probe = page.locator('#cc-probe [name="label"]')
@@ -77,6 +80,7 @@ def test_inspector_keeps_live_composer_selection_reply_and_source(collaboration_
         probe_node = probe.element_handle()
         page.locator('[data-cc-view="agents"]').click()
         expect(form.locator('[name="label"]')).to_have_value('保留中的新助手名称')
+        page.locator('[data-cc-view="jobs"]').click()
         page.locator('[data-cc-view="monitor"]').click()
         expect(probe).to_have_value('未提交的探针草稿')
         assert probe_node.evaluate('(n) => n.isConnected')
@@ -153,8 +157,13 @@ def test_suggestions_never_submit_or_overwrite_and_narrow_viewports(collaboratio
         for width in [320, 390, 768, 1024, 1440]:
             page.set_viewport_size({'width': width, 'height': 900})
             for view in ['jobs', 'agents', 'monitor', 'discussion']:
+                if view == 'monitor':
+                    page.locator('[data-cc-view="jobs"]').click()
                 page.locator(f'[data-cc-view="{view}"]').click()
-                expect(page.locator(f'[data-cc-view="{view}"]')).to_have_attribute('aria-pressed', 'true')
+                selected = 'jobs' if view == 'monitor' else view
+                expect(page.locator(f'.cc-workspace-nav [data-cc-view="{selected}"]')).to_have_attribute('aria-pressed', 'true')
+                if view == 'monitor':
+                    expect(page.locator('#cc-panel-title')).to_contain_text('监控')
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), (width, view)
             expect(area).to_have_value('自己的草稿')
             box = page.locator('#cc-command button[type="submit"]').bounding_box()

@@ -65,6 +65,7 @@ def test_pairing_errors_retry_and_first_success_are_visible(qr_page):
 def test_refresh_preserves_unrelated_inputs_focus_and_qr(qr_page):
     page, _ = qr_page
     pairing(page)
+    page.locator(".cc-connection-maintenance > summary").click()
     page.get_by_text("高级：登记已有授权机器人", exact=True).click()
     name = page.locator('[data-channel-form="account"] [name="label"]')
     name.fill("未提交的合成名称")

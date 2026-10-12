@@ -1,6 +1,8 @@
 """Default-off Telegram transport and immutable per-target delivery records."""
 
 from typing import Literal
+
+from hub.collaboration.channel_consent import OwnerPreapproval
 from pydantic import Field, SecretStr
 from hub.collaboration.weixin_schema import Scope, Mutation
 
@@ -79,6 +81,7 @@ class AccountImport(Mutation):
 
 
 class Bind(Mutation):
+    owner_preapproval: OwnerPreapproval | None = Field(default=None, exclude_if=lambda value: value is None)
     account_id: str = Field(min_length=1, max_length=100)
     dot_id: str = Field(min_length=1, max_length=100)
     confirm_external_data_ingress: Literal[True]

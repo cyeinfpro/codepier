@@ -1,6 +1,8 @@
 """Forward-only channel ledgers; no old room, grant or subscription changes."""
 from typing import Literal
 
+from hub.collaboration.channel_consent import OwnerPreapproval
+
 from pydantic import Field, SecretStr, model_validator
 
 from hub.access import AccessModel
@@ -121,6 +123,7 @@ class AccountImport(Mutation):
 
 
 class Bind(Mutation):
+    owner_preapproval: OwnerPreapproval | None = Field(default=None, exclude_if=lambda value: value is None)
     account_id: str = Field(min_length=1, max_length=100)
     dot_id: str = Field(min_length=1, max_length=100)
     confirm_external_data_ingress: Literal[True]
@@ -166,8 +169,18 @@ class QRAccept(QRStatus):
     idempotency_key: str = Field(min_length=8, max_length=128)
     label: str = Field(min_length=1, max_length=80)
     confirm_scanner_id: str = Field(min_length=1, max_length=256)
-    confirm_credential_storage: Literal[True]
-    confirm_provider_terms: Literal[True]
+    consent_receipt_id: str = Field(default='', max_length=100, exclude_if=lambda value: not value)
+    confirm_credential_storage: bool | None = Field(default=None, exclude_if=lambda value: value is None)
+    confirm_provider_terms: bool | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @model_validator(mode='after')
+    def exact_prior_or_fresh_consent(self):
+        if self.consent_receipt_id:
+            if self.confirm_credential_storage is False or self.confirm_provider_terms is False:
+                raise ValueError('A prior receipt cannot override an explicit refusal')
+        elif self.confirm_credential_storage is not True or self.confirm_provider_terms is not True:
+            raise ValueError('Credential storage and provider terms each need explicit consent or their exact prior receipt')
+        return self
 
 
 class AttachmentAdd(Mutation):

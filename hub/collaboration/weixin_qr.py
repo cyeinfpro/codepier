@@ -52,7 +52,8 @@ class WeixinEnrollment:
         body = self.payload(row)
         result = {'enrollment_id': row['id'], 'state': row['state'], 'version': row['version'],
                   'expires_at': row['expires_at'], 'reason_code': body.get('reason_code', ''),
-                  'credential_stored': row['state'] == 'accepted', 'room_bound': False}
+                  'credential_stored': row['state'] == 'accepted', 'room_bound': False,
+                  'consent_receipt_id': body.get('consent_receipt_id', '')}
         if body.get('renewal'):
             renewal = body['renewal']
             result.update(renew_account_id=renewal['account_id'],
@@ -159,6 +160,9 @@ class WeixinEnrollment:
                 identifier, now = uuid.uuid4().hex, self.c.clock()
                 body = {'project_snapshot': project_snapshot(self.c.runtime.project(room['project_id'], principal)),
                         'api_base': API_BASE, 'attempted': False}
+                body['consent_receipt_id'] = self.c.channel_enrollment.evidence('weixin', identifier, principal, room, args['conversation_id'],
+                    {'credential_storage': args['confirm_credential_storage'], 'provider_terms': args['confirm_provider_terms']},
+                    {'purpose': 'qr_processing_and_credential_storage_after_scanner_review'})
                 if renewal:
                     body['renewal'] = renewal
                 self.store.execute("""INSERT INTO weixin_enrollments
@@ -292,7 +296,8 @@ class WeixinEnrollment:
                             'scanner_id': text(response.get('ilink_user_id'), 256),
                             'api_base': approved_url(response.get('baseurl') or body['api_base'],
                                 bases=self.w.allowed_api_bases, exact_base=True),
-                            'project_snapshot': body['project_snapshot']}
+                            'project_snapshot': body['project_snapshot'],
+                            'consent_receipt_id': body.get('consent_receipt_id', '')}
                     if renewal:
                         body['renewal'] = renewal
                 elif state == 'scaned_but_redirect':
@@ -358,6 +363,12 @@ class WeixinEnrollment:
                     raise DevError('WEIXIN_QR_NOT_CONFIRMED', '扫码尚未确认或已过期，请重新核对', 409)
                 body = self.payload(row)
                 self.check_pending(body, room, principal)
+                receipt = args.get('consent_receipt_id', '')
+                if receipt:
+                    if receipt != body.get('consent_receipt_id'):
+                        raise DevError('CHANNEL_CONSENT_REQUIRED', '不能使用其他扫码请求的授权证据', 403)
+                    self.c.channel_enrollment.require_evidence(receipt, 'weixin', row['id'], principal, room, args['conversation_id'],
+                                                               ('credential_storage', 'provider_terms'))
                 if not hmac.compare_digest(body['scanner_id'].encode(), args['confirm_scanner_id'].encode()):
                     raise DevError('WEIXIN_SCANNER_MISMATCH', '请确认本次扫码实际返回的微信身份', 409)
                 renewal = body.get('renewal')
@@ -376,8 +387,8 @@ class WeixinEnrollment:
                     'expected_version': renewal['credential_version'] if renewal else 0, 'confirm_credential_storage': True,
                     'confirm_provider_terms': True, 'idempotency_key': 'qr-account-' + row['id']}, principal,
                     renewal=renewal)
-                self.update(row, 'accepted', {'account': result})
+                self.update(row, 'accepted', {'account': result, 'consent_receipt_id': body.get('consent_receipt_id', '')})
                 self.c.audit(room, principal.actor, 'weixin.qr_accepted', row['id'],
-                             {'account_id': result['account_id'], 'room_bound': False})
+                             {'account_id': result['account_id'], 'room_bound': False, 'consent_receipt_id': body.get('consent_receipt_id', '')})
                 return {**result, 'enrollment_id': row['id'], 'state': 'accepted', 'version': row['version'] + 1}
             return self.c.mutation(principal, room, 'weixin_qr_accept', args, save)

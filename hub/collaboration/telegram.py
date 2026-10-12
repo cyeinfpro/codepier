@@ -128,6 +128,9 @@ class TelegramService:
                     ),
                 )
                 if old:
+                    for previous in self.store.all("SELECT id FROM telegram_bindings WHERE account_id=? AND state!='revoked'", (aid,)):
+                        self.c.channel_owner.revoke(previous['id'], 'credential_changed')
+                        self.c.channel_enrollment.invalidate(previous['id'], 'credential_changed')
                     self.store.execute(
                         "UPDATE telegram_bindings SET state='revoked',version=version+1 WHERE account_id=?",
                         (aid,),
@@ -139,6 +142,9 @@ class TelegramService:
                     aid,
                     {"credential_version": args["expected_version"] + 1},
                 )
+                self.c.channel_enrollment.evidence('telegram', aid, principal, room, args['conversation_id'],
+                    {'credential_storage': args['confirm_credential_storage'], 'provider_terms': args['confirm_provider_terms']},
+                    {'credential_version': args['expected_version'] + 1})
                 return {
                     "account_id": aid,
                     "credential_version": args["expected_version"] + 1,
@@ -172,6 +178,7 @@ class TelegramService:
                         "此机器人已绑定当前话题；先明确撤销旧绑定",
                         409,
                     )
+                self.c.channel_enrollment.prepare('telegram', args, principal, room, account, dot)
                 bid, now, challenge = (
                     uuid.uuid4().hex,
                     self.c.clock(),
@@ -218,12 +225,15 @@ class TelegramService:
                     bid,
                     {"full_mirror": True, "automatic_execution": False},
                 )
+                self.c.channel_enrollment.record_binding('telegram', args, principal, room, bid)
                 return {
+                    'onboarding': self.c.channel_enrollment.view(bid),
+                    'pairing_until': now + 900,
                     "binding_id": bid,
                     "version": 1,
                     "state": "pairing",
                     "pairing_command": "/start " + challenge,
-                    "instructions": "向该机器人私聊发送配对命令，回面板核对实际 user_id 和 chat_id。一个私聊仅路由到一个协作室；其他协作室请使用另一个机器人。",
+                    "instructions": ("仅本人私聊发送此授权码，验证后自动连接并开通已批准范围；无需返回面板确认。" if args.get("owner_preapproval") else "向该机器人私聊发送配对命令，回面板核对实际 user_id 和 chat_id。一个私聊仅路由到一个协作室；其他协作室请使用另一个机器人。"),
                 }
 
             return self.c.mutation(principal, room, "telegram_bind", args, save)
@@ -241,6 +251,7 @@ class TelegramService:
                 row = self.binding(args["binding_id"], principal, room)
                 if row["version"] != args["expected_version"]:
                     raise DevError("STALE_VERSION", "原绑定版本已变化", 409)
+                self.c.channel_enrollment.invalidate(row["id"], "binding_" + args["action"])
                 user, chat = row["user_id"], row["chat_id"]
                 if args["action"] == "activate":
                     self.valid(row["id"], pairing=True)
@@ -302,6 +313,8 @@ class TelegramService:
                     "UPDATE telegram_accounts SET poll_fence=poll_fence+1,poll_until=0,next_poll=0 WHERE id=?",
                     (row["account_id"],),
                 )
+                if state == "revoked":
+                    self.c.channel_owner.revoke(row["id"], "binding_revoked")
                 if state == "active":
                     self.valid(row["id"])
                 self.c.channels.quarantine(
@@ -332,11 +345,13 @@ class TelegramService:
         )
         bindings = self.store.all(
             """SELECT id,account_id,dot_id,version,generation,state,user_id,chat_id,
-            pending_user_id,pending_chat_id,pairing_until,pairing_secret,disable_notification,expires_at,mirror_enabled
+            pending_user_id,pending_chat_id,pairing_until,pairing_secret,disable_notification,expires_at,mirror_enabled,lifetime_mode
             FROM telegram_bindings WHERE room_id=? AND conversation_id=? ORDER BY created DESC LIMIT 64""",
             (room["id"], args["conversation_id"]),
         )
         for row in bindings:
+            row["onboarding"] = self.c.channel_enrollment.view(row["id"])
+            row["owner_authorization"] = self.c.channel_owner.view(self.c.channel_owner.current(row["id"]))
             secret = row.pop("pairing_secret")
             row["pairing_command"] = (
                 "/start " + self.store.decrypt(secret)
@@ -353,6 +368,7 @@ class TelegramService:
             "private_only": True,
             "accounts": accounts,
             "bindings": bindings,
+            "owner_task_options": [self.c.channel_owner.options(self.binding(row["id"], principal, room), channel="telegram") for row in bindings],
             "deliveries": self.c.channels.listing(room["id"], args["conversation_id"]),
             "notification_note": "Telegram 无声发送仍可能显示通知；微信需在客户端设置免打扰。",
             **self.files.candidates(principal, room, args["conversation_id"]),
@@ -539,8 +555,8 @@ class TelegramService:
         value = message.get("text", message.get("caption", ""))
         if not isinstance(value, str) or len(value) > 24000:
             return None, "text_limit"
-        if value.startswith("/start "):
-            challenge = value[7:].strip()
+        if value.startswith("/start ") or value.strip().startswith("CPT_"):
+            challenge = value[7:].strip() if value.startswith("/start ") else value.strip()
             for bid in eligible:
                 row = self.store.one(
                     "SELECT * FROM telegram_bindings WHERE id=?", (bid,)
@@ -550,6 +566,12 @@ class TelegramService:
                     and row["pairing_until"] > self.c.clock()
                     and hmac.compare_digest(row["pairing_hash"], digest(challenge))
                 ):
+                    binding, account, owner, room, dot = self.valid(bid, pairing=True)
+                    record = self.c.channel_enrollment.current(bid)
+                    date = message.get('date')
+                    fresh = not update.get('edited_message') and (date is None or type(date) is int and (not record or date >= int(record['created'])))
+                    if self.c.channel_enrollment.incoming('telegram', binding, account, owner, room, dot, chat_id, external_id, matched=True, fresh=fresh):
+                        return None, 'pairing_preapproval_processed'
                     self.store.execute(
                         """UPDATE telegram_bindings SET state='awaiting_owner',pending_user_id=?,pending_chat_id=?,
                         pairing_hash='',pairing_secret='',version=version+1,updated=? WHERE id=?""",
@@ -562,8 +584,22 @@ class TelegramService:
             (account["id"], user_id, chat_id),
         )
         if len(rows) != 1 or rows[0]["id"] not in eligible:
+            self.c.channel_enrollment.quarantine_input('telegram', account, chat_id, external_id)
+            # The generic reminder carries no project data and does not choose
+            # a task route, even when several pending rooms share this bot.
+            for bid in sorted(eligible):
+                pending = self.c.channel_enrollment.current(bid)
+                if not pending or pending['state'] != 'pending' or pending['expected_peer_id'] not in ('', chat_id):
+                    continue
+                binding, account, owner, room, dot = self.valid(bid, pairing=True)
+                if binding['state'] == 'pairing':
+                    self.c.channel_enrollment.incoming('telegram', binding, account, owner, room, dot, chat_id, external_id,
+                        matched=False, fresh=not update.get('edited_message'))
+                    break
             return None, "unbound_or_ambiguous_private_chat"
         binding, _, owner, room, dot = self.valid(rows[0]["id"])
+        if self.c.channel_enrollment.input_quarantined('telegram', account, chat_id, external_id):
+            return None, 'preauthorization_input_replay'
         if self.store.one(
             "SELECT 1 FROM channel_message_map WHERE channel=? AND binding_id=? AND generation=? AND external_id=?",
             ("telegram", binding["id"], binding["generation"], "out:" + external_id),
@@ -628,6 +664,9 @@ class TelegramService:
                 "external_message_id": external_id,
                 "execution_authority": False,
                 "peer_pairing_verified": True,
+                "provider_created": str(message['date'] * 1000) if type(message.get('date')) is int and message['date'] > 0 else None,
+                "revision_is_latest_at_commit": not bool(update.get('edited_message')),
+                "provider_deleted": False,
                 "supersedes_message_id": old["message_id"] if old else "",
             },
         }
@@ -659,6 +698,7 @@ class TelegramService:
             (binding["id"], binding["generation"], "in:" + external_id, mid),
         )
         stored = self.c.object("collaboration_messages", room, mid)
+        self.c.channel_owner.attest(stored)
         body["notifications"] = self.c.chatroom.notify(
             room, stored, owner, body["mentions"]
         )

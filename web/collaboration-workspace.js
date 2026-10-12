@@ -52,7 +52,14 @@ window.CodePierCollaborationWorkspace = {
       bindDetails,
       onOpen = () => {},
     } = ctx;
-    const names = { discussion: '对话', jobs: '进展', agents: '连接', monitor: '监控' };
+    const names = {
+      discussion: '对话',
+      jobs: '任务与结果',
+      agents: '连接',
+      monitor: '监控与异常',
+    };
+    const primaryViews = ['discussion', 'jobs', 'agents'];
+    const panelScroll = new Map();
     const symbols = {
       discussion: '<path d="M5 5h14v10H9l-4 4z"/>',
       jobs: '<path d="M5 17V9m7 8V5m7 12v-6"/>',
@@ -62,7 +69,9 @@ window.CodePierCollaborationWorkspace = {
     };
     let filter = 'all',
       railFocus = null,
-      composerSelection = null;
+      composerSelection = null,
+      discussionScroll = null,
+      receiptsRequested = false;
     const root = () => document.querySelector('.cc-workspace');
     const rows = () =>
       window.CodePierCollaborationWorkspace.receiptRows(
@@ -73,15 +82,15 @@ window.CodePierCollaborationWorkspace = {
     const icon = (name) =>
       `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${symbols[name] || symbols.discussion}</svg>`;
     function navigation() {
-      return `<nav class="cc-tabs cc-workspace-nav" aria-label="房间工作区">${Object.entries(names)
+      return `<nav class="cc-tabs cc-workspace-nav" aria-label="房间工作区">${primaryViews
         .map(
-          ([id, label]) =>
-            `<button type="button" class="btn ${state.view === id ? 'is-active' : ''}" data-cc-view="${id}" aria-pressed="${state.view === id}" aria-controls="${id === 'discussion' ? 'cc-discussion-host' : 'cc-workspace-panel'}">${icon(id)}<span>${label}</span>${id === 'jobs' ? '<span class="cc-nav-count" data-cc-attention-count hidden></span>' : ''}</button>`,
+          (id) =>
+            `<button type="button" class="btn ${state.view === id || (id === 'jobs' && state.view === 'monitor') ? 'is-active' : ''}" data-cc-view="${id}" aria-pressed="${state.view === id || (id === 'jobs' && state.view === 'monitor')}" aria-controls="${id === 'discussion' ? 'cc-discussion-host' : 'cc-workspace-panel'}">${icon(id)}<span>${names[id]}</span>${id === 'jobs' ? '<span class="cc-nav-count" data-cc-attention-count hidden></span>' : ''}</button>`,
         )
         .join('')}</nav>`;
     }
     function summary() {
-      return '<div class="cc-workspace-pulse" aria-label="当前协作状态"><span class="cc-pulse-label" data-cc-pulse-label></span><button type="button" data-cc-workspace-view="jobs" class="cc-pulse-action">查看进展 <span aria-hidden="true">↗</span></button></div>';
+      return '<div class="cc-workspace-pulse" aria-label="当前协作状态" hidden><span class="cc-pulse-label" data-cc-pulse-label></span><button type="button" data-cc-workspace-view="jobs" data-cc-progress-open="all" class="cc-pulse-action">查看 <span aria-hidden="true">↗</span></button></div>';
     }
     function welcome() {
       const slots = mentionSlots().filter(
@@ -101,7 +110,7 @@ window.CodePierCollaborationWorkspace = {
           : '添加助手，复制加入指令，然后回到这里直接交流。无需选择聊天或任务模式。';
       const disabled =
         chat().draft || !state.snapshot?.can_manage || state.snapshot?.room?.state !== 'active';
-      return `<div class="cc-chat-empty cc-workspace-welcome"><span class="cc-welcome-mark" aria-hidden="true">${icon('discussion')}</span><span class="cc-eyebrow">${E(projectLabel(state.project))} · ${E(state.environment)}</span><h3>${title}</h3><p>${prose}</p>${!state.snapshot?.can_manage ? '<p>当前为只读访问，可以查看已获准的记录。</p>' : connected ? `<div class="cc-prompt-grid" aria-label="消息草稿建议">${['梳理一下当前进展和下一步', '先一起讨论方案，暂时不要修改', '检查目前有哪些问题需要处理'].map((prompt) => `<button type="button" data-cc-prompt="${E(prompt)}" ${disabled ? 'disabled' : ''}>${E(prompt)}<span aria-hidden="true">↗</span></button>`).join('')}</div><small>点击只填入草稿，由你确认发送。</small>` : button('open-members', pending ? '继续连接 dot' : '添加第一个 dot', {}, 'data-cc-onboarding="true"')}</div>`;
+      return `<div class="cc-chat-empty cc-workspace-welcome"><span class="cc-welcome-mark" aria-hidden="true">${icon('discussion')}</span><span class="cc-eyebrow">${E(projectLabel(state.project))} · ${E(state.environment)}</span><h3>${title}</h3><p>${prose}</p>${!state.snapshot?.can_manage ? '<p>当前为只读访问，可以查看已获准的记录。</p>' : connected ? `<div class="cc-prompt-grid" aria-label="消息草稿建议">${['梳理一下当前进展和下一步', '先一起讨论方案，暂时不要修改', '检查目前有哪些问题需要处理'].map((prompt) => `<button type="button" data-cc-prompt="${E(prompt)}" ${disabled ? 'disabled' : ''}>${E(prompt)}<span aria-hidden="true">↗</span></button>`).join('')}</div><small>选择后可继续编辑，再发送。</small>` : button('open-members', pending ? '继续连接 dot' : '添加第一个 dot', {}, 'data-cc-onboarding="true"')}</div>`;
     }
     function progress() {
       const all = rows();
@@ -113,17 +122,17 @@ window.CodePierCollaborationWorkspace = {
         ['responded', '已反馈'],
       ];
       const cards = all.filter((r) => filter === 'all' || r.group === filter);
-      return `<div class="cc-progress-feed"><div class="cc-progress-caption"><h3>对话进展</h3><small>仅当前项目已加载消息的实际回执；已回复不等于执行已验收。</small></div><div class="cc-progress-filters" aria-label="筛选消息进展">${categories.map(([id, name]) => `<button type="button" data-cc-progress-filter="${id}" aria-pressed="${filter === id}">${name}<span>${id === 'all' ? all.length : all.filter((r) => r.group === id).length}</span></button>`).join('')}</div><div class="cc-progress-items">${cards.map((r) => `<article class="cc-progress-card" data-progress-message="${E(r.message.id)}" data-group="${r.group}"><div class="cc-row"><span class="cc-progress-state">${E(r.label)}</span><small>${E(new Date(r.message.created * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }))}</small></div><p>${E(messageText(r.message).slice(0, 180))}</p><div class="cc-actions">${button('source', '回到原消息', r.message)}${r.state === 'waiting_connection' && r.dot ? button('dot-connect', '核对连接', { id: r.dot }) : ''}</div></article>`).join('') || `<div class="cc-progress-empty"><h3>${all.length ? '这个分类暂无消息' : '进展会从对话中自然出现'}</h3><p>${all.length ? '可以查看其他分类，或回到对话继续交流。' : '发出消息后，在这里查看接收、回复和处理状态，不必手工创建任务。'}</p><button type="button" class="btn" data-cc-workspace-view="discussion">回到对话</button></div>`}</div></div>`;
+      return `<div class="cc-progress-feed"><div class="cc-progress-caption"><h3>消息回执</h3><small>当前项目已加载消息的接收与回复状态；执行结果请查看任务记录。</small></div><div class="cc-progress-filters" aria-label="筛选消息进展">${categories.map(([id, name]) => `<button type="button" data-cc-progress-filter="${id}" aria-pressed="${filter === id}">${name}<span>${id === 'all' ? all.length : all.filter((r) => r.group === id).length}</span></button>`).join('')}</div><div class="cc-progress-items">${cards.map((r) => `<article class="cc-progress-card" data-progress-message="${E(r.message.id)}" data-group="${r.group}"><div class="cc-row"><span class="cc-progress-state">${E(r.label)}</span><small>${E(new Date(r.message.created * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }))}</small></div><p>${E(messageText(r.message).slice(0, 180))}</p><div class="cc-actions">${button('source', '查看对话', r.message)}${r.state === 'waiting_connection' && r.dot ? button('dot-connect', '核对连接', { id: r.dot }) : ''}</div></article>`).join('') || `<div class="cc-progress-empty"><h3>${all.length ? '这个分类暂无消息' : '进展会从对话中自然出现'}</h3><p>${all.length ? '可以查看其他分类，或回到对话继续交流。' : '发出消息后，在这里查看接收、回复和处理状态，不必手工创建任务。'}</p><button type="button" class="btn" data-cc-workspace-view="discussion">回到对话</button></div>`}</div></div>`;
     }
     function content(view) {
       if (view === 'jobs')
-        return progress() + '<div class="cc-workspace-records">' + renderJobs() + '</div>';
+        return `<div class="cc-task-toolbar"><p>从对话交办，在这里看进度和结果。</p><button type="button" class="btn" data-cc-view="monitor" aria-controls="cc-workspace-panel">${icon('monitor')}监控与异常<span aria-hidden="true">›</span></button></div><div class="cc-workspace-records">${renderJobs()}</div><details class="cc-message-receipts" ${filter === 'attention' ? 'open' : ''}><summary><span>消息回执</span><span data-cc-receipt-summary></span></summary>${progress()}</details>`;
       if (view === 'agents') return renderAgents();
       if (view === 'monitor') return renderMonitor();
       return '';
     }
     function panel() {
-      return `<aside id="cc-workspace-panel" class="cc-workspace-panel" aria-label="房间工作详情" ${state.view === 'discussion' ? 'hidden' : ''}><header class="cc-panel-heading"><div><span class="cc-eyebrow">当前房间</span><h2 id="cc-panel-title" tabindex="-1">${E(names[state.view] || '进展')}</h2></div><button type="button" class="btn" data-cc-workspace-view="discussion" aria-label="关闭详情，返回对话">返回对话 <span aria-hidden="true">×</span></button></header><div class="cc-panel-scroll">${Object.keys(
+      return `<aside id="cc-workspace-panel" class="cc-workspace-panel" aria-label="房间工作详情" ${state.view === 'discussion' ? 'hidden' : ''}><header class="cc-panel-heading"><div><button type="button" class="cc-panel-back" data-cc-workspace-view="jobs" ${state.view === 'monitor' ? '' : 'hidden'}>‹ 任务与结果</button><h2 id="cc-panel-title" tabindex="-1">${E(names[state.view] || names.jobs)}</h2></div><button type="button" class="btn" data-cc-workspace-view="discussion" aria-label="关闭详情，返回对话">返回对话 <span aria-hidden="true">×</span></button></header><div class="cc-panel-scroll">${Object.keys(
         names,
       )
         .filter((v) => v !== 'discussion')
@@ -136,6 +145,9 @@ window.CodePierCollaborationWorkspace = {
     function selection() {
       const area = root()?.querySelector('#cc-message-input');
       if (area) composerSelection = [area.selectionStart, area.selectionEnd];
+      const feed = root()?.querySelector('.cc-feed');
+      if (state.view === 'discussion' && feed?.getClientRects().length)
+        discussionScroll = feed.scrollTop;
     }
     function layout() {
       const node = root();
@@ -155,8 +167,12 @@ window.CodePierCollaborationWorkspace = {
     function open(view, trigger) {
       if (!names[view] || !root() || !state.snapshot?.room) return;
       selection();
-      state.view = view;
       const node = root();
+      const scroll = node.querySelector('.cc-panel-scroll');
+      if (state.view !== 'discussion' && scroll) panelScroll.set(state.view, scroll.scrollTop);
+      const revealReceipts = view === 'jobs' && receiptsRequested;
+      if (view === 'jobs') receiptsRequested = false;
+      state.view = view;
       node.dataset.workspaceView = view;
       const holder = node.querySelector('#cc-workspace-panel');
       if (!holder) return;
@@ -171,15 +187,25 @@ window.CodePierCollaborationWorkspace = {
         }
       }
       holder.querySelector('#cc-panel-title').textContent = names[view];
+      holder.querySelector('.cc-panel-back').hidden = view !== 'monitor';
       for (const tab of node.querySelectorAll('.cc-workspace-nav [data-cc-view]')) {
-        tab.classList.toggle('is-active', tab.dataset.ccView === view);
-        tab.setAttribute('aria-pressed', String(tab.dataset.ccView === view));
+        const selected =
+          tab.dataset.ccView === view || (tab.dataset.ccView === 'jobs' && view === 'monitor');
+        tab.classList.toggle('is-active', selected);
+        tab.setAttribute('aria-pressed', String(selected));
+      }
+      if (view === 'jobs' && (filter === 'attention' || revealReceipts)) {
+        const receipts = node.querySelector('.cc-message-receipts');
+        if (receipts) receipts.open = true;
       }
       layout();
       bindDetails();
       refresh();
       onOpen();
+      if (scroll && view !== 'discussion') scroll.scrollTop = panelScroll.get(view) || 0;
       if (view === 'discussion') {
+        const feed = node.querySelector('.cc-feed');
+        if (feed && discussionScroll !== null) feed.scrollTop = discussionScroll;
         const area = node.querySelector('#cc-message-input');
         if (area && !area.disabled) {
           area.focus({ preventScroll: true });
@@ -190,6 +216,14 @@ window.CodePierCollaborationWorkspace = {
         trigger?.closest('#cc-workspace-panel')
       )
         holder.querySelector('#cc-panel-title').focus({ preventScroll: true });
+      if (revealReceipts && scroll) {
+        const summary = node.querySelector('.cc-message-receipts > summary');
+        if (summary) {
+          scroll.scrollTop +=
+            summary.getBoundingClientRect().top - scroll.getBoundingClientRect().top - 8;
+          summary.focus({ preventScroll: true });
+        }
+      }
     }
     function safePatch(node, markup) {
       const selected = window.getSelection();
@@ -209,6 +243,14 @@ window.CodePierCollaborationWorkspace = {
       if (!node || node.matches(':active') || node._workspaceMarkup === markup) return;
       const selected = window.getSelection();
       if (selected && !selected.isCollapsed && node.contains(selected.anchorNode)) return;
+      // A refresh must never overwrite a form being edited inside a detail.
+      if (
+        node.contains(document.activeElement) &&
+        document.activeElement.matches('input, textarea, select, [contenteditable]')
+      )
+        return;
+      const scroll = node.closest('.cc-panel-scroll');
+      const scrollTop = scroll?.scrollTop;
       const controls = (parent) => [...parent.querySelectorAll('button, summary')];
       const active = document.activeElement;
       const key = (item) =>
@@ -233,6 +275,7 @@ window.CodePierCollaborationWorkspace = {
         if (details.has(id)) detail.open = details.get(id);
       }
       bindDetails();
+      if (scroll) scroll.scrollTop = scrollTop;
       if (focused)
         controls(node)
           .find((item) => key(item) === focused)
@@ -296,12 +339,29 @@ window.CodePierCollaborationWorkspace = {
                   ? `${waiting} 条消息等待反馈`
                   : '对话、进展与结果，留在同一个房间';
         label.parentElement.dataset.tone = attention ? 'attention' : active ? 'active' : 'quiet';
+        label.parentElement.hidden =
+          state.view !== 'discussion' ||
+          (state.snapshot.room.state === 'active' && !attention && !active && !waiting);
+        const action = label.parentElement.querySelector('[data-cc-progress-open]');
+        if (action) {
+          action.dataset.ccProgressOpen = attention ? 'attention' : 'all';
+          action.innerHTML = attention
+            ? '查看原因 <span aria-hidden="true">›</span>'
+            : '查看 <span aria-hidden="true">›</span>';
+        }
       }
       const count = node.querySelector('[data-cc-attention-count]');
       if (count) {
         count.textContent = String(attention);
         count.hidden = !attention;
       }
+      const receiptSummary = node.querySelector('[data-cc-receipt-summary]');
+      if (receiptSummary)
+        receiptSummary.textContent = attention
+          ? `${attention} 条需关注`
+          : all.length
+            ? `${all.length} 条消息`
+            : '暂无';
       const progressNode = node.querySelector('.cc-progress-feed');
       if (progressNode) {
         const template = document.createElement('template');
@@ -315,6 +375,7 @@ window.CodePierCollaborationWorkspace = {
             `[data-cc-progress-filter="${control.dataset.ccProgressFilter}"] span`,
           );
           control.querySelector('span').textContent = fresh.textContent;
+          control.setAttribute('aria-pressed', String(control.dataset.ccProgressFilter === filter));
         }
       }
       const records = node.querySelector('.cc-workspace-records');
@@ -352,6 +413,11 @@ window.CodePierCollaborationWorkspace = {
       } else if (railFocus?.isConnected) railFocus.focus({ preventScroll: true });
     }
     function handleClick(event) {
+      const progressLink = event.target.closest('[data-cc-progress-open]');
+      if (progressLink) {
+        filter = progressLink.dataset.ccProgressOpen;
+        receiptsRequested = true;
+      }
       const local = event.target.closest('[data-cc-workspace]');
       if (local) {
         if (local.dataset.ccWorkspace === 'rooms') rooms(true, local);
@@ -449,6 +515,9 @@ window.CodePierCollaborationWorkspace = {
     function clear() {
       filter = 'all';
       composerSelection = null;
+      discussionScroll = null;
+      receiptsRequested = false;
+      panelScroll.clear();
       railFocus = null;
       const node = root();
       if (!node) return;

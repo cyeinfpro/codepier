@@ -21,7 +21,7 @@ class ChannelBinding:
         if row:
             self.c.telegram.require_enabled(row)
         states = {"active", "pairing", "awaiting_owner"} if pairing else {"active"}
-        if not row or row["state"] not in states or row["expires_at"] <= self.c.clock():
+        if not row or row["state"] not in states or (row.get("lifetime_mode") != "until_revoked" and row["expires_at"] <= self.c.clock()):
             raise DevError(
                 "CHANNEL_BINDING_INACTIVE", "原通道绑定已暂停、撤销或到期", 403
             )
@@ -85,8 +85,7 @@ class ChannelBinding:
             raise DevError(
                 "CHANNEL_MESSAGE_SCOPE", "消息不属于当前原绑定、版本或世代", 403
             )
-        if channel == "weixin":
-            self.c.channel_owner.require_reply_source(self.c.weixin.delivery.root_source(message))
+        self.c.channel_owner.require_reply_source(self.c.weixin.delivery.root_source(message))
         self.c.chatroom.require_message_visible(owner, message)
         reader = self.c.grant_reader(
             room,

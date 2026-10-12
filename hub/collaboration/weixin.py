@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import uuid
 
@@ -138,6 +139,7 @@ class WeixinService:
                      self.store.encrypt(token), args['expected_version'] + 1, self.store.encrypt(''), now, now))
                 if old:
                     for previous in self.store.all("SELECT * FROM weixin_bindings WHERE account_id=? AND state!='revoked'", (identifier,)):
+                        self.c.channel_enrollment.invalidate(previous['id'], 'credential_changed')
                         if renewal is not None:
                             self.c.channel_owner.pending_revalidation(previous['id'])
                             challenge = 'CPW-' + secrets.token_hex(16).upper()
@@ -150,6 +152,9 @@ class WeixinService:
                             self.store.execute("UPDATE weixin_bindings SET state='revoked',version=version+1,updated=? WHERE id=?", (now, previous['id']))
                     self.store.execute('DELETE FROM weixin_contexts WHERE account_id=?', (identifier,))
                     self.delivery.quarantine_account(identifier, 'credential_changed')
+                self.c.channel_enrollment.evidence('weixin', identifier, principal, room, args['conversation_id'],
+                    {'credential_storage': args['confirm_credential_storage'], 'provider_terms': args['confirm_provider_terms']},
+                    {'credential_version': args['expected_version'] + 1})
                 self.c.audit(room, principal.actor, 'weixin.account_approved', identifier,
                     {'credential_version': args['expected_version'] + 1, 'creates_mcp_grant': False})
                 return {'account_id': identifier, 'credential_version': args['expected_version'] + 1,
@@ -170,6 +175,7 @@ class WeixinService:
             def save():
                 if account['state'] != 'active' or self.store.one("SELECT 1 FROM weixin_bindings WHERE state!='revoked' AND (account_id=? OR conversation_id=?)", (account['id'], dot['conversation_id'])):
                     raise DevError('WEIXIN_BINDING_CONFLICT', '一个话题仅绑定一个机器人；当前机器人不跨话题复用。先明确撤销旧绑定', 409)
+                self.c.channel_enrollment.prepare('weixin', args, principal, room, account, dot)
                 identifier, now = uuid.uuid4().hex, self.c.clock()
                 challenge = 'CPW-' + secrets.token_hex(16).upper()
                 generation = account['generation'] + 1
@@ -189,12 +195,14 @@ class WeixinService:
                     self.store.execute("UPDATE collaboration_join_slots SET lifetime_mode='until_revoked',lifetime_authorization_id=? WHERE id=?",
                                        ('weixin-binding:' + identifier, dot['id']))
                 self.store.execute('UPDATE weixin_bindings SET pairing_secret=? WHERE id=?', (self.store.encrypt(challenge), identifier))
+                self.c.channel_enrollment.record_binding('weixin', args, principal, room, identifier)
                 self.c.audit(room, principal.actor, 'weixin.binding_pairing_requested', identifier,
                     {'generation': generation, 'dot_id': dot['id'], 'allow_replies': args['allow_replies'],
                      'allow_media_outbound': args['allow_media_outbound'], 'automatic_execution': False})
                 return {'binding_id': identifier, 'version': 1, 'generation': generation, 'state': 'pairing',
                         'pairing_challenge': challenge, 'pairing_until': now + 900,
-                        'instructions': '在准备绑定的微信私聊中发送此一次性配对码；回到面板核对真实 peer 编号后明确激活。扫码人身份不自动等同房主。'}
+                        'onboarding': self.c.channel_enrollment.view(identifier),
+                        'instructions': ('请仅用本人微信向此机器人私聊发送一次性授权码；验证后自动连接并开通摘要中的任务范围，无需返回面板确认。' if args.get('owner_preapproval') else '在准备绑定的微信私聊中发送此一次性配对码；回到面板核对真实 peer 编号后明确激活。扫码人身份不自动等同房主。')}
             return self.c.mutation(principal, room, 'weixin_bind', args, save)
 
     def control(self, raw, principal):
@@ -207,6 +215,7 @@ class WeixinService:
                 if current['version'] != args['expected_version']:
                     raise DevError('STALE_VERSION', '微信绑定已变化，请重新核对', 409)
                 action = args['action']
+                self.c.channel_enrollment.invalidate(current['id'], 'binding_' + action)
                 if action == 'refresh_pairing':
                     if current['state'] not in {'pairing', 'awaiting_owner', 'paused'}:
                         raise DevError('WEIXIN_PAIRING_UNAVAILABLE', '只有未完成配对或暂停的原绑定可以刷新配对码', 409)
@@ -288,6 +297,7 @@ class WeixinService:
                 pairing_until,allow_replies,allow_media_outbound,lifetime_mode,revalidation_required,expires_at,updated FROM weixin_bindings
                 WHERE room_id=? AND conversation_id=? ORDER BY created DESC LIMIT 100''', (room['id'], args['conversation_id']))
             for binding in bindings:
+                binding['onboarding'] = self.c.channel_enrollment.view(binding['id'])
                 binding['owner_authorization'] = self.c.channel_owner.view(self.c.channel_owner.current(binding['id']))
                 if binding['state'] == 'pairing' and binding['pairing_until'] > self.c.clock():
                     secret = self.store.one('SELECT pairing_secret FROM weixin_bindings WHERE id=?', (binding['id'],))['pairing_secret']
@@ -404,7 +414,7 @@ class WeixinService:
         items = message.get('item_list', [])
         if not isinstance(items, list) or len(items) > 32:
             raise DevError('WEIXIN_ITEMS_INVALID', '外部消息分项超过上限', 422)
-        echo = bool(message.get('client_id') and (self.store.one('SELECT 1 FROM weixin_parts WHERE client_id=?', (message['client_id'],)) or self.store.one("SELECT 1 FROM channel_mirror_parts WHERE 'cpm-' || id=?", (message['client_id'],))))
+        echo = bool(message.get('client_id') and (self.store.one("SELECT 1 FROM channel_onboarding_notices WHERE 'cpo-' || id=?", (message['client_id'],)) or self.store.one('SELECT 1 FROM weixin_parts WHERE client_id=?', (message['client_id'],)) or self.store.one("SELECT 1 FROM channel_mirror_parts WHERE 'cpm-' || id=?", (message['client_id'],))))
         direct = not message.get('group_id') and type(message.get('message_type')) is int and message['message_type'] == 1 and not echo and peer != account['bot_id']
         if direct and message.get('to_user_id') not in (None, '', account['bot_id']):
             raise DevError('WEIXIN_RECEIVER_MISMATCH', '微信应答接收机器人不属于原绑定', 409)
@@ -412,10 +422,20 @@ class WeixinService:
             disposition = 'group_or_echo_quarantined'
         elif binding['state'] == 'pairing' and binding['pairing_until'] > self.c.clock():
             body = '\n'.join(text(i.get('text_item', {}).get('text'), 12000, empty=True) for i in items if isinstance(i, dict) and i.get('type') == 1)
-            if hmac.compare_digest(digest(body.strip()), binding['pairing_hash']):
+            matched = hmac.compare_digest(digest(body.strip()), binding['pairing_hash'])
+            preapproval = self.c.channel_enrollment.current(binding['id'])
+            fresh = (not old and not int(deleted) and not int(updated)
+                     and (not created or not preapproval or int(created) >= int(preapproval['created'] * 1000)))
+            handled = self.c.channel_enrollment.incoming('weixin', binding, account, owner, room, dot, peer, identifier,
+                matched=matched, context=message.get('context_token', ''), fresh=fresh)
+            if handled:
+                disposition = 'pairing_preapproval_processed'
+            elif matched:
                 self.store.execute("UPDATE weixin_bindings SET state='awaiting_owner',pending_peer_id=?,pairing_hash='',pairing_secret='',version=version+1,updated=? WHERE id=?",
                                    (peer, self.c.clock(), binding['id']))
                 disposition = 'pairing_waits_for_panel_owner'
+        elif re.fullmatch(r'CPW-[A-F0-9]{32}', '\n'.join(i.get('text_item', {}).get('text', '') for i in items if isinstance(i, dict) and i.get('type') == 1).strip()):
+            disposition = 'pairing_code_never_a_task'
         elif binding['state'] == 'active' and hmac.compare_digest(peer, binding['peer_id']):
             body_text, attachment_items = [], []
             for index, item in enumerate(items):

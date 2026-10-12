@@ -58,6 +58,8 @@ class CollaborationService:
         from hub.collaboration.channel_router import ChannelRouter
         self.telegram = TelegramService(self)
         self.channels = ChannelRouter(self)
+        from hub.collaboration.channel_enrollment import ChannelEnrollment
+        self.channel_enrollment = ChannelEnrollment(self)
         self.events = None
         self.monitor = None
         self.secret = b''

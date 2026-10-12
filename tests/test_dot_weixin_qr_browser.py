@@ -23,7 +23,7 @@ def writes(page, name):
 
 
 @pytest.mark.parametrize("width", [1440, 390])
-def test_qr_consent_scan_verify_exact_owner_then_manual_room_binding(qr_page, width, tmp_path):
+def test_qr_consent_scan_verify_exact_owner_then_explicit_scope_review(qr_page, width, tmp_path):
     page, engine = qr_page
     page.set_viewport_size({"width": width, "height": 1000})
     assert page.evaluate("writes.length") == 0
@@ -67,8 +67,11 @@ def test_qr_consent_scan_verify_exact_owner_then_manual_room_binding(qr_page, wi
     assert accepted["expected_version"] == 4
     assert accepted["label"] == "本人微信"
     assert accepted["confirm_credential_storage"] and accepted["confirm_provider_terms"]
-    assert page.locator('.cc-wx-bind [name="account_id"]').input_value() == "accountA"
-    assert page.locator(".cc-wx-bind").get_attribute("open") is not None
+    enrollment = page.locator('[data-channel-form="enrollment"]')
+    expect(enrollment).to_be_visible()
+    assert enrollment.locator('[name="account_id"]').input_value() == "accountA"
+    expect(enrollment.locator('[name="enrollment_agreement"]')).not_to_be_checked()
+    assert page.locator(".cc-wx-bind").get_attribute("open") is None
     assert not page.locator('.cc-wx-bind [name="confirm_ingress"]').is_checked()
     assert not page.locator('.cc-wx-bind [name="allow_replies"]').is_checked()
     assert not page.locator('.cc-wx-bind [name="allow_media"]').is_checked()
@@ -197,6 +200,8 @@ def test_qr_redirect_expiry_and_untrusted_image_fail_closed(qr_page):
 def test_independent_channel_settings_require_exact_explicit_click(qr_page):
     page, _ = qr_page
     assert not writes(page, "channel-settings")
+    action(page, "view-overview")
+    action(page, "view-telegram")
     assert page.locator('[data-cc-action="dot-channel-tg-import"]').is_disabled()
     page.evaluate("confirmResult=false")
     action(page, "setting-telegram")
@@ -208,6 +213,8 @@ def test_independent_channel_settings_require_exact_explicit_click(qr_page):
     assert sent["expected_version"] == 0
     assert page.evaluate("data.weixin.enabled") is True
     assert page.locator('[data-cc-action="dot-channel-tg-import"]').is_enabled()
+    action(page, "view-overview")
+    action(page, "view-weixin")
     action(page, "setting-weixin")
     sent = writes(page, "channel-settings")[-1]["args"]
     assert sent["channel"] == "weixin" and sent["enabled"] is False
@@ -253,8 +260,9 @@ def test_qr_unknown_save_can_query_terminal_outcome_without_repeating_save(qr_pa
         page.evaluate("statusResponses.push({state:'expired',version:2})")
     action(page, "qr-status")
     if resolution == "accepted":
-        assert page.locator('.cc-wx-bind [name="account_id"]').input_value() == "accountA"
+        assert page.locator('[data-channel-form="enrollment"] [name="account_id"]').input_value() == "accountA"
         expect(page.locator(".cc-wx-binding-guide")).to_contain_text("微信登录已保存")
+        expect(page.locator(".cc-wx-binding-guide")).to_contain_text("自动开通")
     else:
         expect(page.locator(".cc-wx-qr")).to_contain_text("二维码已过期")
         assert page.locator('[data-cc-action="dot-channel-qr-new"]').is_enabled()

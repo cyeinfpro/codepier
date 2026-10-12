@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import sync_playwright
 
+from tests.weixin_browser_support import full_styles
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -23,6 +25,7 @@ def test_owner_channel_controls_read_only_open_confirmed_write_and_stale_fences(
             page.on('pageerror', lambda error: errors.append(str(error)))
             css = (ROOT / 'web/collaboration-channels.css').read_text()
             page.set_content('<style>body{margin:16px;font:16px sans-serif}input,select,textarea{max-width:100%;box-sizing:border-box}.cc-field{display:grid;gap:4px}.btn{padding:8px}#drawer{max-width:800px;margin:auto}*{box-sizing:border-box}' + css + '</style><button id="open">管理</button><div id="drawer"></div><div id="files"></div>')
+            full_styles(page)
             page.add_script_tag(path=str(ROOT / 'web/collaboration-channels.js'))
             page.evaluate('''() => {
                 window.S = {session:{id:'fixture-session'},space_id:'fixture-space'};
@@ -44,9 +47,11 @@ def test_owner_channel_controls_read_only_open_confirmed_write_and_stale_fences(
             page.evaluate("channels.act('dot-channel-open', document.querySelector('#open'))")
             assert page.locator('.cc-channel-pane').count() == 1
             assert page.evaluate('reads.length') == 2 and page.evaluate('writes.length') == 0
+            page.evaluate("channels.act('dot-channel-view-weixin', document.querySelector('[data-cc-action=dot-channel-view-weixin]'))")
             assert page.locator('[data-cc-action="dot-channel-import"]').is_disabled()
             assert page.locator('[data-cc-action="dot-channel-bind"]').is_disabled()
-            page.get_by_text('明确设置连接范围', exact=True).click()
+            page.evaluate("channels.act('dot-channel-view-overview', document.querySelector('[data-cc-action=dot-channel-view-overview]'))")
+            page.evaluate("channels.act('dot-channel-view-advanced', document.querySelector('[data-cc-action=dot-channel-view-advanced]'))")
             group = page.locator('[data-channel-form="scope"]')
             group.locator('[name="grant_id"]').select_option('grantA')
             # Missing owner confirmation cannot send a mutation.
@@ -76,7 +81,10 @@ def test_owner_channel_controls_read_only_open_confirmed_write_and_stale_fences(
             assert href.startswith('/api/collaboration/attachments/') and 'attacker' not in href
             assert 'fixture-space' in href
             assert '发送结果未知' in page.locator('#files').inner_text()
-            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+            page.screenshot(path=str(tmp_path / f"overflow-diagnostic-{engine}-{width}.png"), full_page=True)
+            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), page.evaluate('''() => ({width:innerWidth, scroll:document.documentElement.scrollWidth, body:document.body.scrollWidth, nodes:[...document.querySelectorAll('*')].filter(n => n.scrollWidth > n.clientWidth).map(n => ({tag:n.tagName, cls:n.className, scroll:n.scrollWidth, client:n.clientWidth, text:n.textContent.slice(0,60)}))})''')
+            for selector in (".cc-drawer", "#drawer", ".cc-channel-pane"):
+                assert page.locator(selector).evaluate("(n) => n.scrollWidth <= n.clientWidth"), selector
             evidence = Path(os.environ.get('CODEPIER_TEST_EVIDENCE_DIR', str(tmp_path)))
             evidence.mkdir(parents=True, exist_ok=True)
             page.screenshot(path=str(evidence / f'channels-{engine}-{width}.png'), full_page=True)

@@ -37,8 +37,12 @@ def test_telegram_settings_identity_consent_stale_and_duplicate_guards(
                     weixin:{enabled:true,accounts:[],bindings:[{id:'wxA',state:'active',version:3,generation:1,expires_at:1900000000,peer_id:'synthetic-weixin'}]},
                     telegram:{enabled:true,accounts:[{id:'tgAccount',label:'测试机器人',bot_id:'900001',state:'active',credential_version:1}],
                         bindings:[{id:'tgBinding',state:'awaiting_owner',version:2,generation:1,pending_user_id:'101',pending_chat_id:'101',expires_at:1900000000}],deliveries:[]}};
-                window.reads=[];window.writes=[];window.delayed=[];window.delayReads=false;window.delayWrites=false;
-                window.api=async url=>{reads.push(url);if(delayReads)await new Promise(resolve=>delayed.push(resolve));
+                window.reads=[];window.previewReads=[];window.writes=[];window.delayed=[];window.delayReads=false;window.delayWrites=false;
+                window.api=async (url,options={})=>{reads.push(url);if(delayReads)await new Promise(resolve=>delayed.push(resolve));
+                    if(url==='/api/collaboration/channel-enrollment-preview'){
+                        previewReads.push({method:options.method,args:JSON.parse(options.body),retrySafe:options.retrySafe});
+                        throw new Error('Synthetic legacy binding has no new owner-task preapproval');
+                    }
                     return structuredClone(url.includes('room-scopes')?data.scopes:url.includes('/telegram?')?data.telegram:data.weixin)};
                 window.E=v=>String(v??'').replace(/[&<>"']/g,x=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x]));
                 window.channels=CodePierCollaborationChannels.create({state,E,
@@ -52,9 +56,20 @@ def test_telegram_settings_identity_consent_stale_and_duplicate_guards(
             page.evaluate(
                 "channels.act('dot-channel-open',document.querySelector('#open'))"
             )
-            assert page.evaluate("reads.length") == 3
+            page.evaluate("channels.act('dot-channel-view-telegram',document.querySelector('[data-cc-action=dot-channel-view-telegram]'))")
+            # Three existing settings reads plus one explicit read-only scope
+            # preview. A legacy binding still cannot inherit owner-task consent.
+            assert page.evaluate("reads.length") == 4
+            assert page.evaluate("previewReads") == [{
+                "method": "POST", "retrySafe": True, "args": {
+                    "project": "projectA", "environment_id": "production",
+                    "conversation_id": "conversationA", "channel": "telegram",
+                    "account_id": "tgAccount", "dot_id": "dotA",
+                },
+            }]
+            assert page.locator('[data-channel-form="enrollment"] [name="enrollment_agreement"]').is_disabled()
             assert page.evaluate("writes.length") == 0
-            assert "同一协作室" in page.locator(".cc-tg-settings").inner_text()
+            assert "每个私聊明确绑定一个协作室" in page.locator(".cc-tg-settings").inner_text()
             assert "仍可能显示通知" not in page.locator(".cc-tg-binding").inner_text()
             page.evaluate(
                 "channels.act('dot-channel-tg-activate',document.querySelector('[data-cc-action=dot-channel-tg-activate]'))"
@@ -80,7 +95,7 @@ def test_telegram_settings_identity_consent_stale_and_duplicate_guards(
             page.evaluate("resolveWrite(); delayWrites=false")
             page.evaluate("first")
             page.evaluate("second")
-            page.get_by_text("将本人私聊绑定此协作室", exact=True).click()
+            page.locator('[data-channel-form="tg-bind"]').locator("..").locator("summary").click()
             group = page.locator("[data-channel-form=tg-bind]")
             group.locator("[name=account_id]").select_option("tgAccount")
             group.locator("[name=dot_id]").select_option("dotA")
@@ -125,6 +140,7 @@ def test_telegram_settings_identity_consent_stale_and_duplicate_guards(
             page.evaluate(
                 "channels.act('dot-channel-open',document.querySelector('#open'))"
             )
+            page.locator(".cc-connection-maintenance > summary").click()
             page.get_by_text("向 Telegram 发送已有图片或文件", exact=True).click()
             files = page.locator("[data-channel-form=tg-files]")
             files.locator("[name=tg_binding]").select_option("tgBinding")

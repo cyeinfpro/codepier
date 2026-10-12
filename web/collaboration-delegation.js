@@ -32,7 +32,8 @@ window.CodePierCollaborationDelegation = {
     const selectedPolicy = () =>
       state.delegationPolicies.find((p) => p.id === chat().delegationPolicy);
     const policyAvailable = (policy) =>
-      !!policy?.effective_active && policy.expires_at * 1000 > Date.now();
+      !!policy?.effective_active &&
+      (policy.lifetime_mode === 'until_revoked' || policy.expires_at * 1000 > Date.now());
     const capabilitiesLabel = (caps) =>
       (caps || [])
         .map((cap) => ({ read: '读取', write: '修改文件', execute: '运行命令' })[cap] || cap)
@@ -48,11 +49,30 @@ window.CodePierCollaborationDelegation = {
       policy?.execution_target_options?.find((item) => item.id === id)?.available !== false;
     function selectPolicy(policy, version = policy?.version || 0, automatic = false) {
       const c = chat();
+      // Retain only an explicitly chosen subset from the same live policy version.
+      // New scope, revoked grants, or a newly added target never inherit selection.
+      const same =
+        policyAvailable(policy) &&
+        c.delegationPolicy === policy?.id &&
+        c.delegationVersion === version;
+      const targets =
+        same &&
+        (c.delegationTargets || []).every(
+          (id) => policyTargets(policy).includes(id) && targetAvailable(policy, id),
+        )
+          ? [...(c.delegationTargets || [])]
+          : null;
+      const capabilities =
+        same &&
+        (c.delegationCapabilities || []).every((cap) => (policy.capabilities || []).includes(cap))
+          ? [...(c.delegationCapabilities || [])]
+          : null;
       c.delegationPolicy = policy?.id || '';
       c.delegationVersion = version;
       c.delegationAutomatic = !!policy && automatic;
-      c.delegationTargets = policyTargets(policy).length === 1 ? [...policyTargets(policy)] : [];
-      c.delegationCapabilities = [...(policy?.capabilities || [])];
+      c.delegationTargets =
+        targets || (policyTargets(policy).length === 1 ? [...policyTargets(policy)] : []);
+      c.delegationCapabilities = capabilities || [...(policy?.capabilities || [])];
     }
     function updatePolicies(items) {
       const previous = state.delegationPolicies || [];
@@ -443,17 +463,20 @@ window.CodePierCollaborationDelegation = {
             '<small>版本 ' +
             E(policy.version) +
             ' · ' +
-            (policy.usage?.budget_mode === 'rolling_24h'
-              ? '滚动24小时已用 ' +
-                E(policy.usage?.window_delegations || 0) +
-                ' / ' +
-                E(policy.usage?.max_delegations || 0) +
-                '；累计 ' +
+            (policy.usage?.budget_mode === 'unlimited'
+              ? '任务数量不限；累计 ' +
                 E(policy.usage?.total_delegations ?? policy.usage?.delegations ?? 0)
-              : '已用 ' +
-                E(policy.usage?.delegations || 0) +
-                ' / ' +
-                E(policy.usage?.max_delegations || 0)) +
+              : policy.usage?.budget_mode === 'rolling_24h'
+                ? '滚动24小时已用 ' +
+                  E(policy.usage?.window_delegations || 0) +
+                  ' / ' +
+                  E(policy.usage?.max_delegations || 0) +
+                  '；累计 ' +
+                  E(policy.usage?.total_delegations ?? policy.usage?.delegations ?? 0)
+                : '已用 ' +
+                  E(policy.usage?.delegations || 0) +
+                  ' / ' +
+                  E(policy.usage?.max_delegations || 0)) +
             ' 次。只有范围改变时才需重新审阅。</small></details>'
           : '') +
         '</section>'

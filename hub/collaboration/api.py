@@ -123,6 +123,8 @@ def make_router(auth, runtime):
                         'room-scope-control': service.room_scope.control,
                         'telegram-account': service.telegram.import_account,
                         'telegram-bind': service.telegram.bind,
+                        'channel-enrollment-preview': service.channel_enrollment.preview,
+                        'telegram-owner-authority': lambda args, actor: service.channel_owner.control(args, actor, channel='telegram'),
                         'telegram-control': service.telegram.control,
                         'telegram-files-preview': service.telegram.files.preview,
                         'telegram-files': service.telegram.files.approve,

@@ -57,50 +57,56 @@ window.CodePierCollaborationDots = {
       const code = joinInstruction(slot),
         status = joinStatus(slot);
       const alive = liveJoin(slot),
-        policy = delegation.policyFor(slot.id);
-      const task = slot.task_status;
+        policy = delegation.policyFor(slot.id),
+        task = slot.task_status;
+      const connected = transport(slot) && ready(slot);
+      const persistent = (policy?.lifetime_mode || slot.lifetime_mode) === 'until_revoked';
+      const expiry = persistent
+        ? '持续至撤销'
+        : '至 ' + when(policy?.expires_at || slot.expires_at);
       const explain =
         status === 'invited'
-          ? '复制加入指令，发到你的 dot。完成一次宿主确认后，就能在这里持续交流和交办。'
+          ? '把加入指令发到你的 dot，完成原聊天中的接入确认。'
           : status === 'code_expired'
-            ? '刷新加入码后，将新指令发到目标 dot。'
+            ? '加入码已过期。刷新后把新指令发到同一个 dot。'
             : status === 'authorization_unavailable'
-              ? '原范围或连接已不可用：' + (slot.blocked_reason || '请核对项目授权')
-              : transport(slot)
-                ? slot.duplex
-                  ? '像房间成员一样双向交流：你发消息，它回复或主动提问；需要做事时再执行。'
-                  : '面板 @ 它发送任务；领取、进度和结果会回复原消息。连接有效不等于模型已处理。'
+              ? '原授权需要核对：' + (slot.blocked_reason || '请检查项目访问范围')
+              : connected
+                ? '已接入这个房间。继续在对话中交流或交办，沿用已确认的范围。'
                 : slot.state === 'registered'
-                  ? '绑定已完成。将恢复指令发到原 dot，补齐原来的订阅，不必重新加入。'
-                  : '此 dot 不再接收新任务。已有操作保留原回执，不会重投。';
-      return `<article class="cc-card cc-dot-card cc-join-card" data-cc-slot="${E(slot.id)}" data-dot-card="${E(slot.id)}">
-        <div class="cc-row"><div class="cc-dot-title"><span class="cc-avatar" aria-hidden="true">●</span><h3>${E(slot.label)}</h3></div><span class="cc-status">${E(statusText(slot))}</span></div>
-        <p class="cc-join-hint">${E(explain)}</p><p class="cc-hint">${E(projectLabel(state.project))} · ${E(capsLabel(slot.capabilities))}${slot.execution_target !== 'project_agent' ? ' · 已选 VPS' : ''}</p>
-        ${
-          code
-            ? `<div class="cc-join-invitation">${slot.state === 'invited' ? `<div class="cc-row"><strong class="cc-join-code">${E(slot.join_code)}</strong><small>有效至 ${E(when(slot.code_expires_at))}</small></div>` : ''}
-          <details class="cc-dot-instruction" ${slot.state === 'invited' ? 'open' : ''}><summary>${slot.state === 'invited' ? '加入指令' : '恢复原 dot 接入'}</summary><textarea class="cc-join-instruction" aria-label="dot 加入或恢复指令" rows="4" readonly>${E(code)}</textarea></details>
-          <div class="cc-actions">${button('join-copy', slot.state === 'invited' ? '复制加入指令' : '复制恢复指令', slot)}${slot.state === 'invited' ? '' : button('dot-select', '@' + slot.label + ' 发消息', slot, ready(slot) ? '' : 'disabled')}</div></div>`
-            : ''
-        }
-        ${task ? `<div class="cc-dot-evidence" aria-label="实际协作状态"><span>${slot.duplex ? '消息订阅' : '任务订阅'} ${transport(slot) ? '1 / 1' : '0 / 1'}</span><span>已领取 ${E(task.claim?.observed_count || 0)}</span><span>已回传 ${E(task.result?.count || 0)}</span></div>` : ''}
-        <small>连接范围有效至 ${E(when(policy?.expires_at || slot.expires_at))}；不新增账号权限。</small>
-        ${slot.scope_manifest ? `<details class="cc-dot-scope-proof"><summary>${slot.scope_manifest.ordinary_tools_room_scoped ? '普通工具已按此凭据限制到房间范围' : '普通工具尚未按房间强隔离'}</summary><p>${slot.scope_manifest.connection_exceeds_selected_room ? '原连接的有效项目范围大于当前房间。请在通道与执行边界中明确收窄。' : '以上为实际连接范围；不代表宿主其他连接器也受同样限制。'}</p><p>不是操作系统沙箱。宿主持久发件箱是否安装：尚未核验。</p>${slot.scope_manifest.reason_code ? `<p>${E(slot.scope_manifest.reason_code)}</p>` : ''}</details>` : ''}
-        <p class="cc-hint">${slot.operation_timeout_seconds ? `单命令预算 ${E(slot.operation_timeout_seconds)} 秒；已开始命令在原预算内结束，失联不批准新步骤。` : '命令沿用原工作租约上限；没有自动升级长命令预算。'}</p>
-        <details class="cc-dot-maintenance"><summary>连接维护与通知测试</summary>${alive && state.snapshot.can_manage ? `<div class="cc-actions">${slot.state === 'invited' ? button('join-refresh_code', '刷新加入码', slot) : ''}${transport(slot) ? button('join-test', '测试通知链路', slot) : ''}${button('join-revoke', '移除 dot 并停止新任务', slot)}</div>` : ''}
-        ${
-          slot.routes?.some((route) => route.test)
-            ? `<details><summary>通知测试回执</summary>${slot.routes
-                .filter((route) => route.test)
-                .map(
-                  (route) =>
-                    `<p>事件 <code>${E(route.test.event_id)}</code> · ${E(route.test.state)}</p>`,
-                )
-                .join(
-                  '',
-                )}<small>HTTP 接收不代表 dot 已读取；以原话题实际回复为准。</small></details>`
-            : ''
-        }
+                  ? '绑定已保存。把恢复指令发到原 dot，恢复原订阅即可。'
+                  : '此连接不再接收新任务。已有操作保留原记录。';
+      const instruction = code
+        ? `<details class="cc-dot-instruction" ${slot.state === 'invited' ? 'open' : ''}><summary>${slot.state === 'invited' ? '加入指令' : '查看恢复指令'}</summary><textarea class="cc-join-instruction" aria-label="dot 加入或恢复指令" rows="4" readonly>${E(code)}</textarea></details>`
+        : '';
+      const recovery = code
+        ? button('join-copy', slot.state === 'invited' ? '复制加入指令' : '复制恢复指令', slot)
+        : '';
+      return `<article class="cc-card cc-dot-card cc-join-card ${connected ? 'is-connected' : 'needs-connection'}" data-cc-slot="${E(slot.id)}" data-dot-card="${E(slot.id)}">
+        <div class="cc-row cc-dot-heading"><div class="cc-dot-title"><span class="cc-avatar" aria-hidden="true">●</span><div><h3>${E(slot.label)}</h3><p class="cc-dot-scope-line">${E(projectLabel(state.project))} · ${E(capsLabel(slot.capabilities))}</p></div></div><span class="cc-status">${E(statusText(slot))}</span></div>
+        <p class="cc-join-hint">${E(explain)}</p>
+        ${!connected && code ? `<div class="cc-join-invitation">${slot.state === 'invited' ? `<div class="cc-row"><strong class="cc-join-code">${E(slot.join_code)}</strong><small>加入码至 ${E(when(slot.code_expires_at))}</small></div>` : ''}${instruction}<div class="cc-actions">${recovery}</div></div>` : ''}
+        ${connected ? `<div class="cc-actions cc-dot-primary">${button('dot-select', '继续对话', slot)}</div>` : ''}
+        <details class="cc-dot-maintenance"><summary>连接详情与维护</summary>
+          <dl class="cc-dot-facts"><div><dt>授权期限</dt><dd>${E(expiry)}</dd></div><div><dt>执行位置</dt><dd>${slot.execution_target === 'project_agent' ? '当前项目 Agent' : '已选 VPS'}</dd></div><div><dt>单命令预算</dt><dd>${slot.operation_timeout_seconds ? E(slot.operation_timeout_seconds) + ' 秒' : '沿用原工作租约'}</dd></div></dl>
+          ${task ? `<div class="cc-dot-evidence" aria-label="实际协作状态"><span>${slot.duplex ? '消息订阅' : '任务订阅'} ${transport(slot) ? '1 / 1' : '0 / 1'}</span><span>已领取 ${E(task.claim?.observed_count || 0)}</span><span>已回传 ${E(task.result?.count || 0)}</span></div>` : ''}
+          ${slot.scope_manifest ? `<details class="cc-dot-scope-proof"><summary>${slot.scope_manifest.ordinary_tools_room_scoped ? '查看实际凭据限制' : '查看原凭据范围'}</summary><p>${slot.scope_manifest.connection_exceeds_selected_room ? '原凭据还可访问本房间以外的获权项目。需要收窄时，请进入消息连接的高级凭据设置；它会影响使用该凭据的所有会话。' : '以上是此连接的实际范围，不改变其他连接器的权限。'}</p><p>执行使用 Agent 账号权限，不是操作系统沙箱。宿主持久发件箱尚未核验。</p>${slot.scope_manifest.reason_code ? `<p>${E(slot.scope_manifest.reason_code)}</p>` : ''}</details>` : ''}
+          <p class="cc-hint">已开始命令按原预算结束。失联不批准新步骤；恢复连接不会扩大授权或重投任务。</p>
+          ${connected ? instruction : ''}
+          ${alive && state.snapshot.can_manage ? `<div class="cc-actions">${connected ? recovery : ''}${slot.state === 'invited' ? button('join-refresh_code', '刷新加入码', slot) : ''}${transport(slot) ? button('join-test', '测试通知链路', slot) : ''}${button('join-revoke', '移除 dot 并停止新任务', slot)}</div>` : ''}
+          ${
+            slot.routes?.some((route) => route.test)
+              ? `<details><summary>通知测试回执</summary>${slot.routes
+                  .filter((route) => route.test)
+                  .map(
+                    (route) =>
+                      `<p>事件 <code>${E(route.test.event_id)}</code> · ${E(route.test.state)}</p>`,
+                  )
+                  .join(
+                    '',
+                  )}<small>通道接收不代表 dot 已读取；以原话题实际回复为准。</small></details>`
+              : ''
+          }
         </details>
       </article>`;
     }
@@ -332,6 +338,12 @@ window.CodePierCollaborationDots = {
         wrapper.innerHTML = card(slot);
         const next = wrapper.firstElementChild;
         next.dataset.signature = signature;
+        const expanded = new Set(
+          [...node.querySelectorAll('details[open]')].map((detail) => detail.className),
+        );
+        for (const detail of next.querySelectorAll('details')) {
+          if (expanded.has(detail.className)) detail.open = true;
+        }
         node.replaceWith(next);
       }
     }

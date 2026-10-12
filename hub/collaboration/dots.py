@@ -346,6 +346,7 @@ class DotService:
                 'version': slot['version'], 'state': state, 'status': status, 'blocked_reason': reason,
                 'conversation_id': dot['conversation_id'], 'expires_at': slot['expires_at'],
                 'lifetime_mode': 'until_revoked' if self.c.channel_owner.persistent(slot) else 'timed',
+                'effective_active': state not in {'revoked', 'expired'} and not self.c.channel_owner.expired(slot),
                 'code_expires_at': slot['code_expires_at'], 'joined_at': slot['joined_at'], 'join_code': code,
                 'join_instruction': instruction, 'subscription_instruction': resume,
                 'capabilities': setup['capabilities'], 'execution_target': setup['execution_target'],

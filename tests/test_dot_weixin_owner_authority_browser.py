@@ -27,8 +27,10 @@ def setup_owner(page, active=False, polling=False):
 
 def confirm_owner(page):
     page.locator(".cc-wx-owner-authority summary").click()
-    for name in ("confirm_owner_peer", "confirm_owner_tasks", "confirm_until_revoked"):
-        page.locator('[data-channel-form="owner-authority"] [name="' + name + '"]').check()
+    form = page.locator('[data-channel-form="owner-authority"]')
+    for purpose in ("本人身份", "未来任务与回传", "持续与撤销"):
+        expect(form.locator('.cc-consent-purposes')).to_contain_text(purpose)
+    form.locator('[name="confirm_owner_agreement"]').check()
 
 
 @pytest.mark.parametrize("width", [1440, 390])
@@ -39,14 +41,18 @@ def test_exact_consent_default_budget_and_repeat_click(qr_page, width, tmp_path)
     panel = page.locator(".cc-wx-owner-authority")
     panel.locator("summary").click()
     for text in ("projectA", "read / write / execute", "agent", "policyA",
-                 "不是操作系统沙箱", "累计最多 100"):
+                 "并非操作系统沙箱", "累计最多 100"):
         expect(panel).to_contain_text(text)
     assert page.evaluate("writes.length") == 0
     assert panel.locator("input:checked").count() == 0
-    for name in ("confirm_owner_peer", "confirm_owner_tasks", "confirm_until_revoked"):
-        page.evaluate("clickAction('dot-channel-owner-approve')")
-        assert page.evaluate("writes.length") == 0
-        panel.locator('[name="' + name + '"]').check()
+    # The new UI has one explicit acknowledgement, not three separate clicks.
+    # Every purpose remains visible and the exact independent API fields below
+    # are unchanged; missing acknowledgement still prevents every mutation.
+    for purpose in ("本人身份", "未来任务与回传", "持续与撤销"):
+        expect(panel.locator('.cc-consent-purposes')).to_contain_text(purpose)
+    page.evaluate("clickAction('dot-channel-owner-approve')")
+    assert page.evaluate("writes.length") == 0
+    panel.locator('[name="confirm_owner_agreement"]').check()
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     page.screenshot(path=str(tmp_path / f"weixin-owner-consent-{engine}-{width}.png"), full_page=True)
     page.evaluate("Promise.all([clickAction('dot-channel-owner-approve'),clickAction('dot-channel-owner-approve')])")
@@ -60,7 +66,13 @@ def test_exact_consent_default_budget_and_repeat_click(qr_page, width, tmp_path)
         "confirm_owner_tasks": True, "confirm_until_revoked": True, "budget_mode": "lifetime",
         "project": "projectA", "environment_id": "test", "conversation_id": "conversationA",
     }
-    confirm_owner(page)
+    page.locator(".cc-wx-owner-authority > summary").click()
+    page.locator('[name="budget_mode"]').select_option("rolling_24h")
+    form = page.locator('[data-channel-form="owner-authority"]')
+    expect(form.locator('[name="confirm_owner_agreement"]')).not_to_be_checked()
+    form.locator('[name="confirm_owner_agreement"]').check()
+    page.evaluate("clickAction('dot-channel-owner-approve')")
+    assert page.evaluate("writes.length") == 1
     page.locator('[name="confirm_daily_budget"]').check()
     page.evaluate("clickAction('dot-channel-owner-approve')")
     args = page.evaluate("writes[1].args")
@@ -153,6 +165,7 @@ def test_binding_lifetime_requires_specific_consent(qr_page):
 
 def start_renewal(page, confirmed=False):
     setup_owner(page, active=True)
+    page.locator(".cc-wx-account-step > summary").click()
     page.locator('[name="renew_account_id"]').select_option("accountA")
     page.locator('[name="qr_storage"]').check()
     page.locator('[name="qr_terms"]').check()
@@ -197,8 +210,8 @@ def test_pending_revalidation_preserves_scope_without_reapproving(qr_page):
     }""")
     page.evaluate("clickAction('dot-channel-open')")
     panel = page.locator(".cc-wx-owner-authority")
-    expect(panel).to_contain_text("原授权保留，等待原联系人重新验证")
-    expect(panel).to_contain_text("原执行目标：agent")
+    expect(panel).to_contain_text("原批准范围保留")
+    expect(panel.locator("dt", has_text="执行目标").locator("xpath=following-sibling::dd[1]")).to_have_text("agent")
     expect(panel).not_to_contain_text("not-the-approved-target")
     assert panel.locator('[data-cc-action="dot-channel-owner-approve"]').count() == 0
     expect(panel.locator('[data-cc-action="dot-channel-owner-revoke"]')).to_be_visible()
@@ -267,7 +280,7 @@ def test_missing_reply_authorization_explains_explicit_rebinding(qr_page):
     }""")
     page.evaluate("clickAction('dot-channel-open')")
     panel = page.locator(".cc-wx-owner-authority")
-    expect(panel).to_contain_text("当前绑定未批准回复。请明确重新建立允许回复的绑定，再开启本人任务。")
+    expect(panel).to_contain_text("当前绑定未批准回复。需建立允许回复的绑定后才能开启任务。")
     assert panel.locator('[data-cc-action="dot-channel-owner-approve"]').count() == 0
     assert page.evaluate("writes.length") == 0
 

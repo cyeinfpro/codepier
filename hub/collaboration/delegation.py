@@ -188,7 +188,7 @@ class DelegationService:
             'target_snapshot': spec['target_snapshot'], 'target_snapshots': spec['target_snapshots'],
             **self.notification_status(policy, room),
             'effective_active': not bool(reason), 'blocked_reason': reason,
-            'usage': {'delegations': policy['uses'], 'max_delegations': spec['max_delegations'],
+            'usage': {'delegations': policy['uses'], 'max_delegations': self.c.channel_owner.budget_limit(policy),
                       'total_delegations': policy['uses'], 'window_delegations': self.c.channel_owner.budget_used(policy),
                       'budget_mode': self.c.channel_owner.budget_mode(policy)},
             'subscription_request': {'name': DELEGATION_EVENT, 'arguments': filters},
@@ -404,7 +404,8 @@ class DelegationService:
         if 'write' in capabilities and 'project_agent' not in targets:
             raise DevError('DELEGATION_SCOPE_DENIED', 'VPS目标不能授权本机文件写入', 403)
         request_scope = {'execution_targets': targets, 'capabilities': capabilities}
-        if self.c.channel_owner.budget_used(policy) >= spec['max_delegations']:
+        count_limit = self.c.channel_owner.budget_limit(policy)
+        if count_limit is not None and self.c.channel_owner.budget_used(policy) >= count_limit:
             raise DevError('DELEGATION_BUDGET_EXCEEDED', '此委托设置的请求次数已用尽', 409)
         body = json.loads(message['body'])['body_text']
         objective = '委托用途：' + spec['purpose'] + '\n本次房主请求：' + body

@@ -1,6 +1,6 @@
 /* One room workspace. Transport, permissions and existing theme remain unchanged. */
 .cc-workspace.cc-chat-shell {
-  grid-template-columns: 216px minmax(0, 1fr);
+  grid-template-columns: 220px minmax(0, 1fr);
   max-width: 1840px;
   min-height: 440px;
   border-radius: 14px;
@@ -14,8 +14,8 @@
   outline-offset: 3px;
 }
 .cc-workspace .cc-room-rail {
-  padding: 18px 12px;
-  gap: 14px;
+  padding: 20px 14px;
+  gap: 16px;
   background: color-mix(in srgb, var(--ui-side) 70%, var(--ui-panel));
 }
 .cc-workspace .cc-rail-heading {
@@ -78,12 +78,12 @@
 }
 .cc-workspace .cc-room-header {
   align-items: center;
-  padding: 18px 24px 9px;
+  padding: 18px 24px 12px;
   gap: 12px;
   border-bottom: 0;
 }
 .cc-workspace .cc-room-header h2 {
-  font-size: 19px;
+  font-size: 20px;
   line-height: 1.4;
   letter-spacing: -0.03em;
 }
@@ -100,6 +100,33 @@
 .cc-workspace .cc-room-title {
   gap: 8px;
 }
+.cc-workspace .cc-room-subline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  margin-top: 4px;
+  min-width: 0;
+  color: var(--ui-muted);
+  font-size: 12px;
+}
+.cc-workspace .cc-room-subline .cc-member-strip {
+  margin: 0;
+  padding: 0;
+}
+.cc-workspace .cc-room-subline .cc-member-strip .cc-avatar {
+  display: none;
+}
+.cc-workspace .cc-room-subline .cc-member-strip > span {
+  margin: 0;
+}
+.cc-workspace .cc-room-subline .cc-member-strip .cc-text-button {
+  min-height: 28px;
+  padding: 2px 0;
+}
+.cc-workspace .cc-room-subline .cc-project-strip {
+  padding: 0;
+}
 .cc-workspace .cc-room-title .cc-status {
   font-size: 10px;
   padding: 3px 7px;
@@ -111,8 +138,8 @@
   gap: 6px;
 }
 .cc-workspace .cc-header-tools .btn {
-  min-height: 36px;
-  border-radius: 8px;
+  min-height: 40px;
+  border-radius: 10px;
   font-size: 12px;
   padding: 6px 10px;
 }
@@ -137,9 +164,9 @@
   margin: 0;
   padding: 0 24px 9px;
 }
-/* Keep scope recovery and add-project usable even when only one project remains. */
-.cc-workspace[data-relay-multi='false'] .cc-project-strip {
-  display: flex;
+/* A single scope stays in the header menu; recovery remains visible when needed. */
+.cc-workspace .cc-project-strip.is-single-project:not(:has([data-cc-action='retry-directory'])) {
+  display: none;
 }
 .cc-workspace .cc-project-strip .cc-project-chip {
   padding: 4px 8px;
@@ -155,30 +182,32 @@
 }
 .cc-workspace .cc-workspace-nav.cc-tabs {
   display: flex;
-  gap: 6px;
+  gap: 8px;
   padding: 0 24px;
   margin: 0;
   border-bottom: 1px solid var(--ui-line);
   overflow-x: auto;
   flex-wrap: nowrap;
+  flex-shrink: 0;
 }
 .cc-workspace .cc-workspace-nav .btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 7px;
-  min-height: 43px;
-  padding: 9px 12px;
+  min-height: 46px;
+  padding: 10px 14px;
   border-radius: 0;
   border: 0;
   border-bottom: 2px solid transparent;
   font-size: 13px;
   white-space: nowrap;
   background: transparent;
+  color: var(--ui-muted);
 }
 .cc-workspace .cc-workspace-nav .btn.is-active {
   border-bottom-color: var(--ui-purple);
-  color: var(--ui-text);
+  color: var(--ui-purple);
   background: transparent;
   font-weight: 650;
 }
@@ -203,8 +232,8 @@
   justify-content: space-between;
   align-items: center;
   gap: 12px;
-  min-height: 35px;
-  padding: 6px 24px;
+  min-height: 36px;
+  padding: 4px 24px;
   font-size: 11px;
   border-bottom: 1px solid var(--ui-line);
   color: var(--ui-muted);
@@ -238,8 +267,8 @@
   color: inherit;
   font: inherit;
   cursor: pointer;
-  min-height: 25px;
-  padding: 2px 0;
+  min-height: 30px;
+  padding: 3px 0;
   white-space: nowrap;
 }
 .cc-workspace #cc-feedback {
@@ -275,10 +304,10 @@
   height: 100%;
 }
 .cc-workspace .cc-feed {
-  padding: 24px max(22px, calc((100% - 820px) / 2));
+  padding: 28px max(24px, calc((100% - 800px) / 2));
 }
 .cc-workspace .cc-compose-wrap {
-  padding: 10px max(20px, calc((100% - 820px) / 2)) 13px;
+  padding: 10px max(20px, calc((100% - 800px) / 2)) 14px;
   background: var(--ui-panel);
   border-top: 0;
 }
@@ -337,8 +366,8 @@
 .cc-workspace-panel {
   display: flex;
   flex-direction: column;
-  flex: 0 0 min(43%, 470px);
-  min-width: 320px;
+  flex: 0 0 min(46%, 540px);
+  min-width: 350px;
   min-height: 0;
   height: 100%;
   border-left: 1px solid var(--ui-line);
@@ -354,16 +383,94 @@
 }
 .cc-panel-heading h2 {
   font-size: 17px;
-  margin: 4px 0 0;
+  margin: 0;
 }
 .cc-panel-heading .btn {
   font-size: 11px;
-  min-height: 34px;
-  padding: 5px 8px;
+  min-height: 40px;
+  padding: 6px 10px;
   border-radius: 7px;
 }
-.cc-panel-heading .cc-eyebrow {
-  font-size: 9px;
+.cc-panel-back {
+  display: block;
+  border: 0;
+  padding: 0 0 7px;
+  min-height: 32px;
+  background: transparent;
+  color: var(--ui-muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.cc-task-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 20px;
+}
+.cc-task-toolbar p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--ui-muted);
+}
+.cc-task-toolbar .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 40px;
+  padding: 6px 10px;
+  border: 1px solid var(--ui-line);
+  border-radius: 9px;
+  font-size: 12px;
+}
+.cc-task-toolbar svg {
+  width: 16px;
+  height: 16px;
+}
+.cc-task-toolbar .btn > span {
+  margin-left: 5px;
+}
+.cc-message-receipts {
+  margin-top: 20px;
+  border: 1px solid var(--ui-line);
+  border-radius: 12px;
+  background: var(--ui-panel);
+}
+.cc-message-receipts > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px;
+  min-height: 48px;
+  font-size: 13px;
+  cursor: pointer;
+  list-style: none;
+}
+.cc-message-receipts > summary::-webkit-details-marker {
+  display: none;
+}
+.cc-message-receipts > summary::before {
+  content: '›';
+  width: 12px;
+  font-size: 18px;
+  color: var(--ui-muted);
+}
+.cc-message-receipts[open] > summary::before {
+  transform: rotate(90deg);
+}
+.cc-message-receipts > summary [data-cc-receipt-summary] {
+  margin-left: auto;
+  color: var(--ui-muted);
+  font-size: 11px;
+}
+.cc-message-receipts .cc-progress-feed {
+  padding: 0 14px 14px;
+}
+.cc-message-receipts .cc-progress-caption h3 {
+  display: none;
 }
 .cc-panel-scroll {
   flex: 1;
@@ -485,9 +592,21 @@
   font-size: 12px;
 }
 .cc-workspace-records {
-  margin-top: 24px;
-  padding-top: 18px;
-  border-top: 1px solid var(--ui-line);
+  min-width: 0;
+}
+.cc-workspace-records > .cc-stack > .cc-legacy-tasks {
+  border: 1px solid var(--ui-line);
+  padding: 0 14px 14px;
+  border-radius: 12px;
+}
+.cc-workspace-records > .cc-stack > .cc-legacy-tasks:not([open]) {
+  padding-bottom: 0;
+}
+.cc-workspace-records .cc-legacy-tasks > summary {
+  min-height: 46px;
+  padding-block: 13px;
+  cursor: pointer;
+  font-size: 13px;
 }
 .cc-workspace .cc-workspace-welcome {
   max-width: 520px;
@@ -600,7 +719,7 @@
 }
 @media (max-width: 1300px) {
   .cc-workspace.cc-chat-shell {
-    grid-template-columns: 184px minmax(0, 1fr);
+    grid-template-columns: 190px minmax(0, 1fr);
   }
   .cc-workspace .cc-room-header {
     padding-inline: 18px;
@@ -663,7 +782,7 @@
     );
   }
   .cc-workspace .cc-room-header {
-    padding: 12px 12px 6px;
+    padding: 10px 12px 8px;
     gap: 8px;
   }
   .cc-workspace .cc-room-header h2 {
@@ -679,8 +798,8 @@
     display: none;
   }
   .cc-workspace .cc-header-tools .btn {
-    min-height: 36px;
-    min-width: 36px;
+    min-height: 40px;
+    min-width: 40px;
     padding: 5px;
   }
   .cc-workspace .cc-member-strip {
@@ -692,27 +811,27 @@
     font-size: 11px;
   }
   .cc-workspace .cc-workspace-nav.cc-tabs {
-    padding: 0 8px;
-    gap: 0;
+    padding: 0 10px;
+    gap: 4px;
   }
   .cc-workspace .cc-workspace-nav .btn {
     flex: 1;
     min-height: 44px;
-    padding: 8px 7px;
-    font-size: 12px;
+    padding: 9px 8px;
+    font-size: 13px;
     gap: 5px;
   }
   .cc-workspace-pulse {
-    padding: 5px 14px;
-    font-size: 10px;
-    min-height: 32px;
+    padding: 2px 14px;
+    font-size: 11px;
+    min-height: 34px;
   }
   .cc-workspace #cc-feedback {
     padding-inline: 14px;
     font-size: 11px;
   }
   .cc-workspace .cc-feed {
-    padding: 18px 12px;
+    padding: 20px 14px;
   }
   .cc-workspace .cc-compose-wrap {
     padding: 8px 10px max(8px, env(safe-area-inset-bottom));
@@ -760,7 +879,7 @@
     padding: 14px;
   }
   .cc-progress-filters button {
-    min-height: 38px;
+    min-height: 40px;
   }
   .cc-workspace .cc-panel-heading .btn,
   .cc-progress-card .btn {
@@ -768,6 +887,30 @@
   }
   .cc-workspace .cc-project-strip {
     padding-inline: 14px;
+  }
+  .cc-workspace .cc-room-subline {
+    font-size: 11px;
+    gap: 2px 8px;
+  }
+  .cc-workspace .cc-room-subline .cc-project-strip {
+    padding: 0;
+  }
+  .cc-workspace .cc-room-subline .cc-member-strip {
+    margin: 0;
+    padding: 0;
+  }
+  .cc-workspace .cc-room-menu > summary {
+    min-width: 40px;
+    min-height: 40px;
+  }
+  .cc-panel-back {
+    min-height: 36px;
+  }
+  .cc-task-toolbar .btn {
+    min-height: 44px;
+  }
+  .cc-message-receipts .cc-progress-feed {
+    padding-inline: 12px;
   }
 }
 @media (prefers-reduced-motion: reduce) {

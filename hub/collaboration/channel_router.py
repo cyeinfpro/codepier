@@ -645,6 +645,7 @@ class ChannelRouter:
             await self.store.run(self.finish, claim, "", exc)
 
     async def tick(self):
+        await self.c.channel_enrollment.notices.tick()
         await self.store.run(self.reconcile)
         rows = await self.store.run(
             lambda: self.store.all(

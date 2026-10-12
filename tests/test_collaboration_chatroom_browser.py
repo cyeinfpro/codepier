@@ -30,6 +30,13 @@ def login(page, stack):
     expect(page.locator('#cc-message-input')).to_be_enabled()
 
 
+def open_add_project(page):
+    menu = page.locator('.cc-room-menu')
+    if menu.get_attribute('open') is None:
+        menu.locator('[data-cc-more]').click()
+    menu.locator('[data-cc-action="add-project"]').click()
+
+
 def add_message(stack, room_id, body):
     return stack.must(stack.client.post('/api/collaboration/message', json={
         **scope(stack), 'room_id': room_id, 'body_text': body,
@@ -274,12 +281,12 @@ def test_conversation_add_project_preserves_history_draft_and_attribution(collab
         assert conversation == data['room']['id']
         area.fill('添加项目期间保留的草稿')
         other = stack.projects[1]
-        page.locator('[data-cc-action="add-project"]').click()
+        open_add_project(page)
         form = page.locator('#cc-add-project')
         form.locator('[name="project"]').select_option(other['id'])
         page.keyboard.press('Escape')
         expect(area).to_have_value('添加项目期间保留的草稿')
-        page.locator('[data-cc-action="add-project"]').click()
+        open_add_project(page)
         form.locator('[name="project"]').select_option(other['id'])
         form.locator('[name="confirm"]').check()
         form.locator('button[type="submit"]').evaluate('(button) => {button.click();button.click();}')
@@ -361,7 +368,7 @@ def test_conversation_stale_add_review_and_visible_permission_reset(collaboratio
         data = overview(stack)
         conversation = data['conversation']
         other = stack.projects[1]
-        page.locator('[data-cc-action="add-project"]').click()
+        open_add_project(page)
         form = page.locator('#cc-add-project')
         form.locator('[name="project"]').select_option(other['id'])
         form.locator('[name="confirm"]').check()
@@ -669,14 +676,14 @@ def test_older_background_poll_cannot_replace_new_foreground_snapshot(collaborat
         assert held[0][1].ok, held[0][1].status
         register_notification_fixture(stack, '新快照里的通知连接')
         click_room_refresh(page)
-        expect(page.locator('.cc-member-strip')).to_contain_text('1 个助手连接')
+        expect(page.locator('.cc-member-strip')).to_contain_text('1 个助手')
         expect(page.locator('[data-cc-action="refresh"]')).to_be_enabled()
         page.locator('[data-cc-action="mentions"]').click()
         expect(page.locator('[data-cc-action="pick-mention"]')).to_contain_text('新快照里的通知连接')
         held[0][0].fulfill(response=held[0][1])
         page.evaluate('() => window.__ccHeldPoll')
         page.unroute('**/api/collaboration?*', hold_first_overview)
-        expect(page.locator('.cc-member-strip')).to_contain_text('1 个助手连接')
+        expect(page.locator('.cc-member-strip')).to_contain_text('1 个助手')
         expect(page.locator('#cc-drawer')).to_be_visible()
         page.locator('[data-cc-action="pick-mention"]').click()
         page.keyboard.press('Escape')

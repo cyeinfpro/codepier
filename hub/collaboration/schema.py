@@ -228,6 +228,8 @@ def migrate(db):
     migrate_channel_media(db)
     from hub.collaboration.telegram_schema import migrate as migrate_telegram
     migrate_telegram(db)
+    from hub.collaboration.channel_consent import migrate as migrate_channel_consent
+    migrate_channel_consent(db)
     from hub.collaboration.channel_settings import migrate as migrate_channel_settings
     migrate_channel_settings(db)
     db.execute("INSERT OR REPLACE INTO meta VALUES ('collaboration_schema','3')")

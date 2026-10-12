@@ -92,7 +92,7 @@ window.CodePierCollaborationChannels = {
         : '尚未记录';
     function card() {
       return allowed() && state.snapshot?.capabilities?.room_scope_v1
-        ? `<section class="cc-card cc-channel-settings"><h3>通道与执行边界</h3><p>在此管理当前房间的微信与 Telegram 连接、文件外发和凭据范围。打开此页只查询状态；保存配置需逐项确认。</p>${button('dot-channel-open', '管理通道与范围')}</section>`
+        ? `<section class="cc-card cc-channel-settings"><h3>消息连接</h3><p>把微信或 Telegram 接入当前话题。</p>${button('dot-channel-open', '管理连接')}</section>`
         : '';
     }
 
@@ -285,11 +285,13 @@ window.CodePierCollaborationChannels = {
             '连接名称',
             '<input name="label" value="我的微信" maxlength="80" required autocomplete="off">',
           ) +
-          checkbox(
-            'qr_scanner',
-            '我已核对以上完整账号编号，确认是本人，已在微信授权页确认相关条款，并同意加密保存凭据供本服务持续连接使用',
-            true,
-          ) +
+          (e.consent_receipt_id
+            ? '<p>凭据保存与服务条款已分别记录。请核对以上本人扫码账号，点击下方按钮保存；不会新增任务权限。</p>'
+            : checkbox(
+                'qr_scanner',
+                '我已核对以上完整账号编号，确认是本人，已在微信授权页确认相关条款，并同意加密保存凭据供本服务持续连接使用',
+                true,
+              )) +
           (q.renew
             ? checkbox(
                 'qr_replace_existing',
@@ -395,6 +397,9 @@ window.CodePierCollaborationChannels = {
         expected_credential_version: result.expected_credential_version,
         renew_bot_id: result.renew_bot_id || '',
         re_pair_required: result.re_pair_required === true,
+        consent_receipt_id: /^[a-f0-9]{32}$/.test(result.consent_receipt_id || '')
+          ? result.consent_receipt_id
+          : '',
       };
       if (qrTerminal(q.entry)) q.acceptArgs = null;
     }
@@ -512,7 +517,10 @@ window.CodePierCollaborationChannels = {
       if (!qrLive(q) || q.busy || q.entry?.state !== 'confirmed' || !q.entry.scanner_id)
         return local;
       if (!q.acceptArgs) {
-        if (!data.checked('qr_scanner') || (q.renew && !data.checked('qr_replace_existing')))
+        if (
+          (!q.entry.consent_receipt_id && !data.checked('qr_scanner')) ||
+          (q.renew && !data.checked('qr_replace_existing'))
+        )
           return local;
         q.acceptArgs = {
           ...qrScope(q.key),
@@ -522,8 +530,9 @@ window.CodePierCollaborationChannels = {
           label: data.value('label').trim(),
           confirm_scanner_id: q.entry.scanner_id,
           ...(q.renew ? { confirm_replace_existing: data.checked('qr_replace_existing') } : {}),
-          confirm_credential_storage: true,
-          confirm_provider_terms: true,
+          ...(q.entry.consent_receipt_id
+            ? { consent_receipt_id: q.entry.consent_receipt_id }
+            : { confirm_credential_storage: true, confirm_provider_terms: true }),
         };
       }
       q.busy = true;
@@ -636,6 +645,181 @@ window.CodePierCollaborationChannels = {
       }
       return local;
     }
+
+    const enrollmentPreviews = new WeakMap();
+    const enrollmentRequests = new Set();
+    const enrollmentSelection = (form) =>
+      JSON.stringify(
+        ['account_id', 'dot_id', 'expected_peer_id'].map(
+          (name) => form.querySelector('[name="' + name + '"]')?.value.trim() || '',
+        ),
+      );
+    function enrollmentForm(channel, data) {
+      const accounts = (data.accounts || []).filter(
+        (a) =>
+          a.state === 'active' &&
+          !(data.bindings || []).some(
+            (b) => b.state !== 'revoked' && (channel === 'weixin' || b.account_id === a.id),
+          ),
+      );
+      if (!accounts.length) return '';
+      const slots = mentionSlots().filter((slot) => slot.duplex && slot.state === 'registered');
+      return `<section class="cc-enrollment"><h3>2. 核对授权，私聊验证后自动开通</h3>
+        <p>在这里一次核对接入与本人任务授权；发回授权码后，无需再回面板确认联系人或重复开通任务。</p>
+        <div class="cc-form" data-channel-form="enrollment" data-enrollment-channel="${E(channel)}">
+          ${field(
+            '授权的机器人账号',
+            select(
+              'account_id',
+              accounts.map((a) => [a.id, a.label + ' · ' + a.bot_id]),
+            ),
+          )}
+          ${field(
+            '接收任务的 dot',
+            select(
+              'dot_id',
+              slots.map((slot) => [slot.id, slot.label]),
+            ),
+          )}
+          <details class="cc-enrollment-peer"><summary>已有本人联系人编号（可选，填写后仅该联系人可验证）</summary>
+            ${field(channel === 'telegram' ? '本人的数字 user_id / 私聊 chat_id' : '本人的私聊 peer_id', '<input name="expected_peer_id" maxlength="256" autocomplete="off">')}
+          </details>
+          <div class="cc-enrollment-summary" role="status" aria-live="polite">选择账号与 dot 后显示确切授权范围。</div>
+          <div class="cc-consent-purposes">
+            <p data-consent-purpose="owner_identity"><strong>本人身份：</strong>仅本人在所选机器人私聊发送此一次性授权码，该私聊身份将绑定为本人。不要转发授权码。</p>
+            <p data-consent-purpose="future_tasks"><strong>未来任务：</strong>允许该本人私聊交办摘要所列项目、能力和执行目标内的新任务，不执行旧消息，不扩大 MCP 连接权限。</p>
+            <p data-consent-purpose="result_delivery"><strong>消息与回传：</strong>接收此私聊的新消息到当前话题，任务结果回到原私聊和当前话题。${channel === 'telegram' ? '同时把本话题已授权、当前可见的新消息完整同步到此 Telegram 私聊；不补发历史。' : '仅允许原微信消息的结果回复，不自动开启跨通道完整同步。'}文件外发仍需逐份批准。</p>
+            <p data-consent-purpose="until_revoked"><strong>持续期限：</strong>验证完成后，绑定和上述任务范围持续至面板撤销；任务数量、超时、并发以及宿主必要的权限和付款确认仍然有效。</p>
+            <p data-consent-purpose="pairing_notices"><strong>接入提醒：</strong>验证前只提示发送授权码，验证后向原私聊发送回执。同一条入站消息只提醒一次；没有可用私聊地址时等待第一条入站消息，不宣称已发送。</p>
+          </div>
+          ${checkbox('enrollment_agreement', '我已核对并同意以上各项授权', true)}
+          <div class="cc-actions">${button('dot-channel-enrollment-approve', '同意并生成本人授权码', {}, 'disabled')}${button('dot-channel-enrollment-preview', '重新核对摘要')}</div>
+          <small>各项同意分别留存证据。此处不重复索取凭据保存或服务条款同意；没有对应证据时不会推定已经同意。</small>
+        </div></section>`;
+    }
+    function enrollmentReset(form) {
+      enrollmentPreviews.get(form)?.controller?.abort();
+      enrollmentPreviews.delete(form);
+      const agree = form.querySelector('[name="enrollment_agreement"]');
+      agree.checked = false;
+      agree.disabled = true;
+      form.querySelector('[data-cc-action="dot-channel-enrollment-approve"]').disabled = true;
+    }
+    async function enrollmentRead(form) {
+      enrollmentReset(form);
+      const owner = loaded;
+      const selection = enrollmentSelection(form);
+      const [account_id, dot_id, peer] = JSON.parse(selection);
+      const channel = form.dataset.enrollmentChannel;
+      const output = form.querySelector('.cc-enrollment-summary');
+      if (!account_id || !dot_id) {
+        output.textContent = '请先选择当前账号和已连接的 dot。';
+        return local;
+      }
+      const request = {
+        owner,
+        epoch: state.drawerEpoch,
+        selection,
+        controller: new AbortController(),
+      };
+      enrollmentPreviews.set(form, request);
+      enrollmentRequests.add(request.controller);
+      const live = () =>
+        form.isConnected &&
+        loaded === owner &&
+        current(owner.key) &&
+        request.epoch === state.drawerEpoch &&
+        enrollmentPreviews.get(form) === request &&
+        enrollmentSelection(form) === selection;
+      output.textContent = '正在读取确切的项目、能力和结果回传范围…';
+      try {
+        const preview = await api('/api/collaboration/channel-enrollment-preview', {
+          method: 'POST',
+          body: JSON.stringify({ ...qrScope(owner.key), channel, account_id, dot_id }),
+          signal: request.controller.signal,
+          retrySafe: true,
+        });
+        if (!live()) return local;
+        if (
+          preview.channel !== channel ||
+          preview.account_id !== account_id ||
+          preview.dot_id !== dot_id ||
+          preview.conversation_id !== owner.key.conversation_id ||
+          preview.environment_id !== owner.key.environment_id ||
+          !/^[a-f0-9]{64}$/.test(preview.scope_digest || '') ||
+          preview.text_version !== 'channel-consent-v1' ||
+          !preview.project_id ||
+          !Array.isArray(preview.capabilities) ||
+          !preview.capabilities.length ||
+          !Array.isArray(preview.execution_targets) ||
+          !preview.execution_targets.length ||
+          !Number.isInteger(preview.max_delegations) ||
+          preview.max_delegations < 1 ||
+          !preview.revoke_path
+        )
+          throw new Error('服务端授权摘要不完整，不能生成任务授权码。');
+        request.preview = preview;
+        const rows = [
+          ['账号', preview.account_label + ' · ' + preview.bot_id],
+          ['授权联系人', peer || '仅本人持此码验证的原机器人私聊身份'],
+          ['项目范围', preview.project_id + ' / ' + preview.environment_id],
+          ['接收任务的 dot', dot_id],
+          ['允许能力', preview.capabilities.join(' / ')],
+          ['执行目标', preview.execution_targets.join(' / ')],
+          ['任务数量', '沿用原策略：累计最多 ' + preview.max_delegations + ' 次'],
+          ['结果回传位置', preview.result_destination],
+          ['期限与撤销', '持续至撤销 · ' + preview.revoke_path],
+        ];
+        output.innerHTML =
+          '<h4>本次授权摘要</h4><dl>' +
+          rows
+            .map(([name, value]) => '<dt>' + E(name) + '</dt><dd>' + E(value) + '</dd>')
+            .join('') +
+          '</dl>';
+        form.querySelector('[name="enrollment_agreement"]').disabled = false;
+        form.querySelector('[data-cc-action="dot-channel-enrollment-approve"]').disabled = false;
+      } catch (error) {
+        if (live() && error.name !== 'AbortError')
+          output.textContent =
+            '无法确认授权范围，尚未生成授权码。请检查 dot 的已批准范围后重新核对。' +
+            (error.message || '');
+      } finally {
+        enrollmentRequests.delete(request.controller);
+      }
+      return local;
+    }
+    function onboardingStatus(binding) {
+      const entry = binding.onboarding;
+      if (!entry) return '';
+      const status =
+        {
+          waiting_inbound: '尚无可用私聊地址，等待第一条入站消息；未发送接入提醒。',
+          waiting_context: '等待原私聊的可用回复上下文；回执尚未发送。',
+          queued: '接入回执已排队，尚未确认平台接受。',
+          sending: '接入回执正在提交，结果尚未确认。',
+          accepted: '平台已接受原私聊接入回执，不代表用户已读。',
+          unknown: '接入回执结果未知，为避免重复不会自动重发。',
+          rejected: '平台拒绝接入回执；请核对原通道状态。',
+          cancelled: '原接入回执已取消或授权状态已变化。',
+        }[entry.notice_state] || '尚无可核实的私聊回执。';
+      const instruction = entry.auto_complete
+        ? '授权摘要已确认：仅本人向原机器人私聊发送授权码，验证后自动完成绑定与任务开通，无需回面板重复确认。'
+        : entry.state === 'completed'
+          ? '本次授权码已完成验证。任务权限以当前授权状态为准。'
+          : '原接入预授权已失效或范围已变化，不会自动开通任务；请重新核对。';
+      return `<div class="cc-onboarding-status" role="status"><strong>${E(instruction)}</strong><p>${E(status)}</p></div>`;
+    }
+    function channelOwnerPanel(channel, data, binding) {
+      if (channel === 'weixin') return ownerTaskPanel(data, binding);
+      return ownerTaskPanel(data, {
+        ...binding,
+        peer_id: binding.chat_id,
+        allow_replies: binding.mirror_enabled,
+      })
+        .replaceAll('dot-channel-owner-', 'dot-channel-tg-owner-')
+        .replaceAll('微信', 'Telegram');
+    }
+
     function channelSetting(channel, data) {
       if (!data.setting) return '';
       const name = channel === 'weixin' ? '微信' : 'Telegram';
@@ -660,23 +844,26 @@ window.CodePierCollaborationChannels = {
       );
     }
 
+    function telegramBindings(t) {
+      return (t.bindings || [])
+        .map(
+          (
+            b,
+          ) => `<section class="cc-channel-binding cc-tg-binding" data-binding-id="${E(b.id)}"><div class="cc-channel-heading"><strong>Telegram · ${listState(b.state)}</strong><span>完整同步</span></div><small>原绑定 ${E(b.id.slice(-8))} · 世代 ${E(b.generation)} · ${b.lifetime_mode === 'until_revoked' ? '持续至撤销' : '到期 ' + stamp(b.expires_at)}</small>
+        ${b.user_id ? `<p>本人 user_id：<code>${E(b.user_id)}</code> · 私聊 chat_id：<code>${E(b.chat_id)}</code></p>` : ''}
+        ${b.state === 'pairing' ? `<p>${b.onboarding?.auto_complete ? '仅本人在当前机器人私聊发送以下一次性授权码，即可自动连接并开通已批准任务范围：' : '在当前机器人私聊发送以下一次性命令，再回来核对身份：'}</p><textarea readonly rows="2" aria-label="Telegram 配对命令">${E(b.pairing_command || '已过期，请撤销后重新配对')}</textarea>` : ''}
+        ${b.state === 'awaiting_owner' ? `<p>实际 user_id：<code>${E(b.pending_user_id)}</code> · chat_id：<code>${E(b.pending_chat_id)}</code></p><div data-channel-form="tg-activate">${checkbox('same_owner', '我已核对数字编号，确认这是我本人的 Telegram 私聊', true)}${button('dot-channel-tg-activate', '确认本人并启用同步', b)}</div>` : ''}
+        ${onboardingStatus(b)}${channelOwnerPanel('telegram', t, b)}<small>${b.disable_notification ? 'Telegram 无声发送；仍可能显示通知。' : 'Telegram 按客户端通知设置提醒。'}微信请在客户端设置免打扰。</small><div class="cc-actions">${b.state === 'active' ? button('dot-channel-tg-pause', '暂停 Telegram', b) : b.state === 'paused' ? button('dot-channel-tg-resume', '恢复原绑定', b) : ''}${b.state !== 'revoked' ? button('dot-channel-tg-revoke', '撤销 Telegram', b) : ''}</div></section>`,
+        )
+        .join('');
+    }
     function telegramPanel(t, w, slots) {
       if (!t) return '';
       const names = {
         retention_gap_possible: '离线可能超过24小时，上游历史可能不完整',
         TELEGRAM_WEBHOOK_CONFLICT: '机器人已有Webhook，请人工核对，不会自动替换',
       };
-      const bindings = (t.bindings || [])
-        .map(
-          (
-            b,
-          ) => `<section class="cc-channel-binding cc-tg-binding" data-binding-id="${E(b.id)}"><div class="cc-channel-heading"><strong>Telegram · ${listState(b.state)}</strong><span>完整同步</span></div><small>原绑定 ${E(b.id.slice(-8))} · 世代 ${E(b.generation)} · 到期 ${stamp(b.expires_at)}</small>
-        ${b.user_id ? `<p>本人 user_id：<code>${E(b.user_id)}</code> · 私聊 chat_id：<code>${E(b.chat_id)}</code></p>` : ''}
-        ${b.state === 'pairing' ? `<p>在当前机器人私聊发送以下一次性命令，再回来核对身份：</p><textarea readonly rows="2" aria-label="Telegram 配对命令">${E(b.pairing_command || '已过期，请撤销后重新配对')}</textarea>` : ''}
-        ${b.state === 'awaiting_owner' ? `<p>实际 user_id：<code>${E(b.pending_user_id)}</code> · chat_id：<code>${E(b.pending_chat_id)}</code></p><div data-channel-form="tg-activate">${checkbox('same_owner', '我已核对数字编号，确认这是我本人的 Telegram 私聊', true)}${button('dot-channel-tg-activate', '确认本人并启用同步', b)}</div>` : ''}
-        <small>${b.disable_notification ? 'Telegram 无声发送；仍可能显示通知。' : 'Telegram 按客户端通知设置提醒。'}微信请在客户端设置免打扰。</small><div class="cc-actions">${b.state === 'active' ? button('dot-channel-tg-pause', '暂停 Telegram', b) : b.state === 'paused' ? button('dot-channel-tg-resume', '恢复原绑定', b) : ''}${b.state !== 'revoked' ? button('dot-channel-tg-revoke', '撤销 Telegram', b) : ''}</div></section>`,
-        )
-        .join('');
+      const bindings = telegramBindings(t);
       const receipts = (t.deliveries || [])
         .map(
           (d) =>
@@ -692,8 +879,8 @@ window.CodePierCollaborationChannels = {
               `<p role="status">${E(a.label)}：${E(names[a.reason_code] || a.reason_code)}</p>`,
           )
           .join('')}
-        ${bindings || '<p>当前协作室尚未绑定 Telegram。</p>'}
-        <details class="cc-tg-connect"><summary>连接 Telegram 机器人</summary><div data-channel-form="tg-account">${field('名称', '<input name="label" maxlength="80" required autocomplete="off">')}${field('机器人数字编号', '<input name="bot_id" inputmode="numeric" pattern="[1-9][0-9]*" required autocomplete="off">')}${field('Bot Token', '<input type="password" name="token" maxlength="256" required autocomplete="new-password">')}${checkbox('credentials', '我确认在本服务加密保存此凭据，并接受 Telegram 的相关条款', true)}${button('dot-channel-tg-import', '确认登记 Telegram 凭据', {}, t.enabled ? '' : 'disabled')}<small>仅使用官方API长轮询；已有Webhook会阻止连接，系统不会自动删除或覆盖。</small></div></details>
+        <div class="cc-tg-bindings">${bindings || '<p>当前协作室尚未绑定 Telegram。</p>'}</div><p class="cc-tg-refresh-notice" role="status" aria-live="polite"></p>
+        <details class="cc-tg-connect"><summary>连接 Telegram 机器人</summary><div data-channel-form="tg-account">${field('名称', '<input name="label" maxlength="80" required autocomplete="off">')}${field('机器人数字编号', '<input name="bot_id" inputmode="numeric" pattern="[1-9][0-9]*" required autocomplete="off">')}${field('Bot Token', '<input type="password" name="token" maxlength="256" required autocomplete="new-password">')}${checkbox('credentials', '我同意在本服务加密保存此 Telegram 凭据', true) + checkbox('provider_terms', '我已核对并接受 Telegram 的相关服务条款', true)}${button('dot-channel-tg-import', '确认登记 Telegram 凭据', {}, t.enabled ? '' : 'disabled')}<small>仅使用官方API长轮询；已有Webhook会阻止连接，系统不会自动删除或覆盖。</small></div></details>
         <details><summary>将本人私聊绑定此协作室</summary><div data-channel-form="tg-bind">${field(
           '已登记机器人',
           select(
@@ -744,6 +931,87 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
         ? options.find((option) => option.binding_id === id)
         : options[id];
     }
+
+    function ownerBudgetLabel(mode, maximum) {
+      return mode === 'unlimited'
+        ? '不设任务数量上限'
+        : mode === 'rolling_24h'
+          ? '每滚动 24 小时最多 ' + maximum + ' 次'
+          : '累计最多 ' + maximum + ' 次';
+    }
+    function ownerBudgetForm(option, binding) {
+      const authority = binding.owner_authorization;
+      const editing = authority?.state === 'active';
+      const mode = editing ? authority.budget_mode || 'lifetime' : 'lifetime';
+      const maximum =
+        editing && authority.max_delegations != null
+          ? authority.max_delegations
+          : option.max_delegations;
+      const modes = option.available_budget_modes || ['lifetime', 'rolling_24h'];
+      return (
+        '<div data-channel-form="owner-authority" class="cc-form">' +
+        field(
+          '任务数量限制',
+          '<select name="budget_mode">' +
+            modes
+              .map(
+                (value) =>
+                  '<option value="' +
+                  E(value) +
+                  '" ' +
+                  (mode === value ? 'selected' : '') +
+                  '>' +
+                  {
+                    lifetime: '累计数量上限',
+                    rolling_24h: '每滚动 24 小时的数量上限',
+                    unlimited: '不设数量上限',
+                  }[value] +
+                  '</option>',
+              )
+              .join('') +
+            '</select>',
+        ) +
+        field(
+          '最多多少次任务委派',
+          '<input name="max_delegations" type="number" value="' +
+            E(maximum) +
+            '" min="1" step="1" required>',
+        ) +
+        '<p class="cc-budget-summary" aria-live="polite">' +
+        E(ownerBudgetLabel(mode, maximum)) +
+        '。任务超时、并发与必要的付款、权限确认仍然有效。</p>' +
+        (editing
+          ? '<p>仅修改任务数量，不重新扩大原联系人、项目、能力、回传位置和持续期限。</p>'
+          : '<div class="cc-consent-purposes"><p><strong>本人身份：</strong>以上已验证联系人是我本人。</p>' +
+            '<p><strong>未来任务与回传：</strong>允许本人今后向以上 dot 交办所列项目、能力和执行目标内的新任务，结果回到原私聊；文件仍需逐份确认。</p>' +
+            '<p><strong>持续与撤销：</strong>此绑定及原 dot 范围持续至面板撤销；每项任务限制和宿主必要确认仍保留。可在此处撤销任务授权，或撤销整个绑定。</p></div>' +
+            checkbox(
+              'confirm_owner_agreement',
+              '我已核对并同意以上本人身份、未来任务与回传、持续期限及撤销安排',
+              true,
+            )) +
+        checkbox('confirm_daily_budget', '我另外批准所选滚动 24 小时额度，替代原累计总额度') +
+        checkbox(
+          'confirm_unlimited_budget',
+          '我明确批准不设任务数量上限；项目、能力、目标、任务超时、并发以及付款和权限确认仍然保留',
+        ) +
+        checkbox('confirm_task_count_budget', '我明确批准上方填写的任务数量上限') +
+        (editing
+          ? checkbox(
+              'confirm_budget_change',
+              '我确认修改此原授权的任务数量策略；这会停止此授权下尚未完成的任务，只有之后的新消息使用新额度',
+              true,
+            )
+          : '') +
+        '<small>外部消息保留微信来源。shell 以执行账户权限运行，并非操作系统沙箱。平台登录失效时仍需本人重新连接。</small>' +
+        button(
+          'dot-channel-owner-approve',
+          editing ? '确认修改任务数量' : '确认授权微信交办任务',
+          binding,
+        ) +
+        '</div>'
+      );
+    }
     function ownerTaskPanel(w, binding) {
       const authority = binding.owner_authorization;
       const option = ownerTaskOption(w, binding.id);
@@ -757,42 +1025,93 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
         displayed.capabilities.length > 0 &&
         Array.isArray(displayed.execution_targets) &&
         displayed.execution_targets.length > 0 &&
-        Number.isInteger(displayed.max_delegations) &&
-        displayed.max_delegations > 0;
+        ((displayed.budget_mode === 'unlimited' && displayed.max_delegations === null) ||
+          (Number.isInteger(displayed.max_delegations) && displayed.max_delegations > 0));
       const canApprove =
         w.enabled &&
         binding.state === 'active' &&
         !!binding.peer_id &&
+        binding.allow_replies !== false &&
         option?.available === true &&
         !!option.scope_digest &&
         exactScope;
       const dot = mentionSlots().find((slot) => slot.id === binding.dot_id);
       const scopeDetails = exactScope
-        ? `<p>绑定 dot：${E(dot?.label || binding.dot_id)} · ${E(binding.dot_id)}<br>原项目：${E(displayed.project_id)}<br>原能力：${E(displayed.capabilities.join(' / '))}<br>原执行目标：${E(displayed.execution_targets.join(' / '))}<br>原策略：${E(displayed.policy_id)}${displayed.policy_version ? ' · 版本 ' + E(displayed.policy_version) : ''}</p>`
+        ? '<dl class="cc-authority-scope"><div><dt>联系人</dt><dd>' +
+          E(binding.peer_id || binding.pending_peer_id) +
+          '</dd></div><div><dt>交给 dot</dt><dd>' +
+          E(dot?.label || binding.dot_id) +
+          '<small>' +
+          E(binding.dot_id) +
+          '</small></dd></div><div><dt>项目</dt><dd>' +
+          E(displayed.project_id) +
+          '</dd></div><div><dt>允许操作</dt><dd>' +
+          E(displayed.capabilities.join(' / ')) +
+          '</dd></div><div><dt>执行目标</dt><dd>' +
+          E(displayed.execution_targets.join(' / ')) +
+          '</dd></div><div><dt>原策略</dt><dd>' +
+          E(displayed.policy_id) +
+          (displayed.policy_version ? ' · 版本 ' + E(displayed.policy_version) : '') +
+          '</dd></div></dl>'
         : '';
       if (pending)
-        return `<div class="cc-wx-owner-authority"><h5>原授权保留，等待原联系人重新验证</h5><p>原通道与任务执行暂停。请在同一本人微信私聊发送上方新配对码，并回到面板核对联系人；确认后仅恢复以下原批准范围。不同联系人不能继承授权，旧消息和旧任务不会重放。</p>${scopeDetails}<p>原预算保留：${authority.budget_mode === 'rolling_24h' ? '每滚动24小时最多 ' : '累计最多 '}${E(authority.max_delegations)} 次委派。</p>${button('dot-channel-owner-revoke', '撤销保留的任务授权', binding)}</div>`;
+        return (
+          '<div class="cc-wx-owner-authority"><h5>任务已暂停，等待原联系人验证</h5><p>原批准范围保留。请在同一本人微信发送新配对码，回到面板核对后恢复；旧消息与旧任务不会重放。</p>' +
+          scopeDetails +
+          '<p>保留的额度：' +
+          E(ownerBudgetLabel(authority.budget_mode, authority.max_delegations)) +
+          '</p>' +
+          button('dot-channel-owner-revoke', '撤销保留的任务授权', binding) +
+          '</div>'
+        );
       if (active)
-        return `<div class="cc-wx-owner-authority"><h5>本人微信任务授权：已启用</h5><p>此联系人可通过绑定 dot 交办原范围内的明确任务。授权与绑定有效期持续至在面板撤销；暂停通道期间不执行新任务。任务进度与结果回传原微信，文件仍需逐份确认。</p>${scopeDetails}<p>任务预算：${authority.budget_mode === 'rolling_24h' ? '每滚动24小时最多 ' : '累计最多 '}${E(authority.max_delegations)} 次委派。每项任务仍受原限制和宿主必要确认约束。</p><small>外部消息保留微信来源；shell 以执行账户权限运行，不是操作系统沙箱。微信登录可能被平台作废，届时需本人明确重新连接。</small>${button('dot-channel-owner-revoke', '撤销任务授权，保留聊天', binding)}</div>`;
+        return (
+          '<div class="cc-wx-owner-authority is-active"><div class="cc-channel-heading"><h5>微信任务已开启</h5><span class="cc-channel-pill">持续至撤销</span></div><p>' +
+          E(ownerBudgetLabel(authority.budget_mode, authority.max_delegations)) +
+          ' · 进度与结果回到原微信</p><details><summary>查看原批准范围</summary>' +
+          scopeDetails +
+          '<p>暂停通道期间不执行新任务。每项任务仍受原限制和宿主必要确认约束，文件仍需逐份确认。</p></details>' +
+          (canApprove
+            ? '<details class="cc-connection-secondary"><summary>修改任务数量限制</summary><p>仅修改同一联系人、dot 和原任务范围内的数量策略。</p>' +
+              scopeDetails +
+              ownerBudgetForm(option, binding) +
+              '</details>'
+            : '') +
+          '<details class="cc-connection-secondary"><summary>停用微信任务</summary><p>撤销任务授权后，原联系人仍可继续聊天。</p>' +
+          button('dot-channel-owner-revoke', '撤销任务授权，保留聊天', binding) +
+          '</details></div>'
+        );
       if (!option && !authority) return '';
       const reason =
         {
-          WEIXIN_BINDING_INACTIVE: '请先激活并核对此原联系人。',
+          WEIXIN_BINDING_INACTIVE: '先接通并核对本人私聊。',
           WEIXIN_OWNER_POLICY_UNAVAILABLE: '此 dot 尚无可用的原任务策略。',
-          WEIXIN_PAIRING_UNVERIFIED: '请先激活并核对此原联系人。',
-          CHANNEL_OWNER_SCOPE_CHANGED: '原任务范围已变化，请重新读取并核对。',
+          WEIXIN_PAIRING_UNVERIFIED: '先接通并核对本人私聊。',
+          CHANNEL_OWNER_SCOPE_CHANGED: '原任务范围已变化，请刷新后核对。',
           CHANNEL_OWNER_REPLIES_REQUIRED:
-            '当前绑定未批准回复。请明确重新建立允许回复的绑定，再开启本人任务。',
-          WEIXIN_OWNER_SCOPE_UNAVAILABLE: '当前原授权范围不可用，请先核对 dot 与项目。',
+            '当前绑定未批准回复。需建立允许回复的绑定后才能开启任务。',
+          WEIXIN_OWNER_SCOPE_UNAVAILABLE: '当前原授权范围不可用，请核对 dot 与项目。',
           WEIXIN_CHANNEL_DISABLED: '请先开启微信通道。',
-        }[option?.reason_code] || '当前原连接不满足任务授权条件，请核对联系人、dot 与原任务策略。';
-      return `<details class="cc-wx-owner-authority"><summary>本人微信任务授权${authority?.state === 'revoked' ? '（已撤销）' : '（尚未启用）'}</summary><p>一次确认后，这个本人微信联系人可持续向绑定 dot 交办以下原范围内的明确任务，直到在面板撤销。普通聊天不会自动成为任务。</p>${scopeDetails}${canApprove ? `<div data-channel-form="owner-authority" class="cc-form">${checkbox('confirm_owner_peer', '我已核对以上联系人编号，此微信联系人是我本人', true)}${checkbox('confirm_owner_tasks', '我允许此本人联系人今后向以上 dot 明确交办原项目、能力和执行目标范围内的任务，并将任务进度与结果回传原微信；文件仍需逐份确认', true)}${checkbox('confirm_until_revoked', '我确认将此绑定及原 dot 范围持续至面板撤销；每项任务限制、宿主必要确认和安全边界仍然有效', true)}<p>默认保留原预算：累计最多 ${E(option.max_delegations)} 次委派，用尽后停止新增任务。</p>${checkbox('confirm_daily_budget', '另外授权每滚动24小时最多 ' + option.max_delegations + ' 次委派，替代累计总额度（可选，未勾选不扩展预算）')}<small>外部消息保留微信来源，不扩大原项目、能力或目标。shell 以执行账户权限运行，不是操作系统沙箱。微信登录可能被平台作废，届时需本人明确重新连接。</small>${button('dot-channel-owner-approve', '确认授权本人微信交办任务', binding)}</div>` : `<p role="status">${E(reason)}${option?.reason_code ? '（' + E(option.reason_code) + '）' : ''}</p>`}</details>`;
+        }[option?.reason_code] || '当前连接尚不满足任务授权条件，请核对联系人、dot 与原任务策略。';
+      return (
+        '<details class="cc-wx-owner-authority"><summary>3. 微信交办任务 · 可选' +
+        (authority?.state === 'revoked' ? '（已撤销）' : '') +
+        '</summary><p>一次批准后，本人联系人可以在以下原范围内持续交办任务，直到撤销。普通聊天不会自动成为任务。</p>' +
+        scopeDetails +
+        (canApprove
+          ? ownerBudgetForm(option, binding)
+          : '<p role="status">' +
+            E(reason) +
+            (option?.reason_code ? '（' + E(option.reason_code) + '）' : '') +
+            '</p>') +
+        '</details>'
+      );
     }
     function weixinBindings(w) {
       return (w.bindings || [])
         .map(
           (binding) =>
-            `<section class="cc-channel-binding" data-binding-id="${E(binding.id)}"><h4>${binding.state === 'pairing' && binding.pairing_until <= Date.now() / 1000 ? '配对码已过期' : listState(binding.state)}</h4><p>原绑定 ${E(binding.id.slice(-8))} · 世代 ${E(binding.generation)} · ${binding.lifetime_mode === 'until_revoked' ? '有效期：持续至面板撤销' : '有效至 ' + stamp(binding.expires_at)}</p>${binding.peer_id ? `<p>原联系人：<code>${E(binding.peer_id)}</code></p>` : ''}${binding.state === 'pairing' ? `<p>在要绑定的微信私聊发送以下配对码。此处会自动查询配对状态，仍需本人核对后激活。</p><textarea readonly rows="2" aria-label="微信配对码">${E(binding.pairing_until <= Date.now() / 1000 ? '配对码已过期；请点击“重新生成配对码”' : binding.pairing_challenge || '原配对码不可用；请重新核对状态')}</textarea><small>配对期限：${stamp(binding.pairing_until)}。配对不会授予代码执行权限。</small>` : ''}${binding.state === 'awaiting_owner' ? `<p>实际返回的联系人编号：<code>${E(binding.pending_peer_id)}</code></p><div data-channel-form="activate">${checkbox('confirm_peer', binding.owner_authorization?.state === 'pending_revalidation' ? '我已核对是原本人联系人，确认恢复原批准范围；不重放旧任务或旧消息' : '我已核对该联系人和当前房间', true)}${button('dot-channel-activate', '确认激活此联系人', binding)}</div>` : ''}${ownerTaskPanel(w, binding)}<div class="cc-actions">${binding.state === 'active' ? button('dot-channel-pause', '暂停此通道', binding) : binding.state === 'paused' && !binding.revalidation_required ? button('dot-channel-resume', '恢复原绑定', binding) : ''}${['pairing', 'awaiting_owner'].includes(binding.state) || (binding.state === 'paused' && binding.revalidation_required) ? button('dot-channel-refresh-pairing', '重新生成配对码', binding) : ''}${binding.state !== 'revoked' ? button('dot-channel-revoke', '撤销原绑定', binding) : ''}</div></section>`,
+            `<section class="cc-channel-binding" data-binding-id="${E(binding.id)}"><h4>${binding.state === 'pairing' && binding.pairing_until <= Date.now() / 1000 ? '配对码已过期' : listState(binding.state)}</h4><p>原绑定 ${E(binding.id.slice(-8))} · 世代 ${E(binding.generation)} · ${binding.lifetime_mode === 'until_revoked' ? '有效期：持续至面板撤销' : '有效至 ' + stamp(binding.expires_at)}</p>${binding.peer_id ? `<p>原联系人：<code>${E(binding.peer_id)}</code></p>` : ''}${binding.state === 'pairing' ? `<p>${binding.onboarding?.auto_complete ? '仅本人在原机器人私聊发送以下一次性授权码，验证后自动完成连接和任务开通。' : '在要绑定的微信私聊发送以下配对码。此处会自动查询配对状态，仍需本人核对后激活。'}</p><textarea readonly rows="2" aria-label="微信配对码">${E(binding.pairing_until <= Date.now() / 1000 ? '配对码已过期；请点击“重新生成配对码”' : binding.pairing_challenge || '原配对码不可用；请重新核对状态')}</textarea><small>配对期限：${stamp(binding.pairing_until)}。配对不会授予代码执行权限。</small>` : ''}${binding.state === 'awaiting_owner' ? `<p>实际返回的联系人编号：<code>${E(binding.pending_peer_id)}</code></p><div data-channel-form="activate">${checkbox('confirm_peer', binding.owner_authorization?.state === 'pending_revalidation' ? '我已核对是原本人联系人，确认恢复原批准范围；不重放旧任务或旧消息' : '我已核对该联系人和当前房间', true)}${button('dot-channel-activate', '确认激活此联系人', binding)}</div>` : ''}${onboardingStatus(binding)}${ownerTaskPanel(w, binding)}<div class="cc-actions">${binding.state === 'active' ? button('dot-channel-pause', '暂停此通道', binding) : binding.state === 'paused' && !binding.revalidation_required ? button('dot-channel-resume', '恢复原绑定', binding) : ''}${['pairing', 'awaiting_owner'].includes(binding.state) || (binding.state === 'paused' && binding.revalidation_required) ? button('dot-channel-refresh-pairing', '重新生成配对码', binding) : ''}${binding.state !== 'revoked' ? button('dot-channel-revoke', '撤销原绑定', binding) : ''}</div></section>`,
         )
         .join('');
     }
@@ -961,6 +1280,8 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
           if (!displayed.some((b) => b.id === card.dataset.bindingId)) card.remove();
         p.owner.weixin.bindings = displayed;
         p.owner.weixin.owner_task_options = displayedOptions;
+        for (const form of region.querySelectorAll('[data-channel-form="owner-authority"]'))
+          syncBudgetForm(form);
         const notice = document.querySelector('.cc-wx-refresh-notice');
         notice.textContent = '';
         if (
@@ -1005,7 +1326,7 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
       }
     }
 
-    function render(data) {
+    function legacyMarkup(data) {
       const w = data.weixin,
         r = data.scopes;
       const slots = mentionSlots().filter((s) => s.duplex && s.state === 'registered');
@@ -1039,7 +1360,7 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
         .join('');
       return `<div class="cc-channel-pane"><p class="cc-hint">当前项目：${E(state.project)} · ${E(state.environment)}。刷新仅查询证据，不重发消息、不领取任务。</p>${button('dot-channel-open', '重新核对状态')}
       <section><h3>微信私聊通道</h3><p>${w.enabled ? '功能已开启；真实收发仍以每条回执为准。' : '微信通道已关闭。可在此开启，再扫码连接本人微信。'}</p><p>仅支持机器人私聊，不冒充原生群聊。仅在面板核对本人联系人并明确开启任务授权后，才可在原范围交办任务。</p>${channelSetting('weixin', w)}<div class="cc-wx-health">${weixinHealth(w)}</div><p class="cc-wx-refresh-notice" role="status" aria-live="polite"></p>${qrPanel(w)}<div class="cc-wx-bindings">${bindings || '<p>当前房间尚未绑定微信。</p>'}</div>
-      <details><summary>高级：登记已有授权机器人</summary><div data-channel-form="account" class="cc-form">${field('名称', '<input name="label" maxlength="80" required autocomplete="off">')}${field('机器人编号', '<input name="bot_id" maxlength="256" required autocomplete="off">')}${field('已有授权令牌', '<input type="password" name="token" maxlength="16384" required autocomplete="new-password">')}${checkbox('confirm_credentials', '我确认保存此已授权凭据，并已核对服务条款与使用资格', true)}${button('dot-channel-import', '确认登记凭据', {}, w.enabled ? '' : 'disabled')}<small>凭据加密保存；不创建 MCP 凭据，也不会显示到消息中。</small></div></details>
+      <details><summary>高级：登记已有授权机器人</summary><div data-channel-form="account" class="cc-form">${field('名称', '<input name="label" maxlength="80" required autocomplete="off">')}${field('机器人编号', '<input name="bot_id" maxlength="256" required autocomplete="off">')}${field('已有授权令牌', '<input type="password" name="token" maxlength="16384" required autocomplete="new-password">')}${checkbox('confirm_credentials', '我同意在本服务加密保存此已授权凭据', true) + checkbox('confirm_provider_terms', '我已核对并同意微信相关服务条款及使用资格', true)}${button('dot-channel-import', '确认登记凭据', {}, w.enabled ? '' : 'disabled')}<small>凭据加密保存；不创建 MCP 凭据，也不会显示到消息中。</small></div></details>
       <p class="cc-wx-binding-guide" hidden></p><details class="cc-wx-bind"><summary>绑定当前话题与 dot</summary><div data-channel-form="bind" class="cc-form">${field(
         '已登记机器人',
         select(
@@ -1075,16 +1396,424 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
               (g.scope_version ? '（已有范围，修改会替换原范围）' : ''),
           ]),
         ),
-      )}<fieldset><legend>当前环境的项目与逐项目能力</legend>${projects.map((p) => `<div class="cc-channel-project" data-project-id="${E(p.project_id)}"><label><input type="checkbox" name="project_selected" ${p.project_id === (state.snapshot.room.project_id || state.project) ? 'checked disabled' : ''}>${E(p.project_label || p.project_id)}</label>${checkbox('write', '允许项目文件写入')}${checkbox('execute', '允许此项目的 Agent 执行')}</div>`).join('')}</fieldset>${field('有效小时数', '<input type="number" name="hours" value="24" min="1" max="720" step="1" required>')}${checkbox('unsandboxed', '如选择执行，我明确接受 Agent 账户权限；这不是文件系统或网络沙箱')}${checkbox('confirm_scope', '我确认以本次选择替换此凭据的房间范围，且影响它的所有会话', true)}${button('dot-channel-scope-save', '确认设置范围')}<p>严格 OS 隔离尚未验证时不会放行执行。未选择执行时只允许获批文件工具。</p></div></details></section></div>`;
+      )}<fieldset><legend>当前环境的项目与逐项目能力</legend>${projects.map((p) => `<div class="cc-channel-project" data-project-id="${E(p.project_id)}"><label><input type="checkbox" name="project_selected" ${p.project_id === (state.snapshot.room.project_id || state.project) ? 'checked disabled' : ''}>${E(p.project_label || p.project_id)}</label>${checkbox('write', '允许项目文件写入')}${checkbox('execute', '允许此项目的 Agent 执行')}</div>`).join('')}</fieldset>${field('临时凭据限制期限（小时）', '<input type="number" name="hours" value="24" min="1" max="720" step="1" required>')}${checkbox('unsandboxed', '如选择执行，我明确接受 Agent 账户权限；这不是文件系统或网络沙箱')}${checkbox('confirm_scope', '我确认以本次选择替换此凭据的房间范围，且影响它的所有会话', true)}${button('dot-channel-scope-save', '确认设置范围')}<p>严格 OS 隔离尚未验证时不会放行执行。未选择执行时只允许获批文件工具。</p></div></details></section></div>`;
+    }
+
+    const viewTitles = {
+      overview: '消息连接',
+      weixin: '微信连接',
+      telegram: 'Telegram 连接',
+      advanced: '高级 · 凭据范围',
+    };
+    let channelView = 'overview';
+    const drafts = new Map();
+    const draftKey = (form) =>
+      form.dataset.channelForm + ':' + (form.closest('[data-binding-id]')?.dataset.bindingId || '');
+    function scopeSignature(form) {
+      return JSON.stringify({
+        grant: form.querySelector('[name="grant_id"]').value,
+        hours: form.querySelector('[name="hours"]').value,
+        projects: [...form.querySelectorAll('[data-project-id]')].map((row) => [
+          row.dataset.projectId,
+          ...['project_selected', 'write', 'execute'].map(
+            (name) => row.querySelector('[name="' + name + '"]').checked,
+          ),
+        ]),
+      });
+    }
+    function prefillScope(form) {
+      const grantId = form.querySelector('[name="grant_id"]').value;
+      const saved = loaded.scopes.items.find((item) => item.grant_id === grantId);
+      for (const row of form.querySelectorAll('[data-project-id]')) {
+        const original = saved?.manifest?.project_rules?.find(
+          (rule) => rule.project_id === row.dataset.projectId,
+        );
+        row.querySelector('[name="project_selected"]').checked =
+          !!original || (!saved && row.querySelector('[name="project_selected"]').disabled);
+        row.querySelector('[name="write"]').checked = !!original?.capabilities?.includes('write');
+        row.querySelector('[name="execute"]').checked =
+          !!original?.capabilities?.includes('execute');
+      }
+      form.querySelector('[name="hours"]').value = saved?.expires_at
+        ? String(
+            Math.min(720, Math.max(1, Math.ceil((saved.expires_at - Date.now() / 1000) / 3600))),
+          )
+        : '24';
+      for (const name of ['confirm_scope', 'unsandboxed'])
+        form.querySelector('[name="' + name + '"]').checked = false;
+      loaded.scopeDraft = saved ? { grantId, signature: scopeSignature(form) } : null;
+    }
+    function rememberDrafts() {
+      for (const form of document.querySelectorAll('.cc-channel-pane [data-channel-form]')) {
+        const values = {};
+        for (const input of form.querySelectorAll('input[name],select[name]')) {
+          if (
+            ['password', 'checkbox', 'radio'].includes(input.type) ||
+            input.readOnly ||
+            /verify|token|confirm/i.test(input.name)
+          )
+            continue;
+          values[input.name] = input.value;
+        }
+        drafts.set(draftKey(form), values);
+      }
+    }
+    function restoreDrafts() {
+      for (const form of document.querySelectorAll('.cc-channel-pane [data-channel-form]')) {
+        const values = drafts.get(draftKey(form));
+        if (!values) continue;
+        for (const input of form.querySelectorAll('input[name],select[name]')) {
+          if (!(input.name in values) || ['checkbox', 'password'].includes(input.type)) continue;
+          if (
+            input.tagName === 'SELECT' &&
+            ![...input.options].some((o) => o.value === values[input.name])
+          )
+            continue;
+          input.value = values[input.name];
+        }
+      }
+    }
+    function paintView(element) {
+      showDrawer(viewTitles[channelView], render(loaded), element);
+      loaded.epoch = state.drawerEpoch;
+      restoreDrafts();
+      bindViewInputs();
+      pairingStart();
+    }
+
+    function syncBudgetForm(form, reset = false) {
+      const data = form.closest('.cc-tg-binding') ? loaded?.telegram : loaded?.weixin;
+      const binding = data?.bindings.find(
+        (b) => b.id === form.closest('[data-binding-id]')?.dataset.bindingId,
+      );
+      const option = binding && ownerTaskOption(data, binding.id);
+      if (!option) return;
+      const mode = form.querySelector('[name="budget_mode"]').value;
+      const number = form.querySelector('[name="max_delegations"]');
+      number.disabled = mode === 'unlimited';
+      number.closest('.cc-field').hidden = mode === 'unlimited';
+      const original = binding.owner_authorization?.max_delegations ?? option.max_delegations;
+      for (const [name, visible] of [
+        ['confirm_daily_budget', mode === 'rolling_24h'],
+        ['confirm_unlimited_budget', mode === 'unlimited'],
+        ['confirm_task_count_budget', mode !== 'unlimited' && Number(number.value) !== original],
+      ]) {
+        const input = form.querySelector('[name="' + name + '"]');
+        input.disabled = !visible;
+        input.required = visible;
+        input.closest('label').hidden = !visible;
+        if (reset || !visible) input.checked = false;
+      }
+      if (reset)
+        for (const input of form.querySelectorAll('input[type="checkbox"]')) input.checked = false;
+      form.querySelector('.cc-budget-summary').textContent =
+        ownerBudgetLabel(mode, number.value) + '。任务超时、并发与必要的付款、权限确认仍然有效。';
+    }
+    function bindViewInputs() {
+      const pane = document.querySelector('.cc-channel-pane');
+      for (const form of pane?.querySelectorAll('[data-channel-form="owner-authority"]') || [])
+        syncBudgetForm(form);
+      for (const select of pane?.querySelectorAll('select[required]') || []) {
+        if (!select.value && select.options.length === 2) select.value = select.options[1].value;
+      }
+      for (const form of pane?.querySelectorAll('[data-channel-form="enrollment"]') || [])
+        void enrollmentRead(form);
+      const scopeForm = pane?.querySelector('[data-channel-form="scope"]');
+      if (scopeForm) prefillScope(scopeForm);
+      pane?.addEventListener('change', (event) => {
+        const enrollment = event.target.closest('[data-channel-form="enrollment"]');
+        if (enrollment && ['account_id', 'dot_id', 'expected_peer_id'].includes(event.target.name))
+          void enrollmentRead(enrollment);
+        if (event.target.name === 'grant_id' && scopeForm) prefillScope(scopeForm);
+        if (['budget_mode', 'max_delegations'].includes(event.target.name)) {
+          const form = event.target.closest('[data-channel-form="owner-authority"]');
+          if (form) syncBudgetForm(form, true);
+        }
+      });
+      pane?.addEventListener('input', (event) => {
+        const enrollment = event.target.closest('[data-channel-form="enrollment"]');
+        if (enrollment && event.target.name === 'expected_peer_id') enrollmentReset(enrollment);
+        if (event.target.name === 'max_delegations') {
+          const form = event.target.closest('[data-channel-form="owner-authority"]');
+          if (form) syncBudgetForm(form, true);
+        }
+      });
+    }
+    function navigate(view, element) {
+      if (!group(element, false) || !viewTitles[view]) return local;
+      if (
+        qr &&
+        !qrTerminal(qr.entry) &&
+        !window.confirm(
+          '离开后将停止本次扫码，未完成的二维码会取消或到期失效。返回时需要重新开始。确定离开？',
+        )
+      )
+        return local;
+      rememberDrafts();
+      pairingStop();
+      qrDiscard(qr);
+      channelView = view;
+      paintView(element);
+      return local;
+    }
+    function channelSteps(account, binding, tasks, telegram = false) {
+      return (
+        '<ol class="cc-connection-steps" aria-label="连接进度">' +
+        [
+          [account, '连接账号'],
+          [binding, '私聊验证'],
+          [tasks, '交办任务'],
+        ]
+          .map(
+            ([done, title], i) =>
+              '<li class="' +
+              (done
+                ? 'is-complete'
+                : (!account && i === 0) ||
+                    (account && !binding && i === 1) ||
+                    (binding && !tasks && i === 2)
+                  ? 'is-current'
+                  : '') +
+              '"><span aria-hidden="true">' +
+              (done ? '✓' : i + 1) +
+              '</span><strong>' +
+              title +
+              '</strong><small>' +
+              (done ? '已完成' : '待完成') +
+              '</small></li>',
+          )
+          .join('') +
+        '</ol>'
+      );
+    }
+    function channelSummary(data) {
+      if (!data) return '当前不可用';
+      const bindings = (data.bindings || []).filter((b) => b.state !== 'revoked');
+      if (!data.enabled) return '通道已关闭';
+      if (bindings.some((b) => b.state === 'awaiting_owner')) return '等待核对联系人';
+      if (bindings.some((b) => b.state === 'pairing')) return '等待联系人配对';
+      if (bindings.some((b) => b.state === 'active')) return '已绑定 · 收发以回执为准';
+      if (bindings.some((b) => b.state === 'paused')) return '绑定已暂停';
+      return (data.accounts || []).some((a) => a.state === 'active')
+        ? '账号已登记 · 待配对'
+        : '尚未连接';
+    }
+    function overview(data) {
+      return (
+        '<div class="cc-connection-intro"><h3>选择一个消息入口</h3><p>连接后，在熟悉的聊天里继续当前话题。</p></div><div class="cc-connection-options">' +
+        [
+          ['weixin', '微信', 'W', '扫码登录，连接本人私聊。'],
+          ...(data.telegram ? [['telegram', 'Telegram', 'T', '连接机器人，同步本人私聊。']] : []),
+        ]
+          .map(
+            ([kind, title, icon, description]) =>
+              '<section class="cc-connection-option"><div class="cc-connection-icon is-' +
+              kind +
+              '" aria-hidden="true">' +
+              icon +
+              '</div><div class="cc-connection-option-copy"><h3>' +
+              title +
+              '</h3><p>' +
+              description +
+              '</p><span class="cc-connection-status">' +
+              E(channelSummary(data[kind])) +
+              '</span></div>' +
+              button('dot-channel-view-' + kind, '设置' + title) +
+              '</section>',
+          )
+          .join('') +
+        '</div><div class="cc-connection-advanced"><div><strong>高级：整条 MCP 连接的限制</strong><p>影响使用该凭据的所有会话。连接微信、开启微信任务都不需要设置这里。</p></div>' +
+        button('dot-channel-view-advanced', '查看高级设置') +
+        '</div>'
+      );
+    }
+    function disclosure(title, hint, className, open = false) {
+      const node = document.createElement('details');
+      node.className = className;
+      node.open = open;
+      node.innerHTML =
+        '<summary><span><strong>' +
+        E(title) +
+        '</strong>' +
+        (hint ? '<small>' + E(hint) + '</small>' : '') +
+        '</span></summary>';
+      return node;
+    }
+    function prepareChannel(data) {
+      const template = document.createElement('template');
+      template.innerHTML = legacyMarkup(data);
+      const sections = template.content.querySelector('.cc-channel-pane').children;
+      const section =
+        channelView === 'weixin'
+          ? sections[2]
+          : channelView === 'telegram'
+            ? template.content.querySelector('.cc-tg-settings')
+            : sections[sections.length - 1];
+      if (channelView === 'weixin') {
+        const w = data.weixin;
+        const accounts = (w.accounts || []).filter((a) => a.state === 'active');
+        const live = (w.bindings || []).filter((b) => b.state !== 'revoked');
+        const active = live.some((b) => b.state === 'active');
+        for (const node of [...section.children].slice(0, 3)) node.remove();
+        section.classList.add('cc-wx-settings');
+        section.insertAdjacentHTML(
+          'afterbegin',
+          '<p class="cc-connection-intro">集中核对授权，再由本人私聊验证。已有连接不会自动扩大权限。</p>' +
+            channelSteps(
+              !!accounts.length,
+              active,
+              live.some((b) => b.owner_authorization?.state === 'active'),
+            ),
+        );
+        const qrNode = section.querySelector('.cc-wx-onboarding');
+        const account = disclosure(
+          '1. 微信账号',
+          accounts.length ? '账号已登记 · 重连与维护' : '扫码登录并核对本人账号',
+          'cc-connection-section cc-wx-account-step',
+          !accounts.length,
+        );
+        qrNode.before(account);
+        account.append(qrNode);
+        const bind = section.querySelector('.cc-wx-bind');
+        bind.classList.add('cc-connection-section');
+        bind.open = false;
+        bind.insertAdjacentHTML('beforebegin', enrollmentForm('weixin', w));
+        bind.querySelector('summary').textContent = '高级：仅绑定聊天，稍后单独授权任务';
+        const maintenance = disclosure(
+          '连接维护与收发记录',
+          '',
+          'cc-connection-secondary cc-connection-maintenance',
+        );
+        for (const selector of ['.cc-channel-switch', '.cc-wx-health']) {
+          const node = section.querySelector(selector);
+          if (node && selector === '.cc-channel-switch' && !w.enabled)
+            section.insertBefore(node, account);
+          else if (node) maintenance.append(node);
+        }
+        for (const name of ['account', 'files']) {
+          const node = section
+            .querySelector('[data-channel-form="' + name + '"]')
+            ?.closest('details');
+          if (node) {
+            node.classList.add('cc-connection-secondary');
+            maintenance.append(node);
+          }
+        }
+        const receipts = disclosure(
+          '最近投递记录',
+          '已接受不等于已读，未知结果不会自动重发',
+          'cc-connection-secondary',
+        );
+        for (const node of [...section.children]) {
+          if (
+            node.tagName === 'H4' ||
+            node.matches('.cc-channel-delivery') ||
+            (node.tagName === 'P' && node.textContent === '暂无外发记录。')
+          )
+            receipts.append(node);
+        }
+        receipts.querySelector('h4')?.remove();
+        maintenance.append(receipts);
+        section.append(maintenance);
+      } else if (channelView === 'telegram') {
+        const t = data.telegram;
+        const hasAccount = (t.accounts || []).some((a) => a.state === 'active');
+        const active = (t.bindings || []).some((b) => b.state === 'active');
+        section.querySelector('.cc-channel-heading')?.remove();
+        section.insertAdjacentHTML(
+          'afterbegin',
+          channelSteps(
+            hasAccount,
+            active,
+            (t.bindings || []).some((b) => b.owner_authorization?.state === 'active'),
+            true,
+          ),
+        );
+        const account = section.querySelector('.cc-tg-connect');
+        account.classList.add('cc-connection-section');
+        account.open = !hasAccount;
+        account.querySelector('summary').textContent = '1. 连接 Telegram 机器人';
+        const bind = section.querySelector('[data-channel-form="tg-bind"]').closest('details');
+        bind.classList.add('cc-connection-section');
+        bind.open = false;
+        bind.insertAdjacentHTML('beforebegin', enrollmentForm('telegram', t));
+        bind.querySelector('summary').textContent = '高级：仅同步聊天，稍后单独授权任务';
+        const maintenance = disclosure(
+          '同步、文件与连接维护',
+          '',
+          'cc-connection-secondary cc-connection-maintenance',
+        );
+        const setting = section.querySelector('.cc-channel-switch');
+        if (t.enabled && setting) maintenance.append(setting);
+        for (const node of [...section.querySelectorAll('[data-channel-form="wx-mirror"]')])
+          maintenance.append(node);
+        const files = section.querySelector('[data-channel-form="tg-files"]')?.closest('details');
+        if (files) maintenance.append(files);
+        for (const node of [...section.children])
+          if (node.tagName === 'H4' || node.matches('.cc-channel-delivery'))
+            maintenance.append(node);
+        section.append(maintenance);
+      } else {
+        section.classList.add('cc-advanced-settings');
+        section.querySelector('h3')?.remove();
+        section.querySelector('p')?.remove();
+        section.insertAdjacentHTML(
+          'afterbegin',
+          '<div class="cc-connection-warning"><strong>这会限制整条 MCP 连接</strong><p>所有使用同一凭据的会话都会受影响。它不是微信连接期限，也不是微信任务授权的必需步骤。</p></div>',
+        );
+        const form = section.querySelector('[data-channel-form="scope"]');
+        const detail = form.closest('details');
+        detail.classList.add('cc-connection-section');
+        detail.querySelector('summary').textContent = (data.scopes.items || []).length
+          ? '修改已有连接的限制'
+          : '设置临时凭据限制';
+        detail.open = !(data.scopes.items || []).length;
+        form.querySelector('fieldset').classList.add('cc-scope-projects');
+        const hours = form.querySelector('[name="hours"]');
+        const label = hours.closest('.cc-field');
+        if (label) {
+          const text = [...label.childNodes].find((n) => n.nodeType === Node.TEXT_NODE);
+          if (text) text.textContent = '临时凭据限制期限（小时）';
+          else
+            label.querySelector('span') &&
+              (label.querySelector('span').textContent = '临时凭据限制期限（小时）');
+        }
+        hours.setAttribute('aria-describedby', 'cc-scope-expiry-help');
+        hours.insertAdjacentHTML(
+          'afterend',
+          '<small id="cc-scope-expiry-help">默认 24 小时，最长 720 小时。到期后普通工具会被拒绝访问，不会自动恢复为更宽权限。</small>',
+        );
+      }
+      return section.outerHTML;
+    }
+    function render(data) {
+      return (
+        '<div class="cc-channel-pane" data-channel-view="' +
+        channelView +
+        '"><nav class="cc-connection-nav" aria-label="连接设置">' +
+        (channelView !== 'overview'
+          ? button('dot-channel-view-overview', '‹ 连接总览')
+          : '<span>当前话题的消息入口</span>') +
+        button('dot-channel-open', '刷新状态') +
+        '</nav>' +
+        (channelView === 'overview' ? overview(data) : prepareChannel(data)) +
+        '<p class="cc-connection-footnote">消息是否送达，以实际回执为准。</p></div>'
+      );
     }
     async function open(element, selectedAccount = '') {
+      if (loaded && current(loaded.key) && loaded.epoch === state.drawerEpoch) rememberDrafts();
+      else {
+        channelView = 'overview';
+        drafts.clear();
+      }
+      if (selectedAccount) channelView = 'weixin';
       pairingStop();
       qrDiscard(qr);
       if (!allowed()) throw new Error('当前身份不能管理房间连接。');
       controller?.abort();
       controller = new AbortController();
       const key = capture();
-      showDrawer('通道与执行边界', '<p role="status">正在读取原连接与投递状态…</p>', element);
+      showDrawer(viewTitles[channelView], '<p role="status">正在读取连接状态…</p>', element);
       const epoch = state.drawerEpoch;
       const query = new URLSearchParams(scope());
       let result;
@@ -1108,9 +1837,7 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
       if (!current(key) || epoch !== state.drawerEpoch) return local;
       const [scopes, weixin, telegram] = result;
       loaded = { key, scopes, weixin, telegram };
-      showDrawer('通道与执行边界', render(loaded), element);
-      loaded.epoch = state.drawerEpoch;
-      pairingStart();
+      paintView(element);
       if (selectedAccount) {
         const guide = document.querySelector('.cc-wx-binding-guide');
         const existing = weixin.bindings.find(
@@ -1125,14 +1852,25 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
           );
           card?.querySelector('textarea,button')?.focus();
         } else {
-          const select = document.querySelector('.cc-wx-bind [name="account_id"]');
+          const form = document.querySelector(
+            '[data-channel-form="enrollment"][data-enrollment-channel="weixin"]',
+          );
+          const select = form?.querySelector('[name="account_id"]');
+          guide.hidden = false;
           if (select && [...select.options].some((option) => option.value === selectedAccount)) {
+            // Saving login credentials is not task consent. Continue with the
+            // exact new account's summary and an unchecked acknowledgement,
+            // never reopen the legacy manual-pairing detour.
             select.value = selectedAccount;
-            document.querySelector('.cc-wx-bind').open = true;
-            guide.hidden = false;
+            form.closest('.cc-enrollment').prepend(guide);
             guide.textContent =
-              '微信登录已保存。请选择当前话题的 dot，再生成配对码；核对实际联系人后才会启用通道。';
+              '微信登录已保存。下一步核对本次授权摘要；确认后向原私聊发送本人授权码，即可自动开通，无需返回面板重复确认。';
             select.focus();
+            await enrollmentRead(form);
+          } else {
+            document.querySelector('.cc-wx-bind').before(guide);
+            guide.textContent =
+              '微信登录已保存，但当前话题暂不具备生成本人任务授权码的条件。请检查已有绑定和 dot 范围；尚未新增任何绑定或任务权限。';
           }
         }
       }
@@ -1159,9 +1897,21 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
       return { root, value, checked };
     }
     async function act(action, element) {
-      if (action === 'dot-channel-open') return open(element);
+      if (action === 'dot-channel-open') {
+        // A state refresh never cancels or creates an enrollment. Preserve its
+        // original request identity while QR status or a lost response settles.
+        if (qr && qrLive(qr) && !qrTerminal(qr.entry)) {
+          if (qr.entry) return qrStatus(qr);
+          return { local: true, message: '登录请求尚未确认，请在当前扫码区域恢复原请求。' };
+        }
+        return open(element);
+      }
       if (saving) return local;
+      if (action.startsWith('dot-channel-view-'))
+        return navigate(action.slice('dot-channel-view-'.length), element);
       if (action.startsWith('dot-channel-qr-')) return qrAct(action, element);
+      if (action === 'dot-channel-enrollment-preview')
+        return enrollmentRead(group(element, false).root);
       const data = group(
         element,
         ![
@@ -1193,6 +1943,36 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
           enabled: !channelData.enabled,
           expected_version: channelData.setting.version,
         };
+      } else if (action === 'dot-channel-enrollment-approve') {
+        const approved = enrollmentPreviews.get(root);
+        if (
+          !checked('enrollment_agreement') ||
+          !approved?.preview ||
+          approved.owner !== loaded ||
+          approved.epoch !== state.drawerEpoch ||
+          approved.selection !== enrollmentSelection(root)
+        )
+          throw new Error('账号、联系人或授权摘要已变化，请重新核对并明确同意本次范围。');
+        const channel = root.dataset.enrollmentChannel;
+        operation = channel + '-bind';
+        args = {
+          account_id: value('account_id'),
+          dot_id: value('dot_id'),
+          confirm_external_data_ingress: true,
+          ...(channel === 'weixin'
+            ? { allow_replies: true, allow_media_outbound: false }
+            : { confirm_full_mirror: true }),
+          owner_preapproval: {
+            text_version: approved.preview.text_version,
+            expected_scope_digest: approved.preview.scope_digest,
+            expected_peer_id: value('expected_peer_id').trim(),
+            confirm_owner_identity: true,
+            confirm_future_tasks: true,
+            confirm_result_delivery: true,
+            confirm_until_revoked: true,
+            confirm_pairing_notices: true,
+          },
+        };
       } else if (action === 'dot-channel-tg-import') {
         operation = 'telegram-account';
         const old = loaded.telegram.accounts.find((a) => a.bot_id === value('bot_id').trim());
@@ -1207,7 +1987,7 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
           token: value('token'),
           expected_version: old?.credential_version || 0,
           confirm_credential_storage: checked('credentials'),
-          confirm_provider_terms: checked('credentials'),
+          confirm_provider_terms: checked('provider_terms'),
         };
       } else if (action === 'dot-channel-tg-bind') {
         operation = 'telegram-bind';
@@ -1320,7 +2100,7 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
           token: value('token'),
           expected_version: existing?.credential_version || 0,
           confirm_credential_storage: checked('confirm_credentials'),
-          confirm_provider_terms: checked('confirm_credentials'),
+          confirm_provider_terms: checked('confirm_provider_terms'),
         };
       } else if (action === 'dot-channel-bind') {
         const lifetime = value('lifetime_mode') || 'timed';
@@ -1336,21 +2116,46 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
           lifetime_mode: lifetime,
           confirm_until_revoked: lifetime === 'until_revoked' && checked('bind_until_revoked'),
         };
-      } else if (['dot-channel-owner-approve', 'dot-channel-owner-revoke'].includes(action)) {
-        const row = loaded.weixin.bindings.find((binding) => binding.id === element.dataset.id);
-        if (!row) throw new Error('原微信绑定已不在当前列表。');
-        const approve = action === 'dot-channel-owner-approve';
-        const option = ownerTaskOption(loaded.weixin, row.id);
+      } else if (
+        [
+          'dot-channel-owner-approve',
+          'dot-channel-owner-revoke',
+          'dot-channel-tg-owner-approve',
+          'dot-channel-tg-owner-revoke',
+        ].includes(action)
+      ) {
+        const channel = action.startsWith('dot-channel-tg-owner-') ? 'telegram' : 'weixin';
+        const channelData = loaded[channel];
+        const original = channelData.bindings.find((b) => b.id === element.dataset.id);
+        const row =
+          original &&
+          (channel === 'telegram'
+            ? { ...original, peer_id: original.chat_id, allow_replies: original.mirror_enabled }
+            : original);
+        if (!row) throw new Error('原本人绑定已不在当前列表。');
+        const approve = action.endsWith('owner-approve');
+        const option = ownerTaskOption(channelData, row.id);
+        const existingAuthority = row.owner_authorization;
+        const selectedMode = value('budget_mode') || 'lifetime';
         if (
           approve &&
-          (!loaded.weixin.enabled ||
+          existingAuthority?.state === 'active' &&
+          selectedMode === (existingAuthority.budget_mode || 'lifetime') &&
+          (selectedMode === 'unlimited' ||
+            Number(value('max_delegations')) === existingAuthority.max_delegations)
+        )
+          return { local: true, message: '任务数量设置没有变化，已保留原授权与正在进行的任务。' };
+        if (
+          approve &&
+          (!channelData.enabled ||
             row.state !== 'active' ||
             !row.peer_id ||
             option?.available !== true ||
             !option.scope_digest ||
-            !checked('confirm_owner_peer') ||
-            !checked('confirm_owner_tasks') ||
-            !checked('confirm_until_revoked'))
+            row.allow_replies === false ||
+            !(existingAuthority?.state === 'active'
+              ? checked('confirm_budget_change')
+              : checked('confirm_owner_agreement')))
         )
           throw new Error('请重新核对原联系人与任务范围，并逐项确认本人任务授权。');
         if (
@@ -1361,7 +2166,7 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
             ))
         )
           return local;
-        operation = 'weixin-owner-authority';
+        operation = channel + '-owner-authority';
         args = {
           binding_id: row.id,
           expected_binding_version: row.version,
@@ -1371,10 +2176,26 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
             ? {
                 confirm_peer_id: row.peer_id,
                 expected_scope_digest: option.scope_digest,
-                confirm_owner_tasks: checked('confirm_owner_tasks'),
-                confirm_until_revoked: checked('confirm_until_revoked'),
-                budget_mode: checked('confirm_daily_budget') ? 'rolling_24h' : 'lifetime',
-                ...(checked('confirm_daily_budget') ? { confirm_daily_budget: true } : {}),
+                confirm_owner_tasks: true,
+                confirm_until_revoked: true,
+                budget_mode: value('budget_mode') || 'lifetime',
+                ...(value('budget_mode') === 'rolling_24h'
+                  ? { confirm_daily_budget: checked('confirm_daily_budget') }
+                  : {}),
+                ...(value('budget_mode') === 'unlimited'
+                  ? { confirm_unlimited_budget: checked('confirm_unlimited_budget') }
+                  : {}),
+                ...(value('budget_mode') !== 'unlimited' &&
+                Number(value('max_delegations')) !==
+                  (row.owner_authorization?.max_delegations ?? option.max_delegations)
+                  ? {
+                      max_delegations: Number(value('max_delegations')),
+                      confirm_task_count_budget: checked('confirm_task_count_budget'),
+                    }
+                  : {}),
+                ...(row.owner_authorization?.state === 'active'
+                  ? { confirm_budget_change: checked('confirm_budget_change') }
+                  : {}),
               }
             : {}),
         };
@@ -1419,6 +2240,11 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
       } else if (action === 'dot-channel-scope-save') {
         const grant = loaded.scopes.eligible_connections.find((g) => g.id === value('grant_id'));
         if (!grant) throw new Error('请选择当前已有连接。');
+        if (
+          loaded.scopeDraft?.grantId === grant.id &&
+          loaded.scopeDraft.signature === scopeSignature(root)
+        )
+          return { local: true, message: '连接范围没有变化，已保留原设置与到期时间。' };
         const rules = [...root.querySelectorAll('[data-project-id]')]
           .filter((p) => p.querySelector('[name="project_selected"]').checked)
           .map((p) => ({
@@ -1484,14 +2310,24 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
       if (!current(key) || loaded?.epoch !== state.drawerEpoch) return local;
       if (root?.querySelector('[name="token"]')) root.querySelector('[name="token"]').value = '';
       await open(document.querySelector('[data-cc-action="dot-channel-open"]'));
-      return { local: true, message: '原配置或投递清单已保存；状态以新读取的证据为准。' };
+      return {
+        local: true,
+        message:
+          action === 'dot-channel-enrollment-approve'
+            ? '授权已保存。请仅在本人原私聊发送授权码，验证后自动开通；回执以实际发送状态为准。'
+            : '原配置或投递清单已保存；状态以新读取的证据为准。',
+      };
     }
     function clear() {
       pairingStop();
       qrDiscard(qr);
       controller?.abort();
+      for (const request of enrollmentRequests) request.abort();
+      enrollmentRequests.clear();
       controller = null;
       loaded = null;
+      channelView = 'overview';
+      drafts.clear();
       for (const input of document.querySelectorAll('.cc-channel-pane input[type="password"]'))
         input.value = '';
     }
