@@ -40,8 +40,8 @@ def show_update_controls(page):
     expect(page.locator('#panel-update')).to_be_visible()
 
 
-def open_settings(browser,stack,state,width=1440,post_handler=None,init_script=None,get_handler=None,clock=False):
-    page=browser.new_page(viewport={'width':width,'height':960 if width>500 else 844})
+def open_settings(browser,stack,state,width=1440,post_handler=None,init_script=None,get_handler=None,clock=False,has_touch=False):
+    page=browser.new_page(viewport={'width':width,'height':960 if width>500 else 844},has_touch=has_touch)
     if clock:
         page.clock.install()
     if init_script:
@@ -382,7 +382,8 @@ def test_automatic_check_never_displaces_existing_work(update_browser,stack,bloc
     finally:page.close()
 
 
-def test_top_entry_lost_response_recovers_without_post_replay(update_browser,stack):
+@pytest.mark.parametrize('resume_during_press',[False,True])
+def test_top_entry_lost_response_recovers_without_post_replay(update_browser,stack,resume_during_press):
     browser,_=update_browser;state=ready();queries=[];offline=False
     def get(route):
         queries.append(route.request.url)
@@ -407,11 +408,67 @@ def test_top_entry_lost_response_recovers_without_post_replay(update_browser,sta
         offline=False
         page.clock.fast_forward(4000)
         expect(page.locator('#panel-update-float-state')).to_contain_text('原更新处理中')
+        if resume_during_press:
+            # Hold the boot snapshot so the real resume runs between pointerdown
+            # and pointerup. WebKit drops click when its text hit target changes.
+            page.add_init_script("""(() => {
+              const fetch = window.fetch;
+              let held = false;
+              window.fetch = async function(...args) {
+                const response = await fetch.apply(this, args);
+                if (!held && String(args[0]).includes('/api/overview')) {
+                  held = true;
+                  await new Promise(resolve => {
+                    window.__releaseUpdateOverview = resolve;
+                    document.documentElement.dataset.updateOverviewHeld = 'true';
+                  });
+                }
+                return response;
+              };
+            })();""")
         page.reload()
-        page.locator('[data-panel-update-open]').click()
+        entry=page.locator('[data-panel-update-open]')
+        if resume_during_press:
+            expect(page.locator('html')).to_have_attribute('data-update-overview-held','true')
+            expect(entry).to_contain_text('检查更新')
+            box=entry.bounding_box()
+            assert box
+            page.mouse.move(box['x']+box['width']/2,box['y']+box['height']/2)
+            page.mouse.down()
+            try:
+                page.evaluate('window.__releaseUpdateOverview()')
+                expect(entry).to_have_attribute('data-state','updating')
+            finally:page.mouse.up()
+        else:entry.click()
         expect(page.locator('#panel-update-float-state')).to_contain_text('原更新处理中')
         assert len(calls)==1 and all('request_key='+key in url for url in queries if 'request_key=' in url)
         assert not errors,errors
+    finally:page.close()
+
+
+@pytest.mark.parametrize('activation',['Enter','Space','touch'])
+def test_top_entry_native_activation_survives_repeated_status_refresh(update_browser,stack,activation):
+    browser,_=update_browser;state=ready()
+    state.update(busy=True,operation={'id':'d'*32,'kind':'apply','state':'running',
+                                    'message':'原更新处理中','events':[]})
+    page,calls,errors=open_settings(browser,stack,state,
+        width=390 if activation=='touch' else 1440,has_touch=activation=='touch')
+    try:
+        page.evaluate("navigate('overview')")
+        expect(page.locator('#page h1')).to_have_text('控制总览')
+        entry=page.locator('[data-panel-update-open]')
+        for _ in range(2):
+            if activation=='touch':entry.tap()
+            else:
+                entry.focus()
+                page.keyboard.press(activation)
+            expect(page.locator('#panel-update-float-state')).to_contain_text('原更新处理中')
+            page.click('#panel-update-float-refresh')
+            expect(entry).to_have_attribute('data-state','updating')
+            page.keyboard.press('Escape')
+            expect(page.locator('#panel-update-popover')).to_have_count(0)
+            expect(entry).to_be_focused()
+        assert not calls and not errors,errors
     finally:page.close()
 
 

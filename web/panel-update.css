@@ -54,6 +54,12 @@
   cursor: pointer;
   min-height: 40px;
 }
+/* Keep one native hit target while recovery repaints the display-only labels.
+   WebKit can drop click if pointerdown and pointerup hit different children. */
+.panel-update-entry > [data-panel-update-version],
+.panel-update-entry > [data-panel-update-status] {
+  pointer-events: none;
+}
 .panel-update-entry:focus-visible {
   outline: 3px solid var(--text, #111827);
   outline-offset: 3px;
