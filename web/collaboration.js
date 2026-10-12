@@ -7,6 +7,7 @@ window.CodePierCollaboration = (() => {
     project: '',
     conversation: '',
     viewportCleanup: null,
+    workspaceTimer: null,
     environment: 'production',
     view: 'discussion',
     snapshot: null,
@@ -92,6 +93,7 @@ window.CodePierCollaboration = (() => {
     partial_confirmed: '部分订阅已确认收件',
     slot_revoked: '位置已撤销',
   };
+  const fluid = window.CodePierCollaborationRuntime;
   const E = (value) => CP.ui.esc(value == null ? '' : String(value));
   const text = (value) => labels[value] || value || '暂无记录';
   const when = (value) =>
@@ -149,6 +151,7 @@ window.CodePierCollaboration = (() => {
     if (send) send.disabled = true;
   }
   async function selectPartition(project, environment) {
+    if (project === state.project && environment === state.environment) return true;
     const conversation = state.conversation;
     rememberChat();
     disableComposer();
@@ -220,6 +223,9 @@ window.CodePierCollaboration = (() => {
     rememberChat();
     relay.detach();
     dots.clearChannels();
+    clearTimeout(state.workspaceTimer);
+    state.workspaceTimer = null;
+    fluid.cancelWithin(document.querySelector('.collaboration'));
     state.busyCleanup?.();
     state.busyCleanup = null;
     state.refreshSequence++;
@@ -409,7 +415,7 @@ window.CodePierCollaboration = (() => {
     m.body_text ?? m.body?.text ?? m.body?.command?.request ?? m.body?.summary ?? '';
   const eligibleWorkers = () =>
     (state.snapshot?.agents || []).filter((a) => a.binding_status === 'enabled');
-  const messageById = (id) => chat().messages.find((m) => m.id === id);
+  const messageById = (id) => fluid.index(chat().messages).get(id);
   const notificationSlots = () => (state.snapshot?.join_slots || []).filter(liveJoin);
   const slotMember = (id) => state.members.find((m) => m.slot_id === id || m.id === id);
   const mentionSlots = () =>
@@ -699,38 +705,66 @@ window.CodePierCollaboration = (() => {
     if (node) node.innerHTML = draftContext();
   }
   function mergeMessages(items) {
-    const c = chat(),
-      map = new Map(c.messages.map((m) => [m.id, m]));
-    for (const m of items) {
-      if ((map.get(m.id)?.version || 0) <= (m.version || 1)) map.set(m.id, m);
-    }
-    c.messages = [...map.values()].sort(
-      (a, b) =>
-        (a.server_sequence || 0) - (b.server_sequence || 0) ||
-        (a.created || 0) - (b.created || 0) ||
-        a.id.localeCompare(b.id),
-    );
+    const c = chat();
+    c.messages = fluid.merge(c.messages, items);
+  }
+  function timelineContext() {
+    // Render dependencies only. Server visibility checks still purge records
+    // before a changed authorization projection is displayed.
+    const d = state.snapshot;
+    return JSON.stringify([state.project, state.environment, d?.can_manage,
+      d?.capabilities?.native_dot_relay, d?.capabilities?.message_remind, d?.jobs,
+      (d?.join_slots || []).map((slot) => [slot.id, slot.label]),
+      mentionSlots().map((slot) => [slot.id, slot.task_dot, slot.duplex]),
+      S.projects.map((project) => [project.id, project.alias])]);
   }
   function patchTimeline(forceBottom = false) {
     const feed = document.querySelector('.cc-feed'),
       list = feed?.querySelector('.cc-message-list');
     if (!list) return;
-    const c = chat(),
-      nearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 70;
-    const top = feed.scrollTop,
-      oldIds = new Set(
-        [...list.querySelectorAll('[data-message-id]')].map((n) => n.dataset.messageId),
-      );
+    const c = chat(), context = timelineContext(), evidence = relay.evidenceProjection();
+    if (list._ccMessages === c.messages && list._ccContext === context &&
+        list._ccEvidence === evidence.signature && !list._ccDeferred) {
+      if (forceBottom) {
+        feed.scrollTop = feed.scrollHeight;
+        c.scroll = feed.scrollTop;
+        c.unread = 0;
+        document.querySelector('.cc-new-messages').hidden = true;
+      }
+      return;
+    }
+    const nearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 70;
+    const top = feed.scrollTop, children = [...list.children];
+    const nodes = new Map(children.map((node) => [node.dataset.messageId, node]));
+    const lastSequence = Number(children.at(-1)?.dataset.sequence) || 0;
+    // One viewport read, logarithmic anchor lookup; no row geometry reads when
+    // following the tail, and no scroll hijacking while reading older messages.
+    let anchor = null, anchorTop = 0;
+    if (!nearBottom && !forceBottom && children.length) {
+      const edge = feed.getBoundingClientRect().top;
+      let low = 0, high = children.length - 1;
+      while (low < high) {
+        const mid = (low + high) >> 1;
+        if (children[mid].getBoundingClientRect().bottom < edge) low = mid + 1;
+        else high = mid;
+      }
+      anchor = children[low];
+      anchorTop = anchor.getBoundingClientRect().top;
+    }
     if (c.messages.length) list.querySelector('.cc-chat-empty')?.remove();
-    const nodes = new Map([...list.children].map((node) => [node.dataset.messageId, node]));
-    const anchor = [...list.children].find(
-      (node) => node.getBoundingClientRect().bottom >= feed.getBoundingClientRect().top,
-    );
-    const anchorTop = anchor?.getBoundingClientRect().top;
-    let previous = null;
+    let previous = null, added = 0, deferred = false;
+    const hydrated = [], entered = [];
     for (const m of c.messages) {
       let node = nodes.get(m.id);
+      const parent = m.reply_to_id ? messageById(m.reply_to_id) : null;
+      const taskEvidence = evidence.byMessage.get(m.id) || '';
+      if (node?._ccMessage === m && node._ccContext === context &&
+          node._ccParent === parent && node._ccEvidence === taskEvidence && !node._ccDeferred) {
+        previous = node;
+        continue;
+      }
       const markup = messageMarkup(m);
+      let pending = false;
       if (!node || node._ccMarkup !== markup) {
         const template = document.createElement('template');
         template.innerHTML = markup;
@@ -738,29 +772,48 @@ window.CodePierCollaboration = (() => {
         next._ccMarkup = markup;
         const patched = node && relay.patchMessage(node, next, m);
         if (patched) {
-          if (patched !== 'defer') node._ccMarkup = markup;
+          pending = patched === 'defer';
+          if (!pending) node._ccMarkup = markup;
         } else {
           if (node) node.replaceWith(next);
-          else list.insertBefore(next, previous ? previous.nextSibling : list.firstChild);
+          else {
+            list.insertBefore(next, previous ? previous.nextSibling : list.firstChild);
+            added++;
+            if ((m.server_sequence || 0) > lastSequence) entered.push(next);
+          }
           node = next;
         }
+        hydrated.push(node);
+      }
+      node._ccDeferred = pending;
+      deferred ||= pending;
+      if (!pending) {
+        node._ccMessage = m;
+        node._ccContext = context;
+        node._ccParent = parent;
+        node._ccEvidence = taskEvidence;
       }
       previous = node;
     }
-    relay.hydrate(list);
+    for (const node of hydrated) relay.hydrate(node);
+    list._ccMessages = c.messages;
+    list._ccContext = context;
+    list._ccEvidence = evidence.signature;
+    list._ccDeferred = deferred;
     if (forceBottom || nearBottom) {
       feed.scrollTop = feed.scrollHeight;
       c.unread = 0;
+      // Never animate an entire history batch.
+      if (entered.length <= 4) for (const node of entered) fluid.enter(node, { y: 6, duration: 180 });
     } else {
       feed.scrollTop = top;
-      if (relay.active() && anchor?.isConnected)
-        feed.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
-      c.unread += c.messages.filter((m) => !oldIds.has(m.id)).length;
+      if (anchor?.isConnected) feed.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
+      c.unread += added;
     }
     c.scroll = feed.scrollTop;
     const newer = document.querySelector('.cc-new-messages');
     newer.hidden = !c.unread;
-    newer.textContent = `${c.unread} 条新消息 ↓`;
+    fluid.text(newer, `${c.unread} 条新消息 ↓`);
   }
   function markVisibleRead() {
     const c = chat(),
@@ -774,7 +827,7 @@ window.CodePierCollaboration = (() => {
       feed.scrollHeight - feed.scrollTop - feed.clientHeight >= 70
     )
       return;
-    const sequence = Math.max(0, ...c.messages.map((m) => Number(m.server_sequence) || 0));
+    const sequence = c.messages.reduce((max, m) => Math.max(max, Number(m.server_sequence) || 0), 0);
     if (sequence <= (c.read || 0)) return;
     c.read = sequence;
     mutation('read-cursor', {
@@ -1003,10 +1056,10 @@ window.CodePierCollaboration = (() => {
     if (context && !context.matches(':active') && !context.contains(document.activeElement))
       context.innerHTML = contextContents();
     const strip = document.querySelector('.cc-member-strip');
-    if (strip && !strip.matches(':active') && !strip.contains(document.activeElement))
+    if (strip && !strip.matches(':active') && !strip.contains(document.activeElement) && strip.outerHTML !== memberStrip())
       strip.outerHTML = memberStrip();
     const projects = document.querySelector('.cc-project-strip');
-    if (projects && !projects.matches(':active') && !projects.contains(document.activeElement))
+    if (projects && !projects.matches(':active') && !projects.contains(document.activeElement) && projects.outerHTML !== projectChips())
       projects.outerHTML = projectChips();
     const area = document.querySelector('#cc-message-input');
     if (area) {
@@ -1017,10 +1070,26 @@ window.CodePierCollaboration = (() => {
       document.querySelector('#cc-command button[type="submit"]').disabled = area.disabled;
     }
   }
-  let workspaceRefresh = null;
+  let workspaceRefresh = null, workspaceFresh = null;
   function refreshWorkspaceData() {
     if (state.busy || !state.snapshot?.room || !state.snapshot.capabilities?.plain_messages) return;
     if (workspaceRefresh?.generation === state.generation) return workspaceRefresh.promise;
+    // Retained views open immediately. Regular sync and explicit refresh remain
+    // live; repeated navigation does not fan out redundant metadata requests.
+    const age = workspaceFresh?.generation === state.generation
+      ? performance.now() - workspaceFresh.at : Infinity;
+    if (age < 4000) {
+      // A trailing refresh keeps newly created rooms discoverable even if the
+      // user stops switching tabs during the coalescing window.
+      const generation = state.generation;
+      state.workspaceTimer ??= setTimeout(() => {
+        state.workspaceTimer = null;
+        if (generation === state.generation && S.page === 'collaboration') refreshWorkspaceData();
+      }, 4000 - age);
+      return;
+    }
+    clearTimeout(state.workspaceTimer);
+    state.workspaceTimer = null;
     const ticket = { generation: state.generation, promise: null };
     workspaceRefresh = ticket;
     const session = S.session,
@@ -1044,6 +1113,7 @@ window.CodePierCollaboration = (() => {
         : await getRecord('rooms', '');
       if (!current()) return;
       state.rooms = directory.items || [];
+      workspaceFresh = { generation: state.generation, at: performance.now() };
       workspaceUI.refreshRooms(roomRail(''));
       workspaceUI.refresh();
     })()
@@ -1497,17 +1567,19 @@ window.CodePierCollaboration = (() => {
     if (!state.project)
       return `<div class="collaboration">${header}${empty('请先创建一个有权限访问的项目映射。')}</div>`;
     const data = await getRecord('overview', '');
-    const grants = data.can_manage
-      ? (await api('/api/grants', { signal: state.controller.signal })).grants
-      : [];
     if (gen !== state.generation || session !== S.session || space !== S.space_id) return '';
+    // Independent authorized reads share one network stage instead of putting
+    // the grants directory in front of the conversation's critical path.
+    const grantsRequest = data.can_manage
+      ? api('/api/grants', { signal: state.controller.signal })
+      : Promise.resolve({ grants: [] });
     state.snapshot = data;
     state.conversation = data.conversation?.id || '';
     persistSelection();
-    state.grants = grants || [];
+    state.grants = [];
     if (data.room && data.capabilities?.plain_messages) {
       const c = chat();
-      const [timeline, rooms, members, policies] = await Promise.all([
+      const [timeline, rooms, members, policies, grants] = await Promise.all([
         getRecord('timeline', '', '', { room_id: data.room.id, limit: '100' }),
         data.conversation
           ? api('/api/collaboration/conversations', { signal: state.controller.signal })
@@ -1516,6 +1588,7 @@ window.CodePierCollaboration = (() => {
         data.capabilities?.direct_delegation
           ? getRecord('delegation_policies', '')
           : Promise.resolve({ items: [] }),
+        grantsRequest,
       ]);
       if (gen !== state.generation || session !== S.session || space !== S.space_id) return '';
       if (c.visibility && c.visibility !== timeline.visibility_token) clearVisibility(c, true);
@@ -1529,6 +1602,11 @@ window.CodePierCollaboration = (() => {
       delegation.updatePolicies(policies.items || []);
       state.dotTargets = policies.execution_target_candidates || [];
       state.dotDefaults = policies.dot_setup_defaults || null;
+      state.grants = grants.grants || [];
+    } else {
+      const grants = await grantsRequest;
+      if (gen !== state.generation || session !== S.session || space !== S.space_id) return '';
+      state.grants = grants.grants || [];
     }
     await coordination.load(data);
     if (gen !== state.generation || session !== S.session || space !== S.space_id) return '';
@@ -1543,7 +1621,7 @@ window.CodePierCollaboration = (() => {
     if (!data.room)
       return `<div class="collaboration">${header}${selection}${feedback}<section class="cc-card cc-intro"><h2>开启这个项目的共享讨论室</h2><p>创建讨论室只保存协作记录，不代表授权采集、添加订阅或执行代码。</p>${data.can_manage ? button('create-room', '创建项目讨论室') : empty('请由项目所属空间的管理员创建讨论室。')}</section></div>`;
     const project = S.projects.find((p) => p.id === state.project);
-    return `<div class="collaboration cc-chat-shell cc-workspace is-discussion" data-workspace-view="${E(state.view)}" data-project="${E(state.project)}" data-environment="${E(state.environment)}" data-conversation="${E(state.conversation)}"><h1 class="cc-sr-only" tabindex="-1">协作中心</h1>${roomRail(selection)}<button type="button" class="cc-room-backdrop" data-cc-workspace="close-rooms" aria-label="关闭房间列表" tabindex="-1"></button><section class="cc-room-body"><header class="cc-room-header"><button type="button" class="btn cc-room-mobile-toggle" data-cc-workspace="rooms" aria-controls="cc-room-rail" aria-expanded="false" aria-label="打开房间列表">☰</button><div class="cc-room-heading-copy"><div class="cc-room-title"><h2>${E(data.conversation ? conversationTitle(data.conversation) : data.room.title || project?.alias || state.project)}</h2><span class="cc-status">${E(state.environment)}</span>${data.room.state === 'paused' ? badge('paused') : ''}</div><div class="cc-room-subline"><span>${E(projectLabel(state.project))}</span>${memberStrip()}</div></div><div class="cc-header-tools">${data.capabilities?.message_search ? '<button type="button" class="btn" data-cc-action="search" aria-label="搜索房间消息"><span aria-hidden="true">⌕</span><span class="cc-search-label"> 搜索</span></button>' : ''}<details class="cc-room-menu"><summary data-cc-more aria-label="房间更多选项">···</summary><div>${button('room-settings', '切换房间')}${button('new-conversation', '新建独立聊天室')}${coordination.action('创建协作目标')}${button('context', '项目范围与上下文')}${data.can_manage && data.conversation ? button('add-project', '添加已授权项目') : ''}${button('refresh', '刷新状态')}</div></details></div></header>${projectChips()}${workspaceUI.navigation()}${workspaceUI.summary()}${feedback}<div class="cc-main"><div id="cc-discussion-host" class="cc-discussion-host">${discussion()}</div>${workspaceUI.panel()}</div></section><dialog id="cc-drawer" class="cc-drawer" aria-label="房间详情"></dialog></div>`;
+    return `<div class="collaboration cc-chat-shell cc-workspace is-discussion" data-workspace-view="${E(state.view)}" data-project="${E(state.project)}" data-environment="${E(state.environment)}" data-conversation="${E(state.conversation)}"><h1 class="cc-sr-only" tabindex="-1">协作中心</h1>${roomRail(selection)}<button type="button" class="cc-room-backdrop" data-cc-workspace="close-rooms" aria-label="关闭房间列表" tabindex="-1"></button><section class="cc-room-body"><header class="cc-room-header"><button type="button" class="btn cc-room-mobile-toggle" data-cc-workspace="rooms" aria-controls="cc-room-rail" aria-expanded="false" aria-label="打开房间列表">☰</button><div class="cc-room-heading-copy"><div class="cc-room-title"><h2>${E(data.conversation ? conversationTitle(data.conversation) : data.room.title || project?.alias || state.project)}</h2><span class="cc-status">${E(state.environment)}</span>${data.room.state === 'paused' ? badge('paused') : ''}</div><div class="cc-room-subline"><span>${E(projectLabel(state.project))}</span>${memberStrip()}</div></div><div class="cc-header-tools">${data.capabilities?.message_search ? '<button type="button" class="btn" data-cc-action="search" aria-label="搜索房间消息"><span aria-hidden="true">⌕</span><span class="cc-search-label"> 搜索</span></button>' : ''}<details class="cc-room-menu"><summary data-cc-more aria-label="房间更多选项">···</summary><div>${button('room-settings', '切换房间')}${button('new-conversation', '新建独立聊天室')}${coordination.action('创建协作目标')}${button('context', '项目范围与上下文')}${data.can_manage && data.conversation ? button('add-project', '添加已授权项目') : ''}${button('refresh', '刷新状态')}</div></details></div></header>${projectChips()}<div class="cc-room-toolbar">${workspaceUI.navigation()}</div>${workspaceUI.summary()}${feedback}<div class="cc-main"><div id="cc-discussion-host" class="cc-discussion-host">${discussion()}</div>${workspaceUI.panel()}</div></section><dialog id="cc-drawer" class="cc-drawer" aria-label="房间详情"></dialog></div>`;
   }
 
   async function act(action, element) {
@@ -2593,6 +2671,11 @@ window.CodePierCollaboration = (() => {
       }
       const room = event.target.closest('[data-cc-room]');
       if (room) {
+        if (room.dataset.ccRoom === state.conversation && room.dataset.project === state.project &&
+            room.dataset.environment === state.environment) {
+          workspaceUI.rooms(false);
+          return;
+        }
         rememberChat();
         disableComposer();
         resetScope();
@@ -2710,10 +2793,21 @@ window.CodePierCollaboration = (() => {
       area = root.querySelector('#cc-message-input');
     if (feed) {
       const c = chat();
+      const context = timelineContext(), evidence = relay.evidenceProjection();
       for (const node of feed.querySelectorAll('[data-message-id]')) {
         const m = messageById(node.dataset.messageId);
-        if (m) node._ccMarkup = messageMarkup(m);
+        if (m) {
+          node._ccMarkup = messageMarkup(m);
+          node._ccMessage = m;
+          node._ccContext = context;
+          node._ccParent = m.reply_to_id ? messageById(m.reply_to_id) : null;
+          node._ccEvidence = evidence.byMessage.get(m.id) || '';
+        }
       }
+      const list = feed.querySelector('.cc-message-list');
+      list._ccMessages = c.messages;
+      list._ccContext = context;
+      list._ccEvidence = evidence.signature;
       feed.scrollTop = c.scroll ?? feed.scrollHeight;
       feed.addEventListener('scroll', () => {
         c.scroll = feed.scrollTop;

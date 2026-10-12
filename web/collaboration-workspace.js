@@ -52,6 +52,7 @@ window.CodePierCollaborationWorkspace = {
       bindDetails,
       onOpen = () => {},
     } = ctx;
+    const fluid = window.CodePierCollaborationRuntime;
     const names = {
       discussion: '对话',
       jobs: '任务与结果',
@@ -73,12 +74,16 @@ window.CodePierCollaborationWorkspace = {
       discussionScroll = null,
       receiptsRequested = false;
     const root = () => document.querySelector('.cc-workspace');
-    const rows = () =>
-      window.CodePierCollaborationWorkspace.receiptRows(
-        chat().messages,
-        state.project,
-        state.environment,
-      );
+    let rowCache = null;
+    const rows = () => {
+      const messages = chat().messages;
+      if (rowCache?.messages !== messages || rowCache.project !== state.project ||
+          rowCache.environment !== state.environment) {
+        rowCache = { messages, project: state.project, environment: state.environment,
+          rows: window.CodePierCollaborationWorkspace.receiptRows(messages, state.project, state.environment) };
+      }
+      return rowCache.rows;
+    };
     const icon = (name) =>
       `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${symbols[name] || symbols.discussion}</svg>`;
     function navigation() {
@@ -112,8 +117,7 @@ window.CodePierCollaborationWorkspace = {
         chat().draft || !state.snapshot?.can_manage || state.snapshot?.room?.state !== 'active';
       return `<div class="cc-chat-empty cc-workspace-welcome"><span class="cc-welcome-mark" aria-hidden="true">${icon('discussion')}</span><span class="cc-eyebrow">${E(projectLabel(state.project))} · ${E(state.environment)}</span><h3>${title}</h3><p>${prose}</p>${!state.snapshot?.can_manage ? '<p>当前为只读访问，可以查看已获准的记录。</p>' : connected ? `<div class="cc-prompt-grid" aria-label="消息草稿建议">${['梳理一下当前进展和下一步', '先一起讨论方案，暂时不要修改', '检查目前有哪些问题需要处理'].map((prompt) => `<button type="button" data-cc-prompt="${E(prompt)}" ${disabled ? 'disabled' : ''}>${E(prompt)}<span aria-hidden="true">↗</span></button>`).join('')}</div><small>选择后可继续编辑，再发送。</small>` : button('open-members', pending ? '继续连接 dot' : '添加第一个 dot', {}, 'data-cc-onboarding="true"')}</div>`;
     }
-    function progress() {
-      const all = rows();
+    function progress(all = rows()) {
       const categories = [
         ['all', '全部'],
         ['attention', '需关注'],
@@ -167,6 +171,7 @@ window.CodePierCollaborationWorkspace = {
     function open(view, trigger) {
       if (!names[view] || !root() || !state.snapshot?.room) return;
       selection();
+      const previousView = state.view;
       const node = root();
       const scroll = node.querySelector('.cc-panel-scroll');
       if (state.view !== 'discussion' && scroll) panelScroll.set(state.view, scroll.scrollTop);
@@ -201,6 +206,11 @@ window.CodePierCollaborationWorkspace = {
       layout();
       bindDetails();
       refresh();
+      if (view !== previousView) {
+        fluid.cancelWithin(holder);
+        fluid.enter(view === 'discussion' ? node.querySelector('#cc-discussion-host') : holder,
+          { x: view === 'discussion' ? -6 : 12, y: 0, duration: 220 });
+      }
       onOpen();
       if (scroll && view !== 'discussion') scroll.scrollTop = panelScroll.get(view) || 0;
       if (view === 'discussion') {
@@ -234,23 +244,48 @@ window.CodePierCollaborationWorkspace = {
         (selected && !selected.isCollapsed && node.contains(selected.anchorNode))
       )
         return;
-      if (node.innerHTML !== markup) node.innerHTML = markup;
+      if (node._workspaceMarkup !== markup) {
+        if (node.innerHTML !== markup) node.innerHTML = markup;
+        node._workspaceMarkup = markup;
+      }
     }
     function patchRecords(node, markup) {
-      // Focus restoration cannot restore a native click whose pressed target
-      // was removed. :active also covers WebKit buttons that never take focus.
-      // Do not cache skipped markup; the next refresh must still apply it.
-      if (!node || node.matches(':active') || node._workspaceMarkup === markup) return;
+      if (!node || node.matches(':active')) return false;
+      if (node._workspaceMarkup === markup) return true;
       const selected = window.getSelection();
-      if (selected && !selected.isCollapsed && node.contains(selected.anchorNode)) return;
+      if (selected && !selected.isCollapsed && node.contains(selected.anchorNode)) return false;
       // A refresh must never overwrite a form being edited inside a detail.
       if (
         node.contains(document.activeElement) &&
         document.activeElement.matches('input, textarea, select, [contenteditable]')
       )
-        return;
+        return false;
       const scroll = node.closest('.cc-panel-scroll');
       const scrollTop = scroll?.scrollTop;
+      if (node.matches('.cc-progress-items')) {
+        const template = document.createElement('template');
+        template.innerHTML = markup;
+        const fresh = [...template.content.children];
+        if (fresh.length && fresh.every((item) => item.dataset.progressMessage)) {
+          const existing = new Map([...node.children].map((item) => [item.dataset.progressMessage, item]));
+          let previous = null, complete = true;
+          for (const next of fresh) {
+            let item = existing.get(next.dataset.progressMessage);
+            existing.delete(next.dataset.progressMessage);
+            if (!item) item = next;
+            else if (item.outerHTML !== next.outerHTML) {
+              if (item.contains(document.activeElement)) complete = false;
+              else { item.replaceWith(next); item = next; }
+            }
+            const position = previous ? previous.nextSibling : node.firstChild;
+            if (item !== position) node.insertBefore(item, position);
+            previous = item;
+          }
+          for (const item of existing.values()) item.remove();
+          if (complete) node._workspaceMarkup = markup;
+          return complete;
+        }
+      }
       const controls = (parent) => [...parent.querySelectorAll('button, summary')];
       const active = document.activeElement;
       const key = (item) =>
@@ -280,11 +315,14 @@ window.CodePierCollaborationWorkspace = {
         controls(node)
           .find((item) => key(item) === focused)
           ?.focus({ preventScroll: true });
+      return true;
     }
     function refreshRooms(markup) {
       const node = root(),
         list = node?.querySelector('.cc-room-list');
       if (!list || list.matches(':active')) return;
+      if (list._workspaceSource === markup) { draftBadges(node); return; }
+      list._workspaceSource = markup;
       const template = document.createElement('template');
       template.innerHTML = markup;
       const fresh = template.content.querySelector('.cc-room-list');
@@ -309,7 +347,7 @@ window.CodePierCollaborationWorkspace = {
         const draft = room.querySelector('.cc-room-draft');
         if (draft) {
           draft.hidden = !c?.draft;
-          draft.textContent = c?.draft ? '草稿' : '';
+          fluid.text(draft, c?.draft ? '草稿' : '');
         }
       }
     }
@@ -328,7 +366,7 @@ window.CodePierCollaborationWorkspace = {
         waiting = all.filter((r) => r.group === 'waiting').length;
       const label = node.querySelector('[data-cc-pulse-label]');
       if (label) {
-        label.textContent =
+        fluid.text(label,
           state.snapshot.room.state !== 'active'
             ? '房间已暂停 · 已保存记录仍可查看'
             : attention
@@ -337,7 +375,7 @@ window.CodePierCollaborationWorkspace = {
                 ? `${active} 条消息正在处理或回复`
                 : waiting
                   ? `${waiting} 条消息等待反馈`
-                  : '对话、进展与结果，留在同一个房间';
+                  : '对话、进展与结果，留在同一个房间');
         label.parentElement.dataset.tone = attention ? 'attention' : active ? 'active' : 'quiet';
         label.parentElement.hidden =
           state.view !== 'discussion' ||
@@ -352,7 +390,7 @@ window.CodePierCollaborationWorkspace = {
       }
       const count = node.querySelector('[data-cc-attention-count]');
       if (count) {
-        count.textContent = String(attention);
+        fluid.text(count, attention);
         count.hidden = !attention;
       }
       const receiptSummary = node.querySelector('[data-cc-receipt-summary]');
@@ -363,10 +401,11 @@ window.CodePierCollaborationWorkspace = {
             ? `${all.length} 条消息`
             : '暂无';
       const progressNode = node.querySelector('.cc-progress-feed');
-      if (progressNode) {
+      if (state.view === 'jobs' && progressNode &&
+          (progressNode._ccRows !== all || progressNode._ccFilter !== filter)) {
         const template = document.createElement('template');
-        template.innerHTML = progress();
-        patchRecords(
+        template.innerHTML = progress(all);
+        const complete = patchRecords(
           progressNode.querySelector('.cc-progress-items'),
           template.content.querySelector('.cc-progress-items').innerHTML,
         );
@@ -374,14 +413,18 @@ window.CodePierCollaborationWorkspace = {
           const fresh = template.content.querySelector(
             `[data-cc-progress-filter="${control.dataset.ccProgressFilter}"] span`,
           );
-          control.querySelector('span').textContent = fresh.textContent;
+          fluid.text(control.querySelector('span'), fresh.textContent);
           control.setAttribute('aria-pressed', String(control.dataset.ccProgressFilter === filter));
         }
+        // A selection/focus deferral is not a completed render. Retry it on the
+        // next refresh, including when the server returns no new messages.
+        progressNode._ccRows = complete ? all : null;
+        progressNode._ccFilter = complete ? filter : null;
       }
       const records = node.querySelector('.cc-workspace-records');
-      if (records) patchRecords(records, renderJobs());
+      if (state.view === 'jobs' && records) patchRecords(records, renderJobs());
       const monitor = node.querySelector('.cc-monitor-status');
-      if (monitor) {
+      if (state.view === 'monitor' && monitor) {
         const template = document.createElement('template');
         template.innerHTML = renderMonitor();
         const status = template.content.querySelector('.cc-monitor-status');
@@ -409,6 +452,7 @@ window.CodePierCollaborationWorkspace = {
       if (body) body.inert = show && matchMedia('(max-width: 1000px)').matches;
       if (show) {
         rail.querySelector('#cc-room-search')?.focus();
+        fluid.enter(rail, { x: -14, y: 0, duration: 240 });
         onOpen();
       } else if (railFocus?.isConnected) railFocus.focus({ preventScroll: true });
     }
@@ -427,13 +471,10 @@ window.CodePierCollaborationWorkspace = {
       const filterButton = event.target.closest('[data-cc-progress-filter]');
       if (filterButton) {
         filter = filterButton.dataset.ccProgressFilter;
-        const node = root().querySelector('.cc-progress-feed'),
-          template = document.createElement('template');
-        template.innerHTML = progress();
-        node.replaceWith(template.content.firstElementChild);
-        root()
-          .querySelector(`[data-cc-progress-filter="${filter}"]`)
-          ?.focus({ preventScroll: true });
+        // Safari pointer clicks need not focus buttons. Preserve the same control
+        // and explicitly give it focus without remounting the surrounding feed.
+        refresh();
+        filterButton.focus({ preventScroll: true });
         return true;
       }
       const prompt = event.target.closest('[data-cc-prompt]');
@@ -505,6 +546,25 @@ window.CodePierCollaborationWorkspace = {
           return true;
         }
       }
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && !event.altKey &&
+          event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        event.stopPropagation();
+        if (matchMedia('(max-width: 1000px)').matches) rooms(true, document.activeElement);
+        else root()?.querySelector('#cc-room-search')?.focus();
+        return true;
+      }
+      if (event.target.closest('.cc-workspace-nav') &&
+          ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+        event.preventDefault();
+        const tabs = [...root().querySelectorAll('.cc-workspace-nav [data-cc-view]')];
+        const index = tabs.indexOf(event.target.closest('[data-cc-view]'));
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 :
+          (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+        tabs[next]?.focus({ preventScroll: true });
+        tabs[next]?.click();
+        return true;
+      }
       if (event.key === 'Escape' && state.view !== 'discussion') {
         event.preventDefault();
         open('discussion');
@@ -513,6 +573,8 @@ window.CodePierCollaborationWorkspace = {
       return false;
     }
     function clear() {
+      rowCache = null;
+      fluid.cancelWithin(root());
       filter = 'all';
       composerSelection = null;
       discussionScroll = null;
