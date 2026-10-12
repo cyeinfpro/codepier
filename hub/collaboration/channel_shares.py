@@ -78,7 +78,7 @@ class ChannelShares:
                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                         (identifier, binding['id'], binding['generation'], source['id'], source['version'], dot['id'],
                          artifact['id'], artifact['sha256'], artifact['bytes'], principal.space_id, principal.user_id,
-                         binding['peer_id'], min(binding['expires_at'], artifact['expires']), self.c.clock()))
+                         binding['peer_id'], artifact['expires'] if binding.get('lifetime_mode') == 'until_revoked' else min(binding['expires_at'], artifact['expires']), self.c.clock()))
                     self.store.execute('UPDATE channel_attachment_approvals SET ordinal=? WHERE id=?', (ordinal, identifier))
                     ids.append(identifier)
                 self.c.audit(room, principal.actor, 'weixin.attachment_shares_approved', source['id'],

@@ -33,7 +33,7 @@ def named_step(steps, name):
 def test_ci_bounds_existing_linux_installations_without_changing_trust(job):
     steps = workflow_steps(job)
     step = named_step(steps, 'Bound Linux APT download waits')
-    expected = "runner.os == 'Linux'" + (" && matrix.shard != 4" if job == 'verify' else "")
+    expected = "runner.os == 'Linux'" + (" && matrix.shard < 4" if job == 'verify' else "")
     assert step['if'] == expected
     assert step['timeout-minutes'] == 2
     assert step['shell'] == 'bash'
@@ -141,10 +141,10 @@ else:
     assert len(observed) == expected_calls.get(failure, 4)
 
 
-@pytest.mark.parametrize('shard', [0, 1, 2, 3, 4])
+@pytest.mark.parametrize('shard', [0, 1, 2, 3, 4, 5])
 def test_dedicated_resource_job_does_not_install_browsers(tmp_path, shard):
     install = named_step(workflow_steps('verify'), INSTALL_STEPS['verify'])['run']
-    boundary = "if [[ '${{ matrix.shard }}' != '4' ]]; then"
+    boundary = "if [[ '${{ matrix.shard }}' -lt 4 ]]; then"
     assert install.count(boundary) == 1
     script = install[install.index(boundary):].replace('${{ matrix.shard }}', str(shard))
     # Execute the real conditional with an inert interpreter substitute.

@@ -30,7 +30,7 @@ class JoiningService:
         self.c.live_room(room)
         if slot['state'] == 'revoked':
             raise DevError('JOIN_SLOT_REVOKED', '这个智能体位置已撤销；请由面板重新创建', 403)
-        if slot['expires_at'] <= self.c.clock():
+        if self.c.channel_owner.expired(slot):
             raise DevError('JOIN_SLOT_EXPIRED', '这个智能体位置已到期；请由面板重新创建', 403)
         if registered and slot['state'] != 'registered':
             raise DevError('JOIN_REQUIRED', '请先在目标聊天用加入码登记当前连接', 409)
@@ -50,7 +50,7 @@ class JoiningService:
             self.c.owner(principal)
             self.c.live_room(room)
             def save():
-                count = self.store.one("SELECT COUNT(*) AS n FROM collaboration_join_slots WHERE room_id=? AND state!='revoked' AND expires_at>?",
+                count = self.store.one("SELECT COUNT(*) AS n FROM collaboration_join_slots WHERE room_id=? AND state!='revoked' AND (lifetime_mode='until_revoked' OR expires_at>?)",
                                        (room['id'], self.c.clock()))['n']
                 if count >= 16:
                     raise DevError('JOIN_SLOT_LIMIT', '这个协作室已有 16 个有效位置；先撤销不再使用的项', 409)
@@ -139,7 +139,7 @@ class JoiningService:
                     JOIN mcp_event_subscriptions s ON s.id=r.subscription_id
                     JOIN collaboration_join_slots j ON j.id=r.slot_id
                     WHERE r.slot_id!=? AND r.endpoint_digest=? AND j.room_id=?
-                    AND j.state='registered' AND j.expires_at>? AND s.expires_at>? AND s.state IN ('active','paused')''',
+                    AND j.state='registered' AND (j.lifetime_mode='until_revoked' OR j.expires_at>?) AND s.expires_at>? AND s.state IN ('active','paused')''',
                     (identifier, endpoint, room['id'], self.c.clock(), self.c.clock())):
                 saved = json.loads(self.store.decrypt(route['secret']))
                 if delivery['secret'] in {saved.get('current'), saved.get('retiring')}:
@@ -211,7 +211,7 @@ class JoiningService:
         if dot:
             return self.c.dots.slot_view(room, slot, dot, principal)
         state = slot['state']
-        if slot['expires_at'] <= self.c.clock() and state != 'revoked':
+        if self.c.channel_owner.expired(slot) and state != 'revoked':
             state = 'expired'
         authorization = True
         if state == 'registered':

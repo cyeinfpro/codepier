@@ -20,7 +20,13 @@ def available_workers() -> int:
     return max(1, (getattr(os, "process_cpu_count", os.cpu_count)() or 1))
 
 
-RESOURCE_LAYOUT = "four-plus-resource-v1"
+RESOURCE_LAYOUT = "four-plus-resource-and-long-v1"
+RELEASE_SHARDS = 6
+LONG_NODEIDS = frozenset({
+    "tests/test_dot_bounded_execution_process.py::test_real_silent_process_keeps_budget_and_replays_only_receipt",
+    "tests/test_dot_bounded_execution_process.py::test_real_process_explicit_cancel_does_not_reexecute",
+    "tests/test_dot_bounded_execution_process.py::test_ten_and_thirty_minute_silent_commands",
+})
 RESOURCE_NODEIDS = frozenset({
     "tests/test_hub_adaptive_admission_stack.py::test_real_128_waiting_burst_other_project_cancel_restart_and_exact_drain",
 })
@@ -34,11 +40,13 @@ def plan_jobs(nodeids, markers=None, *, shard_index=0, shard_count=1, resource_s
         raise ValueError("Collection contains duplicate node IDs")
     markers = markers or {}
     if resource_shard:
-        if shard_count != 5:
-            raise ValueError("Resource layout requires four ordinary shards and one resource shard")
+        if shard_count != RELEASE_SHARDS:
+            raise ValueError("Release layout requires four ordinary, one resource and one long wall-clock shard")
         marked = {node for node in nodeids if "resource_regression" in markers.get(node, [])}
         if marked != RESOURCE_NODEIDS or not RESOURCE_NODEIDS <= set(nodeids):
             raise ValueError("Resource test collection/markers differ from the explicit release contract")
+        if not LONG_NODEIDS <= set(nodeids):
+            raise ValueError("Long wall-clock tests are absent from the release collection")
     grouped: dict[str, list[str]] = {}
     by_module: dict[str, list[str]] = {}
     for nodeid in nodeids:
@@ -55,8 +63,11 @@ def plan_jobs(nodeids, markers=None, *, shard_index=0, shard_count=1, resource_s
             resource = bool(set(selected) & RESOURCE_NODEIDS)
             if resource and not set(selected) <= RESOURCE_NODEIDS:
                 raise ValueError("Resource tests must own their complete isolated job")
-            assigned = 4 if resource else ordinary_ordinal % 4
-            if not resource:
+            long_running = bool(set(selected) & LONG_NODEIDS)
+            if long_running and not set(selected) <= LONG_NODEIDS:
+                raise ValueError("Long wall-clock tests must own their complete isolated job")
+            assigned = 4 if resource else 5 if long_running else ordinary_ordinal % 4
+            if not resource and not long_running:
                 ordinary_ordinal += 1
         else:
             assigned = ordinal % shard_count
@@ -116,11 +127,11 @@ def merge_summaries(summaries):
     if len(summaries) != count or {s["shard"]["index"] for s in summaries} != set(range(count)):
         raise ValueError("Missing or duplicate shard reports")
     layout = first.get("layout", "ordinary")
-    if layout not in {"ordinary", RESOURCE_LAYOUT} or (layout == RESOURCE_LAYOUT and count != 5):
+    if layout not in {"ordinary", RESOURCE_LAYOUT} or (layout == RESOURCE_LAYOUT and count != RELEASE_SHARDS):
         raise ValueError("Unknown or incomplete regression layout")
     expected = first["full_collection"]
-    if layout == RESOURCE_LAYOUT and not RESOURCE_NODEIDS <= set(expected):
-        raise ValueError("Required resource tests are absent from collection")
+    if layout == RESOURCE_LAYOUT and not (RESOURCE_NODEIDS | LONG_NODEIDS) <= set(expected):
+        raise ValueError("Required resource or long wall-clock tests are absent from collection")
     if len(expected) != len(set(expected)) or not expected:
         raise ValueError("Invalid full collection")
     outcomes: dict[str, str] = {}
@@ -131,10 +142,11 @@ def merge_summaries(summaries):
                 summary["source_inventory_sha256"] != first["source_inventory_sha256"]):
             raise ValueError("Shard source or collection fingerprints differ")
         if layout == RESOURCE_LAYOUT:
-            resource_outcomes = set(summary["outcomes"]) & RESOURCE_NODEIDS
-            if ((summary["shard"]["index"] == 4 and set(summary["outcomes"]) != RESOURCE_NODEIDS) or
-                    (summary["shard"]["index"] != 4 and resource_outcomes)):
-                raise ValueError("Resource tests must execute exactly once in the dedicated shard")
+            for dedicated_index, required_nodes in ((4, RESOURCE_NODEIDS), (5, LONG_NODEIDS)):
+                dedicated_outcomes = set(summary["outcomes"]) & required_nodes
+                if ((summary["shard"]["index"] == dedicated_index and set(summary["outcomes"]) != required_nodes) or
+                        (summary["shard"]["index"] != dedicated_index and dedicated_outcomes)):
+                    raise ValueError("Dedicated tests must execute exactly once in their own shard")
         if not summary.get("verified") or summary.get("source_changed_during_run"):
             raise ValueError("A shard is failed, skipped, incomplete or stale")
         if summary.get("unexpected_tests") or summary.get("duplicate_phases") or summary.get("module_failures"):

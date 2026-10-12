@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from scripts.check_release import check_archive, check_source
-from scripts.regression_plan import RESOURCE_LAYOUT, fingerprint, merge_summaries
+from scripts.regression_plan import RELEASE_SHARDS, RESOURCE_LAYOUT, fingerprint, merge_summaries
 
 
 def write_json(path, value):
@@ -110,8 +110,8 @@ def finish(root, archive, proof):
 
 
 def verify_reports(reports, commit):
-    if len(reports) != 5:
-        raise ValueError('All four ordinary and the dedicated resource public-archive shards are required')
+    if len(reports) != RELEASE_SHARDS:
+        raise ValueError('All four ordinary, dedicated resource and long wall-clock public-archive shards are required')
     summaries, proofs = [], []
     for report in map(Path, reports):
         summary = json.loads(report.read_text())
@@ -136,7 +136,7 @@ def verify_reports(reports, commit):
         raise ValueError('Shards tested different public archives')
     return {'verified': True, 'commit': commit, 'archive_sha256': first['archive_sha256'],
             'source_inventory_sha256': first['source_inventory_sha256'],
-            'public_files': len(first['files']), 'shards': 5}
+            'public_files': len(first['files']), 'shards': RELEASE_SHARDS}
 
 
 def main():

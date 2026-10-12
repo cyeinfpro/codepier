@@ -127,7 +127,17 @@ class ChatroomService:
             result['source_channel'] = body.get('external_origin', {}).get('channel', 'weixin')
             result['canonical_message_id'] = row['id']
             result['author_kind'] = 'external_channel'
-            result['external_execution_authority'] = False
+            trusted = self.c.channel_owner.author(row)
+            origin = body.get('external_origin')
+            if isinstance(origin, dict):
+                origin['execution_authority'] = trusted['authenticated']
+            body['requires_owner_execution_request'] = not trusted['authenticated']
+            result['external_execution_authority'] = trusted['authenticated']
+            result['chat_identity_verified'] = trusted['authenticated']
+            result['requires_owner_execution_request'] = not trusted['authenticated']
+            if trusted['authenticated']:
+                result['display_name'] = '微信本人'
+                result['trusted_author'] = trusted
         return result
 
     def deliveries(self, rows):

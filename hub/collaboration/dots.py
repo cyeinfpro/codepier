@@ -290,7 +290,7 @@ class DotService:
 
     def slot_view(self, room, slot, dot, principal):
         setup = json.loads(dot['setup'])
-        state = 'expired' if slot['expires_at'] <= self.c.clock() and slot['state'] != 'revoked' else slot['state']
+        state = 'expired' if self.c.channel_owner.expired(slot) and slot['state'] != 'revoked' else slot['state']
         status, reason, policy, request, progress = state, '', None, None, None
         routes = self.c.joining.routes(room, slot) if state == 'registered' else []
         if state == 'invited' and slot['code_expires_at'] <= self.c.clock():
@@ -345,6 +345,7 @@ class DotService:
  'label': slot['label'], 'kind': 'dot',
                 'version': slot['version'], 'state': state, 'status': status, 'blocked_reason': reason,
                 'conversation_id': dot['conversation_id'], 'expires_at': slot['expires_at'],
+                'lifetime_mode': 'until_revoked' if self.c.channel_owner.persistent(slot) else 'timed',
                 'code_expires_at': slot['code_expires_at'], 'joined_at': slot['joined_at'], 'join_code': code,
                 'join_instruction': instruction, 'subscription_instruction': resume,
                 'capabilities': setup['capabilities'], 'execution_target': setup['execution_target'],

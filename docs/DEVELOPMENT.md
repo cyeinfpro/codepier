@@ -50,25 +50,29 @@ browser/integration/slow 由实际导入及 fixture 依赖分类，smoke 和独�
 完整回归使用全新目录；workers 不超过可用 CPU，资源受限时可更低：
 
 ```bash
-.venv/bin/python scripts/check_full_regression.py \
-  --output .work/regression-final --workers 4 --timeout 1200 --coverage
+CODEPIER_LONG_BUDGET_TEST=1 .venv/bin/python scripts/check_full_regression.py \
+  --output .work/regression-final --workers 4 --timeout 2400 --coverage
 ```
 
 运行器先完整收集，再按模块隔离进程；独立主题/视口案例各有自己的进程、临时目录、截图和报告。不会为变绿重试失败用例。耗时上限用于识别卡死，不是跳过结果。执行期间不能改源码。任意失败、跳过、丢失阶段、重复阶段、非零进程退出或源码变化都会使 verified=false。
 
 ## CI 分片与完整证明
 
-Linux/macOS 每个平台各自分成四份。每个 shard 都保存完整收集清单、实际执行结果和源码指纹。分片的 verified 仅表示该片通过，不表示全仓通过；平台聚合必须收齐同一次源码、全部四个 index，并核对每个测试恰好执行一次。
+Linux/macOS 每个平台各自有六片：四个普通分片、一个真实资源准入专片（index 4）、一个真实长时进程专片（index 5）。长时专片保留原来的 10/30 分钟墙钟测试及同模块短时/取消测试，不缩短预算、不模拟时间、不跳过。所有分片从同一份经重复构建确认可复现的公开源码 ZIP 解包运行；每片仍保存完整收集清单、实际执行结果、coverage 和源码前后指纹。只有六片同源码、同收集集合、每例恰好执行一次且全部通过，聚合才是完整证明。不得把独立长测移到定时任务后仍称当前发布全量通过。
 
 ```bash
-.venv/bin/python scripts/check_full_regression.py \
-  --output .work/shard-0 --workers 2 --shard-count 4 --shard-index 0 --coverage
-# 其余三个 shard 用独立目录和对应 index 执行后，再合并所有报告。
+# 每片使用独立输出目录；CI 为不同平台/分片提供独立 runner。
+CODEPIER_LONG_BUDGET_TEST=1 .venv/bin/python scripts/check_full_regression.py \
+  --output .work/shard-0 --workers 2 --timeout 2400 \
+  --shard-count 6 --shard-index 0 --resource-shard --coverage
+# index 1–5 全部完成后合并；任一缺失、失败、跳过或重复都失败。
 .venv/bin/python scripts/merge_regression.py \
-  .work/shard-0/summary.json .work/shard-1/summary.json \
-  .work/shard-2/summary.json .work/shard-3/summary.json \
-  --output .work/complete.json
+  .work/shard-{0,1,2,3,4,5}/summary.json --coverage --output .work/complete/summary.json
 ```
+
+CI 的 Linux 源码构建 job 与 macOS 的第 0 片分别保留本平台的构建、静态检查与依赖审计；其他普通片只建立各自的依赖环境、安装测试需要的构建依赖，不重复相同构建检查。资源与长时片不安装浏览器。pip/npm/浏览器仅复用下载缓存，不共享或上传虚拟环境。
+
+候选完整通过后，main 的“Validate same-commit promotion”可以只读验证同一仓库、同一完整 SHA、同一 workflow、最新有效成功 job 集合、两平台完整证明、coverage、公开 ZIP 和 manifest 的精确哈希，再复用候选证据。已失败/未结束的后续同 workflow 验证、过期或缺失 artifact、不同源码/workflow/归档都不允许复用；读取失败回退全量。复用不伪造本轮测试执行：Release gate 明确报告来源 run，受复用替代的 job 显示 skipped。首次候选、PR 和没有合格证据的 main 仍跑完整六片。
 
 覆盖率采集包括 Python 子进程，保存 XML/JSON 和可合并的数据。diff coverage 仅报告新增/修改的可执行 Python 行、未测量文件和未覆盖行，不设置旧代码全仓 80% 门槛，也不把没有数据说成 100%。分片先合并覆盖数据，再计算整个变更的覆盖率。
 

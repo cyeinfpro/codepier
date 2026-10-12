@@ -442,10 +442,18 @@ window.CodePierCollaborationDelegation = {
             (available ? button('delegation-pause', '暂停后续委托', policy) : '') +
             '<small>版本 ' +
             E(policy.version) +
-            ' · 已用 ' +
-            E(policy.usage?.delegations || 0) +
-            ' / ' +
-            E(policy.usage?.max_delegations || 0) +
+            ' · ' +
+            (policy.usage?.budget_mode === 'rolling_24h'
+              ? '滚动24小时已用 ' +
+                E(policy.usage?.window_delegations || 0) +
+                ' / ' +
+                E(policy.usage?.max_delegations || 0) +
+                '；累计 ' +
+                E(policy.usage?.total_delegations ?? policy.usage?.delegations ?? 0)
+              : '已用 ' +
+                E(policy.usage?.delegations || 0) +
+                ' / ' +
+                E(policy.usage?.max_delegations || 0)) +
             ' 次。只有范围改变时才需重新审阅。</small></details>'
           : '') +
         '</section>'

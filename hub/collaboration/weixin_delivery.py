@@ -12,6 +12,11 @@ from shared.util import DevError
 
 DONE = frozenset({'accepted', 'owner_confirmed', 'cancelled', 'rejected'})
 READY = frozenset({'queued', 'waiting_context', 'waiting_media'})
+TERMINAL_SOURCE = frozenset({
+    'CHANNEL_OWNER_REVOKED', 'CHANNEL_OWNER_SOURCE_CHANGED',
+    'CHANNEL_OWNER_SOURCE_SUPERSEDED', 'CHANNEL_OWNER_SCOPE_CHANGED',
+    'CHANNEL_OWNER_PEER_CHANGED', 'CHANNEL_OWNER_NOT_APPROVED',
+})
 
 
 class WeixinDelivery:
@@ -38,10 +43,16 @@ class WeixinDelivery:
         if not self.c.config.enabled:
             return None
         body = json.loads(message['body'])
-        if message['origin'] != 'bound_connector' or not body.get('sender_dot_id') or body.get('dot_reply_complete') is False:
+        if message['origin'] != 'bound_connector' or not body.get('sender_dot_id'):
             return None
         source = self.root_source(message)
         if not source:
+            return None
+        try:
+            self.c.channel_owner.require_reply_source(source)
+        except DevError:
+            return None
+        if body.get('dot_reply_complete') is False and not self.c.channel_owner.author(source)['authenticated']:
             return None
         origin = json.loads(source['body']).get('external_origin', {})
         try:
@@ -110,6 +121,7 @@ class WeixinDelivery:
                 or digest(body) != delivery['message_digest'] or body.get('sender_dot_id') != dot['id']):
             raise DevError('WEIXIN_DELIVERY_CONTENT_CHANGED', '原消息内容或版本已变化，不覆盖已排定的微信分项', 409)
         source = self.c.object('collaboration_messages', room, delivery['source_message_id'])
+        self.c.channel_owner.require_reply_source(source)
         if source['origin'] != 'external_channel' or source['conversation_id'] != binding['conversation_id']:
             raise DevError('WEIXIN_DELIVERY_SOURCE_CHANGED', '原外部消息来源已变化', 403)
         return binding, account, owner, message
@@ -223,7 +235,8 @@ class WeixinDelivery:
                     'WEIXIN_MEDIA_LIMIT', 'WEIXIN_VOICE_SEND_UNVERIFIED', 'WEIXIN_UPLOAD_REJECTED',
                     'ATTACHMENT_EXPIRED', 'ATTACHMENT_HASH_MISMATCH', 'WEIXIN_MEDIA_INVALID'})
             state = ('accepted' if result is not None else 'unknown' if row['state'] == 'sending'
-                     else 'rejected' if definite_media_failure else 'attention')
+                     else 'rejected' if definite_media_failure or (row['state'] == 'preparing'
+                         and row['attempts'] == 0 and code in TERMINAL_SOURCE) else 'attention')
             self.store.execute('''UPDATE weixin_parts SET state=?,reason_code=?,provider_receipt=?,lease_until=0,updated=? WHERE id=?''',
                 (state, code, canonical(result) if result is not None else None, self.c.clock(), row['id']))
             self.refresh(row['delivery_id'])
@@ -241,7 +254,10 @@ class WeixinDelivery:
                 with self.store.transaction():
                     row = self.store.one('SELECT * FROM weixin_parts WHERE id=?', (identifier,))
                     if row and row['state'] in READY:
-                        self.store.execute("UPDATE weixin_parts SET reason_code=?,next_attempt=?,updated=? WHERE id=?", (code, self.c.clock() + 30, self.c.clock(), identifier))
+                        terminal_source = code in TERMINAL_SOURCE
+                        self.store.execute("UPDATE weixin_parts SET state=?,reason_code=?,next_attempt=?,updated=? WHERE id=?",
+                                           ('rejected' if terminal_source else row['state'], code, self.c.clock() + 30, self.c.clock(), identifier))
+                        self.refresh(row['delivery_id'])
             await self.store.run(blocked)
             return
         if not claim:
@@ -302,9 +318,14 @@ class WeixinDelivery:
         await asyncio.gather(*(run(row) for row in rows))
 
     def quarantine_binding(self, identifier, reason):
-        rows = self.store.all("SELECT p.* FROM weixin_parts p JOIN weixin_deliveries d ON d.id=p.delivery_id WHERE d.binding_id=? AND p.state NOT IN ('accepted','owner_confirmed','cancelled')", (identifier,))
+        rows = self.store.all("SELECT p.* FROM weixin_parts p JOIN weixin_deliveries d ON d.id=p.delivery_id WHERE d.binding_id=? AND p.state NOT IN ('accepted','owner_confirmed','cancelled','rejected')", (identifier,))
         for row in rows:
-            self.store.execute("UPDATE weixin_parts SET state=CASE WHEN state='sending' THEN 'unknown' ELSE 'attention' END,reason_code=?,lease_fence=lease_fence+1,lease_until=0,updated=? WHERE id=?", (reason, self.c.clock(), row['id']))
+            # Fence stale workers and release only parts proven never sent.
+            # A previous unknown send keeps its lane barrier across re-login.
+            state = ('unknown' if row['state'] in {'sending', 'unknown'} else 'cancelled'
+                     if row['state'] in READY | {'preparing', 'attention'} and row['attempts'] == 0 else 'attention')
+            self.store.execute("UPDATE weixin_parts SET state=?,reason_code=?,lease_fence=lease_fence+1,lease_until=0,updated=? WHERE id=?",
+                               (state, reason, self.c.clock(), row['id']))
             self.refresh(row['delivery_id'])
 
     def quarantine_account(self, identifier, reason):

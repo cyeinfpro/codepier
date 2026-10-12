@@ -10,7 +10,7 @@ import zipfile
 import pytest
 
 from scripts import release_acceptance as acceptance
-from scripts.regression_plan import RESOURCE_LAYOUT, RESOURCE_NODEIDS, fingerprint
+from scripts.regression_plan import LONG_NODEIDS, RELEASE_SHARDS, RESOURCE_LAYOUT, RESOURCE_NODEIDS, fingerprint
 
 
 def inventory(root):
@@ -104,17 +104,17 @@ def reports(tmp_path):
     commit = 'a' * 40
     files = {'module.py': {'sha256': 'b' * 64, 'bytes': 4, 'mode': 0o644}}
     source = {'module.py': 'b' * 64}
-    nodes = ['tests/test_example.py::test_' + str(i) for i in range(4)] + sorted(RESOURCE_NODEIDS)
+    nodes = ['tests/test_example.py::test_' + str(i) for i in range(4)] + sorted(RESOURCE_NODEIDS) + sorted(LONG_NODEIDS)
     proof = {'schema': 1, 'commit': commit, 'files': files, 'archive_sha256': 'c' * 64,
              'source_inventory_sha256': 'd' * 64, 'commit_binding_verified': True,
              'post_regression_source_verified': True}
     paths = []
-    for i in range(5):
+    for i in range(RELEASE_SHARDS):
         directory = tmp_path / str(i)
         directory.mkdir()
-        summary = {'verified': True, 'layout': RESOURCE_LAYOUT, 'shard': {'index': i, 'count': 5}, 'full_collection': nodes,
+        summary = {'verified': True, 'layout': RESOURCE_LAYOUT, 'shard': {'index': i, 'count': RELEASE_SHARDS}, 'full_collection': nodes,
                    'collection_sha256': fingerprint(nodes), 'source_inventory_sha256': fingerprint(source),
-                   'outcomes': {nodes[i]: 'passed'}}
+                   'outcomes': {node: 'passed' for node in (sorted(LONG_NODEIDS) if i == 5 else [nodes[i]])}}
         path = directory / 'summary.json'
         for name, value in [('summary.json', summary), ('archive-proof.json', proof),
                             ('source-before.json', source), ('source-after.json', source)]:
@@ -123,7 +123,7 @@ def reports(tmp_path):
     return paths, commit
 
 
-def test_five_complete_archive_shards_bind_one_commit(tmp_path):
+def test_six_complete_archive_shards_bind_one_commit(tmp_path):
     paths, commit = reports(tmp_path)
     assert acceptance.verify_reports(paths, commit)['verified']
 
@@ -160,7 +160,7 @@ def test_aggregate_rejects_missing_stale_or_mixed_evidence(tmp_path, change):
 
 def test_workflow_preserves_matrix_and_runs_extracted_source():
     workflow = (Path(__file__).resolve().parents[1] / '.github/workflows/ci.yml').read_text()
-    for fragment in ['os: [ubuntu-24.04, macos-15]', 'shard: [0, 1, 2, 3, 4]', '--resource-shard', 'Resource admission',
+    for fragment in ['os: [ubuntu-24.04, macos-15]', 'shard: [0, 1, 2, 3, 4, 5]', '--resource-shard', 'Resource admission',
                      'windows-core:', 'oidc-authentik:', 'release_acceptance.py prepare',
                      'release_acceptance.py finish', 'release_acceptance.py verify',
                      'cd "$ACCEPTANCE"', 'MCP_COMPAT_PYTHON:', '--coverage',

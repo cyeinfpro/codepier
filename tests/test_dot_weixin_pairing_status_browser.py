@@ -201,7 +201,7 @@ def test_natural_pairing_expiry_preserves_focus_but_clears_old_code(qr_page):
     page.clock.fast_forward(901000)
     page.evaluate('Promise.resolve()')
     expect(code).to_be_focused()
-    expect(code).to_have_value("配对码已过期；请撤销原绑定后重新生成")
+    expect(code).to_have_value("配对码已过期；请点击“重新生成配对码”")
     expect(page.locator(".cc-wx-bindings")).to_contain_text("配对码已过期")
     count = page.evaluate("pollReads")
     advance(page, 30000)
@@ -229,7 +229,7 @@ def test_expired_code_is_cleared_even_when_status_transport_fails(qr_page):
     page.clock.fast_forward(901000)
     advance(page, 30001)
     expect(page.get_by_role("textbox", name="微信配对码")).to_have_value(
-        "配对码已过期；请撤销原绑定后重新生成")
+        "配对码已过期；请点击“重新生成配对码”")
     expect(page.locator(".cc-wx-refresh-notice")).to_contain_text("配对码已到期")
     count = page.evaluate("pollReads")
     advance(page, 30000)

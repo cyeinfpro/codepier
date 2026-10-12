@@ -135,6 +135,7 @@ def make_router(auth, runtime):
                         'weixin-bind': service.weixin.bind,
                         'weixin-control': service.weixin.control,
                         'weixin-owner-request': service.weixin.owner_request,
+                        'weixin-owner-authority': service.channel_owner.control,
                         'weixin-files': service.weixin.media.add_artifacts,
                         'weixin-approve-files': service.weixin.media.approve,
                         'weixin-delivery-control': service.weixin.delivery.control,

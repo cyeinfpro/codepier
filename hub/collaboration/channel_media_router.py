@@ -97,7 +97,7 @@ class ChannelMediaRouter:
                 "unavailable" if oversize else "pending",
                 self.store.encrypt(canonical({"file_id": item["file_id"]})),
                 "telegram_download_limit" if oversize else "",
-                min(binding["expires_at"], now + 7 * 86400),
+                now + 7 * 86400 if binding.get("lifetime_mode") == "until_revoked" else min(binding["expires_at"], now + 7 * 86400),
                 now,
                 now,
             ),

@@ -107,7 +107,7 @@ class ChannelMedia:
             (identifier, binding['space_id'], binding['owner_user_id'], binding['room_id'], binding['conversation_id'],
              binding['project_id'], message_id, ordinal, binding['id'], binding['generation'], binding['peer_id'],
              kind, name, 'application/octet-stream', state, self.store.encrypt(canonical({'media': media})), reason,
-             min(binding['expires_at'], now + 7 * 86400), now, now))
+             now + 7 * 86400 if binding.get('lifetime_mode') == 'until_revoked' else min(binding['expires_at'], now + 7 * 86400), now, now))
         return identifier
 
     def add_artifacts(self, raw, principal):
@@ -154,7 +154,7 @@ class ChannelMedia:
                          binding['project_id'], message['id'], ordinal, binding['id'], binding['generation'], binding['peer_id'],
                          kind, name, mime, artifact['bytes'], artifact['sha256'], artifact['id'],
                          self.store.encrypt(canonical({'artifact_id': artifact['id']})),
-                         min(artifact['expires'], binding['expires_at']), now, now))
+                         artifact['expires'] if binding.get('lifetime_mode') == 'until_revoked' else min(artifact['expires'], binding['expires_at']), now, now))
                     identifiers.append(identifier)
                 self.w.delivery.add_attachment_parts(delivery, identifiers)
                 self.c.audit(room, principal.actor, 'weixin.files_egress_approved', message['id'],

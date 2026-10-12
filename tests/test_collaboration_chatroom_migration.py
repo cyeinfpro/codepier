@@ -60,11 +60,13 @@ def test_real_v1_forward_migration_threads_and_stable_order():
         (id,room_id,goal_id,kind,assignee_agent_id,target_grant_id,queue,business_key,deadline_at,context,created,updated)
         VALUES ('job','room','goal','analyze_incident','agent','grant','work-analysis','legacy',9999,'{"origin_message_id":"a"}',1,1)''')
     jobs = db.execute('SELECT * FROM collaboration_jobs').fetchall()
+    join_columns = ','.join(row[1] for row in db.execute('PRAGMA table_info(collaboration_join_slots)'))
     joins = db.execute('SELECT * FROM collaboration_join_slots').fetchall()
     migrate(db)
     migrate(db)
     assert db.execute('SELECT * FROM collaboration_jobs').fetchall() == jobs
-    assert db.execute('SELECT * FROM collaboration_join_slots').fetchall() == joins
+    assert db.execute(f'SELECT {join_columns} FROM collaboration_join_slots').fetchall() == joins
+    assert db.execute('SELECT lifetime_mode,lifetime_authorization_id FROM collaboration_join_slots').fetchall() == [('timed', '')]
     assert db.execute('SELECT id,server_sequence,thread_root_id FROM collaboration_messages ORDER BY server_sequence').fetchall() == [('a',1,'a'),('b',2,'a'),('c',3,'a')]
     assert db.execute('SELECT state,chat_history_sequence FROM collaboration_rooms').fetchone() == ('paused',3)
     assert db.execute("SELECT value FROM meta WHERE key='collaboration_schema'").fetchone()[0] == '3'

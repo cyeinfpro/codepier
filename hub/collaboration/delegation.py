@@ -79,7 +79,7 @@ class DelegationService:
         if not active:
             return principal
         self.c.live_room(room)
-        if policy['state'] != 'active' or policy['expires_at'] <= self.c.clock():
+        if policy['state'] != 'active' or self.c.channel_owner.expired(policy):
             raise DevError('DELEGATION_POLICY_INACTIVE', '委托设置已暂停或到期，不能开始新步骤', 409)
         slot = self.c.joining.slot(room, policy['slot_id'])
         self.c.joining.active(room, slot, registered=True)
@@ -116,7 +116,7 @@ class DelegationService:
             except DevError:
                 continue
         return {'notification_state': 'active' if valid else 'not_subscribed',
-                'notification_expires_at': min(policy['expires_at'], max(r['expires_at'] for r in valid)) if valid else None}
+                'notification_expires_at': (max(r['expires_at'] for r in valid) if self.c.channel_owner.persistent(policy) else min(policy['expires_at'], max(r['expires_at'] for r in valid))) if valid else None}
 
     def progress(self, identifier):
         link = self.store.one('SELECT * FROM delegation_requests WHERE id=?', (identifier,))
@@ -140,7 +140,7 @@ class DelegationService:
             return overall
         room = self.store.one('SELECT * FROM collaboration_rooms WHERE id=?', (link['room_id'],))
         policy = self.policy(room, link['policy_id'])
-        if policy['version'] != link['policy_version'] or policy['state'] != 'active' or policy['expires_at'] <= self.c.clock():
+        if policy['version'] != link['policy_version'] or policy['state'] != 'active' or self.c.channel_owner.expired(policy):
             return 'policy_inactive'
         routing = self.notification_status(policy, room)['notification_state']
         if routing != 'active':
@@ -188,9 +188,13 @@ class DelegationService:
             'target_snapshot': spec['target_snapshot'], 'target_snapshots': spec['target_snapshots'],
             **self.notification_status(policy, room),
             'effective_active': not bool(reason), 'blocked_reason': reason,
-            'usage': {'delegations': policy['uses'], 'max_delegations': spec['max_delegations']},
+            'usage': {'delegations': policy['uses'], 'max_delegations': spec['max_delegations'],
+                      'total_delegations': policy['uses'], 'window_delegations': self.c.channel_owner.budget_used(policy),
+                      'budget_mode': self.c.channel_owner.budget_mode(policy)},
             'subscription_request': {'name': DELEGATION_EVENT, 'arguments': filters},
             'subscription_required': True, 'chat_identity_verified': False,
+            'expires_at': None if self.c.channel_owner.persistent(policy) else policy['expires_at'],
+            'lifetime_mode': 'until_revoked' if self.c.channel_owner.persistent(policy) else 'timed',
             'automatic_delegation': spec.get('automatic_delegation', False),
             'automatic_acceptance': spec.get('automatic_acceptance', ''),
             'authority': self.authority_descriptor(),
@@ -400,7 +404,7 @@ class DelegationService:
         if 'write' in capabilities and 'project_agent' not in targets:
             raise DevError('DELEGATION_SCOPE_DENIED', 'VPS目标不能授权本机文件写入', 403)
         request_scope = {'execution_targets': targets, 'capabilities': capabilities}
-        if policy['uses'] >= spec['max_delegations']:
+        if self.c.channel_owner.budget_used(policy) >= spec['max_delegations']:
             raise DevError('DELEGATION_BUDGET_EXCEEDED', '此委托设置的请求次数已用尽', 409)
         body = json.loads(message['body'])['body_text']
         objective = '委托用途：' + spec['purpose'] + '\n本次房主请求：' + body
@@ -408,18 +412,21 @@ class DelegationService:
         if not acceptance or len(objective) > 4000:
             raise DevError('INVALID_ARGUMENTS', '委托需要验收说明，且用途与请求合计不能超过4000字', 422)
         now = self.c.clock()
-        if policy['expires_at'] - now < 60:
+        policy_deadline = now + spec['goal_duration_seconds'] if self.c.channel_owner.persistent(policy) else policy['expires_at']
+        if policy_deadline - now < 60:
             raise DevError('DELEGATION_POLICY_INACTIVE', '委托将在一分钟内到期，请重新确认设置', 409)
         identifier = uuid.uuid4().hex
         scope = {'project': room['project_id'], 'environment_id': room['environment_id']}
         raw = {**scope, 'conversation_id': message['conversation_id'], 'objective': objective, 'acceptance': acceptance,
                'project_ids': [room['project_id']], 'participant_grant_ids': [policy['grant_id']],
                'coordinator_grant_id': policy['grant_id'], 'capabilities': capabilities,
-               'duration_seconds': min(spec['goal_duration_seconds'], int(policy['expires_at'] - now)),
+               'duration_seconds': min(spec['goal_duration_seconds'], int(policy_deadline - now)),
                'budget': spec['budget'], 'idempotency_key': 'delegation:create:' + identifier}
         goal = self.c.coordination.create(raw, principal)['goal']
         policy_snapshot = canonical({'spec': spec, 'request_scope': request_scope, 'digest': policy['digest'], 'principal': json.loads(policy['principal']),
-                                     'grant_snapshot': json.loads(policy['grant_snapshot']), 'expires_at': policy['expires_at']})
+                                     'grant_snapshot': json.loads(policy['grant_snapshot']),
+                                      'expires_at': None if self.c.channel_owner.persistent(policy) else policy['expires_at'],
+                                      'lifetime_mode': 'until_revoked' if self.c.channel_owner.persistent(policy) else 'timed'})
         self.store.execute('''INSERT INTO delegation_requests
             (id,room_id,conversation_id,policy_id,policy_version,policy_snapshot,message_id,message_version,
              message_digest,author_user_id,goal_id,goal_digest,created) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)''',
@@ -539,7 +546,7 @@ class DelegationService:
         policy = self.store.one('SELECT * FROM delegation_policies WHERE id=?', (link['policy_id'],))
         room = self.store.one('SELECT * FROM collaboration_rooms WHERE id=?', (goal['room_id'],))
         current = (policy['version'] == link['policy_version'] and policy['state'] == 'active'
-                   and policy['expires_at'] > self.c.clock() and goal['state'] == 'active')
+                   and not self.c.channel_owner.expired(policy) and goal['state'] == 'active')
         request = {'name': DELEGATION_EVENT, 'arguments': {
             'project_id': room['project_id'], 'environment_id': room['environment_id'],
             'conversation_id': link['conversation_id'], 'slot_id': policy['slot_id'],
@@ -564,8 +571,8 @@ class DelegationService:
                 or goal['digest'] != link['goal_digest'] or goal['approval_id'] != link['approval_id']):
             raise DevError('DELEGATION_APPROVAL_CHANGED', '原消息的委托或目标批准已改变', 409)
         source = self.c.object('collaboration_messages', room, link['message_id'])
-        if (source['origin'] != 'panel_owner' or source['author'] != link['author_user_id']
-                or source['author'] != room['owner_user_id'] or source['conversation_id'] != link['conversation_id']
+        if (not self.c.channel_owner.author(source)['authenticated'] or link['author_user_id'] != room['owner_user_id']
+                or source['conversation_id'] != link['conversation_id']
                 or source['version'] != link['message_version'] or digest(json.loads(source['body'])['body_text']) != link['message_digest']):
             raise DevError('DELEGATION_MESSAGE_CHANGED', '委托来源身份或原文已改变', 409)
         approved_scope = snapshot.get('request_scope', snapshot['spec'])
@@ -640,7 +647,8 @@ class DelegationService:
             policy = self.policy(room, link['policy_id'])
             self.authorize_policy(principal, room, policy, active=False)
             source = self.c.object('collaboration_messages', room, link['message_id'])
-            valid = (source['origin'] == 'panel_owner' and source['author'] == room['owner_user_id'] == link['author_user_id']
+            author = self.c.channel_owner.author(source)
+            valid = (author['authenticated'] and room['owner_user_id'] == link['author_user_id']
                      and source['version'] == link['message_version'] and digest(json.loads(source['body'])['body_text']) == link['message_digest'])
             if not valid:
                 raise DevError('DELEGATION_MESSAGE_CHANGED', '原房主委托消息已改变', 409)
@@ -648,7 +656,7 @@ class DelegationService:
                 'delegation': {key: link[key] for key in ('id', 'policy_id', 'policy_version', 'message_id', 'message_version',
                                'goal_id', 'approval_id', 'work_item_id', 'created')},
                 'source_message': self.c.chatroom.view(source),
-                'trusted_author': {'kind': 'panel_owner', 'user_id': link['author_user_id'], 'authenticated': True},
+                'trusted_author': {**author, 'user_id': link['author_user_id']},
                 'policy': self.view(policy, principal, room),
                 'approved_policy': {'id': link['policy_id'], 'version': link['policy_version'],
                     'expires_at': json.loads(link['policy_snapshot'])['expires_at'],
@@ -667,13 +675,15 @@ class DelegationService:
         identifier = 'delegation-result:' + item['id'] + ':' + str(item['attempt'])
         projects = sorted(set(body['provenance_project_ids']) | set(json.loads(goal['spec'])['project_ids']))
         result = {**body, 'body_text': body['summary'], 'delegation_id': link['id'], 'work_item_id': item['id'],
-                  'source_message_id': source['id'], 'provenance_project_ids': projects, 'mentions': [], 'notifications': []}
+                  'source_message_id': source['id'], 'provenance_project_ids': projects, 'mentions': [], 'notifications': [],
+                  'sender_dot_id': self.policy(room, link['policy_id'])['slot_id'], 'dot_reply_complete': True}
         self.store.execute('''INSERT OR IGNORE INTO collaboration_messages
             (id,room_id,conversation_id,thread_id,thread_root_id,reply_to_id,author,origin,source_id,kind,body,state,goal_id,created)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
             (identifier, room['id'], link['conversation_id'], source['thread_root_id'], source['thread_root_id'],
              source['id'], principal.grant_id, 'bound_connector', identifier, 'delegation_result', canonical(result),
              body['outcome'], goal['id'], self.c.clock()))
+        self.c.channels.queue(self.c.object('collaboration_messages', room, identifier))
 
     def project_progress(self, room, goal, item, summary, principal, identifier, *, system_receipt=False):
         link = self.goal_link(goal)
@@ -684,11 +694,13 @@ class DelegationService:
             'work_item_id': item['id'], 'source_message_id': source['id'], 'attempt': item['attempt'],
             'fencing_token': item['fencing_token'], 'system_receipt': system_receipt,
             'provenance_project_ids': sorted(set(json.loads(goal['spec'])['project_ids'])),
-            'mentions': [], 'notifications': [], 'execution_verified': False})
+            'mentions': [], 'notifications': [], 'execution_verified': False,
+            'sender_dot_id': self.policy(room, link['policy_id'])['slot_id'], 'dot_reply_complete': False})
         self.store.execute("""INSERT OR IGNORE INTO collaboration_messages
             (id,room_id,conversation_id,thread_id,thread_root_id,reply_to_id,author,origin,source_id,kind,body,state,goal_id,created)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (identifier, room['id'], link['conversation_id'], source['thread_root_id'], source['thread_root_id'],
              source['id'], principal.grant_id, 'bound_connector', identifier, 'delegation_progress', canonical(body),
              'saved', goal['id'], self.c.clock()))
+        self.c.channels.queue(self.c.object('collaboration_messages', room, identifier))
         return identifier

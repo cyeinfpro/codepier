@@ -1,7 +1,7 @@
 """Forward-only channel ledgers; no old room, grant or subscription changes."""
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 
 from hub.access import AccessModel
 from hub.collaboration.weixin_protocol import API_BASE
@@ -77,6 +77,8 @@ def migrate(db):
     columns = {r[1] for r in db.execute('PRAGMA table_info(weixin_bindings)')}
     if 'pairing_secret' not in columns:
         db.execute("ALTER TABLE weixin_bindings ADD COLUMN pairing_secret TEXT NOT NULL DEFAULT ''")
+    if 'revalidation_required' not in columns:
+        db.execute('ALTER TABLE weixin_bindings ADD COLUMN revalidation_required INTEGER NOT NULL DEFAULT 0')
     accounts = {r[1] for r in db.execute('PRAGMA table_info(weixin_accounts)')}
     if 'last_sync_at' not in accounts:
         # No historical successful poll proof is invented from account.updated.
@@ -125,16 +127,26 @@ class Bind(Mutation):
     allow_replies: bool = False
     allow_media_outbound: bool = False
     expires_seconds: int = Field(default=86400, ge=300, le=30 * 86400)
+    lifetime_mode: Literal['timed', 'until_revoked'] = Field(default='timed', exclude_if=lambda value: value == 'timed')
+    confirm_until_revoked: bool = Field(default=False, exclude_if=lambda value: not value)
+
+    @model_validator(mode='after')
+    def explicit_lifetime(self):
+        if self.lifetime_mode == 'until_revoked' and not self.confirm_until_revoked:
+            raise ValueError('Until-revoked channel consent must be explicitly confirmed')
+        return self
 
 
 class Control(Mutation):
     binding_id: str = Field(min_length=1, max_length=100)
     expected_version: int = Field(ge=1)
-    action: Literal['activate', 'pause', 'resume', 'revoke']
+    action: Literal['activate', 'pause', 'resume', 'revoke', 'refresh_pairing']
     confirm_peer_id: str = Field(default='', max_length=256)
 
 
 class QRStart(Mutation):
+    renew_account_id: str = Field(default='', max_length=100, exclude_if=lambda value: not value)
+    expected_credential_version: int = Field(default=0, ge=0, exclude_if=lambda value: value == 0)
     confirm_credential_storage: Literal[True]
     confirm_provider_terms: Literal[True]
 
@@ -150,6 +162,7 @@ class QRCancel(QRStatus):
 
 
 class QRAccept(QRStatus):
+    confirm_replace_existing: bool = Field(default=False, exclude_if=lambda value: not value)
     idempotency_key: str = Field(min_length=8, max_length=128)
     label: str = Field(min_length=1, max_length=80)
     confirm_scanner_id: str = Field(min_length=1, max_length=256)

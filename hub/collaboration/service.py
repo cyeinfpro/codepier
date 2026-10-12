@@ -52,6 +52,8 @@ class CollaborationService:
         self.channel_settings = ChannelSettings(self)
         from hub.collaboration.weixin import WeixinService
         self.weixin = WeixinService(self)
+        from hub.collaboration.channel_owner_authority import ChannelOwnerAuthority
+        self.channel_owner = ChannelOwnerAuthority(self)
         from hub.collaboration.telegram import TelegramService
         from hub.collaboration.channel_router import ChannelRouter
         self.telegram = TelegramService(self)

@@ -89,7 +89,7 @@ def main():
     parser.add_argument('--workers', type=int, default=1, help='Concurrent isolated jobs, bounded by available CPUs')
     parser.add_argument('--shard-count', type=int, default=1)
     parser.add_argument('--shard-index', type=int, default=0)
-    parser.add_argument('--resource-shard', action='store_true', help='Use four ordinary shards plus one exact resource-test shard')
+    parser.add_argument('--resource-shard', action='store_true', help='Use four ordinary, one exact resource and one complete long wall-clock shard')
     parser.add_argument('--coverage', action='store_true', help='Capture parent/child Python coverage without a legacy whole-suite threshold')
     parser.add_argument('--timeout', type=int, default=900)
     args = parser.parse_args()

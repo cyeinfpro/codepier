@@ -223,6 +223,8 @@ def migrate(db):
     from hub.collaboration.weixin_schema import migrate as migrate_weixin
     from hub.collaboration.channel_media import migrate as migrate_channel_media
     migrate_weixin(db)
+    from hub.collaboration.channel_owner_authority import migrate as migrate_channel_owner_authority
+    migrate_channel_owner_authority(db)
     migrate_channel_media(db)
     from hub.collaboration.telegram_schema import migrate as migrate_telegram
     migrate_telegram(db)

@@ -69,6 +69,7 @@ class DelegationConsumer:
                    '将返回的 consumer_configuration.wake_instructions 原样保存在持久消费者提示中，不能只保存静态接入说明。'
                    '未来唤醒只用保存的 inbox_request 或 resume_request（旧工具使用 legacy_inbox_request/legacy_resume_request），不能重复调用 connection_read 重置基线。'
                    '从仅通知升级处理模式时，需宿主用户明确同意并重新读取一次新执行基线，不能复用旧只读checkpoint。'
+                   '宿主应使用已有同范围续订能力，在 refreshBefore 前续订原订阅并保留原 checkpoint；需要再次确认时报告，不新建凭据或扩大授权来续期。'
                    '不要手填过滤器或创建凭据。测试事件只确认收件，不领取任务。'
                    '订阅成功、模式声明和此读取都不是用户授权，也不证明模型在线。')
         if mode == 'notification_only':
@@ -124,14 +125,15 @@ class DelegationConsumer:
     def contracts(self, policy, room):
         return {mode: self.contract(policy, room, mode) for mode in MODES}
 
-    @staticmethod
-    def summary(policy, room):
+    def summary(self, policy, room):
         spec = json.loads(policy['spec'])
         return {'project_id': room['project_id'], 'environment_id': room['environment_id'],
                 'conversation_id': policy['conversation_id'], 'slot_id': policy['slot_id'],
                 'grant_id': policy['grant_id'], 'policy_id': policy['id'], 'policy_version': policy['version'],
                 'purpose': spec['purpose'], 'execution_targets': spec['execution_targets'],
-                'capabilities': spec['capabilities'], 'expires_at': policy['expires_at']}
+                'capabilities': spec['capabilities'],
+                'expires_at': None if self.c.channel_owner.persistent(policy) else policy['expires_at'],
+                'lifetime_mode': 'until_revoked' if self.c.channel_owner.persistent(policy) else 'timed'}
 
     def status(self, policy, room):
         items = self.store.all("""SELECT w.*,g.state AS goal_state,g.approval_id AS goal_approval,g.expires_at AS goal_expires

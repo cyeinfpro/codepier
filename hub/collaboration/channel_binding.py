@@ -85,6 +85,8 @@ class ChannelBinding:
             raise DevError(
                 "CHANNEL_MESSAGE_SCOPE", "消息不属于当前原绑定、版本或世代", 403
             )
+        if channel == "weixin":
+            self.c.channel_owner.require_reply_source(self.c.weixin.delivery.root_source(message))
         self.c.chatroom.require_message_visible(owner, message)
         reader = self.c.grant_reader(
             room,
