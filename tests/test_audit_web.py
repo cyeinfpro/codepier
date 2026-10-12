@@ -20,14 +20,34 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const elements = new Map(), timers = new Map(), storage = new Map();
 let timerId = 0, fetchImpl;
-function element(value='') { const children=new Map(),attributes=new Map();return {value, innerHTML:'', textContent:'', disabled:false, isConnected:true, readOnly:false, childNodes:[],
-  style:{getPropertyValue(){return '';},getPropertyPriority(){return '';},setProperty(){},removeProperty(){}},
-  focus(){}, remove(){this.isConnected=false;}, append(...nodes){this.childNodes.push(...nodes);}, replaceChildren(...nodes){children.clear();this.childNodes=nodes;},getBoundingClientRect(){return {width:100};},
-  setAttribute(k,v){attributes.set(k,String(v));},getAttribute(k){return attributes.get(k)??null;},
-  removeAttribute(k){attributes.delete(k);},addEventListener(){},contains(){return false;},classList:{toggle(){},add(){},remove(){},contains(){return false;}},
-  querySelector(s){if(s==='.toast-message'||s==='.toast-dismiss'){if(!children.has(s))children.set(s,element());return children.get(s);}return elements.get(s)||null;},querySelectorAll(){return [];}}; }
-const document = {body:element(),activeElement:null,querySelector:s=>elements.get(s)||null,querySelectorAll:()=>[],addEventListener(){},removeEventListener(){},createElement:()=>element()};
+// Model the topology used by the shared modal: closest includes self/ancestors,
+// after moves an existing node, and clearing a root disconnects only its children.
+function connected(node,value){node.isConnected=value;for(const child of node.childNodes)connected(child,value);}
+function insert(parent,node,index){parent.childNodes.splice(index,0,node);node.parentElement=parent;connected(node,parent.isConnected);}
+function element(value='') {
+  const children=new Map(),attributes=new Map();let html='';
+  return {value,textContent:'',disabled:false,isConnected:true,readOnly:false,childNodes:[],parentElement:null,
+    get innerHTML(){return html;},set innerHTML(value){html=value;this.replaceChildren();},
+    style:{getPropertyValue(){return '';},getPropertyPriority(){return '';},setProperty(){},removeProperty(){}},
+    focus(){document.activeElement=this;},
+    remove(){if(this.parentElement){const siblings=this.parentElement.childNodes;siblings.splice(siblings.indexOf(this),1);}this.parentElement=null;connected(this,false);},
+    append(...nodes){for(const node of nodes){node.remove();insert(this,node,this.childNodes.length);}},
+    after(...nodes){if(!this.parentElement)return;let anchor=this;for(const node of nodes){const parent=anchor.parentElement;node.remove();insert(parent,node,parent.childNodes.indexOf(anchor)+1);anchor=node;}},
+    replaceChildren(...nodes){for(const child of [...this.childNodes])child.remove();children.clear();this.append(...nodes);},
+    getBoundingClientRect(){return {width:100};},getClientRects(){return this.isConnected?[{}]:[];},
+    setAttribute(k,v){attributes.set(k,String(v));},getAttribute(k){return attributes.get(k)??null;},
+    removeAttribute(k){attributes.delete(k);},addEventListener(){},
+    matches(s){return s==='[inert]'?!!this.inert:elements.get(s)===this;},
+    closest(s){for(let node=this;node;node=node.parentElement)if(node.matches(s))return node;return null;},
+    contains(other){for(let node=other;node;node=node.parentElement)if(node===this)return true;return false;},
+    classList:{toggle(){},add(){},remove(){},contains(){return false;}},
+    querySelector(s){if(s==='.toast-message'||s==='.toast-dismiss'){if(!children.has(s)){const child=element();children.set(s,child);this.append(child);}return children.get(s);}return elements.get(s)?.isConnected?elements.get(s):null;},
+    querySelectorAll(){return [];}
+  };
+}
+const document = {body:element(),activeElement:null,querySelector:s=>elements.get(s)?.isConnected?elements.get(s):null,querySelectorAll:()=>[],addEventListener(){},removeEventListener(){},createElement:()=>element()};
 for(const s of ['#app','#modal-root','#toasts','#page','#editor-wrap','#file-tree','#code-editor','#dirty-state','#editor-lines','#task-select','#task-output','#task-status'])elements.set(s,element());
+document.body.append(elements.get('#app'),elements.get('#modal-root'),elements.get('#toasts'));
 const context = vm.createContext({document, console, URLSearchParams, AbortController, Uint8Array, Blob, URL, Event, crypto:require('node:crypto').webcrypto,
   location:{hash:'',protocol:'http:',origin:'http://fixture.invalid',search:''},history:{replaceState(){}},navigator:{},confirm:()=>true,
   // Load the same presentation module as index.html; this VM models a desktop viewport.
@@ -56,11 +76,34 @@ function editor(content='base'){
 }
 function type(text){const el=elements.get('#code-editor');el.value=text;el.oninput();}
 function modalAdapter(){
-  context.makeModal=()=>{const dialog=element();elements.set('.modal',dialog);for(const s of ['#confirm-move','#move-destination','#confirm-save'])elements.set(s,element());return dialog;};
+  context.makeModal=()=>{
+    const dialog=element();elements.set('.modal',dialog);elements.get('#modal-root').replaceChildren(dialog);
+    dialog.append(elements.get('#toasts'));
+    for(const s of ['#confirm-move','#move-destination','#confirm-save']){const control=element();elements.set(s,control);dialog.append(control);}
+    return dialog;
+  };
   run('modal=()=>makeModal();');
 }
 async function scenario(name){
-  if(name==='editor_restores_html_stripped_first_newline'){
+  if(name==='modal_close_preserves_notice_topology'){
+    editor();modalAdapter();run('modal()');
+    const dialog=elements.get('.modal'),root=elements.get('#modal-root'),host=elements.get('#toasts');
+    assert.equal(dialog.closest('.modal'),dialog);assert.equal(host.closest('.modal'),dialog);
+    run("toast('Pending notice',true)");const notice=host.childNodes[0];
+    run('closeModal()');
+    assert.equal(host.parentElement,document.body);assert.equal(host.closest('.modal'),null);
+    assert.equal(document.body.childNodes.indexOf(host),document.body.childNodes.indexOf(root)+1);
+    assert.equal(root.childNodes.length,0);assert.equal(dialog.isConnected,false);
+    assert.equal(document.querySelector('.modal'),null);assert.equal(host.isConnected,true);
+    assert.equal(host.childNodes.length,1);assert.equal(host.childNodes[0],notice);
+    assert.equal(notice.querySelector('.toast-message').textContent,'Pending notice');
+    // Reopening moves the same host; closing an obsolete dialog must do nothing.
+    run('modal()');const replacement=elements.get('.modal');context.oldDialog=dialog;
+    run('closeModal(oldDialog)');assert.equal(host.closest('.modal'),replacement);
+    run('closeModal()');run('closeModal()');
+    assert.equal(host.parentElement,document.body);assert.equal(host.childNodes[0],notice);
+    assert.equal(document.body.childNodes.filter(node=>node===host).length,1);
+  }else if(name==='editor_restores_html_stripped_first_newline'){
     editor();work().content="\nleading newline";run("bindEditor()");assert.equal(elements.get('#code-editor').value,'\nleading newline');
   }else if(name==='read_preserves_input'){
     editor();const read=deferred();fetchImpl=()=>read.promise;
@@ -71,6 +114,7 @@ async function scenario(name){
     editor();modalAdapter();const move=deferred();fetchImpl=async(path,options)=>JSON.parse(options.body).tool==='fs_move'?move.promise:response({entries:[],next_offset:null});
     await run('moveFile()');elements.get('#move-destination').value='moved.txt';const pending=elements.get('#confirm-move').onclick();type('typed while moving');
     move.resolve(response({destination:'moved.txt',sha256:'sha-base'}));await pending;
+    assert.deepEqual(elements.get('#toasts').childNodes.filter(node=>node.className==='toast error').map(node=>node.querySelector('.toast-message').textContent),[]);
     assert.equal(work().path,'moved.txt');assert.equal(work().content,'typed while moving');assert.equal(work().original,'base');assert.equal(work().dirty,true);
   }else if(name==='restore_failed_reload_keeps_dirty'){
     editor();type('unsaved draft');modalAdapter();run('modal()');let reads=0;
@@ -129,6 +173,7 @@ scenario(process.argv[1]).then(()=>console.log('SCENARIO_COMPLETED')).catch(erro
 
 @pytest.mark.skipif(NODE is None, reason="Node.js is required for UI behavior tests")
 @pytest.mark.parametrize("scenario", [
+    "modal_close_preserves_notice_topology",
     "editor_restores_html_stripped_first_newline",
     "read_preserves_input",
     "move_preserves_input",

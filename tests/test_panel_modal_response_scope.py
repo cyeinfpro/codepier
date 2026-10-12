@@ -60,7 +60,7 @@ if(name.startsWith('modal_scope:')){
   const change=name.split(':')[1];editor();run('S.renderSeq=1');
   const opened=[];
   context.makeCopyModal=()=>{const dialog=element();opened.push(dialog);elements.set('.modal',dialog);
-    elements.set('#copy-text',{select(){}});return dialog;};
+    elements.set('#copy-text',Object.assign(element(),{select(){}}));return dialog;};
   run('modal=()=>{S.modalIntent=(S.modalIntent||0)+1;return makeCopyModal();}');
   const job=deferred();context.navigator.clipboard={writeText:()=>job.promise};context.window.isSecureContext=true;
   const pending=run("copy('fixture copied text')");
