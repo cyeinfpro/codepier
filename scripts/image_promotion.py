@@ -85,6 +85,13 @@ def identity(version):
     require(SHA.fullmatch(sha), "A full 40-character source SHA is required")
     require(re.fullmatch(r"[\w.-]+/[\w.-]+", repository), "Invalid repository")
     require(re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", version), "Invalid source version")
+    if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
+        origin = run_origin()
+        ref = origin["ref"]
+        branch = ref.removeprefix("refs/heads/")
+        require(trusted_ref(origin["event"], branch, version) == ref
+                and origin["forced"] is False and origin["inputs"] == {},
+                "Only an empty-input version-matching release candidate dispatch may publish")
     require(text_command("git", "rev-parse", "HEAD") == sha, "Checkout is not the event SHA")
     require(not command("git", "diff", "--name-only", "HEAD"), "Tracked source changed before build")
     tree = text_command("git", "rev-parse", "HEAD^{tree}")
@@ -99,28 +106,50 @@ def identity(version):
     }
 
 
+def candidate_branch(branch, version):
+    """Only a version-matching release branch, never a PR/topic or arbitrary ref."""
+    return isinstance(branch, str) and len(branch) <= 128 and re.fullmatch(
+        r"release/v" + re.escape(version) + r"-[a-z0-9]+(?:-[a-z0-9]+)*", branch) is not None
+
+
+def trusted_ref(event, branch, version):
+    if event == "push":
+        if branch == "main":
+            return "refs/heads/main"
+        if branch == "v" + version:
+            return "refs/tags/" + branch
+    elif event == "workflow_dispatch" and candidate_branch(branch, version):
+        return "refs/heads/" + branch
+    return None
+
+
 def run_origin():
+    payload = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+    inputs = payload.get("inputs")
     return {
         "run_id": int(os.environ["GITHUB_RUN_ID"]),
         "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
         "event": os.environ["GITHUB_EVENT_NAME"],
         "ref": os.environ["GITHUB_REF"],
         "workflow_sha": os.environ["GITHUB_WORKFLOW_SHA"],
-        "forced": json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text()).get("forced", False),
+        "forced": payload.get("forced", False),
+        "inputs": {} if inputs is None else inputs,
     }
 
 
 def eligible_run(run, expected, current_run_id):
     repository = expected["repository"]
     return (
-        isinstance(run.get("id"), int) and run["id"] != current_run_id
-        and isinstance(run.get("run_attempt"), int) and run["run_attempt"] >= 1
+        type(run.get("id")) is int and run["id"] != current_run_id
+        and type(run.get("run_attempt")) is int and run["run_attempt"] >= 1
         and run.get("status") == "completed" and run.get("conclusion") == "success"
-        and run.get("event") == "push" and run.get("head_sha") == expected["source_sha"]
-        and run.get("path") == WORKFLOW
-        and run.get("head_branch") in ("main", "v" + expected["version"])
+        and run.get("head_sha") == expected["source_sha"] and run.get("path") == WORKFLOW
+        and trusted_ref(run.get("event"), run.get("head_branch"), expected["version"]) is not None
         and run.get("repository", {}).get("full_name") == repository
         and run.get("head_repository", {}).get("full_name") == repository
+        and type(run.get("repository", {}).get("id")) is int
+        and run["repository"]["id"] > 0
+        and run["repository"]["id"] == run.get("head_repository", {}).get("id")
     )
 
 
@@ -135,18 +164,30 @@ def validate_proof(proof, expected, run=None):
             "Published amd64 is not the boot-tested image")
     require(set(proof["registry"].get("platforms", {})) == set(PLATFORMS), "Missing target platform")
     require(proof["registry"].get("attestations_verified") is True, "Missing SBOM / provenance")
+    platforms = proof["registry"]["platforms"]
+    attestations = proof["registry"].get("attestations")
+    require(all(DIGEST.fullmatch(str(value)) for value in platforms.values())
+            and len(set(platforms.values())) == len(PLATFORMS)
+            and isinstance(attestations, dict) and set(attestations) == set(platforms.values())
+            and all(DIGEST.fullmatch(str(value)) for value in attestations.values()),
+            "Attestation descriptors do not bind both runtime manifests")
     origin = proof.get("origin", {})
-    require(origin.get("event") == "push" and origin.get("forced") is False,
-            "Only non-forced push builds can supply reusable proof")
+    event, ref = origin.get("event"), origin.get("ref")
+    require(origin.get("forced") is False, "Forced or ambiguous origin cannot supply reusable proof")
+    require(isinstance(ref, str), "Missing origin ref")
+    if event == "workflow_dispatch":
+        require(origin.get("inputs") == {}, "Candidate dispatch inputs must be explicitly empty")
+        branch = ref.removeprefix("refs/heads/")
+    else:
+        branch = "main" if ref == "refs/heads/main" else ref.removeprefix("refs/tags/")
+    require(trusted_ref(event, branch, expected["version"]) == ref, "Untrusted build ref")
     require(origin.get("workflow_sha") == expected["source_sha"], "Workflow source SHA differs")
-    require(origin.get("ref") in ("refs/heads/main", "refs/tags/v" + expected["version"]),
-            "Untrusted build ref")
     if run is not None:
         require(origin.get("run_id") == run["id"] and origin.get("run_attempt") == run["run_attempt"],
                 "Proof belongs to a different run or attempt")
-        expected_ref = ("refs/heads/main" if run["head_branch"] == "main"
-                        else "refs/tags/v" + expected["version"])
-        require(origin["ref"] == expected_ref, "Proof ref does not match successful run")
+        expected_ref = trusted_ref(run.get("event"), run.get("head_branch"), expected["version"])
+        require(origin["event"] == run.get("event") and expected_ref is not None
+                and origin["ref"] == expected_ref, "Proof ref/event does not match successful run")
     return proof
 
 
@@ -260,10 +301,42 @@ def boot_published(image, digest, version, config):
             pass
 
 
+FULL_BUILD_STEPS = frozenset({
+    "Release inputs must agree with source VERSION (host Python, standard library only)",
+    "Bind build context to the complete immutable source commit",
+    "Build the linux/amd64 candidate into the local daemon",
+    "Candidate must boot healthy from an empty data directory under the Compose hardening",
+    "Build linux/amd64 and linux/arm64 once; publish a run-specific candidate",
+    "Verify both manifests and attestations bind to the real boot-tested amd64 image",
+    "Promote only the tested digest; never repoint VERSION or full-SHA tags",
+    "Retain immutable build and hardened-boot proof",
+})
+
+
+def verify_producer_jobs(payload, run, expected):
+    jobs = payload.get("jobs", [])
+    require(payload.get("total_count") == len(jobs) == 2, "Incomplete image job evidence")
+    require({job.get("name") for job in jobs} == {
+        "Verify reusable image evidence (read-only)", "Build, boot-test and publish"},
+        "Image workflow jobs differ")
+    for job in jobs:
+        require(job.get("run_id") == run["id"] and job.get("head_sha") == expected["source_sha"]
+                and type(job.get("run_attempt")) is int
+                and 1 <= job["run_attempt"] <= run["run_attempt"]
+                and job.get("status") == "completed" and job.get("conclusion") == "success",
+                "Image producer job was skipped, failed or belongs to another source")
+    producer = next(job for job in jobs if job["name"] == "Build, boot-test and publish")
+    require(producer["run_attempt"] == run["run_attempt"], "Image proof is not from latest producer attempt")
+    for name in FULL_BUILD_STEPS:
+        steps = [step for step in producer.get("steps", []) if step.get("name") == name]
+        require(len(steps) == 1 and steps[0].get("status") == "completed"
+                and steps[0].get("conclusion") == "success", "Required image build/boot/proof step did not pass")
+
+
 def discover(expected, current_run_id):
     """A failed lookup never authorizes skipping the normal build."""
     base = f"repos/{expected['repository']}"
-    query = f"head_sha={expected['source_sha']}&event=push&status=success&per_page=100"
+    query = f"head_sha={expected['source_sha']}&status=success&per_page=100"
     result = api_json(f"{base}/actions/workflows/image.yml/runs?{query}")
     require(result.get("total_count", 0) <= 100, "More candidate runs than bounded lookup supports")
     for run in result.get("workflow_runs", []):
@@ -280,13 +353,23 @@ def discover(expected, current_run_id):
             require(0 < artifact.get("size_in_bytes", 0) <= MAX_ARTIFACT, "Invalid proof size")
             artifact_run = artifact.get("workflow_run", {})
             require(artifact_run.get("id") == run["id"]
-                    and artifact_run.get("head_sha") == expected["source_sha"],
+                    and artifact_run.get("head_sha") == expected["source_sha"]
+                    and artifact_run.get("repository_id") == run["repository"]["id"]
+                    and artifact_run.get("head_repository_id") == run["repository"]["id"],
                     "Artifact source run does not match")
             archive = api(f"{base}/actions/artifacts/{int(artifact['id'])}/zip")
             checksum = artifact.get("digest")
-            require(checksum == "sha256:" + hashlib.sha256(archive).hexdigest(),
-                    "Artifact archive digest missing or mismatched")
+            require(checksum == "sha256:" + hashlib.sha256(archive).hexdigest()
+                    and len(archive) == artifact["size_in_bytes"],
+                    "Artifact archive digest or size missing or mismatched")
             proof = validate_proof(proof_from_archive(archive), expected, run)
+            jobs = api_json(f"{base}/actions/runs/{run['id']}/jobs?filter=latest&per_page=100")
+            verify_producer_jobs(jobs, run, expected)
+            current = api_json(f"{base}/actions/runs/{run['id']}")
+            revision = ("id", "run_attempt", "status", "conclusion", "event", "head_sha",
+                        "path", "head_branch", "workflow_id", "updated_at", "repository", "head_repository")
+            require(all(current.get(key) == run.get(key) for key in revision),
+                    "Image source run changed during verification")
             return proof
         except (EvidenceError, AttributeError, KeyError, TypeError, ValueError, RecursionError, OSError,
                 subprocess.SubprocessError, zipfile.BadZipFile) as error:
@@ -436,8 +519,8 @@ def main(argv=None):
         proof = {"identity": expected, "origin": run_origin(), "digest": args.digest,
                  "registry": registry, "tested_amd64_config": registry["amd64_config"],
                  "boot_verified": True, "boot_mode": boot_mode}
-        # Dispatch builds may publish their branch, but never become reusable
-        # main/release evidence; discover enforces the stronger origin contract.
+        # Only version-matching release dispatches with empty inputs and fully
+        # successful producer jobs may later become main/tag promotion evidence.
         write_json(args.proof, proof)
     elif args.action == "promote":
         proof = read_json(args.proof)

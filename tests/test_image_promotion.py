@@ -26,8 +26,8 @@ def expected():
 def run(expected):
     return {"id": 17, "run_attempt": 2, "status": "completed", "conclusion": "success",
             "event": "push", "head_sha": SHA, "path": m.WORKFLOW, "head_branch": "main",
-            "repository": {"full_name": expected["repository"]},
-            "head_repository": {"full_name": expected["repository"]}}
+            "repository": {"full_name": expected["repository"], "id": 123},
+            "head_repository": {"full_name": expected["repository"], "id": 123}}
 
 @pytest.fixture
 def proof(expected):
@@ -49,10 +49,17 @@ def archive(proof, names=("proof.json",)):
 def setup_discovery(monkeypatch, expected, run, proof):
     data = archive(proof)
     artifact = {"id": 88, "name": f"image-proof-{SHA}-17-2", "expired": False,
-                "size_in_bytes": len(data), "workflow_run": {"id": 17, "head_sha": SHA},
+                "size_in_bytes": len(data), "workflow_run": {"id": 17, "head_sha": SHA,
+                    "repository_id": 123, "head_repository_id": 123},
                 "digest": "sha256:" + hashlib.sha256(data).hexdigest()}
+    producer = {"name": "Build, boot-test and publish", "run_id": 17, "run_attempt": 2,
+                "head_sha": SHA, "status": "completed", "conclusion": "success",
+                "steps": [{"name": name, "status": "completed", "conclusion": "success"}
+                          for name in sorted(m.FULL_BUILD_STEPS)]}
+    verifier = {**producer, "name": "Verify reusable image evidence (read-only)", "steps": []}
     responses = [{"total_count": 1, "workflow_runs": [run]},
-                 {"total_count": 1, "artifacts": [artifact]}]
+                 {"total_count": 1, "artifacts": [artifact]},
+                 {"total_count": 2, "jobs": [verifier, producer]}, deepcopy(run)]
     calls = []
     def api_json(path):
         calls.append(path)
@@ -65,7 +72,7 @@ def setup_discovery(monkeypatch, expected, run, proof):
 def test_discovers_successful_exact_source(monkeypatch, expected, run, proof):
     _, _, calls = setup_discovery(monkeypatch, expected, run, proof)
     assert m.discover(expected, 18) == proof
-    assert calls[0].endswith(f"head_sha={SHA}&event=push&status=success&per_page=100")
+    assert calls[0].endswith(f"head_sha={SHA}&status=success&per_page=100")
     assert m.validate_proof(proof, expected, run) == proof
 
 @pytest.mark.parametrize(("key", "value"), [
@@ -517,3 +524,143 @@ def test_oversize_verifier_output_falls_back_without_partial_proof(
     assert m.main(["discover", "--identity", str(identity), "--proof", str(destination)]) == 0
     assert outputs.read_text() == "proof=\n" and not destination.exists()
     assert "full build required" in capsys.readouterr().out
+
+@pytest.mark.parametrize("branch", [
+    "release/v1.27.3-weixin-owner", "release/v1.27.3-candidate", "release/v1.27.3-ci-speedup-2",
+])
+def test_trusted_candidate_dispatch_can_promote_without_rebuild(monkeypatch, expected, run, proof, branch):
+    run.update(event="workflow_dispatch", head_branch=branch)
+    proof["origin"].update(event="workflow_dispatch", ref="refs/heads/" + branch, inputs={})
+    setup_discovery(monkeypatch, expected, run, proof)
+    assert m.eligible_run(run, expected, 18)
+    assert m.discover(expected, 18) == proof
+    assert m.validate_proof(proof, expected, run) == proof
+
+
+@pytest.mark.parametrize("branch", [
+    "main", "topic", "v1.27.3", "release/v1.27.2-candidate", "release/v1.27.30-candidate",
+    "release/v1.27.3", "release/v1.27.3-", "release/v1.27.3-Owner", "release/v1.27.3-foo/bar",
+    "release/v1.27.3--candidate", "release/v1.27.3-candidate-", "release/v1.27.3-a..b",
+    "refs/pull/1/merge", "release/v1.27.3-" + "a" * 130,
+])
+def test_dispatch_untrusted_or_mismatched_ref_never_reuses(expected, run, proof, branch):
+    run.update(event="workflow_dispatch", head_branch=branch)
+    proof["origin"].update(event="workflow_dispatch", ref="refs/heads/" + branch, inputs={})
+    assert not m.eligible_run(run, expected, 18)
+    with pytest.raises(m.EvidenceError):
+        m.validate_proof(proof, expected, run)
+
+
+@pytest.mark.parametrize("change", ["different-ref", "event", "forced", "missing-inputs", "inputs"])
+def test_dispatch_origin_must_match_api_run_and_no_overrides(expected, run, proof, change):
+    run.update(event="workflow_dispatch", head_branch="release/v1.27.3-candidate")
+    proof["origin"].update(event="workflow_dispatch", ref="refs/heads/release/v1.27.3-candidate", inputs={})
+    if change == "different-ref":
+        proof["origin"]["ref"] = "refs/heads/release/v1.27.3-other"
+    elif change == "event":
+        proof["origin"].update(event="push", ref="refs/heads/main")
+    elif change == "forced":
+        proof["origin"]["forced"] = True
+    elif change == "missing-inputs":
+        proof["origin"].pop("inputs")
+    else:
+        proof["origin"]["inputs"] = {"source_sha": SHA}
+    with pytest.raises(m.EvidenceError):
+        m.validate_proof(proof, expected, run)
+
+
+@pytest.mark.parametrize("section,field,value", [
+    ("repository", "id", None), ("head_repository", "id", 999),
+    ("repository", "id", True), ("head_repository", "full_name", "fork/codepier"),
+])
+def test_run_repository_identity_cannot_be_ambiguous(expected, run, section, field, value):
+    run[section][field] = value
+    assert not m.eligible_run(run, expected, 18)
+
+
+@pytest.mark.parametrize("change", ["failed", "skipped", "source", "attempt", "missing-job",
+                                   "duplicate-job", "skipped-step", "missing-step", "duplicate-step"])
+def test_missing_or_failed_real_producer_evidence_cannot_reuse(monkeypatch, expected, run, proof, change):
+    _, responses, _ = setup_discovery(monkeypatch, expected, run, proof)
+    jobs = responses[2]
+    producer = jobs["jobs"][1]
+    if change in {"failed", "skipped"}:
+        producer["conclusion"] = "failure" if change == "failed" else "skipped"
+    elif change == "source":
+        producer["head_sha"] = "d" * 40
+    elif change == "attempt":
+        producer["run_attempt"] = 1
+    elif change == "missing-job":
+        jobs["jobs"].pop()
+    elif change == "duplicate-job":
+        jobs["jobs"][0] = deepcopy(producer)
+    elif change == "skipped-step":
+        producer["steps"][0]["conclusion"] = "skipped"
+    elif change == "missing-step":
+        producer["steps"].pop()
+    else:
+        producer["steps"].append(deepcopy(producer["steps"][0]))
+    assert m.discover(expected, 18) is None
+
+
+@pytest.mark.parametrize("key,value", [
+    ("run_attempt", 3), ("conclusion", "failure"), ("status", "in_progress"),
+    ("head_sha", "d" * 40), ("head_branch", "topic"), ("workflow_id", 999),
+])
+def test_source_run_revision_is_rechecked_after_download(monkeypatch, expected, run, proof, key, value):
+    _, responses, _ = setup_discovery(monkeypatch, expected, run, proof)
+    responses[3][key] = value
+    assert m.discover(expected, 18) is None
+
+
+@pytest.mark.parametrize("key,value", [("repository_id", 999), ("head_repository_id", 999)])
+def test_artifact_cannot_come_from_fork_with_same_sha(monkeypatch, expected, run, proof, key, value):
+    item, _, _ = setup_discovery(monkeypatch, expected, run, proof)
+    item["workflow_run"][key] = value
+    assert m.discover(expected, 18) is None
+
+
+def test_artifact_size_must_match_actual_archive(monkeypatch, expected, run, proof):
+    item, _, _ = setup_discovery(monkeypatch, expected, run, proof)
+    item["size_in_bytes"] += 1
+    assert m.discover(expected, 18) is None
+
+
+@pytest.mark.parametrize("attestations", [None, {}, {digest("9"): digest("5")}, {
+    digest("2"): "invalid", digest("3"): digest("6")}])
+def test_proof_requires_attestations_bound_to_both_runtime_manifests(expected, run, proof, attestations):
+    proof["registry"]["attestations"] = attestations
+    with pytest.raises(m.EvidenceError, match="Attestation"):
+        m.validate_proof(proof, expected, run)
+
+
+@pytest.mark.parametrize("inputs", [None, {}, {"unexpected": "override"}])
+def test_dispatch_event_inputs_are_recorded_without_accepting_overrides(monkeypatch, tmp_path, inputs):
+    event = tmp_path / "event.json"
+    event.write_text(json.dumps({"inputs": inputs}))
+    for key, value in {"GITHUB_EVENT_PATH": str(event), "GITHUB_RUN_ID": "17",
+                       "GITHUB_RUN_ATTEMPT": "2", "GITHUB_EVENT_NAME": "workflow_dispatch",
+                       "GITHUB_REF": "refs/heads/release/v1.27.3-candidate",
+                       "GITHUB_WORKFLOW_SHA": SHA}.items():
+        monkeypatch.setenv(key, value)
+    origin = m.run_origin()
+    assert origin["forced"] is False
+    assert origin["inputs"] == ({} if inputs is None else inputs)
+
+
+@pytest.mark.parametrize("ref,inputs", [
+    ("refs/heads/main", {}), ("refs/heads/topic", {}),
+    ("refs/heads/release/v1.27.2-candidate", {}),
+    ("refs/heads/release/v1.27.3-candidate", {"sha": SHA}),
+])
+def test_untrusted_manual_dispatch_fails_before_build_or_registry(monkeypatch, tmp_path, ref, inputs):
+    event = tmp_path / "event.json"
+    event.write_text(json.dumps({"inputs": inputs}))
+    for key, value in {"GITHUB_EVENT_PATH": str(event), "GITHUB_RUN_ID": "17",
+                       "GITHUB_RUN_ATTEMPT": "2", "GITHUB_EVENT_NAME": "workflow_dispatch",
+                       "GITHUB_REF": ref, "GITHUB_WORKFLOW_SHA": SHA,
+                       "GITHUB_SHA": SHA, "GITHUB_REPOSITORY": "example/codepier"}.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(m, "command", lambda *args, **kwargs: pytest.fail("Rejected dispatch ran a command"))
+    with pytest.raises(m.EvidenceError, match="release candidate dispatch"):
+        m.identity("1.27.3")

@@ -80,3 +80,6 @@ macOS 下，浏览器原生宿主若从 Downloads 等受限制目录启动，可
 
 
 跨运行的 Actions 产物读取仅由 CI 与镜像各自独立的晋级验证 job 执行，job 权限限定为 contents: read 与 actions: read，使用 GitHub 内置短时令牌；不新增凭据或持久授权。CI 的令牌只传给 main push 的验证步骤。普通测试/源码构建 job 不获得 Actions 读取权限；镜像构建与发布 job 保持原有 contents: read、packages: write，不获得 actions: read。镜像只读验证结果通过本次运行的有界 job output 传递，构建 job 在使用前重新核对源码身份与注册表摘要。读取被拒绝、缺少或无法校验的证明一律不允许复用，回到完整构建和既有门禁；取消运行仍尊重取消，不继续发布。
+
+
+候选镜像可由同仓库的 workflow_dispatch 产生，但可复用来源严格限于与源码版本匹配的 release/v<VERSION>-<小写字母数字短横线后缀> 分支，且 dispatch 输入必须为空、forced 明确为 false。来源 run 的 event/head_branch 必须与 proof.origin.event/ref 一致，并核对同仓库 ID、相同源码 SHA/tree、workflow SHA/内容、固定构建配方、成功的完整构建/真实启动/多架构证明步骤、run/attempt 和 artifact ZIP 摘要；读取后再确认来源 run 未变化。PR、fork、任意 topic/main 手动触发、异版本候选、非空参数或不完整产物都不能作为复用来源。该规则保留正式版本与完整 SHA 标签的不可覆盖检查；改变源码后必须用新 SHA 重跑完整验收。
