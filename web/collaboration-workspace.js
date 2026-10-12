@@ -24,12 +24,15 @@ window.CodePierCollaborationWorkspace = {
           m.relay_receipts?.length,
       )
       .map((message) => {
-        const states = message.relay_receipts.map((r) =>
-          window.CodePierCollaborationRelay?.presentReceipt(r) || ({
-            state: r.state, dot: r.dot_id,
-            group: groups[r.state]?.[0] || 'unknown',
-            label: groups[r.state]?.[1] || '状态待核对',
-          }));
+        const states = message.relay_receipts.map(
+          (r) =>
+            window.CodePierCollaborationRelay?.presentReceipt(r) || {
+              state: r.state,
+              dot: r.dot_id,
+              group: groups[r.state]?.[0] || 'unknown',
+              label: groups[r.state]?.[1] || '状态待核对',
+            },
+        );
         const primary = [...states].sort(
           (a, b) => priority.indexOf(a.group) - priority.indexOf(b.group),
         )[0];
@@ -77,10 +80,21 @@ window.CodePierCollaborationWorkspace = {
     let rowCache = null;
     const rows = () => {
       const messages = chat().messages;
-      if (rowCache?.messages !== messages || rowCache.project !== state.project ||
-          rowCache.environment !== state.environment) {
-        rowCache = { messages, project: state.project, environment: state.environment,
-          rows: window.CodePierCollaborationWorkspace.receiptRows(messages, state.project, state.environment) };
+      if (
+        rowCache?.messages !== messages ||
+        rowCache.project !== state.project ||
+        rowCache.environment !== state.environment
+      ) {
+        rowCache = {
+          messages,
+          project: state.project,
+          environment: state.environment,
+          rows: window.CodePierCollaborationWorkspace.receiptRows(
+            messages,
+            state.project,
+            state.environment,
+          ),
+        };
       }
       return rowCache.rows;
     };
@@ -208,8 +222,11 @@ window.CodePierCollaborationWorkspace = {
       refresh();
       if (view !== previousView) {
         fluid.cancelWithin(holder);
-        fluid.enter(view === 'discussion' ? node.querySelector('#cc-discussion-host') : holder,
-          { x: view === 'discussion' ? -6 : 12, y: 0, duration: 220 });
+        fluid.enter(view === 'discussion' ? node.querySelector('#cc-discussion-host') : holder, {
+          x: view === 'discussion' ? -6 : 12,
+          y: 0,
+          duration: 220,
+        });
       }
       onOpen();
       if (scroll && view !== 'discussion') scroll.scrollTop = panelScroll.get(view) || 0;
@@ -259,8 +276,12 @@ window.CodePierCollaborationWorkspace = {
       if (node._workspaceMarkup === markup) return true;
       if (node.matches(':active')) return deferRefresh();
       const selected = window.getSelection();
-      if (selected && !selected.isCollapsed &&
-          (node.contains(selected.anchorNode) || node.contains(selected.focusNode))) return deferRefresh();
+      if (
+        selected &&
+        !selected.isCollapsed &&
+        (node.contains(selected.anchorNode) || node.contains(selected.focusNode))
+      )
+        return deferRefresh();
       // A refresh must never overwrite a form being edited inside a detail.
       if (
         node.contains(document.activeElement) &&
@@ -274,15 +295,21 @@ window.CodePierCollaborationWorkspace = {
         template.innerHTML = markup;
         const fresh = [...template.content.children];
         if (fresh.length && fresh.every((item) => item.dataset.progressMessage)) {
-          const existing = new Map([...node.children].map((item) => [item.dataset.progressMessage, item]));
-          let previous = null, complete = true;
+          const existing = new Map(
+            [...node.children].map((item) => [item.dataset.progressMessage, item]),
+          );
+          let previous = null,
+            complete = true;
           for (const next of fresh) {
             let item = existing.get(next.dataset.progressMessage);
             existing.delete(next.dataset.progressMessage);
             if (!item) item = next;
             else if (item.outerHTML !== next.outerHTML) {
               if (item.contains(document.activeElement)) complete = false;
-              else { item.replaceWith(next); item = next; }
+              else {
+                item.replaceWith(next);
+                item = next;
+              }
             }
             const position = previous ? previous.nextSibling : node.firstChild;
             if (item !== position) node.insertBefore(item, position);
@@ -329,7 +356,10 @@ window.CodePierCollaborationWorkspace = {
       const node = root(),
         list = node?.querySelector('.cc-room-list');
       if (!list || list.matches(':active')) return;
-      if (list._workspaceSource === markup) { draftBadges(node); return; }
+      if (list._workspaceSource === markup) {
+        draftBadges(node);
+        return;
+      }
       list._workspaceSource = markup;
       const template = document.createElement('template');
       template.innerHTML = markup;
@@ -377,7 +407,8 @@ window.CodePierCollaborationWorkspace = {
         waiting = all.filter((r) => r.group === 'waiting').length;
       const label = node.querySelector('[data-cc-pulse-label]');
       if (label) {
-        fluid.text(label,
+        fluid.text(
+          label,
           state.snapshot.room.state !== 'active'
             ? '房间已暂停 · 已保存记录仍可查看'
             : attention
@@ -386,7 +417,8 @@ window.CodePierCollaborationWorkspace = {
                 ? `${active} 条消息正在处理或回复`
                 : waiting
                   ? `${waiting} 条消息等待反馈`
-                  : '对话、进展与结果，留在同一个房间');
+                  : '对话、进展与结果，留在同一个房间',
+        );
         label.parentElement.dataset.tone = attention ? 'attention' : active ? 'active' : 'quiet';
         label.parentElement.hidden =
           state.view !== 'discussion' ||
@@ -412,8 +444,11 @@ window.CodePierCollaborationWorkspace = {
             ? `${all.length} 条消息`
             : '暂无';
       const progressNode = node.querySelector('.cc-progress-feed');
-      if (state.view === 'jobs' && progressNode &&
-          (progressNode._ccRows !== all || progressNode._ccFilter !== filter)) {
+      if (
+        state.view === 'jobs' &&
+        progressNode &&
+        (progressNode._ccRows !== all || progressNode._ccFilter !== filter)
+      ) {
         const template = document.createElement('template');
         template.innerHTML = progress(all);
         const complete = patchRecords(
@@ -561,21 +596,31 @@ window.CodePierCollaborationWorkspace = {
           return true;
         }
       }
-      if ((event.metaKey || event.ctrlKey) && event.shiftKey && !event.altKey &&
-          event.key.toLowerCase() === 'k') {
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        event.shiftKey &&
+        !event.altKey &&
+        event.key.toLowerCase() === 'k'
+      ) {
         event.preventDefault();
         event.stopPropagation();
         if (matchMedia('(max-width: 1000px)').matches) rooms(true, document.activeElement);
         else root()?.querySelector('#cc-room-search')?.focus();
         return true;
       }
-      if (event.target.closest('.cc-workspace-nav') &&
-          ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+      if (
+        event.target.closest('.cc-workspace-nav') &&
+        ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)
+      ) {
         event.preventDefault();
         const tabs = [...root().querySelectorAll('.cc-workspace-nav [data-cc-view]')];
         const index = tabs.indexOf(event.target.closest('[data-cc-view]'));
-        const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 :
-          (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+        const next =
+          event.key === 'Home'
+            ? 0
+            : event.key === 'End'
+              ? tabs.length - 1
+              : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
         tabs[next]?.focus({ preventScroll: true });
         tabs[next]?.click();
         return true;

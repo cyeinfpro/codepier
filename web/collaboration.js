@@ -715,19 +715,32 @@ window.CodePierCollaboration = (() => {
     // Render dependencies only. Server visibility checks still purge records
     // before a changed authorization projection is displayed.
     const d = state.snapshot;
-    return JSON.stringify([state.project, state.environment, d?.can_manage,
-      d?.capabilities?.native_dot_relay, d?.capabilities?.message_remind, d?.jobs,
+    return JSON.stringify([
+      state.project,
+      state.environment,
+      d?.can_manage,
+      d?.capabilities?.native_dot_relay,
+      d?.capabilities?.message_remind,
+      d?.jobs,
       (d?.join_slots || []).map((slot) => [slot.id, slot.label]),
       mentionSlots().map((slot) => [slot.id, slot.task_dot, slot.duplex]),
-      S.projects.map((project) => [project.id, project.alias])]);
+      S.projects.map((project) => [project.id, project.alias]),
+    ]);
   }
   function patchTimeline(forceBottom = false, dirtyIds = null) {
     const feed = document.querySelector('.cc-feed'),
       list = feed?.querySelector('.cc-message-list');
     if (!list) return;
-    const c = chat(), context = timelineContext(), evidence = relay.evidenceProjection();
-    if (list._ccMessages === c.messages && list._ccContext === context &&
-        list._ccEvidence === evidence.signature && !list._ccDeferred && !dirtyIds?.size) {
+    const c = chat(),
+      context = timelineContext(),
+      evidence = relay.evidenceProjection();
+    if (
+      list._ccMessages === c.messages &&
+      list._ccContext === context &&
+      list._ccEvidence === evidence.signature &&
+      !list._ccDeferred &&
+      !dirtyIds?.size
+    ) {
       if (forceBottom) {
         feed.scrollTop = feed.scrollHeight;
         c.scroll = feed.scrollTop;
@@ -737,15 +750,18 @@ window.CodePierCollaboration = (() => {
       return;
     }
     const nearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 70;
-    const top = feed.scrollTop, children = [...list.children];
+    const top = feed.scrollTop,
+      children = [...list.children];
     const nodes = new Map(children.map((node) => [node.dataset.messageId, node]));
     const lastSequence = Number(children.at(-1)?.dataset.sequence) || 0;
     // One viewport read, logarithmic anchor lookup; no row geometry reads when
     // following the tail, and no scroll hijacking while reading older messages.
-    let anchor = null, anchorTop = 0;
+    let anchor = null,
+      anchorTop = 0;
     if (!nearBottom && !forceBottom && children.length) {
       const edge = feed.getBoundingClientRect().top;
-      let low = 0, high = children.length - 1;
+      let low = 0,
+        high = children.length - 1;
       while (low < high) {
         const mid = (low + high) >> 1;
         if (children[mid].getBoundingClientRect().bottom < edge) low = mid + 1;
@@ -755,14 +771,23 @@ window.CodePierCollaboration = (() => {
       anchorTop = anchor.getBoundingClientRect().top;
     }
     if (c.messages.length) list.querySelector('.cc-chat-empty')?.remove();
-    let previous = null, added = 0, deferred = false;
-    const hydrated = [], entered = [];
+    let previous = null,
+      added = 0,
+      deferred = false;
+    const hydrated = [],
+      entered = [];
     for (const m of c.messages) {
       let node = nodes.get(m.id);
       const parent = m.reply_to_id ? messageById(m.reply_to_id) : null;
       const taskEvidence = evidence.byMessage.get(m.id) || '';
-      if (!dirtyIds?.has(m.id) && node?._ccMessage === m && node._ccContext === context &&
-          node._ccParent === parent && node._ccEvidence === taskEvidence && !node._ccDeferred) {
+      if (
+        !dirtyIds?.has(m.id) &&
+        node?._ccMessage === m &&
+        node._ccContext === context &&
+        node._ccParent === parent &&
+        node._ccEvidence === taskEvidence &&
+        !node._ccDeferred
+      ) {
         previous = node;
         continue;
       }
@@ -807,7 +832,8 @@ window.CodePierCollaboration = (() => {
       feed.scrollTop = feed.scrollHeight;
       c.unread = 0;
       // Never animate an entire history batch.
-      if (entered.length <= 4) for (const node of entered) fluid.enter(node, { y: 6, duration: 180 });
+      if (entered.length <= 4)
+        for (const node of entered) fluid.enter(node, { y: 6, duration: 180 });
     } else {
       feed.scrollTop = top;
       if (anchor?.isConnected) feed.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
@@ -830,7 +856,10 @@ window.CodePierCollaboration = (() => {
       feed.scrollHeight - feed.scrollTop - feed.clientHeight >= 70
     )
       return;
-    const sequence = c.messages.reduce((max, m) => Math.max(max, Number(m.server_sequence) || 0), 0);
+    const sequence = c.messages.reduce(
+      (max, m) => Math.max(max, Number(m.server_sequence) || 0),
+      0,
+    );
     if (sequence <= (c.read || 0)) return;
     c.read = sequence;
     mutation('read-cursor', {
@@ -1059,10 +1088,20 @@ window.CodePierCollaboration = (() => {
     if (context && !context.matches(':active') && !context.contains(document.activeElement))
       context.innerHTML = contextContents();
     const strip = document.querySelector('.cc-member-strip');
-    if (strip && !strip.matches(':active') && !strip.contains(document.activeElement) && strip.outerHTML !== memberStrip())
+    if (
+      strip &&
+      !strip.matches(':active') &&
+      !strip.contains(document.activeElement) &&
+      strip.outerHTML !== memberStrip()
+    )
       strip.outerHTML = memberStrip();
     const projects = document.querySelector('.cc-project-strip');
-    if (projects && !projects.matches(':active') && !projects.contains(document.activeElement) && projects.outerHTML !== projectChips())
+    if (
+      projects &&
+      !projects.matches(':active') &&
+      !projects.contains(document.activeElement) &&
+      projects.outerHTML !== projectChips()
+    )
       projects.outerHTML = projectChips();
     const area = document.querySelector('#cc-message-input');
     if (area) {
@@ -1073,26 +1112,34 @@ window.CodePierCollaboration = (() => {
       document.querySelector('#cc-command button[type="submit"]').disabled = area.disabled;
     }
   }
-  let workspaceRefresh = null, workspaceFresh = null;
+  let workspaceRefresh = null,
+    workspaceFresh = null;
   function refreshWorkspaceData() {
     if (state.busy || !state.snapshot?.room || !state.snapshot.capabilities?.plain_messages) return;
     if (workspaceRefresh?.generation === state.generation) return workspaceRefresh.promise;
     // Retained views open immediately. Regular sync and explicit refresh remain
     // live; repeated navigation does not fan out redundant metadata requests.
-    const age = workspaceFresh?.generation === state.generation
-      ? performance.now() - workspaceFresh.at : Infinity;
+    const age =
+      workspaceFresh?.generation === state.generation
+        ? performance.now() - workspaceFresh.at
+        : Infinity;
     if (age < 4000) {
       // A trailing refresh keeps newly created rooms discoverable even if the
       // user stops switching tabs during the coalescing window.
       if (!state.workspacePending) {
         const pending = { generation: state.generation, promise: null, resolve: null };
-        pending.promise = new Promise((resolve) => { pending.resolve = resolve; });
+        pending.promise = new Promise((resolve) => {
+          pending.resolve = resolve;
+        });
         state.workspacePending = pending;
         state.workspaceTimer = setTimeout(() => {
           state.workspaceTimer = null;
           if (state.workspacePending === pending) state.workspacePending = null;
-          pending.resolve(pending.generation === state.generation && S.page === 'collaboration'
-            ? refreshWorkspaceData() : undefined);
+          pending.resolve(
+            pending.generation === state.generation && S.page === 'collaboration'
+              ? refreshWorkspaceData()
+              : undefined,
+          );
         }, 4000 - age);
       }
       // Callers observe the real trailing read, including its cancellation.
@@ -2810,8 +2857,11 @@ window.CodePierCollaboration = (() => {
       }
       const room = event.target.closest('[data-cc-room]');
       if (room) {
-        if (room.dataset.ccRoom === state.conversation && room.dataset.project === state.project &&
-            room.dataset.environment === state.environment) {
+        if (
+          room.dataset.ccRoom === state.conversation &&
+          room.dataset.project === state.project &&
+          room.dataset.environment === state.environment
+        ) {
           workspaceUI.rooms(false);
           return;
         }
@@ -2932,7 +2982,8 @@ window.CodePierCollaboration = (() => {
       area = root.querySelector('#cc-message-input');
     if (feed) {
       const c = chat();
-      const context = timelineContext(), evidence = relay.evidenceProjection();
+      const context = timelineContext(),
+        evidence = relay.evidenceProjection();
       for (const node of feed.querySelectorAll('[data-message-id]')) {
         const m = messageById(node.dataset.messageId);
         if (m) {

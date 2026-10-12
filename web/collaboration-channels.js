@@ -33,33 +33,92 @@ window.CodePierCollaborationChannels = {
   },
   capabilities(value, E) {
     if (!value?.features) return '';
-    const labels = {text:'文字', image:'图片', file:'文件', video:'视频', voice:'语音外发',
-      edit:'原位编辑', typing:'输入状态', native_reply:'原生引用', receipt_lookup:'平台回执查询',
-      read_receipt:'用户已读', preview:'在线预览', transcription:'音频转写'};
-    const layers = {implemented:'当前实现', provider_account_verified:'账号实测',
-      authorized:'当前授权', session_available:'当前会话'};
-    const fact = (value) => value === true ? '已核实' : value === false ? '不支持或不可用' : '尚未核实';
-    return '<details class="cc-channel-capabilities"><summary>当前通道能力与限制</summary><p>四项均有证据才显示可用；能力说明不会授予权限。</p><dl>' +
-      Object.entries(labels).map(([name, label]) => {
-        const item = value.features[name] || {};
-        return '<dt>' + E(label) + '：' + E(item.enabled === true ? '可用' : fact(item.effective)) + '</dt><dd>' +
-          Object.entries(layers).map(([key, title]) => E(title + '：' + fact(item[key]))).join(' · ') + '</dd>';
-      }).join('') + '</dl><p>文本分段上限：' + E(value.text?.limit ?? '未知') + ' ' + E(value.text?.unit || '') +
-      '；文件上传上限：' + E(value.media?.upload_limit ?? '未知') + ' 字节。</p>' +
-      '<p>文件逐份核对当前收件人和内容摘要；上传成功不等于消息已发送。阶段反馈合并更新；无编辑能力时保留文字摘要。音频没有转写证据时只作为原音频附件。</p></details>';
+    const labels = {
+      text: '文字',
+      image: '图片',
+      file: '文件',
+      video: '视频',
+      voice: '语音外发',
+      edit: '原位编辑',
+      typing: '输入状态',
+      native_reply: '原生引用',
+      receipt_lookup: '平台回执查询',
+      read_receipt: '用户已读',
+      preview: '在线预览',
+      transcription: '音频转写',
+    };
+    const layers = {
+      implemented: '当前实现',
+      provider_account_verified: '账号实测',
+      authorized: '当前授权',
+      session_available: '当前会话',
+    };
+    const fact = (value) =>
+      value === true ? '已核实' : value === false ? '不支持或不可用' : '尚未核实';
+    return (
+      '<details class="cc-channel-capabilities"><summary>当前通道能力与限制</summary><p>四项均有证据才显示可用；能力说明不会授予权限。</p><dl>' +
+      Object.entries(labels)
+        .map(([name, label]) => {
+          const item = value.features[name] || {};
+          return (
+            '<dt>' +
+            E(label) +
+            '：' +
+            E(item.enabled === true ? '可用' : fact(item.effective)) +
+            '</dt><dd>' +
+            Object.entries(layers)
+              .map(([key, title]) => E(title + '：' + fact(item[key])))
+              .join(' · ') +
+            '</dd>'
+          );
+        })
+        .join('') +
+      '</dl><p>文本分段上限：' +
+      E(value.text?.limit ?? '未知') +
+      ' ' +
+      E(value.text?.unit || '') +
+      '；文件上传上限：' +
+      E(value.media?.upload_limit ?? '未知') +
+      ' 字节。</p>' +
+      '<p>文件逐份核对当前收件人和内容摘要；上传成功不等于消息已发送。阶段反馈合并更新；无编辑能力时保留文字摘要。音频没有转写证据时只作为原音频附件。</p></details>'
+    );
   },
   fileDetails(item, E) {
-    const stamp = (value) => Number.isFinite(value) ? new Date(value * 1000).toLocaleString('zh-CN', {hour12:false}) : '尚未记录';
+    const stamp = (value) =>
+      Number.isFinite(value)
+        ? new Date(value * 1000).toLocaleString('zh-CN', { hour12: false })
+        : '尚未记录';
     const source = item.origin?.work_item_id || item.origin?.operation_id;
-    const upload = {accepted:'上传已接受', combined_with_send:'上传与消息发送合并，暂无独立上传回执', unknown:'上传结果尚未确认'};
-    return '<details class="cc-file-manifest"><summary>文件来源与分享状态</summary><p>类型：' + E(item.mime || '尚未核实') +
-      '；来源：' + E(source || (item.artifact_id ? '原产物' : '原通道附件')) + '</p><p>SHA-256：' + E(item.sha256 || '尚未取得原字节') +
-      '</p><p>保留至：' + E(stamp(item.expires_at)) + '；到期不会重跑生成任务。</p>' +
+    const upload = {
+      accepted: '上传已接受',
+      combined_with_send: '上传与消息发送合并，暂无独立上传回执',
+      unknown: '上传结果尚未确认',
+    };
+    return (
+      '<details class="cc-file-manifest"><summary>文件来源与分享状态</summary><p>类型：' +
+      E(item.mime || '尚未核实') +
+      '；来源：' +
+      E(source || (item.artifact_id ? '原产物' : '原通道附件')) +
+      '</p><p>SHA-256：' +
+      E(item.sha256 || '尚未取得原字节') +
+      '</p><p>保留至：' +
+      E(stamp(item.expires_at)) +
+      '；到期不会重跑生成任务。</p>' +
       (item.kind === 'voice' ? '<p>原音频附件；尚无可验证转写。</p>' : '') +
-      (item.shares || []).map((share) => '<p>' + E(share.channel === 'telegram' ? 'Telegram' : '微信') + '：' +
-        E(upload[share.upload_state] || upload.unknown) + '；消息：' +
-        E(window.CodePierCollaborationChannels.status(share.send_state)) + '</p>').join('') +
-      '<small>文件读取与外发批准分别核对。平台接受不代表用户已读。</small></details>';
+      (item.shares || [])
+        .map(
+          (share) =>
+            '<p>' +
+            E(share.channel === 'telegram' ? 'Telegram' : '微信') +
+            '：' +
+            E(upload[share.upload_state] || upload.unknown) +
+            '；消息：' +
+            E(window.CodePierCollaborationChannels.status(share.send_state)) +
+            '</p>',
+        )
+        .join('') +
+      '<small>文件读取与外发批准分别核对。平台接受不代表用户已读。</small></details>'
+    );
   },
   attachments(message, E) {
     const label = window.CodePierCollaborationChannels.status;
@@ -790,7 +849,9 @@ window.CodePierCollaborationChannels = {
         )
           throw new Error('服务端授权摘要不完整，不能生成任务授权码。');
         request.preview = preview;
-        const changed = previous?.preview && previous.selection === selection &&
+        const changed =
+          previous?.preview &&
+          previous.selection === selection &&
           previous.preview.scope_digest !== preview.scope_digest;
         const rows = [
           ...(changed ? [['范围变化', '原摘要已失效，请只核对下方当前差异并重新确认。']] : []),
@@ -824,7 +885,10 @@ window.CodePierCollaborationChannels = {
     }
     function onboardingStatus(binding) {
       const entry = binding.onboarding;
-      const capabilities = window.CodePierCollaborationChannels.capabilities(binding.effective_capabilities, E);
+      const capabilities = window.CodePierCollaborationChannels.capabilities(
+        binding.effective_capabilities,
+        E,
+      );
       if (!entry) return capabilities;
       const status =
         {
@@ -843,16 +907,39 @@ window.CodePierCollaborationChannels = {
           ? '本次授权码已完成验证。任务权限以当前授权状态为准。'
           : '原接入预授权已失效或范围已变化，不会自动开通任务；请重新核对。';
       const readiness = entry.readiness;
-      const names = {account:'账号或凭据世代', project_id:'项目', environment_id:'环境', project_snapshot:'项目映射',
-        dot_id:'目标 dot', dot_setup_digest:'dot 范围', policy_id:'任务策略', policy_version:'策略版本',
-        policy_digest:'策略内容', capabilities:'允许能力', execution_targets:'执行目标',
-        target_snapshots:'目标映射', max_delegations:'任务预算', delivery_mode:'回传方式', binding:'绑定版本'};
-      const recovery = readiness ? '<p>已恢复原接入对象，查询不会创建新绑定。</p>' +
-        (readiness.ready_for_private_proof ? '<p>原范围仍一致，等待本人完成私聊验证。</p>' :
-          readiness.changed_fields?.length ? '<p>需要重新核对变化：' +
-            E(readiness.changed_fields.map((key) => names[key] || '原范围').join('、')) + '</p>' :
-          readiness.scope_unchanged === null ? '<p>当前范围尚未核实，请查看原账号、绑定和授权状态。</p>' : '') : '';
-      return capabilities + `<div class="cc-onboarding-status" role="status"><strong>${E(instruction)}</strong><p>${E(status)}</p>${recovery}</div>`;
+      const names = {
+        account: '账号或凭据世代',
+        project_id: '项目',
+        environment_id: '环境',
+        project_snapshot: '项目映射',
+        dot_id: '目标 dot',
+        dot_setup_digest: 'dot 范围',
+        policy_id: '任务策略',
+        policy_version: '策略版本',
+        policy_digest: '策略内容',
+        capabilities: '允许能力',
+        execution_targets: '执行目标',
+        target_snapshots: '目标映射',
+        max_delegations: '任务预算',
+        delivery_mode: '回传方式',
+        binding: '绑定版本',
+      };
+      const recovery = readiness
+        ? '<p>已恢复原接入对象，查询不会创建新绑定。</p>' +
+          (readiness.ready_for_private_proof
+            ? '<p>原范围仍一致，等待本人完成私聊验证。</p>'
+            : readiness.changed_fields?.length
+              ? '<p>需要重新核对变化：' +
+                E(readiness.changed_fields.map((key) => names[key] || '原范围').join('、')) +
+                '</p>'
+              : readiness.scope_unchanged === null
+                ? '<p>当前范围尚未核实，请查看原账号、绑定和授权状态。</p>'
+                : '')
+        : '';
+      return (
+        capabilities +
+        `<div class="cc-onboarding-status" role="status"><strong>${E(instruction)}</strong><p>${E(status)}</p>${recovery}</div>`
+      );
     }
     function channelOwnerPanel(channel, data, binding) {
       if (channel === 'weixin') return ownerTaskPanel(data, binding);
@@ -2157,11 +2244,18 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
           artifact_ids: ids,
         };
         if (action === 'dot-channel-tg-file-preview') {
-          const previewOwner = loaded, previewEpoch = state.drawerEpoch;
+          const previewOwner = loaded,
+            previewEpoch = state.drawerEpoch;
           saving = true;
           try {
             const preview = await mutation('telegram-files-preview', { ...selected, ...scope() });
-            if (!current(key) || loaded !== previewOwner || previewEpoch !== state.drawerEpoch || !root.isConnected) return local;
+            if (
+              !current(key) ||
+              loaded !== previewOwner ||
+              previewEpoch !== state.drawerEpoch ||
+              !root.isConnected
+            )
+              return local;
             loaded.filePreview = { selected, preview };
             root.querySelector('.tg-file-preview').innerHTML =
               `<section class="cc-channel-binding"><strong>核对后才发送</strong><p>项目：${E(preview.project_id || '')} · 原话题：${E(preview.conversation_id || '')} · 绑定版本 ${E(preview.binding_version)}</p><p>Telegram user_id：${E(preview.recipient.user_id)} · chat_id：${E(preview.recipient.chat_id)}</p><p>原回复：${E(preview.message_id.slice(-8))} · 版本 ${E(preview.message_version)}</p>${preview.files.map((f) => `<div>${E(f.name)} · ${E(f.bytes)} 字节<small>SHA-256：${E(f.sha256)}</small><small>保留至：${stamp(f.expires_at)}</small></div>`).join('')}<p>总计 ${E(preview.total_bytes)} 字节</p>${checkbox('file_confirm', '我确认仅向以上本人Telegram私聊发送以上完整文件清单', true)}${button('dot-channel-tg-files', '确认并排队发送这些文件')}</section>`;
@@ -2408,32 +2502,67 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
         if (!reply || !ids.length || ids.length > 16)
           throw new Error('请选择原回复与1至16件实际产物。');
         const selected = {
-          message_id: reply.id, expected_message_version: reply.version, artifact_ids: ids,
+          message_id: reply.id,
+          expected_message_version: reply.version,
+          artifact_ids: ids,
         };
         if (action === 'dot-channel-file-preview') {
-          const owner = loaded, epoch = state.drawerEpoch;
+          const owner = loaded,
+            epoch = state.drawerEpoch;
           saving = true;
           try {
-            const preview = await mutation('weixin-files-preview', {...selected, ...scope()});
-            if (!current(key) || loaded !== owner || epoch !== state.drawerEpoch || !root.isConnected) return local;
-            loaded.wxFilePreview = {selected, preview};
+            const preview = await mutation('weixin-files-preview', { ...selected, ...scope() });
+            if (
+              !current(key) ||
+              loaded !== owner ||
+              epoch !== state.drawerEpoch ||
+              !root.isConnected
+            )
+              return local;
+            loaded.wxFilePreview = { selected, preview };
             root.querySelector('.wx-file-preview').innerHTML =
               '<section class="cc-channel-binding"><strong>核对后才发送</strong><p>原微信收件人：' +
-              E(preview.recipient.peer_id) + '；绑定版本 ' + E(preview.binding_version) + '</p><p>项目：' +
-              E(preview.project_id) + '；原话题：' + E(preview.conversation_id) + '</p>' +
-              preview.files.map((file) => '<p>' + E(file.name) + ' · ' + E(file.bytes) +
-                ' 字节<small>SHA-256：' + E(file.sha256) + '</small><small>保留至：' +
-                stamp(file.expires_at) + '</small></p>').join('') +
+              E(preview.recipient.peer_id) +
+              '；绑定版本 ' +
+              E(preview.binding_version) +
+              '</p><p>项目：' +
+              E(preview.project_id) +
+              '；原话题：' +
+              E(preview.conversation_id) +
+              '</p>' +
+              preview.files
+                .map(
+                  (file) =>
+                    '<p>' +
+                    E(file.name) +
+                    ' · ' +
+                    E(file.bytes) +
+                    ' 字节<small>SHA-256：' +
+                    E(file.sha256) +
+                    '</small><small>保留至：' +
+                    stamp(file.expires_at) +
+                    '</small></p>',
+                )
+                .join('') +
               checkbox('confirm_files', '我确认仅向以上原微信联系人分享以上完整文件清单', true) +
-              button('dot-channel-files', '确认保存文件外发清单') + '</section>';
-          } finally { saving = false; }
+              button('dot-channel-files', '确认保存文件外发清单') +
+              '</section>';
+          } finally {
+            saving = false;
+          }
           return local;
         }
-        if (!loaded.wxFilePreview || JSON.stringify(loaded.wxFilePreview.selected) !== JSON.stringify(selected))
+        if (
+          !loaded.wxFilePreview ||
+          JSON.stringify(loaded.wxFilePreview.selected) !== JSON.stringify(selected)
+        )
           throw new Error('文件或原回复已变化，请重新预览文件与收件人。');
         operation = 'weixin-files-reviewed';
-        args = {...selected, preview_digest: loaded.wxFilePreview.preview.preview_digest,
-          confirm_file_egress: checked('confirm_files')};
+        args = {
+          ...selected,
+          preview_digest: loaded.wxFilePreview.preview.preview_digest,
+          confirm_file_egress: checked('confirm_files'),
+        };
       } else if (['dot-channel-confirm-received', 'dot-channel-cancel-unsent'].includes(action)) {
         const row = loaded.weixin.deliveries.find((d) => d.id === element.dataset.id);
         if (!row) throw new Error('原投递已不在当前列表。');
