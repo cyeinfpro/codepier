@@ -42,6 +42,12 @@ window.CodePierCollaborationDots = {
         : delegation.policyAvailable(delegation.policyFor(slot.id)));
     const transport = (slot) => slot.task_status?.notification_state === 'active';
     function statusText(slot) {
+      const projection = state.snapshot?.connection_readiness?.[slot.id];
+      const labels = {ready: '已连接 · 可接收消息', chat_only: '可对话 · 执行权限未开放',
+        not_registered: '等待在原 dot 登记', waiting_subscription: '已登记 · 待宿主订阅',
+        paused: '已暂停', revoked: '已撤销', expired: '已到期', authorization_unavailable: '需要核对原授权'};
+      if (projection?.read_only === true && labels[projection.primary_state])
+        return labels[projection.primary_state];
       const status = joinStatus(slot);
       if (status === 'invited') return '等待在 dot 加入';
       if (status === 'code_expired') return '加入码已过期';
@@ -189,6 +195,8 @@ window.CodePierCollaborationDots = {
       if (token && area && area.value === token.value && area.selectionStart === token.end) {
         area.setRangeText('', token.start, token.end, 'end');
         c.draft = area.value;
+        // Programmatic token removal must update draft-only controls too.
+        area.dispatchEvent(new Event('input', { bubbles: true }));
       }
       hideSuggestions();
       c.mentions = [slot.id];
@@ -331,8 +339,11 @@ window.CodePierCollaborationDots = {
     function refreshCards() {
       for (const node of document.querySelectorAll('[data-dot-card]')) {
         const slot = slots().find((item) => item.id === node.dataset.dotCard);
-        if (!slot || node.contains(document.activeElement)) continue;
-        const signature = JSON.stringify(slot);
+        const selection = window.getSelection();
+        if (!slot || node.matches(':active') || node.contains(document.activeElement) ||
+            (selection && !selection.isCollapsed &&
+              (node.contains(selection.anchorNode) || node.contains(selection.focusNode)))) continue;
+        const signature = JSON.stringify([slot, state.snapshot?.connection_readiness?.[slot.id]]);
         if (node.dataset.signature === signature) continue;
         const wrapper = document.createElement('div');
         wrapper.innerHTML = card(slot);

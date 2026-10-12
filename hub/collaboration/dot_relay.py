@@ -67,6 +67,8 @@ class DotRelay:
                             (self.c.clock(), self.c.clock(), dot['id'], message['reply_to_id']))
                 stored = self.c.object('collaboration_messages', room, message['id'])
                 self.c.task_liveness.record_receipt(dot, args, 'update', stored)
+                if args['complete'] and hasattr(self.c, 'message_handling'):
+                    self.c.message_handling.record_reply(room, dot, principal, stored)
                 self.c.channels.queue_reply(stored)
                 return {'message_id': message['id']}
 
@@ -85,6 +87,140 @@ class DotRelay:
                     'update_arguments': self.update_arguments(room, dot, current)}
 
     def receipts(self, message):
+        return self.receipts_many([message]).get(message['id'], [])
+
+    def receipts_many(self, messages, principal=None):
+        """Bounded request-local batches. Never reuse authority across requests."""
+        from hub.collaboration import experience_projection as projection
+        unique = {m['id']: m for m in messages}
+        if len(unique) > 124:
+            raise DevError('RELAY_BATCH_LIMIT', '一次最多读取124条可见消息回执', 422)
+        if not unique:
+            return {}
+        if not self.c.config.relay_batch_enabled:
+            return {identifier: self._legacy_receipts(row) for identifier, row in unique.items()}
+        include_experience = bool(self.c.config.experience_projection_enabled and principal is not None and not principal.grant_id)
+        ids, now = tuple(unique), self.c.clock()
+        marks = ','.join('?' for _ in ids)
+        rows = self.store.all(f'''SELECT m.*,s.label,s.state AS slot_state,s.expires_at AS slot_expires,
+            s.grant_id FROM collaboration_dot_messages m JOIN collaboration_join_slots s ON s.id=m.dot_id
+            WHERE message_id IN ({marks}) ORDER BY sequence''', ids)
+        if not rows:
+            return {identifier: [] for identifier in ids}
+        reply_rows = self.store.all(f'''SELECT * FROM (
+            SELECT m.*,json_extract(body,'$.sender_dot_id') AS sender_dot,
+                ROW_NUMBER() OVER (PARTITION BY reply_to_id,json_extract(body,'$.sender_dot_id')
+                    ORDER BY created DESC,id DESC) AS rank
+            FROM collaboration_messages m WHERE reply_to_id IN ({marks}))
+            WHERE rank=1''', ids)
+        replies = {(r['reply_to_id'], r['sender_dot']): r for r in reply_rows}
+        works = self.store.all(f'''SELECT w.*,d.message_id,p.slot_id AS dot_id
+            FROM delegation_requests d JOIN delegation_policies p ON p.id=d.policy_id
+            JOIN coordination_work w ON w.id=d.work_item_id WHERE d.message_id IN ({marks})''', ids)
+        work_map = {(w['message_id'], w['dot_id']): w for w in works}
+        # Detailed operation evidence is only included after existing goal access
+        # checks. Internal callers without a principal get the old state only.
+        summaries = {(w['message_id'], w['dot_id']): w for w in self.c.task_liveness.for_messages(
+            list(unique.values()), principal)} if principal is not None and include_experience else {}
+        handling_service = getattr(self.c, 'message_handling', None)
+        handling = {}
+        if handling_service is not None and include_experience:
+            for offset in range(0, len(ids), 100):
+                handling.update(handling_service.summaries(ids[offset:offset + 100], principal=principal))
+        coverage_ids = {h.get('reply_id') for h in handling.values() if h.get('reply_id') and h.get('source_current', True)}
+        coverage = {}
+        if coverage_ids:
+            coverage = {r['id']: r for r in self.store.all('SELECT * FROM collaboration_messages WHERE id IN ('
+                + ','.join('?' for _ in coverage_ids) + ')', tuple(coverage_ids))}
+        all_reply_ids = list(dict.fromkeys([r['id'] for r in reply_rows] + list(coverage)))
+        channels = self.c.channels.for_messages(all_reply_ids) if include_experience else {}
+        dots = tuple(dict.fromkeys(row['dot_id'] for row in rows))
+        active_rows = self.store.all('''SELECT r.slot_id,json_extract(s.arguments,'$.conversation_id') AS conversation_id
+            FROM mcp_event_subscriptions s JOIN collaboration_join_routes r ON r.subscription_id=s.id
+            WHERE r.slot_id IN (''' + ','.join('?' for _ in dots) + ''')
+            AND s.name=? AND s.state='active' AND s.expires_at>?''', (*dots, MESSAGE_EVENT, now))
+        active_pairs = {(r['slot_id'], r['conversation_id']) for r in active_rows}
+        authorized, result = {}, {identifier: [] for identifier in ids}
+        for row in rows:
+            message = unique[row['message_id']]
+            pair = (message['id'], row['dot_id'])
+            reply, work = replies.get(pair), work_map.get(pair)
+            state = 'saved'
+            if work:
+                if work['state'] == 'succeeded':
+                    state = 'completed'
+                elif work['state'] in ('failed', 'blocked', 'cancelled', 'expired'):
+                    state = 'needs_attention'
+                elif work['state'] in ('running', 'leased') and (work['lease_until'] or 0) > now:
+                    state = 'working'
+                else:
+                    state = 'waiting_dot'
+            elif reply:
+                body = json.loads(reply['body'])
+                state = 'replied' if body.get('dot_reply_complete') is not False else (
+                    'replying' if now - max(reply['created'], body.get('dot_updated_at', 0)) < 90 else 'waiting_dot')
+            elif row['state'] == 'handled':
+                state = 'handled'
+            elif row['state'] == 'read':
+                state = 'received' if now - max(row['received_at'] or 0, row['last_activity_at']) < 90 else 'waiting_dot'
+            if state in ('saved', 'waiting_dot'):
+                active = ((row['dot_id'], message['conversation_id']) in active_pairs
+                          and row['slot_state'] == 'registered' and row['slot_expires'] > now
+                          and self.c.config.events_enabled)
+                if active:
+                    if row['dot_id'] not in authorized:
+                        try:
+                            dot = self.c.dots.find(row['dot_id'])
+                            room = self.store.one('SELECT * FROM collaboration_rooms WHERE id=?', (dot['room_id'],))
+                            slot = self.c.joining.slot(room, dot['id'])
+                            actor = self.c.grant_reader(room, slot['grant_id'], snapshot=json.loads(slot['principal']))
+                            self.c.dot_chat.authorize(actor, room, dot)
+                            self.c.live_room(room)
+                            authorized[row['dot_id']] = actor
+                        except DevError:
+                            authorized[row['dot_id']] = None
+                    actor = authorized[row['dot_id']]
+                    active = actor is not None and self.c.chatroom.message_visible(actor, message)
+                if not active:
+                    state = 'waiting_connection'
+            summary = summaries.get(pair)
+            if summary is None and work:
+                summary = {'work_item_id': None, 'execution_state': work['state'],
+                           'acceptance_status': 'unverified', 'observed_at': None}
+            handling_row = handling.get((row['dot_id'], message['id']))
+            projected_reply = reply if reply and (principal is None or self.c.chatroom.message_visible(principal, reply)) else None
+            if handling_row and handling_row.get('source_current', True):
+                candidate = coverage.get(handling_row.get('reply_id'))
+                if (candidate and candidate['room_id'] == message['room_id']
+                        and candidate['conversation_id'] == message['conversation_id']
+                        and (principal is None or self.c.chatroom.message_visible(principal, candidate))):
+                    projected_reply = candidate
+                elif candidate:
+                    handling_row = {'state': 'awaiting', 'evidence_current': False, 'revision': handling_row.get('revision')}
+            if projected_reply:
+                projected_reply = {**projected_reply, 'body': json.loads(projected_reply['body'])}
+            value = {'dot_id': row['dot_id'], 'label': row['label'], 'state': state,
+                'received_at': row['received_at'], 'handled_at': row['handled_at'],
+                'recovery_wakes': row['wake_count'], 'model_online': 'unknown'}
+            if include_experience:
+                value['experience'] = projection.message(message, {**row, 'relay_state': state},
+                    reply=projected_reply, work=summary, handling=handling_row,
+                    channels=channels.get(projected_reply['id'], []) if projected_reply else [])
+            result[message['id']].append(value)
+        if self.c.config.relay_batch_shadow:
+            baseline = {identifier: self._legacy_receipts(row) for identifier, row in unique.items()}
+            compared = {identifier: [{k: v for k, v in r.items() if k != 'experience'} for r in values]
+                        for identifier, values in result.items()}
+            if compared != baseline:
+                return {identifier: [{**r, 'projection_comparison': 'mismatch_fallback'} for r in values]
+                        for identifier, values in baseline.items()}
+        if not self.c.config.experience_projection_enabled:
+            for values in result.values():
+                for value in values:
+                    value.pop('experience', None)
+        return result
+
+    def _legacy_receipts(self, message):
         """One truthful status per recipient, rather than contradictory UI badges."""
         rows = self.store.all('''SELECT m.*,s.label,s.state AS slot_state,s.expires_at AS slot_expires,
             s.grant_id FROM collaboration_dot_messages m JOIN collaboration_join_slots s ON s.id=m.dot_id
@@ -212,6 +348,78 @@ class DotRelay:
                     break
             return len(awakened)
 
+    def pending_scope_revision(self, principal, room, conversation, slots=None):
+        """Opaque generation for optional local pending intents, not a grant.
+
+        Include current effective authority and exact project mappings. Never
+        include credentials, query time or model liveness in this stable digest.
+        """
+        from hub.room_scope import snapshot
+        if principal.grant_id or not principal.admin:
+            return None
+        rooms = self.c.conversations.visible(principal, conversation)
+        mappings = []
+        for selected in rooms:
+            project = self.c.runtime.project(selected['project_id'], principal)
+            mappings.append([selected['id'], selected['version'], selected['state'], snapshot(project)])
+        if slots is None:
+            slots = self.c.joining.list(room, principal, conversation['id'])
+        return digest(['pending-scope-v1',
+            {key: getattr(principal, key) for key in ('user_id', 'space_id', 'user_epoch', 'identity_id',
+                'admin', 'profile_id', 'role_id', 'authorization_mode')},
+            sorted(principal.scopes), sorted(principal.projects), conversation['id'], conversation['version'],
+            sorted(mappings, key=lambda value: value[0]),
+            [{key: slot.get(key) for key in ('id', 'version', 'state', 'status', 'policy_id', 'policy_version',
+                'capabilities', 'execution_target', 'scope_manifest')}
+             for slot in sorted(slots, key=lambda value: value['id'])]])
+
+    def message_receipt(self, raw, principal):
+        """Authoritative absence only after exact current sender/scope checks."""
+        from hub.collaboration.common import validate
+        args = validate(contracts.Read, {**raw, 'kind': 'message_status'})
+        if not args['client_message_id'] or args['id']:
+            raise DevError('INVALID_ARGUMENTS', '核对提交需要原 client_message_id', 422)
+        with self.store.transaction(immediate=False):
+            principal, room = self.c.scope(principal, args)
+            conversation = self.c.conversations.resolve(principal, room, args)
+            row = self.store.one('''SELECT * FROM collaboration_messages
+                WHERE room_id=? AND author=? AND origin=? AND source_id=?''',
+                (room['id'], principal.grant_id or principal.user_id,
+                 'bound_connector' if principal.grant_id else 'panel_owner', args['client_message_id']))
+            if row:
+                if row['conversation_id'] != conversation['id']:
+                    raise DevError('SOURCE_MESSAGE_CONFLICT', '原提交标识属于另一话题', 409)
+                self.c.chatroom.require_message_visible(principal, row)
+            return {'schema_version': 1, 'read_only': True, 'authoritative': True,
+                    'state': 'committed' if row else 'not_committed',
+                    'client_message_id': args['client_message_id'], 'conversation_id': conversation['id'],
+                    'pending_scope_revision': self.pending_scope_revision(principal, room, conversation),
+                    'message': self.c.chatroom.view(row) if row else None,
+                    'retry_rule': 'same_original_request_key_only_after_not_committed'}
+
+    def diagnostics(self, raw, principal):
+        from hub.collaboration.channel_capabilities import diagnostic_summary
+        from hub.collaboration.common import validate
+        from shared.util import VERSION
+        args = validate(contracts.Read, {**raw, 'kind': 'overview'})
+        with self.store.transaction(immediate=False):
+            principal, room = self.c.scope(principal, args)
+            conversation = self.c.conversations.resolve(principal, room, args)
+            result = self.sync(raw, principal, '')['diagnostic_summary']
+            descriptors, truncated = [], False
+            for channel in ('weixin', 'telegram'):
+                bindings = self.store.all('SELECT id FROM ' + channel + '''_bindings
+                    WHERE room_id=? AND conversation_id=? AND space_id=? AND owner_user_id=?
+                    ORDER BY id LIMIT 33''', (room['id'], conversation['id'], principal.space_id, principal.user_id))
+                truncated |= len(bindings) > 32
+                for binding in bindings[:32]:
+                    descriptors.append(diagnostic_summary(
+                        self.c.channels.capabilities.for_binding(channel, binding['id'])))
+            return {**result, 'codepier_version': VERSION, 'channel_capabilities': descriptors,
+                    'channel_capabilities_truncated': truncated,
+                    'layers': ['current_account_and_scope', 'current_channel_capabilities',
+                               'host_subscription', 'consumption_and_original_work', 'publication_and_channel_receipts']}
+
     def sync(self, raw, principal, tracked):
         from hub.collaboration.common import validate
         args = validate(contracts.Read, {**raw, 'kind': 'timeline', 'limit': 100})
@@ -235,10 +443,19 @@ class DotRelay:
             keys = {'id', 'dot_id', 'label', 'duplex', 'task_dot', 'kind', 'conversation_id', 'capabilities', 'execution_target', 'default_dispatch', 'state', 'status', 'version', 'expires_at', 'code_expires_at',
                     'policy_id', 'policy_version', 'blocked_reason', 'task_blocked_reason', 'task_status',
                     'chat_status', 'subscription_count', 'scope_manifest', 'operation_timeout_seconds'}
-            slots = [{key: value for key, value in slot.items() if key in keys}
-                     for slot in self.c.joining.list(room, principal, conversation['id'])]
+            from hub.collaboration import experience_projection as projection
+            full_slots = self.c.joining.list(room, principal, conversation['id'])
+            slots = [{key: value for key, value in slot.items() if key in keys} for slot in full_slots]
+            readiness = {slot['id']: projection.connection(slot) for slot in full_slots} if self.c.config.experience_projection_enabled else {}
             task_states = self.c.task_liveness.for_messages([*rows, *timeline.get('items', [])], principal)
+            updates = self.c.chatroom.views(rows, principal=principal)
+            loaded = {item['id']: item for item in [*timeline.get('items', []), *updates]}
+            projections = [receipt['experience'] for item in loaded.values()
+                           for receipt in item.get('relay_receipts', []) if receipt.get('experience')]
             return {**timeline, 'task_states': task_states, 'server_now': self.c.clock(),
-                    'updates': self.c.chatroom.views(rows, principal=principal),
+                    'connection_readiness': readiness,
+                    'pending_scope_revision': self.pending_scope_revision(principal, room, conversation, full_slots),
+                    'diagnostic_summary': projection.diagnostic(projections, list(readiness.values())),
+                    'updates': updates,
                     'join_slots': slots, 'room_state': room['state'],
                     'can_manage': bool(principal.admin and not principal.grant_id), 'read_only': True}

@@ -8,7 +8,7 @@ window.CodePierCollaborationWorkspace = {
       working: ['active', '正在处理'],
       replying: ['active', '正在回复'],
       saved: ['waiting', '等待接收'],
-      received: ['waiting', '已送达，等待反馈'],
+      received: ['waiting', 'dot 已接收，等待反馈'],
       waiting_dot: ['waiting', '等待继续反馈'],
       replied: ['responded', '已回复'],
       handled: ['responded', '已确认处理'],
@@ -24,12 +24,12 @@ window.CodePierCollaborationWorkspace = {
           m.relay_receipts?.length,
       )
       .map((message) => {
-        const states = message.relay_receipts.map((r) => ({
-          state: r.state,
-          dot: r.dot_id,
-          group: groups[r.state]?.[0] || 'unknown',
-          label: groups[r.state]?.[1] || '状态待核对',
-        }));
+        const states = message.relay_receipts.map((r) =>
+          window.CodePierCollaborationRelay?.presentReceipt(r) || ({
+            state: r.state, dot: r.dot_id,
+            group: groups[r.state]?.[0] || 'unknown',
+            label: groups[r.state]?.[1] || '状态待核对',
+          }));
         const primary = [...states].sort(
           (a, b) => priority.indexOf(a.group) - priority.indexOf(b.group),
         )[0];
@@ -115,7 +115,7 @@ window.CodePierCollaborationWorkspace = {
           : '添加助手，复制加入指令，然后回到这里直接交流。无需选择聊天或任务模式。';
       const disabled =
         chat().draft || !state.snapshot?.can_manage || state.snapshot?.room?.state !== 'active';
-      return `<div class="cc-chat-empty cc-workspace-welcome"><span class="cc-welcome-mark" aria-hidden="true">${icon('discussion')}</span><span class="cc-eyebrow">${E(projectLabel(state.project))} · ${E(state.environment)}</span><h3>${title}</h3><p>${prose}</p>${!state.snapshot?.can_manage ? '<p>当前为只读访问，可以查看已获准的记录。</p>' : connected ? `<div class="cc-prompt-grid" aria-label="消息草稿建议">${['梳理一下当前进展和下一步', '先一起讨论方案，暂时不要修改', '检查目前有哪些问题需要处理'].map((prompt) => `<button type="button" data-cc-prompt="${E(prompt)}" ${disabled ? 'disabled' : ''}>${E(prompt)}<span aria-hidden="true">↗</span></button>`).join('')}</div><small>选择后可继续编辑，再发送。</small>` : button('open-members', pending ? '继续连接 dot' : '添加第一个 dot', {}, 'data-cc-onboarding="true"')}</div>`;
+      return `<div class="cc-chat-empty cc-workspace-welcome"><span class="cc-welcome-mark" aria-hidden="true">${icon('discussion')}</span><span class="cc-eyebrow">${E(projectLabel(state.project))} · ${E(state.environment)}</span><h3>${title}</h3><p>${prose}</p>${!state.snapshot?.can_manage ? '<p>当前为只读访问，可以查看已获准的记录。</p>' : connected ? `<div class="cc-prompt-grid" aria-label="消息草稿建议">${['梳理一下当前进展和下一步', '先一起讨论方案，暂时不要修改', '检查目前有哪些问题需要处理'].map((prompt) => `<button type="button" data-cc-prompt="${E(prompt)}" ${disabled ? 'disabled' : ''}>${E(prompt)}<span aria-hidden="true">↗</span></button>`).join('')}</div><small>选择后可继续编辑，再发送。</small>` : button(pending ? 'dot-connect' : 'open-members', pending ? '继续连接 dot' : '添加第一个 dot', pending || {}, 'data-cc-onboarding="true"')}</div>`;
     }
     function progress(all = rows()) {
       const categories = [
@@ -235,31 +235,38 @@ window.CodePierCollaborationWorkspace = {
         }
       }
     }
+    function deferRefresh() {
+      const node = root();
+      if (node) node._ccWorkspaceDeferred = true;
+      return false;
+    }
     function safePatch(node, markup) {
+      if (!node || node._workspaceMarkup === markup || node.innerHTML === markup) return;
       const selected = window.getSelection();
       if (
-        !node ||
         node.matches(':active') ||
         node.contains(document.activeElement) ||
         (selected && !selected.isCollapsed && node.contains(selected.anchorNode))
       )
-        return;
+        return deferRefresh();
       if (node._workspaceMarkup !== markup) {
         if (node.innerHTML !== markup) node.innerHTML = markup;
         node._workspaceMarkup = markup;
       }
     }
     function patchRecords(node, markup) {
-      if (!node || node.matches(':active')) return false;
+      if (!node) return false;
       if (node._workspaceMarkup === markup) return true;
+      if (node.matches(':active')) return deferRefresh();
       const selected = window.getSelection();
-      if (selected && !selected.isCollapsed && node.contains(selected.anchorNode)) return false;
+      if (selected && !selected.isCollapsed &&
+          (node.contains(selected.anchorNode) || node.contains(selected.focusNode))) return deferRefresh();
       // A refresh must never overwrite a form being edited inside a detail.
       if (
         node.contains(document.activeElement) &&
         document.activeElement.matches('input, textarea, select, [contenteditable]')
       )
-        return false;
+        return deferRefresh();
       const scroll = node.closest('.cc-panel-scroll');
       const scrollTop = scroll?.scrollTop;
       if (node.matches('.cc-progress-items')) {
@@ -283,6 +290,7 @@ window.CodePierCollaborationWorkspace = {
           }
           for (const item of existing.values()) item.remove();
           if (complete) node._workspaceMarkup = markup;
+          else deferRefresh();
           return complete;
         }
       }
@@ -360,6 +368,9 @@ window.CodePierCollaborationWorkspace = {
         node.dataset.environment !== state.environment
       )
         return;
+      // Explicitly true only when real changed markup was deferred. An
+      // uninitialized cache is not a deferred render.
+      node._ccWorkspaceDeferred = false;
       const all = rows(),
         attention = all.filter((r) => r.group === 'attention').length;
       const active = all.filter((r) => r.group === 'active').length,
@@ -432,7 +443,7 @@ window.CodePierCollaborationWorkspace = {
       }
       draftBadges(node);
       const welcomeNode = node.querySelector('.cc-workspace-welcome');
-      if (welcomeNode) {
+      if (welcomeNode && state.view === 'discussion') {
         const template = document.createElement('template');
         template.innerHTML = welcome();
         safePatch(welcomeNode, template.content.firstElementChild.innerHTML);
@@ -507,6 +518,10 @@ window.CodePierCollaborationWorkspace = {
             !!event.target.value ||
             !state.snapshot?.can_manage ||
             state.snapshot?.room?.state !== 'active';
+        // These live disabled attributes are outside the markup cache. A later
+        // programmatic draft/permission change must not reuse the stale source.
+        const welcome = node.querySelector('.cc-workspace-welcome');
+        if (welcome) delete welcome._workspaceMarkup;
         // Typing never rebuilds records or forms and never triggers a network read.
         draftBadges(node);
       }
@@ -583,6 +598,7 @@ window.CodePierCollaborationWorkspace = {
       railFocus = null;
       const node = root();
       if (!node) return;
+      node._ccWorkspaceDeferred = false;
       for (const section of node.querySelectorAll('[data-cc-panel]')) {
         section.replaceChildren();
         delete section.dataset.loaded;

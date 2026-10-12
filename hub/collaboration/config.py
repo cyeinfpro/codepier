@@ -11,6 +11,9 @@ class CollaborationConfig:
     analysis_dispatch_enabled: bool = False
     weixin_enabled: bool = True
     telegram_enabled: bool = False
+    experience_projection_enabled: bool = True
+    relay_batch_enabled: bool = True
+    relay_batch_shadow: bool = False
 
     @classmethod
     def from_env(cls):
@@ -21,7 +24,10 @@ class CollaborationConfig:
                      env_bool('CODEPIER_MONITOR_COLLECTOR_ENABLED', False),
                      env_bool('CODEPIER_ANALYSIS_DISPATCH_ENABLED', False),
                      enabled and weixin_enabled,
-                     env_bool('CODEPIER_TELEGRAM_ENABLED', False))
+                     env_bool('CODEPIER_TELEGRAM_ENABLED', False),
+                     env_bool('CODEPIER_EXPERIENCE_PROJECTION_ENABLED', True),
+                     env_bool('CODEPIER_RELAY_BATCH_ENABLED', True),
+                     env_bool('CODEPIER_RELAY_BATCH_SHADOW', False))
         if not result.enabled and any((result.events_enabled, result.collector_enabled, result.analysis_dispatch_enabled, result.weixin_enabled, result.telegram_enabled)):
             raise ConfigurationError('Collaboration must be enabled before its events, collector or analysis dispatcher')
         return result

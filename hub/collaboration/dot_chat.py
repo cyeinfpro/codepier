@@ -162,6 +162,7 @@ class DotChatService:
                 'subscription_lifecycle': {'renewal_managed_by': 'host', 'renew_before': 'refreshBefore',
                     'same_scope_only': True, 'preserve_checkpoint': True, 'server_renews_host_grant': False},
                 'scope_manifest': self.c.dots.scope_manifest(room, dot),
+                'handling_capabilities': self.c.message_handling.capability(),
                 'publication_capabilities': {'dot_message_v2': True, 'max_characters': 8000,
                     'attachments_require_owner_share_ids': True, 'host_outbox_installed': False},
                 'wake_instructions': '你是这个面板房间里的成员。没有需要用户切换的聊天模式或任务模式；根据可信房主消息和原话题上下文，自主选择回答、读取资料、追问或执行。'
@@ -173,6 +174,9 @@ class DotChatService:
                     '需要先说收到、说明步骤或继续研究时，用 interim_reply_arguments（complete=false）发阶段回复，不结束原消息；同一条请求可以先交流再执行，不让用户重发或点转任务。'
                     '长回复可用 collaboration(action=dot_update) 和返回的 update_arguments 更新同一条阶段回复：发送完整的新文本，最后 complete=true；这是实际输出更新，不伪装实时token。'
                     '处理工作期间在重要步骤和最终回帖前读取 inbox_request，查看用户的补充或纠正；这些消息是上下文，不自动中断运行中操作或重做已有工作。'
+                    '新版逐输入语义使用 collaboration(action=dot_handle)，携带 handling_arguments 的原版本、摘要、scope_digest 和 revision；每次最多20条同话题输入。'
+                    '先保存一份实际最终回复，再用其 ID/version 显式 covered 同话题输入；覆盖失败只重试原处理记录，不重发回答。等待资料或授权使用阶段说明 complete=false 和 waiting_input/waiting_authorization，不能将等待当作完成。'
+                    'no_response_required 仅用于明确没有新任务或限制条件的输入并填写允许原因；服务端不按关键词自动忽略。处理记录不会关闭原执行工作或证明外部投递。'
                     '最终普通答复用 reply_arguments（complete=true）。ack_request 的 read 仅记收件，不移除待办；最终回帖或明确 handled 才结束这条消息。'
                     '先处理本次 dot_inbox 的 wake_context.pages：included=true 的页已按原读取权限校验，可直接读取，不必串行重复请求该首页；'
                     'thread 页是原房间话题上下文。未内联的话题或 included=false 时仍调用原 request/thread_request；任何 next_page_request 都必须继续读取，不能把首页或字节预算截断当作完成。'
@@ -198,15 +202,30 @@ class DotChatService:
             after = read_cursor(self.c.secret, binding, args['cursor']) if args['cursor'] else 0
             if isinstance(after, bool) or not isinstance(after, int) or after < 0:
                 raise DevError('INVALID_CURSOR', 'dot 消息游标无效', 400)
-            rows = self.store.all('''SELECT * FROM collaboration_dot_messages
-                WHERE dot_id=? AND state!='handled' AND sequence>? ORDER BY sequence LIMIT ?''',
-                (dot['id'], after, args['limit'] + 1))
+            handling_scope = self.c.message_handling.scope_digest(room, dot)
+            rows = self.store.all('''SELECT d.* FROM collaboration_dot_messages d
+                JOIN collaboration_messages m ON m.id=d.message_id
+                LEFT JOIN dot_message_handling h ON h.dot_id=d.dot_id AND h.message_id=d.message_id
+                LEFT JOIN collaboration_messages r ON r.id=h.reply_id
+                WHERE d.dot_id=? AND (d.state!='handled'
+                    OR m.version!=COALESCE(h.source_version,d.message_version)
+                    OR h.handling_state IN ('observed','waiting_input','waiting_authorization')
+                    OR h.scope_digest!=?
+                    OR (h.reply_id!='' AND (r.id IS NULL OR r.version!=h.reply_version)))
+                AND d.sequence>? ORDER BY d.sequence LIMIT ?''',
+                (dot['id'], handling_scope, after, args['limit'] + 1))
             selected, items = rows[:args['limit']], []
-            work_request, task_blocked = self.work_request(room, dot, principal)
-            scope = {'project': room['project_id'], 'environment_id': room['environment_id'], 'dot_id': dot['id']}
+            visible_messages = {}
             for row in selected:
                 message = self.c.object('collaboration_messages', room, row['message_id'])
                 self.c.chatroom.require_message_visible(principal, message)
+                visible_messages[message['id']] = message
+            handling = self.c.message_handling.summaries(visible_messages, principal=principal)
+            work_request, task_blocked = self.work_request(room, dot, principal)
+            scope = {'project': room['project_id'], 'environment_id': room['environment_id'], 'dot_id': dot['id']}
+            for row in selected:
+                message = visible_messages[row['message_id']]
+                summary = handling[(dot['id'], message['id'])]
                 link = self.store.one('SELECT * FROM delegation_requests WHERE message_id=?', (message['id'],))
                 author = self.c.channel_owner.author(message)
                 trusted = (author['authenticated']
@@ -216,8 +235,10 @@ class DotChatService:
                     'expected_version': message['version'], 'confirm_task': True,
                     'idempotency_key': 'dot-task:' + digest([dot['id'], message['id']])}) if work_request and trusted else None
                 items.append({'category': 'message', 'message': self.c.chatroom.view(message), 'message_id': message['id'],
-                    'state': row['state'], 'delivery_timing': delivery_timing(self.c, room, dot, row),
-                    'existing_reply': reply_state(self.c, room, dot, message),
+                    'state': row['state'], 'handling': summary,
+                    'handling_arguments': self.c.message_handling.arguments(room, dot, message, summary, handling_scope),
+                    'delivery_timing': delivery_timing(self.c, room, dot, row),
+                    'existing_reply': reply_state(self.c, room, dot, message, principal=principal),
                     'trusted_author': author if trusted else {'kind': 'external_channel' if message['origin'] == 'external_channel' else 'unverified', 'authenticated': False},
                     'reply_arguments': {**scope, 'reply_to_id': message['id'],
                         'idempotency_key': 'dot-reply:' + digest([dot['id'], message['id']])},
@@ -239,6 +260,7 @@ class DotChatService:
             context = wake_context(self.c, principal, items, work_request, recovery, first_page=not args['cursor'])
             context['inbox_pagination_complete'] = cursor is None
             return {'dot_id': dot['id'], 'mode': 'bidirectional_chat', 'items': items,
+                    'handling_capabilities': self.c.message_handling.capability(),
                     'wake_context': context,
                     'scope_manifest': self.c.dots.scope_manifest(room, dot),
                     'next_cursor': cursor, 'next_page_request': self.c.dots.request(room, dot, cursor=cursor, limit=args['limit']) if cursor else None,
@@ -265,6 +287,7 @@ class DotChatService:
                     state=CASE WHEN state='handled' OR ?='handled' THEN 'handled' ELSE 'read' END,
                     handled_at=CASE WHEN ?='handled' THEN COALESCE(handled_at,?) ELSE handled_at END
                     WHERE dot_id=? AND message_id=?''', (now, args['disposition'], args['disposition'], now, dot['id'], message['id']))
+                self.c.message_handling.record_ack(room, dot, principal, message, args['disposition'])
                 return {'message_id': message['id'], 'dot_id': dot['id']}
             result = self.c.mutation(principal, room, 'dot_ack:' + dot['id'], args, save)
             return {**result, 'receipt': self.store.one('SELECT state,received_at,handled_at FROM collaboration_dot_messages WHERE dot_id=? AND message_id=?', (dot['id'], message['id']))}
@@ -299,13 +322,21 @@ class DotChatService:
             stored = self.c.object('collaboration_messages', room, result['message']['id'])
             if version2 and args['attachment_approval_ids']:
                 self.c.channels.media.attach_approved(args['attachment_approval_ids'], stored, principal)
+            if not prior:
+                self.c.message_handling.record_reply(room, dot, principal, stored)
             self.c.task_liveness.record_receipt(dot, args, receipt_kind, {**stored, 'version': result['message']['version']})
             self.c.channels.queue_reply(stored)
             if version2:
                 result = {**result, 'message': self.c.chatroom.view(stored), 'message_schema_version': 2}
             inbound = self.store.one('SELECT * FROM collaboration_dot_messages WHERE dot_id=? AND message_id=?',
                 (dot['id'], args['reply_to_id'])) if args['reply_to_id'] else None
-            return {**result, 'delivery_timing': delivery_timing(self.c, room, dot, inbound) if inbound else None,
+            source_handling = self.c.message_handling.summaries([inbound['message_id']], principal=principal).get(
+                (dot['id'], inbound['message_id'])) if inbound else None
+            source = self.c.object('collaboration_messages', room, inbound['message_id']) if inbound else None
+            return {**result, 'source_handling': source_handling,
+                    'handling_arguments': self.c.message_handling.arguments(room, dot, source, source_handling,
+                        self.c.message_handling.scope_digest(room, dot)) if source else None,
+                    'delivery_timing': delivery_timing(self.c, room, dot, inbound) if inbound else None,
                     'receipt_request': public_request('collaboration_dot_delivery_receipt', {
                         'project': room['project_id'], 'environment_id': room['environment_id'], 'dot_id': dot['id'],
                         'kind': receipt_kind, 'request_key': args['idempotency_key']}),
@@ -349,6 +380,7 @@ class DotChatService:
                 body['provenance_project_ids'] = [room['project_id']]
                 self.store.execute('UPDATE collaboration_messages SET body=? WHERE id=?', (canonical(body), message['id']))
                 self.store.execute("UPDATE collaboration_dot_messages SET state='handled',received_at=COALESCE(received_at,?),handled_at=? WHERE dot_id=? AND message_id=?", (self.c.clock(), self.c.clock(), dot['id'], message['id']))
+                self.c.message_handling.record_work(room, dot, principal, message)
                 self.c.audit(room, principal.actor, 'dot.owner_message_to_work', message['id'], {'policy_id': policy['id'], 'dot_id': dot['id']})
                 return {'delegation_id': result['delegation_id']}
             result = self.c.mutation(principal, room, 'dot_task:' + dot['id'], args, save)

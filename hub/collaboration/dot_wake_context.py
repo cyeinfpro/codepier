@@ -63,12 +63,12 @@ def wake_context(c, principal, items, work_request, recovery_request, *, first_p
     return context
 
 
-def reply_state(c, room, dot, message):
+def reply_state(c, room, dot, message, principal=None):
     row = c.store.one("""SELECT * FROM collaboration_messages WHERE room_id=?
         AND conversation_id=? AND reply_to_id=? AND origin='bound_connector'
         AND json_extract(body,'$.sender_dot_id')=? ORDER BY created DESC,id DESC LIMIT 1""",
         (room['id'], dot['conversation_id'], message['id'], dot['id']))
-    if not row:
+    if not row or principal is None or not c.chatroom.message_visible(principal, row):
         return None
     complete = json.loads(row['body']).get('dot_reply_complete') is not False
     return {'message_id': row['id'], 'version': row['version'], 'complete': complete,

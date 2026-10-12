@@ -622,7 +622,7 @@ window.CodePierCollaboration = (() => {
     const d = state.snapshot,
       c = chat();
     const enabled = d.capabilities?.plain_messages && d.can_manage && d.room.state === 'active';
-    return `<section class="cc-conversation"><div id="cc-relay-network" class="cc-relay-network" role="status" aria-live="polite" hidden></div><div class="cc-timeline-wrap"><div class="cc-feed" tabindex="0" aria-label="共享讨论记录"><div class="cc-history">${c.older ? button('older-messages', '加载更早消息') : ''}</div><div class="cc-message-list" role="log" aria-label="房间消息" aria-live="polite" aria-relevant="additions text">${c.messages.map(messageMarkup).join('') || workspaceUI.welcome()}</div><div id="cc-relay-outbox">${relay.outboxMarkup(c)}</div></div><button type="button" class="btn cc-new-messages" data-cc-action="latest" ${c.unread ? '' : 'hidden'}>${c.unread} 条新消息 ↓</button></div><div class="cc-compose-wrap"><form id="cc-command" class="cc-composer"><div id="cc-draft-context">${draftContext()}</div><div id="cc-delegation-context">${delegationContext()}</div><label class="cc-sr-only" for="cc-message-input">房间消息</label><textarea id="cc-message-input" name="request" rows="2" maxlength="3900" required ${enabled ? '' : 'disabled'} placeholder="${enabled ? '直接说说你想做什么，或 @ 选择助手…' : '普通消息暂不可用，请核对房间与服务能力'}">${E(c.draft)}</textarea><div id="cc-dot-suggestions" class="cc-dot-suggestions" role="listbox" aria-label="选择任务 dot" hidden></div><div class="cc-compose-controls">${button('mentions', '@ 助手', {}, enabled && d.capabilities?.message_notifications ? '' : 'disabled')}<span id="cc-task-compose-tools" ${dots.simpleComposer() ? 'hidden' : ''}>${coordination.action()}</span><span id="cc-send-mode">${delegationComposer()}</span><small>来源 · ${E(projectLabel(state.project))}</small><button class="btn primary" type="submit" ${enabled ? '' : 'disabled'}>发送 ↑</button></div></form><div class="cc-compose-help"><span>发送到 ${E(projectLabel(state.project))} · ${E(state.environment)}</span><span class="cc-desktop-key">Enter 发送 · Shift + Enter 换行</span><span class="cc-mobile-key">Enter 换行</span></div></div></section>`;
+    return `<section class="cc-conversation"><div id="cc-relay-network" class="cc-relay-network" role="status" aria-live="polite" hidden></div><div class="cc-timeline-wrap"><div class="cc-feed" tabindex="0" aria-label="共享讨论记录"><div class="cc-history">${c.older ? button('older-messages', '加载更早消息') : ''}</div><div class="cc-message-list" role="log" aria-label="房间消息" aria-live="polite" aria-relevant="additions text">${c.messages.map(messageMarkup).join('') || workspaceUI.welcome()}</div><div id="cc-relay-outbox">${relay.outboxMarkup(c)}</div></div><button type="button" class="btn cc-new-messages" data-cc-action="latest" ${c.unread ? '' : 'hidden'}>${c.unread} 条新消息 ↓</button></div><div class="cc-compose-wrap"><form id="cc-command" class="cc-composer"><div id="cc-draft-context">${draftContext()}</div><div id="cc-delegation-context">${delegationContext()}</div><label class="cc-sr-only" for="cc-message-input">房间消息</label><textarea id="cc-message-input" name="request" rows="2" maxlength="3900" required ${enabled ? '' : 'disabled'} placeholder="${enabled ? '直接说说你想做什么，或 @ 选择助手…' : '普通消息暂不可用，请核对房间与服务能力'}">${E(c.draft)}</textarea><div id="cc-dot-suggestions" class="cc-dot-suggestions" role="listbox" aria-label="选择任务 dot" hidden></div><div class="cc-compose-controls">${button('mentions', '@ 助手', {}, enabled && d.capabilities?.message_notifications ? '' : 'disabled')}<span id="cc-task-compose-tools" ${dots.simpleComposer() ? 'hidden' : ''}>${coordination.action()}</span><span id="cc-send-mode">${delegationComposer()}</span><small>来源 · ${E(projectLabel(state.project))}</small><button class="btn primary" type="submit" ${enabled ? '' : 'disabled'}>发送 ↑</button></div></form>${relay.capable() ? `<details class="cc-relay-tools"><summary>对话与本机保存选项</summary><div>${relay.toolbar()}</div></details>` : ''}<div class="cc-compose-help"><span>发送到 ${E(projectLabel(state.project))} · ${E(state.environment)}</span><span class="cc-desktop-key">Enter 发送 · Shift + Enter 换行</span><span class="cc-mobile-key">Enter 换行</span></div></div></section>`;
   }
   function memberStrip() {
     const slots = notificationSlots(),
@@ -721,13 +721,13 @@ window.CodePierCollaboration = (() => {
       mentionSlots().map((slot) => [slot.id, slot.task_dot, slot.duplex]),
       S.projects.map((project) => [project.id, project.alias])]);
   }
-  function patchTimeline(forceBottom = false) {
+  function patchTimeline(forceBottom = false, dirtyIds = null) {
     const feed = document.querySelector('.cc-feed'),
       list = feed?.querySelector('.cc-message-list');
     if (!list) return;
     const c = chat(), context = timelineContext(), evidence = relay.evidenceProjection();
     if (list._ccMessages === c.messages && list._ccContext === context &&
-        list._ccEvidence === evidence.signature && !list._ccDeferred) {
+        list._ccEvidence === evidence.signature && !list._ccDeferred && !dirtyIds?.size) {
       if (forceBottom) {
         feed.scrollTop = feed.scrollHeight;
         c.scroll = feed.scrollTop;
@@ -761,7 +761,7 @@ window.CodePierCollaboration = (() => {
       let node = nodes.get(m.id);
       const parent = m.reply_to_id ? messageById(m.reply_to_id) : null;
       const taskEvidence = evidence.byMessage.get(m.id) || '';
-      if (node?._ccMessage === m && node._ccContext === context &&
+      if (!dirtyIds?.has(m.id) && node?._ccMessage === m && node._ccContext === context &&
           node._ccParent === parent && node._ccEvidence === taskEvidence && !node._ccDeferred) {
         previous = node;
         continue;

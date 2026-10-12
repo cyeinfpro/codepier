@@ -350,6 +350,7 @@ class TelegramService:
             (room["id"], args["conversation_id"]),
         )
         for row in bindings:
+            row["effective_capabilities"] = self.c.channels.capabilities.for_binding("telegram", row["id"])
             row["onboarding"] = self.c.channel_enrollment.view(row["id"])
             row["owner_authorization"] = self.c.channel_owner.view(self.c.channel_owner.current(row["id"]))
             secret = row.pop("pairing_secret")

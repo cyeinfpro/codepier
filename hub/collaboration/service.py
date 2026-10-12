@@ -42,6 +42,8 @@ class CollaborationService:
         self.dots = DotService(self)
         from hub.collaboration.dot_chat import DotChatService
         self.dot_chat = DotChatService(self)
+        from hub.collaboration.message_handling import MessageHandling
+        self.message_handling = MessageHandling(self)
         from hub.collaboration.dot_relay import DotRelay
         self.dot_relay = DotRelay(self)
         from hub.collaboration.task_liveness import TaskLiveness
@@ -904,6 +906,10 @@ class CollaborationService:
                     page = self.chatroom.conversation_listing(principal, room, conversation['id'], item, args['limit'])
                     result[item], result[item + '_next_cursor'] = page['items'], page['next_cursor']
             result['join_slots'] = self.joining.list(room, principal, conversation['id'])
+            result['pending_scope_revision'] = self.dot_relay.pending_scope_revision(principal, room, conversation, result['join_slots'])
+            if self.config.experience_projection_enabled:
+                from hub.collaboration.experience_projection import connection
+                result['connection_readiness'] = {slot['id']: connection(slot) for slot in result['join_slots']}
             result['plan'] = self.monitor.plan_view(room) if self.monitor else None
             result['probes'] = self.monitor.probes_view(room, include_targets=bool(principal.admin and not principal.grant_id)) if self.monitor else []
             result['counts'] = {
@@ -970,6 +976,7 @@ class CollaborationService:
                     'collaboration_dot_message': self.dot_chat.message,
                     'collaboration_dot_message_v2': self.dot_chat.message_v2,
                     'collaboration_dot_ack': self.dot_chat.acknowledge,
+                    'collaboration_dot_handle': self.message_handling.submit,
                     'collaboration_dot_task': self.dot_chat.from_message,
                     'collaboration_dot_connection': self.dots.connection,
                     'collaboration_dot_inbox': self.dots.inbox,

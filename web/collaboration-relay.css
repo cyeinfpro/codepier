@@ -488,3 +488,31 @@
     transition: none;
   }
 }
+
+/* Evidence-led status cards. No liveness animation or synthetic progress. */
+.cc-experience-status { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.cc-experience-status[data-primary-state='waiting_authorization'],
+.cc-experience-status[data-primary-state='waiting_input'] {
+  border-left: 3px solid var(--ui-purple); padding-left: 8px;
+}
+.cc-experience-status .cc-dot-receipt { color: var(--ui-text); font-size: 12px; }
+.cc-experience-status button, .cc-pending-settings button { min-height: 40px; }
+.cc-receipt-detail { width: 100%; color: var(--ui-muted); font-size: 11px; text-align: left; }
+.cc-receipt-detail > summary { cursor: pointer; padding: 6px 0; }
+.cc-diagnostic-preview { margin-top: 8px; }
+.cc-diagnostic-preview pre { white-space: pre-wrap; overflow-wrap: anywhere; max-width: 100%; }
+.cc-relay-tools { margin-top: 8px; color: var(--ui-muted); font-size: 11px; }
+.cc-relay-tools > summary { cursor: pointer; padding: 8px 0; }
+.cc-relay-tools > div { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; min-width: 0; }
+.cc-relay-tools button { white-space: normal; max-width: 100%; }
+.cc-pending-settings { max-width: 440px; min-width: 0; font-size: 11px; overflow-wrap: anywhere; }
+.cc-pending-settings p { line-height: 1.6; }
+.cc-relay-pending { animation: cc-relay-appear 140ms ease-out; }
+@keyframes cc-relay-appear { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .cc-relay-pending { animation: none; }
+  .cc-experience-status, .cc-receipt-detail { transition: none; scroll-behavior: auto; }
+}
+
+.cc-stage-card { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; font-size: 12px; color: var(--ui-muted); }
+.cc-stage-card small { font-size: 10px; }

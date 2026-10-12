@@ -34,6 +34,8 @@ def migrate(db):
     columns = {r[1] for r in db.execute('PRAGMA table_info(channel_attachment_approvals)')}
     if 'ordinal' not in columns:
         db.execute('ALTER TABLE channel_attachment_approvals ADD COLUMN ordinal INTEGER NOT NULL DEFAULT 0')
+    if 'binding_version' not in columns:
+        db.execute('ALTER TABLE channel_attachment_approvals ADD COLUMN binding_version INTEGER NOT NULL DEFAULT 0')
     db.execute('CREATE INDEX IF NOT EXISTS channel_share_source ON channel_attachment_approvals(source_message_id,dot_id,expires_at)')
 
 
@@ -79,7 +81,7 @@ class ChannelShares:
                         (identifier, binding['id'], binding['generation'], source['id'], source['version'], dot['id'],
                          artifact['id'], artifact['sha256'], artifact['bytes'], principal.space_id, principal.user_id,
                          binding['peer_id'], artifact['expires'] if binding.get('lifetime_mode') == 'until_revoked' else min(binding['expires_at'], artifact['expires']), self.c.clock()))
-                    self.store.execute('UPDATE channel_attachment_approvals SET ordinal=? WHERE id=?', (ordinal, identifier))
+                    self.store.execute('UPDATE channel_attachment_approvals SET ordinal=?,binding_version=? WHERE id=?', (ordinal, binding['version'], identifier))
                     ids.append(identifier)
                 self.c.audit(room, principal.actor, 'weixin.attachment_shares_approved', source['id'],
                              {'approval_ids': ids, 'artifact_ids': args['artifact_ids'], 'binding_id': binding['id']})
@@ -109,6 +111,7 @@ class ChannelShares:
             approval = self.store.one('SELECT * FROM channel_attachment_approvals WHERE id=?', (identifier,))
             if (not approval or approval['expires_at'] <= self.c.clock()
                     or approval['binding_id'] != binding['id'] or approval['generation'] != binding['generation']
+                    or approval['binding_version'] not in (0, binding['version'])
                     or approval['peer_id'] != binding['peer_id'] or approval['dot_id'] != dot['id']
                     or approval['source_message_id'] != source['id'] or approval['source_version'] != source['version']
                     or approval['owner_user_id'] != principal.user_id or approval['space_id'] != principal.space_id):

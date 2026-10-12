@@ -1,7 +1,6 @@
 """Exact owner-selected artifact egress to one confirmed Telegram identity."""
 
 import json
-import mimetypes
 import uuid
 from hub.collaboration import telegram_schema as models
 from hub.collaboration.common import canonical, digest
@@ -90,12 +89,18 @@ class TelegramFiles:
                 },
                 "message_id": message["id"],
                 "message_version": message["version"],
+                "project_id": binding["project_id"],
+                "conversation_id": binding["conversation_id"],
                 "files": [
                     {
                         "artifact_id": a["id"],
                         "name": safe_filename(a["name"]),
                         "bytes": a["bytes"],
                         "sha256": a["sha256"],
+                        "expires_at": a["expires"],
+                        "source_operation_id": a.get("source_operation_id") or None,
+                        "type": "application/octet-stream",
+                        "type_verified": False,
                     }
                     for a in artifacts
                 ],
@@ -172,8 +177,7 @@ class TelegramFiles:
                         )
                     aid = uuid.uuid4().hex
                     name = safe_filename(artifact["name"])
-                    mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
-                    kind = "image" if mime.startswith("image/") else "file"
+                    mime, kind = "application/octet-stream", "file"  # Byte verification determines type.
                     self.store.execute(
                         """INSERT INTO channel_attachments
                         (id,space_id,owner_user_id,room_id,conversation_id,project_id,message_id,ordinal,direction,
@@ -207,17 +211,18 @@ class TelegramFiles:
                                     }
                                 )
                             ),
-                            min(binding["expires_at"], artifact["expires"]),
+                            artifact["expires"] if binding.get("lifetime_mode") == "until_revoked" else min(binding["expires_at"], artifact["expires"]),
                             now,
                             now,
                         ),
                     )
+                    part_id = uuid.uuid4().hex
                     self.store.execute(
                         """INSERT INTO channel_mirror_parts
                         (id,delivery_id,ordinal,kind,body,state,created,updated)
                         VALUES (?,?,?,'attachment',?,'queued',?,?)""",
                         (
-                            uuid.uuid4().hex,
+                            part_id,
                             delivery["id"],
                             part + index,
                             canonical({"attachment_id": aid}),
@@ -225,6 +230,9 @@ class TelegramFiles:
                             now,
                         ),
                     )
+                    self.store.execute(
+                        """INSERT INTO channel_attachment_transfers(attachment_id,channel,part_id,upload_state,binding_version)
+                        VALUES (?,'telegram',?,'combined_with_send',?)""", (aid, part_id, binding["version"]))
                     ids.append(aid)
                 self.c.channels.refresh(delivery["id"])
                 self.c.audit(

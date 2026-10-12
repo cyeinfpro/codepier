@@ -85,6 +85,22 @@ def make_router(auth, runtime):
             'project': project, 'environment_id': environment_id,
             'conversation_id': conversation_id, 'after': after}, auth.panel(request), tracked))
 
+    @router.get('/message-receipt')
+    async def message_receipt(request: Request, response: Response, project: str, client_message_id: str,
+                              environment_id: str = 'production', conversation_id: str = ''):
+        response.headers['Cache-Control'] = 'private, no-store'
+        return await store.run(lambda: service.dot_relay.message_receipt({
+            'project': project, 'environment_id': environment_id, 'conversation_id': conversation_id,
+            'client_message_id': client_message_id}, auth.panel(request)))
+
+    @router.get('/diagnostics')
+    async def diagnostics(request: Request, response: Response, project: str,
+                          environment_id: str = 'production', conversation_id: str = ''):
+        response.headers['Cache-Control'] = 'private, no-store'
+        return await store.run(lambda: service.dot_relay.diagnostics({
+            'project': project, 'environment_id': environment_id, 'conversation_id': conversation_id},
+            auth.panel(request)))
+
     @router.get('/dot-recovery')
     async def dot_recovery(request: Request, project: str, dot_id: str, environment_id: str = 'production',
                            cursor: str = '', limit: int = Query(default=20, ge=1, le=50), include_completed: bool = False):
@@ -141,6 +157,8 @@ def make_router(auth, runtime):
                         'weixin-owner-request': service.weixin.owner_request,
                         'weixin-owner-authority': service.channel_owner.control,
                         'weixin-files': service.weixin.media.add_artifacts,
+                        'weixin-files-preview': service.weixin.media.review.preview,
+                        'weixin-files-reviewed': service.weixin.media.review.approve,
                         'weixin-approve-files': service.weixin.media.approve,
                         'weixin-delivery-control': service.weixin.delivery.control,
                         'delegation-policy': service.delegation.set_policy,

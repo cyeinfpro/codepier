@@ -166,6 +166,7 @@ _DISCUSSION = {
     'dot_message_v2': 'collaboration_dot_message_v2',
     'dot_update': 'collaboration_dot_reply_update',
     'dot_ack': 'collaboration_dot_ack',
+    'dot_handle': 'collaboration_dot_handle',
     'message': 'collaboration_message_create',
     'command': 'collaboration_command_create',
     'goal_create': 'collaboration_goal_create',
