@@ -100,7 +100,8 @@ def install_command(platform, hub_url, enrollment_token, package_sha256, allow_r
         raise ValueError('Unsupported installer action')
     if action == 'archive' and platform != 'windows':
         raise ValueError('Local archive recovery is Windows-only')
-    if (expected_device or action in ('upgrade','uninstall')) and not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', expected_device):
+    local_windows_uninstall = platform == 'windows' and action == 'uninstall'
+    if not local_windows_uninstall and (expected_device or action in ('upgrade','uninstall')) and not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', expected_device):
         raise ValueError('A valid target device identity is required')
     if bootstrap_sha256 is not None and not re.fullmatch(r'[a-f0-9]{64}', bootstrap_sha256):
         raise DevError('INSTALL_PACKAGE_CHANGED', '安装脚本校验值无效，请在面板重新生成安装命令', 409)
@@ -136,7 +137,7 @@ def install_command(platform, hub_url, enrollment_token, package_sha256, allow_r
     if action == 'install':
         arguments += ' -Token '+ticket+' -AllowRoot '+root
     maintenance = '' if action == 'install' else ' -Action '+action
-    if action in ('upgrade','uninstall'):
+    if action == 'upgrade':
         maintenance += ' -ExpectedDevice '+powershell_quote(expected_device)
     if action == 'install':
         maintenance += ' -Shell '+powershell_quote('full' if enable_execution else 'disabled')
@@ -154,6 +155,8 @@ def install_command(platform, hub_url, enrollment_token, package_sha256, allow_r
             "finally { $codepierBootstrapStream.Dispose() }; "
             "if ($codepierBootstrapDigest -cne " +powershell_quote(bootstrap_sha256)
             +") { throw '安装脚本校验失败，请在面板重新生成安装命令' }; ")
+    operation_name = {'install': '安装', 'upgrade': '升级', 'uninstall': '本机卸载', 'archive': '归档恢复'}[action]
+    failure = powershell_quote('Agent '+operation_name+'失败，请查看上方具体错误；未确认完成前不要继续重装')
     return ('& { $ErrorActionPreference = \'Stop\'; '
             '$codepierInstallTemp = Join-Path ([IO.Path]::GetTempPath()) (\'codepier-\' + [guid]::NewGuid().ToString(\'N\')); '
             'New-Item -ItemType Directory -Path $codepierInstallTemp | Out-Null; '
@@ -162,7 +165,7 @@ def install_command(platform, hub_url, enrollment_token, package_sha256, allow_r
             ' -OutFile $codepierInstallScript; '+bootstrap_check+
             '& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $codepierInstallScript '
             +arguments+maintenance+'; '
-            'if ($LASTEXITCODE -ne 0) { throw \'Agent 安装失败，请查看上方错误\' } '
+            'if ($LASTEXITCODE -ne 0) { throw '+failure+' } '
             '} finally { Remove-Item -LiteralPath $codepierInstallTemp -Recurse -Force } }')
 
 

@@ -597,7 +597,7 @@ def check_existing_panel_target(current, expected_device='', hub=''):
                          'No files were changed and the ticket was not used.'+hint+
                          ' To keep this Agent, select its original node and copy that node\'s install or upgrade command. '
                          'To intentionally change nodes, use the Windows archive recovery command with local confirmation, '
-                         'then reinstall. Do not delete config.json.')
+                         'then reinstall. Or run the local Windows uninstall command to remove verified Agent installations before a fresh install. Do not delete config.json.')
     if hub and current['hub_url'].rstrip('/') != hub.rstrip('/'):
         raise ValueError('This command belongs to a different panel (Hub); no files were changed and the ticket was not used. '
                          'Select the original node on its original panel to upgrade. '
@@ -1292,7 +1292,35 @@ def main():
     parser.add_argument('--recover-stale-operations',action='store_true',help='After locally reviewing residual processes, reconcile a dead Agent journal without replaying commands; refuses a live Agent or native session')
     parser.add_argument('--expected-device',default='',help='Refuse commands copied from a different panel node')
     parser.add_argument('--archive-handoff-file',default='',help='Windows bootstrap-only file for deferred archive after interpreter exit')
+    parser.add_argument('--uninstall-handoff-file',default='',help='Windows bootstrap-only verified file cleanup plan')
+    parser.add_argument('--uninstall-preview',action='store_true',help='Preview local Windows Agent cleanup without changing services or files')
     args=parser.parse_args()
+    if (args.uninstall_handoff_file or args.uninstall_preview) and not args.uninstall:
+        raise ValueError('Uninstall handoff and preview require --uninstall')
+    if args.archive_handoff_file and not args.archive_install:
+        raise ValueError('--archive-handoff-file requires --archive-install')
+    if args.uninstall and sys.platform == 'win32':
+        if args.no_service or args.source:
+            raise ValueError('Installation options are not valid for local uninstall')
+        # Local uninstall covers verified installations for this account, not a
+        # panel node. Do not apply enrollment checks, ACL changes or mkdir first.
+        from types import SimpleNamespace
+        api = SimpleNamespace(**globals())
+        if args.archive or args.sha256:
+            if not (args.archive and args.sha256):
+                raise ValueError('Local uninstall requires both archive and checksum')
+            # The Hub bootstrap downloads this one installer file first. Load
+            # cleanup and service helpers only from the verified package, never
+            # from an older or damaged installed runtime.
+            with tempfile.TemporaryDirectory(prefix='codepier-uninstall-source-') as folder:
+                source_root = Path(folder)
+                unpack(args.archive, args.sha256, source_root)
+                api.__file__ = str(source_root/'scripts/install_agent.py')
+                load_lifecycle_helper(source_root/'shared/windows_uninstall.py').run(args, api)
+        else:
+            source = Path(__file__).resolve().parent.parent/'shared/windows_uninstall.py'
+            load_lifecycle_helper(source).run(args, api)
+        return
     if args.archive_handoff_file and not args.archive_install:
         raise ValueError('--archive-handoff-file requires --archive-install')
     if args.source and (sys.platform != 'win32' or args.no_service or args.start_service or args.upgrade or args.uninstall or args.status or args.archive_install):

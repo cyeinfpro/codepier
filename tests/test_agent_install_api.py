@@ -71,9 +71,21 @@ def test_windows_maintenance_omits_install_only_arguments(action):
     assert "-Sha256 '" + 'a' * 64 + "'" in command
     assert 'b' * 64 in command
     assert r"-InstallDir 'C:\Agent O''Brien'" in command
-    if action == 'archive':
+    if action in ('archive', 'uninstall'):
         assert '-ExpectedDevice' not in command
     else:
+        assert "-ExpectedDevice 'fixture-node'" in command
+
+
+@pytest.mark.parametrize('action,label', [('install','安装'), ('upgrade','升级'), ('uninstall','本机卸载'), ('archive','归档恢复')])
+def test_windows_command_reports_the_actual_failed_operation(action, label):
+    command = install_command('windows', 'https://hub.invalid', 'rdi_fixture' if action == 'install' else '',
+                              'a' * 64, r'C:\Agent' if action == 'install' else '',
+                              action=action, expected_device='fixture-node' if action in ('install','upgrade') else '')
+    assert 'Agent '+label+'失败' in command
+    if action == 'uninstall':
+        assert '-ExpectedDevice' not in command and '-Token' not in command
+    elif action == 'upgrade':
         assert "-ExpectedDevice 'fixture-node'" in command
 
 

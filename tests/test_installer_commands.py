@@ -148,10 +148,10 @@ def test_management_api_authorization_no_ticket_and_expected_identity(tmp_path, 
                                              else {'upgrade', 'uninstall'})
             for action, command in data['commands'].items():
                 assert directory in command
-                if action != 'archive':
-                    assert device_id in command
+                if platform == 'windows' and action in ('archive', 'uninstall'):
+                    assert '-Action '+action in command and '-ExpectedDevice' not in command
                 else:
-                    assert '-Action archive' in command and '-ExpectedDevice' not in command
+                    assert device_id in command
                 assert secret not in command and 'rdi_' not in command
                 if platform == 'windows':
                     assert 'powershell.exe' in command and 'bash ' not in command

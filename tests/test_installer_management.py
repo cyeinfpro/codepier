@@ -333,7 +333,8 @@ def test_maintenance_command_does_not_mint_or_embed_pairing_ticket(bundle):
             command = install_command(platform, 'https://hub.example', '', bundle.sha256, '',
                 'b' * 64, action=action, expected_device='d' * 32)
             assert 'rdi_' not in command and 'fixture-secret' not in command
-            assert 'd' * 32 in command and 'b' * 64 in command and bundle.sha256 in command
+            assert 'b' * 64 in command and bundle.sha256 in command
+            assert ('d' * 32 in command) == (platform != 'windows' or action != 'uninstall')
             assert '--yes' not in command and '-Yes' not in command
             assert action in command
 
