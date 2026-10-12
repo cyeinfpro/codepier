@@ -9,7 +9,6 @@ import asyncio
 import base64
 import hashlib
 import json
-import mimetypes
 import uuid
 from urllib.parse import quote
 
@@ -28,6 +27,12 @@ PUBLIC_FIELDS = ('id', 'schema_version', 'message_id', 'ordinal', 'direction', '
 def migrate(db):
     from hub.collaboration.channel_shares import migrate as migrate_shares
     migrate_shares(db)
+    db.execute("""CREATE TABLE IF NOT EXISTS channel_attachment_transfers(
+        attachment_id TEXT PRIMARY KEY,channel TEXT NOT NULL,part_id TEXT NOT NULL,
+        upload_state TEXT NOT NULL DEFAULT 'unknown',upload_observed_at REAL,binding_version INTEGER)""")
+    transfer_columns = {row[1] for row in db.execute('PRAGMA table_info(channel_attachment_transfers)')}
+    if 'binding_version' not in transfer_columns:
+        db.execute('ALTER TABLE channel_attachment_transfers ADD COLUMN binding_version INTEGER')
     db.execute('''CREATE TABLE IF NOT EXISTS channel_attachment_chunks(
         attachment_id TEXT NOT NULL,offset INTEGER NOT NULL,bytes INTEGER NOT NULL,sha256 TEXT NOT NULL,
         content TEXT NOT NULL,PRIMARY KEY(attachment_id,offset))''')
@@ -40,28 +45,82 @@ class ChannelMedia:
         self.shares = ChannelShares(self)
         self.approve = self.shares.approve
         self.attach_approved = self.shares.attach
+        from hub.collaboration.channel_file_review import ChannelFileReview
+        self.review = ChannelFileReview(self)
 
     def public(self, row):
         return {k: row[k] for k in PUBLIC_FIELDS} | {'authentication': 'current_room_and_project_authority',
             'download_path': '/api/collaboration/attachments/' + row['id'] + '/content?space_id=' + quote(row.get('space_id', 'legacy'), safe=''),
             'immutable': True, 'range_supported': True,
-            'plaintext_integrity': 'sha256_recorded' if row['sha256'] else 'not_yet_downloaded'}
+            'plaintext_integrity': 'sha256_recorded' if row['sha256'] else 'not_yet_downloaded',
+            'origin': {'artifact_id': row['artifact_id'], 'operation_id': row.get('source_operation_id') or None,
+                       'work_item_id': row.get('source_work_id') or None},
+            'preview': {'available': False, 'mode': 'download_only'},
+            'transcription': {'available': False, 'source': None},
+            'retention': {'expires_at': row['expires_at'], 'regenerate_automatically': False},
+            'shares': [{'channel': row.get('channel', 'weixin'),
+                        'approval': 'exact_file_and_recipient' if row['direction'] == 'outbound' else 'not_approved',
+                        'recipient_version': row.get('share_binding_version'),
+                        'upload_state': row.get('upload_state') or 'unknown',
+                        'upload_observed_at': row.get('upload_observed_at'),
+                        'send_state': row.get('send_state') or 'unknown',
+                        'delivered_verified': False, 'read_verified': False}]}
 
-    def for_message(self, identifier):
-        return self.for_messages([identifier]).get(identifier, [])
+    def for_message(self, identifier, principal=None):
+        return self.for_messages([identifier], principal=principal).get(identifier, [])
 
-    def for_messages(self, identifiers):
+    def for_messages(self, identifiers, principal=None):
         identifiers = list(dict.fromkeys(identifiers))[:124]
         if not identifiers:
             return {}
         # Status polling must never load encrypted file bytes or CDN secrets.
-        rows = self.store.all('SELECT ' + ','.join((*PUBLIC_FIELDS, 'space_id')) +
-            ' FROM channel_attachments WHERE message_id IN (' + ','.join('?' for _ in identifiers) +
-            ') ORDER BY message_id,ordinal,id', tuple(identifiers))
+        rows = self.store.all('SELECT ' + ','.join('a.' + k for k in (*PUBLIC_FIELDS, 'space_id', 'channel', 'room_id', 'conversation_id', 'project_id')) +
+            """, g.source_operation_id, t.upload_state,t.upload_observed_at,t.binding_version AS share_binding_version,
+                CASE t.channel WHEN 'weixin' THEN w.state WHEN 'telegram' THEN m.state END AS send_state
+            FROM channel_attachments a
+            LEFT JOIN artifacts g ON g.id=a.artifact_id AND g.project_id=a.project_id AND g.space_id=a.space_id
+            LEFT JOIN channel_attachment_transfers t ON t.attachment_id=a.id
+            LEFT JOIN weixin_parts w ON t.channel='weixin' AND w.id=t.part_id
+            LEFT JOIN channel_mirror_parts m ON t.channel='telegram' AND m.id=t.part_id
+            WHERE a.message_id IN (""" + ','.join('?' for _ in identifiers) +
+            ') ORDER BY a.message_id,a.ordinal,a.id', tuple(identifiers))
+        self.source_work(rows, principal)
         result = {}
         for row in rows:
             result.setdefault(row['message_id'], []).append(self.public(row))
         return result
+
+    def source_work(self, rows, principal):
+        # An artifact lookup alone does not authorize revealing the enclosing
+        # multi-project goal. Batch lookup, then keep each goal's original guard.
+        if principal is None:
+            return
+        operation_ids = list(dict.fromkeys(row.get('source_operation_id') for row in rows if row.get('source_operation_id')))
+        by_operation, checked, rooms = {}, {}, {}
+        for start in range(0, len(operation_ids), 124):
+            batch = operation_ids[start:start + 124]
+            links = self.store.all("""SELECT op.operation_id,op.work_item_id,op.project_id AS source_project_id,g.*
+                FROM coordination_operations op JOIN coordination_goals g ON g.id=op.goal_id
+                WHERE op.operation_id IN (""" + ','.join('?' for _ in batch) + ')', tuple(batch))
+            for goal in links:
+                if goal['id'] not in checked:
+                    if goal['room_id'] not in rooms:
+                        rooms[goal['room_id']] = self.store.one('SELECT * FROM collaboration_rooms WHERE id=?', (goal['room_id'],))
+                    room = rooms[goal['room_id']]
+                    try:
+                        if not room:
+                            raise DevError('NOT_FOUND', '来源工作已不可见', 404)
+                        self.c.coordination.authorize(principal, room, goal)
+                        checked[goal['id']] = True
+                    except DevError:
+                        checked[goal['id']] = False
+                if checked[goal['id']]:
+                    by_operation[goal['operation_id']] = goal
+        for row in rows:
+            goal = by_operation.get(row.get('source_operation_id'))
+            if (goal and goal['room_id'] == row['room_id'] and goal['conversation_id'] == row['conversation_id']
+                    and goal['source_project_id'] == row['project_id']):
+                row['source_work_id'] = goal['work_item_id']
 
     def row(self, identifier, principal):
         principal = refresh_principal(self.store, principal)
@@ -144,8 +203,7 @@ class ChannelMedia:
                 identifiers = []
                 for ordinal, artifact in enumerate(artifacts, last + 1):
                     identifier, name = uuid.uuid4().hex, safe_filename(artifact['name'])
-                    mime = mimetypes.guess_type(name)[0] or 'application/octet-stream'
-                    kind = 'image' if mime in {'image/jpeg', 'image/png', 'image/webp', 'image/gif'} else 'video' if mime == 'video/mp4' else 'file'
+                    mime, kind = 'application/octet-stream', 'file'  # Verify actual bytes before classifying.
                     self.store.execute('''INSERT INTO channel_attachments
                         (id,space_id,owner_user_id,room_id,conversation_id,project_id,message_id,ordinal,direction,binding_id,
                          generation,peer_id,kind,name,mime,size,sha256,artifact_id,state,private_source,expires_at,created,updated)
@@ -316,6 +374,9 @@ class ChannelMedia:
         if (not binding['allow_media_outbound'] or row['binding_id'] != binding_id
                 or row['generation'] != binding['generation'] or row['peer_id'] != binding['peer_id'] or row['direction'] != 'outbound'):
             raise DevError('ATTACHMENT_EGRESS_NOT_APPROVED', '附件不属于原收件人和已批准的外发绑定', 403)
+        approved = self.store.one('SELECT binding_version FROM channel_attachment_transfers WHERE attachment_id=?', (identifier,))
+        if approved and approved['binding_version'] is not None and approved['binding_version'] != binding['version']:
+            raise DevError('ATTACHMENT_EGRESS_NOT_APPROVED', '当前收件绑定版本已变化，需要重新核对原文件分享', 403)
         content, row, *_ = self.content(identifier, owner)
         return content, row
 

@@ -121,6 +121,7 @@ class DelegationSend(Model):
 
 class MessageCreate(Scope):
     conversation_id: str = Field(default='', max_length=128)
+    pending_scope_revision: str = Field(default='', pattern=r'^(|[a-f0-9]{64})$')
     room_id: Identifier
     body_text: str = Field(min_length=1, max_length=8000)
     client_message_id: Key
@@ -910,6 +911,52 @@ class DotChatAck(DotRead):
     idempotency_key: Key
 
 
+class DotHandlingInput(Model):
+    message_id: Identifier
+    source_version: int = Field(ge=1)
+    source_digest: str = Field(pattern=r'^[0-9a-f]{64}$')
+    expected_revision: int = Field(ge=0)
+
+
+class DotHandling(DotRead):
+    handling_schema_version: Literal[1]
+    scope_digest: str = Field(pattern=r'^[0-9a-f]{64}$')
+    inputs: list[DotHandlingInput] = Field(min_length=1, max_length=20)
+    handling_state: Literal['observed', 'waiting_input', 'waiting_authorization',
+                            'work_linked', 'reply_committed', 'covered', 'no_response_required']
+    reason_code: Literal['received', 'question_asked', 'authorization_required', 'existing_work',
+                         'final_reply', 'acknowledgement_only', 'social_only', 'duplicate_without_new_intent']
+    reply_id: str = Field(default='', max_length=128)
+    reply_version: int = Field(default=0, ge=0)
+    work_item_id: str = Field(default='', max_length=128)
+    confirms_no_new_intent: bool = False
+    idempotency_key: Key
+
+    @model_validator(mode='after')
+    def exact_handling_evidence(self):
+        if len({item.message_id for item in self.inputs}) != len(self.inputs):
+            raise ValueError('Inputs must be unique; batches never silently discard an input')
+        reasons = {'observed': {'received'}, 'waiting_input': {'question_asked'},
+            'waiting_authorization': {'authorization_required'}, 'work_linked': {'existing_work'},
+            'reply_committed': {'final_reply'}, 'covered': {'final_reply'},
+            'no_response_required': {'acknowledgement_only', 'social_only', 'duplicate_without_new_intent'}}
+        if self.reason_code not in reasons[self.handling_state]:
+            raise ValueError('Reason must match the declared handling state')
+        if self.handling_state in {'waiting_input', 'waiting_authorization', 'reply_committed', 'covered'}:
+            if not self.reply_id or not self.reply_version:
+                raise ValueError('A persisted same-thread reply and its exact version are required')
+        elif self.reply_id or self.reply_version:
+            raise ValueError('This handling state must not attach a reply')
+        if bool(self.work_item_id) != (self.handling_state == 'work_linked'):
+            raise ValueError('work_linked must reference an existing work item; no other state may attach one')
+        if self.handling_state == 'no_response_required':
+            if not self.confirms_no_new_intent:
+                raise ValueError('Explicitly confirm that the input contains no new task or constraint')
+        elif self.confirms_no_new_intent:
+            raise ValueError('No-new-intent declaration is only valid for no_response_required')
+        return self
+
+
 class DotChatTask(DotRead):
     message_id: Identifier
     expected_version: int = Field(ge=1)
@@ -918,9 +965,11 @@ class DotChatTask(DotRead):
 
 
 TOOL_MODELS.update({'collaboration_dot_message': DotChatMessage,
+    'collaboration_dot_handle': DotHandling,
     'collaboration_dot_ack': DotChatAck, 'collaboration_dot_task': DotChatTask})
 TOOL_DESCRIPTIONS.update({
     'collaboration_dot_message': 'Send a normal or proactive message to this explicitly owner-approved duplex dot room. Requires its existing bound connector, not a task lease. Use reply_to_id and the supplied reply_arguments key for final replies. For an interim reply use interim_reply_arguments with complete=false to keep the owner request pending while chatting and working; no panel mode switch or repeated user instruction is needed. Never sync private chat history or wake peer bots.',
+    'collaboration_dot_handle': 'Explicitly record versioned handling for up to 20 addressed inputs in one authorized dot thread. Uses source digests, current scope and compare-and-swap revisions. covered requires a directly referenced canonical final reply from this dot. Never closes unfinished or failed work, proves external delivery, infers semantic coverage, or creates execution authority. Retry the same handling request without republishing the reply.',
     'collaboration_dot_ack': 'Acknowledge an addressed dot message. read records connector receipt but leaves it pending; handled explicitly finishes that message. Neither state proves human reading or task execution.',
     'collaboration_dot_task': 'Only after an explicitly authenticated owner message addressed to this duplex dot asks for actual work, attach one managed task using its existing owner-approved scope. User-approved host execution remains required; do not convert greetings or questions into work. Returns real delegation/inbox requests; claim and execute with the original leases, never general tools to bypass a refusal.',
 })

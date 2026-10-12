@@ -44,6 +44,11 @@ def example(tool, action):
     # discovery envelope. This keeps every action-specific required-field check.
     schema = ADAPTERS[tool].json_schema()
     spec = branch(schema, action)
+    if action == 'dot_handle':
+        return {'action': action, 'project': 'project', 'dot_id': 'dot', 'handling_schema_version': 1,
+            'scope_digest': 'a' * 64, 'inputs': [{'message_id': 'source', 'source_version': 1,
+                'source_digest': 'b' * 64, 'expected_revision': 0}],
+            'handling_state': 'observed', 'reason_code': 'received', 'idempotency_key': 'stable-handling'}
     if action == 'execute':
         return {'action': action, **{key: VALUES[key] for key in
             ('project', 'goal_id', 'work_item_id', 'attempt', 'fencing_token', 'idempotency_key')},

@@ -31,6 +31,36 @@ window.CodePierCollaborationChannels = {
       '尚无证据'
     );
   },
+  capabilities(value, E) {
+    if (!value?.features) return '';
+    const labels = {text:'文字', image:'图片', file:'文件', video:'视频', voice:'语音外发',
+      edit:'原位编辑', typing:'输入状态', native_reply:'原生引用', receipt_lookup:'平台回执查询',
+      read_receipt:'用户已读', preview:'在线预览', transcription:'音频转写'};
+    const layers = {implemented:'当前实现', provider_account_verified:'账号实测',
+      authorized:'当前授权', session_available:'当前会话'};
+    const fact = (value) => value === true ? '已核实' : value === false ? '不支持或不可用' : '尚未核实';
+    return '<details class="cc-channel-capabilities"><summary>当前通道能力与限制</summary><p>四项均有证据才显示可用；能力说明不会授予权限。</p><dl>' +
+      Object.entries(labels).map(([name, label]) => {
+        const item = value.features[name] || {};
+        return '<dt>' + E(label) + '：' + E(item.enabled === true ? '可用' : fact(item.effective)) + '</dt><dd>' +
+          Object.entries(layers).map(([key, title]) => E(title + '：' + fact(item[key]))).join(' · ') + '</dd>';
+      }).join('') + '</dl><p>文本分段上限：' + E(value.text?.limit ?? '未知') + ' ' + E(value.text?.unit || '') +
+      '；文件上传上限：' + E(value.media?.upload_limit ?? '未知') + ' 字节。</p>' +
+      '<p>文件逐份核对当前收件人和内容摘要；上传成功不等于消息已发送。阶段反馈合并更新；无编辑能力时保留文字摘要。音频没有转写证据时只作为原音频附件。</p></details>';
+  },
+  fileDetails(item, E) {
+    const stamp = (value) => Number.isFinite(value) ? new Date(value * 1000).toLocaleString('zh-CN', {hour12:false}) : '尚未记录';
+    const source = item.origin?.work_item_id || item.origin?.operation_id;
+    const upload = {accepted:'上传已接受', combined_with_send:'上传与消息发送合并，暂无独立上传回执', unknown:'上传结果尚未确认'};
+    return '<details class="cc-file-manifest"><summary>文件来源与分享状态</summary><p>类型：' + E(item.mime || '尚未核实') +
+      '；来源：' + E(source || (item.artifact_id ? '原产物' : '原通道附件')) + '</p><p>SHA-256：' + E(item.sha256 || '尚未取得原字节') +
+      '</p><p>保留至：' + E(stamp(item.expires_at)) + '；到期不会重跑生成任务。</p>' +
+      (item.kind === 'voice' ? '<p>原音频附件；尚无可验证转写。</p>' : '') +
+      (item.shares || []).map((share) => '<p>' + E(share.channel === 'telegram' ? 'Telegram' : '微信') + '：' +
+        E(upload[share.upload_state] || upload.unknown) + '；消息：' +
+        E(window.CodePierCollaborationChannels.status(share.send_state)) + '</p>').join('') +
+      '<small>文件读取与外发批准分别核对。平台接受不代表用户已读。</small></details>';
+  },
   attachments(message, E) {
     const label = window.CodePierCollaborationChannels.status;
     const files = (message.attachments || [])
@@ -42,7 +72,7 @@ window.CodePierCollaborationChannels = {
             '/content?space_id=' +
             encodeURIComponent(S.space_id || 'legacy')
           : '';
-        return `<div class="cc-channel-file" data-attachment-id="${E(item.id)}"><div><strong>${E(item.name || '附件')}</strong><small>${E(item.kind || 'file')} · ${E(label(item.state))}${Number.isFinite(item.size) ? ' · ' + E(String(item.size)) + ' 字节' : ''}</small>${item.reason_code ? `<small>${E(item.reason_code)}</small>` : ''}</div>${item.state === 'ready' && valid ? `<a class="btn" href="${E(href)}" target="_blank" rel="noopener noreferrer" download>读取原附件</a>` : '<span>原消息与顺序已保留</span>'}</div>`;
+        return `<div class="cc-channel-file" data-attachment-id="${E(item.id)}"><div><strong>${E(item.name || '附件')}</strong><small>${E(item.kind || 'file')} · ${E(label(item.state))}${Number.isFinite(item.size) ? ' · ' + E(String(item.size)) + ' 字节' : ''}</small>${item.reason_code ? `<small>${E(item.reason_code)}</small>` : ''}${window.CodePierCollaborationChannels.fileDetails(item, E)}</div>${item.state === 'ready' && valid ? `<a class="btn" href="${E(href)}" target="_blank" rel="noopener noreferrer" download>读取原附件</a>` : '<span>原消息与顺序已保留</span>'}</div>`;
       })
       .join('');
     const deliveries = (message.channel_deliveries || [])
@@ -706,6 +736,7 @@ window.CodePierCollaborationChannels = {
       form.querySelector('[data-cc-action="dot-channel-enrollment-approve"]').disabled = true;
     }
     async function enrollmentRead(form) {
+      const previous = enrollmentPreviews.get(form);
       enrollmentReset(form);
       const owner = loaded;
       const selection = enrollmentSelection(form);
@@ -759,7 +790,10 @@ window.CodePierCollaborationChannels = {
         )
           throw new Error('服务端授权摘要不完整，不能生成任务授权码。');
         request.preview = preview;
+        const changed = previous?.preview && previous.selection === selection &&
+          previous.preview.scope_digest !== preview.scope_digest;
         const rows = [
+          ...(changed ? [['范围变化', '原摘要已失效，请只核对下方当前差异并重新确认。']] : []),
           ['账号', preview.account_label + ' · ' + preview.bot_id],
           ['授权联系人', peer || '仅本人持此码验证的原机器人私聊身份'],
           ['项目范围', preview.project_id + ' / ' + preview.environment_id],
@@ -790,7 +824,8 @@ window.CodePierCollaborationChannels = {
     }
     function onboardingStatus(binding) {
       const entry = binding.onboarding;
-      if (!entry) return '';
+      const capabilities = window.CodePierCollaborationChannels.capabilities(binding.effective_capabilities, E);
+      if (!entry) return capabilities;
       const status =
         {
           waiting_inbound: '尚无可用私聊地址，等待第一条入站消息；未发送接入提醒。',
@@ -807,7 +842,17 @@ window.CodePierCollaborationChannels = {
         : entry.state === 'completed'
           ? '本次授权码已完成验证。任务权限以当前授权状态为准。'
           : '原接入预授权已失效或范围已变化，不会自动开通任务；请重新核对。';
-      return `<div class="cc-onboarding-status" role="status"><strong>${E(instruction)}</strong><p>${E(status)}</p></div>`;
+      const readiness = entry.readiness;
+      const names = {account:'账号或凭据世代', project_id:'项目', environment_id:'环境', project_snapshot:'项目映射',
+        dot_id:'目标 dot', dot_setup_digest:'dot 范围', policy_id:'任务策略', policy_version:'策略版本',
+        policy_digest:'策略内容', capabilities:'允许能力', execution_targets:'执行目标',
+        target_snapshots:'目标映射', max_delegations:'任务预算', delivery_mode:'回传方式', binding:'绑定版本'};
+      const recovery = readiness ? '<p>已恢复原接入对象，查询不会创建新绑定。</p>' +
+        (readiness.ready_for_private_proof ? '<p>原范围仍一致，等待本人完成私聊验证。</p>' :
+          readiness.changed_fields?.length ? '<p>需要重新核对变化：' +
+            E(readiness.changed_fields.map((key) => names[key] || '原范围').join('、')) + '</p>' :
+          readiness.scope_unchanged === null ? '<p>当前范围尚未核实，请查看原账号、绑定和授权状态。</p>' : '') : '';
+      return capabilities + `<div class="cc-onboarding-status" role="status"><strong>${E(instruction)}</strong><p>${E(status)}</p>${recovery}</div>`;
     }
     function channelOwnerPanel(channel, data, binding) {
       if (channel === 'weixin') return ownerTaskPanel(data, binding);
@@ -1382,7 +1427,7 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
           'message_id',
           (w.reply_candidates || []).map((m) => [m.id, m.body_text || m.id]),
         ),
-      )}<fieldset><legend>最近的已生成产物（最多16件）</legend>${(w.artifact_candidates || []).map((a) => `<label class="cc-channel-check"><input type="checkbox" name="artifact_ids" value="${E(a.artifact_id)}">${E(a.name)} · ${E(a.bytes)} 字节</label>`).join('') || '<p>当前项目没有可选产物。</p>'}</fieldset>${w.artifact_candidates_more ? '<p>此处仅列最近50件；更早产物请在产物管理中核对编号。</p>' : ''}${checkbox('confirm_files', '我确认仅向这条原微信消息的联系人分享所选文件', true)}${button('dot-channel-files', '确认保存文件外发清单', {}, w.enabled ? '' : 'disabled')}<small>只传输已有产物，不重跑原生成任务；正文不会重复发送。</small></div></details>
+      )}<fieldset><legend>最近的已生成产物（最多16件）</legend>${(w.artifact_candidates || []).map((a) => `<label class="cc-channel-check"><input type="checkbox" name="artifact_ids" value="${E(a.artifact_id)}">${E(a.name)} · ${E(a.bytes)} 字节</label>`).join('') || '<p>当前项目没有可选产物。</p>'}</fieldset>${w.artifact_candidates_more ? '<p>此处仅列最近50件；更早产物请在产物管理中核对编号。</p>' : ''}${button('dot-channel-file-preview', '预览文件与原收件人', {}, w.enabled ? '' : 'disabled')}<div class="wx-file-preview"></div><small>只传输已有产物，不重跑原生成任务；正文不会重复发送。</small></div></details>
       <h4>最近投递分项</h4>${deliveries || '<p>暂无外发记录。</p>'}</section>
       ${telegramPanel(data.telegram, w, slots)}<section><h3>房间凭据范围</h3><p>范围绑定服务器上的原 grant，省略 room_id 也不能绕过。启用或修改会影响所有使用同一凭据的会话；工作目录不是操作系统沙箱。</p>${policies || '<p>尚未启用普通工具的房间限制。</p>'}<details><summary>明确设置连接范围</summary><div data-channel-form="scope" class="cc-form">${field(
         '当前房间已有连接',
@@ -1991,6 +2036,7 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
           'dot-channel-cancel-unsent',
           'dot-channel-mirror-cancel',
           'dot-channel-tg-file-preview',
+          'dot-channel-file-preview',
         ].includes(action),
       );
       if (!data) return local;
@@ -2111,13 +2157,14 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
           artifact_ids: ids,
         };
         if (action === 'dot-channel-tg-file-preview') {
+          const previewOwner = loaded, previewEpoch = state.drawerEpoch;
           saving = true;
           try {
             const preview = await mutation('telegram-files-preview', { ...selected, ...scope() });
-            if (!current(key) || loaded.epoch !== state.drawerEpoch) return local;
+            if (!current(key) || loaded !== previewOwner || previewEpoch !== state.drawerEpoch || !root.isConnected) return local;
             loaded.filePreview = { selected, preview };
             root.querySelector('.tg-file-preview').innerHTML =
-              `<section class="cc-channel-binding"><strong>核对后才发送</strong><p>Telegram user_id：${E(preview.recipient.user_id)} · chat_id：${E(preview.recipient.chat_id)}</p><p>原回复：${E(preview.message_id.slice(-8))} · 版本 ${E(preview.message_version)}</p>${preview.files.map((f) => `<div>${E(f.name)} · ${E(f.bytes)} 字节<small>SHA-256：${E(f.sha256)}</small></div>`).join('')}<p>总计 ${E(preview.total_bytes)} 字节</p>${checkbox('file_confirm', '我确认仅向以上本人Telegram私聊发送以上完整文件清单', true)}${button('dot-channel-tg-files', '确认并排队发送这些文件')}</section>`;
+              `<section class="cc-channel-binding"><strong>核对后才发送</strong><p>项目：${E(preview.project_id || '')} · 原话题：${E(preview.conversation_id || '')} · 绑定版本 ${E(preview.binding_version)}</p><p>Telegram user_id：${E(preview.recipient.user_id)} · chat_id：${E(preview.recipient.chat_id)}</p><p>原回复：${E(preview.message_id.slice(-8))} · 版本 ${E(preview.message_version)}</p>${preview.files.map((f) => `<div>${E(f.name)} · ${E(f.bytes)} 字节<small>SHA-256：${E(f.sha256)}</small><small>保留至：${stamp(f.expires_at)}</small></div>`).join('')}<p>总计 ${E(preview.total_bytes)} 字节</p>${checkbox('file_confirm', '我确认仅向以上本人Telegram私聊发送以上完整文件清单', true)}${button('dot-channel-tg-files', '确认并排队发送这些文件')}</section>`;
           } finally {
             saving = false;
           }
@@ -2353,20 +2400,40 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
           return local;
         operation = 'room-scope-control';
         args = { grant_id: row.grant_id, expected_version: row.version, action: 'revoke' };
-      } else if (action === 'dot-channel-files') {
+      } else if (['dot-channel-files', 'dot-channel-file-preview'].includes(action)) {
         const reply = loaded.weixin.reply_candidates.find((m) => m.id === value('message_id'));
         const ids = [...root.querySelectorAll('[name="artifact_ids"]:checked')].map(
           (input) => input.value,
         );
         if (!reply || !ids.length || ids.length > 16)
           throw new Error('请选择原回复与1至16件实际产物。');
-        operation = 'weixin-files';
-        args = {
-          message_id: reply.id,
-          expected_message_version: reply.version,
-          artifact_ids: ids,
-          confirm_file_egress: checked('confirm_files'),
+        const selected = {
+          message_id: reply.id, expected_message_version: reply.version, artifact_ids: ids,
         };
+        if (action === 'dot-channel-file-preview') {
+          const owner = loaded, epoch = state.drawerEpoch;
+          saving = true;
+          try {
+            const preview = await mutation('weixin-files-preview', {...selected, ...scope()});
+            if (!current(key) || loaded !== owner || epoch !== state.drawerEpoch || !root.isConnected) return local;
+            loaded.wxFilePreview = {selected, preview};
+            root.querySelector('.wx-file-preview').innerHTML =
+              '<section class="cc-channel-binding"><strong>核对后才发送</strong><p>原微信收件人：' +
+              E(preview.recipient.peer_id) + '；绑定版本 ' + E(preview.binding_version) + '</p><p>项目：' +
+              E(preview.project_id) + '；原话题：' + E(preview.conversation_id) + '</p>' +
+              preview.files.map((file) => '<p>' + E(file.name) + ' · ' + E(file.bytes) +
+                ' 字节<small>SHA-256：' + E(file.sha256) + '</small><small>保留至：' +
+                stamp(file.expires_at) + '</small></p>').join('') +
+              checkbox('confirm_files', '我确认仅向以上原微信联系人分享以上完整文件清单', true) +
+              button('dot-channel-files', '确认保存文件外发清单') + '</section>';
+          } finally { saving = false; }
+          return local;
+        }
+        if (!loaded.wxFilePreview || JSON.stringify(loaded.wxFilePreview.selected) !== JSON.stringify(selected))
+          throw new Error('文件或原回复已变化，请重新预览文件与收件人。');
+        operation = 'weixin-files-reviewed';
+        args = {...selected, preview_digest: loaded.wxFilePreview.preview.preview_digest,
+          confirm_file_egress: checked('confirm_files')};
       } else if (['dot-channel-confirm-received', 'dot-channel-cancel-unsent'].includes(action)) {
         const row = loaded.weixin.deliveries.find((d) => d.id === element.dataset.id);
         if (!row) throw new Error('原投递已不在当前列表。');

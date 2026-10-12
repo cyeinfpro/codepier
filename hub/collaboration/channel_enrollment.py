@@ -239,6 +239,42 @@ class ChannelEnrollment:
                 '尚未完成授权验证，此消息不会执行任务。请仅在本人与此机器人的私聊发送面板显示的一次性授权码；不要转发授权码。')
         return True
 
+    def readiness(self, binding_id):
+        """Restore the same pending object; checking never activates or renews it."""
+        record = self.current(binding_id)
+        if not record:
+            return None
+        original = json.loads(record['scope'])
+        fields = ('account', 'project_id', 'environment_id', 'project_snapshot', 'dot_id',
+                  'dot_setup_digest', 'policy_id', 'policy_version', 'policy_digest',
+                  'capabilities', 'execution_targets', 'target_snapshots', 'max_delegations',
+                  'delivery_mode', 'binding')
+        changes, current_digest, reason = [], None, ''
+        try:
+            transport = self.transport(record['channel'])
+            binding, account, owner, room, dot = transport.valid(binding_id, pairing=True)
+            current = self.snapshot(record['channel'], account, dot, room, owner)
+            current['binding'] = {key: binding[key] for key in original['binding']}
+            current_digest = digest(current)
+            changes = [key for key in fields if original.get(key) != current.get(key)]
+        except DevError as exc:
+            reason = exc.code
+        current = record['state'] == 'pending' and record['expires_at'] > self.c.clock()
+        same_scope = current_digest == record['scope_digest'] and not changes
+        return {
+            'read_only': True, 'same_pending_object': True, 'creates_binding': False,
+            'frozen_scope_digest': record['scope_digest'], 'current_scope_digest': current_digest,
+            'scope_unchanged': same_scope if current_digest else None,
+            'changed_fields': changes, 'reason_code': reason or record['reason_code'],
+            'ready_for_private_proof': bool(current and same_scope),
+            'identity_verified': record['state'] == 'completed',
+            'next_step': 'private_code_proof' if current and same_scope else
+                         'review_changed_scope' if current and not same_scope else
+                         'view_original_binding' if record['state'] == 'completed' else
+                         'review_original_pairing',
+            'credential_consent_inferred': False, 'task_consent_inferred': False,
+        }
+
     def view(self, binding_id):
         record = self.current(binding_id)
         if not record:
@@ -247,7 +283,8 @@ class ChannelEnrollment:
         if state == 'pending' and record['expires_at'] <= self.c.clock():
             state = 'expired'
         notices = self.store.all('SELECT kind,state,reason_code FROM channel_onboarding_notices WHERE binding_id=? ORDER BY created DESC LIMIT 8', (binding_id,))
-        return {'state': state, 'receipt_id': record['receipt_id'], 'expires_at': record['expires_at'],
-                'reason_code': record['reason_code'], 'auto_complete': state == 'pending',
+        readiness = self.readiness(binding_id)
+        return {'readiness': readiness, 'state': state, 'receipt_id': record['receipt_id'], 'expires_at': record['expires_at'],
+                'reason_code': record['reason_code'], 'auto_complete': readiness['ready_for_private_proof'],
                 'notice_state': notices[0]['state'] if notices else 'waiting_inbound',
                 'notices': notices, 'delivered_verified': False, 'read_verified': False}

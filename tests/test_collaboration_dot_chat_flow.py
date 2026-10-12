@@ -54,9 +54,20 @@ def test_panel_chat_proactive_dot_thread_reply_restart_and_no_task(
         assert len(sent) == 1 and not sent[0].get('delegation') and not sent[0].get('dispatch_mode')
         call(stack, first['ack_request'])
         refresh(page)
-        receipt = page.locator('.cc-dot-receipt[data-relay-state="received"]')
-        expect(receipt).to_have_text('插件已接收')
-        expect(receipt).to_have_attribute('title', '状态来自实际插件回执，不代表模型持续在线')
+        source = page.locator(f'[data-message-id="{first["message_id"]}"]')
+        status = source.locator('.cc-experience-status')
+        expect(status).to_have_count(1)
+        expect(status).to_have_attribute('data-primary-state', 'observed')
+        receipt = status.locator('.cc-dot-receipt[data-relay-state="received"]')
+        expect(receipt).to_have_text('dot 已接收')
+        expect(receipt).to_have_attribute('title', '已确认插件收件，不代表已经处理、执行任务或模型持续在线')
+        # Transport consumption is neither work completion nor task dispatch.
+        store = Store(stack.hubdir)
+        try:
+            assert store.one('SELECT COUNT(*) AS n FROM coordination_work')['n'] == 0
+            assert store.one('SELECT COUNT(*) AS n FROM delegation_requests')['n'] == 0
+        finally:
+            store.close()
         response = {'action': 'dot_message', **first['reply_arguments'], 'body_text': '你更重视速度，还是界面？'}
         replied = mcp(stack, 'collaboration', response)
         assert mcp(stack, 'collaboration', response)['message']['id'] == replied['message']['id']

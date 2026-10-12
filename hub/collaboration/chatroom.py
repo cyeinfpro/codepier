@@ -14,7 +14,8 @@ class ChatroomService:
         self.c, self.store = collaboration, collaboration.store
 
     def capabilities(self, principal=None):
-        return {'task_liveness_v1': True, 'dot_receipts_v1': True, 'expired_result_archive': True,
+        return {'experience_projection_v1': True, 'redacted_diagnostics_v1': True, 'authoritative_message_receipt_v1': True,
+                'task_liveness_v1': True, 'dot_receipts_v1': True, 'expired_result_archive': True,
                 'dot_message_v2': True, 'channel_attachment_manifest_v1': True,
                 'room_scope_v1': True, 'bounded_execution_v1': True, 'weixin_channel_v1': True,
                 'weixin_enabled': self.c.channel_settings.enabled('weixin', principal) if principal else self.c.config.weixin_enabled, 'telegram_channel_v1': True,
@@ -72,7 +73,7 @@ class ChatroomService:
                         'expires_at': expires, 'version': version + 1, 'chat_identity_verified': False}
             return self.c.mutation(principal, room, 'message_access:' + conversation['id'], args, save)
 
-    def view(self, row, delivery_map=None, attachment_map=None, channel_map=None):
+    def view(self, row, delivery_map=None, attachment_map=None, channel_map=None, relay_map=None, dot_map=None):
         body = redact(json.loads(row['body']))
         if body.get('delegation'):
             body['delegation']['delivery_status'] = self.c.delegation.delivery_status(body['delegation']['delegation_id'])
@@ -94,8 +95,8 @@ class ChatroomService:
                   'job_id': body.get('job_id'), 'result_id': body.get('result_id'),
                   'source_message_id': body.get('source_message_id')}
         if body.get('duplex_recipients'):
-            result['dot_receipts'] = self.c.dot_chat.receipts(row['id'])
-            result['relay_receipts'] = self.c.dot_relay.receipts(row)
+            result['dot_receipts'] = dot_map.get(row['id'], []) if dot_map is not None else self.c.dot_chat.receipts(row['id'])
+            result['relay_receipts'] = relay_map.get(row['id'], []) if relay_map is not None else self.c.dot_relay.receipts(row)
         if body.get('sender_dot_id'):
             sender = self.store.one('SELECT label FROM collaboration_join_slots WHERE id=? AND room_id=? AND grant_id=?', (body['sender_dot_id'], row['room_id'], row['author']))
             if sender:
@@ -197,9 +198,16 @@ class ChatroomService:
             rows = [row for row in rows if self.message_visible(principal, row)]
         delivery_map = self.deliveries(rows)
         identifiers = [row['id'] for row in rows]
-        attachments = self.c.channels.media.for_messages(identifiers)
+        attachments = self.c.channels.media.for_messages(identifiers, principal=principal)
         channels = self.c.channels.for_messages(identifiers)
-        return [self.view(row, delivery_map, attachments, channels) for row in rows]
+        relay = self.c.dot_relay.receipts_many(rows, principal=principal)
+        dot_map = {}
+        if identifiers:
+            for item in self.store.all('''SELECT message_id,dot_id,state,received_at,handled_at
+                    FROM collaboration_dot_messages WHERE message_id IN ('''
+                    + ','.join('?' for _ in identifiers) + ') ORDER BY sequence', tuple(identifiers)):
+                dot_map.setdefault(item.pop('message_id'), []).append(item)
+        return [self.view(row, delivery_map, attachments, channels, relay, dot_map) for row in rows]
 
     def notify(self, room, message, principal, mentions, generation=''):
         receipts = []
@@ -242,6 +250,7 @@ class ChatroomService:
 
     def create(self, raw, principal, *, sender_dot_id='', complete_dot_message=True):
         args = validate(contracts.MessageCreate, raw)
+        pending_scope_revision = args.pop('pending_scope_revision')
         # Omitted new fields must keep old ordinary-message replay fingerprints.
         if args['dispatch_mode'] == 'discussion':
             args.pop('dispatch_mode')
@@ -257,6 +266,8 @@ class ChatroomService:
             self.same_room(room, args)
             conversation = self.c.conversations.resolve(principal, room, args)
             args['conversation_id'] = conversation['id']
+            if pending_scope_revision and pending_scope_revision != self.c.dot_relay.pending_scope_revision(principal, room, conversation):
+                raise DevError('PENDING_SCOPE_CHANGED', '原待发消息的身份、项目映射或授权范围已改变，请核对原消息', 409)
             if sender_dot_id:
                 self.c.dot_chat.authorize_sender(principal, room, conversation, sender_dot_id)
                 args['_sender_dot_id'] = sender_dot_id
@@ -329,6 +340,10 @@ class ChatroomService:
                 else:
                     body['notifications'] = self.notify(room, message, principal, mentions)
                 self.store.execute('UPDATE collaboration_messages SET body=? WHERE id=?', (canonical(body), identifier))
+                if selected_delegation and duplex and hasattr(self.c, 'message_handling'):
+                    stored = self.c.object('collaboration_messages', room, identifier)
+                    for dot_id in duplex:
+                        self.c.message_handling.record_work(room, self.c.dots.find(dot_id), principal, stored)
                 if not sender_dot_id:
                     self.c.channels.queue(self.c.object('collaboration_messages', room, identifier))
                 return {'message': self.view(self.c.object('collaboration_messages', room, identifier)),

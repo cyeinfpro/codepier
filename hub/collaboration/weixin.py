@@ -297,6 +297,7 @@ class WeixinService:
                 pairing_until,allow_replies,allow_media_outbound,lifetime_mode,revalidation_required,expires_at,updated FROM weixin_bindings
                 WHERE room_id=? AND conversation_id=? ORDER BY created DESC LIMIT 100''', (room['id'], args['conversation_id']))
             for binding in bindings:
+                binding['effective_capabilities'] = self.c.channels.capabilities.for_binding('weixin', binding['id'])
                 binding['onboarding'] = self.c.channel_enrollment.view(binding['id'])
                 binding['owner_authorization'] = self.c.channel_owner.view(self.c.channel_owner.current(binding['id']))
                 if binding['state'] == 'pairing' and binding['pairing_until'] > self.c.clock():

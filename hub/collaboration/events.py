@@ -77,7 +77,9 @@ class EventService:
         principal = refresh_principal(self.store, principal)
         if not principal.grant_id or 'read' not in principal.scopes:
             return {'events': []}
-        return {'events': definitions() if self.c.runtime.list_projects(principal) else []}
+        from hub.collaboration.channel_capabilities import subscription_proposal
+        return {'events': definitions() if self.c.runtime.list_projects(principal) else [],
+                '_meta': {'codepier/subscription_lifetime': subscription_proposal()}}
 
     def prepare(self, raw, principal, *, stopping=False):
         self.guard()

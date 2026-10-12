@@ -41,6 +41,9 @@ class ChannelRouter:
         from hub.collaboration.channel_media_router import ChannelMediaRouter
 
         self.media = ChannelMediaRouter(self)
+        from hub.collaboration.channel_capabilities import ChannelCapabilities
+
+        self.capabilities = ChannelCapabilities(self)
 
     def consent_weixin(self, raw, principal):
         with self.store.transaction():
@@ -677,6 +680,7 @@ class ChannelRouter:
         return rows
 
     def for_messages(self, ids):
+        ids = list(dict.fromkeys(ids))[:124]
         result = self.c.weixin.delivery.for_messages(ids)
         for values in result.values():
             for value in values:
@@ -689,11 +693,17 @@ class ChannelRouter:
             + ")",
             tuple(ids),
         )
+        parts = {}
+        if rows:
+            for part in self.store.all(
+                "SELECT delivery_id,ordinal,kind,state,reason_code FROM channel_mirror_parts WHERE delivery_id IN ("
+                + ",".join("?" for _ in rows) + ") ORDER BY delivery_id,ordinal",
+                tuple(row["id"] for row in rows),
+            ):
+                delivery_id = part.pop("delivery_id")
+                parts.setdefault(delivery_id, []).append(part)
         for row in rows:
-            row["parts"] = self.store.all(
-                "SELECT ordinal,kind,state,reason_code FROM channel_mirror_parts WHERE delivery_id=? ORDER BY ordinal",
-                (row["id"],),
-            )
+            row["parts"] = parts.get(row["id"], [])
             result.setdefault(row["message_id"], []).append(row)
         return result
 

@@ -20,7 +20,14 @@ class ChannelMediaRouter:
         self.attach_approved = self.legacy.attach_approved
         self.for_message = self.legacy.for_message
         self.for_messages = self.legacy.for_messages
-        self.public = self.legacy.public
+
+    def public(self, row):
+        # The API calls row() first, so metadata is already scoped to this actor.
+        # Reuse the same manifest as the timeline without loading cached bytes.
+        for item in self.for_message(row["message_id"]):
+            if item["id"] == row["id"]:
+                return item
+        return self.legacy.public(row)
 
     def row(self, identifier, principal):
         found = self.store.one(

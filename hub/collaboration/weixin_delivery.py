@@ -106,7 +106,10 @@ class WeixinDelivery:
     def add_attachment_parts(self, delivery, attachment_ids):
         value = self.store.one('SELECT COALESCE(MAX(ordinal),-1) AS last FROM weixin_parts WHERE delivery_id=?', (delivery['id'],))['last']
         for index, identifier in enumerate(attachment_ids, value + 1):
-            self.add_part(delivery['id'], index, 'attachment', {'attachment_id': identifier})
+            part_id = self.add_part(delivery['id'], index, 'attachment', {'attachment_id': identifier})
+            self.store.execute("""INSERT OR IGNORE INTO channel_attachment_transfers(attachment_id,channel,part_id,binding_version)
+                SELECT ?,'weixin',?,version FROM weixin_bindings WHERE id=?""",
+                (identifier, part_id, delivery['binding_id']))
         self.refresh(delivery['id'])
 
     def validate(self, delivery):
@@ -203,6 +206,17 @@ class WeixinDelivery:
                 self.store.execute('UPDATE weixin_parts SET wire_body=? WHERE id=?', (self.store.encrypt(canonical(saved)), part['id']))
             return saved
 
+    def record_upload(self, claim):
+        # Upload success is an observation, not send authority. A revoked
+        # binding can still have a successful upload followed by a blocked send.
+        with self.store.transaction():
+            part = self.store.one('SELECT * FROM weixin_parts WHERE id=?', (claim['id'],))
+            if not part or part['lease_owner'] != claim['lease_owner'] or part['lease_fence'] != claim['lease_fence']:
+                return
+            self.store.execute("""UPDATE channel_attachment_transfers
+                SET upload_state='accepted',upload_observed_at=? WHERE channel='weixin' AND part_id=?""",
+                (self.c.clock(), claim['id']))
+
     def mark_sending(self, claim, items):
         with self.store.transaction():
             part = self.current(claim)
@@ -274,6 +288,7 @@ class WeixinDelivery:
                 content, attachment = await self.store.run(self.w.media.outbound_content, body['attachment_id'], claim['binding']['id'])
                 item = await client.upload_media(claim['delivery']['peer_id'], content, attachment['kind'], attachment['name'],
                                                  filekey=saved['filekey'], key=bytes.fromhex(saved['upload_key']))
+                await self.store.run(self.record_upload, claim)
                 items = [item]
             wire = await self.store.run(self.mark_sending, claim, items)
             await self.store.run(self.w.require_enabled, claim['account'])
