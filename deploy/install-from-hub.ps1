@@ -227,8 +227,13 @@ function Assert-CodePierUninstallRoot {
       ($MarkerItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Missing or unsafe cleanup recovery marker.' }
   $Marker = Get-Content -LiteralPath $MarkerPath -Encoding UTF8 -Raw | ConvertFrom-Json
   $Sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-  if ($Marker.schema -ne 1 -or $Marker.kind -cne 'codepier-local-uninstall' -or $Marker.stage -cnotin @('files_pending', 'files_failed') -or
-      [string]$Marker.source -ine $Source -or [string]$Marker.owner_sid -cne $Sid) { throw 'Cleanup recovery marker ownership changed.' }
+  if ($Marker.schema -ne 1 -or $Marker.kind -cne 'codepier-local-uninstall') { throw 'Cleanup recovery marker schema changed.' }
+  if ($Marker.stage -cnotin @('files_pending', 'files_failed')) { throw 'Cleanup recovery marker stage changed.' }
+  # Windows PowerShell/.NET can expand an existing 8.3 short path while
+  # Python preserves its spelling. Normalize both verified absolute paths.
+  $MarkerSource = Assert-CodePierPlainPath -Path ([string]$Marker.source)
+  if (-not [string]::Equals($MarkerSource, $Source, [StringComparison]::OrdinalIgnoreCase)) { throw 'Cleanup recovery marker source changed.' }
+  if ([string]$Marker.owner_sid -cne $Sid) { throw 'Cleanup recovery marker account SID changed.' }
   Assert-CodePierUninstallTree -Path $Source
   return $Source
 }
@@ -259,9 +264,10 @@ function Set-CodePierUninstallFailure {
   $Item = Get-Item -LiteralPath $File -Force -ErrorAction Stop
   if ($Item.PSIsContainer -or $Item.Length -gt 16384) { throw 'Unsafe cleanup failure marker.' }
   $Marker = Get-Content -LiteralPath $File -Encoding UTF8 -Raw | ConvertFrom-Json
-  if ($Marker.schema -ne 1 -or $Marker.kind -cne 'codepier-local-uninstall' -or
-      [string]$Marker.source -ine $Source -or
-      [string]$Marker.owner_sid -cne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value) { throw 'Cleanup failure marker ownership changed.' }
+  if ($Marker.schema -ne 1 -or $Marker.kind -cne 'codepier-local-uninstall') { throw 'Cleanup failure marker schema changed.' }
+  $MarkerSource = Assert-CodePierPlainPath -Path ([string]$Marker.source)
+  if (-not [string]::Equals($MarkerSource, $Source, [StringComparison]::OrdinalIgnoreCase)) { throw 'Cleanup failure marker source changed.' }
+  if ([string]$Marker.owner_sid -cne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value) { throw 'Cleanup failure marker account SID changed.' }
   $Marker | Add-Member -NotePropertyName stage -NotePropertyValue 'files_failed' -Force
   $SafeMessage = 'Local cleanup failed; inspect remaining paths and retry after closing file locks.'
   $Marker | Add-Member -NotePropertyName last_error -NotePropertyValue $SafeMessage -Force

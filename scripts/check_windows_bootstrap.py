@@ -157,6 +157,22 @@ def probe_uninstall_handoff(directory, executable):
     sid = re.search(rb'S-1-\d+(?:-\d+)+',
                     subprocess.check_output(['whoami.exe', '/user', '/fo', 'csv', '/nh'])).group().decode('ascii')
 
+    # Keep SID authority checks intact and diagnose path spelling separately.
+    # Windows TEMP may use an 8.3 path that .NET expands to its long spelling.
+    import base64
+    escaped_directory = str(directory).replace("'", "''")
+    identity_script = (
+        "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); "
+        "@{sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; "
+        "canonical_directory=[IO.Path]::GetFullPath('"+escaped_directory+"')} | ConvertTo-Json -Compress")
+    identity_run = subprocess.run([executable, '-NoLogo', '-NoProfile', '-NonInteractive',
+        '-EncodedCommand', base64.b64encode(identity_script.encode('utf-16-le')).decode('ascii')],
+        capture_output=True, text=True, encoding='utf-8', timeout=30, check=True)
+    identity = json.loads(identity_run.stdout)
+    assert identity['sid'] == sid, 'whoami and WindowsIdentity must identify the same fixture account'
+    identity_evidence = {'same_account_sid': True,
+                         'path_spelling_changed': identity['canonical_directory'].casefold() != str(directory).casefold()}
+
     def fixture(base):
         base.mkdir(exist_ok=True)
         if not (base/'config.json').exists():
@@ -185,7 +201,7 @@ def probe_uninstall_handoff(directory, executable):
         return subprocess.run(command, capture_output=True, timeout=30, env=env, cwd=cwd)
 
     results = []
-    for case in ('success', 'empty', 'cwd-inside-root', 'changed-config', 'wrong-lock', 'missing-snapshot',
+    for case in ('success', 'empty', 'cwd-inside-root', 'equivalent-source-spelling', 'changed-config', 'wrong-lock', 'missing-snapshot',
                  'extra-entry', 'path-traversal', 'duplicate-root', 'wrong-owner', 'partial-failure'):
         base = directory/('uninstall-'+case+" & $ [test]")
         roots = [] if case == 'empty' else [fixture(base)]
@@ -194,7 +210,11 @@ def probe_uninstall_handoff(directory, executable):
             other = directory/('uninstall-'+case+'-second')
             roots.append(fixture(other))
         plan = {'schema': 1, 'roots': roots, 'aliases': []}
-        if case == 'changed-config':
+        if case == 'equivalent-source-spelling':
+            marker = json.loads((base/'.uninstall.json').read_text())
+            marker['source'] = str(base/'runtime'/'..')
+            (base/'.uninstall.json').write_text(json.dumps(marker))
+        elif case == 'changed-config':
             (other/'config.json').write_text('{"changed":true}')
         elif case == 'wrong-lock':
             roots[0]['lock_token'] = 'c'*32
@@ -213,8 +233,8 @@ def probe_uninstall_handoff(directory, executable):
         held = base/'runtime/held.txt' if case == 'partial-failure' else None
         handoff = directory/('uninstall-'+case+'.json')
         result = invoke(plan, handoff, held, cwd=base if case == 'cwd-inside-root' else None)
-        success = case in {'success', 'empty', 'cwd-inside-root'}
-        assert (result.returncode == 0) == success, (case, result.stdout[-4000:], result.stderr[-4000:])
+        success = case in {'success', 'empty', 'cwd-inside-root', 'equivalent-source-spelling'}
+        assert (result.returncode == 0) == success, (case, identity_evidence, result.stdout[-4000:], result.stderr[-4000:])
         if success:
             assert not base.exists()
             if other:
@@ -231,7 +251,8 @@ def probe_uninstall_handoff(directory, executable):
                 plan['roots'] = [fixture(base)]
                 retry = invoke(plan, handoff)
                 assert retry.returncode == 0 and not base.exists(), (retry.stdout[-4000:], retry.stderr[-4000:])
-        results.append({'case': case, 'passed': True, 'exit_code': result.returncode})
+        results.append({'case': case, 'passed': True, 'exit_code': result.returncode,
+                        'identity_evidence': identity_evidence})
 
     # A junction pointing outside the owned root is refused without following it.
     outside = directory/'uninstall-outside'
