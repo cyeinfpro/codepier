@@ -19,6 +19,8 @@ Linux 还需 Playwright 对应系统依赖，可在隔离 CI 运行 install --wi
 
 依赖更新时修改 `.in`，显式运行 `python scripts/lock_requirements.py --exclude-newer YYYY-MM-DD`，审阅六份锁文件，再在新环境安装并测试。解析只允许 wheel，不执行源代码发行包的构建脚本。`--check` 仅对比，不覆盖。版本源是 `shared/util.py` 的 VERSION；RELEASE.json、README 当前版本、Compose 与 k3s 清单镜像、支持分支与生成资源由发布检查核对。LOCAL_RELEASE.json 仅是本地历史记录，不是当前源码或部署状态的权威。
 
+2026-10-12 的依赖维护保留原有完整依赖图，仅合入已审查的 Dependabot 固定版本与哈希。受影响锁文件分别记录基础解析截止日和后续 PR 更新来源，不把它们描述为按旧截止日重新解析的结果。后续需要重新解析整张依赖图时，仍须显式提供新的 `--exclude-newer` 日期并逐项审阅，不能为更新注释而引入未审阅的新版本。
+
 ## 前端构建与格式
 
 ```bash
