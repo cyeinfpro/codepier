@@ -22,7 +22,10 @@ window.CodePierCollaborationRelay = {
       onWorkspaceChange = () => {},
     } = ctx;
     let cleanup = null,
-      retryTimer = null;
+      retryTimer = null,
+      sizeFrame = 0,
+      selectionFrame = 0,
+      sizeMemo = null;
     const capable = () => !!state.snapshot?.capabilities?.native_dot_relay;
     const active = () => capable() && mentionSlots().some((s) => s.duplex);
     const focused = () => active();
@@ -96,6 +99,13 @@ window.CodePierCollaborationRelay = {
         })
         .join('');
     }
+    function evidenceProjection() {
+      // Execution evidence and its freshness can change without a message edit.
+      // Recompute only those bounded records, not every message's rich text.
+      const entries = Object.keys(chat().relayTaskStates || {}).sort()
+        .map((id) => [id, taskEvidence({ id })]).filter(([, markup]) => markup);
+      return { signature: JSON.stringify(entries), byMessage: new Map(entries) };
+    }
     function statuses(m) {
       const badges = (m.relay_receipts || [])
         .map(
@@ -149,27 +159,43 @@ window.CodePierCollaborationRelay = {
         if (holder._chatSource === undefined) holder.replaceChildren();
         chatRichMarkdown(holder, messageText(m));
       }
+      let deferred = false;
+      const quote = node.querySelector('.cc-relay-quote'),
+        nextQuote = next.querySelector('.cc-relay-quote');
+      if (quote?.outerHTML !== nextQuote?.outerHTML) {
+        if (quote && (quote.matches(':active') || quote.contains(document.activeElement)))
+          deferred = true;
+        else if (quote && nextQuote) quote.replaceWith(nextQuote);
+        else if (quote) quote.remove();
+        else if (nextQuote && holder) holder.before(nextQuote);
+      }
       for (const selector of [
         '.cc-message-meta',
         '.cc-relay-delivery',
         '.cc-relay-extra',
         '.cc-relay-attachments',
+        '.cc-message-actions',
       ]) {
         const old = node.querySelector(selector),
           fresh = next.querySelector(selector);
         if (
           !old ||
           !fresh ||
-          old.innerHTML === fresh.innerHTML ||
-          old.contains(document.activeElement)
+          old.innerHTML === fresh.innerHTML
         )
           continue;
-        const opened = old.querySelector('details')?.open;
+        if (old.matches(':active') || old.contains(document.activeElement)) {
+          deferred = true;
+          continue;
+        }
+        const opened = new Set([...old.querySelectorAll('details[open]')]
+          .map((detail) => detail.dataset.workId || detail.className));
         old.innerHTML = fresh.innerHTML;
-        if (opened && old.querySelector('details')) old.querySelector('details').open = true;
+        for (const detail of old.querySelectorAll('details'))
+          if (opened.has(detail.dataset.workId || detail.className)) detail.open = true;
       }
       node.dataset.version = String(m.version || 1);
-      return true;
+      return deferred ? 'defer' : true;
     }
     function toolbar() {
       return capable()
@@ -205,14 +231,22 @@ window.CodePierCollaborationRelay = {
       autosize();
     }
     function autosize() {
-      const area = document.querySelector('#cc-message-input');
-      if (!area || !active()) return;
-      const feed = document.querySelector('.cc-feed');
-      const bottom = feed && feed.scrollHeight - feed.clientHeight - feed.scrollTop < 70;
-      area.style.height = 'auto';
-      area.style.height = Math.min(180, Math.max(52, area.scrollHeight)) + 'px';
-      area.style.overflowY = area.scrollHeight > 180 ? 'auto' : 'hidden';
-      if (bottom) feed.scrollTop = feed.scrollHeight;
+      if (sizeFrame) return;
+      sizeFrame = requestAnimationFrame(() => {
+        sizeFrame = 0;
+        const area = document.querySelector('#cc-message-input');
+        if (!area || !active() || !area.getClientRects().length) return;
+        const width = area.clientWidth;
+        if (sizeMemo?.node === area && sizeMemo.value === area.value && sizeMemo.width === width) return;
+        sizeMemo = { node: area, value: area.value, width };
+        const feed = document.querySelector('.cc-feed');
+        const bottom = feed && feed.scrollHeight - feed.clientHeight - feed.scrollTop < 70;
+        area.style.height = 'auto';
+        const measured = area.scrollHeight;
+        area.style.height = Math.min(180, Math.max(52, measured)) + 'px';
+        area.style.overflowY = measured > 180 ? 'auto' : 'hidden';
+        if (bottom) feed.scrollTop = feed.scrollHeight;
+      });
     }
     function topicHint() {
       return active() && chat().relayAnchor
@@ -315,18 +349,15 @@ window.CodePierCollaborationRelay = {
       entry.phase = 'sent';
       entry.message = result.message;
       entry.anchor = null;
-      const c = entry.chat,
-        existing = c.messages.find((m) => m.id === result.message.id);
-      if (!existing) c.messages.push(result.message);
-      else if ((existing.version || 1) <= (result.message.version || 1))
-        Object.assign(existing, result.message);
-      c.messages.sort((a, b) => (a.server_sequence || 0) - (b.server_sequence || 0));
+      const c = entry.chat;
+      // An acknowledgement may arrive after navigation or before the sync feed.
+      // Update its own room immutably so indexed reads and render caches see it.
+      c.messages = window.CodePierCollaborationRuntime.merge(c.messages, [result.message]);
       c.relayOutbox = c.relayOutbox.filter((e) => e !== entry);
       if (visible(entry)) {
         patchTimeline();
         paintOutbox(c);
         patchDraftContext();
-        hydrate();
         onWorkspaceChange();
       }
     }
@@ -495,7 +526,6 @@ window.CodePierCollaborationRelay = {
           if (m) adopt(entry, { message: m });
         }
         patchTimeline();
-        hydrate();
         patchDelegationComposer();
         dots.refreshCards();
         onWorkspaceChange();
@@ -541,6 +571,10 @@ window.CodePierCollaborationRelay = {
     function detach() {
       cleanup?.();
       cleanup = null;
+      cancelAnimationFrame(sizeFrame);
+      cancelAnimationFrame(selectionFrame);
+      sizeFrame = selectionFrame = 0;
+      sizeMemo = null;
       clearTimeout(retryTimer);
       retryTimer = null;
     }
@@ -567,10 +601,28 @@ window.CodePierCollaborationRelay = {
         }
       };
 
+      let selectedMessage = false;
       const select = () => {
-        if (active() && !state.busy && root.isConnected && window.getSelection()?.isCollapsed)
-          patchTimeline();
+        const selection = window.getSelection();
+        const timeline = root.querySelector('.cc-message-list');
+        if (selection && !selection.isCollapsed) {
+          selectedMessage = !!timeline?.contains(selection.anchorNode);
+          return;
+        }
+        // Caret movement and IME inside the composer must never repaint history.
+        if (!selectedMessage) return;
+        selectedMessage = false;
+        if (selectionFrame) return;
+        selectionFrame = requestAnimationFrame(() => {
+          selectionFrame = 0;
+          if (active() && !state.busy && root.isConnected && !root.inert &&
+              window.getSelection()?.isCollapsed) patchTimeline();
+        });
       };
+      const area = root.querySelector('#cc-message-input');
+      const sizeObserver = area && typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(autosize) : null;
+      sizeObserver?.observe(area);
       window.addEventListener('online', wake);
       document.addEventListener('visibilitychange', wake);
       document.addEventListener('selectionchange', select);
@@ -594,6 +646,7 @@ window.CodePierCollaborationRelay = {
         window.removeEventListener('online', wake);
         document.removeEventListener('visibilitychange', wake);
         document.removeEventListener('selectionchange', select);
+        sizeObserver?.disconnect();
       };
       void drain(chat());
     }
@@ -645,6 +698,7 @@ window.CodePierCollaborationRelay = {
       capable,
       isRelayMessage,
       renderMessage,
+      evidenceProjection,
       hydrate,
       patchMessage,
       toolbar,
