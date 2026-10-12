@@ -78,9 +78,13 @@ def test_collaboration_panel_complete_readonly_flow(collaboration_stack, chat_br
         assert overview['jobs'][0]['delivery_status'] == 'manual_claim_required'
         page.screenshot(path=str(screenshots / f'{engine}-discussion-desktop.png'), full_page=True)
         page.locator('[data-cc-view="jobs"]').click()
-        expect(page.locator('.cc-main')).to_contain_text('待人工领取')
-        page.locator('[data-cc-detail="job"] summary').click()
-        expect(page.locator('.cc-detail')).to_contain_text('fencing_token')
+        records = page.locator('#cc-workspace-panel .cc-legacy-tasks')
+        expect(records).not_to_have_attribute('open', '')
+        records.locator(':scope > summary').click()
+        expect(records).to_have_attribute('open', '')
+        expect(records).to_contain_text('待人工领取')
+        records.locator('[data-cc-detail="job"] > summary').click()
+        expect(records.locator('.cc-detail')).to_contain_text('fencing_token')
         page.locator('[data-cc-view="monitor"]').click()
         page.get_by_text('登记固定只读探针', exact=True).click()
         page.locator('#cc-probe [name="label"]').fill('只读健康入口')
@@ -113,7 +117,11 @@ def test_collaboration_panel_complete_readonly_flow(collaboration_stack, chat_br
             page.set_viewport_size({'width': width, 'height': 844})
             for view in ('discussion', 'jobs', 'monitor', 'agents'):
                 page.locator(f'[data-cc-view="{view}"]').click()
-                expect(page.locator(f'[data-cc-view="{view}"]')).to_have_attribute('aria-pressed', 'true')
+                # Monitoring is nested under tasks, not a duplicate primary tab.
+                selected = 'jobs' if view == 'monitor' else view
+                expect(page.locator(f'.cc-workspace-nav [data-cc-view="{selected}"]')).to_have_attribute('aria-pressed', 'true')
+                if view != 'discussion':
+                    expect(page.locator(f'#cc-workspace-panel [data-cc-panel="{view}"]')).to_be_visible()
                 expect(page.locator('.cc-main')).to_be_visible()
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), (engine, width, view)
             page.evaluate('window.scrollTo(0, 0)')

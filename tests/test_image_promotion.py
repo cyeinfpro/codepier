@@ -361,6 +361,9 @@ def test_identity_binds_complete_source_and_clean_workflow(monkeypatch, tmp_path
     workflow = tmp_path / m.WORKFLOW
     workflow.parent.mkdir(parents=True)
     workflow.write_text("synthetic workflow")
+    # This tests source identity, not the outer CI dispatch event. Dedicated
+    # dispatch tests below retain the candidate-ref and empty-input checks.
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "push")
     monkeypatch.setenv("GITHUB_SHA", "a" * 7 if change == "short-sha" else SHA)
     monkeypatch.setenv("GITHUB_REPOSITORY", "example/codepier")
     def command(*args, **kwargs):
