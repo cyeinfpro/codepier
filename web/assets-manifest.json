@@ -127,8 +127,8 @@
       "bytes": 9391
     },
     "core/bundle.js": {
-      "sha256": "b3276a8a99f2544cb41e2086a0a35fab53c177837bb5c244f48104944e38024a",
-      "bytes": 23795
+      "sha256": "60c5d2efb78583a422871a5b2df56ad12c23f8e42a174538b057804da80d8c38",
+      "bytes": 24120
     },
     "experience.css": {
       "sha256": "b3477fa412294b4707ab44854d04dd505e4ff6593c7660814ace4b14ceb44485",
@@ -211,8 +211,8 @@
       "bytes": 6635
     },
     "styles.css": {
-      "sha256": "5875180cda4f60237acf32a78e534da988139ee00b5b0991b90b983b609d180d",
-      "bytes": 80624
+      "sha256": "576f0c90d0293767ccc7080bf1789e1ed97bd2b25f8382af4ee540024000ef64",
+      "bytes": 80883
     },
     "token-usage.css": {
       "sha256": "52d1221e75e7c4bfd7eb8683e2affa4e78d46839fa978e1d0cc806506031672c",

@@ -1,6 +1,7 @@
 """Real settings, consent and existing-grant editing in Chromium and WebKit."""
 import base64
 import hashlib
+import sys
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -208,13 +209,25 @@ def test_grants_compact_history_pagination_and_project_disclosure(access_page, s
     expect(history.locator('.grant-row')).to_have_count(0)
     pager.get_by_role('button', name='上一页').click()
     screenshots = Path('.work/grant-list/screenshots'); screenshots.mkdir(parents=True, exist_ok=True)
-    for width in [320, 390, 1280]:
+    for width in [320, 360, 390, 640, 768, 1280]:
         page.set_viewport_size({'width': width, 'height': 900})
         assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
-        for button in current.locator('.actions button').all():
-            rect = button.bounding_box()
-            assert rect and rect['width'] >= 40 and rect['x'] >= 0 and rect['x'] + rect['width'] <= width
-        if width != 320:
+        for row in current.locator('.grant-row').all():
+            row_rect = row.bounding_box()
+            for button in row.locator('.actions button').all():
+                rect = button.bounding_box()
+                assert rect and rect['width'] >= 40 and rect['x'] >= 0 and rect['x'] + rect['width'] <= width
+                assert row_rect and rect['x'] >= row_rect['x'] - 1
+                assert rect['x'] + rect['width'] <= row_rect['x'] + row_rect['width'] + 1
+        # All three controls remain keyboard reachable after narrow-screen wrapping.
+        actions = current.locator('.grant-row').first.locator('.actions button')
+        actions.first.focus()
+        # Safari on macOS uses Option-Tab to include buttons in native tab order.
+        tab = 'Alt+Tab' if kind == 'webkit' and sys.platform == 'darwin' else 'Tab'
+        for index in range(1, actions.count()):
+            page.keyboard.press(tab)
+            expect(actions.nth(index)).to_be_focused()
+        if width in [320, 390, 1280]:
             panel.screenshot(path=str(screenshots / f'{kind}-grants-{width}.png'))
     # When the last current grants disappear, pagination clamps and history remains available.
     for grant in grants:

@@ -2435,7 +2435,9 @@ input[type='checkbox'] {
   min-width: 0;
 }
 .grant-row > .actions {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
   flex-wrap: wrap;
 }
 .grant-row h3 {
@@ -4301,9 +4303,19 @@ button.ui-busy {
     max-height: 32dvh;
   }
 }
-body:has(.modal) #toasts {
-  top: max(12px, env(safe-area-inset-top));
-  bottom: auto;
+/* Keep dialog notices in layout and inside its keyboard focus boundary. */
+.modal > #toasts {
+  position: static;
+  flex: none;
+  max-width: 100%;
+  max-height: min(25dvh, 180px);
+  margin: 12px var(--ui-panel-inset);
+}
+.modal > #toasts:empty {
+  display: none;
+}
+.modal > #toasts .toast {
+  box-shadow: none;
 }
 @media (prefers-reduced-motion: reduce) {
   *,

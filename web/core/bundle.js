@@ -191,8 +191,11 @@ var CP = (() => {
       clearTimeout(timer);
       const focused = node.contains(document.activeElement);
       node.remove();
-      if (focused && origin?.isConnected && origin.getClientRects().length && !origin.closest("[inert]"))
-        origin.focus({ preventScroll: true });
+      if (focused) {
+        const dialog = $(".modal");
+        const target = origin?.isConnected && origin.getClientRects().length && !origin.closest("[inert]") && (!dialog || dialog.contains(origin)) ? origin : dialog;
+        target?.focus({ preventScroll: true });
+      }
     };
     const stop = () => {
       if (timer) {
@@ -336,6 +339,8 @@ var CP = (() => {
       S.modalIntent = (S.modalIntent || 0) + 1;
       if (S.modalCleanup) S.modalCleanup();
       S.modalCleanup = null;
+      const toasts = $("#toasts");
+      if (toasts?.closest(".modal")) $("#modal-root").after(toasts);
       $("#modal-root").innerHTML = "";
       $("#app").inert = false;
       document.body.style.overflow = $(".sidebar.open") ? "hidden" : "";
@@ -362,6 +367,8 @@ var CP = (() => {
       document.body.style.overflow = "hidden";
       $("#app").inert = true;
       const dialog = $(".modal");
+      const toasts = $("#toasts");
+      if (toasts) $(".modal-header", dialog).after(toasts);
       const complex = dialog.querySelector(
         '#role-form,#profile-form,#vps-form,#project-form,#device-form,#device-rename,#agent-command-form,#grant-form,#workflow-create-form,#workflow-update-form,#artifact-form,.gw-tools,#gw-form [name="networks"],#iam-issuer,#iam-group_name'
       );

@@ -3,6 +3,7 @@ from pathlib import Path
 from scripts.check_release import check_web_assets
 from shared.util import VERSION
 import time
+import sys
 
 import pytest
 from playwright.sync_api import expect, sync_playwright
@@ -196,6 +197,83 @@ def test_long_modal_layout_targets_and_focus(stack, engine, scheme, width, heigh
         page.screenshot(path=str(OUT / f"{engine}-{scheme}-{width}-modal.png"), animations="disabled")
         page.keyboard.press("Escape")
         expect(page.locator(".modal")).to_have_count(0)
+        browser.close()
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+@pytest.mark.parametrize("width,height", [(320, 568), (390, 844), (768, 1024), (1440, 1000), (667, 375)])
+def test_dialog_toasts_preserve_controls_keyboard_access_and_pending_errors(stack, engine, width, height):
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        page.emulate_media(reduced_motion="reduce")
+        _login(page, stack, "settings")
+        # Safari on macOS uses Option-Tab to include buttons in native tab order.
+        tab = "Alt+Tab" if engine == "webkit" and sys.platform == "darwin" else "Tab"
+        page.evaluate("""() => {
+          window.qaNotice=toast('完成步骤必须关联至少一个本轮成功操作，并说明验收结论',true);
+          const body='<input id="qa-toast-origin" aria-label="验收结论">'+
+            '<p>长内容需要保持可滚动，错误提示不能遮挡关闭或保存控件。</p>'.repeat(30);
+          modal('提示与操作仍可访问',body,buttons('qa-toast-save','保存'),true);
+        }""")
+        alert = page.get_by_role("alert")
+
+        def assert_notice_visible():
+            notice_box = page.locator("#toasts").bounding_box()
+            alert_box = alert.bounding_box()
+            dismiss_box = alert.get_by_role("button", name="关闭提示").bounding_box()
+            assert notice_box and alert_box and dismiss_box
+            assert alert_box["y"] >= notice_box["y"] - 1
+            assert alert_box["y"] + alert_box["height"] <= notice_box["y"] + notice_box["height"] + 1
+            assert dismiss_box["y"] >= notice_box["y"] - 1
+            assert dismiss_box["y"] + dismiss_box["height"] <= notice_box["y"] + notice_box["height"] + 1
+
+        expect(alert).to_contain_text("成功操作")
+        expect(page.locator(".modal #toasts")).to_have_count(1)
+        assert_notice_visible()
+        expect(page.locator("#qa-toast-origin")).to_be_focused()
+        header = page.locator(".modal-header").bounding_box()
+        notices = page.locator("#toasts").bounding_box()
+        footer = page.locator(".modal-footer").bounding_box()
+        assert header and notices and footer
+        assert notices["y"] >= header["y"] + header["height"] - 1
+        assert notices["y"] + notices["height"] <= footer["y"] + 1
+        assert footer["y"] + footer["height"] <= height + 1
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        # The first Tab after the dialog close control must reach its notice,
+        # even when that error came from a previous, now-inert screen.
+        close = page.locator('.modal-header [data-action="close-modal"]')
+        close.focus()
+        page.keyboard.press(tab)
+        expect(alert.get_by_role("button", name="关闭提示")).to_be_focused()
+        page.keyboard.press("Enter")
+        expect(alert).to_have_count(0)
+        expect(page.locator(".modal")).to_be_focused()
+        page.keyboard.press(tab)
+        expect(close).to_be_focused()
+        # An error from this dialog returns focus to the field that raised it.
+        page.locator("#qa-toast-origin").focus()
+        page.evaluate("toast('当前输入仍需修正：完成步骤必须关联至少一个本轮成功操作，并说明验收结论',true)")
+        assert_notice_visible()
+        close.focus()
+        page.keyboard.press(tab)
+        expect(alert.get_by_role("button", name="关闭提示")).to_be_focused()
+        page.keyboard.press("Enter")
+        expect(page.locator("#qa-toast-origin")).to_be_focused()
+        # Replacement and dismissal preserve outstanding errors and their nodes.
+        page.evaluate("""() => {
+          window.qaNotice=toast('错误保留直到明确关闭',true);
+          modal('替换后的窗口','<p>仍需核对错误</p>',buttons('qa-toast-save','保存'));
+        }""")
+        expect(alert).to_contain_text("错误保留直到明确关闭")
+        assert page.evaluate("document.querySelector('.toast') === window.qaNotice")
+        assert_notice_visible()
+        page.locator('.modal-header [data-action="close-modal"]').click()
+        expect(page.locator(".modal")).to_have_count(0)
+        expect(alert).to_be_visible()
+        assert page.evaluate("document.querySelector('.toast') === window.qaNotice")
+        alert.get_by_role("button", name="关闭提示").click()
+        expect(alert).to_have_count(0)
         browser.close()
 
 

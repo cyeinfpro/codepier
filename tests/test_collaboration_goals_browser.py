@@ -358,36 +358,87 @@ def test_goal_work_cards_show_real_fixture_operations_results_and_dependencies(c
 
 
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
-def test_goal_all_pages_and_stale_page_cannot_replace_new_navigation(collaboration_stack, chat_browser_pool, engine):
+@pytest.mark.parametrize('refresh_source', ['workspace', 'background'])
+def test_goal_all_pages_and_stale_page_cannot_replace_new_navigation(collaboration_stack, chat_browser_pool, engine, refresh_source):
     stack = collaboration_stack
     context = chat_browser_pool(engine).new_context(viewport={'width': 1440, 'height': 900})
     page = context.new_page()
-    # Observe the real workspace callback without changing its return value or
-    # scheduling. Navigation can abort its read, so requestfinished is not a
-    # completion barrier; the callback promise settles in both cases.
+    # A workspace callback and the periodic poll can overlap. Observe the load
+    # that actually owns the held page, rather than the latest onOpen promise.
+    # Hold the real response at the loader boundary so navigation's AbortSignal
+    # cannot hide whether the loader rejects an already received stale payload.
     page.add_init_script("""(() => {
-      let workspaceModule;
-      Object.defineProperty(window, 'CodePierCollaborationWorkspace', {
-        configurable: true,
-        get: () => workspaceModule,
-        set: (value) => {
-          const create = value.create;
-          value.create = function(options, ...args) {
-            const observed = {
-              ...options,
-              onOpen: function(...openArgs) {
-                const pending = Reflect.apply(options.onOpen, this, openArgs);
-                const record = {promise: pending, settled: false};
-                window.goalWorkspaceRefresh = record;
-                if (pending && typeof pending.then === 'function')
-                  pending.then(() => { record.settled = true; }, () => { record.settled = true; });
-                return pending;
-              },
-            };
-            return Reflect.apply(create, this, [observed, ...args]);
-          };
-          workspaceModule = value;
-        },
+      const observeModule = (name, wrap) => {
+        let module;
+        Object.defineProperty(window, name, {
+          configurable: true,
+          get: () => module,
+          set: (value) => {
+            value.create = wrap(value.create);
+            module = value;
+          },
+        });
+      };
+      const observePromise = (pending, record = {}) => {
+        Object.assign(record, {promise: pending, settled: false});
+        pending.then(() => { record.settled = true; }, () => { record.settled = true; });
+        return record;
+      };
+      // Keep real timers unchanged. The background case advances the actual
+      // scheduled collaboration poll explicitly, without sleeping for its delay.
+      const timers = new Map();
+      const setTimeout = window.setTimeout;
+      window.setTimeout = function(callback, delay, ...args) {
+        const id = Reflect.apply(setTimeout, this, [callback, delay, ...args]);
+        timers.set(id, () => callback(...args));
+        return id;
+      };
+      observeModule('CodePierCollaborationWorkspace', (create) => function(options, ...args) {
+        return Reflect.apply(create, this, [{...options, onOpen(...openArgs) {
+          const pending = Reflect.apply(options.onOpen, this, openArgs);
+          if (pending) window.goalWorkspaceRefresh = observePromise(pending);
+          return pending;
+        }}, ...args]);
+      });
+      observeModule('CodePierCollaborationGoals', (create) => function(options, ...args) {
+        let readOwner;
+        window.heldGoalPageRefreshes = [];
+        window.runGoalBackgroundRefresh = () => {
+          const poll = timers.get(options.state.timer);
+          if (!poll) throw new Error('No scheduled collaboration poll');
+          clearTimeout(options.state.timer);
+          window.goalBackgroundRefresh = poll();
+        };
+        const goals = Reflect.apply(create, this, [{...options, getRecord(...readArgs) {
+          const pending = Reflect.apply(options.getRecord, this, readArgs);
+          if (window.holdGoalPages && readArgs[0] === 'coordination_goals' && readArgs[2]) {
+            const record = readOwner;
+            const gate = new Promise((resolve) => { record.release = resolve; });
+            record.response = pending;
+            record.cursor = readArgs[2];
+            pending.then((response) => { record.payload = response; });
+            window.heldGoalPageRefreshes.push(record);
+            return pending.then((response) => gate.then(() => {
+              record.delivered = true;
+              return response;
+            }));
+          }
+          return pending;
+        }}, ...args]);
+        window.goalListMarkup = () => goals.list();
+        const load = goals.load;
+        goals.load = function(snapshot, sourceCurrent = () => true) {
+          const record = {promise: null, settled: false};
+          const pending = Reflect.apply(load, this, [snapshot, (...currentArgs) => {
+            // load checks sourceCurrent synchronously just before each page.
+            // This identifies its owner even when another refresh overlaps.
+            readOwner = record;
+            return Reflect.apply(sourceCurrent, this, currentArgs);
+          }]);
+          observePromise(pending, record);
+          return pending;
+        };
+        return goals;
       });
     })();""")
     try:
@@ -400,40 +451,58 @@ def test_goal_all_pages_and_stale_page_cannot_replace_new_navigation(collaborati
                  coordinator_grant_id=stack.grant, capabilities=['read'])
         open_goals(page)
         expect(page.locator('.cc-coordination-list .cc-goal-summary')).to_have_count(31)
-        held = []
-
-        def delay_second_page(route):
-            query = parse_qs(urlsplit(route.request.url).query)
-            if query.get('kind') == ['coordination_goals'] and query.get('cursor') and not held:
-                held.append(route)
-                page.locator('html').evaluate('(n) => n.dataset.goalPageHeld = "yes"')
-            else:
-                route.continue_()
-
-        page.route('**/api/collaboration?*', delay_second_page)
-        with page.expect_request(lambda request: parse_qs(urlsplit(request.url).query).get('kind') == ['coordination_goals']
-                                 and bool(parse_qs(urlsplit(request.url).query).get('cursor'))):
+        page.evaluate('async () => { await window.goalWorkspaceRefresh.promise; }')
+        first_page = read(stack, 'coordination_goals', limit=30)
+        held_goal = read(stack, 'coordination_goals', cursor=first_page['next_cursor'], limit=30)['items'][0]
+        # Gate every concurrent second page before changing real backend data.
+        # No competing poll can publish this newer payload before navigation.
+        page.evaluate('window.holdGoalPages = true')
+        updated_objective = '第二页刷新后只允许当前范围接收的目标'
+        post(stack, 'goal-update', **{**goal_payload(held_goal), 'objective': updated_objective},
+             goal_id=held_goal['id'], expected_version=held_goal['version'])
+        if refresh_source == 'background':
+            page.evaluate('window.runGoalBackgroundRefresh()')
+        else:
             page.locator('[data-cc-view="discussion"]').click()
-        expect(page.locator('html')).to_have_attribute('data-goal-page-held', 'yes')
-        assert len(held) == 1
-        # Freeze the old page snapshot before navigating to a new scope.
-        page_response = held[0].fetch()
-        assert page_response.ok, page_response.status
-        page.evaluate('() => { window.heldGoalPageRefresh = window.goalWorkspaceRefresh; }')
+        page.wait_for_function("""(objective) => window.heldGoalPageRefreshes.some(
+          (record) => record.payload?.items.some((goal) => goal.objective === objective)
+        )""", arg=updated_objective)
+        page.evaluate("""(objective) => {
+          window.heldGoalPageRefresh = window.heldGoalPageRefreshes.find(
+            (record) => record.payload?.items.some((goal) => goal.objective === objective));
+        }""", updated_objective)
+        # Freeze the actual second-page payload before navigating away.
+        page_response = page.evaluate('async () => await window.heldGoalPageRefresh.response')
+        assert len(page_response['items']) == 1
+        assert page_response['items'][0]['objective'] == updated_objective
         assert page.evaluate('typeof window.heldGoalPageRefresh?.promise?.then') == 'function'
         assert page.evaluate('window.heldGoalPageRefresh.settled') is False
+        if refresh_source == 'background':
+            # Deterministically reproduce the original fixture's false premise:
+            # onOpen has settled while a different real goal load is still held.
+            assert page.evaluate('window.goalWorkspaceRefresh.settled') is True
         page.evaluate("navigate('projects')")
         expect(page.locator('#page h1')).to_have_text('项目映射')
-        held[0].fulfill(response=page_response)
-        page.evaluate('async () => { await window.heldGoalPageRefresh.promise; }')
+        markup_after_navigation = page.evaluate('window.goalListMarkup()')
+        page.evaluate("""async () => {
+          window.holdGoalPages = false;
+          await Promise.all(window.heldGoalPageRefreshes.map((record) => {
+            record.release();
+            return record.promise;
+          }));
+          await window.goalBackgroundRefresh;
+          await window.goalWorkspaceRefresh.promise;
+        }""")
+        assert page.evaluate('window.heldGoalPageRefresh.delivered') is True
         assert page.evaluate('window.heldGoalPageRefresh.settled') is True
-        page.unroute('**/api/collaboration?*', delay_second_page)
+        assert page.evaluate('window.goalListMarkup()') == markup_after_navigation
         expect(page.locator('#page h1')).to_have_text('项目映射')
         expect(page.locator('.cc-coordination-list')).to_have_count(0)
         page.go_back()
         expect(page.locator('#cc-message-input')).to_be_enabled()
         open_goals(page)
         expect(page.locator('.cc-coordination-list .cc-goal-summary')).to_have_count(31)
+        expect(page.locator('.cc-coordination-list')).to_contain_text(updated_objective)
     finally:
         context.close()
 
