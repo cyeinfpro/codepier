@@ -12,7 +12,7 @@ import uuid
 
 from hub.collaboration.common import canonical, digest, redact, validate
 from hub.collaboration import weixin_schema as models
-from hub.collaboration.weixin_protocol import API_BASE, ITEM_NAMES, MAX_JSON, WeixinClient, approved_url, safe_filename, text, uint64
+from hub.collaboration.weixin_protocol import API_BASE, ITEM_NAMES, MAX_JSON, WeixinClient, approved_url, safe_filename, text, uint64, validate_updates
 from hub.principal import Principal, refresh_principal
 from hub.room_scope import snapshot as project_snapshot
 from shared.util import DevError
@@ -80,6 +80,8 @@ class WeixinService:
         allowed = {'active', 'pairing', 'awaiting_owner'} if pairing else {'active'}
         if not binding or binding['state'] not in allowed or binding['expires_at'] <= self.c.clock():
             raise DevError('WEIXIN_BINDING_INACTIVE', '原微信绑定已暂停、撤销或到期', 403)
+        if binding['state'] == 'pairing' and binding['pairing_until'] <= self.c.clock():
+            raise DevError('WEIXIN_PAIRING_EXPIRED', '配对码已到期；原登录凭据保留，请在面板明确撤销后重新绑定', 403)
         value = json.loads(binding['owner_principal'])
         value['scopes'] = set(value['scopes'])
         owner = refresh_principal(self.store, Principal(**value))
@@ -307,12 +309,8 @@ class WeixinService:
             binding, account, owner, room, dot = self.valid(claim['binding_id'], pairing=True)
             if binding['version'] != claim['binding_version'] or binding['generation'] != claim['generation']:
                 raise DevError('WEIXIN_BINDING_CHANGED', '轮询期间房间绑定变化，丢弃旧批次且不前移游标', 409)
-            if type(response.get('ret')) is not int or response['ret'] != 0 or type(response.get('errcode', 0)) is not int or response.get('errcode', 0) != 0:
-                raise DevError('WEIXIN_UPDATES_REJECTED', '收件批次没有成功，原游标不变', 502)
-            messages, cursor = response.get('msgs', []), response.get('get_updates_buf')
-            if not isinstance(messages, list) or len(messages) > 100:
-                raise DevError('WEIXIN_BATCH_LIMIT', '收件批次超过上限', 413)
-            text(cursor, 65536, empty=True)
+            validate_updates(response)
+            messages, cursor = response.get('msgs', []), response.get('get_updates_buf', '')
             if len(canonical(response).encode()) > MAX_JSON:
                 raise DevError('WEIXIN_BATCH_LIMIT', '收件批次字节超过上限', 413)
             received = []
@@ -367,6 +365,8 @@ class WeixinService:
             raise DevError('WEIXIN_ITEMS_INVALID', '外部消息分项超过上限', 422)
         echo = bool(message.get('client_id') and (self.store.one('SELECT 1 FROM weixin_parts WHERE client_id=?', (message['client_id'],)) or self.store.one("SELECT 1 FROM channel_mirror_parts WHERE 'cpm-' || id=?", (message['client_id'],))))
         direct = not message.get('group_id') and type(message.get('message_type')) is int and message['message_type'] == 1 and not echo and peer != account['bot_id']
+        if direct and message.get('to_user_id') not in (None, '', account['bot_id']):
+            raise DevError('WEIXIN_RECEIVER_MISMATCH', '微信应答接收机器人不属于原绑定', 409)
         if not direct:
             disposition = 'group_or_echo_quarantined'
         elif binding['state'] == 'pairing' and binding['pairing_until'] > self.c.clock():
@@ -376,8 +376,6 @@ class WeixinService:
                                    (peer, self.c.clock(), binding['id']))
                 disposition = 'pairing_waits_for_panel_owner'
         elif binding['state'] == 'active' and hmac.compare_digest(peer, binding['peer_id']):
-            if message.get('to_user_id') not in (None, '', account['bot_id']):
-                raise DevError('WEIXIN_RECEIVER_MISMATCH', '微信应答接收机器人不属于原绑定', 409)
             body_text, attachment_items = [], []
             for index, item in enumerate(items):
                 if not isinstance(item, dict) or type(item.get('type')) is not int:
@@ -457,6 +455,14 @@ class WeixinService:
             if not row or row['poll_owner'] != claim['poll_owner'] or row['poll_fence'] != claim['poll_fence']:
                 return
             code = error.code if isinstance(error, DevError) else type(error).__name__
+            if code in {'WEIXIN_POLL_IDLE', 'WEIXIN_POLL_FENCE_LOST', 'WEIXIN_POLL_CANCELLED',
+                        'WEIXIN_BINDING_CHANGED', 'WEIXIN_PAIRING_EXPIRED'}:
+                # Expected idle/read timeout and obsolete local leases are not
+                # credential failures. Never advance a cursor, fabricate sync
+                # success, or let an old claim overwrite its replacement.
+                self.store.execute('UPDATE weixin_accounts SET reason_code=?,next_poll=?,poll_until=0,updated=? WHERE id=?',
+                    (code, self.c.clock() + 2, self.c.clock(), row['id']))
+                return
             permanent = isinstance(error, DevError) and error.status in {401, 403, 409, 422}
             failures = min(row['failures'] + 1, 10)
             delay = min(3600, 5 * 2 ** failures) + secrets.randbelow(6)

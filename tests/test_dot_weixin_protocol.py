@@ -88,7 +88,6 @@ def test_send_has_no_hidden_retries_or_delivery_claim():
     (WireReply(200, b'{"ret":0,"errcode":123}'), 'WEIXIN_SEND_UNCONFIRMED'),
     (WireReply(200, b'{"ret":0,"errcode":"0"}'), 'WEIXIN_SEND_UNCONFIRMED'),
     (WireReply(200, b'{"ret":0,"errcode":false}'), 'WEIXIN_SEND_UNCONFIRMED'),
-    (WireReply(200, b'{}'), 'WEIXIN_SEND_UNCONFIRMED'),
 ])
 def test_wire_errors_preserve_uncertainty(response, code):
     async def transport(*args, **kwargs):
@@ -114,3 +113,150 @@ def test_cdn_upload_has_different_media_type_map_and_requires_receipt_header():
     assert item['file_item']['file_name'] == 'report.txt'
     assert calls[1][1] == {'Content-Type': 'application/octet-stream'}  # no API token to CDN
     assert item['file_item']['media']['encrypt_query_param'] == 'encrypted-result'
+
+
+@pytest.mark.parametrize('response', [
+    {'msgs': [], 'get_updates_buf': 'opaque-new'},
+    {'errcode': 0, 'msgs': [], 'get_updates_buf': 'opaque-new'},
+    {'ret': 0}, {'errcode': 0}, {},
+])
+def test_getupdates_accepts_optional_success_fields_and_preserves_envelope(response):
+    async def transport(*args, **kwargs):
+        return WireReply(200, json.dumps(response).encode())
+    result = asyncio.run(WeixinClient(token='fixture', transport=transport).updates('opaque-old'))
+    assert result == response
+
+
+@pytest.mark.parametrize('response', [
+    {'ret': None}, {'ret': False}, {'ret': '0'}, {'ret': 0.0},
+    {'errcode': None}, {'errcode': False}, {'errcode': '0'},
+    {'msgs': None}, {'msgs': {}}, {'msgs': [None] * 101},
+    {'get_updates_buf': None}, {'get_updates_buf': 123},
+])
+def test_getupdates_rejects_explicit_invalid_fields(response):
+    async def transport(*args, **kwargs):
+        return WireReply(200, json.dumps(response).encode())
+    with pytest.raises(DevError):
+        asyncio.run(WeixinClient(token='fixture', transport=transport).updates('opaque-old'))
+
+
+@pytest.mark.parametrize('response', [{}, {'message_id': 'opaque-receipt'}, {'errcode': 0}])
+def test_send_accepts_omitted_success_ret_without_claiming_delivery(response):
+    calls = []
+    async def transport(*args, **kwargs):
+        calls.append(args)
+        return WireReply(200, json.dumps(response).encode())
+    result = asyncio.run(WeixinClient(token='fixture', transport=transport).send(
+        'peer', 'context', 'original-client-id', [{'type': 1}]))
+    assert result['provider_state'] == 'accepted'
+    assert result['delivered_verified'] is False and result['read_verified'] is False
+    assert len(calls) == 1
+
+
+def test_getupdates_idle_read_timeout_has_dedicated_recoverable_code():
+    import httpx
+    async def transport(*args, **kwargs):
+        assert kwargs['timeout'] == 50
+        assert kwargs['read_timeout'] == 35
+        raise httpx.ReadTimeout('synthetic idle long poll')
+    with pytest.raises(DevError) as caught:
+        asyncio.run(WeixinClient(token='fixture', transport=transport).updates('opaque-old'))
+    assert caught.value.code == 'WEIXIN_POLL_IDLE'
+    assert caught.value.status == 503
+
+
+def test_getupdates_total_deadline_is_not_assumed_to_be_an_idle_read():
+    async def transport(*args, **kwargs):
+        raise asyncio.TimeoutError('synthetic total deadline')
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(WeixinClient(token='fixture', transport=transport).updates('opaque-old'))
+
+
+@pytest.mark.parametrize('kind', ['connect', 'write', 'pool'])
+def test_getupdates_other_timeouts_still_follow_failure_backoff(kind):
+    import httpx
+    error = {'connect': httpx.ConnectTimeout, 'write': httpx.WriteTimeout, 'pool': httpx.PoolTimeout}[kind]
+    async def transport(*args, **kwargs):
+        raise error('synthetic transport failure')
+    with pytest.raises(error):
+        asyncio.run(WeixinClient(token='fixture', transport=transport).updates('opaque-old'))
+
+
+@pytest.mark.parametrize('total,read,expected', [(40, None, 40), (50, 35, 35), (60, None, 60), (3, 35, 3)])
+def test_public_transport_bounds_setup_without_changing_other_read_budgets(monkeypatch, total, read, expected):
+    from hub.collaboration import weixin_protocol as protocol
+    deadlines, clients = [], []
+
+    class Deadline:
+        def __init__(self, seconds):
+            deadlines.append(seconds)
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            return False
+
+    class Response:
+        status_code = 200
+        headers = {}
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            return False
+        async def aiter_raw(self):
+            yield b'{}'
+
+    class Client:
+        def __init__(self, **kwargs):
+            clients.append(kwargs)
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            return False
+        def stream(self, method, pinned, **kwargs):
+            assert pinned.startswith('https://203.0.113.1/')
+            assert kwargs['headers']['Host'] == 'ilinkai.weixin.qq.com'
+            assert kwargs['extensions']['sni_hostname'] == 'ilinkai.weixin.qq.com'
+            return Response()
+
+    async def destination(url):
+        return 'https://203.0.113.1/ilink/bot/getupdates', 'ilinkai.weixin.qq.com', 'ilinkai.weixin.qq.com'
+
+    monkeypatch.setattr(protocol.asyncio, 'timeout', Deadline)
+    monkeypatch.setattr(protocol.httpx, 'AsyncClient', Client)
+    monkeypatch.setattr(protocol, 'callback_destination', destination)
+    result = asyncio.run(protocol.public_transport(
+        'POST', API_BASE + '/ilink/bot/getupdates', {}, b'{}', timeout=total, read_timeout=read))
+    assert result.status == 200 and result.body == b'{}'
+    assert deadlines == [total, min(5, total)]
+    limits = clients[0]['timeout']
+    assert limits.read == expected
+    assert limits.connect == limits.write == limits.pool == min(5, total)
+    assert clients[0]['follow_redirects'] is False and clients[0]['trust_env'] is False
+
+
+def test_getupdates_dns_timeout_keeps_failure_classification(monkeypatch):
+    from hub.collaboration import weixin_protocol as protocol
+    async def destination(url):
+        raise asyncio.TimeoutError('synthetic DNS timeout')
+    monkeypatch.setattr(protocol, 'callback_destination', destination)
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(WeixinClient(token='fixture').updates('opaque-old'))
+
+
+def test_getupdates_cancellation_is_not_converted_to_idle():
+    async def transport(*args, **kwargs):
+        raise asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(WeixinClient(token='fixture', transport=transport).updates('opaque-old'))
+
+
+def test_send_read_timeout_remains_uncertain_without_retry():
+    import httpx
+    calls = []
+    async def transport(*args, **kwargs):
+        calls.append(args)
+        raise httpx.ReadTimeout('synthetic lost send response')
+    with pytest.raises(httpx.ReadTimeout):
+        asyncio.run(WeixinClient(token='fixture', transport=transport).send(
+            'peer', 'context', 'original-client-id', [{'type': 1}]))
+    assert len(calls) == 1

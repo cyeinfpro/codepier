@@ -670,6 +670,214 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
 <h4>逐目标投递状态</h4>${receipts || '<p>暂无完整同步投递记录。</p>'}</section>`;
     }
 
+    function weixinBindings(w) {
+      return (w.bindings || [])
+        .map(
+          (binding) =>
+            `<section class="cc-channel-binding" data-binding-id="${E(binding.id)}"><h4>${binding.state === 'pairing' && binding.pairing_until <= Date.now() / 1000 ? '配对码已过期' : listState(binding.state)}</h4><p>原绑定 ${E(binding.id.slice(-8))} · 世代 ${E(binding.generation)} · 有效至 ${stamp(binding.expires_at)}</p>${binding.peer_id ? `<p>原联系人：<code>${E(binding.peer_id)}</code></p>` : ''}${binding.state === 'pairing' ? `<p>在要绑定的微信私聊发送以下配对码。此处会自动查询配对状态，仍需本人核对后激活。</p><textarea readonly rows="2" aria-label="微信配对码">${E(binding.pairing_until <= Date.now() / 1000 ? '配对码已过期；请撤销原绑定后重新生成' : binding.pairing_challenge || '原配对码不可用；请重新核对状态')}</textarea><small>配对期限：${stamp(binding.pairing_until)}。配对不会授予代码执行权限。</small>` : ''}${binding.state === 'awaiting_owner' ? `<p>实际返回的联系人编号：<code>${E(binding.pending_peer_id)}</code></p><div data-channel-form="activate">${checkbox('confirm_peer', '我已核对该联系人和当前房间', true)}${button('dot-channel-activate', '确认激活此联系人', binding)}</div>` : ''}<div class="cc-actions">${binding.state === 'active' ? button('dot-channel-pause', '暂停此通道', binding) : binding.state === 'paused' ? button('dot-channel-resume', '恢复原绑定', binding) : ''}${binding.state !== 'revoked' ? button('dot-channel-revoke', '撤销原绑定', binding) : ''}</div></section>`,
+        )
+        .join('');
+    }
+    function weixinHealth(w) {
+      const names = {
+        WEIXIN_UPDATES_REJECTED: '微信收件接口尚未返回成功应答，配对消息可能还未被接收',
+        WEIXIN_AUTH_REJECTED: '微信登录凭据被拒绝，需要重新核对连接',
+        WEIXIN_SESSION_EXPIRED: '微信登录已失效，需要重新扫码确认',
+        WEIXIN_RATE_LIMITED: '微信接口限流，正在等待原连接重试',
+        WEIXIN_POLL_IDLE: '本轮长轮询暂未取得新批次，将继续原连接等待',
+        WEIXIN_POLL_FENCE_LOST: '原收件轮次已交接，将沿用当前连接继续查询',
+        WEIXIN_POLL_CANCELLED: '本轮收件暂时中断，将沿用原进度继续查询',
+        WEIXIN_BINDING_CHANGED: '绑定状态已更新，将按当前绑定继续查询',
+        WEIXIN_PAIRING_EXPIRED: '配对码已过期，已停止此次配对收件；请撤销原绑定后重新生成',
+        WEIXIN_BINDING_INACTIVE: '原绑定已暂停、撤销或到期',
+        WEIXIN_CREDENTIAL_CHANGED: '原凭据或绑定世代已变化，需要重新核对',
+        WEIXIN_MAPPING_CHANGED: '原项目范围已变化，需要重新核对',
+        WEIXIN_CURSOR_MISSING: '微信应答缺少收件进度，尚未确认同步成功',
+        TimeoutError: '本轮收件超时，原收件进度保留',
+      };
+      return (w.accounts || [])
+        .map((account) => {
+          const synced = Number.isFinite(account.last_sync_at);
+          const retry =
+            account.state === 'active' &&
+            w.enabled &&
+            account.reason_code !== 'WEIXIN_PAIRING_EXPIRED' &&
+            Number.isFinite(account.next_poll) &&
+            account.next_poll > Date.now() / 1000;
+          return (
+            '<div class="cc-wx-account-health"><strong>' +
+            E(account.label || '微信连接') +
+            '：' +
+            (account.state === 'active' ? '登录凭据已保存' : listState(account.state)) +
+            '</strong><p>' +
+            (synced
+              ? '最近成功收件查询：' +
+                stamp(account.last_sync_at) +
+                '。这不代表已配对或已收到新消息。'
+              : '尚未成功完成收件查询；还不能确认配对消息已被接收。') +
+            '</p>' +
+            (account.reason_code
+              ? '<p role="status">' +
+                E(names[account.reason_code] || '原连接需要核对，请保留当前状态查看原因') +
+                '（' +
+                E(account.reason_code) +
+                '）</p>'
+              : '') +
+            (retry
+              ? '<p>下次收件尝试不早于 ' + stamp(account.next_poll) + '；无需重复发送配对码。</p>'
+              : account.state === 'attention'
+                ? '<p>此连接已停止自动收件，请先处理以上原因。</p>'
+                : '') +
+            (!w.enabled ? '<p>微信通道已关闭，当前不会收件。</p>' : '') +
+            '</div>'
+          );
+        })
+        .join('');
+    }
+
+    let pairingRefresh = null;
+    const pairingLive = (p) =>
+      pairingRefresh === p &&
+      !p.stopped &&
+      loaded === p.owner &&
+      current(p.owner.key) &&
+      p.owner.epoch === state.drawerEpoch &&
+      !!document.querySelector('.cc-wx-bindings');
+    function pairingStop() {
+      const p = pairingRefresh;
+      pairingRefresh = null;
+      if (!p) return;
+      p.stopped = true;
+      clearTimeout(p.timer);
+      clearInterval(p.watch);
+      p.controller?.abort();
+    }
+    function pairingExpire(p) {
+      for (const binding of p.owner.weixin.bindings || []) {
+        if (binding.state !== 'pairing' || binding.pairing_until > Date.now() / 1000) continue;
+        const card = [...document.querySelectorAll('.cc-wx-bindings [data-binding-id]')].find(
+          (node) => node.dataset.bindingId === binding.id,
+        );
+        if (!card) continue;
+        card.querySelector('h4').textContent = '配对码已过期';
+        const code = card.querySelector('textarea[readonly]');
+        if (code) code.value = '配对码已过期；请撤销原绑定后重新生成';
+      }
+    }
+    function pairingStart() {
+      pairingStop();
+      if (
+        !loaded?.weixin.enabled ||
+        !(loaded.weixin.bindings || []).some(
+          (b) =>
+            b.state === 'awaiting_owner' ||
+            (b.state === 'pairing' && b.pairing_until > Date.now() / 1000),
+        )
+      )
+        return;
+      const p = { owner: loaded, timer: null, watch: null, controller: null, failures: 0 };
+      pairingRefresh = p;
+      p.watch = setInterval(() => {
+        if (!pairingLive(p)) pairingStop();
+        else pairingExpire(p);
+      }, 500);
+      p.timer = setTimeout(() => pairingPoll(p), 5000);
+    }
+    async function pairingPoll(p) {
+      if (!pairingLive(p)) {
+        pairingStop();
+        return;
+      }
+      pairingExpire(p);
+      if (saving || document.hidden) {
+        p.timer = setTimeout(() => pairingPoll(p), 5000);
+        return;
+      }
+      p.controller = new AbortController();
+      try {
+        const fresh = await api(
+          '/api/collaboration/weixin?' + new URLSearchParams(qrScope(p.owner.key)),
+          { signal: p.controller.signal },
+        );
+        if (!pairingLive(p) || saving) return;
+        p.failures = 0;
+        const health = document.querySelector('.cc-wx-health');
+        const markup = weixinHealth(fresh);
+        if (health.innerHTML !== markup) health.innerHTML = markup;
+        const region = document.querySelector('.cc-wx-bindings');
+        const previous = p.owner.weixin.bindings || [];
+        const displayed = [];
+        for (const binding of fresh.bindings || []) {
+          const card = [...region.querySelectorAll('[data-binding-id]')].find(
+            (node) => node.dataset.bindingId === binding.id,
+          );
+          const before = previous.find((b) => b.id === binding.id);
+          const changed = !before || JSON.stringify(before) !== JSON.stringify(binding);
+          if (card && binding.state === 'pairing' && binding.pairing_until <= Date.now() / 1000) {
+            card.querySelector('h4').textContent = '配对码已过期';
+            const code = card.querySelector('textarea[readonly]');
+            if (code) code.value = '配对码已过期；请撤销原绑定后重新生成';
+          }
+          if (
+            card &&
+            changed &&
+            (card.contains(document.activeElement) || card.querySelector('input:checked'))
+          ) {
+            displayed.push(before);
+            continue;
+          }
+          displayed.push(binding);
+          if (!card)
+            region.insertAdjacentHTML('beforeend', weixinBindings({ bindings: [binding] }));
+          else if (changed) card.outerHTML = weixinBindings({ bindings: [binding] });
+        }
+        for (const card of region.querySelectorAll('[data-binding-id]'))
+          if (!displayed.some((b) => b.id === card.dataset.bindingId)) card.remove();
+        p.owner.weixin.bindings = displayed;
+        const notice = document.querySelector('.cc-wx-refresh-notice');
+        notice.textContent = '';
+        if (
+          !fresh.enabled ||
+          !(fresh.bindings || []).some(
+            (b) =>
+              b.state === 'awaiting_owner' ||
+              (b.state === 'pairing' && b.pairing_until > Date.now() / 1000),
+          )
+        )
+          pairingStop();
+      } catch (error) {
+        if (!pairingLive(p) || error.name === 'AbortError') return;
+        if ([401, 403].includes(error.status)) {
+          document.querySelector('.cc-wx-refresh-notice').textContent =
+            '当前身份无权继续查询原配对，已停止自动刷新。请核对登录和当前房间后重新打开。';
+          pairingStop();
+          return;
+        }
+        if (
+          !(p.owner.weixin.bindings || []).some(
+            (b) =>
+              b.state === 'awaiting_owner' ||
+              (b.state === 'pairing' && b.pairing_until > Date.now() / 1000),
+          )
+        ) {
+          document.querySelector('.cc-wx-refresh-notice').textContent =
+            '配对码已到期，最新服务端状态暂不可用。请重新核对状态后撤销原绑定或继续核对联系人。';
+          pairingStop();
+          return;
+        }
+        p.failures++;
+        document.querySelector('.cc-wx-refresh-notice').textContent =
+          '暂时无法查询最新配对状态，以上为上次读取结果。将自动重试，也可点击“重新核对状态”。';
+      } finally {
+        p.controller = null;
+        if (pairingLive(p))
+          p.timer = setTimeout(
+            () => pairingPoll(p),
+            Math.min(30000, 5000 * 2 ** Math.min(p.failures, 3)),
+          );
+      }
+    }
+
     function render(data) {
       const w = data.weixin,
         r = data.scopes;
@@ -689,12 +897,7 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
             .map((p) => [p.project_id, p]),
         ).values(),
       ];
-      const bindings = (w.bindings || [])
-        .map(
-          (binding) =>
-            `<section class="cc-channel-binding" data-binding-id="${E(binding.id)}"><h4>${listState(binding.state)}</h4><p>原绑定 ${E(binding.id.slice(-8))} · 世代 ${E(binding.generation)} · 有效至 ${stamp(binding.expires_at)}</p>${binding.peer_id ? `<p>原联系人：<code>${E(binding.peer_id)}</code></p>` : ''}${binding.state === 'pairing' ? `<p>在要绑定的微信私聊发送以下配对码，再回到此处核对状态。</p><textarea readonly rows="2" aria-label="微信配对码">${E(binding.pairing_challenge || '原配对码不可用或已过期；撤销后重新绑定')}</textarea><small>配对期限：${stamp(binding.pairing_until)}。配对不会授予代码执行权限。</small>` : ''}${binding.state === 'awaiting_owner' ? `<p>实际返回的联系人编号：<code>${E(binding.pending_peer_id)}</code></p><div data-channel-form="activate">${checkbox('confirm_peer', '我已核对该联系人和当前房间', true)}${button('dot-channel-activate', '确认激活此联系人', binding)}</div>` : ''}<div class="cc-actions">${binding.state === 'active' ? button('dot-channel-pause', '暂停此通道', binding) : binding.state === 'paused' ? button('dot-channel-resume', '恢复原绑定', binding) : ''}${binding.state !== 'revoked' ? button('dot-channel-revoke', '撤销原绑定', binding) : ''}</div></section>`,
-        )
-        .join('');
+      const bindings = weixinBindings(w);
       const policies = (r.items || [])
         .map(
           (item) =>
@@ -708,7 +911,7 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
         )
         .join('');
       return `<div class="cc-channel-pane"><p class="cc-hint">当前项目：${E(state.project)} · ${E(state.environment)}。刷新仅查询证据，不重发消息、不领取任务。</p>${button('dot-channel-open', '重新核对状态')}
-      <section><h3>微信私聊通道</h3><p>${w.enabled ? '功能已开启；真实收发仍以每条回执为准。' : '微信通道已关闭。可在此开启，再扫码连接本人微信。'}</p><p>仅支持机器人私聊，不冒充原生群聊。外部文字不能自动变成房主的执行授权。</p>${channelSetting('weixin', w)}${qrPanel(w)}${bindings || '<p>当前房间尚未绑定微信。</p>'}
+      <section><h3>微信私聊通道</h3><p>${w.enabled ? '功能已开启；真实收发仍以每条回执为准。' : '微信通道已关闭。可在此开启，再扫码连接本人微信。'}</p><p>仅支持机器人私聊，不冒充原生群聊。外部文字不能自动变成房主的执行授权。</p>${channelSetting('weixin', w)}<div class="cc-wx-health">${weixinHealth(w)}</div><p class="cc-wx-refresh-notice" role="status" aria-live="polite"></p>${qrPanel(w)}<div class="cc-wx-bindings">${bindings || '<p>当前房间尚未绑定微信。</p>'}</div>
       <details><summary>高级：登记已有授权机器人</summary><div data-channel-form="account" class="cc-form">${field('名称', '<input name="label" maxlength="80" required autocomplete="off">')}${field('机器人编号', '<input name="bot_id" maxlength="256" required autocomplete="off">')}${field('已有授权令牌', '<input type="password" name="token" maxlength="16384" required autocomplete="new-password">')}${checkbox('confirm_credentials', '我确认保存此已授权凭据，并已核对服务条款与使用资格', true)}${button('dot-channel-import', '确认登记凭据', {}, w.enabled ? '' : 'disabled')}<small>凭据加密保存；不创建 MCP 凭据，也不会显示到消息中。</small></div></details>
       <p class="cc-wx-binding-guide" hidden></p><details class="cc-wx-bind"><summary>绑定当前话题与 dot</summary><div data-channel-form="bind" class="cc-form">${field(
         '已登记机器人',
@@ -748,6 +951,7 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
       )}<fieldset><legend>当前环境的项目与逐项目能力</legend>${projects.map((p) => `<div class="cc-channel-project" data-project-id="${E(p.project_id)}"><label><input type="checkbox" name="project_selected" ${p.project_id === (state.snapshot.room.project_id || state.project) ? 'checked disabled' : ''}>${E(p.project_label || p.project_id)}</label>${checkbox('write', '允许项目文件写入')}${checkbox('execute', '允许此项目的 Agent 执行')}</div>`).join('')}</fieldset>${field('有效小时数', '<input type="number" name="hours" value="24" min="1" max="720" step="1" required>')}${checkbox('unsandboxed', '如选择执行，我明确接受 Agent 账户权限；这不是文件系统或网络沙箱')}${checkbox('confirm_scope', '我确认以本次选择替换此凭据的房间范围，且影响它的所有会话', true)}${button('dot-channel-scope-save', '确认设置范围')}<p>严格 OS 隔离尚未验证时不会放行执行。未选择执行时只允许获批文件工具。</p></div></details></section></div>`;
     }
     async function open(element, selectedAccount = '') {
+      pairingStop();
       qrDiscard(qr);
       if (!allowed()) throw new Error('当前身份不能管理房间连接。');
       controller?.abort();
@@ -779,6 +983,7 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
       loaded = { key, scopes, weixin, telegram };
       showDrawer('通道与执行边界', render(loaded), element);
       loaded.epoch = state.drawerEpoch;
+      pairingStart();
       if (selectedAccount) {
         const select = document.querySelector('.cc-wx-bind [name="account_id"]');
         if (select && [...select.options].some((option) => option.value === selectedAccount)) {
@@ -1080,6 +1285,7 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
       return { local: true, message: '原配置或投递清单已保存；状态以新读取的证据为准。' };
     }
     function clear() {
+      pairingStop();
       qrDiscard(qr);
       controller?.abort();
       controller = null;

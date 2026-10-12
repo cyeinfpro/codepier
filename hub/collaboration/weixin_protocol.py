@@ -73,6 +73,25 @@ def strict_json(raw):
         raise DevError('WEIXIN_RESPONSE_INVALID', '微信应答不是唯一字段、有限数值的 JSON 对象', 502) from exc
 
 
+def validate_updates(response):
+    """Validate an iLink success envelope without inventing optional fields.
+
+    Pinned monitor.ts accepts omitted success codes, messages and cursor. An
+    omitted/empty cursor means retain the previous cursor, not reset or advance.
+    Explicit malformed values still fail closed in both wire and commit paths.
+    """
+    if not isinstance(response, dict):
+        raise DevError('WEIXIN_RESPONSE_INVALID', '微信收件应答必须是 JSON 对象', 502)
+    if any(type(response.get(k, 0)) is not int or response.get(k, 0) != 0 for k in ('ret', 'errcode')):
+        raise DevError('WEIXIN_UPDATES_REJECTED', '微信收件请求未成功；保留原游标', 502)
+    messages = response.get('msgs', [])
+    if not isinstance(messages, list) or len(messages) > 100:
+        raise DevError('WEIXIN_BATCH_LIMIT', '微信收件批次超过接纳上限；原游标未前移', 413)
+    if 'get_updates_buf' in response:
+        text(response['get_updates_buf'], 65536, empty=True)
+    return response
+
+
 def approved_url(value, *, bases, exact_base=False):
     try:
         text(value, 8192)
@@ -104,11 +123,17 @@ class WireReply:
     headers: dict = field(default_factory=dict)
 
 
-async def public_transport(method, url, headers, body, *, timeout=40, maximum=MAX_JSON):
+async def public_transport(method, url, headers, body, *, timeout=40, maximum=MAX_JSON, read_timeout=None):
     """Re-resolve public addresses, pin the IP, preserve TLS SNI, no proxy/redirect."""
+    phase_timeout = min(5, timeout)
+    limits = httpx.Timeout(timeout if read_timeout is None else min(read_timeout, timeout),
+                           connect=phase_timeout, write=phase_timeout, pool=phase_timeout)
     async with asyncio.timeout(timeout):
-        pinned, host, hostname = await callback_destination(url)
-        async with httpx.AsyncClient(follow_redirects=False, trust_env=False, timeout=timeout) as client:
+        # DNS and overall deadline exhaustion are transport failures, not proof
+        # of an idle read. Keep them distinct from httpx.ReadTimeout below.
+        async with asyncio.timeout(phase_timeout):
+            pinned, host, hostname = await callback_destination(url)
+        async with httpx.AsyncClient(follow_redirects=False, trust_env=False, timeout=limits) as client:
             async with client.stream(method, pinned, headers={'Host': host, 'Accept-Encoding': 'identity', **headers},
                                      content=body, extensions={'sni_hostname': hostname}) as response:
                 if 300 <= response.status_code < 400:
@@ -142,7 +167,7 @@ class WeixinClient:
             result['Authorization'] = 'Bearer ' + self.token
         return result
 
-    async def call(self, method, path, payload=None, *, auth=True, qr_status=False, timeout=40):
+    async def call(self, method, path, payload=None, *, auth=True, qr_status=False, timeout=40, read_timeout=None):
         if not path.startswith('/ilink/bot/') or '..' in path or '#' in path:
             raise DevError('WEIXIN_ENDPOINT_DENIED', '不允许任意微信 API 路径', 403)
         if payload is not None and auth:
@@ -150,8 +175,11 @@ class WeixinClient:
         body = json.dumps(payload, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode() if payload is not None else None
         if body is not None and len(body) > MAX_JSON:
             raise DevError('WEIXIN_REQUEST_LIMIT', '微信请求超过传输预算', 413)
+        limits = {'timeout': timeout, 'maximum': MAX_JSON}
+        if read_timeout is not None:
+            limits['read_timeout'] = read_timeout
         reply = await self.transport(method, self.base + path, self.headers(auth=auth, qr_status=qr_status),
-                                     body, timeout=timeout, maximum=MAX_JSON)
+                                     body, **limits)
         if reply.status in (401, 403):
             raise DevError('WEIXIN_AUTH_REJECTED', '微信凭据被拒绝，通道需要重新确认', 403)
         if reply.status == 429:
@@ -166,16 +194,16 @@ class WeixinClient:
         return result
 
     async def updates(self, cursor):
-        result = await self.call('POST', '/ilink/bot/getupdates', {'get_updates_buf': text(cursor, 65536, empty=True)})
-        if type(result.get('ret')) is not int or result['ret'] != 0 or type(result.get('errcode', 0)) is not int or result.get('errcode', 0) != 0:
-            raise DevError('WEIXIN_UPDATES_REJECTED', '微信收件请求未成功；保留原游标', 502)
-        messages = result.get('msgs', [])
-        if not isinstance(messages, list) or len(messages) > 100:
-            raise DevError('WEIXIN_BATCH_LIMIT', '微信收件批次超过接纳上限；原游标未前移', 413)
-        if 'get_updates_buf' not in result:
-            raise DevError('WEIXIN_CURSOR_MISSING', '微信应答缺少原协议游标；不使用废弃 sync_buf 代替', 502)
-        text(result['get_updates_buf'], 65536, empty=True)
-        return result
+        try:
+            # The provider's default long poll is 35s. Keep a separate 50s
+            # total budget below the 55s account lease, including setup time.
+            result = await self.call('POST', '/ilink/bot/getupdates',
+                {'get_updates_buf': text(cursor, 65536, empty=True)}, timeout=50, read_timeout=35)
+        except httpx.ReadTimeout as exc:
+            # Only a quiet read is ordinary control flow. DNS/total deadline,
+            # connection, write and pool timeouts retain failure backoff.
+            raise DevError('WEIXIN_POLL_IDLE', '本轮长轮询暂未返回消息；原游标不变', 503) from exc
+        return validate_updates(result)
 
     async def send(self, peer, context, client_id, items):
         text(peer, 256); text(context, 65536); text(client_id, 128)
@@ -184,8 +212,9 @@ class WeixinClient:
         result = await self.call('POST', '/ilink/bot/sendmessage', {'msg': {'from_user_id': '',
             'to_user_id': peer, 'client_id': client_id, 'message_type': 2, 'message_state': 2,
             'context_token': context, 'item_list': items}})
-        if (type(result.get('ret')) is not int or result['ret'] != 0
-                or type(result.get('errcode', 0)) is not int or result.get('errcode', 0) != 0):
+        # Pinned api.ts treats omitted ret as accepted, as protobuf JSON may
+        # omit a zero default. This is no delivery/read proof and adds no retry.
+        if any(type(result.get(k, 0)) is not int or result.get(k, 0) != 0 for k in ('ret', 'errcode')):
             raise DevError('WEIXIN_SEND_UNCONFIRMED', '微信未返回明确成功；保留原投递号等待核验，不自动重发', 409)
         message_id = result.get('message_id')
         if message_id is not None:
