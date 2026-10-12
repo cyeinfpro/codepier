@@ -470,12 +470,20 @@ def test_host_reads_real_project_and_returns_one_reply_to_original_thread(
         finished = host_tool(stack, 'collaboration_work_result', result_args)['work_item']
         host_tool(stack, 'collaboration_work_result', result_args)
         assert finished['result']['execution_verified']
+        # A legacy notification slot is not a configured duplex dot. Its result
+        # must keep ordinary provenance and a directly accessible evidence card.
+        projected = next(row for row in messages(stack) if row['kind'] == 'delegation_result')
+        assert not projected.get('sender_dot_id')
+        assert not projected['body'].get('sender_dot_id')
+        assert 'dot_reply_complete' not in projected['body']
         result_card = page.locator('.cc-feed .cc-delegation-result')
         expect(result_card).to_have_count(1, timeout=12000)
         expect(page.locator('.cc-feed')).to_contain_text(result_args['summary'])
         expect(page.locator('.cc-delegation-message')).to_have_attribute('data-delegation-state', 'succeeded')
         result_article = result_card.locator('xpath=ancestor::article[1]')
+        assert 'cc-relay-turn' not in result_article.get_attribute('class').split()
         expect(result_article.locator('[data-cc-action="convert"]')).to_have_count(0)
+        expect(result_card.locator('[data-cc-action="delegation-result"]')).to_be_visible()
         result_card.locator('[data-cc-action="delegation-result"]').click()
         drawer = page.locator('#cc-drawer')
         expect(drawer.locator('[data-cc-action="goal-edit"]')).to_have_count(0)

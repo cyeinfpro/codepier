@@ -675,8 +675,11 @@ class DelegationService:
         identifier = 'delegation-result:' + item['id'] + ':' + str(item['attempt'])
         projects = sorted(set(body['provenance_project_ids']) | set(json.loads(goal['spec'])['project_ids']))
         result = {**body, 'body_text': body['summary'], 'delegation_id': link['id'], 'work_item_id': item['id'],
-                  'source_message_id': source['id'], 'provenance_project_ids': projects, 'mentions': [], 'notifications': [],
-                  'sender_dot_id': self.policy(room, link['policy_id'])['slot_id'], 'dot_reply_complete': True}
+                  'source_message_id': source['id'], 'provenance_project_ids': projects, 'mentions': [], 'notifications': []}
+        dot = self.c.dots.find(self.policy(room, link['policy_id'])['slot_id'])
+        # Legacy notification/task slots are not approved duplex chat identities.
+        if self.c.dot_chat.enabled(dot):
+            result.update(sender_dot_id=dot['id'], dot_reply_complete=True)
         self.store.execute('''INSERT OR IGNORE INTO collaboration_messages
             (id,room_id,conversation_id,thread_id,thread_root_id,reply_to_id,author,origin,source_id,kind,body,state,goal_id,created)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
@@ -694,8 +697,10 @@ class DelegationService:
             'work_item_id': item['id'], 'source_message_id': source['id'], 'attempt': item['attempt'],
             'fencing_token': item['fencing_token'], 'system_receipt': system_receipt,
             'provenance_project_ids': sorted(set(json.loads(goal['spec'])['project_ids'])),
-            'mentions': [], 'notifications': [], 'execution_verified': False,
-            'sender_dot_id': self.policy(room, link['policy_id'])['slot_id'], 'dot_reply_complete': False})
+            'mentions': [], 'notifications': [], 'execution_verified': False})
+        dot = self.c.dots.find(self.policy(room, link['policy_id'])['slot_id'])
+        if self.c.dot_chat.enabled(dot):
+            body.update(sender_dot_id=dot['id'], dot_reply_complete=False)
         self.store.execute("""INSERT OR IGNORE INTO collaboration_messages
             (id,room_id,conversation_id,thread_id,thread_root_id,reply_to_id,author,origin,source_id,kind,body,state,goal_id,created)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
