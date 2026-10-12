@@ -247,7 +247,9 @@ def probe_uninstall_handoff(directory, executable):
             if case != 'wrong-lock':
                 assert not (base/'.install.lock').exists()
             if case == 'partial-failure':
-                assert json.loads((base/'.uninstall.json').read_text())['stage'] == 'files_failed'
+                stage = json.loads((base/'.uninstall.json').read_text())['stage']
+                assert stage == 'files_failed', (case, stage, result.stdout[-4000:], result.stderr[-4000:])
+                assert not list(base.glob('.uninstall-failure-*.tmp'))
                 plan['roots'] = [fixture(base)]
                 retry = invoke(plan, handoff)
                 assert retry.returncode == 0 and not base.exists(), (retry.stdout[-4000:], retry.stderr[-4000:])
@@ -283,6 +285,24 @@ def probe_uninstall_handoff(directory, executable):
     assert result.returncode == 0, (result.stdout[-4000:], result.stderr[-4000:])
     assert not canonical.exists() and not alias.exists()
     results.append({'case': 'owned-migration-alias', 'passed': True, 'exit_code': result.returncode})
+
+    # USERPROFILE, plan roots and junction targets can name the same home with
+    # different absolute spellings. This must not relax the exact alias target.
+    spelled_home = directory/'uninstall-normalized-alias-home'
+    spelled_home.mkdir()
+    (spelled_home/'placeholder').mkdir()
+    spelled_canonical = spelled_home/'.codepier-agent'
+    spelled_root = fixture(spelled_canonical)
+    spelled_alias = spelled_home/'.remote-dev-agent'
+    link = subprocess.run(['cmd.exe', '/d', '/c', 'mklink', '/J', str(spelled_alias), str(spelled_canonical)],
+                          capture_output=True, timeout=10)
+    assert link.returncode == 0, link.stderr
+    result = invoke({'schema': 1, 'roots': [spelled_root], 'aliases': [str(spelled_alias)]},
+                    directory/'uninstall-normalized-alias.json',
+                    env={**os.environ, 'USERPROFILE': str(spelled_home/'placeholder'/'..')})
+    assert result.returncode == 0, (result.stdout[-4000:], result.stderr[-4000:])
+    assert not spelled_canonical.exists() and not os.path.lexists(spelled_alias)
+    results.append({'case': 'equivalent-userprofile-alias', 'passed': True, 'exit_code': result.returncode})
 
     # A prior run may have removed the canonical directory before alias removal failed.
     canonical.mkdir()

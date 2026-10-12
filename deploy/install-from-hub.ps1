@@ -247,14 +247,17 @@ function Remove-CodePierUninstallLock {
 }
 function Assert-CodePierUninstallAlias {
   param([string]$Alias, [string[]]$Sources)
-  $Expected = Join-Path $env:USERPROFILE '.remote-dev-agent'
-  $Target = Join-Path $env:USERPROFILE '.codepier-agent'
+  $CanonicalHome = Assert-CodePierPlainPath -Path $env:USERPROFILE
+  $Expected = Join-Path $CanonicalHome '.remote-dev-agent'
+  $Target = Join-Path $CanonicalHome '.codepier-agent'
   if (-not $Alias -or [IO.Path]::GetFullPath($Alias) -ine [IO.Path]::GetFullPath($Expected) -or
       ($Sources -notcontains $Target -and (Test-Path -LiteralPath $Target))) { throw 'Unrecognized cleanup alias.' }
   $null = Assert-CodePierPlainPath -Path $env:USERPROFILE
   $Item = Get-Item -LiteralPath $Alias -Force -ErrorAction Stop
+  $RawTarget = [string]$Item.Target
   if (-not $Item.PSIsContainer -or -not ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
-      @($Item.Target).Count -ne 1 -or [string]$Item.Target -ine $Target) { throw 'Cleanup alias target changed.' }
+      @($Item.Target).Count -ne 1 -or $RawTarget -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)' -or
+      [IO.Path]::GetFullPath($RawTarget) -ine $Target) { throw 'Cleanup alias target changed.' }
 }
 function Set-CodePierUninstallFailure {
   param($Root, [string]$Message)
@@ -276,7 +279,9 @@ function Set-CodePierUninstallFailure {
   $Stream = [IO.File]::Open($Temporary, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
   try {
     try { $Stream.Write($Bytes, 0, $Bytes.Length); $Stream.Flush() } finally { $Stream.Dispose() }
-    [IO.File]::Replace($Temporary, $File, $null)
+    # PowerShell coerces $null to an empty string for .NET string parameters.
+    # File.Replace requires a real null when no backup file is requested.
+    [IO.File]::Replace($Temporary, $File, [NullString]::Value)
   } finally { if (Test-Path -LiteralPath $Temporary) { [IO.File]::Delete($Temporary) } }
 }
 function Assert-CodePierUninstallTasksAbsent {
@@ -400,7 +405,7 @@ function Complete-CodePierUninstall {
     $Failure = $_
     foreach ($Root in $Roots) {
       if (Test-Path -LiteralPath (Join-Path $Root.source '.install.lock')) {
-        try { Set-CodePierUninstallFailure -Root $Root -Message $Failure.Exception.Message } catch { Write-Warning 'Cleanup recovery marker could not be safely updated.' }
+        try { Set-CodePierUninstallFailure -Root $Root -Message $Failure.Exception.Message } catch { Write-Warning ('Cleanup recovery marker could not be safely updated (' + $_.Exception.GetType().Name + ').') }
         try { Remove-CodePierUninstallLock -Root $Root } catch { Write-Warning 'Cleanup lock could not be safely released; inspect it before retrying.' }
       }
     }
