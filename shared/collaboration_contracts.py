@@ -73,8 +73,27 @@ class ConversationCreate(Model):
         return value
 
 
+class ConversationProjectPreview(Scope):
+    conversation_id: Identifier
+    dot_id: str = Field(default='', max_length=128)
+
+
+class ProjectScopeApproval(Model):
+    dot_id: Identifier
+    scope_digest: str = Field(pattern=r'^[a-f0-9]{64}$')
+    confirm_scope: Literal[True]
+
+
 class ConversationProject(Scope):
     conversation_id: Identifier
+    expected_version: int = Field(ge=1)
+    authorization: ProjectScopeApproval | None = None
+    idempotency_key: Key
+
+
+class ConversationProjectScopeControl(Model):
+    conversation_id: Identifier
+    scope_id: Identifier
     expected_version: int = Field(ge=1)
     idempotency_key: Key
 

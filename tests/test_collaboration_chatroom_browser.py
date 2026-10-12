@@ -280,6 +280,8 @@ def test_conversation_add_project_preserves_history_draft_and_attribution(collab
         original_message = data['messages'][0]['id']
         assert conversation == data['room']['id']
         area.fill('添加项目期间保留的草稿')
+        from tests.test_collaboration_dots_flow import create_dot, join_dot
+        join_dot(stack, create_dot(stack))
         other = stack.projects[1]
         open_add_project(page)
         form = page.locator('#cc-add-project')
@@ -288,7 +290,8 @@ def test_conversation_add_project_preserves_history_draft_and_attribution(collab
         expect(area).to_have_value('添加项目期间保留的草稿')
         open_add_project(page)
         form.locator('[name="project"]').select_option(other['id'])
-        form.locator('[name="confirm"]').check()
+        expect(form.locator('[name="confirm"]')).to_have_count(0)
+        expect(form.locator('button[type="submit"]')).to_be_enabled()
         form.locator('button[type="submit"]').evaluate('(button) => {button.click();button.click();}')
         expect(page.locator('.cc-project-chip')).to_have_count(2)
         expect(page.locator('.cc-chat-shell')).to_have_attribute('data-conversation', conversation)
@@ -367,11 +370,13 @@ def test_conversation_stale_add_review_and_visible_permission_reset(collaboratio
         expect(page.locator('#cc-message-input')).to_have_value('')
         data = overview(stack)
         conversation = data['conversation']
+        from tests.test_collaboration_dots_flow import create_dot, join_dot
+        join_dot(stack, create_dot(stack))
         other = stack.projects[1]
         open_add_project(page)
         form = page.locator('#cc-add-project')
         form.locator('[name="project"]').select_option(other['id'])
-        form.locator('[name="confirm"]').check()
+        expect(form.locator('button[type="submit"]')).to_be_enabled()
         stack.must(stack.client.post('/api/collaboration/conversation-project', json={
             'conversation_id': conversation['id'], 'expected_version': conversation['version'],
             'project': other['id'], 'environment_id': 'production', 'idempotency_key': key()}))

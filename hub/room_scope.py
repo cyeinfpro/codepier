@@ -52,10 +52,16 @@ class ScopeSet(AccessModel):
     expected_version: int = Field(ge=0)
     project_rules: list[ProjectRule] = Field(min_length=1, max_length=32)
     execution_mode: Literal['file_tools_only', 'account_permissions_acknowledged', 'require_os_isolation'] = 'file_tools_only'
-    expires_seconds: int = Field(default=86400, ge=300, le=30 * 86400)
+    expires_seconds: int = Field(default=86400, ge=0, le=30 * 86400, strict=True)
     confirm_connection_wide_ceiling: Literal[True]
     acknowledge_unsandboxed_exec: bool = False
     idempotency_key: str = Field(min_length=8, max_length=128)
+
+    @model_validator(mode='after')
+    def exact_lifetime(self):
+        if 0 < self.expires_seconds < 300:
+            raise ValueError('凭据限制期限须为 0（持续至撤销），或 300 至 2592000 秒')
+        return self
 
 
 class ScopeControl(AccessModel):
@@ -89,6 +95,14 @@ def snapshot(project):
     return {key: project[key] for key in SNAPSHOT_FIELDS}
 
 
+def root_overlap_ids(store, project):
+    """Inspect mapping metadata only; never open another project's files."""
+    root = PureWindowsPath(project['root']) if PureWindowsPath(project['root']).drive else PurePosixPath(project['root'])
+    return {other['id'] for other in store.all(
+        'SELECT id,root FROM projects WHERE device_id=?', (project['device_id'],))
+        if other['id'] != project['id'] and type(root)(other['root']).is_relative_to(root)}
+
+
 def fingerprint(row, manifest):
     return digest([row['grant_id'], row['space_id'], row['owner_user_id'], row['room_id'],
                    row['conversation_id'], row['version'], row['expires_at'], manifest])
@@ -102,7 +116,7 @@ def current(store, grant_id, *, grant=None):
         return None  # Legacy grants are deliberately unchanged.
     if row['state'] != 'active':
         raise DevError('ROOM_SCOPE_REVOKED', '此房间连接上限已撤销；不会退回更宽的原授权', 403)
-    if not math.isfinite(row['expires_at']) or row['expires_at'] <= time.time():
+    if not math.isfinite(row['expires_at']) or (row['expires_at'] != 0 and row['expires_at'] <= time.time()):
         raise DevError('ROOM_SCOPE_EXPIRED', '此房间连接已过期；请由房主明确重新确认', 403)
     grant = grant or store.one('SELECT * FROM grants WHERE id=?', (grant_id,))
     if not grant or grant['user_id'] != row['owner_user_id'] or grant.get('space_id', 'legacy') != row['space_id'] or grant['revoked']:
@@ -111,6 +125,11 @@ def current(store, grant_id, *, grant=None):
         manifest = json.loads(row['manifest'])
         if (manifest['schema_version'] != PROTOCOL or fingerprint(row, manifest) != row['manifest_digest']
                 or not isinstance(manifest['project_rules'], list) or not manifest['project_rules']):
+            raise ValueError()
+        # Zero is long-term only with an explicit, digest-bound owner selection.
+        # Legacy missing modes remain bounded; no migration extends old approvals.
+        lifetime = manifest.get('lifetime_mode', 'bounded')
+        if lifetime not in {'bounded', 'until_revoked'} or (lifetime == 'until_revoked') != (row['expires_at'] == 0):
             raise ValueError()
         for rule in manifest['project_rules']:
             ProjectRule.model_validate({k: rule[k] for k in ('project_id', 'capabilities', 'execution_targets')})
@@ -240,6 +259,7 @@ def descriptor(store, principal):
     return {'protocol': PROTOCOL, 'credential_bound': True, 'ordinary_tools_room_scoped': True,
             'grant_id': record['grant_id'], 'room_id': record['room_id'], 'conversation_id': record['conversation_id'],
             'version': record['version'], 'expires_at': record['expires_at'], 'manifest_digest': record['manifest_digest'],
+            'lifetime_mode': record['manifest'].get('lifetime_mode', 'bounded'),
             'project_rules': [{k: r[k] for k in ('project_id', 'capabilities', 'execution_targets')}
                               for r in record['manifest']['project_rules']],
             'execution_mode': record['manifest']['execution_mode'], 'os_sandbox_verified': False,
@@ -306,13 +326,12 @@ class RoomScopeService:
                     self.c.coordination.require_capability(principal, capability, project['id'])
                 # A broad parent mapping can expose an excluded child through a
                 # different alias. Reject overlaps rather than implying hard isolation.
-                root = PureWindowsPath(project['root']) if PureWindowsPath(project['root']).drive else PurePosixPath(project['root'])
-                for other in self.store.all('SELECT id,root FROM projects WHERE device_id=?', (project['device_id'],)):
-                    if other['id'] in {r['project_id'] for r in rules}:
-                        continue
-                    other_root = type(root)(other['root'])
-                    if root == other_root or other_root.is_relative_to(root):
-                        raise DevError('ROOM_SCOPE_ROOT_OVERLAP', '批准目录包含范围外的项目映射；请使用独立项目根目录', 409)
+                if root_overlap_ids(self.store, project) - {r['project_id'] for r in rules}:
+                    label = project.get('alias') or project['id']
+                    raise DevError('ROOM_SCOPE_ROOT_OVERLAP',
+                        f'项目“{label}”的批准目录包含范围外的项目映射。请在项目管理核对该项目根目录，'
+                        '使用独立目录的项目建立话题后再设置凭据范围；本次未更改连接权限。', 409,
+                        project_id=project['id'], project_label=label, remedy='use_independent_project_root')
                 targets = {target: self.c.runtime.vps.reference({'vps': target[4:]}, project)
                            for target in rule['execution_targets'] if target != 'agent'}
                 snapshots.append({**rule, 'project_snapshot': snapshot(project),
@@ -323,11 +342,12 @@ class RoomScopeService:
                 if (actual['version'] if actual else 0) != args['expected_version']:
                     raise DevError('STALE_VERSION', '连接范围已变化，请重新读取后确认', 409)
                 now = self.c.clock()
+                lifetime = 'until_revoked' if args['expires_seconds'] == 0 else 'bounded'
                 manifest = {'schema_version': PROTOCOL, 'project_rules': snapshots, 'execution_mode': args['execution_mode'],
-                            'environment_id': room['environment_id']}
+                            'environment_id': room['environment_id'], 'lifetime_mode': lifetime}
                 record = {'grant_id': grant['id'], 'space_id': principal.space_id, 'owner_user_id': principal.user_id,
                     'room_id': room['id'], 'conversation_id': conversation['id'], 'version': args['expected_version'] + 1,
-                    'expires_at': now + args['expires_seconds']}
+                    'expires_at': 0.0 if lifetime == 'until_revoked' else now + args['expires_seconds']}
                 self.store.execute('''INSERT INTO room_scope_manifests
                     (grant_id,space_id,owner_user_id,room_id,conversation_id,version,state,manifest,manifest_digest,expires_at,created,updated)
                     VALUES (?,?,?,?,?,?,'active',?,?,?,?,?) ON CONFLICT(grant_id) DO UPDATE SET
@@ -337,9 +357,11 @@ class RoomScopeService:
                      canonical(manifest), fingerprint(record, manifest), record['expires_at'], actual['created'] if actual else now, now))
                 self.c.audit(room, principal.actor, 'room_scope.owner_approved', grant['id'],
                     {'version': record['version'], 'project_ids': [r['project_id'] for r in snapshots],
-                     'execution_mode': args['execution_mode'], 'changes_underlying_grant': False})
+                     'execution_mode': args['execution_mode'], 'changes_underlying_grant': False,
+                     'lifetime_mode': lifetime, 'expires_seconds': args['expires_seconds'], 'expires_at': record['expires_at']})
                 return {'grant_id': grant['id'], 'version': record['version'], 'manifest_digest': fingerprint(record, manifest),
-                        'credential_bound': True, 'affects_all_chats_using_this_grant': True, 'os_sandbox_verified': False}
+                        'credential_bound': True, 'affects_all_chats_using_this_grant': True, 'os_sandbox_verified': False,
+                        'lifetime_mode': lifetime, 'expires_at': record['expires_at']}
             return self.c.mutation(principal, room, 'room_scope_set', args, save)
 
     def control(self, raw, principal):
@@ -364,6 +386,17 @@ class RoomScopeService:
         with self.store.transaction(immediate=False):
             principal, room = self.c.scope(principal, raw)
             self.c.owner(principal)
+            conversation = self.c.conversations.resolve(principal, room, raw)
+            projects = [self.c.runtime.project(item['project_id'], principal)
+                for item in self.c.conversations.visible(principal, conversation)
+                if item['environment_id'] == room['environment_id']]
+            visible_ids = {project['id'] for project in projects}
+            root_checks = []
+            for project in projects:
+                overlaps = root_overlap_ids(self.store, project)
+                root_checks.append({'project_id': project['id'],
+                    'overlap_with_project_ids': sorted(overlaps & visible_ids),
+                    'has_outside_projects': bool(overlaps - visible_ids)})
             rows = self.store.all('SELECT * FROM room_scope_manifests WHERE room_id=? ORDER BY grant_id', (room['id'],))
             grants = self.store.all('''SELECT g.id,MIN(s.label) AS label,m.version AS scope_version,
                 m.conversation_id AS scoped_conversation_id,m.state AS scope_state
@@ -373,5 +406,6 @@ class RoomScopeService:
                 (room['id'], principal.user_id, principal.space_id))
             return {'items': [{k: r[k] for k in ('grant_id', 'room_id', 'conversation_id', 'version', 'state', 'manifest_digest', 'expires_at')}
                               | {'manifest': json.loads(r['manifest'])} for r in rows],
-                    'eligible_connections': grants, 'read_only': True, 'strict_os_isolation_available': False,
+                    'eligible_connections': grants, 'project_root_checks': root_checks,
+                    'read_only': True, 'strict_os_isolation_available': False,
                     'warning': '启用后约束同一凭据在所有会话中的 CodePier 调用；不会改变原 grant 或创建新凭据。'}

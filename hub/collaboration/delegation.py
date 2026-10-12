@@ -403,7 +403,12 @@ class DelegationService:
             raise DevError('DELEGATION_SCOPE_DENIED', 'VPS目标需要本次明确选择执行能力', 403)
         if 'write' in capabilities and 'project_agent' not in targets:
             raise DevError('DELEGATION_SCOPE_DENIED', 'VPS目标不能授权本机文件写入', 403)
+        scope_approvals, additional_projects = self.c.conversations.project_scopes.for_new_task(
+            principal, policy, capabilities, targets)
         request_scope = {'execution_targets': targets, 'capabilities': capabilities}
+        if scope_approvals:
+            request_scope.update(project_ids=[room['project_id'], *additional_projects],
+                                 project_scope_approvals=scope_approvals)
         count_limit = self.c.channel_owner.budget_limit(policy)
         if count_limit is not None and self.c.channel_owner.budget_used(policy) >= count_limit:
             raise DevError('DELEGATION_BUDGET_EXCEEDED', '此委托设置的请求次数已用尽', 409)
@@ -414,17 +419,20 @@ class DelegationService:
             raise DevError('INVALID_ARGUMENTS', '委托需要验收说明，且用途与请求合计不能超过4000字', 422)
         now = self.c.clock()
         policy_deadline = now + spec['goal_duration_seconds'] if self.c.channel_owner.persistent(policy) else policy['expires_at']
+        if scope_approvals:
+            policy_deadline = min(policy_deadline, *(self.c.conversations.project_scopes.authorize(
+                principal, policy, ref)['expires_at'] for ref in scope_approvals))
         if policy_deadline - now < 60:
             raise DevError('DELEGATION_POLICY_INACTIVE', '委托将在一分钟内到期，请重新确认设置', 409)
         identifier = uuid.uuid4().hex
         scope = {'project': room['project_id'], 'environment_id': room['environment_id']}
         raw = {**scope, 'conversation_id': message['conversation_id'], 'objective': objective, 'acceptance': acceptance,
-               'project_ids': [room['project_id']], 'participant_grant_ids': [policy['grant_id']],
+               'project_ids': [room['project_id'], *additional_projects], 'participant_grant_ids': [policy['grant_id']],
                'coordinator_grant_id': policy['grant_id'], 'capabilities': capabilities,
                'duration_seconds': min(spec['goal_duration_seconds'], int(policy_deadline - now)),
                'budget': spec['budget'], 'idempotency_key': 'delegation:create:' + identifier}
         goal = self.c.coordination.create(raw, principal)['goal']
-        policy_snapshot = canonical({'spec': spec, 'request_scope': request_scope, 'digest': policy['digest'], 'principal': json.loads(policy['principal']),
+        policy_snapshot = canonical({'spec': spec, 'request_scope': request_scope, 'project_scope_approvals': scope_approvals, 'digest': policy['digest'], 'principal': json.loads(policy['principal']),
                                      'grant_snapshot': json.loads(policy['grant_snapshot']),
                                       'expires_at': None if self.c.channel_owner.persistent(policy) else policy['expires_at'],
                                       'lifetime_mode': 'until_revoked' if self.c.channel_owner.persistent(policy) else 'timed'})
@@ -576,6 +584,7 @@ class DelegationService:
                 or source['conversation_id'] != link['conversation_id']
                 or source['version'] != link['message_version'] or digest(json.loads(source['body'])['body_text']) != link['message_digest']):
             raise DevError('DELEGATION_MESSAGE_CHANGED', '委托来源身份或原文已改变', 409)
+        self.c.conversations.project_scopes.validate_task(principal, room, policy, snapshot, goal)
         approved_scope = snapshot.get('request_scope', snapshot['spec'])
         if (not set(approved_scope['execution_targets']) <= set(snapshot['spec']['execution_targets'])
                 or set(json.loads(goal['spec'])['capabilities']) != set(approved_scope['capabilities'])):

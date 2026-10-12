@@ -62,3 +62,19 @@ def test_real_grant_scope_blocks_native_adapter_before_source_access(bridge, mon
     assert denied.value.code == 'ROOM_SCOPE_WORKSPACE_DENIED'
     assert not calls
     assert not b.app.state.store.all('SELECT * FROM operations')
+
+
+def test_long_term_ceiling_does_not_extend_underlying_bearer_expiry(bridge):
+    b = bridge
+    store = b.app.state.store
+    tokens_before = store.all('SELECT * FROM tokens WHERE grant_id=?', (b.grant,))
+    saved = panel(b, 'room-scope', {**b.scope, 'conversation_id': b.room['id'], 'grant_id': b.grant,
+        'expected_version': 0, 'project_rules': [{'project_id': 'project', 'capabilities': ['read']}],
+        'expires_seconds': 0, 'confirm_connection_wide_ceiling': True, 'idempotency_key': key()})
+    assert saved['lifetime_mode'] == 'until_revoked' and saved['expires_at'] == 0
+    assert store.all('SELECT * FROM tokens WHERE grant_id=?', (b.grant,)) == tokens_before
+    request = Request({'type': 'http', 'headers': [(b'authorization', ('Bearer ' + b.token).encode())]})
+    assert b.app.state.auth.bearer(request).projects == ['project']
+    store.execute('UPDATE tokens SET expires=? WHERE grant_id=?', (time.time() - 1, b.grant))
+    with pytest.raises(DevError, match='过期'):
+        b.app.state.auth.bearer(request)

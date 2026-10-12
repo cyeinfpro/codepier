@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 
 from hub.collaboration.common import MESSAGE_EVENT, canonical, digest, redact
+from hub.collaboration.dot_wake_context import delivery_timing
 from shared import collaboration_contracts as contracts
 from shared.util import DevError
 
@@ -73,7 +74,10 @@ class DotRelay:
             current = self.c.object('collaboration_messages', room, receipt['message_id'])
             view = self.c.chatroom.view(current)
             from shared.public_collaboration import request as public_request
+            inbound = self.store.one('SELECT * FROM collaboration_dot_messages WHERE dot_id=? AND message_id=?',
+                (dot['id'], current['reply_to_id'])) if current['reply_to_id'] else None
             return {'dot_id': dot['id'], 'message': view, 'scheduled': False,
+                    'delivery_timing': delivery_timing(self.c, room, dot, inbound) if inbound else None,
                     'receipt_request': public_request('collaboration_dot_delivery_receipt', {
                         'project': room['project_id'], 'environment_id': room['environment_id'], 'dot_id': dot['id'],
                         'kind': 'update', 'request_key': args['idempotency_key']}),

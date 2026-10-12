@@ -11,6 +11,8 @@ from shared.util import DevError
 
 
 def migrate(db):
+    from hub.collaboration.project_scopes import migrate as migrate_project_scopes
+    migrate_project_scopes(db)
     db.execute('''CREATE TABLE IF NOT EXISTS conversation_rooms (
         id TEXT PRIMARY KEY,space_id TEXT NOT NULL,owner_user_id TEXT NOT NULL,title TEXT NOT NULL,
         version INTEGER NOT NULL DEFAULT 1,created REAL NOT NULL)''')
@@ -73,6 +75,8 @@ def migrate(db):
 class ConversationService:
     def __init__(self, collaboration):
         self.c, self.store = collaboration, collaboration.store
+        from hub.collaboration.project_scopes import ProjectScopes
+        self.project_scopes = ProjectScopes(collaboration)
 
     def ensure_default(self, room):
         self.store.execute('''INSERT OR IGNORE INTO conversation_rooms (id,space_id,owner_user_id,title,created)
@@ -117,7 +121,8 @@ class ConversationService:
             raise DevError('CONVERSATION_NOT_FOUND', '当前授权下没有这个聊天室', 404)
         return {**conversation, 'kind': 'conversation', 'projects': [
             {key: room[key] for key in ('project_id', 'environment_id', 'project_label', 'state')} | {'room_id': room['id']}
-            for room in projects], 'visibility_token': digest([principal.grant_id or principal.user_id, [room['id'] for room in projects]])}
+            for room in projects], 'project_authorizations': self.project_scopes.listing(principal, conversation, {room['project_id'] for room in projects}),
+            'visibility_token': digest([principal.grant_id or principal.user_id, [room['id'] for room in projects]])}
 
     def listing(self, principal):
         self.c.guard()
@@ -175,15 +180,19 @@ class ConversationService:
 
     def add_project(self, raw, principal):
         args = validate(contracts.ConversationProject, raw)
+        if args['authorization'] is None:
+            args.pop('authorization')  # Keep legacy relationship-only retry fingerprints.
         with self.store.transaction():
             self.c.guard()
             principal = refresh_principal(self.store, principal)
             self.c.owner(principal)
             conversation = self.object(principal, args['conversation_id'])
-            self.c.runtime.project(args['project'], principal)
+            project = self.c.runtime.project(args['project'], principal)
             def save():
                 if conversation['version'] != args['expected_version']:
                     raise DevError('STALE_VERSION', '聊天室项目列表已改变，请刷新后重新确认', 409)
+                authorization = self.project_scopes.approve(principal, conversation, project,
+                    args['environment_id'], args['authorization']) if args.get('authorization') else None
                 _, room = self.c.scope(principal, args, create=True)
                 existing = self.store.one('SELECT 1 FROM conversation_projects WHERE conversation_id=? AND room_id=?', (conversation['id'], room['id']))
                 if not existing:
@@ -192,8 +201,18 @@ class ConversationService:
                         raise DevError('CONVERSATION_PROJECT_LIMIT', '一个聊天室最多加入16个项目环境', 409)
                     self.store.execute('INSERT INTO conversation_projects VALUES (?,?,?)', (conversation['id'], room['id'], self.c.clock()))
                     self.store.execute('UPDATE conversation_rooms SET version=version+1 WHERE id=?', (conversation['id'],))
-                return {'conversation': self.view(principal, self.object(principal, conversation['id'])), 'added': not bool(existing)}
-            return self.mutation(principal, 'conversation_add_project:' + conversation['id'], args, save)
+                if authorization and existing:
+                    self.store.execute('UPDATE conversation_rooms SET version=version+1 WHERE id=?', (conversation['id'],))
+                return {'conversation': self.view(principal, self.object(principal, conversation['id'])),
+                        'added': not bool(existing), **({'authorization': authorization} if authorization else {})}
+            result = self.mutation(principal, 'conversation_add_project:' + conversation['id'], args, save)
+            if result.get('authorization'):
+                dot = self.c.dots.find(args['authorization']['dot_id'])
+                room = self.store.one('SELECT * FROM collaboration_rooms WHERE id=?', (dot['room_id'],))
+                policy = self.c.dots.policy(room, dot)
+                self.project_scopes.authorize(principal, policy, result['authorization'])
+                result['execution_authorized'] = True
+            return result
 
     def binding(self, principal, conversation, rooms, mode):
         return digest([conversation['id'], principal.grant_id or principal.user_id, sorted(room['id'] for room in rooms), mode])

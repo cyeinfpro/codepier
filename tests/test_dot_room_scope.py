@@ -177,3 +177,107 @@ def test_manifest_tampering_is_not_an_authority_override(collab):
     s.store.execute("UPDATE room_scope_manifests SET manifest=? WHERE grant_id='broad'", (json.dumps(payload),))
     with pytest.raises(DevError, match='记录无效'):
         refresh_profile_principal(s.store, actor)
+
+
+def test_zero_expiry_is_explicit_auditable_long_term_ceiling_not_broader_authority(collab, monkeypatch):
+    from hub.room_scope import current
+    s, owner, actor, room, args = setup(collab)
+    original_grant = s.store.one("SELECT * FROM grants WHERE id='broad'")
+    receipt = s.room_scope.set({**args, 'expires_seconds': 0}, owner)
+    assert s.room_scope.set({**args, 'expires_seconds': 0}, owner) == receipt
+    assert receipt['lifetime_mode'] == 'until_revoked' and receipt['expires_at'] == 0
+    record = current(s.store, 'broad')
+    assert record['manifest']['lifetime_mode'] == 'until_revoked'
+    assert record['expires_at'] == 0
+    audit = s.store.one("SELECT detail FROM collaboration_audit WHERE action='room_scope.owner_approved' AND target='broad'")
+    evidence = json.loads(audit['detail'])
+    assert evidence['lifetime_mode'] == 'until_revoked' and evidence['expires_seconds'] == 0
+    assert evidence['changes_underlying_grant'] is False
+    assert s.room_scope.listing(args, owner)['items'][0]['manifest']['lifetime_mode'] == 'until_revoked'
+    assert descriptor(s.store, actor)['lifetime_mode'] == 'until_revoked'
+    assert s.store.one("SELECT * FROM grants WHERE id='broad'") == original_grant
+    with monkeypatch.context() as patch:
+        patch.setattr('hub.room_scope.time.time', lambda: 4102444800)
+        assert current(s.store, 'broad')['expires_at'] == 0
+    require_action(s.store, actor, 'read', project_id='proj')
+    with pytest.raises(DevError):
+        require_action(s.store, actor, 'read', project_id='otherproj')
+    with pytest.raises(DevError):
+        require_action(s.store, actor, 'execute', project_id='proj')
+    s.room_scope.control({**{k: args[k] for k in ('project', 'environment_id', 'grant_id')},
+        'expected_version': 1, 'action': 'revoke', 'idempotency_key': key()}, owner)
+    with pytest.raises(DevError, match='不会退回'):
+        current(s.store, 'broad')
+
+
+@pytest.mark.parametrize('seconds', [-1, 1, 299, 2592001, 0.5, True, '0', None])
+def test_invalid_scope_lifetime_is_rejected_without_write(collab, seconds):
+    s, owner, actor, room, args = setup(collab)
+    with pytest.raises(DevError):
+        s.room_scope.set({**args, 'expires_seconds': seconds}, owner)
+    assert not s.store.all('SELECT * FROM room_scope_manifests')
+
+
+@pytest.mark.parametrize('seconds', [300, 86400, 2592000])
+def test_finite_scope_lifetime_remains_bounded(collab, seconds):
+    s, owner, actor, room, args = setup(collab)
+    before = s.clock()
+    receipt = s.room_scope.set({**args, 'expires_seconds': seconds}, owner)
+    assert receipt['lifetime_mode'] == 'bounded'
+    assert before + seconds <= receipt['expires_at'] <= s.clock() + seconds
+
+
+def test_existing_finite_scope_changes_to_long_term_only_with_fresh_explicit_owner_save(collab):
+    s, owner, actor, room, args = setup(collab)
+    finite = s.room_scope.set(args, owner)
+    assert finite['lifetime_mode'] == 'bounded'
+    with pytest.raises(DevError):
+        s.room_scope.set({**args, 'expires_seconds': 0, 'idempotency_key': key()}, owner)
+    unchanged = s.store.one("SELECT * FROM room_scope_manifests WHERE grant_id='broad'")
+    assert unchanged['expires_at'] == finite['expires_at']
+    fresh = {**args, 'expires_seconds': 0, 'expected_version': 1, 'idempotency_key': key()}
+    with pytest.raises(DevError):
+        s.room_scope.set({**fresh, 'confirm_connection_wide_ceiling': False}, owner)
+    with pytest.raises(DevError):
+        s.room_scope.set(fresh, actor)
+    saved = s.room_scope.set(fresh, owner)
+    assert saved['version'] == 2 and saved['expires_at'] == 0
+    finite_again = s.room_scope.set({**args, 'expires_seconds': 3600,
+        'expected_version': 2, 'idempotency_key': key()}, owner)
+    assert finite_again['version'] == 3 and finite_again['lifetime_mode'] == 'bounded'
+
+
+def test_legacy_missing_lifetime_mode_is_not_upgraded_and_zero_requires_bound_evidence(collab):
+    from hub.room_scope import current, fingerprint, migrate
+    from hub.collaboration.common import canonical
+    s, owner, actor, room, args = setup(collab)
+    s.room_scope.set(args, owner)
+    row = s.store.one("SELECT * FROM room_scope_manifests WHERE grant_id='broad'")
+    manifest = json.loads(row['manifest'])
+    manifest.pop('lifetime_mode')
+    row['manifest_digest'] = fingerprint(row, manifest)
+    s.store.execute("UPDATE room_scope_manifests SET manifest=?,manifest_digest=? WHERE grant_id='broad'",
+                    (canonical(manifest), row['manifest_digest']))
+    with s.store.lock:
+        migrate(s.store.db)
+    assert descriptor(s.store, actor)['lifetime_mode'] == 'bounded'
+    assert current(s.store, 'broad')['expires_at'] == row['expires_at']
+    # Even a self-consistent legacy digest cannot turn zero into long-term.
+    row['expires_at'] = 0.0
+    s.store.execute("UPDATE room_scope_manifests SET expires_at=0,manifest_digest=? WHERE grant_id='broad'",
+                    (fingerprint(row, manifest),))
+    with pytest.raises(DevError, match='记录无效'):
+        current(s.store, 'broad')
+
+
+def test_long_term_scope_cannot_survive_grant_revocation_or_remapping(collab):
+    from hub.room_scope import current
+    s, owner, actor, room, args = setup(collab)
+    s.room_scope.set({**args, 'expires_seconds': 0}, owner)
+    s.store.execute("UPDATE projects SET root='/tmp/dot-scope-fixture/moved' WHERE id='proj'")
+    with pytest.raises(DevError, match='目录'):
+        current(s.store, 'broad')
+    s.store.execute("UPDATE projects SET root='/tmp/dot-scope-fixture/A' WHERE id='proj'")
+    s.store.execute("UPDATE grants SET revoked=1 WHERE id='broad'")
+    with pytest.raises(DevError, match='身份'):
+        current(s.store, 'broad')

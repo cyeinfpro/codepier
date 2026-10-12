@@ -313,3 +313,83 @@ def test_closing_then_reopening_discards_channel_drafts_and_consent(qr_page):
     expect(account.locator("[name=token]")).to_have_value("")
     expect(account.locator("[name=confirm_credentials]")).not_to_be_checked()
     assert page.evaluate("writes.length") == 0
+
+
+def scope_form(page, saved=False):
+    page.evaluate("""(saved) => {
+      data.scopes.eligible_connections=[{id:'grantA',label:'合成测试连接',scope_version:saved ? 3 : 0}];
+      data.scopes.items=saved ? [{grant_id:'grantA',version:3,state:'active',expires_at:0,
+        manifest:{lifetime_mode:'until_revoked',project_rules:[
+          {project_id:'projectA',capabilities:['read'],execution_targets:['agent']}],
+          execution_mode:'file_tools_only'}}] : [];
+    }""", saved)
+    act(page, "open")
+    overview(page)
+    act(page, "view-advanced")
+    if saved:
+        page.get_by_text("修改已有连接的限制", exact=True).click()
+    return page.locator("[data-channel-form=scope]")
+
+
+@pytest.mark.parametrize("selection", ["select", "zero"])
+def test_scope_long_term_is_explicit_and_resets_independent_confirmations(qr_page, selection, tmp_path):
+    page, engine = qr_page
+    page.set_viewport_size({"width": 390, "height": 1000})
+    full_styles(page)
+    form = scope_form(page)
+    expect(form.locator("[name=hours]")).to_have_value("24")
+    expect(form.locator("[name=scope_lifetime]")).to_have_value("bounded")
+    form.locator("[name=confirm_scope]").check()
+    form.locator("[name=unsandboxed]").check()
+    if selection == "select":
+        form.locator("[name=scope_lifetime]").select_option("until_revoked")
+    else:
+        form.locator("[name=hours]").fill("0")
+    expect(form.locator("[name=scope_lifetime]")).to_have_value("until_revoked")
+    expect(form.locator("[name=hours]")).to_have_value("0")
+    expect(form.locator("[name=confirm_scope]")).not_to_be_checked()
+    expect(form.locator("[name=unsandboxed]")).not_to_be_checked()
+    act(page, "scope-save")
+    assert page.evaluate("writes.length") == 0
+    form.locator("[name=confirm_scope]").check()
+    no_overflow(page)
+    page.screenshot(path=str(tmp_path / f"scope-long-term-{selection}-{engine}.png"), full_page=True)
+    act(page, "scope-save")
+    sent = page.evaluate("writes[0]")
+    assert sent["args"]["expires_seconds"] == 0
+    assert sent["args"]["execution_mode"] == "file_tools_only"
+    assert sent["args"]["acknowledge_unsandboxed_exec"] is False
+    assert sent["args"]["confirm_connection_wide_ceiling"] is True
+
+
+def test_saved_long_term_scope_reopens_as_zero_and_unchanged_does_not_write(qr_page):
+    page, _ = qr_page
+    form = scope_form(page, saved=True)
+    expect(form.locator("[name=hours]")).to_have_value("0")
+    expect(form.locator("[name=scope_lifetime]")).to_have_value("until_revoked")
+    expect(page.locator(".cc-channel-binding").filter(has_text="连接 grantA")).to_contain_text("长期（持续至撤销）")
+    form.locator("[name=confirm_scope]").check()
+    act(page, "scope-save")
+    assert page.evaluate("writes.length") == 0
+    overview(page)
+    act(page, "view-advanced")
+    page.get_by_text("修改已有连接的限制", exact=True).click()
+    expect(form.locator("[name=hours]")).to_have_value("0")
+    expect(form.locator("[name=confirm_scope]")).not_to_be_checked()
+    form.locator("[name=scope_lifetime]").select_option("bounded")
+    expect(form.locator("[name=hours]")).to_have_value("24")
+    form.locator("[name=hours]").fill("72")
+    form.locator("[name=confirm_scope]").check()
+    act(page, "scope-save")
+    assert page.evaluate("writes[0].args.expires_seconds") == 72 * 3600
+
+
+@pytest.mark.parametrize("hours", ["", "-1", "0.5", "721"])
+def test_invalid_scope_hours_never_send_or_become_implicit_long_term(qr_page, hours):
+    page, _ = qr_page
+    form = scope_form(page)
+    form.locator("[name=hours]").fill(hours)
+    form.locator("[name=confirm_scope]").check()
+    page.evaluate("clickAction('dot-channel-scope-save').catch(()=>({local:true}))")
+    assert page.evaluate("writes.length") == 0
+    expect(form.locator("[name=scope_lifetime]")).to_have_value("bounded")

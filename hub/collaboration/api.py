@@ -20,9 +20,9 @@ def make_router(auth, runtime):
         return await store.run(inspect)
 
     @router.get('/room-scopes')
-    async def room_scopes(request: Request, project: str, environment_id: str = 'production'):
+    async def room_scopes(request: Request, project: str, environment_id: str = 'production', conversation_id: str = ''):
         return await store.run(lambda: service.room_scope.listing(
-            {'project': project, 'environment_id': environment_id}, auth.panel(request)))
+            {'project': project, 'environment_id': environment_id, 'conversation_id': conversation_id}, auth.panel(request)))
 
     @router.get('/weixin')
     async def weixin(request: Request, project: str, environment_id: str = 'production', conversation_id: str = ''):
@@ -119,6 +119,8 @@ def make_router(auth, runtime):
         def perform():
             principal = auth.admin(request, True)
             handlers = {'dot': service.dots.create,
+                        'conversation-project-preview': service.conversations.project_scopes.preview,
+                        'conversation-project-scope-control': service.conversations.project_scopes.control,
                         'room-scope': service.room_scope.set,
                         'room-scope-control': service.room_scope.control,
                         'telegram-account': service.telegram.import_account,

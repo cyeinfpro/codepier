@@ -1349,7 +1349,7 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
       const policies = (r.items || [])
         .map(
           (item) =>
-            `<div class="cc-channel-binding"><strong>连接 ${E(item.grant_id.slice(-8))} · ${listState(item.state)}</strong><p>版本 ${E(item.version)} · 到期 ${stamp(item.expires_at)} · ${item.manifest?.execution_mode === 'file_tools_only' ? '仅文件工具' : '账户权限执行（不是 OS 沙箱）'}</p><p>${(item.manifest?.project_rules || []).map((p) => E(p.project_id) + '：' + E(p.capabilities.join(' / '))).join('<br>')}</p>${item.state === 'active' ? button('dot-channel-scope-revoke', '停用此房间连接', { id: item.grant_id }) : ''}</div>`,
+            `<div class="cc-channel-binding"><strong>连接 ${E(item.grant_id.slice(-8))} · ${listState(item.state)}</strong><p>版本 ${E(item.version)} · ${item.manifest?.lifetime_mode === 'until_revoked' && item.expires_at === 0 ? '长期（持续至撤销）' : '到期 ' + stamp(item.expires_at)} · ${item.manifest?.execution_mode === 'file_tools_only' ? '仅文件工具' : '账户权限执行（不是 OS 沙箱）'}</p><p>${(item.manifest?.project_rules || []).map((p) => E(p.project_id) + '：' + E(p.capabilities.join(' / '))).join('<br>')}</p>${item.state === 'active' ? button('dot-channel-scope-revoke', '停用此房间连接', { id: item.grant_id }) : ''}</div>`,
         )
         .join('');
       const deliveries = (w.deliveries || [])
@@ -1396,7 +1396,7 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
               (g.scope_version ? '（已有范围，修改会替换原范围）' : ''),
           ]),
         ),
-      )}<fieldset><legend>当前环境的项目与逐项目能力</legend>${projects.map((p) => `<div class="cc-channel-project" data-project-id="${E(p.project_id)}"><label><input type="checkbox" name="project_selected" ${p.project_id === (state.snapshot.room.project_id || state.project) ? 'checked disabled' : ''}>${E(p.project_label || p.project_id)}</label>${checkbox('write', '允许项目文件写入')}${checkbox('execute', '允许此项目的 Agent 执行')}</div>`).join('')}</fieldset>${field('临时凭据限制期限（小时）', '<input type="number" name="hours" value="24" min="1" max="720" step="1" required>')}${checkbox('unsandboxed', '如选择执行，我明确接受 Agent 账户权限；这不是文件系统或网络沙箱')}${checkbox('confirm_scope', '我确认以本次选择替换此凭据的房间范围，且影响它的所有会话', true)}${button('dot-channel-scope-save', '确认设置范围')}<p>严格 OS 隔离尚未验证时不会放行执行。未选择执行时只允许获批文件工具。</p></div></details></section></div>`;
+      )}<fieldset><legend>当前环境的项目与逐项目能力</legend>${projects.map((p) => `<div class="cc-channel-project" data-project-id="${E(p.project_id)}"><label><input type="checkbox" name="project_selected" ${p.project_id === (state.snapshot.room.project_id || state.project) ? 'checked disabled' : ''}>${E(p.project_label || p.project_id)}</label>${checkbox('write', '允许项目文件写入')}${checkbox('execute', '允许此项目的 Agent 执行')}</div>`).join('')}</fieldset>${field('凭据限制有效期', '<select name="scope_lifetime"><option value="bounded">定时到期</option><option value="until_revoked">长期（持续至撤销）</option></select>')}${field('限制期限（小时，0 为长期）', '<input type="number" name="hours" value="24" min="0" max="720" step="1" required>')}${checkbox('unsandboxed', '如选择执行，我明确接受 Agent 账户权限；这不是文件系统或网络沙箱')}${checkbox('confirm_scope', '我确认以本次选择替换此凭据的房间范围，且影响它的所有会话', true)}${button('dot-channel-scope-save', '确认设置范围')}<p>严格 OS 隔离尚未验证时不会放行执行。未选择执行时只允许获批文件工具。</p></div></details></section></div>`;
     }
 
     const viewTitles = {
@@ -1409,6 +1409,38 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
     const drafts = new Map();
     const draftKey = (form) =>
       form.dataset.channelForm + ':' + (form.closest('[data-binding-id]')?.dataset.bindingId || '');
+    function syncScopeRootCheck(form) {
+      const rows = [...form.querySelectorAll('[data-project-id]')];
+      const selected = new Set(
+        rows
+          .filter((row) => row.querySelector('[name="project_selected"]').checked)
+          .map((row) => row.dataset.projectId),
+      );
+      const blocked = (loaded?.scopes.project_root_checks || []).filter(
+        (check) =>
+          selected.has(check.project_id) &&
+          (check.has_outside_projects ||
+            (check.overlap_with_project_ids || []).some((id) => !selected.has(id))),
+      );
+      const labels = blocked.map(
+        (check) =>
+          rows
+            .find((row) => row.dataset.projectId === check.project_id)
+            ?.querySelector('label')
+            ?.textContent.trim() || check.project_id,
+      );
+      const message = labels.length
+        ? '目录预检：项目“' +
+          labels.join('”、“') +
+          '”的根目录包含未选项目映射，当前范围无法保存。请在项目管理核对这些项目的根目录，' +
+          '使用独立目录的项目建立话题后再设置限制。调整映射后请刷新状态。'
+        : '';
+      const notice = form.querySelector('.cc-scope-root-check');
+      notice.textContent = message;
+      notice.hidden = !message;
+      form.querySelector('[data-cc-action="dot-channel-scope-save"]').disabled = !!message;
+      return message;
+    }
     function scopeSignature(form) {
       return JSON.stringify({
         grant: form.querySelector('[name="grant_id"]').value,
@@ -1434,14 +1466,30 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
         row.querySelector('[name="execute"]').checked =
           !!original?.capabilities?.includes('execute');
       }
-      form.querySelector('[name="hours"]').value = saved?.expires_at
-        ? String(
-            Math.min(720, Math.max(1, Math.ceil((saved.expires_at - Date.now() / 1000) / 3600))),
-          )
-        : '24';
+      const untilRevoked =
+        saved?.manifest?.lifetime_mode === 'until_revoked' && saved.expires_at === 0;
+      form.querySelector('[name="hours"]').value = untilRevoked
+        ? '0'
+        : saved?.expires_at
+          ? String(
+              Math.min(720, Math.max(1, Math.ceil((saved.expires_at - Date.now() / 1000) / 3600))),
+            )
+          : '24';
+      syncScopeLifetime(form);
       for (const name of ['confirm_scope', 'unsandboxed'])
         form.querySelector('[name="' + name + '"]').checked = false;
       loaded.scopeDraft = saved ? { grantId, signature: scopeSignature(form) } : null;
+      syncScopeRootCheck(form);
+    }
+    function syncScopeLifetime(form, changed = '') {
+      const hours = form.querySelector('[name="hours"]');
+      const mode = form.querySelector('[name="scope_lifetime"]');
+      if (changed === 'scope_lifetime') hours.value = mode.value === 'until_revoked' ? '0' : '24';
+      mode.value =
+        hours.value.trim() !== '' && Number(hours.value) === 0 ? 'until_revoked' : 'bounded';
+      if (changed)
+        for (const name of ['confirm_scope', 'unsandboxed'])
+          form.querySelector('[name="' + name + '"]').checked = false;
     }
     function rememberDrafts() {
       for (const form of document.querySelectorAll('.cc-channel-pane [data-channel-form]')) {
@@ -1525,6 +1573,15 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
         if (enrollment && ['account_id', 'dot_id', 'expected_peer_id'].includes(event.target.name))
           void enrollmentRead(enrollment);
         if (event.target.name === 'grant_id' && scopeForm) prefillScope(scopeForm);
+        if (event.target.name === 'project_selected' && scopeForm) syncScopeRootCheck(scopeForm);
+        if (
+          scopeForm &&
+          event.target.closest('[data-channel-form="scope"]') === scopeForm &&
+          ['scope_lifetime', 'hours', 'project_selected', 'write', 'execute'].includes(
+            event.target.name,
+          )
+        )
+          syncScopeLifetime(scopeForm, event.target.name);
         if (['budget_mode', 'max_delegations'].includes(event.target.name)) {
           const form = event.target.closest('[data-channel-form="owner-authority"]');
           if (form) syncBudgetForm(form, true);
@@ -1533,6 +1590,12 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
       pane?.addEventListener('input', (event) => {
         const enrollment = event.target.closest('[data-channel-form="enrollment"]');
         if (enrollment && event.target.name === 'expected_peer_id') enrollmentReset(enrollment);
+        if (
+          scopeForm &&
+          event.target.name === 'hours' &&
+          event.target.closest('[data-channel-form="scope"]') === scopeForm
+        )
+          syncScopeLifetime(scopeForm, 'hours');
         if (event.target.name === 'max_delegations') {
           const form = event.target.closest('[data-channel-form="owner-authority"]');
           if (form) syncBudgetForm(form, true);
@@ -1766,22 +1829,28 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
         detail.classList.add('cc-connection-section');
         detail.querySelector('summary').textContent = (data.scopes.items || []).length
           ? '修改已有连接的限制'
-          : '设置临时凭据限制';
+          : '设置凭据限制';
         detail.open = !(data.scopes.items || []).length;
         form.querySelector('fieldset').classList.add('cc-scope-projects');
+        form
+          .querySelector('fieldset')
+          .insertAdjacentHTML(
+            'afterend',
+            '<p class="cc-connection-warning cc-scope-root-check" role="status" aria-live="polite" hidden></p>',
+          );
         const hours = form.querySelector('[name="hours"]');
         const label = hours.closest('.cc-field');
         if (label) {
           const text = [...label.childNodes].find((n) => n.nodeType === Node.TEXT_NODE);
-          if (text) text.textContent = '临时凭据限制期限（小时）';
+          if (text) text.textContent = '限制期限（小时，0 为长期）';
           else
             label.querySelector('span') &&
-              (label.querySelector('span').textContent = '临时凭据限制期限（小时）');
+              (label.querySelector('span').textContent = '限制期限（小时，0 为长期）');
         }
         hours.setAttribute('aria-describedby', 'cc-scope-expiry-help');
         hours.insertAdjacentHTML(
           'afterend',
-          '<small id="cc-scope-expiry-help">默认 24 小时，最长 720 小时。到期后普通工具会被拒绝访问，不会自动恢复为更宽权限。</small>',
+          '<small id="cc-scope-expiry-help">输入 0 或选择“长期”表示此限制持续至撤销；定时默认 24 小时，最长 720 小时。定时到期或撤销后普通工具会被拒绝访问，不会恢复为更宽权限。原凭据自身有效期、项目权限和每次任务超时仍然适用。</small>',
         );
       }
       return section.outerHTML;
@@ -1821,7 +1890,11 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
         result = await Promise.all([
           api(
             '/api/collaboration/room-scopes?' +
-              new URLSearchParams({ project: key.project, environment_id: key.environment_id }),
+              new URLSearchParams({
+                project: key.project,
+                environment_id: key.environment_id,
+                conversation_id: key.conversation_id,
+              }),
             { signal: controller.signal },
           ),
           api('/api/collaboration/weixin?' + query, { signal: controller.signal }),
@@ -2238,6 +2311,8 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
             action === 'dot-channel-activate' && checked('confirm_peer') ? row.pending_peer_id : '',
         };
       } else if (action === 'dot-channel-scope-save') {
+        const rootWarning = syncScopeRootCheck(root);
+        if (rootWarning) throw new Error(rootWarning);
         const grant = loaded.scopes.eligible_connections.find((g) => g.id === value('grant_id'));
         if (!grant) throw new Error('请选择当前已有连接。');
         if (
@@ -2245,6 +2320,9 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
           loaded.scopeDraft.signature === scopeSignature(root)
         )
           return { local: true, message: '连接范围没有变化，已保留原设置与到期时间。' };
+        const hours = Number(value('hours'));
+        if (!value('hours').trim() || !Number.isInteger(hours) || hours < 0 || hours > 720)
+          throw new Error('请输入 0（长期），或 1 至 720 的整数小时。');
         const rules = [...root.querySelectorAll('[data-project-id]')]
           .filter((p) => p.querySelector('[name="project_selected"]').checked)
           .map((p) => ({
@@ -2266,7 +2344,7 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
           project_rules: rules,
           execution_mode: execute ? 'account_permissions_acknowledged' : 'file_tools_only',
           acknowledge_unsandboxed_exec: checked('unsandboxed'),
-          expires_seconds: Number(value('hours')) * 3600,
+          expires_seconds: hours * 3600,
           confirm_connection_wide_ceiling: checked('confirm_scope'),
         };
       } else if (action === 'dot-channel-scope-revoke') {
