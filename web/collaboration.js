@@ -100,8 +100,12 @@ window.CodePierCollaboration = (() => {
   const when = (value) =>
     value ? new Date(value * 1000).toLocaleString('zh-CN', { hour12: false }) : '暂无';
   const scope = () => ({ project: state.project, environment_id: state.environment });
+  const roomConnection = () =>
+    state.snapshot?.conversation?.working_scope ? state.snapshot.conversation.connection : null;
   const chatScope = () => ({
-    ...scope(),
+    ...(roomConnection()
+      ? { project: roomConnection().project_id, environment_id: roomConnection().environment_id }
+      : scope()),
     ...(state.conversation ? { conversation_id: state.conversation } : {}),
   });
   const projectLabel = (id) => S.projects.find((p) => p.id === id)?.alias || id;
@@ -115,7 +119,7 @@ window.CodePierCollaboration = (() => {
       },
     ];
   function conversationTitle(room) {
-    const first = room?.projects?.[0];
+    const first = room?.connection || room?.projects?.[0];
     if (first && room.title === first.project_id + ' · ' + first.environment_id)
       return first.project_label || projectLabel(first.project_id);
     return (
@@ -137,13 +141,14 @@ window.CodePierCollaboration = (() => {
   }
   function projectChips() {
     return `<div class="cc-project-strip ${roomProjects().length <= 1 ? 'is-single-project' : ''}" aria-label="房间项目">${roomProjects()
-      .map(
-        (p) =>
-          `<button type="button" class="cc-project-chip ${p.project_id === state.project && p.environment_id === state.environment ? 'is-selected' : ''}" data-cc-partition="${E(p.project_id)}" data-environment="${E(p.environment_id)}" aria-pressed="${p.project_id === state.project && p.environment_id === state.environment}">${E(p.project_label || projectLabel(p.project_id))}<small>${E(p.environment_id)}</small></button>`,
+      .map((p) =>
+        roomConnection()
+          ? `<span class="cc-project-chip cc-task-project-label" data-room-project="${E(p.project_id)}">${E(p.project_label || projectLabel(p.project_id))}<small>${E(p.environment_id)}</small></span>`
+          : `<button type="button" class="cc-project-chip ${p.project_id === state.project && p.environment_id === state.environment ? 'is-selected' : ''}" data-cc-partition="${E(p.project_id)}" data-environment="${E(p.environment_id)}" aria-pressed="${p.project_id === state.project && p.environment_id === state.environment}">${E(p.project_label || projectLabel(p.project_id))}<small>${E(p.environment_id)}</small></button>`,
       )
       .join(
         '',
-      )}${state.snapshot?.can_manage && state.snapshot?.conversation ? button('add-project', '＋ 添加项目') : ''}</div>`;
+      )}${roomProjects().length ? '' : '<span class="cc-project-empty">纯聊天 · 暂无任务项目</span>'}${state.snapshot?.can_manage && state.snapshot?.conversation ? button('manage-projects', '管理房间项目') : ''}</div>`;
   }
   function disableComposer() {
     const area = document.querySelector('#cc-message-input');
@@ -152,6 +157,7 @@ window.CodePierCollaboration = (() => {
     if (send) send.disabled = true;
   }
   async function selectPartition(project, environment) {
+    if (roomConnection()) return project === state.project && environment === state.environment;
     if (project === state.project && environment === state.environment) return true;
     const conversation = state.conversation;
     rememberChat();
@@ -635,7 +641,11 @@ window.CodePierCollaboration = (() => {
   }
   function contextContents() {
     const d = state.snapshot;
-    return `<h2>房间上下文</h2><p class="cc-hint">当前项目：${E(projectLabel(state.project))} · ${E(state.environment)}</p>${coordination.context()}<section><h3>新增项目执行范围</h3>${(d.conversation?.project_authorizations || []).map((scope) => `<div class="cc-goal"><strong>${E(scope.project_label)} · ${E(scope.dot_label)}</strong><p>${E(scope.environment_id)} · ${E(scope.capabilities.join(' / '))} · ${scope.effective_active ? '已授权' : E(scope.blocked_reason)}</p>${d.can_manage ? button('project-scope-revoke', '撤销项目授权', scope) : ''}</div>`).join('') || empty('尚无新增项目执行授权。')}</section><section><h3>只读任务目标</h3>${d.goals.map((g) => `<div class="cc-goal"><strong>${E(g.request)}</strong><p>${E(g.acceptance)}</p>${badge(g.state)}${d.can_manage && g.state === 'awaiting_decision' ? button('verify_goal', '核对证据后验收', g) : ''}</div>`).join('') || empty('讨论后再确认目标。普通消息不会自动生成任务。')}</section><section><h3>房间任务</h3>${
+    return `<h2>房间上下文</h2><p class="cc-hint">当前项目：${E(projectLabel(state.project))} · ${E(state.environment)}</p>${coordination.context()}<section><h3>当前房间任务项目</h3><p>${
+      roomProjects()
+        .map((p) => E(p.project_label || projectLabel(p.project_id)))
+        .join('、') || '纯聊天 · 暂无任务项目'
+    }</p>${d.can_manage && d.conversation ? button('manage-projects', '管理房间项目') : ''}</section><section><h3>旧版单项目授权记录</h3>${(d.conversation?.project_authorizations || []).map((scope) => `<div class="cc-goal"><strong>${E(scope.project_label)} · ${E(scope.dot_label)}</strong><p>${E(scope.environment_id)} · ${E(scope.capabilities.join(' / '))} · ${scope.effective_active ? '已授权' : E(scope.blocked_reason)}</p>${d.can_manage ? button('project-scope-revoke', '撤销项目授权', scope) : ''}</div>`).join('') || empty('暂无旧版单项目授权记录。')}</section><section><h3>只读任务目标</h3>${d.goals.map((g) => `<div class="cc-goal"><strong>${E(g.request)}</strong><p>${E(g.acceptance)}</p>${badge(g.state)}${d.can_manage && g.state === 'awaiting_decision' ? button('verify_goal', '核对证据后验收', g) : ''}</div>`).join('') || empty('讨论后再确认目标。普通消息不会自动生成任务。')}</section><section><h3>房间任务</h3>${
       d.jobs
         .slice(0, 8)
         .map(
@@ -656,8 +666,9 @@ window.CodePierCollaboration = (() => {
         const first = r.projects?.find(
           (p) => p.project_id === state.project && p.environment_id === state.environment,
         ) ||
+          r.connection ||
           r.projects?.[0] || { project_id: r.project_id, environment_id: r.environment_id };
-        return `<button type="button" data-cc-room="${E(r.id)}" data-project="${E(first.project_id)}" data-environment="${E(first.environment_id)}" class="cc-room ${r.id === state.conversation ? 'is-current' : ''}" aria-current="${r.id === state.conversation ? 'page' : 'false'}"><span class="cc-room-icon" aria-hidden="true">${E((conversationTitle(r) || 'C').slice(0, 1))}</span><span><strong>${E(conversationTitle(r))}<em class="cc-room-draft" hidden></em></strong><small>${r.projects?.length > 1 ? `${r.projects.length} 个项目` : E(first.environment_id)}</small></span></button>`;
+        return `<button type="button" data-cc-room="${E(r.id)}" data-project="${E(first.project_id)}" data-environment="${E(first.environment_id)}" class="cc-room ${r.id === state.conversation ? 'is-current' : ''}" aria-current="${r.id === state.conversation ? 'page' : 'false'}"><span class="cc-room-icon" aria-hidden="true">${E((conversationTitle(r) || 'C').slice(0, 1))}</span><span><strong>${E(conversationTitle(r))}<em class="cc-room-draft" hidden></em></strong><small>${r.projects?.length === 0 ? '纯聊天' : r.projects?.length > 1 ? `${r.projects.length} 个项目` : E(first.environment_id)}</small></span></button>`;
       })
       .join(
         '',
@@ -1626,7 +1637,17 @@ window.CodePierCollaboration = (() => {
       state.project = S.projects[0]?.id || '';
     if (!state.project)
       return `<div class="collaboration">${header}${empty('请先创建一个有权限访问的项目映射。')}</div>`;
-    const data = await getRecord('overview', '');
+    let data = await getRecord('overview', '');
+    if (gen !== state.generation || session !== S.session || space !== S.space_id) return '';
+    const connection = data.conversation?.working_scope && data.conversation.connection;
+    if (
+      connection &&
+      (state.project !== connection.project_id || state.environment !== connection.environment_id)
+    ) {
+      state.project = connection.project_id;
+      state.environment = connection.environment_id;
+      data = await getRecord('overview', '');
+    }
     if (gen !== state.generation || session !== S.session || space !== S.space_id) return '';
     // Independent authorized reads share one network stage instead of putting
     // the grants directory in front of the conversation's critical path.
@@ -1681,22 +1702,50 @@ window.CodePierCollaboration = (() => {
     if (!data.room)
       return `<div class="collaboration">${header}${selection}${feedback}<section class="cc-card cc-intro"><h2>开启这个项目的共享讨论室</h2><p>创建讨论室只保存协作记录，不代表授权采集、添加订阅或执行代码。</p>${data.can_manage ? button('create-room', '创建项目讨论室') : empty('请由项目所属空间的管理员创建讨论室。')}</section></div>`;
     const project = S.projects.find((p) => p.id === state.project);
-    return `<div class="collaboration cc-chat-shell cc-workspace is-discussion" data-workspace-view="${E(state.view)}" data-project="${E(state.project)}" data-environment="${E(state.environment)}" data-conversation="${E(state.conversation)}"><h1 class="cc-sr-only" tabindex="-1">协作中心</h1>${roomRail(selection)}<button type="button" class="cc-room-backdrop" data-cc-workspace="close-rooms" aria-label="关闭房间列表" tabindex="-1"></button><section class="cc-room-body"><header class="cc-room-header"><button type="button" class="btn cc-room-mobile-toggle" data-cc-workspace="rooms" aria-controls="cc-room-rail" aria-expanded="false" aria-label="打开房间列表">☰</button><div class="cc-room-heading-copy"><div class="cc-room-title"><h2>${E(data.conversation ? conversationTitle(data.conversation) : data.room.title || project?.alias || state.project)}</h2><span class="cc-status">${E(state.environment)}</span>${data.room.state === 'paused' ? badge('paused') : ''}</div><div class="cc-room-subline"><span>${E(projectLabel(state.project))}</span>${memberStrip()}</div></div><div class="cc-header-tools">${data.capabilities?.message_search ? '<button type="button" class="btn" data-cc-action="search" aria-label="搜索房间消息"><span aria-hidden="true">⌕</span><span class="cc-search-label"> 搜索</span></button>' : ''}<details class="cc-room-menu"><summary data-cc-more aria-label="房间更多选项">···</summary><div>${button('room-settings', '切换房间')}${button('new-conversation', '新建独立聊天室')}${coordination.action('创建协作目标')}${button('context', '项目范围与上下文')}${data.can_manage && data.conversation ? button('add-project', '添加项目并授权') : ''}${button('refresh', '刷新状态')}</div></details></div></header>${projectChips()}<div class="cc-room-toolbar">${workspaceUI.navigation()}</div>${workspaceUI.summary()}${feedback}<div class="cc-main"><div id="cc-discussion-host" class="cc-discussion-host">${discussion()}</div>${workspaceUI.panel()}</div></section><dialog id="cc-drawer" class="cc-drawer" aria-label="房间详情"></dialog></div>`;
+    return `<div class="collaboration cc-chat-shell cc-workspace is-discussion" data-workspace-view="${E(state.view)}" data-project="${E(state.project)}" data-environment="${E(state.environment)}" data-conversation="${E(state.conversation)}"><h1 class="cc-sr-only" tabindex="-1">协作中心</h1>${roomRail(selection)}<button type="button" class="cc-room-backdrop" data-cc-workspace="close-rooms" aria-label="关闭房间列表" tabindex="-1"></button><section class="cc-room-body"><header class="cc-room-header"><button type="button" class="btn cc-room-mobile-toggle" data-cc-workspace="rooms" aria-controls="cc-room-rail" aria-expanded="false" aria-label="打开房间列表">☰</button><div class="cc-room-heading-copy"><div class="cc-room-title"><h2>${E(data.conversation ? conversationTitle(data.conversation) : data.room.title || project?.alias || state.project)}</h2><span class="cc-status">${E(state.environment)}</span>${data.room.state === 'paused' ? badge('paused') : ''}</div><div class="cc-room-subline"><span>${E(projectLabel(state.project))}</span>${memberStrip()}</div></div><div class="cc-header-tools">${data.capabilities?.message_search ? '<button type="button" class="btn" data-cc-action="search" aria-label="搜索房间消息"><span aria-hidden="true">⌕</span><span class="cc-search-label"> 搜索</span></button>' : ''}<details class="cc-room-menu"><summary data-cc-more aria-label="房间更多选项">···</summary><div>${button('room-settings', '切换房间')}${button('new-conversation', '新建独立聊天室')}${coordination.action('创建协作目标')}${button('context', '项目范围与上下文')}${data.can_manage && data.conversation ? button('manage-projects', '管理房间项目') : ''}${button('refresh', '刷新状态')}</div></details></div></header>${projectChips()}<div class="cc-room-toolbar">${workspaceUI.navigation()}</div>${workspaceUI.summary()}${feedback}<div class="cc-main"><div id="cc-discussion-host" class="cc-discussion-host">${discussion()}</div>${workspaceUI.panel()}</div></section><dialog id="cc-drawer" class="cc-drawer" aria-label="房间详情"></dialog></div>`;
   }
 
-  async function refreshProjectAuthorization(form) {
+  function roomProjectSelection(form) {
+    return [...form.querySelectorAll('[name="room_projects"]:checked')]
+      .map((input) => ({ project: input.value, environment_id: input.dataset.environment }))
+      .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  }
+  function roomProjectIntent(form) {
+    return {
+      conversation_id: form.dataset.conversation,
+      projects: roomProjectSelection(form),
+      dot_id: form.elements.dot_id?.value || '',
+    };
+  }
+  function projectSelectionKey(form) {
+    return JSON.stringify(roomProjectIntent(form));
+  }
+  function roomProjectChoices() {
+    const rows = new Map();
+    for (const p of roomProjects())
+      rows.set(JSON.stringify([p.project_id, p.environment_id]), { ...p, selected: true });
+    for (const p of S.projects) {
+      const key = JSON.stringify([p.id, state.environment]);
+      if (!rows.has(key))
+        rows.set(key, {
+          project_id: p.id,
+          project_label: p.alias || p.id,
+          environment_id: state.environment,
+          selected: false,
+        });
+    }
+    return [...rows.values()];
+  }
+  async function refreshRoomProjects(form) {
     const sequence = Number(form.dataset.previewSequence || 0) + 1;
     form.dataset.previewSequence = sequence;
     form.projectAuthorization = null;
     const submitButton = form.querySelector('button[type="submit"]');
     submitButton.disabled = true;
-    const summary = form.querySelector('[data-project-authorization]');
-    const values = Object.fromEntries(new FormData(form));
-    if (!values.project) {
-      summary.textContent = '选择项目后，会在这里显示本次授权的助手、能力和执行目标。';
-      return;
-    }
-    summary.textContent = '正在核对现有连接与执行范围…';
+    const summary = form.querySelector('[data-room-project-summary]');
+    const intent = roomProjectIntent(form),
+      intentKey = JSON.stringify(intent);
+    summary.textContent = '正在核对房间项目与原连接…';
     const generation = state.generation,
       epoch = state.drawerEpoch;
     const current = () =>
@@ -1704,42 +1753,66 @@ window.CodePierCollaboration = (() => {
       document.querySelector('#cc-drawer')?.open &&
       generation === state.generation &&
       epoch === state.drawerEpoch &&
-      Number(form.dataset.previewSequence) === sequence;
+      Number(form.dataset.previewSequence) === sequence &&
+      projectSelectionKey(form) === intentKey;
     try {
-      const preview = await api('/api/collaboration/conversation-project-preview', {
+      const preview = await api('/api/collaboration/conversation-projects-preview', {
         method: 'POST',
-        body: JSON.stringify({
-          project: values.project,
-          environment_id: values.environment,
-          conversation_id: form.dataset.conversation,
-          dot_id: values.dot_id || '',
-        }),
+        body: JSON.stringify(intent),
       });
       if (!current()) return;
-      const choices = form.querySelector('[data-project-assistant]');
-      if (preview.choices?.length > 1) {
+      const choices = form.querySelector('[data-room-project-assistant]');
+      if (preview.choices?.length > 1)
         choices.innerHTML = field(
-          '执行助手',
+          '此房间使用的助手',
           `<select name="dot_id" required>${options(
-            preview.choices.map((dot) => [dot.id, dot.label]),
-            values.dot_id || '',
-            '请选择助手',
+            preview.choices.map((dot) => [dot.id || dot.dot_id, dot.label || dot.dot_label]),
+            intent.dot_id,
+            '请选择已有助手连接',
           )}</select>`,
         );
-      } else choices.innerHTML = '';
       if (!preview.ready) {
-        summary.textContent = preview.message || '当前范围尚不能授权执行。';
+        summary.textContent = preview.message || '当前选择尚不能应用，请核对项目和已有助手连接。';
         return;
       }
-      const scope = preview.scope;
-      summary.innerHTML = `<p><strong>${E(scope.project_label)}</strong> · ${E(scope.environment_id)}</p>
-        <p>助手：${E(scope.dot_label)} · 连接 ${E(scope.grant_id.slice(-8))}</p>
-        <p>能力：${E(scope.capabilities.map((cap) => ({ read: '读取', write: '修改', execute: '执行' })[cap]).join('、'))}</p>
-        <p>执行目标：项目 Agent · ${E(scope.project_snapshot.device_id)}<br>项目目录：${E(scope.project_snapshot.root)}</p>
-        <p>回传位置：${E(scope.reply_location)}<br>有效期至：${E(new Date(scope.expires_at * 1000).toLocaleString())}</p>
-        <p class="cc-hint">点击下方按钮即确认此范围。后续明确交给该助手的新任务可操作此项目，旧任务保持原范围。Shell 使用执行账号权限，并非目录沙箱；连接权限上限与宿主审批继续生效。</p>`;
-      form.projectAuthorization = preview;
-      form.dataset.version = scope.conversation_version;
+      if (
+        !preview.selection_digest ||
+        !Number.isInteger(preview.conversation_version) ||
+        !Number.isInteger(preview.scope_version) ||
+        !Array.isArray(preview.projects)
+      )
+        throw new Error('服务器未返回完整的范围确认信息，请重新核对。');
+      const connection = preview.connection || {};
+      const label = (p) =>
+        typeof p === 'string'
+          ? projectLabel(p)
+          : p.project_label || projectLabel(p.project_id || p.project);
+      const list = (items) => (items?.length ? items.map((p) => E(label(p))).join('、') : '无');
+      const capabilities = (p) =>
+        (p.capabilities || [])
+          .map((cap) => ({ read: '读取', write: '修改', execute: '执行' })[cap] || cap)
+          .join('、');
+      summary.innerHTML = `<h3>确认这次项目变更</h3>
+        <p>保留当前房间的一个消息连接：${E(connection.dot_label || '原助手')}${connection.grant_id ? ' · ' + E(connection.grant_id.slice(-8)) : ''}</p>
+        <p><strong>新增：</strong>${list(preview.added)}<br><strong>移除：</strong>${list(preview.removed)}</p>
+        ${
+          preview.projects.length
+            ? '<ul class="cc-project-review">' +
+              preview.projects
+                .map(
+                  (p) =>
+                    `<li><strong>${E(label(p))}</strong> · ${E(p.environment_id)}
+            <span>能力：${E(capabilities(p) || '未授予任务能力')}</span>
+            <span>执行目标：${E(p.project_snapshot?.device_id || p.device_id || '无')} · ${E(p.project_snapshot?.root || p.root || '')}</span>
+            <span>有效期：${p.expires_at === 0 ? '长期（持续至撤销）' : p.expires_at ? E(when(p.expires_at)) : '沿用原连接限制'}</span></li>`,
+                )
+                .join('') +
+              '</ul>'
+            : '<p class="cc-project-chat-only"><strong>切换为纯聊天</strong>：当前房间不再包含任务项目，原助手与消息历史保留。</p>'
+        }
+        <p class="cc-hint">移除项目后，该项目的任务不能开始新步骤；运行中的操作申请取消，实际停止以回执为准。新增项目只用于本次明确确认的助手和后续任务，旧任务不会自动扩大范围。</p>
+        <p class="cc-hint">执行仍受已有连接权限和宿主审批限制。Shell 使用执行账号权限，并非目录沙箱。</p>`;
+      form.projectAuthorization = { ...preview, intentKey };
       submitButton.disabled = false;
     } catch (error) {
       if (current()) summary.textContent = error.message;
@@ -1764,6 +1837,7 @@ window.CodePierCollaboration = (() => {
     ) {
       const origin = element.closest('[data-message-id]');
       if (
+        !roomConnection() &&
         origin?.dataset.project &&
         (origin.dataset.project !== state.project ||
           origin.dataset.environment !== state.environment)
@@ -1784,43 +1858,45 @@ window.CodePierCollaboration = (() => {
       );
       return local;
     }
-    if (action === 'add-project') {
+    if (action === 'room-project-preview') {
+      await refreshRoomProjects(element.closest('form'));
+      return local;
+    }
+    if (action === 'manage-projects' || action === 'add-project') {
+      const currentDot =
+        state.snapshot.conversation?.working_scope?.dot_id ||
+        state.snapshot.conversation?.connection?.dot_id ||
+        '';
       showDrawer(
-        '添加项目并授权执行',
-        `<form id="cc-add-project" class="cc-form" data-conversation="${E(state.conversation)}" data-version="${E(state.snapshot.conversation?.version || 0)}">${field(
-          '项目',
-          `<select name="project" required>${options(
-            S.projects.map((p) => [p.id, p.alias || p.id]),
-            '',
-            '请选择项目',
-          )}</select>`,
-        )}${field('项目环境', `<input name="environment" value="${E(state.environment)}" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9_.-]*" required>`)}<div data-project-assistant></div><section data-project-authorization role="status">选择项目后，会显示本次授权的助手、能力和执行目标。</section><button class="btn primary" type="submit" disabled>添加并授权</button></form>`,
+        '管理房间项目',
+        `<p>一个房间保留一个消息连接。勾选要保留的任务项目，可随时新增或移除；全部取消后仍可聊天。</p>
+        <form id="cc-room-projects" class="cc-form" data-conversation="${E(state.conversation)}">
+          <fieldset class="cc-project-choices cc-room-project-choices"><legend>房间中的任务项目</legend>${roomProjectChoices()
+            .map(
+              (p) =>
+                `<label><input type="checkbox" name="room_projects" value="${E(p.project_id)}" data-environment="${E(p.environment_id)}" ${p.selected ? 'checked' : ''}><span>${E(p.project_label || projectLabel(p.project_id))}<small>${E(p.environment_id)}</small></span></label>`,
+            )
+            .join('')}</fieldset>
+          <div data-room-project-assistant><input type="hidden" name="dot_id" value="${E(currentDot)}"></div>
+          <section data-room-project-summary role="status" aria-live="polite"></section>
+          ${button('room-project-preview', '重新核对')}<div class="cc-actions">${button('close-drawer', '取消')}<button class="btn primary" type="submit" disabled>确认项目变更</button></div>
+        </form>`,
         element,
       );
+      await refreshRoomProjects(document.querySelector('#cc-room-projects'));
       return local;
     }
     if (action === 'new-conversation') {
-      const adding = action === 'add-project';
-      const existing = roomProjects();
-      const choices = S.projects.filter(
-        (p) =>
-          !adding ||
-          !existing.some((v) => v.project_id === p.id && v.environment_id === state.environment),
-      );
       showDrawer(
-        adding ? '在这个房间添加项目' : '新建独立聊天室',
-        `<p>${adding ? '保留当前房间 ID、消息历史、草稿和原任务归属。' : '选择一个或多个项目，在独立的房间里讨论。'}</p><form id="${adding ? 'cc-add-project' : 'cc-new-conversation'}" class="cc-form" data-version="${E(state.snapshot.conversation?.version || 0)}">${adding ? '' : field('房间名称', '<input name="title" maxlength="120" required placeholder="为这个讨论起个名字">')}${
-          adding
-            ? field(
-                '要加入的项目',
-                `<select name="project" required>${options(
-                  choices.map((p) => [p.id, p.alias || p.id]),
-                  '',
-                  '请选择一个已授权项目',
-                )}</select>`,
-              )
-            : `<fieldset class="cc-project-choices"><legend>参与项目（至少一个）</legend>${choices.map((p) => `<label><input type="checkbox" name="projects" value="${E(p.id)}">${E(p.alias || p.id)}</label>`).join('')}</fieldset>`
-        }${field('项目环境', `<input name="environment" value="${E(state.environment)}" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9_.-]*" required>`)}<p class="cc-hint">项目加入不扩大任何连接权限。每条消息、回复和任务保留来源项目；助手连接只能读取自己已有权的项目。新房间的发言许可和 @ 订阅需要分别确认。</p><label><input name="confirm" type="checkbox" required> 已核对项目与房间范围</label><button class="btn primary" type="submit" ${choices.length ? '' : 'disabled'}>${adding ? '确认添加项目' : '创建聊天室'}</button></form>`,
+        '新建独立聊天室',
+        `<p>选择一个或多个项目，在独立的房间里讨论。</p>
+        <form id="cc-new-conversation" class="cc-form">${field('房间名称', '<input name="title" maxlength="120" required placeholder="为这个讨论起个名字">')}
+          <fieldset class="cc-project-choices"><legend>参与项目（至少一个）</legend>${S.projects.map((p) => `<label><input type="checkbox" name="projects" value="${E(p.id)}">${E(p.alias || p.id)}</label>`).join('')}</fieldset>
+          ${field('项目环境', `<input name="environment" value="${E(state.environment)}" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9_.-]*" required>`)}
+          <p class="cc-hint">项目加入不扩大任何连接权限。每条消息、回复和任务保留来源项目；助手连接只能读取自己已有权的项目。新房间的发言许可和 @ 订阅需要分别确认。</p>
+          <label><input name="confirm" type="checkbox" required> 已核对项目与房间范围</label>
+          <button class="btn primary" type="submit" ${S.projects.length ? '' : 'disabled'}>创建聊天室</button>
+        </form>`,
         element,
       );
       return local;
@@ -2025,6 +2101,7 @@ window.CodePierCollaboration = (() => {
     if (action === 'reply' || action === 'clear-reply') {
       const source = action === 'reply' ? messageById(element.dataset.id) : null;
       if (
+        !roomConnection() &&
         source?.project_id &&
         (source.project_id !== state.project || source.environment_id !== state.environment)
       ) {
@@ -2082,6 +2159,7 @@ window.CodePierCollaboration = (() => {
         workers = eligibleWorkers();
       if (!m) throw new Error('来源消息已改变，请刷新。');
       if (
+        !roomConnection() &&
         m.project_id &&
         (m.project_id !== state.project || m.environment_id !== state.environment)
       ) {
@@ -2092,10 +2170,21 @@ window.CodePierCollaboration = (() => {
         if (trigger) return act('convert', trigger);
         return local;
       }
-      const allowed = state.snapshot.capabilities?.task_assignment && workers.length;
+      const allowed =
+        state.snapshot.capabilities?.task_assignment &&
+        workers.length &&
+        (!roomConnection() ||
+          (roomProjects().some((p) => p.project_id === m.project_id) &&
+            m.project_id === state.project));
+      const taskBlocker =
+        roomConnection() && !roomProjects().some((p) => p.project_id === m.project_id)
+          ? '该项目已移出房间，请用当前项目创建新任务。'
+          : roomConnection() && m.project_id !== state.project
+            ? '这条历史消息来自其他项目。请在当前房间创建协作目标，并明确选择任务项目。'
+            : '当前没有可用的只读任务执行者，或服务未启用任务指派。先在助手与连接中核对独立任务资格；你的消息已保留。';
       showDrawer(
         '把讨论转为任务',
-        `<p>确认后才会创建一个只读任务。通知位置不能直接担任执行者。</p><div class="cc-source-quote"><small>来源消息</small><p class="cc-prose">${E(messageText(m))}</p></div>${allowed ? '' : '<p class="cc-task-blocker" role="status">当前没有可用的只读任务执行者，或服务未启用任务指派。先在助手与连接中核对独立任务资格；你的消息已保留。</p>'}<form id="cc-task-review" class="cc-form" data-message-id="${E(m.id)}" data-version="${E(m.version || 1)}">${field('任务所属项目', `<select name="target_project" required>${options([[state.project, `${projectLabel(state.project)} · ${state.environment}`]], '', '明确确认来源项目')}</select>`)}${field(
+        `<p>确认后才会创建一个只读任务。通知位置不能直接担任执行者。</p><div class="cc-source-quote"><small>来源消息</small><p class="cc-prose">${E(messageText(m))}</p></div>${allowed ? '' : `<p class="cc-task-blocker" role="status">${E(taskBlocker)}</p>`}<form id="cc-task-review" class="cc-form" data-message-id="${E(m.id)}" data-version="${E(m.version || 1)}">${field('任务所属项目', `<select name="target_project" required>${options([[state.project, `${projectLabel(state.project)} · ${state.environment}`]], '', '明确确认来源项目')}</select>`)}${field(
           '执行者',
           `<select name="assignee" required ${allowed ? '' : 'disabled'}>${options(
             workers.map((a) => [
@@ -2333,48 +2422,100 @@ window.CodePierCollaboration = (() => {
       closeDrawer();
       return { message: '项目授权已撤销；已运行操作请核对实际取消回执。' };
     }
-    if (['cc-new-conversation', 'cc-add-project'].includes(form.id)) {
-      if (form.id === 'cc-new-conversation' && !form.elements.confirm.checked)
-        throw new Error('请先确认项目与房间范围。');
-      if (
-        form.id === 'cc-add-project' &&
-        (!form.projectAuthorization?.ready ||
-          form.projectAuthorization.scope.project_id !== data.project ||
-          form.projectAuthorization.scope.environment_id !== data.environment)
-      )
-        throw new Error('请等待并核对本次项目执行范围。');
-      const adding = form.id === 'cc-add-project',
-        generation = state.generation;
+    if (form.id === 'cc-room-projects') {
+      const preview = form.projectAuthorization;
+      if (!preview?.ready || preview.intentKey !== projectSelectionKey(form))
+        throw new Error('请等待并核对当前项目选择的确认摘要。');
+      const generation = state.generation,
+        epoch = state.drawerEpoch;
+      const payload = {
+        ...roomProjectIntent(form),
+        dot_id: preview.connection?.dot_id || roomProjectIntent(form).dot_id,
+        expected_version: preview.conversation_version,
+        expected_scope_version: preview.scope_version,
+        selection_digest: preview.selection_digest,
+        confirm_scope: true,
+      };
+      const current = () =>
+        generation === state.generation &&
+        epoch === state.drawerEpoch &&
+        form.isConnected &&
+        document.querySelector('#cc-drawer')?.open &&
+        preview.intentKey === projectSelectionKey(form);
+      const identity = await commandIdentity({ operation: 'conversation-projects', ...payload });
+      if (!current()) return { local: true };
+      const controls = [...form.querySelectorAll('input, select')].map((node) => [
+        node,
+        node.disabled,
+      ]);
+      for (const [node] of controls) node.disabled = true;
+      try {
+        const result = await api('/api/collaboration/conversation-projects', {
+          method: 'POST',
+          retrySafe: true,
+          body: JSON.stringify({ ...payload, idempotency_key: identity.identifier }),
+        });
+        if (!current()) return { local: true };
+        if (result.applied !== true || result.conversation?.id !== payload.conversation_id)
+          throw new Error('服务器未确认项目变更已应用，请刷新房间核对，勿重复操作。');
+        try {
+          sessionStorage.removeItem(identity.storageKey);
+        } catch {}
+        state.requests.delete(identity.storageKey);
+        rememberChat();
+        closeDrawer();
+        const connection = result.conversation.connection;
+        if (connection?.project_id && connection?.environment_id) {
+          state.project = connection.project_id;
+          state.environment = connection.environment_id;
+        }
+        state.notes = payload.projects.length
+          ? '房间项目已更新，原消息连接与历史保留。'
+          : '已切换为纯聊天，原助手和消息历史保留。';
+        persistSelection();
+        await renderPage(false);
+        return { local: true, message: state.notes };
+      } catch (error) {
+        if (!current()) return { local: true };
+        if (
+          error.status === 409 ||
+          ['STALE_VERSION', 'STALE_SCOPE', 'SCOPE_CHANGED'].includes(error.code)
+        ) {
+          closeDrawer();
+          state.notes = '房间项目或连接范围已改变，请重新审阅后确认。';
+          state.error = true;
+          await renderPage(false);
+          return { local: true, message: state.notes };
+        }
+        form
+          .querySelector('[data-room-project-summary]')
+          .insertAdjacentHTML(
+            'afterbegin',
+            `<p class="cc-feedback is-error" role="alert">${E(error.message)}</p>`,
+          );
+        throw error;
+      } finally {
+        for (const [node, disabled] of controls) if (node.isConnected) node.disabled = disabled;
+      }
+    }
+    if (form.id === 'cc-new-conversation') {
+      if (!form.elements.confirm.checked) throw new Error('请先确认项目与房间范围。');
+      const generation = state.generation;
       const selected = new FormData(form).getAll('projects');
-      if (!adding && !selected.length) throw new Error('请选择至少一个项目。');
-      const payload = adding
-        ? {
-            conversation_id: state.conversation,
-            expected_version: Number(form.dataset.version),
-            project: data.project,
-            environment_id: data.environment,
-            authorization: {
-              dot_id: form.projectAuthorization.scope.dot_id,
-              scope_digest: form.projectAuthorization.scope_digest,
-              confirm_scope: true,
-            },
-          }
-        : {
-            title: data.title.trim(),
-            projects: selected.map((project) => ({ project, environment_id: data.environment })),
-          };
-      const operation = adding ? 'conversation-project' : 'conversation';
-      const identity = await commandIdentity({ operation, ...payload });
+      if (!selected.length) throw new Error('请选择至少一个项目。');
+      const payload = {
+        title: data.title.trim(),
+        projects: selected.map((project) => ({ project, environment_id: data.environment })),
+      };
+      const identity = await commandIdentity({ operation: 'conversation', ...payload });
       if (generation !== state.generation) return { local: true };
       try {
-        const result = await api('/api/collaboration/' + operation, {
+        const result = await api('/api/collaboration/conversation', {
           method: 'POST',
           retrySafe: true,
           body: JSON.stringify({ ...payload, idempotency_key: identity.identifier }),
         });
         if (generation !== state.generation) return { local: true };
-        if (adding && result.execution_authorized !== true)
-          throw new Error('服务器未确认执行授权，不能将本次添加显示为成功。请核对当前范围。');
         try {
           sessionStorage.removeItem(identity.storageKey);
         } catch {}
@@ -2382,29 +2523,18 @@ window.CodePierCollaboration = (() => {
         const room = result.conversation || result;
         closeDrawer();
         rememberChat();
-        if (!adding) {
-          state.conversation = room.id;
-          state.project = room.projects?.[0]?.project_id || selected[0];
-          state.environment = room.projects?.[0]?.environment_id || data.environment;
-          state.view = 'discussion';
-          resetScope();
-        }
-        state.notes = adding
-          ? '项目已加入并授权给所选助手；请在该助手的原任务话题继续交办。'
-          : '独立聊天室已创建。';
+        state.conversation = room.id;
+        state.project = room.projects?.[0]?.project_id || selected[0];
+        state.environment = room.projects?.[0]?.environment_id || data.environment;
+        state.view = 'discussion';
+        resetScope();
+        state.notes = '独立聊天室已创建。';
         persistSelection();
         await renderPage(false);
         return { local: true, message: state.notes };
       } catch (error) {
         if (generation !== state.generation) return { local: true };
-        if (form.elements.confirm) form.elements.confirm.checked = false;
-        if (error.status === 409 || error.code === 'STALE_VERSION') {
-          closeDrawer();
-          state.notes = '房间项目已改变，请重新审阅后添加。';
-          state.error = true;
-          await renderPage(false);
-          return { local: true, message: state.notes };
-        }
+        form.elements.confirm.checked = false;
         throw error;
       }
     }
@@ -2782,12 +2912,13 @@ window.CodePierCollaboration = (() => {
     });
   }
   function composerChanged(event) {
-    if (event.target.form?.id === 'cc-add-project') {
+    if (event.target.form?.id === 'cc-room-projects') {
       const form = event.target.form;
       form.projectAuthorization = null;
       form.dataset.previewSequence = Number(form.dataset.previewSequence || 0) + 1;
       form.querySelector('button[type="submit"]').disabled = true;
-      if (event.type === 'change') refreshProjectAuthorization(form);
+      form.querySelector('[data-room-project-summary]').textContent = '选择已改变，正在重新核对…';
+      if (event.type === 'change') refreshRoomProjects(form);
       return;
     }
     delegation.change(event);

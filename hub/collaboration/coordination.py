@@ -45,6 +45,10 @@ class CoordinationService:
             raise DevError('GOAL_OWNER_MISMATCH', '目标只属于当前所有者自己的连接', 403)
         spec = json.loads(goal['spec'])
         self.c.conversations.object(principal, goal['conversation_id'])
+        source_link = self.c.delegation.goal_link(goal)
+        if source_link:
+            source = self.c.object('collaboration_messages', room, source_link['message_id'])
+            self.c.chatroom.require_message_visible(principal, source)
         # A narrower new proposal cannot relabel old multi-project evidence.
         source_projects = set(spec['project_ids'])
         for history in self.store.all('SELECT spec FROM coordination_approvals WHERE goal_id=?', (goal['id'],)):
@@ -58,6 +62,7 @@ class CoordinationService:
         else:
             self.c.owner(principal)
         if active:
+            self.c.conversations.working_scopes.validate_goal(principal, goal)
             self.c.delegation.authorize_goal(principal, room, goal)
             self.c.live_room(room)
             if goal['state'] != 'active' or not goal['approval_id'] or (goal['expires_at'] or 0) <= self.c.clock():
@@ -105,7 +110,9 @@ class CoordinationService:
                 (conversation['id'], project_id, room['environment_id'])):
                 raise DevError('GOAL_PROJECT_NOT_IN_ROOM', '目标项目必须已明确加入当前聊天室和环境', 409)
             projects.append(self.project_snapshot(project))
-        if room['project_id'] not in args['project_ids']:
+        room_scope = self.c.conversations.working_scopes.goal_scope(principal, conversation['id'],
+            args['project_ids'], args['participant_grant_ids'], args['capabilities'])
+        if room_scope is None and room['project_id'] not in args['project_ids']:
             raise DevError('GOAL_ANCHOR_REQUIRED', '目标范围需要包含当前项目', 422)
         for grant_id in args['participant_grant_ids']:
             participant = self.c.grant_reader(room, grant_id)
@@ -121,7 +128,8 @@ class CoordinationService:
             raise DevError('GOAL_READ_REQUIRED', '协作目标必须包含读取能力', 422)
         return {key: redact(args[key]) for key in ('objective', 'acceptance', 'duration_seconds', 'budget')} | {
             'project_ids': sorted(args['project_ids']), 'participant_grant_ids': sorted(args['participant_grant_ids']),
-            'capabilities': capabilities, 'projects': projects, 'coordinator_grant_id': coordinator, 'execution_boundary': BOUNDARY}
+            'capabilities': capabilities, 'projects': projects, 'coordinator_grant_id': coordinator, 'execution_boundary': BOUNDARY,
+            **({'room_project_scope': room_scope} if room_scope else {})}
 
     def view(self, goal, principal):
         spec = json.loads(goal['spec'])
@@ -195,6 +203,7 @@ class CoordinationService:
             if link and link['approval_id']:
                 raise DevError('DELEGATION_IMMUTABLE', '原消息委托不能重新批准；请核对已有操作后发送新委托', 409)
             spec = json.loads(goal['spec'])
+            self.c.conversations.working_scopes.validate_goal(principal, goal)
             # Current owner and every connection must already have every approved
             # capability. This approval creates no IAM grant or notification route.
             for snapshot in spec['projects']:
@@ -231,7 +240,8 @@ class CoordinationService:
                 kickoff = uuid.uuid4().hex
                 self.store.execute('''INSERT INTO coordination_work
                     (id,goal_id,approval_id,project_id,objective,acceptance,responsibility,assignee_grant_id,created,updated)
-                    VALUES (?,?,?,?,?,?,?,?,?,?)''', (kickoff, goal['id'], identifier, room['project_id'],
+                    VALUES (?,?,?,?,?,?,?,?,?,?)''', (kickoff, goal['id'], identifier,
+                    spec['project_ids'][0] if spec.get('room_project_scope') else room['project_id'],
                     spec['objective'], spec['acceptance'], 'coordinator', spec['coordinator_grant_id'], now, now))
                 current = self.object(room, goal['id'])
                 self.emit_work(room, current, self.work(current, kickoff))
@@ -243,12 +253,14 @@ class CoordinationService:
             c.work_item_id,c.attempt,c.cancel_note FROM coordination_operations c JOIN operations o ON o.id=c.operation_id
             WHERE c.goal_id=? ORDER BY c.created,o.id''', (goal['id'],))
 
-    def stop_work(self, goal, reason):
+    def stop_work(self, goal, reason, *, cancel_project_ids=None):
         now = self.c.clock()
         self.store.execute("""UPDATE coordination_work SET state='blocked',reason_code=?,lease_until=NULL,
             fencing_token=fencing_token+1,version=version+1,updated=?
             WHERE goal_id=? AND state IN ('queued','leased','running')""", (reason, now, goal['id']))
         for op in self.operations(goal):
+            if cancel_project_ids is not None and op['project_id'] not in cancel_project_ids:
+                continue  # Preserve accepted work on unaffected projects; never claim it stopped.
             if op['state'] not in {'queued', 'running', 'reconnecting', 'cancelling', 'unknown'}:
                 continue
             full = self.store.one('SELECT * FROM operations WHERE id=?', (op['id'],))

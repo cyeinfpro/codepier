@@ -1866,7 +1866,9 @@ body:has(.cc-chat-shell) .mobile-dock {
   background: var(--ui-soft);
   overflow-wrap: anywhere;
 }
-.cc-project-strip.is-single-project:not(:has([data-cc-action='retry-directory'])) {
+.cc-project-strip.is-single-project:not(
+    :has([data-cc-action='retry-directory'], [data-cc-action='manage-projects'], .cc-project-empty)
+  ) {
   display: none;
 }
 .cc-room-subline .cc-member-strip {
@@ -1949,4 +1951,57 @@ body:has(.cc-chat-shell) .mobile-dock {
     width: 100%;
     white-space: normal;
   }
+}
+
+/* Room project selection is independent of credential-wide restrictions. */
+.cc-room-project-choices label {
+  align-items: flex-start;
+  gap: 10px;
+}
+.cc-room-project-choices input {
+  flex: 0 0 auto;
+  margin-top: 4px;
+}
+.cc-room-project-choices span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.cc-room-project-choices small,
+.cc-project-review span {
+  display: block;
+  color: var(--muted);
+}
+.cc-project-review {
+  padding-left: 20px;
+}
+.cc-project-review li {
+  margin: 12px 0;
+  overflow-wrap: anywhere;
+}
+.cc-project-empty {
+  align-self: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+#cc-room-projects .cc-actions {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+#cc-room-projects [data-room-project-summary] {
+  overflow-wrap: anywhere;
+}
+
+#cc-room-projects .cc-actions {
+  position: sticky;
+  bottom: 0;
+  display: grid;
+  grid-template-columns: 1fr 2fr;
+  background: var(--ui-panel);
+  border-top: 1px solid var(--ui-line);
+  padding: 10px 0 0;
+  z-index: 1;
+}
+#cc-room-projects > [data-cc-action='room-project-preview'] {
+  justify-self: start;
+  margin-top: 12px;
 }

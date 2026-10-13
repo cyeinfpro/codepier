@@ -403,12 +403,15 @@ class DelegationService:
             raise DevError('DELEGATION_SCOPE_DENIED', 'VPS目标需要本次明确选择执行能力', 403)
         if 'write' in capabilities and 'project_agent' not in targets:
             raise DevError('DELEGATION_SCOPE_DENIED', 'VPS目标不能授权本机文件写入', 403)
-        scope_approvals, additional_projects = self.c.conversations.project_scopes.for_new_task(
+        working = self.c.conversations.working_scopes.for_new_task(principal, policy, capabilities, targets)
+        scope_approvals, additional_projects = ([], []) if working else self.c.conversations.project_scopes.for_new_task(
             principal, policy, capabilities, targets)
+        project_ids = working['project_ids'] if working else [room['project_id'], *additional_projects]
         request_scope = {'execution_targets': targets, 'capabilities': capabilities}
-        if scope_approvals:
-            request_scope.update(project_ids=[room['project_id'], *additional_projects],
-                                 project_scope_approvals=scope_approvals)
+        if working:
+            request_scope.update(project_ids=project_ids, room_project_scope=working['reference'])
+        elif scope_approvals:
+            request_scope.update(project_ids=project_ids, project_scope_approvals=scope_approvals)
         count_limit = self.c.channel_owner.budget_limit(policy)
         if count_limit is not None and self.c.channel_owner.budget_used(policy) >= count_limit:
             raise DevError('DELEGATION_BUDGET_EXCEEDED', '此委托设置的请求次数已用尽', 409)
@@ -427,7 +430,7 @@ class DelegationService:
         identifier = uuid.uuid4().hex
         scope = {'project': room['project_id'], 'environment_id': room['environment_id']}
         raw = {**scope, 'conversation_id': message['conversation_id'], 'objective': objective, 'acceptance': acceptance,
-               'project_ids': [room['project_id'], *additional_projects], 'participant_grant_ids': [policy['grant_id']],
+               'project_ids': project_ids, 'participant_grant_ids': [policy['grant_id']],
                'coordinator_grant_id': policy['grant_id'], 'capabilities': capabilities,
                'duration_seconds': min(spec['goal_duration_seconds'], int(policy_deadline - now)),
                'budget': spec['budget'], 'idempotency_key': 'delegation:create:' + identifier}
@@ -580,11 +583,19 @@ class DelegationService:
                 or goal['digest'] != link['goal_digest'] or goal['approval_id'] != link['approval_id']):
             raise DevError('DELEGATION_APPROVAL_CHANGED', '原消息的委托或目标批准已改变', 409)
         source = self.c.object('collaboration_messages', room, link['message_id'])
+        self.c.chatroom.require_message_visible(principal, source)
         if (not self.c.channel_owner.author(source)['authenticated'] or link['author_user_id'] != room['owner_user_id']
                 or source['conversation_id'] != link['conversation_id']
                 or source['version'] != link['message_version'] or digest(json.loads(source['body'])['body_text']) != link['message_digest']):
             raise DevError('DELEGATION_MESSAGE_CHANGED', '委托来源身份或原文已改变', 409)
-        self.c.conversations.project_scopes.validate_task(principal, room, policy, snapshot, goal)
+        if snapshot.get('request_scope', {}).get('room_project_scope'):
+            if snapshot['request_scope']['room_project_scope'] != json.loads(goal['spec']).get('room_project_scope'):
+                raise DevError('ROOM_PROJECT_APPROVAL_CHANGED', '任务房间项目版本与原批准不一致', 409)
+            if set(snapshot['request_scope']['project_ids']) != set(json.loads(goal['spec'])['project_ids']):
+                raise DevError('ROOM_PROJECT_APPROVAL_CHANGED', '任务项目与原批准不一致', 409)
+            self.c.conversations.working_scopes.validate_goal(principal, goal)
+        else:
+            self.c.conversations.project_scopes.validate_task(principal, room, policy, snapshot, goal)
         approved_scope = snapshot.get('request_scope', snapshot['spec'])
         if (not set(approved_scope['execution_targets']) <= set(snapshot['spec']['execution_targets'])
                 or set(json.loads(goal['spec'])['capabilities']) != set(approved_scope['capabilities'])):
@@ -683,7 +694,8 @@ class DelegationService:
             return
         source = self.c.object('collaboration_messages', room, link['message_id'])
         identifier = 'delegation-result:' + item['id'] + ':' + str(item['attempt'])
-        projects = sorted(set(body['provenance_project_ids']) | set(json.loads(goal['spec'])['project_ids']))
+        projects = sorted(set(body['provenance_project_ids']) | set(json.loads(goal['spec'])['project_ids'])
+                          | set(json.loads(source['body']).get('provenance_project_ids', [])))
         result = {**body, 'body_text': body['summary'], 'delegation_id': link['id'], 'work_item_id': item['id'],
                   'source_message_id': source['id'], 'provenance_project_ids': projects, 'mentions': [], 'notifications': []}
         dot = self.c.dots.find(self.policy(room, link['policy_id'])['slot_id'])
@@ -706,7 +718,8 @@ class DelegationService:
         body = redact({'body_text': summary, 'summary': summary, 'delegation_id': link['id'],
             'work_item_id': item['id'], 'source_message_id': source['id'], 'attempt': item['attempt'],
             'fencing_token': item['fencing_token'], 'system_receipt': system_receipt,
-            'provenance_project_ids': sorted(set(json.loads(goal['spec'])['project_ids'])),
+            'provenance_project_ids': sorted(set(json.loads(goal['spec'])['project_ids'])
+                | set(json.loads(source['body']).get('provenance_project_ids', []))),
             'mentions': [], 'notifications': [], 'execution_verified': False})
         dot = self.c.dots.find(self.policy(room, link['policy_id'])['slot_id'])
         if self.c.dot_chat.enabled(dot):

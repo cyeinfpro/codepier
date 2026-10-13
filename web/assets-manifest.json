@@ -1,5 +1,5 @@
 {
-  "version": "1.28.0",
+  "version": "1.28.1",
   "algorithm": "sha256",
   "assets": {
     "access-profiles.css": {
@@ -71,8 +71,8 @@
       "bytes": 16124
     },
     "collaboration-channels.js": {
-      "sha256": "d4b3e44d298144c096f5ab095cc954adaa1461a90a57b4f5df2bd17bc336464f",
-      "bytes": 131207
+      "sha256": "2939943af818163ba10001ba7b8827c466a8ffc4b65e1aa2ae7aec4416a7d3f9",
+      "bytes": 131308
     },
     "collaboration-delegation.js": {
       "sha256": "555d463f782157743fb806ebe1c1efee27c37055e160c84110811b7fd46f5e4f",
@@ -87,8 +87,8 @@
       "bytes": 37439
     },
     "collaboration-relay.css": {
-      "sha256": "6f51bb664a32dd21fd25f992e4f03f645da0a173b89989aae5632324a9ad4684",
-      "bytes": 12310
+      "sha256": "bbc34cf9fabe3e1d675a1bd5a5adfa51651f6e50eae9d7d0fa0b82f39c3e0ec3",
+      "bytes": 12377
     },
     "collaboration-relay.js": {
       "sha256": "92062f7b6080576e9916ff2b25d9cba4e87d412a6f40a044d1642de408b37410",
@@ -99,20 +99,20 @@
       "bytes": 2871
     },
     "collaboration-workspace.css": {
-      "sha256": "082313bc102b80a43e951b43bde54d87987ab5a73548c62449fe6a86b5c9197d",
-      "bytes": 27726
+      "sha256": "d64ec806c2e365e79db3c484771e501e7d30cf7aca781c979b53eebb81074020",
+      "bytes": 27774
     },
     "collaboration-workspace.js": {
       "sha256": "6b497189028fb344c9df3cb65ea6a53e4c481894ef605af0a3f632beab28eb38",
       "bytes": 30627
     },
     "collaboration.css": {
-      "sha256": "140da83bf1bdcbd8eeb58711757c819e63c9d3dd92f46dc8129180ad55bf560b",
-      "bytes": 36574
+      "sha256": "ace1e959b54647ea43dcee3af9801af5bba3ad548c9e3b33f0048b9197650b73",
+      "bytes": 37716
     },
     "collaboration.js": {
-      "sha256": "d3f1105023acbdc2e38a12ea5b1446e006382856396d707a1b19de0c22c1d8a1",
-      "bytes": 148550
+      "sha256": "acac471d4cbb8b95e1fc862582f2a2426e26c094ee7d92a86f190c8a95e8686d",
+      "bytes": 154872
     },
     "computer.css": {
       "sha256": "3bfd6993ecee11cf6c23d78cc7b4f9acd6759ffaccc5e241ff06e156da7dfcac",

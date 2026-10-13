@@ -1516,7 +1516,7 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
         ),
       )}<fieldset><legend>最近的已生成产物（最多16件）</legend>${(w.artifact_candidates || []).map((a) => `<label class="cc-channel-check"><input type="checkbox" name="artifact_ids" value="${E(a.artifact_id)}">${E(a.name)} · ${E(a.bytes)} 字节</label>`).join('') || '<p>当前项目没有可选产物。</p>'}</fieldset>${w.artifact_candidates_more ? '<p>此处仅列最近50件；更早产物请在产物管理中核对编号。</p>' : ''}${button('dot-channel-file-preview', '预览文件与原收件人', {}, w.enabled ? '' : 'disabled')}<div class="wx-file-preview"></div><small>只传输已有产物，不重跑原生成任务；正文不会重复发送。</small></div></details>
       <h4>最近投递分项</h4>${deliveries || '<p>暂无外发记录。</p>'}</section>
-      ${telegramPanel(data.telegram, w, slots)}<section><h3>房间凭据范围</h3><p>范围绑定服务器上的原 grant，省略 room_id 也不能绕过。启用或修改会影响所有使用同一凭据的会话；工作目录不是操作系统沙箱。</p>${policies || '<p>尚未启用普通工具的房间限制。</p>'}<details><summary>明确设置连接范围</summary><div data-channel-form="scope" class="cc-form">${field(
+      ${telegramPanel(data.telegram, w, slots)}<section><h3>高级：整条 MCP 凭据限制</h3><p>范围绑定服务器上的原 grant，省略 room_id 也不能绕过。启用或修改会影响所有使用同一凭据的会话；工作目录不是操作系统沙箱。</p>${policies || '<p>尚未启用普通工具的房间限制。</p>'}<details><summary>明确设置连接范围</summary><div data-channel-form="scope" class="cc-form">${field(
         '当前房间已有连接',
         select(
           'grant_id',
@@ -1535,7 +1535,7 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
       overview: '消息连接',
       weixin: '微信连接',
       telegram: 'Telegram 连接',
-      advanced: '高级 · 凭据范围',
+      advanced: '高级 · 整条凭据限制',
     };
     let channelView = 'overview';
     const drafts = new Map();
@@ -1954,7 +1954,7 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
         section.querySelector('p')?.remove();
         section.insertAdjacentHTML(
           'afterbegin',
-          '<div class="cc-connection-warning"><strong>这会限制整条 MCP 连接</strong><p>所有使用同一凭据的会话都会受影响。它不是微信连接期限，也不是微信任务授权的必需步骤。</p></div>',
+          '<div class="cc-connection-warning"><strong>这会限制整条 MCP 连接</strong><p>所有使用同一凭据的会话都会受影响。增删当前房间项目请使用房间菜单中的“管理房间项目”。这里不是微信连接期限，也不是微信任务授权的必需步骤。</p></div>',
         );
         const form = section.querySelector('[data-channel-form="scope"]');
         const detail = form.closest('details');

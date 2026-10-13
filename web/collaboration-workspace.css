@@ -197,8 +197,11 @@
   margin: 0;
   padding: 0 24px 6px;
 }
-/* A single scope stays in the header menu; recovery remains visible when needed. */
-.cc-workspace .cc-project-strip.is-single-project:not(:has([data-cc-action='retry-directory'])) {
+/* Keep room project management and the chat-only state visible. */
+.cc-workspace
+  .cc-project-strip.is-single-project:not(
+    :has([data-cc-action='retry-directory'], [data-cc-action='manage-projects'], .cc-project-empty)
+  ) {
   display: none;
 }
 .cc-workspace .cc-project-strip .cc-project-chip {

@@ -11,6 +11,8 @@ from shared.util import DevError
 
 
 def migrate(db):
+    from hub.collaboration.working_scopes import migrate as migrate_working_scopes
+    migrate_working_scopes(db)
     from hub.collaboration.project_scopes import migrate as migrate_project_scopes
     migrate_project_scopes(db)
     db.execute('''CREATE TABLE IF NOT EXISTS conversation_rooms (
@@ -36,6 +38,11 @@ def migrate(db):
         if name not in columns:
             db.execute(f'ALTER TABLE collaboration_messages ADD COLUMN {name} {declaration}')
     for room in db.execute('SELECT id,space_id,owner_user_id,project_id,environment_id,title,created,chat_history_sequence FROM collaboration_rooms').fetchall():
+        # New working partitions belong to their one existing conversation. Do not
+        # manufacture a second user-visible room on restart; keep legacy defaults.
+        if (not db.execute('SELECT 1 FROM conversation_rooms WHERE id=?', (room[0],)).fetchone()
+                and db.execute('SELECT 1 FROM conversation_projects WHERE room_id=?', (room[0],)).fetchone()):
+            continue
         db.execute('''INSERT OR IGNORE INTO conversation_rooms (id,space_id,owner_user_id,title,created) VALUES (?,?,?,?,?)''',
                    (room[0], room[1], room[2], room[5] or room[3] + ' · ' + room[4], room[6]))
         db.execute('INSERT OR IGNORE INTO conversation_projects VALUES (?,?,?)', (room[0], room[0], room[6]))
@@ -77,6 +84,8 @@ class ConversationService:
         self.c, self.store = collaboration, collaboration.store
         from hub.collaboration.project_scopes import ProjectScopes
         self.project_scopes = ProjectScopes(collaboration)
+        from hub.collaboration.working_scopes import WorkingScopes
+        self.working_scopes = WorkingScopes(collaboration)
 
     def ensure_default(self, room):
         self.store.execute('''INSERT OR IGNORE INTO conversation_rooms (id,space_id,owner_user_id,title,created)
@@ -115,13 +124,43 @@ class ConversationService:
             raise DevError('CONVERSATION_PROJECT_MISMATCH', '当前项目没有加入这个聊天室', 409)
         return conversation
 
+    def message(self, principal, room, conversation_id, identifier):
+        """Read historical partitions without moving the room's message connection."""
+        self.resolve(principal, room, {'conversation_id': conversation_id})
+        working = self.working_scopes.current(conversation_id)
+        if not working or working['spec']['connection']['room_id'] != room['id']:
+            row = self.c.object('collaboration_messages', room, identifier)
+        else:
+            row = self.store.one('''SELECT m.* FROM collaboration_messages m
+                JOIN conversation_projects p ON p.room_id=m.room_id AND p.conversation_id=m.conversation_id
+                JOIN collaboration_rooms r ON r.id=m.room_id
+                WHERE m.id=? AND m.conversation_id=? AND r.space_id=? AND r.owner_user_id=?''',
+                (identifier, conversation_id, principal.space_id, principal.user_id))
+            if not row:
+                raise DevError('NOT_FOUND', '当前授权下没有这条消息', 404)
+            source = self.store.one('SELECT project_id FROM collaboration_rooms WHERE id=?', (row['room_id'],))
+            self.c.runtime.project(source['project_id'], principal)
+        if row['conversation_id'] != conversation_id:
+            raise DevError('THREAD_NOT_FOUND', '话题不属于这个聊天室', 404)
+        self.c.chatroom.require_message_visible(principal, row)
+        return row
+
     def view(self, principal, conversation):
         projects = self.visible(principal, conversation)
         if not projects:
             raise DevError('CONVERSATION_NOT_FOUND', '当前授权下没有这个聊天室', 404)
-        return {**conversation, 'kind': 'conversation', 'projects': [
+        working = self.working_scopes.current(conversation['id'])
+        active_ids = {r['project_id'] for r in working['spec']['projects']} if working else None
+        visible_ids = {r['project_id'] for r in projects}
+        extra = {'working_scope': {**self.working_scopes.reference(working),
+                    'project_ids': sorted(active_ids & visible_ids)}} if working else {}
+        if working and working['spec']['connection']['project_id'] in visible_ids:
+            extra['working_scope']['dot_id'] = working['spec']['dot_id']
+            extra['connection'] = working['spec']['connection']
+        return {**conversation, **extra, 'kind': 'conversation', 'projects': [
             {key: room[key] for key in ('project_id', 'environment_id', 'project_label', 'state')} | {'room_id': room['id']}
-            for room in projects], 'project_authorizations': self.project_scopes.listing(principal, conversation, {room['project_id'] for room in projects}),
+            for room in projects if active_ids is None or room['project_id'] in active_ids],
+            'project_authorizations': self.project_scopes.listing(principal, conversation, {room['project_id'] for room in projects}),
             'visibility_token': digest([principal.grant_id or principal.user_id, [room['id'] for room in projects]])}
 
     def listing(self, principal):
@@ -227,8 +266,7 @@ class ConversationService:
         params = [conversation['id'], *ids]
         where = 'conversation_id=? AND room_id IN (' + ','.join('?' for _ in ids) + ')'
         if mode == 'thread':
-            root = self.c.object('collaboration_messages', room, args['id'])
-            self.c.chatroom.require_message_visible(principal, root)
+            root = self.message(principal, room, conversation['id'], args['id'])
             if root['conversation_id'] != conversation['id']:
                 raise DevError('THREAD_NOT_FOUND', '话题不属于这个聊天室', 404)
             where += ' AND thread_root_id=?'

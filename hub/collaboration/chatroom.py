@@ -304,10 +304,13 @@ class ChatroomService:
                 selected_delegation = args.get('delegation') or automatic
                 identifier = uuid.uuid4().hex
                 root = identifier
+                provenance = set()
                 if args['reply_to_id']:
-                    parent = self.c.object('collaboration_messages', room, args['reply_to_id'])
-                    if sender_dot_id:
-                        self.require_message_visible(principal, parent)
+                    parent = self.c.conversations.message(principal, room, conversation['id'], args['reply_to_id'])
+                    provenance.update(json.loads(parent['body']).get('provenance_project_ids', []))
+                    if parent['room_id'] != room['id']:
+                        source = self.store.one('SELECT project_id FROM collaboration_rooms WHERE id=?', (parent['room_id'],))
+                        provenance.update([source['project_id'], room['project_id']])
                     if parent['conversation_id'] != conversation['id']:
                         raise DevError('THREAD_NOT_FOUND', '不能跨聊天室或项目回复，请另发一条消息', 409)
                     root = parent['thread_root_id'] or parent['id']
@@ -316,6 +319,8 @@ class ChatroomService:
                     slot = self.c.joining.slot(room, item['slot_id'])
                     mentions.append({'slot_id': slot['id'], 'display_snapshot': slot['label']})
                 body = {'body_text': redact(args['body_text']), 'mentions': mentions, 'request_digest': fingerprint}
+                if provenance:
+                    body['provenance_project_ids'] = sorted(provenance)
                 if sender_dot_id:
                     body['sender_dot_id'] = sender_dot_id
                     if not complete_dot_message:
@@ -335,7 +340,7 @@ class ChatroomService:
                     body['delegation'] = {**receipt, 'policy_id': selected_delegation['policy_id'],
                                           'policy_version': selected_delegation['policy_version'],
                                           'automatic': automatic is not None}
-                    body['provenance_project_ids'] = [room['project_id']]
+                    body['provenance_project_ids'] = sorted(provenance | {room['project_id']})
                     body['notifications'] = self.notify(room, message, principal, mentions) if duplex else []
                 else:
                     body['notifications'] = self.notify(room, message, principal, mentions)
@@ -348,7 +353,10 @@ class ChatroomService:
                     self.c.channels.queue(self.c.object('collaboration_messages', room, identifier))
                 return {'message': self.view(self.c.object('collaboration_messages', room, identifier)),
                         'notifications': body['notifications'], **receipt}
-            return self.c.mutation(principal, room, 'message_create:' + conversation['id'] + (':' + sender_dot_id if sender_dot_id else ''), args, save)
+            result = self.c.mutation(principal, room, 'message_create:' + conversation['id'] + (':' + sender_dot_id if sender_dot_id else ''), args, save)
+            # An idempotent receipt is not authority to disclose a now-revoked source.
+            self.require_message_visible(principal, self.c.object('collaboration_messages', room, result['message']['id']))
+            return result
 
     def is_delegation_source(self, message):
         return bool(json.loads(message['body']).get('delegation') or self.store.one(

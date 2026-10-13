@@ -230,8 +230,19 @@ class DotService:
             scope = descriptor(self.store, actor)
             conversation = self.c.conversations.object(actor, dot['conversation_id'])
             selected = sorted({r['project_id'] for r in self.c.conversations.visible(actor, conversation)})
+            working = self.c.conversations.working_scopes.current(conversation['id'])
+            extra = {}
+            if working:
+                selected = sorted(set(selected) & {r['project_id'] for r in working['spec']['projects']})
+                extra = {'working_scope': self.c.conversations.working_scopes.reference(working),
+                    'message_connection_project_id': room['project_id'],
+                    'task_project_rules': [{k: r[k] for k in ('project_id', 'project_label',
+                        'capabilities', 'execution_targets', 'authorization_id')}
+                        for r in working['spec']['projects'] if r['project_id'] in selected],
+                    'chat_only': not working['spec']['projects'],
+                    'working_scope_applies_to': 'managed_room_tasks_only'}
             effective = sorted(actor.projects)
-            return {**base, **scope, 'state': 'active', 'selected_room_project_ids': selected,
+            return {**base, **scope, **extra, 'state': 'active', 'selected_room_project_ids': selected,
                     'effective_project_ids': effective,
                     'connection_exceeds_selected_room': '*' in effective or bool(set(effective) - set(selected))}
         except DevError as exc:

@@ -70,12 +70,12 @@ class DotChatService:
         """A human thread reply retains its exact dot; arbitrary @ prose does not."""
         if principal.grant_id or args['mentions'] or not args.get('reply_to_id'):
             return args['mentions']
-        parent = self.c.object('collaboration_messages', room, args['reply_to_id'])
+        parent = self.c.conversations.message(principal, room, args['conversation_id'], args['reply_to_id'])
         if parent['conversation_id'] != args['conversation_id']:
             return args['mentions']  # The normal thread check returns the exact error.
         rows = [parent]
         if parent['thread_root_id'] and parent['thread_root_id'] != parent['id']:
-            rows.append(self.c.object('collaboration_messages', room, parent['thread_root_id']))
+            rows.append(self.c.conversations.message(principal, room, args['conversation_id'], parent['thread_root_id']))
         ids = []
         for row in rows:
             body = json.loads(row['body'])
@@ -141,6 +141,9 @@ class DotChatService:
     def task_policy(self, room, dot, principal):
         policy = self.c.dots.policy(room, dot)
         self.c.delegation.authorize_policy(principal, room, policy)
+        spec = json.loads(policy['spec'])
+        self.c.conversations.working_scopes.for_new_task(principal, policy,
+            spec['capabilities'], spec['execution_targets'])
         return policy
 
     def work_request(self, room, dot, principal):
@@ -377,7 +380,7 @@ class DotChatService:
                     'mentions': [{'slot_id': dot['id']}]})
                 body['delegation'] = {**result, 'policy_id': policy['id'], 'policy_version': policy['version'],
                                       'automatic': False, 'from_conversation': True}
-                body['provenance_project_ids'] = [room['project_id']]
+                body['provenance_project_ids'] = sorted(set(body.get('provenance_project_ids', [])) | {room['project_id']})
                 self.store.execute('UPDATE collaboration_messages SET body=? WHERE id=?', (canonical(body), message['id']))
                 self.store.execute("UPDATE collaboration_dot_messages SET state='handled',received_at=COALESCE(received_at,?),handled_at=? WHERE dot_id=? AND message_id=?", (self.c.clock(), self.c.clock(), dot['id'], message['id']))
                 self.c.message_handling.record_work(room, dot, principal, message)

@@ -87,7 +87,7 @@ class CollaborationService:
         if not principal.admin or principal.grant_id is not None:
             raise DevError('OWNER_REQUIRED', '此操作需要已登录面板的空间管理员确认', 403)
 
-    def scope(self, principal, args, *, create=False, optional=False, notification=False):
+    def scope(self, principal, args, *, create=False, optional=False, notification=False, default_conversation=True):
         self.guard()
         principal = refresh_principal(self.store, principal)
         project = self.runtime.project(args['project'], principal)
@@ -110,7 +110,7 @@ class CollaborationService:
                 (id,space_id,owner_user_id,project_id,environment_id,created) VALUES (?,?,?,?,?,?)''',
                 (identifier, principal.space_id, principal.user_id, project['id'], args['environment_id'], self.clock()))
             room = self.store.one('SELECT * FROM collaboration_rooms WHERE id=?', (identifier,))
-        if room is not None and create:
+        if room is not None and create and default_conversation:
             self.conversations.ensure_default(room)
         if room is None and not optional:
             raise DevError('ROOM_NOT_FOUND', '请先在面板开启这个项目环境的协作室', 404)

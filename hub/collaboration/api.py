@@ -136,6 +136,8 @@ def make_router(auth, runtime):
             principal = auth.admin(request, True)
             handlers = {'dot': service.dots.create,
                         'conversation-project-preview': service.conversations.project_scopes.preview,
+                        'conversation-projects-preview': service.conversations.working_scopes.preview,
+                        'conversation-projects': service.conversations.working_scopes.apply,
                         'conversation-project-scope-control': service.conversations.project_scopes.control,
                         'room-scope': service.room_scope.set,
                         'room-scope-control': service.room_scope.control,

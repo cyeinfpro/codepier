@@ -29,7 +29,8 @@
 .cc-relay-focus .cc-project-strip {
   padding: 0 28px 8px;
 }
-.cc-relay-focus[data-relay-multi='false'] .cc-project-strip {
+.cc-relay-focus[data-relay-multi='false']
+  .cc-project-strip:not(:has([data-cc-action='manage-projects'], .cc-project-empty)) {
   display: none;
 }
 .cc-relay-focus .cc-rail-note {

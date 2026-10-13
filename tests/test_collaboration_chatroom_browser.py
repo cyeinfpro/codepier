@@ -34,7 +34,7 @@ def open_add_project(page):
     menu = page.locator('.cc-room-menu')
     if menu.get_attribute('open') is None:
         menu.locator('[data-cc-more]').click()
-    menu.locator('[data-cc-action="add-project"]').click()
+    menu.locator('[data-cc-action="manage-projects"]').click()
 
 
 def add_message(stack, room_id, body):
@@ -284,12 +284,12 @@ def test_conversation_add_project_preserves_history_draft_and_attribution(collab
         join_dot(stack, create_dot(stack))
         other = stack.projects[1]
         open_add_project(page)
-        form = page.locator('#cc-add-project')
-        form.locator('[name="project"]').select_option(other['id'])
+        form = page.locator('#cc-room-projects')
+        form.locator(f'[name="room_projects"][value="{other["id"]}"]').check()
         page.keyboard.press('Escape')
         expect(area).to_have_value('添加项目期间保留的草稿')
         open_add_project(page)
-        form.locator('[name="project"]').select_option(other['id'])
+        form.locator(f'[name="room_projects"][value="{other["id"]}"]').check()
         expect(form.locator('[name="confirm"]')).to_have_count(0)
         expect(form.locator('button[type="submit"]')).to_be_enabled()
         form.locator('button[type="submit"]').evaluate('(button) => {button.click();button.click();}')
@@ -299,22 +299,22 @@ def test_conversation_add_project_preserves_history_draft_and_attribution(collab
         expect(page.locator('.cc-feed')).to_contain_text('原项目已有讨论')
         current = overview(stack)['conversation']
         assert current['id'] == conversation and len(current['projects']) == 2
-        # Changing the source project changes execution context, not the room ID.
-        page.locator(f'[data-cc-partition="{other["id"]}"]').click()
-        expect(page.locator(f'[data-cc-partition="{other["id"]}"]')).to_have_attribute('aria-pressed', 'true')
+        # Working projects are labels; they never switch the original message connection.
+        page.locator(f'[data-room-project="{other["id"]}"]').click()
+        expect(page.locator('.cc-chat-shell')).to_have_attribute('data-project', stack.project['id'])
         expect(area).to_have_value('添加项目期间保留的草稿')
         area.fill('第二个项目的消息')
         page.locator('#cc-command button[type="submit"]').click()
         expect(page.locator('.cc-feed')).to_contain_text('第二个项目的消息')
         records = stack.must(stack.client.get('/api/collaboration', params={
             **scope(stack), 'kind': 'timeline', 'conversation_id': conversation}))['items']
-        assert {m['project_id'] for m in records} == {stack.project['id'], other['id']}
+        assert {m['project_id'] for m in records} == {stack.project['id']}
         assert all(m['conversation_id'] == conversation for m in records)
-        second = next(m for m in records if m['project_id'] == other['id'])
-        expect(page.locator(f'[data-message-id="{second["id"]}"] .cc-message-project')).to_contain_text(other['alias'])
+        second = next(m for m in records if m['body_text'] == '第二个项目的消息')
+        expect(page.locator(f'[data-message-id="{second["id"]}"] .cc-message-project')).to_contain_text(stack.project['alias'])
         # A reply from another selected project follows its actual source.
         page.locator(f'[data-message-id="{original_message}"] [data-cc-action="reply"]').click()
-        expect(page.locator(f'[data-cc-partition="{stack.project["id"]}"]')).to_have_attribute('aria-pressed', 'true')
+        expect(page.locator('.cc-chat-shell')).to_have_attribute('data-project', stack.project['id'])
         expect(page.locator('.cc-reply-preview')).to_contain_text('原项目已有讨论')
         area.fill('回复仍归属原项目')
         page.locator('#cc-command button[type="submit"]').click()
@@ -374,8 +374,8 @@ def test_conversation_stale_add_review_and_visible_permission_reset(collaboratio
         join_dot(stack, create_dot(stack))
         other = stack.projects[1]
         open_add_project(page)
-        form = page.locator('#cc-add-project')
-        form.locator('[name="project"]').select_option(other['id'])
+        form = page.locator('#cc-room-projects')
+        form.locator(f'[name="room_projects"][value="{other["id"]}"]').check()
         expect(form.locator('button[type="submit"]')).to_be_enabled()
         stack.must(stack.client.post('/api/collaboration/conversation-project', json={
             'conversation_id': conversation['id'], 'expected_version': conversation['version'],
