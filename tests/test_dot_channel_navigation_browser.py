@@ -393,3 +393,66 @@ def test_invalid_scope_hours_never_send_or_become_implicit_long_term(qr_page, ho
     page.evaluate("clickAction('dot-channel-scope-save').catch(()=>({local:true}))")
     assert page.evaluate("writes.length") == 0
     expect(form.locator("[name=scope_lifetime]")).to_have_value("bounded")
+
+
+def test_advanced_project_bulk_preserves_hidden_selections_and_capabilities(qr_page):
+    page, _ = qr_page
+    page.evaluate("""() => {
+      S.projects=[{id:'projectA',alias:'PrimaryFolder'},{id:'projectB',alias:'SecondaryFolder'},{id:'projectC',alias:'TertiaryFolder'}];
+      data.scopes.eligible_connections=[{id:'grantA',label:'合成原连接',scope_version:3}];
+      data.scopes.items=[{grant_id:'grantA',version:3,expires_at:0,manifest:{
+        lifetime_mode:'until_revoked',project_rules:[
+          {project_id:'projectA',capabilities:['read','write','execute'],execution_targets:['agent']},
+          {project_id:'projectC',capabilities:['read','write'],execution_targets:['agent']}]} }];
+    }""")
+    act(page, 'open')
+    overview(page)
+    act(page, 'view-advanced')
+    open_scope_form(page)
+    form = page.locator('[data-channel-form=scope]')
+    form.locator('[name=grant_id]').select_option('grantA')
+    expect(form.locator('[name=write]:visible')).to_have_count(0)
+    expect(form.locator('[name=execute]:visible')).to_have_count(0)
+    baseline = form.locator('[name=write], [name=execute]').evaluate_all('(nodes) => nodes.map(n => n.checked)')
+    form.locator('[data-project-search]').fill('SecondaryFolder')
+    act(page, 'project-all')
+    expect(form.locator('[data-project-id=projectB] [name=project_selected]')).to_be_checked()
+    expect(form.locator('[data-project-id=projectC] [name=project_selected]')).to_be_checked()
+    act(page, 'project-none')
+    expect(form.locator('[data-project-id=projectB] [name=project_selected]')).not_to_be_checked()
+    expect(form.locator('[data-project-id=projectC] [name=project_selected]')).to_be_checked()
+    assert form.locator('[name=write], [name=execute]').evaluate_all('(nodes) => nodes.map(n => n.checked)') == baseline
+    expect(form.locator('[name=confirm_scope]')).not_to_be_checked()
+    expect(form.locator('[name=unsandboxed]')).not_to_be_checked()
+    assert page.evaluate('writes.length') == 0
+
+
+@pytest.mark.parametrize('old_target', [None, 'vps:legacy', {'unknown': 'record'}])
+def test_unknown_saved_target_is_visible_and_never_replaced_with_agent(qr_page, old_target):
+    page, _ = qr_page
+    page.evaluate("""(target) => {
+      data.scopes.eligible_connections=[{id:'grantA',label:'合成原连接',scope_version:3}];
+      data.scopes.items=[{grant_id:'grantA',version:3,expires_at:0,manifest:{
+        lifetime_mode:'until_revoked',project_rules:[
+          {project_id:'projectA',capabilities:['read'],execution_targets:target}]} }];
+    }""", old_target)
+    act(page, 'open')
+    overview(page)
+    act(page, 'view-advanced')
+    open_scope_form(page)
+    form = page.locator('[data-channel-form=scope]')
+    form.locator('[name=grant_id]').select_option('grantA')
+    form.locator('.cc-project-capabilities > summary').click()
+    expect(form.locator('[data-project-target-summary]')).to_contain_text('原执行位置缺失')
+    form.locator('[name=hours]').fill('2')
+    form.locator('[name=confirm_scope]').check()
+    message = page.evaluate("clickAction('dot-channel-scope-save').then(()=>'',e=>e.message)")
+    assert '不会自动改为 Agent' in message
+    assert page.evaluate('writes.length') == 0
+
+
+def open_scope_form(page):
+    form = page.locator('[data-channel-form="scope"]')
+    if not form.is_visible():
+        form.locator('..').locator(':scope > summary').click()
+    return form

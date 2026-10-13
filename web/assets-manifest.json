@@ -1,5 +1,5 @@
 {
-  "version": "1.28.1",
+  "version": "1.28.2",
   "algorithm": "sha256",
   "assets": {
     "access-profiles.css": {
@@ -71,8 +71,8 @@
       "bytes": 16124
     },
     "collaboration-channels.js": {
-      "sha256": "2939943af818163ba10001ba7b8827c466a8ffc4b65e1aa2ae7aec4416a7d3f9",
-      "bytes": 131308
+      "sha256": "f82931d1fb210ead8db18d405ff1f05aaccb1d4056f2c76dc142bac38b671039",
+      "bytes": 139098
     },
     "collaboration-delegation.js": {
       "sha256": "555d463f782157743fb806ebe1c1efee27c37055e160c84110811b7fd46f5e4f",
@@ -107,12 +107,12 @@
       "bytes": 30627
     },
     "collaboration.css": {
-      "sha256": "ace1e959b54647ea43dcee3af9801af5bba3ad548c9e3b33f0048b9197650b73",
-      "bytes": 37716
+      "sha256": "1327016ede11f790b11d7949785636bfb337c214b86ea6bd6f44710d8862d342",
+      "bytes": 39320
     },
     "collaboration.js": {
-      "sha256": "acac471d4cbb8b95e1fc862582f2a2426e26c094ee7d92a86f190c8a95e8686d",
-      "bytes": 154872
+      "sha256": "a76f676ca0bf647faa6c6a85feed0069a58c9d99b49387524a39c3a35e03b846",
+      "bytes": 160165
     },
     "computer.css": {
       "sha256": "3bfd6993ecee11cf6c23d78cc7b4f9acd6759ffaccc5e241ff06e156da7dfcac",

@@ -50,7 +50,7 @@ class ScopeSet(AccessModel):
     conversation_id: str = Field(min_length=1, max_length=100)
     grant_id: str = Field(min_length=1, max_length=100)
     expected_version: int = Field(ge=0)
-    project_rules: list[ProjectRule] = Field(min_length=1, max_length=32)
+    project_rules: list[ProjectRule] = Field(default_factory=list, max_length=32)
     execution_mode: Literal['file_tools_only', 'account_permissions_acknowledged', 'require_os_isolation'] = 'file_tools_only'
     expires_seconds: int = Field(default=86400, ge=0, le=30 * 86400, strict=True)
     confirm_connection_wide_ceiling: Literal[True]
@@ -131,6 +131,9 @@ def current(store, grant_id, *, grant=None):
         lifetime = manifest.get('lifetime_mode', 'bounded')
         if lifetime not in {'bounded', 'until_revoked'} or (lifetime == 'until_revoked') != (row['expires_at'] == 0):
             raise ValueError()
+        membership_mode = manifest.get('project_membership_mode', 'conversation')
+        if membership_mode not in {'conversation', 'grant_ceiling'}:
+            raise ValueError()
         for rule in manifest['project_rules']:
             ProjectRule.model_validate({k: rule[k] for k in ('project_id', 'capabilities', 'execution_targets')})
             project = store.one('SELECT * FROM projects WHERE id=? AND space_id=?', (rule['project_id'], row['space_id']))
@@ -149,13 +152,17 @@ def current(store, grant_id, *, grant=None):
                     (target[4:], project['id'], row['space_id']))
                 if actual is None or actual != rule.get('target_snapshots', {}).get(target):
                     raise DevError('ROOM_SCOPE_TARGET_CHANGED', '原批准的 VPS 连接、凭据或项目分配已改变，不能继承到新目标', 403)
-            if not store.one('''SELECT 1 FROM conversation_projects p JOIN collaboration_rooms r ON r.id=p.room_id
+            # Old approvals retain their original membership dependency. New
+            # explicit owner approvals cap the credential independently of work
+            # membership, so a not-yet-joined project can be selected afterward.
+            if membership_mode == 'conversation' and not store.one('''SELECT 1 FROM conversation_projects p JOIN collaboration_rooms r ON r.id=p.room_id
                 WHERE p.conversation_id=? AND r.project_id=? AND r.environment_id=?''',
                 (row['conversation_id'], rule['project_id'], manifest['environment_id'])):
                 raise DevError('ROOM_SCOPE_CHANGED', '原范围项目已不再属于批准的话题或环境', 403)
         room = store.one('SELECT * FROM collaboration_rooms WHERE id=?', (row['room_id'],))
         conversation = store.one('SELECT * FROM conversation_rooms WHERE id=?', (row['conversation_id'],))
         if (not room or room['state'] != 'active' or room['owner_user_id'] != row['owner_user_id']
+                or room['environment_id'] != manifest['environment_id']
                 or room['space_id'] != row['space_id'] or not conversation
                 or conversation['owner_user_id'] != row['owner_user_id'] or conversation['space_id'] != row['space_id']
                 or not store.one('SELECT 1 FROM conversation_projects WHERE conversation_id=? AND room_id=?',
@@ -206,6 +213,8 @@ def require_room(store, principal, room, conversation_id=None):
         return
     if (room is None or room['environment_id'] != record['manifest']['environment_id']
             or room['project_id'] not in {r['project_id'] for r in record['manifest']['project_rules']}
+            or not store.one('SELECT 1 FROM conversation_projects WHERE conversation_id=? AND room_id=?',
+                             (record['conversation_id'], room['id']))
             or conversation_id and record['conversation_id'] != conversation_id):
         raise DevError('ROOM_SCOPE_CONVERSATION_DENIED', '此连接不能切换到另一个房间或话题', 403)
 
@@ -283,9 +292,30 @@ class RoomScopeService:
             if (not grant or grant['revoked'] or grant['user_id'] != principal.user_id
                     or grant.get('space_id', 'legacy') != principal.space_id):
                 raise DevError('ROOM_SCOPE_GRANT_INVALID', '请选择当前房主已有的有效连接，不创建或冒用其他身份', 403)
-            rules = args['project_rules']
-            if len({r['project_id'] for r in rules}) != len(rules) or room['project_id'] not in {r['project_id'] for r in rules}:
-                raise DevError('ROOM_SCOPE_PROJECTS_INVALID', '项目不能重复，且必须包含当前房间项目', 422)
+            # Harmless duplicate selections share one receipt and one rule. Keep
+            # first-occurrence order so existing valid request fingerprints survive.
+            rules, seen = [], {}
+            for rule in args['project_rules']:
+                identity = {**rule, 'capabilities': sorted(rule['capabilities']),
+                            'execution_targets': sorted(rule['execution_targets'])}
+                if rule['project_id'] in seen:
+                    if seen[rule['project_id']] != identity:
+                        raise DevError('ROOM_SCOPE_PROJECT_RULE_CONFLICT',
+                            '同一项目选择了不同权限或执行位置。请核对后只保留一项；本次未更改连接权限。', 422,
+                            project_id=rule['project_id'], remedy='review_connection_rules',
+                            changes_applied=False)
+                    continue
+                seen[rule['project_id']] = identity
+                rules.append(rule)
+            args = {**args, 'project_rules': rules}
+            if not rules:
+                raise DevError('ROOM_SCOPE_EMPTY',
+                    '要让房间只聊天，请打开“管理房间项目”并取消全部项目。这里调整的是整条连接权限，本次未更改。', 422,
+                    remedy='edit_room_projects', conversation_id=conversation['id'], changes_applied=False)
+            if room['project_id'] not in seen:
+                raise DevError('ROOM_SCOPE_ANCHOR_REQUIRED',
+                    '要保留原连接并只处理所选项目，请打开“管理房间项目”保存选择。这里调整的是整条连接权限，本次未更改。', 422,
+                    remedy='edit_room_projects', conversation_id=conversation['id'], changes_applied=False)
             wants_exec = any('execute' in r['capabilities'] for r in rules)
             if args['execution_mode'] == 'require_os_isolation':
                 raise DevError('ROOM_SCOPE_ISOLATION_UNAVAILABLE', '尚无经批准并验证的 OS 隔离驱动；严格执行范围不能降级为 cwd 限制', 409)
@@ -315,10 +345,8 @@ class RoomScopeService:
             snapshots = []
             for rule in rules:
                 project = self.c.runtime.project(rule['project_id'], principal)
-                if not self.store.one('''SELECT 1 FROM conversation_projects p JOIN collaboration_rooms r ON r.id=p.room_id
-                    WHERE p.conversation_id=? AND r.project_id=? AND r.environment_id=?''',
-                    (conversation['id'], project['id'], room['environment_id'])):
-                    raise DevError('ROOM_SCOPE_PROJECT_NOT_IN_ROOM', '范围项目必须已加入当前话题和环境', 409)
+                # Credential approval and task membership are independent.
+                # This saves no conversation partition or working-scope revision.
                 if ('*' not in base_projects and project['id'] not in base_projects
                         or not set(rule['capabilities']) <= set(base_caps(project['id']))):
                     raise DevError('ROOM_SCOPE_CEILING_EXCEEDED', '房间限制只能取原连接授权交集，不能扩大项目或能力', 403)
@@ -344,7 +372,8 @@ class RoomScopeService:
                 now = self.c.clock()
                 lifetime = 'until_revoked' if args['expires_seconds'] == 0 else 'bounded'
                 manifest = {'schema_version': PROTOCOL, 'project_rules': snapshots, 'execution_mode': args['execution_mode'],
-                            'environment_id': room['environment_id'], 'lifetime_mode': lifetime}
+                            'environment_id': room['environment_id'], 'lifetime_mode': lifetime,
+                            'project_membership_mode': 'grant_ceiling'}
                 record = {'grant_id': grant['id'], 'space_id': principal.space_id, 'owner_user_id': principal.user_id,
                     'room_id': room['id'], 'conversation_id': conversation['id'], 'version': args['expected_version'] + 1,
                     'expires_at': 0.0 if lifetime == 'until_revoked' else now + args['expires_seconds']}
@@ -358,6 +387,7 @@ class RoomScopeService:
                 self.c.audit(room, principal.actor, 'room_scope.owner_approved', grant['id'],
                     {'version': record['version'], 'project_ids': [r['project_id'] for r in snapshots],
                      'execution_mode': args['execution_mode'], 'changes_underlying_grant': False,
+                     'project_membership_mode': manifest['project_membership_mode'],
                      'lifetime_mode': lifetime, 'expires_seconds': args['expires_seconds'], 'expires_at': record['expires_at']})
                 return {'grant_id': grant['id'], 'version': record['version'], 'manifest_digest': fingerprint(record, manifest),
                         'credential_bound': True, 'affects_all_chats_using_this_grant': True, 'os_sandbox_verified': False,

@@ -1,6 +1,58 @@
 'use strict';
 // Explicit owner controls. Opening/refreshing this view never sends or replays work.
 window.CodePierCollaborationChannels = {
+  // One DOM-only project picker shared by room, new-room and advanced forms.
+  projectPicker: {
+    toolbar(E, allAction, noneAction) {
+      return `<div class="cc-project-picker-tools">
+        <label class="cc-field"><span>搜索项目</span><input type="search" data-project-search name="project_search" placeholder="输入项目名称" autocomplete="off"></label>
+        <div class="cc-project-bulk"><button type="button" class="btn" data-project-bulk="all" data-cc-action="${E(allAction)}">全选</button><button type="button" class="btn" data-project-bulk="none" data-cc-action="${E(noneAction)}">取消全选</button><span data-project-selection-count role="status"></span></div>
+        <p class="cc-hint">全选仅作用于当前列表；搜索外的选择会保留，新项目不会自动加入。</p>
+      </div>`;
+    },
+    filter(root) {
+      const query = (root.querySelector('[data-project-search]')?.value || '')
+        .trim()
+        .toLocaleLowerCase();
+      const rows = [...root.querySelectorAll('[data-project-option]')];
+      for (const row of rows)
+        row.hidden = !String(row.dataset.projectLabel || row.textContent)
+          .toLocaleLowerCase()
+          .includes(query);
+      const visible = rows.filter((row) => !row.hidden);
+      const selected = rows.filter((row) => row.querySelector('[data-project-select]')?.checked);
+      const hiddenSelected = selected.filter((row) => row.hidden).length;
+      const count = root.querySelector('[data-project-selection-count]');
+      if (count)
+        count.textContent = `已选 ${selected.length} 项${hiddenSelected ? '，其中 ' + hiddenSelected + ' 项在搜索结果外' : ''}`;
+      for (const button of root.querySelectorAll('[data-project-bulk]')) {
+        const disabled = !visible.some(
+          (row) => !row.querySelector('[data-project-select]')?.disabled,
+        );
+        if (button.disabled !== disabled) button.disabled = disabled;
+        const label =
+          button.dataset.projectBulk === 'all'
+            ? query
+              ? '全选搜索结果'
+              : '全选'
+            : query
+              ? '取消选择搜索结果'
+              : '取消全选';
+        // Search blur fires change during pointerdown on Safari. Replacing the
+        // pressed button's text here would cancel its native click event.
+        if (button.textContent !== label) button.textContent = label;
+      }
+      const empty = root.querySelector('[data-project-search-empty]');
+      if (empty) empty.hidden = visible.length > 0;
+    },
+    bulk(root, checked) {
+      for (const row of root.querySelectorAll('[data-project-option]')) {
+        const input = row.querySelector('[data-project-select]');
+        if (!row.hidden && input && !input.disabled) input.checked = checked;
+      }
+      this.filter(root);
+    },
+  },
   status(value) {
     return (
       {
@@ -181,7 +233,7 @@ window.CodePierCollaborationChannels = {
         : '尚未记录';
     function card() {
       return allowed() && state.snapshot?.capabilities?.room_scope_v1
-        ? `<section class="cc-card cc-channel-settings"><h3>消息连接</h3><p>把微信或 Telegram 接入当前话题。</p>${button('dot-channel-open', '管理连接')}</section>`
+        ? `<section class="cc-card cc-channel-project-entry"><h3>房间项目</h3><p>选择这个房间要使用的项目，继续沿用当前助手。</p>${button('manage-projects', '管理房间项目')}</section><section class="cc-card cc-channel-settings"><h3>消息连接</h3><p>把微信或 Telegram 接入当前话题。</p>${button('dot-channel-open', '管理连接')}</section>`
         : '';
     }
 
@@ -1464,15 +1516,20 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
       const slots = mentionSlots().filter((s) => s.duplex && s.state === 'registered');
       const projects = [
         ...new Map(
-          (
-            state.snapshot.conversation?.projects || [
+          [
+            ...(state.snapshot.conversation?.projects ?? [
               {
                 project_id: state.snapshot.room.project_id || state.project,
                 project_label: state.project,
                 environment_id: state.environment,
               },
-            ]
-          )
+            ]),
+            ...(S.projects || []).map((p) => ({
+              project_id: p.id,
+              project_label: p.alias || p.id,
+              environment_id: state.environment,
+            })),
+          ]
             .filter((p) => p.environment_id === state.environment)
             .map((p) => [p.project_id, p]),
         ).values(),
@@ -1481,7 +1538,7 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
       const policies = (r.items || [])
         .map(
           (item) =>
-            `<div class="cc-channel-binding"><strong>连接 ${E(item.grant_id.slice(-8))} · ${listState(item.state)}</strong><p>版本 ${E(item.version)} · ${item.manifest?.lifetime_mode === 'until_revoked' && item.expires_at === 0 ? '长期（持续至撤销）' : '到期 ' + stamp(item.expires_at)} · ${item.manifest?.execution_mode === 'file_tools_only' ? '仅文件工具' : '账户权限执行（不是 OS 沙箱）'}</p><p>${(item.manifest?.project_rules || []).map((p) => E(p.project_id) + '：' + E(p.capabilities.join(' / '))).join('<br>')}</p>${item.state === 'active' ? button('dot-channel-scope-revoke', '停用此房间连接', { id: item.grant_id }) : ''}</div>`,
+            `<div class="cc-channel-binding"><strong>连接 ${E(item.grant_id.slice(-8))} · ${listState(item.state)}</strong><p>版本 ${E(item.version)} · ${item.manifest?.lifetime_mode === 'until_revoked' && item.expires_at === 0 ? '长期（持续至撤销）' : '到期 ' + stamp(item.expires_at)} · ${item.manifest?.execution_mode === 'file_tools_only' ? '仅文件工具' : '账户权限执行（不是 OS 沙箱）'}</p><p>${(item.manifest?.project_rules || []).map((p) => E(p.project_id) + '：' + E(p.capabilities.join(' / '))).join('<br>')}</p>${item.state === 'active' ? button('dot-channel-scope-revoke', '停用整条凭据访问', { id: item.grant_id }) : ''}</div>`,
         )
         .join('');
       const deliveries = (w.deliveries || [])
@@ -1528,7 +1585,7 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
               (g.scope_version ? '（已有范围，修改会替换原范围）' : ''),
           ]),
         ),
-      )}<fieldset><legend>当前环境的项目与逐项目能力</legend>${projects.map((p) => `<div class="cc-channel-project" data-project-id="${E(p.project_id)}"><label><input type="checkbox" name="project_selected" ${p.project_id === (state.snapshot.room.project_id || state.project) ? 'checked disabled' : ''}>${E(p.project_label || p.project_id)}</label>${checkbox('write', '允许项目文件写入')}${checkbox('execute', '允许此项目的 Agent 执行')}</div>`).join('')}</fieldset>${field('凭据限制有效期', '<select name="scope_lifetime"><option value="bounded">定时到期</option><option value="until_revoked">长期（持续至撤销）</option></select>')}${field('限制期限（小时，0 为长期）', '<input type="number" name="hours" value="24" min="0" max="720" step="1" required>')}${checkbox('unsandboxed', '如选择执行，我明确接受 Agent 账户权限；这不是文件系统或网络沙箱')}${checkbox('confirm_scope', '我确认以本次选择替换此凭据的房间范围，且影响它的所有会话', true)}${button('dot-channel-scope-save', '确认设置范围')}<p>严格 OS 隔离尚未验证时不会放行执行。未选择执行时只允许获批文件工具。</p></div></details></section></div>`;
+      )}${window.CodePierCollaborationChannels.projectPicker.toolbar(E, 'dot-channel-project-all', 'dot-channel-project-none')}<p class="cc-hint">批选只更改项目选择，不会开启修改或执行权限。</p><fieldset><legend>限制到以下项目</legend>${projects.map((p) => `<div class="cc-channel-project" data-project-option data-project-label="${E(p.project_label || p.project_id)}" data-project-id="${E(p.project_id)}"><label><input data-project-select type="checkbox" name="project_selected" >${E(p.project_label || p.project_id)}</label><details class="cc-project-capabilities"><summary>高级权限 <small data-project-capability-summary></small></summary>${checkbox('write', '允许项目文件写入')}${checkbox('execute', '允许此项目在以下位置执行')}<p data-project-target-summary></p></details></div>`).join('')}</fieldset>${field('凭据限制有效期', '<select name="scope_lifetime"><option value="bounded">定时到期</option><option value="until_revoked">长期（持续至撤销）</option></select>')}${field('限制期限（小时，0 为长期）', '<input type="number" name="hours" value="24" min="0" max="720" step="1" required>')}${checkbox('unsandboxed', '如选择执行，我明确接受 Agent 账户权限；这不是文件系统或网络沙箱')}${checkbox('confirm_scope', '我确认以本次选择替换此凭据的房间范围，且影响它的所有会话', true)}${button('dot-channel-scope-save', '确认设置范围')}<p>严格 OS 隔离尚未验证时不会放行执行。未选择执行时只允许获批文件工具。</p></div></details></section></div>`;
     }
 
     const viewTitles = {
@@ -1573,6 +1630,20 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
       form.querySelector('[data-cc-action="dot-channel-scope-save"]').disabled = !!message;
       return message;
     }
+    function syncProjectCapabilities(form) {
+      for (const row of form.querySelectorAll('[data-project-id]')) {
+        const label = row.querySelector('[data-project-capability-summary]');
+        if (label)
+          label.textContent = [
+            '读取',
+            row.querySelector('[name="write"]').checked ? '修改' : '',
+            row.querySelector('[name="execute"]').checked ? '执行' : '',
+          ]
+            .filter(Boolean)
+            .join('、');
+      }
+      window.CodePierCollaborationChannels.projectPicker.filter(form);
+    }
     function scopeSignature(form) {
       return JSON.stringify({
         grant: form.querySelector('[name="grant_id"]').value,
@@ -1593,10 +1664,32 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
           (rule) => rule.project_id === row.dataset.projectId,
         );
         row.querySelector('[name="project_selected"]').checked =
-          !!original || (!saved && row.querySelector('[name="project_selected"]').disabled);
+          !!original ||
+          (!saved &&
+            (
+              state.snapshot.conversation?.projects ?? [
+                { project_id: state.snapshot.room.project_id || state.project },
+              ]
+            ).some((p) => p.project_id === row.dataset.projectId));
         row.querySelector('[name="write"]').checked = !!original?.capabilities?.includes('write');
         row.querySelector('[name="execute"]').checked =
           !!original?.capabilities?.includes('execute');
+        row.projectTargetsMissing = !!original && !Array.isArray(original.execution_targets);
+        row.projectExecutionTargets = original
+          ? Array.isArray(original.execution_targets)
+            ? [...original.execution_targets]
+            : []
+          : ['agent'];
+        row.querySelector('[data-project-target-summary]').textContent =
+          (row.projectTargetsMissing
+            ? '原执行位置缺失，无法安全覆盖；请先核对连接记录。'
+            : '执行位置：') +
+          (row.projectExecutionTargets.length
+            ? row.projectExecutionTargets
+                .map((target) => (target === 'agent' ? '项目 Agent' : target))
+                .join('、')
+            : '无') +
+          (original ? '（沿用已有设置）' : '（新项目默认；不会自动加入 VPS）');
       }
       const untilRevoked =
         saved?.manifest?.lifetime_mode === 'until_revoked' && saved.expires_at === 0;
@@ -1612,6 +1705,7 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
         form.querySelector('[name="' + name + '"]').checked = false;
       loaded.scopeDraft = saved ? { grantId, signature: scopeSignature(form) } : null;
       syncScopeRootCheck(form);
+      syncProjectCapabilities(form);
     }
     function syncScopeLifetime(form, changed = '') {
       const hours = form.querySelector('[name="hours"]');
@@ -1705,7 +1799,10 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
         if (enrollment && ['account_id', 'dot_id', 'expected_peer_id'].includes(event.target.name))
           void enrollmentRead(enrollment);
         if (event.target.name === 'grant_id' && scopeForm) prefillScope(scopeForm);
-        if (event.target.name === 'project_selected' && scopeForm) syncScopeRootCheck(scopeForm);
+        if (scopeForm && ['project_selected', 'write', 'execute'].includes(event.target.name)) {
+          syncScopeRootCheck(scopeForm);
+          syncProjectCapabilities(scopeForm);
+        }
         if (
           scopeForm &&
           event.target.closest('[data-channel-form="scope"]') === scopeForm &&
@@ -1720,6 +1817,8 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
         }
       });
       pane?.addEventListener('input', (event) => {
+        if (scopeForm && event.target.matches('[data-project-search]'))
+          window.CodePierCollaborationChannels.projectPicker.filter(scopeForm);
         const enrollment = event.target.closest('[data-channel-form="enrollment"]');
         if (enrollment && event.target.name === 'expected_peer_id') enrollmentReset(enrollment);
         if (
@@ -1795,7 +1894,9 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
     }
     function overview(data) {
       return (
-        '<div class="cc-connection-intro"><h3>选择一个消息入口</h3><p>连接后，在熟悉的聊天里继续当前话题。</p></div><div class="cc-connection-options">' +
+        '<section class="cc-room-project-entry"><div><h3>房间项目</h3><p>增删项目在这里完成，保留原助手与消息。</p></div>' +
+        button('manage-projects', '管理房间项目') +
+        '</section><div class="cc-connection-intro"><h3>选择一个消息入口</h3><p>连接后，在熟悉的聊天里继续当前话题。</p></div><div class="cc-connection-options">' +
         [
           ['weixin', '微信', 'W', '扫码登录，连接本人私聊。'],
           ...(data.telegram ? [['telegram', 'Telegram', 'T', '连接机器人，同步本人私聊。']] : []),
@@ -1954,7 +2055,9 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
         section.querySelector('p')?.remove();
         section.insertAdjacentHTML(
           'afterbegin',
-          '<div class="cc-connection-warning"><strong>这会限制整条 MCP 连接</strong><p>所有使用同一凭据的会话都会受影响。增删当前房间项目请使用房间菜单中的“管理房间项目”。这里不是微信连接期限，也不是微信任务授权的必需步骤。</p></div>',
+          '<section class="cc-room-project-entry"><div><strong>只想增删房间项目？</strong><p>使用同一个项目面板即可，无需调整下面的凭据权限。</p></div>' +
+            button('manage-projects', '管理房间项目') +
+            '</section><div class="cc-connection-warning"><strong>以下设置影响整条 MCP 凭据</strong><p>所有使用同一凭据的会话都会受影响。仅在需要限制凭据本身时修改。</p></div>',
         );
         const form = section.querySelector('[data-channel-form="scope"]');
         const detail = form.closest('details');
@@ -2112,6 +2215,16 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
         return open(element);
       }
       if (saving) return local;
+      if (['dot-channel-project-all', 'dot-channel-project-none'].includes(action)) {
+        const form = group(element, false).root;
+        window.CodePierCollaborationChannels.projectPicker.bulk(
+          form,
+          action === 'dot-channel-project-all',
+        );
+        syncScopeRootCheck(form);
+        syncScopeLifetime(form, 'project_selected');
+        return local;
+      }
       if (action.startsWith('dot-channel-view-'))
         return navigate(action.slice('dot-channel-view-'.length), element);
       if (action.startsWith('dot-channel-qr-')) return qrAct(action, element);
@@ -2473,8 +2586,17 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
               ...(p.querySelector('[name="write"]').checked ? ['write'] : []),
               ...(p.querySelector('[name="execute"]').checked ? ['execute'] : []),
             ],
-            execution_targets: ['agent'],
+            execution_targets: [...p.projectExecutionTargets],
           }));
+        if (
+          [...root.querySelectorAll('[data-project-id]')].some(
+            (row) =>
+              row.querySelector('[name="project_selected"]').checked && row.projectTargetsMissing,
+          )
+        )
+          throw new Error(
+            '已有项目的执行位置记录不完整，未修改权限。请先核对连接记录，不会自动改为 Agent。',
+          );
         const execute = rules.some((r) => r.capabilities.includes('execute'));
         if (execute && !checked('unsandboxed'))
           throw new Error('选择执行需要明确接受账户权限边界；未确认时仅使用文件工具。');
@@ -2490,7 +2612,12 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
         };
       } else if (action === 'dot-channel-scope-revoke') {
         const row = loaded.scopes.items.find((r) => r.grant_id === element.dataset.id);
-        if (!row || !window.confirm('停用此房间连接？它将被拒绝访问，不会退回更宽的原授权。'))
+        if (
+          !row ||
+          !window.confirm(
+            '停用整条凭据的访问？所有使用这条凭据的会话和工具都会受影响。停用后不会恢复为更宽权限。',
+          )
+        )
           return local;
         operation = 'room-scope-control';
         args = { grant_id: row.grant_id, expected_version: row.version, action: 'revoke' };
@@ -2577,6 +2704,26 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
       saving = true;
       try {
         await mutation(operation, { ...args, ...scope() });
+      } catch (error) {
+        if (
+          action === 'dot-channel-scope-save' &&
+          current(key) &&
+          loaded?.epoch === state.drawerEpoch
+        ) {
+          const detail = error.details || error.data || error;
+          const remedy = detail.remedy || error.remedy;
+          const editProjects =
+            remedy === 'edit_room_projects' ||
+            ['ROOM_SCOPE_ANCHOR_REQUIRED', 'ROOM_SCOPE_EMPTY'].includes(error.code);
+          root.querySelector('[data-scope-error]')?.remove();
+          root.insertAdjacentHTML(
+            'afterbegin',
+            `<div class="cc-connection-warning" data-scope-error role="alert"><p>${E(error.message)}</p>${editProjects ? button('manage-projects', '管理房间项目', {}, 'data-project-remedy') : '<p>当前选择已保留，请调整后再保存。</p>'}</div>`,
+          );
+          root.querySelector('[data-scope-error]').scrollIntoView({ block: 'nearest' });
+          return { local: true, message: '' };
+        }
+        throw error;
       } finally {
         saving = false;
         if (root?.querySelector('[name="token"]')) root.querySelector('[name="token"]').value = '';

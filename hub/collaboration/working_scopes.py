@@ -69,13 +69,25 @@ class WorkingScopes:
             WHERE d.conversation_id=? AND s.state='registered' ORDER BY s.created,s.id""",
             (conversation_id,))
 
+    @staticmethod
+    def normalized_selection(args):
+        # UI repeated selections are one intent, never a capability union. Keep
+        # the first occurrence to preserve valid pre-existing retry fingerprints.
+        seen, projects = set(), []
+        for project in args['projects']:
+            identity = (project['project'], project['environment_id'])
+            if identity not in seen:
+                seen.add(identity)
+                projects.append(project)
+        return {**args, 'projects': projects}
+
     def candidate(self, args, principal, conversation):
         previous = self.current(conversation['id'])
         choices = self.candidates(conversation['id'])
         chosen = args['projects']
         ids = [item['project'] for item in chosen]
         if len(set(ids)) != len(ids):
-            raise DevError('DUPLICATE_PROJECT', '房间项目不能重复', 422)
+            raise DevError('DUPLICATE_PROJECT', '同一项目选择了不同环境。请刷新项目列表，选择一个环境后再保存；本次未更改。', 422)
         old_rules = {r['project_id']: r for r in previous['spec']['projects']} if previous else {}
         narrowing = not ids or previous is not None and set(ids) <= set(old_rules)
         dot_id = args['dot_id'] or (previous['spec']['dot_id'] if previous else
@@ -143,6 +155,12 @@ class WorkingScopes:
                 [conversation['id'], dot_id, version, rule])
             rules.append(rule)
         rules.sort(key=lambda r: r['project_id'])
+        if not narrowing and 'execute' in base['capabilities']:
+            from hub.room_scope import require_tool
+            for rule in rules:
+                for target in rule['execution_targets']:
+                    require_tool(self.store, actor, 'exec', {'project': rule['project_id'],
+                        'target': 'agent' if target == 'project_agent' else target})
         connection = {'dot_id': dot_id, 'dot_label': slot['label'], 'grant_id': slot['grant_id'],
                       'room_id': room['id'], 'project_id': room['project_id'],
                       'environment_id': room['environment_id']}
@@ -164,25 +182,104 @@ class WorkingScopes:
                 'changes_underlying_grant': False,
                 'message': '保存后沿用原消息连接；移除项目不能开始新步骤，运行操作以取消回执为准。'}
 
+    def checked_candidate(self, args, principal, conversation):
+        try:
+            return self.candidate(args, principal, conversation)
+        except DevError as exc:
+            # Explain a proven ceiling denial only after the actual guards failed.
+            # This diagnostic never creates a usable, less-restricted principal.
+            replacement = self.connection_limit_error(args, principal, conversation, exc)
+            raise replacement or exc
+
+    def connection_limit_error(self, args, principal, conversation, original):
+        if original.code not in {'PROJECT_NOT_FOUND', 'INSUFFICIENT_SCOPE',
+                                 'ROOM_SCOPE_DENIED', 'ROOM_SCOPE_ISOLATION_REQUIRED',
+                                 'ROOM_SCOPE_TARGET_DENIED'} or not args['projects']:
+            return None
+        self.c.owner(principal)
+        previous, choices = self.current(conversation['id']), self.candidates(conversation['id'])
+        dot_id = args['dot_id'] or (previous['spec']['dot_id'] if previous else
+                                  choices[0]['id'] if len(choices) == 1 else '')
+        dot = self.c.dots.find(dot_id)
+        if not dot or dot['conversation_id'] != conversation['id']:
+            return None
+        room = self.store.one('SELECT * FROM collaboration_rooms WHERE id=?', (dot['room_id'],))
+        policy = self.store.one('SELECT * FROM delegation_policies WHERE id=?', (dot['policy_id'],))
+        if not room or not policy:
+            return None
+        from hub import iam
+        from hub.access_profiles import intersect_projects, stored_permissions
+        from hub.room_scope import current
+        try:
+            actor = self.c.grant_reader(room, policy['grant_id'],
+                                        snapshot=json.loads(policy['grant_snapshot']))
+            ceiling = current(self.store, policy['grant_id'])
+            grant = self.store.one('SELECT * FROM grants WHERE id=?', (policy['grant_id'],))
+            # Dynamic roles have per-project policy; do not mistake their denials
+            # for a request to widen the connection-wide ceiling.
+            if not ceiling or grant.get('authorization_mode', 'fixed') != 'fixed':
+                return None
+            scopes, project_ids = stored_permissions(grant)
+            if grant.get('profile_id'):
+                profile = self.store.one('SELECT * FROM access_profiles WHERE id=?', (grant['profile_id'],))
+                caps, ids = stored_permissions(profile)
+                scopes &= caps
+                project_ids = intersect_projects(project_ids, ids)
+            base = json.loads(policy['spec'])
+            rules = {rule['project_id']: rule for rule in ceiling['manifest']['project_rules']}
+            restricted = []
+            for project_id in dict.fromkeys([room['project_id']] + [p['project'] for p in args['projects']]):
+                project = self.c.runtime.project(project_id, principal)
+                if (project['id'] != project_id or '*' not in project_ids and project_id not in project_ids
+                        or not set(base['capabilities']) <= scopes):
+                    return None
+                for capability in base['capabilities']:
+                    self.c.coordination.require_capability(principal, capability, project_id)
+                    if iam.installed(self.store):
+                        iam.require_project(self.store, actor, capability, project_id)
+                for target in base['execution_targets']:
+                    self.c.delegation.target_snapshot(principal, project, target)
+                rule = rules.get(project_id, {})
+                caps = sorted(set(base['capabilities']) - set(rule.get('capabilities', [])))
+                targets = sorted(target for target in base['execution_targets']
+                                 if ('agent' if target == 'project_agent' else target)
+                                 not in rule.get('execution_targets', []))
+                if ('execute' in base['capabilities']
+                        and ceiling['manifest']['execution_mode'] != 'account_permissions_acknowledged'):
+                    caps = sorted(set(caps) | {'execute'})
+                if caps or targets:
+                    restricted.append({'project_id': project_id, 'capabilities': caps,
+                                       'execution_targets': targets})
+            if restricted:
+                return DevError('ROOM_PROJECT_CONNECTION_LIMITED',
+                    '这个项目超出此连接已确认的权限，需先确认连接权限；本次选择已保留，尚未保存。',
+                    403, remedy='review_connection_scope', grant_id=grant['id'],
+                    conversation_id=conversation['id'], restricted_projects=restricted,
+                    changes_applied=False)
+        except (DevError, ValueError, KeyError, TypeError):
+            pass  # Keep the original authorization error if attribution is uncertain.
+        return None
+
     def preview(self, raw, principal):
-        args = validate(Selection, raw)
+        args = self.normalized_selection(validate(Selection, raw))
         with self.store.transaction(immediate=False):
             self.c.guard()
             principal = refresh_principal(self.store, principal)
             self.c.owner(principal)
             conversation = self.c.conversations.object(principal, args['conversation_id'])
             try:
-                result = self.candidate(args, principal, conversation)
+                result = self.checked_candidate(args, principal, conversation)
             except DevError as exc:
                 return {'ready': False, 'reason_code': exc.code, 'message': exc.message,
                         'choices': self.candidates(conversation['id']),
                         'conversation_version': conversation['version'],
                         'scope_version': (self.current(conversation['id']) or {}).get('version', 0),
-                        'changes_underlying_grant': False}
+                        'changes_underlying_grant': False,
+                        **(exc.details if exc.code == 'ROOM_PROJECT_CONNECTION_LIMITED' else {})}
             return {k: v for k, v in result.items() if k != 'spec'}
 
     def apply(self, raw, principal):
-        args = validate(ApplySelection, raw)
+        args = self.normalized_selection(validate(ApplySelection, raw))
         with self.store.transaction():
             self.c.guard()
             principal = refresh_principal(self.store, principal)
@@ -195,7 +292,7 @@ class WorkingScopes:
                 if (conversation['version'] != args['expected_version']
                         or (previous['version'] if previous else 0) != args['expected_scope_version']):
                     raise DevError('STALE_VERSION', '房间项目已改变，请重新核对后确认', 409)
-                result = self.candidate(args, principal, conversation)
+                result = self.checked_candidate(args, principal, conversation)
                 if result['selection_digest'] != args['selection_digest']:
                     raise DevError('ROOM_PROJECT_PREVIEW_CHANGED', '项目、目录或连接权限已变化，请重新核对后确认', 409)
                 spec, now = result['spec'], self.c.clock()

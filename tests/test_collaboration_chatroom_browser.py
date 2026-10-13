@@ -381,8 +381,11 @@ def test_conversation_stale_add_review_and_visible_permission_reset(collaboratio
             'conversation_id': conversation['id'], 'expected_version': conversation['version'],
             'project': other['id'], 'environment_id': 'production', 'idempotency_key': key()}))
         form.locator('button[type="submit"]').click()
-        expect(page.locator('#cc-feedback')).to_contain_text('重新审阅')
-        expect(page.locator('#cc-drawer')).not_to_be_visible()
+        expect(form.locator('[data-room-project-summary]')).to_contain_text('已重新检查并保留你的选择')
+        expect(page.locator('#cc-drawer')).to_be_visible()
+        expect(form.locator(f'[name="room_projects"][value="{other["id"]}"]')).to_be_checked()
+        page.keyboard.press('Escape')
+        click_room_refresh(page)
         expect(page.locator('.cc-project-chip')).to_have_count(2)
         assert len(overview(stack)['conversation']['projects']) == 2
         page.locator('#cc-message-input').fill('被撤权来源的草稿')

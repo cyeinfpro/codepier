@@ -2005,3 +2005,85 @@ body:has(.cc-chat-shell) .mobile-dock {
   justify-self: start;
   margin-top: 12px;
 }
+
+/* Room project picking shares one searchable, explicit current-list selection. */
+.cc-project-strip > .cc-project-chip,
+.cc-project-strip > .btn {
+  flex: 0 0 auto;
+}
+.cc-project-chip.cc-task-project-label {
+  cursor: default;
+}
+.cc-project-picker-tools {
+  display: grid;
+  gap: 8px;
+}
+.cc-project-picker-tools .cc-field {
+  margin: 0;
+}
+.cc-project-bulk {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.cc-project-bulk .btn {
+  min-height: 44px;
+}
+.cc-project-bulk [data-project-selection-count] {
+  color: var(--ui-muted);
+  font-size: 12px;
+}
+[data-project-option][hidden] {
+  display: none !important;
+}
+.cc-room-project-choices {
+  max-height: min(36vh, 320px);
+  overflow-y: auto;
+}
+.cc-project-permission-details {
+  padding: 10px 0;
+  font-size: 12px;
+  color: var(--ui-muted);
+}
+.cc-project-permission-details > summary,
+.cc-project-capabilities > summary {
+  cursor: pointer;
+  min-height: 32px;
+}
+.cc-project-summary p {
+  margin: 6px 0;
+}
+.cc-project-capabilities {
+  padding-left: 26px;
+  width: 100%;
+}
+.cc-project-capabilities small {
+  color: var(--ui-muted);
+  font-size: 11px;
+}
+.cc-project-capabilities label {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+}
+.cc-room-project-entry {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  padding: 16px;
+  border: 1px solid var(--ui-line);
+  border-radius: 12px;
+  margin-bottom: 18px;
+}
+.cc-room-project-entry > div {
+  flex: 1 1 220px;
+}
+.cc-room-project-entry h3,
+.cc-room-project-entry p {
+  margin: 0 0 6px;
+}
+.cc-project-update-notice {
+  color: var(--ui-purple);
+}
