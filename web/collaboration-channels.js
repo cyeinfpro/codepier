@@ -1665,12 +1665,7 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
         );
         row.querySelector('[name="project_selected"]').checked =
           !!original ||
-          (!saved &&
-            (
-              state.snapshot.conversation?.projects ?? [
-                { project_id: state.snapshot.room.project_id || state.project },
-              ]
-            ).some((p) => p.project_id === row.dataset.projectId));
+          (!saved && row.dataset.projectId === (state.snapshot.room.project_id || state.project));
         row.querySelector('[name="write"]').checked = !!original?.capabilities?.includes('write');
         row.querySelector('[name="execute"]').checked =
           !!original?.capabilities?.includes('execute');

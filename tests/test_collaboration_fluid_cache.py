@@ -30,6 +30,7 @@ def boot_timeline(page):
     }''')
     page.add_script_tag(path=str(ROOT / 'web/collaboration-runtime.js'))
     page.add_script_tag(path=str(ROOT / 'web/collaboration-relay.js'))
+    page.add_script_tag(path=str(ROOT / 'web/collaboration-channels.js'))
     source = (ROOT / 'web/collaboration.js').read_text()
     export = 'return { html, bind, detach, clear, open };'
     assert source.count(export) == 1
