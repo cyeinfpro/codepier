@@ -12,8 +12,19 @@ def act(page, suffix):
 
 
 def overview(page):
+    if page.locator('[data-channel-view="connection-scope"]').count():
+        act(page, "view-advanced")
     act(page, "view-overview")
     expect(page.locator("[data-channel-view]")).to_have_attribute("data-channel-view", "overview")
+
+
+def connection_scope(page):
+    act(page, "view-advanced")
+    expect(page.locator("[data-channel-form=scope]")).to_have_count(0)
+    expect(page.locator("[data-cc-action=manage-room-permissions]")).to_be_visible()
+    act(page, "view-connection-scope")
+    expect(page.locator("[data-channel-view]")).to_have_attribute("data-channel-view", "connection-scope")
+    expect(page.locator(".cc-connection-warning").first).to_contain_text("所有使用同一凭据的会话都会受影响")
 
 
 def no_overflow(page):
@@ -239,7 +250,7 @@ def test_saved_advanced_scope_prefills_and_unchanged_submit_is_read_only(qr_page
     }""")
     act(page, "open")
     overview(page)
-    act(page, "view-advanced")
+    connection_scope(page)
     page.get_by_text("修改已有连接的限制", exact=True).click()
     form = page.locator("[data-channel-form=scope]")
     expect(form.locator("[name=grant_id]")).to_have_value("grantA")
@@ -325,7 +336,7 @@ def scope_form(page, saved=False):
     }""", saved)
     act(page, "open")
     overview(page)
-    act(page, "view-advanced")
+    connection_scope(page)
     if saved:
         page.get_by_text("修改已有连接的限制", exact=True).click()
     return page.locator("[data-channel-form=scope]")
@@ -372,7 +383,7 @@ def test_saved_long_term_scope_reopens_as_zero_and_unchanged_does_not_write(qr_p
     act(page, "scope-save")
     assert page.evaluate("writes.length") == 0
     overview(page)
-    act(page, "view-advanced")
+    connection_scope(page)
     page.get_by_text("修改已有连接的限制", exact=True).click()
     expect(form.locator("[name=hours]")).to_have_value("0")
     expect(form.locator("[name=confirm_scope]")).not_to_be_checked()
@@ -407,7 +418,7 @@ def test_advanced_project_bulk_preserves_hidden_selections_and_capabilities(qr_p
     }""")
     act(page, 'open')
     overview(page)
-    act(page, 'view-advanced')
+    connection_scope(page)
     open_scope_form(page)
     form = page.locator('[data-channel-form=scope]')
     form.locator('[name=grant_id]').select_option('grantA')
@@ -438,7 +449,7 @@ def test_unknown_saved_target_is_visible_and_never_replaced_with_agent(qr_page, 
     }""", old_target)
     act(page, 'open')
     overview(page)
-    act(page, 'view-advanced')
+    connection_scope(page)
     open_scope_form(page)
     form = page.locator('[data-channel-form=scope]')
     form.locator('[name=grant_id]').select_option('grantA')
@@ -456,3 +467,79 @@ def open_scope_form(page):
     if not form.is_visible():
         form.locator('..').locator(':scope > summary').click()
     return form
+
+
+def test_connection_scope_revoke_requires_specific_view_confirmation_and_version(qr_page):
+    page, _ = qr_page
+    scope_form(page, saved=True)
+    page.evaluate("confirmResult=false")
+    act(page, "scope-revoke")
+    assert page.evaluate("writes.length") == 0
+    assert "所有使用这条凭据的会话" in page.evaluate("confirmations.at(-1)")
+    page.evaluate("window.oldRevoke=document.querySelector('[data-cc-action=dot-channel-scope-revoke]')")
+    act(page, "view-advanced")
+    refused = page.evaluate("channels.act('dot-channel-scope-revoke',oldRevoke).then(()=>'',e=>e.message)")
+    assert "请先打开整条连接限制" in refused
+    assert page.evaluate("writes.length") == 0
+    act(page, "view-connection-scope")
+    page.evaluate("confirmResult=true")
+    act(page, "scope-revoke")
+    sent = page.evaluate("writes")
+    assert len(sent) == 1
+    assert sent[0]["operation"] == "room-scope-control"
+    assert sent[0]["args"] == {
+        "grant_id": "grantA", "expected_version": 3, "action": "revoke",
+        "project": "projectA", "environment_id": "test",
+    }
+
+
+@pytest.mark.parametrize("change", [
+    "state.generation++",
+    "S.session={id:'replacement-session'}",
+    "S.space_id='replacement-space'",
+    "state.snapshot.can_manage=false",
+    "state.snapshot.conversation.restored_from_archive=true",
+    "state.snapshot.conversation.archived_at=1",
+])
+def test_connection_scope_stale_or_history_context_cannot_save_or_revoke(qr_page, change):
+    page, _ = qr_page
+    form = scope_form(page, saved=True)
+    form.locator("[name=hours]").fill("2")
+    form.locator("[name=confirm_scope]").check()
+    page.evaluate(change)
+    for suffix in ("scope-save", "scope-revoke"):
+        refused = page.evaluate("(suffix)=>clickAction('dot-channel-'+suffix).then(()=>false,()=>true)", suffix)
+        assert refused
+    assert page.evaluate("writes.length") == 0
+    assert page.evaluate("confirmations.length") == 0
+
+
+@pytest.mark.parametrize("targets", [["vps:original"], ["agent", "vps:original"]])
+def test_connection_scope_explicit_save_preserves_original_vps_targets(qr_page, targets):
+    page, _ = qr_page
+    page.evaluate("""(targets) => {
+      data.scopes.eligible_connections=[{id:'grantA',label:'合成原连接',scope_version:3}];
+      data.scopes.items=[{grant_id:'grantA',version:3,state:'active',expires_at:0,
+        manifest:{lifetime_mode:'until_revoked',project_rules:[
+          {project_id:'projectA',capabilities:['read','write','execute'],execution_targets:targets}],
+          execution_mode:'account_permissions_acknowledged'}}];
+    }""", targets)
+    act(page, "open")
+    overview(page)
+    connection_scope(page)
+    form = open_scope_form(page)
+    form.locator(".cc-project-capabilities > summary").click()
+    expect(form.locator("[data-project-target-summary]")).to_contain_text("vps:original")
+    assert page.evaluate("writes.length") == 0
+    form.locator("[name=hours]").fill("2")
+    form.locator("[name=confirm_scope]").check()
+    form.locator("[name=unsandboxed]").check()
+    act(page, "scope-save")
+    sent = page.evaluate("writes")
+    assert len(sent) == 1 and sent[0]["operation"] == "room-scope"
+    assert sent[0]["args"]["project_rules"] == [{
+        "project_id": "projectA", "capabilities": ["read", "write", "execute"],
+        "execution_targets": targets,
+    }]
+    assert sent[0]["args"]["expected_version"] == 3
+    assert sent[0]["args"]["expires_seconds"] == 7200

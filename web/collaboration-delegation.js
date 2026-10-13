@@ -39,7 +39,11 @@ window.CodePierCollaborationDelegation = {
         .map((cap) => ({ read: '读取', write: '修改文件', execute: '运行命令' })[cap] || cap)
         .join('、');
     const policyTargets = (policy) =>
-      policy?.execution_targets || (policy?.execution_target ? [policy.execution_target] : []);
+      policy?.task_defaults?.execution_targets ||
+      policy?.execution_targets ||
+      (policy?.execution_target ? [policy.execution_target] : []);
+    const policyCapabilities = (policy) =>
+      policy?.task_defaults?.capabilities || policy?.capabilities || [];
     const targetLabel = (policy, id) =>
       id === 'project_agent'
         ? '项目 Agent · ' + projectLabel(policy?.project_id || state.project)
@@ -64,7 +68,7 @@ window.CodePierCollaborationDelegation = {
           : null;
       const capabilities =
         same &&
-        (c.delegationCapabilities || []).every((cap) => (policy.capabilities || []).includes(cap))
+        (c.delegationCapabilities || []).every((cap) => policyCapabilities(policy).includes(cap))
           ? [...(c.delegationCapabilities || [])]
           : null;
       c.delegationPolicy = policy?.id || '';
@@ -72,7 +76,7 @@ window.CodePierCollaborationDelegation = {
       c.delegationAutomatic = !!policy && automatic;
       c.delegationTargets =
         targets || (policyTargets(policy).length === 1 ? [...policyTargets(policy)] : []);
-      c.delegationCapabilities = capabilities || [...(policy?.capabilities || [])];
+      c.delegationCapabilities = capabilities || [...policyCapabilities(policy)];
     }
     function updatePolicies(items) {
       const previous = state.delegationPolicies || [];
@@ -104,7 +108,7 @@ window.CodePierCollaborationDelegation = {
           (id) => policyTargets(policy).includes(id) && targetAvailable(policy, id),
         ) &&
         c.delegationCapabilities?.includes('read') &&
-        c.delegationCapabilities.every((cap) => policy.capabilities.includes(cap)) &&
+        c.delegationCapabilities.every((cap) => policyCapabilities(policy).includes(cap)) &&
         (!c.delegationTargets.some((id) => id.startsWith('vps:')) ||
           c.delegationCapabilities.includes('execute')) &&
         (!c.delegationCapabilities.includes('write') ||
@@ -140,7 +144,7 @@ window.CodePierCollaborationDelegation = {
           )
           .join('') +
         '</fieldset><fieldset class="cc-project-choices"><legend>本次可用能力</legend>' +
-        policy.capabilities
+        policyCapabilities(policy)
           .map(
             (cap) =>
               '<label><input type="checkbox" name="capabilities" value="' +
@@ -154,6 +158,11 @@ window.CodePierCollaborationDelegation = {
           )
           .join('') +
         '</fieldset><p class="cc-hint">仅在这些已批准目标和能力内处理。需要其他目标时，助手会报告缺少的范围。</p>' +
+        (policy.task_defaults?.project_ids?.length
+          ? '<p class="cc-hint">本次项目：' +
+            E(policy.task_defaults.project_ids.map(projectLabel).join('、')) +
+            '。普通任务使用这些项目的共同能力；只对部分项目使用额外能力时，请创建目标并明确选择项目。</p>'
+          : '') +
         '<details><summary>验收要求</summary>' +
         field(
           '本次验收要求',
@@ -516,7 +525,9 @@ window.CodePierCollaborationDelegation = {
         policy_inactive: '原委托授权已不可用',
       };
       const status = d.delivery_status || 'not_dispatched';
-      const retry = ['not_subscribed', 'dispatch_required', 'not_dispatched'].includes(status);
+      const restored = !!state.snapshot?.conversation?.restored_from_archive;
+      const retry =
+        !restored && ['not_subscribed', 'dispatch_required', 'not_dispatched'].includes(status);
       const next = {
         not_subscribed: '接通对应聊天后，可继续派发这条已保存的委托。',
         dispatch_required: '连接已接通，点击继续派发原任务。',
@@ -536,9 +547,18 @@ window.CodePierCollaborationDelegation = {
         '<section class="cc-linked-card cc-delegation-message" data-delegation-state="' +
         E(status) +
         '"><strong>' +
-        E(names[status] || status) +
+        E(
+          restored
+            ? '历史委托 · ' +
+                (status === 'dispatch_required' ? '原记录曾等待派发' : names[status] || status)
+            : names[status] || status,
+        ) +
         '</strong><p>' +
-        E(next[status] || '领取、实际操作与回帖分别记录。') +
+        E(
+          restored
+            ? '仅保留历史进度与证据；原委托不会继续派发或重试。'
+            : next[status] || '领取、实际操作与回帖分别记录。',
+        ) +
         '</p>' +
         (d.progress?.counts
           ? '<small>共 ' +
@@ -550,7 +570,10 @@ window.CodePierCollaborationDelegation = {
         '<div class="cc-actions">' +
         button('delegation-result', '查看委托进度与结果', { id: d.goal_id }) +
         button('delegation-id', '复制委托编号', { id: d.delegation_id }) +
-        (status === 'blocked' && d.retry_blocked_eligible === true && state.snapshot?.can_manage
+        (!restored &&
+        status === 'blocked' &&
+        d.retry_blocked_eligible === true &&
+        state.snapshot?.can_manage
           ? button('delegation-retry-blocked', '重试尚未开始的步骤', { id: d.delegation_id })
           : '') +
         (retry
@@ -918,7 +941,7 @@ window.CodePierCollaborationDelegation = {
           targets.some(
             (id) => !policyTargets(policy).includes(id) || !targetAvailable(policy, id),
           ) ||
-          capabilities.some((cap) => !policy.capabilities.includes(cap))
+          capabilities.some((cap) => !policyCapabilities(policy).includes(cap))
         )
           throw new Error('所选范围已不可用，请重新核对。');
         if (targets.some((id) => id.startsWith('vps:')) && !capabilities.includes('execute'))

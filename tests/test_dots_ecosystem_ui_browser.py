@@ -512,3 +512,80 @@ def test_prompt_cache_tracks_input_mutation_then_programmatic_draft_clear(ecosys
       state.snapshot.can_manage=true;promptWorkspace.refresh();
     }""")
     expect(page.locator('[data-cc-prompt]').first).to_be_enabled()
+
+
+def test_archived_outbox_cleanup_is_scoped_and_late_receipt_cannot_resend(ecosystem_page):
+    page = ecosystem_page
+    page.evaluate("""() => {
+      S.session={user_id:'fixture-owner'}; state.session=S.session;
+      state.conversation='room-a';state.snapshot.conversation={id:'room-a'};
+      state.snapshot.pending_scope_revision='a'.repeat(64);
+      c.relayOutbox=[];c.mentions=['fixture-dot'];c.relayEpoch=0;
+      state.chats=new Map([[JSON.stringify([S.space_id,'room-a']),c]]);
+      relay.toolbar();
+      window.roomA=c;window.roomB={...c,messages:[],relayOutbox:[],relayEpoch:0};
+      state.chats.set(JSON.stringify([S.space_id,'room-b']),roomB);
+      const make=(id,room,conversation)=>({id,chat:room,epoch:0,session:S.session,space:S.space_id,
+        payload:{project:'project',environment_id:'production',room_id:'room-fixture',
+          conversation_id:conversation,body_text:id,mentions:[{slot_id:'fixture-dot'}]},
+        dotId:'fixture-dot',phase:'error',attempts:0,due:0,needsReceipt:true});
+      window.entryA=make('pending-a',roomA,'room-a');window.entryB=make('pending-b',roomB,'room-b');
+      roomA.relayOutbox=[entryA];roomB.relayOutbox=[entryB];
+      window.pendingStore=CodePierCollaborationRelay.pendingStore(localStorage,JSON.stringify([S.session.user_id,S.space_id]));
+      pendingStore.enable();
+      for(const entry of [entryA,entryB])pendingStore.save({...entry,scope:entry.payload.conversation_id,
+        created:Date.now(),authorization_revision:'a'.repeat(64)});
+      calls=[];
+      api=(url,options={})=>{
+        calls.push({url,method:options.method||'GET'});
+        if(url.includes('message-receipt'))return new Promise(resolve=>window.lateReceipt=resolve);
+        throw new Error('Archived queue attempted a send');
+      };
+      relay.action('relay-retry',{dataset:{id:entryA.id}});
+    }""")
+    page.wait_for_function("typeof lateReceipt==='function'")
+    page.evaluate("""() => {
+      relay.purgeConversation('room-a'); relay.purgeConversation('room-a');
+      lateReceipt({authoritative:true,state:'not_committed',client_message_id:'pending-a',
+        conversation_id:'room-a'});
+    }""")
+    page.wait_for_function('!roomA.relayFlight')
+    assert page.evaluate('roomA.relayOutbox.length') == 0
+    assert page.evaluate('roomA.messages[0].id') == 'original-message'
+    assert page.evaluate('roomB.relayOutbox[0].id') == 'pending-b'
+    assert page.evaluate('roomB.relayEpoch') == 0
+    assert page.evaluate("pendingStore.recover('room-a').length") == 0
+    assert page.evaluate("pendingStore.recover('room-b').length") == 1
+    assert page.evaluate('pendingStore.enabled()')
+    assert page.evaluate('calls.every(call=>call.method==="GET")')
+    page.evaluate("""() => {
+      state.snapshot.conversation={id:'room-a',restored_from_archive:true};
+      state.snapshot.room.state='active'; // Same tuple and visibility; do not rely on paused.
+      roomA.relayOutbox=[{...entryA,epoch:roomA.relayEpoch,phase:'queued'}];
+      relay.bind(document.querySelector('.collaboration'));
+      calls=[];window.dispatchEvent(new Event('online'));
+      relay.action('relay-retry',{dataset:{id:'pending-a'}});
+      document.querySelector('#cc-message-input').value='must not send from history';
+      relay.send(document.querySelector('#cc-command'));
+    }""")
+    assert page.evaluate('roomA.relayOutbox.length') == 0
+    assert page.evaluate('relay.canSend()') is False
+    assert page.evaluate('calls.every(call=>call.method==="GET")')
+    expect(page.locator('#cc-relay-outbox [data-pending-id]')).to_have_count(0)
+    page.evaluate("""() => {
+      relay.detach();window.c=roomB;state.conversation='room-b';
+      state.snapshot.conversation={id:'room-b'};state.snapshot.room.state='active';
+      api=async(url,options={})=>{
+        calls.push({url,method:options.method||'GET'});
+        if(url.includes('message-receipt'))return {authoritative:true,state:'committed',
+          client_message_id:'pending-b',conversation_id:'room-b',
+          message:{id:'committed-b',body_text:'pending-b',author_kind:'owner',created:1,version:1}};
+        throw new Error('Unexpected send while checking other room');
+      };
+      relay.action('relay-retry',{dataset:{id:'pending-b'}});
+    }""")
+    page.wait_for_function('!roomB.relayFlight')
+    assert page.evaluate('roomB.messages[0].id') == 'committed-b'
+    assert page.evaluate('roomB.relayOutbox.length') == 0
+    assert page.evaluate('roomA.messages[0].id') == 'original-message'
+    assert page.evaluate('calls.every(call=>call.method==="GET")')

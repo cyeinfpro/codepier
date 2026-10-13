@@ -200,7 +200,10 @@ window.CodePierCollaborationChannels = {
       controller = null,
       saving = false;
     const local = { local: true };
-    const allowed = () => !!state.snapshot?.can_manage;
+    const allowed = () =>
+      !!state.snapshot?.can_manage &&
+      !state.snapshot?.conversation?.restored_from_archive &&
+      !state.snapshot?.conversation?.archived_at;
     const scope = () => ({
       project: state.project,
       environment_id: state.environment,
@@ -1592,7 +1595,8 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
       overview: '消息连接',
       weixin: '微信连接',
       telegram: 'Telegram 连接',
-      advanced: '高级 · 整条凭据限制',
+      advanced: '房间权限与上游连接',
+      'connection-scope': '整条 MCP 凭据限制',
     };
     let channelView = 'overview';
     const drafts = new Map();
@@ -1889,8 +1893,8 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
     }
     function overview(data) {
       return (
-        '<section class="cc-room-project-entry"><div><h3>房间项目</h3><p>增删项目在这里完成，保留原助手与消息。</p></div>' +
-        button('manage-projects', '管理房间项目') +
+        '<section class="cc-room-project-entry"><div><h3>房间项目与权限</h3><p>权限候选只包含此房间已选项目；保存只作用于当前房间。</p></div>' +
+        button('manage-room-permissions', '房间项目权限') +
         '</section><div class="cc-connection-intro"><h3>选择一个消息入口</h3><p>连接后，在熟悉的聊天里继续当前话题。</p></div><div class="cc-connection-options">' +
         [
           ['weixin', '微信', 'W', '扫码登录，连接本人私聊。'],
@@ -1913,7 +1917,7 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
               '</section>',
           )
           .join('') +
-        '</div><div class="cc-connection-advanced"><div><strong>高级：整条 MCP 连接的限制</strong><p>影响使用该凭据的所有会话。连接微信、开启微信任务都不需要设置这里。</p></div>' +
+        '</div><div class="cc-connection-advanced"><div><strong>上游连接状态</strong><p>查看当前连接的权限上限。共享凭据在独立设置中管理。</p></div>' +
         button('dot-channel-view-advanced', '查看高级设置') +
         '</div>'
       );
@@ -1931,6 +1935,19 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
       return node;
     }
     function prepareChannel(data) {
+      if (channelView === 'advanced')
+        return (
+          '<section class="cc-advanced-settings"><h3>房间项目权限</h3><p>读取、修改与执行仅授权此房间已选项目，不更改其他房间或共享凭据。</p>' +
+          button('manage-room-permissions', '房间项目权限') +
+          '<h4>上游连接状态（只读）</h4><p>上游权限不足时，项目面板会明确提示；共享凭据需要所有者在独立凭据设置中处理。</p>' +
+          '<ul>' +
+          (data.scopes.eligible_connections || [])
+            .map((g) => '<li>' + E(g.label || g.name || g.id) + '</li>')
+            .join('') +
+          '</ul><section class="cc-connection-warning"><h4>整条连接限制</h4><p>所有使用同一凭据的会话都会受影响。仅需管理本房间项目时，请使用上方房间项目权限。</p>' +
+          button('dot-channel-view-connection-scope', '查看整条连接限制') +
+          '</section></section>'
+        );
       const template = document.createElement('template');
       template.innerHTML = legacyMarkup(data);
       const sections = template.content.querySelector('.cc-channel-pane').children;
@@ -2090,9 +2107,11 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
         '<div class="cc-channel-pane" data-channel-view="' +
         channelView +
         '"><nav class="cc-connection-nav" aria-label="连接设置">' +
-        (channelView !== 'overview'
-          ? button('dot-channel-view-overview', '‹ 连接总览')
-          : '<span>当前话题的消息入口</span>') +
+        (channelView === 'connection-scope'
+          ? button('dot-channel-view-advanced', '‹ 房间权限与上游连接')
+          : channelView !== 'overview'
+            ? button('dot-channel-view-overview', '‹ 连接总览')
+            : '<span>当前话题的消息入口</span>') +
         button('dot-channel-open', '刷新状态') +
         '</nav>' +
         (channelView === 'overview' ? overview(data) : prepareChannel(data)) +
@@ -2210,6 +2229,11 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
         return open(element);
       }
       if (saving) return local;
+      if (
+        ['dot-channel-scope-save', 'dot-channel-scope-revoke'].includes(action) &&
+        channelView !== 'connection-scope'
+      )
+        throw new Error('请先打开整条连接限制，核对所有会话的影响后再明确确认。');
       if (['dot-channel-project-all', 'dot-channel-project-none'].includes(action)) {
         const form = group(element, false).root;
         window.CodePierCollaborationChannels.projectPicker.bulk(
@@ -2698,7 +2722,12 @@ ${button('dot-channel-tg-file-preview', '预览文件与收件人', {}, t.enable
       } else return local;
       saving = true;
       try {
-        await mutation(operation, { ...args, ...scope() });
+        const operationScope = scope();
+        // ScopeControl is credential-wide and accepts the original project and
+        // environment, not a conversation field. The loaded conversation and
+        // identity are still fenced by group/current before and after mutation.
+        if (operation === 'room-scope-control') delete operationScope.conversation_id;
+        await mutation(operation, { ...args, ...operationScope });
       } catch (error) {
         if (
           action === 'dot-channel-scope-save' &&

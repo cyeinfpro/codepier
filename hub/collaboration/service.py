@@ -240,6 +240,9 @@ class CollaborationService:
 
     def make_job(self, room, *, agent_id, kind, business_key, context, goal_id=None,
                  incident_id=None, next_agent='', parent=None, plan_version=None):
+        # Shared project partitions can stay active after one conversation is
+        # removed. A legacy message/goal must never bypass its tombstone.
+        self.require_job_conversation(room, context, goal_id)
         old = self.store.one('SELECT * FROM collaboration_jobs WHERE business_key=? AND room_id=?', (business_key, room['id']))
         if old:
             return old
@@ -266,6 +269,18 @@ class CollaborationService:
         job = self.object('collaboration_jobs', room, identifier)
         self.task_event(room, job)
         return job
+
+    def require_job_conversation(self, room, context, goal_id=None):
+        identifiers = [context.get('origin_message_id')]
+        if goal_id:
+            goal = self.object('collaboration_goals', room, goal_id)
+            identifiers.append(goal['source_message_id'])
+        for identifier in filter(None, identifiers):
+            message = self.object('collaboration_messages', room, identifier)
+            conversation = self.store.one('SELECT archived_at FROM conversation_rooms WHERE id=?',
+                                          (message['conversation_id'],))
+            if not conversation or conversation['archived_at'] is not None:
+                raise DevError('CONVERSATION_ARCHIVED', '原消息所属房间已删除，不能启动或继续任务', 410)
 
     def task_event(self, room, job):
         incident = self.object('monitor_incidents', room, job['incident_id']) if job['incident_id'] else None
@@ -296,6 +311,7 @@ class CollaborationService:
             def take():
                 self.live_room(room)
                 self.check_plan(room, job)
+                self.require_job_conversation(room, json.loads(job['context']), job['goal_id'])
                 source_id = json.loads(job['context']).get('origin_message_id')
                 if source_id:
                     self.object('collaboration_messages', room, source_id)
@@ -333,6 +349,7 @@ class CollaborationService:
             raise DevError('FORBIDDEN', '租约不属于当前认证连接', 403)
         self.live_room(room)
         self.check_plan(room, job)
+        self.require_job_conversation(room, json.loads(job['context']), job['goal_id'])
         if (job['state'] not in {'leased', 'running'} or job['attempt'] != args['attempt']
                 or job['fencing_token'] != args['fencing_token'] or not job['lease_until']
                 or self.clock() >= min(job['lease_until'], job['deadline_at'])):
@@ -405,6 +422,7 @@ class CollaborationService:
             if args['room_id'] != room['id']:
                 raise DevError('ROOM_MISMATCH', '指令与当前协作室不一致', 409)
             self.owner(principal) if from_panel else self.bound_worker(principal, room)
+            self.conversations.resolve(principal, room, {})
             def save():
                 self.live_room(room)
                 target = self.agent(room, args['structured_mentions'][0]['agent_id'])
@@ -444,6 +462,7 @@ class CollaborationService:
             return self.mutation(principal, room, 'command_create', args, save)
 
     def schedule_message(self, room, message, principal):
+        self.conversations.resolve(principal, room, {'conversation_id': message['conversation_id']})
         args = json.loads(message['body'])['command']
         self.live_room(room)
         # All writes below join the caller's transaction, including the job/outbox.

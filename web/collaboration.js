@@ -119,12 +119,16 @@ window.CodePierCollaboration = (() => {
       },
     ];
   function conversationTitle(room) {
-    const first = room?.connection || room?.projects?.[0];
-    if (first && room.title === first.project_id + ' · ' + first.environment_id)
-      return first.project_label || projectLabel(first.project_id);
-    return (
-      room?.title || (first ? first.project_label || projectLabel(first.project_id) : '聊天室')
-    );
+    if (!room?.title_is_generated) return room?.title || '聊天室';
+    const defaultProject = [
+      ...(room?.projects || []),
+      ...(room?.history_projects || []),
+      room?.connection,
+    ]
+      .filter(Boolean)
+      .find((p) => room.title === p.project_id + ' · ' + p.environment_id);
+    if (defaultProject?.project_label) return defaultProject.project_label;
+    return '聊天室';
   }
   function persistSelection() {
     try {
@@ -139,16 +143,18 @@ window.CodePierCollaboration = (() => {
       );
     } catch {}
   }
+  function displayedRoomProjects() {
+    return state.snapshot?.conversation?.restored_from_archive
+      ? state.snapshot.conversation.history_projects || []
+      : roomProjects();
+  }
   function projectChips() {
-    return `<div class="cc-project-strip ${roomProjects().length <= 1 ? 'is-single-project' : ''}" aria-label="房间项目">${roomProjects()
-      .map((p) =>
-        roomConnection()
-          ? `<span class="cc-project-chip cc-task-project-label" data-room-project="${E(p.project_id)}">${E(p.project_label || projectLabel(p.project_id))}<small>${E(p.environment_id)}</small></span>`
-          : `<button type="button" class="cc-project-chip ${p.project_id === state.project && p.environment_id === state.environment ? 'is-selected' : ''}" data-cc-partition="${E(p.project_id)}" data-environment="${E(p.environment_id)}" aria-pressed="${p.project_id === state.project && p.environment_id === state.environment}">${E(p.project_label || projectLabel(p.project_id))}<small>${E(p.environment_id)}</small></button>`,
-      )
-      .join(
-        '',
-      )}${roomProjects().length ? '' : '<span class="cc-project-empty">纯聊天 · 暂无任务项目</span>'}${state.snapshot?.can_manage && state.snapshot?.conversation ? button('manage-projects', '管理房间项目') : ''}</div>`;
+    const count = displayedRoomProjects().length;
+    const restored = !!state.snapshot?.conversation?.restored_from_archive;
+    return `<div class="cc-project-strip cc-project-summary" aria-label="房间项目">
+      <span class="${count ? 'cc-project-count' : 'cc-project-empty'}">${restored ? count + ' 个历史项目' : count ? count + ' 个项目' : '纯聊天 · 暂无任务项目'}</span>
+      ${button(state.snapshot?.can_manage && state.snapshot?.conversation && !restored ? 'manage-projects' : 'view-projects', restored ? '查看历史项目' : '查看与管理项目')}
+    </div>`;
   }
   function disableComposer() {
     const area = document.querySelector('#cc-message-input');
@@ -157,9 +163,17 @@ window.CodePierCollaboration = (() => {
     if (send) send.disabled = true;
   }
   async function selectPartition(project, environment) {
-    if (roomConnection()) return project === state.project && environment === state.environment;
-    if (project === state.project && environment === state.environment) return true;
+    const recovering = state.snapshot?.access_recovery === true;
+    if (
+      recovering &&
+      !roomProjects().some((p) => p.project_id === project && p.environment_id === environment)
+    )
+      return false;
+    if (!recovering && roomConnection())
+      return project === state.project && environment === state.environment;
+    if (!recovering && project === state.project && environment === state.environment) return true;
     const conversation = state.conversation;
+    if (recovering) closeDrawer();
     rememberChat();
     disableComposer();
     chat().mentions = [];
@@ -168,7 +182,35 @@ window.CodePierCollaboration = (() => {
     state.project = project;
     state.environment = environment;
     persistSelection();
-    await renderPage(false);
+    const oldRoot = document.querySelector('.collaboration');
+    let focusMoved = false;
+    const trackFocus = (event) => {
+      if (event.target !== document.body && !oldRoot?.contains(event.target)) focusMoved = true;
+    };
+    document.addEventListener('focusin', trackFocus);
+    const rendering = renderPage(false);
+    const generation = state.generation,
+      epoch = state.drawerEpoch;
+    try {
+      await rendering;
+    } finally {
+      document.removeEventListener('focusin', trackFocus);
+    }
+    const selected =
+      generation === state.generation &&
+      epoch === state.drawerEpoch &&
+      state.conversation === conversation &&
+      state.project === project &&
+      state.environment === environment &&
+      S.page === 'collaboration' &&
+      !state.snapshot?.access_recovery;
+    if (
+      recovering &&
+      selected &&
+      !focusMoved &&
+      (document.activeElement === document.body || oldRoot?.contains(document.activeElement))
+    )
+      document.querySelector('#cc-message-input:not(:disabled)')?.focus({ preventScroll: true });
     return (
       state.conversation === conversation &&
       state.project === project &&
@@ -205,8 +247,45 @@ window.CodePierCollaboration = (() => {
     );
   const badge = (value) => `<span class="cc-status">${E(text(value))}</span>`;
   const empty = (message) => `<p class="cc-empty">${E(message)}</p>`;
+  const restoredHistory = () => !!state.snapshot?.conversation?.restored_from_archive;
+  const historyBlockedActions = new Set([
+    'reply',
+    'convert',
+    'mentions',
+    'pick-mention',
+    'pick-delegation',
+    'goal-new',
+    'goal-review',
+    'goal-edit',
+    'goal-pause',
+    'goal-cancel-review',
+    'goal-copy-subscription',
+    'accept_proposal',
+    'reject_proposal',
+    'mention-connect',
+    'mention-notifications',
+    'message-remind',
+    'delegation-remind',
+    'delegation-retry-blocked',
+    'dot-connect',
+    'open-members',
+    'open-joins',
+    'manage-projects',
+    'manage-room-permissions',
+    'pause',
+    'resume',
+    'retry',
+    'cancel',
+    'verify_goal',
+    'activate-plan',
+    'plan_pause',
+    'plan-template',
+    'validate-plan',
+  ]);
   const button = (action, label, row = {}, extra = '') =>
-    `<button type="button" class="btn" data-cc-action="${E(action)}" data-id="${E(row.id)}" data-version="${E(row.version)}" ${extra}>${E(label)}</button>`;
+    restoredHistory() && historyBlockedActions.has(action)
+      ? ''
+      : `<button type="button" class="btn" data-cc-action="${E(action)}" data-id="${E(row.id)}" data-version="${E(row.version)}" ${extra}>${E(label)}</button>`;
   const field = (label, control) =>
     `<label class="cc-field"><span>${E(label)}</span>${control}</label>`;
   const json = (value) => `<pre class="cc-json">${E(JSON.stringify(value, null, 2))}</pre>`;
@@ -265,6 +344,7 @@ window.CodePierCollaboration = (() => {
     coordination.clear();
     dots.clearChannels();
     state.snapshot = null;
+    state.historyUnavailable = false;
     state.delegationPolicies = [];
     state.draft = {};
     state.joinDraft = {};
@@ -471,13 +551,11 @@ window.CodePierCollaboration = (() => {
         .map((mention) => {
           const receipt = receipts.find((item) => item.slot_id === mention.slot_id);
           const status = receipt?.state || 'unknown';
-          const repair = ![
-            'queued',
-            'pending',
-            'delivering',
-            'accepted',
-            'suppressed_agent_reply',
-          ].includes(status);
+          const repair =
+            !restoredHistory() &&
+            !['queued', 'pending', 'delivering', 'accepted', 'suppressed_agent_reply'].includes(
+              status,
+            );
           return (
             '<li data-delivery-slot="' +
             E(mention.slot_id) +
@@ -667,12 +745,13 @@ window.CodePierCollaboration = (() => {
           (p) => p.project_id === state.project && p.environment_id === state.environment,
         ) ||
           r.connection ||
-          r.projects?.[0] || { project_id: r.project_id, environment_id: r.environment_id };
-        return `<button type="button" data-cc-room="${E(r.id)}" data-project="${E(first.project_id)}" data-environment="${E(first.environment_id)}" class="cc-room ${r.id === state.conversation ? 'is-current' : ''}" aria-current="${r.id === state.conversation ? 'page' : 'false'}"><span class="cc-room-icon" aria-hidden="true">${E((conversationTitle(r) || 'C').slice(0, 1))}</span><span><strong>${E(conversationTitle(r))}<em class="cc-room-draft" hidden></em></strong><small>${r.projects?.length === 0 ? '纯聊天' : r.projects?.length > 1 ? `${r.projects.length} 个项目` : E(first.environment_id)}</small></span></button>`;
+          r.projects?.[0] ||
+          r.history_projects?.[0] || { project_id: r.project_id, environment_id: r.environment_id };
+        return `<button type="button" data-cc-room="${E(r.id)}" data-project="${E(first.project_id)}" data-environment="${E(first.environment_id)}" class="cc-room ${r.id === state.conversation ? 'is-current' : ''}" aria-current="${r.id === state.conversation ? 'page' : 'false'}"><span class="cc-room-icon" aria-hidden="true">${E((conversationTitle(r) || 'C').slice(0, 1))}</span><span><strong>${E(conversationTitle(r))}<em class="cc-room-draft" hidden></em></strong><small>${r.restored_from_archive ? (r.history_projects || []).length + ' 个历史项目' : r.projects?.length === 0 ? '纯聊天' : r.projects?.length > 1 ? `${r.projects.length} 个项目` : E(first.environment_id)}</small></span></button>`;
       })
       .join(
         '',
-      )}</nav><p class="cc-room-search-empty" hidden>没有匹配的房间，试试其他名称。</p><details class="cc-scope-details"><summary>打开项目默认房间</summary>${selection}</details></aside>`;
+      )}</nav>${state.snapshot?.can_manage ? button('archived-rooms', '已删除房间') : ''}<p class="cc-room-search-empty" hidden>没有匹配的房间，试试其他名称。</p><details class="cc-scope-details"><summary>打开项目默认房间</summary>${selection}</details></aside>`;
   }
   function showDrawer(title, content, trigger) {
     const dialog = document.querySelector('#cc-drawer');
@@ -915,7 +994,7 @@ window.CodePierCollaboration = (() => {
     if (submit) submit.disabled = true;
     patchDraftContext();
   }
-  function bindDeniedScope(pending = false) {
+  function bindDeniedScope(pending = false, restoreFocus = false) {
     // Replace cleared markup so recovery never reactivates an old listener epoch.
     state.busyCleanup?.();
     state.busyCleanup = null;
@@ -934,19 +1013,35 @@ window.CodePierCollaboration = (() => {
         );
       const allowedRoom = room && state.rooms.some((r) => r.id === room);
       const retry = node.dataset.ccAction === 'retry-directory' && !pending;
-      node.disabled = !allowedPartition && !allowedRoom && !retry;
+      const projectList =
+        node.dataset.ccAction === 'view-projects' && !pending && roomProjects().length > 0;
+      node.disabled = !allowedPartition && !allowedRoom && !retry && !projectList;
     }
     root.replaceWith(next);
     bind();
     if (pending) next.setAttribute('aria-busy', 'true');
+    if (restoreFocus) {
+      const target =
+        next.querySelector(
+          '[data-cc-action="view-projects"]:not(:disabled), [data-cc-action="retry-directory"]:not(:disabled)',
+        ) || next.querySelector('.cc-room-title h2');
+      target?.focus({ preventScroll: true });
+    }
   }
   function showAccessRecovery(items, message, error = false, pending = false) {
+    const focusRoot = document.querySelector('.collaboration');
+    const restoreFocus =
+      focusRoot?.contains(document.activeElement) ||
+      document.activeElement === focusRoot?.parentElement ||
+      document.activeElement === document.body ||
+      document.activeElement === document.documentElement;
     state.rooms = items;
     const conversation = items.find((room) => room.id === state.conversation);
     state.snapshot = {
       room: state.snapshot?.room,
       conversation: conversation || { id: state.conversation, projects: [] },
       can_manage: false,
+      access_recovery: true,
       capabilities: { plain_messages: false, coordination_goals: false },
       agents: [],
       jobs: [],
@@ -962,6 +1057,29 @@ window.CodePierCollaboration = (() => {
     state.members = [];
     state.notes = message;
     state.error = error;
+    const root = document.querySelector('.collaboration');
+    if (root) {
+      root.dataset.project = '';
+      root.dataset.environment = '';
+      root.dataset.accessRecovery = 'true';
+    }
+    const title = document.querySelector('.cc-room-title');
+    if (title)
+      title.innerHTML =
+        '<h2 tabindex="-1">选择可访问项目</h2><span class="cc-status">权限待核</span>';
+    const count = document.querySelector('.cc-room-subline > span');
+    if (count)
+      count.textContent = pending ? '正在核对项目' : roomProjects().length + ' 个可访问项目';
+    const source = document.querySelector('.cc-compose-controls > small');
+    if (source) source.textContent = '来源 · 待选择';
+    const destination = document.querySelector('.cc-compose-help > span');
+    if (destination) destination.textContent = '尚未选择发送项目 · 权限待核';
+    const input = document.querySelector('#cc-message-input');
+    if (input) input.placeholder = '选择仍可访问的项目并重新检查后，才能发送消息';
+    for (const selector of ['#cc-delegation-context', '#cc-send-mode', '#cc-dot-suggestions']) {
+      const node = document.querySelector(selector);
+      if (node) node.innerHTML = '';
+    }
     const strip = document.querySelector('.cc-project-strip');
     if (strip) {
       strip.outerHTML = projectChips();
@@ -979,7 +1097,7 @@ window.CodePierCollaboration = (() => {
       feedback.textContent = message;
       feedback.classList.toggle('is-error', error);
     }
-    bindDeniedScope(pending);
+    bindDeniedScope(pending, restoreFocus);
   }
   async function recoverAccess(allowCurrent = false) {
     clearVisibility(chat());
@@ -1203,11 +1321,11 @@ window.CodePierCollaboration = (() => {
     return ticket.promise;
   }
   function jobs() {
-    const d = state.snapshot;
+    const d = { ...state.snapshot, can_manage: state.snapshot.can_manage && !restoredHistory() };
     return `<section class="cc-stack">${coordination.list()}<details class="cc-legacy-tasks"><summary>只读任务记录 · ${d.jobs.length}</summary>${d.jobs.map((job) => `<article class="cc-card"><div class="cc-row"><strong>${E(job.kind === 'summarize_result' ? '结果汇总' : job.kind === 'propose_monitor_plan' ? '监控计划草稿' : '只读异常分析')}</strong>${badge(job.state)}</div><p>${E(text(job.delivery_status))}${job.reason_code ? ` · ${E(job.reason_code)}` : ''}</p><dl class="cc-facts"><div><dt>任务</dt><dd>${E(job.id.slice(-8))}</dd></div><div><dt>领取轮次</dt><dd>${job.attempt} / 3</dd></div><div><dt>期限</dt><dd>${E(when(job.deadline_at))}</dd></div></dl><details data-cc-detail="job" data-id="${E(job.id)}"><summary>上下文、结果与执行记录</summary><div class="cc-detail">展开后读取当前记录</div></details>${d.can_manage && !['succeeded', 'failed', 'cancelled', 'expired', 'dead_letter'].includes(job.state) ? `<div class="cc-actions">${['blocked', 'retry_wait'].includes(job.state) ? button('retry', '在原期限内解除阻塞', job) : ''}${button('cancel', '取消只读任务', job)}</div>` : ''}</article>`).join('') || empty('尚未创建任务。任务是否完成与业务是否恢复会分别显示。')}${d.jobs_next_cursor ? button('more', '加载更多任务', {}, 'data-kind="jobs"') : ''}</details></section>`;
   }
   function monitoring() {
-    const d = state.snapshot,
+    const d = { ...state.snapshot, can_manage: state.snapshot.can_manage && !restoredHistory() },
       plan = d.plan;
     const probes = d.probes.map((probe) => [probe.id, `${probe.label} · ${probe.id.slice(-6)}`]);
     const latest = plan?.latest;
@@ -1634,11 +1752,23 @@ window.CodePierCollaboration = (() => {
     if (!status.features.enabled) state.snapshot = null;
     if (!status.features.enabled)
       return `<div class="collaboration">${header}<section class="cc-card cc-intro"><h2>协作中心尚未启用</h2><p>当前没有启动采集、创建订阅或派发分析任务。部署维护者可按实施说明开启只读试点，原有项目功能不受影响。</p><a class="btn" href="https://github.com/cyeinfpro/codepier/blob/main/docs/COLLABORATION.md" target="_blank" rel="noopener noreferrer">查看启用与验收说明</a></section></div>`;
+    if (state.historyUnavailable)
+      return `<div class="collaboration cc-history-unavailable">${header}<section class="cc-card"><h2>历史已恢复，当前没有可访问的项目</h2><p>最新房间目录已改变。请选择仍可访问的其他房间；这里不会重新打开旧项目或恢复执行权限。</p>${button('available-rooms', '查看可访问房间')}${button('new-conversation', '新建独立聊天室')}</section><dialog id="cc-drawer" class="cc-drawer" aria-label="房间详情"></dialog></div>`;
     if (!S.projects.some((project) => project.id === state.project))
       state.project = S.projects[0]?.id || '';
     if (!state.project)
       return `<div class="collaboration">${header}${empty('请先创建一个有权限访问的项目映射。')}</div>`;
-    let data = await getRecord('overview', '');
+    let data;
+    try {
+      data = await getRecord('overview', '');
+    } catch (error) {
+      if (gen !== state.generation || session !== S.session || space !== S.space_id) return '';
+      if (error.code !== 'CONVERSATION_ARCHIVED') throw error;
+      state.conversation = '';
+      state.snapshot = null;
+      persistSelection();
+      return `<div class="collaboration cc-archived-empty">${header}<section class="cc-card"><h2>这个房间已删除</h2><p>项目源码与历史仍保留。可恢复房间，或新建一个独立聊天室。</p>${button('archived-rooms', '查看已删除房间')}${button('new-conversation', '新建独立聊天室')}</section><dialog id="cc-drawer" class="cc-drawer" aria-label="房间详情"></dialog></div>`;
+    }
     if (gen !== state.generation || session !== S.session || space !== S.space_id) return '';
     const connection = data.conversation?.working_scope && data.conversation.connection;
     if (
@@ -1656,6 +1786,8 @@ window.CodePierCollaboration = (() => {
       ? api('/api/grants', { signal: state.controller.signal })
       : Promise.resolve({ grants: [] });
     state.snapshot = data;
+    if (data.conversation?.restored_from_archive && state.view === 'agents')
+      state.view = 'discussion';
     state.conversation = data.conversation?.id || '';
     persistSelection();
     state.grants = [];
@@ -1703,14 +1835,37 @@ window.CodePierCollaboration = (() => {
     if (!data.room)
       return `<div class="collaboration">${header}${selection}${feedback}<section class="cc-card cc-intro"><h2>开启这个项目的共享讨论室</h2><p>创建讨论室只保存协作记录，不代表授权采集、添加订阅或执行代码。</p>${data.can_manage ? button('create-room', '创建项目讨论室') : empty('请由项目所属空间的管理员创建讨论室。')}</section></div>`;
     const project = S.projects.find((p) => p.id === state.project);
-    return `<div class="collaboration cc-chat-shell cc-workspace is-discussion" data-workspace-view="${E(state.view)}" data-project="${E(state.project)}" data-environment="${E(state.environment)}" data-conversation="${E(state.conversation)}"><h1 class="cc-sr-only" tabindex="-1">协作中心</h1>${roomRail(selection)}<button type="button" class="cc-room-backdrop" data-cc-workspace="close-rooms" aria-label="关闭房间列表" tabindex="-1"></button><section class="cc-room-body"><header class="cc-room-header"><button type="button" class="btn cc-room-mobile-toggle" data-cc-workspace="rooms" aria-controls="cc-room-rail" aria-expanded="false" aria-label="打开房间列表">☰</button><div class="cc-room-heading-copy"><div class="cc-room-title"><h2>${E(data.conversation ? conversationTitle(data.conversation) : data.room.title || project?.alias || state.project)}</h2><span class="cc-status">${E(state.environment)}</span>${data.room.state === 'paused' ? badge('paused') : ''}</div><div class="cc-room-subline"><span>${roomProjects().length ? roomProjects().length + ' 个项目' : '仅聊天'}</span>${memberStrip()}</div></div><div class="cc-header-tools">${data.capabilities?.message_search ? '<button type="button" class="btn" data-cc-action="search" aria-label="搜索房间消息"><span aria-hidden="true">⌕</span><span class="cc-search-label"> 搜索</span></button>' : ''}<details class="cc-room-menu"><summary data-cc-more aria-label="房间更多选项">···</summary><div>${button('room-settings', '切换房间')}${button('new-conversation', '新建独立聊天室')}${coordination.action('创建协作目标')}${button('context', '项目范围与上下文')}${data.can_manage && data.conversation ? button('manage-projects', '管理房间项目') : ''}${button('refresh', '刷新状态')}</div></details></div></header>${projectChips()}<div class="cc-room-toolbar">${workspaceUI.navigation()}</div>${workspaceUI.summary()}${feedback}<div class="cc-main"><div id="cc-discussion-host" class="cc-discussion-host">${discussion()}</div>${workspaceUI.panel()}</div></section><dialog id="cc-drawer" class="cc-drawer" aria-label="房间详情"></dialog></div>`;
+    return `<div class="collaboration cc-chat-shell cc-workspace is-discussion" data-restored-room="${!!data.conversation?.restored_from_archive}" data-workspace-view="${E(state.view)}" data-project="${E(state.project)}" data-environment="${E(state.environment)}" data-conversation="${E(state.conversation)}"><h1 class="cc-sr-only" tabindex="-1">协作中心</h1>${roomRail(selection)}<button type="button" class="cc-room-backdrop" data-cc-workspace="close-rooms" aria-label="关闭房间列表" tabindex="-1"></button><section class="cc-room-body"><header class="cc-room-header"><button type="button" class="btn cc-room-mobile-toggle" data-cc-workspace="rooms" aria-controls="cc-room-rail" aria-expanded="false" aria-label="打开房间列表">☰</button><div class="cc-room-heading-copy"><div class="cc-room-title"><h2>${E(data.conversation ? conversationTitle(data.conversation) : data.room.title || project?.alias || state.project)}</h2><span class="cc-status">${E(state.environment)}</span>${data.room.state === 'paused' ? badge('paused') : ''}</div><div class="cc-room-subline"><span>${data.conversation?.restored_from_archive ? displayedRoomProjects().length + ' 个历史项目' : roomProjects().length ? roomProjects().length + ' 个项目' : '仅聊天'}</span>${memberStrip()}</div></div><div class="cc-header-tools">${data.capabilities?.message_search ? '<button type="button" class="btn" data-cc-action="search" aria-label="搜索房间消息"><span aria-hidden="true">⌕</span><span class="cc-search-label"> 搜索</span></button>' : ''}<details class="cc-room-menu"><summary data-cc-more aria-label="房间更多选项">···</summary><div>${button('room-settings', '切换房间')}${button('new-conversation', '新建独立聊天室')}${coordination.action('创建协作目标')}${button('context', '项目范围与上下文')}${data.can_manage && data.conversation ? button('manage-projects', '管理房间项目') + button('archive-room', '删除房间（可恢复）') : ''}${button('refresh', '刷新状态')}</div></details></div></header>${projectChips()}${data.conversation?.restored_from_archive ? '<section class="cc-restored-notice" role="status"><strong>历史已恢复，执行权限未恢复</strong><p>原连接、订阅和任务保持关闭。继续执行请新建房间并明确接入助手。</p>' + button('new-conversation', '新建房间并接入助手') + '</section>' : ''}<div class="cc-room-toolbar">${workspaceUI.navigation()}</div>${workspaceUI.summary()}${feedback}<div class="cc-main"><div id="cc-discussion-host" class="cc-discussion-host">${discussion()}</div>${workspaceUI.panel()}</div></section><dialog id="cc-drawer" class="cc-drawer" aria-label="房间详情"></dialog></div>`;
   }
 
   const projectPicker = window.CodePierCollaborationChannels.projectPicker;
   let roomProjectReturnDraft = null;
   function roomProjectSelection(form) {
-    return [...form.querySelectorAll('[name="room_projects"]:checked')]
-      .map((input) => ({ project: input.value, environment_id: input.dataset.environment }))
+    const permissionsOnly = form.dataset.permissionsOnly === 'true';
+    return [...form.querySelectorAll('[data-room-project-row]')]
+      .filter((row) => permissionsOnly || row.querySelector('[name="room_projects"]').checked)
+      .map((row) => {
+        const input = row.querySelector('[name="room_projects"]');
+        const caps = input.checked
+          ? [...row.querySelectorAll('[data-project-capability]:checked')].map((node) => node.value)
+          : [];
+        return {
+          project: input.value,
+          environment_id: input.dataset.environment,
+          ...(row.dataset.initialized === 'true'
+            ? {
+                capabilities: input.checked ? caps : [],
+                execution_targets: caps.length
+                  ? JSON.parse(
+                      row.dataset.targets && row.dataset.targets !== '[]'
+                        ? row.dataset.targets
+                        : row.dataset.allowedTargets || '[]',
+                    )
+                  : [],
+              }
+            : {}),
+        };
+      })
       .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
   }
   function roomProjectIntent(form) {
@@ -1718,16 +1873,57 @@ window.CodePierCollaboration = (() => {
       conversation_id: form.dataset.conversation,
       projects: roomProjectSelection(form),
       dot_id: form.elements.dot_id?.value || '',
+      ...(form.dataset.permissionsOnly === 'true' ? { permissions_only: true } : {}),
     };
+  }
+  function syncRoomProjectPermissions(form, preview) {
+    let changedIntent = false;
+    for (const row of form.querySelectorAll('[data-room-project-row]')) {
+      const input = row.querySelector('[name="room_projects"]');
+      const option = preview.permission_options?.find((p) => p.project_id === input.value);
+      const rule = preview.projects?.find(
+        (p) =>
+          (p.project_id || p.project) === input.value &&
+          p.environment_id === input.dataset.environment,
+      );
+      if (option) {
+        row.dataset.allowed = JSON.stringify(option.allowed_capabilities || []);
+        row.dataset.allowedTargets = JSON.stringify(option.allowed_execution_targets || []);
+        row.querySelector('[data-capability-denials]').textContent = (
+          option.capability_denials || []
+        )
+          .map((d) => d.message)
+          .join(' ');
+      }
+      if (option && row.dataset.pendingAll === 'true') {
+        for (const node of row.querySelectorAll('[data-project-capability]'))
+          node.checked = (option.allowed_capabilities || []).includes(node.value);
+        row.dataset.targets = JSON.stringify(option.allowed_execution_targets || []);
+        row.dataset.initialized = 'true';
+        delete row.dataset.pendingAll;
+        changedIntent = true;
+      }
+      if (rule && row.dataset.initialized !== 'true') {
+        for (const node of row.querySelectorAll('[data-project-capability]'))
+          node.checked = (rule.capabilities || []).includes(node.value);
+        row.dataset.targets = JSON.stringify(rule.execution_targets || []);
+        row.dataset.initialized = 'true';
+      }
+      const allowed = option?.allowed_capabilities;
+      for (const node of row.querySelectorAll('[data-project-capability]'))
+        node.disabled = !input.checked || (Array.isArray(allowed) && !allowed.includes(node.value));
+      row.querySelector('[data-project-capabilities]').hidden = !input.checked;
+    }
+    return changedIntent;
   }
   function projectSelectionKey(form) {
     return JSON.stringify(roomProjectIntent(form));
   }
-  function roomProjectChoices() {
+  function roomProjectChoices(permissionsOnly = false) {
     const rows = new Map();
     for (const p of roomProjects())
       rows.set(JSON.stringify([p.project_id, p.environment_id]), { ...p, selected: true });
-    for (const p of S.projects) {
+    for (const p of permissionsOnly ? [] : S.projects) {
       const key = JSON.stringify([p.id, state.environment]);
       if (!rows.has(key))
         rows.set(key, {
@@ -1775,6 +1971,7 @@ window.CodePierCollaboration = (() => {
             '请选择已有助手连接',
           )}</select>`,
         );
+      if (syncRoomProjectPermissions(form, preview)) return refreshRoomProjects(form);
       if (!preview.ready) {
         form.dataset.previewState = 'blocked';
         form.projectReviewGrantId = preview.grant_id || '';
@@ -1784,8 +1981,7 @@ window.CodePierCollaboration = (() => {
           '</p>' +
           (preview.remedy === 'review_connection_scope' ||
           preview.reason_code === 'ROOM_PROJECT_CONNECTION_LIMITED'
-            ? '<p>所选项目已保留，尚未保存。连接权限的调整会影响共用这条凭据的会话，需要单独确认。</p>' +
-              button('room-project-connection-review', '查看连接权限')
+            ? '<p>所选项目已保留，尚未保存。请由连接所有者在凭据设置中单独调整上游权限，或取消不可用能力后重试。此处不会修改共享凭据。</p>'
             : '');
         return;
       }
@@ -1804,16 +2000,17 @@ window.CodePierCollaboration = (() => {
       const list = (items) => (items?.length ? items.map((p) => E(label(p))).join('、') : '无');
       const capabilities = (p) =>
         (p.capabilities || [])
-          .map((cap) => ({ read: '读取', write: '修改', execute: '执行' })[cap] || cap)
+          .map((cap) => ({ read: '读取', write: '修改/写入', execute: '执行' })[cap] || cap)
           .join('、');
       const capSummary = [...new Set(preview.projects.flatMap((p) => p.capabilities || []))]
-        .map((cap) => ({ read: '读取', write: '修改', execute: '执行' })[cap] || cap)
+        .map((cap) => ({ read: '读取', write: '修改/写入', execute: '执行' })[cap] || cap)
         .join('、');
       summary.innerHTML = `<div class="cc-project-save-summary"><p><strong>${preview.projects.length ? '保存后使用 ' + preview.projects.length + ' 个项目' : '保存后仅聊天'}</strong> · 保留原助手和消息</p>
         <p>${preview.added?.length ? '新增：' + list(preview.added) + '。' : ''}${preview.removed?.length ? '移除：' + list(preview.removed) + '。' : ''}</p>
-        ${capSummary ? `<p>所选项目使用当前助手已有的${E(capSummary)}能力，执行时仍检查连接状态和审批。</p>` : ''}
+        ${capSummary ? `<p>本次保存授予此房间所选项目：${E(capSummary)}。执行时仍检查连接状态和审批。</p>` : ''}
         ${preview.removed?.length ? '<p class="cc-hint">移除项目会停止新任务，并请求停止正在运行的任务；实际停止以回执为准。</p>' : ''}
         ${preview.projects.length ? '' : '<p class="cc-project-chat-only">全部取消后仍可聊天，原助手和消息不会删除。</p>'}</div>
+        ${preview.requires_execution_confirmation ? '<p class="cc-connection-warning">本次包含新增执行权限。Shell 使用执行账号权限，并非目录沙箱；点击“保存项目与权限”即确认以上范围和执行边界。</p>' : ''}
         <details class="cc-project-permission-details"><summary>权限和设备详情</summary>
           <p>当前助手：${E(connection.dot_label || '原助手')}${connection.grant_id ? ' · ' + E(connection.grant_id.slice(-8)) : ''}</p>
           <ul class="cc-project-review">${preview.projects
@@ -1827,7 +2024,7 @@ window.CodePierCollaboration = (() => {
           <p class="cc-hint">旧任务不会扩大范围。Shell 使用执行账号权限，并非目录沙箱；不扩大整条凭据的权限。</p>
         </details>`;
       form.dataset.previewState = 'ready';
-      form.projectAuthorization = { ...preview, intentKey };
+      form.projectAuthorization = { ...preview, intentKey: projectSelectionKey(form) };
       submitButton.disabled = false;
     } catch (error) {
       if (!current()) return;
@@ -1844,6 +2041,8 @@ window.CodePierCollaboration = (() => {
   }
 
   async function act(action, element) {
+    if (restoredHistory() && historyBlockedActions.has(action))
+      return { local: true, message: '当前显示恢复的历史；继续执行请新建房间并明确接入助手。' };
     if (action.startsWith('dot-')) return dots.act(action, element);
     const local = { local: true, message: '' };
     if (action.startsWith('goal-')) return coordination.act(action, element);
@@ -1884,40 +2083,68 @@ window.CodePierCollaboration = (() => {
     }
     if (action === 'project-picker-all' || action === 'project-picker-none') {
       const form = element.closest('form');
-      projectPicker.bulk(form, action === 'project-picker-all');
-      if (form.id === 'cc-room-projects') void refreshRoomProjects(form);
+      const checked = action === 'project-picker-all';
+      projectPicker.bulk(form, checked);
+      if (form.id === 'cc-room-projects') {
+        for (const row of form.querySelectorAll('[data-room-project-row]')) {
+          if (row.hidden) continue;
+          const allowed = JSON.parse(row.dataset.allowed || '["read","write","execute"]');
+          for (const node of row.querySelectorAll('[data-project-capability]'))
+            node.checked = checked && allowed.includes(node.value);
+          if (checked && !row.dataset.allowed) row.dataset.pendingAll = 'true';
+          else {
+            row.dataset.initialized = 'true';
+            delete row.dataset.pendingAll;
+          }
+        }
+        void refreshRoomProjects(form);
+      }
       return local;
     }
     if (action === 'room-project-preview') {
       void refreshRoomProjects(element.closest('form'));
       return local;
     }
-    if (action === 'room-project-connection-review') {
-      const form = element.closest('form'),
-        generation = state.generation;
-      roomProjectReturnDraft = {
-        ...roomProjectIntent(form),
-        generation,
-        grant_id: form.projectReviewGrantId,
-      };
-      await dots.act('dot-channel-open', element);
-      const advanced = document.querySelector(
-        '#cc-drawer [data-cc-action="dot-channel-view-advanced"]',
+    if (action === 'view-projects') {
+      const recovering = state.snapshot?.access_recovery === true;
+      const projects = recovering ? roomProjects() : displayedRoomProjects();
+      showDrawer(
+        '房间项目',
+        (recovering
+          ? '<p>旧内容已清除。这里只列出最新房间目录中仍可访问的项目；选择后会重新检查权限并读取记录。</p>'
+          : state.snapshot?.conversation?.restored_from_archive
+            ? '<p>历史关联，无执行授权。继续执行请新建房间并接入助手。</p>'
+            : '') +
+          '<ul class="cc-project-review">' +
+          projects
+            .map(
+              (p) =>
+                '<li><strong>' +
+                E(p.project_label || projectLabel(p.project_id)) +
+                '</strong><span>' +
+                E(p.environment_id) +
+                '</span>' +
+                (recovering
+                  ? '<button type="button" class="btn" data-cc-partition="' +
+                    E(p.project_id) +
+                    '" data-environment="' +
+                    E(p.environment_id) +
+                    '">选择此项目并重新检查</button>'
+                  : '') +
+                '</li>',
+            )
+            .join('') +
+          '</ul>',
+        element,
       );
-      if (advanced && generation === state.generation && document.querySelector('#cc-drawer')?.open)
-        await dots.act('dot-channel-view-advanced', advanced);
-      const grantSelect = document.querySelector('#cc-drawer [name="grant_id"]');
-      if (
-        roomProjectReturnDraft?.grant_id &&
-        grantSelect &&
-        [...grantSelect.options].some((option) => option.value === roomProjectReturnDraft.grant_id)
-      ) {
-        grantSelect.value = roomProjectReturnDraft.grant_id;
-        grantSelect.dispatchEvent(new Event('change', { bubbles: true }));
-      }
       return local;
     }
-    if (action === 'manage-projects' || action === 'add-project') {
+    if (
+      action === 'manage-projects' ||
+      action === 'add-project' ||
+      action === 'manage-room-permissions'
+    ) {
+      const permissionsOnly = action === 'manage-room-permissions';
       const draft =
         element.closest('.cc-channel-pane') &&
         roomProjectReturnDraft?.generation === state.generation &&
@@ -1938,20 +2165,36 @@ window.CodePierCollaboration = (() => {
         state.error = false;
       }
       showDrawer(
-        '管理房间项目',
-        `<p>勾选要使用的项目，然后保存。连接和聊天记录会保留。</p>
-        <form id="cc-room-projects" class="cc-form" data-conversation="${E(state.conversation)}">
+        permissionsOnly ? '房间项目权限' : '管理房间项目',
+        `<p>选择项目与读取、修改、执行权限，一次保存后用于此房间。旧任务授权不会扩大，原连接与消息保留。</p>
+        ${permissionsOnly ? '<p>此处仅列出当前房间项目。增删项目请使用“管理房间项目”。</p>' + button('manage-projects', '管理房间项目') : ''}
+        <form id="cc-room-projects" class="cc-form" data-permissions-only="${permissionsOnly}" data-conversation="${E(state.conversation)}">
           ${projectPicker.toolbar(E, 'project-picker-all', 'project-picker-none')}
-          <fieldset class="cc-project-choices cc-room-project-choices"><legend>选择项目</legend>${roomProjectChoices()
+          <fieldset class="cc-project-choices cc-room-project-choices"><legend>项目与权限</legend>${roomProjectChoices(
+            permissionsOnly,
+          )
             .map(
               (p) =>
-                `<label data-project-option data-project-label="${E(p.project_label || projectLabel(p.project_id))}"><input data-project-select type="checkbox" name="room_projects" value="${E(p.project_id)}" data-environment="${E(p.environment_id)}" ${p.selected ? 'checked' : ''}><span>${E(p.project_label || projectLabel(p.project_id))}<small>${E(p.environment_id)}</small></span></label>`,
+                `<div class="cc-project-permission-row" data-room-project-row data-project-option data-project-label="${E(p.project_label || projectLabel(p.project_id))}">
+                  <label><input data-project-select type="checkbox" name="room_projects" value="${E(p.project_id)}" data-environment="${E(p.environment_id)}" ${p.selected ? 'checked' : ''}><span>${E(p.project_label || projectLabel(p.project_id))}<small>${E(p.environment_id)}</small></span></label>
+                  <div class="cc-project-capabilities" data-project-capabilities ${p.selected ? '' : 'hidden'}>${[
+                    ['read', '读取'],
+                    ['write', '修改/写入'],
+                    ['execute', '执行'],
+                  ]
+                    .map(
+                      ([cap, label]) =>
+                        `<label><input type="checkbox" data-project-capability name="project_capability" value="${cap}" aria-label="${E(p.project_label || projectLabel(p.project_id))} ${label}">${label}</label>`,
+                    )
+                    .join('')}</div>
+                  <small class="cc-hint" data-capability-denials></small>
+                </div>`,
             )
             .join('')}</fieldset>
           <p data-project-search-empty hidden>没有找到匹配的项目，试试其他名称。</p>
           <div data-room-project-assistant><input type="hidden" name="dot_id" value="${E(currentDot)}"></div>
           <section data-room-project-summary role="status" aria-live="polite"></section>
-          <div class="cc-actions">${button('close-drawer', '取消')}<button class="btn primary" type="submit" disabled>保存</button></div>
+          <div class="cc-actions">${button('close-drawer', '取消')}<button class="btn primary" type="submit" disabled>保存项目与权限</button></div>
         </form>`,
         element,
       );
@@ -1965,6 +2208,108 @@ window.CodePierCollaboration = (() => {
       }
       projectPicker.filter(form);
       void refreshRoomProjects(form);
+      return local;
+    }
+    if (action === 'archive-room') {
+      const conversationId = state.conversation,
+        conversationLabel = conversationTitle(state.snapshot?.conversation),
+        generation = state.generation;
+      showDrawer('删除房间（可恢复）', '<p role="status">正在核对本房间的关联与任务…</p>', element);
+      const epoch = state.drawerEpoch;
+      const preview = await api('/api/collaboration/conversation-archive-preview', {
+        method: 'POST',
+        body: JSON.stringify({ conversation_id: conversationId }),
+      });
+      if (
+        generation !== state.generation ||
+        epoch !== state.drawerEpoch ||
+        !document.querySelector('#cc-drawer')?.open
+      )
+        return local;
+      if (preview.ready === false) {
+        showDrawer(
+          '暂时不能删除此房间',
+          '<p role="alert">' +
+            E(preview.message || '请先处理本房间的旧连接限制。') +
+            '</p><ul class="cc-archive-dependencies">' +
+            (preview.dependent_connections || [])
+              .map(
+                (connection) =>
+                  '<li><strong>' +
+                  E(connection.label || '连接') +
+                  '</strong><small>连接 ID：' +
+                  E(connection.grant_id) +
+                  '</small></li>',
+              )
+              .join('') +
+            '</ul><p>请返回消息连接 → 查看高级设置 → 查看整条连接限制，按以上名称与 ID 核对后选择“停用整条凭据访问”。此操作会影响所有使用该凭据的会话；普通凭据撤销不能替代限制停用。这里不会自动撤销共享凭据或改变其安全限制。</p>' +
+            button('close-drawer', '返回'),
+          element,
+        );
+        return local;
+      }
+      if (!preview.impact_digest || preview.conversation?.id !== conversationId)
+        throw new Error('服务器未返回完整的删除影响，请刷新后重试。');
+      const labels = {
+        projects: '房间项目关联',
+        connections: '房间助手连接',
+        subscriptions: '房间订阅',
+        active_tasks: '未完成任务',
+        project_authorizations: '房间项目授权',
+        in_flight_operations: '进行中的操作',
+        monitoring_plans: '监控计划',
+        legacy_agents: '旧版用途绑定',
+        pending_proposals: '待批准提案',
+        messages: '保留的历史消息',
+      };
+      showDrawer(
+        '删除房间（可恢复）',
+        `<p>删除“${E(conversationLabel)}”后，它将移到已删除房间。</p>
+        <ul class="cc-archive-impact">${Object.entries(labels)
+          .filter(([key]) => Number.isInteger(preview.impact?.[key]))
+          .map(([key, label]) => '<li>' + label + '：' + preview.impact[key] + '</li>')
+          .join('')}</ul>
+        <p>本房间的连接、订阅和授权将关闭，未完成任务会请求取消。运行中的操作以实际停止回执为准。</p>
+        <ul>${(preview.retained || ['源项目与源码、共享凭据、其他房间和审计记录保留。']).map((line) => '<li>' + E(line) + '</li>').join('')}</ul>
+        ${(preview.warnings || []).map((line) => '<p class="cc-connection-warning">' + E(line) + '</p>').join('')}
+        <p>恢复后可查看项目关系和历史；旧授权、连接、订阅与任务不会自动恢复。</p>
+        <form id="cc-archive-room" class="cc-form" data-conversation="${E(conversationId)}" data-version="${E(preview.conversation.version)}" data-digest="${E(preview.impact_digest)}">
+          <p data-archive-error role="alert"></p><div class="cc-actions">${button('close-drawer', '取消')}<button class="btn danger" type="submit">确认删除此房间</button></div></form>`,
+        element,
+      );
+      return local;
+    }
+    if (action === 'archived-rooms') {
+      const generation = state.generation;
+      showDrawer('已删除房间', '<p role="status">正在读取…</p>', element);
+      const epoch = state.drawerEpoch;
+      const result = await api('/api/collaboration/conversations?include_archived=true');
+      if (
+        generation !== state.generation ||
+        epoch !== state.drawerEpoch ||
+        !document.querySelector('#cc-drawer')?.open
+      )
+        return local;
+      const rooms = (result.items || []).filter((room) => room.archived_at);
+      showDrawer(
+        '已删除房间',
+        '<p>恢复项目关系与历史记录。旧权限、连接、订阅和任务保持关闭。</p>' +
+          (rooms
+            .map(
+              (room) =>
+                `<section class="cc-archived-room"><h3>${E(conversationTitle(room))}</h3><p>${room.projects?.length || 0} 个项目 · ${E(when(room.archived_at))}</p>${button('restore-room', '恢复房间', { id: room.id, version: room.version })}</section>`,
+            )
+            .join('') || '<p>没有已删除房间。</p>'),
+        element,
+      );
+      return local;
+    }
+    if (action === 'restore-room') {
+      showDrawer(
+        '恢复房间',
+        `<p>恢复后可查看历史与项目关系。旧连接、权限、订阅和任务保持关闭。继续执行请新建房间并接入助手。</p><form id="cc-restore-room" class="cc-form" data-conversation="${E(element.dataset.id)}" data-version="${E(element.dataset.version)}"><p data-archive-error role="alert"></p><div class="cc-actions">${button('archived-rooms', '返回')}<button class="btn primary" type="submit">确认恢复房间</button></div></form>`,
+        element,
+      );
       return local;
     }
     if (action === 'new-conversation') {
@@ -2044,6 +2389,26 @@ window.CodePierCollaboration = (() => {
     }
     if (action === 'context') {
       showDrawer('房间上下文', contextContents(), element);
+      return local;
+    }
+    if (action === 'available-rooms') {
+      showDrawer('可访问房间', empty('正在读取最新房间目录…'), element);
+      const generation = state.generation,
+        epoch = state.drawerEpoch;
+      const directory = await api('/api/collaboration/conversations');
+      if (generation !== state.generation || epoch !== state.drawerEpoch) return local;
+      state.rooms = directory.items || [];
+      showDrawer(
+        '可访问房间',
+        state.rooms
+          .map((room) => {
+            const project = room.connection || room.projects?.[0] || room.history_projects?.[0];
+            if (!project) return '';
+            return `<button type="button" class="btn" data-cc-room="${E(room.id)}" data-project="${E(project.project_id)}" data-environment="${E(project.environment_id)}">${E(conversationTitle(room))}</button>`;
+          })
+          .join('') || empty('最新目录中暂无可访问房间。'),
+        element,
+      );
       return local;
     }
     if (action === 'room-settings') {
@@ -2483,6 +2848,17 @@ window.CodePierCollaboration = (() => {
     });
   }
   async function submit(form) {
+    if (
+      restoredHistory() &&
+      ![
+        'cc-search',
+        'cc-scope',
+        'cc-new-conversation',
+        'cc-archive-room',
+        'cc-restore-room',
+      ].includes(form.id)
+    )
+      return { local: true, message: '历史已恢复，原执行权限未恢复。请新建房间并明确接入助手。' };
     if (form.id === 'cc-dot-create') return dots.submit(form);
     if (form.id.startsWith('cc-goal-')) return coordination.submit(form);
     const data = Object.fromEntries(new FormData(form));
@@ -2504,6 +2880,87 @@ window.CodePierCollaboration = (() => {
       closeDrawer();
       return { message: '项目授权已撤销；已运行操作请核对实际取消回执。' };
     }
+    if (form.id === 'cc-archive-room' || form.id === 'cc-restore-room') {
+      const archive = form.id === 'cc-archive-room',
+        generation = state.generation,
+        epoch = state.drawerEpoch;
+      const operation = archive ? 'conversation-archive' : 'conversation-restore';
+      const payload = {
+        conversation_id: form.dataset.conversation,
+        expected_version: Number(form.dataset.version),
+        ...(archive
+          ? { impact_digest: form.dataset.digest, confirm_archive: true }
+          : { confirm_restore: true }),
+      };
+      const identity = await commandIdentity({ operation, ...payload });
+      if (!form.isConnected || generation !== state.generation || epoch !== state.drawerEpoch)
+        return { local: true };
+      try {
+        const result = await api('/api/collaboration/' + operation, {
+          method: 'POST',
+          retrySafe: true,
+          body: JSON.stringify({ ...payload, idempotency_key: identity.identifier }),
+        });
+        if (generation !== state.generation || epoch !== state.drawerEpoch) return { local: true };
+        const restoredReplay =
+          archive &&
+          result.archived === false &&
+          result.replayed === true &&
+          result.conversation?.archived_at === null;
+        if (
+          !(archive ? result.archived === true || restoredReplay : result.restored === true) ||
+          result.conversation?.id !== payload.conversation_id
+        )
+          throw new Error('服务器尚未确认结果，请刷新列表核对，不要重复操作。');
+        const archivedNow =
+          archive && result.archived === true && result.conversation.archived_at != null;
+        if (archivedNow) relay.purgeConversation(payload.conversation_id);
+        try {
+          sessionStorage.removeItem(identity.storageKey);
+        } catch {}
+        state.requests.delete(identity.storageKey);
+        rememberChat();
+        const rooms = await api('/api/collaboration/conversations');
+        if (
+          generation !== state.generation ||
+          epoch !== state.drawerEpoch ||
+          S.page !== 'collaboration'
+        )
+          return { local: true };
+        closeDrawer();
+        state.rooms = rooms.items || [];
+        const next = archivedNow
+          ? state.rooms.find((room) => room.id !== payload.conversation_id)
+          : state.rooms.find((room) => room.id === payload.conversation_id);
+        state.historyUnavailable = !archivedNow && !next;
+        if (state.historyUnavailable) {
+          state.snapshot = null;
+          state.project = '';
+          state.environment = '';
+        }
+        state.conversation = next?.id || '';
+        const connection = next?.connection || next?.projects?.[0] || next?.history_projects?.[0];
+        if (connection) {
+          state.project = connection.project_id;
+          state.environment = connection.environment_id;
+        }
+        persistSelection();
+        state.notes = archivedNow
+          ? '房间已移到已删除列表，关联权限已关闭；任务取消以实际回执为准。'
+          : archive
+            ? '这是原删除操作的回执；房间当前已恢复，以下以最新可见目录为准。'
+            : '历史已恢复，执行权限未恢复；继续执行请新建房间并接入助手。';
+        await renderPage(false);
+        return { local: true, message: state.notes };
+      } catch (error) {
+        if (form.isConnected)
+          form.querySelector('[data-archive-error]').textContent =
+            error.status === 409
+              ? '房间或关联状态已更新，请取消后重新核对实际影响。尚未应用本次操作。'
+              : error.message;
+        return { local: true };
+      }
+    }
     if (form.id === 'cc-room-projects') {
       if (
         !form.projectAuthorization?.ready ||
@@ -2522,6 +2979,7 @@ window.CodePierCollaboration = (() => {
         expected_scope_version: preview.scope_version,
         selection_digest: preview.selection_digest,
         confirm_scope: true,
+        confirm_unsandboxed_exec: preview.projects.some((p) => p.capabilities?.includes('execute')),
       };
       const current = () =>
         generation === state.generation &&
@@ -2558,7 +3016,7 @@ window.CodePierCollaboration = (() => {
         }
         state.error = false;
         state.notes = payload.projects.length
-          ? '房间项目已保存，原消息连接与历史保留。'
+          ? '房间项目与权限已保存，原消息连接与历史保留。'
           : '已切换为纯聊天，原助手和消息历史保留。';
         persistSelection();
         await renderPage(false);
@@ -3020,6 +3478,15 @@ window.CodePierCollaboration = (() => {
       projectPicker.filter(event.target.form);
     if (event.target.form?.id === 'cc-room-projects') {
       const form = event.target.form;
+      const row = event.target.closest('[data-room-project-row]');
+      if (row && event.target.matches('[data-project-capability]')) {
+        row.dataset.initialized = 'true';
+        if (event.target.value === 'read' && !event.target.checked)
+          for (const node of row.querySelectorAll('[data-project-capability]'))
+            node.checked = false;
+        else if (event.target.checked)
+          row.querySelector('[data-project-capability][value="read"]').checked = true;
+      }
       projectPicker.filter(form);
       form.projectAuthorization = null;
       form.dataset.previewSequence = Number(form.dataset.previewSequence || 0) + 1;

@@ -42,7 +42,8 @@ window.CodePierCollaborationGoals = {
     const local = (message = '') => ({ local: true, message });
     const status = (value) => names[value] || value || '暂无记录';
     const badge = (value) => '<span class="cc-status">' + E(status(value)) + '</span>';
-    const canManage = () => !!state.snapshot?.can_manage;
+    const restored = () => !!state.snapshot?.conversation?.restored_from_archive;
+    const canManage = () => !!state.snapshot?.can_manage && !restored();
     const canApprove = () => canManage() && options?.can_approve === true;
     const enabled = () => !!state.snapshot?.capabilities?.coordination_goals;
     const connection = (id) => options?.participants?.find((p) => p.grant_id === id);
@@ -538,6 +539,8 @@ window.CodePierCollaborationGoals = {
       );
     }
     function subscription(g) {
+      if (restored())
+        return '<p class="cc-hint">历史订阅与执行范围仅供查阅，不会重新接通或恢复。</p>';
       if (g.delegation) {
         return (
           '<section class="cc-goal-subscription"><p class="cc-hint">继续使用原委托范围；接入与处理方式在同一处核对。</p>' +
@@ -607,9 +610,11 @@ window.CodePierCollaborationGoals = {
           ? button('goal-cancel-review', '取消目标…', g)
           : '') +
         '</div><p class="cc-hint">' +
-        (g.state === 'active'
-          ? '已批准范围不保证助手在线。实际领取、操作与结果分别记录。'
-          : '尚不接受新的目标执行；普通讨论和规划可以继续。') +
+        (restored()
+          ? '以下是历史状态与证据；原执行权限未恢复。'
+          : g.state === 'active'
+            ? '已批准范围不保证助手在线。实际领取、操作与结果分别记录。'
+            : '尚不接受新的目标执行；普通讨论和规划可以继续。') +
         '</p>' +
         (g.delegation
           ? '<section class="cc-delegation-origin" data-message-id="' +
@@ -621,7 +626,9 @@ window.CodePierCollaborationGoals = {
             '">' +
             button('source', '查看原委托消息', { id: g.delegation.source_message_id }) +
             button('mention-connect', '查看委托范围与接通设置', { id: g.delegation.slot_id }) +
-            '<p class="cc-hint">此目标绑定原委托，不能修订或重新批准。暂停后若需继续，请核对已有操作，再发送新委托；已运行的实际操作不保证停止。</p></section>'
+            (restored()
+              ? '<p class="cc-hint">此目标保留原委托的历史证据；不会继续派发。</p></section>'
+              : '<p class="cc-hint">此目标绑定原委托，不能修订或重新批准。暂停后若需继续，请核对已有操作，再发送新委托；已运行的实际操作不保证停止。</p></section>')
           : '') +
         subscription(g) +
         '<div class="cc-row"><h3>步骤与结果</h3>' +

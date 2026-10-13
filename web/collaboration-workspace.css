@@ -1222,3 +1222,98 @@
     transform: none !important;
   }
 }
+
+/* Compact room header and one explicit project/permission editor. */
+.cc-project-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.cc-project-summary .cc-project-count {
+  white-space: nowrap;
+  font-weight: 600;
+}
+.cc-project-permission-row {
+  border: 1px solid var(--border, #dce1e8);
+  border-radius: 10px;
+  padding: 10px;
+  min-width: 0;
+}
+.cc-project-permission-row > label {
+  border: 0;
+  padding: 0;
+}
+.cc-project-capabilities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 8px 0 0 26px;
+}
+.cc-project-capabilities label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  border: 0;
+  white-space: nowrap;
+}
+.cc-project-permission-row [data-capability-denials] {
+  display: block;
+  overflow-wrap: anywhere;
+}
+.cc-project-capabilities[hidden] {
+  display: none;
+}
+.cc-archive-dependencies small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+.cc-archive-impact {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  padding-left: 20px;
+}
+.cc-archived-room {
+  border: 1px solid var(--border, #dce1e8);
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+.cc-archived-room h3 {
+  margin-top: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Opaque sticky action footer extends over the drawer's bottom padding. */
+#cc-room-projects .cc-actions {
+  box-shadow: 0 28px 0 var(--ui-panel);
+  padding-bottom: 4px;
+}
+.cc-restored-notice {
+  margin: 8px 24px;
+  padding: 14px;
+  background: var(--ui-lilac);
+  border-radius: 12px;
+}
+.cc-restored-notice p {
+  margin: 6px 0 10px;
+}
+[data-restored-room='true'] .cc-compose-wrap,
+[data-restored-room='true'] [data-cc-view='agents'],
+[data-restored-room='true'] [data-cc-action='manage-projects'],
+[data-restored-room='true'] [data-cc-action='convert'],
+[data-restored-room='true'] [data-cc-action='reply'],
+[data-restored-room='true'] [data-cc-action='mentions'],
+[data-restored-room='true'] [data-cc-action='open-members'],
+[data-restored-room='true'] [data-cc-action='dot-connect'],
+[data-restored-room='true'] [data-cc-action='accept_proposal'],
+[data-restored-room='true'] .cc-member-strip,
+[data-restored-room='true'] [data-cc-action='goal-new'] {
+  display: none;
+}
+
+.cc-workspace[data-restored-room='true'] .cc-workspace-nav [data-cc-view='agents'] {
+  display: none;
+}

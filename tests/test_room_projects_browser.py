@@ -57,16 +57,21 @@ def test_room_projects_add_remove_anchor_and_chat_only_preserve_connection(
         open_add_project(page)
         project_checkbox(form, stack.projects[1]).check()
         expect(form.locator('button[type="submit"]')).to_be_enabled()
+        evidence_sizes(page, tmp_path, 'room-project-add-review', engine)
         form.locator('button[type="submit"]').evaluate('(b) => {b.click(); b.click();}')
-        expect(page.locator('.cc-project-chip')).to_have_count(2)
+        expect(page.locator('.cc-project-count')).to_have_text('2 个项目')
         assert len(applies) == 1
         assert applies[0]['expected_scope_version'] == 0
         assert applies[0]['dot_id'] == joined['slot']['id']
+        expect(page.locator('.cc-room-subline > span')).to_have_text('2 个项目')
+        evidence_sizes(page, tmp_path, 'room-project-added', engine)
         expect(area).to_have_value('管理期间的本地草稿')
         expect(page.locator('.cc-feed')).to_contain_text('保留的房间历史')
         connection = overview(stack)['conversation']['connection']
         assert connection['dot_id'] == joined['slot']['id']
-        page.locator(f'[data-room-project="{stack.projects[1]["id"]}"]').click()
+        page.locator('.cc-project-summary [data-cc-action="manage-projects"]').click()
+        expect(page.locator(f'#cc-room-projects [name="room_projects"][value="{stack.projects[1]["id"]}"]')).to_be_checked()
+        page.keyboard.press('Escape')
         expect(page.locator('.cc-chat-shell')).to_have_attribute('data-project', connection['project_id'])
         expect(page.locator('[data-cc-partition]')).to_have_count(0)
         expect(area).to_have_value('管理期间的本地草稿')
@@ -82,16 +87,22 @@ def test_room_projects_add_remove_anchor_and_chat_only_preserve_connection(
         confirm = form.locator('button[type="submit"]')
         box = confirm.bounding_box()
         assert box and box['y'] + box['height'] <= page.viewport_size['height']
-        page.screenshot(path=str(tmp_path / f'room-projects-review-{engine}-390.png'), full_page=True)
+        evidence_sizes(page, tmp_path, 'room-project-remove-review', engine)
         targets.evaluate_all('(nodes, originals) => nodes.forEach((n, i) => n.textContent = originals[i])', original_targets)
         assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
         assert form.evaluate('(n) => n.scrollWidth <= n.clientWidth')
         save(form)
-        expect(page.locator('.cc-project-chip')).to_have_count(1)
-        expect(page.locator('.cc-project-chip')).to_have_attribute('data-room-project', stack.projects[1]['id'])
+        expect(page.locator('.cc-project-count')).to_have_text('1 个项目')
+        open_add_project(page)
+        expect(project_checkbox(page.locator('#cc-room-projects'), stack.projects[1])).to_be_checked()
+        page.keyboard.press('Escape')
         current = overview(stack)['conversation']
         expect(page.locator('.cc-room-title h2')).to_have_text(stack.project['alias'])
         assert current['connection'] == connection and current['id'] == before['id']
+        expect(page.locator('.cc-room-subline > span')).to_have_text('1 个项目')
+        expect(page.locator('.cc-compose-controls > small')).to_have_text('来源 · ' + stack.project['alias'])
+        expect(page.locator('.cc-compose-help > span').first).to_have_text('发送到 ' + stack.project['alias'] + ' · production')
+        evidence_sizes(page, tmp_path, 'room-project-removed-anchor', engine)
         expect(area).to_have_value('管理期间的本地草稿')
 
         # Removing the last task project leaves the same room and chat connection usable.
@@ -107,7 +118,10 @@ def test_room_projects_add_remove_anchor_and_chat_only_preserve_connection(
         current = overview(stack)['conversation']
         assert current['projects'] == [] and current['connection'] == connection
         area.fill('纯聊天消息仍使用原连接')
-        page.locator('#cc-command button[type="submit"]').click()
+        with page.expect_request('**/api/collaboration/message') as sent:
+            page.locator('#cc-command button[type="submit"]').click()
+        assert sent.value.post_data_json['project'] == connection['project_id']
+        assert sent.value.post_data_json['environment_id'] == connection['environment_id']
         expect(area).to_have_value('')
         expect(page.locator('.cc-feed')).to_contain_text('纯聊天消息仍使用原连接')
         page.reload()
@@ -117,7 +131,7 @@ def test_room_projects_add_remove_anchor_and_chat_only_preserve_connection(
         expect(page.locator('.cc-feed')).to_contain_text('纯聊天消息仍使用原连接')
         expect(area).to_be_enabled()
         page.set_viewport_size({'width': 1440, 'height': 900})
-        page.screenshot(path=str(tmp_path / f'room-projects-chat-only-{engine}-1440.png'), full_page=True)
+        evidence_sizes(page, tmp_path, 'room-project-chat-only', engine)
         assert not errors, {'errors': errors, 'network': network}
     finally:
         context.close()
@@ -256,7 +270,7 @@ def test_removed_historical_project_thread_reply_and_convert_keep_connection(
         form = page.locator('#cc-room-projects')
         project_checkbox(form, other).uncheck()
         save(form)
-        expect(page.locator('.cc-project-chip')).to_have_count(1)
+        expect(page.locator('.cc-project-count')).to_have_text('1 个项目')
         assert overview(stack)['conversation']['working_scope']['project_ids'] == [stack.project['id']]
         message = page.locator(f'[data-message-id="{historical["message"]["id"]}"]')
         message.locator('[data-cc-action="thread"]').click()
@@ -304,8 +318,7 @@ def advanced_connections(page):
     connections(page)
     page.locator('.cc-channel-settings [data-cc-action="dot-channel-open"]').click()
     page.locator('[data-cc-action="dot-channel-view-advanced"]').click()
-    open_scope_form(page)
-    return page.locator('[data-channel-form="scope"]')
+    return page.locator('.cc-advanced-settings')
 
 
 def evidence(page, tmp_path, name):
@@ -313,7 +326,19 @@ def evidence(page, tmp_path, name):
     from pathlib import Path
     destination = Path(os.environ.get('ROOM_UI_EVIDENCE_DIR', str(tmp_path)))
     destination.mkdir(parents=True, exist_ok=True)
-    page.screenshot(path=str(destination / name), full_page=True)
+    page.screenshot(path=str(destination / name), full_page=True, animations='disabled')
+
+
+def evidence_sizes(page, tmp_path, state, engine):
+    viewport = page.viewport_size
+    try:
+        for width, height in ((390, 844), (1440, 900)):
+            page.set_viewport_size({'width': width, 'height': height})
+            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+            evidence(page, tmp_path, f'{state}-{engine}-{width}.png')
+    finally:
+        page.set_viewport_size(viewport)
+
 
 
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
@@ -333,7 +358,7 @@ def test_simple_connection_picker_search_bulk_empty_and_reopen(
         second = stack.projects[1]
         project_checkbox(form, stack.project).uncheck()
         project_checkbox(form, second).check()
-        expect(form.locator('button[type="submit"]')).to_have_text('保存')
+        expect(form.locator('button[type="submit"]')).to_have_text('保存项目与权限')
         expect(form).to_contain_text('新项目不会自动加入')
         expect(form.locator('[data-cc-action="room-project-preview"]')).to_have_count(0)
         expect(form.locator('.cc-project-permission-details')).not_to_have_attribute('open', '')
@@ -362,10 +387,12 @@ def test_simple_connection_picker_search_bulk_empty_and_reopen(
         expect(project_checkbox(form, stack.project)).to_be_checked()
         expect(project_checkbox(form, second)).to_be_checked()
         save(form)
-        expect(page.locator('.cc-project-chip')).to_have_count(len(stack.projects))
-        chips = page.locator('.cc-project-chip').evaluate_all(
-            '(nodes) => nodes.map(n => ({width:n.getBoundingClientRect().width, scroll:n.scrollWidth, client:n.clientWidth}))')
-        assert all(c['width'] >= 70 and c['scroll'] <= c['client'] for c in chips)
+        expect(page.locator('.cc-project-count')).to_have_text(f'{len(stack.projects)} 个项目')
+        expect(page.locator('.cc-project-chip')).to_have_count(0)
+        assert page.locator('.cc-project-summary').evaluate('(node) => node.scrollWidth <= node.clientWidth')
+        page.locator('.cc-project-summary [data-cc-action="manage-projects"]').click()
+        expect(page.locator('#cc-room-projects [name="room_projects"]:checked')).to_have_count(len(stack.projects))
+        page.keyboard.press('Escape')
         assert overview(stack)['conversation']['connection'] == anchor
 
         form = manage_from_connections(page)
@@ -396,56 +423,70 @@ def test_simple_connection_picker_search_bulk_empty_and_reopen(
 
 
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
-def test_real_advanced_missing_anchor_returns_to_same_room_picker(
+def test_room_link_permissions_only_current_projects_and_bulk_all_capabilities(
         collaboration_stack, chat_browser_pool, tmp_path, engine):
     stack = collaboration_stack
     context = chat_browser_pool(engine).new_context(viewport={'width': 390, 'height': 844})
     page = context.new_page()
-    page.set_default_timeout(10000)
+    shared_writes, writes = [], []
+    page.on('request', lambda r: shared_writes.append(r.post_data_json)
+            if r.url.endswith('/api/collaboration/room-scope') else None)
+    page.on('request', lambda r: writes.append(r.post_data_json)
+            if r.url.endswith('/api/collaboration/conversation-projects') else None)
     try:
         login(page, stack)
         join_dot(stack, create_dot(stack, '合成原助手'))
-        group = advanced_connections(page)
-        group.locator('[name="grant_id"]').select_option(index=1)
-        group.locator(f'[data-project-id="{stack.project["id"]}"] [name="project_selected"]').uncheck()
-        group.locator(f'[data-project-id="{stack.projects[1]["id"]}"] [name="project_selected"]').check()
-        group.locator('[name="confirm_scope"]').check()
-        before = overview(stack)['conversation']
-        with page.expect_response(lambda r: r.url.endswith('/api/collaboration/room-scope')) as response:
-            group.locator('[data-cc-action="dot-channel-scope-save"]').click()
-        assert response.value.status == 422
-        error = response.value.json()['error']
-        assert error['code'] == 'ROOM_SCOPE_ANCHOR_REQUIRED'
-        assert error['changes_applied'] is False
-        expect(group.locator('[data-scope-error]')).to_contain_text('管理房间项目')
-        expect(group.locator('[data-scope-error]')).not_to_contain_text('必须包含当前房间项目')
-        assert overview(stack)['conversation']['version'] == before['version']
-        evidence(page, tmp_path, f'room-project-advanced-remedy-{engine}-390.png')
-        group.locator('[data-project-remedy]').click()
-        form = page.locator('#cc-room-projects')
-        expect(form).to_be_visible()
-        project_checkbox(form, stack.project).uncheck()
+        form = manage_from_connections(page)
         project_checkbox(form, stack.projects[1]).check()
         save(form)
         expect(page.locator('#cc-drawer')).not_to_be_visible()
-        expect(page.locator('#cc-feedback')).to_contain_text('房间项目已保存')
-        expect(page.locator('#cc-feedback')).not_to_contain_text(error['message'])
-        after = overview(stack)['conversation']
-        assert [p['project_id'] for p in after['projects']] == [stack.projects[1]['id']]
-        assert after['connection']['project_id'] == stack.project['id']
+        before = overview(stack)['conversation']
+        group = advanced_connections(page)
+        expect(group.locator('[data-channel-form="scope"]')).to_have_count(0)
+        group.locator('[data-cc-action="manage-room-permissions"]').click()
+        form = page.locator('#cc-room-projects')
+        expect(form).to_have_attribute('data-permissions-only', 'true')
+        expect(form.locator('[name="room_projects"]')).to_have_count(2)
+        for project in stack.projects[2:]:
+            expect(project_checkbox(form, project)).to_have_count(0)
+        expect(form.locator('button[type="submit"]')).to_be_enabled()
+        form.locator('[data-project-bulk="none"]').click()
+        expect(form.locator('[data-project-capability]:checked')).to_have_count(0)
+        save(form)
+        expect(page.locator('#cc-drawer')).not_to_be_visible()
+        assert len(overview(stack)['conversation']['projects']) == 2
+        assert all(p['capabilities'] == [] for p in writes[-1]['projects'])
+        group = advanced_connections(page)
+        group.locator('[data-cc-action="manage-room-permissions"]').click()
+        form = page.locator('#cc-room-projects')
+        expect(form.locator('button[type="submit"]')).to_be_enabled()
+        form.locator('[data-project-bulk="all"]').click()
+        expect(form.locator('[data-project-capability]:checked')).to_have_count(6)
+        expect(form.locator('[data-room-project-summary]')).to_contain_text('执行')
+        evidence(page, tmp_path, f'room-project-permissions-{engine}-390.png')
+        form.locator('[data-room-project-summary]').scroll_into_view_if_needed()
+        evidence(page, tmp_path, f'room-project-permission-summary-{engine}-390.png')
+        save(form)
+        expect(page.locator('#cc-drawer')).not_to_be_visible()
+        assert writes[-1]['permissions_only'] is True
+        assert all(p['capabilities'] == ['read', 'write', 'execute'] for p in writes[-1]['projects'])
+        assert overview(stack)['conversation']['connection'] == before['connection']
+        assert not shared_writes
     finally:
         context.close()
 
 
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
-def test_real_connection_limit_advanced_confirmation_preserves_project_draft(
+def test_room_upstream_limit_is_explicit_and_never_expands_shared_connection(
         collaboration_stack, chat_browser_pool, engine):
     from tests.collaboration_support import key
     from tests.test_collaboration_delivery_flow import scope
     stack = collaboration_stack
     context = chat_browser_pool(engine).new_context(viewport={'width': 390, 'height': 844})
     page = context.new_page()
-    page.set_default_timeout(10000)
+    shared_writes = []
+    page.on('request', lambda r: shared_writes.append(r.post_data_json)
+            if r.url.endswith('/api/collaboration/room-scope') else None)
     try:
         login(page, stack)
         joined = join_dot(stack, create_dot(stack, '合成受限助手'))
@@ -460,45 +501,22 @@ def test_real_connection_limit_advanced_confirmation_preserves_project_draft(
                 'capabilities': ['read', 'write', 'execute'], 'execution_targets': ['agent']}],
             'execution_mode': 'account_permissions_acknowledged', 'acknowledge_unsandboxed_exec': True,
             'confirm_connection_wide_ceiling': True, 'expires_seconds': 3600, 'idempotency_key': key()}))
+        baseline = stack.must(stack.client.get('/api/collaboration/room-scopes', params={**scope(stack), 'conversation_id': conversation['id']}))
         form = manage_from_connections(page)
         project_checkbox(form, stack.projects[1]).check()
         expect(form.locator('[data-room-project-summary]')).to_contain_text('尚未保存')
+        expect(form.locator('[data-room-project-summary]')).to_contain_text('共享凭据')
         expect(form.locator('button[type="submit"]')).to_be_disabled()
         expect(project_checkbox(form, stack.projects[1])).to_be_checked()
-        form.locator('[data-cc-action="room-project-connection-review"]').click()
-        expect(page.locator('.cc-channel-pane')).to_have_attribute('data-channel-view', 'advanced')
-        open_scope_form(page)
-        group = page.locator('[data-channel-form="scope"]')
-        group.locator('[name="grant_id"]').select_option(grant)
-        # Closing advanced discards the temporary return draft; reopening reads the room.
+        expect(form.locator('[data-cc-action="room-project-connection-review"]')).to_have_count(0)
         page.keyboard.press('Escape')
         form = manage_from_connections(page)
         expect(project_checkbox(form, stack.projects[1])).not_to_be_checked()
-        project_checkbox(form, stack.projects[1]).check()
-        form.locator('[data-cc-action="room-project-connection-review"]').click()
-        open_scope_form(page)
-        group = page.locator('[data-channel-form="scope"]')
-        expect(group.locator('[name="grant_id"]')).to_have_value(grant)
-        second = group.locator(f'[data-project-id="{stack.projects[1]["id"]}"]')
-        expect(second.locator('[name="project_selected"]')).not_to_be_checked()
-        expect(second.locator('[name="write"]')).not_to_be_checked()
-        expect(second.locator('[name="execute"]')).not_to_be_checked()
-        second.locator('[name="project_selected"]').check()
-        second.locator('.cc-project-capabilities > summary').click()
-        second.locator('[name="write"]').check()
-        second.locator('[name="execute"]').check()
-        group.locator('[name="unsandboxed"]').check()
-        group.locator('[name="confirm_scope"]').check()
-        with page.expect_response(lambda r: r.url.endswith('/api/collaboration/room-scope')) as response:
-            group.locator('[data-cc-action="dot-channel-scope-save"]').click()
-        assert response.value.status == 200, response.value.json()
-        page.locator('#cc-drawer [data-cc-action="manage-projects"]').click()
-        expect(project_checkbox(form, stack.project)).to_be_checked()
-        expect(project_checkbox(form, stack.projects[1])).to_be_checked()
-        save(form)
-        expect(page.locator('#cc-drawer')).not_to_be_visible()
-        assert len(overview(stack)['conversation']['projects']) == 2
-        assert overview(stack)['conversation']['connection']['grant_id'] == grant
+        page.keyboard.press('Escape')
+        after = stack.must(stack.client.get('/api/collaboration/room-scopes', params={**scope(stack), 'conversation_id': conversation['id']}))
+        assert after['items'] == baseline['items']
+        assert overview(stack)['conversation']['version'] == conversation['version']
+        assert not shared_writes
     finally:
         context.close()
 
@@ -544,16 +562,16 @@ def test_preview_retry_keeps_selection_and_new_room_reuses_bulk_picker(
 
 
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
-def test_saved_vps_target_survives_advanced_search_bulk_and_expiry_change(
+def test_shared_vps_target_is_read_only_from_room_connection_entry(
         collaboration_stack, chat_browser_pool, engine):
     from tests.collaboration_support import key
     from tests.test_collaboration_delivery_flow import scope
     stack = collaboration_stack
     context = chat_browser_pool(engine).new_context(viewport={'width': 390, 'height': 844})
     page = context.new_page()
-    page.set_default_timeout(10000)
-    errors = []
-    page.on('pageerror', lambda error: errors.append({'message': str(error), 'stack': error.stack}))
+    writes = []
+    page.on('request', lambda r: writes.append(r.url)
+            if r.url.endswith('/api/collaboration/room-scope') else None)
     try:
         login(page, stack)
         joined = join_dot(stack, create_dot(stack, '合成目标保留助手'))
@@ -572,28 +590,13 @@ def test_saved_vps_target_survives_advanced_search_bulk_and_expiry_change(
             'execution_mode': 'account_permissions_acknowledged', 'acknowledge_unsandboxed_exec': True,
             'confirm_connection_wide_ceiling': True, 'expires_seconds': 3600, 'idempotency_key': key()}))
         group = advanced_connections(page)
-        group.locator('[name="grant_id"]').select_option(grant)
-        row = group.locator(f'[data-project-id="{stack.project["id"]}"]')
-        row.locator('.cc-project-capabilities > summary').click()
-        expect(row.locator('[data-project-target-summary]')).to_contain_text(target)
-        group.locator('[data-project-search]').fill(stack.projects[1]['alias'])
-        group.locator('[data-project-bulk="all"]').click()
-        group.locator('[data-project-bulk="none"]').click()
-        expect(row.locator('[name="project_selected"]')).to_be_checked()
-        group.locator('[data-project-search]').fill('')
-        group.locator('[name="hours"]').fill('2')
-        group.locator('[name="unsandboxed"]').check()
-        group.locator('[name="confirm_scope"]').check()
-        with page.expect_response(lambda r: r.url.endswith('/api/collaboration/room-scope')) as response:
-            group.locator('[data-cc-action="dot-channel-scope-save"]').click()
-        assert response.value.status == 200, response.value.json()
-        rules = response.value.request.post_data_json['project_rules']
-        assert rules == [{'project_id': stack.project['id'], 'capabilities': ['read', 'execute'],
-                          'execution_targets': [target]}]
+        expect(group).to_contain_text('只读')
+        expect(group.locator('[name="grant_id"], [name="hours"], [data-channel-form="scope"]')).to_have_count(0)
+        page.keyboard.press('Escape')
         saved = stack.must(stack.client.get('/api/collaboration/room-scopes', params={
             **scope(stack), 'conversation_id': conversation['id']}))
         assert saved['items'][0]['manifest']['project_rules'][0]['execution_targets'] == [target]
-        assert not errors
+        assert not writes
     finally:
         context.close()
 
@@ -627,7 +630,8 @@ def test_apply_concurrent_connection_limit_refreshes_remedy_without_resubmitting
             route.continue_()
         page.route('**/api/collaboration/conversation-projects', change_ceiling)
         save(form)
-        expect(form.locator('[data-cc-action="room-project-connection-review"]')).to_be_visible()
+        expect(form.locator('[data-room-project-summary]')).to_contain_text('上游权限')
+        expect(form.locator('[data-cc-action="room-project-connection-review"]')).to_have_count(0)
         expect(project_checkbox(form, stack.projects[1])).to_be_checked()
         expect(form.locator('button[type="submit"]')).to_be_disabled()
         assert len(writes) == 1
@@ -642,3 +646,201 @@ def open_scope_form(page):
     if not form.is_visible():
         form.locator('..').locator(':scope > summary').click()
     return form
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_early_bulk_intent_survives_late_initial_permission_preview(
+        collaboration_stack, chat_browser_pool, engine):
+    stack = collaboration_stack
+    context = chat_browser_pool(engine).new_context(viewport={'width': 390, 'height': 844})
+    page = context.new_page()
+    held, seen = [], []
+    try:
+        login(page, stack)
+        join_dot(stack, create_dot(stack))
+        form = manage_from_connections(page)
+        project_checkbox(form, stack.projects[1]).check()
+        expect(form.locator('button[type="submit"]')).to_be_enabled()
+        first = project_checkbox(form, stack.project).locator('..').locator('..')
+        first.locator('[data-project-capability][value="write"]').uncheck()
+        first.locator('[data-project-capability][value="execute"]').uncheck()
+        save(form)
+        expect(page.locator('#cc-drawer')).not_to_be_visible()
+        def delay_initial(route):
+            seen.append(route.request.post_data_json)
+            if len(seen) == 1:
+                held.append((route, route.fetch()))
+                page.locator('html').evaluate('(n) => n.dataset.heldFirstPermission = "ready"')
+            else:
+                route.continue_()
+        page.route('**/api/collaboration/conversation-projects-preview', delay_initial)
+        group = advanced_connections(page)
+        group.locator('[data-cc-action="manage-room-permissions"]').click()
+        expect(page.locator('html')).to_have_attribute('data-held-first-permission', 'ready')
+        form = page.locator('#cc-room-projects')
+        form.locator('[data-project-bulk="all"]').click()
+        expect(form.locator('[data-project-capability]:checked')).to_have_count(6)
+        expect(form.locator('button[type="submit"]')).to_be_enabled()
+        route, response = held.pop()
+        route.fulfill(response=response)
+        expect(form.locator('[data-project-capability]:checked')).to_have_count(6)
+        save(form)
+        expect(page.locator('#cc-drawer')).not_to_be_visible()
+        assert len(seen) >= 3
+    finally:
+        page.unroute_all(behavior='ignoreErrors')
+        context.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_global_connection_scope_is_separate_confirmed_and_unblocks_archive_dependency(
+        collaboration_stack, chat_browser_pool, tmp_path, engine):
+    from tests.collaboration_support import key
+    from tests.test_collaboration_delivery_flow import scope
+    stack = collaboration_stack
+    context = chat_browser_pool(engine).new_context(viewport={'width': 390, 'height': 844})
+    page = context.new_page()
+    shared_writes, room_writes = [], []
+    page.on('request', lambda r: shared_writes.append((r.url.rsplit('/', 1)[-1], r.post_data_json))
+            if r.method == 'POST' and r.url.rsplit('/', 1)[-1] in {'room-scope', 'room-scope-control'} else None)
+    page.on('request', lambda r: room_writes.append(r.post_data_json)
+            if r.url.endswith('/api/collaboration/conversation-projects') else None)
+    try:
+        login(page, stack)
+        joined = join_dot(stack, create_dot(stack, '合成范围核对助手'))
+        before = overview(stack)['conversation']
+        preview = stack.must(stack.client.post('/api/collaboration/conversation-projects-preview', json={
+            'conversation_id': before['id'], 'dot_id': joined['slot']['id'],
+            'projects': [{'project': stack.project['id'], 'environment_id': 'production'}]}))
+        grant = preview['connection']['grant_id']
+        rules = [{'project_id': stack.project['id'], 'capabilities': ['read', 'write', 'execute'],
+                  'execution_targets': ['agent']}]
+        stack.must(stack.client.post('/api/collaboration/room-scope', json={
+            **scope(stack), 'conversation_id': before['id'], 'grant_id': grant,
+            'expected_version': 0, 'project_rules': rules,
+            'execution_mode': 'account_permissions_acknowledged', 'acknowledge_unsandboxed_exec': True,
+            'confirm_connection_wide_ceiling': True, 'expires_seconds': 3600, 'idempotency_key': key()}))
+        initial = stack.must(stack.client.get('/api/collaboration/room-scopes', params={
+            **scope(stack), 'conversation_id': before['id']}))['items'][0]
+        blocked = stack.must(stack.client.post('/api/collaboration/conversation-archive-preview',
+                                              json={'conversation_id': before['id']}))
+        assert blocked['ready'] is False and blocked['dependent_connections'][0]['grant_id'] == grant
+        assert '整条连接限制' in blocked['message'] and '所有使用同一凭据的会话' in blocked['message']
+
+        page.locator('[data-cc-more]').click()
+        page.locator('[data-cc-action="archive-room"]').click()
+        expect(page.locator('#cc-drawer h2')).to_have_text('暂时不能删除此房间')
+        expect(page.locator('#cc-drawer')).to_contain_text('查看整条连接限制')
+        evidence_sizes(page, tmp_path, 'connection-archive-dependency-guide', engine)
+        page.locator('#cc-drawer').get_by_role('button', name='返回', exact=True).click()
+        expect(page.locator('#cc-drawer')).not_to_be_visible()
+        group = advanced_connections(page)
+        expect(group.locator('[data-channel-form="scope"]')).to_have_count(0)
+        expect(group.locator('[data-cc-action="manage-room-permissions"]')).to_be_visible()
+        evidence_sizes(page, tmp_path, 'connection-separated-entry', engine)
+        group.locator('[data-cc-action="dot-channel-view-connection-scope"]').click()
+        expect(page.locator('[data-channel-view]')).to_have_attribute('data-channel-view', 'connection-scope')
+        expect(page.locator('#cc-drawer h2')).to_have_text('整条 MCP 凭据限制')
+        expect(page.locator('.cc-connection-warning').first).to_contain_text('所有使用同一凭据的会话')
+        form = open_scope_form(page)
+        expect(form.locator('[name="grant_id"]')).to_have_value(grant)
+        expect(form.locator('[name="confirm_scope"]')).not_to_be_checked()
+        expect(form.locator('[name="unsandboxed"]')).not_to_be_checked()
+        assert not shared_writes and not room_writes
+        form.scroll_into_view_if_needed()
+        evidence_sizes(page, tmp_path, 'connection-global-scope-top', engine)
+        # Merely returning or reopening neither changes the scope nor retains consent.
+        form.locator('[name="confirm_scope"]').check()
+        page.locator('[data-cc-action="dot-channel-view-advanced"]').click()
+        expect(page.locator('[data-channel-form="scope"]')).to_have_count(0)
+        evidence_sizes(page, tmp_path, 'connection-back-to-room-permissions', engine)
+        page.locator('[data-cc-action="dot-channel-view-connection-scope"]').click()
+        form = open_scope_form(page)
+        expect(form.locator('[name="confirm_scope"]')).not_to_be_checked()
+        form.locator('[name="hours"]').fill('2')
+        form.locator('[data-cc-action="dot-channel-scope-save"]').click()
+        assert not shared_writes
+        form.locator('[name="confirm_scope"]').check()
+        form.locator('[name="unsandboxed"]').check()
+        form.locator('[data-cc-action="dot-channel-scope-save"]').scroll_into_view_if_needed()
+        evidence_sizes(page, tmp_path, 'connection-global-explicit-confirmation', engine)
+        form.locator('[data-cc-action="dot-channel-scope-save"]').click()
+        expect(page.locator('.cc-channel-binding').first).to_contain_text('版本 2')
+        assert len(shared_writes) == 1 and shared_writes[0][0] == 'room-scope'
+        sent = shared_writes[0][1]
+        assert sent['grant_id'] == grant and sent['expected_version'] == initial['version']
+        assert sent['project_rules'] == rules and sent['expires_seconds'] == 7200
+        assert sent['confirm_connection_wide_ceiling'] is True
+        assert sent['conversation_id'] == before['id']
+
+        page.once('dialog', lambda dialog: dialog.dismiss())
+        page.locator('[data-cc-action="dot-channel-scope-revoke"]').click()
+        assert len(shared_writes) == 1
+        expect(page.locator('.collaboration')).not_to_have_attribute('aria-busy', 'true')
+        page.once('dialog', lambda dialog: dialog.accept())
+        with page.expect_response('**/api/collaboration/room-scope-control') as revoked:
+            page.locator('[data-cc-action="dot-channel-scope-revoke"]').click()
+        assert revoked.value.ok, revoked.value.text()
+        expect(page.locator('.cc-channel-binding').first).to_contain_text('已撤销')
+        assert len(shared_writes) == 2 and shared_writes[-1][0] == 'room-scope-control'
+        assert shared_writes[-1][1]['grant_id'] == grant
+        assert shared_writes[-1][1]['expected_version'] == 2
+        current = stack.must(stack.client.get('/api/collaboration/room-scopes', params={
+            **scope(stack), 'conversation_id': before['id']}))['items'][0]
+        assert current['state'] == 'revoked'
+        ready = stack.must(stack.client.post('/api/collaboration/conversation-archive-preview',
+                                            json={'conversation_id': before['id']}))
+        assert ready['ready'] is True and ready['dependent_connections'] == []
+        assert overview(stack)['conversation'] == before
+        assert not room_writes
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_room_permission_preview_root_overlap_blocks_apply_without_adding_project(
+        collaboration_stack, chat_browser_pool, tmp_path, engine):
+    stack = collaboration_stack
+    context = chat_browser_pool(engine).new_context(viewport={'width': 390, 'height': 844})
+    page = context.new_page()
+    applies, previews = [], []
+    page.on('request', lambda r: applies.append(r.url)
+            if r.method == 'POST' and r.url.rsplit('/', 1)[-1] in
+            {'conversation-projects', 'room-scope', 'room-scope-control'} else None)
+    page.on('response', lambda response: previews.append(response.json())
+            if response.url.endswith('/api/collaboration/conversation-projects-preview') else None)
+    try:
+        login(page, stack)
+        join_dot(stack, create_dot(stack, '合成目录核对助手'))
+        before = overview(stack)['conversation']
+        nested = stack.create_project({
+            'alias': 'SyntheticNestedProject', 'root': str(stack.projectalpha / 'src'),
+            'device_id': stack.device, 'description': 'Disposable overlapping mapping',
+            'mode': 'write', 'allow_tasks': True,
+        })
+        page.reload()
+        group = advanced_connections(page)
+        group.locator('[data-cc-action="manage-room-permissions"]').click()
+        form = page.locator('#cc-room-projects')
+        expect(form).to_have_attribute('data-permissions-only', 'true')
+        expect(form).to_have_attribute('data-preview-state', 'blocked')
+        expect(form.locator('[data-room-project-summary]')).to_contain_text('包含未选择的项目目录')
+        expect(form.locator('[data-room-project-summary]')).to_contain_text(stack.project['alias'])
+        expect(form.locator('button[type="submit"]')).to_be_disabled()
+        expect(form.locator('[name="room_projects"]')).to_have_count(1)
+        expect(project_checkbox(form, stack.project)).to_be_checked()
+        expect(project_checkbox(form, nested)).to_have_count(0)
+        assert any(item.get('reason_code') == 'ROOM_PROJECT_ROOT_OVERLAP' for item in previews)
+        evidence_sizes(page, tmp_path, 'room-root-overlap-blocked', engine)
+        # A second explicit read preserves the same selection and cannot apply.
+        page.keyboard.press('Escape')
+        group = advanced_connections(page)
+        group.locator('[data-cc-action="manage-room-permissions"]').click()
+        expect(form).to_have_attribute('data-preview-state', 'blocked')
+        expect(form.locator('button[type="submit"]')).to_be_disabled()
+        assert not applies
+        after = overview(stack)['conversation']
+        assert after['version'] == before['version'] and after['projects'] == before['projects']
+        assert after == before
+    finally:
+        context.close()

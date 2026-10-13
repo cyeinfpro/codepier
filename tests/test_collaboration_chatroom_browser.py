@@ -293,14 +293,16 @@ def test_conversation_add_project_preserves_history_draft_and_attribution(collab
         expect(form.locator('[name="confirm"]')).to_have_count(0)
         expect(form.locator('button[type="submit"]')).to_be_enabled()
         form.locator('button[type="submit"]').evaluate('(button) => {button.click();button.click();}')
-        expect(page.locator('.cc-project-chip')).to_have_count(2)
+        expect(page.locator('.cc-project-count')).to_have_text('2 个项目')
         expect(page.locator('.cc-chat-shell')).to_have_attribute('data-conversation', conversation)
         expect(area).to_have_value('添加项目期间保留的草稿')
         expect(page.locator('.cc-feed')).to_contain_text('原项目已有讨论')
         current = overview(stack)['conversation']
         assert current['id'] == conversation and len(current['projects']) == 2
         # Working projects are labels; they never switch the original message connection.
-        page.locator(f'[data-room-project="{other["id"]}"]').click()
+        page.locator('.cc-project-summary [data-cc-action="manage-projects"]').click()
+        expect(page.locator(f'#cc-room-projects [name="room_projects"][value="{other["id"]}"]')).to_be_checked()
+        page.keyboard.press('Escape')
         expect(page.locator('.cc-chat-shell')).to_have_attribute('data-project', stack.project['id'])
         expect(area).to_have_value('添加项目期间保留的草稿')
         area.fill('第二个项目的消息')
@@ -343,7 +345,7 @@ def test_conversation_add_project_preserves_history_draft_and_attribution(collab
         created = page.locator('.cc-chat-shell').get_attribute('data-conversation')
         assert created and created != conversation
         expect(page.locator('.cc-feed')).not_to_contain_text('原项目已有讨论')
-        expect(page.locator('.cc-project-chip')).to_have_count(2)
+        expect(page.locator('.cc-project-count')).to_have_text('2 个项目')
         page.reload()
         expect(page.locator('.cc-chat-shell')).to_have_attribute('data-conversation', created)
         expect(page.locator('.cc-room-title h2')).to_have_text('独立多项目讨论')
@@ -386,7 +388,7 @@ def test_conversation_stale_add_review_and_visible_permission_reset(collaboratio
         expect(form.locator(f'[name="room_projects"][value="{other["id"]}"]')).to_be_checked()
         page.keyboard.press('Escape')
         click_room_refresh(page)
-        expect(page.locator('.cc-project-chip')).to_have_count(2)
+        expect(page.locator('.cc-project-count')).to_have_text('2 个项目')
         assert len(overview(stack)['conversation']['projects']) == 2
         page.locator('#cc-message-input').fill('被撤权来源的草稿')
         page.locator('[data-cc-more]').click()
@@ -419,8 +421,8 @@ def test_conversation_stale_add_review_and_visible_permission_reset(collaboratio
         expect(page.locator('.cc-feed')).not_to_contain_text('原项目敏感讨论记录')
         expect(page.locator('#cc-message-input')).to_have_value('')
         expect(page.locator('#cc-message-input')).to_be_disabled()
-        expect(page.locator('.cc-project-chip')).to_have_count(1)
-        expect(page.locator('.cc-project-chip')).to_have_attribute('data-cc-partition', other['id'])
+        expect(page.locator('.cc-project-count')).to_have_text('1 个项目')
+        expect(page.locator('.cc-project-strip .cc-project-chip')).to_have_count(0)
         expect(page.locator('.cc-context-rail')).to_have_count(0)
         expect(page.locator('#cc-workspace-panel [data-cc-panel]')).to_have_text(['', '', ''])
     finally:
@@ -802,7 +804,7 @@ def test_ordinary_drawer_close_suppresses_late_thread_response(collaboration_sta
 @pytest.mark.parametrize('failure_kind', ['timeline', 'overview', 'coordination_options'])
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
 def test_permission_loss_at_each_refresh_stage_clears_and_rebinds_remaining_project(
-        collaboration_stack, chat_browser_pool, engine, failure_kind):
+        collaboration_stack, chat_browser_pool, tmp_path, engine, failure_kind, focus_away=False):
     stack = collaboration_stack
     context = chat_browser_pool(engine).new_context(viewport={'width': 1440, 'height': 900})
     page = context.new_page()
@@ -832,7 +834,7 @@ def test_permission_loss_at_each_refresh_stage_clears_and_rebinds_remaining_proj
             **other_scope, 'room_id': other_room['id'], 'body_text': '仍获权项目的安全记录',
             'client_message_id': key(), 'idempotency_key': key(), 'mentions': []}))
         click_room_refresh(page)
-        expect(page.locator('.cc-project-chip')).to_have_count(2)
+        expect(page.locator('.cc-project-count')).to_have_text('2 个项目')
         expect(page.locator('.cc-feed')).to_contain_text('撤权后必须清除的旧项目记录')
         page.locator('#cc-message-input').fill('必须清除的旧项目草稿')
         page.locator('.cc-feed [data-cc-action="thread"]').first.click()
@@ -892,15 +894,85 @@ def test_permission_loss_at_each_refresh_stage_clears_and_rebinds_remaining_proj
             expect(retry).to_be_enabled()
             retry.click()
             expect(page.locator('#cc-feedback')).to_contain_text('请重新选择仍获权的项目')
-        remaining = page.locator(f'[data-cc-partition="{other["id"]}"]')
+        expect(page.locator('.cc-room-title h2')).to_have_text('选择可访问项目')
+        expect(page.locator('.cc-room-title .cc-status')).to_have_text('权限待核')
+        expect(page.locator('.cc-room-subline > span')).to_have_text('1 个可访问项目')
+        expect(page.locator('.cc-project-count')).to_have_text('1 个项目')
+        expect(page.locator('.cc-compose-controls > small')).to_have_text('来源 · 待选择')
+        expect(page.locator('.cc-compose-help > span').first).to_have_text('尚未选择发送项目 · 权限待核')
+        expect(page.locator('.collaboration')).to_have_attribute('data-project', '')
+        expect(page.locator('.collaboration')).to_have_attribute('data-environment', '')
+        expect(page.locator('.cc-room-body')).not_to_contain_text(stack.project['alias'])
+        expect(page.locator('.cc-room-rail')).not_to_contain_text(stack.project['alias'])
+        expect(page.locator('.cc-project-strip [data-cc-partition]')).to_have_count(0)
+        from tests.test_room_projects_browser import evidence_sizes
+        if failure_kind == 'timeline' and not focus_away:
+            evidence_sizes(page, tmp_path, 'room-recovery-cleared', engine)
+        project_list = page.locator('.cc-project-summary [data-cc-action="view-projects"]')
+        expect(project_list).to_be_enabled()
+        expect(project_list).to_be_focused()
+        project_list.click()
+        expect(page.locator('#cc-drawer')).to_contain_text('旧内容已清除')
+        expect(page.locator('#cc-drawer .cc-project-review li')).to_have_count(1)
+        expect(page.locator('#cc-drawer')).to_contain_text(other['alias'])
+        expect(page.locator('#cc-drawer')).not_to_contain_text(stack.project['alias'])
+        expect(page.locator('#cc-drawer')).not_to_contain_text('撤权后必须清除')
+        expect(page.locator('#cc-drawer [data-cc-action="manage-projects"]')).to_have_count(0)
+        if failure_kind == 'timeline' and not focus_away:
+            evidence_sizes(page, tmp_path, 'room-recovery-list', engine)
+        page.keyboard.press('Escape')
+        expect(project_list).to_be_focused()
+        expect(page.locator('#cc-message-input')).to_be_disabled()
+        project_list.click()
+        remaining = page.locator(f'#cc-drawer [data-cc-partition="{other["id"]}"]')
         expect(remaining).to_be_enabled()
+        held_rebind = []
+        def delay_rebind(route):
+            query = parse_qs(urlsplit(route.request.url).query)
+            if query.get('project') == [other['id']] and query.get('kind', ['overview']) == ['overview']:
+                response = route.fetch()
+                body = response.json()
+                body['conversation']['projects'] = [p for p in body['conversation']['projects']
+                                                    if p['project_id'] == other['id']]
+                held_rebind.append((route, response, body))
+                page.locator('html').evaluate('(n) => n.dataset.heldRebind = "yes"')
+            else:
+                route.fallback()
+        if focus_away:
+            page.route('**/api/collaboration?*', delay_rebind)
         remaining.click()
+        external_focus = page.get_by_role('button', name='项目映射', exact=True)
+        if focus_away:
+            expect(page.locator('html')).to_have_attribute('data-held-rebind', 'yes')
+            external_focus.focus()
+            expect(external_focus).to_be_focused()
+            route, response, body = held_rebind.pop()
+            route.fulfill(response=response, json=body)
+            page.unroute('**/api/collaboration?*', delay_rebind)
         expect(page.locator('.collaboration')).to_have_attribute('data-project', other['id'])
         expect(page.locator('#cc-message-input')).to_be_enabled()
         expect(page.locator('.cc-feed')).to_contain_text('仍获权项目的安全记录')
         expect(page.locator('.cc-feed')).not_to_contain_text('撤权后必须清除')
+        expect(page.locator('.cc-room-title h2')).to_have_text('聊天室')
+        expect(page.locator('.cc-room-subline > span')).to_have_text('1 个项目')
+        expect(page.locator('.cc-compose-controls > small')).to_have_text('来源 · ' + other['alias'])
+        expect(page.locator('.cc-compose-help > span').first).to_have_text('发送到 ' + other['alias'] + ' · production')
+        expect(page.locator('.cc-room-body')).not_to_contain_text(stack.project['alias'])
+        expect(external_focus if focus_away else page.locator('#cc-message-input')).to_be_focused()
+        if failure_kind == 'timeline' and not focus_away:
+            evidence_sizes(page, tmp_path, 'room-recovery-rebound', engine)
+        page.locator('#cc-message-input').fill('重检后只发给仍获权项目')
+        with page.expect_request('**/api/collaboration/message') as sent:
+            page.locator('#cc-command button[type="submit"]').click()
+        assert sent.value.post_data_json['project'] == other['id']
+        assert sent.value.post_data_json['environment_id'] == 'production'
+        assert sent.value.post_data_json['conversation_id'] == conversation['id']
+        expect(page.locator('#cc-message-input')).to_have_value('')
+        expect(page.locator('.cc-feed')).to_contain_text('重检后只发给仍获权项目')
+        expect(page.locator('#cc-command button[type="submit"]')).to_be_enabled()
         assert original['project'] != other['id']
     finally:
+        page.unroute_all(behavior='wait')
         context.close()
 
 
@@ -967,6 +1039,12 @@ def test_refresh_recovery_clears_before_waiting_and_respects_new_navigation(
         assert held[0][1].ok, held[0][1].status
         expect(page.locator('.cc-feed')).not_to_contain_text(body)
         expect(page.locator('#cc-message-input')).to_be_disabled()
+        if pending_stage == 'directory':
+            expect(page.locator('.cc-room-title h2')).to_have_text('选择可访问项目')
+            expect(page.locator('.cc-room-subline > span')).to_have_text('正在核对项目')
+            expect(page.locator('.cc-compose-help > span').first).to_contain_text('权限待核')
+            expect(page.locator('.collaboration')).to_have_attribute('data-project', '')
+            expect(page.locator('.cc-room-body')).not_to_contain_text(stack.project['alias'])
         page.get_by_role('button', name='项目映射', exact=True).click()
         expect(page.locator('#page h1')).to_have_text('项目映射')
         held[0][0].fulfill(response=held[0][1])
@@ -977,3 +1055,10 @@ def test_refresh_recovery_clears_before_waiting_and_respects_new_navigation(
         expect(page.locator('.collaboration')).to_have_count(0)
     finally:
         context.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_recovery_late_rebind_does_not_steal_new_external_focus(
+        collaboration_stack, chat_browser_pool, tmp_path, engine):
+    test_permission_loss_at_each_refresh_stage_clears_and_rebinds_remaining_project(
+        collaboration_stack, chat_browser_pool, tmp_path, engine, 'timeline', focus_away=True)

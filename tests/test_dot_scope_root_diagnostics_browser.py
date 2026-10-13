@@ -5,14 +5,14 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import expect
 
-from tests.test_dot_channel_navigation_browser import act, overview, no_overflow
+from tests.test_dot_channel_navigation_browser import act, overview, no_overflow, connection_scope
 from tests.weixin_browser_support import full_styles, qr_page as qr_page
 
 
 def open_scope(page):
     act(page, "open")
     overview(page)
-    act(page, "view-advanced")
+    connection_scope(page)
     return page.locator("[data-channel-form=scope]")
 
 

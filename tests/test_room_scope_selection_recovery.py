@@ -239,7 +239,18 @@ def test_existing_connection_ceiling_explains_one_owner_confirmation_without_sav
     joined, args = setup_connection_limit(b, kind)
     baseline = saved_state(b)
     changes = b.app.state.store.one('SELECT total_changes() AS n')['n']
-    preview = panel(b, 'conversation-projects-preview', selection(b, joined, ['otherproject']))
+    raw = selection(b, joined, ['otherproject'])
+    preview = panel(b, 'conversation-projects-preview', raw)
+    if kind == 'capability':
+        # New selections default to the actual permission intersection. Available
+        # reads stay usable; they must never be presented as writable.
+        assert preview['ready'] and preview['projects'][0]['capabilities'] == ['read']
+        assert preview['permission_options'][0]['allowed_capabilities'] == ['read']
+        stale = b.client.post('/api/collaboration/conversation-projects', json=args)
+        assert stale.status_code == 409 and stale.json()['error']['code'] == 'ROOM_PROJECT_PREVIEW_CHANGED'
+        raw['projects'][0]['capabilities'] = ['read', 'write']
+        args['projects'][0]['capabilities'] = ['read', 'write']
+        preview = panel(b, 'conversation-projects-preview', raw)
     assert preview['ready'] is False
     assert preview['reason_code'] == 'ROOM_PROJECT_CONNECTION_LIMITED'
     assert preview['remedy'] == 'review_connection_scope'
@@ -351,7 +362,18 @@ def test_scope_preview_checks_exact_execution_target_ceiling_before_reporting_re
     })
     before = saved_state(b)
     operations = b.app.state.store.all('SELECT * FROM operations')
-    preview = panel(b, 'conversation-projects-preview', selection(b, joined, ['otherproject']))
+    raw = selection(b, joined, ['otherproject'])
+    available = panel(b, 'conversation-projects-preview', raw)
+    assert available['ready'] and available['projects'][0]['capabilities'] == ['read']
+    assert available['permission_options'][0]['allowed_capabilities'] == ['read']
+    assert available['permission_options'][0]['allowed_execution_targets'] == []
+    stale = b.client.post('/api/collaboration/conversation-projects', json=args)
+    assert stale.status_code == 409 and stale.json()['error']['code'] == 'ROOM_PROJECT_PREVIEW_CHANGED'
+    # An explicit execution request still fails against the exact old target
+    # ceiling, and cannot reuse the earlier wider approval.
+    raw['projects'][0].update(capabilities=['read', 'execute'], execution_targets=[target])
+    args['projects'][0].update(capabilities=['read', 'execute'], execution_targets=[target])
+    preview = panel(b, 'conversation-projects-preview', raw)
     assert not preview['ready']
     assert preview['reason_code'] == 'ROOM_PROJECT_CONNECTION_LIMITED'
     assert preview['restricted_projects'] == [{

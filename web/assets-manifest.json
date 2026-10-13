@@ -1,5 +1,5 @@
 {
-  "version": "1.28.2",
+  "version": "1.28.3",
   "algorithm": "sha256",
   "assets": {
     "access-profiles.css": {
@@ -71,48 +71,48 @@
       "bytes": 16124
     },
     "collaboration-channels.js": {
-      "sha256": "e895311f7e9c90746d04807f8534e21fe5f6e839db2d3245a76e1ddeab07283b",
-      "bytes": 138940
+      "sha256": "b68a0ccfedc13b5582de615302d0e713afbf44c9441d3e37c64558e36ba6faeb",
+      "bytes": 140860
     },
     "collaboration-delegation.js": {
-      "sha256": "555d463f782157743fb806ebe1c1efee27c37055e160c84110811b7fd46f5e4f",
-      "bytes": 46284
+      "sha256": "d083a7bf98a5e8b90ba1c5220b36e2fea7292a2f46ddf901baf07d74539be339",
+      "bytes": 47277
     },
     "collaboration-dots.js": {
-      "sha256": "9592121fe494026d345bbec7c17d4a3f995342fac40ab95e7dc9c10940977171",
-      "bytes": 21111
+      "sha256": "32e8decdfb9461a9aa7c928011f559e2d4c7c359727663a40ba9d19ecd7932ef",
+      "bytes": 21217
     },
     "collaboration-goals.js": {
-      "sha256": "d5572bb47e15fb3cb7483ee8de30ba1ff23875fb99b83446ad256d24e29c1c55",
-      "bytes": 37439
+      "sha256": "c7f84b510fccc45e92e829d11d27ee96b86857b7dc5816d488f0a299b8e6fb19",
+      "bytes": 37918
     },
     "collaboration-relay.css": {
       "sha256": "bbc34cf9fabe3e1d675a1bd5a5adfa51651f6e50eae9d7d0fa0b82f39c3e0ec3",
       "bytes": 12377
     },
     "collaboration-relay.js": {
-      "sha256": "92062f7b6080576e9916ff2b25d9cba4e87d412a6f40a044d1642de408b37410",
-      "bytes": 58026
+      "sha256": "b53efb8d77488393266234adbc0fced7776a55dd857938227a5a8fe7d8f54508",
+      "bytes": 60068
     },
     "collaboration-runtime.js": {
       "sha256": "ac478b2c93d54e1a84e743537ecaf0c57793433884ae0328e26b93c00e491baa",
       "bytes": 2871
     },
     "collaboration-workspace.css": {
-      "sha256": "d64ec806c2e365e79db3c484771e501e7d30cf7aca781c979b53eebb81074020",
-      "bytes": 27774
+      "sha256": "3810dcd2123ba46d5623c96ec1b22fe3da326c180c673682d5f83d2b0bbfc16c",
+      "bytes": 30111
     },
     "collaboration-workspace.js": {
-      "sha256": "6b497189028fb344c9df3cb65ea6a53e4c481894ef605af0a3f632beab28eb38",
-      "bytes": 30627
+      "sha256": "1dcf231b134d330b6f4fa9c1d4220ce4b7b2964c56625e0c509ae35dc6926323",
+      "bytes": 31149
     },
     "collaboration.css": {
       "sha256": "1327016ede11f790b11d7949785636bfb337c214b86ea6bd6f44710d8862d342",
       "bytes": 39320
     },
     "collaboration.js": {
-      "sha256": "a76f676ca0bf647faa6c6a85feed0069a58c9d99b49387524a39c3a35e03b846",
-      "bytes": 160165
+      "sha256": "8d15ba3ea9e18d55eac49316a42912cce820392d19d581c6e73cfe1faf7a3a1a",
+      "bytes": 183438
     },
     "computer.css": {
       "sha256": "3bfd6993ecee11cf6c23d78cc7b4f9acd6759ffaccc5e241ff06e156da7dfcac",

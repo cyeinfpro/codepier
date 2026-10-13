@@ -141,9 +141,9 @@ class DotChatService:
     def task_policy(self, room, dot, principal):
         policy = self.c.dots.policy(room, dot)
         self.c.delegation.authorize_policy(principal, room, policy)
-        spec = json.loads(policy['spec'])
+        defaults = self.c.conversations.working_scopes.task_defaults(principal, policy)
         self.c.conversations.working_scopes.for_new_task(principal, policy,
-            spec['capabilities'], spec['execution_targets'])
+            defaults['capabilities'], defaults['execution_targets'])
         return policy
 
     def work_request(self, room, dot, principal):
@@ -367,6 +367,7 @@ class DotChatService:
             owner, _ = self.c.dots.approved_owner(room, dot, principal)
             policy = self.task_policy(room, dot, principal)
             spec = json.loads(policy['spec'])
+            defaults = self.c.conversations.working_scopes.task_defaults(owner, policy)
             def save():
                 existing = self.store.one('SELECT * FROM delegation_requests WHERE message_id=?', (message['id'],))
                 if existing:
@@ -374,7 +375,7 @@ class DotChatService:
                         raise DevError('DELEGATION_POLICY_CHANGED', '原消息已属于其他范围的工作，不重复执行', 409)
                     return {'delegation_id': existing['id']}
                 delegation = {'policy_id': policy['id'], 'policy_version': policy['version'],
-                    'execution_targets': spec['execution_targets'], 'capabilities': spec['capabilities'],
+                    'execution_targets': defaults['execution_targets'], 'capabilities': defaults['capabilities'],
                     'acceptance': spec['automatic_acceptance']}
                 result = self.c.delegation.send(owner, room, message, {'delegation': delegation,
                     'mentions': [{'slot_id': dot['id']}]})

@@ -556,7 +556,8 @@ class CoordinationService:
                 supplied = args['arguments']
                 if supplied.get('project', item['project_id']) != item['project_id']:
                     raise DevError('WORK_PROJECT_MISMATCH', '执行参数必须使用工作项的唯一项目', 403)
-                target = self.c.delegation.target(principal, room, goal, args['tool'], supplied)
+                target = self.c.delegation.target(principal, room, goal, args['tool'], supplied,
+                                                  project_id=item['project_id'])
                 if supplied.get('operation', 'file') != 'file':
                     raise DevError('GOAL_OPERATION_NOT_SUPPORTED', '此入口只支持基本文件操作和 exec', 422)
                 if args['tool'] == 'exec' and supplied.get('task'):

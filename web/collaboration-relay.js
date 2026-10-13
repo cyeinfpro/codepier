@@ -214,6 +214,13 @@ window.CodePierCollaborationRelay = {
       clear: () => {
         storage.removeItem(key);
       },
+      removeConversation: (conversation) => {
+        const value = read();
+        value.records = value.records.filter(
+          (r) => (r.payload.conversation_id || r.payload.room_id) !== conversation,
+        );
+        write(value);
+      },
       remove: (id) => {
         const value = read();
         value.records = value.records.filter((r) => r.id !== id);
@@ -296,7 +303,9 @@ window.CodePierCollaborationRelay = {
       }
       return pendingStore;
     }
+    const restoredHistory = () => !!state.snapshot?.conversation?.restored_from_archive;
     function persistenceScope() {
+      if (restoredHistory()) return '';
       const c = chat();
       if (
         !S.session?.user_id ||
@@ -334,6 +343,10 @@ window.CodePierCollaborationRelay = {
       }
     }
     function restorePending() {
+      if (restoredHistory()) {
+        purgeConversation(state.snapshot.conversation.id);
+        return;
+      }
       const c = chat(),
         scope = persistenceScope();
       if (!scope || c.relayRestoredScope === scope) return;
@@ -387,6 +400,7 @@ window.CodePierCollaborationRelay = {
       entry.space === S.space_id &&
       [...state.chats.values()].includes(entry.chat);
     const visible = (entry) =>
+      !restoredHistory() &&
       belongs(entry) &&
       entry.chat === chat() &&
       S.page === 'collaboration' &&
@@ -451,6 +465,7 @@ window.CodePierCollaborationRelay = {
     function statuses(m) {
       const view = window.CodePierCollaborationRelay.primaryReceipt(m);
       if (!view) return taskEvidence(m);
+      const restored = !!state.snapshot?.conversation?.restored_from_archive;
       const p = view.projection,
         action = p?.next_action;
       const actions = new Set([
@@ -468,16 +483,22 @@ window.CodePierCollaborationRelay = {
             action.kind,
           )
         )
-          next = button('dot-connect', '查看原连接', { id: view.dot });
+          next = restored
+            ? button('relay-inspect', '查看历史回执', m)
+            : button('dot-connect', '查看原连接', { id: view.dot });
         else if (action.kind === 'open_original_message' && messageById(action.target_ref))
           next = button('source', '查看原消息', { id: action.target_ref });
         else
           next = button(
             'relay-inspect',
-            action.kind === 'open_host_confirmation' ? '查看授权说明' : '查看原回执',
+            restored
+              ? '查看历史回执'
+              : action.kind === 'open_host_confirmation'
+                ? '查看授权说明'
+                : '查看原回执',
             m,
           );
-      } else if (view.state === 'waiting_connection')
+      } else if (!restored && view.state === 'waiting_connection')
         next = button('dot-connect', '连接详情', { id: view.dot });
       const waiting = [
         'waiting_input',
@@ -495,13 +516,14 @@ window.CodePierCollaborationRelay = {
         .join('');
       const receiptNote =
         view.state === 'observed' ? '已确认插件收件，不代表已经处理、执行任务或模型持续在线' : '';
-      const notice =
-        view.state === 'waiting_authorization'
+      const notice = restored
+        ? '<p>以下是历史回执；原授权、连接和任务不会继续生效。</p>'
+        : view.state === 'waiting_authorization'
           ? '<p>dot 报告需要确认。请在原 dot 界面查看真实请求；此处不会批准权限。</p>'
           : receiptNote
             ? '<p>' + E(receiptNote) + '</p>'
             : '';
-      return `<div class="cc-experience-status" data-primary-state="${E(view.state)}" data-waiting-id="${E(waitingId)}"><span class="cc-dot-receipt" data-relay-state="${E(view.receipt?.state || view.state)}"${receiptNote ? ` title="${E(receiptNote)}"` : ''}>${E(view.label)}</span>${next}</div>
+      return `<div class="cc-experience-status" data-primary-state="${E(view.state)}" data-waiting-id="${E(waitingId)}"><span class="cc-dot-receipt" data-relay-state="${E(view.receipt?.state || view.state)}"${receiptNote ? ` title="${E(receiptNote)}"` : ''}>${E(restored ? '历史状态 · ' + view.label : view.label)}</span>${next}</div>
         <details class="cc-receipt-detail" data-receipt-detail="${E(m.id)}"><summary>回执与诊断详情</summary>${notice}<ul>${detail}</ul>
           <details class="cc-diagnostic-preview"><summary>预览脱敏诊断摘要</summary><p>仅含状态、脱敏对象与已核验时间；不含正文、路径或凭据。</p><pre>${E(window.CodePierCollaborationRelay.diagnosticSummary(m))}</pre>${button('relay-diagnostic-copy', '复制这份诊断摘要', m)}</details>
         </details>${taskEvidence(m)}`;
@@ -683,6 +705,7 @@ window.CodePierCollaborationRelay = {
       const c = chat();
       return (
         capable() &&
+        !restoredHistory() &&
         !c.delegationPolicy &&
         c.mentions.length === 1 &&
         mentionSlots().some(
@@ -703,6 +726,7 @@ window.CodePierCollaborationRelay = {
       }
     }
     function outboxMarkup(c) {
+      if (restoredHistory()) return '';
       return currentPending(c)
         .map(
           (e) =>
@@ -886,7 +910,7 @@ window.CodePierCollaborationRelay = {
       }
     }
     async function drain(c) {
-      if (c.relayFlight || c !== chat() || S.page !== 'collaboration') return;
+      if (restoredHistory() || c.relayFlight || c !== chat() || S.page !== 'collaboration') return;
       c.relayFlight = true;
       try {
         while (true) {
@@ -942,6 +966,7 @@ window.CodePierCollaborationRelay = {
             }
             e.needsReceipt = false;
           }
+          if (!visible(e)) break;
           e.phase = 'sending';
           e.needsReceipt = true;
           e.attempts++;
@@ -1206,6 +1231,34 @@ window.CodePierCollaborationRelay = {
       clearTimeout(retryTimer);
       retryTimer = null;
     }
+    function purgeConversation(conversation) {
+      if (!conversation) return;
+      try {
+        localStore()?.removeConversation(conversation);
+      } catch {}
+      for (const [key, c] of state.chats) {
+        let sameRoom = false;
+        try {
+          const tuple = JSON.parse(key);
+          sameRoom = tuple[0] === S.space_id && tuple[1] === conversation;
+        } catch {}
+        if (
+          !sameRoom &&
+          !(c.relayOutbox || []).some(
+            (e) =>
+              e.space === S.space_id &&
+              (e.payload.conversation_id || e.payload.room_id) === conversation,
+          )
+        )
+          continue;
+        // Invalidate late acknowledgements without touching saved server history.
+        c.relayEpoch = (c.relayEpoch || 0) + 1;
+        c.relayOutbox = [];
+        c.relayAnchor = null;
+        c.relayRestoredScope = '';
+        c.relayRecent = 0;
+      }
+    }
     function purge(c) {
       try {
         pendingStore?.clear();
@@ -1346,6 +1399,7 @@ window.CodePierCollaborationRelay = {
         document.querySelector('#cc-message-input')?.focus();
       }
       if (name === 'relay-retry') {
+        if (restoredHistory()) return true;
         const e = pending(chat()).find((e) => e.id === node.dataset.id);
         if (e && visible(e)) {
           e.phase = 'retry';
@@ -1413,6 +1467,7 @@ window.CodePierCollaborationRelay = {
       delay,
       detach,
       purge,
+      purgeConversation,
       bind,
       action,
       outboxMarkup,

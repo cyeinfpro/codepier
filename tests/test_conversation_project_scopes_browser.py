@@ -48,9 +48,9 @@ def test_single_scope_summary_one_click_and_explicit_revoke(collaboration_stack,
             expect(summary).to_contain_text(text)
         expect(form.locator('[name="confirm"]')).to_have_count(0)
         expect(form.locator('select[name="dot_id"]')).to_have_count(0)
-        expect(form.locator('button[type="submit"]')).to_have_text('保存')
+        expect(form.locator('button[type="submit"]')).to_have_text('保存项目与权限')
         form.locator('button[type="submit"]').click()
-        expect(page.locator('#cc-feedback')).to_contain_text('房间项目已保存')
+        expect(page.locator('#cc-feedback')).to_contain_text('房间项目与权限已保存')
         room = overview(stack)['conversation']
         assert room['working_scope']['dot_id'] == original_dot_id
         assert len(room['working_scope']['project_ids']) == 2
@@ -59,7 +59,7 @@ def test_single_scope_summary_one_click_and_explicit_revoke(collaboration_stack,
         added.uncheck()
         expect(form.locator('button[type="submit"]')).to_be_enabled()
         form.locator('button[type="submit"]').click()
-        expect(page.locator('#cc-feedback')).to_contain_text('房间项目已保存')
+        expect(page.locator('#cc-feedback')).to_contain_text('房间项目与权限已保存')
         room = overview(stack)['conversation']
         assert room['working_scope']['project_ids'] == [stack.project['id']]
         assert room['connection'] == original_connection

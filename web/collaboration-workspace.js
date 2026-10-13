@@ -112,6 +112,8 @@ window.CodePierCollaborationWorkspace = {
       return '<div class="cc-workspace-pulse" aria-label="当前协作状态" hidden><span class="cc-pulse-label" data-cc-pulse-label></span><button type="button" data-cc-workspace-view="jobs" data-cc-progress-open="all" class="cc-pulse-action">查看 <span aria-hidden="true">↗</span></button></div>';
     }
     function welcome() {
+      if (state.snapshot?.conversation?.restored_from_archive)
+        return `<div class="cc-chat-empty cc-workspace-welcome"><h3>房间历史已恢复</h3><p>当前可访问的项目范围内暂无历史消息。执行权限、旧连接和任务不会自动恢复。</p>${state.snapshot.can_manage ? button('new-conversation', '新建房间并接入助手') : ''}</div>`;
       const slots = mentionSlots().filter(
         (s) => s.task_dot && !['revoked', 'expired'].includes(s.state),
       );
@@ -140,7 +142,7 @@ window.CodePierCollaborationWorkspace = {
         ['responded', '已反馈'],
       ];
       const cards = all.filter((r) => filter === 'all' || r.group === filter);
-      return `<div class="cc-progress-feed"><div class="cc-progress-caption"><h3>消息回执</h3><small>当前项目已加载消息的接收与回复状态；执行结果请查看任务记录。</small></div><div class="cc-progress-filters" aria-label="筛选消息进展">${categories.map(([id, name]) => `<button type="button" data-cc-progress-filter="${id}" aria-pressed="${filter === id}">${name}<span>${id === 'all' ? all.length : all.filter((r) => r.group === id).length}</span></button>`).join('')}</div><div class="cc-progress-items">${cards.map((r) => `<article class="cc-progress-card" data-progress-message="${E(r.message.id)}" data-group="${r.group}"><div class="cc-row"><span class="cc-progress-state">${E(r.label)}</span><small>${E(new Date(r.message.created * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }))}</small></div><p>${E(messageText(r.message).slice(0, 180))}</p><div class="cc-actions">${button('source', '查看对话', r.message)}${r.state === 'waiting_connection' && r.dot ? button('dot-connect', '核对连接', { id: r.dot }) : ''}</div></article>`).join('') || `<div class="cc-progress-empty"><h3>${all.length ? '这个分类暂无消息' : '进展会从对话中自然出现'}</h3><p>${all.length ? '可以查看其他分类，或回到对话继续交流。' : '发出消息后，在这里查看接收、回复和处理状态，不必手工创建任务。'}</p><button type="button" class="btn" data-cc-workspace-view="discussion">回到对话</button></div>`}</div></div>`;
+      return `<div class="cc-progress-feed"><div class="cc-progress-caption"><h3>消息回执</h3><small>当前项目已加载消息的接收与回复状态；执行结果请查看任务记录。</small></div><div class="cc-progress-filters" aria-label="筛选消息进展">${categories.map(([id, name]) => `<button type="button" data-cc-progress-filter="${id}" aria-pressed="${filter === id}">${name}<span>${id === 'all' ? all.length : all.filter((r) => r.group === id).length}</span></button>`).join('')}</div><div class="cc-progress-items">${cards.map((r) => `<article class="cc-progress-card" data-progress-message="${E(r.message.id)}" data-group="${r.group}"><div class="cc-row"><span class="cc-progress-state">${E(r.label)}</span><small>${E(new Date(r.message.created * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }))}</small></div><p>${E(messageText(r.message).slice(0, 180))}</p><div class="cc-actions">${button('source', '查看对话', r.message)}${!state.snapshot?.conversation?.restored_from_archive && r.state === 'waiting_connection' && r.dot ? button('dot-connect', '核对连接', { id: r.dot }) : ''}</div></article>`).join('') || `<div class="cc-progress-empty"><h3>${all.length ? '这个分类暂无消息' : '进展会从对话中自然出现'}</h3><p>${all.length ? '可以查看其他分类，或回到对话继续交流。' : '发出消息后，在这里查看接收、回复和处理状态，不必手工创建任务。'}</p><button type="button" class="btn" data-cc-workspace-view="discussion">回到对话</button></div>`}</div></div>`;
     }
     function content(view) {
       if (view === 'jobs')
@@ -183,6 +185,7 @@ window.CodePierCollaborationWorkspace = {
         rooms(false);
     }
     function open(view, trigger) {
+      if (view === 'agents' && state.snapshot?.conversation?.restored_from_archive) return;
       if (!names[view] || !root() || !state.snapshot?.room) return;
       selection();
       const previousView = state.view;

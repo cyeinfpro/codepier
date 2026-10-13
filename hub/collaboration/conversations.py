@@ -21,6 +21,8 @@ def migrate(db):
     columns_room = {row[1] for row in db.execute('PRAGMA table_info(conversation_rooms)')}
     if 'history_sequence' not in columns_room:
         db.execute('ALTER TABLE conversation_rooms ADD COLUMN history_sequence INTEGER NOT NULL DEFAULT 0')
+    from hub.collaboration.conversation_archive import migrate as migrate_archive
+    migrate_archive(db)
     db.execute('''CREATE TABLE IF NOT EXISTS conversation_projects (
         conversation_id TEXT NOT NULL REFERENCES conversation_rooms(id),room_id TEXT NOT NULL REFERENCES collaboration_rooms(id),
         created REAL NOT NULL,PRIMARY KEY(conversation_id,room_id))''')
@@ -38,6 +40,12 @@ def migrate(db):
         if name not in columns:
             db.execute(f'ALTER TABLE collaboration_messages ADD COLUMN {name} {declaration}')
     for room in db.execute('SELECT id,space_id,owner_user_id,project_id,environment_id,title,created,chat_history_sequence FROM collaboration_rooms').fetchall():
+        archived = db.execute('SELECT archived_at FROM conversation_rooms WHERE id=?', (room[0],)).fetchone()
+        if archived and archived[0] is not None:
+            continue  # Restart must never resurrect a removed default conversation.
+        if db.execute('''SELECT 1 FROM conversation_archives a,json_each(a.snapshot,'$.projects') p
+                WHERE json_extract(p.value,'$.id')=?''', (room[0],)).fetchone():
+            continue  # Detached archived partitions remain tombstones, not new defaults.
         # New working partitions belong to their one existing conversation. Do not
         # manufacture a second user-visible room on restart; keep legacy defaults.
         if (not db.execute('SELECT 1 FROM conversation_rooms WHERE id=?', (room[0],)).fetchone()
@@ -86,14 +94,22 @@ class ConversationService:
         self.project_scopes = ProjectScopes(collaboration)
         from hub.collaboration.working_scopes import WorkingScopes
         self.working_scopes = WorkingScopes(collaboration)
+        from hub.collaboration.conversation_archive import ConversationArchive
+        self.archive = ConversationArchive(self)
 
     def ensure_default(self, room):
+        existing = self.store.one('SELECT archived_at FROM conversation_rooms WHERE id=?', (room['id'],))
+        if existing and existing['archived_at'] is not None:
+            return
+        if not existing and self.store.one('''SELECT 1 FROM conversation_archives a,json_each(a.snapshot,'$.projects') p
+                WHERE json_extract(p.value,'$.id')=?''', (room['id'],)):
+            return
         self.store.execute('''INSERT OR IGNORE INTO conversation_rooms (id,space_id,owner_user_id,title,created)
             VALUES (?,?,?,?,?)''', (room['id'], room['space_id'], room['owner_user_id'],
             room['title'] or room['project_id'] + ' · ' + room['environment_id'], room['created']))
         self.store.execute('INSERT OR IGNORE INTO conversation_projects VALUES (?,?,?)', (room['id'], room['id'], room['created']))
 
-    def object(self, principal, identifier):
+    def object(self, principal, identifier, *, include_archived=False):
         from hub.room_scope import current
         restriction = current(self.store, principal.grant_id)
         if restriction and restriction['conversation_id'] != identifier:
@@ -102,6 +118,8 @@ class ConversationService:
                              (identifier, principal.space_id, principal.user_id))
         if not row:
             raise DevError('CONVERSATION_NOT_FOUND', '当前授权下没有这个聊天室', 404)
+        if row['archived_at'] is not None and not include_archived:
+            raise DevError('CONVERSATION_ARCHIVED', '此房间已删除，旧连接和授权不可继续使用', 410)
         return row
 
     def visible(self, principal, conversation):
@@ -145,6 +163,13 @@ class ConversationService:
         self.c.chatroom.require_message_visible(principal, row)
         return row
 
+    def title_is_generated(self, conversation):
+        """Display provenance only; never expose an inaccessible source project."""
+        room = self.store.one('SELECT project_id,environment_id,title FROM collaboration_rooms WHERE id=?',
+                              (conversation['id'],))
+        return bool(room and not room['title'] and
+                    conversation['title'] == room['project_id'] + ' · ' + room['environment_id'])
+
     def view(self, principal, conversation):
         projects = self.visible(principal, conversation)
         if not projects:
@@ -156,22 +181,38 @@ class ConversationService:
                     'project_ids': sorted(active_ids & visible_ids)}} if working else {}
         if working and working['spec']['connection']['project_id'] in visible_ids:
             extra['working_scope']['dot_id'] = working['spec']['dot_id']
-            extra['connection'] = working['spec']['connection']
-        return {**conversation, **extra, 'kind': 'conversation', 'projects': [
+            connection = working['spec']['connection']
+            source = next((room for room in projects if room['project_id'] == connection['project_id'] and
+                           room['environment_id'] == connection['environment_id']), None)
+            extra['connection'] = {**connection, **({'project_label': source['project_label']} if source else {})}
+        restored = self.store.one('SELECT 1 FROM conversation_archives WHERE conversation_id=? LIMIT 1', (conversation['id'],))
+        if restored:
+            # Historical membership is display-only, never an executable working
+            # scope. Keep current project visibility filtering on every read.
+            extra['history_projects'] = [
+                {key: room[key] for key in ('project_id', 'environment_id', 'project_label', 'state')} |
+                {'room_id': room['id'], 'execution_authorized': False, 'capabilities': [], 'execution_targets': []}
+                for room in projects]
+        return {**conversation, **extra, 'kind': 'conversation', 'title_is_generated': self.title_is_generated(conversation),
+                'restored_from_archive': bool(restored), 'projects': [
             {key: room[key] for key in ('project_id', 'environment_id', 'project_label', 'state')} | {'room_id': room['id']}
             for room in projects if active_ids is None or room['project_id'] in active_ids],
             'project_authorizations': self.project_scopes.listing(principal, conversation, {room['project_id'] for room in projects}),
             'visibility_token': digest([principal.grant_id or principal.user_id, [room['id'] for room in projects]])}
 
-    def listing(self, principal):
+    def listing(self, principal, *, include_archived=False):
         self.c.guard()
         principal = refresh_principal(self.store, principal)
-        rows = self.store.all('SELECT * FROM conversation_rooms WHERE space_id=? AND owner_user_id=? ORDER BY created,id LIMIT 128',
+        if include_archived:
+            self.c.owner(principal)
+        rows = self.store.all('SELECT * FROM conversation_rooms WHERE space_id=? AND owner_user_id=?' +
+                             ('' if include_archived else ' AND archived_at IS NULL') + ' ORDER BY created,id LIMIT 128',
                              (principal.space_id, principal.user_id))
         result = []
         for row in rows:
             try:
-                result.append(self.view(principal, row))
+                result.append(self.archive.archived_view(principal, row) if row['archived_at'] is not None
+                              else self.view(principal, row))
             except DevError:
                 continue
         return {'items': result, 'next_cursor': None}

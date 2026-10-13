@@ -52,6 +52,11 @@ def test_owner_channel_controls_read_only_open_confirmed_write_and_stale_fences(
             assert page.locator('[data-cc-action="dot-channel-bind"]').is_disabled()
             page.evaluate("channels.act('dot-channel-view-overview', document.querySelector('[data-cc-action=dot-channel-view-overview]'))")
             page.evaluate("channels.act('dot-channel-view-advanced', document.querySelector('[data-cc-action=dot-channel-view-advanced]'))")
+            assert page.locator('[data-channel-form="scope"]').count() == 0
+            assert page.locator('[data-cc-action="manage-room-permissions"]').count() == 1
+            assert page.evaluate('writes.length') == 0
+            page.evaluate("channels.act('dot-channel-view-connection-scope', document.querySelector('[data-cc-action=dot-channel-view-connection-scope]'))")
+            assert page.locator('[data-channel-view="connection-scope"]').count() == 1
             group = page.locator('[data-channel-form="scope"]')
             group.locator('[name="grant_id"]').select_option('grantA')
             # Missing owner confirmation cannot send a mutation.

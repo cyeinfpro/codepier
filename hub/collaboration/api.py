@@ -60,8 +60,8 @@ def make_router(auth, runtime):
                         media_type='application/octet-stream', headers=headers)
 
     @router.get('/conversations')
-    async def conversations(request: Request):
-        return await store.run(lambda: service.conversations.listing(auth.panel(request)))
+    async def conversations(request: Request, include_archived: bool = False):
+        return await store.run(lambda: service.conversations.listing(auth.panel(request), include_archived=include_archived))
 
     @router.get('')
     async def read(request: Request, project: str, environment_id: str = 'production',
@@ -135,6 +135,9 @@ def make_router(auth, runtime):
         def perform():
             principal = auth.admin(request, True)
             handlers = {'dot': service.dots.create,
+                        'conversation-archive-preview': service.conversations.archive.preview,
+                        'conversation-archive': service.conversations.archive.archive,
+                        'conversation-restore': service.conversations.archive.restore,
                         'conversation-project-preview': service.conversations.project_scopes.preview,
                         'conversation-projects-preview': service.conversations.working_scopes.preview,
                         'conversation-projects': service.conversations.working_scopes.apply,

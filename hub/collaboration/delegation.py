@@ -170,9 +170,10 @@ class DelegationService:
     def view(self, policy, principal, room):
         self.authorize_policy(principal, room, policy, active=False)
         spec = json.loads(policy['spec'])
-        reason = ''
+        reason, defaults = '', None
         try:
             self.authorize_policy(principal, room, policy)
+            defaults = self.c.conversations.working_scopes.task_defaults(principal, policy)
         except DevError as exc:
             reason = exc.code
         filters = {'project_id': room['project_id'], 'environment_id': room['environment_id'],
@@ -188,6 +189,7 @@ class DelegationService:
             'target_snapshot': spec['target_snapshot'], 'target_snapshots': spec['target_snapshots'],
             **self.notification_status(policy, room),
             'effective_active': not bool(reason), 'blocked_reason': reason,
+            'task_defaults': defaults,
             'usage': {'delegations': policy['uses'], 'max_delegations': self.c.channel_owner.budget_limit(policy),
                       'total_delegations': policy['uses'], 'window_delegations': self.c.channel_owner.budget_used(policy),
                       'budget_mode': self.c.channel_owner.budget_mode(policy)},
@@ -332,10 +334,11 @@ class DelegationService:
         if args.get('automatic_policy_version') and args['automatic_policy_version'] != policy['version']:
             raise DevError('DELEGATION_POLICY_CHANGED', '自动委托范围已改变，请核对当前范围；正文已保留', 409)
         spec = json.loads(policy['spec'])
-        if len(spec['execution_targets']) != 1 or not spec.get('automatic_acceptance', '').strip():
+        defaults = self.c.conversations.working_scopes.task_defaults(principal, policy)
+        if len(defaults['execution_targets']) != 1 or not spec.get('automatic_acceptance', '').strip():
             raise DevError('AUTOMATIC_DELEGATION_SCOPE_REQUIRED', '自动委托需要一个已确认目标及验收要求', 409)
         return {'policy_id': policy['id'], 'policy_version': policy['version'],
-                'execution_targets': list(spec['execution_targets']), 'capabilities': list(spec['capabilities']),
+                'execution_targets': defaults['execution_targets'], 'capabilities': defaults['capabilities'],
                 'acceptance': spec['automatic_acceptance']}
 
     def read_request(self, room, identifier):
@@ -391,12 +394,13 @@ class DelegationService:
                 or [item['slot_id'] for item in args['mentions']] != [policy['slot_id']]):
             raise DevError('DELEGATION_POLICY_CHANGED', '委托版本、聊天室或唯一接收位置不匹配', 409)
         spec = json.loads(policy['spec'])
+        defaults = self.c.conversations.working_scopes.task_defaults(principal, policy)
         targets = request.get('execution_targets')
         if targets is None:
-            if len(spec['execution_targets']) != 1:
+            if len(defaults['execution_targets']) != 1:
                 raise DevError('DELEGATION_TARGET_REQUIRED', '多个可用目标必须为本次委托明确选择范围', 422)
-            targets = list(spec['execution_targets'])
-        capabilities = request.get('capabilities') or list(spec['capabilities'])
+            targets = list(defaults['execution_targets'])
+        capabilities = request.get('capabilities') or list(defaults['capabilities'])
         if not set(targets) <= set(spec['execution_targets']) or not set(capabilities) <= set(spec['capabilities']):
             raise DevError('DELEGATION_SCOPE_DENIED', '本次委托范围必须是原设置的目标与能力子集', 403)
         if any(target.startswith('vps:') for target in targets) and 'execute' not in capabilities:
@@ -602,10 +606,19 @@ class DelegationService:
             raise DevError('DELEGATION_SCOPE_CHANGED', '本次不可变委托范围与目标批准不一致', 409)
         return policy
 
-    def target(self, principal, room, goal, tool, arguments):
+    def target(self, principal, room, goal, tool, arguments, *, project_id=None):
         policy = self.authorize_goal(principal, room, goal)
         snapshot = json.loads(self.goal_link(goal)['policy_snapshot']) if policy else {}
         approved = snapshot.get('request_scope', snapshot.get('spec', {})).get('execution_targets', ['project_agent'])
+        working = self.c.conversations.working_scopes
+        record = working.current(goal['conversation_id'])
+        if tool == 'exec' and record:
+            working.validate_goal(principal, goal)
+            rule = next((rule for rule in record['spec']['projects'] if rule['project_id'] == project_id), None)
+            if rule is None or 'execute' not in rule['capabilities']:
+                raise DevError('ROOM_PROJECT_SCOPE_DENIED', '此工作项目未批准执行权限', 403)
+            approved = ([target for target in approved if target in rule['execution_targets']]
+                        if policy else list(rule['execution_targets']))
         targets = ['agent' if value == 'project_agent' else value for value in approved]
         if tool == 'exec' and len(targets) > 1 and not arguments.get('target'):
             raise DevError('DELEGATION_TARGET_REQUIRED', '此委托包含多个执行目标，每个exec必须明确选择target', 422)
