@@ -407,7 +407,7 @@ def _native(name, args, value):
         for row in result.get('vps', []):
             row['projects'] = [_project(project) for project in row.get('projects', [])]
         return result
-    if name in {'read', 'write', 'edit', 'fs_read', 'fs_read_many', 'fs_write', 'fs_edit', 'apply_patch', 'show_changes'}:
+    if name in {'read', 'write', 'edit', 'fs_read', 'fs_read_many', 'fs_write', 'fs_edit', 'apply_patch', 'show_changes', 'artifacts_register'}:
         from shared.contracts import OUTPUT_SCHEMAS
         fields = set(OUTPUT_SCHEMAS[name].get('properties', {})) | _RECEIPT | {'_computer_content'}
         result = _pick(value, fields)

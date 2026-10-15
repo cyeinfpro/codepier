@@ -476,7 +476,14 @@ OUTPUT_SCHEMAS.update({
     'diagnostics_get': _object({'hub': {'type': 'object'}, 'devices': {'type': 'array'}, 'warnings': {'type': 'array'}}, ('hub', 'devices', 'warnings')),
     'operations_trace': _object({'operation_id': {'type': 'string'}, 'current': {'type': 'object'}, 'events': {'type': 'array'}}, ('operation_id', 'current', 'events')),
     'agent_diagnostics': _object({'operation_id': {'type': 'string'}, 'build': {'type': 'object'}}, ('operation_id', 'build')),
-    'artifacts_register': _object({'operation_id': {'type': 'string'}, 'artifact_id': {'type': 'string'}, 'sha256': {'type': 'string'}, 'bytes': {'type': 'integer'}}, ('operation_id', 'artifact_id', 'sha256', 'bytes')),
+    # Public Agent snapshot metadata; download_path is an authenticated HTTP
+    # route, never a host filesystem path. Keep this complete because the write
+    # facade uses declared properties as its MCP presentation allowlist.
+    'artifacts_register': _object({'operation_id': _STR, 'artifact_id': _STR,
+        'sha256': _STR, 'bytes': _INT, 'name': _STR,
+        'created': {'type': 'number'}, 'expires': {'type': 'number'},
+        'immutable': _BOOL, 'download_path': _STR, 'retention_days': _INT},
+        ('operation_id', 'artifact_id', 'sha256', 'bytes')),
     'artifacts_list': _object({'artifacts': {'type': 'array'}, 'next_cursor': {'type': ['string', 'null']}}, ('artifacts', 'next_cursor')),
     'artifacts_get': _object({'artifact_id': {'type': 'string'}, 'sha256': {'type': 'string'}, 'bytes': {'type': 'integer'}, 'download_path': {'type': 'string'}}, ('artifact_id', 'sha256', 'bytes', 'download_path')),
     'searches_start': _object({'operation_id': {'type': 'string'}, 'search_id': {'type': 'string'}, 'state': {'type': 'string'}}, ('operation_id', 'search_id', 'state')),

@@ -237,3 +237,36 @@ def test_real_agent_discovery_receipts_and_panel_keep_distinct_views(stack):
     original = stack.poll(result['operation_id'])['result']['data']
     assert original['command'] and original['output'] == result['output']
     assert stack.call('projects_resolve', {'project': 'ProjectAlpha'})['root'] == str(stack.projectalpha)
+
+
+@pytest.mark.parametrize('name,args', [
+    ('write', {'operation': 'artifact'}),
+    ('artifacts_register', {}),
+])
+def test_artifact_receipt_keeps_authenticated_download_metadata_and_hides_host_paths(name, args):
+    raw = {'operation_id': OP, 'artifact_id': OP, 'sha256': 'b' * 64,
+        'bytes': 4, 'name': 'report.txt', 'created': 1791205037.5,
+        'expires': 1791809837.5, 'immutable': True, 'retention_days': 7,
+        'download_path': '/api/artifacts/' + OP + '/download',
+        'root': ROOT, 'snapshot_path': ROOT + '/private-snapshot.bin',
+        'future_host_metadata': {'home': ROOT}}
+    before = deepcopy(raw)
+    expected = {key: value for key, value in raw.items()
+                if key not in {'root', 'snapshot_path', 'future_host_metadata'}}
+    rendered = core_result(name, args, raw)
+    assert rendered['structuredContent'] == expected
+    assert json.loads(rendered['content'][0]['text']) == expected
+    Draft202012Validator(OUTPUT_SCHEMAS[name]).validate(expected)
+    assert raw == before
+    # Native stored tool identity and an old facade-shaped receipt both retain
+    # the same public metadata when resolved by either polling facade.
+    receipt = {'id': OP, 'tool': name, 'state': 'succeeded',
+        'args_summary': args, 'result': {'ok': True, 'data': raw}}
+    for polling in ('process', 'task_query'):
+        shown = checked(polling, {'operation': 'wait'}, {'operations': [receipt]})
+        assert shown['operations'][0]['result']['data'] == expected
+    assert receipt['result']['data'] == before
+    pending = {'operation_id': OP, 'state': 'running', 'pending': True,
+               'snapshot_path': ROOT}
+    assert present(name, args, pending) == {key: pending[key]
+        for key in ('operation_id', 'state', 'pending')}
