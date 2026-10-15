@@ -299,6 +299,7 @@ class DelegationConsumer:
                     self.c.coordination.authorize(principal, room, goal, active=True)
                     actor = self.c.grant_reader(room, policy['grant_id'])
                     self.c.coordination.work_capabilities(actor, goal, item)
+                    self.c.owner_task_context.validate_goal(principal, room, goal, ready=True)
                     if item['assignee_grant_id'] != policy['grant_id'] or item['approval_id'] != goal['approval_id']:
                         raise DevError('WORK_APPROVAL_CHANGED', '工作项不再属于本次明确批准', 409)
                 except DevError as exc:

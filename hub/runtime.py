@@ -80,6 +80,7 @@ class Connection:
         self.native_chat_protocol = 0
         self.native_security_protocol = 0
         self.tool_protocol = None
+        self.project_view_protocol = 0
         from hub.admission_policy import AdmissionWindow
         self.admission = AdmissionWindow()
 
@@ -259,7 +260,7 @@ class Runtime:
         principal = refresh_profile_principal(self.store, principal)
         row = self.store.one("SELECT p.*,d.name AS device_name,d.enabled AS device_enabled FROM projects p JOIN devices d ON d.id=p.device_id WHERE (p.id=? OR p.alias_key=?) AND p.space_id=?", (value, alias_key(value), principal.space_id))
         if not row or not self.visible_project(row, principal):
-            raise DevError("PROJECT_NOT_FOUND", "未找到已授权的项目别名，请先调用 projects_list", 404)
+            raise DevError("PROJECT_NOT_FOUND", "未找到此已授权项目；请核对明确的项目别名或 ID", 404)
         self.authorize(principal, 'read', project_id=row['id'])
         return row
 
@@ -348,6 +349,14 @@ class Runtime:
                 result["result"].pop("trace", None)
                 if (row["tool"] in COMPUTER_TOOLS or row["tool"] in {"browser_open", "browser_snapshot", "browser_action", "browser_close"}):
                     scrub_expired(result["result"])
+            # Current MCP context reuse is distinct from the authorized panel's
+            # immutable historical audit. operation_row above still enforces IAM.
+            if principal.grant_id and row['tool'] == 'open_workspace' and (result['result'] or {}).get('ok'):
+                from hub.project_views import validate_context
+                validate_context(self, result['args_summary'], result['result'].get('data') or {}, principal, operation=id)
+            if principal.grant_id and row['tool'] == 'readiness_get' and (result['args_summary'] or {}).get('operation_kind') and (result['result'] or {}).get('ok'):
+                from hub.project_views import enrich_readiness
+                result['result']['data'] = enrich_readiness(self, result['args_summary'], result['result'].get('data') or {}, principal)
             data = (result["result"] or {}).get("data")
             if isinstance(data, dict) and "output" in data:
                 original = data["output"]
@@ -528,7 +537,14 @@ class Runtime:
         elif name == "get_access_context":
             result = access_context(self.store, principal)
         elif name == "projects_list":
-            result = {"projects": self.list_projects(principal)}
+            from hub.project_views import list_projects
+            result = list_projects(self, args, principal)
+        elif name == 'readiness_get' and args.get('operation_kind') and (
+                not self.online(scoped_project['device_id']) or
+                getattr(self.connections.get(scoped_project['device_id']), 'project_view_protocol', 0) != 1):
+            from hub.project_views import enrich_readiness
+            reason = 'AGENT_OFFLINE' if not self.online(scoped_project['device_id']) else 'AGENT_VIEW_UPGRADE_REQUIRED'
+            result = enrich_readiness(self, args, {'compatibility': reason}, principal)
         elif name == "vps":
             result = self.vps.list(args, principal)
         elif name == "projects_resolve":
@@ -812,12 +828,22 @@ class Runtime:
     def authorized_result(self, identifier, result, principal):
         """A stored result is not authority to disclose it after a policy change."""
         try:
-            self.operation_row(identifier, principal, status_only=True)
+            row = self.operation_row(identifier, principal, status_only=True)
         except DevError as exc:
             # Keep the original receipt so a lost permission is not mistaken for
             # a failed execution and replayed with a fresh idempotency key.
             raise DevError(exc.code, exc.message, exc.status, operation_id=identifier) from exc
-        return self.unwrap(identifier, result)
+        value = self.unwrap(identifier, result)
+        if row['tool'] == 'open_workspace':
+            from hub.project_views import validate_context
+            args = json.loads(row['args_summary']) if row.get('args_summary') else {}
+            validate_context(self, args, value, principal, operation=identifier)
+        if row['tool'] == 'readiness_get':
+            args = json.loads(row['args_summary']) if row.get('args_summary') else {}
+            if args.get('operation_kind'):
+                from hub.project_views import enrich_readiness
+                value = {**enrich_readiness(self, args, value, principal), 'operation_id': identifier}
+        return value
 
     def expire_waiter(self, id, future):
         if self.futures.get(id) is future:
@@ -1025,6 +1051,8 @@ class Runtime:
             packet['integration_context'] = {
                 'owner': 'grant:'+op['grant_id'] if op['grant_id'] else op['actor'],
                 'admin': principal.admin, 'device_id': op['device_id'], 'scopes': scopes}
+            from hub.project_views import prepare_view_packet
+            prepare_view_packet(self, packet, principal, con)
             packet['execution_policy'] = hub_execution_policy(panel=panel)
             self.diagnostics.record(identifier, 'dispatched')
             return True
@@ -1386,6 +1414,7 @@ class Runtime:
             if hello.get("type") != "hello":
                 raise ValueError("Invalid hello")
             connection.tool_protocol = negotiate(hello)
+            connection.project_view_protocol = 1 if type(hello.get('project_view_protocol')) is int and hello['project_view_protocol'] == 1 else 0
             connection.journal_id = hello.get("journal_id")
             connection.protocol = hello.get("delivery_protocol", 1)
             connection.cancel_pending_protocol = 1 if type(hello.get("cancel_pending_protocol")) is int and hello["cancel_pending_protocol"] == 1 else 0
@@ -1415,6 +1444,7 @@ class Runtime:
             info["scheduler_protocol"] = connection.scheduler_protocol
             info["native_chat_protocol"] = connection.native_chat_protocol
             info["tool_protocol"] = connection.tool_protocol.public(catalog_digest())
+            info["project_view_protocol"] = connection.project_view_protocol
             build = hello.get("build")
             if isinstance(build, dict) and len(json.dumps(build)) <= 12000:
                 info["build"] = build

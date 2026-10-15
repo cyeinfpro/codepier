@@ -21,6 +21,7 @@ class OpenWorkspace(CodingArgs):
     project: str = Field(min_length=1, max_length=100)
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=128)
     context_id: str = Field(default='', pattern=r'^(|[a-f0-9]{64})$')
+    context_detail: Literal['minimal', 'documents'] = Field(default='minimal', description='Minimal rule/document/skill index by default; documents explicitly requests bounded source previews. Neither probes execution capabilities.')
     capture_baseline: bool = Field(default=False, description='Capture before editing, not after. Bounded source snapshot, not a Git commit or authorship proof.')
     max_chars: int = Field(default=6000, ge=1000, le=32000)
     max_files: int = Field(default=8, ge=1, le=32)

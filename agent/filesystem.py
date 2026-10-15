@@ -78,7 +78,7 @@ class FileEngine:
         try:
             actual = raw.resolve(strict=True)
         except FileNotFoundError as exc:
-            raise DevError("ROOT_MISSING", "家里电脑上的项目目录不存在", 404) from exc
+            raise DevError("ROOT_MISSING", "执行节点上的项目目录不存在", 404) from exc
         if not actual.is_dir():
             raise DevError("INVALID_ROOT", "项目根路径不是目录")
         if protected(actual.as_posix()):
@@ -89,7 +89,7 @@ class FileEngine:
             if within(actual, allowed):
                 matches.append((len(allowed.parts), spec))
         if not matches:
-            raise DevError("ROOT_NOT_ALLOWED", "这个路径未在家里 Agent 的 allowed_roots 中授权", 403)
+            raise DevError("ROOT_NOT_ALLOWED", "这个路径未在执行节点 Agent 的 allowed_roots 中授权", 403)
         spec = max(matches, key=lambda x: x[0])[1]
         if write and (project.get("mode") != "write" or not spec.get("writable", True)):
             raise DevError("READ_ONLY", "项目或本机授权目录是只读的", 403)

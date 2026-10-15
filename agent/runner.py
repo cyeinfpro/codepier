@@ -611,7 +611,8 @@ class Agent:
                 admin = integration_context.get('admin') is True and isinstance(execution_policy, dict) and execution_policy.get('origin') == 'panel'
                 project.update(_integration_owner=owner, _integration_admin=admin, _coding_owner=owner,
                     _coding_device=integration_context['device_id'], device_id=integration_context['device_id'],
-                    _coding_scopes=integration_context.get('scopes', []), _computer_scopes=integration_context.get('scopes', []))
+                    _coding_scopes=integration_context.get('scopes', []), _computer_scopes=integration_context.get('scopes', []),
+                    _authority_revision=integration_context.get('authority_revision'))
                 self.integrations.remember_project(project)
             if args.get('workspace_id'):
                 project = self.integrations.project(project, args)
@@ -670,7 +671,8 @@ class Agent:
                 # Config/status queries do not read project contents. Keep them
                 # available while a shell owns the project and all workers are busy.
                 args = TOOLS[tool].model.model_validate(args).model_dump()
-                self.engine.root(project)
+                if tool != 'readiness_get' or not args.get('operation_kind'):
+                    self.engine.root(project)
                 self.journal.mark_running(id)
                 await self.send({"type": "started", "id": id})
                 self.phase(id, "executing")

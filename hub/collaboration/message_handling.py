@@ -70,6 +70,13 @@ class MessageHandling:
                               (dot_id, message_id))
 
     def work(self, dot_id, message_id):
+        linked = self.store.one('''SELECT w.id,w.state,w.version,w.goal_id FROM dot_task_links l
+            JOIN delegation_requests d ON d.id=l.delegation_id
+            JOIN delegation_policies p ON p.id=d.policy_id
+            JOIN coordination_work w ON w.id=d.work_item_id
+            WHERE l.dot_id=? AND l.message_id=? AND p.slot_id=l.dot_id''', (dot_id, message_id))
+        if linked:
+            return linked
         return self.store.one("""SELECT w.id,w.state,w.version,w.goal_id FROM delegation_requests d
             JOIN delegation_policies p ON p.id=d.policy_id
             JOIN coordination_work w ON w.id=d.work_item_id
@@ -262,7 +269,9 @@ class MessageHandling:
             FROM collaboration_dot_messages d JOIN collaboration_messages m ON m.id=d.message_id
             LEFT JOIN dot_message_handling h ON h.dot_id=d.dot_id AND h.message_id=d.message_id
             LEFT JOIN collaboration_messages r ON r.id=h.reply_id
-            LEFT JOIN delegation_requests dr ON dr.message_id=d.message_id
+            LEFT JOIN dot_task_links tl ON tl.dot_id=d.dot_id AND tl.message_id=d.message_id
+            LEFT JOIN delegation_requests dr ON dr.id=COALESCE(tl.delegation_id,
+                (SELECT id FROM delegation_requests WHERE message_id=d.message_id))
             LEFT JOIN delegation_policies p ON p.id=dr.policy_id AND p.slot_id=d.dot_id
             LEFT JOIN coordination_work w ON w.id=dr.work_item_id AND p.id IS NOT NULL
             WHERE d.message_id IN ({','.join('?' for _ in ids)})""", tuple(ids))

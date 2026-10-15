@@ -1,5 +1,6 @@
 """Read-only entrypoints retain runtime authorization and never launch work."""
 import asyncio
+from copy import deepcopy
 import time
 
 import pytest
@@ -64,11 +65,27 @@ def test_query_allowlists_reject_mutations(name, args):
 @pytest.mark.asyncio
 async def test_project_query_filters_projects_and_revalidates_revoked_grants(runtime):
     instance, principal = runtime
-    initial = await instance.invoke('project_query', {}, principal)
+    async def observed_query():
+        before = time.time()
+        result = await instance.invoke('project_query', {}, principal)
+        after = time.time()
+        # Every fresh query reports its own observation time. Compare all other
+        # fields exactly, and validate the changing timestamp separately.
+        stable = deepcopy(result)
+        for project in stable['projects']:
+            connection = project['connection']
+            observed_at = connection.pop('observed_at')
+            assert type(observed_at) in (float, int)
+            assert before <= observed_at <= after
+            assert connection == {'state': 'online' if project['online'] else 'offline',
+                                  'source': 'hub_connection'}
+        return result, stable
+    initial, initial_stable = await observed_query()
     assert [p['alias'] for p in initial['projects']] == ['Visible']
     assert not instance.store.all('SELECT id FROM operations')
-    queried = await instance.invoke('project_query', {}, principal)
-    assert queried == initial
+    queried, queried_stable = await observed_query()
+    assert queried_stable == initial_stable
+    assert queried['projects'][0]['connection']['observed_at'] >= initial['projects'][0]['connection']['observed_at']
     with pytest.raises(DevError):
         await instance.invoke('project_query', {'operation': 'open', 'project': 'Hidden'}, principal)
     assert not instance.store.all('SELECT id FROM operations')

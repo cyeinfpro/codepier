@@ -44,6 +44,8 @@ class CollaborationService:
         self.dot_chat = DotChatService(self)
         from hub.collaboration.message_handling import MessageHandling
         self.message_handling = MessageHandling(self)
+        from hub.collaboration.owner_task_context import OwnerTaskContext
+        self.owner_task_context = OwnerTaskContext(self)
         from hub.collaboration.dot_relay import DotRelay
         self.dot_relay = DotRelay(self)
         from hub.collaboration.task_liveness import TaskLiveness

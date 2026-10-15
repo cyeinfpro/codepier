@@ -8,7 +8,7 @@
 - [Agent 安装与升级](AGENT_INSTALL.md)
 - [连接 ChatGPT 与其他 MCP 客户端](CHATGPT.md)
 - [连接改进验收](CONNECTION_ACCEPTANCE.md)：批读、连接证据、刷新提示、恢复与 Tunnel 的已验收边界
-- [MCP 工具参考](CORE_TOOLS.md)
+- [MCP 工具参考](CORE_TOOLS.md)：定向项目发现、最小上下文、动作诊断与原操作恢复
 - [CLI 会话](CLI_SESSIONS.md)：Pi、Codex 和 Claude Code
 - [浏览器集成](INTEGRATIONS-20260917.md)与[桌面控制](COMPUTER_USE.md)
 - [统一设置中心](SETTINGS_CENTER.md)：个人、实例、项目和节点的设置入口

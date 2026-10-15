@@ -9,7 +9,7 @@ window.CodePierCollaborationRelay = {
     waiting_dot: ['waiting', '等待 dot 继续反馈'],
     processing: ['active', '正在处理'],
     waiting_input: ['attention', '等待你补充'],
-    waiting_authorization: ['attention', '需要授权'],
+    waiting_authorization: ['attention', '授权待核对'],
     original_operation_uncertain: ['attention', '正在核对原操作'],
     awaiting_result_publication: ['waiting', '执行已有结果，等待回复'],
     replied: ['responded', '已回复'],
@@ -462,9 +462,48 @@ window.CodePierCollaborationRelay = {
         .filter(([, markup]) => markup);
       return { signature: JSON.stringify(entries), byMessage: new Map(entries) };
     }
+    function continuationCard(m) {
+      const c = m.task_continuation;
+      if (c?.schema_version !== 1 || c.kind !== 'owner_task_clarification') return '';
+      if (
+        c.question_message_id &&
+        c.question_message_id !== m.id &&
+        !['ambiguous', 'stale'].includes(c.resolution)
+      )
+        return '';
+      const unavailable = ['expired', 'superseded', 'stale'].includes(c.state);
+      const labels = {
+        confirmed: '已确认这份方案，仍关联原任务',
+        answer: '补充已关联原任务',
+        declined: '已回复不执行此方案',
+        ambiguous: '请说明回复的是哪件事',
+        stale: '原方案已变化，请核对后再回复',
+        already_answered: '这件事已有回复，不会重复建任务',
+      };
+      const label = unavailable
+        ? c.state === 'expired'
+          ? '这份方案已过期，请在这里继续核对'
+          : '这份方案已更新，请查看原话题'
+        : labels[c.resolution] ||
+          (c.reason === 'clarification' ? '等待你补充任务要求' : '等待你确认这份方案');
+      const question = messageById(c.question_message_id);
+      const canReply =
+        !unavailable &&
+        !c.resolution &&
+        question &&
+        !state.snapshot?.conversation?.restored_from_archive;
+      const detail =
+        c.resolution === 'ambiguous'
+          ? '可回复对应的问题，或使用该问题附带的编号。'
+          : !c.resolution && !unavailable
+            ? '直接在这里回复即可，仍是同一个任务。'
+            : '';
+      return `<section class="cc-task-context-card" data-task-context-state="${E(c.resolution || c.state)}" aria-label="原任务关联"><div><strong>${E(label)}</strong>${detail ? `<small>${E(detail)}</small>` : ''}</div>${canReply ? button('reply', '回复这个问题', question) : ''}</section>`;
+    }
     function statuses(m) {
+      const continuation = continuationCard(m);
       const view = window.CodePierCollaborationRelay.primaryReceipt(m);
-      if (!view) return taskEvidence(m);
+      if (!view) return continuation + taskEvidence(m);
       const restored = !!state.snapshot?.conversation?.restored_from_archive;
       const p = view.projection,
         action = p?.next_action;
@@ -519,11 +558,11 @@ window.CodePierCollaborationRelay = {
       const notice = restored
         ? '<p>以下是历史回执；原授权、连接和任务不会继续生效。</p>'
         : view.state === 'waiting_authorization'
-          ? '<p>dot 报告需要确认。请在原 dot 界面查看真实请求；此处不会批准权限。</p>'
+          ? '<p>这是 dot 报告的授权待核对状态，不代表已收到宿主原生审批请求。任务范围或方案补充可直接在这里回复；只有实际的宿主原生审批才需在宿主处理，面板不会代替批准。</p>'
           : receiptNote
             ? '<p>' + E(receiptNote) + '</p>'
             : '';
-      return `<div class="cc-experience-status" data-primary-state="${E(view.state)}" data-waiting-id="${E(waitingId)}"><span class="cc-dot-receipt" data-relay-state="${E(view.receipt?.state || view.state)}"${receiptNote ? ` title="${E(receiptNote)}"` : ''}>${E(restored ? '历史状态 · ' + view.label : view.label)}</span>${next}</div>
+      return `${continuation}<div class="cc-experience-status" data-primary-state="${E(view.state)}" data-waiting-id="${E(waitingId)}"><span class="cc-dot-receipt" data-relay-state="${E(view.receipt?.state || view.state)}"${receiptNote ? ` title="${E(receiptNote)}"` : ''}>${E(restored ? '历史状态 · ' + view.label : view.label)}</span>${next}</div>
         <details class="cc-receipt-detail" data-receipt-detail="${E(m.id)}"><summary>回执与诊断详情</summary>${notice}<ul>${detail}</ul>
           <details class="cc-diagnostic-preview"><summary>预览脱敏诊断摘要</summary><p>仅含状态、脱敏对象与已核验时间；不含正文、路径或凭据。</p><pre>${E(window.CodePierCollaborationRelay.diagnosticSummary(m))}</pre>${button('relay-diagnostic-copy', '复制这份诊断摘要', m)}</details>
         </details>${taskEvidence(m)}`;

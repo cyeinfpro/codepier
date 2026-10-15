@@ -700,6 +700,8 @@ class TelegramService:
         )
         stored = self.c.object("collaboration_messages", room, mid)
         self.c.channel_owner.attest(stored)
+        stored = self.c.owner_task_context.incoming(room, dot, stored, owner)
+        body = json.loads(stored['body'])
         body["notifications"] = self.c.chatroom.notify(
             room, stored, owner, body["mentions"]
         )

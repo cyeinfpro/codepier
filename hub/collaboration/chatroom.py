@@ -139,6 +139,9 @@ class ChatroomService:
             if trusted['authenticated']:
                 result['display_name'] = '微信本人'
                 result['trusted_author'] = trusted
+        continuation = self.c.owner_task_context.presentation(row['id']) if body.get('task_context_schema') == 1 else None
+        if continuation:
+            result['task_continuation'] = continuation
         return result
 
     def deliveries(self, rows):
@@ -334,6 +337,14 @@ class ChatroomService:
                 duplex = self.c.dot_chat.enqueue(room, message, mentions, principal)
                 if duplex:
                     body['duplex_recipients'] = duplex
+                if len(duplex) == 1 and not selected_delegation:
+                    message = self.c.owner_task_context.incoming(room, self.c.dots.find(duplex[0]), message, principal)
+                    incoming_body = json.loads(message['body'])
+                    provenance.update(incoming_body.get('provenance_project_ids', []))
+                    if incoming_body.get('task_context_schema') == 1:
+                        body['task_context_schema'] = 1
+                    if provenance:
+                        body['provenance_project_ids'] = sorted(provenance)
                 receipt = {'scheduled': False}
                 if selected_delegation:
                     receipt = self.c.delegation.send(principal, room, message, {**args, 'delegation': selected_delegation})

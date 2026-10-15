@@ -57,9 +57,11 @@ IMAGE = obj({'mimeType': {'enum': ['image/png', 'image/jpeg']},
 MEDIA = {'text': STR, 'images': array(IMAGE), 'native_is_error': BOOL,
          'content_truncated': BOOL, 'computer_expires_at': NUM,
          'media_expired': BOOL}
-PROJECT = obj({'id': STR, 'alias': STR, 'device_id': STR, 'root': STR,
-               'description': STR, 'mode': STR, 'allow_tasks': BOOL,
-               'device_name': STR, 'online': BOOL}, ('id', 'alias'))
+PROJECT = obj({'id': STR, 'alias': STR, 'root': STR,
+               'description': STR, 'mode': STR, 'allow_tasks': BOOL, 'online': BOOL,
+               'connection': obj({'state': {'enum': ['online', 'offline', 'unknown']},
+                   'source': nullable(STR), 'observed_at': nullable(NUM)},
+                   ('state', 'source', 'observed_at'))}, ('id', 'alias'))
 FILE_DIFF = obj({'path': STR, 'sha256': STR, 'current_sha256': STR,
                  'before_sha256': STR, 'after_sha256': STR,
                  'backup_id': nullable(STR), 'state': STR, 'diff': STR,
@@ -67,7 +69,7 @@ FILE_DIFF = obj({'path': STR, 'sha256': STR, 'current_sha256': STR,
                  'removed_lines': INT, 'unchanged': BOOL}, ('path',))
 RESULT = obj({'ok': BOOL, 'data': OBJ, 'error': ERROR}, ('ok',))
 OPERATION = obj({
-    **RECEIPT, 'id': STR, 'project_id': nullable(STR), 'device_id': nullable(STR),
+    **RECEIPT, 'id': STR, 'project_id': nullable(STR),
     'tool': STR, 'created': NUM, 'updated': NUM, 'accepted_at': nullable(NUM),
     'attempts': INT, 'cancel_requested': either(BOOL, INT),
     'result': nullable(RESULT), 'error': either(STR, ERROR, NULL),
@@ -190,7 +192,8 @@ def build_core_output_schemas(legacy, *, include_queries=False):
     def variants(*names):
         return [copy(name) for name in names]
 
-    project_list = copy('projects_list', fields={'projects': array(PROJECT)})
+    project_list = copy('projects_list', fields={'projects': array(PROJECT),
+        'total': INT, 'offset': INT, 'next_offset': nullable(INT), 'mcp_view_version': {'const': 1}})
     help_index = obj({'tools': {'type': 'object', 'additionalProperties': obj({
         'operations': array(STR), 'help': CALL}, ('operations', 'help'))},
         'note': STR}, ('tools', 'note'))
@@ -201,7 +204,7 @@ def build_core_output_schemas(legacy, *, include_queries=False):
         ('tool', 'operation', 'scope', 'arguments_location', 'inputSchema'))
     devices = obj({'devices': array(obj({'id': STR, 'name': STR,
         'online': BOOL, 'platform': STR}, ('id', 'name')))}, ('devices',))
-    project_created = obj({**PROJECT['properties'], 'created_by_role': nullable(STR),
+    project_created = obj({**PROJECT['properties'], 'device_id': STR, 'device_name': STR, 'created_by_role': nullable(STR),
         'role_access': array(STR)}, ('id', 'alias', 'root', 'device_id'))
     workspace = [project_list, help_index, help_detail, devices, project_created,
         *variants('projects_resolve', 'open_workspace', 'project_context',

@@ -26,6 +26,10 @@ class ProjectArgs(Strict):
     workspace_id: str = Field(default='', pattern=OPTIONAL_ID, description='Exact managed workspace ID; empty uses the original checkout. Not a credential.')
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=128)
 
+class ReadinessArgs(ProjectArgs):
+    operation_kind: Literal['file_read', 'file_write', 'command_exec'] | None = Field(default=None,
+        description='Diagnose only this action at project-default scope, never execute it. Omission retains the legacy explicit full readiness report; no platform approval is inferred.')
+
 class WorkspaceStatus(ProjectArgs):
     workflow_id: str = Field(default='', pattern=OPTIONAL_ID, description='Explicit task selection; empty never guesses the current conversation task.')
     workflow_cursor: str = Field(default='', max_length=512)
@@ -184,7 +188,7 @@ SPECS = {
     'validations_accept': (ValidationAccept, 'write', 'Panel-owner-only acceptance or rejection of an exact verification after a fresh source check. MCP callers cannot accept their own work.', True, False),
     'workflows_handoff': (Handoff, 'read', 'Recover a compact task handoff with original goal, unresolved steps, evidence and pending/uncertain operations. Never automatically reruns writes or launches a model.', False, True),
     'activity_list': (Activity, 'read', 'Read authorized project MCP activity, timing and bounded payload-token estimates. Estimates cover only included tool text, not host billing or whole conversations. Response-to-next-call gap is not model thinking time. Raw arguments and outputs are not recorded here.', False, True),
-    'readiness_get': (ProjectArgs, 'read', 'Inspect Agent readiness, effective execution policy, source/runtime drift, language and browser capabilities. Unperformed end-to-end checks stay unverified; never starts a model.', False, False),
+    'readiness_get': (ReadinessArgs, 'read', 'Inspect Agent readiness, effective execution policy, source/runtime drift, language and browser capabilities. Unperformed end-to-end checks stay unverified; never starts a model.', False, False),
     'integration_control': (Control, 'execute', 'Panel-owner-only project admission pause/resume and verified cancellation of owned processes. Status and receipt recovery remain available. Does not disable the Agent connection.', True, False),
     'browser_status': (ProjectArgs, 'read', 'Inspect the optional non-Codex browser bridge and extension-owned pool without reading user tabs or starting Chrome.', False, False),
     'browser_open': (BrowserOpen, 'computer', 'Lease an existing extension-owned background tab for an explicitly allowed origin. Never creates/focuses a browser window. Requires computer scope and separate local browser/project opt-in.', True, False),
@@ -255,7 +259,15 @@ def output_schema(name):
             'sha256':{'type':'string','pattern':r'^[a-f0-9]{64}$'},'state':string,
             'expires':{'type':'number'},'created':boolean,'ready':boolean}
         required[name] = list(fields[name])
-    return {'type':'object','properties':fields[name],'required':required[name],'additionalProperties':True}
+    result = {'type':'object','properties':fields[name],'required':required[name],'additionalProperties':True}
+    if name == 'readiness_get':
+        from shared.project_view_contracts import ACTION_READINESS
+        from shared.core_output_schemas import union
+        # Keep legacy and action checks in separate constrained branches.
+        # Sharing properties directly would impose action-only fields on legacy checks.
+        result['not'] = {'required': ['operation_kind']}
+        result = union([result, ACTION_READINESS], pending=False)
+    return result
 
 
 def register(Tool, tools, schemas):

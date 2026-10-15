@@ -259,18 +259,29 @@ def open_workspace(engine, project, args):
                 'skills': context['skills'], 'codex_skills': context['codex_skills'],
                 'skills_catalog': context['skills_catalog'], 'root_entries': context['root_entries'],
                 'remaining_documents': context['remaining_documents'], 'warnings': context['warnings'],
-                'tasks': context['tasks'], 'execution': context['execution'],
+                'tasks': context.get('tasks'), 'execution': context.get('execution'),
+                'view_version': 1, 'context_detail': args.get('context_detail', 'minimal'),
+                'workspace_id': args.get('workspace_id', ''),
+                'authority_revision': project.get('_authority_revision'),
+                'instruction_index': context.get('instruction_index'),
                 'limits': {k: args[k] for k in ('max_files', 'max_chars', 'include_skills')},
                 'permissions': {'mode': project['mode'], 'allow_tasks': project.get('allow_tasks'), 'granted_scopes': project.get('_coding_scopes'),
                                 'local_roots': engine.config.get('allowed_roots', [])}}
     context_id = fingerprint(manifest)
     unchanged = context_id == args.get('context_id')
-    result = {'context_id': context_id, 'context_unchanged': unchanged,
+    result = {'view_version': 1, 'context_detail': args.get('context_detail', 'minimal'),
+              'observed_at': time.time(),
+              'context_id': context_id, 'context_unchanged': unchanged,
               'workspace': {'project': project.get('alias'), 'project_id': project.get('id'),
                             'root': context['project_root'], 'mode': project['mode'], 'allow_tasks': project.get('allow_tasks'), 'granted_scopes': project.get('_coding_scopes')},
               'context': None if unchanged else context, 'truncated': context['truncated'],
               'context_scope': 'Bounded bootstrap only. Revalidated on every open; context_id is not an access token.',
               'next': 'fs_read / skills_read on demand; capture baseline BEFORE edits; show_changes to freeze results.'}
+    result['_project_view_binding'] = {
+        'project_id': project.get('id'), 'root': project.get('_original_root', project.get('root')),
+        'device_id': project.get('_coding_device', project.get('device_id')),
+        'workspace_id': args.get('workspace_id', ''), 'authority_revision': project.get('_authority_revision'),
+        'mode': project.get('mode'), 'allow_tasks': bool(project.get('allow_tasks'))}
     if args.get('capture_baseline'):
         baseline = ReviewStore(engine).save(capture(engine, project))
         result.update(baseline_ref=baseline['id'], baseline_coverage=baseline['coverage'], baseline_expires_at=baseline['expires_at'])

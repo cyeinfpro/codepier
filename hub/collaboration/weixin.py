@@ -489,6 +489,9 @@ class WeixinService:
             # Keep transport provenance. Only explicit owner consent may add a
             # separate immutable authentication attestation for a fresh message.
             self.c.channel_owner.attest(canonical_message)
+            if newest:
+                canonical_message = self.c.owner_task_context.incoming(room, dot, canonical_message, owner)
+                body = json.loads(canonical_message['body'])
             body['notifications'] = self.c.chatroom.notify(room, canonical_message, owner, body['mentions']) if newest else []
             self.store.execute('UPDATE collaboration_messages SET body=? WHERE id=?', (canonical(body), message_id))
             context = message.get('context_token')

@@ -439,7 +439,10 @@ class DelegationService:
                'duration_seconds': min(spec['goal_duration_seconds'], int(policy_deadline - now)),
                'budget': spec['budget'], 'idempotency_key': 'delegation:create:' + identifier}
         goal = self.c.coordination.create(raw, principal)['goal']
-        policy_snapshot = canonical({'spec': spec, 'request_scope': request_scope, 'project_scope_approvals': scope_approvals, 'digest': policy['digest'], 'principal': json.loads(policy['principal']),
+        dot = self.store.one('SELECT * FROM collaboration_dots WHERE id=?', (policy['slot_id'],))
+        conversation_context = self.c.owner_task_context.snapshot(room, dot, message, principal) if dot and self.c.dot_chat.enabled(dot) else []
+        policy_snapshot = canonical({'spec': spec, 'request_scope': request_scope, 'conversation_context': conversation_context,
+                                     'project_scope_approvals': scope_approvals, 'digest': policy['digest'], 'principal': json.loads(policy['principal']),
                                      'grant_snapshot': json.loads(policy['grant_snapshot']),
                                       'expires_at': None if self.c.channel_owner.persistent(policy) else policy['expires_at'],
                                       'lifetime_mode': 'until_revoked' if self.c.channel_owner.persistent(policy) else 'timed'})
@@ -608,6 +611,7 @@ class DelegationService:
 
     def target(self, principal, room, goal, tool, arguments, *, project_id=None):
         policy = self.authorize_goal(principal, room, goal)
+        self.c.owner_task_context.validate_goal(principal, room, goal, ready=True)
         snapshot = json.loads(self.goal_link(goal)['policy_snapshot']) if policy else {}
         approved = snapshot.get('request_scope', snapshot.get('spec', {})).get('execution_targets', ['project_agent'])
         working = self.c.conversations.working_scopes
@@ -686,7 +690,15 @@ class DelegationService:
                      and source['version'] == link['message_version'] and digest(json.loads(source['body'])['body_text']) == link['message_digest'])
             if not valid:
                 raise DevError('DELEGATION_MESSAGE_CHANGED', '原房主委托消息已改变', 409)
-            return {**self.c.coordination.detail(goal, principal),
+            dot = self.store.one('SELECT * FROM collaboration_dots WHERE id=?', (policy['slot_id'],))
+            context = {}
+            if dot and self.c.dot_chat.enabled(dot):
+                from hub.collaboration.owner_task_context import execution_route
+                context = {'execution_context': self.c.owner_task_context.bundle(room, dot, source, principal),
+                           'response_request_options': self.c.owner_task_context.options(room, dot, source),
+                           'execution_route': execution_route(json.loads(link['policy_snapshot']).get(
+                               'request_scope', json.loads(link['policy_snapshot'])['spec'])['execution_targets'])}
+            return {**self.c.coordination.detail(goal, principal), **context,
                 'delegation': {key: link[key] for key in ('id', 'policy_id', 'policy_version', 'message_id', 'message_version',
                                'goal_id', 'approval_id', 'work_item_id', 'created')},
                 'source_message': self.c.chatroom.view(source),

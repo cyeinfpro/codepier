@@ -115,6 +115,9 @@ class Integrations:
         if name=='validations_accept':return await self.threaded(self.validations.accept,project,args)
         if name=='integration_control':return await self.control.action(identifier,project,args)
         if name.startswith('browser_'):return await self.browser.execute(identifier,name,project,args)
+        if name=='readiness_get' and args.get('operation_kind'):
+            from agent.action_readiness import action_readiness
+            return action_readiness(self, project, args)
         if name=='readiness_get':
             from agent.shell import execution_info
             root,spec=self.agent.engine.root(project)

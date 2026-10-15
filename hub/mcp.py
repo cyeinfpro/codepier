@@ -190,6 +190,7 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                         if name == 'get_access_context':
                             value={**value,'gateway':await runtime.store.run(runtime.gateway.context,principal)}
                         if name in COLLABORATION_TOOLS:
+                            value=present(name,arguments,value)
                             result={'content':[{'type':'text','text':json.dumps(value,ensure_ascii=False)}],
                                     'structuredContent':value,'isError':bool(value.get('error'))}
                         else:
@@ -283,6 +284,7 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
 
     def project_resources(principal):
         principal=refresh_principal(runtime.store,principal)
-        return present('workspace', {}, {'projects':runtime.list_projects(principal)})['projects']
+        from hub.project_views import authorized_projects
+        return present('workspace', {'operation':'list'}, {'projects':authorized_projects(runtime,principal)})['projects']
 
     return router

@@ -135,7 +135,11 @@ def test_selected_stage_body_defers_patch_but_updates_state(ecosystem_page):
     }""")
     assert result['patch'] == 'defer'
     assert result['unchanged'] and result['sameWait']
-    expect(page.locator('.cc-experience-status')).to_contain_text('需要授权')
+    status = page.locator('.cc-experience-status')
+    expect(status).to_contain_text('授权待核对')
+    expect(status).to_have_attribute('data-primary-state', 'waiting_authorization')
+    expect(status.get_by_role('button', name='查看授权说明')).to_have_count(1)
+    assert '回 Dot 确认' not in status.inner_text()
     assert page.locator('.cc-experience-status a').count() == 0
     assert page.evaluate("getComputedStyle(document.querySelector('.cc-relay-pending') || document.body).animationName") == 'none'
 

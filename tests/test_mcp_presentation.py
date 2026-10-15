@@ -75,7 +75,7 @@ def test_open_masks_metadata_but_keeps_source_previews_sha_and_context_id(name):
             'codex_skills': [{'skill_id': 'd' * 64, 'source': 'codex',
                 'path': '/Users/private-account/.codex/skills/check/SKILL.md'}]},
         'truncated': False, 'baseline_ref': 'e' * 32}
-    value = checked(name, {'operation': 'open'}, raw)
+    value = checked(name, {'operation': 'open', 'options': {'context_detail': 'documents'}}, raw)
     assert value['workspace']['root'] == value['context']['project_root'] == '.'
     assert value['context']['documents'] == raw['context']['documents']
     assert value['context']['codex_skills'][0]['path'] == 'SKILL.md'
@@ -99,11 +99,20 @@ def test_discovery_devices_worktrees_tasks_and_skill_summaries_have_no_host_path
     value = present('workspace', {}, raw)
     assert raw == original
     assert ROOT not in json.dumps(value) and 'Private MacBook' not in json.dumps(value)
-    assert value['devices'][0]['name'] == value['projects'][0]['device_name'] == node_label('device')
-    assert value['warnings'] == [node_label('device') + ' needs restart']
-    assert value['tasks'] == [{'name': 'test', 'cwd': 'src', 'executable_available': True}]
-    assert value['workspaces'][0]['path'] == '.' and 'identity' not in value['workspaces'][0]
-    assert value['skills'][0]['skill_id'] == 'd' * 64 and value['skills'][0]['path'] == 'SKILL.md'
+    assert not {'device_id', 'device_name'} & value['projects'][0].keys()
+    assert 'devices' not in value and 'workspaces' not in value
+    # Management/skill/task queries are explicit, not inferred from dictionary shape.
+    devices = present('workspace', {'operation': 'devices'}, {'devices': raw['devices'], 'warnings': raw['warnings']})
+    assert devices['devices'][0]['id'] == 'device'
+    assert devices['devices'][0]['name'] == node_label('device')
+    assert devices['warnings'] == [node_label('device') + ' needs restart']
+    tasks = present('workspace', {'operation': 'tasks'}, {'tasks': raw['tasks']})
+    assert tasks['tasks'] == [{'name': 'test', 'cwd': 'src', 'executable_available': True}]
+    trees = present('workspace', {'operation': 'worktree_list'}, {'workspaces': raw['workspaces']})
+    assert trees['workspaces'][0]['path'] == '.' and 'identity' not in trees['workspaces'][0]
+    skills = present('workspace', {'operation': 'skills'}, {'skills': raw['skills'], 'sources': raw['sources']})
+    assert skills['skills'][0]['skill_id'] == 'd' * 64 and skills['skills'][0]['path'] == 'SKILL.md'
+    assert all('path' not in source for source in skills['sources'])
 
 
 def test_explicit_skill_resource_locations_survive_direct_reads_and_polling():

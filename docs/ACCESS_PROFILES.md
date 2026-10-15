@@ -109,6 +109,12 @@ OAuth 同意 `/api/oauth/requests/{id}/decide` 和 PAT 创建 `/api/grants` 可�
 
 普通交互 `project_query`／`task_query` 的输入没有委托 ID 前置参数，仍检查凭据、项目和原操作可见性。已经交给受管任务的工作继续走原委托与租约链路；不能把它改用普通工具来规避原拒绝，也不能依据 `managed=false` 跳过任何校验。固定授权、动态角色和访问 Profile 状态均不等于任务执行模式。
 
+### 定向动作诊断不是新的授权入口
+
+普通项目工作不必先调用 get_access_context；该 v2 接口继续作为显式的连接级诊断，保留其必需 projects 与 managed 兼容字段。已有项目通过 project_query.open 直接进入；动作诊断使用 project_query.readiness 的 options.operation_kind（file_read/file_write/command_exec）。
+
+诊断分别返回当前 CodePier 策略检查、Agent 时间点观察和调用平台决定。平台无可信反馈时为 not_observed；未知不等于批准、拒绝或需要再次确认。Agent 未升级、离线或映射已改变时不能用旧快照宣称所有检查完成。查询不会创建任务、批准或续租，具体操作仍逐次检查真实参数和适用任务约束。文件写入不因命令或电脑控制权限关闭而自动拒绝。
+
 ### 关联真实拒绝，而不是猜原因
 
 新旧协议的工具调用结果在 `_meta["com.codepier/requestId"]` 返回与 `X-CodePier-Request-ID` 响应头一致的服务端生成编号；它只用于查找同一请求的诊断记录，不授予访问权限，也不是 `delegation_id`。旧版 `ping` 的空响应保持不变。

@@ -39,7 +39,7 @@
 
 ## 工作区与宿主信息
 
-原生 MCP 默认按“项目工作区、执行节点”返回信息。项目的 `root`、上下文的 `project_root` 和工作目录记录的 `path` 为 `.`，表示当前项目或 `workspace_id` 对应的目录，不能据此把不同项目或工作目录合并。节点 ID 保持可调用，显示名称变为稳定代号；节点名称、账户名、UID、系统类型、工具安装路径及凭据环境变量存在情况不再出现在默认执行概览中。`execution.tools` 的值为可用性布尔值；Shell 保留必要的程序名称、权限状态、超时限制和真实的非沙箱边界。
+原生 MCP 默认按“项目工作区、执行节点”返回信息。项目的 `root`、上下文的 `project_root` 和工作目录记录的 `path` 为 `.`，表示当前项目或 `workspace_id` 对应的目录，不能据此把不同项目或工作目录合并。普通项目列表和操作回执不返回节点 ID、名称或替代关联代号；明确授权的设备/映射管理仍保留必要标识。默认 open 仅返回规则、文档和技能索引，不自动返回执行概览。按需查询的执行概览省略账户名、UID、系统类型、工具安装路径及凭据环境变量存在情况。`execution.tools` 的值为可用性布尔值；Shell 保留必要的程序名称、权限状态、超时限制和真实的非沙箱边界。
 
 技能目录按 `skill_id` 发现；带 ID 的技能摘要 `path/resource_path` 为相对技能资源的 `SKILL.md`，应通过 `workspace(operation="skill", skill_id=..., resource_path="SKILL.md")` 读取，不能作为项目根目录下的文件读取。显式读取技能时仍返回执行脚本所需的真实资源位置。项目内不带 ID 的技能路径仍相对于项目。具名任务目录保留任务名、说明、工作子目录和可用性，省略启动命令及环境变量清单。
 
@@ -56,6 +56,26 @@ ChatGPT 内的项目选择与任务看板已移除。`workbench` 不再出现在
 只读发现从 `project_query` 开始，目录和技能读取无需调用混合工具。公开回执的等待、补读和追踪继续指向 `task_query`，保留原操作编号；捕获基线仍使用 `workspace`，显式取消仍使用 `process`。这些路由不改变实际授权，也不能保证宿主不再出现取消或拒绝提示。
 
 这两个专用入口标注为只读；混合读写的 `workspace/process/browser/computer` 保持保守的非只读注解。工具目录不注册 global/thread 工作台或自动展示模板。九个核心工具的 `outputSchema` 描述实际成功、错误、持久 pending 变体；错误/等待不是成功，仍须核对原操作编号、状态和退出码。
+
+## 项目视图 v1 与动作诊断
+
+已知项目直接 `project_query(operation="open", project=...)`；只有发现或消歧时调用 `list`。`list` 支持 query、limit、offset，搜索、排序、计数和分页均在当前项目授权过滤之后完成。普通结果带 `mcp_view_version: 1`，它不是权限或部署版本。
+
+默认 open 保留 AGENTS.md、MEMORY.md、CLAUDE.md 的规则索引以及文档/技能路径和 SHA，不返回正文或自动执行能力快照。`options.context_detail="documents"` 明确请求有界文档预览；`project_query` 仍不能捕获修改基线。子目录规则需在访问该目录时按需检查。
+
+```json
+{"name":"project_query","arguments":{"operation":"list","query":"Project","limit":10,"offset":0}}
+{"name":"project_query","arguments":{"operation":"open","project":"ProjectAlpha","options":{"context_detail":"documents"}}}
+{"name":"project_query","arguments":{"operation":"readiness","project":"ProjectAlpha","options":{"operation_kind":"file_write"}}}
+```
+
+动作类型为 file_read、file_write、command_exec。诊断仅观察项目默认条件：codepier_authorization、execution_readiness 与 caller_platform_decision 独立；当前未接入可信平台反馈时后者固定 not_observed，operation_evidence 为 null。allowed/ready 不证明具体写入成功；精确路径、SHA、命令内容、任务租约仍由真实调用检查。unknown 不自动要求重新授权，也不允许绕过已知拒绝。
+
+普通文件写入不依赖 execute、computer 或 allow_tasks；有原受管任务时仍走其批准、租约和 fence。正常文件操作不新增强制 readiness 预检，get_access_context 也不是必跑步骤。
+
+上下文指纹区分详细程度、规则 SHA、工作树和授权修订。映射或项目配置变化后，MCP 旧上下文返回 PROJECT_CONTEXT_CHANGED；面板经原权限检查仍可查看历史回执。旧 Agent 通过握手兼容：不发送未知参数、不复用旧 context_id，未观察到的动作能力返回 unknown；不伪造 Agent 端优化已生效。
+
+投影覆盖原生直接结果、资源、轮询回执及协作连接摘要，保留原文、输出、拒绝错误码与批准/租约标识。未来原生策略字段未识别时保留 restrictions_unknown 和已观察到的拒绝摘要，不改变真实执行门禁。升级顺序为 Hub 后 Agent；源码和隔离联调通过不代表生产或客户端目录已刷新。
 
 ## 标准 Tasks
 
@@ -82,11 +102,10 @@ Task 绑定原 operation、Space、用户和确切创建 grant，每次查询/�
 ## 常用流程
 
 ```json
-{"name":"workspace","arguments":{"operation":"list"}}
-{"name":"workspace","arguments":{"operation":"open","project":"ProjectAlpha"}}
+{"name":"project_query","arguments":{"operation":"open","project":"ProjectAlpha"}}
 {"name":"read","arguments":{"project":"ProjectAlpha","path":"README.md"}}
 {"name":"exec","arguments":{"project":"ProjectAlpha","command":"git status --short","yield_seconds":1,"idempotency_key":"status-intent-001"}}
-{"name":"process","arguments":{"operation":"wait","operation_ids":["返回的操作编号"],"wait_seconds":5}}
+{"name":"task_query","arguments":{"operation":"wait","operation_ids":["返回的操作编号"],"wait_seconds":5}}
 ```
 
 文件路径相对于已授权项目。读取文本默认最多 2,000 行、50 KiB，按完整行截断，用 `next_offset` 继续并携带 `expected_sha256`；支持读取不超过 16 MiB 的文本文件。PNG/JPEG 返回原生 MCP 图片块，沿用现有图片大小和过期限制。其他二进制文件使用产物导出。

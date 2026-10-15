@@ -8,12 +8,15 @@ from pathlib import PurePosixPath
 from agent.shell import execution_info
 from shared.util import DevError
 
-DOCUMENTS = ("AGENTS.md", "CLAUDE.md", "README.md", "README.rst", "README.txt", "pyproject.toml", "package.json",
+DOCUMENTS = ("AGENTS.md", "MEMORY.md", "CLAUDE.md", "README.md", "README.rst", "README.txt", "pyproject.toml", "package.json",
              "go.mod", "Cargo.toml", "Makefile", "Dockerfile", "requirements.txt", "CONTRIBUTING.md")
 SKILL_ROOTS = ("skills", ".agents/skills", ".claude/skills", ".codex/skills")
 
 
 def project_context(engine, project, args):
+    if args.get('context_detail') == 'minimal':
+        from agent.project_index import project_index
+        return project_index(engine, project, args)
     root, spec = engine.root(project)
     deadline = time.monotonic() + 4
     documents, remaining, skills, warnings, tree = [], [], [], [], []
@@ -119,7 +122,7 @@ def project_context(engine, project, args):
                 allowed_tasks.append({"name": name, "description": task.get("description", "")[:300]})
     return {"project": project.get("alias"), "project_root": str(root), "documents": documents, "skills": skills, "codex_skills": codex_skills, "skills_catalog": skills_catalog,
             "root_entries": tree, "tasks": {"enabled": enabled, "items": allowed_tasks, "next": "tasks_list"},
-            "execution": execution_info(engine.config, project, spec, root),
+            **({"execution": execution_info(engine.config, project, spec, root)} if "context_detail" not in args else {}),
             "truncated": truncated, "remaining_documents": remaining, "warnings": warnings,
             "budget": {"preview_chars": used, "max_chars": args["max_chars"], "max_files": args["max_files"]},
             "scope": "Known root documents, first-level docs and project skill directories only. NOT a full repository scan.",

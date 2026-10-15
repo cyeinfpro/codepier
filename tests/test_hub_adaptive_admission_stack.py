@@ -60,6 +60,22 @@ def wait_for_burst_capacity(probe, *, timeout=300, clock=time.monotonic, sleep=t
     }, sort_keys=True))
 
 
+def growth_prerequisite_diagnostics(sample):
+    """Explain independent OS observations; never feed or override admission."""
+    available, total = sample.memory_available, sample.memory_total
+    fraction = (available / total if type(available) is int and
+                type(total) is int and total > 0 else None)
+    checks = {
+        "memory_at_least_1gib": type(available) is int and available >= 1024**3,
+        "memory_fraction_at_least_20pct": fraction is not None and fraction >= .20,
+        "cpu_busy_at_most_65pct": sample.cpu_busy is not None and sample.cpu_busy <= .65,
+        "io_stall_below_10pct": (sample.io_stall or 0) < .10,
+    }
+    return {"memory_available_fraction": fraction,
+            "unmet_growth_conditions": [name for name, ready in checks.items() if not ready],
+            "diagnostic_only": True}
+
+
 def owned_cpu_percent(stack):
     """Diagnostic-only percentages for this test's three processes; no argv."""
     roles = {os.getpid(): "test", stack.hub.pid: "hub", stack.agent.pid: "agent"}
@@ -149,6 +165,7 @@ def test_real_128_waiting_burst_other_project_cancel_restart_and_exact_drain(tmp
                 "owned_ps_cpu_percent": owned_cpu_percent(stack), "cpu_count": os.cpu_count(),
                 "host_ps_cpu_leaders": host_cpu_leaders(),
                 "independent_os_observer": {
+                    "growth_prerequisites": growth_prerequisite_diagnostics(sample),
                     "source": sample.source, "cpu_busy": sample.cpu_busy,
                     "memory_available": sample.memory_available,
                     "memory_total": sample.memory_total, "io_stall": sample.io_stall,

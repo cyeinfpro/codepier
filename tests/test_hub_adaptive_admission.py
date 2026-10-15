@@ -177,6 +177,41 @@ def counts(**changes):
                           "project_count", "project_bytes", "node_reads", "project_reads", "controls"), 0) | changes
 
 
+def test_observed_low_memory_cannot_expand_admission_then_real_health_recovers():
+    # Original macOS regression's final observation: 18.46% available memory.
+    # Replay the necessary resource precondition, not the real heartbeat timing.
+    state = AdmissionWindow()
+    for at in range(0, 301, 3):
+        sample = telemetry(at, source="darwin_os_counters", cpu_busy=.3044861597200127,
+                           memory_available=6343327744, memory_total=34359738368,
+                           io_stall=None)
+        state.observe(snapshot(reason="cooldown"), sample, REVISION, REVISION, at)
+        assert state.current(at, REVISION).project == 32
+        assert state.healthy == 0
+    for at in (303, 306, 309):
+        state.observe(snapshot(), telemetry(at, source="darwin_os_counters"),
+                      REVISION, REVISION, at)
+    assert state.current(309, REVISION).reason == "adaptive"
+    assert state.current(309, REVISION).project >= 129
+
+
+@pytest.mark.parametrize("available,cpu,io,unmet", [
+    (6343327744, .3044861597200127, None, ["memory_fraction_at_least_20pct"]),
+    (8 * 1024**3, .65, .09, []),
+    (8 * 1024**3, None, .10, ["cpu_busy_at_most_65pct", "io_stall_below_10pct"]),
+    (None, .2, None, ["memory_at_least_1gib", "memory_fraction_at_least_20pct"]),
+])
+def test_growth_prerequisite_diagnostics_are_read_only(available, cpu, io, unmet):
+    from tests.test_hub_adaptive_admission_stack import growth_prerequisite_diagnostics
+    sample = Pressure(measured_at=0, memory_available=available, memory_total=34359738368,
+                      cpu_busy=cpu, io_stall=io)
+    before = vars(sample).copy()
+    diagnostic = growth_prerequisite_diagnostics(sample)
+    assert diagnostic["unmet_growth_conditions"] == unmet
+    assert diagnostic["diagnostic_only"] is True
+    assert vars(sample) == before
+
+
 def test_growth_is_waiting_budget_not_execution_capacity():
     state = warmed()
     budget = state.current(24, REVISION)

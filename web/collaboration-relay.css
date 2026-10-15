@@ -1,4 +1,43 @@
 /* Passive dot relay. Scope all styles to conversation UI and existing theme tokens. */
+.collaboration .cc-task-context-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin: 10px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--ui-line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--ui-purple) 5%, var(--ui-panel));
+  overflow-wrap: anywhere;
+}
+.collaboration .cc-task-context-card > div {
+  flex: 1 1 180px;
+  min-width: 0;
+}
+.collaboration .cc-task-context-card strong,
+.collaboration .cc-task-context-card small {
+  display: block;
+  line-height: 1.6;
+}
+.collaboration .cc-task-context-card strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+.collaboration .cc-task-context-card small {
+  color: var(--ui-muted);
+  font-size: 11px;
+}
+.collaboration .cc-task-context-card button {
+  flex: 0 0 auto;
+  min-height: 36px;
+}
+@media (max-width: 600px) {
+  .collaboration .cc-task-context-card button {
+    min-height: 44px;
+  }
+}
 .cc-chat-shell.cc-relay-focus {
   grid-template-columns: 220px minmax(0, 1fr);
   max-width: 1440px;

@@ -130,7 +130,12 @@ class ChannelOwnerAuthority:
             'lifetime_mode': 'until_revoked', 'project_id': scope['project_id'],
             'capabilities': scope['capabilities'], 'execution_targets': scope['execution_targets'],
             'budget_mode': scope['budget_mode'], 'max_delegations': scope['max_delegations'],
-            'host_approval_required': True, 'changes_underlying_grant': False}
+            # Retain the legacy boundary flag, but never present it as an
+            # observed request for another per-task native approval.
+            'host_approval_required': True,
+            'host_approval_requirement_scope': 'host_policy_not_per_task_status',
+            'host_approval_state': 'not_evaluated', 'host_approval_required_this_task': None,
+            'changes_underlying_grant': False}
 
     def approval_digest(self, policy, dot, slot):
         return digest([policy['id'], policy['version'], policy['digest'], dot['setup_digest'], slot['principal']])

@@ -876,7 +876,27 @@ TOOL_DESCRIPTIONS.update({
 })
 
 
+class DotResponseRequest(Model):
+    reason: Literal['clarification', 'plan_confirmation']
+    source_version: int = Field(ge=1)
+    source_digest: str = Field(pattern=r'^[a-f0-9]{64}$')
+    scope_digest: str = Field(pattern=r'^[a-f0-9]{64}$')
+    ttl_seconds: int = Field(default=1800, ge=60, le=3600)
+
+
 class DotChatMessage(DotRead):
+    response_request: DotResponseRequest | None = Field(default=None, exclude_if=lambda value: value is None,
+        description='Optional precise owner clarification, not host approval. Use only when the task genuinely needs input; do not add a confirmation to routine already-authorized work. Requires an interim reply to the exact source version and scope returned in response_request_options.')
+
+    @model_validator(mode='after')
+    def question_is_interim(self):
+        if self.response_request is not None:
+            if self.complete or not self.reply_to_id:
+                raise ValueError('A task question must be an interim reply to its original owner request')
+            if len(self.body_text) > 3600:
+                raise ValueError('A task question must leave room for its original-channel response instructions')
+        return self
+
     complete: bool = Field(default=True, description='False for an interim conversational reply: keep this owner message pending so the dot can continue reading, replying or preparing its authorized work. True finishes this message; never proves work success.')
     body_text: str = Field(min_length=1, max_length=4000)
     reply_to_id: str = Field(default='', max_length=128)
@@ -958,6 +978,8 @@ class DotHandling(DotRead):
 
 
 class DotChatTask(DotRead):
+    context_digest: str = Field(default='', pattern=r'^(|[a-f0-9]{64})$', exclude_if=lambda value: not value,
+        description='Digest of the attributed context returned by the current inbox; detects changed plans without changing task identity or granting new authority.')
     message_id: Identifier
     expected_version: int = Field(ge=1)
     confirm_task: Literal[True]

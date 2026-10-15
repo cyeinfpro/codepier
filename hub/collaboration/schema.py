@@ -216,6 +216,8 @@ def migrate(db):
     migrate_dot_chat(db)
     from hub.collaboration.message_handling import migrate as migrate_message_handling
     migrate_message_handling(db)
+    from hub.collaboration.owner_task_context import migrate as migrate_owner_task_context
+    migrate_owner_task_context(db)
     from hub.collaboration.dot_relay import migrate as migrate_dot_relay
     migrate_dot_relay(db)
     from hub.collaboration.task_liveness import migrate as migrate_task_liveness

@@ -3347,7 +3347,7 @@ window.CodePierCollaboration = (() => {
     const previous = new Map();
     let released = false;
     const navigation =
-      '[data-cc-room], [data-cc-partition], [data-cc-view], [data-cc-workspace-view], [data-cc-workspace], [data-cc-open-joins], [data-cc-action="close-drawer"]';
+      '[data-cc-room], [data-cc-partition], [data-cc-view], [data-cc-workspace-view], [data-cc-workspace], [data-cc-open-joins], [data-cc-action="close-drawer"], [data-cc-action="dot-select"]';
     const mark = () => {
       for (const node of root.querySelectorAll('button, input[type="submit"]')) {
         if (node.matches(navigation) || previous.has(node)) continue;
@@ -3384,6 +3384,39 @@ window.CodePierCollaboration = (() => {
     } catch (error) {
       if (current()) showDrawer(title, empty(error.message), trigger);
       throw error;
+    }
+  }
+  async function selectDotLocally(trigger) {
+    // Selecting an already-authorized recipient is local navigation, not another
+    // mutation. A slow read or pending save must not silently swallow this click.
+    // Keep act()/choose() scope checks and leave the in-flight request token alone.
+    const generation = state.generation,
+      session = S.session,
+      space = S.space_id,
+      conversation = state.conversation,
+      project = state.project,
+      environment = state.environment;
+    const current = () =>
+      generation === state.generation &&
+      session === S.session &&
+      space === S.space_id &&
+      conversation === state.conversation &&
+      project === state.project &&
+      environment === state.environment &&
+      S.page === 'collaboration';
+    try {
+      const result = await act('dot-select', trigger);
+      if (current() && result?.message) {
+        const feedback = document.querySelector('#cc-feedback');
+        if (feedback) feedback.textContent = result.message;
+      }
+    } catch (error) {
+      if (!current()) return;
+      const feedback = document.querySelector('#cc-feedback');
+      if (feedback) {
+        feedback.textContent = error.message;
+        feedback.classList.add('is-error');
+      }
     }
   }
   async function run(operation, trigger) {
@@ -3591,6 +3624,10 @@ window.CodePierCollaboration = (() => {
       }
       const button = event.target.closest('[data-cc-action]');
       if (button) {
+        if (button.dataset.ccAction === 'dot-select') {
+          selectDotLocally(button);
+          return;
+        }
         if (relay.action(button.dataset.ccAction, button)) return;
         if (button.dataset.ccAction === 'close-drawer') {
           closeDrawer();

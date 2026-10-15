@@ -447,6 +447,7 @@ class CoordinationService:
             def take():
                 self.version(item, args)
                 self.work_capabilities(principal, goal, item)
+                self.c.owner_task_context.validate_goal(principal, room, goal, ready=True)
                 spec, now = json.loads(goal['spec']), self.c.clock()
                 if item['approval_id'] != goal['approval_id'] or item['state'] != 'queued':
                     raise DevError('WORK_NOT_CLAIMABLE', '工作项当前不可领取', 409)
