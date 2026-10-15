@@ -844,3 +844,71 @@ def test_room_permission_preview_root_overlap_blocks_apply_without_adding_projec
         assert after == before
     finally:
         context.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+@pytest.mark.parametrize('width', [390, 1440])
+def test_project_picker_preview_response_during_pointer_preserves_click(
+        collaboration_stack, chat_browser_pool, tmp_path, engine, width):
+    """A real preview may finish between pointerdown and pointerup."""
+    stack = collaboration_stack
+    context = chat_browser_pool(engine).new_context(viewport={'width': width, 'height': 844})
+    page = context.new_page()
+    held, holding = [], [True]
+
+    def hold_preview(route):
+        if holding[0]:
+            held.append((route, route.fetch()))
+            page.locator("#cc-room-projects").evaluate("form => form.dataset.testPreviewHeld = 'true'")
+        else:
+            route.continue_()
+
+    try:
+        login(page, stack)
+        join_dot(stack, create_dot(stack, '合成预览时序助手'))
+        form = manage_from_connections(page)
+        second = stack.projects[1]
+        project_checkbox(form, stack.project).uncheck()
+        project_checkbox(form, second).check()
+        save(form)
+        expect(page.locator('#cc-drawer')).not_to_be_visible()
+        form = manage_from_connections(page)
+        form.locator('[data-project-search]').fill(stack.project['alias'])
+        expect(form).to_have_attribute('data-preview-state', 'ready')
+        page.route('**/api/collaboration/conversation-projects-preview', hold_preview)
+        form.locator('[data-project-bulk="all"]').click()
+        expect(project_checkbox(form, stack.project)).to_be_checked()
+        expect(form).to_have_attribute('data-preview-state', 'checking')
+        expect(form).to_have_attribute('data-test-preview-held', 'true')
+        assert held, 'The current all-selection preview must be held.'
+        # Exercise the scroll container before returning to the operation toolbar.
+        form.locator('[data-cc-action="close-drawer"]').scroll_into_view_if_needed()
+        button = form.locator('[data-project-bulk="none"]')
+        button.click(trial=True)
+        box = button.bounding_box()
+        assert box
+        page.mouse.move(box['x'] + box['width'] / 2, box['y'] + box['height'] / 2)
+        page.mouse.down()
+        holding[0] = False
+        for route, response in list(held):
+            route.fulfill(response=response)
+        expect(form).to_have_attribute('data-preview-state', 'ready')
+        after = button.bounding_box()
+        assert after and abs(after['y'] - box['y']) < 2, (box, after)
+        page.mouse.up()
+        expect(project_checkbox(form, stack.project)).not_to_be_checked()
+        expect(project_checkbox(form, second)).to_be_checked()
+        # Keep native keyboard semantics as well as pointer release semantics.
+        form.locator('[data-project-bulk="all"]').focus()
+        page.keyboard.press('Enter')
+        expect(project_checkbox(form, stack.project)).to_be_checked()
+        button.focus()
+        page.keyboard.press('Space')
+        expect(project_checkbox(form, stack.project)).not_to_be_checked()
+        expect(project_checkbox(form, second)).to_be_checked()
+        expect(form.locator('[data-project-selection-count]')).to_contain_text('1 项在搜索结果外')
+        expect(form).to_have_attribute('data-preview-state', 'ready')
+        assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+        evidence(page, tmp_path, f'room-project-stable-preview-{engine}-{width}.png')
+    finally:
+        context.close()

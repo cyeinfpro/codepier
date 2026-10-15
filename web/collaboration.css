@@ -2014,6 +2014,12 @@ body:has(.cc-chat-shell) .mobile-dock {
 .cc-project-chip.cc-task-project-label {
   cursor: default;
 }
+/* Preview responses change this form's height. Keep its operation toolbar
+   anchored so a response cannot move a pressed button before pointerup. */
+.cc-drawer:has(#cc-room-projects) {
+  margin: 16px auto auto;
+  max-height: calc(100dvh - 32px);
+}
 .cc-project-picker-tools {
   display: grid;
   gap: 8px;
