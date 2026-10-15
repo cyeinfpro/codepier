@@ -96,8 +96,15 @@ def main():
                            max_log_bytes=args.max_log_bytes)
     output = args.output.resolve()
     if output.exists():
-        parser.error('Use a new output directory; existing files are never adopted or cleaned')
-    output.mkdir(parents=True)
+        # CI records immutable public-archive provenance before running tests.
+        # Preserve that one known evidence file; no prior run or arbitrary data
+        # is adopted, overwritten, or included in scratch cleanup.
+        entries = list(output.iterdir()) if output.is_dir() else []
+        if (len(entries) != 1 or entries[0].name != 'archive-proof.json'
+                or entries[0].is_symlink() or not entries[0].is_file()):
+            parser.error('Use a new output directory (only CI archive-proof.json may pre-exist)')
+    else:
+        output.mkdir(parents=True)
     plugin_dir = output/'instrumentation'; plugin_dir.mkdir()
     (plugin_dir/'codepier_regression_capture.py').write_text(PLUGIN)
     env = {**os.environ, 'PYTHONPATH':os.pathsep.join([str(plugin_dir),str(ROOT)]),

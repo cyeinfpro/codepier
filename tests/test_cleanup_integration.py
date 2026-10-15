@@ -18,7 +18,8 @@ def test_separate_scratch_from_evidence():
 
 
 @pytest.mark.parametrize('fails', [False, True, 'forced_descendant'])
-def test_full_runner_retains_reports_but_removes_owned_scratch(tmp_path, monkeypatch, fails):
+@pytest.mark.parametrize('archive_proof', [False, True])
+def test_full_runner_retains_reports_but_removes_owned_scratch(tmp_path, monkeypatch, fails, archive_proof):
     from scripts import check_full_regression as runner
     root = tmp_path/'source'
     (root/'tests').mkdir(parents=True)
@@ -28,6 +29,9 @@ def test_full_runner_retains_reports_but_removes_owned_scratch(tmp_path, monkeyp
         "    (tmp_path/'payload').write_bytes(b'x' * 100000)\n"
         f"    assert {fails is not True}\n")
     output = tmp_path/'evidence'
+    if archive_proof:
+        output.mkdir()
+        (output/'archive-proof.json').write_text('{"archive": "immutable fixture"}')
     monkeypatch.setattr(runner, 'ROOT', root)
     monkeypatch.setattr(runner, 'snapshot', lambda: {'fixture': 'unchanged'})
     monkeypatch.setattr(sys, 'argv', ['regression', '--output', str(output)])
@@ -48,6 +52,8 @@ def test_full_runner_retains_reports_but_removes_owned_scratch(tmp_path, monkeyp
     assert not list(output.rglob('.scratch-*'))
     manifests = list(output.rglob('managed-run.json'))
     assert len(manifests) == 2
+    if archive_proof:
+        assert (output/'archive-proof.json').read_text() == '{"archive": "immutable fixture"}'
 
 
 def test_full_runner_never_adopts_existing_directory(tmp_path, monkeypatch):
