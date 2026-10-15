@@ -13,7 +13,6 @@ import json
 import os
 from pathlib import Path
 import signal
-import subprocess
 import sys
 import threading
 import time
@@ -22,6 +21,7 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+from scripts.managed_test_run import ManagedTestRun
 from scripts.regression_plan import RESOURCE_LAYOUT, available_workers, classify_events, fingerprint, plan_jobs, pytest_command
 PLUGIN = '''import json, os
 from pathlib import Path
@@ -66,23 +66,6 @@ def write_json(path, value):
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2)+'\n', encoding='utf-8')
 
 
-def stop(process):
-    if process.poll() is not None:
-        return False
-    process.send_signal(signal.SIGINT if os.name != 'nt' else signal.SIGTERM)
-    try:
-        process.wait(timeout=20)
-        return False
-    except subprocess.TimeoutExpired:
-        if os.name == 'nt':
-            process.kill()
-        else:
-            try: os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError: pass
-        process.wait(timeout=10)
-        return True
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', required=True, type=Path)
@@ -92,6 +75,9 @@ def main():
     parser.add_argument('--resource-shard', action='store_true', help='Use four ordinary, one exact resource and one complete long wall-clock shard')
     parser.add_argument('--coverage', action='store_true', help='Capture parent/child Python coverage without a legacy whole-suite threshold')
     parser.add_argument('--timeout', type=int, default=900)
+    parser.add_argument('--min-free-bytes', type=int, default=256*1024**2)
+    parser.add_argument('--max-scratch-bytes', type=int, default=2*1024**3)
+    parser.add_argument('--max-log-bytes', type=int, default=8*1024**2)
     args = parser.parse_args()
     if not 1 <= args.workers <= available_workers():
         parser.error(f'--workers must be between 1 and {available_workers()} available CPUs')
@@ -103,10 +89,15 @@ def main():
             parser.error('--coverage requires requirements-dev.txt (pytest-cov)')
     if args.timeout < 30:
         parser.error('--timeout must be at least 30 seconds')
+    if args.min_free_bytes < 0 or args.max_scratch_bytes <= 0 or args.max_log_bytes < 0:
+        parser.error('Cleanup budgets must be nonnegative; scratch must be positive')
+    managed_options = dict(min_free_bytes=args.min_free_bytes,
+                           max_scratch_bytes=args.max_scratch_bytes,
+                           max_log_bytes=args.max_log_bytes)
     output = args.output.resolve()
-    output.mkdir(parents=True, exist_ok=True)
-    if (output/'collection.json').exists():
-        parser.error('Use a fresh output directory; existing evidence is never overwritten')
+    if output.exists():
+        parser.error('Use a new output directory; existing files are never adopted or cleaned')
+    output.mkdir(parents=True)
     plugin_dir = output/'instrumentation'; plugin_dir.mkdir()
     (plugin_dir/'codepier_regression_capture.py').write_text(PLUGIN)
     env = {**os.environ, 'PYTHONPATH':os.pathsep.join([str(plugin_dir),str(ROOT)]),
@@ -117,12 +108,23 @@ def main():
     prefix = [sys.executable,'-m','pytest','-p','codepier_regression_capture']
     baseline = snapshot(); write_json(output/'source-before.json', baseline)
     started = time.monotonic()
-    with (output/'collection.log').open('w') as log:
-        result = subprocess.run(prefix+['--collect-only','-q','-o','cache_dir='+str(output/'collect-cache'),'tests'],
-            cwd=ROOT,env=env,stdout=log,stderr=subprocess.STDOUT,timeout=90)
-    if result.returncode:
-        print('Collection failed; see',output/'collection.log',flush=True)
-        return result.returncode
+    with ManagedTestRun(output/'collection', **managed_options) as collection_run:
+        previous_collection = {}
+        if threading.current_thread() is threading.main_thread():
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                previous_collection[sig] = signal.signal(
+                    sig, lambda signum, frame: collection_run.cancel())
+        try:
+            result = collection_run.run(prefix+['--collect-only','-q','-o',
+                'cache_dir='+str(collection_run.scratch/'cache'),'tests'],
+                cwd=ROOT, env=env, timeout=90)
+        finally:
+            for sig, handler in previous_collection.items():
+                signal.signal(sig, handler)
+    if result['status'] != 'success' or result['cleanup_pending']:
+        write_json(output/'collection-process.json', result)
+        print('Collection or cleanup failed; see',output/'collection',flush=True)
+        return result['exit_code'] or 1
     full_collection = json.loads((output/'collection.json').read_text())
     markers = json.loads((output/'markers.json').read_text())
     jobs = plan_jobs(full_collection, markers, shard_index=args.shard_index, shard_count=args.shard_count, resource_shard=args.resource_shard)
@@ -135,31 +137,34 @@ def main():
     parallel_jobs = [job for job in jobs if not job.get('exclusive') and not job.get('limited')]
     limited_workers = min(2, args.workers)
     print(f'Collected {len(full_collection)} tests; selected {len(expected)} in {len(jobs)} jobs; workers={args.workers}; limited={len(limited_jobs)}@{limited_workers}; exclusive={len(exclusive_jobs)}; shard={args.shard_index}/{args.shard_count}',flush=True)
-    lock = threading.Lock(); active = {}; results = []
+    lock = threading.Lock(); active = {}; results = []; cancelled = threading.Event()
 
     def run(job):
         module, name = job['module'], job['name']
-        directory = output/name; directory.mkdir()
-        local_env = {**env,'CODEPIER_COLLECTION':str(directory/'collected.json'),'CODEPIER_EVENTS':str(directory/'events.jsonl'),
-                     'CODEPIER_MARKERS':str(directory/'markers.json'), 'COVERAGE_FILE':str(directory/'.coverage')}
-        command = pytest_command(prefix, directory, job['selectors'], coverage=args.coverage)
-        begin = time.monotonic(); timed_out = forced = False
-        with (directory/'output.log').open('w') as log:
-            process = subprocess.Popen(command,cwd=ROOT,env=local_env,stdout=log,stderr=subprocess.STDOUT,start_new_session=os.name!='nt')
-            with lock: active[name] = process
+        directory = output/name
+        with ManagedTestRun(directory, **managed_options) as managed:
+            local_env = {**env,'CODEPIER_COLLECTION':str(directory/'collected.json'),
+                         'CODEPIER_EVENTS':str(directory/'events.jsonl'),
+                         'CODEPIER_MARKERS':str(directory/'markers.json'),
+                         'COVERAGE_FILE':str(directory/'.coverage')}
+            command = pytest_command(prefix, directory, job['selectors'],
+                                     coverage=args.coverage, scratch=managed.scratch)
+            with lock:
+                active[name] = managed
+                if cancelled.is_set():
+                    managed.cancel()
             try:
-                try: process.wait(timeout=args.timeout)
-                except subprocess.TimeoutExpired:
-                    timed_out = True; forced = stop(process)
+                record = managed.run(command, cwd=ROOT, env=local_env, timeout=args.timeout)
             finally:
-                with lock: active.pop(name,None)
-        record = {'module':module,'job':name,'exit_code':process.returncode,'timed_out':timed_out,
-                  'forced_termination':forced,'seconds':round(time.monotonic()-begin,3)}
+                with lock:
+                    active.pop(name, None)
+        record.update(module=module, job=name)
         write_json(directory/'process.json', record)
         with lock:
             print(json.dumps(record),flush=True)
-            if record['exit_code'] or record['timed_out']:
-                print('FAILURE_LOG '+module+'\n'+(directory/'output.log').read_text(errors='replace')[-12000:],flush=True)
+            if record['status'] != 'success' or record['cleanup_pending']:
+                print('FAILURE_LOG '+module+'\n'+((directory/'output.log').read_text(errors='replace')[-12000:]
+                    if (directory/'output.log').exists() else 'Command did not start.'),flush=True)
         return record
 
     def run_pool(selected_jobs, workers):
@@ -172,23 +177,37 @@ def main():
             except BaseException:
                 for future in futures: future.cancel()
                 with lock: running = list(active.values())
-                for process in running: stop(process)
+                for process in running: process.cancel()
                 raise
 
-    run_pool(parallel_jobs, args.workers)
-    # Browser/real-process integration modules get a smaller shared pool. This
-    # keeps coverage exhaustive without turning host saturation into false
-    # product failures on local 5-15 second deadlines.
-    run_pool(limited_jobs, limited_workers)
-    # Timing/restart-sensitive jobs still run exactly once, but only after both
-    # pools have drained so their local deadlines measure the product contract.
+    def cancel_runs(signum, frame):
+        cancelled.set()
+        # Never acquire a potentially interrupted main-thread lock here.
+        for managed in list(active.values()):
+            managed.cancel()
+
+    previous = {}
+    if threading.current_thread() is threading.main_thread():
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            previous[sig] = signal.signal(sig, cancel_runs)
     try:
-        for job in exclusive_jobs:
-            results.append(run(job))
-    except BaseException:
-        with lock: running = list(active.values())
-        for process in running: stop(process)
-        raise
+        run_pool(parallel_jobs, args.workers)
+        # Browser/real-process integration modules get a smaller shared pool. This
+        # keeps coverage exhaustive without turning host saturation into false
+        # product failures on local 5-15 second deadlines.
+        run_pool(limited_jobs, limited_workers)
+        # Timing/restart-sensitive jobs still run exactly once, but only after both
+        # pools have drained so their local deadlines measure the product contract.
+        try:
+            for job in exclusive_jobs:
+                results.append(run(job))
+        except BaseException:
+            with lock: running = list(active.values())
+            for process in running: process.cancel()
+            raise
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
     records = {}; suites = ET.Element('testsuites')
     for job in jobs:
         directory = output/job['name']
@@ -220,7 +239,7 @@ def main():
                'source_inventory_sha256':fingerprint(baseline),'duplicate_phases':duplicate_phases,
                'seconds':round(time.monotonic()-started,3),'source_changed_during_run':changed,
                'unexpected_tests':sorted(set(records)-set(expected)),
-               'module_failures':[r for r in results if r['exit_code'] or r['timed_out']],
+               'module_failures':[r for r in results if r['status'] != 'success' or r['cleanup_pending']],
                'outcomes':outcomes,'runs':sorted(results,key=lambda r:r['job']),
                'method':'Deterministic exhaustive module/independent-case jobs, explicit shards, exactly-once evidence, no retries. Browser/integration jobs use a two-worker resource pool; timing/restart-sensitive jobs run once with exclusive host admission after both pools drain. A shard is not full verification until all shards merge. Native CLI tests use local substitutes, never real model probes.'}
     summary['verified'] = (counts['passed']==len(expected) and bool(expected) and not changed

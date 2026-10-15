@@ -55,7 +55,7 @@ PANEL_UPDATE_EXCLUDES = frozenset({'.prettierrc.json', 'pyproject.toml'} |
 EXTENSIONS = {'.py','.js','.mjs','.cjs','.ts','.tsx','.html','.css','.json','.toml','.yaml','.yml',
               '.md','.txt','.sh','.ps1','.cmd','.bat','.svg','.png','.jpg','.jpeg','.webp','.ico',
               '.xml','.service','.plist','.example'}
-EXCLUDED_NAMES = {'.rekey','.codepier-updater','__pycache__','node_modules','.git','.pytest_cache','.venv','.venv-compat',
+EXCLUDED_NAMES = {'.codepier-test-runs','.rekey','.codepier-updater','__pycache__','node_modules','.git','.pytest_cache','.venv','.venv-compat',
                   'data','private','agent-state','hub-data','uploads','backups','checkpoints','.DS_Store',
                   '.work','dist','.ruff_cache','.mypy_cache','.idea','.vscode'}
 PRIVATE_NAMES = {'master.keys.json','next-keyring.json','rekey.json','auth.json','config.json','pairing.json','master.key','.env','credentials.json'}
@@ -179,6 +179,7 @@ REQUIRED_FILES = {
 
 PUBLIC_DOCS = {
     'docs/OWNER_TASK_CONTEXT.md',
+    'docs/TEST_CLEANUP.md',
     'docs/COLLABORATION_FLUID_UX_2026-10-12.md',
     'docs/COLLABORATION_RECOVERY.md', 'docs/COLLABORATION_WORKSPACE_UX_2026-10-11.md',
     'docs/DOT_BIDIRECTIONAL_CHAT.md', 'docs/DOT_SEAMLESS_CONVERSATION.md', 'docs/DOT_RELAY_EXPERIENCE.md',

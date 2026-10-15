@@ -89,10 +89,11 @@ def plan_jobs(nodeids, markers=None, *, shard_index=0, shard_count=1, resource_s
     return jobs
 
 
-def pytest_command(prefix, directory, selectors, *, coverage=False):
+def pytest_command(prefix, directory, selectors, *, coverage=False, scratch=None):
     directory = Path(directory)
-    command = [*prefix, "-v", "--tb=short", "-o", "cache_dir=" + str(directory / "cache"),
-               "--junitxml=" + str(directory / "results.xml"), "--basetemp=" + str(directory / "tmp")]
+    scratch = Path(scratch) if scratch is not None else directory
+    command = [*prefix, "-v", "--tb=short", "-o", "cache_dir=" + str(scratch / "cache"),
+               "--junitxml=" + str(directory / "results.xml"), "--basetemp=" + str(scratch / "tmp")]
     if coverage:
         command += ["--cov=agent", "--cov=hub", "--cov=shared", "--cov=scripts", "--cov-report="]
     return command + list(selectors)
