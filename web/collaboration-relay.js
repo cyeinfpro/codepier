@@ -1089,6 +1089,16 @@ window.CodePierCollaborationRelay = {
         m.attachments,
         m.channel_deliveries,
         m.channel_media,
+        // The server can update a question projection without editing its message.
+        // Sign every field continuationCard consumes, in a stable order.
+        m.task_continuation && [
+          m.task_continuation.schema_version,
+          m.task_continuation.kind,
+          m.task_continuation.question_message_id,
+          m.task_continuation.state,
+          m.task_continuation.resolution,
+          m.task_continuation.reason,
+        ],
         tasks.map((t) => [
           t.work_item_id,
           t.wait_reason,

@@ -593,3 +593,43 @@ def test_archived_outbox_cleanup_is_scoped_and_late_receipt_cannot_resend(ecosys
     assert page.evaluate('roomB.relayOutbox.length') == 0
     assert page.evaluate('roomA.messages[0].id') == 'original-message'
     assert page.evaluate('calls.every(call=>call.method==="GET")')
+
+
+@pytest.mark.parametrize('change,label', [
+    ({'state': 'answered', 'resolution': 'confirmed'}, '已确认这份方案'),
+    ({'state': 'answered', 'resolution': 'declined'}, '已回复不执行此方案'),
+    ({'state': 'expired'}, '这份方案已过期'),
+    ({'reason': 'clarification'}, '等待你补充任务要求'),
+])
+def test_continuation_only_update_repaints_one_card_without_changing_message(
+        ecosystem_page, change, label):
+    page = ecosystem_page
+    page.evaluate("""() => {
+      const m = c.messages[0];
+      m.relay_receipts = [];
+      m.task_continuation = {schema_version: 1, kind: 'owner_task_clarification',
+        question_message_id: m.id, state: 'pending', reason: 'plan_confirmation'};
+      window.serverMessage = structuredClone(m);
+      document.querySelector('#timeline').innerHTML = relay.renderMessage(m);
+      window.api = async (url, options = {}) => {
+        calls.push({url, method: options.method || 'GET'});
+        return {server_now: 1000, visibility_token: 'visibility',
+          updates: [structuredClone(serverMessage)], items: [], task_states: [],
+          room_state: 'active', can_manage: true, has_more: false};
+      };
+    }""")
+    card = page.locator('.cc-task-context-card')
+    expect(card).to_contain_text('等待你确认这份方案')
+    page.evaluate('relay.sync({readOnly: true})')
+    page.evaluate('patches.length = 0')
+    baseline = page.evaluate('({version: c.messages[0].version, body: c.messages[0].body_text})')
+    page.evaluate('(change) => Object.assign(serverMessage.task_continuation, change)', change)
+    page.evaluate('relay.sync({readOnly: true})')
+    assert page.evaluate('c.messages[0].task_continuation') == page.evaluate('serverMessage.task_continuation')
+    assert page.evaluate('({version: c.messages[0].version, body: c.messages[0].body_text})') == baseline
+    expect(card).to_contain_text(label)
+    assert page.evaluate('patches') == [['original-message']]
+    page.evaluate('relay.sync({readOnly: true})')
+    assert page.evaluate('patches') == [['original-message']]
+    assert page.evaluate('calls.every(call => call.method === "GET")')
+    assert page.evaluate('c.relayOutbox[0].attempts') == 0
