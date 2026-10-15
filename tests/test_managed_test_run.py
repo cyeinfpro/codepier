@@ -17,6 +17,32 @@ from scripts import managed_test_run as managed
 pytestmark = pytest.mark.skipif(os.name != 'posix', reason='fd-safe POSIX runner; other platforms fail closed')
 
 
+OWNED_ALIAS_RECEIPTS = []
+
+
+@pytest.fixture(autouse=True)
+def clean_test_roots(monkeypatch):
+    """Remove only roots allocated by this test, after its child has stopped."""
+    original = managed._create_short_tmp
+    allocated = []
+    def create(data):
+        info = original(data)
+        allocated.append((data, {**data, 'short_tmp': json.loads(json.dumps(info))}))
+        return info
+    monkeypatch.setattr(managed, '_create_short_tmp', create)
+    OWNED_ALIAS_RECEIPTS.clear()
+    yield
+    allocated.extend((data, data) for data in OWNED_ALIAS_RECEIPTS)
+    for data, initial in allocated:
+        state, pid = data.get('child_state'), data.get('child_pid')
+        if state not in {'not_started', 'stopped'} and (
+                not managed._dead(pid) or managed.live_group_members(pid)):
+            continue
+        saved = {**initial, 'cleanup_state': 'cleanup_pending'}
+        managed._short_tmp(saved, remove=True)
+    OWNED_ALIAS_RECEIPTS.clear()
+
+
 def command(source):
     return [sys.executable, '-c', source]
 
@@ -36,7 +62,9 @@ def orphan(tmp_path):
     subprocess.run(command(source), cwd=managed.ROOT, check=True, timeout=10,
                    env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'})
     path = output.resolve() / managed.MANIFEST
-    return path, json.loads(path.read_text())
+    data = json.loads(path.read_text())
+    OWNED_ALIAS_RECEIPTS.append(json.loads(json.dumps(data)))
+    return path, data
 
 
 @pytest.mark.parametrize('exit_code', [0, 7])
@@ -66,7 +94,9 @@ def test_environment_cannot_be_overridden_with_inherited_values(tmp_path):
         ), timeout=5, env={'TMPDIR': '/should-not-use', 'XDG_CACHE_HOME': '/wrong'})
         assert result['status'] == 'success'
         values = json.loads((run.evidence / 'output.log').read_text())
-        assert all(value.startswith(scratch + '/') for value in values.values())
+        assert all(values[key].startswith(scratch + '/') for key in ('XDG_CACHE_HOME', 'PYTHONPYCACHEPREFIX'))
+        assert values['TMPDIR'] == values['TMP'] == values['TEMP']
+        assert len(values['TMPDIR'].encode()) < 60
 
 
 def test_timeout_and_descendants_are_stopped_before_cleanup(tmp_path):
@@ -226,7 +256,7 @@ def test_replaced_evidence_root_does_not_redirect_cleanup(tmp_path):
 def test_initial_system_ancestor_symlink_is_canonicalized(tmp_path):
     real = tmp_path / 'real'
     real.mkdir()
-    link = tmp_path / 'alias'
+    link = tmp_path / 'temporary'
     link.symlink_to(real, target_is_directory=True)
     with managed.ManagedTestRun(link / 'run', min_free_bytes=0) as run:
         assert run.evidence == real.resolve() / 'run'
@@ -321,6 +351,9 @@ def test_unverified_stop_retains_scratch(tmp_path, monkeypatch):
         assert run.scratch.exists()
         assert receipt(run)['cleanup_pending']
         assert 'unverified' in receipt(run)['cleanup_error']
+        # This fixture never launched a child; restore only its test proof.
+        run._stopped = True
+        run.data['child_state'] = 'not_started'
 
 
 def test_cli_opt_in_for_arbitrary_project_with_unique_evidence(tmp_path):
@@ -371,6 +404,9 @@ def test_interrupted_launch_is_unknown_and_never_cleaned(tmp_path, monkeypatch):
         assert run.scratch.exists()
         assert receipt(run)['child_state'] == 'launching'
         assert receipt(run)['cleanup_pending']
+        # The mocked Popen raised before creating any child.
+        run._stopped = True
+        run.data['child_state'] = 'not_started'
 
 
 def test_malformed_manifest_is_blocked(tmp_path):
@@ -406,3 +442,107 @@ def test_cleanup_write_failure_preserves_primary_exception(tmp_path, monkeypatch
             raise RuntimeError('primary')
     assert run.scratch.exists()
     assert run.data['cleanup_pending']
+
+
+def test_long_evidence_path_can_bind_unix_socket(tmp_path):
+    with managed.ManagedTestRun(tmp_path / ('deep-' * 35) / 'run', min_free_bytes=0) as run:
+        temporary = Path(run.environment()['TMPDIR'])
+        result = run.run(command(
+            'import os,socket,tempfile; from pathlib import Path; '
+            'p=Path(tempfile.mkdtemp(prefix="org.chromium.Chromium.")).resolve()/"SingletonSocket"; '
+            's=socket.socket(socket.AF_UNIX); s.bind(str(p)); s.close(); print(p)'
+        ), timeout=5)
+        assert result['status'] == 'success'
+        assert not result['cleanup_pending']
+        assert not temporary.exists()
+        assert not run.scratch.exists()
+
+
+def test_short_root_replacement_blocks_without_touching_foreign_target(tmp_path):
+    with managed.ManagedTestRun(tmp_path / 'run', min_free_bytes=0) as run:
+        temporary = Path(run.environment()['TMPDIR'])
+        original = temporary.with_name(temporary.name + '-saved')
+        temporary.rename(original)
+        temporary.symlink_to(tmp_path)
+        try:
+            run.finish('success')
+            assert receipt(run)['cleanup_pending']
+            assert run.scratch.is_dir()
+            assert temporary.is_symlink()
+        finally:
+            temporary.unlink()
+            original.rename(temporary)
+        run.finish('success')
+        assert not receipt(run)['cleanup_pending']
+
+
+def test_recovery_after_short_root_removal(tmp_path):
+    path, data = orphan(tmp_path)
+    data['cleanup_state'] = 'cleanup_pending'
+    fd = managed._directory(path.parent)
+    try:
+        managed._json_write(fd, managed.MANIFEST, data)
+        managed._short_tmp(data, remove=True)
+    finally:
+        os.close(fd)
+    assert managed.recover(path, dry_run=False)['status'] == 'cleaned'
+
+
+def test_short_root_symlink_does_not_follow_foreign_target(tmp_path):
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    sentinel = outside / 'user-file'
+    sentinel.write_text('keep')
+    with managed.ManagedTestRun(tmp_path / 'run', min_free_bytes=0) as run:
+        root = Path(run.environment()['TMPDIR'])
+        (root / 'outside-link').symlink_to(outside, target_is_directory=True)
+        run.finish('success')
+        assert not receipt(run)['cleanup_pending']
+        assert not root.exists()
+    assert sentinel.read_text() == 'keep'
+
+
+@pytest.mark.parametrize('invalid', [[], 'forged', 5])
+def test_malformed_short_metadata_is_blocked(tmp_path, invalid):
+    path, data = orphan(tmp_path)
+    data['short_tmp'] = invalid
+    path.write_text(json.dumps(data))
+    assert managed.recover(path, dry_run=False)['status'] == 'blocked'
+
+
+def test_initial_manifest_failure_reclaims_just_created_temporary(tmp_path, monkeypatch):
+    original = managed._json_write
+    roots = []
+    def fail(fd, name, data, **kwargs):
+        if name == managed.MANIFEST and not kwargs.get('initial') and 'short_tmp' in data and data.get('status') != 'initialization_failed':
+            roots.append(Path(data['short_tmp']['parent']) / ('cpt-' + data['run_id']))
+            raise OSError('fixture manifest failure')
+        return original(fd, name, data, **kwargs)
+    monkeypatch.setattr(managed, '_json_write', fail)
+    with pytest.raises(OSError, match='fixture manifest failure'):
+        managed.ManagedTestRun(tmp_path / 'run', min_free_bytes=0)
+    assert len(roots) == 1
+    assert not roots[0].exists()
+
+
+@pytest.mark.parametrize('fault', ['marker', 'fsync'])
+def test_short_root_creation_failure_is_owned_and_reclaimed(tmp_path, monkeypatch, fault):
+    original = managed._json_write
+    roots = []
+    def fail(fd, name, data, **kwargs):
+        if name == managed.MARKER and data.get('run_id'):
+            root = Path('/tmp').resolve() / ('cpt-' + data['run_id'])
+            if root.exists() and managed._matches(os.fstat(fd), managed._identity(root.stat())):
+                roots.append(root)
+                if fault == 'fsync':
+                    original(fd, name, data, **kwargs)
+                raise OSError('fixture short-root creation ' + fault)
+        return original(fd, name, data, **kwargs)
+    monkeypatch.setattr(managed, '_json_write', fail)
+    output = tmp_path / 'run'
+    with pytest.raises(OSError, match='fixture short-root creation'):
+        managed.ManagedTestRun(output, min_free_bytes=0)
+    assert len(roots) == 1 and not roots[0].exists()
+    data = json.loads((output / managed.MANIFEST).read_text())
+    assert data['status'] == 'initialization_failed'
+    assert data['short_tmp']['identity']

@@ -4,6 +4,8 @@
 
 CodePier 全回归入口 scripts/check_full_regression.py 自动为收集阶段和每个测试任务分配受管 scratch，JUnit、事件、摘要和有界日志保留在 evidence 中。测试成功、失败、取消、超时后，先确认所属进程组结束，再清理本次 scratch。清理失败会设置 cleanup_pending，不能算完整验证通过。
 
+TMPDIR/TMP/TEMP 使用系统 /tmp 下按 run_id 独占创建的真实短目录（macOS 为 canonical /private/tmp），避免 Chromium Unix socket 路径过长；它不是指向长路径的别名。短目录和 evidence 内 scratch 都有目录身份和 owner marker，属于同一预算与收尾。pytest basetemp 单独放到 scratch/pytest，与浏览器/系统临时目录分开，pytest 初始化不会删除已启动浏览器的临时文件。
+
 任意已映射项目可以显式使用 scripts/managed_test_run.py 包装测试命令。普通 exec、第三方测试自己写到项目目录的文件、旧工作树、虚拟环境、历史报告和备份不会被猜测删除。本变更不修改任何现有项目映射、权限或 Agent 配置。
 
 当前实现需要 POSIX fd-relative/no-follow 和 waitid/WNOWAIT，支持已验证的 macOS 环境；Windows 会拒绝运行，不会退回不安全删除。Linux 尚需独立系统验收。测试子进程必须保持在继承的进程组中；daemon/setsid 逃逸不属于此包装器可证明回收的范围。
@@ -46,7 +48,7 @@ Python tempfile 会使用受管 TMPDIR；pytest 应用 -p no:cacheprovider 避�
 
 ## 配额与报告
 
-默认最小空闲空间 256 MiB、单次 scratch 2 GiB、stdout/stderr 保留最多 8 MiB；CLI 可设置 --min-free-bytes、--max-scratch-bytes、--max-log-bytes。容量是采样准入/停止保护，不是操作系统硬配额。报告、覆盖率和用户测试直接写出的文件不在 scratch 字节上限内，必要证据保留供审查，不自动过期删除。
+默认最小空闲空间 256 MiB、单次 scratch 与短 TMP 根合计 2 GiB、stdout/stderr 保留最多 8 MiB；CLI 可设置 --min-free-bytes、--max-scratch-bytes、--max-log-bytes。容量是采样准入/停止保护，不是操作系统硬配额。报告、覆盖率和用户测试直接写出的文件不在 scratch 字节上限内，必要证据保留供审查，不自动过期删除。
 
 managed-run.json 提供 schema、run_id、路径/设备/inode/uid 身份、所属进程状态、预算、测试结果、cleanup_state 和 cleanup_pending。日志截断明确标注 log_truncated。输出目录不可复用，旧文件不被覆盖。
 
@@ -58,6 +60,8 @@ managed-run.json 提供 schema、run_id、路径/设备/inode/uid 身份、所�
 ```
 
 默认只检查。仅对自己创建的已确认停止 scratch，可显式传 --apply 恢复回收。恢复不向历史 PID 发停止信号。活跃/未知 PID、活跃锁、路径身份变化、根或元数据符号链接、未确认启动窗口、设备文件或不完整所有权证据都会阻止删除。部分清理后标记丢失时，仅已核实 inode 的空 quarantine 可完成删除；非空目录仍保留并要求人工检查，不能凭年龄猜测。
+
+短 TMP 根创建前先持久化初始化收据；普通创建失败只回收已核实身份的本次目录。若创建后尚未取得身份就崩溃，保留具名 pending 记录供核验，不扫 /tmp 猜测归属。
 
 该版没有定时全盘扫描，也没有自动应用历史清理；恢复命令为明确、可审查的本次记录入口。
 

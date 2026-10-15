@@ -12,7 +12,7 @@ from scripts.preview_worktree_cleanup import inventory, size
 def test_separate_scratch_from_evidence():
     command = pytest_command(['python'], Path('evidence'), ['tests/test_a.py'],
                              scratch=Path('scratch'))
-    assert '--basetemp=scratch/tmp' in command
+    assert '--basetemp=scratch/pytest' in command
     assert 'cache_dir=scratch/cache' in command
     assert '--junitxml=evidence/results.xml' in command
 
@@ -25,7 +25,17 @@ def test_full_runner_retains_reports_but_removes_owned_scratch(tmp_path, monkeyp
     (root/'tests').mkdir(parents=True)
     (root/'pytest.ini').write_text('[pytest]\n')
     (root/'tests'/'test_example.py').write_text(
-        "def test_example(tmp_path):\n"
+        "import os, tempfile, pytest\n"
+        "from pathlib import Path\n"
+        "@pytest.fixture(scope='session')\n"
+        "def before_tmp():\n"
+        "    with tempfile.TemporaryDirectory() as d:\n"
+        "        p=Path(d)/'live-browser-sentinel'; p.write_text('keep')\n"
+        "        yield p\n"
+        "        assert p.read_text()=='keep'\n"
+        "def test_example(before_tmp, tmp_path):\n"
+        "    assert before_tmp.read_text()=='keep'\n"
+        "    assert Path(os.environ['TMPDIR']).resolve() not in tmp_path.parents\n"
         "    (tmp_path/'payload').write_bytes(b'x' * 100000)\n"
         f"    assert {fails is not True}\n")
     output = tmp_path/'evidence'

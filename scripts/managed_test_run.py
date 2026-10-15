@@ -216,6 +216,98 @@ def _scratch_name(fd, data):
     return choices[0] if choices else None
 
 
+def _short_tmp(data, *, remove=False, limit=None):
+    """Verify and optionally reclaim this run's real, short temporary root."""
+    info = data.get('short_tmp')
+    if info is None:
+        if data.get('short_tmp_setup') == 'pending':
+            raise SafetyError('Short temporary creation identity is incomplete')
+        return 0  # Older receipts predate short-path support.
+    if not isinstance(info, dict):
+        raise SafetyError('Invalid short temporary metadata')
+    root = Path('/tmp').resolve(strict=True)
+    if info.get('parent') != str(root):
+        raise SafetyError('Short temporary parent changed')
+    parent = _directory(root)
+    child = None
+    try:
+        if not _matches(os.fstat(parent), info['parent_identity']):
+            raise SafetyError('Short temporary parent identity changed')
+        base = 'cpt-' + data['run_id']
+        names = []
+        for name in (base, base + '-cleanup'):
+            try:
+                st = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISDIR(st.st_mode) or not _matches(st, info['identity']) or stat.S_IMODE(st.st_mode) != 0o700:
+                raise SafetyError('Short temporary directory identity changed')
+            names.append(name)
+        pending = data.get('cleanup_state') in {'cleanup_pending', 'cleaned'}
+        if not names and pending:
+            return 0
+        if len(names) != 1:
+            raise SafetyError('Short temporary directory missing or ambiguous')
+        name = names[0]
+        child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+        if not _matches(os.fstat(child), info['identity']):
+            raise SafetyError('Short temporary directory changed while opening')
+        try:
+            marker = _json_read(child, MARKER)
+        except FileNotFoundError:
+            if not pending or os.listdir(child):
+                raise
+        else:
+            if marker != {'run_id': data['run_id'], 'uid': data['uid'], 'evidence': data['evidence']}:
+                raise SafetyError('Short temporary ownership marker changed')
+        if not remove:
+            if limit is None:
+                return 0
+            return _scan(child, device=info['identity']['dev'], limit=limit, mutable=True)[1]
+        inventory, total = _scan(child, device=info['identity']['dev'])
+        if name == base:
+            os.rename(base, base + '-cleanup', src_dir_fd=parent, dst_dir_fd=parent)
+            os.fsync(parent)
+            name = base + '-cleanup'
+        if not _matches(os.stat(name, dir_fd=parent, follow_symlinks=False), info['identity']):
+            raise SafetyError('Short temporary directory changed during quarantine')
+        _erase(child, inventory)
+        if not _matches(os.stat(name, dir_fd=parent, follow_symlinks=False), info['identity']):
+            raise SafetyError('Short temporary directory moved during cleanup')
+        os.rmdir(name, dir_fd=parent)
+        os.fsync(parent)
+        return total
+    finally:
+        if child is not None:
+            os.close(child)
+        os.close(parent)
+
+
+def _create_short_tmp(data):
+    # Canonical real directory stays short even for applications using realpath.
+    root = Path('/tmp').resolve(strict=True)
+    parent = _directory(root)
+    child = None
+    try:
+        name = 'cpt-' + data['run_id']
+        os.mkdir(name, mode=0o700, dir_fd=parent)
+        child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+        st = os.fstat(child)
+        if st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) != 0o700:
+            raise SafetyError('Short temporary directory ownership differs')
+        info = {'parent': str(root), 'parent_identity': _identity(os.fstat(parent)),
+                'identity': _identity(st)}
+        data['short_tmp'] = info  # Available to failure handling before more I/O.
+        _json_write(child, MARKER, {'run_id': data['run_id'], 'uid': data['uid'],
+                                   'evidence': data['evidence']}, initial=True)
+        os.fsync(parent)
+        return info
+    finally:
+        if child is not None:
+            os.close(child)
+        os.close(parent)
+
+
 def _validate(fd, data):
     if not isinstance(data, dict):
         raise SafetyError('Manifest must be an object')
@@ -237,6 +329,7 @@ def _validate(fd, data):
     lock_info = os.stat(LOCK, dir_fd=fd, follow_symlinks=False)
     if not stat.S_ISREG(lock_info.st_mode) or not _matches(lock_info, data.get('lock_identity')):
         raise SafetyError('Ownership lock changed')
+    _short_tmp(data)
     name = _scratch_name(fd, data)
     if name is not None:
         child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
@@ -260,6 +353,10 @@ def _validate(fd, data):
 def _cleanup(fd, data):
     """Persist cleanup_pending before touching owned scratch, retain evidence."""
     name = _validate(fd, data)
+    data['cleanup_pending'] = True
+    data['cleanup_state'] = 'cleanup_pending'
+    _json_write(fd, MANIFEST, data)
+    _short_tmp(data, remove=True)
     if name is None:
         data['cleanup_pending'] = False
         data['cleanup_state'] = 'cleaned'
@@ -361,8 +458,24 @@ class ManagedTestRun:
                 'created_at': time.time(), 'metadata': metadata or {},
                 'limits': {'min_free_bytes': min_free_bytes, 'max_scratch_bytes': max_scratch_bytes, 'max_log_bytes': max_log_bytes},
             }
+            self.data['short_tmp_setup'] = 'pending'
             _json_write(self._fd, MANIFEST, self.data, initial=True)
+            self.data['short_tmp'] = _create_short_tmp(self.data)
+            self.data.pop('short_tmp_setup')
+            _json_write(self._fd, MANIFEST, self.data)
         except BaseException:
+            if getattr(self, 'data', {}).get('short_tmp') is not None:
+                try:
+                    _short_tmp({**self.data, 'cleanup_state': 'cleanup_pending'}, remove=True)
+                except (OSError, KeyError, TypeError, SafetyError):
+                    pass  # Retain unverifiable identity rather than erase it.
+            if getattr(self, 'data', None) is not None:
+                try:
+                    self.data['cleanup_state'] = 'cleanup_pending'
+                    self.data['status'] = 'initialization_failed'
+                    _json_write(self._fd, MANIFEST, self.data)
+                except OSError:
+                    pass  # The first receipt still identifies the run/root name.
             self._close()
             raise
 
@@ -372,8 +485,9 @@ class ManagedTestRun:
             raise AdmissionError('Minimum free disk headroom is unavailable')
 
     def environment(self):
-        return {**os.environ, 'TMPDIR': str(self.scratch / 'tmp'),
-                'TMP': str(self.scratch / 'tmp'), 'TEMP': str(self.scratch / 'tmp'),
+        temporary = str(Path(self.data['short_tmp']['parent']) / ('cpt-' + self.data['run_id']))
+        return {**os.environ, 'TMPDIR': temporary,
+                'TMP': temporary, 'TEMP': temporary,
                 'XDG_CACHE_HOME': str(self.scratch / 'cache'),
                 'PYTHONPYCACHEPREFIX': str(self.scratch / 'pycache'),
                 'PYTHONDONTWRITEBYTECODE': '1'}
@@ -385,11 +499,19 @@ class ManagedTestRun:
     def _budget(self):
         self._admit()
         name = _validate(self._fd, self.data)
+        temporary_bytes = _short_tmp(self.data, limit=self.max_scratch_bytes)
+        temporary_fd = _directory(Path(self.data['short_tmp']['parent']))
+        try:
+            info = os.fstatvfs(temporary_fd)
+            if info.f_bavail * info.f_frsize < self.min_free_bytes:
+                raise AdmissionError('Minimum temporary disk headroom is unavailable')
+        finally:
+            os.close(temporary_fd)
         if name != self.data['scratch_name']:
             raise SafetyError('Active scratch moved or disappeared')
         fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=self._fd)
         try:
-            _scan(fd, device=self.data['scratch_identity']['dev'], limit=self.max_scratch_bytes, mutable=True)
+            _scan(fd, device=self.data['scratch_identity']['dev'], limit=self.max_scratch_bytes - temporary_bytes, mutable=True)
         finally:
             os.close(fd)
 
