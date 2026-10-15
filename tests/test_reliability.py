@@ -205,14 +205,35 @@ async def test_corrupt_recovery_payload_stops_without_fake_success(runtime):
 
 
 @pytest.mark.asyncio
-async def test_slow_socket_does_not_lock_http_admission(runtime):
+@pytest.mark.parametrize('preparation_delay', [0, .05])
+async def test_slow_socket_does_not_lock_http_admission(runtime, monkeypatch, preparation_delay):
     r,p=runtime;one=await r.invoke('fs_read',{'project':'ProjectAlpha','path':'one'},p)
-    peer=Peer();peer.gate=asyncio.Event();r.connections['dev']=peer
+    entered = asyncio.Event()
+
+    class SocketGate(asyncio.Event):
+        async def wait(self):
+            entered.set()  # Peer has appended its packet and is now blocked.
+            return await super().wait()
+
+    if preparation_delay:
+        original_prepare = r._prepare_for_send
+        async def delayed_prepare(identifier):
+            # Inject scheduling latency beyond the former fixed 20 ms sleep.
+            await asyncio.sleep(preparation_delay)
+            return await original_prepare(identifier)
+        monkeypatch.setattr(r, '_prepare_for_send', delayed_prepare)
+    peer=Peer();peer.gate=SocketGate();r.connections['dev']=peer
     send=asyncio.create_task(r.deliver(one['operation_id']))
-    await asyncio.sleep(.02);assert peer.packets
-    two=await asyncio.wait_for(r.invoke('fs_read',{'project':'ProjectAlpha','path':'two'},p),.3)
-    assert two['pending'] and two['operation_id']!=one['operation_id']
-    peer.gate.set();await send
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        assert peer.packets and not send.done() and not peer.gate.is_set()
+        two=await asyncio.wait_for(r.invoke('fs_read',{'project':'ProjectAlpha','path':'two'},p),.3)
+        assert two['pending'] and two['operation_id']!=one['operation_id']
+        assert not send.done() and not peer.gate.is_set()
+    finally:
+        peer.gate.set()
+        await asyncio.wait_for(send, 5)
+    assert send.done() and not send.cancelled()
 
 
 @pytest.mark.asyncio
