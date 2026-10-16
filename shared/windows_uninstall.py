@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import xml.etree.ElementTree as ET
 
@@ -25,7 +26,42 @@ NS = {'t': 'http://schemas.microsoft.com/windows/2004/02/mit/task'}
 
 
 def linked(path):
-    return path.is_symlink() or getattr(path, 'is_junction', lambda: False)()
+    # Treat every Windows reparse point as linked, including unknown tags.
+    try:
+        attributes = path.lstat().st_file_attributes
+    except AttributeError:
+        attributes = 0
+    except FileNotFoundError:
+        return False
+    return (path.is_symlink() or getattr(path, 'is_junction', lambda: False)()
+            or bool(attributes & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0x400)))
+
+
+def python_junction(path, base, metadata, api):
+    """Allow only uv's managed minor-version alias, never follow it in a walk."""
+    match = re.fullmatch(r'cpython-(3\.[0-9]+)-windows-(x86_64|aarch64|i686)-none', path.name)
+    if (not match or path.parent != base/'python'
+            or metadata.get('managed') is not True or metadata.get('layout') != 'managed-runtime'
+            or path.is_symlink() or not getattr(path, 'is_junction', lambda: False)()):
+        raise ValueError('Linked contents were preserved: '+str(path))
+    raw = os.readlink(path)
+    # readlink returns the Windows substitute name for a junction.
+    if raw.startswith('\\\\?\\') or raw.startswith('\\??\\'):
+        raw = raw[4:]
+        if raw.startswith('UNC\\'):
+            raw = '\\\\'+raw[4:]
+    target = Path(raw)
+    if (not target.is_absolute() or '..' in target.parts
+            or target.parent != base/'python'
+            or not re.fullmatch(re.escape('cpython-'+match[1])+r'\.[0-9]+-windows-'
+                                +re.escape(match[2])+r'-none', target.name)):
+        raise ValueError('Unverified Python junction target was preserved: '+str(path))
+    safe_directory(target, api)
+    executable = target/'python.exe'
+    if (not target.is_dir() or linked(executable) or not executable.is_file()
+            or path.resolve(strict=True) != target):
+        raise ValueError('Python junction runtime could not be verified: '+str(path))
+    return {'path': str(path), 'target': str(target)}
 
 
 def safe_directory(path, api):
@@ -121,18 +157,26 @@ def inspect_root(base, api, *, locked=False):
     unknown = [name for name in entries if not known_entry(name) and not (locked and name == '.install.lock')]
     if unknown:
         raise ValueError('Unrecognized contents were preserved in '+str(base)+': '+', '.join(unknown))
+    metadata = read_record(base/'management.json', api)
+    junctions = []
+    def unreadable(error):
+        raise error
     inspected = 1
-    for folder, directories, files in os.walk(base, followlinks=False):
+    for folder, directories, files in os.walk(base, followlinks=False, onerror=unreadable):
         inspected += len(directories)+len(files)
         if inspected > 200000:
             raise ValueError('Cleanup tree exceeds the inspection limit; nothing was removed.')
         for name in directories+files:
             item = Path(folder)/name
             if linked(item):
-                raise ValueError('Linked contents were preserved: '+str(item))
+                junctions.append(python_junction(item, base, metadata, api))
+                if len(junctions) > 64:
+                    raise ValueError('Too many Python junctions; installation was preserved.')
+                # os.walk may traverse Windows junctions even with followlinks=False.
+                if name in directories:
+                    directories.remove(name)
             if name in {'.git', '.hg', '.svn'}:
                 raise ValueError('A project checkout exists inside the installation: '+str(item))
-    metadata = read_record(base/'management.json', api)
     config = read_record(base/'config.json', api)
     resume = read_record(base/'.uninstall.json', api)
     trusted_resume = (resume.get('schema') == 1 and resume.get('source') == str(base)
@@ -166,7 +210,8 @@ def inspect_root(base, api, *, locked=False):
         raise ValueError('A browser bridge is installed. Remove its registered host with its verified uninstaller before Agent cleanup.')
     api.require_idle(base, config or {'state_dir': str(state)})
     return {'base': base, 'config': config, 'files': fingerprint(base, api),
-            'entries': [name for name in entries if name != '.install.lock']}
+            'entries': [name for name in entries if name != '.install.lock'],
+            'python_junctions': sorted(junctions, key=lambda item: item['path'])}
 
 
 def inventory(args, api):
@@ -263,7 +308,8 @@ def run(args, api):
             raise ValueError('Scheduled tasks changed during confirmation; cleanup was cancelled.')
         for item in roots:
             current = inspect_root(item['base'], api, locked=True)
-            if current['files'] != item['files'] or current['entries'] != item['entries']:
+            if (current['files'] != item['files'] or current['entries'] != item['entries']
+                    or current['python_junctions'] != item['python_junctions']):
                 raise ValueError('Agent files changed during confirmation; cleanup was cancelled.')
         helper = api.load_lifecycle_helper(Path(api.__file__).resolve().with_name('agent_lifecycle.py'))
         # Exact task ownership is rechecked immediately before each service action.
@@ -295,13 +341,16 @@ def run(args, api):
             current = item['config'] or {'state_dir': str(base/'state')}
             api.require_idle(base, current)
             api.verify_windows_instance_is_stopped(base, current)
-            if fingerprint(base, api) != item['files']:
-                raise ValueError('Agent configuration changed during cleanup; files were preserved.')
+            snapshot = inspect_root(base, api, locked=True)
+            if (snapshot['files'] != item['files'] or snapshot['entries'] != item['entries']
+                    or snapshot['python_junctions'] != item['python_junctions']):
+                raise ValueError('Agent files changed during cleanup; files were preserved.')
             api.atomic_json_file(base/'.uninstall.json', {
                 'schema': 1, 'kind': 'codepier-local-uninstall', 'source': str(base),
                 'owner_sid': api.windows_user_sid(), 'stage': 'files_pending'})
             plan.append({'source': str(base), 'lock_token': token, 'files': fingerprint(base, api),
-                         'entries': sorted(set(item['entries']) | {'.uninstall.json'})})
+                         'entries': sorted(set(item['entries']) | {'.uninstall.json'}),
+                         'python_junctions': item['python_junctions']})
         api.atomic_json_file(handoff, {'schema': 1, 'roots': plan, 'aliases': aliases})
         transferred = True
         print('Services checked. PowerShell will now finish and verify local file cleanup.', flush=True)

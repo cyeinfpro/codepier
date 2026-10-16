@@ -164,8 +164,66 @@ function Assert-CodePierPlainPath {
   }
   return $Full
 }
+function Assert-CodePierPythonJunction {
+  param($Junction, [string]$Source)
+  if (-not ($Junction.path -is [string]) -or -not ($Junction.target -is [string]) -or
+      $Junction.path -match '[\x00-\x1f\x7f]' -or $Junction.target -match '[\x00-\x1f\x7f]') { throw 'Invalid Python junction snapshot.' }
+  if ($Junction.path -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)' -or
+      $Junction.path -match '(?:^|[\\/])\.\.(?:[\\/]|$)') { throw 'Python junction path must be absolute and direct.' }
+  $Python = Assert-CodePierPlainPath -Path (Join-Path $Source 'python')
+  $Alias = [IO.Path]::GetFullPath($Junction.path)
+  $Leaf = [IO.Path]::GetFileName($Alias)
+  $NameMatch = [regex]::Match($Leaf, '^cpython-(3\.[0-9]+)-windows-(x86_64|aarch64|i686)-none$')
+  if (-not $NameMatch.Success -or [IO.Path]::GetDirectoryName($Alias) -ine $Python) { throw 'Unrecognized Python junction path.' }
+  $Target = Assert-CodePierPlainPath -Path $Junction.target
+  $TargetPattern = '^cpython-' + [regex]::Escape($NameMatch.Groups[1].Value) + '\.[0-9]+-windows-' + [regex]::Escape($NameMatch.Groups[2].Value) + '-none$'
+  if ([IO.Path]::GetDirectoryName($Target) -ine $Python -or [IO.Path]::GetFileName($Target) -cnotmatch $TargetPattern) { throw 'Unrecognized Python junction target.' }
+  $TargetItem = Get-Item -LiteralPath $Target -Force -ErrorAction Stop
+  $Executable = Assert-CodePierPlainPath -Path (Join-Path $Target 'python.exe')
+  if (-not $TargetItem.PSIsContainer -or (Get-Item -LiteralPath $Executable -Force -ErrorAction Stop).PSIsContainer) { throw 'Python junction runtime could not be verified.' }
+  $Item = Get-Item -LiteralPath $Alias -Force -ErrorAction Stop
+  if (-not $Item.PSIsContainer -or -not ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+      $Item.LinkType -cne 'Junction' -or @($Item.Target).Count -ne 1) { throw 'Python alias is not a verified junction.' }
+  $RawTarget = [string]$Item.Target
+  if ($RawTarget.StartsWith('\\?\') -or $RawTarget.StartsWith('\??\')) {
+    $RawTarget = $RawTarget.Substring(4)
+    if ($RawTarget.StartsWith('UNC\')) { $RawTarget = '\\' + $RawTarget.Substring(4) }
+  }
+  if ($RawTarget -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)' -or
+      $RawTarget -match '[\x00-\x1f\x7f]' -or $RawTarget -match '(?:^|[\\/])\.\.(?:[\\/]|$)' -or
+      [IO.Path]::GetFullPath($RawTarget) -ine $Target) { throw 'Python junction target changed.' }
+  return @{ path = $Alias; target = $Target }
+}
+function Get-CodePierPythonJunctions {
+  param($Root, [string]$Source)
+  # Old plain-tree handoffs remain valid; new handoffs contain an explicit list.
+  if ($Root.PSObject.Properties.Name -notcontains 'python_junctions') { return }
+  if (-not ($Root.python_junctions -is [Array]) -or $Root.python_junctions.Count -gt 64) { throw 'Invalid Python junction list.' }
+  if ($Root.python_junctions.Count -eq 0) { return }
+  $Metadata = Get-Content -LiteralPath (Join-Path $Source 'management.json') -Encoding UTF8 -Raw | ConvertFrom-Json
+  if (-not ($Metadata.managed -is [bool]) -or -not $Metadata.managed -or $Metadata.layout -cne 'managed-runtime') { throw 'Python junctions require a verified managed installation.' }
+  $Seen = @{}
+  foreach ($Junction in @($Root.python_junctions)) {
+    $Verified = Assert-CodePierPythonJunction -Junction $Junction -Source $Source
+    if ($Seen.ContainsKey($Verified.path)) { throw 'Duplicate Python junction snapshot.' }
+    $Seen[$Verified.path] = $true
+    $Verified
+  }
+}
+function Remove-CodePierPythonJunctions {
+  param($Root, [string]$Source)
+  $Junctions = @(Get-CodePierPythonJunctions -Root $Root -Source $Source)
+  foreach ($Junction in $Junctions) {
+    $Verified = Assert-CodePierPythonJunction -Junction $Junction -Source $Source
+    # Python has exited and services are stopped. Never recurse into this alias.
+    [IO.Directory]::Delete($Verified.path, $false)
+    if (@(Get-ChildItem -LiteralPath ([IO.Path]::GetDirectoryName($Verified.path)) -Force -ErrorAction Stop |
+          Where-Object { $_.Name -ieq [IO.Path]::GetFileName($Verified.path) }).Count -ne 0) { throw 'A Python junction entry remains.' }
+  }
+  Assert-CodePierUninstallTree -Path $Source
+}
 function Assert-CodePierUninstallTree {
-  param([string]$Path)
+  param([string]$Path, [string[]]$AllowedPythonJunctions = @())
   $Pending = New-Object System.Collections.Stack
   $Pending.Push($Path)
   $Count = 0
@@ -173,7 +231,10 @@ function Assert-CodePierUninstallTree {
     $Item = Get-Item -LiteralPath ([string]$Pending.Pop()) -Force -ErrorAction Stop
     $Count++
     if ($Count -gt 200000) { throw 'Cleanup tree exceeds the inspection limit.' }
-    if ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Cleanup tree contains a link; manual review is required.' }
+    if ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+      if ($AllowedPythonJunctions -notcontains $Item.FullName) { throw 'Cleanup tree contains a link; manual review is required.' }
+      continue
+    }
     if ($Item.PSIsContainer) {
       foreach ($Child in @(Get-ChildItem -LiteralPath $Item.FullName -Force -ErrorAction Stop)) { $Pending.Push($Child.FullName) }
     }
@@ -234,7 +295,8 @@ function Assert-CodePierUninstallRoot {
   $MarkerSource = Assert-CodePierPlainPath -Path ([string]$Marker.source)
   if (-not [string]::Equals($MarkerSource, $Source, [StringComparison]::OrdinalIgnoreCase)) { throw 'Cleanup recovery marker source changed.' }
   if ([string]$Marker.owner_sid -cne $Sid) { throw 'Cleanup recovery marker account SID changed.' }
-  Assert-CodePierUninstallTree -Path $Source
+  $PythonJunctions = @(Get-CodePierPythonJunctions -Root $Root -Source $Source)
+  Assert-CodePierUninstallTree -Path $Source -AllowedPythonJunctions @($PythonJunctions | ForEach-Object { $_.path })
   return $Source
 }
 function Remove-CodePierUninstallLock {
@@ -347,6 +409,7 @@ function Complete-CodePierUninstall {
         if (Test-Path -LiteralPath $File) { $Evidence[$Name] = [IO.File]::ReadAllBytes($File) }
       }
       try {
+        Remove-CodePierPythonJunctions -Root $Root -Source $Source
         foreach ($Name in @($Root.entries)) {
           if ($Name -in @('config.json', 'management.json', 'service.xml', '.uninstall.json')) { continue }
           $null = Assert-CodePierUninstallRoot -Root $Root -SkipEntries

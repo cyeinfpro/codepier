@@ -682,27 +682,163 @@ def verify_service_ownership(base, *, allow_missing=False):
         raise ValueError('Existing service belongs to a different Agent configuration; no files were changed.')
 
 
+def _maintenance_error_detail(error):
+    """Keep the original SQLite/OS failure available in the CLI diagnostic."""
+    codes = []
+    for name in ('sqlite_errorcode', 'sqlite_errorname', 'errno', 'winerror'):
+        value = getattr(error, name, None)
+        if value is not None:
+            codes.append(f'{name}={value}')
+    suffix = ' [' + ', '.join(codes) + ']' if codes else ''
+    return f'{type(error).__name__}: {str(error)!r}{suffix}'
+
+
+def _maintenance_error_kind(error):
+    import errno
+    import sqlite3
+    code = getattr(error, 'sqlite_errorcode', None)
+    primary = code & 0xff if isinstance(code, int) else None
+    # Windows sharing/lock violations are distinct from an ACL denial.
+    if getattr(error, 'winerror', None) in (32, 33):
+        return 'file-sharing/lock conflict'
+    if (getattr(error, 'winerror', None) == 5
+            or primary in (sqlite3.SQLITE_PERM, sqlite3.SQLITE_AUTH)):
+        return 'permission denied'
+    if (isinstance(error, PermissionError)
+            or getattr(error, 'errno', None) in (errno.EACCES, errno.EPERM)):
+        # Windows CRT EACCES can mean either sharing conflict or access denial.
+        return ('access denied or file-sharing conflict (native detail unavailable)'
+                if sys.platform == 'win32' else 'permission denied')
+    if primary in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+        return 'database busy/locked'
+    if primary in (sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB):
+        return 'corrupt or invalid database'
+    if primary == sqlite3.SQLITE_READONLY:
+        return 'SQLite read-only/recovery restriction'
+    if primary == sqlite3.SQLITE_CANTOPEN:
+        return 'database open failure'
+    if primary == sqlite3.SQLITE_IOERR:
+        return 'storage I/O failure'
+    if primary == sqlite3.SQLITE_ERROR and any(
+            text in str(error).lower() for text in ('no such table', 'no such column')):
+        return 'missing or incompatible database schema'
+    return 'unclassified read failure'
+
+
+def _maintenance_windows_read_probe(path):
+    """Preserve Win32 errors that the CRT open() folds into EACCES."""
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                  ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD,
+                                  wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    # GENERIC_READ, all sharing modes, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL:
+    # do not create files, request write access, or introduce a sharing lock.
+    handle = kernel.CreateFileW(str(path), 0x80000000, 7, None, 3, 0x80, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        # This corroborates read-open access only, never SQLite validity or idle state.
+        return
+    finally:
+        if not kernel.CloseHandle(handle):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+
+def _maintenance_file_diagnostics(database):
+    """Probe existing database files read-only; never repair or infer idleness."""
+    details = []
+    kinds = set()
+    for suffix in ('', '-wal', '-shm'):
+        path = Path(str(database) + suffix)
+        size = ''
+        try:
+            metadata = path.stat()
+            size = f', size={metadata.st_size}'
+            if not stat.S_ISREG(metadata.st_mode):
+                details.append(f'{str(path)!r}: not a regular file{size}')
+                continue
+            # A stat/access check alone does not establish readability on Windows.
+            # Nonblocking open plus fstat avoids blocking on a replaced FIFO.
+            fd = os.open(path, os.O_RDONLY | getattr(os, 'O_BINARY', 0)
+                         | getattr(os, 'O_NONBLOCK', 0))
+            try:
+                opened = os.fstat(fd)
+                if not stat.S_ISREG(opened.st_mode):
+                    details.append(f'{str(path)!r}: not a regular file')
+                    continue
+                os.read(fd, 1)
+                size = f', size={opened.st_size}'
+            finally:
+                os.close(fd)
+            details.append(f'{str(path)!r}: readable{size}')
+        except FileNotFoundError:
+            details.append(f'{str(path)!r}: absent (or disappeared during probe)')
+        except OSError as error:
+            kind = _maintenance_error_kind(error)
+            native_detail = ''
+            if sys.platform == 'win32':
+                try:
+                    _maintenance_windows_read_probe(path)
+                except OSError as native_error:
+                    # The original CRT failure remains visible alongside this later probe.
+                    kind = _maintenance_error_kind(native_error)
+                    native_detail = '; Native read-open probe: ' + _maintenance_error_detail(native_error)
+                except (ImportError, AttributeError) as probe_error:
+                    native_detail = '; Native read-open probe unavailable: ' + _maintenance_error_detail(probe_error)
+                else:
+                    native_detail = '; Native read-open probe succeeded; original failure remains unresolved'
+            kinds.add(kind)
+            details.append(f'{str(path)!r}: {kind}{size}; {_maintenance_error_detail(error)}{native_detail}')
+    return details, kinds
+
+
+def _maintenance_active_count(database, query, state_name):
+    import sqlite3
+    from contextlib import closing
+    diagnostic_path = database
+    try:
+        try:
+            # exists() can hide access errors. Only actual absence is optional.
+            database.lstat()
+        except FileNotFoundError:
+            return 0
+        diagnostic_path = database.resolve()
+        # Keep WAL-aware SQLite reads; an immutable read or copied main database
+        # could miss active work committed only to WAL. Explicitly close handles.
+        with closing(sqlite3.connect(diagnostic_path.as_uri()+'?mode=ro', uri=True, timeout=3)) as db:
+            return db.execute(query).fetchone()[0]
+    except (sqlite3.Error, OSError) as error:
+        details, kinds = _maintenance_file_diagnostics(diagnostic_path)
+        kinds.add(_maintenance_error_kind(error))
+        raise ValueError(
+            f'Cannot verify {state_name}; database={str(diagnostic_path)!r}. '
+            f'Original error: {_maintenance_error_detail(error)}. '
+            f'Diagnostic categories: {", ".join(sorted(kinds))}. '
+            f'Read-only file probes: {"; ".join(details)}. '
+            'Maintenance remains blocked. Readability does not prove SQLite can read its WAL '
+            'or establish idle state. Inspect the reported files and the original failure '
+            'under the intended Agent account; do not delete sidecars or bypass state checks.'
+        ) from error
+
+
 def require_idle(base, current, *, recover_stale_operations=False):
     """Never infer dead Agent == dead child. Recovery needs explicit local review."""
     import sqlite3
     state = Path(current.get('state_dir') or base/'state').expanduser()
     database = state/'agent.sqlite3'
-    active = 0
-    if database.exists():
-        try:
-            with sqlite3.connect(database.resolve().as_uri()+'?mode=ro', uri=True, timeout=3) as db:
-                active = db.execute("SELECT COUNT(*) FROM calls WHERE status IN ('running','accepted')").fetchone()[0]
-        except sqlite3.Error as exc:
-            raise ValueError('Cannot verify Agent task state; inspect the local journal before retrying.') from exc
+    active = _maintenance_active_count(database,
+        "SELECT COUNT(*) FROM calls WHERE status IN ('running','accepted')", 'Agent task state')
     native = state/'native-cli/native.sqlite3'
-    if native.exists():
-        try:
-            with sqlite3.connect(native.resolve().as_uri()+'?mode=ro', uri=True, timeout=3) as db:
-                sessions = db.execute("SELECT COUNT(*) FROM sessions WHERE status IN ('starting','running','stopping','orphaned')").fetchone()[0]
-        except sqlite3.Error as exc:
-            raise ValueError('Cannot verify native terminal session state; inspect sessions before maintenance.') from exc
-        if sessions:
-            raise ValueError('Native terminal sessions are active. Explicitly stop them before Agent maintenance; stale-operation recovery does not override them.')
+    sessions = _maintenance_active_count(native,
+        "SELECT COUNT(*) FROM sessions WHERE status IN ('starting','running','stopping','orphaned')",
+        'native terminal session state')
+    if sessions:
+        raise ValueError('Native terminal sessions are active. Explicitly stop them before Agent maintenance; stale-operation recovery does not override them.')
     plans = state/'lifecycle'
     if plans.is_dir() and any(p.suffix in ('.json', '.claimed') for p in plans.iterdir()):
         raise ValueError('An Agent lifecycle operation is pending; inspect it before retrying.')

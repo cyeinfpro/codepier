@@ -6,6 +6,7 @@ from pathlib import Path
 
 WINDOWS_CORE = {
     'test_native_windows.py', 'test_windows_service.py', 'test_windows_local_uninstall.py',
+    'test_maintenance_sqlite_diagnostics.py', 'test_windows_python_junction_contract.py',
     'test_optimization_store.py',
     'test_regression_plan.py', 'test_smoke.py', 'test_protocol_negotiation.py',
 }

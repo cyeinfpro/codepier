@@ -256,6 +256,75 @@ def probe_uninstall_handoff(directory, executable):
         results.append({'case': case, 'passed': True, 'exit_code': result.returncode,
                         'identity_evidence': identity_evidence})
 
+    # uv minor-version junctions are allowed only in a verified managed layout.
+    for case in ('managed-python', 'missing-snapshot', 'outside-target', 'changed-target',
+                 'wrong-version', 'wrong-architecture', 'duplicate-junction', 'not-managed',
+                 'linked-executable', 'partial-python-failure'):
+        base = directory/('uninstall-python-'+case)
+        base.mkdir()
+        python = base/'python'
+        python.mkdir()
+        target = python/'cpython-3.13.12-windows-x86_64-none'
+        target.mkdir()
+        (target/'python.exe').write_bytes(b'synthetic Python')
+        alias = python/'cpython-3.13-windows-x86_64-none'
+        actual_target = target
+        if case == 'outside-target':
+            actual_target = directory/('python-outside-'+case)/target.name
+        elif case == 'changed-target':
+            actual_target = python/'cpython-3.13.13-windows-x86_64-none'
+        elif case == 'wrong-version':
+            actual_target = python/'cpython-3.12.12-windows-x86_64-none'
+        elif case == 'wrong-architecture':
+            actual_target = python/'cpython-3.13.12-windows-aarch64-none'
+        if actual_target != target:
+            actual_target.mkdir(parents=True)
+            (actual_target/'python.exe').write_bytes(b'preserve Python')
+        (base/'management.json').write_text(json.dumps({
+            'managed': case != 'not-managed', 'layout': 'managed-runtime'}))
+        root = fixture(base)
+        root['python_junctions'] = [{'path': str(alias), 'target': str(target)}]
+        if case in {'outside-target', 'wrong-version', 'wrong-architecture'}:
+            root['python_junctions'][0]['target'] = str(actual_target)
+        if case == 'duplicate-junction':
+            root['python_junctions'] *= 2
+        elif case == 'missing-snapshot':
+            del root['python_junctions']
+        link = subprocess.run(['cmd.exe', '/d', '/c', 'mklink', '/J', str(alias), str(actual_target)],
+                              capture_output=True, timeout=10)
+        assert link.returncode == 0, link.stderr
+        if case == 'linked-executable':
+            # Junctions do not need Developer Mode. A directory reparse point
+            # shaped like python.exe must not count as a regular executable.
+            (target/'python.exe').unlink()
+            link = subprocess.run(['cmd.exe', '/d', '/c', 'mklink', '/J',
+                                   str(target/'python.exe'), str(base/'runtime')],
+                                  capture_output=True, timeout=10)
+            assert link.returncode == 0, link.stderr
+        handoff = directory/('uninstall-python-'+case+'.json')
+        held = target/'python.exe' if case == 'partial-python-failure' else None
+        result = invoke({'schema': 1, 'roots': [root], 'aliases': []}, handoff, held)
+        if case == 'managed-python':
+            assert result.returncode == 0 and not base.exists(), (result.stdout[-4000:], result.stderr[-4000:])
+        else:
+            assert result.returncode != 0 and (base/'config.json').exists()
+            if case == 'partial-python-failure':
+                assert json.loads((base/'.uninstall.json').read_text())['stage'] == 'files_failed'
+                assert (target/'python.exe').read_bytes() == b'synthetic Python'
+                assert not os.path.lexists(alias)
+                # After the lock is released, a new plain-tree snapshot retries safely.
+                retry_root = fixture(base)
+                retry = invoke({'schema': 1, 'roots': [retry_root], 'aliases': []}, handoff)
+                assert retry.returncode == 0 and not base.exists(), (retry.stdout[-4000:], retry.stderr[-4000:])
+            else:
+                assert os.path.lexists(alias)
+                if case != 'linked-executable':
+                    assert (actual_target/'python.exe').read_bytes() in {b'synthetic Python', b'preserve Python'}
+                else:
+                    os.rmdir(target/'python.exe')
+                os.rmdir(alias)
+        results.append({'case': 'python-junction-'+case, 'passed': True, 'exit_code': result.returncode})
+
     # A junction pointing outside the owned root is refused without following it.
     outside = directory/'uninstall-outside'
     outside.mkdir(); (outside/'project.txt').write_text('preserve')
