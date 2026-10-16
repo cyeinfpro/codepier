@@ -40,6 +40,7 @@ class Socket:
         self.before_hello, self.after_ready = before_hello, after_ready
         self.incoming = asyncio.Queue()
         self.outgoing = asyncio.Queue()
+        self.receive_started = asyncio.Event()
         self.packets = []
         self.closed = False
         self.first = True
@@ -56,6 +57,13 @@ class Socket:
         self.outgoing.put_nowait(data)
         if data["type"] == "ready" and self.after_ready:
             self.after_ready()
+
+    async def wait_connected(self, runtime, *, timeout=1):
+        # Ready precedes the final authorization and registration. The next
+        # receive starts only after those complete; await that event without
+        # competing with the Store worker, keeping the same total deadline.
+        await asyncio.wait_for(self.receive_started.wait(), timeout)
+        assert runtime.online("dev")
 
     async def wait_packets(self, kind, count=1, *, timeout=1):
         # Await the transport event instead of keeping the loop continuously
@@ -76,6 +84,7 @@ class Socket:
             if self.before_hello:
                 self.before_hello()
             return self.channel.pack(self.hello)
+        self.receive_started.set()
         item = await self.incoming.get()
         if item is None:
             raise WebSocketDisconnect()
@@ -159,7 +168,7 @@ async def test_disabled_device_is_fenced_before_close_completes(runtime):
     op = await r.invoke("fs_read", {"project": "Project", "path": "README.md"}, p)
     socket = Socket(secret)
     reader = asyncio.create_task(r.agent_socket(socket, "dev"))
-    await until(lambda: r.online("dev"))
+    await socket.wait_connected(r)
     r.store.execute("UPDATE devices SET enabled=0 WHERE id='dev'")
     assert not r.online("dev")
     await r.deliver(op["operation_id"])
@@ -174,7 +183,7 @@ async def test_storage_failure_cannot_prevent_connection_teardown(runtime, monke
     r, _, secret = runtime
     socket = Socket(secret)
     reader = asyncio.create_task(r.agent_socket(socket, "dev"))
-    await until(lambda: r.online("dev"))
+    await socket.wait_connected(r)
     def unavailable(*args, **kwargs):
         raise OSError("storage temporarily unavailable")
     monkeypatch.setattr(r.store, "execute", unavailable)
@@ -189,7 +198,7 @@ async def test_authenticated_late_events_cannot_cross_key_rotation(runtime):
     receipt = await r.invoke("fs_read", {"project": "Project", "path": "README.md"}, p)
     socket = Socket(secret)
     reader = asyncio.create_task(r.agent_socket(socket, "dev"))
-    await until(lambda: r.online("dev"))
+    await socket.wait_connected(r)
     r.store.execute("UPDATE devices SET secret=? WHERE id='dev'", (r.store.encrypt(token()),))
     socket.incoming.put_nowait({"type": "result", "id": receipt["operation_id"], "result": {"ok": True, "data": {"content": "stale device"}}})
     await reader
@@ -204,7 +213,7 @@ async def test_reconnect_outbox_cannot_bypass_journal_epoch_fence(runtime):
     socket = Socket(secret)
     reader = asyncio.create_task(r.agent_socket(socket, "dev"))
     try:
-        await until(lambda: r.online("dev"))
+        await socket.wait_connected(r)
         socket.incoming.put_nowait({"type": "result", "id": receipt["operation_id"], "result": {"ok": True, "data": {"content": "foreign journal"}}})
         acknowledgements = await socket.wait_packets("ack")
         assert acknowledgements[0]["id"] == receipt["operation_id"]
@@ -259,7 +268,7 @@ async def test_replayed_interrupted_result_is_acknowledged_without_reauditing(ru
     socket = Socket(secret)
     reader = asyncio.create_task(r.agent_socket(socket, "dev"))
     try:
-        await until(lambda: r.online("dev"))
+        await socket.wait_connected(r)
         packet = {"type": "result", "id": receipt["operation_id"], "result": {"ok": False, "error": {"code": "INTERRUPTED", "message": "local restart"}}}
         socket.incoming.put_nowait(packet)
         socket.incoming.put_nowait(packet)
@@ -280,7 +289,7 @@ async def test_malformed_result_does_not_poison_agent_outbox(runtime, result):
     socket = Socket(secret)
     reader = asyncio.create_task(r.agent_socket(socket, "dev"))
     try:
-        await until(lambda: r.online("dev"))
+        await socket.wait_connected(r)
         socket.incoming.put_nowait({"type": "result", "id": receipt["operation_id"], "result": result})
         acknowledgements = await socket.wait_packets("ack")
         assert acknowledgements[0]["id"] == receipt["operation_id"]
@@ -353,3 +362,30 @@ async def test_socket_ack_wait_keeps_packet_count_and_bounded_total_deadline():
     socket.outgoing.put_nowait({"type": "ack", "id": "only-one"})
     with pytest.raises(TimeoutError):
         await socket.wait_packets("ack", 2, timeout=0.02)
+
+
+@pytest.mark.asyncio
+async def test_socket_connection_wait_requires_registered_receive_loop(runtime):
+    r, _, secret = runtime
+    socket = Socket(secret)
+    socket.outgoing.put_nowait({"type": "ready"})
+    with pytest.raises(TimeoutError):
+        await socket.wait_connected(r, timeout=0.02)
+    assert not socket.receive_started.is_set()
+    reader = asyncio.create_task(r.agent_socket(socket, "dev"))
+    try:
+        await socket.wait_connected(r)
+        assert socket.receive_started.is_set() and r.online("dev")
+        assert not reader.done()
+    finally:
+        await socket.close()
+        await reader
+
+
+@pytest.mark.asyncio
+async def test_socket_connection_wait_rejects_inactive_runtime(runtime):
+    r, _, secret = runtime
+    socket = Socket(secret)
+    socket.receive_started.set()
+    with pytest.raises(AssertionError):
+        await socket.wait_connected(r)
