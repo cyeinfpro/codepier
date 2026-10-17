@@ -4,10 +4,9 @@ No shell process, file mutation, browser/model probe or platform approval. A
 ready project default cannot prove a particular path, SHA or command will work.
 """
 from __future__ import annotations
-import os
-import shutil
 import time
-from agent.shell import shell_denial, validate_shell
+from agent.shell import shell_denial
+from agent.project_runtime import runtime_readiness
 from shared.project_view_contracts import KINDS, platform_unknown, unknown_decision
 from shared.util import DevError
 
@@ -37,10 +36,10 @@ def action_readiness(service, project, args):
             denial = shell_denial(engine.config, project, spec)
             if denial:
                 raise DevError(*denial, 403)
-            shell = engine.config.get('shell') or validate_shell({})
-            search_path = shell.get('env', {}).get('PATH', os.environ.get('PATH', os.defpath))
-            if not shutil.which(shell['command'][0], path=search_path):
-                ready.update(state='unavailable', code='COMMAND_MISSING')
+            observed = runtime_readiness(engine.config, project, root)
+            ready['state'] = observed['state']
+            if observed.get('code'):
+                ready['code'] = observed['code']
         checks.append({'name': 'local_project_policy', 'state': 'allowed',
                        'source': 'agent_local_policy', 'observed_at': now})
     except (DevError, OSError) as exc:

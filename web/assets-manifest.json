@@ -1,5 +1,5 @@
 {
-  "version": "1.29.2",
+  "version": "1.30.0",
   "algorithm": "sha256",
   "assets": {
     "access-profiles.css": {
@@ -19,8 +19,8 @@
       "bytes": 33097
     },
     "app.js": {
-      "sha256": "6a6a32433ac025ff4232078a115a892dc6cf4cb68c56b332f9c93080ccbcf5ea",
-      "bytes": 122408
+      "sha256": "7357c14fbb6e85ead257f7511c5b4c867ce7b4063668b160736e9c7d7d4eed17",
+      "bytes": 122718
     },
     "appearance.js": {
       "sha256": "7fc8e8ffa85a4bb5836b8919cdf6ff12813cfb4a9e4736709f5858e5d8782bb1",
@@ -186,6 +186,14 @@
       "sha256": "74e9324c147aa485bef7d866fb708aca5a8889171b3bb0a74e70055a634fc2c5",
       "bytes": 33379
     },
+    "project-runtimes.css": {
+      "sha256": "acd3c86fa899948af0d54f3f9645883c5ae8c32927719b927208855d3f476eed",
+      "bytes": 3627
+    },
+    "project-runtimes.js": {
+      "sha256": "f0c4afd6f372b2296c54ac8334e6d56dfa77cfb99ecb60aa1c6f2170962bcbbf",
+      "bytes": 26383
+    },
     "roles.js": {
       "sha256": "832649b780a3b592472ebaa16ccc4147fa77e95ab41b53e7400c5c092446977a",
       "bytes": 12022
@@ -251,5 +259,5 @@
       "bytes": 25968
     }
   },
-  "template_sha256": "dfea3a3f9e550acd777210c31e550cdfcbacb9518552784f55674cbc67f00783"
+  "template_sha256": "c75ec1164bb1cd5b50ffb329a8d6ce18e0926f10d8bc13d3750121767bf0f267"
 }

@@ -190,6 +190,9 @@ async def test_existing_local_script_password_env_is_redacted(shell_agent):
 def test_mcp_ssh_recovery_cancel_scope_and_secret_storage(stack):
     stack.stop_agent()
     path = fake_transport(stack.directory / 'ssh-bin')
+    # This journey verifies the explicitly selected legacy SSH/account behavior.
+    # Unconfigured projects now use clean mode, which must never fall back to SSH.
+    stack.config.setdefault('project_runtimes', {})[stack.project['id']] = {'mode': 'native_compat'}
     stack.config['shell'] = {'enabled': True, 'projects': ['ProjectAlpha'], 'command': ['/bin/sh', '-c'], 'env': {'PATH': path}}
     atomic_json(stack.config_path, stack.config)
     stack.start_agent()

@@ -524,6 +524,8 @@ register_access_profiles(Tool, Empty, TOOLS, OUTPUT_SCHEMAS)
 
 from shared.integration_contracts import register as register_integrations, decorate as decorate_integration, ADMIN_TOOLS, READ_WITH_SCOPE, APP_ONLY_TOOLS
 register_integrations(Tool, TOOLS, OUTPUT_SCHEMAS)
+from shared.runtime_panel_contracts import register as register_runtime_panel
+register_runtime_panel(Tool, TOOLS, OUTPUT_SCHEMAS)
 from shared.core_contracts import register as register_core, CORE_TOOLS, CORE_INSTRUCTIONS, REPLACED_MCP_TOOLS
 register_core(Tool, TOOLS, OUTPUT_SCHEMAS)
 from shared.query_contracts import register as register_queries, QUERY_TOOLS

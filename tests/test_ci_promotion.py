@@ -85,7 +85,13 @@ def evidence():
              "source_inventory_sha256": full_inventory,
              "assets": {name: {"sha256": promotion.digest(raw), "bytes": len(raw)}
                         for name, raw in assets.items()}}
-    source_artifact = {**assets, "source-build.json": encode(build)}
+    from shared.runtime_qualification import CHECKS
+    qualification = {'schema_version': 1, 'backend': 'docker_restricted_v1', 'verified': True,
+        'commit': SHA, 'archive_sha256': promotion.digest(assets['codepier-1.2.3-source-full.zip']),
+        'source_inventory_sha256': full_inventory, 'source_files_unchanged': True,
+        'cleanup_pending': False, 'checks': {name: True for name in CHECKS}}
+    source_artifact = {**assets, "source-build.json": encode(build),
+                       "runtime-acceptance.json": encode(qualification)}
     for panel, suffix in ((False, "-source-full"), (True, "-source")):
         raw = assets["codepier-1.2.3" + suffix + ".zip"]
         source_artifact["panel-update-check.json" if panel else "public-check.json"] = encode({
@@ -703,3 +709,12 @@ def test_ci_promotion_shell_falls_back_without_success(tmp_path, event, ref, exi
                         "--sha", SHA, "--current-run-id", "101", "--token-env", "GH_TOKEN",
                         "--output", "dist/promotion/proof.json"]
     assert "synthetic-read-only-token" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize('field,value', [('verified', False), ('commit', 'f'*40),
+    ('archive_sha256', '0'*64), ('source_inventory_sha256', '0'*64),
+    ('cleanup_pending', True), ('source_files_unchanged', False), ('checks', {})])
+def test_promotion_requires_real_container_qualification_bound_to_exact_bytes(evidence, field, value):
+    replace_artifact(evidence, 'public-source', 'runtime-acceptance.json', lambda proof: proof.update({field: value}))
+    with pytest.raises(promotion.EvidenceError, match='runtime qualification'):
+        verify(evidence)

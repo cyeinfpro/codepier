@@ -199,7 +199,8 @@ SPECS = {
 INTEGRATION_TOOLS = frozenset(SPECS)
 HUB_TOOLS = frozenset(k for k,v in SPECS.items() if v[4])
 REMOTE_TOOLS = INTEGRATION_TOOLS - HUB_TOOLS
-ADMIN_TOOLS = {'integration_control', 'validations_accept'}
+from shared.runtime_panel_contracts import PANEL_RUNTIME_TOOLS
+ADMIN_TOOLS = {'integration_control', 'validations_accept'} | PANEL_RUNTIME_TOOLS
 APP_ONLY_TOOLS = {'workspace_status'}
 BROWSER_TOOLS = {k for k in SPECS if k.startswith('browser_')}
 READ_WITH_SCOPE = {'lsp_query', 'browser_snapshot'}

@@ -254,12 +254,15 @@ def read_review(engine, project, args):
 
 def open_workspace(engine, project, args):
     context = project_context(engine, project, args)
+    from agent.project_runtime import descriptor
+    from shared.runtime_results import capability_index
+    runtime = descriptor(engine.config, project, engine.root(project)[0])
     manifest = {'binding': binding(engine, project),
                 'documents': [{k: d[k] for k in ('path', 'sha256')} for d in context['documents']],
                 'skills': context['skills'], 'codex_skills': context['codex_skills'],
                 'skills_catalog': context['skills_catalog'], 'root_entries': context['root_entries'],
                 'remaining_documents': context['remaining_documents'], 'warnings': context['warnings'],
-                'tasks': context.get('tasks'), 'execution': context.get('execution'),
+                'tasks': context.get('tasks'), 'execution': context.get('execution'), 'runtime': runtime,
                 'view_version': 1, 'context_detail': args.get('context_detail', 'minimal'),
                 'workspace_id': args.get('workspace_id', ''),
                 'authority_revision': project.get('_authority_revision'),
@@ -269,7 +272,7 @@ def open_workspace(engine, project, args):
                                 'local_roots': engine.config.get('allowed_roots', [])}}
     context_id = fingerprint(manifest)
     unchanged = context_id == args.get('context_id')
-    result = {'view_version': 1, 'context_detail': args.get('context_detail', 'minimal'),
+    result = {'view_version': 1, 'runtime': runtime, 'capability_index': capability_index(project.get('alias')), 'context_detail': args.get('context_detail', 'minimal'),
               'observed_at': time.time(),
               'context_id': context_id, 'context_unchanged': unchanged,
               'workspace': {'project': project.get('alias'), 'project_id': project.get('id'),

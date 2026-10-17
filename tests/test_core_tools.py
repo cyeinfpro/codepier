@@ -269,7 +269,10 @@ def test_bridge_does_not_invent_lookup_filters_or_workspace_arguments():
 @pytest.mark.asyncio
 async def test_complete_capability_discovery_and_no_unmapped_public_tool(runtime):
     instance, principal = runtime
-    assert set(TOOLS) - CORE_TOOLS - QUERY_TOOLS - set(REPLACED_MCP_TOOLS) - INCOMING_UPLOAD_TOOLS == {'integration_control', 'validations_accept', 'get_profile', 'get_access_context'}
+    from shared.runtime_panel_contracts import PANEL_RUNTIME_TOOLS
+    assert PANEL_RUNTIME_TOOLS == {'project_runtime_get', 'project_runtime_set'}
+    assert set(TOOLS) - CORE_TOOLS - QUERY_TOOLS - set(REPLACED_MCP_TOOLS) - INCOMING_UPLOAD_TOOLS == {
+        'integration_control', 'validations_accept', 'get_profile', 'get_access_context', *PANEL_RUNTIME_TOOLS}
     for profile in ('core', 'coding', 'full'):
         assert {t['name'] for t in tool_definitions(profile)} == CORE_TOOLS | QUERY_TOOLS | {'get_profile', 'get_access_context'}
     for name, operations in CORE_ACTIONS.items():

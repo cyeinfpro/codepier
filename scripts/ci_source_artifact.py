@@ -35,6 +35,12 @@ def source_build_record(root, directory, context):
         assets[path.name] = {'sha256': hashlib.sha256(raw).hexdigest(), 'bytes': len(raw)}
     if set(assets) != expected:
         raise ValueError('Exactly four source release assets are required')
+    from shared.runtime_qualification import verified_receipt
+    qualification = json.loads((directory / 'runtime-acceptance.json').read_text())
+    if not verified_receipt(qualification, commit=commit,
+            archive_sha256=assets[f'codepier-{version}-source-full.zip']['sha256'],
+            source_inventory_sha256=check['inventory_sha256']):
+        raise ValueError('Real container acceptance is missing, unsuccessful or belongs to other source bytes')
     return {'schema': 1, 'repository': context['GITHUB_REPOSITORY'], 'commit': commit,
             'tree': subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], cwd=root, text=True).strip(),
             'run_id': int(context['GITHUB_RUN_ID']), 'run_attempt': int(context['GITHUB_RUN_ATTEMPT']),

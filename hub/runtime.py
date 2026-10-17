@@ -28,6 +28,7 @@ from hub.call_log import operation_summary
 from hub.artifacts import ArtifactService
 from hub.native_cli import NativeService
 from shared.agent_lifecycle import DEVICE_ACTIONS, public_management
+from shared.runtime_panel_contracts import PANEL_RUNTIME_TOOLS
 from shared.contracts import TOOLS, PROCESS_TOOLS, MUTATING, OPERATION_WAIT_SECONDS, OPERATION_OUTPUT_LIMIT, required_scope
 from shared.computer_contracts import COMPUTER_TOOLS
 from shared.computer_media import scrub_expired, purge_database
@@ -81,6 +82,8 @@ class Connection:
         self.native_security_protocol = 0
         self.tool_protocol = None
         self.project_view_protocol = 0
+        self.project_runtime_protocol = 0
+        self.project_runtime_profiles = []
         from hub.admission_policy import AdmissionWindow
         self.admission = AdmissionWindow()
 
@@ -279,6 +282,9 @@ class Runtime:
         columns = "id,grant_id,project_id,device_id,tool,state,space_id,owner_user_id,visibility,args_summary" if status_only else "*"
         row = self.store.one(f"SELECT {columns} FROM operations WHERE id=?", (id,))
         principal = iam.require_record(self.store, principal, row)
+        if row['tool'] in PANEL_RUNTIME_TOOLS:
+            from hub.runtime_panel import authorize
+            principal = authorize(self, principal, {'id': row['project_id'], 'device_id': row['device_id']})
         try:
             summary = json.loads(row['args_summary'])
         except (TypeError, ValueError):
@@ -492,6 +498,9 @@ class Runtime:
             issues = [{"field": ".".join(map(str, x["loc"])), "message": x["msg"]} for x in exc.errors()]
             raise DevError("INVALID_ARGUMENTS", json.dumps(issues, ensure_ascii=False)[:1500]) from exc
         from hub.room_scope import require_tool
+        if name in PANEL_RUNTIME_TOOLS:
+            from hub.runtime_panel import authorize
+            principal = authorize(self, principal, self.project(args['project'], principal))
         require_tool(self.store, principal, name, args)
         scope = required_scope(name, args)
         if scope not in principal.scopes:
@@ -579,7 +588,7 @@ class Runtime:
             return DeferredCall("cancel", args)
         else:
             project = self.project(args["project"], principal)
-            if name in MUTATING and name != "computer_session_close" and project["mode"] != "write":
+            if name in MUTATING and name not in PANEL_RUNTIME_TOOLS | {"computer_session_close"} and project["mode"] != "write":
                 raise DevError("READ_ONLY", "面板中的这个项目设为只读", 403)
             if name in PROCESS_TOOLS and not project["allow_tasks"]:
                 raise DevError("TASKS_DISABLED", "面板中的这个项目没有允许执行任务", 403)
@@ -713,6 +722,9 @@ class Runtime:
 
     def _admit_operation(self, name: str, args: dict, project: dict, principal: Principal, background=False):
         principal = refresh_principal(self.store, principal)
+        if name in PANEL_RUNTIME_TOOLS:
+            from hub.runtime_panel import authorize
+            principal = authorize(self, principal, project)
         if getattr(self, "panel_maintenance", None):
             self.panel_maintenance.guard()
         idem = args.get("idempotency_key")
@@ -796,6 +808,9 @@ class Runtime:
                 if name == "exec" and args["target"].startswith("vps:"):
                     vps_args = {**args, "vps": args["target"][4:]}
                     request["vps_ref"] = self.vps.reference(vps_args, project)
+                if project.get('id'):
+                    from hub.project_runtimes import attach_requirement
+                    attach_requirement(self, request, principal, project, admission=True)
                 payload = self.store.encrypt(json.dumps(request, ensure_ascii=False))
                 from hub.admission_policy import check_admission, usage
                 check_admission(self._admission_budget(project["device_id"]),
@@ -877,6 +892,9 @@ class Runtime:
     def permission_error(self, op, request):
         try:
             caller = self.operation_principal(op, request)
+            if op['tool'] in PANEL_RUNTIME_TOOLS:
+                from hub.runtime_panel import authorize
+                caller = authorize(self, caller, {'id': op['project_id'], 'device_id': op['device_id']})
             from hub.room_scope import require_tool
             require_tool(self.store, caller, op['tool'], request['args'])
             if op['tool'] == 'computer_session_close' and request['args'].get('force') and not caller.instance_admin:
@@ -907,7 +925,7 @@ class Runtime:
             if denied:
                 return denied
         scope = required_scope(op["tool"], request["args"])
-        if op["tool"] in MUTATING and op["tool"] != "computer_session_close" and project["mode"] != "write" or op["tool"] in PROCESS_TOOLS and not project["allow_tasks"]:
+        if op["tool"] in MUTATING and op["tool"] not in PANEL_RUNTIME_TOOLS | {"computer_session_close"} and project["mode"] != "write" or op["tool"] in PROCESS_TOOLS and not project["allow_tasks"]:
             return "排队操作的项目写入/任务权限已撤销"
         if op["grant_id"]:
             grant = self.store.one("SELECT * FROM grants WHERE id=?", (op["grant_id"],))
@@ -1031,6 +1049,11 @@ class Runtime:
                     Principal(op['actor'], '', set(), [], grant_id=op['grant_id'], admin=panel))
                 denied = denied or (policy[1] if policy else None)
                 require_compatible(getattr(con, 'tool_protocol', None), op['tool'])
+                runtime_requirement = None
+                if op['project_id']:
+                    from hub.project_runtimes import attach_requirement
+                    runtime_project = self.store.one('SELECT * FROM projects WHERE id=?', (op['project_id'],))
+                    runtime_requirement = attach_requirement(self, packet, principal, runtime_project, con)
                 if request.get('bounded_execution') is not None and getattr(con, 'bounded_execution_protocol', 0) != 1:
                     raise DevError('AGENT_BOUNDED_EXECUTION_REQUIRED', '当前连接不能确认原有界命令预算，禁止重投执行', 409)
             except DevError as exc:
@@ -1050,7 +1073,8 @@ class Runtime:
                 packet['project']['_computer_admin'] = principal.instance_admin
             packet['integration_context'] = {
                 'owner': 'grant:'+op['grant_id'] if op['grant_id'] else op['actor'],
-                'admin': principal.admin, 'device_id': op['device_id'], 'scopes': scopes}
+                'admin': principal.admin, 'device_id': op['device_id'], 'scopes': scopes,
+                'runtime_requirement': runtime_requirement}
             from hub.project_views import prepare_view_packet
             prepare_view_packet(self, packet, principal, con)
             packet['execution_policy'] = hub_execution_policy(panel=panel)
@@ -1141,6 +1165,10 @@ class Runtime:
             try:
                 validate_call_epoch(op['tool'], request.get('tool_contract_version'))
                 require_compatible(getattr(con, 'tool_protocol', None), op['tool'])
+                if not op['accepted_at'] and op['project_id']:
+                    from hub.project_runtimes import attach_requirement
+                    runtime_project = self.store.one('SELECT * FROM projects WHERE id=?', (op['project_id'],))
+                    request['integration_context']['runtime_requirement'] = attach_requirement(self, request, delivery_principal, runtime_project, con)
                 if request.get('bounded_execution') is not None and getattr(con, 'bounded_execution_protocol', 0) != 1:
                     raise DevError('AGENT_BOUNDED_EXECUTION_REQUIRED', '当前连接不能确认原有界命令预算，禁止重投执行', 409)
             except DevError as exc:
@@ -1199,8 +1227,17 @@ class Runtime:
             result = {"ok": False, "error": {"code": "INVALID_AGENT_RESULT", "message": "Agent 返回的结果格式无效，请检查本机执行结果"}}
         if result["ok"] and isinstance(result.get("data"), dict) and "exit_code" in result["data"]:
             data = dict(result["data"])
-            data["command_ok"] = type(data["exit_code"]) is int and data["exit_code"] == 0 and not data.get("timed_out") and not data.get("cancelled")
+            for key in ('runtime_cleanup', 'runtime_outcome'):
+                if key in data and not isinstance(data[key], dict):
+                    data[key] = {'state': 'unconfirmed', 'pending': True, 'code': 'INVALID_RUNTIME_RESULT'}
+            data["command_ok"] = type(data["exit_code"]) is int and data["exit_code"] == 0 and not data.get("timed_out") and not data.get("cancelled") and not (data.get('runtime_cleanup') or {}).get('pending') and (data.get('runtime_outcome') or {}).get('state', 'confirmed') == 'confirmed'
+            from shared.runtime_results import failure_context
+            data['failure_context'] = failure_context(data=data, operation_id=op['id'], source='hub_operation_receipt')
             result = {**result, "data": data}
+        elif not result['ok'] and op['tool'] in {'read', 'write', 'edit', 'exec', 'fs_read', 'fs_write', 'fs_edit', 'shell_exec', 'tasks_run', 'validation_run'}:
+            from shared.runtime_results import failure_context
+            result = {**result, 'error': {**(result.get('error') or {}),
+                'failure_context': failure_context(error=result.get('error'), operation_id=op['id'], source='codepier_operation_error')}}
         self.integrations.complete(op, result)
         if op["tool"] == "artifacts_register" and result["ok"]:
             try:self.artifacts.register_result(op,result.get("data") or {})
@@ -1213,14 +1250,18 @@ class Runtime:
         data = result.get("data") or {}
         error = result.get("error") or {}
         state = "succeeded" if result["ok"] else "failed"
-        if error.get("code") in {"INTERRUPTED", "JOURNAL_CHANGED", "RECOVERY_DATA_INVALID", "INVALID_AGENT_RESULT", "DURABILITY_UNCONFIRMED", "COMPUTER_ACTION_UNCERTAIN", "BROWSER_ACTION_UNCERTAIN"}:
+        if error.get("code") in {"INTERRUPTED", "JOURNAL_CHANGED", "RECOVERY_DATA_INVALID", "INVALID_AGENT_RESULT", "DURABILITY_UNCONFIRMED", "COMPUTER_ACTION_UNCERTAIN", "BROWSER_ACTION_UNCERTAIN", "RUNTIME_CONTROL_UNCERTAIN", "RUNTIME_CREATION_UNCERTAIN", "RUNTIME_CLEANUP_PENDING", "RUNTIME_OPERATION_REQUIRES_RECOVERY"}:
             state = "needs_review"
         elif error.get("code") == "CANCELLED" or data.get("cancelled"):
             state = "cancelled"
         elif op["tool"] in {"tasks_run", "shell_exec", "ssh_exec", "vps_exec", "exec", "validation_run", "git_status", "git_diff", "git_log"} and result["ok"]:
             if not data.get("command_ok", False):
                 state = "failed"
-                error = {"message": "本机任务执行超时" if data.get("timed_out") else f"本机任务退出码 {data.get('exit_code')}；请查看操作输出"}
+                error = {"message": "运行时清理结果尚未确认；请查询原操作" if data.get('runtime_cleanup', {}).get('pending') else
+                    "项目命令执行超时" if data.get("timed_out") else f"项目命令退出码 {data.get('exit_code')}；请查看原操作输出"}
+        if (isinstance(data.get('runtime_cleanup'), dict) and data['runtime_cleanup'].get('pending')
+                or isinstance(data.get('runtime_outcome'), dict) and data['runtime_outcome'].get('state') == 'unconfirmed'):
+            state = 'needs_review'
         if op['tool'] in COMPUTER_TOOLS and data.get('native_is_error'):
             state = 'needs_review' if data.get('action_outcome') == 'uncertain' else 'failed'
             error = {'message': '原生桌面工具报错；检查本机权限与界面，勿盲目重放输入'}
@@ -1414,6 +1455,8 @@ class Runtime:
             if hello.get("type") != "hello":
                 raise ValueError("Invalid hello")
             connection.tool_protocol = negotiate(hello)
+            from hub.project_runtimes import parse_advertisement
+            connection.project_runtime_protocol, connection.project_runtime_profiles = parse_advertisement(hello)
             connection.project_view_protocol = 1 if type(hello.get('project_view_protocol')) is int and hello['project_view_protocol'] == 1 else 0
             connection.journal_id = hello.get("journal_id")
             connection.protocol = hello.get("delivery_protocol", 1)
@@ -1445,6 +1488,8 @@ class Runtime:
             info["native_chat_protocol"] = connection.native_chat_protocol
             info["tool_protocol"] = connection.tool_protocol.public(catalog_digest())
             info["project_view_protocol"] = connection.project_view_protocol
+            info["project_runtime_protocol"] = connection.project_runtime_protocol
+            info["project_runtime_profiles"] = connection.project_runtime_profiles
             build = hello.get("build")
             if isinstance(build, dict) and len(json.dumps(build)) <= 12000:
                 info["build"] = build

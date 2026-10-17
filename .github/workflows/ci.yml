@@ -105,6 +105,34 @@ jobs:
           sha256sum --check "$RUNNER_TEMP/source-assets.sha256"
           .venv/bin/python scripts/check_release.py --bundle "dist/codepier-$VERSION-source-full.zip" --output dist/public-check.json
           .venv/bin/python scripts/check_release.py --panel-update --bundle "dist/codepier-$VERSION-source.zip" --output dist/panel-update-check.json
+      - name: Mandatory real project-container acceptance from public archive
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE=$(python -c "import re; from pathlib import Path; print(re.search(r'^FROM (\S+)', Path('Dockerfile').read_text()).group(1))")
+          [[ "$IMAGE" =~ @sha256:[a-f0-9]{64}$ ]]
+          # Explicit CI fixture setup only. The production runtime never pulls.
+          docker pull "$IMAGE"
+          PROFILE="$RUNNER_TEMP/codepier-runtime-profile.json"
+          export PROFILE IMAGE
+          python - <<'PYPROFILE'
+          import json, os, shutil
+          from pathlib import Path
+          Path(os.environ['PROFILE']).write_text(json.dumps({
+              'mode': 'container_v1', 'shell': 'sh', 'container': {
+                  'engine': shutil.which('docker'), 'endpoint': 'unix:///var/run/docker.sock',
+                  'image': os.environ['IMAGE'], 'uid': os.getuid(), 'gid': os.getgid()}}))
+          Path(os.environ['PROFILE']).chmod(0o600)
+          PYPROFILE
+          VERSION=$(.venv/bin/python -c 'from scripts.build_source_bundle import source_version; print(source_version())')
+          BUNDLE="$GITHUB_WORKSPACE/dist/codepier-$VERSION-source-full.zip"
+          ACCEPTANCE="$RUNNER_TEMP/codepier-runtime-public-$GITHUB_RUN_ID"
+          PROOF="$RUNNER_TEMP/codepier-runtime-archive-proof.json"
+          .venv/bin/python scripts/release_acceptance.py prepare --root "$GITHUB_WORKSPACE" --archive "$BUNDLE" --destination "$ACCEPTANCE" --proof "$PROOF" --commit "$GITHUB_SHA"
+          ln -s "$GITHUB_WORKSPACE/.venv" "$ACCEPTANCE/.venv"
+          (cd "$ACCEPTANCE" && .venv/bin/python scripts/verify_project_runtime.py --profile-json "$PROFILE" --archive "$BUNDLE" --commit "$GITHUB_SHA" --output "$GITHUB_WORKSPACE/dist/runtime-acceptance.json")
+          .venv/bin/python scripts/release_acceptance.py finish --root "$ACCEPTANCE" --archive "$BUNDLE" --proof "$PROOF"
           .venv/bin/python scripts/ci_source_artifact.py --directory dist
       - name: Retain immutable source inputs for every platform
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -116,6 +144,7 @@ jobs:
             dist/public-check.json
             dist/panel-update-check.json
             dist/source-build.json
+            dist/runtime-acceptance.json
           if-no-files-found: error
           retention-days: 14
 

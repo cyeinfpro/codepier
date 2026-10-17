@@ -21,7 +21,7 @@ _SHELL = frozenset({'enabled', 'configured_enabled', 'denial', 'executable_avail
     'max_timeout_seconds', 'interactive', 'caller_permitted', 'effective_ready', 'next', 'executable'})
 _EXECUTION = frozenset({'operation_id', 'pending', 'state', 'next', 'next_call',
     'retry_after_seconds', 'deadline', 'elapsed_seconds', 'execution_policy',
-    'shell', 'tools', 'ssh', 'authorization'})
+    'shell', 'tools', 'ssh', 'authorization', 'runtime'})
 
 
 def node_label(identifier):
@@ -70,10 +70,11 @@ _DOCUMENT = _FILE_INDEX | frozenset({'content', 'total_lines', 'start_line',
 _OPEN = _RECEIPT | frozenset({'context_id', 'context_unchanged', 'workspace',
     'context', 'context_detail', 'view_version', 'observed_at', 'truncated',
     'baseline_ref', 'baseline_coverage', 'baseline_expires_at', 'context_scope',
-    'context_refresh_required', 'compatibility'})
+    'context_refresh_required', 'compatibility', 'runtime', 'capability_index'})
 _EXEC_RESULT = _RECEIPT | frozenset({'exit_code', 'output', 'output_truncated',
     'output_omitted', 'timed_out', 'cancelled', 'duration_ms', 'command_ok',
-    'target', 'resource_coordination', 'host', 'port', 'username', 'ssh_error'})
+    'target', 'resource_coordination', 'host', 'port', 'username', 'ssh_error',
+    'runtime', 'failure_context', 'continuation', 'log_ref', 'diagnostics', 'execution_isolation', 'runtime_cleanup', 'runtime_outcome'})
 _STATUS_POLICY = frozenset({'version', 'local_block_codex', 'effective_block_codex',
     'local_block_native_computer', 'effective_block_native_computer',
     'split_capabilities', 'enforcement', 'os_sandbox', 'state', 'denial', 'code',
@@ -134,17 +135,48 @@ def _policy_denials(value):
     return found
 
 
+def _runtime(value):
+    from shared.runtime_results import RUNTIME_FIELDS
+    return _pick(value, RUNTIME_FIELDS)
+
+
+def _exec_result(value):
+    result = _pick(value, _EXEC_RESULT)
+    fields = {
+        'runtime': None,
+        'failure_context': {'schema_version', 'category', 'source', 'operation_id', 'code',
+            'caller_platform_decision', 'requires_desktop_control', 'grants_authority', 'replay_recommended'},
+        'continuation': {'schema_version', 'project_id', 'workspace_id', 'operation_id', 'target',
+            'runtime_ref', 'runtime_revision', 'grants_authority', 'recovery'},
+        'log_ref': {'operation_id', 'source'},
+        'execution_isolation': {'state', 'driver', 'evidence_sha256', 'filesystem_scope', 'network', 'host_credentials_inherited'},
+        'runtime_cleanup': {'state', 'pending', 'code'},
+        'runtime_outcome': {'state', 'source', 'workload_exit_code', 'transport_exit_code', 'oom_killed'},
+    }
+    for key, allowed in fields.items():
+        if key in result:
+            result[key] = _runtime(result[key]) if key == 'runtime' else _pick(result[key], allowed)
+    if isinstance(result.get('diagnostics'), list):
+        result['diagnostics'] = [_pick(row, {'path', 'line', 'column', 'message', 'source', 'untrusted'})
+                                  for row in result['diagnostics'][:20]]
+    return result
+
+
 def _execution(value):
     if not isinstance(value, dict):
         return deepcopy(value)
     result = _pick(value, _EXECUTION | _RECEIPT)
     result['project_root'] = '.'
+    if 'runtime' in result:
+        result['runtime'] = _runtime(result['runtime'])
     shell = value.get('shell', {})
     result['shell'] = _pick(shell, _SHELL)
     command = shell.get('command')
     if isinstance(command, list) and command and isinstance(command[0], str):
         result['shell']['executable'] = re.split(r'[\\/]', command[0])[-1]
-    result['shell']['filesystem_scope'] = 'Execution account permissions; not restricted to the project directory.'
+    container = isinstance(result.get('runtime'), dict) and result['runtime'].get('mode') == 'container_v1'
+    result['shell']['filesystem_scope'] = ('Approved workspace bind; isolation must be verified before each start.' if container else
+        'Execution account permissions; not restricted to the project directory.')
     policy = value.get('execution_policy')
     if isinstance(policy, dict):
         result['execution_policy'] = _pick(policy, _STATUS_POLICY)
@@ -164,6 +196,8 @@ def _execution(value):
     result['note'] = ('Commands run on the workspace execution node with its account permissions. '
         'This is not an OS sandbox. File tools enforce their own project path rules. '
         'No automatic command backup, rollback or interactive input.')
+    if container:
+        result['note'] = 'Configured isolated runtime; this query is not proof of execution or isolation. The driver must verify each created container before starting project code. No native fallback.'
     return result
 
 
@@ -213,6 +247,11 @@ def _open(value, args):
     # Use the stored backend detail when rendering a receipt, not a polling caller's options.
     detail = args.get('context_detail', value.get('context_detail', 'minimal'))
     result['context_detail'] = detail
+    if 'runtime' in result:
+        result['runtime'] = _runtime(result['runtime'])
+    if 'capability_index' in result:
+        from shared.runtime_results import capability_index
+        result['capability_index'] = capability_index(args.get('project'))
     result['mcp_view_version'] = VIEW_VERSION
     if isinstance(value.get('workspace'), dict):
         result['workspace'] = _project(value['workspace'])
@@ -362,7 +401,7 @@ def _native(name, args, value):
     if name == 'readiness_get':
         return _readiness(value)
     if name in {'exec', 'shell_exec', 'tasks_run', 'ssh_exec', 'vps_exec'}:
-        return _pick(value, _EXEC_RESULT)
+        return _exec_result(value)
     if name in {'operations_get', 'operations_wait', 'operations_cancel', 'operations_trace'}:
         return _operation(value)
     if name == 'operations_list':
@@ -381,6 +420,8 @@ def _native(name, args, value):
         return result
     if name == 'tasks_list':
         result = deepcopy(value)
+        if 'runtime' in result:
+            result['runtime'] = _runtime(result['runtime'])
         result['tasks'] = [_pick(row, {'name', 'description', 'cwd', 'timeout_seconds',
             'executable_available', 'available', 'enabled', 'denial'}) for row in value.get('tasks', [])]
         return result
@@ -465,13 +506,32 @@ def output_schema(name, schema):
         if isinstance(properties, dict):
             for key in _IDENTITY:
                 properties.pop(key, None)
-            def availability(tools):
-                item = tools.get('additionalProperties', {})
-                if isinstance(item, dict) and any(choice.get('type') == 'string' for choice in item.get('anyOf', [])):
-                    tools['additionalProperties'] = {'type': 'boolean'}
-                for choice in tools.get('anyOf', []):
-                    availability(choice)
-            availability(properties.get('tools', {}))
+            def resolved(value, seen=frozenset()):
+                reference = value.get('$ref') if isinstance(value, dict) else None
+                if (set(value) == {'$ref'} if isinstance(value, dict) else False) and isinstance(reference, str) and reference.startswith('#/$defs/') and reference not in seen:
+                    target = schema.get('$defs', {}).get(reference[len('#/$defs/'):])
+                    if isinstance(target, dict):
+                        return resolved(target, seen | {reference})
+                return value
+            def availability(tools, seen=frozenset()):
+                # Factoring can put the map or its value union behind a $ref.
+                # Clone only this tools occurrence: the same definition may be
+                # used by unrelated path/string maps whose types must not change.
+                if not isinstance(tools, dict):
+                    return tools
+                reference = tools.get('$ref')
+                if reference in seen:
+                    return tools
+                candidate = deepcopy(resolved(tools))
+                item = resolved(candidate.get('additionalProperties', {}))
+                if isinstance(item, dict) and any(isinstance(resolved(choice), dict) and resolved(choice).get('type') == 'string' for choice in item.get('anyOf', [])):
+                    candidate['additionalProperties'] = {'type': 'boolean'}
+                for union in ('anyOf', 'oneOf', 'allOf'):
+                    if union in candidate:
+                        candidate[union] = [availability(choice, seen | ({reference} if reference else set())) for choice in candidate[union]]
+                return candidate if candidate != resolved(tools) else tools
+            if 'tools' in properties:
+                properties['tools'] = availability(properties['tools'])
         if isinstance(result.get('required'), list):
             result['required'] = [key for key in result['required'] if key not in _IDENTITY]
         return result

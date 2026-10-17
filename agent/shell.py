@@ -71,15 +71,18 @@ def prepare_shell(config, project, spec, root, args):
             raise DevError("INVALID_CWD", "Shell 工作目录必须是已存在的目录")
     except (OSError, RuntimeError, ValueError) as exc:
         raise DevError("INVALID_CWD", "无法访问 Shell 工作目录，请核对本机路径") from exc
-    return shell["command"] + [args["command"]], cwd, {**shell["env"], **args["env"]}
+    from agent.project_runtime import shell_command, selected
+    inherited = shell['env'] if selected(config, project)['mode'] == 'native_compat' else {}
+    return shell_command(config, project) + [args["command"]], cwd, {**inherited, **args["env"]}
 
 
 def execution_info(config, project, spec, root):
     shell = config.get("shell") or validate_shell({})
-    environment = dict(os.environ) if shell["inherit_env"] else {"PATH": os.environ.get("PATH", os.defpath)}
-    environment.update(shell["env"])
+    from agent.project_runtime import build_environment, runtime_readiness, shell_command
+    environment = build_environment({**config, 'shell': shell}, project, root)
+    runtime = runtime_readiness({**config, 'shell': shell}, project, root)
     denial = shell_denial(config, project, spec)
-    command = shell["command"]
+    command = shell_command({**config, "shell": shell}, project)
     try:
         username = getpass.getuser()
         if hasattr(os, "geteuid"):
@@ -88,6 +91,7 @@ def execution_info(config, project, spec, root):
     except (OSError, KeyError):
         username = "unknown"
     return {
+        "runtime": runtime,
         "platform": platform.system(), "user": username,
         "uid": os.geteuid() if hasattr(os, "geteuid") else None,
         "project_root": str(root),
@@ -101,12 +105,12 @@ def execution_info(config, project, spec, root):
                              "os_sandbox": False},
         "shell": {"enabled": denial is None, "configured_enabled": shell["enabled"],
                   "denial": {"code": denial[0], "message": denial[1]} if denial else None,
-                  "command": command, "executable_available": bool(shutil.which(command[0], path=environment.get("PATH"))),
-                  "inherit_env": shell["inherit_env"], "environment_keys": sorted(shell["env"]),
+                  "command": command, "executable_available": None if runtime["state"] == "unknown" else runtime["state"] == "ready",
+                  "inherit_env": shell["inherit_env"] if runtime["mode"] == "native_compat" else False, "environment_keys": sorted(shell["env"]),
                   "max_timeout_seconds": shell["max_timeout_seconds"], "interactive": False,
                   "filesystem_scope": "Agent OS user; absolute cwd and paths outside project allowed",
                   "next": "shell_exec" if denial is None else None},
-        "tools": {name: shutil.which(name, path=environment.get("PATH")) for name in
+        "tools": {} if runtime["mode"] == "container_v1" else {name: shutil.which(name, path=environment.get("PATH")) for name in
                   ("git", "ssh", "sshpass", "gh", "docker", "python3", "uv", "node", "npm", "pnpm")},
         "ssh": {"tool": "ssh_exec", "password_auth_available": denial is None and all(
                     shutil.which(name, path=environment.get('PATH')) for name in ('ssh', 'sshpass')),

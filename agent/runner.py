@@ -39,6 +39,7 @@ from shared.build_info import BuildIdentity
 from agent.config import validate_config
 from agent.shell import execution_info, prepare_shell
 from shared.contracts import TOOLS, MUTATING, required_scope
+from shared.runtime_panel_contracts import PANEL_RUNTIME_TOOLS
 from shared.crypto import SecureChannel
 from shared.util import DevError, VERSION
 from shared.file_sources import safe_import_error_detail
@@ -111,11 +112,14 @@ class Agent:
             raise DevError('AGENT_BUSY', '设备仍有活动工作，维护交接尚未开始', 409)
 
     def load_config(self):
+        from agent.runtime_config import read_json
         try:
-            with self.config_path.open(encoding="utf-8") as f:
-                return validate_config(json.load(f), self.config_path)
+            value, _, _ = read_json(self.config_path)
+            return validate_config(value, self.config_path)
         except RecursionError as exc:
             raise ValueError("Agent 配置嵌套过深") from exc
+        except DevError as exc:
+            raise ValueError("Agent 配置读取期间发生变化，保留原运行配置") from exc
 
     async def send(self, body: dict):
         async with self.send_lock:
@@ -268,6 +272,7 @@ class Agent:
                 print(f"[Agent] 新配置无效，继续使用原配置：{exc}", file=sys.stderr)
 
     async def connect_once(self):
+        from agent.project_runtime import advertised_profiles
         config = self.config
         base = config["hub_url"]
         ws_url = ("wss://" if base.startswith("https://") else "ws://") + base.split("://", 1)[1] + "/agent/ws/" + config["device_id"]
@@ -282,6 +287,7 @@ class Agent:
                           "python": platform.python_version(), "roots": config["allowed_roots"], "capabilities": list(TOOLS),
                           "management": self.lifecycle.describe(), "device_actions": self.lifecycle.actions(),
                           "scheduler_protocol": 1, "bounded_execution_protocol": 1,
+                          "project_runtime_protocol": 1, "project_runtime_profiles": advertised_profiles(config),
                           "journal_id": self.journal.journal_id, "delivery_protocol": 2, "cancel_pending_protocol": 1, "native_security_protocol": 1, "native_protocol": 1, "native_chat_protocol": 3, **advertisement(self.build.catalog_sha256)}))
             reply = channel.unpack(await asyncio.wait_for(socket.recv(), 10))
             if reply.get("type") != "ready":
@@ -563,11 +569,14 @@ class Agent:
         integration_context = request.get('integration_context')
         core_ssh = request.get('core_ssh')
         bounded_execution = request.get('bounded_execution')
+        runtime_requirement = request.get('project_runtime_requirement')
         request = {k: request.get(k) for k in ("tool", "project", "args")}
         if bounded_execution is not None:
             # Unlike mutable transport policy, a time budget is immutable work
             # identity: changing it under the same operation ID is a conflict.
             request['bounded_execution'] = bounded_execution
+        if runtime_requirement is not None:
+            request['project_runtime_requirement'] = runtime_requirement
         try:
             previous = self.journal.start(id, request)
             if previous is not None:
@@ -602,7 +611,7 @@ class Agent:
             # Never accept a project/argument-supplied exemption. Legacy frames
             # without metadata still obey the independently configured local floor.
             project = {**project, "_execution_policy": execution_policy, "_core_ssh": core_ssh,
-                       '_bounded_execution': bounded_execution,
+                       '_bounded_execution': bounded_execution, '_runtime_requirement': None,
                        '_integration_admin': False, '_integration_owner': None, '_computer_scopes': []}
             if isinstance(integration_context, dict):
                 owner = integration_context.get('owner')
@@ -612,8 +621,15 @@ class Agent:
                 project.update(_integration_owner=owner, _integration_admin=admin, _coding_owner=owner,
                     _coding_device=integration_context['device_id'], device_id=integration_context['device_id'],
                     _coding_scopes=integration_context.get('scopes', []), _computer_scopes=integration_context.get('scopes', []),
-                    _authority_revision=integration_context.get('authority_revision'))
+                    _authority_revision=integration_context.get('authority_revision'),
+                    _runtime_requirement=integration_context.get('runtime_requirement'))
                 self.integrations.remember_project(project)
+            if runtime_requirement is not None:
+                from shared.runtime_requirements import valid_requirement
+                if not valid_requirement(runtime_requirement, project.get('id')) or project.get('_runtime_requirement') != runtime_requirement:
+                    raise DevError('RUNTIME_REQUIREMENT_INVALID', 'Runtime requirement lacks matching authenticated delivery metadata', 403)
+            elif project.get('_runtime_requirement') is not None:
+                raise DevError('RUNTIME_REQUIREMENT_INVALID', 'Runtime requirement is missing from original operation identity', 403)
             if args.get('workspace_id'):
                 project = self.integrations.project(project, args)
             self.integration_projects[id] = project
@@ -644,6 +660,19 @@ class Agent:
                 self.phase(id, "lifecycle_prepared", action=tool)
             elif tool not in TOOLS or TOOLS[tool].local:
                 raise DevError("UNKNOWN_TOOL", "该操作不能由 Agent 执行")
+            elif tool in PANEL_RUNTIME_TOOLS:
+                from agent.runtime_panel import call as runtime_settings_call
+                args = TOOLS[tool].model.model_validate(args).model_dump()
+                self.journal.mark_running(id)
+                await self.send({"type": "started", "id": id})
+                self.phase(id, "runtime_settings")
+                work = asyncio.create_task(asyncio.to_thread(runtime_settings_call, self, tool, project, args))
+                try:
+                    result = await asyncio.shield(work)
+                except asyncio.CancelledError:
+                    # An atomic config write in a worker cannot be cancelled.
+                    # Preserve its actual receipt, just as file writes do.
+                    result = await work
             elif tool in {"execution_info", "agent_diagnostics"}:
                 TOOLS[tool].model.model_validate(args)
                 root, spec = self.engine.root(project)
@@ -833,8 +862,18 @@ class Agent:
             try:return await asyncio.shield(work)
             except asyncio.CancelledError:return await work
         if tool == "ssh_exec":
-            from agent.ssh import prepare_ssh, ssh_error
             root, spec = self.engine.root(project, True)
+            # Preserve the original local denial before runtime compatibility
+            # diagnostics; a disabled permission must not look like a request
+            # to select a broader execution mode.
+            from agent.shell import shell_denial
+            denial = shell_denial(self.config, project, spec)
+            if denial:
+                raise DevError(*denial, 403)
+            from agent.project_runtime import selected
+            if project.get('_runtime_requirement') or selected(self.config, project)['mode'] != 'native_compat':
+                raise DevError('RUNTIME_REMOTE_TARGET_UNSUPPORTED', 'This project runtime does not support native SSH transport; choose a separately authorized compatible target', 403)
+            from agent.ssh import prepare_ssh, ssh_error
             command, env = prepare_ssh(self.config, project, spec, args)
             timeout = self.bounded_timeout(project, args['timeout_seconds'])
             result = await self.run_process(id, command, root, timeout, stream=True,
@@ -851,9 +890,21 @@ class Agent:
                                             inherit_env=self.config["shell"]["inherit_env"], execution_project=project)
             return {**result, "cwd": str(cwd), "shell": command[:-1]}
         if tool == "tasks_list":
-            _, spec = self.engine.root(project)
+            root, spec = self.engine.root(project)
+            from agent.project_runtime import build_environment, descriptor, resolve_executable, legacy_environment
+            runtime = descriptor(self.config, project, root)
+            def available(task):
+                if runtime['mode'] == 'container_v1':
+                    return None
+                try:
+                    environment = (legacy_environment(False, task.get('env', {})) if runtime['mode'] == 'native_compat' else
+                        build_environment(self.config, project, root, task.get('env', {})))
+                    resolve_executable(task['command'], environment, root / task.get('cwd', '.'))
+                    return True
+                except DevError:
+                    return False
             enabled = project.get("allow_tasks", False) and spec.get("allow_tasks", False)
-            return {"enabled": enabled, "tasks": [{"name": name, "description": t.get("description", ""), "command": t.get("command"), "timeout": t.get("timeout", 300), "cwd": t.get("cwd", "."), "executable_available": bool(shutil.which(t["command"][0])), "environment_keys": sorted(t.get("env", {})), "allow_read_concurrency": bool(t.get("allow_read_concurrency", False))}
+            return {"enabled": enabled, "runtime": runtime, "tasks": [{"name": name, "description": t.get("description", ""), "command": t.get("command"), "timeout": t.get("timeout", 300), "cwd": t.get("cwd", "."), "executable_available": available(t), "environment_keys": sorted(t.get("env", {})), "allow_read_concurrency": bool(t.get("allow_read_concurrency", False))}
                     for name, t in self.config.get("tasks", {}).items() if enabled and self.task_allowed(t, project)],
                     "warning": "Tasks execute project code with the Agent user's OS permissions. Not an OS sandbox."}
         if tool == "tasks_run":
@@ -868,8 +919,10 @@ class Agent:
                 raise DevError("TASK_CONFIG", "本机 command 必须是命令参数数组")
             cwd = self.engine.path(root, task.get("cwd", "."))
             timeout = max(1, min(int(task.get("timeout", 300)), 3600))
+            from copy import deepcopy
+            task_project = {**project, '_runtime_task_binding': {'name': args['task'], 'definition': deepcopy(task)}}
             return await self.run_process(id, command, cwd, timeout, stream=True,
-                                          task_env=task.get("env", {}), execution_project=project)
+                                          task_env=task.get("env", {}), execution_project=task_project)
         if tool.startswith("git_"):
             root, _ = self.engine.root(project)
             # Git is only used for fixed read operations. Disable external helpers and hooks.
@@ -901,16 +954,83 @@ class Agent:
 
     async def run_process(self, id, command, cwd, timeout, stream=False, task_env=None,
                           full_access=False, inherit_env=False, execution_project=None):
+        from copy import deepcopy
+        from agent.project_runtime import selected, prepare, descriptor
+        from shared.runtime_results import decorate_result
+        if execution_project is None:
+            return await self._run_process_account(id, command, cwd, timeout, stream, task_env,
+                full_access, inherit_env, execution_project)
+        config = deepcopy(self.config)
+        profile = selected(config, execution_project)
+        root, _ = self.engine.root(execution_project)
+        runtime = descriptor(config, execution_project, root)
+        if profile['mode'] == 'native_compat':
+            if execution_project.get('_runtime_requirement'):
+                raise DevError('RUNTIME_ISOLATION_REQUIRED', 'This operation requires its approved isolated runtime', 403)
+            result = await self._run_process_account(id, command, cwd, timeout, stream, task_env,
+                full_access, inherit_env, execution_project)
+            return decorate_result(result, execution_project, id, runtime, root)
+        plan = prepare(config, execution_project, root, command, cwd, task_env)
+        # Check the exact workload before adding a trusted container transport.
+        enforce_argv(config, execution_project, plan.command, plan.cwd, plan.environment)
+        driver = None
+        started = time.monotonic()
+        try:
+            if profile['mode'] == 'container_v1':
+                from agent.container_runtime import ContainerRuntime
+                driver = ContainerRuntime(config, root, plan, id)
+                actual = await driver.prepare_async()
+                environment = driver.client_env
+            else:
+                actual, environment = plan.command, plan.environment
+            if id in self.cancelled or self.journal.is_cancelled(id) or self.stop_event.is_set():
+                raise DevError('CANCELLED', 'Operation was cancelled before workload launch', 409)
+            current_root, current_spec = self.engine.root(execution_project, write=full_access or self.integration_tool_names.get(id) in {'tasks_run', 'exec', 'validation_run'})
+            if current_root != root:
+                raise DevError('ROOT_CHANGED', 'Workspace mapping changed before workload launch', 409)
+            tool = self.integration_tool_names.get(id, 'shell_exec' if full_access else 'tasks_run')
+            self.integrations.control.guard(tool, execution_project)
+            if full_access:
+                from agent.shell import shell_denial
+                denial = shell_denial(self.config, execution_project, current_spec)
+                if denial:
+                    raise DevError(*denial, 403)
+            elif not execution_project.get('allow_tasks') or not current_spec.get('allow_tasks'):
+                raise DevError('TASKS_DISABLED', 'Project execution was disabled before launch', 403)
+            task_binding = execution_project.get('_runtime_task_binding')
+            if task_binding:
+                current_task = self.config.get('tasks', {}).get(task_binding['name'])
+                if current_task != task_binding['definition'] or not self.task_allowed(current_task, execution_project):
+                    raise DevError('RUNTIME_CONFIGURATION_CHANGED', 'The configured task changed before workload launch', 409)
+            if descriptor(self.config, execution_project, root)['revision'] != runtime['revision']:
+                raise DevError('RUNTIME_CONFIGURATION_CHANGED', 'Runtime configuration changed before launch; no workload was started', 409)
+            remaining = timeout - (time.monotonic() - started)
+            if remaining <= 0:
+                raise DevError('RUNTIME_PREPARATION_TIMEOUT', 'The original command budget expired during runtime preparation', 409)
+            remaining = min(remaining, self.bounded_timeout(execution_project, timeout))
+            result = await self._run_process_account(id, actual, plan.cwd, remaining, stream,
+                full_access=full_access, execution_project=None if driver else execution_project,
+                environment_override=environment, redaction_value=plan.environment.get('SSHPASS', ''))
+            if driver:
+                outcome = await driver.outcome_async()
+                result['runtime_outcome'] = {**outcome, 'transport_exit_code': result['exit_code']}
+                if outcome['state'] == 'confirmed':
+                    result['exit_code'] = outcome['workload_exit_code']
+        finally:
+            if driver:
+                await driver.cleanup_async()
+        if driver:
+            result.update(execution_isolation=driver.evidence, runtime_cleanup=driver.cleanup_state)
+        return decorate_result(result, execution_project, id, runtime, root)
+
+    async def _run_process_account(self, id, command, cwd, timeout, stream=False, task_env=None,
+                          full_access=False, inherit_env=False, execution_project=None,
+                          environment_override=None, redaction_value=None):
         from shared.secret_output import SecretOutput
-        environment = {k: v for k, v in os.environ.items() if inherit_env or k in {
-            "PATH", "HOME", "USER", "USERNAME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "SYSTEMROOT", "SystemRoot",
-            "COMSPEC", "PATHEXT", "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL", "SHELL", "NVM_DIR"}}
-        environment.setdefault("GIT_TERMINAL_PROMPT", "0")
-        if not full_access:
-            environment.update({"GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "NO_COLOR": "1", "CI": "1"})
-        # Full-access shell can override env; named tasks remain local-config-only.
-        environment.update(task_env or {})
-        output_filter = SecretOutput(environment.get('SSHPASS', ''))
+        from agent.project_runtime import legacy_environment
+        environment = (dict(environment_override) if environment_override is not None else
+                       legacy_environment(inherit_env, task_env, full_access=full_access))
+        output_filter = SecretOutput(environment.get('SSHPASS', '') if redaction_value is None else redaction_value)
         if execution_project is not None:
             # Inspect the exact argv, cwd and environment used below, including
             # local task definitions, PATH overrides and resolved symlink targets.

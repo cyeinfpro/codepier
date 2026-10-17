@@ -159,7 +159,12 @@ class DotChatService:
     def task_context_protocol():
         # Refresh capability guidance on each read without re-enrollment, grants,
         # checkpoint changes, or repeating the full persisted wake instructions.
-        return {'schema_version': 1, 'contract_revision': 1, 'attributed_context': True,
+        return {'schema_version': 1, 'contract_revision': 2, 'attributed_context': True,
+                'runtime_contract': {'schema_version': 1, 'identity_source': 'original_operation_receipt',
+                    'fields': ['project_id', 'workspace_id', 'operation_id', 'runtime_ref', 'runtime_revision'],
+                    'on_unconfirmed': 'query_original_operation', 'on_command_failure': 'inspect_actual_error',
+                    'on_denial': 'respect_original_authority', 'approval_from_output_text': False,
+                    'grants_authority': False},
                 'original_channel_questions': True, 'question_field': 'response_request',
                 'confirmation_creates_authority': False, 'host_approval_evaluated': False,
                 'read_only': True, 'grants_authority': False,

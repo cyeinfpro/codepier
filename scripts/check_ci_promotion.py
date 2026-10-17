@@ -321,7 +321,7 @@ def verify_evidence(snapshot, artifact_payloads, *, expected_sha, expected_workf
     prefix = "codepier-" + version
     asset_names = {prefix + suffix for suffix in
                    ("-source-full.zip", "-source-full.manifest.json", "-source.zip", "-source.manifest.json")}
-    require(set(source) == asset_names | {"public-check.json", "panel-update-check.json", "source-build.json"},
+    require(set(source) == asset_names | {"public-check.json", "panel-update-check.json", "source-build.json", "runtime-acceptance.json"},
             "Public-source artifact file set differs")
     assets = {name: source[name] for name in sorted(asset_names)}
     assets_receipt = {name: {"sha256": digest(raw), "bytes": len(raw)} for name, raw in assets.items()}
@@ -353,6 +353,10 @@ def verify_evidence(snapshot, artifact_payloads, *, expected_sha, expected_workf
                     "Panel updater compatibility evidence is missing")
     summaries = []
     full_digest = digest(source[prefix + "-source-full.zip"])
+    from shared.runtime_qualification import verified_receipt
+    require(verified_receipt(load_json(source['runtime-acceptance.json']), commit=expected_sha,
+            archive_sha256=full_digest, source_inventory_sha256=source_identity),
+            'Mandatory real runtime qualification failed or belongs to different source bytes')
     regression_identity = regression_inventory_sha256(source_files)
     for platform in PLATFORMS:
         platform_files = selected["complete-" + platform][1]

@@ -54,12 +54,13 @@ class Validations:
             self.records.save('validation',identifier,project,record,replace=True)
             raise
         after=await asyncio.to_thread(source_version,self.agent.engine,project)
-        success=result.get('exit_code')==0 and not result.get('timed_out') and not result.get('cancelled')
+        success=result.get('exit_code')==0 and not result.get('timed_out') and not result.get('cancelled') and not result.get('runtime_cleanup', {}).get('pending') and result.get('runtime_outcome', {}).get('state', 'confirmed') == 'confirmed'
         state=('failed' if not success else 'unverified' if not before['complete'] or not after['complete'] else
                'stale' if before['sha256']!=after['sha256'] else 'passed')
         record.update(state=state,after=after,finished=time.time(),exit_code=result.get('exit_code'),
                       timed_out=result.get('timed_out',False),cancelled=result.get('cancelled',False),
-                      duration_ms=result.get('duration_ms'),output_truncated=result.get('output_truncated',False))
+                      duration_ms=result.get('duration_ms'),output_truncated=result.get('output_truncated',False),
+                      runtime=result.get('runtime'),runtime_outcome=result.get('runtime_outcome'),runtime_cleanup=result.get('runtime_cleanup'))
         self.records.save('validation',identifier,project,record,replace=True)
         return {**result,**record,'next':{'tool':'validations_get','arguments':{'project':args['project'],
                 'workspace_id':args.get('workspace_id',''),'validation_id':identifier}}}
@@ -69,9 +70,15 @@ class Validations:
         current=source_version(self.agent.engine,project)
         after=record.get('after',{})
         fresh=current['complete'] and after.get('complete') and current['sha256']==after.get('sha256')
+        runtime_current = None
+        if record.get('runtime'):
+            from agent.project_runtime import descriptor
+            root, _ = self.agent.engine.root(project)
+            runtime_current = descriptor(self.agent.config, project, root)['revision'] == record['runtime']['revision']
+            fresh = fresh and runtime_current
         current_state=record['state']
         if record['state']=='passed':current_state='passed' if fresh else 'stale' if current['complete'] else 'unverified'
-        return {**record,'historical_state':record['state'],'state':current_state,'source_current':bool(fresh),
+        return {**record,'historical_state':record['state'],'state':current_state,'source_current':bool(current['complete'] and after.get('complete') and current['sha256']==after.get('sha256')),'runtime_current':runtime_current,
                 'current':current,'accepted_current':bool(record.get('decision') and record['decision']['action']=='accept' and current_state=='passed')}
 
     def list(self,project):

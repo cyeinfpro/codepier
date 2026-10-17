@@ -2,7 +2,7 @@
 
 让 ChatGPT 直接使用你的开发电脑：读代码、改文件、跑测试。
 
-[![Version](https://img.shields.io/badge/version-1.29.2-2563eb)](RELEASE.json)
+[![Version](https://img.shields.io/badge/version-1.30.0-2563eb)](RELEASE.json)
 [![License](https://img.shields.io/badge/license-MIT-16a34a)](LICENSE)
 
 CodePier 是自托管的 MCP 服务和开发面板。**Hub** 负责接入与管理，**Agent** 在 macOS、Windows 或 Linux 上运行本机工具。你也可以在网页里继续 Pi、Codex、Claude Code 会话，管理多台电脑和服务器。
@@ -21,10 +21,10 @@ CodePier 是自托管的 MCP 服务和开发面板。**Hub** 负责接入与管�
 
 ### 1. 安装 Hub
 
-服务器需准备 Git、Bash、Python 3.9+、Docker 和支持 `up --wait` 的 Docker Compose v2。以下安装本版本 **v1.29.2**，最新正式版本见 [Releases](https://github.com/cyeinfpro/codepier/releases/latest)：
+服务器需准备 Git、Bash、Python 3.9+、Docker 和支持 `up --wait` 的 Docker Compose v2。以下安装本版本 **v1.30.0**，最新正式版本见 [Releases](https://github.com/cyeinfpro/codepier/releases/latest)：
 
 ```bash
-git clone --branch v1.29.2 --depth 1 https://github.com/cyeinfpro/codepier.git
+git clone --branch v1.30.0 --depth 1 https://github.com/cyeinfpro/codepier.git
 cd codepier
 bash install.sh
 ```
@@ -62,10 +62,13 @@ https://你的域名/mcp
 - **处理真实项目**：搜索和修改文件、审阅差异、运行测试，用 worktree 隔离工作目录。
 - **继续本机会话**：在网页中使用 Pi、Codex 或 Claude Code，查看历史、发送附件、处理审批。
 - **管理电脑与服务器**：一台 Hub 连接多台 Agent，通过项目使用已分配的 VPS。
+- **设置项目运行时**：在项目卡片直接切换清洁、兼容、容器模式，核对保存与实际生效。未单独配置的项目默认清洁模式。
 - **追踪执行结果**：查看任务状态、输出和退出码，断线后查询原操作，避免重复执行。
 - **按需授权**：控制项目和工具权限，使用团队 Space、角色和已审核的外部 MCP 工具。
 
 CodePier 不提供模型服务。只使用 MCP 文件与命令工具，不需要安装模型 CLI；使用原生会话时，需在 Agent 电脑上自行安装、登录相应 CLI，模型费用沿用其配置。
+
+清洁模式使用独立 HOME、缓存和非登录 Shell，但不是 OS 沙箱。依赖个人终端、原生 SSH、签名或全局凭据的项目，升级前请明确选择兼容模式或配置项目工具链；切换不会重启已运行命令。详见[项目运行时](docs/PROJECT_RUNTIMES.md)。
 
 ## 使用前了解
 
@@ -87,9 +90,9 @@ CodePier 不提供模型服务。只使用 MCP 文件与命令工具，不需要
 
 ## 版本与许可
 
-当前仓库的 `RELEASE.json` 标记为 **1.29.2 / prepared / source-and-image**；可下载版本以 [Releases](https://github.com/cyeinfpro/codepier/releases/latest) 为准，`main` 可能包含尚未发布的改动。
+当前仓库的 `RELEASE.json` 标记为 **1.30.0 / prepared / source-and-image**；可下载版本以 [Releases](https://github.com/cyeinfpro/codepier/releases/latest) 为准，`main` 可能包含尚未发布的改动。
 
-- **Version:** 1.29.2
+- **Version:** 1.30.0
 - **License:** [MIT](LICENSE)
 
 第三方依赖保留各自许可证，见 `web/vendor/` 与 [MCP Apps 声明](web/mcp-apps/THIRD_PARTY_NOTICES.txt)。

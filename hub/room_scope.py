@@ -203,7 +203,9 @@ def require_action(store, principal, action, *, project_id=None, device_id=None)
     if rule is None or action not in rule['capabilities']:
         raise DevError('ROOM_SCOPE_DENIED', '此连接未获当前房间对该项目和能力的授权', 403)
     if action == 'execute' and record['manifest']['execution_mode'] != 'account_permissions_acknowledged':
-        raise DevError('ROOM_SCOPE_ISOLATION_REQUIRED', '此房间只允许文件工具；未证明 OS 隔离，不允许 shell/任务执行', 403)
+        from shared.runtime_requirements import valid_requirement
+        if record['manifest']['execution_mode'] != 'require_os_isolation' or not valid_requirement(rule.get('runtime_requirement'), project_id):
+            raise DevError('ROOM_SCOPE_ISOLATION_REQUIRED', '此房间只允许文件工具；缺少强制 OS 隔离要求，不允许 shell/任务执行', 403)
     return record
 
 
@@ -253,6 +255,9 @@ def require_tool(store, principal, name, args):
     from shared.contracts import TOOLS, required_scope
     capability = required_scope(name, args) if name in TOOLS else 'read'
     require_action(store, principal, capability, project_id=project['id'])
+    if capability == 'execute' and record['manifest']['execution_mode'] == 'require_os_isolation':
+        from hub.project_runtimes import current_requirement
+        current_requirement(store, principal, project['id'], name, args)
     if name in {'exec', 'shell_exec', 'ssh_exec', 'tasks_run'}:
         require_action(store, principal, 'execute', project_id=project['id'])
         rule = next(r for r in record['manifest']['project_rules'] if r['project_id'] == project['id'])
@@ -317,9 +322,8 @@ class RoomScopeService:
                     '要保留原连接并只处理所选项目，请打开“管理房间项目”保存选择。这里调整的是整条连接权限，本次未更改。', 422,
                     remedy='edit_room_projects', conversation_id=conversation['id'], changes_applied=False)
             wants_exec = any('execute' in r['capabilities'] for r in rules)
-            if args['execution_mode'] == 'require_os_isolation':
-                raise DevError('ROOM_SCOPE_ISOLATION_UNAVAILABLE', '尚无经批准并验证的 OS 隔离驱动；严格执行范围不能降级为 cwd 限制', 409)
-            if wants_exec and (args['execution_mode'] != 'account_permissions_acknowledged' or not args['acknowledge_unsandboxed_exec']):
+            strict_runtime = args['execution_mode'] == 'require_os_isolation'
+            if wants_exec and not strict_runtime and (args['execution_mode'] != 'account_permissions_acknowledged' or not args['acknowledge_unsandboxed_exec']):
                 raise DevError('ROOM_SCOPE_EXECUTION_CONSENT', '执行使用 Agent 账号权限；需要房主单独明确确认，文件模式不包含执行', 422)
             from hub import iam
             iam.validate_grant(self.store, grant)
@@ -360,9 +364,16 @@ class RoomScopeService:
                         f'项目“{label}”的批准目录包含范围外的项目映射。请在项目管理核对该项目根目录，'
                         '使用独立目录的项目建立话题后再设置凭据范围；本次未更改连接权限。', 409,
                         project_id=project['id'], project_label=label, remedy='use_independent_project_root')
+                runtime_requirement = None
+                if strict_runtime:
+                    from hub.project_runtimes import configured_requirement
+                    if any(target != 'agent' for target in rule['execution_targets']):
+                        raise DevError('ROOM_SCOPE_ISOLATION_TARGET', '严格 OS 隔离不支持原生 VPS 或其他执行位置', 403)
+                    runtime_requirement = configured_requirement(self.c.runtime, project)
                 targets = {target: self.c.runtime.vps.reference({'vps': target[4:]}, project)
                            for target in rule['execution_targets'] if target != 'agent'}
                 snapshots.append({**rule, 'project_snapshot': snapshot(project),
+                                  **({'runtime_requirement': runtime_requirement} if runtime_requirement else {}),
                                   **({'target_snapshots': targets} if targets else {})})
 
             def save():

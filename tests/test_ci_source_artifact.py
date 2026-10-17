@@ -70,6 +70,12 @@ def record_inputs(tmp_path, monkeypatch):
         (directory / name).write_text(json.dumps(check))
     monkeypatch.setattr(subprocess, 'check_output', lambda args, **kwargs: 'c' * 40 if args[-1] == 'HEAD^{tree}' else 'a' * 40)
     monkeypatch.setattr(subprocess, 'run', lambda *args, **kwargs: None)
+    from shared.runtime_qualification import CHECKS
+    qualification = {'schema_version': 1, 'backend': 'docker_restricted_v1', 'verified': True,
+        'commit': 'a'*40, 'archive_sha256': hashlib.sha256(b'synthetic build asset').hexdigest(),
+        'source_inventory_sha256': 'b'*64, 'source_files_unchanged': True,
+        'cleanup_pending': False, 'checks': {name: True for name in CHECKS}}
+    (directory / 'runtime-acceptance.json').write_text(json.dumps(qualification))
     context = {'GITHUB_SHA': 'a' * 40, 'GITHUB_REPOSITORY': 'fixture/repo', 'GITHUB_RUN_ID': '12',
                'GITHUB_RUN_ATTEMPT': '1', 'GITHUB_EVENT_NAME': 'workflow_dispatch'}
     return root, directory, context
@@ -104,4 +110,25 @@ def test_build_record_rejects_unbound_inputs(record_inputs, change):
         path.unlink()
         path.symlink_to(directory / 'codepier-1.2.3-source.zip')
     with pytest.raises(ValueError):
+        source_build_record(root, directory, context)
+
+
+
+def test_source_job_cannot_skip_or_ignore_real_runtime_qualification():
+    steps = workflow()['source']['steps']
+    gate = next(step for step in steps if step.get('name') == 'Mandatory real project-container acceptance from public archive')
+    assert 'if' not in gate and 'continue-on-error' not in gate
+    assert 'release_acceptance.py prepare' in gate['run'] and 'release_acceptance.py finish' in gate['run']
+    assert 'scripts/verify_project_runtime.py' in gate['run'] and '--commit "$GITHUB_SHA"' in gate['run']
+    assert gate['run'].index('scripts/verify_project_runtime.py') < gate['run'].index('scripts/ci_source_artifact.py')
+    artifact = next(step for step in steps if step.get('name') == 'Retain immutable source inputs for every platform')
+    assert 'dist/runtime-acceptance.json' in artifact['with']['path']
+
+
+@pytest.mark.parametrize('field,value', [('verified', False), ('checks', {}), ('commit', 'c'*40), ('cleanup_pending', True)])
+def test_source_record_rejects_missing_or_foreign_runtime_acceptance(record_inputs, field, value):
+    root, directory, context = record_inputs
+    path = directory / 'runtime-acceptance.json'
+    proof = json.loads(path.read_text()); proof[field] = value; path.write_text(json.dumps(proof))
+    with pytest.raises(ValueError, match='Real container acceptance'):
         source_build_record(root, directory, context)

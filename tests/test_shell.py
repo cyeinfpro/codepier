@@ -33,6 +33,7 @@ def shell_agent(tmp_path):
     path = tmp_path / "config.json"
     atomic_json(path, {"hub_url": "http://127.0.0.1:9", "device_id": "fixture", "secret": token(),
                       "state_dir": str(tmp_path / "state"),
+                      "project_runtimes": {"fixture": {"mode": "native_compat"}},
                       "allowed_roots": [{"path": str(root), "writable": True, "allow_tasks": True}],
                       "shell": {"enabled": True, "projects": ["fixture"], "command": ["/bin/sh", "-c"]}})
     agent = Agent(path)

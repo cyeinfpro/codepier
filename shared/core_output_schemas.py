@@ -146,7 +146,7 @@ def factor(schema):
 
     def count(node):
         fingerprint = key(node)
-        if len(fingerprint) >= 180:
+        if len(fingerprint) >= 50:
             counts[fingerprint] += 1
         for child in children(node):
             count(child)
@@ -254,7 +254,9 @@ def build_core_output_schemas(legacy, *, include_queries=False):
         'output_truncated': BOOL, 'timed_out': BOOL, 'cancelled': BOOL,
         'duration_ms': INT, 'command_ok': BOOL, 'cwd': STR, 'shell': array(STR),
         'command': array(STR), 'host': STR, 'port': INT, 'username': STR,
-        'ssh_error': nullable(STR)}, ('operation_id', 'exit_code', 'output'))
+        'ssh_error': nullable(STR), 'runtime': OBJ, 'failure_context': OBJ, 'continuation': OBJ,
+        'log_ref': OBJ, 'diagnostics': array(OBJ), 'execution_isolation': nullable(OBJ),
+        'runtime_cleanup': OBJ, 'runtime_outcome': OBJ}, ('operation_id', 'exit_code', 'output'))
 
     process = [obj({'operations': array(OPERATION),
         'next_before_created': nullable(NUM), 'media_truncated': BOOL}, ('operations',)),

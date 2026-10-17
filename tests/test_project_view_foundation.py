@@ -93,7 +93,7 @@ def test_file_actions_are_independent_of_disabled_exec_and_computer(workspace, m
     engine.config['mcp_policy'] = {'block_local_codex': True, 'block_native_computer': True}
     def unexpected(*args, **kwargs):
         raise AssertionError('file readiness must not search executable paths')
-    monkeypatch.setattr('agent.action_readiness.shutil.which', unexpected)
+    monkeypatch.setattr('agent.project_runtime.shutil.which', unexpected)
     result = local(workspace, kind, scopes=('read', 'write'))
     assert result['local_authorization']['state'] == 'allowed'
     assert result['execution_readiness']['state'] == 'ready'

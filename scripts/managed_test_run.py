@@ -752,12 +752,35 @@ def recover(manifest_path, *, dry_run=True):
     return result
 
 
+def project_result_view(result, root):
+    """Project-relative presentation of wrapper metadata, not log rewriting.
+
+    The full durable manifest remains unchanged for owner-side recovery. An
+    external result is explicitly not a project file; it never gets a fake path.
+    """
+    value = dict(result)
+    root = Path(root).resolve()
+    for field in ('evidence', 'manifest'):
+        if not isinstance(value.get(field), str):
+            continue
+        path = Path(value[field]).resolve()
+        if path.is_relative_to(root):
+            value[field] = path.relative_to(root).as_posix()
+        else:
+            value.pop(field)
+            value[field + '_ref'] = {'scope': 'outside_project', 'name': path.name}
+    value.update(path_base='project', original_manifest_retained=True)
+    return value
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     destination = parser.add_mutually_exclusive_group()
     destination.add_argument('--output', type=Path)
     destination.add_argument('--output-root', type=Path, help='Create a unique retained run under this root')
     parser.add_argument('--cwd', type=Path)
+    parser.add_argument('--result-view', choices=('absolute', 'project'), default='absolute',
+                        help='Present wrapper paths relative to cwd; raw logs and recovery manifests are unchanged')
     for label in ('project', 'workspace', 'task'):
         parser.add_argument('--' + label, default='')
     parser.add_argument('--timeout', type=float, default=900)
@@ -790,7 +813,8 @@ def main(argv=None):
             finally:
                 for number, handler in old.items():
                     signal.signal(number, handler)
-        print(json.dumps(result))
+        presented = project_result_view(result, args.cwd or Path.cwd()) if args.result_view == 'project' else result
+        print(json.dumps(presented))
         return 0 if result['status'] == 'success' and not result['cleanup_pending'] else 1
     except (OSError, ValueError, SafetyError) as error:
         print(json.dumps({'status': 'blocked', 'error': str(error)}), file=sys.stderr)

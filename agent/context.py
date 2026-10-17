@@ -122,7 +122,7 @@ def project_context(engine, project, args):
                 allowed_tasks.append({"name": name, "description": task.get("description", "")[:300]})
     return {"project": project.get("alias"), "project_root": str(root), "documents": documents, "skills": skills, "codex_skills": codex_skills, "skills_catalog": skills_catalog,
             "root_entries": tree, "tasks": {"enabled": enabled, "items": allowed_tasks, "next": "tasks_list"},
-            **({"execution": execution_info(engine.config, project, spec, root)} if "context_detail" not in args else {}),
+            **({"execution": execution_info({"state_dir": str(engine.journal.directory), **engine.config}, project, spec, root)} if "context_detail" not in args else {}),
             "truncated": truncated, "remaining_documents": remaining, "warnings": warnings,
             "budget": {"preview_chars": used, "max_chars": args["max_chars"], "max_files": args["max_files"]},
             "scope": "Known root documents, first-level docs and project skill directories only. NOT a full repository scan.",

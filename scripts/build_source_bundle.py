@@ -178,6 +178,7 @@ REQUIRED_FILES = {
 }
 
 PUBLIC_DOCS = {
+    'docs/PROJECT_RUNTIMES.md',
     'docs/OWNER_TASK_CONTEXT.md',
     'docs/TEST_CLEANUP.md',
     'docs/COLLABORATION_FLUID_UX_2026-10-12.md',

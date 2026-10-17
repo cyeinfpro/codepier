@@ -24,6 +24,7 @@ from hub.api.context import HubContext
 from hub.api.accounts import make_accounts_router
 from hub.api.devices import make_devices_router
 from hub.api.projects import make_projects_router
+from hub.api.project_runtimes import make_project_runtimes_router
 from hub.api.activity import make_activity_router
 from hub.call_log import register_call_log
 from hub.api.settings import make_settings_router
@@ -113,7 +114,8 @@ def create_app(data_dir: str | None = None):
         app.add_middleware(MCPRequestAuditMiddleware)
         context = HubContext(store, runtime, auth, config, maintenance, public_url, BASE)
         for make in (make_accounts_router, make_devices_router, make_projects_router,
-                     make_activity_router, make_settings_router, make_file_import_settings_router, make_system_router, make_connection_router):
+                     make_activity_router, make_settings_router, make_file_import_settings_router, make_system_router, make_connection_router,
+                     make_project_runtimes_router):
             app.include_router(make(context))
         app.include_router(oidc.router)
         for make in (make_iam_router, make_profiles_router, make_roles_router, make_gateway_router):

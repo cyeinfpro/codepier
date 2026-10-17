@@ -80,6 +80,8 @@ def validate_config(value: object, config_path: Path) -> dict:
                 raise ValueError(f"任务 {name}: env 必须是文字键值对象")
     c["tasks"] = tasks
     c["shell"] = validate_shell(c.get("shell", {}))
+    from agent.project_runtime import validate_runtimes
+    c["project_runtimes"] = validate_runtimes(c.get("project_runtimes", {}))
     c["mcp_policy"] = validate_policy(c.get("mcp_policy", {}))
     c["skills"] = validate_skills(c.get("skills", {}))
     c["computer"] = validate_computer(c.get("computer", {}))
