@@ -262,6 +262,8 @@ class Agent:
                         old = current
                         continue
                     await self.scheduler.reconfigure(effective_scheduler(c.get("scheduler"), self.scheduler_requested))
+                    # A loaded profile is not yet an available control channel.
+                    self.runtime_reload_pending = True
                     self.config = c
                     self.engine.config = c
                     old = current
@@ -298,6 +300,7 @@ class Agent:
             if self.stop_event.is_set() or self.config is not config:
                 return
             self.socket, self.channel = socket, channel
+            self.runtime_reload_pending = False
             self.connection_number += 1
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S%z')}] [Agent] 已连接 {base}；设备 {self.config['device_id']}；授权目录 {len(self.config['allowed_roots'])} 个。", flush=True)
             self.output_wake.set()
@@ -820,7 +823,7 @@ class Agent:
                                       requested_seconds=budget['timeout_seconds'], now=time.time())
         return min(local_timeout, remaining)
 
-    async def execute(self, id, tool, project, args):
+    async def execute(self, id, tool, project, args, *, saved_vps_target=None):
         from shared.integration_contracts import REMOTE_TOOLS
         if tool == 'exec':
             if args['task']:
@@ -836,7 +839,7 @@ class Agent:
                 if not isinstance(project.get('_core_ssh'), dict):
                     raise DevError('VPS_TRANSPORT_MISSING', '缺少 Hub 验证的 VPS 连接，未执行命令', 409)
                 forwarded = SSHExec.model_validate(project['_core_ssh']).model_dump()
-                result = await self.execute(id, 'ssh_exec', project, forwarded)
+                result = await self.execute(id, 'ssh_exec', project, forwarded, saved_vps_target=args['target'])
             output = result.get('output', '')
             tail = '\n'.join(output.split('\n')[-2000:]).encode('utf-8')[-50 * 1024:].decode('utf-8', errors='ignore')
             return {**result, 'output': tail, 'output_truncated': bool(result.get('output_truncated') or tail != output),
@@ -871,14 +874,27 @@ class Agent:
             if denial:
                 raise DevError(*denial, 403)
             from agent.project_runtime import selected
-            if project.get('_runtime_requirement') or selected(self.config, project)['mode'] != 'native_compat':
+            mode = selected(self.config, project)['mode']
+            # A saved VPS is an explicit, separately authorized remote target,
+            # never a fallback for a failed local runtime. Only this internal
+            # call path receives the transport prepared from the bound VPS.
+            saved_transport = (isinstance(saved_vps_target, str) and saved_vps_target.startswith('vps:')
+                and isinstance(project.get('_core_ssh'), dict)
+                and TOOLS['ssh_exec'].model.model_validate(project['_core_ssh']).model_dump() == args)
+            if project.get('_runtime_requirement') or mode == 'container_v1' or (mode != 'native_compat' and not saved_transport):
                 raise DevError('RUNTIME_REMOTE_TARGET_UNSUPPORTED', 'This project runtime does not support native SSH transport; choose a separately authorized compatible target', 403)
             from agent.ssh import prepare_ssh, ssh_error
             command, env = prepare_ssh(self.config, project, spec, args)
             timeout = self.bounded_timeout(project, args['timeout_seconds'])
-            result = await self.run_process(id, command, root, timeout, stream=True,
-                                            task_env=env, full_access=True,
-                                            inherit_env=self.config['shell']['inherit_env'], execution_project=project)
+            # SSH launches a native transport to the selected remote target;
+            # it must not be described as the local clean/container workload.
+            runner = self._run_process_account if saved_transport else self.run_process
+            result = await runner(id, command, root, timeout, stream=True,
+                                  task_env=env, full_access=True,
+                                  inherit_env=self.config['shell']['inherit_env'], execution_project=project)
+            if saved_transport:
+                result['transport_runtime'] = {'mode': 'native_ssh_transport',
+                    'target': saved_vps_target, 'isolation': 'none', 'grants_authority': False}
             return {**result, 'host': args['host'], 'port': args['port'], 'username': args['username'],
                     'ssh_error': ssh_error(result)}
         if tool == "shell_exec":

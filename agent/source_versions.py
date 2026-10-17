@@ -60,7 +60,10 @@ class Validations:
         record.update(state=state,after=after,finished=time.time(),exit_code=result.get('exit_code'),
                       timed_out=result.get('timed_out',False),cancelled=result.get('cancelled',False),
                       duration_ms=result.get('duration_ms'),output_truncated=result.get('output_truncated',False),
-                      runtime=result.get('runtime'),runtime_outcome=result.get('runtime_outcome'),runtime_cleanup=result.get('runtime_cleanup'))
+                      runtime=result.get('runtime'))
+        # Native execution has no container evidence. Do not synthesize null
+        # fields: the Hub correctly treats malformed supplied evidence as unknown.
+        record.update({key: result[key] for key in ('runtime_outcome', 'runtime_cleanup') if key in result})
         self.records.save('validation',identifier,project,record,replace=True)
         return {**result,**record,'next':{'tool':'validations_get','arguments':{'project':args['project'],
                 'workspace_id':args.get('workspace_id',''),'validation_id':identifier}}}

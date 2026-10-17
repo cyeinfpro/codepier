@@ -490,6 +490,7 @@
 }
 .workspace-project-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 6px;
@@ -501,6 +502,8 @@
 .workspace-project-actions > .actions {
   gap: 5px;
   min-width: 0;
+  flex: 1 1 220px;
+  flex-wrap: wrap;
 }
 .workspace-project-actions .btn {
   min-height: 34px;
@@ -1005,7 +1008,7 @@
     padding-inline: 12px;
   }
   .workspace-project-actions > .actions {
-    flex: 1;
+    flex: 1 1 100%;
   }
   .mobile-dock {
     right: max(6px, env(safe-area-inset-right));

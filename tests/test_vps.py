@@ -311,6 +311,11 @@ def test_mcp_saved_ssh_real_process_redaction_and_once_only(vps_stack):
     op = s.poll(opid, timeout=20)
     assert op['state'] == 'succeeded',op
     assert op['tool'] == 'exec' and op['result']['data']['exit_code'] == 0
+    # A saved VPS remains a separately authorized target with the clean default.
+    assert 'project_runtimes' not in s.config
+    assert op['result']['data']['transport_runtime']['mode'] == 'native_ssh_transport'
+    assert op['result']['data']['transport_runtime']['target'] == 'vps:' + v['id']
+    assert not op['result']['data']['transport_runtime']['grants_authority']
     assert 'remote-ok' in op['output'] and '<redacted>' in op['output']
     assert (s.projectalpha / filename).read_text() == 'once'
     assert PASSWORD not in json.dumps(op)

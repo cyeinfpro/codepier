@@ -209,3 +209,31 @@ async def test_original_isolation_requirement_rejects_native_ssh_before_dependen
     with pytest.raises(DevError) as caught:
         await agent.execute('strict-ssh-check', 'ssh_exec', value, {})
     assert caught.value.code == 'RUNTIME_REMOTE_TARGET_UNSUPPORTED'
+
+
+def test_loaded_profile_is_not_applied_before_authenticated_reconnect(shell_agent):
+    agent, root = shell_agent
+    value = project(agent, root)
+    initial = get(agent, value)
+    assert initial['state'] == 'applied'
+    agent.runtime_reload_pending = True
+    pending = get(agent, value)
+    assert pending['state'] == 'pending_reload'
+    assert pending['revision'] == initial['revision']
+    agent.runtime_reload_pending = False
+    assert get(agent, value)['state'] == 'applied'
+
+
+@pytest.mark.asyncio
+async def test_saved_target_cannot_override_required_isolation(shell_agent):
+    from shared.contracts import SSHExec
+    agent, root = shell_agent
+    value = project(agent, root)
+    args = SSHExec.model_validate({'project': value['id'], 'host': 'fixture.invalid',
+        'username': 'fixture', 'password': 'synthetic-not-a-real-password',
+        'command': 'touch forbidden', 'idempotency_key': 'strict-saved-target'}).model_dump()
+    value.update(_runtime_requirement={'protocol': 1}, _core_ssh=args)
+    with pytest.raises(DevError) as error:
+        await agent.execute('strict-saved-target', 'ssh_exec', value, args, saved_vps_target='vps:' + 'a' * 32)
+    assert error.value.code == 'RUNTIME_REMOTE_TARGET_UNSUPPORTED'
+    assert not (root / 'forbidden').exists()

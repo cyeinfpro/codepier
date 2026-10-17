@@ -64,9 +64,17 @@ def test_validation_cannot_certify_an_unrelated_cwd(integrated_stack):
         op=s.poll(response['operation_id']);assert op['state']=='failed' and op['result']['error']['code']=='VALIDATION_CWD',op
     else:assert response['error']['code']=='VALIDATION_CWD'
     assert not (outside/'MUST_NOT_EXIST').exists()
-    # Ordinary owner-enabled shell retains its existing full-access semantics.
-    ordinary=resolved(s,'shell_exec',{'command':'pwd','cwd':str(outside)})
-    assert ordinary['exit_code']==0 and str(outside) in ordinary['output']
+    # The clean default is workspace-relative. Full-account cwd semantics
+    # require an explicit compatibility selection, not an implicit fallback.
+    from tests.test_runtime_panel_http import snapshot, set_mode, applied
+    prior = snapshot(s)['profile']
+    try:
+        s.must(set_mode(s, 'native_compat')[0]); applied(s, 'native_compat')
+        ordinary=resolved(s,'shell_exec',{'command':'pwd','cwd':str(outside)})
+        assert ordinary['exit_code']==0 and str(outside) in ordinary['output']
+    finally:
+        s.must(set_mode(s, prior['mode'], **{k:v for k,v in prior.items() if k != 'mode'})[0])
+        applied(s, prior['mode'])
 
 def test_setup_links_download_complete_current_assets(integrated_stack):
     s=integrated_stack

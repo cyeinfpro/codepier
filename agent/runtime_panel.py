@@ -68,7 +68,8 @@ def _snapshot(agent, project, root, config, raw):
         loaded = None
     saved_runtime = descriptor(config, project, root)
     readiness = runtime_readiness(config, project, root)
-    applied = bool(loaded and loaded['revision'] == saved_runtime['revision'])
+    applied = bool(loaded and loaded['revision'] == saved_runtime['revision']
+                   and not getattr(agent, 'runtime_reload_pending', False))
     return {'schema_version': 1, 'project_id': project['id'], 'revision': _revision(config, raw, project),
         'profile': _editable(saved), 'default_mode': DEFAULT_MODE, 'clean_default_profile': _editable(default_profile()), 'selection_source': source,
         'state': 'applied' if applied else 'pending_reload', 'runtime': loaded,
