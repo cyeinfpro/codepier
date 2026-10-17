@@ -44,7 +44,8 @@ def read_json(path):
     if path.is_symlink():
         raise ValueError('Configuration inputs must not be symbolic links')
     # A FIFO substituted for the config must fail, not block a control worker.
-    flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+    flags = (os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+             | getattr(os, 'O_BINARY', 0))
     descriptor = os.open(path, flags)
     try:
         info = os.fstat(descriptor)
@@ -54,8 +55,14 @@ def read_json(path):
             raw = stream.read(MAX_BYTES + 1)
         if len(raw) > MAX_BYTES:
             raise ValueError('Configuration input exceeds its size limit')
-        if (_file_version(os.fstat(descriptor)) != _file_version(info)
-                or _file_version(path.lstat()) != _file_version(info)):
+        latest = os.fstat(descriptor)
+        named = path.lstat()
+        # Compare timestamps through the same descriptor API. Path-stat and
+        # fd-stat timestamp representations can differ on Windows. Identity
+        # still binds the current name to the originally opened object.
+        if (_file_version(latest) != _file_version(info)
+                or (named.st_dev, named.st_ino) != (info.st_dev, info.st_ino)
+                or not stat.S_ISREG(named.st_mode) or named.st_size != info.st_size):
             raise DevError('RUNTIME_CONFIG_CHANGED', 'Configuration changed during the read; no write was performed', 409)
         value = json.loads(raw.decode('utf-8-sig'), object_pairs_hook=_unique_object)
         if not isinstance(value, dict):

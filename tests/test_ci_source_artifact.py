@@ -132,3 +132,19 @@ def test_source_record_rejects_missing_or_foreign_runtime_acceptance(record_inpu
     proof = json.loads(path.read_text()); proof[field] = value; path.write_text(json.dumps(proof))
     with pytest.raises(ValueError, match='Real container acceptance'):
         source_build_record(root, directory, context)
+
+
+@pytest.mark.parametrize('prefix', ['', '# syntax=docker/dockerfile:1\n\n# pinned image\n', '\n\n'])
+def test_container_qualification_reads_pinned_base_after_comments(prefix):
+    from shared.runtime_qualification import pinned_base_image
+    image = 'python:3.13-slim@sha256:' + 'a'*64
+    assert pinned_base_image(prefix+'FROM '+image+' AS base\nRUN true') == image
+    assert pinned_base_image(prefix+'from --platform=$BUILDPLATFORM '+image+' AS base') == image
+    assert pinned_base_image((ROOT/'Dockerfile').read_text()).startswith('python:')
+
+
+@pytest.mark.parametrize('source', ['# FROM ignored\n', 'FROM python:latest', 'FROM scratch\nFROM python@sha256:'+'a'*64])
+def test_container_qualification_rejects_mutable_or_missing_first_base(source):
+    from shared.runtime_qualification import pinned_base_image
+    with pytest.raises(ValueError):
+        pinned_base_image(source)

@@ -34,3 +34,28 @@ def test_runtime_lock_exited_process_recovery_is_real_and_cross_platform(tmp_pat
         current = json.loads(marker.read_text())
         assert current['nonce'] != original['nonce'] and current['pid'] == os.getpid()
     assert not marker.exists()
+
+
+
+def test_config_binary_bytes_and_descriptor_identity_are_portable(tmp_path):
+    from agent.runtime_config import read_json
+    path = tmp_path / 'config.json'
+    raw = b'\xef\xbb\xbf{\r\n  "project": "fixture"\r\n}\r\n'
+    path.write_bytes(raw)
+    value, actual, info = read_json(path)
+    assert value == {'project': 'fixture'} and actual == raw
+    assert info.st_size == len(raw)
+
+
+def test_path_timestamp_representation_does_not_invalidate_same_open_file(tmp_path, monkeypatch):
+    from pathlib import Path
+    from types import SimpleNamespace
+    from agent.runtime_config import read_json
+    path = tmp_path / 'config.json'; path.write_text('{"value": 1}')
+    original = Path.lstat
+    def distinct_time(self):
+        info = original(self)
+        return SimpleNamespace(st_dev=info.st_dev, st_ino=info.st_ino, st_mode=info.st_mode,
+            st_size=info.st_size, st_mtime_ns=info.st_mtime_ns+1, st_ctime_ns=info.st_ctime_ns+1)
+    monkeypatch.setattr(Path, 'lstat', distinct_time)
+    assert read_json(path)[0] == {'value': 1}

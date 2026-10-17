@@ -110,7 +110,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          IMAGE=$(python -c "import re; from pathlib import Path; print(re.search(r'^FROM (\S+)', Path('Dockerfile').read_text()).group(1))")
+          IMAGE=$(python -c "from pathlib import Path; from shared.runtime_qualification import pinned_base_image; print(pinned_base_image(Path('Dockerfile').read_text()))")
           [[ "$IMAGE" =~ @sha256:[a-f0-9]{64}$ ]]
           # Explicit CI fixture setup only. The production runtime never pulls.
           docker pull "$IMAGE"
