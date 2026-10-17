@@ -148,3 +148,44 @@ def test_container_qualification_rejects_mutable_or_missing_first_base(source):
     from shared.runtime_qualification import pinned_base_image
     with pytest.raises(ValueError):
         pinned_base_image(source)
+
+
+@pytest.mark.parametrize('qualified', [True, False])
+def test_real_source_record_cli_is_independent_of_working_directory_and_pythonpath(tmp_path, qualified):
+    import shutil
+    import sys
+    from shared.runtime_qualification import CHECKS
+    root = tmp_path / 'checkout'
+    for folder in ['scripts', 'shared', '.github/workflows']:
+        (root/folder).mkdir(parents=True, exist_ok=True)
+    for name in ['scripts/ci_source_artifact.py', 'shared/runtime_qualification.py']:
+        shutil.copyfile(ROOT/name, root/name)
+    (root/'.github/workflows/ci.yml').write_text('name: Synthetic verification\n')
+    subprocess.run(['git', 'init', '-q', str(root)], check=True, capture_output=True)
+    subprocess.run(['git', '-C', str(root), 'add', '.'], check=True, capture_output=True)
+    subprocess.run(['git', '-C', str(root), '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                    'commit', '-qm', 'Synthetic CLI fixture'], check=True, capture_output=True)
+    commit = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
+    directory = tmp_path/'release-inputs';directory.mkdir()
+    for suffix in ['-full.zip', '-full.manifest.json', '.zip', '.manifest.json']:
+        (directory/('codepier-1.2.3-source'+suffix)).write_bytes(b'synthetic')
+    check = {'passed': True, 'version': '1.2.3', 'inventory_sha256': 'b'*64}
+    for name in ['public-check.json', 'panel-update-check.json']:
+        (directory/name).write_text(json.dumps(check))
+    proof = {'schema_version': 1, 'backend': 'docker_restricted_v1', 'verified': qualified,
+        'commit': commit, 'archive_sha256': hashlib.sha256(b'synthetic').hexdigest(),
+        'source_inventory_sha256': 'b'*64, 'source_files_unchanged': True, 'cleanup_pending': False,
+        'checks': {name: True for name in CHECKS}}
+    (directory/'runtime-acceptance.json').write_text(json.dumps(proof))
+    environment = {**os.environ, 'GITHUB_SHA': commit, 'GITHUB_REPOSITORY': 'fixture/repo',
+        'GITHUB_RUN_ID': '12', 'GITHUB_RUN_ATTEMPT': '1', 'GITHUB_EVENT_NAME': 'workflow_dispatch'}
+    environment.pop('PYTHONPATH', None)
+    result = subprocess.run([sys.executable, '-I', str(root/'scripts/ci_source_artifact.py'),
+        '--directory', str(directory)], cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=15)
+    assert 'ModuleNotFoundError' not in result.stderr
+    if qualified:
+        assert result.returncode == 0, result.stderr
+        assert json.loads((directory/'source-build.json').read_text())['commit'] == commit
+    else:
+        assert result.returncode != 0 and 'Real container acceptance' in result.stderr
+        assert not (directory/'source-build.json').exists()

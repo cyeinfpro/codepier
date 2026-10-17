@@ -1,6 +1,7 @@
 """Golden paths against a real isolated Hub, real Agent, and real local filesystem."""
 from __future__ import annotations
 import uuid
+import json
 import httpx
 import pytest
 
@@ -24,8 +25,16 @@ def result(stack, name, args):
     assert not reply.get('isError'), reply
     data = reply['structuredContent']
     if data.get('pending'):
-        operation = stack.poll(data['operation_id'], timeout=30)
-        assert operation['state'] == 'succeeded', operation
+        try:
+            operation = stack.poll(data['operation_id'], timeout=30)
+        except AssertionError as error:
+            # Preserve the original timing/assertion and report its exact
+            # receipt; do not hide a failed process behind a truncated dict.
+            from shared.audit_redaction import redact_text
+            snapshot = stack.client.get('/api/operations/' + data['operation_id']).json()
+            raise AssertionError(redact_text(json.dumps(snapshot, ensure_ascii=True))[-12000:]) from error
+        from shared.audit_redaction import redact_text
+        assert operation['state'] == 'succeeded', redact_text(json.dumps(operation, ensure_ascii=True))[-12000:]
         return operation['result']['data']
     return data
 

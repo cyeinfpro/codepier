@@ -121,7 +121,7 @@ class Integrations:
         if name=='readiness_get':
             from agent.shell import execution_info
             root,spec=self.agent.engine.root(project)
-            execution=execution_info(self.agent.config,project,spec,root)
+            execution=execution_info({"state_dir":str(self.agent.engine.journal.directory),**self.agent.config},project,spec,root)
             browser=self.browser.status(project);languages=lsp_navigation.status(self.agent.config,project)
             admission=self.control.state(project)
             scopes=project.get('_coding_scopes')

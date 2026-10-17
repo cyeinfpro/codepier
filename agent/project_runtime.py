@@ -13,7 +13,7 @@ import hmac
 import json
 import os
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 import shutil
 import stat
@@ -93,12 +93,32 @@ def validate_runtimes(value):
     return result
 
 
+def windows_system_tool_paths(parent):
+    """Deterministic system tools, not arbitrary personal PATH inheritance.
+
+    Git for Windows publishes its command shim under the machine Program Files
+    directory. Keep both native/32-bit installation roots where applicable;
+    project-specific tools still precede them and explicit profiles stay exact.
+    """
+    system = PureWindowsPath(parent.get('SystemRoot', r'C:\Windows'))
+    if not system.is_absolute():
+        system = PureWindowsPath(r'C:\Windows')
+    result = [str(system / 'System32' / 'WindowsPowerShell' / 'v1.0'), str(system / 'System32')]
+    drive = PureWindowsPath(system.anchor)
+    for name, default in [('ProgramW6432', drive / 'Program Files'),
+                          ('ProgramFiles', drive / 'Program Files'),
+                          ('ProgramFiles(x86)', drive / 'Program Files (x86)')]:
+        location = PureWindowsPath(parent.get(name) or default)
+        if location.is_absolute():
+            result.append(str(location / 'Git' / 'cmd'))
+    return list(dict.fromkeys(result))
+
+
 def default_profile():
     """A deterministic project-first tool path, never the personal login PATH."""
     paths = ['.venv/Scripts' if os.name == 'nt' else '.venv/bin', 'node_modules/.bin']
     if os.name == 'nt':
-        system = Path(os.environ.get('SystemRoot', r'C:\Windows'))
-        paths += [str(system / 'System32' / 'WindowsPowerShell' / 'v1.0'), str(system / 'System32')]
+        paths += windows_system_tool_paths(os.environ)
     else:
         if sys.platform == 'darwin':
             paths.append('/opt/homebrew/bin')

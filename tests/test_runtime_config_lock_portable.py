@@ -59,3 +59,16 @@ def test_path_timestamp_representation_does_not_invalidate_same_open_file(tmp_pa
             st_size=info.st_size, st_mtime_ns=info.st_mtime_ns+1, st_ctime_ns=info.st_ctime_ns+1)
     monkeypatch.setattr(Path, 'lstat', distinct_time)
     assert read_json(path)[0] == {'value': 1}
+
+
+
+def test_windows_clean_default_includes_machine_git_not_personal_path():
+    from agent.project_runtime import windows_system_tool_paths
+    paths = windows_system_tool_paths({'SystemRoot': r'C:\Windows',
+        'ProgramFiles': r'C:\Program Files', 'ProgramW6432': r'C:\Program Files',
+        'ProgramFiles(x86)': r'C:\Program Files (x86)', 'PATH': r'C:\Users\private\tools;D:\unrelated'})
+    assert paths == [r'C:\Windows\System32\WindowsPowerShell\v1.0', r'C:\Windows\System32',
+                     r'C:\Program Files\Git\cmd', r'C:\Program Files (x86)\Git\cmd']
+    assert not any('private' in path or 'unrelated' in path for path in paths)
+    assert r'D:\Programs\Git\cmd' in windows_system_tool_paths({'SystemRoot': r'D:\Windows', 'ProgramFiles': r'D:\Programs'})
+    assert all(path.startswith(('C:\\', 'D:\\')) for path in windows_system_tool_paths({'SystemRoot': '.', 'ProgramFiles': '.'}))
