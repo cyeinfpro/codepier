@@ -68,7 +68,11 @@ def _snapshot(agent, project, root, config, raw):
         loaded = None
     saved_runtime = descriptor(config, project, root)
     readiness = runtime_readiness(config, project, root)
+    # Matching mode/revision alone is insufficient: saving an explicit
+    # equivalent default still schedules a connection reload. Until the exact
+    # validated config is loaded and the channel reauthenticated, report pending.
     applied = bool(loaded and loaded['revision'] == saved_runtime['revision']
+                   and config == agent.config
                    and not getattr(agent, 'runtime_reload_pending', False))
     return {'schema_version': 1, 'project_id': project['id'], 'revision': _revision(config, raw, project),
         'profile': _editable(saved), 'default_mode': DEFAULT_MODE, 'clean_default_profile': _editable(default_profile()), 'selection_source': source,

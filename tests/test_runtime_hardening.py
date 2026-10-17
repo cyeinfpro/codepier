@@ -237,3 +237,23 @@ async def test_saved_target_cannot_override_required_isolation(shell_agent):
         await agent.execute('strict-saved-target', 'ssh_exec', value, args, saved_vps_target='vps:' + 'a' * 32)
     assert error.value.code == 'RUNTIME_REMOTE_TARGET_UNSUPPORTED'
     assert not (root / 'forbidden').exists()
+
+
+def test_equivalent_default_binding_is_pending_until_exact_config_loaded(shell_agent):
+    from tests.test_runtime_panel import reload
+    from shared.util import atomic_json
+    agent, root = shell_agent
+    raw = json.loads(agent.config_path.read_text())
+    raw.pop('project_runtimes', None)
+    atomic_json(agent.config_path, raw)
+    reload(agent)
+    value = project(agent, root)
+    initial = get(agent, value)
+    assert initial['profile']['mode'] == 'project_clean_v1'
+    saved = save(agent, value, initial, {'mode': 'project_clean_v1'})
+    assert saved['saved'] and not saved['unchanged']
+    assert saved['runtime']['revision'] == saved['saved_runtime']['revision']
+    assert saved['state'] == 'pending_reload'
+    assert get(agent, value)['state'] == 'pending_reload'
+    reload(agent)
+    assert get(agent, value)['state'] == 'applied'
