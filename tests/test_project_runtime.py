@@ -162,14 +162,31 @@ async def test_clean_runtime_timeout_cleans_owned_processes(shell_agent):
     assert data['timed_out'] and not agent.processes and not (root / 'should-not-exist').exists()
 
 
-def test_status_and_launch_share_path(shell_agent):
+@pytest.mark.parametrize('linked_directory', [False, True])
+def test_status_and_launch_share_path(shell_agent, monkeypatch, linked_directory):
     agent, root = shell_agent
+    if linked_directory:
+        # Public-archive acceptance links the complete test virtualenv. Preserve
+        # its invocation directory; dereferencing the executable can lose venv.
+        alias = root / 'toolchain-alias'
+        alias.symlink_to(Path(sys.prefix), target_is_directory=True)
+        monkeypatch.setattr(sys, 'executable', str(alias / 'bin' / Path(sys.executable).name))
     clean(agent)
     project = shell_request(root)['project']
     info = execution_info(agent.config, project, agent.config['allowed_roots'][0], root)
     assert info['runtime']['state'] == 'ready' and info['runtime']['tools']['python3']
     plan = prepare(agent.config, project, root, ['python3', '--version'], root, create=False)
-    assert Path(plan.command[0]).parent == Path(sys.executable).parent.resolve()
+    assert Path(plan.command[0]).parent == Path(sys.executable).parent.absolute()
+    # Verify the actual launched interpreter keeps the intended environment,
+    # not merely an equal path string or the same base-executable inode.
+    import subprocess
+    code = "import json,sys,pytest; print(json.dumps({'prefix':sys.prefix,'base_prefix':sys.base_prefix,'executable':sys.executable}))"
+    launched = subprocess.run([plan.command[0], '-c', code], cwd=plan.cwd,
+        env=plan.environment, capture_output=True, text=True, timeout=10, check=True)
+    observed = json.loads(launched.stdout)
+    assert Path(observed['prefix']).samefile(Path(sys.prefix))
+    assert observed['prefix'] != observed['base_prefix']
+    assert Path(observed['executable']).samefile(Path(plan.command[0]))
 
 
 def test_diagnostics_do_not_become_approval_or_modify_raw_log():
