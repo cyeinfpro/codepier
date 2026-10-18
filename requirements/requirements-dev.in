@@ -5,4 +5,4 @@ playwright==1.63.0
 jsonschema==4.26.0
 -r requirements-tools.in
 pytest-cov==7.1.0
-mypy==2.3.1
+mypy==2.4.0
