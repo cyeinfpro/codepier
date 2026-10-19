@@ -712,8 +712,12 @@ function chatSettings(settings) {
     );
   const name = $('#chat-model-name');
   if (!name) return;
-  name.textContent =
+  const label =
     model?.name || model?.displayName || current || (v.catalog ? '本机默认' : '选择模型');
+  // WebKit can lose the pending click when discovery replaces the text node
+  // underneath a pressed picker. Keep that node while updating its label.
+  if (name.firstChild?.nodeType === Node.TEXT_NODE) name.firstChild.nodeValue = label;
+  else name.textContent = label;
   $('#chat-model-picker').title =
     (model?.provider ? model.provider + ' / ' : '') + (model?.id || current || '发送前可选择模型');
   const source = v.configForResume ? v.catalog : v.settings || v.catalog;

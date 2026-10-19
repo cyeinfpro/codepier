@@ -9,6 +9,24 @@ def catalogs(page):
     return page.evaluate("requests.filter(r=>r.path.endsWith('/chat_catalog'))")
 
 
+@pytest.mark.parametrize('chat_page', ['chromium', 'webkit'], indirect=True)
+def test_catalog_reply_during_model_picker_press_keeps_the_click(chat_page):
+    page = chat_page
+    page.evaluate('ChatUI.catalogCache.clear();window.delayCatalog=true;void chatLoadCatalog()')
+    page.wait_for_function('!!window.finishCatalog')
+    # A delayed model discovery can complete between pointer down and up.
+    picker = page.locator('#chat-model-picker')
+    box = picker.bounding_box()
+    page.mouse.move(box['x'] + box['width'] / 2, box['y'] + box['height'] / 2)
+    page.mouse.down()
+    page.evaluate('window.delayCatalog=false;finishCatalog()')
+    page.wait_for_function('!chatView().catalogLoading')
+    page.mouse.up()
+    expect(page.locator('#chat-model-search')).to_be_visible()
+    expect(page.locator('.chat-model-group').first).to_have_text('local')
+    assert not page.evaluate("requests.some(r=>r.path.endsWith('/start')||r.path.endsWith('/chat_prompt'))")
+
+
 def choose(page, model):
     page.click('#chat-model-picker')
     page.locator(f'[data-model="{model}"]').click()
