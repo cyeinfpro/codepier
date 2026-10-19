@@ -873,7 +873,7 @@ window.CodePierCollaborationRelay = {
       form.elements.request.focus({ preventScroll: true });
       void drain(c);
     }
-    function adopt(entry, result) {
+    function adopt(entry, result, { reconcile = true } = {}) {
       if (!belongs(entry) || !result.message?.id) return;
       entry.phase = 'sent';
       try {
@@ -891,6 +891,13 @@ window.CodePierCollaborationRelay = {
         paintOutbox(c);
         patchDraftContext();
         onWorkspaceChange();
+        if (reconcile && result.message.task_continuation?.kind === 'owner_task_clarification') {
+          // A saved answer changes the original question without editing it.
+          // Reconcile after acknowledgement, even during polling backoff; an
+          // older in-flight read must finish before the trailing read begins.
+          c.relayRefreshPending = true;
+          if (!c.relaySync) void sync({ readOnly: true });
+        }
       }
     }
     async function inspectPending(e) {
@@ -1122,6 +1129,7 @@ window.CodePierCollaborationRelay = {
       if (c.relaySync) return;
       const sequence = ++state.refreshSequence;
       c.relaySync = true;
+      c.relayRefreshPending = false;
       const current = () =>
         sequence === state.refreshSequence &&
         gen === state.generation &&
@@ -1208,7 +1216,7 @@ window.CodePierCollaborationRelay = {
         network();
         for (const entry of [...pending(c)]) {
           const m = c.messages.find((m) => m.client_message_id === entry.id);
-          if (m) adopt(entry, { message: m });
+          if (m) adopt(entry, { message: m }, { reconcile: false });
         }
         const dirtyIds = new Set(
           c.messages.filter((m) => before.get(m.id) !== renderRevision(m, c)).map((m) => m.id),
@@ -1248,6 +1256,15 @@ window.CodePierCollaborationRelay = {
         patchTimeline();
       } finally {
         c.relaySync = false;
+        if (
+          c.relayRefreshPending &&
+          gen === state.generation &&
+          c === chat() &&
+          S.session === state.session &&
+          S.space_id === state.space &&
+          S.page === 'collaboration'
+        )
+          void sync({ readOnly: true });
         if (!readOnly && c === chat() && S.page === 'collaboration') void drain(c);
       }
     }
@@ -1318,6 +1335,7 @@ window.CodePierCollaborationRelay = {
       c.relayAnchor = null;
       c.relayRecent = 0;
       c.relayTaskStates = {};
+      c.relayRefreshPending = false;
       c.relayServerNow = null;
       c.relayReceivedAt = 0;
       c.relayRenderStats = null;

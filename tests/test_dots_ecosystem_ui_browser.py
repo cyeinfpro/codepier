@@ -633,3 +633,55 @@ def test_continuation_only_update_repaints_one_card_without_changing_message(
     assert page.evaluate('patches') == [['original-message']]
     assert page.evaluate('calls.every(call => call.method === "GET")')
     assert page.evaluate('c.relayOutbox[0].attempts') == 0
+
+
+@pytest.mark.parametrize('phase', ['backoff', 'stale_read', 'failed_read', 'navigation'])
+def test_confirmed_reply_reconciles_question_after_connection_recovery(ecosystem_page, phase):
+    page = ecosystem_page
+    page.evaluate("""(phase) => {
+      const inFlight=phase!=='backoff';
+      c.relayOutbox=[];c.mentions=['fixture-dot'];c.reply=c.messages[0].id;
+      // A failed connection left polling in backoff. The successful send must
+      // reconcile the original question without waiting for that old timer.
+      c.relayFailures=4;
+      const m=c.messages[0];m.server_sequence=1;m.relay_receipts=[];m.body={dot_reply_complete:false};
+      m.task_continuation={schema_version:1,kind:'owner_task_clarification',
+        question_message_id:m.id,state:'pending',reason:'plan_confirmation'};
+      window.serverMessage=structuredClone(m);window.requestLog=[];window.syncCount=0;
+      document.querySelector('#timeline').innerHTML=relay.renderMessage(m);
+      window.api=async(url,options={})=>{
+        requestLog.push({url,method:options.method||'GET'});
+        if(options.method==='POST') {
+          serverMessage.task_continuation={...serverMessage.task_continuation,
+            state:'responded',resolution:'confirmed'};
+          return {message:{id:'saved-answer',body_text:'可以',version:1,server_sequence:2,created:901,
+            task_continuation:structuredClone(serverMessage.task_continuation)}};
+        }
+        if(!url.startsWith('/api/collaboration/relay-sync?'))throw Error('Unexpected route '+url);
+        syncCount++;
+        const response={server_now:1000,visibility_token:'visibility',
+          updates:[structuredClone(serverMessage)],items:[],task_states:[],
+          room_state:'active',can_manage:true,has_more:false};
+        if(inFlight && syncCount===1)await new Promise((resolve,reject)=>{
+          window.releaseOldSync=()=>phase==='failed_read'
+            ? reject(Object.assign(Error('old connection lost'),{status:503})) : resolve();
+        });
+        return response;
+      };
+      if(inFlight)void relay.sync({readOnly:true});
+      document.querySelector('#cc-message-input').value='可以';
+      relay.send(document.querySelector('#cc-command'));
+    }""", phase)
+    page.wait_for_function('!c.relayFlight && c.relayOutbox.length===0')
+    if phase == 'navigation':
+        page.evaluate('state.generation++')
+    if phase != 'backoff':
+        page.evaluate('releaseOldSync()')
+    if phase != 'navigation':
+        expect(page.locator('.cc-task-context-card')).to_contain_text('已确认这份方案', timeout=3000)
+    page.wait_for_function('!c.relaySync')
+    if phase == 'navigation':
+        expect(page.locator('.cc-task-context-card')).to_contain_text('等待你确认这份方案')
+    assert page.evaluate('syncCount') == (2 if phase in {'stale_read', 'failed_read'} else 1)
+    assert page.evaluate('requestLog.filter(r=>r.method==="POST").length') == 1
+    assert page.evaluate('c.messages.filter(m=>m.id==="saved-answer").length') == 1
