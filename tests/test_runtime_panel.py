@@ -9,6 +9,7 @@ from agent.config import validate_config
 from agent.project_runtime import default_profile, selected
 from agent.runtime_panel import call
 from shared.runtime_panel_contracts import RuntimeSave
+from shared.tool_protocol import PeerContract, require_compatible, validate_call_epoch, wire_version
 from shared.util import DevError, atomic_json
 from tests.test_shell import shell_agent  # noqa: F401
 
@@ -37,6 +38,7 @@ def test_unspecified_projects_default_to_real_clean_runtime_not_just_ui():
     default = selected({}, {'id': 'p', 'alias': 'P'})
     assert default == default_profile() and default['mode'] == 'project_clean_v1'
     assert default['pass_env'] == [] and default['env'] == {}
+    assert 'credentials' not in default
     assert 'node_modules/.bin' in default['path']
     explicit = {'project_runtimes': {'p': {'schema_version': 1, 'mode': 'native_compat'}}}
     assert selected(explicit, {'id': 'p', 'alias': 'P'})['mode'] == 'native_compat'
@@ -161,3 +163,116 @@ async def test_default_clean_refuses_native_ssh_before_transport_without_fallbac
         await agent.execute(uuid.uuid4().hex, 'ssh_exec', value, {})
     assert error.value.code == 'RUNTIME_REMOTE_TARGET_UNSUPPORTED'
     assert not agent.processes
+
+
+@pytest.mark.parametrize('credentials', [
+    {'github_cli': 1}, {'git_config': 'true'}, {'ssh_agent': None},
+    {'github_cli': True, 'token': 'synthetic-secret'}, None,
+])
+def test_credentials_contract_rejects_secrets_coercion_and_null(credentials):
+    with pytest.raises(ValidationError):
+        RuntimeSave(expected_revision='a'*64, idempotency_key='fixture-key',
+            profile={'mode': 'project_clean_v1', 'credentials': credentials})
+
+
+@pytest.mark.parametrize('mode', ['native_compat', 'container_v1'])
+@pytest.mark.parametrize('credentials', [{}, {'github_cli': False}, None])
+def test_credentials_contract_only_accepts_clean_mode(mode, credentials):
+    profile = {'mode': mode, 'credentials': credentials}
+    if mode == 'container_v1':
+        profile['container'] = {'engine': '/not-installed/docker',
+            'endpoint': 'unix:///not-installed/docker.sock', 'image': 'sha256:' + 'a'*64}
+    with pytest.raises(ValidationError):
+        RuntimeSave(expected_revision='a'*64, idempotency_key='fixture-key', profile=profile)
+
+
+def test_credentials_contract_preserves_omission_through_hub_agent_roundtrip():
+    omitted = RuntimeSave(expected_revision='a'*64, idempotency_key='fixture-key',
+        profile={'mode': 'project_clean_v1'})
+    assert 'credentials' not in omitted.profile.model_dump(exclude_none=True)
+    assert 'credentials' not in omitted.model_dump()['profile']
+    assert RuntimeSave.model_validate(omitted.model_dump()) == omitted
+
+
+@pytest.mark.parametrize('credentials,expected', [
+    ({}, {'github_cli': True, 'git_config': True, 'ssh_agent': True}),
+    ({'github_cli': False}, {'github_cli': False, 'git_config': True, 'ssh_agent': True}),
+    ({'git_config': False, 'ssh_agent': False}, {'github_cli': True, 'git_config': False, 'ssh_agent': False}),
+    ({'github_cli': False, 'git_config': False, 'ssh_agent': False},
+     {'github_cli': False, 'git_config': False, 'ssh_agent': False}),
+])
+def test_credentials_contract_defaults_only_missing_choices(credentials, expected):
+    explicit = RuntimeSave(expected_revision='a'*64, idempotency_key='fixture-key',
+        profile={'mode': 'project_clean_v1', 'credentials': credentials})
+    assert explicit.profile.credentials.model_dump() == expected
+    assert RuntimeSave.model_validate(explicit.model_dump()).profile.credentials.model_dump() == expected
+
+
+@pytest.mark.parametrize('profile,expected', [
+    (None, {'github_cli': True, 'git_config': True, 'ssh_agent': True}),
+    ({'mode': 'project_clean_v1'}, {'github_cli': True, 'git_config': True, 'ssh_agent': True}),
+    ({'mode': 'project_clean_v1', 'credentials': {}},
+     {'github_cli': True, 'git_config': True, 'ssh_agent': True}),
+    ({'mode': 'project_clean_v1', 'credentials': {'github_cli': False}},
+     {'github_cli': False, 'git_config': True, 'ssh_agent': True}),
+])
+def test_credentials_snapshot_reports_effective_defaults_without_rewriting_config(shell_agent, monkeypatch, profile, expected):
+    agent, root = shell_agent
+    value = project(agent, root)
+    monkeypatch.setattr('agent.runtime_panel.runtime_readiness', lambda *args: {'state': 'ready'})
+    raw = json.loads(agent.config_path.read_text())
+    raw.pop('project_runtimes', None)
+    if profile is not None:
+        raw['project_runtimes'] = {value['id']: profile}
+    atomic_json(agent.config_path, raw); reload(agent)
+    before = agent.config_path.read_bytes()
+    result = get(agent, value)
+    assert result['profile']['credentials'] == expected
+    assert result['clean_default_profile']['credentials'] == {
+        'github_cli': True, 'git_config': True, 'ssh_agent': True}
+    assert agent.config_path.read_bytes() == before
+    assert not (agent.state_dir / 'project-runtimes').exists()
+
+
+def test_credentials_preserve_omitted_same_mode_revoke_explicitly_and_reset_on_switch(shell_agent, monkeypatch):
+    agent, root = shell_agent
+    value = project(agent, root)
+    # This test covers panel persistence only. Never inspect a real login source.
+    monkeypatch.setattr('agent.runtime_panel.runtime_readiness', lambda *args: {'state': 'ready'})
+    choices = {'github_cli': True, 'git_config': False, 'ssh_agent': False}
+    first = save(agent, value, get(agent, value), {'mode': 'project_clean_v1', 'credentials': choices})
+    assert first['profile']['credentials'] == choices
+    reload(agent)
+    # Older callers know only the existing toolchain fields.
+    same = save(agent, value, get(agent, value), {'mode': 'project_clean_v1', 'path': ['tools']})
+    assert same['profile']['credentials'] == choices
+    raw = json.loads(agent.config_path.read_text())
+    assert raw['project_runtimes'][value['id']]['credentials'] == choices
+    assert 'credentials' not in selected(agent.config, {'id': 'other-project', 'alias': 'other'})
+    reload(agent)
+    off = dict.fromkeys(choices, False)
+    revoked = save(agent, value, get(agent, value), {'mode': 'project_clean_v1', 'credentials': off})
+    assert revoked['profile']['credentials'] == off
+    reload(agent)
+    still_off = save(agent, value, get(agent, value), {'mode': 'project_clean_v1', 'path': ['other-tools']})
+    assert still_off['profile']['credentials'] == off
+    reload(agent)
+    switched = save(agent, value, get(agent, value), {'mode': 'native_compat'})
+    assert 'credentials' not in switched['profile']
+    reload(agent)
+    returned = save(agent, value, get(agent, value), {'mode': 'project_clean_v1'})
+    assert returned['profile']['credentials'] == dict.fromkeys(choices, True)
+
+
+@pytest.mark.parametrize('tool', ['project_runtime_get', 'project_runtime_set'])
+def test_credential_runtime_contract_refuses_old_agent(tool):
+    assert wire_version(tool) == 3
+    old = PeerContract((1, 30, 1), False, 'a'*64, {tool: 2})
+    with pytest.raises(DevError) as error:
+        require_compatible(old, tool)
+    assert error.value.code == 'AGENT_UPGRADE_REQUIRED'
+    with pytest.raises(DevError) as error:
+        validate_call_epoch(tool, 2)
+    assert error.value.code == 'TOOL_PROTOCOL_MISMATCH'
+    require_compatible(PeerContract((1, 30, 1), False, 'b'*64, {tool: 3}), tool)
+    validate_call_epoch(tool, 3)

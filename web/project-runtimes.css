@@ -125,7 +125,7 @@
 #project-runtime-form .field {
   min-width: 0;
 }
-#project-runtime-form input:not([type='radio']),
+#project-runtime-form input:not([type='radio']):not([type='checkbox']),
 #project-runtime-form textarea,
 #project-runtime-form select {
   max-width: 100%;
@@ -148,7 +148,65 @@
   margin: 0;
   font-size: 16px;
 }
+.runtime-credentials {
+  margin: 18px 0;
+}
+.runtime-credentials h3 {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+.runtime-credential-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 12px 0;
+}
+.runtime-credential-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-control-radius);
+  background: var(--ui-panel);
+  cursor: pointer;
+}
+.runtime-credential-option:has(:checked) {
+  border-color: var(--ui-accent);
+  background: var(--ui-accent-soft);
+}
+.runtime-credential-option:focus-within {
+  outline: var(--ui-focus-width) solid var(--ui-focus);
+  outline-offset: 2px;
+}
+.runtime-credential-option input {
+  flex: 0 0 auto;
+  width: 18px;
+  min-height: 18px;
+  margin: 3px 0 0;
+  accent-color: var(--ui-accent);
+}
+.runtime-credential-option span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.runtime-credential-option strong {
+  font-size: 14px;
+}
+.runtime-credential-option small {
+  display: block;
+  margin-top: 6px;
+  color: var(--ui-muted);
+  line-height: 1.6;
+}
+.runtime-credential-status {
+  font-size: 12px;
+}
 @media (max-width: 640px) {
+  .runtime-credential-options {
+    grid-template-columns: 1fr;
+  }
   .runtime-options {
     grid-template-columns: 1fr;
     gap: 8px;

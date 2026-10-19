@@ -31,3 +31,29 @@ class SecretOutput:
 
     def redact(self, text: str) -> str:
         return text.replace(self.secret, '<redacted>') if self.secret else text
+
+
+class SecretOutputs:
+    """Compose exact-value streaming filters without persisting their values."""
+
+    def __init__(self, secrets):
+        values = sorted({value for value in secrets if isinstance(value, str) and value},
+                        key=lambda value: (-len(value), value))
+        self.filters = [SecretOutput(value) for value in values]
+
+    def feed(self, text: str, *, final: bool = False) -> str:
+        for output_filter in self.filters:
+            text = output_filter.feed(text, final=final)
+        return text
+
+    def redact(self, text: str) -> str:
+        for output_filter in self.filters:
+            text = output_filter.redact(text)
+        return text
+
+
+def credential_output_values(environment):
+    """Known injected authentication values; never read credential stores."""
+    return [environment.get(name, '') for name in (
+        'SSHPASS', 'GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN',
+        'GITHUB_ENTERPRISE_TOKEN')]

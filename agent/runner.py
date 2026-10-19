@@ -973,6 +973,7 @@ class Agent:
         from copy import deepcopy
         from agent.project_runtime import selected, prepare, descriptor
         from shared.runtime_results import decorate_result
+        from shared.secret_output import credential_output_values
         if execution_project is None:
             return await self._run_process_account(id, command, cwd, timeout, stream, task_env,
                 full_access, inherit_env, execution_project)
@@ -1027,7 +1028,7 @@ class Agent:
             remaining = min(remaining, self.bounded_timeout(execution_project, timeout))
             result = await self._run_process_account(id, actual, plan.cwd, remaining, stream,
                 full_access=full_access, execution_project=None if driver else execution_project,
-                environment_override=environment, redaction_value=plan.environment.get('SSHPASS', ''))
+                environment_override=environment, redaction_values=credential_output_values(plan.environment))
             if driver:
                 outcome = await driver.outcome_async()
                 result['runtime_outcome'] = {**outcome, 'transport_exit_code': result['exit_code']}
@@ -1044,12 +1045,15 @@ class Agent:
 
     async def _run_process_account(self, id, command, cwd, timeout, stream=False, task_env=None,
                           full_access=False, inherit_env=False, execution_project=None,
-                          environment_override=None, redaction_value=None):
-        from shared.secret_output import SecretOutput
+                          environment_override=None, redaction_value=None, redaction_values=None):
+        from shared.secret_output import SecretOutputs, credential_output_values
         from agent.project_runtime import legacy_environment
         environment = (dict(environment_override) if environment_override is not None else
                        legacy_environment(inherit_env, task_env, full_access=full_access))
-        output_filter = SecretOutput(environment.get('SSHPASS', '') if redaction_value is None else redaction_value)
+        protected_values = credential_output_values(environment) + list(redaction_values or [])
+        if redaction_value is not None:
+            protected_values.append(redaction_value)
+        output_filter = SecretOutputs(protected_values)
         if execution_project is not None:
             # Inspect the exact argv, cwd and environment used below, including
             # local task definitions, PATH overrides and resolved symlink targets.

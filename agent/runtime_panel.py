@@ -14,10 +14,11 @@ from agent.config import validate_config
 from agent.project_runtime import (default_profile, descriptor, selected,
     runtime_readiness, validate_runtimes)
 from agent.runtime_config import read_json, _replace_config
+from agent.runtime_credentials import credential_settings
 from shared.runtime_panel_contracts import DEFAULT_MODE, RuntimeGet, RuntimeSet
 from shared.util import DevError
 
-EDITABLE = frozenset({'mode', 'shell', 'path', 'pass_env', 'container'})
+EDITABLE = frozenset({'mode', 'shell', 'path', 'pass_env', 'container', 'credentials'})
 
 
 def _authorized(agent, project):
@@ -46,7 +47,11 @@ def _load(agent, project):
 
 
 def _editable(profile):
-    return {key: deepcopy(value) for key, value in profile.items() if key in EDITABLE}
+    editable = {key: deepcopy(value) for key, value in profile.items() if key in EDITABLE}
+    if profile.get('mode') == DEFAULT_MODE:
+        # Report effective defaults without materializing them in stored config.
+        editable['credentials'] = credential_settings(profile)
+    return editable
 
 
 def _snapshot(agent, project, root, config, raw):
@@ -110,6 +115,12 @@ def call(agent, tool, project, arguments):
     # through the panel. Preserve them only for an edit of the same mode.
     if old.get('mode') == desired['mode'] and desired['mode'] != 'native_compat':
         desired['env'] = deepcopy(old.get('env', {}))
+        # Older clients omit this field. Same-mode toolchain edits preserve
+        # saved provider choices, including explicit opt-outs; otherwise the
+        # clean-mode defaults apply.
+        if (desired['mode'] == DEFAULT_MODE and 'credentials' not in editable
+                and 'credentials' in old):
+            desired['credentials'] = deepcopy(old['credentials'])
     try:
         desired = validate_runtimes({project['id']: desired})[project['id']]
     except (ValueError, TypeError) as exc:

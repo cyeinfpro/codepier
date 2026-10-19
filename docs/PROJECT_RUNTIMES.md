@@ -4,7 +4,7 @@
 
 ## 面板设置（2026-10-17）
 
-入口：**项目映射 → 对应项目卡片 → 执行环境**。页面提供清洁、兼容和容器三种方式，以及可选的 Shell、逐行 PATH、环境变量名称与容器资源参数，不再要求用户编辑 JSON 或复制命令。
+入口：**项目映射 → 对应项目卡片 → 执行环境**。页面提供清洁、兼容和容器三种方式，以及可选的 Shell、逐行 PATH、环境变量名称与容器资源参数。清洁模式默认复用已有 GitHub CLI、Git 配置和 SSH Agent，可按项目分别关闭，无需输入或复制令牌。
 
 当前源码的实际默认值已调整为 `project_clean_v1`：没有独立运行配置的新旧项目都使用清洁模式；明确配置的 `native_compat` 或 `container_v1` 保持不变。界面不是单独预选一个按钮；默认规则由 Agent 的 `default_profile()` 与执行选路共同决定。清洁模式默认查找项目 `.venv`、`node_modules/.bin` 和按平台确定的工具目录，不继承个人登录 PATH。
 
@@ -89,6 +89,53 @@ python -m agent.runtime_config configure \
 应用保留原始配置的其他字段，包括身份、密钥、roots、任务、Shell 开关。使用当前 SHA、文件身份复核、独占协作写锁、0600 备份和原子替换；冲突不会猜测覆盖。写锁是合作式并发约定，不能代替操作系统访问权限。不要同时从其他配置编辑器写同一文件。
 
 启用后沿用已有 Agent 配置重新加载机制；核对新的原生握手与 project_query(open/status) 中的 runtime 修订，不把配置写入成功当作 Agent 已加载。回退为 native_compat 需要再次明确修改配置，不能用失败后的自动回退绕开原隔离要求。进行中的原操作和历史回执保持不变。
+
+### 2.2 清洁模式复用已有开发授权
+
+清洁模式默认复用 Agent 执行账号已有的 GitHub CLI、Git 全局配置和 SSH Agent 来源，使新旧项目在独立 HOME 下仍能继续使用有效的原登录。无需逐项目开启；需要调整时，在 **执行环境 → 复用已有登录** 中更改选项，沿原“保存并应用”完成。项目已经显式关闭的选项会继续关闭。
+
+| 选项 | 接入方式 | 保留的行为 |
+| --- | --- | --- |
+| GitHub CLI | 原非空 GH_CONFIG_DIR 优先；否则按原 XDG_CONFIG_HOME、Windows AppData、用户目录定位 gh 配置；Windows 用户目录取 USERPROFILE，其他平台取 HOME；可继承已有 GitHub / Enterprise token 环境变量 | 由 gh 沿用已有配置和操作系统凭据存储；不读取并复制 hosts.yml 中的令牌 |
+| Git 配置 | 原 GIT_CONFIG_GLOBAL 优先；否则用私有引用文件按 XDG git/config → HOME/.gitconfig 顺序引入 | 保持 global 层次，仓库和工作区配置仍优先；不把用户配置内容复制进项目源码 |
+| SSH Agent | 传递原 SSH_AUTH_SOCK | 继续由原 SSH Agent 提供签名；不导出私钥、不执行 ssh-add、不创建新部署密钥 |
+
+三项默认开启。省略整个 credentials 字段、使用空对象 {}，或只设置其中一项时，所有缺省项均按 true 处理；显式 false 关闭对应的自动复用。默认规则在读取时生效，不要求重写已有项目配置。下列片段显式写出默认值，保留原配置中的 shell、path 等工具设置；项目选择通过受保护的面板配置保存：
+
+```json
+{
+  "mode": "project_clean_v1",
+  "credentials": {
+    "github_cli": true,
+    "git_config": true,
+    "ssh_agent": true
+  }
+}
+```
+
+例如，`"credentials": {"ssh_agent": false}` 仅关闭 SSH Agent 自动复用，GitHub CLI 与 Git 配置仍沿用默认值。null、字符串、数字及未知选项均被拒绝；native_compat 和 container_v1 的既有规则保持不变。
+
+这些开关不扩大 CodePier 的项目、工具、VPS 或桌面权限；启用后，项目内已获准的命令可使用所选账号原本具备的权限。项目隔离与第三方账号的仓库授权是不同边界，仍应使用适合该项目的账号或令牌。运行时继续如实返回 project_clean_v1 / isolation=none，不把环境整理描述成 OS 沙箱。
+
+项目原有 pass_env、profile.env 和单次允许的环境设置优先，显式空字符串保持不变。显式 GITHUB_TOKEN 不会被自动继承的高优先级 GH_TOKEN 遮盖；显式 GH_CONFIG_DIR 不会被自动附加的原账号 token 遮盖。已明确提供项目 token 时，也不自动补入原账号的 GH_HOST。原 GH_CONFIG_DIR 或 GIT_CONFIG_GLOBAL 明确指向缺失位置时保留该选择，不静默切到另一份账号配置；自动复用的这两个原生路径必须为绝对路径，避免更换工作目录后选中另一份配置。
+
+原进程 GH_CONFIG_DIR 为空时，按 gh 语义继续寻找原账号的默认目录；原进程 GIT_CONFIG_GLOBAL 为空则按 Git 语义保留空值、不回落到默认全局配置。复用来源属于 Agent 的执行账号；另一个系统账号的登录不会被扫描或自动接入。
+
+SSH 和 GitHub 凭据不写入源码、面板回执或状态报告。经环境变量注入的 GitHub / Enterprise token 与 SSHPASS 会在进程输出流和持久日志前按实际值脱敏；这不代替对任意文件内容、编码后的秘密或第三方工具输出的访问控制。配置摘要继续使用带密钥的修订值，所选 token 或 socket 变量改变后会产生不同修订，不公开其值。
+
+关闭复用后，新命令不再自动设置对应来源。Git 引用文件位于私有 HOME 中的独立文件，未启用时不会被 Git 的默认配置查找自动读取。已运行进程、已发送请求和已存在的手动 pass_env/env 配置保持各自原有语义；关闭自动复用不撤销第三方账号本身的登录。
+
+面板与 doctor 只返回每类来源的 enabled、state 和 source：disabled 表示未启用自动复用，missing 表示未发现该来源，configured 表示来源已配置。**configured 不表示已经通过 GitHub API、Git 远端或 SSH 服务器认证**。状态查询不创建私有目录、不发起登录或网络认证；凭据是否过期、账号是否有目标仓库权限，由实际工具调用确认。
+
+适用边界：
+
+- GitHub CLI 配置复用与 Git HTTPS 凭据配置分别生效；使用 gh 作为 Git helper 的项目通常需要同时启用前两项。
+- Git 的相对 include 仍由 Git 相对于原配置文件解析；配置内显式使用 ~/、依赖个人 HOME 的自定义 helper、credential-store 默认路径或发布脚本手写的 ~/.ssh/key，需要改为项目明确配置的路径或原有 SSH Agent。不会把整个用户 HOME、.ssh 目录或浏览器登录目录映射进清洁环境。
+- SSH Agent 状态仅说明 socket 来源已设置，不证明 Agent 已解锁或载入了需要的密钥；已有 VPS 目标仍沿原独立授权和传输链路执行。
+- container_v1 和 native_compat 拒绝 credentials 字段。容器仍不接入原账号凭据或管理 socket；兼容模式继续使用原环境继承规则。
+- 新设置需要匹配的 Hub 与 Agent 私有面板契约。旧节点通过契约协商禁用设置，不能显示“已生效”却忽略凭据选择。
+
+环境变量语义依据：[GitHub CLI 环境变量](https://cli.github.com/manual/gh_help_environment)、[Git 全局配置变量](https://git-scm.com/docs/git)、[Git 配置层次与 include](https://git-scm.com/docs/git-config)、[OpenSSH 环境变量](https://man.openbsd.org/ssh.1)。
 
 ## 3. 常规开发使用项目能力
 

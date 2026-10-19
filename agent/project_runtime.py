@@ -60,13 +60,15 @@ def validate_runtimes(value):
         if (not isinstance(selector, str) or not 1 <= len(selector) <= 100
                 or selector != selector.strip() or '*' in selector or '\x00' in selector):
             raise ValueError('Runtime bindings require an exact project ID or alias; no wildcard')
-        if not isinstance(raw, dict) or set(raw) - {'schema_version', 'mode', 'path', 'env', 'pass_env', 'shell', 'container'}:
+        if not isinstance(raw, dict) or set(raw) - {'schema_version', 'mode', 'path', 'env', 'pass_env', 'shell', 'container', 'credentials'}:
             raise ValueError('Unknown project runtime configuration field')
         if type(raw.get('schema_version', 1)) is not int or raw.get('schema_version', 1) != 1:
             raise ValueError('Unsupported project runtime schema_version')
         mode = raw.get('mode')
         if mode not in MODES:
             raise ValueError('Unknown project runtime mode')
+        if 'credentials' in raw and mode != 'project_clean_v1':
+            raise ValueError('Native credential reuse requires project_clean_v1')
         if mode == 'native_compat':
             if set(raw) - {'schema_version', 'mode'}:
                 raise ValueError('native_compat uses the existing shell configuration')
@@ -91,6 +93,9 @@ def validate_runtimes(value):
         profile = {'schema_version': 1, 'mode': mode, 'path': list(paths),
                    'env': _environment(raw.get('env', {}), 'runtime.env', windows=windows),
                    'pass_env': list(passed), 'shell': shell}
+        if 'credentials' in raw:
+            from agent.runtime_credentials import validate_credentials
+            profile['credentials'] = validate_credentials(raw['credentials'])
         if mode == 'container_v1':
             from agent.container_runtime import validate_container
             if passed:
@@ -129,7 +134,11 @@ def windows_system_tool_paths(parent):
 
 
 def default_profile():
-    """A deterministic project-first tool path, never the personal login PATH."""
+    """Project-first tool paths with the clean runtime's default credential reuse.
+
+    Omitted credentials retain the existing profile shape; the shared credential
+    resolver applies defaults and respects each explicit project opt-out.
+    """
     paths = ['.venv/Scripts' if os.name == 'nt' else '.venv/bin', 'node_modules/.bin']
     if os.name == 'nt':
         paths += windows_system_tool_paths(os.environ)
@@ -157,10 +166,15 @@ def _digest(config, value):
 
 
 def profile_revision(config, profile):
+    from agent.runtime_credentials import credential_revision_inputs
     windows = os.name == 'nt' and profile['mode'] == 'project_clean_v1'
     parent = _environment_keys(os.environ, windows)
-    return _digest(config, ['project-runtime-config-v1', profile,
-        {key: parent.get(key.upper() if windows else key) for key in profile.get('pass_env', [])}])
+    inputs = ['project-runtime-config-v1', profile,
+        {key: parent.get(key.upper() if windows else key) for key in profile.get('pass_env', [])}]
+    credentials = credential_revision_inputs(profile, parent, windows=windows)
+    if credentials:
+        inputs.append(['native-credentials-v1', credentials])
+    return _digest(config, inputs)
 
 
 def descriptor(config, project, root):
@@ -265,7 +279,8 @@ def build_environment(config, project, root, overrides=None, *, create=False):
         CODEPIER_RUNTIME_REF=meta['runtime_ref'], CODEPIER_RUNTIME_REVISION=meta['revision'])
     environment.update(_environment_keys(profile['env'], windows))
     environment.update(_environment_keys(extra, windows))
-    return environment
+    from agent.runtime_credentials import apply_credentials
+    return apply_credentials(profile, parent, environment, windows=windows, create=create)
 
 
 def resolve_executable(command, environment, cwd):
@@ -289,7 +304,13 @@ def runtime_readiness(config, project, root):
     """
     profile = selected(config, project)
     meta = descriptor(config, project, root)
-    environment = build_environment(config, project, root)
+    try:
+        environment = build_environment(config, project, root)
+    except DevError as exc:
+        # Keep the owner panel readable so an invalid inherited source can be
+        # disabled. Process preparation still rejects the same configuration.
+        return {**meta, 'state': 'unavailable', 'code': exc.code,
+                'tools': {}, 'toolchain_state': 'not_observed'}
     if profile['mode'] == 'container_v1':
         from agent.container_runtime import readiness
         return {**meta, **readiness(profile['container']), 'tools': {}, 'toolchain_state': 'not_observed'}
@@ -299,8 +320,12 @@ def runtime_readiness(config, project, root):
         state, code = 'ready', None
     except DevError as exc:
         state, code = 'unavailable', exc.code
+    from agent.runtime_credentials import credential_readiness
+    credentials = credential_readiness(profile, os.environ, environment,
+        windows=os.name == 'nt' and profile['mode'] == 'project_clean_v1')
     return {**meta, 'state': state, 'code': code, 'toolchain_state': 'configured_PATH',
-            'tools': {name: bool(shutil.which(name, path=environment.get('PATH'))) for name in TOOLS}}
+            'tools': {name: bool(shutil.which(name, path=environment.get('PATH'))) for name in TOOLS},
+            'credentials': credentials}
 
 
 @dataclass(frozen=True)

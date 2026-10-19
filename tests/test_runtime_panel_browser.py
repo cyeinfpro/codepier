@@ -226,3 +226,130 @@ def test_initial_offline_observation_recovers_without_any_write(runtime_page, st
     expect(page.locator('[data-runtime-state]')).to_have_text('已生效', timeout=20000)
     expect(page.locator('[data-runtime-current]')).to_contain_text('清洁模式')
     assert len(reads) >= 2 and not writes
+
+
+def test_credential_draft_survives_mode_switch_and_submits_one_scoped_save(runtime_page, stack):
+    page, engine, width = runtime_page
+    form = page.locator('#project-runtime-form')
+    keys = ('github_cli', 'git_config', 'ssh_agent')
+    for key in keys:
+        expect(form.locator('[name="runtime_credential_' + key + '"]')).to_be_checked()
+    expect(form.locator('[data-runtime-credentials]')).to_contain_text('默认复用')
+    expect(form.locator('[data-runtime-credentials]')).to_contain_text('逐项关闭')
+    form.locator('[name="runtime_credential_git_config"]').uncheck()
+    expect(form.locator('[data-runtime-credential-state="git_config"]')).to_have_text('待保存 · 将停用此来源')
+    form.locator('[value="native_compat"]').check()
+    expect(form.locator('[data-runtime-credentials]')).to_be_hidden()
+    form.locator('[value="container_v1"]').check()
+    expect(form.locator('[data-runtime-credentials]')).to_be_hidden()
+    form.locator('[value="project_clean_v1"]').check()
+    expect(form.locator('[name="runtime_credential_github_cli"]')).to_be_checked()
+    expect(form.locator('[name="runtime_credential_ssh_agent"]')).to_be_checked()
+    expect(form.locator('[name="runtime_credential_git_config"]')).not_to_be_checked()
+    writes, dialogs = [], []
+    # The real form submits to a deterministic endpoint response; no fixture
+    # needs a personal GitHub account, native credential helper or SSH socket.
+    observation = snapshot(stack)
+    def endpoint_response(route):
+        if route.request.method == 'PUT':
+            payload = route.request.post_data_json
+            writes.append(payload)
+            observation['profile'] = payload['profile']
+            observation['readiness'] = {'state': 'ready', 'credentials': {
+                key: {'enabled': enabled, 'state': 'missing' if enabled else 'disabled', 'source': 'none'}
+                for key, enabled in payload['profile']['credentials'].items()}}
+            route.fulfill(json={**observation, 'saved': True, 'unchanged': False})
+        else:
+            route.fulfill(json=observation)
+    page.route('**' + endpoint(stack), endpoint_response)
+    page.on('dialog', lambda dialog: (dialogs.append(dialog.message), dialog.dismiss()))
+    with page.expect_response(lambda response: response.request.method == 'PUT' and response.url.endswith(endpoint(stack))):
+        form.evaluate('(form) => {form.requestSubmit(); form.requestSubmit();}')
+    expect(page.locator('[data-runtime-state]')).to_have_text('已生效', timeout=20000)
+    assert len(writes) == 1 and not dialogs
+    assert writes[0]['profile']['mode'] == 'project_clean_v1'
+    assert writes[0]['profile']['credentials'] == {'github_cli': True, 'git_config': False, 'ssh_agent': True}
+    expect(form.locator('[data-runtime-credential-state="github_cli"]')).to_have_text('未找到可用来源')
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
+    evidence = ROOT / '.work/runtime-credentials-20261019/screenshots'
+    evidence.mkdir(parents=True, exist_ok=True)
+    page.locator('[data-runtime-credentials]').scroll_into_view_if_needed()
+    page.screenshot(path=str(evidence / f'credentials-{engine}-{width}.png'))
+
+
+def test_credential_defaults_apply_to_missing_options_and_first_clean_selection(runtime_page, stack):
+    page, _, _ = runtime_page
+    form = page.locator('#project-runtime-form')
+    keys = ('github_cli', 'git_config', 'ssh_agent')
+    observed = snapshot(stack)
+    clean = dict(observed['profile'])
+    writes = []
+    def observe(route):
+        if route.request.method != 'GET':
+            writes.append(route.request.method)
+        route.fulfill(json=observed)
+    page.route('**' + endpoint(stack), observe)
+    for credentials in (None, {}, {'github_cli': False}):
+        observed['profile'] = {key: value for key, value in clean.items() if key != 'credentials'}
+        if credentials is not None:
+            observed['profile']['credentials'] = credentials
+        choices = {key: (credentials or {}).get(key, True) for key in keys}
+        observed['readiness'] = {'state': 'ready', 'credentials': {
+            key: {'enabled': enabled, 'state': 'missing' if enabled else 'disabled', 'source': 'none'}
+            for key, enabled in choices.items()}}
+        with page.expect_response(lambda response: response.request.method == 'GET' and response.url.endswith(endpoint(stack))):
+            page.locator('[data-runtime-refresh]').click()
+        for key, enabled in choices.items():
+            checkbox = form.locator('[name="runtime_credential_' + key + '"]')
+            if enabled:
+                expect(checkbox).to_be_checked()
+            else:
+                expect(checkbox).not_to_be_checked()
+            expect(form.locator('[data-runtime-credential-state="' + key + '"]')).to_have_text(
+                '未找到可用来源' if enabled else '未启用')
+        expect(page.locator('[data-runtime-save]')).to_be_disabled()
+    observed['profile'] = {'mode': 'native_compat'}
+    observed['runtime'] = {**observed['runtime'], 'mode': 'native_compat'}
+    observed['readiness'] = {'state': 'ready'}
+    observed['clean_default_profile'] = {key: value for key, value in clean.items() if key != 'credentials'}
+    page.locator('[data-runtime-refresh]').click()
+    expect(form.locator('[value="native_compat"]')).to_be_checked()
+    expect(form.locator('[data-runtime-credentials]')).to_be_hidden()
+    form.locator('[value="project_clean_v1"]').check()
+    for key in keys:
+        expect(form.locator('[name="runtime_credential_' + key + '"]')).to_be_checked()
+        expect(form.locator('[data-runtime-credential-state="' + key + '"]')).to_have_text('待保存 · 将启用此来源')
+    assert not writes
+
+
+def test_credential_source_status_is_not_remote_login_proof_and_old_agent_disables_save(runtime_page, stack):
+    page, engine, width = runtime_page
+    observed = snapshot(stack)
+    observed['profile']['credentials'] = {'github_cli': True, 'git_config': True, 'ssh_agent': False}
+    observed['readiness'] = {'state': 'ready', 'credentials': {
+        'github_cli': {'enabled': True, 'state': 'configured', 'source': 'configuration'},
+        'git_config': {'enabled': True, 'state': 'missing', 'source': 'none'},
+        'ssh_agent': {'enabled': False, 'state': 'disabled', 'source': 'none'}}}
+    writes = []
+    def observe(route):
+        if route.request.method != 'GET':
+            writes.append(route.request.method)
+        route.fulfill(json=observed)
+    page.route('**' + endpoint(stack), observe)
+    page.locator('[data-runtime-refresh]').click()
+    expect(page.locator('[data-runtime-credential-state="github_cli"]')).to_have_text('来源已配置')
+    expect(page.locator('[data-runtime-credential-state="git_config"]')).to_have_text('未找到可用来源')
+    expect(page.locator('[data-runtime-credential-state="ssh_agent"]')).to_have_text('未启用')
+    expect(page.locator('[data-runtime-credentials]')).to_contain_text('由实际操作确认')
+    evidence = ROOT / '.work/runtime-credentials-20261019/screenshots'
+    evidence.mkdir(parents=True, exist_ok=True)
+    page.locator('[data-runtime-credentials]').scroll_into_view_if_needed()
+    page.screenshot(path=str(evidence / f'credential-sources-{engine}-{width}.png'))
+    observed = {'project_id': stack.project['id'], 'state': 'upgrade_required',
+        'can_save': False, 'default_mode': 'project_clean_v1', 'profile': None,
+        'runtime': None, 'revision': None}
+    page.locator('[data-runtime-refresh]').click()
+    expect(page.locator('[data-runtime-state]')).to_have_text('需要更新 Agent')
+    expect(page.locator('[name="runtime_credential_github_cli"]')).to_be_disabled()
+    expect(page.locator('[data-runtime-save]')).to_be_disabled()
+    assert not writes

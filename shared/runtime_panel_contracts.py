@@ -30,15 +30,26 @@ class ContainerSettings(Strict):
     tmp_mib: int = Field(default=256, ge=16, le=4096)
     home_mib: int = Field(default=256, ge=16, le=4096)
 
+class CredentialSettings(Strict):
+    github_cli: bool = True
+    git_config: bool = True
+    ssh_agent: bool = True
+
 class EditableRuntime(Strict):
     mode: Literal['native_compat', 'project_clean_v1', 'container_v1'] = DEFAULT_MODE
     shell: Literal['sh', 'bash', 'powershell'] | None = None
     path: list[PathText] | None = Field(default=None, max_length=32)
     pass_env: list[EnvName] | None = Field(default=None, max_length=64)
     container: ContainerSettings | None = None
+    # Keep omission intact through the normal Hub/Agent model_dump round-trip;
+    # an explicit incoming null remains invalid in mode_fields below.
+    credentials: CredentialSettings | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode='after')
     def mode_fields(self):
+        if 'credentials' in self.model_fields_set:
+            if self.mode != DEFAULT_MODE or self.credentials is None:
+                raise ValueError('Credential reuse requires an explicit clean-mode settings object')
         if self.mode == 'native_compat' and any(getattr(self, key) is not None for key in ('shell', 'path', 'pass_env', 'container')):
             raise ValueError('Compatibility mode uses existing shell settings')
         if self.mode == 'container_v1':

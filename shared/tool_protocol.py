@@ -20,8 +20,9 @@ CONTRACT_PROTOCOL = 1
 TOOL_WIRE_VERSIONS: dict[str, int] = {name: 2 for name in ("read", "write", "edit", "exec")}
 # A preview must never degrade to an import on a legacy peer.
 TOOL_WIRE_VERSIONS['inspect_file_source'] = 2
-# Private panel settings cannot be interpreted by an older Agent.
-TOOL_WIRE_VERSIONS.update(project_runtime_get=2, project_runtime_set=2)
+# Epoch 3 includes project-scoped credential reuse. Older Agents must not
+# accept a save while silently dropping these authorization choices.
+TOOL_WIRE_VERSIONS.update(project_runtime_get=3, project_runtime_set=3)
 # Byte ingress is never emulated through CLI, shell or legacy file operations.
 TOOL_WIRE_VERSIONS.update({name: 2 for name in (
     'incoming_upload_begin', 'incoming_upload_status',

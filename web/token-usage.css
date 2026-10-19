@@ -109,9 +109,10 @@
 .token-dashboard details {
   margin-top: 0.35rem;
 }
-/* Keep nested open panels hidden when an ancestor disclosure is closed, including WebKit. */
+/* Hide nested open panels with a closed ancestor without removing their render
+   trees: WebKit can misreport native selects after display:none is restored. */
 .token-dashboard details:not([open]) > :not(summary) {
-  display: none;
+  visibility: hidden;
 }
 .token-dashboard summary {
   cursor: pointer;

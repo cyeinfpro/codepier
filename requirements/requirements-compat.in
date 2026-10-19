@@ -2,3 +2,10 @@
 # Pin the bootstrap installer too, so fresh SDK environments pass the same audit.
 pip==26.2.1
 mcp==2.3.0
+
+# Retain reviewed transitive versions while integrating the 2026-10-19 updates.
+httpcore2==2.13.1 ; sys_platform != 'emscripten'
+httpx2==2.13.1
+pycparser==3.1 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'
+starlette==1.7.0
+truststore==0.10.4 ; sys_platform != 'emscripten'

@@ -37,6 +37,9 @@ def test_panel_reads_actual_default_and_switches_without_editing_other_settings(
     first = snapshot(stack)
     assert first['default_mode'] == first['profile']['mode'] == 'project_clean_v1'
     assert first['selection_source'] == 'default' and first['state'] == 'applied'
+    assert first['profile']['credentials'] == {
+        'github_cli': True, 'git_config': True, 'ssh_agent': True}
+    assert first['clean_default_profile']['credentials'] == first['profile']['credentials']
     response, body = set_mode(stack, 'native_compat', first)
     result = stack.must(response)
     original_id = result['operation_id']
@@ -145,3 +148,49 @@ def test_readonly_project_can_change_runtime_without_enabling_execution(stack):
         assert saved['mode'] == 'read' and saved['allow_tasks'] is False
     finally:
         stack.must(stack.client.put('/api/projects/' + stack.project['id'], json=original))
+
+
+def test_clean_credentials_http_roundtrip_uses_defaults_and_preserves_explicit_opt_outs(stack):
+    # Only the disposable Agent's settings are changed. No GitHub request,
+    # native credential helper or SSH operation is executed by this journey.
+    keys = ('github_cli', 'git_config', 'ssh_agent')
+    other = stack.projects[1]['id']
+    other_before = snapshot(stack, other)['profile']
+    on, off = dict.fromkeys(keys, True), dict.fromkeys(keys, False)
+    for fields, choices in [
+        ({'credentials': on}, on),
+        ({'credentials': off}, off),
+        ({'path': ['credential-tools']}, off),
+        ({'credentials': {'github_cli': False}}, {**on, 'github_cli': False}),
+        ({'credentials': {}}, on),
+    ]:
+        response, body = set_mode(stack, 'project_clean_v1', **fields)
+        submitted = stack.must(response)
+        completed = stack.poll(submitted['operation_id'], timeout=30)
+        assert completed['state'] == 'succeeded', completed
+        ready = applied(stack, 'project_clean_v1')
+        assert ready['profile']['credentials'] == choices
+        assert ready['runtime']['mode'] == 'project_clean_v1'
+        assert json.loads(stack.config_path.read_text())['project_runtimes'][stack.project['id']]['credentials'] == choices
+        for key in keys:
+            enabled = choices[key]
+            source = ready['readiness']['credentials'][key]
+            assert source['enabled'] is enabled
+            if enabled:
+                assert source['state'] in {'configured', 'missing'}
+            else:
+                assert source['state'] == 'disabled' and source['source'] == 'none'
+        receipt = stack.must(stack.client.get(endpoint(stack) + '/receipts/' + body['idempotency_key']))
+        assert receipt['operation_id'] == submitted['operation_id']
+        assert receipt['outcome_confirmed']
+    assert snapshot(stack, other)['profile'] == other_before
+
+
+def test_clean_credentials_http_rejects_explicit_null_without_writing(stack):
+    before = snapshot(stack)
+    raw = stack.config_path.read_bytes()
+    response, _ = set_mode(stack, 'project_clean_v1', before, credentials=None)
+    assert response.status_code in {400, 422}, response.text
+    assert response.json().get('error'), response.text
+    assert stack.config_path.read_bytes() == raw
+    assert snapshot(stack)['revision'] == before['revision']

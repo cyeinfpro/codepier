@@ -14,6 +14,7 @@ window.CodePierProjectRuntime = (() => {
     container_v1:
       '命令在固定镜像中运行，仅挂载此项目；默认不联网。需已安装的 Docker 服务和镜像，不满足条件时不会回退。',
   };
+  const credentialKeys = ['github_cli', 'git_config', 'ssh_agent'];
   let sessionOwner = null,
     spaceOwner = null,
     activeDispose = null;
@@ -100,6 +101,21 @@ window.CodePierProjectRuntime = (() => {
                 `<label class="field">${label}<input type="number" name="${key}" value="${value}" min="${min}" max="${max}" step="${step}"></label>`,
             )
             .join('')}</div></details>
+        </section>
+        <section class="runtime-credentials" data-runtime-credentials hidden aria-labelledby="runtime-credentials-title">
+          <h3 id="runtime-credentials-title">复用已有登录</h3>
+          <p class="form-note">默认复用节点执行账号的已有登录，可对此项目逐项关闭，同时保留清洁环境。令牌与密钥不会返回面板。</p>
+          <div class="runtime-credential-options">${[
+            ['github_cli', 'GitHub CLI', '复用 gh 已有登录与 GitHub 令牌'],
+            ['git_config', 'Git 全局配置', '沿用身份、凭据助手及其他全局设置'],
+            ['ssh_agent', 'SSH Agent', '使用已经加载到 SSH Agent 的密钥'],
+          ]
+            .map(
+              ([key, label, hint]) =>
+                `<label class="runtime-credential-option"><input type="checkbox" name="runtime_credential_${key}"><span><strong>${label}</strong><small>${hint}</small><small class="runtime-credential-status" data-runtime-credential-state="${key}"></small></span></label>`,
+            )
+            .join('')}</div>
+          <p class="form-note">来源已配置只表示可供命令使用；账号是否有效、远端权限是否足够，由实际操作确认。</p>
         </section>
         <details class="runtime-advanced" data-runtime-toolchain><summary>高级设置 · Shell 与工具路径</summary>
           <label class="field">Shell<select name="runtime_shell"><option value="sh">sh · 非登录</option><option value="bash">bash · 不加载 profile/rc</option><option value="powershell">PowerShell · NoProfile</option></select></label>
@@ -200,6 +216,28 @@ window.CodePierProjectRuntime = (() => {
       field('runtime_shell').disabled = compat;
       field('runtime_path').disabled = compat;
       field('runtime_pass_env').disabled = compat || container;
+      $('[data-runtime-credentials]', dialog).hidden = compat || container;
+      for (const key of credentialKeys) {
+        const input = field('runtime_credential_' + key);
+        input.disabled = compat || container;
+        const observed = loaded?.readiness?.credentials?.[key];
+        const saved =
+          loaded?.profile?.mode === 'project_clean_v1' &&
+          loaded.profile.credentials?.[key] !== false;
+        const label = $('[data-runtime-credential-state="' + key + '"]', dialog);
+        label.textContent =
+          input.checked !== saved
+            ? input.checked
+              ? '待保存 · 将启用此来源'
+              : '待保存 · 将停用此来源'
+            : !input.checked
+              ? '未启用'
+              : observed?.state === 'configured'
+                ? '来源已配置'
+                : observed?.state === 'missing'
+                  ? '未找到可用来源'
+                  : '来源待核对';
+      }
       const powershell = field('runtime_shell').querySelector('option[value="powershell"]');
       powershell.disabled = container;
       if (container && field('runtime_shell').value === 'powershell')
@@ -218,6 +256,9 @@ window.CodePierProjectRuntime = (() => {
         shell: field('runtime_shell').value,
         path: field('runtime_path').value,
         pass: field('runtime_pass_env').value,
+        credentials: Object.fromEntries(
+          credentialKeys.map((key) => [key, field('runtime_credential_' + key).checked]),
+        ),
       };
     }
     function show(value) {
@@ -228,6 +269,9 @@ window.CodePierProjectRuntime = (() => {
         field('runtime_shell').value = value.profile.shell || 'sh';
         field('runtime_path').value = (value.profile.path || []).join('\n');
         field('runtime_pass_env').value = (value.profile.pass_env || []).join('\n');
+        for (const key of credentialKeys)
+          field('runtime_credential_' + key).checked =
+            value.profile.mode === 'project_clean_v1' && value.profile.credentials?.[key] !== false;
         for (const [key, entry] of Object.entries(value.profile.container || {}))
           if (field(key)) field(key).value = entry;
         baseMode = value.profile.mode;
@@ -279,7 +323,12 @@ window.CodePierProjectRuntime = (() => {
           result.container[key] = field(key).value.trim();
         for (const key of ['uid', 'gid', 'memory_mib', 'cpus', 'pids_limit', 'tmp_mib', 'home_mib'])
           result.container[key] = Number(field(key).value);
-      } else result.pass_env = lineItems(field('runtime_pass_env').value);
+      } else {
+        result.pass_env = lineItems(field('runtime_pass_env').value);
+        result.credentials = Object.fromEntries(
+          credentialKeys.map((key) => [key, field('runtime_credential_' + key).checked]),
+        );
+      }
       return result;
     }
     function later(action) {
@@ -522,10 +571,14 @@ window.CodePierProjectRuntime = (() => {
                 shell: loaded.clean_default_profile?.shell || 'sh',
                 path: (loaded.clean_default_profile?.path || []).join('\n'),
                 pass: '',
+                credentials: loaded.clean_default_profile?.credentials,
               });
         field('runtime_shell').value = fields.shell;
         field('runtime_path').value = fields.path;
         field('runtime_pass_env').value = fields.pass;
+        for (const key of credentialKeys)
+          field('runtime_credential_' + key).checked =
+            value === 'project_clean_v1' && fields.credentials?.[key] !== false;
         baseMode = value;
       }
       clearTimeout(timer);
