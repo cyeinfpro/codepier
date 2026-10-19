@@ -219,3 +219,240 @@ def test_real_container_qualification_is_an_explicit_mandatory_release_gate():
     assert 'Mandatory real project-container acceptance from public archive' in workflow
     assert 'scripts/verify_project_runtime.py' in workflow
     assert 'dist/runtime-acceptance.json' in workflow
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancel_waits_for_late_creation_before_cleanup(container_plan, monkeypatch):
+    import asyncio
+    import threading
+
+    config, _, root, plan = container_plan
+    driver = ContainerRuntime(config, root, plan, 'cancel-during-create')
+    entered, release, cleanup_entered = threading.Event(), threading.Event(), threading.Event()
+    cleaned = []
+
+    def preparing():
+        driver.creation_attempted = True
+        entered.set()
+        assert release.wait(5), 'test did not release the bounded control call'
+        driver.identifier = CID
+        return ['synthetic-docker', 'start', '--attach', CID]
+
+    def cleanup():
+        cleaned.append(driver.identifier)
+        cleanup_entered.set()
+        return {'state': 'removed', 'pending': False}
+
+    monkeypatch.setattr(driver, 'prepare', preparing)
+    monkeypatch.setattr(driver, 'cleanup', cleanup)
+    operation = asyncio.create_task(driver.prepare_async())
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        operation.cancel()
+        await asyncio.sleep(0)
+        operation.cancel()
+        await asyncio.sleep(0)
+        # Give an erroneously abandoned create and its cleanup thread a real
+        # bounded opportunity to run. sleep(0) alone can mask this thread race.
+        assert not await asyncio.to_thread(cleanup_entered.wait, .5), 'cleanup began before create returned'
+        assert cleaned == [], 'cleanup must not race ahead of the original create result'
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await operation
+    assert cleaned == [CID]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('method', ['outcome', 'cleanup'])
+async def test_repeated_cancel_keeps_original_outcome_and_cleanup_job(container_plan, monkeypatch, method):
+    import asyncio
+    import threading
+
+    config, _, root, plan = container_plan
+    driver = ContainerRuntime(config, root, plan, 'cancel-' + method)
+    entered, release = threading.Event(), threading.Event()
+    observed = []
+
+    def control():
+        entered.set()
+        assert release.wait(5), 'test did not release the bounded control call'
+        observed.append(method)
+        return {'state': 'confirmed'}
+
+    monkeypatch.setattr(driver, method, control)
+    operation = asyncio.create_task(getattr(driver, method + '_async')())
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        operation.cancel()
+        await asyncio.sleep(0)
+        operation.cancel()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not operation.done(), 'cancellation cannot abandon an active control call'
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await operation
+    assert observed == [method]
+
+
+def test_unknown_create_preserves_original_receipt_and_rejects_replay(container_plan, monkeypatch):
+    config, _, root, plan = container_plan
+    driver = ContainerRuntime(config, root, plan, 'lost-create-response')
+    calls = []
+    monkeypatch.setattr('agent.container_runtime.readiness', lambda _: {'state': 'unknown'})
+
+    def control(args, **kwargs):
+        calls.append(args)
+        if args[0] == 'info':
+            return {'OSType': 'linux', 'SecurityOptions': ['name=seccomp,profile=builtin']}
+        if args[:2] == ['image', 'inspect']:
+            return [{'Id': IMAGE, 'Config': {}}]
+        if args[0] == 'create':
+            raise DevError('RUNTIME_CONTROL_UNCERTAIN', 'fixture lost create response', 409)
+        pytest.fail('No guessed inspection, deletion or native fallback after unknown create')
+
+    monkeypatch.setattr(driver, '_control', control)
+    with pytest.raises(DevError) as exc:
+        driver.prepare()
+    assert exc.value.code == 'RUNTIME_CREATION_UNCERTAIN'
+    receipt = driver.receipt.read_bytes()
+    saved = json.loads(receipt)
+    assert saved['state'] == 'needs_review' and saved['container_id'] is None
+    assert saved['cleanup']['pending'] is True
+    assert saved['runtime_ref'] == plan.runtime['runtime_ref']
+    assert saved['revision'] == plan.runtime['revision']
+    with pytest.raises(DevError) as repeated:
+        ContainerRuntime(config, root, plan, 'lost-create-response')
+    assert repeated.value.code == 'RUNTIME_OPERATION_REQUIRES_RECOVERY'
+    assert driver.receipt.read_bytes() == receipt
+    assert [row[0] for row in calls] == ['info', 'image', 'create']
+
+
+@pytest.mark.parametrize('section,key,value', [
+    ('State', 'Running', None), ('State', 'Running', 0), ('State', 'Running', ''),
+    ('HostConfig', 'Privileged', 0), ('HostConfig', 'ReadonlyRootfs', 1),
+    ('HostConfig', 'RestartPolicy', None), ('HostConfig', 'RestartPolicy', []),
+    ('HostConfig', 'CapDrop', [['ALL']]), ('HostConfig', 'SecurityOpt', [None]),
+    ('HostConfig', 'SecurityOpt', [{'no-new-privileges': True}]),
+])
+def test_inspection_rejects_malformed_state_and_security_fields(container_plan, section, key, value):
+    _, _, root, plan = container_plan
+    data = inspected(plan.profile['container'], root, plan, 'operation')
+    data[section][key] = value
+    with pytest.raises(DevError) as exc:
+        verify_inspection(data, plan.profile['container'], root, plan, 'operation', IMAGE)
+    assert exc.value.code == 'RUNTIME_ISOLATION_UNVERIFIED'
+
+
+@pytest.mark.parametrize('running', [None, 0, ''])
+def test_unknown_running_state_never_confirms_workload_success(container_plan, monkeypatch, running):
+    config, _, root, plan = container_plan
+    driver = ContainerRuntime(config, root, plan, 'missing-running-state')
+    driver.identifier = CID
+    state = {'Id': CID, 'State': {'Status': 'exited', 'Running': running,
+        'ExitCode': 0, 'StartedAt': '2026-10-19T00:00:00Z'}}
+    monkeypatch.setattr(driver, '_control', lambda *args, **kwargs: [state])
+    result = driver.outcome()
+    assert result['state'] == 'unconfirmed'
+    assert result['workload_exit_code'] is None
+
+
+@pytest.mark.parametrize('stage,payload,code', [
+    ('info', [], 'RUNTIME_ENGINE_UNSUPPORTED'),
+    ('info', {'OSType': 'linux', 'SecurityOptions': None}, 'RUNTIME_ENGINE_UNSUPPORTED'),
+    ('info', {'OSType': 'linux', 'SecurityOptions': [None]}, 'RUNTIME_ENGINE_UNSUPPORTED'),
+    ('info', {'OSType': 'linux', 'SecurityOptions': ['name=seccomp-unconfined']},
+        'RUNTIME_ENGINE_UNSUPPORTED'),
+    ('image', [None], 'RUNTIME_IMAGE_UNSUPPORTED'),
+    ('image', [{'Id': IMAGE, 'Config': None}], 'RUNTIME_IMAGE_UNSUPPORTED'),
+    ('image', [{'Id': None, 'Config': {}}], 'RUNTIME_IMAGE_UNSUPPORTED'),
+])
+def test_malformed_backend_discovery_never_starts_project_code(container_plan, monkeypatch, stage, payload, code):
+    config, _, root, plan = container_plan
+    driver = ContainerRuntime(config, root, plan, 'malformed-discovery')
+    calls = []
+    monkeypatch.setattr('agent.container_runtime.readiness', lambda _: {'state': 'unknown'})
+
+    def control(args, **kwargs):
+        calls.append(args)
+        if args[0] == 'info':
+            return payload if stage == 'info' else {'OSType': 'linux',
+                'SecurityOptions': ['name=seccomp,profile=builtin']}
+        if args[:2] == ['image', 'inspect']:
+            return payload
+        pytest.fail('Invalid backend discovery must fail before create or start')
+
+    monkeypatch.setattr(driver, '_control', control)
+    with pytest.raises(DevError) as exc:
+        driver.prepare()
+    assert exc.value.code == code
+    assert not driver.creation_attempted
+    assert not driver.receipt.exists()
+    assert [args[0] for args in calls] == (['info'] if stage == 'info' else ['info', 'image'])
+
+
+@pytest.mark.parametrize('change', ['restart-name', 'mount-type', 'mount-destination',
+    'env-item', 'env-no-separator', 'env-empty-name', 'env-duplicate'])
+def test_ambiguous_inspection_never_proves_isolation(container_plan, change):
+    _, _, root, plan = container_plan
+    data = inspected(plan.profile['container'], root, plan, 'operation')
+    if change == 'restart-name':
+        data['HostConfig']['RestartPolicy']['Name'] = []
+    elif change == 'mount-type':
+        data['Mounts'][0]['Type'] = []
+    elif change == 'mount-destination':
+        data['Mounts'].append({'Type': 'tmpfs', 'Destination': {}})
+    elif change == 'env-item':
+        data['Config']['Env'].append(None)
+    elif change == 'env-no-separator':
+        data['Config']['Env'].append('HOME')
+    elif change == 'env-empty-name':
+        data['Config']['Env'].append('=unexpected')
+    else:
+        # Last-value-wins parsing can hide the earlier value seen by a workload.
+        data['Config']['Env'].insert(0, 'HOME=/unexpected')
+    with pytest.raises(DevError) as exc:
+        verify_inspection(data, plan.profile['container'], root, plan, 'operation', IMAGE)
+    assert exc.value.code == 'RUNTIME_ISOLATION_UNVERIFIED'
+
+
+@pytest.mark.parametrize('payload', [[None], [[]], ['invalid']])
+@pytest.mark.parametrize('cleanup_fails', [False, True])
+def test_malformed_created_inspection_retains_exact_cleanup_identity(
+        container_plan, monkeypatch, payload, cleanup_fails):
+    config, _, root, plan = container_plan
+    driver = ContainerRuntime(config, root, plan, 'malformed-created-inspection')
+    calls = []
+    monkeypatch.setattr('agent.container_runtime.readiness', lambda _: {'state': 'unknown'})
+
+    def control(args, **kwargs):
+        calls.append(args)
+        if args[0] == 'info':
+            return {'OSType': 'linux', 'SecurityOptions': ['name=seccomp,profile=builtin']}
+        if args[:2] == ['image', 'inspect']:
+            return [{'Id': IMAGE, 'Config': {}}]
+        if args[0] == 'create':
+            return CID
+        if args[0] == 'inspect':
+            return payload
+        if args[0] == 'rm':
+            if cleanup_fails:
+                raise DevError('RUNTIME_ENGINE_FAILED', 'fixture cleanup failure', 409)
+            return CID
+        pytest.fail('Unverified container must never start')
+
+    monkeypatch.setattr(driver, '_control', control)
+    with pytest.raises(DevError) as exc:
+        driver.prepare()
+    assert exc.value.code == ('RUNTIME_CREATION_UNCERTAIN' if cleanup_fails
+                              else 'RUNTIME_ISOLATION_UNVERIFIED')
+    assert driver.evidence is None
+    assert [args for args in calls if args[0] == 'rm'] == [['rm', '--force', CID]]
+    receipt = json.loads(driver.receipt.read_text())
+    assert receipt['container_id'] == CID
+    assert receipt['cleanup']['pending'] is cleanup_fails
+    with pytest.raises(DevError) as repeated:
+        ContainerRuntime(config, root, plan, 'malformed-created-inspection')
+    assert repeated.value.code == 'RUNTIME_OPERATION_REQUIRES_RECOVERY'

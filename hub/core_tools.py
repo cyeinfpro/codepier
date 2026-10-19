@@ -11,10 +11,8 @@ from shared.computer_media import mcp_result
 from shared.mcp_presentation import present
 from shared.util import DevError
 
-WORKSPACE = {'list': 'projects_list', 'open': 'open_workspace', 'skills': 'skills_list',
-             'skill': 'skills_read', 'tasks': 'tasks_list', 'status': 'execution_info', 'readiness': 'readiness_get', 'tree': 'fs_tree'}
-COMPUTER = {'status': 'computer_status', 'apps': 'computer_apps', 'open': 'computer_session_open',
-            'observe': 'computer_observe', 'action': 'computer_action', 'close': 'computer_session_close'}
+from hub.tool_discovery import (WORKSPACE, COMPUTER, catalogs, scope_allows,
+                                guarded_schema, project_hints)
 
 
 def validate(name, raw):
@@ -25,25 +23,19 @@ def validate(name, raw):
         raise DevError('INVALID_ARGUMENTS', json.dumps(issues, ensure_ascii=False)[:1500]) from exc
 
 
-def help_result(tool='', action=''):
-    catalogs = {**CORE_ACTIONS,
-        **{name: {'file': name, **CORE_ACTIONS[name]} for name in ('read', 'write', 'edit')},
-        'exec': {'run': 'exec'}, 'vps': {'list': 'vps'},
-        'workspace': {**CORE_ACTIONS['workspace'], **WORKSPACE},
-        'process': {**CORE_ACTIONS['process'], **{operation: 'operations_' + operation
-            for operation in ('list', 'get', 'wait', 'cancel', 'trace')},
-            'diagnostics': 'diagnostics_get', 'activity': 'activity_list'},
-        'browser': {op: 'browser_' + op for op in ('status', 'open', 'snapshot', 'action', 'close')},
-        'computer': COMPUTER}
-    catalogs['read']['batch'] = 'read'
+def help_result(tool='', action='', *, scopes=None):
+    visible = catalogs(scopes)
     if not tool or not action:
         return {'tools': {name: {'operations': sorted(actions),
             'help': {'tool': 'project_query', 'arguments': {'operation': 'help', 'tool': name, 'action': '<operation>'}}}
-            for name, actions in catalogs.items() if not tool or name == tool},
+            for name, actions in visible.items() if not tool or name == tool},
             'note': 'Specialized operations use options. Common operations use top-level arguments, with additional filters in options as shown by each help schema. All scopes and node opt-ins are checked on every call.'}
-    target = catalogs.get(tool, {}).get(action)
+    target = catalogs().get(tool, {}).get(action)
     if not target:
         raise DevError('UNKNOWN_OPERATION', '未找到工具操作，请先读取 workspace.help 目录')
+    if not scope_allows(target, {}, scopes):
+        raise DevError('INSUFFICIENT_SCOPE', '当前凭据不提供此操作的发现入口', 403,
+                       required_scope=TOOLS[target].scope)
     from shared.contracts import _compact_input_schema
     schema = _compact_input_schema(TOOLS[target].model.model_json_schema())
     advanced = action in CORE_ACTIONS.get(tool, {})
@@ -96,11 +88,14 @@ def help_result(tool='', action=''):
                 'file': native, 'options': options_schema},
             'required': ['operation', 'project', 'idempotency_key', 'file'] + (['options'] if options_schema.get('required') else [])}
         advanced = False
+    if not advanced and 'operation' in schema.get('properties', {}):
+        # A single-operation help schema must not re-advertise facade siblings.
+        schema['properties']['operation'] = {'type': 'string', 'const': action}
     return {'tool': tool, 'operation': action, 'scope': TOOLS[target].scope,
             'arguments_location': 'options' if advanced else 'top-level',
             'requires_project': any('project' in TOOLS[n].model.model_fields and TOOLS[n].model.model_fields['project'].is_required() for n in (target, tool)),
             'requires_idempotency_key': 'idempotency_key' in TOOLS[target].model.model_fields and TOOLS[target].model.model_fields['idempotency_key'].is_required(),
-            'inputSchema': schema, 'description': public_description(TOOLS[target].description)}
+            'inputSchema': guarded_schema(tool, schema, scopes), 'description': public_description(TOOLS[target].description)}
 
 
 def public_call(target, arguments):
@@ -175,7 +170,7 @@ async def invoke(runtime, name, raw, principal):
         user = await runtime.store.run(refresh_principal, runtime.store, principal)
         if 'read' not in user.scopes:
             raise DevError('INSUFFICIENT_SCOPE', '缺少 read 权限', 403, required_scope='read')
-        return help_result(args['tool'], args['action'])
+        return help_result(args['tool'], args['action'], scopes=user.scopes)
     target = CORE_ACTIONS.get(name, {}).get(action)
     if target:
         fields = TOOLS[target].model.model_fields
@@ -324,8 +319,9 @@ def bound_batch_response(payload):
     return payload
 
 
-def result(name, arguments, value):
+def result(name, arguments, value, *, scopes=None):
     value = present(name, arguments, value)
+    value = project_hints(copy.deepcopy(value), scopes)
     name = {'project_query': 'workspace', 'task_query': 'process'}.get(name, name)
     if name in CORE_TOOLS:
         value = compact_receipt(copy.deepcopy(value))

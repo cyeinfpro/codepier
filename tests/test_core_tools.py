@@ -275,9 +275,12 @@ async def test_complete_capability_discovery_and_no_unmapped_public_tool(runtime
         'integration_control', 'validations_accept', 'get_profile', 'get_access_context', *PANEL_RUNTIME_TOOLS}
     for profile in ('core', 'coding', 'full'):
         assert {t['name'] for t in tool_definitions(profile)} == CORE_TOOLS | QUERY_TOOLS | {'get_profile', 'get_access_context'}
+    from hub.core_tools import help_result
     for name, operations in CORE_ACTIONS.items():
         for operation, backend in operations.items():
-            help = await instance.invoke('workspace', {'operation': 'help', 'tool': name, 'action': operation}, principal)
+            # Complete registry/schema coverage is separate from caller-visible help.
+            # Live scope filtering is covered by test_dot_tool_discovery.
+            help = help_result(name, operation)
             assert help['scope'] == TOOLS[backend].scope
             native_import = name == 'write' and operation in {'import', 'source_check'}
             assert help['arguments_location'] == ('top-level' if native_import else 'options')

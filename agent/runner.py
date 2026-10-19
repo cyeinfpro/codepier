@@ -985,7 +985,8 @@ class Agent:
                 raise DevError('RUNTIME_ISOLATION_REQUIRED', 'This operation requires its approved isolated runtime', 403)
             result = await self._run_process_account(id, command, cwd, timeout, stream, task_env,
                 full_access, inherit_env, execution_project)
-            return decorate_result(result, execution_project, id, runtime, root)
+            return decorate_result(result, execution_project, id, runtime, root,
+                                   cwd=cwd, command=command)
         plan = prepare(config, execution_project, root, command, cwd, task_env)
         # Check the exact workload before adding a trusted container transport.
         enforce_argv(config, execution_project, plan.command, plan.cwd, plan.environment)
@@ -1037,7 +1038,9 @@ class Agent:
                 await driver.cleanup_async()
         if driver:
             result.update(execution_isolation=driver.evidence, runtime_cleanup=driver.cleanup_state)
-        return decorate_result(result, execution_project, id, runtime, root)
+        return decorate_result(result, execution_project, id, runtime, root,
+                               cwd=plan.cwd, command=plan.command,
+                               workspace_root='/workspace' if driver else None)
 
     async def _run_process_account(self, id, command, cwd, timeout, stream=False, task_env=None,
                           full_access=False, inherit_env=False, execution_project=None,
@@ -1067,7 +1070,7 @@ class Agent:
         except FileNotFoundError as exc:
             raise DevError("COMMAND_MISSING", f"找不到本机命令 {command[0]}，请安装或使用绝对路径") from exc
         self.processes[id] = process
-        total = 0
+        output_truncated = False
         start = time.monotonic()
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         decoded_output = ""
@@ -1084,17 +1087,20 @@ class Agent:
                                        "seq": seq, "text": decoded_output}
             self.output_wake.set()
 
+        def append_output(text):
+            nonlocal decoded_output, output_truncated
+            output_truncated = output_truncated or len(decoded_output) + len(text) > 131072
+            decoded_output = (decoded_output + text)[-131072:]
+
         async def drain():
-            nonlocal total, decoded_output
             while True:
                 # Read available bytes in larger batches; StreamReader.read does not wait to fill n.
                 chunk = await process.stdout.read(65536)
                 if not chunk:
-                    decoded_output = (decoded_output + output_filter.feed(decoder.decode(b"", final=True), final=True))[-131072:]
+                    append_output(output_filter.feed(decoder.decode(b"", final=True), final=True))
                     snapshot(True)
                     return
-                total += len(chunk)
-                decoded_output = (decoded_output + output_filter.feed(decoder.decode(chunk)))[-131072:]
+                append_output(output_filter.feed(decoder.decode(chunk)))
                 snapshot()
                 # stdout may remain immediately readable; let heartbeat/cancel run.
                 await asyncio.sleep(0)
@@ -1141,7 +1147,7 @@ class Agent:
                 await asyncio.gather(*(t for t in (reader, waiter) if t is not None), return_exceptions=True)
                 self.processes.pop(id, None)
         return {"exit_code": process.returncode, "output": decoded_output,
-                "output_truncated": total > 128 * 1024, "timed_out": timed_out, "cancelled": id in self.cancelled or self.journal.is_cancelled(id),
+                "output_truncated": output_truncated, "timed_out": timed_out, "cancelled": id in self.cancelled or self.journal.is_cancelled(id),
                 "duration_ms": round((time.monotonic() - start) * 1000), "command": [output_filter.redact(value) for value in command]}
 
     @staticmethod

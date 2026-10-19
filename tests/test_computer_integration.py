@@ -81,7 +81,9 @@ def test_scope_catalog_and_status_never_expand_existing_grants(desktop):
     assert not {'integration_control','validations_accept'} & {t['name'] for t in out}
     definition=next(t for t in out if t['name']=='computer')
     assert set(definition['_meta']['securitySchemes'][0]['scopes'])=={'read'}
-    help=s.mcp('workspace',{'operation':'help','tool':'computer','action':'action'})['structuredContent']
+    denied_help=s.mcp('workspace',{'operation':'help','tool':'computer','action':'action'})
+    assert denied_help['isError'] and denied_help['structuredContent']['error']['code']=='INSUFFICIENT_SCOPE'
+    help=s.mcp('workspace',{'operation':'help','tool':'computer','action':'action'},s.computer_pat)['structuredContent']
     assert help['scope']=='computer'
     assert definition['securitySchemes']==definition['_meta']['securitySchemes']
     metadata=s.client.get('/.well-known/oauth-authorization-server').json()

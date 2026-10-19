@@ -30,15 +30,25 @@ SYSTEM_KEYS = ('SystemRoot', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT')
 TOOLS = ('git', 'ssh', 'sshpass', 'gh', 'docker', 'python3', 'uv', 'node', 'npm', 'pnpm')
 
 
-def _environment(value, label):
+def _environment_keys(value, windows):
+    """Use one spelling per Windows variable without changing Linux guests."""
+    return {key.upper() if windows else key: item for key, item in value.items()}
+
+
+def _environment(value, label, *, windows=False):
     if not isinstance(value, dict) or len(value) > 128:
         raise ValueError(f'{label} must be a bounded environment object')
+    names = set()
     for key, item in value.items():
         if (not isinstance(key, str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', key)
                 or not isinstance(item, str) or '\x00' in item or len(item) > 65536):
             raise ValueError(f'{label} contains an invalid variable')
         if key.upper() in RESERVED:
             raise ValueError(f'{label}.{key} is owned by the runtime profile')
+        name = key.upper() if windows else key
+        if name in names:
+            raise ValueError(f'{label} contains ambiguous variable names')
+        names.add(name)
     return dict(value)
 
 
@@ -62,12 +72,15 @@ def validate_runtimes(value):
                 raise ValueError('native_compat uses the existing shell configuration')
             result[selector] = {'schema_version': 1, 'mode': mode}
             continue
+        windows = os.name == 'nt' and mode == 'project_clean_v1'
         paths = raw.get('path', [])
         if not isinstance(paths, list) or len(paths) > 32 or any(
                 not isinstance(p, str) or not p or '\x00' in p or os.pathsep in p for p in paths):
             raise ValueError('runtime.path must contain explicit PATH directories')
         passed = raw.get('pass_env', [])
-        if not isinstance(passed, list) or len(passed) > 64 or any(not isinstance(name, str) for name in passed) or len(set(passed)) != len(passed):
+        if (not isinstance(passed, list) or len(passed) > 64
+                or any(not isinstance(name, str) for name in passed)
+                or len({name.upper() if windows else name for name in passed}) != len(passed)):
             raise ValueError('runtime.pass_env must contain distinct variable names')
         for name in passed:
             if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', name) or name.upper() in RESERVED:
@@ -76,7 +89,7 @@ def validate_runtimes(value):
         if shell not in {'sh', 'bash', 'powershell'}:
             raise ValueError('runtime.shell must be sh, bash or powershell; login shells are not supported')
         profile = {'schema_version': 1, 'mode': mode, 'path': list(paths),
-                   'env': _environment(raw.get('env', {}), 'runtime.env'),
+                   'env': _environment(raw.get('env', {}), 'runtime.env', windows=windows),
                    'pass_env': list(passed), 'shell': shell}
         if mode == 'container_v1':
             from agent.container_runtime import validate_container
@@ -100,7 +113,8 @@ def windows_system_tool_paths(parent):
     directory. Keep both native/32-bit installation roots where applicable;
     project-specific tools still precede them and explicit profiles stay exact.
     """
-    system = PureWindowsPath(parent.get('SystemRoot', r'C:\Windows'))
+    parent = _environment_keys(parent, True)
+    system = PureWindowsPath(parent.get('SYSTEMROOT') or r'C:\Windows')
     if not system.is_absolute():
         system = PureWindowsPath(r'C:\Windows')
     result = [str(system / 'System32' / 'WindowsPowerShell' / 'v1.0'), str(system / 'System32')]
@@ -108,7 +122,7 @@ def windows_system_tool_paths(parent):
     for name, default in [('ProgramW6432', drive / 'Program Files'),
                           ('ProgramFiles', drive / 'Program Files'),
                           ('ProgramFiles(x86)', drive / 'Program Files (x86)')]:
-        location = PureWindowsPath(parent.get(name) or default)
+        location = PureWindowsPath(parent.get(name.upper()) or default)
         if location.is_absolute():
             result.append(str(location / 'Git' / 'cmd'))
     return list(dict.fromkeys(result))
@@ -143,9 +157,10 @@ def _digest(config, value):
 
 
 def profile_revision(config, profile):
-    parent = os.environ
+    windows = os.name == 'nt' and profile['mode'] == 'project_clean_v1'
+    parent = _environment_keys(os.environ, windows)
     return _digest(config, ['project-runtime-config-v1', profile,
-        {key: parent.get(key) for key in profile.get('pass_env', [])}])
+        {key: parent.get(key.upper() if windows else key) for key in profile.get('pass_env', [])}])
 
 
 def descriptor(config, project, root):
@@ -222,14 +237,16 @@ def build_environment(config, project, root, overrides=None, *, create=False):
     if profile['mode'] == 'native_compat':
         shell = config['shell']
         return legacy_environment(shell['inherit_env'], {**shell['env'], **(overrides or {})}, full_access=True)
+    windows = os.name == 'nt' and profile['mode'] == 'project_clean_v1'
     try:
-        extra = _environment(overrides or {}, 'operation.env')
+        extra = _environment(overrides or {}, 'operation.env', windows=windows)
     except ValueError as exc:
         raise DevError('RUNTIME_ENV_RESERVED', str(exc), 400) from exc
     root = Path(root).resolve()
     meta = descriptor(config, project, root)
-    environment = {key: os.environ[key] for key in SYSTEM_KEYS if key in os.environ}
-    environment.update({key: os.environ[key] for key in profile['pass_env'] if key in os.environ})
+    parent = _environment_keys(os.environ, windows)
+    inherited = [key.upper() if windows else key for key in (*SYSTEM_KEYS, *profile['pass_env'])]
+    environment = {key: parent[key] for key in inherited if key in parent}
     if profile['mode'] == 'container_v1':
         environment = {'HOME': '/home/project', 'TMPDIR': '/tmp', 'XDG_CACHE_HOME': '/home/project/.cache',
                        'XDG_CONFIG_HOME': '/home/project/.config', 'XDG_DATA_HOME': '/home/project/.local/share'}
@@ -246,8 +263,8 @@ def build_environment(config, project, root, overrides=None, *, create=False):
     environment.update(PATH=separator.join(dict.fromkeys(paths)), TEMP=environment['TMPDIR'], TMP=environment['TMPDIR'],
         LANG='C.UTF-8', GIT_TERMINAL_PROMPT='0', CI='1', NO_COLOR='1',
         CODEPIER_RUNTIME_REF=meta['runtime_ref'], CODEPIER_RUNTIME_REVISION=meta['revision'])
-    environment.update(profile['env'])
-    environment.update(extra)
+    environment.update(_environment_keys(profile['env'], windows))
+    environment.update(_environment_keys(extra, windows))
     return environment
 
 
@@ -265,7 +282,11 @@ def resolve_executable(command, environment, cwd):
 
 
 def runtime_readiness(config, project, root):
-    """Pure configuration/filesystem observation; does not create storage or probe code."""
+    """Observe the shell and configured PATH without storage or process effects.
+
+    Ready is not proof that a named task, its imports or network dependencies
+    can run. prepare resolves the actual task executable before launch.
+    """
     profile = selected(config, project)
     meta = descriptor(config, project, root)
     environment = build_environment(config, project, root)

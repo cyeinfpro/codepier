@@ -5,6 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 
 WINDOWS_CORE = {
+    'test_dot_environment_windows_core.py',
     'test_runtime_config_lock_portable.py',
     'test_native_windows.py', 'test_windows_service.py', 'test_windows_local_uninstall.py',
     'test_maintenance_sqlite_diagnostics.py', 'test_windows_python_junction_contract.py',

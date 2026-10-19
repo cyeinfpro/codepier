@@ -67,7 +67,7 @@ macOS 下，浏览器原生宿主若从 Downloads 等受限制目录启动，可
 
 ## 同提交晋级与长测并行
 
-候选分支在最终源码提交上运行完整 CodePier CI。晋级不是重新生成测试成功状态：scripts/check_ci_promotion.py 只读核验同一仓库、完整 SHA、Git tree、workflow ID/路径/内容哈希、最新有效成功 job、Windows/OIDC、两平台六片完整证明、coverage 及公开归档。public-source 工件包含四个发布附件、两份发布检查、source-build.json 和 runtime-acceptance.json；真实容器资格验证必须从同一公开归档执行，十项边界/读写/恢复检查全部通过且清理完成，证明同时绑定提交、归档与源码清单，缺少或不匹配则禁止复用；每个来源工件绑定不可变 artifact ID 与 GitHub 给出的 ZIP digest。过期、缺失、来源不符、后续同 workflow 失败或未结束都使复用失败并回退完整 CI。
+候选分支在最终源码提交上运行完整 CodePier CI。晋级不是重新生成测试成功状态：scripts/check_ci_promotion.py 只读核验同一仓库、完整 SHA、Git tree、workflow ID/路径/内容哈希、最新有效成功 job、Windows/OIDC、两平台六片完整证明、coverage 及公开归档。public-source 工件包含四个发布附件、两份发布检查、source-build.json 和 runtime-acceptance.json；真实容器资格验证必须从同一公开归档执行，`shared/runtime_qualification.py` 中 `CHECKS` 规定的全部边界、读写、恢复及归档一致性检查通过且清理完成，证明同时绑定提交、归档与源码清单，缺少或不匹配则禁止复用；每个来源工件绑定不可变 artifact ID 与 GitHub 给出的 ZIP digest。过期、缺失、来源不符、后续同 workflow 失败或未结束都使复用失败并回退完整 CI。
 
 可在确认已授权的提交推送及发布范围内，将已通过候选的同一 SHA 快进到 main，核对远端 SHA 后按同一已验证公开 ZIP 创建正式标签及 Release。无需把 main 自动触发的相同完整测试重复等待一遍；main 的快速路径明确保留候选 run、job、artifact、源码和四附件摘要。SHA 或 workflow 有任何变化，之前证据一律不能晋级。镜像门禁仍独立执行，源码证据不能替代镜像启动、多架构、SBOM/来源证明验证。
 

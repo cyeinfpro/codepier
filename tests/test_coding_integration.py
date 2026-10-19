@@ -106,7 +106,9 @@ def test_coding_profile_uses_canonical_oauth_resource_and_revocation(coding_stac
     decision=s.must(s.client.post('/api/oauth/requests/'+request+'/decide',json={'allow':True,'scopes':['read'],'projects':[s.project['id']]}))
     code=parse_qs(urlparse(decision['redirect']).query)['code'][0]
     tokens=s.must(s.client.post('/oauth/token',data={'grant_type':'authorization_code','client_id':registration['client_id'],'code':code,'code_verifier':verifier,'redirect_uri':args['redirect_uri'],'resource':s.url+'/mcp'}))
-    assert_task_catalog(rpc(s,'tools/list',token=tokens['access_token']).json()['result']['tools'], 13)
+    catalog = rpc(s,'tools/list',token=tokens['access_token']).json()['result']['tools']
+    expected = {item['name'] for item in tool_definitions('coding')} - {'exec', 'edit'}
+    assert_task_catalog(catalog, 11, expected_names=expected)
     opened=value(s,tool(s,'open_workspace',{'project':'ProjectAlpha'},tokens['access_token']))
     assert opened['workspace']['granted_scopes']==['read']
     assert s.client.post('/oauth/revoke',data={'token':tokens['access_token'],'client_id':registration['client_id']}).status_code==200

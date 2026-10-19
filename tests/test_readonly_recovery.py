@@ -77,7 +77,23 @@ def test_readonly_discovery_and_recovery_over_real_http(tmp_path):
             Draft202012Validator(catalog[name]['outputSchema']).validate(value)
             return value
 
-        for operation, extra in [('help', {}), ('help', {'tool': 'read', 'action': 'lsp'}),
+        read_catalog = {item['name']: item for item in
+                        s.rpc('tools/list', token_value=grant['token']).json()['result']['tools']}
+        assert 'lsp' not in read_catalog['read']['inputSchema']['properties']['operation']['enum']
+        help_value = call('project_query', {'operation': 'help'})
+        assert 'lsp' not in help_value['tools']['read']['operations']
+        # LSP queries start a configured process and keep their execute scope.
+        for tool, arguments in [
+            ('project_query', {'operation': 'help', 'tool': 'read', 'action': 'lsp'}),
+            ('read', {'operation': 'lsp', 'project': 'ProjectAlpha',
+                      'options': {'action': 'definition', 'path': 'README.md'}}),
+        ]:
+            denied = s.mcp(tool, arguments, token_value=grant['token'])
+            assert denied['isError'], denied
+            assert denied['structuredContent']['error']['code'] == 'INSUFFICIENT_SCOPE'
+            assert denied['structuredContent']['error']['required_scope'] == 'execute'
+
+        for operation, extra in [('help', {}), ('help', {'tool': 'read', 'action': 'file'}),
                                  ('tree', {'project': 'ProjectAlpha'}),
                                  ('skills', {'project': 'ProjectAlpha'}),
                                  ('open', {'project': 'ProjectAlpha'})]:

@@ -1,7 +1,10 @@
 """Portable, dependency-free contract for mandatory real runtime qualification."""
 CHECKS = frozenset({'non_root', 'workspace_mapping', 'shared_read_write', 'network_denied',
     'immutable_image', 'inspection_before_start', 'original_operation_replay_safe',
-    'workload_exit_code', 'timeout_enforced', 'cleanup_confirmed'})
+    'workload_exit_code', 'timeout_enforced', 'cleanup_confirmed',
+    'host_absolute_path_denied', 'sibling_project_denied', 'cross_boundary_link_denied',
+    'management_socket_denied', 'cancellation_enforced', 'original_operation_query_safe',
+    'archive_matches_executed_source'})
 
 
 def verified_receipt(value, *, commit, archive_sha256, source_inventory_sha256):

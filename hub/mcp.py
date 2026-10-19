@@ -194,7 +194,7 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                             result={'content':[{'type':'text','text':json.dumps(value,ensure_ascii=False)}],
                                     'structuredContent':value,'isError':bool(value.get('error'))}
                         else:
-                            result=await runtime.store.run(mcp_apps.attach,core_result(name,arguments,value),name,arguments,value,request_public_url)
+                            result=await runtime.store.run(mcp_apps.attach,core_result(name,arguments,value,scopes=principal.scopes),name,arguments,value,request_public_url)
                         try:
                             await runtime.store.run(runtime.diagnostics.connection.returned, principal, name, arguments, value)
                         except Exception:

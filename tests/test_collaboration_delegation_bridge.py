@@ -18,6 +18,8 @@ from hub.app import create_app
 from hub.collaboration.network import Reply
 from hub.principal import Principal
 from shared.crypto import digest, password_hash
+from shared.contracts import tool_definitions as core_definitions
+from shared.public_collaboration import PUBLIC_TOOLS
 from tests.collaboration_support import collaboration_stack, key  # noqa: F401
 from tests.legacy_iam_fixture import attach_session_security
 
@@ -163,7 +165,9 @@ def test_public_catalog_exposes_current_reply_and_delegation_contracts(bridge):
     listed = rpc(b, 'tools/list').json()['result']
     tools = {item['name']: item for item in listed['tools']}
     assert {'collaboration_query', 'collaboration', 'collaboration_work'} <= tools.keys()
-    assert len(tools) == 16
+    expected = {item['name'] for item in core_definitions()} | PUBLIC_TOOLS
+    assert set(tools) == expected - {'exec', 'edit'}
+    assert len(listed['tools']) == len(tools)
     query = tools['collaboration_query']['inputSchema']
     assert {'timeline', 'thread', 'message_status', 'connection', 'inbox', 'dot_connection', 'dot_inbox'} <= set(
         query['properties']['action']['enum'])
@@ -574,10 +578,11 @@ def test_all_public_profiles_are_the_same_native_catalog_and_cached_aliases_stil
     from shared.public_collaboration import LEGACY_TOOLS
     b = bridge
     catalogs = []
+    expected = ({item['name'] for item in core_definitions()} | PUBLIC_TOOLS) - {'exec', 'edit'}
     for profile in ('core', 'full', 'coding'):
         listing = rpc(b, 'tools/list', profile=profile).json()['result']['tools']
         names = {item['name'] for item in listing}
-        assert len(listing) == len(names) == 16
+        assert len(listing) == len(names) and names == expected
         assert not names.intersection(LEGACY_TOOLS)
         catalogs.append(names)
     assert catalogs[0] == catalogs[1] == catalogs[2]
@@ -587,7 +592,7 @@ def test_all_public_profiles_are_the_same_native_catalog_and_cached_aliases_stil
     plan = tool(b, 'collaboration_query', {**b.scope, 'action': 'plan'})
     assert plan == {'state': 'not_configured'}
     assert tool(b, 'collaboration_read', {**b.scope, 'kind': 'plan'}) == plan
-    # Approved gateway entries are additional to the sixteen native entries.
+    # Approved gateway entries extend this principal's visible native catalog.
     runtime = b.app.state.runtime
     monkeypatch.setattr(runtime.gateway, 'tools', lambda principal: [{
         'name': 'fixture_remote_read', 'description': 'Synthetic approved gateway entry',
@@ -595,7 +600,8 @@ def test_all_public_profiles_are_the_same_native_catalog_and_cached_aliases_stil
         'annotations': {'readOnlyHint': True},
     }])
     listing = rpc(b, 'tools/list').json()['result']['tools']
-    assert len(listing) == 17 and any(item['name'] == 'fixture_remote_read' for item in listing)
+    assert {item['name'] for item in listing} == expected | {'fixture_remote_read'}
+    assert len(listing) == len(expected) + 1
 
 
 def test_read_grant_cannot_execute_through_new_tool_or_hidden_alias(bridge):

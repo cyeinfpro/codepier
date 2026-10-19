@@ -6,6 +6,8 @@ from pathlib import PurePosixPath
 from shared.util import DevError
 
 RULES = ('AGENTS.md', 'MEMORY.md', 'CLAUDE.md')
+ROOT_INDEX_NOISE = frozenset({'.DS_Store', 'Thumbs.db', '.Spotlight-V100', '.fseventsd',
+    '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache'})
 
 def project_index(engine, project, args):
     from agent.context import DOCUMENTS, SKILL_ROOTS
@@ -59,6 +61,10 @@ def project_index(engine, project, args):
         index(name)
     try:
         for _, relative, st in engine.walk(root, root, depth=1, deadline=deadline):
+            # This overview filter neither changes generic walk/read access nor
+            # spends the useful-entry budget on system/cache metadata.
+            if PurePosixPath(relative).name in ROOT_INDEX_NOISE:
+                continue
             if len(entries) >= 40:
                 truncated = True
                 break

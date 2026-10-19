@@ -41,7 +41,7 @@ def iso(value):
     return datetime.fromtimestamp(value, timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
 
 
-def render_exec_v1(snapshot):
+def render_exec_v1(snapshot, *, scopes=None):
     from hub.core_tools import result as core_result
     from hub.runtime import Runtime
     try:
@@ -65,7 +65,7 @@ def render_exec_v1(snapshot):
         value = {'error': error_view({'code': exc.code, 'message': exc.message, **exc.details})}
         return {'content': [{'type': 'text', 'text': json.dumps(value, ensure_ascii=False)}],
                 'structuredContent': value, 'isError': True}
-    rendered = core_result('exec', {}, value)
+    rendered = core_result('exec', {}, value, scopes=scopes)
     rendered['isError'] = rendered['isError'] or snapshot['state'] != 'succeeded'
     return rendered
 
@@ -121,6 +121,7 @@ class TaskService:
 
     @iam.read_decision
     def get(self, identifier, principal):
+        principal = refresh_principal(self.store, principal)
         with self.store.transaction():
             row, operation = self._binding(identifier, principal)
             row = self._freeze(row, operation)
@@ -133,7 +134,7 @@ class TaskService:
                     body['status'] = 'cancelled'
                 else:
                     try:
-                        body['result'] = render_exec_v1(snapshot)
+                        body['result'] = render_exec_v1(snapshot, scopes=principal.scopes)
                         body['status'] = 'completed'
                     except ProtocolError as exc:
                         body['status'] = 'failed'

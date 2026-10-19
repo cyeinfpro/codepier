@@ -73,12 +73,14 @@ def test_removed_public_native_tools_never_fall_through_to_gateway(team,monkeypa
     assert json.loads(payload['content'][0]['text'])['error']['code']=='TOOL_REMOVED'
 
 
-def test_native_catalog_is_nine_core_plus_stable_identity(team):
-    app,b=team;r=shared_role(app,b);p=profile(b['alice'],r);g=must(credential(b['alice'],r,p))
+def test_native_catalog_matches_read_scope_and_stable_identity(team):
+    app,b=team;r=shared_role(app,b,['read']);p=profile(b['alice'],r);g=must(credential(b['alice'],r,p))
     response=b['alice'].post('/mcp',headers={'Authorization':'Bearer '+g['token'],'Accept':'application/json, text/event-stream'},json={
         'jsonrpc':'2.0','id':1,'method':'tools/list','params':{}})
     tools=response.json()['result']['tools']
-    assert {t['name'] for t in tools}==CORE_TOOLS|QUERY_TOOLS|{'get_profile','get_access_context'}
+    names = {t['name'] for t in tools}
+    assert names == (CORE_TOOLS - {'exec', 'edit'}) | QUERY_TOOLS | {'get_profile', 'get_access_context'}
+    assert len(tools) == len(names)
     assert next(t for t in tools if t['name']=='get_profile')['_meta']['openai/profile'] is True
 
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hub import iam
 from hub.principal import refresh_principal
+from hub.tool_discovery import visible_definitions
 from shared.contracts import tool_definitions
 from shared.core_contracts import REPLACED_MCP_TOOLS
 from shared.integration_contracts import ADMIN_TOOLS, INCOMING_UPLOAD_TOOLS
@@ -22,7 +23,7 @@ class ToolRouter:
         self.store, self.gateway = store, gateway
 
     @iam.read_decision
-    def definitions(self, principal):
+    def definitions(self, principal, *, discovery=True):
         principal = refresh_principal(self.store, principal)
         native = tool_definitions(authorization=principal.authorization_mode)
         collaboration = getattr(self.store, "collaboration", None)
@@ -37,7 +38,9 @@ class ToolRouter:
         names = [item['name'] for item in native + external]
         if len(names) != len(set(names)):
             raise DevError('TOOL_NAME_COLLISION', '工具发布名称冲突；未选择任意后端', 409)
-        return principal, native, external
+        # Resolve against the full reserved namespace, before discovery projection.
+        # Hiding a name is neither authorization nor permission for a gateway to claim it.
+        return principal, visible_definitions(native, principal.scopes) if discovery else native, external
 
     def list_tools(self, principal, cursor=None):
         principal, native, external = self.definitions(principal)
@@ -55,7 +58,7 @@ class ToolRouter:
             raise DevError('TOOL_REMOVED', '旧工具已移除，请使用 ' + REPLACED_MCP_TOOLS[name], 404)
         if name in ADMIN_TOOLS:
             raise DevError('OWNER_REQUIRED', '此操作只接受已授权的管理入口', 403)
-        principal, native, external = self.definitions(principal)
+        principal, native, external = self.definitions(principal, discovery=False)
         from shared.public_collaboration import LEGACY_TOOLS
         collaboration = getattr(self.store, "collaboration", None)
         if name in LEGACY_TOOLS and collaboration is not None and collaboration.config.enabled:

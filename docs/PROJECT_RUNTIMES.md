@@ -1,6 +1,6 @@
 # 项目运行时与连续执行
 
-版本：1.30.0；更新：2026-10-17。本文描述源码能力；实际节点是否启用，以已认证握手、当前配置和原操作回执为准。
+版本：1.30.0；更新：2026-10-19。本文描述源码能力；实际节点是否启用，以已认证握手、当前配置和原操作回执为准。
 
 ## 面板设置（2026-10-17）
 
@@ -55,7 +55,7 @@ PATH 的相对项以实际工作区根目录解析，随后补充系统默认路
 
 清洁模式的 Shell 可选 `sh`、`bash`、`powershell`。sh 使用 `/bin/sh -c`；bash 关闭 profile/rc；PowerShell 使用 NoProfile/NonInteractive。未启用清洁模式的项目保留原 Shell 选择。独立 HOME 是执行配置，不改变实际 UID 或操作系统权限。
 
-HOME、USER、PATH、SHELL、ENV/BASH_ENV、TMP/XDG 等运行时保留字段不能被单次调用覆盖。必要代理/证书等变量通过明确的 pass_env 或 env 配置引入；不要把完整父环境或宿主凭据目录暴露给容器。
+HOME、USER、PATH、SHELL、ENV/BASH_ENV、TMP/XDG 等运行时保留字段不能由 pass_env、profile.env 或单次调用覆盖。允许变量的显式空字符串仍保留，不解释为删除；Windows 按环境变量名大小写不敏感的规则保护保留字段。必要代理/证书等变量通过明确的 pass_env 或 env 配置引入；不要把完整父环境或宿主凭据目录暴露给容器。就绪查询只观察依赖，不创建私有目录，也不代表项目任务已经通过。
 
 ### 2.1 预览与应用
 
@@ -92,7 +92,9 @@ python -m agent.runtime_config configure \
 
 ## 3. 常规开发使用项目能力
 
-open 返回 `capability_index`，提供搜索、changes、validation、tasks、artifacts 的现有帮助入口。每个入口仍使用原工具/权限，不创建第二套任务系统。
+open 返回 `capability_index`，按本次调用的有效权限提供搜索、changes、validation、tasks、artifacts 的现有帮助入口。tools/list、聚合与单项 help、输入 schema 和结果中的下一步提示使用同一发现策略；权限变化后重新计算，不以最近打开的项目改变连接范围。每次实际调用仍独立校验当前权限。
+
+只读调用可发现 browser/computer 的静态 status。computer.status 的 probe=false 使用 read，probe=true 另需 computer；桌面动作继续要求 computer。`read.lsp` 会运行已配置的语言服务，仍要求 execute，只读账号的目录和帮助不提供此操作。旧客户端直接调用隐藏入口也不会绕过后端鉴权。
 
 需要严格参数时使用返回的 project_query(help) 请求。配置好的任务继续通过 `exec(task=...)` 执行；其 command 为受保护 Agent 配置内的 argv 数组，不经过额外登录 Shell。需要管道或重定向时继续使用 exec(command=...)，由项目指定的 Shell 解析。
 
@@ -111,6 +113,8 @@ open 返回 `capability_index`，提供搜索、changes、validation、tasks、a
 `runtime_outcome` 区分 Docker 客户端退出和实际工作负载退出；只有真实容器终态观察才能证明工作负载结果。创建/启动/清理结果不明确时保留 needs_review，不能用客户端退出 0 报告完成。清理失败也不能算完整执行成功。
 
 原始 stdout/stderr、文件正文、diff、SHA、截断和输出序列均保留真实语义，已有 SecretOutput 凭据保护不被移除。派生相对路径摘要不是原始日志。直接结果、轮询和标准 Tasks 均复用同一展示白名单；服务端持久回执保留原数据。
+
+可跳转诊断只使用可信的项目根、执行目录及实际容器映射。项目外路径、相似前缀、没有可靠参照目录的相对路径不会被猜成项目文件；命令内部切换目录后也不沿用启动目录作假定位。无法解析的内容保留在原始输出中，普通短输出无需再取一次日志。展示投影不改写原回执，也不改变执行配置修订。
 
 测试包装器支持显式项目视图：
 
@@ -173,7 +177,11 @@ python scripts/verify_project_runtime.py \
   --output /evidence/runtime-acceptance.json
 ```
 
-该资格验证在临时项目中实际检查非 root、指定工作区、共享读写、网络限制、原操作幂等、真实非零退出和超时清理。缺少配置、服务或任一证据即失败，不能 skip 后宣布隔离通过。CI 的 Linux 公开归档构建必须运行此入口；正常的跨平台回归保留模拟拒绝测试，不把它们当作实机证明。发布证明绑定最终提交、归档 SHA 与源码清单。
+从被核验的最终公开归档解包后的源码运行资格脚本，脚本同时核对实际执行源码与归档的逐文件内容、权限和清单。传入一个提交号或归档路径本身不能证明源码一致。
+
+该资格验证在受控临时项目中实际检查非 root、指定工作区、双向共享读写、网络限制、宿主绝对路径和相邻项目不可达、跨界链接和管理 socket 不可用、原操作幂等及重复查询、真实非零退出、超时与主动取消、容器清理。根外 canary 由受信夹具创建，不能使用用户真实的其他项目或凭据。必需检查以 `shared/runtime_qualification.py` 的 `CHECKS` 为唯一清单，证据消费者拒绝缺项、额外项和非布尔真值。
+
+缺少配置、服务、镜像或任一必需证据即失败，不能 skip 后宣布隔离通过。CI 的 Linux 公开归档构建必须运行此入口；正常的跨平台回归保留模拟拒绝测试，不把它们当作实机证明。发布证明绑定最终提交、归档 SHA 与源码清单，并保留实际运行结果和清理状态。
 
 ## 6. 上线检查
 

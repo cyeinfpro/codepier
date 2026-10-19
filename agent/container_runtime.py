@@ -26,6 +26,21 @@ IMAGE = re.compile(r'(?:sha256:|[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:)[a-f0-9]{64
 CID = re.compile(r'[a-f0-9]{64}')
 
 
+async def _finish_control_job(job):
+    """Observe the original bounded control call despite repeated cancellation.
+
+    Cancelling a to_thread Task does not stop its Docker subprocess. A second
+    cancellation must therefore not abandon that task before its exact container
+    identity or cleanup result is known. Callers still propagate cancellation.
+    """
+    while not job.done():
+        try:
+            await asyncio.shield(job)
+        except asyncio.CancelledError:
+            continue
+    return job.result()
+
+
 def validate_container(value):
     fields = {'engine', 'endpoint', 'image', 'uid', 'gid', 'memory_mib', 'cpus',
               'pids_limit', 'tmp_mib', 'home_mib'}
@@ -155,13 +170,21 @@ def verify_inspection(value, config, root, plan, name, image_id):
             or any(not isinstance(item, dict) for item in value['Mounts'])
             or not isinstance(host.get('Mounts'), list) or any(not isinstance(item, dict) for item in host['Mounts'])
             or not isinstance(inner.get('Labels'), dict) or not isinstance(inner.get('Healthcheck'), dict)
-            or not isinstance(inner.get('Env'), list)):
+            or not isinstance(inner.get('Env'), list)
+            or not isinstance(host.get('RestartPolicy'), dict)
+            or not isinstance(host['RestartPolicy'].get('Name'), str)
+            or any(not isinstance(item.get('Type'), str)
+                or not isinstance(item.get('Destination'), str) for item in value['Mounts'])
+            or any(not isinstance(host.get(key), list)
+                or any(not isinstance(item, str) for item in host[key])
+                for key in ('CapDrop', 'SecurityOpt'))):
         raise DevError('RUNTIME_ISOLATION_UNVERIFIED', 'Container inspection structure is incomplete', 409)
     expected = {'Privileged': False, 'ReadonlyRootfs': True, 'NetworkMode': 'none',
         'IpcMode': 'private', 'PidMode': '', 'UTSMode': '', 'CgroupnsMode': 'private',
         'PidsLimit': config['pids_limit'], 'Memory': config['memory_mib'] * 1024 * 1024,
         'MemorySwap': config['memory_mib'] * 1024 * 1024, 'NanoCpus': round(config['cpus'] * 1_000_000_000)}
-    valid = all(host.get(key) == item for key, item in expected.items())
+    valid = all(type(host.get(key)) is type(item) and host[key] == item
+                for key, item in expected.items())
     valid = valid and not any(host.get(key) for key in ('CapAdd', 'Devices', 'DeviceRequests',
         'Links', 'PortBindings', 'PublishAllPorts', 'ExtraHosts', 'VolumesFrom', 'Binds'))
     valid = valid and set(host.get('CapDrop') or []) == {'ALL'}
@@ -176,9 +199,16 @@ def verify_inspection(value, config, root, plan, name, image_id):
     valid = valid and inner.get('WorkingDir') == '/workspace' + ('' if relative == '.' else '/' + relative)
     valid = valid and inner.get('Labels', {}).get('com.codepier.operation') == name
     valid = valid and inner.get('Labels', {}).get('com.codepier.runtime') == DRIVER
-    valid = valid and value.get('Image') == image_id and not value.get('State', {}).get('Running')
+    valid = valid and value.get('Image') == image_id and value['State'].get('Running') is False
     valid = valid and inner.get('Healthcheck', {}).get('Test') == ['NONE']
-    actual_env = dict(item.split('=', 1) for item in inner.get('Env', []) if isinstance(item, str) and '=' in item)
+    actual_env = {}
+    for item in inner['Env']:
+        if not isinstance(item, str) or '=' not in item or '\x00' in item:
+            raise DevError('RUNTIME_ISOLATION_UNVERIFIED', 'Container environment is invalid', 409)
+        key, env_value = item.split('=', 1)
+        if not key or key in actual_env:
+            raise DevError('RUNTIME_ISOLATION_UNVERIFIED', 'Container environment is ambiguous', 409)
+        actual_env[key] = env_value
     valid = valid and all(actual_env.get(key) == item for key, item in plan.environment.items())
     mounts = value.get('Mounts', [])
     binds = [item for item in mounts if item.get('Type') == 'bind']
@@ -246,13 +276,17 @@ class ContainerRuntime:
             raise DevError(status['code'], 'The configured isolated runtime is unavailable; no native fallback is allowed', 503)
         inspect_project_mount(self.root)
         info = self._control(['info', '--format', '{{json .}}'], json_result=True)
-        if info.get('OSType') != 'linux' or not any('name=seccomp' in item for item in info.get('SecurityOptions', [])):
+        if (not isinstance(info, dict) or info.get('OSType') != 'linux'
+                or not isinstance(info.get('SecurityOptions'), list)
+                or any(not isinstance(item, str) for item in info['SecurityOptions'])
+                or not any('name=seccomp' in item.split(',') for item in info['SecurityOptions'])):
             raise DevError('RUNTIME_ENGINE_UNSUPPORTED', 'The runtime requires a Linux engine with seccomp', 409)
         images = self._control(['image', 'inspect', self.config['image']], json_result=True)
-        if not isinstance(images, list) or len(images) != 1 or images[0].get('Config', {}).get('Volumes'):
+        if (not isinstance(images, list) or len(images) != 1 or not isinstance(images[0], dict)
+                or not isinstance(images[0].get('Config'), dict) or images[0]['Config'].get('Volumes')):
             raise DevError('RUNTIME_IMAGE_UNSUPPORTED', 'The approved image must exist and must not declare extra volumes', 409)
         image_id = images[0].get('Id', '')
-        if not re.fullmatch(r'sha256:[a-f0-9]{64}', image_id):
+        if not isinstance(image_id, str) or not re.fullmatch(r'sha256:[a-f0-9]{64}', image_id):
             raise DevError('RUNTIME_IMAGE_UNSUPPORTED', 'Image identity is not immutable', 409)
         self._record('creating')
         self.creation_attempted = True
@@ -264,7 +298,8 @@ class ContainerRuntime:
             self.cleanup_state = {'state': 'required', 'pending': True}
             self._record('created')
             values = self._control(['inspect', identifier], json_result=True)
-            if not isinstance(values, list) or len(values) != 1 or values[0].get('Id') != identifier:
+            if (not isinstance(values, list) or len(values) != 1
+                    or not isinstance(values[0], dict) or values[0].get('Id') != identifier):
                 raise DevError('RUNTIME_ISOLATION_UNVERIFIED', 'Container inspection identity changed', 409)
             self.evidence = verify_inspection(values[0], self.config, self.root, self.plan, self.name, image_id)
             self._record('verified_before_start')
@@ -285,9 +320,9 @@ class ContainerRuntime:
             state = rows[0].get('State', {})
             start_value = state.get('StartedAt')
             started = isinstance(start_value, str) and bool(re.fullmatch(r'[1-9][0-9]{3}-[0-9]{2}-[0-9]{2}T[^\s]+', start_value))
-            if state.get('Status') == 'exited' and not state.get('Running') and started and type(state.get('ExitCode')) is int:
+            if state.get('Status') == 'exited' and state.get('Running') is False and started and type(state.get('ExitCode')) is int:
                 result.update(state='confirmed', workload_exit_code=state['ExitCode'], oom_killed=state.get('OOMKilled') is True)
-            elif state.get('Status') == 'created' and not state.get('Running') and not started:
+            elif state.get('Status') == 'created' and state.get('Running') is False and not started:
                 result['state'] = 'not_started'
         except (DevError, ValueError, TypeError, AttributeError):
             pass
@@ -299,7 +334,7 @@ class ContainerRuntime:
         try:
             return await asyncio.shield(job)
         except asyncio.CancelledError:
-            await job
+            await _finish_control_job(job)
             raise
 
     def cleanup(self):
@@ -332,7 +367,7 @@ class ContainerRuntime:
             return await asyncio.shield(job)
         except asyncio.CancelledError:
             try:
-                await job
+                await _finish_control_job(job)
             finally:
                 await self.cleanup_async()
             raise
@@ -342,5 +377,5 @@ class ContainerRuntime:
         try:
             return await asyncio.shield(job)
         except asyncio.CancelledError:
-            await job
+            await _finish_control_job(job)
             raise
