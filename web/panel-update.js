@@ -782,5 +782,20 @@ window.CodePierPanelUpdate = (() => {
     paint();
     load();
   }
+  // Navigation cancels browser reads, not a durable update request. Invalidate
+  // callbacks before WebKit tears down an in-flight status fetch during reload.
+  window.addEventListener('pagehide', () => {
+    generation++;
+    clearTimeout(timer);
+    timer = null;
+    reader?.abort();
+    reader = null;
+    submitting = false;
+  });
+  // A back-forward cached document survives pagehide and must resume its
+  // original idempotency-key watch instead of submitting a second update.
+  window.addEventListener('pageshow', (event) => {
+    if (event.persisted && S.session?.instance_admin) resume();
+  });
   return { html, bind, detach, resume, entry, open };
 })();

@@ -29,7 +29,7 @@ def admission_probe_due(now, previous):
     return now - previous >= 3
 
 
-def wait_for_burst_capacity(probe, *, timeout=300, clock=time.monotonic, sleep=time.sleep):
+def wait_for_burst_capacity(probe, *, timeout=300, clock=time.monotonic, sleep=time.sleep, diagnostics=None):
     """Absolute readiness-acceptance deadline; an in-flight read keeps its 35s timeout."""
     deadline = clock() + timeout
     previous = -float("inf")
@@ -57,6 +57,7 @@ def wait_for_burst_capacity(probe, *, timeout=300, clock=time.monotonic, sleep=t
     raise AssertionError("Admission preparation timed out: " + json.dumps({
         "timeout_seconds": timeout, "probes": probes,
         "last_state": last_state, "last_error": last_error,
+        "host_resource_prerequisites": diagnostics() if diagnostics else None,
     }, sort_keys=True))
 
 
@@ -148,14 +149,21 @@ def test_real_128_waiting_burst_other_project_cancel_restart_and_exact_drain(tmp
         observer = ResourceSampler()
         observed_at = time.monotonic()
         probe_count = 0
+        last_growth = None
 
         def observe_preparation():
-            nonlocal probe_count
+            nonlocal probe_count, last_growth
             now = time.monotonic()
             probe_count += 1
             state = settings(stack, probe_client)
             limits = state["durable_admission"]
             sample = observer.sample()
+            last_growth = {
+                "source": sample.source, "cpu_busy": sample.cpu_busy,
+                "memory_available": sample.memory_available,
+                "memory_total": sample.memory_total, "io_stall": sample.io_stall,
+                "checks": growth_prerequisite_diagnostics(sample),
+            }
             reported = state["reported"] or {}
             print(json.dumps({"admission_prerequisite": {
                 "elapsed_seconds": round(now - observed_at, 3), "probe_count": probe_count,
@@ -178,7 +186,8 @@ def test_real_128_waiting_burst_other_project_cancel_restart_and_exact_drain(tmp
         with httpx.Client(base_url=stack.url, cookies=stack.client.cookies,
                 timeout=35, trust_env=False,
                 limits=httpx.Limits(max_connections=1, max_keepalive_connections=1)) as probe_client:
-            expanded = wait_for_burst_capacity(observe_preparation)
+            expanded = wait_for_burst_capacity(observe_preparation,
+                                               diagnostics=lambda: last_growth)
         assert sum(lane["capacity"] for lane in expanded["reported"]["lanes"].values()) < expanded["durable_admission"]["node_pending_limit"]
         held = stack.call("exec", {"project": "ProjectAlpha", "task": "admission_hold",
                                   "idempotency_key": uuid.uuid4().hex})
