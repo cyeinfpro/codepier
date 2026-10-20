@@ -1,5 +1,9 @@
 'use strict';
 // One view per project/native conversation. Model selection never sends a prompt.
+const CHAT_MESSAGE_MAX_BYTES = 64 * 1024;
+const CHAT_ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024;
+const CHAT_ATTACHMENT_MAX_COUNT = 10;
+const CHAT_UPLOAD_CHUNK_BYTES = 64 * 1024;
 function chatProviderName(provider = ChatUI.selected?.provider || ChatUI.provider) {
   return { pi: 'Pi', codex: 'Codex', claude: 'Claude' }[provider] || 'CLI';
 }
@@ -167,37 +171,41 @@ function chatStatus(text, error = false) {
   }
 }
 function chatDetach(clear = false) {
-  chatRememberView();
-  chatUnmountChrome();
   const c = ChatUI;
-  c.generation++;
-  c.catalogTicket++;
-  c.source?.close();
-  c.source = null;
-  c.listeners?.abort();
-  c.listeners = null;
-  cancelAnimationFrame(c.frame);
-  c.frame = 0;
-  c.dirty.clear();
-  document.body.classList.remove('chat-focus');
-  if (clear) {
-    chatCatalogAbortAll();
-    Object.assign(c, {
-      historyProject: '',
-      query: '',
-      filter: '',
-      historyOffset: 0,
-      historyLoaded: false,
-      targetsLoading: false,
-      rows: [],
-      recentProjects: [],
-    });
-    for (const v of c.views.values())
-      for (const f of v.files) if (f.preview) URL.revokeObjectURL(f.preview);
-    c.views.clear();
-    c.catalogCache.clear();
-    c.selected = null;
-    c.project = '';
+  chatDisconnect();
+  try {
+    chatRememberView();
+  } finally {
+    // A pending render can fail while leaving the page. Release transports and
+    // listeners even then, before allowing that error to reach the caller.
+    c.generation++;
+    c.catalogTicket++;
+    c.listeners?.abort();
+    c.listeners = null;
+    cancelAnimationFrame(c.frame);
+    c.frame = 0;
+    c.dirty.clear();
+    document.body.classList.remove('chat-focus');
+    if (clear) {
+      chatCatalogAbortAll();
+      Object.assign(c, {
+        historyProject: '',
+        query: '',
+        filter: '',
+        historyOffset: 0,
+        historyLoaded: false,
+        targetsLoading: false,
+        rows: [],
+        recentProjects: [],
+      });
+      for (const v of c.views.values())
+        for (const f of v.files) if (f.preview) URL.revokeObjectURL(f.preview);
+      c.views.clear();
+      c.catalogCache.clear();
+      c.selected = null;
+      c.project = '';
+    }
+    chatUnmountChrome();
   }
 }
 async function chatOpenProject(project, provider = 'pi') {
@@ -209,12 +217,11 @@ async function chatOpenProject(project, provider = 'pi') {
 }
 async function chatSwitch(row, project = row?.project_id || ChatUI.project, options = {}) {
   const c = ChatUI;
+  chatDisconnect();
   chatRememberView();
   c.dialogCancel?.();
   chatClosePopover();
   chatOptions(false);
-  c.source?.close();
-  c.source = null;
   c.generation++;
   c.catalogTicket++;
   c.listTicket++;
@@ -304,7 +311,7 @@ async function chatPage() {
   <div id="chat-catalog-notice" class="chat-catalog-notice" hidden><span></span><button id="chat-catalog-retry">重新加载</button></div>
 
 
-  <form id="chat-form" class="chat-composer"><textarea id="chat-compose" rows="1" aria-label="消息" aria-describedby="chat-status" placeholder="描述任务，输入 / 查看指令…" maxlength="65536"></textarea>
+  <form id="chat-form" class="chat-composer"><textarea id="chat-compose" rows="1" aria-label="消息" aria-describedby="chat-status chat-text-limit" placeholder="描述任务，输入 / 查看指令…" maxlength="${CHAT_MESSAGE_MAX_BYTES}"></textarea>
   <div class="chat-compose-bottom"><div class="chat-compose-controls"><button class="chat-square" type="button" id="chat-attach" aria-label="添加文件或图片" title="上传图片与文件">${chatIcon('plus')}</button><input type="file" id="chat-file-input" multiple hidden>  <button type="button" id="chat-model-picker" class="chat-model-picker" aria-label="选择模型" aria-haspopup="dialog" aria-expanded="false">${chatIcon('model')}<span id="chat-model-name">选择模型</span>${chatIcon('chevron')}</button></div>
   <div class="chat-send-actions"><button type="button" id="chat-options-toggle" class="chat-square" aria-label="会话设置" aria-controls="chat-options" aria-expanded="false" title="项目、思考强度与工具">${chatIcon('settings')}</button><button type="submit" id="chat-send" class="chat-send" aria-label="发送消息">${chatIcon('send')}</button></div></div></form>
   <button type="button" id="chat-options-shade" class="chat-options-shade" aria-label="关闭会话设置" tabindex="-1" hidden></button>
@@ -314,7 +321,7 @@ async function chatPage() {
   <button type="button" id="chat-cwd-button" class="chat-cwd-button" title="工作目录">${chatIcon('folder')}<span>.</span></button></div>
   <div class="chat-option-tools"><button type="button" id="chat-commands" aria-label="指令与技能">${chatIcon('command')}<span>指令与技能</span></button><button type="button" id="chat-file-library" aria-label="附件库">${chatIcon('file')}<span>附件库</span></button><button type="button" id="chat-usage" title="查看用量">上下文</button></div></section>
   <div class="chat-setting-feedback"><span id="chat-setting-state" class="chat-setting-state"></span><button type="button" id="chat-settings-retry" class="chat-text-button" hidden>重试设置</button></div>
-  <div class="chat-composer-note"><span id="chat-status" role="status" data-quiet="true">Enter 发送 · Shift+Enter 换行</span><button id="chat-retry" hidden>重试原请求</button></div></div>
+  <div class="chat-composer-note"><span id="chat-status" role="status" data-quiet="true">Enter 发送 · Shift+Enter 换行</span><span id="chat-text-limit" role="status" hidden></span><button id="chat-retry" hidden>重试原请求</button></div></div>
   </div>
   <aside id="chat-inspector" class="chat-inspector" hidden><header><strong>会话详情</strong><button id="chat-inspector-close" class="chat-square" aria-label="关闭会话详情">${chatIcon('close')}</button></header><nav class="chat-inspector-tabs">${[
     ['overview', '概览'],
@@ -1090,6 +1097,28 @@ function chatCwdPopover() {
 function chatLocalCommand(text) {
   return /^\/(model|thinking|stats|new|queue|commands)\s*$/.test(text.trim());
 }
+function chatDraftBytes(v = chatView()) {
+  const text = v.draft.trim();
+  if (v.measuredDraft !== text) {
+    v.measuredDraft = text;
+    v.draftBytes = new TextEncoder().encode(text).length;
+  }
+  return v.draftBytes;
+}
+function chatDraftLimit(v = chatView()) {
+  const bytes = chatDraftBytes(v),
+    exceeded = bytes > CHAT_MESSAGE_MAX_BYTES,
+    input = $('#chat-compose'),
+    hint = $('#chat-text-limit');
+  if (input) input.setAttribute('aria-invalid', String(exceeded));
+  if (hint) {
+    hint.hidden = bytes < CHAT_MESSAGE_MAX_BYTES * 0.9;
+    hint.textContent = hint.hidden
+      ? ''
+      : `${bytes.toLocaleString()} / ${CHAT_MESSAGE_MAX_BYTES.toLocaleString()} 字节${exceeded ? ' · 消息过长' : ''}`;
+  }
+  return exceeded ? '消息不能超过 64 KiB，请缩短内容或改用附件' : '';
+}
 async function chatSend(retry = false) {
   const c = ChatUI,
     v = chatView(),
@@ -1127,7 +1156,7 @@ async function chatSend(retry = false) {
   }
   if (!v.pending) {
     const text = v.draft.trim();
-    if (new TextEncoder().encode(text).length > 65536) {
+    if (chatDraftBytes(v) > CHAT_MESSAGE_MAX_BYTES) {
       chatStatus('消息不能超过 64 KiB', true);
       return;
     }
@@ -1292,13 +1321,18 @@ function chatConnection(state, text) {
     el.querySelector('span').textContent = text;
   }
 }
+function chatDisconnect() {
+  const source = ChatUI.source;
+  ChatUI.source = null;
+  source?.close();
+}
 function chatConnect() {
   const c = ChatUI,
     gen = c.generation,
     id = c.selected?.id,
     v = chatView();
+  chatDisconnect();
   if (!id) return;
-  c.source?.close();
   c.cursor = v.cursor || 0;
   const source = new EventSource(
     '/api/native/sessions/' +
@@ -1358,7 +1392,7 @@ function chatConnect() {
     if (!chatCurrent(gen, v) || source !== c.source || !e.data) return;
     try {
       const error = JSON.parse(e.data);
-      source.close();
+      chatDisconnect();
       chatConnection('error', '连接受限');
       chatStatus(error.message || '访问权限已变化', true);
     } catch {}
@@ -1521,6 +1555,10 @@ function chatEvent(e) {
     v.order.push(key);
   }
   item.data = { ...item.data, ...e };
+  if (kind === 'approval') {
+    if (!v.approvalKeys) chatHasPendingApproval(v);
+    v.approvalKeys.add(key);
+  }
   if (e.type === 'approval' && !['running', 'starting'].includes(c.selected?.status)) {
     item.data.resolved = true;
     item.data.resolution = 'closed';
@@ -1554,6 +1592,21 @@ function chatProcessFailure(item) {
       ['error', 'failed', 'denied', 'interrupted', 'cancelled'].includes(item.data.status))
   );
 }
+function chatHasPendingApproval(v = chatView()) {
+  // Hydrated views are indexed once. Subsequent stream frames only inspect the
+  // small set of approval entries, not the entire retained conversation.
+  if (!v.approvalKeys)
+    v.approvalKeys = new Set(
+      [...v.items.values()].filter((item) => item.kind === 'approval').map((item) => item.key),
+    );
+  let pending = false;
+  for (const key of v.approvalKeys) {
+    const item = v.items.get(key);
+    if (!item || item.data.resolved || item.answered) v.approvalKeys.delete(key);
+    else pending = true;
+  }
+  return pending;
+}
 function chatReconcileNodes(holder, nodes) {
   let cursor = holder.firstChild;
   for (const node of nodes) {
@@ -1569,7 +1622,7 @@ function chatRenderProcessGroups() {
     holder = $('#chat-messages');
   if (!holder) return;
   const keys = v.order.slice(-v.limit),
-    visible = new Set(keys),
+    renderedItems = new Map(),
     nodes = [],
     groups = [];
   v.processGroups ??= new Map();
@@ -1579,6 +1632,7 @@ function chatRenderProcessGroups() {
     if (!item) continue;
     if (!item.node) chatCreateItem(item);
     chatUpdateItem(item);
+    renderedItems.set(key, item);
     const compact = ['tool', 'reasoning'].includes(item.kind) && !chatProcessFailure(item);
     if (!compact) {
       group = null;
@@ -1635,12 +1689,13 @@ function chatRenderProcessGroups() {
   chatReconcileNodes(holder, nodes);
   const retained = new Set(groups.map((g) => g.node.dataset.groupKey));
   for (const key of v.processGroups.keys()) if (!retained.has(key)) v.processGroups.delete(key);
-  for (const [key, item] of v.items)
-    if (item.node && !visible.has(key)) {
-      item.node.remove();
+  for (const [key, item] of v.renderedItems || [])
+    if (renderedItems.get(key) !== item) {
+      item.node?.remove();
       item.node = null;
       item.body = null;
     }
+  v.renderedItems = renderedItems;
 }
 function chatFlush() {
   const c = ChatUI;
@@ -2313,7 +2368,7 @@ async function chatUpload(files) {
     chatStatus('请先选择项目');
     return;
   }
-  if (v.files.length + files.length > 10) {
+  if (v.files.length + files.length > CHAT_ATTACHMENT_MAX_COUNT) {
     chatStatus('每条消息最多 10 个附件', true);
     return;
   }
@@ -2356,7 +2411,8 @@ async function chatUploadEntry(
   entry.errorMessage = '';
   if (visible()) chatFiles();
   try {
-    if (!file.size || file.size > 20 * 1024 * 1024) throw new Error('每个附件须为 1 字节–20 MiB');
+    if (!file.size || file.size > CHAT_ATTACHMENT_MAX_BYTES)
+      throw new Error('每个附件须为 1 字节–20 MiB');
     const raw = new Uint8Array(await file.arrayBuffer()),
       sha256 = await nativeSha256(raw);
     if (!valid()) return;
@@ -2377,7 +2433,7 @@ async function chatUploadEntry(
     while (reply.received < raw.length) {
       if (!valid()) return;
       const offset = reply.received,
-        part = raw.slice(offset, offset + 65536);
+        part = raw.slice(offset, offset + CHAT_UPLOAD_CHUNK_BYTES);
       let binary = '';
       for (const byte of part) binary += String.fromCharCode(byte);
       const payload = { file: id, offset, data: btoa(binary), sha256: await nativeSha256(part) };

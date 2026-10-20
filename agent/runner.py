@@ -3,6 +3,7 @@ import asyncio
 import contextlib
 import codecs
 import json
+import logging
 import hashlib
 import ipaddress
 import math
@@ -47,6 +48,9 @@ from shared.tool_protocol import advertisement, negotiate, validate_call_epoch
 from shared.execution_policy import (enforce_argv, agent_blocks_codex, agent_blocks_computer,
     computer_denial, codex_computer_target, DENIAL_MESSAGE, COMPUTER_DENIAL_MESSAGE, COMPUTER_DENIAL_CODE)
 from shared.instance_lock import InstanceLock
+
+
+LOGGER = logging.getLogger("codepier.agent")
 
 
 class Agent:
@@ -214,7 +218,7 @@ class Agent:
             # Performance preferences are not a transport prerequisite. Preserve
             # the last good limits/revision and keep receipt recovery available.
             if not self.scheduler_error:
-                print("[Agent] 调度设置无效，保留原限额；认证连接继续使用。", file=sys.stderr)
+                LOGGER.warning("调度设置无效，保留原限额；认证连接继续使用。")
             self.scheduler_error = "SCHEDULER_SETTINGS_INVALID"
             return False
         self.scheduler_requested = requested
@@ -251,9 +255,9 @@ class Agent:
                 if current != old:
                     c = self.load_config()
                     if c.get("state_dir", str(self.config_path.parent / "state")) != self.config.get("state_dir", str(self.config_path.parent / "state")):
-                        print("[Agent] state_dir 更改需要手动重启。", file=sys.stderr)
+                        LOGGER.warning("state_dir 更改需要手动重启。")
                     if c.get("device_id") != self.config["device_id"] or c.get("secret") != self.config["secret"]:
-                        print("[Agent] 设备身份/密钥更改需要停止 Agent 后重新启动；未在运行中切换身份。", file=sys.stderr)
+                        LOGGER.warning("设备身份/密钥更改需要停止 Agent 后重新启动；未在运行中切换身份。")
                         old = current
                         continue
                     # Do not pretend a hot-reloaded state_dir changed the open journal.
@@ -267,11 +271,11 @@ class Agent:
                     self.config = c
                     self.engine.config = c
                     old = current
-                    print("[Agent] 配置已重新加载，连接新的面板地址。", flush=True)
+                    LOGGER.info("配置已重新加载，连接新的面板地址。")
                     if self.socket:
                         await self.socket.close(code=1000, reason="Configuration reloaded")
             except (ValueError, OSError, TypeError, KeyError) as exc:
-                print(f"[Agent] 新配置无效，继续使用原配置：{exc}", file=sys.stderr)
+                LOGGER.warning("新配置无效，继续使用原配置（%s）", type(exc).__name__)
 
     async def connect_once(self):
         from agent.project_runtime import advertised_profiles
@@ -302,7 +306,7 @@ class Agent:
             self.socket, self.channel = socket, channel
             self.runtime_reload_pending = False
             self.connection_number += 1
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S%z')}] [Agent] 已连接 {base}；设备 {self.config['device_id']}；授权目录 {len(self.config['allowed_roots'])} 个。", flush=True)
+            LOGGER.info("已连接面板；设备 %s；授权目录 %s 个。", self.config["device_id"], len(self.config["allowed_roots"]))
             self.output_wake.set()
             # heartbeat sends the outbox concurrently with the socket reader,
             # so result ACKs are processed during backlog recovery.
@@ -368,7 +372,7 @@ class Agent:
                             except Exception as exc:
                                 # Keep the durable result in the outbox. A repeated Hub ACK
                                 # will retry the handoff without creating another operation.
-                                print(f"[Agent] 生命周期操作交接失败，将等待重试：{type(exc).__name__}", file=sys.stderr, flush=True)
+                                LOGGER.warning("生命周期操作交接失败，将等待重试（%s）", type(exc).__name__)
                                 continue
                         self.journal.ack(data["id"])
                         if lifecycle_started:
@@ -423,7 +427,7 @@ class Agent:
     def kill_done(self, task):
         self.kill_tasks.discard(task)
         if not task.cancelled() and task.exception():
-            print(f"[Agent] 停止任务进程失败：{type(task.exception()).__name__}", file=sys.stderr, flush=True)
+            LOGGER.error("停止任务进程失败（%s）", type(task.exception()).__name__)
 
     def job_done(self, id, task):
         self.jobs.pop(id, None)
@@ -431,7 +435,7 @@ class Agent:
         self.cancelled.discard(id)
         if not task.cancelled() and task.exception():
             # Storage errors must be observable; never send success without a durable result.
-            print(f"[Agent] 操作 {id} 结果持久化异常：{type(task.exception()).__name__}", file=sys.stderr, flush=True)
+            LOGGER.error("操作 %s 结果持久化异常（%s）", id, type(task.exception()).__name__)
 
     @staticmethod
     def _projects_overlap(left: Path, right: Path) -> bool:
@@ -778,7 +782,7 @@ class Agent:
                 # Keep the real result in this job while a transient disk fault
                 # recovers; reporting running forever after dropping it loses
                 # the only safe way to acknowledge an already executed write.
-                print(f"[Agent] 操作 {id} 结果暂时无法持久化，将重试：{type(exc).__name__}", file=sys.stderr, flush=True)
+                LOGGER.warning("操作 %s 结果暂时无法持久化，将重试（%s）", id, type(exc).__name__)
                 if self.stop_event.is_set():
                     raise
                 try:
@@ -1224,7 +1228,7 @@ class Agent:
                 except asyncio.CancelledError:
                     break
                 except Exception as exc:
-                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S%z')}] [Agent] 连接断开：{type(exc).__name__}: {str(exc)[:200]}", file=sys.stderr, flush=True)
+                    LOGGER.warning("连接断开（%s）；将按原连接退避策略恢复", type(exc).__name__)
                 if self.connection_number != before:
                     delay = 1
                 try:

@@ -4,6 +4,7 @@ import getpass
 import json
 from shared.config import ConfigurationError, DEFAULT_HUB_PORT
 from hub.config import HubConfig
+from shared.process_logging import configure_logging
 from shared.instance_lock import InstanceLock
 import os
 import sqlite3
@@ -77,11 +78,13 @@ def main():
             parser.error("端口范围应为 1–65535")
         os.environ["HUB_PORT"] = str(args.port)
         try:
-            HubConfig.from_env()
+            config = HubConfig.from_env()
+            configure_logging(config.log_level)
         except ConfigurationError as exc:
             parser.error(str(exc))
         import uvicorn
         uvicorn.run("hub.app:create_app", factory=True, host=args.host, port=args.port, workers=1,
+                    log_level=config.log_level,
                     ws_max_size=16 * 1024 * 1024, proxy_headers=True,
                     forwarded_allow_ips=os.getenv("FORWARDED_ALLOW_IPS", "127.0.0.1"),
                     access_log=False, timeout_graceful_shutdown=10)

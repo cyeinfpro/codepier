@@ -13,6 +13,10 @@ from hub.roles import validate_role_consent
 from hub import iam
 
 SESSION_SECONDS = 12 * 3600
+LOGIN_ATTEMPT_WINDOW_SECONDS = 300
+LOGIN_IP_ATTEMPT_LIMIT = 8
+LOGIN_ACCOUNT_ATTEMPT_LIMIT = 8
+LOGIN_ATTEMPT_STORAGE_LIMIT = 4096
 
 
 class Auth:
@@ -116,12 +120,25 @@ class Auth:
     def _login_attempt(self, request, username):
         ip = request.client.host if request.client else "unknown"
         now = time.time()
-        with self.store.lock, self.store.db:
-            self.store.execute("DELETE FROM login_attempts WHERE at<?", (now - 900,))
-            count = self.store.one("SELECT count(*) AS n FROM login_attempts WHERE ip=? AND at>?", (ip, now - 300))["n"]
-            if count >= 8:
+        username_hash = digest(username)
+        cutoff = now - LOGIN_ATTEMPT_WINDOW_SECONDS
+        # BEGIN IMMEDIATE makes admission atomic across independent Hub Store
+        # connections. Reserve before password hashing, including unknown users;
+        # denied probes do not add records or extend the bounded window.
+        with self.store.transaction():
+            self.store.db.execute("DELETE FROM login_attempts WHERE at<?", (now - 900,))
+            self.store.db.execute("DELETE FROM login_account_attempts WHERE at<=?", (cutoff,))
+            count = self.store.one("SELECT count(*) AS n FROM login_attempts WHERE ip=? AND at>?", (ip, cutoff))["n"]
+            account_count = self.store.one("SELECT count(*) AS n FROM login_account_attempts WHERE username_hash=? AND at>?", (username_hash, cutoff))["n"]
+            if count >= LOGIN_IP_ATTEMPT_LIMIT or account_count >= LOGIN_ACCOUNT_ATTEMPT_LIMIT:
                 raise DevError("LOGIN_THROTTLED", "登录尝试过多，5 分钟后重试", 429)
-            self.store.execute("INSERT INTO login_attempts VALUES (?,?)", (ip, now))
+            # A rotating-username attack must not grow persistent state forever.
+            # Refuse new admissions at capacity; do not evict live security data.
+            total = self.store.one("SELECT count(*) AS n FROM login_account_attempts")["n"]
+            if total >= LOGIN_ATTEMPT_STORAGE_LIMIT:
+                raise DevError("LOGIN_THROTTLED", "登录服务繁忙，请稍后重试", 429)
+            self.store.db.execute("INSERT INTO login_attempts VALUES (?,?)", (ip, now))
+            self.store.db.execute("INSERT INTO login_account_attempts(username_hash,at) VALUES (?,?)", (username_hash, now))
             return ip, self.store.one("SELECT u.*,s.local_login FROM users u JOIN iam_users s ON s.user_id=u.id WHERE username=?", (username,))
 
 
@@ -132,6 +149,7 @@ class Auth:
             if not current or current["password_hash"] != user["password_hash"]:
                 raise DevError("LOGIN_FAILED", "密码已变化，请重新登录", 401)
             self.store.db.execute("DELETE FROM login_attempts WHERE ip=?", (ip,))
+            self.store.db.execute("DELETE FROM login_account_attempts WHERE username_hash=?", (digest(username),))
             self.store.db.execute("DELETE FROM sessions WHERE expires<=?", (now,))
             security = iam.user_security(self.store, user['id'])
             if not security['local_login']:
@@ -160,7 +178,9 @@ class Auth:
             hash_owns_slot = True
             valid = await asyncio.shield(verification)
             if not user or not valid:
-                await self.store.run(self.store.audit, "anonymous", "auth.login", username[:80], "failed", {"ip": ip})
+                # Preserve correlation without logging raw, unauthenticated input
+                # (the username field can accidentally contain a password).
+                await self.store.run(self.store.audit, "anonymous", "auth.login", "username-sha256:" + digest(username), "failed", {"ip": ip})
                 raise DevError("LOGIN_FAILED", "用户名或密码不正确", 401)
             return await self.store.run(self._login_session, user, ip, username)
         finally:

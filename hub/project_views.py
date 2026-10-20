@@ -4,6 +4,7 @@ import hashlib
 import json
 import time
 import unicodedata
+from hub import iam
 from hub.principal import refresh_principal
 from shared.util import DevError
 
@@ -23,19 +24,36 @@ def authorized_projects(runtime, principal):
     return visible
 
 
+@iam.read_decision
 def list_projects(runtime, args, principal):
-    visible = authorized_projects(runtime, principal)
+    principal = refresh_principal(runtime.store, principal)
     normalize = lambda value: unicodedata.normalize('NFKC', value).casefold()
     query = normalize(args.get('query', ''))
-    matches = [row for row in visible if query in normalize(row['alias'])
-               or query in normalize(row.get('description', '')) or query == normalize(row['id'])]
-    matches.sort(key=lambda row: (normalize(row['alias']), row['id']))
     offset, limit = args.get('offset', 0), args.get('limit', 30)
-    end = min(offset + limit, len(matches))
+    total, page, online = 0, [], {}
+    # SQL keyset pages bound candidate memory. Role checks must precede both
+    # pagination and counts, and only returned rows need connection lookups.
+    for row in runtime.iter_project_rows(principal):
+        try:
+            runtime.authorize(principal, 'read', project_id=row['id'])
+        except DevError as exc:
+            if exc.status in {403, 404}:
+                continue
+            raise
+        if not (query in normalize(row['alias'])
+                or query in normalize(row.get('description', '')) or query == normalize(row['id'])):
+            continue
+        if offset <= total < offset + limit:
+            device_id = row['device_id']
+            if device_id not in online:
+                online[device_id] = runtime.online(device_id)
+            page.append(runtime.project_public(row, online=online[device_id]))
+        total += 1
+    end = min(offset + limit, total)
     now = time.time()
     return {'projects': [{**row, 'connection': {'state': 'online' if row['online'] else 'offline',
-            'source': 'hub_connection', 'observed_at': now}} for row in matches[offset:end]],
-        'total': len(matches), 'offset': offset, 'next_offset': end if end < len(matches) else None,
+            'source': 'hub_connection', 'observed_at': now}} for row in page],
+        'total': total, 'offset': offset, 'next_offset': end if end < total else None,
         'view_version': 1, 'query': args.get('query', '')}
 
 

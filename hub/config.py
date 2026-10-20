@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 from shared.config import DEFAULT_HUB_PORT, DEFAULT_PUBLIC_URL, ConfigurationError, RuntimeConfig, env_bool, env_csv, env_int, env_timezone
 from shared.util import normalize_url
+from shared.process_logging import process_log_level
 
 # The one provider a deployment may declare through CODEPIER_OIDC_*.
 OIDC_SEED_PROVIDER_ID = "idp_env"
@@ -111,6 +112,7 @@ class HubConfig:
     # MCP/OAuth public origin. Keeping this separate makes the redirect URI
     # deterministic before an administrator or provider exists.
     oidc_public_url: str = ""
+    log_level: str = "info"
 
     @classmethod
     def from_env(cls) -> HubConfig:
@@ -130,4 +132,4 @@ class HubConfig:
             raise ConfigurationError("CODEPIER_OIDC_BOOTSTRAP_ADMIN must be off or first-login")
         return cls(port=port, timezone=timezone, public_url=public_url, runtime=RuntimeConfig.from_env(),
                    oidc_seed=OIDCSeed.from_env(), oidc_public_url=oidc_public_url,
-                   oidc_bootstrap_admin=bootstrap == "first-login")
+                   oidc_bootstrap_admin=bootstrap == "first-login", log_level=process_log_level())

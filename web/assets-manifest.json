@@ -1,5 +1,5 @@
 {
-  "version": "1.30.2",
+  "version": "1.30.3",
   "algorithm": "sha256",
   "assets": {
     "access-profiles.css": {
@@ -43,8 +43,8 @@
       "bytes": 10298
     },
     "chat-chrome.js": {
-      "sha256": "c165024d2bf8b2e1201e91a592cc454f93ae762dd55ce3a3084d0000d13de651",
-      "bytes": 25413
+      "sha256": "1a714be40195c224e7ba51f93674dbc08debae8e2887993608ea45d3daaae13a",
+      "bytes": 25376
     },
     "chat-history.js": {
       "sha256": "59a808aa9972f931c1ce793840bf1768e95774576108ee3d48a4b083d47dfc70",
@@ -59,12 +59,12 @@
       "bytes": 32449
     },
     "chat.css": {
-      "sha256": "8b68063b61d1d2c3520b09ff35cae49657a2f3156663218f1cade06f85bde6a0",
-      "bytes": 74061
+      "sha256": "350edf6ab82805cdb1ae935e888f5b0258c86a9125ca7a9f1e39ebd365cece42",
+      "bytes": 74111
     },
     "chat.js": {
-      "sha256": "6fc11c61eef94017bbdc96c5a882187c2ba2959f75c007c5619c713abab192fc",
-      "bytes": 93712
+      "sha256": "4bde869b6725f01c8fbe9e1cc80324f5a98d06d35c0a5d3393de6d90c95192cd",
+      "bytes": 95939
     },
     "collaboration-channels.css": {
       "sha256": "1eab0e3970c7936e5a0d45ed337dd8d3a7183937c638932480395d64755fbfc4",

@@ -173,6 +173,12 @@ def main():
             public["shell"] = {**public["shell"], "env": {k: "<redacted>" for k in public["shell"].get("env", {})}}
         print(json.dumps(public, ensure_ascii=False, indent=2))
     else:
+        from shared.config import ConfigurationError
+        from shared.process_logging import configure_logging
+        try:
+            configure_logging()
+        except ConfigurationError as exc:
+            parser.error(str(exc))
         from agent.runner import Agent
         async def run():
             from agent.service_watchdog import is_supervised, watch_event_loop

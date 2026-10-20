@@ -264,7 +264,8 @@ function chatSyncChrome() {
   $('#chat-inspector-toggle').setAttribute('aria-expanded', String(!!c.inspector));
   const send = $('#chat-send');
   const target = chatProjectInfo(c.project, c.selected || {}),
-    localCommand = chatLocalCommand(v.draft) && !v.pending;
+    localCommand = chatLocalCommand(v.draft) && !v.pending,
+    draftLimit = chatDraftLimit(v);
   const processBlocked = {
     stopping: '正在等待会话进程退出',
     orphaned: '会话进程状态待核实，请先检查节点',
@@ -272,6 +273,7 @@ function chatSyncChrome() {
   const blocked =
     (v.resumeBusy && '正在恢复会话') ||
     (v.pending && '上一条消息待确认，请重试原请求') ||
+    draftLimit ||
     (!localCommand &&
       (processBlocked ||
         target.reason ||
@@ -298,9 +300,7 @@ function chatSyncChrome() {
   $('#chat-title').title = c.selected?.title || '新对话';
   const activity = $('#chat-activity');
   if (activity) {
-    const approval = [...v.items.values()].some(
-      (item) => item.kind === 'approval' && !item.data.resolved && !item.answered,
-    );
+    const approval = chatHasPendingApproval(v);
     activity.hidden = !v.active && !approval;
     activity.dataset.state = approval ? 'approval' : 'working';
     const label = approval

@@ -2,13 +2,14 @@ name: codepier
 services:
   hub:
     build: "${CODEPIER_HUB_SOURCE:-.}"
-    image: "${CODEPIER_HUB_IMAGE:-codepier:1.30.2}"
+    image: "${CODEPIER_HUB_IMAGE:-codepier:1.30.3}"
     restart: unless-stopped
     init: true
     ports:
       - "${HUB_BIND_ADDRESS:-0.0.0.0}:${HUB_PORT:-8765}:8765"
     environment:
       CODEPIER_MCP_GATEWAY: ${CODEPIER_MCP_GATEWAY:-1}
+      CODEPIER_LOG_LEVEL: "${CODEPIER_LOG_LEVEL:-info}"
       CODEPIER_FILE_IMPORT_STREAMING: "${CODEPIER_FILE_IMPORT_STREAMING:-true}"
       CODEPIER_NATIVE_FILE_RELAY: "${CODEPIER_NATIVE_FILE_RELAY:-true}"
       CODEPIER_NATIVE_FILE_PROVIDERS: "${CODEPIER_NATIVE_FILE_PROVIDERS:-[]}"

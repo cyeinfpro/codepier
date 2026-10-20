@@ -3131,7 +3131,9 @@ html[data-appearance='dark'] .chat-workspace .chat-message-user .chat-message-bo
 .chat-compose-controls .chat-model-picker {
   min-width: 0;
 }
-.chat-composer-note:has(#chat-status[data-quiet='true']):has(#chat-retry[hidden]) {
+.chat-composer-note:has(#chat-status[data-quiet='true']):has(#chat-retry[hidden]):not(
+    :has(#chat-text-limit:not([hidden]))
+  ) {
   display: none;
 }
 @media (min-width: 761px) and (max-width: 1100px) {

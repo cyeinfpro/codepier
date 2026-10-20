@@ -183,9 +183,10 @@ def test_mapping_changes_and_unknown_agent_are_not_false_approval(workspace, hub
 
 def test_authorization_precedes_search_pagination_and_counts(hub_fixture):
     runtime, principal, _ = hub_fixture
-    rows = [dict(id=i, alias=name, description='', online=True) for i, name in
-            [('hidden', 'MCP private'), ('b', 'mcp Z'), ('a', 'MCP A')]]
-    runtime.list_projects = lambda caller: rows
+    rows = [dict(id=i, alias=name, description='', device_id='node', online=True) for i, name in
+            [('a', 'MCP A'), ('hidden', 'MCP private'), ('b', 'mcp Z')]]
+    runtime.iter_project_rows = lambda caller: iter(rows)
+    runtime.project_public = lambda row, **kwargs: row
     def authorize(caller, action, **kwargs):
         if kwargs['project_id'] == 'hidden':
             raise DevError('ROLE_POLICY_DENIED', 'denied', 403)

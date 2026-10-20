@@ -171,6 +171,8 @@ class Store:
         migrate_tasks(self.db)
         from hub.collaboration.schema import migrate as migrate_collaboration
         migrate_collaboration(self.db)
+        from hub.auth_schema import migrate as migrate_auth
+        migrate_auth(self.db)
 
     @contextmanager
     def transaction(self, *, immediate=True):

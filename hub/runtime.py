@@ -41,6 +41,7 @@ from shared.execution_policy import (DENIAL_MESSAGE, COMPUTER_DENIAL_MESSAGE, CO
 
 ACTIVE = {"queued", "running", "reconnecting", "cancelling"}
 TERMINAL = {"succeeded", "failed", "cancelled", "needs_review", "interrupted"}
+PROJECT_DISCOVERY_PAGE_SIZE = 100
 
 
 def alias_key(value: str):
@@ -96,6 +97,10 @@ class Connection:
             # A rejected guard has not packed ciphertext or advanced its sequence.
             if before_send is not None and not await before_send():
                 return False
+            # A replacement can fence this socket while the database guard is
+            # awaiting its worker result. Do not pack or send on the old channel.
+            if self.unusable:
+                raise ConnectionError("Authenticated channel is no longer usable")
             try:
                 await asyncio.wait_for(self.socket.send_text(self.channel.pack(body)), 4)
             except BaseException:
@@ -205,6 +210,9 @@ class Runtime:
                     (getattr(connection, "device_secret", None) is None or connection.device_secret == device["secret"]))
 
     def _detach_fence(self, device_id, connection):
+        # Production attach/detach runs on the owning event loop. Keep this
+        # identity check and removal synchronous: an old socket must never
+        # remove the authenticated replacement while awaiting its cleanup.
         if self.connections.get(device_id) is not connection:
             return False
         self.connections.pop(device_id, None)
@@ -267,18 +275,58 @@ class Runtime:
         self.authorize(principal, 'read', project_id=row['id'])
         return row
 
-    def project_public(self, p):
-        return {k: p[k] for k in ("id", "alias", "device_id", "root", "description", "mode", "allow_tasks", "device_name") if k in p} | {"online": self.online(p["device_id"]), "allow_tasks": bool(p.get("allow_tasks"))}
+    def project_public(self, p, *, online=None):
+        return {k: p[k] for k in ("id", "alias", "device_id", "root", "description", "mode", "allow_tasks", "device_name") if k in p} | {"online": self.online(p["device_id"]) if online is None else online, "allow_tasks": bool(p.get("allow_tasks"))}
+
+    @iam.read_decision
+    def _project_rows_page(self, principal, after):
+        principal = refresh_profile_principal(self.store, principal)
+        self.authorize(principal, 'read')
+        where, parameters = 'p.space_id=?', [principal.space_id]
+        if not principal.admin and '*' not in principal.projects:
+            if not principal.projects:
+                return []
+            # JSON membership avoids both interpolated IDs and SQLite's bound
+            # variable limit when a credential contains many project IDs.
+            where += ' AND p.id IN (SELECT value FROM json_each(?))'
+            parameters.append(json.dumps(principal.projects))
+        if after is not None:
+            where += ' AND (p.alias_key>? OR (p.alias_key=? AND p.id>?))'
+            parameters.extend((after[0], after[0], after[1]))
+        parameters.append(PROJECT_DISCOVERY_PAGE_SIZE)
+        return self.store.all('SELECT p.*,d.name AS device_name FROM projects p '
+            'JOIN devices d ON d.id=p.device_id WHERE ' + where +
+            ' ORDER BY p.alias_key,p.id LIMIT ?', tuple(parameters))
+
+    def iter_project_rows(self, principal):
+        """Bounded, ordered candidates; callers still apply per-project roles."""
+        after = None
+        while True:
+            rows = self._project_rows_page(principal, after)
+            if not rows:
+                return
+            yield from rows
+            if len(rows) < PROJECT_DISCOVERY_PAGE_SIZE:
+                return
+            after = rows[-1]['alias_key'], rows[-1]['id']
 
     @iam.read_decision
     def list_projects(self, principal):
-        principal = refresh_profile_principal(self.store, principal)
-        self.authorize(principal, 'read')
-        return [self.project_public(p) for p in self.store.all("SELECT p.*,d.name AS device_name FROM projects p JOIN devices d ON d.id=p.device_id WHERE p.space_id=? ORDER BY p.alias_key", (principal.space_id,)) if self.visible_project(p, principal)]
+        # Legacy panel/internal consumers still receive the complete list.
+        # Connection state is a request-local observation, never a grant cache.
+        result, online = [], {}
+        for row in self.iter_project_rows(principal):
+            device_id = row['device_id']
+            if device_id not in online:
+                online[device_id] = self.online(device_id)
+            result.append(self.project_public(row, online=online[device_id]))
+        return result
 
     @iam.read_decision
     def operation_row(self, id: str, principal: Principal, *, status_only=False):
         principal = refresh_profile_principal(self.store, principal)
+        # These two projections are code-defined; operation IDs remain bound
+        # parameters and both projections pass the same live record/IAM checks.
         columns = "id,grant_id,project_id,device_id,tool,state,space_id,owner_user_id,visibility,args_summary" if status_only else "*"
         row = self.store.one(f"SELECT {columns} FROM operations WHERE id=?", (id,))
         principal = iam.require_record(self.store, principal, row)
