@@ -12,6 +12,7 @@ from hub import iam
 from hub.iam_read import read_decision
 from hub.runtime import Principal
 from hub.store import Store
+from shared.crypto import digest
 from shared.util import DevError
 from tests.test_iam_integration import team as team, shared_role
 from tests.test_roles import role, must
@@ -173,7 +174,13 @@ def test_freeform_failed_login_target_cannot_select_a_space(team,target):
     response=b['bob'].post('/api/login',json={'username':target,'password':'not-a-real-password'})
     assert response.status_code==401
     event=app.state.store.one("SELECT * FROM audit WHERE action='auth.login' AND actor='anonymous' ORDER BY id DESC LIMIT 1")
-    assert event['target']==target and event['space_id']=='legacy' and event['owner_user_id'] is None
+    # Login input is unauthenticated and can even contain a password; audit
+    # correlation must be deterministic without persisting its raw value.
+    assert event['target'] == 'username-sha256:' + digest(target)
+    assert target not in event['target']
+    # The untyped audit target must never be resolved to a project, operation
+    # or device and therefore cannot acquire that resource's team scope.
+    assert event['space_id'] == 'legacy' and event['owner_user_id'] is None
     team_log=b['owner'].get('/api/audit').json()['events']
     assert not any(row['id']==event['id'] for row in team_log)
 
