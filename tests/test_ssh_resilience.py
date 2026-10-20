@@ -13,7 +13,7 @@ import time
 
 import pytest
 
-from agent.ssh import SSHDiagnostics, prepare_ssh
+from agent.ssh import SSHDiagnostics, prepare_ssh, run_ssh_attempts
 from shared.contracts import SSHExec
 from tests.test_shell import shell_agent  # noqa: F401
 from tests.test_ssh import PASSWORD, request
@@ -182,7 +182,39 @@ async def test_deadline_includes_retry_backoff(shell_agent, tmp_path, monkeypatc
     assert time.monotonic() - started < 4
     assert data['timed_out'] and data['ssh_error'] == 'SSH_TIMEOUT'
     assert data['ssh_diagnostics']['attempt_count'] == 1
-    assert (root / 'connection-count').read_text() == '1'
+    # Under high runner load the one-second deadline may expire before the
+    # nested SSH fixture interpreter starts. Either way, it cannot reconnect.
+    counter = root / 'connection-count'
+    assert not counter.exists() or counter.read_text() == '1'
+
+
+@pytest.mark.asyncio
+async def test_retry_backoff_deadline_after_a_proven_auth_failure(monkeypatch):
+    # Test the actual backoff path without relying on OS subprocess startup
+    # to fit inside a tight wall-clock deadline on a saturated CI runner.
+    monkeypatch.setattr('agent.ssh.SSH_RETRY_DELAYS', (5.0, 5.0))
+    calls = []
+    events = []
+
+    async def attempt(remaining):
+        calls.append(remaining)
+        return {'exit_code': 255, 'output': '', 'ssh_error': 'SSH_AUTH_FAILED',
+                'ssh_diagnostics': {'retryable': True, 'authentication': 'failed',
+                                    'failure_stage': 'authentication'}}
+
+    def record(stage, **detail):
+        events.append((stage, detail))
+
+    started = time.monotonic()
+    data = await run_ssh_attempts(attempt, timeout=1, cancelled=lambda: False,
+                                  stopping=lambda: False, record=record)
+    assert len(calls) == 1
+    assert data['timed_out'] and data['ssh_error'] == 'SSH_TIMEOUT'
+    assert data['ssh_diagnostics']['attempt_count'] == 1
+    assert data['ssh_diagnostics']['retry_stop_reason'] == 'timeout'
+    assert [stage for stage, _ in events].count('ssh_retry_wait') == 1
+    assert [stage for stage, _ in events].count('ssh_attempt') == 1
+    assert time.monotonic() - started < 4
 
 
 @pytest.mark.asyncio
