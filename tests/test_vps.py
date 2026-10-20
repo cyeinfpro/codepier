@@ -342,6 +342,28 @@ def test_mcp_scope_and_assignments(vps_stack):
     assert denied['isError'] and denied['structuredContent']['error']['code'] == 'VPS_NOT_FOUND'
 
 
+def test_saved_vps_default_wait_returns_final_result_after_bounded_retries(vps_stack):
+    s = vps_stack
+    v = create_remote(s, password='wrong')
+    call = execute_args('ProjectAlpha', v['id'], command='touch auth-must-not-execute')
+    call.pop('yield_seconds')
+    rendered = s.mcp('exec', call)
+    receipt = rendered['structuredContent']
+    assert rendered['isError'] and receipt['state'] == 'failed' and not receipt['pending']
+    assert receipt['attempts'] == 1
+    diagnostic = receipt['result']['data']['ssh_diagnostics']
+    assert diagnostic['attempt_count'] == diagnostic['attempt_limit'] == 3
+    assert diagnostic['credential_source'] == 'saved_vps' and diagnostic['retry_exhausted']
+    assert not (s.projectalpha / 'auth-must-not-execute').exists()
+    repeated = s.mcp('exec', call)['structuredContent']
+    assert repeated['operation_id'] == receipt['operation_id']
+    assert s.poll(repeated['operation_id'])['result']['data']['ssh_diagnostics'] == diagnostic
+    # Prior clients normalized the omitted wait to 1. Changing only our response
+    # wait must not conflict with that original persisted execution intent.
+    previous_default = s.mcp('exec', {**call, 'yield_seconds': 1})['structuredContent']
+    assert previous_default['operation_id'] == receipt['operation_id']
+
+
 def test_saved_ssh_remote_failure_and_timeout(vps_stack):
     s = vps_stack;v = create_remote(s)
     for command,timeout in [('exit 7',10),('sleep 5',1)]:

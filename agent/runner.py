@@ -887,20 +887,28 @@ class Agent:
                 and TOOLS['ssh_exec'].model.model_validate(project['_core_ssh']).model_dump() == args)
             if project.get('_runtime_requirement') or mode == 'container_v1' or (mode != 'native_compat' and not saved_transport):
                 raise DevError('RUNTIME_REMOTE_TARGET_UNSUPPORTED', 'This project runtime does not support native SSH transport; choose a separately authorized compatible target', 403)
-            from agent.ssh import prepare_ssh, ssh_error
-            command, env = prepare_ssh(self.config, project, spec, args)
+            from agent.ssh import prepare_ssh, SSHDiagnostics, run_ssh_attempts
+            from agent.project_runtime import legacy_environment
             timeout = self.bounded_timeout(project, args['timeout_seconds'])
             # SSH launches a native transport to the selected remote target;
             # it must not be described as the local clean/container workload.
             runner = self._run_process_account if saved_transport else self.run_process
-            result = await runner(id, command, root, timeout, stream=True,
-                                  task_env=env, full_access=True,
-                                  inherit_env=self.config['shell']['inherit_env'], execution_project=project)
+            async def attempt(remaining):
+                async with SSHDiagnostics(self.state_dir) as diagnostics:
+                    command, env = prepare_ssh(self.config, project, spec, args, diagnostic_path=diagnostics.path)
+                    result = await runner(id, command, root, remaining, stream=True,
+                                          task_env=env, full_access=True,
+                                          inherit_env=self.config['shell']['inherit_env'], execution_project=project)
+                    return diagnostics.complete(result,
+                        environment=legacy_environment(self.config['shell']['inherit_env'], env, full_access=True),
+                        credential_source='saved_vps' if saved_transport else 'explicit_password')
+            result = await run_ssh_attempts(attempt, timeout=timeout,
+                cancelled=lambda: id in self.cancelled or self.journal.is_cancelled(id),
+                stopping=self.stop_event.is_set, record=lambda stage, **detail: self.phase(id, stage, **detail))
             if saved_transport:
                 result['transport_runtime'] = {'mode': 'native_ssh_transport',
                     'target': saved_vps_target, 'isolation': 'none', 'grants_authority': False}
-            return {**result, 'host': args['host'], 'port': args['port'], 'username': args['username'],
-                    'ssh_error': ssh_error(result)}
+            return {**result, 'host': args['host'], 'port': args['port'], 'username': args['username']}
         if tool == "shell_exec":
             root, spec = self.engine.root(project, True)
             command, cwd, env = prepare_shell(self.config, project, spec, root, args)

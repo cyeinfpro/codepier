@@ -161,7 +161,7 @@ class Exec(Mutation):
     cwd: str = Field(default='.', min_length=1, max_length=4096)
     env: dict[str, str] = Field(default_factory=dict)
     timeout_seconds: int = Field(default=3600, ge=1, le=86400)
-    yield_seconds: int = Field(default=1, ge=0, le=10)
+    yield_seconds: int = Field(default=1, ge=0, le=10, description='Initial wait: defaults to 10 seconds for saved VPS targets and 1 second for local execution. Longer operations return the original pending receipt; polling never restarts SSH.')
     resources: list[Resource] = Field(default_factory=list, max_length=32)
 
     @model_validator(mode='after')
@@ -260,7 +260,7 @@ def register(tool, tools, schemas):
         'read': (Read, 'read', 'Read UTF-8 (2000 lines/50 KiB) or PNG/JPEG with SHA/continuation. batch: up to 8 options.items in one workspace, 128 KiB response. Other operations: project_query.help.', False, False),
         'write': (Write, 'write', 'Atomic UTF-8 create/replace with required SHA, conflicts, parents and backup. Import/register: project_query.help.', True, False),
         'edit': (Edit, 'write', 'SHA-checked unique edits preserving line endings/BOM; or write/delete/move changes with dry_run. Restore/checkpoint: project_query.help.', True, False),
-        'exec': (Exec, 'execute', 'Run project commands or configured argv tasks under the selected runtime; native execution is not a sandbox. Declare path/service resources. Recover the original operation_id with task_query; configuration alone is not isolation proof.', True, False),
+        'exec': (Exec, 'execute', 'Run project commands or configured argv tasks under the selected runtime; native execution is not a sandbox. Declare path/service resources. Saved VPS SSH retries up to 3 times only for proven pre-command failures; attempt history stays on the original operation. Recover its operation_id with task_query; configuration alone is not isolation proof.', True, False),
         'process': (Process, 'read', 'List or batch get/wait/cancel original operations; waits never restart work. Cancel requires execute. Search/validation options: project_query.help.', True, True),
         'browser': (Browser, 'read', 'Browser status/open/snapshot/action/close. Except status: computer scope and node opt-in. Actions require current lease/observation and mutation key.', True, True),
         'computer': (Computer, 'read', 'Native app status/apps/open/observe/action/close; screenshots are images. Except status: computer scope and node opt-in. Actions require current observation and mutation key.', True, True),

@@ -523,8 +523,14 @@ class Runtime:
             await self.wait_operation(args["operation_id"], principal, args["wait_seconds"])
             return await self.store.run(self._read_after_wait, args, principal)
         receipt = await self.dispatch(name, prepared.arguments, prepared.project, principal, background=name in PROCESS_TOOLS)
-        if name == 'exec' and receipt.get('pending') and prepared.arguments['yield_seconds']:
-            await self.wait_operation(receipt['operation_id'], principal, prepared.arguments['yield_seconds'])
+        yield_seconds = prepared.arguments.get('yield_seconds', 0)
+        # This is response waiting, not execution intent. Keep the normalized
+        # arguments/fingerprint unchanged so pre-upgrade idempotency keys still
+        # recover their original operation. Explicit async waits remain honored.
+        if name == 'exec' and 'yield_seconds' not in raw and prepared.arguments['target'].startswith('vps:'):
+            yield_seconds = 10
+        if name == 'exec' and receipt.get('pending') and yield_seconds:
+            await self.wait_operation(receipt['operation_id'], principal, yield_seconds)
             return await self.store.run(self._read_after_wait, {'operation_id': receipt['operation_id'], 'output_limit': 8000}, principal)
         return receipt
 

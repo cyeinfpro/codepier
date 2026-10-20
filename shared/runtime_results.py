@@ -27,6 +27,14 @@ def failure_context(*, data=None, error=None, operation_id=None, source='agent_o
     code = error.get('code')
     if not isinstance(code, str):
         code = None
+    # SSH returns a completed transport receipt (ok=True), with its diagnostic
+    # in data rather than error. Keep that diagnostic without deriving a caller
+    # platform decision or permission to replay from the command output.
+    if code is None and type(data.get('exit_code')) is int and data['exit_code'] != 0:
+        ssh_code = data.get('ssh_error')
+        if isinstance(ssh_code, str) and ssh_code in {'SSH_AUTH_FAILED', 'SSH_HOST_KEY_CHANGED', 'SSH_HOST_KEY_UNTRUSTED',
+                        'SSH_COMMAND_OR_CONNECTION_FAILED', 'SSH_TIMEOUT', 'SSH_CANCELLED'}:
+            code = ssh_code
     if code in DENIALS or (code and code.startswith(('ROOM_SCOPE_', 'DELEGATION_', 'LEASE_', 'FENCING_'))):
         category = 'codepier_authorization'
     elif code in UNAVAILABLE or outcome.get('state') == 'not_started':
@@ -37,6 +45,12 @@ def failure_context(*, data=None, error=None, operation_id=None, source='agent_o
         category = 'cancelled' if code != 'INTERRUPTED' else 'outcome_unconfirmed'
     elif data.get('timed_out'):
         category = 'command_timeout'
+    elif code == 'SSH_AUTH_FAILED':
+        category = 'ssh_authentication_failed'
+    elif code in {'SSH_HOST_KEY_CHANGED', 'SSH_HOST_KEY_UNTRUSTED'}:
+        category = 'ssh_host_verification_failed'
+    elif code == 'SSH_COMMAND_OR_CONNECTION_FAILED':
+        category = 'ssh_command_or_connection_failed'
     elif type(data.get('exit_code')) is int:
         category = 'succeeded' if data['exit_code'] == 0 else 'command_failed'
     else:

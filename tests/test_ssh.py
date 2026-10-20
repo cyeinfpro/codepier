@@ -38,13 +38,16 @@ def fake_transport(directory):
         'import os,sys\nassert sys.argv[1] == "-e"\nos.execv(sys.argv[2],sys.argv[2:])\n')
     (directory / 'ssh').write_text(f'#!{sys.executable}\n'
         'import os,sys,subprocess,time\n'
+        'from pathlib import Path\n'
         'a=sys.argv[1:]; p=os.environ["SSHPASS"]\n'
         'assert p not in " ".join(a)\n'
         'assert "BatchMode=no" in a and "PubkeyAuthentication=no" in a\n'
         'assert "StrictHostKeyChecking=yes" in a or "StrictHostKeyChecking=accept-new" in a\n'
+        'log=Path(a[a.index("-E")+1])\n'
         'if p == "wrong":\n'
-        ' print("Permission denied, please try again.",flush=True);sys.exit(5)\n'
+        ' log.write_text("root@vps.example.invalid: Permission denied (password).\\n");sys.exit(5)\n'
         'assert a[a.index("--")+1] == "vps.example.invalid"\n'
+        'log.write_text(\'Authenticated to vps.example.invalid using "password".\\n\')\n'
         'print("transport-ready",flush=True)\n'
         'sys.stdout.write(p[:8]);sys.stdout.flush();time.sleep(.3)\n'
         'sys.stdout.write(p[8:]+"\\n");sys.stdout.flush()\n'
@@ -219,6 +222,13 @@ def test_mcp_ssh_recovery_cancel_scope_and_secret_storage(stack):
     # A cold fixture transport can outlast the short synchronous MCP window.
     result = stack.poll(failed, timeout=30)
     assert result['state'] == 'failed' and result['result']['data']['ssh_error'] == 'SSH_AUTH_FAILED'
+    assert result['attempts'] == 1
+    assert result['result']['data']['ssh_diagnostics']['attempt_count'] == 3
+    polled = stack.mcp('task_query', {'operation': 'get', 'operation_ids': [failed], 'include_trace': True})['structuredContent']['operations'][0]
+    assert polled['result']['data']['ssh_diagnostics']['attempt_count'] == 3
+    assert polled['result']['data']['failure_context']['code'] == 'SSH_AUTH_FAILED'
+    assert polled['result']['data']['transport_runtime']['mode'] == 'native_ssh_transport'
+    assert len([event for event in polled['execution']['events'] if event['stage'] == 'ssh_attempt_finished']) == 3
     cancelled = stack.mcp('exec', execution(command='sleep 20; touch must-not-exist'))['structuredContent']['operation_id']
     wait_for(lambda: 'transport-ready' in stack.client.get('/api/operations/' + cancelled).json()['output'])
     stack.mcp('process', {'operation': 'cancel', 'operation_ids': [cancelled]})

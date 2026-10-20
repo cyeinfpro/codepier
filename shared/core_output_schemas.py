@@ -254,7 +254,8 @@ def build_core_output_schemas(legacy, *, include_queries=False):
         'output_truncated': BOOL, 'timed_out': BOOL, 'cancelled': BOOL,
         'duration_ms': INT, 'command_ok': BOOL, 'cwd': STR, 'shell': array(STR),
         'command': array(STR), 'host': STR, 'port': INT, 'username': STR,
-        'ssh_error': nullable(STR), 'runtime': OBJ, 'failure_context': OBJ, 'continuation': OBJ,
+        'ssh_error': nullable(STR), 'ssh_diagnostics': OBJ, 'transport_runtime': OBJ,
+        'runtime': OBJ, 'failure_context': OBJ, 'continuation': OBJ,
         'log_ref': OBJ, 'diagnostics': array(OBJ), 'execution_isolation': nullable(OBJ),
         'runtime_cleanup': OBJ, 'runtime_outcome': OBJ}, ('operation_id', 'exit_code', 'output'))
 

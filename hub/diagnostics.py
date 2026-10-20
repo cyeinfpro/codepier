@@ -9,15 +9,19 @@ from shared.core_contracts import CORE_TOOLS
 from shared.util import DevError
 from shared.computer_diagnostics import COMPUTER_STAGES, safe_detail
 from shared.scheduler_config import QUEUE_REASONS, safe_queue_detail
+from shared.ssh_diagnostics import SSH_STAGES, safe_ssh_detail
 
 LABELS = {'hub_received':'Hub 已接收', 'dispatched':'已投递设备', 'accepted':'Agent 已接收',
           'waiting_resource':'等待共享文件或服务', 'waiting_project':'等待项目读写锁', 'waiting_worker':'等待本机执行槽', 'executing':'本机正在执行',
           'persisting':'结果正在落盘', 'result_ready':'结果已在本机保存', 'hub_completed':'Hub 已保存最终结果'}
 LABELS.update(COMPUTER_STAGES)
+LABELS.update(SSH_STAGES)
 AGENT_STAGES = set(LABELS)-{'hub_received','dispatched','hub_completed'}
 
 
 def event_detail(stage, detail):
+    if stage in SSH_STAGES:
+        return safe_ssh_detail(detail)
     return {**safe_detail(detail), **(safe_queue_detail(detail) if stage == 'waiting_worker' else {})}
 
 

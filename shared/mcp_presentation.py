@@ -73,7 +73,7 @@ _OPEN = _RECEIPT | frozenset({'context_id', 'context_unchanged', 'workspace',
     'context_refresh_required', 'compatibility', 'runtime', 'capability_index'})
 _EXEC_RESULT = _RECEIPT | frozenset({'exit_code', 'output', 'output_truncated',
     'output_omitted', 'timed_out', 'cancelled', 'duration_ms', 'command_ok',
-    'target', 'resource_coordination', 'host', 'port', 'username', 'ssh_error',
+    'target', 'resource_coordination', 'host', 'port', 'username', 'ssh_error', 'ssh_diagnostics', 'transport_runtime',
     'runtime', 'failure_context', 'continuation', 'log_ref', 'diagnostics', 'execution_isolation', 'runtime_cleanup', 'runtime_outcome'})
 _STATUS_POLICY = frozenset({'version', 'local_block_codex', 'effective_block_codex',
     'local_block_native_computer', 'effective_block_native_computer',
@@ -144,6 +144,11 @@ def _exec_result(value):
     result = _pick(value, _EXEC_RESULT)
     fields = {
         'runtime': None,
+        'transport_runtime': {'mode', 'target', 'isolation', 'grants_authority'},
+        'ssh_diagnostics': {'schema_version', 'source', 'log_available', 'log_truncated', 'log_cleanup',
+            'authentication', 'failure_stage', 'credential_source', 'password_prompt_limit',
+            'connection_attempt_limit', 'automatic_replay', 'retryable', 'attempt_count',
+            'attempt_limit', 'attempts', 'retry_policy', 'retry_stop_reason', 'retry_exhausted'},
         'failure_context': {'schema_version', 'category', 'source', 'operation_id', 'code',
             'caller_platform_decision', 'requires_desktop_control', 'grants_authority', 'replay_recommended'},
         'continuation': {'schema_version', 'project_id', 'workspace_id', 'operation_id', 'target',
@@ -156,6 +161,10 @@ def _exec_result(value):
     for key, allowed in fields.items():
         if key in result:
             result[key] = _runtime(result[key]) if key == 'runtime' else _pick(result[key], allowed)
+    if isinstance(result.get('ssh_diagnostics'), dict) and isinstance(result['ssh_diagnostics'].get('attempts'), list):
+        from shared.ssh_diagnostics import SSH_ATTEMPT_LIMIT, safe_ssh_detail
+        result['ssh_diagnostics']['attempts'] = [safe_ssh_detail(row) for row in
+            result['ssh_diagnostics']['attempts'][:SSH_ATTEMPT_LIMIT] if isinstance(row, dict)]
     if isinstance(result.get('diagnostics'), list):
         result['diagnostics'] = [_pick(row, {'path', 'line', 'column', 'message', 'source', 'untrusted'})
                                   for row in result['diagnostics'][:20]]
