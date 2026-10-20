@@ -233,9 +233,20 @@ async def test_client_log_credentials_are_redacted_before_persistence(shell_agen
 
 def test_real_openssh_effective_options_ignore_conflicting_auth_and_session_settings(shell_agent, tmp_path):
     ssh = shutil.which('ssh')
-    if not ssh or not shutil.which('sshpass'):
-        pytest.skip('OpenSSH and sshpass are required for offline configuration validation')
+    if not ssh:
+        pytest.skip('OpenSSH is required for offline configuration validation')
     agent, root = shell_agent
+    # Only OpenSSH -G is executed here; sshpass is not. Supply a non-executed
+    # resolver fixture so macOS runners without sshpass still verify real
+    # OpenSSH's effective options instead of skipping a release-gate test.
+    fixture_bin = tmp_path / 'bin'
+    fixture_bin.mkdir()
+    sshpass = fixture_bin / 'sshpass'
+    sshpass.write_text('#!/bin/sh\nexit 99\n')
+    sshpass.chmod(0o700)
+    agent.config['shell']['env'] = {
+        'PATH': str(fixture_bin) + os.pathsep + str(Path(ssh).parent) + os.pathsep + os.defpath,
+    }
     config = tmp_path / 'ssh_config'
     config.write_text('Host *\n PasswordAuthentication no\n KbdInteractiveAuthentication no\n'
         ' ControlMaster auto\n ControlPath /tmp/unrelated-fixture-socket\n ControlPersist yes\n'
