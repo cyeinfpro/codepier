@@ -1,6 +1,6 @@
 # CodePier · 码头
 
-让 ChatGPT 直接使用你的开发电脑：读代码、改文件、跑测试。
+让 ChatGPT 在你授权的电脑和服务器上读代码、改文件、跑测试，并拿到可核对的执行结果。
 
 [![Version](https://img.shields.io/badge/version-1.30.4-2563eb)](RELEASE.json)
 [![License](https://img.shields.io/badge/license-MIT-16a34a)](LICENSE)
@@ -9,7 +9,7 @@ CodePier 是自托管的 MCP 服务和开发面板。**Hub** 负责接入与管�
 
 项目留在原来的电脑上，开发电脑无需开放公网入站端口。读取的源码、命令结果和会话记录会按使用流程传给 Hub 或客户端。
 
-[快速开始](#5-分钟快速开始) · [使用文档](docs/README.md) · [版本下载](https://github.com/cyeinfpro/codepier/releases/latest)
+[5 分钟快速开始](#5-分钟快速开始) · [核心能力](#核心能力) · [使用示例](#使用示例) · [使用文档](docs/README.md) · [版本下载](https://github.com/cyeinfpro/codepier/releases/latest)
 
 ![使用合成项目与设备的控制总览](web/readme/overview.png)
 
@@ -59,16 +59,40 @@ https://你的域名/mcp
 
 ## 核心能力
 
-- **处理真实项目**：搜索和修改文件、审阅差异、运行测试，用 worktree 隔离工作目录。
-- **继续本机会话**：在网页中使用 Pi、Codex 或 Claude Code，查看历史、发送附件、处理审批。
-- **管理电脑与服务器**：一台 Hub 连接多台 Agent，通过项目使用已分配的 VPS。
-- **设置项目运行时**：在项目卡片直接切换清洁、兼容、容器模式，核对保存与实际生效。未单独配置的项目默认清洁模式。
-- **追踪执行结果**：查看任务状态、输出和退出码，断线后查询原操作，避免重复执行。
-- **按需授权**：控制项目和工具权限，使用团队 Space、角色和已审核的外部 MCP 工具。
+| 场景 | 能做什么 |
+| --- | --- |
+| **真实项目开发** | 按授权目录搜索、读取、SHA 校验修改文件，审阅差异、运行命令与测试；需要时使用 worktree。 |
+| **原生 AI 编程会话** | 在网页继续 Pi、Codex、Claude Code 会话，查看历史、附件和审批；CLI 安装与登录留在 Agent 电脑。 |
+| **多电脑与 VPS** | 一台 Hub 接入多台 macOS、Windows、Linux Agent；通过项目访问已分配的 SSH 服务器。 |
+| **项目执行环境** | 在项目卡片切换默认**清洁模式**、兼容模式或符合条件的 Linux 容器模式，并分别核对保存和生效。 |
+| **协作中心** | 在获准开启后建立项目讨论室，接入 dot，通过 `@` 交办、查看进度与原话题回传；实际任务领取需要宿主订阅和独立授权。 |
+| **浏览器与桌面** | 按需接入浏览器和桌面操作；需另行配置与授权，不能由项目文件权限自动开启。 |
+| **权限与审计** | 按 Space、项目及工具划分 OAuth/PAT 权限，保留操作编号、输出、退出码和原操作恢复入口。 |
 
-CodePier 不提供模型服务。只使用 MCP 文件与命令工具，不需要安装模型 CLI；使用原生会话时，需在 Agent 电脑上自行安装、登录相应 CLI，模型费用沿用其配置。
+CodePier **不提供模型服务**。只使用 MCP 文件与命令工具，不需要安装模型 CLI；使用原生会话时，需在 Agent 电脑上自行安装、登录相应 CLI，模型费用沿用其配置。
 
-清洁模式使用独立 HOME、缓存和非登录 Shell，并默认复用 Agent 执行账号已有的 GitHub CLI 登录、Git 全局配置和 SSH Agent。项目在“执行环境 → 复用已有登录”中显式关闭的选项会保留，保存后供新命令使用。清洁模式不是 OS 沙箱；依赖个人终端启动脚本、特殊签名或硬编码 HOME 路径的工具仍需单独配置。详见[项目运行时](docs/PROJECT_RUNTIMES.md)。
+清洁模式使用独立 HOME、缓存和非登录 Shell，并默认复用 Agent 执行账号已有的 GitHub CLI 登录、Git 全局配置和 SSH Agent。可在项目的 **执行环境 → 复用已有登录** 中逐项关闭。它**不是操作系统沙箱**：Shell 仍以本机 Agent 账号权限执行。依赖个人终端启动脚本、特殊签名或硬编码 HOME 的工具仍需配置。[项目运行时与边界](docs/PROJECT_RUNTIMES.md)
+
+### 最近版本变化
+
+- **v1.30.4 — VPS SSH 可靠性**：仅在可以安全判定的连接/认证失败阶段，在同一操作中最多进行 3 次有界尝试；保留逐次诊断。主机密钥错误、远端命令已开始、取消或结果不明时不会盲目重试。[VPS 与 SSH 说明](docs/VPS.md)
+- **v1.30.3 — 安全与稳定性**：加强登录限流、HTTP 请求预算与响应安全头，修复聊天、连接状态与项目发现问题。
+- **v1.30.2 — 清洁模式授权复用**：默认复用既有 GitHub CLI、Git 配置及 SSH Agent，按项目可关闭，不会复制私钥或自动新增授权。
+
+版本功能是否已经运行，取决于实际部署的 **Hub、Agent 和客户端工具目录**，不能仅凭仓库代码或版本说明判断。[完整更新记录](CHANGELOG.md)
+
+## 使用示例
+
+在已连接 CodePier 且具有相应权限的 ChatGPT 对话里，可以这样说：
+
+> 打开 demo 项目，先阅读 README 和项目规则，再告诉我结构与测试入口。不要修改文件。
+
+> 检查 demo 项目的 Git 状态，修复指定问题，运行相关测试；只提交你修改的文件，并报告 commit 与推送结果。
+
+> 查询 demo 项目已分配的 VPS，检查磁盘和服务状态；如果返回 pending，继续查询原操作编号，不要重新执行命令。
+
+协作中心启用并完成 dot 订阅后，也可在面板中选择 `@dot` 交办任务。消息发送、订阅连接、实际领取和最终回传是不同状态。[dot 协作指南](docs/DOT_COLLABORATION.md)
+
 
 ## 使用前了解
 
@@ -76,17 +100,33 @@ CodePier 不提供模型服务。只使用 MCP 文件与命令工具，不需要
 - 浏览器与桌面控制需另行配置和授权。桌面控制当前已验证 macOS，Windows / Linux 桌面后端尚未验证。[配置说明](docs/COMPUTER_USE.md)
 - 文件入站未配置时默认开启，显式关闭会保留；来源授权不会自动扩大。支持范围、大小限制和客户端验收状态见[文件入站指南](docs/FILE_IMPORT_INGRESS.md)。协作室默认关闭，启用前阅读[协作室指南](docs/COLLABORATION_CHATROOM.md)。
 
+## 遇到问题时
+
+| 现象 | 先检查 |
+| --- | --- |
+| Agent 离线或项目打不开 | 电脑是否在线、Hub 地址、本机授权目录与项目映射；不要先删除配对配置。 |
+| 能读文件却无法运行命令 | 项目与客户端 `execute` 权限、Agent 本机 Shell 开关，以及清洁模式下的工具 PATH。 |
+| GitHub/SSH 凭据在清洁模式不可用 | 确认实际 Agent 运行账号已有登录，并查看项目「复用已有登录」是否被显式关闭。 |
+| VPS 登录失败 | 主机密钥、账号/密码、Agent 网络与 `ssh_diagnostics`；不把远端命令失败当作 SSH 认证失败。 |
+| 操作显示 `pending`、`queued` 或 `unknown` | 使用原 `operation_id` 查询；不能以新幂等键盲目重跑写入、部署或远程命令。 |
+| dot 收不到任务 | 核对协作功能开关、加入范围、实际宿主事件订阅及消费状态；消息已发送不等于任务已执行。 |
+
+[常见问题](docs/FAQ.md) · [连接诊断](docs/CHATGPT.md) · [操作恢复](docs/LONG_OPERATIONS.md)
+
 ## 更新与备份
 
-发布新版本不会自动更新你的部署。面板顶部的快捷更新只更新面板、Hub 与 Agent 分发文件，不会自动更新或重启已安装的 Agent。如需同步更新当前空间已授权的受管 Agent，请在更新详情或系统设置中选择范围并确认，也可在设备节点页单独升级。更新前备份数据库及匹配的密钥；回退也必须使用匹配版本的备份。
+发布新版本不会自动更新你的部署。面板顶部的快捷更新只更新面板、Hub 与 Agent 分发文件，**不会自动更新或重启已安装的 Agent**。如需同步更新当前空间已授权的受管 Agent，请在更新详情或系统设置中选择范围并确认，也可在设备节点页单独升级。
+
+更新前备份 Hub 数据库及其**匹配的密钥文件**（视加密格式包含 `master.key`、`master.keys.json`），重要的 Agent 状态、journal、原生 CLI 历史和部署配置还需单独备份。回退必须使用与程序和数据库格式匹配的备份；不要通过删除数据卷或重新配对解决升级故障。
 
 [更新 Hub](docs/PANEL_UPDATE.md) · [升级 Agent](docs/AGENT_INSTALL.md) · [备份 Hub 数据](docs/PANEL_UPDATE.md#备份-hub-数据)
 
 ## 更多文档
 
-- [使用文档](docs/README.md)：设置、CLI 会话、VPS、工具与排错
-- [开发与验证](docs/DEVELOPMENT.md) · [贡献指南](CONTRIBUTING.md)
-- [更新记录](CHANGELOG.md) · [问题反馈](https://github.com/cyeinfpro/codepier/issues)
+- [文档导航](docs/README.md) · [完整入门](docs/START-HERE.md) · [ChatGPT / MCP 连接](docs/CHATGPT.md)
+- [项目执行环境](docs/PROJECT_RUNTIMES.md) · [MCP 工具](docs/CORE_TOOLS.md) · [协作中心](docs/COLLABORATION_CHATROOM.md)
+- [VPS 管理](docs/VPS.md) · [安全说明](SECURITY.md) · [开发与验证](docs/DEVELOPMENT.md)
+- [贡献指南](CONTRIBUTING.md) · [更新记录](CHANGELOG.md) · [问题反馈](https://github.com/cyeinfpro/codepier/issues)
 
 ## 版本与许可
 
