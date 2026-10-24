@@ -93,7 +93,9 @@ class OAuth:
         resource = params.get("resource", self.resource())
         if resource != self.resource():
             raise DevError("INVALID_TARGET", "资源标识不匹配")
-        scopes = params.get("scope", "read").split()
+        # Omitted scope offers fixed choices; it does not grant them. Explicit
+        # narrow requests remain narrow, and consent still enforces this ceiling.
+        scopes = params.get("scope", " ".join(LEGACY_OAUTH_SCOPES)).split()
         if set(scopes) != {ROLE_SCOPE} and (not scopes or not set(scopes).issubset({"read", "write", "execute", "computer"}) or "read" not in scopes):
             raise DevError("INVALID_SCOPE", "使用传统 read/write/execute/computer，或单独申请 codepier.role_access；两种模式不能混用")
         state = params.get("state", "")

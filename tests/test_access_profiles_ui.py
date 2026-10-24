@@ -116,3 +116,70 @@ def test_oauth_profile_filters_scope_and_project_then_binds_real_token(profiles_
     identity = stack.rpc('tools/call', {'name': 'get_profile', 'arguments': {}}, token_value=token).json()
     assert identity['result']['structuredContent']['id'] == profile['id']
     assert not errors, errors
+
+
+@pytest.fixture(scope="module")
+def pairing_stack(tmp_path_factory):
+    # Separate synthetic stack keeps this matrix below the real OAuth throttle;
+    # do not disable the limiter or reset its records to make tests pass.
+    from tests.support import running_stack
+    with running_stack(tmp_path_factory.mktemp("pairing-hub-agent")) as stack:
+        yield stack
+
+
+@pytest.fixture(params=[{"width": 1280, "height": 900}, {"width": 390, "height": 844}])
+def pairing_page(profiles_browser, request, pairing_stack):
+    page = profiles_browser.new_page(viewport=request.param)
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.goto(pairing_stack.url + "/#profiles")
+    page.fill("#username", "admin")
+    page.fill("#password", pairing_stack.password)
+    page.click("#login-form button")
+    expect(page.locator("#profiles-page")).to_be_visible()
+    yield page, errors
+    page.close()
+
+
+@pytest.mark.parametrize("requested", [None, "read"])
+def test_pairing_scope_choices_are_optional_and_reopen_safely(pairing_page, pairing_stack, requested):
+    page, errors = pairing_page
+    stack = pairing_stack
+    # Even a saved developer convenience default must not check new OAuth powers.
+    page.route("**/api/oauth/requests/*", lambda route: route.fulfill(
+        response=(response := route.fetch()),
+        json={**response.json(), "access_defaults": {"developer_scopes": True, "all_projects": False}},
+    ) if not route.request.url.endswith("/decide") else route.continue_())
+    registration = stack.must(stack.client.post("/oauth/register", json={
+        "redirect_uris": ["http://localhost:12345/callback"]}))
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(b"v" * 64).digest()).rstrip(b"=").decode()
+    def new_request():
+        response = stack.client.get("/oauth/authorize", params={
+            "response_type": "code", "client_id": registration["client_id"],
+            "redirect_uri": "http://localhost:12345/callback",
+            **({"scope": requested} if requested is not None else {}),
+            "code_challenge_method": "S256", "code_challenge": challenge,
+            "resource": stack.url + "/mcp",
+        })
+        return parse_qs(urlsplit(response.headers["location"]).query)["authorize"][0]
+    page.route("http://localhost:12345/callback*", lambda route: route.fulfill(body="Denied test callback"))
+    for _ in range(2):
+        request_id = new_request()
+        page.evaluate("(id)=>consentModal(id)", request_id)
+        dialog = page.locator(".modal")
+        expect(dialog.locator('[name="scope"][value="read"]')).to_be_checked()
+        for scope in ("write", "execute", "computer"):
+            field = dialog.locator(f'[name="scope"][value="{scope}"]')
+            if requested == "read":
+                expect(field).to_have_count(0)
+            else:
+                expect(field).to_be_visible()
+                expect(field).not_to_be_checked()
+                field.check()
+                expect(field).to_be_checked()
+        assert page.evaluate("document.documentElement.scrollWidth<=innerWidth+1")
+        dialog.locator("#deny-consent").click()
+        page.wait_for_url(re.compile(r"^http://localhost:12345/callback\?"))
+        page.goto(stack.url + "/#profiles")
+        expect(page.locator("#profiles-page")).to_be_visible()
+    assert not errors, errors

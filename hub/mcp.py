@@ -19,6 +19,7 @@ import json,os
 from fastapi import APIRouter,Request
 from fastapi.responses import JSONResponse,Response
 from hub.auth import Auth
+from hub.oauth import LEGACY_OAUTH_SCOPES
 from hub.runtime import Runtime
 from hub import mcp_apps
 from hub.mcp_request_audit import mark, request_id
@@ -81,7 +82,9 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
         request_public_url=lambda:public_base
         authorization=request.query_params.get('authorization','fixed')
         if authorization not in {'fixed','role'}:return failure(None,-32602,'Unknown authorization mode',400)
-        auth_scope=ROLE_SCOPE if authorization=='role' else 'read'
+        # Initial pairing advertises choices, not an automatic grant. Tool-level
+        # step-up challenges still request only the scopes the operation needs.
+        auth_scope=ROLE_SCOPE if authorization=='role' else ' '.join(LEGACY_OAUTH_SCOPES)
         mark('authenticate')
         try:principal=await runtime.store.run(auth.bearer, request)
         except DevError as exc:

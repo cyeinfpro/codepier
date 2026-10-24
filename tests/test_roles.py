@@ -418,7 +418,7 @@ def test_result_disclosure_rechecks_role_after_completion(api):
 def test_settings_and_first_role_auth_challenge(api):
     app,client,_=api
     assert client.get('/api/settings').json()['role_mcp_url']=='http://testserver/mcp?authorization=role'
-    for endpoint,scope in [('/mcp','read'),('/mcp?authorization=role',ROLE_SCOPE)]:
+    for endpoint,scope in [('/mcp','read write execute computer'),('/mcp?authorization=role',ROLE_SCOPE)]:
         reply=client.post(endpoint,headers={'Content-Type':'application/json'},json={'jsonrpc':'2.0','id':1,'method':'tools/list'})
         assert reply.status_code==401
         assert 'scope="'+scope+'"' in reply.headers['WWW-Authenticate']

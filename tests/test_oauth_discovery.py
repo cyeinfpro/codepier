@@ -24,7 +24,7 @@ def authorize(client, scopes):
         "response_type": "code",
         "client_id": registration.json()["client_id"],
         "redirect_uri": "http://localhost:12345/callback",
-        "scope": " ".join(scopes),
+        **({"scope": " ".join(scopes)} if scopes is not None else {}),
         "code_challenge": challenge,
         "code_challenge_method": "S256",
         "resource": "http://testserver/mcp",
@@ -78,7 +78,7 @@ def test_entry_challenge_links_metadata_for_exact_authorization_mode(api, mode):
     metadata = client.get(metadata_url).json()
     expected = [ROLE_SCOPE] if mode == "role" else LEGACY_SCOPES
     assert metadata["scopes_supported"] == expected
-    assert set(scopes) <= set(expected)
+    assert set(scopes) == set(expected)
     # Emulate a client whose fallback requests every advertised scope.
     assert authorize(client, metadata["scopes_supported"]).status_code == 303
 
@@ -139,3 +139,54 @@ def test_unknown_discovery_mode_fails_closed(api):
     response = client.get("/.well-known/oauth-protected-resource/mcp?authorization=invalid")
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "INVALID_REQUEST"
+
+
+def test_omitted_scope_offers_choices_but_grants_only_confirmed_read(api):
+    app, client, _ = api
+    response = authorize(client, None)
+    assert response.status_code == 303, response.text
+    request_id = parse_qs(urlsplit(response.headers["location"]).query)["authorize"][0]
+    details = client.get(f"/api/oauth/requests/{request_id}").json()
+    assert set(details["scopes"]) == set(LEGACY_SCOPES)
+    assert app.state.store.one("SELECT count(*) AS n FROM oauth_codes")["n"] == 0
+    decision = client.post(f"/api/oauth/requests/{request_id}/decide", json={
+        "allow": True, "scopes": ["read"], "projects": ["project"],
+    })
+    assert decision.status_code == 200, decision.text
+    grant = app.state.store.one("SELECT scopes FROM grants WHERE client_id=?", (details["client_id"],))
+    assert json.loads(grant["scopes"]) == ["read"]
+
+
+def test_explicit_read_request_cannot_expand_at_consent(api):
+    app, client, _ = api
+    response = authorize(client, ["read"])
+    request_id = parse_qs(urlsplit(response.headers["location"]).query)["authorize"][0]
+    details = client.get(f"/api/oauth/requests/{request_id}").json()
+    assert details["scopes"] == ["read"]
+    rejected = client.post(f"/api/oauth/requests/{request_id}/decide", json={
+        "allow": True, "scopes": ["read", "execute"], "projects": ["project"],
+    })
+    assert rejected.status_code == 400
+    assert rejected.json()["error"]["code"] == "INVALID_SCOPE"
+    assert app.state.store.one("SELECT count(*) AS n FROM grants WHERE client_id=?", (details["client_id"],))["n"] == 0
+    assert app.state.store.one("SELECT count(*) AS n FROM oauth_codes")["n"] == 0
+    # A rejected expansion neither consumes nor silently widens the original request.
+    approved = client.post(f"/api/oauth/requests/{request_id}/decide", json={
+        "allow": True, "scopes": ["read"], "projects": ["project"],
+    })
+    assert approved.status_code == 200
+
+
+def test_omitted_scope_deny_is_one_use_and_creates_no_authority(api):
+    app, client, _ = api
+    response = authorize(client, None)
+    request_id = parse_qs(urlsplit(response.headers["location"]).query)["authorize"][0]
+    details = client.get(f"/api/oauth/requests/{request_id}").json()
+    denied = client.post(f"/api/oauth/requests/{request_id}/decide", json={"allow": False})
+    assert denied.status_code == 200
+    replay = client.post(f"/api/oauth/requests/{request_id}/decide", json={
+        "allow": True, "scopes": LEGACY_SCOPES, "projects": ["project"],
+    })
+    assert replay.status_code == 410
+    assert app.state.store.one("SELECT count(*) AS n FROM grants WHERE client_id=?", (details["client_id"],))["n"] == 0
+    assert app.state.store.one("SELECT count(*) AS n FROM oauth_codes")["n"] == 0

@@ -2212,7 +2212,8 @@ async function consentModal(id) {
       $('.modal'),
       profiles,
       r.scopes,
-      r.access_defaults || {},
+      // Offering capabilities is not consent: optional scopes start unchecked.
+      { ...(r.access_defaults || {}), developer_scopes: false },
     );
     const decide = (allow) =>
       busy(allow ? $('#allow-consent') : $('#deny-consent'), async () => {
