@@ -1,6 +1,6 @@
 ========================================================================
-@modelcontextprotocol/client@2.2.0
-License: MIT
+@modelcontextprotocol/client@2.3.0
+License: Apache-2.0
 
 -- LICENSE --
 The MCP project is undergoing a licensing transition from the MIT License to the Apache License, Version 2.0 ("Apache-2.0"). All new code and specification contributions to the project are licensed under Apache-2.0. Documentation contributions (excluding specifications) are licensed under CC-BY-4.0.
@@ -221,8 +221,8 @@ CC-BY-4.0. See https://creativecommons.org/licenses/by/4.0/legalcode for
 the full license text.
 
 ========================================================================
-@modelcontextprotocol/core@2.2.0
-License: MIT
+@modelcontextprotocol/core@2.3.0
+License: Apache-2.0
 
 -- LICENSE --
 The MCP project is undergoing a licensing transition from the MIT License to the Apache License, Version 2.0 ("Apache-2.0"). All new code and specification contributions to the project are licensed under Apache-2.0. Documentation contributions (excluding specifications) are licensed under CC-BY-4.0.
@@ -955,7 +955,7 @@ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR
 IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ========================================================================
-zod@4.6.5
+zod@4.6.6
 License: MIT
 
 -- LICENSE --

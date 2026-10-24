@@ -10,8 +10,9 @@ mypy==2.4.0
 
 # Retain reviewed transitive versions while integrating the 2026-10-19 updates.
 ast-serialize==0.12.1
-certifi==2026.7.22
-filelock==4.0.12
+coverage==7.16.2
+certifi==2026.10.19
+filelock==4.2.1
 platformdirs==4.12.3
 pluggy==1.6.0
 pycparser==3.1 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'
