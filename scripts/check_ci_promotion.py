@@ -349,7 +349,7 @@ def verify_evidence(snapshot, artifact_payloads, *, expected_sha, expected_workf
                 checked.get("sha256") == digest(source[name + ".zip"]) and
                 checked.get("bytes") == len(source[name + ".zip"]), "Source archive check differs")
         if panel:
-            require(checked.get("panel_updaters_verified") == ["1.13.0", "current"],
+            require(checked.get("panel_updaters_verified") == ["1.13.0", "1.30.5", "current"],
                     "Panel updater compatibility evidence is missing")
     summaries = []
     full_digest = digest(source[prefix + "-source-full.zip"])

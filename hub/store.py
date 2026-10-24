@@ -54,9 +54,11 @@ CREATE TABLE IF NOT EXISTS workflow_replays (actor TEXT NOT NULL, idem TEXT NOT 
 class Store:
     def __init__(self, directory: str | Path):
         self.directory = Path(directory).resolve()
+        from hub.state_layout import state_directory
+        self.state_directory = state_directory(self.directory)
         self.directory.mkdir(parents=True, exist_ok=True)
         os.chmod(self.directory, 0o700)
-        connection = sqlite3.connect(self.directory / "hub.sqlite3", check_same_thread=False, timeout=30)
+        connection = sqlite3.connect(self.state_directory / "hub.sqlite3", check_same_thread=False, timeout=30)
         connection.row_factory = sqlite3.Row
         self.lock = OwnedRLock()
         self.iam_enabled = True
@@ -88,13 +90,13 @@ class Store:
                     if self.db.execute("PRAGMA foreign_key_check").fetchall():
                         raise RuntimeError("Hub migration has invalid foreign-key relationships")
                 self.db.execute("PRAGMA foreign_keys=ON")
-                os.chmod(self.directory / "hub.sqlite3", 0o600)
+                os.chmod(self.state_directory / "hub.sqlite3", 0o600)
             except BaseException:
                 self.db.close()
                 raise
 
     def _load_cipher(self):
-        key_path = self.directory / "master.key"
+        key_path = self.state_directory / "master.key"
         if not key_path.exists():
             from hub.keyring import CIPHER_COLUMNS
             for table, column in CIPHER_COLUMNS:
@@ -103,7 +105,7 @@ class Store:
                     f"SELECT 1 FROM {table} WHERE {column} IS NOT NULL LIMIT 1"
                 ).fetchone():
                     raise RuntimeError("master.key is missing for an encrypted Hub database; restore the matching master.key from backup")
-            fd, temporary = tempfile.mkstemp(prefix=".master-key-", dir=self.directory)
+            fd, temporary = tempfile.mkstemp(prefix=".master-key-", dir=self.state_directory)
             try:
                 with os.fdopen(fd, "wb") as stream:
                     stream.write(Fernet.generate_key())
@@ -116,7 +118,7 @@ class Store:
                 except FileExistsError:
                     pass
                 if os.name != "nt":
-                    directory_fd = os.open(self.directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                    directory_fd = os.open(self.state_directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
                     try:
                         os.fsync(directory_fd)
                     finally:
@@ -124,7 +126,7 @@ class Store:
             finally:
                 os.unlink(temporary)
         from hub.keyring import CipherSuite
-        return CipherSuite(self.directory, key_path.read_bytes().strip())
+        return CipherSuite(self.state_directory, key_path.read_bytes().strip())
 
     def _migrate(self):
         # Execute DDL within the caller's transaction; executescript would

@@ -139,8 +139,8 @@ def _backup(store, destination: Path) -> None:
         finally:
             target.close()
     os.chmod(destination / "hub.sqlite3", 0o600)
-    atomic_private(destination / "master.key", private_read(store.directory / "master.key"))
-    ring = store.directory / RING_FILE
+    atomic_private(destination / "master.key", private_read(store.state_directory / "master.key"))
+    ring = store.state_directory / RING_FILE
     if ring.exists() or ring.is_symlink():
         atomic_private(destination / RING_FILE, private_read(ring))
 
@@ -152,7 +152,9 @@ def rotate_key(directory: str | Path, *, resume: bool = False) -> dict:
     Backups are deliberately retained and never pruned automatically.
     """
     from hub.store import Store
-    directory = Path(directory).expanduser()
+    from hub.state_layout import state_directory
+    data_directory = directory
+    directory = state_directory(directory)
     if directory.is_symlink() or not directory.is_dir():
         raise RuntimeError("Select an existing, non-symlink Hub data directory")
     directory = directory.resolve()
@@ -161,7 +163,7 @@ def rotate_key(directory: str | Path, *, resume: bool = False) -> dict:
     key_lock = None
     try:
         key_lock = InstanceLock(directory / ".keys.lock")
-        store = Store(directory)
+        store = Store(data_directory)
         journal_path = directory / JOURNAL_FILE
         previous = json.loads(private_read(journal_path)) if journal_path.exists() or journal_path.is_symlink() else None
         if previous is not None and (not isinstance(previous, dict) or previous.get("version") != 1):

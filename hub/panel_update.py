@@ -126,7 +126,13 @@ def make_panel_update_router(auth, runtime, client=None):
         operation = data.get('operation') or {}
         if not request_key and operation.get('kind') == 'apply':
             rollout = await runtime.store.run(rollouts.view, principal, operation.get('request_key', ''))
-        return {**data, 'running_version': VERSION, 'agent_rollout': rollout}
+        capabilities = data.get('capabilities') or {}
+        storage_ready = capabilities.get('default_split_state') is True
+        host_ready = capabilities.get('verified_engine_updates') is True
+        notice = ('' if storage_ready and host_ready else
+            '当前宿主更新器不具备完整自动升级能力：可以直接更新 Hub，但存储分离和宿主更新器升级不会随此操作自动生效。需管理员安装新版宿主更新器；先更新过渡 Hub 也不能补足旧宿主权限。')
+        return {**data, 'running_version': VERSION, 'agent_rollout': rollout,
+                'host_setup_required': not (storage_ready and host_ready), 'host_update_notice': notice}
 
     @router.get('/available')
     async def available(request: Request):

@@ -67,7 +67,7 @@ class Gateway:
         with store.transaction():
             saved = store.one("SELECT secret FROM gateway_secrets WHERE id='routing'")
             if not saved:
-                original = hmac.new((store.directory / 'master.key').read_bytes(), b'codepier-gateway-v1', hashlib.sha256).digest()
+                original = hmac.new((store.state_directory / 'master.key').read_bytes(), b'codepier-gateway-v1', hashlib.sha256).digest()
                 store.db.execute("INSERT INTO gateway_secrets(id,secret) VALUES('routing',?)", (store.encrypt(original.hex()),))
                 self.secret = original
             else:

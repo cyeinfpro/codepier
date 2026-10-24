@@ -19,7 +19,7 @@ from shared.util import VERSION, fsync_directory
 
 
 def write_backup(store: Store, output: Path):
-    key_lock = InstanceLock(store.directory / ".keys.lock")
+    key_lock = InstanceLock(store.state_directory / ".keys.lock")
     try:
         return _write_backup(store, output)
     finally:
@@ -43,8 +43,8 @@ def _write_backup(store: Store, output: Path):
         with os.fdopen(fd, "wb") as handle:
             with zipfile.ZipFile(handle, "w", zipfile.ZIP_DEFLATED) as z:
                 z.write(target, "hub.sqlite3")
-                z.write(store.directory / "master.key", "master.key")
-                keyring = store.directory / "master.keys.json"
+                z.write(store.state_directory / "master.key", "master.key")
+                keyring = store.state_directory / "master.keys.json"
                 if keyring.exists() or keyring.is_symlink():
                     from hub.keyring import private_read
                     z.writestr("master.keys.json", private_read(keyring))

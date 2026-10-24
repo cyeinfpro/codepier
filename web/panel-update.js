@@ -208,9 +208,14 @@ window.CodePierPanelUpdate = (() => {
     const d = data || {},
       job = d.operation,
       busy = submitting || !!pending || !!d.busy;
-    text('panel-update-float-state', job?.message || d.reason || entryStatus()[1]);
-    text('panel-update-float-note', note);
-    $('#panel-update-float-note').hidden = !note;
+    text(
+      'panel-update-float-state',
+      d.host_engine?.activating
+        ? 'Hub 已提交，正在切换已验证的宿主更新器；请等待就绪回执。'
+        : job?.message || d.reason || entryStatus()[1],
+    );
+    text('panel-update-float-note', note || d.host_update_notice || '');
+    $('#panel-update-float-note').hidden = !(note || d.host_update_notice);
     $('#panel-update-float-apply').disabled = !canApply();
     $('#panel-update-float-check').disabled =
       !d.enabled || busy || d.recovery_required || accessDenied || awaitingVersion();
@@ -264,12 +269,12 @@ window.CodePierPanelUpdate = (() => {
     <dl class="kv"><dt>运行版本</dt><dd id="panel-update-current">${esc(S.settings?.version || '—')}</dd><dt>更新来源</dt><dd id="panel-update-repo">—</dd><dt>可用版本</dt><dd id="panel-update-target">尚未检查</dd></dl>
     <label class="panel-agent-consent"><input type="checkbox" id="panel-update-agents" checked> 面板更新成功后自动更新当前空间已授权的 Agent</label>
     <div class="actions"><button class="btn" id="panel-update-check" type="button" disabled>检查 GitHub 更新</button><button class="btn primary" id="panel-update-apply" type="button" disabled>更新面板及已授权 Agent</button><button class="btn ghost" id="panel-update-refresh" type="button">刷新状态</button><button class="btn" id="panel-update-retry" type="button" hidden>重新提交原请求</button><button class="btn" id="panel-update-reload" type="button" hidden>刷新到新版本</button></div>
-    <p id="panel-update-state" role="status" aria-live="polite">正在读取宿主机更新服务状态…</p><p class="form-note" id="panel-update-note" role="status" hidden></p>
+    <p id="panel-update-host-notice" class="form-note" role="status" hidden></p><p id="panel-update-state" role="status" aria-live="polite">正在读取宿主机更新服务状态…</p><p class="form-note" id="panel-update-note" role="status" hidden></p>
     <section id="panel-agent-rollout" hidden aria-labelledby="panel-agent-rollout-title"><h3 id="panel-agent-rollout-title">Agent 更新进度</h3><p id="panel-agent-rollout-summary" role="status"></p><ul id="panel-agent-rollout-nodes"></ul></section>
     <details id="panel-update-release" hidden><summary>发布说明与校验值</summary><p id="panel-update-digest" class="mono"></p><pre id="panel-update-notes"></pre></details>
     <details id="panel-update-history" hidden><summary>更新阶段记录</summary><pre id="panel-update-events"></pre></details>
     <details id="panel-update-setup" hidden><summary>首次启用更新服务</summary><p>需要 Linux、systemd 与 Docker Compose。先在服务器部署包含本功能的新版源码，再在该部署目录运行一次：</p><div class="code-box"><pre>sudo python3 scripts/panel_updater.py install --root "$PWD"</pre></div><p>宿主机更新服务独立运行，网页进程没有 Docker 管理权限。安装或更新面板时也可使用 <code>sudo bash install.sh --enable-panel-update</code>。未完成的更新须先在宿主机核查，不能靠重新安装服务覆盖。</p></details>
-    <p class="form-note">从旧版面板首次升级没有自动更新 Agent 的授权记录，请在设备节点页按原流程确认更新。切换前保存完整数据副本。更新期间短暂进入维护状态；关闭页面不取消更新。原数据卷、镜像和更新记录不会自动删除，请定期在宿主机归档。</p></div></section>`;
+    <p class="form-note">从旧版面板首次升级没有自动更新 Agent 的授权记录，请在设备节点页按原流程确认更新。具备新版宿主能力时默认分离数据库快照与附件原件；旧宿主仍按完整卷复制。更新期间短暂进入维护状态；关闭页面不取消更新。原数据卷、镜像和更新记录不会自动删除，请定期在宿主机归档。</p></div></section>`;
   }
   function text(id, value) {
     const node = document.getElementById(id);
@@ -332,11 +337,15 @@ window.CodePierPanelUpdate = (() => {
     );
     text(
       'panel-update-state',
-      job
-        ? `${job.message || '更新处理中'}${job.id ? ' · 操作 ' + job.id : ''}`
-        : d.reason ||
+      d.host_engine?.activating
+        ? 'Hub 已提交，正在切换已验证的宿主更新器；请等待就绪回执。'
+        : job
+          ? `${job.message || '更新处理中'}${job.id ? ' · 操作 ' + job.id : ''}`
+          : d.reason ||
             (enabled ? '点击检查，读取 GitHub 最新正式发布。' : '正在读取宿主机更新服务状态…'),
     );
+    text('panel-update-host-notice', d.host_update_notice || '');
+    $('#panel-update-host-notice').hidden = !d.host_setup_required;
     text('panel-update-note', note);
     $('#panel-update-note').hidden = !note;
     $('#panel-update-check').disabled =
@@ -359,7 +368,7 @@ window.CodePierPanelUpdate = (() => {
       job.state === 'succeeded' &&
       d.running_version === job.target_version
     );
-    $('#panel-update-setup').hidden = enabled;
+    $('#panel-update-setup').hidden = enabled && !d.host_setup_required;
     $('#panel-update-release').hidden = !d.candidate;
     text('panel-update-digest', d.candidate ? `SHA-256: ${d.candidate.sha256}` : '');
     text('panel-update-notes', d.candidate?.notes || '此 Release 未提供说明。');

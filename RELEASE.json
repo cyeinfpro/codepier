@@ -1,11 +1,15 @@
 {
   "name": "CodePier",
-  "version": "1.30.5",
+  "version": "1.30.6",
   "date": "2026-10-24",
   "status": "prepared",
   "source_only": false,
   "published": false,
   "deployed": false,
   "release_notes": "CHANGELOG.md",
-  "release_checklist": "docs/RELEASING.md"
+  "release_checklist": "docs/RELEASING.md",
+  "host_updater": {
+    "protocol": 1,
+    "min_launcher": 1
+  }
 }

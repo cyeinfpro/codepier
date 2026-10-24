@@ -119,9 +119,33 @@ def save_compose(path, spec):
     atomic_json(path, escaped(spec))
 
 
+def storage_layout(spec):
+    service = spec.get('services', {}).get('hub', {})
+    environment = service.get('environment', {})
+    configured = environment.get('HUB_STATE_DIR', '')
+    if not configured:
+        return '/app/data', 'CODEPIER_HUB_DATA_VOLUME'
+    if configured != '/app/state' or environment.get('HUB_DATA_DIR') != '/app/data':
+        raise UpdateError('UNSUPPORTED_DEPLOYMENT', '分离存储需要固定 /app/state 与 /app/data 挂载')
+    assets = [v for v in service.get('volumes', []) if isinstance(v, dict) and v.get('target') == '/app/data']
+    if len(assets) != 1 or assets[0].get('type') != 'volume':
+        raise UpdateError('UNSUPPORTED_DEPLOYMENT', '附件必须保留独立稳定命名卷')
+    value = spec.get('volumes', {}).get(assets[0].get('source'), {})
+    if not value.get('external') or not value.get('name'):
+        raise UpdateError('UNSUPPORTED_DEPLOYMENT', '附件卷必须外部管理并禁止历史清理')
+    states = [v for v in service.get('volumes', []) if isinstance(v, dict) and v.get('target') == '/app/state']
+    if len(states) != 1 or states[0].get('type') != 'volume':
+        raise UpdateError('UNSUPPORTED_DEPLOYMENT', '状态卷必须独立挂载')
+    state = spec.get('volumes', {}).get(states[0].get('source'), {})
+    if states[0].get('source') == assets[0].get('source') or state.get('name') == value.get('name'):
+        raise UpdateError('UNSUPPORTED_DEPLOYMENT', '状态与附件不能共享同一底层数据卷')
+    return '/app/state', 'CODEPIER_HUB_STATE_VOLUME'
+
+
 def data_volume(spec):
     service = spec.get('services', {}).get('hub', {})
-    mounts = [v for v in service.get('volumes', []) if isinstance(v, dict) and v.get('target') == '/app/data']
+    mount_path, _ = storage_layout(spec)
+    mounts = [v for v in service.get('volumes', []) if isinstance(v, dict) and v.get('target') == mount_path]
     if len(mounts) != 1 or mounts[0].get('type') != 'volume':
         raise UpdateError('UNSUPPORTED_DEPLOYMENT', '一键更新需要 Hub 使用独立命名数据卷；自定义挂载请手动维护')
     key = mounts[0]['source']
@@ -197,13 +221,101 @@ with sqlite3.connect('file:/app/data/hub.sqlite3?mode=ro',uri=True) as db:
 print(json.dumps({'files':files,'bytes':total,'integrity':'ok'}))
 '''
 
+COPY_STATE = r'''
+
+import hashlib,json,os,shutil,sqlite3,stat
+from pathlib import Path
+src,dst=Path('/backup'),Path('/app/data')
+allowed={'hub.sqlite3','hub.sqlite3-wal','hub.sqlite3-shm','master.key','master.keys.json','.codepier-state.json','.hub.lock','.keys.lock','native-cli','rekey.json','.rekey'}
+if any(dst.iterdir()): raise RuntimeError('Candidate state is not empty')
+if any(p.name not in allowed or p.is_symlink() for p in src.iterdir()): raise RuntimeError('Unknown state files; inspect before snapshot')
+if (src/'rekey.json').exists() or (src/'.rekey').exists(): raise RuntimeError('Key rotation recovery material requires explicit archive review before split-state update')
+marker=json.loads((src/'.codepier-state.json').read_text())
+if marker.get('schema_version')!=1 or marker.get('layout')!='split-state-v1': raise RuntimeError('State receipt invalid')
+required=sum((src/n).stat().st_size for n in ('hub.sqlite3','hub.sqlite3-wal','native-cli/native.sqlite3','native-cli/native.sqlite3-wal') if (src/n).is_file())+512*1024*1024
+if shutil.disk_usage(dst).free < required: raise RuntimeError('Insufficient target state capacity')
+files=total=0
+for name in ('master.key','master.keys.json'):
+    original=src/name
+    if not original.exists():
+        if name=='master.keys.json': continue
+        raise RuntimeError('State identity missing')
+    if not stat.S_ISREG(original.lstat().st_mode): raise RuntimeError('Invalid state identity')
+    copied=dst/name
+    shutil.copy2(original,copied)
+    os.chmod(copied,0o600)
+    if hashlib.sha256(original.read_bytes()).digest()!=hashlib.sha256(copied.read_bytes()).digest(): raise RuntimeError('Identity mismatch')
+    with copied.open('rb') as handle: os.fsync(handle.fileno())
+    files+=1;total+=copied.stat().st_size
+for name in ('hub.sqlite3','native-cli/native.sqlite3'):
+    original=src/name
+    if name.startswith('native-cli'):
+        folder=src/'native-cli'
+        if not folder.exists(): continue
+        if folder.is_symlink() or any(p.name not in {'native.sqlite3','native.sqlite3-wal','native.sqlite3-shm','locks'} or p.is_symlink() for p in folder.iterdir()): raise RuntimeError('Unknown native state')
+    if original.is_symlink() or not original.is_file(): raise RuntimeError('Database missing')
+    copied=dst/name;copied.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+    # The old Hub is stopped. Copy its WAL as part of the same quiesced state.
+    # Opening a WAL database directly on a read-only mount can require creating
+    # shared-memory files. Never use immutable=1 to bypass that: it ignores WAL.
+    if original.with_name(original.name+'-journal').exists(): raise RuntimeError('Unexpected rollback journal')
+    def digest(path):
+        h=hashlib.sha256()
+        with path.open('rb') as handle:
+            for chunk in iter(lambda:handle.read(65536),b''): h.update(chunk)
+        return h.digest()
+    for suffix in ('','-wal'):
+        source_file=original.with_name(original.name+suffix)
+        if not source_file.exists(): continue
+        if source_file.is_symlink() or not stat.S_ISREG(source_file.lstat().st_mode): raise RuntimeError('Unsafe database file')
+        target_file=copied.with_name(copied.name+suffix)
+        shutil.copy2(source_file,target_file);os.chmod(target_file,0o600)
+        if digest(source_file)!=digest(target_file): raise RuntimeError('Database copy mismatch')
+        with target_file.open('rb') as handle: os.fsync(handle.fileno())
+    target=sqlite3.connect(copied)
+    try:
+        if target.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()[0]!=0: raise RuntimeError('Candidate WAL busy')
+        if target.execute('PRAGMA journal_mode=DELETE').fetchone()[0]!='delete': raise RuntimeError('Candidate journal mode')
+        if target.execute('PRAGMA integrity_check').fetchone()[0]!='ok': raise RuntimeError('SQLite integrity')
+    finally:
+        target.close()
+    os.chmod(copied,0o600)
+    with copied.open('rb') as handle: os.fsync(handle.fileno())
+    files+=1;total+=copied.stat().st_size
+for root,dirs,names in os.walk(dst,topdown=False):
+    os.chmod(root,0o700)
+    fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY)
+    try: os.fsync(fd)
+    finally: os.close(fd)
+# Receipt is published only after all databases and identities are durable.
+receipt=dst/'.codepier-state.json'
+with receipt.open('x',encoding='utf-8') as handle:
+    json.dump(marker,handle,sort_keys=True);handle.flush();os.fsync(handle.fileno())
+os.chmod(receipt,0o600)
+fd=os.open(dst,os.O_RDONLY|os.O_DIRECTORY)
+try: os.fsync(fd)
+finally: os.close(fd)
+print(json.dumps({'files':files,'bytes':total,'integrity':'ok','state_layout':'split-state-v1','attachments_copied':False}))
+'''
+
+# First transition retains all non-state files in the original stable asset volume.
+COPY_MIGRATION = COPY_STATE.replace(
+    "if any(p.name not in allowed or p.is_symlink() for p in src.iterdir()): raise RuntimeError('Unknown state files; inspect before snapshot')",
+    "if any((src/n).is_symlink() for n in allowed): raise RuntimeError('Symlink state identity')").replace(
+    "marker=json.loads((src/'.codepier-state.json').read_text())",
+    "marker={'schema_version':1,'layout':'split-state-v1'}")
+
 PREFLIGHT = """import json
 from pathlib import Path
 from shared.util import VERSION
 from hub.agent_install import AgentPackage
 import hub.panel_update, shared.panel_maintenance
+try:
+    from hub.state_layout import STATE_LAYOUT
+except ImportError:
+    STATE_LAYOUT = 'legacy'
 p=AgentPackage(Path('/app')).build()
-print(json.dumps({'version':VERSION,'agent_sha256':p.sha256,'agent_bytes':len(p.content)}))
+print(json.dumps({'version':VERSION,'agent_sha256':p.sha256,'agent_bytes':len(p.content),'state_layout':STATE_LAYOUT}))
 """
 HEALTH = "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8765/healthz',timeout=3).read().decode())"
 MANIFEST = "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8765/agent/manifest.json',timeout=5).read().decode())"
@@ -246,7 +358,14 @@ class DockerRuntime:
         container = json.loads(self.command(['docker', 'inspect', ids[0]], job=job))[0]
         labels = container.get('Config', {}).get('Labels', {})
         mounts = container.get('Mounts', [])
-        mounted = [m for m in mounts if m.get('Destination') == '/app/data']
+        mount_path, volume_env = storage_layout(spec)
+        mounted = [m for m in mounts if m.get('Destination') == mount_path]
+        if mount_path == '/app/state':
+            asset_key = next(v['source'] for v in spec['services']['hub']['volumes'] if v.get('target') == '/app/data')
+            asset_name = spec['volumes'][asset_key]['name']
+            live_assets = [m for m in mounts if m.get('Destination') == '/app/data']
+            if len(live_assets) != 1 or live_assets[0].get('Name') != asset_name:
+                raise UpdateError('DEPLOYMENT_CHANGED', '运行中的附件卷与独立存储配置不一致', 409)
         socket_mount = [m for m in mounts if m.get('Destination') == '/run/codepier-updater']
         if (labels.get('com.docker.compose.project') != self.config['project'] or
                 labels.get('com.docker.compose.service') != 'hub' or
@@ -264,13 +383,36 @@ class DockerRuntime:
         image = 'codepier-update:' + job['id']
         target = copy.deepcopy(spec)
         target['services']['hub']['image'] = image
-        target['volumes'][key]['name'] = new_volume
+        migration = job.get('kind') == 'migrate-state' or (job.get('kind') == 'apply' and mount_path == '/app/data')
+        if migration:
+            live_env = dict(v.split('=', 1) for v in container.get('Config', {}).get('Env', []) if '=' in v)
+            if (live_env.get('HUB_STATE_DIR') or live_env.get('HUB_DATA_DIR', '/app/data') != '/app/data' or
+                    any(v.get('Destination') == '/app/state' for v in mounts) or
+                    any(v.get('target') == '/app/state' for v in target['services']['hub']['volumes'])):
+                raise UpdateError('LAYOUT_SOURCE_MISMATCH', '实际数据库路径或已有状态挂载不适合首次迁移', 409)
+            if mount_path != '/app/data' or 'hub-state' in target['volumes']:
+                raise UpdateError('LAYOUT_ALREADY_SET', '布局已分离或状态卷名称冲突；未改变部署', 409)
+            if job.get('kind') == 'migrate-state':
+                image = container['Image']
+                target['services']['hub']['image'] = image
+            target['services']['hub']['environment']['HUB_STATE_DIR'] = '/app/state'
+            target['services']['hub']['environment']['HUB_DATA_DIR'] = '/app/data'
+            target['services']['hub']['volumes'].append({'type': 'volume', 'source': 'hub-state', 'target': '/app/state'})
+            target['volumes']['hub-state'] = {'external': True, 'name': new_volume}
+            volume_env = 'CODEPIER_HUB_STATE_VOLUME'
+        else:
+            target['volumes'][key]['name'] = new_volume
         save_compose(path / 'target.json', target)
         return {'old_volume': old_volume, 'new_volume': new_volume, 'old_image': container['Image'],
-                'image': image, 'source': str(source.relative_to(self.root)), 'old_container': ids[0]}
+                'image': image, 'source': str(source.relative_to(self.root)), 'old_container': ids[0],
+                'state_layout': 'split-state-v1' if migration or mount_path == '/app/state' else 'legacy',
+                'volume_env': volume_env, 'layout_migration': migration,
+                'asset_volume': old_volume if migration else asset_name if mount_path == '/app/state' else '',
+                'layout_config': '.codepier-updater/layouts/' + job['id'] + '.json' if migration or mount_path == '/app/state' else ''}
 
     def build(self, job, source):
-        self.command(['docker', 'build', '--pull', '--tag', job['image'], '--file', str(source / 'Dockerfile'), str(source)], timeout=1800, job=job)
+        if job.get('kind') != 'migrate-state':
+            self.command(['docker', 'build', '--pull', '--tag', job['image'], '--file', str(source / 'Dockerfile'), str(source)], timeout=1800, job=job)
         metadata = json.loads(self.command(['docker', 'run', '--rm', '--network', 'none', '--read-only',
                              '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
                              '--entrypoint', 'python', job['image'], '-c', PREFLIGHT], job=job))
@@ -278,6 +420,12 @@ class DockerRuntime:
                 not re.fullmatch(r'[a-f0-9]{64}', metadata.get('agent_sha256', '')) or
                 not 0 < metadata.get('agent_bytes', 0) <= 8 * 1024 * 1024):
             raise UpdateError('PREFLIGHT_FAILED', '候选镜像或配套 Agent 文件校验失败', 500)
+        if job.get('state_layout') == 'split-state-v1' and metadata.get('state_layout') != 'split-state-v1':
+            raise UpdateError('STATE_LAYOUT_UNSUPPORTED', '候选版本不支持独立状态卷；未停止旧服务', 409)
+        image_id = self.command(['docker', 'image', 'inspect', job['image'], '--format', '{{.Id}}'], job=job).strip()
+        if not re.fullmatch(r'sha256:[a-f0-9]{64}', image_id):
+            raise UpdateError('PREFLIGHT_FAILED', '候选镜像固定身份无法核实', 500)
+        metadata['image_id'] = image_id
         return metadata
 
     def validate_files(self):
@@ -314,7 +462,7 @@ class DockerRuntime:
                             '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
                             '--volume', job['old_volume'] + ':/backup:ro',
                             '--volume', job['new_volume'] + ':/app/data',
-                            '--entrypoint', 'python', job['old_image'], '-c', COPY_DATA], timeout=1800, job=job)
+                            '--entrypoint', 'python', job['old_image'], '-c', COPY_MIGRATION if job.get('layout_migration') else COPY_STATE if job.get('state_layout') == 'split-state-v1' else COPY_DATA], timeout=1800, job=job)
         return json.loads(raw)
 
     def start(self, job, which):
@@ -334,7 +482,31 @@ class DockerRuntime:
             if (agent.get('version') != expected or agent.get('sha256') != job['package']['agent_sha256'] or
                     agent.get('bytes') != job['package']['agent_bytes']):
                 raise UpdateError('AGENT_PACKAGE_MISMATCH', '新 Hub 提供的 Agent 安装包与预检不一致', 500)
+        if job.get('layout_migration'):
+            actual = json.loads(self.command(['docker', 'inspect', ids[0]], job=job))[0]
+            selected = read_json(self.home / 'jobs' / job['id'] / (which + '.spec.json'))
+            expected_mounts = {v['target']: selected['volumes'][v['source']]['name']
+                for v in selected['services']['hub']['volumes'] if v.get('type') == 'volume'}
+            actual_mounts = {v.get('Destination'): v.get('Name') for v in actual.get('Mounts', [])}
+            if any(actual_mounts.get(path) != name for path, name in expected_mounts.items()):
+                raise UpdateError('LAYOUT_MISMATCH', '实际状态或附件卷与迁移目标不一致', 500)
+            expected_state = '/app/state' if which == 'target' else None
+            actual_env = dict(v.split('=', 1) for v in actual.get('Config', {}).get('Env', []) if '=' in v)
+            if ((actual_env.get('HUB_STATE_DIR') or None) != expected_state or
+                    actual_env.get('HUB_DATA_DIR', '/app/data') != '/app/data' or
+                    (which == 'old' and '/app/state' in actual_mounts) or
+                    actual.get('Image') != (job['package'].get('image_id') if which == 'target' and job.get('kind') == 'apply' else job['old_image'])):
+                raise UpdateError('LAYOUT_MISMATCH', '实际镜像或状态路径与已核验迁移目标不一致', 500)
         return health
+
+    def committed_env(self, job, before):
+        changes = {'CODEPIER_HUB_IMAGE': job['image'],
+                   job.get('volume_env', 'CODEPIER_HUB_DATA_VOLUME'): job['new_volume']}
+        if job.get('state_layout') == 'split-state-v1':
+            changes['COMPOSE_FILE'] = job['layout_config']
+        if job.get('kind') != 'migrate-state':
+            changes['CODEPIER_HUB_SOURCE'] = job['source']
+        return updated_env(before, changes)
 
     def commit(self, job):
         # Caller durably records COMMITTED after this returns, before removing gate.
@@ -343,9 +515,14 @@ class DockerRuntime:
         if fingerprint(self.root / '.env') != current['files']['.env']:
             raise UpdateError('DEPLOYMENT_CHANGED', '更新期间 .env 被其他操作修改，拒绝覆盖', 409)
         before = (self.home / 'jobs' / job['id'] / 'env.before').read_bytes()
-        content = updated_env(before, {'CODEPIER_HUB_IMAGE': job['image'],
-                                      'CODEPIER_HUB_SOURCE': job['source'],
-                                      'CODEPIER_HUB_DATA_VOLUME': job['new_volume']})
+        content = self.committed_env(job, before)
+        if job.get('state_layout') == 'split-state-v1':
+            selected = read_json(self.home / 'jobs' / job['id'] / 'target.spec.json')
+            layout = self.root / job['layout_config']
+            if layout.exists() or layout.is_symlink():
+                raise UpdateError('LAYOUT_CONFIG_EXISTS', '迁移配置已存在；拒绝覆盖，需核对原操作', 409)
+            save_compose(layout, selected)
+            current['files'] = {job['layout_config']: fingerprint(layout)}
         atomic_bytes(self.root / '.env', content)
         current['compose'] = read_json(self.home / 'jobs' / job['id'] / 'target.spec.json')
         current['version'] = job['target_version']
@@ -362,9 +539,7 @@ class DockerRuntime:
         current = read_json(self.home / 'jobs' / job['id'] / 'current.before.json')
         actual = fingerprint(self.root / '.env')
         old_sha = hashlib.sha256(before.read_bytes()).hexdigest()
-        committed_env = hashlib.sha256(updated_env(before.read_bytes(), {
-            'CODEPIER_HUB_IMAGE': job['image'], 'CODEPIER_HUB_SOURCE': job['source'],
-            'CODEPIER_HUB_DATA_VOLUME': job['new_volume']})).hexdigest()
+        committed_env = hashlib.sha256(self.committed_env(job, before.read_bytes())).hexdigest()
         if actual not in {old_sha, committed_env}:
             raise UpdateError('RECOVERY_REQUIRED', '运行版本已恢复，但宿主机配置被另行修改；请人工核对', 500)
         atomic_bytes(self.root / '.env', before.read_bytes())

@@ -18,7 +18,7 @@ from hub import iam
 class NativeService:
     def __init__(self,runtime):
         self.runtime=runtime
-        self.directory=runtime.store.directory/'native-cli'
+        self.directory=runtime.store.state_directory/'native-cli'
         self.pending={}
         self.changed=asyncio.Condition()
         self.revision=0

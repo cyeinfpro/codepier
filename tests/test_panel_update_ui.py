@@ -665,3 +665,23 @@ def test_manual_check_reload_has_no_implicit_install_continuation(update_browser
         assert any('request_key='+key in url for url in queries)
         assert not errors,errors
     finally:page.close()
+
+
+def test_legacy_host_notice_and_engine_activation_are_not_hidden(update_browser, stack):
+    browser, kind = update_browser
+    state = ready()
+    state.update(host_setup_required=True, host_update_notice='旧宿主可以更新 Hub，但宿主引导需管理员初始化。')
+    page, calls, errors = open_settings(browser, stack, state)
+    try:
+        expect(page.locator('#panel-update-host-notice')).to_be_visible()
+        expect(page.locator('#panel-update-host-notice')).to_contain_text('管理员初始化')
+        expect(page.locator('#panel-update-setup')).to_be_visible()
+        expect(page.locator('#panel-update-apply')).to_be_enabled()
+        state.update(host_setup_required=False, host_update_notice='', busy=True,
+                     host_engine={'active': VERSION, 'ready': False, 'activating': True})
+        page.click('#panel-update-refresh')
+        expect(page.locator('#panel-update-state')).to_contain_text('请等待就绪回执')
+        expect(page.locator('#panel-update-apply')).to_be_disabled()
+        assert not calls and not errors
+    finally:
+        page.close()

@@ -270,7 +270,7 @@ def check_archive(path, expected):
 
 
 def check_panel_update(path, expected):
-    """Verify actual release bytes with both the frozen 1.13 and current updater."""
+    """Verify actual release bytes with frozen 1.13/1.30.5 and current updaters."""
     from scripts import panel_update_source
     files = {name: item for name, item in expected.items() if name not in PANEL_UPDATE_EXCLUDES}
     result = check_archive(path, files)
@@ -278,13 +278,14 @@ def check_panel_update(path, expected):
         version = json.loads(archive.read('RELEASE.json'))['version']
     release = {'version': version, 'bytes': result['bytes'], 'sha256': result['sha256']}
     legacy = runpy.run_path(str(ROOT / 'tests/fixtures/panel_update_source_v1_13_0.py'))
+    previous = runpy.run_path(str(ROOT / 'tests/fixtures/panel_update_source_v1_30_5.py'))
     with tempfile.TemporaryDirectory(prefix='codepier-upgrade-check-') as directory:
-        for label, unpack in [('1.13.0', legacy['unpack_bundle']), ('current', panel_update_source.unpack_bundle)]:
+        for label, unpack in [('1.13.0', legacy['unpack_bundle']), ('1.30.5', previous['unpack_bundle']), ('current', panel_update_source.unpack_bundle)]:
             try:
                 unpack(path, Path(directory) / label, release)
             except Exception as exc:
                 raise ValueError('Panel updater compatibility failed: ' + label + ': ' + str(exc)) from exc
-    return {**result, 'panel_updaters_verified': ['1.13.0', 'current']}
+    return {**result, 'panel_updaters_verified': ['1.13.0', '1.30.5', 'current']}
 
 
 def main():

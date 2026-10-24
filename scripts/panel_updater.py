@@ -11,6 +11,7 @@ from contextlib import contextmanager
 import copy
 import fcntl
 import hashlib
+import importlib.util
 from http.server import BaseHTTPRequestHandler
 import json
 import os
@@ -24,6 +25,11 @@ import time
 import traceback
 from urllib.parse import parse_qs, urlsplit
 import uuid
+
+sys.dont_write_bytecode = True
+
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 try:
     from .panel_update_source import DEFAULT_REPOSITORY, UpdateError, fetch, latest_release, repository_name, unpack_bundle, version_tuple
@@ -71,8 +77,17 @@ def secure_host_path(path):
             raise UpdateError('UNSAFE_HOST_PATH', 'root 更新服务要求部署目录及其父目录由 root 拥有，且组/其他用户不可写；建议使用 /opt/codepier')
 
 
+def installed_engine_helper(home):
+    path = Path(home) / 'service' / 'panel_update_engine.py'
+    secure_host_path(path)
+    spec = importlib.util.spec_from_file_location('codepier_installed_engine', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 class Manager:
-    def __init__(self, root, *, runtime=None, start_workers=True):
+    def __init__(self, root, *, runtime=None, start_workers=True, engine_identity=None):
         self.root = Path(root).resolve()
         self.home = self.root / '.codepier-updater'
         self.config = read_json(self.home / 'config.json')
@@ -82,6 +97,12 @@ class Manager:
         self.lock = threading.RLock()
         self.start_workers = start_workers
         self.worker = None
+        self.draining = False
+        self.restart_requested = False
+        self.engine_helper = installed_engine_helper(self.home) if self.config.get('engine_launcher') else None
+        self.engine_identity = engine_identity
+        if self.engine_helper and self.engine_identity is None:
+            self.engine_identity = self.engine_helper.select_engine(self.home)
         for name in ('jobs', 'keys', 'releases', 'run'):
             (self.home / name).mkdir(mode=0o700, exist_ok=True)
 
@@ -106,9 +127,14 @@ class Manager:
             available = bool(candidate and time.time() - candidate['checked_at'] <= 900 and
                              version_tuple(candidate['version']) > version_tuple(version))
             active = self.current_job()
+            ready = read_json(self.home / 'engine-ready.json', {})
             return {'enabled': True, 'repository': self.config['repository'], 'current_version': version,
                     'candidate': candidate, 'update_available': available,
-                    'busy': bool(active and active['state'] not in TERMINAL),
+                    'capabilities': {'default_split_state': True, 'verified_engine_updates': bool(self.config.get('engine_launcher'))},
+                    'busy': self.draining or bool(active and active['state'] not in TERMINAL),
+                    'host_engine': {'active': self.engine_identity.get('version') if self.engine_identity else None,
+                                    'ready': bool(self.engine_identity and ready.get('id') == self.engine_identity['id']),
+                                    'activating': self.draining},
                     'recovery_required': bool(active and active['state'] == 'recovery_required'),
                     'operation': job_view(job) if job else None,
                     'request_found': bool(receipt) if request_key else None}
@@ -127,9 +153,9 @@ class Manager:
             job['updated'] = time.time()
             atomic_json(self.home / 'jobs' / job['id'] / 'status.json', job)
 
-    def submit(self, kind, body):
+    def submit(self, kind, body, *, host_migration=False):
         allowed = {'idempotency_key', 'current_version', 'actor'} | ({'version', 'release_id', 'sha256'} if kind == 'apply' else set())
-        if kind not in {'check', 'apply'} or not isinstance(body, dict) or set(body) != allowed:
+        if (kind not in {'check', 'apply'} and not (kind == 'migrate-state' and host_migration)) or not isinstance(body, dict) or set(body) != allowed:
             raise UpdateError('INVALID_REQUEST', '更新服务只接受检查或已确认的正式版本更新')
         key = body['idempotency_key']
         digest = key_digest(key)
@@ -138,6 +164,9 @@ class Manager:
             raise UpdateError('INVALID_REQUEST', '更新请求缺少管理员审计身份')
         content_hash = hashlib.sha256(json.dumps({'kind': kind, 'body': body}, sort_keys=True).encode()).hexdigest()
         with admission_lock(self.home), self.lock:
+            self.verify_engine_owner()
+            if self.draining:
+                raise UpdateError('UPDATER_RESTARTING', '宿主更新器正在完成已确认版本的切换，请查询原请求', 409)
             receipt = read_json(self.home / 'keys' / (digest + '.json'))
             if receipt:
                 if receipt['fingerprint'] != content_hash:
@@ -151,6 +180,13 @@ class Manager:
             current = read_json(self.home / 'current.json')
             if body['current_version'] != current['version']:
                 raise UpdateError('VERSION_CHANGED', 'Hub 与更新服务记录的版本不一致，请在宿主机重新检查配置', 409)
+            if kind == 'migrate-state':
+                if self.runtime.gate.exists():
+                    raise UpdateError('MAINTENANCE_BUSY', '已有维护标记；拒绝覆盖其他操作', 409)
+                for previous_path in (self.home / 'jobs').glob('*/status.json'):
+                    previous = read_json(previous_path, {})
+                    if previous.get('state') not in TERMINAL or previous.get('state') == 'recovery_required':
+                        raise UpdateError('UPDATE_BUSY', '存在未完成或待恢复记录，未开始布局迁移', 409)
             candidate = read_json(self.home / 'candidate.json')
             if kind == 'apply':
                 if not candidate or time.time() - candidate['checked_at'] > 900:
@@ -163,7 +199,9 @@ class Manager:
             job = {'id': uuid.uuid4().hex, 'kind': kind, 'state': 'queued', 'phase': 'queued',
                    'message': '更新请求已持久保存', 'request_key': key, 'actor': body['actor'],
                    'created': time.time(), 'updated': time.time(), 'from_version': current['version'],
-                   'target_version': candidate['version'] if kind == 'apply' else '', 'events': []}
+                   'target_version': candidate['version'] if kind == 'apply' else current['version'] if kind == 'migrate-state' else '', 'events': []}
+            if self.engine_identity:
+                job['engine'] = self.engine_identity
             path = self.home / 'jobs' / job['id']
             path.mkdir(mode=0o700)
             atomic_json(path / 'current.before.json', current)
@@ -194,9 +232,18 @@ class Manager:
             (lock / 'panel-update-owner.json').unlink()
             lock.rmdir()
 
+    def verify_engine_owner(self, job=None):
+        if self.engine_helper:
+            if job is not None and job.get('engine') != self.engine_identity:
+                raise UpdateError('ENGINE_OWNER_REQUIRED', '任务固定更新器与正在执行的更新器不一致', 409)
+            directory = self.engine_helper.verify_engine(self.home, self.engine_identity)
+            if directory != Path(__file__).resolve().parent:
+                raise UpdateError('ENGINE_OWNER_REQUIRED', '此操作必须使用任务固定的宿主更新器执行；请通过已安装 launcher 恢复，不能使用旧安装脚本替代', 409)
+
     def perform(self, job):
+        self.verify_engine_owner(job)
         try:
-            if job['kind'] == 'apply':
+            if job['kind'] in {'apply', 'migrate-state'}:
                 self.acquire_install_lock(job)
             self.save(job, state='running', phase='checking', message='正在检查 GitHub 正式 Release')
             if job['kind'] == 'check':
@@ -207,6 +254,12 @@ class Manager:
                 newer = version_tuple(candidate['version']) > version_tuple(job['from_version'])
                 self.save(job, state='succeeded', phase='checked', target_version=candidate['version'],
                           message='发现新的正式版本，可一键更新面板及 Agent 文件' if newer else '已是最新版本，或本机版本比正式 Release 更新')
+                return
+            if job['kind'] == 'migrate-state':
+                self.save(job, phase='building', message='核验当前镜像支持独立状态卷；不下载或更换版本',
+                          **self.runtime.prepare(job, self.root))
+                package = self.runtime.build(job, self.root)
+                self.cutover(job, package)
                 return
             release = read_json(self.home / 'jobs' / job['id'] / 'release.json')
             fresh = latest_release(self.config['repository'])
@@ -220,28 +273,52 @@ class Manager:
             self.save(job, phase='downloading', message='正在下载源码包并核对 GitHub SHA-256')
             fetch(release['url'], limit=release['bytes'], destination=archive, deadline_seconds=300)
             source = unpack_bundle(archive, directory / 'source', release)
+            if self.engine_helper:
+                staged = self.engine_helper.stage_engine(self.home, source, release)
+                self.save(job, staged_engine=staged)
             self.save(job, phase='building', message='正在构建独立候选镜像；现有面板仍正常服务', **self.runtime.prepare(job, source))
             package = self.runtime.build(job, source)
-            self.save(job, phase='quiescing', message='候选镜像和 Agent 包已验证，正在等待操作结束', package=package)
-            self.runtime.quiesce(job)
-            self.save(job, phase='stopping', message='维护保护已启用，正在停止旧 Hub')
-            self.runtime.stop(job)
-            self.save(job, phase='copying', message='正在复制并校验完整数据卷；原数据保留为回退备份',
-                      backup={'volume': job['old_volume'], 'retained': True})
-            copied = self.runtime.copy_data(job)
-            self.save(job, phase='starting', message='数据副本校验通过，正在启动新版本', copy_summary=copied)
-            self.runtime.start(job, 'target')
-            self.save(job, phase='verifying', message='正在校验新 Hub 健康状态、版本及 Agent 下载文件')
-            self.runtime.verify(job)
-            self.save(job, phase='committing', message='新版本验证通过，正在持久保存部署配置')
-            self.runtime.commit(job)
-            # Irreversible decision is durable BEFORE admitting any new traffic.
-            self.save(job, phase='committed', message='新版本已提交，正在恢复面板连接', commit_decided=True)
-            self.runtime.clear_gate()
-            self.save(job, state='succeeded', phase='done', message='面板、Hub 和配套 Agent 文件更新成功；已连接 Agent 未被强制重启')
-            self.release_install_lock(job)
+            self.cutover(job, package)
+            self.activate_staged_engine(job)
         except Exception as exc:
             self.fail(job, exc)
+
+    def cutover(self, job, package):
+        self.save(job, phase='quiescing', message='候选镜像和 Agent 包已验证，正在等待操作结束', package=package)
+        self.runtime.quiesce(job)
+        self.save(job, phase='stopping', message='维护保护已启用，正在停止旧 Hub')
+        self.runtime.stop(job)
+        self.save(job, phase='copying', message=('正在复制数据库与必要密钥状态；附件原卷独立保留' if job.get('state_layout') == 'split-state-v1' else '正在复制并校验完整数据卷；原数据保留为回退备份'),
+                  backup={'volume': job['old_volume'], 'retained': True})
+        copied = self.runtime.copy_data(job)
+        self.save(job, phase='starting', message='数据副本校验通过，正在启动新版本', copy_summary=copied)
+        self.runtime.start(job, 'target')
+        self.save(job, phase='verifying', message='正在校验新 Hub 健康状态、版本及 Agent 下载文件')
+        self.runtime.verify(job)
+        self.save(job, phase='committing', message='新版本验证通过，正在持久保存部署配置')
+        self.runtime.commit(job)
+        # Irreversible decision is durable BEFORE admitting any new traffic.
+        self.save(job, phase='committed', message='新版本已提交，正在恢复面板连接', commit_decided=True)
+        self.runtime.clear_gate()
+        if job.get('staged_engine'):
+            with self.lock:
+                self.draining = True
+        self.save(job, state='succeeded', phase='done', message='面板、Hub 和配套 Agent 文件更新成功；已连接 Agent 未被强制重启')
+        self.release_install_lock(job)
+
+    def activate_staged_engine(self, job):
+        identity = job.get('staged_engine')
+        if not self.engine_helper or not identity or job.get('state') != 'succeeded':
+            return
+        with admission_lock(self.home), self.lock:
+            self.draining = True
+            current = read_json(self.home / 'engine-current.json')
+            if current.get('id') != identity['id']:
+                self.engine_helper.promote_engine(self.home, identity, job['id'])
+            if identity['id'] != self.engine_identity['id']:
+                self.restart_requested = True
+            else:
+                self.draining = False
 
     def fail(self, job, exc):
         if not isinstance(exc, UpdateError):
@@ -270,9 +347,12 @@ class Manager:
             self.save(job, state='recovery_required', error=error, message='自动恢复未完成；保护和备份保留，请在宿主机人工检查')
 
     def recover(self, *, manual=False):
+        self.verify_engine_owner()
         # Durable accepted-but-not-started records are NOT automatically replayed.
         for path in sorted((self.home / 'jobs').glob('*/status.json')):
             job = read_json(path)
+            if job and (job.get('state') not in TERMINAL or job.get('state') == 'recovery_required'):
+                self.verify_engine_owner(job)
             if job['state'] in TERMINAL and not (manual and job['state'] == 'recovery_required'):
                 if job['state'] != 'recovery_required':
                     self.release_install_lock(job)
@@ -353,22 +433,47 @@ def acquire_lock(home):
     return descriptor
 
 
-def serve(root):
-    manager = Manager(root)
-    descriptor = acquire_lock(manager.home)
+def serve(root, supervised_lock_fd=None, engine_id=None):
+    home = Path(root).resolve() / '.codepier-updater'
+    helper = None
+    identity = None
+    if supervised_lock_fd is not None:
+        secure_host_path(Path(root).resolve())
+        helper = installed_engine_helper(home)
+        helper.validate_supervised_fd(home, supervised_lock_fd)
+        if not engine_id or not re.fullmatch(r'[a-f0-9]{64}', engine_id):
+            raise UpdateError('ENGINE_IDENTITY', '监督更新器缺少已验证身份')
+        identity = read_json(home / 'engines' / engine_id / 'identity.json')
+        directory = helper.verify_engine(home, identity)
+        if directory != Path(__file__).resolve().parent:
+            raise UpdateError('ENGINE_IDENTITY', '运行代码与固定更新器身份不一致')
+    manager = Manager(root, engine_identity=identity)
+    descriptor = supervised_lock_fd if supervised_lock_fd is not None else acquire_lock(manager.home)
     try:
         manager.recover()
+        latest = manager.current_job()
+        if latest and latest.get('state') == 'succeeded' and latest.get('staged_engine'):
+            manager.activate_staged_engine(latest)
+        if manager.restart_requested:
+            return helper.RESTART_EXIT if helper else 1
         socket = manager.home / 'run' / 'updater.sock'
         if socket.is_symlink():
             raise UpdateError('UNSAFE_SOCKET', '更新套接字路径不安全')
         socket.unlink(missing_ok=True)
         with Server(str(socket), Handler) as server:
             server.manager = manager
+            server.timeout = 0.5
             os.chown(socket, 0, 10001)
             socket.chmod(0o660)
-            server.serve_forever(poll_interval=0.5)
+            if helper:
+                helper.mark_ready(home, identity)
+            while True:
+                server.handle_request()
+                if manager.restart_requested and (not manager.worker or not manager.worker.is_alive()):
+                    return helper.RESTART_EXIT if helper else 1
     finally:
-        os.close(descriptor)
+        if supervised_lock_fd is None:
+            os.close(descriptor)
 
 
 def unit_name(root):
@@ -450,7 +555,7 @@ def _install_locked(root, repository):
     try:
         home.chmod(0o700)
         (home / 'run').chmod(0o755)
-        for name in ('panel_updater.py', 'panel_update_runtime.py', 'panel_update_source.py'):
+        for name in ('panel_updater.py', 'panel_update_runtime.py', 'panel_update_source.py', 'panel_update_engine.py', 'panel_update_launcher.py'):
             source = Path(__file__).resolve().parent / name
             atomic_bytes(home / 'service' / name, source.read_bytes())
         from_version = json.loads(run(['docker', 'exec', ids[0], 'python', '-c',
@@ -458,16 +563,19 @@ def _install_locked(root, repository):
         version_tuple(from_version)
         files = {str(p.relative_to(root)): fingerprint(p) for p in paths}
         files['.env'] = fingerprint(root / '.env')
-        config = {'root': str(root), 'repository': repository, 'project': project, 'unit': unit, 'protocol': 1}
+        config = {'root': str(root), 'repository': repository, 'project': project, 'unit': unit, 'protocol': 1, 'engine_launcher': 1}
         old_config = read_json(home / 'config.json', {})
         if old_config.get('repository') != repository:
             (home / 'candidate.json').unlink(missing_ok=True)
         atomic_json(home / 'config.json', config)
         atomic_json(home / 'current.json', {'compose': spec, 'files': files, 'version': from_version})
+        helper = installed_engine_helper(home)
+        identity = helper.stage_bootstrap(home, Path(__file__).resolve().parent.parent)
+        atomic_json(home / 'engine-current.json', identity)
         executable = Path(sys.executable).resolve()
         text = ('[Unit]\nDescription=CodePier panel update service\nAfter=docker.service network-online.target\nWants=network-online.target\n\n'
                 '[Service]\nType=simple\nUser=root\nUMask=0077\nWorkingDirectory=' + systemd_quote(root) + '\n'
-                'ExecStart=' + systemd_quote(executable) + ' ' + systemd_quote(home / 'service/panel_updater.py') + ' serve --root ' + systemd_quote(root) + '\n'
+                'ExecStart=' + systemd_quote(executable) + ' ' + systemd_quote(home / 'service/panel_update_launcher.py') + ' --root ' + systemd_quote(root) + '\n'
                 'Restart=on-failure\nRestartSec=5\nKillMode=control-group\nTimeoutStopSec=15\nNoNewPrivileges=true\nPrivateTmp=true\n'
                 '\n[Install]\nWantedBy=multi-user.target\n')
         atomic_bytes(service_path, text.encode(), 0o644)
@@ -492,17 +600,39 @@ def _install_locked(root, repository):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['install', 'serve', 'status', 'recover'])
+    parser.add_argument('action', choices=['install', 'serve', 'status', 'recover', 'migrate-state'])
     parser.add_argument('--root', type=Path, required=True)
+    parser.add_argument('--supervised-lock-fd', type=int)
+    parser.add_argument('--engine-id')
     parser.add_argument('--repository', default=DEFAULT_REPOSITORY)
+    parser.add_argument('--confirm-layout-migration', action='store_true')
+    parser.add_argument('--request-key', default='')
     args = parser.parse_args()
     try:
         if args.action == 'install':
             install(args.root, args.repository)
         elif args.action == 'serve':
-            serve(args.root)
+            return serve(args.root, args.supervised_lock_fd, args.engine_id)
         else:
-            manager = Manager(args.root)
+            manager = Manager(args.root, start_workers=False)
+            if args.action == 'migrate-state':
+                if not args.confirm_layout_migration or not args.request_key:
+                    raise UpdateError('CONFIRMATION_REQUIRED', '布局迁移需要显式确认和稳定请求编号')
+                if sys.platform != 'linux' or os.geteuid() != 0:
+                    raise UpdateError('HOST_SETUP_REQUIRED', '请在 Linux 宿主机以 root 执行已批准迁移')
+                secure_host_path(manager.root)
+                descriptor = acquire_lock(manager.home)
+                try:
+                    current = read_json(manager.home / 'current.json')
+                    accepted = manager.submit('migrate-state', {'idempotency_key': args.request_key,
+                        'current_version': current['version'], 'actor': 'host-admin'}, host_migration=True)
+                    if not accepted['replayed']:
+                        job = read_json(manager.home / 'jobs' / accepted['operation']['id'] / 'status.json')
+                        manager.perform(job)
+                finally:
+                    os.close(descriptor)
+                print(json.dumps(manager.status(args.request_key), ensure_ascii=False, indent=2))
+                return 0 if manager.status(args.request_key)['operation']['state'] == 'succeeded' else 1
             if args.action == 'recover':
                 descriptor = acquire_lock(manager.home)
                 try:

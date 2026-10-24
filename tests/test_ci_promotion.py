@@ -97,7 +97,7 @@ def evidence():
         source_artifact["panel-update-check.json" if panel else "public-check.json"] = encode({
             "passed": True, "version": "1.2.3", "inventory_sha256": full_inventory,
             "verified_against_current_source": True, "sha256": promotion.digest(raw), "bytes": len(raw),
-            **({"panel_updaters_verified": ["1.13.0", "current"]} if panel else {}),
+            **({"panel_updaters_verified": ["1.13.0", "1.30.5", "current"]} if panel else {}),
         })
     summary = {"verified": True, "scope": "complete", "layout": promotion.RESOURCE_LAYOUT,
                "shards": 6, "coverage_merged": True, "collected": 99,

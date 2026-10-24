@@ -56,7 +56,8 @@ def create_app(data_dir: str | None = None):
     CollaborationConfig.from_env()  # Reject inconsistent gates before opening the database.
     config = HubConfig.from_env()
     directory = Path(data_dir or os.getenv("HUB_DATA_DIR", str(BASE / "data"))).resolve()
-    instance_lock = InstanceLock(directory / ".hub.lock")
+    from hub.state_layout import state_directory
+    instance_lock = InstanceLock(state_directory(directory) / ".hub.lock")
     store = None
     try:
         store = Store(directory)

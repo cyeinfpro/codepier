@@ -1,6 +1,7 @@
 """Exercise real runtime commands with a deterministic Docker boundary, not a live deployment."""
 import copy
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -54,6 +55,7 @@ class DockerBoundary:
         if command[:2]==['docker','run']:
             if '/backup' in command[-1]:return '{"files":4,"bytes":512,"integrity":"ok"}'
             return json.dumps({'version':TARGET,'agent_sha256':'a'*64,'agent_bytes':123})
+        if command[:3]==['docker','image','inspect']:return 'sha256:'+'c'*64
         if command[:2]==['docker','build']:return 'built'
         if 'ps' in command:return 'container-id'
         if 'up' in command:
@@ -184,10 +186,17 @@ def test_installer_generates_private_service_and_fences_reinstallation(monkeypat
                 return json.dumps(VERSION) if 'VERSION' in command[-1] else ''
             raise AssertionError(command)
         monkeypatch.setattr(updater,'run',execute)
+        from scripts import panel_update_engine as engine
+        from types import SimpleNamespace
+        test_helper = SimpleNamespace(
+            stage_bootstrap=lambda home, source: engine.stage_bootstrap(home, source, expected_uid=os.getuid()),
+            select_engine=lambda home: engine.select_engine(home, expected_uid=os.getuid()),
+            verify_engine=lambda home, identity: original_path(updater.__file__).resolve().parent)
+        monkeypatch.setattr(updater, 'installed_engine_helper', lambda home: test_helper)
         updater.install(root,'cyeinfpro/codepier')
         unit=units/updater.unit_name(root);assert unit.is_file()
         assert 'KillMode=control-group' in unit.read_text()
-        assert '.codepier-updater/service/panel_updater.py' in unit.read_text()
+        assert '.codepier-updater/service/panel_update_launcher.py' in unit.read_text()
         assert not (unit.stat().st_mode&0o022)
         assert (home/'config.json').stat().st_mode&0o777==0o600
         assert all((home/'service'/name).is_file() for name in ('panel_updater.py','panel_update_runtime.py','panel_update_source.py'))

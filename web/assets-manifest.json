@@ -1,5 +1,5 @@
 {
-  "version": "1.30.5",
+  "version": "1.30.6",
   "algorithm": "sha256",
   "assets": {
     "access-profiles.css": {
@@ -183,8 +183,8 @@
       "bytes": 3115
     },
     "panel-update.js": {
-      "sha256": "1de1f9f92d40e5a6967c4a231183a350c5b3c3c55b762385ba5b84ba77345970",
-      "bytes": 33987
+      "sha256": "680c873a39f617b18d9f986df792e35c50fcda1ad8ab2f7ed24c7532265a4bc8",
+      "bytes": 34633
     },
     "project-runtimes.css": {
       "sha256": "f57a14e6c71034691ffff3f6f8757071bca528a02ac4776e0f5a6c5ad3c4bf66",

@@ -641,3 +641,25 @@ def test_discovery_version_comparison_and_host_repository(tmp_path, monkeypatch,
             assert value['candidate'] == original
     finally:
         store.close()
+
+
+@pytest.mark.parametrize('capabilities,required', [({}, True),
+    ({'default_split_state': True}, True),
+    ({'default_split_state': True, 'verified_engine_updates': True}, False)])
+def test_old_host_capability_is_explicit_without_blocking_hub_upgrade(tmp_path, capabilities, required):
+    class Bridge:
+        async def request(self, method, path, body=None):
+            return {'enabled': True, 'capabilities': capabilities, 'operation': None,
+                    'current_version': VERSION, 'update_available': True}
+    app, store = make_auth_app(tmp_path, Bridge())
+    try:
+        with TestClient(app) as client:
+            client.cookies.set('rd_session', 'cookie')
+            data = client.get('/api/panel-update/status').json()
+            assert data['enabled'] and data['update_available']
+            assert data['host_setup_required'] is required
+            assert bool(data['host_update_notice']) is required
+            if required:
+                assert '过渡 Hub' in data['host_update_notice']
+    finally:
+        store.close()

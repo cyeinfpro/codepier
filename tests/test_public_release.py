@@ -148,7 +148,7 @@ def test_real_release_upgrades_with_unmodified_1_13_updater(tmp_path):
         full = bundle.build(paths[0], public=True)
         panel = bundle.build(paths[1], public=True, panel_update=True)
         expected = guard.public_files(bundle.ROOT)
-        assert guard.check_panel_update(paths[1], expected)['panel_updaters_verified'] == ['1.13.0', 'current']
+        assert guard.check_panel_update(paths[1], expected)['panel_updaters_verified'] == ['1.13.0', '1.30.5', 'current']
         with zipfile.ZipFile(paths[0]) as complete, zipfile.ZipFile(paths[1]) as compatible:
             complete_names = set(complete.namelist()) - {'MANIFEST.sha256'}
             compatible_names = set(compatible.namelist()) - {'MANIFEST.sha256'}
