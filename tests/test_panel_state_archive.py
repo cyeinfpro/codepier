@@ -77,17 +77,29 @@ class ArchiveTests(unittest.TestCase):
             archive.export_state(self.source, self.archive)
         self.assertFalse(self.archive.exists())
 
-    def test_unknown_sidecars_and_rekey_fail_closed(self):
-        for name in ('attachments', 'hub.sqlite3-wal', '.hub.lock', 'rekey.json', '.rekey', 'native-cli/locks'):
-            with self.subTest(name=name):
-                self.write(name, b'not archived')
-                with self.assertRaises(ValueError):
-                    self.export()
-                (self.source / name).unlink()
-                native = self.source / 'native-cli'
-                if native.exists():
-                    native.rmdir()
+    def assert_unknown_sidecar_rejected(self, name):
+        self.write(name, b'not archived')
+        with self.assertRaises(ValueError):
+            self.export()
         self.assertFalse(self.archive.exists())
+
+    def test_unknown_attachments_fail_closed(self):
+        self.assert_unknown_sidecar_rejected('attachments')
+
+    def test_unknown_wal_fail_closed(self):
+        self.assert_unknown_sidecar_rejected('hub.sqlite3-wal')
+
+    def test_unknown_lock_fail_closed(self):
+        self.assert_unknown_sidecar_rejected('.hub.lock')
+
+    def test_unknown_rekey_journal_fail_closed(self):
+        self.assert_unknown_sidecar_rejected('rekey.json')
+
+    def test_unknown_rekey_directory_fail_closed(self):
+        self.assert_unknown_sidecar_rejected('.rekey')
+
+    def test_unknown_native_locks_fail_closed(self):
+        self.assert_unknown_sidecar_rejected('native-cli/locks')
 
     def test_wrong_keys_and_invalid_sqlite(self):
         self.write('master.key', Fernet.generate_key())
@@ -109,15 +121,27 @@ class ArchiveTests(unittest.TestCase):
             archive.restore_state(self.archive, self.destination)
         self.assertEqual((self.destination / 'keep').read_text(), 'keep')
 
-    def test_truncation_corruption_and_trailing_bytes(self):
+    def assert_corrupt_archive_rejected(self, variant):
         self.export()
         good = self.archive.read_bytes()
-        for bad in (good[:-1], good[:5], good + b'extra', good[:-8] + bytes([good[-8] ^ 0xff]) + good[-7:]):
-            with self.subTest(length=len(bad)):
-                self.archive.write_bytes(bad)
-                with self.assertRaises((ValueError, zlib.error)):
-                    archive.restore_state(self.archive, self.destination)
-                self.assertEqual(list(self.destination.iterdir()), [])
+        bad = {'truncated': good[:-1], 'short_header': good[:5], 'trailing': good + b'extra',
+               'checksum': good[:-8] + bytes([good[-8] ^ 0xff]) + good[-7:]}[variant]
+        self.archive.write_bytes(bad)
+        with self.assertRaises((ValueError, zlib.error)):
+            archive.restore_state(self.archive, self.destination)
+        self.assertEqual(list(self.destination.iterdir()), [])
+
+    def test_corrupt_archive_truncated(self):
+        self.assert_corrupt_archive_rejected('truncated')
+
+    def test_corrupt_archive_short_header(self):
+        self.assert_corrupt_archive_rejected('short_header')
+
+    def test_corrupt_archive_trailing(self):
+        self.assert_corrupt_archive_rejected('trailing')
+
+    def test_corrupt_archive_checksum(self):
+        self.assert_corrupt_archive_rejected('checksum')
 
     def test_manifest_rejects_version_paths_duplicates_hash_and_limits(self):
         self.export()
