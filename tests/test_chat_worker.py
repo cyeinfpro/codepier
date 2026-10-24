@@ -124,13 +124,20 @@ def test_serial_followup_interrupt_and_incremental_offsets(worker):
     assert state(interrupt) == 'completed'
     assert [e['receipt'] for e in events() if e['type'] == 'user'] == [first, second]
     assert {'delta', 'reasoning', 'tool', 'done'} <= {e['type'] for e in events()}
-    chunks = list(db.execute('SELECT offset,data FROM output WHERE session=? ORDER BY offset', (sid,)))
+    # The worker can append another event after completing the command. Read
+    # chunks and their committed size from one WAL snapshot, not two moments.
+    db.execute('BEGIN')
+    try:
+        chunks = list(db.execute('SELECT offset,data FROM output WHERE session=? ORDER BY offset', (sid,)))
+        snapshot_size = db.execute('SELECT size FROM sessions WHERE id=?', (sid,)).fetchone()[0]
+    finally:
+        db.rollback()
     offset = 0
     for chunk in chunks:
         assert chunk['offset'] == offset
         assert len(chunk['data']) <= 65536
         offset += len(chunk['data'])
-    assert offset == db.execute('SELECT size FROM sessions WHERE id=?', (sid,)).fetchone()[0]
+    assert offset == snapshot_size
     if provider == 'codex':
         assert db.execute('SELECT native_thread FROM sessions WHERE id=?', (sid,)).fetchone()[0] == 'thread-native'
 
