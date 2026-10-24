@@ -415,7 +415,8 @@ def resolve(reference):
         detail = (error.stderr or b"").decode(errors="replace").lower()
         # Authentication, transport, rate limiting, and ambiguous failures are
         # NOT evidence that a tag is absent.
-        require(not re.search(r"unauthorized|denied|forbidden|401|403|429|timeout|connection", detail),
+        # Status codes are tokens, not substrings of the queried image SHA.
+        require(not re.search(r"unauthorized|denied|forbidden|\b(?:401|403|429)\b|timeout|connection", detail),
                 "Cannot establish registry tag state")
         absent = "manifest unknown" in detail or "manifest_unknown" in detail
         absent = absent or bool(re.search(re.escape(reference.lower()) + r'["\x27]?: not found', detail))

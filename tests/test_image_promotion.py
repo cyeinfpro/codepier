@@ -180,6 +180,8 @@ def test_registry_requires_both_platforms_and_attestations(monkeypatch):
 @pytest.mark.parametrize("detail", [
     b"401 unauthorized: manifest unknown", b"403 forbidden", b"connection reset",
     b"lookup ghcr.io: no such host", b"unexpected EOF", b"429 too many requests",
+    b"HTTP 403: manifest unknown", b"status code:403; manifest unknown",
+    b"401 Unauthorized; manifest unknown", b"429 Too Many Requests; manifest unknown",
 ])
 def test_unknown_registry_state_is_not_absence(monkeypatch, detail):
     def inspect(*args):
@@ -193,6 +195,24 @@ def test_explicit_missing_registry_manifest_is_absence(monkeypatch):
         raise subprocess.CalledProcessError(1, "docker", stderr=(IMAGE + ":1.27.3: not found").encode())
     monkeypatch.setattr(m, "inspect", inspect)
     assert m.resolve(IMAGE + ":1.27.3") is None
+
+@pytest.mark.parametrize("code", ["401", "403", "429"])
+def test_status_digits_inside_image_sha_do_not_mean_http_failure(monkeypatch, code):
+    reference = IMAGE + ":build-" + "a" * 20 + code + "b" * 17 + "-123-1"
+    def inspect(*args):
+        raise subprocess.CalledProcessError(1, "docker", stderr=(reference + ": not found").encode())
+    monkeypatch.setattr(m, "inspect", inspect)
+    assert m.resolve(reference) is None
+
+@pytest.mark.parametrize("code", ["401", "403", "429"])
+def test_actual_http_status_with_missing_manifest_still_fails_closed(monkeypatch, code):
+    reference = IMAGE + ":build-" + "a" * 20 + code + "b" * 17 + "-123-1"
+    def inspect(*args):
+        detail = reference + ": not found; HTTP status: " + code
+        raise subprocess.CalledProcessError(1, "docker", stderr=detail.encode())
+    monkeypatch.setattr(m, "inspect", inspect)
+    with pytest.raises(m.EvidenceError, match="Cannot establish"):
+        m.resolve(reference)
 
 @pytest.mark.parametrize("conflict", ["version", "sha"])
 def test_immutable_tag_conflict_prevents_every_write(monkeypatch, expected, proof, conflict):
