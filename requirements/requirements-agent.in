@@ -1,4 +1,4 @@
-websockets==17.1
+websockets==17.3
 cryptography==50.0.2
 pydantic==2.14.1
 # 0.26.0 Point getters corrupt references; see py-tree-sitter#487.
