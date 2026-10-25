@@ -78,4 +78,3 @@ def test_inflight_returns_cannot_raise_current_cost_or_create_a_future_bucket(ap
     assert calls["input"]["estimated_tokens"] == 135431
     assert calls["adjustments"]["fresh_tool_input_tokens"] == 0
     assert all(p["started"] <= now for p in result["trend"])
-

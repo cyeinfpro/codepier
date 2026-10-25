@@ -126,4 +126,3 @@ def test_warmup_and_scope_do_not_leak_raw_fields_or_count_prior_period_calls():
     text = json.dumps(value)
     for marker in ("window_key", "operation_id", "grant_id", "actor", "contributions"):
         assert marker not in text
-

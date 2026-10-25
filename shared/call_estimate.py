@@ -140,4 +140,3 @@ def summarize_calls(groups, coverage, *, cache_read_percent=DEFAULT_CACHE_READ_P
                         "scope_is_inferred_model_rounds": True},
         "actual_usage": None, "billing_total": None,
     }
-

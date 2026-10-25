@@ -1,9 +1,9 @@
 # Dot 执行环境、输出与连续开发设计
 
-版本：0.5 · 增量设计与实施状态  
-日期：2026-10-19（UTC）  
-适用项目：CodePier MCP，源码版本线 1.30.0  
-设计基线：`release/v1.30.0-runtime-hardening`，提交 `aea0c45653ed768f6ef1ea8f2e1b28ac501edb3d`  
+版本：0.5 · 增量设计与实施状态
+日期：2026-10-19（UTC）
+适用项目：CodePier MCP，源码版本线 1.30.0
+设计基线：`release/v1.30.0-runtime-hardening`，提交 `aea0c45653ed768f6ef1ea8f2e1b28ac501edb3d`
 状态：W1–W5 的开发和约定验收已完成；最终提交 `da81e12` 的 Linux/macOS 各 8,865 项、Windows 331 项及真实容器 17 项检查通过，CI 19 个任务全部成功。W6 的回环集成已通过；真实 Dot 新旧会话配对按用户要求不执行。尚未发布或部署。详见 [2026-10-19 实施记录第 8.3 节](DOT_ENVIRONMENT_IMPLEMENTATION_2026-10-19.md)。
 
 ## 1. 目标与设计决策

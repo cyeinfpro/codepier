@@ -98,4 +98,3 @@ def test_calibrated_card_in_real_overview_layout(chat_browser_pool, stack, brows
         assert not errors
     finally:
         context.close()
-

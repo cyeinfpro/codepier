@@ -2,10 +2,10 @@
 
 最新完成状态见第 8.3 节：最终提交 `da81e12` 的 19 个 CI 任务全部通过；Linux/macOS 各 8,865 项、Windows 331 项及真实容器 17 项资格检查通过。真实 Dot 新旧会话验收按用户要求不执行。第 1–7 节保留历次历史结果，不代表最终交付状态；其中 Docker 不可用仅描述当时的 Mac 默认连接。
 
-日期：2026-10-19（UTC）  
-项目：CodePier MCP，源码版本线 1.30.0  
-分支：`release/v1.30.0-runtime-hardening`  
-最初续作 HEAD：`aea0c45653ed768f6ef1ea8f2e1b28ac501edb3d`  
+日期：2026-10-19（UTC）
+项目：CodePier MCP，源码版本线 1.30.0
+分支：`release/v1.30.0-runtime-hardening`
+最初续作 HEAD：`aea0c45653ed768f6ef1ea8f2e1b28ac501edb3d`
 最终验收 HEAD：`da81e12d62673d6e025d546f3a9641f2f5db7109`
 
 ## 1. 第一轮交付状态（历史）

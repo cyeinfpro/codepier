@@ -127,4 +127,3 @@ SELECT json_build_object(
   ) FROM u WHERE cohort='codex_client')
 );
 COMMIT;
-

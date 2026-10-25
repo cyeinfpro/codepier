@@ -58,4 +58,3 @@ def test_incompatible_call_cost_and_injected_actual_usage_are_not_displayed():
     headline = render(data).split("<details data-token-filters", 1)[0]
     assert "<strong>未记录</strong>" in headline
     assert "987654321" not in headline
-
