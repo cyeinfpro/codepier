@@ -15,6 +15,17 @@ from shared.ssh_diagnostics import SSH_ATTEMPT_LIMIT, safe_ssh_detail
 from shared.util import DevError
 
 
+def ssh_transport_tools(shell):
+    """Resolve native SSH dependencies without borrowing the project PATH.
+
+    Saved-VPS transport runs in the Agent account environment even when the
+    local project uses a clean runtime. Keep discovery and launch identical;
+    explicit shell.env.PATH, including an empty value, overrides Agent PATH.
+    """
+    path = shell['env'].get('PATH', os.environ.get('PATH', os.defpath))
+    return {name: shutil.which(name, path=path) for name in ('ssh', 'sshpass')}
+
+
 def prepare_ssh(config, project, spec, args, *, diagnostic_path=None):
     denial = shell_denial(config, project, spec)
     if denial:
@@ -22,9 +33,8 @@ def prepare_ssh(config, project, spec, args, *, diagnostic_path=None):
     shell = config['shell']
     if args['timeout_seconds'] > shell['max_timeout_seconds']:
         raise DevError('SHELL_TIMEOUT_LIMIT', '请求超时超过本机 Shell 执行上限')
-    path = shell['env'].get('PATH', os.environ.get('PATH', os.defpath))
-    ssh = shutil.which('ssh', path=path)
-    sshpass = shutil.which('sshpass', path=path)
+    tools = ssh_transport_tools(shell)
+    ssh, sshpass = tools['ssh'], tools['sshpass']
     if not ssh or not sshpass:
         raise DevError('SSH_DEPENDENCY_MISSING', '密码 SSH 需要 Agent 本机安装 ssh 和 sshpass，并在 Agent PATH 或 shell.env.PATH 中可见；尚未连接服务器')
     known_hosts = []

@@ -55,7 +55,8 @@ class ContextReplayTests(unittest.TestCase):
         self.assertEqual(replay([dict(r, round_hint="turn1") for r in rows], SCENARIOS[2])["tool_rounds"], 1)
 
     def test_polling_is_not_certainly_one_round(self):
-        rows = [event(i, i*2, tool="operations_get", request=25, response=60) for i in range(20)]
+        rows = [event(i, i*2, tool="operations_get", request=25, response=60,
+                      operation_id="same-target") for i in range(20)]
         result = estimate_context(rows)
         self.assertEqual([r["tool_rounds"] for r in result["scenarios"]], [2, 4, 20])
         self.assertLess(result["low"], result["estimated_tokens"])

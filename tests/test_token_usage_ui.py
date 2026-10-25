@@ -260,7 +260,7 @@ def test_dashboard_compact_summary_keeps_details_and_missing_states():
     assert '实际模型用量' not in visible
     assert '次有记录' not in visible and '次未记录' not in visible
     assert '统计说明' in html
-    assert '1 次调用' in html
+    assert '1 次工具调用' in html
     assert 'codepier-text-v1' in html and '范围不是统计置信区间' in html
     partial = run_js('dashboard', dashboard_payload(rows=[
         row(token_usage=usage(input=metric(state='partial'))), row(2, token_usage=None)]))
@@ -364,7 +364,7 @@ def test_dashboard_essential_context_limit_remains_outside_collapsed_details():
     html = run_js('dashboard', dashboard_payload())
     visible, details = html.split('<details data-token-filters', 1)
     assert '未包含完整对话上下文，非实际账单。' in visible
-    assert '1 次调用' in visible and '95% 假设' in visible
+    assert '1 次工具调用' in visible and '95% 假设' in visible
     assert '<span>总 Token</span>' not in visible
     assert 'Unicode' not in visible and '272K' not in visible
     assert 'data-token-filter=' not in visible and 'data-token-export' not in visible

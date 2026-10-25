@@ -257,11 +257,20 @@ async function vpsCheck(id) {
             output_limit: 12000,
           });
           if (!dialog.isConnected || session !== S.session) return;
-          output.textContent = op.output || op.result?.data?.output || '等待 Agent 返回…';
+          const error = op.result?.error;
+          output.textContent =
+            op.output ||
+            op.result?.data?.output ||
+            (op.pending
+              ? '等待 Agent 返回…'
+              : error?.message ||
+                op.error ||
+                (op.state === 'succeeded'
+                  ? '连接检查完成，未返回输出。'
+                  : '检查已结束，未返回输出。'));
           status.textContent = (stateNames[op.state] || op.state) + ' · ' + operation;
           if (!op.pending) {
             finished = true;
-            const error = op.result?.error;
             status.textContent =
               (op.state === 'succeeded'
                 ? '连接检查成功'

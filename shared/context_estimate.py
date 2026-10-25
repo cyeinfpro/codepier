@@ -37,7 +37,7 @@ class Scenario:
 
 SCENARIOS = (
     Scenario("low", 6000, 32000, .95, 4, 4, 8, 30, 900, 160, 20, 40, 240, "low"),
-    Scenario("mid", 12000, 64000, .98, 8, 1, 4, 10, 1800, 240, 40, 120, 400),
+    Scenario("mid", 12000, 64000, .98, 8, 0, 4, 10, 1800, 240, 40, 120, 400),
     Scenario("high", 24000, 128000, .995, 16, 0, 0, 0, 7200, 500, 100, 400, 900, "high"),
 )
 
@@ -57,6 +57,16 @@ def _metric(row, direction, field):
 def _id(value):
     # Correlation identifiers never leave this function/module in results.
     return value if isinstance(value, (str, int)) else None
+
+
+def _poll_key(row):
+    explicit = _id(row.get("poll_key"))
+    if explicit is not None:
+        return explicit
+    target = _id(row.get("operation_id"))
+    if row.get("tool") in POLL_TOOLS and target is not None:
+        return str(row["tool"]).rsplit("_", 1)[0] + ":" + str(target)
+    return None
 
 
 def normalize(rows):
@@ -92,7 +102,9 @@ def normalize(rows):
                            ("grant_id", "actor", "project", "root", "device")),
             "window_key": _id(row.get("window_key")),
             "round_hint": _id(row.get("round_hint")),
-            "poll_key": _id(row.get("poll_key")),
+            # Only a known server target can support poll coalescing. An
+            # absent target must not make unrelated polls look identical.
+            "poll_key": _poll_key(row),
             "token_usage": metrics,
         })
     return sorted(result, key=lambda r: (r["started"], str(r["id"])))
@@ -137,7 +149,7 @@ def _rounds(items, scenario):
                 merge = meta["round_hint"] == row["round_hint"]
             elif meta["round_hint"] is None:
                 all_poll = poll and meta["all_poll"]
-                same_poll = meta["poll_key"] == row["poll_key"]
+                same_poll = row["poll_key"] is not None and meta["poll_key"] == row["poll_key"]
                 if all_poll and same_poll and scenario.poll_seconds > 0:
                     merge = span <= scenario.poll_seconds
                 elif not meta["any_poll"] and not poll:

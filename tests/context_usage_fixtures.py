@@ -5,7 +5,7 @@ from hub.context_usage import context_usage
 from shared.token_estimate import summarize, usage
 
 
-def synthetic_dashboard(percent=95, model="gpt-6-astra", authority="context-fixture"):
+def synthetic_dashboard(percent=95, model="gpt-6-astra", authority="context-fixture", calibrated=False):
     def metric(n):
         return dict(state="available", estimated_tokens=n, low=n, high=n,
                     characters=n, utf8_bytes=n, source_truncated=False, truncated=False)
@@ -13,15 +13,21 @@ def synthetic_dashboard(percent=95, model="gpt-6-astra", authority="context-fixt
              "tool": "read", "project": "synthetic-project", "window_key": "synthetic-window",
              "token_usage": usage(metric(100), metric(1000))} for index in range(10)]
     summary = summarize(rows, cache_read_percent=percent, reference_model=model)
-    summary["context_estimate"], context_buckets = context_usage(
+    projection = context_usage(
         rows, 0, 3600, lambda timestamp: int(timestamp // 3600)*3600,
-        cache_read_percent=percent, reference_model=model)
+        cache_read_percent=percent, reference_model=model, include_call_estimate=calibrated)
+    summary["context_estimate"], context_buckets = projection[:2]
+    if calibrated:
+        summary["call_estimate"] = projection[2]
     buckets = defaultdict(list)
     for row in rows:
         buckets[int(row["started"] // 3600)*3600].append(row)
     trend = [{"started": key, **summarize(items, cache_read_percent=percent, reference_model=model),
               "context_estimate": context_buckets[key]} for key, items in buckets.items()]
-    return {"schema_version": 3, "authority_key": authority, "summary": summary,
+    if calibrated:
+        for point in trend:
+            point["call_estimate"] = projection[3][point["started"]]
+    return {"schema_version": 4 if calibrated else 3, "authority_key": authority, "summary": summary,
             "period": {"key": "today", "start": 0, "end": 3600, "timezone": "UTC", "bucket": "hour"},
             "filters": {"project": "", "connection": "", "session": ""},
             "options": {"projects": [], "connections": [], "sessions": []}, "trend": trend,

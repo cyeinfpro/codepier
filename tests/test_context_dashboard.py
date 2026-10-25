@@ -54,7 +54,7 @@ def test_context_contract_additive_legacy_compatibility_and_cost(api):
     seed(app, token, now - 60)
     value = read(app, token, now)
     result = context(value)
-    assert value["schema_version"] == 3
+    assert value["schema_version"] == 4
     assert result["kind"] == "context_scenario"
     assert result["version"] == "codepier-context-v1"
     assert result["scope"] == "retained_authorized_context_estimate"
@@ -100,7 +100,8 @@ def test_default_poll_rounds_are_estimates_not_call_count(api):
     app, client, token = api
     now = clock()
     for index in range(20):
-        seed(app, token, now-60+index*2, request=25, response=60, tool="operations_get")
+        identifier = seed(app, token, now-60+index*2, request=25, response=60, tool="operations_get")
+        app.state.store.execute("UPDATE mcp_activity SET operation_id=? WHERE id=?", ("same-target", identifier))
     value = context(read(app, token, now))
     assert value["grouped_tool_rounds"] == 4
     assert value["provisional_tails"] == 1

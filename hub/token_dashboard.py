@@ -15,6 +15,7 @@ from hub.context_usage import context_usage
 from hub.mcp_usage import MAX_ROWS, RETENTION_SECONDS, activity_actor_scope
 from hub.principal import refresh_principal
 from shared.context_estimate import VERSION as CONTEXT_VERSION
+from shared.call_estimate import VERSION as CALL_VERSION
 from shared.token_estimate import summarize, NUMBERS, VERSION as TEXT_VERSION, unavailable
 from shared.token_cost import DEFAULT_CACHE_READ_PERCENT, DEFAULT_REFERENCE_MODEL, MODELS, VERSION as PRICE_VERSION, pricing
 from shared.util import DevError
@@ -81,7 +82,7 @@ def token_dashboard(runtime, principal, timezone, *, period: Period = "today",
         ], separators=(",", ":")).encode()).hexdigest()
         data_version = store.one("PRAGMA data_version")["data_version"]
         collector = runtime.integrations.usage_metrics
-        cache_key = (CONTEXT_VERSION, PRICE_VERSION, authority_key, store.session_revision,
+        cache_key = (CALL_VERSION, CONTEXT_VERSION, PRICE_VERSION, authority_key, store.session_revision,
                      store.db.total_changes, data_version, id(collector), str(timezone),
                      period, project, connection, session, cache_read_percent, reference_model,
                      lower, now)
@@ -156,22 +157,25 @@ def token_dashboard(runtime, principal, timezone, *, period: Period = "today",
             if period == "today":
                 return lower + int((timestamp - lower) // 3600) * 3600
             return local.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-        context, context_buckets = context_usage(rows, lower, upper, bucket_for,
+        context, context_buckets, calls, call_buckets = context_usage(rows, lower, upper, bucket_for,
                                                 cache_read_percent=cache_read_percent,
                                                 reference_model=reference_model,
-                                                collection_unavailable=collection_unavailable)
+                                                collection_unavailable=collection_unavailable,
+                                                include_call_estimate=True)
         total["context_estimate"] = context
+        total["call_estimate"] = calls
         buckets = defaultdict(list)
         for row in period_rows:
             buckets[bucket_for(row["started"])].append(row)
         trend = []
-        for bucket in sorted(set(buckets) | set(context_buckets)):
+        for bucket in sorted(set(buckets) | set(context_buckets) | set(call_buckets)):
             point = summarize(buckets[bucket], cache_read_percent=cache_read_percent, reference_model=reference_model)
             point["scope"] = total["scope"]
             point["context_estimate"] = context_buckets.get(bucket)
+            point["call_estimate"] = call_buckets.get(bucket)
             trend.append({"started": bucket, **point})
         result = {
-            "schema_version": 3, "authority_key": authority_key,
+            "schema_version": 4, "authority_key": authority_key,
             "period": {"key": period, "start": lower, "end": upper,
                        "timezone": str(timezone), "bucket": "hour" if period == "today" else "day"},
             "filters": {"project": project, "connection": connection, "session": session},
@@ -187,7 +191,7 @@ def token_dashboard(runtime, principal, timezone, *, period: Period = "today",
                 "collection_unavailable": collection_unavailable,
                 "oldest_visible_activity": min((row["started"] for row in period_rows), default=None),
                 "context_warmup_attempts": len(rows) - len(period_rows),
-                "context_version": CONTEXT_VERSION},
+                "context_version": CONTEXT_VERSION, "call_estimate_version": CALL_VERSION},
         }
         if not collection_unavailable and expiry_seconds > 0:
             cache[cache_key] = (time.monotonic() + expiry_seconds, deepcopy(result), time.time() + expiry_seconds)

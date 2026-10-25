@@ -1,8 +1,9 @@
 """Projection of context scenarios to an authorized period and trend buckets."""
 from collections import defaultdict
 
-from shared.context_estimate import VERSION, SCENARIOS, estimate_context
+from shared.context_estimate import VERSION, SCENARIOS, estimate_context, replay
 from shared.token_cost import DEFAULT_CACHE_READ_PERCENT, reference_cost
+from shared.call_estimate import CALL_SCENARIOS, summarize_calls
 
 
 def _counter(value):
@@ -71,7 +72,8 @@ def _summary(groups, coverage, cache_read_percent, reference_model):
 
 
 def context_usage(rows, lower, upper, bucket_for, *, cache_read_percent=DEFAULT_CACHE_READ_PERCENT,
-                  reference_model="gpt-6-astra", collection_unavailable=False):
+                  reference_model="gpt-6-astra", collection_unavailable=False,
+                  include_call_estimate=False):
     """Warm retained history first; cut contributions only after one replay.
 
     All rows MUST already satisfy the current caller's live IAM, project,
@@ -101,6 +103,18 @@ def context_usage(rows, lower, upper, bucket_for, *, cache_read_percent=DEFAULT_
             if lower <= item["started"] <= upper:
                 groups[index].append(item)
                 buckets[bucket_for(item["started"])][index].append(item)
-    return (_summary(groups, coverage, cache_read_percent, reference_model),
-            {key: _summary(value, coverage, cache_read_percent, reference_model)
-             for key, value in buckets.items()})
+    result = (_summary(groups, coverage, cache_read_percent, reference_model),
+              {key: _summary(value, coverage, cache_read_percent, reference_model)
+               for key, value in buckets.items()})
+    if not include_call_estimate:
+        return result
+    call_groups = [[], [], []]
+    call_buckets = defaultdict(lambda: [[], [], []])
+    for index, scenario in enumerate(CALL_SCENARIOS):
+        for item in replay(rows, scenario)["contributions"]:
+            if lower <= item["started"] <= upper:
+                call_groups[index].append(item)
+                call_buckets[bucket_for(item["started"])][index].append(item)
+    options = dict(cache_read_percent=cache_read_percent, reference_model=reference_model)
+    return (*result, summarize_calls(call_groups, coverage, **options),
+            {key: summarize_calls(value, coverage, **options) for key, value in call_buckets.items()})
