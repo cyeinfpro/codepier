@@ -242,12 +242,30 @@ jobs:
           sudo apt-config dump | grep -Fx 'Acquire::http::Timeout "30";'
           sudo apt-config dump | grep -Fx 'Acquire::https::Timeout "30";'
           sudo apt-config dump | grep -Fx 'Acquire::Retries "2";'
+      - name: Isolate macOS resource workspace from Spotlight indexing
+        if: runner.os == 'macOS' && matrix.shard == 4
+        run: |
+          # Only this disposable job's generated files; no system indexing changes.
+          CI_SCRATCH="$RUNNER_TEMP/codepier-resource-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.noindex"
+          mkdir "$CI_SCRATCH"
+          mkdir "$CI_SCRATCH/tmp" "$CI_SCRATCH/pip-cache" "$CI_SCRATCH/dist"
+          ln -s "$CI_SCRATCH/dist" "$GITHUB_WORKSPACE/dist"
+          echo "CODEPIER_RESOURCE_SCRATCH=$CI_SCRATCH" >> "$GITHUB_ENV"
+          echo "TMPDIR=$CI_SCRATCH/tmp" >> "$GITHUB_ENV"
+          echo "PIP_CACHE_DIR=$CI_SCRATCH/pip-cache" >> "$GITHUB_ENV"
       - name: Fresh environments; cached downloads, never shared virtualenvs
         timeout-minutes: 15
         run: |
-          python -m venv .venv
+          if [[ -n "${CODEPIER_RESOURCE_SCRATCH:-}" ]]; then
+            python -m venv "$CODEPIER_RESOURCE_SCRATCH/venv"
+            ln -s "$CODEPIER_RESOURCE_SCRATCH/venv" .venv
+            python -m venv "$CODEPIER_RESOURCE_SCRATCH/venv-compat"
+            ln -s "$CODEPIER_RESOURCE_SCRATCH/venv-compat" .venv-compat
+          else
+            python -m venv .venv
+            python -m venv .venv-compat
+          fi
           .venv/bin/python -m pip install --require-hashes -r requirements-dev.txt
-          python -m venv .venv-compat
           .venv-compat/bin/python -m pip install --require-hashes -r requirements-compat.txt
           if [[ '${{ matrix.shard }}' -lt 4 ]]; then
             .venv/bin/python -m playwright install --with-deps chromium webkit
@@ -292,7 +310,7 @@ jobs:
         id: archive
         run: |
           VERSION=$(.venv/bin/python -c 'from scripts.build_source_bundle import source_version; print(source_version())')
-          ACCEPTANCE="$RUNNER_TEMP/codepier-public-$GITHUB_RUN_ID-${{ matrix.shard }}"
+          ACCEPTANCE="${CODEPIER_RESOURCE_SCRATCH:-$RUNNER_TEMP}/codepier-public-$GITHUB_RUN_ID-${{ matrix.shard }}"
           BUNDLE="$GITHUB_WORKSPACE/dist/codepier-$VERSION-source-full.zip"
           .venv/bin/python scripts/release_acceptance.py prepare --root "$GITHUB_WORKSPACE" --archive "$BUNDLE" --destination "$ACCEPTANCE" --proof "$GITHUB_WORKSPACE/dist/ci-results/archive-proof.json" --commit "$GITHUB_SHA"
           ln -s "$GITHUB_WORKSPACE/.venv" "$ACCEPTANCE/.venv"
