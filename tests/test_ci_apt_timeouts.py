@@ -42,6 +42,16 @@ def test_ci_bounds_existing_linux_installations_without_changing_trust(job):
     assert script.count('sudo apt-config dump') == 3
     directives = script.split("<<'APT'\n", 1)[1].split('\nAPT', 1)[0]
     assert directives.splitlines() == [f'{key} "{value}";' for key, value in APT_OPTIONS.items()]
+    # The authorized archive selector has its own exact-URI/preservation contract.
+    # This timeout step must still only configure download limits, never sources.
+    selector = named_step(steps, 'Select official HTTPS Ubuntu archive')
+    assert selector['if'] == expected
+    assert selector['timeout-minutes'] == 2
+    assert not selector.get('continue-on-error', False)
+    assert steps.index(selector) < steps.index(step)
+    assert selector['run'].splitlines()[-1] == (
+        'sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_OS="$RUNNER_OS" '
+        'python3 .github/scripts/ci_ubuntu_archive.py')
     for forbidden in ['APT_CONFIG=', 'sources.list', 'apt-mirrors', '--allow-unauthenticated',
                       'trusted=yes', 'Verify-Peer', 'Verify-Host', 'Check-Valid-Until',
                       'apt-get install', 'pip install', 'npm install']:
