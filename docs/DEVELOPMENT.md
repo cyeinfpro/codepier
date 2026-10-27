@@ -64,6 +64,8 @@ CODEPIER_LONG_BUDGET_TEST=1 .venv/bin/python scripts/check_full_regression.py \
 
 ## CI 分片与完整证明
 
+GitHub Linux 浏览器测试前，独立 helper 仅把 `azure.archive.ubuntu.com/ubuntu` 的精确 HTTP/HTTPS URI 切换为 Ubuntu 官方 `https://archive.ubuntu.com/ubuntu`，避免 Azure 镜像持续低速占满安装预算。支持 deb822 与 legacy sources；保留签名密钥、suite、component、security 及第三方源，异常格式拒绝修改。此为显式的 CI 镜像策略，不用于生产或关闭 APT 验签；合成测试同时约束镜像选择与原下载超时 step。原 30 秒下载超时、2 次重试、15 分钟安装预算和全部测试门槛不变。
+
 Linux/macOS 每个平台各自有六片：四个普通分片、一个真实资源准入专片（index 4）、一个真实长时进程专片（index 5）。长时专片保留原来的 10/30 分钟墙钟测试及同模块短时/取消测试，不缩短预算、不模拟时间、不跳过。所有分片从同一份经重复构建确认可复现的公开源码 ZIP 解包运行；每片仍保存完整收集清单、实际执行结果、coverage 和源码前后指纹。只有六片同源码、同收集集合、每例恰好执行一次且全部通过，聚合才是完整证明。不得把独立长测移到定时任务后仍称当前发布全量通过。
 
 ```bash

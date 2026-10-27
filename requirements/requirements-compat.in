@@ -7,5 +7,5 @@ mcp==2.3.0
 httpcore2==2.13.1 ; sys_platform != 'emscripten'
 httpx2==2.13.1
 pycparser==3.1 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'
-starlette==1.7.0
+starlette==1.9.0
 truststore==0.10.4 ; sys_platform != 'emscripten'
