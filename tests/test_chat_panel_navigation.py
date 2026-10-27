@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import expect, sync_playwright
 
+from tests.browser_launch import launch_browser
 from tests.browser_support import chat_page
 from tests.test_ui_unification import _login, _navigate, _prepare_native_fixture
 
@@ -52,7 +53,7 @@ def test_real_panel_roundtrip_retains_session_draft_and_theme(stack, engine, sch
     _prepare_native_fixture(stack)
     OUT.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as pw:
-        browser = getattr(pw, engine).launch()
+        browser = launch_browser(getattr(pw, engine))
         try:
             page = browser.new_page(viewport={'width':width, 'height':height}, reduced_motion='reduce')
             errors = []
@@ -86,7 +87,7 @@ def test_real_panel_roundtrip_retains_session_draft_and_theme(stack, engine, sch
 
 def test_failed_chat_load_cannot_overwrite_a_new_panel_page(stack):
     with sync_playwright() as pw:
-        browser = pw.chromium.launch()
+        browser = launch_browser(pw.chromium)
         try:
             page = browser.new_page()
             _login(page, stack, 'overview')

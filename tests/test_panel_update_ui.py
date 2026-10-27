@@ -1,4 +1,5 @@
 """Real Chromium/WebKit settings flows; host deploy responses are simulated."""
+from tests.browser_launch import launch_browser
 import copy
 import os
 import re
@@ -17,7 +18,7 @@ def update_browser(request):
     with sync_playwright() as pw:
         executable=os.environ.get('CODEPIER_TEST_'+request.param.upper()+'_EXECUTABLE')
         options={'executable_path':executable} if executable else {}
-        browser=getattr(pw,request.param).launch(**options)
+        browser=launch_browser(getattr(pw,request.param), **options)
         yield browser,request.param
         browser.close()
 

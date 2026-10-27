@@ -1,4 +1,5 @@
 import pytest
+from tests.browser_launch import launch_browser
 from tests.support import running_stack
 
 @pytest.fixture(scope='module')
@@ -51,7 +52,7 @@ def chat_browser_pool():
         browsers = {}
         def get_browser(kind):
             if kind not in browsers or not browsers[kind].is_connected():
-                browsers[kind] = getattr(pw, kind).launch()
+                browsers[kind] = launch_browser(getattr(pw, kind))
             return browsers[kind]
         try:
             yield get_browser

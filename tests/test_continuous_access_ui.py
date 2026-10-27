@@ -1,4 +1,5 @@
 """Real settings, consent and existing-grant editing in Chromium and WebKit."""
+from tests.browser_launch import launch_browser
 import base64
 import hashlib
 import sys
@@ -12,7 +13,7 @@ from playwright.sync_api import expect, sync_playwright
 @pytest.fixture(scope='module', params=['chromium', 'webkit'])
 def access_browser(request):
     with sync_playwright() as pw:
-        browser = getattr(pw, request.param).launch()
+        browser = launch_browser(getattr(pw, request.param))
         yield browser, request.param
         browser.close()
 

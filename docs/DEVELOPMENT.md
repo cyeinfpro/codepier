@@ -23,7 +23,7 @@ Linux 还需 Playwright 对应系统依赖，可在隔离 CI 运行 install --wi
 
 2026-10-19 的依赖维护使用明确的解析截止日 `2026-10-19`，将 Pydantic 与其精确匹配的 Core 一同更新。开发与独立 SDK 的 `.in` 显式保留本次无关的既有传递版本和平台条件，避免解析器顺带升级其他依赖；六套锁文件继续由同一脚本生成并使用相同截止日执行 `--check`。后续解除这些保守固定版本时，应单独审查对应依赖的变化。
 
-本次保留 Playwright 1.63.0：1.64.0 所带 Chromium 在本机 macOS 26.3.1 / arm64 上，即使只加载无项目样式或脚本的按钮页面，`requestAnimationFrame` 仍不推进，正常点击等待稳定状态超时；相同主机和探针下 1.63.0 正常。升级应等待该执行环境的兼容性验收通过。嵌套 `details` 的关闭保护改用 `visibility: hidden`，已在两版 WebKit 验证展开、选择、折叠与重开，保留这项兼容修复和回归断言。
+Playwright 1.64.1 在本机 macOS 26.3.1 / arm64 的默认 Chromium headless shell 上，即使空白合成页面也不推进 requestAnimationFrame，普通点击稳定性等待超时。浏览器验收通过 `tests/browser_launch.py` 显式选项策略：仅 macOS、Chromium、默认无头且未指定 channel/executable_path 时选择官方 `channel="chromium"` 完整浏览器新无头模式。Linux、Windows、WebKit、显式浏览器及有头选择原样保留。此策略不用于运行时，不关闭动画、actionability 或安全检查；移动元素仍须等待稳定。新增浏览器测试也应使用该 helper（包括 persistent context），不要全局猴子补丁或强制点击。参考 https://playwright.dev/docs/browsers#chromium-new-headless-mode 。嵌套 details 的 visibility 兼容修复和既有回归断言继续保留。
 
 ## 前端构建与格式
 

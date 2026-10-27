@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import expect, sync_playwright
 from scripts.ui_comfort_audit import MEASURE
+from tests.browser_launch import launch_browser
 from tests.test_ui_unification import _login, _navigate, _prepare_native_fixture, _set_scheme
 from tests.browser_support import chat_page
 from shared.token_estimate import summarize, usage
@@ -38,7 +39,7 @@ def within(page,selector,width,height):
 def test_desktop_essentials_fit_and_text_is_readable(stack,engine,scheme,width,height):
     _prepare_native_fixture(stack)
     with sync_playwright() as pw:
-        browser=getattr(pw,engine).launch()
+        browser=launch_browser(getattr(pw,engine))
         page=browser.new_page(viewport={'width':width,'height':height},color_scheme=scheme,reduced_motion='reduce')
         errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
         _login(page,stack);_set_scheme(page,scheme)
@@ -104,7 +105,7 @@ def test_short_desktop_token_states_keep_figures_notes_and_actions_reachable(sta
     }
     selected = {'name': 'unknown'}
     with sync_playwright() as pw:
-        browser = getattr(pw, engine).launch()
+        browser = launch_browser(getattr(pw, engine))
         page = browser.new_page(viewport={'width': width, 'height': height},
                                 color_scheme=scheme, reduced_motion='reduce')
         errors = []
@@ -167,7 +168,7 @@ def test_short_desktop_token_states_keep_figures_notes_and_actions_reachable(sta
 @pytest.mark.parametrize('scheme',['light','dark'])
 def test_semantic_palette_pairing_including_hover_and_selection(stack,scheme):
     with sync_playwright() as pw:
-        browser=pw.chromium.launch();page=browser.new_page()
+        browser=launch_browser(pw.chromium);page=browser.new_page()
         _login(page,stack);_set_scheme(page,scheme)
         names=['text','muted','soft','panel','surface','raised','hover','selected','danger','danger-bg','warning','warning-bg','success','success-bg','info','info-bg','purple','purple-bg','primary','primary-text','primary-hover','message-bg','message-text']
         values=page.evaluate('names=>Object.fromEntries(names.map(n=>[n,getComputedStyle(document.documentElement).getPropertyValue("--ui-"+n).trim()]))',names)
@@ -194,7 +195,7 @@ def test_semantic_palette_pairing_including_hover_and_selection(stack,scheme):
 @pytest.mark.parametrize('scheme',['light','dark'])
 def test_notices_dialog_buttons_and_login_colors(stack,engine,scheme):
     with sync_playwright() as pw:
-        browser=getattr(pw,engine).launch();page=browser.new_page(viewport={'width':1366,'height':768},color_scheme=scheme,reduced_motion='reduce')
+        browser=launch_browser(getattr(pw,engine));page=browser.new_page(viewport={'width':1366,'height':768},color_scheme=scheme,reduced_motion='reduce')
         page.goto(stack.url);expect(page.locator('#login-form')).to_be_visible();_set_scheme(page,scheme)
         initial=page.evaluate(MEASURE)
         assert not initial['failures'],('login',initial['failures'])
@@ -213,7 +214,7 @@ def test_notices_dialog_buttons_and_login_colors(stack,engine,scheme):
 @pytest.mark.parametrize('width,height',[(320,568),(390,844),(768,1024)])
 def test_mobile_reflow_and_navigation_remain_reachable(stack,engine,width,height):
     with sync_playwright() as pw:
-        browser=getattr(pw,engine).launch();page=browser.new_page(viewport={'width':width,'height':height},reduced_motion='reduce')
+        browser=launch_browser(getattr(pw,engine));page=browser.new_page(viewport={'width':width,'height':height},reduced_motion='reduce')
         _login(page,stack)
         within(page,'.mobile-dock',width,height)
         for button in page.locator('.mobile-dock button').all():

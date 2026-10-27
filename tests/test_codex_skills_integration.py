@@ -7,6 +7,7 @@ from jsonschema import Draft202012Validator
 from playwright.sync_api import expect, sync_playwright
 
 from shared.contracts import OUTPUT_SCHEMAS
+from tests.browser_launch import launch_browser
 from tests.test_codex_skills import skill
 
 
@@ -69,7 +70,7 @@ def test_browser_lists_reads_resources_and_mobile_layout(prepared,tmp_path):
     stack,folder=prepared
     screenshots=Path(os.getenv('CODEX_SKILLS_SCREENSHOTS',str(tmp_path/'screenshots')));screenshots.mkdir(parents=True,exist_ok=True)
     with sync_playwright() as playwright:
-        browser=playwright.chromium.launch()
+        browser=launch_browser(playwright.chromium)
         page=browser.new_page(viewport={'width':1440,'height':1000})
         errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
         try:

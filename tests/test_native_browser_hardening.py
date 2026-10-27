@@ -1,3 +1,4 @@
+from tests.browser_launch import launch_browser
 from tests.evidence import evidence_path
 """Archived terminal compatibility/security coverage.
 The production panel no longer mounts this application. The old renderer is
@@ -20,7 +21,7 @@ from tests.support_legacy_terminal import mount_archived_terminal
 def test_http_upload_reload_binding_input_batch_queries_and_export(cli_stack,tmp_path):
     s=cli_stack
     with sync_playwright() as playwright:
-        browser=playwright.chromium.launch()
+        browser=launch_browser(playwright.chromium)
         page=browser.new_page(viewport={'width':1440,'height':1000})
         errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
         # localhost normally grants a secure context. Explicitly remove WebCrypto
