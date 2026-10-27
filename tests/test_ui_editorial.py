@@ -6,6 +6,7 @@ import json
 import pytest
 from playwright.sync_api import expect, sync_playwright
 from scripts.ui_comfort_audit import MEASURE
+from tests.browser_launch import launch_browser
 from tests.test_ui_unification import _login, _navigate, _prepare_native_fixture, _set_scheme
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -34,7 +35,7 @@ def test_editorial_composition_navigation_and_live_controls(stack,engine,scheme,
     OUT.mkdir(parents=True,exist_ok=True)
     _prepare_native_fixture(stack)
     with sync_playwright() as pw:
-        browser=getattr(pw,engine).launch()
+        browser=launch_browser(getattr(pw,engine))
         page=browser.new_page(viewport={'width':width,'height':height},color_scheme=scheme,reduced_motion='reduce')
         errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
         _login(page,stack);_set_scheme(page,scheme)
@@ -86,7 +87,7 @@ def test_editorial_composition_navigation_and_live_controls(stack,engine,scheme,
 @pytest.mark.parametrize('width,height',[(320,568),(1280,720)])
 def test_long_names_empty_states_and_colored_card_actions(stack,engine,width,height):
     with sync_playwright() as pw:
-        browser=getattr(pw,engine).launch();page=browser.new_page(viewport={'width':width,'height':height},reduced_motion='reduce')
+        browser=launch_browser(getattr(pw,engine));page=browser.new_page(viewport={'width':width,'height':height},reduced_motion='reduce')
         # Synthetic project data must not be replaced by live event refreshes.
         page.route('**/api/events?*', lambda route: route.abort())
         _login(page,stack,'projects')

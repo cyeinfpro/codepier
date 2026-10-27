@@ -7,6 +7,7 @@ import sys
 
 import pytest
 from playwright.sync_api import sync_playwright, expect
+from tests.browser_launch import launch_browser
 from tests.support import running_stack, BASE
 from tests.test_integrations_stack import integrated_stack
 
@@ -45,7 +46,7 @@ def capture_integration_renders(page):
 def test_panel_real_validation_semantics_navigation_and_draft_retention(integrated_stack):
     s=integrated_stack
     with sync_playwright() as pw:
-        browser=pw.chromium.launch();page=browser.new_page(viewport={'width':1366,'height':768},reduced_motion='reduce')
+        browser=launch_browser(pw.chromium);page=browser.new_page(viewport={'width':1366,'height':768},reduced_motion='reduce')
         errors=[];page.on('pageerror',lambda e:errors.append(str(e)));page.on('dialog',lambda d:d.accept())
         login(page,s)
         expect(page.locator('#i-checks')).to_contain_text('原生模型对话')
@@ -88,7 +89,7 @@ def test_panel_real_validation_semantics_navigation_and_draft_retention(integrat
 def test_worktree_editor_writes_only_selected_workspace(integrated_stack):
     s=integrated_stack
     with sync_playwright() as pw:
-        browser=pw.chromium.launch();page=browser.new_page(viewport={'width':1366,'height':768},reduced_motion='reduce')
+        browser=launch_browser(pw.chromium);page=browser.new_page(viewport={'width':1366,'height':768},reduced_motion='reduce')
         page.on('dialog',lambda d:d.accept());errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
         login(page,s);tab(page,'worktrees')
         page.locator('[data-i-form=worktree] [name=label]').fill('UI isolated worktree')
@@ -125,7 +126,7 @@ def test_worktree_editor_writes_only_selected_workspace(integrated_stack):
 def test_integration_views_keep_readable_geometry(integrated_stack,engine,scheme,width,height):
     s=integrated_stack;OUT.mkdir(parents=True,exist_ok=True)
     with sync_playwright() as pw:
-        browser=getattr(pw,engine).launch();page=browser.new_page(viewport={'width':width,'height':height},color_scheme=scheme,reduced_motion='reduce')
+        browser=launch_browser(getattr(pw,engine));page=browser.new_page(viewport={'width':width,'height':height},color_scheme=scheme,reduced_motion='reduce')
         errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
         login(page,s);page.evaluate('(scheme)=>document.documentElement.dataset.appearance=scheme',scheme)
         for name in ['overview','status','validation','worktrees','navigation','browser','handoff','setup']:
@@ -152,7 +153,7 @@ def test_tabs_accept_latest_click_while_basics_read_is_pending(integrated_stack,
     """Visible tabs must stay interactive until their replacement is mounted."""
     s = integrated_stack
     with sync_playwright() as pw:
-        browser = getattr(pw, engine).launch()
+        browser = launch_browser(getattr(pw, engine))
         page = browser.new_page(viewport={'width': width, 'height': height}, color_scheme='dark', reduced_motion='reduce')
         errors = []
         page.on('pageerror', lambda error: errors.append(str(error)))
@@ -189,7 +190,7 @@ def test_tabs_accept_latest_click_while_basics_read_is_pending(integrated_stack,
 def test_pending_tab_read_cannot_rebind_after_leaving(integrated_stack, engine, leave):
     s = integrated_stack
     with sync_playwright() as pw:
-        browser = getattr(pw, engine).launch()
+        browser = launch_browser(getattr(pw, engine))
         page = browser.new_page(viewport={'width': 390, 'height': 844}, color_scheme='dark')
         held = []
         try:
@@ -232,7 +233,7 @@ def test_pending_tab_read_cannot_rebind_after_leaving(integrated_stack, engine, 
 def test_superseded_tab_render_cannot_steal_focus_after_aba(integrated_stack, engine, transition):
     s = integrated_stack
     with sync_playwright() as pw:
-        browser = getattr(pw, engine).launch()
+        browser = launch_browser(getattr(pw, engine))
         page = browser.new_page(viewport={'width': 390, 'height': 844}, color_scheme='dark', reduced_motion='reduce')
         held = []
         request_count = 0

@@ -8,6 +8,7 @@ import pytest
 from playwright.sync_api import expect, sync_playwright
 
 from shared.util import atomic_json
+from tests.browser_launch import launch_browser
 from tests.test_ssh import PASSWORD, fake_transport
 
 
@@ -24,7 +25,7 @@ def ui_stack(stack):
 @pytest.fixture(params=['chromium','webkit'])
 def browser(request):
     with sync_playwright() as pw:
-        value=getattr(pw,request.param).launch()
+        value=launch_browser(getattr(pw,request.param))
         yield value, request.param
         value.close()
 

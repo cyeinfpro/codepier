@@ -9,6 +9,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+from tests.browser_launch import launch_browser
 from tests.support import running_stack
 from tests.test_ui_unification import _login, _navigate, _prepare_native_fixture, _set_scheme
 from playwright.sync_api import sync_playwright
@@ -54,7 +55,7 @@ def capture(output: Path, *, full: bool=False, engine: str='chromium') -> dict:
     with TemporaryDirectory(prefix='codepier-ui-comfort-') as tmp, running_stack(Path(tmp)) as stack:
         _prepare_native_fixture(stack)
         with sync_playwright() as pw:
-            browser=getattr(pw,engine).launch()
+            browser=launch_browser(getattr(pw,engine))
             try:
                 for width,height in viewports:
                     for scheme in ['light','dark']:

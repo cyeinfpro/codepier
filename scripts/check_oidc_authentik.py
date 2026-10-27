@@ -31,6 +31,7 @@ from playwright.sync_api import sync_playwright, expect
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from tests.browser_launch import launch_browser
 from shared.role_contracts import ROLE_SCOPE
 
 
@@ -221,7 +222,7 @@ def acceptance(output):
             passed('actual_discovery_jwks_and_exact_callback')
             phase = 'real-browser-login'
             with sync_playwright() as pw:
-                browser = pw.chromium.launch()
+                browser = launch_browser(pw.chromium)
                 human_clients, identities, profiles = [], [], []
                 for user, password in users:
                     context = browser.new_context()

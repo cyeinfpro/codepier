@@ -9,6 +9,7 @@ from jsonschema import Draft202012Validator
 from playwright.sync_api import expect, sync_playwright
 
 from shared.contracts import OUTPUT_SCHEMAS
+from tests.browser_launch import launch_browser
 from tests.support import wait_for
 
 
@@ -81,7 +82,7 @@ def test_browser_task_creation_evidence_gate_progress_context_and_responsiveness
     screenshots = Path(os.getenv("AGENTDOCK_SCREENSHOTS_DIR", str(tmp_path / "screenshots")))
     screenshots.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as p:
-        browser = p.chromium.launch()
+        browser = launch_browser(p.chromium)
         page = browser.new_page(viewport={"width": 1440, "height": 1000}, device_scale_factor=1)
         errors = []
         page.on('pageerror', lambda error: errors.append(str(error)))

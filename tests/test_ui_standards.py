@@ -8,6 +8,7 @@ import sys
 import pytest
 from playwright.sync_api import expect, sync_playwright
 
+from tests.browser_launch import launch_browser
 from tests.browser_support import chat_page
 from tests.test_ui_unification import _login, _layout, _set_scheme
 
@@ -28,7 +29,7 @@ def test_dimension_tokens_and_cache_contract():
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_field_semantics_invalid_reset_and_clear_search(stack, engine):
     with sync_playwright() as pw:
-        browser = getattr(pw, engine).launch()
+        browser = launch_browser(getattr(pw, engine))
         page = browser.new_page(viewport={"width": 390, "height": 844})
         _login(page, stack, "projects")
         page.fill("#project-query", "no-match-ui-standards")
@@ -76,7 +77,7 @@ def test_field_semantics_invalid_reset_and_clear_search(stack, engine):
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_busy_preserves_geometry_name_nodes_and_duplicate_guard(stack, engine):
     with sync_playwright() as pw:
-        browser = getattr(pw, engine).launch()
+        browser = launch_browser(getattr(pw, engine))
         page = browser.new_page(viewport={"width": 1440, "height": 1000})
         _login(page, stack, "settings")
         # Follow the settings center navigation so the control is in the
@@ -113,7 +114,7 @@ def test_busy_preserves_geometry_name_nodes_and_duplicate_guard(stack, engine):
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_command_first_arrow_node_identity_and_filter_reset(stack, engine):
     with sync_playwright() as pw:
-        browser = getattr(pw, engine).launch()
+        browser = launch_browser(getattr(pw, engine))
         page = browser.new_page(viewport={"width": 1440, "height": 1000})
         _login(page, stack)
         page.evaluate("""() => {
@@ -157,7 +158,7 @@ def test_command_first_arrow_node_identity_and_filter_reset(stack, engine):
 def test_long_modal_layout_targets_and_focus(stack, engine, scheme, width, height):
     OUT.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as pw:
-        browser = getattr(pw, engine).launch()
+        browser = launch_browser(getattr(pw, engine))
         page = browser.new_page(viewport={"width": width, "height": height}, color_scheme=scheme)
         page.emulate_media(reduced_motion="reduce")
         _login(page, stack, "settings")
@@ -204,7 +205,7 @@ def test_long_modal_layout_targets_and_focus(stack, engine, scheme, width, heigh
 @pytest.mark.parametrize("width,height", [(320, 568), (390, 844), (768, 1024), (1440, 1000), (667, 375)])
 def test_dialog_toasts_preserve_controls_keyboard_access_and_pending_errors(stack, engine, width, height):
     with sync_playwright() as pw:
-        browser = getattr(pw, engine).launch()
+        browser = launch_browser(getattr(pw, engine))
         page = browser.new_page(viewport={"width": width, "height": height})
         page.emulate_media(reduced_motion="reduce")
         _login(page, stack, "settings")
@@ -280,7 +281,7 @@ def test_dialog_toasts_preserve_controls_keyboard_access_and_pending_errors(stac
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_mobile_toast_does_not_cover_dock_and_errors_are_explicit(stack, engine):
     with sync_playwright() as pw:
-        browser = getattr(pw, engine).launch()
+        browser = launch_browser(getattr(pw, engine))
         page = browser.new_page(viewport={"width": 390, "height": 844})
         _login(page, stack)
         page.evaluate("toast('操作完成：保留当前工作区')")
@@ -308,7 +309,7 @@ def test_mobile_toast_does_not_cover_dock_and_errors_are_explicit(stack, engine)
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_password_mismatch_stays_at_field_without_submission(stack, engine):
     with sync_playwright() as pw:
-        browser = getattr(pw, engine).launch()
+        browser = launch_browser(getattr(pw, engine))
         page = browser.new_page()
         submitted = []
         page.on("request", lambda req: submitted.append(req.url) if req.method == "POST" and "/api/account/password" in req.url else None)

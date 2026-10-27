@@ -11,6 +11,7 @@ import subprocess
 import uuid
 import pytest
 from playwright.sync_api import sync_playwright,expect
+from tests.browser_launch import launch_browser
 from tests.support import BASE
 from tests.test_integrations_stack import integrated_stack,resolved
 
@@ -46,7 +47,7 @@ def test_sdk_cards_restore_pending_and_immutable_paginated_review(integrated_sta
             response={**response,'structuredContent':{'pending':True,'operation_id':op}}
         return response
     with sync_playwright() as pw:
-        browser=pw.chromium.launch(headless=True);page=browser.new_page(viewport={'width':width,'height':1000});errors=[]
+        browser=launch_browser(pw.chromium, headless=True);page=browser.new_page(viewport={'width':width,'height':1000});errors=[]
         page.on('pageerror',lambda e:errors.append(str(e)))
         page.expose_function('codepierHostTool',host_tool)
         page.set_content('<!doctype html><html><body style="margin:0"></body></html>')

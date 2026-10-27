@@ -1,3 +1,4 @@
+from tests.browser_launch import launch_browser
 from shared.util import VERSION
 from shared.contracts import tool_definitions
 import hashlib
@@ -10,7 +11,7 @@ def test_browser_diagnostics_search_symbols_and_download(stack,tmp_path):
     directory=Path(os.getenv('CODEPIER_V140_SCREENSHOTS',str(tmp_path/'screenshots')));directory.mkdir(parents=True,exist_ok=True)
     filename='browser-deliverable.txt';data='真实浏览器下载验证\n'.encode();(stack.projectalpha/filename).write_bytes(data)
     with sync_playwright() as playwright:
-        browser=playwright.chromium.launch()
+        browser=launch_browser(playwright.chromium)
         page=browser.new_page(viewport={'width':1440,'height':1000},accept_downloads=True)
         errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
         try:

@@ -16,6 +16,7 @@ from shared.util import VERSION
 from playwright.sync_api import Page, expect, sync_playwright
 
 from shared.util import atomic_json
+from tests.browser_launch import launch_browser
 from tests.test_chat_worker import FAKE
 
 
@@ -233,7 +234,7 @@ def exercise_matrix(stack, output: Path, *, screenshots: bool = True, schemes=SC
         "browser_errors": [],
     }
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
+        browser = launch_browser(playwright.chromium)
         try:
             for scheme in schemes:
                 for width, height in viewports:
@@ -374,7 +375,7 @@ def test_theme_viewport_conversation_matrix(stack, tmp_path, scheme, viewport):
 def test_reduced_motion_disables_visible_css_motion(stack):
     _prepare_native_fixture(stack)
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
+        browser = launch_browser(playwright.chromium)
         page = browser.new_page(
             viewport={"width": 1440, "height": 1000},
             reduced_motion="reduce",
@@ -420,7 +421,7 @@ def test_native_and_management_share_theme_without_transcript_scans(stack):
     """Exercise the integrated theme service, not chat's standalone fallback."""
     _prepare_native_fixture(stack)
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
+        browser = launch_browser(playwright.chromium)
         context = browser.new_context(viewport={"width": 1440, "height": 1000}, color_scheme="dark")
         page = context.new_page()
         errors = []

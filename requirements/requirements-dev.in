@@ -1,8 +1,8 @@
 -r requirements.in
 pytest==9.1.1
 pytest-asyncio==1.4.0
-# 1.64 Chromium stalls animation frames on the supported local macOS environment.
-playwright==1.63.0
+# macOS default headless-shell stalls RAF; tests/browser_launch.py selects full Chromium.
+playwright==1.64.1
 jsonschema==4.26.0
 -r requirements-tools.in
 pytest-cov==7.1.0

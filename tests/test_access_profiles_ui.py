@@ -1,4 +1,5 @@
 """Real owner/consent UI; optional explicit Chromium executable for local checks."""
+from tests.browser_launch import launch_browser
 import base64
 import hashlib
 import os
@@ -14,7 +15,7 @@ from playwright.sync_api import expect, sync_playwright
 def profiles_browser(request):
     with sync_playwright() as pw:
         executable = os.getenv('CODEPIER_TEST_CHROMIUM_EXECUTABLE') if request.param == 'chromium' else None
-        browser = getattr(pw, request.param).launch(**({'executable_path': executable} if executable else {}))
+        browser = launch_browser(getattr(pw, request.param), **({'executable_path': executable} if executable else {}))
         yield browser
         browser.close()
 
