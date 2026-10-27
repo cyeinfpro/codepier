@@ -189,3 +189,130 @@ def test_source_directory_symlink_refused(tmp_path):
     with pytest.raises(ValueError, match="symlink source directory"):
         archive.configure(tmp_path)
     assert source.read_text() == SOURCE
+
+
+MIRROR_FIXTURE = ("http://azure.archive.ubuntu.com/ubuntu/\tpriority:1\n"
+                  "https://archive.ubuntu.com/ubuntu/\tpriority:2\n"
+                  "https://security.ubuntu.com/ubuntu/\tpriority:3\n")
+
+
+@pytest.mark.parametrize("deb822", [True, False])
+def test_hosted_runner_144_byte_mirrorlist_preserves_source_and_metadata(tmp_path, deb822):
+    assert len(MIRROR_FIXTURE.encode()) == 144
+    if deb822:
+        folder = tmp_path / "sources.list.d"
+        folder.mkdir()
+        source = folder / "ubuntu.sources"
+        text = SOURCE.replace(OLD, archive.MIRROR_URI)
+    else:
+        source = tmp_path / "sources.list"
+        text = f"deb [signed-by=/keys/ubuntu.gpg] {archive.MIRROR_URI} noble main\n"
+    source.write_text(text)
+    mirrors = tmp_path / "apt-mirrors.txt"
+    mirrors.write_text(MIRROR_FIXTURE)
+    assert archive.configure(tmp_path) == 1
+    assert source.read_text() == text
+    assert mirrors.read_text() == MIRROR_FIXTURE.split("\n", 1)[1]
+    assert archive.configure(tmp_path) == 0
+
+
+@pytest.mark.parametrize("bad", ["", MIRROR_FIXTURE.replace("priority:1", "priority:9"),
+                                 MIRROR_FIXTURE + "https://third.example/\n",
+                                 MIRROR_FIXTURE.replace("https://archive", "http://archive")])
+def test_unknown_mirrorlist_fails_before_any_writes(tmp_path, bad):
+    source = tmp_path / "sources.list"
+    text = f"deb {OLD} noble main\ndeb {archive.MIRROR_URI} noble-updates main\n"
+    source.write_text(text)
+    mirrors = tmp_path / "apt-mirrors.txt"
+    mirrors.write_text(bad)
+    with pytest.raises(ValueError):
+        archive.configure(tmp_path)
+    assert source.read_text() == text
+    assert mirrors.read_text() == bad
+
+
+def test_other_file_uri_rejected_without_following(tmp_path):
+    source = tmp_path / "sources.list"
+    text = "deb mirror+file:/not/authorized/elsewhere noble main\n"
+    source.write_text(text)
+    mirrors = tmp_path / "apt-mirrors.txt"
+    mirrors.write_text(MIRROR_FIXTURE)
+    with pytest.raises(ValueError, match="Unknown mirror file URI"):
+        archive.configure(tmp_path)
+    assert mirrors.read_text() == MIRROR_FIXTURE
+
+
+@pytest.mark.parametrize("symlink", [True, False])
+def test_missing_or_symlink_mirrorlist_rejected(tmp_path, symlink):
+    (tmp_path / "sources.list").write_text(f"deb {archive.MIRROR_URI} noble main\n")
+    if symlink:
+        actual = tmp_path / "actual"
+        actual.write_text(MIRROR_FIXTURE)
+        (tmp_path / "apt-mirrors.txt").symlink_to(actual)
+    with pytest.raises(ValueError):
+        archive.configure(tmp_path)
+
+
+
+def test_unreferenced_mirror_file_is_not_read(tmp_path, monkeypatch):
+    (tmp_path / "sources.list").write_text("deb https://archive.ubuntu.com/ubuntu noble main\n")
+    mirrors = tmp_path / "apt-mirrors.txt"
+    mirrors.write_text("unknown unrelated contents")
+    real_read = Path.read_bytes
+
+    def reject_mirror_read(path):
+        if path == mirrors:
+            raise AssertionError("Unreferenced mirror list must not be read")
+        return real_read(path)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_mirror_read)
+    assert archive.configure(tmp_path) == 0
+
+
+@pytest.mark.parametrize("field", ["Description", "Signed-By", "# URIs"])
+@pytest.mark.parametrize("reference", [archive.MIRROR_URI, "mirror+file:/unrelated/file"])
+def test_non_uri_deb822_field_never_reads_mirrors(tmp_path, field, reference):
+    folder = tmp_path / "sources.list.d"
+    folder.mkdir()
+    base = SOURCE.replace(OLD, NEW)
+    if field == "Signed-By":
+        base = base.replace("Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n", "")
+    text = base + f"{field}: {reference}\n"
+    source = folder / "ubuntu.sources"
+    source.write_text(text)
+    assert archive.configure(tmp_path) == 0
+    assert source.read_text() == text
+
+
+@pytest.mark.parametrize("reference", [archive.MIRROR_URI, "mirror+file:/unrelated/file"])
+def test_disabled_deb822_never_reads_mirrors(tmp_path, reference):
+    folder = tmp_path / "sources.list.d"
+    folder.mkdir()
+    text = SOURCE.replace(OLD, reference) + "Enabled: no\n"
+    source = folder / "ubuntu.sources"
+    source.write_text(text)
+    assert archive.configure(tmp_path) == 0
+    assert source.read_text() == text
+
+
+@pytest.mark.parametrize("line", [
+    f"# deb {archive.MIRROR_URI} noble main\n",
+    f"deb https://archive.ubuntu.com/ubuntu noble main # {archive.MIRROR_URI}\n",
+    "deb [signed-by=mirror+file:/not/a/mirror] https://archive.ubuntu.com/ubuntu noble main\n",
+])
+def test_legacy_comments_and_options_are_not_source_addresses(tmp_path, line):
+    source = tmp_path / "sources.list"
+    source.write_text(line)
+    assert archive.configure(tmp_path) == 0
+    assert source.read_text() == line
+
+
+def test_deb822_active_uri_continuation_is_recognized(tmp_path):
+    folder = tmp_path / "sources.list.d"
+    folder.mkdir()
+    source = folder / "ubuntu.sources"
+    source.write_text(SOURCE.replace(OLD, f"https://archive.ubuntu.com/ubuntu\n {archive.MIRROR_URI}"))
+    mirrors = tmp_path / "apt-mirrors.txt"
+    mirrors.write_text(MIRROR_FIXTURE)
+    assert archive.configure(tmp_path) == 1
+    assert mirrors.read_text() == archive.HTTPS_MIRRORS
