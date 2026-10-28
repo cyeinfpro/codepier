@@ -214,7 +214,8 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.13'
-          cache: pip
+          # Resource acceptance must not restore a home-directory cache before isolation.
+          cache: ${{ (runner.os != 'macOS' || matrix.shard != 4) && 'pip' || '' }}
           cache-dependency-path: requirements*.txt
       - if: matrix.shard < 4
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0

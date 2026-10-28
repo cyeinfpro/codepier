@@ -48,6 +48,26 @@ def test_resource_layout_moves_generated_files_before_dependency_install(tmp_pat
         assert not any(command in value for command in ('mdutil', 'launchctl', 'sudo', 'killall'))
 
 
+def test_resource_job_does_not_restore_a_cache_outside_its_isolated_scratch():
+    workflow_steps = steps()
+    python_steps = [step for step in workflow_steps
+                    if step.get('uses', '').startswith('actions/setup-python@')]
+    assert len(python_steps) == 1
+    assert python_steps[0]['with']['cache'] == (
+        "${{ (runner.os != 'macOS' || matrix.shard != 4) && 'pip' || '' }}")
+    # Other action caches must stay excluded from the resource and long-test jobs.
+    for step in workflow_steps:
+        action = step.get('uses', '')
+        if action.startswith(('actions/cache@', 'actions/setup-node@')):
+            assert step['if'] == 'matrix.shard < 4'
+    setup = named('Isolate macOS resource workspace from Spotlight indexing')
+    assert 'echo "PIP_CACHE_DIR=$CI_SCRATCH/pip-cache" >> "$GITHUB_ENV"' in setup['run']
+    install = named('Fresh environments; cached downloads, never shared virtualenvs')
+    assert workflow_steps.index(setup) < workflow_steps.index(install)
+    assert '.venv/bin/python -m pip install --require-hashes -r requirements-dev.txt' in install['run']
+    assert '.venv-compat/bin/python -m pip install --require-hashes -r requirements-compat.txt' in install['run']
+
+
 @pytest.mark.parametrize('isolated', [False, True])
 def test_dependency_links_and_acceptance_parent_use_the_same_layout(tmp_path, isolated):
     install = named('Fresh environments; cached downloads, never shared virtualenvs')['run']
