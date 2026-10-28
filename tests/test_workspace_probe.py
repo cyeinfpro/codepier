@@ -292,3 +292,126 @@ async def test_cancelled_handle_releases_slots_and_recovers(local_agent, monkeyp
     assert agent.scheduler.snapshot()['running'] == 0
     await agent.handle({**request, 'id': 'after-cancel'})
     assert agent.journal.status('after-cancel')['result']['ok']
+
+
+@pytest.mark.asyncio
+async def test_preflight_burst_is_bounded_and_other_project_has_reserved_slot(local_agent, monkeypatch):
+    agent, root = local_agent
+    release = asyncio.Event()
+    gamma_entered = asyncio.Event()
+    entered = []
+    peak = 0
+    async def blocked(engine, tool, project, args):
+        nonlocal peak
+        entered.append(project['id'])
+        peak = max(peak, len(agent.scheduler.active))
+        if project['id'] == 'gamma':
+            gamma_entered.set()
+        await release.wait()
+        return root, {}
+    monkeypatch.setattr(workspace_probe, 'root', blocked)
+    alpha = {'id': 'alpha', 'root': str(root)}
+    tasks = [asyncio.create_task(agent._operation_root(
+        'read', alpha, {}, preflight_id=f'alpha-{i}')) for i in range(128)]
+    try:
+        limit = agent.scheduler.lane_limit('read')
+        async with asyncio.timeout(5):
+            while len(entered) < limit - 1:
+                await asyncio.sleep(.01)
+        assert len(entered) == limit - 1
+        gamma = asyncio.create_task(agent._operation_root(
+            'read', {'id': 'gamma', 'root': str(root)}, {}, preflight_id='gamma'))
+        tasks.append(gamma)
+        await asyncio.wait_for(gamma_entered.wait(), 2)
+        assert peak <= limit
+        assert entered.count('alpha') == limit - 1
+        # Cancelling a queued preflight removes its scheduler ticket, without
+        # creating a worker or consuming a filesystem resource.
+        tasks[-2].cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await tasks[-2]
+        assert not agent.resources.active
+        release.set()
+        await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 5)
+        assert entered.count('alpha') == 127
+    finally:
+        release.set()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    assert not agent.scheduler.active and not agent.scheduler.waiting
+
+
+@pytest.mark.asyncio
+async def test_unresolved_legacy_roots_share_conservative_preflight_quota(local_agent, monkeypatch):
+    agent, root = local_agent
+    keys = []
+    async def inspect(engine, tool, project, args):
+        keys.append(next(iter(agent.scheduler.active.values())).project)
+        return root, {}
+    monkeypatch.setattr(workspace_probe, 'root', inspect)
+    for index, project in enumerate([
+            {'root': '/unresolved/one', 'alias': 'one'},
+            {'root': '/unresolved/two', 'alias': 'two', 'id': ''},
+            {'root': '/unresolved/three', 'id': 'bound-project'}]):
+        await agent._operation_root('read', project, {}, preflight_id=str(index))
+    assert keys == ['__unresolved_read_preflight__', '__unresolved_read_preflight__', 'bound-project']
+    assert not agent.scheduler.active
+
+
+@pytest.mark.asyncio
+async def test_read_rechecks_do_not_reenter_execution_slot(local_agent, monkeypatch):
+    agent, root = local_agent
+    (root / 'README.md').write_text('read me')
+    original = workspace_probe.probe
+    observed = []
+    async def inspect(engine, tool, project, args, *, phase='execute', expected_root=None):
+        active = list(agent.scheduler.active.values())
+        observed.append((phase, [(entry.operation_id, entry.lane) for entry in active]))
+        return await original(engine, tool, project, args, phase=phase, expected_root=expected_root)
+    monkeypatch.setattr(workspace_probe, 'probe', inspect)
+    await asyncio.wait_for(agent.handle({
+        'id': 'single-slot', 'tool': 'read', 'tool_contract_version': wire_version('read'),
+        'project': {'id': 'fixture', 'root': str(root), 'alias': 'fixture', 'mode': 'write'},
+        'args': {'project': 'fixture', 'path': 'README.md'}}), 5)
+    assert agent.journal.status('single-slot')['result']['ok']
+    assert [phase for phase, _ in observed] == ['root', 'claims', 'root', 'root', 'execute']
+    assert all(active == [('single-slot', 'read')] for _, active in observed)
+    assert not agent.scheduler.active and not agent.scheduler.waiting
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('ending', ['deadline', 'cancel'])
+async def test_first_preflight_wait_expires_or_cancels_without_spawning(
+        local_agent, monkeypatch, ending):
+    import contextlib
+    import time
+    agent, root = local_agent
+    async def forbidden(*args, **kwargs):
+        pytest.fail('An unadmitted preflight must not spawn a root worker')
+    monkeypatch.setattr(workspace_probe, 'root', forbidden)
+    reserved = agent.scheduler.lane_limit('read') - 1
+    async with contextlib.AsyncExitStack() as stack:
+        for index in range(reserved):
+            await stack.enter_async_context(agent.scheduler.slot(
+                f'holder-{index}', 'fixture', 'read'))
+        task = asyncio.create_task(agent.handle({
+            'id': 'preflight-ended', 'tool': 'read',
+            'tool_contract_version': wire_version('read'),
+            'not_after': time.time() + (0.15 if ending == 'deadline' else 30),
+            'project': {'id': 'fixture', 'root': str(root), 'mode': 'write'},
+            'args': {'project': 'fixture', 'path': 'README.md'}}))
+        async with asyncio.timeout(3):
+            while not agent.scheduler.waiting:
+                assert not task.done()
+                await asyncio.sleep(.01)
+        if ending == 'cancel':
+            task.cancel()
+        await asyncio.wait_for(task, 3)
+        expected = 'QUEUE_EXPIRED' if ending == 'deadline' else 'INTERRUPTED'
+        assert agent.journal.status('preflight-ended')['result']['error']['code'] == expected
+        assert not agent.scheduler.waiting
+        assert len(agent.scheduler.active) == reserved
+        assert not agent.resources.active and not agent.resources.waiting
+    assert not agent.scheduler.active

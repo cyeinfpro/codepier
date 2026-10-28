@@ -489,8 +489,9 @@ class Agent:
                     # here also stalls unrelated projects under a mapped parent.
                     read_admission = None
                     if workspace_probe.eligible(tool, args):
-                        read_admission = await workspace_probe.probe(
-                            self.engine, tool, project, args, phase='claims', expected_root=root)
+                        async with self._read_preflight_slot(identifier, project):
+                            read_admission = await workspace_probe.probe(
+                                self.engine, tool, project, args, phase='claims', expected_root=root)
                         claims = [Claim(**item) for item in read_admission['claims']]
                         if tool not in CORE_REMOTE and tool not in PATH_READ_TOOLS:
                             await stack.enter_async_context(self._legacy_project_slot(
@@ -578,8 +579,34 @@ class Agent:
             if lock_acquired:
                 lock.release()
 
-    async def _operation_root(self, tool, project, args):
+    @contextlib.asynccontextmanager
+    async def _read_preflight_slot(self, identifier, project):
+        # Root validation itself can block. Bound its processes with the existing
+        # fair read lane, but release BEFORE waiting on any filesystem resource.
+        # Unresolved legacy roots share a conservative key: resolving a path here
+        # would defeat isolation, and caller aliases must not mint new quotas.
+        project_id = project.get('id')
+        if not isinstance(project_id, str) or not project_id:
+            project_id = '__unresolved_read_preflight__'
+        async with self.scheduler.slot(identifier, project_id, 'read',
+                on_wait=lambda reason: self.phase(identifier, 'waiting_worker',
+                    queue_reason=reason, lane='read')):
+            yield
+
+    async def _operation_root(self, tool, project, args, *, preflight_id=None,
+                              preflight_deadline=None):
         if workspace_probe.eligible(tool, args):
+            if preflight_id is not None:
+                remaining = (max(0, preflight_deadline - time.time())
+                             if preflight_deadline is not None else None)
+                try:
+                    async with asyncio.timeout(remaining):
+                        async with self._read_preflight_slot(preflight_id, project):
+                            return await workspace_probe.root(self.engine, tool, project, args)
+                except TimeoutError as exc:
+                    raise DevError('QUEUE_EXPIRED', '超过首次执行期限，未开始操作') from exc
+            # These rechecks already hold the execution slot. Re-entering the
+            # lane here could deadlock when all slots are occupied by readers.
             return await workspace_probe.root(self.engine, tool, project, args)
         return self.engine.root(project, tool in MUTATING)
 
@@ -732,7 +759,8 @@ class Agent:
                 result = await self.execute(id, tool, project, args)
             else:
                 args = TOOLS[tool].model.model_validate(args).model_dump()
-                root, _ = await self._operation_root(tool, project, args)
+                root, _ = await self._operation_root(tool, project, args,
+                                                     preflight_id=id, preflight_deadline=not_after)
                 # Wait for the project BEFORE consuming a global worker slot: a queue
                 # of ProjectAlpha tests must not starve a read of ProjectGamma or ProjectBeta.
                 slot_write = tool in MUTATING
