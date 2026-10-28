@@ -448,7 +448,22 @@ def test_mobile_team_approval_and_explicit_goal_history_page(collaboration_stack
         page.evaluate("()=>mobileGoals.load().then(()=>mobileGoalsContext.onProjectionChange())")
         expect(page.locator(".cc-coordination-list .cc-goal-summary")).to_have_count(80)
         page.locator('[data-cc-action="goal-more"]').tap()
-        expect(page.locator(".cc-coordination-list .cc-goal-summary")).to_have_count(100)
+        try:
+            expect(page.locator(".cc-coordination-list .cc-goal-summary")).to_have_count(100)
+        except AssertionError:
+            print("PAGINATION_FINAL_DIAGNOSTIC", json.dumps({
+                "queries": queries,
+                "ui": page.evaluate("""()=>({
+                  busy:!!mobileGoalsContext.state.busy,
+                  model_count:(mobileGoals.list().match(/class="cc-goal-summary"/g)||[]).length,
+                  deferred:document.querySelector('.cc-workspace')._ccWorkspaceDeferred,
+                  active:document.activeElement?.tagName,
+                  activeAction:document.activeElement?.dataset?.ccAction,
+                  feedback:document.querySelector('#cc-feedback')?.textContent,
+                  records_active:document.querySelector('.cc-workspace-records')?.matches(':active')
+                })"""),
+            }, ensure_ascii=False), flush=True)
+            raise
         assert [q for q in queries if q["cursor"]] == [
             {"cursor": "ui-history-next", "limit": ["40"]},
             {"cursor": "ui-history-next", "limit": ["40"]},

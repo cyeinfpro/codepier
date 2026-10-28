@@ -75,7 +75,8 @@ window.CodePierCollaborationWorkspace = {
       railFocus = null,
       composerSelection = null,
       discussionScroll = null,
-      receiptsRequested = false;
+      receiptsRequested = false,
+      pointerRefresh = null;
     const root = () => document.querySelector('.cc-workspace');
     let rowCache = null;
     const rows = () => {
@@ -255,16 +256,65 @@ window.CodePierCollaborationWorkspace = {
         }
       }
     }
-    function deferRefresh() {
+    function cancelPointerRefresh() {
+      if (pointerRefresh) clearTimeout(pointerRefresh.timer);
+      pointerRefresh = null;
+    }
+    function deferRefresh(pointerNode = null) {
       const node = root();
       if (node) node._ccWorkspaceDeferred = true;
+      if (node && pointerNode) {
+        if (
+          pointerRefresh &&
+          (pointerRefresh.root !== node || pointerRefresh.generation !== state.generation)
+        )
+          cancelPointerRefresh();
+        if (!pointerRefresh) {
+          const ticket = {
+            root: node,
+            generation: state.generation,
+            project: state.project,
+            environment: state.environment,
+            targets: new Set(),
+            timer: null,
+          };
+          pointerRefresh = ticket;
+          const flush = () => {
+            if (pointerRefresh !== ticket) return;
+            if (
+              !node.isConnected ||
+              node.inert ||
+              root() !== node ||
+              state.generation !== ticket.generation ||
+              state.project !== ticket.project ||
+              state.environment !== ticket.environment ||
+              !node._ccWorkspaceDeferred
+            ) {
+              cancelPointerRefresh();
+              return;
+            }
+            // Touch :active can outlive click and a fast read response. Keep
+            // one local tail until release; never issue another read or action.
+            if (
+              [...ticket.targets].some((target) => target.isConnected && target.matches(':active'))
+            ) {
+              ticket.timer = setTimeout(flush, 50);
+              return;
+            }
+            pointerRefresh = null;
+            refresh();
+          };
+          ticket.timer = setTimeout(flush, 16);
+        }
+        pointerRefresh.targets.add(pointerNode);
+      }
       return false;
     }
     function safePatch(node, markup) {
       if (!node || node._workspaceMarkup === markup || node.innerHTML === markup) return;
       const selected = window.getSelection();
+      if (node.matches(':active')) return deferRefresh(node);
       if (
-        node.matches(':active') ||
         node.contains(document.activeElement) ||
         (selected && !selected.isCollapsed && node.contains(selected.anchorNode))
       )
@@ -277,7 +327,7 @@ window.CodePierCollaborationWorkspace = {
     function patchRecords(node, markup) {
       if (!node) return false;
       if (node._workspaceMarkup === markup) return true;
-      if (node.matches(':active')) return deferRefresh();
+      if (node.matches(':active')) return deferRefresh(node);
       const selected = window.getSelection();
       if (
         selected &&
@@ -636,6 +686,7 @@ window.CodePierCollaborationWorkspace = {
       return false;
     }
     function clear() {
+      cancelPointerRefresh();
       rowCache = null;
       fluid.cancelWithin(root());
       filter = 'all';

@@ -1254,7 +1254,9 @@ window.CodePierCollaborationRelay = {
     async function sync({ readOnly = false } = {}) {
       const c = chat(),
         gen = state.generation;
-      if (c.relaySync) {
+      // Background hints must not invalidate an explicit action's reads or
+      // replace its drawer/navigation. Retain one read for its completion.
+      if (state.busy || c.relaySync) {
         c.relayRefreshPending = true;
         return;
       }
@@ -1398,6 +1400,7 @@ window.CodePierCollaborationRelay = {
         c.relaySync = false;
         if (
           c.relayRefreshPending &&
+          !state.busy &&
           gen === state.generation &&
           c === chat() &&
           S.session === state.session &&
@@ -1469,9 +1472,12 @@ window.CodePierCollaborationRelay = {
         c.relayRecent = 0;
       }
     }
-    function purge(c) {
+    function purge(c, conversation = '') {
       try {
-        pendingStore?.clear();
+        // A room visibility change invalidates that room, not unrelated local
+        // drafts. Unknown scope/session cleanup deliberately retains full purge.
+        if (conversation) pendingStore?.removeConversation(conversation);
+        else pendingStore?.clear();
       } catch {}
       c.relayRestoredScope = '';
       c.relayEpoch = (c.relayEpoch || 0) + 1;
@@ -1507,11 +1513,13 @@ window.CodePierCollaborationRelay = {
           state.snapshot?.capabilities?.relay_hints === true && typeof EventSource !== 'undefined',
         current: hintCurrent,
         onChange: () => {
-          void sync({ readOnly: true });
+          // Ordinary rooms require the full authority/coordination projection,
+          // not the compact relay read. Both paths coalesce while actions run.
+          if (active()) void sync({ readOnly: true });
+          else state.relayPollWake?.();
         },
-        onState: () => state.relayPollWake?.(),
         onAccessChanged: () => {
-          void recoverAccess(false);
+          void recoverAccess(true);
         },
       });
       hints.start();

@@ -76,7 +76,61 @@ async def test_stream_contains_only_revision_and_closes_after_access_change(coll
     assert data == {'revision': initial['revision']}
     assert room['id'] not in first and 'owner' not in first
     with service.store.transaction():
-        service.store.execute("UPDATE collaboration_rooms SET version=version+1 WHERE id=?", (room['id'],))
+        service.store.execute('DELETE FROM conversation_projects WHERE conversation_id=? AND room_id=?',
+                              (raw['conversation_id'], room['id']))
+    queue.put_nowait(None)
+    assert await anext(stream) == 'event: access_changed\ndata: {}\n\n'
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+    assert queue not in service.runtime.watchers
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('table', ['collaboration_rooms', 'conversation_rooms'])
+async def test_version_only_change_refreshes_without_revoking_access(collab, table):
+    service, owner, room, raw = context(collab)
+    hints = service.relay_hints
+    initial = hints.snapshot(raw, owner)
+    queue = hints.subscribe(initial['owner'])
+
+    async def connected():
+        return False
+
+    stream = hints.stream(SimpleNamespace(is_disconnected=connected), raw,
+                          SimpleNamespace(panel=lambda _: owner), queue, initial)
+    await anext(stream)
+    identifier = room['id'] if table == 'collaboration_rooms' else raw['conversation_id']
+    with service.store.transaction():
+        service.store.execute(f'UPDATE {table} SET version=version+1 WHERE id=?', (identifier,))
+    changed = hints.snapshot(raw, owner)
+    assert changed['access'] == initial['access']
+    assert changed['revision'] != initial['revision']
+    queue.put_nowait(None)
+    event = await anext(stream)
+    assert 'event: change\n' in event
+    assert json.loads(next(line[6:] for line in event.splitlines() if line.startswith('data: '))) == {
+        'revision': changed['revision']}
+    await stream.aclose()
+    assert queue not in service.runtime.watchers
+
+
+@pytest.mark.asyncio
+async def test_room_state_change_still_invalidates_access(collab):
+    service, owner, room, raw = context(collab)
+    hints = service.relay_hints
+    initial = hints.snapshot(raw, owner)
+    queue = hints.subscribe(initial['owner'])
+
+    async def connected():
+        return False
+
+    stream = hints.stream(SimpleNamespace(is_disconnected=connected), raw,
+                          SimpleNamespace(panel=lambda _: owner), queue, initial)
+    await anext(stream)
+    with service.store.transaction():
+        service.store.execute("UPDATE collaboration_rooms SET state='paused' WHERE id=?", (room['id'],))
+    assert hints.snapshot(raw, owner)['access'] != initial['access']
     queue.put_nowait(None)
     assert await anext(stream) == 'event: access_changed\ndata: {}\n\n'
     with pytest.raises(StopAsyncIteration):

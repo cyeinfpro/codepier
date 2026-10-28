@@ -62,9 +62,13 @@ class RelayHints:
                              {'admin': principal.admin, 'scopes': sorted(principal.scopes),
                               'projects': sorted(principal.projects), 'role_id': principal.role_id,
                               'authorization_mode': principal.authorization_mode}, conversation['id'],
-                             conversation['version'], [(item['id'], item['project_id'], item['state'], item['version'])
-                                                       for item in sorted(visible, key=lambda item: item['id'])]])
-            return {'revision': digest([access, revisions]), 'access': access,
+                             [(item['id'], item['project_id'], item['state'])
+                              for item in sorted(visible, key=lambda item: item['id'])]])
+            # A content/configuration CAS revision is not a permission change.
+            # Keep real identity, visible scope and room-state fences above;
+            # publish ordinary revisions through the read-only refresh path.
+            versions = [(item['id'], item['version']) for item in sorted(visible, key=lambda item: item['id'])]
+            return {'revision': digest([access, conversation['version'], versions, revisions]), 'access': access,
                     'owner': (principal.space_id, principal.user_id)}
 
     def subscribe(self, owner):

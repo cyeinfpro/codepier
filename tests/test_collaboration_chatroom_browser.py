@@ -808,6 +808,9 @@ def test_permission_loss_at_each_refresh_stage_clears_and_rebinds_remaining_proj
     stack = collaboration_stack
     context = chat_browser_pool(engine).new_context(viewport={'width': 1440, 'height': 900})
     page = context.new_page()
+    # This case advances the fallback poll itself. Keep a concurrent initial
+    # SSE refresh from consuming the transport-only authority fixtures.
+    page.route('**/api/collaboration/relay-hints?*', lambda route: route.abort())
     page.add_init_script("""(() => {
       const schedule = window.setTimeout.bind(window);
       window.setTimeout = (fn, delay, ...args) => {
@@ -983,6 +986,9 @@ def test_refresh_recovery_clears_before_waiting_and_respects_new_navigation(
     stack = collaboration_stack
     context = chat_browser_pool(engine).new_context(viewport={'width': 1440, 'height': 900})
     page = context.new_page()
+    # Real-time hint recovery is covered separately; this fixture owns one
+    # explicit fallback poll and its held authority-read boundary.
+    page.route('**/api/collaboration/relay-hints?*', lambda route: route.abort())
     page.add_init_script("""(() => {
       const schedule = window.setTimeout.bind(window);
       window.setTimeout = (fn, delay, ...args) => {

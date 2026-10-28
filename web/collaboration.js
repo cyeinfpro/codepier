@@ -977,7 +977,7 @@ window.CodePierCollaboration = (() => {
     });
   }
   function clearVisibility(c, keepDraft = false) {
-    relay.purge(c);
+    relay.purge(c, state.conversation || '');
     coordination.clear();
     c.messages = [];
     c.after = '';
@@ -1116,9 +1116,17 @@ window.CodePierCollaboration = (() => {
     bindDeniedScope(pending, restoreFocus);
   }
   async function recoverAccess(allowCurrent = false) {
-    clearVisibility(chat());
-    const recovery = ++state.generation,
-      session = S.session,
+    const c = chat(),
+      form = document.querySelector('#cc-drawer[open] form'),
+      intent = allowCurrent && form?.id === 'cc-room-projects' ? roomProjectIntent(form) : null,
+      accessAction = allowCurrent ? form?.accessAction : null,
+      draft = allowCurrent ? (document.querySelector('#cc-message-input')?.value ?? c.draft) : '',
+      conversation = state.conversation,
+      project = state.project,
+      environment = state.environment;
+    clearVisibility(c);
+    let recovery = ++state.generation;
+    const session = S.session,
       space = S.space_id;
     state.controller?.abort();
     state.controller = new AbortController();
@@ -1128,23 +1136,135 @@ window.CodePierCollaboration = (() => {
       recovery === state.generation &&
       session === S.session &&
       space === S.space_id &&
+      conversation === state.conversation &&
+      project === state.project &&
+      environment === state.environment &&
       S.page === 'collaboration';
     showAccessRecovery([], '项目访问范围已改变，旧记录已清除。正在读取最新房间目录…', false, true);
+    const recoveryFocus = document.activeElement,
+      recoveryDrawer = state.drawerEpoch;
     try {
+      let receipt = null;
+      if (accessAction) {
+        // The mutation may already have committed. Await its original promise;
+        // do not replay it or treat a lost/failed acknowledgement as success.
+        try {
+          receipt = await accessAction.request;
+        } catch {}
+        if (!current()) return;
+      }
+      const confirmed =
+        receipt?.conversation?.id === accessAction?.payload.conversation_id &&
+        (accessAction?.kind === 'projects'
+          ? receipt?.applied === true
+          : accessAction?.kind === 'archive'
+            ? receipt?.archived === true ||
+              (receipt?.archived === false &&
+                receipt?.replayed === true &&
+                receipt?.conversation?.archived_at === null)
+            : accessAction?.kind === 'restore' && receipt?.restored === true);
+      if (confirmed) {
+        try {
+          sessionStorage.removeItem(accessAction.identity.storageKey);
+        } catch {}
+        state.requests.delete(accessAction.identity.storageKey);
+      }
       const directory = await api('/api/collaboration/conversations', {
         signal: state.controller.signal,
       });
       if (!current()) return;
-      const available = (directory.items || []).find((room) => room.id === state.conversation);
-      if (
-        allowCurrent &&
-        available?.projects?.some(
-          (p) => p.project_id === state.project && p.environment_id === state.environment,
-        )
-      ) {
+      if (confirmed && accessAction.kind !== 'projects') {
+        const archivedNow =
+          accessAction.kind === 'archive' &&
+          receipt.archived === true &&
+          receipt.conversation.archived_at != null;
+        if (archivedNow) relay.purgeConversation(accessAction.payload.conversation_id);
         state.rooms = directory.items || [];
-        state.notes = '访问范围已更新。';
+        const next = archivedNow
+          ? state.rooms.find((room) => room.id !== accessAction.payload.conversation_id)
+          : state.rooms.find((room) => room.id === accessAction.payload.conversation_id);
+        state.historyUnavailable = !archivedNow && !next;
+        if (state.historyUnavailable) {
+          state.snapshot = null;
+          state.project = '';
+          state.environment = '';
+        }
+        state.conversation = next?.id || '';
+        const nextConnection =
+          next?.connection || next?.projects?.[0] || next?.history_projects?.[0];
+        if (nextConnection) {
+          state.project = nextConnection.project_id;
+          state.environment = nextConnection.environment_id;
+        }
+        persistSelection();
+        state.notes = archivedNow
+          ? '房间已移到已删除列表，关联权限已关闭；任务取消以实际回执为准。'
+          : '历史已恢复，执行权限未恢复；继续执行请新建房间并接入助手。';
         await renderPage(false);
+        return;
+      }
+      const available = (directory.items || []).find((room) => room.id === conversation);
+      const connection = available?.working_scope && available.connection;
+      const allowed =
+        available?.projects?.some(
+          (p) => p.project_id === project && p.environment_id === environment,
+        ) ||
+        (connection?.project_id === project && connection.environment_id === environment);
+      if (allowCurrent && allowed) {
+        // Only local editing intent survives a freshly reauthorized identical
+        // scope. Never restore old messages, thread DOM or preview grants.
+        const restoreEditor =
+          intent &&
+          !confirmed &&
+          state.drawerEpoch === recoveryDrawer &&
+          document.activeElement === recoveryFocus;
+        c.draft = draft;
+        state.rooms = directory.items || [];
+        state.notes = confirmed
+          ? intent?.projects.length
+            ? '房间项目与权限已保存，原消息连接与历史保留。'
+            : '已切换为纯聊天，原助手和消息历史保留。'
+          : '访问范围已更新。';
+        recovery++;
+        await renderPage(false);
+        if (
+          !current() ||
+          !restoreEditor ||
+          (document.activeElement !== document.body &&
+            !document.querySelector('.collaboration')?.contains(document.activeElement))
+        )
+          return;
+        const action = intent.permissions_only ? 'manage-room-permissions' : 'manage-projects';
+        const trigger = document.querySelector('[data-cc-action="' + action + '"]');
+        if (!trigger) return;
+        await act(action, trigger);
+        if (!current()) return;
+        const fresh = document.querySelector('#cc-drawer[open] #cc-room-projects');
+        if (!fresh) return;
+        for (const row of fresh.querySelectorAll('[data-room-project-row]')) {
+          const input = row.querySelector('[name="room_projects"]');
+          const selected = intent.projects.find(
+            (p) => p.project === input.value && p.environment_id === input.dataset.environment,
+          );
+          input.checked =
+            !!selected && (!intent.permissions_only || !!selected.capabilities?.length);
+          if (selected?.capabilities) {
+            row.dataset.initialized = 'true';
+            row.dataset.targets = JSON.stringify(selected.execution_targets || []);
+            for (const node of row.querySelectorAll('[data-project-capability]'))
+              node.checked = selected.capabilities.includes(node.value);
+          }
+        }
+        fresh.elements.dot_id.value = intent.dot_id;
+        projectPicker.filter(fresh);
+        await refreshRoomProjects(fresh);
+        if (current() && fresh.isConnected && document.querySelector('#cc-drawer')?.open)
+          fresh
+            .querySelector('[data-room-project-summary]')
+            ?.insertAdjacentHTML(
+              'afterbegin',
+              '<p class="cc-project-update-notice">房间刚有更新，已重新检查并保留你的选择。请确认后保存。</p>',
+            );
         return;
       }
       showAccessRecovery(
@@ -1224,11 +1344,20 @@ window.CodePierCollaboration = (() => {
     patchTimeline(forceBottom);
     patchMemberStatus();
     patchDelegationComposer();
-    const goals = document.querySelector('.cc-coordination-list');
-    // WebKit does not focus mouse-pressed buttons. Preserve their native
-    // activation target until pointer release, including unchanged refreshes.
-    if (goals && !goals.matches(':active') && !goals.contains(document.activeElement))
-      goals.outerHTML = coordination.list();
+    // Use the complete workspace projection and its stable/pointer-aware
+    // patcher. list() also contains the sibling team picker, not just goals.
+    const drawerFocus = state.drawerFocus;
+    workspaceUI.refresh();
+    if (drawerFocus && !drawerFocus.isConnected && document.querySelector('#cc-drawer')?.open) {
+      state.drawerFocus =
+        [...document.querySelectorAll('[data-cc-action]')].find(
+          (node) =>
+            node.dataset.ccAction === drawerFocus.dataset.ccAction &&
+            node.dataset.id === drawerFocus.dataset.id &&
+            !node.disabled &&
+            node.getAttribute('aria-disabled') !== 'true',
+        ) || null;
+    }
     markVisibleRead();
     const context = document.querySelector('.cc-context-rail');
     if (context && !context.matches(':active') && !context.contains(document.activeElement))
@@ -2937,11 +3066,13 @@ window.CodePierCollaboration = (() => {
       if (!form.isConnected || generation !== state.generation || epoch !== state.drawerEpoch)
         return { local: true };
       try {
-        const result = await api('/api/collaboration/' + operation, {
+        const request = api('/api/collaboration/' + operation, {
           method: 'POST',
           retrySafe: true,
           body: JSON.stringify({ ...payload, idempotency_key: identity.identifier }),
         });
+        form.accessAction = { kind: archive ? 'archive' : 'restore', payload, identity, request };
+        const result = await request;
         if (generation !== state.generation || epoch !== state.drawerEpoch) return { local: true };
         const restoredReplay =
           archive &&
@@ -3036,11 +3167,13 @@ window.CodePierCollaboration = (() => {
       ]);
       for (const [node] of controls) node.disabled = true;
       try {
-        const result = await api('/api/collaboration/conversation-projects', {
+        const request = api('/api/collaboration/conversation-projects', {
           method: 'POST',
           retrySafe: true,
           body: JSON.stringify({ ...payload, idempotency_key: identity.identifier }),
         });
+        form.accessAction = { kind: 'projects', payload, identity, request };
+        const result = await request;
         if (!current()) return { local: true };
         if (result.applied !== true || result.conversation?.id !== payload.conversation_id)
           throw new Error('服务器未确认项目变更已应用，请刷新房间核对，勿重复操作。');
@@ -3510,7 +3643,7 @@ window.CodePierCollaboration = (() => {
       if (state.busy === token) state.busy = false;
       releaseBusy();
       if (state.busyCleanup === releaseBusy) state.busyCleanup = null;
-      if (stillCurrent) state.relayPollWake?.();
+      if (stillCurrent) state.relayPollWake?.(true);
       const feedback = document.querySelector('#cc-feedback');
       if (feedback && stillCurrent) {
         feedback.textContent = state.notes;
@@ -3822,6 +3955,7 @@ window.CodePierCollaboration = (() => {
         polling = true;
         try {
           if (!document.hidden && !state.busy) {
+            pollAgain = false;
             if (relay.focused()) await relay.sync();
             if (!relay.focused() || state.view !== 'discussion') await refreshChat();
           }
@@ -3837,15 +3971,22 @@ window.CodePierCollaboration = (() => {
         polling = false;
         if (generation === state.generation) {
           clearTimeout(state.timer);
-          state.timer = setTimeout(poll, pollAgain ? 0 : relay.focused() ? relay.delay() : 5000);
-          pollAgain = false;
+          state.timer = setTimeout(
+            poll,
+            pollAgain && !state.busy && !document.hidden
+              ? 0
+              : relay.focused()
+                ? relay.delay()
+                : 5000,
+          );
         }
       };
-      state.relayPollWake = () => {
+      state.relayPollWake = (pendingOnly = false) => {
         if (generation !== state.generation || S.page !== 'collaboration') return;
+        if (!pendingOnly) pollAgain = true;
+        if (!pollAgain && !chat().relayRefreshPending) return;
         clearTimeout(state.timer);
-        if (polling) pollAgain = true;
-        else state.timer = setTimeout(poll, 0);
+        if (!polling && !state.busy && !document.hidden) state.timer = setTimeout(poll, 0);
       };
       state.timer = setTimeout(poll, relay.active() ? 1200 : 5000);
     }

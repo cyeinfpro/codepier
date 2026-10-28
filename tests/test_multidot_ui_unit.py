@@ -230,6 +230,46 @@ assert.equal(f.c.teamId,'team');assert.equal(f.c.draft,'中文草稿');
 """)
 
 
+
+@pytest.mark.parametrize('boundary', ['unknown', 'owner', 'space'])
+def test_room_purge_keeps_unrelated_pending_but_identity_cleanup_remains_global(boundary):
+    run_js(r"""
+const boundary='__BOUNDARY__';
+S.session={user_id:'owner'};S.space_id='space';
+const storage=new Map();
+global.localStorage={
+  getItem:key=>storage.get(key)||null,
+  setItem:(key,value)=>storage.set(key,value),
+  removeItem:key=>storage.delete(key),
+};
+const f=teamFixture();
+f.c.visibility='current-visibility';f.c.messages=[];f.c.relayOutbox=[{id:'old'}];
+f.state.snapshot.pending_scope_revision='a'.repeat(64);
+f.state.chats=new Map([['room',f.c]]);
+const relay=Relay.create({...f.context,chatScope:()=>({project:'p',environment_id:'production',conversation_id:'room'}),
+  dots:{},delegation:{}});
+relay.action('relay-persistence-toggle',{});
+const saved=Relay.pendingStore(localStorage,JSON.stringify(['owner','space']));
+const save=(id,conversation)=>saved.save({id,scope:conversation,created:Date.now(),dotId:'a',
+  authorization_revision:'a'.repeat(64),payload:{project:'p',environment_id:'production',room_id:'partition',
+    conversation_id:conversation,body_text:id,mentions:[{slot_id:'a'}]}});
+assert.equal(save('current','room'),true);assert.equal(save('unrelated','other'),true);
+relay.purge(f.c,'room');
+assert.equal(saved.recover('room').length,0);
+assert.equal(saved.recover('other').length,1);
+assert.equal(saved.recover('changed-authorization-scope').length,0);
+assert.deepEqual(f.c.relayOutbox,[]);assert.equal(f.c.relayEpoch,1);
+if(boundary==='unknown')relay.purge(f.c);
+else {
+  if(boundary==='owner')S.session={user_id:'another-owner'};
+  else S.space_id='another-space';
+  relay.action('relay-persistence-toggle',{});
+}
+assert.equal(saved.recover('other').length,0);
+assert.equal(saved.enabled(),false);
+""".replace('__BOUNDARY__', boundary))
+
+
 def test_team_send_cannot_fall_back_to_an_individual_after_revocation():
     run_js(r"""
 const f=teamFixture();f.c.teamId='team';f.c.mentions=['a'];

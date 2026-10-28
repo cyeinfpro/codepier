@@ -127,10 +127,22 @@ def test_goal_draft_owner_confirmation_conflict_refresh_and_mobile(collaboration
         expect(review).to_be_focused()
         assert read(stack, 'coordination_goal', id=goal['id'])['goal']['state'] == 'proposed'
         review.click()
-        revised = post(stack, 'goal-update', **{**goal_payload(goal), 'objective': '并发修订后的目标'},
-                       goal_id=goal['id'], expected_version=goal['version'])['goal']
+        approval = []
+
+        def hold_approval(route):
+            approval.append(route)
+            page.locator('html').evaluate('(node) => node.dataset.goalApprovalHeld = "yes"')
+
+        page.route('**/api/collaboration/goal-approve', hold_approval)
         form.locator('[name="confirm"]').check()
         form.locator('button[type="submit"]').click()
+        expect(page.locator('html')).to_have_attribute('data-goal-approval-held', 'yes')
+        # The original approval is already in flight. A real SSE update must
+        # not be mistaken for permission to approve the newer goal version.
+        revised = post(stack, 'goal-update', **{**goal_payload(goal), 'objective': '并发修订后的目标'},
+                       goal_id=goal['id'], expected_version=goal['version'])['goal']
+        approval[0].continue_()
+        page.unroute('**/api/collaboration/goal-approve', hold_approval)
         expect(page.locator('#cc-feedback')).to_contain_text('重新审阅')
         expect(page.locator('#cc-drawer')).not_to_be_visible()
         assert read(stack, 'coordination_goal', id=goal['id'])['goal']['state'] == 'proposed'
@@ -364,8 +376,8 @@ def test_goal_all_pages_and_stale_page_cannot_replace_new_navigation(collaborati
     stack = collaboration_stack
     context = chat_browser_pool(engine).new_context(viewport={'width': 1440, 'height': 900})
     page = context.new_page()
-    # A workspace callback and the periodic poll can overlap. Observe the load
-    # that actually owns the held page, rather than the latest onOpen promise.
+    # The approved bounded-history contract keeps metadata refreshes on the
+    # first page. Observe the explicit history action's promise, not onOpen.
     # Hold the real response at the loader boundary so navigation's AbortSignal
     # cannot hide whether the loader rejects an already received stale payload.
     page.add_init_script("""(() => {
@@ -404,6 +416,7 @@ def test_goal_all_pages_and_stale_page_cannot_replace_new_navigation(collaborati
       observeModule('CodePierCollaborationGoals', (create) => function(options, ...args) {
         let readOwner;
         window.heldGoalPageRefreshes = [];
+        window.goalPageReads = [];
         window.runGoalBackgroundRefresh = () => {
           const poll = timers.get(options.state.timer);
           if (!poll) throw new Error('No scheduled collaboration poll');
@@ -411,6 +424,8 @@ def test_goal_all_pages_and_stale_page_cannot_replace_new_navigation(collaborati
           window.goalBackgroundRefresh = poll();
         };
         const goals = Reflect.apply(create, this, [{...options, getRecord(...readArgs) {
+          if (readArgs[0] === 'coordination_goals')
+            window.goalPageReads.push({cursor: readArgs[2] || '', limit: readArgs[3]?.limit});
           const pending = Reflect.apply(options.getRecord, this, readArgs);
           if (window.holdGoalPages && readArgs[0] === 'coordination_goals' && readArgs[2]) {
             const record = readOwner;
@@ -426,17 +441,23 @@ def test_goal_all_pages_and_stale_page_cannot_replace_new_navigation(collaborati
           }
           return pending;
         }}, ...args]);
-        window.goalListMarkup = () => goals.list();
-        const load = goals.load;
-        goals.load = function(snapshot, sourceCurrent = () => true) {
+        window.goalListState = () => {
+          const template = document.createElement('template');
+          template.innerHTML = goals.list();
+          const more = template.content.querySelector('[data-cc-action="goal-more"]');
+          const loading = more?.disabled === true;
+          // The cancelled request must release its busy control. Compare every
+          // record and cursor control independently of that transient flag.
+          more?.removeAttribute('disabled');
+          return {markup: template.innerHTML, loading};
+        };
+        const act = goals.act;
+        goals.act = function(action, ...actArgs) {
+          if (action !== 'goal-more') return Reflect.apply(act, this, [action, ...actArgs]);
           const record = {promise: null, settled: false};
-          const pending = Reflect.apply(load, this, [snapshot, (...currentArgs) => {
-            // load checks sourceCurrent synchronously just before each page.
-            // This identifies its owner even when another refresh overlaps.
-            readOwner = record;
-            return Reflect.apply(sourceCurrent, this, currentArgs);
-          }]);
-          observePromise(pending, record);
+          readOwner = record;
+          const pending = Reflect.apply(act, this, [action, ...actArgs]);
+          window.goalHistoryLoad = observePromise(pending, record);
           return pending;
         };
         return goals;
@@ -445,26 +466,34 @@ def test_goal_all_pages_and_stale_page_cannot_replace_new_navigation(collaborati
     try:
         login(page, stack)
         conversation = read(stack)['conversation']['id']
-        for index in range(31):
+        for index in range(41):
             post(stack, 'goal-create', conversation_id=conversation,
                  objective=f'分页目标 {index:02d}', acceptance='隔离规划记录，不启动执行',
                  project_ids=[stack.project['id']], participant_grant_ids=[stack.grant],
                  coordinator_grant_id=stack.grant, capabilities=['read'])
         open_goals(page)
-        expect(page.locator('.cc-coordination-list .cc-goal-summary')).to_have_count(31)
+        expect(page.locator('.cc-coordination-list .cc-goal-summary')).to_have_count(40)
         page.evaluate('async () => { await window.goalWorkspaceRefresh.promise; }')
-        first_page = read(stack, 'coordination_goals', limit=30)
-        held_goal = read(stack, 'coordination_goals', cursor=first_page['next_cursor'], limit=30)['items'][0]
-        # Gate every concurrent second page before changing real backend data.
-        # No competing poll can publish this newer payload before navigation.
-        page.evaluate('window.holdGoalPages = true')
+        first_page = read(stack, 'coordination_goals', limit=40)
+        assert len(first_page['items']) == 40 and first_page['next_cursor']
+        held_goal = read(stack, 'coordination_goals', cursor=first_page['next_cursor'], limit=40)['items'][0]
+        # The changed record is outside the bounded first page. Neither a
+        # background poll nor a workspace refresh may fetch it implicitly.
         updated_objective = '第二页刷新后只允许当前范围接收的目标'
         post(stack, 'goal-update', **{**goal_payload(held_goal), 'objective': updated_objective},
              goal_id=held_goal['id'], expected_version=held_goal['version'])
         if refresh_source == 'background':
             page.evaluate('window.runGoalBackgroundRefresh()')
+            page.evaluate('async () => { await window.goalBackgroundRefresh; }')
         else:
             page.locator('[data-cc-view="discussion"]').click()
+            page.evaluate('async () => { await window.goalWorkspaceRefresh.promise; }')
+            open_goals(page)
+            page.evaluate('async () => { await window.goalWorkspaceRefresh.promise; }')
+        expect(page.locator('.cc-coordination-list .cc-goal-summary')).to_have_count(40)
+        assert page.evaluate('window.goalPageReads.every(read => !read.cursor && read.limit === "40")')
+        page.evaluate('window.holdGoalPages = true')
+        page.locator('[data-cc-action="goal-more"]').click()
         page.wait_for_function("""(objective) => window.heldGoalPageRefreshes.some(
           (record) => record.payload?.items.some((goal) => goal.objective === objective)
         )""", arg=updated_objective)
@@ -478,13 +507,14 @@ def test_goal_all_pages_and_stale_page_cannot_replace_new_navigation(collaborati
         assert page_response['items'][0]['objective'] == updated_objective
         assert page.evaluate('typeof window.heldGoalPageRefresh?.promise?.then') == 'function'
         assert page.evaluate('window.heldGoalPageRefresh.settled') is False
-        if refresh_source == 'background':
-            # Deterministically reproduce the original fixture's false premise:
-            # onOpen has settled while a different real goal load is still held.
-            assert page.evaluate('window.goalWorkspaceRefresh.settled') is True
+        assert page.evaluate('window.heldGoalPageRefresh === window.goalHistoryLoad')
+        # A settled workspace callback cannot prove this distinct history
+        # request settled. Wait on its actual owner after releasing the payload.
+        assert page.evaluate('window.goalWorkspaceRefresh.settled') is True
         page.evaluate("navigate('projects')")
         expect(page.locator('#page h1')).to_have_text('项目映射')
-        markup_after_navigation = page.evaluate('window.goalListMarkup()')
+        state_after_navigation = page.evaluate('window.goalListState()')
+        assert state_after_navigation['loading'] is True
         page.evaluate("""async () => {
           window.holdGoalPages = false;
           await Promise.all(window.heldGoalPageRefreshes.map((record) => {
@@ -496,14 +526,20 @@ def test_goal_all_pages_and_stale_page_cannot_replace_new_navigation(collaborati
         }""")
         assert page.evaluate('window.heldGoalPageRefresh.delivered') is True
         assert page.evaluate('window.heldGoalPageRefresh.settled') is True
-        assert page.evaluate('window.goalListMarkup()') == markup_after_navigation
+        state_after_release = page.evaluate('window.goalListState()')
+        assert state_after_release['loading'] is False
+        assert state_after_release['markup'] == state_after_navigation['markup']
         expect(page.locator('#page h1')).to_have_text('项目映射')
         expect(page.locator('.cc-coordination-list')).to_have_count(0)
         page.go_back()
         expect(page.locator('#cc-message-input')).to_be_enabled()
         open_goals(page)
-        expect(page.locator('.cc-coordination-list .cc-goal-summary')).to_have_count(31)
+        expect(page.locator('.cc-coordination-list .cc-goal-summary')).to_have_count(40)
+        expect(page.locator('.cc-coordination-list')).not_to_contain_text(updated_objective)
+        page.locator('[data-cc-action="goal-more"]').click()
+        expect(page.locator('.cc-coordination-list .cc-goal-summary')).to_have_count(41)
         expect(page.locator('.cc-coordination-list')).to_contain_text(updated_objective)
+        expect(page.locator('[data-cc-action="goal-more"]')).to_have_count(0)
     finally:
         context.close()
 
