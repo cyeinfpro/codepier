@@ -74,8 +74,8 @@ def _launchd_service_name(base, recorded=None, home=None):
             value = plistlib.loads(_read_owned_service_file(target))
             matches = (isinstance(value, dict) and value.get('Label') == name
                        and value.get('WorkingDirectory') == str(base/'runtime')
-                       and value.get('ProgramArguments') == command
-                       and value.get('Program') in (None, command[0]))
+                       and value.get('ProgramArguments') in (command, [str(base/'CodePier Agent.app/Contents/MacOS/CodePier Agent'), *command])
+                       and value.get('Program') in (None, value['ProgramArguments'][0]))
         except (OSError, ValueError, TypeError, plistlib.InvalidFileException):
             matches = False
         if matches:
@@ -318,9 +318,15 @@ def start_service(base: Path) -> None:
         target = _service_target(base, kind, scope)
         if not target or not target.is_file():
             raise RuntimeError("launchd service definition is missing")
-        domain = f"gui/{os.getuid()}"
-        _run(["launchctl", "bootstrap", domain, target], check=True)
-        _run(["launchctl", "kickstart", f"{domain}/{name}"], check=True)
+        # Use the same strict app validation and owned-definition transaction as
+        # installation; do not bypass these when restarting an upgraded runtime.
+        runtime = base / "runtime"
+        python = runtime / ".venv/bin/python"
+        code = ("import sys; sys.path.insert(0, " + repr(str(runtime)) + "); "
+                "from scripts.install_agent import start_service; "
+                "from pathlib import Path; start_service(Path(" + repr(str(base)) +
+                "), Path(" + repr(str(python)) + "))")
+        _run([python, "-I", "-c", code], check=True)
     elif kind == "systemd":
         command = _systemctl(scope)
         _run(command + ["daemon-reload"], check=True)

@@ -20,6 +20,7 @@ from pathlib import Path
 import websockets
 from agent.filesystem import FileEngine
 from agent.core_files import CoreFiles
+from agent import workspace_probe
 from agent.resource_queue import Claim, ResourceQueue, claims_for, canonical_path, PATH_READ_TOOLS
 from agent.scheduler import ProjectScheduler
 from agent.resource_pressure import ResourceSampler
@@ -486,7 +487,17 @@ class Agent:
                 async with asyncio.timeout(timeout) as timer:
                     # Imports publish one destination. A project-wide writer
                     # here also stalls unrelated projects under a mapped parent.
-                    if tool in CORE_REMOTE or tool == 'download_artifact' or tool in PATH_READ_TOOLS:
+                    read_admission = None
+                    if workspace_probe.eligible(tool, args):
+                        read_admission = await workspace_probe.probe(
+                            self.engine, tool, project, args, phase='claims', expected_root=root)
+                        claims = [Claim(**item) for item in read_admission['claims']]
+                        if tool not in CORE_REMOTE and tool not in PATH_READ_TOOLS:
+                            await stack.enter_async_context(self._legacy_project_slot(
+                                root, write=write, operation_id=identifier, resolved_root=True))
+                        await stack.enter_async_context(self.resources.slot(identifier, claims,
+                            lambda blockers: self.phase(identifier, 'waiting_resource', blocked_by=blockers)))
+                    elif tool in CORE_REMOTE or tool == 'download_artifact' or tool in PATH_READ_TOOLS:
                         claims = claims_for(self.engine, tool, project, args, root)
                         await stack.enter_async_context(self.resources.slot(identifier, claims,
                             lambda blockers: self.phase(identifier, 'waiting_resource', blocked_by=blockers)))
@@ -514,7 +525,8 @@ class Agent:
                         target = host + ":" + str(remote["port"])
                     # Managed worktrees retain the authenticated parent project
                     # ID; a new workspace cannot manufacture a new quota.
-                    project_id = project.get("id") or canonical_path(project.get("_original_root", root))
+                    project_id = (read_admission['project_key'] if read_admission is not None
+                                  else project.get("id") or canonical_path(project.get("_original_root", root)))
                     await stack.enter_async_context(self.scheduler.slot(
                         identifier, project_id, lane, target,
                         lambda reason: self.phase(identifier, "waiting_worker", queue_reason=reason, lane=lane)))
@@ -524,14 +536,14 @@ class Agent:
             yield
 
     @contextlib.asynccontextmanager
-    async def _legacy_project_slot(self, root, write=True, operation_id=None):
+    async def _legacy_project_slot(self, root, write=True, operation_id=None, *, resolved_root=False):
         """Coordinate overlapping project paths with shared reads and exclusive writes.
 
         Named tasks remain exclusive by default. A task explicitly marked
         ``allow_read_concurrency`` is admitted as a shared reader: reads may
         proceed while it runs, but writes still wait for it to finish.
         """
-        root = Path(root).expanduser().resolve()
+        root = Path(root) if resolved_root else Path(root).expanduser().resolve()
         token = object()
         if operation_id:
             self.slot_owners[token] = operation_id
@@ -565,6 +577,11 @@ class Agent:
             self.slot_owners.pop(token, None)
             if lock_acquired:
                 lock.release()
+
+    async def _operation_root(self, tool, project, args):
+        if workspace_probe.eligible(tool, args):
+            return await workspace_probe.root(self.engine, tool, project, args)
+        return self.engine.root(project, tool in MUTATING)
 
     async def handle(self, request):
         id = request["id"]
@@ -715,7 +732,7 @@ class Agent:
                 result = await self.execute(id, tool, project, args)
             else:
                 args = TOOLS[tool].model.model_validate(args).model_dump()
-                root, _ = self.engine.root(project, tool in MUTATING)
+                root, _ = await self._operation_root(tool, project, args)
                 # Wait for the project BEFORE consuming a global worker slot: a queue
                 # of ProjectAlpha tests must not starve a read of ProjectGamma or ProjectBeta.
                 slot_write = tool in MUTATING
@@ -732,7 +749,7 @@ class Agent:
                         raise DevError("QUEUE_EXPIRED", "超过首次执行期限，尚未开始操作；请确认后重新提交")
                     self.integrations.control.guard(tool, project)
                     if args.get('workspace_id'): project = self.integrations.project(project, args)
-                    current_root, _ = self.engine.root(project, tool in MUTATING)
+                    current_root, _ = await self._operation_root(tool, project, args)
                     if current_root != root:
                         raise DevError("ROOT_CHANGED", "排队期间项目根目录发生变化，请确认映射后重新提交")
                     self.journal.mark_running(id)
@@ -741,7 +758,7 @@ class Agent:
                         raise DevError("CANCELLED", "操作开始前已取消")
                     self.integrations.control.guard(tool, project)
                     if args.get('workspace_id'): project = self.integrations.project(project, args)
-                    current_root, _ = self.engine.root(project, tool in MUTATING)
+                    current_root, _ = await self._operation_root(tool, project, args)
                     if current_root != root:
                         raise DevError("ROOT_CHANGED", "项目根目录发生变化，请确认映射后重新提交")
                     self.phase(id, "executing")
@@ -828,6 +845,8 @@ class Agent:
         return min(local_timeout, remaining)
 
     async def execute(self, id, tool, project, args, *, saved_vps_target=None):
+        if workspace_probe.eligible(tool, args):
+            return await workspace_probe.probe(self.engine, tool, project, args)
         from shared.integration_contracts import REMOTE_TOOLS
         if tool == 'exec':
             if args['task']:

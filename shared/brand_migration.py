@@ -145,8 +145,8 @@ def _launchd_service_name(base, recorded=None, home=None):
             value = plistlib.loads(_read_owned_service_file(target))
             matches = (isinstance(value, dict) and value.get('Label') == name
                        and value.get('WorkingDirectory') == str(base/'runtime')
-                       and value.get('ProgramArguments') == command
-                       and value.get('Program') in (None, command[0]))
+                       and value.get('ProgramArguments') in (command, [str(base/'CodePier Agent.app/Contents/MacOS/CodePier Agent'), *command])
+                       and value.get('Program') in (None, value['ProgramArguments'][0]))
         except (OSError, ValueError, TypeError, plistlib.InvalidFileException):
             matches = False
         if matches:
@@ -167,7 +167,7 @@ def definition_owned(raw, base, kind, name):
         if kind == 'launchd':
             value = plistlib.loads(raw)
             return (isinstance(value, dict) and value.get('Label') == name and value.get('WorkingDirectory') == str(runtime)
-                    and value.get('ProgramArguments') == command and value.get('Program') in (None, command[0]))
+                    and value.get('ProgramArguments') in (command, [str(base/'CodePier Agent.app/Contents/MacOS/CodePier Agent'), *command]) and value.get('Program') in (None, value['ProgramArguments'][0]))
         if kind == 'systemd':
             lines = raw.decode().splitlines()
             return ('WorkingDirectory='+str(runtime).replace('%','%%') in lines
@@ -211,8 +211,12 @@ def service_name(base, kind, scope, home=None):
     if kind == 'schtasks':
         target = base/'service.xml'
         if target.is_file():
-            text = target.read_text(encoding='utf-16')
-            return names[0] if 'CodePierAgent' in text or AGENT_DIRECTORY in text else names[1]
+            ns = '{http://schemas.microsoft.com/windows/2004/02/mit/task}'
+            tree = ET.fromstring(target.read_bytes())
+            uris = tree.findall(ns+'RegistrationInfo/'+ns+'URI')
+            if tree.tag != ns+'Task' or len(uris) != 1 or uris[0].text not in {'\\'+x for x in names}:
+                raise RuntimeError('Unrecognized managed Windows task URI')
+            return uris[0].text[1:]
         return names[0]
     owned = []
     for name in names:

@@ -340,7 +340,7 @@ def test_systemd_service_quotes_user_selected_paths(tmp_path, monkeypatch):
     assert 'Environment=CODEPIER_SUPERVISED=1' in content
 
 
-def test_launchd_service_enables_recovery_without_changing_legacy_command(tmp_path, monkeypatch):
+def test_launchd_service_enables_recovery_with_owned_launcher_migration(tmp_path, monkeypatch):
     import plistlib
     home = tmp_path / 'home'
     base = home / '.codepier-agent'
@@ -350,7 +350,7 @@ def test_launchd_service_enables_recovery_without_changing_legacy_command(tmp_pa
     monkeypatch.setattr(install_agent.Path, 'home', classmethod(lambda cls: home))
     monkeypatch.setattr(install_agent.sys, 'platform', 'darwin')
     monkeypatch.setattr(install_agent, 'run', lambda *args, **kwargs: None)
-    monkeypatch.setattr(install_agent.subprocess, 'run', lambda *args, **kwargs: subprocess.CompletedProcess(args, 1))
+    monkeypatch.setattr(install_agent, '_launchd_loaded', lambda domain: False)
     monkeypatch.setattr(install_agent.subprocess, 'check_output', lambda *args, **kwargs: 'state = running')
     monkeypatch.setattr(install_agent.time, 'sleep', lambda seconds: None)
     target = home / 'Library/LaunchAgents/com.codepier.agent.plist'
@@ -360,5 +360,7 @@ def test_launchd_service_enables_recovery_without_changing_legacy_command(tmp_pa
                                       'WorkingDirectory': str(runtime), 'ProgramArguments': command}))
     assert install_agent.start_service(base, python) == command
     service = plistlib.loads(target.read_bytes())
+    assert service['ProgramArguments'] == [str(base/'CodePier Agent.app/Contents/MacOS/CodePier Agent'), *command]
+    assert service['WorkingDirectory'] == str(runtime)
     assert service['EnvironmentVariables']['CODEPIER_SUPERVISED'] == '1'
     assert service['KeepAlive'] and service['ProcessType'] == 'Standard'

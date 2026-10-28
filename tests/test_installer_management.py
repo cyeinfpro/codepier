@@ -779,3 +779,41 @@ def test_unregistered_incomplete_pending_runtime_is_not_blindly_overwritten(
         invoke(monkeypatch, f, *panel_arguments(f))
     assert (f.base/'config.json').read_bytes() == before
     assert not list(f.base.glob('.runtime-update-cli-*'))
+
+
+@pytest.mark.parametrize('backend', ['installer', 'migration'])
+@pytest.mark.parametrize('name', ['RemoteDevAgent', 'CodePierAgent'])
+def test_windows_task_name_uses_only_exact_uri(tmp_path, backend, name):
+    from shared import brand_migration
+    base = tmp_path / '.codepier-agent' / 'CodePierAgent' / '.remote-dev-agent'
+    base.mkdir(parents=True)
+    python = base / 'runtime/.venv/Scripts/python.exe'
+    python.parent.mkdir(parents=True)
+    python.with_name('pythonw.exe').write_bytes(b'fixture')
+    xml = installer.windows_task_xml(base, python, name, 'S-1-5-21-1234567')
+    text = xml.decode('utf-16').replace('</RegistrationInfo>',
+        '<Description>CodePierAgent .codepier-agent RemoteDevAgent</Description></RegistrationInfo>')
+    (base / 'service.xml').write_text(text, encoding='utf-16')
+    resolve = installer.managed_service_name if backend == 'installer' else brand_migration.service_name
+    assert resolve(base, 'schtasks', 'user') == name
+
+
+@pytest.mark.parametrize('backend', ['installer', 'migration'])
+@pytest.mark.parametrize('uri_xml', ['', '<URI>\\ForeignAgent</URI>',
+    '<URI>\\RemoteDevAgent</URI><URI>\\CodePierAgent</URI>',
+    '<URI xmlns="urn:foreign">\\RemoteDevAgent</URI>', '<URI>RemoteDevAgent</URI>'])
+def test_windows_task_unknown_uri_never_guesses(tmp_path, backend, uri_xml):
+    from shared import brand_migration
+    base = tmp_path / '.codepier-agent'
+    base.mkdir()
+    xml = ('<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">'
+           '<RegistrationInfo>' + uri_xml + '<Description>CodePierAgent</Description>'
+           '</RegistrationInfo></Task>')
+    (base / 'service.xml').write_text(xml, encoding='utf-16')
+    resolve = installer.managed_service_name if backend == 'installer' else brand_migration.service_name
+    with pytest.raises((ValueError, RuntimeError), match='Windows task URI'):
+        resolve(base, 'schtasks', 'user')
+    # Existing validated metadata remains authoritative, even for historical XML
+    # without RegistrationInfo/URI. Ownership checks still precede service actions.
+    (base / 'management.json').write_text(json.dumps({'service_name': 'RemoteDevAgent'}))
+    assert resolve(base, 'schtasks', 'user') == 'RemoteDevAgent'

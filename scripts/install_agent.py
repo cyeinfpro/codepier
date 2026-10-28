@@ -76,8 +76,8 @@ def _launchd_service_name(base, recorded=None, home=None):
             value = plistlib.loads(_read_owned_service_file(target))
             matches = (isinstance(value, dict) and value.get('Label') == name
                        and value.get('WorkingDirectory') == str(base/'runtime')
-                       and value.get('ProgramArguments') == command
-                       and value.get('Program') in (None, command[0]))
+                       and value.get('ProgramArguments') in (command, [str(base/'CodePier Agent.app/Contents/MacOS/CodePier Agent'), *command])
+                       and value.get('Program') in (None, value['ProgramArguments'][0]))
         except (OSError, ValueError, TypeError, plistlib.InvalidFileException):
             matches = False
         if matches:
@@ -111,8 +111,13 @@ def managed_service_name(base, kind, scope):
     if kind == 'schtasks':
         target = base/'service.xml'
         if target.is_file():
-            text = target.read_text(encoding='utf-16')
-            return names[0] if 'CodePierAgent' in text or '.codepier-agent' in text else names[1]
+            import xml.etree.ElementTree as ET
+            ns = '{http://schemas.microsoft.com/windows/2004/02/mit/task}'
+            tree = ET.fromstring(target.read_bytes())
+            uris = tree.findall(ns+'RegistrationInfo/'+ns+'URI')
+            if tree.tag != ns+'Task' or len(uris) != 1 or uris[0].text not in {'\\'+x for x in names}:
+                raise ValueError('Unrecognized managed Windows task URI')
+            return uris[0].text[1:]
         return names[0]
     folder = (Path.home()/'Library/LaunchAgents' if kind == 'launchd' else
               Path('/etc/systemd/system') if scope == 'system' else Path.home()/'.config/systemd/user')
@@ -489,6 +494,125 @@ def windows_task_has_recovery(raw, user=None):
             and value('Settings/StartWhenAvailable') == 'true')
 
 
+def _atomic_service_definition(target, raw, mode=0o600):
+    fd, temporary = tempfile.mkstemp(prefix='.' + target.name + '.', dir=target.parent)
+    try:
+        with os.fdopen(fd, 'wb') as output:
+            output.write(raw)
+            output.flush()
+            os.fsync(output.fileno())
+            os.fchmod(output.fileno(), mode)
+        os.replace(temporary, target)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _launchd_loaded(domain):
+    result = subprocess.run(['launchctl', 'print', domain], capture_output=True, text=True, timeout=30)
+    if result.returncode == 0:
+        return True
+    if result.returncode == 113 and 'Could not find service' in result.stderr:
+        return False
+    raise RuntimeError('Cannot establish launchd service state; no definition changed')
+
+
+def start_macos_service(base, python, name, direct_command):
+    runtime = base / 'runtime'
+    target = Path.home() / 'Library/LaunchAgents' / (name + '.plist')
+    target.parent.mkdir(parents=True, exist_ok=True)
+    launcher = base / 'CodePier Agent.app/Contents/MacOS/CodePier Agent'
+    command = [str(launcher), *direct_command]
+    before = _read_owned_service_file(target) if target.exists() or target.is_symlink() else None
+    old_mode = stat.S_IMODE(target.stat().st_mode) if before is not None else 0o600
+    if before is not None:
+        value = plistlib.loads(before)
+        if (not isinstance(value, dict) or value.get('Label') != name
+                or value.get('WorkingDirectory') != str(runtime)
+                or value.get('ProgramArguments') not in (direct_command, command)
+                or value.get('Program') not in (None, value.get('ProgramArguments', [''])[0])):
+            raise ValueError('Existing launch service belongs to a different Agent configuration')
+    domain = f'gui/{os.getuid()}/{name}'
+    was_loaded = _launchd_loaded(domain)
+    if was_loaded and before is None:
+        raise ValueError('Loaded service without an owned definition; refusing to replace')
+    # Uses the verified new runtime, never user site packages or project imports.
+    run([python, '-I', '-c',
+         'import sys; sys.path.insert(0, ' + repr(str(runtime)) + '); '
+         'from agent.macos_app import build; build(' + repr(str(base)) + ')'], cwd=runtime)
+    if before is not None:
+        # Retain all existing service options; change only the proven command.
+        data = plistlib.loads(before)
+        data['ProgramArguments'] = command
+        if 'Program' in data:
+            data['Program'] = command[0]
+    else:
+        logs = base / 'logs'
+        data = {'Label': name, 'ProgramArguments': command, 'WorkingDirectory': str(runtime),
+                'RunAtLoad': True, 'KeepAlive': True, 'ThrottleInterval': 10, 'ProcessType': 'Standard',
+                'EnvironmentVariables': {'PYTHONUNBUFFERED': '1', 'CODEPIER_SUPERVISED': '1',
+                                         'PATH': os.environ.get('PATH', '/usr/bin:/bin')},
+                'StandardOutPath': str(logs / 'stdout.log'), 'StandardErrorPath': str(logs / 'stderr.log')}
+    data.setdefault('RunAtLoad', True)
+    data.setdefault('KeepAlive', True)
+    data.setdefault('ThrottleInterval', 10)
+    data.setdefault('ProcessType', 'Standard')
+    environment = data.setdefault('EnvironmentVariables', {})
+    if not isinstance(environment, dict):
+        raise ValueError('Managed service environment is malformed')
+    environment.setdefault('PYTHONUNBUFFERED', '1')
+    environment.setdefault('CODEPIER_SUPERVISED', '1')
+    after = plistlib.dumps(data)
+    changed = before is None or plistlib.loads(before) != data
+    stopped = False
+    published = False
+    attempted_start = False
+
+    def confirm_definition(expected):
+        actual = (_read_owned_service_file(target)
+                  if target.exists() or target.is_symlink() else None)
+        if actual != expected:
+            raise RuntimeError('Managed service definition changed concurrently; refusing overwrite')
+
+    try:
+        confirm_definition(before)
+        if was_loaded and changed:
+            run(['launchctl', 'bootout', domain])
+            stopped = True
+        if changed:
+            confirm_definition(before)
+            _atomic_service_definition(target, after, old_mode)
+            published = True
+        if not was_loaded or stopped:
+            attempted_start = True
+            run(['launchctl', 'bootstrap', f'gui/{os.getuid()}', target])
+        run(['launchctl', 'kickstart', domain])
+        time.sleep(2)
+        status = subprocess.check_output(['launchctl', 'print', domain], text=True, timeout=30)
+        if 'state = running' not in status:
+            raise RuntimeError('Agent exited during startup')
+    except BaseException:
+        # Restore only this proven definition and its observed pre-call loaded state.
+        if published or stopped or attempted_start:
+            try:
+                confirm_definition(after if published else before)
+                if _launchd_loaded(domain):
+                    run(['launchctl', 'bootout', domain])
+                if before is None:
+                    if target.read_bytes() != after:
+                        raise RuntimeError('New definition changed; refusing rollback deletion')
+                    target.unlink()
+                else:
+                    confirm_definition(after if published else before)
+                    _atomic_service_definition(target, before, old_mode)
+                    if was_loaded:
+                        run(['launchctl', 'bootstrap', f'gui/{os.getuid()}', target])
+                        run(['launchctl', 'kickstart', domain])
+            except Exception as recovery:
+                raise RuntimeError('Managed launch migration failed; rollback needs manual recovery') from recovery
+        raise
+
+
 def start_service(base, python):
     name = managed_service_name(base, *service_identity())
     runtime = base/'runtime'
@@ -497,22 +621,7 @@ def start_service(base, python):
     logs.mkdir(exist_ok=True)
     command = [str(python), '-m', 'agent', '--config', str(config), 'run']
     if sys.platform == 'darwin':
-        target = Path.home()/'Library/LaunchAgents'/f'{name}.plist'
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists() and plistlib.loads(target.read_bytes()).get('ProgramArguments') != command:
-            raise ValueError('Existing launch service belongs to a different Agent configuration')
-        data = {'Label':name,'ProgramArguments':command,'WorkingDirectory':str(runtime),
-                'RunAtLoad':True,'KeepAlive':True,'ThrottleInterval':10,'ProcessType':'Standard',
-                'EnvironmentVariables':{'PYTHONUNBUFFERED':'1','CODEPIER_SUPERVISED':'1','PATH':os.environ.get('PATH','/usr/bin:/bin')},
-                'StandardOutPath':str(logs/'stdout.log'),'StandardErrorPath':str(logs/'stderr.log')}
-        target.write_bytes(plistlib.dumps(data)); target.chmod(0o600)
-        domain=f'gui/{os.getuid()}/{name}'
-        loaded=subprocess.run(['launchctl','print',domain],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-        if loaded.returncode != 0:run(['launchctl','bootstrap',f'gui/{os.getuid()}',target])
-        run(['launchctl','kickstart',domain])
-        time.sleep(2)
-        status=subprocess.check_output(['launchctl','print',domain],text=True)
-        if 'state = running' not in status:raise ValueError('Agent exited during startup; inspect '+str(logs/'stderr.log'))
+        start_macos_service(base, python, name, command)
     elif sys.platform == 'win32':
         if not (runtime/'agent/service_watchdog.py').is_file():
             raise ValueError('Upgrade the Agent runtime with the current source installer before repairing Windows boot startup')
@@ -650,12 +759,13 @@ def verify_service_ownership(base, *, allow_missing=False):
     runtime = base/'runtime'
     config = base/'config.json'
     if kind == 'launchd':
-        value = plistlib.loads(target.read_bytes())
-        args = value.get('ProgramArguments', [])
-        owned = (value.get('Label') == name and value.get('WorkingDirectory') == str(runtime)
-                 and isinstance(args, list) and '--config' in args
-                 and args[args.index('--config')+1:args.index('--config')+2] == [str(config)]
-                 and args[:3] == [str(runtime/'.venv/bin/python'), '-m', 'agent'])
+        value = plistlib.loads(_read_owned_service_file(target))
+        command = [str(runtime/'.venv/bin/python'), '-m', 'agent', '--config', str(config), 'run']
+        wrapped = [str(base/'CodePier Agent.app/Contents/MacOS/CodePier Agent'), *command]
+        owned = (isinstance(value, dict) and value.get('Label') == name
+                 and value.get('WorkingDirectory') == str(runtime)
+                 and value.get('ProgramArguments') in (command, wrapped)
+                 and value.get('Program') in (None, value.get('ProgramArguments', [''])[0]))
     elif kind == 'systemd':
         text = target.read_text(encoding='utf-8')
         command = [str(runtime/'.venv/bin/python'), '-m', 'agent', '--config', str(config), 'run']
