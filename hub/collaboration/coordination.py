@@ -26,6 +26,8 @@ BOUNDARY = {'shell': 'execution_account_not_project_sandbox',
 class CoordinationService:
     def __init__(self, collaboration):
         self.c, self.store, self.runtime = collaboration, collaboration.store, collaboration.runtime
+        from hub.collaboration.team_collaboration import TeamService
+        self.teams = TeamService(self)
 
     def object(self, room, goal_id):
         row = self.store.one('SELECT * FROM coordination_goals WHERE id=? AND room_id=?', (goal_id, room['id']))
@@ -45,6 +47,7 @@ class CoordinationService:
             raise DevError('GOAL_OWNER_MISMATCH', '目标只属于当前所有者自己的连接', 403)
         spec = json.loads(goal['spec'])
         self.c.conversations.object(principal, goal['conversation_id'])
+        self.teams.authorize_goal(principal, room, goal, active=active)
         source_link = self.c.delegation.goal_link(goal)
         if source_link:
             source = self.c.object('collaboration_messages', room, source_link['message_id'])
@@ -136,15 +139,18 @@ class CoordinationService:
         anchor = self.store.one('SELECT project_id,environment_id FROM collaboration_rooms WHERE id=?', (goal['room_id'],))
         count = self.store.one('SELECT COUNT(*) AS n FROM coordination_work WHERE goal_id=?', (goal['id'],))['n']
         delegation = self.c.delegation.goal_metadata(goal)
+        team = self.teams.goal_view(goal)
         return {key: goal[key] for key in ('id', 'room_id', 'conversation_id', 'digest', 'version',
                 'state', 'approval_id', 'expires_at', 'created', 'updated')} | spec | {
-                'can_approve': bool(principal.admin and not principal.grant_id and not delegation),
+                'can_approve': bool(principal.admin and not principal.grant_id and not delegation and not team),
+                **({'team': team} if team else {}),
                 'delegation': delegation,
                 'anchor_project_id': anchor['project_id'], 'environment_id': anchor['environment_id'],
                 'usage': {'work_items': count, 'steps': goal['steps'], 'messages': goal['messages']}}
 
     def mutation(self, principal, room, action, args, perform):
-        result = self.c.mutation(principal, room, action, args, perform)
+        stable = {k: v for k, v in args.items() if k not in {'consumer_session_id', 'consumer_fence', 'consumer_proof'}}
+        result = self.c.mutation(principal, room, action, stable, perform)
         # Stored idempotency receipts are evidence, never stale UI authority.
         if 'goal' in result:
             goal = self.object(room, result['goal']['id'])
@@ -175,6 +181,8 @@ class CoordinationService:
         args = validate(contracts.GoalUpdate, raw)
         with self.store.transaction():
             principal, room, goal = self.scope(principal, args)
+            if self.teams.link(goal):
+                raise DevError('TEAM_APPROVAL_IMMUTABLE', '团队目标只接受原批准内的意图修订，范围变更须重新确认团队', 409)
             if self.c.delegation.goal_link(goal):
                 raise DevError('DELEGATION_IMMUTABLE', '原消息委托不能改写目标；请在明确设置范围内发送新委托', 409)
             if args['conversation_id'] != goal['conversation_id']:
@@ -199,6 +207,8 @@ class CoordinationService:
         with self.store.transaction():
             principal, room, goal = self.scope(principal, args)
             self.c.owner(principal)
+            if self.teams.link(goal):
+                raise DevError('TEAM_APPROVAL_IMMUTABLE', '团队原批准不能重写或扩大', 409)
             link = self.c.delegation.goal_link(goal)
             if link and link['approval_id']:
                 raise DevError('DELEGATION_IMMUTABLE', '原消息委托不能重新批准；请核对已有操作后发送新委托', 409)
@@ -341,7 +351,8 @@ class CoordinationService:
             for key in ('mention_grant_ids', 'provenance_project_ids'):
                 message[key] = json.loads(message[key])
             message['body_text'] = message.pop('body')
-        return {'goal': self.view(goal, principal), 'can_approve': bool(principal.admin and not principal.grant_id and not self.c.delegation.goal_link(goal)),
+        return {'goal': self.view(goal, principal), 'can_approve': bool(principal.admin and not principal.grant_id and not self.c.delegation.goal_link(goal) and not self.teams.link(goal)),
+                **({'team_context': self.teams.goal_context(goal, principal)} if self.teams.link(goal) else {}),
                 'work_items': [self.work_view(row) for row in rows], 'messages': messages, 'operations': self.operations(goal)}
 
     def listing(self, args, principal, room):
@@ -378,7 +389,15 @@ class CoordinationService:
         return row
 
     def work_view(self, row):
-        return {**row, 'dependencies': json.loads(row['dependencies']),
+        assignment = self.store.one('SELECT * FROM team_work_assignments WHERE work_id=?', (row['id'],))
+        team_fields = ({'assignee_dot_id': assignment['dot_id'], 'intent_revision': assignment['intent_revision'],
+                        'coordinator_epoch': assignment['coordinator_epoch']} if assignment else {})
+        if assignment:
+            team_fields['coordinator_epoch'] = self.teams.link(row['goal_id'])['coordinator_epoch']
+        if assignment and row['result']:
+            team_fields['artifact_ref'] = {'work_item_id': row['id'], 'version': row['version'],
+                                           'digest': digest(json.loads(row['result']))}
+        return {**row, **team_fields, 'dependencies': json.loads(row['dependencies']),
                 'required_capabilities': json.loads(row['required_capabilities']),
                 'result': json.loads(row['result']) if row['result'] else None,
                 'provenance_project_ids': json.loads(row['result']).get('provenance_project_ids', [row['project_id']]) if row['result'] else [row['project_id']]}
@@ -393,6 +412,7 @@ class CoordinationService:
         args = validate(contracts.WorkCreate, raw)
         with self.store.transaction():
             principal, room, goal = self.scope(principal, args, active=True)
+            self.teams.guard(args, principal, goal, 'create')
             spec = json.loads(goal['spec'])
             if args['target_project_id'] not in spec['project_ids']:
                 raise DevError('GOAL_PROJECT_DENIED', '工作项项目不在原目标批准范围内', 403)
@@ -402,6 +422,8 @@ class CoordinationService:
             dependencies = list(dict.fromkeys(args['dependencies']))
             for identifier in dependencies:
                 dependency = self.work(goal, identifier)
+                if self.teams.link(goal):
+                    self.teams.operation_guard(goal, dependency)
                 if dependency['approval_id'] != goal['approval_id']:
                     raise DevError('WORK_APPROVAL_CHANGED', '依赖不属于当前目标批准', 409)
             def save():
@@ -415,6 +437,7 @@ class CoordinationService:
                     (identifier, goal['id'], goal['approval_id'], args['target_project_id'], redact(args['objective']),
                      redact(args['acceptance']), redact(args['responsibility']), args['assignee_grant_id'], canonical(dependencies), canonical(args['required_capabilities']), now, now))
                 item = self.work(goal, identifier)
+                self.teams.assign(goal, item, args.get('assignee_dot_id', ''))
                 self.emit_work(room, goal, item)
                 return {'work_item': self.work_view(item)}
             return self.mutation(principal, room, 'work_create', args, save)
@@ -423,6 +446,7 @@ class CoordinationService:
         args = validate(contracts.WorkAssign, raw)
         with self.store.transaction():
             principal, room, goal = self.scope(principal, args, active=True)
+            self.teams.guard(args, principal, goal, 'assign')
             item = self.work(goal, args['work_item_id'])
             assignee = self.participant(room, goal, args['assignee_grant_id'])
             self.work_capabilities(assignee, goal, item)
@@ -433,6 +457,7 @@ class CoordinationService:
                 self.store.execute('UPDATE coordination_work SET assignee_grant_id=?,version=version+1,updated=? WHERE id=?',
                                     (args['assignee_grant_id'], self.c.clock(), item['id']))
                 current = self.work(goal, item['id'])
+                self.teams.assign(goal, current, args.get('assignee_dot_id', ''))
                 self.emit_work(room, goal, current)
                 return {'work_item': self.work_view(current)}
             return self.mutation(principal, room, 'work_assign', args, save)
@@ -441,6 +466,7 @@ class CoordinationService:
         args = validate(contracts.WorkClaim, raw)
         with self.store.transaction():
             principal, room, goal = self.scope(principal, args, active=True)
+            self.teams.guard(args, principal, goal, 'claim', self.work(goal, args['work_item_id']))
             item = self.work(goal, args['work_item_id'])
             if not principal.grant_id or item['assignee_grant_id'] != principal.grant_id:
                 raise DevError('WORK_ASSIGNEE_REQUIRED', '工作项没有分配给当前连接', 403)
@@ -491,6 +517,7 @@ class CoordinationService:
         args = validate(contracts.WorkLease, raw)
         with self.store.transaction():
             principal, room, goal = self.scope(principal, args, active=True)
+            self.teams.guard(args, principal, goal, 'heartbeat', self.work(goal, args['work_item_id']))
             def extend():
                 item = self.lease(principal, goal, args)
                 until = min(goal['expires_at'], self.c.clock() + json.loads(goal['spec'])['budget']['lease_seconds'])
@@ -502,15 +529,17 @@ class CoordinationService:
         args = validate(contracts.WorkProgress, raw)
         with self.store.transaction():
             principal, room, goal = self.scope(principal, args, active=True)
+            self.teams.guard(args, principal, goal, 'progress', self.work(goal, args['work_item_id']))
             def save():
                 item = self.lease(principal, goal, args)
                 budget = json.loads(goal['spec'])['budget']
                 if goal['messages'] >= budget['max_messages']:
                     raise DevError('GOAL_BUDGET_EXCEEDED', '目标通信预算已用尽，仍可提交真实最终结果', 409)
-                if not self.c.delegation.goal_link(goal):
+                if not self.c.delegation.goal_link(goal) and not self.teams.link(goal):
                     raise DevError('DELEGATION_REQUIRED', '原话题进展需要关联的房主任务；普通目标使用 goal_message', 409)
                 identifier = 'delegation-progress:' + digest([goal['id'], item['id'], item['attempt'], args['idempotency_key']])
                 self.c.delegation.project_progress(room, goal, item, args['summary'], principal, identifier)
+                self.teams.project_progress(room, goal, item, args['summary'], principal, identifier)
                 until = min(goal['expires_at'], self.c.clock() + budget['lease_seconds'])
                 summary = redact(args['summary'])
                 changed = ' '.join(summary.split()) != ' '.join(item.get('last_progress_summary', '').split())
@@ -528,6 +557,7 @@ class CoordinationService:
             args.pop('supersedes_operation_id')
         with self.store.transaction():
             principal, room, goal = self.scope(principal, args, active=True)
+            self.teams.guard(args, principal, goal, 'execute', self.work(goal, args['work_item_id']))
             spec = json.loads(goal['spec'])
             item = self.work(goal, args['work_item_id'])
             # Replays identify genuine admission, but never bypass current scope.
@@ -640,6 +670,7 @@ class CoordinationService:
         projects = set(initial)
         for identifier in identifiers:
             item = self.work(goal, identifier)
+            self.teams.operation_guard(goal, item)
             if item['state'] != 'succeeded' or not item['result']:
                 raise DevError('WORK_INPUT_NOT_READY', '汇总来源必须是同目标的已完成工作项', 409)
             projects.update(json.loads(item['result'])['provenance_project_ids'])
@@ -696,6 +727,7 @@ class CoordinationService:
         action = 'work_archive_result' if archive else 'work_result_v2' if version2 else 'work_result'
         with self.store.transaction():
             principal, room, goal = self.scope(principal, args, active=True)
+            self.teams.guard(args, principal, goal, 'result', self.work(goal, args['work_item_id']))
             def save():
                 item = self.archive_item(principal, goal, args) if archive else self.lease(principal, goal, args)
                 rows = self.store.all('''SELECT o.id,o.state,c.operation_role,c.supersedes_operation_id
@@ -710,7 +742,7 @@ class CoordinationService:
                     raise DevError('WORK_OPERATION_PENDING', '持久操作尚未确定完成；不能宣称工作结束', 409)
                 if archive and not actual:
                     raise DevError('WORK_OPERATION_REQUIRED', '过期归档需要原尝试的真实操作回执', 409)
-                if (args['outcome'] == 'succeeded' and self.c.delegation.goal_link(goal)
+                if (args['outcome'] == 'succeeded' and (self.c.delegation.goal_link(goal) or self.teams.link(goal))
                         and set(json.loads(item['required_capabilities'])) & {'write', 'execute'} and not actual):
                     raise DevError('WORK_OPERATION_REQUIRED', '执行委托必须有真实操作回执，不能仅凭文字宣称完成', 409)
                 covered = self.recovered_explorations(rows) if version2 else set()
@@ -742,6 +774,7 @@ class CoordinationService:
                     version=version+1,updated=? WHERE id=?''',
                     (args['outcome'], canonical(body), self.c.clock(), item['id']))
                 self.c.delegation.project_result(room, goal, item, body, principal)
+                self.teams.result_ready(goal, self.work(goal, item['id']))
                 if archive:
                     self.c.audit(room, principal.actor, 'work.expired_attempt_archived', item['id'],
                                  {'original_attempt': args['attempt'], 'original_fencing_token': args['fencing_token'],
@@ -758,6 +791,8 @@ class CoordinationService:
         args = validate(contracts.GoalMessage, raw)
         with self.store.transaction():
             principal, room, goal = self.scope(principal, args, active=True)
+            if self.teams.link(goal):
+                raise DevError('TEAM_STRUCTURED_HANDOFF_REQUIRED', '团队通信使用带来源、产物版本和跳数预算的 team_handoff', 409)
             for grant_id in args['mention_grant_ids']:
                 self.participant(room, goal, grant_id)
             def save():
@@ -782,6 +817,8 @@ class CoordinationService:
 
     def emit_work(self, room, goal, item):
         if any(self.work(goal, identifier)['state'] != 'succeeded' for identifier in json.loads(item['dependencies'])):
+            return
+        if self.teams.emit_work(goal, item):
             return
         if self.c.delegation.emit_work(room, goal, item):
             return
@@ -826,6 +863,7 @@ class CoordinationService:
             room = self.store.one('SELECT * FROM collaboration_rooms WHERE id=?', (goal['room_id'],))
             actor = self.participant(room, goal, link['grant_id'])
             item = self.lease(actor, goal, link)
+            self.teams.operation_guard(goal, item)
             if item['project_id'] != operation['project_id'] or operation['grant_id'] != link['grant_id']:
                 raise DevError('WORK_OPERATION_MISMATCH', '执行操作归属改变', 403)
         except DevError as exc:

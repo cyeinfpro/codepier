@@ -21,6 +21,7 @@ class ChatroomService:
                 'weixin_enabled': self.c.channel_settings.enabled('weixin', principal) if principal else self.c.config.weixin_enabled, 'telegram_channel_v1': True,
                 'telegram_enabled': self.c.channel_settings.enabled('telegram', principal) if principal else self.c.config.telegram_enabled, 'channel_mirror_v1': True,
                 'work_result_v2': True, 'host_outbox_durability_verified': False, 'room_os_sandbox_verified': False,
+                'relay_hints': True, 'multidot_teams': True, 'dot_mailbox_v2': True, 'consumer_fencing_v1': True,
                 'native_dot_relay': True, 'duplex_dots': True, 'task_dots': True, 'work_progress': True, 'coordination_goals': True, 'direct_delegation': True, 'message_remind': True, 'plain_messages': True, 'message_notifications': self.c.config.events_enabled,
                 'task_assignment': True, 'message_search': True, 'incremental_messages': True,
                 'read_cursors': True, 'attachments': False, 'human_memberships': False}
@@ -232,6 +233,9 @@ class ChatroomService:
                     state = 'suppressed_agent_reply'
                 elif not self.c.config.events_enabled:
                     state = 'notifications_disabled'
+                elif self.c.dot_mailbox.enabled(slot['id']):
+                    receipt = self.c.dot_mailbox.notification_receipt(slot['id'])
+                    state, event_id = receipt['state'], receipt['event_id']
                 elif routes:
                     # Shared project budget survives new rooms, environments and retries.
                     count = self.store.one('''SELECT COUNT(*) AS n FROM mcp_event_outbox WHERE name=?
@@ -280,6 +284,8 @@ class ChatroomService:
                 self.writer(principal, room, conversation['id'])
             if args.get('delegation') or args.get('dispatch_mode') == 'automatic':
                 self.c.owner(principal)
+            if args.get('team_id'):
+                args['mentions'] = self.c.coordination.teams.prepare_message(room, conversation, args, principal)
             def save():
                 self.c.live_room(room)
                 origin = 'bound_connector' if principal.grant_id else 'panel_owner'
@@ -303,7 +309,7 @@ class ChatroomService:
                 if count >= 60:
                     raise DevError('MESSAGE_RATE_LIMIT', '发言过于频繁，请稍后再试', 429)
                 # Resolve only after the saved-message check: retries always keep their original ID.
-                automatic = self.c.delegation.automatic_request(principal, room, conversation, args)
+                automatic = None if args.get('team_id') else self.c.delegation.automatic_request(principal, room, conversation, args)
                 selected_delegation = args.get('delegation') or automatic
                 identifier = uuid.uuid4().hex
                 root = identifier
@@ -324,6 +330,8 @@ class ChatroomService:
                 body = {'body_text': redact(args['body_text']), 'mentions': mentions, 'request_digest': fingerprint}
                 if provenance:
                     body['provenance_project_ids'] = sorted(provenance)
+                if args.get('team_id'):
+                    body['team_id'] = args['team_id']
                 if sender_dot_id:
                     body['sender_dot_id'] = sender_dot_id
                     if not complete_dot_message:
@@ -337,7 +345,7 @@ class ChatroomService:
                 duplex = self.c.dot_chat.enqueue(room, message, mentions, principal)
                 if duplex:
                     body['duplex_recipients'] = duplex
-                if len(duplex) == 1 and not selected_delegation:
+                if len(duplex) == 1 and not selected_delegation and not args.get('team_id'):
                     message = self.c.owner_task_context.incoming(room, self.c.dots.find(duplex[0]), message, principal)
                     incoming_body = json.loads(message['body'])
                     provenance.update(incoming_body.get('provenance_project_ids', []))
@@ -356,6 +364,9 @@ class ChatroomService:
                 else:
                     body['notifications'] = self.notify(room, message, principal, mentions)
                 self.store.execute('UPDATE collaboration_messages SET body=? WHERE id=?', (canonical(body), identifier))
+                if args.get('team_id'):
+                    stored = self.c.object('collaboration_messages', room, identifier)
+                    self.c.coordination.teams.bind_message(room, stored, args['team_id'], principal)
                 if selected_delegation and duplex and hasattr(self.c, 'message_handling'):
                     stored = self.c.object('collaboration_messages', room, identifier)
                     for dot_id in duplex:

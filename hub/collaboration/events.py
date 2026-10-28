@@ -9,6 +9,7 @@ import base64
 import hashlib
 import hmac
 import json
+import math
 import secrets
 import time
 
@@ -17,11 +18,36 @@ from hub.principal import refresh_principal
 from hub.mcp_request_audit import mark
 from hub.collaboration.event_errors import CallbackEndpointError, callback_reason
 from hub.collaboration import network
-from hub.collaboration.common import (TASK_EVENT, RESULT_EVENT, INCIDENT_EVENT, STATUS_EVENT, MESSAGE_EVENT, WORK_EVENT, DELEGATION_EVENT, OPERATION_EVENT,
+from hub.collaboration.common import (TASK_EVENT, RESULT_EVENT, INCIDENT_EVENT, STATUS_EVENT, MESSAGE_EVENT, WORK_EVENT, DELEGATION_EVENT, OPERATION_EVENT, MAILBOX_EVENT,
     SEVERITIES, canonical, digest, read_cursor, sign_cursor, timestamp, validate)
 from hub.collaboration.event_contracts import FILTERS, PAYLOADS, Subscribe, Unsubscribe, definitions
 from shared.util import DevError
 
+DISPATCH_CAPACITY = 4
+MAX_ENVELOPE_BYTES = 16384
+WIRE_HEADER_BYTES = 768  # Two signatures plus bounded webhook/HTTP header overhead.
+# rate, burst, byte rate, byte burst; shared by all dispatcher processes.
+DISPATCH_BUDGETS = {'global': (8., 16., 128 * 1024., 256 * 1024.),
+                    'owner': (4., 8., 64 * 1024., 128 * 1024.)}
+SEALED_BODY_PREFIX = 'sealed:v1:'
+
+
+def migrate_dispatch(db):
+    """Additive scheduling state; callback URLs never become metric keys."""
+    db.execute("""CREATE TABLE IF NOT EXISTS mcp_event_dispatch_routes (
+        subscription_id TEXT PRIMARY KEY REFERENCES mcp_event_subscriptions(id) ON DELETE CASCADE,
+        endpoint_key TEXT NOT NULL, owner_key TEXT NOT NULL)""")
+    db.execute("""CREATE INDEX IF NOT EXISTS mcp_event_dispatch_routes_endpoint
+        ON mcp_event_dispatch_routes(endpoint_key,subscription_id)""")
+    db.execute("""CREATE TABLE IF NOT EXISTS mcp_event_dispatch_endpoints (
+        endpoint_key TEXT PRIMARY KEY, cooldown_until REAL NOT NULL DEFAULT 0,
+        updated REAL NOT NULL)""")
+    db.execute("""CREATE TABLE IF NOT EXISTS mcp_event_dispatch_owners (
+        owner_key TEXT PRIMARY KEY,after_subscription TEXT NOT NULL,
+        updated REAL NOT NULL)""")
+    db.execute("""CREATE TABLE IF NOT EXISTS mcp_event_dispatch_budgets (
+        scope_key TEXT PRIMARY KEY,tokens REAL NOT NULL,byte_tokens REAL NOT NULL,
+        updated REAL NOT NULL)""")
 
 
 def signing_key(value):
@@ -48,9 +74,13 @@ class EventService:
     def __init__(self, collaboration, sender=None):
         self.c, self.store = collaboration, collaboration.store
         self.sender = sender or network.webhook
-        self._network_limit = asyncio.Semaphore(2)
+        self._network_limit = asyncio.Semaphore(DISPATCH_CAPACITY)
+        self._challenge_limit = asyncio.Semaphore(2)
+        self._tick_lock = asyncio.Lock()
+        self._owner_after = ''
         self._scan_after = ''
         self._relay_recover_after = 0
+        self._budget_retry_at = None
         from hub.operation_events import OperationEvents
         self.operations = OperationEvents(self)
 
@@ -98,8 +128,10 @@ class EventService:
         self.c.notification_reader(principal)
         if args['name'] == OPERATION_EVENT and not stopping:
             self.operations.authorize(principal, filters)
-        if args['name'] == MESSAGE_EVENT:
+        if args['name'] in {MESSAGE_EVENT, MAILBOX_EVENT}:
             self.c.conversations.resolve(principal, room, filters)
+        if args['name'] == MAILBOX_EVENT and not stopping:
+            self.c.dot_mailbox.authorize_event(principal, filters)
         if args['name'] == DELEGATION_EVENT and not stopping:
             self.c.delegation.authorize_event(principal, filters)
         if args['name'] == WORK_EVENT and not stopping:
@@ -156,7 +188,7 @@ class EventService:
             reply_status = None
             try:
                 try:
-                    async with self._network_limit:
+                    async with self._challenge_limit:
                         reply = await self.sender(args['delivery']['url'], body, headers)
                     reply_status = reply.status
                     if 400 <= reply.status < 500:
@@ -184,8 +216,10 @@ class EventService:
                 self.c.live_room(current_room)
                 current_filters = validate(FILTERS[args['name']], args['arguments'])
                 self.c.joining.subscription_guard(current_room, current_principal, current_filters, args['delivery'])
-                if args['name'] == MESSAGE_EVENT:
+                if args['name'] in {MESSAGE_EVENT, MAILBOX_EVENT}:
                     self.c.conversations.resolve(current_principal, current_room, current_filters)
+                if args['name'] == MAILBOX_EVENT:
+                    self.c.dot_mailbox.authorize_event(current_principal, current_filters)
                 if args['name'] == DELEGATION_EVENT:
                     self.c.delegation.authorize_event(current_principal, current_filters)
                 if args['name'] == WORK_EVENT:
@@ -250,6 +284,7 @@ class EventService:
                 saved = self.store.one('SELECT * FROM mcp_event_subscriptions WHERE id=?', (identifier,))
                 self.c.joining.attach_subscription(current_room, current_principal,
                     validate(FILTERS[args['name']], args['arguments']), saved, reset_verification=not active)
+                self.dispatch_route(saved, current_room)
                 if args['name'] == OPERATION_EVENT:
                     self.operations.catch_up(saved, current_room, current_principal, current_filters)
                 return {'id': identifier, 'refreshBefore': timestamp(lifetime),
@@ -280,8 +315,10 @@ class EventService:
         self.c.joining.subscription_guard(room, principal, filters)
         if subscription['name'] == OPERATION_EVENT:
             self.operations.authorize(principal, filters, snapshot=json.loads(subscription['principal']), payload=payload)
-        if subscription['name'] == MESSAGE_EVENT:
+        if subscription['name'] in {MESSAGE_EVENT, MAILBOX_EVENT}:
             self.c.conversations.resolve(principal, room, filters)
+        if subscription['name'] == MAILBOX_EVENT:
+            self.c.dot_mailbox.authorize_event(principal, filters, payload)
         if subscription['name'] == DELEGATION_EVENT:
             self.c.delegation.authorize_event(principal, filters, payload)
         if subscription['name'] == WORK_EVENT:
@@ -301,6 +338,12 @@ class EventService:
                 or payload.get('recipient_slot_id') != filters['slot_id']
                 or not payload.get('conversation_id') or not filters.get('conversation_id')
                 or payload['conversation_id'] != filters['conversation_id']):
+            return False
+        if event['name'] == MAILBOX_EVENT and (not event['target_grant_id']
+                or payload.get('recipient_grant_id') != subscription['grant_id']
+                or payload.get('recipient_slot_id') != filters.get('slot_id')
+                or any(payload.get(key) != filters.get(key)
+                       for key in ('project_id', 'environment_id', 'conversation_id', 'binding_generation'))):
             return False
         if event['name'] == WORK_EVENT and (not event['target_grant_id']
                 or payload.get('recipient_grant_id') != subscription['grant_id']
@@ -330,19 +373,141 @@ class EventService:
             return False
         return True
 
+    def mailbox_owns(self, event):
+        """An active v2 route consumes new addressed inputs through its mailbox."""
+        if event['name'] not in {MESSAGE_EVENT, DELEGATION_EVENT}:
+            return False
+        payload = json.loads(event['data'])
+        mailbox = getattr(self.c, 'dot_mailbox', None)
+        return bool(mailbox and not payload.get('test') and payload.get('recipient_slot_id')
+                    and mailbox.enabled(payload['recipient_slot_id']))
+
     def advance(self, subscription_id):
         sub = self.store.one('SELECT * FROM mcp_event_subscriptions WHERE id=?', (subscription_id,))
         pending = self.store.one("SELECT MIN(event_seq) AS n FROM mcp_event_deliveries WHERE subscription_id=? AND state IN ('pending','retry_wait','leased')", (subscription_id,))['n']
         ack = min(sub['scan_seq'], pending - 1) if pending is not None else sub['scan_seq']
         self.store.execute('UPDATE mcp_event_subscriptions SET ack_seq=MAX(ack_seq,?) WHERE id=?', (ack, subscription_id))
 
-    def reserve(self):
+    def dispatch_route(self, subscription, room=None):
+        """Internal stable recipient key, not caller-supplied priority or authority."""
+        existing = self.store.one('SELECT * FROM mcp_event_dispatch_routes WHERE subscription_id=?',
+                                  (subscription['id'],))
+        if existing:
+            return existing
+        room = room or self.store.one('SELECT * FROM collaboration_rooms WHERE id=?', (subscription['room_id'],))
+        destination = json.loads(self.store.decrypt(subscription['secret']))['url']
+        network.callback_url(destination)
+        owner_key = digest([room['space_id'], room['owner_user_id']])
+        endpoint_key = digest([owner_key, str(httpx.URL(destination))])
+        self.store.execute('INSERT OR IGNORE INTO mcp_event_dispatch_routes VALUES (?,?,?)',
+                           (subscription['id'], endpoint_key, owner_key))
+        return {'subscription_id': subscription['id'], 'endpoint_key': endpoint_key, 'owner_key': owner_key}
+
+    @staticmethod
+    def retry_delay(delivery, retry_after=None):
+        # Stable 80-100% jitter spreads a recovered backlog without exceeding the
+        # existing backoff ceilings. Retry-After can only delay, never accelerate.
+        ceiling = (30, 120, 600, 1800)[min(delivery['attempt'] - 1, 3)]
+        fraction = int(digest([delivery['id'], delivery['attempt']])[:8], 16) / 0xffffffff
+        delay = ceiling * (.8 + .2 * fraction)
+        if (isinstance(retry_after, (int, float)) and not isinstance(retry_after, bool)
+                and math.isfinite(retry_after) and retry_after >= 0):
+            delay = max(delay, min(1800, retry_after))
+        return delay
+
+    def send_budget(self, owner_key, byte_count, now, *, spend=False):
+        """Atomically share global/owner send and byte buckets with all pumps."""
+        self.store.require_transaction()
+        accounts = []
+        for key, limits in (('global', DISPATCH_BUDGETS['global']),
+                            ('owner:' + owner_key, DISPATCH_BUDGETS['owner'])):
+            rate, burst, byte_rate, byte_burst = limits
+            row = self.store.one('SELECT * FROM mcp_event_dispatch_budgets WHERE scope_key=?', (key,))
+            elapsed = max(0, now - row['updated']) if row else 0
+            tokens = min(burst, row['tokens'] + elapsed * rate) if row else burst
+            byte_tokens = min(byte_burst, row['byte_tokens'] + elapsed * byte_rate) if row else byte_burst
+            if tokens < 1 or byte_tokens < byte_count:
+                delay = max(0, (1 - tokens) / rate, (byte_count - byte_tokens) / byte_rate)
+                due = max(now, row['updated']) + delay if row else now + delay
+                self._budget_retry_at = (due if self._budget_retry_at is None
+                                         else min(self._budget_retry_at, due))
+                return False
+            accounts.append((key, tokens - 1, byte_tokens - byte_count,
+                             max(now, row['updated']) if row else now))
+        if spend:
+            for account in accounts:
+                self.store.execute("""INSERT INTO mcp_event_dispatch_budgets VALUES (?,?,?,?)
+                    ON CONFLICT(scope_key) DO UPDATE SET tokens=excluded.tokens,
+                    byte_tokens=excluded.byte_tokens,updated=excluded.updated""", account)
+        return True
+
+    def next_dispatch_delay(self, default=2):
+        if self._budget_retry_at is None:
+            return default
+        return min(default, max(.01, self._budget_retry_at - self.c.clock()))
+
+    def coalesce_mailbox(self, subscription, filters):
+        if subscription['name'] != MAILBOX_EVENT:
+            return
+        # Only unsent, unsealed hints may be superseded. Every typed mailbox
+        # entry/revision remains durable; latest wake reads the current ledger.
+        eligible = """FROM mcp_event_deliveries d JOIN mcp_event_outbox e ON e.id=d.event_id
+            WHERE d.subscription_id=? AND d.state='pending' AND d.attempt=0 AND d.body IS NULL
+            AND e.name=? AND COALESCE(json_extract(e.data,'$.test'),0)=0
+            AND json_extract(e.data,'$.recipient_slot_id')=?
+            AND json_extract(e.data,'$.binding_generation')=?"""
+        parameters = (subscription['id'], MAILBOX_EVENT, filters['slot_id'], filters['binding_generation'])
+        latest = self.store.one('SELECT MAX(d.event_seq) AS n ' + eligible, parameters)['n']
+        if latest is None:
+            return
+        old = self.store.all('SELECT d.id ' + eligible + ' AND d.event_seq<? ORDER BY d.event_seq LIMIT 100',
+                             (*parameters, latest))
+        if old:
+            self.store.execute("""UPDATE mcp_event_deliveries SET state='abandoned',
+                reason_code='mailbox_coalesced',fence=fence+1
+                WHERE id IN (SELECT value FROM json_each(?))""", (canonical([row['id'] for row in old]),))
+
+    def reserve(self, capacity=DISPATCH_CAPACITY):
         self.guard()
         now, reserved = self.c.clock(), []
+        capacity = max(0, min(DISPATCH_CAPACITY, capacity))
+        if not capacity:
+            return reserved
         with self.store.transaction():
+            # Include leases created before this migration and other dispatchers.
+            leased = self.store.all("""SELECT s.* FROM mcp_event_subscriptions s
+                JOIN mcp_event_deliveries d ON d.subscription_id=s.id
+                WHERE d.state='leased' AND d.lease_until>?""", (now,))
+            for subscription in leased:
+                self.dispatch_route(subscription)
+            capacity = min(capacity, max(0, DISPATCH_CAPACITY - len(leased)))
+            if not capacity:
+                return reserved
             subscriptions = self.store.all("SELECT * FROM mcp_event_subscriptions WHERE state='active' AND id>? ORDER BY id LIMIT 32", (self._scan_after,))
             self._scan_after = subscriptions[-1]['id'] if len(subscriptions) == 32 else ''
-            for sub in subscriptions:
+            routes = {sub['id']: self.dispatch_route(sub) for sub in subscriptions}
+            owners = sorted({route['owner_key'] for route in routes.values()})
+            owners = [key for key in owners if key > self._owner_after] + [key for key in owners if key <= self._owner_after]
+            groups = {}
+            for key in owners:
+                cursor = self.store.one('SELECT after_subscription FROM mcp_event_dispatch_owners WHERE owner_key=?', (key,))
+                after = cursor['after_subscription'] if cursor else ''
+                members = [sub for sub in subscriptions if routes[sub['id']]['owner_key'] == key]
+                groups[key] = ([sub for sub in members if sub['id'] > after]
+                               + [sub for sub in members if sub['id'] <= after])
+            # Round-robin owners first, subscriptions second. The page cursor
+            # still advances over the original SQL page, never the rotated list.
+            ordered = []
+            while any(groups.values()):
+                for key in owners:
+                    if groups[key]:
+                        ordered.append(groups[key].pop(0))
+            owner_count = self.store.one("""SELECT COUNT(*) AS n FROM (
+                SELECT r.space_id,r.owner_user_id FROM collaboration_rooms r
+                JOIN mcp_event_subscriptions s ON s.room_id=r.id
+                WHERE s.state='active' AND s.expires_at>? GROUP BY r.space_id,r.owner_user_id)""", (now,))['n']
+            owner_limit = 2 if owner_count > 1 else DISPATCH_CAPACITY
+            for sub in ordered:
                 if sub['expires_at'] <= now:
                     self.store.execute("UPDATE mcp_event_subscriptions SET state='expired',version=version+1,updated=? WHERE id=?", (now, sub['id']))
                     continue
@@ -358,19 +523,35 @@ class EventService:
                 # The already-verified subscription remains valid until expires_at.
                 rows = self.store.all('SELECT * FROM mcp_event_outbox WHERE room_id=? AND seq>? ORDER BY seq LIMIT 100', (room['id'], sub['scan_seq']))
                 for event in rows:
-                    if self.matches(sub, filters, event):
+                    if self.matches(sub, filters, event) and not self.mailbox_owns(event):
                         self.store.execute('''INSERT OR IGNORE INTO mcp_event_deliveries
                             (id,subscription_id,event_id,event_seq,created) VALUES (?,?,?,?,?)''',
                             (digest([sub['id'], event['id']]), sub['id'], event['id'], event['seq'], now))
                 if rows:
                     self.store.execute('UPDATE mcp_event_subscriptions SET scan_seq=? WHERE id=?', (rows[-1]['seq'], sub['id']))
+                self.coalesce_mailbox(sub, filters)
                 self.advance(sub['id'])
                 delivery = self.store.one("SELECT * FROM mcp_event_deliveries WHERE subscription_id=? AND state IN ('pending','retry_wait','leased') ORDER BY event_seq LIMIT 1", (sub['id'],))
                 if not delivery or delivery['next_at'] > now or (delivery['state'] == 'leased' and (delivery['lease_until'] or 0) > now):
                     continue
+                route = routes[sub['id']]
+                cooldown = self.store.one('SELECT cooldown_until FROM mcp_event_dispatch_endpoints WHERE endpoint_key=?',
+                                          (route['endpoint_key'],))
+                if cooldown and cooldown['cooldown_until'] > now:
+                    continue
+                busy = self.store.one("""SELECT COUNT(*) AS n FROM mcp_event_deliveries d
+                    JOIN mcp_event_dispatch_routes r ON r.subscription_id=d.subscription_id
+                    WHERE d.state='leased' AND d.lease_until>? AND r.endpoint_key=?""",
+                    (now, route['endpoint_key']))['n']
+                occupied = self.store.one("""SELECT COUNT(*) AS n FROM mcp_event_deliveries d
+                    JOIN mcp_event_dispatch_routes r ON r.subscription_id=d.subscription_id
+                    WHERE d.state='leased' AND d.lease_until>? AND r.owner_key=?""",
+                    (now, route['owner_key']))['n']
+                if busy or occupied >= owner_limit:
+                    continue
                 event = self.store.one('SELECT * FROM mcp_event_outbox WHERE id=?', (delivery['event_id'],))
                 payload = validate(PAYLOADS[event['name']], json.loads(event['data']))
-                if event['name'] in {WORK_EVENT, DELEGATION_EVENT, OPERATION_EVENT}:
+                if event['name'] in {WORK_EVENT, DELEGATION_EVENT, OPERATION_EVENT, MAILBOX_EVENT}:
                     try:
                         self.authorize(sub, room, payload)
                     except DevError:
@@ -385,10 +566,25 @@ class EventService:
                         self.store.execute("UPDATE mcp_event_deliveries SET state='abandoned',reason_code='obsolete_task' WHERE id=?", (delivery['id'],))
                         self.advance(sub['id'])
                         continue
-                body = delivery['body'] or canonical({'eventId': event['id'], 'name': event['name'],
-                    'timestamp': timestamp(event['created']), 'data': payload,
-                    'cursor': sign_cursor(self.c.secret, sub['id'], event['seq'])})
-                if len(body.encode()) > 16384:
+                stored_body = delivery['body']
+                body = ((self.store.decrypt(stored_body[len(SEALED_BODY_PREFIX):])
+                         if stored_body.startswith(SEALED_BODY_PREFIX) else stored_body)
+                        if stored_body else None)
+                # Reserve headroom before issuing a one-time mailbox ticket.
+                # Actual bytes alone are charged after the body is frozen.
+                headroom = (len(body.encode()) if body is not None else MAX_ENVELOPE_BYTES) + WIRE_HEADER_BYTES
+                if not self.send_budget(route['owner_key'], headroom, now):
+                    continue
+                if body is None:
+                    if event['name'] == MAILBOX_EVENT:
+                        payload = validate(PAYLOADS[event['name']],
+                                           self.c.dot_mailbox.delivery_payload(sub, payload, event['id']))
+                    body = canonical({'eventId': event['id'], 'name': event['name'],
+                        'timestamp': timestamp(event['created']), 'data': payload,
+                        'cursor': sign_cursor(self.c.secret, sub['id'], event['seq'])})
+                    stored_body = (SEALED_BODY_PREFIX + self.store.encrypt(body)
+                                   if event['name'] == MAILBOX_EVENT else body)
+                if len(body.encode()) > MAX_ENVELOPE_BYTES:
                     self.store.execute("UPDATE mcp_event_deliveries SET state='dead_letter',reason_code='payload_too_large' WHERE id=?", (delivery['id'],))
                     self.advance(sub['id'])
                     continue
@@ -396,12 +592,17 @@ class EventService:
                     self.store.execute("UPDATE mcp_event_deliveries SET state='dead_letter',lease_until=NULL,reason_code='attempts_exhausted' WHERE id=?", (delivery['id'],))
                     self.advance(sub['id'])
                     continue
+                if not self.send_budget(route['owner_key'], len(body.encode()) + WIRE_HEADER_BYTES, now, spend=True):
+                    raise RuntimeError('Dispatcher budget changed within its reservation transaction')
                 fence = delivery['fence'] + 1
-                self.store.execute("UPDATE mcp_event_deliveries SET state='leased',body=?,attempt=attempt+1,fence=?,lease_until=? WHERE id=?", (body, fence, now + 30, delivery['id']))
+                self.store.execute("UPDATE mcp_event_deliveries SET state='leased',body=?,attempt=attempt+1,fence=?,lease_until=? WHERE id=?", (stored_body, fence, now + 30, delivery['id']))
                 reserved.append({'delivery_id': delivery['id'], 'subscription_id': sub['id'], 'fence': fence,
                                  'subscription_version': sub['version'], 'body': body.encode(), 'event_id': event['id']})
-                if len(reserved) >= 2:
-                    self._scan_after = sub['id']
+                self._owner_after = route['owner_key']
+                self.store.execute("""INSERT INTO mcp_event_dispatch_owners VALUES (?,?,?)
+                    ON CONFLICT(owner_key) DO UPDATE SET after_subscription=excluded.after_subscription,
+                    updated=excluded.updated""", (route['owner_key'], sub['id'], now))
+                if len(reserved) >= capacity:
                     break
         return reserved
 
@@ -415,7 +616,7 @@ class EventService:
                 return None
             room = self.store.one('SELECT * FROM collaboration_rooms WHERE id=?', (sub['room_id'],))
             event = self.store.one('SELECT * FROM mcp_event_outbox WHERE id=?', (delivery['event_id'],))
-            self.authorize(sub, room, json.loads(event['data']) if event['name'] in {WORK_EVENT, DELEGATION_EVENT, OPERATION_EVENT} else None)
+            self.authorize(sub, room, json.loads(event['data']) if event['name'] in {WORK_EVENT, DELEGATION_EVENT, OPERATION_EVENT, MAILBOX_EVENT} else None)
             if event['name'] == TASK_EVENT and not json.loads(event['data']).get('test'):
                 job = self.store.one('SELECT * FROM collaboration_jobs WHERE id=? AND room_id=?', (event['object_id'], room['id']))
                 if (not self.c.config.analysis_dispatch_enabled or not job or job['state'] != 'queued'
@@ -428,7 +629,7 @@ class EventService:
                 keys.append(stored['retiring'])
             return stored['url'], signed_headers(item['event_id'], sub['id'], item['body'], keys, self.c.clock())
 
-    def finish(self, item, status=None, reason=''):
+    def finish(self, item, status=None, reason='', retry_after=None):
         with self.store.transaction():
             row = self.store.one('SELECT * FROM mcp_event_deliveries WHERE id=?', (item['delivery_id'],))
             if not row or row['state'] != 'leased' or row['fence'] != item['fence']:
@@ -448,15 +649,24 @@ class EventService:
             elif sub['state'] != 'active' or sub['expires_at'] <= now or reason == 'authorization_stopped':
                 state, next_at = 'abandoned', 0
             elif retryable and row['attempt'] < 5:
-                state, next_at = 'retry_wait', now + (30, 120, 600, 1800)[min(row['attempt'] - 1, 3)]
+                state, next_at = 'retry_wait', now + self.retry_delay(row, retry_after)
             else:
                 state, next_at = 'dead_letter', 0
             self.store.execute('''UPDATE mcp_event_deliveries SET state=?,next_at=?,lease_until=NULL,
                 status_code=?,reason_code=?,accepted_at=? WHERE id=?''',
                 (state, next_at, status, reason or ('http_' + str(status) if not accepted else ''), now if accepted else None, row['id']))
+            if retryable and sub['state'] == 'active' and sub['expires_at'] > now:
+                route = self.dispatch_route(sub)
+                self.store.execute("""INSERT INTO mcp_event_dispatch_endpoints VALUES (?,?,?)
+                    ON CONFLICT(endpoint_key) DO UPDATE SET
+                    cooldown_until=MAX(cooldown_until,excluded.cooldown_until),updated=excluded.updated""",
+                    (route['endpoint_key'], now + self.retry_delay(row, retry_after), now))
             if accepted:
                 self.store.execute('UPDATE mcp_event_subscriptions SET last_accepted=? WHERE id=?', (now, sub['id']))
             self.advance(sub['id'])
+            hints = getattr(self.c, 'relay_hints', None)
+            if hints is not None:
+                self.store.after_commit(hints.wake)
 
     async def deliver(self, item):
         try:
@@ -466,21 +676,73 @@ class EventService:
                     await self.store.run(self.finish, item, None, 'authorization_stopped')
                     return
                 url, headers = outbound
-                reply = await self.sender(url, item['body'], headers)
-            await self.store.run(self.finish, item, reply.status)
+                # Also bound injected/adapted transports; the native transport has
+                # its own stricter 10-second DNS/connect/body deadline.
+                async with asyncio.timeout(12):
+                    reply = await self.sender(url, item['body'], headers)
+            await self.store.run(self.finish, item, reply.status, '', getattr(reply, 'retry_after_seconds', None))
         except DevError as exc:
             policy = exc.code in {'CALLBACK_URL_REJECTED', 'CALLBACK_ADDRESS_REJECTED', 'HTTP_REDIRECT_REJECTED', 'HTTP_RESPONSE_TOO_LARGE', 'EVENT_TOO_LARGE'}
             await self.store.run(self.finish, item, None, 'callback_policy_rejected' if policy else 'authorization_stopped')
         except (TimeoutError, httpx.HTTPError, OSError):
             await self.store.run(self.finish, item, None, 'network_error')
 
-    async def tick(self):
-        if self.c.clock() >= self._relay_recover_after:
-            self._relay_recover_after = self.c.clock() + 5
-            chat_wakes = await self.store.run(self.c.dot_relay.recover)
-            await self.store.run(lambda: self.c.task_liveness.recover(max_wakes=4 - chat_wakes))
-        items = await self.store.run(self.reserve)
-        await asyncio.gather(*(self.deliver(item) for item in items))
+    async def tick(self, *, wake=None):
+        """One owned pump, bounded children, replenished on each completion/hint.
+
+        A slow callback never holds the entire batch hostage. Leases remain in
+        SQLite on cancellation: an ambiguous HTTP outcome must be fenced and
+        retried with the same event body after its original lease expires.
+        """
+        async with self._tick_lock:
+            self._budget_retry_at = None
+            pending = set()
+            waiter = None
+            empty_pages = 0
+            try:
+                while True:
+                    # Clear before scanning; a commit during Store.run remains
+                    # visible and is consumed by the following wait.
+                    if wake is not None:
+                        wake.clear()
+                    if self.c.clock() >= self._relay_recover_after:
+                        self._relay_recover_after = self.c.clock() + 5
+                        chat_wakes = await self.store.run(self.c.dot_relay.recover)
+                        mailbox = getattr(self.c, 'dot_mailbox', None)
+                        mailbox_wakes = (await self.store.run(lambda: mailbox.recover(max_wakes=max(0, 4 - chat_wakes)))
+                                         if mailbox is not None else 0)
+                        await self.store.run(lambda: self.c.task_liveness.recover(
+                            max_wakes=max(0, 4 - chat_wakes - mailbox_wakes)))
+                    items = await self.store.run(self.reserve, DISPATCH_CAPACITY - len(pending))
+                    pending.update(asyncio.create_task(self.deliver(item), name='collaboration:event-delivery')
+                                   for item in items)
+                    if not pending:
+                        # Bound scans even when a room has many idle subscribers.
+                        empty_pages += 1
+                        if self._scan_after and empty_pages < 8:
+                            continue
+                        return
+                    empty_pages = 0
+                    waiting = set(pending)
+                    if wake is not None:
+                        waiter = asyncio.create_task(wake.wait(), name='collaboration:event-wake')
+                        waiting.add(waiter)
+                    done, _ = await asyncio.wait(waiting, timeout=.25, return_when=asyncio.FIRST_COMPLETED)
+                    if waiter is not None:
+                        waiter.cancel()
+                        await asyncio.gather(waiter, return_exceptions=True)
+                        waiter = None
+                    completed = done & pending
+                    pending.difference_update(completed)
+                    for task in completed:
+                        task.result()
+            finally:
+                if waiter is not None:
+                    pending.add(waiter)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
 
     def queue_test(self, room, subscription):
         self.guard()
@@ -489,7 +751,11 @@ class EventService:
         filters = self.authorize(subscription, room)
         identifier = 'test_' + secrets.token_hex(16)
         base = {'test': True, 'test_subscription_id': subscription['id']}
-        if subscription['name'] == OPERATION_EVENT:
+        if subscription['name'] == MAILBOX_EVENT:
+            base.update(schema_version=2, conversation_id=filters['conversation_id'], room_id=room['id'],
+                        recipient_slot_id=filters['slot_id'], recipient_grant_id=subscription['grant_id'],
+                        binding_generation=filters['binding_generation'], dirty_revision=0)
+        elif subscription['name'] == OPERATION_EVENT:
             principal = self.c.grant_reader(room, subscription['grant_id'], snapshot=json.loads(subscription['principal']))
             operation = self.operations.read(filters['operation_ids'][0], principal, filters)
             base.update(operation_id=operation['id'], state='succeeded', output_seq=operation['output_seq'],

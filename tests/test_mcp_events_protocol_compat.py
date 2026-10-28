@@ -25,6 +25,7 @@ EVENT_NAMES = {
     'codepier.monitor.incident_changed.v1', 'codepier.collaboration.task_available.v1',
     'codepier.collaboration.message_mentioned.v1', 'codepier.collaboration.work_available.v1',
     'codepier.collaboration.delegation_available.v1', 'codepier.operation.completed.v1',
+    'codepier.collaboration.inbox_dirty.v2',
 }
 EVENT = 'codepier.monitor.status_changed.v1'
 SECRET = 'whsec_' + base64.b64encode(b'fixture-only-signing-material-32b!').decode()
@@ -68,6 +69,11 @@ def wire(tmp_path, monkeypatch):
     args = {'name': EVENT, 'arguments': {'project_id': 'project', 'environment_id': 'production'},
             'delivery': {'mode': 'webhook', 'url': 'https://example.invalid/' + PRIVATE, 'secret': SECRET}}
     with TestClient(app) as client:
+        # These HTTP protocol cases reserve deliveries explicitly. Keep the
+        # lifecycle pump from racing retained-history construction or calling
+        # this deliberately verification-only receiver; pump behavior has its
+        # own dispatch/lifecycle tests. MCP/auth/challenge handling stays real.
+        client.portal.call(service.loops.stop)
         yield app, client, token, args, captured
 
 
@@ -270,13 +276,16 @@ def test_duplicate_event_name_headers_rejected(wire):
 
 def emit_status(wire, label, *, age=0):
     service = wire[0].state.runtime.collaboration
-    room = service.store.one('SELECT * FROM collaboration_rooms')
-    service.emit(room, EVENT, label, 1, {'component': 'fixture', 'status': 'degraded',
-                 'reason_code': label, 'observed_at': '2026-10-07T00:00:00Z',
-                 'recovery_state': 'unknown'})
-    service.store.execute('UPDATE mcp_event_outbox SET created=? WHERE object_id=?',
-                          (service.clock() - age, label))
-    return service.store.one('SELECT * FROM mcp_event_outbox WHERE object_id=?', (label,))
+    # Backdated retained history is one committed fixture fact, never a briefly
+    # live event whose timestamp is rewritten after an after-commit wake.
+    with service.store.transaction():
+        room = service.store.one('SELECT * FROM collaboration_rooms')
+        service.emit(room, EVENT, label, 1, {'component': 'fixture', 'status': 'degraded',
+                     'reason_code': label, 'observed_at': '2026-10-07T00:00:00Z',
+                     'recovery_state': 'unknown'})
+        service.store.execute('UPDATE mcp_event_outbox SET created=? WHERE object_id=?',
+                              (service.clock() - age, label))
+        return service.store.one('SELECT * FROM mcp_event_outbox WHERE object_id=?', (label,))
 
 
 @pytest.mark.parametrize('ttl,seconds', [(-1, 60), (0, 60), (1, 60), (999, 60),

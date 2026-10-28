@@ -1,7 +1,7 @@
 """Real HTTP/modern MCP enrollment uses existing grants and panel CSRF."""
 import pytest
 
-from hub.collaboration.common import EVENTS, MESSAGE_EVENT, WORK_EVENT, DELEGATION_EVENT
+from hub.collaboration.common import EVENTS, MESSAGE_EVENT, WORK_EVENT, DELEGATION_EVENT, MAILBOX_EVENT
 from tests.collaboration_support import collaboration_stack
 from tests.collaboration_support import key
 from tests.test_mcp_tasks_http import modern
@@ -55,7 +55,25 @@ def test_event_discovery_advertises_slot_filter_without_assuming_host_binding(co
     for event in catalog['events']:
         schema = event['inputSchema']
         required = set(schema.get('required', []))
-        if event['name'] == DELEGATION_EVENT:
+        if event['name'] == MAILBOX_EVENT:
+            assert set(schema['properties']) == {'project_id', 'environment_id', 'conversation_id',
+                                                 'slot_id', 'binding_generation'}
+            assert required == set(schema['properties'])
+            assert schema['additionalProperties'] is False
+            generation = schema['properties']['binding_generation']
+            assert generation['type'] == 'string'
+            assert generation['minLength'] == 1 and generation['maxLength'] == 128
+            assert generation['pattern'] == r'^[A-Za-z0-9_.:-]+$'
+            payload = event['payloadSchema']
+            assert payload['additionalProperties'] is False
+            assert payload['properties']['schema_version']['const'] == 2
+            assert payload['properties']['dirty_revision']['type'] == 'integer'
+            assert payload['properties']['dirty_revision']['minimum'] == 0
+            assert set(payload['required']) == {'schema_version', 'room_id', 'project_id',
+                'environment_id', 'conversation_id', 'recipient_slot_id', 'recipient_grant_id',
+                'binding_generation', 'dirty_revision'}
+            assert 'wake_ticket' not in payload['required']
+        elif event['name'] == DELEGATION_EVENT:
             assert set(schema['properties']) == {'project_id', 'environment_id', 'conversation_id',
                                                  'slot_id', 'policy_id', 'policy_version'}
             assert required == set(schema['properties'])

@@ -3,6 +3,7 @@ import asyncio
 import logging
 from threading import Lock
 from contextlib import suppress
+from functools import partial
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ class CollaborationLoops:
             self._wake_scheduled = None
         operations = [('reconcile', self.reconcile, 5)]
         if self.service.config.events_enabled:
-            operations.append(('events', self.service.events.tick, 2))
+            operations.append(('events', partial(self.service.events.tick, wake=self._event_wake), 2))
         if self.service.config.collector_enabled:
             operations.append(('collector', self.service.monitor.tick, 2))
         # Owner switches are persisted and can change without a Hub restart.
@@ -77,6 +78,7 @@ class CollaborationLoops:
             if wake is not None:
                 wake.clear()
             try:
+                self.service.health[name] = {'status': 'running', 'observed_at': self.service.clock()}
                 await operation()
             except asyncio.CancelledError:
                 raise
@@ -89,11 +91,14 @@ class CollaborationLoops:
                 logger.warning('Collaboration component %s degraded (%s)', name, code)
             else:
                 self.service.health[name] = {'status': 'running', 'observed_at': self.service.clock()}
+            deadline = (getattr(getattr(self.service, 'events', None), 'next_dispatch_delay', None)
+                        if name == 'events' else None)
+            delay = deadline(interval) if deadline is not None else interval
             if wake is None:
-                await asyncio.sleep(interval)
+                await asyncio.sleep(delay)
             else:
                 with suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(wake.wait(), interval)
+                    await asyncio.wait_for(wake.wait(), delay)
 
     async def stop(self):
         with self._wake_lock:

@@ -26,7 +26,12 @@ CIPHER_COLUMNS = (("devices", "secret"), ("operations", "payload"), ("vps_connec
                   ("oidc_providers", "client_secret"), ("external_identities", "upstream_tokens"),
                   ("oidc_transactions", "verifier"), ("gateway_secrets", "secret"), ("gateway_accounts", "secret"),
                   ("gateway_calls", "result"), ("collaboration_secrets", "secret"),
-                  ("mcp_event_subscriptions", "secret"))
+                  ("mcp_event_subscriptions", "secret"),
+                  ("dot_consumer_sessions", "proof_secret"), ("dot_wake_tickets", "ticket_secret"))
+# Delivery bodies from older protocols remain plaintext JSON; only explicitly
+# sealed bodies participate in rotation and missing-key detection.
+PREFIXED_CIPHER_COLUMNS = (("mcp_event_deliveries", "body", "sealed:v1:"),)
+CIPHER_PRIMARY_KEYS = {"oidc_transactions": "state_hash", "dot_wake_tickets": "ticket_hash"}
 
 
 def key_id(key: bytes) -> str:
@@ -213,15 +218,19 @@ def rotate_key(directory: str | Path, *, resume: bool = False) -> dict:
         changed = 0
         with store.lock, store.db:
             store.db.execute("BEGIN IMMEDIATE")
-            for table, column in CIPHER_COLUMNS:
+            columns = [(table, column, "") for table, column in CIPHER_COLUMNS]
+            for table, column, prefix in [*columns, *PREFIXED_CIPHER_COLUMNS]:
                 if column not in {row[1] for row in store.db.execute(f"PRAGMA table_info({table})").fetchall()}:
                     continue
-                primary = "state_hash" if table == "oidc_transactions" else "id"
-                cursor = store.db.execute(f"SELECT {primary} AS id,{column} FROM {table} WHERE {column} IS NOT NULL AND {column} != ''")
+                primary = CIPHER_PRIMARY_KEYS.get(table, "id")
+                condition = f" AND substr({column},1,?)=?" if prefix else ""
+                cursor = store.db.execute(f"SELECT {primary} AS id,{column} FROM {table} "
+                    f"WHERE {column} IS NOT NULL AND {column} != ''" + condition,
+                    (len(prefix), prefix) if prefix else ())
                 while rows := cursor.fetchmany(128):
                     for row in rows:
-                        plaintext = store.decrypt(row[column])
-                        encrypted = store.encrypt(plaintext)
+                        plaintext = store.decrypt(row[column][len(prefix):])
+                        encrypted = prefix + store.encrypt(plaintext)
                         store.db.execute(f"UPDATE {table} SET {column}=? WHERE {primary}=?", (encrypted, row["id"]))
                         if table == 'external_identities' and column == 'upstream_tokens':
                             # Re-encryption changes ciphertext, not identity ownership.

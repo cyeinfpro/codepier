@@ -206,6 +206,11 @@ window.CodePierCollaborationDots = {
         area.dispatchEvent(new Event('input', { bubbles: true }));
       }
       hideSuggestions();
+      if (c.teamId) {
+        c.reply = '';
+        c.relayAnchor = null;
+      }
+      c.teamId = '';
       c.mentions = [slot.id];
       c.relayRecipientCleared = false;
       if (slot.duplex) delegation.selectPolicy(null);
@@ -224,6 +229,7 @@ window.CodePierCollaborationDots = {
         return channels.act(action, element);
       }
       if (action === 'dot-clear') {
+        chat().teamId = '';
         chat().mentions = [];
         chat().relayRecipientCleared = true;
         chat().relayAnchor = null;

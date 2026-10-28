@@ -201,8 +201,10 @@ class DotService:
             raise DevError('DOT_SETUP_CHANGED', '此 dot 的原任务范围已变更或暂停；请在面板核对，不自动接受新范围', 409)
         return policy
 
-    @staticmethod
-    def subscription(room, dot, policy):
+    def subscription(self, room, dot, policy):
+        mailbox = self.c.dot_mailbox.subscription(room, dot)
+        if mailbox:
+            return mailbox
         if json.loads(dot['setup']).get('duplex'):
             from hub.collaboration.dot_chat import DotChatService
             return DotChatService.subscription(room, dot)
@@ -254,7 +256,11 @@ class DotService:
             if self.c.dot_chat.enabled(dot):
                 self.c.dot_chat.authorize(principal, room, dot)
                 configuration = self.c.dot_chat.configuration(room, dot, principal)
-                subscription = self.c.dot_chat.subscription(room, dot)
+                protocol = self.c.dot_mailbox.configuration(room, dot)
+                configuration = {**configuration, 'protocol': protocol}
+                if protocol.get('selected_protocol_version') == 2:
+                    configuration = {**configuration, **protocol}
+                subscription = self.c.dot_mailbox.subscription(room, dot) or self.c.dot_chat.subscription(room, dot)
                 return {'dot_id': dot['id'], 'slot': self.slot_view(room, slot, dot, principal),
                     'subscription_request': subscription, 'subscription_requests': [subscription],
                     'subscription_created': False, 'permissions_changed': False,
@@ -321,16 +327,20 @@ class DotService:
             try:
                 self.c.dot_chat.authorize(principal, room, dot)
                 chat_status = self.c.dot_chat.status(room, dot)
-                request = self.c.dot_chat.subscription(room, dot)
+                request = self.c.dot_mailbox.subscription(room, dot) or self.c.dot_chat.subscription(room, dot)
                 progress = {**(progress or {}), 'notification_state': chat_status['notification_state']}
                 reason = ''
                 status = 'subscription_verified' if chat_status['notification_state'] == 'active' else 'waiting_subscription'
             except DevError as exc:
                 reason, status = exc.code, 'authorization_unavailable'
-        from hub.collaboration.common import MESSAGE_EVENT
-        expected_event = MESSAGE_EVENT if duplex else DELEGATION_EVENT
+        from hub.collaboration.common import MAILBOX_EVENT, MESSAGE_EVENT
+        mailbox = self.c.dot_mailbox.binding(dot['id']) if duplex else None
+        expected_event = MAILBOX_EVENT if mailbox else (MESSAGE_EVENT if duplex else DELEGATION_EVENT)
         routes = [r for r in routes if r['name'] == expected_event]
         active = [r for r in routes if r['available']]
+        if mailbox and status in {'subscription_verified', 'waiting_subscription'}:
+            status = 'subscription_verified' if active else 'waiting_subscription'
+            progress = {**(progress or {}), 'notification_state': 'active' if active else 'missing'}
         owner = bool(principal.admin and not principal.grant_id)
         code = slot['join_code'] if owner and status == 'invited' else None
         instruction = (f'@CodePier 请用加入码 {code} 接入这个任务 dot。'
@@ -352,7 +362,9 @@ class DotService:
                 + canonical(self.request(room, dot, 'dot_connection')) + '，保存返回说明并立即读取待办。'
                 '继续按原同意范围交流与处理明确任务；仍需宿主原生确认。') if state == 'registered' else None
         return {'id': slot['id'], 'dot_id': slot['id'], 'task_dot': True,
-                'duplex': duplex, 'chat_status': chat_status, 'task_blocked_reason': task_reason if duplex else '',
+                'duplex': duplex, 'chat_status': chat_status,
+                'mailbox_protocol': self.c.dot_mailbox.configuration(room, dot) if duplex else None,
+                'task_blocked_reason': task_reason if duplex else '',
  'label': slot['label'], 'kind': 'dot',
                 'version': slot['version'], 'state': state, 'status': status, 'blocked_reason': reason,
                 'conversation_id': dot['conversation_id'], 'expires_at': slot['expires_at'],

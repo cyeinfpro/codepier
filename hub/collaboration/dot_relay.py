@@ -42,6 +42,7 @@ class DotRelay:
     def update(self, raw, principal):
         with self.store.transaction():
             args, principal, room, _, dot = self.c.dot_chat.scope(raw, principal, contracts.DotReplyUpdate, connector=True)
+            self.c.dot_consumers.guard(args, principal, room, dot, require_revision=bool(args['complete']))
             message = self.c.object('collaboration_messages', room, args['message_id'])
             body = json.loads(message['body'])
             self.c.chatroom.require_message_visible(principal, message)
@@ -140,6 +141,9 @@ class DotRelay:
             WHERE r.slot_id IN (''' + ','.join('?' for _ in dots) + ''')
             AND s.name=? AND s.state='active' AND s.expires_at>?''', (*dots, MESSAGE_EVENT, now))
         active_pairs = {(r['slot_id'], r['conversation_id']) for r in active_rows}
+        mailbox_rows = self.store.all('SELECT * FROM dot_mailbox_bindings WHERE state=\'active\' AND dot_id IN ('
+            + ','.join('?' for _ in dots) + ')', dots)
+        mailbox_health = {binding['dot_id']: self.c.dot_mailbox.health(binding)['available'] for binding in mailbox_rows}
         authorized, result = {}, {identifier: [] for identifier in ids}
         for row in rows:
             message = unique[row['message_id']]
@@ -164,7 +168,7 @@ class DotRelay:
             elif row['state'] == 'read':
                 state = 'received' if now - max(row['received_at'] or 0, row['last_activity_at']) < 90 else 'waiting_dot'
             if state in ('saved', 'waiting_dot'):
-                active = ((row['dot_id'], message['conversation_id']) in active_pairs
+                active = (mailbox_health.get(row['dot_id'], (row['dot_id'], message['conversation_id']) in active_pairs)
                           and row['slot_state'] == 'registered' and row['slot_expires'] > now
                           and self.c.config.events_enabled)
                 if active:
@@ -261,6 +265,9 @@ class DotRelay:
                         WHERE r.slot_id=? AND s.name=? AND s.state='active' AND s.expires_at>?
                         AND json_extract(s.arguments,'$.conversation_id')=? LIMIT 1''',
                         (row['dot_id'], MESSAGE_EVENT, now, message['conversation_id']))
+                    binding = self.c.dot_mailbox.binding(row['dot_id'])
+                    if binding and binding['state'] == 'active':
+                        active = self.c.dot_mailbox.health(binding)['available']
                     if active:
                         try:
                             dot = self.c.dots.find(row['dot_id'])
@@ -298,7 +305,7 @@ class DotRelay:
                 if now - idle_since < (max(300, delay) if row['state'] == 'read' else delay) or row['dot_id'] in awakened:
                     continue
                 dot = self.c.dots.find(row['dot_id'])
-                if not self.c.dot_chat.enabled(dot):
+                if not self.c.dot_chat.enabled(dot) or self.c.dot_mailbox.enabled(dot['id']):
                     continue
                 room = self.store.one('SELECT * FROM collaboration_rooms WHERE id=?', (dot['room_id'],))
                 slot = self.c.joining.slot(room, dot['id'])
@@ -442,7 +449,8 @@ class DotRelay:
             # state needed for this conversation, not repeated consumer prompts.
             keys = {'id', 'dot_id', 'label', 'duplex', 'task_dot', 'kind', 'conversation_id', 'capabilities', 'execution_target', 'default_dispatch', 'state', 'status', 'version', 'expires_at', 'code_expires_at',
                     'policy_id', 'policy_version', 'blocked_reason', 'task_blocked_reason', 'task_status',
-                    'chat_status', 'subscription_count', 'scope_manifest', 'operation_timeout_seconds'}
+                    'chat_status', 'subscription_count', 'scope_manifest', 'operation_timeout_seconds',
+                    'dot_mailbox', 'consumer', 'inbox_protocol', 'mailbox'}
             from hub.collaboration import experience_projection as projection
             full_slots = self.c.joining.list(room, principal, conversation['id'])
             slots = [{key: value for key, value in slot.items() if key in keys} for slot in full_slots]
@@ -452,7 +460,12 @@ class DotRelay:
             loaded = {item['id']: item for item in [*timeline.get('items', []), *updates]}
             projections = [receipt['experience'] for item in loaded.values()
                            for receipt in item.get('relay_receipts', []) if receipt.get('experience')]
+            teams = self.c.coordination.teams.listing({
+                'project': room['project_id'], 'environment_id': room['environment_id'],
+                'conversation_id': conversation['id']}, principal)
             return {**timeline, 'task_states': task_states, 'server_now': self.c.clock(),
+                    'teams': teams['items'], 'team_goals': teams.get('team_goals', []),
+                    'capabilities': self.c.chatroom.capabilities(principal),
                     'connection_readiness': readiness,
                     'pending_scope_revision': self.pending_scope_revision(principal, room, conversation, full_slots),
                     'diagnostic_summary': projection.diagnostic(projections, list(readiness.values())),

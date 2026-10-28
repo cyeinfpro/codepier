@@ -10,6 +10,7 @@ from contextvars import copy_context
 from functools import partial
 from hub.store_contract import CheckedConnection, OwnedRLock
 from hub.worker_metrics import WorkerMetrics
+from hub.store_metrics import TransactionMetrics
 import time
 from pathlib import Path
 from cryptography.fernet import Fernet
@@ -64,7 +65,9 @@ class Store:
         self.iam_enabled = True
         self.session_revision = 0
         self._event_loop = None
-        self.db = CheckedConnection(connection, self.lock, self._security_write)
+        self.transaction_metrics = TransactionMetrics()
+        self.db = CheckedConnection(connection, self.lock, self._security_write,
+                                    on_transaction=self.transaction_metrics.observe)
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hub-sqlite")
         self.worker_metrics = WorkerMetrics()
         with self.lock:
@@ -98,11 +101,17 @@ class Store:
     def _load_cipher(self):
         key_path = self.state_directory / "master.key"
         if not key_path.exists():
-            from hub.keyring import CIPHER_COLUMNS
+            from hub.keyring import CIPHER_COLUMNS, PREFIXED_CIPHER_COLUMNS
             for table, column in CIPHER_COLUMNS:
                 columns = {r[1] for r in self.db.execute(f"PRAGMA table_info({table})")}
                 if column in columns and self.db.execute(
                     f"SELECT 1 FROM {table} WHERE {column} IS NOT NULL LIMIT 1"
+                ).fetchone():
+                    raise RuntimeError("master.key is missing for an encrypted Hub database; restore the matching master.key from backup")
+            for table, column, prefix in PREFIXED_CIPHER_COLUMNS:
+                columns = {r[1] for r in self.db.execute(f"PRAGMA table_info({table})")}
+                if column in columns and self.db.execute(
+                    f"SELECT 1 FROM {table} WHERE {column} LIKE ? LIMIT 1", (prefix + '%',)
                 ).fetchone():
                     raise RuntimeError("master.key is missing for an encrypted Hub database; restore the matching master.key from backup")
             fd, temporary = tempfile.mkstemp(prefix=".master-key-", dir=self.state_directory)
@@ -281,7 +290,11 @@ class Store:
             finally:
                 self.worker_metrics.finish(started, failed=failed)
 
-        future = asyncio.get_running_loop().run_in_executor(self._executor, measured)
+        try:
+            future = asyncio.get_running_loop().run_in_executor(self._executor, measured)
+        except BaseException:
+            self.worker_metrics.reject()
+            raise
         try:
             return await asyncio.shield(future)
         except asyncio.CancelledError:
@@ -296,6 +309,16 @@ class Store:
             if not future.cancelled():
                 future.exception()
             raise
+
+    def stats_snapshot(self):
+        """Internal bounded process metrics; never queries or mutates SQLite.
+
+        Each group is consistent under its own lock. This aggregate is not a
+        tenant endpoint and must not be exposed as a user's room statistics.
+        """
+        return {'schema_version': 1, 'scope': 'hub_process', 'read_only': True,
+                'worker': self.worker_metrics.snapshot(),
+                'transactions': self.transaction_metrics.snapshot()}
 
     async def aclose(self):
         await asyncio.to_thread(self.close)

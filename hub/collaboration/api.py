@@ -85,6 +85,30 @@ def make_router(auth, runtime):
             'project': project, 'environment_id': environment_id,
             'conversation_id': conversation_id, 'after': after}, auth.panel(request), tracked))
 
+    @router.get('/relay-hints')
+    async def relay_hints(request: Request, project: str, environment_id: str = 'production',
+                          conversation_id: str = '', cursor: str = Query(default='', max_length=64)):
+        from fastapi.responses import StreamingResponse
+        if request.headers.get('sec-fetch-site') == 'cross-site':
+            raise DevError('SAME_ORIGIN_REQUIRED', '实时提示需要当前站点会话', 403)
+        raw = {'project': project, 'environment_id': environment_id, 'conversation_id': conversation_id}
+        initial = await store.run(lambda: service.relay_hints.snapshot(raw, auth.panel(request)))
+        resume = request.headers.get('last-event-id') or cursor
+        if resume and (len(resume) != 64 or any(char not in '0123456789abcdef' for char in resume)):
+            raise DevError('INVALID_CURSOR', '实时提示游标无效', 400)
+        queue = service.relay_hints.subscribe(initial['owner'])
+
+        class HintStream(StreamingResponse):
+            async def __call__(self, scope, receive, send):
+                try:
+                    await super().__call__(scope, receive, send)
+                finally:
+                    service.relay_hints.unsubscribe(queue)
+
+        return HintStream(service.relay_hints.stream(request, raw, auth, queue, initial, resume),
+                          media_type='text/event-stream', headers={'Cache-Control': 'private, no-store',
+                          'X-Accel-Buffering': 'no', 'Vary': 'Cookie', 'X-Content-Type-Options': 'nosniff'})
+
     @router.get('/message-receipt')
     async def message_receipt(request: Request, response: Response, project: str, client_message_id: str,
                               environment_id: str = 'production', conversation_id: str = ''):
@@ -135,6 +159,10 @@ def make_router(auth, runtime):
         def perform():
             principal = auth.admin(request, True)
             handlers = {'dot': service.dots.create,
+                        'team-create': service.coordination.teams.create,
+                        'team-control': service.coordination.teams.control,
+                        'team-revise-intent': service.coordination.teams.revise_intent,
+                        'dot-mailbox-configure': service.dot_mailbox.configure,
                         'conversation-archive-preview': service.conversations.archive.preview,
                         'conversation-archive': service.conversations.archive.archive,
                         'conversation-restore': service.conversations.archive.restore,

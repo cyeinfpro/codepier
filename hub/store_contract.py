@@ -10,6 +10,7 @@ from __future__ import annotations
 import sqlite3
 import re
 import threading
+import time
 
 
 class OwnedRLock:
@@ -49,7 +50,7 @@ class TransactionAborted(RuntimeError):
 
 
 class CheckedConnection:
-    def __init__(self, connection: sqlite3.Connection, lock: OwnedRLock, on_write=None):
+    def __init__(self, connection: sqlite3.Connection, lock: OwnedRLock, on_write=None, on_transaction=None):
         self._connection = connection
         self._lock = lock
         self.depth = 0
@@ -57,6 +58,8 @@ class CheckedConnection:
         self._closed = False
         self._on_write = on_write
         self._callbacks = []
+        self._on_transaction = on_transaction
+        self._transaction_started = None
 
     def _require(self):
         # Preserve SQLite's normal closed-connection error for lifecycle callers.
@@ -80,13 +83,23 @@ class CheckedConnection:
 
     def execute(self, sql, parameters=()):
         self._require()
-        cursor = self._connection.execute(sql, parameters)
+        started = time.monotonic() if self._on_transaction and self._transaction_started is None else None
+        try:
+            cursor = self._connection.execute(sql, parameters)
+        finally:
+            if started is not None and self._connection.in_transaction:
+                self._transaction_started = started
         self._changed(sql)
         return CheckedCursor(cursor, self._lock)
 
     def executemany(self, sql, parameters):
         self._require()
-        cursor = self._connection.executemany(sql, parameters)
+        started = time.monotonic() if self._on_transaction and self._transaction_started is None else None
+        try:
+            cursor = self._connection.executemany(sql, parameters)
+        finally:
+            if started is not None and self._connection.in_transaction:
+                self._transaction_started = started
         self._changed(sql)
         return CheckedCursor(cursor, self._lock)
 
@@ -117,6 +130,14 @@ class CheckedConnection:
         self.depth += 1
         return self
 
+    def _transaction_finished(self, outcome):
+        started, self._transaction_started = self._transaction_started, None
+        if started is not None and self._on_transaction:
+            try:
+                self._on_transaction(max(0, (time.monotonic() - started) * 1000), outcome)
+            except Exception:
+                pass  # Observation must not change persistence or callback delivery.
+
     def __exit__(self, kind, error, traceback):
         self._require()
         self.depth -= 1
@@ -126,9 +147,19 @@ class CheckedConnection:
         rollback_only, self._rollback_only = self._rollback_only, False
         callbacks, self._callbacks = self._callbacks, []
         if rollback_only and kind is None:
-            self._connection.rollback()
+            try:
+                self._connection.rollback()
+            except BaseException:
+                self._transaction_finished('rollback_failed')
+                raise
+            self._transaction_finished('rolled_back')
             raise TransactionAborted("An inner database operation failed; the whole transaction was rolled back")
-        outcome = self._connection.__exit__(kind, error, traceback)
+        try:
+            outcome = self._connection.__exit__(kind, error, traceback)
+        except BaseException:
+            self._transaction_finished('commit_failed' if kind is None else 'rollback_failed')
+            raise
+        self._transaction_finished('committed' if kind is None else 'rolled_back')
         if kind is None:
             for callback in callbacks:
                 callback()

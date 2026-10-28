@@ -336,11 +336,15 @@ def test_omitted_subset_keeps_existing_message_replay_fingerprint(collab):
     assert c.s.chatroom.create({**raw, 'idempotency_key': key()}, c.owner)['delegation_id'] == sent['delegation_id']
 
 
-def test_every_public_query_action_is_read_only_in_real_business_tables(collab):
+@pytest.mark.asyncio
+async def test_every_public_query_action_is_read_only_in_real_business_tables(collab):
+    import base64
     import json
     from datetime import datetime, timezone
     from hub.collaboration.common import canonical, digest
     from hub.collaboration.monitor import MonitorService
+    from hub.collaboration.events import EventService
+    from hub.collaboration.network import Reply
     from shared.public_collaboration import ACTIONS
 
     c = setup(collab)
@@ -384,6 +388,46 @@ def test_every_public_query_action_is_read_only_in_real_business_tables(collab):
     duplex_dot = s.dots.create({**c.scope, 'label': 'Recovery query dot', 'confirm_tasks': True,
         'duplex': True, 'capabilities': ['read'], 'idempotency_key': key()}, c.owner)['dot']
     s.dots.join({'code': duplex_dot['join_code'], 'idempotency_key': key()}, c.actor)
+    peer_dot = s.dots.create({**c.scope, 'label': 'Team query peer', 'confirm_tasks': True,
+        'duplex': True, 'capabilities': ['read'], 'idempotency_key': key()}, c.owner)['dot']
+    s.dots.join({'code': peer_dot['join_code'], 'idempotency_key': key()}, c.actor)
+    team = s.coordination.teams.create({**c.scope, 'conversation_id': c.room['id'],
+        'label': 'Query fixture team', 'dot_ids': [duplex_dot['id'], peer_dot['id']],
+        'coordinator_dot_id': duplex_dot['id'], 'project_ids': [c.room['project_id']],
+        'capabilities': ['read'], 'confirm_tasks': True, 'idempotency_key': key()}, c.owner)['team']
+    callbacks = []
+
+    async def receiver(url, body, headers):
+        payload = json.loads(body)
+        if payload.get('type') == 'verification':
+            return Reply(200, canonical({'challenge': payload['challenge']}).encode())
+        callbacks.append(payload)
+        return Reply(204)
+
+    s.config = replace(s.config, events_enabled=True)
+    s.events = EventService(s, receiver)
+    mailbox = s.invoke('collaboration', {'action': 'dot_mailbox_configure',
+        **c.scope, 'dot_id': duplex_dot['id'],
+        'confirm_consumer_protocol': True, 'idempotency_key': key()}, c.actor)
+    await s.events.subscribe({**mailbox['subscription_request'], 'delivery': {
+        'mode': 'webhook', 'url': 'https://query-fixture.example.invalid/events',
+        'secret': 'whsec_' + base64.b64encode(b'synthetic-readonly-query-key-32!!').decode()}}, c.actor)
+    team_text = 'Read-only query fixture with a real source and team goal.'
+    team_source = s.chatroom.create({**c.scope, 'room_id': c.room['id'],
+        'conversation_id': c.room['id'], 'body_text': team_text,
+        'team_id': team['id'], 'mentions': [{'slot_id': duplex_dot['id']}],
+        'client_message_id': key(), 'idempotency_key': key()}, c.owner)['message']
+    await s.events.tick()
+    ticket = next(payload['data']['wake_ticket'] for payload in callbacks
+                  if payload.get('data', {}).get('wake_ticket'))
+    consumer = s.invoke('collaboration', {'action': 'consumer_begin', **c.scope,
+        'dot_id': duplex_dot['id'], 'binding_generation': mailbox['binding_generation'],
+        'wake_ticket': ticket, 'consumer_run_id': key(), 'idempotency_key': key()}, c.actor)
+    s.invoke('collaboration_work', {'action': 'team_from_message', **c.scope,
+        'team_id': team['id'], 'dot_id': duplex_dot['id'], 'message_id': team_source['id'],
+        'source_version': team_source['version'], 'source_digest': digest(team_text),
+        **{field: consumer[field] for field in ('consumer_session_id', 'consumer_fence', 'consumer_proof')},
+        'expected_inbox_revision': consumer['inbox_revision'], 'idempotency_key': key()}, c.actor)
     queries = {action: {} for action in ('overview', 'rooms', 'jobs', 'messages', 'goals',
         'incidents', 'agents', 'subscriptions', 'join_slots', 'plan', 'timeline', 'members',
         'changes', 'coordination_goals', 'coordination_options', 'delegation_policies', 'delegations')}
@@ -400,6 +444,9 @@ def test_every_public_query_action_is_read_only_in_real_business_tables(collab):
         'plan_validate': {'candidate': candidate},
         'dot_connection': {'dot_id': dot['id']}, 'dot_inbox': {'dot_id': dot['id']},
         'dot_recovery': {'dot_id': duplex_dot['id']},
+        'team': {'team_id': team['id']}, 'teams': {'conversation_id': c.room['id']},
+        'dot_consumer': {'dot_id': duplex_dot['id']},
+        'dot_mailbox': {'dot_id': duplex_dot['id'], 'binding_generation': mailbox['binding_generation']},
         'dot_receipt': {'dot_id': duplex_dot['id'], 'request_key': 'not-committed-query'},
         'work_evidence': {'goal_id': delegated['goal_id'], 'work_item_id': delegated['work_item_id']},
     })
@@ -407,11 +454,12 @@ def test_every_public_query_action_is_read_only_in_real_business_tables(collab):
     tables = [r['name'] for r in s.store.all(
         "SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE 'collaboration_%' "
         "OR name LIKE 'coordination_%' OR name LIKE 'delegation_%' OR name LIKE 'monitor_%' "
-        "OR name LIKE 'mcp_event_%' OR name LIKE 'conversation_%' OR name LIKE 'dot_%' OR name='operations')")]
+        "OR name LIKE 'mcp_event_%' OR name LIKE 'conversation_%' OR name LIKE 'dot_%' "
+        "OR name LIKE 'team_%' OR name='operations')")]
     def snapshot():
         return {table: s.store.all('SELECT * FROM "' + table + '" ORDER BY rowid') for table in tables}
     before = snapshot()
     for action, arguments in queries.items():
-        actor = c.actor if action in {'goal', 'delegation', 'connection', 'inbox', 'dot_connection', 'dot_inbox', 'dot_recovery', 'dot_receipt', 'work_evidence'} else c.owner
+        actor = c.actor if action in {'goal', 'delegation', 'connection', 'inbox', 'dot_connection', 'dot_inbox', 'dot_recovery', 'dot_receipt', 'work_evidence', 'team', 'teams', 'dot_consumer', 'dot_mailbox'} else c.owner
         assert s.invoke('collaboration_query', {'action': action, **c.scope, **arguments}, actor) is not None
         assert snapshot() == before, action

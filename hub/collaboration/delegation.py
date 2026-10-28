@@ -386,6 +386,9 @@ class DelegationService:
 
     def send(self, principal, room, message, args):
         """Called only in the original message transaction, never for historical replay."""
+        if args.get('team_id') or self.store.one(
+                'SELECT 1 FROM team_message_bindings WHERE message_id=?', (message['id'],)):
+            raise DevError('TEAM_SOURCE_REQUIRES_TEAM', '团队原始请求必须复用团队 Goal，不能另建个人委托', 409)
         self.c.owner(principal)
         request = args['delegation']
         policy = self.policy(room, request['policy_id'])

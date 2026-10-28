@@ -1,6 +1,48 @@
 'use strict';
 // Goal proposals do not create credentials, subscriptions or execution authority.
 window.CodePierCollaborationGoals = {
+  teamState(team, now = Date.now()) {
+    if (!team) return { available: false, label: '团队范围已不可用' };
+    const expires =
+      typeof team.expires_at === 'number' ? team.expires_at * 1000 : Date.parse(team.expires_at);
+    if (team.state === 'active' && Number.isFinite(expires) && expires <= now)
+      return { available: false, label: '团队授权已到期' };
+    return {
+      available: team.state === 'active' && Number.isFinite(expires) && expires > now,
+      label:
+        { active: '范围已批准', paused: '已暂停', revoked: '已撤销', expired: '已到期' }[
+          team.state
+        ] || '等待确认范围',
+    };
+  },
+  teamProgress(team, work = []) {
+    const publication = team?.publication;
+    if (
+      publication?.state === 'committed' &&
+      Number.isSafeInteger(team.intent_revision) &&
+      publication.intent_revision === team.intent_revision
+    )
+      return {
+        label:
+          { succeeded: '已提交最终结果', partial: '已提交部分结果', blocked: '已提交阻塞说明' }[
+            publication.outcome
+          ] || '已提交汇总',
+        summary: publication.summary || '',
+        final: true,
+      };
+    if (work.some((item) => ['blocked', 'failed', 'awaiting_review'].includes(item.state)))
+      return { label: '等待处理或复核', final: false };
+    if (work.some((item) => ['running', 'leased'].includes(item.state)))
+      return { label: '成员正在协作', final: false };
+    if (work.some((item) => ['queued', 'pending'].includes(item.state)))
+      return { label: '等待成员领取或依赖', final: false };
+    if (
+      work.length &&
+      work.every((item) => ['succeeded', 'completed', 'cancelled'].includes(item.state))
+    )
+      return { label: '等待主责汇总', final: false };
+    return { label: '等待工作回执', final: false };
+  },
   create(ctx) {
     const {
       state,
@@ -15,13 +57,24 @@ window.CodePierCollaborationGoals = {
       projectLabel,
       roomProjects,
       when,
+      chat = () => ({}),
+      mentionSlots = () => [],
+      patchDraftContext = () => {},
+      patchDelegationComposer = () => {},
+      selectPolicy = () => {},
+      onProjectionChange = () => {},
     } = ctx;
     let items = [],
       options = null,
       detail = null,
       revision = 0,
       loading = 0,
-      projection = '';
+      projection = '',
+      nextCursor = '',
+      pageCursors = new Set(),
+      historyScope = null,
+      moreFlight = null,
+      projectionFlight = null;
     const names = {
       proposed: '讨论与规划 · 尚未启用执行',
       active: '执行范围已批准',
@@ -46,6 +99,176 @@ window.CodePierCollaborationGoals = {
     const canManage = () => !!state.snapshot?.can_manage && !restored();
     const canApprove = () => canManage() && options?.can_approve === true;
     const enabled = () => !!state.snapshot?.capabilities?.coordination_goals;
+    const teamsEnabled = () => state.snapshot?.capabilities?.multidot_teams === true;
+    const teams = () => (Array.isArray(state.snapshot?.teams) ? state.snapshot.teams : []);
+    const teamById = (id) => teams().find((team) => team.id === id);
+    const teamStatus = (team) => window.CodePierCollaborationGoals.teamState(team);
+    const teamAvailable = (id, coordinatorId) => {
+      const team = teamById(id);
+      return (
+        teamsEnabled() &&
+        canManage() &&
+        teamStatus(team).available &&
+        team.coordinator_dot_id === coordinatorId &&
+        mentionSlots().some(
+          (slot) =>
+            slot.id === coordinatorId &&
+            slot.duplex &&
+            slot.state === 'registered' &&
+            !['authorization_unavailable', 'revoked', 'expired', 'room_paused'].includes(
+              slot.status,
+            ),
+        )
+      );
+    };
+    const teamCandidates = () =>
+      mentionSlots().filter(
+        (slot) =>
+          slot.task_dot &&
+          slot.duplex &&
+          slot.state === 'registered' &&
+          !['authorization_unavailable', 'revoked', 'expired', 'room_paused'].includes(slot.status),
+      );
+    const teamName = (team) => team?.label || '协作团队';
+    const coordinatorName = (team) =>
+      team?.participants?.find((p) => p.dot_id === team.coordinator_dot_id)?.label ||
+      mentionSlots().find((slot) => slot.id === team?.coordinator_dot_id)?.label ||
+      '主责助手';
+    function teamPicker() {
+      if (!teamsEnabled()) return '';
+      return (
+        '<section class="cc-team-list"><div class="cc-row"><h3>协作团队</h3>' +
+        (canManage() ? button('team-new', '＋ 团队') : '') +
+        '</div><p class="cc-hint">向一个主责说明需求，由团队分工并统一汇总。</p>' +
+        (teams()
+          .map(
+            (team) =>
+              '<article class="cc-team-card">' +
+              '<button type="button" class="cc-team-option" data-cc-action="team-pick" data-id="' +
+              E(team.id) +
+              '" aria-pressed="' +
+              (chat().teamId === team.id) +
+              '" ' +
+              (teamAvailable(team.id, team.coordinator_dot_id) ? '' : 'disabled') +
+              '><strong>' +
+              E(teamName(team)) +
+              '</strong><span>主责 · ' +
+              E(coordinatorName(team)) +
+              ' · ' +
+              E(team.participants?.length || 0) +
+              ' 个成员</span><small>' +
+              E(teamStatus(team).label) +
+              ' · 接收与执行以实际回执为准</small></button>' +
+              (canManage()
+                ? '<details class="cc-team-controls"><summary>范围与成员</summary><p>' +
+                  E((team.participants || []).map((p) => p.label || p.dot_id).join('、')) +
+                  '</p><p>' +
+                  E((team.project_ids || []).map(projectLabel).join(' · ')) +
+                  ' · ' +
+                  E((team.capabilities || []).map((cap) => capNames[cap] || cap).join('、')) +
+                  '</p><p>到期 · ' +
+                  E(when(team.expires_at)) +
+                  '</p><div class="cc-actions">' +
+                  (team.state === 'active'
+                    ? button('team-pause', '暂停', team)
+                    : team.state === 'paused'
+                      ? button('team-resume', '恢复原范围', team)
+                      : '') +
+                  (!['revoked', 'expired'].includes(team.state)
+                    ? button('team-revoke', '撤销团队范围', team)
+                    : '') +
+                  '</div></details>'
+                : '') +
+              '</article>',
+          )
+          .join('') || empty('先接入助手，再选择成员和主责创建团队。')) +
+        '</section>'
+      );
+    }
+    function teamChip() {
+      const id = chat().teamId;
+      if (!id) return '';
+      const team = teamById(id),
+        available = teamAvailable(id, chat().mentions?.[0]);
+      return (
+        '<div class="cc-team-context" role="status"><strong>' +
+        E(teamName(team)) +
+        '</strong><span>主责 · ' +
+        E(coordinatorName(team)) +
+        '</span><small>' +
+        E(
+          available
+            ? '团队将统一汇总结果'
+            : teamStatus(team).available
+              ? '主责连接待核对，草稿已保留'
+              : teamStatus(team).label + '，草稿已保留',
+        ) +
+        '</small>' +
+        button('team-clear', '取消团队') +
+        '</div>'
+      );
+    }
+    function selectTeam(team) {
+      if (!teamAvailable(team?.id, team?.coordinator_dot_id))
+        throw new Error('团队范围或主责连接已变化，请重新选择；正文已保留。');
+      const c = chat();
+      c.teamId = team.id;
+      c.mentions = [team.coordinator_dot_id];
+      c.reply = '';
+      c.relayAnchor = null;
+      c.relayRecipientCleared = false;
+      selectPolicy(null);
+      patchDraftContext();
+      patchDelegationComposer();
+      closeDrawer();
+      document.querySelector('#cc-message-input')?.focus({ preventScroll: true });
+    }
+    function teamForm() {
+      const candidates = teamCandidates(),
+        projects = roomProjects().filter((p) => p.environment_id === state.environment);
+      return (
+        '<p>确认一次团队范围，随后直接向主责说明任务。成员会复用已有项目权限；创建团队不会代替原生接通。</p>' +
+        '<form id="cc-team-create" class="cc-form">' +
+        field('团队名称', '<input name="label" maxlength="80" value="协作团队" required>') +
+        '<fieldset class="cc-project-choices"><legend>团队成员</legend>' +
+        choices(
+          'dot_ids',
+          candidates.map((slot) => [slot.id, slot.label]),
+          [],
+        ) +
+        (candidates.length ? '' : empty('暂无可加入的双向任务助手。请先接入助手。')) +
+        '</fieldset>' +
+        field(
+          '主责助手',
+          '<select name="coordinator_dot_id" required><option value="">先选择成员</option></select>',
+        ) +
+        '<fieldset class="cc-project-choices"><legend>允许使用的项目</legend>' +
+        choices(
+          'project_ids',
+          projects.map((p) => [p.project_id, p.project_label || projectLabel(p.project_id)]),
+          [state.project],
+        ) +
+        '</fieldset><fieldset class="cc-project-choices"><legend>团队任务的能力上限</legend>' +
+        choices(
+          'capabilities',
+          ['read', 'write', 'execute'].map((cap) => [cap, capNames[cap]]),
+          ['read'],
+        ) +
+        '</fieldset><p class="cc-hint">只使用成员已经拥有的能力。运行命令使用原执行位置，关键操作仍受原审批约束。</p>' +
+        '<div class="cc-two">' +
+        field(
+          '每个任务最长执行（分钟）',
+          '<input type="number" name="duration_minutes" min="1" max="1440" step="1" value="60" required>',
+        ) +
+        field(
+          '团队范围有效期（小时）',
+          '<input type="number" name="policy_hours" min="1" max="24" step="1" value="24" required>',
+        ) +
+        '</div>' +
+        '<label class="cc-check"><input type="checkbox" name="confirm_tasks" required>我批准所选成员在上述项目、能力和期限内协作处理发给团队的任务。</label>' +
+        '<button class="btn primary" type="submit">批准并创建团队</button></form>'
+      );
+    }
     const connection = (id) => options?.participants?.find((p) => p.grant_id === id);
     const connectionName = (id) =>
       (connection(id)?.label || '助手连接') + ' · ' + String(id).slice(-8);
@@ -80,6 +303,11 @@ window.CodePierCollaborationGoals = {
       options = null;
       detail = null;
       projection = '';
+      nextCursor = '';
+      pageCursors.clear();
+      historyScope = null;
+      moreFlight = null;
+      projectionFlight = null;
     }
     function privateClear() {
       clear();
@@ -91,7 +319,25 @@ window.CodePierCollaborationGoals = {
       ))
         node.innerHTML = empty('连接或项目范围已改变，请重新读取。');
     }
-    async function load(snapshot = state.snapshot, sourceCurrent = () => true) {
+    function load(snapshot = state.snapshot, sourceCurrent = () => true) {
+      const flight = {};
+      projectionFlight = flight;
+      flight.promise = loadProjection(snapshot, sourceCurrent).finally(() => {
+        if (projectionFlight === flight) projectionFlight = null;
+      });
+      return flight.promise;
+    }
+    async function loadProjection(snapshot, sourceCurrent) {
+      if (
+        snapshot?.room &&
+        snapshot.capabilities?.multidot_teams &&
+        !Array.isArray(snapshot.teams)
+      ) {
+        const t = token(),
+          result = await getRecord('teams', '');
+        if (!current(t) || !sourceCurrent()) return;
+        snapshot.teams = result.items || [];
+      }
       if (!snapshot?.room || !snapshot.capabilities?.coordination_goals) {
         clear();
         return;
@@ -114,19 +360,22 @@ window.CodePierCollaborationGoals = {
         }
         options = nextOptions;
         projection = nextProjection;
-        const collected = [],
-          cursors = new Set();
-        let cursor = '';
-        do {
-          const page = await getRecord('coordination_goals', '', cursor, { limit: '30' });
-          if (!fresh()) return;
-          collected.push(...(page.items || []));
-          cursor = page.next_cursor || '';
-          if (cursor && cursors.has(cursor)) throw new Error('目标分页游标重复，请刷新后重试。');
-          if (cursor) cursors.add(cursor);
-        } while (cursor);
+        // First paint is one bounded page. History is fetched only by the
+        // explicit "more" action; a refresh never walks the cursor chain.
+        const page = await getRecord('coordination_goals', '', '', { limit: '40' });
         if (!fresh()) return;
-        items = [...new Map(collected.map((g) => [g.id, g])).values()];
+        const keepHistory = historyScope && current(historyScope);
+        const retained = keepHistory ? items : detail?.goal ? [detail.goal] : [];
+        const freshIds = new Set((page.items || []).map((goal) => goal.id));
+        items = [...(page.items || []), ...retained.filter((goal) => !freshIds.has(goal.id))];
+        // Goal cursors are scope-bound ID keysets. A same-scope first-page
+        // refresh updates visible records without rewinding explicit progress
+        // (including an exhausted cursor) or walking any history pages.
+        if (!keepHistory) {
+          nextCursor = page.next_cursor || '';
+          pageCursors = new Set(nextCursor ? [nextCursor] : []);
+          historyScope = null;
+        }
         if (detail) {
           const latest = items.find((g) => g.id === detail.goal?.id);
           if (!latest || latest.version !== detail.goal.version) {
@@ -148,10 +397,72 @@ window.CodePierCollaborationGoals = {
         throw error;
       }
     }
+    async function loadMore() {
+      if (!nextCursor || moreFlight) return local();
+      const t = token(),
+        request = {};
+      moreFlight = request;
+      try {
+        // Preserve the user's expand intent across one metadata refresh. The
+        // older page stays inadmissible; wait for the newest authority/cursor
+        // projection and issue a fresh bounded read instead of merging it.
+        for (let attempt = 0; attempt < 2; attempt++) {
+          if (projectionFlight) await projectionFlight.promise;
+          if (!current(t) || moreFlight !== request) return local();
+          if (projectionFlight) continue;
+          const cursor = nextCursor,
+            loadEpoch = loading;
+          if (!cursor) return local('已显示所有已读取目标。');
+          const page = await getRecord('coordination_goals', '', cursor, { limit: '40' });
+          if (!current(t) || moreFlight !== request) return local();
+          if (projectionFlight || nextCursor !== cursor || loadEpoch !== loading) continue;
+          const next = page.next_cursor || '';
+          if (next && pageCursors.has(next)) throw new Error('目标分页游标重复，请刷新后重试。');
+          if (next) pageCursors.add(next);
+          items = [
+            ...new Map([...items, ...(page.items || [])].map((goal) => [goal.id, goal])).values(),
+          ];
+          nextCursor = next;
+          historyScope = t;
+          return local(next ? '已加载更早目标。' : '已显示所有已读取目标。');
+        }
+        throw new Error('目标列表仍在更新，已保留当前记录。请再次点击“加载更早目标”。');
+      } catch (error) {
+        if (
+          current(t) &&
+          ([401, 403, 409].includes(error.status) ||
+            ['FORBIDDEN', 'PERMISSION_DENIED', 'AUTHORIZATION_CHANGED', 'ACCESS_CHANGED'].includes(
+              error.code,
+            ))
+        )
+          privateClear();
+        throw error;
+      } finally {
+        if (moreFlight === request) moreFlight = null;
+        if (current(t)) onProjectionChange();
+      }
+    }
+    function updateProjection(result) {
+      if (!teamsEnabled() || !Array.isArray(result.team_goals)) return false;
+      const next = result.team_goals.filter((goal) => goal?.id && goal.team);
+      const before = JSON.stringify(items);
+      const ids = new Set(next.map((goal) => goal.id));
+      const retained =
+        result.team_goals_complete === true
+          ? items.filter((goal) => !goal.team || ids.has(goal.id))
+          : items;
+      // Bounded hint projections update known goals; they are not an exhaustive
+      // deletion list. Visibility changes are purged by the authority token.
+      items = [...new Map([...retained, ...next].map((goal) => [goal.id, goal])).values()];
+      return before !== JSON.stringify(items);
+    }
     function action(label = '＋ 目标') {
       return enabled() && canManage() ? button('goal-new', label) : '';
     }
     function summary(g) {
+      const team = g.team;
+      const progress =
+        team && window.CodePierCollaborationGoals.teamProgress(team, g.work_items || []);
       return (
         '<article class="cc-goal-summary" data-goal-id="' +
         E(g.id) +
@@ -159,8 +470,15 @@ window.CodePierCollaborationGoals = {
         '<div class="cc-row"><strong>' +
         E(g.objective) +
         '</strong>' +
-        badge(g.state) +
+        (team ? '<span class="cc-status">' + E(progress.label) + '</span>' : badge(g.state)) +
         '</div>' +
+        (team
+          ? '<p class="cc-team-lead">主责 · ' +
+            E(coordinatorName(team)) +
+            ' · 统一汇总' +
+            '</p>' +
+            (progress.summary ? '<p class="cc-prose">' + E(progress.summary) + '</p>' : '')
+          : '') +
         '<p>' +
         E(g.acceptance) +
         '</p><small>' +
@@ -173,6 +491,7 @@ window.CodePierCollaborationGoals = {
         button('goal-detail', '查看步骤与结果', g) +
         (canApprove() &&
         !g.delegation &&
+        !g.team &&
         g.can_approve !== false &&
         ['proposed', 'paused'].includes(g.state)
           ? button('goal-review', '审阅执行范围', g)
@@ -194,10 +513,16 @@ window.CodePierCollaborationGoals = {
     function list() {
       if (!enabled()) return '';
       return (
+        teamPicker() +
         '<section class="cc-coordination-list"><div class="cc-row"><h2>目标与工作项</h2>' +
         action('创建协作目标') +
         '</div><p class="cc-hint">助手可围绕目标拆解、交接与复核。保存目标仅建立规划；执行需房主另外确认已有连接与能力。</p>' +
         (items.map(summary).join('') || empty('还没有协作目标。')) +
+        (nextCursor
+          ? '<div class="cc-actions">' +
+            button('goal-more', '加载更早目标', {}, moreFlight ? 'disabled' : '') +
+            '</div>'
+          : '') +
         '</section>'
       );
     }
@@ -541,6 +866,37 @@ window.CodePierCollaborationGoals = {
     function subscription(g) {
       if (restored())
         return '<p class="cc-hint">历史订阅与执行范围仅供查阅，不会重新接通或恢复。</p>';
+      if (g.team && state.snapshot?.capabilities?.dot_mailbox_v2) {
+        const members = g.team.participants || [];
+        const protocols = members.map(
+          (member) => mentionSlots().find((slot) => slot.id === member.dot_id)?.mailbox_protocol,
+        );
+        if (
+          members.length &&
+          protocols.every((protocol) => protocol?.selected_protocol_version === 2)
+        ) {
+          const connected = protocols.every(
+            (protocol) =>
+              protocol.active_protocol_version === 2 &&
+              protocol.subscription_health?.available === true,
+          );
+          return (
+            '<section class="cc-goal-subscription"><p class="cc-hint">' +
+            (connected
+              ? '成员的统一收件箱订阅有效；接收、领取和结果仍以实际回执为准。'
+              : '部分成员的统一收件箱等待原生接通。正文和已提交结果会保留，请在对应助手连接中继续。') +
+            '</p><div class="cc-actions">' +
+            members
+              .map((member) =>
+                button('mention-connect', '核对 ' + (member.label || '成员') + ' 的连接', {
+                  id: member.dot_id,
+                }),
+              )
+              .join('') +
+            '</div></section>'
+          );
+        }
+      }
       if (g.delegation) {
         return (
           '<section class="cc-goal-subscription"><p class="cc-hint">继续使用原委托范围；接入与处理方式在同一处核对。</p>' +
@@ -579,7 +935,7 @@ window.CodePierCollaborationGoals = {
       );
     }
     function detailMarkup(record) {
-      const g = record.goal,
+      const g = { ...record.goal, ...(record.team ? { team: record.team } : {}) },
         work = record.work_items || [],
         operations = record.operations || [];
       return (
@@ -598,11 +954,12 @@ window.CodePierCollaborationGoals = {
         '。新加入房间的项目不属于此目标。</p><div class="cc-actions">' +
         (canApprove() &&
         !g.delegation &&
+        !g.team &&
         g.can_approve !== false &&
         ['proposed', 'paused'].includes(g.state)
           ? button('goal-review', '审阅执行范围', g)
           : '') +
-        (canManage() && !g.delegation && !['cancelled', 'expired'].includes(g.state)
+        (canManage() && !g.delegation && !g.team && !['cancelled', 'expired'].includes(g.state)
           ? button('goal-edit', '修订规划', g)
           : '') +
         (canApprove() && g.state === 'active' ? button('goal-pause', '暂停目标', g) : '') +
@@ -630,13 +987,31 @@ window.CodePierCollaborationGoals = {
               ? '<p class="cc-hint">此目标保留原委托的历史证据；不会继续派发。</p></section>'
               : '<p class="cc-hint">此目标绑定原委托，不能修订或重新批准。暂停后若需继续，请核对已有操作，再发送新委托；已运行的实际操作不保证停止。</p></section>')
           : '') +
+        (g.team
+          ? '<section class="cc-team-progress" role="status"><strong>' +
+            E(window.CodePierCollaborationGoals.teamProgress(g.team, work).label) +
+            '</strong><p>主责 · ' +
+            E(coordinatorName(g.team)) +
+            '</p>' +
+            (window.CodePierCollaborationGoals.teamProgress(g.team, work).final
+              ? '<p class="cc-prose">' + E(g.team.publication.summary) + '</p>'
+              : '<p class="cc-hint">成员结果将由主责汇总；等待状态不会显示为完成。</p>') +
+            '</section>'
+          : '') +
         subscription(g) +
+        (g.team
+          ? '<details class="cc-team-work"><summary>成员工作与证据 · ' +
+            work.length +
+            ' 项</summary>'
+          : '') +
         '<div class="cc-row"><h3>步骤与结果</h3>' +
         button('goal-detail', '刷新步骤与结果', g) +
         '</div>' +
         (work.map((w) => workCard(w, work, operations)).join('') ||
           empty('还没有工作项。助手提出的拆解、依赖与交接会显示在这里。')) +
-        '<h3>目标内协调记录</h3>' +
+        (g.team
+          ? '</details><details class="cc-team-work"><summary>成员交接与复核记录</summary>'
+          : '<h3>目标内协调记录</h3>') +
         ((record.messages || [])
           .map(
             (m) =>
@@ -654,7 +1029,8 @@ window.CodePierCollaborationGoals = {
               '</p></article>',
           )
           .join('') || empty('暂无目标内交接或复核消息。普通房间消息不会递归触发执行。')) +
-        (canApprove() && !g.delegation && g.state === 'active'
+        (g.team ? '</details>' : '') +
+        (canApprove() && !g.delegation && !g.team && g.state === 'active'
           ? '<form id="cc-goal-message" class="cc-form" data-id="' +
             E(g.id) +
             '">' +
@@ -683,8 +1059,63 @@ window.CodePierCollaborationGoals = {
       return record;
     }
     async function act(actionName, element) {
+      if (actionName.startsWith('team-')) {
+        if (actionName === 'team-clear') {
+          const c = chat();
+          c.teamId = '';
+          c.mentions = [];
+          c.reply = '';
+          c.relayAnchor = null;
+          c.relayRecipientCleared = true;
+          patchDraftContext();
+          patchDelegationComposer();
+          return local();
+        }
+        if (!teamsEnabled() || !canManage()) throw new Error('当前范围不能管理团队。');
+        if (actionName === 'team-new') {
+          showDrawer('创建协作团队', teamForm(), element);
+          return local();
+        }
+        const team = teamById(element.dataset.id);
+        if (actionName === 'team-pick') {
+          selectTeam(team);
+          return local();
+        }
+        if (!team || Number(element.dataset.version) !== team.version)
+          throw new Error('团队版本已变化，请重新核对。');
+        if (['team-pause', 'team-resume', 'team-revoke'].includes(actionName)) {
+          const t = token();
+          const result = await mutation('team-control', {
+            team_id: team.id,
+            expected_version: team.version,
+            action:
+              actionName === 'team-pause'
+                ? 'pause'
+                : actionName === 'team-resume'
+                  ? 'resume'
+                  : 'revoke',
+          });
+          if (!current(t)) return local();
+          if (result.team)
+            state.snapshot.teams = teams().map((value) =>
+              value.id === team.id ? result.team : value,
+            );
+          patchDraftContext();
+          patchDelegationComposer();
+          showDrawer('协作团队', teamPicker(), element);
+          return local(
+            actionName === 'team-pause'
+              ? '团队已暂停。已有实际操作请继续核对。'
+              : actionName === 'team-resume'
+                ? '原团队范围已恢复。旧工作保持阻塞，由主责核对原操作后继续规划。'
+                : '团队范围已撤销。已有实际操作请继续核对。',
+          );
+        }
+        return local();
+      }
       if (!actionName.startsWith('goal-')) return null;
       if (!enabled()) throw new Error('当前服务未启用目标协作能力。');
+      if (actionName === 'goal-more') return loadMore();
       if (actionName === 'goal-copy-subscription') {
         const area = element.closest('.cc-goal-subscription').querySelector('textarea');
         area.focus();
@@ -793,6 +1224,42 @@ window.CodePierCollaborationGoals = {
       return local();
     }
     async function submit(form) {
+      if (form.id === 'cc-team-create') {
+        if (!teamsEnabled() || !canManage()) throw new Error('当前范围不能创建团队。');
+        const t = token(),
+          data = new FormData(form);
+        const dotIds = data.getAll('dot_ids'),
+          coordinatorId = data.get('coordinator_dot_id');
+        if (
+          !data.get('confirm_tasks') ||
+          dotIds.length < 2 ||
+          dotIds.length > 16 ||
+          !dotIds.includes(coordinatorId)
+        )
+          throw new Error('请选择 2 至 16 个成员、其中一个主责，并明确批准所选范围。');
+        if (!data.getAll('project_ids').length || !data.getAll('capabilities').includes('read'))
+          throw new Error('请至少选择一个项目，并保留读取能力。');
+        const result = await mutation('team-create', {
+          conversation_id:
+            state.conversation || state.snapshot.conversation?.id || state.snapshot.room.id,
+          label: String(data.get('label')).trim(),
+          dot_ids: dotIds,
+          coordinator_dot_id: coordinatorId,
+          project_ids: data.getAll('project_ids'),
+          capabilities: data.getAll('capabilities'),
+          duration_seconds: Number(data.get('duration_minutes')) * 60,
+          policy_duration_seconds: Number(data.get('policy_hours')) * 3600,
+          confirm_tasks: true,
+        });
+        if (!current(t)) return local();
+        if (!result.team?.id) throw new Error('团队回执不完整，请重新读取团队列表。');
+        state.snapshot.teams = [
+          ...teams().filter((value) => value.id !== result.team.id),
+          result.team,
+        ];
+        selectTeam(result.team);
+        return local('团队范围已批准。向主责发送需求即可，接收和执行以实际回执为准。');
+      }
       if (!form.id.startsWith('cc-goal-')) return null;
       const t = token();
       try {
@@ -855,6 +1322,26 @@ window.CodePierCollaborationGoals = {
     }
     function change(event) {
       const form = event.target.form;
+      if (form?.id === 'cc-team-create' && event.target.name === 'dot_ids') {
+        const selected = new FormData(form).getAll('dot_ids'),
+          picker = form.elements.coordinator_dot_id;
+        const chosen = selected.includes(picker.value) ? picker.value : selected[0];
+        picker.innerHTML =
+          '<option value="">先选择成员</option>' +
+          teamCandidates()
+            .filter((slot) => selected.includes(slot.id))
+            .map(
+              (slot) =>
+                '<option value="' +
+                E(slot.id) +
+                '"' +
+                (slot.id === chosen ? ' selected' : '') +
+                '>' +
+                E(slot.label) +
+                '</option>',
+            )
+            .join('');
+      }
       if (form?.id === 'cc-goal-draft') {
         if (event.target.name === 'participant_grant_ids') {
           const selected = new FormData(form).getAll('participant_grant_ids');
@@ -878,6 +1365,20 @@ window.CodePierCollaborationGoals = {
         validateDraft(form, draftPayload(form));
       }
     }
-    return { clear, load, action, context, list, act, submit, change, enabled };
+    return {
+      clear,
+      load,
+      action,
+      context,
+      list,
+      act,
+      submit,
+      change,
+      enabled,
+      teamPicker,
+      teamChip,
+      teamAvailable,
+      updateProjection,
+    };
   },
 };

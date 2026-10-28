@@ -16,6 +16,16 @@ PLAN = {'intent': 'Monitor fixture', 'valid_until': '2030-01-01T00:00:00Z', 'rul
     'close_when': {'operator': 'gt', 'value': 0.99}, 'require_recovery_probe': 'probe'}]}
 VALUES = {
     'dot_id': 'task-dot', 'message_id': 'message', 'confirm_task': True,
+    'team_id': 'team', 'binding_generation': 'binding-generation',
+    'wake_ticket': 'fixture-wake-ticket-not-a-secret-' * 2,
+    'consumer_run_id': 'consumer-run', 'consumer_session_id': 'consumer-session',
+    'consumer_fence': 1, 'consumer_proof': 'fixture-consumer-proof-not-a-secret-' * 2,
+    'expected_inbox_revision': 0, 'confirm_consumer_protocol': True,
+    'entry_ids': ['mailbox-entry'], 'coordinator_epoch': 1, 'expected_intent_revision': 1,
+    'recipient_dot_id': 'peer-dot', 'coordinator_dot_id': 'coordinator-dot',
+    'purpose': 'Review original constraints',
+    'artifact_refs': [{'work_item_id': 'work', 'version': 1, 'digest': 'a' * 64}],
+    'source_version': 1, 'source_digest': 'a' * 64,
     'project': 'project', 'id': 'item', 'goal_id': 'goal', 'policy_id': 'policy', 'policy_version': 1,
     'delegation_id': 'delegation', 'checkpoint': 'signed-checkpoint', 'conversation_id': 'room', 'room_id': 'room',
     'work_item_id': 'work', 'job_id': 'job', 'result_id': 'result', 'query': 'search text',

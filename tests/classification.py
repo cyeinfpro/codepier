@@ -32,10 +32,15 @@ REGRESSION_EXCLUSIVE = {
     'test_devtools_flow.py',
 }
 
-@lru_cache(maxsize=None)
 def module_tiers(filename):
-    path = Path(filename)
-    tree = ast.parse(path.read_text(encoding='utf-8'))
+    # Pytest can remove a passed case's temporary directory and reuse its path.
+    # Read current contents so that path reuse or edits cannot retain old tiers.
+    return _source_tiers(Path(filename).read_text(encoding='utf-8'))
+
+
+@lru_cache(maxsize=512)
+def _source_tiers(source):
+    tree = ast.parse(source)
     imports = set()
     shared_stack = False
     for node in ast.walk(tree):

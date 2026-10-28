@@ -125,10 +125,18 @@ def test_rotation_covers_gateway_oidc_and_preserves_retry_and_idempotency(gw,oid
     store.execute('INSERT INTO oidc_sync_state(identity_id,attempted_at,next_attempt,failures,code,credential_hash,provider_version,observed_checked_at) VALUES(?,1,9999999999,2,?,?,?,?)',
                   (identity['id'],'OIDC_UPSTREAM_ERROR',digest(identity['upstream_tokens']),provider['version'],identity['checked_at']))
     expected={}
-    for table,column in keyring.CIPHER_COLUMNS:
-        primary='state_hash' if table=='oidc_transactions' else 'id'
-        for row in store.all(f"SELECT {primary} AS id,{column} AS cipher FROM {table} WHERE {column} IS NOT NULL AND {column}!=''"):
-            expected[(table,column,primary,row['id'])]=store.decrypt(row['cipher'])
+    columns=[(table,column,'') for table,column in keyring.CIPHER_COLUMNS]
+    for table,column,prefix in [*columns,*keyring.PREFIXED_CIPHER_COLUMNS]:
+        schema=store.all(f'PRAGMA table_info({table})')
+        primary_keys=[row['name'] for row in schema if row['pk']]
+        # Independently check the production key mapping against real schema;
+        # consumer tickets use ticket_hash, while OIDC transactions use state_hash.
+        assert primary_keys==[keyring.CIPHER_PRIMARY_KEYS.get(table,'id')]
+        primary=primary_keys[0]
+        condition=f' AND substr({column},1,?)=?' if prefix else ''
+        for row in store.all(f"SELECT {primary} AS id,{column} AS cipher FROM {table} WHERE {column} IS NOT NULL AND {column}!=''"+condition,
+                             (len(prefix),prefix) if prefix else ()):
+            expected[(table,column,primary,row['id'],prefix)]=store.decrypt(row['cipher'][len(prefix):])
     assert {'oidc_providers','oidc_transactions','external_identities','gateway_accounts','gateway_calls','gateway_secrets'}<={k[0] for k in expected}
     copied=tmp_path/'rotation-copy';copied.mkdir()
     with store.lock,sqlite3.connect(copied/'hub.sqlite3') as db:
@@ -138,10 +146,10 @@ def test_rotation_covers_gateway_oidc_and_preserves_retry_and_idempotency(gw,oid
     assert result['records']==len(expected)
     reopened=Store(copied)
     try:
-        for (table,column,primary,identifier),plaintext in expected.items():
+        for (table,column,primary,identifier,prefix),plaintext in expected.items():
             row=reopened.one(f'SELECT {column} AS cipher FROM {table} WHERE {primary}=?',(identifier,))
-            assert reopened.decrypt(row['cipher'])==plaintext
-            assert row['cipher'].startswith('cp1:'+result['key_id']+':')
+            assert reopened.decrypt(row['cipher'][len(prefix):])==plaintext
+            assert row['cipher'].startswith(prefix+'cp1:'+result['key_id']+':')
         rotated=reopened.one('SELECT upstream_tokens FROM external_identities WHERE id=?',(identity['id'],))['upstream_tokens']
         state=reopened.one('SELECT * FROM oidc_sync_state WHERE identity_id=?',(identity['id'],))
         assert state['credential_hash']==digest(rotated) and state['failures']==2

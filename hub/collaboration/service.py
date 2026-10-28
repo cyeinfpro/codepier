@@ -50,6 +50,12 @@ class CollaborationService:
         self.dot_relay = DotRelay(self)
         from hub.collaboration.task_liveness import TaskLiveness
         self.task_liveness = TaskLiveness(self)
+        from hub.collaboration.dot_consumers import DotConsumers
+        self.dot_consumers = DotConsumers(self)
+        from hub.collaboration.dot_mailbox import DotMailbox
+        self.dot_mailbox = DotMailbox(self)
+        from hub.collaboration.relay_hints import RelayHints
+        self.relay_hints = RelayHints(self)
         from hub.room_scope import RoomScopeService
         self.room_scope = RoomScopeService(self)
         from hub.collaboration.channel_settings import ChannelSettings
@@ -197,7 +203,9 @@ class CollaborationService:
         # Reauthorize before replay, but replay before checking a now-terminal lease.
         key = digest([room['space_id'], room['owner_user_id'], principal.grant_id or 'panel',
                       action, room['id'], args['idempotency_key']])
-        fingerprint = digest(args)
+        # A refreshed consumer proof authenticates a retry; it is not new business intent.
+        fingerprint = digest({key: value for key, value in args.items()
+                              if key not in {'consumer_session_id', 'consumer_fence', 'consumer_proof'}})
         saved = self.store.one('SELECT * FROM collaboration_idempotency WHERE id=?', (key,))
         if saved:
             if saved['digest'] != fingerprint:
@@ -213,6 +221,7 @@ class CollaborationService:
     def audit(self, room, actor, action, target, detail=None):
         self.store.execute('''INSERT INTO collaboration_audit(room_id,actor,action,target,detail,created)
             VALUES (?,?,?,?,?,?)''', (room['id'], actor, action, target, canonical(redact(detail or {})), self.clock()))
+        self.store.after_commit(self.relay_hints.wake)
 
     def emit(self, room, name, object_id, version, data, *, grant_id='', queue=''):
         body = redact({'schema_version': 1, 'project_id': room['project_id'],
@@ -223,10 +232,19 @@ class CollaborationService:
         body = validate(PAYLOADS[name], body)
         if len(canonical(body).encode()) > 12 * 1024:
             raise DevError('EVENT_TOO_LARGE', '事件摘要超过上限，请只保存受控引用', 413)
-        self.store.execute('''INSERT OR IGNORE INTO mcp_event_outbox
+        inserted = self.store.execute('''INSERT OR IGNORE INTO mcp_event_outbox
             (id,room_id,name,object_id,object_version,target_grant_id,queue,data,created)
             VALUES (?,?,?,?,?,?,?,?,?)''',
             (new_id(), room['id'], name, object_id, version, grant_id, queue, canonical(body), self.clock()))
+        if inserted.rowcount:
+            mailbox = getattr(self, 'dot_mailbox', None)
+            if mailbox is not None:
+                mailbox.on_event(room, name, object_id, version, body, grant_id)
+            loops = getattr(self, 'loops', None)
+            if loops is not None:
+                self.store.after_commit(loops.wake_events)
+            self.store.after_commit(self.relay_hints.wake)
+
 
     def budget(self, room, budget):
         now = self.clock()
@@ -846,6 +864,11 @@ class CollaborationService:
                         'schema_version': 3, 'capabilities': self.chatroom.capabilities(principal),
                         'can_manage': bool(principal.admin and not principal.grant_id)}
             kind = args['kind']
+            if kind == 'teams':
+                conversation = self.conversations.resolve(principal, room, args)
+                return {**self.coordination.teams.listing({
+                    'project': room['project_id'], 'environment_id': room['environment_id'],
+                    'conversation_id': conversation['id']}, principal), 'next_cursor': None}
             if kind == 'delegation_policies':
                 if args['query'].startswith('delegation-consumer-v1:'):
                     return self.delegation.consumer.legacy_read(args, principal, room)
@@ -917,6 +940,9 @@ class CollaborationService:
                 result[item], result[item + '_next_cursor'] = page['items'], page['next_cursor']
             conversation = self.conversations.resolve(principal, room, args)
             result['conversation'] = self.conversations.view(principal, conversation)
+            result['teams'] = self.coordination.teams.listing({
+                'project': room['project_id'], 'environment_id': room['environment_id'],
+                'conversation_id': conversation['id']}, principal)['items']
             result['delegation'] = self.delegation.authority_descriptor()
             result['selected_partition'] = {'project_id': room['project_id'], 'environment_id': room['environment_id'], 'room_id': room['id']}
             if args['conversation_id']:
@@ -988,9 +1014,20 @@ class CollaborationService:
         self.guard()
         from shared.public_collaboration import resolve
         name, raw = resolve(name, raw)
+        from shared.team_collaboration_contracts import TOOL_MODELS as TEAM_MODELS
+        if name in TEAM_MODELS:
+            return self.coordination.teams.invoke(name, raw, principal)
         if name in contracts.COORDINATION_TOOL_MODELS:
             return self.coordination.invoke(name, raw, principal)
-        handlers = {'collaboration_dot_recovery': self.task_liveness.recovery,
+        handlers = {'collaboration_consumer_begin': self.dot_consumers.begin,
+                    'collaboration_consumer_heartbeat': self.dot_consumers.heartbeat,
+                    'collaboration_consumer_yield': self.dot_consumers.yield_session,
+                    'collaboration_consumer_read': self.dot_consumers.read,
+                    'collaboration_dot_mailbox_configure': self.dot_mailbox.configure,
+                    'collaboration_dot_mailbox': self.dot_mailbox.read,
+                    'collaboration_dot_mailbox_ack': self.dot_mailbox.ack,
+                    'collaboration_dot_mailbox_recover': self.dot_mailbox.request_recovery,
+                    'collaboration_dot_recovery': self.task_liveness.recovery,
                     'collaboration_dot_delivery_receipt': self.task_liveness.receipt,
                     'collaboration_work_evidence': self.task_liveness.evidence,
                     'collaboration_dot_reply_update': self.dot_relay.update,

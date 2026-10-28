@@ -96,6 +96,125 @@ window.CodePierCollaborationRelay = {
       2,
     );
   },
+  hintURL(scope, spaceId) {
+    // EventSource cannot attach api()'s X-CodePier-Space header.
+    return '/api/collaboration/relay-hints?' + new URLSearchParams({ ...scope, space_id: spaceId });
+  },
+  hintStream({
+    url,
+    enabled = () => true,
+    current = () => true,
+    onChange = () => {},
+    onState = () => {},
+    onAccessChanged = () => {},
+    createSource = (value) => new EventSource(value),
+    schedule = setTimeout,
+    cancel = clearTimeout,
+    random = Math.random,
+  }) {
+    let source = null,
+      retry = null,
+      pending = null,
+      stopped = true,
+      healthy = false;
+    let failures = 0,
+      revision = null,
+      accessLost = false;
+    const state = (next) => {
+      if (healthy === next) return;
+      healthy = next;
+      onState(next);
+    };
+    const close = () => {
+      if (source) {
+        source.onopen = source.onerror = null;
+        source.close();
+        source = null;
+      }
+    };
+    const allowed = () => !stopped && enabled() && current();
+    const connect = () => {
+      retry = null;
+      if (!allowed() || source) return;
+      let next;
+      try {
+        next = createSource(url);
+      } catch {
+        recover();
+        return;
+      }
+      source = next;
+      next.onopen = () => {
+        if (!allowed() || source !== next) return;
+        state(true); // Transport only; never changes a message or work state.
+      };
+      next.addEventListener('change', (event) => {
+        if (
+          !allowed() ||
+          source !== next ||
+          typeof event.data !== 'string' ||
+          event.data.length > 2048
+        )
+          return;
+        let data;
+        try {
+          data = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+        const value = data?.revision;
+        if (!(
+          (typeof value === 'string' && value.length > 0 && value.length <= 256) ||
+          (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)
+        ))
+          return;
+        failures = 0;
+        if (revision === value) return;
+        revision = value;
+        if (pending !== null) return;
+        pending = schedule(() => {
+          pending = null;
+          if (allowed()) onChange();
+        }, 60);
+      });
+      next.addEventListener('access_changed', () => {
+        if (!allowed() || source !== next) return;
+        accessLost = true;
+        stop();
+        onAccessChanged();
+      });
+      next.onerror = () => {
+        if (source === next && !stopped) recover();
+      };
+    };
+    const recover = () => {
+      close();
+      state(false);
+      if (!allowed()) return;
+      const delay = Math.min(30000, 1000 * 2 ** Math.min(failures++, 5));
+      retry = schedule(
+        connect,
+        Math.min(30000, Math.round(delay * (1 + Math.max(0, Math.min(1, random())) * 0.15))),
+      );
+    };
+    function stop() {
+      stopped = true;
+      close();
+      if (retry !== null) cancel(retry);
+      if (pending !== null) cancel(pending);
+      retry = pending = null;
+      state(false);
+    }
+    return {
+      start() {
+        if (accessLost || !enabled() || !current()) return;
+        stopped = false;
+        if (!source && retry === null) connect();
+      },
+      stop,
+      healthy: () => healthy && allowed(),
+    };
+  },
   pendingPayload(value, dotId) {
     const id = (value) => typeof value === 'string' && value.length > 0 && value.length <= 256;
     if (
@@ -111,6 +230,7 @@ window.CodePierCollaborationRelay = {
       !Array.isArray(value.mentions) ||
       value.mentions.length !== 1 ||
       value.mentions[0]?.slot_id !== dotId ||
+      (value.team_id != null && value.team_id !== '' && !id(value.team_id)) ||
       (value.reply_to_id != null && value.reply_to_id !== '' && !id(value.reply_to_id)) ||
       (value.pending_scope_revision != null && !/^[a-f0-9]{64}$/.test(value.pending_scope_revision))
     )
@@ -123,6 +243,7 @@ window.CodePierCollaborationRelay = {
       body_text: value.body_text,
       reply_to_id: value.reply_to_id || '',
       mentions: [{ slot_id: dotId }],
+      ...(value.team_id ? { team_id: value.team_id } : {}),
       ...(value.pending_scope_revision
         ? { pending_scope_revision: value.pending_scope_revision }
         : {}),
@@ -281,6 +402,8 @@ window.CodePierCollaborationRelay = {
       mergeMessages,
       recoverAccess,
       onWorkspaceChange = () => {},
+      teamAvailable = () => false,
+      updateGoalProjection = () => false,
     } = ctx;
     let cleanup = null,
       retryTimer = null,
@@ -288,7 +411,8 @@ window.CodePierCollaborationRelay = {
       selectionFrame = 0,
       sizeMemo = null;
     let pendingStore = null,
-      storeOwner = null;
+      storeOwner = null,
+      hints = null;
     function localStore() {
       const owner =
         S.session?.user_id && S.space_id ? JSON.stringify([S.session.user_id, S.space_id]) : '';
@@ -746,6 +870,7 @@ window.CodePierCollaborationRelay = {
         capable() &&
         !restoredHistory() &&
         !c.delegationPolicy &&
+        (!c.teamId || teamAvailable(c.teamId, c.mentions[0])) &&
         c.mentions.length === 1 &&
         mentionSlots().some(
           (s) =>
@@ -827,6 +952,7 @@ window.CodePierCollaborationRelay = {
         conversation_id:
           chatScope().conversation_id || state.snapshot.conversation?.id || state.snapshot.room.id,
         body_text: text,
+        ...(c.teamId ? { team_id: c.teamId } : {}),
         ...(localStore()?.enabled() && persistenceScope()
           ? { pending_scope_revision: state.snapshot.pending_scope_revision }
           : {}),
@@ -838,6 +964,7 @@ window.CodePierCollaborationRelay = {
         !c.reply &&
         previous &&
         previous.dotId === c.mentions[0] &&
+        (previous.payload.team_id || '') === (payload.team_id || '') &&
         previous.payload.project === payload.project &&
         previous.payload.environment_id === payload.environment_id
           ? previous
@@ -978,6 +1105,7 @@ window.CodePierCollaborationRelay = {
           if (
             !state.snapshot?.can_manage ||
             state.snapshot?.room?.state !== 'active' ||
+            (e.payload.team_id && !teamAvailable(e.payload.team_id, e.dotId)) ||
             mentionSlots().some(
               (slot) =>
                 slot.id === e.dotId &&
@@ -1126,7 +1254,10 @@ window.CodePierCollaborationRelay = {
     async function sync({ readOnly = false } = {}) {
       const c = chat(),
         gen = state.generation;
-      if (c.relaySync) return;
+      if (c.relaySync) {
+        c.relayRefreshPending = true;
+        return;
+      }
       const sequence = ++state.refreshSequence;
       c.relaySync = true;
       c.relayRefreshPending = false;
@@ -1174,6 +1305,7 @@ window.CodePierCollaborationRelay = {
         const oldConnections = JSON.stringify([
           state.snapshot.join_slots,
           state.snapshot.connection_readiness,
+          state.snapshot.teams,
           state.snapshot.room.state,
           state.snapshot.can_manage,
         ]);
@@ -1200,6 +1332,12 @@ window.CodePierCollaborationRelay = {
         }));
         if (result.connection_readiness)
           state.snapshot.connection_readiness = result.connection_readiness;
+        if (Array.isArray(result.teams)) state.snapshot.teams = result.teams;
+        const goalsDirty = updateGoalProjection(result);
+        if (typeof result.capabilities?.relay_hints === 'boolean') {
+          state.snapshot.capabilities.relay_hints = result.capabilities.relay_hints;
+          if (!result.capabilities.relay_hints) hints?.stop();
+        }
         if (
           state.snapshot.pending_scope_revision &&
           state.snapshot.pending_scope_revision !== result.pending_scope_revision
@@ -1226,6 +1364,7 @@ window.CodePierCollaborationRelay = {
           JSON.stringify([
             state.snapshot.join_slots,
             state.snapshot.connection_readiness,
+            state.snapshot.teams,
             state.snapshot.room.state,
             state.snapshot.can_manage,
           ]);
@@ -1234,10 +1373,11 @@ window.CodePierCollaborationRelay = {
         c.relayRenderStats.dirty_messages += dirtyIds.size;
         if (dirtyIds.size || connectionDirty) patchTimeline(false, dirtyIds.size ? dirtyIds : null);
         if (connectionDirty) {
+          patchDraftContext();
           patchDelegationComposer();
           dots.refreshCards();
         }
-        if (dirtyIds.size || connectionDirty) onWorkspaceChange();
+        if (dirtyIds.size || connectionDirty || goalsDirty) onWorkspaceChange();
         else c.relayRenderStats.unchanged++;
         const area = document.querySelector('#cc-message-input');
         if (area) {
@@ -1273,6 +1413,7 @@ window.CodePierCollaborationRelay = {
       if (document.hidden) return 15000;
       if (c.relayFailures) return Math.min(30000, 2000 * 2 ** Math.min(c.relayFailures, 4));
       if (c.relayMore) return 250;
+      if (hints?.healthy()) return 30000; // Bounded reconciliation remains even with hints.
       if (
         pending(c).length ||
         Date.now() - (c.relayRecent || 0) < 60000 ||
@@ -1288,6 +1429,9 @@ window.CodePierCollaborationRelay = {
       return 5000;
     }
     function detach() {
+      hints?.stop();
+      hints = null;
+      state.relayPollWake = null;
       cleanup?.();
       cleanup = null;
       cancelAnimationFrame(sizeFrame);
@@ -1346,7 +1490,37 @@ window.CodePierCollaborationRelay = {
       restorePending();
       hydrate(root);
       paintOutbox();
+      const hintGeneration = state.generation,
+        hintChat = chat();
+      const hintCurrent = () =>
+        root.isConnected &&
+        !root.inert &&
+        S.page === 'collaboration' &&
+        hintGeneration === state.generation &&
+        hintChat === chat() &&
+        S.session === state.session &&
+        S.space_id === state.space &&
+        !document.hidden;
+      hints = window.CodePierCollaborationRelay.hintStream({
+        url: window.CodePierCollaborationRelay.hintURL(chatScope(), S.space_id),
+        enabled: () =>
+          state.snapshot?.capabilities?.relay_hints === true && typeof EventSource !== 'undefined',
+        current: hintCurrent,
+        onChange: () => {
+          void sync({ readOnly: true });
+        },
+        onState: () => state.relayPollWake?.(),
+        onAccessChanged: () => {
+          void recoverAccess(false);
+        },
+      });
+      hints.start();
       const wake = () => {
+        if (document.hidden) {
+          hints?.stop();
+          return;
+        }
+        hints?.start();
         if (root.isConnected && S.page === 'collaboration' && !document.hidden) {
           const c = chat();
           for (const e of pending(c)) if (e.phase === 'retry') e.due = 0;

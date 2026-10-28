@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import socket
+import time
+from email.utils import parsedate_to_datetime
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -19,6 +21,24 @@ from shared.util import DevError
 class Reply:
     status: int
     body: bytes = b''
+    retry_after_seconds: float | None = None
+
+
+def retry_after_seconds(value, *, now=None):
+    """Only the bounded Retry-After value crosses the transport boundary."""
+    if not isinstance(value, str) or not value.strip() or len(value) > 128:
+        return None
+    value = value.strip()
+    if value.isascii() and value.isdecimal():
+        return min(1800, int(value))
+    try:
+        parsed = parsedate_to_datetime(value)
+        if parsed.tzinfo is None:
+            return None
+        delay = parsed.timestamp() - (time.time() if now is None else now)
+        return max(0, min(1800, delay))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
 
 
 def callback_url(value):
@@ -74,7 +94,9 @@ async def request(method, destination, headers=None, body=None, *, timeout=10, r
                     chunks.extend(chunk)
                     if len(chunks) > 8192:
                         raise DevError('HTTP_RESPONSE_TOO_LARGE', '回调应答超过 8 KiB 上限', 413)
-            return Reply(response.status_code, bytes(chunks))
+            delay = (retry_after_seconds(response.headers.get('Retry-After'))
+                     if response.status_code in {429, 503} else None)
+            return Reply(response.status_code, bytes(chunks), delay)
 
 
 async def webhook(url, body, headers):

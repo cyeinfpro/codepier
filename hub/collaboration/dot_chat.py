@@ -114,6 +114,12 @@ class DotChatService:
             self.store.execute('''INSERT OR IGNORE INTO collaboration_dot_messages
                 (dot_id,message_id,message_version,message_digest,created) VALUES (?,?,?,?,?)''',
                 (dot['id'], message['id'], message['version'], digest(body['body_text']), self.c.clock()))
+            # The input ledger drives dirtiness even when no legacy message
+            # subscription exists (or callback delivery is unavailable).
+            mailbox = getattr(self.c, 'dot_mailbox', None)
+            if mailbox is not None:
+                mailbox.mark_dirty(dot, 'message', message['id'], message['version'],
+                    {'message_id': message['id'], 'thread_root_id': message['thread_root_id']})
             identifiers.append(dot['id'])
         return identifiers
 
@@ -261,6 +267,15 @@ class DotChatService:
             handling = self.c.message_handling.summaries(visible_messages, principal=principal)
             work_request, task_blocked = self.work_request(room, dot, principal)
             scope = {'project': room['project_id'], 'environment_id': room['environment_id'], 'dot_id': dot['id']}
+            consumer_binding = self.c.dot_consumers.active_binding(dot['id'])
+            consumer_context = None
+            if consumer_binding:
+                revision = self.c.dot_mailbox.current_revision(dot['id'], consumer_binding['generation'])
+                scope['expected_inbox_revision'] = revision
+                consumer_context = {'protocol_version': 2, 'binding_generation': consumer_binding['generation'],
+                    'expected_inbox_revision': revision,
+                    'required_credential_fields': ['consumer_session_id', 'consumer_fence', 'consumer_proof'],
+                    'credentials_source': 'own_consumer_begin_response', 'read_is_consumption': False}
             execution_targets = json.loads(self.c.dots.policy(room, dot)['spec'])['execution_targets'] if work_request else []
             context_bytes_remaining = 24000
             for row in selected:
@@ -303,12 +318,18 @@ class DotChatService:
                     'task_continuation': self.c.owner_task_context.presentation(message['id']) if json.loads(message['body']).get('task_context_schema') == 1 else None,
                     'task_request': task_request, 'task_blocked_reason': input_blocked or task_blocked,
                     'delegation_id': link['id'] if link else None})
+            if consumer_context:
+                for item in items:
+                    item['handling_arguments']['expected_inbox_revision'] = consumer_context['expected_inbox_revision']
+                    if item['existing_reply'] and item['existing_reply'].get('update_arguments'):
+                        item['existing_reply']['update_arguments']['expected_inbox_revision'] = consumer_context['expected_inbox_revision']
             cursor = sign_cursor(self.c.secret, binding, selected[-1]['sequence']) if len(rows) > args['limit'] else None
             recovery = public_request('collaboration_dot_recovery', {'project': room['project_id'],
                 'environment_id': room['environment_id'], 'dot_id': dot['id']})
             context = wake_context(self.c, principal, items, work_request, recovery, first_page=not args['cursor'])
             context['inbox_pagination_complete'] = cursor is None
             return {'dot_id': dot['id'], 'mode': 'bidirectional_chat', 'items': items,
+                    **({'consumer_context': consumer_context} if consumer_context else {}),
                     'task_context_protocol': self.task_context_protocol(),
                     'handling_capabilities': self.c.message_handling.capability(),
                     'wake_context': context,
@@ -326,6 +347,8 @@ class DotChatService:
     def acknowledge(self, raw, principal):
         with self.store.transaction():
             args, principal, room, _, dot = self.scope(raw, principal, contracts.DotChatAck, connector=True)
+            self.c.dot_consumers.guard(args, principal, room, dot,
+                require_revision=args['disposition'] == 'handled')
             receipt = self.store.one('SELECT * FROM collaboration_dot_messages WHERE dot_id=? AND message_id=?', (dot['id'], args['message_id']))
             if not receipt:
                 raise DevError('DOT_MESSAGE_NOT_ADDRESSED', '不能确认不属于这个 dot 的消息', 404)
@@ -352,6 +375,7 @@ class DotChatService:
         with self.store.transaction():
             args, principal, room, _, dot = self.scope(raw, principal,
                 contracts.DotChatMessageV2 if version2 else contracts.DotChatMessage, connector=True)
+            self.c.dot_consumers.guard(args, principal, room, dot, require_revision=bool(args['complete']))
             question_spec = args.pop('response_request', None)
             question_code = self.c.owner_task_context.code(dot, args['idempotency_key']) if question_spec else ''
             source = self.c.object('collaboration_messages', room, args['reply_to_id']) if question_spec else None
@@ -411,10 +435,14 @@ class DotChatService:
     def from_message(self, raw, principal):
         with self.store.transaction():
             args, principal, room, _, dot = self.scope(raw, principal, contracts.DotChatTask, connector=True)
+            self.c.dot_consumers.guard(args, principal, room, dot, require_revision=True)
             receipt = self.store.one('SELECT * FROM collaboration_dot_messages WHERE dot_id=? AND message_id=?', (dot['id'], args['message_id']))
             if not receipt:
                 raise DevError('DOT_MESSAGE_NOT_ADDRESSED', '工作必须来自明确发给这个 dot 的房主消息', 403)
             message = self.c.object('collaboration_messages', room, args['message_id'])
+            if (self.store.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='team_message_bindings'")
+                    and self.store.one('SELECT 1 FROM team_message_bindings WHERE message_id=?', (message['id'],))):
+                raise DevError('TEAM_SOURCE_REQUIRES_TEAM', '房主已指定团队处理这条消息，请沿用原团队工作', 409)
             body = json.loads(message['body'])
             if (not self.c.channel_owner.author(message)['authenticated']
                     or message['conversation_id'] != dot['conversation_id'] or message['version'] != args['expected_version']

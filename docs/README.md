@@ -28,6 +28,7 @@
 - [外部 MCP 网关](MCP_GATEWAY.md)与[并发隔离](GATEWAY_CONCURRENCY.md)
 - [模型/CLI 与桌面能力策略](EXECUTION_CAPABILITIES.md)
 - [原操作完成提示](OPERATION_EVENTS.md)：精确订阅、事务 outbox 与宿主消费边界
+- [MCP Events 与多 Dot](MCP_EVENTS_MULTI_DOT.md)：v2 稳定收件箱、消费会话、团队交接、恢复、现场验收及离线工具
 - [协作室](COLLABORATION_CHATROOM.md)与[统一工作区交互](COLLABORATION_WORKSPACE_UX_2026-10-11.md)
 - [协作中心流畅交互与动效](COLLABORATION_FLUID_UX_2026-10-12.md)：增量呈现、输入热路径、状态一致性、浅深色与减少动态效果
 - [有界协作恢复与通道边界](COLLABORATION_RECOVERY.md)

@@ -58,3 +58,6 @@ def migrate(db):
     db.execute("""CREATE TRIGGER IF NOT EXISTS coordination_approval_immutable
         BEFORE UPDATE ON coordination_approvals
         BEGIN SELECT RAISE(ABORT,'goal approvals are immutable'); END""")
+
+    from hub.collaboration.team_collaboration import migrate as migrate_teams
+    migrate_teams(db)

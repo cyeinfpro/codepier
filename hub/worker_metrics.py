@@ -18,18 +18,25 @@ def percentiles(values):
 class WorkerMetrics:
     """Numeric aggregates only: no SQL, parameters, labels, actors, or paths."""
     def __init__(self, sample_limit=2048):
+        if type(sample_limit) is not int or not 1 <= sample_limit <= 8192:
+            raise ValueError('Worker sample limit must be within 1..8192')
         self._lock = Lock()
         self._queue = deque(maxlen=sample_limit)
         self._run = deque(maxlen=sample_limit)
-        self.submitted = self.started = self.completed = self.failed = 0
+        self.submitted = self.started = self.completed = self.failed = self.rejected = 0
         self.peak_pending = 0
         self.since = time.time()
 
     def submit(self):
         with self._lock:
             self.submitted += 1
-            self.peak_pending = max(self.peak_pending, self.submitted-self.completed)
+            self.peak_pending = max(self.peak_pending, self.submitted-self.completed-self.rejected)
         return time.monotonic()
+
+    def reject(self):
+        # The executor rejected submission before any phase was admitted.
+        with self._lock:
+            self.rejected += 1
 
     def start(self, submitted):
         now = time.monotonic()
@@ -48,7 +55,9 @@ class WorkerMetrics:
         with self._lock:
             return {'scope': 'hub_process', 'since': self.since,
                     'submitted': self.submitted, 'completed': self.completed,
-                    'failed': self.failed, 'queued': self.submitted-self.started,
+                    'failed': self.failed, 'rejected': self.rejected,
+                    'accepted': self.submitted-self.rejected,
+                    'queued': self.submitted-self.started-self.rejected,
                     'running': self.started-self.completed, 'peak_pending': self.peak_pending,
                     'sample_limit': self._queue.maxlen, 'sample_count': len(self._queue),
                     'phase_sample_count': len(self._run), 'percentile_method': 'nearest_rank',

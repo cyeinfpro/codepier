@@ -103,13 +103,11 @@ class OperationEvents:
         # Materialize the exact delivery within this same transaction. This also
         # covers completion during callback verification and an older outbox seq.
         # Existing accepted/abandoned receipts are never silently reset.
-        delivery = self.store.execute('''INSERT OR IGNORE INTO mcp_event_deliveries
+        self.store.execute('''INSERT OR IGNORE INTO mcp_event_deliveries
             (id,subscription_id,event_id,event_seq,created) VALUES (?,?,?,?,?)''',
             (digest([subscription['id'], event['id']]), subscription['id'], event['id'],
              event['seq'], self.c.clock()))
-        loops = getattr(self.c, 'loops', None)
-        if delivery.rowcount and loops is not None:
-            self.store.after_commit(loops.wake_events)
+        # The common emit path owns the single after-commit dispatcher wake.
 
     def catch_up(self, subscription, room, principal, filters):
         self.store.require_transaction()
@@ -122,10 +120,12 @@ class OperationEvents:
         if not self.c.config.enabled or not self.c.config.events_enabled:
             return
         self.store.require_transaction()
-        operation = self.store.one('SELECT id,state,grant_id,project_id,space_id,owner_user_id FROM operations WHERE id=?',
+        operation = self.store.one('SELECT id,state,output_seq,grant_id,project_id,space_id,owner_user_id FROM operations WHERE id=?',
                                    (identifier,))
         if not operation or operation['state'] not in COMPLETED or not operation['grant_id']:
             return
+        # A v2 Dot has one stable inbox, even without a per-operation subscription.
+        self.c.dot_mailbox.operation_completed(operation)
         # Existing room/subscription limits bound fan-out. SQL selects only the
         # original ID and exact owner/grant; unrelated subscriptions incur no
         # operation reads and no broad notification is ever created.

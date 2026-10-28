@@ -236,6 +236,14 @@ def migrate(db):
     migrate_channel_consent(db)
     from hub.collaboration.channel_settings import migrate as migrate_channel_settings
     migrate_channel_settings(db)
+    from hub.collaboration.events import migrate_dispatch
+    migrate_dispatch(db)
+    from hub.collaboration.dot_consumers import migrate as migrate_dot_consumers
+    migrate_dot_consumers(db)
+    from hub.collaboration.dot_mailbox import migrate as migrate_dot_mailbox
+    migrate_dot_mailbox(db)
+    from hub.collaboration.relay_hints import migrate as migrate_relay_hints
+    migrate_relay_hints(db)
     db.execute("INSERT OR REPLACE INTO meta VALUES ('collaboration_schema','3')")
 
 def migrate_chatroom(db):

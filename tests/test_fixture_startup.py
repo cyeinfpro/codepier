@@ -72,3 +72,18 @@ def test_shared_real_stack_uses_integration_pool_without_marking_plain_helpers(t
     module = tmp_path / 'classification_fixture.py'
     module.write_text(source + '\n')
     assert module_tiers(str(module)) == expected
+
+
+@pytest.mark.parametrize('recreate', [False, True])
+def test_module_tiers_rechecks_source_when_a_path_is_reused(tmp_path, recreate):
+    from tests.classification import module_tiers
+
+    module = tmp_path / 'reused_classification_fixture.py'
+    module.write_text('from tests.support import running_stack\n', encoding='utf-8')
+    assert module_tiers(str(module)) == (False, True)
+    if recreate:
+        module.unlink()
+    module.write_text('from tests.support import wait_for\n', encoding='utf-8')
+    assert module_tiers(str(module)) == (False, False)
+    module.write_text('from playwright.sync_api import sync_playwright\n', encoding='utf-8')
+    assert module_tiers(str(module)) == (True, True)

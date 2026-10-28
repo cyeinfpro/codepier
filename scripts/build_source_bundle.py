@@ -178,6 +178,7 @@ REQUIRED_FILES = {
 }
 
 PUBLIC_DOCS = {
+    'docs/MCP_EVENTS_MULTI_DOT.md',
     'docs/PROJECT_RUNTIMES.md',
     'docs/OWNER_TASK_CONTEXT.md',
     'docs/TEST_CLEANUP.md',

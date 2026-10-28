@@ -77,10 +77,21 @@ class MessageHandling:
             WHERE l.dot_id=? AND l.message_id=? AND p.slot_id=l.dot_id''', (dot_id, message_id))
         if linked:
             return linked
-        return self.store.one("""SELECT w.id,w.state,w.version,w.goal_id FROM delegation_requests d
+        linked = self.store.one("""SELECT w.id,w.state,w.version,w.goal_id FROM delegation_requests d
             JOIN delegation_policies p ON p.id=d.policy_id
             JOIN coordination_work w ON w.id=d.work_item_id
             WHERE d.message_id=? AND p.slot_id=?""", (message_id, dot_id))
+        if linked:
+            return linked
+        # Team authority and assignment revisions, not responsibility labels,
+        # identify the one current coordinator handoff for an owner input.
+        return self.store.one("""SELECT w.id,w.state,w.version,w.goal_id FROM team_intent_sources s
+            JOIN team_goals t ON t.goal_id=s.goal_id
+            JOIN coordination_work w ON w.goal_id=t.goal_id
+            JOIN team_work_assignments a ON a.work_id=w.id
+            WHERE s.message_id=? AND a.dot_id=? AND a.dot_id=t.coordinator_dot_id
+                AND a.intent_revision=t.intent_revision AND a.coordinator_epoch=t.coordinator_epoch
+            ORDER BY w.created,w.id LIMIT 1""", (message_id, dot_id))
 
     def _save(self, dot, message, principal, scope_digest, state, reason, *,
               reply=None, work=None, evidence='consumer_declaration'):
@@ -143,6 +154,27 @@ class MessageHandling:
         self._save(dot, message, principal, self.scope_digest(room, dot), 'work_linked',
                    'existing_work', work=work, evidence='existing_work_handoff')
 
+    def record_superseded(self, room, dot, principal, message):
+        """Only an explicit owner intent revision may retire its previous input."""
+        self.c.owner(principal)
+        if message['room_id'] != room['id'] or message['conversation_id'] != dot['conversation_id']:
+            return False
+        previous = self.store.one("""SELECT 1 FROM team_intent_sources s
+            JOIN team_goals t ON t.goal_id=s.goal_id
+            WHERE s.message_id=? AND s.intent_revision<t.intent_revision
+                AND t.current_message_id!=s.message_id""", (message['id'],))
+        receipt = self.store.one('SELECT * FROM collaboration_dot_messages WHERE dot_id=? AND message_id=?',
+                                 (dot['id'], message['id']))
+        if (not previous or not receipt or receipt['message_version'] != message['version']
+                or receipt['message_digest'] != self.source_digest(message)):
+            return False
+        self._save(dot, message, principal, self.scope_digest(room, dot),
+            'no_response_required', 'owner_intent_revised', evidence='authenticated_owner_control')
+        self.store.execute("""UPDATE collaboration_dot_messages SET state='handled',
+            received_at=COALESCE(received_at,?),handled_at=COALESCE(handled_at,?)
+            WHERE dot_id=? AND message_id=?""", (self.c.clock(), self.c.clock(), dot['id'], message['id']))
+        return True
+
     def record_ack(self, room, dot, principal, message, disposition):
         # Old handled is deliberately not upgraded to a specific completion fact.
         old = self.current(dot['id'], message['id'])
@@ -163,6 +195,8 @@ class MessageHandling:
         with self.store.transaction():
             args, principal, room, _, dot = self.c.dot_chat.scope(
                 raw, principal, contracts.DotHandling, connector=True)
+            self.c.dot_consumers.guard(args, principal, room, dot,
+                require_revision=args['handling_state'] in CONTENT_FINAL)
             self.c.live_room(room)
             scope_digest = self.scope_digest(room, dot)
             if args['scope_digest'] != scope_digest:
@@ -265,7 +299,8 @@ class MessageHandling:
             r.version AS current_reply_version,r.body AS reply_body,r.room_id AS reply_room_id,
             r.conversation_id AS reply_conversation_id,r.thread_root_id AS reply_root,
             r.origin AS reply_origin,r.kind AS reply_kind,
-            w.id AS linked_work_id,w.state AS work_state,w.goal_id AS work_goal_id
+            w.id AS linked_work_id,w.state AS work_state,w.goal_id AS work_goal_id,
+            tp.message_id AS team_reply_id
             FROM collaboration_dot_messages d JOIN collaboration_messages m ON m.id=d.message_id
             LEFT JOIN dot_message_handling h ON h.dot_id=d.dot_id AND h.message_id=d.message_id
             LEFT JOIN collaboration_messages r ON r.id=h.reply_id
@@ -273,7 +308,15 @@ class MessageHandling:
             LEFT JOIN delegation_requests dr ON dr.id=COALESCE(tl.delegation_id,
                 (SELECT id FROM delegation_requests WHERE message_id=d.message_id))
             LEFT JOIN delegation_policies p ON p.id=dr.policy_id AND p.slot_id=d.dot_id
-            LEFT JOIN coordination_work w ON w.id=dr.work_item_id AND p.id IS NOT NULL
+            LEFT JOIN team_intent_sources ts ON ts.message_id=d.message_id
+            LEFT JOIN team_goals tg ON tg.goal_id=ts.goal_id
+            LEFT JOIN team_work_assignments ta ON ta.work_id=h.work_item_id AND ta.dot_id=d.dot_id
+                AND ta.intent_revision=tg.intent_revision
+            LEFT JOIN coordination_work w ON w.id=CASE WHEN p.id IS NOT NULL THEN dr.work_item_id
+                WHEN ta.work_id IS NOT NULL THEN ta.work_id END
+                AND (p.id IS NOT NULL OR w.goal_id=tg.goal_id)
+            LEFT JOIN team_publications tp ON tp.message_id=r.id AND tp.goal_id=tg.goal_id
+                AND tp.intent_revision=tg.intent_revision
             WHERE d.message_id IN ({','.join('?' for _ in ids)})""", tuple(ids))
         scopes, work_access = {}, {}
         result = {}
@@ -298,8 +341,9 @@ class MessageHandling:
                     and row['reply_room_id'] == row['source_room_id']
                     and row['reply_conversation_id'] == row['source_conversation_id']
                     and row['reply_root'] == row['source_root']
-                    and row['reply_origin'] == 'bound_connector' and row['reply_kind'] == 'reply'
-                    and reply_body.get('sender_dot_id') == row['dot_id']
+                    and row['reply_origin'] == 'bound_connector'
+                    and ((row['reply_kind'] == 'reply' and reply_body.get('sender_dot_id') == row['dot_id'])
+                         or (row['reply_kind'] == 'team_result' and row['team_reply_id'] == reply_id))
                     and self.c.chatroom.message_visible(principal, {'body': row['reply_body']}))
                 evidence_valid &= reply_visible and reply_version == row['current_reply_version']
                 if state in {'covered', 'reply_committed'}:

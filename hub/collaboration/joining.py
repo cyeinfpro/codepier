@@ -5,7 +5,7 @@ import secrets
 import uuid
 from hub.principal import refresh_principal
 from hub.collaboration.common import (
-    TASK_EVENT, RESULT_EVENT, INCIDENT_EVENT, STATUS_EVENT, canonical, digest, redact, validate,
+    TASK_EVENT, RESULT_EVENT, INCIDENT_EVENT, STATUS_EVENT, MAILBOX_EVENT, canonical, digest, redact, validate,
 )
 from shared import collaboration_contracts as contracts
 from shared.util import DevError
@@ -158,6 +158,8 @@ class JoiningService:
             if old['slot_id'] != identifier:
                 raise DevError('JOIN_ROUTE_CONFLICT', '已有订阅不能重新绑定到另一个智能体位置', 409)
             if not reset_verification and old['endpoint_digest'] == endpoint and old['credential_digest'] == subscription['key_digest']:
+                if subscription['name'] == MAILBOX_EVENT:
+                    self.c.dot_mailbox.activate_subscription(room, principal, filters, subscription, restoring=reset_verification)
                 return
             self.store.execute('''UPDATE collaboration_join_routes SET endpoint_digest=?,credential_digest=?,
                 confirmed_event_id='',confirmed_at=NULL,confirmed_by='',test_after_seq=? WHERE subscription_id=?''',
@@ -172,6 +174,8 @@ class JoiningService:
                 (subscription_id,slot_id,endpoint_digest,credential_digest,test_after_seq,created) VALUES (?,?,?,?,?,?)''',
                 (subscription['id'], identifier, endpoint, subscription['key_digest'], watermark, self.c.clock()))
         self.store.execute('UPDATE collaboration_join_slots SET version=version+1,updated=? WHERE id=?', (self.c.clock(), identifier))
+        if subscription['name'] == MAILBOX_EVENT:
+            self.c.dot_mailbox.activate_subscription(room, principal, filters, subscription, restoring=reset_verification)
 
     def latest_test(self, subscription, after_seq):
         events = self.store.all('''SELECT * FROM mcp_event_outbox WHERE room_id=? AND name=?

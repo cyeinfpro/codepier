@@ -1317,3 +1317,117 @@
 .cc-workspace[data-restored-room='true'] .cc-workspace-nav [data-cc-view='agents'] {
   display: none;
 }
+
+/* One team entry and coordinator, with member evidence disclosed on demand. */
+.cc-team-list {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  margin-bottom: 20px;
+}
+.cc-team-list .cc-row h3 {
+  margin: 0;
+}
+.cc-team-card {
+  border: 1px solid var(--border, #dce1e8);
+  border-radius: 12px;
+  overflow: hidden;
+  min-width: 0;
+}
+.cc-team-option {
+  display: grid;
+  gap: 5px;
+  width: 100%;
+  min-height: 64px;
+  padding: 14px;
+  border: 0;
+  text-align: left;
+  color: inherit;
+  background: var(--ui-panel);
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.cc-team-option[aria-pressed='true'] {
+  background: var(--ui-lilac);
+}
+.cc-team-option:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+.cc-team-option:focus-visible {
+  outline-offset: -3px;
+}
+.cc-team-option span,
+.cc-team-option small {
+  line-height: 1.5;
+}
+.cc-team-controls {
+  border-top: 1px solid var(--border, #dce1e8);
+  padding: 10px 14px;
+}
+.cc-team-controls summary,
+.cc-team-work summary {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+.cc-team-controls p,
+.cc-team-progress,
+.cc-team-context {
+  overflow-wrap: anywhere;
+}
+.cc-team-context {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin-bottom: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--ui-lilac);
+  min-width: 0;
+}
+.cc-team-context small {
+  flex: 1 1 180px;
+}
+.cc-team-context .btn {
+  min-height: 44px;
+}
+.cc-team-progress {
+  padding: 14px;
+  border-radius: 12px;
+  background: var(--ui-lilac);
+  margin: 16px 0;
+}
+.cc-team-progress p:last-child {
+  margin-bottom: 0;
+}
+.cc-team-work {
+  border-top: 1px solid var(--border, #dce1e8);
+  padding: 8px 0;
+}
+#cc-team-create input[type='checkbox'] {
+  flex: 0 0 auto;
+}
+#cc-team-create .cc-check {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  line-height: 1.6;
+}
+@media (max-width: 640px) {
+  .cc-team-context {
+    padding: 8px 10px;
+    gap: 4px 8px;
+  }
+  .cc-team-context small {
+    flex-basis: 100%;
+  }
+  .cc-team-option {
+    padding: 12px;
+  }
+  #cc-team-create .cc-two {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

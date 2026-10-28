@@ -303,6 +303,12 @@ window.CodePierCollaboration = (() => {
     projectLabel,
     roomProjects,
     when,
+    chat,
+    mentionSlots: () => mentionSlots(),
+    patchDraftContext,
+    patchDelegationComposer: () => patchDelegationComposer(),
+    selectPolicy: (...args) => delegation.selectPolicy(...args),
+    onProjectionChange: () => workspaceUI.refresh(),
   });
 
   function detach() {
@@ -467,6 +473,7 @@ window.CodePierCollaboration = (() => {
         older: '',
         draft: '',
         mentions: [],
+        teamId: '',
         delegationPolicy: '',
         delegationVersion: 0,
         delegationAutomatic: false,
@@ -695,7 +702,10 @@ window.CodePierCollaboration = (() => {
   function draftContext() {
     const c = chat(),
       reply = messageById(c.reply);
-    return `${relay.topicHint()}${c.reply ? `<div class="cc-reply-preview">回复：${E(reply ? messageText(reply).slice(0, 100) : '已选择的房间消息')}${button('clear-reply', '取消回复')}</div>` : ''}${c.mentions
+    return `${c.teamId ? coordination.teamChip() : relay.topicHint()}${c.reply ? `<div class="cc-reply-preview">回复：${E(reply ? messageText(reply).slice(0, 100) : '已选择的房间消息')}${button('clear-reply', '取消回复')}</div>` : ''}${(c.teamId
+      ? []
+      : c.mentions
+    )
       .map((id) => {
         const slot = (state.snapshot.join_slots || []).find((s) => s.id === id);
         return `<button type="button" class="cc-mention-chip" data-cc-action="remove-mention" data-id="${E(id)}">@${E(slot?.label || '位置已不可用')} ×</button>`;
@@ -796,7 +806,13 @@ window.CodePierCollaboration = (() => {
   }
   function patchDraftContext() {
     const node = document.querySelector('#cc-draft-context');
-    if (node) node.innerHTML = draftContext();
+    if (node) {
+      const markup = draftContext();
+      if (node._ccDraftMarkup !== markup) {
+        node.innerHTML = markup;
+        node._ccDraftMarkup = markup;
+      }
+    }
   }
   function mergeMessages(items) {
     const c = chat();
@@ -1425,6 +1441,8 @@ window.CodePierCollaboration = (() => {
     mergeMessages,
     recoverAccess,
     onWorkspaceChange: () => workspaceUI.refresh(),
+    teamAvailable: coordination.teamAvailable,
+    updateGoalProjection: coordination.updateProjection,
   });
 
   const workspaceUI = window.CodePierCollaborationWorkspace.create({
@@ -1705,7 +1723,7 @@ window.CodePierCollaboration = (() => {
         grant.id || grant.grant_id,
         `${grant.label || '只读连接'} · ${(grant.id || grant.grant_id).slice(-6)}`,
       ]);
-    return `<section class="cc-stack">${joining()}<details class="cc-advanced"><summary>高级：任务用途绑定与事件订阅</summary><h2>独立任务资格</h2><p class="cc-hint">登记、订阅有效和最近响应是三件事。同一连接中的聊天不能仅凭名字彼此隔离。</p>${d.agents.map((agent) => `<article class="cc-card"><div class="cc-row"><strong>${E(agent.label)} <small>${agent.kind === 'dot' ? 'dot' : 'Work Cloud'} · ${E(agent.id.slice(-6))}</small></strong>${badge(agent.binding_status)}</div><dl class="cc-facts"><div><dt>有效订阅</dt><dd>${agent.valid_subscriptions}</dd></div><div><dt>最近领取</dt><dd>${E(when(agent.last_claim))}</dd></div><div><dt>最近结果</dt><dd>${E(when(agent.last_result))}</dd></div></dl><small>用途绑定到期：${E(when(agent.expires_at))} · 原始聊天身份未做密码学验证</small>${d.can_manage ? `<div class="cc-actions">${button(agent.enabled ? 'agent_disable' : 'agent_enable', agent.enabled ? '停用此用途' : '启用此用途', agent)}${button('agent_renew', '确认续期 7 天', agent)}</div>` : ''}</article>`).join('') || empty('先在目标 Work 或 dot 聊天连接一个只读 CodePier 连接，再登记其用途。')}${d.can_manage ? `<details class="cc-card"><summary>登记智能体用途</summary><form id="cc-agent" class="cc-form"><div class="cc-two">${field('显示名称', '<input name="label" maxlength="80" required>')}${field('类型', '<select name="kind"><option value="work_cloud">Work Cloud · 只读分析</option><option value="dot">dot · 协调与汇总</option></select>')}</div>${field('现有只读连接', `<select name="grant_id" required>${options(available, '', '选择现有连接')}</select>`)}<small>这里只绑定现有授权，不创建凭据或扩大权限。没有候选连接时，请在 MCP 接入中创建项目限定的只读连接。</small><button class="btn" type="submit">确认登记 7 天</button></form></details>` : ''}<h2>事件订阅</h2>${d.subscriptions.map((sub) => `<article class="cc-card"><div class="cc-row"><strong>${E(sub.name.replace('codepier.', ''))}</strong>${badge(sub.state)}</div><p>${E(sub.arguments.queue || '项目结果与状态')} · ${E(sub.id.slice(-8))}</p><dl class="cc-facts"><div><dt>到期</dt><dd>${E(when(sub.expires_at))}</dd></div><div><dt>最近接收</dt><dd>${E(when(sub.last_accepted))}</dd></div></dl><small>接收回执不代表已领取或用户已读。回调地址与签名材料不在面板显示。</small>${d.can_manage ? `<div class="cc-actions">${button('subscription_test', '发送无敏感测试事件', sub)}${button(sub.state === 'paused' ? 'subscription_resume' : 'subscription_pause', sub.state === 'paused' ? '恢复投递' : '暂停投递', sub)}</div>` : ''}</article>`).join('') || empty('订阅必须由对应的 Work / dot 聊天发起。面板不会代替用户创建或控制聊天。')}${d.subscriptions_next_cursor ? button('more', '加载更多订阅', {}, 'data-kind="subscriptions"') : ''}</details></section>`;
+    return `<section class="cc-stack">${coordination.teamPicker()}${joining()}<details class="cc-advanced"><summary>高级：任务用途绑定与事件订阅</summary><h2>独立任务资格</h2><p class="cc-hint">登记、订阅有效和最近响应是三件事。同一连接中的聊天不能仅凭名字彼此隔离。</p>${d.agents.map((agent) => `<article class="cc-card"><div class="cc-row"><strong>${E(agent.label)} <small>${agent.kind === 'dot' ? 'dot' : 'Work Cloud'} · ${E(agent.id.slice(-6))}</small></strong>${badge(agent.binding_status)}</div><dl class="cc-facts"><div><dt>有效订阅</dt><dd>${agent.valid_subscriptions}</dd></div><div><dt>最近领取</dt><dd>${E(when(agent.last_claim))}</dd></div><div><dt>最近结果</dt><dd>${E(when(agent.last_result))}</dd></div></dl><small>用途绑定到期：${E(when(agent.expires_at))} · 原始聊天身份未做密码学验证</small>${d.can_manage ? `<div class="cc-actions">${button(agent.enabled ? 'agent_disable' : 'agent_enable', agent.enabled ? '停用此用途' : '启用此用途', agent)}${button('agent_renew', '确认续期 7 天', agent)}</div>` : ''}</article>`).join('') || empty('先在目标 Work 或 dot 聊天连接一个只读 CodePier 连接，再登记其用途。')}${d.can_manage ? `<details class="cc-card"><summary>登记智能体用途</summary><form id="cc-agent" class="cc-form"><div class="cc-two">${field('显示名称', '<input name="label" maxlength="80" required>')}${field('类型', '<select name="kind"><option value="work_cloud">Work Cloud · 只读分析</option><option value="dot">dot · 协调与汇总</option></select>')}</div>${field('现有只读连接', `<select name="grant_id" required>${options(available, '', '选择现有连接')}</select>`)}<small>这里只绑定现有授权，不创建凭据或扩大权限。没有候选连接时，请在 MCP 接入中创建项目限定的只读连接。</small><button class="btn" type="submit">确认登记 7 天</button></form></details>` : ''}<h2>事件订阅</h2>${d.subscriptions.map((sub) => `<article class="cc-card"><div class="cc-row"><strong>${E(sub.name.replace('codepier.', ''))}</strong>${badge(sub.state)}</div><p>${E(sub.arguments.queue || '项目结果与状态')} · ${E(sub.id.slice(-8))}</p><dl class="cc-facts"><div><dt>到期</dt><dd>${E(when(sub.expires_at))}</dd></div><div><dt>最近接收</dt><dd>${E(when(sub.last_accepted))}</dd></div></dl><small>接收回执不代表已领取或用户已读。回调地址与签名材料不在面板显示。</small>${d.can_manage ? `<div class="cc-actions">${button('subscription_test', '发送无敏感测试事件', sub)}${button(sub.state === 'paused' ? 'subscription_resume' : 'subscription_pause', sub.state === 'paused' ? '恢复投递' : '暂停投递', sub)}</div>` : ''}</article>`).join('') || empty('订阅必须由对应的 Work / dot 聊天发起。面板不会代替用户创建或控制聊天。')}${d.subscriptions_next_cursor ? button('more', '加载更多订阅', {}, 'data-kind="subscriptions"') : ''}</details></section>`;
   }
   function sidebar() {
     const d = state.snapshot;
@@ -2045,7 +2063,8 @@ window.CodePierCollaboration = (() => {
       return { local: true, message: '当前显示恢复的历史；继续执行请新建房间并明确接入助手。' };
     if (action.startsWith('dot-')) return dots.act(action, element);
     const local = { local: true, message: '' };
-    if (action.startsWith('goal-')) return coordination.act(action, element);
+    if (action.startsWith('goal-') || action.startsWith('team-'))
+      return coordination.act(action, element);
     if (
       [
         'result',
@@ -2445,7 +2464,8 @@ window.CodePierCollaboration = (() => {
         const legacy = mentionSlots().filter((slot) => !slot.task_dot);
         showDrawer(
           '选择 dot',
-          dots.picker() +
+          coordination.teamPicker() +
+            dots.picker() +
             (legacy.length
               ? '<details><summary>其他助手</summary>' +
                 legacy
@@ -2463,7 +2483,7 @@ window.CodePierCollaboration = (() => {
       }
       showDrawer(
         '选择提醒对象',
-        `<p>选择已确认范围内的委托，或仅发送讨论提醒。正文不会自动决定执行方式。</p><div class="cc-mention-options">${slots.map((s) => `<div class="cc-mention-row">${delegation.pickerAction(s)}<button type="button" class="cc-mention-option" data-cc-action="pick-mention" data-id="${E(s.id)}" aria-pressed="${chat().mentions.includes(s.id) && !chat().delegationPolicy}"><strong>仅讨论提醒 · ${E(s.label)}</strong><span>${s.kind === 'dot' ? 'dot' : 'Work'} · ${E(s.id.slice(-6))}</span><small data-cc-mention-status="${E(s.id)}">${E(mentionReadiness(s))}</small></button>${button('mention-connect', '接通与回帖设置', s)}</div>`).join('') || empty('还没有聊天连接。先添加 dot 或 Work。')}</div>${button('open-members', '添加或管理助手连接')}<p class="cc-hint">请使用此处的结构化选择。纯文本 @ 不会派发；名称不证明独立聊天身份。</p>`,
+        `${coordination.teamPicker()}<p>选择已确认范围内的委托，或仅发送讨论提醒。正文不会自动决定执行方式。</p><div class="cc-mention-options">${slots.map((s) => `<div class="cc-mention-row">${delegation.pickerAction(s)}<button type="button" class="cc-mention-option" data-cc-action="pick-mention" data-id="${E(s.id)}" aria-pressed="${chat().mentions.includes(s.id) && !chat().delegationPolicy}"><strong>仅讨论提醒 · ${E(s.label)}</strong><span>${s.kind === 'dot' ? 'dot' : 'Work'} · ${E(s.id.slice(-6))}</span><small data-cc-mention-status="${E(s.id)}">${E(mentionReadiness(s))}</small></button>${button('mention-connect', '接通与回帖设置', s)}</div>`).join('') || empty('还没有聊天连接。先添加 dot 或 Work。')}</div>${button('open-members', '添加或管理助手连接')}<p class="cc-hint">请使用此处的结构化选择。纯文本 @ 不会派发；名称不证明独立聊天身份。</p>`,
         element,
       );
       return local;
@@ -2512,6 +2532,11 @@ window.CodePierCollaboration = (() => {
       )
         throw new Error('委托范围已改变，请重新打开 @ 选择器核对；正文已保留。');
       const c = chat();
+      if (c.teamId) {
+        c.reply = '';
+        c.relayAnchor = null;
+      }
+      c.teamId = '';
       c.mentions = [element.dataset.id];
       delegation.selectPolicy(
         policy,
@@ -2529,6 +2554,12 @@ window.CodePierCollaboration = (() => {
     if (action === 'pick-mention' || action === 'remove-mention') {
       const c = chat(),
         id = element.dataset.id;
+      if (c.teamId) {
+        c.teamId = '';
+        c.mentions = [];
+        c.reply = '';
+        c.relayAnchor = null;
+      }
       c.mentions =
         action === 'pick-mention' && c.delegationPolicy
           ? [id]
@@ -2559,9 +2590,18 @@ window.CodePierCollaboration = (() => {
       const sender =
         source?.sender_dot_id &&
         mentionSlots().find((slot) => slot.id === source.sender_dot_id && slot.duplex);
-      if (sender) {
-        chat().mentions = [sender.id];
+      const sourceTeamId = source?.team_id || source?.body?.team_id;
+      if (sourceTeamId) {
+        const team = (state.snapshot.teams || []).find((value) => value.id === sourceTeamId);
+        chat().teamId = sourceTeamId;
+        chat().mentions = team ? [team.coordinator_dot_id] : [];
         delegation.selectPolicy(null);
+      } else if (source) {
+        chat().teamId = '';
+        if (sender) {
+          chat().mentions = [sender.id];
+          delegation.selectPolicy(null);
+        }
       }
       if (chat().delegationAutomatic && !dots.selected()) delegation.selectPolicy(null);
       patchDraftContext();
@@ -2860,7 +2900,8 @@ window.CodePierCollaboration = (() => {
     )
       return { local: true, message: '历史已恢复，原执行权限未恢复。请新建房间并明确接入助手。' };
     if (form.id === 'cc-dot-create') return dots.submit(form);
-    if (form.id.startsWith('cc-goal-')) return coordination.submit(form);
+    if (form.id.startsWith('cc-goal-') || form.id.startsWith('cc-team-'))
+      return coordination.submit(form);
     const data = Object.fromEntries(new FormData(form));
     if (form.id === 'cc-project-scope-revoke') {
       const payload = {
@@ -3115,10 +3156,18 @@ window.CodePierCollaboration = (() => {
         ...chatScope(),
         room_id: room,
         body_text: data.request.trim(),
+        ...(c.teamId ? { team_id: c.teamId } : {}),
         reply_to_id: c.reply,
         mentions: c.mentions.map((slot_id) => ({ slot_id })),
       };
       if (!payload.body_text) throw new Error('先写一条消息。');
+      if (
+        c.teamId &&
+        (c.mentions.length !== 1 ||
+          c.delegationPolicy ||
+          !coordination.teamAvailable(c.teamId, c.mentions[0]))
+      )
+        throw new Error('团队范围或主责连接已变化，请重新核对团队；正文已保留。');
       if (c.delegationPolicy) {
         if (!selectedDelegationValid())
           throw new Error('委托授权、版本或所选助手已改变，请重新核对；正文已保留。');
@@ -3461,6 +3510,7 @@ window.CodePierCollaboration = (() => {
       if (state.busy === token) state.busy = false;
       releaseBusy();
       if (state.busyCleanup === releaseBusy) state.busyCleanup = null;
+      if (stillCurrent) state.relayPollWake?.();
       const feedback = document.querySelector('#cc-feedback');
       if (feedback && stillCurrent) {
         feedback.textContent = state.notes;
@@ -3761,8 +3811,15 @@ window.CodePierCollaboration = (() => {
     expireInvitations(root);
     if (state.snapshot?.room && state.snapshot.capabilities?.plain_messages) {
       const generation = state.generation;
+      let polling = false,
+        pollAgain = false;
       const poll = async () => {
         if (generation !== state.generation || S.page !== 'collaboration') return;
+        if (polling) {
+          pollAgain = true;
+          return;
+        }
+        polling = true;
         try {
           if (!document.hidden && !state.busy) {
             if (relay.focused()) await relay.sync();
@@ -3777,8 +3834,18 @@ window.CodePierCollaboration = (() => {
             }
           }
         }
-        if (generation === state.generation)
-          state.timer = setTimeout(poll, relay.focused() ? relay.delay() : 5000);
+        polling = false;
+        if (generation === state.generation) {
+          clearTimeout(state.timer);
+          state.timer = setTimeout(poll, pollAgain ? 0 : relay.focused() ? relay.delay() : 5000);
+          pollAgain = false;
+        }
+      };
+      state.relayPollWake = () => {
+        if (generation !== state.generation || S.page !== 'collaboration') return;
+        clearTimeout(state.timer);
+        if (polling) pollAgain = true;
+        else state.timer = setTimeout(poll, 0);
       };
       state.timer = setTimeout(poll, relay.active() ? 1200 : 5000);
     }

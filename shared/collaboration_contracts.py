@@ -45,7 +45,7 @@ class Read(Scope):
     kind: Literal['overview', 'jobs', 'messages', 'goals', 'incidents', 'agents',
                   'subscriptions', 'join_slots', 'job', 'result', 'evidence', 'plan',
                   'rooms', 'timeline', 'thread', 'search', 'members', 'changes', 'message_status',
-                  'coordination_goals', 'coordination_goal', 'coordination_options', 'delegation_policies', 'delegations'] = 'overview'
+                  'coordination_goals', 'coordination_goal', 'coordination_options', 'delegation_policies', 'delegations', 'teams'] = 'overview'
     id: str = Field(default='', max_length=128)
     cursor: str = Field(default='', max_length=2048)
     limit: int = Field(default=40, ge=1, le=100)
@@ -120,6 +120,7 @@ class DelegationSend(Model):
 
 
 class MessageCreate(Scope):
+    team_id: str = Field(default='', max_length=128, exclude_if=lambda value: not value)
     conversation_id: str = Field(default='', max_length=128)
     pending_scope_revision: str = Field(default='', pattern=r'^(|[a-f0-9]{64})$')
     room_id: Identifier
@@ -134,6 +135,8 @@ class MessageCreate(Scope):
 
     @model_validator(mode='after')
     def explicit_dispatch(self):
+        if self.team_id and (self.dispatch_mode != 'discussion' or self.delegation is not None):
+            raise ValueError('A team request cannot also dispatch an individual delegation')
         if self.dispatch_mode == 'automatic' and self.automatic_policy_version < 1:
             raise ValueError('Automatic dispatch requires the reviewed policy version')
         if self.dispatch_mode == 'automatic' and (self.delegation is not None or self.reply_to_id or len(self.mentions) != 1):
@@ -643,9 +646,17 @@ class GoalControl(Scope):
 
 class GoalRead(Scope):
     goal_id: Identifier
+    dot_id: str = Field(default='', max_length=128, exclude_if=lambda value: not value)
+    coordinator_epoch: int = Field(default=0, ge=0, strict=True, exclude_if=lambda value: not value)
+    consumer_session_id: str = Field(default='', max_length=128, exclude_if=lambda value: not value)
+    consumer_fence: int | None = Field(default=None, ge=1, strict=True, exclude_if=lambda value: value is None)
+    consumer_proof: str = Field(default='', max_length=256, exclude_if=lambda value: not value)
+    expected_inbox_revision: int | None = Field(default=None, ge=0, strict=True, exclude_if=lambda value: value is None)
+    expected_intent_revision: int | None = Field(default=None, ge=0, strict=True, exclude_if=lambda value: value is None)
 
 
 class WorkCreate(GoalRead):
+    assignee_dot_id: str = Field(default='', max_length=128, exclude_if=lambda value: not value)
     required_capabilities: list[GoalCapability] = Field(default_factory=lambda: ['read'], min_length=1, max_length=3)
     objective: str = Field(min_length=1, max_length=4000)
     acceptance: str = Field(min_length=1, max_length=2000)
@@ -664,6 +675,7 @@ class WorkCreate(GoalRead):
 
 
 class WorkAssign(GoalRead):
+    assignee_dot_id: str = Field(default='', max_length=128, exclude_if=lambda value: not value)
     work_item_id: Identifier
     assignee_grant_id: Identifier
     expected_version: int = Field(ge=1)
@@ -845,6 +857,11 @@ class DotCreate(Scope):
 
 class DotRead(Scope):
     dot_id: Identifier
+    consumer_session_id: str = Field(default='', max_length=128, exclude_if=lambda value: not value)
+    consumer_fence: int | None = Field(default=None, ge=1, strict=True, exclude_if=lambda value: value is None)
+    consumer_proof: str = Field(default='', max_length=256, exclude_if=lambda value: not value)
+    expected_inbox_revision: int | None = Field(default=None, ge=0, strict=True, exclude_if=lambda value: value is None)
+    expected_intent_revision: int | None = Field(default=None, ge=0, strict=True, exclude_if=lambda value: value is None)
 
 
 class DotInbox(DotRead):

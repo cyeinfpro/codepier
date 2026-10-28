@@ -173,8 +173,12 @@ class TaskLiveness:
         if not messages:
             return []
         ids = [row['id'] for row in messages][:124]
+        # CPJ policies are valid delegations but do not have a Dot scope
+        # manifest. Only actual task/duplex Dots receive this liveness overlay.
         rows = self.store.all('''SELECT w.*,r.message_id,p.slot_id AS dot_id
             FROM delegation_requests r JOIN delegation_policies p ON p.id=r.policy_id
+            JOIN collaboration_dots dot ON dot.id=p.slot_id AND dot.room_id=p.room_id
+                AND dot.conversation_id=p.conversation_id
             JOIN coordination_work w ON w.id=r.work_item_id
             WHERE r.message_id IN (''' + ','.join('?' for _ in ids) + ')', tuple(ids))
         permitted = []
@@ -199,18 +203,36 @@ class TaskLiveness:
 
     def recovery(self, raw, principal):
         with self.store.transaction(immediate=False):
-            args, principal, room, _, dot = self.c.dot_chat.scope(raw, principal, contracts.DotRecovery)
+            args, principal, room, slot, dot = self.c.dot_chat.scope(raw, principal, contracts.DotRecovery)
             binding = digest(['dot-work-recovery-v1', room['id'], dot['id'], dot['setup_digest'],
                               principal.grant_id or principal.user_id, args['include_completed']])
             after = read_cursor(self.c.secret, binding, args['cursor']) if args['cursor'] else ''
             if not isinstance(after, str) or len(after) > 128:
                 raise DevError('INVALID_CURSOR', '恢复游标无效', 400)
-            rows = self.store.all('''SELECT w.*,r.id AS delegation_id,r.message_id FROM coordination_work w
-                JOIN delegation_requests r ON r.work_item_id=w.id
-                JOIN delegation_policies p ON p.id=r.policy_id WHERE p.slot_id=? AND p.room_id=?
-                AND p.conversation_id=? AND w.id>? AND (? OR w.result IS NULL)
-                ORDER BY w.id LIMIT ?''',
-                (dot['id'], room['id'], dot['conversation_id'], after, args['include_completed'], args['limit'] + 1))
+            # Merge original personal and team work into the same bounded,
+            # signed cursor stream. Assignment is a server-owned Dot mapping;
+            # a shared grant must never fan recovery out to another Dot.
+            rows = self.store.all('''WITH recoverable AS (
+                SELECT w.*,r.id AS delegation_id,r.message_id,'' AS team_id,
+                    NULL AS team_intent_revision,NULL AS work_intent_revision,NULL AS coordinator_epoch
+                FROM coordination_work w JOIN delegation_requests r ON r.work_item_id=w.id
+                JOIN delegation_policies p ON p.id=r.policy_id
+                WHERE p.slot_id=? AND p.room_id=? AND p.conversation_id=?
+                    AND w.id>? AND (? OR w.result IS NULL)
+                UNION ALL
+                SELECT w.*,'' AS delegation_id,
+                    COALESCE((SELECT s.message_id FROM team_intent_sources s WHERE s.goal_id=w.goal_id
+                        AND s.intent_revision=a.intent_revision LIMIT 1),t.current_message_id) AS message_id,
+                    t.team_id,t.intent_revision AS team_intent_revision,a.intent_revision AS work_intent_revision,
+                    t.coordinator_epoch
+                FROM coordination_work w JOIN team_work_assignments a ON a.work_id=w.id
+                JOIN team_goals t ON t.goal_id=w.goal_id JOIN coordination_goals g ON g.id=w.goal_id
+                WHERE a.dot_id=? AND w.assignee_grant_id=? AND g.room_id=? AND g.conversation_id=?
+                    AND w.id>? AND (? OR w.result IS NULL)
+            ) SELECT * FROM recoverable ORDER BY id LIMIT ?''',
+                (dot['id'], room['id'], dot['conversation_id'], after, args['include_completed'],
+                 dot['id'], slot['grant_id'], room['id'], dot['conversation_id'], after,
+                 args['include_completed'], args['limit'] + 1))
             selected, permitted = rows[:args['limit']], []
             for row in selected:
                 message = self.c.object('collaboration_messages', room, row['message_id'])
@@ -226,13 +248,24 @@ class TaskLiveness:
                     'limit': args['limit'], 'include_completed': args['include_completed']}
             cursor = sign_cursor(self.c.secret, binding, selected[-1]['id']) if len(rows) > args['limit'] else None
             items = [{**summaries[row['id']], 'message_id': row['message_id'],
-                'read_request': self.c.delegation.read_request(room, row['delegation_id']),
+                'lease_state': ('active' if row['state'] in {'leased', 'running'} and
+                    (row['lease_until'] or 0) > self.c.clock() else 'expired' if row['lease_until'] else 'none'),
+                **({'team_id': row['team_id'], 'assignee_dot_id': dot['id'],
+                    'intent_revision': row['team_intent_revision'], 'work_intent_revision': row['work_intent_revision'],
+                    'coordinator_epoch': row['coordinator_epoch'],
+                    'current_intent': row['team_intent_revision'] == row['work_intent_revision']} if row['team_id'] else {}),
+                'read_request': (public_request('collaboration_goal_read', {
+                    'project': room['project_id'], 'environment_id': room['environment_id'], 'goal_id': row['goal_id']})
+                    if row['team_id'] else self.c.delegation.read_request(room, row['delegation_id'])),
                 'operations_request': public_request('collaboration_work_evidence', {
                     'project': room['project_id'], 'environment_id': room['environment_id'],
                     'goal_id': row['goal_id'], 'work_item_id': row['id']})} for row in permitted]
             return {'items': items, 'next_cursor': cursor, 'server_now': self.c.clock(), 'dot_id': dot['id'],
                 'next_page_request': public_request('collaboration_dot_recovery', {**base, 'cursor': cursor}) if cursor else None,
                 'resume_request': public_request('collaboration_dot_recovery', base),
+                'instructions': 'Recover the original work, attempt, lease and operation IDs. Read every operations_request page and '
+                    'query original operation receipts. A replacement consumer session does not renew a work lease or authorize '
+                    'reclaim/replay. Re-read current goal intent and approval before any new managed action.',
                 'read_only': True, 'grants_authority': False,
                 'scope_boundary': self.c.dots.scope_manifest(room, dot)}
 

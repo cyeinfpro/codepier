@@ -15,6 +15,24 @@ from shared.core_contracts import Replacement, Resource
 from shared.coding_contracts import PatchChange
 from shared.util import DevError
 
+from shared.dot_consumer_contracts import ConsumerBegin, ConsumerLease, ConsumerRead, ConsumerYield
+from shared.dot_mailbox_contracts import MODEL_MAP as MAILBOX_MODELS
+from shared.team_collaboration_contracts import TOOL_MODELS as TEAM_MODELS
+
+# Register in place after the base module has finished loading; extension models
+# may also be imported first by a service without introducing an import cycle.
+EXTENSION_MODELS = {
+    **MAILBOX_MODELS,
+    **{name: model for name, model in TEAM_MODELS.items()
+       if name not in {'collaboration_team_create', 'collaboration_team_control',
+                       'collaboration_team_revise_intent'}},
+    'collaboration_consumer_begin': ConsumerBegin,
+    'collaboration_consumer_heartbeat': ConsumerLease,
+    'collaboration_consumer_yield': ConsumerYield,
+    'collaboration_consumer_read': ConsumerRead,
+}
+c.TOOL_MODELS.update(EXTENSION_MODELS)
+
 PUBLIC_TOOLS = frozenset({'collaboration_query', 'collaboration', 'collaboration_work'})
 LEGACY_TOOLS = frozenset(c.TOOL_MODELS)
 
@@ -149,6 +167,10 @@ class ExecuteCommand(ExecutionIntent):
 Execute = Annotated[Union[ExecuteRead, ExecuteWrite, ExecuteEdit, ExecuteCommand],
                     Field(discriminator='tool')]
 _QUERY = {
+    'team': 'collaboration_team_read',
+    'teams': 'collaboration_team_list',
+    'dot_consumer': 'collaboration_consumer_read',
+    'dot_mailbox': 'collaboration_dot_mailbox',
     'goal': 'collaboration_goal_read',
     'delegation': 'collaboration_delegation_read',
     'connection': 'collaboration_delegation_connection_read',
@@ -161,6 +183,15 @@ _QUERY = {
     'plan_validate': 'monitor_plan_validate',
 }
 _DISCUSSION = {
+    'consumer_begin': 'collaboration_consumer_begin',
+    'consumer_heartbeat': 'collaboration_consumer_heartbeat',
+    'consumer_yield': 'collaboration_consumer_yield',
+    'dot_mailbox_configure': 'collaboration_dot_mailbox_configure',
+    'dot_mailbox_ack': 'collaboration_dot_mailbox_ack',
+    'dot_mailbox_recover': 'collaboration_dot_mailbox_recover',
+    'team_handoff': 'collaboration_team_handoff',
+    'team_takeover': 'collaboration_team_takeover',
+    'team_publish': 'collaboration_team_publish',
     'join': 'collaboration_join',
     'dot_message': 'collaboration_dot_message',
     'dot_message_v2': 'collaboration_dot_message_v2',
@@ -186,6 +217,7 @@ _WORK = {
     'claim': 'collaboration_work_claim',
     'heartbeat': 'collaboration_work_heartbeat',
     'progress': 'collaboration_work_progress',
+    'team_from_message': 'collaboration_team_from_message',
     'from_message': 'collaboration_dot_task',
     'execute': 'collaboration_work_execute',
     'result': 'collaboration_work_result',
@@ -218,6 +250,10 @@ DESCRIPTIONS = {
     'collaboration_work': 'Manage explicitly authorized analysis or goal work. claim/heartbeat/execute/result preserve the owner approval, exact project/target, live attempt and fence. execute is a typed read/write/edit/exec step within that managed lease, never a general shell shortcut. Poll original pending operation IDs with task_query. job_evidence consumes the original analysis tool-call budget and requires its live lease. Notification-only consumers must not use this tool.',
 }
 
+
+DESCRIPTIONS['collaboration_query'] += (' V2 dot_mailbox is a typed, read-only inbox; dot_consumer reports ownership without secrets. Read on every wake and after reconnect. Teams and goals retain owner-approved scope.')
+DESCRIPTIONS['collaboration'] += (' Explicit dot_mailbox_configure prepares v2 only; activation requires a verified native host subscription. On a v2 wake, consumer_begin requires its wake ticket, then all Dot writes require the live consumer session/fence/proof. Drain the inbox and consumer_yield with its exact revision; a dirty response means continue draining. Tickets and proofs must never appear in chat. Team handoffs are bounded and publication requires exact artifact versions.')
+DESCRIPTIONS['collaboration_work'] += (' team_from_message reuses the unique Goal for the owner-selected source and team. Team writes carry the current coordinator epoch and intent revision plus the executing Dot consumer proof; new input requires reconciliation before new effects.')
 
 for _tool, _actions in ACTIONS.items():
     _aliases = ', '.join(legacy + '=' + action for action, legacy in _actions.items()

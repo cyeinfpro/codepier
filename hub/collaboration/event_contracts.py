@@ -2,7 +2,7 @@
 from typing import Literal
 from pydantic import Field, model_validator
 from shared.collaboration_contracts import Model, Identifier, Queue, JobKind, Severity
-from hub.collaboration.common import TASK_EVENT, RESULT_EVENT, INCIDENT_EVENT, STATUS_EVENT, MESSAGE_EVENT, WORK_EVENT, DELEGATION_EVENT, OPERATION_EVENT
+from hub.collaboration.common import TASK_EVENT, RESULT_EVENT, INCIDENT_EVENT, STATUS_EVENT, MESSAGE_EVENT, WORK_EVENT, DELEGATION_EVENT, OPERATION_EVENT, MAILBOX_EVENT
 
 
 class EventFilters(Model):
@@ -22,6 +22,10 @@ class MessageFilters(Model):
     project_id: Identifier
     environment_id: str = Field(min_length=1, max_length=64, pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]*$')
     slot_id: Identifier
+
+
+class MailboxFilters(MessageFilters):
+    binding_generation: Identifier
 
 
 class WorkFilters(Model):
@@ -141,6 +145,27 @@ class MessagePayload(BasePayload):
     thread_root_id: Identifier
 
 
+class MailboxPayload(Model):
+    schema_version: Literal[2]
+    room_id: Identifier
+    project_id: Identifier
+    environment_id: str = Field(min_length=1, max_length=64)
+    test: bool = False
+    test_subscription_id: str = Field(default='', max_length=128)
+    conversation_id: Identifier
+    recipient_slot_id: Identifier
+    recipient_grant_id: Identifier
+    binding_generation: Identifier
+    dirty_revision: int = Field(ge=0)
+    wake_ticket: str | None = Field(default=None, max_length=2048)
+
+    @model_validator(mode='after')
+    def synthetic_ticket(self):
+        if self.test and self.wake_ticket is not None:
+            raise ValueError('Test events cannot carry a consumer ticket')
+        return self
+
+
 class WorkPayload(BasePayload):
     conversation_id: Identifier
     goal_id: Identifier
@@ -199,14 +224,15 @@ class OperationPayload(BasePayload):
         return self
 
 
-PAYLOADS = {OPERATION_EVENT: OperationPayload, DELEGATION_EVENT: DelegationPayload, WORK_EVENT: WorkPayload, MESSAGE_EVENT: MessagePayload, TASK_EVENT: TaskPayload, RESULT_EVENT: ResultPayload,
+PAYLOADS = {MAILBOX_EVENT: MailboxPayload, OPERATION_EVENT: OperationPayload, DELEGATION_EVENT: DelegationPayload, WORK_EVENT: WorkPayload, MESSAGE_EVENT: MessagePayload, TASK_EVENT: TaskPayload, RESULT_EVENT: ResultPayload,
             INCIDENT_EVENT: IncidentPayload, STATUS_EVENT: StatusPayload}
-FILTERS = {OPERATION_EVENT: OperationFilters, DELEGATION_EVENT: DelegationFilters, WORK_EVENT: WorkFilters, MESSAGE_EVENT: MessageFilters, TASK_EVENT: TaskFilters, RESULT_EVENT: EventFilters,
+FILTERS = {MAILBOX_EVENT: MailboxFilters, OPERATION_EVENT: OperationFilters, DELEGATION_EVENT: DelegationFilters, WORK_EVENT: WorkFilters, MESSAGE_EVENT: MessageFilters, TASK_EVENT: TaskFilters, RESULT_EVENT: EventFilters,
            INCIDENT_EVENT: EventFilters, STATUS_EVENT: EventFilters}
 
 
 def definitions():
     descriptions = {
+        MAILBOX_EVENT: 'A stable inbox changed for this exact approved Dot binding. Native subscription is separately confirmed. Read the current mailbox and original message/work ledgers; delivery is only a hint, not execution authority. Synthetic tests never issue a consumer ticket or create work. V2 consumer writes require the live proof and fence; legacy notification-only purposes never upgrade.',
         OPERATION_EVENT: 'A bounded hint for explicitly subscribed original operation IDs on this exact grant. Read task_query(operation=get, operation_ids=[original ID]) and use your saved output cursor; never execute again. needs_review/interrupted do not prove success, and cancellation requires its durable terminal receipt. environment_id is notification context, not proof of execution environment. Delivery is accepted only, never host consumption or permission to continue a chat. Synthetic test events create no operation.',
         DELEGATION_EVENT: 'Wake-up for this exact owner policy/version and slot. For a CPD task dot use the saved collaboration_query(action=dot_inbox, dot_id=recipient_slot_id) request; its initial baseline is stored once on the server. Recover its exact setup via collaboration_query(action=dot_connection), not a fresh legacy checkpoint. Read the inbox immediately after native subscription and on every wake; paginate and reconcile original operations. For legacy non-CPD consumers only at initial enrollment, read collaboration_delegation_connection_read and persist its checkpoint/inbox_request in the host consumer. On future wakes use the saved inbox_request/resume_request to reconcile collaboration_delegation_inbox, even without this payload; never refresh the initial baseline per event. Preserve existing notification_only consumers. Only an explicitly user-approved managed_execution host may fresh-read, claim, heartbeat, work_execute, poll the original operation and work_result. Test events only confirm delivery; a requested mode or notification never grants permission.',
         WORK_EVENT: 'An approved goal has work or a peer message for this exact connection. Requires separate native opt-in. Re-read current approval, work and capabilities; delivery never authorizes execution and a test creates no work.',
