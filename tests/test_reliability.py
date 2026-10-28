@@ -355,7 +355,9 @@ async def test_project_queue_does_not_starve_other_projects(local_agent):
             tasks.append(asyncio.create_task(a.handle({'id':f'blocked-{i}','tool':'fs_read','project':{'root':str(root),'alias':'ProjectAlpha'},'args':{'project':'ProjectAlpha','path':'README.md'}})))
         await asyncio.sleep(.02)
         await asyncio.wait_for(a.handle({'id':'free','tool':'fs_read','project':{'root':str(other),'alias':'ProjectGamma'},'args':{'project':'ProjectGamma','path':'README.md'}}),1)
-        assert a.journal.status('free')['result']['data']['content']=='other project'
+        result = a.journal.status('free')['result']
+        assert result['ok'], result
+        assert result['data']['content']=='other project'
     finally:
         first_lock.release();await asyncio.gather(*tasks)
 

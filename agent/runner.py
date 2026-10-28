@@ -63,6 +63,7 @@ class Agent:
         try:
             self.journal = Journal(self.state_dir)
             self.engine = FileEngine(self.config, self.journal, self.config_path)
+            self._read_workers = {}
             self.telemetry = AgentTelemetry(self.journal)
             self.build = BuildIdentity("agent")
             self.lifecycle = LifecycleManager(self.config_path, self.state_dir, lambda: self.config)
@@ -478,7 +479,8 @@ class Agent:
                 yield
 
     @contextlib.asynccontextmanager
-    async def execution_slot(self, identifier, tool, project, args, root, write, deadline):
+    async def execution_slot(self, identifier, tool, project, args, root, write, deadline,
+                             *, read_admission=None):
         # Only queue acquisition has this deadline. Once execution begins the
         # command timeout / file commit rules own cancellation and durability.
         timeout = max(0, deadline - time.time()) if deadline is not None else None
@@ -487,11 +489,11 @@ class Agent:
                 async with asyncio.timeout(timeout) as timer:
                     # Imports publish one destination. A project-wide writer
                     # here also stalls unrelated projects under a mapped parent.
-                    read_admission = None
                     if workspace_probe.eligible(tool, args):
-                        async with self._read_preflight_slot(identifier, project):
-                            read_admission = await workspace_probe.probe(
-                                self.engine, tool, project, args, phase='claims', expected_root=root)
+                        if read_admission is None:
+                            async with self._read_preflight_slot(identifier, project):
+                                read_admission = await workspace_probe.probe(
+                                    self.engine, tool, project, args, phase='claims', expected_root=root)
                         claims = [Claim(**item) for item in read_admission['claims']]
                         if tool not in CORE_REMOTE and tool not in PATH_READ_TOOLS:
                             await stack.enter_async_context(self._legacy_project_slot(
@@ -593,8 +595,30 @@ class Agent:
                     queue_reason=reason, lane='read')):
             yield
 
+    async def _read_admission(self, identifier, tool, project, args, deadline):
+        remaining = max(0, deadline - time.time()) if deadline is not None else None
+        try:
+            async with asyncio.timeout(remaining):
+                async with self._read_preflight_slot(identifier, project):
+                    return await workspace_probe.probe(
+                        self.engine, tool, project, args, phase='admission')
+        except TimeoutError as exc:
+            raise DevError('QUEUE_EXPIRED', '超过首次执行期限，未开始操作') from exc
+
+    @contextlib.asynccontextmanager
+    async def _read_execution_worker(self, identifier, tool, args, root):
+        if not workspace_probe.eligible(tool, args):
+            yield None
+            return
+        async with workspace_probe.ReadWorker() as worker:
+            self._read_workers[identifier] = (worker, root)
+            try:
+                yield worker
+            finally:
+                self._read_workers.pop(identifier, None)
+
     async def _operation_root(self, tool, project, args, *, preflight_id=None,
-                              preflight_deadline=None):
+                              preflight_deadline=None, worker=None, expected_root=None):
         if workspace_probe.eligible(tool, args):
             if preflight_id is not None:
                 remaining = (max(0, preflight_deadline - time.time())
@@ -607,7 +631,8 @@ class Agent:
                     raise DevError('QUEUE_EXPIRED', '超过首次执行期限，未开始操作') from exc
             # These rechecks already hold the execution slot. Re-entering the
             # lane here could deadlock when all slots are occupied by readers.
-            return await workspace_probe.root(self.engine, tool, project, args)
+            return await workspace_probe.root(self.engine, tool, project, args,
+                                               worker=worker, expected_root=expected_root)
         return self.engine.root(project, tool in MUTATING)
 
     async def handle(self, request):
@@ -759,8 +784,12 @@ class Agent:
                 result = await self.execute(id, tool, project, args)
             else:
                 args = TOOLS[tool].model.model_validate(args).model_dump()
-                root, _ = await self._operation_root(tool, project, args,
-                                                     preflight_id=id, preflight_deadline=not_after)
+                admission = None
+                if workspace_probe.eligible(tool, args):
+                    admission = await self._read_admission(id, tool, project, args, not_after)
+                    root = Path(admission['root'])
+                else:
+                    root, _ = await self._operation_root(tool, project, args)
                 # Wait for the project BEFORE consuming a global worker slot: a queue
                 # of ProjectAlpha tests must not starve a read of ProjectGamma or ProjectBeta.
                 slot_write = tool in MUTATING
@@ -770,27 +799,31 @@ class Agent:
                 blockers = [self.slot_owners[token] for token, (active_root, active_write) in self._active_slots.items()
                             if token in self.slot_owners and self._projects_overlap(root, active_root) and (slot_write or active_write)]
                 self.phase(id, "waiting_project", blocked_by=blockers[:64])
-                async with self.execution_slot(id, tool, project, args, root, slot_write, not_after):
+                async with self.execution_slot(id, tool, project, args, root, slot_write, not_after,
+                                               read_admission=admission):
                     if id in self.cancelled or self.journal.is_cancelled(id) or self.stop_event.is_set():
                         raise DevError("CANCELLED", "操作开始前已取消")
                     if not_after is not None and time.time() > not_after:
                         raise DevError("QUEUE_EXPIRED", "超过首次执行期限，尚未开始操作；请确认后重新提交")
-                    self.integrations.control.guard(tool, project)
-                    if args.get('workspace_id'): project = self.integrations.project(project, args)
-                    current_root, _ = await self._operation_root(tool, project, args)
-                    if current_root != root:
-                        raise DevError("ROOT_CHANGED", "排队期间项目根目录发生变化，请确认映射后重新提交")
-                    self.journal.mark_running(id)
-                    await self.send({"type": "started", "id": id})
-                    if id in self.cancelled or self.journal.is_cancelled(id) or self.stop_event.is_set():
-                        raise DevError("CANCELLED", "操作开始前已取消")
-                    self.integrations.control.guard(tool, project)
-                    if args.get('workspace_id'): project = self.integrations.project(project, args)
-                    current_root, _ = await self._operation_root(tool, project, args)
-                    if current_root != root:
-                        raise DevError("ROOT_CHANGED", "项目根目录发生变化，请确认映射后重新提交")
-                    self.phase(id, "executing")
-                    result = await self.execute(id, tool, project, args)
+                    async with self._read_execution_worker(id, tool, args, root) as read_worker:
+                        self.integrations.control.guard(tool, project)
+                        if args.get('workspace_id'): project = self.integrations.project(project, args)
+                        current_root, _ = await self._operation_root(tool, project, args,
+                                                                       worker=read_worker, expected_root=root)
+                        if current_root != root:
+                            raise DevError("ROOT_CHANGED", "排队期间项目根目录发生变化，请确认映射后重新提交")
+                        self.journal.mark_running(id)
+                        await self.send({"type": "started", "id": id})
+                        if id in self.cancelled or self.journal.is_cancelled(id) or self.stop_event.is_set():
+                            raise DevError("CANCELLED", "操作开始前已取消")
+                        self.integrations.control.guard(tool, project)
+                        if args.get('workspace_id'): project = self.integrations.project(project, args)
+                        current_root, _ = await self._operation_root(tool, project, args,
+                                                                       worker=read_worker, expected_root=root)
+                        if current_root != root:
+                            raise DevError("ROOT_CHANGED", "项目根目录发生变化，请确认映射后重新提交")
+                        self.phase(id, "executing")
+                        result = await self.execute(id, tool, project, args)
             result = {"ok": True, "data": result}
         except asyncio.CancelledError:
             result = {"ok": False, "error": {"code": "CANCELLED" if self.journal.is_cancelled(id) else "INTERRUPTED", "message": "操作已取消" if self.journal.is_cancelled(id) else "Agent 进程被停止；检查本机结果后再决定是否重做"}}
@@ -874,7 +907,9 @@ class Agent:
 
     async def execute(self, id, tool, project, args, *, saved_vps_target=None):
         if workspace_probe.eligible(tool, args):
-            return await workspace_probe.probe(self.engine, tool, project, args)
+            worker, root = self._read_workers.get(id, (None, None))
+            return await workspace_probe.probe(self.engine, tool, project, args,
+                                               worker=worker, expected_root=root)
         from shared.integration_contracts import REMOTE_TOOLS
         if tool == 'exec':
             if args['task']:

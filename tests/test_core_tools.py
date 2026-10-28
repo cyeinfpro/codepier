@@ -154,7 +154,9 @@ async def test_two_commands_start_together_and_reads_bypass_busy_workers(agent, 
         (root / 'file').write_text('readable')
         call = request(project, 'read', path='file')
         await asyncio.wait_for(instance.handle(call), 1)
-        assert instance.journal.status(call['id'])['result']['data']['content'] == 'readable'
+        result = instance.journal.status(call['id'])['result']
+        assert result['ok'], result
+        assert result['data']['content'] == 'readable'
     finally:
         release.set()
         await asyncio.gather(*jobs)

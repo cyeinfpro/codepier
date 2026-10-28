@@ -45,20 +45,35 @@ async def test_discovery_matches_in_process_and_keeps_authorization(local_agent)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('tool,args', [('open_workspace', {}), ('read', {'path': 'README.md'})])
-@pytest.mark.parametrize('blocked_phase', ['root', 'claims', 'execute'])
+@pytest.mark.parametrize('blocked_phase', ['admission', 'root', 'execute'])
 async def test_blocked_discovery_is_reaped_and_releases_slots(
         local_agent, monkeypatch, tmp_path, tool, args, blocked_phase):
     agent, root = local_agent
     (root / 'README.md').write_text('Readable after recovery')
     marker = tmp_path / 'pid'
     original_probe = workspace_probe.probe
-    async def blocked(engine, tool, project, args, *, phase='execute', expected_root=None):
+    async def blocked(engine, tool, project, args, *, phase='execute', expected_root=None, worker=None):
         if phase == blocked_phase:
             code = ('import os,time; from pathlib import Path; '
                     f'Path({str(marker)!r}).write_text(str(os.getpid())); time.sleep(60)')
-            return await workspace_probe.run_worker(
-                [sys.executable, '-c', code], b'', cwd=str(tmp_path), timeout=.25)
-        return await original_probe(engine, tool, project, args, phase=phase, expected_root=expected_root)
+            spawn = asyncio.create_subprocess_exec
+            async def ready_spawn(*command, **kwargs):
+                process = await spawn(*command, **kwargs)
+                try:
+                    async with asyncio.timeout(5):
+                        while not marker.exists():
+                            await asyncio.sleep(.01)
+                    return process
+                except BaseException:
+                    await workspace_probe._reap(process)
+                    raise
+            # Begin the actual run_worker communication timeout only after the
+            # child is ready, independent of interpreter/coverage startup cost.
+            with monkeypatch.context() as startup_patch:
+                startup_patch.setattr(asyncio, 'create_subprocess_exec', ready_spawn)
+                return await workspace_probe.run_worker(
+                    [sys.executable, '-c', code], b'', cwd=str(tmp_path), timeout=.25)
+        return await original_probe(engine, tool, project, args, phase=phase, expected_root=expected_root, worker=worker)
     project = {'id': 'fixture', 'alias': 'fixture', 'root': str(root),
                'mode': 'write', '_coding_owner': 'grant:test'}
     with monkeypatch.context() as patch:
@@ -169,8 +184,15 @@ async def test_cancellation_during_reap_is_not_success(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_authorization_revoked_while_queued(local_agent):
+async def test_authorization_revoked_while_queued(local_agent, monkeypatch):
     agent, root = local_agent
+    spawn = asyncio.create_subprocess_exec
+    processes = []
+    async def counted(*args, **kwargs):
+        process = await spawn(*args, **kwargs)
+        processes.append(process)
+        return process
+    monkeypatch.setattr(asyncio, 'create_subprocess_exec', counted)
     (root / 'README.md').write_text('read me')
     from agent.resource_queue import Claim, canonical_path
     project = {'id': 'fixture', 'root': str(root), 'alias': 'fixture', 'mode': 'write'}
@@ -182,6 +204,8 @@ async def test_authorization_revoked_while_queued(local_agent):
             while not agent.resources.waiting:
                 assert not task.done()
                 await asyncio.sleep(.01)
+        assert len(processes) == 1 and processes[0].returncode == 0
+        assert not agent._read_workers
         agent.config['allowed_roots'] = []
     await asyncio.wait_for(task, 5)
     result = agent.journal.status('revoked')['result']
@@ -266,13 +290,13 @@ async def test_cancelled_handle_releases_slots_and_recovers(local_agent, monkeyp
     agent, root = local_agent
     original = workspace_probe.probe
     marker = tmp_path / 'cancel-pid'
-    async def blocked(engine, tool, project, args, *, phase='execute', expected_root=None):
+    async def blocked(engine, tool, project, args, *, phase='execute', expected_root=None, worker=None):
         if phase == 'execute':
             code = ('import os,time; from pathlib import Path; '
                     f'Path({str(marker)!r}).write_text(str(os.getpid())); time.sleep(60)')
             return await workspace_probe.run_worker(
                 [sys.executable, '-c', code], b'', cwd=str(tmp_path))
-        return await original(engine, tool, project, args, phase=phase, expected_root=expected_root)
+        return await original(engine, tool, project, args, phase=phase, expected_root=expected_root, worker=worker)
     project = {'id': 'fixture', 'root': str(root), 'alias': 'fixture', 'mode': 'write',
                '_coding_owner': 'grant:test'}
     request = {'id': 'cancelled', 'tool': 'open_workspace',
@@ -365,19 +389,29 @@ async def test_read_rechecks_do_not_reenter_execution_slot(local_agent, monkeypa
     agent, root = local_agent
     (root / 'README.md').write_text('read me')
     original = workspace_probe.probe
+    spawn = asyncio.create_subprocess_exec
+    processes = []
+    async def counted(*args, **kwargs):
+        process = await spawn(*args, **kwargs)
+        processes.append(process)
+        return process
+    monkeypatch.setattr(asyncio, 'create_subprocess_exec', counted)
     observed = []
-    async def inspect(engine, tool, project, args, *, phase='execute', expected_root=None):
+    async def inspect(engine, tool, project, args, *, phase='execute', expected_root=None, worker=None):
         active = list(agent.scheduler.active.values())
         observed.append((phase, [(entry.operation_id, entry.lane) for entry in active]))
-        return await original(engine, tool, project, args, phase=phase, expected_root=expected_root)
+        return await original(engine, tool, project, args, phase=phase, expected_root=expected_root, worker=worker)
     monkeypatch.setattr(workspace_probe, 'probe', inspect)
     await asyncio.wait_for(agent.handle({
         'id': 'single-slot', 'tool': 'read', 'tool_contract_version': wire_version('read'),
         'project': {'id': 'fixture', 'root': str(root), 'alias': 'fixture', 'mode': 'write'},
         'args': {'project': 'fixture', 'path': 'README.md'}}), 5)
     assert agent.journal.status('single-slot')['result']['ok']
-    assert [phase for phase, _ in observed] == ['root', 'claims', 'root', 'root', 'execute']
+    assert [phase for phase, _ in observed] == ['admission', 'root', 'root', 'execute']
     assert all(active == [('single-slot', 'read')] for _, active in observed)
+    assert len(processes) == 2
+    assert all(process.returncode == 0 for process in processes)
+    assert not agent._read_workers
     assert not agent.scheduler.active and not agent.scheduler.waiting
 
 
@@ -390,7 +424,7 @@ async def test_first_preflight_wait_expires_or_cancels_without_spawning(
     agent, root = local_agent
     async def forbidden(*args, **kwargs):
         pytest.fail('An unadmitted preflight must not spawn a root worker')
-    monkeypatch.setattr(workspace_probe, 'root', forbidden)
+    monkeypatch.setattr(workspace_probe, 'probe', forbidden)
     reserved = agent.scheduler.lane_limit('read') - 1
     async with contextlib.AsyncExitStack() as stack:
         for index in range(reserved):
@@ -415,3 +449,114 @@ async def test_first_preflight_wait_expires_or_cancels_without_spawning(
         assert len(agent.scheduler.active) == reserved
         assert not agent.resources.active and not agent.resources.waiting
     assert not agent.scheduler.active
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('change_at,change', [(1, 'revoke'), (1, 'remap'), (2, 'revoke')])
+async def test_session_rechecks_current_authority_and_mapping(local_agent, tmp_path, change_at, change):
+    agent, root = local_agent
+    (root / 'README.md').write_text('authorized content')
+    project = {'id': 'fixture', 'root': str(root), 'mode': 'write'}
+    args = TOOLS['read'].model.model_validate({'project': 'fixture', 'path': 'README.md'}).model_dump()
+    async with workspace_probe.ReadWorker() as worker:
+        for _ in range(change_at):
+            await workspace_probe.probe(agent.engine, 'read', project, args, phase='root',
+                                        expected_root=root, worker=worker)
+        if change == 'revoke':
+            agent.config['allowed_roots'] = []
+        else:
+            second = tmp_path / 'second-session'
+            second.mkdir()
+            agent.config['allowed_roots'].append({'path': str(second), 'writable': True})
+            project['root'] = str(second)
+        with pytest.raises(DevError) as error:
+            await workspace_probe.probe(agent.engine, 'read', project, args,
+                phase='execute' if change_at == 2 else 'root', expected_root=root, worker=worker)
+        assert error.value.code == ('ROOT_NOT_ALLOWED' if change == 'revoke' else 'ROOT_CHANGED')
+    assert worker.process.returncode is not None
+
+
+@pytest.mark.asyncio
+async def test_session_execute_once_and_parent_rejects_duplicate(local_agent):
+    agent, root = local_agent
+    (root / 'README.md').write_text('once')
+    project = {'id': 'fixture', 'root': str(root), 'mode': 'write'}
+    args = TOOLS['read'].model.model_validate({'project': 'fixture', 'path': 'README.md'}).model_dump()
+    async with workspace_probe.ReadWorker() as worker:
+        for _ in range(2):
+            await workspace_probe.probe(agent.engine, 'read', project, args, phase='root',
+                                        expected_root=root, worker=worker)
+        result = await workspace_probe.probe(agent.engine, 'read', project, args,
+                                            expected_root=root, worker=worker)
+        assert result['content'] == 'once'
+        assert worker.process.returncode == 0
+        with pytest.raises(DevError) as error:
+            await workspace_probe.probe(agent.engine, 'read', project, args,
+                                        expected_root=root, worker=worker)
+        assert error.value.code == 'INVALID_REQUEST'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('phases', [('execute',), ('root', 'execute'),
+                                  ('root', 'root', 'execute', 'execute')])
+async def test_worker_enforces_protocol_even_without_parent(local_agent, phases):
+    import json
+    agent, root = local_agent
+    (root / 'README.md').write_text('once')
+    args = TOOLS['read'].model.model_validate({'project': 'fixture', 'path': 'README.md'}).model_dump()
+    request = {'config': agent.config, 'config_path': str(agent.config_path),
+               'state_dir': str(agent.journal.directory), 'tool': 'read',
+               'project': {'id': 'fixture', 'root': str(root)}, 'args': args,
+               'expected_root': str(root)}
+    base, command = workspace_probe.worker_command('session_main')
+    process = await asyncio.create_subprocess_exec(*command, cwd=base,
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
+    try:
+        frames = b''.join((json.dumps({**request, 'phase': phase}) + chr(10)).encode() for phase in phases)
+        output, _ = await asyncio.wait_for(process.communicate(frames), 5)
+        results = [json.loads(line) for line in output.splitlines()]
+        if len(phases) < 3:
+            assert results[-1]['error']['code'] == 'INVALID_REQUEST'
+        else:
+            assert len(results) == 3
+            assert results[-1]['data']['content'] == 'once'
+        assert process.returncode == 0
+    finally:
+        await workspace_probe._reap(process)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('ending', ['cancel', 'timeout'])
+async def test_session_blocked_read_reaps_process(local_agent, monkeypatch, tmp_path, ending):
+    original = workspace_probe.worker_command
+    marker = tmp_path / 'session-ready'
+    code = (
+        "import sys,json,time; from pathlib import Path; "
+        "json.loads(sys.stdin.readline()); print(json.dumps({'ok':True,'data':{}}),flush=True); "
+        "json.loads(sys.stdin.readline()); print(json.dumps({'ok':True,'data':{}}),flush=True); "
+        f"json.loads(sys.stdin.readline()); Path({str(marker)!r}).write_text('ready'); time.sleep(60)")
+    def synthetic(entry='main'):
+        if entry == 'session_main':
+            return str(tmp_path), [sys.executable, '-c', code]
+        return original(entry)
+    monkeypatch.setattr(workspace_probe, 'worker_command', synthetic)
+    async with workspace_probe.ReadWorker() as worker:
+        await worker.request({'phase': 'root'})
+        await worker.request({'phase': 'root'})
+        # Both prior frames prove interpreter startup has completed.
+        if ending == 'timeout':
+            monkeypatch.setattr(workspace_probe, 'PROBE_TIMEOUT', .25)
+        pending = asyncio.create_task(worker.request({'phase': 'execute'}))
+        async with asyncio.timeout(3):
+            while not marker.exists():
+                assert not pending.done()
+                await asyncio.sleep(.01)
+        if ending == 'cancel':
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+        else:
+            with pytest.raises(DevError) as error:
+                await pending
+            assert error.value.code == 'PROJECT_DISCOVERY_TIMEOUT'
+    assert worker.process.returncode is not None
