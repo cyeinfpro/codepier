@@ -11,6 +11,7 @@ import math
 import time
 from collections import Counter
 from contextlib import asynccontextmanager
+from agent.resource_queue import finish_cleanup
 from dataclasses import dataclass
 
 from shared.util import DevError
@@ -131,6 +132,7 @@ class ProjectScheduler:
         self.turn = Counter()
         self.sequence = 0
         self.closed = False
+        self._notifications = set()
 
     def lane_limit(self, lane):
         if lane == "execution":
@@ -189,6 +191,65 @@ class ProjectScheduler:
         async with self.condition:
             self.closed = True
             self.condition.notify_all()
+        if self._notifications:
+            await asyncio.gather(*self._notifications)
+
+    def try_reserve(self, operation_id, project, lane="execution", target="", *, replace):
+        """Non-waiting fair admission, converting an owned preflight slot.
+
+        All state changes are synchronous on this event loop. No reservation is
+        published on failure, and the caller must never wait holding a child.
+        """
+        if lane not in LANES or not isinstance(project, str) or not project:
+            raise ValueError("Invalid scheduler admission identity")
+        if self.condition.locked() or self.closed or len(self.waiting) >= 1024:
+            return None
+        if (not isinstance(replace, Ticket) or self.active.get(replace.token) is not replace
+                or replace.operation_id != operation_id):
+            return None
+        if any(item.operation_id == operation_id and item is not replace
+               for item in [*self.active.values(), *self.waiting]):
+            return None
+        item = Ticket(replace.token, operation_id, project, lane, target)
+        self.active.pop(replace.token)
+        self.waiting.append(item)
+        try:
+            selected = self._selected() is item
+        finally:
+            self.waiting.remove(item)
+            self.active[replace.token] = replace
+        if not selected:
+            return None
+        self.active[item.token] = item
+        self.sequence += 1
+        self.turn[(lane, project)] = self.sequence
+        # Conversion may free a different lane/project. Notify asynchronously,
+        # never turn a non-waiting reservation into a condition acquisition.
+        notification = asyncio.create_task(self._notify_reservation_change())
+        self._notifications.add(notification)
+        notification.add_done_callback(self._notification_done)
+        return item
+
+    def _notification_done(self, task):
+        self._notifications.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            asyncio.get_running_loop().call_exception_handler({
+                "message": "Scheduler reservation notification failed",
+                "exception": task.exception(), "task": task})
+
+    async def _notify_reservation_change(self):
+        async with self.condition:
+            self.condition.notify_all()
+
+    async def _release_owned(self, item):
+        async with self.condition:
+            if item in self.waiting:
+                self.waiting.remove(item)
+            # The slot context owns this token, including its converted ticket.
+            self.active.pop(item.token, None)
+            live = {(entry.lane, entry.project) for entry in [*self.waiting, *self.active.values()]}
+            self.turn = Counter({key: value for key, value in self.turn.items() if key in live})
+            self.condition.notify_all()
 
     @asynccontextmanager
     async def slot(self, operation_id, project, lane="execution", target="", on_wait=None):
@@ -217,17 +278,10 @@ class ProjectScheduler:
                 self.sequence += 1
                 self.turn[(lane, project)] = self.sequence
                 self.condition.notify_all()
-            yield
+            yield item
         finally:
             if added:
-                async with self.condition:
-                    if item in self.waiting:
-                        self.waiting.remove(item)
-                    self.active.pop(item.token, None)
-                    # Bound fairness history to active/queued project-lane pairs.
-                    live = {(entry.lane, entry.project) for entry in [*self.waiting, *self.active.values()]}
-                    self.turn = Counter({key: value for key, value in self.turn.items() if key in live})
-                    self.condition.notify_all()
+                await finish_cleanup(self._release_owned(item))
 
     def admission_snapshot(self):
         """Versioned OS telemetry only for the authenticated Hub heartbeat.

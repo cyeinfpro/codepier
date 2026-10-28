@@ -121,13 +121,14 @@ def decode_result(output):
 
 class ReadWorker:
     # One execution-slot lifetime, exactly root/root/execute, never a pool.
-    def __init__(self):
+    def __init__(self, *, admission=False):
+        self.admission = admission
         self.process = None
         self.index = 0
         self.failed = False
 
     async def __aenter__(self):
-        base, command = worker_command('session_main')
+        base, command = worker_command('admission_session_main' if self.admission else 'session_main')
         spawning = asyncio.create_task(asyncio.create_subprocess_exec(
             *command, cwd=base, stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
@@ -146,8 +147,22 @@ class ReadWorker:
         if cancelled:
             raise asyncio.CancelledError
 
+    async def abandon_admission(self):
+        """Normal contention fallback: EOF, coverage flush, then reap before queuing."""
+        if not self.admission or self.index != 1 or self.failed:
+            raise DevError('INVALID_REQUEST', '仅已完成的准入会话可正常结束')
+        self.failed = True
+        self.process.stdin.close()
+        try:
+            async with asyncio.timeout(PROBE_TIMEOUT):
+                await self.process.wait()
+        except TimeoutError as exc:
+            raise DevError('PROJECT_DISCOVERY_TIMEOUT', '项目准入读取进程结束超时') from exc
+        if self.process.returncode:
+            raise DevError('PROJECT_DISCOVERY_FAILED', '项目准入读取进程异常退出')
+
     async def request(self, payload):
-        phases = ('root', 'root', 'execute')
+        phases = (('admission',) if self.admission else ()) + ('root', 'root', 'execute')
         if self.failed or self.index >= len(phases) or payload.get('phase') != phases[self.index]:
             self.failed = True
             raise DevError('INVALID_REQUEST', '独立读取会话阶段乱序或重复执行')
@@ -223,8 +238,18 @@ def response(request):
 
 
 def session_main():
+    _session_main(False)
+
+
+def admission_session_main():
+    _session_main(True)
+
+
+def _session_main(admission):
     identity = None
-    for phase in ('root', 'root', 'execute'):
+    admitted_root = None
+    phases = (('admission',) if admission else ()) + ('root', 'root', 'execute')
+    for phase in phases:
         line = sys.stdin.buffer.readline(64 * 1024 * 1024 + 1)
         if not line:
             return
@@ -232,13 +257,23 @@ def session_main():
             if len(line) > 64 * 1024 * 1024:
                 raise ValueError('frame too large')
             request = json.loads(line)
-            current = (request['tool'], request['args'], request['expected_root'])
+            current = (request['tool'], request['args'])
             if request.get('phase') != phase or (identity is not None and current != identity):
                 raise ValueError('invalid order or changed operation')
-            if not isinstance(request['expected_root'], str) or not request['expected_root']:
-                raise ValueError('missing admitted root')
+            expected = request['expected_root']
+            if phase == 'admission':
+                if expected is not None:
+                    raise ValueError('admission cannot select its root')
+            else:
+                if not isinstance(expected, str) or not expected:
+                    raise ValueError('missing admitted root')
+                if admitted_root is not None and expected != admitted_root:
+                    raise ValueError('changed admitted root')
+                admitted_root = expected
             identity = current
             result = response(request)
+            if phase == 'admission' and result['ok']:
+                admitted_root = result['data']['root']
         except (ValueError, KeyError, TypeError):
             result = {'ok': False, 'error': {'code': 'INVALID_REQUEST',
                        'message': '独立读取会话阶段或请求无效'}}
@@ -246,7 +281,7 @@ def session_main():
         sys.stdout.flush()
         if not result['ok']:
             return
-    # The worker exits after exactly one execute. No fourth frame is consumed.
+    # Exactly one execute; no further frame is consumed.
 
 
 def main():

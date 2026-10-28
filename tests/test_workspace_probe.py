@@ -409,7 +409,7 @@ async def test_read_rechecks_do_not_reenter_execution_slot(local_agent, monkeypa
     assert agent.journal.status('single-slot')['result']['ok']
     assert [phase for phase, _ in observed] == ['admission', 'root', 'root', 'execute']
     assert all(active == [('single-slot', 'read')] for _, active in observed)
-    assert len(processes) == 2
+    assert len(processes) == 1
     assert all(process.returncode == 0 for process in processes)
     assert not agent._read_workers
     assert not agent.scheduler.active and not agent.scheduler.waiting
@@ -560,3 +560,147 @@ async def test_session_blocked_read_reaps_process(local_agent, monkeypatch, tmp_
                 await pending
             assert error.value.code == 'PROJECT_DISCOVERY_TIMEOUT'
     assert worker.process.returncode is not None
+
+
+@pytest.mark.asyncio
+async def test_fastpath_body_timeout_is_not_queue_expired(local_agent):
+    agent, root = local_agent
+    (root / 'README.md').write_text('read')
+    args = TOOLS['read'].model.model_validate({'project': 'fixture', 'path': 'README.md'}).model_dump()
+    with pytest.raises(TimeoutError, match='body timeout'):
+        async with agent._read_admission_context('body-timeout', 'read',
+                {'id': 'fixture', 'root': str(root), 'mode': 'write'}, args, None) as (_, worker, reserved):
+            assert worker is not None and reserved
+            raise TimeoutError('body timeout')
+    assert not agent.scheduler.active and not agent.resources.active
+    assert worker.process.returncode is not None
+
+
+@pytest.mark.asyncio
+async def test_fastpath_scheduler_rejection_reaps_before_wait_and_cancellation(
+        local_agent, monkeypatch):
+    agent, root = local_agent
+    (root / 'README.md').write_text('find this')
+    agent.scheduler.capacity.limit = 0
+    processes = []
+    spawn = asyncio.create_subprocess_exec
+    async def counted(*args, **kwargs):
+        process = await spawn(*args, **kwargs)
+        processes.append(process)
+        return process
+    monkeypatch.setattr(asyncio, 'create_subprocess_exec', counted)
+    task = asyncio.create_task(agent.handle({
+        'id': 'contended-search', 'tool': 'fs_search',
+        'project': {'id': 'fixture', 'root': str(root), 'mode': 'write'},
+        'args': {'project': 'fixture', 'path': '.', 'query': 'find'}}))
+    async with asyncio.timeout(5):
+        while not any(ticket.lane == 'execution' for ticket in agent.scheduler.waiting):
+            assert not task.done(), agent.journal.status('contended-search')
+            await asyncio.sleep(.01)
+    assert len(processes) == 1 and processes[0].returncode == 0
+    assert not agent.scheduler.active
+    # The normal resource-first queue now owns exactly one claim; the
+    # provisional fastpath reservation was released before this queue started.
+    assert len(agent.resources.active) == 1
+    task.cancel()
+    await asyncio.wait_for(task, 3)
+    assert not agent.scheduler.active and not agent.scheduler.waiting
+    assert not agent.resources.active and not agent.resources.waiting
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('change', ['root', 'tool', 'args', 'revoke'])
+async def test_admission_session_binds_real_root_and_operation(local_agent, tmp_path, change):
+    agent, root = local_agent
+    (root / 'README.md').write_text('authorized')
+    project = {'id': 'fixture', 'root': str(root), 'mode': 'write'}
+    args = TOOLS['read'].model.model_validate({'project': 'fixture', 'path': 'README.md'}).model_dump()
+    async with workspace_probe.ReadWorker(admission=True) as worker:
+        admission = await workspace_probe.probe(agent.engine, 'read', project, args,
+                                                phase='admission', worker=worker)
+        assert admission['root'] == str(root.resolve())
+        expected = root
+        tool = 'read'
+        if change == 'root':
+            second = tmp_path / 'also-authorized'
+            second.mkdir()
+            agent.config['allowed_roots'].append({'path': str(second), 'writable': True})
+            project['root'] = str(second)
+            expected = second
+        elif change == 'tool':
+            tool = 'fs_read'
+        elif change == 'args':
+            args = {**args, 'path': 'another.txt'}
+        else:
+            agent.config['allowed_roots'] = []
+        with pytest.raises(DevError) as error:
+            await workspace_probe.probe(agent.engine, tool, project, args,
+                phase='root', expected_root=expected, worker=worker)
+        assert error.value.code == ('ROOT_NOT_ALLOWED' if change == 'revoke' else 'INVALID_REQUEST')
+    assert worker.process.returncode == 0
+
+
+@pytest.mark.asyncio
+async def test_fastpath_cancel_after_conversion_reaps_and_releases(local_agent, monkeypatch):
+    agent, root = local_agent
+    (root / 'README.md').write_text('cancel after admitted')
+    started = asyncio.Event()
+    async def send(message):
+        if message['type'] == 'started':
+            started.set()
+            await asyncio.Event().wait()
+    monkeypatch.setattr(agent, 'send', send)
+    task = asyncio.create_task(agent.handle({
+        'id': 'fast-cancel', 'tool': 'read', 'tool_contract_version': wire_version('read'),
+        'project': {'id': 'fixture', 'root': str(root), 'mode': 'write'},
+        'args': {'project': 'fixture', 'path': 'README.md'}}))
+    await asyncio.wait_for(started.wait(), 5)
+    worker, _ = agent._read_workers['fast-cancel']
+    assert worker.process.returncode is None
+    assert len(agent.scheduler.active) == len(agent.resources.active) == 1
+    task.cancel()
+    await asyncio.wait_for(task, 3)
+    assert worker.process.returncode is not None
+    assert not agent._read_workers
+    assert not agent.scheduler.active and not agent.scheduler.waiting
+    assert not agent.resources.active and not agent.resources.waiting
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('blocked_queue', ['resources', 'scheduler'])
+async def test_fastpath_cleanup_survives_repeated_cancellation(local_agent, blocked_queue):
+    agent, root = local_agent
+    (root / 'README.md').write_text('cancellable')
+    args = TOOLS['read'].model.model_validate({'project': 'fixture', 'path': 'README.md'}).model_dump()
+    started = asyncio.Event()
+    workers = []
+    async def operation():
+        async with agent._read_admission_context('double-cancel', 'read',
+                {'id': 'fixture', 'root': str(root), 'mode': 'write'}, args, None) as (_, worker, reserved):
+            assert reserved
+            workers.append(worker)
+            started.set()
+            await asyncio.Event().wait()
+    task = asyncio.create_task(operation())
+    await asyncio.wait_for(started.wait(), 5)
+    condition = getattr(agent, blocked_queue).condition
+    await condition.acquire()
+    try:
+        task.cancel()
+        async with asyncio.timeout(3):
+            while workers[0].process.returncode is None:
+                await asyncio.sleep(.01)
+        # Cleanup must remain owned while its condition is temporarily held.
+        await asyncio.sleep(.02)
+        assert not task.done()
+        task.cancel()
+        await asyncio.sleep(.02)
+        assert not task.done()
+    finally:
+        condition.release()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 3)
+    await agent.scheduler.close()
+    assert not agent.scheduler.active and not agent.scheduler.waiting
+    assert not agent.resources.active and not agent.resources.waiting
+    assert not agent.scheduler._notifications

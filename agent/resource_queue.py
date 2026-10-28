@@ -31,11 +31,49 @@ def overlaps(left, right):
     return any(a.conflicts(b) for a in left for b in right)
 
 
+async def finish_cleanup(awaitable):
+    """Own queue cleanup through repeated cancellation, then propagate it."""
+    task = asyncio.create_task(awaitable)
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    task.result()
+    if cancelled:
+        raise asyncio.CancelledError
+
+
 class ResourceQueue:
     def __init__(self):
         self.condition = asyncio.Condition()
         self.active = {}
         self.waiting = []
+
+    def try_reserve(self, operation_id, claims):
+        """Atomically reserve without waiting; existing conflicting waiters win."""
+        if self.condition.locked():
+            return None
+        if any(identifier == operation_id for identifier, _ in self.active.values()):
+            return None
+        if any(identifier == operation_id for _, identifier, _ in self.waiting):
+            return None
+        if any(overlaps(claims, held) for _, held in self.active.values()):
+            return None
+        if any(overlaps(claims, requested) for _, _, requested in self.waiting):
+            return None
+        token = object()
+        self.active[token] = (operation_id, claims)
+        return token
+
+    async def release(self, token):
+        await finish_cleanup(self._release(token))
+
+    async def _release(self, token):
+        async with self.condition:
+            self.active.pop(token, None)
+            self.condition.notify_all()
 
     @asynccontextmanager
     async def slot(self, operation_id, claims, on_wait):
