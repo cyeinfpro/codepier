@@ -994,6 +994,25 @@ def test_unknown_operation_projection_never_claims_running(
         context.close()
 
 
+def _mark_connection_projection_routes(page, pending_routes):
+    page.locator('html').evaluate(
+        '(node, count) => node.dataset.connectionProjectionPending = String(count)', len(pending_routes))
+
+
+def _close_connection_projection_context(context, page, pending_routes):
+    try:
+        # Stop the live view normally, then let the original route callbacks
+        # finish while their APIResponse bodies and context are still alive.
+        # Removing interception or closing first can dispose an in-flight body.
+        _mark_connection_projection_routes(page, pending_routes)
+        page.evaluate("navigate('projects')")
+        expect(page.locator('html')).to_have_attribute('data-connection-projection-pending', '0', timeout=5000)
+        assert not pending_routes
+        page.unroute_all(behavior='wait')
+    finally:
+        context.close()
+
+
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
 def test_focused_connection_updates_evidence_and_rejects_stale_copy(
         collaboration_stack, chat_browser_pool, engine):
@@ -1001,17 +1020,24 @@ def test_focused_connection_updates_evidence_and_rejects_stale_copy(
     context = chat_browser_pool(engine).new_context(viewport={'width': 1440, 'height': 900})
     page = context.new_page()
     projection = {'unknown': False}
+    pending_routes = set()
     try:
         room, slot, policy = policy_choice_fixture(page, stack)
 
         def statuses(route):
-            response = route.fetch()
-            value = response.json()
-            if projection['unknown']:
-                for item in value.get('items', []):
-                    item['connection_status']['operation'] = {
-                        'state': 'unknown', 'pending_count': 1, 'unknown_count': 1}
-            route.fulfill(response=response, json=value)
+            pending_routes.add(route)
+            _mark_connection_projection_routes(page, pending_routes)
+            try:
+                response = route.fetch()
+                value = response.json()
+                if projection['unknown']:
+                    for item in value.get('items', []):
+                        item['connection_status']['operation'] = {
+                            'state': 'unknown', 'pending_count': 1, 'unknown_count': 1}
+                route.fulfill(response=response, json=value)
+            finally:
+                pending_routes.remove(route)
+                _mark_connection_projection_routes(page, pending_routes)
 
         page.route('**/api/collaboration?*kind=delegation_policies*', statuses)
         page.locator('#cc-message-input').fill('状态刷新期间保留的正文')
@@ -1046,7 +1072,52 @@ def test_focused_connection_updates_evidence_and_rejects_stale_copy(
         expect(page.locator('#cc-message-input')).to_have_value('状态刷新期间保留的正文')
         assert messages(stack) == []
     finally:
-        context.close()
+        _close_connection_projection_context(context, page, pending_routes)
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_connection_projection_teardown_reads_pending_body_before_close(
+        collaboration_stack, chat_browser_pool, engine, monkeypatch):
+    import sys
+    from playwright.sync_api import APIResponse
+    original_json = APIResponse.json
+    original_close = _close_connection_projection_context
+    holding = False
+    page_holder, admitted, completed = [], [], []
+
+    def pending_body(response):
+        gated = holding and parse_qs(urlsplit(response.url).query).get('kind') == ['delegation_policies']
+        if gated:
+            admitted.append(response)
+            page = page_holder[0]
+            page.locator('html').evaluate("node => node.dataset.connectionBodyPending = 'yes'")
+            # Park the original response body until the normal navigation
+            # lifecycle, not a sleep, replay or discarded callback.
+            expect(page.locator('#page h1')).to_have_text('项目映射', timeout=5000)
+        value = original_json(response)
+        if gated:
+            completed.append(response)
+        return value
+
+    def overlapping_close(context, page, pending_routes):
+        nonlocal holding
+        page_holder.append(page)
+        holding = True
+        page.locator('[data-cc-action="refresh"]').evaluate('(node) => node.click()')
+        expect(page.locator('html')).to_have_attribute('data-connection-body-pending', 'yes', timeout=5000)
+        assert pending_routes and admitted and not completed
+        original_close(context, page, pending_routes)
+        assert not pending_routes
+        # Independent refresh bodies may complete in either order, but every
+        # original body must be read exactly once before the context closes.
+        assert len(completed) == len(admitted) == len({id(response) for response in admitted})
+        assert {id(response) for response in completed} == {id(response) for response in admitted}
+
+    monkeypatch.setattr(APIResponse, 'json', pending_body)
+    monkeypatch.setattr(sys.modules[__name__], '_close_connection_projection_context', overlapping_close)
+    test_focused_connection_updates_evidence_and_rejects_stale_copy(
+        collaboration_stack, chat_browser_pool, engine)
+    assert len(page_holder) == 1 and admitted
 
 
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])

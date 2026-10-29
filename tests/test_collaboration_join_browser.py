@@ -398,8 +398,14 @@ def test_join_panel_partial_routes_and_explicit_event_confirmation(collaboration
         page.on('request', lambda request: tests_sent.append(request.post_data_json)
                 if request.url.endswith('/api/collaboration/join-slot-control')
                 and request.post_data_json.get('action') == 'test' else None)
-        card.locator('[data-cc-action="join-test"]').evaluate(
-            '(button) => { button.click(); button.click(); }')
+        # Real double-click actionability waits for an in-flight refresh to
+        # release its inert/busy surface; synthetic button.click() can be
+        # silently dropped there. Keep the one-intent and consent assertions.
+        with page.expect_response(lambda response:
+                response.url.endswith('/api/collaboration/join-slot-control')
+                and response.request.post_data_json.get('action') == 'test', timeout=5000) as queued:
+            card.locator('[data-cc-action="join-test"]').dblclick(timeout=5000)
+        assert queued.value.status == 200
         expect(page.locator('#cc-feedback')).to_contain_text('测试已排队')
         current = overview(stack)['join_slots'][0]
         assert not current['connection_complete']
