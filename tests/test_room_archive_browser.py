@@ -16,6 +16,22 @@ def archive_preview(page):
     return form
 
 
+def _mark_archive_route_count(page, pending_routes):
+    page.locator('html').evaluate(
+        '(node, count) => node.dataset.archiveRoutesPending = String(count)', len(pending_routes))
+
+
+def _drain_restored_history_routes(page, pending_routes):
+    # unroute_all(wait) removes interception before waiting for callbacks. A
+    # live refresh can then auto-continue a request whose fixture still needs
+    # to fulfill it. Leave the view normally and drain while routes still own
+    # their requests; preserve callback errors instead of ignoring them.
+    _mark_archive_route_count(page, pending_routes)
+    page.evaluate("navigate('projects')")
+    expect(page.locator('html')).to_have_attribute('data-archive-routes-pending', '0', timeout=5000)
+    assert not pending_routes
+
+
 def all_rooms(stack):
     return stack.must(stack.client.get('/api/collaboration/conversations',
                                       params={'include_archived': 'true'}))['items']
@@ -243,6 +259,19 @@ def test_restore_uses_only_visible_history_project_for_navigation(
     context = chat_browser_pool(engine).new_context(viewport={'width': 1440, 'height': 900})
     page = context.new_page()
     other = stack.projects[1]
+    pending_routes = set()
+
+    def tracked(handler):
+        def handle(route):
+            pending_routes.add(route)
+            _mark_archive_route_count(page, pending_routes)
+            try:
+                return handler(route)
+            finally:
+                pending_routes.remove(route)
+                _mark_archive_route_count(page, pending_routes)
+        return handle
+
     try:
         login(page, stack)
         join_dot(stack, create_dot(stack, '合成历史助手'))
@@ -349,9 +378,9 @@ def test_restore_uses_only_visible_history_project_for_navigation(
                     body['items'] = historical[:]
             route.fulfill(response=response, json=body)
 
-        page.route('**/api/collaboration/conversations*', restricted_directory)
-        page.route('**/api/collaboration/conversation-restore', restricted_restore)
-        page.route('**/api/collaboration?*', restricted_history)
+        page.route('**/api/collaboration/conversations*', tracked(restricted_directory))
+        page.route('**/api/collaboration/conversation-restore', tracked(restricted_restore))
+        page.route('**/api/collaboration?*', tracked(restricted_history))
         page.locator('[data-cc-action="archived-rooms"]').click()
         page.locator(f'[data-cc-action="restore-room"][data-id="{conversation["id"]}"]').click()
         page.locator('#cc-restore-room button[type="submit"]').click()
@@ -428,8 +457,11 @@ def test_restore_uses_only_visible_history_project_for_navigation(
         expect(page.locator('.cc-project-count')).to_have_text('1 个历史项目')
         assert next(r for r in all_rooms(stack) if r['id'] == conversation['id'])['projects'] == []
     finally:
-        page.unroute_all(behavior='wait')
-        context.close()
+        try:
+            _drain_restored_history_routes(page, pending_routes)
+            page.unroute_all(behavior='wait')
+        finally:
+            context.close()
 
 
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
@@ -462,6 +494,47 @@ def test_restore_latest_directory_without_room_does_not_reopen_old_project(
         collaboration_stack, chat_browser_pool, tmp_path, engine):
     test_restore_uses_only_visible_history_project_for_navigation(
         collaboration_stack, chat_browser_pool, tmp_path, engine, empty_history=False, hide_directory=True)
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_restore_route_teardown_drains_pending_refresh_before_unroute(
+        collaboration_stack, chat_browser_pool, tmp_path, engine, monkeypatch):
+    import re
+    import sys
+    from playwright.sync_api import Route
+    original_fetch = Route.fetch
+    original_drain = _drain_restored_history_routes
+    holding = False
+    overlap_seen = []
+
+    def gated_fetch(route, *args, **kwargs):
+        response = original_fetch(route, *args, **kwargs)
+        if holding:
+            # Deterministically park the original callback, without a sleep or
+            # replay, until cleanup performs the normal navigation lifecycle.
+            expect(route.request.frame.page.locator('#page h1')).to_have_text('项目映射', timeout=5000)
+        return response
+
+    def overlapping_cleanup(page, pending_routes):
+        nonlocal holding
+        _mark_archive_route_count(page, pending_routes)
+        if not page.locator('[data-cc-action="refresh"]').is_visible():
+            page.locator('[data-cc-more]').click()
+        holding = True
+        page.locator('[data-cc-action="refresh"]').click()
+        expect(page.locator('html')).to_have_attribute(
+            'data-archive-routes-pending', re.compile(r'[1-9]\d*'), timeout=5000)
+        assert pending_routes, 'The original refresh must overlap teardown'
+        overlap_seen.append(len(pending_routes))
+        original_drain(page, pending_routes)
+        assert not pending_routes
+        expect(page.locator('#page h1')).to_have_text('项目映射')
+
+    monkeypatch.setattr(Route, 'fetch', gated_fetch)
+    monkeypatch.setattr(sys.modules[__name__], '_drain_restored_history_routes', overlapping_cleanup)
+    test_restore_uses_only_visible_history_project_for_navigation(
+        collaboration_stack, chat_browser_pool, tmp_path, engine, empty_history=False, hide_directory=True)
+    assert len(overlap_seen) == 1
 
 
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])

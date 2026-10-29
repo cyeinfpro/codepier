@@ -86,9 +86,73 @@ def approve_in_ui(page, goal_id):
     footer = form.locator('button[type="submit"]')
     assert footer.evaluate('(n) => {const r=n.getBoundingClientRect(); return r.y >= 0 && r.bottom <= innerHeight;}')
     snapshot(page, 'goal-demo-approval-' + ('mobile' if page.viewport_size['width'] < 640 else 'desktop'))
-    form.locator('[name="confirm"]').check()
-    form.locator('button[type="submit"]').click()
-    expect(page.locator('#cc-drawer')).not_to_be_visible()
+    timeline = []
+    approval_posts, approval_responses, fresh_requests = [], [], []
+    conversation = page.locator('.cc-chat-shell').get_attribute('data-conversation')
+    started = time.monotonic()
+
+    def approval_request(request):
+        path = urlsplit(request.url).path
+        query = parse_qs(urlsplit(request.url).query)
+        if path == '/api/collaboration/goal-approve' and request.method == 'POST':
+            approval_posts.append(request)
+        elif (approval_responses and approval_responses[0].status == 200
+              and path == '/api/collaboration' and query.get('kind') == ['coordination_goals']):
+            payload = approval_posts[0].post_data_json
+            if (query.get('project') == [payload['project']]
+                    and query.get('environment_id') == [payload['environment_id']]
+                    and query.get('conversation_id') == [conversation]):
+                fresh_requests.append(request)
+        if path.startswith('/api/collaboration'):
+            timeline.append({'event': 'request', 'method': request.method,
+                'route': path, 'kind': parse_qs(urlsplit(request.url).query).get('kind', [''])[0],
+                'elapsed': round(time.monotonic() - started, 3)})
+
+    def approval_response(response):
+        if response.request in approval_posts:
+            approval_responses.append(response)
+        path = urlsplit(response.url).path
+        if path.startswith('/api/collaboration'):
+            timeline.append({'event': 'response', 'route': path,
+                'kind': parse_qs(urlsplit(response.url).query).get('kind', [''])[0],
+                'status': response.status, 'elapsed': round(time.monotonic() - started, 3)})
+
+    page.on('request', approval_request)
+    page.on('response', approval_response)
+    try:
+        form.locator('[name="confirm"]').check()
+        # Approval deliberately keeps the old modal inert until the authoritative
+        # replacement is ready. Observe the original POST and its same-scope GET
+        # within the existing API's 15s request budget before the unchanged 5s
+        # DOM assertion; never click again or accept an older/polled response.
+        with page.expect_response(lambda response: response.request in fresh_requests,
+                                  timeout=15000) as refreshed:
+            with page.expect_event('requestfinished', predicate=lambda request: request in fresh_requests,
+                                   timeout=15000) as finished:
+                with page.expect_response(lambda response: response.request in approval_posts,
+                                          timeout=15000) as saved:
+                    form.locator('button[type="submit"]').click()
+                assert saved.value.status == 200
+        assert len(approval_posts) == 1 and len(approval_responses) == 1
+        assert approval_posts[0].post_data_json['goal_id'] == goal_id
+        assert len(fresh_requests) == 1 and refreshed.value.request == finished.value
+        assert refreshed.value.status == 200
+        assert any(item['id'] == goal_id and item['state'] == 'active'
+                   for item in refreshed.value.json()['items'])
+        expect(page.locator('#cc-drawer')).not_to_be_visible()
+        assert len(approval_posts) == 1
+    except Exception:
+        print('GOAL_APPROVAL_DIAGNOSTIC', json.dumps({'timeline': timeline,
+            'dom': page.evaluate("""() => {const root=document.querySelector('.collaboration'),
+              form=document.querySelector('#cc-goal-approve'), button=form?.querySelector('button[type=submit]');
+              return {rootInert:root?.inert,rootBusy:root?.getAttribute('aria-busy'),
+                drawerInert:document.querySelector('#cc-drawer')?.inert,confirmed:form?.elements.confirm.checked,
+                buttonDisabled:button?.disabled,buttonAriaDisabled:button?.getAttribute('aria-disabled'),
+                valid:form?.checkValidity(),feedback:document.querySelector('#cc-feedback')?.textContent};}""")}), flush=True)
+        raise
+    finally:
+        page.remove_listener('request', approval_request)
+        page.remove_listener('response', approval_response)
 
 
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])

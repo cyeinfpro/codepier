@@ -8,7 +8,7 @@ import pytest
 from shared.execution_policy import InvocationInspector
 from shared.util import DevError
 from hub.runtime import Principal
-from tests.test_audit_runtime import runtime, Socket, until
+from tests.test_audit_runtime import runtime, Socket
 from tests.test_shell import shell_agent, shell_request
 
 
@@ -85,15 +85,20 @@ async def test_ambiguous_or_accepted_work_is_only_probed(runtime, monkeypatch, a
     p = Principal('mcp:test:ChatGPT', 'owner', {'read','execute'}, ['*'])
     monkeypatch.delenv('MCP_BLOCK_LOCAL_CODEX', raising=False)
     receipt = await r.invoke('shell_exec', {'project':'Project', 'command':'codex never-run', 'idempotency_key':'ambiguous-policy-probe'}, p)
-    r.store.execute('UPDATE operations SET attempts=1,accepted_at=? WHERE id=?', (time.time() if accepted else None, receipt['operation_id']))
+    accepted_at = time.time() if accepted else None
+    r.store.execute('UPDATE operations SET attempts=1,accepted_at=? WHERE id=?', (accepted_at, receipt['operation_id']))
     monkeypatch.setenv('MCP_BLOCK_LOCAL_CODEX', 'true')
     socket = Socket(secret)
     reader = asyncio.create_task(r.agent_socket(socket, 'dev'))
     try:
-        await until(lambda: r.online('dev'))
+        await socket.wait_connected(r)
         await r.deliver(receipt['operation_id'])
         assert [x['type'] for x in socket.packets] == ['ready', 'probe']
-        assert r.operation(receipt['operation_id'], p)['pending']
+        assert socket.packets[-1]['id'] == receipt['operation_id']
+        op = r.operation(receipt['operation_id'], p)
+        assert op['pending'] and op['attempts'] == 1
+        assert r.store.one('SELECT accepted_at FROM operations WHERE id=?',
+                           (receipt['operation_id'],))['accepted_at'] == accepted_at
     finally:
         await socket.close()
         await reader

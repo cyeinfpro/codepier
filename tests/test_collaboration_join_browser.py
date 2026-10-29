@@ -320,14 +320,22 @@ def seed_fixture_host(stack, slot, requests, deliver):
             subscriptions.append(store.one('SELECT * FROM mcp_event_subscriptions WHERE id=?', (result['id'],)))
         if not deliver:
             return
-        # Reserve in the same synchronous transaction that queues the fixtures,
-        # so the separate Hub loop cannot claim them. No lock crosses an await.
-        with store.transaction():
-            for row in subscriptions:
+        # Production permits one in-flight delivery per callback endpoint.
+        # Queue and reserve each test atomically, then finish its original
+        # delivery before queuing the next same-endpoint subscription. This
+        # keeps the separate Hub loop from claiming fixture work without
+        # bypassing endpoint serialization or holding a DB lock across await.
+        for row in subscriptions:
+            with store.transaction():
                 events.queue_test(room, row)
-            deliveries = events.reserve()
-        for delivery in deliveries:
+                deliveries = events.reserve()
+            assert len(deliveries) == 1
+            delivery = deliveries[0]
+            assert delivery['subscription_id'] == row['id']
             await events.deliver(delivery)
+            receipt = store.one('SELECT state,attempt FROM mcp_event_deliveries WHERE id=?',
+                                (delivery['delivery_id'],))
+            assert receipt['state'] == 'accepted' and receipt['attempt'] == 1
 
     try:
         asyncio.run(seed())
