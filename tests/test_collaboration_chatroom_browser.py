@@ -263,6 +263,125 @@ def test_structured_mentions_and_connection_access_review(collaboration_stack, c
         context.close()
 
 
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+@pytest.mark.parametrize('finish', ['click', 'cancel'])
+def test_connection_access_pointer_survives_unchanged_refresh(
+        collaboration_stack, chat_browser_pool, engine, finish):
+    stack = collaboration_stack
+    context = chat_browser_pool(engine).new_context(viewport={'width': 1440, 'height': 900})
+    page = context.new_page()
+    page.add_init_script("""(() => {
+      let workspaceModule;
+      Object.defineProperty(window, 'CodePierCollaborationWorkspace', {
+        configurable: true,
+        get: () => workspaceModule,
+        set: (value) => {
+          const create = value.create;
+          value.create = function(options, ...args) {
+            return Reflect.apply(create, this, [{...options, onOpen(...openArgs) {
+              const pending = Reflect.apply(options.onOpen, this, openArgs);
+              window.speakingPointerRefresh = pending;
+              return pending;
+            }}, ...args]);
+          };
+          workspaceModule = value;
+        },
+      });
+      window.speakingPointerEvents = [];
+      for (const type of ['mousedown', 'mouseup', 'click']) {
+        document.addEventListener(type, (event) => {
+          if (event.target.closest('[data-cc-action]')?.dataset.ccAction === 'message-access')
+            window.speakingPointerEvents.push(type);
+        }, true);
+      }
+    })();""")
+    held = []
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    try:
+        login(page, stack)
+        slot = register_notification_fixture(stack, '真实指针审阅连接')
+        click_room_refresh(page)
+        # Seed the retained agents form only after this explicit refresh has
+        # applied the newly registered slot, not while its reads are pending.
+        expect(page.locator('#cc-feedback')).to_have_text('状态已刷新。')
+        expect(page.locator('.collaboration')).not_to_have_attribute('aria-busy', 'true')
+        page.locator('[data-cc-view="agents"]').click()
+        card = page.locator(f'[data-speaking-slot="{slot["id"]}"]')
+        details = card.locator('xpath=ancestor::details[1]')
+        if details.get_attribute('open') is None:
+            details.locator(':scope > summary').click()
+        button = card.locator('[data-cc-action="message-access"]')
+        expect(button).to_be_visible()
+
+        def matches_overview(url):
+            parsed = urlsplit(url)
+            return parsed.path == '/api/collaboration' and parse_qs(parsed.query).get('kind') == ['overview']
+
+        def delay_overview(route):
+            if not held:
+                held.append(route)
+                page.locator('html').evaluate('(n) => n.dataset.speakingRefreshHeld = "yes"')
+            else:
+                route.continue_()
+
+        page.route(matches_overview, delay_overview)
+        page.locator('[data-cc-view="agents"]').click()
+        expect(page.locator('html')).to_have_attribute('data-speaking-refresh-held', 'yes')
+        response = held[0].fetch()
+        assert response.ok, response.status
+        button.scroll_into_view_if_needed()
+        original = button.element_handle()
+        original_text = button.evaluate_handle('(node) => node.firstChild')
+        bounds = button.bounding_box()
+        assert bounds
+        page.mouse.move(bounds['x'] + bounds['width'] / 2, bounds['y'] + bounds['height'] / 2)
+        page.evaluate('window.speakingPointerEvents = []')
+        page.mouse.down()
+        assert original.evaluate("(node) => node.matches(':active')")
+        held[0].fulfill(response=response)
+        page.evaluate('() => window.speakingPointerRefresh')
+        # Even an identical textContent assignment replaces the text target in
+        # WebKit and suppresses its native click. Do not replace a stable label.
+        assert original.evaluate('(node) => node.isConnected')
+        assert original_text.evaluate('(node) => node.isConnected')
+        expect(button).to_have_attribute('data-speaking-version', '0')
+        if finish == 'cancel':
+            page.mouse.move(1, 1)
+        page.mouse.up()
+        form = page.locator('#cc-message-access')
+        if finish == 'click':
+            expect(form).to_have_attribute('data-version', '0')
+            expect(form.locator('[name="confirm"]')).not_to_be_checked()
+            assert page.evaluate('window.speakingPointerEvents') == ['mousedown', 'mouseup', 'click']
+            page.keyboard.press('Escape')
+        else:
+            assert page.evaluate('window.speakingPointerEvents') == ['mousedown']
+        expect(page.locator('#cc-drawer')).not_to_be_visible()
+
+        # Identity preservation must not defer real permission changes.
+        # Opening or cancelling review must not grant permission by itself.
+        data = overview(stack)
+        member = stack.must(stack.client.get('/api/collaboration', params={
+            **scope(stack), 'kind': 'members'}))['items'][0]
+        assert not member['can_speak'] and member['speaking_version'] == 0
+        stack.must(stack.client.post('/api/collaboration/message-access', json={
+            **scope(stack), 'room_id': data['room']['id'], 'grant_id': member['grant_id'],
+            'expected_version': 0, 'enabled': True, 'idempotency_key': key()}))
+        # The next onOpen refresh reads the actual changed server state.
+        page.locator('[data-cc-view="agents"]').click()
+        page.evaluate('() => window.speakingPointerRefresh')
+        expect(button).to_have_text('撤回这个连接的发言许可')
+        expect(button).to_have_attribute('data-enabled', 'false')
+        expect(button).to_have_attribute('data-speaking-version', '1')
+        expect(card.locator('[data-cc-speaking-status]')).to_have_text('这个连接已获准在本房间发言')
+        button.click()
+        expect(form).to_have_attribute('data-version', '1')
+        expect(form.locator('[name="confirm"]')).not_to_be_checked()
+        assert errors == []
+    finally:
+        context.close()
+
 
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
 def test_conversation_add_project_preserves_history_draft_and_attribution(collaboration_stack, chat_browser_pool, tmp_path, engine):
@@ -721,7 +840,7 @@ def test_pending_refresh_allows_navigation_and_failed_refresh_releases_actions(c
             # Keep one handler until context teardown. Removing a broad handler
             # while sibling timeline/member requests were continuing caused a
             # WebKit "Route is already handled" race in the test harness.
-            if phase['value'] == 'hold' and not held:
+            if phase['value'] == 'hold':
                 held.append([route, None])
                 page.locator('html').evaluate('(n) => n.dataset.navigationRefreshHeld = "yes"')
             elif phase['value'] == 'fail':
@@ -730,16 +849,24 @@ def test_pending_refresh_allows_navigation_and_failed_refresh_releases_actions(c
                 route.continue_()
 
         page.route(matches_overview, overview_fixture)
+        # Start a real background read first. A single-request hold can capture
+        # this read and let the manual action finish before the navigation check.
+        page.locator('[data-cc-view="discussion"]').click()
+        expect(page.locator('html')).to_have_attribute('data-navigation-refresh-held', 'yes')
+        background_reads = len(held)
         with page.expect_request(lambda request: matches_overview(request.url)):
             click_room_refresh(page)
-        expect(page.locator('html')).to_have_attribute('data-navigation-refresh-held', 'yes')
-        held[0][1] = held[0][0].fetch()
-        assert held[0][1].ok, held[0][1].status
+        expect(page.locator('.collaboration')).to_have_attribute('aria-busy', 'true')
         expect(page.locator('[data-cc-action="mentions"]')).to_be_disabled()
+        assert len(held) > background_reads
+        for pending in held:
+            pending[1] = pending[0].fetch()
+            assert pending[1].ok, pending[1].status
         page.locator('[data-cc-view="jobs"]').click()
         expect(page.locator('.cc-coordination-list')).to_be_visible()
         phase['value'] = 'pass'
-        held[0][0].fulfill(response=held[0][1])
+        for route, response in held:
+            route.fulfill(response=response)
         expect(page.locator('[data-cc-action="mentions"]')).to_be_enabled()
         expect(page.locator('[data-cc-view="jobs"]')).to_have_attribute('aria-pressed', 'true')
         page.locator('[data-cc-view="discussion"]').click()
@@ -772,20 +899,35 @@ def test_ordinary_drawer_close_suppresses_late_thread_response(collaboration_sta
         expect(page.locator('.cc-feed')).to_contain_text(body)
         held = []
 
-        def delay_thread(route):
-            if parse_qs(urlsplit(route.request.url).query).get('kind') == ['thread'] and not held:
-                held.append([route, None])
-                page.locator('html').evaluate('(n) => n.dataset.ordinaryThreadHeld = "yes"')
-            else:
-                route.continue_()
+        def matches_thread(url):
+            parsed = urlsplit(url)
+            return parsed.path == '/api/collaboration' and parse_qs(parsed.query).get('kind') == ['thread']
 
-        page.route('**/api/collaboration?*', delay_thread)
+        def delay_thread(route):
+            assert matches_thread(route.request.url)
+            assert not held  # One click must issue exactly one detail request.
+            held.append([route, None])
+            page.locator('html').evaluate('(n) => n.dataset.ordinaryThreadHeld = "yes"')
+
+        # Intercept only the held detail request. Removing a broad interceptor
+        # while sibling reads continue races Playwright's route completion.
+        page.route(matches_thread, delay_thread)
         trigger = page.locator('.cc-feed [data-cc-action="thread"]').first
         with page.expect_request(lambda request: parse_qs(urlsplit(request.url).query).get('kind') == ['thread']):
             trigger.click()
         expect(page.locator('html')).to_have_attribute('data-ordinary-thread-held', 'yes')
         held[0][1] = held[0][0].fetch()
         assert held[0][1].ok, held[0][1].status
+        # A real sibling read must finish without entering the detail handler.
+        sibling_status = page.evaluate("""async (url) => {
+          const sibling = new URL(url);
+          sibling.searchParams.set('kind', 'members');
+          const response = await fetch(sibling);
+          await response.json();
+          return response.status;
+        }""", held[0][0].request.url)
+        assert sibling_status == 200
+        assert len(held) == 1
         expect(trigger).to_be_disabled()
         expect(page.locator('#cc-drawer')).to_be_visible()
         close = page.locator('#cc-drawer [data-cc-action="close-drawer"]')
@@ -793,7 +935,6 @@ def test_ordinary_drawer_close_suppresses_late_thread_response(collaboration_sta
         close.click()
         expect(page.locator('#cc-drawer')).not_to_be_visible()
         held[0][0].fulfill(response=held[0][1])
-        page.unroute('**/api/collaboration?*', delay_thread)
         expect(trigger).to_be_enabled()
         expect(page.locator('#cc-drawer')).not_to_be_visible()
         expect(page.locator('#cc-drawer')).not_to_contain_text(body)

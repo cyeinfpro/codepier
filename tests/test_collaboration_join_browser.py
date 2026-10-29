@@ -11,6 +11,7 @@ import os
 import secrets
 import time
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -78,6 +79,120 @@ def open_monitor_details(page):
             has_text='高级：项目监控订阅与测试').all():
         if summary.locator('..').get_attribute('open') is None:
             summary.click()
+
+
+def queue_join_test(page, card, before_render_completion=None):
+    """Bind one native intent to its original authoritative replacement."""
+    posts, responses, fresh_requests, fresh_responses = [], [], [], []
+    root = page.locator('.collaboration')
+    expected_scope = {
+        'project': root.get_attribute('data-project'),
+        'environment_id': root.get_attribute('data-environment'),
+        'conversation_id': root.get_attribute('data-conversation') or '',
+    }
+    page.evaluate("""() => {
+        const original = window.renderPage;
+        const observed = window.joinTestRender = {
+            beforeSequence: S.renderSeq, sequence: null, settled: false, error: null, calls: 0
+        };
+        observed.finished = new Promise(resolve => { observed.complete = resolve; });
+        const wrapper = window.renderPage = function () {
+            'use strict';
+            window.renderPage = original;
+            observed.calls++;
+            const rendering = Reflect.apply(original, this, arguments);
+            observed.sequence = S.renderSeq;
+            observed.promise = rendering;
+            const complete = () => { observed.settled = true; observed.complete(); };
+            rendering.then(complete, error => {
+                observed.error = String(error);
+                complete();
+            });
+            return rendering;
+        };
+        observed.restore = () => {
+            if (window.renderPage === wrapper) window.renderPage = original;
+        };
+    }""")
+
+    def requested(request):
+        parsed = urlsplit(request.url)
+        if (parsed.path == '/api/collaboration/join-slot-control'
+                and request.method == 'POST' and request.post_data_json.get('action') == 'test'):
+            posts.append(request)
+        elif (responses and responses[0].status == 200 and parsed.path == '/api/collaboration'
+              and request.method == 'GET'):
+            query = parse_qs(parsed.query)
+            if (not fresh_requests and query.get('kind') == ['overview']
+                    and all(query.get(name, ['']) == [value] for name, value in expected_scope.items())):
+                # The first same-scope overview after the POST belongs to its
+                # replacement; busy/detach fence polling until that render.
+                # Reserve synchronously, before any response callback can run.
+                # Older requests and later polls cannot replace this receipt.
+                fresh_requests.append(request)
+
+    def responded(response):
+        if response.request in posts:
+            responses.append(response)
+        if response.request in fresh_requests:
+            fresh_responses.append(response)
+
+    page.on('request', requested)
+    page.on('response', responded)
+    try:
+        # HTTP 200 is not replacement completion: html() must finish its
+        # authoritative reads while the old DOM stays inert. Keep the native
+        # one-intent gesture and the original five-second DOM assertion.
+        with page.expect_response(lambda response: response.request in posts, timeout=5000) as queued:
+            card.locator('[data-cc-action="join-test"]').dblclick(timeout=5000)
+        assert queued.value.status == 200
+        result = queued.value.json()
+        payload = queued.value.request.post_data_json
+        assert result['message'] == '测试已排队。请到对应聊天核对事件；接收回执不代表已读。'
+        assert result['slot']['id'] == payload['slot_id']
+        assert result['slot']['version'] == payload['expected_version'] + 1
+        assert payload['project'] == expected_scope['project']
+        assert payload['environment_id'] == expected_scope['environment_id']
+        if before_render_completion is not None:
+            before_render_completion(posts, result)
+        # This is the exact renderer started by the original POST, bounded by
+        # the existing API request budget, not a longer feedback expectation.
+        page.evaluate("""async () => {
+            let timer;
+            try {
+                await Promise.race([
+                    window.joinTestRender.finished,
+                    new Promise((_, reject) => {
+                        timer = setTimeout(() => reject(new Error(
+                            'Original join renderer exceeded the existing 15000ms API budget')), 15000);
+                    })
+                ]);
+            } finally { clearTimeout(timer); }
+        }""")
+        observed = page.evaluate("""() => ({calls: window.joinTestRender.calls,
+            error: window.joinTestRender.error, before: window.joinTestRender.beforeSequence,
+            sequence: window.joinTestRender.sequence, current: S.renderSeq})""")
+        assert observed['calls'] == 1 and observed['error'] is None
+        assert observed['sequence'] == observed['before'] + 1 == observed['current']
+        assert len(posts) == len(responses) == len(fresh_requests) == len(fresh_responses) == 1
+        refreshed = fresh_responses[0]
+        assert refreshed.status == 200 and refreshed.request == fresh_requests[0]
+        fresh_slot = next(slot for slot in refreshed.json()['join_slots'] if slot['id'] == payload['slot_id'])
+        assert fresh_slot['version'] == result['slot']['version']
+        assert not fresh_slot['connection_complete']
+        assert not any(route['chat_receipt_confirmed'] for route in fresh_slot['routes'])
+        expect(page.locator('#cc-feedback')).to_contain_text('测试已排队')
+        assert not root.evaluate('(node) => node.inert')
+        assert all(root.get_attribute('data-' + name) == value
+                   for name, value in (('project', expected_scope['project']),
+                                       ('environment', expected_scope['environment_id']),
+                                       ('conversation', expected_scope['conversation_id'])))
+        assert len(posts) == 1
+        return result
+    finally:
+        page.remove_listener('request', requested)
+        page.remove_listener('response', responded)
+        page.evaluate('window.joinTestRender.restore()')
 
 
 def join_existing_connection(stack, code):
@@ -398,15 +513,7 @@ def test_join_panel_partial_routes_and_explicit_event_confirmation(collaboration
         page.on('request', lambda request: tests_sent.append(request.post_data_json)
                 if request.url.endswith('/api/collaboration/join-slot-control')
                 and request.post_data_json.get('action') == 'test' else None)
-        # Real double-click actionability waits for an in-flight refresh to
-        # release its inert/busy surface; synthetic button.click() can be
-        # silently dropped there. Keep the one-intent and consent assertions.
-        with page.expect_response(lambda response:
-                response.url.endswith('/api/collaboration/join-slot-control')
-                and response.request.post_data_json.get('action') == 'test', timeout=5000) as queued:
-            card.locator('[data-cc-action="join-test"]').dblclick(timeout=5000)
-        assert queued.value.status == 200
-        expect(page.locator('#cc-feedback')).to_contain_text('测试已排队')
+        queue_join_test(page, card)
         current = overview(stack)['join_slots'][0]
         assert not current['connection_complete']
         assert len(tests_sent) == 1
@@ -415,6 +522,73 @@ def test_join_panel_partial_routes_and_explicit_event_confirmation(collaboration
     finally:
         context.close()
 
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_join_test_waits_for_original_authoritative_replacement(collaboration_stack, chat_browser_pool, engine):
+    stack = collaboration_stack
+    context = chat_browser_pool(engine).new_context(viewport={'width': 1440, 'height': 1000})
+    page = context.new_page()
+    held, saved = [], []
+    try:
+        login(page, stack)
+        open_room(page, stack)
+        card = create_slot(page, 'Delayed authoritative join test', 'work_cloud')
+        joined = join_existing_connection(stack, card.locator('.cc-join-code').inner_text())
+        fixture_host(stack, joined['slot'], joined['subscription_requests'])
+        refresh(page)
+        card.locator('.cc-join-confirm input[type="checkbox"]').check()
+        card.locator('.cc-join-confirm button').click()
+        expect(card.locator('.cc-status').first).to_have_text('用户已确认聊天收件')
+        refresh(page)
+
+        def saved_test(response):
+            if (urlsplit(response.url).path == '/api/collaboration/join-slot-control'
+                    and response.request.post_data_json.get('action') == 'test'):
+                assert response.status == 200
+                saved.append(response)
+
+        def hold_options(route):
+            if saved and not held:
+                held.append(route)
+                page.locator('html').evaluate('(node) => { node.dataset.joinReplacementHeld = "true"; }')
+            else:
+                route.continue_()
+
+        page.on('response', saved_test)
+        pattern = lambda url: (urlsplit(url).path == '/api/collaboration'
+                               and parse_qs(urlsplit(url).query).get('kind') == ['coordination_options'])
+        page.route(pattern, hold_options)
+
+        def complete_original(posts, result):
+            expect(page.locator('html')).to_have_attribute('data-join-replacement-held', 'true')
+            assert len(held) == len(saved) == len(posts) == 1
+            query = parse_qs(urlsplit(held[0].request.url).query)
+            assert query['project'] == [stack.project['id']]
+            assert query['environment_id'] == ['production']
+            assert query.get('conversation_id', ['']) == [page.locator('.collaboration').get_attribute('data-conversation')]
+            response = held[0].fetch()
+            assert response.status == 200
+            # The mutation already cleared consent, but the old DOM cannot be
+            # used while the authoritative replacement is deliberately held.
+            assert not result['slot']['connection_complete']
+            assert not any(route['chat_receipt_confirmed'] for route in result['slot']['routes'])
+            expect(page.locator('#cc-feedback')).to_have_text('状态已刷新。')
+            expect(page.locator('.collaboration')).to_have_attribute('aria-busy', 'true')
+            assert page.locator('.collaboration').evaluate('(node) => node.inert')
+            assert page.evaluate('window.joinTestRender.settled === false')
+            card.locator('[data-cc-action="join-test"]').evaluate('(button) => button.click()')
+            assert len(posts) == 1
+            held[0].fulfill(response=response)
+
+        queue_join_test(page, card, complete_original)
+        # Keep this disposable interceptor until context.close(); removing it
+        # can race a later poll whose continue_ callback is still in flight.
+        expect(card.locator('.cc-join-confirm')).to_have_count(0)
+        current = overview(stack)['join_slots'][0]
+        assert not current['connection_complete']
+        assert not any(route['chat_receipt_confirmed'] for route in current['routes'])
+        assert len(saved) == 1
+    finally:
+        context.close()
 
 
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])

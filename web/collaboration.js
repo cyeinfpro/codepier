@@ -615,7 +615,10 @@ window.CodePierCollaboration = (() => {
       if (!member) continue;
       node.dataset.enabled = String(!member.can_speak);
       node.dataset.speakingVersion = String(member.speaking_version || 0);
-      node.textContent = member.can_speak ? '撤回这个连接的发言许可' : '审阅并允许这个连接发言';
+      const label = member.can_speak ? '撤回这个连接的发言许可' : '审阅并允许这个连接发言';
+      // Replacing even identical text between pointerdown/up cancels WebKit's click.
+      // Real permission/version changes still take effect immediately above.
+      if (node.textContent !== label) node.textContent = label;
     }
   }
   async function refreshDeliveries(c, current) {
