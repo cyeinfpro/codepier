@@ -22,8 +22,11 @@ from pathlib import Path
 root = Path(sys.argv[1])
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
 signal.signal(signal.SIGHUP, signal.SIG_IGN)
-(root / 'ready').write_text('ready')
 try:
+    # Readiness includes an actual side effect, not only installed handlers.
+    with (root / 'ticks').open('ab', buffering=0) as stream:
+        stream.write(b'x')
+    (root / 'ready').write_text('ready')
     while not (root / 'fixture-stop').exists():
         with (root / 'ticks').open('ab', buffering=0) as stream:
             stream.write(b'x')
@@ -88,6 +91,47 @@ async def test_close_stops_owned_descendant_even_after_provider_leader_exits(tmp
         await asyncio.sleep(.1)
 
 
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX provider descendant readiness')
+@pytest.mark.asyncio
+async def test_provider_ready_follows_first_completed_tick(tmp_path):
+    # Hold the real descendant immediately before its first side effect. Ready
+    # must not let a cancellation test stop it before ticks has ever existed.
+    marker = "root = Path(sys.argv[1])"
+    gated = PROVIDER.replace(marker, marker + """
+original_open = Path.open
+def gated_open(path, *args, **kwargs):
+    if path == root / 'ticks' and not (root / 'release-first-tick').exists():
+        (root / 'first-tick-blocked').write_text('blocked')
+        while not (root / 'release-first-tick').exists():
+            time.sleep(.01)
+    return original_open(path, *args, **kwargs)
+Path.open = gated_open
+""")
+    provider = tmp_path / 'provider.py'
+    provider.write_text(gated)
+    launcher = tmp_path / 'launcher'
+    launcher.write_text('#!/bin/sh\nexec ' + shlex.join([sys.executable, str(provider)]) + '\n')
+    launcher.chmod(0o700)
+    client = NativeClient({'available': True, 'launcher': str(launcher),
+                           'plugin_root': str(tmp_path), 'codex_home': str(tmp_path)})
+    task = asyncio.create_task(client.start())
+    try:
+        await wait_until(lambda: (tmp_path / 'first-tick-blocked').exists())
+        assert not (tmp_path / 'ready').exists()
+        assert not (tmp_path / 'ticks').exists()
+        (tmp_path / 'release-first-tick').write_text('release')
+        await asyncio.wait_for(task, 5)
+        assert (tmp_path / 'ready').exists()
+        assert (tmp_path / 'ticks').stat().st_size > 0
+    finally:
+        (tmp_path / 'release-first-tick').write_text('release')
+        (tmp_path / 'fixture-stop').write_text('stop')
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await client.close()
+
+
 def test_windows_provider_command_keeps_existing_direct_path():
     from agent.computer_process import provider_argv
     command = ['fixture-provider.exe', 'mcp']
@@ -135,6 +179,7 @@ async def test_cancellation_while_spawn_completes_reaps_only_owned_provider(tmp_
     try:
         await asyncio.wait_for(spawned.wait(), 5)
         await wait_until(lambda: (tmp_path / 'ready').exists())
+        assert (tmp_path / 'ticks').stat().st_size > 0
         task.cancel()
         release.set()
         with pytest.raises(asyncio.CancelledError):

@@ -699,7 +699,7 @@ def test_join_test_waits_for_original_authoritative_replacement(collaboration_st
                 assert response.status == 200
                 saved.append(response)
 
-        def hold_options(route):
+        def hold_basics(route):
             if saved and not held:
                 held.append(route)
                 page.locator('html').evaluate('(node) => { node.dataset.joinReplacementHeld = "true"; }')
@@ -707,17 +707,29 @@ def test_join_test_waits_for_original_authoritative_replacement(collaboration_st
                 route.continue_()
 
         page.on('response', saved_test)
-        pattern = lambda url: (urlsplit(url).path == '/api/collaboration'
-                               and parse_qs(urlsplit(url).query).get('kind') == ['coordination_options'])
-        page.route(pattern, hold_options)
+        # Hold the original replacement's first dependency, not a later options
+        # read that requires unrelated basics/status/overview reads to finish
+        # within the five-second marker expectation. The test is about keeping
+        # stale DOM inert until that same replacement finishes, not read latency.
+        page.route(stack.url + '/api/devices', hold_basics)
+        scope = {name: page.locator('.collaboration').get_attribute('data-' + name)
+                 for name in ('project', 'environment', 'conversation')}
 
         def complete_original(posts, result):
             expect(page.locator('html')).to_have_attribute('data-join-replacement-held', 'true')
             assert len(held) == len(saved) == len(posts) == 1
-            query = parse_qs(urlsplit(held[0].request.url).query)
-            assert query['project'] == [stack.project['id']]
-            assert query['environment_id'] == ['production']
-            assert query.get('conversation_id', ['']) == [page.locator('.collaboration').get_attribute('data-conversation')]
+            assert held[0].request.method == 'GET'
+            assert held[0].request.url == stack.url + '/api/devices'
+            rendering = page.evaluate("""() => ({
+                calls: window.joinTestRender.calls, before: window.joinTestRender.beforeSequence,
+                sequence: window.joinTestRender.sequence, current: S.renderSeq,
+                settled: window.joinTestRender.settled
+            })""")
+            assert rendering['calls'] == 1 and not rendering['settled']
+            assert rendering['sequence'] == rendering['before'] + 1 == rendering['current']
+            assert scope['project'] == stack.project['id'] and scope['environment'] == 'production'
+            assert all(page.locator('.collaboration').get_attribute('data-' + name) == value
+                       for name, value in scope.items())
             response = held[0].fetch()
             assert response.status == 200
             # The mutation already cleared consent, but the old DOM cannot be

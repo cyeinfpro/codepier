@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from types import SimpleNamespace
@@ -229,6 +230,47 @@ def vps_stack(stack):
     return stack
 
 
+@pytest.fixture
+def rejected_auth_transport(vps_stack):
+    # This response-wait test needs real native processes and retry backoff, not
+    # six coverage-instrumented Python startups competing for its 10s budget.
+    # Other transport tests retain the general Python fixture and command path.
+    directory = vps_stack.directory / 'vps-bin'
+    assert vps_stack.config['shell']['env']['PATH'].split(os.pathsep)[0] == str(directory)
+    scripts = {
+        directory / 'sshpass': '#!/bin/sh\n[ "$1" = "-e" ] || exit 99\nshift\nexec "$@"\n',
+        directory / 'ssh': r'''#!/bin/sh
+[ "$SSHPASS" = wrong ] || exit 99
+log= batch= pubkey= hostkey= host=
+for arg in "$@"; do
+  case "$arg" in *"$SSHPASS"*) exit 98;; esac
+done
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    BatchMode=no) batch=yes;;
+    PubkeyAuthentication=no) pubkey=yes;;
+    StrictHostKeyChecking=yes|StrictHostKeyChecking=accept-new) hostkey=yes;;
+    -E) shift; log="$1";;
+    --) shift; host="$1"; break;;
+  esac
+  shift
+done
+[ "$batch:$pubkey:$hostkey:$host" = yes:yes:yes:vps.example.invalid ] || exit 97
+[ -n "$log" ] || exit 96
+printf '%s\n' 'root@vps.example.invalid: Permission denied (password).' > "$log"
+exit 5
+''',
+    }
+    original = {path: path.read_bytes() for path in scripts}
+    try:
+        for path, source in scripts.items():
+            path.write_text(source)
+        yield
+    finally:
+        for path, raw in original.items():
+            path.write_bytes(raw)
+
+
 def create_remote(stack, **changes):
     # The module-scoped stack keeps saved endpoints across tests. Random ports
     # collide; allocate each fixture identity once for this stack instead.
@@ -342,7 +384,7 @@ def test_mcp_scope_and_assignments(vps_stack):
     assert denied['isError'] and denied['structuredContent']['error']['code'] == 'VPS_NOT_FOUND'
 
 
-def test_saved_vps_default_wait_returns_final_result_after_bounded_retries(vps_stack):
+def test_saved_vps_default_wait_returns_final_result_after_bounded_retries(vps_stack, rejected_auth_transport):
     s = vps_stack
     v = create_remote(s, password='wrong')
     call = execute_args('ProjectAlpha', v['id'], command='touch auth-must-not-execute')
