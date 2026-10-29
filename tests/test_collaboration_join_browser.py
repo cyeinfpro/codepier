@@ -81,8 +81,143 @@ def open_monitor_details(page):
             summary.click()
 
 
+
+class JoinCompletionDiagnostic:
+    """Bounded failure-only metadata; never record URLs, payloads or credentials."""
+
+    endpoints = (
+        '/api/devices', '/api/projects', '/api/grants', '/api/collaboration/status',
+        '/api/collaboration', '/api/collaboration/conversations',
+        '/api/collaboration/join-slot-control',
+    )
+    kinds = ('overview', 'timeline', 'members', 'delegation_policies',
+             'teams', 'coordination_options', 'coordination_goals')
+
+    def __init__(self, page):
+        self.page = page
+        self.started = time.monotonic()
+        self.network = []
+        self.requests = {}
+        self.callbacks = {
+            'request': lambda request: self.record('request', request),
+            'response': lambda response: self.record('response', response.request, response.status),
+            'requestfinished': lambda request: self.record('finished', request),
+            'requestfailed': lambda request: self.record('failed', request),
+        }
+        page.evaluate("""({endpoints, kinds}) => {
+            const started = performance.now(), session = S.session, space = S.space_id;
+            const initial = document.querySelector('.collaboration')?.dataset;
+            const scope = initial ? [initial.project, initial.environment, initial.conversation] : [];
+            const stages = [], pointers = [], restores = [];
+            let serial = 0;
+            const append = (items, value) => { items.push(value); if (items.length > 96) items.shift(); };
+            const at = () => Math.round(performance.now() - started);
+            const record = (stage, id, metadata = {}) =>
+                append(stages, {stage, id, ms: at(), sequence: S.renderSeq, ...metadata});
+            const wrap = (owner, name, stage, describe = () => ({})) => {
+                const original = owner[name];
+                const wrapped = function () {
+                    'use strict';
+                    const id = ++serial;
+                    let metadata;
+                    try { metadata = describe(arguments); }
+                    catch { metadata = {metadataUnavailable: true}; }
+                    record(stage + ':start', id, metadata);
+                    let result;
+                    try { result = Reflect.apply(original, this, arguments); }
+                    catch (error) { record(stage + ':error', id, metadata); throw error; }
+                    if (result && typeof result.then === 'function')
+                        result.then(() => record(stage + ':end', id, metadata),
+                            () => record(stage + ':error', id, metadata));
+                    else record(stage + ':end', id, metadata);
+                    return result;
+                };
+                owner[name] = wrapped;
+                restores.push(() => { if (owner[name] === wrapped) owner[name] = original; });
+            };
+            wrap(window, 'api', 'api', args => {
+                const parsed = new URL(args[0], location.href);
+                const kind = parsed.searchParams.get('kind') || '';
+                return {endpoint: endpoints.includes(parsed.pathname) ? parsed.pathname : 'other',
+                    kind: kinds.includes(kind) ? kind : 'other',
+                    method: ['GET', 'HEAD', 'POST'].includes(args[1]?.method || 'GET')
+                        ? args[1]?.method || 'GET' : 'other'};
+            });
+            for (const name of ['loadBasics', 'renderPage', 'uiWaitForPagePointer'])
+                wrap(window, name, name);
+            for (const name of ['html', 'detach', 'clear', 'open'])
+                wrap(CodePierCollaboration, name, 'collaboration.' + name);
+            const pointer = event => append(pointers, {
+                event: event.type, ms: at(), id: event.pointerId, buttons: event.buttons,
+                tracked: uiPagePointers.size, inert: !!event.target.closest?.('[inert]')
+            });
+            for (const event of ['pointerdown', 'pointerup', 'pointercancel'])
+                window.addEventListener(event, pointer, true);
+            window.joinCompletionDiagnostic = {
+                snapshot: () => {
+                    const root = document.querySelector('.collaboration'), data = root?.dataset;
+                    const rendering = window.joinTestRender;
+                    return {stages, pointers, state: {
+                        sequence: S.renderSeq, collaborationPage: S.page === 'collaboration',
+                        sameSession: S.session === session, sameSpace: S.space_id === space,
+                        sameScope: !!data && [data.project, data.environment, data.conversation]
+                            .every((value, index) => value === scope[index]),
+                        rootPresent: !!root, rootInert: !!root?.inert,
+                        rootBusy: root?.getAttribute('aria-busy') === 'true',
+                        pointers: [...uiPagePointers].slice(0, 16), pointerCount: uiPagePointers.size,
+                        pointerWaiters: uiPagePointerWaiters.size,
+                        renderCalls: rendering?.calls ?? 0,
+                        renderSequence: rendering?.sequence ?? null,
+                        renderSettled: !!rendering?.settled, renderRejected: !!rendering?.error
+                    }};
+                },
+                restore: () => {
+                    for (const event of ['pointerdown', 'pointerup', 'pointercancel'])
+                        window.removeEventListener(event, pointer, true);
+                    for (const restore of restores.reverse()) restore();
+                }
+            };
+        }""", {'endpoints': self.endpoints, 'kinds': self.kinds})
+        for event, callback in self.callbacks.items():
+            page.on(event, callback)
+
+    def record(self, event, request, status=None):
+        parsed = urlsplit(request.url)
+        if parsed.path not in self.endpoints:
+            return
+        if request not in self.requests:
+            if len(self.requests) >= 128:
+                return
+            self.requests[request] = len(self.requests) + 1
+        kind = parse_qs(parsed.query).get('kind', [''])[0]
+        self.network.append({
+            'event': event, 'id': self.requests[request],
+            'endpoint': parsed.path, 'kind': kind if kind in self.kinds else 'other',
+            'method': request.method if request.method in ('GET', 'HEAD', 'POST') else 'other',
+            'status': status, 'ms': round((time.monotonic() - self.started) * 1000),
+        })
+        del self.network[:-96]
+
+    def report(self):
+        # A closed/crashed page must not replace the original test exception.
+        try:
+            browser = self.page.evaluate('() => window.joinCompletionDiagnostic.snapshot()')
+        except Exception:
+            browser = {'snapshotUnavailable': True}
+        print('JOIN_COMPLETION_DIAGNOSTIC', json.dumps({
+            'network': self.network, 'browser': browser}, ensure_ascii=True), flush=True)
+
+    def close(self):
+        for event, callback in self.callbacks.items():
+            self.page.remove_listener(event, callback)
+        if not self.page.is_closed():
+            self.page.evaluate('() => window.joinCompletionDiagnostic.restore()')
+
+
 def queue_join_test(page, card, before_render_completion=None):
     """Bind one native intent to its original authoritative replacement."""
+    diagnostics = JoinCompletionDiagnostic(page)
+    failed = False
     posts, responses, fresh_requests, fresh_responses = [], [], [], []
     root = page.locator('.collaboration')
     expected_scope = {
@@ -189,10 +324,28 @@ def queue_join_test(page, card, before_render_completion=None):
                                        ('conversation', expected_scope['conversation_id'])))
         assert len(posts) == 1
         return result
+    except Exception:
+        failed = True
+        try:
+            diagnostics.report()
+        except Exception:
+            pass  # Reporting failure cannot mask the original assertion/error.
+        raise
     finally:
         page.remove_listener('request', requested)
         page.remove_listener('response', responded)
-        page.evaluate('window.joinTestRender.restore()')
+        try:
+            if not page.is_closed():
+                page.evaluate('window.joinTestRender.restore()')
+        except Exception:
+            if not failed:
+                raise
+        finally:
+            try:
+                diagnostics.close()
+            except Exception:
+                if not failed:
+                    raise
 
 
 def join_existing_connection(stack, code):
