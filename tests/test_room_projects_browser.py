@@ -1,5 +1,8 @@
 """Room-only project revisions in disposable Hub/Agent fixtures and real browsers."""
 
+import json
+from urllib.parse import urlsplit
+
 import pytest
 from playwright.sync_api import expect
 
@@ -804,6 +807,12 @@ def test_room_permission_preview_root_overlap_blocks_apply_without_adding_projec
     context = chat_browser_pool(engine).new_context(viewport={'width': 390, 'height': 844})
     page = context.new_page()
     applies, previews = [], []
+    network = []
+    page.on('response', lambda response: network.append({
+        'path': urlsplit(response.url).path, 'status': response.status})
+        if '/api/' in response.url else None)
+    page.on('requestfailed', lambda request: network.append({
+        'path': urlsplit(request.url).path, 'failure': request.failure}))
     page.on('request', lambda r: applies.append(r.url)
             if r.method == 'POST' and r.url.rsplit('/', 1)[-1] in
             {'conversation-projects', 'room-scope', 'room-scope-control'} else None)
@@ -842,6 +851,18 @@ def test_room_permission_preview_root_overlap_blocks_apply_without_adding_projec
         after = overview(stack)['conversation']
         assert after['version'] == before['version'] and after['projects'] == before['projects']
         assert after == before
+    except Exception:
+        # Keep the original failure and budget; Linux-only startup failures need
+        # the actual page and transport state, not a blind test retry.
+        try:
+            print('ROOM_OVERLAP_DIAGNOSTIC', json.dumps({
+                'page': urlsplit(page.url).path, 'fragment': urlsplit(page.url).fragment,
+                'body': page.locator('body').inner_text(timeout=1000)[:5000],
+                'network': network[-60:],
+            }, ensure_ascii=False), flush=True)
+        except Exception as diagnostic_error:
+            print('ROOM_OVERLAP_DIAGNOSTIC_UNAVAILABLE', type(diagnostic_error).__name__, flush=True)
+        raise
     finally:
         context.close()
 
