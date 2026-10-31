@@ -703,7 +703,8 @@ def test_drawer_focus_lifecycle_respects_reopen_navigation_and_new_focus(collabo
 
 
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
-def test_foreground_refresh_exposes_busy_actions_and_preserves_ime_draft(collaboration_stack, chat_browser_pool, engine):
+@pytest.mark.parametrize('background_first', [False, True])
+def test_foreground_refresh_exposes_busy_actions_and_preserves_ime_draft(collaboration_stack, chat_browser_pool, engine, background_first):
     stack = collaboration_stack
     context = chat_browser_pool(engine).new_context(viewport={'width': 1440, 'height': 900})
     page = context.new_page()
@@ -711,8 +712,10 @@ def test_foreground_refresh_exposes_busy_actions_and_preserves_ime_draft(collabo
       const schedule = window.setTimeout.bind(window);
       window.setTimeout = (fn, delay, ...args) => {
         const id = schedule(fn, delay, ...args);
-        if (delay === 5000 && typeof fn === 'function' && fn.name === 'poll')
+        if (typeof fn === 'function' && fn.name === 'poll') {
           window.__ccScheduledPoll = id;
+          window.__ccRunScheduledPoll = fn;
+        }
         return id;
       };
     })();""")
@@ -721,21 +724,31 @@ def test_foreground_refresh_exposes_busy_actions_and_preserves_ime_draft(collabo
         page.evaluate('() => clearTimeout(window.__ccScheduledPoll)')
         slot = register_notification_fixture(stack, '慢刷新后的通知连接')
         held = []
+        holding = True
 
         def hold_overview(route):
             query = parse_qs(urlsplit(route.request.url).query)
-            if query.get('kind') == ['overview'] and not held:
-                held.append([route, None])  # Reserve before route.fetch can dispatch another request.
-                page.locator('html').evaluate('(n) => n.dataset.chatRefreshHeld = "yes"')
+            if query.get('kind') == ['overview'] and holding:
+                # A poll can arrive first; holding only that request lets the
+                # actual foreground refresh finish before its busy assertions.
+                held.append(route)
+                page.locator('html').evaluate('''(n) => {
+                  n.dataset.chatRefreshHeld = 'yes';
+                  if (document.querySelector('.collaboration')?.getAttribute('aria-busy') === 'true')
+                    n.dataset.foregroundRefreshHeld = 'yes';
+                }''')
             else:
                 route.continue_()
 
         page.route('**/api/collaboration?*', hold_overview)
+        if background_first:
+            page.evaluate('() => { window.__ccRunScheduledPoll(); }')
+            expect(page.locator('html')).to_have_attribute('data-chat-refresh-held', 'yes')
+            expect(page.locator('.collaboration')).not_to_have_attribute('aria-busy', 'true')
         with page.expect_request(lambda request: parse_qs(urlsplit(request.url).query).get('kind') == ['overview']):
             click_room_refresh(page)
         expect(page.locator('html')).to_have_attribute('data-chat-refresh-held', 'yes')
-        held[0][1] = held[0][0].fetch()
-        assert held[0][1].ok, held[0][1].status
+        expect(page.locator('html')).to_have_attribute('data-foreground-refresh-held', 'yes')
         # Waiting is a product state: a fresh action must never look ready while
         # its click would be silently dropped by the request lock.
         mentions = page.locator('[data-cc-action="mentions"]')
@@ -749,7 +762,11 @@ def test_foreground_refresh_exposes_busy_actions_and_preserves_ime_draft(collabo
         area.dispatch_event('keydown', {'key': 'Enter', 'isComposing': True})
         assert overview(stack)['messages'] == []
         area.dispatch_event('compositionend')
-        held[0][0].fulfill(response=held[0][1])
+        holding = False
+        for route in held:
+            response = route.fetch()
+            assert response.ok, response.status
+            route.fulfill(response=response)
         # Keep interception alive through the following options/goals requests.
         # Removing it at response release can strand a newly paused Chromium request.
         expect(mentions).to_be_enabled()
