@@ -4004,5 +4004,22 @@ window.CodePierCollaboration = (() => {
     if (S.page === 'collaboration') return renderPage();
     return navigate('collaboration');
   }
+  // A document reload leaves the SPA without running its navigation cleanup.
+  // Cancel reads before WebKit tears down their network context; this does not
+  // cancel durable mutations or discard their original idempotency receipts.
+  let documentSuspended = false;
+  window.addEventListener('pagehide', () => {
+    if (S.page !== 'collaboration') return;
+    documentSuspended = true;
+    detach();
+  });
+  window.addEventListener('pageshow', (event) => {
+    if (!event.persisted || !documentSuspended) return;
+    documentSuspended = false;
+    // A cached document needs a fresh authorized projection and active readers,
+    // not replayed POSTs or an inert copy of the old room. detach kept its draft.
+    if (S.page === 'collaboration' && S.session)
+      renderPage(false).catch((error) => toast(error.message, true));
+  });
   return { html, bind, detach, clear, open };
 })();
