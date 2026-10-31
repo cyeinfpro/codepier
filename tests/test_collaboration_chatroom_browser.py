@@ -307,6 +307,9 @@ def test_connection_access_pointer_survives_unchanged_refresh(
         expect(page.locator('#cc-feedback')).to_have_text('状态已刷新。')
         expect(page.locator('.collaboration')).not_to_have_attribute('aria-busy', 'true')
         page.locator('[data-cc-view="agents"]').click()
+        # Finish the first tab's read before intercepting the next refresh.
+        # Otherwise onOpen can return that in-flight promise without a new GET.
+        page.evaluate('() => window.speakingPointerRefresh')
         card = page.locator(f'[data-speaking-slot="{slot["id"]}"]')
         details = card.locator('xpath=ancestor::details[1]')
         if details.get_attribute('open') is None:

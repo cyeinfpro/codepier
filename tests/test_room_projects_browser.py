@@ -1,10 +1,13 @@
 """Room-only project revisions in disposable Hub/Agent fixtures and real browsers."""
 
 import json
+import time
 from urllib.parse import urlsplit
 
 import pytest
 from playwright.sync_api import expect
+
+from shared.audit_redaction import redact_text
 
 from tests.collaboration_support import collaboration_stack  # noqa: F401
 from tests.test_collaboration_chatroom_browser import login, overview, open_add_project
@@ -807,12 +810,35 @@ def test_room_permission_preview_root_overlap_blocks_apply_without_adding_projec
     context = chat_browser_pool(engine).new_context(viewport={'width': 390, 'height': 844})
     page = context.new_page()
     applies, previews = [], []
-    network = []
+    network, lifecycle = [], []
+    started = time.monotonic()
+    page.add_init_script("""(() => {
+      const id = String(performance.timeOrigin);
+      for (const type of ['pagehide', 'pageshow', 'DOMContentLoaded'])
+        window.addEventListener(type, (event) => {
+          const item = {id, type, persisted: !!event.persisted, at: performance.now()};
+          const events = JSON.parse(sessionStorage.getItem('room-test-lifecycle') || '[]');
+          sessionStorage.setItem('room-test-lifecycle', JSON.stringify([...events, item].slice(-20)));
+          console.debug('ROOM_DOCUMENT ' + JSON.stringify(item));
+        });
+    })();""")
+    page.on('console', lambda message: lifecycle.append(message.text[:1000])
+            if message.text.startswith('ROOM_DOCUMENT ') else None)
+    page.on('request', lambda request: network.append({
+        'event': 'request', 'path': urlsplit(request.url).path,
+        'at': round(time.monotonic() - started, 3)})
+        if '/api/' in request.url else None)
+    page.on('requestfinished', lambda request: network.append({
+        'event': 'finished', 'path': urlsplit(request.url).path,
+        'at': round(time.monotonic() - started, 3)})
+        if '/api/' in request.url else None)
     page.on('response', lambda response: network.append({
-        'path': urlsplit(response.url).path, 'status': response.status})
+        'path': urlsplit(response.url).path, 'status': response.status,
+        'at': round(time.monotonic() - started, 3)})
         if '/api/' in response.url else None)
     page.on('requestfailed', lambda request: network.append({
-        'path': urlsplit(request.url).path, 'failure': request.failure}))
+        'path': urlsplit(request.url).path, 'failure': request.failure,
+        'at': round(time.monotonic() - started, 3)}))
     page.on('request', lambda r: applies.append(r.url)
             if r.method == 'POST' and r.url.rsplit('/', 1)[-1] in
             {'conversation-projects', 'room-scope', 'room-scope-control'} else None)
@@ -858,7 +884,14 @@ def test_room_permission_preview_root_overlap_blocks_apply_without_adding_projec
             print('ROOM_OVERLAP_DIAGNOSTIC', json.dumps({
                 'page': urlsplit(page.url).path, 'fragment': urlsplit(page.url).fragment,
                 'body': page.locator('body').inner_text(timeout=1000)[:5000],
-                'network': network[-60:],
+                'network': network[-60:], 'lifecycle': lifecycle[-20:],
+                'document': page.evaluate("""() => ({
+                    origin: performance.timeOrigin, ready: document.readyState,
+                    lifecycle: JSON.parse(sessionStorage.getItem('room-test-lifecycle') || '[]')
+                })"""),
+                'processes': {'hub_exit': stack.hub.poll(), 'agent_exit': stack.agent.poll()},
+                'hub_log_tail': redact_text((stack.directory / 'hub.log').read_text(
+                    encoding='utf-8', errors='replace')[-6000:])[-4000:],
             }, ensure_ascii=False), flush=True)
         except Exception as diagnostic_error:
             print('ROOM_OVERLAP_DIAGNOSTIC_UNAVAILABLE', type(diagnostic_error).__name__, flush=True)
