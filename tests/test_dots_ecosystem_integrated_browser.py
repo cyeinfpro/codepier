@@ -120,6 +120,10 @@ def test_real_http_lost_ack_reload_and_scope_generation(collaboration_stack, cha
         page.route('**/api/collaboration/message',message)
         page.route('**/api/collaboration/message-receipt?*',receipt)
         send(page,'HTTP-ACK-LOSS synthetic fixture')
+        # Timeline sync can adopt the committed message and clear the outbox
+        # before the lost-ack receipt finishes. Await the same original drain,
+        # not another send, before asserting its authoritative HTTP evidence.
+        wait_idle(page, 'relayFlight')
         assert len(posts)==1 and len(receipts)>=1
         assert receipts[-1]['authoritative'] and receipts[-1]['state']=='committed'
         assert count_intent(stack,posts[0]['client_message_id'])==1
