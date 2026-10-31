@@ -67,10 +67,53 @@ def create_in_ui(page, stack, objective='修复并验证合成测试目标', cap
     for capability in capabilities:
         form.locator(f'[name="capabilities"][value="{capability}"]').check()
     snapshot(page, 'goal-create-' + ('mobile' if page.viewport_size['width'] < 640 else 'desktop'))
-    form.locator('button[type="submit"]').click()
-    expect(page.locator('#cc-drawer')).not_to_be_visible()
-    expect(page.locator('#cc-feedback')).to_contain_text('执行尚未启用')
-    return read(stack, 'coordination_goals')['items'][0]
+    creation_posts, creation_responses, fresh_requests = [], [], []
+    conversation = page.locator('.cc-chat-shell').get_attribute('data-conversation')
+
+    def creation_request(request):
+        path = urlsplit(request.url).path
+        query = parse_qs(urlsplit(request.url).query)
+        if path == '/api/collaboration/goal-create' and request.method == 'POST':
+            creation_posts.append(request)
+        elif (creation_responses and creation_responses[0].status == 200
+              and path == '/api/collaboration' and query.get('kind') == ['coordination_goals']):
+            payload = creation_posts[0].post_data_json
+            if (query.get('project') == [payload['project']]
+                    and query.get('environment_id') == [payload['environment_id']]
+                    and query.get('conversation_id') == [conversation]):
+                fresh_requests.append(request)
+
+    def creation_response(response):
+        if response.request in creation_posts:
+            creation_responses.append(response)
+
+    page.on('request', creation_request)
+    page.on('response', creation_response)
+    try:
+        # Like approval, creation retains the old modal until its authoritative
+        # replacement is ready. Wait for the original POST and same-scope read
+        # within the API's existing 15s budget, then keep the 5s DOM assertion.
+        with page.expect_response(lambda response: response.request in fresh_requests,
+                                  timeout=15000) as refreshed:
+            with page.expect_event('requestfinished', predicate=lambda request: request in fresh_requests,
+                                   timeout=15000) as finished:
+                with page.expect_response(lambda response: response.request in creation_posts,
+                                          timeout=15000) as saved:
+                    form.locator('button[type="submit"]').click()
+                assert saved.value.status == 200
+        assert len(creation_posts) == 1 and len(creation_responses) == 1
+        goal_id = saved.value.json()['goal']['id']
+        assert len(fresh_requests) == 1 and refreshed.value.request == finished.value
+        assert refreshed.value.status == 200
+        assert any(item['id'] == goal_id and item['state'] == 'proposed'
+                   for item in refreshed.value.json()['items'])
+        expect(page.locator('#cc-drawer')).not_to_be_visible()
+        expect(page.locator('#cc-feedback')).to_contain_text('执行尚未启用')
+        assert len(creation_posts) == 1
+        return next(item for item in read(stack, 'coordination_goals')['items'] if item['id'] == goal_id)
+    finally:
+        page.remove_listener('request', creation_request)
+        page.remove_listener('response', creation_response)
 
 
 def goal_payload(goal):
@@ -160,8 +203,37 @@ def test_goal_draft_owner_confirmation_conflict_refresh_and_mobile(collaboration
     stack = collaboration_stack
     context = chat_browser_pool(engine).new_context(viewport={'width': 1440, 'height': 900})
     page = context.new_page()
-    errors = []
-    page.on('pageerror', lambda error: errors.append(str(error)))
+    errors, lifecycle = [], []
+    started = time.monotonic()
+    phase = {'value': 'initial'}
+
+    def record(event, **details):
+        lifecycle.append({'event': event, 'phase': phase['value'],
+            'elapsed': round(time.monotonic() - started, 3), **details})
+        del lifecycle[:-160]
+
+    def page_error(error):
+        errors.append(str(error))
+        record('pageerror', message=str(error))
+
+    def request_failed(request):
+        parsed = urlsplit(request.url)
+        record('requestfailed', route=parsed.path,
+            kind=parse_qs(parsed.query).get('kind', [''])[0],
+            method=request.method, failure=request.failure)
+
+    def lifecycle_console(message):
+        if message.text.startswith('GOAL_DOCUMENT '):
+            record('document', detail=message.text[len('GOAL_DOCUMENT '):])
+
+    page.add_init_script("""(() => {
+      for (const type of ['beforeunload', 'pagehide', 'pageshow'])
+        window.addEventListener(type, event => console.log('GOAL_DOCUMENT ' +
+          JSON.stringify({type, persisted: !!event.persisted, origin: performance.timeOrigin})));
+    })();""")
+    page.on('pageerror', page_error)
+    page.on('requestfailed', request_failed)
+    page.on('console', lifecycle_console)
     shots = Path(os.getenv('CODEPIER_COLLABORATION_SCREENSHOTS', str(tmp_path / 'screenshots')))
     shots.mkdir(parents=True, exist_ok=True)
     try:
@@ -217,10 +289,14 @@ def test_goal_draft_owner_confirmation_conflict_refresh_and_mobile(collaboration
         form.locator('button[type="submit"]').click()
         expect(page.locator('#cc-feedback')).to_contain_text('已批准')
         assert read(stack, 'coordination_goal', id=goal['id'])['goal']['state'] == 'active'
+        phase['value'] = 'reload'
+        record('reload-start')
         page.reload()
+        record('reload-return')
         expect(page.locator('.cc-chat-shell')).to_be_visible()
         open_goals(page)
         expect(page.locator('.cc-coordination-list')).to_contain_text('执行范围已批准')
+        phase['value'] = 'restored-ui'
         page.screenshot(animations='disabled', path=str(shots / f'{engine}-goals-desktop.png'))
         page.locator('[data-cc-view="discussion"]').click()
         area.fill('目标启用后普通消息仍不创建工作项')
@@ -252,7 +328,13 @@ def test_goal_draft_owner_confirmation_conflict_refresh_and_mobile(collaboration
             expect(area).to_have_value('手机草稿\n')
             page.screenshot(animations='disabled', path=str(shots / f'{engine}-goals-mobile-{width}.png'))
         assert not errors, errors
+    except Exception:
+        print('GOAL_DOCUMENT_DIAGNOSTIC', json.dumps(lifecycle), flush=True)
+        raise
     finally:
+        page.remove_listener('pageerror', page_error)
+        page.remove_listener('requestfailed', request_failed)
+        page.remove_listener('console', lifecycle_console)
         context.close()
 
 
