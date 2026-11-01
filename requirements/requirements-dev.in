@@ -10,7 +10,7 @@ mypy==2.4.0
 
 # Retain reviewed transitive versions while integrating the 2026-10-19 updates.
 ast-serialize==0.12.1
-coverage==7.16.2
+coverage==7.17.0
 certifi==2026.10.19
 filelock==4.2.1
 platformdirs==4.12.3
