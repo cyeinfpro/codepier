@@ -1,6 +1,6 @@
 -r requirements.in
 pytest==9.1.1
-pytest-asyncio==1.4.0
+pytest-asyncio==1.4.1
 # 1.64 Chromium stalls animation frames on the supported local macOS environment.
 playwright==1.63.0
 jsonschema==4.26.0
