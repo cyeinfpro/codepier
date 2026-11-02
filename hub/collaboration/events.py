@@ -39,6 +39,8 @@ def migrate_dispatch(db):
         endpoint_key TEXT NOT NULL, owner_key TEXT NOT NULL)""")
     db.execute("""CREATE INDEX IF NOT EXISTS mcp_event_dispatch_routes_endpoint
         ON mcp_event_dispatch_routes(endpoint_key,subscription_id)""")
+    db.execute("""CREATE INDEX IF NOT EXISTS mcp_event_dispatch_routes_owner
+        ON mcp_event_dispatch_routes(owner_key,subscription_id)""")
     db.execute("""CREATE TABLE IF NOT EXISTS mcp_event_dispatch_endpoints (
         endpoint_key TEXT PRIMARY KEY, cooldown_until REAL NOT NULL DEFAULT 0,
         updated REAL NOT NULL)""")
@@ -48,6 +50,22 @@ def migrate_dispatch(db):
     db.execute("""CREATE TABLE IF NOT EXISTS mcp_event_dispatch_budgets (
         scope_key TEXT PRIMARY KEY,tokens REAL NOT NULL,byte_tokens REAL NOT NULL,
         updated REAL NOT NULL)""")
+    db.execute("""CREATE TABLE IF NOT EXISTS mcp_event_dispatch_cursor (
+        id TEXT PRIMARY KEY CHECK(id='global'),after_owner TEXT NOT NULL,
+        updated REAL NOT NULL)""")
+    # These are inspection continuations, never evidence of a successful send.
+    # They let bounded pages pass temporarily unauthorizable legacy heads.
+    if 'scan_after_owner' not in {row[1] for row in db.execute('PRAGMA table_info(mcp_event_dispatch_cursor)')}:
+        db.execute('ALTER TABLE mcp_event_dispatch_cursor ADD COLUMN scan_after_owner TEXT')
+    # Preserve the original three-column owner service journal: released
+    # dispatchers insert into it positionally. A read-only upgrade must not
+    # invalidate their otherwise supported rollback before native writes.
+    db.execute('''CREATE TABLE IF NOT EXISTS mcp_event_dispatch_owner_scans (
+        owner_key TEXT PRIMARY KEY,after_subscription TEXT NOT NULL,
+        updated REAL NOT NULL)''')
+    db.execute("""CREATE INDEX IF NOT EXISTS mcp_event_deliveries_head
+        ON mcp_event_deliveries(subscription_id,event_seq)
+        WHERE state IN ('pending','retry_wait','leased')""")
 
 
 def signing_key(value):
@@ -77,7 +95,6 @@ class EventService:
         self._network_limit = asyncio.Semaphore(DISPATCH_CAPACITY)
         self._challenge_limit = asyncio.Semaphore(2)
         self._tick_lock = asyncio.Lock()
-        self._owner_after = ''
         self._scan_after = ''
         self._relay_recover_after = 0
         self._budget_retry_at = None
@@ -486,12 +503,14 @@ class EventService:
             delay = max(delay, min(1800, retry_after))
         return delay
 
-    def send_budget(self, owner_key, byte_count, now, *, spend=False):
-        """Atomically share global/owner send and byte buckets with all pumps."""
+    def budget_accounts(self, owner_key, byte_count, now):
+        """Return an atomic debit, or the bucket that prevents reservation."""
         self.store.require_transaction()
         accounts = []
-        for key, limits in (('global', DISPATCH_BUDGETS['global']),
-                            ('owner:' + owner_key, DISPATCH_BUDGETS['owner'])):
+        buckets = [('global', DISPATCH_BUDGETS['global'])]
+        if owner_key is not None:
+            buckets.append(('owner:' + owner_key, DISPATCH_BUDGETS['owner']))
+        for key, limits in buckets:
             rate, burst, byte_rate, byte_burst = limits
             row = self.store.one('SELECT * FROM mcp_event_dispatch_budgets WHERE scope_key=?', (key,))
             elapsed = max(0, now - row['updated']) if row else 0
@@ -502,9 +521,16 @@ class EventService:
                 due = max(now, row['updated']) + delay if row else now + delay
                 self._budget_retry_at = (due if self._budget_retry_at is None
                                          else min(self._budget_retry_at, due))
-                return False
+                return None, key
             accounts.append((key, tokens - 1, byte_tokens - byte_count,
                              max(now, row['updated']) if row else now))
+        return accounts, None
+
+    def send_budget(self, owner_key, byte_count, now, *, spend=False):
+        """Atomically share global/owner send and byte buckets with all pumps."""
+        accounts, _ = self.budget_accounts(owner_key, byte_count, now)
+        if accounts is None:
+            return False
         if spend:
             for account in accounts:
                 self.store.execute("""INSERT INTO mcp_event_dispatch_budgets VALUES (?,?,?,?)
@@ -540,6 +566,101 @@ class EventService:
                 reason_code='mailbox_coalesced',fence=fence+1
                 WHERE id IN (SELECT value FROM json_each(?))""", (canonical([row['id'] for row in old]),))
 
+    def discover_deliveries(self, now):
+        """Materialize one bounded outbox page, independently of send fairness.
+
+        Advancing this scan says nothing about a recipient having been served.
+        In particular, an empty global bucket must not discard that recipient's
+        place in the durable owner/subscription service rings.
+        """
+        subscriptions = self.store.all("""SELECT * FROM mcp_event_subscriptions s
+            WHERE s.state='active' AND s.id>? AND (s.expires_at<=?
+                OR (s.room_id IS NOT NULL AND EXISTS (SELECT 1 FROM mcp_event_outbox e
+                    WHERE e.room_id=s.room_id AND e.seq>s.scan_seq))
+                OR (s.conversation_id IS NOT NULL AND EXISTS (SELECT 1 FROM mcp_event_outbox e
+                    WHERE e.conversation_id=s.conversation_id AND e.seq>s.scan_seq)))
+            ORDER BY s.id LIMIT 32""", (self._scan_after, now))
+        self._scan_after = subscriptions[-1]['id'] if len(subscriptions) == 32 else ''
+        for sub in subscriptions:
+            if sub['expires_at'] <= now:
+                self.store.execute("UPDATE mcp_event_subscriptions SET state='expired',version=version+1,updated=? WHERE id=?", (now, sub['id']))
+                continue
+            room = self.event_room(sub)
+            try:
+                filters = self.authorize(sub, room)
+            except DevError as exc:
+                if exc.code not in {'ROOM_PAUSED', 'WORKER_BINDING_REQUIRED', 'GOAL_INACTIVE'}:
+                    self.store.execute("UPDATE mcp_event_subscriptions SET state='revoked',version=version+1,updated=? WHERE id=?", (now, sub['id']))
+                continue
+            self.dispatch_route(sub, room)
+            scope_column = self.scope_column(room)
+            rows = self.store.all(f'SELECT * FROM mcp_event_outbox WHERE {scope_column}=? AND seq>? ORDER BY seq LIMIT 100', (room['id'], sub['scan_seq']))
+            for event in rows:
+                if self.matches(sub, filters, event) and not self.mailbox_owns(event):
+                    self.store.execute('''INSERT OR IGNORE INTO mcp_event_deliveries
+                        (id,subscription_id,event_id,event_seq,created) VALUES (?,?,?,?,?)''',
+                        (digest([sub['id'], event['id']]), sub['id'], event['id'], event['seq'], now))
+            if rows:
+                self.store.execute('UPDATE mcp_event_subscriptions SET scan_seq=? WHERE id=?', (rows[-1]['seq'], sub['id']))
+            self.coalesce_mailbox(sub, filters)
+            self.advance(sub['id'])
+
+    def dispatch_candidates(self, now, owner_limit):
+        """Bounded ready candidates across both complete persistent rings.
+
+        Eligibility excludes idle routes and blocked *heads*, never skips a
+        retry/lease to send a later event. The SQL limits bound fetched owners
+        and subscriptions; no active-subscription inventory is loaded here.
+        Authorization, budgets and lease fencing are checked again below.
+        """
+        ready = """FROM mcp_event_dispatch_routes r
+            JOIN mcp_event_subscriptions s ON s.id=r.subscription_id
+            JOIN mcp_event_deliveries d ON d.id=(
+                SELECT h.id FROM mcp_event_deliveries h
+                WHERE h.subscription_id=s.id AND h.state IN ('pending','retry_wait','leased')
+                ORDER BY h.event_seq LIMIT 1)
+            LEFT JOIN collaboration_rooms lr ON lr.id=s.room_id
+            LEFT JOIN conversation_rooms cr ON cr.id=s.conversation_id
+            LEFT JOIN mcp_event_dispatch_endpoints ep ON ep.endpoint_key=r.endpoint_key
+            WHERE s.state='active' AND s.expires_at>:now
+                AND COALESCE(cr.state,lr.state)='active'
+                AND d.next_at<=:now
+                AND (d.state!='leased' OR COALESCE(d.lease_until,0)<=:now)
+                AND COALESCE(ep.cooldown_until,0)<=:now
+                AND NOT EXISTS (
+                    SELECT 1 FROM mcp_event_dispatch_routes br
+                    JOIN mcp_event_deliveries bd ON bd.subscription_id=br.subscription_id
+                    WHERE br.endpoint_key=r.endpoint_key
+                        AND bd.state='leased' AND bd.lease_until>:now)
+                AND (SELECT COUNT(*) FROM mcp_event_dispatch_routes br
+                    JOIN mcp_event_deliveries bd ON bd.subscription_id=br.subscription_id
+                    WHERE br.owner_key=r.owner_key
+                        AND bd.state='leased' AND bd.lease_until>:now)<:owner_limit"""
+        parameters = {'now': now, 'owner_limit': owner_limit}
+        cursor = self.store.one("SELECT * FROM mcp_event_dispatch_cursor WHERE id='global'")
+        after = (cursor['scan_after_owner'] or cursor['after_owner']) if cursor else ''
+        owners = []
+        for comparison in ('>', '<='):
+            owners += self.store.all('SELECT DISTINCT r.owner_key ' + ready
+                + f' AND r.owner_key{comparison}:after ORDER BY r.owner_key LIMIT :limit',
+                {**parameters, 'after': after, 'limit': 32 - len(owners)})
+        groups = []
+        for owner in owners:
+            key = owner['owner_key']
+            cursor = self.store.one('SELECT * FROM mcp_event_dispatch_owners WHERE owner_key=?', (key,))
+            inspected = self.store.one('SELECT after_subscription FROM mcp_event_dispatch_owner_scans WHERE owner_key=?', (key,))
+            after = inspected['after_subscription'] if inspected else cursor['after_subscription'] if cursor else ''
+            members = []
+            for comparison in ('>', '<='):
+                members += self.store.all('SELECT s.*,r.owner_key,r.endpoint_key ' + ready
+                    + f' AND r.owner_key=:owner AND s.id{comparison}:after ORDER BY s.id LIMIT :limit',
+                    {**parameters, 'owner': key, 'after': after, 'limit': owner_limit - len(members)})
+            groups.append(members)
+        # Each owner gets a turn before any owner gets its second turn. Owners
+        # and their subscriptions can live on arbitrary discovery SQL pages.
+        return [members[index] for index in range(owner_limit)
+                for members in groups if index < len(members)]
+
     def reserve(self, capacity=DISPATCH_CAPACITY):
         self.guard()
         now, reserved = self.c.clock(), []
@@ -556,25 +677,13 @@ class EventService:
             capacity = min(capacity, max(0, DISPATCH_CAPACITY - len(leased)))
             if not capacity:
                 return reserved
-            subscriptions = self.store.all("SELECT * FROM mcp_event_subscriptions WHERE state='active' AND id>? ORDER BY id LIMIT 32", (self._scan_after,))
-            self._scan_after = subscriptions[-1]['id'] if len(subscriptions) == 32 else ''
-            routes = {sub['id']: self.dispatch_route(sub) for sub in subscriptions}
-            owners = sorted({route['owner_key'] for route in routes.values()})
-            owners = [key for key in owners if key > self._owner_after] + [key for key in owners if key <= self._owner_after]
-            groups = {}
-            for key in owners:
-                cursor = self.store.one('SELECT after_subscription FROM mcp_event_dispatch_owners WHERE owner_key=?', (key,))
-                after = cursor['after_subscription'] if cursor else ''
-                members = [sub for sub in subscriptions if routes[sub['id']]['owner_key'] == key]
-                groups[key] = ([sub for sub in members if sub['id'] > after]
-                               + [sub for sub in members if sub['id'] <= after])
-            # Round-robin owners first, subscriptions second. The page cursor
-            # still advances over the original SQL page, never the rotated list.
-            ordered = []
-            while any(groups.values()):
-                for key in owners:
-                    if groups[key]:
-                        ordered.append(groups[key].pop(0))
+            self.discover_deliveries(now)
+            # A missing global send token (or even the minimum wire overhead)
+            # rules out every delivery. Do not scan, skip or mutate either
+            # service/inspection ring while waiting for this shared refill.
+            accounts, _ = self.budget_accounts(None, WIRE_HEADER_BYTES, now)
+            if accounts is None:
+                return reserved
             owner_count = self.store.one("""SELECT COUNT(*) AS n FROM (
                 SELECT COALESCE(r.space_id,c.space_id),COALESCE(r.owner_user_id,c.owner_user_id)
                 FROM mcp_event_subscriptions s
@@ -582,35 +691,24 @@ class EventService:
                 LEFT JOIN conversation_rooms c ON s.conversation_id=c.id
                 WHERE s.state='active' AND s.expires_at>? GROUP BY 1,2)""", (now,))['n']
             owner_limit = 2 if owner_count > 1 else DISPATCH_CAPACITY
-            for sub in ordered:
-                if sub['expires_at'] <= now:
-                    self.store.execute("UPDATE mcp_event_subscriptions SET state='expired',version=version+1,updated=? WHERE id=?", (now, sub['id']))
-                    continue
+            candidates = self.dispatch_candidates(now, owner_limit)
+            inspected, served, budget_waiting, global_blocked = {}, set(), set(), False
+            for sub in candidates:
+                # Until a send or budget gate below, this records only a head
+                # proved unavailable. It is a separate inspection continuation.
+                inspected[sub['owner_key']] = sub['id']
                 room = self.event_room(sub)
                 try:
-                    filters = self.authorize(sub, room)
+                    self.authorize(sub, room)
                 except DevError as exc:
                     if exc.code in {'ROOM_PAUSED', 'WORKER_BINDING_REQUIRED', 'GOAL_INACTIVE'}:
                         continue
                     self.store.execute("UPDATE mcp_event_subscriptions SET state='revoked',version=version+1,updated=? WHERE id=?", (now, sub['id']))
                     continue
-                # Verification cache expiry only controls the next challenge.
-                # The already-verified subscription remains valid until expires_at.
-                scope_column = self.scope_column(room)
-                rows = self.store.all(f'SELECT * FROM mcp_event_outbox WHERE {scope_column}=? AND seq>? ORDER BY seq LIMIT 100', (room['id'], sub['scan_seq']))
-                for event in rows:
-                    if self.matches(sub, filters, event) and not self.mailbox_owns(event):
-                        self.store.execute('''INSERT OR IGNORE INTO mcp_event_deliveries
-                            (id,subscription_id,event_id,event_seq,created) VALUES (?,?,?,?,?)''',
-                            (digest([sub['id'], event['id']]), sub['id'], event['id'], event['seq'], now))
-                if rows:
-                    self.store.execute('UPDATE mcp_event_subscriptions SET scan_seq=? WHERE id=?', (rows[-1]['seq'], sub['id']))
-                self.coalesce_mailbox(sub, filters)
-                self.advance(sub['id'])
                 delivery = self.store.one("SELECT * FROM mcp_event_deliveries WHERE subscription_id=? AND state IN ('pending','retry_wait','leased') ORDER BY event_seq LIMIT 1", (sub['id'],))
                 if not delivery or delivery['next_at'] > now or (delivery['state'] == 'leased' and (delivery['lease_until'] or 0) > now):
                     continue
-                route = routes[sub['id']]
+                route = sub
                 cooldown = self.store.one('SELECT cooldown_until FROM mcp_event_dispatch_endpoints WHERE endpoint_key=?',
                                           (route['endpoint_key'],))
                 if cooldown and cooldown['cooldown_until'] > now:
@@ -649,7 +747,18 @@ class EventService:
                 # Reserve headroom before issuing a one-time mailbox ticket.
                 # Actual bytes alone are charged after the body is frozen.
                 headroom = (len(body.encode()) if body is not None else MAX_ENVELOPE_BYTES) + WIRE_HEADER_BYTES
-                if not self.send_budget(route['owner_key'], headroom, now):
+                accounts, blocked_by = self.budget_accounts(route['owner_key'], headroom, now)
+                if accounts is None:
+                    # A budget wait must not skip an otherwise valid member in
+                    # its owner's ring. Other genuinely unavailable heads can
+                    # still be passed on the next bounded inspection page.
+                    inspected.pop(sub['owner_key'], None)
+                    budget_waiting.add(sub['owner_key'])
+                    if blocked_by == 'global':
+                        # Nothing can be sent until refill. Keep both service
+                        # cursors at the last actual lease, even across pumps.
+                        global_blocked = True
+                        break
                     continue
                 if body is None:
                     if event['name'] == MAILBOX_EVENT:
@@ -677,12 +786,28 @@ class EventService:
                 self.store.execute("UPDATE mcp_event_deliveries SET state='leased',body=?,attempt=attempt+1,fence=?,lease_until=? WHERE id=?", (stored_body, fence, now + 30, delivery['id']))
                 reserved.append({'delivery_id': delivery['id'], 'subscription_id': sub['id'], 'fence': fence,
                                  'subscription_version': sub['version'], 'body': body.encode(), 'event_id': event['id']})
-                self._owner_after = route['owner_key']
-                self.store.execute("""INSERT INTO mcp_event_dispatch_owners VALUES (?,?,?)
+                self.store.execute("""INSERT INTO mcp_event_dispatch_cursor (id,after_owner,updated)
+                    VALUES ('global',?,?)
+                    ON CONFLICT(id) DO UPDATE SET after_owner=excluded.after_owner,
+                    updated=excluded.updated,scan_after_owner=NULL""", (route['owner_key'], now))
+                self.store.execute("""INSERT INTO mcp_event_dispatch_owners (owner_key,after_subscription,updated)
+                    VALUES (?,?,?)
                     ON CONFLICT(owner_key) DO UPDATE SET after_subscription=excluded.after_subscription,
                     updated=excluded.updated""", (route['owner_key'], sub['id'], now))
+                self.store.execute('DELETE FROM mcp_event_dispatch_owner_scans WHERE owner_key=?', (route['owner_key'],))
+                served.add(route['owner_key'])
                 if len(reserved) >= capacity:
                     break
+            for owner_key, subscription_id in inspected.items():
+                if owner_key not in served | budget_waiting:
+                    self.store.execute("""INSERT INTO mcp_event_dispatch_owner_scans VALUES (?,?,?)
+                        ON CONFLICT(owner_key) DO UPDATE SET after_subscription=excluded.after_subscription,
+                        updated=excluded.updated""", (owner_key, subscription_id, now))
+            if candidates and not reserved and not global_blocked:
+                self.store.execute("""INSERT INTO mcp_event_dispatch_cursor
+                    (id,after_owner,updated,scan_after_owner) VALUES ('global','',?,?)
+                    ON CONFLICT(id) DO UPDATE SET scan_after_owner=excluded.scan_after_owner""",
+                    (now, candidates[-1]['owner_key']))
         return reserved
 
     def ready(self, item):

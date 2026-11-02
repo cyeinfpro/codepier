@@ -54,6 +54,32 @@ window.CodePierCollaboration = (() => {
     reconnecting: '等待执行目标恢复',
     expired: '已过期',
   };
+  const deliveryLabels = {
+    queued: '等待发送',
+    pending: '等待发送',
+    preparing: '正在准备',
+    leased: '已领取',
+    sending: '正在发送',
+    waiting_context: '等待渠道恢复',
+    waiting_media: '等待附件准备',
+    unknown: '发送结果待核对',
+    needs_attention: '投递需要核对',
+    attention: '需要处理',
+    rejected: '平台未接受',
+    failed: '投递失败',
+    blocked: '等待恢复',
+    accepted: '平台已接受',
+    owner_confirmed: '本人已确认收到',
+    cancelled: '已取消投递',
+    superseded: '已由后续进展替代',
+  };
+  const contextKinds = {
+    objective: '当前目标',
+    decision: '已确认决策',
+    constraint: '当前约束',
+    question: '待回答问题',
+    artifact: '产物引用',
+  };
   let root = null,
     timer = null,
     bound = null,
@@ -112,6 +138,12 @@ window.CodePierCollaboration = (() => {
           minute: '2-digit',
         })
       : '';
+  const dateTime = (value) =>
+    value === null || value === undefined || value === ''
+      ? '未提供'
+      : new Date(typeof value === 'number' ? value * 1000 : value).toLocaleString('zh-CN');
+  const supplied = (value) => (value === null || value === undefined ? '未提供' : String(value));
+  const identifier = (value) => (value ? '#' + String(value).slice(0, 12) : '未提供');
   function selection(value) {
     try {
       const key = 'codepier-room:' + currentOwner();
@@ -142,16 +174,34 @@ window.CodePierCollaboration = (() => {
   function rememberReading() {
     const feed = root?.querySelector('.cr-feed');
     if (!feed || !state.roomId || !state.room || root._restoringReading) return;
+    store.draft().reading = readingSnapshot();
+  }
+  function readingSnapshot() {
+    const feed = root?.querySelector('.cr-feed');
+    if (!feed) return null;
     const edge = feed.getBoundingClientRect().top;
-    const anchor = [...root.querySelectorAll('[data-message-id]')].find(
+    const anchor = [...root.querySelectorAll('[data-message-id], [data-work-id]')].find(
       (node) => node.getBoundingClientRect().bottom > edge + 8,
     );
-    store.draft().reading = {
+    return {
       anchorId: anchor?.dataset.messageId || '',
+      workId: anchor?.dataset.workId || '',
       offset: anchor ? anchor.getBoundingClientRect().top - edge : 0,
       atEnd: feed.scrollHeight - feed.scrollTop - feed.clientHeight < 90,
       visibilityRevision: state.visibilityRevision,
     };
+  }
+  function restoreAnchor(reading) {
+    if (!reading || reading.atEnd || !root) return;
+    const feed = root.querySelector('.cr-feed');
+    const anchor = [...root.querySelectorAll('[data-message-id], [data-work-id]')].find((node) =>
+      reading.anchorId
+        ? node.dataset.messageId === reading.anchorId
+        : node.dataset.workId === reading.workId,
+    );
+    if (anchor)
+      feed.scrollTop +=
+        anchor.getBoundingClientRect().top - feed.getBoundingClientRect().top - reading.offset;
   }
   async function restoreReading() {
     const view = root,
@@ -168,34 +218,46 @@ window.CodePierCollaboration = (() => {
     }
     const current = () => root === view && id === state.roomId && epoch === state.epoch;
     const findAnchor = () =>
-      [...view.querySelectorAll('[data-message-id]')].find(
-        (node) => node.dataset.messageId === reading.anchorId,
+      [...view.querySelectorAll('[data-message-id], [data-work-id]')].find((node) =>
+        reading.anchorId
+          ? node.dataset.messageId === reading.anchorId
+          : node.dataset.workId === reading.workId,
       );
     try {
-      // Fetch only while the remembered anchor is outside the initial page.
-      // Bound automatic restoration; older history remains explicitly paged.
-      for (
-        let pages = 0;
+      if (
         current() &&
         store.draft().reading === reading &&
         !reading.atEnd &&
         !findAnchor() &&
-        state.cursor &&
-        pages < 20;
-        pages++
+        reading.anchorId
       )
-        await store.messages(true);
+        await store.restoreMessage(reading.anchorId);
+      if (
+        current() &&
+        store.draft().reading === reading &&
+        !reading.atEnd &&
+        reading.workId &&
+        !findAnchor()
+      )
+        await store.restoreWork(reading.workId);
       if (!current() || store.draft().reading !== reading) return;
       const feed = view.querySelector('.cr-feed'),
         anchor = findAnchor();
       if (reading.atEnd) feed.scrollTop = feed.scrollHeight;
-      else if (anchor)
-        feed.scrollTop +=
-          anchor.getBoundingClientRect().top - feed.getBoundingClientRect().top - reading.offset;
+      else if (anchor) restoreAnchor(reading);
       else {
         delete store.draft().reading;
         announce('原阅读位置已不可见，已保留当前可读取的历史。');
       }
+    } catch (error) {
+      if (!current()) return;
+      delete store.draft().reading;
+      await store.latestMessages();
+      announce(
+        [400, 403, 404, 410].includes(error.status)
+          ? '原阅读位置已不在当前可读范围，已核对最新窗口。'
+          : '原阅读位置暂时无法恢复，已保留草稿并核对最新窗口。',
+      );
     } finally {
       if (current()) view._restoringReading = false;
     }
@@ -249,9 +311,9 @@ window.CodePierCollaboration = (() => {
       <main class="cr-main"><header class="cr-topbar"><div class="cr-room-heading">${btn('rooms', icon('menu'), 'aria-label="显示房间列表" aria-expanded="false"', 'cr-icon cr-mobile')}<div><h1 tabindex="-1" data-cr-title></h1><span class="cr-subtitle" data-cr-status></span></div></div><nav class="cr-room-actions" aria-label="房间管理">${btn('projects', icon('folder') + '<span data-cr-project-count>项目</span>')}${btn('members', '<span class="cr-avatars" data-cr-avatars></span><span>成员</span>')}${btn('weixin', icon('message') + '<span data-cr-weixin-label>连接微信</span>')}${btn('settings', icon('settings'), 'aria-label="房间设置"', 'cr-icon')}</nav></header>
         <div class="cr-legacy-note" data-cr-legacy hidden>原房间的历史和工作已保留。成员连接需要逐一完成迁移。${btn('members', '查看成员')}</div>
         <div class="cr-feedback" role="status" aria-live="polite" data-cr-feedback></div>
-        <section class="cr-feed" aria-label="房间对话" tabindex="0"><div class="cr-load-older" data-cr-older hidden>${btn('older', '更早的消息')}</div><div data-cr-empty></div><div class="cr-messages" role="log" aria-live="polite" aria-relevant="additions text" data-cr-messages></div><div class="cr-pending" data-cr-pending></div><div class="cr-work-list" data-cr-work></div></section>
+        <section class="cr-feed" aria-label="房间对话" tabindex="0"><div class="cr-load-older" data-cr-older hidden>${btn('older', '更早的消息')}</div><p class="cr-window-note" data-cr-message-window hidden></p><div data-cr-empty></div><div class="cr-messages" role="log" aria-live="polite" aria-relevant="additions text" data-cr-messages></div><div class="cr-history-end" data-cr-history-end hidden><p>当前历史窗口到此结束，后续消息尚未载入。</p>${btn('latest', '返回最新消息窗口')}</div><div class="cr-pending" data-cr-pending></div><div class="cr-work-list" data-cr-work></div></section>
         ${btn('latest', '查看新消息 ↓', 'data-cr-latest hidden', 'cr-latest')}
-        <form class="cr-composer" id="cr-composer"><div class="cr-reply" data-cr-reply hidden></div><div class="cr-draft-files" data-cr-files aria-label="待发送的附件" aria-live="polite" hidden></div><div class="cr-composer-line"><textarea id="cr-message" name="body_text" aria-label="消息" placeholder="说说你想做什么…" rows="1" maxlength="8000"></textarea><button type="submit" class="cr-send" aria-label="发送消息">${icon('arrow')}</button></div><footer><div class="cr-composer-tools">${btn('attach', icon('plus'), 'aria-label="添加附件" title="每个附件最多 8 MiB"', 'cr-icon cr-attach')}<input type="file" id="cr-file" multiple hidden aria-label="选择附件"><label class="cr-recipient"><span>发送给</span><select name="member_id" aria-label="选择处理成员"><option value="">主责 dot</option></select></label></div><span data-cr-compose-status>Enter 发送 · Shift + Enter 换行</span></footer></form>
+        <form class="cr-composer" id="cr-composer"><div class="cr-reply cr-context-correction" data-cr-correction hidden></div><div class="cr-reply" data-cr-reply hidden></div><div class="cr-draft-files" data-cr-files aria-label="待发送的附件" aria-live="polite" hidden></div><div class="cr-composer-line"><textarea id="cr-message" name="body_text" aria-label="消息" placeholder="说说你想做什么…" rows="1" maxlength="8000"></textarea><button type="submit" class="cr-send" aria-label="发送消息">${icon('arrow')}</button></div><footer><div class="cr-composer-tools">${btn('attach', icon('plus'), 'aria-label="添加附件" title="每个附件最多 8 MiB"', 'cr-icon cr-attach')}<input type="file" id="cr-file" multiple hidden aria-label="选择附件"><label class="cr-recipient"><span>发送给</span><select name="member_id" aria-label="选择处理成员"><option value="">主责 dot</option></select></label></div><span data-cr-compose-status>Enter 发送 · Shift + Enter 换行</span></footer></form>
       </main><dialog class="cr-panel" aria-labelledby="cr-panel-title"><header><h2 id="cr-panel-title"></h2>${btn('close', '×', 'aria-label="关闭面板"', 'cr-icon')}</header><div class="cr-panel-content"></div><p role="alert" class="cr-error" data-cr-panel-error hidden></p><div class="cr-mutation-recovery" data-cr-panel-recovery hidden></div></dialog>
     </section>`;
   }
@@ -327,20 +389,38 @@ window.CodePierCollaboration = (() => {
     const disabled = !activeRoom() || state.room?.state === 'paused';
     editor.disabled = disabled;
     const unfinished = draft.files.some((entry) => entry.state !== 'ready');
+    const staleCorrection = contextCorrectionStale();
     const duplicate = [...state.pending.values()].some(
       (receipt) => receipt.roomId === state.roomId && store.sameDraft(receipt),
     );
     root.querySelector('.cr-send').disabled =
-      disabled || unfinished || duplicate || (!editor.value.trim() && !draft.files.length);
+      disabled ||
+      unfinished ||
+      duplicate ||
+      staleCorrection ||
+      (!editor.value.trim() && !draft.files.length);
     root.querySelector('[data-cr-action="attach"]').disabled = disabled || draft.files.length >= 16;
     root.querySelector('#cr-file').disabled = disabled;
     const status = root.querySelector('[data-cr-compose-status]');
     status.textContent = unfinished
       ? '请完成附件上传后发送'
-      : draft.work
-        ? '补充到当前工作'
-        : 'Enter 发送 · Shift + Enter 换行';
+      : draft.contextCorrection
+        ? staleCorrection
+          ? '请重新核对当前事实'
+          : '发送后纠正所选事实'
+        : draft.work
+          ? '补充到当前工作'
+          : 'Enter 发送 · Shift + Enter 换行';
     patchFiles();
+    const correction = root.querySelector('[data-cr-correction]');
+    correction.hidden = !draft.contextCorrection;
+    if (draft.contextCorrection) {
+      const markup = `<span>${staleCorrection ? '上下文已变化，请重新选择要纠正的事实。' : '正在纠正事实 ' + E(draft.contextCorrection.ids.map(identifier).join('、')) + ' · 版本 ' + E(draft.contextCorrection.version)}</span>${btn('context', staleCorrection ? '重新核对' : '查看事实', '', 'cr-text-button')}${btn('cancel-context-correction', '×', 'aria-label="取消纠正上下文"', 'cr-icon')}`;
+      if (correction._markup !== markup) {
+        correction.innerHTML = markup;
+        correction._markup = markup;
+      }
+    }
     if (select && !select.matches(':focus')) {
       const markup =
         '<option value="">主责 dot</option>' +
@@ -408,13 +488,63 @@ window.CodePierCollaboration = (() => {
   }
   function messageMarkup(message) {
     const owner = ['owner', 'user', 'human'].includes(message.author_kind);
-    return `<header><strong>${E(message.author_name || message.display_name || message.member_name || (owner ? '你' : message.author_kind === 'system' ? '房间动态' : 'dot'))}</strong><time>${E(time(message.created_at || message.created))}</time></header>${message.reply_to_id ? '<span class="cr-message-reference">回复原消息</span>' : ''}<div class="cr-message-body" ${message.body_text ? '' : 'hidden'}></div>${message.attachments?.length ? `<div class="cr-message-files">${message.attachments.map(attachmentMarkup).join('')}</div>` : ''}<footer>${message.display?.title ? `<span>${E(message.display.title)}</span>` : ''}${btn('reply', '回复', `data-id="${E(message.id)}"`, 'cr-text-button')}</footer>`;
+    return `<header><strong>${E(message.author_name || message.display_name || message.member_name || (owner ? '你' : message.author_kind === 'system' ? '房间动态' : 'dot'))}</strong><time>${E(time(message.created_at || message.created))}</time></header>${message.reply_to_id ? '<span class="cr-message-reference">回复原消息</span>' : ''}<div class="cr-message-body" ${message.body_text ? '' : 'hidden'}></div>${message.attachments?.length ? `<div class="cr-message-files">${message.attachments.map(attachmentMarkup).join('')}</div>` : ''}${deliveryMarkup(message.channel_deliveries)}<footer>${message.display?.title ? `<span>${E(message.display.title)}</span>` : ''}${btn('reply', '回复', `data-id="${E(message.id)}"`, 'cr-text-button')}</footer>`;
+  }
+  function deliveryMarkup(deliveries = [], display, truncated = false) {
+    if (!deliveries?.length) return '';
+    return `<section class="cr-deliveries" aria-label="原渠道投递" data-cr-deliveries>${display?.title ? `<p class="cr-delivery-title">${E(display.title)}</p>${display.reason ? `<p class="cr-muted">${E(display.reason)}</p>` : ''}` : ''}${deliveries.map((delivery) => `<details class="cr-delivery" data-delivery-id="${E(delivery.id)}"><summary>${E(delivery.channel === 'weixin' ? '微信回复' : delivery.channel || '渠道回复')} · ${E(delivery.display?.title || deliveryLabels[delivery.state] || delivery.state)}</summary><p class="cr-muted">原投递 ${E(identifier(delivery.id))}${delivery.message_id ? ' · 原消息 ' + E(identifier(delivery.message_id)) : ''}</p>${delivery.parts?.length ? `<ol class="cr-delivery-parts">${delivery.parts.map((part) => `<li data-delivery-part="${E(part.id || part.ordinal)}" data-state="${E(part.state)}"><strong>${E({ text: '文字', image: '图片', file: '文件', voice: '语音', video: '视频' }[part.kind] || part.kind || '分项')} · ${E(deliveryLabels[part.state] || part.state)}</strong>${part.reason_code ? `<p>${E(part.reason_code)}</p>` : ''}${part.attempts !== undefined ? `<small>已记录尝试 ${E(part.attempts)} 次</small>` : ''}</li>`).join('')}</ol>` : '<p class="cr-muted">当前没有可显示的投递分项。</p>'}<p class="cr-muted">${delivery.read_verified === true ? '服务端已记录已读证据。' : delivery.provider_delivery_verified === true ? '服务端已记录供应商送达证据；尚无已读证据。' : '平台接受不等于对端送达或已读；本人确认会单独标明。'}</p>${delivery.parts_truncated ? '<p class="cr-info">此处只显示当前可读的部分分项。</p>' : ''}</details>`).join('')}${truncated ? '<p class="cr-info">当前只显示有界范围内的原投递，历史可能不完整。</p>' : ''}</section>`;
+  }
+  function patchWindowHints() {
+    if (!root) return;
+    const note = root.querySelector('[data-cr-message-window]');
+    note.hidden = !state.messages.length;
+    note.textContent = `消息窗口 ${state.messages.length} / ${store.limits.messages} 条 · 历史按页读取${state.messageHistory ? ' · 正在查看较早内容' : ''}`;
+    root.querySelector('[data-cr-older]').hidden = !state.cursor;
+    const boundary = root.querySelector('[data-cr-history-end]');
+    boundary.hidden = !state.messageHistory;
+    boundary.style.minHeight = state.messageHistory
+      ? root.querySelector('.cr-feed').clientHeight + 'px'
+      : '';
+    if (state.newerMessages) root.querySelector('[data-cr-latest]').hidden = false;
+  }
+  function patchMessageContent(node, message) {
+    const expanded = [...node.querySelectorAll('[data-delivery-id][open]')].map(
+      (item) => item.dataset.deliveryId,
+    );
+    const template = document.createElement('div');
+    template.innerHTML = messageMarkup(message);
+    let body = node.querySelector('.cr-message-body');
+    if (!body) {
+      body = document.createElement('div');
+      body.className = 'cr-message-body';
+      node.append(body);
+    }
+    for (const child of [...node.children]) if (child !== body) child.remove();
+    let before = true;
+    for (const child of [...template.children]) {
+      if (child.classList.contains('cr-message-body')) {
+        before = false;
+        continue;
+      }
+      if (before) node.insertBefore(child, body);
+      else node.append(child);
+    }
+    const text = message.body_text || '';
+    body.hidden = !text;
+    if (body._crText !== text) {
+      if (typeof chatRichMarkdown === 'function') chatRichMarkdown(body, text);
+      else body.textContent = text;
+      body._crText = text;
+    }
+    for (const details of node.querySelectorAll('[data-delivery-id]'))
+      if (expanded.includes(details.dataset.deliveryId)) details.open = true;
   }
   function patchMessages() {
     if (!root) return;
     const list = root.querySelector('[data-cr-messages]'),
       feed = root.querySelector('.cr-feed');
     const nearEnd = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 90;
+    const reading = readingSnapshot();
     let changed = false;
     const visibleIds = new Set(state.messages.map((message) => message.id));
     for (const node of [...list.children])
@@ -442,10 +572,7 @@ window.CodePierCollaboration = (() => {
       node.className =
         'cr-message ' +
         (['owner', 'user', 'human'].includes(message.author_kind) ? 'is-owner' : 'is-dot');
-      node.innerHTML = messageMarkup(message);
-      const body = node.querySelector('.cr-message-body');
-      if (typeof chatRichMarkdown === 'function') chatRichMarkdown(body, message.body_text || '');
-      else body.textContent = message.body_text || '';
+      patchMessageContent(node, message);
       changed = true;
     }
     // Stable nodes keep browser selection and scroll intact across projections.
@@ -454,8 +581,16 @@ window.CodePierCollaboration = (() => {
       if (node && list.children[index] !== node)
         list.insertBefore(node, list.children[index] || null);
     });
+    patchWindowHints();
+    if (changed && !root._restoringReading && !root._loadingOlder) restoreAnchor(reading);
     patchEmpty();
-    if (changed && nearEnd && !root._loadingOlder && !root._restoringReading) {
+    if (
+      changed &&
+      nearEnd &&
+      !state.messageHistory &&
+      !root._loadingOlder &&
+      !root._restoringReading
+    ) {
       const top = feed.scrollTop,
         epoch = state.epoch;
       requestAnimationFrame(() => {
@@ -505,26 +640,59 @@ window.CodePierCollaboration = (() => {
   function patchWorks() {
     const node = root?.querySelector('[data-cr-work]');
     if (!node) return;
-    const markup = state.works
-      .map(
-        (work) =>
-          `<article class="cr-work" data-work-id="${E(work.id)}"><span class="cr-work-indicator ${E(work.state)}" aria-hidden="true"></span><div><strong>${E(work.title || '当前工作')}</strong><p>${E(work.display?.title || workLabels[work.state] || work.state)}${work.display?.reason ? ' · ' + E(work.display.reason) : ''}</p></div>${btn('work-detail', '查看', `data-id="${E(work.id)}"`, 'cr-text-button')}</article>`,
-      )
-      .join('');
-    if (node._markup !== markup) {
+    const reading = readingSnapshot();
+    const markup =
+      (state.works.length
+        ? `<p class="cr-window-note">工作窗口 ${state.works.length} / ${store.limits.works} 项 · 列表不等于完整历史</p>`
+        : '') +
+      state.works
+        .map(
+          (work) =>
+            `<article class="cr-work" data-work-id="${E(work.id)}"><span class="cr-work-indicator ${E(work.state)}" aria-hidden="true"></span><div><strong>${E(work.title || '当前工作')}</strong><p>${E(work.display?.title || workLabels[work.state] || work.state)}${work.display?.reason ? ' · ' + E(work.display.reason) : ''}</p>${work.delivery_display?.title ? `<p class="cr-work-delivery" data-cr-work-delivery>${E(work.delivery_display.title)}</p>` : ''}</div>${btn('work-detail', '查看', `data-id="${E(work.id)}"`, 'cr-text-button')}</article>`,
+        )
+        .join('') +
+      (!state.worksComplete || state.worksCursor
+        ? btn('more-work', state.worksCursor ? '更早工作' : '重新核对工作列表', '', 'cr-full')
+        : '') +
+      (state.newerWorks || state.workHistory
+        ? `<div class="cr-history-end" data-cr-work-window-end><p>当前只显示这一页及已载入的相邻工作。</p>${btn('latest-work', '返回最新工作窗口')}</div>`
+        : '');
+    const changed = node._markup !== markup;
+    if (changed) {
       node.innerHTML = markup;
       node._markup = markup;
     }
+    const boundary = node.querySelector('[data-cr-work-window-end]');
+    if (boundary)
+      boundary.style.minHeight = state.workHistory
+        ? root.querySelector('.cr-feed').clientHeight + 'px'
+        : '';
+    if (changed && !root._restoringReading && !root._loadingOlder) restoreAnchor(reading);
     patchEmpty();
   }
   function update(domain) {
     if (!root) return;
     if (['room', 'rooms'].includes(domain)) patchHeader();
+    if (domain === 'context') patchComposer();
+    if (['room', 'context'].includes(domain) && panel?.name === 'context' && panel.context) {
+      const latest = state.room?.context;
+      if (
+        latest &&
+        (latest.version !== panel.context.version ||
+          latest.visibility_revision !== panel.context.visibility_revision)
+      ) {
+        panel.context = latest;
+        renderContext();
+        panelError('当前上下文已更新，旧页已清除，请按最新事实核对。');
+      }
+    }
     if (domain === 'messages') patchMessages();
     if (domain === 'works') {
       patchWorks();
       if (panel?.name === 'work' && !panel.busy) {
-        const latest = state.works.find((work) => work.id === panel.work.id);
+        const latest =
+          state.works.find((work) => work.id === panel.work.id) ||
+          (state.workDetail?.id === panel.work.id ? state.workDetail : null);
         if (latest) renderWork(latest);
       }
     }
@@ -540,7 +708,7 @@ window.CodePierCollaboration = (() => {
       patchComposer();
       patchPending();
     }
-    if (domain === 'page') root.querySelector('[data-cr-older]').hidden = !state.cursor;
+    if (domain === 'page') patchWindowHints();
   }
   function sizeEditor(editor) {
     editor.style.height = 'auto';
@@ -549,11 +717,15 @@ window.CodePierCollaboration = (() => {
   function closePanel() {
     const dialog = root?.querySelector('dialog');
     if (!dialog) return;
+    panel?.impactController?.abort();
+    if (panel?.name === 'work') state.workDetail = null;
     panelEpoch++;
     panel = null;
     dialog.close();
   }
   function openPanel(name, heading, content, data = {}) {
+    panel?.impactController?.abort();
+    if (panel?.name === 'work') state.workDetail = null;
     panelEpoch++;
     panel = { name, roomId: state.roomId, epoch: panelEpoch, key: store.key(), ...data };
     const dialog = root.querySelector('dialog');
@@ -594,6 +766,71 @@ window.CodePierCollaboration = (() => {
       `<form data-cr-form="projects"><p class="cr-muted">关联项目后，可在成员里分配参与范围。</p><fieldset><legend class="sr-only">关联项目</legend>${projectOptions(state.room.projects || [])}</fieldset><div class="cr-impact" data-cr-project-impact hidden></div><button class="cr-button cr-primary" type="submit">保存项目</button></form>`,
       { version: state.room.version },
     );
+  }
+  function projectImpactSelection(form) {
+    const chosen = new Set(
+      [...form.querySelectorAll('[name="project"]:checked')].map((item) => item.value),
+    );
+    const removed = (state.room?.projects || []).filter((item) => !chosen.has(item.project_id));
+    return { removed, key: JSON.stringify([panel?.version, [...chosen].sort()]) };
+  }
+  function projectImpactMarkup(value) {
+    const impact = value.impact || {};
+    const effectLabels = {
+      block_new_steps: '禁止新的步骤准入',
+      cancel_requested: '请求停止，等待原操作回执',
+      retain_receipt: '保留原回执',
+      revoke_scope: '撤销该项目范围',
+    };
+    return `<h3>移出后会发生什么</h3><p>房间、通用消息和项目文件保留；其他项目的工作范围保留。移出范围不再接受新步骤。</p>${value.note ? `<p>${E(value.note)}</p>` : ''}<p class="cr-muted">此预览没有执行撤销，也不表示运行中的原操作已经停止。</p>${Object.values(value.truncated || {}).some(Boolean) ? '<p class="cr-info">影响记录超过本次观察上限，以下列表不完整。</p>' : ''}
+      ${impact.members?.length ? `<details><summary>受影响的成员范围（${E(impact.members.length)} 条）</summary><ul>${impact.members.map((member) => `<li>${E(identifier(member.member_id))} · ${E(S.projects.find((item) => item.id === member.project_id)?.alias || member.project_id)} · ${E(member.environment_id)}${member.lifetime_mode === 'timed' ? ' · 原截止 ' + E(dateTime(member.expires_at)) : ''}</li>`).join('')}</ul></details>` : ''}
+      <details open><summary>原工作步骤（${E(impact.work_items?.length || 0)} 条）</summary>${impact.work_items?.length ? `<ul>${impact.work_items.map((item) => `<li data-impact-work="${E(item.id)}"><strong>${E(item.title || '原步骤')}</strong> · ${E(workLabels[item.state] || item.state)}<small>步骤 ${E(identifier(item.id))} · 工作 ${E(identifier(item.goal_id))}</small><p>${E(effectLabels[item.effect] || item.effect || '新步骤将按移出后的范围重新核验')}</p></li>`).join('')}</ul>` : '<p>当前窗口没有受影响的工作步骤。</p>'}</details>
+      <details open><summary>原操作（${E(impact.operations?.length || 0)} 条）</summary>${impact.operations?.length ? `<ul>${impact.operations.map((operation) => `<li data-impact-operation="${E(operation.id)}"><strong>${E(identifier(operation.id))}</strong> · ${E(workLabels[operation.state] || operation.state)}${operation.cancel_requested ? '<p>已请求停止，仍需核对原回执</p>' : ''}<p>${E(effectLabels[operation.effect] || operation.effect || '保留原操作状态和回执')}</p></li>`).join('')}</ul>` : '<p>当前窗口没有受影响的原操作。</p>'}</details>`;
+  }
+  async function loadProjectImpact(form) {
+    const current = panel,
+      owner = state.owner;
+    if (current?.name !== 'projects') return;
+    const { removed, key } = projectImpactSelection(form);
+    current.impactController?.abort();
+    const controller = new AbortController();
+    current.impactController = controller;
+    current.impactReadyKey = '';
+    const node = root.querySelector('[data-cr-project-impact]');
+    const save = form.querySelector('[type="submit"]');
+    node.hidden = !removed.length;
+    if (!removed.length) {
+      node.replaceChildren();
+      save.disabled = false;
+      current.impactReadyKey = key;
+      return;
+    }
+    save.disabled = true;
+    node.textContent = '正在核对受影响的原步骤与原操作…';
+    try {
+      const query = new URLSearchParams({ expected_version: String(current.version) });
+      for (const project of removed) query.append('removed_partition_ids', project.room_id);
+      const value = await api(store.path(current.roomId) + '/projects/impact?' + query, {
+        signal: controller.signal,
+      });
+      if (
+        panel !== current ||
+        state.owner !== owner ||
+        controller.signal.aborted ||
+        projectImpactSelection(form).key !== key
+      )
+        return;
+      node.innerHTML = projectImpactMarkup(value);
+      current.impactReadyKey = key;
+      save.disabled = false;
+      panelError('');
+    } catch (error) {
+      if (panel !== current || controller.signal.aborted) return;
+      node.innerHTML =
+        '<p>影响预览尚未完成，请重新核对后保存。</p>' +
+        btn('refresh-project-impact', '重新核对影响');
+      panelError(error.message);
+    }
   }
   function membersPanel() {
     if (!state.room) return;
@@ -897,9 +1134,14 @@ window.CodePierCollaboration = (() => {
             panel.version = state.room.version;
             panel.key = store.key();
             if (panel.name === 'work') {
-              const latest = state.works.find((work) => work.id === panel.work.id);
-              if (latest) renderWork(latest);
-              panelError('原工作刚有更新，请核对当前连接和原操作后再继续。');
+              const reviewing = panel;
+              await store.work(reviewing.work.id).catch(() => {});
+              if (panel === reviewing) {
+                const latest = state.works.find((work) => work.id === reviewing.work.id);
+                if (latest || state.workDetail?.id === reviewing.work.id)
+                  renderWork(latest || state.workDetail);
+                panelError('原工作刚有更新，请核对当前连接和原操作后再继续。');
+              }
             }
           }
         }
@@ -985,6 +1227,16 @@ window.CodePierCollaboration = (() => {
       requestedProject = '';
       await selectRoom(room.id);
     } else if (type === 'projects') {
+      const impact = projectImpactSelection(form);
+      if (
+        impact.removed.length &&
+        (current.impactReadyKey !== impact.key || current.version !== state.room.version)
+      ) {
+        current.version = state.room.version;
+        await loadProjectImpact(form);
+        panelError('请核对当前的原步骤和原操作影响后，再次保存。');
+        return;
+      }
       const result = await mutation('PUT', store.path() + '/projects', {
         expected_version: current.version,
         projects: selectedProjects(data.getAll('project')),
@@ -992,7 +1244,11 @@ window.CodePierCollaboration = (() => {
       if (!result) return;
       closePanel();
       await store.refresh();
-      announce('房间项目已更新');
+      announce(
+        impact.removed.length
+          ? '房间项目已更新，移出范围的新步骤已停止准入。运行中原操作的停止请继续核对各自回执。'
+          : '房间项目已更新',
+      );
     } else if (type === 'member' || type === 'member-scope') {
       const project_scopes = formScopes(form);
       const lifetime =
@@ -1106,20 +1362,294 @@ window.CodePierCollaboration = (() => {
       if (error.name !== 'AbortError') announce(error.message, true);
     }
   }
+  function diagnosticFields(fields) {
+    return `<dl class="cr-facts">${fields.map(([label, value]) => `<div><dt>${E(label)}</dt><dd>${E(supplied(value))}</dd></div>`).join('')}</dl>`;
+  }
+  function renderDiagnostics(data) {
+    const box = root?.querySelector('[data-cr-diagnostics-view]');
+    if (!box || panel?.name !== 'diagnostics') return;
+    const truncated = Object.values(data.truncated || {}).some(Boolean);
+    const labels = {
+      members: '成员',
+      traces: '原记录',
+      budgets: '额度',
+      pending: '待处理输入',
+      goals: '工作',
+    };
+    const traceLabels = {
+      member: '成员',
+      message: '原输入',
+      goal: '工作',
+      work: '步骤',
+      operation: '原操作',
+      delivery: '渠道投递',
+    };
+    const limitLabels = {
+      members: '成员',
+      goals: '工作',
+      pending_per_member: '每成员待处理输入',
+      traces: '原记录',
+      budgets: '额度',
+      messages: '原消息',
+      parts_per_delivery: '每投递分项',
+      dispatch_concurrency: '通知并发',
+    };
+    box.innerHTML = `<div class="cr-inspection-heading"><p class="cr-muted">只读快照 · ${E(dateTime(data.observed_at))}</p>${btn('refresh-diagnostics', '刷新')}</div><p class="cr-info">${data.read_only === true ? '查询不领取输入、不确认消费。' : '查询是否只读：未提供。'} ${data.redacted === true ? '仅显示已脱敏的当前授权记录。' : '脱敏状态：未提供。'} ${data.grants_authority === false ? '这些记录和额度不授予工作权限。' : '授权含义：未提供。'}</p><p class="cr-muted">有界观察窗口；待处理数量不是全局总数。未提供的值保持未知。</p>${
+      truncated
+        ? `<p class="cr-info" data-cr-diagnostics-incomplete>部分记录未载入：${E(
+            Object.entries(data.truncated || {})
+              .filter(([, value]) => value)
+              .map(([name]) => labels[name] || name)
+              .join('、'),
+          )}。</p>`
+        : ''
+    }
+      <section class="cr-inspection-section" data-cr-diagnostic-queues><h3>等待与队列</h3>${
+        data.queues?.length
+          ? data.queues
+              .map(
+                (queue) =>
+                  `<article><h4>${E(queue.label || queue.kind)}</h4>${diagnosticFields([
+                    ['窗口内待处理', queue.pending_count],
+                    ['最早等待（秒）', queue.oldest_age_seconds],
+                  ])}</article>`,
+              )
+              .join('')
+          : '<p class="cr-muted">未提供队列数据。</p>'
+      }</section>
+      <section class="cr-inspection-section" data-cr-diagnostic-budgets><h3>额度与下一可用时间</h3>${
+        data.budgets?.length
+          ? data.budgets
+              .map(
+                (budget) =>
+                  `<details><summary>${E(budget.title || '工作额度')}${budget.goal_id ? ' · ' + E(identifier(budget.goal_id)) : ''}</summary>${diagnosticFields((budget.counters || []).map((counter) => [counter.label || '额度', supplied(counter.used) + ' / ' + supplied(counter.limit)]))}${diagnosticFields(
+                    [
+                      ['到期时间', dateTime(budget.expires_at)],
+                      ['下一可用时间', dateTime(budget.next_available_at)],
+                    ],
+                  )}${budget.display?.reason || budget.reason_code ? `<p>${E(budget.display?.reason || budget.reason_code)}</p>` : ''}</details>`,
+              )
+              .join('')
+          : '<p class="cr-muted">未提供额度数据。</p>'
+      }</section>
+      <section class="cr-inspection-section" data-cr-diagnostic-members><h3>成员与消费证据</h3>${
+        data.members?.length
+          ? data.members
+              .map(
+                (member) =>
+                  `<details><summary>${E(identifier(member.member_id))} · ${E(stages[member.state] || member.state)}</summary>${diagnosticFields(
+                    [
+                      ['绑定世代', member.binding_generation],
+                      ['订阅状态', member.subscription?.state],
+                      ['原生订阅已验证', dateTime(member.subscription_verified_at)],
+                      ['探测已读取', dateTime(member.probe_read_at)],
+                      ['规范探测已回复', dateTime(member.probe_replied_at)],
+                      ['消费者状态', member.consumer?.state],
+                      ['消费者 fence', member.consumer?.fence],
+                      ['租约截止', dateTime(member.consumer?.lease_until)],
+                      ['待处理原输入', member.inbox?.pending_count],
+                      ['输入水位', member.inbox?.dirty_revision],
+                      ['完成水位', member.inbox?.drained_revision],
+                      ['最早输入等待（秒）', member.inbox?.oldest_age_seconds],
+                      ['通知待发送', member.notification?.pending_count],
+                      ['通知最早等待（秒）', member.notification?.oldest_age_seconds],
+                      ['平台接受时间', dateTime(member.notification?.last_accepted_at)],
+                      ['下一通知尝试', dateTime(member.notification?.next_attempt_at)],
+                    ],
+                  )}<p class="cr-muted">平台接受通知不证明模型在线或已经消费。${member.inbox?.complete === false ? '输入列表尚不完整。' : ''}</p></details>`,
+              )
+              .join('')
+          : '<p class="cr-muted">当前没有可显示的成员证据。</p>'
+      }</section>
+      <section class="cr-inspection-section" data-cr-diagnostic-traces><h3>原记录关联</h3>${
+        data.traces?.length
+          ? data.traces
+              .map(
+                (trace) =>
+                  `<details data-trace-id="${E(trace.id)}"><summary>${E(traceLabels[trace.kind] || trace.kind)} ${E(identifier(trace.id))} · ${E(trace.display?.title || workLabels[trace.state] || deliveryLabels[trace.state] || trace.state)}</summary>${trace.display?.reason || trace.reason_code ? `<p>${E(trace.display?.reason || trace.reason_code)}</p>` : ''}${diagnosticFields(
+                    [
+                      ['记录时间', dateTime(trace.updated_at)],
+                      ...[
+                        ['成员', 'member_id'],
+                        ['绑定世代', 'binding_generation'],
+                        ['原消息', 'message_id'],
+                        ['工作', 'goal_id'],
+                        ['步骤', 'work_item_id'],
+                        ['原操作', 'operation_id'],
+                        ['原投递', 'delivery_id'],
+                      ]
+                        .filter(([, key]) => trace[key] !== undefined && trace[key] !== '')
+                        .map(([label, key]) => [
+                          label,
+                          key === 'binding_generation' ? trace[key] : identifier(trace[key]),
+                        ]),
+                    ],
+                  )}${trace.kind === 'delivery' ? deliveryMarkup([trace]) : ''}</details>`,
+              )
+              .join('')
+          : '<p class="cr-muted">当前窗口没有可显示的原记录。</p>'
+      }</section>
+      <details class="cr-diagnostics"><summary>本次观察上限</summary>${diagnosticFields(
+        Object.entries(limitLabels)
+          .filter(([key]) => data.limits?.[key] !== undefined)
+          .map(([key, label]) => [label, data.limits[key]]),
+      )}</details>`;
+  }
+  async function loadDiagnostics() {
+    const current = panel,
+      owner = state.owner;
+    if (current?.name !== 'diagnostics' || current.loading) return;
+    current.loading = true;
+    try {
+      const data = await api(store.path(current.roomId) + '/diagnostics');
+      if (panel !== current || state.owner !== owner || state.roomId !== current.roomId) return;
+      renderDiagnostics(data);
+      panelError('');
+    } finally {
+      current.loading = false;
+    }
+  }
+  function contextCorrectionStale() {
+    const correction = store.draft().contextCorrection;
+    const context = state.room?.context;
+    return !!(
+      correction &&
+      context &&
+      (correction.version !== context.version ||
+        correction.visibilityRevision !== context.visibility_revision)
+    );
+  }
+  function renderContext() {
+    const box = root?.querySelector('[data-cr-context-view]');
+    const value = panel?.context;
+    if (!box || panel?.name !== 'context' || !value) return;
+    const reasonLabels = {
+      unreviewed_input: '还有新的原输入等待核对',
+      byte_budget: '本页内容达到大小上限',
+      page_limit: '还有事实未载入',
+      more_facts: '还有事实未载入',
+      history_is_paginated: '完整历史按页读取',
+      not_summarized: '原输入尚未形成经核对的摘要',
+      source_needs_review: '事实来源需要重新核对',
+      recent_messages_omitted: '近期原消息未包含在本页',
+      visibility_limited: '当前范围只允许查看部分来源',
+    };
+    box.innerHTML = `<div class="cr-inspection-heading"><p class="cr-muted">当前事实 · 版本 ${E(value.version)}</p>${btn('refresh-context', '刷新')}</div><p class="cr-muted">摘要保留原消息引用。纠正会回到房间输入框，由你写明新的事实。</p>${value.incomplete ? `<p class="cr-info" data-cr-context-incomplete>上下文尚不完整。${E((value.incomplete_reasons || []).map((reason) => reasonLabels[reason] || reason).join('；'))}</p>` : ''}${value.active_projects?.length ? `<p class="cr-muted">当前项目：${E(value.active_projects.map((project) => (typeof project === 'string' ? S.projects.find((item) => item.id === project)?.alias || project : project.project_label || S.projects.find((item) => item.id === project.project_id)?.alias || project.project_id)).join('、'))}</p>` : ''}<div class="cr-context-facts">${value.facts?.length ? value.facts.map((fact) => `<article class="cr-context-fact" data-context-id="${E(fact.id)}"><h3>${E(contextKinds[fact.kind] || fact.kind || '当前事实')}${fact.review_state === 'needs_review' || value.review_state === 'needs_review' ? '<span class="cr-tag">待重新核对</span>' : ''}</h3><p class="cr-context-text">${E(fact.text)}</p>${fact.sources?.length ? `<div class="cr-context-sources" aria-label="事实来源">${fact.sources.map((source) => btn('context-source', `原消息 ${E(identifier(source.message_id))} · v${E(source.version)}`, `data-id="${E(source.message_id)}" data-source-version="${E(source.version)}"`, 'cr-text-button')).join('')}</div>` : '<p class="cr-muted">未提供来源。</p>'}${fact.artifact_refs?.length ? `<p class="cr-muted">产物：${E(fact.artifact_refs.map((artifact) => (typeof artifact === 'string' ? artifact : artifact.name || artifact.label || artifact.id || '原产物引用')).join('、'))}</p>` : ''}${value.writable === false || value.archived ? '' : btn('correct-context', '纠正这条事实', `data-id="${E(fact.id)}"`, 'cr-text-button')}</article>`).join('') : '<p class="cr-muted">尚无已核对的当前事实。原消息仍保存在房间中。</p>'}</div>${value.next_cursor ? btn('more-context', '载入更多事实', '', 'cr-full') : ''}`;
+  }
+  async function loadContext(more = false) {
+    const current = panel,
+      owner = state.owner;
+    if (current?.name !== 'context' || current.loading) return;
+    current.loading = true;
+    const valid = () =>
+      panel === current && state.owner === owner && state.roomId === current.roomId;
+    let append = more && !!current.context?.next_cursor;
+    const expectedVisibility = state.room?.context?.visibility_revision;
+    const firstPage = store.path(current.roomId) + '/context?limit=20&byte_budget=16000';
+    try {
+      let value;
+      try {
+        value = await api(
+          firstPage + (append ? '&cursor=' + encodeURIComponent(current.context.next_cursor) : ''),
+        );
+      } catch (error) {
+        if (
+          !append ||
+          !(error.status === 409 || (error.status === 400 && error.code === 'INVALID_CURSOR')) ||
+          !valid()
+        )
+          throw error;
+        append = false;
+        value = await api(firstPage);
+      }
+      if (!valid()) return;
+      if (
+        append &&
+        (value.version !== current.context.version ||
+          value.visibility_revision !== current.context.visibility_revision)
+      ) {
+        append = false;
+        value = await api(firstPage);
+        if (!valid()) return;
+      }
+      if (append)
+        current.context = {
+          ...value,
+          facts: [
+            ...new Map(
+              [...current.context.facts, ...(value.facts || [])].map((fact) => [fact.id, fact]),
+            ).values(),
+          ],
+        };
+      else {
+        store.applyContext(value, expectedVisibility);
+        current.context = state.room?.context || value;
+      }
+      renderContext();
+      panelError('');
+    } finally {
+      current.loading = false;
+    }
+  }
+  async function contextSource(id, sourceVersion) {
+    openPanel(
+      'context-source',
+      '原消息',
+      '<div data-cr-context-source><p class="cr-muted">正在核对当前可读原消息…</p></div>',
+    );
+    const current = panel,
+      owner = state.owner;
+    const result = await api(
+      store.path(current.roomId) + '/messages?message_id=' + encodeURIComponent(id),
+    );
+    if (panel !== current || state.owner !== owner || state.roomId !== current.roomId) return;
+    const message = result.message || result.messages?.find((item) => item.id === id);
+    const box = root.querySelector('[data-cr-context-source]');
+    if (!message) {
+      box.textContent = '原消息当前不可见，请刷新上下文。';
+      return;
+    }
+    box.innerHTML = `<p class="cr-muted">原消息 ${E(identifier(message.id))} · 当前版本 ${E(supplied(message.version))}</p>${Number(sourceVersion) !== Number(message.version) ? '<p class="cr-info">原消息已更新。此处是当前可读版本，摘要引用的旧版本需重新核对。</p>' : ''}<div class="cr-message-body"></div>${message.attachments?.length ? `<div class="cr-message-files">${message.attachments.map(attachmentMarkup).join('')}</div>` : ''}${state.messages.some((item) => item.id === id) ? btn('locate-message', '在房间中查看', `data-id="${E(id)}"`) : ''}${btn('context', '返回当前上下文')}`;
+    const body = box.querySelector('.cr-message-body');
+    if (typeof chatRichMarkdown === 'function') chatRichMarkdown(body, message.body_text || '');
+    else body.textContent = message.body_text || '';
+  }
   function settingsPanel() {
     const room = state.room;
     openPanel(
       'settings',
       '房间设置',
-      `<form data-cr-form="settings">${field('房间名称', `<input name="title" value="${E(room.title)}" required maxlength="120" autofocus>`)}<button type="submit" class="cr-button cr-primary">保存名称</button></form><section class="cr-setting-actions">${btn('room-state', room.state === 'paused' ? '继续房间' : '暂停房间', `data-state="${room.state === 'paused' ? 'active' : 'paused'}"`)}${btn('archive-room', room.state === 'archived' ? '恢复房间' : '归档房间', '', 'cr-danger')}${btn('diagnostics', '运行诊断')}</section>`,
+      `<form data-cr-form="settings">${field('房间名称', `<input name="title" value="${E(room.title)}" required maxlength="120" autofocus>`)}<button type="submit" class="cr-button cr-primary">保存名称</button></form><section class="cr-setting-actions">${btn('context', '当前上下文')}${btn('diagnostics', '运行诊断')}${btn('room-state', room.state === 'paused' ? '继续房间' : '暂停房间', `data-state="${room.state === 'paused' ? 'active' : 'paused'}"`)}${btn('archive-room', room.state === 'archived' ? '恢复房间' : '归档房间', '', 'cr-danger')}</section>`,
       { version: room.version },
     );
   }
-  function workPanel(id) {
+  async function workPanel(id) {
     const work = state.works.find((item) => item.id === id);
-    if (!work) return;
-    openPanel('work', work.title || '当前工作', '<div data-cr-work-view></div>', { work });
-    renderWork(work);
+    openPanel(
+      'work',
+      work?.title || '当前工作',
+      '<div data-cr-work-view><p class="cr-muted">正在核对原工作…</p></div>',
+      { work: work || { id } },
+    );
+    state.workDetail = work || { id };
+    if (work) renderWork(work);
+    const current = panel;
+    try {
+      await store.work(id);
+    } catch (error) {
+      if (panel === current && [401, 403, 404].includes(error.status)) {
+        root.querySelector('[data-cr-work-view]').textContent =
+          '原工作当前不可读，请刷新房间后核对。';
+        state.works = state.works.filter((item) => item.id !== id);
+        patchWorks();
+      }
+      throw error;
+    }
+    if (panel !== current) return;
+    const latest =
+      state.works.find((item) => item.id === id) ||
+      (state.workDetail?.id === id ? state.workDetail : null);
+    if (latest) renderWork(latest);
   }
   function workRecoveryForm(action, candidates) {
     const takeover = action === 'takeover';
@@ -1150,7 +1680,7 @@ window.CodePierCollaboration = (() => {
     const focusedAction = document.activeElement?.closest?.('[data-cr-form="work-recovery"]')
       ?.dataset.workAction;
     panel.work = work;
-    const markup = `<div class="cr-flow-state"><h3>${E(work.display?.title || workLabels[work.state] || work.state)}</h3><p>${E(work.display?.reason || work.reason_code || '')}</p></div>${work.result_summary ? `<p>${E(work.result_summary)}</p>` : ''}
+    const markup = `<div class="cr-flow-state"><h3>${E(work.display?.title || workLabels[work.state] || work.state)}</h3><p>${E(work.display?.reason || work.reason_code || '')}</p></div>${work.result_summary ? `<p>${E(work.result_summary)}</p>` : ''}${deliveryMarkup(work.channel_deliveries, work.delivery_display, work.channel_deliveries_truncated)}
       <section class="cr-work-summary"><h3>验收条件</h3><p>${E(work.acceptance || '此工作未单列验收条件。')}</p>${coordinatorId ? `<p data-cr-work-coordinator><strong>当前主责</strong> ${E(coordinator?.name || recovery.coordinator_name || 'dot')} · #${E(coordinatorId.slice(0, 8))}</p>` : ''}${team.length ? `<h3>参与成员</h3><ul>${team.map((member) => `<li>${E(member.name || 'dot')} · #${E((member.member_id || member.id).slice(0, 8))}${(member.member_id || member.id) === coordinatorId ? ' · 主责' : ''}</li>`).join('')}</ul>` : ''}</section>
       <details class="cr-diagnostics cr-work-evidence" open><summary>步骤与原操作</summary>${work.items?.length ? `<ul>${work.items.map((item) => `<li><strong>${E(item.title || '工作步骤')}</strong> · ${E(workLabels[item.state] || item.state)}${item.member_id ? ' · #' + E(item.member_id.slice(0, 8)) : ''}${item.display?.reason || item.reason_code ? `<p>${E(item.display?.reason || item.reason_code)}</p>` : ''}<small>步骤 #${E(item.id.slice(0, 8))}</small></li>`).join('')}</ul>` : '<p class="cr-muted">当前没有可显示的执行步骤。</p>'}<div data-cr-operation-receipts>${operations.length ? `<ul>${operations.map((operation) => `<li data-operation-id="${E(operation.id || operation.operation_id)}"><strong>${E(operation.display?.title || workLabels[operation.state] || operation.state)}</strong>${operation.cancel_requested && !['succeeded', 'failed', 'cancelled'].includes(operation.state) ? '<p>已请求停止，等待原操作回执</p>' : ''}${operation.display?.reason ? `<p>${E(operation.display.reason)}</p>` : ''}<small>原操作 #${E(String(operation.id || operation.operation_id || '').slice(0, 12))}</small></li>`).join('')}</ul>` : '<p class="cr-muted">当前没有已记录的操作；不会把未开始显示为已完成。</p>'}</div></details>
       ${recovery.state === 'waiting_operations' ? '<p class="cr-info">先核对上面的原操作回执，确认结束后才能恢复或接替。</p>' : ''}
@@ -1449,6 +1979,8 @@ window.CodePierCollaboration = (() => {
       const visible = root.classList.toggle('cr-show-rooms');
       button.setAttribute('aria-expanded', String(visible));
     } else if (action === 'projects') projectsPanel();
+    else if (action === 'refresh-project-impact')
+      await loadProjectImpact(root.querySelector('[data-cr-form="projects"]'));
     else if (action === 'members') membersPanel();
     else if (action === 'add-member') addMemberPanel();
     else if (action === 'more-connections') await loadConnections(!!panel.connectionsCursor);
@@ -1499,20 +2031,35 @@ window.CodePierCollaboration = (() => {
       const entry = store.draft().files.find((file) => file.id === id);
       if (entry) await store.upload(entry);
     } else if (action === 'older') {
-      const feed = root.querySelector('.cr-feed'),
-        height = feed.scrollHeight,
-        top = feed.scrollTop;
+      const reading = readingSnapshot();
+      rememberReading();
       root._loadingOlder = true;
       try {
         await store.messages(true);
-        feed.scrollTop = top + feed.scrollHeight - height;
+        restoreAnchor(reading);
       } finally {
-        if (root) root._loadingOlder = false;
+        if (root) {
+          root._loadingOlder = false;
+          rememberReading();
+        }
       }
     } else if (action === 'latest') {
+      store.draft().reading = {
+        atEnd: true,
+        anchorId: '',
+        workId: '',
+        visibilityRevision: state.visibilityRevision,
+      };
+      root._restoringReading = true;
+      try {
+        if (state.messageHistory || state.newerMessages) await store.latestMessages();
+      } finally {
+        if (root) root._restoringReading = false;
+      }
       const feed = root.querySelector('.cr-feed');
       feed.scrollTop = feed.scrollHeight;
-      button.hidden = true;
+      root.querySelector('[data-cr-latest]').hidden = true;
+      rememberReading();
     } else if (action === 'recover-send') await recoverSend(id);
     else if (action === 'recover-action') await recoverAction(id);
     else if (action === 'flow-action') {
@@ -1617,22 +2164,83 @@ window.CodePierCollaboration = (() => {
           '<p>停止新工作并保留历史。归档后可以恢复这个房间。</p>' +
             btn('room-state', '归档房间', 'data-state="archived"', 'cr-danger cr-full'),
         );
-    } else if (action === 'work-detail') workPanel(id);
-    else if (action === 'work-control') await controlWork(button.dataset.workAction);
+    } else if (action === 'work-detail') await workPanel(id);
+    else if (action === 'more-work') {
+      rememberReading();
+      button.disabled = true;
+      try {
+        await store.works(!!state.worksCursor);
+      } finally {
+        if (button.isConnected) button.disabled = false;
+      }
+    } else if (action === 'latest-work') {
+      await store.latestWorks();
+      root.querySelector('[data-cr-work]')?.scrollIntoView({ block: 'start', behavior: 'instant' });
+      rememberReading();
+    } else if (action === 'work-control') await controlWork(button.dataset.workAction);
     else if (action === 'supplement') {
       store.draft().work = panel.work.id;
       store.draft().workVersion = panel.work.version;
+      store.draft().contextCorrection = null;
       closePanel();
       patchComposer();
       root.querySelector('#cr-message').focus();
       announce('下一条消息将补充到这项工作');
     } else if (action === 'diagnostics') {
-      openPanel('diagnostics', '运行诊断', '<p class="cr-muted">正在读取…</p>');
-      const current = panel;
-      const data = await api(store.path() + '/diagnostics');
-      if (current === panel)
-        root.querySelector('.cr-panel-content').innerHTML =
-          `<pre class="cr-diagnostic-output">${E(JSON.stringify(data, null, 2))}</pre>`;
+      openPanel(
+        'diagnostics',
+        '运行诊断',
+        '<div data-cr-diagnostics-view><p class="cr-muted">正在读取…</p></div>',
+      );
+      await loadDiagnostics();
+    } else if (action === 'refresh-diagnostics') await loadDiagnostics();
+    else if (action === 'context') {
+      openPanel(
+        'context',
+        '当前上下文',
+        '<div data-cr-context-view><p class="cr-muted">正在核对…</p></div>',
+        { context: state.room?.context },
+      );
+      renderContext();
+      await loadContext();
+    } else if (action === 'more-context') await loadContext(true);
+    else if (action === 'refresh-context') await loadContext();
+    else if (action === 'context-source') await contextSource(id, button.dataset.sourceVersion);
+    else if (action === 'correct-context') {
+      const value = panel?.context;
+      if (
+        !activeRoom() ||
+        value?.writable === false ||
+        value?.archived ||
+        !value?.facts.some((fact) => fact.id === id)
+      )
+        return;
+      remember();
+      const draft = store.draft();
+      draft.contextCorrection = {
+        ids: [id],
+        version: value.version,
+        visibilityRevision: value.visibility_revision,
+      };
+      draft.work = '';
+      draft.workVersion = 0;
+      closePanel();
+      patchComposer();
+      root.querySelector('#cr-message').focus();
+      announce('请在原输入框写明纠正内容。发送后才会撤下所选旧事实。');
+    } else if (action === 'cancel-context-correction') {
+      store.draft().contextCorrection = null;
+      patchComposer();
+    } else if (action === 'locate-message') {
+      closePanel();
+      const node = [...root.querySelectorAll('[data-message-id]')].find(
+        (item) => item.dataset.messageId === id,
+      );
+      if (node) {
+        node.scrollIntoView({ block: 'center', behavior: 'instant' });
+        node.tabIndex = -1;
+        node.focus({ preventScroll: true });
+      }
     }
   }
   function closeHints() {
@@ -1699,6 +2307,7 @@ window.CodePierCollaboration = (() => {
       // Clear the old projection before waiting on a new authorization check.
       closeHints();
       store.abort();
+      store.clearWindows();
       root._restoringReading = false;
       closePanel();
       root.querySelector('.cr-panel-content').replaceChildren();
@@ -1708,6 +2317,9 @@ window.CodePierCollaboration = (() => {
       state.room = null;
       state.messages = [];
       state.works = [];
+      state.worksCursor = null;
+      state.worksComplete = true;
+      state.worksVisibilityRevision = null;
       state.cursor = null;
       state.visibilityRevision = null;
       state.messageRevision = 0;
@@ -1748,6 +2360,7 @@ window.CodePierCollaboration = (() => {
         if (epoch !== state.epoch) return;
         if (panel?.name === 'member') await refreshFlow();
         if (panel?.name === 'weixin') await refreshChannel();
+        if (panel?.name === 'work' && !panel.busy) await store.work(panel.work.id);
       } catch (error) {
         if (error.name !== 'AbortError' && root)
           announce('刷新暂时失败，草稿与原工作已保留。' + error.message, true);
@@ -1821,6 +2434,7 @@ window.CodePierCollaboration = (() => {
             (!draft.text.trim() && !draft.files.length) ||
             !activeRoom() ||
             state.room.state === 'paused' ||
+            contextCorrectionStale() ||
             draft.files.some((entry) => entry.state !== 'ready')
           )
             return;
@@ -1830,7 +2444,9 @@ window.CodePierCollaboration = (() => {
             )
           )
             return;
-          store.send().catch((error) => {
+          store.send().catch(async (error) => {
+            if (state.roomId !== roomId || state.owner !== owner) return;
+            if (error.code === 'CONTEXT_VERSION_CHANGED') await store.refresh().catch(() => {});
             if (state.roomId === roomId && state.owner === owner) announce(error.message, true);
           });
         } else if (event.target.matches('[data-cr-form]')) submitForm(event.target).catch(() => {});
@@ -1918,24 +2534,7 @@ window.CodePierCollaboration = (() => {
           } else if (event.target.checked) group.querySelector('[value="read"]').checked = true;
         }
         if (event.target.name === 'project' && panel?.name === 'projects') {
-          const chosen = new Set(
-            [...event.target.form.querySelectorAll('[name="project"]:checked')].map(
-              (item) => item.value,
-            ),
-          );
-          const removed = (state.room.projects || []).filter(
-            (item) => !chosen.has(item.project_id),
-          );
-          const affected = state.works.filter(
-            (work) =>
-              !['completed', 'succeeded', 'cancelled', 'failed'].includes(work.state) &&
-              work.project_ids?.some((id) => removed.some((project) => project.project_id === id)),
-          );
-          const node = root.querySelector('[data-cr-project-impact]');
-          node.hidden = !removed.length;
-          node.textContent = removed.length
-            ? `将移出 ${removed.map((item) => item.project_label || S.projects.find((p) => p.id === item.project_id)?.alias || item.project_id).join('、')}。该范围的新步骤会停止准入，项目文件保留。${affected.length ? '受影响的工作：' + affected.map((work) => work.title).join('、') + '。' : ''}`
-            : '';
+          void loadProjectImpact(event.target.form);
         }
       },
       { signal },
@@ -1944,6 +2543,7 @@ window.CodePierCollaboration = (() => {
       'close',
       () => {
         panelEpoch++;
+        if (panel?.name === 'work') state.workDetail = null;
         panel = null;
         const dialog = root?.querySelector('dialog');
         const opener = dialog?._crOpener;
@@ -1955,7 +2555,8 @@ window.CodePierCollaboration = (() => {
       'scroll',
       () => {
         const feed = root.querySelector('.cr-feed');
-        if (feed.scrollHeight - feed.scrollTop - feed.clientHeight < 90)
+        rememberReading();
+        if (!state.newerMessages && feed.scrollHeight - feed.scrollTop - feed.clientHeight < 90)
           root.querySelector('[data-cr-latest]').hidden = true;
       },
       { signal, passive: true },

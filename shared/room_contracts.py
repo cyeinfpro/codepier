@@ -88,6 +88,18 @@ class RoomProjects(RoomRead):
     idempotency_key: Key
 
 
+class RoomProjectImpact(RoomRead):
+    removed_partition_ids: list[Identifier] = Field(default_factory=list, max_length=16)
+    expected_version: int = Field(ge=1)
+
+    @field_validator('removed_partition_ids')
+    @classmethod
+    def distinct_partitions(cls, value):
+        if len(set(value)) != len(value):
+            raise ValueError('Removed partitions must be distinct')
+        return value
+
+
 class MemberCreate(RoomRead):
     name: str = Field(min_length=1, max_length=80)
     reuse_member_id: Identifier | None = None
@@ -145,6 +157,7 @@ class RoomChanges(RoomRead):
 ROOM_QUERY_ACTIONS = {
     'room_list': RoomList, 'room_view': RoomRead, 'room_connect': ConnectRead,
     'room_changes': RoomChanges, 'room_diagnostics': RoomRead,
+    'room_project_impact': RoomProjectImpact,
 }
 ROOM_MUTATION_ACTIONS = {
     'room_create': RoomCreate, 'room_update': RoomPatch,

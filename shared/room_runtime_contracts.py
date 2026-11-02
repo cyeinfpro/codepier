@@ -13,6 +13,23 @@ class RoomMessagesRead(Model):
     cursor: str = Field(default='', max_length=2048)
     limit: int = Field(default=50, ge=1, le=100)
     client_message_id: str = Field(default='', max_length=128)
+    message_id: str = Field(default='', max_length=128)
+
+    @model_validator(mode='after')
+    def one_lookup(self):
+        if self.message_id and (self.client_message_id or self.cursor):
+            raise ValueError('An exact message lookup cannot mix cursor or client identity')
+        return self
+
+
+class RoomWorksRead(Model):
+    conversation_id: Identifier
+    cursor: str = Field(default='', max_length=2048)
+    limit: int = Field(default=50, ge=1, le=100)
+
+
+class RoomWorkRead(Model):
+    work_id: Identifier
 
 
 class ChannelRead(Model):
@@ -28,6 +45,8 @@ class RoomMessage(Model):
     member_id: str = Field(default='', max_length=128)
     reply_to_id: str = Field(default='', max_length=128)
     work_id: str = Field(default='', max_length=128)
+    supersedes_context_ids: list[Identifier] = Field(default_factory=list, max_length=20)
+    expected_context_version: int | None = Field(default=None, strict=True, ge=0)
 
     @model_validator(mode='after')
     def nonblank(self):
@@ -35,6 +54,9 @@ class RoomMessage(Model):
             raise ValueError('Message must contain text or attachments')
         if len(set(self.attachment_ids)) != len(self.attachment_ids):
             raise ValueError('Attachments must be distinct')
+        if (len(set(self.supersedes_context_ids)) != len(self.supersedes_context_ids)
+                or bool(self.supersedes_context_ids) != (self.expected_context_version is not None)):
+            raise ValueError('Explicit context correction requires distinct fact IDs and the current context version')
         return self
 
 
@@ -116,7 +138,8 @@ class RoomWorkHandoffRead(MemberIdentity):
     handoff_id: Identifier
 
 
-ROOM_RUNTIME_QUERIES = {'room_work_handoff_read': RoomWorkHandoffRead}
+ROOM_RUNTIME_QUERIES = {'room_work_handoff_read': RoomWorkHandoffRead,
+                        'room_works': RoomWorksRead, 'room_work': RoomWorkRead}
 
 
 ROOM_RUNTIME_MUTATION_ACTIONS = {

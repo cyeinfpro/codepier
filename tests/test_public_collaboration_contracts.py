@@ -25,7 +25,7 @@ VALUES = {
     'wake_ticket': 'fixture-wake-ticket-not-a-secret-' * 2,
     'consumer_run_id': 'consumer-run', 'consumer_session_id': 'consumer-session',
     'consumer_fence': 1, 'consumer_proof': 'fixture-consumer-proof-not-a-secret-' * 2,
-    'expected_inbox_revision': 0, 'confirm_consumer_protocol': True,
+    'expected_inbox_revision': 0, 'expected_context_version': 0, 'confirm_consumer_protocol': True,
     'entry_ids': ['mailbox-entry'], 'coordinator_epoch': 1, 'expected_intent_revision': 1,
     'recipient_dot_id': 'peer-dot', 'coordinator_dot_id': 'coordinator-dot',
     'recipient_member_id': 'peer-member', 'target_member_id': 'peer-member', 'expected_coordinator_epoch': 1,
@@ -81,6 +81,8 @@ def example(tool, action):
             result[key] = 1
         else:
             result[key] = deepcopy(VALUES[key])
+    if action == 'room_context_update':
+        result['reviewed_sources'] = [{'message_id': 'context-source', 'version': 1, 'digest': 'a' * 64}]
     return result
 
 
@@ -204,3 +206,29 @@ def test_room_handoff_preserves_native_identity_and_rejects_blank_purpose():
     assert 'project' not in arguments and 'dot_id' not in arguments
     with pytest.raises(DevError):
         resolve('collaboration', {**raw, 'purpose': '  '})
+
+
+@pytest.mark.parametrize('empty', [{}, {'facts': []}, {'reviewed_sources': []},
+    {'facts': [], 'reviewed_sources': []}, {'supersedes': ['old-fact']}])
+def test_room_context_schema_and_runtime_reject_updates_without_source_or_fact(empty):
+    raw = {k: v for k, v in example('collaboration', 'room_context_update').items() if k != 'reviewed_sources'}
+    raw.update(empty)
+    validator = Draft202012Validator(ADAPTERS['collaboration'].json_schema())
+    assert list(validator.iter_errors(raw))
+    with pytest.raises(DevError):
+        resolve('collaboration', raw)
+
+
+@pytest.mark.parametrize('mode', ['facts', 'reviewed_sources', 'both'])
+def test_room_context_schema_and_runtime_accept_each_nonempty_source_alternative(mode):
+    raw = example('collaboration', 'room_context_update')
+    sources = deepcopy(raw['reviewed_sources'])
+    if mode != 'reviewed_sources':
+        raw['facts'] = [{'kind': 'question', 'key': 'pending', 'text': 'Which constraints remain open?', 'sources': sources}]
+    if mode == 'facts':
+        raw.pop('reviewed_sources')
+    validator = Draft202012Validator(ADAPTERS['collaboration'].json_schema())
+    validator.validate(raw)
+    target, arguments = resolve('collaboration', raw)
+    assert target == 'collaboration_room_context_update'
+    assert arguments['expected_context_version'] == 0

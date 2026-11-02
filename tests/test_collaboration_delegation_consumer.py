@@ -494,9 +494,14 @@ async def test_every_public_query_action_is_read_only_in_real_business_tables(co
         'room_changes': {'conversation_id': native_room['id']},
         'room_diagnostics': {'conversation_id': native_room['id']},
         'room_messages': {'conversation_id': native_room['id']},
+        'room_works': {'conversation_id': native_room['id']},
+        'room_work': {'work_id': handoff_goal['goal_id']},
+        'room_project_impact': {'conversation_id': native_room['id'],
+            'expected_version': s.rooms.read({'conversation_id': native_room['id']}, c.owner)['room']['version']},
         'room_connect': {'flow_id': created_member['flow']['id']},
         'room_channel': {'flow_id': channel['flow']['id']},
         'room_consumer': native_identity, 'room_inbox': native_identity,
+        'room_context': native_identity,
         'room_message_read': {**native_identity, 'message_id': native_message['id']},
         'room_attachment_read': {**native_identity, 'attachment_id': attachment},
         'room_work_handoff_read': {**handoff_lead, 'handoff_id': handoff['handoff']['id']},
@@ -512,7 +517,7 @@ async def test_every_public_query_action_is_read_only_in_real_business_tables(co
         return {table: s.store.all('SELECT * FROM "' + table + '" ORDER BY rowid') for table in tables}
     before = snapshot()
     for action, arguments in queries.items():
-        actor = c.actor if action in {'goal', 'delegation', 'connection', 'inbox', 'dot_connection', 'dot_inbox', 'dot_recovery', 'dot_receipt', 'work_evidence', 'team', 'teams', 'dot_consumer', 'dot_mailbox', 'room_consumer', 'room_inbox', 'room_message_read', 'room_attachment_read', 'room_work_handoff_read'} else c.owner
+        actor = c.actor if action in {'goal', 'delegation', 'connection', 'inbox', 'dot_connection', 'dot_inbox', 'dot_recovery', 'dot_receipt', 'work_evidence', 'team', 'teams', 'dot_consumer', 'dot_mailbox', 'room_consumer', 'room_inbox', 'room_context', 'room_message_read', 'room_attachment_read', 'room_work_handoff_read'} else c.owner
         scope = {} if action.startswith('room_') else c.scope
         assert s.invoke('collaboration_query', {'action': action, **scope, **arguments}, actor) is not None
         assert snapshot() == before, action

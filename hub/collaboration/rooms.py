@@ -260,6 +260,9 @@ class Rooms:
             'members': [self.member_view(m) for m in members],
             'visibility_token': digest([principal.grant_id or principal.user_id, [p['id'] for p in projects], room['revision']])}
         if details and room['state'] != 'archived':
+            context=getattr(self.c,'room_context',None)
+            if context is not None and not principal.grant_id:
+                result['context']=context.project(principal,room)
             runtime = getattr(self.c, 'room_runtime', None)
             channels = getattr(self.c, 'room_channels', None)
             if runtime is not None:
@@ -534,6 +537,49 @@ class Rooms:
             self.store.execute('INSERT OR IGNORE INTO room_member_scope_revisions VALUES (?,?,?,?,?,?)',
                 (member_id, project_id, environment_id, row['version'], canonical(row), self.c.clock()))
 
+    def project_effect_rows(self, room, partition, *, operations=False, scan_limit=None):
+        """Page original work/operations and use one exact environment rule.
+
+        The preview has a bounded inspection window; a None sentinel reports
+        that it was truncated. The committed revocation visits every matching
+        original in bounded SQL pages inside its existing transaction.
+        """
+        after, scanned = '', 0
+        selection = '''SELECT w.*,g.spec AS saved_goal_spec,g.room_id AS saved_goal_room,
+            g.conversation_id AS saved_conversation'''
+        joins = ' FROM coordination_work w JOIN coordination_goals g ON g.id=w.goal_id'
+        if operations:
+            selection += ',o.id AS operation_id,o.state AS operation_state,o.cancel_requested'
+            joins += ' JOIN coordination_operations c ON c.work_item_id=w.id AND c.goal_id=g.id JOIN operations o ON o.id=c.operation_id'
+            condition = " AND o.project_id=w.project_id AND o.state IN ('queued','running','reconnecting','cancelling','unknown')"
+            key = 'o.id'
+        else:
+            condition = " AND w.state IN ('queued','leased','running')"
+            key = 'w.id'
+        while True:
+            maximum = min(64, scan_limit - scanned + 1) if scan_limit is not None else 64
+            rows = self.store.all(selection + joins + ' WHERE g.conversation_id=? AND w.project_id=?'
+                + condition + f' AND {key}>? ORDER BY {key} LIMIT ?',
+                (room['id'], partition['project_id'], after, maximum))
+            for row in rows:
+                if scan_limit is not None and scanned >= scan_limit:
+                    yield None
+                    return
+                scanned += 1
+                after = row['operation_id'] if operations else row['id']
+                goal = {'id': row['goal_id'], 'room_id': row['saved_goal_room'],
+                        'conversation_id': row['saved_conversation'], 'spec': row['saved_goal_spec']}
+                if self.c.room_work_bridge.native.work_environment(goal, row) != partition['environment_id']:
+                    continue
+                if operations:
+                    yield {'id': row['operation_id'], 'state': row['operation_state'],
+                           'cancel_requested': row['cancel_requested'], 'goal_id': row['goal_id'],
+                           'work_item_id': row['id'], 'project_id': row['project_id']}
+                else:
+                    yield row
+            if len(rows) < maximum:
+                return
+
     def detach_effects(self, room, removed, principal):
         """Fence only affected project work and track each original cancellation."""
         operations, affected_work = [], []
@@ -548,19 +594,11 @@ class Rooms:
                     (scope['member_id'], project_id, environment_id))
                 self.scope_revision(scope['member_id'], project_id, environment_id)
                 self.store.execute('UPDATE room_members SET scope_revision=scope_revision+1 WHERE id=?', (scope['member_id'],))
-            items = self.store.all('''SELECT w.id FROM coordination_work w JOIN coordination_goals g ON g.id=w.goal_id
-                JOIN collaboration_rooms r ON r.id=g.room_id WHERE g.conversation_id=? AND w.project_id=?
-                AND r.environment_id=? AND w.state IN ('queued','leased','running')''', (room['id'], project_id, environment_id))
-            for item in items:
+            for item in self.project_effect_rows(room, partition):
                 self.store.execute("""UPDATE coordination_work SET state='blocked',reason_code='ROOM_PROJECT_REMOVED',
                     lease_until=NULL,fencing_token=fencing_token+1,version=version+1,updated=? WHERE id=?""", (self.c.clock(), item['id']))
                 affected_work.append(item['id'])
-            active = self.store.all('''SELECT o.id,o.state FROM coordination_operations c
-                JOIN coordination_goals g ON g.id=c.goal_id JOIN collaboration_rooms r ON r.id=g.room_id
-                JOIN operations o ON o.id=c.operation_id WHERE g.conversation_id=? AND o.project_id=?
-                AND r.environment_id=? AND o.state IN ('queued','running','reconnecting','cancelling','unknown')''',
-                (room['id'], project_id, environment_id))
-            for operation in active:
+            for operation in self.project_effect_rows(room, partition, operations=True):
                 try:
                     result = self.c.runtime._cancel(operation['id'], principal)
                 except DevError as exc:
@@ -607,6 +645,49 @@ class Rooms:
                 (member['conversation_id'], row['project_id'], row['environment_id'])))
         except DevError:
             return False
+
+    def project_impact(self, raw, principal):
+        args = validate(contracts.RoomProjectImpact, raw)
+        with self.store.transaction(immediate=False):
+            principal, room = self.owner(principal, args['conversation_id'])
+            self.check_version(room, args['expected_version'])
+            members, items, operations, projects = [], [], [], []
+            truncated = {'members': False, 'work_items': False, 'operations': False}
+            for identifier in args['removed_partition_ids']:
+                partition = self.store.one('''SELECT r.* FROM collaboration_rooms r
+                    JOIN conversation_projects p ON p.room_id=r.id WHERE p.conversation_id=? AND r.id=?''',
+                    (room['id'], identifier))
+                if not partition:
+                    raise DevError('ROOM_PROJECT_NOT_LINKED', '所选项目已不属于当前房间，请刷新后核对', 404)
+                self.c.runtime.project(partition['project_id'], principal)
+                projects.append({k: partition[k] for k in ('id', 'project_id', 'environment_id')})
+                scopes = self.store.all('''SELECT s.member_id,s.project_id,s.environment_id,s.version,
+                    s.lifetime_mode,s.expires_at FROM room_member_scopes s JOIN room_members m ON m.id=s.member_id
+                    WHERE m.conversation_id=? AND s.project_id=? AND s.environment_id=? AND s.state='active'
+                    ORDER BY s.member_id LIMIT 65''', (room['id'], partition['project_id'], partition['environment_id']))
+                members.extend(scopes[:64])
+                truncated['members'] |= len(scopes) > 64
+                for item in self.project_effect_rows(room, partition, scan_limit=1000):
+                    if item is None or len(items) >= 100:
+                        truncated['work_items'] = True
+                        break
+                    items.append({k: item[k] for k in ('id', 'goal_id', 'project_id', 'state', 'version')}
+                        | {'title': '此项目的原工作项', 'effect': 'block_new_steps_preserve_receipts'})
+                for operation in self.project_effect_rows(room, partition, operations=True, scan_limit=1000):
+                    if operation is None or len(operations) >= 100:
+                        truncated['operations'] = True
+                        break
+                    operations.append({**operation, 'effect': 'request_cancel_then_verify_original_receipt'})
+            for name, values, maximum in (('members', members, 64), ('work_items', items, 100), ('operations', operations, 100)):
+                truncated[name] |= len(values) > maximum
+            return {'conversation_id': room['id'], 'expected_version': room['version'], 'revision': room['revision'],
+                'removed_projects': projects, 'read_only': True, 'grants_authority': False,
+                'impact': {'members': members[:64], 'work_items': items[:100], 'operations': operations[:100],
+                    'project_files_deleted': False, 'room_retained': True, 'unaffected_project_work_retained': True,
+                    'new_steps_blocked': bool(projects), 'running_operations_confirmed_stopped': False},
+                'truncated': truncated, 'limits': {'members': 64, 'work_items': 100, 'operations': 100,
+                                                  'scanned_per_project_kind': 1000},
+                'note': '提交时重新核对房间版本并禁止相关新步骤；运行操作只请求停止，实际结果沿原回执核对。'}
 
     def projects(self, raw, principal):
         args = validate(contracts.RoomProjects, raw)
@@ -1050,16 +1131,15 @@ class Rooms:
 
     def diagnostics(self, raw, principal):
         args = validate(contracts.RoomRead, raw)
-        principal, room = self.owner(principal, args['conversation_id'], include_archived=True)
-        return {'conversation_id': room['id'], 'revision': room['revision'], 'state': room['state'],
-            'members': [{'member_id': m['id'], 'binding_generation': m['binding_generation'],
-                'state': self.state(m), 'subscription_verified_at': m['subscription_verified_at'],
-                'probe_read_at': m['probe_read_at'], 'probe_replied_at': m['probe_replied_at']}
-                for m in self.store.all('SELECT * FROM room_members WHERE conversation_id=?', (room['id'],))]}
+        from hub.collaboration.room_diagnostics import projection
+        with self.store.transaction(immediate=False):
+            principal, room = self.owner(principal, args['conversation_id'], include_archived=True)
+            return projection(self.c, room, principal)
 
     def invoke(self, action, raw, principal):
         handlers = {'room_list': self.listing, 'room_view': self.read, 'room_create': self.create,
-            'room_update': self.update, 'room_projects': self.projects, 'room_member_create': self.create_member,
+            'room_update': self.update, 'room_projects': self.projects, 'room_project_impact': self.project_impact,
+            'room_member_create': self.create_member,
             'room_connect': self.connect_read, 'room_connect_resume': self.connect_action,
             'room_connect_join': self.join, 'room_probe_read': self.probe_read, 'room_probe_reply': self.probe_reply,
             'room_changes': self.changes, 'room_diagnostics': self.diagnostics}

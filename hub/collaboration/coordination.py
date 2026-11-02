@@ -59,19 +59,21 @@ class CoordinationService:
         self.authorize(principal, room, goal, active=active)
         return principal, room, goal
 
-    def authorize(self, principal, room, goal, *, active=False):
+    def authorize(self, principal, room, goal, *, active=False, include_archived=False):
         principal = refresh_principal(self.store, principal)
+        if include_archived and (active or principal.grant_id):
+            raise DevError('GOAL_ARCHIVE_READ_ONLY', '归档工作仅供房主查阅，不能继续处理', 403)
         if principal.user_id != room['owner_user_id'] or principal.space_id != room['space_id']:
             raise DevError('GOAL_OWNER_MISMATCH', '目标只属于当前所有者自己的连接', 403)
         spec = json.loads(goal['spec'])
         native=self.c.room_work_bridge.native
         if spec.get('room_member_scope'):
-            native.validate(spec['room_member_scope'],principal,active=active)
-        self.c.conversations.object(principal, goal['conversation_id'])
-        self.teams.authorize_goal(principal, room, goal, active=active)
+            native.validate(spec['room_member_scope'],principal,active=active,include_archived=include_archived)
+        self.c.conversations.object(principal, goal['conversation_id'], include_archived=include_archived)
+        self.teams.authorize_goal(principal, room, goal, active=active, include_archived=include_archived)
         source_link = self.c.delegation.goal_link(goal)
         if source_link:
-            source = native.source(goal,principal) if spec.get('room_member_scope') else self.c.object('collaboration_messages', room, source_link['message_id'])
+            source = native.source(goal,principal,include_archived=include_archived) if spec.get('room_member_scope') else self.c.object('collaboration_messages', room, source_link['message_id'])
             self.c.chatroom.require_message_visible(principal, source)
         # A narrower new proposal cannot relabel old multi-project evidence.
         source_projects = set(spec['project_ids'])

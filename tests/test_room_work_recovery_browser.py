@@ -47,6 +47,10 @@ def test_owner_restores_original_participant_and_selects_original_goal_successor
         response = route.fetch()
         result = response.json()
         result['works'] = [deepcopy(work)]
+        if work.get('channel_deliveries'):
+            result['messages'].append({'id': 'original-final', 'version': 1, 'author_kind': 'dot',
+                'created_at': 1, 'body_text': '原结果已保存',
+                'channel_deliveries': deepcopy(work['channel_deliveries'])})
         route.fulfill(status=response.status, json=result)
     def control(route):
         submitted = route.request.post_data_json
@@ -68,6 +72,8 @@ def test_owner_restores_original_participant_and_selects_original_goal_successor
         sign_in(page, stack)
         create_room(page, '原工作恢复验收')
         page.route('**/api/collaboration/rooms/*/messages?*', projection)
+        page.route('**/api/collaboration/work/original-goal',
+            lambda route: route.fulfill(status=200, json={'work': deepcopy(work), 'revision': 1, 'read_only': True}))
         page.route('**/api/collaboration/work/original-goal/control', control)
         page.evaluate('document.dispatchEvent(new Event("visibilitychange"))')
         expect(page.locator('[data-work-id="original-goal"]')).to_be_visible()
@@ -118,5 +124,30 @@ def test_owner_restores_original_participant_and_selects_original_goal_successor
         expect(page.locator('[data-cr-work-coordinator]')).to_contain_text(candidate['name'])
         expect(page.locator('[data-operation-id="original-operation"]')).to_have_count(1)
         expect(page.locator('[data-work-id="original-goal"]')).to_have_count(1)
+
+        # Explicitly synthetic transport projection, independent of business
+        # completion. Inspecting either receipt never sends or reruns anything.
+        work['version'] += 1
+        work.update(state='completed', allowed_actions=[],
+            display={'title': '工作已完成', 'reason': '原结果已经保存'},
+            channel_deliveries=[{'id': 'original-delivery', 'message_id': 'original-final',
+                'channel': 'weixin', 'state': 'needs_attention', 'provider_delivery_verified': False,
+                'read_verified': False, 'parts': [
+                    {'id': 'accepted-part', 'ordinal': 0, 'kind': 'text', 'state': 'accepted', 'attempts': 1},
+                    {'id': 'unknown-part', 'ordinal': 1, 'kind': 'image', 'state': 'unknown',
+                     'reason_code': 'provider_response_unknown', 'attempts': 1}]}],
+            delivery_display={'state': 'unknown', 'title': '已完成，微信回复发送待核对',
+                'reason': '核对原分项前不会自动重发或重跑工作。'})
+        page.evaluate('document.dispatchEvent(new Event("visibilitychange"))')
+        expect(page.locator('[data-work-id="original-goal"]')).to_contain_text('工作已完成')
+        expect(page.locator('[data-cr-work-delivery]')).to_have_text('已完成，微信回复发送待核对')
+        details = page.locator('[data-cr-work-view] [data-delivery-id="original-delivery"]')
+        details.locator('summary').click()
+        expect(details.locator('[data-delivery-part="unknown-part"]')).to_contain_text('发送结果待核对')
+        expect(details.locator('[data-delivery-part="accepted-part"]')).to_contain_text('平台已接受')
+        expect(details).to_contain_text('平台接受不等于对端送达或已读')
+        expect(page.locator('[data-cr-work-view] [data-cr-action="work-control"]')).to_have_count(0)
+        expect(page.locator('[data-message-id="original-final"] [data-delivery-id="original-delivery"]')).to_have_count(1)
+        assert len(writes) == 2
     finally:
         context.close()

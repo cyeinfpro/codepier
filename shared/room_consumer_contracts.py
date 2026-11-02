@@ -3,6 +3,7 @@ from pydantic import Field
 
 from shared.collaboration_contracts import Identifier, Key
 from shared.room_contracts import MemberIdentity
+from shared.room_context_contracts import RoomContextRead, RoomContextUpdate
 
 
 class RoomConsumerRead(MemberIdentity):
@@ -52,11 +53,13 @@ class RoomInboxRecover(MemberIdentity):
 
 
 ROOM_CONSUMER_QUERIES = {'room_consumer': RoomConsumerRead, 'room_inbox': RoomInboxRead,
-                         'room_message_read': RoomMessageRead, 'room_attachment_read': RoomAttachmentRead}
+                         'room_message_read': RoomMessageRead, 'room_attachment_read': RoomAttachmentRead,
+                         'room_context': RoomContextRead}
 ROOM_CONSUMER_ACTIONS = {
     'room_consumer_begin': RoomConsumerBegin,
     'room_consumer_heartbeat': RoomConsumerLease,
     'room_consumer_yield': RoomConsumerYield,
     'room_inbox_ack': RoomInboxAck,
     'room_inbox_recover': RoomInboxRecover,
+    'room_context_update': RoomContextUpdate,
 }

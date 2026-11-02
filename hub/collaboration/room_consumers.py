@@ -247,8 +247,19 @@ class RoomConsumers(FencedConsumerEngine):
             return False
         if not self.c.chatroom.message_visible(principal, message):
             return False
-        allowed = {s['project_id'] for s in self.c.rooms.scopes(member, principal) if 'read' in s['capabilities']}
-        provenance = set(json.loads(message['body']).get('provenance_project_ids', []))
+        scopes=[s for s in self.c.rooms.scopes(member,principal) if 'read' in s['capabilities']]
+        allowed = {s['project_id'] for s in scopes}
+        body=json.loads(message['body'])
+        provenance = set(body.get('provenance_project_ids', []))
+        if not {(s['project_id'],s['environment_id']) for s in body.get('provenance_scopes',[])} <= {
+                (scope['project_id'],scope['environment_id']) for scope in scopes}:
+            return False
+        if message.get('room_id'):
+            partition=self.store.one('SELECT project_id,environment_id FROM collaboration_rooms WHERE id=?',(message['room_id'],))
+            if not partition or (partition['project_id'],partition['environment_id']) not in {
+                    (scope['project_id'],scope['environment_id']) for scope in scopes}:
+                return False
+            provenance.add(partition['project_id'])
         return provenance <= allowed
 
     def _entry(self, row, member, principal):
@@ -369,12 +380,17 @@ class RoomConsumers(FencedConsumerEngine):
                     count += len(canonical(item).encode())
                 scanned = row['sequence']
             more = limited or len(rows) > args['limit']
+            context_reference={'action':'room_context',
+                **{k:args[k] for k in ('conversation_id','member_id','binding_generation')},
+                'credential_required':'current_member_connection_proof'}
             return {'conversation_id': room['id'], 'member_id': member['id'],
                 'binding_generation': member['binding_generation'], 'inbox_revision': member['dirty_revision'],
                 'drained_revision': member['drained_revision'], 'items': items,
                 'next_cursor': sign_cursor(self.c.secret, cursor_scope, scanned) if more else None,
                 'pagination_complete': not more, 'read_only': True, 'read_is_consumption': False,
-                'grants_authority': False, 'actions': {'reply': 'room_reply', 'work': 'room_work_start',
+                'grants_authority': False, 'context_reference':context_reference,
+                'context_version':self.c.room_context.version(room['id']),
+                'actions': {'reply': 'room_reply', 'work': 'room_work_start',
                     'ack_notice': 'room_inbox_ack', 'yield': 'room_consumer_yield'}}
 
     def message(self, raw, principal):
@@ -495,6 +511,10 @@ class RoomConsumers(FencedConsumerEngine):
         return count
 
     def invoke(self, action, raw, principal):
+        if action=='room_context':
+            return self.c.room_context.read(raw,principal)
+        if action=='room_context_update':
+            return self.c.room_context.update(raw,principal)
         return {'room_consumer': self.read, 'room_inbox': self.inbox, 'room_message_read': self.message, 'room_consumer_begin': self.begin,
                 'room_attachment_read': self.c.room_attachments.read,
                 'room_consumer_heartbeat': self.heartbeat, 'room_consumer_yield': self.yield_session,

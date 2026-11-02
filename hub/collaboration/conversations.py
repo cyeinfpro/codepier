@@ -134,8 +134,10 @@ class ConversationService:
             raise DevError('CONVERSATION_ARCHIVED', '此房间已删除，旧连接和授权不可继续使用', 410)
         return row
 
-    def visible(self, principal, conversation):
-        self.object(principal, conversation['id'])
+    def visible(self, principal, conversation, *, include_archived=False):
+        if include_archived:
+            self.c.owner(principal)
+        self.object(principal, conversation['id'], include_archived=include_archived)
         rows = self.store.all('''SELECT r.* FROM collaboration_rooms r JOIN conversation_projects p ON p.room_id=r.id
             WHERE p.conversation_id=? ORDER BY p.created,r.id''', (conversation['id'],))
         result = []

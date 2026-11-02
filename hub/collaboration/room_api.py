@@ -1,4 +1,5 @@
 """Room-first panel resources. All writes use live session + CSRF validation."""
+from typing import Annotated
 from fastapi import Query, Request, Response
 from shared.util import DevError
 
@@ -25,6 +26,13 @@ def install_routes(router, auth, runtime):
     async def room(request: Request, identifier: str):
         return await store.run(lambda: service.rooms.read({'conversation_id': identifier}, auth.panel(request)))
 
+    @router.get('/rooms/{identifier}/context')
+    async def context(request: Request, response: Response, identifier: str, cursor: str = '',
+                      limit: int = Query(20,ge=1,le=50),byte_budget: int = Query(16000,ge=4096,le=24000)):
+        response.headers['Cache-Control']='private, no-store'
+        return await store.run(lambda: service.room_context.owner_read(identifier,auth.panel(request),
+            cursor=cursor,limit=limit,byte_budget=byte_budget))
+
     @router.patch('/rooms/{identifier}')
     async def update(request: Request, identifier: str):
         body = await request.json()
@@ -34,6 +42,14 @@ def install_routes(router, auth, runtime):
     async def projects(request: Request, identifier: str):
         body = await request.json()
         return await store.run(lambda: service.rooms.projects({**body, 'conversation_id': identifier}, auth.admin(request, True)))
+
+    @router.get('/rooms/{identifier}/projects/impact')
+    async def project_impact(request: Request, response: Response, identifier: str,
+                             expected_version: int = Query(ge=1),
+                             removed_partition_ids: Annotated[list[str] | None, Query()] = None):
+        response.headers['Cache-Control'] = 'private, no-store'
+        return await store.run(lambda: service.rooms.project_impact({'conversation_id': identifier,
+            'expected_version': expected_version, 'removed_partition_ids': removed_partition_ids or []}, auth.panel(request)))
 
     @router.post('/rooms/{identifier}/members')
     async def member(request: Request, identifier: str):

@@ -45,6 +45,60 @@ class RoomGoalScopes:
             raise DevError('ROOM_WORK_APPROVAL_CHANGED','原房间工作范围证据不完整',403)
         return spec
 
+    def work_rule(self,goal,item):
+        """Resolve the assignment's saved rule without requiring it to be live.
+
+        Revocation and original receipts must still identify a stopped work's
+        environment. A later takeover must not reinterpret an earlier work
+        using the new coordinator's role or the Goal's anchor partition.
+        """
+        reference=self.reference(goal)
+        if not reference:
+            return None
+        assignment=self.store.one('SELECT * FROM room_native_work_assignments WHERE work_id=?',(item['id'],))
+        if not assignment or item['goal_id']!=goal['id']:
+            raise DevError('ROOM_WORK_ASSIGNEE_REQUIRED','原工作缺少稳定成员分配证据',403)
+        original=self.original(reference)
+        revision=self.store.one('''SELECT * FROM room_goal_recovery_revisions
+            WHERE goal_id=? AND json_extract(spec,'$.intent_revision')<=?
+            ORDER BY coordinator_epoch DESC LIMIT 1''',(goal['id'],assignment['intent_revision']))
+        members=original['members']
+        if revision:
+            value=json.loads(revision['spec'])
+            if (digest(value)!=revision['digest'] or value['scope_id']!=reference['id']
+                    or value['original_digest']!=reference['digest'] or value['goal_id']!=goal['id']
+                    or value['coordinator_epoch']!=revision['coordinator_epoch']):
+                raise DevError('ROOM_RECOVERY_EVIDENCE_CHANGED','原工作恢复证据已改变',403)
+            members=self.c.room_goal_recovery.merge_roles(value['roles'])
+        rules=[rule for member in members if member['member_id']==assignment['member_id']
+               for rule in member['projects'] if rule['project_id']==item['project_id']]
+        if len(rules)!=1:
+            raise DevError('ROOM_WORK_ENVIRONMENT_REQUIRED','原工作须有唯一的成员、项目与环境证据',409)
+        return rules[0]
+
+    def work_environment(self,goal,item):
+        rule=self.work_rule(goal,item)
+        if rule is not None:
+            return rule['environment_id']
+        partition=self.store.one('SELECT environment_id FROM collaboration_rooms WHERE id=?',(goal['room_id'],))
+        if not partition:
+            raise DevError('ROOM_WORK_PARTITION_CHANGED','原工作项目分区证据不存在',403)
+        return partition['environment_id']
+
+    def work_partition(self,goal,item):
+        rule=self.work_rule(goal,item)
+        if rule is None:
+            return self.store.one('SELECT * FROM collaboration_rooms WHERE id=?',(goal['room_id'],))
+        # The saved private adapter retains its original partition after a
+        # project is detached. This preserves receipt provenance, not access.
+        partition=self.store.one('''SELECT r.* FROM collaboration_rooms r
+            JOIN collaboration_dots d ON d.room_id=r.id WHERE d.id=?
+            AND r.project_id=? AND r.environment_id=?''',
+            (rule['legacy_dot_id'],item['project_id'],rule['environment_id']))
+        if not partition:
+            raise DevError('ROOM_WORK_PARTITION_CHANGED','原工作项目分区证据不存在',403)
+        return partition
+
     def prepare(self,member,source,principal,args):
         scopes=self.bridge.scopes(member)
         project_ids=sorted(set(args.get('project_ids') or ([args['target_project_id']] if args.get('target_project_id') else [s['project_id'] for s in scopes])))
@@ -69,6 +123,8 @@ class RoomGoalScopes:
                     (not args.get('environment_id') or s['environment_id']==args['environment_id'])]
                 if not available:
                     continue
+                if len(available)!=1:
+                    raise DevError('ROOM_WORK_ENVIRONMENT_REQUIRED','同一项目有多个已批准环境，请明确选择本次环境',409)
                 capabilities,_=self.bridge.effective(available[0],actor)
                 if 'read' not in capabilities:
                     continue
@@ -104,6 +160,8 @@ class RoomGoalScopes:
             rules=[r for m in members for r in m['projects'] if r['project_id']==project_id]
             if not rules:
                 raise DevError('ROOM_WORK_SCOPE_DENIED','所选项目没有任何当前参与成员的明确批准',403)
+            if len({rule['environment_id'] for rule in rules})!=1:
+                raise DevError('ROOM_WORK_ENVIRONMENT_REQUIRED','参与成员对同一项目选择了不同环境，请明确本次环境与参与范围',409)
             projects.append({'project_id':project_id,'environment_id':rules[0]['environment_id'],
                 'capabilities':sorted(set().union(*(set(r['capabilities']) for r in rules))),
                 'execution_targets':sorted(set().union(*(set(r['execution_targets']) for r in rules))),
@@ -145,9 +203,11 @@ class RoomGoalScopes:
                 self.validate_rule(saved,rule,value['conversation_id'])
         return reference,value
 
-    def validate(self,reference,principal,*,active=True):
+    def validate(self,reference,principal,*,active=True,include_archived=False):
+        if include_archived and (active or principal.grant_id):
+            raise DevError('ROOM_HISTORY_OWNER_ONLY','归档工作历史只允许本人只读查看',403)
         spec=self.record(reference)
-        room=self.c.conversations.object(principal,spec['conversation_id'])
+        room=self.c.conversations.object(principal,spec['conversation_id'],include_archived=include_archived)
         if principal.grant_id and principal.grant_id not in spec['participant_grant_ids']:
             raise DevError('ROOM_WORK_MEMBER_REQUIRED','当前连接不在原工作成员范围内',403)
         if not active:
@@ -178,8 +238,8 @@ class RoomGoalScopes:
             self.c.coordination.require_capability(actor,capability,rule['project_id'])
         return member,actor
 
-    def source(self,goal,principal):
-        spec=self.validate(self.reference(goal),principal,active=False)
+    def source(self,goal,principal,*,include_archived=False):
+        spec=self.validate(self.reference(goal),principal,active=False,include_archived=include_archived)
         source=self.store.one('SELECT * FROM collaboration_messages WHERE id=? AND conversation_id=?',
             (spec['source_message_id'],spec['conversation_id']))
         if (not source or source['version']!=spec['source_version']

@@ -137,8 +137,10 @@ class TeamService:
                 self.q.runtime.project(project_id, actor)
         return owner
 
-    def access(self, principal, room, team, *, active=False):
-        self.c.conversations.object(principal, team['conversation_id'])
+    def access(self, principal, room, team, *, active=False, include_archived=False):
+        if include_archived and (active or principal.grant_id):
+            raise DevError('TEAM_ARCHIVE_READ_ONLY', '归档团队仅供房主查阅，不能继续处理', 403)
+        self.c.conversations.object(principal, team['conversation_id'], include_archived=include_archived)
         if principal.grant_id:
             if principal.grant_id not in {m['grant_id'] for m in self.members(team)}:
                 raise DevError('TEAM_MEMBER_REQUIRED', '当前连接不是这个团队的成员', 403)
@@ -394,12 +396,12 @@ class TeamService:
         if action in {'handoff', 'progress'} and totals['messages'] >= policy['max_total_messages']:
             raise DevError('TEAM_MESSAGE_BUDGET', '团队累计消息预算已用完', 409)
 
-    def authorize_goal(self, principal, room, goal, *, active=False):
+    def authorize_goal(self, principal, room, goal, *, active=False, include_archived=False):
         link = self.link(goal)
         if not link:
             return
         team = self.find(room, link['team_id'])
-        self.access(principal, room, team, active=active)
+        self.access(principal, room, team, active=active, include_archived=include_archived)
         current_source = self.c.object('collaboration_messages', room, link['current_message_id'])
         self.c.chatroom.require_message_visible(principal, current_source)
         if active:

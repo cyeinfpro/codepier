@@ -260,6 +260,8 @@ def migrate(db):
     from hub.collaboration.room_goal_handoffs import migrate as migrate_room_goal_handoffs
     migrate_room_goal_recovery(db)
     migrate_room_goal_handoffs(db)
+    from hub.collaboration.room_context import migrate as migrate_room_context
+    migrate_room_context(db)
     from hub.collaboration.room_message_migration import migrate as migrate_room_messages
     migrate_room_messages(db)
     db.execute("INSERT OR REPLACE INTO meta VALUES ('collaboration_schema','3')")

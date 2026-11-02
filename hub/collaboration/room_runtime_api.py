@@ -8,9 +8,22 @@ def register(router, service, auth):
     store=service.store
 
     @router.get('/rooms/{conversation_id}/messages')
-    async def messages(request:Request,conversation_id:str,cursor:str='',limit:int=50,client_message_id:str=''):
+    async def messages(request:Request,conversation_id:str,cursor:str='',limit:int=50,client_message_id:str='',message_id:str=''):
         principal=await store.run(auth.admin,request,request.method != 'GET')
-        return await store.run(lambda:service.room_runtime.read(conversation_id,principal,cursor=cursor,limit=limit,client_message_id=client_message_id))
+        return await store.run(lambda:service.room_runtime.read(conversation_id,principal,cursor=cursor,limit=limit,
+            client_message_id=client_message_id,message_id=message_id))
+
+    @router.get('/rooms/{conversation_id}/work')
+    async def works(request:Request,response:Response,conversation_id:str,cursor:str='',limit:int=50):
+        response.headers['Cache-Control']='private, no-store'
+        principal=await store.run(auth.admin,request,False)
+        return await store.run(lambda:service.room_runtime.work_page(conversation_id,principal,cursor=cursor,limit=limit))
+
+    @router.get('/work/{work_id}')
+    async def work(request:Request,response:Response,work_id:str):
+        response.headers['Cache-Control']='private, no-store'
+        principal=await store.run(auth.admin,request,False)
+        return await store.run(service.room_runtime.work_read,work_id,principal)
 
     @router.post('/rooms/{conversation_id}/messages')
     async def message(request:Request,conversation_id:str,body:dict):

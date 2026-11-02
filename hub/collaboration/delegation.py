@@ -762,8 +762,7 @@ class DelegationService:
         if self.c.dot_chat.enabled(dot):
             result.update(sender_dot_id=dot['id'], dot_reply_complete=True)
         self.c.room_work_bridge.native.annotate(goal,item,result)
-        output_room=self.store.one('''SELECT r.id FROM collaboration_rooms r JOIN conversation_projects p ON p.room_id=r.id
-            WHERE p.conversation_id=? AND r.project_id=? AND r.environment_id=?''',(goal['conversation_id'],item['project_id'],room['environment_id'])) if native else room
+        output_room=self.c.room_work_bridge.native.work_partition(goal,item) if native else room
         self.store.execute('''INSERT OR IGNORE INTO collaboration_messages
             (id,room_id,conversation_id,thread_id,thread_root_id,reply_to_id,author,origin,source_id,kind,body,state,goal_id,created)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
@@ -788,8 +787,7 @@ class DelegationService:
         if self.c.dot_chat.enabled(dot):
             body.update(sender_dot_id=dot['id'], dot_reply_complete=False)
         self.c.room_work_bridge.native.annotate(goal,item,body)
-        output_room=self.store.one('''SELECT r.id FROM collaboration_rooms r JOIN conversation_projects p ON p.room_id=r.id
-            WHERE p.conversation_id=? AND r.project_id=? AND r.environment_id=?''',(goal['conversation_id'],item['project_id'],room['environment_id'])) if native else room
+        output_room=self.c.room_work_bridge.native.work_partition(goal,item) if native else room
         self.store.execute("""INSERT OR IGNORE INTO collaboration_messages
             (id,room_id,conversation_id,thread_id,thread_root_id,reply_to_id,author,origin,source_id,kind,body,state,goal_id,created)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",

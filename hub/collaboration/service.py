@@ -88,6 +88,8 @@ class CollaborationService:
         self.room_channels = RoomChannels(self)
         from hub.collaboration.room_attachments import RoomAttachments
         self.room_attachments = RoomAttachments(self)
+        from hub.collaboration.room_context import RoomContext
+        self.room_context = RoomContext(self)
         self.events = None
         self.monitor = None
         self.secret = b''
@@ -1074,6 +1076,14 @@ class CollaborationService:
             from shared.room_runtime_contracts import RoomMessagesRead
             args = validate(RoomMessagesRead, raw)
             return self.room_runtime.read(args.pop('conversation_id'), principal, **args)
+        if name == 'collaboration_room_works':
+            from shared.room_runtime_contracts import RoomWorksRead
+            args = validate(RoomWorksRead, raw)
+            return self.room_runtime.work_page(args.pop('conversation_id'), principal, **args)
+        if name == 'collaboration_room_work':
+            from shared.room_runtime_contracts import RoomWorkRead
+            args = validate(RoomWorkRead, raw)
+            return self.room_runtime.work_read(args['work_id'], principal)
         if name == 'collaboration_room_message':
             return self.room_runtime.send(raw, principal)
         if name == 'collaboration_room_reply':

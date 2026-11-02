@@ -1118,6 +1118,133 @@
   font-size: 11px;
   line-height: 1.7;
 }
+.cr-deliveries {
+  margin: 12px 0;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.cr-delivery {
+  border-top: 1px solid var(--cr-line);
+}
+.cr-delivery summary,
+.cr-inspection-section summary,
+.cr-impact summary {
+  cursor: pointer;
+  min-height: 44px;
+  padding: 11px 0;
+  box-sizing: border-box;
+  font-weight: 600;
+}
+.cr-delivery-title,
+.cr-work-delivery {
+  color: var(--cr-blue);
+}
+.cr-delivery-parts {
+  padding-left: 20px;
+}
+.cr-delivery-parts li {
+  padding: 5px 0;
+  overflow-wrap: anywhere;
+}
+.cr-delivery-parts p,
+.cr-delivery p {
+  margin: 5px 0;
+}
+.cr-delivery [data-state='unknown'] strong,
+.cr-delivery [data-state='needs_attention'] strong {
+  color: #9c6022;
+}
+.cr-inspection-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.cr-inspection-section {
+  margin: 24px 0;
+  font-size: 12px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.cr-inspection-section h3 {
+  font-size: 14px;
+  margin-bottom: 10px;
+}
+.cr-inspection-section h4 {
+  margin: 12px 0 4px;
+  font-size: 12px;
+}
+.cr-inspection-section > details,
+.cr-inspection-section > article {
+  border-top: 1px solid var(--cr-line);
+}
+.cr-facts {
+  margin: 5px 0 14px;
+  font-size: 11px;
+  line-height: 1.7;
+}
+.cr-facts > div {
+  display: grid;
+  grid-template-columns: minmax(90px, 1fr) minmax(0, 1.3fr);
+  gap: 14px;
+  padding: 4px 0;
+}
+.cr-facts dt {
+  color: var(--cr-muted);
+}
+.cr-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.cr-context-fact {
+  margin: 20px 0;
+  padding-top: 18px;
+  border-top: 1px solid var(--cr-line);
+}
+.cr-context-fact h3 {
+  font-size: 13px;
+  margin: 0 0 8px;
+}
+.cr-context-text {
+  font-size: 13px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.8;
+}
+.cr-context-sources {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.cr-context-correction {
+  align-items: center;
+}
+.cr-context-correction > span {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.cr-impact small {
+  display: block;
+}
+.cr-window-note {
+  color: var(--cr-muted);
+  font-size: 11px;
+  line-height: 1.7;
+  margin: 8px 0 18px;
+}
+.cr-history-end {
+  padding: 34px 12px;
+  text-align: center;
+  color: var(--cr-muted);
+  font-size: 12px;
+  border-top: 1px solid var(--cr-line);
+}
+.cr-history-end p {
+  line-height: 1.7;
+}
+.cr-delivery-parts small {
+  display: block;
+}
 .cr-channel-steps {
   list-style: none;
   display: flex;
