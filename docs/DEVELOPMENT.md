@@ -64,7 +64,9 @@ CODEPIER_LONG_BUDGET_TEST=1 .venv/bin/python scripts/check_full_regression.py \
 
 ## CI 分片与完整证明
 
-GitHub Linux 浏览器测试前，独立 helper 仅把 `azure.archive.ubuntu.com/ubuntu` 的精确 HTTP/HTTPS URI 切换为 Ubuntu 官方 `https://archive.ubuntu.com/ubuntu`，避免 Azure 镜像持续低速占满安装预算。支持 deb822 与 legacy sources；保留签名密钥、suite、component、security 及第三方源，异常格式拒绝修改。此为显式的 CI 镜像策略，不用于生产或关闭 APT 验签；合成测试同时约束镜像选择与原下载超时 step。原 30 秒下载超时、2 次重试、15 分钟安装预算和全部测试门槛不变。 对 runner 新版 `mirror+file:/etc/apt/apt-mirrors.txt`，仅识别官方固定三行列表并移除 Azure `priority:1` 行，保留既有 HTTPS archive/security 行及优先级，避免重复 URI；仅访问固定文件，不跟随任意 file URI，非预期内容失败而不继续安装。
+GitHub Linux 浏览器和 OIDC 验收前，archive helper 显式使用 `--mode direct-source`。该固定源策略只支持 Ubuntu 24.04 / noble / x86_64；仅改写活动 source 中精确的 `mirror+file:/etc/apt/apt-mirrors.txt`，要求官方 Ubuntu `Signed-By` keyring、合法 Types、noble suites 和 components，以及受支持的 source 字段/选项。普通 suites 改为 `https://archive.ubuntu.com/ubuntu`，独立 `noble-security` 改为 `https://security.ubuntu.com/ubuntu`；其余字节、签名密钥、第三方源和文件权限保留。混合 security/普通 suites、多 URI、未知字段/选项、身份、架构或文件 URI 在任何写入前失败。helper 不读取、信任或修改镜像列表，不宣称识别了 AWS 的未知格式；这是明确收窄到固定官方 HTTPS 源的策略，不是校验失败后的静默 fallback，也不再使用列表中的镜像优先级或故障切换。
+
+helper 默认仍为 `strict-mirror`：保留精确 Azure URI 转换、已确认的 144-byte 官方三行列表及其 HTTPS 两行结果校验，未知列表继续失败。两种模式均先验证全部 source，再原子写入并核对；注释和禁用条目不触发镜像访问。CI 不用于生产源配置，不关闭 APT 验签；原 30 秒下载超时、2 次重试、15 分钟安装预算和全部测试门槛保持不变。
 
 Linux/macOS 每个平台各自有六片：四个普通分片、一个真实资源准入专片（index 4）、一个真实长时进程专片（index 5）。长时专片保留原来的 10/30 分钟墙钟测试及同模块短时/取消测试，不缩短预算、不模拟时间、不跳过。所有分片从同一份经重复构建确认可复现的公开源码 ZIP 解包运行；每片仍保存完整收集清单、实际执行结果、coverage 和源码前后指纹。只有六片同源码、同收集集合、每例恰好执行一次且全部通过，聚合才是完整证明。不得把独立长测移到定时任务后仍称当前发布全量通过。
 

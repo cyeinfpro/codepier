@@ -51,7 +51,7 @@ def test_ci_bounds_existing_linux_installations_without_changing_trust(job):
     assert steps.index(selector) < steps.index(step)
     assert selector['run'].splitlines()[-1] == (
         'sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_OS="$RUNNER_OS" '
-        'python3 .github/scripts/ci_ubuntu_archive.py')
+        'python3 .github/scripts/ci_ubuntu_archive.py --mode direct-source')
     for forbidden in ['APT_CONFIG=', 'sources.list', 'apt-mirrors', '--allow-unauthenticated',
                       'trusted=yes', 'Verify-Peer', 'Verify-Host', 'Check-Valid-Until',
                       'apt-get install', 'pip install', 'npm install']:
