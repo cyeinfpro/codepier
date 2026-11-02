@@ -46,7 +46,10 @@ def test_hard_link_path_remains_supported(tmp_path):
     assert destination.read_text(encoding="utf-8") == "complete"
 
 
-@pytest.mark.parametrize("error", [errno.EACCES, errno.EPERM, errno.EIO, errno.ETIMEDOUT])
+@pytest.mark.parametrize(
+    "error", [errno.EACCES, errno.EPERM, errno.EIO, errno.ETIMEDOUT],
+    ids=["EACCES", "EPERM", "EIO", "ETIMEDOUT"],
+)
 def test_io_and_permission_failures_do_not_replay_with_rename(tmp_path, monkeypatch, error):
     source, destination = tmp_path / "stage", tmp_path / "target"
     source.write_text("complete", encoding="utf-8")
