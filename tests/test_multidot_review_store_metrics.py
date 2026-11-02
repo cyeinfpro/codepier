@@ -55,6 +55,12 @@ def test_only_outer_transaction_counts_and_caught_inner_error_rolls_back(tmp_pat
         assert callbacks == ['committed']
         assert 'private' not in json.dumps(after)
         changes = store.one('SELECT total_changes() AS n')['n']
+        # Read queries are now included in outer lock timings. The observation
+        # itself still neither queries SQLite nor changes any measurement.
+        measured = store.stats_snapshot()
+        assert measured['transactions'] == after['transactions']
+        assert measured['worker'] == after['worker']
+        after = measured
         assert store.stats_snapshot() == after
         assert store.one('SELECT total_changes() AS n')['n'] == changes
     finally:

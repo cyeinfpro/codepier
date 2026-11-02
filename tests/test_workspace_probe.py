@@ -225,7 +225,9 @@ async def test_root_change_is_rejected(local_agent, tmp_path):
     async with agent.resources.slot('writer', [Claim('agent', 'path', canonical_path(root), True)], lambda _: None):
         task = asyncio.create_task(agent.handle({
             'id': 'remapped', 'tool': 'open_workspace', 'tool_contract_version': wire_version('open_workspace'),
-            'project': project, 'args': {'project': 'fixture'}}))
+            # Explicit previews retain root-read exclusion. The default minimal
+            # observation has a separate regression proving it can pass writers.
+            'project': project, 'args': {'project': 'fixture', 'context_detail': 'documents'}}))
         async with asyncio.timeout(5):
             while not agent.resources.waiting:
                 assert not task.done()
@@ -452,15 +454,16 @@ async def test_first_preflight_wait_expires_or_cancels_without_spawning(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('tool', ['read', 'open_workspace'])
 @pytest.mark.parametrize('change_at,change', [(1, 'revoke'), (1, 'remap'), (2, 'revoke')])
-async def test_session_rechecks_current_authority_and_mapping(local_agent, tmp_path, change_at, change):
+async def test_session_rechecks_current_authority_and_mapping(local_agent, tmp_path, tool, change_at, change):
     agent, root = local_agent
     (root / 'README.md').write_text('authorized content')
     project = {'id': 'fixture', 'root': str(root), 'mode': 'write'}
-    args = TOOLS['read'].model.model_validate({'project': 'fixture', 'path': 'README.md'}).model_dump()
+    args = TOOLS[tool].model.model_validate({'project': 'fixture', **({'path': 'README.md'} if tool == 'read' else {})}).model_dump()
     async with workspace_probe.ReadWorker() as worker:
         for _ in range(change_at):
-            await workspace_probe.probe(agent.engine, 'read', project, args, phase='root',
+            await workspace_probe.probe(agent.engine, tool, project, args, phase='root',
                                         expected_root=root, worker=worker)
         if change == 'revoke':
             agent.config['allowed_roots'] = []
@@ -470,7 +473,7 @@ async def test_session_rechecks_current_authority_and_mapping(local_agent, tmp_p
             agent.config['allowed_roots'].append({'path': str(second), 'writable': True})
             project['root'] = str(second)
         with pytest.raises(DevError) as error:
-            await workspace_probe.probe(agent.engine, 'read', project, args,
+            await workspace_probe.probe(agent.engine, tool, project, args,
                 phase='execute' if change_at == 2 else 'root', expected_root=root, worker=worker)
         assert error.value.code == ('ROOT_NOT_ALLOWED' if change == 'revoke' else 'ROOT_CHANGED')
     assert worker.process.returncode is not None
@@ -599,9 +602,11 @@ async def test_fastpath_scheduler_rejection_reaps_before_wait_and_cancellation(
             await asyncio.sleep(.01)
     assert len(processes) == 1 and processes[0].returncode == 0
     assert not agent.scheduler.active
-    # The normal resource-first queue now owns exactly one claim; the
-    # provisional fastpath reservation was released before this queue started.
-    assert len(agent.resources.active) == 1
+    # Joint admission queues the complete claim without owning it while waiting
+    # for execution capacity. No provisional fastpath reservation survives.
+    assert len(agent.resources.active) == 0
+    assert len(agent.resources.waiting) == 1
+    assert agent.resources.waiting[0][1] == 'contended-search'
     task.cancel()
     await asyncio.wait_for(task, 3)
     assert not agent.scheduler.active and not agent.scheduler.waiting

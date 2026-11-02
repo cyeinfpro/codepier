@@ -1,4 +1,4 @@
-"""Bounded, project-fair admission; resource locks stay outside this scheduler.
+"""Bounded, project-fair admission with atomic resource/capacity grants.
 
 Shrinking capacity never cancels admitted operations. A reserved admission per
 lane prevents one project's backlog from occupying every slot before another
@@ -123,16 +123,24 @@ class Ticket:
 
 
 class ProjectScheduler:
-    def __init__(self, config=None, clock=time.monotonic):
+    def __init__(self, config=None, clock=time.monotonic, *, resources=None):
         self.config = validate_scheduler(config, effective=True)
         self.capacity = AdaptiveCapacity(self.config, clock)
-        self.condition = asyncio.Condition()
+        self.resources = resources
+        self.condition = resources.condition if resources is not None else asyncio.Condition()
         self.waiting = []
         self.active = {}
         self.turn = Counter()
         self.sequence = 0
         self.closed = False
         self._notifications = set()
+        self._events = {}
+        self._callbacks = {}
+        self._resource_callbacks = {}
+        self._resource_tokens = set()
+        self._reported = {}
+        if resources is not None:
+            resources.add_listener(self._drain)
 
     def lane_limit(self, lane):
         if lane == "execution":
@@ -165,11 +173,52 @@ class ProjectScheduler:
             if key in seen:
                 continue
             # A blocked remote target must not block this project's other target.
-            if self._reason(item):
+            if (item.token in self._resource_tokens and self.resources.blocked(item.token)) or self._reason(item):
                 continue
             seen.add(key)
             eligible.append((counts[key], self.turn[key], index, item))
         return min(eligible, key=lambda row: row[:3])[-1] if eligible else None
+
+    def _blockers(self, item):
+        return self.resources.blockers(item.token) if item.token in self._resource_tokens else []
+
+    def _drain(self):
+        """Publish complete grants before waking only their owning coroutine."""
+        if self.closed:
+            for event in self._events.values():
+                event.set()
+            return
+        while (item := self._selected()) is not None:
+            event = self._events.get(item.token)
+            if event is None:
+                # A non-waiting conversion temporarily participates in selection
+                # but does not become an owned context until it succeeds.
+                break
+            if item.token in self._resource_tokens:
+                self.resources.grant(item.token)
+            self.waiting.remove(item)
+            self.active[item.token] = item
+            self.sequence += 1
+            self.turn[(item.lane, item.project)] = self.sequence
+            self._reported.pop(item.token, None)
+            event.set()
+        for item in self.waiting:
+            blockers = self._blockers(item)
+            reason = (self._reason(item) or "project_fairness") if not blockers else None
+            detail = ("resource", tuple(blockers)) if blockers else ("worker", reason)
+            if self._reported.get(item.token) == detail:
+                continue
+            self._reported[item.token] = detail
+            callback = (self._resource_callbacks.get(item.token) if blockers
+                        else self._callbacks.get(item.token))
+            if callback:
+                callback(blockers if blockers else reason)
+
+    def _drain_all(self):
+        if self.resources is not None:
+            self.resources.drain()
+        else:
+            self._drain()
 
     async def reconfigure(self, value):
         config = validate_scheduler(value, effective=True)
@@ -180,21 +229,21 @@ class ProjectScheduler:
                                    else max(config["minimum"], min(self.capacity.limit, config["maximum"])))
             self.capacity.healthy = 0
             self.capacity.changed_at = self.capacity.clock()
-            self.condition.notify_all()
+            self._drain_all()
 
     async def update_pressure(self, sample):
         async with self.condition:
             self.capacity.update(sample)
-            self.condition.notify_all()
+            self._drain_all()
 
     async def close(self):
         async with self.condition:
             self.closed = True
-            self.condition.notify_all()
+            self._drain_all()
         if self._notifications:
             await asyncio.gather(*self._notifications)
 
-    def try_reserve(self, operation_id, project, lane="execution", target="", *, replace):
+    def try_reserve(self, operation_id, project, lane="execution", target="", *, replace, claims=None):
         """Non-waiting fair admission, converting an owned preflight slot.
 
         All state changes are synchronous on this event loop. No reservation is
@@ -210,6 +259,15 @@ class ProjectScheduler:
         if any(item.operation_id == operation_id and item is not replace
                for item in [*self.active.values(), *self.waiting]):
             return None
+        if claims is not None:
+            if self.resources is None:
+                raise ValueError("Resource claims require a joint resource queue")
+            if (replace.token in self._resource_tokens
+                    or any(identifier == operation_id for identifier, _ in self.resources.active.values())
+                    or any(identifier == operation_id for _, identifier, _ in self.resources.waiting)):
+                return None
+            self.resources.enqueue(replace.token, operation_id, claims)
+            self._resource_tokens.add(replace.token)
         item = Ticket(replace.token, operation_id, project, lane, target)
         self.active.pop(replace.token)
         self.waiting.append(item)
@@ -219,7 +277,12 @@ class ProjectScheduler:
             self.waiting.remove(item)
             self.active[replace.token] = replace
         if not selected:
+            if claims is not None:
+                self.resources.discard(replace.token)
+                self._resource_tokens.discard(replace.token)
             return None
+        if claims is not None:
+            self.resources.grant(item.token)
         self.active[item.token] = item
         self.sequence += 1
         self.turn[(lane, project)] = self.sequence
@@ -239,7 +302,7 @@ class ProjectScheduler:
 
     async def _notify_reservation_change(self):
         async with self.condition:
-            self.condition.notify_all()
+            self._drain_all()
 
     async def _release_owned(self, item):
         async with self.condition:
@@ -247,15 +310,24 @@ class ProjectScheduler:
                 self.waiting.remove(item)
             # The slot context owns this token, including its converted ticket.
             self.active.pop(item.token, None)
+            if item.token in self._resource_tokens:
+                self.resources.discard(item.token)
+                self._resource_tokens.discard(item.token)
+            self._events.pop(item.token, None)
+            self._callbacks.pop(item.token, None)
+            self._resource_callbacks.pop(item.token, None)
+            self._reported.pop(item.token, None)
             live = {(entry.lane, entry.project) for entry in [*self.waiting, *self.active.values()]}
             self.turn = Counter({key: value for key, value in self.turn.items() if key in live})
-            self.condition.notify_all()
+            self._drain_all()
 
     @asynccontextmanager
-    async def slot(self, operation_id, project, lane="execution", target="", on_wait=None):
+    async def slot(self, operation_id, project, lane="execution", target="", on_wait=None,
+                   *, claims=None, on_resource_wait=None):
         if lane not in LANES or not isinstance(project, str) or not project:
             raise ValueError("Invalid scheduler admission identity")
         item = Ticket(object(), operation_id, project, lane, target)
+        event = asyncio.Event()
         added = False
         try:
             async with self.condition:
@@ -265,19 +337,18 @@ class ProjectScheduler:
                     raise DevError("SCHEDULER_QUEUE_FULL", "节点等待队列已满，请稍后重试", 429)
                 self.waiting.append(item)
                 added = True
-                while self._selected() is not item:
-                    if self.closed:
-                        raise DevError("AGENT_STOPPING", "Agent 正在停止，尚未开始执行", 409)
-                    if on_wait:
-                        on_wait(self._reason(item) or "project_fairness")
-                    await self.condition.wait()
-                if self.closed:
-                    raise DevError("AGENT_STOPPING", "Agent 正在停止，尚未开始执行", 409)
-                self.waiting.remove(item)
-                self.active[item.token] = item
-                self.sequence += 1
-                self.turn[(lane, project)] = self.sequence
-                self.condition.notify_all()
+                self._events[item.token] = event
+                self._callbacks[item.token] = on_wait
+                self._resource_callbacks[item.token] = on_resource_wait
+                if claims is not None:
+                    if self.resources is None:
+                        raise ValueError("Resource claims require a joint resource queue")
+                    self.resources.enqueue(item.token, operation_id, claims)
+                    self._resource_tokens.add(item.token)
+                self._drain_all()
+            await event.wait()
+            if self.closed:
+                raise DevError("AGENT_STOPPING", "Agent 正在停止，尚未开始执行", 409)
             yield item
         finally:
             if added:

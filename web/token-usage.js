@@ -541,12 +541,39 @@ window.CodePierTokenUsage = (() => {
     return result;
   }
 
+  async function loadDashboard(container, fetcher, continuing, valid) {
+    const placeholder = container?.querySelector('[data-token-dashboard]');
+    if (!placeholder) return;
+    const current = () => valid() && placeholder.isConnected && container.contains(placeholder);
+    try {
+      const initial = await fetcher('/api/token-usage');
+      if (!current()) return;
+      const data = await prepareDashboard(initial, fetcher, continuing, current);
+      if (!current() || !data) return;
+      const holder = document.createElement('div');
+      holder.innerHTML = dashboard(data);
+      placeholder.replaceWith(holder.firstElementChild);
+      bindDashboard(container, fetcher, data);
+    } catch {
+      // Statistics are independent of live device/task state. A failed or late
+      // response cannot replace the page, revive navigation, or expose old data.
+      if (current()) {
+        const status = placeholder.querySelector('[role=status]');
+        if (status) status.textContent = '统计暂不可用，请刷新重试。';
+      }
+    }
+  }
+
   function dashboard(data, expanded = null) {
     if (expanded === null)
       expanded =
         dashboardState?.authority === data?.authority_key ? dashboardState?.expanded : false;
     if (!data?.summary)
-      return '<div class="token-dashboard" data-token-dashboard><div class="token-dashboard-head"><h3>今日工具用量</h3><span class="token-estimate-badge">估算</span></div><p role="status">统计暂不可用</p><details class="token-usage-help"><summary>统计说明</summary><p>实际模型用量未提供。</p></details></div>';
+      return (
+        '<div class="token-dashboard" data-token-dashboard><div class="token-dashboard-head"><h3>今日工具用量</h3><span class="token-estimate-badge">估算</span></div><p role="status">' +
+        (data?.loading ? '正在读取统计…' : '统计暂不可用') +
+        '</p><details class="token-usage-help"><summary>统计说明</summary><p>实际模型用量未提供。</p></details></div>'
+      );
     const value = data.summary,
       period = data.period || {},
       filters = data.filters || {};
@@ -571,6 +598,11 @@ window.CodePierTokenUsage = (() => {
       '<div class="token-dashboard" data-token-dashboard>' +
       `<div class="token-dashboard-head"><h3>${title}工具用量</h3><span class="token-estimate-badge">估算</span></div>` +
       headline(value) +
+      (Number.isFinite(data.freshness?.as_of)
+        ? '<p class="token-dashboard-note">统计截至 ' +
+          escape(dateText(data.freshness.as_of, period.timezone)) +
+          '，最多每 30 秒更新。</p>'
+        : '') +
       (data.coverage?.collection_unavailable ? '<p role="status">估算读取暂不可用</p>' : '') +
       `<details data-token-filters${expanded ? ' open' : ''}><summary>查看详情</summary>` +
       panel('settings', '筛选与估价设置') +
@@ -835,6 +867,7 @@ window.CodePierTokenUsage = (() => {
     bindDashboard,
     trendHTML,
     prepareDashboard,
+    loadDashboard,
     resetDashboard,
   };
 })();

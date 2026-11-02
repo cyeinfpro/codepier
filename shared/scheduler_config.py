@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 
 QUEUE_REASONS = {
+    "resource_conflict": "等待冲突的文件或服务资源释放",
     "project_limit": "等待本项目并发额度",
     "remote_target_limit": "等待该远程目标并发额度",
     "resource_pressure": "等待节点资源压力回落",
@@ -14,7 +15,7 @@ SCHEDULER_LANES = frozenset({"execution", "read", "remote"})
 
 
 def safe_queue_detail(detail):
-    """Only fixed scheduler enums cross the diagnostic boundary."""
+    """Only fixed enums and bounded counts cross the diagnostic boundary."""
     if not isinstance(detail, dict):
         return {}
     result = {}
@@ -23,7 +24,24 @@ def safe_queue_detail(detail):
         result["queue_reason"] = reason
     if isinstance(lane, str) and lane in SCHEDULER_LANES:
         result["lane"] = lane
+    kinds = detail.get("resource_kinds")
+    if isinstance(kinds, list):
+        kinds = sorted({value for value in kinds[:64]
+                        if isinstance(value, str) and value in {"path", "service"}})
+        if kinds:
+            result["resource_kinds"] = kinds
+    for key, maximum in (("blocked_count", 65536), ("queue_age_ms", 7 * 86400000)):
+        number = detail.get(key)
+        if type(number) is int and 0 <= number <= maximum:
+            result[key] = number
     return result
+
+
+def is_metadata_observation(tool, args):
+    """Minimal project indexing is a bounded observation, never a baseline."""
+    return (tool == "open_workspace" and isinstance(args, dict)
+            and not args.get("capture_baseline")
+            and args.get("context_detail", "minimal") == "minimal")
 
 
 FIELDS = frozenset({"adaptive", "minimum", "maximum", "initial", "read_limit", "remote_limit", "remote_target_limit", "project_limits"})

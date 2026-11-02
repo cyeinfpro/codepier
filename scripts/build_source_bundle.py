@@ -178,6 +178,7 @@ REQUIRED_FILES = {
 }
 
 PUBLIC_DOCS = {
+    'docs/CONCURRENCY_OPTIMIZATION.md', 'docs/HUB_OUTPUT_STORAGE.md',
     'docs/MCP_EVENTS_MULTI_DOT.md',
     'docs/PROJECT_RUNTIMES.md',
     'docs/OWNER_TASK_CONTEXT.md',

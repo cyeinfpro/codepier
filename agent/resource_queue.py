@@ -6,9 +6,18 @@ import os
 import sys
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
 
 from shared.util import DevError
+
+
+@lru_cache(maxsize=4096)
+def _path_scope(name):
+    # Claims are normally canonical already; normalize direct/internal claims
+    # too. Cache only bounded path metadata, never file contents or authority.
+    path = PurePosixPath(name)
+    return path.anchor, path.parts
 
 
 @dataclass(frozen=True)
@@ -23,8 +32,9 @@ class Claim:
             return False
         if self.kind == 'service':
             return self.name == other.name
-        left, right = PurePosixPath(self.name), PurePosixPath(other.name)
-        return left == right or left in right.parents or right in left.parents
+        left_anchor, left = _path_scope(self.name)
+        right_anchor, right = _path_scope(other.name)
+        return left_anchor == right_anchor and (left[:len(right)] == right or right[:len(left)] == left)
 
 
 def overlaps(left, right):
@@ -50,6 +60,89 @@ class ResourceQueue:
         self.condition = asyncio.Condition()
         self.active = {}
         self.waiting = []
+        self._events = {}
+        self._callbacks = {}
+        self._reported = {}
+        self._listeners = []
+        self._entries = {}
+        self._dependencies = {}
+        self._dependents = {}
+
+    def add_listener(self, listener):
+        """Register a synchronous joint-admission drain on this event loop.
+
+        Listeners share ``condition`` with this queue and never await while
+        inspecting or granting resources. Waiting coroutines have private events;
+        a resource release never wakes unrelated blocked coroutines.
+        """
+        self._listeners.append(listener)
+
+    def enqueue(self, token, operation_id, claims):
+        claims = tuple(claims)
+        dependencies = dict.fromkeys(held_token for held_token, (_, held) in self._entries.items()
+                                     if overlaps(claims, held))
+        self._entries[token] = (operation_id, claims)
+        self._dependencies[token] = dependencies
+        for blocker in dependencies:
+            self._dependents.setdefault(blocker, set()).add(token)
+        self.waiting.append((token, operation_id, claims))
+
+    def blockers(self, token):
+        # Dependencies are fixed against earlier owners/waiters on enqueue.
+        # Granting an earlier waiter does not change conflict order; release or
+        # cancellation removes only its reverse-indexed dependent edges.
+        return list(dict.fromkeys(self._entries[blocker][0]
+                    for blocker in self._dependencies.get(token, {})))[:64]
+
+    def blocked(self, token):
+        return bool(self._dependencies.get(token))
+
+    def grant(self, token):
+        """Move a prechecked waiter to active without yielding or notifying."""
+        entry = next(item for item in self.waiting if item[0] is token)
+        self.waiting.remove(entry)
+        self.active[token] = (entry[1], entry[2])
+        self._dependencies.pop(token, None)
+
+    def discard(self, token):
+        self.waiting[:] = [item for item in self.waiting if item[0] is not token]
+        self.active.pop(token, None)
+        self._entries.pop(token, None)
+        for blocker in self._dependencies.pop(token, {}):
+            dependents = self._dependents.get(blocker)
+            if dependents is not None:
+                dependents.discard(token)
+                if not dependents:
+                    self._dependents.pop(blocker, None)
+        for dependent in self._dependents.pop(token, ()):
+            self._dependencies.get(dependent, {}).pop(token, None)
+        self._events.pop(token, None)
+        self._callbacks.pop(token, None)
+        self._reported.pop(token, None)
+
+    def drain(self):
+        """Grant standalone claims, then jointly eligible scheduler tickets.
+
+        Earlier conflicting waiters remain in the same FIFO, including waiters
+        that need execution capacity. Independent paths and shared reads may
+        pass; a new reader cannot continually overtake a pending writer.
+        """
+        for token, _, _ in tuple(self.waiting):
+            event = self._events.get(token)
+            if event is None:
+                continue  # A scheduler ticket must acquire both budgets.
+            blockers = self.blockers(token)
+            if not blockers:
+                self.grant(token)
+                self._reported.pop(token, None)
+                event.set()
+            elif self._reported.get(token) != blockers:
+                self._reported[token] = blockers
+                callback = self._callbacks.get(token)
+                if callback:
+                    callback(blockers)
+        for listener in self._listeners:
+            listener()
 
     def try_reserve(self, operation_id, claims):
         """Atomically reserve without waiting; existing conflicting waiters win."""
@@ -64,7 +157,7 @@ class ResourceQueue:
         if any(overlaps(claims, requested) for _, _, requested in self.waiting):
             return None
         token = object()
-        self.active[token] = (operation_id, claims)
+        self.active[token] = self._entries[token] = (operation_id, tuple(claims))
         return token
 
     async def release(self, token):
@@ -72,36 +165,26 @@ class ResourceQueue:
 
     async def _release(self, token):
         async with self.condition:
-            self.active.pop(token, None)
-            self.condition.notify_all()
+            self.discard(token)
+            self.drain()
 
     @asynccontextmanager
     async def slot(self, operation_id, claims, on_wait):
         token = object()
-        entry = (token, operation_id, claims)
+        event = asyncio.Event()
+        added = False
         try:
             async with self.condition:
-                self.waiting.append(entry)
-                while True:
-                    blockers = [identifier for identifier, held in self.active.values() if overlaps(claims, held)]
-                    for waiter, identifier, requested in self.waiting:
-                        if waiter is token:
-                            break
-                        if overlaps(claims, requested):
-                            blockers.append(identifier)
-                    if not blockers:
-                        break
-                    on_wait(blockers[:64])
-                    await self.condition.wait()
-                self.waiting.remove(entry)
-                self.active[token] = (operation_id, claims)
+                self.enqueue(token, operation_id, claims)
+                self._events[token] = event
+                self._callbacks[token] = on_wait
+                added = True
+                self.drain()
+            await event.wait()
             yield
         finally:
-            async with self.condition:
-                if entry in self.waiting:
-                    self.waiting.remove(entry)
-                self.active.pop(token, None)
-                self.condition.notify_all()
+            if added:
+                await self.release(token)
 
 
 PATH_READ_TOOLS = frozenset({'fs_tree', 'fs_read', 'fs_read_many', 'fs_search'})

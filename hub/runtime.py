@@ -116,6 +116,8 @@ class Connection:
 class Runtime:
     def __init__(self, store: Store):
         self.store = store
+        from hub.operation_output import OperationOutput
+        self.outputs = OperationOutput(store)
         from hub.collaboration.lifecycle import install as install_collaboration
         install_collaboration(self)
         self._loop = None
@@ -323,7 +325,7 @@ class Runtime:
         return result
 
     @iam.read_decision
-    def operation_row(self, id: str, principal: Principal, *, status_only=False):
+    def operation_row(self, id: str, principal: Principal, *, status_only=False, include_output=True):
         principal = refresh_profile_principal(self.store, principal)
         # These two projections are code-defined; operation IDs remain bound
         # parameters and both projections pass the same live record/IAM checks.
@@ -350,6 +352,8 @@ class Runtime:
             self.authorize(principal, 'projects.create', device_id=row['device_id'])
         if (scope == 'computer' or row['tool'] in {'browser_open', 'browser_snapshot', 'browser_action', 'browser_close'}) and 'computer' not in principal.scopes:
             raise DevError('INSUFFICIENT_SCOPE', '读取桌面操作结果仍需 computer 权限', 403)
+        if not status_only and include_output:
+            row['output'], _ = self.outputs.read(row)
         return row
 
     async def wait_operation(self, id: str, principal: Principal, seconds: int):
@@ -387,8 +391,9 @@ class Runtime:
                 args["after_output_seq"] = after_output_seq
         return {"name": "operations_wait" if pending else "operations_get", "arguments": args}
 
+    @iam.read_decision
     def operation(self, id: str, principal: Principal, view: dict | None = None):
-        row = self.operation_row(id, principal)
+        row = self.operation_row(id, principal, include_output=False)
         result = dict(row)
         options = view or {}
         include_result = options.get("include_result", True)
@@ -423,11 +428,11 @@ class Runtime:
         else:
             result.pop("result", None)
             result["result_omitted"] = True
-        output = row["output"] or ""
-        result["output_chars"] = len(output)
+        output, output_chars = self.outputs.read(row, limit=limit, include_body=include_output)
+        result["output_chars"] = output_chars
         if include_output:
-            result["output"] = output[-limit:] if limit else ""
-            result["output_truncated"] = len(output) > limit
+            result["output"] = output
+            result["output_truncated"] = output_chars > limit
         else:
             result.pop("output", None)
             result["output_omitted"] = True
@@ -868,7 +873,7 @@ class Runtime:
                 payload = self.store.encrypt(json.dumps(request, ensure_ascii=False))
                 from hub.admission_policy import check_admission, usage
                 check_admission(self._admission_budget(project["device_id"]),
-                    usage(self.store, project["device_id"], project.get("id")), name, len(payload))
+                    usage(self.store, project["device_id"], project.get("id")), name, len(payload), args=args)
                 lifecycle_ttl = 900 if name == "agent_update" else 120
                 deadline_seconds = (min(self.queue_seconds, 15) if name in {"computer_action", "browser_action"} else
                                     min(self.queue_seconds, 60) if name in COMPUTER_TOOLS | {"browser_open", "browser_snapshot"} else
@@ -1322,15 +1327,20 @@ class Runtime:
         if op['tool'] in {'apply_patch', 'edit'} and data.get('success') is False:
             state = 'needs_review' if data.get('outcome') == 'partial' else 'failed'
             error = data.get('error') or {'message': '批量补丁未完成，请核查备份与回滚结果'}
-        output = str(data.get("output", op.get("output", "")))[-131072:]
         # Persist the terminal result and exact-subscription completion hint
         # atomically. A failed outbox write must leave the original operation
         # recoverable; unrelated evidence/audit failures stay outside this unit.
         with self.store.transaction():
+            current = self.store.one('SELECT id,state,output,output_seq FROM operations WHERE id=?', (op['id'],))
+            if not current or current['state'] in {'succeeded', 'failed', 'cancelled'}:
+                return
+            previous, _ = self.outputs.read(current)
+            output = str(data.get('output', previous))[-131072:]
             changed = self.store.execute("UPDATE operations SET state=?,result=?,error=?,output=?,updated=?,output_seq=output_seq+?,payload=NULL,transport_error=NULL WHERE id=? AND state NOT IN ('succeeded','failed','cancelled')",
-                (state, encoded, error.get("message"), output, time.time(), int(output != (op.get("output") or "")), op["id"]))
+                (state, encoded, error.get("message"), output, time.time(), int(output != previous), op["id"]))
             if not changed.rowcount:
                 return
+            self.outputs.discard(op['id'])
             # Passive/offline collaboration services may have no event adapter.
             # Completion must still commit; configured adapters retain the atomic outbox.
             if self.collaboration.events is not None:
@@ -1364,7 +1374,8 @@ class Runtime:
         if self.connections.get(device_id) is not connection or not self.connection_authorized(device_id, connection):
             return None
         kind, id = data.get("type"), data.get("id")
-        op = self.store.one("SELECT * FROM operations WHERE id=? AND device_id=?", (id, device_id))
+        op = self.store.one('''SELECT id,tool,state,journal_id,output_seq,accepted_at,cancel_requested,deadline
+            FROM operations WHERE id=? AND device_id=?''', (id, device_id))
         if not op:
             if kind == "result" and isinstance(id, str):
                 return {"type": "ack", "id": id}
@@ -1402,16 +1413,8 @@ class Runtime:
                     self.store.execute("UPDATE operations SET accepted_at=NULL,next_attempt=0,state='queued',attempts=0 WHERE id=?", (id,))
                     self.wake_delivery()
         elif kind == "output" and op["tool"] in PROCESS_TOOLS and op["state"] in ACTIVE | {"unknown", "needs_review"}:
-            if data.get("snapshot"):
-                seq = data.get("seq")
-                if type(seq) is not int or seq <= op["output_seq"]:
-                    return None
-                output = str(data.get("text", ""))[-131072:]
-            else:  # Legacy v1 Agent.
-                seq = op["output_seq"] + 1
-                output = (op["output"] + str(data.get("text", ""))[:8192])[-131072:]
-            self.store.execute("UPDATE operations SET output=?,output_seq=?,updated=?,last_output_at=? WHERE id=?", (output, seq, time.time(), time.time(), id))
-            self.publish("output", {"id": id})
+            if self.outputs.receive(id, data):
+                self.publish("output", {"id": id})
         elif kind == "result":
             result = data.get("result")
             self.complete(op, result)
@@ -1607,6 +1610,13 @@ class Runtime:
                 await asyncio.wait_for(websocket.close(), 2)
 
     async def stop(self):
+        try:
+            await self._stop_runtime()
+        finally:
+            from hub.token_dashboard import aclose_token_dashboard
+            await aclose_token_dashboard(self)
+
+    async def _stop_runtime(self):
         self.stopping = True
         for id in self.operation_waiters:
             self.notify_operation(id)

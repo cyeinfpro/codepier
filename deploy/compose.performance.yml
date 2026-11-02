@@ -1,0 +1,15 @@
+# Opt-in budget for a host with spare capacity. Apply with the main compose.yml:
+# docker compose -f compose.yml -f deploy/compose.performance.yml config
+# docker compose -f compose.yml -f deploy/compose.performance.yml up -d
+# Existing .env, volumes, credentials and updater configuration stay authoritative.
+services:
+  hub:
+    cpus: "${CODEPIER_HUB_CPUS:-2.0}"
+    mem_limit: "${CODEPIER_HUB_MEMORY:-1g}"
+    mem_reservation: "${CODEPIER_HUB_MEMORY_RESERVATION:-512m}"
+    pids_limit: 512
+    logging:
+      driver: json-file
+      options:
+        max-size: "${CODEPIER_LOG_MAX_SIZE:-20m}"
+        max-file: "${CODEPIER_LOG_MAX_FILES:-5}"

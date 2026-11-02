@@ -15,6 +15,8 @@
 - [浏览器集成](INTEGRATIONS-20260917.md)与[桌面控制](COMPUTER_USE.md)
 - [统一设置中心](SETTINGS_CENTER.md)：个人、实例、项目和节点的设置入口
 - [自适应并发与队列](ADAPTIVE_SCHEDULER.md)：并发上下限、资源压力、项目公平和生效回执
+- [并发优化与容量验证](CONCURRENCY_OPTIMIZATION.md)：队列定位、发布能力、资源预算及可复现验收
+- [Hub 输出与数据库观测](HUB_OUTPUT_STORAGE.md)：热表、历史兼容、事务保证和降级条件
 - [文件入站](FILE_IMPORT_INGRESS.md)：限制、权限、客户端兼容证据、升级顺序
 - [Hub 入站设置](hub-file-import-settings.md)：预览、确认、保存、继承与关闭
 - [Token 与费用估算](mcp-token-usage.md)：MCP 工具文本、95% 输入缓存假设、参考模型、价格分项和真实用量边界

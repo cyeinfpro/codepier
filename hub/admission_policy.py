@@ -10,6 +10,7 @@ import math
 from dataclasses import dataclass
 
 from hub.scheduler_settings import public_snapshot
+from shared.scheduler_config import is_metadata_observation
 from shared.util import DevError
 
 READ_TOOLS = frozenset({"read", "fs_read", "fs_read_many", "fs_tree", "tasks_list"})
@@ -170,28 +171,33 @@ class AdmissionWindow:
 
 
 def usage(store, device_id, project_id):
-    # Durable tool identity suffices for protected read classification. No schema
-    # change, payload decryption, caller-provided lane, or in-memory count cache.
+    # Trusted normalized tool/argument summaries identify protected observations.
+    # Never decrypt payloads or accept a caller-provided priority/lane.
     # Ciphertext is ASCII. BLOB length uses byte size, avoiding repeated Unicode
     # character scans of multi-MiB TEXT payloads on the single DB worker.
     reads = ",".join("'" + name + "'" for name in sorted(READ_TOOLS))
+    read_sql = f"""(tool IN ({reads}) OR CASE WHEN tool='open_workspace'
+        AND json_valid(args_summary) THEN
+        coalesce(json_extract(args_summary,'$.capture_baseline'),0)=0 AND
+        coalesce(json_extract(args_summary,'$.context_detail'),'minimal')='minimal'
+        ELSE 0 END)"""
     return store.one(f"""SELECT count(*) AS global_count,
         coalesce(sum(length(CAST(payload AS BLOB))),0) AS global_bytes,
         coalesce(sum(device_id=?),0) AS node_count,
         coalesce(sum(CASE WHEN device_id=? THEN length(CAST(payload AS BLOB)) ELSE 0 END),0) AS node_bytes,
         coalesce(sum(device_id=? AND project_id IS ?),0) AS project_count,
         coalesce(sum(CASE WHEN device_id=? AND project_id IS ? THEN length(CAST(payload AS BLOB)) ELSE 0 END),0) AS project_bytes,
-        coalesce(sum(device_id=? AND tool IN ({reads})),0) AS node_reads,
-        coalesce(sum(device_id=? AND project_id IS ? AND tool IN ({reads})),0) AS project_reads,
+        coalesce(sum(device_id=? AND {read_sql}),0) AS node_reads,
+        coalesce(sum(device_id=? AND project_id IS ? AND {read_sql}),0) AS project_reads,
         coalesce(sum(device_id=? AND tool='integration_control'),0) AS controls
         FROM operations WHERE {ACTIVE_SQL}""",
         (device_id, device_id, device_id, project_id, device_id, project_id,
          device_id, device_id, project_id, device_id))
 
 
-def check_admission(budget, counts, tool, payload_bytes):
+def check_admission(budget, counts, tool, payload_bytes, *, args=None):
     """Call under the same DB transaction as idempotency lookup and INSERT."""
-    read = tool in READ_TOOLS
+    read = tool in READ_TOOLS or is_metadata_observation(tool, args)
     control = tool == "integration_control"
     protected = read or control
 

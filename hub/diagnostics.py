@@ -22,11 +22,11 @@ AGENT_STAGES = set(LABELS)-{'hub_received','dispatched','hub_completed'}
 def event_detail(stage, detail):
     if stage in SSH_STAGES:
         return safe_ssh_detail(detail)
-    return {**safe_detail(detail), **(safe_queue_detail(detail) if stage == 'waiting_worker' else {})}
+    return {**safe_detail(detail), **(safe_queue_detail(detail) if stage in {'waiting_worker', 'waiting_resource'} else {})}
 
 
 def stage_label(stage, detail):
-    queue = safe_queue_detail(detail) if stage == 'waiting_worker' else {}
+    queue = safe_queue_detail(detail) if stage in {'waiting_worker', 'waiting_resource'} else {}
     return QUEUE_REASONS.get(queue.get('queue_reason'), LABELS.get(stage, stage))
 
 class Diagnostics:
@@ -52,6 +52,7 @@ class Diagnostics:
     def ingest(self, identifier, trace):
         if not isinstance(trace,list) or len(trace)>32:
             return
+        events = {}
         for event in trace:
             if not isinstance(event,dict) or not isinstance(event.get('stage'),str) or event['stage'] not in AGENT_STAGES:
                 continue
@@ -61,7 +62,29 @@ class Diagnostics:
             detail=event.get('detail');detail=detail if isinstance(detail,dict) else {}
             blocked=detail.get('blocked_by',[])
             blocked=[x for x in blocked[:64] if isinstance(x,str) and 1<=len(x)<=100] if isinstance(blocked,list) else []
-            self.record(identifier,event['stage'],source='agent',seq=seq,elapsed_ms=elapsed,detail={'blocked_by':blocked, **event_detail(event['stage'], detail)})
+            # Duplicate sequence numbers are immutable; keep the first event.
+            events.setdefault(seq, (identifier, 'agent', seq, event['stage'], time.time(), elapsed,
+                                   json.dumps({'blocked_by': blocked, **event_detail(event['stage'], detail)})))
+        if not events:
+            return
+        store = self.runtime.store
+        try:
+            with store.lock, store.db:
+                # A replayed 32-stage snapshot is common after reconnect. Avoid
+                # 32 write transactions and repeated retention DELETEs for it.
+                placeholders = ','.join('?' for _ in events)
+                present = {row[0] for row in store.db.execute(
+                    'SELECT seq FROM operation_events WHERE operation_id=? AND source=\'agent\' AND seq IN ('
+                    + placeholders + ')', (identifier, *events)).fetchall()}
+                pending = [row for seq, row in events.items() if seq not in present]
+                if pending:
+                    store.db.executemany(
+                        'INSERT OR IGNORE INTO operation_events(operation_id,source,seq,stage,at,elapsed_ms,detail) VALUES (?,?,?,?,?,?,?)',
+                        pending)
+                    store.db.execute('DELETE FROM operation_events WHERE operation_id=? AND id NOT IN (SELECT id FROM operation_events WHERE operation_id=? ORDER BY id DESC LIMIT 200)',
+                                     (identifier, identifier))
+        except (sqlite3.Error, OSError):
+            self.errors += 1
 
     def trace(self,args,principal):
         runtime=self.runtime
@@ -79,6 +102,8 @@ class Diagnostics:
                 except DevError:
                     pass
             row['blocked_by']=visible;row['label']=stage_label(row['stage'],detail)
+            if detail.get('blocked_by') and not visible:
+                row['blocker_visibility'] = 'restricted_or_unavailable'
             row['detail']=event_detail(row['stage'],detail)
         last=runtime.store.one("SELECT stage,at,detail FROM operation_events WHERE operation_id=? AND source='agent' ORDER BY seq DESC LIMIT 1",(op['id'],))
         online=runtime.online(op['device_id']) if op['device_id'] else False
@@ -90,6 +115,7 @@ class Diagnostics:
         else: reason='Hub 排队或等待设备接收确认'
         return {'operation_id':op['id'],'current':{'state':op['state'],'reason':reason,'online':online,
                     'last_agent_stage':last['stage'] if last else None,'stage_observed_at':last['at'] if last else None,
+                    'stage_age_ms':max(0, round(((time.time() if op['pending'] else op['updated']) - last['at']) * 1000)) if last else None,
                     'transport_error':op['transport_error'],'attempts':op['attempts'],'elapsed_ms':max(0,round(((time.time() if op['pending'] else op['updated'])-op['created'])*1000))},
                 'events':rows,'next_after_event_id':rows[-1]['id'] if more and rows else None,'diagnostic_write_errors':self.errors,
                 'clock_note':'at is Hub observation time; agent elapsed_ms is relative to a handling attempt, not a synchronized wall clock.',

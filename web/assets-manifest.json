@@ -1,5 +1,5 @@
 {
-  "version": "1.30.8",
+  "version": "1.31.0",
   "algorithm": "sha256",
   "assets": {
     "access-profiles.css": {
@@ -19,8 +19,8 @@
       "bytes": 33097
     },
     "app.js": {
-      "sha256": "45429c2f80384e5c9d8cc416a4b75b957dfc7308e5057c3a64a515106147b385",
-      "bytes": 122832
+      "sha256": "5935ee9ec1dff6739d33d775925a236a24269cbb500cee449aa82a45e98edbb2",
+      "bytes": 122690
     },
     "appearance.js": {
       "sha256": "7fc8e8ffa85a4bb5836b8919cdf6ff12813cfb4a9e4736709f5858e5d8782bb1",
@@ -227,8 +227,8 @@
       "bytes": 6102
     },
     "token-usage.js": {
-      "sha256": "5dc508421e322eecb9b4c1ffece297dedc90fa15b09b95466eeabb0c3cff5a4d",
-      "bytes": 35515
+      "sha256": "f3e8f8f485ec9e18bd1a9d60ca3cd7d0998a5c31e3fc102edf67dc61fb249819",
+      "bytes": 36917
     },
     "tokens.css": {
       "sha256": "e553a6798a846da2e12119604d6aa39a5b6e13416d0863777fc27c6266cd3153",

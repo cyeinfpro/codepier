@@ -2,7 +2,7 @@
 
 让 ChatGPT 在你授权的电脑和服务器上读代码、改文件、跑测试，并拿到可核对的执行结果。
 
-[![Version](https://img.shields.io/badge/version-1.30.8-2563eb)](RELEASE.json)
+[![Version](https://img.shields.io/badge/version-1.31.0-2563eb)](RELEASE.json)
 [![License](https://img.shields.io/badge/license-MIT-16a34a)](LICENSE)
 
 CodePier 是自托管的 MCP 服务和开发面板。**Hub** 负责接入与管理，**Agent** 在 macOS、Windows 或 Linux 上运行本机工具。你也可以在网页里继续 Pi、Codex、Claude Code 会话，管理多台电脑和服务器。
@@ -21,10 +21,10 @@ CodePier 是自托管的 MCP 服务和开发面板。**Hub** 负责接入与管�
 
 ### 1. 安装 Hub
 
-服务器需准备 Git、Bash、Python 3.9+、Docker 和支持 `up --wait` 的 Docker Compose v2。以下安装本版本 **v1.30.8**，最新正式版本见 [Releases](https://github.com/cyeinfpro/codepier/releases/latest)：
+服务器需准备 Git、Bash、Python 3.9+、Docker 和支持 `up --wait` 的 Docker Compose v2。以下安装本版本 **v1.31.0**，最新正式版本见 [Releases](https://github.com/cyeinfpro/codepier/releases/latest)：
 
 ```bash
-git clone --branch v1.30.8 --depth 1 https://github.com/cyeinfpro/codepier.git
+git clone --branch v1.31.0 --depth 1 https://github.com/cyeinfpro/codepier.git
 cd codepier
 bash install.sh
 ```
@@ -74,6 +74,8 @@ CodePier **不提供模型服务**。只使用 MCP 文件与命令工具，不�
 清洁模式使用独立 HOME、缓存和非登录 Shell，并默认复用 Agent 执行账号已有的 GitHub CLI 登录、Git 全局配置和 SSH Agent。可在项目的 **执行环境 → 复用已有登录** 中逐项关闭。它**不是操作系统沙箱**：Shell 仍以本机 Agent 账号权限执行。依赖个人终端启动脚本、特殊签名或硬编码 HOME 的工具仍需配置。[项目运行时与边界](docs/PROJECT_RUNTIMES.md)
 
 ### 最近版本变化
+
+- **v1.31.0 — 队列与数据库并发优化**：资源与执行额度联合准入、定向唤醒、轻量项目索引、隔离读取按需加载、统计独立计算、活动输出热表与排队观测。[并发优化与容量验证](docs/CONCURRENCY_OPTIMIZATION.md)
 
 - **v1.30.8 — Agent 安装与读取隔离**：完善 macOS 启动器安装和旧服务迁移，对项目读取使用有界独立进程；保留现有目录授权，发布不自动升级部署。[Agent 安装说明](docs/AGENT_INSTALL.md)
 
@@ -136,9 +138,9 @@ CodePier **不提供模型服务**。只使用 MCP 文件与命令工具，不�
 
 ## 版本与许可
 
-当前仓库的 `RELEASE.json` 标记为 **1.30.8 / prepared / source-and-image**；可下载版本以 [Releases](https://github.com/cyeinfpro/codepier/releases/latest) 为准，`main` 可能包含尚未发布的改动。
+当前仓库的 `RELEASE.json` 标记为 **1.31.0 / prepared / source-and-image**；可下载版本以 [Releases](https://github.com/cyeinfpro/codepier/releases/latest) 为准，`main` 可能包含尚未发布的改动。
 
-- **Version:** 1.30.8
+- **Version:** 1.31.0
 - **License:** [MIT](LICENSE)
 
 第三方依赖保留各自许可证，见 `web/vendor/` 与 [MCP Apps 声明](web/mcp-apps/THIRD_PARTY_NOTICES.txt)。

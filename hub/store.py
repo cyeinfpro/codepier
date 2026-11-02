@@ -10,7 +10,7 @@ from contextvars import copy_context
 from functools import partial
 from hub.store_contract import CheckedConnection, OwnedRLock
 from hub.worker_metrics import WorkerMetrics
-from hub.store_metrics import TransactionMetrics
+from hub.store_metrics import LockMetrics, TransactionMetrics
 import time
 from pathlib import Path
 from cryptography.fernet import Fernet
@@ -61,7 +61,8 @@ class Store:
         os.chmod(self.directory, 0o700)
         connection = sqlite3.connect(self.state_directory / "hub.sqlite3", check_same_thread=False, timeout=30)
         connection.row_factory = sqlite3.Row
-        self.lock = OwnedRLock()
+        self.lock_metrics = LockMetrics()
+        self.lock = OwnedRLock(on_release=self.lock_metrics.observe)
         self.iam_enabled = True
         self.session_revision = 0
         self._event_loop = None
@@ -184,6 +185,8 @@ class Store:
         migrate_collaboration(self.db)
         from hub.auth_schema import migrate as migrate_auth
         migrate_auth(self.db)
+        from hub.operation_output import migrate as migrate_output
+        migrate_output(self.db)
 
     @contextmanager
     def transaction(self, *, immediate=True):
@@ -318,6 +321,7 @@ class Store:
         """
         return {'schema_version': 1, 'scope': 'hub_process', 'read_only': True,
                 'worker': self.worker_metrics.snapshot(),
+                'lock': self.lock_metrics.snapshot(),
                 'transactions': self.transaction_metrics.snapshot()}
 
     async def aclose(self):

@@ -7,7 +7,6 @@ import hashlib
 import json
 import struct
 import time
-from shared.computer_contracts import COMPUTER_TOOLS
 from shared.util import DevError, valid_json_value
 
 MAX_IMAGE_BYTES = 3 * 1024 * 1024
@@ -109,6 +108,9 @@ def scrub_expired(value: dict, now: float | None = None):
 
 def mcp_result(name: str, value: dict):
     """Return metadata as JSON text and screenshots as native MCP image blocks, including polls."""
+    # Media validation/expiry are also used by lightweight file workers. Tool
+    # classification belongs at the MCP boundary, not their cold import path.
+    from shared.computer_contracts import COMPUTER_TOOLS
     public = copy.deepcopy(value)
     browser = name.startswith('browser_') or name in {'operations_get','operations_wait'} and public.get('tool','').startswith('browser_')
     if browser:
