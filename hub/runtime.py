@@ -1144,8 +1144,10 @@ class Runtime:
         device_id, con, packets = prepared
         for packet in packets:
             async def current(packet=packet):
-                return await self.store.run(self._delivery_packet_current,
-                                            identifier, device_id, con, packet)
+                # This final current-authority fence holds the socket send
+                # lock. It must not strand receipt ACKs behind normal DB work.
+                return await self.store.run_control(self._delivery_packet_current,
+                                                    identifier, device_id, con, packet)
             if not await con.send(packet, before_send=current):
                 return
 
@@ -1494,6 +1496,26 @@ class Runtime:
             self.wake_delivery()
         return True
 
+    def _receive_agent_frame(self, device_id, connection, info, data):
+        """One queued phase per authenticated frame, in wire receive order.
+
+        Keep existing transaction boundaries: a completion may already be
+        durable when auxiliary audit work fails. ACKs leave this phase only
+        after its normal persistence path completes. Async native/artifact
+        receivers stay on their owning event loop after this current fence.
+        """
+        if not self._touch_agent(device_id, connection):
+            return False, None
+        kind = data.get('type')
+        if kind == 'heartbeat':
+            return True, self._heartbeat(device_id, connection, info, data)
+        if kind in {'computer_approval', 'computer_approval_closed'}:
+            self.computer_approvals.receive(device_id, connection, data)
+            return True, None
+        if kind in {'native_reply', 'native_sync', 'artifact_chunk'}:
+            return True, None
+        return True, self._receive_operation_event(device_id, connection, data)
+
     async def agent_socket(self, websocket: WebSocket, device_id: str):
         device = await self.store.run(self.store.one, "SELECT * FROM devices WHERE id=?", (device_id,))
         if not device or not device["enabled"]:
@@ -1575,16 +1597,16 @@ class Runtime:
             while not self.stopping:
                 packet = await asyncio.wait_for(websocket.receive_text(), 45)
                 data = channel.unpack(packet)
-                if not await self.store.run(self._touch_agent, device_id, connection):
+                current, reply = await self.store.run_control(
+                    self._receive_agent_frame, device_id, connection, info, data)
+                if not current:
                     break  # Fence a replaced socket before accepting its late events.
-                kind, id = data.get("type"), data.get("id")
+                kind = data.get("type")
                 if kind == "heartbeat":
-                    preference = await self.store.run(self._heartbeat, device_id, connection, info, data)
-                    if preference is not None:
-                        await connection.send(preference)
+                    if reply is not None:
+                        await connection.send(reply)
                     continue
                 if kind in {"computer_approval", "computer_approval_closed"}:
-                    await self.store.run(self.computer_approvals.receive,device_id,connection,data)
                     continue
                 if kind in {"native_reply", "native_sync"}:
                     await self.native.receive(device_id, connection, data)
@@ -1592,9 +1614,8 @@ class Runtime:
                 if kind == "artifact_chunk":
                     self.artifacts.receive(connection,data)
                     continue
-                acknowledgement = await self.store.run(self._receive_operation_event, device_id, connection, data)
-                if acknowledgement is not None:
-                    await connection.send(acknowledgement)
+                if reply is not None:
+                    await connection.send(reply)
 
         except (WebSocketDisconnect, asyncio.TimeoutError):
             pass

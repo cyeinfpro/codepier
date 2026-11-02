@@ -5,12 +5,12 @@ import os
 import sqlite3
 import tempfile
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 from functools import partial
 from hub.store_contract import CheckedConnection, OwnedRLock
 from hub.worker_metrics import WorkerMetrics
 from hub.store_metrics import LockMetrics, TransactionMetrics
+from hub.store_worker import StoreWorker
 import time
 from pathlib import Path
 from cryptography.fernet import Fernet
@@ -69,7 +69,7 @@ class Store:
         self.transaction_metrics = TransactionMetrics()
         self.db = CheckedConnection(connection, self.lock, self._security_write,
                                     on_transaction=self.transaction_metrics.observe)
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hub-sqlite")
+        self._executor = StoreWorker()
         self.worker_metrics = WorkerMetrics()
         with self.lock:
             try:
@@ -275,9 +275,21 @@ class Store:
         caller's async admission lock. No transaction or thread lock crosses an
         await; cancellation is not a claim that a durable write did not happen.
         """
+        return await self._run(function, args, kwargs, control=False)
+
+    async def run_control(self, function, /, *args, **kwargs):
+        """Internal authenticated Agent receipt/final-send-fence path only.
+
+        No request parameter selects this lane. Normal phases make progress
+        after a bounded control burst; running work is never interrupted.
+        """
+        return await self._run(function, args, kwargs, control=True)
+
+    async def _run(self, function, args, kwargs, *, control):
         if self.lock.owned:
             raise RuntimeError("Do not await Store.run while holding Store.lock")
-        self._event_loop = asyncio.get_running_loop()
+        loop = asyncio.get_running_loop()
+        self._event_loop = loop
         context = copy_context()
         call = partial(function, *args, **kwargs)
         submitted = self.worker_metrics.submit()
@@ -294,10 +306,16 @@ class Store:
                 self.worker_metrics.finish(started, failed=failed)
 
         try:
-            future = asyncio.get_running_loop().run_in_executor(self._executor, measured)
+            submit = self._executor.submit_control if control else self._executor.submit
+            future = asyncio.wrap_future(submit(measured), loop=loop)
         except BaseException:
             self.worker_metrics.reject()
             raise
+        return await self._settle(future)
+
+    @staticmethod
+    async def _settle(future):
+        """Cancellation cannot detach an admitted phase or database close."""
         try:
             return await asyncio.shield(future)
         except asyncio.CancelledError:
@@ -325,7 +343,7 @@ class Store:
                 'transactions': self.transaction_metrics.snapshot()}
 
     async def aclose(self):
-        await asyncio.to_thread(self.close)
+        await self._settle(asyncio.create_task(asyncio.to_thread(self.close)))
 
     def close(self):
         if self.lock.owned:
