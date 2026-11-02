@@ -6,6 +6,7 @@
 
 - [完整入门](START-HERE.md)：部署 Hub、接入电脑、映射项目、连接客户端
 - [Agent 安装与升级](AGENT_INSTALL.md)
+- [面板目录授权与 SMB 文件兼容](AGENT_PATHS_AND_SMB.md)：路径管理、配置冲突、授权生效与网络文件系统恢复
 - [连接 ChatGPT 与其他 MCP 客户端](CHATGPT.md)
 - [连接改进验收](CONNECTION_ACCEPTANCE.md)：批读、连接证据、刷新提示、恢复与 Tunnel 的已验收边界
 - [MCP 工具参考](CORE_TOOLS.md)：定向项目发现、最小上下文、动作诊断与原操作恢复

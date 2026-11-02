@@ -272,9 +272,12 @@ def test_bridge_does_not_invent_lookup_filters_or_workspace_arguments():
 async def test_complete_capability_discovery_and_no_unmapped_public_tool(runtime):
     instance, principal = runtime
     from shared.runtime_panel_contracts import PANEL_RUNTIME_TOOLS
+    from shared.agent_roots_contracts import PANEL_ROOTS_TOOLS
     assert PANEL_RUNTIME_TOOLS == {'project_runtime_get', 'project_runtime_set'}
+    assert PANEL_ROOTS_TOOLS == {'agent_roots_get', 'agent_roots_preview', 'agent_roots_set'}
     assert set(TOOLS) - CORE_TOOLS - QUERY_TOOLS - set(REPLACED_MCP_TOOLS) - INCOMING_UPLOAD_TOOLS == {
-        'integration_control', 'validations_accept', 'get_profile', 'get_access_context', *PANEL_RUNTIME_TOOLS}
+        'integration_control', 'validations_accept', 'get_profile', 'get_access_context',
+        *PANEL_RUNTIME_TOOLS, *PANEL_ROOTS_TOOLS}
     for profile in ('core', 'coding', 'full'):
         assert {t['name'] for t in tool_definitions(profile)} == CORE_TOOLS | QUERY_TOOLS | {'get_profile', 'get_access_context'}
     from hub.core_tools import help_result

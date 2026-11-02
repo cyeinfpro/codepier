@@ -23,6 +23,8 @@ TOOL_WIRE_VERSIONS['inspect_file_source'] = 2
 # Epoch 3 includes project-scoped credential reuse. Older Agents must not
 # accept a save while silently dropping these authorization choices.
 TOOL_WIRE_VERSIONS.update(project_runtime_get=3, project_runtime_set=3)
+# Private directory grants must never execute against legacy epoch-1 peers.
+TOOL_WIRE_VERSIONS.update(agent_roots_get=2, agent_roots_preview=2, agent_roots_set=2)
 # Byte ingress is never emulated through CLI, shell or legacy file operations.
 TOOL_WIRE_VERSIONS.update({name: 2 for name in (
     'incoming_upload_begin', 'incoming_upload_status',
