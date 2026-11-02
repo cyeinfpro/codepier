@@ -96,13 +96,12 @@ def test_context_estimate_in_real_short_desktop_overview(chat_browser_pool, stac
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
 
-    def overview_fixture(route):
+    def token_usage_fixture(route):
         response = route.fetch()
-        data = response.json()
-        data["token_usage"] = synthetic_dashboard()
-        route.fulfill(response=response, json=data)
+        route.fulfill(response=response, json=synthetic_dashboard())
 
-    page.route("**/api/overview", overview_fixture)
+    # Statistics now load independently of the lightweight overview response.
+    page.route("**/api/token-usage", token_usage_fixture)
     try:
         _login(page, stack)
         _set_scheme(page, scheme)

@@ -596,13 +596,14 @@ window.CodePierTokenUsage = (() => {
       '</select></label>';
     return (
       '<div class="token-dashboard" data-token-dashboard>' +
-      `<div class="token-dashboard-head"><h3>${title}工具用量</h3><span class="token-estimate-badge">估算</span></div>` +
-      headline(value) +
+      `<div class="token-dashboard-head"><h3>${title}工具用量</h3><span class="token-estimate-badge">估算</span>` +
       (Number.isFinite(data.freshness?.as_of)
-        ? '<p class="token-dashboard-note">统计截至 ' +
+        ? '<span class="token-dashboard-freshness">统计截至 ' +
           escape(dateText(data.freshness.as_of, period.timezone)) +
-          '，最多每 30 秒更新。</p>'
+          '，最多每 30 秒更新。</span>'
         : '') +
+      '</div>' +
+      headline(value) +
       (data.coverage?.collection_unavailable ? '<p role="status">估算读取暂不可用</p>' : '') +
       `<details data-token-filters${expanded ? ' open' : ''}><summary>查看详情</summary>` +
       panel('settings', '筛选与估价设置') +

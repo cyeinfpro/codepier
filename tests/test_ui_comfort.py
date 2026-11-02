@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json
 from pathlib import Path
+import re
 import pytest
 from playwright.sync_api import expect, sync_playwright
 from scripts.ui_comfort_audit import MEASURE
@@ -110,13 +111,14 @@ def test_short_desktop_token_states_keep_figures_notes_and_actions_reachable(sta
         errors = []
         page.on('pageerror', lambda error: errors.append(str(error)))
 
-        def overview_fixture(route):
+        def token_usage_fixture(route):
             response = route.fetch()
             data = response.json()
-            data['token_usage']['summary'] = samples[selected['name']]
+            data['summary'] = samples[selected['name']]
             route.fulfill(response=response, json=data)
 
-        page.route('**/api/overview', overview_fixture)
+        # Statistics now load independently of the lightweight overview response.
+        page.route('**/api/token-usage', token_usage_fixture)
         try:
             _login(page, stack, 'projects')
             _set_scheme(page, scheme)
@@ -135,6 +137,9 @@ def test_short_desktop_token_states_keep_figures_notes_and_actions_reachable(sta
                 note = card.locator('.token-dashboard-note').first
                 expect(note).to_be_visible()
                 expect(note).to_contain_text('GPT-6 Astra · 输入缓存 95% 假设')
+                freshness = card.locator('.token-dashboard-freshness')
+                expect(freshness).to_be_visible()
+                expect(freshness).to_have_text(re.compile(r'^统计截至 .+，最多每 30 秒更新。$'))
                 partial = card.locator('.token-dashboard-note').filter(has_text='仅已记录部分')
                 if name == 'partial':
                     expect(partial).to_be_visible()
@@ -144,7 +149,7 @@ def test_short_desktop_token_states_keep_figures_notes_and_actions_reachable(sta
                 assert not details.evaluate('el => el.open')
                 expect(details.locator('summary').first).to_be_visible()
                 within(page, '.stats,.codepier-focus-card,.workspace-operations', width, height)
-                within(page, '.token-dashboard-metric,.token-dashboard-note,'
+                within(page, '.token-dashboard-metric,.token-dashboard-note,.token-dashboard-freshness,'
                              '.token-dashboard-limit,[data-token-filters] > summary', width, height)
                 report = page.evaluate(MEASURE)
                 assert report['documentWidth'] <= width + 1
