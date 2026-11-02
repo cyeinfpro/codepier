@@ -4,6 +4,7 @@ Uses isolated state and the ordinary authenticated Hub/Agent fixture, not a mode
 """
 from __future__ import annotations
 import asyncio
+from contextlib import contextmanager
 import json
 import sqlite3
 from types import SimpleNamespace
@@ -22,6 +23,14 @@ class TimingStore:
 
     def execute(self, sql, args=()):
         return self.db.execute(sql, args)
+
+    @contextmanager
+    def transaction(self, *, immediate=True):
+        # Keep shared schema initialization atomic, including DDL, on real SQLite.
+        with self.db:
+            if not self.db.in_transaction:
+                self.db.execute('BEGIN IMMEDIATE' if immediate else 'BEGIN')
+            yield self.db
 
     def all(self, sql, args=()):
         return [dict(row) for row in self.db.execute(sql, args)]
