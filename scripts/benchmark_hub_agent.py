@@ -105,6 +105,145 @@ def preflight(seconds, max_load_per_cpu):
     return samples, overloaded
 
 
+def bounded_number(value, low, high, *, integer=False):
+    kinds = (int,) if integer else (int, float)
+    return value if type(value) in kinds and low <= value <= high and math.isfinite(value) else None
+
+
+def bounded_choice(value, choices, default=None):
+    return value if isinstance(value, str) and value in choices else default
+
+
+def admission_snapshot(value):
+    """Retain bounded diagnostics, never scheduler config, identities or paths."""
+    value = value if isinstance(value, dict) else {}
+    states = {'offline', 'unsupported', 'applied', 'rejected', 'pending'}
+    reasons = {'legacy', 'unavailable', 'pressure', 'recovering', 'adaptive'}
+    reported_reasons = {'starting', 'fixed', 'metrics_unavailable', 'memory_critical',
+                        'memory_recovery', 'recovering', 'resource_pressure', 'healthy', 'cooldown'}
+    budget = value.get('durable_admission')
+    budget = budget if isinstance(budget, dict) else {}
+    result = {
+        'state': bounded_choice(value.get('state'), states, 'unknown'),
+        'revision': value.get('revision') if isinstance(value.get('revision'), str)
+                    and re.fullmatch(r'[0-9a-f]{64}', value['revision']) else None,
+        'durable_admission': {
+            'reason': bounded_choice(budget.get('reason'), reasons, 'unknown'),
+            'node_pending_limit': bounded_number(budget.get('node_pending_limit'), 1, 512, integer=True),
+            'project_pending_limit': bounded_number(budget.get('project_pending_limit'), 1, 256, integer=True),
+            'new_heavy_admission_paused': budget.get('new_heavy_admission_paused')
+                if type(budget.get('new_heavy_admission_paused')) is bool else None,
+            'overload_read_reserve': bounded_number(budget.get('overload_read_reserve'), 0, 8, integer=True),
+        },
+        'reported': None,
+    }
+    reported = value.get('reported')
+    if isinstance(reported, dict):
+        lanes = reported.get('lanes')
+        lanes = lanes if isinstance(lanes, dict) else {}
+        result['reported'] = {
+            'reason': bounded_choice(reported.get('reason'), reported_reasons, 'unknown'),
+            'running': bounded_number(reported.get('running'), 0, 100000, integer=True),
+            'queued': bounded_number(reported.get('queued'), 0, 100000, integer=True),
+            'lanes': {},
+        }
+        for name in ('execution', 'read', 'remote'):
+            lane = lanes.get(name)
+            lane = lane if isinstance(lane, dict) else {}
+            result['reported']['lanes'][name] = {
+                'capacity': bounded_number(lane.get('capacity'), 0, 64, integer=True),
+                'running': bounded_number(lane.get('running'), 0, 100000, integer=True),
+                'queued': bounded_number(lane.get('queued'), 0, 100000, integer=True),
+            }
+    return result
+
+
+def admission_ready(snapshot, required_pending):
+    if type(required_pending) is not int or not 1 <= required_pending <= 256:
+        return False
+    snapshot = admission_snapshot(snapshot)
+    budget = snapshot['durable_admission']
+    return (snapshot['state'] == 'applied' and snapshot['revision'] is not None and budget['reason'] == 'adaptive'
+            and budget['new_heavy_admission_paused'] is False
+            and budget['node_pending_limit'] is not None and budget['node_pending_limit'] >= required_pending
+            and budget['project_pending_limit'] is not None and budget['project_pending_limit'] >= required_pending)
+
+
+def observe_admission(stack, *, timeout=10):
+    # Reuse the fixture's authenticated owner client. No preferences are written.
+    response = stack.client.get('/api/settings/scheduler', params={'device': stack.device}, timeout=timeout)
+    response.raise_for_status()
+    return response.json()
+
+
+class AdmissionReadinessError(RuntimeError):
+    def __init__(self, observation):
+        super().__init__('admission_readiness_not_met')
+        self.observation = observation
+
+
+def prepare_admission(probe, required_pending, *, profile='cold', timeout=300,
+                      clock=time.monotonic, sleep=time.sleep):
+    """Observe once, or wait for a real applied budget under one absolute deadline.
+
+    Match the real-resource acceptance helper's 3s cadence and deadline check
+    after each response. Slow/failed probes cannot reuse old readiness or extend
+    the budget. At most 100 observations fit the maximum 300s preparation.
+    """
+    import httpx
+    if (bounded_choice(profile, {'cold', 'ready'}) is None or type(required_pending) is not int
+            or not 1 <= required_pending <= 256
+            or bounded_number(timeout, 0, 300) is None or timeout <= 0):
+        raise ValueError('invalid_admission_preparation')
+    started = clock()
+    deadline = started + timeout
+    result = {'profile': profile, 'required_pending': required_pending,
+              'timeout_seconds': timeout, 'elapsed_seconds': 0, 'ready': False,
+              'probe_count': 0, 'observations': []}
+    while clock() < deadline:
+        previous = clock()
+        if previous >= deadline:
+            break
+        observation = {'elapsed_seconds': None, 'snapshot': None, 'error': None}
+        try:
+            observation['snapshot'] = admission_snapshot(probe(timeout=min(10, deadline - previous)))
+        except (httpx.HTTPError, OSError, AssertionError, KeyError, TypeError, ValueError) as exc:
+            observation['error'] = type(exc).__name__
+        now = clock()
+        observation['elapsed_seconds'] = round(now - started, 3)
+        result['observations'].append(observation)
+        result['probe_count'] += 1
+        result['elapsed_seconds'] = round(now - started, 3)
+        # Readiness arriving at or beyond the original deadline is not success.
+        result['ready'] = (now < deadline and observation['snapshot'] is not None
+                           and admission_ready(observation['snapshot'], required_pending))
+        if profile == 'cold' or result['ready']:
+            return result
+        if now < deadline:
+            sleep(min(max(0, previous + 3 - now), deadline - now))
+    result['elapsed_seconds'] = round(clock() - started, 3)
+    raise AdmissionReadinessError(result)
+
+
+def rejection_metadata(result):
+    """Keep exact known admission diagnostics without copying an error body."""
+    error = result.get('error') if isinstance(result, dict) else None
+    if not isinstance(error, dict):
+        return {}
+    retained = {}
+    if bounded_choice(error.get('queue_scope'), {'hub', 'node', 'project'}) is not None:
+        retained['queue_scope'] = error['queue_scope']
+    if bounded_choice(error.get('queue_reason'), {'admission_count', 'admission_bytes', 'control_reserve',
+                                                'resource_pressure', 'project_fairness'}) is not None:
+        retained['queue_reason'] = error['queue_reason']
+    retry = bounded_number(error.get('retry_after_seconds'), 0, 300)
+    if retry is not None:
+        retained['retry_after_seconds'] = retry
+    if type(error.get('admitted')) is bool:
+        retained['admitted'] = error['admitted']
+    return retained
+
+
 def extract(response):
     response.raise_for_status()
     body = response.json()
@@ -288,6 +427,9 @@ async def workload(stack, output, workload_name, concurrency, operations, reques
                     if failed:
                         error = result.get('error')
                         sample['error'] = safe_code(error.get('code', state) if isinstance(error, dict) else state)
+                        admission_rejection = rejection_metadata(result)
+                        if admission_rejection:
+                            sample['admission_rejection'] = admission_rejection
                 except Exception as exc:
                     # Stop admission for every worker. A missing HTTP response
                     # never authorizes another operation; recover this ID only.
@@ -398,6 +540,10 @@ def main():
     parser.add_argument('--workloads',default='read,read_write,long_short')
     parser.add_argument('--operations-per-worker',type=int,default=4)
     parser.add_argument('--request-timeout',type=float,default=120)
+    parser.add_argument('--admission-profile',choices=['cold','ready'],default='cold',
+                        help='cold observes once; ready waits for the real applied adaptive budget')
+    parser.add_argument('--readiness-timeout',type=float,default=300,
+                        help='Absolute ready preparation budget in seconds (1..300), never a capacity override')
     parser.add_argument('--skip-disconnect-check',action='store_true')
     parser.add_argument('--preflight-seconds',type=float,default=5)
     parser.add_argument('--max-load-per-cpu',type=float,default=1)
@@ -417,6 +563,7 @@ def main():
             or not set(names)<={'read','read_write','long_short'}):
         parser.error('invalid workload or concurrency')
     if (not 1<=options.operations_per_worker<=32 or not 10<=options.request_timeout<=300
+            or not 1<=options.readiness_timeout<=300
             or not 0<=options.preflight_seconds<=60 or not .1<=options.max_load_per_cpu<=10):
         parser.error('invalid operation count or timeout')
     # The chosen checkout owns every product import and subprocess cwd. The
@@ -430,7 +577,12 @@ def main():
         'python':sys.version,'platform':platform.platform(),'cpu_count':os.cpu_count(),
         'host_context':options.host_context,'started_at':time.time(),'loadavg_start':list(os.getloadavg()),
         'workloads':names,'concurrency':levels,'operations_per_worker':options.operations_per_worker,
+        'admission_profile':options.admission_profile,'readiness_timeout_seconds':options.readiness_timeout,
+        'admission_cases':[],
         'measurement_notes':['Loopback fixture, not ChatGPT host or public WAN',
+            'cold observes admission once; ready waits only for a real authenticated adaptive budget',
+            'Ready preparation and before/after budget observations are outside measured workload time',
+            'The live admission budget may shrink during a case; every rejection remains an error',
             'Hub queue: admission to first dispatch, Hub clock only',
             'Agent queue: relative accepted/wait to executing within one attempt',
             'Resource CPU is ps lifetime-average; RSS KiB only Hub+Agent, not aggregate child tree',
@@ -463,8 +615,25 @@ def main():
                         (bench/f'worker-{index}.txt').write_bytes(b'initial\n')
                     directory = output/(name+'-'+str(concurrency))
                     directory.mkdir()
+                    # One completed read is protocol warmup, not adaptive-budget
+                    # readiness. Record every case's actual preparation state.
+                    admission = {'case':name+'-'+str(concurrency), 'started_at':time.time()}
+                    manifest['admission_cases'].append(admission)
+                    try:
+                        admission['before'] = prepare_admission(
+                            lambda **kwargs: observe_admission(stack, **kwargs), concurrency,
+                            profile=options.admission_profile, timeout=options.readiness_timeout)
+                    except AdmissionReadinessError as exc:
+                        admission['before'] = exc.observation
+                        raise
                     summary = asyncio.run(workload(stack,directory,name,concurrency,
                         options.operations_per_worker,options.request_timeout))
+                    admission['after'] = prepare_admission(
+                        lambda **kwargs: observe_admission(stack, **kwargs), concurrency,
+                        profile='cold', timeout=options.readiness_timeout)
+                    admission['ended_at'] = time.time()
+                    summary['admission'] = admission
+                    (directory/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
                     summaries.append(summary)
                     print(json.dumps(summary),flush=True)
                     with sqlite3.connect(f'file:{stack.hubdir/"hub.sqlite3"}?mode=ro',uri=True) as db:
@@ -480,7 +649,7 @@ def main():
             else:
                 manifest['disconnect'] = {'exercised':False, 'passed':False, 'reason':'explicitly_skipped'}
     except Exception as exc:
-        manifest.setdefault('result', 'failed')
+        manifest.setdefault('result', 'readiness_not_met' if isinstance(exc, AdmissionReadinessError) else 'failed')
         manifest['error'] = type(exc).__name__
     usage = resource.getrusage(resource.RUSAGE_CHILDREN)
     manifest.update(ended_at=time.time(),loadavg_end=list(os.getloadavg()),

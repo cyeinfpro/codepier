@@ -4,7 +4,7 @@
 
 ## 安全与执行条件
 
-- 只用现有 Python/依赖，不安装软件。所有输出必须是当前工作目录下全新的 .work 子目录。
+- 只用现有 Python/依赖，不安装软件。Hub/Agent 夹具使用独立 `/tmp` 工作目录，所有输出仍必须是该目录下全新的 `.work` 子目录。共享工作区仅保存已经停止、核对完整性后的测量归档，不能同步或读取运行中的数据库、WAL 和项目文件。
 - 不连接生产 Hub、真实账户或公网后端。脚本没有可传入外部 endpoint、真实凭据的参数；HTTP fixture 仅绑定 127.0.0.1。
 - Hub/Agent 基准通过 central tests.support.running_stack 建立一次性 fixture。它会在输出目录的合成 ProjectAlpha/Beta/Gamma 中创建初始 Git 提交、临时用户/授权、配对数据与配置。不是修改用户仓库、生产账户或实际凭据。
 - fixture 原始日志、数据库、配置仍可能含合成密钥。不得整目录上传或公开。分享前单独审阅 manifest、summary 和仅有测量字段的 JSONL；host-context 也不得填写秘密或私人内容。
@@ -28,12 +28,23 @@ scripts/benchmark_hub_agent.py 的同一份文件、同一解释器分别传 --r
 - long_short：每八个 worker 有一个每四次发一次 0.4 秒合成任务，其他为短读；短/长样本分开汇总
 - 复用测量 HTTP client 的协议 warmup 完整等到终态后才开始计时
 - 每个样本保留操作 ID、worker/step/kind、总时延、错误类型、poll 数、原 ID 恢复和状态
+- 准入拒绝另保留四个有界白名单字段：`queue_scope`、`queue_reason`、`retry_after_seconds`、`admitted`。不保存错误原文、原始响应、配置、路径或凭据；拒绝仍计入失败，不自动重试新操作
 - Hub queue：同 Hub 时钟的 admission(created) 至首 dispatch；Agent queue：同一执行尝试的相对 accepted/wait 至 executing。attempts 不等于 1 时不混算 Agent 时间，只保留不可用原因
 - 真实断 HTTP waiter：在 fixture 数据库看见原 idem 对应 running 操作后取消等待，仅 task_query 原 operation ID；核对该 idem 只有一条 operation、2 秒合成任务只追加一次计数
 
 初次 HTTP 异常、poll 拒绝、未知/缺失状态及错误 receipt 均停止所有 worker 的新发起。只允许查询已知原 ID；初次响应丢失时，仅从该 fixture DB 的精确 idem 查回原 ID，不重新调用原工具。恢复成功也保留初次失败样本，不变绿。当前 phase 清理后不继续下一格。任意残留 queued/running/reconnecting/cancelling/unknown 也阻止后续 phase。
 
 断连检查未实际触发、检查失败、--skip-disconnect-check、资源采样缺失、源码中途变化或任意错误，均不能取得完整验收。跳过断连只用于诊断。
+
+#### 冷启动与准入就绪
+
+`--admission-profile cold` 是默认值：每格开始前只观察一次真实准入状态，不等待扩容，保留原有单次读取 warmup。每格结束后再观察一次。这里的 `cold` 表示没有准入预热屏障，并不表示每格重启夹具；多格共用一个持续运行的夹具。前序格变快，会让后续格在不同启动年龄遇到自适应预算，所以不能把这一序列直接当作稳定容量对照。
+
+稳定准入对照显式使用 `--admission-profile ready --readiness-timeout 300`。脚本通过夹具既有的认证 HTTP 客户端，只读 `/api/settings/scheduler`；要求配置已应用、revision 有效、预算 reason 为 `adaptive`、未暂停 heavy admission，且节点和项目 pending 上限均不小于本格并发数。它不会写入调度偏好、伪造健康遥测、提高阈值或直接修改 Hub/Agent 内存。该条件说明观测到的 pending 预算，不是执行槽位或零拒绝保证；真实资源压力、读保留额度和工作负载仍可能使格内请求被拒绝。
+
+探测间隔至少三秒，单次 HTTP timeout 不超过十秒及绝对截止的剩余时间。等待预算默认且最多 300 秒；即使最后一次响应报告就绪，只要已到绝对截止也失败。永久未知、压力状态、失联或 HTTP 错误不会被当作就绪，不复用旧的成功观察。失败写入 `readiness_not_met`，停止该轮而不重新压测。准备及前后观察不计入 workload 时长。
+
+`manifest.json` 记录 profile、等待预算及所有 case 的安全观察；每个已完成 case 的 `summary.json` 还包含相同的 `admission` 记录。观察包括实际预算、reason、三条 lane 的有界数值及等待经过时间，不包括设备身份、scheduler 配置或项目路径。将 `cold` 与 `ready` 分开报告，同一对必须使用同一 profile、等待预算和新 harness 哈希；旧冷启动拒绝结果保持原样，不能用 ready 结果替换。
 
 ### Gateway Session 微基准
 
@@ -55,8 +66,8 @@ scripts/benchmark_gateway.py 单独比较 Session 调度与传输，不混入 Hu
 下述命令只执行指定纯 mock/helper 测试，不启动真实 listener/Hub/Agent。将 PY 指向已安装依赖的解释器：
 
     PY=/path/to/existing/python
-    "$PY" -m pytest -q tests/test_benchmark_hub_agent.py tests/test_benchmark_gateway.py
-    "$PY" -m ruff check scripts/benchmark_hub_agent.py scripts/benchmark_gateway.py tests/test_benchmark_hub_agent.py tests/test_benchmark_gateway.py
+    "$PY" -m pytest -q tests/test_benchmark_hub_agent.py tests/test_benchmark_admission_readiness.py tests/test_benchmark_gateway.py
+    "$PY" -m ruff check scripts/benchmark_hub_agent.py scripts/benchmark_gateway.py tests/test_benchmark_hub_agent.py tests/test_benchmark_admission_readiness.py tests/test_benchmark_gateway.py
 
 测试不从 test_*.py 导入共享 fixture。新增测量器失败、超时、状态错误和脱敏行为都有独立负向检查。秒级 mock 结果只证明脚本语义，不能替代下面真实矩阵。
 
@@ -67,13 +78,16 @@ scripts/benchmark_gateway.py 单独比较 Session 调度与传输，不混入 Hu
     PY=/path/to/existing/python
     AFTER=/path/to/codepier-after
     BEFORE=/path/to/codepier-before
-    cd "$AFTER"
+    BENCHMARK_DIR="$(mktemp -d /tmp/codepier-benchmark.XXXXXX)"
+    cd "$BENCHMARK_DIR"
 
     "$PY" "$AFTER/scripts/benchmark_hub_agent.py" \
       --repository "$BEFORE" --variant before --output .work/hub-pair01-before \
+      --admission-profile ready --readiness-timeout 300 \
       --operations-per-worker 32 --host-context "实际已核实的同时运行活动"
     "$PY" "$AFTER/scripts/benchmark_hub_agent.py" \
       --repository "$AFTER" --variant after --output .work/hub-pair01-after \
+      --admission-profile ready --readiness-timeout 300 \
       --operations-per-worker 32 --host-context "实际已核实的同时运行活动"
 
 下一对反转次序 after → before。至少三个 ABBA 循环（六个相邻配对），保留全部结果，不选最好的一次。初次仅可先跑 --concurrency 1 --operations-per-worker 1 作真实 harness 冒烟，明确标成 smoke，不并入正式矩阵。
