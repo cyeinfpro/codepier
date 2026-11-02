@@ -149,16 +149,36 @@ async def test_two_commands_start_together_and_reads_bypass_busy_workers(agent, 
     monkeypatch.setattr(instance, 'execute', execution)
     await instance.scheduler.reconfigure({"adaptive": False, "initial": 3})
     jobs = [asyncio.create_task(instance.handle(request(project, 'exec', command='fixture', idempotency_key=uuid.uuid4().hex))) for _ in range(2)]
+    read_job = None
     try:
-        await asyncio.wait_for(both.wait(), 1)
+        # Deadlock guards are not latency requirements. The read uses a real
+        # isolated process and must flush coverage and its journal before exit.
+        await asyncio.wait_for(both.wait(), 10)
         (root / 'file').write_text('readable')
         call = request(project, 'read', path='file')
-        await asyncio.wait_for(instance.handle(call), 1)
-        result = instance.journal.status(call['id'])['result']
+        read_job = asyncio.create_task(instance.handle(call))
+        # Leave the worker's own 15-second timeout intact. wait_for would
+        # cancel handle and manufacture an INTERRUPTED receipt on a slow host.
+        done, _ = await asyncio.wait({read_job}, timeout=20)
+        assert read_job in done, {
+            'message': 'Read did not finish while both commands remained blocked',
+            'journal': instance.journal.status(call['id']),
+            'trace': instance.telemetry.snapshot(call['id']),
+        }
+        await read_job
+        assert not release.is_set()
+        assert all(not job.done() for job in jobs)
+        status = instance.journal.status(call['id'])
+        assert status['status'] == 'done', status
+        result = status['result']
         assert result['ok'], result
         assert result['data']['content'] == 'readable'
     finally:
         release.set()
+        if read_job is not None:
+            if not read_job.done():
+                read_job.cancel()
+            await asyncio.gather(read_job, return_exceptions=True)
         await asyncio.gather(*jobs)
 
 
