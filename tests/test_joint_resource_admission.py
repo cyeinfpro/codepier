@@ -227,4 +227,3 @@ async def test_minimal_open_uses_one_read_worker_while_root_and_execution_are_bu
         assert agent._active_slots  # Existing writer ownership is unchanged.
         assert not agent.resources.waiting and not agent._read_workers
     assert not agent.scheduler.active and not agent.resources.active
-

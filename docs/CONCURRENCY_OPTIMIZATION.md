@@ -41,13 +41,17 @@
 
 ## 可选的容器预算
 
-在确认主机有足够余量后，先检查覆盖后的配置：
+在确认主机有足够余量后，先保留实际 `COMPOSE_FILE` 或当前使用的完整 Compose 文件序列，在末尾追加性能覆盖文件。不能用基础 `compose.yml` 替换既有 HTTPS 覆盖或 `.codepier-updater/layouts/...` 独立状态卷布局；否则可能遗漏状态卷挂载、改变 `HUB_STATE_DIR` 或启动错误的历史数据库。
+
+下面的配置检查仅适用于当前配置恰为 `compose.yml`、尚未分离状态卷且没有其他覆盖文件的新部署或未托管部署：
 
 ```sh
 docker compose -f compose.yml -f deploy/compose.performance.yml config
 ```
 
-覆盖文件默认给 Hub 2 CPU 上限、1 GiB 内存上限、512 MiB reservation、512 pids 和有界日志保留。可通过 `.env.example` 中的 `CODEPIER_HUB_*` 与 `CODEPIER_LOG_*` 设置调整。只有显式应用覆盖文件才生效；生产升级继续采用已有部署/更新流程，并确认持久 Compose 的资源设置未丢失。
+覆盖文件默认给 Hub 2 CPU 上限、1 GiB 内存上限、512 MiB reservation、512 pids 和有界日志保留。可通过 `.env.example` 中的 `CODEPIER_HUB_*` 与 `CODEPIER_LOG_*` 设置调整。实际应用前，核对合并结果中的镜像、服务、全部卷、`HUB_STATE_DIR` 与资源限制。
+
+已由更新服务托管的部署应将此文件视为预算参考，按既有配置变更流程把资源设置合入当前已登记的完整布局，再核对 `current.json` 实际记录。仅修改 `.env`、一次性添加 `-f`，或重装更新服务，都不保证新增覆盖文件被登记并在后续更新中保留。更新器的 `DEPLOYMENT_CHANGED` 检查不能绕过，参见 [面板更新](PANEL_UPDATE.md)。普通查询和源码发布不会应用此预算。
 
 比较升级前后的 cgroup memory.current、memory.events、CPU throttle、进程 RSS、DB worker 排队与磁盘余量。memory.current 包含缓存，不能全部当作 Python 堆；历史 memory.events 计数需要看增量。资源上限应由真实稳定负载验证，不能仅因主机空闲就把所有并发提高到 64。
 

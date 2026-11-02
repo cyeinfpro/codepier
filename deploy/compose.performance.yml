@@ -1,7 +1,9 @@
-# Opt-in budget for a host with spare capacity. Apply with the main compose.yml:
-# docker compose -f compose.yml -f deploy/compose.performance.yml config
-# docker compose -f compose.yml -f deploy/compose.performance.yml up -d
-# Existing .env, volumes, credentials and updater configuration stay authoritative.
+# Opt-in budget for a host with spare capacity. Append to the complete currently
+# selected Compose configuration. Preserve existing HTTPS overlays and any
+# .codepier-updater/layouts/... state layout; do not replace them with compose.yml.
+# Validate merged volumes, HUB_STATE_DIR, image, services and resource limits.
+# Managed deployments must retain the budget in their registered configuration;
+# a one-time -f overlay or .env edit does not establish updater persistence.
 services:
   hub:
     cpus: "${CODEPIER_HUB_CPUS:-2.0}"
