@@ -656,6 +656,7 @@ class GoalRead(Scope):
 
 
 class WorkCreate(GoalRead):
+    assignee_member_id: str = Field(default='', max_length=128, exclude_if=lambda value: not value)
     assignee_dot_id: str = Field(default='', max_length=128, exclude_if=lambda value: not value)
     required_capabilities: list[GoalCapability] = Field(default_factory=lambda: ['read'], min_length=1, max_length=3)
     objective: str = Field(min_length=1, max_length=4000)
@@ -675,6 +676,7 @@ class WorkCreate(GoalRead):
 
 
 class WorkAssign(GoalRead):
+    assignee_member_id: str = Field(default='', max_length=128, exclude_if=lambda value: not value)
     assignee_dot_id: str = Field(default='', max_length=128, exclude_if=lambda value: not value)
     work_item_id: Identifier
     assignee_grant_id: Identifier
@@ -838,6 +840,7 @@ class DotCreate(Scope):
     label: str = Field(min_length=1, max_length=80)
     capabilities: list[GoalCapability] = Field(default_factory=lambda: ['read'], min_length=1, max_length=3)
     execution_target: str = Field(default='project_agent', pattern=r'^(project_agent|vps:[A-Za-z0-9_.:-]+)$', max_length=132)
+    execution_targets: list[Annotated[str, Field(pattern=r'^(project_agent|vps:[A-Za-z0-9_.:-]+)$', max_length=132)]] = Field(default_factory=list, max_length=16, exclude_if=lambda value: not value)
     acknowledge_unsandboxed_exec: bool = False
     confirm_tasks: Literal[True]
     idempotency_key: Key
@@ -850,8 +853,9 @@ class DotCreate(Scope):
             raise ValueError('A command budget requires explicitly approved execution capability')
         DelegationPolicySet(project=self.project, conversation_id=self.conversation_id or 'default',
             slot_id='pending', expected_version=0, purpose='Panel dot tasks', capabilities=self.capabilities,
-            execution_target=self.execution_target, acknowledge_unsandboxed_exec=self.acknowledge_unsandboxed_exec,
-            automatic_delegation=True, idempotency_key=self.idempotency_key)
+            execution_target=self.execution_target, execution_targets=self.execution_targets,
+            acknowledge_unsandboxed_exec=self.acknowledge_unsandboxed_exec,
+            automatic_delegation=len(self.execution_targets)<=1, idempotency_key=self.idempotency_key)
         return self
 
 

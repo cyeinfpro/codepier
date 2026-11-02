@@ -487,6 +487,8 @@ class Runtime:
         name, raw = resolve_collaboration(name, raw)
         if name == 'collaboration_work_execute':
             return await self.collaboration.coordination.execute(raw, principal)
+        if name == 'collaboration_room_channel_action':
+            return await self.collaboration.room_channels.action(raw, principal)
         if name in COLLABORATION_TOOLS:
             return await self.store.run(self.collaboration.invoke, name, raw, principal)
         from shared.query_contracts import QUERY_TOOLS

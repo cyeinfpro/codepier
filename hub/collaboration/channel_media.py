@@ -128,6 +128,21 @@ class ChannelMedia:
                              (identifier, principal.space_id, principal.user_id))
         if not row:
             raise DevError('ATTACHMENT_NOT_FOUND', '当前身份不能访问这个附件', 404)
+        binding = self.store.one('SELECT * FROM weixin_bindings WHERE id=?', (row['binding_id'],))
+        if binding and binding.get('native_member_id'):
+            _,_,_,room,_=self.w.valid(binding['id'])
+            message=self.store.one('SELECT * FROM collaboration_messages WHERE id=? AND conversation_id=?',
+                (row['message_id'],room['id']))
+            if (not message or row['conversation_id']!=room['id'] or row['generation']!=binding['generation']
+                    or row['peer_id']!=binding['peer_id']):
+                raise DevError('ATTACHMENT_SCOPE_CHANGED','附件原房间、联系人或绑定已改变',403)
+            self.c.conversations.object(principal,room['id'])
+            self.c.chatroom.require_message_visible(principal,message)
+            if row['direction']!='inbound':
+                self.c.runtime.project(row['project_id'],principal)
+            if row['expires_at']<=self.c.clock() or row['state']=='expired':
+                raise DevError('ATTACHMENT_EXPIRED','附件保留期限已到；不会重跑原生成任务',410)
+            return row
         project = self.c.runtime.project(row['project_id'], principal)
         room = self.store.one('SELECT * FROM collaboration_rooms WHERE id=?', (row['room_id'],))
         from hub.room_scope import require_room

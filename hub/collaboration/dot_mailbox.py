@@ -289,6 +289,9 @@ class DotMailbox:
         dot = self.c.dots.find(dot) if isinstance(dot, str) else dot
         if not dot:
             return 0
+        member = self.c.dot_consumers.room_member(dot['id'])
+        if member:
+            return self.c.room_consumers.enqueue_ref(member, kind, object_id, object_version, reference)
         row = self.binding(dot['id'])
         if not row:
             return 0

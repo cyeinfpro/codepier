@@ -619,6 +619,10 @@ class WorkingScopes:
         return self.reference(record)
 
     def validate_goal(self, principal, goal):
+        native=self.c.room_work_bridge.native
+        if reference:=native.reference(goal):
+            native.validate(reference,principal)
+            return
         current = self.current(goal['conversation_id'])
         if current is None:
             return

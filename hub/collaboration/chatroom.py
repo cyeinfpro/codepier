@@ -86,7 +86,7 @@ class ChatroomService:
             receipt.update(delivery_map.get(receipt.get('event_id'), {}))
         text = body.get('body_text', body.get('summary', body.get('command', {}).get('request', '')))
         owner = row['origin'] in {'panel', 'panel_owner'}
-        partition = self.store.one('SELECT project_id,environment_id FROM collaboration_rooms WHERE id=?', (row['room_id'],))
+        partition = self.store.one('SELECT project_id,environment_id FROM collaboration_rooms WHERE id=?', (row['room_id'],)) or {}
         result = {**row, **partition, 'source_room_id': row['room_id'], 'source_sequence': row['server_sequence'],
                   'server_sequence': row['conversation_sequence'], 'message_id': row['id'], 'body': body, 'body_text': text,
                   'author_kind': 'owner' if owner else 'connector',
@@ -186,7 +186,13 @@ class ChatroomService:
         return result
 
     def message_visible(self, principal, row):
-        for project_id in json.loads(row['body']).get('provenance_project_ids', []):
+        projects = set(json.loads(row['body']).get('provenance_project_ids', []))
+        if row.get('room_id'):
+            partition = self.store.one('SELECT project_id FROM collaboration_rooms WHERE id=?', (row['room_id'],))
+            if not partition:
+                return False
+            projects.add(partition['project_id'])
+        for project_id in projects:
             try:
                 self.c.runtime.project(project_id, principal)
             except DevError:

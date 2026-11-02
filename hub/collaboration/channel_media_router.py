@@ -35,6 +35,8 @@ class ChannelMediaRouter:
         )
         if not found or found["channel"] == "weixin":
             return self.legacy.row(identifier, principal)
+        if found['channel'] == 'panel':
+            return self.c.room_attachments.row(identifier, principal)
         principal = refresh_principal(self.store, principal)
         row = self.store.one(
             "SELECT * FROM channel_attachments WHERE id=? AND space_id=? AND owner_user_id=?",
@@ -73,7 +75,7 @@ class ChannelMediaRouter:
         if row["state"] != "ready" or not row["content"]:
             raise DevError("ATTACHMENT_NOT_READY", "附件尚未准备完成", 409)
         data = base64.b64decode(self.store.decrypt(row["content"]), validate=True)
-        if hashlib.sha256(data).hexdigest() != row["sha256"]:
+        if len(data) != row["size"] or hashlib.sha256(data).hexdigest() != row["sha256"]:
             raise DevError("ATTACHMENT_INTEGRITY", "附件完整性校验失败", 409)
         start, end, partial = byte_range(range_header, len(data))
         return data[start : end + 1], row, start, end, partial

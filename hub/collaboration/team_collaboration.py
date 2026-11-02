@@ -354,6 +354,9 @@ class TeamService:
         return actual
 
     def guard(self, raw, principal, goal, action, item=None):
+        native=self.c.room_work_bridge.native
+        if native.reference(goal):
+            return native.guard(raw,principal,goal,item,action=action,require_revision=True)
         link = self.link(goal)
         if not link:
             if hasattr(self.c, 'dot_consumers'):
@@ -502,6 +505,8 @@ class TeamService:
         return True
 
     def operation_guard(self, goal, item):
+        if self.c.room_work_bridge.native.operation_guard(goal,item):
+            return
         link = self.link(goal)
         if not link:
             return
@@ -518,6 +523,8 @@ class TeamService:
                 redact(summary), '[]', canonical([item['project_id']]), self.c.clock()))
 
     def result_ready(self, goal, item):
+        if self.c.room_work_bridge.native.result_ready(goal,item):
+            return
         link = self.link(goal)
         if link:
             self.dirty(link['coordinator_dot_id'], 'result_ready', item['id'], item['version'],
@@ -525,13 +532,15 @@ class TeamService:
 
     def artifacts(self, goal, refs):
         seen, current = set(), []
-        link = self.link(goal)
+        native=self.c.room_work_bridge.native.reference(goal)
+        link = {'intent_revision':self.c.room_runtime.intent_revision(goal['id'])} if native else self.link(goal)
+        assignments='room_native_work_assignments' if native else 'team_work_assignments'
         for ref in refs:
             if ref['work_item_id'] in seen:
                 raise DevError('TEAM_ARTIFACT_DUPLICATE', '产物引用不能重复', 422)
             seen.add(ref['work_item_id'])
             item = self.q.work(goal, ref['work_item_id'])
-            assignment = self.store.one('SELECT * FROM team_work_assignments WHERE work_id=?', (item['id'],))
+            assignment = self.store.one('SELECT * FROM '+assignments+' WHERE work_id=?', (item['id'],))
             if (item['approval_id'] != goal['approval_id'] or not item['result'] or item['version'] != ref['version']
                     or digest(json.loads(item['result'])) != ref['digest'] or not assignment
                     or assignment['intent_revision'] != link['intent_revision']):

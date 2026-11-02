@@ -76,6 +76,8 @@ class WeixinService:
 
     def valid(self, identifier, *, pairing=False):
         binding = self.store.one('SELECT * FROM weixin_bindings WHERE id=?', (identifier,))
+        if binding and binding.get('native_member_id'):
+            return self.c.room_channels.native.valid(binding,pairing=pairing)
         if binding:
             self.require_enabled(binding)
         allowed = {'active', 'pairing', 'awaiting_owner'} if pairing else {'active'}
@@ -380,6 +382,8 @@ class WeixinService:
             return {'committed': True, 'message_ids': received, 'cursor_persisted': bool(cursor)}
 
     def ingest_one(self, binding, account, owner, room, dot, message):
+        if binding.get('native_member_id'):
+            return self.c.room_channels.native.ingest(binding,account,owner,room,dot,message)
         if not isinstance(message, dict):
             raise DevError('WEIXIN_MESSAGE_INVALID', '消息不是结构化对象；整批保留原游标', 422)
         peer = text(message.get('from_user_id'), 256)

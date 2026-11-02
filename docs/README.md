@@ -22,6 +22,9 @@
 
 ## 权限、协作与维护
 
+- [房间协作中心](COLLABORATION_CENTER.md)：建房、成员接入、项目范围、微信向导和原工作继续
+- [协作中心维护与恢复](COLLABORATION_CENTER_OPERATIONS.md)：接入诊断、迁移、幂等回执与数据库恢复
+
 - [安全指南](../SECURITY.md)
 - [身份与 OIDC](MULTIUSER_OIDC.md)
 - [访问配置](ACCESS_PROFILES.md)与[动态角色](DYNAMIC_ROLES.md)

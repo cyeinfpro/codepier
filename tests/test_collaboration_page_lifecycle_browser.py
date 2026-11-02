@@ -4,6 +4,8 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from playwright.sync_api import expect
 
+from tests.legacy_collaboration_ui import use_legacy_collaboration_ui
+
 from tests.collaboration_support import collaboration_stack  # noqa: F401
 
 pytestmark = [pytest.mark.browser, pytest.mark.integration, pytest.mark.slow]
@@ -27,6 +29,7 @@ def test_pagehide_cancels_refresh_and_cached_restore_preserves_draft(
 
     page.on("request", observe)
     try:
+        use_legacy_collaboration_ui(page, stack)
         page.goto(stack.url + "/#projects")
         page.fill("#username", "admin")
         page.fill("#password", stack.password)

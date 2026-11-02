@@ -92,6 +92,10 @@ class DotService:
             snapshot = asdict(principal)
             snapshot.update(scopes=[], session_hash='', token_hash='')
             setup = {key: args[key] for key in ('capabilities', 'execution_target', 'acknowledge_unsandboxed_exec')}
+            if args.get('execution_targets'):
+                setup['execution_targets']=args['execution_targets']
+                setup['target_snapshots']={value:self.c.delegation.target_snapshot(principal,project,value)
+                                           for value in args['execution_targets']}
             if args.get('duplex'):
                 setup['duplex'] = True
             if args.get('operation_timeout_seconds'):
@@ -133,6 +137,9 @@ class DotService:
                 self.c.coordination.require_capability(subject, capability, project['id'])
         if self.c.delegation.target_snapshot(owner, project, setup['execution_target']) != setup['target_snapshot']:
             raise DevError('DOT_TARGET_CHANGED', '已确认执行目标发生变化，请重新确认', 409)
+        for target in setup.get('execution_targets',[]):
+            if self.c.delegation.target_snapshot(owner,project,target)!=setup.get('target_snapshots',{}).get(target):
+                raise DevError('DOT_TARGET_CHANGED','已确认执行目标发生变化，请重新确认',409)
         return owner, setup
 
     def join(self, raw, principal):
@@ -172,8 +179,9 @@ class DotService:
                     'conversation_id': dot['conversation_id'], 'slot_id': dot['id'], 'expected_version': 0,
                     'purpose': setup['purpose'], 'capabilities': setup['capabilities'],
                     'execution_target': setup['execution_target'],
+                    **({'execution_targets':setup['execution_targets']} if setup.get('execution_targets') else {}),
                     'acknowledge_unsandboxed_exec': setup['acknowledge_unsandboxed_exec'],
-                    'automatic_delegation': True,
+                    'automatic_delegation': len(setup.get('execution_targets',[]))<=1,
                     **({'budget': {'operation_timeout_seconds': setup['operation_timeout_seconds']}}
                        if setup.get('operation_timeout_seconds') else {}),
                     'idempotency_key': 'dot-policy:' + dot['id']}, owner)['policy']

@@ -244,6 +244,24 @@ def migrate(db):
     migrate_dot_mailbox(db)
     from hub.collaboration.relay_hints import migrate as migrate_relay_hints
     migrate_relay_hints(db)
+    from hub.collaboration.room_event_migration import migrate as migrate_room_events
+    migrate_room_events(db)
+    from hub.collaboration.rooms import migrate as migrate_rooms
+    from hub.collaboration.room_runtime import migrate as migrate_room_runtime
+    from hub.collaboration.room_channels import migrate as migrate_room_channels
+    from hub.collaboration.room_work_bridge import migrate as migrate_room_work_bridge
+    from hub.collaboration.room_consumer_migration import migrate as migrate_room_consumers
+    migrate_rooms(db)
+    migrate_room_consumers(db)
+    migrate_room_runtime(db)
+    migrate_room_channels(db)
+    migrate_room_work_bridge(db)
+    from hub.collaboration.room_goal_recovery import migrate as migrate_room_goal_recovery
+    from hub.collaboration.room_goal_handoffs import migrate as migrate_room_goal_handoffs
+    migrate_room_goal_recovery(db)
+    migrate_room_goal_handoffs(db)
+    from hub.collaboration.room_message_migration import migrate as migrate_room_messages
+    migrate_room_messages(db)
     db.execute("INSERT OR REPLACE INTO meta VALUES ('collaboration_schema','3')")
 
 def migrate_chatroom(db):

@@ -1,7 +1,7 @@
 """Real HTTP/modern MCP enrollment uses existing grants and panel CSRF."""
 import pytest
 
-from hub.collaboration.common import EVENTS, MESSAGE_EVENT, WORK_EVENT, DELEGATION_EVENT, MAILBOX_EVENT
+from hub.collaboration.common import EVENTS, MESSAGE_EVENT, WORK_EVENT, DELEGATION_EVENT, MAILBOX_EVENT, ROOM_INBOX_EVENT
 from tests.collaboration_support import collaboration_stack
 from tests.collaboration_support import key
 from tests.test_mcp_tasks_http import modern
@@ -55,7 +55,17 @@ def test_event_discovery_advertises_slot_filter_without_assuming_host_binding(co
     for event in catalog['events']:
         schema = event['inputSchema']
         required = set(schema.get('required', []))
-        if event['name'] == MAILBOX_EVENT:
+        if event['name'] == ROOM_INBOX_EVENT:
+            assert set(schema['properties']) == {'owner_user_id', 'conversation_id', 'member_id', 'binding_generation'}
+            assert required == set(schema['properties'])
+            assert schema['additionalProperties'] is False
+            assert schema['properties']['binding_generation']['type'] == 'integer'
+            assert schema['properties']['binding_generation']['minimum'] == 1
+            payload = event['payloadSchema']
+            assert payload['additionalProperties'] is False
+            assert payload['properties']['schema_version']['const'] == 1
+            assert not {'project_id', 'room_id', 'body_text', 'connection_proof'} & set(payload['properties'])
+        elif event['name'] == MAILBOX_EVENT:
             assert set(schema['properties']) == {'project_id', 'environment_id', 'conversation_id',
                                                  'slot_id', 'binding_generation'}
             assert required == set(schema['properties'])

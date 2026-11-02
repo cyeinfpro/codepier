@@ -15,7 +15,12 @@ PLAN = {'intent': 'Monitor fixture', 'valid_until': '2030-01-01T00:00:00Z', 'rul
     'open_when': {'operator': 'lt', 'value': 0.9},
     'close_when': {'operator': 'gt', 'value': 0.99}, 'require_recovery_probe': 'probe'}]}
 VALUES = {
-    'dot_id': 'task-dot', 'message_id': 'message', 'confirm_task': True,
+    'title': 'A room', 'name': 'A member', 'flow_id': 'connect-flow', 'member_id': 'room-member',
+    'invite_code': 'CPR-fixture-invitation-not-a-secret-' * 2,
+    'connection_proof': 'fixture-member-proof-not-a-secret-' * 2,
+    'probe_nonce': 'fixture-connection-nonce-not-a-secret-' * 2,
+    'work_id': 'room-work',
+    'dot_id': 'task-dot', 'message_id': 'message', 'attachment_id': 'attachment', 'confirm_task': True,
     'team_id': 'team', 'binding_generation': 'binding-generation',
     'wake_ticket': 'fixture-wake-ticket-not-a-secret-' * 2,
     'consumer_run_id': 'consumer-run', 'consumer_session_id': 'consumer-session',
@@ -23,6 +28,8 @@ VALUES = {
     'expected_inbox_revision': 0, 'confirm_consumer_protocol': True,
     'entry_ids': ['mailbox-entry'], 'coordinator_epoch': 1, 'expected_intent_revision': 1,
     'recipient_dot_id': 'peer-dot', 'coordinator_dot_id': 'coordinator-dot',
+    'recipient_member_id': 'peer-member', 'target_member_id': 'peer-member', 'expected_coordinator_epoch': 1,
+    'handoff_id': 'handoff',
     'purpose': 'Review original constraints',
     'artifact_refs': [{'work_item_id': 'work', 'version': 1, 'digest': 'a' * 64}],
     'source_version': 1, 'source_digest': 'a' * 64,
@@ -63,7 +70,18 @@ def example(tool, action):
         return {'action': action, **{key: VALUES[key] for key in
             ('project', 'goal_id', 'work_item_id', 'attempt', 'fencing_token', 'idempotency_key')},
             'tool': 'exec', 'arguments': {'command': 'printf fixture'}}
-    return {key: (action if key == 'action' else deepcopy(VALUES[key])) for key in spec['required']}
+    result = {}
+    for key in spec['required']:
+        field = spec['properties'][key]
+        if key == 'action':
+            result[key] = action
+        elif key == 'flow_action':
+            result[key] = field.get('enum', [field.get('const')])[0]
+        elif key == 'binding_generation' and field.get('type') == 'integer':
+            result[key] = 1
+        else:
+            result[key] = deepcopy(VALUES[key])
+    return result
 
 
 @pytest.mark.parametrize('tool,action', [(tool, action) for tool, actions in ACTIONS.items() for action in actions])
@@ -78,8 +96,10 @@ def test_every_action_accepts_exact_shape_and_rejects_missing_or_foreign_fields(
     target, adapted = resolve(tool, raw)
     c.TOOL_MODELS[target].model_validate(adapted)
     # Route adaptation must not materialize nested defaults or change any key.
-    assert {k: v for k, v in raw.items() if k != 'action'} == {
-        k: v for k, v in adapted.items() if k != 'kind'}
+    expected = {k: v for k, v in raw.items() if k != 'action'}
+    if 'flow_action' in expected:
+        expected['action'] = expected.pop('flow_action')
+    assert expected == {k: v for k, v in adapted.items() if k != 'kind'}
     for field in raw:
         invalid = {k: v for k, v in raw.items() if k != field}
         assert list(validator.iter_errors(invalid)), (tool, action, field)
@@ -154,3 +174,33 @@ def test_canonical_requests_preserve_checkpoint_mode_and_exact_required_scope():
     assert resolve(canonical['tool'], canonical['arguments']) == ('collaboration_delegation_inbox', args)
     assert canonical['arguments']['checkpoint'] == args['checkpoint']
     assert canonical['arguments']['mode'] == 'notification_only'
+
+
+@pytest.mark.parametrize('action', ['takeover', 'restore_binding'])
+def test_room_recovery_requires_explicit_member_and_current_role_and_intent(action):
+    raw = {**example('collaboration', 'room_work_control'), 'flow_action': action}
+    with pytest.raises(DevError):
+        resolve('collaboration', raw)
+    approved = {**raw, 'target_member_id': 'original-member',
+        'expected_coordinator_epoch': 2, 'expected_intent_revision': 3}
+    target, arguments = resolve('collaboration', approved)
+    assert target == 'collaboration_room_work_control'
+    assert arguments['target_member_id'] == 'original-member'
+    assert arguments['expected_coordinator_epoch'] == 2
+    assert arguments['expected_intent_revision'] == 3
+    for field in ('target_member_id', 'expected_coordinator_epoch', 'expected_intent_revision'):
+        with pytest.raises(DevError):
+            resolve('collaboration', {key: value for key, value in approved.items() if key != field})
+    with pytest.raises(DevError):
+        resolve('collaboration', {**approved, 'expected_coordinator_epoch': True})
+
+
+def test_room_handoff_preserves_native_identity_and_rejects_blank_purpose():
+    raw = example('collaboration', 'room_work_handoff')
+    target, arguments = resolve('collaboration', raw)
+    assert target == 'collaboration_room_work_handoff'
+    assert arguments['member_id'] == VALUES['member_id']
+    assert arguments['recipient_member_id'] == VALUES['recipient_member_id']
+    assert 'project' not in arguments and 'dot_id' not in arguments
+    with pytest.raises(DevError):
+        resolve('collaboration', {**raw, 'purpose': '  '})

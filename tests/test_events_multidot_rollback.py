@@ -110,6 +110,19 @@ def test_plan_is_read_only_and_contains_exact_sources_and_current_operations(rol
     assert not plan['recovery']['restore_database_snapshot']
 
 
+def test_legacy_freeze_refuses_native_room_data_without_mutation(rollback_case):
+    c = rollback_case
+    native = c.s.rooms.create({'title': 'Independent recovery fixture',
+        'idempotency_key': key()}, c.owner)['room']
+    before = snapshots(c)
+    with pytest.raises(freeze.FreezeError, match='room-compatible'):
+        freeze.create_plan(c.database)
+    assert snapshots(c) == before
+    assert c.s.store.one('SELECT room_protocol FROM conversation_rooms WHERE id=?',
+                        (native['id'],))['room_protocol'] == 1
+    assert not c.s.store.one("SELECT 1 FROM sqlite_master WHERE name='multidot_rollback_manifests'")
+
+
 def test_freeze_uses_old_guard_states_and_preserves_original_ledgers(rollback_case):
     c = rollback_case
     original = snapshots(c)

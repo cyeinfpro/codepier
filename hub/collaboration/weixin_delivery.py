@@ -33,8 +33,8 @@ class WeixinDelivery:
                 return current
             if not current['reply_to_id']:
                 return None
-            current = self.store.one('SELECT * FROM collaboration_messages WHERE id=? AND room_id=? AND conversation_id=?',
-                                    (current['reply_to_id'], message['room_id'], message['conversation_id']))
+            current = self.store.one('SELECT * FROM collaboration_messages WHERE id=? AND conversation_id=?',
+                                    (current['reply_to_id'], message['conversation_id']))
             if not current:
                 return None
         return None
@@ -43,24 +43,33 @@ class WeixinDelivery:
         if not self.c.config.enabled:
             return None
         body = json.loads(message['body'])
-        if message['origin'] != 'bound_connector' or not body.get('sender_dot_id'):
+        if message['origin'] != 'bound_connector' or not (body.get('sender_dot_id') or body.get('sender_member_id')):
             return None
         source = self.root_source(message)
         if not source:
             return None
-        try:
-            self.c.channel_owner.require_reply_source(source)
-        except DevError:
-            return None
-        if body.get('dot_reply_complete') is False and not self.c.channel_owner.author(source)['authenticated']:
-            return None
         origin = json.loads(source['body']).get('external_origin', {})
         try:
-            binding, account, owner, room, dot = self.w.valid(origin.get('binding_id', ''))
+            if origin.get('native_room'):
+                author=self.c.room_channels.native.reply_author(message,source)
+            else:
+                self.c.channel_owner.require_reply_source(source)
+                author=self.c.channel_owner.author(source)
+        except DevError:
+            return None
+        if body.get('dot_reply_complete') is False and not author['authenticated']:
+            return None
+        try:
+            if origin.get('native_room'):
+                native_binding=self.store.one('SELECT * FROM weixin_bindings WHERE id=?',(origin.get('binding_id',''),))
+                binding, account, owner, room, dot = self.c.room_channels.native.reply_binding(native_binding,message,source)
+            else:
+                binding, account, owner, room, dot = self.w.valid(origin.get('binding_id', ''))
         except DevError:
             return None  # Chat persistence is independent of channel availability.
+        sender=(dot['id'] if self.c.room_channels.native.sender_matches(binding,message,source) else None) if binding.get('native_member_id') else body.get('sender_dot_id')
         if (not binding['allow_replies'] or origin.get('generation') != binding['generation']
-                or origin.get('peer_id') != binding['peer_id'] or body['sender_dot_id'] != dot['id']):
+                or origin.get('peer_id') != binding['peer_id'] or sender != dot['id']):
             return None
         old = self.store.one('SELECT * FROM weixin_deliveries WHERE binding_id=? AND generation=? AND message_id=? AND message_version=?',
                              (binding['id'], binding['generation'], message['id'], message['version']))
@@ -113,6 +122,9 @@ class WeixinDelivery:
         self.refresh(delivery['id'])
 
     def validate(self, delivery):
+        binding=self.store.one('SELECT * FROM weixin_bindings WHERE id=?',(delivery['binding_id'],))
+        if binding and binding.get('native_member_id'):
+            return self.c.room_channels.native.delivery_validate(delivery)
         binding, account, owner, room, dot = self.w.valid(delivery['binding_id'])
         if (not binding['allow_replies'] or binding['generation'] != delivery['generation']
                 or binding['peer_id'] != delivery['peer_id']):

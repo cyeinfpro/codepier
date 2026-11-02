@@ -93,6 +93,9 @@ class ChannelOwnerAuthority:
         if row.get('lifetime_mode') != 'until_revoked':
             return False
         identifier = row.get('lifetime_authorization_id', '')
+        if identifier.startswith('room-member:'):
+            bridge = getattr(self.c, 'room_work_bridge', None)
+            return bool(bridge and bridge.persistent(row))
         if identifier.startswith(('weixin-binding:', 'telegram-binding:')):
             channel = identifier.split('-binding:', 1)[0]
             binding = self.store.one('SELECT * FROM ' + channel + '_bindings WHERE id=?', (identifier.split(':', 1)[1],))
@@ -119,6 +122,10 @@ class ChannelOwnerAuthority:
                     and binding['account_id'] == scope['account_id'] and binding['peer_id'] == scope['peer_id'])
 
     def expired(self, row):
+        if row.get('lifetime_authorization_id','').startswith('room-member:'):
+            bridge=getattr(self.c,'room_work_bridge',None)
+            return not bridge or not bridge.authorized(row) or (
+                row.get('lifetime_mode')!='until_revoked' and row['expires_at']<=self.c.clock())
         return row['expires_at'] <= self.c.clock() and not self.persistent(row)
 
     def view(self, auth):
@@ -327,6 +334,9 @@ class ChannelOwnerAuthority:
         self.c.delegation.authorize_policy(actor, room, policy)
 
     def require_reply_source(self, source):
+        if (source and json.loads(source['body']).get('external_origin',{}).get('native_room')
+                and self.store.one('SELECT 1 FROM room_channel_owner_inputs WHERE message_id=?',(source['id'],))):
+            self.c.room_channels.native.author(source)
         if source and self.store.one('SELECT 1 FROM channel_owner_messages WHERE message_id=?', (source['id'],)):
             self.trusted(source)
 
@@ -430,17 +440,21 @@ class ChannelOwnerAuthority:
 
     def author(self, message):
         if message['origin'] == 'panel_owner':
-            room = self.store.one('SELECT * FROM collaboration_rooms WHERE id=?', (message['room_id'],))
-            if message['author'] == room['owner_user_id']:
+            room = self.store.one('SELECT * FROM conversation_rooms WHERE id=?', (message['conversation_id'],))
+            if room and message['author'] == room['owner_user_id']:
                 return {'kind': 'panel_owner', 'authenticated': True}
         if message['origin'] == 'external_channel':
             try:
+                if json.loads(message['body']).get('external_origin',{}).get('native_room'):
+                    return self.c.room_channels.native.author(message)
                 return self.trusted(message)
             except DevError:
                 return {'kind': 'external_channel', 'authenticated': False}
         return {'kind': 'unverified', 'authenticated': False}
 
     def budget_mode(self, policy):
+        if policy.get('lifetime_authorization_id','').startswith('room-member:'):
+            return 'lifetime'
         if self.persistent(policy):
             auth = self.store.one('SELECT * FROM channel_owner_authorizations WHERE id=?', (policy['lifetime_authorization_id'],))
             return json.loads(auth['scope'])['budget_mode']
@@ -451,7 +465,7 @@ class ChannelOwnerAuthority:
         # The signed policy and its per-task budgets remain unchanged.
         if self.budget_mode(policy) == 'unlimited':
             return None
-        if self.persistent(policy):
+        if self.persistent(policy) and not policy.get('lifetime_authorization_id','').startswith('room-member:'):
             auth = self.store.one('SELECT * FROM channel_owner_authorizations WHERE id=?', (policy['lifetime_authorization_id'],))
             return json.loads(auth['scope'])['max_delegations']
         return json.loads(policy['spec'])['max_delegations']
