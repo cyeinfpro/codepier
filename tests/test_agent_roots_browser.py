@@ -595,39 +595,107 @@ def test_changed_mapping_draft_is_never_automatically_submitted(project_editor, 
 
 def test_pending_mapping_validation_reuses_original_key_and_finishes(project_editor):
     page, transport = project_editor
+    held = []
 
     def handler(route, row):
-        if row["path"] == "/api/projects":
+        if row["path"] == "/api/projects" and row["method"] == "POST":
             if len(transport.matching("POST", "/api/projects")) == 1:
                 reply(route, {"error": {"code": "VALIDATION_PENDING", "message": "等待节点验证"}}, 409)
             else:
-                reply(route, {"id": "mapped-project"})
+                held.append(route)
             return True
         return False
 
     transport.handler = handler
+    page.expose_function("heldPendingMappingSaveCount", lambda: len(held))
+    page.evaluate("""() => {
+      const button = document.querySelector('#save-project'), handler = button.onclick;
+      button.onclick = event => {
+        button.onclick = handler;
+        const completion = handler.call(button, event);
+        completion.then(() => {
+          window.initialPendingMappingState = {
+            text: document.querySelector('#project-form > [role="status"]').textContent,
+            enabled: !button.disabled
+          };
+        });
+        return completion;
+      };
+    }""")
     page.locator('#save-project').click()
-    expect(page.locator('#project-form > [role="status"]')).to_contain_text("完成后自动保存映射")
-    expect(page.locator('.modal')).to_have_count(0, timeout=7000)
+    # Keep the real automatic retry in flight. Observing the held HTTP route
+    # avoids racing Python assertions against the production 1800 ms timer.
+    page.evaluate("""async () => {
+      const deadline = performance.now() + 7000;
+      while (!(await window.heldPendingMappingSaveCount())) {
+        if (performance.now() >= deadline) throw new Error('Automatic mapping retry was not received');
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+    }""")
+    assert page.evaluate("window.initialPendingMappingState") == {
+        "text": "正在等待节点完成目录验证，完成后自动保存映射…",
+        "enabled": True,
+    }
+    expect(page.locator('.modal')).to_have_count(1)
+    expect(page.locator('#save-project')).to_be_disabled()
     attempts = transport.matching("POST", "/api/projects")
     assert len(attempts) == 2
-    assert attempts[0]["body"] == attempts[1]["body"]
+    assert len(held) == 1
+    first = attempts[0]["body"]
+    assert first["idempotency_key"].startswith("project-save-")
+    assert first == {
+        "alias": "NAS Project", "device_id": DEVICE,
+        "root": "/Volumes/Shared/Project", "description": "Keep this draft",
+        "mode": "write", "allow_tasks": True,
+        "idempotency_key": first["idempotency_key"],
+    }
+    assert attempts[1]["body"] == first
+    assert page.evaluate("window.toasts") == []
+    reply(held.pop(), {"id": "mapped-project"})
+    expect(page.locator('.modal')).to_have_count(0, timeout=7000)
+    assert len(transport.matching("POST", "/api/projects")) == 2
+    assert page.evaluate("window.toasts") == ["映射已保存"]
 
 
 def test_space_change_stops_pending_mapping_validation_retry(project_editor):
     page, transport = project_editor
 
     def handler(route, row):
-        if row["path"] == "/api/projects":
+        if row["path"] == "/api/projects" and row["method"] == "POST":
             reply(route, {"error": {"code": "VALIDATION_PENDING", "message": "等待节点验证"}}, 409)
             return True
         return False
 
     transport.handler = handler
+    page.evaluate("""() => {
+      const button = document.querySelector('#save-project'), handler = button.onclick;
+      button.onclick = event => {
+        button.onclick = handler;
+        const completion = handler.call(button, event);
+        window.afterPendingMappingRetryWindow = completion.then(() => {
+          window.initialPendingMappingState = {
+            text: document.querySelector('#project-form > [role="status"]').textContent,
+            enabled: !button.disabled, space: S.space_id
+          };
+          // busy has restored the button, and this microtask runs before the
+          // scheduled retry. Scope changes therefore cannot race the test host.
+          S.space_id = 'different-space';
+          // Let the unchanged production timer get its turn after scope changed.
+          return new Promise(resolve => setTimeout(resolve, 2100));
+        });
+        return completion;
+      };
+    }""")
     page.locator('#save-project').click()
-    expect(page.locator('#project-form > [role="status"]')).to_contain_text("完成后自动保存映射")
-    page.evaluate("S.space_id = 'different-space'")
-    page.evaluate("() => new Promise(resolve => setTimeout(resolve, 2100))")
+    page.evaluate("() => window.afterPendingMappingRetryWindow")
+    assert page.evaluate("window.initialPendingMappingState") == {
+        "text": "正在等待节点完成目录验证，完成后自动保存映射…",
+        "enabled": True,
+        "space": "owner-space",
+    }
+    assert page.evaluate("S.space_id") == "different-space"
+    expect(page.locator('.modal')).to_have_count(1)
+    expect(page.locator('#save-project')).to_be_enabled()
     assert len(transport.matching("POST", "/api/projects")) == 1
     assert page.evaluate("window.toasts") == []
 
