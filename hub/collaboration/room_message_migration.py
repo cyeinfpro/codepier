@@ -76,4 +76,14 @@ def migrate(db):
         END''')
     db.execute('''CREATE UNIQUE INDEX IF NOT EXISTS room_message_source_identity
         ON collaboration_messages(conversation_id,origin,author,source_id) WHERE room_id IS NULL''')
+    # Keep historical/native lookup scopes intact while bounding hot paths.
+    # The unique positive-sequence and native source-identity indexes above
+    # remain the authoritative constraints; these indexes only aid reads.
+    db.execute('''CREATE INDEX IF NOT EXISTS room_message_conversation_order
+        ON collaboration_messages(conversation_id,conversation_sequence,id)''')
+    db.execute('''CREATE INDEX IF NOT EXISTS room_message_owner_source_lookup
+        ON collaboration_messages(conversation_id,author,source_id)
+        WHERE origin='panel_owner' ''')
+    db.execute('''CREATE INDEX IF NOT EXISTS room_message_author_time
+        ON collaboration_messages(conversation_id,author,created)''')
     db.execute("INSERT OR REPLACE INTO meta VALUES ('room_message_schema','1')")

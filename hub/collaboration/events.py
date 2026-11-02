@@ -66,6 +66,11 @@ def migrate_dispatch(db):
     db.execute("""CREATE INDEX IF NOT EXISTS mcp_event_deliveries_head
         ON mcp_event_deliveries(subscription_id,event_seq)
         WHERE state IN ('pending','retry_wait','leased')""")
+    # Global concurrency checks must visit only currently leased deliveries,
+    # not all accepted/abandoned history retained for audit and replay.
+    db.execute("""CREATE INDEX IF NOT EXISTS mcp_event_deliveries_live_leases
+        ON mcp_event_deliveries(lease_until,subscription_id)
+        WHERE state='leased'""")
 
 
 def signing_key(value):
