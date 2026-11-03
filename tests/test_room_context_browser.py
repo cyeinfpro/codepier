@@ -150,4 +150,8 @@ def test_context_correction_preserves_room_draft_and_diagnostics_never_add_autho
         expect(page.locator('[data-cr-diagnostics-incomplete]')).to_be_visible()
         assert len(writes) == 2 and not errors
     finally:
-        browser_context.close()
+        try:
+            # Drain synthetic fetch/fulfill callbacks before disposing responses.
+            page.unroute_all(behavior='wait')
+        finally:
+            browser_context.close()
