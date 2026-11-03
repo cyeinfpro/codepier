@@ -8,6 +8,7 @@ from shared.util import VERSION
 import pytest
 from playwright.sync_api import expect, sync_playwright
 
+from tests.browser_launch import launch_browser
 from tests.test_ui_unification import (
     _layout,
     _login,
@@ -33,7 +34,7 @@ def _uncovered(locator) -> None:
 @pytest.mark.parametrize("width,height", [(320, 568), (390, 844), (768, 1024), (1440, 1000)])
 def test_reference_navigation_filter_and_reachability(stack, engine, scheme, width, height):
     with sync_playwright() as pw:
-        browser = getattr(pw, engine).launch()
+        browser = launch_browser(getattr(pw, engine))
         page = browser.new_page(viewport={"width": width, "height": height}, color_scheme=scheme)
         errors = []
         page.on("pageerror", lambda error: errors.append(str(error)))
@@ -90,7 +91,7 @@ def test_reference_navigation_filter_and_reachability(stack, engine, scheme, wid
 def test_reference_chat_stays_focused_and_keeps_draft(stack, engine, width, height):
     _prepare_native_fixture(stack)
     with sync_playwright() as pw:
-        browser = getattr(pw, engine).launch()
+        browser = launch_browser(getattr(pw, engine))
         page = browser.new_page(viewport={"width": width, "height": height})
         submitted = []
         page.on("request", lambda request: submitted.append(request.url)

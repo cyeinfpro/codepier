@@ -23,6 +23,7 @@ import pytest
 from playwright.sync_api import sync_playwright, expect
 from scripts.install_browser_bridge import install, uninstall
 from shared.util import atomic_json
+from tests.browser_launch import launch_persistent_browser
 from tests.support import BASE, running_stack, wait_for
 
 
@@ -73,7 +74,7 @@ def test_real_extension_native_host_and_mcp_browser_actions(native_workspace,web
     profile=tmp_path/'browser-profile'
     options={'channel':'chromium','headless':True,'args':['--disable-extensions-except='+str(extension),'--load-extension='+str(extension)],'viewport':{'width':1280,'height':720}}
     with running_stack(tmp_path/'stack') as s, sync_playwright() as pw:
-        context=pw.chromium.launch_persistent_context(str(profile),**options)
+        context=launch_persistent_browser(pw.chromium, str(profile),**options)
         try:
             worker=context.service_workers[0] if context.service_workers else context.wait_for_event('serviceworker')
             extension_id=worker.url.split('/')[2]
@@ -85,7 +86,7 @@ def test_real_extension_native_host_and_mcp_browser_actions(native_workspace,web
         installed=install(s.config_path,extension_id,identity,['ProjectAlpha'],[website],browser='chromium',root=profile,apply=True)
         s.start_agent()
         grant=s.client.post('/api/grants',json={'label':'Browser isolated fixture','projects':[s.project['id']],'scopes':['read','write','execute','computer'],'days':1}).json()
-        context=pw.chromium.launch_persistent_context(str(profile),**options)
+        context=launch_persistent_browser(pw.chromium, str(profile),**options)
         executor=ThreadPoolExecutor(max_workers=1)
         def native_call(name,args=None,*,token=None,expect_failure=False):
             data={'project':'ProjectAlpha',**(args or {})};data.setdefault('idempotency_key',uuid.uuid4().hex)

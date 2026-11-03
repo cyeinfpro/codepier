@@ -5,6 +5,7 @@ from urllib.parse import urlsplit
 import pytest
 from playwright.sync_api import sync_playwright, expect
 
+from tests.browser_launch import launch_browser
 from tests.test_mcp_gateway import gw, team
 from tests.test_roles import role, profile, credential, must
 
@@ -13,7 +14,7 @@ from tests.test_roles import role, profile, credential, must
 def gateway_browser(request):
     with sync_playwright() as pw:
         executable = os.getenv('CODEPIER_TEST_CHROMIUM_EXECUTABLE') if request.param == 'chromium' else None
-        browser = getattr(pw, request.param).launch(**({'executable_path': executable} if executable else {}))
+        browser = launch_browser(getattr(pw, request.param), **({'executable_path': executable} if executable else {}))
         yield browser
         browser.close()
 

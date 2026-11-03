@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import sync_playwright
 
+from tests.browser_launch import launch_browser
 from tests.weixin_browser_support import full_styles
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,15 +19,15 @@ def test_owner_channel_controls_read_only_open_confirmed_write_and_stale_fences(
         executable = os.environ.get('CODEPIER_TEST_CHROMIUM') if engine == 'chromium' else None
         if not executable and not Path(browser_type.executable_path).is_file():
             pytest.skip(engine + ' runtime is not installed; no browser result claimed')
-        browser = browser_type.launch(headless=True, **({'executable_path': executable} if executable else {}))
+        browser = launch_browser(browser_type, headless=True, **({'executable_path': executable} if executable else {}))
         try:
             page = browser.new_page(viewport={'width': width, 'height': 1000})
             errors = []
             page.on('pageerror', lambda error: errors.append(str(error)))
-            css = (ROOT / 'web/collaboration-channels.css').read_text()
+            css = (ROOT / 'tests/fixtures/legacy_collaboration_ui/collaboration-channels.css').read_text()
             page.set_content('<style>body{margin:16px;font:16px sans-serif}input,select,textarea{max-width:100%;box-sizing:border-box}.cc-field{display:grid;gap:4px}.btn{padding:8px}#drawer{max-width:800px;margin:auto}*{box-sizing:border-box}' + css + '</style><button id="open">管理</button><div id="drawer"></div><div id="files"></div>')
             full_styles(page)
-            page.add_script_tag(path=str(ROOT / 'web/collaboration-channels.js'))
+            page.add_script_tag(path=str(ROOT / 'tests/fixtures/legacy_collaboration_ui/collaboration-channels.js'))
             page.evaluate('''() => {
                 window.S = {session:{id:'fixture-session'},space_id:'fixture-space'};
                 window.state = {generation:1,drawerEpoch:0,project:'projectA',environment:'production',conversation:'conversationA',

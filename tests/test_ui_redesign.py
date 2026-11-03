@@ -1,4 +1,5 @@
 """Command Deck: real browser, real isolated Hub + outbound Agent, no production data."""
+from tests.browser_launch import launch_browser
 import json
 import os
 import uuid
@@ -50,7 +51,7 @@ def layout(page, label):
 def test_all_pages_layout_and_screenshots(stack, width, height):
     OUT.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as pw:
-        browser = pw.chromium.launch()
+        browser = launch_browser(pw.chromium)
         page = browser.new_page(viewport={'width':width,'height':height})
         errors=[]
         page.on('pageerror', lambda e: errors.append(str(e)))
@@ -84,7 +85,7 @@ def test_all_pages_layout_and_screenshots(stack, width, height):
 
 def test_command_palette_filter_focus_and_navigation(stack):
     with sync_playwright() as pw:
-        browser=pw.chromium.launch()
+        browser=launch_browser(pw.chromium)
         page=browser.new_page(viewport={'width':1440,'height':1000})
         login(page,stack)
         page.locator('[data-ui="command"]').focus()
@@ -114,7 +115,7 @@ def test_command_palette_filter_focus_and_navigation(stack):
 
 def test_mobile_drawer_accessibility_and_editor_panes(stack):
     with sync_playwright() as pw:
-        browser=pw.chromium.launch()
+        browser=launch_browser(pw.chromium)
         page=browser.new_page(viewport={'width':390,'height':844})
         login(page,stack)
         assert page.locator('.sidebar').evaluate('(el)=>el.inert')
@@ -147,7 +148,7 @@ def test_mobile_drawer_accessibility_and_editor_panes(stack):
 
 def test_project_search_disclosure_tools_and_modal_focus(stack):
     with sync_playwright() as pw:
-        browser=pw.chromium.launch()
+        browser=launch_browser(pw.chromium)
         page=browser.new_page(viewport={'width':390,'height':844})
         errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
         login(page,stack,'projects')
@@ -188,7 +189,7 @@ def test_project_search_disclosure_tools_and_modal_focus(stack):
 
 def test_reduced_motion_and_dirty_navigation_guard(stack):
     with sync_playwright() as pw:
-        browser=pw.chromium.launch()
+        browser=launch_browser(pw.chromium)
         page=browser.new_page(viewport={'width':1440,'height':1000},reduced_motion='reduce')
         login(page,stack)
         page.wait_for_function("() => {const el=document.querySelector('.overview-summary'); return el && getComputedStyle(el).animationName==='none';}")
@@ -208,7 +209,7 @@ def test_reduced_motion_and_dirty_navigation_guard(stack):
 
 def test_live_refresh_preserves_filter_focus_and_disclosure(stack):
     with sync_playwright() as pw:
-        browser=pw.chromium.launch()
+        browser=launch_browser(pw.chromium)
         page=browser.new_page(viewport={'width':1440,'height':1000})
         login(page,stack,'projects')
         page.locator('.page-help summary').click()

@@ -52,6 +52,8 @@ class ChatroomService:
             conversation = self.c.conversations.resolve(principal, room, args)
             args['conversation_id'] = conversation['id']
             def save():
+                if args['enabled']:
+                    self.c.rooms.migration.legacy_write(conversation['id'])
                 now = self.c.clock()
                 current = self.store.one('SELECT version FROM conversation_writers WHERE conversation_id=? AND room_id=? AND grant_id=?',
                                          (conversation['id'], room['id'], args['grant_id']))
@@ -86,7 +88,7 @@ class ChatroomService:
             receipt.update(delivery_map.get(receipt.get('event_id'), {}))
         text = body.get('body_text', body.get('summary', body.get('command', {}).get('request', '')))
         owner = row['origin'] in {'panel', 'panel_owner'}
-        partition = self.store.one('SELECT project_id,environment_id FROM collaboration_rooms WHERE id=?', (row['room_id'],))
+        partition = self.store.one('SELECT project_id,environment_id FROM collaboration_rooms WHERE id=?', (row['room_id'],)) or {}
         result = {**row, **partition, 'source_room_id': row['room_id'], 'source_sequence': row['server_sequence'],
                   'server_sequence': row['conversation_sequence'], 'message_id': row['id'], 'body': body, 'body_text': text,
                   'author_kind': 'owner' if owner else 'connector',
@@ -186,7 +188,13 @@ class ChatroomService:
         return result
 
     def message_visible(self, principal, row):
-        for project_id in json.loads(row['body']).get('provenance_project_ids', []):
+        projects = set(json.loads(row['body']).get('provenance_project_ids', []))
+        if row.get('room_id'):
+            partition = self.store.one('SELECT project_id FROM collaboration_rooms WHERE id=?', (row['room_id'],))
+            if not partition:
+                return False
+            projects.add(partition['project_id'])
+        for project_id in projects:
             try:
                 self.c.runtime.project(project_id, principal)
             except DevError:
@@ -302,6 +310,7 @@ class ChatroomService:
                     view = self.view(old)
                     return {'message': view, 'notifications': view['body'].get('notifications', []),
                             **view['body'].get('delegation', {'scheduled': False})}
+                self.c.rooms.migration.legacy_write(conversation['id'])
                 count = self.store.one('''SELECT COUNT(*) AS n FROM collaboration_messages
                     WHERE author=? AND room_id IN (SELECT id FROM collaboration_rooms
                     WHERE space_id=? AND owner_user_id=? AND project_id=?) AND created>?''',
@@ -405,6 +414,7 @@ class ChatroomService:
             if len(set(args['slot_ids'])) != len(args['slot_ids']) or not set(args['slot_ids']) <= set(mentioned):
                 raise DevError('MESSAGE_MENTION_REQUIRED', '只能提醒原消息已明确提及的位置', 403)
             def save():
+                self.c.rooms.migration.legacy_write(conversation['id'])
                 self.c.live_room(room)
                 receipts = {item['slot_id']: item for item in body.get('notifications', [])}
                 delivery = self.deliveries([message])
@@ -453,6 +463,7 @@ class ChatroomService:
                     if json.loads(old['context']).get('conversion_digest') != digest(snapshot):
                         raise DevError('MESSAGE_ALREADY_CONVERTED', '此消息已有任务，请查看原任务', 409)
                     return {'message_id': source['id'], 'job_id': old['id'], 'goal_id': old['goal_id'], 'scheduled': True, 'replayed': True}
+                self.c.rooms.migration.legacy_write(conversation['id'])
                 agent = self.c.agent(room, args['assignee_agent_id'])
                 goal = uuid.uuid4().hex
                 self.store.execute('''INSERT INTO collaboration_goals

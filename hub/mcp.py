@@ -193,8 +193,9 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                         if name == 'get_access_context':
                             value={**value,'gateway':await runtime.store.run(runtime.gateway.context,principal)}
                         if name in COLLABORATION_TOOLS:
+                            media = value.pop('_mcp_media_content', [])
                             value=present(name,arguments,value)
-                            result={'content':[{'type':'text','text':json.dumps(value,ensure_ascii=False)}],
+                            result={'content':[{'type':'text','text':json.dumps(value,ensure_ascii=False)}, *media],
                                     'structuredContent':value,'isError':bool(value.get('error'))}
                         else:
                             result=await runtime.store.run(mcp_apps.attach,core_result(name,arguments,value,scopes=principal.scopes),name,arguments,value,request_public_url)

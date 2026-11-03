@@ -46,8 +46,8 @@ def boot_hint_editor(page):
         teams:[],room_state:'active',can_manage:true,has_more:false});
       window.chatRichMarkdown=(node,value)=>{node.textContent=value;node._chatSource=value;};
     }""")
-    page.add_script_tag(path=str(ROOT / "web/collaboration-runtime.js"))
-    page.add_script_tag(path=str(ROOT / "web/collaboration-relay.js"))
+    page.add_script_tag(path=str(ROOT / "tests/fixtures/legacy_collaboration_ui/collaboration-runtime.js"))
+    page.add_script_tag(path=str(ROOT / "tests/fixtures/legacy_collaboration_ui/collaboration-relay.js"))
     page.evaluate("""() => {
       window.relay=CodePierCollaborationRelay.create({state,E:String,button:()=>'',chat:()=>c,
         chatScope:()=>({project:'p',environment_id:'production',conversation_id:'room'}),
@@ -114,7 +114,7 @@ def boot_team_picker(page):
     page.set_content("""<main class="collaboration">
       <textarea id="cc-message-input" style="font-size:16px">保留我的中文需求</textarea>
       <div id="chip"></div><div id="drawer"></div></main>""")
-    page.add_style_tag(path=str(ROOT / "web/collaboration-workspace.css"))
+    page.add_style_tag(path=str(ROOT / "tests/fixtures/legacy_collaboration_ui/collaboration-workspace.css"))
     page.add_style_tag(content="""
       body{margin:0;padding:12px;box-sizing:border-box} *{box-sizing:border-box}
       .cc-form{display:grid;gap:12px}.cc-field{display:grid;gap:5px}
@@ -124,7 +124,7 @@ def boot_team_picker(page):
       .cc-two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
       button{min-height:44px}
     """)
-    page.add_script_tag(path=str(ROOT / "web/collaboration-goals.js"))
+    page.add_script_tag(path=str(ROOT / "tests/fixtures/legacy_collaboration_ui/collaboration-goals.js"))
     page.evaluate("""() => {
       const E=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
       window.S={session:'s',space_id:'space',page:'collaboration'};

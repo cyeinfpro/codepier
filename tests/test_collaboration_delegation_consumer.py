@@ -450,16 +450,74 @@ async def test_every_public_query_action_is_read_only_in_real_business_tables(co
         'dot_receipt': {'dot_id': duplex_dot['id'], 'request_key': 'not-committed-query'},
         'work_evidence': {'goal_id': delegated['goal_id'], 'work_item_id': delegated['work_item_id']},
     })
+    from tests.test_room_members_rebuild import create, add, join, identity
+    native_room = create(s, c.owner)
+    created_member = add(s, c.owner, native_room)
+    joined, _ = join(s, c.actor, created_member)
+    await s.events.subscribe({**joined['subscription_request'], 'delivery': {
+        'mode': 'webhook', 'url': 'https://native-query-fixture.example.invalid/events',
+        'secret': 'whsec_' + base64.b64encode(b'native-readonly-query-key-32bytes!').decode()}}, c.actor)
+    await s.events.tick()
+    native_ticket = next(payload['data']['wake_ticket'] for payload in callbacks
+        if payload.get('data', {}).get('member_id') == joined['member_id'])
+    native_identity = identity(joined)
+    probe = s.rooms.probe_read({**native_identity, 'wake_ticket': native_ticket, 'idempotency_key': key()}, c.actor)
+    s.rooms.probe_reply({**native_identity, 'probe_nonce': probe['probe_nonce'], 'idempotency_key': key()}, c.actor)
+    attachment = s.room_attachments.upload(native_room['id'], 'fixture.txt', b'Original query fixture', key(), c.owner)['attachment']['id']
+    native_message = s.room_runtime.send({'conversation_id': native_room['id'], 'body_text': 'Native room source',
+        'attachment_ids': [attachment], 'member_id': joined['member_id'],
+        'client_message_id': key(), 'idempotency_key': key()}, c.owner)['message']
+    s.config = replace(s.config, weixin_enabled=True)
+    channel = s.room_channels.create({'conversation_id': native_room['id'], 'idempotency_key': key()}, c.owner)
+    from tests.test_room_managed_work import connected as native_connected
+    _, _, _, _, handoff_lead, handoff_credentials = await native_connected(
+        collab, [{'project': c.room['project_id']}], [{'project_id': c.room['project_id']}], worker_override=c.actor)
+    _, _, _, _, handoff_peer, _ = await native_connected(
+        collab, scopes=[{'project_id': c.room['project_id']}], worker_override=c.actor,
+        conversation_id=handoff_lead['conversation_id'])
+    handoff_source = s.room_runtime.send({'conversation_id': handoff_lead['conversation_id'],
+        'member_id': handoff_lead['member_id'], 'body_text': '请在同一原工作内核对项目说明。',
+        'client_message_id': key(), 'idempotency_key': key()}, c.owner)['message']
+    handoff_goal = s.room_runtime.start_work({**handoff_lead, **handoff_credentials,
+        'source_message_id': handoff_source['id'], 'source_version': handoff_source['version'],
+        'source_digest': digest(handoff_source['body_text']),
+        'expected_inbox_revision': s.room_consumers.inbox(handoff_lead, c.actor)['inbox_revision'],
+        'target_project_id': c.room['project_id'], 'participant_member_ids': [handoff_peer['member_id']],
+        'acceptance': '保留同一目标和原证据', 'confirm_task': True, 'idempotency_key': key()}, c.actor)
+    handoff = s.room_goal_handoffs.handoff({**handoff_lead, **handoff_credentials,
+        'goal_id': handoff_goal['goal_id'], 'recipient_member_id': handoff_peer['member_id'],
+        'expected_inbox_revision': s.room_consumers.inbox(handoff_lead, c.actor)['inbox_revision'],
+        'expected_intent_revision': 1, 'coordinator_epoch': 1,
+        'purpose': '请核对原项目说明后向当前主责报告证据。', 'idempotency_key': key()}, c.actor)
+    queries.update({
+        'room_list': {}, 'room_view': {'conversation_id': native_room['id']},
+        'room_changes': {'conversation_id': native_room['id']},
+        'room_diagnostics': {'conversation_id': native_room['id']},
+        'room_messages': {'conversation_id': native_room['id']},
+        'room_works': {'conversation_id': native_room['id']},
+        'room_work': {'work_id': handoff_goal['goal_id']},
+        'room_project_impact': {'conversation_id': native_room['id'],
+            'expected_version': s.rooms.read({'conversation_id': native_room['id']}, c.owner)['room']['version']},
+        'room_connect': {'flow_id': created_member['flow']['id']},
+        'room_channel': {'flow_id': channel['flow']['id']},
+        'room_consumer': native_identity, 'room_inbox': native_identity,
+        'room_context': native_identity,
+        'room_message_read': {**native_identity, 'message_id': native_message['id']},
+        'room_attachment_read': {**native_identity, 'attachment_id': attachment},
+        'room_work_handoff_read': {**handoff_lead, 'handoff_id': handoff['handoff']['id']},
+    })
     assert set(queries) == set(ACTIONS['collaboration_query'])
     tables = [r['name'] for r in s.store.all(
         "SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE 'collaboration_%' "
         "OR name LIKE 'coordination_%' OR name LIKE 'delegation_%' OR name LIKE 'monitor_%' "
         "OR name LIKE 'mcp_event_%' OR name LIKE 'conversation_%' OR name LIKE 'dot_%' "
-        "OR name LIKE 'team_%' OR name='operations')")]
+        "OR name LIKE 'team_%' OR name LIKE 'room_%' OR name LIKE 'channel_%' "
+        "OR name LIKE 'weixin_%' OR name='operations')")]
     def snapshot():
         return {table: s.store.all('SELECT * FROM "' + table + '" ORDER BY rowid') for table in tables}
     before = snapshot()
     for action, arguments in queries.items():
-        actor = c.actor if action in {'goal', 'delegation', 'connection', 'inbox', 'dot_connection', 'dot_inbox', 'dot_recovery', 'dot_receipt', 'work_evidence', 'team', 'teams', 'dot_consumer', 'dot_mailbox'} else c.owner
-        assert s.invoke('collaboration_query', {'action': action, **c.scope, **arguments}, actor) is not None
+        actor = c.actor if action in {'goal', 'delegation', 'connection', 'inbox', 'dot_connection', 'dot_inbox', 'dot_recovery', 'dot_receipt', 'work_evidence', 'team', 'teams', 'dot_consumer', 'dot_mailbox', 'room_consumer', 'room_inbox', 'room_context', 'room_message_read', 'room_attachment_read', 'room_work_handoff_read'} else c.owner
+        scope = {} if action.startswith('room_') else c.scope
+        assert s.invoke('collaboration_query', {'action': action, **scope, **arguments}, actor) is not None
         assert snapshot() == before, action

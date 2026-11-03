@@ -102,6 +102,8 @@ class ChannelShares:
             raise DevError('ATTACHMENT_REPLY_REQUIRED', '预批附件只能随原 dot 的最终回复一起提交', 403)
         origin = json.loads(source['body']).get('external_origin', {})
         binding, _, owner, room, dot = self.w.valid(origin.get('binding_id', ''))
+        if not binding.get('native_member_id'):
+            self.c.rooms.migration.legacy_write(binding['conversation_id'])
         self.c.dot_chat.authorize_sender(principal, room,
             self.c.conversations.object(principal, message['conversation_id']), dot['id'])
         if not binding['allow_media_outbound'] or not binding['allow_replies']:

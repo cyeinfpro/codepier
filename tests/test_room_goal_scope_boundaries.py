@@ -1,0 +1,324 @@
+"""One native Goal uses exact member/project scopes and original operations."""
+import json
+from dataclasses import replace
+
+import pytest
+
+from hub.collaboration.common import digest
+from shared.util import DevError
+from tests.collaboration_support import collab as collab,key
+from tests.legacy_iam_fixture import seed_grant
+from tests.test_room_managed_work import connected,current_epoch
+
+
+def worker_for(s,worker,name,scopes=('read','write'),projects=('proj','otherproj')):
+    seed_grant(s.store,name,'owner',scopes=scopes,projects=projects)
+    return replace(worker,grant_id=name,actor='mcp:'+name+':fixture',scopes=set(scopes),projects=list(projects))
+
+
+def mutation(s,identity,credentials,goal_id,*,project='proj'):
+    return {'project':project,'environment_id':'production','goal_id':goal_id,**credentials,
+        'expected_inbox_revision':s.room_consumers.inbox(identity,s.rooms.principal(s.rooms.member(identity['member_id'])))['inbox_revision'],
+        'coordinator_epoch':current_epoch(s,goal_id),
+        'expected_intent_revision':s.room_runtime.intent_revision(goal_id),'idempotency_key':key()}
+
+
+def start(s,owner,actor,identity,credentials,**extra):
+    message=s.room_runtime.send({'conversation_id':identity['conversation_id'],'member_id':identity['member_id'],
+        'body_text':'读取 A 项目的说明，并修改 B 项目的文档；请在原目标内协作。','client_message_id':key(),'idempotency_key':key()},owner)['message']
+    request={**identity,**credentials,'source_message_id':message['id'],'source_version':message['version'],
+        'source_digest':digest(message['body_text']),'expected_inbox_revision':s.room_consumers.inbox(identity,actor)['inbox_revision'],
+        'target_project_id':'proj','project_ids':['proj','otherproj'],'acceptance':'报告真实读取和修改结果',
+        'confirm_task':True,'idempotency_key':key(),**extra}
+    return s.room_runtime.start_work(request,actor),request
+
+
+@pytest.mark.asyncio
+async def test_one_goal_applies_capabilities_per_project_and_never_forks_source(collab):
+    s,owner,worker,*_=collab
+    actor=worker_for(s,worker,'room-wide')
+    scopes=[{'project_id':'proj','capabilities':['read']}, {'project_id':'otherproj','capabilities':['read','write']}]
+    s,owner,actor,clock,identity,credentials=await connected(collab,
+        [{'project':'proj'},{'project':'otherproj'}],scopes,worker_override=actor)
+    result,request=start(s,owner,actor,identity,credentials)
+    assert set(result['goal']['project_ids'])=={'proj','otherproj'}
+    assert result['goal']['capabilities']==['read','write']
+    raw={**mutation(s,identity,credentials,result['goal_id']),'objective':'修改文档','acceptance':'真实回执',
+        'assignee_grant_id':actor.grant_id,'assignee_member_id':identity['member_id'],'required_capabilities':['read','write']}
+    with pytest.raises(DevError,match='能力'):
+        s.coordination.work_create({**raw,'target_project_id':'proj'},actor)
+    item=s.coordination.work_create({**raw,'target_project_id':'otherproj'},actor)['work_item']
+    claimed=s.coordination.work_claim({**mutation(s,identity,credentials,result['goal_id']),
+        'work_item_id':item['id'],'expected_version':item['version']},actor)['work_item']
+    lease={**mutation(s,identity,credentials,result['goal_id']),'work_item_id':item['id'],
+        'attempt':claimed['attempt'],'fencing_token':claimed['fencing_token']}
+    with pytest.raises(DevError,match='唯一项目'):
+        s.coordination.admit({**lease,'tool':'write','arguments':{'project':'proj','path':'README.md','content':'bad'}},actor)
+    admitted=s.coordination.admit({**lease,'tool':'write','arguments':{'path':'README.md','content':'approved B change','expected_sha256':'new'}},actor)
+    assert s.store.one('SELECT project_id FROM operations WHERE id=?',(admitted['operation_id'],))['project_id']=='otherproj'
+    again=s.room_runtime.start_work({**request,'project_ids':['proj'],'idempotency_key':key(),
+        'coordinator_epoch':current_epoch(s,result['goal_id']),
+        'expected_inbox_revision':s.room_consumers.inbox(identity,actor)['inbox_revision']},actor)
+    assert again['goal_id']==result['goal_id'] and again['scope_revision_required']
+    assert len(s.store.all('SELECT * FROM coordination_goals'))==1
+    assert len(s.store.all('SELECT * FROM delegation_requests'))==1
+
+
+@pytest.mark.asyncio
+async def test_same_goal_work_handoff_uses_real_second_member_consumer(collab):
+    s,owner,worker,*_=collab
+    first=worker_for(s,worker,'room-first',scopes=('read',),projects=('proj',))
+    second=worker_for(s,worker,'room-second',scopes=('read',),projects=('otherproj',))
+    projects=[{'project':'proj'},{'project':'otherproj'}]
+    rules=[{'project_id':'proj','capabilities':['read']}]
+    s,owner,first,clock,lead,lead_credentials=await connected(collab,projects,rules,worker_override=first)
+    _,_,second,_,peer,peer_credentials=await connected(collab,scopes=[{'project_id':'otherproj','capabilities':['read']}],worker_override=second,conversation_id=lead['conversation_id'])
+    result,_=start(s,owner,first,lead,lead_credentials,participant_member_ids=[peer['member_id']])
+    source=s.store.one('SELECT room_id FROM collaboration_messages WHERE id=(SELECT message_id FROM delegation_requests WHERE goal_id=?)',(result['goal_id'],))
+    assert source['room_id'] is None
+    assert result['goal']['project_ids']==['proj']  # A-only leader receives minimum B state, never B contents.
+    task=s.coordination.work_create({**mutation(s,lead,lead_credentials,result['goal_id']),
+        'target_project_id':'otherproj','objective':'核对 B 文档','acceptance':'报告事实',
+        'assignee_grant_id':second.grant_id,'assignee_member_id':peer['member_id']},first)['work_item']
+    assert any(item.get('reference',{}).get('work_item_id')==task['id'] for item in s.room_consumers.inbox(peer,second)['items'])
+    with pytest.raises(DevError):
+        s.coordination.work_claim({**mutation(s,lead,lead_credentials,result['goal_id']),
+            'work_item_id':task['id'],'expected_version':task['version']},first)
+    claimed=s.coordination.work_claim({**mutation(s,peer,peer_credentials,result['goal_id'],project='otherproj'),
+        'work_item_id':task['id'],'expected_version':task['version']},second)['work_item']
+    lease={**mutation(s,peer,peer_credentials,result['goal_id'],project='otherproj'),'work_item_id':task['id'],
+        'attempt':claimed['attempt'],'fencing_token':claimed['fencing_token']}
+    op=s.coordination.admit({**lease,'tool':'read','arguments':{'path':'README.md'}},second)
+    s.runtime.complete(s.store.one('SELECT * FROM operations WHERE id=?',(op['operation_id'],)),{'ok':True,'data':{'content':'B facts'}})
+    result=s.coordination.result({**lease,'idempotency_key':key(),'outcome':'succeeded','summary':'B 文档已核对',
+        'operation_ids':[op['operation_id']]},second)
+    assert result['work_item']['state']=='succeeded'
+    message=s.store.one("SELECT body FROM collaboration_messages WHERE kind='delegation_result'")
+    assert json.loads(message['body'])['sender_member_id']==peer['member_id']
+    lead_view=s.coordination.read({k:v for k,v in mutation(s,lead,lead_credentials,task['goal_id']).items() if k!='idempotency_key'},first)
+    assert task['id'] not in {item['id'] for item in lead_view['work_items']}
+    assert any(item['id']==task['id'] and item['state']=='succeeded' for item in lead_view['related_work'])
+    assert 'B 文档已核对' not in json.dumps(lead_view)
+    peer_view=s.coordination.read({k:v for k,v in mutation(s,peer,peer_credentials,task['goal_id'],project='otherproj').items() if k!='idempotency_key'},second)
+    assert peer_view['goal']['project_ids']==['otherproj']
+    assert all(item['project_id']=='otherproj' for item in peer_view['work_items'])
+    with pytest.raises(DevError):
+        s.task_liveness.evidence({'project':'proj','environment_id':'production','goal_id':task['goal_id'],'work_item_id':task['id']},first)
+    initial=s.store.one('SELECT * FROM coordination_work WHERE goal_id=? AND responsibility=?',(task['goal_id'],'coordinator'))
+    initial_lease,initial_op=admit_read(s,lead,lead_credentials,first,task['goal_id'],initial,'proj')
+    report(s,lead,lead_credentials,first,task['goal_id'],initial_lease,initial_op)
+    source=s.store.one('SELECT * FROM collaboration_messages WHERE goal_id=? AND origin=?',(task['goal_id'],'panel_owner'))
+    refs=[{'work_item_id':row['id'],'version':row['version'],'digest':digest(json.loads(row['result']))}
+        for row in s.store.all('SELECT * FROM coordination_work WHERE goal_id=?',(task['goal_id'],))]
+    with pytest.raises(DevError):
+        s.room_runtime.reply(final_request(s,peer,peer_credentials,second,source,refs),second)
+    final=s.room_runtime.reply(final_request(s,lead,lead_credentials,first,source,refs),first)
+    assert final['complete'] and len(s.store.all('SELECT * FROM team_publications'))==1
+    assert len(s.store.all('SELECT * FROM coordination_goals'))==1
+
+
+@pytest.mark.asyncio
+async def test_owner_supplement_fences_old_attempt_and_continues_same_goal(collab):
+    s,owner,actor,clock,identity,credentials=await connected(collab,[{'project':'proj'}],[{'project_id':'proj'}])
+    result,raw=start(s,owner,actor,identity,credentials,project_ids=['proj'])
+    claim={k:v for k,v in result['next_request']['arguments'].items() if k!='action'}
+    item=s.coordination.work_claim(claim,actor)['work_item']
+    old_lease={**mutation(s,identity,credentials,result['goal_id']),'work_item_id':item['id'],
+        'attempt':item['attempt'],'fencing_token':item['fencing_token']}
+    revised=s.room_runtime.control({'work_id':result['goal_id'],'expected_version':result['goal']['version'],
+        'action':'supplement','body_text':'补充：只需要检查标题，不需要读取全文。','idempotency_key':key()},owner)
+    assert revised['work']['intent_revision']==2
+    with pytest.raises(DevError):
+        s.coordination.admit({**old_lease,'tool':'read','arguments':{'path':'README.md'}},actor)
+    source=s.store.one("SELECT * FROM collaboration_messages WHERE json_extract(body,'$.work_id')=?",(result['goal_id'],))
+    request={**identity,**credentials,'source_message_id':source['id'],'source_version':source['version'],
+        'coordinator_epoch':current_epoch(s,result['goal_id']),
+        'source_digest':digest(json.loads(source['body'])['body_text']),
+        'expected_inbox_revision':s.room_consumers.inbox(identity,actor)['inbox_revision'],
+        'acceptance':'只报告标题','confirm_task':True,'idempotency_key':key()}
+    resumed=s.room_runtime.start_work(request,actor)
+    assert resumed['goal_id']==result['goal_id'] and resumed['intent_revision']==2 and resumed['scheduled']
+    assert resumed['continued_work_item_id']!=item['id']
+    assert s.store.one('SELECT state FROM coordination_work WHERE id=?',(item['id'],))['state']=='blocked'
+    assert len(s.store.all('SELECT * FROM coordination_goals'))==1
+    assert not s.store.all('SELECT * FROM operations')
+
+
+@pytest.mark.asyncio
+async def test_grant_intersection_preserves_chat_join_without_expanding_approved_scope(collab):
+    s,owner,worker,*_=collab
+    rules=[{'project_id':'proj','capabilities':['read','write']},{'project_id':'otherproj','capabilities':['read']}]
+    s,owner,actor,clock,identity,credentials=await connected(collab,
+        [{'project':'proj'},{'project':'otherproj'}],rules)
+    member=s.rooms.member(identity['member_id'])
+    assert s.rooms.state(member)=='ready_work'
+    bridges=s.store.all("SELECT * FROM room_member_work_bridges WHERE member_id=? AND state='active'",(member['id'],))
+    assert [r['project_id'] for r in bridges]==['proj']
+    policy=s.store.one('SELECT * FROM delegation_policies WHERE id=?',(bridges[0]['policy_id'],))
+    assert json.loads(policy['spec'])['capabilities']==['read']
+    original=s.store.one('SELECT capabilities FROM room_member_scopes WHERE member_id=? AND project_id=?',(member['id'],'proj'))
+    assert json.loads(original['capabilities'])==['read','write']
+    result,_=start(s,owner,actor,identity,credentials,project_ids=['proj'])
+    assert result['goal']['capabilities']==['read']
+    with pytest.raises(DevError):
+        s.coordination.work_create({**mutation(s,identity,credentials,result['goal_id']),
+            'target_project_id':'proj','objective':'不能借批准扩大当前 grant','acceptance':'拒绝越权',
+            'required_capabilities':['read','write'],'assignee_grant_id':actor.grant_id,
+            'assignee_member_id':identity['member_id']},actor)
+
+
+async def two_project_members(collab):
+    s,owner,worker,*_=collab
+    a=worker_for(s,worker,'only-a',scopes=('read',),projects=('proj',))
+    b=worker_for(s,worker,'only-b',scopes=('read',),projects=('otherproj',))
+    s,owner,a,clock,lead,lead_credentials=await connected(collab,[{'project':'proj'},{'project':'otherproj'}],
+        [{'project_id':'proj'}],worker_override=a)
+    _,_,b,_,peer,peer_credentials=await connected(collab,scopes=[{'project_id':'otherproj'}],
+        worker_override=b,conversation_id=lead['conversation_id'])
+    goal,request=start(s,owner,a,lead,lead_credentials,participant_member_ids=[peer['member_id']])
+    task=s.coordination.work_create({**mutation(s,lead,lead_credentials,goal['goal_id']),
+        'target_project_id':'otherproj','objective':'检查 B 文档','acceptance':'报告实际读取',
+        'assignee_grant_id':b.grant_id,'assignee_member_id':peer['member_id']},a)['work_item']
+    return s,owner,a,b,lead,lead_credentials,peer,peer_credentials,goal,task
+
+
+def admit_read(s,identity,credentials,actor,goal_id,item,project):
+    claimed=s.coordination.work_claim({**mutation(s,identity,credentials,goal_id,project=project),
+        'work_item_id':item['id'],'expected_version':item['version']},actor)['work_item']
+    lease={**mutation(s,identity,credentials,goal_id,project=project),'work_item_id':item['id'],
+        'attempt':claimed['attempt'],'fencing_token':claimed['fencing_token']}
+    op=s.coordination.admit({**lease,'tool':'read','arguments':{'path':'README.md'}},actor)
+    return lease,op
+
+
+def report(s,identity,credentials,actor,goal_id,lease,operation,*,outcome='succeeded'):
+    s.runtime.complete(s.store.one('SELECT * FROM operations WHERE id=?',(operation['operation_id'],)),
+        {'ok':True,'data':{'content':'# Real fixture receipt'}} if outcome=='succeeded' else
+        {'ok':False,'error':{'code':'FIXTURE_READ_FAILED','message':'合成读取失败'}})
+    return s.coordination.result({**lease,'idempotency_key':key(),
+        'expected_inbox_revision':s.room_consumers.inbox(identity,actor)['inbox_revision'],
+        'outcome':outcome,'summary':'已核对真实原操作回执','operation_ids':[operation['operation_id']]},actor)['work_item']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('removed',['proj','otherproj'])
+async def test_removing_one_project_blocks_only_its_work_even_when_it_was_the_anchor(collab,removed):
+    s,owner,a,b,lead,acred,peer,bcred,goal,task=await two_project_members(collab)
+    first=s.store.one('SELECT * FROM coordination_work WHERE id=?',(goal['next_request']['arguments']['work_item_id'],))
+    alease,aop=admit_read(s,lead,acred,a,goal['goal_id'],first,'proj')
+    blease,bop=admit_read(s,peer,bcred,b,goal['goal_id'],task,'otherproj')
+    current=s.rooms.read({'conversation_id':lead['conversation_id']},owner)['room']
+    remaining='otherproj' if removed=='proj' else 'proj'
+    s.rooms.projects({'conversation_id':lead['conversation_id'],'expected_version':current['version'],
+        'projects':[{'project':remaining}],'idempotency_key':key()},owner)
+    blocked=first if removed=='proj' else task
+    assert s.store.one('SELECT state FROM coordination_work WHERE id=?',(blocked['id'],))['state']=='blocked'
+    assert s.room_runtime.goal(goal['goal_id'])['state']=='active'
+    identity,credentials,actor,lease,op=(peer,bcred,b,blease,bop) if remaining=='otherproj' else (lead,acred,a,alease,aop)
+    assert s.store.one('SELECT cancel_requested FROM operations WHERE id=?',(op['operation_id'],))['cancel_requested']==0
+    done=report(s,identity,credentials,actor,goal['goal_id'],lease,op)
+    assert done['state']=='succeeded'
+    old_identity,old_credentials,old_actor,old_lease=(lead,acred,a,alease) if removed=='proj' else (peer,bcred,b,blease)
+    with pytest.raises(DevError):
+        s.coordination.admit({**old_lease,'idempotency_key':key(),'tool':'read','arguments':{'path':'README.md'}},old_actor)
+    assert len(s.store.all('SELECT * FROM coordination_goals'))==1
+    assert len(s.store.all('SELECT * FROM operations'))==2
+
+
+@pytest.mark.asyncio
+async def test_resume_keeps_original_operation_and_waits_for_new_fenced_intent(collab):
+    s,owner,actor,clock,identity,credentials=await connected(collab,[{'project':'proj'}],[{'project_id':'proj'}])
+    goal,_=start(s,owner,actor,identity,credentials,project_ids=['proj'])
+    item=s.store.one('SELECT * FROM coordination_work WHERE id=?',(goal['next_request']['arguments']['work_item_id'],))
+    lease,op=admit_read(s,identity,credentials,actor,goal['goal_id'],item,'proj')
+    s.runtime.complete(s.store.one('SELECT * FROM operations WHERE id=?',(op['operation_id'],)),{'ok':True,'data':{'content':'已读内容'}})
+    paused=s.room_runtime.control({'work_id':goal['goal_id'],'expected_version':s.room_runtime.goal(goal['goal_id'])['version'],
+        'action':'pause','idempotency_key':key()},owner)['work']
+    resumed=s.room_runtime.control({'work_id':goal['goal_id'],'expected_version':paused['version'],
+        'action':'resume','idempotency_key':key()},owner)['work']
+    assert resumed['state']=='waiting_member' and resumed['intent_revision']==2
+    assert s.store.one('SELECT state FROM coordination_work WHERE id=?',(item['id'],))['state']=='blocked'
+    source=s.store.one("SELECT * FROM collaboration_messages WHERE json_extract(body,'$.work_id')=?",(goal['goal_id'],))
+    continued=s.room_runtime.start_work({**identity,**credentials,'source_message_id':source['id'],'source_version':source['version'],
+        'coordinator_epoch':current_epoch(s,goal['goal_id']),
+        'source_digest':digest(json.loads(source['body'])['body_text']),
+        'expected_inbox_revision':s.room_consumers.inbox(identity,actor)['inbox_revision'],
+        'acceptance':'先复用原操作回执','confirm_task':True,'idempotency_key':key()},actor)
+    assert continued['goal_id']==goal['goal_id'] and continued['continued_work_item_id']!=item['id']
+    assert len(s.store.all('SELECT * FROM operations'))==1
+
+
+def final_request(s,identity,credentials,actor,source,refs,**extra):
+    return {**identity,**credentials,'source_message_id':source['id'],'source_version':source['version'],
+        'coordinator_epoch':current_epoch(s,source.get('goal_id') or json.loads(source['body'])['work_id']),
+        'source_digest':digest(json.loads(source['body'])['body_text']),
+        'expected_inbox_revision':s.room_consumers.inbox(identity,actor)['inbox_revision'],
+        'expected_intent_revision':1,'outcome':'succeeded','artifact_refs':refs,
+        'body_text':'按所有当前工作结果汇总。','complete':True,'idempotency_key':key(),**extra}
+
+
+@pytest.mark.asyncio
+async def test_final_publication_reuses_original_artifact_evidence_and_is_unique(collab):
+    s,owner,actor,clock,identity,credentials=await connected(collab,[{'project':'proj'}],[{'project_id':'proj'}])
+    goal,_=start(s,owner,actor,identity,credentials,project_ids=['proj'])
+    item=s.store.one('SELECT * FROM coordination_work WHERE id=?',(goal['next_request']['arguments']['work_item_id'],))
+    source=s.store.one('SELECT * FROM collaboration_messages WHERE goal_id=? AND origin=?',(goal['goal_id'],'panel_owner'))
+    lease,op=admit_read(s,identity,credentials,actor,goal['goal_id'],item,'proj')
+    with pytest.raises(DevError,match='未完成或不确定'):
+        s.room_runtime.reply(final_request(s,identity,credentials,actor,source,[]),actor)
+    done=report(s,identity,credentials,actor,goal['goal_id'],lease,op)
+    ref={'work_item_id':done['id'],'version':done['version'],'digest':digest(done['result'])}
+    with pytest.raises(DevError,match='全部已有结果'):
+        s.room_runtime.reply(final_request(s,identity,credentials,actor,source,[]),actor)
+    with pytest.raises(DevError,match='最新结果版本'):
+        s.room_runtime.reply(final_request(s,identity,credentials,actor,source,[{**ref,'version':ref['version']-1}]),actor)
+    request=final_request(s,identity,credentials,actor,source,[ref])
+    final=s.room_runtime.reply(request,actor)
+    again=s.room_runtime.reply({**request,'idempotency_key':key()},actor)
+    assert again['message']['id']==final['message']['id']
+    assert len(s.store.all('SELECT * FROM team_publications WHERE goal_id=?',(goal['goal_id'],)))==1
+    assert len(s.store.all('SELECT * FROM room_goal_publications WHERE goal_id=?',(goal['goal_id'],)))==1
+    s.room_runtime.control({'work_id':goal['goal_id'],'expected_version':s.room_runtime.goal(goal['goal_id'])['version'],
+        'action':'supplement','body_text':'改为仅检查标题','idempotency_key':key()},owner)
+    with pytest.raises(DevError,match='意图'):
+        s.room_runtime.reply({**request,'expected_inbox_revision':s.room_consumers.inbox(identity,actor)['inbox_revision']},actor)
+    with pytest.raises(DevError,match='当前意图'):
+        s.room_runtime.reply({**request,'expected_intent_revision':2,'idempotency_key':key(),
+            'expected_inbox_revision':s.room_consumers.inbox(identity,actor)['inbox_revision']},actor)
+
+
+@pytest.mark.asyncio
+async def test_failed_work_can_only_publish_explicit_partial_or_blocked_result(collab):
+    s,owner,actor,clock,identity,credentials=await connected(collab,[{'project':'proj'}],[{'project_id':'proj'}])
+    goal,_=start(s,owner,actor,identity,credentials,project_ids=['proj'])
+    item=s.store.one('SELECT * FROM coordination_work WHERE id=?',(goal['next_request']['arguments']['work_item_id'],))
+    lease,op=admit_read(s,identity,credentials,actor,goal['goal_id'],item,'proj')
+    done=report(s,identity,credentials,actor,goal['goal_id'],lease,op,outcome='failed')
+    source=s.store.one('SELECT * FROM collaboration_messages WHERE goal_id=? AND origin=?',(goal['goal_id'],'panel_owner'))
+    ref={'work_item_id':done['id'],'version':done['version'],'digest':digest(done['result'])}
+    request=final_request(s,identity,credentials,actor,source,[ref])
+    with pytest.raises(DevError,match='不能声明全部完成'):
+        s.room_runtime.reply(request,actor)
+    saved=s.room_runtime.reply({**request,'outcome':'blocked','idempotency_key':key()},actor)
+    body=json.loads(s.store.one('SELECT body FROM collaboration_messages WHERE id=?',(saved['message']['id'],))['body'])
+    assert body['outcome']=='blocked'
+    assert s.room_runtime.work_view(s.room_runtime.goal(goal['goal_id']),owner)['state']=='blocked'
+
+
+@pytest.mark.asyncio
+async def test_explicit_persistent_scope_has_no_seven_day_fallback_after_pause(collab):
+    s,owner,actor,clock,identity,credentials=await connected(collab,[{'project':'proj'}],[{'project_id':'proj'}])
+    member=s.rooms.member(identity['member_id'])
+    bridge,_=s.room_work_bridge.adapter(member,'proj')
+    policy=s.store.one('SELECT * FROM delegation_policies WHERE id=?',(bridge['policy_id'],))
+    assert policy['expires_at']>clock[0] and s.room_work_bridge.persistent(policy)
+    flow=s.store.one('SELECT * FROM room_connect_flows WHERE member_id=?',(member['id'],))
+    paused=s.rooms.connect_action({'flow_id':flow['id'],'expected_version':flow['version'],
+        'action':'pause','idempotency_key':key()},owner)
+    assert s.channel_owner.expired(policy)  # Even a stale row cannot fall back to its old deadline.
+    resumed=s.rooms.connect_action({'flow_id':flow['id'],'expected_version':paused['flow']['version'],
+        'action':'resume','idempotency_key':key()},owner)
+    current=s.store.one('SELECT * FROM delegation_policies WHERE id=?',(policy['id'],))
+    assert s.room_work_bridge.persistent(current)
+    clock[0]+=8*86400
+    assert not s.channel_owner.expired(current)

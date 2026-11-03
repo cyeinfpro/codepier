@@ -7,6 +7,8 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from playwright.sync_api import expect
 
+from tests.legacy_collaboration_ui import use_legacy_collaboration_ui
+
 from tests.collaboration_support import collaboration_stack  # noqa: F401
 from tests.test_collaboration_chatroom_browser import login, overview
 
@@ -17,7 +19,7 @@ POLL_KINDS = ["delegation_policies", "members", "overview", "timeline"]
 POLL_PROBE = """(() => {
   const originalTimer = window.setTimeout, originalFetch = window.fetch;
   const probe = window.lifecycleProbe = {armed: false, rows: [], poll: null,
-    origin: performance.timeOrigin, pagehide: false, signals: [], owners: []};
+    origin: crypto.randomUUID(), pagehide: false, signals: [], owners: [], cycles: new Set()};
   probe.record = (event, details={}) => {
     const key = 'codepier-lifecycle-read-evidence';
     const records = JSON.parse(sessionStorage.getItem(key) || '[]');
@@ -30,10 +32,25 @@ POLL_PROBE = """(() => {
     if (probe.armed) probe.record('pagehide');
   });
   window.setTimeout = function(callback, delay, ...args) {
-    const id = originalTimer.call(this, callback, delay, ...args);
-    if (typeof callback === 'function' && callback.name === 'poll')
-      probe.poll = {id, run: () => callback(...args)};
+    if (typeof callback !== 'function' || callback.name !== 'poll')
+      return originalTimer.call(this, callback, delay, ...args);
+    const run = () => {
+      const pending = Promise.resolve(callback(...args));
+      probe.cycles.add(pending);
+      const done = () => probe.cycles.delete(pending);
+      pending.then(done, done);
+      return pending;
+    };
+    const id = originalTimer.call(this, run, delay);
+    probe.poll = {id, run};
     return id;
+  };
+  probe.drain = async () => {
+    clearTimeout(probe.poll?.id);
+    while (probe.cycles.size) {
+      await Promise.all([...probe.cycles]);
+      clearTimeout(probe.poll?.id);
+    }
   };
   window.fetch = function(input, init = {}) {
     const url = new URL(typeof input === 'string' ? input : input.url, location.href);
@@ -90,6 +107,10 @@ def polling_page(stack, chat_browser_pool, engine):
         return original.call(this, path, options);
       };
     }""")
+    # A scheduled cycle may already be running by the time the refresh UI is
+    # visible. Finish that original cycle before routes are held and the probe
+    # is armed, so its late/retried fetches cannot stand in for the new cycle.
+    page.evaluate("lifecycleProbe.drain()")
     return context, page, errors, writes
 
 
@@ -111,9 +132,13 @@ def test_pending_reload_reads_use_the_original_document_without_page_errors(
         # replacement response is held. Native fetches and API responses remain
         # real; no synthetic success, timer delay, retry or error filtering.
         result = original.evaluate("""async p => {
-          const pending = p.poll.run();
-          await Promise.race([p.firstCycle, pending]);
-          return {origin:p.origin, currentOrigin:performance.timeOrigin,
+          // A wake while another poll is active may return immediately while
+          // scheduling the real cycle. Await its four actual response records,
+          // rather than treating that early return as completed work.
+          void p.poll.run();
+          await Promise.race([p.firstCycle, new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('Four polling reads did not finish')), 15000))]);
+          return {origin:p.origin, currentOrigin:window.lifecycleProbe.origin,
             pagehide:p.pagehide, rows:p.rows};
         }""")
         assert len(held) == 1
@@ -123,9 +148,11 @@ def test_pending_reload_reads_use_the_original_document_without_page_errors(
         assert all(row.get("status") == 200 and row["beforePagehide"] for row in result["rows"])
         assert errors == []
         with page.expect_navigation(wait_until="domcontentloaded"):
-            held.pop().continue_()
+            # Let the previously registered legacy document fixture handle the
+            # released navigation instead of bypassing it to the new room UI.
+            held.pop().fallback()
         expect(page.locator(".cc-chat-shell")).to_be_visible()
-        assert page.evaluate("performance.timeOrigin") != result["origin"]
+        assert page.evaluate("lifecycleProbe.origin") != result["origin"]
         assert writes == before_writes
         assert errors == []
     finally:
@@ -176,7 +203,7 @@ def test_real_pagehide_aborts_pending_reads_and_history_return_reauthorizes(
 
     try:
         before_writes = list(writes)
-        original_origin = page.evaluate("performance.timeOrigin")
+        original_origin = page.evaluate("lifecycleProbe.origin")
         conversation = page.locator(".cc-chat-shell").get_attribute("data-conversation")
         page.evaluate("""() => window.addEventListener('pagehide', () => {
           lifecycleProbe.record('pagehide-after-cleanup', {signals:lifecycleProbe.signals.map(
@@ -195,6 +222,10 @@ def test_real_pagehide_aborts_pending_reads_and_history_return_reauthorizes(
         page.wait_for_function("() => lifecycleProbe.heldRoutes === 4")
         assert len(held) == 4
         assert page.evaluate("lifecycleProbe.rows.every(row => !row.settled)")
+        # Capture which view-owned signals started the four held reads before
+        # navigation, so a stale in-flight cycle cannot masquerade as this one.
+        owners = page.evaluate("lifecycleProbe.owners.map(item => item.kind).sort()")
+        assert owners == POLL_KINDS, {"owners": owners, "held": len(held)}
         page.evaluate("lifecycleProbe.record('navigation-start')")
         page.goto(stack.url + "/healthz")
         # Store only fixed request kinds and lifecycle facts synchronously in
@@ -316,6 +347,7 @@ def test_pagehide_cancels_refresh_and_cached_restore_preserves_draft(
 
     page.on("request", observe)
     try:
+        use_legacy_collaboration_ui(page, stack)
         page.goto(stack.url + "/#projects")
         page.fill("#username", "admin")
         page.fill("#password", stack.password)

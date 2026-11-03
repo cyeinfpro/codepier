@@ -86,6 +86,12 @@ class Callback:
                     if item['payload'].get('data', {}).get('recipient_slot_id') == dot_id
                     and item['payload']['data'].get('wake_ticket')]
 
+    def room_events(self, member_id):
+        with self.lock:
+            return [item for item in self.records
+                    if item['payload'].get('data', {}).get('member_id') == member_id
+                    and item['payload']['data'].get('wake_ticket')]
+
     def close(self):
         self.release.set()
         self.server.shutdown()
@@ -461,6 +467,253 @@ def test_team_operation_and_agent_resource_ownership_survive_hub_process_restart
                           'original_operation_reused': True, 'real_side_effect_counts': [1, 1],
                           'resource_wait_observed': True, 'same_grant_targeting': True,
                           'real_dot_host': False}))
+
+
+def native_room(s, receiver):
+    """Use only owner HTTP and the actual public invitation/subscription flow."""
+    room = s.must(s.client.post('/api/collaboration/rooms', json={
+        'title': 'Native room process recovery',
+        'projects': [{'project': s.project['id'], 'environment_id': 'production'}],
+        'idempotency_key': key()}))['room']
+    created = s.must(s.client.post('/api/collaboration/rooms/' + room['id'] + '/members', json={
+        'name': 'Synthetic native host', 'project_scopes': [{
+            'project_id': s.project['id'], 'capabilities': ['read', 'write', 'execute'],
+            'execution_targets': ['project_agent']}], 'idempotency_key': key()}))
+    flow = s.must(s.client.get('/api/collaboration/connect-flows/' + created['flow']['id']))
+    instructions = flow['join_instructions']
+    request, _ = json.JSONDecoder().raw_decode(instructions[instructions.index('{'):])
+    assert request['action'] == 'room_connect_join'
+    joined = mcp(s, 'collaboration', request)
+    identity = {field: joined[field] for field in
+                ('conversation_id', 'member_id', 'binding_generation', 'connection_proof')}
+    subscribed = native(s, 'events/subscribe', {**joined['subscription_request'],
+        'delivery': {'mode': 'webhook',
+            'url': 'https://process-fixture.example.invalid/native/' + identity['member_id'],
+            'secret': SECRET}})
+    event = wait_for(lambda: next(iter(receiver.room_events(identity['member_id'])), None), 15)
+    assert event['headers']['X-MCP-Subscription-Id'] == subscribed['id']
+    probe = mcp(s, 'collaboration', {'action': 'room_probe_read', **identity,
+        'wake_ticket': event['payload']['data']['wake_ticket'], 'idempotency_key': key()})
+    mcp(s, 'collaboration', {'action': 'room_probe_reply', **identity,
+        'probe_nonce': probe['probe_nonce'], 'idempotency_key': key()})
+    ready = s.must(s.client.get('/api/collaboration/rooms/' + room['id']))['room']['members']
+    assert next(member for member in ready if member['id'] == identity['member_id'])['state'] == 'ready_work'
+    session = mcp(s, 'collaboration', {'action': 'room_consumer_begin', **identity,
+        'wake_ticket': event['payload']['data']['wake_ticket'], 'consumer_run_id': key(),
+        'lease_seconds': 300, 'idempotency_key': key()})
+    return room, identity, session, subscribed['id']
+
+
+def native_inbox(s, identity):
+    return mcp(s, 'collaboration_query', {'action': 'room_inbox', **identity, 'limit': 100})
+
+
+def native_proof(s, identity, session):
+    return {**{field: session[field] for field in PROOF_FIELDS},
+            'expected_inbox_revision': native_inbox(s, identity)['inbox_revision']}
+
+
+def native_source(s, identity, message_id):
+    page = native_inbox(s, identity)
+    entry = next(item for item in page['items']
+                 if item['kind'] == 'message' and item['reference']['message_id'] == message_id)
+    return {'source_message_id': message_id, 'source_version': entry['source_version'],
+            'source_digest': entry['source_digest']}
+
+
+def native_goal(s, identity, session, goal_id):
+    return mcp(s, 'collaboration_query', {'action': 'goal', 'project': s.project['id'],
+        'environment_id': 'production', 'goal_id': goal_id,
+        **{field: session[field] for field in PROOF_FIELDS}})
+
+
+def native_work_lease(s, identity, session, goal_id, item):
+    context = native_goal(s, identity, session, goal_id)['room_work_context']
+    return {'project': s.project['id'], 'environment_id': 'production', 'goal_id': goal_id,
+        'work_item_id': item['id'], 'attempt': item['attempt'],
+        'fencing_token': item['fencing_token'], **native_proof(s, identity, session),
+        'coordinator_epoch': context['coordinator_epoch'],
+        'expected_intent_revision': context['intent_revision']}
+
+
+def test_native_room_real_agent_restart_stop_continue_and_unique_publication(tmp_path):
+    """Synthetic native host transport; real Hub/Agent, HTTP, exec, files and crash."""
+    with stack(tmp_path / 'native-room-agent') as (s, receiver):
+        s.stop_agent()
+        s.config['shell'] = {'enabled': True, 'projects': ['ProjectAlpha'],
+                            'command': ['/bin/sh', '-c'], 'inherit_env': False,
+                            'max_timeout_seconds': 120}
+        s.config_path.write_text(json.dumps(s.config))
+        s.start_agent()
+        room, identity, session, subscription_id = native_room(s, receiver)
+        messages_path = '/api/collaboration/rooms/' + room['id'] + '/messages'
+        source_text = ('Write one durable start marker, wait for explicit stop, then preserve the '
+                       'original receipt before continuing the same goal with a verified file and command.')
+        source = s.must(s.client.post(messages_path, json={'body_text': source_text,
+            'client_message_id': key(), 'idempotency_key': key()}))['message']
+        start = mcp(s, 'collaboration', {'action': 'room_work_start', **identity,
+            **native_source(s, identity, source['id']), **native_proof(s, identity, session),
+            'target_project_id': s.project['id'], 'capabilities': ['read', 'write', 'execute'],
+            'execution_targets': ['project_agent'], 'acceptance': 'Original receipts and exactly one effect per command.',
+            'confirm_task': True, 'idempotency_key': key()})
+        goal_id = start['goal_id']
+        assert start['scheduled'] and start['next_request']
+        first_item = mcp(s, start['next_request']['tool'], start['next_request']['arguments'])['work_item']
+        release = s.directory / 'release-first-command'
+        first_code = ("from pathlib import Path; import time; "
+            "p=Path('native-first-effects'); f=p.open('a'); f.write('1'); f.flush(); f.close(); "
+            "Path('native-first-started').write_text('started'); "
+            f"release=Path({str(release)!r}); deadline=time.monotonic()+90; "
+            "exec('while not release.exists() and time.monotonic()<deadline:\\n time.sleep(.05)'); "
+            "assert release.exists(); Path('native-first-finished').write_text('done')")
+        first_args = {**native_work_lease(s, identity, session, goal_id, first_item),
+            'tool': 'exec', 'arguments': {
+                'command': shlex.quote(sys.executable) + ' -c ' + shlex.quote(first_code),
+                'resources': [{'kind': 'path', 'mode': 'write', 'name': '.'},
+                              {'kind': 'path', 'mode': 'read', 'name': str(release)}],
+                'timeout_seconds': 100, 'yield_seconds': 0}, 'idempotency_key': key()}
+        first = mcp(s, 'collaboration_work_execute', first_args)
+        wait_for(lambda: (s.projectalpha / 'native-first-started').exists(), 15)
+        assert (s.projectalpha / 'native-first-effects').read_text() == '1'
+        started = time.perf_counter()
+        chat = s.must(s.client.post(messages_path, json={
+            'body_text': '运行中仍可交谈；这条消息不增加执行权限。',
+            'client_message_id': key(), 'idempotency_key': key()}))['message']
+        message_seconds = time.perf_counter() - started
+        assert message_seconds < 5, 'One local message request stalled behind the Agent command'
+        assert chat['id'] != source['id'] and not (s.projectalpha / 'native-first-finished').exists()
+
+        agent_pid = s.agent.pid
+        s.crash_hub()
+        s.restart_hub()
+        assert s.agent.pid == agent_pid and s.agent.poll() is None
+        assert (s.projectalpha / 'native-first-effects').read_text() == '1'
+        assert not release.exists() and not (s.projectalpha / 'native-first-finished').exists()
+        recovered = native_goal(s, identity, session, goal_id)
+        assert recovered['goal']['id'] == goal_id
+        assert [operation['operation_id'] for operation in recovered['operations']] == [first['operation_id']]
+        recovered_item = next(item for item in recovered['work_items'] if item['id'] == first_item['id'])
+        assert (recovered_item['attempt'], recovered_item['fencing_token']) == (
+            first_item['attempt'], first_item['fencing_token'])
+        original = mcp(s, 'task_query', {'operation': 'get',
+            'operation_ids': [first['operation_id']]})['operations'][0]
+        assert original['operation_id'] == first['operation_id']
+        assert original['state'] in {'running', 'unknown', 'reconnecting'}
+        replay = mcp(s, 'collaboration_work_execute', {
+            **first_args, **native_proof(s, identity, session)})
+        assert replay['operation_id'] == first['operation_id']
+        assert (s.projectalpha / 'native-first-effects').read_text() == '1'
+
+        started = time.perf_counter()
+        paused = s.must(s.client.post('/api/collaboration/work/' + goal_id + '/control', json={
+            'action': 'pause', 'expected_version': recovered['goal']['version'], 'idempotency_key': key()}))
+        stop_seconds = time.perf_counter() - started
+        assert stop_seconds < 5, 'One local stop request stalled behind the Agent command'
+        assert paused['work']['id'] == goal_id
+        assert [operation['operation_id'] for operation in paused['operations']] == [first['operation_id']]
+        # Pausing the goal itself requests cancellation. The original operation
+        # may already have reached its terminal state before this explicit check.
+        cancel_result = s.mcp('process', {'operation': 'cancel',
+            'operation_ids': [first['operation_id']]})
+        cancellation = cancel_result['structuredContent']['operations'][0]
+        assert cancellation['operation_id'] == first['operation_id']
+        if cancel_result.get('isError'):
+            assert cancellation['state'] == 'cancelled' and cancellation['cancel_requested'] is False, cancel_result
+        else:
+            assert cancellation['cancel_requested'] is True or cancellation['state'] == 'cancelled', cancel_result
+        terminal = s.poll(first['operation_id'], timeout=20)
+        assert terminal['state'] == 'cancelled', terminal
+        assert (s.projectalpha / 'native-first-effects').read_text() == '1'
+        assert not (s.projectalpha / 'native-first-finished').exists()
+
+        mcp(s, 'collaboration', {'action': 'room_reply', **identity,
+            **native_source(s, identity, chat['id']), **native_proof(s, identity, session),
+            'body_text': '原命令已停止；已保留同一个操作回执。', 'complete': True,
+            'idempotency_key': key()})
+        latest = native_goal(s, identity, session, goal_id)
+        resume_key = key()
+        s.must(s.client.post('/api/collaboration/work/' + goal_id + '/control', json={
+            'action': 'resume', 'expected_version': latest['goal']['version'], 'idempotency_key': resume_key}))
+        resumed_input = s.must(s.client.get(messages_path, params={
+            'client_message_id': 'work-input:' + resume_key}))['messages']
+        assert len(resumed_input) == 1
+        context = native_goal(s, identity, session, goal_id)['room_work_context']
+        continued = mcp(s, 'collaboration', {'action': 'room_work_start', **identity,
+            **native_source(s, identity, resumed_input[0]['id']), **native_proof(s, identity, session),
+            'target_project_id': s.project['id'], 'capabilities': ['read', 'write', 'execute'],
+            'execution_targets': ['project_agent'], 'acceptance': 'Write and verify the second durable result once.',
+            'coordinator_epoch': context['coordinator_epoch'],
+            'confirm_task': True, 'idempotency_key': key()})
+        assert continued['goal_id'] == goal_id and continued['scheduled']
+        second_item = mcp(s, continued['next_request']['tool'], continued['next_request']['arguments'])['work_item']
+        assert second_item['id'] != first_item['id']
+        written = mcp(s, 'collaboration_work_execute', {
+            **native_work_lease(s, identity, session, goal_id, second_item),
+            'tool': 'write', 'arguments': {'path': 'native-second-input.txt',
+                'content': 'Explicit continuation of the original Goal.\n', 'expected_sha256': 'new'},
+            'idempotency_key': key()})
+        assert s.poll(written['operation_id'], timeout=15)['state'] == 'succeeded'
+        second_code = ("from pathlib import Path; "
+            "assert Path('native-second-input.txt').read_text() == 'Explicit continuation of the original Goal.\\n'; "
+            "f=Path('native-second-effects').open('a'); f.write('1'); f.close(); "
+            "Path('native-second-finished').write_text('verified')")
+        second = mcp(s, 'collaboration_work_execute', {
+            **native_work_lease(s, identity, session, goal_id, second_item), 'tool': 'exec',
+            'arguments': {'command': shlex.quote(sys.executable) + ' -c ' + shlex.quote(second_code),
+                'resources': [{'kind': 'path', 'mode': 'write', 'name': '.'}],
+                'timeout_seconds': 30, 'yield_seconds': 0}, 'idempotency_key': key()})
+        assert s.poll(second['operation_id'], timeout=15)['state'] == 'succeeded'
+        result = mcp(s, 'collaboration_work_result', {
+            **native_work_lease(s, identity, session, goal_id, second_item), 'outcome': 'succeeded',
+            'summary': 'The original operation was cancelled; the explicit continuation wrote and verified one result.',
+            'operation_ids': [written['operation_id'], second['operation_id']], 'idempotency_key': key()})
+        assert result['work_item']['state'] == 'succeeded'
+        context = native_goal(s, identity, session, goal_id)['room_work_context']
+        requirements = context['publication_requirements']
+        publication = {'action': 'room_reply', **identity, **native_proof(s, identity, session),
+            **{field: requirements[field] for field in ('source_message_id', 'source_version',
+                'source_digest', 'expected_intent_revision', 'artifact_refs')},
+            'coordinator_epoch': context['coordinator_epoch'], 'complete': True, 'outcome': 'succeeded',
+            'body_text': '已复核原取消回执，并在同一目标中完成一次后续文件写入与验证。', 'idempotency_key': key()}
+        final = mcp(s, 'collaboration', publication)
+        duplicate = mcp(s, 'collaboration', {**publication,
+            **native_proof(s, identity, session), 'idempotency_key': key()})
+        assert duplicate['message']['id'] == final['message']['id']
+        assert (s.projectalpha / 'native-first-effects').read_text() == '1'
+        assert (s.projectalpha / 'native-second-effects').read_text() == '1'
+        assert (s.projectalpha / 'native-second-finished').read_text() == 'verified'
+        assert rows(s, 'SELECT COUNT(*) AS n FROM coordination_goals')[0]['n'] == 1
+        assert rows(s, 'SELECT COUNT(*) AS n FROM coordination_operations WHERE work_item_id=?',
+                    (first_item['id'],))[0]['n'] == 1
+        operation_ids = {operation['operation_id'] for operation in
+                         native_goal(s, identity, session, goal_id)['operations']}
+        assert operation_ids == {first['operation_id'], written['operation_id'], second['operation_id']}
+        assert rows(s, 'SELECT COUNT(*) AS n FROM room_goal_publications WHERE goal_id=?',
+                    (goal_id,))[0]['n'] == 1
+        assert rows(s, 'SELECT COUNT(*) AS n FROM team_publications WHERE goal_id=?', (goal_id,))[0]['n'] == 1
+        assert rows(s, 'SELECT id FROM room_members') == [{'id': identity['member_id']}]
+        assert rows(s, 'SELECT id FROM mcp_event_subscriptions') == [{'id': subscription_id}]
+        assert rows(s, 'SELECT id FROM dot_consumer_sessions') == [{'id': session['consumer_session_id']}]
+        remaining = native_inbox(s, identity)
+        assert not [item for item in remaining['items'] if item['kind'] == 'message']
+        assert not [item for item in remaining['items'] if item['kind'] == 'work_ready' and item['ready']]
+        notices = [item['id'] for item in remaining['items'] if item['kind'] not in {'message', 'work_ready'}]
+        if notices:
+            mcp(s, 'collaboration', {'action': 'room_inbox_ack', **identity,
+                **native_proof(s, identity, session), 'entry_ids': notices,
+                'idempotency_key': key()})
+        ended = mcp(s, 'collaboration', {'action': 'room_consumer_yield', **identity,
+            **native_proof(s, identity, session), 'idempotency_key': key()})
+        assert ended['state'] == 'yielded' and not ended['more']
+        assert s.agent.pid == agent_pid and len(set(s.hub_pids)) == 2
+        print(json.dumps({'scenario': 'native_room_real_agent_restart_stop_continue',
+            'hub_processes': 2, 'agent_process_survived': True,
+            'member_and_subscription_preserved': True, 'original_goal_preserved': True,
+            'original_operation_preserved': True, 'real_side_effect_counts': [1, 1],
+            'canonical_publications': 1, 'message_http_seconds': round(message_seconds, 4),
+            'stop_http_seconds': round(stop_seconds, 4),
+            'latency_observations': 'single local requests, not a load-test percentile',
+            'real_dot_host': False}))
 
 
 def serve_fixture_hub(directory, port, callback_port):

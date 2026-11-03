@@ -1,5 +1,5 @@
 {
-  "version": "1.31.0",
+  "version": "1.32.0",
   "algorithm": "sha256",
   "assets": {
     "access-profiles.css": {
@@ -74,53 +74,17 @@
       "sha256": "4bde869b6725f01c8fbe9e1cc80324f5a98d06d35c0a5d3393de6d90c95192cd",
       "bytes": 95939
     },
-    "collaboration-channels.css": {
-      "sha256": "1eab0e3970c7936e5a0d45ed337dd8d3a7183937c638932480395d64755fbfc4",
-      "bytes": 16124
+    "collaboration-room-store.js": {
+      "sha256": "ace07166dc58a78aa89381b795803f036509420cefe19f86633c5ad831558399",
+      "bytes": 32207
     },
-    "collaboration-channels.js": {
-      "sha256": "b68a0ccfedc13b5582de615302d0e713afbf44c9441d3e37c64558e36ba6faeb",
-      "bytes": 140860
+    "collaboration-room.css": {
+      "sha256": "e24d4128c6aa1425416922d1b98c5f0de14da9210c28093cad70124e10c7d3c8",
+      "bytes": 27766
     },
-    "collaboration-delegation.js": {
-      "sha256": "d083a7bf98a5e8b90ba1c5220b36e2fea7292a2f46ddf901baf07d74539be339",
-      "bytes": 47277
-    },
-    "collaboration-dots.js": {
-      "sha256": "4272a3604c5973446c2ab058875104fd544f9854c75d06b8b53dcaf87f823346",
-      "bytes": 21348
-    },
-    "collaboration-goals.js": {
-      "sha256": "b6cbc94805706b2d5ceff935ed66e098c1331e99ca38707a347f9d31410a4cd5",
-      "bytes": 59577
-    },
-    "collaboration-relay.css": {
-      "sha256": "dd3ab80c573ac1547064c7679862f95591e42627f9cd042bfe422d9297d2c8bf",
-      "bytes": 13307
-    },
-    "collaboration-relay.js": {
-      "sha256": "44f1ab5960bc74a9f908d55f0bc7c516cea754eaee97911235d5714cd711387d",
-      "bytes": 69695
-    },
-    "collaboration-runtime.js": {
-      "sha256": "ac478b2c93d54e1a84e743537ecaf0c57793433884ae0328e26b93c00e491baa",
-      "bytes": 2871
-    },
-    "collaboration-workspace.css": {
-      "sha256": "edf4528e9a130925702ab2032f3a80438fff79c873df071529da499b0071babb",
-      "bytes": 32233
-    },
-    "collaboration-workspace.js": {
-      "sha256": "c3b8d32b4edb1bb2ee81b2074d2ca01a3677425f33d4a167d2787c0fa17824fe",
-      "bytes": 32967
-    },
-    "collaboration.css": {
-      "sha256": "16b421ada210c33346a6292eed6d37deb507fc2c90aface2fd0ba711c003a8e4",
-      "bytes": 39570
-    },
-    "collaboration.js": {
-      "sha256": "bfb752c0b80e0c4b706a42c7b8f631e531077651279ce1f8e30108cf67944a31",
-      "bytes": 195327
+    "collaboration-room.js": {
+      "sha256": "4f7c7fa2c46a2b21dbb3e85e8e3a432d834092d5f8abae149195b0b604fb4ace",
+      "bytes": 144503
     },
     "computer.css": {
       "sha256": "3bfd6993ecee11cf6c23d78cc7b4f9acd6759ffaccc5e241ff06e156da7dfcac",
@@ -267,5 +231,5 @@
       "bytes": 26032
     }
   },
-  "template_sha256": "d71440cfd71390e77614ecd06fc9ab305746006338ed7bb607ba3edb4d84d0a0"
+  "template_sha256": "333de333189038936e047431cf4692fef529c2c0affc22e9ce95eb9060f5bc8f"
 }

@@ -15,14 +15,21 @@ PLAN = {'intent': 'Monitor fixture', 'valid_until': '2030-01-01T00:00:00Z', 'rul
     'open_when': {'operator': 'lt', 'value': 0.9},
     'close_when': {'operator': 'gt', 'value': 0.99}, 'require_recovery_probe': 'probe'}]}
 VALUES = {
-    'dot_id': 'task-dot', 'message_id': 'message', 'confirm_task': True,
+    'title': 'A room', 'name': 'A member', 'flow_id': 'connect-flow', 'member_id': 'room-member',
+    'invite_code': 'CPR-fixture-invitation-not-a-secret-' * 2,
+    'connection_proof': 'fixture-member-proof-not-a-secret-' * 2,
+    'probe_nonce': 'fixture-connection-nonce-not-a-secret-' * 2,
+    'work_id': 'room-work',
+    'dot_id': 'task-dot', 'message_id': 'message', 'attachment_id': 'attachment', 'confirm_task': True,
     'team_id': 'team', 'binding_generation': 'binding-generation',
     'wake_ticket': 'fixture-wake-ticket-not-a-secret-' * 2,
     'consumer_run_id': 'consumer-run', 'consumer_session_id': 'consumer-session',
     'consumer_fence': 1, 'consumer_proof': 'fixture-consumer-proof-not-a-secret-' * 2,
-    'expected_inbox_revision': 0, 'confirm_consumer_protocol': True,
+    'expected_inbox_revision': 0, 'expected_context_version': 0, 'confirm_consumer_protocol': True,
     'entry_ids': ['mailbox-entry'], 'coordinator_epoch': 1, 'expected_intent_revision': 1,
     'recipient_dot_id': 'peer-dot', 'coordinator_dot_id': 'coordinator-dot',
+    'recipient_member_id': 'peer-member', 'target_member_id': 'peer-member', 'expected_coordinator_epoch': 1,
+    'handoff_id': 'handoff',
     'purpose': 'Review original constraints',
     'artifact_refs': [{'work_item_id': 'work', 'version': 1, 'digest': 'a' * 64}],
     'source_version': 1, 'source_digest': 'a' * 64,
@@ -63,7 +70,34 @@ def example(tool, action):
         return {'action': action, **{key: VALUES[key] for key in
             ('project', 'goal_id', 'work_item_id', 'attempt', 'fencing_token', 'idempotency_key')},
             'tool': 'exec', 'arguments': {'command': 'printf fixture'}}
-    return {key: (action if key == 'action' else deepcopy(VALUES[key])) for key in spec['required']}
+    result = {}
+    for key in spec['required']:
+        field = spec['properties'][key]
+        if key == 'action':
+            result[key] = action
+        elif key == 'flow_action':
+            result[key] = field.get('enum', [field.get('const')])[0]
+        elif key == 'binding_generation' and field.get('type') == 'integer':
+            result[key] = 1
+        else:
+            result[key] = deepcopy(VALUES[key])
+    if action == 'room_context_update':
+        result['reviewed_sources'] = [{'message_id': 'context-source', 'version': 1, 'digest': 'a' * 64}]
+    return result
+
+
+def test_room_migration_is_an_explicit_owner_mutation_not_a_query():
+    assert 'room_migrate' in ACTIONS['collaboration']
+    assert 'room_migrate' not in ACTIONS['collaboration_query']
+    raw = {'action': 'room_migrate', 'flow_action': 'activate', 'conversation_id': 'original-room',
+        'expected_version': 4, 'idempotency_key': 'original-cutover-request'}
+    target, args = resolve('collaboration', raw)
+    assert target == 'collaboration_room_migrate'
+    assert args == {'action': 'activate', 'conversation_id': 'original-room',
+        'expected_version': 4, 'idempotency_key': 'original-cutover-request'}
+    for change in ({'flow_action': 'auto'}, {'expected_version': 0}, {'owner_approved': True}):
+        with pytest.raises(DevError):
+            resolve('collaboration', {**raw, **change})
 
 
 @pytest.mark.parametrize('tool,action', [(tool, action) for tool, actions in ACTIONS.items() for action in actions])
@@ -78,8 +112,10 @@ def test_every_action_accepts_exact_shape_and_rejects_missing_or_foreign_fields(
     target, adapted = resolve(tool, raw)
     c.TOOL_MODELS[target].model_validate(adapted)
     # Route adaptation must not materialize nested defaults or change any key.
-    assert {k: v for k, v in raw.items() if k != 'action'} == {
-        k: v for k, v in adapted.items() if k != 'kind'}
+    expected = {k: v for k, v in raw.items() if k != 'action'}
+    if 'flow_action' in expected:
+        expected['action'] = expected.pop('flow_action')
+    assert expected == {k: v for k, v in adapted.items() if k != 'kind'}
     for field in raw:
         invalid = {k: v for k, v in raw.items() if k != field}
         assert list(validator.iter_errors(invalid)), (tool, action, field)
@@ -154,3 +190,59 @@ def test_canonical_requests_preserve_checkpoint_mode_and_exact_required_scope():
     assert resolve(canonical['tool'], canonical['arguments']) == ('collaboration_delegation_inbox', args)
     assert canonical['arguments']['checkpoint'] == args['checkpoint']
     assert canonical['arguments']['mode'] == 'notification_only'
+
+
+@pytest.mark.parametrize('action', ['takeover', 'restore_binding'])
+def test_room_recovery_requires_explicit_member_and_current_role_and_intent(action):
+    raw = {**example('collaboration', 'room_work_control'), 'flow_action': action}
+    with pytest.raises(DevError):
+        resolve('collaboration', raw)
+    approved = {**raw, 'target_member_id': 'original-member',
+        'expected_coordinator_epoch': 2, 'expected_intent_revision': 3}
+    target, arguments = resolve('collaboration', approved)
+    assert target == 'collaboration_room_work_control'
+    assert arguments['target_member_id'] == 'original-member'
+    assert arguments['expected_coordinator_epoch'] == 2
+    assert arguments['expected_intent_revision'] == 3
+    for field in ('target_member_id', 'expected_coordinator_epoch', 'expected_intent_revision'):
+        with pytest.raises(DevError):
+            resolve('collaboration', {key: value for key, value in approved.items() if key != field})
+    with pytest.raises(DevError):
+        resolve('collaboration', {**approved, 'expected_coordinator_epoch': True})
+
+
+def test_room_handoff_preserves_native_identity_and_rejects_blank_purpose():
+    raw = example('collaboration', 'room_work_handoff')
+    target, arguments = resolve('collaboration', raw)
+    assert target == 'collaboration_room_work_handoff'
+    assert arguments['member_id'] == VALUES['member_id']
+    assert arguments['recipient_member_id'] == VALUES['recipient_member_id']
+    assert 'project' not in arguments and 'dot_id' not in arguments
+    with pytest.raises(DevError):
+        resolve('collaboration', {**raw, 'purpose': '  '})
+
+
+@pytest.mark.parametrize('empty', [{}, {'facts': []}, {'reviewed_sources': []},
+    {'facts': [], 'reviewed_sources': []}, {'supersedes': ['old-fact']}])
+def test_room_context_schema_and_runtime_reject_updates_without_source_or_fact(empty):
+    raw = {k: v for k, v in example('collaboration', 'room_context_update').items() if k != 'reviewed_sources'}
+    raw.update(empty)
+    validator = Draft202012Validator(ADAPTERS['collaboration'].json_schema())
+    assert list(validator.iter_errors(raw))
+    with pytest.raises(DevError):
+        resolve('collaboration', raw)
+
+
+@pytest.mark.parametrize('mode', ['facts', 'reviewed_sources', 'both'])
+def test_room_context_schema_and_runtime_accept_each_nonempty_source_alternative(mode):
+    raw = example('collaboration', 'room_context_update')
+    sources = deepcopy(raw['reviewed_sources'])
+    if mode != 'reviewed_sources':
+        raw['facts'] = [{'kind': 'question', 'key': 'pending', 'text': 'Which constraints remain open?', 'sources': sources}]
+    if mode == 'facts':
+        raw.pop('reviewed_sources')
+    validator = Draft202012Validator(ADAPTERS['collaboration'].json_schema())
+    validator.validate(raw)
+    target, arguments = resolve('collaboration', raw)
+    assert target == 'collaboration_room_context_update'
+    assert arguments['expected_context_version'] == 0

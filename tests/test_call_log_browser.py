@@ -1,4 +1,5 @@
 """Offline browser interaction tests of the shipped call-log component."""
+from tests.browser_launch import launch_browser
 import copy
 import shutil
 from pathlib import Path
@@ -32,7 +33,7 @@ def log_page():
     details={rows[0]['id']:{**rows[0],'attempts':1,'args_summary':{'command':'pytest -q','env':'<redacted>'},'output':'output line\npassword=<redacted>','result':{'ok':True,'data':{'exit_code':0}},'timing':{'wait_ms':20,'execution_ms':150},'trace':{'current':{'reason':'本机正在执行'},'events':[]}}}
     with sync_playwright() as p:
         executable=shutil.which('chromium')
-        browser=p.chromium.launch(headless=True,**({'executable_path':executable} if executable else {}))
+        browser=launch_browser(p.chromium, headless=True,**({'executable_path':executable} if executable else {}))
         page=browser.new_page(viewport={'width':1100,'height':900})
         errors=[]
         page.on('pageerror',lambda e:errors.append(str(e)))

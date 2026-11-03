@@ -1,5 +1,7 @@
 # 微信扫码登录与面板开关
 
+> **1.32 房间入口**：当前使用流程见 [房间协作中心](COLLABORATION_CENTER.md)，维护与恢复见 [协作中心维护与恢复](COLLABORATION_CENTER_OPERATIONS.md)。本文件用于既有 CPD/CPJ、v2 Dot 或渠道对象的兼容维护。旧界面已退出生产静态目录，仅以原字节快照保留在 `tests/fixtures/legacy_collaboration_ui` 执行旧 wire 回归；下文旧界面步骤说明历史行为，当前面板使用上述房间指南。
+
 ## 入口
 
 协作中心 → 选择房间 → 连接 → 通道与执行边界 → 管理通道与范围。

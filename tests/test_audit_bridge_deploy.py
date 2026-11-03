@@ -193,14 +193,24 @@ def test_token_read_uses_the_descriptor_that_passed_permission_checks(tmp_path, 
     replacement.write_text("rd_" + "y" * 43)
     replacement.chmod(0o644)
     real_fstat = os.fstat
+    token_stat = token.stat()
+    token_identity = (token_stat.st_dev, token_stat.st_ino)
+    swapped = False
 
     def replace_after_check(fd):
+        nonlocal swapped
         info = real_fstat(fd)
-        replacement.replace(token)
+        if not swapped and (info.st_dev, info.st_ino) == token_identity:
+            swapped = True
+            replacement.replace(token)
         return info
 
     monkeypatch.setattr(bridge.os, "fstat", replace_after_check)
+    with open(os.devnull, "rb") as unrelated:
+        os.fstat(unrelated.fileno())
+    assert not swapped and replacement.exists()
     assert bridge.token_from_file(token) == "rd_" + "x" * 43
+    assert swapped
 
 
 def fake_hub_installer(tmp_path, *, probe_status=0, start_status=0):

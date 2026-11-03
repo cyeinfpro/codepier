@@ -1,4 +1,5 @@
 """Shared synthetic Weixin browser fixtures; never calls Tencent."""
+from tests.browser_launch import launch_browser
 import os
 import re
 from pathlib import Path
@@ -6,14 +7,19 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import sync_playwright
 
+from tests.legacy_collaboration_ui import LEGACY_ASSET_NAMES, legacy_asset, legacy_document
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def full_styles(page):
-    index = (ROOT / "web/index.html").read_text()
-    names = re.findall(r'<link rel="stylesheet" href="/static/([^?"]+)', index)
+    # Explicit historical test surface; the production entry stays room-only.
+    index = legacy_document((ROOT / "web/index.html").read_text())
+    names = re.findall(r'<link rel="stylesheet" href="/(?:static|__tests__/legacy-collaboration-ui)/([^?"]+)', index)
     assert "collaboration-channels.css" in names and "collaboration.css" in names
-    page.add_style_tag(content="\n".join((ROOT / "web" / name).read_text() for name in names))
+    page.add_style_tag(content="\n".join(
+        (legacy_asset(name) if name in LEGACY_ASSET_NAMES else ROOT / "web" / name).read_text()
+        for name in names))
     page.evaluate("""() => {
       const drawer=document.querySelector('#drawer');
       drawer.removeAttribute('style');drawer.className='cc-drawer-body';
@@ -31,17 +37,17 @@ def qr_page(request):
         executable = os.environ.get("CODEPIER_TEST_CHROMIUM") if request.param == "chromium" else None
         if not executable and not Path(kind.executable_path).is_file():
             pytest.skip(request.param + " runtime is not installed; no browser result claimed")
-        browser = kind.launch(headless=True, **({"executable_path": executable} if executable else {}))
+        browser = launch_browser(kind, headless=True, **({"executable_path": executable} if executable else {}))
         page = browser.new_page(viewport={"width": 1440, "height": 1000})
         errors = []
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.set_content("<style>body{font:16px sans-serif;margin:16px}*{box-sizing:border-box}"
                          ".cc-field{display:grid}#drawer{max-width:800px;margin:auto}"
                          "button{padding:8px}" +
-                         (ROOT / "web/collaboration-channels.css").read_text() +
+                         (ROOT / "tests/fixtures/legacy_collaboration_ui/collaboration-channels.css").read_text() +
                          "</style><button id='open'>管理通道</button><main id='drawer'></main>")
         page.clock.install()
-        page.add_script_tag(path=str(ROOT / "web/collaboration-channels.js"))
+        page.add_script_tag(path=str(ROOT / "tests/fixtures/legacy_collaboration_ui/collaboration-channels.js"))
         page.evaluate(r"""() => {
           window.S={session:{id:'synthetic-session'},space_id:'synthetic-space'};
           window.state={generation:1,drawerEpoch:0,project:'projectA',environment:'test',

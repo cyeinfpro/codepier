@@ -70,6 +70,26 @@ class CollaborationService:
         self.channels = ChannelRouter(self)
         from hub.collaboration.channel_enrollment import ChannelEnrollment
         self.channel_enrollment = ChannelEnrollment(self)
+        from hub.collaboration.rooms import Rooms
+        from hub.collaboration.room_runtime import RoomRuntime
+        from hub.collaboration.room_channels import RoomChannels
+        from hub.collaboration.room_work_bridge import RoomWorkBridge
+        from hub.collaboration.room_consumers import RoomConsumers
+        from hub.collaboration.room_connections import RoomConnections
+        from hub.collaboration.room_goal_recovery import RoomGoalRecovery
+        from hub.collaboration.room_goal_handoffs import RoomGoalHandoffs
+        self.rooms = Rooms(self)
+        self.room_connections = RoomConnections(self)
+        self.room_work_bridge = RoomWorkBridge(self)
+        self.room_goal_recovery = RoomGoalRecovery(self)
+        self.room_goal_handoffs = RoomGoalHandoffs(self)
+        self.room_consumers = RoomConsumers(self)
+        self.room_runtime = RoomRuntime(self)
+        self.room_channels = RoomChannels(self)
+        from hub.collaboration.room_attachments import RoomAttachments
+        self.room_attachments = RoomAttachments(self)
+        from hub.collaboration.room_context import RoomContext
+        self.room_context = RoomContext(self)
         self.events = None
         self.monitor = None
         self.secret = b''
@@ -195,6 +215,38 @@ class CollaborationService:
                          'monitor_incidents', 'monitor_evidence'}:
             raise RuntimeError('Unknown collaboration object kind')
         row = self.store.one(f'SELECT * FROM {table} WHERE id=? AND room_id=?', (identifier, room['id']))
+        if row is None and table == 'collaboration_messages':
+            # A native room message has one immutable ledger identity even when
+            # a later, explicitly approved project consumes it. The mapping is
+            # created within that admission's fenced transaction, never inferred
+            # from text, a shared grant, or a newly attached project.
+            source = self.store.one('''SELECT w.* FROM room_work_sources w
+                JOIN room_member_work_bridges b ON b.legacy_dot_id=w.legacy_dot_id
+                JOIN room_members m ON m.id=w.member_id
+                JOIN room_member_scopes s ON s.member_id=w.member_id AND s.project_id=w.project_id
+                    AND s.environment_id=w.environment_id
+                WHERE w.message_id=? AND w.partition_id=? AND b.state='active'
+                    AND b.scope_digest=w.scope_digest AND s.version=w.scope_version
+                    AND m.binding_generation=w.binding_generation AND m.grant_id=w.grant_id
+                    AND m.status='bound' AND s.state='active'
+                ORDER BY w.created DESC LIMIT 1''', (identifier, room['id']))
+            if source:
+                candidate = self.store.one('SELECT * FROM collaboration_messages WHERE id=? AND conversation_id=?',
+                                           (identifier, source['conversation_id']))
+                member = self.rooms.member(source['member_id'])
+                try:
+                    actor = self.rooms.principal(member)
+                    self.rooms.member_scope(actor, source['conversation_id'], member['id'], source['binding_generation'])
+                    active = any(s['project_id'] == source['project_id'] and
+                                 s['environment_id'] == source['environment_id'] and 'read' in s['capabilities']
+                                 for s in self.rooms.scopes(member, actor))
+                except DevError:
+                    active = False
+                if (active and candidate and candidate['version'] == source['source_version']
+                        and digest(json.loads(candidate['body']).get('body_text', '')) == source['source_digest']
+                        and source['project_id'] == room['project_id']
+                        and source['environment_id'] == room['environment_id']):
+                    row = candidate
         if row is None:
             raise DevError('NOT_FOUND', '未找到当前授权范围内的记录', 404)
         return row
@@ -1014,6 +1066,41 @@ class CollaborationService:
         self.guard()
         from shared.public_collaboration import resolve
         name, raw = resolve(name, raw)
+        from shared.room_contracts import ROOM_QUERY_ACTIONS, ROOM_MUTATION_ACTIONS
+        from shared.room_consumer_contracts import ROOM_CONSUMER_QUERIES, ROOM_CONSUMER_ACTIONS
+        if name.startswith('collaboration_room_') and name.removeprefix('collaboration_') in (ROOM_CONSUMER_QUERIES | ROOM_CONSUMER_ACTIONS):
+            return self.room_consumers.invoke(name.removeprefix('collaboration_'), raw, principal)
+        if name.startswith('collaboration_room_') and name.removeprefix('collaboration_') in (ROOM_QUERY_ACTIONS | ROOM_MUTATION_ACTIONS):
+            return self.rooms.invoke(name.removeprefix('collaboration_'), raw, principal)
+        if name == 'collaboration_room_messages':
+            from shared.room_runtime_contracts import RoomMessagesRead
+            args = validate(RoomMessagesRead, raw)
+            return self.room_runtime.read(args.pop('conversation_id'), principal, **args)
+        if name == 'collaboration_room_works':
+            from shared.room_runtime_contracts import RoomWorksRead
+            args = validate(RoomWorksRead, raw)
+            return self.room_runtime.work_page(args.pop('conversation_id'), principal, **args)
+        if name == 'collaboration_room_work':
+            from shared.room_runtime_contracts import RoomWorkRead
+            args = validate(RoomWorkRead, raw)
+            return self.room_runtime.work_read(args['work_id'], principal)
+        if name == 'collaboration_room_message':
+            return self.room_runtime.send(raw, principal)
+        if name == 'collaboration_room_reply':
+            return self.room_runtime.reply(raw, principal)
+        if name == 'collaboration_room_work_start':
+            return self.room_runtime.start_work(raw, principal)
+        if name == 'collaboration_room_work_handoff':
+            return self.room_goal_handoffs.handoff(raw, principal)
+        if name == 'collaboration_room_work_handoff_read':
+            return self.room_goal_handoffs.query(raw, principal)
+        if name == 'collaboration_room_work_control':
+            return self.room_runtime.control(raw, principal)
+        if name == 'collaboration_room_channel_connect':
+            return self.room_channels.create(raw, principal)
+        if name == 'collaboration_room_channel':
+            from shared.room_runtime_contracts import ChannelRead
+            return self.room_channels.read(validate(ChannelRead, raw)['flow_id'], principal)
         from shared.team_collaboration_contracts import TOOL_MODELS as TEAM_MODELS
         if name in TEAM_MODELS:
             return self.coordination.teams.invoke(name, raw, principal)

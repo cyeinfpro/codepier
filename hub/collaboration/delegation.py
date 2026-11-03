@@ -202,7 +202,7 @@ class DelegationService:
             'authority': self.authority_descriptor(),
             **self.consumer.presentation(policy, room, reason)}
 
-    def set_policy(self, raw, principal):
+    def set_policy(self, raw, principal, *, room_member_id=''):
         args = validate(contracts.DelegationPolicySet, raw)
         with self.store.transaction():
             principal, room = self.c.scope(principal, args)
@@ -232,6 +232,9 @@ class DelegationService:
             snapshot = asdict(principal)
             snapshot.update(scopes=[], session_hash='', token_hash='')
             def save():
+                self.c.rooms.migration.adapter_write(conversation['id'], room_member_id,
+                    room['project_id'], room['environment_id'], args['capabilities'], targets,
+                    dot_id=slot['id'] if room_member_id else '')
                 old = self.store.one('SELECT * FROM delegation_policies WHERE room_id=? AND conversation_id=? AND slot_id=?',
                                      (room['id'], conversation['id'], slot['id']))
                 if (old['version'] if old else 0) != args['expected_version']:
@@ -277,8 +280,12 @@ class DelegationService:
 
     def stop(self, policy, reason):
         self.retire_routes(policy)
+        native=self.c.room_work_bridge.native
+        native.stop_policy(policy,reason)
         for row in self.store.all('SELECT g.* FROM coordination_goals g JOIN delegation_requests d ON d.goal_id=g.id WHERE d.policy_id=? AND g.state=?',
                                   (policy['id'], 'active')):
+            if native.reference(row):
+                continue
             self.c.coordination.stop_work(row, reason)
             self.store.execute("UPDATE coordination_goals SET state='paused',version=version+1,updated=? WHERE id=?", (self.c.clock(), row['id']))
 
@@ -384,8 +391,10 @@ class DelegationService:
         return {'items': items, 'next_cursor': cursor, 'discovery_only': True, 'grants_authority': False,
                 'instructions': '使用每项 read_request 核验原委托；领取仍使用已保存的消费者基线、明确执行模式和原租约。列表不授予执行权限。'}
 
-    def send(self, principal, room, message, args):
+    def send(self, principal, room, message, args, *, native_scope=None):
         """Called only in the original message transaction, never for historical replay."""
+        if not native_scope:
+            self.c.rooms.migration.legacy_write(message['conversation_id'])
         if args.get('team_id') or self.store.one(
                 'SELECT 1 FROM team_message_bindings WHERE message_id=?', (message['id'],)):
             raise DevError('TEAM_SOURCE_REQUIRES_TEAM', '团队原始请求必须复用团队 Goal，不能另建个人委托', 409)
@@ -397,25 +406,35 @@ class DelegationService:
                 or [item['slot_id'] for item in args['mentions']] != [policy['slot_id']]):
             raise DevError('DELEGATION_POLICY_CHANGED', '委托版本、聊天室或唯一接收位置不匹配', 409)
         spec = json.loads(policy['spec'])
-        defaults = self.c.conversations.working_scopes.task_defaults(principal, policy)
+        native=self.c.room_work_bridge.native.validate(native_scope,principal) if native_scope else None
+        if native:
+            coordinator=next(m for m in native['members'] if m['member_id']==native['coordinator_member_id'])
+            rule=next(r for r in coordinator['projects'] if r['project_id']==native['anchor_project_id'])
+            if (native['source_message_id']!=message['id'] or native['source_version']!=message['version']
+                    or native['source_digest']!=digest(json.loads(message['body'])['body_text'])
+                    or rule['policy_id']!=policy['id'] or rule['legacy_dot_id']!=policy['slot_id']):
+                raise DevError('ROOM_WORK_SCOPE_DENIED','原房间来源和执行批准不匹配',403)
+        defaults = native if native else self.c.conversations.working_scopes.task_defaults(principal, policy)
         targets = request.get('execution_targets')
         if targets is None:
             if len(defaults['execution_targets']) != 1:
                 raise DevError('DELEGATION_TARGET_REQUIRED', '多个可用目标必须为本次委托明确选择范围', 422)
             targets = list(defaults['execution_targets'])
         capabilities = request.get('capabilities') or list(defaults['capabilities'])
-        if not set(targets) <= set(spec['execution_targets']) or not set(capabilities) <= set(spec['capabilities']):
+        if not native and (not set(targets) <= set(spec['execution_targets']) or not set(capabilities) <= set(spec['capabilities'])):
             raise DevError('DELEGATION_SCOPE_DENIED', '本次委托范围必须是原设置的目标与能力子集', 403)
         if any(target.startswith('vps:') for target in targets) and 'execute' not in capabilities:
             raise DevError('DELEGATION_SCOPE_DENIED', 'VPS目标需要本次明确选择执行能力', 403)
-        if 'write' in capabilities and 'project_agent' not in targets:
+        if not native and 'write' in capabilities and 'project_agent' not in targets:
             raise DevError('DELEGATION_SCOPE_DENIED', 'VPS目标不能授权本机文件写入', 403)
-        working = self.c.conversations.working_scopes.for_new_task(principal, policy, capabilities, targets)
-        scope_approvals, additional_projects = ([], []) if working else self.c.conversations.project_scopes.for_new_task(
+        working = None if native else self.c.conversations.working_scopes.for_new_task(principal, policy, capabilities, targets)
+        scope_approvals, additional_projects = ([], []) if working or native else self.c.conversations.project_scopes.for_new_task(
             principal, policy, capabilities, targets)
-        project_ids = working['project_ids'] if working else [room['project_id'], *additional_projects]
+        project_ids = native['project_ids'] if native else working['project_ids'] if working else [room['project_id'], *additional_projects]
         request_scope = {'execution_targets': targets, 'capabilities': capabilities}
-        if working:
+        if native:
+            request_scope.update(project_ids=project_ids,room_member_scope=native_scope)
+        elif working:
             request_scope.update(project_ids=project_ids, room_project_scope=working['reference'])
         elif scope_approvals:
             request_scope.update(project_ids=project_ids, project_scope_approvals=scope_approvals)
@@ -430,18 +449,21 @@ class DelegationService:
         now = self.c.clock()
         policy_deadline = now + spec['goal_duration_seconds'] if self.c.channel_owner.persistent(policy) else policy['expires_at']
         if scope_approvals:
-            policy_deadline = min(policy_deadline, *(self.c.conversations.project_scopes.authorize(
-                principal, policy, ref)['expires_at'] for ref in scope_approvals))
+            deadlines = [self.c.conversations.project_scopes.authorize(principal, policy, ref)['expires_at']
+                         for ref in scope_approvals]
+            policy_deadline = min([policy_deadline, *(expiry for expiry in deadlines if expiry is not None)])
+        if native:
+            policy_deadline=min([policy_deadline,*[r['expires_at'] for m in native['members'] for r in m['projects'] if r['expires_at'] is not None]])
         if policy_deadline - now < 60:
             raise DevError('DELEGATION_POLICY_INACTIVE', '委托将在一分钟内到期，请重新确认设置', 409)
         identifier = uuid.uuid4().hex
         scope = {'project': room['project_id'], 'environment_id': room['environment_id']}
         raw = {**scope, 'conversation_id': message['conversation_id'], 'objective': objective, 'acceptance': acceptance,
-               'project_ids': project_ids, 'participant_grant_ids': [policy['grant_id']],
+               'project_ids': project_ids, 'participant_grant_ids': native['participant_grant_ids'] if native else [policy['grant_id']],
                'coordinator_grant_id': policy['grant_id'], 'capabilities': capabilities,
                'duration_seconds': min(spec['goal_duration_seconds'], int(policy_deadline - now)),
                'budget': spec['budget'], 'idempotency_key': 'delegation:create:' + identifier}
-        goal = self.c.coordination.create(raw, principal)['goal']
+        goal = self.c.coordination.create(raw, principal,native_scope=native_scope)['goal']
         dot = self.store.one('SELECT * FROM collaboration_dots WHERE id=?', (policy['slot_id'],))
         conversation_context = self.c.owner_task_context.snapshot(room, dot, message, principal) if dot and self.c.dot_chat.enabled(dot) else []
         policy_snapshot = canonical({'spec': spec, 'request_scope': request_scope, 'conversation_context': conversation_context,
@@ -457,7 +479,8 @@ class DelegationService:
         goal = self.c.coordination.approve({**scope, 'goal_id': goal['id'], 'expected_version': goal['version'],
             'digest': goal['digest'], 'idempotency_key': 'delegation:approve:' + identifier}, principal)['goal']
         work = self.store.one('SELECT * FROM coordination_work WHERE goal_id=? AND approval_id=?', (goal['id'], goal['approval_id']))
-        self.store.execute('UPDATE coordination_work SET required_capabilities=? WHERE id=?', (canonical(capabilities), work['id']))
+        initial_caps=next(r['capabilities'] for r in coordinator['projects'] if r['project_id']==work['project_id']) if native else capabilities
+        self.store.execute('UPDATE coordination_work SET required_capabilities=? WHERE id=?', (canonical(initial_caps), work['id']))
         self.store.execute('UPDATE delegation_requests SET approval_id=?,work_item_id=? WHERE id=?',
                            (goal['approval_id'], work['id'], identifier))
         self.store.execute('UPDATE delegation_policies SET uses=uses+1 WHERE id=?', (policy['id'],))
@@ -519,6 +542,8 @@ class DelegationService:
             goal = self.c.coordination.object(room, link['goal_id'])
             self.c.coordination.authorize(principal, room, goal, active=True)
             def send():
+                if not self.c.room_work_bridge.native.reference(goal):
+                    self.c.rooms.migration.legacy_write(goal['conversation_id'])
                 recent = self.store.one("SELECT COUNT(*) AS n FROM collaboration_audit WHERE room_id=? AND action='delegation.remind' AND created>?",
                                         (room['id'], self.c.clock() - 60))['n']
                 if recent >= 30:
@@ -587,18 +612,26 @@ class DelegationService:
         if not link:
             return None
         policy = self.policy(room, link['policy_id'])
-        self.authorize_policy(principal, room, policy)
+        native_reference=self.c.room_work_bridge.native.reference(goal)
+        if native_reference:
+            self.c.room_work_bridge.native.validate(native_reference,principal)
+        else:
+            self.authorize_policy(principal, room, policy)
         snapshot = json.loads(link['policy_snapshot'])
-        if (policy['version'] != link['policy_version'] or policy['digest'] != snapshot['digest']
+        if ((not native_reference and (policy['version'] != link['policy_version'] or policy['digest'] != snapshot['digest']))
                 or goal['digest'] != link['goal_digest'] or goal['approval_id'] != link['approval_id']):
             raise DevError('DELEGATION_APPROVAL_CHANGED', '原消息的委托或目标批准已改变', 409)
-        source = self.c.object('collaboration_messages', room, link['message_id'])
+        source = self.c.room_work_bridge.native.source(goal,principal) if native_reference else self.c.object('collaboration_messages', room, link['message_id'])
         self.c.chatroom.require_message_visible(principal, source)
-        if (not self.c.channel_owner.author(source)['authenticated'] or link['author_user_id'] != room['owner_user_id']
+        author=self.c.room_work_bridge.native.owner_author(goal,source) if native_reference else self.c.channel_owner.author(source)
+        if (not author['authenticated'] or link['author_user_id'] != room['owner_user_id']
                 or source['conversation_id'] != link['conversation_id']
                 or source['version'] != link['message_version'] or digest(json.loads(source['body'])['body_text']) != link['message_digest']):
             raise DevError('DELEGATION_MESSAGE_CHANGED', '委托来源身份或原文已改变', 409)
-        if snapshot.get('request_scope', {}).get('room_project_scope'):
+        if native_reference:
+            if snapshot.get('request_scope',{}).get('room_member_scope')!=native_reference:
+                raise DevError('ROOM_WORK_SCOPE_CHANGED','原工作范围引用已改变',403)
+        elif snapshot.get('request_scope', {}).get('room_project_scope'):
             if snapshot['request_scope']['room_project_scope'] != json.loads(goal['spec']).get('room_project_scope'):
                 raise DevError('ROOM_PROJECT_APPROVAL_CHANGED', '任务房间项目版本与原批准不一致', 409)
             if set(snapshot['request_scope']['project_ids']) != set(json.loads(goal['spec'])['project_ids']):
@@ -607,14 +640,16 @@ class DelegationService:
         else:
             self.c.conversations.project_scopes.validate_task(principal, room, policy, snapshot, goal)
         approved_scope = snapshot.get('request_scope', snapshot['spec'])
-        if (not set(approved_scope['execution_targets']) <= set(snapshot['spec']['execution_targets'])
+        if ((not native_reference and not set(approved_scope['execution_targets']) <= set(snapshot['spec']['execution_targets']))
                 or set(json.loads(goal['spec'])['capabilities']) != set(approved_scope['capabilities'])):
             raise DevError('DELEGATION_SCOPE_CHANGED', '本次不可变委托范围与目标批准不一致', 409)
         return policy
 
-    def target(self, principal, room, goal, tool, arguments, *, project_id=None):
+    def target(self, principal, room, goal, tool, arguments, *, project_id=None,work_item=None):
         policy = self.authorize_goal(principal, room, goal)
         self.c.owner_task_context.validate_goal(principal, room, goal, ready=True)
+        if self.c.room_work_bridge.native.reference(goal):
+            return self.c.room_work_bridge.native.target(principal,goal,tool,arguments,project_id,item=work_item)
         snapshot = json.loads(self.goal_link(goal)['policy_snapshot']) if policy else {}
         approved = snapshot.get('request_scope', snapshot.get('spec', {})).get('execution_targets', ['project_agent'])
         working = self.c.conversations.working_scopes
@@ -637,6 +672,8 @@ class DelegationService:
         return target
 
     def emit_work(self, room, goal, item):
+        if self.c.room_work_bridge.native.emit(goal,item):
+            return True
         link = self.goal_link(goal)
         if not link:
             return False
@@ -655,6 +692,7 @@ class DelegationService:
     def authorize_event(self, principal, filters, payload=None):
         principal, room = self.c.scope(principal, {'project': filters['project_id'], 'environment_id': filters['environment_id']})
         policy = self.policy(room, filters['policy_id'])
+        self.c.rooms.migration.legacy_write(policy['conversation_id'])
         self.authorize_policy(principal, room, policy)
         if (not principal.grant_id or filters['policy_version'] != policy['version']
                 or filters['conversation_id'] != policy['conversation_id'] or filters['slot_id'] != policy['slot_id']):
@@ -720,9 +758,10 @@ class DelegationService:
         link = self.goal_link(goal)
         if not link:
             return
-        source = self.c.object('collaboration_messages', room, link['message_id'])
+        source = self.c.room_work_bridge.native.source(goal,principal) if self.c.room_work_bridge.native.reference(goal) else self.c.object('collaboration_messages', room, link['message_id'])
         identifier = 'delegation-result:' + item['id'] + ':' + str(item['attempt'])
-        projects = sorted(set(body['provenance_project_ids']) | set(json.loads(goal['spec'])['project_ids'])
+        native=self.c.room_work_bridge.native.reference(goal)
+        projects = sorted(set(body['provenance_project_ids']) | ({item['project_id']} if native else set(json.loads(goal['spec'])['project_ids']))
                           | set(json.loads(source['body']).get('provenance_project_ids', [])))
         result = {**body, 'body_text': body['summary'], 'delegation_id': link['id'], 'work_item_id': item['id'],
                   'source_message_id': source['id'], 'provenance_project_ids': projects, 'mentions': [], 'notifications': []}
@@ -730,33 +769,38 @@ class DelegationService:
         # Legacy notification/task slots are not approved duplex chat identities.
         if self.c.dot_chat.enabled(dot):
             result.update(sender_dot_id=dot['id'], dot_reply_complete=True)
+        self.c.room_work_bridge.native.annotate(goal,item,result)
+        output_room=self.c.room_work_bridge.native.work_partition(goal,item) if native else room
         self.store.execute('''INSERT OR IGNORE INTO collaboration_messages
             (id,room_id,conversation_id,thread_id,thread_root_id,reply_to_id,author,origin,source_id,kind,body,state,goal_id,created)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-            (identifier, room['id'], link['conversation_id'], source['thread_root_id'], source['thread_root_id'],
+            (identifier, output_room['id'], link['conversation_id'], source['thread_root_id'], source['thread_root_id'],
              source['id'], principal.grant_id, 'bound_connector', identifier, 'delegation_result', canonical(result),
              body['outcome'], goal['id'], self.c.clock()))
-        self.c.channels.queue(self.c.object('collaboration_messages', room, identifier))
+        self.c.channels.queue(self.store.one('SELECT * FROM collaboration_messages WHERE id=?',(identifier,)))
 
     def project_progress(self, room, goal, item, summary, principal, identifier, *, system_receipt=False):
         link = self.goal_link(goal)
         if not link:
             return None
-        source = self.c.object('collaboration_messages', room, link['message_id'])
+        source = self.c.room_work_bridge.native.source(goal,principal) if self.c.room_work_bridge.native.reference(goal) else self.c.object('collaboration_messages', room, link['message_id'])
+        native=self.c.room_work_bridge.native.reference(goal)
         body = redact({'body_text': summary, 'summary': summary, 'delegation_id': link['id'],
             'work_item_id': item['id'], 'source_message_id': source['id'], 'attempt': item['attempt'],
             'fencing_token': item['fencing_token'], 'system_receipt': system_receipt,
-            'provenance_project_ids': sorted(set(json.loads(goal['spec'])['project_ids'])
+            'provenance_project_ids': sorted(({item['project_id']} if native else set(json.loads(goal['spec'])['project_ids']))
                 | set(json.loads(source['body']).get('provenance_project_ids', []))),
             'mentions': [], 'notifications': [], 'execution_verified': False})
         dot = self.c.dots.find(self.policy(room, link['policy_id'])['slot_id'])
         if self.c.dot_chat.enabled(dot):
             body.update(sender_dot_id=dot['id'], dot_reply_complete=False)
+        self.c.room_work_bridge.native.annotate(goal,item,body)
+        output_room=self.c.room_work_bridge.native.work_partition(goal,item) if native else room
         self.store.execute("""INSERT OR IGNORE INTO collaboration_messages
             (id,room_id,conversation_id,thread_id,thread_root_id,reply_to_id,author,origin,source_id,kind,body,state,goal_id,created)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (identifier, room['id'], link['conversation_id'], source['thread_root_id'], source['thread_root_id'],
+            (identifier, output_room['id'], link['conversation_id'], source['thread_root_id'], source['thread_root_id'],
              source['id'], principal.grant_id, 'bound_connector', identifier, 'delegation_progress', canonical(body),
              'saved', goal['id'], self.c.clock()))
-        self.c.channels.queue(self.c.object('collaboration_messages', room, identifier))
+        self.c.channels.queue(self.store.one('SELECT * FROM collaboration_messages WHERE id=?',(identifier,)))
         return identifier

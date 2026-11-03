@@ -1,5 +1,5 @@
 {
-  "sdk": "@modelcontextprotocol/ext-apps@2.0.3",
+  "sdk": "@modelcontextprotocol/ext-apps@2.0.4",
   "outputs": {
     "changes-v1.html": {
       "bytes": 634875,

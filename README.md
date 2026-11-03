@@ -2,7 +2,7 @@
 
 让 ChatGPT 在你授权的电脑和服务器上读代码、改文件、跑测试，并拿到可核对的执行结果。
 
-[![Version](https://img.shields.io/badge/version-1.31.0-2563eb)](RELEASE.json)
+[![Version](https://img.shields.io/badge/version-1.32.0-2563eb)](RELEASE.json)
 [![License](https://img.shields.io/badge/license-MIT-16a34a)](LICENSE)
 
 CodePier 是自托管的 MCP 服务和开发面板。**Hub** 负责接入与管理，**Agent** 在 macOS、Windows 或 Linux 上运行本机工具。你也可以在网页里继续 Pi、Codex、Claude Code 会话，管理多台电脑和服务器。
@@ -21,10 +21,10 @@ CodePier 是自托管的 MCP 服务和开发面板。**Hub** 负责接入与管�
 
 ### 1. 安装 Hub
 
-服务器需准备 Git、Bash、Python 3.9+、Docker 和支持 `up --wait` 的 Docker Compose v2。以下安装本版本 **v1.31.0**，最新正式版本见 [Releases](https://github.com/cyeinfpro/codepier/releases/latest)：
+服务器需准备 Git、Bash、Python 3.9+、Docker 和支持 `up --wait` 的 Docker Compose v2。以下安装本版本 **v1.32.0**，最新正式版本见 [Releases](https://github.com/cyeinfpro/codepier/releases/latest)：
 
 ```bash
-git clone --branch v1.31.0 --depth 1 https://github.com/cyeinfpro/codepier.git
+git clone --branch v1.32.0 --depth 1 https://github.com/cyeinfpro/codepier.git
 cd codepier
 bash install.sh
 ```
@@ -59,13 +59,15 @@ https://你的域名/mcp
 
 ## 核心能力
 
+协作中心支持先建房聊天，再关联项目和接入多个 dot。成员可操作的项目、能力与执行位置分别批准；微信向导在原房间完成扫码、本人配对和恢复。操作步骤见[房间协作中心](docs/COLLABORATION_CENTER.md)，迁移与恢复见[维护指南](docs/COLLABORATION_CENTER_OPERATIONS.md)。
+
 | 场景 | 能做什么 |
 | --- | --- |
 | **真实项目开发** | 按授权目录搜索、读取、SHA 校验修改文件，审阅差异、运行命令与测试；需要时使用 worktree。 |
 | **原生 AI 编程会话** | 在网页继续 Pi、Codex、Claude Code 会话，查看历史、附件和审批；CLI 安装与登录留在 Agent 电脑。 |
 | **多电脑与 VPS** | 一台 Hub 接入多台 macOS、Windows、Linux Agent；通过项目访问已分配的 SSH 服务器。 |
 | **项目执行环境** | 在项目卡片切换默认**清洁模式**、兼容模式或符合条件的 Linux 容器模式，并分别核对保存和生效。 |
-| **协作中心** | 在获准开启后建立项目讨论室，接入 dot，通过 `@` 交办、查看进度与原话题回传；实际任务领取需要宿主订阅和独立授权。 |
+| **协作中心** | 在获准开启后建立独立房间，先聊天再关联已有项目，接入多个 dot 与微信；成员按明确批准的范围协作，保留进度、原操作和回传证据。 |
 | **浏览器与桌面** | 按需接入浏览器和桌面操作；需另行配置与授权，不能由项目文件权限自动开启。 |
 | **权限与审计** | 按 Space、项目及工具划分 OAuth/PAT 权限，保留操作编号、输出、退出码和原操作恢复入口。 |
 
@@ -75,6 +77,7 @@ CodePier **不提供模型服务**。只使用 MCP 文件与命令工具，不�
 
 ### 最近版本变化
 
+- **v1.32.0 — 房间协作中心**：支持零项目建房、稳定成员、逐项目授权、原生通知与消费、原工作接续、微信统一向导和加密附件；移出项目、换绑与停止都保留原消息和操作回执。[房间协作中心](docs/COLLABORATION_CENTER.md)
 - **v1.31.0 — 队列与数据库并发优化**：资源与执行额度联合准入、定向唤醒、轻量项目索引、隔离读取按需加载、统计独立计算、控制回包公平调度、活动输出热表与排队观测。[并发优化与容量验证](docs/CONCURRENCY_OPTIMIZATION.md)
 - **v1.30.9 — 目录授权与 SMB 稳定性**：面板新增授权目录管理，项目映射可衔接授权；改进 NAS 写入、防覆盖发布与中断回执。[目录授权与 SMB](docs/AGENT_PATHS_AND_SMB.md)
 - **v1.30.8 — Agent 安装与读取隔离**：完善 macOS 启动器安装和旧服务迁移，对项目读取使用有界独立进程；保留现有目录授权，发布不自动升级部署。[Agent 安装说明](docs/AGENT_INSTALL.md)
@@ -138,9 +141,9 @@ CodePier **不提供模型服务**。只使用 MCP 文件与命令工具，不�
 
 ## 版本与许可
 
-当前仓库的 `RELEASE.json` 标记为 **1.31.0 / prepared / source-and-image**；可下载版本以 [Releases](https://github.com/cyeinfpro/codepier/releases/latest) 为准，`main` 可能包含尚未发布的改动。
+当前仓库的 `RELEASE.json` 标记为 **1.32.0 / prepared / source-and-image**；可下载版本以 [Releases](https://github.com/cyeinfpro/codepier/releases/latest) 为准，`main` 可能包含尚未发布的改动。
 
-- **Version:** 1.31.0
+- **Version:** 1.32.0
 - **License:** [MIT](LICENSE)
 
 第三方依赖保留各自许可证，见 `web/vendor/` 与 [MCP Apps 声明](web/mcp-apps/THIRD_PARTY_NOTICES.txt)。

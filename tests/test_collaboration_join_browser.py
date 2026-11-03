@@ -17,6 +17,8 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from playwright.sync_api import expect
 
+from tests.legacy_collaboration_ui import use_legacy_collaboration_ui
+
 from hub.collaboration.config import CollaborationConfig
 from hub.collaboration.events import EventService
 from hub.collaboration.service import CollaborationService
@@ -30,6 +32,7 @@ pytestmark = [pytest.mark.browser, pytest.mark.integration, pytest.mark.slow]
 
 
 def login(page, stack):
+    use_legacy_collaboration_ui(page, stack)
     page.goto(stack.url + '/#projects')
     page.fill('#username', 'admin')
     page.fill('#password', stack.password)

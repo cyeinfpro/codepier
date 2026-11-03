@@ -12,6 +12,7 @@ from playwright.sync_api import expect, sync_playwright
 
 from shared.native_cli import database
 from shared.util import atomic_json
+from tests.browser_launch import launch_browser
 from tests.support import running_stack, wait_for
 from tests.claude_fixture import FAKE_CLAUDE
 from tests.browser_support import chat_page  # noqa: F401
@@ -53,7 +54,7 @@ def test_claude_full_panel_sse_review_mobile_history(claude_stack, tmp_path, mon
 def test_actual_claude_questions_approvals_models_and_resume(claude_stack, browser_name, tmp_path):
     s = claude_stack
     with sync_playwright() as pw:
-        browser = getattr(pw, browser_name).launch()
+        browser = launch_browser(getattr(pw, browser_name))
         context = browser.new_context(viewport={'width': 1440, 'height': 1000})
         context.add_cookies([{'name': c.name, 'value': c.value, 'url': s.url} for c in s.client.cookies.jar])
         page = context.new_page(); errors = []

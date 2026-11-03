@@ -274,6 +274,9 @@ class TaskLiveness:
         with self.store.transaction(immediate=False):
             principal, room, goal = self.c.coordination.scope(principal, args)
             item = self.c.coordination.work(goal, args['work_item_id'])
+            native=self.c.room_work_bridge.native
+            if native.reference(goal) and item['project_id'] not in native.visible_projects(goal,principal,goal.get('_reader_member_id','')):
+                raise DevError('WORK_NOT_FOUND','当前成员不能读取此工作项的项目证据',404)
             binding = digest(['work-evidence-v1', goal['id'], item['id'], principal.grant_id or principal.user_id])
             after = read_cursor(self.c.secret, binding, args['cursor']) if args['cursor'] else ''
             if not isinstance(after, str) or len(after) > 128:

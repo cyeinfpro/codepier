@@ -14,7 +14,7 @@ def test_task_scope_ui_uses_common_room_capabilities_and_keeps_legacy_policy_cei
     page = context.new_page()
     try:
         page.set_content('<main id="drawer"></main>')
-        page.add_script_tag(path=str(ROOT / 'web/collaboration-delegation.js'))
+        page.add_script_tag(path=str(ROOT / 'tests/fixtures/legacy_collaboration_ui/collaboration-delegation.js'))
         page.evaluate("""() => {
           const policy = {
             id:'policy', slot_id:'slot', version:1, effective_active:true,

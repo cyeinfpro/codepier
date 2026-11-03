@@ -15,6 +15,8 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from playwright.sync_api import expect
 
+from tests.legacy_collaboration_ui import use_legacy_collaboration_ui
+
 from hub.store import Store
 from shared.mcp_protocol import MODERN, PREFIX, request_headers
 from tests.collaboration_support import collaboration_stack as collaboration_stack, key
@@ -23,7 +25,15 @@ pytestmark = [pytest.mark.browser, pytest.mark.integration, pytest.mark.slow]
 EVIDENCE = Path(os.environ.get("MULTIDOT_MOBILE_EVIDENCE", ".work/multidot-mobile-evidence"))
 
 HOOK = r"""(() => {
-  window.mobileEvidence={sources:[],changes:0,opens:0,reads:0};
+  window.mobileEvidence={sources:[],changes:0,opens:0,reads:0,relayReads:[]};
+  const nativeFetch=window.fetch;
+  window.fetch=function(input,init){
+    const url=typeof input==='string'?input:input.url;
+    if(String(url).includes('/api/collaboration/relay-sync?'))
+      mobileEvidence.relayReads.push({at:performance.now(),revision:mobileEvidence.lastRevision,
+        flushed:mobileEvidence.flushedRevision,hidden:document.hidden,stack:new Error().stack});
+    return nativeFetch.call(this,input,init);
+  };
   const NativeSource=window.EventSource;
   mobileEvidence.NativeSource=NativeSource;
   window.EventSource=class extends NativeSource {
@@ -105,6 +115,7 @@ def add_dot(stack, label):
 
 
 def prepare(page, stack):
+    use_legacy_collaboration_ui(page, stack)
     page.goto(stack.url + "/#projects")
     page.fill("#username", "admin")
     page.fill("#password", stack.password)
@@ -339,7 +350,7 @@ def test_mobile_background_restore_coalesces_real_hint_reads(collaboration_stack
         assert len(reads) == 1
         held[0].continue_()
         wait_js(page, "!mobileRelayContext.chat().relaySync")
-        assert len(reads) == 2, reads
+        assert len(reads) == 2, {"requests": reads, "diagnostics": page.evaluate("mobileEvidence.relayReads")}
         assert page.evaluate("mobileEvidence.sources.filter(s=>!s.closed).length") == 1
         expect(page.locator("#cc-message-input")).to_have_value("后台恢复仍保留草稿")
         expect(page.locator(".cc-message.is-owner")).to_have_count(4, timeout=10000)

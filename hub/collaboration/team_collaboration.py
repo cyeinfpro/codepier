@@ -137,8 +137,10 @@ class TeamService:
                 self.q.runtime.project(project_id, actor)
         return owner
 
-    def access(self, principal, room, team, *, active=False):
-        self.c.conversations.object(principal, team['conversation_id'])
+    def access(self, principal, room, team, *, active=False, include_archived=False):
+        if include_archived and (active or principal.grant_id):
+            raise DevError('TEAM_ARCHIVE_READ_ONLY', '归档团队仅供房主查阅，不能继续处理', 403)
+        self.c.conversations.object(principal, team['conversation_id'], include_archived=include_archived)
         if principal.grant_id:
             if principal.grant_id not in {m['grant_id'] for m in self.members(team)}:
                 raise DevError('TEAM_MEMBER_REQUIRED', '当前连接不是这个团队的成员', 403)
@@ -240,6 +242,7 @@ class TeamService:
             saved = asdict(principal)
             saved.update(scopes=[], session_hash='', token_hash='')
             def save():
+                self.c.rooms.migration.legacy_write(args['conversation_id'])
                 identifier, now = uuid.uuid4().hex, self.c.clock()
                 self.store.execute('''INSERT INTO collaboration_teams
                     (id,room_id,conversation_id,label,policy,policy_digest,owner_principal,expires_at,created,updated)
@@ -354,6 +357,9 @@ class TeamService:
         return actual
 
     def guard(self, raw, principal, goal, action, item=None):
+        native=self.c.room_work_bridge.native
+        if native.reference(goal):
+            return native.guard(raw,principal,goal,item,action=action,require_revision=True)
         link = self.link(goal)
         if not link:
             if hasattr(self.c, 'dot_consumers'):
@@ -391,12 +397,12 @@ class TeamService:
         if action in {'handoff', 'progress'} and totals['messages'] >= policy['max_total_messages']:
             raise DevError('TEAM_MESSAGE_BUDGET', '团队累计消息预算已用完', 409)
 
-    def authorize_goal(self, principal, room, goal, *, active=False):
+    def authorize_goal(self, principal, room, goal, *, active=False, include_archived=False):
         link = self.link(goal)
         if not link:
             return
         team = self.find(room, link['team_id'])
-        self.access(principal, room, team, active=active)
+        self.access(principal, room, team, active=active, include_archived=include_archived)
         current_source = self.c.object('collaboration_messages', room, link['current_message_id'])
         self.c.chatroom.require_message_visible(principal, current_source)
         if active:
@@ -417,6 +423,7 @@ class TeamService:
                 goal = self.q.object(room, existing['goal_id'])
                 self.q.authorize(principal, room, goal)
                 return {'team': self.view(team), 'goal': self.q.view(goal, principal), 'created': False}
+            self.c.rooms.migration.legacy_write(team['conversation_id'])
             if self.store.one('SELECT 1 FROM delegation_requests WHERE message_id=?', (source['id'],)):
                 raise DevError('TEAM_SOURCE_ALREADY_DELEGATED', '原消息已有个人委托，不能重复创建团队任务', 409)
             policy = json.loads(team['policy'])
@@ -502,6 +509,8 @@ class TeamService:
         return True
 
     def operation_guard(self, goal, item):
+        if self.c.room_work_bridge.native.operation_guard(goal,item):
+            return
         link = self.link(goal)
         if not link:
             return
@@ -518,6 +527,8 @@ class TeamService:
                 redact(summary), '[]', canonical([item['project_id']]), self.c.clock()))
 
     def result_ready(self, goal, item):
+        if self.c.room_work_bridge.native.result_ready(goal,item):
+            return
         link = self.link(goal)
         if link:
             self.dirty(link['coordinator_dot_id'], 'result_ready', item['id'], item['version'],
@@ -525,13 +536,15 @@ class TeamService:
 
     def artifacts(self, goal, refs):
         seen, current = set(), []
-        link = self.link(goal)
+        native=self.c.room_work_bridge.native.reference(goal)
+        link = {'intent_revision':self.c.room_runtime.intent_revision(goal['id'])} if native else self.link(goal)
+        assignments='room_native_work_assignments' if native else 'team_work_assignments'
         for ref in refs:
             if ref['work_item_id'] in seen:
                 raise DevError('TEAM_ARTIFACT_DUPLICATE', '产物引用不能重复', 422)
             seen.add(ref['work_item_id'])
             item = self.q.work(goal, ref['work_item_id'])
-            assignment = self.store.one('SELECT * FROM team_work_assignments WHERE work_id=?', (item['id'],))
+            assignment = self.store.one('SELECT * FROM '+assignments+' WHERE work_id=?', (item['id'],))
             if (item['approval_id'] != goal['approval_id'] or not item['result'] or item['version'] != ref['version']
                     or digest(json.loads(item['result'])) != ref['digest'] or not assignment
                     or assignment['intent_revision'] != link['intent_revision']):
@@ -647,6 +660,7 @@ class TeamService:
             if existing:
                 raise DevError('TEAM_SOURCE_ALREADY_USED', '该输入已经关联原目标意图，不能重复解释或另建目标', 409)
             def save():
+                self.c.rooms.migration.legacy_write(goal['conversation_id'])
                 self.q.stop_work(goal, 'TEAM_INTENT_CHANGED')
                 self.store.execute('''UPDATE team_goals SET current_message_id=?,current_source_version=?,current_source_digest=?,
                     intent_revision=intent_revision+1,updated=? WHERE goal_id=?''',
@@ -727,6 +741,8 @@ class TeamService:
             if args['action'] == 'resume':
                 self.live(room, team, allow_paused=True)
             def save():
+                if args['action'] == 'resume':
+                    self.c.rooms.migration.legacy_write(team['conversation_id'])
                 self.q.version(team, args)
                 if args['action'] == 'resume' and team['state'] != 'paused':
                     raise DevError('TEAM_NOT_PAUSED', '只能恢复原团队暂停，已撤销批准不能恢复', 409)

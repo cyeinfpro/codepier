@@ -302,7 +302,9 @@ def test_restore_uses_only_visible_history_project_for_navigation(
             return room
 
         def restricted_directory(route):
-            response = route.fetch()
+            # This route only reads the directory. Playwright retries only a
+            # reset connection here, never the restore mutation below.
+            response = route.fetch(max_retries=2)
             body = response.json()
             body['items'] = [restrict_room(room) for room in body['items']
                              if room['id'] == conversation['id']]

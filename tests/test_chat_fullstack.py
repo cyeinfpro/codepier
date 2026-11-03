@@ -8,6 +8,7 @@ import pytest
 from playwright.sync_api import sync_playwright,expect
 from shared.native_cli import database
 from shared.util import atomic_json
+from tests.browser_launch import launch_browser
 from tests.support import running_stack,wait_for
 from tests.test_chat_worker import FAKE
 ROOT=Path(__file__).resolve().parents[1]
@@ -38,7 +39,7 @@ def chat_stack(tmp_path_factory):
 def test_full_panel_direct_chat_actual_sse_history_and_responsive_layout(chat_stack,cli):
     s=chat_stack
     with sync_playwright() as pw:
-        browser=pw.chromium.launch()
+        browser=launch_browser(pw.chromium)
         context=browser.new_context(viewport={'width':1440,'height':1000})
         context.add_cookies([{'name':c.name,'value':c.value,'url':s.url} for c in s.client.cookies.jar])
         page=context.new_page();errors=[];requests=[]

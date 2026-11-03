@@ -25,7 +25,7 @@ EVENT_NAMES = {
     'codepier.monitor.incident_changed.v1', 'codepier.collaboration.task_available.v1',
     'codepier.collaboration.message_mentioned.v1', 'codepier.collaboration.work_available.v1',
     'codepier.collaboration.delegation_available.v1', 'codepier.operation.completed.v1',
-    'codepier.collaboration.inbox_dirty.v2',
+    'codepier.collaboration.inbox_dirty.v2', 'codepier.collaboration.room_inbox_dirty.v1',
 }
 EVENT = 'codepier.monitor.status_changed.v1'
 SECRET = 'whsec_' + base64.b64encode(b'fixture-only-signing-material-32b!').decode()
@@ -113,15 +113,18 @@ def test_http_subscribe_and_unsubscribe_optional_name_header(wire, mirror):
 
 
 @pytest.mark.parametrize('project_visible', [True, False])
-def test_catalog_audit_distinguishes_empty_success_from_discovery(wire, monkeypatch, project_visible):
+def test_catalog_audit_distinguishes_project_and_room_scoped_discovery(wire, monkeypatch, project_visible):
     events = []
     monkeypatch.setattr(mcp_request_audit, 'write_event', events.append)
     if not project_visible:
         wire[0].state.store.execute("UPDATE grants SET projects='[]'")
     response = rpc(wire, 'events/list', {})
     assert response.status_code == 200
-    expected = len(EVENT_NAMES) if project_visible else 0
-    assert {event['name'] for event in response.json()['result']['events']} == (EVENT_NAMES if project_visible else set())
+    # A read connection with no project can discover the independent room event;
+    # the subscription and inbox still require a current owner-approved member.
+    expected_names = EVENT_NAMES if project_visible else {'codepier.collaboration.room_inbox_dirty.v1'}
+    expected = len(expected_names)
+    assert {event['name'] for event in response.json()['result']['events']} == expected_names
     assert len(response.json()['result']['events']) == expected
     listed = [e for e in events if e['stage'] == 'event_catalog_returned']
     assert len(listed) == 1 and listed[0]['event_count'] == expected
