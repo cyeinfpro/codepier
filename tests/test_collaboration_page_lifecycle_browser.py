@@ -19,7 +19,7 @@ POLL_KINDS = ["delegation_policies", "members", "overview", "timeline"]
 POLL_PROBE = """(() => {
   const originalTimer = window.setTimeout, originalFetch = window.fetch;
   const probe = window.lifecycleProbe = {armed: false, rows: [], poll: null,
-    origin: crypto.randomUUID(), pagehide: false, signals: [], owners: []};
+    origin: crypto.randomUUID(), pagehide: false, signals: [], owners: [], cycles: new Set()};
   probe.record = (event, details={}) => {
     const key = 'codepier-lifecycle-read-evidence';
     const records = JSON.parse(sessionStorage.getItem(key) || '[]');
@@ -32,10 +32,25 @@ POLL_PROBE = """(() => {
     if (probe.armed) probe.record('pagehide');
   });
   window.setTimeout = function(callback, delay, ...args) {
-    const id = originalTimer.call(this, callback, delay, ...args);
-    if (typeof callback === 'function' && callback.name === 'poll')
-      probe.poll = {id, run: () => callback(...args)};
+    if (typeof callback !== 'function' || callback.name !== 'poll')
+      return originalTimer.call(this, callback, delay, ...args);
+    const run = () => {
+      const pending = Promise.resolve(callback(...args));
+      probe.cycles.add(pending);
+      const done = () => probe.cycles.delete(pending);
+      pending.then(done, done);
+      return pending;
+    };
+    const id = originalTimer.call(this, run, delay);
+    probe.poll = {id, run};
     return id;
+  };
+  probe.drain = async () => {
+    clearTimeout(probe.poll?.id);
+    while (probe.cycles.size) {
+      await Promise.all([...probe.cycles]);
+      clearTimeout(probe.poll?.id);
+    }
   };
   window.fetch = function(input, init = {}) {
     const url = new URL(typeof input === 'string' ? input : input.url, location.href);
@@ -92,6 +107,10 @@ def polling_page(stack, chat_browser_pool, engine):
         return original.call(this, path, options);
       };
     }""")
+    # A scheduled cycle may already be running by the time the refresh UI is
+    # visible. Finish that original cycle before routes are held and the probe
+    # is armed, so its late/retried fetches cannot stand in for the new cycle.
+    page.evaluate("lifecycleProbe.drain()")
     return context, page, errors, writes
 
 
