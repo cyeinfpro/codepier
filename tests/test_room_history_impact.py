@@ -69,21 +69,17 @@ async def test_project_removal_preview_is_read_only_and_matches_only_affected_or
 
 def test_http_exact_source_and_impact_reads_use_current_room_without_side_effects(collaboration_stack):
     stack = collaboration_stack
-    room = stack.must(stack.client.post('/api/collaboration/rooms', json={
-        'title': 'Exact source fixture', 'projects': [{'project': stack.project['id']}], 'idempotency_key': key()}))['room']
-    source = stack.must(stack.client.post(f"/api/collaboration/rooms/{room['id']}/messages", json={
+    conversation = stack.must(stack.client.post('/api/collaboration/conversation', json={
+        'title': 'Exact source fixture', 'projects': [{'project': stack.project['id']}],
+        'idempotency_key': key()}))['conversation']
+    base = f"/api/collaboration/rooms/{conversation['id']}"
+    room = stack.must(stack.client.get(base))['room']
+    assert room['legacy'] and room['read_only'] and room['migration']['eligible']
+    partition = room['projects'][0]['room_id']
+    source = stack.must(stack.client.post('/api/collaboration/message', json={
+        'project': stack.project['id'], 'environment_id': 'production',
+        'room_id': partition, 'conversation_id': room['id'],
         'body_text': '原始上下文证据', 'client_message_id': key(), 'idempotency_key': key()}))['message']
-    base = f"/api/collaboration/rooms/{room['id']}"
-    exact = stack.must(stack.client.get(base + '/messages', params={'message_id': source['id']}))
-    assert exact['exact_lookup'] and [row['id'] for row in exact['messages']] == [source['id']]
-    stack.must(stack.client.post(base + '/messages', json={
-        'body_text': 'Later input cannot displace the old reading anchor', 'client_message_id': key(), 'idempotency_key': key()}))
-    anchored = stack.must(stack.client.get(base + '/messages', params={'cursor': exact['history_cursor']}))
-    assert [row['id'] for row in anchored['messages']] == [source['id']]
-    assert anchored['visibility_revision'] == exact['visibility_revision']
-    other = stack.must(stack.client.post('/api/collaboration/rooms', json={
-        'title': 'Other context', 'idempotency_key': key()}))['room']
-    assert stack.client.get(f"/api/collaboration/rooms/{other['id']}/messages", params={'message_id': source['id']}).status_code == 404
     page = stack.must(stack.client.get(base + '/work'))
     assert page['works'] == [] and page['pagination_complete']
     proposal = stack.mcp('collaboration_goal_create', {
@@ -93,6 +89,22 @@ def test_http_exact_source_and_impact_reads_use_current_room_without_side_effect
         'capabilities': ['read'], 'idempotency_key': key()})
     assert not proposal.get('isError'), proposal
     goal = proposal['structuredContent']['goal']
+    activated = stack.must(stack.client.post(base + '/migration', json={
+        'action': 'activate', 'expected_version': room['version'], 'idempotency_key': key()}))
+    room = activated['room']
+    assert activated['activated'] and not room['legacy'] and not room['read_only']
+    assert room['migration']['status'] == 'complete'
+    exact = stack.must(stack.client.get(base + '/messages', params={'message_id': source['id']}))
+    assert exact['exact_lookup'] and [row['id'] for row in exact['messages']] == [source['id']]
+    assert exact['message']['source_room_id'] == partition
+    stack.must(stack.client.post(base + '/messages', json={
+        'body_text': 'Later input cannot displace the old reading anchor', 'client_message_id': key(), 'idempotency_key': key()}))
+    anchored = stack.must(stack.client.get(base + '/messages', params={'cursor': exact['history_cursor']}))
+    assert [row['id'] for row in anchored['messages']] == [source['id']]
+    assert anchored['visibility_revision'] == exact['visibility_revision']
+    other = stack.must(stack.client.post('/api/collaboration/rooms', json={
+        'title': 'Other context', 'idempotency_key': key()}))['room']
+    assert stack.client.get(f"/api/collaboration/rooms/{other['id']}/messages", params={'message_id': source['id']}).status_code == 404
     work_exact = stack.must(stack.client.get('/api/collaboration/work/' + goal['id']))
     work_restored = stack.must(stack.client.get(base + '/work', params={'cursor': work_exact['history_cursor']}))
     assert work_restored['works'][0]['id'] == goal['id']
@@ -110,6 +122,14 @@ def test_http_exact_source_and_impact_reads_use_current_room_without_side_effect
 def test_archived_owner_history_keeps_original_goals_and_messages_without_reopening_actions(collab):
     coordinator, s, owner, worker, actor, goal, scope, raw = setup_goal(collab)
     cid = goal['conversation_id']
+    room = s.rooms.read({'conversation_id': cid}, owner)['room']
+    original_goal = s.store.one('SELECT * FROM coordination_goals WHERE id=?', (goal['id'],))
+    original_work = s.store.all('SELECT * FROM coordination_work WHERE goal_id=? ORDER BY id', (goal['id'],))
+    activated = s.rooms.migrate_room({'conversation_id': cid, 'action': 'activate',
+        'expected_version': room['version'], 'idempotency_key': key()}, owner)
+    assert activated['activated'] and not activated['room']['legacy'] and not activated['room']['read_only']
+    assert s.store.one('SELECT * FROM coordination_goals WHERE id=?', (goal['id'],)) == original_goal
+    assert s.store.all('SELECT * FROM coordination_work WHERE goal_id=? ORDER BY id', (goal['id'],)) == original_work
     sent = [s.room_runtime.send({'conversation_id': cid, 'body_text': 'Original history ' + str(index),
         'client_message_id': key(), 'idempotency_key': key()}, owner)['message'] for index in range(3)]
     room = s.rooms.read({'conversation_id': cid}, owner)['room']

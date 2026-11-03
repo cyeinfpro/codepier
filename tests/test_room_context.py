@@ -36,6 +36,27 @@ def effect_counts(s):
         'coordination_goals', 'coordination_work', 'operations', 'delegation_requests', 'dot_mailbox_entries')}
 
 
+def migrated_partition_source(s, owner, projects, project_id, environment_id, text):
+    """Create historical data through its old surface, then explicitly cut over."""
+    conversation = s.conversations.create({'title': 'Original partition history', 'projects': projects,
+        'idempotency_key': key()}, owner)['conversation']
+    room = s.rooms.read({'conversation_id': conversation['id']}, owner)['room']
+    assert room['legacy'] and room['read_only'] and room['migration']['eligible']
+    partition = next(p['room_id'] for p in room['projects']
+        if p['project_id'] == project_id and p['environment_id'] == environment_id)
+    message = s.chatroom.create({'project': project_id, 'environment_id': environment_id,
+        'room_id': partition, 'conversation_id': room['id'], 'body_text': text,
+        'client_message_id': key(), 'idempotency_key': key()}, owner)['message']
+    original = s.store.one('SELECT * FROM collaboration_messages WHERE id=?', (message['id'],))
+    activated = s.rooms.migrate_room({'conversation_id': room['id'], 'action': 'activate',
+        'expected_version': room['version'], 'idempotency_key': key()}, owner)
+    assert activated['activated'] and not activated['room']['read_only'] and not activated['room']['legacy']
+    assert activated['room']['migration']['status'] == 'complete'
+    assert original['room_id'] == partition
+    assert s.store.one('SELECT * FROM collaboration_messages WHERE id=?', (message['id'],)) == original
+    return activated['room'], message, partition
+
+
 @pytest.mark.asyncio
 async def test_context_empty_room_update_is_fenced_idempotent_and_never_work_or_ack(collab):
     s, owner, actor, clock, identity, credentials = await connected(collab)
@@ -246,16 +267,13 @@ async def test_context_scope_intersection_correction_provenance_and_revocation(c
 async def test_context_migrated_partition_source_respects_narrow_member_scope(collab):
     s, owner, worker, *_ = collab
     broad = worker_for(s, worker, 'context-wide-grant', scopes=('read',), projects=('proj', 'otherproj'))
+    room, message, partition = migrated_partition_source(s, owner,
+        [{'project': 'proj'}, {'project': 'otherproj'}], 'otherproj', 'production', '原 B 分区记录。')
     s, owner, actor, _, lead, credentials = await connected(collab,
-        [{'project': 'proj'}, {'project': 'otherproj'}],
-        [{'project_id': 'proj'}, {'project_id': 'otherproj'}], worker_override=broad)
+        scopes=[{'project_id': 'proj'}, {'project_id': 'otherproj'}],
+        worker_override=broad, conversation_id=room['id'])
     _, _, _, _, peer, _ = await connected(collab, scopes=[{'project_id': 'proj'}],
         worker_override=broad, conversation_id=lead['conversation_id'])
-    room = s.rooms.read({'conversation_id': lead['conversation_id']}, owner)['room']
-    partition = next(p['room_id'] for p in room['projects'] if p['project_id'] == 'otherproj')
-    message = s.chatroom.create({'project': 'otherproj', 'environment_id': 'production',
-        'room_id': partition, 'conversation_id': room['id'], 'body_text': '原 B 分区记录。',
-        'client_message_id': key(), 'idempotency_key': key()}, owner)['message']
     row = s.store.one('SELECT * FROM collaboration_messages WHERE id=?', (message['id'],))
     assert row['room_id'] == partition and not json.loads(row['body']).get('provenance_project_ids')
     s.room_context.update(request(s, actor, lead, credentials, facts=[fact(s, message)]), actor)
@@ -266,16 +284,15 @@ async def test_context_migrated_partition_source_respects_narrow_member_scope(co
 
 @pytest.mark.asyncio
 async def test_context_environment_scope_survives_correction_replies_and_renaming(collab):
-    s, owner, actor, _, lead, credentials = await connected(collab,
+    s, owner, *_ = collab
+    room, source, partition = migrated_partition_source(s, owner,
         [{'project': 'proj', 'environment_id': 'production'}, {'project': 'proj', 'environment_id': 'staging'}],
-        [{'project_id': 'proj', 'environment_id': 'staging'}])
+        'proj', 'staging', 'Staging 私有约束。')
+    s, owner, actor, _, lead, credentials = await connected(collab,
+        scopes=[{'project_id': 'proj', 'environment_id': 'staging'}], conversation_id=room['id'])
     _, _, _, _, peer, peer_credentials = await connected(collab,
         scopes=[{'project_id': 'proj', 'environment_id': 'production'}], conversation_id=lead['conversation_id'])
-    room = s.rooms.read({'conversation_id': lead['conversation_id']}, owner)['room']
-    partition = next(p['room_id'] for p in room['projects'] if p['environment_id'] == 'staging')
-    source = s.chatroom.create({'project': 'proj', 'environment_id': 'staging', 'room_id': partition,
-        'conversation_id': room['id'], 'body_text': 'Staging 私有约束。',
-        'client_message_id': key(), 'idempotency_key': key()}, owner)['message']
+    assert s.store.one('SELECT room_id FROM collaboration_messages WHERE id=?', (source['id'],))['room_id'] == partition
     first = s.room_context.update(request(s, actor, lead, credentials,
         facts=[fact(s, source, kind='constraint')]), actor)
     assert not s.room_context.read(peer, actor)['facts']
