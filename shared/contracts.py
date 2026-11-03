@@ -339,7 +339,7 @@ class Tool:
 
 TOOLS: dict[str, Tool] = {
     'open_workspace': Tool(OpenWorkspace, 'read', 'Open a project with bounded rules, skills and execution context. Pass context_id to omit unchanged content after revalidation. Optional capture_baseline snapshots allowed source BEFORE editing; works without Git. Not a full scan or authorization token.'),
-    'show_changes': Tool(ShowChanges, 'read', 'Freeze an immutable interval review from baseline_ref, or read a saved review_ref. List files first; path reads bounded diff pages via offset. Snapshots belong to the current project/mapping/grant, expire after seven days and do not prove session authorship.'),
+    'show_changes': Tool(ShowChanges, 'read', 'Freeze an immutable interval review from baseline_ref, or read a saved review_ref. finalize=true releases the baseline by atomically replacing it with its final review; retries return that result. New baselines last 24 hours, reviews seven days. Default retains the baseline for further comparisons. List files first; path reads bounded diff pages via offset. Bound to project/mapping/grant, not session authorship proof.'),
     'apply_patch': Tool(ApplyPatch, 'write', 'Apply up to 32 typed write/delete/move changes. Preflight ALL paths/SHA before writing; parent directories must exist. dry_run previews only. Whole-batch backups, per-file CAS and explicit rollback reports; NOT an atomic filesystem transaction. Reuse the same key only to recover the identical request.', True),
     "computer_status": Tool(ComputerStatus, "read", "Inspect local Codex Computer Use installation and opt-in. probe=true additionally requires computer scope and verifies native MCP tools only, without reading apps/screens. Executable presence is not OS permission verification."),
     "computer_apps": Tool(ComputerApps, "computer", "List native app inventory, which may include recent app usage. Requires distinct computer scope and local project opt-in; does not grant app access."),
@@ -515,7 +515,9 @@ OUTPUT_SCHEMAS.update({name: _object({**_RECEIPT, "session_id": _NULLABLE_STR,
 
 OUTPUT_SCHEMAS.update({
     'open_workspace': _object({**_RECEIPT, 'context_id': _STR, 'context_unchanged': _BOOL, 'workspace': {'type': 'object'}, 'context': {'type': ['object', 'null']}, 'baseline_ref': _STR, 'truncated': _BOOL}, ('operation_id', 'context_id', 'context_unchanged', 'workspace')),
-    'show_changes': _object({**_RECEIPT, 'review_ref': _STR, 'immutable': _BOOL, 'summary': {'type': 'object'}, 'coverage': {'type': 'object'}, 'files': {'type': 'array'}, 'diff': _STR, 'next_offset': _NULLABLE_INT}, ('operation_id', 'review_ref', 'summary', 'coverage')),
+    'show_changes': _object({**_RECEIPT, 'review_ref': _STR, 'baseline_ref': _STR, 'immutable': _BOOL, 'baseline_released': _BOOL,
+                            'started': _NUM, 'finished': _NUM, 'expires_at': _NUM, 'scope': _STR,
+                            'summary': {'type': 'object'}, 'coverage': {'type': 'object'}, 'files': {'type': 'array'}, 'diff': _STR, 'next_offset': _NULLABLE_INT}, ('operation_id', 'review_ref', 'summary', 'coverage')),
     'apply_patch': _object({**_RECEIPT, 'success': _BOOL, 'outcome': _STR, 'atomic': _BOOL, 'files': {'type': 'array'}, 'rollback_errors': {'type': 'array'}, 'error': {'type': 'object'}}, ('operation_id', 'success', 'outcome', 'files')),
 })
 

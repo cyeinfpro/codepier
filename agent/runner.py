@@ -1333,6 +1333,8 @@ class Agent:
         stopping = asyncio.create_task(self.stop_event.wait())
         from agent.brand_upgrade import watch as watch_brand_upgrade
         branding = asyncio.create_task(watch_brand_upgrade(self))
+        from agent.coding_reviews import watch_cleanup
+        review_cleanup = asyncio.create_task(watch_cleanup(self.engine, self.stop_event))
         connection = None
         delay = 1
         try:
@@ -1360,7 +1362,7 @@ class Agent:
             await self.scheduler.close()
             await self.computer.close()
             await self.integrations.close()
-            background = [watcher, sender, stopping, branding, scheduler_monitor] + ([connection] if connection else [])
+            background = [watcher, sender, stopping, branding, scheduler_monitor, review_cleanup] + ([connection] if connection else [])
             for task in background:
                 task.cancel()
             await asyncio.gather(*background, return_exceptions=True)

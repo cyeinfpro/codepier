@@ -309,7 +309,7 @@ class FileEngine:
             if truncated: break
         return {"diff": "".join(parts), "diff_truncated": truncated, "added_lines": added, "removed_lines": removed}
 
-    def walk(self, root: Path, start: Path, depth: int | None = None, *, exclude=None, deadline=None):
+    def walk(self, root: Path, start: Path, depth: int | None = None, *, exclude=None, deadline=None, files_first=False):
         # Bound directory enumeration as well as matching files. A tree containing
         # only directories or ignored names must not bypass search/checkpoint limits.
         scanned = 0
@@ -331,7 +331,8 @@ class FileEngine:
                         names.append((p, st))
             except OSError as exc:
                 raise DevError("SCAN_FAILED", "目录在扫描期间改变或无法读取；未完成扫描") from exc
-            return iter(sorted(names, key=lambda item: (not stat.S_ISDIR(item[1].st_mode), item[0].name.casefold(), item[0].name)))
+            preferred = stat.S_ISREG if files_first else stat.S_ISDIR
+            return iter(sorted(names, key=lambda item: (not preferred(item[1].st_mode), item[0].name.casefold(), item[0].name)))
 
         # An explicit stack avoids silently omitting paths below 100 levels and
         # avoids Python recursion limits on deep, otherwise valid source trees.

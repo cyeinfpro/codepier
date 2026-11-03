@@ -20,6 +20,9 @@ CONTRACT_PROTOCOL = 1
 TOOL_WIRE_VERSIONS: dict[str, int] = {name: 2 for name in ("read", "write", "edit", "exec")}
 # A preview must never degrade to an import on a legacy peer.
 TOOL_WIRE_VERSIONS['inspect_file_source'] = 2
+# Finalization consumes a baseline. Legacy peers must reject this operation
+# explicitly rather than ignore the option or fail on a new default argument.
+TOOL_WIRE_VERSIONS['show_changes'] = 2
 # Epoch 3 includes project-scoped credential reuse. Older Agents must not
 # accept a save while silently dropping these authorization choices.
 TOOL_WIRE_VERSIONS.update(project_runtime_get=3, project_runtime_set=3)

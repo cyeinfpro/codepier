@@ -4,10 +4,15 @@ Works without Git. A snapshot is sequential, not an OS transaction; shared
 workspace changes cannot be attributed exclusively to a particular agent.
 """
 from __future__ import annotations
+import asyncio
+import errno
 import hashlib
 import json
+import logging
+import math
 import os
 from contextlib import contextmanager
+from functools import lru_cache
 from pathlib import PurePosixPath
 import re
 import stat
@@ -23,7 +28,9 @@ MAX_DOCUMENT_BYTES = 32 * 1024 * 1024
 MAX_STORAGE_BYTES = 256 * 1024 * 1024
 MAX_RECORDS = 256
 TTL = 7 * 24 * 3600
-EXCLUSIONS = 'Protected paths, links, dependencies, .venv-* / venv-* environments, dist/build, caches and docs/evidence are excluded.'
+BASELINE_TTL = 24 * 3600
+CLEANUP_INTERVAL = 3600
+EXCLUSIONS = 'Protected paths, links, dependencies, .venv-* / venv-* environments, dist/build, caches, .work, .codepier-test-runs and docs/evidence are excluded. Direct files precede subdirectories within each directory.'
 SCOPE = '共享目录在两个采样时点之间的变化；不证明本会话独占修改。快照按文件读取，不是原子文件系统快照。'
 
 
@@ -45,6 +52,12 @@ def excluded(path):
     return any(p in CHECKPOINT_ARTIFACTS | {'dist', 'build', '.venv-compat'} or p.startswith(('.venv-', 'venv-')) for p in parts) or path == 'docs/evidence' or path.startswith('docs/evidence/')
 
 
+def review_excluded(path):
+    # Review capture has a smaller budget than validation/source fingerprints.
+    # Internal scratch histories must not crowd actual project source out of it.
+    return excluded(path) or bool({'.work', '.codepier-test-runs'} & set(PurePosixPath(path).parts))
+
+
 class ReviewStore:
     def __init__(self, engine):
         self.engine = engine
@@ -55,45 +68,144 @@ class ReviewStore:
         os.chmod(self.directory, 0o700)
 
     @contextmanager
-    def lock(self):
+    def lock(self, *, blocking=True):
         # Shared by native workers and the Agent; limits are enforced across processes.
         fd = os.open(self.directory / '.lock', os.O_RDWR | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0), 0o600)
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode) or os.fstat(fd).st_nlink != 1:
                 raise DevError('REVIEW_STORAGE_INVALID', '无效存储锁', 403)
-            if os.name == 'nt':
-                import msvcrt
-                if not os.fstat(fd).st_size:
-                    os.write(fd, b'0')
-                os.lseek(fd, 0, os.SEEK_SET)
-                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(fd, fcntl.LOCK_EX)
-            yield
+            try:
+                if os.name == 'nt':
+                    import msvcrt
+                    if not os.fstat(fd).st_size:
+                        os.write(fd, b'0')
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+            except OSError as exc:
+                if not blocking and exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                    yield False
+                    return
+                raise
+            yield True
         finally:
             os.close(fd)
 
-    def save(self, document):
-        ref = uuid.uuid4().hex
-        document = {**document, 'id': ref, 'created': time.time(), 'expires_at': time.time()+TTL}
+    @staticmethod
+    def _read(path):
+        """Validate before using metadata for reclamation or quota accounting."""
+        if path.is_symlink():
+            raise DevError('REVIEW_STORAGE_INVALID', '快照存储存在符号链接', 403)
+        fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+        with os.fdopen(fd, 'rb') as source:
+            st = os.fstat(source.fileno())
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size > MAX_DOCUMENT_BYTES:
+                raise DevError('REVIEW_STORAGE_INVALID', '快照文件无效', 409)
+            raw = source.read(MAX_DOCUMENT_BYTES+1)
+        try:
+            wrapped = json.loads(raw)
+            document = wrapped['payload']
+            expires = document['expires_at']
+            if (wrapped['sha256'] != fingerprint(document) or document['id'] != path.stem
+                    or type(expires) not in (int, float) or not math.isfinite(expires)):
+                raise ValueError('Invalid snapshot metadata')
+        except (ValueError, KeyError, TypeError) as exc:
+            raise DevError('REVIEW_INTEGRITY', '快照格式或校验损坏', 409) from exc
+        return document, st.st_size
+
+    @staticmethod
+    @lru_cache(maxsize=512)
+    def _metadata(path, signature):
+        # Cache only metadata, never source text. Atomic writes and even in-place
+        # edits invalidate via inode/ctime/mtime/size; permissions and links count too.
+        document, size = ReviewStore._read(path)
+        return {'expires_at': document['expires_at'], 'review_key': ReviewStore._review_key(document)}, size
+
+    def _records(self, *, now=None):
+        # Caller holds the cross-process lock. Never infer expiry from mtime:
+        # copying/restoring a file must not extend or shorten its published lease.
+        now = time.time() if now is None else now
+        removed = False
+        try:
+            for path in self.directory.glob('*.json'):
+                st = path.lstat()
+                if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+                    raise DevError('REVIEW_STORAGE_INVALID', '快照文件无效', 409)
+                signature = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_mode, st.st_nlink)
+                # Windows ctime is creation time, not a reliable in-place-change
+                # indicator. Revalidate there instead of trusting this cache.
+                metadata = self._metadata.__wrapped__ if os.name == 'nt' else self._metadata
+                document, size = metadata(path, signature)
+                if document['expires_at'] <= now:
+                    path.unlink()
+                    removed = True
+                else:
+                    yield path, document, size
+        finally:
+            if removed:
+                fsync_directory(self.directory)
+
+    def cleanup(self):
+        # Maintenance must not leave a thread waiting behind a native worker
+        # while the Agent is trying to stop or replace its runtime.
+        with self.lock(blocking=False) as acquired:
+            if not acquired:
+                return
+            for _ in self._records():
+                pass
+
+    @staticmethod
+    def _review_key(document):
+        if document.get('kind') != 'review' or not document.get('coverage', {}).get('complete'):
+            return None
+        # Reuse the original immutable interval, including its original expiry.
+        return fingerprint({k: document[k] for k in
+                            ('binding', 'baseline_ref', 'started', 'files', 'summary', 'coverage', 'scope')})
+
+    def save(self, document, *, finalize_project=None):
+        finalizing = finalize_project is not None
+        ref = document['baseline_ref'] if finalizing else uuid.uuid4().hex
+        now = time.time()
+        ttl = min(TTL, BASELINE_TTL) if document['kind'] == 'baseline' else TTL
+        document = {**document, 'id': ref, 'created': now, 'expires_at': now+ttl}
+        if finalizing:
+            document['baseline_released'] = True
         wrapped = {'sha256': fingerprint(document), 'payload': document}
         size = len(json.dumps(wrapped, ensure_ascii=False, indent=2).encode())
         if size > MAX_DOCUMENT_BYTES:
             raise DevError('REVIEW_TOO_LARGE', '快照序列化超过 32 MiB；没有发布不完整快照', 413)
         with self.lock():
+            sweep_time = time.time()
+            replaced_size = 0
+            if finalizing:
+                previous = self.load(ref, finalize_project, ('baseline', 'review'))
+                if previous['binding'] != document['binding']:
+                    raise DevError('REVIEW_NOT_FOUND', '快照不属于当前项目映射和授权', 404)
+                if previous['kind'] == 'review':
+                    if previous.get('baseline_released') and previous.get('baseline_ref') == ref:
+                        return previous
+                    raise DevError('REVIEW_NOT_FOUND', '此编号不是可完成的基线', 404)
+                replaced_size = (self.directory / (ref+'.json')).stat().st_size
             used, count = 0, 0
-            for path in self.directory.glob('*.json'):
-                if path.is_symlink():
-                    raise DevError('REVIEW_STORAGE_INVALID', '快照存储存在符号链接', 403)
-                st = path.stat()
-                if time.time()-st.st_mtime > TTL:
-                    path.unlink()
-                else:
-                    used += st.st_size
-                    count += 1
-            if count >= MAX_RECORDS or used+size > MAX_STORAGE_BYTES:
-                raise DevError('REVIEW_QUOTA', '审阅快照达到 256 条或 256 MiB 配额；旧快照保留七天，不自动删除未过期结果', 409)
+            key = self._review_key(document) if not finalizing else None
+            reused = None
+            for path, existing, stored_size in self._records(now=sweep_time):
+                used += stored_size
+                count += 1
+                if key is not None and existing['review_key'] == key:
+                    reused = path
+            if reused is not None:
+                return self._read(reused)[0]
+            # New baselines leave room for completing reviews. Finalization
+            # atomically replaces the baseline at the same reference, so neither
+            # record count nor bytes are charged twice and crashes cannot lose both.
+            reserve = MAX_DOCUMENT_BYTES if document['kind'] == 'baseline' else 0
+            if count + (0 if finalizing else 1) > MAX_RECORDS or used-replaced_size+size > MAX_STORAGE_BYTES-reserve:
+                raise DevError('REVIEW_QUOTA', '审阅快照配额不足；新基线保留 24 小时，审阅结果保留七天。请完成已有基线或等待到期回收', 409,
+                               used_bytes=used, limit_bytes=MAX_STORAGE_BYTES, records=count,
+                               limit_records=MAX_RECORDS, completion_reserve_bytes=reserve)
             atomic_json(self.directory / (ref+'.json'), wrapped)
         return document
 
@@ -118,9 +230,10 @@ class ReviewStore:
         return removed
 
     def release_baseline(self, ref, project):
-        self.load(ref, project, 'baseline')
         with self.lock():
+            self.load(ref, project, 'baseline')
             (self.directory / (ref+'.json')).unlink(missing_ok=True)
+            fsync_directory(self.directory)
 
     def load(self, ref, project, kind):
         expected_binding = binding(self.engine, project)  # Reauthorize on EVERY read.
@@ -128,21 +241,13 @@ class ReviewStore:
             raise DevError('REVIEW_INVALID_REF', '快照编号无效')
         try:
             path = self.directory / (ref+'.json')
-            fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
-            with os.fdopen(fd, 'rb') as source:
-                st = os.fstat(source.fileno())
-                if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size > MAX_DOCUMENT_BYTES:
-                    raise DevError('REVIEW_STORAGE_INVALID', '快照文件无效', 409)
-                raw = source.read(MAX_DOCUMENT_BYTES+1)
-            wrapped = json.loads(raw)
-            document = wrapped['payload']
-            if wrapped['sha256'] != fingerprint(document) or document['id'] != ref:
-                raise DevError('REVIEW_INTEGRITY', '快照校验失败，未返回内容', 409)
+            document, _ = self._read(path)
         except FileNotFoundError as exc:
             raise DevError('REVIEW_NOT_FOUND', '快照不存在或已过期；不会用当前目录差异替代历史结果', 404) from exc
         except (ValueError, KeyError, TypeError) as exc:
             raise DevError('REVIEW_INTEGRITY', '快照格式损坏', 409) from exc
-        if document.get('binding') != expected_binding or document.get('kind') != kind:
+        kinds = kind if isinstance(kind, tuple) else (kind,)
+        if document.get('binding') != expected_binding or document.get('kind') not in kinds:
             raise DevError('REVIEW_NOT_FOUND', '快照不属于当前项目映射和授权', 404)
         if document['expires_at'] <= time.time():
             raise DevError('REVIEW_EXPIRED', '快照已过期；不会用当前目录差异替代', 410)
@@ -157,7 +262,7 @@ def capture(engine, project):
     size, incomplete = 0, False
     with engine.mutation_lock:
         try:
-            for path, relative, st in engine.walk(root, root, exclude=excluded, deadline=time.monotonic()+2):
+            for path, relative, st in engine.walk(root, root, exclude=review_excluded, deadline=time.monotonic()+2, files_first=True):
                 if not stat.S_ISREG(st.st_mode):
                     continue
                 if len(files)+len(skipped) >= MAX_FILES or size+min(st.st_size, MAX_FILE) > MAX_SOURCE_BYTES:
@@ -189,15 +294,23 @@ def capture(engine, project):
 
 
 def public_summary(review):
-    return {k: review[k] for k in ('baseline_ref', 'started', 'finished', 'expires_at', 'summary', 'coverage', 'scope')} | {'review_ref': review['id'], 'immutable': True}
+    return {k: review[k] for k in ('baseline_ref', 'started', 'finished', 'expires_at', 'summary', 'coverage', 'scope')} | {'review_ref': review['id'], 'immutable': True, 'baseline_released': review.get('baseline_released', False)}
 
 
-def freeze_review(engine, project, baseline_ref):
+def freeze_review(engine, project, baseline_ref, *, finalize=False):
     store = ReviewStore(engine)
-    baseline = store.load(baseline_ref, project, 'baseline')
+    baseline = store.load(baseline_ref, project, ('baseline', 'review') if finalize else 'baseline')
+    if baseline['kind'] == 'review':
+        if baseline.get('baseline_released') and baseline.get('baseline_ref') == baseline_ref:
+            return public_summary(baseline)
+        raise DevError('REVIEW_NOT_FOUND', '此编号不是可完成的基线', 404)
     after = capture(engine, project)
     files, added, removed, approximate = [], 0, 0, False
     for path in sorted(baseline['files'].keys() | after['files'].keys()):
+        if review_excluded(path):
+            # Legacy baselines can contain newly excluded scratch files. A
+            # capture-policy change is not evidence that those files were deleted.
+            continue
         before, current = baseline['files'].get(path), after['files'].get(path)
         if before and current and (before['sha256'], before['mode']) == (current['sha256'], current['mode']):
             continue
@@ -220,7 +333,8 @@ def freeze_review(engine, project, baseline_ref):
                                        'line_counts_approximate': approximate,
                                        'unverified_files': sum(x['status'] == 'unverified' for x in files)},
                            'coverage': {'before': baseline['coverage'], 'after': after['coverage'],
-                                        'complete': baseline['coverage']['complete'] and after['coverage']['complete']}, 'scope': SCOPE})
+                                        'complete': baseline['coverage']['complete'] and after['coverage']['complete']}, 'scope': SCOPE},
+                          finalize_project=project if finalize else None)
     return public_summary(document)
 
 
@@ -293,6 +407,32 @@ def open_workspace(engine, project, args):
 
 def show_changes(engine, project, args):
     if args.get('baseline_ref'):
-        summary = freeze_review(engine, project, args['baseline_ref'])
+        summary = freeze_review(engine, project, args['baseline_ref'], finalize=args.get('finalize', False))
         args = {**args, 'review_ref': summary['review_ref'], 'baseline_ref': ''}
     return read_review(engine, project, args)
+
+
+async def watch_cleanup(engine, stop_event):
+    """Expiry is independent of new writes and of the Hub connection."""
+    while not stop_event.is_set():
+        work = asyncio.create_task(asyncio.to_thread(lambda: ReviewStore(engine).cleanup()))
+        try:
+            await asyncio.shield(work)
+        except asyncio.CancelledError:
+            # Cancelling to_thread alone leaves its filesystem writer alive.
+            # Finish it before Agent.run releases the single-instance lock.
+            settled = asyncio.gather(work, return_exceptions=True)
+            while not settled.done():
+                try:
+                    await asyncio.shield(settled)
+                except asyncio.CancelledError:
+                    # Repeated stop/cancel requests must not cancel the wrapper
+                    # while its underlying thread still owns filesystem writes.
+                    continue
+            raise
+        except Exception as exc:
+            logging.getLogger(__name__).warning('Review cleanup failed (%s)', type(exc).__name__)
+        try:
+            await asyncio.wait_for(stop_event.wait(), CLEANUP_INTERVAL)
+        except asyncio.TimeoutError:
+            pass

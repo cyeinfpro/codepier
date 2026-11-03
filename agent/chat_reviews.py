@@ -5,7 +5,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from agent.filesystem import FileEngine
 from agent.coding_reviews import ReviewStore, capture, freeze_review
-from shared.util import DevError
 
 
 class TurnReviews:
@@ -36,17 +35,15 @@ class TurnReviews:
         baseline = self.baselines.pop(receipt, None)
         if baseline is None:
             return None
+        finalized = False
         try:
             if isinstance(baseline, dict):
                 return {'available': False, 'status': 'unavailable', 'text': '未能记录修改前快照，不能核实本轮改动。', 'reason': baseline['code']}
             engine, project = self.engine()
-            summary = freeze_review(engine, project, baseline)
+            summary = freeze_review(engine, project, baseline, finalize=True)
+            finalized = True
             # The persistent transcript contains a compact summary; large private
             # source/diff data stays in the bounded review store and loads on demand.
-            try:
-                ReviewStore(engine).release_baseline(baseline, project)
-            except (DevError, OSError):
-                pass  # Review is durable; failed cleanup must not hide a valid result.
             coverage = summary['coverage']
             return {**summary, 'available': True,
                     'coverage': {'complete': coverage['complete'],
@@ -55,3 +52,13 @@ class TurnReviews:
         except Exception as exc:  # Optional review failures must not interrupt native execution.
             return {'available': False, 'status': 'unavailable', 'text': '改动审阅暂不可用；不会把未知结果显示为没有修改。',
                     'reason': getattr(exc, 'code', 'REVIEW_UNAVAILABLE')}
+        finally:
+            if isinstance(baseline, str) and not finalized:
+                try:
+                    engine, project = self.engine()
+                    # A failed, settled turn cannot use this baseline again.
+                    # A successful atomic finalization has changed its kind to
+                    # review, so release_baseline deliberately refuses deletion.
+                    ReviewStore(engine).release_baseline(baseline, project)
+                except Exception:
+                    pass

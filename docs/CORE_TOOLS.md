@@ -157,6 +157,20 @@ Task 绑定原 operation、Space、用户和确切创建 grant，每次查询/�
 {"name":"read","arguments":{"operation":"changes","project":"ProjectAlpha","options":{"baseline_ref":"打开工作区时取得的基线编号"}}}
 ```
 
+新建修改前基线有效期为 24 小时，审阅结果保留七天；已有快照仍遵守创建时返回的 `expires_at`。普通 `changes` 保留基线，允许继续比较；相同基线、完整覆盖且内容相同的审阅会复用原结果，采样时间与到期时间不延长。
+
+工作结束时使用 `options.finalize=true`，把基线原子替换为最终审阅，释放完整源码占用。返回 `baseline_released=true`，此时 `review_ref` 与原 `baseline_ref` 相同；后续使用 `review_ref` 读取。重复完成请求返回同一结果，不重新采样。完成后不能再用该基线比较新的修改，需要重新捕获基线。
+
+```json
+{"name":"read","arguments":{"operation":"changes","project":"ProjectAlpha","options":{"baseline_ref":"打开工作区时取得的基线编号","finalize":true}}}
+```
+
+原生聊天自动完成基线；失败且已结束的轮次会尝试释放其临时基线。Agent 启动时及之后每小时按快照内的到期时间回收，离线也会运行。所有项目仍共享 256 条／256 MiB 上限；新基线为审阅完成预留 32 MiB 总空间，这不是每轮独占预留。不会为腾空间删除未过期审阅或其他调用方的活动基线。
+
+快照采样在每个目录中优先读取直接文件，再进入子目录，避免根目录的入口文件被大量历史作品挤出预算；`.work` 和 `.codepier-test-runs` 不进入审阅。达到原有 8 MiB／2000 文件上限时仍明确返回不完整覆盖，不把未采样文件当作无改动。后台回收遇到正在持锁的写入会跳过本轮，退出时等待已经开始的回收结束。
+
+`show_changes` 使用工具语义版本 2。Hub 与 Agent 需同时支持该版本才能开始新的审阅请求；旧节点会明确收到升级要求，不会忽略 `finalize` 或误报已释放。历史回执仍通过原操作编号查询。
+
 ## 原生附件导入
 
 `write(operation="import")` 的 `file` 必须放在顶层；`options` 只填写目标路径和可选源 SHA-256。来源校验在 Agent 执行，只更新 Hub 不会更新旧 Agent 的允许列表。配置扩展、即时失败恢复、脱敏错误以及实际往返验收要求见[文件导入指南](FILE_IMPORT.md)。

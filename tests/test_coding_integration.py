@@ -95,6 +95,24 @@ def test_remote_non_git_review_patch_idempotency_and_grant_boundaries(coding_sta
     assert conflict['isError'] and conflict['structuredContent']['error']['code']=='SHA_CONFLICT'
 
 
+def test_remote_finalization_replays_original_result_through_public_facade(coding_stack):
+    s = coding_stack
+    baseline = value(s, tool(s, 'open_workspace', {'project': 'ProjectAlpha', 'capture_baseline': True}))
+    path = s.projectalpha/'finalized-review.txt'
+    path.write_text('final result\n')
+    args = {'project': 'ProjectAlpha', 'baseline_ref': baseline['baseline_ref'], 'finalize': True}
+    final = value(s, tool(s, 'show_changes', args))
+    assert final['baseline_released'] and final['review_ref'] == baseline['baseline_ref']
+    path.write_text('later unrelated result\n')
+    replay = value(s, tool(s, 'show_changes', args))
+    assert replay['review_ref'] == final['review_ref'] and replay['summary'] == final['summary']
+    assert replay['finished'] == final['finished'] and replay['expires_at'] == final['expires_at']
+    assert replay['started'] <= replay['finished'] < replay['expires_at']
+    detail = value(s, tool(s, 'show_changes', {
+        'project': 'ProjectAlpha', 'review_ref': replay['review_ref'], 'path': path.name}))
+    assert '+final result' in detail['diff'] and 'later unrelated' not in detail['diff']
+
+
 def test_coding_profile_uses_canonical_oauth_resource_and_revocation(coding_stack):
     from urllib.parse import parse_qs,urlparse
     from tests.test_integration import oauth_prepare
