@@ -10,7 +10,7 @@ from playwright.sync_api import expect
 from shared.audit_redaction import redact_text
 
 from tests.collaboration_support import collaboration_stack  # noqa: F401
-from tests.test_collaboration_chatroom_browser import login, overview, open_add_project
+from tests.test_collaboration_chatroom_browser import click_room_refresh, login, overview, open_add_project
 from tests.test_collaboration_dots_flow import create_dot, join_dot
 
 pytestmark = [pytest.mark.browser, pytest.mark.integration, pytest.mark.slow]
@@ -595,6 +595,11 @@ def test_shared_vps_target_is_read_only_from_room_connection_entry(
                 'capabilities': ['read', 'execute'], 'execution_targets': [target]}],
             'execution_mode': 'account_permissions_acknowledged', 'acknowledge_unsandboxed_exec': True,
             'confirm_connection_wide_ceiling': True, 'expires_seconds': 3600, 'idempotency_key': key()}))
+        # The out-of-band fixture write changes the authority projection. Finish
+        # its real UI refresh before opening a drawer that this change invalidates.
+        click_room_refresh(page)
+        expect(page.locator('#cc-feedback')).to_have_text('状态已刷新。')
+        expect(page.locator('.collaboration')).not_to_have_attribute('aria-busy', 'true')
         group = advanced_connections(page)
         expect(group).to_contain_text('只读')
         expect(group.locator('[name="grant_id"], [name="hours"], [data-channel-form="scope"]')).to_have_count(0)
