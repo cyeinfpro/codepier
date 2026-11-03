@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from hub.operation_output import OperationOutput
 from hub.runtime import Runtime
 from hub.store import Store
 from shared.util import DevError
@@ -15,6 +16,7 @@ def completion_runtime(tmp_path):
     store = Store(tmp_path / 'hub')
     runtime = Runtime.__new__(Runtime)
     runtime.store = store
+    runtime.outputs = OperationOutput(store)
     runtime.integrations = SimpleNamespace(complete=lambda *args: None)
     runtime.diagnostics = SimpleNamespace(ingest=lambda *args: None, record=lambda *args: None,
         connection=SimpleNamespace(completed=lambda *args, **kwargs: None, write_errors=0))
