@@ -1,0 +1,17 @@
+# Opt-in budget for a host with spare capacity. Append to the complete currently
+# selected Compose configuration. Preserve existing HTTPS overlays and any
+# .codepier-updater/layouts/... state layout; do not replace them with compose.yml.
+# Validate merged volumes, HUB_STATE_DIR, image, services and resource limits.
+# Managed deployments must retain the budget in their registered configuration;
+# a one-time -f overlay or .env edit does not establish updater persistence.
+services:
+  hub:
+    cpus: "${CODEPIER_HUB_CPUS:-2.0}"
+    mem_limit: "${CODEPIER_HUB_MEMORY:-1g}"
+    mem_reservation: "${CODEPIER_HUB_MEMORY_RESERVATION:-512m}"
+    pids_limit: 512
+    logging:
+      driver: json-file
+      options:
+        max-size: "${CODEPIER_LOG_MAX_SIZE:-20m}"
+        max-file: "${CODEPIER_LOG_MAX_FILES:-5}"

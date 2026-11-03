@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from contextvars import ContextVar
 import sqlite3
 import threading
@@ -55,7 +56,7 @@ def test_nested_execute_and_audit_do_not_commit_outer_transaction(store):
             store.audit("test", "rollback.audit")
             store.after_commit(lambda: callbacks.append("published"))
             # A second SQLite connection must not observe an early commit.
-            with sqlite3.connect(store.directory / "hub.sqlite3") as observer:
+            with closing(sqlite3.connect(store.directory / "hub.sqlite3")) as observer:
                 assert observer.execute("SELECT value FROM meta WHERE key='rollback'").fetchone() is None
             raise ValueError("after writes")
     assert store.one("SELECT * FROM meta WHERE key='rollback'") is None

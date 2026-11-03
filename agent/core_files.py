@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import base64
 from shared.crypto import digest
-from shared.computer_media import normalize_content
 from shared.util import DevError
 
 OUTPUT_BYTES = 50 * 1024
@@ -31,6 +30,9 @@ class CoreFiles:
         if mime:
             if args['offset'] != 1:
                 raise DevError('INVALID_OFFSET', '图片不支持文本行分页')
+            # Isolated text reads do not need desktop media or model schemas.
+            # Keep the same validation when an actual PNG/JPEG is returned.
+            from shared.computer_media import normalize_content
             return {**meta, **normalize_content({'content': [{'type': 'image', 'mimeType': mime,
                 'data': base64.b64encode(data).decode('ascii')}]}), 'truncated': False, 'next_offset': None}
         lines = engine.text(data).splitlines(keepends=True)

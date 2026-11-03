@@ -20,11 +20,12 @@ def app_page(chat_browser_pool):
         status=200, content_type='text/html',
         body='<div id="app"></div><div id="modal-root"></div><div id="toasts"></div>'))
     page.goto('https://flow.fixture/')
-    for name in ('tokens.css','styles.css','workspace.css','chat.css'):
+    for name in ('tokens.css','styles.css','workspace.css','chat.css','agent-roots.css'):
         page.add_style_tag(path=str(ROOT / 'web' / name))
     for name in ('core/bundle.js', 'ui.js'):
         page.add_script_tag(path=str(ROOT / 'web' / name))
     page.add_script_tag(content=panel_without_boot())
+    page.add_script_tag(path=str(ROOT / 'web' / 'agent-roots.js'))
     page.add_script_tag(path=str(ROOT / 'web' / 'identity.js'))
     for name in ('chat-markdown.js','chat-panels.js','chat-chrome.js',
                  'chat-history.js','chat-catalog.js','chat.js'):
@@ -49,6 +50,9 @@ def app_page(chat_browser_pool):
           disabled_spaces:[],identities:[],sessions:[]});
         if(path==='/api/logout')return response({ok:true});
         if(path==='/api/devices')return response({devices:fixtureDevices});
+        if(path==='/api/devices/node-one/roots'&&method==='GET')return response({
+          device_id:'node-one',state:'applied',config_sha256:'a'.repeat(64),
+          roots:[{path:'/fixture/one',writable:false,allow_tasks:false}]});
         if(path.startsWith('/api/projects')&&method!=='GET'){
           if(window.saveHandler)return saveHandler({path,method,body},response);
           return response(fixtureProjects[0]);
@@ -183,23 +187,49 @@ def test_late_project_load_cannot_open_over_a_newer_dialog(app_page):
     expect(page.locator('#project-form [name=alias]')).to_have_value('NewerDialog')
 
 
-def test_pending_project_validation_reuses_same_save_receipt(app_page):
+@pytest.mark.parametrize('confirmation', ['automatic', 'manual'])
+def test_pending_project_validation_reuses_same_save_receipt(app_page, confirmation):
     page = app_page
     page.evaluate('''() => {
       let attempts=0;
-      window.saveHandler=async(request,response)=>++attempts===1
-        ?response({error:{code:'VALIDATION_PENDING',message:'fixture slow validation',operation_id:'d'.repeat(32)}},409)
-        :response({id:'project-one'});
+      window.saveHandler=async(request,response)=>{
+        if(++attempts===1)return response({error:{code:'VALIDATION_PENDING',
+          message:'fixture slow validation',operation_id:'d'.repeat(32)}},409);
+        return new Promise(resolve=>{
+          window.finishPendingProjectSave=()=>resolve(response({id:'project-one'}));
+        });
+      };
     }''')
     open_project(page)
+    page.evaluate('''confirmation => {
+      const button=document.querySelector('#save-project'),handler=button.onclick;
+      button.onclick=event=>{
+        button.onclick=handler;
+        return handler.call(button,event).then(()=>{
+          window.initialPendingState={
+            text:document.querySelector('#project-form > [role=status]').textContent,
+            enabled:!button.disabled};
+          // Observe completion in the browser microtask queue. A real explicit
+          // click can then run before the scheduled automatic confirmation,
+          // without replacing or shortening the production timer.
+          if(confirmation==='manual')button.click();
+        });
+      };
+    }''', confirmation)
     page.click('#save-project')
-    expect(page.locator('#project-form [role=status]')).to_contain_text('不会新建重复任务')
-    expect(page.locator('#save-project')).to_be_enabled()
-    page.click('#save-project')
-    expect(page.locator('#project-form')).to_have_count(0)
+    page.wait_for_function("typeof window.finishPendingProjectSave==='function'")
+    assert page.evaluate('initialPendingState') == {
+        'text': '正在等待节点完成目录验证，完成后自动保存映射…',
+        'enabled': True,
+    }
+    expect(page.locator('#project-form')).to_be_visible()
+    expect(page.locator('#save-project')).to_be_disabled()
     requests = page.evaluate("calls.filter(call=>call.method==='PUT').map(call=>call.body)")
     assert len(requests) == 2 and requests[0] == requests[1]
     assert requests[0]['idempotency_key'].startswith('project-save-')
+    page.evaluate('finishPendingProjectSave()')
+    expect(page.locator('#project-form')).to_have_count(0)
+    assert page.evaluate("calls.filter(call=>call.method==='PUT').length") == 2
 
 
 def test_unknown_project_save_does_not_send_changed_configuration(app_page):
@@ -210,7 +240,7 @@ def test_unknown_project_save_does_not_send_changed_configuration(app_page):
     expect(page.locator('#save-project')).to_be_enabled()
     page.fill('#project-form [name=alias]','DoNotReplayDifferentConfig')
     page.click('#save-project')
-    expect(page.locator('#project-form [role=status]')).to_contain_text('原保存结果尚未核实')
+    expect(page.locator('#project-form > [role=status]')).to_contain_text('原保存结果尚未核实')
     assert page.evaluate("calls.filter(call=>call.method==='PUT').length") == 1
 
 
@@ -224,7 +254,9 @@ def test_definite_project_rejection_allows_a_fresh_explicit_validation(app_page)
     }''')
     open_project(page)
     page.click('#save-project')
-    expect(page.locator('#project-form [role=status]')).to_contain_text('permission rejected')
+    expect(page.locator('#project-form > [role=status]')).to_contain_text('permission rejected')
+    expect(page.locator('#project-roots-manager .agent-roots')).to_be_visible()
+    expect(page.locator('#project-roots-manager [data-roots-state]')).to_have_text('已生效')
     page.click('#save-project')
     expect(page.locator('#project-form')).to_have_count(0)
     requests = page.evaluate("calls.filter(call=>call.method==='PUT').map(call=>call.body)")

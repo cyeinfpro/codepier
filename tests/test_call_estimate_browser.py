@@ -78,13 +78,12 @@ def test_calibrated_card_in_real_overview_layout(chat_browser_pool, stack, brows
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
 
-    def overview(route):
+    def token_usage_fixture(route):
         response = route.fetch()
-        data = response.json()
-        data["token_usage"] = synthetic_dashboard(calibrated=True)
-        route.fulfill(response=response, json=data)
+        route.fulfill(response=response, json=synthetic_dashboard(calibrated=True))
 
-    page.route("**/api/overview", overview)
+    # Statistics now load independently of the lightweight overview response.
+    page.route("**/api/token-usage", token_usage_fixture)
     try:
         _login(page, stack)
         card = page.locator(".overview-summary [data-token-dashboard]")

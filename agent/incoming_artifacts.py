@@ -218,6 +218,7 @@ class AnchoredDestination:
     def __init__(self,engine,root,relative):
         self.engine,self.root=engine,root;self.parts=relative.split('/');self.fds=[];self.handles=[]
         self.parent=root;self.fd=None;self.temporary='.rd-import-'+uuid.uuid4().hex+'.part';self.published=False
+        self.publication_method = None
 
     def __enter__(self):
         try:
@@ -283,9 +284,13 @@ class AnchoredDestination:
                 os.close(self.fd);self.fd=None
                 # os.rename on Windows refuses an existing target.
                 os.rename(self.parent/self.temporary,target)
+                self.publication_method = 'rename_no_replace'
             else:
-                os.link(self.temporary,self.parts[-1],src_dir_fd=self.fds[-1],dst_dir_fd=self.fds[-1],follow_symlinks=False)
-                os.unlink(self.temporary,dir_fd=self.fds[-1])
+                publication = self.engine.publish_new_file(self.temporary,self.parts[-1],
+                    src_dir_fd=self.fds[-1],dst_dir_fd=self.fds[-1],follow_symlinks=False)
+                self.publication_method = publication.method
+                if publication.source_retained:
+                    os.unlink(self.temporary,dir_fd=self.fds[-1])
             self.published=True
         except FileExistsError as exc:raise DevError('ARTIFACT_DESTINATION_EXISTS','目标文件已存在，未覆盖',409) from exc
         self.engine.sync_directory(self.parent)
@@ -397,4 +402,5 @@ def import_artifact(engine,project,args,*,stream=None):
             engine.root(project,True)
             target.publish()
     return {'path':relative,'bytes':total,'sha256':actual,'created':True,'overwritten':False,
-            'extracted':False,'executed':False,'name':destination.name}
+            'extracted':False,'executed':False,'name':destination.name,
+            'publication_method':target.publication_method}

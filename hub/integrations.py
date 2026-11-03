@@ -24,6 +24,8 @@ class HubIntegrations:
         self.usage_metrics=None
         try:self.usage_metrics=MCPUsage(self.store)
         except Exception:self.write_errors+=1
+        from hub.token_cache_schema import install as install_token_cache
+        install_token_cache(self.store)
 
     def state(self,project):
         row=self.store.one('SELECT * FROM integration_admission WHERE project=?',(project['id'],))

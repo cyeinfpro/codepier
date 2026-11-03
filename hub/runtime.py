@@ -29,11 +29,13 @@ from hub.artifacts import ArtifactService
 from hub.native_cli import NativeService
 from shared.agent_lifecycle import DEVICE_ACTIONS, public_management
 from shared.runtime_panel_contracts import PANEL_RUNTIME_TOOLS
+from shared.agent_roots_contracts import PANEL_ROOTS_TOOLS
 from shared.contracts import TOOLS, PROCESS_TOOLS, MUTATING, OPERATION_WAIT_SECONDS, OPERATION_OUTPUT_LIMIT, required_scope
 from shared.computer_contracts import COMPUTER_TOOLS
 from shared.computer_media import scrub_expired, purge_database
 from shared.crypto import SecureChannel, digest, token
 from shared.util import DevError, safe_summary
+from shared.filesystem_errors import safe_filesystem_error_detail
 from shared.tool_protocol import advertisement, catalog_digest, negotiate, require_compatible, validate_call_epoch, wire_version
 from shared.execution_policy import (DENIAL_MESSAGE, COMPUTER_DENIAL_MESSAGE, COMPUTER_DENIAL_CODE,
     InvocationInspector, hub_blocks_codex, hub_blocks_computer, hub_execution_policy,
@@ -116,6 +118,8 @@ class Connection:
 class Runtime:
     def __init__(self, store: Store):
         self.store = store
+        from hub.operation_output import OperationOutput
+        self.outputs = OperationOutput(store)
         from hub.collaboration.lifecycle import install as install_collaboration
         install_collaboration(self)
         self._loop = None
@@ -323,13 +327,16 @@ class Runtime:
         return result
 
     @iam.read_decision
-    def operation_row(self, id: str, principal: Principal, *, status_only=False):
+    def operation_row(self, id: str, principal: Principal, *, status_only=False, include_output=True):
         principal = refresh_profile_principal(self.store, principal)
         # These two projections are code-defined; operation IDs remain bound
         # parameters and both projections pass the same live record/IAM checks.
         columns = "id,grant_id,project_id,device_id,tool,state,space_id,owner_user_id,visibility,args_summary" if status_only else "*"
         row = self.store.one(f"SELECT {columns} FROM operations WHERE id=?", (id,))
         principal = iam.require_record(self.store, principal, row)
+        if row['tool'] in PANEL_ROOTS_TOOLS:
+            from hub.agent_roots import authorize
+            principal, _ = authorize(self, principal, row['device_id'])
         if row['tool'] in PANEL_RUNTIME_TOOLS:
             from hub.runtime_panel import authorize
             principal = authorize(self, principal, {'id': row['project_id'], 'device_id': row['device_id']})
@@ -350,6 +357,8 @@ class Runtime:
             self.authorize(principal, 'projects.create', device_id=row['device_id'])
         if (scope == 'computer' or row['tool'] in {'browser_open', 'browser_snapshot', 'browser_action', 'browser_close'}) and 'computer' not in principal.scopes:
             raise DevError('INSUFFICIENT_SCOPE', '读取桌面操作结果仍需 computer 权限', 403)
+        if not status_only and include_output:
+            row['output'], _ = self.outputs.read(row)
         return row
 
     async def wait_operation(self, id: str, principal: Principal, seconds: int):
@@ -387,8 +396,9 @@ class Runtime:
                 args["after_output_seq"] = after_output_seq
         return {"name": "operations_wait" if pending else "operations_get", "arguments": args}
 
+    @iam.read_decision
     def operation(self, id: str, principal: Principal, view: dict | None = None):
-        row = self.operation_row(id, principal)
+        row = self.operation_row(id, principal, include_output=False)
         result = dict(row)
         options = view or {}
         include_result = options.get("include_result", True)
@@ -423,11 +433,11 @@ class Runtime:
         else:
             result.pop("result", None)
             result["result_omitted"] = True
-        output = row["output"] or ""
-        result["output_chars"] = len(output)
+        output, output_chars = self.outputs.read(row, limit=limit, include_body=include_output)
+        result["output_chars"] = output_chars
         if include_output:
-            result["output"] = output[-limit:] if limit else ""
-            result["output_truncated"] = len(output) > limit
+            result["output"] = output
+            result["output_truncated"] = output_chars > limit
         else:
             result.pop("output", None)
             result["output_omitted"] = True
@@ -542,6 +552,8 @@ class Runtime:
 
     def _invoke(self, name: str, raw: dict, principal: Principal):
         principal = refresh_principal(self.store, principal)
+        if name in PANEL_ROOTS_TOOLS:
+            raise DevError('OWNER_REQUIRED', '目录授权必须使用已登录面板的专用设备管理入口', 403)
         tool = TOOLS.get(name)
         if not tool:
             raise DevError("UNKNOWN_TOOL", "不存在此工具", 404)
@@ -776,6 +788,11 @@ class Runtime:
 
     def _admit_operation(self, name: str, args: dict, project: dict, principal: Principal, background=False):
         principal = refresh_principal(self.store, principal)
+        if name in PANEL_ROOTS_TOOLS:
+            from hub.agent_roots import authorize
+            principal, _ = authorize(self, principal, project['device_id'])
+            if project.get('id') is not None or args.get('device_id') != project['device_id']:
+                raise DevError('ROOTS_DEVICE_MISMATCH', '目录授权必须绑定原设备，不能借用项目或工作树', 409)
         if name in PANEL_RUNTIME_TOOLS:
             from hub.runtime_panel import authorize
             principal = authorize(self, principal, project)
@@ -846,7 +863,7 @@ class Runtime:
                     self.integrations.guard(name, args, project, principal)
                 if name in (COMPUTER_TOOLS - {"computer_session_close"}) | {"browser_open", "browser_snapshot", "browser_action"} and not self.online(project["device_id"]):
                     raise DevError("COMPUTER_OFFLINE", "设备不在线，不排队保存延迟桌面操作；恢复后重新观察", 409, admitted=False)
-                if name in DEVICE_ACTIONS and not self.online(project["device_id"]):
+                if name in DEVICE_ACTIONS | PANEL_ROOTS_TOOLS and not self.online(project["device_id"]):
                     raise DevError("DEVICE_OFFLINE", "设备当前离线；生命周期操作未排队", 409)
                 device = self.store.one("SELECT enabled FROM devices WHERE id=?", (project["device_id"],))
                 if not device or not device["enabled"]:
@@ -868,10 +885,11 @@ class Runtime:
                 payload = self.store.encrypt(json.dumps(request, ensure_ascii=False))
                 from hub.admission_policy import check_admission, usage
                 check_admission(self._admission_budget(project["device_id"]),
-                    usage(self.store, project["device_id"], project.get("id")), name, len(payload))
+                    usage(self.store, project["device_id"], project.get("id")), name, len(payload), args=args)
                 lifecycle_ttl = 900 if name == "agent_update" else 120
                 deadline_seconds = (min(self.queue_seconds, 15) if name in {"computer_action", "browser_action"} else
                                     min(self.queue_seconds, 60) if name in COMPUTER_TOOLS | {"browser_open", "browser_snapshot"} else
+                                    min(self.queue_seconds, 60) if name in PANEL_ROOTS_TOOLS else
                                     min(self.queue_seconds, lifecycle_ttl) if name in DEVICE_ACTIONS else self.queue_seconds)
                 self.store.execute("INSERT INTO operations(id,device_id,project_id,actor,grant_id,tool,args_summary,fingerprint,idem,state,created,updated,payload,deadline,space_id,owner_user_id) VALUES (?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?)",
                     (id, project["device_id"], project.get("id"), principal.actor, principal.grant_id, name,
@@ -902,7 +920,7 @@ class Runtime:
             # Keep the original receipt so a lost permission is not mistaken for
             # a failed execution and replayed with a fresh idempotency key.
             raise DevError(exc.code, exc.message, exc.status, operation_id=identifier) from exc
-        value = self.unwrap(identifier, result)
+        value = self.unwrap(identifier, result, tool=row['tool'])
         if row['tool'] == 'open_workspace':
             from hub.project_views import validate_context
             args = json.loads(row['args_summary']) if row.get('args_summary') else {}
@@ -919,10 +937,14 @@ class Runtime:
             self.futures.pop(id, None)
 
     @staticmethod
-    def unwrap(id, result):
+    def unwrap(id, result, *, tool=None):
         if not result.get("ok"):
             error = result.get("error") or {}
             details = safe_detail(error)
+            details.update(safe_filesystem_error_detail(tool, error.get('code'), error))
+            # The synchronous error already carries retryable=False below;
+            # keep one explicit value, independent from remote details.
+            details.pop('retryable', None)
             if error.get('next') == 'computer_observe':
                 details['next'] = 'computer_observe'
             if error.get('input_sent') is False:
@@ -946,6 +968,9 @@ class Runtime:
     def permission_error(self, op, request):
         try:
             caller = self.operation_principal(op, request)
+            if op['tool'] in PANEL_ROOTS_TOOLS:
+                from hub.agent_roots import authorize
+                caller, _ = authorize(self, caller, op['device_id'])
             if op['tool'] in PANEL_RUNTIME_TOOLS:
                 from hub.runtime_panel import authorize
                 caller = authorize(self, caller, {'id': op['project_id'], 'device_id': op['device_id']})
@@ -1139,8 +1164,10 @@ class Runtime:
         device_id, con, packets = prepared
         for packet in packets:
             async def current(packet=packet):
-                return await self.store.run(self._delivery_packet_current,
-                                            identifier, device_id, con, packet)
+                # This final current-authority fence holds the socket send
+                # lock. It must not strand receipt ACKs behind normal DB work.
+                return await self.store.run_control(self._delivery_packet_current,
+                                                    identifier, device_id, con, packet)
             if not await con.send(packet, before_send=current):
                 return
 
@@ -1304,7 +1331,7 @@ class Runtime:
         data = result.get("data") or {}
         error = result.get("error") or {}
         state = "succeeded" if result["ok"] else "failed"
-        if error.get("code") in {"INTERRUPTED", "JOURNAL_CHANGED", "RECOVERY_DATA_INVALID", "INVALID_AGENT_RESULT", "DURABILITY_UNCONFIRMED", "COMPUTER_ACTION_UNCERTAIN", "BROWSER_ACTION_UNCERTAIN", "RUNTIME_CONTROL_UNCERTAIN", "RUNTIME_CREATION_UNCERTAIN", "RUNTIME_CLEANUP_PENDING", "RUNTIME_OPERATION_REQUIRES_RECOVERY"}:
+        if error.get("code") in {"INTERRUPTED", "JOURNAL_CHANGED", "RECOVERY_DATA_INVALID", "INVALID_AGENT_RESULT", "DURABILITY_UNCONFIRMED", "WRITE_OUTCOME_UNCONFIRMED", "STAGING_CLEANUP_UNCONFIRMED", "COMPUTER_ACTION_UNCERTAIN", "BROWSER_ACTION_UNCERTAIN", "RUNTIME_CONTROL_UNCERTAIN", "RUNTIME_CREATION_UNCERTAIN", "RUNTIME_CLEANUP_PENDING", "RUNTIME_OPERATION_REQUIRES_RECOVERY"}:
             state = "needs_review"
         elif error.get("code") == "CANCELLED" or data.get("cancelled"):
             state = "cancelled"
@@ -1316,21 +1343,29 @@ class Runtime:
         if (isinstance(data.get('runtime_cleanup'), dict) and data['runtime_cleanup'].get('pending')
                 or isinstance(data.get('runtime_outcome'), dict) and data['runtime_outcome'].get('state') == 'unconfirmed'):
             state = 'needs_review'
+        if op['tool'] == 'agent_roots_set' and result['ok'] and (
+                data.get('state') == 'needs_review' or data.get('outcome_confirmed') is False):
+            state = 'needs_review'
         if op['tool'] in COMPUTER_TOOLS and data.get('native_is_error'):
             state = 'needs_review' if data.get('action_outcome') == 'uncertain' else 'failed'
             error = {'message': '原生桌面工具报错；检查本机权限与界面，勿盲目重放输入'}
         if op['tool'] in {'apply_patch', 'edit'} and data.get('success') is False:
             state = 'needs_review' if data.get('outcome') == 'partial' else 'failed'
             error = data.get('error') or {'message': '批量补丁未完成，请核查备份与回滚结果'}
-        output = str(data.get("output", op.get("output", "")))[-131072:]
         # Persist the terminal result and exact-subscription completion hint
         # atomically. A failed outbox write must leave the original operation
         # recoverable; unrelated evidence/audit failures stay outside this unit.
         with self.store.transaction():
+            current = self.store.one('SELECT id,state,output,output_seq FROM operations WHERE id=?', (op['id'],))
+            if not current or current['state'] in {'succeeded', 'failed', 'cancelled'}:
+                return
+            previous, _ = self.outputs.read(current)
+            output = str(data.get('output', previous))[-131072:]
             changed = self.store.execute("UPDATE operations SET state=?,result=?,error=?,output=?,updated=?,output_seq=output_seq+?,payload=NULL,transport_error=NULL WHERE id=? AND state NOT IN ('succeeded','failed','cancelled')",
-                (state, encoded, error.get("message"), output, time.time(), int(output != (op.get("output") or "")), op["id"]))
+                (state, encoded, error.get("message"), output, time.time(), int(output != previous), op["id"]))
             if not changed.rowcount:
                 return
+            self.outputs.discard(op['id'])
             # Passive/offline collaboration services may have no event adapter.
             # Completion must still commit; configured adapters retain the atomic outbox.
             if self.collaboration.events is not None:
@@ -1364,7 +1399,8 @@ class Runtime:
         if self.connections.get(device_id) is not connection or not self.connection_authorized(device_id, connection):
             return None
         kind, id = data.get("type"), data.get("id")
-        op = self.store.one("SELECT * FROM operations WHERE id=? AND device_id=?", (id, device_id))
+        op = self.store.one('''SELECT id,tool,state,journal_id,output_seq,accepted_at,cancel_requested,deadline
+            FROM operations WHERE id=? AND device_id=?''', (id, device_id))
         if not op:
             if kind == "result" and isinstance(id, str):
                 return {"type": "ack", "id": id}
@@ -1402,16 +1438,8 @@ class Runtime:
                     self.store.execute("UPDATE operations SET accepted_at=NULL,next_attempt=0,state='queued',attempts=0 WHERE id=?", (id,))
                     self.wake_delivery()
         elif kind == "output" and op["tool"] in PROCESS_TOOLS and op["state"] in ACTIVE | {"unknown", "needs_review"}:
-            if data.get("snapshot"):
-                seq = data.get("seq")
-                if type(seq) is not int or seq <= op["output_seq"]:
-                    return None
-                output = str(data.get("text", ""))[-131072:]
-            else:  # Legacy v1 Agent.
-                seq = op["output_seq"] + 1
-                output = (op["output"] + str(data.get("text", ""))[:8192])[-131072:]
-            self.store.execute("UPDATE operations SET output=?,output_seq=?,updated=?,last_output_at=? WHERE id=?", (output, seq, time.time(), time.time(), id))
-            self.publish("output", {"id": id})
+            if self.outputs.receive(id, data):
+                self.publish("output", {"id": id})
         elif kind == "result":
             result = data.get("result")
             self.complete(op, result)
@@ -1490,6 +1518,26 @@ class Runtime:
             self.publish("device", {"id": device_id, "online": True})
             self.wake_delivery()
         return True
+
+    def _receive_agent_frame(self, device_id, connection, info, data):
+        """One queued phase per authenticated frame, in wire receive order.
+
+        Keep existing transaction boundaries: a completion may already be
+        durable when auxiliary audit work fails. ACKs leave this phase only
+        after its normal persistence path completes. Async native/artifact
+        receivers stay on their owning event loop after this current fence.
+        """
+        if not self._touch_agent(device_id, connection):
+            return False, None
+        kind = data.get('type')
+        if kind == 'heartbeat':
+            return True, self._heartbeat(device_id, connection, info, data)
+        if kind in {'computer_approval', 'computer_approval_closed'}:
+            self.computer_approvals.receive(device_id, connection, data)
+            return True, None
+        if kind in {'native_reply', 'native_sync', 'artifact_chunk'}:
+            return True, None
+        return True, self._receive_operation_event(device_id, connection, data)
 
     async def agent_socket(self, websocket: WebSocket, device_id: str):
         device = await self.store.run(self.store.one, "SELECT * FROM devices WHERE id=?", (device_id,))
@@ -1572,16 +1620,16 @@ class Runtime:
             while not self.stopping:
                 packet = await asyncio.wait_for(websocket.receive_text(), 45)
                 data = channel.unpack(packet)
-                if not await self.store.run(self._touch_agent, device_id, connection):
+                current, reply = await self.store.run_control(
+                    self._receive_agent_frame, device_id, connection, info, data)
+                if not current:
                     break  # Fence a replaced socket before accepting its late events.
-                kind, id = data.get("type"), data.get("id")
+                kind = data.get("type")
                 if kind == "heartbeat":
-                    preference = await self.store.run(self._heartbeat, device_id, connection, info, data)
-                    if preference is not None:
-                        await connection.send(preference)
+                    if reply is not None:
+                        await connection.send(reply)
                     continue
                 if kind in {"computer_approval", "computer_approval_closed"}:
-                    await self.store.run(self.computer_approvals.receive,device_id,connection,data)
                     continue
                 if kind in {"native_reply", "native_sync"}:
                     await self.native.receive(device_id, connection, data)
@@ -1589,9 +1637,8 @@ class Runtime:
                 if kind == "artifact_chunk":
                     self.artifacts.receive(connection,data)
                     continue
-                acknowledgement = await self.store.run(self._receive_operation_event, device_id, connection, data)
-                if acknowledgement is not None:
-                    await connection.send(acknowledgement)
+                if reply is not None:
+                    await connection.send(reply)
 
         except (WebSocketDisconnect, asyncio.TimeoutError):
             pass
@@ -1607,6 +1654,13 @@ class Runtime:
                 await asyncio.wait_for(websocket.close(), 2)
 
     async def stop(self):
+        try:
+            await self._stop_runtime()
+        finally:
+            from hub.token_dashboard import aclose_token_dashboard
+            await aclose_token_dashboard(self)
+
+    async def _stop_runtime(self):
         self.stopping = True
         for id in self.operation_waiters:
             self.notify_operation(id)

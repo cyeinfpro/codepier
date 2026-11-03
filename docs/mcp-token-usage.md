@@ -79,7 +79,7 @@ characters 和 utf8_bytes 是实际纳入统计的规范化文本的精确 Unico
 
 “查看详情”默认收起。展开后，“筛选与估价设置”“请求与响应明细”“用量趋势”“统计说明”仍分别收起，避免一次展开全部表单、图表和长说明；计价依据再按需展开。JSON 导出保留在详情内。筛选、参考模型和缓存率变化后保留当前展开状态，离开页面或权限主体切换重置。今日零点与既有今日操作统计使用同一个 Hub 配置时区，时区和起止时间在统计说明中保留。
 
-GET /api/token-usage 使用当前面板会话认证，并在 Store 数据库 worker 的同一次当前权限读取范围内完成取数。period 只接受 today、7d、30d；project、connection、session 是可选过滤条件。选项仅从当前可见项目及其授权活动产生，输入别人的连接或匿名窗口编号不能扩大访问。服务先按当前项目/root/device 和既有 grant/actor/user/space 规则筛选活动，再读取这些活动 ID 的数字指标。连接名只是授权标签，不用于推断宿主产品。
+GET /api/token-usage 使用当前面板会话认证，在 Store 数据库 worker 的短只读事务内取得当前授权数据快照；JSON 解析、上下文重放与费用聚合在独立计算线程中完成，返回前重新核验原凭据和完整授权过滤条件。period 只接受 today、7d、30d；project、connection、session 是可选过滤条件。选项仅从当前可见项目及其授权活动产生，输入别人的连接或匿名窗口编号不能扩大访问。服务先按当前项目/root/device 和既有 grant/actor/user/space 规则筛选活动，再读取这些活动 ID 的数字指标。连接名只是授权标签，不用于推断宿主产品。
 
 summary.scope 为 retained_authorized_project_activity，区别于活动分页的 returned_activity_page。它只汇总所选时间段内仍保留的授权记录，受活动 10,000 行及指标 30 天/10,000 行上限约束；coverage.complete_history 始终 false，不代表完整历史或账单。API 不新建持久化访问日志，不保存参数或输出，也不在 GET 时执行清理删除。
 
@@ -114,7 +114,13 @@ summary.scope 为 retained_authorized_project_activity，区别于活动分页�
 - `coverage` 包含保留历史、预热、缺失/截断和匿名流推断计数；`complete_history=false`、`range_is_error_bound=false`
 - `actual_usage/billing_total` 及未知缓存写入/推理字段保持null
 
-每次请求，包括缓存命中，都先刷新原凭据和当前IAM/项目映射。数字指标用授权范围内的批量join读取，没有逐活动查询。最多8份只读聚合缓存，最长30秒，key含上下文/价格版本、当前权限指纹、访问修订及SQLite本连接/外部连接数据修订。撤权、映射变化、迟到指标或数据修改不能复用旧结果；缓存不会跨日期或指标保留期限。缓存中不保存原始正文，也不写数据库。
+每次请求，包括缓存命中，都重新刷新原凭据和当前 IAM、项目映射及可见连接归属；异步等待后再核验一次。数字指标用授权范围内的批量 join 读取，没有逐活动查询。统计缓存最多 8 份，只包含聚合结果，最长 30 秒且不能跨日期或指标保留期限。撤权、项目重映射、连接归属/标签变化以及活动授权字段重归属立即使旧结果不可返回；它们不等待统计刷新窗口。缓存不保存原始正文，不在 GET 时写数据库。
+
+HTTP 统计使用有界时间快照：持续的 MCP 调用、迟到指标、更新或删除在下一次最长 30 秒的刷新时可见，不会让每个面板请求都重新解析全部历史。响应增加 `freshness`：`as_of` 是读取快照的 Unix 时间，`age_seconds` 是返回时年龄，`max_cache_age_seconds=30`，`policy=bounded_snapshot`。`period.end` 保留该快照的统计截止时间，不把缓存数据标成刚发生的事实。同步内部查询仍提供 `revision_checked` 模式；活动和指标表的持久触发器覆盖插入、更新、删除及其他 SQLite 连接的写入，无关的设备心跳、审计与操作状态写入不会击穿该精确缓存。
+
+同一授权范围与筛选共享一份正在计算的任务，取消一个读取请求不会取消其他读取者的计算。最多 2 个聚合线程、8 个不同筛选的在途任务；尚未取得计算额度的任务不加载大行快照，因此最多同时持有 2 份各不超过 10,000 行的数据。超过边界时返回 `STATISTICS_BUSY`（HTTP 503），不会无限排队。统计读取期间的权限或映射变化返回 `STATISTICS_AUTHORITY_CHANGED`（409）；原凭据撤销仍返回其原来的认证错误。停机时先停止接纳新计算并收束在途任务，再关闭数据库。
+
+`GET /api/overview?include_token_usage=false` 只返回即时设备、项目和操作状态，`token_usage` 为 null；首页使用它与独立的 `/api/token-usage` 请求分载。未指定参数的 `/api/overview` 继续包含原来的统计字段，兼容旧客户端；统计计算不占用 Hub 的单数据库 worker。
 
 ## MCP 工具文本参考估价
 

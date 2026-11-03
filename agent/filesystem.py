@@ -6,6 +6,7 @@ import json
 import os
 import re
 import stat
+import sys
 import tempfile
 import threading
 import time
@@ -13,6 +14,7 @@ import uuid
 import zipfile
 from pathlib import Path, PurePosixPath
 from shared.crypto import digest
+from shared.file_publish import AtomicCreateUnsupported, publish_new_file
 from shared.util import DevError, fsync_directory
 from agent.journal import Journal
 
@@ -22,6 +24,10 @@ MAX_DIFF_CHANGED_LINES = 4000
 MAX_SCAN_ENTRIES = 100000
 IGNORED_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".ssh", ".aws", ".azure", ".kube", ".codepier-agent", ".remote-dev-agent", ".remote-dev", ".codepier", ".remote-dev", ".cache"}
 CHECKPOINT_ARTIFACTS = {".next", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".turbo", "coverage", "playwright-report", "test-results"}
+STORAGE_UNAVAILABLE = frozenset(getattr(errno, name) for name in (
+    "EIO", "ESTALE", "ENOTCONN", "ETIMEDOUT", "ENODEV", "ENXIO",
+    "ENETDOWN", "ENETUNREACH", "EHOSTUNREACH", "ECONNRESET", "ECONNABORTED",
+) if hasattr(errno, name))
 
 
 def protected(relative: str) -> bool:
@@ -77,9 +83,15 @@ class FileEngine:
             raise DevError("INVALID_ROOT", "项目根目录必须是本机绝对路径")
         try:
             actual = raw.resolve(strict=True)
+            root_stat = actual.stat()
         except FileNotFoundError as exc:
-            raise DevError("ROOT_MISSING", "执行节点上的项目目录不存在", 404) from exc
-        if not actual.is_dir():
+            raise DevError("ROOT_MISSING", "执行节点上的项目目录不存在，或共享磁盘尚未挂载；请检查路径与挂载状态", 404) from exc
+        except OSError as exc:
+            if exc.errno in STORAGE_UNAVAILABLE:
+                raise DevError("FILESYSTEM_UNAVAILABLE", "项目存储暂时不可访问；请检查磁盘或网络共享连接，增加路径授权不能修复连接故障", 503,
+                               filesystem_errno=exc.errno, mutation_started=False) from exc
+            raise
+        if not stat.S_ISDIR(root_stat.st_mode):
             raise DevError("INVALID_ROOT", "项目根路径不是目录")
         if protected(actual.as_posix()):
             raise DevError("PROTECTED_ROOT", "不能把凭据、依赖或内部目录直接映射成项目", 403)
@@ -126,7 +138,47 @@ class FileEngine:
         try:
             fsync_directory(directory)
         except OSError as exc:
-            raise DevError("DURABILITY_UNCONFIRMED", "文件系统已改变，但目录落盘失败；请先核查当前文件和备份，勿盲目重试", 500) from exc
+            unsupported = exc.errno in {errno.EINVAL, errno.ENOTSUP, getattr(errno, "EOPNOTSUPP", errno.ENOTSUP)}
+            message = ("文件系统已改变，但此存储不支持目录落盘确认；请核查当前文件和备份，勿盲目重试" if unsupported else
+                       "文件系统已改变，但目录落盘失败；请先核查当前文件和备份，勿盲目重试")
+            raise DevError("DURABILITY_UNCONFIRMED", message, 500,
+                           filesystem_errno=exc.errno, durability="unconfirmed", retryable=False) from exc
+
+    @staticmethod
+    def publish_new_file(source, destination, **kwargs):
+        """Share safe publication across text writes, moves and native imports."""
+        try:
+            return publish_new_file(source, destination, **kwargs)
+        except AtomicCreateUnsupported as exc:
+            raise DevError("ATOMIC_CREATE_UNSUPPORTED",
+                           "当前文件系统不支持硬链接或排他重命名，无法安全新建文件；未覆盖同名目标。请使用支持安全发布的存储或在共享服务端运行 Agent", 409,
+                           retryable=False, destination_overwritten=False) from exc
+        except OSError as exc:
+            if exc.errno in STORAGE_UNAVAILABLE or exc.errno == errno.EINTR:
+                raise DevError("WRITE_OUTCOME_UNCONFIRMED",
+                               "发布文件时存储连接或 I/O 中断，最终状态尚未确认；请检查目标文件和原操作回执后再决定，勿直接重复写入", 500,
+                               filesystem_errno=exc.errno, retryable=False,
+                               publication="unconfirmed") from exc
+            raise
+
+    @staticmethod
+    def cleanup_staging(path):
+        # A rename fallback has already consumed this name.  Missing is normal;
+        # a disconnected share is not proof that cleanup succeeded.
+        original = sys.exception()
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            if original is not None:
+                original.add_note("Staging cleanup also failed; inspect the operation before replaying it")
+                if isinstance(original, DevError):
+                    original.details["staging_cleanup"] = "unconfirmed"
+            else:
+                raise DevError("STAGING_CLEANUP_UNCONFIRMED",
+                               "临时文件清理未确认；目标可能已发布，请核查原操作和文件状态后再继续", 500,
+                               filesystem_errno=exc.errno, retryable=False) from exc
 
     def read_bytes(self, path: Path, missing: bool = False, *, max_bytes: int = MAX_FILE) -> bytes | None:
         try:
@@ -139,6 +191,9 @@ class FileEngine:
         except OSError as exc:
             if exc.errno == errno.ELOOP:
                 raise DevError("SYMLINK_BLOCKED", "文件工具不跟随符号链接", 403) from exc
+            if exc.errno in STORAGE_UNAVAILABLE:
+                raise DevError("FILESYSTEM_UNAVAILABLE", "文件存储暂时不可访问；请检查磁盘或网络共享连接", 503,
+                               filesystem_errno=exc.errno) from exc
             raise
         try:
             s = os.fstat(fd)
@@ -162,6 +217,11 @@ class FileEngine:
             if (s.st_size, s.st_mtime_ns, s.st_ctime_ns) != (latest.st_size, latest.st_mtime_ns, latest.st_ctime_ns):
                 raise DevError("FILE_CHANGED", "文件在读取期间改变，请重新读取", 409)
             return data
+        except OSError as exc:
+            if exc.errno in STORAGE_UNAVAILABLE:
+                raise DevError("FILESYSTEM_UNAVAILABLE", "读取期间存储连接或 I/O 中断；未返回不完整内容", 503,
+                               filesystem_errno=exc.errno) from exc
+            raise
         finally:
             os.close(fd)
 
@@ -436,6 +496,7 @@ class FileEngine:
         if (digest(again) if again is not None else "new") != expected:
             raise DevError("SHA_CONFLICT", "文件在保存期间变化，未覆盖", 409)
         if after is None:
+            publication_method = "delete"
             if before is not None:
                 p.unlink()
         else:
@@ -456,16 +517,29 @@ class FileEngine:
                 if before is None:
                     try:
                         # Atomic, no-clobber publication of a new file (same filesystem).
-                        os.link(tmp, p)
+                        publication_method = self.publish_new_file(tmp, p).method
                     except FileExistsError as exc:
                         raise DevError("SHA_CONFLICT", "本机刚创建了同名文件，未覆盖", 409) from exc
+                    except DevError as exc:
+                        if exc.code == "WRITE_OUTCOME_UNCONFIRMED":
+                            exc.details.update(path=path, backup_id=backup_id, expected_sha256=after_sha)
+                        raise
                 else:
-                    os.replace(tmp, p)
+                    publication_method = "replace"
+                    try:
+                        os.replace(tmp, p)
+                    except OSError as exc:
+                        if exc.errno in STORAGE_UNAVAILABLE or exc.errno == errno.EINTR:
+                            raise DevError("WRITE_OUTCOME_UNCONFIRMED",
+                                           "替换文件时存储连接或 I/O 中断，最终状态尚未确认；请核查当前文件和备份，勿直接重复写入", 500,
+                                           filesystem_errno=exc.errno, retryable=False,
+                                           path=path, backup_id=backup_id, expected_sha256=after_sha) from exc
+                        raise
             finally:
-                if os.path.exists(tmp):
-                    os.unlink(tmp)
+                self.cleanup_staging(tmp)
         self.sync_directory(p.parent)
-        return {"path": p.relative_to(root).as_posix(), "sha256": after_sha, "backup_id": backup_id, **self.diff(path, before, after)}
+        return {"path": p.relative_to(root).as_posix(), "sha256": after_sha, "backup_id": backup_id,
+                "publication_method": publication_method, **self.diff(path, before, after)}
 
     def edit(self, project, args):
         root, _ = self.root(project, True)
@@ -516,29 +590,49 @@ class FileEngine:
                 f.flush()
                 os.fsync(f.fileno())
             os.chmod(tmp, mode)
+            staged_stat = os.stat(tmp, follow_symlinks=False)
             self.path(root, args["path"], False)
             self.path(root, args["destination"], False)
             if digest(self.read_bytes(src)) != args["expected_sha256"]:
                 raise DevError("SHA_CONFLICT", "移动期间源文件改变，未删除源文件", 409)
             try:
-                os.link(tmp, dest)
+                publication = self.publish_new_file(tmp, dest)
             except FileExistsError as exc:
                 raise DevError("DESTINATION_EXISTS", "本机刚创建了目标文件，未覆盖", 409) from exc
+            except DevError as exc:
+                if exc.code == "WRITE_OUTCOME_UNCONFIRMED":
+                    exc.details.update(path=args["path"], destination=args["destination"], backup_id=backup_id)
+                raise
             # Persist the destination name before removing the source, including
             # when a move crosses two directories on the same volume.
             self.sync_directory(dest.parent)
             def destination_unchanged():
-                staged_stat = os.stat(tmp)
                 try:
                     destination_stat = dest.lstat()
-                    if ((staged_stat.st_dev, staged_stat.st_ino) !=
+                    if (not stat.S_ISREG(destination_stat.st_mode) or
+                            (staged_stat.st_dev, staged_stat.st_ino) !=
                             (destination_stat.st_dev, destination_stat.st_ino)):
                         return False
-                    # tmp and dest intentionally share this staging inode.
-                    with open(tmp, "rb") as staged:
-                        return staged.read(MAX_FILE + 1) == before
+                    # Exclusive rename consumes tmp. Read the published inode,
+                    # with no-follow and an fd identity check, on either path.
+                    fd = os.open(dest, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+                    with os.fdopen(fd, "rb") as published:
+                        opened = os.fstat(published.fileno())
+                        if (opened.st_dev, opened.st_ino) != (staged_stat.st_dev, staged_stat.st_ino):
+                            return False
+                        content = published.read(MAX_FILE + 1)
+                        latest = os.fstat(published.fileno())
+                        current = dest.lstat()
+                        return (content == before and
+                                (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns) ==
+                                (latest.st_size, latest.st_mtime_ns, latest.st_ctime_ns) and
+                                (current.st_dev, current.st_ino) == (staged_stat.st_dev, staged_stat.st_ino))
                 except FileNotFoundError:
                     return False
+                except OSError as exc:
+                    if exc.errno == errno.ELOOP:
+                        return False
+                    raise
             # A local editor can save either file while the copy is being staged.
             # Never remove a destination another process has replaced or edited.
             self.path(root, args["path"], False)
@@ -551,19 +645,25 @@ class FileEngine:
                 raise DevError("DESTINATION_CHANGED", "移动期间目标文件改变，已保留源文件", 409)
             try:
                 src.unlink()
-            except OSError:
-                # Failed source deletion is a failed move. Roll back only our
-                # unchanged published copy, so retry remains possible.
-                if destination_unchanged():
-                    dest.unlink()
-                    self.sync_directory(dest.parent)
-                raise
+            except OSError as exc:
+                # A network error can be reported after unlink took effect.
+                # Keep the published destination unless failure is definitive;
+                # otherwise rollback could erase the last copy of the file.
+                if isinstance(exc, PermissionError) or exc.errno in {errno.EACCES, errno.EPERM, errno.EROFS}:
+                    if destination_unchanged():
+                        dest.unlink()
+                        self.sync_directory(dest.parent)
+                    raise
+                raise DevError("WRITE_OUTCOME_UNCONFIRMED",
+                               "移动目标已发布，但源文件删除结果尚未确认；已保留目标和备份，请核查后再继续", 500,
+                               filesystem_errno=exc.errno, retryable=False,
+                               path=args["path"], destination=args["destination"], backup_id=backup_id) from exc
             self.sync_directory(src.parent)
         finally:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
+            self.cleanup_staging(tmp)
         self.sync_directory(dest.parent)
         return {"path": args["path"], "destination": args["destination"], "sha256": digest(before), "backup_id": backup_id,
+                "publication_method": publication.method,
                 "note": "Restoring the source backup does not remove the moved destination."}
 
     def checkpoint(self, project, args):

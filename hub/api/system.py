@@ -14,7 +14,7 @@ from shared.token_cost import DEFAULT_CACHE_READ_PERCENT
 from hub.api.models import ComputerDecision, ToolCall
 from hub.api.devices import device_rows
 from hub.api.activity import operation_rows, audit_rows
-from hub.token_dashboard import Period, token_dashboard
+from hub.token_dashboard import Period, token_dashboard_async, overview_token_snapshot, validate_dashboard_snapshot
 
 
 
@@ -37,10 +37,10 @@ def make_system_router(context: HubContext):
                 "diagnostics": {"write_errors": runtime.diagnostics.errors,
                                 "activity_write_errors": runtime.integrations.write_errors}}
 
-    @router.get("/api/overview")
-    @database_endpoint(store)
-    def overview(request: Request):
+    def overview_data(request, token_usage, token_snapshot):
         principal = auth.panel(request)
+        if token_snapshot is not None:
+            validate_dashboard_snapshot(runtime, principal, token_snapshot)
         tz = config.timezone
         today = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
         devices = device_rows(store, runtime, principal)
@@ -54,20 +54,35 @@ def make_system_router(context: HubContext):
             "today_operations": sum(counts.values()), "today_succeeded": counts.get("succeeded", 0), "today_failed": counts.get("failed", 0),
             "active_operations": store.one("SELECT count(*) AS n FROM operations WHERE "+clause+" AND state IN ('running','queued','reconnecting','cancelling')",args)["n"],
             "recent_operations": operation_rows(store, principal, limit=8), "recent_audit": audit_rows(store, principal, limit=6),
-            "token_usage": token_dashboard(runtime, principal, tz),
+            "token_usage": token_usage,
             "mcp_url": public_url() + "/mcp", "role_mcp_url": public_url() + "/mcp?authorization=role", "version": VERSION, "tool_count": len(tool_definitions()), "native_core_tool_count": len(CORE_TOOLS), "timezone": str(tz)}
 
+    def overview_snapshot(request, token_usage, token_snapshot):
+        with store.transaction(immediate=False), iam.read_scope(store):
+            return overview_data(request, token_usage, token_snapshot)
+
+    @router.get("/api/overview")
+    async def overview(request: Request, include_token_usage: bool = True):
+        # The panel may fetch live status independently. The default retains the
+        # established combined response without holding the DB worker while
+        # parsing metrics or replaying retained context scenarios.
+        token_usage, token_snapshot = None, None
+        if include_token_usage:
+            principal = await store.run(auth.panel, request)
+            token_usage, token_snapshot = await overview_token_snapshot(runtime, principal, config.timezone)
+        return await store.run(overview_snapshot, request, token_usage, token_snapshot)
+
     @router.get("/api/token-usage")
-    @database_endpoint(store)
-    def token_usage(request: Request, period: Period = "today",
+    async def token_usage(request: Request, period: Period = "today",
                     project: str = Query(default="", max_length=128),
                     connection: str = Query(default="", max_length=128),
                     session: str = Query(default="", max_length=128),
                     cache_read_percent: int = Query(default=DEFAULT_CACHE_READ_PERCENT, ge=0, le=100),
                     reference_model: str = Query(default="gpt-6-astra", max_length=64)):
-        return token_dashboard(runtime, auth.panel(request), config.timezone,
-                               period=period, project=project, connection=connection, session=session,
-                               cache_read_percent=cache_read_percent, reference_model=reference_model)
+        principal = await store.run(auth.panel, request)
+        return await token_dashboard_async(runtime, principal, config.timezone,
+                                          period=period, project=project, connection=connection, session=session,
+                                          cache_read_percent=cache_read_percent, reference_model=reference_model)
 
     @router.post("/api/tools/call")
     async def call_tool(request: Request, body: ToolCall):

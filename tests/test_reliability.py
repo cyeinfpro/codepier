@@ -347,19 +347,31 @@ async def test_duplicate_agent_requests_execute_one_write(local_agent):
 
 @pytest.mark.asyncio
 async def test_project_queue_does_not_starve_other_projects(local_agent):
+    from agent.resource_queue import Claim, canonical_path
     a,root=local_agent; other=root/'Other';other.mkdir();(other/'README.md').write_text('other project')
-    first_lock=asyncio.Lock();await first_lock.acquire();a.project_locks[str(root)]=first_lock
+    (root/'README.md').write_text('queued project')
+    # Hold the actual declared file, so a nested mapping's independent path can
+    # proceed. A whole-root claim would correctly exclude both project paths.
+    first_lock=a.resources.slot('busy-file', [Claim('agent','path',canonical_path(root/'README.md'),True)], lambda _:None)
+    await first_lock.__aenter__()
     tasks=[]
     try:
         for i in range(6):
             tasks.append(asyncio.create_task(a.handle({'id':f'blocked-{i}','tool':'fs_read','project':{'root':str(root),'alias':'ProjectAlpha'},'args':{'project':'ProjectAlpha','path':'README.md'}})))
-        await asyncio.sleep(.02)
+        async with asyncio.timeout(5):
+            while len(a.resources.waiting) < 6:
+                assert not any(task.done() for task in tasks)
+                await asyncio.sleep(.01)
+        assert not a.scheduler.active
         await asyncio.wait_for(a.handle({'id':'free','tool':'fs_read','project':{'root':str(other),'alias':'ProjectGamma'},'args':{'project':'ProjectGamma','path':'README.md'}}),1)
         result = a.journal.status('free')['result']
         assert result['ok'], result
         assert result['data']['content']=='other project'
     finally:
-        first_lock.release();await asyncio.gather(*tasks)
+        await first_lock.__aexit__(None,None,None)
+        await asyncio.gather(*tasks)
+    assert all(a.journal.status(f'blocked-{i}')['result']['ok'] for i in range(6))
+    assert not a.resources.active and not a.resources.waiting
 
 
 def test_read_many_response_budget_reports_remaining_paths(engine):

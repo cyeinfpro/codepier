@@ -293,5 +293,7 @@ def test_panel_indexes_follow_legacy_iam_migration(tmp_path):
     try:
         assert upgraded.one("SELECT value FROM meta WHERE key='panel-legacy-preserve'")['value'] == 'yes'
         assert len(upgraded.all("SELECT name FROM sqlite_master WHERE name LIKE 'operations_panel_%'")) == 2
+        assert len(upgraded.all("SELECT name FROM sqlite_master WHERE name LIKE 'operations_project_%'")) == 2
+        assert upgraded.one("SELECT name FROM sqlite_master WHERE name='operation_output_tails'")
     finally:
         upgraded.close()

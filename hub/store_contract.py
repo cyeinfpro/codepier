@@ -14,9 +14,10 @@ import time
 
 
 class OwnedRLock:
-    def __init__(self):
+    def __init__(self, *, on_release=None):
         self._lock = threading.RLock()
         self._local = threading.local()
+        self._on_release = on_release
 
     @property
     def owned(self) -> bool:
@@ -27,15 +28,29 @@ class OwnedRLock:
             raise RuntimeError("Raw Hub SQLite access requires Store.lock in the current thread")
 
     def acquire(self, blocking=True, timeout=-1):
+        observe = self._on_release is not None and not self.owned
+        started = time.monotonic() if observe else None
         acquired = self._lock.acquire(blocking, timeout)
         if acquired:
+            if observe:
+                now = time.monotonic()
+                self._local.wait_ms = max(0, (now - started) * 1000)
+                self._local.acquired_at = now
             self._local.depth = getattr(self._local, "depth", 0) + 1
         return acquired
 
     def release(self):
         self.require()
+        observation = None
+        if self._on_release is not None and self._local.depth == 1:
+            observation = (self._local.wait_ms, max(0, (time.monotonic() - self._local.acquired_at) * 1000))
         self._lock.release()
         self._local.depth -= 1
+        if observation is not None:
+            try:
+                self._on_release(*observation)
+            except Exception:
+                pass  # Observation must not retain a lock or change persistence.
 
     def __enter__(self):
         self.acquire()

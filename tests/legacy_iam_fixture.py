@@ -11,7 +11,10 @@ from hub.store import Store
 def legacy_store(directory):
     def mark_v7(db):
         db.execute("UPDATE meta SET value='7' WHERE key='schema'")
-    with patch('hub.iam_schema.migrate', mark_v7):
+    # These output/index structures postdate IAM and require its authorization
+    # columns. A historical fixture must omit them too; reopening runs BOTH real
+    # migrations. Production must still fail if a required IAM column is missing.
+    with patch('hub.iam_schema.migrate', mark_v7), patch('hub.operation_output.migrate'):
         return Store(directory)
 
 

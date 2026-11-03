@@ -36,6 +36,10 @@ class MCPUsage:
             activity_id INTEGER PRIMARY KEY REFERENCES mcp_activity(id) ON DELETE CASCADE,
             created REAL NOT NULL, metrics TEXT NOT NULL CHECK(length(metrics)<=4096))""")
         store.execute("CREATE INDEX IF NOT EXISTS mcp_usage_created ON mcp_usage(created)")
+        # A collector can be recreated after an unavailable initialization.
+        # Install revisions on the newly created table as well as at Hub start.
+        from hub.token_cache_schema import install
+        install(store)
         self.prune()
 
     def prune(self):

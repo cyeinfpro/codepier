@@ -233,8 +233,8 @@ jobs:
         timeout-minutes: 2
         shell: bash
         run: |
-          # Preserve APT signatures, suites, components and security/third-party sources.
-          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_OS="$RUNNER_OS" python3 .github/scripts/ci_ubuntu_archive.py
+          # Pin verified Ubuntu sources to official HTTPS; never parse cloud mirror lists.
+          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_OS="$RUNNER_OS" python3 .github/scripts/ci_ubuntu_archive.py --mode direct-source
       - name: Bound Linux APT download waits
         if: runner.os == 'Linux' && matrix.shard < 4
         timeout-minutes: 2
@@ -457,8 +457,8 @@ jobs:
         timeout-minutes: 2
         shell: bash
         run: |
-          # Preserve APT signatures, suites, components and security/third-party sources.
-          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_OS="$RUNNER_OS" python3 .github/scripts/ci_ubuntu_archive.py
+          # Pin verified Ubuntu sources to official HTTPS; never parse cloud mirror lists.
+          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_OS="$RUNNER_OS" python3 .github/scripts/ci_ubuntu_archive.py --mode direct-source
       - name: Bound Linux APT download waits
         if: runner.os == 'Linux'
         timeout-minutes: 2

@@ -1,5 +1,5 @@
 {
-  "version": "1.30.8",
+  "version": "1.31.0",
   "algorithm": "sha256",
   "assets": {
     "access-profiles.css": {
@@ -18,9 +18,17 @@
       "sha256": "db8bb9e9ba3b5651ce6ea1bf6a58514368ba69a2175f0415c088962145987482",
       "bytes": 33097
     },
+    "agent-roots.css": {
+      "sha256": "c2bd26edc5cc69fd07625c816274c79367cb5309c83970ab0de255fb50d88b4b",
+      "bytes": 2823
+    },
+    "agent-roots.js": {
+      "sha256": "01b061f089ef2e7e6bdfbdab7f6c5a07d6f8f0f944085903928199142b8d0627",
+      "bytes": 21356
+    },
     "app.js": {
-      "sha256": "45429c2f80384e5c9d8cc416a4b75b957dfc7308e5057c3a64a515106147b385",
-      "bytes": 122832
+      "sha256": "30d02735cb76bbf086cbfd99e1f8c0e68fad932cba241c813787e8b3d2d7c95e",
+      "bytes": 125914
     },
     "appearance.js": {
       "sha256": "7fc8e8ffa85a4bb5836b8919cdf6ff12813cfb4a9e4736709f5858e5d8782bb1",
@@ -91,8 +99,8 @@
       "bytes": 13307
     },
     "collaboration-relay.js": {
-      "sha256": "972561b1f4dd0a58133a7e694c17d7cf6ce3a2f7521f0575e17183aaa897262f",
-      "bytes": 69605
+      "sha256": "44f1ab5960bc74a9f908d55f0bc7c516cea754eaee97911235d5714cd711387d",
+      "bytes": 69695
     },
     "collaboration-runtime.js": {
       "sha256": "ac478b2c93d54e1a84e743537ecaf0c57793433884ae0328e26b93c00e491baa",
@@ -111,8 +119,8 @@
       "bytes": 39570
     },
     "collaboration.js": {
-      "sha256": "4522e70b632ffb921fe5df8e551daaad29d9d3005fb86e1e62d8cecfd8f00f9f",
-      "bytes": 194858
+      "sha256": "bfb752c0b80e0c4b706a42c7b8f631e531077651279ce1f8e30108cf67944a31",
+      "bytes": 195327
     },
     "computer.css": {
       "sha256": "3bfd6993ecee11cf6c23d78cc7b4f9acd6759ffaccc5e241ff06e156da7dfcac",
@@ -223,12 +231,12 @@
       "bytes": 80883
     },
     "token-usage.css": {
-      "sha256": "ddddbfced779605f014fe3ef7b27162aa450a91c3819541031a6250383f54243",
-      "bytes": 6102
+      "sha256": "142b0e5a1878c4c6a25af02c121c788fc3c2b5dd0a66eca66ae2ffcdcf67d6bd",
+      "bytes": 6231
     },
     "token-usage.js": {
-      "sha256": "5dc508421e322eecb9b4c1ffece297dedc90fa15b09b95466eeabb0c3cff5a4d",
-      "bytes": 35515
+      "sha256": "90056c2e68e67485691089c7a53042fbdcf09431071fe6320e9ac1e1e1d6bcbf",
+      "bytes": 36939
     },
     "tokens.css": {
       "sha256": "e553a6798a846da2e12119604d6aa39a5b6e13416d0863777fc27c6266cd3153",
@@ -259,5 +267,5 @@
       "bytes": 26032
     }
   },
-  "template_sha256": "c75ec1164bb1cd5b50ffb329a8d6ce18e0926f10d8bc13d3750121767bf0f267"
+  "template_sha256": "d71440cfd71390e77614ecd06fc9ab305746006338ed7bb607ba3edb4d84d0a0"
 }

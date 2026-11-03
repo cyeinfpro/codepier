@@ -216,9 +216,17 @@ def test_loaded_details_explicitly_display_range_and_actual_unavailable():
 def test_dashboard_mounts_inside_existing_workspace_overview():
     source = (ROOT / 'web/app.js').read_text()
     assert 'CodePierTokenUsage?.dashboard(o.token_usage)' in source
-    assert 'CodePierTokenUsage?.bindDashboard' in source
+    assert 'CodePierTokenUsage?.loadDashboard' in source
+    assert "/api/overview?include_token_usage=false" in source
     css = (ROOT / 'web/token-usage.css').read_text()
     assert '@media (max-width: 600px)' in css
+
+
+def test_pending_dashboard_never_looks_like_zero_usage():
+    html = run_js('dashboard', {'loading': True})
+    assert '正在读取统计' in html
+    assert '约 0' not in html
+    assert '实际模型用量未提供' in html
 
 
 def test_dashboard_refresh_state_is_scoped_and_late_results_are_discarded():

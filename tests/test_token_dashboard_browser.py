@@ -69,6 +69,7 @@ def priced_dashboard(percent=95, authority='test-authority', model='gpt-6-astra'
                 period=dict(key='today', start=0, end=3600, timezone='UTC', bucket='hour'),
                 filters=dict(project='', connection='', session=''),
                 options=dict(projects=[], connections=[], sessions=[]),
+                freshness=dict(as_of=3600, max_cache_age_seconds=30),
                 coverage=dict(activity_row_limit=10000, estimate_retention_days=30), trend=[])
 
 
@@ -97,6 +98,8 @@ def test_compact_cost_cache_late_response_failure_and_mobile(chat_browser_pool, 
         expect(card.locator('.is-cost')).to_contain_text('$0.6089')
         expect(card.locator('.token-pricing-details')).to_be_hidden()
         expect(card).to_contain_text('GPT-6 Astra · 输入缓存 95% 假设')
+        expect(card.locator('.token-dashboard-freshness')).to_be_visible()
+        expect(card.locator('.token-dashboard-freshness')).to_contain_text('最多每 30 秒更新。')
         assert card.locator('.is-total strong').evaluate('(el) => el.getBoundingClientRect().height < parseFloat(getComputedStyle(el).fontSize) * 1.6')
         assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
         evidence = root / '.work/token-cost-preview'

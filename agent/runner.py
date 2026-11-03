@@ -24,7 +24,7 @@ from agent import workspace_probe
 from agent.resource_queue import Claim, ResourceQueue, claims_for, canonical_path, PATH_READ_TOOLS
 from agent.scheduler import ProjectScheduler
 from agent.resource_pressure import ResourceSampler
-from shared.scheduler_config import effective_scheduler, validate_scheduler_overrides
+from shared.scheduler_config import effective_scheduler, validate_scheduler_overrides, is_metadata_observation
 from shared.core_contracts import CORE_REMOTE
 from agent.journal import Journal
 from agent.telemetry import AgentTelemetry
@@ -42,9 +42,11 @@ from agent.config import validate_config
 from agent.shell import execution_info, prepare_shell
 from shared.contracts import TOOLS, MUTATING, required_scope
 from shared.runtime_panel_contracts import PANEL_RUNTIME_TOOLS
+from shared.agent_roots_contracts import PANEL_ROOTS_TOOLS
 from shared.crypto import SecureChannel
 from shared.util import DevError, VERSION
 from shared.file_sources import safe_import_error_detail
+from shared.filesystem_errors import safe_filesystem_error_detail
 from shared.tool_protocol import advertisement, negotiate, validate_call_epoch
 from shared.execution_policy import (enforce_argv, agent_blocks_codex, agent_blocks_computer,
     computer_denial, codex_computer_target, DENIAL_MESSAGE, COMPUTER_DENIAL_MESSAGE, COMPUTER_DENIAL_CODE)
@@ -86,18 +88,16 @@ class Agent:
         self.jobs: dict[str, asyncio.Task] = {}
         self.processes: dict[str, asyncio.subprocess.Process] = {}
         self.cancelled: set[str] = set()
-        self.project_locks: dict[str, asyncio.Lock] = {}
         self.slot_owners = {}
-        self.project_condition = asyncio.Condition()
         self.active_roots: set[Path] = set()
         self._active_slots: dict[object, tuple[Path, bool]] = {}
         self._waiting_writes: list[tuple[object, Path]] = []
-        self.scheduler = ProjectScheduler(self.config.get("scheduler"))
+        self.resources = ResourceQueue()
+        self.scheduler = ProjectScheduler(self.config.get("scheduler"), resources=self.resources)
         self.resource_sampler = ResourceSampler()
         self.scheduler_requested = {}
         self.scheduler_revision = ""
         self.scheduler_error = ""
-        self.resources = ResourceQueue()
         self.stop_event = asyncio.Event()
         self.connection_number = 0
         self.pending_output: dict[str, dict] = {}
@@ -162,7 +162,8 @@ class Agent:
             await asyncio.sleep(.2)
 
     def phase(self, id, stage, **detail):
-        self.telemetry.record(id, stage, **detail)
+        if not self.telemetry.record(id, stage, **detail):
+            return
         self.pending_output['trace:'+id] = {"type": "trace", "id": id, "trace": self.telemetry.snapshot(id)}
         self.output_wake.set()
 
@@ -443,39 +444,36 @@ class Agent:
     def _projects_overlap(left: Path, right: Path) -> bool:
         return left == right or left in right.parents or right in left.parents
 
-    def _slot_conflicts(self, root: Path, write: bool, token: object) -> bool:
-        for active_root, active_write in self._active_slots.values():
-            if self._projects_overlap(root, active_root) and (write or active_write):
-                return True
-        # Readers yield to every queued overlapping writer. Writers only yield
-        # to EARLIER overlapping writers: yielding to later ones creates a cycle
-        # when multiple writes accumulate behind an active shared reader.
-        for waiting_token, waiting_root in self._waiting_writes:
-            if waiting_token is token:
-                break
-            if self._projects_overlap(root, waiting_root):
-                return True
-        return False
+    @contextlib.contextmanager
+    def _project_tracking(self, root, write, operation_id):
+        """Legacy ownership diagnostics; the resource queue owns exclusion."""
+        token = object()
+        if operation_id:
+            self.slot_owners[token] = operation_id
+        if write:
+            self._waiting_writes.append((token, root))
 
-    async def _acquire_project_slot(self, root: Path, write: bool, token: object):
-        async with self.project_condition:
-            await self.project_condition.wait_for(lambda: not self._slot_conflicts(root, write, token))
+        def admitted():
+            self._waiting_writes[:] = [item for item in self._waiting_writes if item[0] is not token]
             self._active_slots[token] = (root, write)
             self.active_roots.add(root)
 
-    async def _release_project_slot(self, root: Path, token: object):
-        async with self.project_condition:
+        try:
+            yield admitted
+        finally:
+            self._waiting_writes[:] = [item for item in self._waiting_writes if item[0] is not token]
             self._active_slots.pop(token, None)
+            self.slot_owners.pop(token, None)
             if not any(active_root == root for active_root, _ in self._active_slots.values()):
                 self.active_roots.discard(root)
-            self.project_condition.notify_all()
 
     @contextlib.asynccontextmanager
     async def project_slot(self, root, write=True, operation_id=None):
-        path = canonical_path(root)
-        async with self._legacy_project_slot(root, write=write, operation_id=operation_id):
-            async with self.resources.slot(operation_id or 'local', [Claim('agent', 'path', path, write)],
+        root = Path(root).expanduser().resolve()
+        with self._project_tracking(root, write, operation_id) as admitted:
+            async with self.resources.slot(operation_id or 'local', [Claim('agent', 'path', canonical_path(root), write)],
                     lambda blockers: self.phase(operation_id, 'waiting_resource', blocked_by=blockers) if operation_id else None):
+                admitted()
                 yield
 
     @contextlib.asynccontextmanager
@@ -498,23 +496,22 @@ class Agent:
                                 read_admission = await workspace_probe.probe(
                                     self.engine, tool, project, args, phase='claims', expected_root=root)
                         claims = [Claim(**item) for item in read_admission['claims']]
-                        if tool not in CORE_REMOTE and tool not in PATH_READ_TOOLS:
-                            await stack.enter_async_context(self._legacy_project_slot(
-                                root, write=write, operation_id=identifier, resolved_root=True))
-                        await stack.enter_async_context(self.resources.slot(identifier, claims,
-                            lambda blockers: self.phase(identifier, 'waiting_resource', blocked_by=blockers)))
                     elif tool in CORE_REMOTE or tool == 'download_artifact' or tool in PATH_READ_TOOLS:
                         claims = claims_for(self.engine, tool, project, args, root)
-                        await stack.enter_async_context(self.resources.slot(identifier, claims,
-                            lambda blockers: self.phase(identifier, 'waiting_resource', blocked_by=blockers)))
                     else:
-                        await stack.enter_async_context(self.project_slot(root, write=write, operation_id=identifier))
-                    self.phase(identifier, 'waiting_worker')
+                        claims = [Claim('agent', 'path', canonical_path(root), write)]
+                    metadata = is_metadata_observation(tool, args)
+                    if metadata:
+                        # The index is a bounded observation with per-file
+                        # authorization/SHA checks, not a repository snapshot.
+                        # Explicit document previews and baseline capture retain
+                        # their root claim and consistent exclusion from writes.
+                        claims = []
                     # The panel still uses legacy bounded file reads. Give them
                     # the existing file-I/O lane, just like core read, so long
                     # commands cannot starve directory navigation. Resource locks
-                    # above still exclude conflicting writes; searches stay heavy.
-                    lane = "read" if tool in {'read', 'write', 'edit', 'fs_tree', 'fs_read', 'fs_read_many'} else "execution"
+                    # still exclude conflicting writes; searches stay heavy.
+                    lane = "read" if metadata or tool in {'read', 'write', 'edit', 'fs_tree', 'fs_read', 'fs_read_many'} else "execution"
                     # Match the typed execution dispatcher, including the panel's
                     # legacy SSH entry. Never infer remote work from shell text.
                     remote = args if tool == "ssh_exec" else None
@@ -533,56 +530,25 @@ class Agent:
                     # ID; a new workspace cannot manufacture a new quota.
                     project_id = (read_admission['project_key'] if read_admission is not None
                                   else project.get("id") or canonical_path(project.get("_original_root", root)))
+                    admitted = None
+                    if not metadata and tool not in CORE_REMOTE and tool not in PATH_READ_TOOLS and tool != 'download_artifact':
+                        admitted = stack.enter_context(self._project_tracking(root, write, identifier))
+                    queued_at = time.monotonic()
                     await stack.enter_async_context(self.scheduler.slot(
                         identifier, project_id, lane, target,
-                        lambda reason: self.phase(identifier, "waiting_worker", queue_reason=reason, lane=lane)))
+                        lambda reason: self.phase(identifier, "waiting_worker", queue_reason=reason, lane=lane,
+                            queue_age_ms=round((time.monotonic()-queued_at)*1000)),
+                        claims=claims,
+                        on_resource_wait=lambda blockers: self.phase(identifier, 'waiting_resource',
+                            blocked_by=blockers, queue_reason='resource_conflict', lane=lane,
+                            blocked_count=len(blockers), resource_kinds=sorted({claim.kind for claim in claims}),
+                            queue_age_ms=round((time.monotonic()-queued_at)*1000))))
+                    if admitted is not None:
+                        admitted()
                     timer.reschedule(None)
             except TimeoutError as exc:
                 raise DevError('QUEUE_EXPIRED', '超过首次执行期限，未开始操作') from exc
             yield
-
-    @contextlib.asynccontextmanager
-    async def _legacy_project_slot(self, root, write=True, operation_id=None, *, resolved_root=False):
-        """Coordinate overlapping project paths with shared reads and exclusive writes.
-
-        Named tasks remain exclusive by default. A task explicitly marked
-        ``allow_read_concurrency`` is admitted as a shared reader: reads may
-        proceed while it runs, but writes still wait for it to finish.
-        """
-        root = Path(root) if resolved_root else Path(root).expanduser().resolve()
-        token = object()
-        if operation_id:
-            self.slot_owners[token] = operation_id
-        lock = self.project_locks.setdefault(str(root), asyncio.Lock()) if write else None
-        if write:
-            self._waiting_writes.append((token, root))
-        acquired = False
-        lock_acquired = False
-        try:
-            if lock is not None:
-                await lock.acquire()
-                lock_acquired = True
-            await self._acquire_project_slot(root, write, token)
-            acquired = True
-            if write:
-                self._waiting_writes = [(waiting_token, waiting_root)
-                                        for waiting_token, waiting_root in self._waiting_writes
-                                        if waiting_token is not token]
-                async with self.project_condition:
-                    self.project_condition.notify_all()
-            yield
-        finally:
-            if acquired:
-                await self._release_project_slot(root, token)
-            elif write:
-                self._waiting_writes = [(waiting_token, waiting_root)
-                                        for waiting_token, waiting_root in self._waiting_writes
-                                        if waiting_token is not token]
-                async with self.project_condition:
-                    self.project_condition.notify_all()
-            self.slot_owners.pop(token, None)
-            if lock_acquired:
-                lock.release()
 
     @contextlib.asynccontextmanager
     async def _read_preflight_slot(self, identifier, project):
@@ -613,35 +579,30 @@ class Agent:
         if not workspace_probe.eligible(tool, args):
             yield None, None, False
             return
-        if tool != 'read' and tool not in PATH_READ_TOOLS:
+        metadata = is_metadata_observation(tool, args)
+        if tool != 'read' and tool not in PATH_READ_TOOLS and not metadata:
             yield await self._read_admission(identifier, tool, project, args, deadline), None, False
             return
         remaining = max(0, deadline - time.time()) if deadline is not None else None
         try:
             async with asyncio.timeout(remaining) as timer:
                 async with self._read_preflight_slot(identifier, project) as ticket:
-                    resource_token = None
-                    try:
-                        async with workspace_probe.ReadWorker(admission=True) as worker:
-                            admission = await workspace_probe.probe(
-                                self.engine, tool, project, args, phase='admission', worker=worker)
-                            claims = [Claim(**item) for item in admission['claims']]
-                            # No await between these two atomic attempts. A failed
-                            # attempt leaves no fairness turn or execution ticket.
-                            resource_token = self.resources.try_reserve(identifier, claims)
-                            lane = 'execution' if tool == 'fs_search' else 'read'
-                            reserved = (resource_token is not None and self.scheduler.try_reserve(
-                                identifier, admission['project_key'], lane, replace=ticket) is not None)
-                            if reserved:
-                                timer.reschedule(None)
-                                yield admission, worker, True
-                                return
-                            await worker.abandon_admission()
-                        # The child is closed/reaped BEFORE any condition wait,
-                        # including releasing a provisional resource reservation.
-                    finally:
-                        if resource_token is not None:
-                            await self.resources.release(resource_token)
+                    async with workspace_probe.ReadWorker(admission=True) as worker:
+                        admission = await workspace_probe.probe(
+                            self.engine, tool, project, args, phase='admission', worker=worker)
+                        claims = [] if metadata else [Claim(**item) for item in admission['claims']]
+                        lane = 'execution' if tool == 'fs_search' else 'read'
+                        # One synchronous decision converts the preflight ticket
+                        # and reserves resources. Failure leaves neither a path
+                        # reservation nor a fairness turn behind while reaping.
+                        reserved = self.scheduler.try_reserve(identifier,
+                            admission['project_key'], lane, replace=ticket, claims=claims) is not None
+                        if reserved:
+                            timer.reschedule(None)
+                            yield admission, worker, True
+                            return
+                        await worker.abandon_admission()
+                    # The child is closed/reaped BEFORE waiting on either queue.
         except TimeoutError as exc:
             if not timer.expired():
                 raise
@@ -740,13 +701,14 @@ class Agent:
             # without metadata still obey the independently configured local floor.
             project = {**project, "_execution_policy": execution_policy, "_core_ssh": core_ssh,
                        '_bounded_execution': bounded_execution, '_runtime_requirement': None,
-                       '_integration_admin': False, '_integration_owner': None, '_computer_scopes': []}
+                       '_integration_admin': False, '_roots_admin': False, '_integration_owner': None, '_computer_scopes': []}
             if isinstance(integration_context, dict):
                 owner = integration_context.get('owner')
                 if not isinstance(owner, str) or not 1 <= len(owner) <= 600 or integration_context.get('device_id') != self.config['device_id']:
                     raise DevError('INTEGRATION_IDENTITY', '经过认证的执行身份无效', 403)
                 admin = integration_context.get('admin') is True and isinstance(execution_policy, dict) and execution_policy.get('origin') == 'panel'
-                project.update(_integration_owner=owner, _integration_admin=admin, _coding_owner=owner,
+                project.update(_integration_owner=owner, _integration_admin=admin,
+                    _roots_admin=bool(admin and tool in PANEL_ROOTS_TOOLS and project.get('id') is None), _coding_owner=owner,
                     _coding_device=integration_context['device_id'], device_id=integration_context['device_id'],
                     _coding_scopes=integration_context.get('scopes', []), _computer_scopes=integration_context.get('scopes', []),
                     _authority_revision=integration_context.get('authority_revision'),
@@ -788,6 +750,19 @@ class Agent:
                 self.phase(id, "lifecycle_prepared", action=tool)
             elif tool not in TOOLS or TOOLS[tool].local:
                 raise DevError("UNKNOWN_TOOL", "该操作不能由 Agent 执行")
+            elif tool in PANEL_ROOTS_TOOLS:
+                from agent.roots_panel import call as roots_settings_call
+                args = TOOLS[tool].model.model_validate(args).model_dump()
+                self.journal.mark_running(id)
+                await self.send({'type': 'started', 'id': id})
+                self.phase(id, 'directory_grants')
+                work = asyncio.create_task(asyncio.to_thread(roots_settings_call, self, tool, project, args))
+                try:
+                    result = await asyncio.shield(work)
+                except asyncio.CancelledError:
+                    # A config commit cannot be cancelled after dispatch. Keep
+                    # the original durable result, including uncertain saves.
+                    result = await work
             elif tool in PANEL_RUNTIME_TOOLS:
                 from agent.runtime_panel import call as runtime_settings_call
                 args = TOOLS[tool].model.model_validate(args).model_dump()
@@ -842,15 +817,12 @@ class Agent:
                         root = Path(admission['root'])
                     else:
                         root, _ = await self._operation_root(tool, project, args)
-                    # Wait for the project BEFORE consuming a global worker slot: a queue
-                    # of ProjectAlpha tests must not starve a read of ProjectGamma or ProjectBeta.
+                    # Resource ownership and execution capacity are one grant;
+                    # waiting work owns neither and independent projects can run.
                     slot_write = tool in MUTATING
                     if tool == "tasks_run":
                         task_config = self.config.get("tasks", {}).get(args["task"], {})
                         slot_write = not task_config.get("allow_read_concurrency", False)
-                    blockers = [self.slot_owners[token] for token, (active_root, active_write) in self._active_slots.items()
-                                if token in self.slot_owners and self._projects_overlap(root, active_root) and (slot_write or active_write)]
-                    self.phase(id, "waiting_project", blocked_by=blockers[:64])
                     async with self.execution_slot(id, tool, project, args, root, slot_write, not_after,
                                                    read_admission=admission, reserved=reserved):
                         if id in self.cancelled or self.journal.is_cancelled(id) or self.stop_event.is_set():
@@ -881,6 +853,7 @@ class Agent:
             result = {"ok": False, "error": {"code": "CANCELLED" if self.journal.is_cancelled(id) else "INTERRUPTED", "message": "操作已取消" if self.journal.is_cancelled(id) else "Agent 进程被停止；检查本机结果后再决定是否重做"}}
         except DevError as exc:
             result = {"ok": False, "error": {"code": exc.code, "message": exc.message}}
+            result['error'].update(safe_filesystem_error_detail(request.get('tool'), exc.code, exc.details))
             if request.get('tool') == 'download_artifact':
                 result['error'].update(safe_import_error_detail(exc.details))
             if isinstance(request.get('tool'), str) and request['tool'] in COMPUTER_TOOLS:
@@ -1226,13 +1199,17 @@ class Agent:
         decoded_output = ""
         seq = 0
         last_snapshot = 0.0
+        last_snapshot_output = None
         def snapshot(force=False):
-            nonlocal seq, last_snapshot
+            nonlocal seq, last_snapshot, last_snapshot_output
             if not stream or not force and time.monotonic() - last_snapshot < .25:
+                return
+            if last_snapshot_output == decoded_output:
                 return
             seq += 1
             last_snapshot = time.monotonic()
             self.journal.update_output(id, decoded_output, seq)
+            last_snapshot_output = decoded_output
             self.pending_output[id] = {"type": "output", "id": id, "snapshot": True,
                                        "seq": seq, "text": decoded_output}
             self.output_wake.set()

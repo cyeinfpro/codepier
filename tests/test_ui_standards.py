@@ -43,7 +43,10 @@ def test_field_semantics_invalid_reset_and_clear_search(stack, engine):
         assert alias.get_attribute("id")
         expect(page.locator(f'label[for="{alias.get_attribute("id")}"] .field-required')).to_have_text("必填")
         hint = root.get_attribute("aria-describedby")
-        assert hint and "allowed_roots" in page.locator("#" + hint).inner_text()
+        assert hint
+        expect(page.locator("#" + hint)).to_have_text(
+            "保存时验证目录与权限。SMB 共享请填写节点上已挂载的路径。"
+        )
         page.evaluate("uiLabelFields(document.querySelector('.modal'))")
         expect(root).to_have_attribute("aria-describedby", hint)
         expect(page.locator(f'label[for="{alias.get_attribute("id")}"] .field-required')).to_have_count(1)

@@ -125,20 +125,21 @@ async def test_cancellation_during_spawn_retains_handle_until_child_reaped(local
 @pytest.mark.asyncio
 async def test_accepted_cancel_does_not_wait_for_project_lock(local_agent):
     agent, root = local_agent
-    lock = asyncio.Lock()
-    await lock.acquire()
-    agent.project_locks[str(root)] = lock
+    lock = agent.project_slot(root, operation_id='blocking-root-writer')
+    await lock.__aenter__()
     job = asyncio.create_task(agent.handle(request(root)))
     agent.jobs["operation"] = job
     try:
         await eventually(lambda: agent.journal.status("operation")["status"] == "accepted")
+        assert not agent.scheduler.active
         agent.cancel_call("operation")
         await asyncio.wait_for(job, .5)
         assert agent.journal.status("operation")["result"]["error"]["code"] == "CANCELLED"
         assert not (root / "created.txt").exists()
     finally:
-        lock.release()
+        await lock.__aexit__(None, None, None)
         await job
+    assert not agent.resources.active and not agent.resources.waiting
 
 
 @pytest.mark.asyncio
@@ -181,7 +182,10 @@ async def test_cancelling_file_thread_preserves_project_lock_and_real_result(loc
         await eventually(entered.is_set)
         job.cancel()
         await asyncio.sleep(.02)
-        assert not job.done() and agent.project_locks[str(root)].locked()
+        assert not job.done() and any(active_root == root and write
+                                     for active_root, write in agent._active_slots.values())
+        assert any(identifier == 'operation' and any(claim.write for claim in claims)
+                   for identifier, claims in agent.resources.active.values())
     finally:
         release.set()
         await job

@@ -1296,7 +1296,12 @@ window.CodePierCollaborationRelay = {
               after: c.after,
               tracked: tracked.map((m) => m.id).join(','),
             }),
-          { signal: state.controller?.signal, retryDelays: [], requestTimeout: 8000 },
+          {
+            signal: state.controller?.signal,
+            keepalive: !!state.controller,
+            retryDelays: [],
+            requestTimeout: 8000,
+          },
         );
         if (!current()) return;
         if (c.visibility && result.visibility_token !== c.visibility) {

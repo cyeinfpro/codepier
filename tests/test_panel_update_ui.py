@@ -189,7 +189,7 @@ def test_global_update_entry_and_failure_banner_removal(update_browser,stack,wid
             value['recent_operations']=[{'id':'synthetic-failure','tool':'fs_write','state':'failed',
                 'created':time.time(),'actor':'panel:admin','alias':'Synthetic project'}]
             route.fulfill(response=response,json=value)
-        page.route('**/api/overview',overview)
+        page.route(lambda url: urlsplit(url).path == '/api/overview', overview)
         page.evaluate("navigate('overview')")
         expect(page.locator('#page h1')).to_have_text('控制总览')
         expect(page.locator('.attention-strip')).to_have_count(0)
