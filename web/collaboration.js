@@ -383,7 +383,13 @@ window.CodePierCollaboration = (() => {
   }
   async function getRecord(kind, id, cursor = '', extra = {}) {
     const query = new URLSearchParams({ ...chatScope(), kind, id, cursor, ...extra });
-    return api('/api/collaboration?' + query, { signal: state.controller?.signal });
+    // WebKit refuses ordinary reads while a replacement document is loading,
+    // before pagehide can cancel them. Keep these GETs eligible in that window;
+    // the view's signal still cancels them on real pagehide or navigation.
+    return api('/api/collaboration?' + query, {
+      signal: state.controller?.signal,
+      keepalive: !!state.controller,
+    });
   }
   async function mutation(operation, args) {
     const payload = {
@@ -1174,6 +1180,7 @@ window.CodePierCollaboration = (() => {
       }
       const directory = await api('/api/collaboration/conversations', {
         signal: state.controller.signal,
+        keepalive: true,
       });
       if (!current()) return;
       if (confirmed && accessAction.kind !== 'projects') {
@@ -1446,7 +1453,10 @@ window.CodePierCollaboration = (() => {
       await refreshChat();
       if (!current()) return;
       const directory = state.snapshot.conversation
-        ? await api('/api/collaboration/conversations', { signal: state.controller.signal })
+        ? await api('/api/collaboration/conversations', {
+            signal: state.controller.signal,
+            keepalive: true,
+          })
         : await getRecord('rooms', '');
       if (!current()) return;
       state.rooms = directory.items || [];
@@ -1896,7 +1906,10 @@ window.CodePierCollaboration = (() => {
     const gen = state.generation,
       session = S.session,
       space = S.space_id;
-    const status = await api('/api/collaboration/status', { signal: state.controller.signal });
+    const status = await api('/api/collaboration/status', {
+      signal: state.controller.signal,
+      keepalive: true,
+    });
     const header =
       '<header class="cc-heading"><div><span class="cc-eyebrow">CodePier / Collaboration</span><h1 tabindex="-1">协作中心</h1><p>让目标、任务和证据在同一处衔接。</p></div></header>';
     if (!status.features.enabled) state.snapshot = null;
@@ -1933,7 +1946,7 @@ window.CodePierCollaboration = (() => {
     // Independent authorized reads share one network stage instead of putting
     // the grants directory in front of the conversation's critical path.
     const grantsRequest = data.can_manage
-      ? api('/api/grants', { signal: state.controller.signal })
+      ? api('/api/grants', { signal: state.controller.signal, keepalive: true })
       : Promise.resolve({ grants: [] });
     state.snapshot = data;
     if (data.conversation?.restored_from_archive && state.view === 'agents')
@@ -1946,7 +1959,10 @@ window.CodePierCollaboration = (() => {
       const [timeline, rooms, members, policies, grants] = await Promise.all([
         getRecord('timeline', '', '', { room_id: data.room.id, limit: '100' }),
         data.conversation
-          ? api('/api/collaboration/conversations', { signal: state.controller.signal })
+          ? api('/api/collaboration/conversations', {
+              signal: state.controller.signal,
+              keepalive: true,
+            })
           : getRecord('rooms', ''),
         getRecord('members', ''),
         data.capabilities?.direct_delegation
