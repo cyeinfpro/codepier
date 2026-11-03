@@ -208,6 +208,8 @@ class RoomGoalScopes:
             raise DevError('ROOM_HISTORY_OWNER_ONLY','归档工作历史只允许本人只读查看',403)
         spec=self.record(reference)
         room=self.c.conversations.object(principal,spec['conversation_id'],include_archived=include_archived)
+        if active:
+            self.c.rooms.require_native(room)
         if principal.grant_id and principal.grant_id not in spec['participant_grant_ids']:
             raise DevError('ROOM_WORK_MEMBER_REQUIRED','当前连接不在原工作成员范围内',403)
         if not active:

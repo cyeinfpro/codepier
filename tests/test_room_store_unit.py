@@ -86,6 +86,76 @@ assert.equal(store.state.pending.size,0);
 """)
 
 
+def test_read_only_room_fences_new_and_unknown_sends_without_discarding_draft():
+    run_js(r"""
+const calls=[];
+const store=create(async(url,options)=>{
+  calls.push({url,options});
+  throw Object.assign(new Error('lost response'),{code:'NETWORK_UNCERTAIN'});
+});
+store.reset('owner');store.state.roomId='original';
+store.applyRoom({id:'original',state:'active',legacy:false,read_only:false,revision:1});
+const original=store.draft();original.text='原房间未确认的草稿';
+original.reading={anchorId:'older-message',atEnd:false,offset:12};
+const file=store.addFiles([{name:'notes.txt',size:4}])[0];
+await assert.rejects(store.upload(file));
+assert.equal(file.state,'unknown');
+store.removeFile(file.id);
+await assert.rejects(store.send());
+const receipt=[...store.state.pending.values()][0];
+original.files.push(file);
+store.applyRoom({id:'original',state:'active',legacy:true,read_only:true,revision:2,
+  migration:{required:true,eligible:true,status:'ready'}});
+assert.equal(store.writable(),false);
+const before=calls.length;
+await assert.rejects(store.send(receipt),error=>error.code==='ROOM_READ_ONLY');
+await assert.rejects(store.upload(file),error=>error.code==='ROOM_READ_ONLY');
+assert.throws(()=>store.addFiles([{name:'new.txt',size:1}]),error=>error.code==='ROOM_READ_ONLY');
+assert.equal(calls.length,before);
+assert.equal(receipt.state,'unknown');assert.equal(file.state,'unknown');
+assert.equal(store.state.pending.get(receipt.id),receipt);
+assert.equal(original.text,'原房间未确认的草稿');
+assert.equal(original.reading.anchorId,'older-message');
+assert.equal(original.files[0],file);
+// Choosing another room cannot turn a retained old receipt into a new send.
+store.state.roomId='other';
+store.applyRoom({id:'other',state:'active',legacy:false,read_only:false,revision:1});
+store.draft().text='另一房间独立草稿';
+await assert.rejects(store.send(receipt),error=>error.code==='ROOM_READ_ONLY');
+assert.equal(calls.length,before);assert.equal(store.draft().text,'另一房间独立草稿');
+// A canonical read can still settle a previously saved original message.
+store.completeReceipt(receipt,{message:{id:'saved-original'}});
+assert.equal(store.state.pending.size,0);
+assert.equal(store.draft().text,'另一房间独立草稿');
+assert.equal(store.state.messages.length,0);
+""")
+
+
+def test_migration_eligibility_does_not_unlock_writes_or_clear_existing_draft():
+    run_js(r"""
+const store=create(async()=>({}));
+store.reset('owner');store.state.roomId='room';store.draft().text='待迁移草稿';
+for(const projection of [
+  {legacy:true,read_only:true,migration:{eligible:false}},
+  {legacy:true,read_only:true,migration:{eligible:true}},
+  {legacy:true,read_only:false,migration:{eligible:true}},
+  {legacy:false,read_only:true,migration:{status:'complete'}},
+]) {
+  store.applyRoom({id:'room',state:'active',revision:1,...projection});
+  assert.equal(store.writable(),false);
+  await assert.rejects(store.send(),error=>error.code==='ROOM_READ_ONLY');
+  assert.equal(store.draft().text,'待迁移草稿');
+  assert.equal(store.state.pending.size,0);
+}
+store.applyRoom({id:'room',state:'active',legacy:false,read_only:false,revision:2,
+  migration:{eligible:false,status:'complete'}});
+assert.equal(store.writable(),true);
+assert.equal(store.draft().text,'待迁移草稿');
+store.applyRoom({id:'room',state:'paused',legacy:false,read_only:true,revision:3});
+assert.equal(store.writable(),false);
+""")
+
+
 def test_permission_revision_discards_cached_hidden_messages_and_work():
     run_js(r"""
 let revision='visible', messages=[{id:'secret',body_text:'project-private',created_at:1}];

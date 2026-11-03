@@ -39,6 +39,7 @@ class RoomAttachments:
                 raise DevError('ROOM_PAUSED', '房间已暂停，不能上传新附件', 409)
             args = {'name': name, 'sha256': checksum, 'size': len(content), 'idempotency_key': request_key}
             def save():
+                self.c.rooms.require_native(room)
                 used = self.c.channels.media.cache_usage()
                 if used + len(content) > MAX_CACHE:
                     raise DevError('ATTACHMENT_CACHE_QUOTA', '附件加密缓存已满，请稍后再试', 429)

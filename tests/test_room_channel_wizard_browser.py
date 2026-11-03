@@ -107,5 +107,26 @@ def test_ready_chat_can_approve_tasks_but_scope_drift_clears_old_checked_consent
         assert flow['account'] == original_account
         assert flow['binding'] == original_binding
         assert flow['stage'] == 'ready' and flow['work_authorized'] is False
+
+        # A writable native room may still contain a historical flow whose
+        # only allowed operation is cancellation. Account presence is not
+        # permission to bind that old flow or replace its credentials.
+        flow.update(stage='choose_account', version=5, primary_action='cancel',
+            accounts=[{'id': 'retained-account', 'label': '原账号'}],
+            actions=[{'action': 'cancel', 'label': '取消原流程'}], allowed_actions=['cancel'],
+            next_request={'body': {'action': 'cancel', 'expected_version': 5}, 'form_fields': []})
+        page.evaluate('document.dispatchEvent(new Event("visibilitychange"))')
+        expect(page.locator('[data-cr-form="weixin"]')).to_have_attribute('data-channel-action', 'cancel')
+        expect(page.locator('[name="existing_account_id"]')).to_have_count(0)
+        expect(page.locator('[data-cr-action="channel-existing"]')).to_have_count(0)
+        assert len(writes) == 2
+
+        flow['version'] = 6
+        flow['actions'].append({'action': 'select_account', 'label': '使用已有微信'})
+        flow['allowed_actions'].append('select_account')
+        page.evaluate('document.dispatchEvent(new Event("visibilitychange"))')
+        expect(page.locator('[name="existing_account_id"]')).to_be_visible()
+        expect(page.locator('[data-cr-action="channel-existing"]')).to_be_visible()
+        assert len(writes) == 2
     finally:
         context.close()

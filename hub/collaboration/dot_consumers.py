@@ -89,6 +89,8 @@ class DotConsumers(FencedConsumerEngine):
 
     def scope(self, raw, principal, model):
         args, principal, room, slot, dot = self.c.dot_chat.scope(raw, principal, model, connector=True)
+        if model is not contracts.ConsumerYield:
+            self.c.rooms.migration.legacy_write(dot['conversation_id'])
         self.c.live_room(room)
         binding, sub = self.binding(room, dot, principal, args.get('binding_generation'))
         return args, principal, room, slot, dot, binding, sub

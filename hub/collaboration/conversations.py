@@ -288,6 +288,7 @@ class ConversationService:
             conversation = self.object(principal, args['conversation_id'])
             project = self.c.runtime.project(args['project'], principal)
             def save():
+                self.c.rooms.migration.legacy_write(conversation['id'])
                 if conversation['version'] != args['expected_version']:
                     raise DevError('STALE_VERSION', '聊天室项目列表已改变，请刷新后重新确认', 409)
                 authorization = self.project_scopes.approve(principal, conversation, project,

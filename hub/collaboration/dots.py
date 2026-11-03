@@ -76,7 +76,7 @@ class DotService:
         return {'project_id': project['id'], 'capabilities': available,
                 'execution_target': 'project_agent', 'changes_authority': False}
 
-    def create(self, raw, principal):
+    def create(self, raw, principal, *, room_member_id=''):
         args = validate(contracts.DotCreate, raw)
         if not args['duplex']:
             args.pop('duplex')  # Preserve old task-only creation fingerprints.
@@ -103,6 +103,9 @@ class DotService:
             setup.update(project_snapshot=self.c.coordination.project_snapshot(project), target_snapshot=target,
                          purpose='处理房主在此房间明确 @ 此 dot 交办的任务，并回复实际进展、结果和未完成项。')
             def save():
+                self.c.rooms.migration.adapter_write(conversation['id'], room_member_id,
+                    room['project_id'], room['environment_id'], args['capabilities'],
+                    args.get('execution_targets') or [args['execution_target']])
                 slot = self.c.joining.create({'project': room['project_id'], 'environment_id': room['environment_id'],
                     'label': args['label'], 'kind': 'dot', 'idempotency_key': 'dot-slot:' + digest(args)}, principal)['slot']
                 self.store.execute('UPDATE collaboration_join_slots SET join_code=? WHERE id=?',
@@ -111,6 +114,8 @@ class DotService:
                     (id,room_id,conversation_id,setup,owner_principal,setup_digest,created) VALUES (?,?,?,?,?,?,?)''',
                     (slot['id'], room['id'], conversation['id'], canonical(setup), canonical(snapshot),
                      digest([setup, snapshot, conversation['id']]), self.c.clock()))
+                if not room_member_id:
+                    self.c.rooms.migration.track_legacy_dot(slot['id'])
                 self.c.audit(room, principal.actor, 'dot.owner_approved', slot['id'],
                              {'conversation_id': conversation['id'], 'capabilities': setup['capabilities'],
                               'execution_target': setup['execution_target'], 'creates_grant': False})
@@ -142,7 +147,7 @@ class DotService:
                 raise DevError('DOT_TARGET_CHANGED','已确认执行目标发生变化，请重新确认',409)
         return owner, setup
 
-    def join(self, raw, principal):
+    def join(self, raw, principal, *, room_member_id=''):
         args = validate(contracts.JoinCode, raw)
         if not args['code'].startswith('CPD-'):
             raise DevError('DOT_CODE_REQUIRED', '任务 dot 必须使用面板生成的 CPD 加入码', 422)
@@ -169,6 +174,9 @@ class DotService:
                     raise DevError('JOIN_CODE_EXPIRED', '加入码已过期；已加入的 dot 使用 dot_connection 恢复，不要重新兑换', 409)
                 if current['state'] == 'registered':
                     return {'id': current['id']}
+                self.c.rooms.migration.adapter_write(dot['conversation_id'], room_member_id,
+                    room['project_id'], room['environment_id'], setup['capabilities'],
+                    setup.get('execution_targets') or [setup['execution_target']], dot_id=dot['id'] if room_member_id else '')
                 self.store.execute('''UPDATE collaboration_join_slots SET state='registered',grant_id=?,principal=?,
                     joined_at=?,updated=?,version=version+1 WHERE id=?''',
                     (principal.grant_id, canonical(self.c.principal_snapshot(principal)), self.c.clock(), self.c.clock(), slot['id']))
@@ -184,11 +192,13 @@ class DotService:
                     'automatic_delegation': len(setup.get('execution_targets',[]))<=1,
                     **({'budget': {'operation_timeout_seconds': setup['operation_timeout_seconds']}}
                        if setup.get('operation_timeout_seconds') else {}),
-                    'idempotency_key': 'dot-policy:' + dot['id']}, owner)['policy']
+                    'idempotency_key': 'dot-policy:' + dot['id']}, owner, room_member_id=room_member_id)['policy']
                 policy_row = self.c.delegation.policy(room, policy['id'])
                 baseline = self.c.delegation.consumer.checkpoint(policy_row, room, 'managed_execution')
                 self.store.execute('UPDATE collaboration_dots SET policy_id=?,policy_version=?,checkpoint=? WHERE id=?',
                                    (policy['id'], policy['version'], baseline, dot['id']))
+                if not room_member_id:
+                    self.c.rooms.migration.track_legacy_dot(dot['id'])
                 return {'id': dot['id']}
             receipt = self.c.mutation(principal, room, 'dot_join', args, enroll)
             result = self.connection({'project': room['project_id'], 'environment_id': room['environment_id'],

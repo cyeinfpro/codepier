@@ -1,6 +1,6 @@
 # 协作中心使用与运维说明
 
-> **1.32 房间入口**：当前使用流程见 [房间协作中心](COLLABORATION_CENTER.md)，维护与恢复见 [协作中心维护与恢复](COLLABORATION_CENTER_OPERATIONS.md)。本文件用于既有 CPD/CPJ、v2 Dot 或渠道对象的兼容维护；其中旧界面入口不再是新房间的接入步骤。
+> **1.32 房间入口**：当前使用流程见 [房间协作中心](COLLABORATION_CENTER.md)，维护与恢复见 [协作中心维护与恢复](COLLABORATION_CENTER_OPERATIONS.md)。本文件用于既有 CPD/CPJ、v2 Dot 或渠道对象的兼容维护。旧界面已退出生产静态目录，仅以原字节快照保留在 `tests/fixtures/legacy_collaboration_ui` 执行旧 wire 回归；下文旧界面步骤说明历史行为，当前面板使用上述房间指南。
 
 > 新的任务 dot 默认走 **添加 dot → CPD 加入码 → 一条宿主任务订阅 → @ 交办 → 原话题回传**，见 [dot 接入与验收指南](DOT_COLLABORATION.md)。下面的 CPJ、监控通知和通用发言说明继续适用于旧用途，不是新 CPD 接入的额外步骤。
 
@@ -188,4 +188,4 @@ npm --prefix web/mcp-apps run build
 
 浏览器测试以临时 Hub、合成项目和独立 Chromium/WebKit context 执行；事件测试用本地可控接收器。它们不会调用真实模型 CLI、创建真实 ChatGPT 订阅或替代真实 Work/dot PoC。
 
-主要代码位置：hub/collaboration、shared/collaboration_contracts.py、web/collaboration.js、web/collaboration.css。认证、工具目录、加密轮换、数据库与应用生命周期均复用原项目入口。
+主要服务代码位于 `hub/collaboration` 与 `shared/collaboration_contracts.py`。当前生产界面使用 `web/collaboration-room-store.js`、`web/collaboration-room.js` 和 `web/collaboration-room.css`；旧界面兼容快照只位于 `tests/fixtures/legacy_collaboration_ui`。认证、工具目录、加密轮换、数据库与应用生命周期均复用原项目入口。

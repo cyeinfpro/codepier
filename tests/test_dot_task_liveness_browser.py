@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 import pytest
+from tests.legacy_collaboration_ui import LEGACY_ASSET_NAMES, legacy_asset
 from playwright.sync_api import sync_playwright, expect
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -75,9 +76,9 @@ def test_reconcile_is_read_only_and_evidence_is_honest_escaped_and_focus_safe(wi
               <div id="timeline"></div><form id="cc-command"><textarea name="request" id="cc-message-input"></textarea>
               <button type="submit">发送</button></form><div id="cc-relay-network" hidden></div></main></body></html>''')
             for name in ('styles.css', 'collaboration.css', 'collaboration-relay.css'):
-                page.add_style_tag(content=(ROOT/'web'/name).read_text())
+                page.add_style_tag(content=(legacy_asset(name) if name in LEGACY_ASSET_NAMES else ROOT/'web'/name).read_text())
             page.add_style_tag(content='body{margin:0;padding:16px;display:block;overflow:auto} .collaboration{display:block;max-width:960px;margin:auto;min-width:0} .cc-message{min-width:0} textarea{max-width:100%;width:100%;min-height:64px}')
-            page.add_script_tag(content=(ROOT/'web/collaboration-relay.js').read_text())
+            page.add_script_tag(content=(ROOT/'tests/fixtures/legacy_collaboration_ui/collaboration-relay.js').read_text())
             page.evaluate(SETUP)
             area = page.locator('#cc-message-input')
             area.fill('尚未发送的草稿')

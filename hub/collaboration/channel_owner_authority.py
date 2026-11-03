@@ -184,6 +184,7 @@ class ChannelOwnerAuthority:
                         raise DevError('CHANNEL_OWNER_NOT_APPROVED', '没有可撤销的本人任务授权', 409)
                     self.revoke(binding['id'], 'owner_revoked')
                     return {'authorization_id': old['id']}
+                self.c.rooms.migration.legacy_write(binding['conversation_id'])
                 updating_budget = bool(old and old['state'] == 'active')
                 if updating_budget and not args.get('confirm_budget_change'):
                     raise DevError('CHANNEL_OWNER_ALREADY_APPROVED', '现有授权有效；修改任务数量需明确确认更新及停止未完成任务', 409)

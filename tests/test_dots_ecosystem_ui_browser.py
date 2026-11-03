@@ -6,6 +6,7 @@ external messages, production authorization or provider delivery is exercised.
 from pathlib import Path
 
 import pytest
+from tests.legacy_collaboration_ui import LEGACY_ASSET_NAMES, legacy_asset
 from playwright.sync_api import expect
 
 from tests.test_dot_task_liveness_browser import SETUP
@@ -30,10 +31,10 @@ def ecosystem_page(request, chat_browser_pool):
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     for name in ['styles.css', 'collaboration.css', 'collaboration-relay.css']:
-        page.add_style_tag(content=(ROOT/'web'/name).read_text())
+        page.add_style_tag(content=(legacy_asset(name) if name in LEGACY_ASSET_NAMES else ROOT/'web'/name).read_text())
     page.add_style_tag(content='body{margin:0;padding:12px;display:block;overflow:auto}.collaboration{display:block;min-width:0}textarea{max-width:100%}')
     for name in ['collaboration-runtime.js', 'collaboration-relay.js', 'collaboration-workspace.js']:
-        page.add_script_tag(content=(ROOT/'web'/name).read_text())
+        page.add_script_tag(content=legacy_asset(name).read_text())
     setup = SETUP.replace("room: {state: 'active'}", "room: {id: 'room-fixture', state: 'active'}")
     setup = setup.replace("window.calls = [];", "window.calls = []; window.patches = [];")
     setup = setup.replace("patchTimeline: ()=>{", "patchTimeline: (force,dirty)=>{ patches.push(dirty ? [...dirty] : null);")

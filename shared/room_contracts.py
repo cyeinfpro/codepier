@@ -44,6 +44,12 @@ class RoomPatch(RoomRead):
         return value.strip() if value is not None else None
 
 
+class RoomMigrate(RoomRead):
+    action: Literal['activate']
+    expected_version: int = Field(ge=1)
+    idempotency_key: Key
+
+
 class MemberProjectScope(Model):
     project_id: Identifier
     environment_id: str = Field(default='production', min_length=1, max_length=64)
@@ -161,6 +167,7 @@ ROOM_QUERY_ACTIONS = {
 }
 ROOM_MUTATION_ACTIONS = {
     'room_create': RoomCreate, 'room_update': RoomPatch,
+    'room_migrate': RoomMigrate,
     'room_projects': RoomProjects, 'room_member_create': MemberCreate,
     'room_connect_resume': ConnectAction, 'room_connect_join': ConnectJoin,
     'room_probe_read': ConnectProbeRead, 'room_probe_reply': ConnectProbeReply,

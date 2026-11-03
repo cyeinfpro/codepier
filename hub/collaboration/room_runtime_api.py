@@ -40,6 +40,11 @@ def register(router, service, auth):
         principal=await store.run(auth.admin,request,request.method != 'GET')
         return await store.run(service.room_channels.create,{**body,'conversation_id':conversation_id},principal)
 
+    @router.post('/rooms/{conversation_id}/legacy-channels/{binding_id}/pause')
+    async def pause_legacy_channel(request:Request,conversation_id:str,binding_id:str,body:dict):
+        principal=await store.run(auth.admin,request,True)
+        return await store.run(service.room_channels.pause_legacy,conversation_id,binding_id,body,principal)
+
     @router.get('/channel-connect-flows/{flow_id}')
     async def flow(request:Request,flow_id:str):
         principal=await store.run(auth.admin,request,request.method != 'GET')

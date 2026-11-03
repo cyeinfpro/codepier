@@ -45,6 +45,13 @@ class RoomWeixin:
     def __init__(self,channels):
         self.channels,self.c,self.store=channels,channels.c,channels.store
 
+    def require_room(self,conversation_id):
+        room=self.store.one('SELECT * FROM conversation_rooms WHERE id=?',(conversation_id,))
+        if not room:
+            raise DevError('ROOM_NOT_FOUND','此房间不存在',404)
+        self.c.rooms.require_native(room)
+        return room
+
     def login_view(self,row):
         body=json.loads(self.store.decrypt(row['payload'])) if row['payload'] else {}
         state=row['state']
@@ -76,7 +83,8 @@ class RoomWeixin:
 
     def prepare_login(self,flow,action,args,principal):
         with self.store.transaction():
-            current,principal,_=self.channels.get(flow['id'],principal)
+            current,principal,room=self.channels.get(flow['id'],principal)
+            self.c.rooms.require_native(room)
             if current['state']!='active':
                 raise DevError('CONNECT_FLOW_CLOSED','接入已取消',409)
             self.c.weixin.require_enabled(principal)
@@ -124,6 +132,7 @@ class RoomWeixin:
         with self.store.transaction():
             row=self.store.one('SELECT * FROM room_weixin_logins WHERE id=?',(identifier,))
             flow=self.store.one('SELECT * FROM room_channel_flows WHERE id=?',(row['flow_id'],))
+            self.require_room(flow['conversation_id'])
             body=json.loads(self.store.decrypt(row['payload'])) if row['payload'] else {}
             if flow['state']!='active' or body.get('fence')!=claim['fence'] or row['expires_at']<=self.c.clock():
                 return self.login_view(row)
@@ -170,6 +179,7 @@ class RoomWeixin:
             return self.login_view(self.store.one('SELECT * FROM room_weixin_logins WHERE id=?',(identifier,)))
 
     def accept_account(self,flow,args,principal):
+        self.require_room(flow['conversation_id'])
         row=self.store.one('SELECT * FROM room_weixin_logins WHERE id=? AND flow_id=?',(flow['enrollment_id'],flow['id']))
         if not row or self.login_view(row)['state']!='confirmed':
             raise DevError('WEIXIN_QR_NOT_CONFIRMED','请先完成当前扫码',409)
@@ -182,6 +192,10 @@ class RoomWeixin:
                     or not body.get('renewal') or body['renewal']['id']!=existing['id']
                     or body['renewal']['credential_version']!=existing['credential_version'] or not args['confirm_replace_existing']):
                 raise DevError('WEIXIN_ACCOUNT_CONFLICT','请明确恢复原账号，不覆盖其他绑定',409)
+            for binding in self.store.all("SELECT * FROM weixin_bindings WHERE account_id=? AND state!='revoked'",(existing['id'],)):
+                if not binding.get('native_member_id'):
+                    raise DevError('CHANNEL_ROUTE_CONFLICT','此账号仍保留旧连接，请先明确解除旧绑定再继续此房间接入',409)
+                self.require_room(binding['conversation_id'])
         else:
             count=self.store.one('SELECT COUNT(*) n FROM weixin_accounts WHERE owner_user_id=? AND space_id=?',(principal.user_id,principal.space_id))['n']
             total=self.store.one('SELECT COUNT(*) n FROM weixin_accounts')['n']
@@ -211,6 +225,7 @@ class RoomWeixin:
         return identifier
 
     def bind(self,flow,args,principal,conversation):
+        self.c.rooms.require_native(conversation)
         member=self.channels.member(conversation,args['member_id'] or flow['member_id'])
         account=self.c.weixin.account(flow['account_id'],principal)
         if not args['confirm_external_data_ingress'] or not args['confirm_until_revoked']:
@@ -248,6 +263,7 @@ class RoomWeixin:
         saved=json.loads(binding['owner_principal'])
         owner=refresh_principal(self.store,Principal(**{**saved,'scopes':set()}))
         owner,room=self.c.rooms.owner(owner,binding['conversation_id'])
+        self.c.rooms.require_native(room)
         if room['state']!='active':
             raise DevError('ROOM_PAUSED','原房间已暂停',409)
         member=self.c.rooms.member(binding['native_member_id'],room['id'])
@@ -273,6 +289,9 @@ class RoomWeixin:
 
     def approve_tasks(self,binding_id,args,principal,*,pending=False):
         binding=self.store.one('SELECT * FROM weixin_bindings WHERE id=?',(binding_id,))
+        if not binding:
+            raise DevError('WEIXIN_BINDING_INACTIVE','原微信绑定已不可用',403)
+        self.require_room(binding['conversation_id'])
         preview=self.preview(binding,principal)
         if not preview['scope']['projects']:
             raise DevError('CHANNEL_TASK_PROJECT_REQUIRED','先明确此成员可工作的项目，再开通微信交办',409)
@@ -300,6 +319,8 @@ class RoomWeixin:
 
     def control(self,binding,args,principal):
         action=args['action']
+        if action not in {'pause','disconnect','migrate','cancel'}:
+            self.require_room(binding['conversation_id'])
         if action=='confirm_owner':
             if binding['state']!='awaiting_owner' or not binding['pending_peer_id'] or not hmac.compare_digest(args['confirm_peer_id'],binding['pending_peer_id']):
                 raise DevError('WEIXIN_PAIRING_UNVERIFIED','请确认当前配对返回的本人联系人',409)
@@ -442,6 +463,7 @@ class RoomWeixin:
             'affected_work_ids':[goal['id'] for goal in goals]}
 
     def ingest(self,binding,account,owner,room,member,message):
+        self.c.rooms.require_native(room)
         if not isinstance(message,dict):
             raise DevError('WEIXIN_MESSAGE_INVALID','微信消息必须为结构化对象',422)
         peer=text(message.get('from_user_id'),256);external_id=uint64(message.get('message_id'))

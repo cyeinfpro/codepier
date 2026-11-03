@@ -227,6 +227,10 @@ class CoordinationService:
             principal, room = self.c.scope(principal, args)
             spec = self.candidate(args, principal, room,native_scope=native_scope)
             def save():
+                if native_scope:
+                    self.c.rooms.require_native(self.c.conversations.object(principal, args['conversation_id']))
+                else:
+                    self.c.rooms.migration.legacy_write(args['conversation_id'])
                 identifier, now = uuid.uuid4().hex, self.c.clock()
                 self.store.execute('''INSERT INTO coordination_goals
                     (id,room_id,conversation_id,spec,digest,created,updated) VALUES (?,?,?,?,?,?,?)''',
@@ -247,6 +251,7 @@ class CoordinationService:
                 raise DevError('GOAL_CONVERSATION_CHANGED', '不能移动既有目标的聊天室', 409)
             spec = self.candidate(args, principal, room)
             def save():
+                self.c.rooms.migration.legacy_write(goal['conversation_id'])
                 self.version(goal, args)
                 self.stop_work(goal, 'GOAL_REVISED')
                 self.store.execute("""UPDATE coordination_goals SET spec=?,digest=?,state='proposed',
@@ -296,6 +301,10 @@ class CoordinationService:
                     if not original or project['id'] in {r['project_id'] for m in original['members'] if m['grant_id']==grant_id for r in m['projects']}:
                         self.runtime.project(project['id'], participant)
             def save():
+                if spec.get('room_member_scope'):
+                    self.c.rooms.require_native(self.c.conversations.object(principal, goal['conversation_id']))
+                else:
+                    self.c.rooms.migration.legacy_write(goal['conversation_id'])
                 self.version(goal, args)
                 self.c.live_room(room)
                 if goal['digest'] != args['digest'] or goal['state'] == 'cancelled':
@@ -522,6 +531,15 @@ class CoordinationService:
             participant_goal['_reader_member_id']=member_id
         return self.authorize(actor, room, participant_goal, active=True)
 
+    def admit_current_work_surface(self, goal):
+        """Cutover stops new legacy work, never historical operation receipts.
+
+        Call inside mutation callbacks so an already admitted same-key request
+        can still recover its original receipt without starting another step.
+        """
+        if not self.c.room_work_bridge.native.reference(goal):
+            self.c.rooms.migration.legacy_write(goal['conversation_id'])
+
     def work_create(self, raw, principal):
         args = validate(contracts.WorkCreate, raw)
         with self.store.transaction():
@@ -541,6 +559,7 @@ class CoordinationService:
                 if dependency['approval_id'] != goal['approval_id']:
                     raise DevError('WORK_APPROVAL_CHANGED', '依赖不属于当前目标批准', 409)
             def save():
+                self.admit_current_work_surface(goal)
                 count = self.store.one('SELECT COUNT(*) AS n FROM coordination_work WHERE goal_id=?', (goal['id'],))['n']
                 if count >= spec['budget']['max_work_items']:
                     raise DevError('GOAL_BUDGET_EXCEEDED', '目标工作项预算已用尽', 409)
@@ -566,6 +585,7 @@ class CoordinationService:
             assignee = self.participant(room, goal, args['assignee_grant_id'],args.get('assignee_member_id',''))
             self.work_capabilities(assignee, goal, {**item,'id':''},member_id=args.get('assignee_member_id',''))
             def save():
+                self.admit_current_work_surface(goal)
                 self.version(item, args)
                 if item['state'] != 'queued' or item['approval_id'] != goal['approval_id']:
                     raise DevError('WORK_NOT_ASSIGNABLE', '只有当前批准的未领取工作可以交接', 409)
@@ -587,6 +607,7 @@ class CoordinationService:
             if not principal.grant_id or item['assignee_grant_id'] != principal.grant_id:
                 raise DevError('WORK_ASSIGNEE_REQUIRED', '工作项没有分配给当前连接', 403)
             def take():
+                self.admit_current_work_surface(goal)
                 self.version(item, args)
                 self.work_capabilities(principal, goal, item)
                 self.c.owner_task_context.validate_goal(principal, room, goal, ready=True)
@@ -680,6 +701,7 @@ class CoordinationService:
             if item['assignee_grant_id'] != principal.grant_id:
                 raise DevError('WORK_ASSIGNEE_REQUIRED', '工作项不属于当前连接', 403)
             def execute():
+                self.admit_current_work_surface(goal)
                 item = self.lease(principal, goal, args)
                 from shared.contracts import TOOLS
                 from hub.dispatch_plan import DeferredCall
@@ -918,6 +940,7 @@ class CoordinationService:
             for grant_id in args['mention_grant_ids']:
                 self.participant(room, goal, grant_id)
             def save():
+                self.admit_current_work_surface(goal)
                 if not args['body_text'].strip():
                     raise DevError('INVALID_ARGUMENTS', '目标消息不能为空', 422)
                 if goal['messages'] >= json.loads(goal['spec'])['budget']['max_messages']:

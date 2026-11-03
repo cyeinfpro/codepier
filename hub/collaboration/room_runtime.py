@@ -453,16 +453,21 @@ class RoomRuntime:
                     if json.loads(old['body']).get('room_request_digest')!=fingerprint:
                         raise DevError('SOURCE_MESSAGE_CONFLICT','同一消息标识不能替换已保存的消息',409)
                     return {'message_id':old['id']}
+                self.c.rooms.require_native(conversation)
                 count=self.store.one('''SELECT COUNT(*) AS n FROM collaboration_messages
                     WHERE conversation_id=? AND author=? AND created>?''',(conversation['id'],principal.user_id,self.c.clock()-60))['n']
                 if count>=60:
                     raise DevError('MESSAGE_RATE_LIMIT','发送过于频繁，请稍后继续',429)
                 member=self.recipient(conversation,args['member_id'])
-                routing={'state':'queued' if member and member['status'] not in {'paused','removed'} else 'waiting',
+                if member and self.c.rooms.migration.member_requires_migration(member):
+                    raise DevError('ROOM_MEMBER_MIGRATION_REQUIRED','此成员仍是原连接，请先明确迁移或移除，不能从新入口向旧路线发送',409)
+                connected=bool(member and member['grant_id'] and member['connection_proof_hash'])
+                routing={'state':'queued' if connected and member['status'] not in {'paused','removed'} else 'waiting',
                          'member_id':member['id'] if member else '',
                          'reason_code':'member_paused' if member and member['status']=='paused' else
                                        'member_removed' if member and member['status']=='removed' else
-                                       'lead_member_required' if not member else ''}
+                                       'lead_member_required' if not member else
+                                       'member_not_connected' if not connected else ''}
                 identifier=uuid.uuid4().hex
                 parent=None
                 if args['reply_to_id']:
@@ -491,12 +496,10 @@ class RoomRuntime:
                     body['provenance_project_ids']=provenance
                 if provenance_scopes:
                     body['provenance_scopes']=provenance_scopes
-                dot=self.c.dots.find(member['legacy_dot_id']) if member and member['status']=='legacy' and member.get('legacy_dot_id') else None
-                partition=self.store.one('SELECT * FROM collaboration_rooms WHERE id=?',(dot['room_id'],)) if dot else None
                 self.store.execute('''INSERT INTO collaboration_messages
                     (id,room_id,conversation_id,thread_id,thread_root_id,reply_to_id,author,origin,source_id,kind,body,state,created)
                     VALUES (?,?,?,?,?,?,?,'panel_owner',?,'text',?,'saved',?)''',
-                    (identifier,partition['id'] if partition else None,conversation['id'],root,root,args['reply_to_id'],
+                    (identifier,None,conversation['id'],root,root,args['reply_to_id'],
                      principal.user_id,args['client_message_id'],canonical(body),self.c.clock()))
                 message=self.store.one('SELECT * FROM collaboration_messages WHERE id=?',(identifier,))
                 self.c.room_attachments.attach(args['attachment_ids'], message, principal)
@@ -511,30 +514,14 @@ class RoomRuntime:
                     provenance=body.get('provenance_project_ids',[])
                 if args['work_id']:
                     self.revise_intent(goal,message,member)
-                if member and routing['state']=='queued':
-                    if dot:
-                        mentions=[{'slot_id':dot['id'],'display_snapshot':member['name']}]
-                        try:
-                            duplex=self.c.dot_chat.enqueue(partition,message,mentions,principal)
-                        except DevError as exc:
-                            # Persist the input even if the connection needs
-                            # restoration. Never fall back to a broader member.
-                            routing.update(state='waiting',reason_code=exc.code)
-                            body['room_routing']=routing
-                        else:
-                            body.update(mentions=mentions,duplex_recipients=duplex)
-                            if duplex:
-                                message=self.c.owner_task_context.incoming(partition,dot,message,principal)
-                                context=json.loads(message['body'])
-                                if context.get('task_context_schema')==1:
-                                    body['task_context_schema']=1
-                                body['provenance_project_ids']=sorted(set(provenance)|set(context.get('provenance_project_ids',[])))
+                # Waiting for the first binding still needs its durable input
+                # reference. Enqueue does not claim a lease or create work, and
+                # an unbound member cannot emit a callback or consume it.
+                if member and (routing['state']=='queued' or routing['reason_code']=='member_not_connected'):
                     self.store.execute('UPDATE collaboration_messages SET body=? WHERE id=?',(canonical(body),identifier))
                     message=self.store.one('SELECT * FROM collaboration_messages WHERE id=?',(identifier,))
                     self.c.room_consumers.enqueue(message,member,principal)
                 self.c.rooms.change(conversation['id'],'message',identifier,message['version'])
-                if partition:
-                    self.c.channels.queue(message)
                 return {'message_id':identifier}
             result=self.c.room_channels.receipt(principal,conversation,'room_message',args,save)
             row=self.store.one('SELECT * FROM collaboration_messages WHERE id=?',(result['message_id'],))
@@ -556,7 +543,7 @@ class RoomRuntime:
         if member_id and native.reference(goal):
             goal={**goal,'_reader_member_id':member_id}
         partition=self.store.one('SELECT * FROM collaboration_rooms WHERE id=?',(goal['room_id'],))
-        conversation=self.store.one('SELECT archived_at FROM conversation_rooms WHERE id=?',(goal['conversation_id'],))
+        conversation=self.store.one('SELECT archived_at,room_protocol FROM conversation_rooms WHERE id=?',(goal['conversation_id'],))
         archived=conversation is not None and conversation['archived_at'] is not None
         self.c.coordination.authorize(principal,partition,goal,include_archived=archived and not principal.grant_id)
         items=self.store.all('SELECT * FROM coordination_work WHERE goal_id=? ORDER BY created,id',(goal['id'],))
@@ -603,13 +590,15 @@ class RoomRuntime:
         native_scope=self.c.room_work_bridge.native.record(spec['room_member_scope']) if spec.get('room_member_scope') else None
         visible=native.visible_projects(goal,principal,member_id) if native_scope else set(spec['project_ids'])
         partial=visible!=set(spec['project_ids'])
-        recovery=self.c.room_goal_recovery.projection(goal,principal) if native_scope and not principal.grant_id and not archived else None
+        recovery=self.c.room_goal_recovery.projection(goal,principal) if native_scope and not principal.grant_id and not archived and conversation['room_protocol'] else None
         if recovery and recovery['restore_candidates']:
             allowed.append('restore_binding')
         if recovery and recovery['takeover_candidates']:
             allowed.append('takeover')
         if archived:
             allowed=[]
+        elif not native_scope or conversation and not conversation['room_protocol']:
+            allowed=[action for action in allowed if action in {'pause','cancel'}]
         assignments={row['work_id']:row['member_id'] for row in self.store.all('''SELECT a.work_id,a.member_id
             FROM room_native_work_assignments a JOIN coordination_work w ON w.id=a.work_id WHERE w.goal_id=?''',(goal['id'],))} if native_scope else {}
         from hub.collaboration.room_diagnostics import delivery_display,work_deliveries
@@ -707,6 +696,9 @@ class RoomRuntime:
             partition=self.store.one('SELECT * FROM collaboration_rooms WHERE id=?',(goal['room_id'],))
             self.c.coordination.authorize(principal,partition,goal)
             def save():
+                if args['action'] not in {'pause','cancel'}:
+                    self.c.rooms.require_native(conversation)
+                    self.c.coordination.admit_current_work_surface(goal)
                 if goal['version']!=args['expected_version']:
                     raise DevError('STALE_VERSION','工作已更新，请核对最新进展',409)
                 if args['action'] in {'takeover','restore_binding'}:

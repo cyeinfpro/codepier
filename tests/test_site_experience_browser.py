@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import pytest
+from tests.legacy_collaboration_ui import LEGACY_ASSET_NAMES, legacy_asset
 from playwright.sync_api import expect
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -218,7 +219,7 @@ def test_collaboration_shared_tokens_keep_reduced_motion(chat_browser_pool, engi
     try:
         page.set_content('<div class="cc-workspace cc-chat-shell"><details class="cc-drawer" open><summary>Details</summary></details><div class="cc-project-strip"><button class="btn">Project</button></div></div>')
         for name in ["tokens.css", "collaboration-workspace.css", "experience.css"]:
-            page.add_style_tag(path=str(ROOT / "web" / name))
+            page.add_style_tag(path=str(legacy_asset(name) if name in LEGACY_ASSET_NAMES else ROOT / "web" / name))
         assert page.locator(".cc-workspace").evaluate("""el => {
           const style = getComputedStyle(el), root = getComputedStyle(document.documentElement);
           return [['radius-control', 'control-radius'], ['radius-shell', 'window-radius'],

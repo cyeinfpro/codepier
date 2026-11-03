@@ -201,7 +201,9 @@ class EventService:
         if args['name'] == OPERATION_EVENT and not stopping:
             self.operations.authorize(principal, filters)
         if args['name'] in {MESSAGE_EVENT, MAILBOX_EVENT}:
-            self.c.conversations.resolve(principal, room, filters)
+            conversation = self.c.conversations.resolve(principal, room, filters)
+            if not stopping:
+                self.c.rooms.migration.legacy_write(conversation['id'])
         if args['name'] == MAILBOX_EVENT and not stopping:
             self.c.dot_mailbox.authorize_event(principal, filters)
         if args['name'] == DELEGATION_EVENT and not stopping:
@@ -294,7 +296,8 @@ class EventService:
                 current_filters = validate(FILTERS[args['name']], args['arguments'])
                 self.binding_guard(current_room, current_principal, current_filters, args['delivery'])
                 if args['name'] in {MESSAGE_EVENT, MAILBOX_EVENT}:
-                    self.c.conversations.resolve(current_principal, current_room, current_filters)
+                    conversation = self.c.conversations.resolve(current_principal, current_room, current_filters)
+                    self.c.rooms.migration.legacy_write(conversation['id'])
                 if args['name'] == MAILBOX_EVENT:
                     self.c.dot_mailbox.authorize_event(current_principal, current_filters)
                 if args['name'] == DELEGATION_EVENT:
@@ -405,7 +408,8 @@ class EventService:
         if subscription['name'] == OPERATION_EVENT:
             self.operations.authorize(principal, filters, snapshot=json.loads(subscription['principal']), payload=payload)
         if subscription['name'] in {MESSAGE_EVENT, MAILBOX_EVENT}:
-            self.c.conversations.resolve(principal, room, filters)
+            conversation = self.c.conversations.resolve(principal, room, filters)
+            self.c.rooms.migration.legacy_write(conversation['id'])
         if subscription['name'] == MAILBOX_EVENT:
             self.c.dot_mailbox.authorize_event(principal, filters, payload)
         if subscription['name'] == DELEGATION_EVENT:

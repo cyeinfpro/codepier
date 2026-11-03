@@ -63,6 +63,15 @@ INTEGRATION_EVIDENCE_FILES = {'verification.json','feature-matrix.json','source-
     'full-regression.xml','targeted.xml','real-lsp.json','browser-final.xml','apps-final.xml',
     'distribution-check.json'}
 
+# Removed production UI must not re-enter a release through stale checkout
+# files. Its unchanged compatibility material lives only below tests/fixtures.
+RETIRED_WEB_ASSETS = frozenset('web/' + name for name in (
+    'collaboration.css', 'collaboration-relay.css', 'collaboration-workspace.css',
+    'collaboration-runtime.js', 'collaboration-goals.js', 'collaboration-delegation.js',
+    'collaboration-channels.css', 'collaboration-channels.js', 'collaboration-dots.js',
+    'collaboration-relay.js', 'collaboration-workspace.js', 'collaboration.js',
+))
+
 EVIDENCE_FILES = {'full-regression-final.xml','focused-verified.xml','worker-real-results.json',
                   'windows-controller-contract.xml','native-finish-focused.xml','boot-recovery-fixed.xml',
                   'browser-final.xml','ACCEPTANCE_LOCAL_1.8.0.md','COMPLETION_2026-09-14.md',
@@ -73,9 +82,10 @@ REQUIRED_FILES = {
     'hub/collaboration/service.py', 'hub/collaboration/events.py', 'hub/collaboration/monitor.py',
     'hub/collaboration/chatroom.py', 'hub/collaboration/conversations.py',
     'hub/collaboration/coordination.py', 'hub/collaboration/coordination_schema.py',
-    'hub/access_preview.py', 'web/collaboration-goals.js',
+    'hub/access_preview.py',
     'hub/collaboration/joining.py', 'hub/collaboration/event_errors.py',
-    'shared/collaboration_contracts.py', 'web/collaboration.js', 'web/collaboration.css',
+    'shared/collaboration_contracts.py',
+    'web/collaboration-room.js', 'web/collaboration-room-store.js', 'web/collaboration-room.css',
     'docs/COLLABORATION.md', 'docs/COLLABORATION_CHATROOM.md', 'docs/designs/COLLABORATION_V0_2.md',
     'hub/principal.py', 'hub/tool_router.py', 'hub/gateway/service.py', 'hub/iam.py', 'hub/oidc.py',
     'hub/access_profiles.py','shared/access_profile_contracts.py','web/access-profiles.js',
@@ -231,6 +241,8 @@ def digest(raw):
 
 def include(relative, *, public=False):
     if relative.is_absolute() or '..' in relative.parts:
+        return False
+    if relative.as_posix() in RETIRED_WEB_ASSETS:
         return False
     if public and (relative.name == 'LOCAL_RELEASE.json' or
                    relative.parts[:1] == ('docs',) and relative.as_posix() not in PUBLIC_DOCS):

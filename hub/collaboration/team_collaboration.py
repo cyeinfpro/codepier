@@ -242,6 +242,7 @@ class TeamService:
             saved = asdict(principal)
             saved.update(scopes=[], session_hash='', token_hash='')
             def save():
+                self.c.rooms.migration.legacy_write(args['conversation_id'])
                 identifier, now = uuid.uuid4().hex, self.c.clock()
                 self.store.execute('''INSERT INTO collaboration_teams
                     (id,room_id,conversation_id,label,policy,policy_digest,owner_principal,expires_at,created,updated)
@@ -422,6 +423,7 @@ class TeamService:
                 goal = self.q.object(room, existing['goal_id'])
                 self.q.authorize(principal, room, goal)
                 return {'team': self.view(team), 'goal': self.q.view(goal, principal), 'created': False}
+            self.c.rooms.migration.legacy_write(team['conversation_id'])
             if self.store.one('SELECT 1 FROM delegation_requests WHERE message_id=?', (source['id'],)):
                 raise DevError('TEAM_SOURCE_ALREADY_DELEGATED', '原消息已有个人委托，不能重复创建团队任务', 409)
             policy = json.loads(team['policy'])
@@ -658,6 +660,7 @@ class TeamService:
             if existing:
                 raise DevError('TEAM_SOURCE_ALREADY_USED', '该输入已经关联原目标意图，不能重复解释或另建目标', 409)
             def save():
+                self.c.rooms.migration.legacy_write(goal['conversation_id'])
                 self.q.stop_work(goal, 'TEAM_INTENT_CHANGED')
                 self.store.execute('''UPDATE team_goals SET current_message_id=?,current_source_version=?,current_source_digest=?,
                     intent_revision=intent_revision+1,updated=? WHERE goal_id=?''',
@@ -738,6 +741,8 @@ class TeamService:
             if args['action'] == 'resume':
                 self.live(room, team, allow_paused=True)
             def save():
+                if args['action'] == 'resume':
+                    self.c.rooms.migration.legacy_write(team['conversation_id'])
                 self.q.version(team, args)
                 if args['action'] == 'resume' and team['state'] != 'paused':
                     raise DevError('TEAM_NOT_PAUSED', '只能恢复原团队暂停，已撤销批准不能恢复', 409)

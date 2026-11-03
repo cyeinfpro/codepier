@@ -22,7 +22,7 @@ def test_budget_usage_renders_exact_units_without_mutating_authority(chat_browse
     context = chat_browser_pool(engine).new_context()
     page = context.new_page()
     try:
-        page.add_script_tag(path=str(ROOT / "web/collaboration-delegation.js"))
+        page.add_script_tag(path=str(ROOT / "tests/fixtures/legacy_collaboration_ui/collaboration-delegation.js"))
         actual = page.evaluate("""usage => {
           const policy = {id:'policy-safe', slot_id:'dot-safe', version:3,
             effective_active:true, lifetime_mode:'until_revoked', expires_at:1,

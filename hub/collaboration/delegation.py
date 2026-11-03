@@ -202,7 +202,7 @@ class DelegationService:
             'authority': self.authority_descriptor(),
             **self.consumer.presentation(policy, room, reason)}
 
-    def set_policy(self, raw, principal):
+    def set_policy(self, raw, principal, *, room_member_id=''):
         args = validate(contracts.DelegationPolicySet, raw)
         with self.store.transaction():
             principal, room = self.c.scope(principal, args)
@@ -232,6 +232,9 @@ class DelegationService:
             snapshot = asdict(principal)
             snapshot.update(scopes=[], session_hash='', token_hash='')
             def save():
+                self.c.rooms.migration.adapter_write(conversation['id'], room_member_id,
+                    room['project_id'], room['environment_id'], args['capabilities'], targets,
+                    dot_id=slot['id'] if room_member_id else '')
                 old = self.store.one('SELECT * FROM delegation_policies WHERE room_id=? AND conversation_id=? AND slot_id=?',
                                      (room['id'], conversation['id'], slot['id']))
                 if (old['version'] if old else 0) != args['expected_version']:
@@ -390,6 +393,8 @@ class DelegationService:
 
     def send(self, principal, room, message, args, *, native_scope=None):
         """Called only in the original message transaction, never for historical replay."""
+        if not native_scope:
+            self.c.rooms.migration.legacy_write(message['conversation_id'])
         if args.get('team_id') or self.store.one(
                 'SELECT 1 FROM team_message_bindings WHERE message_id=?', (message['id'],)):
             raise DevError('TEAM_SOURCE_REQUIRES_TEAM', '团队原始请求必须复用团队 Goal，不能另建个人委托', 409)
@@ -537,6 +542,8 @@ class DelegationService:
             goal = self.c.coordination.object(room, link['goal_id'])
             self.c.coordination.authorize(principal, room, goal, active=True)
             def send():
+                if not self.c.room_work_bridge.native.reference(goal):
+                    self.c.rooms.migration.legacy_write(goal['conversation_id'])
                 recent = self.store.one("SELECT COUNT(*) AS n FROM collaboration_audit WHERE room_id=? AND action='delegation.remind' AND created>?",
                                         (room['id'], self.c.clock() - 60))['n']
                 if recent >= 30:
@@ -685,6 +692,7 @@ class DelegationService:
     def authorize_event(self, principal, filters, payload=None):
         principal, room = self.c.scope(principal, {'project': filters['project_id'], 'environment_id': filters['environment_id']})
         policy = self.policy(room, filters['policy_id'])
+        self.c.rooms.migration.legacy_write(policy['conversation_id'])
         self.authorize_policy(principal, room, policy)
         if (not principal.grant_id or filters['policy_version'] != policy['version']
                 or filters['conversation_id'] != policy['conversation_id'] or filters['slot_id'] != policy['slot_id']):

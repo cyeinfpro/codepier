@@ -102,6 +102,8 @@ def migrate(db):
     migrate_pending_bindings(db)
     from hub.collaboration.room_connections import migrate as migrate_connections
     migrate_connections(db)
+    from hub.collaboration.room_migration import migrate as migrate_room_migration
+    migrate_room_migration(db)
 
 
 class Rooms:
@@ -109,6 +111,13 @@ class Rooms:
         self.c, self.store = collaboration, collaboration.store
         from hub.collaboration.room_pending_bindings import PendingBindings
         self.pending = PendingBindings(self)
+        from hub.collaboration.room_migration import RoomMigration
+        self.migration = RoomMigration(self)
+
+    @staticmethod
+    def require_native(room):
+        if not room['room_protocol']:
+            raise DevError('ROOM_MIGRATION_REQUIRED', '旧房间在新协作中心仅可查看；请先迁移所有保留连接，再由房主明确激活此房间', 409)
 
     def owner(self, principal, conversation_id, *, include_archived=False):
         self.c.guard()
@@ -138,6 +147,8 @@ class Rooms:
         if require_proof and (not isinstance(connection_proof, str) or not member['connection_proof_hash']
                 or not hmac.compare_digest(digest(connection_proof), member['connection_proof_hash'])):
             raise DevError('ROOM_MEMBER_PROOF_REQUIRED', '需要原成员连接证明，不能仅凭共享授权代替另一个成员', 403)
+        if not stopping and not pending:
+            self.require_native(room)
         connections = getattr(self.c, 'room_connections', None)
         if connections is not None and not stopping and check_connection:
             connections.guard_join(member, principal)
@@ -158,7 +169,11 @@ class Rooms:
 
     def principal(self, member):
         saved = json.loads(member['principal'])
-        if not saved or not member['grant_id']:
+        # Old join slots keep only an identity reference, not a native binding
+        # proof or a complete authenticated snapshot. Preserve that history but
+        # do not invent an actor/project scope to make it usable as a new member.
+        if (not saved or not member['grant_id'] or not saved.get('actor')
+                or not saved.get('user_id') or not isinstance(saved.get('projects'), list)):
             raise DevError('ROOM_MEMBER_UNBOUND', '成员尚未接入', 409)
         return refresh_principal(self.store, Principal(**{**saved, 'scopes': set()}))
 
@@ -200,7 +215,7 @@ class Rooms:
         try:
             actor = self.principal(member)
             self.member_scope(actor, member['conversation_id'], member['id'], member['binding_generation'],
-                pending=bool(member.get('_pending_binding')), check_connection=check_connection)
+                pending=True, check_connection=check_connection)
         except DevError:
             return 'degraded'
         sub = self.store.one('SELECT * FROM mcp_event_subscriptions WHERE id=?', (member['subscription_id'],))
@@ -253,12 +268,17 @@ class Rooms:
         result = {'id': room['id'], 'conversation_id': room['id'], 'title': room['title'],
             'state': room['state'], 'version': room['version'], 'revision': room['revision'],
             'lead_member_id': room['lead_member_id'], 'legacy': not bool(room['room_protocol']),
+            'read_only': not bool(room['room_protocol']) or room['state'] != 'active',
+            'migration': self.migration.projection(room),
             'display': {'title': '已暂停' if room['state'] == 'paused' else '已归档' if room['state'] == 'archived' else '待命',
                         'primary_action': 'resume' if room['state'] == 'paused' else 'send_message'},
             'projects': [{'project_id': p['project_id'], 'project_label': p['project_label'], 'room_id': p['id'],
                 'environment_id': p['environment_id'], 'state': p['state'], 'capabilities': []} for p in projects],
             'members': [self.member_view(m) for m in members],
             'visibility_token': digest([principal.grant_id or principal.user_id, [p['id'] for p in projects], room['revision']])}
+        if not room['room_protocol']:
+            result['display'].update(title='旧房间 · 只读', primary_action='migrate_room',
+                reason='逐一迁移或移除原连接后，由房主明确激活此房间。')
         if details and room['state'] != 'archived':
             context=getattr(self.c,'room_context',None)
             if context is not None and not principal.grant_id:
@@ -313,7 +333,9 @@ class Rooms:
         return result
 
     def change(self, conversation_id, kind, object_id, version=1):
-        self.store.execute('UPDATE conversation_rooms SET revision=revision+1 WHERE id=?', (conversation_id,))
+        self.store.execute('''UPDATE conversation_rooms SET revision=revision+1,
+            version=version+CASE WHEN room_protocol=0 AND ? IN ('member','connection') THEN 1 ELSE 0 END
+            WHERE id=?''', (kind, conversation_id))
         self.store.execute('INSERT INTO room_changes(conversation_id,kind,object_id,version,created_at) VALUES (?,?,?,?,?)',
                            (conversation_id, kind, object_id, version, self.c.clock()))
         self.store.after_commit(self.c.relay_hints.wake)
@@ -400,6 +422,8 @@ class Rooms:
             principal, room = self.owner(principal, args['conversation_id'], include_archived=True)
             def perform():
                 self.check_version(room, args['expected_version'])
+                if args['lead_member_id'] is not None and args['lead_member_id'] != room['lead_member_id']:
+                    self.require_native(room)
                 if args['lead_member_id']:
                     member = self.member(args['lead_member_id'], room['id'])
                     if member['status'] == 'removed':
@@ -411,7 +435,7 @@ class Rooms:
                         self.stop_member_work(member, 'ROOM_' + state.upper(), revoke=state == 'archived')
                         if state == 'archived':
                             self.store.execute("UPDATE room_members SET status='paused',version=version+1 WHERE id=?", (member['id'],))
-                elif state == 'active' and room['state'] == 'paused':
+                elif state == 'active' and room['state'] == 'paused' and room['room_protocol']:
                     for member in self.store.all("SELECT * FROM room_members WHERE conversation_id=? AND status NOT IN ('paused','removed')", (room['id'],)):
                         self.resume_member_policies(member)
                 self.store.execute('''UPDATE conversation_rooms SET title=?,state=?,lead_member_id=?,
@@ -428,6 +452,24 @@ class Rooms:
                 self.change(room['id'], 'room', room['id'], room['version'] + 1)
                 return {'conversation_id': room['id']}
             return self.read(self.mutation(principal, 'room_update', args, perform), principal)
+
+    def migrate_room(self, raw, principal):
+        args = validate(contracts.RoomMigrate, raw)
+        with self.store.transaction():
+            principal, room = self.owner(principal, args['conversation_id'], include_archived=True)
+            def perform():
+                try:
+                    return self.migration.activate(args, principal, room)
+                except DevError as exc:
+                    # This callback is never entered for a saved receipt. Only
+                    # these two pre-admission failures prove this key did not
+                    # commit; permission/conflict/internal failures do not.
+                    if exc.code in {'STALE_VERSION', 'ROOM_MIGRATION_BLOCKED'}:
+                        raise DevError(exc.code, exc.message, exc.status, **{**exc.details, 'not_saved': True}) from exc
+                    raise
+            result = self.mutation(principal, 'room_migrate', args,
+                perform)
+            return {**self.read({'conversation_id': room['id']}, principal), 'activated': result['activated']}
 
     def stop_member_work(self, member, reason, *, revoke=False):
         """Stop original policy work, retaining operation IDs and actual results."""
@@ -697,6 +739,14 @@ class Rooms:
                 self.c.runtime.project(item['project'], principal)
             def perform():
                 self.check_version(room, args['expected_version'])
+                if not room['room_protocol']:
+                    current = {(p['project_id'], p['environment_id']) for p in self.store.all('''
+                        SELECT r.project_id,r.environment_id FROM collaboration_rooms r
+                        JOIN conversation_projects p ON p.room_id=r.id WHERE p.conversation_id=?''', (room['id'],))}
+                    requested = {(self.c.runtime.project(p['project'], principal)['id'], p['environment_id'])
+                        for p in args['projects']}
+                    if not requested <= current or any(a['project_scopes'] or a['lifetime'] for a in args['member_approvals']):
+                        self.require_native(room)
                 parts = self.partitions(principal, args['projects'])
                 before = {p['room_id'] for p in self.store.all('SELECT room_id FROM conversation_projects WHERE conversation_id=?', (room['id'],))}
                 after = {p['id'] for p in parts}
@@ -750,6 +800,7 @@ class Rooms:
         with self.store.transaction():
             principal, room = self.owner(principal, args['conversation_id'])
             def perform():
+                self.require_native(room)
                 self.check_version(room, args['expected_version'])
                 if self.store.one("SELECT COUNT(*) n FROM room_members WHERE conversation_id=? AND status!='removed'", (room['id'],))['n'] >= 32:
                     raise DevError('ROOM_MEMBER_LIMIT', '房间最多可添加 32 个成员', 409)
@@ -853,7 +904,7 @@ class Rooms:
             flow = self.store.one('SELECT * FROM room_connect_flows WHERE id=?', (args['flow_id'],))
             if not flow or (args.get('conversation_id') and args['conversation_id'] != flow['conversation_id']):
                 raise DevError('CONNECT_FLOW_NOT_FOUND', '没有这个接入流程', 404)
-            principal, _ = self.owner(principal, flow['conversation_id'])
+            principal, room = self.owner(principal, flow['conversation_id'])
             member = self.member(flow['member_id'])
             def perform():
                 self.check_version(flow, args['expected_version'])
@@ -882,7 +933,8 @@ class Rooms:
                         self.pending.cancel(member['id'])
                         self.stop_member_work(member, 'ROOM_MEMBER_' + action.upper(), revoke=action == 'remove')
                     elif action == 'resume':
-                        self.resume_member_policies(member)
+                        if room['room_protocol']:
+                            self.resume_member_policies(member)
                     legacy = bool(member['legacy_dot_id'] and member['grant_id'] and not member['connection_proof_hash'])
                     status = ('removed' if action == 'remove' else 'paused' if action == 'pause'
                         else 'legacy' if legacy else 'bound' if member['grant_id'] else 'invited')
@@ -893,7 +945,7 @@ class Rooms:
                     elif action == 'resume':
                         self.store.execute("UPDATE mcp_event_subscriptions SET state='active',version=version+1 WHERE id=? AND state='paused'", (member['subscription_id'],))
                         bridge = getattr(self.c, 'room_work_bridge', None)
-                        if bridge is not None:
+                        if bridge is not None and room['room_protocol']:
                             resumed = self.member(member['id'])
                             bridge.ensure(resumed, principal)
                             if resumed['grant_id'] and resumed['status'] != 'legacy':
@@ -1106,6 +1158,11 @@ class Rooms:
         # proof into its next request. Passive room/flow reads still reveal none.
         identity = {key: verified_args[key] for key in
             ('conversation_id', 'member_id', 'binding_generation', 'connection_proof')}
+        room = self.store.one('SELECT room_protocol FROM conversation_rooms WHERE id=?', (member['conversation_id'],))
+        if not room['room_protocol']:
+            return {'member': self.member_view(member), 'business_task_created': False, 'consumer_lease_created': False,
+                'room_migration_required': True,
+                'next_step': '当前成员的真实连接验证已完成。房间仍只读；等待房主在全部原连接处理完毕后明确激活房间。不要领取业务输入、创建任务或轮询。'}
         return {'member': self.member_view(member), 'business_task_created': False, 'consumer_lease_created': False,
             'next_request': checked_request('collaboration_room_inbox', identity),
             'next_step': '连接检查已完成。用 next_request 读取原收件箱。只在有当前可处理输入时，'
@@ -1138,6 +1195,7 @@ class Rooms:
 
     def invoke(self, action, raw, principal):
         handlers = {'room_list': self.listing, 'room_view': self.read, 'room_create': self.create,
+            'room_migrate': self.migrate_room,
             'room_update': self.update, 'room_projects': self.projects, 'room_project_impact': self.project_impact,
             'room_member_create': self.create_member,
             'room_connect': self.connect_read, 'room_connect_resume': self.connect_action,

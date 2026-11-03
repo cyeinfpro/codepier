@@ -43,6 +43,11 @@ def install_routes(router, auth, runtime):
         body = await request.json()
         return await store.run(lambda: service.rooms.projects({**body, 'conversation_id': identifier}, auth.admin(request, True)))
 
+    @router.post('/rooms/{identifier}/migration')
+    async def migrate_room(request: Request, identifier: str):
+        body = await request.json()
+        return await store.run(lambda: service.rooms.migrate_room({**body, 'conversation_id': identifier}, auth.admin(request, True)))
+
     @router.get('/rooms/{identifier}/projects/impact')
     async def project_impact(request: Request, response: Response, identifier: str,
                              expected_version: int = Query(ge=1),

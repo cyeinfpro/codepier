@@ -84,7 +84,8 @@ class RoomWorkBridge:
                     'capabilities':capabilities,'execution_target':targets[0] if targets else 'project_agent',
                     **({'execution_targets':targets} if targets else {}),
                     'acknowledge_unsandboxed_exec':'execute' in capabilities,'confirm_tasks':True,
-                    'idempotency_key':'room-adapter:'+digest([member['id'],member['binding_generation'],fingerprint,capabilities,targets])},owner)
+                    'idempotency_key':'room-adapter:'+digest([member['id'],member['binding_generation'],fingerprint,capabilities,targets])},owner,
+                    room_member_id=member['id'])
                 identifier=result['dot']['id']
                 now=self.c.clock()
                 self.store.execute("""INSERT INTO room_member_work_bridges
@@ -157,7 +158,8 @@ class RoomWorkBridge:
             if slot['state']=='registered' and slot['grant_id']!=principal.grant_id:
                 raise DevError('ROOM_WORK_BINDING_CHANGED','原执行连接属于另一个身份，请明确更换成员绑定',409)
             result=self.c.dots.join({'code':slot['join_code'],
-                'idempotency_key':'room-adapter-join:'+digest([dot['id'],member['binding_generation'],principal.grant_id])},principal)
+                'idempotency_key':'room-adapter-join:'+digest([dot['id'],member['binding_generation'],principal.grant_id])},principal,
+                room_member_id=member['id'])
             dot=self.c.dots.find(dot['id'])
             policy=self.store.one('SELECT * FROM delegation_policies WHERE id=?',(dot['policy_id'],))
             self.store.execute("""UPDATE room_member_work_bridges SET policy_id=?,policy_version=?,policy_digest=?,updated=? WHERE legacy_dot_id=?""",

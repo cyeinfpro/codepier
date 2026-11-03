@@ -10,36 +10,36 @@ from types import SimpleNamespace
 
 import pytest
 
-from hub.collaboration.rooms import Rooms, migrate as migrate_rooms
-from hub.collaboration.room_channels import RoomChannels, migrate as migrate_channels
-from hub.collaboration.room_runtime import RoomRuntime, migrate as migrate_runtime
-from hub.collaboration.room_work_bridge import RoomWorkBridge, migrate as migrate_bridge
 from shared.util import DevError
 from tests.collaboration_support import collab as collab, key
-from tests.test_collaboration_dot_chat import duplex
+from tests.test_room_migration_boundary import legacy, verify_legacy_member, activate
 from tests.test_weixin_qr_enrollment import confirm
 from tests.test_dot_weixin_channel import packet
 
 
 def install(c):
-    with c.s.store.transaction():
-        for migrate in (migrate_rooms,migrate_channels,migrate_runtime,migrate_bridge):
-            migrate(c.s.store.db)
-    c.s.rooms=Rooms(c.s)
-    c.s.room_channels=RoomChannels(c.s)
-    c.s.room_runtime=RoomRuntime(c.s)
-    c.s.room_work_bridge=RoomWorkBridge(c.s)
-    enqueued=[]
-    c.s.room_consumers=SimpleNamespace(enqueue=lambda message,member,principal: enqueued.append((message['id'],member['id'])))
     c.s.config=replace(c.s.config,weixin_enabled=True)
-    c.member=c.s.store.one('SELECT * FROM room_members WHERE legacy_dot_id=?',(c.slot['id'],))
-    c.conversation_id=c.slot['conversation_id']
+    c.joined=asyncio.run(verify_legacy_member(c,c.member))
+    assert activate(c)['activated']
+    room=c.s.rooms.read({'conversation_id':c.conversation_id},c.owner)['room']
+    c.s.rooms.projects({'conversation_id':c.conversation_id,'expected_version':room['version'],
+        'projects':[c.scope], 'member_approvals':[{'member_id':c.member['id'],
+            'project_scopes':[{'project_id':c.scope['project'],'environment_id':c.scope['environment_id'],
+                'capabilities':['read'],'execution_targets':[]}]}], 'idempotency_key':key()},c.owner)
+    c.member=c.s.rooms.member(c.member['id'],c.conversation_id)
+    enqueued=[]
+    original=c.s.room_consumers.enqueue
+    def record(message,member,principal):
+        result=original(message,member,principal)
+        enqueued.append((message['id'],member['id']))
+        return result
+    c.s.room_consumers.enqueue=record
     return enqueued
 
 
 @pytest.fixture
 def room_channel(collab):
-    c=duplex(collab)
+    c=legacy(collab)
     c.enqueued=install(c)
     provider=SimpleNamespace(starts=0,response={'status':'wait'})
     class Provider:
@@ -100,11 +100,14 @@ def test_same_flow_completes_qr_identity_pair_and_until_revoked_tasks(room_chann
     claim=c.s.weixin.claim_poll(flow['account_id'])
     c.s.weixin.commit_updates(claim,packet(1,flow['binding']['pairing_challenge'],create_time_ms=int(c.clock[0]*1000)+1))
     current=c.s.room_channels.read(flow['id'],c.owner)['flow']
+    assert current['stage']=='confirm_owner' and not current['work_authorized']
+    current=action(c,current,'confirm_owner',confirm_peer_id=current['binding']['pending_peer_id'])
     assert current['stage']=='ready' and current['peer_verified'] and current['work_authorized']
     assert len(c.s.store.all('SELECT * FROM weixin_accounts'))==1
     assert len(c.s.store.all('SELECT * FROM weixin_bindings'))==1
     assert not c.s.store.all('SELECT * FROM coordination_work')
-    assert c.s.channel_owner.current(current['binding']['id'])['state']=='active'
+    assert c.s.store.one('SELECT state FROM room_channel_owner_authorizations WHERE binding_id=?',
+        (current['binding']['id'],))['state']=='active'
 
 
 def test_login_and_chat_pairing_never_imply_owner_execution(room_channel):

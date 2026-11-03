@@ -8,10 +8,19 @@ from __future__ import annotations
 
 import json
 import uuid
+from typing import Literal
 
+from pydantic import Field
+from shared.collaboration_contracts import Model, Key
 from shared.room_runtime_contracts import ChannelConnect, ChannelAction
 from hub.collaboration.common import canonical, digest, validate
 from shared.util import DevError
+
+
+class LegacyChannelPause(Model):
+    channel: Literal['weixin','telegram']
+    expected_version: int = Field(strict=True,ge=1)
+    idempotency_key: Key
 
 
 def migrate(db):
@@ -75,6 +84,7 @@ class RoomChannels:
             principal, conversation = self.owner(principal, args['conversation_id'])
             self.c.weixin.require_enabled(principal)
             def save():
+                self.c.rooms.require_native(conversation)
                 current = self.store.one("SELECT * FROM room_channel_flows WHERE conversation_id=? AND state='active'", (conversation['id'],))
                 if current:
                     if args['account_id'] and current['account_id'] and args['account_id'] != current['account_id']:
@@ -97,6 +107,96 @@ class RoomChannels:
                 return {'flow_id': identifier}
             result = self.receipt(principal, conversation, 'channel_create', args, save)
             return self.read(result['flow_id'], principal)
+
+    def legacy_stop_scope(self,channel,raw,principal,model,binding_id):
+        """Private safe-stop authorization; this grants no project access."""
+        args=validate(model,raw)
+        if channel not in {'weixin','telegram'} or args.get('action') not in {'pause','revoke'} or args.get('binding_id')!=binding_id:
+            raise DevError('LEGACY_CHANNEL_STOP_REQUIRED','此内部入口仅允许精确暂停或撤销原渠道',403)
+        principal,conversation=self.c.rooms.owner(principal,args['conversation_id'],include_archived=True)
+        binding=self.store.one('SELECT * FROM '+channel+'_bindings WHERE id=? AND conversation_id=? AND owner_user_id=? AND space_id=?',
+            (binding_id,conversation['id'],principal.user_id,principal.space_id))
+        if (not binding or channel=='weixin' and binding.get('native_member_id')
+                or args['project']!=binding['project_id'] or args['environment_id']!=binding['environment_id']):
+            raise DevError('LEGACY_CHANNEL_NOT_FOUND','此房间没有这条旧渠道连接',404)
+        partition=self.store.one('''SELECT * FROM collaboration_rooms WHERE id=? AND owner_user_id=? AND space_id=?
+            AND project_id=? AND environment_id=?''',(binding['room_id'],principal.user_id,principal.space_id,
+                binding['project_id'],binding['environment_id']))
+        if not partition:
+            raise DevError('LEGACY_CHANNEL_NOT_FOUND','原渠道的历史分区记录不存在',404)
+        return args,principal,partition,binding
+
+    def stop_legacy(self,conversation_id,binding_id,channel,action,expected_version,request_key,principal):
+        self.store.require_transaction()
+        principal,conversation=self.c.rooms.owner(principal,conversation_id,include_archived=True)
+        if channel not in {'weixin','telegram'} or action not in {'pause','revoke'}:
+            raise DevError('LEGACY_CHANNEL_STOP_REQUIRED','仅允许安全暂停或撤销旧渠道',403)
+        binding=self.store.one('SELECT * FROM '+channel+'_bindings WHERE id=? AND conversation_id=? AND owner_user_id=? AND space_id=?',
+            (binding_id,conversation_id,principal.user_id,principal.space_id))
+        if not binding or channel=='weixin' and binding.get('native_member_id'):
+            raise DevError('LEGACY_CHANNEL_NOT_FOUND','此房间没有这条旧渠道连接',404)
+        result=getattr(self.c,channel).control({'project':binding['project_id'],
+            'environment_id':binding['environment_id'],'conversation_id':conversation_id,
+            'binding_id':binding_id,'expected_version':expected_version,'action':action,'idempotency_key':request_key},
+            principal,room_owner_binding=binding_id)
+        # Stop only original Goals whose source belongs to this exact channel.
+        # A private adapter or unrelated work on the same project is not enough.
+        goals=self.store.all('''SELECT DISTINCT g.* FROM coordination_goals g
+            JOIN delegation_requests d ON d.goal_id=g.id JOIN collaboration_messages m ON m.id=d.message_id
+            LEFT JOIN collaboration_messages parent ON parent.id=m.reply_to_id
+            LEFT JOIN channel_owner_messages proof ON proof.message_id=m.id
+            LEFT JOIN channel_owner_authorizations a ON a.id=proof.authorization_id
+            WHERE g.conversation_id=? AND (a.binding_id=?
+                OR json_extract(m.body,'$.external_origin.binding_id')=?
+                OR json_extract(parent.body,'$.external_origin.binding_id')=?)''',
+            (conversation_id,binding_id,binding_id,binding_id))
+        for goal in goals:
+            if goal['state'] in {'active','paused'}:
+                self.c.coordination.stop_work(goal,'ROOM_LEGACY_CHANNEL_STOPPED')
+                self.store.execute("UPDATE coordination_goals SET state='paused',version=version+1,updated=? WHERE id=? AND state='active'",
+                    (self.c.clock(),goal['id']))
+        self.c.channel_owner.revoke(binding_id,'room_migration_'+action)
+        return result
+
+    def pause_legacy(self,conversation_id,binding_id,raw,principal):
+        """Exact owner-only stop for migrated history that has no new flow."""
+        args=validate(LegacyChannelPause,raw)
+        with self.store.transaction():
+            principal,conversation=self.c.rooms.owner(principal,conversation_id,include_archived=True)
+            table=args['channel']+'_bindings'
+            binding=self.store.one('SELECT * FROM '+table+' WHERE id=? AND conversation_id=? AND owner_user_id=? AND space_id=?',
+                (binding_id,conversation_id,principal.user_id,principal.space_id))
+            if not binding or args['channel']=='weixin' and binding.get('native_member_id'):
+                raise DevError('LEGACY_CHANNEL_NOT_FOUND','此房间没有这条旧渠道连接',404)
+            def stop():
+                result=self.stop_legacy(conversation_id,binding_id,args['channel'],'pause',args['expected_version'],
+                    args['idempotency_key'],principal)
+                current=self.store.one('SELECT version FROM '+table+' WHERE id=?',(binding_id,))
+                self.c.rooms.change(conversation_id,'channel_binding',binding_id,current['version'])
+                return result
+            self.receipt(principal,conversation,'legacy_channel_pause:'+args['channel']+':'+binding_id,args,stop)
+            current=self.store.one('SELECT id,state,version FROM '+table+' WHERE id=?',(binding_id,))
+            return {'conversation_id':conversation_id,'binding':{**current,'channel':args['channel']},
+                'paused':current['state']=='paused','automatic_replay':False}
+
+    def cancel_legacy_login(self,flow,principal):
+        """Close only this owner's original QR without reviving project access."""
+        self.store.require_transaction()
+        principal,conversation=self.c.rooms.owner(principal,flow['conversation_id'],include_archived=True)
+        current=self.store.one('''SELECT * FROM room_channel_flows WHERE id=? AND conversation_id=?
+            AND owner_user_id=? AND space_id=?''',
+            (flow['id'],conversation['id'],principal.user_id,principal.space_id))
+        if not current or current['native'] or current['enrollment_id']!=flow['enrollment_id']:
+            raise DevError('CONNECT_FLOW_NOT_FOUND','此房间没有这条原扫码流程',404)
+        partition=self.store.one('''SELECT r.* FROM collaboration_rooms r JOIN weixin_enrollments e ON e.room_id=r.id
+            WHERE e.id=? AND e.conversation_id=? AND e.owner_user_id=? AND e.space_id=?
+            AND r.owner_user_id=? AND r.space_id=? AND r.project_id=? AND r.environment_id=?''',
+            (current['enrollment_id'],conversation['id'],principal.user_id,principal.space_id,
+             principal.user_id,principal.space_id,current['project_id'],current['environment_id']))
+        if not partition:
+            raise DevError('WEIXIN_ENROLLMENT_NOT_FOUND','当前房主与话题没有此原扫码请求',404)
+        enrollment=self.c.weixin.qr.row(current['enrollment_id'],principal,partition,conversation['id'])
+        return self.c.weixin.qr.cancel_record(enrollment,enrollment['version'])
 
     def member(self, conversation, identifier='', *, required=True):
         explicit=bool(identifier)
@@ -147,7 +247,7 @@ class RoomChannels:
             value['account_connected'] = account['state'] == 'active'
             stage, action = ('confirm_binding','bind') if account['state'] == 'active' else ('needs_reconnect','start_qr')
             if account['state'] == 'active':
-                conflict = self.store.one("SELECT id,conversation_id,version FROM weixin_bindings WHERE account_id=? AND state!='revoked' AND conversation_id!=?", (account['id'], row['conversation_id']))
+                conflict = self.store.one("SELECT id,conversation_id,version FROM weixin_bindings WHERE account_id=? AND state!='revoked' AND id!=?", (account['id'], row['binding_id']))
                 if conflict:
                     value['existing_binding'] = conflict
                     stage, action = 'route_conflict', 'migrate'
@@ -220,7 +320,7 @@ class RoomChannels:
             'confirm_binding':'确认此房间的私聊范围','waiting_member':'先为此房间添加 dot',
             'waiting_project':'先为原连接关联项目','pairing':'在本人微信私聊发送配对码',
             'pairing_expired':'配对码已过期','confirm_owner':'确认本人联系人','ready':'微信已连接',
-            'needs_reconnect':'微信需要重新连接','route_conflict':'此微信已连接另一个房间',
+            'needs_reconnect':'微信需要重新连接','route_conflict':'此微信已有连接，需明确迁移',
             'paused':'微信已暂停','disconnected':'微信已断开','cancelled':'接入已取消','closed':'微信已解除'}.get(stage,'等待连接')
         value['display']={'title':title,'primary_action':action,'reason':value.get('reason_code','')}
         value['actions'] = [{'action': action, 'label': self.action_label(action)}] if action else []
@@ -239,6 +339,11 @@ class RoomChannels:
             if retained and value.get('qr',{}).get('state') not in {None,'accepted','cancelled'}:
                 value['actions'].append({'action':'cancel','label':'取消本次扫码'})
             value['actions'].append({'action':'disconnect' if retained else 'cancel','label':'解除连接' if retained else '取消'})
+        if not conversation.get('room_protocol') or not row.get('native'):
+            value['actions']=[item for item in value['actions'] if item['action'] in {'pause','disconnect','cancel','revoke_tasks'}]
+            action=value['actions'][0]['action'] if value['actions'] else ''
+            value['primary_action']=action
+            value['display'].update(primary_action=action,reason='现有连接仅可安全停用；请完成房间切换后使用新连接。')
         value['allowed_actions']=[item['action'] for item in value['actions']]
         value['next_request'] = {'method':'POST','path':'/api/collaboration/channel-connect-flows/' + row['id'] + '/actions',
             'body':{'action':action,'expected_version':row['version'],
@@ -304,10 +409,18 @@ class RoomChannels:
         return await self.store.run(self.local_action, args, principal)
 
     def check_action(self, row, principal, conversation, args):
+        self.write_guard(row,conversation,args['action'])
         if row['version'] != args['expected_version']:
             raise DevError('STALE_VERSION','接入状态已更新，请保留当前选择并刷新',409)
         if row['state'] != 'active':
             raise DevError('CONNECT_FLOW_CLOSED','此流程已结束，不接受迟到操作',409)
+
+    def write_guard(self,row,conversation,action):
+        if action in {'pause','disconnect','cancel','revoke_tasks'}:
+            return
+        self.c.rooms.require_native(conversation)
+        if not row.get('native'):
+            self.c.rooms.migration.legacy_write(conversation['id'])
 
     def prepare_network(self, args, principal):
         with self.store.transaction():
@@ -321,6 +434,7 @@ class RoomChannels:
                     raise DevError('IDEMPOTENCY_CONFLICT','同一请求标识不能用于不同接入动作',409)
                 if saved.get('complete'):
                     return None
+                self.write_guard(row,conversation,args['action'])
                 return saved['request'], saved['generation']
             self.check_action(row,principal,conversation,args)
             view = self.view(row,principal,conversation)
@@ -350,6 +464,7 @@ class RoomChannels:
         with self.store.transaction():
             row,principal,conversation=self.get(args['flow_id'],principal)
             if row['state']=='active' and row['version']==generation:
+                self.write_guard(row,conversation,args['action'])
                 self.store.execute('UPDATE room_channel_flows SET enrollment_id=?,version=version+1,updated=? WHERE id=?',
                                    (result['enrollment_id'],self.c.clock(),row['id']))
             self.store.execute('''UPDATE room_runtime_receipts SET result=? WHERE owner_user_id=? AND conversation_id=? AND action=? AND request_key=?''',
@@ -401,6 +516,9 @@ class RoomChannels:
                         raise DevError('CHANNEL_BINDING_REQUIRED','此流程还没有微信绑定',409)
                     if binding.get('native_member_id'):
                         self.native.control(binding,args,principal)
+                    elif action in {'pause','disconnect'}:
+                        self.stop_legacy(binding['conversation_id'],binding['id'],'weixin',
+                            'revoke' if action=='disconnect' else 'pause',binding['version'],request_key,principal)
                     else:
                         self.c.weixin.control({**scope,'binding_id':binding['id'],'expected_version':binding['version'],
                             'action':{'confirm_owner':'activate','disconnect':'revoke'}.get(action,action),
@@ -411,22 +529,19 @@ class RoomChannels:
                     binding=self.store.one("SELECT * FROM weixin_bindings WHERE account_id=? AND state!='revoked'",(row['account_id'],))
                     if not binding or args['confirm_migrate_binding_id']!=binding['id'] or args['expected_binding_version']!=binding['version']:
                         raise DevError('CHANNEL_ROUTE_CONFLICT','请明确核对原房间与原绑定版本',409)
-                    self.owner(principal,binding['conversation_id'])
+                    self.c.rooms.owner(principal,binding['conversation_id'],include_archived=True)
                     if binding.get('native_member_id'):
                         self.native.control(binding,args,principal)
                     else:
-                        self.c.weixin.control({'project':binding['project_id'],'environment_id':binding['environment_id'],
-                            'conversation_id':binding['conversation_id'],'binding_id':binding['id'],'expected_version':binding['version'],
-                            'action':'revoke','idempotency_key':request_key},principal)
+                        self.stop_legacy(binding['conversation_id'],binding['id'],'weixin','revoke',
+                            args['expected_binding_version'],request_key,principal)
                 elif action=='cancel':
                     retained=None
                     if row['enrollment_id']:
                         if row.get('native'):
                             self.store.execute("UPDATE room_weixin_logins SET state='cancelled',payload='',version=version+1,updated=? WHERE id=? AND state!='accepted'",(self.c.clock(),row['enrollment_id']))
                         else:
-                            qr=self.store.one('SELECT * FROM weixin_enrollments WHERE id=?',(row['enrollment_id'],))
-                            self.c.weixin.qr.cancel({**scope,'enrollment_id':qr['id'],'expected_version':qr['version'],
-                                'idempotency_key':request_key},principal)
+                            self.cancel_legacy_login(row,principal)
                     if row['binding_id']:
                         binding=self.store.one('SELECT * FROM weixin_bindings WHERE id=?',(row['binding_id'],))
                         retained=binding if binding and binding['state'] in {'active','paused'} else None
@@ -434,8 +549,8 @@ class RoomChannels:
                             if binding.get('native_member_id'):
                                 self.native.control(binding,args,principal)
                             else:
-                                self.c.weixin.control({**scope,'binding_id':binding['id'],'expected_version':binding['version'],
-                                    'action':'revoke','idempotency_key':request_key},principal)
+                                self.stop_legacy(binding['conversation_id'],binding['id'],'weixin','revoke',
+                                    binding['version'],request_key,principal)
                     if retained:
                         updates['enrollment_id']=''
                     else:

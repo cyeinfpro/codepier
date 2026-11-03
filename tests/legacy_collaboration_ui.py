@@ -1,13 +1,32 @@
 """Explicit pre-room UI fixture for the retained wire compatibility window.
 
-Only the disposable browser's HTML entry point is changed. All JavaScript,
-styles, HTTP handlers, subscriptions and operation receipts are the real retained
-implementation. The production index never enables this entry point, and the
-new default room journeys live in test_room_center_browser.py. No assertion or
-test is skipped: these older journeys continue to exercise their original wire
-semantics while new room data uses the new single write surface.
+Only the disposable browser's HTML entry point and test-only asset requests are
+intercepted. JavaScript/styles are byte-identical historical fixtures; the HTTP
+handlers, subscriptions and operation receipts remain the real retained wire.
+Neither the production index nor the static router exposes the old UI. No test
+assertion is skipped: historical journeys keep exercising their original wire
+semantics while the default room journeys cover the new single write surface.
 """
+from pathlib import Path
 import re
+from urllib.parse import urlsplit
+
+
+LEGACY_DIRECTORY = Path(__file__).resolve().parent / 'fixtures/legacy_collaboration_ui'
+LEGACY_PREFIX = '/__tests__/legacy-collaboration-ui/'
+LEGACY_ASSET_NAMES = (
+    'collaboration.css', 'collaboration-relay.css', 'collaboration-workspace.css',
+    'collaboration-runtime.js', 'collaboration-goals.js', 'collaboration-delegation.js',
+    'collaboration-channels.css', 'collaboration-channels.js', 'collaboration-dots.js',
+    'collaboration-relay.js', 'collaboration-workspace.js', 'collaboration.js',
+)
+
+
+def legacy_asset(name):
+    """Resolve only the twelve pinned, test-only historical resources."""
+    if name not in LEGACY_ASSET_NAMES:
+        raise ValueError('Not a legacy collaboration fixture asset: ' + str(name))
+    return LEGACY_DIRECTORY / name
 
 
 LEGACY_ASSETS = '''
@@ -24,11 +43,11 @@ LEGACY_ASSETS = '''
 <script src="/static/collaboration-workspace.js" defer></script>
 <script src="/static/collaboration.js" defer></script>
 <meta name="codepier-test-surface" content="legacy-collaboration-wire-compatibility">
-'''
+'''.replace('/static/', LEGACY_PREFIX)
 
 
 def legacy_document(source):
-    """Use actual asset files; do not synthesize application or API behavior."""
+    """Use the unmodified old bytes; do not synthesize app or API behavior."""
     source, scripts = re.subn(
         r'<script\b[^>]*src="/static/collaboration-room(?:-store)?\.js(?:\?[^" ]*)?"[^>]*>\s*</script>',
         '', source,
@@ -54,4 +73,12 @@ def use_legacy_collaboration_ui(page, stack):
         assert response.status == 200
         route.fulfill(response=response, body=legacy_document(response.text()))
 
+    def fixture_asset(route):
+        name = urlsplit(route.request.url).path.removeprefix(LEGACY_PREFIX)
+        resource = legacy_asset(name)
+        route.fulfill(status=200, body=resource.read_bytes(),
+            content_type='text/css' if resource.suffix == '.css' else 'text/javascript',
+            headers={'Cache-Control': 'no-store', 'X-CodePier-Test-Surface': 'legacy-ui-fixture'})
+
+    page.route(stack.url + LEGACY_PREFIX + '*', fixture_asset)
     page.route(stack.url + '/', index)

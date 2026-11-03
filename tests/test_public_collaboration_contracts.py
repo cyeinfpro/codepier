@@ -86,6 +86,20 @@ def example(tool, action):
     return result
 
 
+def test_room_migration_is_an_explicit_owner_mutation_not_a_query():
+    assert 'room_migrate' in ACTIONS['collaboration']
+    assert 'room_migrate' not in ACTIONS['collaboration_query']
+    raw = {'action': 'room_migrate', 'flow_action': 'activate', 'conversation_id': 'original-room',
+        'expected_version': 4, 'idempotency_key': 'original-cutover-request'}
+    target, args = resolve('collaboration', raw)
+    assert target == 'collaboration_room_migrate'
+    assert args == {'action': 'activate', 'conversation_id': 'original-room',
+        'expected_version': 4, 'idempotency_key': 'original-cutover-request'}
+    for change in ({'flow_action': 'auto'}, {'expected_version': 0}, {'owner_approved': True}):
+        with pytest.raises(DevError):
+            resolve('collaboration', {**raw, **change})
+
+
 @pytest.mark.parametrize('tool,action', [(tool, action) for tool, actions in ACTIONS.items() for action in actions])
 def test_every_action_accepts_exact_shape_and_rejects_missing_or_foreign_fields(tool, action):
     definition = next(t for t in tool_definitions() if t['name'] == tool)

@@ -31,8 +31,8 @@ def boot_relay(page, source=None):
         configurable:true, get(){metrics.heightReads++;return 64;}
       });
     }''')
-    page.add_script_tag(path=str(ROOT / 'web/collaboration-runtime.js'))
-    page.add_script_tag(path=str(source or ROOT / 'web/collaboration-relay.js'))
+    page.add_script_tag(path=str(ROOT / 'tests/fixtures/legacy_collaboration_ui/collaboration-runtime.js'))
+    page.add_script_tag(path=str(source or ROOT / 'tests/fixtures/legacy_collaboration_ui/collaboration-relay.js'))
     page.evaluate('''() => {
       window.relay = CodePierCollaborationRelay.create({state,E:String,button:()=>'',
         chat:()=>c,chatScope:()=>({project:'p',environment_id:'production'}),mentionSlots:()=>[{id:'dot',duplex:true,state:'registered'}],
@@ -63,8 +63,8 @@ def measure_editor(page):
 
 def boot_workspace(page, source=None):
     page.set_content('<main></main>')
-    page.add_script_tag(path=str(ROOT / 'web/collaboration-runtime.js'))
-    page.add_script_tag(path=str(source or ROOT / 'web/collaboration-workspace.js'))
+    page.add_script_tag(path=str(ROOT / 'tests/fixtures/legacy_collaboration_ui/collaboration-runtime.js'))
+    page.add_script_tag(path=str(source or ROOT / 'tests/fixtures/legacy_collaboration_ui/collaboration-workspace.js'))
     page.evaluate('''() => {
       const esc = value => String(value ?? '').replace(/[&<>"']/g, c=>
         ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -157,7 +157,7 @@ def test_indexed_merge_preserves_identity_and_equal_version_receipt_updates(chat
     context = chat_browser_pool(engine).new_context()
     page = context.new_page()
     try:
-        page.add_script_tag(path=str(ROOT / 'web/collaboration-runtime.js'))
+        page.add_script_tag(path=str(ROOT / 'tests/fixtures/legacy_collaboration_ui/collaboration-runtime.js'))
         assert page.evaluate('''() => {
           const {merge,index}=CodePierCollaborationRuntime;
           const original=Object.freeze(Array.from({length:1000},(_,i)=>Object.freeze({
@@ -182,7 +182,7 @@ def test_motion_is_interruptible_cleans_up_and_respects_reduced_motion(chat_brow
     page = context.new_page()
     try:
         page.set_content('<section><button>Ready</button></section>')
-        page.add_script_tag(path=str(ROOT / 'web/collaboration-runtime.js'))
+        page.add_script_tag(path=str(ROOT / 'tests/fixtures/legacy_collaboration_ui/collaboration-runtime.js'))
         assert page.evaluate('''() => {
           const node=document.querySelector('section'),ui=CodePierCollaborationRuntime;
           ui.enter(node,{x:12,duration:500});ui.enter(node,{x:-12,duration:500});

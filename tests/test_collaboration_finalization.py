@@ -73,7 +73,8 @@ def test_public_source_profile_contains_collaboration_and_reviewed_docs():
         assert include(Path(name), public=True) and (ROOT / name).is_file()
     for name in ('hub/collaboration/service.py', 'hub/collaboration/events.py',
                  'hub/collaboration/monitor.py', 'shared/collaboration_contracts.py',
-                 'web/collaboration.js', 'web/collaboration.css'):
+                 'web/collaboration-room.js', 'web/collaboration-room-store.js',
+                 'web/collaboration-room.css'):
         assert name in REQUIRED_FILES and include(Path(name), public=True)
 
 

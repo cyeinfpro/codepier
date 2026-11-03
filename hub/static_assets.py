@@ -19,6 +19,17 @@ from starlette.staticfiles import StaticFiles
 from shared.util import VERSION
 
 
+# A stale installation may retain files removed from a later source archive.
+# These twelve retired UI paths are never public again, with or without a hash.
+# The old wire APIs have their own compatibility policy and are unaffected.
+RETIRED_COLLABORATION_UI = frozenset({
+    'collaboration.css', 'collaboration-relay.css', 'collaboration-workspace.css',
+    'collaboration-runtime.js', 'collaboration-goals.js', 'collaboration-delegation.js',
+    'collaboration-channels.css', 'collaboration-channels.js', 'collaboration-dots.js',
+    'collaboration-relay.js', 'collaboration-workspace.js', 'collaboration.js',
+})
+
+
 class ReleaseAssets(StaticFiles):
     def __init__(self, *, directory):
         super().__init__(directory=directory, follow_symlink=False)
@@ -55,6 +66,8 @@ class ReleaseAssets(StaticFiles):
             self.assets[name] = (digest, raw, media)
 
     async def get_response(self, path, scope):
+        if path.casefold() in RETIRED_COLLABORATION_UI:
+            return Response(status_code=404, headers={'Cache-Control': 'no-store'})
         request = Request(scope)
         hashes = request.query_params.getlist('h')
         if not hashes:

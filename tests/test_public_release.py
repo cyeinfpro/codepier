@@ -26,6 +26,23 @@ def test_public_checkout_can_build_without_private_release_record(source_tree):
     assert result['verified'] and result['skipped_selected_files'] == []
 
 
+def test_source_archive_excludes_retired_production_ui_but_keeps_exact_test_snapshot(source_tree):
+    from tests.legacy_collaboration_ui import LEGACY_ASSET_NAMES, legacy_asset
+    assert bundle.RETIRED_WEB_ASSETS == frozenset('web/' + name for name in LEGACY_ASSET_NAMES)
+    for name in LEGACY_ASSET_NAMES:
+        raw = legacy_asset(name).read_bytes()
+        (source_tree / 'web' / name).write_bytes(raw)
+        snapshot = source_tree / 'tests/fixtures/legacy_collaboration_ui' / name
+        snapshot.parent.mkdir(parents=True, exist_ok=True)
+        snapshot.write_bytes(raw)
+    destination = source_tree / 'dist/public.zip'
+    bundle.build(destination, public=True)
+    with zipfile.ZipFile(destination) as archive:
+        for name in LEGACY_ASSET_NAMES:
+            assert 'web/' + name not in archive.namelist()
+            assert archive.read('tests/fixtures/legacy_collaboration_ui/' + name) == legacy_asset(name).read_bytes()
+
+
 def test_selected_symlink_directory_is_not_silently_omitted(source_tree):
     outside = source_tree / 'outside'
     outside.mkdir()

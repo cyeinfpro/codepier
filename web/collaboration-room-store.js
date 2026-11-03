@@ -45,6 +45,28 @@ window.CodePierRoomStore = (() => {
     const emit = (domain) => state.listeners.forEach((fn) => fn(domain, state));
     const path = (id = state.roomId) => '/api/collaboration/rooms/' + encodeURIComponent(id);
     const key = () => 'room:' + (crypto.randomUUID?.() || Date.now() + ':' + Math.random());
+    const roomProjection = (id = state.roomId) =>
+      (state.room?.id === id && state.room) || state.rooms.find((room) => room.id === id);
+    function writable(id = state.roomId) {
+      const room = roomProjection(id);
+      return (
+        !!room && !room.read_only && !room.legacy && !['paused', 'archived'].includes(room.state)
+      );
+    }
+    function assertWritable(id) {
+      // This is a local stale-view fence. Every write is independently checked
+      // by Hub; a receipt never overrides a known read-only room projection.
+      const room = roomProjection(id);
+      if (room && !writable(id))
+        throw Object.assign(
+          new Error(
+            room.legacy
+              ? '原房间当前只读。完成迁移并明确启用后才能发送；草稿已保留。'
+              : '房间当前只读，草稿与原回执已保留。',
+          ),
+          { code: 'ROOM_READ_ONLY' },
+        );
+    }
     function clearWindows() {
       messageReceipts.clear();
       workReceipts.clear();
@@ -586,6 +608,7 @@ window.CodePierRoomStore = (() => {
       if (entry.owner === state.owner && entry.roomId === state.roomId) emit('draft');
     }
     function addFiles(files, roomId = state.roomId) {
+      assertWritable(roomId);
       const target = draft(roomId);
       if (target.files.length + files.length > 16) throw new Error('每条消息最多添加 16 个附件。');
       if (files.some((file) => !file.size || file.size > 8 * 1024 * 1024))
@@ -613,6 +636,11 @@ window.CodePierRoomStore = (() => {
       const present = () =>
         entry.owner === state.owner && state.drafts.get(entry.roomId)?.files.includes(entry);
       if (!present()) return Promise.resolve();
+      try {
+        assertWritable(entry.roomId);
+      } catch (error) {
+        return Promise.reject(error);
+      }
       entry.state = 'uploading';
       entry.error = '';
       fileChanged(entry);
@@ -717,6 +745,7 @@ window.CodePierRoomStore = (() => {
       const owner = state.owner;
       const epoch = state.epoch;
       if (receipt && receipt.owner !== owner) return;
+      assertWritable(receipt?.roomId || state.roomId);
       if (!receipt && draft().files.some((entry) => entry.state !== 'ready'))
         throw new Error('请等待附件上传完成，或移除未完成的附件。');
       if (!receipt && draft().contextCorrection && draft().work)
@@ -784,6 +813,7 @@ window.CodePierRoomStore = (() => {
       state,
       path,
       key,
+      writable,
       reset,
       abort,
       invalidateReads,

@@ -68,7 +68,7 @@ class RoomConsumers(FencedConsumerEngine):
                    if pending else self.c.rooms.member(member['id'], room['id']))
         actor = principal or self.c.rooms.principal(current)
         self.c.rooms.member_scope(actor, room['id'], current['id'], current['binding_generation'],
-                                  **({'pending': True} if pending else {}))
+                                  pending=True)
         internal = self.generation(current)
         if generation is not None and generation != internal:
             raise DevError('ROOM_BINDING_CHANGED', '消费者绑定已改变，请恢复当前成员连接', 409)
@@ -108,6 +108,7 @@ class RoomConsumers(FencedConsumerEngine):
 
     def guard_session(self, raw, principal, room, member, *, require_revision=True):
         """For original work APIs, session proof also binds the stable member."""
+        self.c.rooms.require_native(room)
         if not member['probe_replied_at']:
             raise DevError('ROOM_PROBE_REQUIRED', '先完成当前成员的真实通知读取和回复验证', 409)
         binding, _ = self.binding(room, member, principal)
@@ -133,7 +134,7 @@ class RoomConsumers(FencedConsumerEngine):
         """An actual host callback, with no business message or work creation."""
         room = self.store.one('SELECT * FROM conversation_rooms WHERE id=?', (member['conversation_id'],))
         binding, sub = self.binding(room, member)
-        if member.get('_pending_binding'):
+        if member.get('_pending_binding') or not room['room_protocol']:
             self._wake(member, 'connection:' + sub['id'] + ':' + str(sub['version']))
             return
         self.activate(room, member, member, binding['generation'], sub['id'])
@@ -144,6 +145,8 @@ class RoomConsumers(FencedConsumerEngine):
     def binding_activated(self, member):
         """Called inside the atomic cutover, after the pending probe succeeded."""
         room = self.store.one('SELECT * FROM conversation_rooms WHERE id=?', (member['conversation_id'],))
+        if not room['room_protocol']:
+            return  # Verified member, but the owner has not switched the room.
         generation = self.generation(member)
         self.activate(room, member, member, generation, member['subscription_id'])
         self.catch_up(member)

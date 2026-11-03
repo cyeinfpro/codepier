@@ -118,6 +118,7 @@ class ChannelEnrollment:
                     'changes_underlying_grant': False, 'authorizes_file_egress': False}
 
     def prepare(self, channel, args, principal, room, account, dot):
+        self.c.rooms.migration.legacy_write(dot['conversation_id'])
         consent = args.get('owner_preapproval')
         if consent is None:
             return
@@ -133,6 +134,7 @@ class ChannelEnrollment:
             return
         transport = self.transport(channel)
         binding = transport.binding(identifier, principal, room)
+        self.c.rooms.migration.legacy_write(binding['conversation_id'])
         account = transport.account(binding['account_id'], principal)
         dot = self.c.dots.find(binding['dot_id'])
         scope = self.snapshot(channel, account, dot, room, principal)
@@ -179,6 +181,7 @@ class ChannelEnrollment:
         return record, scope
 
     def complete(self, channel, binding, owner, room, dot, peer, external_id):
+        self.c.rooms.migration.legacy_write(binding['conversation_id'])
         record, scope = self.validate_pending(channel, binding, owner, room, dot, peer)
         if channel == 'telegram':
             if self.store.one("SELECT 1 FROM telegram_bindings WHERE account_id=? AND user_id=? AND chat_id=? AND state='active' AND id!=?",
@@ -214,6 +217,7 @@ class ChannelEnrollment:
         record = self.current(binding['id'])
         if not record or record['state'] != 'pending':
             return False
+        self.c.rooms.migration.legacy_write(binding['conversation_id'])
         # Legacy/manual pairing remains available, but only a current pending
         # record can automatically activate any task authority.
         try:

@@ -55,6 +55,7 @@ class WeixinService:
         conversation = self.c.conversations.resolve(principal, room, args)
         args['conversation_id'] = conversation['id']
         if enabled:
+            self.c.rooms.migration.legacy_write(conversation['id'])
             self.c.live_room(room)
             self.require_enabled(principal)
         return args, principal, room
@@ -130,6 +131,9 @@ class WeixinService:
                         raise DevError('WEIXIN_ACCOUNT_QUOTA', '已登记机器人数量达到明确上限；不覆盖其他账号或绕过房间预算', 409)
                 if (old['credential_version'] if old else 0) != args['expected_version']:
                     raise DevError('STALE_VERSION', '微信账号版本已变化', 409)
+                if old:
+                    for bound in self.store.all("SELECT conversation_id FROM weixin_bindings WHERE account_id=? AND state!='revoked'",(old['id'],)):
+                        self.c.rooms.migration.legacy_write(bound['conversation_id'])
                 now, identifier = self.c.clock(), old['id'] if old else uuid.uuid4().hex
                 self.store.execute('''INSERT INTO weixin_accounts
                     (id,space_id,owner_user_id,bot_id,label,api_base,secret,state,credential_version,cursor,created,updated)
@@ -207,13 +211,19 @@ class WeixinService:
                         'instructions': ('请仅用本人微信向此机器人私聊发送一次性授权码；验证后自动连接并开通摘要中的任务范围，无需返回面板确认。' if args.get('owner_preapproval') else '在准备绑定的微信私聊中发送此一次性配对码；回到面板核对真实 peer 编号后明确激活。扫码人身份不自动等同房主。')}
             return self.c.mutation(principal, room, 'weixin_bind', args, save)
 
-    def control(self, raw, principal):
+    def control(self, raw, principal, *, room_owner_binding=None):
         with self.store.transaction():
-            args, principal, room = self.owner(raw, principal, models.Control, enabled=False)
-            binding = self.binding(args['binding_id'], principal, room)
+            if room_owner_binding is not None:
+                args,principal,room,binding=self.c.room_channels.legacy_stop_scope('weixin',raw,principal,models.Control,room_owner_binding)
+            else:
+                args, principal, room = self.owner(raw, principal, models.Control, enabled=False)
+                binding = self.binding(args['binding_id'], principal, room)
 
             def save():
-                current = self.binding(binding['id'], principal, room)
+                current=(self.c.room_channels.legacy_stop_scope('weixin',args,principal,models.Control,room_owner_binding)[3]
+                    if room_owner_binding is not None else self.binding(binding['id'], principal, room))
+                if args['action'] not in {'pause','revoke'}:
+                    self.c.rooms.migration.legacy_write(current['conversation_id'])
                 if current['version'] != args['expected_version']:
                     raise DevError('STALE_VERSION', '微信绑定已变化，请重新核对', 409)
                 action = args['action']
@@ -384,6 +394,7 @@ class WeixinService:
     def ingest_one(self, binding, account, owner, room, dot, message):
         if binding.get('native_member_id'):
             return self.c.room_channels.native.ingest(binding,account,owner,room,dot,message)
+        self.c.rooms.migration.legacy_write(binding['conversation_id'])
         if not isinstance(message, dict):
             raise DevError('WEIXIN_MESSAGE_INVALID', '消息不是结构化对象；整批保留原游标', 422)
         peer = text(message.get('from_user_id'), 256)
