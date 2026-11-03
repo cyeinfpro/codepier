@@ -611,9 +611,16 @@ def test_native_room_real_agent_restart_stop_continue_and_unique_publication(tmp
         assert stop_seconds < 5, 'One local stop request stalled behind the Agent command'
         assert paused['work']['id'] == goal_id
         assert [operation['operation_id'] for operation in paused['operations']] == [first['operation_id']]
-        cancellation = mcp(s, 'process', {'operation': 'cancel',
-            'operation_ids': [first['operation_id']]})['operations'][0]
+        # Pausing the goal itself requests cancellation. The original operation
+        # may already have reached its terminal state before this explicit check.
+        cancel_result = s.mcp('process', {'operation': 'cancel',
+            'operation_ids': [first['operation_id']]})
+        cancellation = cancel_result['structuredContent']['operations'][0]
         assert cancellation['operation_id'] == first['operation_id']
+        if cancel_result.get('isError'):
+            assert cancellation['state'] == 'cancelled' and cancellation['cancel_requested'] is False, cancel_result
+        else:
+            assert cancellation['cancel_requested'] is True or cancellation['state'] == 'cancelled', cancel_result
         terminal = s.poll(first['operation_id'], timeout=20)
         assert terminal['state'] == 'cancelled', terminal
         assert (s.projectalpha / 'native-first-effects').read_text() == '1'

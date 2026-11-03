@@ -59,6 +59,20 @@ def test_legacy_room_read_only_safe_stop_explicit_cutover_and_original_receipt(
     room_id = room['id']
     context = chat_browser_pool(engine).new_context(viewport={'width': 1280, 'height': 1050})
     page = context.new_page()
+    page.add_init_script("""(() => {
+      window.panelTrace=[];
+      for(const method of ['showModal','close']) {
+        const original=HTMLDialogElement.prototype[method];
+        HTMLDialogElement.prototype[method]=function(...args){
+          panelTrace.push({method,at:performance.now(),open:this.open,stack:new Error().stack});
+          return original.apply(this,args);
+        };
+      }
+      document.addEventListener('close',event=>panelTrace.push({event:'close',at:performance.now(),open:event.target.open}),true);
+      document.addEventListener('cancel',event=>panelTrace.push({event:'cancel',at:performance.now(),open:event.target.open}),true);
+      document.addEventListener('click',event=>{const button=event.target.closest('[data-cr-action]');
+        if(button)panelTrace.push({event:'click',action:button.dataset.crAction,at:performance.now()});},true);
+    })()""")
     errors, writes, activations = [], [], []
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.on('request', lambda request: writes.append(request.url)
@@ -155,6 +169,9 @@ def test_legacy_room_read_only_safe_stop_explicit_cutover_and_original_receipt(
         page.locator('[data-cr-action="member-detail"]').click()
         page.locator('[data-cr-action="remove-member"]').click()
         page.locator('[data-cr-action="confirm-remove-member"]').click()
+        # The confirmation panel has no member rows, so wait for the refreshed
+        # members panel itself before asserting the member was removed.
+        expect(page.locator('dialog [data-cr-action="add-member"]')).to_be_disabled()
         expect(page.locator('.cr-member')).to_have_count(0)
         page.keyboard.press('Escape')
         page.locator('[data-cr-migration-open]').click()
@@ -242,6 +259,7 @@ def test_legacy_room_read_only_safe_stop_explicit_cutover_and_original_receipt(
         expect(page.locator('.cr-message')).to_have_count(2)
         assert not errors, errors
     finally:
+        print('PANEL_TRACE', page.evaluate('window.panelTrace || []'))
         context.close()
 
 
