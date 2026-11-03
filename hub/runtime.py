@@ -29,11 +29,13 @@ from hub.artifacts import ArtifactService
 from hub.native_cli import NativeService
 from shared.agent_lifecycle import DEVICE_ACTIONS, public_management
 from shared.runtime_panel_contracts import PANEL_RUNTIME_TOOLS
+from shared.agent_roots_contracts import PANEL_ROOTS_TOOLS
 from shared.contracts import TOOLS, PROCESS_TOOLS, MUTATING, OPERATION_WAIT_SECONDS, OPERATION_OUTPUT_LIMIT, required_scope
 from shared.computer_contracts import COMPUTER_TOOLS
 from shared.computer_media import scrub_expired, purge_database
 from shared.crypto import SecureChannel, digest, token
 from shared.util import DevError, safe_summary
+from shared.filesystem_errors import safe_filesystem_error_detail
 from shared.tool_protocol import advertisement, catalog_digest, negotiate, require_compatible, validate_call_epoch, wire_version
 from shared.execution_policy import (DENIAL_MESSAGE, COMPUTER_DENIAL_MESSAGE, COMPUTER_DENIAL_CODE,
     InvocationInspector, hub_blocks_codex, hub_blocks_computer, hub_execution_policy,
@@ -332,6 +334,9 @@ class Runtime:
         columns = "id,grant_id,project_id,device_id,tool,state,space_id,owner_user_id,visibility,args_summary" if status_only else "*"
         row = self.store.one(f"SELECT {columns} FROM operations WHERE id=?", (id,))
         principal = iam.require_record(self.store, principal, row)
+        if row['tool'] in PANEL_ROOTS_TOOLS:
+            from hub.agent_roots import authorize
+            principal, _ = authorize(self, principal, row['device_id'])
         if row['tool'] in PANEL_RUNTIME_TOOLS:
             from hub.runtime_panel import authorize
             principal = authorize(self, principal, {'id': row['project_id'], 'device_id': row['device_id']})
@@ -547,6 +552,8 @@ class Runtime:
 
     def _invoke(self, name: str, raw: dict, principal: Principal):
         principal = refresh_principal(self.store, principal)
+        if name in PANEL_ROOTS_TOOLS:
+            raise DevError('OWNER_REQUIRED', '目录授权必须使用已登录面板的专用设备管理入口', 403)
         tool = TOOLS.get(name)
         if not tool:
             raise DevError("UNKNOWN_TOOL", "不存在此工具", 404)
@@ -781,6 +788,11 @@ class Runtime:
 
     def _admit_operation(self, name: str, args: dict, project: dict, principal: Principal, background=False):
         principal = refresh_principal(self.store, principal)
+        if name in PANEL_ROOTS_TOOLS:
+            from hub.agent_roots import authorize
+            principal, _ = authorize(self, principal, project['device_id'])
+            if project.get('id') is not None or args.get('device_id') != project['device_id']:
+                raise DevError('ROOTS_DEVICE_MISMATCH', '目录授权必须绑定原设备，不能借用项目或工作树', 409)
         if name in PANEL_RUNTIME_TOOLS:
             from hub.runtime_panel import authorize
             principal = authorize(self, principal, project)
@@ -851,7 +863,7 @@ class Runtime:
                     self.integrations.guard(name, args, project, principal)
                 if name in (COMPUTER_TOOLS - {"computer_session_close"}) | {"browser_open", "browser_snapshot", "browser_action"} and not self.online(project["device_id"]):
                     raise DevError("COMPUTER_OFFLINE", "设备不在线，不排队保存延迟桌面操作；恢复后重新观察", 409, admitted=False)
-                if name in DEVICE_ACTIONS and not self.online(project["device_id"]):
+                if name in DEVICE_ACTIONS | PANEL_ROOTS_TOOLS and not self.online(project["device_id"]):
                     raise DevError("DEVICE_OFFLINE", "设备当前离线；生命周期操作未排队", 409)
                 device = self.store.one("SELECT enabled FROM devices WHERE id=?", (project["device_id"],))
                 if not device or not device["enabled"]:
@@ -877,6 +889,7 @@ class Runtime:
                 lifecycle_ttl = 900 if name == "agent_update" else 120
                 deadline_seconds = (min(self.queue_seconds, 15) if name in {"computer_action", "browser_action"} else
                                     min(self.queue_seconds, 60) if name in COMPUTER_TOOLS | {"browser_open", "browser_snapshot"} else
+                                    min(self.queue_seconds, 60) if name in PANEL_ROOTS_TOOLS else
                                     min(self.queue_seconds, lifecycle_ttl) if name in DEVICE_ACTIONS else self.queue_seconds)
                 self.store.execute("INSERT INTO operations(id,device_id,project_id,actor,grant_id,tool,args_summary,fingerprint,idem,state,created,updated,payload,deadline,space_id,owner_user_id) VALUES (?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?)",
                     (id, project["device_id"], project.get("id"), principal.actor, principal.grant_id, name,
@@ -907,7 +920,7 @@ class Runtime:
             # Keep the original receipt so a lost permission is not mistaken for
             # a failed execution and replayed with a fresh idempotency key.
             raise DevError(exc.code, exc.message, exc.status, operation_id=identifier) from exc
-        value = self.unwrap(identifier, result)
+        value = self.unwrap(identifier, result, tool=row['tool'])
         if row['tool'] == 'open_workspace':
             from hub.project_views import validate_context
             args = json.loads(row['args_summary']) if row.get('args_summary') else {}
@@ -924,10 +937,14 @@ class Runtime:
             self.futures.pop(id, None)
 
     @staticmethod
-    def unwrap(id, result):
+    def unwrap(id, result, *, tool=None):
         if not result.get("ok"):
             error = result.get("error") or {}
             details = safe_detail(error)
+            details.update(safe_filesystem_error_detail(tool, error.get('code'), error))
+            # The synchronous error already carries retryable=False below;
+            # keep one explicit value, independent from remote details.
+            details.pop('retryable', None)
             if error.get('next') == 'computer_observe':
                 details['next'] = 'computer_observe'
             if error.get('input_sent') is False:
@@ -951,6 +968,9 @@ class Runtime:
     def permission_error(self, op, request):
         try:
             caller = self.operation_principal(op, request)
+            if op['tool'] in PANEL_ROOTS_TOOLS:
+                from hub.agent_roots import authorize
+                caller, _ = authorize(self, caller, op['device_id'])
             if op['tool'] in PANEL_RUNTIME_TOOLS:
                 from hub.runtime_panel import authorize
                 caller = authorize(self, caller, {'id': op['project_id'], 'device_id': op['device_id']})
@@ -1311,7 +1331,7 @@ class Runtime:
         data = result.get("data") or {}
         error = result.get("error") or {}
         state = "succeeded" if result["ok"] else "failed"
-        if error.get("code") in {"INTERRUPTED", "JOURNAL_CHANGED", "RECOVERY_DATA_INVALID", "INVALID_AGENT_RESULT", "DURABILITY_UNCONFIRMED", "COMPUTER_ACTION_UNCERTAIN", "BROWSER_ACTION_UNCERTAIN", "RUNTIME_CONTROL_UNCERTAIN", "RUNTIME_CREATION_UNCERTAIN", "RUNTIME_CLEANUP_PENDING", "RUNTIME_OPERATION_REQUIRES_RECOVERY"}:
+        if error.get("code") in {"INTERRUPTED", "JOURNAL_CHANGED", "RECOVERY_DATA_INVALID", "INVALID_AGENT_RESULT", "DURABILITY_UNCONFIRMED", "WRITE_OUTCOME_UNCONFIRMED", "STAGING_CLEANUP_UNCONFIRMED", "COMPUTER_ACTION_UNCERTAIN", "BROWSER_ACTION_UNCERTAIN", "RUNTIME_CONTROL_UNCERTAIN", "RUNTIME_CREATION_UNCERTAIN", "RUNTIME_CLEANUP_PENDING", "RUNTIME_OPERATION_REQUIRES_RECOVERY"}:
             state = "needs_review"
         elif error.get("code") == "CANCELLED" or data.get("cancelled"):
             state = "cancelled"
@@ -1322,6 +1342,9 @@ class Runtime:
                     "项目命令执行超时" if data.get("timed_out") else f"项目命令退出码 {data.get('exit_code')}；请查看原操作输出"}
         if (isinstance(data.get('runtime_cleanup'), dict) and data['runtime_cleanup'].get('pending')
                 or isinstance(data.get('runtime_outcome'), dict) and data['runtime_outcome'].get('state') == 'unconfirmed'):
+            state = 'needs_review'
+        if op['tool'] == 'agent_roots_set' and result['ok'] and (
+                data.get('state') == 'needs_review' or data.get('outcome_confirmed') is False):
             state = 'needs_review'
         if op['tool'] in COMPUTER_TOOLS and data.get('native_is_error'):
             state = 'needs_review' if data.get('action_outcome') == 'uncertain' else 'failed'

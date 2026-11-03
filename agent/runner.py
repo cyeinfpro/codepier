@@ -42,9 +42,11 @@ from agent.config import validate_config
 from agent.shell import execution_info, prepare_shell
 from shared.contracts import TOOLS, MUTATING, required_scope
 from shared.runtime_panel_contracts import PANEL_RUNTIME_TOOLS
+from shared.agent_roots_contracts import PANEL_ROOTS_TOOLS
 from shared.crypto import SecureChannel
 from shared.util import DevError, VERSION
 from shared.file_sources import safe_import_error_detail
+from shared.filesystem_errors import safe_filesystem_error_detail
 from shared.tool_protocol import advertisement, negotiate, validate_call_epoch
 from shared.execution_policy import (enforce_argv, agent_blocks_codex, agent_blocks_computer,
     computer_denial, codex_computer_target, DENIAL_MESSAGE, COMPUTER_DENIAL_MESSAGE, COMPUTER_DENIAL_CODE)
@@ -699,13 +701,14 @@ class Agent:
             # without metadata still obey the independently configured local floor.
             project = {**project, "_execution_policy": execution_policy, "_core_ssh": core_ssh,
                        '_bounded_execution': bounded_execution, '_runtime_requirement': None,
-                       '_integration_admin': False, '_integration_owner': None, '_computer_scopes': []}
+                       '_integration_admin': False, '_roots_admin': False, '_integration_owner': None, '_computer_scopes': []}
             if isinstance(integration_context, dict):
                 owner = integration_context.get('owner')
                 if not isinstance(owner, str) or not 1 <= len(owner) <= 600 or integration_context.get('device_id') != self.config['device_id']:
                     raise DevError('INTEGRATION_IDENTITY', '经过认证的执行身份无效', 403)
                 admin = integration_context.get('admin') is True and isinstance(execution_policy, dict) and execution_policy.get('origin') == 'panel'
-                project.update(_integration_owner=owner, _integration_admin=admin, _coding_owner=owner,
+                project.update(_integration_owner=owner, _integration_admin=admin,
+                    _roots_admin=bool(admin and tool in PANEL_ROOTS_TOOLS and project.get('id') is None), _coding_owner=owner,
                     _coding_device=integration_context['device_id'], device_id=integration_context['device_id'],
                     _coding_scopes=integration_context.get('scopes', []), _computer_scopes=integration_context.get('scopes', []),
                     _authority_revision=integration_context.get('authority_revision'),
@@ -747,6 +750,19 @@ class Agent:
                 self.phase(id, "lifecycle_prepared", action=tool)
             elif tool not in TOOLS or TOOLS[tool].local:
                 raise DevError("UNKNOWN_TOOL", "该操作不能由 Agent 执行")
+            elif tool in PANEL_ROOTS_TOOLS:
+                from agent.roots_panel import call as roots_settings_call
+                args = TOOLS[tool].model.model_validate(args).model_dump()
+                self.journal.mark_running(id)
+                await self.send({'type': 'started', 'id': id})
+                self.phase(id, 'directory_grants')
+                work = asyncio.create_task(asyncio.to_thread(roots_settings_call, self, tool, project, args))
+                try:
+                    result = await asyncio.shield(work)
+                except asyncio.CancelledError:
+                    # A config commit cannot be cancelled after dispatch. Keep
+                    # the original durable result, including uncertain saves.
+                    result = await work
             elif tool in PANEL_RUNTIME_TOOLS:
                 from agent.runtime_panel import call as runtime_settings_call
                 args = TOOLS[tool].model.model_validate(args).model_dump()
@@ -837,6 +853,7 @@ class Agent:
             result = {"ok": False, "error": {"code": "CANCELLED" if self.journal.is_cancelled(id) else "INTERRUPTED", "message": "操作已取消" if self.journal.is_cancelled(id) else "Agent 进程被停止；检查本机结果后再决定是否重做"}}
         except DevError as exc:
             result = {"ok": False, "error": {"code": exc.code, "message": exc.message}}
+            result['error'].update(safe_filesystem_error_detail(request.get('tool'), exc.code, exc.details))
             if request.get('tool') == 'download_artifact':
                 result['error'].update(safe_import_error_detail(exc.details))
             if isinstance(request.get('tool'), str) and request['tool'] in COMPUTER_TOOLS:

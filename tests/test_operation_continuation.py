@@ -22,10 +22,86 @@ def finish(r, identifier, *, output='test result', exit_code=0):
                                      'output': output, 'timed_out': False, 'cancelled': False}})
 
 
+class ObservedWaiterSet(set):
+    """Notify only after the real runtime changes its subscription set."""
+
+    def __init__(self, values, changed):
+        super().__init__(values)
+        self.changed = changed
+
+    def add(self, event):
+        super().add(event)
+        self.changed.set()
+
+    def discard(self, event):
+        super().discard(event)
+        self.changed.set()
+
+
+class ObservedWaiters(dict):
+    def __init__(self):
+        super().__init__()
+        self.changed = asyncio.Event()
+
+    def setdefault(self, identifier, default=None):
+        if identifier not in self:
+            self[identifier] = ObservedWaiterSet(default or (), self.changed)
+        return self[identifier]
+
+
+@pytest.fixture(autouse=True)
+def observe_registration(runtime, monkeypatch):
+    r, _ = runtime
+    assert not r.operation_waiters
+    monkeypatch.setattr(r, 'operation_waiters', ObservedWaiters())
+
+
 async def registered(r, identifier, count):
+    # Observe the real subscription without continuously running the event loop
+    # while invoke() is waiting for its database worker. The one-second deadline
+    # and all production registration, authorization and wakeup code stay intact.
+    changed = r.operation_waiters.changed
     async with asyncio.timeout(1):
         while len(r.operation_waiters.get(identifier, ())) != count:
+            changed.clear()
+            await changed.wait()
+
+
+@pytest.mark.asyncio
+async def test_registration_observer_suspends_until_actual_subscription(runtime, monkeypatch):
+    r, _ = runtime
+    registry = r.operation_waiters
+    original_get, checks = registry.get, []
+
+    def observed_get(*args):
+        checks.append(True)
+        return original_get(*args)
+
+    monkeypatch.setattr(registry, 'get', observed_get)
+    reader = asyncio.create_task(registered(r, 'synthetic-registration', 1))
+    try:
+        # Exercise other ready tasks without a wall-clock speed assumption.
+        # The observer must remain suspended, not compete with the DB worker.
+        for _ in range(20):
             await asyncio.sleep(0)
+        assert len(checks) == 1 and not reader.done(), checks
+        marker = asyncio.Event()
+        registry.setdefault('synthetic-registration', set()).add(marker)
+        await asyncio.wait_for(reader, 1)
+        assert len(checks) == 2
+        assert registry['synthetic-registration'] == {marker}
+    finally:
+        reader.cancel()
+        await asyncio.gather(reader, return_exceptions=True)
+        registry.pop('synthetic-registration', None)
+
+
+@pytest.mark.asyncio
+async def test_registration_observer_missing_subscription_still_times_out(runtime):
+    r, _ = runtime
+    with pytest.raises(TimeoutError):
+        await registered(r, 'never-registered', 1)
+    assert not r.operation_waiters
 
 
 @pytest.mark.asyncio

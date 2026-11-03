@@ -1,0 +1,189 @@
+.agent-roots {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.roots-heading,
+.roots-toolbar,
+.roots-row,
+.roots-row-actions,
+.roots-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.roots-heading,
+.roots-row {
+  justify-content: space-between;
+}
+
+.roots-heading h3,
+.roots-heading p,
+.roots-status,
+.roots-feedback {
+  margin: 0;
+}
+
+.roots-heading h3 {
+  font-size: var(--ui-text-base);
+}
+
+.roots-heading p,
+.roots-status,
+.roots-feedback,
+.roots-row small {
+  color: var(--ui-muted);
+  font-size: var(--ui-text-sm);
+}
+
+.roots-toolbar,
+.roots-row-actions,
+.roots-editor-actions {
+  flex-wrap: wrap;
+}
+
+.roots-state {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.roots-list {
+  display: grid;
+  border-top: 1px solid var(--ui-line);
+}
+
+.roots-row {
+  min-width: 0;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--ui-line);
+}
+
+.roots-row-main {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.roots-row code,
+.roots-scope code,
+.roots-feedback {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.roots-row code {
+  font-size: var(--ui-text-sm);
+  color: var(--ui-text);
+  white-space: normal;
+}
+
+.roots-row-actions {
+  flex: 0 0 auto;
+  gap: 4px;
+}
+
+.roots-editor {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-control-radius);
+  background: var(--ui-panel);
+  min-width: 0;
+}
+
+.roots-editor h4 {
+  margin: 0;
+  font-size: var(--ui-text-base);
+}
+
+.roots-editor .field {
+  margin: 0;
+}
+
+.roots-permissions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: end;
+  gap: 16px;
+}
+
+.roots-permissions .check {
+  min-height: var(--ui-touch-target);
+  margin: 0;
+}
+
+.roots-scope {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border-radius: var(--ui-radius-small);
+  background: var(--ui-surface);
+  font-size: var(--ui-text-sm);
+}
+
+.roots-scope p {
+  margin: 0;
+  color: var(--ui-muted);
+}
+
+.roots-feedback[data-tone='error'] {
+  color: var(--ui-danger);
+}
+
+.roots-editor-actions .roots-primary {
+  margin-left: auto;
+}
+
+.project-root-access {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.project-root-access > .btn {
+  justify-self: start;
+}
+
+.project-root-access .agent-roots {
+  padding: 16px 0;
+  border-top: 1px solid var(--ui-line);
+  border-bottom: 1px solid var(--ui-line);
+}
+
+@media (max-width: 640px) {
+  .roots-heading,
+  .roots-row {
+    align-items: flex-start;
+  }
+
+  .roots-heading {
+    flex-direction: column;
+  }
+
+  .roots-row {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .roots-row-main {
+    flex-basis: 100%;
+  }
+
+  .roots-permissions {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .roots-editor {
+    padding: 14px;
+  }
+
+  .roots-editor-actions > .btn {
+    min-height: var(--ui-touch-target);
+  }
+}
