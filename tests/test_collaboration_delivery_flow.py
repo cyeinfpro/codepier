@@ -1080,47 +1080,103 @@ def test_focused_connection_updates_evidence_and_rejects_stale_copy(
 
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
 def test_connection_projection_teardown_reads_pending_body_before_close(
-        collaboration_stack, chat_browser_pool, engine, monkeypatch):
-    import sys
+        chat_browser_pool, engine, monkeypatch):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from playwright.sync_api import APIResponse
-    original_json = APIResponse.json
-    original_close = _close_connection_projection_context
-    holding = False
-    page_holder, admitted, completed = [], [], []
+
+    # One finite localhost response exercises disposal, independently of Hub
+    # polling, authentication and the focused-connection journey above.
+    requests, admitted, completed, fulfilled, closed = [], [], [], [], []
+    pending_routes = set()
+    payload = {'items': [{'id': 'synthetic-projection'}]}
+
+    class ProjectionServer(BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append(self.path)
+            if self.path == '/projection':
+                body = json.dumps(payload).encode()
+                content_type = 'application/json'
+            else:
+                assert self.path == '/'
+                body = b"""<!doctype html><html><head><link rel="icon" href="data:,"></head>
+                <body><div id="page"><h1>Connection</h1></div>
+                <script>
+                  window.navigate = name => {
+                    if (name !== 'projects') throw new Error('Unexpected navigation');
+                    document.querySelector('#page h1').textContent = 'Projects';
+                  };
+                </script></body></html>"""
+                content_type = 'text/html'
+            self.send_response(200)
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Connection', 'close')
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    context = chat_browser_pool(engine).new_context()
+    page = context.new_page()
+    original_json, original_close = APIResponse.json, context.close
 
     def pending_body(response):
-        gated = holding and parse_qs(urlsplit(response.url).query).get('kind') == ['delegation_policies']
-        if gated:
+        if response.url.endswith('/projection'):
             admitted.append(response)
-            page = page_holder[0]
-            page.locator('html').evaluate("node => node.dataset.connectionBodyPending = 'yes'")
-            # Park the original response body until the normal navigation
-            # lifecycle, not a sleep, replay or discarded callback.
-            expect(page.locator('#page h1')).to_have_text('项目映射', timeout=5000)
-        value = original_json(response)
-        if gated:
+            page.evaluate("document.documentElement.dataset.connectionBodyPending = 'yes'")
+            # Hold this exact original APIResponse until teardown navigates.
+            expect(page.locator('#page h1')).to_have_text('Projects', timeout=5000)
+            value = original_json(response)
             completed.append(response)
-        return value
+            return value
+        return original_json(response)
 
-    def overlapping_close(context, page, pending_routes):
-        nonlocal holding
-        page_holder.append(page)
-        holding = True
-        page.locator('[data-cc-action="refresh"]').evaluate('(node) => node.click()')
-        expect(page.locator('html')).to_have_attribute('data-connection-body-pending', 'yes', timeout=5000)
-        assert pending_routes and admitted and not completed
-        original_close(context, page, pending_routes)
+    def project(route):
+        pending_routes.add(route)
+        _mark_connection_projection_routes(page, pending_routes)
+        try:
+            response = route.fetch()
+            value = response.json()
+            assert value == payload
+            route.fulfill(response=response, json=value)
+            fulfilled.append(response)
+        finally:
+            pending_routes.remove(route)
+            _mark_connection_projection_routes(page, pending_routes)
+
+    def close_after_body():
+        # Observe the ordering at close time, not just after teardown returns.
+        assert len(admitted) == 1
+        assert completed == fulfilled == admitted
         assert not pending_routes
-        # Independent refresh bodies may complete in either order, but every
-        # original body must be read exactly once before the context closes.
-        assert len(completed) == len(admitted) == len({id(response) for response in admitted})
-        assert {id(response) for response in completed} == {id(response) for response in admitted}
+        closed.append(True)
+        original_close()
 
     monkeypatch.setattr(APIResponse, 'json', pending_body)
-    monkeypatch.setattr(sys.modules[__name__], '_close_connection_projection_context', overlapping_close)
-    test_focused_connection_updates_evidence_and_rejects_stale_copy(
-        collaboration_stack, chat_browser_pool, engine)
-    assert len(page_holder) == 1 and admitted
+    monkeypatch.setattr(context, 'close', close_after_body)
+    with ThreadingHTTPServer(('127.0.0.1', 0), ProjectionServer) as server:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            serving = executor.submit(server.serve_forever)
+            try:
+                page.goto('http://127.0.0.1:' + str(server.server_port) + '/')
+                page.route('**/projection', project)
+                page.evaluate("""() => {
+                    window.projectionRead = fetch('/projection').then(response => response.json());
+                }""")
+                expect(page.locator('html')).to_have_attribute(
+                    'data-connection-body-pending', 'yes', timeout=5000)
+                assert len(pending_routes) == len(admitted) == 1
+                assert not completed and not fulfilled and not closed
+                _close_connection_projection_context(context, page, pending_routes)
+                assert closed == [True]
+                assert requests == ['/', '/projection']
+            finally:
+                try:
+                    original_close()
+                finally:
+                    server.shutdown()
+                    serving.result()
 
 
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
