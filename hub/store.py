@@ -5,6 +5,7 @@ import os
 import sqlite3
 import tempfile
 import asyncio
+from anyio import CancelScope
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 from functools import partial
@@ -298,13 +299,19 @@ class Store:
         try:
             return await asyncio.shield(future)
         except asyncio.CancelledError:
-            while not future.done():
-                try:
-                    await asyncio.shield(future)
-                except asyncio.CancelledError:
-                    continue
-                except Exception:
-                    break
+            # ASGI task groups use level cancellation: a cancelled parent scope
+            # cancels every await, including asyncio.shield(). Shield that scope
+            # while draining the admitted job, otherwise disconnects busy-loop.
+            # Direct Task.cancel() still reaches us and is drained by the loop.
+            # Never abandon the worker or release admission before it settles.
+            with CancelScope(shield=True):
+                while not future.done():
+                    try:
+                        await asyncio.shield(future)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
             # Retrieve a failing job's exception without masking cancellation.
             if not future.cancelled():
                 future.exception()
