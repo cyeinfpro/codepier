@@ -1,7 +1,7 @@
 # Legacy collaboration UI test snapshot
 
 These twelve JavaScript and CSS files preserve the exact bytes from commit
-`a60d43c36486821273343453f5b6f5b7780ac833`. Their sizes and SHA-256 identities are
+`1a41c198ce690fee2f098a29f2b92a0059b491c6`. Their sizes and SHA-256 identities are
 recorded in `manifest.json`.
 
 They are test material outside the production static root. Full browser journeys

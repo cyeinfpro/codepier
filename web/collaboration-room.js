@@ -798,7 +798,13 @@ window.CodePierCollaboration = (() => {
     patchMutationRecovery();
     patchRoomPermissions();
     if (!dialog.open) dialog.showModal();
-    requestAnimationFrame(() => dialog.querySelector('[autofocus]')?.focus());
+    const openingEpoch = panel.epoch;
+    requestAnimationFrame(() => {
+      if (!dialog.open || panel?.epoch !== openingEpoch) return;
+      const focused = document.activeElement;
+      if (focused && focused !== dialog && dialog.contains(focused)) return;
+      dialog.querySelector('[autofocus]')?.focus();
+    });
   }
   function patchRoomPermissions() {
     if (!root) return;

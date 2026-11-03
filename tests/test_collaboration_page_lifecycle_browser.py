@@ -125,7 +125,9 @@ def test_pending_reload_reads_use_the_original_document_without_page_errors(
         assert all(row.get("status") == 200 and row["beforePagehide"] for row in result["rows"])
         assert errors == []
         with page.expect_navigation(wait_until="domcontentloaded"):
-            held.pop().continue_()
+            # Let the previously registered legacy document fixture handle the
+            # released navigation instead of bypassing it to the new room UI.
+            held.pop().fallback()
         expect(page.locator(".cc-chat-shell")).to_be_visible()
         assert page.evaluate("performance.timeOrigin") != result["origin"]
         assert writes == before_writes

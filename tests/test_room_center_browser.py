@@ -247,6 +247,34 @@ def test_room_empty_projects_member_recovery_and_owner_scope(
 
 
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_deferred_panel_autofocus_does_not_steal_user_focus(collaboration_stack, chat_browser_pool, engine):
+    context = chat_browser_pool(engine).new_context(viewport={'width': 390, 'height': 844}, is_mobile=True, has_touch=True)
+    page = context.new_page()
+    page.add_init_script("""(() => {
+      const original=window.requestAnimationFrame;
+      window.heldPanelFocus=[];
+      window.requestAnimationFrame=(callback) => {
+        if (String(callback).includes('[autofocus]')) {
+          window.heldPanelFocus.push(callback);
+          return 0;
+        }
+        return original.call(window, callback);
+      };
+    })();""")
+    try:
+        sign_in(page, collaboration_stack)
+        page.locator('.cr-empty [data-cr-action="create"]').click()
+        checkbox = page.locator('[data-cr-form="create"] [name="project"]').first
+        expect(checkbox).to_be_visible()
+        checkbox.focus()
+        assert page.evaluate('window.heldPanelFocus.length') == 1
+        page.evaluate('window.heldPanelFocus.splice(0).forEach((callback) => callback(performance.now()))')
+        expect(checkbox).to_be_focused()
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
 def test_mobile_room_switch_preserves_ime_draft_and_stable_message_node(
     collaboration_stack, chat_browser_pool, tmp_path, engine
 ):

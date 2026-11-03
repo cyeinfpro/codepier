@@ -21,7 +21,7 @@ ROOM_ASSETS = ('collaboration-room.js', 'collaboration-room-store.js', 'collabor
 
 def test_legacy_ui_snapshot_keeps_original_bytes_and_public_test_material():
     manifest = json.loads((LEGACY_DIRECTORY / 'manifest.json').read_text())
-    assert manifest['source_commit'] == 'a60d43c36486821273343453f5b6f5b7780ac833'
+    assert manifest['source_commit'] == '1a41c198ce690fee2f098a29f2b92a0059b491c6'
     assert set(manifest['assets']) == set(LEGACY_ASSET_NAMES)
     for name in LEGACY_ASSET_NAMES:
         path = legacy_asset(name)
