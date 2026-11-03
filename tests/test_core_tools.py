@@ -149,16 +149,36 @@ async def test_two_commands_start_together_and_reads_bypass_busy_workers(agent, 
     monkeypatch.setattr(instance, 'execute', execution)
     await instance.scheduler.reconfigure({"adaptive": False, "initial": 3})
     jobs = [asyncio.create_task(instance.handle(request(project, 'exec', command='fixture', idempotency_key=uuid.uuid4().hex))) for _ in range(2)]
+    read_job = None
     try:
-        await asyncio.wait_for(both.wait(), 1)
+        # Deadlock guards are not latency requirements. The read uses a real
+        # isolated process and must flush coverage and its journal before exit.
+        await asyncio.wait_for(both.wait(), 10)
         (root / 'file').write_text('readable')
         call = request(project, 'read', path='file')
-        await asyncio.wait_for(instance.handle(call), 1)
-        result = instance.journal.status(call['id'])['result']
+        read_job = asyncio.create_task(instance.handle(call))
+        # Leave the worker's own 15-second timeout intact. wait_for would
+        # cancel handle and manufacture an INTERRUPTED receipt on a slow host.
+        done, _ = await asyncio.wait({read_job}, timeout=20)
+        assert read_job in done, {
+            'message': 'Read did not finish while both commands remained blocked',
+            'journal': instance.journal.status(call['id']),
+            'trace': instance.telemetry.snapshot(call['id']),
+        }
+        await read_job
+        assert not release.is_set()
+        assert all(not job.done() for job in jobs)
+        status = instance.journal.status(call['id'])
+        assert status['status'] == 'done', status
+        result = status['result']
         assert result['ok'], result
         assert result['data']['content'] == 'readable'
     finally:
         release.set()
+        if read_job is not None:
+            if not read_job.done():
+                read_job.cancel()
+            await asyncio.gather(read_job, return_exceptions=True)
         await asyncio.gather(*jobs)
 
 
@@ -272,9 +292,12 @@ def test_bridge_does_not_invent_lookup_filters_or_workspace_arguments():
 async def test_complete_capability_discovery_and_no_unmapped_public_tool(runtime):
     instance, principal = runtime
     from shared.runtime_panel_contracts import PANEL_RUNTIME_TOOLS
+    from shared.agent_roots_contracts import PANEL_ROOTS_TOOLS
     assert PANEL_RUNTIME_TOOLS == {'project_runtime_get', 'project_runtime_set'}
+    assert PANEL_ROOTS_TOOLS == {'agent_roots_get', 'agent_roots_preview', 'agent_roots_set'}
     assert set(TOOLS) - CORE_TOOLS - QUERY_TOOLS - set(REPLACED_MCP_TOOLS) - INCOMING_UPLOAD_TOOLS == {
-        'integration_control', 'validations_accept', 'get_profile', 'get_access_context', *PANEL_RUNTIME_TOOLS}
+        'integration_control', 'validations_accept', 'get_profile', 'get_access_context',
+        *PANEL_RUNTIME_TOOLS, *PANEL_ROOTS_TOOLS}
     for profile in ('core', 'coding', 'full'):
         assert {t['name'] for t in tool_definitions(profile)} == CORE_TOOLS | QUERY_TOOLS | {'get_profile', 'get_access_context'}
     from hub.core_tools import help_result

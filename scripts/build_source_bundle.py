@@ -79,6 +79,9 @@ EVIDENCE_FILES = {'full-regression-final.xml','focused-verified.xml','worker-rea
 
 
 REQUIRED_FILES = {
+    'agent/roots_panel.py', 'hub/agent_roots.py', 'hub/api/agent_roots.py',
+    'shared/agent_roots_contracts.py', 'shared/file_publish.py', 'shared/filesystem_errors.py',
+    'web/agent-roots.js', 'web/agent-roots.css', 'docs/AGENT_PATHS_AND_SMB.md',
     'hub/collaboration/service.py', 'hub/collaboration/events.py', 'hub/collaboration/monitor.py',
     'hub/collaboration/chatroom.py', 'hub/collaboration/conversations.py',
     'hub/collaboration/coordination.py', 'hub/collaboration/coordination_schema.py',
@@ -213,6 +216,7 @@ PUBLIC_DOCS = {
     'docs/CORE_TOOLS.md',
     'docs/AGENT_INSTALL.md',
     'docs/AGENT_LIFECYCLE.md',
+    'docs/AGENT_PATHS_AND_SMB.md',
     'docs/ARCHITECTURE.md',
     'docs/CHATGPT.md',
     'docs/CALL_LOG.md',

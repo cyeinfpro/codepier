@@ -18,9 +18,17 @@
       "sha256": "db8bb9e9ba3b5651ce6ea1bf6a58514368ba69a2175f0415c088962145987482",
       "bytes": 33097
     },
+    "agent-roots.css": {
+      "sha256": "c2bd26edc5cc69fd07625c816274c79367cb5309c83970ab0de255fb50d88b4b",
+      "bytes": 2823
+    },
+    "agent-roots.js": {
+      "sha256": "01b061f089ef2e7e6bdfbdab7f6c5a07d6f8f0f944085903928199142b8d0627",
+      "bytes": 21356
+    },
     "app.js": {
-      "sha256": "45429c2f80384e5c9d8cc416a4b75b957dfc7308e5057c3a64a515106147b385",
-      "bytes": 122832
+      "sha256": "9ea87e0aae8e7b0f87ceccf94884273e745de9a7fe88f6fb917c1accfbd39659",
+      "bytes": 126056
     },
     "appearance.js": {
       "sha256": "7fc8e8ffa85a4bb5836b8919cdf6ff12813cfb4a9e4736709f5858e5d8782bb1",
@@ -223,5 +231,5 @@
       "bytes": 26032
     }
   },
-  "template_sha256": "641fbb3bfb6ba080fff579c928df050bb33685e2ef8c671720057df1d5d305b8"
+  "template_sha256": "333de333189038936e047431cf4692fef529c2c0affc22e9ce95eb9060f5bc8f"
 }

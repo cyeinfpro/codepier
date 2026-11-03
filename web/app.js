@@ -1052,7 +1052,7 @@ function devicesHTML() {
         String(d.id || '')
           .slice(0, 12)
           .toUpperCase(),
-      )}</span></div></header><dl class="card-meta workspace-device-facts"><div><dt>平台 / 主机</dt><dd>${esc(info.platform || '等待上线')} · ${esc(info.hostname || '—')}</dd></div><div><dt>映射项目</dt><dd>${esc(d.project_count)} 个</dd></div><div><dt>最近心跳</dt><dd>${esc(d.last_seen ? shortTime(d.last_seen) : '未连接')}</dd></div><div><dt>授权目录</dt><dd>${roots.length} 个</dd></div></dl><div class="actions agent-card-actions workspace-device-actions">${agentLifecycleButtons(d, true)}<button class="btn ghost small" data-action="device-detail" data-id="${esc(d.id)}">${icon('settings')}完整管理</button><button class="btn ghost small" data-action="add-project" data-device="${esc(d.id)}">${icon('folder')}映射项目</button></div>${agentLifecycleSummary(d)}<details class="device-roots workspace-device-roots"><summary>目录与权限 · ${roots.length}</summary><div class="device-root-list">${rootRows || '<p>设备上线后显示授权目录</p>'}</div></details><details class="device-raw workspace-device-raw"><summary>完整本机信息</summary><div class="code-box"><pre>${esc(json(info))}</pre></div></details></article>`;
+      )}</span></div></header><dl class="card-meta workspace-device-facts"><div><dt>平台 / 主机</dt><dd>${esc(info.platform || '等待上线')} · ${esc(info.hostname || '—')}</dd></div><div><dt>映射项目</dt><dd>${esc(d.project_count)} 个</dd></div><div><dt>最近心跳</dt><dd>${esc(d.last_seen ? shortTime(d.last_seen) : '未连接')}</dd></div><div><dt>授权目录</dt><dd>${roots.length} 个</dd></div></dl><div class="actions agent-card-actions workspace-device-actions">${agentLifecycleButtons(d, true)}<button class="btn ghost small" data-action="agent-roots" data-id="${esc(d.id)}">${icon('folder')}授权目录</button><button class="btn ghost small" data-action="device-detail" data-id="${esc(d.id)}">${icon('settings')}完整管理</button><button class="btn ghost small" data-action="add-project" data-device="${esc(d.id)}">${icon('folder')}映射项目</button></div>${agentLifecycleSummary(d)}<details class="device-roots workspace-device-roots"><summary>目录与权限 · ${roots.length}</summary><div class="device-root-list">${rootRows || '<p>设备上线后显示授权目录</p>'}</div></details><details class="device-raw workspace-device-raw"><summary>完整本机信息</summary><div class="code-box"><pre>${esc(json(info))}</pre></div></details></article>`;
     })
     .join('');
   return (
@@ -1113,7 +1113,7 @@ async function deviceDetail(id) {
     : '';
   const dialog = modal(
     '管理节点 · ' + d.name,
-    `<div class="field"><label>节点名称</label><input id="device-rename" value="${esc(d.name)}" maxlength="80"></div><dl class="kv device-kv"><dt>节点编号</dt><dd><code>${esc(d.id)}</code></dd><dt>连接状态</dt><dd>${d.enabled ? onlineBadge(d.online) : '<span class="badge failed">已停用</span>'}</dd><dt>最近连接</dt><dd>${esc(timeText(d.last_seen))}</dd><dt>平台 / 主机</dt><dd>${esc(d.info.platform || '等待上线')} · ${esc(d.info.hostname || '—')}</dd><dt>项目映射</dt><dd>${d.project_count} 个</dd></dl>${agentLifecycleSummary(d)}<section class="node-manage-section"><div class="node-section-head"><div><h3>Agent 生命周期</h3><p>更新先校验完整新运行时，面板记录结果后才切换；节点有任务执行时不会强行更新或重启。</p></div></div><div class="actions">${agentLifecycleButtons(d, false)}</div></section><section class="node-manage-section"><h3>开发工具配置</h3><p class="form-note">按项目连接语言服务与后台浏览器。只进入配置引导，不自动安装、授权或重启。</p><div class="actions">${
+    `<div class="field"><label>节点名称</label><input id="device-rename" value="${esc(d.name)}" maxlength="80"></div><dl class="kv device-kv"><dt>节点编号</dt><dd><code>${esc(d.id)}</code></dd><dt>连接状态</dt><dd>${d.enabled ? onlineBadge(d.online) : '<span class="badge failed">已停用</span>'}</dd><dt>最近连接</dt><dd>${esc(timeText(d.last_seen))}</dd><dt>平台 / 主机</dt><dd>${esc(d.info.platform || '等待上线')} · ${esc(d.info.hostname || '—')}</dd><dt>项目映射</dt><dd>${d.project_count} 个</dd></dl>${agentLifecycleSummary(d)}<section class="node-manage-section"><div class="node-section-head"><div><h3>Agent 生命周期</h3><p>更新先校验完整新运行时，面板记录结果后才切换；节点有任务执行时不会强行更新或重启。</p></div></div><div class="actions">${agentLifecycleButtons(d, false)}</div></section><section class="node-manage-section"><div id="device-roots-manager"></div></section><section class="node-manage-section"><h3>开发工具配置</h3><p class="form-note">按项目连接语言服务与后台浏览器。只进入配置引导，不自动安装、授权或重启。</p><div class="actions">${
       S.projects
         .filter((p) => p.device_id === d.id)
         .map(
@@ -1122,10 +1122,11 @@ async function deviceDetail(id) {
         )
         .join('') ||
       `<button class="btn ghost small" data-action="add-project" data-device="${esc(d.id)}">先添加项目映射</button>`
-    }</div></section><details class="device-raw"><summary>本机声明与能力</summary><div class="code-box"><pre>${esc(json(d.info))}</pre></div></details><p class="form-note">更换 IP / 端口：在目标电脑运行 <code>python -m agent configure --hub http://新IP:新端口</code>。面板不能越过本机配置增加授权目录。</p><section class="danger-zone"><div><h3>节点与凭据</h3><p>卸载只清理目标电脑上的 Agent；“移除面板记录”只删除 Hub 中的节点身份。两者都不会删除项目文件。</p></div><div class="actions">${uninstall}<button class="btn small" id="toggle-device">${d.enabled ? '停用节点' : '启用节点'}</button><button class="btn small" id="rotate-device">轮换连接密钥</button><button class="btn danger small" id="delete-device">仅移除面板记录</button></div></section>`,
+    }</div></section><details class="device-raw"><summary>本机声明与能力</summary><div class="code-box"><pre>${esc(json(d.info))}</pre></div></details><p class="form-note">更换 IP / 端口：在目标电脑运行 <code>python -m agent configure --hub http://新IP:新端口</code>。新增或调整授权目录可直接使用上方的目录管理。</p><section class="danger-zone"><div><h3>节点与凭据</h3><p>卸载只清理目标电脑上的 Agent；“移除面板记录”只删除 Hub 中的节点身份。两者都不会删除项目文件。</p></div><div class="actions">${uninstall}<button class="btn small" id="toggle-device">${d.enabled ? '停用节点' : '启用节点'}</button><button class="btn small" id="rotate-device">轮换连接密钥</button><button class="btn danger small" id="delete-device">仅移除面板记录</button></div></section>`,
     buttons('rename-device', '保存名称'),
     true,
   );
+  CodePierRoots.mount($('#device-roots-manager', dialog), d.id);
   $('#rename-device', dialog).onclick = () =>
     busy($('#rename-device', dialog), async () => {
       await api('/api/devices/' + id, {
@@ -1174,12 +1175,14 @@ async function deviceDetail(id) {
 }
 async function projectModal(id = null, device = '') {
   const session = S.session,
+    space = S.space_id,
     page = S.page,
     modalIntent = S.modalIntent || 0,
     ticket = (S.projectModalIntent = (S.projectModalIntent || 0) + 1);
   await loadBasics();
   if (
     S.session !== session ||
+    S.space_id !== space ||
     S.page !== page ||
     S.projectModalIntent !== ticket ||
     (S.modalIntent || 0) !== modalIntent
@@ -1192,7 +1195,7 @@ async function projectModal(id = null, device = '') {
   const p = S.projects.find((p) => p.id === id) || {};
   const dialog = modal(
     id ? '编辑项目映射' : '添加项目映射',
-    `<form id="project-form"><p class="form-note">未单独配置的项目默认使用清洁执行环境。保存映射后，可从项目卡片的“执行环境”选择其他模式。</p><div class="form-row"><div class="field"><label>项目别名</label><input name="alias" required value="${esc(p.alias || '')}" placeholder="ProjectAlpha" maxlength="64"></div><div class="field"><label>所属设备</label><select name="device_id">${S.devices.map((d) => `<option value="${d.id}" ${(p.device_id || device) === d.id ? 'selected' : ''}>${esc(d.name)} · ${d.online ? '在线' : '离线'}</option>`).join('')}</select></div></div><div class="field"><label>本机项目路径</label><input name="root" required value="${esc(p.root || '')}" placeholder="D:/Projects/ProjectAlpha 或 /home/me/Projects/ProjectAlpha"><small>必须在本机 allowed_roots 授权范围内，保存时将验证目录是否存在。</small></div><div class="field"><label>项目说明</label><input name="description" value="${esc(p.description || '')}" placeholder="可选，简要说明" maxlength="1000"></div><div class="field"><label>文件访问权限</label><select name="mode"><option value="write" ${p.mode === 'read' ? '' : 'selected'}>可读取和编辑</option><option value="read" ${p.mode === 'read' ? 'selected' : ''}>只读</option></select></div><label class="check"><input name="allow_tasks" type="checkbox" ${p.allow_tasks ? 'checked' : ''}>允许本机任务及已授权的 Shell 执行</label><p class="form-note">执行还需要本机允许。若本机开启完整 Shell 权限，MCP 可执行任意命令，使用 Agent 系统用户的权限。</p></form>`,
+    `<form id="project-form"><p class="form-note">未单独配置的项目默认使用清洁执行环境。保存映射后，可从项目卡片的“执行环境”选择其他模式。</p><div class="form-row"><div class="field"><label>项目别名</label><input name="alias" required value="${esc(p.alias || '')}" placeholder="ProjectAlpha" maxlength="64"></div><div class="field"><label>所属设备</label><select name="device_id">${S.devices.map((d) => `<option value="${d.id}" ${(p.device_id || device) === d.id ? 'selected' : ''}>${esc(d.name)} · ${d.online ? '在线' : '离线'}</option>`).join('')}</select></div></div><div class="field"><label>本机项目路径</label><input name="root" required value="${esc(p.root || '')}" placeholder="D:/Projects/ProjectAlpha 或 /home/me/Projects/ProjectAlpha"><small>保存时验证目录与权限。SMB 共享请填写节点上已挂载的路径。</small></div><div class="project-root-access"><button class="btn ghost small" type="button" id="project-authorize-root">${icon('folder')}新增或调整目录授权</button><div id="project-roots-manager" hidden></div></div><div class="field"><label>项目说明</label><input name="description" value="${esc(p.description || '')}" placeholder="可选，简要说明" maxlength="1000"></div><div class="field"><label>文件访问权限</label><select name="mode"><option value="write" ${p.mode === 'read' ? '' : 'selected'}>可读取和编辑</option><option value="read" ${p.mode === 'read' ? 'selected' : ''}>只读</option></select></div><label class="check"><input name="allow_tasks" type="checkbox" ${p.allow_tasks ? 'checked' : ''}>允许本机任务及已授权的 Shell 执行</label><p class="form-note">执行还需要本机允许。若本机开启完整 Shell 权限，MCP 可执行任意命令，使用 Agent 系统用户的权限。</p></form>`,
     `${id ? '<button class="btn danger" id="unmap-project">删除映射</button>' : ''}${buttons('save-project', '验证并保存')}`,
   );
   const form = $('#project-form', dialog),
@@ -1202,13 +1205,60 @@ async function projectModal(id = null, device = '') {
   status.setAttribute('role', 'status');
   form.append(status);
   const current = () =>
-    S.session === session && S.page === page && dialog.isConnected && $('.modal') === dialog;
-  let submission = null;
+    S.session === session &&
+    S.space_id === space &&
+    S.page === page &&
+    dialog.isConnected &&
+    $('.modal') === dialog;
+  let submission = null,
+    resumeSignature = null,
+    rootsManager = null,
+    validationTimer = null;
+  const projectData = () => ({
+    ...Object.fromEntries(new FormData(form)),
+    allow_tasks: form.elements.allow_tasks.checked,
+  });
+  const openRootManager = () => {
+    if (!current()) return;
+    const data = projectData(),
+      host = $('#project-roots-manager', dialog);
+    rootsManager?.dispose();
+    host.hidden = false;
+    rootsManager = CodePierRoots.mount(host, data.device_id, {
+      initial: { path: data.root, writable: data.mode === 'write', allow_tasks: data.allow_tasks },
+      current: () => current() && form.elements.device_id.value === data.device_id,
+      onApplied: async () => {
+        if (!current()) return;
+        if (resumeSignature && JSON.stringify(projectData()) === resumeSignature) {
+          submission = null;
+          resumeSignature = null;
+          status.textContent = '目录授权已生效，正在继续保存映射…';
+          await submit();
+        } else {
+          status.textContent = '目录授权已生效，可以验证并保存映射。';
+        }
+      },
+    });
+  };
+  $('#project-authorize-root', dialog).onclick = openRootManager;
+  form.elements.device_id.addEventListener('change', () => {
+    rootsManager?.dispose();
+    rootsManager = null;
+    $('#project-roots-manager', dialog).hidden = true;
+    resumeSignature = null;
+    clearTimeout(validationTimer);
+  });
+  const previousCleanup = S.modalCleanup;
+  S.modalCleanup = () => {
+    previousCleanup?.();
+    rootsManager?.dispose();
+    clearTimeout(validationTimer);
+  };
   const submit = () =>
     busy(button, async () => {
+      clearTimeout(validationTimer);
       if (!current() || !form.reportValidity()) return;
-      const data = Object.fromEntries(new FormData(form));
-      data.allow_tasks = form.elements.allow_tasks.checked;
+      const data = projectData();
       const signature = JSON.stringify(data);
       if (submission && submission.signature !== signature && submission.uncertain) {
         status.textContent = '原保存结果尚未核实，请保留原参数继续核实，或关闭后先刷新项目列表。';
@@ -1218,11 +1268,21 @@ async function projectModal(id = null, device = '') {
         submission = { signature, args: { ...data, idempotency_key: 'project-save-' + uid() } };
       status.textContent = '正在验证目录并保存…';
       try {
-        await api('/api/projects' + (id ? '/' + id : ''), {
+        const saved = await api('/api/projects' + (id ? '/' + id : ''), {
           method: id ? 'PUT' : 'POST',
           body: JSON.stringify(submission.args),
         });
         if (!current()) return;
+        if (JSON.stringify(projectData()) !== signature) {
+          if (!id && typeof saved?.id === 'string') {
+            id = saved.id;
+            $('#modal-title', dialog).textContent = '编辑项目映射';
+          }
+          submission = null;
+          resumeSignature = null;
+          status.textContent = '原映射已保存。当前新增修改已保留，可继续验证并保存。';
+          return;
+        }
         closeModal(dialog);
         toast('映射已保存');
         await renderPage(false);
@@ -1231,12 +1291,28 @@ async function projectModal(id = null, device = '') {
         // A definitive rejection did not save a mapping. A new explicit click
         // may validate changed local permissions instead of replaying a failed read.
         if (error.code !== 'VALIDATION_PENDING' && !submission.uncertain) submission = null;
-        if (current())
-          status.textContent =
-            error.code === 'VALIDATION_PENDING'
-              ? '目录验证仍在进行，尚未保存。再次点击将核实原验证，不会新建重复任务。' +
-                (error.operation_id ? ' · ' + error.operation_id : '')
-              : error.message;
+        if (!current()) return;
+        if (JSON.stringify(projectData()) !== signature) {
+          resumeSignature = null;
+          status.textContent = `${error.message} 当前输入已有修改，已保留草稿。`;
+          return;
+        }
+        status.textContent =
+          error.code === 'VALIDATION_PENDING'
+            ? '正在等待节点完成目录验证，完成后自动保存映射…'
+            : error.message;
+        if (error.code === 'VALIDATION_PENDING') {
+          validationTimer = setTimeout(() => {
+            if (current() && JSON.stringify(projectData()) === signature) submit();
+          }, 1800);
+        } else if (
+          ['ROOT_NOT_ALLOWED', 'LOCAL_READ_ONLY', 'LOCAL_TASKS_DISABLED', 'READ_ONLY'].includes(
+            error.code,
+          )
+        ) {
+          resumeSignature = signature;
+          openRootManager();
+        }
       }
     });
   button.onclick = submit;
@@ -2303,6 +2379,9 @@ panelActions.register(['refresh'], async (b, e) => {
 panelActions.register(['add-device'], async (b, e) => {
   await addDevice();
   return;
+});
+panelActions.register(['agent-roots'], async (b) => {
+  await CodePierRoots.open(b.dataset.id);
 });
 panelActions.register(['device-detail'], async (b, e) => {
   await deviceDetail(b.dataset.id);
