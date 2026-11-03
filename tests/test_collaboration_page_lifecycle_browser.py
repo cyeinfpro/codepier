@@ -113,8 +113,12 @@ def test_pending_reload_reads_use_the_original_document_without_page_errors(
         # replacement response is held. Native fetches and API responses remain
         # real; no synthetic success, timer delay, retry or error filtering.
         result = original.evaluate("""async p => {
-          const pending = p.poll.run();
-          await Promise.race([p.firstCycle, pending]);
+          // A wake while another poll is active may return immediately while
+          // scheduling the real cycle. Await its four actual response records,
+          // rather than treating that early return as completed work.
+          void p.poll.run();
+          await Promise.race([p.firstCycle, new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('Four polling reads did not finish')), 15000))]);
           return {origin:p.origin, currentOrigin:window.lifecycleProbe.origin,
             pagehide:p.pagehide, rows:p.rows};
         }""")
