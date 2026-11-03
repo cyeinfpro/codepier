@@ -101,22 +101,34 @@ async def test_panel_reads_use_existing_io_lane_without_bypassing_resource_locks
     for index in range(agent.scheduler.lane_limit("execution")):
         await holders.enter_async_context(agent.scheduler.slot(f"heavy-{index}", f"project-{index}"))
     entered = asyncio.Event()
+    task = None
     async def read():
-        async with agent.execution_slot('fixture-read', tool, project, args, root, False, time.time() + 2):
+        async with agent.execution_slot('fixture-read', tool, project, args, root, False, time.time() + 10):
             entered.set()
     try:
-        # Commands own all heavy slots; a non-conflicting bounded read proceeds.
-        await asyncio.wait_for(read(), .5)
+        # Commands retain every heavy slot throughout this proof. The bound is
+        # a deadlock guard, not a cold isolated-process startup benchmark.
+        await asyncio.wait_for(read(), 10)
         assert entered.is_set()
         entered.clear()
-        # The same lightweight read still waits behind a conflicting path writer.
+        # Observe actual resource admission before releasing the writer; a
+        # short sleep could pass while the read is still starting its probe.
         async with agent.project_slot(root, write=True):
             task = asyncio.create_task(read())
-            await asyncio.sleep(.03)
+            async with asyncio.timeout(10):
+                while not any(item[1] == 'fixture-read' for item in agent.resources.waiting):
+                    if task.done():
+                        await task
+                        raise AssertionError('Read finished without waiting for the writer')
+                    await asyncio.sleep(.01)
             assert not entered.is_set()
-        await asyncio.wait_for(task, .5)
+            assert all(ticket.operation_id != 'fixture-read' for ticket in agent.scheduler.active.values())
+        await asyncio.wait_for(task, 10)
         assert entered.is_set()
     finally:
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         await holders.aclose()
     assert agent.scheduler.snapshot()["running"] == 0
     assert not agent.resources.active and not agent.resources.waiting
