@@ -1,4 +1,5 @@
 """One-command onboarding in a real browser; installer commands are never run."""
+from tests.browser_launch import launch_browser
 import json
 import time
 from pathlib import Path
@@ -10,7 +11,7 @@ from playwright.sync_api import expect, sync_playwright
 @pytest.fixture(scope='module')
 def browser():
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
+        browser = launch_browser(playwright.chromium)
         yield browser
         browser.close()
 

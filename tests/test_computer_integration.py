@@ -13,6 +13,7 @@ from jsonschema import Draft202012Validator
 from playwright.sync_api import sync_playwright, expect
 from shared.contracts import OUTPUT_SCHEMAS
 from shared.computer_contracts import NATIVE_ACTIONS
+from tests.browser_launch import launch_browser
 from tests.support import running_stack, wait_for
 from tests.catalog_assertions import assert_task_catalog
 from tests.test_computer import fixture_provider
@@ -180,7 +181,7 @@ def test_panel_emergency_close_interrupts_an_inflight_action(desktop):
 def test_browser_desktop_mobile_and_cleanup(desktop,tmp_path):
     s=desktop
     with sync_playwright() as playwright:
-        browser=playwright.chromium.launch()
+        browser=launch_browser(playwright.chromium)
         page=browser.new_page(viewport={'width':1440,'height':1000});errors=[]
         page.on('pageerror',lambda error:errors.append(str(error)))
         try:

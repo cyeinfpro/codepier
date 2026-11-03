@@ -1,5 +1,6 @@
 """Real Chromium/WebKit settings flow using synthetic account data only."""
 
+from tests.browser_launch import launch_browser
 import os
 from pathlib import Path
 import pytest
@@ -17,7 +18,7 @@ def test_telegram_settings_identity_consent_stale_and_duplicate_guards(
         browser_type = getattr(pw, engine)
         if not Path(browser_type.executable_path).is_file():
             pytest.skip("Compatible " + engine + " is not installed")
-        browser = browser_type.launch(headless=True)
+        browser = launch_browser(browser_type, headless=True)
         try:
             page = browser.new_page(viewport={"width": width, "height": 1100})
             errors = []

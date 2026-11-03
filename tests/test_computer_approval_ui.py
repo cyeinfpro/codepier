@@ -5,6 +5,7 @@ import uuid
 
 import pytest
 from playwright.sync_api import expect, sync_playwright
+from tests.browser_launch import launch_browser
 from tests.test_computer_approval_integration import approval_stack, open_session, pending, tool
 from tests.support import wait_for
 
@@ -12,7 +13,7 @@ from tests.support import wait_for
 @pytest.fixture(scope='module')
 def browser():
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
+        browser = launch_browser(playwright.chromium)
         yield browser
         browser.close()
 

@@ -1,5 +1,6 @@
 """Exercise the reported HTML sinks with untrusted values in real browsers."""
 
+from tests.browser_launch import launch_browser
 from pathlib import Path
 
 import pytest
@@ -13,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_chat_project_draft_and_markdown_render_untrusted_text_safely(engine):
     with sync_playwright() as playwright:
-        browser = getattr(playwright, engine).launch()
+        browser = launch_browser(getattr(playwright, engine))
         try:
             page = browser.new_page()
             page.set_content(

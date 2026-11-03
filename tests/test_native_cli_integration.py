@@ -1,3 +1,4 @@
+from tests.browser_launch import launch_browser
 from tests.evidence import evidence_path
 from tests.support_legacy_terminal import mount_archived_terminal
 """Native protocol real Hub/Agent and real Chromium; only disposable fixture processes."""
@@ -122,7 +123,7 @@ def test_admin_csrf_mapping_permissions_and_upload(cli_stack):
 def test_real_chromium_terminal_mobile_detach_and_escape_policy(cli_stack):
     s=cli_stack
     with sync_playwright() as p:
-        browser=p.chromium.launch();page=browser.new_page(viewport={'width':1400,'height':1000})
+        browser=launch_browser(p.chromium);page=browser.new_page(viewport={'width':1400,'height':1000})
         errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
         try:
             page.goto(s.url+'/#projects');page.fill('#username', 'admin');page.fill('#password',s.password);page.click('#login-form button')
@@ -154,7 +155,7 @@ def test_real_chromium_terminal_mobile_detach_and_escape_policy(cli_stack):
 def test_retired_terminal_hash_opens_chat_without_terminal_assets(cli_stack):
     s=cli_stack
     with sync_playwright() as pw:
-        browser=pw.chromium.launch();page=browser.new_page();assets=[]
+        browser=launch_browser(pw.chromium);page=browser.new_page();assets=[]
         page.on('request',lambda request:assets.append(request.url))
         try:
             page.goto(s.url+'/#terminal');page.fill('#username', 'admin');page.fill('#password',s.password);page.click('#login-form button')

@@ -7,6 +7,7 @@ import httpx
 import pytest
 from playwright.sync_api import sync_playwright
 
+from tests.browser_launch import launch_browser
 from tests.support import running_stack
 
 
@@ -79,7 +80,7 @@ def test_real_panel_navigation_live_details_export_themes_and_logout(call_stack)
     operation,_=write_fixture(stack,'call-log-browser.txt')
     errors=[]
     with sync_playwright() as p:
-        browser=p.chromium.launch(headless=True)
+        browser=launch_browser(p.chromium, headless=True)
         page=browser.new_page(viewport={'width':1280,'height':960})
         page.on('pageerror',lambda e:errors.append(str(e)))
         try:

@@ -7,6 +7,7 @@ import argparse, json, os, shutil, sys, tempfile, time, uuid
 import httpx
 from pathlib import Path
 from playwright.sync_api import sync_playwright, expect
+from tests.browser_launch import launch_browser
 from tests.support import running_stack, wait_for
 from shared.util import atomic_json
 
@@ -28,7 +29,7 @@ def main():
         task=s.call('tasks_run',{'project':'ProjectGamma','task':'smoke','idempotency_key':uuid.uuid4().hex});s.poll(task['operation_id'])
         with sync_playwright() as p:
             chromium=os.environ.get('CHROMIUM_PATH') or shutil.which('chromium') or shutil.which('chromium-browser')
-            browser=p.chromium.launch(headless=True,**({'executable_path':chromium} if chromium else {}),args=['--no-sandbox'])
+            browser=launch_browser(p.chromium, headless=True,**({'executable_path':chromium} if chromium else {}),args=['--no-sandbox'])
             context=browser.new_context(viewport={'width':1440,'height':1000},device_scale_factor=1)
             page=context.new_page();page.on('pageerror',lambda e:report['browser_errors'].append(str(e)))
             page.on('dialog',lambda d:d.accept())

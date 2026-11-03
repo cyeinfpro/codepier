@@ -3,6 +3,7 @@
 Set CODEPIER_TEST_CHROMIUM to a locally available Chromium executable when the
 standard Playwright browser is not installed. No production endpoints are used.
 """
+from tests.browser_launch import launch_browser
 import os
 from pathlib import Path
 
@@ -64,7 +65,7 @@ def test_reconcile_is_read_only_and_evidence_is_honest_escaped_and_focus_safe(wi
         options = {'headless': True}
         if executable:
             options['executable_path'] = executable
-        browser = p.chromium.launch(**options)
+        browser = launch_browser(p.chromium, **options)
         context = browser.new_context(viewport={'width': width, 'height': 920})
         page = context.new_page()
         errors = []

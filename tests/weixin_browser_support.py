@@ -1,4 +1,5 @@
 """Shared synthetic Weixin browser fixtures; never calls Tencent."""
+from tests.browser_launch import launch_browser
 import os
 import re
 from pathlib import Path
@@ -31,7 +32,7 @@ def qr_page(request):
         executable = os.environ.get("CODEPIER_TEST_CHROMIUM") if request.param == "chromium" else None
         if not executable and not Path(kind.executable_path).is_file():
             pytest.skip(request.param + " runtime is not installed; no browser result claimed")
-        browser = kind.launch(headless=True, **({"executable_path": executable} if executable else {}))
+        browser = launch_browser(kind, headless=True, **({"executable_path": executable} if executable else {}))
         page = browser.new_page(viewport={"width": 1440, "height": 1000})
         errors = []
         page.on("pageerror", lambda error: errors.append(str(error)))

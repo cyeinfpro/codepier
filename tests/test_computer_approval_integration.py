@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 import httpx
 from playwright.sync_api import sync_playwright, expect
+from tests.browser_launch import launch_browser
 from tests.support import running_stack,wait_for
 from tests.test_computer import fixture_provider
 
@@ -70,7 +71,7 @@ def test_http_encrypted_codepier_requires_human_panel_decision(approval_stack,de
 def test_browser_consent_message_is_text_and_explicit(approval_stack):
     s=approval_stack
     with sync_playwright() as p:
-        browser=p.chromium.launch();page=browser.new_page()
+        browser=launch_browser(p.chromium);page=browser.new_page()
         try:
             page.goto(s.url);page.fill('#username', 'admin');page.fill('#password',s.password);page.click('#login-form button')
             sid=open_session(s)

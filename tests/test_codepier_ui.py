@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import pytest
 from playwright.sync_api import sync_playwright,expect
+from tests.browser_launch import launch_browser
 from tests.test_ui_unification import _login,_navigate,_prepare_native_fixture
 OUT=Path(__file__).resolve().parents[1]/'docs/evidence/codepier-rename-20260918/screenshots'
 
@@ -11,7 +12,7 @@ OUT=Path(__file__).resolve().parents[1]/'docs/evidence/codepier-rename-20260918/
 def test_branding_and_existing_preferences_survive_update(stack,width,height,scheme):
     _prepare_native_fixture(stack);OUT.mkdir(parents=True,exist_ok=True)
     with sync_playwright() as pw:
-        browser=pw.chromium.launch();page=browser.new_page(viewport={'width':width,'height':height},reduced_motion='reduce')
+        browser=launch_browser(pw.chromium);page=browser.new_page(viewport={'width':width,'height':height},reduced_motion='reduce')
         errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
         page.add_init_script("if(!localStorage.getItem('codepier-appearance'))localStorage.setItem('relay-appearance',"+json.dumps(scheme)+");")
         page.goto(stack.url);expect(page.locator('#login-form')).to_be_visible()
