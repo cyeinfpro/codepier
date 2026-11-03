@@ -227,6 +227,13 @@ def test_legacy_room_read_only_safe_stop_explicit_cutover_and_original_receipt(
         assert current['migration']['status'] == 'complete'
         assert current['version'] == committed[0]['version']
         expect(page.locator('[data-cr-legacy]')).not_to_be_visible()
+        if lost_before_commit:
+            # A successful explicit activation resolves this obsolete prompt.
+            # The earlier same-key failure remains true; it must not invite
+            # another confirmation after the server has completed migration.
+            expect(page.locator('[data-cr-pending] [data-mutation-state="not_saved"]')).to_have_count(0)
+            expect(page.locator('[data-cr-panel-recovery] [data-mutation-state="not_saved"]')).to_have_count(0)
+            expect(page.locator('[data-cr-pending] [data-cr-action="migration"]')).to_have_count(0)
         expect(editor).to_be_enabled()
         expect(editor).to_have_value('迁移前未发送的草稿')
         assert len(stack.must(stack.client.get(f'/api/collaboration/rooms/{room_id}/messages'))['messages']) == 1

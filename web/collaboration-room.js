@@ -663,8 +663,19 @@ window.CodePierCollaboration = (() => {
     patchMutationRecovery();
   }
   function mutationMarkup() {
+    const migrationComplete =
+      state.room?.migration?.status === 'complete' || state.room?.migration?.activated_at != null;
     return [...state.mutations.values()]
       .filter((item) => item.roomId === state.roomId || item.kind === 'create')
+      .filter(
+        (item) =>
+          !(
+            item.kind === 'migration' &&
+            item.state === 'not_saved' &&
+            item.roomId === state.room?.id &&
+            migrationComplete
+          ),
+      )
       .map(
         (item) =>
           `<article class="cr-pending-item" data-mutation-state="${E(item.state)}"><p>${E(item.label)} · ${item.state === 'not_saved' ? '原请求未保存' : '结果尚未确认'}${item.state !== 'not_saved' && !mutationAllowed(item.method, item.url, JSON.parse(item.body), item.roomId) ? '<small>仅按原请求键核对。若原操作未保存，当前只读状态会阻止执行；不会改用新的请求。</small>' : ''}${item.error ? `<small>${E(item.error)}</small>` : ''}</p><div>${item.state === 'not_saved' ? btn('migration', '重新核对并确认') : item.state === 'recovering' ? '正在核对原请求…' : btn('recover-action', '核对原操作', `data-id="${E(item.id)}"`)}</div></article>`,
