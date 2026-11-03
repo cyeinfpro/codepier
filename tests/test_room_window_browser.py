@@ -9,6 +9,7 @@ intercepted, and no dot or external channel is simulated.
 import os
 from pathlib import Path
 import sqlite3
+import time
 from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
@@ -54,17 +55,30 @@ def test_long_message_window_preserves_reader_and_original_history_cursors(
 
         def wake_at_latest_receipt():
             last_id = saved[-1]['id']
+            responses = []
 
-            def latest_response(response):
+            def collect_response(response):
                 if response.status != 200 or response.url.split('?', 1)[0] != stack.url + f'/api/collaboration/rooms/{room_id}/messages':
-                    return False
+                    return
                 query = parse_qs(urlsplit(response.url).query)
-                if query.get('cursor') or query.get('message_id'):
-                    return False
-                return any(message['id'] == last_id for message in response.json().get('messages', []))
+                if not query.get('cursor') and not query.get('message_id'):
+                    responses.append(response)
 
-            with page.expect_response(latest_response, timeout=15000):
+            # A response callback must not synchronously read its body: doing so
+            # re-enters Playwright's event loop and can corrupt waiter cleanup.
+            page.on('response', collect_response)
+            try:
                 page.evaluate('document.dispatchEvent(new Event("visibilitychange"))')
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline:
+                    while responses:
+                        response = responses.pop(0)
+                        if any(message['id'] == last_id for message in response.json().get('messages', [])):
+                            return
+                    page.wait_for_timeout(50)
+                pytest.fail(f'No latest response contained message {last_id}')
+            finally:
+                page.remove_listener('response', collect_response)
 
         append_messages(80)
         page.locator('.cr-room', has_text='长会话窗口 A').click()
@@ -80,10 +94,12 @@ def test_long_message_window_preserves_reader_and_original_history_cursors(
             expect(page.locator(f'[data-message-id="{saved[-1]["id"]}"]')).to_have_count(1)
             assert page.locator('.cr-message').count() <= 200
         page.locator('#cr-message').fill('这份草稿属于长会话 A，仍未发送。')
-        page.evaluate("""() => {
+        page.evaluate("""async () => {
           const feed=document.querySelector('.cr-feed');
           const target=document.querySelectorAll('[data-message-id]')[20];
+          const scrolled=new Promise(resolve=>feed.addEventListener('scroll',resolve,{once:true}));
           feed.scrollTop+=target.getBoundingClientRect().top-feed.getBoundingClientRect().top-12;
+          await scrolled;
           const edge=feed.getBoundingClientRect().top;
           window.windowAnchor=[...document.querySelectorAll('[data-message-id]')].find(node=>node.getBoundingClientRect().bottom>edge+8);
           window.windowBody=windowAnchor.querySelector('.cr-message-body');
@@ -101,13 +117,18 @@ def test_long_message_window_preserves_reader_and_original_history_cursors(
             append_messages(25)
             wake_at_latest_receipt()
             assert page.locator('.cr-message').count() <= 200
-            assert page.evaluate("""() => {
+            observed = page.evaluate("""() => {
               const node=document.querySelector('[data-message-id="'+windowReading.id+'"]');
               const feed=document.querySelector('.cr-feed');
-              return node===windowAnchor && node.querySelector('.cr-message-body')===windowBody &&
-                Math.abs(node.getBoundingClientRect().top-feed.getBoundingClientRect().top-windowReading.offset)<3 &&
-                getSelection().toString()===windowSelectedText;
+              return {sameNode:node===windowAnchor,
+                sameBody:!!node && node.querySelector('.cr-message-body')===windowBody,
+                offset:node ? node.getBoundingClientRect().top-feed.getBoundingClientRect().top-windowReading.offset : null,
+                selected:getSelection().toString(), expectedSelection:windowSelectedText};
             }""")
+            assert observed['sameNode'], observed
+            assert observed['sameBody'], observed
+            assert observed['offset'] is not None and abs(observed['offset']) < 3, observed
+            assert observed['selected'] == observed['expectedSelection'], observed
         expect(page.locator('[data-cr-latest]')).to_be_visible()
         expect(page.locator('#cr-message')).to_have_value('这份草稿属于长会话 A，仍未发送。')
 

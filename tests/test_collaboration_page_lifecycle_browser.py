@@ -19,7 +19,7 @@ POLL_KINDS = ["delegation_policies", "members", "overview", "timeline"]
 POLL_PROBE = """(() => {
   const originalTimer = window.setTimeout, originalFetch = window.fetch;
   const probe = window.lifecycleProbe = {armed: false, rows: [], poll: null,
-    origin: performance.timeOrigin, pagehide: false, signals: [], owners: []};
+    origin: crypto.randomUUID(), pagehide: false, signals: [], owners: []};
   probe.record = (event, details={}) => {
     const key = 'codepier-lifecycle-read-evidence';
     const records = JSON.parse(sessionStorage.getItem(key) || '[]');
@@ -115,7 +115,7 @@ def test_pending_reload_reads_use_the_original_document_without_page_errors(
         result = original.evaluate("""async p => {
           const pending = p.poll.run();
           await Promise.race([p.firstCycle, pending]);
-          return {origin:p.origin, currentOrigin:performance.timeOrigin,
+          return {origin:p.origin, currentOrigin:window.lifecycleProbe.origin,
             pagehide:p.pagehide, rows:p.rows};
         }""")
         assert len(held) == 1
@@ -129,7 +129,7 @@ def test_pending_reload_reads_use_the_original_document_without_page_errors(
             # released navigation instead of bypassing it to the new room UI.
             held.pop().fallback()
         expect(page.locator(".cc-chat-shell")).to_be_visible()
-        assert page.evaluate("performance.timeOrigin") != result["origin"]
+        assert page.evaluate("lifecycleProbe.origin") != result["origin"]
         assert writes == before_writes
         assert errors == []
     finally:
@@ -180,7 +180,7 @@ def test_real_pagehide_aborts_pending_reads_and_history_return_reauthorizes(
 
     try:
         before_writes = list(writes)
-        original_origin = page.evaluate("performance.timeOrigin")
+        original_origin = page.evaluate("lifecycleProbe.origin")
         conversation = page.locator(".cc-chat-shell").get_attribute("data-conversation")
         page.evaluate("""() => window.addEventListener('pagehide', () => {
           lifecycleProbe.record('pagehide-after-cleanup', {signals:lifecycleProbe.signals.map(
@@ -199,6 +199,10 @@ def test_real_pagehide_aborts_pending_reads_and_history_return_reauthorizes(
         page.wait_for_function("() => lifecycleProbe.heldRoutes === 4")
         assert len(held) == 4
         assert page.evaluate("lifecycleProbe.rows.every(row => !row.settled)")
+        # Capture which view-owned signals started the four held reads before
+        # navigation, so a stale in-flight cycle cannot masquerade as this one.
+        owners = page.evaluate("lifecycleProbe.owners.map(item => item.kind).sort()")
+        assert owners == POLL_KINDS, {"owners": owners, "held": len(held)}
         page.evaluate("lifecycleProbe.record('navigation-start')")
         page.goto(stack.url + "/healthz")
         # Store only fixed request kinds and lifecycle facts synchronously in

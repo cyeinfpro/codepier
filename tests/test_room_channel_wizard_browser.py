@@ -67,6 +67,9 @@ def test_ready_chat_can_approve_tasks_but_scope_drift_clears_old_checked_consent
         page.route('**/api/collaboration/rooms/*/channels/weixin/connect', channel_projection)
         page.route('**/api/collaboration/channel-connect-flows/**', channel_projection)
         page.locator('.cr-room-actions [data-cr-action="weixin"]').click()
+        # A close event queued by the previous dialog may arrive after this
+        # dialog is reopened; it must not invalidate the new panel.
+        page.locator('dialog.cr-panel').evaluate("dialog => dialog.dispatchEvent(new Event('close'))")
         expect(page.locator('[data-cr-form="weixin"]')).to_be_visible()
         expect(page.locator('[data-cr-channel-view]')).to_contain_text('已连接房间聊天')
         for checkbox in page.locator('[data-cr-form="weixin"] input[type="checkbox"]').all():

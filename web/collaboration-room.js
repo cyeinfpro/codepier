@@ -2879,10 +2879,13 @@ window.CodePierCollaboration = (() => {
     root.querySelector('dialog').addEventListener(
       'close',
       () => {
+        const dialog = root?.querySelector('dialog');
+        // A queued close event can belong to an earlier opening of this same
+        // dialog. Do not tear down a panel that has already been reopened.
+        if (dialog?.open) return;
         panelEpoch++;
         if (panel?.name === 'work') state.workDetail = null;
         panel = null;
-        const dialog = root?.querySelector('dialog');
         const opener = dialog?._crOpener;
         if (opener?.isConnected && !opener.disabled) opener.focus({ preventScroll: true });
       },

@@ -14,6 +14,8 @@ def test_real_frames_animation_actionability_and_multiple_pages(iteration):
             page = context.new_page()
             page.set_content('<style>@keyframes slide {from {transform:translateX(0)} to {transform:translateX(200px)}} button {animation:slide 0.4s linear infinite alternate}</style><button onclick="window.clicks=(window.clicks||0)+1">Go</button>')
             page.evaluate('window.framesSeen=0;function tick(){window.framesSeen++;requestAnimationFrame(tick)};requestAnimationFrame(tick)')
+            # The click timeout does not guarantee the first animation frame ran.
+            page.wait_for_function('window.framesSeen > 0', timeout=5000)
             with pytest.raises(TimeoutError):
                 page.get_by_role('button').click(timeout=700)
             assert page.evaluate('window.framesSeen') > 0
