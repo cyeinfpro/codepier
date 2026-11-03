@@ -1,5 +1,7 @@
 # 聊天式协作室
 
+> **1.32 房间入口**：当前使用流程见 [房间协作中心](COLLABORATION_CENTER.md)，维护与恢复见 [协作中心维护与恢复](COLLABORATION_CENTER_OPERATIONS.md)。本文件用于既有 CPD/CPJ、v2 Dot 或渠道对象的兼容维护。旧界面已退出生产静态目录，仅以原字节快照保留在 `tests/fixtures/legacy_collaboration_ui` 执行旧 wire 回归；下文旧界面步骤说明历史行为，当前面板使用上述房间指南。
+
 > **双向聊天更新**：新版面板添加的 dot 默认是房间成员，支持普通回复、主动发言和连续话题，不再把每句话变成任务。见 [双向通信指南](DOT_BIDIRECTIONAL_CHAT.md)。下文 task-only 流程继续兼容已有连接。
 
 > 新的任务 dot 默认走 **添加 dot → CPD 加入码 → 一条宿主任务订阅 → @ 交办 → 原话题回传**，见 [dot 接入与验收指南](DOT_COLLABORATION.md)。下面的 CPJ、监控通知和通用发言说明继续适用于旧用途，不是新 CPD 接入的额外步骤。

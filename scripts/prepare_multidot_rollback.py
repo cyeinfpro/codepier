@@ -199,6 +199,23 @@ def marker(db):
     schema = db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()
     if not schema or schema[0] != '10':
         raise FreezeError('Only exact Hub schema 10 with the v2/team tables is supported')
+    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if 'conversation_rooms' in tables:
+        room_columns = {row[1] for row in db.execute('PRAGMA table_info(conversation_rooms)')}
+        if 'room_protocol' in room_columns and db.execute(
+                'SELECT 1 FROM conversation_rooms WHERE room_protocol=1 LIMIT 1').fetchone():
+            raise FreezeError('Native room data has been accepted; this legacy freeze cannot downgrade it. '
+                              'Preserve the current database and use a room-compatible recovery version.')
+    if 'room_members' in tables and db.execute(
+            "SELECT 1 FROM room_members WHERE (status!='legacy' AND legacy_dot_id='') OR binding_generation>1 LIMIT 1").fetchone():
+        raise FreezeError('Independent room members require a room-compatible recovery version')
+    if 'room_pending_bindings' in tables and db.execute(
+            'SELECT 1 FROM room_pending_bindings LIMIT 1').fetchone():
+        raise FreezeError('Staged native bindings require a room-compatible recovery version')
+    subscription_columns = {row[1] for row in db.execute('PRAGMA table_info(mcp_event_subscriptions)')}
+    if 'conversation_id' in subscription_columns and db.execute(
+            'SELECT 1 FROM mcp_event_subscriptions WHERE conversation_id IS NOT NULL LIMIT 1').fetchone():
+        raise FreezeError('Native room event receipts require a room-compatible recovery version')
     definitions = {}
     for table, required in REQUIRED_COLUMNS.items():
         columns = {row[1] for row in db.execute(f'PRAGMA table_info({table})')}

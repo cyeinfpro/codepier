@@ -63,14 +63,17 @@ class ProjectScopes:
                 self.c.coordination.require_capability(subject, capability, project['id'])
         if project['mode'] != 'write' or not project['allow_tasks']:
             raise DevError('PROJECT_SCOPE_EXECUTION_DISABLED', '新增项目未允许写入和任务执行', 409)
-        # Never copy an until-revoked channel authorization into this operation.
-        expires = min(policy['expires_at'], slot['expires_at'], policy['created'] + 604800)
-        if expires - self.c.clock() < 60:
+        # Only a proven native member scope can carry its explicit lifetime to
+        # an added project. Existing timed/channel records keep their boundary.
+        bridge = getattr(self.c, 'room_work_bridge', None)
+        persistent = bool(bridge and bridge.persistent(policy) and bridge.persistent(slot))
+        expires = None if persistent else min(policy['expires_at'], slot['expires_at'], policy['created'] + 604800)
+        if expires is not None and expires - self.c.clock() < 60:
             raise DevError('PROJECT_SCOPE_APPROVAL_EXPIRED', '原助手执行范围已到期或即将到期，请先核对原范围', 409)
         for row in self.store.all("""SELECT * FROM conversation_project_scopes
                 WHERE conversation_id=? AND dot_id=? AND project_id=? AND environment_id=? AND state='active'""",
                 (conversation['id'], dot_id, project['id'], environment)):
-            if json.loads(row['spec'])['expires_at'] > self.c.clock():
+            if not self.expired(json.loads(row['spec']), policy):
                 raise DevError('PROJECT_SCOPE_ALREADY_APPROVED', '这个项目已有独立授权记录，请先核对或撤销该记录', 409)
         return {
             'conversation_id': conversation['id'], 'conversation_version': conversation['version'],
@@ -85,6 +88,7 @@ class ProjectScopes:
             'project_snapshot': self.c.coordination.project_snapshot(project),
             'target_snapshot': self.c.delegation.target_snapshot(principal, project, 'project_agent'),
             'expires_at': expires, 'reply_conversation_id': conversation['id'],
+            **({'lifetime_mode': 'until_revoked', 'lifetime_authorization_id': policy['lifetime_authorization_id']} if persistent else {}),
             'reply_location': '当前房间内该助手的原任务话题',
             'execution_boundary': 'execution_account_not_project_sandbox',
             'applies_to': 'new_explicit_owner_tasks_only',
@@ -133,12 +137,19 @@ class ProjectScopes:
     def reference(row):
         return {'id': row['id'], 'version': row['version'], 'digest': row['digest']}
 
+    def expired(self, spec, policy):
+        if spec.get('lifetime_mode') == 'until_revoked':
+            bridge = getattr(self.c, 'room_work_bridge', None)
+            return not (bridge and spec.get('lifetime_authorization_id') == policy.get('lifetime_authorization_id')
+                        and bridge.persistent(policy))
+        return spec.get('expires_at') is None or spec['expires_at'] <= self.c.clock()
+
     def authorize(self, principal, policy, reference):
         row = self.store.one('SELECT * FROM conversation_project_scopes WHERE id=?', (reference['id'],))
         if not row or self.reference(row) != reference:
             raise DevError('PROJECT_SCOPE_APPROVAL_CHANGED', '项目授权证据不存在或已改变', 409)
         spec = json.loads(row['spec'])
-        if digest(spec) != row['digest'] or row['state'] != 'active' or spec['expires_at'] <= self.c.clock():
+        if digest(spec) != row['digest'] or row['state'] != 'active' or self.expired(spec, policy):
             raise DevError('PROJECT_SCOPE_INACTIVE', '项目执行授权已撤销、到期或证据无效', 409)
         dot = self.c.dots.find(spec['dot_id'])
         if (not dot or dot['setup_digest'] != spec['dot_setup_digest']
@@ -174,7 +185,7 @@ class ProjectScopes:
                 WHERE conversation_id=? AND dot_id=? AND state='active' ORDER BY version""",
                 (policy['conversation_id'], policy['slot_id'])):
             spec = json.loads(row['spec'])
-            if spec['expires_at'] <= self.c.clock():
+            if self.expired(spec, policy):
                 continue
             ref = self.reference(row)
             spec = self.authorize(principal, policy, ref)

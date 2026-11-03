@@ -23,7 +23,7 @@ global.window = global;
 global.addEventListener = () => {};
 global.S = {page:'collaboration',session:'session',space_id:'space'};
 for (const name of ['collaboration-relay.js','collaboration-goals.js'])
-  vm.runInThisContext(fs.readFileSync(path.join(process.argv[1], 'web', name), 'utf8'), {filename:name});
+  vm.runInThisContext(fs.readFileSync(path.join(process.argv[1], 'tests/fixtures/legacy_collaboration_ui', name), 'utf8'), {filename:name});
 const Relay = CodePierCollaborationRelay, Goals = CodePierCollaborationGoals;
 function clock() {
   let now = 0, serial = 0;

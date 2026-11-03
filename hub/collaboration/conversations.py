@@ -39,7 +39,13 @@ def migrate(db):
     for name, declaration in [('conversation_id', "TEXT NOT NULL DEFAULT ''"), ('conversation_sequence', 'INTEGER NOT NULL DEFAULT 0')]:
         if name not in columns:
             db.execute(f'ALTER TABLE collaboration_messages ADD COLUMN {name} {declaration}')
+    # A detached partition is historical data, not an instruction to recreate
+    # a default user room on the next process start. Migrate each partition once.
+    db.execute('CREATE TABLE IF NOT EXISTS conversation_partition_migrations (room_id TEXT PRIMARY KEY)')
     for room in db.execute('SELECT id,space_id,owner_user_id,project_id,environment_id,title,created,chat_history_sequence FROM collaboration_rooms').fetchall():
+        if db.execute('SELECT 1 FROM conversation_partition_migrations WHERE room_id=?', (room[0],)).fetchone():
+            continue
+        db.execute('INSERT INTO conversation_partition_migrations VALUES (?)', (room[0],))
         archived = db.execute('SELECT archived_at FROM conversation_rooms WHERE id=?', (room[0],)).fetchone()
         if archived and archived[0] is not None:
             continue  # Restart must never resurrect a removed default conversation.
@@ -99,6 +105,11 @@ class ConversationService:
 
     def ensure_default(self, room):
         existing = self.store.one('SELECT archived_at FROM conversation_rooms WHERE id=?', (room['id'],))
+        if self.store.one('SELECT 1 FROM conversation_partition_migrations WHERE room_id=?', (room['id'],)):
+            return
+        if not existing and self.store.one('SELECT 1 FROM conversation_projects WHERE room_id=?', (room['id'],)):
+            self.store.execute('INSERT OR IGNORE INTO conversation_partition_migrations VALUES (?)', (room['id'],))
+            return  # A new room already owns this partition; no second default.
         if existing and existing['archived_at'] is not None:
             return
         if not existing and self.store.one('''SELECT 1 FROM conversation_archives a,json_each(a.snapshot,'$.projects') p
@@ -108,6 +119,7 @@ class ConversationService:
             VALUES (?,?,?,?,?)''', (room['id'], room['space_id'], room['owner_user_id'],
             room['title'] or room['project_id'] + ' · ' + room['environment_id'], room['created']))
         self.store.execute('INSERT OR IGNORE INTO conversation_projects VALUES (?,?,?)', (room['id'], room['id'], room['created']))
+        self.store.execute('INSERT OR IGNORE INTO conversation_partition_migrations VALUES (?)', (room['id'],))
 
     def object(self, principal, identifier, *, include_archived=False):
         from hub.room_scope import current
@@ -122,8 +134,10 @@ class ConversationService:
             raise DevError('CONVERSATION_ARCHIVED', '此房间已删除，旧连接和授权不可继续使用', 410)
         return row
 
-    def visible(self, principal, conversation):
-        self.object(principal, conversation['id'])
+    def visible(self, principal, conversation, *, include_archived=False):
+        if include_archived:
+            self.c.owner(principal)
+        self.object(principal, conversation['id'], include_archived=include_archived)
         rows = self.store.all('''SELECT r.* FROM collaboration_rooms r JOIN conversation_projects p ON p.room_id=r.id
             WHERE p.conversation_id=? ORDER BY p.created,r.id''', (conversation['id'],))
         result = []
@@ -172,8 +186,13 @@ class ConversationService:
 
     def view(self, principal, conversation):
         projects = self.visible(principal, conversation)
-        if not projects:
-            raise DevError('CONVERSATION_NOT_FOUND', '当前授权下没有这个聊天室', 404)
+        # The owner retains a room after its last project is removed. A grant
+        # still needs an explicit live member binding for a zero-project room.
+        if not projects and principal.grant_id:
+            member = self.store.one("SELECT 1 FROM room_members WHERE conversation_id=? AND grant_id=? AND status NOT IN ('removed','paused','legacy')",
+                                    (conversation['id'], principal.grant_id))
+            if not member:
+                raise DevError('CONVERSATION_NOT_FOUND', '当前授权下没有这个聊天室', 404)
         working = self.working_scopes.current(conversation['id'])
         active_ids = {r['project_id'] for r in working['spec']['projects']} if working else None
         visible_ids = {r['project_id'] for r in projects}
@@ -269,6 +288,7 @@ class ConversationService:
             conversation = self.object(principal, args['conversation_id'])
             project = self.c.runtime.project(args['project'], principal)
             def save():
+                self.c.rooms.migration.legacy_write(conversation['id'])
                 if conversation['version'] != args['expected_version']:
                     raise DevError('STALE_VERSION', '聊天室项目列表已改变，请刷新后重新确认', 409)
                 authorization = self.project_scopes.approve(principal, conversation, project,

@@ -2,7 +2,7 @@
 from typing import Literal
 from pydantic import Field, model_validator
 from shared.collaboration_contracts import Model, Identifier, Queue, JobKind, Severity
-from hub.collaboration.common import TASK_EVENT, RESULT_EVENT, INCIDENT_EVENT, STATUS_EVENT, MESSAGE_EVENT, WORK_EVENT, DELEGATION_EVENT, OPERATION_EVENT, MAILBOX_EVENT
+from hub.collaboration.common import TASK_EVENT, RESULT_EVENT, INCIDENT_EVENT, STATUS_EVENT, MESSAGE_EVENT, WORK_EVENT, DELEGATION_EVENT, OPERATION_EVENT, MAILBOX_EVENT, ROOM_INBOX_EVENT
 
 
 class EventFilters(Model):
@@ -26,6 +26,27 @@ class MessageFilters(Model):
 
 class MailboxFilters(MessageFilters):
     binding_generation: Identifier
+
+
+class RoomInboxFilters(Model):
+    owner_user_id: Identifier
+    conversation_id: Identifier
+    member_id: Identifier
+    binding_generation: int = Field(ge=1)
+
+
+class RoomInboxPayload(RoomInboxFilters):
+    schema_version: Literal[1]
+    dirty_revision: int = Field(ge=0)
+    test: bool = False
+    test_subscription_id: str = Field(default='', max_length=128)
+    wake_ticket: str | None = Field(default=None, max_length=2048)
+
+    @model_validator(mode='after')
+    def synthetic_ticket(self):
+        if self.test and self.wake_ticket is not None:
+            raise ValueError('Test events cannot carry a consumer ticket')
+        return self
 
 
 class WorkFilters(Model):
@@ -224,14 +245,15 @@ class OperationPayload(BasePayload):
         return self
 
 
-PAYLOADS = {MAILBOX_EVENT: MailboxPayload, OPERATION_EVENT: OperationPayload, DELEGATION_EVENT: DelegationPayload, WORK_EVENT: WorkPayload, MESSAGE_EVENT: MessagePayload, TASK_EVENT: TaskPayload, RESULT_EVENT: ResultPayload,
+PAYLOADS = {ROOM_INBOX_EVENT: RoomInboxPayload, MAILBOX_EVENT: MailboxPayload, OPERATION_EVENT: OperationPayload, DELEGATION_EVENT: DelegationPayload, WORK_EVENT: WorkPayload, MESSAGE_EVENT: MessagePayload, TASK_EVENT: TaskPayload, RESULT_EVENT: ResultPayload,
             INCIDENT_EVENT: IncidentPayload, STATUS_EVENT: StatusPayload}
-FILTERS = {MAILBOX_EVENT: MailboxFilters, OPERATION_EVENT: OperationFilters, DELEGATION_EVENT: DelegationFilters, WORK_EVENT: WorkFilters, MESSAGE_EVENT: MessageFilters, TASK_EVENT: TaskFilters, RESULT_EVENT: EventFilters,
+FILTERS = {ROOM_INBOX_EVENT: RoomInboxFilters, MAILBOX_EVENT: MailboxFilters, OPERATION_EVENT: OperationFilters, DELEGATION_EVENT: DelegationFilters, WORK_EVENT: WorkFilters, MESSAGE_EVENT: MessageFilters, TASK_EVENT: TaskFilters, RESULT_EVENT: EventFilters,
            INCIDENT_EVENT: EventFilters, STATUS_EVENT: EventFilters}
 
 
 def definitions():
     descriptions = {
+        ROOM_INBOX_EVENT: 'The inbox changed for one current room member and binding generation. This room-scoped event does not require a project and never expands a legacy project subscription. Read the current room inbox through the server-issued request; recheck member and resource permissions before every effect. A callback acceptance is not host consumption. Probe replies prove connectivity only and never create business work.',
         MAILBOX_EVENT: 'A stable inbox changed for this exact approved Dot binding. Native subscription is separately confirmed. Read the current mailbox and original message/work ledgers; delivery is only a hint, not execution authority. Synthetic tests never issue a consumer ticket or create work. V2 consumer writes require the live proof and fence; legacy notification-only purposes never upgrade.',
         OPERATION_EVENT: 'A bounded hint for explicitly subscribed original operation IDs on this exact grant. Read task_query(operation=get, operation_ids=[original ID]) and use your saved output cursor; never execute again. needs_review/interrupted do not prove success, and cancellation requires its durable terminal receipt. environment_id is notification context, not proof of execution environment. Delivery is accepted only, never host consumption or permission to continue a chat. Synthetic test events create no operation.',
         DELEGATION_EVENT: 'Wake-up for this exact owner policy/version and slot. For a CPD task dot use the saved collaboration_query(action=dot_inbox, dot_id=recipient_slot_id) request; its initial baseline is stored once on the server. Recover its exact setup via collaboration_query(action=dot_connection), not a fresh legacy checkpoint. Read the inbox immediately after native subscription and on every wake; paginate and reconcile original operations. For legacy non-CPD consumers only at initial enrollment, read collaboration_delegation_connection_read and persist its checkpoint/inbox_request in the host consumer. On future wakes use the saved inbox_request/resume_request to reconcile collaboration_delegation_inbox, even without this payload; never refresh the initial baseline per event. Preserve existing notification_only consumers. Only an explicitly user-approved managed_execution host may fresh-read, claim, heartbeat, work_execute, poll the original operation and work_result. Test events only confirm delivery; a requested mode or notification never grants permission.',

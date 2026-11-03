@@ -27,7 +27,12 @@ CIPHER_COLUMNS = (("devices", "secret"), ("operations", "payload"), ("vps_connec
                   ("oidc_transactions", "verifier"), ("gateway_secrets", "secret"), ("gateway_accounts", "secret"),
                   ("gateway_calls", "result"), ("collaboration_secrets", "secret"),
                   ("mcp_event_subscriptions", "secret"),
-                  ("dot_consumer_sessions", "proof_secret"), ("dot_wake_tickets", "ticket_secret"))
+                  ("dot_consumer_sessions", "proof_secret"), ("dot_wake_tickets", "ticket_secret"),
+                  ("room_members", "connection_proof_secret"), ("room_members", "probe_nonce_secret"),
+                  ("room_connect_flows", "invite_secret"),
+                  ("room_pending_bindings", "invite_secret"),
+                  ("room_pending_bindings", "connection_proof_secret"),
+                  ("room_pending_bindings", "probe_nonce_secret"))
 # Delivery bodies from older protocols remain plaintext JSON; only explicitly
 # sealed bodies participate in rotation and missing-key detection.
 PREFIXED_CIPHER_COLUMNS = (("mcp_event_deliveries", "body", "sealed:v1:"),)

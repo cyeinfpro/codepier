@@ -23,13 +23,13 @@ def test_telegram_settings_identity_consent_stale_and_duplicate_guards(
             page = browser.new_page(viewport={"width": width, "height": 1100})
             errors = []
             page.on("pageerror", lambda error: errors.append(str(error)))
-            css = (ROOT / "web/collaboration-channels.css").read_text()
+            css = (ROOT / "tests/fixtures/legacy_collaboration_ui/collaboration-channels.css").read_text()
             page.set_content(
                 "<style>body{margin:16px;font:15px sans-serif;--ui-line:#d8dde5;--ui-muted:#536176;--ui-panel:#fafbfd}.cc-field{display:grid;gap:4px}.btn{padding:10px}#drawer{max-width:850px;margin:auto}*{box-sizing:border-box}input,textarea,select{max-width:100%}</style><style>"
                 + css
                 + '</style><button id="open">通道与范围</button><div id="drawer"></div><div id="files"></div>'
             )
-            page.add_script_tag(path=str(ROOT / "web/collaboration-channels.js"))
+            page.add_script_tag(path=str(ROOT / "tests/fixtures/legacy_collaboration_ui/collaboration-channels.js"))
             page.evaluate("""() => {
                 window.S={session:{id:'fixture'},space_id:'space'};
                 window.state={generation:1,drawerEpoch:0,project:'projectA',environment:'production',conversation:'conversationA',

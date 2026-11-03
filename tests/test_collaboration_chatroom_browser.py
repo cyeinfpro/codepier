@@ -6,6 +6,8 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from playwright.sync_api import expect
 
+from tests.legacy_collaboration_ui import use_legacy_collaboration_ui
+
 from tests.collaboration_support import collaboration_stack, key  # noqa: F401
 
 pytestmark = [pytest.mark.browser, pytest.mark.integration, pytest.mark.slow]
@@ -20,6 +22,7 @@ def overview(stack):
 
 
 def login(page, stack):
+    use_legacy_collaboration_ui(page, stack)
     page.goto(stack.url + '/#projects')
     page.fill('#username', 'admin')
     page.fill('#password', stack.password)

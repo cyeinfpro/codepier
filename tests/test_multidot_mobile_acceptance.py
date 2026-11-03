@@ -15,6 +15,8 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from playwright.sync_api import expect
 
+from tests.legacy_collaboration_ui import use_legacy_collaboration_ui
+
 from hub.store import Store
 from shared.mcp_protocol import MODERN, PREFIX, request_headers
 from tests.collaboration_support import collaboration_stack as collaboration_stack, key
@@ -105,6 +107,7 @@ def add_dot(stack, label):
 
 
 def prepare(page, stack):
+    use_legacy_collaboration_ui(page, stack)
     page.goto(stack.url + "/#projects")
     page.fill("#username", "admin")
     page.fill("#password", stack.password)

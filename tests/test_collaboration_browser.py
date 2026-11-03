@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 from playwright.sync_api import expect
+
+from tests.legacy_collaboration_ui import use_legacy_collaboration_ui
 from tests.collaboration_support import collaboration_stack  # noqa: F401
 
 pytestmark = [pytest.mark.browser, pytest.mark.integration, pytest.mark.slow]
@@ -28,6 +30,7 @@ def test_collaboration_panel_complete_readonly_flow(collaboration_stack, chat_br
     screenshots = Path(os.getenv('CODEPIER_COLLABORATION_SCREENSHOTS', str(tmp_path / 'screenshots')))
     screenshots.mkdir(parents=True, exist_ok=True)
     try:
+        use_legacy_collaboration_ui(page, stack)
         page.goto(stack.url + '/#projects')
         page.fill('#username', 'admin')
         page.fill('#password', stack.password)

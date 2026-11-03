@@ -552,16 +552,25 @@ class OwnerTaskContext:
             # of this same conversation. Its exact read route retains that source
             # project's live permission; it does not expand task execution scope.
             partition = self.store.one('SELECT project_id,environment_id FROM collaboration_rooms WHERE id=?', (row['room_id'],))
-            read = public_request('collaboration_read', {'project': partition['project_id'], 'environment_id': partition['environment_id'],
-                'conversation_id': dot['conversation_id'], 'kind': 'message_status', 'id': row['id']})
-            entry = {**ref, 'role': kind, 'trusted_author': author, 'read_request': read,
+            route={}
+            if partition:
+                route['read_request']=public_request('collaboration_read', {'project': partition['project_id'], 'environment_id': partition['environment_id'],
+                    'conversation_id': dot['conversation_id'], 'kind': 'message_status', 'id': row['id']})
+            else:
+                member=self.store.one('''SELECT m.* FROM room_members m JOIN room_member_work_bridges b ON b.member_id=m.id
+                    WHERE b.legacy_dot_id=? AND b.state='active' AND m.conversation_id=?''',(dot['id'],row['conversation_id']))
+                route['reference_descriptor']={'action':'room_message_read','conversation_id':row['conversation_id'],
+                    'message_id':row['id'],'credential_required':'current_member_identity_and_connection_proof'}
+                if member and member['grant_id']==principal.grant_id:
+                    route['reference_descriptor'].update(member_id=member['id'],binding_generation=member['binding_generation'])
+            entry = {**ref, 'role': kind, 'trusted_author': author, **route,
                      'is_execution_authority': False, 'included': len(text.encode('utf-8')) <= budget}
             if entry['included']:
                 entry['body_text'] = text
                 budget -= len(text.encode('utf-8'))
             entries.append(entry)
             root = row['thread_root_id'] or row['id']
-            if root not in roots:
+            if partition and root not in roots:
                 roots.append(root)
         return {'schema_version': 1, 'source_message_id': source['id'], 'read_only': True,
                 'grants_authority': False, 'context_digest': digest(references), 'references': entries,
@@ -581,8 +590,20 @@ class OwnerTaskContext:
         dot = self.store.one('SELECT * FROM collaboration_dots WHERE id=?', (policy['slot_id'],))
         if not dot or not self.c.dot_chat.enabled(dot):
             return
-        source = self.c.object('collaboration_messages', room, link['message_id'])
+        native=self.c.room_work_bridge.native
+        source = native.source(goal,principal) if native.reference(goal) else self.c.object('collaboration_messages', room, link['message_id'])
         snapshot = json.loads(link['policy_snapshot']).get('conversation_context', [])
+        if native.reference(goal):
+            # A private execution adapter is not the room's message partition.
+            # Recheck immutable context evidence directly within this validated
+            # native Goal, even if another project's adapter was removed.
+            for ref in snapshot:
+                row=self.store.one('SELECT * FROM collaboration_messages WHERE id=? AND conversation_id=?',
+                    (ref['message_id'],goal['conversation_id']))
+                if not row or row['version']!=ref['version'] or body_digest(row)!=ref['digest']:
+                    raise DevError('TASK_CONTEXT_CHANGED','关联的原请求或方案已改变',409)
+                self.c.chatroom.require_message_visible(principal,row)
+            return
         if snapshot:
             self.bundle(room, dot, source, principal, refs=snapshot)
         _, questions = self.question_family(room, dot, source)

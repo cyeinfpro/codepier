@@ -38,6 +38,7 @@ class TelegramService:
             "id"
         ]
         if enabled:
+            self.c.rooms.migration.legacy_write(args['conversation_id'])
             self.require_enabled(principal)
             self.c.live_room(room)
         return args, principal, room
@@ -94,6 +95,9 @@ class TelegramService:
                     "expected_version"
                 ]:
                     raise DevError("STALE_VERSION", "Telegram 账号版本已变化", 409)
+                if old:
+                    for bound in self.store.all("SELECT conversation_id FROM telegram_bindings WHERE account_id=? AND state!='revoked'",(old['id'],)):
+                        self.c.rooms.migration.legacy_write(bound['conversation_id'])
                 if (
                     not old
                     and self.store.one(
@@ -238,17 +242,21 @@ class TelegramService:
 
             return self.c.mutation(principal, room, "telegram_bind", args, save)
 
-    def control(self, raw, principal):
+    def control(self, raw, principal, *, room_owner_binding=None):
         with self.store.transaction():
-            args, principal, room = self.owner(
-                raw, principal, models.Control, enabled=False
-            )
-            row = self.binding(args["binding_id"], principal, room)
+            if room_owner_binding is not None:
+                args,principal,room,row=self.c.room_channels.legacy_stop_scope('telegram',raw,principal,models.Control,room_owner_binding)
+            else:
+                args, principal, room = self.owner(raw, principal, models.Control, enabled=False)
+                row = self.binding(args["binding_id"], principal, room)
             if row["conversation_id"] != args["conversation_id"]:
                 raise DevError("TELEGRAM_BINDING_SCOPE", "绑定不属于当前话题", 403)
 
             def save():
-                row = self.binding(args["binding_id"], principal, room)
+                row=(self.c.room_channels.legacy_stop_scope('telegram',args,principal,models.Control,room_owner_binding)[3]
+                    if room_owner_binding is not None else self.binding(args["binding_id"], principal, room))
+                if args['action'] not in {'pause','revoke'}:
+                    self.c.rooms.migration.legacy_write(row['conversation_id'])
                 if row["version"] != args["expected_version"]:
                     raise DevError("STALE_VERSION", "原绑定版本已变化", 409)
                 self.c.channel_enrollment.invalidate(row["id"], "binding_" + args["action"])
@@ -568,6 +576,7 @@ class TelegramService:
                     and hmac.compare_digest(row["pairing_hash"], digest(challenge))
                 ):
                     binding, account, owner, room, dot = self.valid(bid, pairing=True)
+                    self.c.rooms.migration.legacy_write(binding['conversation_id'])
                     record = self.c.channel_enrollment.current(bid)
                     date = message.get('date')
                     fresh = not update.get('edited_message') and (date is None or type(date) is int and (not record or date >= int(record['created'])))
@@ -599,6 +608,7 @@ class TelegramService:
                     break
             return None, "unbound_or_ambiguous_private_chat"
         binding, _, owner, room, dot = self.valid(rows[0]["id"])
+        self.c.rooms.migration.legacy_write(binding['conversation_id'])
         if self.c.channel_enrollment.input_quarantined('telegram', account, chat_id, external_id):
             return None, 'preauthorization_input_replay'
         if self.store.one(

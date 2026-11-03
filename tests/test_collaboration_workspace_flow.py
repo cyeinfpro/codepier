@@ -178,7 +178,7 @@ def test_suggestions_never_submit_or_overwrite_and_narrow_viewports(collaboratio
 def test_receipt_projection_is_scoped_conservative_and_nonmutating(chat_browser_pool):
     page = chat_browser_pool('chromium').new_page()
     try:
-        page.add_script_tag(content=Path('web/collaboration-workspace.js').read_text())
+        page.add_script_tag(content=Path('tests/fixtures/legacy_collaboration_ui/collaboration-workspace.js').read_text())
         result = page.evaluate('''() => {
           const make = (id, state, extra = {}) => ({id, author_kind:'owner', project_id:'p', environment_id:'production', server_sequence:1, relay_receipts:[{state, dot_id:'d'}], ...extra});
           const rows = [make('private','working',{project_id:'other'}), make('stage','completed',{environment_id:'staging'}), make('reply','replied',{author_kind:'dot'}), make('unknown','new_server_state'), make('mix','completed'), make('active','replying')];

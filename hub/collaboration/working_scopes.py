@@ -465,6 +465,7 @@ class WorkingScopes:
             # mutation handles retries before re-running a stale preview; a saved receipt
             # only returns the current room view and never replays a permission change.
             def save():
+                self.c.rooms.migration.legacy_write(conversation['id'])
                 previous = self.current(conversation['id'])
                 if (conversation['version'] != args['expected_version']
                         or (previous['version'] if previous else 0) != args['expected_scope_version']):
@@ -619,6 +620,10 @@ class WorkingScopes:
         return self.reference(record)
 
     def validate_goal(self, principal, goal):
+        native=self.c.room_work_bridge.native
+        if reference:=native.reference(goal):
+            native.validate(reference,principal)
+            return
         current = self.current(goal['conversation_id'])
         if current is None:
             return

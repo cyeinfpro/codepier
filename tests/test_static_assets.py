@@ -81,3 +81,26 @@ def test_generator_uses_literal_version_and_hashes_without_importing_application
     assert manifest['assets']['core/bundle.js'] == {'sha256': hashlib.sha256(raw).hexdigest(), 'bytes': len(raw)}
     assert b'?v=codepier-9.8.7&amp;h=' in generated['web/index.html']
     assert generated == generate(tmp_path)
+
+
+def test_retired_collaboration_ui_remains_inaccessible_when_old_install_files_survive(assets):
+    from hub.static_assets import RETIRED_COLLABORATION_UI
+    from tests.legacy_collaboration_ui import LEGACY_ASSET_NAMES, legacy_asset
+    directory, original, _, manifest = assets
+    assert RETIRED_COLLABORATION_UI == frozenset(LEGACY_ASSET_NAMES)
+    for name in LEGACY_ASSET_NAMES:
+        raw = legacy_asset(name).read_bytes()
+        (directory / name).write_bytes(raw)
+        manifest['assets'][name] = {'sha256': hashlib.sha256(raw).hexdigest(), 'bytes': len(raw)}
+    (directory / 'assets-manifest.json').write_text(json.dumps(manifest))
+    with client_for(directory) as client:
+        for name in LEGACY_ASSET_NAMES:
+            for suffix in ('', '?' + urlencode({'v': 'codepier-' + VERSION,
+                    'h': manifest['assets'][name]['sha256']})):
+                response = client.get('/static/' + name + suffix)
+                assert response.status_code == 404
+                assert response.headers['cache-control'] == 'no-store'
+                assert response.content == b''
+            assert client.get('/static/' + name.upper()).status_code == 404
+            assert client.head('/static/' + name).status_code == 404
+        assert client.get('/static/app.js').content == original

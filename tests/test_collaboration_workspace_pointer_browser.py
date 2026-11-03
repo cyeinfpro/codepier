@@ -2,6 +2,7 @@
 from pathlib import Path
 
 import pytest
+from tests.legacy_collaboration_ui import legacy_asset
 from playwright.sync_api import expect
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,7 +23,7 @@ def test_pointer_deferred_projection_flushes_without_another_read(chat_browser_p
         page.goto("https://workspace.invalid/")
         page.add_style_tag(content="button{width:180px;height:80px}button:active{opacity:.8}body{padding:30px}")
         for name in ["collaboration-runtime.js", "collaboration-workspace.js"]:
-            page.add_script_tag(content=(ROOT / "web" / name).read_text())
+            page.add_script_tag(content=legacy_asset(name).read_text())
         page.evaluate("""() => {
           window.total = 80;
           window.pointerEvents = [];

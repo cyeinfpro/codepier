@@ -336,6 +336,17 @@ class WeixinEnrollment:
             return await self.store.run(self.finish_status, args, principal, claim, None, True)
         return await self.store.run(self.finish_status, args, principal, claim, response)
 
+    def cancel_record(self, row, expected_version):
+        """Pure stop after the caller authorizes this exact enrollment."""
+        self.store.require_transaction()
+        # Close/Cancel wins even when a preceding status response was lost.
+        # Cancellation never touches an already accepted account.
+        if row['state'] == 'accepted':
+            return self.view(row)
+        if expected_version > row['version']:
+            raise DevError('STALE_VERSION', '扫码版本无效', 409)
+        return self.view(self.update(row, 'cancelled', {}))
+
     def cancel(self, raw, principal):
         with self.store.transaction():
             args, principal, room = self.w.owner(raw, principal, models.QRCancel, enabled=False)
@@ -343,13 +354,7 @@ class WeixinEnrollment:
             row = self.row(args['enrollment_id'], principal, room, args['conversation_id'])
 
             def save():
-                # Close/Cancel wins even when a preceding status response was
-                # lost. Cancellation never touches an already accepted account.
-                if row['state'] == 'accepted':
-                    return self.view(row)
-                if args['expected_version'] > row['version']:
-                    raise DevError('STALE_VERSION', '扫码版本无效', 409)
-                return self.view(self.update(row, 'cancelled', {}))
+                return self.cancel_record(row, args['expected_version'])
             return self.c.mutation(principal, room, 'weixin_qr_cancel', args, save)
 
     def accept(self, raw, principal):

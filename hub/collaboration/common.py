@@ -18,7 +18,8 @@ DELEGATION_EVENT = 'codepier.collaboration.delegation_available.v1'
 WORK_EVENT = 'codepier.collaboration.work_available.v1'
 OPERATION_EVENT = 'codepier.operation.completed.v1'
 MAILBOX_EVENT = 'codepier.collaboration.inbox_dirty.v2'
-EVENTS = (TASK_EVENT, RESULT_EVENT, INCIDENT_EVENT, STATUS_EVENT, MESSAGE_EVENT, WORK_EVENT, DELEGATION_EVENT, OPERATION_EVENT, MAILBOX_EVENT)
+ROOM_INBOX_EVENT = 'codepier.collaboration.room_inbox_dirty.v1'
+EVENTS = (TASK_EVENT, RESULT_EVENT, INCIDENT_EVENT, STATUS_EVENT, MESSAGE_EVENT, WORK_EVENT, DELEGATION_EVENT, OPERATION_EVENT, MAILBOX_EVENT, ROOM_INBOX_EVENT)
 TERMINAL = frozenset({'succeeded', 'failed', 'cancelled', 'expired', 'dead_letter'})
 ACTIVE = ('queued', 'leased', 'running', 'retry_wait', 'blocked')
 SEVERITIES = {'low': 0, 'medium': 1, 'high': 2, 'critical': 3}
@@ -44,8 +45,8 @@ def validate(model, value):
         raise DevError('INVALID_ARGUMENTS', '参数不符合协作契约', 422, issues=issues) from None
 
 
-SENSITIVE_KEY = re.compile(r'(?i)(authorization|cookie|password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|private[_-]?key|wake[_-]?ticket|consumer[_-]?proof)')
-ASSIGNMENT = re.compile(r'''(?ix)\b(authorization|cookie|password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|wake[_-]?ticket|consumer[_-]?proof)\b\s*[=:]\s*(?:"[^"\n]*"|'[^'\n]*'|[^\s,;]+)''')
+SENSITIVE_KEY = re.compile(r'(?i)(authorization|cookie|password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|private[_-]?key|wake[_-]?ticket|(?:consumer|connection|member)[_-]?proof|invite[_-]?code|probe[_-]?nonce)')
+ASSIGNMENT = re.compile(r'''(?ix)\b(authorization|cookie|password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|wake[_-]?ticket|(?:consumer|connection|member)[_-]?proof|invite[_-]?code|probe[_-]?nonce)\b\s*[=:]\s*(?:"[^"\n]*"|'[^'\n]*'|[^\s,;]+)''')
 BEARER = re.compile(r'(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+')
 KEY_TOKEN = re.compile(r'\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|whsec_[A-Za-z0-9+/=]{20,})')
 PEM = re.compile(r'-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----', re.S)

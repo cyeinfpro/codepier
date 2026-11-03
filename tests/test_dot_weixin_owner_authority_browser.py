@@ -295,7 +295,7 @@ def test_delegation_budget_labels_preserve_window_and_total(qr_page, budget_mode
     from pathlib import Path
 
     page, _ = qr_page
-    page.add_script_tag(path=str(Path(__file__).resolve().parents[1] / "web/collaboration-delegation.js"))
+    page.add_script_tag(path=str(Path(__file__).resolve().parents[1] / "tests/fixtures/legacy_collaboration_ui/collaboration-delegation.js"))
     page.evaluate("""({budget_mode,window_count}) => {
       state.snapshot.capabilities.direct_delegation=true;
       state.delegationPolicies=[{id:'policyA',slot_id:'slotA',version:5,

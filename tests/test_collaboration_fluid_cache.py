@@ -28,10 +28,10 @@ def boot_timeline(page):
       window.CodePierCollaborationWorkspace={create:()=>({welcome:()=>''})};
       window.chatRichMarkdown=(node,text)=>{node.textContent=text;node._chatSource=text;};
     }''')
-    page.add_script_tag(path=str(ROOT / 'web/collaboration-runtime.js'))
-    page.add_script_tag(path=str(ROOT / 'web/collaboration-relay.js'))
-    page.add_script_tag(path=str(ROOT / 'web/collaboration-channels.js'))
-    source = (ROOT / 'web/collaboration.js').read_text()
+    page.add_script_tag(path=str(ROOT / 'tests/fixtures/legacy_collaboration_ui/collaboration-runtime.js'))
+    page.add_script_tag(path=str(ROOT / 'tests/fixtures/legacy_collaboration_ui/collaboration-relay.js'))
+    page.add_script_tag(path=str(ROOT / 'tests/fixtures/legacy_collaboration_ui/collaboration-channels.js'))
+    source = (ROOT / 'tests/fixtures/legacy_collaboration_ui/collaboration.js').read_text()
     export = 'return { html, bind, detach, clear, open };'
     assert source.count(export) == 1
     source = source.replace(export, 'return { html, state, chat, relay, patchTimeline, mergeMessages };')

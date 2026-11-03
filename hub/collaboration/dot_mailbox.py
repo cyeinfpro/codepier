@@ -120,6 +120,7 @@ class DotMailbox:
                     if old['grant_id'] != slot['grant_id']:
                         raise DevError('DOT_MAILBOX_BINDING_CHANGED', '原收件箱连接已变化', 409)
                     return {'dot_id': dot['id']}
+                self.c.rooms.migration.legacy_write(dot['conversation_id'])
                 now = self.c.clock()
                 self.store.execute("""INSERT INTO dot_mailbox_bindings
                     (dot_id,room_id,conversation_id,grant_id,generation,created,updated)
@@ -209,6 +210,7 @@ class DotMailbox:
         _, principal, room, slot, dot = self.c.dots.scope({
             'project': filters['project_id'], 'environment_id': filters['environment_id'],
             'dot_id': filters['slot_id']}, principal)
+        self.c.rooms.migration.legacy_write(dot['conversation_id'])
         self.c.dot_chat.authorize(principal, room, dot, connector=True)
         row = self.binding(dot['id'])
         if not row:
@@ -289,6 +291,9 @@ class DotMailbox:
         dot = self.c.dots.find(dot) if isinstance(dot, str) else dot
         if not dot:
             return 0
+        member = self.c.dot_consumers.room_member(dot['id'])
+        if member:
+            return self.c.room_consumers.enqueue_ref(member, kind, object_id, object_version, reference)
         row = self.binding(dot['id'])
         if not row:
             return 0

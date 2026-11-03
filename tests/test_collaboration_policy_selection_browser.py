@@ -13,7 +13,7 @@ def test_persistent_policy_uses_effective_authority_and_bounded_policy_uses_expi
     context = chat_browser_pool(engine).new_context()
     page = context.new_page()
     try:
-        page.add_script_tag(path=str(ROOT / 'web/collaboration-delegation.js'))
+        page.add_script_tag(path=str(ROOT / 'tests/fixtures/legacy_collaboration_ui/collaboration-delegation.js'))
         actual = page.evaluate("""() => {
           const c = {mentions: [], delegationTargets: [], delegationCapabilities: []};
           const api = window.CodePierCollaborationDelegation.create({
@@ -57,7 +57,7 @@ def test_policy_reselection_keeps_explicit_subset_without_inheriting_changed_aut
     context = chat_browser_pool(engine).new_context()
     page = context.new_page()
     try:
-        page.add_script_tag(path=str(ROOT / 'web/collaboration-delegation.js'))
+        page.add_script_tag(path=str(ROOT / 'tests/fixtures/legacy_collaboration_ui/collaboration-delegation.js'))
         actual = page.evaluate("""() => {
           const c = {
             mentions: ['dot-1'], reply: '', delegationPolicy: '', delegationVersion: 0,

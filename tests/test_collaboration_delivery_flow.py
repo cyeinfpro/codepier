@@ -13,6 +13,8 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from playwright.sync_api import expect
 
+from tests.legacy_collaboration_ui import use_legacy_collaboration_ui
+
 from shared.mcp_protocol import MODERN, PREFIX, request_headers
 from shared.public_collaboration import request as public_collaboration_request
 from hub.collaboration.config import CollaborationConfig
@@ -37,6 +39,7 @@ def scope(stack):
 
 
 def login(page, stack):
+    use_legacy_collaboration_ui(page, stack)
     page.goto(stack.url + '/#projects')
     page.fill('#username', 'admin')
     page.fill('#password', stack.password)
@@ -1130,7 +1133,7 @@ def test_delegation_result_load_respects_drawer_dismissal_and_new_navigation(
     page = context.new_page()
     try:
         page.add_script_tag(path=str(
-            Path(__file__).resolve().parents[1] / 'web/collaboration-delegation.js'))
+            Path(__file__).resolve().parents[1] / 'tests/fixtures/legacy_collaboration_ui/collaboration-delegation.js'))
         result = page.evaluate("""async () => {
           const results = {};
           for (const change of ['none', 'close', 'replace', 'navigate']) {
