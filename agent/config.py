@@ -87,4 +87,6 @@ def validate_config(value: object, config_path: Path) -> dict:
     c["computer"] = validate_computer(c.get("computer", {}))
     c["integrations"] = validate_integrations(c.get("integrations", {}))
     c["scheduler"] = validate_scheduler(c.get("scheduler"))
+    from agent.journal_retention import validate as validate_retention
+    c["journal_retention"] = validate_retention(c.get("journal_retention", {}))
     return c

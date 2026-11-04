@@ -14,10 +14,12 @@ import secrets
 import uuid
 from dataclasses import asdict
 
+from hub.collaboration.projection_cache import memoized
 from hub.principal import Principal, refresh_principal
 from hub.collaboration.common import canonical, digest, redact
 from hub.collaboration.weixin_protocol import API_BASE, ITEM_NAMES, approved_url, text, uint64
 from hub.collaboration.qr_image import qr_svg
+from hub.collaboration.weixin_protocol import incoming_text, incoming_items
 from shared.util import DevError
 
 
@@ -198,8 +200,7 @@ class RoomWeixin:
                 self.require_room(binding['conversation_id'])
         else:
             count=self.store.one('SELECT COUNT(*) n FROM weixin_accounts WHERE owner_user_id=? AND space_id=?',(principal.user_id,principal.space_id))['n']
-            total=self.store.one('SELECT COUNT(*) n FROM weixin_accounts')['n']
-            if count>=32 or total>=256:
+            if count>=32:
                 raise DevError('WEIXIN_ACCOUNT_QUOTA','已登记微信账号达到上限',409)
         identifier=existing['id'] if existing else uuid.uuid4().hex
         now=self.c.clock()
@@ -251,6 +252,7 @@ class RoomWeixin:
     def valid(self,binding,*,pairing=False):
         return self._valid(binding,pairing=pairing,require_member=True)
 
+    @memoized
     def _valid(self,binding,*,pairing=False,require_member):
         if not binding:
             raise DevError('WEIXIN_BINDING_INACTIVE','原微信绑定已不可用',403)
@@ -274,6 +276,7 @@ class RoomWeixin:
             raise DevError('WEIXIN_CREDENTIAL_CHANGED','原账号凭据或绑定世代已改变',403)
         return binding,account,owner,room,member
 
+    @memoized
     def preview(self,binding,principal):
         member=self.c.rooms.member(binding['native_member_id'],binding['conversation_id'])
         scopes=self.c.room_work_bridge.scopes(member)
@@ -379,7 +382,9 @@ class RoomWeixin:
             return None
         self.c.room_goal_recovery.authority(reference)
         spec=native.record(reference)
-        lead=next(m for m in spec['members'] if m['member_id']==spec['coordinator_member_id'])
+        lead=next((m for m in spec['members'] if m['member_id']==spec['coordinator_member_id']),None)
+        if lead is None:
+            raise DevError('ROOM_MEMBER_NOT_IN_APPROVAL','原主责成员不在工作批准名单中',403)
         current=self.c.rooms.member(lead['member_id'],goal['conversation_id'])
         if self.c.rooms.state(current)!='ready_work':
             raise DevError('ROOM_RECOVERY_MEMBER_UNAVAILABLE','当前接替主责的连接或批准已不可用',403)
@@ -463,6 +468,7 @@ class RoomWeixin:
             'affected_work_ids':[goal['id'] for goal in goals]}
 
     def ingest(self,binding,account,owner,room,member,message):
+        incoming_items(message)
         self.c.rooms.require_native(room)
         if not isinstance(message,dict):
             raise DevError('WEIXIN_MESSAGE_INVALID','微信消息必须为结构化对象',422)
@@ -496,7 +502,7 @@ class RoomWeixin:
         direct=not message.get('group_id') and type(message.get('message_type')) is int and message['message_type']==1 and not echo and peer!=account['bot_id']
         if direct and message.get('to_user_id') not in (None,'',account['bot_id']):
             raise DevError('WEIXIN_RECEIVER_MISMATCH','当前微信消息不属于原机器人',409)
-        content='\n'.join(text(item.get('text_item',{}).get('text'),12000,empty=True) for item in items if isinstance(item,dict) and item.get('type')==1)
+        content='\n'.join(incoming_text(item.get('text_item',{}).get('text'),12000,empty=True) for item in items if isinstance(item,dict) and item.get('type')==1)
         disposition,message_id='unpaired_peer_quarantined',None
         if not direct:
             disposition='group_or_echo_quarantined'
@@ -528,7 +534,7 @@ class RoomWeixin:
                 content,attachment_items='[微信消息已删除]',[]
             if not content:
                 content='[附件消息]'
-            text(content,24000)
+            content=incoming_text(content,24000)
             body={'body_text':redact(content),'room_member_id':member['id'],'room_routing':{'state':'queued','member_id':member['id'],'reason_code':''},
                 'external_origin':{'channel':'weixin','native_room':True,'binding_id':binding['id'],'account_id':account['id'],
                     'generation':binding['generation'],'peer_id':peer,'external_message_id':external_id,'provider_version':version,

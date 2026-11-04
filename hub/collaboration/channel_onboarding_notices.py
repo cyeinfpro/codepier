@@ -25,6 +25,11 @@ class OnboardingNotices:
         if kind == 'connected':
             self.store.execute("UPDATE channel_onboarding_notices SET state='cancelled',reason_code='pairing_completed' WHERE binding_id=? AND kind='pairing_required' AND state IN ('queued','waiting_context')", (binding['id'],))
         now = self.c.clock()
+        if kind == 'pairing_required' and self.store.one('''SELECT 1 FROM channel_onboarding_notices
+                WHERE binding_id=? AND generation=? AND peer_id=? AND kind='pairing_required'
+                AND created>=? LIMIT 1''',
+                (binding['id'], binding['generation'], peer, binding['pairing_until'] - 900)):
+            return
         self.store.execute('''INSERT OR IGNORE INTO channel_onboarding_notices
             (id,channel,binding_id,account_id,generation,credential_version,peer_id,source_external_id,kind,body,
              state,binding_version,authorization_version,expires_at,created,updated)

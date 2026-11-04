@@ -162,7 +162,7 @@ def make_panel_update_router(auth, runtime, client=None):
         if action == 'apply' and body.confirmation != body.version:
             raise DevError('CONFIRMATION_REQUIRED', '请明确确认所检查的目标版本', 409)
         payload.update(current_version=VERSION, actor=principal.actor)
-        runtime.store.audit(principal.actor, 'panel_update.requested', status='started',
+        await runtime.store.run(runtime.store.audit, principal.actor, 'panel_update.requested', status='started',
                             detail={'action': action, 'request_key': body.idempotency_key,
                                     'version': payload.get('version', '')})
         created = False

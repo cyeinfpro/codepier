@@ -61,6 +61,9 @@ def migrate(db):
         reference TEXT NOT NULL,revision INTEGER NOT NULL,acknowledged_at REAL,
         created REAL NOT NULL,
         UNIQUE(dot_id,generation,kind,object_id,object_version))""")
+    entry_columns = {row[1] for row in db.execute('PRAGMA table_info(dot_mailbox_entries)')}
+    if 'acknowledged_scope_digest' not in entry_columns:
+        db.execute("ALTER TABLE dot_mailbox_entries ADD COLUMN acknowledged_scope_digest TEXT NOT NULL DEFAULT ''")
     db.execute("""CREATE INDEX IF NOT EXISTS dot_mailbox_entries_scan
         ON dot_mailbox_entries(dot_id,generation,sequence)""")
     db.execute("""CREATE INDEX IF NOT EXISTS dot_mailbox_entries_ready
@@ -461,8 +464,10 @@ class DotMailbox:
         return self.c.message_handling.summaries(visible, principal)
 
     def _entry(self, row, principal, room, dot, *, handling_summaries=None):
-        if row['acknowledged_at'] is not None:
+        if row['acknowledged_at'] is not None and row['kind'] != 'message':
             return None
+        # SQL may surface a settled message again after its scope or canonical
+        # reply changed. Revalidate the original handling evidence below.
         ref = json.loads(row['reference'])
         result = {'id': row['id'], 'kind': row['kind'], 'object_id': row['object_id'],
                   'object_version': row['object_version'], 'revision': row['revision'],
@@ -560,12 +565,19 @@ class DotMailbox:
             actor, room, dot = self._actor(binding)
         except DevError:
             return False
+        scope_digest = self.c.message_handling.scope_digest(room, dot)
         after = 0
         while True:
             rows = self.store.all("""SELECT * FROM dot_mailbox_entries
-                WHERE dot_id=? AND generation=? AND acknowledged_at IS NULL AND revision>?
+                WHERE dot_id=? AND generation=? AND superseded_by='' AND revision>?
+                AND (acknowledged_at IS NULL OR (kind='message' AND (acknowledged_scope_digest!=?
+                    OR EXISTS (SELECT 1 FROM dot_message_handling h
+                        LEFT JOIN collaboration_messages r ON r.id=h.reply_id
+                        WHERE h.dot_id=dot_mailbox_entries.dot_id AND h.message_id=dot_mailbox_entries.object_id
+                        AND h.reply_id!='' AND (r.id IS NULL OR r.version!=h.reply_version
+                            OR json_extract(r.body,'$.dot_reply_complete')=0)))))
                 AND sequence>? ORDER BY sequence LIMIT 64""",
-                (dot_id, binding['generation'], after_revision or 0, after))
+                (dot_id, binding['generation'], after_revision or 0, scope_digest, after))
             summaries = self._message_summaries(rows, actor)
             for row in rows:
                 try:
@@ -578,6 +590,36 @@ class DotMailbox:
                 break
             after = rows[-1]['sequence']
         return False
+
+    def settle_history(self, limit=100):
+        """Bounded upgrade of old handled rows, with current evidence checks."""
+        after = getattr(self, '_settle_after', 0)
+        rows = self.store.all("""SELECT e.* FROM dot_mailbox_entries e
+            JOIN dot_message_handling h ON h.dot_id=e.dot_id AND h.message_id=e.object_id
+            JOIN dot_mailbox_bindings b ON b.dot_id=e.dot_id AND b.generation=e.generation
+            WHERE e.kind='message' AND e.acknowledged_at IS NULL AND e.superseded_by=''
+                AND h.handling_state IN ('reply_committed','covered','no_response_required','legacy_handled')
+                AND e.sequence>? ORDER BY e.sequence LIMIT ?""", (after, limit))
+        self._settle_after = rows[-1]['sequence'] if len(rows) == limit else 0
+        actors = {}
+        for entry in rows:
+            try:
+                if entry['dot_id'] not in actors:
+                    actors[entry['dot_id']] = self._actor(self.binding(entry['dot_id']))
+                actor, room, dot = actors[entry['dot_id']]
+                message = self.store.one('SELECT * FROM collaboration_messages WHERE id=?', (entry['object_id'],))
+                if not message or message['version'] != entry['object_version']:
+                    continue
+                summary = self.c.message_handling.summaries([message['id']], actor).get((dot['id'], message['id']))
+                if not summary or not (summary['content_completed'] or
+                        summary['state'] == 'legacy_handled' and summary['evidence_current']):
+                    continue
+                self.store.execute("""UPDATE dot_mailbox_entries SET acknowledged_at=?,acknowledged_scope_digest=?
+                    WHERE id=? AND acknowledged_at IS NULL""",
+                    (self.c.clock(), self.c.message_handling.scope_digest(room, dot), entry['id']))
+            except DevError:
+                # Unavailable authority is never treated as completed input.
+                continue
 
     def recover(self, *, max_wakes=4):
         """Three bounded reminders for an idle, still-authorized exact route.
@@ -728,8 +770,16 @@ class DotMailbox:
             if isinstance(after, bool) or not isinstance(after, int) or after < 0:
                 raise DevError('INVALID_CURSOR', '收件箱游标无效', 400)
             rows = self.store.all("""SELECT * FROM dot_mailbox_entries
-                WHERE dot_id=? AND generation=? AND sequence>? ORDER BY sequence LIMIT ?""",
-                                  (dot['id'], binding['generation'], after, args['limit'] + 1))
+                WHERE dot_id=? AND generation=? AND superseded_by=''
+                AND (acknowledged_at IS NULL OR (kind='message' AND (acknowledged_scope_digest!=?
+                    OR EXISTS (SELECT 1 FROM dot_message_handling h
+                        LEFT JOIN collaboration_messages r ON r.id=h.reply_id
+                        WHERE h.dot_id=dot_mailbox_entries.dot_id AND h.message_id=dot_mailbox_entries.object_id
+                        AND h.reply_id!='' AND (r.id IS NULL OR r.version!=h.reply_version
+                            OR json_extract(r.body,'$.dot_reply_complete')=0)))))
+                AND sequence>? ORDER BY sequence LIMIT ?""",
+                                  (dot['id'], binding['generation'], self.c.message_handling.scope_digest(room, dot),
+                                   after, args['limit'] + 1))
             selected, items, scanned_after, byte_count = rows[:args['limit']], [], after, 0
             budget_limited = False
             summaries = self._message_summaries(selected, principal)

@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import stat
 import tempfile
+import time
 import uuid
 
 from agent.config import validate_config
@@ -100,12 +101,24 @@ def _replace_config(path, original, original_info, replacement, expected):
             if ((info.st_dev, info.st_ino) != (original_info.st_dev, original_info.st_ino)
                     or hashlib.sha256(latest).hexdigest() != expected):
                 raise DevError('SHA_CONFLICT', 'Configuration changed before apply; no settings were changed', 409)
-            backup = path.with_name(path.name + '.runtime-backup-' + uuid.uuid4().hex)
+            # New backups live inside the same protected state directory used
+            # by Agent. Legacy adjacent backups remain blocked by FileEngine.
+            original_config = json.loads(original.decode('utf-8-sig'))
+            state = Path(original_config.get('state_dir', str(path.parent / 'state'))).expanduser()
+            if not state.is_absolute():
+                raise ValueError('Configuration state directory must be absolute')
+            backups = state / 'config-backups'
+            if any(parent.is_symlink() for parent in (backups, *backups.parents)):
+                raise ValueError('Configuration backup directory cannot contain symbolic links')
+            backups.mkdir(mode=0o700, parents=True, exist_ok=True)
+            os.chmod(backups, 0o700)
+            prefix = hashlib.sha256(str(path).encode()).hexdigest()[:16] + '-'
+            backup = backups / (prefix + str(time.time_ns()) + '-' + uuid.uuid4().hex)
             with os.fdopen(os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'wb') as stream:
                 stream.write(original)
                 stream.flush()
                 os.fsync(stream.fileno())
-            _sync_directory(path.parent)
+            _sync_directory(backups)
             fd, name = tempfile.mkstemp(prefix=path.name + '.runtime-', dir=path.parent)
             temporary = Path(name)
             with os.fdopen(fd, 'wb') as stream:
@@ -120,7 +133,14 @@ def _replace_config(path, original, original_info, replacement, expected):
             replaced = True
             temporary = None
             _sync_directory(path.parent)
-            return backup.name
+            # Only this config's regular owned backup files are candidates.
+            retained = sorted((entry for entry in backups.glob(prefix + '*')
+                               if entry.is_file() and not entry.is_symlink()),
+                              key=lambda entry: entry.name, reverse=True)
+            for old in retained[10:]:
+                old.unlink()
+            _sync_directory(backups)
+            return os.path.relpath(backup, path.parent)
         except OSError as exc:
             if replaced:
                 raise DevError('DURABILITY_UNCONFIRMED',

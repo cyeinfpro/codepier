@@ -264,6 +264,8 @@ def migrate(db):
     migrate_room_context(db)
     from hub.collaboration.room_message_migration import migrate as migrate_room_messages
     migrate_room_messages(db)
+    from hub.collaboration.query_indexes import migrate as migrate_query_indexes
+    migrate_query_indexes(db)
     db.execute("INSERT OR REPLACE INTO meta VALUES ('collaboration_schema','3')")
 
 def migrate_chatroom(db):

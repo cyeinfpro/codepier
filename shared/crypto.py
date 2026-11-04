@@ -19,19 +19,45 @@ def digest(value: str | bytes) -> str:
     return hashlib.sha256(value.encode() if isinstance(value, str) else value).hexdigest()
 
 
+SCRYPT_N, SCRYPT_R, SCRYPT_P = 1 << 15, 8, 1
+SCRYPT_MAXMEM = 64 * 1024 * 1024
+
+
 def password_hash(password: str) -> str:
     salt = secrets.token_bytes(16)
-    derived = hashlib.scrypt(password.encode(), salt=salt, n=16384, r=8, p=1)
-    return f"scrypt$16384$8$1${salt.hex()}${derived.hex()}"
+    derived = hashlib.scrypt(password.encode(), salt=salt, n=SCRYPT_N, r=SCRYPT_R,
+                             p=SCRYPT_P, maxmem=SCRYPT_MAXMEM)
+    return f"scrypt${SCRYPT_N}${SCRYPT_R}${SCRYPT_P}${salt.hex()}${derived.hex()}"
+
+
+def _password_parameters(encoded: str):
+    algorithm, n, r, p, salt, expected = encoded.split("$")
+    n, r, p = int(n), int(r), int(p)
+    # Bound both memory and work, including malformed/tampered persisted values.
+    if algorithm != "scrypt" or n not in {1 << 14, 1 << 15, 1 << 16, 1 << 17} or r != 8 or p != 1:
+        raise ValueError("Unsupported password hash parameters")
+    salt, expected = bytes.fromhex(salt), bytes.fromhex(expected)
+    if len(salt) != 16 or len(expected) != 64:
+        raise ValueError("Invalid password hash length")
+    return n, r, p, salt, expected
 
 
 def password_verify(password: str, encoded: str) -> bool:
     try:
-        _, n, r, p, salt, expected = encoded.split("$")
-        derived = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt), n=int(n), r=int(r), p=int(p))
-        return hmac.compare_digest(derived.hex(), expected)
-    except (ValueError, TypeError):
+        n, r, p, salt, expected = _password_parameters(encoded)
+        derived = hashlib.scrypt(password.encode(), salt=salt, n=n, r=r, p=p,
+                                 maxmem=SCRYPT_MAXMEM * 4)
+        return hmac.compare_digest(derived, expected)
+    except (ValueError, TypeError, AttributeError, OverflowError):
         return False
+
+
+def password_needs_rehash(encoded: str) -> bool:
+    try:
+        n, _, _, _, _ = _password_parameters(encoded)
+        return n < SCRYPT_N
+    except (ValueError, TypeError, AttributeError, OverflowError):
+        return True
 
 
 class SecureChannel:

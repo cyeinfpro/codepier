@@ -6,6 +6,7 @@ import uuid
 
 from shared import collaboration_contracts as contracts
 from shared.util import DevError
+from hub.collaboration.projection_cache import projection, memoized, project as projected_project
 from hub.collaboration.common import MESSAGE_EVENT, canonical, digest, read_cursor, redact, sign_cursor, validate
 
 
@@ -187,6 +188,7 @@ class ChatroomService:
                 result[identifier] = {'state': 'recipient_unavailable'}
         return result
 
+    @memoized
     def message_visible(self, principal, row):
         projects = set(json.loads(row['body']).get('provenance_project_ids', []))
         if row.get('room_id'):
@@ -196,7 +198,7 @@ class ChatroomService:
             projects.add(partition['project_id'])
         for project_id in projects:
             try:
-                self.c.runtime.project(project_id, principal)
+                projected_project(self.c, project_id, principal)
             except DevError:
                 return False
         return True
@@ -205,6 +207,7 @@ class ChatroomService:
         if not self.message_visible(principal, row):
             raise DevError('NOT_FOUND', '当前授权下没有这条消息', 404)
 
+    @projection
     def views(self, rows, principal=None):
         if principal is not None:
             rows = [row for row in rows if self.message_visible(principal, row)]
@@ -605,7 +608,7 @@ class ChatroomService:
             if not query:
                 raise DevError('INVALID_QUERY', '请输入搜索内容', 422)
             # JSON body is bounded text; escaping keeps wildcard input literal.
-            clauses.append("body LIKE ? ESCAPE '\\'")
+            clauses.append("json_extract(body,'$.body_text') LIKE ? ESCAPE '\\'")
             params.append('%' + query.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%')
             mode += ':search:' + digest(query)
         latest = self.latest(room)

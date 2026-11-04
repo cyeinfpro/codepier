@@ -7,9 +7,13 @@ from types import SimpleNamespace
 import pytest
 
 from hub.runtime import Runtime
+from hub.operation_history import PREFIX, unseal
 from hub.store import Store
 from shared.util import DevError
-from tests.test_reliability import Peer, runtime  # noqa: F401
+from tests import test_reliability
+
+Peer = test_reliability.Peer
+runtime = test_reliability.runtime
 
 
 async def start(runtime, principal=None):
@@ -40,16 +44,17 @@ async def test_live_tail_is_durable_and_does_not_rewrite_wide_operation_body(run
     retained = text[-131072:]
     raw = instance.store.one('SELECT output,output_seq FROM operations WHERE id=?', (identifier,))
     assert raw == {'output': '', 'output_seq': 8}
-    assert instance.store.one('SELECT output FROM operation_output_tails WHERE operation_id=?',
-                              (identifier,))['output'] == retained
+    stored = instance.store.one('SELECT output,sealed_output FROM operation_output_tails WHERE operation_id=?', (identifier,))
+    assert stored['output'] == '' and stored['sealed_output'].startswith(PREFIX)
+    assert unseal(instance.store, stored['sealed_output']) == retained
     public = instance.operation(identifier, principal)
     assert public['output'] == retained and public['output_chars'] == len(retained)
     assert public['last_output_at'] is not None
     # A second independent connection observes the committed snapshot, not an
     # in-process buffer that could disappear when the Hub process dies.
     with sqlite3.connect(instance.store.state_directory / 'hub.sqlite3') as observer:
-        assert observer.execute('SELECT output FROM operation_output_tails WHERE operation_id=?',
-                                (identifier,)).fetchone()[0] == retained
+        assert unseal(instance.store, observer.execute('SELECT sealed_output FROM operation_output_tails WHERE operation_id=?',
+                                (identifier,)).fetchone()[0]) == retained
     reopened = Store(instance.store.directory)
     try:
         recovered = Runtime(reopened).operation(identifier, principal)
@@ -95,7 +100,9 @@ async def test_terminal_commit_materializes_tail_and_rejects_late_output(runtime
     final = instance.operation(identifier, principal)
     assert final['state'] == 'succeeded' and final['output'] == expected
     assert final['output_seq'] == 7 + int(expected != 'streamed tail')
-    assert instance.store.one('SELECT output FROM operations WHERE id=?', (identifier,))['output'] == expected
+    stored_output = instance.store.one('SELECT output FROM operations WHERE id=?', (identifier,))['output']
+    assert unseal(instance.store, stored_output) == expected
+    assert not expected or stored_output.startswith(PREFIX)
     assert not instance.store.all('SELECT * FROM operation_output_tails')
     emit(instance, peer, identifier, 'late high-sequence output', 1000)
     assert instance.operation(identifier, principal)['output'] == expected

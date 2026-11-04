@@ -8,7 +8,7 @@ from pydantic import Field
 
 from hub.collaboration.common import digest
 from hub.collaboration.weixin_schema import Mutation
-from hub.collaboration.weixin_protocol import MAX_MEDIA, safe_filename
+from hub.collaboration.weixin_protocol import MAX_MEDIA, safe_filename, upload_estimate
 from shared.util import DevError
 
 
@@ -69,6 +69,7 @@ class ChannelFileReview:
                                "source_operation_id": a.get("source_operation_id") or None,
                                "type": "application/octet-stream", "type_verified": False} for a in artifacts],
                     "total_bytes": sum(a["bytes"] for a in artifacts), "upload_limit": MAX_MEDIA,
+                    "upload_estimate": upload_estimate([a["bytes"] for a in artifacts]),
                     "queued": False, "automatic_publication": False, "read_only": True}
 
     def approve(self, raw, principal):

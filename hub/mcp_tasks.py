@@ -8,6 +8,7 @@ import re
 import time
 
 from hub import iam
+from hub.operation_history import seal, unseal
 from hub.principal import refresh_principal
 from shared.mcp_protocol import PREFIX, ProtocolError
 from shared.mcp_presentation import error_view
@@ -91,10 +92,10 @@ class TaskService:
 
     def _freeze(self, row, operation):
         if row['terminal_operation'] is None and operation['state'] in TERMINAL:
-            snapshot = {key: operation.get(key) for key in ('state', 'result', 'error', 'updated')}
+            snapshot = {key: operation.get(key) for key in ('state', 'error', 'updated')}
             snapshot['operation_id'] = operation['id']
-            self.store.execute('UPDATE mcp_tasks SET terminal_operation=? WHERE task_id=? AND terminal_operation IS NULL',
-                (json.dumps(snapshot, ensure_ascii=False), row['task_id']))
+            self.store.execute('UPDATE mcp_tasks SET terminal_operation=?,terminal_result=? WHERE task_id=? AND terminal_operation IS NULL',
+                (json.dumps(snapshot, ensure_ascii=False), seal(self.store, unseal(self.store, operation.get('result'))), row['task_id']))
             row = self.store.one('SELECT * FROM mcp_tasks WHERE task_id=?', (row['task_id'],))
         return row
 
@@ -125,7 +126,9 @@ class TaskService:
         with self.store.transaction():
             row, operation = self._binding(identifier, principal)
             row = self._freeze(row, operation)
-            snapshot = json.loads(row['terminal_operation']) if row['terminal_operation'] else None
+            snapshot = json.loads(unseal(self.store, row['terminal_operation'])) if row['terminal_operation'] else None
+            if snapshot:
+                snapshot['result'] = unseal(self.store, row.get('terminal_result') or snapshot.get('result'))
             updated = snapshot['updated'] if snapshot else operation['updated']
             body = {'taskId': identifier, 'status': 'working', 'createdAt': iso(row['created']),
                     'lastUpdatedAt': iso(max(row['created'], updated)), 'ttlMs': None, 'pollIntervalMs': 2000}

@@ -279,14 +279,16 @@ async def test_config_change_during_handshake_cannot_publish_stale_connection(lo
             pass
 
         async def send(self, packet):
-            assert hub_channel.unpack(packet)["type"] == "hello"
+            hello = hub_channel.unpack(packet)
+            assert hello["type"] == "hello"
+            self.binding = hello["channel_binding"]
 
         async def recv(self):
             self.receives += 1
             if self.receives == 1:
                 return json.dumps({"type": "challenge", "challenge": challenge})
             agent.config = {**agent.config, "hub_url": "http://127.0.0.1:10"}
-            return hub_channel.pack({"type": "ready"})
+            return hub_channel.pack({"type": "ready", "channel_binding": self.binding})
 
         def __aiter__(self):
             raise AssertionError("stale connection entered reader")

@@ -11,6 +11,7 @@ import math
 import uuid
 
 from shared.room_runtime_contracts import RoomMessage, WorkControl, RoomMemberReply, RoomWorkStart
+from hub.collaboration.projection_cache import projection
 from hub.collaboration.common import canonical, digest, read_cursor, redact, sign_cursor, validate
 from shared.util import DevError
 
@@ -210,7 +211,7 @@ class RoomRuntime:
                     result['scope_revision_required']=True
                 return self.work_response(result,args,member,principal)
             native_reference,native_scope=self.c.room_work_bridge.native.prepare(member,source,principal,args)
-            scopes=self.c.room_work_bridge.scopes(member)
+            self.c.room_work_bridge.scopes(member)
             project_id=native_scope['anchor_project_id']
             bridge,scope=self.c.room_work_bridge.adapter(member,project_id,args['environment_id'] or None)
             owner=self.c.room_work_bridge.owner(member,scope)
@@ -309,7 +310,9 @@ class RoomRuntime:
             self.c.coordination.authorize(principal,partition,{**goal,'state':'active'},active=True)
             self.store.execute("UPDATE coordination_goals SET state='active',version=version+1,updated=? WHERE id=?",(self.c.clock(),goal['id']))
             project_id=args['target_project_id'] or spec['anchor_project_id']
-            participant=next(m for m in spec['members'] if m['member_id']==member['id'])
+            participant=next((m for m in spec['members'] if m['member_id']==member['id']),None)
+            if participant is None:
+                raise DevError('ROOM_MEMBER_NOT_IN_APPROVAL','当前成员不在原工作批准名单中',403)
             rule=next((r for r in participant['projects'] if r['project_id']==project_id),None)
             capabilities=args['capabilities'] or (rule['capabilities'] if rule else [])
             if not rule or not set(capabilities)<=set(rule['capabilities']):
@@ -378,6 +381,7 @@ class RoomRuntime:
             '已发送，等待 dot' if route.get('state')=='queued' else '已保存')}
         return view
 
+    @projection
     def read(self,conversation_id,principal,*,cursor='',limit=50,client_message_id='',message_id=''):
         if type(limit) is not int or not 1<=limit<=100:
             raise DevError('INVALID_ARGUMENTS','消息分页数量须为 1–100',422)
@@ -538,7 +542,7 @@ class RoomRuntime:
             raise DevError('GOAL_NOT_FOUND','没有此工作',404)
         return goal
 
-    def work_view(self,goal,principal,*,member_id=''):
+    def work_view(self,goal,principal,*,member_id='',include_recovery=True):
         native=self.c.room_work_bridge.native
         if member_id and native.reference(goal):
             goal={**goal,'_reader_member_id':member_id}
@@ -590,7 +594,7 @@ class RoomRuntime:
         native_scope=self.c.room_work_bridge.native.record(spec['room_member_scope']) if spec.get('room_member_scope') else None
         visible=native.visible_projects(goal,principal,member_id) if native_scope else set(spec['project_ids'])
         partial=visible!=set(spec['project_ids'])
-        recovery=self.c.room_goal_recovery.projection(goal,principal) if native_scope and not principal.grant_id and not archived and conversation['room_protocol'] else None
+        recovery=self.c.room_goal_recovery.projection(goal,principal) if include_recovery and native_scope and not principal.grant_id and not archived and conversation['room_protocol'] else None
         if recovery and recovery['restore_candidates']:
             allowed.append('restore_binding')
         if recovery and recovery['takeover_candidates']:
@@ -607,6 +611,7 @@ class RoomRuntime:
                 'intent_revision':revision,
                 **({'coordinator_epoch':native_scope['coordinator_epoch']} if native_scope else {}),
                 **({'recovery':recovery} if recovery else {}),
+                'recovery_requires_detail':bool(not include_recovery and native_scope and not principal.grant_id and not archived),
                 'state':state,'goal_state':goal['state'],'reason_code':reason,
                 'display':{'title':title,'reason':reasons.get(reason,''),'allowed_actions':allowed},'allowed_actions':allowed,
                 **({'members':[{'id':m['member_id'],'name':m['name'],'grant_id':m['grant_id']} for m in native_scope['members']],
@@ -629,6 +634,7 @@ class RoomRuntime:
         return digest(['room-works-v1',conversation['id'],principal.user_id,principal.space_id,
             sorted(row['id'] for row in projects),conversation['version']])
 
+    @projection
     def work_page(self,conversation_id,principal,*,cursor='',limit=50):
         if type(limit) is not int or not 1<=limit<=100:
             raise DevError('INVALID_ARGUMENTS','工作分页数量须为 1–100',422)
@@ -647,13 +653,13 @@ class RoomRuntime:
             rows=self.store.all('''SELECT * FROM coordination_goals WHERE conversation_id=?'''+
                 (f' AND (created<? OR (created=? AND id{comparator}?))' if position else '')+
                 ' ORDER BY created DESC,id DESC LIMIT ?',
-                (conversation_id,*([position[0],position[0],position[1]] if position else []),min(1000,limit*10)+1))
+                (conversation_id,*([position[0],position[0],position[1]] if position else []),min(200,limit*2)+1))
             selected=[]
             scanned=None
             consumed=0
-            for goal in rows[:min(1000,limit*10)]:
+            for goal in rows[:min(200,limit*2)]:
                 try:
-                    work=self.work_view(goal,principal)
+                    work=self.work_view(goal,principal,include_recovery=False)
                 except DevError:
                     work=None
                 scanned=[goal['created'],goal['id']]
@@ -667,6 +673,7 @@ class RoomRuntime:
                 'next_cursor':sign_cursor(self.c.secret,binding,scanned) if more and scanned else None,
                 'pagination_complete':not more,'visibility_revision':binding,'read_only':True,'grants_authority':False}
 
+    @projection
     def work_read(self,work_id,principal):
         with self.store.transaction(immediate=False):
             goal=self.goal(work_id)
@@ -746,7 +753,7 @@ class RoomRuntime:
                         member={'id':native.record(reference)['coordinator_member_id']}
                     else:
                         member=self.store.one('SELECT member_id AS id FROM room_work_sources WHERE goal_id=? ORDER BY created LIMIT 1',(goal['id'],))
-                    sent=self.send({'conversation_id':conversation['id'],'body_text':args['body_text'],
+                    self.send({'conversation_id':conversation['id'],'body_text':args['body_text'],
                         'client_message_id':'work-input:'+args['idempotency_key'],'idempotency_key':'work-input:'+args['idempotency_key'],
                         'member_id':member['id'] if member else '', 'reply_to_id':parent,'work_id':goal['id'],
                         'attachment_ids':args['attachment_ids']},principal)

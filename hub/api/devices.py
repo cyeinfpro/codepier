@@ -72,8 +72,7 @@ def device_rows(store, runtime, principal):
 def make_devices_router(context: HubContext):
     router = APIRouter()
     store, runtime, auth = context.store, context.runtime, context.auth
-    config, maintenance = context.config, context.maintenance
-    public_url, BASE = context.public_url, context.base
+    public_url = context.public_url
 
     @router.get("/api/devices")
     @database_endpoint(store)

@@ -15,6 +15,7 @@ class CollaborationLoops:
         self.started = False
         self._wake_lock = Lock()
         self._event_loop = self._event_wake = self._wake_scheduled = None
+        self._channel_wakes = {}
 
     async def start(self):
         if self.started or not self.service.config.enabled:
@@ -41,6 +42,8 @@ class CollaborationLoops:
         if self.service.config.enabled:
             operations.append(('channel_mirrors', self.service.channels.tick, 1))
         for name, operation, interval in operations:
+            if name.startswith(('weixin_', 'telegram_')) or name == 'channel_mirrors':
+                self._channel_wakes[name] = asyncio.Event()
             self.service.health.setdefault(name, {'enabled': True, 'running': False, 'reason_code': ''})
             self.tasks.append(asyncio.create_task(self.loop(name, operation, interval), name='collaboration:' + name))
 
@@ -67,19 +70,45 @@ class CollaborationLoops:
             if self.started and self._event_wake is wake:
                 wake.set()
 
+    def wake_channels(self):
+        """An owner/account change interrupts the idle backoff immediately."""
+        with self._wake_lock:
+            loop = self._event_loop
+            if not self.started or loop is None or loop.is_closed():
+                return
+            for wake in self._channel_wakes.values():
+                try:
+                    loop.call_soon_threadsafe(wake.set)
+                except RuntimeError:
+                    return
+
+    def channel_delay(self, name, interval):
+        channels = (('weixin', 'telegram') if name == 'channel_mirrors' else
+                    ('weixin',) if name.startswith('weixin_') else ('telegram',))
+        for channel in channels:
+            enabled = self.service.channel_settings.sql_enabled(channel, 'a')
+            if self.service.store.one(f"SELECT 1 FROM {channel}_accounts a WHERE a.state='active' AND {enabled} LIMIT 1"):
+                return interval
+        # Still run periodic expiry/reconciliation; no enabled owner/account
+        # should consume the one database worker every second.
+        return 30
+
     async def reconcile(self):
         await self.service.store.run(self.service.reconcile)
 
     async def loop(self, name, operation, interval):
         while True:
-            wake = self._event_wake if name == 'events' else None
+            wake = self._event_wake if name == 'events' else self._channel_wakes.get(name)
             # Clear BEFORE the DB scan. A commit during the scan/network await
             # stays set and triggers one more serialized pass, never a lost wake.
             if wake is not None:
                 wake.clear()
+            idle_delay = interval
             try:
                 self.service.health[name] = {'status': 'running', 'observed_at': self.service.clock()}
                 await operation()
+                idle_delay = (await self.service.store.run(lambda: self.channel_delay(name, interval))
+                              if name in self._channel_wakes else interval)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -93,7 +122,7 @@ class CollaborationLoops:
                 self.service.health[name] = {'status': 'running', 'observed_at': self.service.clock()}
             deadline = (getattr(getattr(self.service, 'events', None), 'next_dispatch_delay', None)
                         if name == 'events' else None)
-            delay = deadline(interval) if deadline is not None else interval
+            delay = deadline(interval) if deadline is not None else idle_delay
             if wake is None:
                 await asyncio.sleep(delay)
             else:
@@ -104,6 +133,7 @@ class CollaborationLoops:
         with self._wake_lock:
             self.started = False
             self._event_loop = self._event_wake = self._wake_scheduled = None
+        self._channel_wakes = {}
         tasks, self.tasks = self.tasks, []
         for task in tasks:
             task.cancel()

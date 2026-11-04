@@ -136,34 +136,41 @@ class DelegationConsumer:
                 'lifetime_mode': 'until_revoked' if self.c.channel_owner.persistent(policy) else 'timed'}
 
     def status(self, policy, room):
-        items = self.store.all("""SELECT w.*,g.state AS goal_state,g.approval_id AS goal_approval,g.expires_at AS goal_expires
+        now = self.c.clock()
+        work = self.store.one("""SELECT
+            COALESCE(SUM(w.state IN ('leased','running') AND COALESCE(w.lease_until,0)>?
+                AND g.state='active' AND g.approval_id=w.approval_id AND COALESCE(g.expires_at,0)>?),0) AS active,
+            COALESCE(SUM(w.attempt>0),0) AS observed,
+            COALESCE(SUM(w.result IS NOT NULL AND w.result!=''),0) AS results
             FROM coordination_work w JOIN delegation_requests d ON d.goal_id=w.goal_id
-            JOIN coordination_goals g ON g.id=w.goal_id WHERE d.policy_id=? AND d.policy_version=?""", (policy['id'], policy['version']))
-        active = [w for w in items if w['state'] in {'leased', 'running'} and (w['lease_until'] or 0) > self.c.clock()
-                  and w['goal_state'] == 'active' and w['goal_approval'] == w['approval_id']
-                  and (w['goal_expires'] or 0) > self.c.clock()]
-        operations = self.store.all("""SELECT o.state FROM coordination_operations c
-            JOIN delegation_requests d ON d.goal_id=c.goal_id LEFT JOIN operations o ON o.id=c.operation_id
-            WHERE d.policy_id=? AND d.policy_version=?""", (policy['id'], policy['version']))
-        pending = sum(op['state'] in PENDING or op['state'] is None for op in operations)
-        unknown = sum(op['state'] in {None, 'unknown'} for op in operations)
-        results = sum(bool(w['result']) for w in items)
-        deliveries = self.store.all("""SELECT d.state,d.accepted_at FROM mcp_event_deliveries d
-            JOIN mcp_event_outbox e ON e.id=d.event_id WHERE e.room_id=? AND e.name=?
-            AND json_extract(e.data,'$.policy_id')=? AND json_extract(e.data,'$.policy_version')=?""",
+            JOIN coordination_goals g ON g.id=w.goal_id WHERE d.policy_id=? AND d.policy_version=?""",
+            (now, now, policy['id'], policy['version']))
+        pending_states = sorted(PENDING)
+        operations = self.store.one("""SELECT COUNT(*) AS count,
+            COALESCE(SUM(o.state IS NULL OR o.state IN (""" + ','.join('?' for _ in pending_states) + """)),0) AS pending,
+            COALESCE(SUM(o.state IS NULL OR o.state='unknown'),0) AS unknown
+            FROM coordination_operations c JOIN delegation_requests d ON d.goal_id=c.goal_id
+            LEFT JOIN operations o ON o.id=c.operation_id WHERE d.policy_id=? AND d.policy_version=?""",
+            (*pending_states, policy['id'], policy['version']))
+        deliveries = self.store.one("""SELECT
+            COALESCE(SUM(d.state='accepted' AND COALESCE(d.accepted_at,0)!=0),0) AS accepted,
+            MAX(CASE WHEN d.state='accepted' AND d.accepted_at!=0 THEN d.accepted_at END) AS last_accepted,
+            COALESCE(SUM(d.state IN ('pending','retry_wait','leased')),0) AS pending
+            FROM mcp_event_deliveries d JOIN mcp_event_outbox e ON e.id=d.event_id
+            WHERE e.room_id=? AND e.name=? AND json_extract(e.data,'$.policy_id')=?
+                AND json_extract(e.data,'$.policy_version')=?""",
             (room['id'], DELEGATION_EVENT, policy['id'], policy['version']))
-        accepted = [d['accepted_at'] for d in deliveries if d['state'] == 'accepted' and d['accepted_at']]
         return {**self.d.notification_status(policy, room), 'model_online': 'unknown',
                 'consumer_mode': 'unknown', 'mode_evidence': 'not_observed',
-                'notification': {'delivery_state': 'accepted' if accepted else 'not_observed',
-                    'accepted_count': len(accepted), 'last_accepted_at': max(accepted) if accepted else None,
-                    'pending_count': sum(d['state'] in {'pending', 'retry_wait', 'leased'} for d in deliveries),
-                    'read_verified': False},
-                'claim': {'state': 'leased' if active else 'not_observed', 'active_count': len(active),
-                          'observed_count': sum(w['attempt'] > 0 for w in items)},
-                'operation': {'state': 'unknown' if unknown else 'pending' if pending else 'settled' if operations else 'not_observed',
-                              'pending_count': pending, 'unknown_count': unknown, 'count': len(operations)},
-                'result': {'state': 'reported' if results else 'not_observed', 'count': results}}
+                'notification': {'delivery_state': 'accepted' if deliveries['accepted'] else 'not_observed',
+                    'accepted_count': deliveries['accepted'], 'last_accepted_at': deliveries['last_accepted'],
+                    'pending_count': deliveries['pending'], 'read_verified': False},
+                'claim': {'state': 'leased' if work['active'] else 'not_observed', 'active_count': work['active'],
+                          'observed_count': work['observed']},
+                'operation': {'state': 'unknown' if operations['unknown'] else 'pending' if operations['pending']
+                    else 'settled' if operations['count'] else 'not_observed',
+                    'pending_count': operations['pending'], 'unknown_count': operations['unknown'], 'count': operations['count']},
+                'result': {'state': 'reported' if work['results'] else 'not_observed', 'count': work['results']}}
 
     @staticmethod
     def next_action(status, reason):
@@ -279,14 +286,20 @@ class DelegationConsumer:
             ceiling, after_seq, after_id = position
             # Snapshot pagination is temporary. Every wake rescans current work;
             # requeued/reordered old tasks get a new event and remain discoverable.
-            rows = self.store.all("""SELECT d.id AS delegation_id,d.message_id,d.goal_id,w.id AS work_item_id,
-                COALESCE((SELECT MAX(e.seq) FROM mcp_event_outbox e WHERE e.name=? AND e.object_id=w.id
-                    AND e.seq<=? AND json_extract(e.data,'$.policy_id')=d.policy_id
-                    AND json_extract(e.data,'$.policy_version')=d.policy_version),0) AS event_seq
-                FROM delegation_requests d JOIN coordination_work w ON w.goal_id=d.goal_id
-                WHERE d.policy_id=? AND d.policy_version=? ORDER BY event_seq,w.id""",
-                (DELEGATION_EVENT, ceiling, policy['id'], policy['version']))
-            rows = [row for row in rows if (row['event_seq'], row['work_item_id']) > (after_seq, after_id)]
+            rows = self.store.all("""WITH event_positions AS (
+                    SELECT object_id,MAX(seq) AS event_seq FROM mcp_event_outbox
+                    WHERE name=? AND seq<=? AND json_extract(data,'$.policy_id')=?
+                        AND json_extract(data,'$.policy_version')=? GROUP BY object_id),
+                candidates AS (
+                    SELECT d.id AS delegation_id,d.message_id,d.goal_id,w.id AS work_item_id,
+                        COALESCE(e.event_seq,0) AS event_seq
+                    FROM delegation_requests d JOIN coordination_work w ON w.goal_id=d.goal_id
+                    LEFT JOIN event_positions e ON e.object_id=w.id
+                    WHERE d.policy_id=? AND d.policy_version=?)
+                SELECT * FROM candidates WHERE (event_seq,work_item_id)>(?,?)
+                ORDER BY event_seq,work_item_id LIMIT ?""",
+                (DELEGATION_EVENT, ceiling, policy['id'], policy['version'],
+                 policy['id'], policy['version'], after_seq, after_id, args['limit'] + 1))
             selected, items = rows[:args['limit']], []
             for row in selected:
                 goal = self.c.coordination.object(room, row['goal_id'])

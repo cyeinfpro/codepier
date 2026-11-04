@@ -2052,6 +2052,22 @@ window.CodePierCollaboration = (() => {
     });
     if (result && panel === current) renderChannel(result);
   }
+  function inboundHealthMarkup(accounts) {
+    const items = (accounts || []).flatMap((account) =>
+      (account.inbound_health || [])
+        .filter((item) => ['deferred', 'quarantined'].includes(item.state) && Number(item.count) > 0)
+        .map((item) => `<li><strong>${E(account.label || account.bot_id || '当前账号')}</strong> · ${item.state === 'deferred' ? '等待积压消化' : '已隔离'} ${E(item.count)} 条 · <code>${E(item.reason_code || 'unknown')}</code></li>`),
+    );
+    return items.length
+      ? `<section class="cr-info" aria-label="渠道收件状态"><strong>部分消息需要留意</strong><ul>${items.join('')}</ul><p>延后消息保留在原连接，积压消化后自动核对；隔离消息不会执行任务。后续正常消息仍可接收。</p></section>`
+      : '';
+  }
+  function uploadEstimateMarkup(estimate) {
+    if (!estimate || !Number.isFinite(Number(estimate.estimated_seconds))) return '';
+    const seconds = Math.max(0, Math.ceil(Number(estimate.estimated_seconds)));
+    const duration = seconds >= 60 ? Math.ceil(seconds / 60) + ' 分钟' : seconds + ' 秒';
+    return `<p class="cr-muted" data-cr-upload-estimate>附件外发参考：${estimate.reference_bytes ? E(fileSize(estimate.reference_bytes)) + ' 文件' : '所选文件'}约 ${E(duration)}。 ${E(estimate.note || '')} 外发文件仍需单独批准。</p>`;
+  }
   function renderChannel(result) {
     if (!panel || !root) return;
     const flow = result.flow || result;
@@ -2084,6 +2100,8 @@ window.CodePierCollaboration = (() => {
       parts.push(
         `<section class="cr-channel-existing">${field('已连接的微信', `<select name="existing_account_id"><option value="">选择账号</option>${accounts.map((account) => `<option value="${E(account.id)}">${E(account.label || account.bot_id)}</option>`).join('')}</select>`)}${btn('channel-existing', '使用此账号', '', 'cr-full')}</section>`,
       );
+    parts.push(inboundHealthMarkup(flow.account ? [flow.account] : accounts));
+    if (flow.account_connected) parts.push(uploadEstimateMarkup(flow.upload_estimate));
     if (safeQr)
       parts.push(
         `<img class="cr-qr" src="${E(qr)}" alt="用微信扫描二维码登录" referrerpolicy="no-referrer">`,
@@ -2498,7 +2516,7 @@ window.CodePierCollaboration = (() => {
         openPanel(
           'archive',
           '归档房间',
-          '<p>停止新工作并保留历史。归档后可以恢复这个房间。</p>' +
+          '<p>归档会停止工作并撤销当前连接、授权和订阅，历史记录会保留。恢复只恢复历史和项目关联，不会自动恢复执行权限，需重新确认接入。</p>' +
             btn('room-state', '归档房间', 'data-state="archived"', 'cr-danger cr-full'),
         );
     } else if (action === 'work-detail') await workPanel(id);
@@ -2940,5 +2958,5 @@ window.CodePierCollaboration = (() => {
         renderPage(false).catch((error) => toast(error.message, true));
     }
   });
-  return { html, bind, detach, clear, open };
+  return { html, bind, detach, clear, open, presentation: { inboundHealthMarkup, uploadEstimateMarkup } };
 })();

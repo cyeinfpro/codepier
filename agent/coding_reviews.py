@@ -368,6 +368,8 @@ def read_review(engine, project, args):
 
 def open_workspace(engine, project, args):
     context = project_context(engine, project, args)
+    from agent.git_freshness import freshness
+    git = freshness(engine.root(project)[0])
     from agent.project_runtime import descriptor
     from shared.runtime_results import capability_index
     runtime = descriptor(engine.config, project, engine.root(project)[0])
@@ -387,7 +389,7 @@ def open_workspace(engine, project, args):
     context_id = fingerprint(manifest)
     unchanged = context_id == args.get('context_id')
     result = {'view_version': 1, 'runtime': runtime, 'capability_index': capability_index(project.get('alias')), 'context_detail': args.get('context_detail', 'minimal'),
-              'observed_at': time.time(),
+              'observed_at': time.time(), 'git': git,
               'context_id': context_id, 'context_unchanged': unchanged,
               'workspace': {'project': project.get('alias'), 'project_id': project.get('id'),
                             'root': context['project_root'], 'mode': project['mode'], 'allow_tasks': project.get('allow_tasks'), 'granted_scopes': project.get('_coding_scopes')},

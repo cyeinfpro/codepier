@@ -9,6 +9,7 @@ databases therefore need no history rewrite and old receipts stay readable.
 from __future__ import annotations
 
 import time
+from hub.operation_history import seal, unseal
 
 OUTPUT_LIMIT = 131072
 OUTPUT_STATES = frozenset({'queued', 'running', 'reconnecting', 'cancelling', 'unknown', 'needs_review'})
@@ -19,6 +20,10 @@ def migrate(db):
         operation_id TEXT PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
         output_seq INTEGER NOT NULL CHECK(output_seq >= 0),
         output TEXT NOT NULL CHECK(length(output) <= 131072))''')
+    columns = {row[1] for row in db.execute('PRAGMA table_info(operation_output_tails)')}
+    if 'sealed_output' not in columns:
+        db.execute('ALTER TABLE operation_output_tails ADD COLUMN sealed_output TEXT')
+        db.execute('ALTER TABLE operation_output_tails ADD COLUMN output_chars INTEGER')
     # These predicates are used by authorized project history reads and active
     # admission checks; no owner/grant/privacy predicate is removed or cached.
     db.execute('''CREATE INDEX IF NOT EXISTS operations_project_recent
@@ -40,16 +45,16 @@ class OperationOutput:
         operation row cannot accidentally expose a stale side-table snapshot.
         Compact status reads select only a character count from the live row.
         """
-        columns = 'length(output) AS chars'
+        columns = 'COALESCE(output_chars,length(output)) AS chars'
         args = [row['id'], row['output_seq']]
         if include_body and limit:
-            columns += ',substr(output,?) AS output'
-            args.insert(0, -limit)
+            columns += ',output,sealed_output'
         live = self.store.one('SELECT ' + columns +
                               ' FROM operation_output_tails WHERE operation_id=? AND output_seq=?', args)
         if live is not None:
-            return (live.get('output', '') if include_body else None), live['chars']
-        legacy = row.get('output') or ''
+            text = unseal(self.store, live.get('sealed_output') or live.get('output') or '') if include_body and limit else ''
+            return (text[-limit:] if limit else '') if include_body else None, live['chars']
+        legacy = unseal(self.store, row.get('output') or '')
         return (legacy[-limit:] if limit else '') if include_body else None, len(legacy)
 
     def receive(self, identifier, data):
@@ -74,9 +79,9 @@ class OperationOutput:
                 previous, _ = self.read({**row, **legacy})
                 output = (previous + str(data.get('text', ''))[:8192])[-OUTPUT_LIMIT:]
             now = time.time()
-            self.store.execute('''INSERT INTO operation_output_tails(operation_id,output_seq,output)
-                VALUES(?,?,?) ON CONFLICT(operation_id) DO UPDATE
-                SET output_seq=excluded.output_seq,output=excluded.output''', (identifier, sequence, output))
+            self.store.execute('''INSERT INTO operation_output_tails(operation_id,output_seq,output,sealed_output,output_chars)
+                VALUES(?,?,'',?,?) ON CONFLICT(operation_id) DO UPDATE
+                SET output_seq=excluded.output_seq,output='',sealed_output=excluded.sealed_output,output_chars=excluded.output_chars''', (identifier, sequence, seal(self.store, output), len(output)))
             # Keep the hot parent row small. A legacy active tail is moved only
             # when that operation receives output, never by a bulk migration.
             self.store.execute("UPDATE operations SET output='',output_seq=?,updated=?,last_output_at=? WHERE id=?",

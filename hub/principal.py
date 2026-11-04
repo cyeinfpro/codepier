@@ -41,6 +41,8 @@ def validate_credential(store, principal):
         row = store.one("SELECT g.*,t.kind AS token_kind FROM tokens t JOIN grants g ON g.id=t.grant_id WHERE t.hash=? AND t.kind IN ('access','pat') AND t.expires>? AND g.revoked=0", (principal.token_hash, time.time()))
         if not row or row["id"] != principal.grant_id or row['user_id'] != principal.user_id:
             raise DevError("INVALID_TOKEN", "凭据已过期或撤销", 401)
+        from hub.grant_expiry import check
+        check(store, principal.grant_id)
         resource = getattr(store, "oauth_resource", None)
         if row["token_kind"] == "access" and resource and row["resource"] != resource():
             raise DevError("INVALID_TOKEN", "凭据的资源标识已改变", 401)

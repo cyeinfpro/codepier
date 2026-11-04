@@ -8,6 +8,8 @@ rollback-only even when application code catches that failure.
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
+import itertools
 import re
 import threading
 import time
@@ -73,6 +75,7 @@ class CheckedConnection:
         self._closed = False
         self._on_write = on_write
         self._callbacks = []
+        self._savepoint_ids = itertools.count(1)
         self._on_transaction = on_transaction
         self._transaction_started = None
 
@@ -128,6 +131,44 @@ class CheckedConnection:
             self._callbacks.append(callback)
         else:
             callback()
+
+    @contextmanager
+    def savepoint(self):
+        """Explicit failure isolation inside an already active managed transaction.
+
+        Normal nested contexts remain rollback-only. Only this opt-in boundary
+        can discard its own failure state and callbacks after SQLite rollback.
+        """
+        self._require()
+        if not self.depth or not self._connection.in_transaction:
+            raise RuntimeError("Savepoints require an active Store.transaction")
+        name = f'cp_isolated_{next(self._savepoint_ids)}'
+        rollback_before = self._rollback_only
+        callback_count = len(self._callbacks)
+        self._connection.execute(f'SAVEPOINT {name}')
+        try:
+            yield self
+            if self._rollback_only and not rollback_before:
+                raise TransactionAborted("An isolated nested database operation failed")
+        except BaseException:
+            try:
+                self._connection.execute(f'ROLLBACK TO {name}')
+                self._connection.execute(f'RELEASE {name}')
+            except BaseException:
+                self._rollback_only = True
+                raise
+            else:
+                self._rollback_only = rollback_before
+            finally:
+                del self._callbacks[callback_count:]
+            raise
+        else:
+            try:
+                self._connection.execute(f'RELEASE {name}')
+            except BaseException:
+                self._rollback_only = True
+                del self._callbacks[callback_count:]
+                raise
 
     def executescript(self, script):
         self._require()

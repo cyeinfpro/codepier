@@ -5,6 +5,7 @@ identifiers, never upload capabilities. Only encrypted Runtime payloads carry
 the internal base64 chunk transport; public receipts and this table are metadata.
 """
 from __future__ import annotations
+from hub.operation_history import result as operation_result
 
 import asyncio
 import base64
@@ -292,7 +293,7 @@ class IncomingFileService:
                 or operation["tool"] != "incoming_upload_finish" or operation["state"] != "succeeded"):
             return None
         try:
-            result = json.loads(operation["result"])
+            result = operation_result(self.store, operation)
             data = result.get("data") if isinstance(result, dict) and result.get("ok") is True else None
         except (ValueError, TypeError):
             return None
@@ -349,7 +350,7 @@ class IncomingFileService:
         state, code = operation["state"], None
         if operation.get("result"):
             try:
-                result = json.loads(operation["result"])
+                result = operation_result(self.store, operation)
                 if isinstance(result, dict) and result.get("ok") is False:
                     error = result.get("error")
                     code = error.get("code") if isinstance(error, dict) else None

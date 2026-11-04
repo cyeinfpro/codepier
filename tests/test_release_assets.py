@@ -86,7 +86,10 @@ def test_regression_processes_preserve_per_module_fixture_evidence():
 
 def test_license_is_in_the_container_distribution():
     root = Path(__file__).resolve().parents[1]
-    assert 'COPY --chown=codepier:codepier LICENSE ./' in (root / 'Dockerfile').read_text()
+    dockerfile = (root / 'Dockerfile').read_text()
+    assert 'COPY --chown=root:root LICENSE ./' in dockerfile
+    assert 'COPY --chown=codepier:codepier' not in dockerfile
+    assert 'chown codepier:codepier /app/data' in dockerfile
 
 
 @pytest.mark.parametrize('image', ['codepier:{v}', '"${CODEPIER_HUB_IMAGE:-codepier:{v}}"'])

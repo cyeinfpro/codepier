@@ -16,6 +16,8 @@ import uuid
 import httpx
 import pytest
 
+from hub.keyring import CipherSuite
+from hub.operation_history import PREFIX
 from shared.util import atomic_json
 from tests.support import running_stack, wait_for
 
@@ -106,12 +108,15 @@ def verify_journal_delivery(stack, operations):
     for record in agent_calls:
         assert record['tool'] == operations[record['id']]
         assert json.loads(record['result'])['ok'] is True
+    # Read fixture keys without opening Store or mutating the live database.
+    cipher = CipherSuite(stack.hubdir, (stack.hubdir / 'master.key').read_bytes())
     for record in hub_calls:
         assert record['tool'] == operations[record['id']]
         assert record['state'] == 'succeeded'
         assert record['grant_id'] == stack.ingress_grant
         assert record['project_id'] == stack.project['id']
-        assert json.loads(record['result'])['ok'] is True
+        assert record['result'].startswith(PREFIX)
+        assert json.loads(cipher.decrypt(record['result'][len(PREFIX):].encode()))['ok'] is True
         if record['tool'] == 'incoming_upload_chunk':
             # Runtime summaries contain metadata only, never the internal
             # encrypted transport's base64 body.

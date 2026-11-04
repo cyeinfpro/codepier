@@ -83,6 +83,30 @@ if [[ ! -f .env ]]; then
   mv "$env_tmp" .env
   env_tmp=''
 fi
+# Only upgrade a shipped historical callback allowlist; custom policy is preserved.
+"$bootstrap_python" - <<'PYOAUTH'
+from pathlib import Path
+import os, re, tempfile
+path = Path('.env')
+old = 'chatgpt.com,chat.openai.com,platform.openai.com,localhost,127.0.0.1,::1'
+new = 'chatgpt.com,chat.openai.com,platform.openai.com,claude.ai,localhost,127.0.0.1,::1'
+content = path.read_bytes()
+pattern = rb"(?m)^(OAUTH_REDIRECT_HOSTS=)([\"']?)" + re.escape(old.encode()) + rb"\2(\r?\n|$)"
+updated = re.sub(pattern, lambda m: m[1] + m[2] + new.encode() + m[2] + m[3], content)
+if updated != content:
+    fd, temporary = tempfile.mkstemp(prefix='.env.tmp.', dir='.')
+    try:
+        os.fchmod(fd, path.stat().st_mode & 0o777)
+        with os.fdopen(fd, 'wb') as output:
+            output.write(updated)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    print('已为 Claude 回调补充 OAuth 允许主机 claude.ai')
+PYOAUTH
 [[ ! -L "$root/.codepier-updater" && ! -L "$root/.codepier-updater/run" ]] || { echo "更新服务目录不能是符号链接" >&2; exit 1; }
 mkdir -p "$root/.codepier-updater/run"
 # The Hub must be able to check an absent marker even before the updater is enabled.

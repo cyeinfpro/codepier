@@ -178,7 +178,7 @@ def test_pending_receipt_revalidates_membership_after_wait(team,monkeypatch):
         await runtime.deliver(identifier)
         op=runtime.store.one('SELECT id,state,result,attempts FROM operations WHERE id=?',(identifier,))
         assert op['state']=='failed' and op['attempts']==0 and sends==[]
-        result=json.loads(op['result'])
+        result=runtime.operation_result(op)
         assert result['ok'] is False and result['error']['code']=='AUTHORIZATION_CHANGED'
         assert 'data' not in result
         for read_receipt in (lambda:runtime._pending_receipt(identifier,principal),

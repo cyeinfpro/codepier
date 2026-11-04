@@ -388,3 +388,34 @@ async def test_expired_native_route_cannot_be_rebound_to_another_same_grant_host
     assert current['generation'] == original['generation'] and current['subscription_id'] == original['subscription_id']
     assert len(c.s.store.all('SELECT * FROM mcp_event_subscriptions')) == 1
     assert c.s.dot_mailbox.enabled(c.dot['id'])
+
+
+def test_final_message_settles_mailbox_but_scope_change_reopens_it(collab, monkeypatch):
+    c = setup(collab)
+    configure(c)
+    source = message(c, 'Synthetic completed input')
+    row = c.s.store.one('SELECT * FROM collaboration_messages WHERE id=?', (source['id'],))
+    scope = c.s.message_handling.scope_digest(c.room, c.dot)
+    with c.s.store.transaction():
+        c.s.message_handling._save(c.dot, row, c.actor, scope,
+            'no_response_required', 'social_only')
+    entry = c.s.store.one("SELECT * FROM dot_mailbox_entries WHERE kind='message' AND object_id=?", (source['id'],))
+    assert entry['acknowledged_at'] is not None
+    assert not read(c)['items']
+    monkeypatch.setattr(c.s.message_handling, 'scope_digest', lambda *args: 'new-synthetic-scope')
+    assert any(item['object_id'] == source['id'] for item in read(c)['items'])
+
+
+def test_old_final_message_backfill_revalidates_provenance(collab):
+    c = setup(collab)
+    configure(c)
+    source = message(c, 'Synthetic historical completed input')
+    row = c.s.store.one('SELECT * FROM collaboration_messages WHERE id=?', (source['id'],))
+    scope = c.s.message_handling.scope_digest(c.room, c.dot)
+    with c.s.store.transaction():
+        c.s.message_handling._save(c.dot, row, c.actor, scope,
+            'no_response_required', 'social_only')
+        c.s.store.execute("UPDATE dot_mailbox_entries SET acknowledged_at=NULL,acknowledged_scope_digest='' WHERE object_id=?", (source['id'],))
+        c.s.dot_mailbox.settle_history()
+    assert c.s.store.one('SELECT acknowledged_at FROM dot_mailbox_entries WHERE object_id=?', (source['id'],))['acknowledged_at'] is not None
+    assert not read(c)['items']

@@ -248,9 +248,10 @@ class ProjectScopes:
                         continue
                     room = self.store.one('SELECT * FROM collaboration_rooms WHERE id=?', (link['room_id'],))
                     goal = self.c.coordination.object(room, link['goal_id'])
-                    self.c.coordination.stop_work(goal, 'PROJECT_SCOPE_REVOKED')
-                    self.store.execute("UPDATE coordination_goals SET state='paused',version=version+1,updated=? WHERE id=?",
-                                       (self.c.clock(), goal['id']))
+                    if goal['state'] in {'active', 'proposed'}:
+                        self.c.coordination.stop_work(goal, 'PROJECT_SCOPE_REVOKED')
+                        self.store.execute("UPDATE coordination_goals SET state='paused',version=version+1,updated=? WHERE id=? AND state IN ('active','proposed')",
+                                           (self.c.clock(), goal['id']))
                 anchor = self.store.one('SELECT * FROM collaboration_rooms WHERE id=?',
                                         (json.loads(row['spec'])['anchor_room_id'],))
                 self.c.audit(anchor, principal.actor, 'conversation.project_scope_revoked', row['id'], self.reference(row))

@@ -12,6 +12,7 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
+from hub.collaboration.projection_cache import memoized
 from hub.collaboration.common import canonical, digest
 from hub.collaboration.weixin_schema import Mutation
 from shared.util import DevError
@@ -362,6 +363,7 @@ class ChannelOwnerAuthority:
         except DevError:
             self.store.execute('DELETE FROM channel_owner_messages WHERE message_id=?', (message['id'],))
 
+    @memoized
     def live(self, auth):
         if not auth or auth['state'] != 'active':
             raise DevError('CHANNEL_OWNER_REVOKED', '原本人任务授权已撤销或停止', 403)

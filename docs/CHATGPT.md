@@ -100,3 +100,7 @@ stdio 桥接器为所有请求使用同一个 PAT，并移除客户端 OAuth 元
 验收从只读开始：发现项目，读取 README，再对一个明确的测试文件做带 SHA 检查的修改，最后执行已授权任务。回到面板核对项目、操作编号、审计和真实退出码。使用本地测试客户端通过不等于真实 ChatGPT 账号验收，也不构成官方兼容性认证。
 
 收到 pending、queued 或 reconnecting 后继续查询原 operation_id；响应丢失按原幂等键查找。工具调用超时不能证明远端没有执行，不要生成新键盲目重做。更多恢复步骤见 [FAQ](FAQ.md) 和 [长操作](LONG_OPERATIONS.md)。
+
+### 旧版 Claude 回调允许列表
+
+2026-09-20 至 2026-11-04 期间安装的部署可能在 `.env` 显式保存了不含 `claude.ai` 的历史默认 `OAUTH_REDIRECT_HOSTS`。更新器和重新运行安装脚本只迁移完全一致的旧默认值，保留自定义列表；更新详情会记录 `oauth_redirect_hosts_migrated`。自定义策略仍需管理员自行确认加入 `claude.ai` 并重建 Hub。k3s 需重新应用 ConfigMap 并重启 Deployment。Claude Code 的回环回调不受此项影响。

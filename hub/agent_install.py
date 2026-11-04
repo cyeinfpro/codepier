@@ -9,7 +9,6 @@ from hub.db_worker import database_endpoint
 import hashlib
 import hmac
 import io
-import json
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import shlex
@@ -337,7 +336,7 @@ def make_agent_install_router(runtime, auth, source_root=None):
     async def lifecycle_action(device_id: str, request: Request, body: DeviceLifecycleInput, action: str):
         principal = auth.panel(request, True)
         iam.require_device(store,principal,device_id,manage=True)
-        device = store.one('SELECT name FROM devices WHERE id=?', (device_id,))
+        device = await store.run(store.one, 'SELECT name FROM devices WHERE id=?', (device_id,))
         if not device:
             raise DevError('NOT_FOUND', '设备不存在', 404)
         if action == 'agent_uninstall' and body.confirmation != device['name']:

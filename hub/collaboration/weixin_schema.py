@@ -69,6 +69,8 @@ CREATE INDEX IF NOT EXISTS channel_attachment_room ON channel_attachments(room_i
 
 
 def migrate(db):
+    from hub.collaboration.channel_inbound import migrate as migrate_inbound
+    migrate_inbound(db)
     revisions_existed = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='weixin_inbound_versions'").fetchone() is not None
     for statement in SCHEMA.split(';'):
         if statement.strip():

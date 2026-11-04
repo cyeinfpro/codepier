@@ -226,7 +226,9 @@ class RoomGoalRecovery:
         if not reference or owner.grant_id:
             return None
         spec = self.native.record(reference)
-        lead = next(m for m in spec['members'] if m['member_id']==spec['coordinator_member_id'])
+        lead = next((m for m in spec['members'] if m['member_id']==spec['coordinator_member_id']), None)
+        if lead is None:
+            raise DevError('ROOM_MEMBER_NOT_IN_APPROVAL', '原主责成员不在工作批准名单中', 403)
         result = {'coordinator_member_id':lead['member_id'],'coordinator_name':lead['name'],
             'coordinator_epoch':self.epoch(goal['id']),'intent_revision':self.c.room_runtime.intent_revision(goal['id']),
             'state':'available','reason_code':'','restore_candidates':[],'takeover_candidates':[]}
@@ -243,7 +245,9 @@ class RoomGoalRecovery:
                     continue
                 try:
                     _,_,roles = self.plan(goal,action,member['id'],owner)
-                    saved = next(m for m in self.merge_roles(roles) if m['member_id']==member['id'])
+                    saved = next((m for m in self.merge_roles(roles) if m['member_id']==member['id']), None)
+                    if saved is None:
+                        raise DevError('ROOM_MEMBER_NOT_IN_APPROVAL', '候选成员不在原工作批准名单中', 403)
                     result[field].append(self.public_candidate(saved))
                 except DevError:
                     continue

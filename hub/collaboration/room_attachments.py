@@ -12,7 +12,7 @@ from urllib.parse import unquote
 
 from fastapi import Request
 
-from hub.collaboration.channel_media import MAX_CACHE
+from hub.collaboration import media_cache
 from hub.collaboration.common import validate
 from hub.collaboration.weixin_protocol import safe_filename
 from hub.principal import refresh_principal
@@ -40,8 +40,7 @@ class RoomAttachments:
             args = {'name': name, 'sha256': checksum, 'size': len(content), 'idempotency_key': request_key}
             def save():
                 self.c.rooms.require_native(room)
-                used = self.c.channels.media.cache_usage()
-                if used + len(content) > MAX_CACHE:
+                if not media_cache.available(self.store, {'space_id': owner.space_id, 'owner_user_id': owner.user_id}, len(content)):
                     raise DevError('ATTACHMENT_CACHE_QUOTA', '附件加密缓存已满，请稍后再试', 429)
                 identifier, now = uuid.uuid4().hex, self.c.clock()
                 kind, mime = self.c.weixin.media.content_type(content)
@@ -52,7 +51,7 @@ class RoomAttachments:
                     VALUES (?,?,?,'',?,'',?,0,'inbound','',0,?,?,?,?,?,?,'ready','',?,?,?,?,'panel')''',
                     (identifier, owner.space_id, owner.user_id, room['id'], 'pending:' + identifier,
                      owner.user_id, kind, name, mime, len(content), checksum,
-                     self.store.encrypt(base64.b64encode(content).decode()), now + 7 * 86400, now, now))
+                     media_cache.encode(self.store, content), now + media_cache.UNATTACHED_TTL, now, now))
                 return {'attachment_id': identifier}
             result = self.c.room_channels.receipt(owner, room, 'room_attachment_upload', args, save)
             row = self.row(result['attachment_id'], owner)
@@ -89,8 +88,8 @@ class RoomAttachments:
             if (row['conversation_id'] != message['conversation_id'] or row['state'] != 'ready'
                     or row['message_id'] not in {'pending:' + identifier, message['id']}):
                 raise DevError('ATTACHMENT_SCOPE_CHANGED', '附件必须是当前房间尚未发送的原上传', 409)
-            self.store.execute('UPDATE channel_attachments SET message_id=?,ordinal=?,updated=? WHERE id=?',
-                               (message['id'], ordinal, self.c.clock(), identifier))
+            self.store.execute('UPDATE channel_attachments SET message_id=?,ordinal=?,updated=?,expires_at=? WHERE id=?',
+                               (message['id'], ordinal, self.c.clock(), self.c.clock() + 7 * 86400, identifier))
 
     def read(self, raw, principal):
         args = validate(RoomAttachmentRead, raw)

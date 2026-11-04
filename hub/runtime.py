@@ -3,15 +3,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import os
-import re
 import time
 import unicodedata
 import uuid
 from hub.access_profiles import effective_grant, refresh_profile_principal, current_profile, access_context
-from hub.roles import require_role, role_project_scopes, principal_grant
+from hub.roles import require_role, role_project_scopes
 from hub import iam
-from shared.role_contracts import ROLE_TOOLS
 from hub.principal import Principal, refresh_principal
 from hub.dispatch_plan import DeferredCall
 from shared.config import RuntimeConfig
@@ -159,6 +156,10 @@ class Runtime:
         await self.store.run(self.store.execute, "UPDATE operations SET state='reconnecting',next_attempt=0,transport_error='Hub restarted; reconciling with Agent' WHERE state IN ('running','reconnecting','cancelling') AND payload IS NOT NULL")
         await self.store.run(self.store.execute, "UPDATE operations SET state='needs_review',error='Legacy operation has no durable request; inspect its outcome' WHERE state IN ('queued','running','reconnecting','cancelling','unknown','interrupted') AND payload IS NULL AND result IS NULL")
         self.worker = asyncio.create_task(self.delivery_loop(), name="durable-delivery")
+
+    def operation_result(self, row):
+        from hub.operation_history import result
+        return result(self.store, row)
 
     def on_loop(self, callback, *args):
         loop = self._loop or self.store._event_loop
@@ -408,7 +409,7 @@ class Runtime:
         limit = options.get("output_limit", 131072)
         result["args_summary"] = json.loads(row["args_summary"]) if row["args_summary"] else None
         if include_result:
-            result["result"] = json.loads(row["result"]) if row["result"] else None
+            result["result"] = self.operation_result(row)
             if isinstance(result["result"], dict):
                 result["result"].pop("trace", None)
                 if (row["tool"] in COMPUTER_TOOLS or row["tool"] in {"browser_open", "browser_snapshot", "browser_action", "browser_close"}):
@@ -778,7 +779,7 @@ class Runtime:
                 raise DevError(exc.code, exc.message, exc.status, operation_id=id) from exc
             op = self.store.one("SELECT state,deadline,result,created,updated,device_id,cancel_requested FROM operations WHERE id=?", (id,))
             if op["result"]:
-                return self.authorized_result(id, json.loads(op["result"]), principal)
+                return self.authorized_result(id, self.operation_result(op), principal)
         pending = op["state"] in ACTIVE or op["state"] == "unknown"
         from shared.operation_recovery import operation_recovery
         recovery = operation_recovery({**op, "operation_id": id, "pending": pending, "result": None},
@@ -855,7 +856,7 @@ class Runtime:
                     raise DevError("IDEMPOTENCY_CONFLICT", "幂等键已经用于不同请求；未执行新操作", 409, operation_id=old["id"])
                 id = old["id"]
                 if old["result"]:
-                    return id, json.loads(old["result"])
+                    return id, self.operation_result(old)
                 # A retry wakes the durable worker; it does not allocate another operation.
                 self.store.execute("UPDATE operations SET next_attempt=0 WHERE id=?", (id,))
             else:
@@ -1022,6 +1023,15 @@ class Runtime:
     def _purge_computer(self):
         with self.store.lock, self.store.db:
             purge_database(self.store.db, "operations")
+            # Preserve the existing screenshot TTL for the new encrypted form.
+            # This is the same media-only expiry policy, not history retention.
+            from hub.operation_history import seal
+            now = time.time()
+            for row in self.store.all('SELECT id,result FROM operations WHERE media_expires_at IS NOT NULL AND media_expires_at<=? ORDER BY media_expires_at LIMIT 64', (now,)):
+                value = self.operation_result(row)
+                scrub_expired(value, now)
+                self.store.execute('UPDATE operations SET result=?,media_expires_at=NULL WHERE id=?',
+                                   (seal(self.store, json.dumps(value, ensure_ascii=False)), row['id']))
 
     def _delivery_candidates(self, busy_devices):
         # Round-robin rank prevents one busy device's old backlog from hiding
@@ -1201,7 +1211,6 @@ class Runtime:
             # Never trust a client-supplied origin, UA or project field. Durable
             # actor/grant columns originate from Auth, not tool arguments.
             panel = not op['grant_id'] and op['actor'].startswith('panel:')
-            grant = self.store.one('SELECT * FROM grants WHERE id=?', (op['grant_id'],)) if op['grant_id'] else None
             try:
                 delivery_principal = self.operation_principal(op, request)
                 delivery_scopes = sorted(role_project_scopes(self.store, delivery_principal, op['project_id'])) if op['project_id'] else []
@@ -1328,9 +1337,14 @@ class Runtime:
                 result={"ok":False,"error":{"code":exc.code,"message":exc.message}}
         self.diagnostics.ingest(op["id"], result.get("trace"))
         encoded = json.dumps(result, ensure_ascii=False)
-        if op["result"] == encoded:
+        from hub.operation_history import seal, unseal
+        if unseal(self.store, op["result"]) == encoded:
             return
         data = result.get("data") or {}
+        media_expiry = data.get("computer_expires_at")
+        if (type(media_expiry) not in (int, float)
+                or not (op['tool'].startswith('computer_') or op['tool'] in {'browser_snapshot', 'read'})):
+            media_expiry = None
         error = result.get("error") or {}
         state = "succeeded" if result["ok"] else "failed"
         if error.get("code") in {"INTERRUPTED", "JOURNAL_CHANGED", "RECOVERY_DATA_INVALID", "INVALID_AGENT_RESULT", "DURABILITY_UNCONFIRMED", "WRITE_OUTCOME_UNCONFIRMED", "STAGING_CLEANUP_UNCONFIRMED", "COMPUTER_ACTION_UNCERTAIN", "BROWSER_ACTION_UNCERTAIN", "RUNTIME_CONTROL_UNCERTAIN", "RUNTIME_CREATION_UNCERTAIN", "RUNTIME_CLEANUP_PENDING", "RUNTIME_OPERATION_REQUIRES_RECOVERY"}:
@@ -1363,8 +1377,8 @@ class Runtime:
                 return
             previous, _ = self.outputs.read(current)
             output = str(data.get('output', previous))[-131072:]
-            changed = self.store.execute("UPDATE operations SET state=?,result=?,error=?,output=?,updated=?,output_seq=output_seq+?,payload=NULL,transport_error=NULL WHERE id=? AND state NOT IN ('succeeded','failed','cancelled')",
-                (state, encoded, error.get("message"), output, time.time(), int(output != previous), op["id"]))
+            changed = self.store.execute("UPDATE operations SET state=?,result=?,error=?,output=?,updated=?,output_seq=output_seq+?,media_expires_at=?,payload=NULL,transport_error=NULL WHERE id=? AND state NOT IN ('succeeded','failed','cancelled')",
+                (state, seal(self.store, encoded), error.get("message"), seal(self.store, output), time.time(), int(output != previous), media_expiry, op["id"]))
             if not changed.rowcount:
                 return
             self.outputs.discard(op['id'])
@@ -1605,7 +1619,17 @@ class Runtime:
                     scheduler = {"scheduler_config": await self.store.run(packet, self.store, device_id)}
                 except DevError:
                     pass
-            await connection.send({"type": "ready", "heartbeat_seconds": 12, "delivery_protocol": 2, **scheduler, **advertisement(catalog_digest())})
+            binding = hello.get("channel_binding")
+            channel_binding = {}
+            if binding is not None:
+                if (not isinstance(binding, dict) or type(binding.get("version")) is not int
+                        or binding["version"] != 1 or not isinstance(binding.get("agent_nonce"), str)
+                        or not 32 <= len(binding["agent_nonce"]) <= 128
+                        or not binding["agent_nonce"].isascii()):
+                    raise ValueError("Invalid Agent channel binding")
+                channel_binding = {"channel_binding": {"version": 1, "agent_nonce": binding["agent_nonce"]}}
+            await connection.send({"type": "ready", "heartbeat_seconds": 12, "delivery_protocol": 2,
+                                   **channel_binding, **scheduler, **advertisement(catalog_digest())})
             if self.stopping or not await self.store.run(self.connection_authorized, device_id, connection):
                 return
             old = self.connections.get(device_id)

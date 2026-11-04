@@ -17,8 +17,6 @@ from hub.api.models import Login, PasswordInput
 def make_accounts_router(context: HubContext):
     router = APIRouter()
     store, runtime, auth = context.store, context.runtime, context.auth
-    config, maintenance = context.config, context.maintenance
-    public_url, BASE = context.public_url, context.base
 
     @router.get("/api/session")
     @database_endpoint(store)

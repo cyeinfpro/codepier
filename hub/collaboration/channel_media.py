@@ -12,14 +12,14 @@ import json
 import uuid
 from urllib.parse import quote
 
-from hub.artifacts import byte_range
+from hub.collaboration import media_cache
 from hub.collaboration.common import canonical, digest
 from hub.collaboration import weixin_schema as models
 from hub.collaboration.weixin_protocol import ITEM_NAMES, MAX_MEDIA, safe_filename
 from hub.principal import refresh_principal
 from shared.util import DevError
 
-MAX_CACHE = 256 * 1024 * 1024
+MAX_CACHE = media_cache.MAX_CACHE
 PUBLIC_FIELDS = ('id', 'schema_version', 'message_id', 'ordinal', 'direction', 'kind', 'name', 'mime',
                  'size', 'sha256', 'artifact_id', 'state', 'reason_code', 'expires_at', 'created', 'updated')
 
@@ -243,11 +243,9 @@ class ChannelMedia:
                 return None
             binding, account, owner, *_ = self.w.valid(row['binding_id'])
             self.row(identifier, owner)
-            used = self.store.one("SELECT COALESCE(SUM(size),0) AS n FROM channel_attachments WHERE state='ready'")['n']
-            chunks = self.store.one('SELECT COALESCE(SUM(bytes),0) AS n FROM channel_attachment_chunks')['n']
             own_chunks = self.store.one('SELECT COALESCE(SUM(bytes),0) AS n FROM channel_attachment_chunks WHERE attachment_id=?', (identifier,))['n']
             remaining = max(0, (row['size'] if row['size'] is not None else MAX_MEDIA) - own_chunks)
-            if used + chunks + remaining > MAX_CACHE:
+            if not media_cache.available(self.store, row, remaining):
                 self.store.execute("UPDATE channel_attachments SET next_attempt=?,reason_code='cache_quota',updated=? WHERE id=?", (now + 300, now, identifier))
                 return None
             claim_owner, fence = uuid.uuid4().hex, row['lease_fence'] + 1
@@ -266,25 +264,23 @@ class ChannelMedia:
 
     def save_chunk(self, claim, offset, content):
         with self.store.transaction():
-            self.current(claim)
+            row = self.current(claim)
             checksum = hashlib.sha256(content).hexdigest()
             old = self.store.one('SELECT * FROM channel_attachment_chunks WHERE attachment_id=? AND offset=?', (claim['id'], offset))
             if old and old['sha256'] != checksum:
                 raise DevError('ATTACHMENT_CHUNK_CONFLICT', '同一原产物位置出现不同字节，未覆盖已缓存分段', 409)
             if not old:
-                used = self.store.one("SELECT COALESCE(SUM(size),0) AS n FROM channel_attachments WHERE state='ready'")['n']
-                chunks = self.store.one('SELECT COALESCE(SUM(bytes),0) AS n FROM channel_attachment_chunks')['n']
-                if used + chunks + len(content) > MAX_CACHE:
+                if not media_cache.available(self.store, row, len(content)):
                     raise DevError('ATTACHMENT_CACHE_QUOTA', '加密附件缓存配额已用尽；保留原分段', 429)
             self.store.execute('INSERT OR IGNORE INTO channel_attachment_chunks VALUES (?,?,?,?,?)',
-                (claim['id'], offset, len(content), checksum, self.store.encrypt(base64.b64encode(content).decode())))
+                (claim['id'], offset, len(content), checksum, media_cache.encode(self.store, content)))
             self.store.execute('UPDATE channel_attachments SET lease_until=? WHERE id=?', (self.c.clock() + 60, claim['id']))
 
     def saved_chunks(self, claim):
         self.current(claim)
         values, offset = [], 0
         for row in self.store.all('SELECT * FROM channel_attachment_chunks WHERE attachment_id=? ORDER BY offset', (claim['id'],)):
-            data = base64.b64decode(self.store.decrypt(row['content']), validate=True)
+            data = media_cache.decode(self.store, row['content'])
             if row['offset'] != offset or len(data) != row['bytes'] or hashlib.sha256(data).hexdigest() != row['sha256']:
                 raise DevError('ATTACHMENT_CACHE_CORRUPT', '原产物分段缓存不连续或摘要不匹配', 409)
             values.append(data); offset += len(data)
@@ -298,13 +294,11 @@ class ChannelMedia:
             checksum = hashlib.sha256(content).hexdigest()
             if row['sha256'] and (checksum != row['sha256'] or len(content) != row['size']):
                 raise DevError('ATTACHMENT_HASH_MISMATCH', '附件与原产物摘要或大小不一致', 409)
-            used = self.store.one("SELECT COALESCE(SUM(size),0) AS n FROM channel_attachments WHERE state='ready'")['n']
-            other_chunks = self.store.one('SELECT COALESCE(SUM(bytes),0) AS n FROM channel_attachment_chunks WHERE attachment_id!=?', (row['id'],))['n']
-            if used + other_chunks + len(content) > MAX_CACHE:
+            if not media_cache.available(self.store, row, len(content), exclude_chunks=row['id']):
                 raise DevError('ATTACHMENT_CACHE_QUOTA', '加密附件缓存配额已用尽；保留原分段', 429)
             kind, mime = self.content_type(content)
             self.store.execute("UPDATE channel_attachments SET state='ready',size=?,sha256=?,content=?,kind=?,mime=?,lease_until=0,reason_code='',updated=? WHERE id=?",
-                (len(content), checksum, self.store.encrypt(base64.b64encode(content).decode()), kind, mime, self.c.clock(), row['id']))
+                (len(content), checksum, media_cache.encode(self.store, content), kind, mime, self.c.clock(), row['id']))
             self.store.execute('DELETE FROM channel_attachment_chunks WHERE attachment_id=?', (row['id'],))
 
     @staticmethod
@@ -329,7 +323,8 @@ class ChannelMedia:
             if not row or row['lease_owner'] != claim['lease_owner'] or row['lease_fence'] != claim['lease_fence']:
                 return
             permanent = isinstance(error, DevError) and error.status in {400, 401, 403, 404, 409, 410, 413, 422}
-            terminal = permanent or row['attempts'] >= 5
+            quota_blocked = isinstance(error, DevError) and error.code == 'ATTACHMENT_CACHE_QUOTA'
+            terminal = permanent or (row['attempts'] >= 5 and not quota_blocked)
             self.store.execute('UPDATE channel_attachments SET state=?,reason_code=?,next_attempt=?,lease_until=0,updated=? WHERE id=?',
                 ('unavailable' if terminal else 'pending', error.code if isinstance(error, DevError) else type(error).__name__,
                  self.c.clock() + min(300, 5 * 2 ** min(row['attempts'], 6)), self.c.clock(), row['id']))
@@ -373,15 +368,11 @@ class ChannelMedia:
         except Exception as exc:
             await self.store.run(self.failed, claim, exc)
 
+    def decode_range(self, row, range_header=None):
+        return media_cache.decode_range(self.store, row, range_header)
+
     def content(self, identifier, principal, range_header=None):
-        row = self.row(identifier, principal)
-        if row['state'] != 'ready' or not row['content']:
-            raise DevError('ATTACHMENT_NOT_READY', '原附件尚不可用；此读取不会重跑生成任务', 409)
-        data = base64.b64decode(self.store.decrypt(row['content']), validate=True)
-        if len(data) != row['size'] or hashlib.sha256(data).hexdigest() != row['sha256']:
-            raise DevError('ATTACHMENT_CACHE_CORRUPT', '附件缓存完整性校验失败', 409)
-        start, end, partial = byte_range(range_header, len(data))
-        return data[start:end + 1], row, start, end, partial
+        return self.decode_range(self.row(identifier, principal), range_header)
 
     def outbound_content(self, identifier, binding_id):
         binding, _, owner, *_ = self.w.valid(binding_id)

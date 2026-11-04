@@ -60,8 +60,6 @@ def audit_rows(store, principal,limit=40, offset=0, query="", status="", source=
 def make_activity_router(context: HubContext):
     router = APIRouter()
     store, runtime, auth = context.store, context.runtime, context.auth
-    config, maintenance = context.config, context.maintenance
-    public_url, BASE = context.public_url, context.base
 
     @router.get("/api/operations")
     @database_endpoint(store)

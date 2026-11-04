@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import uuid
 
+from hub.collaboration.projection_cache import projection, memoized
 from hub.principal import refresh_principal
 from hub.collaboration.common import canonical, digest, read_cursor, redact, sign_cursor, validate
 from shared.room_context_contracts import RoomContextRead, RoomContextUpdate
@@ -68,6 +69,7 @@ class RoomContext:
             raise DevError('CONTEXT_VERSION_CHANGED','房间上下文已更新，请核对当前事实后重试',409,context_version=current)
         return current
 
+    @memoized
     def projects(self, principal, room, member=None):
         if member:
             return [{'project_id':r['project_id'],'environment_id':r['environment_id'],
@@ -105,6 +107,7 @@ class RoomContext:
                 projects.add(partition['project_id'])
         return projects
 
+    @memoized
     def source(self, reference, principal, room, member=None):
         row=self.store.one('SELECT * FROM collaboration_messages WHERE id=? AND conversation_id=?',
             (reference['message_id'],room['id']))
@@ -122,12 +125,15 @@ class RoomContext:
                 raise DevError('CONTEXT_SOURCE_CHANGED','原渠道消息已有更新版本',409)
         return row
 
+    @memoized
     def source_visible(self,row,principal,room,member=None):
         if not row or row['conversation_id']!=room['id']:
             return False
         if row.get('room_id') and not self.store.one('''SELECT 1 FROM conversation_projects
                 WHERE conversation_id=? AND room_id=?''',(room['id'],row['room_id'])):
-            return False
+            if (member or room['state'] != 'archived' or principal.grant_id or
+                    row['room_id'] not in {p['id'] for p in self.c.conversations.visible(principal,room,include_archived=True)}):
+                return False
         allowed={(p['project_id'],p['environment_id']) for p in self.projects(principal,room,member)}
         if not self.message_scopes(row)<=allowed:
             return False
@@ -419,6 +425,7 @@ class RoomContext:
             principal,room=self.c.rooms.owner(principal,conversation_id,include_archived=True)
             return self.project(principal,room,cursor=cursor,limit=limit,byte_budget=byte_budget)
 
+    @projection
     def project(self,principal,room,member=None,*,cursor='',limit=20,byte_budget=16000,input_message_id=''):
         if not 1<=limit<=50 or not 4096<=byte_budget<=24000:
             raise DevError('INVALID_CONTEXT_PAGE','上下文分页或字节预算无效',422)
@@ -442,6 +449,7 @@ class RoomContext:
             reasons.add('active_projects_omitted')
         rows=self.store.all('''SELECT f.* FROM room_context_facts f JOIN room_context_current c ON c.fact_id=f.id
             WHERE f.conversation_id=? AND f.sequence>? ORDER BY f.sequence LIMIT 101''',(room['id'],after))
+        fact_bytes=len(canonical(result).encode())+512
         for row in rows[:100]:
             try:
                 value=self.fact(row,principal,room,member)
@@ -451,8 +459,10 @@ class RoomContext:
                 scanned=row['sequence'];continue
             if len(result['facts'])>=limit:
                 more=True;break
-            if len(canonical({**result,'facts':[*result['facts'],value]}).encode())+512>byte_budget:
+            value_bytes=len(canonical(value).encode())+(1 if result['facts'] else 0)
+            if fact_bytes+value_bytes>byte_budget:
                 more=True;reasons.add('byte_budget');break
+            fact_bytes+=value_bytes
             result['facts'].append(value);scanned=row['sequence'];positions.append(scanned)
         more=more or len(rows)>100
         if more:

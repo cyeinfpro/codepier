@@ -230,7 +230,7 @@ class ConversationArchive:
                 self.store.execute('INSERT INTO conversation_archives VALUES (?,?,?,?,?)',
                     (cid, conversation['version'] + 1, canonical({'projects': inventory['projects']}),
                      principal.actor, now))
-                self.store.execute('UPDATE conversation_rooms SET archived_at=?,archived_by=?,version=version+1 WHERE id=?',
+                self.store.execute("UPDATE conversation_rooms SET state='archived',archived_at=?,archived_by=?,version=version+1 WHERE id=?",
                                    (now, principal.actor, cid))
                 operations = self.stop(conversation, inventory, now)
                 self.store.execute('DELETE FROM conversation_projects WHERE conversation_id=?', (cid,))
@@ -247,6 +247,11 @@ class ConversationArchive:
     def stop(self, conversation, inventory, now):
         cid = conversation['id']
         operations = []
+        # Native and legacy room entry points share the same shutdown boundary.
+        for member in self.store.all("SELECT * FROM room_members WHERE conversation_id=? AND status!='removed'", (cid,)):
+            self.c.rooms.pending.cancel(member['id'])
+            self.c.rooms.stop_member_work(member, 'CONVERSATION_ARCHIVED', revoke=True)
+            self.store.execute("UPDATE room_members SET status='paused',version=version+1 WHERE id=?", (member['id'],))
         self.store.execute("""UPDATE collaboration_messages SET state='rejected',version=version+1
             WHERE conversation_id=? AND state='awaiting_approval'""", (cid,))
         self.store.execute("""UPDATE collaboration_goals SET state='cancelled',version=version+1,updated=?
@@ -322,6 +327,26 @@ class ConversationArchive:
                 collection_fence=collection_fence+1,collection_lease_until=NULL,version=version+1 WHERE room_id=?""", (rid,))
         return operations
 
+    def reconcile_legacy(self, limit=20):
+        """Finish the old archive path without restoring any revoked authority."""
+        rows = self.store.all("""SELECT * FROM conversation_rooms r
+            WHERE (r.archived_at IS NOT NULL AND r.state!='archived')
+               OR (r.state='archived' AND NOT EXISTS (
+                   SELECT 1 FROM conversation_archives a WHERE a.conversation_id=r.id))
+            ORDER BY r.id LIMIT ?""", (limit,))
+        for conversation in rows:
+            now = self.c.clock()
+            inventory = self.inventory(conversation)
+            if not self.store.one('SELECT 1 FROM conversation_archives WHERE conversation_id=?', (conversation['id'],)):
+                self.store.execute('INSERT INTO conversation_archives VALUES (?,?,?,?,?)',
+                    (conversation['id'], conversation['version'] + 1,
+                     canonical({'projects': inventory['projects']}), 'migration:legacy_archive', now))
+            self.stop(conversation, inventory, now)
+            self.store.execute('DELETE FROM conversation_projects WHERE conversation_id=?', (conversation['id'],))
+            self.store.execute("""UPDATE conversation_rooms SET state='archived',archived_at=COALESCE(archived_at,?),
+                version=version+1 WHERE id=?""", (now, conversation['id']))
+            self.c.rooms.change(conversation['id'], 'room', conversation['id'], conversation['version'] + 1)
+
     def restore(self, raw, principal):
         args = validate(Restore, raw)
         with self.store.transaction():
@@ -333,6 +358,9 @@ class ConversationArchive:
                     raise DevError('CONVERSATION_NOT_ARCHIVED', '此房间未删除', 409)
                 row = self.store.one('SELECT snapshot FROM conversation_archives WHERE conversation_id=? ORDER BY version DESC LIMIT 1',
                                      (conversation['id'],))
+                if not row:
+                    raise DevError('ARCHIVE_SNAPSHOT_MISSING',
+                        '此房间由旧路径归档且缺少项目快照；请先恢复原项目关联再重试', 409)
                 snapshot = json.loads(row['snapshot'])
                 restored, unavailable = [], []
                 for item in snapshot['projects']:
@@ -349,9 +377,9 @@ class ConversationArchive:
                     self.store.execute('INSERT OR IGNORE INTO conversation_projects VALUES (?,?,?)',
                                        (conversation['id'], room['id'], item['created']))
                     restored.append(room)
-                if not restored:
+                if snapshot['projects'] and not restored:
                     raise DevError('CONVERSATION_RESTORE_PROJECT_UNAVAILABLE', '原项目当前不可访问，无法恢复房间；请先恢复项目访问', 409)
-                self.store.execute("UPDATE conversation_rooms SET archived_at=NULL,archived_by='',version=version+1 WHERE id=?",
+                self.store.execute("UPDATE conversation_rooms SET state='active',archived_at=NULL,archived_by='',version=version+1 WHERE id=?",
                                    (conversation['id'],))
                 for room in restored:
                     self.c.audit(room, principal.actor, 'conversation.restored', conversation['id'],

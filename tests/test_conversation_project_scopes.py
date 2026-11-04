@@ -237,3 +237,15 @@ def test_connector_cannot_self_approve_and_evidence_cannot_be_rewritten(collab):
     with pytest.raises(sqlite3.IntegrityError, match='immutable'):
         c.s.store.execute('UPDATE collaboration_dots SET policy_version=policy_version+1')
     assert result['execution_authorized']
+
+
+@pytest.mark.parametrize('terminal', ['cancelled', 'expired', 'completed', 'succeeded', 'failed'])
+def test_project_revocation_never_resurrects_terminal_goal(collab, terminal):
+    c = fixture(collab)
+    result, _ = add(c)
+    source, _ = send(c)
+    c.s.store.execute('UPDATE coordination_goals SET state=? WHERE id=?', (terminal, source['goal_id']))
+    before = goal(c, source)
+    revoke(c, result['authorization'])
+    after = goal(c, source)
+    assert after['state'] == terminal and after['version'] == before['version']

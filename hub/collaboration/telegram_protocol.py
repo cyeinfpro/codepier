@@ -3,7 +3,7 @@
 import json
 import re
 import secrets
-from hub.collaboration.weixin_protocol import public_transport, safe_filename
+from hub.collaboration.weixin_protocol import public_transport, safe_filename, upload_timeout
 from shared.util import DevError
 
 API_BASE = "https://api.telegram.org"
@@ -61,7 +61,7 @@ class TelegramAdapter:
                 body
                 if body is not None
                 else json.dumps(payload, ensure_ascii=False).encode(),
-                timeout=40,
+                timeout=upload_timeout(len(body)) if method == "sendDocument" and body is not None else 40,
                 maximum=2 * 1024 * 1024,
             )
         except Exception:

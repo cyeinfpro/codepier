@@ -145,7 +145,7 @@ class ConnectionEvidence:
             if (receipt['tool'] != 'worktrees_create' or receipt['project_id'] != subject['id']
                     or receipt['grant_id'] != grant_id or receipt['state'] != 'succeeded'):
                 raise DevError('NOT_FOUND', '未找到当前连接有权查看的隔离目录创建回执', 404)
-            created = json.loads(receipt['result'] or '{}').get('data') or {}
+            created = (self.runtime.operation_result(receipt) or {}).get('data') or {}
             if created.get('workspace_id') != workspace_id:
                 raise DevError('NOT_FOUND', '隔离目录回执绑定不一致', 404)
         now, binding = time.time(), self.binding(grant)

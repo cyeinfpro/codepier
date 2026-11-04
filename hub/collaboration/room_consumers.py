@@ -305,8 +305,11 @@ class RoomConsumers(FencedConsumerEngine):
                         if not assignment or assignment['member_id']!=member['id'] or work['project_id'] not in allowed:
                             return None
                         item['work_item']=self.c.coordination.work_view(work)
-                        item['work_route']={'project':work['project_id'],'environment_id':next(
-                            r['environment_id'] for r in native.record(native.reference(goal))['projects'] if r['project_id']==work['project_id']),
+                        environment=next((r['environment_id'] for r in native.record(native.reference(goal))['projects']
+                            if r['project_id']==work['project_id']),None)
+                        if environment is None:
+                            raise DevError('ROOM_WORK_SCOPE_DENIED','工作项目不在原批准范围中',403)
+                        item['work_route']={'project':work['project_id'],'environment_id':environment,
                             'goal_id':goal['id'],'work_item_id':work['id'],'expected_version':work['version'],
                             'coordinator_epoch':self.c.room_goal_recovery.epoch(goal['id']),
                             'expected_intent_revision':self.c.room_runtime.intent_revision(goal['id'])}
@@ -358,6 +361,7 @@ class RoomConsumers(FencedConsumerEngine):
             if isinstance(after, bool) or not isinstance(after, int) or after < 0:
                 raise DevError('INVALID_CURSOR', '收件箱游标无效', 400)
             rows = self.store.all('''SELECT * FROM dot_mailbox_entries WHERE member_id=? AND generation=?
+                AND acknowledged_at IS NULL AND superseded_by=''
                 AND sequence>? ORDER BY sequence LIMIT ?''', (member['id'], binding['generation'], after, args['limit'] + 1))
             items, count, scanned = [], 0, after
             limited = False

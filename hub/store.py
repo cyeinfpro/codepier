@@ -92,6 +92,9 @@ class Store:
                     self.db.execute("BEGIN IMMEDIATE")
                     self._migrate()
                     self.cipher = self._load_cipher()
+                    from hub.operation_history import same_body
+                    connection.create_function('history_same_body', 2,
+                                               lambda before, after: same_body(self, before, after))
                     if self.db.execute("PRAGMA foreign_key_check").fetchall():
                         raise RuntimeError("Hub migration has invalid foreign-key relationships")
                 self.db.execute("PRAGMA foreign_keys=ON")
@@ -107,7 +110,7 @@ class Store:
             for table, column in CIPHER_COLUMNS:
                 columns = {r[1] for r in self.db.execute(f"PRAGMA table_info({table})")}
                 if column in columns and self.db.execute(
-                    f"SELECT 1 FROM {table} WHERE {column} IS NOT NULL LIMIT 1"
+                    f"SELECT 1 FROM {table} WHERE {column} IS NOT NULL AND {column}!='' LIMIT 1"
                 ).fetchone():
                     raise RuntimeError("master.key is missing for an encrypted Hub database; restore the matching master.key from backup")
             for table, column, prefix in PREFIXED_CIPHER_COLUMNS:
@@ -188,6 +191,10 @@ class Store:
         migrate_auth(self.db)
         from hub.operation_output import migrate as migrate_output
         migrate_output(self.db)
+        from hub.operation_history import migrate as migrate_history
+        migrate_history(self.db)
+        from hub.grant_expiry import migrate as migrate_grant_expiry
+        migrate_grant_expiry(self.db)
 
     @contextmanager
     def transaction(self, *, immediate=True):
@@ -196,6 +203,13 @@ class Store:
             if not self.db.in_transaction:
                 self.db.execute('BEGIN IMMEDIATE' if immediate else 'BEGIN')
             yield self.db
+
+    @contextmanager
+    def savepoint(self):
+        """Opt-in local rollback; requires an enclosing active transaction."""
+        with self.lock:
+            with self.db.savepoint() as db:
+                yield db
 
     def execute(self, sql: str, args=()):
         with self.lock, self.db:

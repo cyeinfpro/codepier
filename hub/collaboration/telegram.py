@@ -17,6 +17,7 @@ from hub.collaboration.telegram_protocol import (
 from hub.collaboration.weixin import principal_record
 from hub.room_scope import snapshot
 from shared.util import DevError
+from hub.collaboration import channel_inbound
 
 
 class TelegramService:
@@ -351,6 +352,8 @@ class TelegramService:
             FROM telegram_accounts WHERE space_id=? AND owner_user_id=? ORDER BY created DESC LIMIT 32""",
             (principal.space_id, principal.user_id),
         )
+        for account in accounts:
+            account["inbound_health"] = channel_inbound.summary(self.store, "telegram", account["id"])
         bindings = self.store.all(
             """SELECT id,account_id,dot_id,version,generation,state,user_id,chat_id,
             pending_user_id,pending_chat_id,pairing_until,pairing_secret,disable_notification,expires_at,mirror_enabled,lifetime_mode
@@ -500,11 +503,14 @@ class TelegramService:
                         self.c.clock(),
                     ),
                 )
-                mid, reason = self.ingest(account, update, claim["bindings"])
+                result, failure = channel_inbound.isolate(
+                    self, "telegram", account, claim["bindings"], update,
+                    lambda: self.ingest(account, update, claim["bindings"]))
+                mid, reason = result if not failure else (None, failure)
                 self.store.execute(
                     "UPDATE telegram_inbox SET state=?,message_id=?,reason_code=? WHERE account_id=? AND update_id=?",
                     (
-                        "committed" if mid else "quarantined",
+                        "committed" if mid else "deferred" if reason.startswith("deferred:") else "quarantined",
                         mid,
                         reason,
                         account["id"],
@@ -604,7 +610,8 @@ class TelegramService:
                 binding, account, owner, room, dot = self.valid(bid, pairing=True)
                 if binding['state'] == 'pairing':
                     self.c.channel_enrollment.incoming('telegram', binding, account, owner, room, dot, chat_id, external_id,
-                        matched=False, fresh=not update.get('edited_message'))
+                        matched=False, fresh=not update.get('edited_message'),
+                        pairing_attempt=value.strip().startswith(('CPW-', 'CPT_')) or len(value.strip()) == 36)
                     break
             return None, "unbound_or_ambiguous_private_chat"
         binding, _, owner, room, dot = self.valid(rows[0]["id"])
@@ -622,7 +629,10 @@ class TelegramService:
         )
         if old and not update.get("edited_message"):
             return old["message_id"], "duplicate_external_message"
-        reference = message.get("reply_to_message", {}).get("message_id")
+        reply = message.get("reply_to_message", {})
+        if not isinstance(reply, dict):
+            raise DevError("TELEGRAM_MESSAGE_INVALID", "回复引用必须是结构化对象", 422)
+        reference = reply.get("message_id")
         mapped = None
         if type(reference) is int:
             mapped = self.store.one(
@@ -755,7 +765,36 @@ class TelegramService:
             raise DevError("TELEGRAM_POLL_FENCE_LOST", "原轮询世代已失效", 409)
         return row
 
+    def replay_deferred(self, aid):
+        with self.store.transaction():
+            account = self.store.one("SELECT * FROM telegram_accounts WHERE id=?", (aid,))
+            if not account or account['state'] != 'active':
+                return
+            self.require_enabled(account)
+            for row in channel_inbound.pending(self, 'telegram', aid):
+                saved = channel_inbound.unpack(self, row)
+                if saved is None:
+                    continue
+                scope = saved['scope']
+                current = {r['id']: r['version'] for r in self.store.all(
+                    "SELECT id,version FROM telegram_bindings WHERE account_id=? AND state IN ('active','pairing')", (aid,))}
+                if (saved['credential_version'] != account['credential_version']
+                        or saved['generation'] != account['generation']
+                        or any(current.get(bid) != version for bid, version in scope.items())):
+                    channel_inbound.stale(self, row)
+                    self.store.execute("UPDATE telegram_inbox SET state='quarantined',reason_code='binding_changed_before_replay' WHERE account_id=? AND update_id=?",
+                                       (aid, saved['source']['update_id']))
+                    continue
+                result, failure = channel_inbound.isolate(self, 'telegram', account, scope, saved['source'],
+                    lambda: self.ingest(account, saved['source'], scope), replay=True)
+                if failure.startswith('deferred:'):
+                    break
+                mid, reason = result if not failure else (None, failure)
+                self.store.execute("UPDATE telegram_inbox SET state=?,message_id=?,reason_code=? WHERE account_id=? AND update_id=?",
+                    ('committed' if mid else 'quarantined', mid, reason, aid, saved['source']['update_id']))
+
     async def poll_once(self, aid):
+        await self.store.run(self.replay_deferred, aid)
         claim = await self.store.run(self.claim_poll, aid)
         if not claim:
             return

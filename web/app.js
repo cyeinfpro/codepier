@@ -2139,7 +2139,7 @@ function grantListHTML() {
       ? '已撤销'
       : expired
         ? '已过期'
-        : g.status === 'pending' || !g.expires
+        : g.status === 'pending' || (!g.expires && !g.unlimited)
           ? '待连接'
           : '';
     const projects = g.projects.map((id) => S.projects.find((p) => p.id === id)?.alias || id);
@@ -2150,7 +2150,7 @@ function grantListHTML() {
         : g.projects.includes('*')
           ? '<span>原同意项目：全部项目（含未来新增）</span>'
           : `<details class="grant-projects"><summary>原同意 ${projects.length} 个项目</summary><div>${projects.map((name) => `<span>${esc(name)}</span>`).join('')}</div></details>`;
-    return `<article class="grant-row ${historical(g) ? 'grant-inactive' : ''}" data-grant-id="${esc(g.id)}"><div class="grant-info"><h3><span>${esc(g.label)}</span><span class="badge purple">${g.client_id ? 'OAuth' : 'PAT'}</span>${status ? `<span class="badge neutral">${status}</span>` : ''}</h3><div class="grant-meta"><span>${g.authorization_mode === 'role' ? '动态角色（role）' : g.profile_id ? '固定 Profile（fixedProfile）' : '固定授权（fixed）'}</span>${g.profile_id ? `<span>Profile：${esc(g.profile_id)}</span>` : ''}<span>原同意能力：${esc(g.scopes.map((scope) => scopeNames[scope] || scope).join(' · '))}</span>${range}</div><p>${g.status === 'pending' ? '等待客户端完成连接' : g.expires ? `${expired ? '已于' : '到期'} ${esc(timeText(g.expires))}${expired ? ' 过期' : ''}` : expired ? '已无有效凭据' : '尚未连接'}</p></div><div class="actions"><button class="btn small" data-action="grant-access-preview" data-id="${esc(g.id)}">查看实际访问结果</button>${!g.revoked ? `${!expired && !g.profile_id ? `<button class="btn small" data-action="edit-grant-projects" data-id="${esc(g.id)}">调整项目范围</button>` : ''}<button class="btn danger small" data-action="revoke-grant" data-id="${esc(g.id)}">撤销</button>` : ''}</div></article>`;
+    return `<article class="grant-row ${historical(g) ? 'grant-inactive' : ''}" data-grant-id="${esc(g.id)}"><div class="grant-info"><h3><span>${esc(g.label)}</span><span class="badge purple">${g.client_id ? 'OAuth' : 'PAT'}</span>${status ? `<span class="badge neutral">${status}</span>` : ''}</h3><div class="grant-meta"><span>${g.authorization_mode === 'role' ? '动态角色（role）' : g.profile_id ? '固定 Profile（fixedProfile）' : '固定授权（fixed）'}</span>${g.profile_id ? `<span>Profile：${esc(g.profile_id)}</span>` : ''}<span>原同意能力：${esc(g.scopes.map((scope) => scopeNames[scope] || scope).join(' · '))}</span>${range}</div><p>${g.status === 'pending' ? '等待客户端完成连接' : g.unlimited ? '无限期，直到手动撤销' : g.expires ? `${expired ? '已于' : '到期'} ${esc(timeText(g.expires))}${expired ? ' 过期' : ''}` : expired ? '已无有效凭据' : '尚未连接'}</p></div><div class="actions"><button class="btn small" data-action="grant-access-preview" data-id="${esc(g.id)}">查看实际访问结果</button>${!g.revoked ? `<button class="btn small" data-action="edit-grant-expiration" data-id="${esc(g.id)}">修改授权期限</button>${!expired && !g.profile_id ? `<button class="btn small" data-action="edit-grant-projects" data-id="${esc(g.id)}">调整项目范围</button>` : ''}<button class="btn danger small" data-action="revoke-grant" data-id="${esc(g.id)}">撤销</button>` : ''}</div></article>`;
   };
   const list = (items, group) => {
     const size = 5;
@@ -2235,7 +2235,7 @@ async function newGrant() {
   if (!current() || intent !== (S.modalIntent || 0)) return;
   const dialog = modal(
     '创建限定范围访问凭据',
-    `<form id="grant-form"><div class="form-row"><div class="field"><label>凭据名称</label><input name="label" required maxlength="80" placeholder="例如 ChatGPT Tunnel"></div><div class="field"><label>有效天数</label><input name="days" type="number" min="1" max="365" value="30" required></div></div>${CodePierProfiles.selectorHTML(profiles)}<div data-profile-permissions></div>${notice('凭据只显示一次，不会写入浏览器持久存储。适用于 stdio bridge、MCP Inspector 或支持 Bearer 的客户端；ChatGPT 直连使用 OAuth。')}</form>`,
+    `<form id="grant-form"><div class="form-row"><div class="field"><label>凭据名称</label><input name="label" required maxlength="80" placeholder="例如 ChatGPT Tunnel"></div><div class="field"><label>有效期限</label><select name="days"><option value="30">30 天（默认）</option><option value="7">7 天</option><option value="90">90 天</option><option value="365">365 天</option><option value="unlimited">无限期，直到手动撤销</option></select><small>无限期会持续保留访问权，请妥善保管凭据。</small></div></div>${CodePierProfiles.selectorHTML(profiles)}<div data-profile-permissions></div>${notice('凭据只显示一次，不会写入浏览器持久存储。适用于 stdio bridge、MCP Inspector 或支持 Bearer 的客户端；ChatGPT 直连使用 OAuth。')}</form>`,
     buttons('create-grant', '创建凭据'),
   );
   const profileBinding = CodePierProfiles.bindSelector(
@@ -2250,7 +2250,7 @@ async function newGrant() {
       if (!f.reportValidity()) return;
       const r = await post('/api/grants', {
         label: f.elements.label.value,
-        days: Number(f.elements.days.value),
+        days: f.elements.days.value === 'unlimited' ? null : Number(f.elements.days.value),
         scopes: checked('scope'),
         ...CodePierAccess.selection(),
         ...profileBinding(),
@@ -2258,7 +2258,7 @@ async function newGrant() {
       if (!current() || !dialog.isConnected) return;
       modal(
         '保存你的访问凭据',
-        `${notice('复制后存入云端受权限保护的 token 文件。任何持有此凭据的人，都能执行已授权操作。')}<div class="spacer"></div><div class="code-box secret">${esc(r.token)}</div><p class="form-note">到期：${esc(timeText(r.expires))}。需要时可随时撤销。</p>`,
+        `${notice('复制后存入云端受权限保护的 token 文件。任何持有此凭据的人，都能执行已授权操作。')}<div class="spacer"></div><div class="code-box secret">${esc(r.token)}</div><p class="form-note">期限：${r.unlimited ? '无限期' : esc(timeText(r.expires))}。需要时可随时撤销。</p>`,
         `<button class="btn ghost" data-action="close-modal">完成</button><button class="btn" id="copy-token">复制</button><button class="btn primary" id="download-token">下载 token.txt</button>`,
       );
       $('#copy-token').onclick = () => copy(r.token);
@@ -2277,7 +2277,7 @@ async function consentModal(id) {
     if (!current() || intent !== (S.modalIntent || 0)) return;
     const dialog = modal(
       '确认 MCP 应用授权',
-      `<p class="form-note"><strong>${esc(r.client_name)}</strong> 正在申请访问你的本机项目。</p><dl class="kv"><dt>客户端</dt><dd><code>${esc(r.client_id)}</code></dd><dt>回调地址</dt><dd>${esc(r.redirect_uri)}</dd><dt>资源</dt><dd>${esc(r.resource)}</dd></dl>${CodePierProfiles.selectorHTML(profiles)}<div data-profile-permissions></div>${notice('固定授权按本次同意限制；动态角色授权会跟随之后的角色能力和项目变更。请核对身份、角色、应用及回调地址。')}`,
+      `<p class="form-note"><strong>${esc(r.client_name)}</strong> 正在申请访问你的本机项目。</p><dl class="kv"><dt>客户端</dt><dd><code>${esc(r.client_id)}</code></dd><dt>回调地址</dt><dd>${esc(r.redirect_uri)}</dd><dt>资源</dt><dd>${esc(r.resource)}</dd></dl><div class="field"><label for="oauth-days">授权期限</label><select id="oauth-days"><option value="30">30 天（默认）</option><option value="7">7 天</option><option value="90">90 天</option><option value="365">365 天</option><option value="unlimited">无限期，直到手动撤销</option></select><small>无限期允许持续访问，泄露风险持续存在；可随时在 MCP 接入撤销。</small></div>${CodePierProfiles.selectorHTML(profiles)}<div data-profile-permissions></div>${notice('固定授权按本次同意限制；动态角色授权会跟随之后的角色能力和项目变更。请核对身份、角色、应用及回调地址。')}`,
       `<button class="btn ghost" id="deny-consent">拒绝</button><button class="btn primary" id="allow-consent">允许所选范围</button>`,
       false,
       false,
@@ -2293,6 +2293,7 @@ async function consentModal(id) {
       busy(allow ? $('#allow-consent') : $('#deny-consent'), async () => {
         const out = await post(`/api/oauth/requests/${encodeURIComponent(id)}/decide`, {
           allow,
+          ...(allow ? { days: $('#oauth-days').value === 'unlimited' ? null : Number($('#oauth-days').value) } : {}),
           scopes: checked('scope'),
           ...CodePierAccess.selection(),
           ...(allow ? profileBinding() : {}),
@@ -2598,6 +2599,37 @@ panelActions.register(['grant-page'], (button) => {
 panelActions.register(['edit-grant-projects'], async (b, e) => {
   await CodePierAccess.editGrant(b.dataset.id);
   return;
+});
+panelActions.register(['edit-grant-expiration'], async (b) => {
+  const grant = S.grants.find((g) => g.id === b.dataset.id);
+  if (!grant || grant.revoked) return;
+  const login = S.session, space = S.space_id;
+  const end = grant.authorization_expires || grant.expires || Date.now() / 1000 + 30 * 86400;
+  const date = new Date(end * 1000);
+  const localDate = new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  const dialog = modal('修改授权期限',
+    `<form id="grant-expiry-form"><p>${esc(grant.label)}</p><div class="field"><label for="grant-expiry-date">到期日期（本地时间）</label><input id="grant-expiry-date" name="expires" type="datetime-local" value="${esc(localDate)}" required></div><label class="check"><input type="checkbox" name="unlimited" ${grant.unlimited ? 'checked' : ''}>无限期，直到手动撤销</label><p class="form-note">无限期会持续保留访问权。缩短期限立即限制现存凭据；不会更改权限和项目范围。已撤销授权不能恢复。</p><label class="check"><input type="checkbox" name="confirm_reactivate">如果已过期，确认恢复仍保留的凭据。已清理的凭据必须重新连接。</label></form>`,
+    buttons('save-grant-expiry', '保存期限'));
+  const form = $('#grant-expiry-form');
+  const toggle = () => { form.elements.expires.disabled = form.elements.unlimited.checked; };
+  form.elements.unlimited.onchange = toggle;
+  toggle();
+  $('#save-grant-expiry').onclick = () => busy($('#save-grant-expiry'), async () => {
+    if (!form.reportValidity()) return;
+    const expires = form.elements.unlimited.checked ? null : new Date(form.elements.expires.value).getTime() / 1000;
+    if (expires !== null && (!Number.isFinite(expires) || expires <= Date.now() / 1000)) {
+      toast('请选择未来的到期日期', true);
+      return;
+    }
+    const result = await api('/api/grants/' + encodeURIComponent(grant.id) + '/expiration', {
+      method: 'PUT', body: JSON.stringify({ expires, expected_revision: grant.expiry_revision,
+        confirm_reactivate: form.elements.confirm_reactivate.checked }),
+    });
+    if (login !== S.session || space !== S.space_id || !dialog.isConnected) return;
+    closeModal();
+    toast(result.reconnect_required ? '期限已更新，凭据已清理或尚未签发，请重新连接' : '授权期限已更新');
+    await renderPage(false);
+  });
 });
 panelActions.register(['revoke-grant'], async (b, e) => {
   if (confirm('撤销这个凭据的全部访问权限？正在执行的本机任务不会自动停止。')) {

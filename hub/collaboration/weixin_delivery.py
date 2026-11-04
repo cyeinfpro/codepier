@@ -76,17 +76,18 @@ class WeixinDelivery:
         if old:
             return old
         pending = self.store.one('''SELECT COUNT(*) AS n FROM weixin_deliveries d JOIN weixin_bindings b ON b.id=d.binding_id
-            WHERE b.account_id=? AND d.created>?''', (account['id'], self.c.clock() - 86400))['n']
-        if pending >= 1000:
-            # No network work and no claim of successful relay. The owner can
-            # see the canonical reply; a later explicit reconciliation can queue it.
-            return None
+            WHERE b.account_id=? AND d.created>? AND d.state NOT IN ('accepted','owner_confirmed','cancelled')''', (account['id'], self.c.clock() - 86400))['n']
         now, identifier = self.c.clock(), uuid.uuid4().hex
         self.store.execute('''INSERT INTO weixin_deliveries
             (id,binding_id,generation,message_id,message_version,message_digest,source_message_id,peer_id,state,created,updated)
             VALUES (?,?,?,?,?,?,?,?, 'queued',?,?)''',
             (identifier, binding['id'], binding['generation'], message['id'], message['version'], digest(body),
              source['id'], binding['peer_id'], now, now))
+        if pending >= 1000:
+            self.add_part(identifier, 0, 'text', {'text': ''})
+            self.store.execute("UPDATE weixin_parts SET state='rejected',reason_code='daily_reply_quota' WHERE delivery_id=?", (identifier,))
+            self.refresh(identifier)
+            return self.store.one('SELECT * FROM weixin_deliveries WHERE id=?', (identifier,))
         value = body.get('body_text', '')
         # Stable Unicode boundaries; byte-bounded chunks preserve all prose.
         pieces, chunk, count = [], [], 0
@@ -195,7 +196,7 @@ class WeixinDelivery:
                     return None
             claim_owner, fence = uuid.uuid4().hex, part['lease_fence'] + 1
             self.store.execute("UPDATE weixin_parts SET state='preparing',lease_owner=?,lease_fence=?,lease_until=?,updated=? WHERE id=?",
-                               (claim_owner, fence, now + 180, now, identifier))
+                               (claim_owner, fence, now + (960 if part['kind'] == 'attachment' else 180), now, identifier))
             return {**part, 'lease_owner': claim_owner, 'lease_fence': fence, 'delivery': delivery,
                     'binding': binding, 'account': account, 'context': context}
 

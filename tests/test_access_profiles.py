@@ -405,7 +405,8 @@ def test_real_durable_queue_rechecks_disabled_profile_before_any_dispatch(api):
         await runtime.deliver(identifier)
         after = store.one('SELECT * FROM operations WHERE id=?', (identifier,))
         assert after['attempts'] == 0 and not after['accepted_at']
-        assert json.loads(after['result'])['error']['code'] == 'AUTHORIZATION_CHANGED'
+        assert after['result'].startswith('history:v1:')
+        assert runtime.operation_result(after)['error']['code'] == 'AUTHORIZATION_CHANGED'
         with pytest.raises(DevError, match='Profile'):
             runtime.operation(identifier, principal)
     # Runtime locks and delivery worker belong to TestClient's event loop.

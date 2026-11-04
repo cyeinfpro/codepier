@@ -54,7 +54,7 @@ class TokenInput(Model):
     scopes: list[str] = Field(min_length=1, max_length=4)
     projects: list[str] = Field(default_factory=list, max_length=1000)
     all_projects: bool = False
-    days: int = Field(default=30, ge=1, le=365)
+    days: int | None = Field(default=30, ge=1, le=365)
     profile_id: str | None = Field(default=None, min_length=1, max_length=100)
     profile_version: int | None = Field(default=None, ge=1)
     authorization_mode: str = Field(default='fixed', pattern=r'^(fixed|role)$')

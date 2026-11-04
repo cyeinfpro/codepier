@@ -1,5 +1,4 @@
 """Real SQLite completion preserves uncertain writes as reviewable receipts."""
-import json
 import time
 from types import SimpleNamespace
 
@@ -53,7 +52,7 @@ def test_file_receipt_separates_uncertain_effect_from_definite_failure(completio
     runtime.complete(op, {'ok': False, 'error': error})
     row = runtime.store.one('SELECT * FROM operations WHERE id=?', (op['id'],))
     assert row['state'] == state
-    assert json.loads(row['result'])['error'] == error
+    assert runtime.operation_result(row)['error'] == error
     # A second receipt observation does not convert uncertainty into success.
     runtime.complete(op, {'ok': False, 'error': error})
     assert runtime.store.one('SELECT state FROM operations WHERE id=?', (op['id'],))['state'] == state
@@ -70,7 +69,7 @@ def test_only_directory_save_uncertainty_changes_success_receipt_state(completio
     runtime = completion_runtime; op = insert_operation(runtime, tool)
     runtime.complete(op, {'ok': True, 'data': data})
     row = runtime.store.one('SELECT * FROM operations WHERE id=?', (op['id'],))
-    assert row['state'] == state and json.loads(row['result'])['data'] == data
+    assert row['state'] == state and runtime.operation_result(row)['data'] == data
 
 
 def test_synchronous_tool_error_keeps_whitelisted_file_recovery_detail():

@@ -9,6 +9,7 @@ import secrets
 import time
 import uuid
 from dataclasses import asdict
+from hub.collaboration.projection_cache import projection, memoized
 from hub.principal import Principal, refresh_principal
 from shared import collaboration_contracts as contracts
 from shared.util import DevError
@@ -152,6 +153,7 @@ class CollaborationService:
             raise DevError('ROOM_PAUSED', '协作室已暂停；不接受新任务或领取', 409)
         return current
 
+    @memoized
     def grant_reader(self, room, grant_id, *, snapshot=None):
         grant = self.store.one('SELECT * FROM grants WHERE id=?', (grant_id,))
         if not grant or grant['user_id'] != room['owner_user_id'] or grant.get('space_id', 'legacy') != room['space_id']:
@@ -170,6 +172,7 @@ class CollaborationService:
         self.notification_reader(principal)
         return principal
 
+    @memoized
     def grant_principal(self, room, grant_id, *, snapshot=None):
         principal = self.grant_reader(room, grant_id, snapshot=snapshot)
         self.readonly_worker(principal)
@@ -262,7 +265,8 @@ class CollaborationService:
         if saved:
             if saved['digest'] != fingerprint:
                 raise DevError('IDEMPOTENCY_CONFLICT', '同一请求键不能用于不同内容', 409)
-            return json.loads(saved['response'])
+            from hub.collaboration.history_retention import replay_response
+            return replay_response(saved['response'])
         result = perform()
         self.store.execute('INSERT INTO collaboration_idempotency VALUES (?,?,?,?,?)',
                            (key, room['id'], fingerprint, canonical(result), self.clock()))
@@ -274,6 +278,9 @@ class CollaborationService:
         self.store.execute('''INSERT INTO collaboration_audit(room_id,actor,action,target,detail,created)
             VALUES (?,?,?,?,?,?)''', (room['id'], actor, action, target, canonical(redact(detail or {})), self.clock()))
         self.store.after_commit(self.relay_hints.wake)
+        loops = getattr(self, 'loops', None)
+        if loops is not None and any(channel in action for channel in ('channel', 'telegram', 'weixin')):
+            self.store.after_commit(loops.wake_channels)
 
     def emit(self, room, name, object_id, version, data, *, grant_id='', queue=''):
         body = redact({'schema_version': 1, 'project_id': room['project_id'],
@@ -786,46 +793,73 @@ class CollaborationService:
             return self.mutation(principal, room, 'control', args, apply)
 
     def delivery_status(self, job):
-        if job['state'] != 'queued':
-            return job['state']
-        if not self.config.events_enabled or not self.config.analysis_dispatch_enabled:
-            return 'manual_claim_required'
-        if self.events is None:
-            return 'no_valid_subscription'
-        event = self.store.one('''SELECT * FROM mcp_event_outbox WHERE room_id=? AND object_id=?
-            AND object_version=? AND name=? AND target_grant_id=?''',
-            (job['room_id'], job['id'], job['version'], TASK_EVENT, job['target_grant_id']))
-        if not event:
-            return 'event_missing'
-        room = self.store.one('SELECT * FROM collaboration_rooms WHERE id=?', (job['room_id'],))
-        subscriptions = self.store.all('''SELECT * FROM mcp_event_subscriptions WHERE room_id=? AND grant_id=?
-            AND name=? AND state='active' AND expires_at>? ORDER BY id LIMIT 32''',
-            (job['room_id'], job['target_grant_id'], TASK_EVENT, self.clock()))
-        states = []
-        for sub in subscriptions:
-            try:
-                filters = self.events.authorize(sub, room)
-            except DevError:
-                continue
-            if not self.events.matches(sub, filters, event):
-                continue
-            delivery = self.store.one('SELECT state,accepted_at FROM mcp_event_deliveries WHERE event_id=? AND subscription_id=?',
-                                      (event['id'], sub['id']))
-            if delivery and delivery['state'] == 'accepted':
-                return 'awaiting_consumer' if self.clock() - delivery['accepted_at'] >= 300 else 'event_accepted'
-            if not delivery and event['seq'] <= sub['scan_seq']:
-                continue  # Before enrollment/replay floor, not awaiting delivery.
-            states.append(delivery['state'] if delivery else 'event_queued')
-        for status in ('leased', 'retry_wait', 'pending', 'event_queued', 'dead_letter', 'abandoned'):
-            if status in states:
-                return status
-        return 'no_valid_subscription'
+        return self.delivery_statuses([job])[job['id']]
 
-    def job_view(self, job, *, full=False):
+    def delivery_statuses(self, jobs):
+        result = {job['id']: job['state'] for job in jobs}
+        queued = [job for job in jobs if job['state'] == 'queued']
+        if not queued:
+            return result
+        if not self.config.events_enabled or not self.config.analysis_dispatch_enabled or self.events is None:
+            status = ('manual_claim_required' if not self.config.events_enabled or
+                      not self.config.analysis_dispatch_enabled else 'no_valid_subscription')
+            result.update((job['id'], status) for job in queued)
+            return result
+        # Exact current versions only. No historical per-job scan or per-sub
+        # delivery lookup is needed for an overview page.
+        clauses = ' OR '.join('(room_id=? AND object_id=? AND object_version=? AND target_grant_id=?)' for _ in queued)
+        values = [value for job in queued for value in
+                  (job['room_id'], job['id'], job['version'], job['target_grant_id'])]
+        events = {row['object_id']: row for row in self.store.all(
+            'SELECT * FROM mcp_event_outbox WHERE name=? AND (' + clauses + ')', (TASK_EVENT, *values))}
+        event_ids = [row['id'] for row in events.values()]
+        deliveries = {(row['event_id'], row['subscription_id']): row for row in self.store.all(
+            'SELECT event_id,subscription_id,state,accepted_at FROM mcp_event_deliveries WHERE event_id IN (' +
+            ','.join('?' for _ in event_ids) + ')', event_ids)} if event_ids else {}
+        rooms, subscriptions = {}, {}
+        now = self.clock()
+        for job in queued:
+            rid, grant = job['room_id'], job['target_grant_id']
+            event = events.get(job['id'])
+            if not event:
+                result[job['id']] = 'event_missing'
+                continue
+            pair = (rid, grant)
+            if rid not in rooms:
+                rooms[rid] = self.store.one('SELECT * FROM collaboration_rooms WHERE id=?', (rid,))
+            if pair not in subscriptions:
+                authorized = []
+                for sub in self.store.all("""SELECT * FROM mcp_event_subscriptions WHERE room_id=? AND grant_id=?
+                        AND name=? AND state='active' AND expires_at>? ORDER BY id LIMIT 32""",
+                        (rid, grant, TASK_EVENT, now)):
+                    try:
+                        filters = self.events.authorize(sub, rooms[rid])
+                    except DevError:
+                        continue
+                    authorized.append((sub, filters))
+                subscriptions[pair] = authorized
+            states = []
+            for sub, filters in subscriptions[pair]:
+                if not self.events.matches(sub, filters, event):
+                    continue
+                delivery = deliveries.get((event['id'], sub['id']))
+                if delivery and delivery['state'] == 'accepted':
+                    result[job['id']] = 'awaiting_consumer' if now - delivery['accepted_at'] >= 300 else 'event_accepted'
+                    break
+                if not delivery and event['seq'] <= sub['scan_seq']:
+                    continue
+                states.append(delivery['state'] if delivery else 'event_queued')
+            else:
+                result[job['id']] = next((state for state in
+                    ('leased', 'retry_wait', 'pending', 'event_queued', 'dead_letter', 'abandoned')
+                    if state in states), 'no_valid_subscription')
+        return result
+
+    def job_view(self, job, *, full=False, delivery_status=None):
         public = {key: job[key] for key in ('id', 'room_id', 'goal_id', 'incident_id', 'kind',
             'assignee_agent_id', 'queue', 'state', 'version', 'attempt', 'fencing_token', 'lease_until',
             'deadline_at', 'not_before', 'reason_code', 'created', 'updated', 'tool_calls', 'plan_version')}
-        public.update(job_id=job['id'], delivery_status=self.delivery_status(job),
+        public.update(job_id=job['id'], delivery_status=self.delivery_status(job) if delivery_status is None else delivery_status,
                       allowed_actions=['collaboration_read', 'collaboration_heartbeat', 'collaboration_result', 'collaboration_block'])
         if job['kind'] == 'propose_monitor_plan':
             public['allowed_actions'].append('monitor_plan_save')
@@ -849,7 +883,29 @@ class CollaborationService:
     def result_view(row):
         return {**row, 'body': redact(json.loads(row['body']))}
 
-    def agent_view(self, room, row):
+    def agent_activities(self, room, rows):
+        """Three aggregates for an entire bounded page, not three per agent."""
+        if not rows:
+            return {}
+        ids = list(dict.fromkeys(row['id'] for row in rows))
+        grants = list(dict.fromkeys(row['grant_id'] for row in rows))
+        subscriptions = {row['grant_id']: row for row in self.store.all(
+            """SELECT grant_id,COUNT(*) n,MAX(last_accepted) last_accepted FROM mcp_event_subscriptions
+            WHERE room_id=? AND state='active' AND expires_at>? AND grant_id IN (""" +
+            ','.join('?' for _ in grants) + ') GROUP BY grant_id', (room['id'], self.clock(), *grants))}
+        activity = {}
+        for table, field in (('collaboration_attempts', 'last_claim'), ('collaboration_results', 'last_result')):
+            for row in self.store.all(f"""SELECT j.assignee_agent_id,MAX(a.created) at FROM {table} a
+                JOIN collaboration_jobs j ON j.id=a.job_id WHERE j.assignee_agent_id IN (""" +
+                ','.join('?' for _ in ids) + ') GROUP BY j.assignee_agent_id', tuple(ids)):
+                activity.setdefault(row['assignee_agent_id'], {})[field] = row['at']
+        return {row['id']: {'valid_subscriptions': subscriptions.get(row['grant_id'], {}).get('n', 0),
+                           'last_event_accepted': subscriptions.get(row['grant_id'], {}).get('last_accepted'),
+                           'last_claim': activity.get(row['id'], {}).get('last_claim'),
+                           'last_result': activity.get(row['id'], {}).get('last_result')}
+                for row in rows}
+
+    def agent_view(self, room, row, *, activity=None):
         result = {key: row[key] for key in ('id', 'label', 'kind', 'queue', 'enabled', 'version', 'expires_at', 'grant_id')}
         result['binding_status'] = 'enabled' if row['enabled'] and row['expires_at'] > self.clock() else 'disabled_or_expired'
         try:
@@ -857,14 +913,8 @@ class CollaborationService:
         except DevError:
             result['binding_status'] = 'authorization_unavailable'
 
-        sub = self.store.one('''SELECT COUNT(*) AS n,MAX(last_accepted) AS last_accepted FROM mcp_event_subscriptions
-            WHERE room_id=? AND grant_id=? AND state='active' AND expires_at>?''',
-            (room['id'], row['grant_id'], self.clock()))
-        result.update(valid_subscriptions=sub['n'], last_event_accepted=sub['last_accepted'], chat_identity_verified=False)
-        result['last_claim'] = self.store.one('''SELECT MAX(a.created) AS at FROM collaboration_attempts a
-            JOIN collaboration_jobs j ON j.id=a.job_id WHERE j.assignee_agent_id=?''', (row['id'],))['at']
-        result['last_result'] = self.store.one('''SELECT MAX(r.created) AS at FROM collaboration_results r
-            JOIN collaboration_jobs j ON j.id=r.job_id WHERE j.assignee_agent_id=?''', (row['id'],))['at']
+        result.update(activity if activity is not None else self.agent_activities(room, [row])[row['id']])
+        result['chat_identity_verified'] = False
         return result
 
     @staticmethod
@@ -890,15 +940,18 @@ class CollaborationService:
         selected = rows[:limit]
         next_cursor = sign_cursor(self.secret, binding, [selected[-1][column], selected[-1]['id']]) if len(rows) > limit else None
         if kind == 'jobs':
-            selected = [self.job_view(row) for row in selected]
+            statuses = self.delivery_statuses(selected)
+            selected = [self.job_view(row, delivery_status=statuses[row['id']]) for row in selected]
         elif kind == 'messages':
             selected = self.chatroom.views(selected, principal=principal)
         elif kind == 'agents':
-            selected = [self.agent_view(room, row) for row in selected]
+            activities = self.agent_activities(room, selected)
+            selected = [self.agent_view(room, row, activity=activities[row['id']]) for row in selected]
         elif kind == 'subscriptions':
             selected = [self.subscription_view(row) for row in selected]
         return {'items': selected, 'next_cursor': next_cursor}
 
+    @projection
     def read(self, raw, principal):
         args = validate(contracts.Read, raw)
         with self.store.transaction(immediate=False):
@@ -1026,6 +1079,9 @@ class CollaborationService:
 
     def reconcile(self):
         """Rotate a bounded scan; a full early batch cannot starve later rooms."""
+        with self.store.transaction():
+            self.conversations.archive.reconcile_legacy()
+            self.dot_mailbox.settle_history()
         self.coordination.reconcile()
         now = self.clock()
         after = getattr(self, '_reconcile_after', '')

@@ -264,6 +264,9 @@ def _open(value, args):
     result['mcp_view_version'] = VIEW_VERSION
     if isinstance(value.get('workspace'), dict):
         result['workspace'] = _project(value['workspace'])
+    if isinstance(value.get('git'), dict):
+        result['git'] = _pick(value['git'], {'available', 'reason', 'branch', 'upstream',
+            'head', 'ahead', 'behind', 'dirty', 'network_checked', 'last_fetch_age_seconds', 'warning'})
     if 'context' in value:
         result['context'] = _context(value['context'], detail)
     if value.get('context_unchanged') and value.get('view_version') != VIEW_VERSION:
@@ -569,7 +572,6 @@ def token_view(name, arguments, value, *, view=2, verbosity='lean', output_mode=
         data = nested.get('data') if isinstance(nested, dict) else None
         if isinstance(nested, dict) and nested.get('error', False) is None:
             nested.pop('error')
-        execution = data if isinstance(data, dict) else row
         if isinstance(data, dict) and row.get('tool') in {'write', 'edit', 'fs_write', 'fs_edit', 'apply_patch'}:
             tool = 'write' if row['tool'] in {'write', 'fs_write'} else 'edit'
             nested['data'] = token_view(tool, row.get('args_summary') or {}, data, view=view, verbosity=verbosity)

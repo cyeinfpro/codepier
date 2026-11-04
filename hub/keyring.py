@@ -32,11 +32,17 @@ CIPHER_COLUMNS = (("devices", "secret"), ("operations", "payload"), ("vps_connec
                   ("room_connect_flows", "invite_secret"),
                   ("room_pending_bindings", "invite_secret"),
                   ("room_pending_bindings", "connection_proof_secret"),
-                  ("room_pending_bindings", "probe_nonce_secret"))
+                  ("room_pending_bindings", "probe_nonce_secret"),
+                  ("channel_attachments", "content"), ("channel_attachments", "private_source"),
+                  ("channel_attachment_chunks", "content"), ("channel_inbound_failures", "body"))
 # Delivery bodies from older protocols remain plaintext JSON; only explicitly
 # sealed bodies participate in rotation and missing-key detection.
-PREFIXED_CIPHER_COLUMNS = (("mcp_event_deliveries", "body", "sealed:v1:"),)
-CIPHER_PRIMARY_KEYS = {"oidc_transactions": "state_hash", "dot_wake_tickets": "ticket_hash"}
+PREFIXED_CIPHER_COLUMNS = (("mcp_event_deliveries", "body", "sealed:v1:"),
+    ("operations", "result", "history:v1:"), ("operations", "output", "history:v1:"),
+    ("operation_output_tails", "sealed_output", "history:v1:"),
+    ("mcp_tasks", "terminal_result", "history:v1:"),
+    ("mcp_tasks", "terminal_operation", "history:v1:"))
+CIPHER_PRIMARY_KEYS = {"oidc_transactions": "state_hash", "operation_output_tails": "operation_id", "mcp_tasks": "task_id", "dot_wake_tickets": "ticket_hash", "channel_attachment_chunks": "rowid"}
 
 
 def key_id(key: bytes) -> str:
@@ -234,8 +240,8 @@ def rotate_key(directory: str | Path, *, resume: bool = False) -> dict:
                     (len(prefix), prefix) if prefix else ())
                 while rows := cursor.fetchmany(128):
                     for row in rows:
-                        plaintext = store.decrypt(row[column][len(prefix):])
-                        encrypted = prefix + store.encrypt(plaintext)
+                        plaintext = store.cipher.decrypt(row[column][len(prefix):].encode("ascii"))
+                        encrypted = prefix + store.cipher.encrypt(plaintext).decode("ascii")
                         store.db.execute(f"UPDATE {table} SET {column}=? WHERE {primary}=?", (encrypted, row["id"]))
                         if table == 'external_identities' and column == 'upstream_tokens':
                             # Re-encryption changes ciphertext, not identity ownership.

@@ -194,7 +194,7 @@ def make_artifact_router(auth,runtime):
             offset=(start//CHUNK)*CHUNK
             first=await service.chunk(row,project,offset)
             service.row(identifier,principal(request))
-            runtime.store.audit(owner.actor,'artifact.download',identifier,detail={'start':start,'end':end,'bytes':row['bytes']})
+            await runtime.store.run(runtime.store.audit,owner.actor,'artifact.download',identifier,detail={'start':start,'end':end,'bytes':row['bytes']})
         except BaseException:
             release();raise
         async def stream():

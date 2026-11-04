@@ -54,6 +54,8 @@ def effective_grant(store, grant):
     if not grant or grant['revoked']:
         raise DevError('INVALID_TOKEN', '授权已撤销', 401)
     grant = dict(grant)
+    from hub.grant_expiry import check
+    check(store, grant.get("grant_id") or grant["id"])
     iam.validate_grant(store, grant)
     if grant.get('authorization_mode', 'fixed') == 'role':
         from hub.roles import effective_role

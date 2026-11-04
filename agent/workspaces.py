@@ -15,10 +15,40 @@ class Workspaces:
         flags=['git','-c','core.fsmonitor=false','-c','core.hooksPath='+str(self.agent.state_dir/'no-hooks'),
                '-c','core.pager=cat','-c','submodule.recurse=false']
         result=await self.agent.run_process(identifier,flags+args,cwd,45,execution_project=project)
-        if result['exit_code']!=0 or result.get('timed_out') or result.get('cancelled'):
+        if result.get('cancelled'):raise DevError('WORKTREE_CANCELLED','Git 操作已取消',409)
+        if result.get('timed_out'):raise DevError('WORKTREE_TIMEOUT','Git 操作超时',409)
+        if result['exit_code']!=0:
             raise DevError('WORKTREE_GIT_FAILED',result['output'][-1200:] or 'Git 操作未完成',409)
         if result.get('output_truncated'):raise DevError('WORKTREE_OUTPUT_LIMIT','Git 输出超出范围，不能核实完整状态',409)
         return result['output'].strip()
+
+    async def resolve_base(self, identifier, project, root, base_ref='', fetch=True):
+        if base_ref.startswith('-') or any(c in base_ref for c in '\x00\r\n'):
+            raise DevError('INVALID_GIT_REF', '无效 Git 基线')
+        report = {'requested': base_ref or 'auto', 'fetched': False, 'fetch_error': None}
+        if fetch:
+            try:
+                await self.git(identifier, project, root, ['fetch', '--prune', '--quiet', 'origin'])
+                report['fetched'] = True
+            except DevError as exc:
+                if exc.code not in {'WORKTREE_GIT_FAILED', 'WORKTREE_TIMEOUT'}:
+                    raise
+                report['fetch_error'] = exc.code
+        candidates = [base_ref] if base_ref else ['refs/remotes/origin/HEAD', '@{upstream}', 'HEAD']
+        for ref in candidates:
+            try:
+                commit = await self.git(identifier, project, root,
+                    ['rev-parse', '--verify', '--quiet', '--end-of-options', ref + '^{commit}'])
+            except DevError as exc:
+                if exc.code != 'WORKTREE_GIT_FAILED':
+                    raise
+                continue
+            if not re.fullmatch('[a-f0-9]{40,64}', commit):
+                raise DevError('INVALID_GIT_COMMIT', 'Git 未返回精确提交编号')
+            behind = await self.git(identifier, project, root, ['rev-list', '--count', 'HEAD..' + commit])
+            return commit, {**report, 'resolved': ref, 'source_head_behind': int(behind),
+                            'freshness': 'fetched' if report['fetched'] else 'local_refs_only'}
+        raise DevError('GIT_BASE_REQUIRED', '需要已有提交的 Git 项目和有效 base_ref；不会自动初始化或提交', 409)
 
     def resolve(self,project,workspace_id):
         parent=self.parent_project(project);self.agent.engine.root(parent)
@@ -36,10 +66,14 @@ class Workspaces:
         if args.get('workspace_id'):raise DevError('NESTED_WORKSPACE','从原项目创建隔离目录，不在隔离目录中嵌套创建')
         parent=self.parent_project(project);root,spec=self.agent.engine.root(parent,True)
         if not project.get('allow_tasks') or not spec.get('allow_tasks'):raise DevError('TASKS_DISABLED','创建 Git 工作目录需要执行权限',403)
-        if args['base_ref'].startswith('-') or any(c in args['base_ref'] for c in '\x00\r\n'):raise DevError('INVALID_GIT_REF','无效 Git 基线')
-        try: commit=await self.git(identifier,project,root,['rev-parse','--verify','--end-of-options',args['base_ref']+'^{commit}'])
-        except DevError as exc:raise DevError('GIT_BASE_REQUIRED','需要已有提交的 Git 项目和有效 base_ref；不会自动初始化或提交',409) from exc
-        if not re.fullmatch('[a-f0-9]{40,64}',commit):raise DevError('INVALID_GIT_COMMIT','Git 未返回精确提交编号')
+        commit, base_info = await self.resolve_base(identifier, project, root, args.get('base_ref', ''), args.get('fetch', True))
+        branch = args.get('branch', '')
+        if branch:
+            if branch.startswith('-') or any(c in branch for c in '\x00\r\n'):
+                raise DevError('INVALID_GIT_REF', '无效 Git 分支')
+            checked = await self.git(identifier, project, root, ['check-ref-format', '--branch', branch])
+            if checked != branch:
+                raise DevError('INVALID_GIT_REF', '分支必须是明确名称，不能使用历史分支表达式')
         dirty=bool(await self.git(identifier,project,root,['status','--porcelain=v1','--untracked-files=normal']))
         configured=self.agent.config.get('integrations',{}).get('worktree_directory','')
         base=Path(configured).expanduser() if configured else root.parent/'CodePier-Worktrees'
@@ -56,10 +90,11 @@ class Workspaces:
         if sum(r['state']!='removed' for r in self.records.list('workspace',parent,2000))>=64:raise DevError('WORKSPACE_QUOTA','该项目最多保留 64 个隔离目录记录')
         parentdir.mkdir(parents=True,exist_ok=True)
         record={'workspace_id':identifier,'path':str(target),'base_commit':commit,'label':args['label'],
-                'source_dirty':dirty,'created':time.time(),'state':'preparing','identity':None}
+                'source_dirty':dirty,'base':base_info,'branch':branch or None,'created':time.time(),'state':'preparing','identity':None}
         self.records.save('workspace',identifier,parent,record)
         try:
-            await self.git(identifier,project,root,['worktree','add','--detach',str(target),commit])
+            add = ['worktree', 'add'] + (['-b', branch] if branch else ['--detach']) + [str(target), commit]
+            await self.git(identifier,project,root,add)
             st=target.stat();record.update(state='ready',identity=[st.st_dev,st.st_ino])
             self.agent.engine.root({**parent,'root':str(target)},True)
         except BaseException:
@@ -77,8 +112,31 @@ class Workspaces:
             if r['state']=='ready':
                 try:
                     resolved=self.resolve(parent,r['workspace_id'])
-                    result['dirty']=bool(await self.git(identifier,resolved,Path(resolved['root']),['status','--porcelain=v1','--untracked-files=all']))
-                except DevError as exc:result.update(state='needs_review',error=exc.code)
+                    path = Path(resolved['root'])
+                    result['dirty']=bool(await self.git(identifier,resolved,path,['status','--porcelain=v1','--untracked-files=all']))
+                    result['head'] = await self.git(identifier, resolved, path, ['rev-parse', '--verify', 'HEAD'])
+                    result['branch'] = await self.git(identifier, resolved, path, ['branch', '--show-current']) or None
+                    try:
+                        into, info = await self.resolve_base(identifier, parent, root, fetch=False)
+                        # "HEAD" alone is not evidence that a branch reached an upstream.
+                        if info['resolved'] != 'HEAD':
+                            common = await self.git(identifier, parent, root, ['merge-base', result['head'], into])
+                            result.update(merged=common == result['head'], merged_into=info['resolved'])
+                        else:
+                            result.update(merged=None, merged_into=None)
+                    except DevError as exc:
+                        if exc.code in {'WORKTREE_CANCELLED', 'WORKTREE_TIMEOUT'}:
+                            raise
+                        result.update(merged=None, merged_into=None, merge_check_error=exc.code)
+                    result['cleanup_candidate'] = result.get('merged') is True and not result['dirty']
+                    if result['cleanup_candidate']:
+                        result['cleanup'] = {'tool': 'worktrees_remove', 'arguments': {
+                            'project': parent.get('alias', parent.get('id')), 'target_workspace_id': r['workspace_id'],
+                            'confirm': r['workspace_id']}, 'requires_confirmation': True}
+                except DevError as exc:
+                    if exc.code == 'WORKTREE_CANCELLED':
+                        raise
+                    result.update(state='needs_review',error=exc.code)
             visible.append(result)
         return {'workspaces':visible,'limit':100}
 

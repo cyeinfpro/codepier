@@ -252,7 +252,7 @@ def make_router(auth, runtime):
     def consent(identifier: str, request: Request, body: Consent):
         principal = actor(request, True)
         with store.transaction():
-            grant = owned_grant(principal, identifier)
+            owned_grant(principal, identifier)
             policy.consent_grant(store, principal, identifier, body.expected_role_version)
         return {'ok': True, 'consent_version': 1}
 

@@ -19,7 +19,8 @@ def migrate(db):
         'collaboration_dot_messages': "SELECT room_id AS room_id FROM collaboration_join_slots WHERE id={row}.dot_id",
         'mcp_event_deliveries': "SELECT room_id AS room_id FROM mcp_event_subscriptions WHERE id={row}.subscription_id",
         'coordination_work': "SELECT room_id AS room_id FROM coordination_goals WHERE id={row}.goal_id",
-        'operations': "SELECT id AS room_id FROM collaboration_rooms WHERE project_id={row}.project_id",
+        'operations': ("SELECT DISTINCT g.room_id AS room_id FROM coordination_operations o "
+                       "JOIN coordination_goals g ON g.id=o.goal_id WHERE o.operation_id={row}.id"),
     }
     tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     for table in (*direct, *indirect):
@@ -31,9 +32,18 @@ def migrate(db):
                 selection = indirect[table].format(row=row)
             else:
                 selection = 'SELECT ' + row + ('.id' if table == 'collaboration_rooms' else '.room_id') + ' AS room_id'
+            # Runtime output and lease heartbeats are not a UI state change.
+            # Replace old unfiltered triggers on upgrade, not only fresh installs.
+            trigger_event, condition = event, ''
+            if event == 'UPDATE' and table in {'operations', 'mcp_event_deliveries', 'coordination_work'}:
+                columns = (('state', 'assignee_grant_id', 'result', 'reason_code', 'objective',
+                            'acceptance', 'dependencies') if table == 'coordination_work' else ('state',))
+                trigger_event = 'UPDATE OF ' + ','.join(columns)
+                condition = 'WHEN ' + ' OR '.join('OLD.' + col + ' IS NOT NEW.' + col for col in columns)
+            db.execute(f'DROP TRIGGER IF EXISTS relay_hint_{table}_{event.lower()}')
             # The WHERE also disambiguates SQLite's UPSERT after SELECT.
-            db.execute(f'''CREATE TRIGGER IF NOT EXISTS relay_hint_{table}_{event.lower()}
-                AFTER {event} ON {table} BEGIN
+            db.execute(f'''CREATE TRIGGER relay_hint_{table}_{event.lower()}
+                AFTER {trigger_event} ON {table} {condition} BEGIN
                 INSERT INTO collaboration_relay_revisions(room_id,revision)
                 SELECT room_id,1 FROM ({selection}) AS rooms WHERE room_id IS NOT NULL
                 ON CONFLICT(room_id) DO UPDATE SET revision=revision+1;

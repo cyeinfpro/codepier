@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 
-from hub import iam
+from hub import iam, grant_expiry
 from hub.principal import Principal
 from shared.contracts import MUTATING, PROCESS_TOOLS, TOOLS
 from shared.util import DevError
@@ -40,6 +40,9 @@ def _credential_state(store, grant, now, expected_resource):
     renewal = max(refresh, default=None)
     if grant['revoked']:
         return 'revoked', expiry, renewal, _reason('GRANT_REVOKED', '连接已撤销')
+    lifetime = grant_expiry.policy(store, grant['id'])
+    if lifetime and lifetime['expires'] is not None and lifetime['expires'] <= now:
+        return 'expired', expiry, renewal, _reason('TOKEN_EXPIRED', '授权已过期')
     live = [r for r in rows if r['kind'] in {'access', 'pat'} and r['expires'] > now]
     if any(r['kind'] == 'pat' or not expected_resource or grant.get('resource') == expected_resource for r in live):
         return 'active', expiry, renewal, None
@@ -108,6 +111,12 @@ def grant_access_preview(store, viewer, grant_id, *, expected_resource=None):
     authorization_mode = grant.get('authorization_mode', 'fixed')
     mode = ('fixedProfile' if grant.get('profile_id') else 'fixed') if authorization_mode == 'fixed' else authorization_mode
     state, expires, renewal, blocked = _credential_state(store, grant, now, expected_resource)
+    lifetime = grant_expiry.policy(store, grant_id)
+    unlimited = bool(lifetime and lifetime['expires'] is None)
+    if unlimited:
+        renewal = None
+        if expires == grant_expiry.UNLIMITED_TOKEN_EXPIRY:
+            expires = None
     scopes, project_ids = set(), []
     try:
         scopes, project_ids, _ = effective_grant(store, grant)
@@ -133,6 +142,7 @@ def grant_access_preview(store, viewer, grant_id, *, expected_resource=None):
         'grant': {'id': grant['id'], 'label': grant['label'], 'mode': mode,
                   'authorization_mode': authorization_mode, 'revoked': bool(grant['revoked']),
                   'state': state, 'expires_at': expires, 'refresh_expires_at': renewal,
+                  'unlimited': unlimited, 'authorization_expires_at': lifetime['expires'] if lifetime else None,
                   'reason': blocked},
         'owner': {'id': owner['id'], 'label': owner['display_name'] or owner['username']},
         'space': space,

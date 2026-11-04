@@ -20,8 +20,6 @@ from hub.api.models import ProjectInput
 def make_projects_router(context: HubContext):
     router = APIRouter()
     store, runtime, auth = context.store, context.runtime, context.auth
-    config, maintenance = context.config, context.maintenance
-    public_url, BASE = context.public_url, context.base
 
     @router.get("/api/projects")
     @database_endpoint(store)

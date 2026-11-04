@@ -1,11 +1,10 @@
 """Channel-neutral attachment access. Binary egress remains separately approved."""
 
 import asyncio
-import base64
 import hashlib
 import json
 import uuid
-from hub.artifacts import byte_range
+from hub.collaboration import media_cache
 from hub.collaboration.common import canonical
 from hub.collaboration.telegram_protocol import DOWNLOAD_LIMIT, UPLOAD_LIMIT
 from hub.principal import refresh_principal
@@ -65,20 +64,11 @@ class ChannelMediaRouter:
             raise DevError("ATTACHMENT_EXPIRED", "附件已到保留期限", 410)
         return row
 
+    def decode_range(self, row, range_header=None):
+        return media_cache.decode_range(self.store, row, range_header)
+
     def content(self, identifier, principal, range_header=None):
-        found = self.store.one(
-            "SELECT channel FROM channel_attachments WHERE id=?", (identifier,)
-        )
-        if not found or found["channel"] == "weixin":
-            return self.legacy.content(identifier, principal, range_header)
-        row = self.row(identifier, principal)
-        if row["state"] != "ready" or not row["content"]:
-            raise DevError("ATTACHMENT_NOT_READY", "附件尚未准备完成", 409)
-        data = base64.b64decode(self.store.decrypt(row["content"]), validate=True)
-        if len(data) != row["size"] or hashlib.sha256(data).hexdigest() != row["sha256"]:
-            raise DevError("ATTACHMENT_INTEGRITY", "附件完整性校验失败", 409)
-        start, end, partial = byte_range(range_header, len(data))
-        return data[start : end + 1], row, start, end, partial
+        return self.decode_range(self.row(identifier, principal), range_header)
 
     def add_telegram(self, binding, message_id, ordinal, item):
         aid, now = uuid.uuid4().hex, self.c.clock()
@@ -117,18 +107,9 @@ class ChannelMediaRouter:
         )
         return aid
 
-    def cache_usage(self, exclude_chunks=None):
-        # Shared with the legacy channel: every retained chunk consumes budget,
-        # including paused/in-flight transfers. Call under the store transaction.
-        ready = self.store.one(
-            "SELECT COALESCE(SUM(size),0) AS n FROM channel_attachments WHERE state='ready'"
-        )["n"]
-        chunks = self.store.one(
-            "SELECT COALESCE(SUM(bytes),0) AS n FROM channel_attachment_chunks"
-            + (" WHERE attachment_id!=?" if exclude_chunks is not None else ""),
-            (exclude_chunks,) if exclude_chunks is not None else (),
-        )["n"]
-        return ready + chunks
+    def cache_usage(self, exclude_chunks=None, *, space_id=None, owner_user_id=None):
+        return media_cache.usage(self.store, exclude_chunks=exclude_chunks,
+                                 space_id=space_id, owner_user_id=owner_user_id)
 
     def claim(self, aid):
         with self.store.transaction():
@@ -155,7 +136,7 @@ class ChannelMediaRouter:
                 (row["size"] if row["size"] is not None else DOWNLOAD_LIMIT)
                 - own_chunks,
             )
-            if self.cache_usage() + remaining > 256 * 1024 * 1024:
+            if not media_cache.available(self.store, row, remaining):
                 self.store.execute(
                     "UPDATE channel_attachments SET next_attempt=?,reason_code='ATTACHMENT_CACHE_LIMIT',updated=? WHERE id=?",
                     (self.c.clock() + 300, self.c.clock(), aid),
@@ -192,10 +173,7 @@ class ChannelMediaRouter:
                 and len(data) != row["size"]
             ):
                 raise DevError("ATTACHMENT_SIZE_MISMATCH", "附件字节数不符合声明", 413)
-            if (
-                self.cache_usage(exclude_chunks=row["id"]) + len(data)
-                > 256 * 1024 * 1024
-            ):
+            if not media_cache.available(self.store, row, len(data), exclude_chunks=row["id"]):
                 raise DevError(
                     "ATTACHMENT_CACHE_LIMIT", "附件缓存暂满；保留原分段等待空间", 429
                 )
@@ -206,7 +184,7 @@ class ChannelMediaRouter:
                 """UPDATE channel_attachments SET state='ready',content=?,size=?,sha256=?,kind=?,mime=?,
                 lease_until=0,reason_code='',updated=? WHERE id=?""",
                 (
-                    self.store.encrypt(base64.b64encode(data).decode()),
+                    media_cache.encode(self.store, data),
                     len(data),
                     hashlib.sha256(data).hexdigest(),
                     kind,
@@ -239,7 +217,7 @@ class ChannelMediaRouter:
             "SELECT * FROM channel_attachment_chunks WHERE attachment_id=? ORDER BY offset",
             (claim["id"],),
         ):
-            data = base64.b64decode(self.store.decrypt(row["content"]), validate=True)
+            data = media_cache.decode(self.store, row["content"])
             if (
                 row["offset"] != offset
                 or len(data) != row["bytes"]
@@ -264,7 +242,7 @@ class ChannelMediaRouter:
             checksum = hashlib.sha256(data).hexdigest()
             if old and old["sha256"] != checksum:
                 raise DevError("ATTACHMENT_CHUNK_CONFLICT", "同一产物位置字节改变", 409)
-            if not old and self.cache_usage() + len(data) > 256 * 1024 * 1024:
+            if not old and not media_cache.available(self.store, row, len(data)):
                 raise DevError(
                     "ATTACHMENT_CACHE_LIMIT", "附件缓存暂满；保留原分段等待空间", 429
                 )
@@ -275,7 +253,7 @@ class ChannelMediaRouter:
                     offset,
                     len(data),
                     checksum,
-                    self.store.encrypt(base64.b64encode(data).decode()),
+                    media_cache.encode(self.store, data),
                 ),
             )
             self.store.execute(

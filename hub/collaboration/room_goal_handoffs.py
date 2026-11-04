@@ -157,7 +157,9 @@ class RoomGoalHandoffs:
         current = self.store.one('SELECT * FROM collaboration_messages WHERE id=?',
             (intent['source_message_id'],)) if intent else original
         self.c.chatroom.require_message_visible(principal,current)
-        recipient = next(m for m in spec['members'] if m['member_id']==member['id'])
+        recipient = next((m for m in spec['members'] if m['member_id']==member['id']), None)
+        if recipient is None:
+            raise DevError('ROOM_MEMBER_NOT_IN_APPROVAL', '接收成员不在原工作批准名单中', 403)
         context = {'original_request':{'message_id':original['id'],'version':original['version'],
             'body_text':json.loads(original['body']).get('body_text','')},
             'current_intent':{'message_id':current['id'],'version':current['version'],

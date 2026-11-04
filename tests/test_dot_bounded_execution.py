@@ -132,7 +132,7 @@ def test_capability_downgrade_after_admission_cannot_dispatch_long_operation(col
     s.runtime._prepare_delivery(receipt['operation_id'])
     row = s.store.one('SELECT * FROM operations WHERE id=?', (receipt['operation_id'],))
     assert row['state'] == 'failed' and row['attempts'] == 0
-    assert json.loads(row['result'])['error']['code'] == 'AGENT_BOUNDED_EXECUTION_REQUIRED'
+    assert s.runtime.operation_result(row)['error']['code'] == 'AGENT_BOUNDED_EXECUTION_REQUIRED'
 
 
 def test_expired_archive_v2_preserves_recovered_failures_without_reviving_lease(collab):

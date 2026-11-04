@@ -5,7 +5,7 @@ import uuid
 from hub.collaboration import telegram_schema as models
 from hub.collaboration.common import canonical, digest
 from hub.collaboration.telegram_protocol import UPLOAD_LIMIT
-from hub.collaboration.weixin_protocol import safe_filename
+from hub.collaboration.weixin_protocol import safe_filename, upload_estimate
 from shared.util import DevError
 
 
@@ -105,6 +105,7 @@ class TelegramFiles:
                     for a in artifacts
                 ],
                 "total_bytes": sum(a["bytes"] for a in artifacts),
+                "upload_estimate": upload_estimate([a["bytes"] for a in artifacts]),
                 "upload_limit": UPLOAD_LIMIT,
                 "queued": False,
                 "automatic_publication": False,

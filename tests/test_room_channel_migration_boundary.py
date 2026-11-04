@@ -4,7 +4,6 @@ All provider inputs and native callback hosts are synthetic. Fixtures perform
 real joins, pairing, owner approval, safe pause and the public room cutover.
 """
 from dataclasses import replace
-import json
 
 import pytest
 
@@ -191,7 +190,7 @@ def test_safe_pause_tracks_original_operation_with_or_without_last_project(colla
     after = c.s.store.one('SELECT * FROM operations WHERE id=?', (operation_id,))
     assert after['cancel_requested'] and after['attempts'] == original['attempts']
     assert after['state'] == 'cancelled'
-    assert json.loads(after['result'])['error']['code'] == 'CANCELLED'
+    assert c.s.runtime.operation_result(after)['error']['code'] == 'CANCELLED'
     receipt = c.s.store.one('SELECT * FROM coordination_operations WHERE operation_id=?', (operation_id,))
     if detach:
         # Removing the project already cancelled this operation through the

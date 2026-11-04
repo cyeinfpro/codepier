@@ -401,6 +401,13 @@ class MonitorService:
             # pinned, but every new evaluation replaces that one small pinned packet.
             self.store.execute("UPDATE monitor_evidence SET body='null' WHERE id IN (SELECT id FROM monitor_evidence WHERE expires_at<? AND body!='null' AND id NOT IN (SELECT evidence_id FROM monitor_incidents WHERE state!='resolved' AND evidence_id IS NOT NULL) LIMIT 200)", (now,))
 
+            # Bound tombstone retention too, while preserving every incident's
+            # referenced evidence (including resolved incidents).
+            self.store.execute("""DELETE FROM monitor_evidence WHERE id IN (
+                SELECT id FROM monitor_evidence WHERE body='null' AND expires_at<?
+                AND id NOT IN (SELECT evidence_id FROM monitor_incidents WHERE evidence_id IS NOT NULL)
+                ORDER BY expires_at LIMIT 500)""", (now - 30 * 86400,))
+
     async def tick(self):
         items = await self.store.run(self.reserve)
         await asyncio.gather(*(self.collect(item) for item in items))

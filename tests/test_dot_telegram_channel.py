@@ -1108,7 +1108,10 @@ def quota_chunk(c, aid, data=b"12345"):
     )
 
 
-def test_quota_claim_counts_other_channel_chunks_and_defers(collab):
+def test_quota_claim_counts_other_channel_chunks_and_defers(collab, monkeypatch):
+    # Isolate the global cap here; per-owner fairness has separate regressions.
+    from hub.collaboration import media_cache
+    monkeypatch.setattr(media_cache, 'PER_OWNER_CACHE', media_cache.MAX_CACHE)
     c, media, ids, data = quota_files(collab)
     cap = 256 * 1024 * 1024
     c.s.store.execute(
@@ -1129,7 +1132,10 @@ def test_quota_claim_counts_other_channel_chunks_and_defers(collab):
     assert media.claim(ids[0])
 
 
-def test_quota_resume_own_chunks_not_double_counted_commit_atomic(collab):
+def test_quota_resume_own_chunks_not_double_counted_commit_atomic(collab, monkeypatch):
+    # Isolate the global cap here; per-owner fairness has separate regressions.
+    from hub.collaboration import media_cache
+    monkeypatch.setattr(media_cache, 'PER_OWNER_CACHE', media_cache.MAX_CACHE)
     c, media, ids, data = quota_files(collab)
     cap = 256 * 1024 * 1024
     c.s.store.execute(
@@ -1148,7 +1154,10 @@ def test_quota_resume_own_chunks_not_double_counted_commit_atomic(collab):
     assert media.content(ids[0], c.owner)[0] == data
 
 
-def test_quota_concurrent_chunk_saves_are_atomic(collab):
+def test_quota_concurrent_chunk_saves_are_atomic(collab, monkeypatch):
+    # Isolate the global cap here; per-owner fairness has separate regressions.
+    from hub.collaboration import media_cache
+    monkeypatch.setattr(media_cache, 'PER_OWNER_CACHE', media_cache.MAX_CACHE)
     from concurrent.futures import ThreadPoolExecutor
 
     c, media, ids, data = quota_files(collab)
@@ -1174,7 +1183,10 @@ def test_quota_concurrent_chunk_saves_are_atomic(collab):
     )
 
 
-def test_quota_commit_counts_other_inflight_and_preserves_own_chunks(collab):
+def test_quota_commit_counts_other_inflight_and_preserves_own_chunks(collab, monkeypatch):
+    # Isolate the global cap here; per-owner fairness has separate regressions.
+    from hub.collaboration import media_cache
+    monkeypatch.setattr(media_cache, 'PER_OWNER_CACHE', media_cache.MAX_CACHE)
     c, media, ids, data = quota_files(collab)
     claim = media.claim(ids[0])
     media.save_chunk(claim, 0, data[:5])
@@ -1274,7 +1286,10 @@ def test_quota_resume_rechecks_authority_before_any_fetch(collab, monkeypatch, c
 
 
 @pytest.mark.parametrize("first", ["telegram", "weixin"])
-def test_two_real_routers_share_atomic_quota(collab, first):
+def test_two_real_routers_share_atomic_quota(collab, first, monkeypatch):
+    # Isolate the global cap here; per-owner fairness has separate regressions.
+    from hub.collaboration import media_cache
+    monkeypatch.setattr(media_cache, 'PER_OWNER_CACHE', media_cache.MAX_CACHE)
     from concurrent.futures import ThreadPoolExecutor
     from tests.test_dot_channel_shares import approved, artifact
 

@@ -495,7 +495,7 @@ async def test_expanded_queue_revocation_prevents_dispatch(runtime):
     r.store.execute("UPDATE projects SET root='/tmp/remapped' WHERE id='proj'")
     await r.deliver(receipt["operation_id"])
     row = r.store.one("SELECT * FROM operations WHERE id=?", (receipt["operation_id"],))
-    assert json.loads(row["result"])["error"]["code"] == "AUTHORIZATION_CHANGED"
+    assert r.operation_result(row)["error"]["code"] == "AUTHORIZATION_CHANGED"
     assert peer.packets == []
 
 

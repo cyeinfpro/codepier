@@ -6,6 +6,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -22,7 +23,7 @@ MAX_FILE = 1024 * 1024
 MAX_DIFF = 100000
 MAX_DIFF_CHANGED_LINES = 4000
 MAX_SCAN_ENTRIES = 100000
-IGNORED_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".ssh", ".aws", ".azure", ".kube", ".codepier-agent", ".remote-dev-agent", ".remote-dev", ".codepier", ".remote-dev", ".cache"}
+IGNORED_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".ssh", ".aws", ".azure", ".kube", ".codepier-agent", ".remote-dev-agent", ".remote-dev", ".codepier", ".cache"}
 CHECKPOINT_ARTIFACTS = {".next", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".turbo", "coverage", "playwright-report", "test-results"}
 STORAGE_UNAVAILABLE = frozenset(getattr(errno, name) for name in (
     "EIO", "ESTALE", "ENOTCONN", "ETIMEDOUT", "ENODEV", "ENXIO",
@@ -38,7 +39,7 @@ def protected(relative: str) -> bool:
            for index, part in enumerate(parts[:-1])):
         return True
     for low in parts:
-        if low in IGNORED_DIRS or low.startswith(".rd-"):
+        if low in IGNORED_DIRS or low.startswith((".rd-", ".venv-", ".venv.")):
             return True
         if low in {".env", ".npmrc", ".pypirc", ".netrc", "id_rsa", "id_ed25519",
                    "auth.json", "credentials.json", ".credentials.json", "secrets.json"}:
@@ -48,6 +49,13 @@ def protected(relative: str) -> bool:
         if low.endswith((".pem", ".key", ".p12", ".pfx")):
             return True
     return False
+
+
+def scan_ignored(relative: str) -> bool:
+    # Generated work is excluded from enumeration, not an authorization rule.
+    # Explicitly authorized projects can themselves live under a .work parent.
+    return any(part.casefold() == ".work" or part.casefold().startswith(".venv")
+               for part in PurePosixPath(relative).parts)
 
 
 def relative_path(value: str, allow_dot: bool = True) -> str:
@@ -105,9 +113,18 @@ class FileEngine:
         spec = max(matches, key=lambda x: x[0])[1]
         if write and (project.get("mode") != "write" or not spec.get("writable", True)):
             raise DevError("READ_ONLY", "项目或本机授权目录是只读的", 403)
-        if within(actual, self.journal.directory) or within(actual, self.config_path.parent) and actual == self.config_path.parent:
+        if within(actual, self.journal.directory) or actual == self.config_path.parent:
             raise DevError("PROTECTED_ROOT", "不能把 Agent 配置/状态目录映射为项目", 403)
         return actual, spec
+
+    def agent_private(self, path: Path) -> bool:
+        # Conservatively protect aliases on case-insensitive APFS/NTFS as well
+        # as legacy adjacent backups and temporary configuration writes.
+        key = lambda value: os.path.normcase(str(value)).casefold()
+        config, candidate, state = key(self.config_path), key(path), key(self.journal.directory)
+        return (candidate == config or candidate == state or candidate.startswith(state + os.sep)
+                or key(path.parent) == key(self.config_path.parent)
+                and key(path.name).startswith(key(self.config_path.name) + "."))
 
     def path(self, root: Path, value: str, allow_dot: bool = True) -> Path:
         rel = relative_path(value, allow_dot)
@@ -122,8 +139,8 @@ class FileEngine:
         resolved = current.resolve(strict=False)
         if not within(resolved, root):
             raise DevError("OUTSIDE_PROJECT", "路径超出项目范围", 403)
-        if resolved == self.config_path or within(resolved, self.journal.directory):
-            raise DevError("PROTECTED_PATH", "不能访问 Agent 配置或状态目录", 403)
+        if self.agent_private(resolved):
+            raise DevError("PROTECTED_PATH", "不能访问 Agent 配置、配置备份或状态目录", 403)
         return current
 
     def check_local_write(self, path: Path):
@@ -353,7 +370,7 @@ class FileEngine:
                 stack.pop()
                 continue
             rel = p.relative_to(root).as_posix()
-            if protected(rel) or stat.S_ISLNK(s.st_mode) or (hasattr(p, "is_junction") and p.is_junction()):
+            if protected(rel) or scan_ignored(rel) or stat.S_ISLNK(s.st_mode) or (hasattr(p, "is_junction") and p.is_junction()):
                 continue
             if not (stat.S_ISDIR(s.st_mode) or stat.S_ISREG(s.st_mode)) or s.st_nlink > 1 and stat.S_ISREG(s.st_mode):
                 continue
@@ -405,14 +422,73 @@ class FileEngine:
                 "total_lines": len(lines), "start_line": start + 1, "end_line": min(end, len(lines)),
                 "truncated": start > 0 or end < len(lines), "next_start_line": end + 1 if end < len(lines) else None}
 
+    def git_candidates(self, root, start, *, max_files=20000):
+        """Bounded Git enumeration; content still passes every filesystem guard."""
+        if not (root / ".git").exists():
+            return None
+        environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        environment["GIT_TERMINAL_PROMPT"] = "0"
+        deadline = time.monotonic() + 5
+        try:
+            # Spool instead of capturing unbounded output from a large index.
+            with tempfile.TemporaryFile() as spool:
+                result = subprocess.run(
+                    ["git", "--no-optional-locks", "--literal-pathspecs", "-c", "core.fsmonitor=false",
+                     "-c", "core.hooksPath=" + str(self.journal.directory / "no-hooks"),
+                     "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--",
+                     start.relative_to(root).as_posix()],
+                    cwd=root, env=environment, stdin=subprocess.DEVNULL, stdout=spool,
+                    stderr=subprocess.DEVNULL, timeout=3, check=False)
+                if result.returncode:
+                    return None
+                spool.seek(0)
+                raw = spool.read(8 * 1024 * 1024 + 1)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        capped = len(raw) > 8 * 1024 * 1024
+        if capped:
+            raw = raw[:8 * 1024 * 1024].rsplit(b"\0", 1)[0] + b"\0"
+        rows, seen = [], set()
+        for name in raw.split(b"\0"):
+            if time.monotonic() > deadline:
+                capped = True
+                break
+            if not name:
+                continue
+            try:
+                rel = name.decode("utf-8")
+                if scan_ignored(rel):
+                    continue
+                path = self.path(root, rel, False)
+                if rel in seen:
+                    continue
+                seen.add(rel)
+                info = path.lstat()
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink > 1:
+                    continue
+            except (UnicodeError, DevError, OSError):
+                continue
+            if len(rows) >= max_files:
+                capped = True
+                break
+            rows.append((path, rel, info))
+        return rows, capped
+
     def search(self, project, args):
         root, _ = self.root(project)
         start = self.path(root, args["path"])
         budget = time.monotonic()
+        scan_scope, candidates_capped = "filesystem_walk", False
         if start.is_file():
             entries = [(start, start.relative_to(root).as_posix(), start.stat())]
+            scan_scope = "explicit_file"
         elif start.is_dir():
-            entries = self.walk(root, start, deadline=budget + 8)
+            candidates = self.git_candidates(root, start)
+            if candidates is None:
+                entries = self.walk(root, start, deadline=budget + 8, files_first=True)
+            else:
+                entries, candidates_capped = candidates
+                scan_scope = "git_index"
         else:
             raise DevError("NOT_FOUND", "搜索路径不存在或不是普通文件/目录", 404)
         needle = args["query"] if args["case_sensitive"] else args["query"].casefold()
@@ -458,7 +534,10 @@ class FileEngine:
                 results.append({"path": rel, "line": n, "text": line[:1600], "line_truncated": len(line) > 1600})
             if truncated:
                 break
+        truncated = truncated or candidates_capped
         return {"matches": results, "scanned_files": min(seen, 20000), "skipped_files": skipped, "truncated": truncated,
+                "scan_scope": scan_scope,
+                "hint": "结果被截断；请缩小 path 或 file_glob，0 条命中不代表不存在" if truncated else None,
                 "next_offset": args["offset"] + len(results) if truncated and results else None,
                 "scan_error": scan_error,
                 "limits": "20,000 files / 100,000 directory entries / 32 MiB / 8 seconds per call; narrow the path if the scan limit is reached. Protected and unsupported filenames are excluded."}

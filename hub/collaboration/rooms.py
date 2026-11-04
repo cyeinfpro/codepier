@@ -12,6 +12,7 @@ import secrets
 import uuid
 from dataclasses import asdict
 
+from hub.collaboration.projection_cache import projection, memoized
 from hub.principal import Principal, refresh_principal
 from hub.collaboration.common import ROOM_INBOX_EVENT, canonical, digest, read_cursor, sign_cursor, validate
 from shared import room_contracts as contracts
@@ -62,6 +63,9 @@ def migrate(db):
         PRIMARY KEY(member_id,project_id,environment_id))''')
     db.execute('''CREATE TABLE IF NOT EXISTS room_mutations (
         id TEXT PRIMARY KEY,request_digest TEXT NOT NULL,result TEXT NOT NULL,created_at REAL NOT NULL)''')
+    db.execute('''CREATE TABLE IF NOT EXISTS room_mutation_scopes (
+        mutation_id TEXT PRIMARY KEY REFERENCES room_mutations(id),
+        conversation_id TEXT NOT NULL REFERENCES conversation_rooms(id))''')
     db.execute('''CREATE TABLE IF NOT EXISTS room_changes (
         sequence INTEGER PRIMARY KEY AUTOINCREMENT,conversation_id TEXT NOT NULL,
         kind TEXT NOT NULL,object_id TEXT NOT NULL,version INTEGER NOT NULL,created_at REAL NOT NULL)''')
@@ -167,6 +171,7 @@ class Rooms:
             raise DevError('ROOM_MEMBER_NOT_FOUND', '此房间没有这个成员', 404)
         return row
 
+    @memoized
     def principal(self, member):
         saved = json.loads(member['principal'])
         # Old join slots keep only an identity reference, not a native binding
@@ -177,6 +182,7 @@ class Rooms:
             raise DevError('ROOM_MEMBER_UNBOUND', '成员尚未接入', 409)
         return refresh_principal(self.store, Principal(**{**saved, 'scopes': set()}))
 
+    @memoized
     def scopes(self, member, principal=None):
         result = []
         for row in self.store.all("SELECT * FROM room_member_scopes WHERE member_id=? ORDER BY project_id,environment_id", (member['id'],)):
@@ -202,6 +208,7 @@ class Rooms:
                 'version': row['version'], 'state': 'active' if capabilities else 'unavailable', 'reason_code': reason})
         return result
 
+    @memoized
     def state(self, member, *, check_connection=True):
         if member['status'] in {'paused', 'removed'}:
             return member['status']
@@ -258,6 +265,7 @@ class Rooms:
                 'subscription_verified': bool(member['subscription_verified_at']),
                 'round_trip_verified': bool(member['probe_replied_at'])}}
 
+    @projection
     def view(self, principal, room, *, details=True):
         # Metadata is visible without any linked project. Resource labels are
         # still projected through the current account's project permissions.
@@ -327,9 +335,18 @@ class Rooms:
         if saved:
             if saved['request_digest'] != fingerprint:
                 raise DevError('IDEMPOTENCY_CONFLICT', '同一请求键不能用于不同内容', 409)
-            return json.loads(saved['result'])
+            from hub.collaboration.history_retention import replay_response
+            return replay_response(saved['result'])
         result = perform()
         self.store.execute('INSERT INTO room_mutations VALUES (?,?,?,?)', (identifier, fingerprint, canonical(result), self.c.clock()))
+        conversation_id = result.get('conversation_id') or args.get('conversation_id')
+        if not conversation_id and result.get('flow_id'):
+            flow = self.store.one('SELECT conversation_id FROM room_connect_flows WHERE id=?', (result['flow_id'],))
+            conversation_id = flow['conversation_id'] if flow else None
+        if conversation_id and self.store.one(
+                'SELECT 1 FROM conversation_rooms WHERE id=? AND space_id=? AND owner_user_id=?',
+                (conversation_id, principal.space_id, principal.user_id)):
+            self.store.execute('INSERT INTO room_mutation_scopes VALUES (?,?)', (identifier, conversation_id))
         return result
 
     def change(self, conversation_id, kind, object_id, version=1):
@@ -340,6 +357,7 @@ class Rooms:
                            (conversation_id, kind, object_id, version, self.c.clock()))
         self.store.after_commit(self.c.relay_hints.wake)
 
+    @projection
     def hint_snapshot(self, conversation_id, principal):
         with self.store.transaction(immediate=False):
             principal, room = self.owner(principal, conversation_id, include_archived=True)
@@ -429,6 +447,28 @@ class Rooms:
                     if member['status'] == 'removed':
                         raise DevError('ROOM_MEMBER_INACTIVE', '已移除的成员不能担任主责', 409)
                 state = args['state'] or room['state']
+                if ((state == 'archived' and room['archived_at'] is None)
+                        or (state == 'active' and room['archived_at'] is not None)):
+                    # RoomPatch's explicit state transition is the legacy owner
+                    # confirmation. Reuse the canonical versioned archive path,
+                    # including its dependency checks and irreversible-authority
+                    # shutdown; direct archive calls still require preview digest.
+                    archive = self.c.conversations.archive
+                    if state == 'archived':
+                        preview = archive.preview({'conversation_id': room['id']}, principal)
+                        archive.archive({'conversation_id': room['id'], 'expected_version': room['version'],
+                            'impact_digest': preview['impact_digest'], 'confirm_archive': True,
+                            'idempotency_key': 'room-archive:' + args['idempotency_key']}, principal)
+                    else:
+                        archive.restore({'conversation_id': room['id'], 'expected_version': room['version'],
+                            'confirm_restore': True, 'idempotency_key': 'room-restore:' + args['idempotency_key']}, principal)
+                    if args['title'] is not None or args['lead_member_id'] is not None:
+                        self.store.execute('UPDATE conversation_rooms SET title=COALESCE(?,title),lead_member_id=COALESCE(?,lead_member_id) WHERE id=?',
+                            (args['title'], args['lead_member_id'], room['id']))
+                    self.change(room['id'], 'room', room['id'], room['version'] + 1)
+                    return {'conversation_id': room['id']}
+                if room['archived_at'] is not None and state != 'archived':
+                    raise DevError('CONVERSATION_ARCHIVED', '请先通过恢复操作恢复归档房间', 409)
                 if state != 'active' and state != room['state']:
                     for member in self.store.all("SELECT * FROM room_members WHERE conversation_id=? AND status!='removed'", (room['id'],)):
                         self.pending.cancel(member['id'])

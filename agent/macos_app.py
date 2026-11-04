@@ -86,7 +86,6 @@ def build(base):
             raise ValueError("Symlink installation directories are not supported")
     safe_path(base, directory=True)
     app = base / 'CodePier Agent.app'
-    binary = executable(base)
     signature = hashlib.sha256(SOURCE.encode()).hexdigest()
     if app.exists() or app.is_symlink():
         return validate(base)

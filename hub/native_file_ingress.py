@@ -4,6 +4,7 @@ The host's file_id is not an authenticity proof. URL fetching remains a separate
 explicitly configured Hub source policy. No browser credentials are forwarded.
 """
 from __future__ import annotations
+from hub.operation_history import result as operation_result
 
 import asyncio
 import hashlib
@@ -235,7 +236,7 @@ def _reserve_native(service, args, principal):
         "SELECT id,result FROM operations WHERE space_id=? AND actor=? AND idem=? AND tool=?",
         (principal.space_id, principal.actor, _step_key(manifest["upload_id"], "finish"), "incoming_upload_finish"))
     if operation and operation["result"]:
-        result = service.runtime.authorized_result(operation["id"], json.loads(operation["result"]), principal)
+        result = service.runtime.authorized_result(operation["id"], operation_result(service.store, operation), principal)
         result = service.reconcile_for(principal, manifest,
             {**result, "operation_id": operation["id"], "pending": False})
         if result.get("state") == "complete":

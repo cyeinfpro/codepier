@@ -106,7 +106,9 @@ class LspQuery(ProjectArgs):
         return self
 
 class WorktreeCreate(Mutation):
-    base_ref: str = Field(default='HEAD', min_length=1, max_length=200)
+    base_ref: str = Field(default='', max_length=200, description='Empty selects the fetched remote default, then upstream, then local HEAD; explicit refs remain exact.')
+    fetch: bool = Field(default=True, description='Refresh origin before resolving the base; failures are reported, never hidden.')
+    branch: str = Field(default='', max_length=120, description='Optional new branch; an existing branch is never reset.')
     label: str = Field(default='', max_length=100)
 
 class WorktreeRemove(Mutation):

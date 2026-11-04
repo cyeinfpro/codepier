@@ -6,11 +6,11 @@ from fastapi import Request
 from hub.principal import Principal
 from hub.store import Store
 from hub.access_profiles import effective_grant, validate_profile_consent
-from shared.crypto import digest, token, password_verify
+from shared.crypto import digest, token, password_verify, password_hash, password_needs_rehash
 from shared.util import DevError
 from shared.role_contracts import ROLE_SCOPE
 from hub.roles import validate_role_consent
-from hub import iam
+from hub import iam, grant_expiry
 
 SESSION_SECONDS = 12 * 3600
 LOGIN_ATTEMPT_WINDOW_SECONDS = 300
@@ -110,6 +110,7 @@ class Auth:
         row = self.store.one("SELECT t.*,g.user_id,g.label,g.scopes,g.projects,g.revoked,g.resource,g.profile_id,g.authorization_mode,g.role_id,g.space_id,g.identity_id,g.user_epoch FROM tokens t JOIN grants g ON g.id=t.grant_id WHERE t.hash=? AND t.kind IN ('access','pat') AND t.expires>? AND g.revoked=0", (digest(value), time.time()))
         if not row or (row["kind"] == "access" and self.resource and row["resource"] != self.resource()):
             raise DevError("INVALID_TOKEN", "凭据已过期或撤销", 401)
+        grant_expiry.check(self.store, row["grant_id"])
         scopes, projects, _ = effective_grant(self.store, row)
         iam.audit_context.set((self.store, "mcp:" + row["grant_id"] + ":" + row["label"], row["space_id"], row["user_id"]))
         return Principal("mcp:" + row["grant_id"] + ":" + row["label"], row["user_id"], scopes, projects,
@@ -142,18 +143,21 @@ class Auth:
             return ip, self.store.one("SELECT u.*,s.local_login FROM users u JOIN iam_users s ON s.user_id=u.id WHERE username=?", (username,))
 
 
-    def _login_session(self, user, ip, username):
-        secret, csrf, now = token(), token(), time.time()
+    def _login_session(self, user, ip, username, upgraded_hash=None):
+        now = time.time()
         with self.store.lock, self.store.db:
             current = self.store.db.execute("SELECT password_hash FROM users WHERE id=?", (user["id"],)).fetchone()
             if not current or current["password_hash"] != user["password_hash"]:
                 raise DevError("LOGIN_FAILED", "密码已变化，请重新登录", 401)
-            self.store.db.execute("DELETE FROM login_attempts WHERE ip=?", (ip,))
+            # IP admission is a shared abuse budget: a valid account must not
+            # erase attempts against other accounts. Let the bounded window expire.
             self.store.db.execute("DELETE FROM login_account_attempts WHERE username_hash=?", (digest(username),))
             self.store.db.execute("DELETE FROM sessions WHERE expires<=?", (now,))
             security = iam.user_security(self.store, user['id'])
             if not security['local_login']:
                 raise DevError('LOGIN_FAILED', '此账号仅允许身份提供者登录', 401)
+            if upgraded_hash is not None:
+                self.store.db.execute('UPDATE users SET password_hash=? WHERE id=?', (upgraded_hash, user['id']))
             value = self.new_session(user['id'])
             self.store.audit("panel:" + username, "auth.login", status="ok", detail={"ip": ip})
         return value
@@ -169,26 +173,31 @@ class Auth:
         hash_owns_slot = False
         try:
             ip, user = await self.store.run(self._login_attempt, request, username)
-            verification = asyncio.create_task(asyncio.to_thread(password_verify, password, user["password_hash"] if user and user["local_login"] else self.dummy))
+            def verify_and_upgrade():
+                encoded = user["password_hash"] if user and user["local_login"] else self.dummy
+                valid = password_verify(password, encoded)
+                upgraded = password_hash(password) if valid and user and password_needs_rehash(encoded) else None
+                return valid, upgraded
+            verification = asyncio.create_task(asyncio.to_thread(verify_and_upgrade))
             def finished(task):
                 self.login_inflight -= 1
                 if not task.cancelled():
                     task.exception()
             verification.add_done_callback(finished)
             hash_owns_slot = True
-            valid = await asyncio.shield(verification)
+            valid, upgraded_hash = await asyncio.shield(verification)
             if not user or not valid:
                 # Preserve correlation without logging raw, unauthenticated input
                 # (the username field can accidentally contain a password).
                 await self.store.run(self.store.audit, "anonymous", "auth.login", "username-sha256:" + digest(username), "failed", {"ip": ip})
                 raise DevError("LOGIN_FAILED", "用户名或密码不正确", 401)
-            return await self.store.run(self._login_session, user, ip, username)
+            return await self.store.run(self._login_session, user, ip, username, upgraded_hash)
         finally:
             if not hash_owns_slot:
                 self.login_inflight -= 1
 
 
-    def issue_grant(self, principal: Principal, label: str, scopes: list[str], projects: list[str], days: int = 30, client_id=None, *, profile_id=None, profile_version=None, authorization_mode='fixed', role_version=None, confirm_dynamic_role=False, confirm_external_mcp=False):
+    def issue_grant(self, principal: Principal, label: str, scopes: list[str], projects: list[str], days: int | None = 30, client_id=None, *, profile_id=None, profile_version=None, authorization_mode='fixed', role_version=None, confirm_dynamic_role=False, confirm_external_mcp=False):
         principal = iam.live_principal(self.store, principal)
         if authorization_mode == 'role':
             if scopes != [ROLE_SCOPE] or projects:
@@ -205,6 +214,7 @@ class Auth:
                 raise DevError("INVALID_PROJECT", "授权的项目已不存在")
         if type(confirm_external_mcp) is not bool:
             raise DevError('INVALID_CONSENT', '外部 MCP 同意必须为布尔值')
+        expires = grant_expiry.expiration(days)
         gid, tid, secret = token(16), token(16), "rd_" + token()
         now = time.time()
         with self.store.lock, self.store.db:
@@ -224,7 +234,8 @@ class Auth:
                     if not set(scopes) <= permissions.get(project_id, set()):
                         raise DevError('INSUFFICIENT_SCOPE', '不能委派自己没有的项目权限', 403)
             self.store.db.execute("INSERT INTO grants(id,user_id,label,client_id,scopes,projects,revoked,created,profile_id,authorization_mode,role_id,space_id,owner_user_id,identity_id,user_epoch) VALUES (?,?,?,?,?,?,0,?,?,?,?,?,?,?,?)", (gid, principal.user_id, label, client_id, json.dumps(sorted(set(scopes))), json.dumps(projects), now, profile_id, authorization_mode, role_id, principal.space_id, principal.user_id, principal.identity_id, principal.user_epoch))
-            self.store.db.execute("INSERT INTO tokens VALUES (?,?,?,'pat',?,?)", (tid, digest(secret), gid, now + days * 86400, now))
+            self.store.db.execute("INSERT INTO tokens VALUES (?,?,?,'pat',?,?)", (tid, digest(secret), gid, grant_expiry.UNLIMITED_TOKEN_EXPIRY if expires is None else expires, now))
+            grant_expiry.save_new(self.store, gid, expires)
             if confirm_external_mcp:
                 from hub.gateway.policy import consent_grant
                 consent_grant(self.store, principal, gid, role_version)
@@ -233,4 +244,4 @@ class Auth:
                         'source': 'pat', 'profile_id': profile_id, 'role_id': role_id,
                         'role_version': role['version'], 'policy': json.loads(role['policy']),
                         'dynamic_resources_and_actions': True})
-        return {"grant_id": gid, "token": secret, "expires": now + days * 86400}
+        return {"grant_id": gid, "token": secret, "expires": expires, "unlimited": expires is None}

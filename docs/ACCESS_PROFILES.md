@@ -76,6 +76,16 @@ Hub 数据库增量迁移到 schema 7，包含 `access_profiles`、`access_roles
 
 升级前备份 Hub 数据库和对应主密钥。新 schema 下已有 Profile 时，不要把旧 Hub 代码直接接回升级后的数据库；回退须使用配套的旧数据库备份。
 
+## 授权期限
+
+新建 PAT 和 OAuth 同意页默认 30 天，可明确选择无限期。无限期只取消连接的日历到期日，不绕过账号、角色、Profile、项目范围或撤销检查；OAuth access token 仍最多 1 小时，并保持 refresh token 轮换与重放撤销。
+
+在「连接 → MCP 接入 → 修改授权期限」可为现有授权选择未来日期或无限期。缩短立即限制现存 access/PAT/refresh；延长不会恢复已消费的 refresh token，也不会创建或找回已经清理的凭据。修改已过期授权必须明确勾选恢复确认；若凭据已清理，需要重新连接。已撤销授权不能通过修改期限恢复。并发修改采用版本检查，并记录修改前后期限和恢复确认的审计。
+
+升级新增独立期限表，不回填或更改旧凭据。旧 OAuth 授权保留原来的滚动刷新期限，直到用户明确编辑期限；新 OAuth 授权的有限期限从同意时计算。API 创建时省略 `days` 仍为 30 天，只有显式 `days: null` 才是无限期。编辑接口 `PUT /api/grants/{id}/expiration` 要求 `expires`（未来 Unix 秒或明确 null）、`expected_revision`，以及需要时的 `confirm_reactivate: true`；不可省略期限。该接口限定当前用户和空间，并保留 CSRF / Origin 检查。
+
+无限期增加长期凭据泄露风险，请只在可信客户端使用；随时可手动撤销。
+
 ## API 和 MCP
 
 管理 API 仅接受原面板管理员会话，写操作还要求原 CSRF / Origin 校验：

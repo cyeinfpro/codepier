@@ -408,8 +408,12 @@ class DelegationService:
         spec = json.loads(policy['spec'])
         native=self.c.room_work_bridge.native.validate(native_scope,principal) if native_scope else None
         if native:
-            coordinator=next(m for m in native['members'] if m['member_id']==native['coordinator_member_id'])
-            rule=next(r for r in coordinator['projects'] if r['project_id']==native['anchor_project_id'])
+            coordinator=next((m for m in native['members'] if m['member_id']==native['coordinator_member_id']),None)
+            if coordinator is None:
+                raise DevError('ROOM_MEMBER_NOT_IN_APPROVAL','原主责成员不在工作批准名单中',403)
+            rule=next((r for r in coordinator['projects'] if r['project_id']==native['anchor_project_id']),None)
+            if rule is None:
+                raise DevError('ROOM_WORK_SCOPE_DENIED','原项目不在主责成员的工作批准中',403)
             if (native['source_message_id']!=message['id'] or native['source_version']!=message['version']
                     or native['source_digest']!=digest(json.loads(message['body'])['body_text'])
                     or rule['policy_id']!=policy['id'] or rule['legacy_dot_id']!=policy['slot_id']):

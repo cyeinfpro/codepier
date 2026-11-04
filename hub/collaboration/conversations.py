@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import uuid
 
+from hub.collaboration.projection_cache import projection, memoized, project as projected_project
 from hub.principal import refresh_principal
 from hub.collaboration.common import canonical, digest, read_cursor, sign_cursor, validate
 from shared import collaboration_contracts as contracts
@@ -134,16 +135,28 @@ class ConversationService:
             raise DevError('CONVERSATION_ARCHIVED', '此房间已删除，旧连接和授权不可继续使用', 410)
         return row
 
+    @memoized
     def visible(self, principal, conversation, *, include_archived=False):
         if include_archived:
             self.c.owner(principal)
         self.object(principal, conversation['id'], include_archived=include_archived)
         rows = self.store.all('''SELECT r.* FROM collaboration_rooms r JOIN conversation_projects p ON p.room_id=r.id
             WHERE p.conversation_id=? ORDER BY p.created,r.id''', (conversation['id'],))
+        if include_archived and conversation['archived_at'] is not None:
+            # Archive membership is historical visibility only. It never
+            # reattaches projects, subscriptions, writers or execution scopes.
+            archive = self.store.one('SELECT snapshot FROM conversation_archives WHERE conversation_id=? ORDER BY version DESC LIMIT 1',
+                                     (conversation['id'],))
+            members = json.loads(archive['snapshot']).get('projects', []) if archive else []
+            saved = {item['id']: item for item in members}
+            rows = self.store.all('SELECT * FROM collaboration_rooms WHERE space_id=? AND owner_user_id=? AND id IN (' +
+                ','.join('?' for _ in saved) + ')', (principal.space_id, principal.user_id, *saved)) if saved else []
+            rows = [row for row in rows if row['project_id'] == saved[row['id']]['project_id']
+                    and row['environment_id'] == saved[row['id']]['environment_id']]
         result = []
         for room in rows:
             try:
-                project = self.c.runtime.project(room['project_id'], principal)
+                project = projected_project(self.c, room['project_id'], principal)
             except DevError:
                 continue
             result.append({**room, 'project_label': project.get('alias', room['project_id'])})
@@ -171,7 +184,7 @@ class ConversationService:
             if not row:
                 raise DevError('NOT_FOUND', '当前授权下没有这条消息', 404)
             source = self.store.one('SELECT project_id FROM collaboration_rooms WHERE id=?', (row['room_id'],))
-            self.c.runtime.project(source['project_id'], principal)
+            projected_project(self.c, source['project_id'], principal)
         if row['conversation_id'] != conversation_id:
             raise DevError('THREAD_NOT_FOUND', '话题不属于这个聊天室', 404)
         self.c.chatroom.require_message_visible(principal, row)
@@ -261,7 +274,7 @@ class ConversationService:
             self.c.owner(principal)
             # Reauthorize every supplied project before replaying an old receipt.
             for project in args['projects']:
-                self.c.runtime.project(project['project'], principal)
+                projected_project(self.c, project['project'], principal)
             def save():
                 rooms = []
                 for project in args['projects']:
@@ -286,7 +299,7 @@ class ConversationService:
             principal = refresh_principal(self.store, principal)
             self.c.owner(principal)
             conversation = self.object(principal, args['conversation_id'])
-            project = self.c.runtime.project(args['project'], principal)
+            project = projected_project(self.c, args['project'], principal)
             def save():
                 self.c.rooms.migration.legacy_write(conversation['id'])
                 if conversation['version'] != args['expected_version']:
@@ -317,6 +330,7 @@ class ConversationService:
     def binding(self, principal, conversation, rooms, mode):
         return digest([conversation['id'], principal.grant_id or principal.user_id, sorted(room['id'] for room in rooms), mode])
 
+    @projection
     def read(self, args, principal, room):
         conversation = self.resolve(principal, room, args)
         rooms = self.visible(principal, conversation) if args.get('conversation_id') else [room]
@@ -337,7 +351,7 @@ class ConversationService:
             query = args['query'].strip()
             if not query:
                 raise DevError('INVALID_QUERY', '请输入搜索内容', 422)
-            where += " AND body LIKE ? ESCAPE '\\'"
+            where += " AND json_extract(body,'$.body_text') LIKE ? ESCAPE '\\'"
             params.append('%' + query.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%')
             mode += ':' + digest(query)
         binding = self.binding(principal, conversation, rooms, mode)

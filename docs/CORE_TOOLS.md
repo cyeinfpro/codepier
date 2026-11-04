@@ -47,6 +47,14 @@
 
 这是减少默认宿主元数据的展示约定，不提供匿名化或隔离保证。源码、文档预览、补丁、命令输出、调用者提供的参数、明确请求的技能资源、原生界面和外部 MCP 结果保留原义，仍可能显示环境信息。`exec` 使用执行账号权限；需要宿主隔离时，应实际部署专用容器或虚拟机。修改工具描述后需在客户端刷新工具目录；已有对话中的旧结果不会被改写。
 
+### Git 基线与隔离目录收尾
+
+open 的 `git` 摘要只读本地 Git 元数据，报告分支、缓存上游、领先/落后、脏条目数和最近 fetch 时间；`network_checked=false` 表示没有联网确认远端。未知、无上游与零落后不同。上下文指纹未变时也重新读取 Git 状态。发现落后应先提示，不覆盖或自动 stash 源目录。
+
+`workspace(operation="worktree_create")` 的 options 默认 `base_ref=""`、`fetch=true`：先刷新 origin，再依次解析 origin/HEAD、当前分支上游、HEAD。返回 `base` 明示实际引用、源目录落后数、fetch 成功与错误；离线回退不冒充最新。`fetch=false` 使用缓存引用；显式 `base_ref` 不会因找不到而悄悄换基线。可传 `branch` 创建新命名分支，不重置既有分支。源目录未提交修改始终留在原处。
+
+`worktree_list` 返回当前 HEAD、分支、脏状态及是否被缓存默认上游包含。`cleanup_candidate=true` 仅为干净且已合并目录的提示，删除仍走现有 `worktree_remove` 的精确 ID 确认、权限、忙碌与脏检查；列表不删除文件。无上游、检查失败、分叉或 squash 合并不能证明包含时保留目录。源检出快进与历史工作目录清理仍须明确操作，不因创建隔离目录而自动执行。
+
 ## 项目运行时与连续执行
 
 open 新增项目绑定的 runtime 与开发 capability_index。未配置的项目保留 native_compat；project_clean_v1 使用明确 PATH、非登录 Shell 和独立 HOME/cache，仍是账号权限；container_v1 必须由实际启动前核验建立每次操作的隔离证据，不能从配置或名称推定。

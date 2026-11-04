@@ -134,7 +134,8 @@ class ChannelSettings:
             # A send already submitted to a provider cannot be recalled or safely
             # retried. Invalidate its local lease and retain an unknown receipt.
             rows = self.store.all("""SELECT d.id FROM channel_mirrors d
-                WHERE d.channel=? AND d.binding_id=?""", (channel, binding['id']))
+                WHERE d.channel=? AND d.binding_id=? AND EXISTS (
+                    SELECT 1 FROM channel_mirror_parts p WHERE p.delivery_id=d.id AND p.state='sending')""", (channel, binding['id']))
             for row in rows:
                 self.store.execute("""UPDATE channel_mirror_parts SET state='unknown',
                     reason_code='channel_disabled_during_send',lease_fence=lease_fence+1,lease_until=0

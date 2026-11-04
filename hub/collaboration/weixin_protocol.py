@@ -49,6 +49,41 @@ def text(value, maximum, *, empty=False):
     return value
 
 
+def incoming_text(value, maximum, *, empty=False):
+    """Validate text while containing oversized provider prose to this message."""
+    if not isinstance(value, str):
+        return text(value, maximum, empty=empty)
+    if len(value.encode()) <= maximum:
+        return text(value, maximum, empty=empty)
+    suffix = '\n[已截断]'
+    clipped = value.encode()[:maximum - len(suffix.encode())].decode('utf-8', errors='ignore') + suffix
+    return text(clipped, maximum, empty=empty)
+
+
+def incoming_items(message):
+    """Validate provider nesting before any attribute access or SQL binding."""
+    if not isinstance(message, dict):
+        raise DevError('WEIXIN_MESSAGE_INVALID', '微信消息必须是结构化对象', 422)
+    if message.get('client_id') is not None:
+        text(message['client_id'], 128, empty=True)
+    items = message.get('item_list', [])
+    if not isinstance(items, list) or len(items) > 32:
+        raise DevError('WEIXIN_ITEMS_INVALID', '外部消息分项超过上限', 422)
+    for item in items:
+        if not isinstance(item, dict) or type(item.get('type')) is not int:
+            raise DevError('WEIXIN_ITEMS_INVALID', '外部消息分项类型无效', 422)
+        if item['type'] == 1:
+            body = item.get('text_item')
+            if not isinstance(body, dict) or not isinstance(body.get('text'), str):
+                raise DevError('WEIXIN_ITEMS_INVALID', '文字分项必须包含结构化正文', 422)
+        elif item['type'] in ITEM_NAMES:
+            body = item.get(ITEM_NAMES[item['type']] + '_item')
+            if body is not None and (not isinstance(body, dict)
+                    or 'media' in body and not isinstance(body['media'], dict)):
+                raise DevError('WEIXIN_ITEMS_INVALID', '附件分项必须包含结构化引用', 422)
+    return items
+
+
 def strict_json(raw):
     if not isinstance(raw, bytes) or len(raw) > MAX_JSON:
         raise DevError('WEIXIN_RESPONSE_LIMIT', '微信 JSON 应答超过接收上限', 413)
@@ -123,11 +158,25 @@ class WireReply:
     headers: dict = field(default_factory=dict)
 
 
+def upload_timeout(size):
+    """Bound total upload time for a conservative 256 KiB/s uplink."""
+    return min(900, max(40, 30 + size / (256 * 1024)))
+
+
+def upload_estimate(sizes):
+    """Informational only: never consent, a delivery promise, or a retry policy."""
+    return {
+        'estimated_seconds': sum(upload_timeout(size) for size in sizes),
+        'assumed_bytes_per_second': 256 * 1024,
+        'note': '按约 2 Mbit/s 上行估算，实际耗时取决于网络。平台接受不代表送达；结果未知时请核对原回执，不要重复发送。',
+    }
+
+
 async def public_transport(method, url, headers, body, *, timeout=40, maximum=MAX_JSON, read_timeout=None):
     """Re-resolve public addresses, pin the IP, preserve TLS SNI, no proxy/redirect."""
     phase_timeout = min(5, timeout)
     limits = httpx.Timeout(timeout if read_timeout is None else min(read_timeout, timeout),
-                           connect=phase_timeout, write=phase_timeout, pool=phase_timeout)
+                           connect=phase_timeout, write=min(timeout, 60) if body is not None and len(body) > 1024 * 1024 else phase_timeout, pool=phase_timeout)
     async with asyncio.timeout(timeout):
         # DNS and overall deadline exhaustion are transport failures, not proof
         # of an idle read. Keep them distinct from httpx.ReadTimeout below.
@@ -259,7 +308,7 @@ class WeixinClient:
         url = prepared.get('upload_full_url') or CDN_BASE + '/upload?' + urlencode({
             'encrypted_query_param': text(prepared.get('upload_param'), 8192), 'filekey': filekey})
         approved_url(url, bases=(CDN_BASE,))
-        reply = await self.transport('POST', url, {'Content-Type': 'application/octet-stream'}, cipher, timeout=60, maximum=8192)
+        reply = await self.transport('POST', url, {'Content-Type': 'application/octet-stream'}, cipher, timeout=upload_timeout(len(cipher)), maximum=8192)
         encrypted_param = reply.headers.get('x-encrypted-param')
         if reply.status != 200 or not isinstance(encrypted_param, str) or not encrypted_param:
             raise DevError('WEIXIN_UPLOAD_UNCONFIRMED', '微信 CDN 没有返回明确的加密参数；未发送附件消息', 409)

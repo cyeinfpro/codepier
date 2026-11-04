@@ -29,6 +29,11 @@ def migrate(db):
     for statement in SCHEMA.split(';'):
         if statement.strip():
             db.execute(statement)
+    task_columns = {entry[1] for entry in db.execute('PRAGMA table_info(mcp_tasks)')}
+    if 'terminal_result' not in task_columns:
+        db.execute('ALTER TABLE mcp_tasks ADD COLUMN terminal_result TEXT')
+    # Replace only the trigger definition. Existing frozen receipts remain intact.
+    db.execute('DROP TRIGGER IF EXISTS mcp_tasks_terminal')
     db.execute("""CREATE TRIGGER IF NOT EXISTS mcp_tasks_binding_insert BEFORE INSERT ON mcp_tasks
         WHEN NOT EXISTS(SELECT 1 FROM operations o WHERE o.id=NEW.task_id AND o.tool='exec'
             AND o.space_id=NEW.space_id AND o.owner_user_id=NEW.owner_user_id AND o.grant_id=NEW.grant_id)
@@ -42,11 +47,18 @@ def migrate(db):
         AFTER UPDATE OF state,result ON operations
         WHEN NEW.state IN ({TERMINAL})
         BEGIN UPDATE mcp_tasks SET terminal_operation=json_object(
-            'operation_id',NEW.id,'state',NEW.state,'result',NEW.result,
-            'error',NEW.error,'updated',NEW.updated)
+            'operation_id',NEW.id,'state',NEW.state,'result',NULL,
+            'error',NEW.error,'updated',NEW.updated),terminal_result=NEW.result
         WHERE task_id=NEW.id AND terminal_operation IS NULL; END""")
+    db.execute('DROP TRIGGER IF EXISTS mcp_tasks_terminal_immutable')
     db.execute("""CREATE TRIGGER IF NOT EXISTS mcp_tasks_terminal_immutable
         BEFORE UPDATE OF terminal_operation ON mcp_tasks
         WHEN OLD.terminal_operation IS NOT NULL AND NEW.terminal_operation IS NOT OLD.terminal_operation
+            AND NOT history_same_body(OLD.terminal_operation,NEW.terminal_operation)
         BEGIN SELECT RAISE(ABORT,'MCP task terminal state is immutable'); END""")
+    db.execute("""CREATE TRIGGER IF NOT EXISTS mcp_tasks_terminal_result_immutable
+        BEFORE UPDATE OF terminal_result ON mcp_tasks
+        WHEN OLD.terminal_operation IS NOT NULL AND NEW.terminal_result IS NOT OLD.terminal_result
+            AND NOT history_same_body(OLD.terminal_result,NEW.terminal_result)
+        BEGIN SELECT RAISE(ABORT,'MCP task terminal result is immutable'); END""")
     db.execute("INSERT OR REPLACE INTO meta VALUES ('mcp_tasks_schema','1')")

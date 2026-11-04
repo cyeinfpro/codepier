@@ -1,10 +1,12 @@
 # MCP 协作中心全面重构设计
 
+> 公开脱敏版；历史观察不代表当前环境。
+
 > 版本：1.0 · 实施设计
 > 日期：2026-11-02（UTC+08:00）
 > 目标：建房间、增删项目、添加 dot、连接微信，在同一条对话中自主推进工作。
 > 本轮交付：现状审计与完整重构方案；文中“应当”“目标”“验收”均为待实施要求。
-> 审计基线：MCP 当前工作区，Git HEAD 为 `3f004f54be61d34e93080e9edda07aeb1a1adb08`。协作模块存在大量未提交修改及未跟踪的新模块，不能把此基线等同于 main、正式 Release 或线上版本。
+> 审计基线：历史开发工作区；不等同于当前 main、正式 Release 或线上版本。
 
 ## 1. 结论与产品定义
 
@@ -96,8 +98,8 @@
 
 ### 2.7 本轮观察与历史状态
 
-- 本轮只读的线上 `collaboration_query(action="rooms")` 返回一个 active 项目环境分区；这不证明目标 dot 已接入，也不等于产品房间列表的完整状态。
-- 2026-10-28 的就绪报告记录过“源码候选与运行镜像不同、旧接入所属房间归档、旧订阅失效”。这是历史证据，后续实施必须重新核对部署和连接，不能沿用其版本号判断当前生产环境。[E12]
+- 历史只读查询不证明目标 dot 已接入，也不等于完整房间状态。
+- 历史验收记录不代表当前部署或授权状态，实施前必须重新核对。[E12]
 - 本轮发现公共工具的通用字段可以被特定 action 拒绝，例如 rooms 不接受 limit。应由单一契约注册表生成 action 参数说明和精确 next_request，避免宿主猜参数。
 
 ## 3. 产品对象与边界
@@ -1013,8 +1015,8 @@ M3 灰度按房间进行，不能给同一房间同时开放两个互不知情�
 | E9 | [微信扫码](WEIXIN_QR_LOGIN.md)；[weixin_qr.py](../hub/collaboration/weixin_qr.py)；[weixin_protocol.py](../hub/collaboration/weixin_protocol.py) | 当前扫码与 iLink 实现路线 |
 | E10 | [微信本人任务](WEIXIN_OWNER_TASKS.md)；[channel_owner_authority.py](../hub/collaboration/channel_owner_authority.py) | 本人任务、长期授权、账号恢复 |
 | E11 | [本人任务上下文](OWNER_TASK_CONTEXT.md)；[owner_task_context.py](../hub/collaboration/owner_task_context.py) | 原处澄清、原工作复用和来源区分 |
-| E12 | [2026-10-28 就绪审查](MCP_EVENTS_MULTI_DOT_LIVE_READINESS_2026-10-28.md)；[2026-10-29 发布准备](MCP_EVENTS_MULTI_DOT_RELEASE_READINESS_2026-10-29.md) | 历史候选与线上差异、真实宿主未验收边界 |
-| E13 | [collaboration.js](../web/collaboration.js)；[collaboration-dots.js](../web/collaboration-dots.js)；[collaboration-channels.js](../web/collaboration-channels.js) | 现有界面入口与模块组织 |
+| E12 | 2026-10-28 就绪审查（历史源码文档：`MCP_EVENTS_MULTI_DOT_LIVE_READINESS_2026-10-28.md`，不随发布包分发）；2026-10-29 发布准备（历史源码文档：`MCP_EVENTS_MULTI_DOT_RELEASE_READINESS_2026-10-29.md`，不随发布包分发） | 历史候选与线上差异、真实宿主未验收边界 |
+| E13 | 历史路径 `web/collaboration.js`、`web/collaboration-dots.js`、`web/collaboration-channels.js`（旧界面已退出当前目录） | 当时的界面入口与模块组织 |
 | E14 | [架构](ARCHITECTURE.md)；[调度](ADAPTIVE_SCHEDULER.md)；[贡献规范](../CONTRIBUTING.md) | Store 事务、持久回执、资源并发与发布要求 |
 
 ### 22.2 外部第一方资料
@@ -1029,14 +1031,14 @@ M3 灰度按房间进行，不能给同一房间同时开放两个互不知情�
 
 | 文件 | SHA-256 |
 | --- | --- |
-| hub/collaboration/conversations.py | 3cd89a3c460ee19d83f7b338c70fe223205cb28dfea4ef468dd7d015448a7053 |
-| hub/collaboration/working_scopes.py | 199be0dbe1fe54daf2ab38b4fd001058423500c6556bd887844ac2721f08054f |
-| hub/collaboration/project_scopes.py | 70d89a300d82ac3df2dc9fa0d319ef6232386d5ebcbbdfc019bf16aba2408a17 |
-| hub/collaboration/dots.py | a6ef491264e964dd6f340059d0ee12c53f415dbb9485e3f30ee4fb4f3cd8fc19 |
-| hub/collaboration/experience_projection.py | 98eabf6d57db4ae0c3c3c2e5c4e934dfddc834ec0638e23f5ec3069bc7672858 |
-| hub/collaboration/dot_consumers.py | 1a135154c947b759273165c2eff5384c034098aa67d7a519ba4c3cccfc8ee4f8 |
-| hub/collaboration/dot_mailbox.py | a8ccbf381385b6da995baebcb2f92d8df64ce1bb205a89e8a767ae42b9b11134 |
-| hub/collaboration/team_collaboration.py | 36a52e686d58c9be4eff87607dbdb14586e1e99b19bbc6a9a8f22c26260da3c7 |
-| web/collaboration.js | 2cadf1a4e75cedf64de9876f7c73cff5cd0163e886c636b829b025af81ba0ecc |
-| web/collaboration-dots.js | 4272a3604c5973446c2ab058875104fd544f9854c75d06b8b53dcaf87f823346 |
-| web/collaboration-channels.js | b68a0ccfedc13b5582de615302d0e713afbf44c9441d3e37c64558e36ba6faeb |
+| hub/collaboration/conversations.py | [已脱敏摘要] |
+| hub/collaboration/working_scopes.py | [已脱敏摘要] |
+| hub/collaboration/project_scopes.py | [已脱敏摘要] |
+| hub/collaboration/dots.py | [已脱敏摘要] |
+| hub/collaboration/experience_projection.py | [已脱敏摘要] |
+| hub/collaboration/dot_consumers.py | [已脱敏摘要] |
+| hub/collaboration/dot_mailbox.py | [已脱敏摘要] |
+| hub/collaboration/team_collaboration.py | [已脱敏摘要] |
+| web/collaboration.js | [已脱敏摘要] |
+| web/collaboration-dots.js | [已脱敏摘要] |
+| web/collaboration-channels.js | [已脱敏摘要] |

@@ -90,6 +90,13 @@ class TaskLiveness:
                     'dot_reply_update:' + dot['id'], room['id'], args['request_key']])
                 legacy = self.store.one('SELECT response FROM collaboration_idempotency WHERE id=? AND room_id=?',
                                         (mutation_key, room['id']))
+                from hub.collaboration.history_retention import RETIRED_RESPONSE
+                if legacy and legacy['response'] == RETIRED_RESPONSE:
+                    return {'dot_id': dot['id'], 'kind': args['kind'], 'committed': True,
+                            'read_only': True, 'grants_authority': False, 'server_now': self.c.clock(),
+                            'host_outbox_durability': 'not_verified', 'receipt_state': 'expired',
+                            'authoritative_lookup': True, 'safe_to_resend_same_request': False,
+                            'reason_code': 'IDEMPOTENCY_RESPONSE_EXPIRED'}
                 message_id = json.loads(legacy['response']).get('message_id') if legacy else None
             else:
                 message_id = None  # v2 has no pre-receipt legacy records.

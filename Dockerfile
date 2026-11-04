@@ -14,14 +14,14 @@ ENV PATH="/opt/venv/bin:$PATH"
 RUN groupadd --gid 10001 codepier \
     && useradd --uid 10001 --gid codepier --create-home --shell /usr/sbin/nologin codepier \
     && mkdir -p /app/data && chown codepier:codepier /app/data
-COPY --chown=codepier:codepier hub ./hub
-COPY --chown=codepier:codepier shared ./shared
-COPY --chown=codepier:codepier web ./web
-COPY --chown=codepier:codepier agent ./agent
-COPY --chown=codepier:codepier scripts ./scripts
-COPY --chown=codepier:codepier deploy ./deploy
-COPY --chown=codepier:codepier requirements-agent.txt ./
-COPY --chown=codepier:codepier LICENSE ./
+COPY --chown=root:root hub ./hub
+COPY --chown=root:root shared ./shared
+COPY --chown=root:root web ./web
+COPY --chown=root:root agent ./agent
+COPY --chown=root:root scripts ./scripts
+COPY --chown=root:root deploy ./deploy
+COPY --chown=root:root requirements-agent.txt ./
+COPY --chown=root:root LICENSE ./
 USER 10001:10001
 VOLUME /app/data
 EXPOSE 8765

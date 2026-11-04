@@ -213,7 +213,7 @@ class ChannelEnrollment:
                      {'receipt_id': record['receipt_id'], 'scope_digest': record['scope_digest'],
                       'peer_digest': digest(peer), 'historical_execution': False, 'receipt_state': 'queued'})
 
-    def incoming(self, channel, binding, account, owner, room, dot, peer, external_id, *, matched, context='', fresh=True):
+    def incoming(self, channel, binding, account, owner, room, dot, peer, external_id, *, matched, context='', fresh=True, pairing_attempt=False):
         record = self.current(binding['id'])
         if not record or record['state'] != 'pending':
             return False
@@ -238,7 +238,7 @@ class ChannelEnrollment:
         if matched:
             # Failure here must roll back the entire inbox/cursor transaction.
             self.complete(channel, binding, owner, room, dot, peer, external_id)
-        else:
+        elif record['expected_peer_id'] or pairing_attempt:
             self.notices.queue(channel, binding, peer, external_id, 'pairing_required',
                 '尚未完成授权验证，此消息不会执行任务。请仅在本人与此机器人的私聊发送面板显示的一次性授权码；不要转发授权码。')
         return True

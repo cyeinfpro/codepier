@@ -49,7 +49,6 @@ def main():
     sub.add_parser("computer-resume", help="本机解除桌面紧急停止，仍需配置和原生权限")
     sub.add_parser("show", help="显示配置摘要，不显示密钥")
     args = parser.parse_args()
-    from shared.brand_migration import default_base
     path = (Path(args.config).expanduser() if args.config else default_base()/'config.json').resolve()
     if args.command == "init":
         if path.exists() and not args.re_pair:

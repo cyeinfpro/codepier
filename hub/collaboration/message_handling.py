@@ -118,6 +118,14 @@ class MessageHandling:
             self.store.execute('INSERT OR IGNORE INTO dot_message_coverage VALUES (?,?,?,?,?,?,?,?)',
                 (dot['id'], message['id'], message['version'], record['source_digest'],
                  reply['id'], reply['version'], record['revision'], now))
+        linked = work or self.work(dot['id'], message['id'])
+        settled = state in CONTENT_FINAL | {'legacy_handled'} and (
+            not linked)
+        # A source or approval change still reopens the input: mailbox reads
+        # compare this scope digest against the current scope, not just an ack.
+        self.store.execute("""UPDATE dot_mailbox_entries SET acknowledged_at=?,acknowledged_scope_digest=?
+            WHERE dot_id=? AND kind='message' AND object_id=? AND object_version=?""",
+            (now if settled else None, scope_digest if settled else '', dot['id'], message['id'], message['version']))
         return record
 
     def record_reply(self, room, dot, principal, reply):

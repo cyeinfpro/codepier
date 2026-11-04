@@ -168,8 +168,9 @@ class Agent:
         self.output_wake.set()
 
     async def report_status(self, id):
-        state = self.journal.status(id)
-        await self.send({"type": "trace", "id": id, "trace": self.telemetry.snapshot(id)})
+        state = await self.disk_call(self.journal.status, id)
+        trace = await self.disk_call(self.telemetry.snapshot, id)
+        await self.send({"type": "trace", "id": id, "trace": trace})
         if state.get("result") is not None:
             await self.send({"type": "result", "id": id, "result": state["result"]})
         else:
@@ -180,7 +181,7 @@ class Agent:
             self.output_wake.set()
 
     async def report_outbox(self):
-        for item in self.journal.outbox():
+        for item in await self.disk_call(self.journal.outbox):
             if not await self.send({"type": "result", **item}):
                 break
 
@@ -190,7 +191,7 @@ class Agent:
             while not self.stop_event.is_set():
                 await self.send({"type": "heartbeat", "at": time.time(), "running": len(self.jobs),
                                  "build": self.build.describe(), "management": self.lifecycle.describe(),
-                                 **self.job_counts(), "scheduler": self.scheduler.snapshot(),
+                                 **(await self.disk_call(self.job_counts)), "scheduler": self.scheduler.snapshot(),
                                  "admission": self.scheduler.admission_snapshot(),
                                  "scheduler_revision": self.scheduler_revision,
                                  "scheduler_error": self.scheduler_error,
@@ -291,7 +292,9 @@ class Agent:
             if not isinstance(challenge, dict) or challenge.get("type") != "challenge":
                 raise ValueError("面板握手无效")
             channel = SecureChannel(config["secret"], challenge["challenge"], config["device_id"], "agent")
-            await socket.send(channel.pack({"type": "hello", "name": config.get("name", platform.node()),
+            from agent.channel_binding import new_binding, verify_binding
+            binding = new_binding()
+            await socket.send(channel.pack({"type": "hello", "channel_binding": binding, "name": config.get("name", platform.node()),
                           "version": VERSION, "build": self.build.describe(), "platform": platform.system(), "hostname": platform.node(),
                           "python": platform.python_version(), "roots": config["allowed_roots"], "capabilities": list(TOOLS),
                           "management": self.lifecycle.describe(), "device_actions": self.lifecycle.actions(),
@@ -301,6 +304,7 @@ class Agent:
             reply = channel.unpack(await asyncio.wait_for(socket.recv(), 10))
             if reply.get("type") != "ready":
                 raise ValueError("面板未确认 Agent 身份")
+            await self.disk_call(verify_binding, self.journal, binding, reply)
             self.hub_protocol = negotiate(reply)
             empty_revision = hashlib.sha256(b"{}").hexdigest()
             await self.apply_scheduler_config(reply.get("scheduler_config", {"config": {}, "revision": empty_revision}))
@@ -377,7 +381,7 @@ class Agent:
                                 # will retry the handoff without creating another operation.
                                 LOGGER.warning("生命周期操作交接失败，将等待重试（%s）", type(exc).__name__)
                                 continue
-                        self.journal.ack(data["id"])
+                        await self.disk_call(self.journal.ack, data["id"])
                         if lifecycle_started:
                             self.stop_event.set()
                             with contextlib.suppress(Exception):
@@ -879,7 +883,7 @@ class Agent:
         delay = 1
         while True:
             try:
-                self.journal.finish(id, result)
+                await self.disk_call(self.journal.finish, id, result)
                 break
             except (sqlite3.Error, OSError) as exc:
                 # Keep the real result in this job while a transient disk fault
@@ -1200,19 +1204,25 @@ class Agent:
         seq = 0
         last_snapshot = 0.0
         last_snapshot_output = None
-        def snapshot(force=False):
-            nonlocal seq, last_snapshot, last_snapshot_output
-            if not stream or not force and time.monotonic() - last_snapshot < .25:
+        last_persist = 0.0
+        persisted_seq = -1
+        async def snapshot(force=False):
+            nonlocal seq, last_snapshot, last_snapshot_output, last_persist, persisted_seq
+            now = time.monotonic()
+            if not stream or not force and now - last_snapshot < .25:
                 return
-            if last_snapshot_output == decoded_output:
-                return
-            seq += 1
-            last_snapshot = time.monotonic()
-            self.journal.update_output(id, decoded_output, seq)
-            last_snapshot_output = decoded_output
-            self.pending_output[id] = {"type": "output", "id": id, "snapshot": True,
-                                       "seq": seq, "text": decoded_output}
-            self.output_wake.set()
+            if last_snapshot_output != decoded_output:
+                seq += 1
+                last_snapshot = now
+                last_snapshot_output = decoded_output
+                self.pending_output[id] = {"type": "output", "id": id, "snapshot": True,
+                                           "seq": seq, "text": decoded_output}
+                self.output_wake.set()
+            if seq != persisted_seq and (force or now - last_persist >= 2.0):
+                # Keep FULL durability. Disk latency must not block heartbeats,
+                # and final output/error handling must await the actual write.
+                await self.disk_call(self.journal.update_output, id, decoded_output, seq)
+                persisted_seq, last_persist = seq, now
 
         def append_output(text):
             nonlocal decoded_output, output_truncated
@@ -1225,10 +1235,10 @@ class Agent:
                 chunk = await process.stdout.read(65536)
                 if not chunk:
                     append_output(output_filter.feed(decoder.decode(b"", final=True), final=True))
-                    snapshot(True)
+                    await snapshot(True)
                     return
                 append_output(output_filter.feed(decoder.decode(chunk)))
-                snapshot()
+                await snapshot()
                 # stdout may remain immediately readable; let heartbeat/cancel run.
                 await asyncio.sleep(0)
         async def exited():
@@ -1241,7 +1251,7 @@ class Agent:
         reader = waiter = None
         timed_out = False
         try:
-            seq = self.journal.status(id).get("output_seq", 0)
+            seq = (await self.disk_call(self.journal.status, id)).get("output_seq", 0)
             reader = asyncio.create_task(drain())
             waiter = asyncio.create_task(exited())
             if id in self.cancelled or self.journal.is_cancelled(id) or self.stop_event.is_set():
@@ -1324,12 +1334,42 @@ class Agent:
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(process.wait(), 5)
 
+    @staticmethod
+    async def disk_call(function, *args):
+        work = asyncio.create_task(asyncio.to_thread(function, *args))
+        try:
+            return await asyncio.shield(work)
+        except asyncio.CancelledError:
+            # A cancelled wrapper must not leave a writer using a closing DB.
+            settled = asyncio.gather(work, return_exceptions=True)
+            while not settled.done():
+                try:
+                    await asyncio.shield(settled)
+                except asyncio.CancelledError:
+                    continue
+            raise
+
+    async def maintain_journal(self):
+        while not self.stop_event.is_set():
+            try:
+                def cleanup():
+                    with self.engine.mutation_lock:
+                        return self.journal.prune(**self.config.get("journal_retention", {}))
+                await self.disk_call(cleanup)
+            except (OSError, sqlite3.Error, ValueError) as exc:
+                LOGGER.warning("Agent recovery retention failed (%s)", type(exc).__name__)
+            try:
+                await asyncio.wait_for(self.stop_event.wait(), 6 * 3600)
+            except TimeoutError:
+                pass
+
     async def run(self):
         await self.integrations.start()
         self.computer.start_guard()
         watcher = asyncio.create_task(self.watch_config())
         sender = asyncio.create_task(self.output_sender())
         scheduler_monitor = asyncio.create_task(self.watch_scheduler())
+        journal_maintenance = asyncio.create_task(self.maintain_journal())
         stopping = asyncio.create_task(self.stop_event.wait())
         from agent.brand_upgrade import watch as watch_brand_upgrade
         branding = asyncio.create_task(watch_brand_upgrade(self))
@@ -1362,7 +1402,7 @@ class Agent:
             await self.scheduler.close()
             await self.computer.close()
             await self.integrations.close()
-            background = [watcher, sender, stopping, branding, scheduler_monitor, review_cleanup] + ([connection] if connection else [])
+            background = [watcher, sender, stopping, branding, scheduler_monitor, review_cleanup, journal_maintenance] + ([connection] if connection else [])
             for task in background:
                 task.cancel()
             await asyncio.gather(*background, return_exceptions=True)

@@ -229,6 +229,12 @@ class RoomChannels:
                  'accounts': self.store.all('''SELECT id,label,bot_id,state,credential_version FROM weixin_accounts
                     WHERE owner_user_id=? AND space_id=? ORDER BY created,id''', (principal.user_id, principal.space_id)),
                  'account_connected': False, 'peer_verified': False, 'work_authorized': False}
+        from hub.collaboration import channel_inbound
+        from hub.collaboration.weixin_protocol import MAX_MEDIA, upload_estimate
+        health = channel_inbound.summaries(self.store, 'weixin', [account['id'] for account in value['accounts']])
+        for account in value['accounts']:
+            account['inbound_health'] = health.get(account['id'], [])
+        value['upload_estimate'] = {**upload_estimate([MAX_MEDIA]), 'reference_bytes': MAX_MEDIA}
         if row['enrollment_id']:
             qr = self.store.one('SELECT * FROM '+('room_weixin_logins' if row.get('native') else 'weixin_enrollments')+' WHERE id=?', (row['enrollment_id'],))
             if qr:
@@ -244,6 +250,7 @@ class RoomChannels:
         if row['account_id']:
             account = self.c.weixin.account(row['account_id'], principal)
             value['account'] = {k: account[k] for k in ('id','label','bot_id','state','credential_version')}
+            value['account']['inbound_health'] = health.get(account['id'], [])
             value['account_connected'] = account['state'] == 'active'
             stage, action = ('confirm_binding','bind') if account['state'] == 'active' else ('needs_reconnect','start_qr')
             if account['state'] == 'active':

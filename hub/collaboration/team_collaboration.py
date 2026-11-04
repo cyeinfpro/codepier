@@ -274,7 +274,7 @@ class TeamService:
         args = validate(contracts.TeamList, raw)
         principal, room = self.c.scope(principal, args)
         self.c.conversations.object(principal, args['conversation_id'])
-        items, goals = [], []
+        items = []
         for team in self.store.all('SELECT * FROM collaboration_teams WHERE room_id=? AND conversation_id=? ORDER BY created,id LIMIT 100',
                                    (room['id'], args['conversation_id'])):
             try:
@@ -447,7 +447,7 @@ class TeamService:
                 'project_ids': policy['project_ids'], 'participant_grant_ids': sorted({m['grant_id'] for m in self.members(team)}),
                 'coordinator_grant_id': coordinator['grant_id'], 'capabilities': policy['capabilities'],
                 'duration_seconds': duration, 'budget': policy['budget'], 'idempotency_key': key}, owner)['goal']
-            approved = self.q.approve({**base, 'goal_id': created['id'], 'expected_version': created['version'],
+            self.q.approve({**base, 'goal_id': created['id'], 'expected_version': created['version'],
                 'digest': created['digest'], 'idempotency_key': 'team-approve:' + source['id']}, owner)
             now = self.c.clock()
             self.store.execute('''INSERT INTO team_goals

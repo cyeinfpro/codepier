@@ -71,3 +71,34 @@ def retry_delay(attempt, *, retry_after=0, jitter=0):
     delays = (5, 15, 30, 60, 120, 300)
     return max(delays[min(attempt - 1, len(delays) - 1)] * (1 + min(1, max(0, jitter))),
                max(0, retry_after))
+
+
+def history_retention_plan(store, *, now, batch=100):
+    """Read-only candidates, not a deletion authorization or replay invalidation.
+
+    Payload-free output helps an operator review old confirmed ledger records.
+    IDs, digests, replay responses and subscription cursor dependencies must be
+    preserved or archived by a separately approved migration. Unknown/deferred
+    deliveries are deliberately absent from this plan.
+    """
+    if not isinstance(now, (int, float)) or not math.isfinite(now):
+        raise ValueError('A finite observation time is required')
+    if type(batch) is not int or not 1 <= batch <= 500:
+        raise ValueError('Batch must be between 1 and 500')
+    # Names are constants, never caller-provided SQL identifiers.
+    specifications = (
+        ('collaboration_idempotency', 30, ''),
+        ('collaboration_audit', 365, ''),
+        ('telegram_inbox', 7, " AND state IN ('committed','ignored','quarantined')"),
+        ('weixin_inbound', 90, " AND disposition IN ('committed','ignored','duplicate')"),
+        ('channel_inbound_failures', 30, " AND state IN ('committed','quarantined')"),
+    )
+    candidates = {}
+    for table, days, condition in specifications:
+        columns = {entry['name'] for entry in store.all(f'PRAGMA table_info({table})')}
+        if 'created' not in columns:
+            continue
+        candidates[table] = store.all(f'SELECT rowid AS record_id,created FROM {table} '
+            f'WHERE created<?{condition} ORDER BY created,rowid LIMIT ?', (now - days * 86400, batch))
+    return {'candidates': candidates, 'automatic_delete_allowed': False,
+            'cleanup_requires_explicit_action': True, 'preserve_replay_and_cursor_dependencies': True}

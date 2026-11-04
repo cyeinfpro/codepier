@@ -19,6 +19,9 @@ class Searches:
         self.engine=engine;self.journal=engine.journal;self.lock=threading.RLock()
         with self.journal.lock,self.journal.db:
             self.journal.db.execute('CREATE TABLE IF NOT EXISTS search_sessions (id TEXT PRIMARY KEY, root TEXT NOT NULL, project_id TEXT NOT NULL, args TEXT NOT NULL, state TEXT NOT NULL, created REAL NOT NULL, expires REAL NOT NULL, scanned INTEGER NOT NULL DEFAULT 0, skipped INTEGER NOT NULL DEFAULT 0, result_count INTEGER NOT NULL DEFAULT 0, read_bytes INTEGER NOT NULL DEFAULT 0, stored_bytes INTEGER NOT NULL DEFAULT 0, truncated INTEGER NOT NULL DEFAULT 0, error TEXT, file_count INTEGER NOT NULL DEFAULT 0, spent REAL NOT NULL DEFAULT 0)')
+            columns = {row[1] for row in self.journal.db.execute('PRAGMA table_info(search_sessions)')}
+            if 'scan_scope' not in columns:
+                self.journal.db.execute("ALTER TABLE search_sessions ADD COLUMN scan_scope TEXT NOT NULL DEFAULT 'filesystem_walk'")
             self.journal.db.execute('CREATE TABLE IF NOT EXISTS search_files (search_id TEXT NOT NULL, seq INTEGER NOT NULL, path TEXT NOT NULL, PRIMARY KEY(search_id,seq))')
             self.journal.db.execute('CREATE TABLE IF NOT EXISTS search_hits (search_id TEXT NOT NULL, seq INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(search_id,seq))')
 
@@ -46,12 +49,18 @@ class Searches:
                 used=self.journal.db.execute('SELECT COUNT(*),COALESCE(SUM(stored_bytes),0) FROM search_sessions').fetchone()
             if old:
                 if old['root']!=str(root) or old['args']!=encoded:raise DevError('IDEMPOTENCY_CONFLICT','搜索编号已用于另一请求')
-                return {'search_id':identifier,'state':old['state'],'project_root':str(root),'expires':old['expires']}
+                return {'search_id':identifier,'state':old['state'],'project_root':str(root),'expires':old['expires'],'scan_scope':old['scan_scope']}
             if used[0]>=32 or used[1]>=MAX_STORAGE:
                 raise DevError('SEARCH_BUSY','搜索保留达到 32 个会话或 128 MiB 结果预算；一小时后过期回收',429)
-            paths=[];manifest_bytes=0;truncated=False;error=None;begin=time.monotonic()
+            paths=[];manifest_bytes=0;truncated=False;error=None;begin=time.monotonic();scan_scope='filesystem_walk'
             try:
-                entries=[(start,start.relative_to(root).as_posix(),start.stat())] if start.is_file() else self.engine.walk(root,start,deadline=begin+min(8,args['timeout_seconds']))
+                candidates = None if start.is_file() else self.engine.git_candidates(root, start, max_files=args['max_files'])
+                scan_scope = 'explicit_file' if start.is_file() else 'git_index' if candidates is not None else 'filesystem_walk'
+                if candidates is not None:
+                    entries, truncated = candidates
+                else:
+                    entries = ([(start,start.relative_to(root).as_posix(),start.stat())] if start.is_file()
+                               else self.engine.walk(root,start,deadline=begin+min(8,args['timeout_seconds']),files_first=True))
                 for _,relative,info in entries:
                     if not stat.S_ISREG(info.st_mode) or not fnmatch.fnmatchcase(relative,args['file_glob']):continue
                     if len(paths)>=args['max_files']:truncated=True;break
@@ -66,9 +75,10 @@ class Searches:
             with self.journal.lock,self.journal.db:
                 self.journal.db.execute('INSERT INTO search_sessions(id,root,project_id,args,state,created,expires,truncated,error,file_count,spent,stored_bytes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
                     (identifier,str(root),project.get('id',project.get('alias','')),encoded,state,now,now+TTL,int(truncated),error,len(paths),time.monotonic()-begin,manifest_bytes))
+                self.journal.db.execute('UPDATE search_sessions SET scan_scope=? WHERE id=?', (scan_scope, identifier))
                 self.journal.db.executemany('INSERT INTO search_files VALUES (?,?,?)',((identifier,i+1,path) for i,path in enumerate(paths)))
             return {'search_id':identifier,'state':state,'project_root':str(root),'expires':now+TTL,'file_count':len(paths),
-                    'truncated':truncated,'next':'searches_get','execution':'Scanning advances on searches_get; no automatic background execution.'}
+                    'truncated':truncated,'scan_scope':scan_scope,'next':'searches_get','execution':'Scanning advances on searches_get; no automatic background execution.'}
 
     def advance(self,project,row,minimum_results=0):
         args=json.loads(row['args']);root,_=self.engine.root(project);begin=time.monotonic()
@@ -141,13 +151,22 @@ class Searches:
             # Retained hits predate today's path policy; do not replay protected text.
             if protected(path):continue
             if path not in files:
-                try:files[path]=digest(self.engine.read_bytes(self.engine.path(root,path,False)))
+                try:
+                    allowed_path = self.engine.path(root,path,False)
+                except DevError:
+                    # A cached snippet does not bypass today's path policy.
+                    files[path] = False
+                    continue
+                try:files[path]=digest(self.engine.read_bytes(allowed_path))
                 except (DevError,OSError):files[path]=None
+            if files[path] is False:
+                continue
             item.update(seq=hit[0],current_sha256=files[path],stale=files[path]!=item['sha256']);results.append(item)
         return {'search_id':row['id'],'state':row['state'],'results':results,'cursor':hits[-1][0] if hits else args['cursor'],
                 'has_more':more or row['state']=='running','scanned_files':row['scanned'],'file_count':row['file_count'],
                 'skipped_files':row['skipped'],'result_count':row['result_count'],'truncated':bool(row['truncated']),
-                'error':row['error'],'expires':row['expires'],
+                'error':row['error'],'expires':row['expires'],'scan_scope':row['scan_scope'],
+                'hint':'结果被截断；请缩小 path 或 file_glob，0 条命中不代表不存在' if row['truncated'] else None,
                 'consistency':'Saved file manifest and per-file content; not an atomic snapshot. Returned hits are SHA-rechecked. New files need a new search.',
                 'precision':'References are syntactic candidates, not LSP type resolution; unsupported and unparsable files count as skipped.'}
 

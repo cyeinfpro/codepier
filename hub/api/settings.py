@@ -11,7 +11,7 @@ from collections import OrderedDict
 from hub.settings_snapshot import snapshot, selected_project, node_snapshot
 from hub.access import access_defaults, project_selection
 from hub.mcp import VERSIONS
-from hub import iam
+from hub import iam, grant_expiry
 from shared.contracts import INSTRUCTIONS, tool_definitions
 from shared.util import DevError, VERSION, normalize_url
 from hub.api.models import TokenInput, SettingsInput
@@ -24,6 +24,13 @@ class SchedulerSettingsInput(BaseModel):
     config: dict
 
 
+class GrantExpirationInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    expires: float | None
+    expected_revision: int = Field(ge=0)
+    confirm_reactivate: bool = False
+
+
 class SettingsUpdateInput(SettingsInput):
     expected_public_url: str | None = Field(default=None, min_length=1, max_length=500)
 
@@ -31,8 +38,8 @@ class SettingsUpdateInput(SettingsInput):
 def make_settings_router(context: HubContext):
     router = APIRouter()
     store, runtime, auth = context.store, context.runtime, context.auth
-    config, maintenance = context.config, context.maintenance
-    public_url, BASE = context.public_url, context.base
+    config = context.config
+    public_url = context.public_url
     node_reads = OrderedDict()
     node_lock = asyncio.Lock()
 
@@ -129,6 +136,9 @@ def make_settings_router(context: HubContext):
             row["status"] = ("revoked" if row["revoked"] else
                 "active" if row["expires"] and row["expires"] > now else
                 "pending" if row["pending_until"] and row["pending_until"] > now else "expired")
+            grant_expiry.public_expiry(store, row)
+            if not row["revoked"] and row["authorization_expires"] is not None and row["authorization_expires"] <= now:
+                row["status"] = "expired"
             del row["pending_until"]
         return {"grants": rows}
 
@@ -146,6 +156,13 @@ def make_settings_router(context: HubContext):
                     "authorization_mode": body.authorization_mode, "profile_id": body.profile_id, "role_version": body.role_version})
         return result
 
+
+    @router.put("/api/grants/{id}/expiration")
+    @database_endpoint(store)
+    def update_grant_expiration(id: str, request: Request, body: GrantExpirationInput):
+        with store.transaction():
+            principal = auth.panel(request, True)
+            return grant_expiry.update(store, principal, id, body.expires, body.expected_revision, body.confirm_reactivate)
 
     @router.delete("/api/grants/{id}")
     @database_endpoint(store)

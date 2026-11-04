@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import json
 import math
+import logging
 import secrets
 import time
 
@@ -22,6 +23,8 @@ from hub.collaboration.common import (TASK_EVENT, RESULT_EVENT, INCIDENT_EVENT, 
     SEVERITIES, canonical, digest, read_cursor, sign_cursor, timestamp, validate)
 from hub.collaboration.event_contracts import FILTERS, PAYLOADS, Subscribe, Unsubscribe, definitions
 from shared.util import DevError
+
+logger = logging.getLogger(__name__)
 
 DISPATCH_CAPACITY = 4
 MAX_ENVELOPE_BYTES = 16384
@@ -598,7 +601,8 @@ class EventService:
             try:
                 filters = self.authorize(sub, room)
             except DevError as exc:
-                if exc.code not in {'ROOM_PAUSED', 'WORKER_BINDING_REQUIRED', 'GOAL_INACTIVE'}:
+                if not (exc.code in {'ROOM_PAUSED', 'WORKER_BINDING_REQUIRED', 'GOAL_INACTIVE'}
+                        or exc.status in {409, 429} or exc.status >= 500):
                     self.store.execute("UPDATE mcp_event_subscriptions SET state='revoked',version=version+1,updated=? WHERE id=?", (now, sub['id']))
                 continue
             self.dispatch_route(sub, room)
@@ -710,7 +714,8 @@ class EventService:
                 try:
                     self.authorize(sub, room)
                 except DevError as exc:
-                    if exc.code in {'ROOM_PAUSED', 'WORKER_BINDING_REQUIRED', 'GOAL_INACTIVE'}:
+                    if (exc.code in {'ROOM_PAUSED', 'WORKER_BINDING_REQUIRED', 'GOAL_INACTIVE'}
+                            or exc.status in {409, 429} or exc.status >= 500):
                         continue
                     self.store.execute("UPDATE mcp_event_subscriptions SET state='revoked',version=version+1,updated=? WHERE id=?", (now, sub['id']))
                     continue
@@ -899,6 +904,9 @@ class EventService:
             await self.store.run(self.finish, item, None, 'callback_policy_rejected' if policy else 'authorization_stopped')
         except (TimeoutError, httpx.HTTPError, OSError):
             await self.store.run(self.finish, item, None, 'network_error')
+        except Exception as exc:
+            logger.warning('Event delivery failed: %s', type(exc).__name__)
+            await self.store.run(self.finish, item, None, 'delivery_internal_error')
 
     async def tick(self, *, wake=None):
         """One owned pump, bounded children, replenished on each completion/hint.
@@ -951,7 +959,8 @@ class EventService:
                     completed = done & pending
                     pending.difference_update(completed)
                     for task in completed:
-                        task.result()
+                        if not task.cancelled() and task.exception() is not None:
+                            logger.warning("Event delivery task failed: %s", type(task.exception()).__name__)
             finally:
                 if waiter is not None:
                     pending.add(waiter)

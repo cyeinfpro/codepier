@@ -160,6 +160,23 @@ def compose_command(spec_path, project):
     return ['docker', 'compose', '--project-name', project, '-f', str(spec_path)]
 
 
+OAUTH_OLD_DEFAULT = 'chatgpt.com,chat.openai.com,platform.openai.com,localhost,127.0.0.1,::1'
+OAUTH_CURRENT_DEFAULT = 'chatgpt.com,chat.openai.com,platform.openai.com,claude.ai,localhost,127.0.0.1,::1'
+
+
+def migrate_oauth_redirect_hosts(content):
+    """Upgrade only the exact historical default, preserving custom policy and bytes."""
+    lines = content.decode('utf-8').splitlines(keepends=True)
+    changed = False
+    pattern = re.compile(r'''(OAUTH_REDIRECT_HOSTS=)(["']?)([^\r\n]*?)\2(\r?\n)?''')
+    for index, line in enumerate(lines):
+        match = pattern.fullmatch(line)
+        if match and match[3] == OAUTH_OLD_DEFAULT:
+            lines[index] = f'{match[1]}{match[2]}{OAUTH_CURRENT_DEFAULT}{match[2]}{match[4] or ""}'
+            changed = True
+    return ''.join(lines).encode('utf-8'), changed
+
+
 def updated_env(content, changes):
     text = content.decode('utf-8')
     lines = text.splitlines(keepends=True)
@@ -383,6 +400,11 @@ class DockerRuntime:
         image = 'codepier-update:' + job['id']
         target = copy.deepcopy(spec)
         target['services']['hub']['image'] = image
+        # The frozen target Compose spec, not .env, starts the new container.
+        # Migrate it too; otherwise committed_env would only fix the next restart.
+        target_env = target['services']['hub']['environment']
+        if job.get('kind') != 'migrate-state' and target_env.get('OAUTH_REDIRECT_HOSTS') == OAUTH_OLD_DEFAULT:
+            target_env['OAUTH_REDIRECT_HOSTS'] = OAUTH_CURRENT_DEFAULT
         migration = job.get('kind') == 'migrate-state' or (job.get('kind') == 'apply' and mount_path == '/app/data')
         if migration:
             live_env = dict(v.split('=', 1) for v in container.get('Config', {}).get('Env', []) if '=' in v)
@@ -506,7 +528,12 @@ class DockerRuntime:
             changes['COMPOSE_FILE'] = job['layout_config']
         if job.get('kind') != 'migrate-state':
             changes['CODEPIER_HUB_SOURCE'] = job['source']
-        return updated_env(before, changes)
+        content = updated_env(before, changes)
+        if job.get('kind') != 'migrate-state':
+            content, migrated = migrate_oauth_redirect_hosts(content)
+            if migrated and 'oauth_redirect_hosts_migrated' not in job.setdefault('notes', []):
+                job['notes'].append('oauth_redirect_hosts_migrated')
+        return content
 
     def commit(self, job):
         # Caller durably records COMMITTED after this returns, before removing gate.

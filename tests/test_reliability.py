@@ -70,10 +70,6 @@ class Peer:
         return True
 
 
-def decoded(op):
-    return json.loads(op['result'])
-
-
 @pytest.mark.parametrize('value',[None, [], 'text', {}, {'hub_url':None}, {'hub_url':4}])
 def test_invalid_config_is_controlled_error(tmp_path,value):
     with pytest.raises(ValueError): validate_config(value,tmp_path/'config.json')

@@ -114,7 +114,7 @@ def test_completion_without_event_adapter_commits_once(harness):
     s.runtime.complete(op, result)
     first = s.store.one('SELECT * FROM operations WHERE id=?', (identifier,))
     assert first['state'] == 'succeeded' and first['payload'] is None
-    assert json.loads(first['result']) == result
+    assert s.runtime.operation_result(first) == result
     s.runtime.complete(first, {'ok': False, 'error': {'message': 'late result'}})
     second = s.store.one('SELECT * FROM operations WHERE id=?', (identifier,))
     assert second['state'] == first['state'] and second['result'] == first['result']

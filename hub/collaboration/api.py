@@ -1,4 +1,5 @@
 """Panel entry: authenticated sessions, current project scopes and CSRF checks."""
+import asyncio
 from fastapi import APIRouter, Query, Request, Response
 from urllib.parse import quote
 from shared.util import DevError
@@ -52,10 +53,16 @@ def make_router(auth, runtime):
         return await store.run(lambda: service.channels.media.public(
             service.channels.media.row(identifier, attachment_actor(request))))
 
+    attachment_download_slots = asyncio.Semaphore(4)
+
     @router.get('/attachments/{identifier}/content')
     async def attachment_content(request: Request, identifier: str):
-        content, row, start, end, partial = await store.run(lambda: service.channels.media.content(
-            identifier, attachment_actor(request), request.headers.get('range')))
+        async with attachment_download_slots:
+            row = await store.run(lambda: service.channels.media.row(identifier, attachment_actor(request)))
+            content, row, start, end, partial = await asyncio.to_thread(
+                service.channels.media.decode_range, row, request.headers.get('range'))
+            # Re-check current authority after the CPU work before releasing bytes.
+            await store.run(lambda: service.channels.media.row(identifier, attachment_actor(request)))
         headers = {'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff',
             'Accept-Ranges': 'bytes', 'Vary': 'Authorization, Cookie', 'ETag': '"' + row['sha256'] + '"',
             'Content-Disposition': "attachment; filename*=UTF-8''" + quote(row['name'], safe=''),

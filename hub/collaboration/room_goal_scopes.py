@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 
+from hub.collaboration.projection_cache import project as projected_project
 from hub.collaboration.common import canonical, digest
 from hub.principal import Principal, refresh_principal
 from shared.util import DevError
@@ -172,7 +173,9 @@ class RoomGoalScopes:
             raise DevError('ROOM_WORK_SCOPE_DENIED','本次能力不在任何参与成员的项目批准内',403)
         if args.get('execution_targets') and not set(args['execution_targets'])<=set(all_targets):
             raise DevError('ROOM_WORK_SCOPE_DENIED','本次执行位置不在参与成员的项目批准内',403)
-        lead=next(m for m in members if m['member_id']==member['id'])
+        lead=next((m for m in members if m['member_id']==member['id']),None)
+        if lead is None:
+            raise DevError('ROOM_MEMBER_NOT_IN_APPROVAL','主责成员不在原工作批准名单中',403)
         anchor=args.get('target_project_id') or lead['projects'][0]['project_id']
         if anchor not in {r['project_id'] for r in lead['projects']}:
             raise DevError('ROOM_WORK_SCOPE_DENIED','初始工作必须使用主责成员已批准的项目',403)
@@ -291,7 +294,7 @@ class RoomGoalScopes:
                 if (scope and scope['version']==rule['scope_version'] and self.bridge.fingerprint([scope])==rule['scope_digest']
                         and self.c.rooms.member_scope_authorized(scope)):
                     try:
-                        self.c.runtime.project(rule['project_id'],principal)
+                        projected_project(self.c, rule['project_id'],principal)
                         visible.add(rule['project_id'])
                     except DevError:
                         pass

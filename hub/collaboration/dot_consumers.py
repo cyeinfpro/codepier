@@ -206,6 +206,7 @@ class DotConsumers(FencedConsumerEngine):
         # Once explicitly migrated, expiration/removal cannot reopen an older
         # unfenced API. Historical legacy records retain their original path.
         return self.store.one('''SELECT m.* FROM room_members m
-            WHERE m.status!='legacy' AND (m.legacy_dot_id=? OR EXISTS (
-                SELECT 1 FROM room_member_work_bridges b WHERE b.member_id=m.id AND b.legacy_dot_id=?))
+            WHERE m.status!='legacy' AND m.id IN (
+                SELECT id FROM room_members WHERE legacy_dot_id=?
+                UNION SELECT member_id FROM room_member_work_bridges WHERE legacy_dot_id=?)
             LIMIT 1''', (dot_id, dot_id))

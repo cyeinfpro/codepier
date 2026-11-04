@@ -176,7 +176,8 @@ class FencedConsumerEngine:
             if old:
                 if old['request_digest'] != fingerprint:
                     raise DevError('IDEMPOTENCY_CONFLICT', '原消费租约请求标识不能更换参数', 409)
-                return json.loads(old['result'])
+                from hub.collaboration.history_retention import replay_response
+                return replay_response(old['result'])
             row = self._credential(args, principal, room, dot, binding)
             now = self.c.clock()
             revision = self._revision(dot, binding)

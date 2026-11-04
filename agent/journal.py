@@ -33,12 +33,13 @@ class Journal:
             self.db.execute("CREATE TABLE IF NOT EXISTS cancellations (id TEXT PRIMARY KEY, at REAL NOT NULL)")
             columns = {r[1] for r in self.db.execute("PRAGMA table_info(calls)")}
             for name, definition in {"tool": "TEXT", "output": "TEXT NOT NULL DEFAULT ''", "output_seq": "INTEGER NOT NULL DEFAULT 0",
-                                     "recovery_attempts": "INTEGER NOT NULL DEFAULT 0"}.items():
+                                     "recovery_attempts": "INTEGER NOT NULL DEFAULT 0", "result_expired": "INTEGER NOT NULL DEFAULT 0"}.items():
                 if name not in columns:
                     self.db.execute(f"ALTER TABLE calls ADD COLUMN {name} {definition}")
             backup_columns = {r[1] for r in self.db.execute("PRAGMA table_info(backups)")}
             if "before_mode" not in backup_columns:
                 self.db.execute("ALTER TABLE backups ADD COLUMN before_mode INTEGER")
+            self.db.execute("CREATE INDEX IF NOT EXISTS calls_retention ON calls(result_expired,acked,status,at DESC)")
             self.db.execute("CREATE INDEX IF NOT EXISTS calls_outbox ON calls(at) WHERE status IN ('done','interrupted') AND acked=0")
             self.db.execute("CREATE INDEX IF NOT EXISTS backups_root_at ON backups(root,at DESC)")
             self.db.execute("CREATE INDEX IF NOT EXISTS backups_root_path_at ON backups(root,path,at DESC)")
@@ -60,6 +61,19 @@ class Journal:
             self.db.execute("UPDATE calls SET status='interrupted',acked=0,result=? WHERE status='running'", (json.dumps({"ok": False, "error": {"code": "INTERRUPTED", "message": "Agent 进程在操作执行期间停止；网络重连不会重跑它。请检查文件或测试进程后再决定下一步。"}}),))
         self.journal_id = self.db.execute("SELECT value FROM meta WHERE key='journal_id'").fetchone()[0]
         os.chmod(self.directory / "agent.sqlite3", 0o600)
+
+    def prune(self, **settings):
+        from agent.journal_retention import prune
+        return prune(self, **settings)
+
+    def meta(self, key):
+        with self.lock:
+            row = self.db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+            return row[0] if row else None
+
+    def set_meta(self, key, value):
+        with self.lock, self.db:
+            self.db.execute("INSERT INTO meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
 
     def start(self, id: str, request: dict):
         fingerprint = digest(json.dumps(request, sort_keys=True, ensure_ascii=False))
@@ -151,9 +165,12 @@ class Journal:
         with self.lock:
             row = self.db.execute("SELECT * FROM backups WHERE root=? AND id=?", (root, id)).fetchone()
         if not row:
-            raise DevError("NOT_FOUND", "该项目没有此备份", 404)
+            raise DevError("NOT_FOUND", "该项目没有此备份，或备份已超过保留期", 404)
         row = dict(row)
-        data = (self.backups / id).read_bytes() if row["existed"] else None
+        try:
+            data = (self.backups / id).read_bytes() if row["existed"] else None
+        except FileNotFoundError as exc:
+            raise DevError("BACKUP_EXPIRED", "备份已过期或被移除；未改动项目文件", 410) from exc
         if data is not None and digest(data) != row["before_sha"]:
             raise DevError("BACKUP_CORRUPT", "备份校验失败，未改动原文件")
         return row, data

@@ -8,6 +8,7 @@ from dataclasses import replace
 
 import pytest
 
+from hub.operation_history import result as operation_result
 from shared.util import DevError
 from tests.collaboration_support import collab, key  # noqa: F401
 
@@ -246,7 +247,7 @@ def test_dispatch_rechecks_pause_before_first_delivery(collab):
     assert service.runtime._prepare_delivery(receipt['operation_id']) is None
     operation = service.store.one('SELECT * FROM operations WHERE id=?', (receipt['operation_id'],))
     assert operation['state'] == 'failed' and operation['attempts'] == 0
-    assert 'AUTHORIZATION_CHANGED' in operation['result']
+    assert 'AUTHORIZATION_CHANGED' in json.dumps(operation_result(service.store, operation))
 
 
 def test_idempotent_approval_replay_reports_current_paused_state(collab):
@@ -430,7 +431,7 @@ def test_goal_pagination_and_reconcile_do_not_starve_later_rows(collab):
     c.reconcile()
     assert service.store.one('SELECT state FROM coordination_goals WHERE id=?', (largest,))['state'] == 'active'
     c.reconcile()
-    assert service.store.one('SELECT state FROM coordination_goals WHERE id=?', (largest,))['state'] == 'paused'
+    assert service.store.one('SELECT state FROM coordination_goals WHERE id=?', (largest,))['state'] == 'expired'
     seen, cursor = [], ''
     while True:
         page = service.read({**scope, 'kind': 'coordination_goals', 'conversation_id': goal['conversation_id'],

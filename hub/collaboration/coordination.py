@@ -10,6 +10,7 @@ import json
 import uuid
 from dataclasses import asdict
 
+from hub.collaboration.projection_cache import project as projected_project
 from hub.principal import Principal, refresh_principal
 from hub.collaboration.common import canonical, digest, redact, validate, read_cursor, sign_cursor
 from shared import collaboration_contracts as contracts
@@ -84,7 +85,7 @@ class CoordinationService:
             if principal.grant_id and not source_projects:
                 raise DevError('GOAL_NOT_FOUND','当前成员没有原工作的可见项目',404)
         for project_id in source_projects:
-            self.runtime.project(project_id, principal)
+            projected_project(self.c, project_id, principal)
         if principal.grant_id:
             self.c.notification_reader(principal)
             participants = native.record(spec['room_member_scope'])['participant_grant_ids'] if spec.get('room_member_scope') else spec['participant_grant_ids']
@@ -107,7 +108,7 @@ class CoordinationService:
             for snapshot in spec['projects']:
                 if spec.get('room_member_scope') and snapshot['project_id'] not in source_projects:
                     continue
-                current = self.runtime.project(snapshot['project_id'], owner)
+                current = projected_project(self.c, snapshot['project_id'], owner)
                 if self.project_snapshot(current) != snapshot:
                     raise DevError('GOAL_PROJECT_CHANGED', '项目执行位置或设置已改变，需要重新审阅目标', 409)
                 for capability in native.project_capabilities(goal,current['id']):
@@ -136,7 +137,7 @@ class CoordinationService:
         conversation = self.c.conversations.resolve(principal, room, args)
         projects = []
         for project_id in sorted(args['project_ids']):
-            project = self.runtime.project(project_id, principal)
+            project = projected_project(self.c, project_id, principal)
             if project['id'] != project_id:
                 raise DevError('PROJECT_ID_REQUIRED', '目标必须绑定明确的项目 ID', 422)
             if not self.store.one('''SELECT 1 FROM conversation_projects p JOIN collaboration_rooms r ON r.id=p.room_id
@@ -157,7 +158,7 @@ class CoordinationService:
             participant = self.c.room_work_bridge.native.participant(native,grant_id) if native else self.c.grant_reader(room, grant_id)
             own_projects={r['project_id'] for m in native['members'] if m['grant_id']==grant_id for r in m['projects']} if native else set(args['project_ids'])
             for project_id in own_projects:
-                self.runtime.project(project_id, participant)
+                projected_project(self.c, project_id, participant)
         if principal.grant_id and principal.grant_id not in args['participant_grant_ids']:
             raise DevError('GOAL_PARTICIPANT_REQUIRED', '提议连接必须在目标参与者集合中', 403)
         coordinator = args['coordinator_grant_id'] or args['participant_grant_ids'][0]
@@ -280,7 +281,7 @@ class CoordinationService:
             # Current owner and every connection must already have every approved
             # capability. This approval creates no IAM grant or notification route.
             for snapshot in spec['projects']:
-                project = self.runtime.project(snapshot['project_id'], principal)
+                project = projected_project(self.c, snapshot['project_id'], principal)
                 if self.project_snapshot(project) != snapshot:
                     raise DevError('GOAL_PROJECT_CHANGED', '项目设置已改变，请先更新目标提议', 409)
                 for capability in self.c.room_work_bridge.native.project_capabilities(goal,project['id']):
@@ -295,11 +296,13 @@ class CoordinationService:
                     participant = native.participant(original,grant_id) if original else self.c.grant_reader(room, grant_id)
                     participant_goal=goal
                     if original:
-                        saved=next(m for m in original['members'] if m['grant_id']==grant_id)
+                        saved=next((m for m in original['members'] if m['grant_id']==grant_id),None)
+                        if saved is None:
+                            raise DevError('ROOM_MEMBER_NOT_IN_APPROVAL','当前成员不在原工作批准名单中',403)
                         participant_goal={**goal,'_reader_member_id':saved['member_id']}
                     self.authorize(participant, room, participant_goal)
                     if not original or project['id'] in {r['project_id'] for m in original['members'] if m['grant_id']==grant_id for r in m['projects']}:
-                        self.runtime.project(project['id'], participant)
+                        projected_project(self.c, project['id'], participant)
             def save():
                 if spec.get('room_member_scope'):
                     self.c.rooms.require_native(self.c.conversations.object(principal, goal['conversation_id']))
@@ -397,7 +400,7 @@ class CoordinationService:
             projects = []
             for candidate in self.c.conversations.visible(principal, conversation):
                 try:
-                    self.runtime.project(candidate['project_id'], actor)
+                    projected_project(self.c, candidate['project_id'], actor)
                     projects.append(candidate['project_id'])
                 except DevError:
                     continue
@@ -1032,6 +1035,11 @@ class CoordinationService:
             rows = self.store.all("SELECT * FROM coordination_goals WHERE state='active' AND id>? ORDER BY id LIMIT 100", (after,))
             self._reconcile_after = rows[-1]['id'] if len(rows) == 100 else ''
             for goal in rows:
+                if goal['expires_at'] is not None and goal['expires_at'] <= now:
+                    self.stop_work(goal, 'GOAL_EXPIRED')
+                    self.store.execute("UPDATE coordination_goals SET state='expired',version=version+1,updated=? WHERE id=? AND state='active'",
+                                       (now, goal['id']))
+                    continue
                 room = self.store.one('SELECT * FROM collaboration_rooms WHERE id=?', (goal['room_id'],))
                 spec = json.loads(goal['spec'])
                 try:

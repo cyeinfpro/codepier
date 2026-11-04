@@ -27,6 +27,7 @@
 
 - [房间协作中心](COLLABORATION_CENTER.md)：建房、成员接入、项目范围、微信向导和原工作继续
 - [协作中心维护与恢复](COLLABORATION_CENTER_OPERATIONS.md)：接入诊断、迁移、幂等回执与数据库恢复
+- [协作中心全面重构设计](COLLABORATION_CENTER_REBUILD_DESIGN_2026-11-02.md)：房间、项目、dot 接入、微信、自主推进、迁移与验收
 
 - [安全指南](../SECURITY.md)
 - [身份与 OIDC](MULTIUSER_OIDC.md)
@@ -41,6 +42,7 @@
 - [Telegram 与微信协作室同步](TELEGRAM_ROOM_SYNC.md)：本人私聊、独立投递与逐文件批准
 - [面板更新与备份](PANEL_UPDATE.md)
 - [长任务与回执恢复](LONG_OPERATIONS.md)
+- [操作历史隐私与保留边界](OPERATION_HISTORY_PRIVACY.md)
 - [VPS 连接](VPS.md)
 
 ## 开发与发布

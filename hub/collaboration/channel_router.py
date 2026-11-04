@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import uuid
 
 from hub.collaboration import telegram_schema as models
@@ -9,6 +10,8 @@ from hub.collaboration.channel_binding import ChannelBinding
 from hub.collaboration.common import canonical, digest
 from hub.collaboration.telegram_protocol import split_text
 from shared.util import DevError
+
+logger = logging.getLogger(__name__)
 
 MAX_DAILY_MIRRORS = 2000
 
@@ -346,13 +349,15 @@ class ChannelRouter:
             else "queued"
         )
         self.store.execute(
-            "UPDATE channel_mirrors SET state=?,updated=? WHERE id=?",
-            (state, self.c.clock(), did),
+            "UPDATE channel_mirrors SET state=?,updated=? WHERE id=? AND state!=?",
+            (state, self.c.clock(), did, state),
         )
 
     def quarantine(self, channel, bid, reason):
         rows = self.store.all(
-            "SELECT id FROM channel_mirrors WHERE channel=? AND binding_id=?",
+            """SELECT d.id FROM channel_mirrors d WHERE d.channel=? AND d.binding_id=?
+            AND EXISTS (SELECT 1 FROM channel_mirror_parts p WHERE p.delivery_id=d.id
+                AND p.state IN ('queued','waiting_context','preparing'))""",
             (channel, bid),
         )
         for row in rows:
@@ -365,6 +370,10 @@ class ChannelRouter:
 
     def reconcile(self):
         with self.store.transaction():
+            expired = self.store.all(
+                "SELECT DISTINCT delivery_id FROM channel_mirror_parts WHERE state='sending' AND lease_until<=?",
+                (self.c.clock(),),
+            )
             self.store.execute(
                 """UPDATE channel_mirror_parts SET state='unknown',reason_code='send_interrupted'
                 WHERE state='sending' AND lease_until<=?""",
@@ -375,9 +384,7 @@ class ChannelRouter:
                 WHERE state='preparing' AND lease_until<=?""",
                 (self.c.clock(),),
             )
-            for row in self.store.all(
-                "SELECT DISTINCT delivery_id FROM channel_mirror_parts WHERE state='unknown'"
-            ):
+            for row in expired:
                 self.refresh(row["delivery_id"])
 
     def claim(self, pid):
@@ -501,8 +508,8 @@ class ChannelRouter:
                     (self.c.clock() + 1.1, account["id"]),
                 )
             self.store.execute(
-                "UPDATE channel_mirror_parts SET state='sending',updated=? WHERE id=?",
-                (self.c.clock(), row["id"]),
+                "UPDATE channel_mirror_parts SET state='sending',lease_until=?,updated=? WHERE id=?",
+                (self.c.clock() + (960 if row["kind"] == "attachment" else 60), self.c.clock(), row["id"]),
             )
             self.refresh(row["delivery_id"])
             reference = self.store.one(
@@ -574,8 +581,22 @@ class ChannelRouter:
                 )
             self.refresh(row["delivery_id"])
 
+    def safe_claim(self, pid):
+        try:
+            return self.claim(pid)
+        except Exception as exc:
+            # claim is transactional, so failures before sending may be rejected
+            # without inventing a network outcome or touching another live lease.
+            with self.store.transaction():
+                row = self.store.one("SELECT * FROM channel_mirror_parts WHERE id=?", (pid,))
+                if row and row["state"] in {"queued", "waiting_context"}:
+                    self.store.execute("UPDATE channel_mirror_parts SET state='rejected',reason_code=?,updated=? WHERE id=?",
+                        (exc.code if isinstance(exc, DevError) else "claim_internal_error", self.c.clock(), pid))
+                    self.refresh(row["delivery_id"])
+            return None
+
     async def send_once(self, pid):
-        claim = await self.store.run(self.claim, pid)
+        claim = await self.store.run(self.safe_claim, pid)
         if not claim:
             return
         content = attachment = None
@@ -589,12 +610,12 @@ class ChannelRouter:
             reference = await self.store.run(self.begin_send, claim)
             if reference is None:
                 return
-        except DevError as exc:
+        except Exception as exc:
 
             def reject(exc=exc):
                 self.store.execute(
                     "UPDATE channel_mirror_parts SET state='rejected',reason_code=? WHERE id=? AND state='preparing' AND lease_fence=?",
-                    (exc.code, claim["id"], claim["lease_fence"]),
+                    (exc.code if isinstance(exc, DevError) else "preparation_internal_error", claim["id"], claim["lease_fence"]),
                 )
                 self.refresh(claim["delivery"]["id"])
 
@@ -658,12 +679,20 @@ class ChannelRouter:
             WHERE p.state IN ('queued','waiting_context') AND p.not_before<=?
             AND NOT EXISTS (SELECT 1 FROM channel_mirror_parts earlier WHERE earlier.delivery_id=p.delivery_id
                 AND earlier.ordinal<p.ordinal AND earlier.state NOT IN ('accepted','owner_confirmed')))
-            ORDER BY lane,updated,id LIMIT 16""",
+            WHERE lane=1 ORDER BY updated,id LIMIT 16""",
                 (self.c.clock(),),
             )
         )
-        for row in rows:
-            await self.send_once(row["id"])
+        semaphore = asyncio.Semaphore(4)
+
+        async def send(row):
+            async with semaphore:
+                await self.send_once(row["id"])
+
+        results = await asyncio.gather(*(send(row) for row in rows), return_exceptions=True)
+        for result in results:
+            if isinstance(result, Exception):
+                logger.warning("Channel mirror worker failed: %s", type(result).__name__)
 
     def listing(self, room_id, conversation_id):
         rows = self.store.all(

@@ -78,6 +78,9 @@ def role_eligible(store, user_id, role_id, space_id, *, delegate=True):
 
 
 def validate_grant(store, grant):
+    if grant:
+        from hub.grant_expiry import check
+        check(store, grant.get('grant_id') or grant['id'])
     if not installed(store):
         return
     if not grant or grant.get('revoked'):

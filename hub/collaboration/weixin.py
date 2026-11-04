@@ -16,7 +16,9 @@ from hub.collaboration import weixin_schema as models
 from hub.collaboration.weixin_protocol import API_BASE, ITEM_NAMES, MAX_JSON, WeixinClient, approved_url, safe_filename, text, uint64, validate_updates
 from hub.principal import Principal, refresh_principal
 from hub.room_scope import snapshot as project_snapshot
+from hub.collaboration.weixin_protocol import incoming_text, incoming_items
 from shared.util import DevError
+from hub.collaboration import channel_inbound
 
 MAX_OWNER_ACCOUNTS = 32
 MAX_INSTANCE_ACCOUNTS = 256
@@ -305,6 +307,8 @@ class WeixinService:
             args, principal, room = self.owner(raw, principal, models.Scope, enabled=False)
             accounts = self.store.all('''SELECT id,bot_id,label,state,credential_version,reason_code,last_sync_at,next_poll,updated FROM weixin_accounts
                 WHERE space_id=? AND owner_user_id=? ORDER BY created DESC LIMIT 100''', (principal.space_id, principal.user_id))
+            for account in accounts:
+                account['inbound_health'] = channel_inbound.summary(self.store, 'weixin', account['id'])
             bindings = self.store.all('''SELECT id,account_id,dot_id,conversation_id,generation,version,state,peer_id,pending_peer_id,
                 pairing_until,allow_replies,allow_media_outbound,lifetime_mode,revalidation_required,expires_at,updated FROM weixin_bindings
                 WHERE room_id=? AND conversation_id=? ORDER BY created DESC LIMIT 100''', (room['id'], args['conversation_id']))
@@ -380,7 +384,9 @@ class WeixinService:
             received = []
             for message in messages:
                 binding = self.store.one('SELECT * FROM weixin_bindings WHERE id=?', (binding['id'],))
-                receipt = self.ingest_one(binding, account, owner, room, dot, message)
+                scope = {'binding_id': binding['id'], 'version': binding['version'], 'generation': binding['generation']}
+                receipt, _ = channel_inbound.isolate(self, 'weixin', account, scope, message,
+                    lambda: self.ingest_one(binding, account, owner, room, dot, message))
                 if receipt:
                     received.append(receipt)
             # Canonical message, ordered attachment jobs, Dot inbox, dedup and
@@ -392,6 +398,7 @@ class WeixinService:
             return {'committed': True, 'message_ids': received, 'cursor_persisted': bool(cursor)}
 
     def ingest_one(self, binding, account, owner, room, dot, message):
+        incoming_items(message)
         if binding.get('native_member_id'):
             return self.c.room_channels.native.ingest(binding,account,owner,room,dot,message)
         self.c.rooms.migration.legacy_write(binding['conversation_id'])
@@ -437,13 +444,14 @@ class WeixinService:
         if not direct:
             disposition = 'group_or_echo_quarantined'
         elif binding['state'] == 'pairing' and binding['pairing_until'] > self.c.clock():
-            body = '\n'.join(text(i.get('text_item', {}).get('text'), 12000, empty=True) for i in items if isinstance(i, dict) and i.get('type') == 1)
+            body = '\n'.join(incoming_text(i.get('text_item', {}).get('text'), 12000, empty=True) for i in items if isinstance(i, dict) and i.get('type') == 1)
             matched = hmac.compare_digest(digest(body.strip()), binding['pairing_hash'])
             preapproval = self.c.channel_enrollment.current(binding['id'])
             fresh = (not old and not int(deleted) and not int(updated)
                      and (not created or not preapproval or int(created) >= int(preapproval['created'] * 1000)))
             handled = self.c.channel_enrollment.incoming('weixin', binding, account, owner, room, dot, peer, identifier,
-                matched=matched, context=message.get('context_token', ''), fresh=fresh)
+                matched=matched, context=message.get('context_token', ''), fresh=fresh,
+                pairing_attempt=body.strip().startswith('CPW-') or len(body.strip()) == 36)
             if handled:
                 disposition = 'pairing_preapproval_processed'
             elif matched:
@@ -458,7 +466,7 @@ class WeixinService:
                 if not isinstance(item, dict) or type(item.get('type')) is not int:
                     raise DevError('WEIXIN_ITEMS_INVALID', '外部消息分项类型无效', 422)
                 if item['type'] == 1:
-                    body_text.append(text(item.get('text_item', {}).get('text'), 12000, empty=True))
+                    body_text.append(incoming_text(item.get('text_item', {}).get('text'), 12000, empty=True))
                 elif item['type'] in ITEM_NAMES:
                     attachment_items.append((index, item))
                 else:
@@ -466,7 +474,7 @@ class WeixinService:
             rendered = '\n'.join(body_text) or '[附件消息]'
             if int(deleted):
                 rendered, attachment_items = '[微信上游标记消息已删除；旧版本保留为审计历史。]', []
-            text(rendered, 24000)
+            rendered = incoming_text(rendered, 24000)
             if newest:
                 pending = self.store.one('''SELECT COUNT(*) AS n FROM weixin_inbound_versions v
                     JOIN collaboration_dot_messages m ON m.message_id=v.message_id
@@ -552,7 +560,33 @@ class WeixinService:
             self.store.execute('UPDATE weixin_accounts SET state=?,reason_code=?,failures=?,next_poll=?,poll_until=0,updated=? WHERE id=?',
                 ('attention' if permanent else row['state'], code, failures, self.c.clock() + delay, self.c.clock(), row['id']))
 
+    def replay_deferred(self, account_id):
+        with self.store.transaction():
+            account = self.store.one('SELECT * FROM weixin_accounts WHERE id=?', (account_id,))
+            if not account or account['state'] != 'active':
+                return
+            self.require_enabled(account)
+            for row in channel_inbound.pending(self, 'weixin', account_id):
+                saved = channel_inbound.unpack(self, row)
+                if saved is None:
+                    continue
+                scope = saved['scope']
+                binding = self.store.one('SELECT * FROM weixin_bindings WHERE id=?', (scope['binding_id'],))
+                if (not binding or binding['state'] != 'active' or binding['version'] != scope['version']
+                        or binding['generation'] != scope['generation']
+                        or account['credential_version'] != saved['credential_version']
+                        or account['generation'] != saved['generation']):
+                    channel_inbound.stale(self, row)
+                    continue
+                def ingest():
+                    current, current_account, owner, room, dot = self.valid(binding['id'])
+                    return self.ingest_one(current, current_account, owner, room, dot, saved['source'])
+                _, failure = channel_inbound.isolate(self, 'weixin', account, scope, saved['source'], ingest, replay=True)
+                if failure.startswith('deferred:'):
+                    break
+
     async def poll_once(self, account_id):
+        await self.store.run(self.replay_deferred, account_id)
         try:
             claim = await self.store.run(self.claim_poll, account_id)
         except DevError:

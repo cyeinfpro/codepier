@@ -16,8 +16,8 @@ MEDIA_TTL_SECONDS = 900
 
 # `read` can contain either an ordinary file or desktop media. Index the expiry
 # once instead of parsing every historical file result on each cleanup tick.
-MEDIA_PENDING = "(tool LIKE 'computer_%' OR tool IN ('browser_snapshot','read')) AND result IS NOT NULL AND COALESCE(json_extract(result,'$.data.media_expired'),0)=0"
-MEDIA_EXPIRY = "json_extract(result,'$.data.computer_expires_at')"
+MEDIA_PENDING = "(tool LIKE 'computer_%' OR tool IN ('browser_snapshot','read')) AND result IS NOT NULL AND CASE WHEN json_valid(result) THEN COALESCE(json_extract(result,'$.data.media_expired'),0)=0 ELSE 0 END"
+MEDIA_EXPIRY = "CASE WHEN json_valid(result) THEN json_extract(result,'$.data.computer_expires_at') END"
 
 
 def dimensions(raw: bytes, mime: str):

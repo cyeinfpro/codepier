@@ -10,7 +10,6 @@ import base64
 import hashlib
 import hmac
 import json
-import os
 import re
 import time
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
@@ -24,7 +23,7 @@ from shared.crypto import digest, token
 from shared.util import DevError, valid_json_value
 from shared.role_contracts import ROLE_SCOPE
 from hub.roles import validate_role_consent, public_role
-from hub import iam
+from hub import iam, grant_expiry
 
 
 # Discovery must never combine mutually exclusive fixed and role modes. MCP
@@ -73,7 +72,7 @@ class OAuth:
             if u.port is not None and not 1 <= u.port <= 65535:
                 raise ValueError()
         except (ValueError, TypeError) as exc:
-            raise DevError("INVALID_REDIRECT", "回调必须是允许主机上的完整 HTTPS 地址（本机回调可用 HTTP），不可使用通配符") from exc
+            raise DevError("INVALID_REDIRECT", "回调必须是允许主机上的完整 HTTPS 地址（本机回调可用 HTTP），不可使用通配符；管理员请检查 OAUTH_REDIRECT_HOSTS（Claude 需 claude.ai），修改后重启 Hub") from exc
         return value
 
     def auth_request(self, params):
@@ -143,11 +142,14 @@ class OAuth:
         scopes, _, _ = effective_grant(self.store, grant)
         if grant.get('authorization_mode') == 'role':
             scopes = {ROLE_SCOPE}  # OAuth delegation is stable; capabilities are live policy.
+        lifetime = grant_expiry.check(self.store, grant_id)
         now = time.time()
+        end = (grant_expiry.UNLIMITED_TOKEN_EXPIRY if lifetime["expires"] is None else lifetime["expires"]) if lifetime else now + 30 * 86400
+        access_end = min(now + 3600, end)
         access, refresh = "rda_" + token(), "rdr_" + token()
-        self.store.db.execute("INSERT INTO tokens VALUES (?,?,?,'access',?,?)", (token(16), digest(access), grant_id, now + 3600, now))
-        self.store.db.execute("INSERT INTO tokens VALUES (?,?,?,'refresh',?,?)", (token(16), digest(refresh), grant_id, now + 30 * 86400, now))
-        return {"access_token": access, "token_type": "Bearer", "expires_in": 3600, "refresh_token": refresh, "scope": " ".join(sorted(scopes))}
+        self.store.db.execute("INSERT INTO tokens VALUES (?,?,?,'access',?,?)", (token(16), digest(access), grant_id, access_end, now))
+        self.store.db.execute("INSERT INTO tokens VALUES (?,?,?,'refresh',?,?)", (token(16), digest(refresh), grant_id, end, now))
+        return {"access_token": access, "token_type": "Bearer", "expires_in": max(0, int(access_end - now)), "refresh_token": refresh, "scope": " ".join(sorted(scopes))}
 
     @staticmethod
     async def json_object(request: Request):
@@ -285,6 +287,7 @@ class OAuth:
                     projects = project_selection(self.store, projects, body.get('all_projects', False),space_id=principal.space_id)
                 else:
                     raise DevError('INVALID_SCOPE', '请明确选择传统固定授权或动态角色授权')
+                expires = grant_expiry.expiration(body.get('days', 30))
                 profile_id = body.get('profile_id')
                 gid, code = token(16), token()
                 with self.store.lock, self.store.db:
@@ -311,6 +314,7 @@ class OAuth:
                     if not used:
                         raise DevError("AUTH_REQUEST_EXPIRED", "授权请求已处理", 410)
                     self.store.db.execute("INSERT INTO grants(id,user_id,label,client_id,scopes,projects,revoked,created,resource,profile_id,authorization_mode,role_id,space_id,owner_user_id,identity_id,user_epoch) VALUES (?,?,?,?,?,?,0,?,?,?,?,?,?,?,?,?)", (gid, principal.user_id, row["client_name"], row["client_id"], json.dumps(sorted(set(scopes))), json.dumps(projects), time.time(), row["resource"], profile_id, mode, role_id,principal.space_id,principal.user_id,principal.identity_id,principal.user_epoch))
+                    grant_expiry.save_new(self.store, gid, expires)
                     if external_consent:
                         from hub.gateway.policy import consent_grant
                         consent_grant(self.store, principal, gid, body.get('role_version'))
@@ -319,7 +323,7 @@ class OAuth:
                         profile_audit(self.store, principal.actor, 'role.consent', gid,
                                       {'profile_id': profile_id, 'role': public_role(role), 'mode': mode, 'future_policy_changes_consented': True})
                     self.store.db.execute("INSERT INTO oauth_codes VALUES (?,?,?,?,?,?,?)", (digest(code), row["client_id"], row["redirect_uri"], row["challenge"], row["resource"], gid, time.time() + 300))
-                self.store.audit(principal.actor, "oauth.consent", row["client_name"], detail={"grant_id": gid, "scopes": scopes, "projects": projects, "profile_id": profile_id, "authorization_mode": mode, "role_id": role_id})
+                self.store.audit(principal.actor, "oauth.consent", row["client_name"], detail={"grant_id": gid, "scopes": scopes, "projects": projects, "profile_id": profile_id, "authorization_mode": mode, "role_id": role_id, "expires": expires, "unlimited": expires is None})
                 return {"redirect": self.redirect(row["redirect_uri"], {"code": code, "state": row["state"]})}
 
             return await self.store.run(finish)
