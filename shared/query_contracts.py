@@ -14,7 +14,7 @@ QUERY_TOOLS = frozenset({'project_query', 'task_query'})
 
 
 class ProjectQuery(Workspace):
-    operation: Literal['list', 'open', 'help', 'tree', 'skills', 'skill', 'tasks', 'status', 'readiness',
+    operation: Literal['list', 'open', 'help', 'tree', 'search', 'skills', 'skill', 'tasks', 'status', 'readiness',
                        'dashboard', 'workflow_list', 'workflow_get'] = 'list'
     capture_baseline: Literal[False] = False
 

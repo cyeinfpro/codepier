@@ -132,7 +132,8 @@ def test_every_action_accepts_exact_shape_and_rejects_missing_or_foreign_fields(
 def test_public_catalog_has_sixteen_native_tools_with_correct_hints(profile, authorization):
     base = core_definitions(profile, authorization)
     collaboration = tool_definitions(authorization)
-    assert len(base) == 13 and len(base + collaboration) == 16
+    assert len(base) == (9 if profile == 'coding' else 13)
+    assert len(base + collaboration) == (12 if profile == 'coding' else 16)
     names = [item['name'] for item in base + collaboration]
     assert len(names) == len(set(names))
     assert not LEGACY_TOOLS.intersection(names)

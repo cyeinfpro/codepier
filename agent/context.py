@@ -1,6 +1,7 @@
 """A bounded, read-only bootstrap index. No project commands are executed."""
 from __future__ import annotations
 
+import re
 import stat
 import time
 from pathlib import PurePosixPath
@@ -11,6 +12,14 @@ from shared.util import DevError
 DOCUMENTS = ("AGENTS.md", "MEMORY.md", "CLAUDE.md", "README.md", "README.rst", "README.txt", "pyproject.toml", "package.json",
              "go.mod", "Cargo.toml", "Makefile", "Dockerfile", "requirements.txt", "CONTRIBUTING.md")
 SKILL_ROOTS = ("skills", ".agents/skills", ".claude/skills", ".codex/skills")
+DOC_INDEX_MAX_BYTES = 32 * 1024
+_INDEX_EXCLUDE = re.compile(
+    r"(^|/)(requirements[^/]*\.txt|[^/]*\.lock|package-lock\.json|MANIFEST\.sha256|[^/]*\.log)$")
+
+
+def index_document(relative):
+    """Filter discovery noise only; explicit file access remains unchanged."""
+    return not _INDEX_EXCLUDE.search(relative)
 
 
 def project_context(engine, project, args):
@@ -24,6 +33,8 @@ def project_context(engine, project, args):
 
     def preview(relative):
         nonlocal used, truncated
+        if not index_document(relative):
+            return
         try:
             path = engine.path(root, relative, False)
             if not path.exists():
@@ -43,6 +54,8 @@ def project_context(engine, project, args):
                 item["next_start_line"] = item["content"].count("\n") + 1
                 item["end_line"] = item["next_start_line"]
             item["next"] = "fs_read" if item["truncated"] else None
+            if item.get("bytes", 0) > DOC_INDEX_MAX_BYTES:
+                item["read_hint"] = "Use read with offset/limit to inspect relevant ranges."
             documents.append(item)
             truncated = truncated or item["truncated"]
         except (DevError, OSError) as exc:

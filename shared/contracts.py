@@ -46,6 +46,8 @@ class RemoteProject(Project):
         description="Optional key for this read. Reuse only to recover the same operation after a transport failure; use a fresh key for a fresh read.")
 
 class Tree(RemoteProject):
+    format: Literal["structured", "compact"] = Field(default="structured",
+        description="MCP presentation only; compact uses relative path lines. Agent results and pagination remain structured.")
     path: str = Field(default=".", max_length=1024)
     depth: int = Field(default=2, ge=1, le=8)
     offset: int = Field(default=0, ge=0, le=100000)
@@ -622,7 +624,28 @@ def _compact_input_schema(schema, *, output=False):
     return result
 
 
-def tool_definitions(profile="core", authorization="fixed"):
+CODING_TOOLS = frozenset({'project_query', 'task_query', 'workspace', 'read', 'write',
+                          'edit', 'exec', 'process', 'get_profile'})
+LEAN_OUTPUT_SCHEMA = {'type': 'object', 'additionalProperties': True,
+    'properties': {'operation_id': {'type': 'string'}, 'pending': {'type': 'boolean'},
+        'state': {'type': 'string'}, 'error': {'anyOf': [{'type': 'object'}, {'type': 'string'}, {'type': 'null'}]},
+        'truncated': {'type': 'boolean'}, 'next_offset': {'anyOf': [{'type': 'integer'}, {'type': 'null'}]}}}
+
+
+def project_output_schemas(definitions, schemas='full'):
+    """Catalog-only projection; runtime validation and remote schemas stay intact."""
+    if schemas not in {'full', 'lean', 'none'}:
+        raise ValueError('Unknown MCP schemas mode')
+    result = copy.deepcopy(definitions)
+    for item in result:
+        if schemas == 'lean':
+            item['outputSchema'] = copy.deepcopy(LEAN_OUTPUT_SCHEMA)
+        elif schemas == 'none':
+            item.pop('outputSchema', None)
+    return result
+
+
+def tool_definitions(profile="core", authorization="fixed", schemas="full"):
     from shared.mcp_presentation import output_schema
     from shared.schema_cache import schema_for
     if authorization not in {"fixed", "role"}:
@@ -643,6 +666,8 @@ def tool_definitions(profile="core", authorization="fixed"):
         if item["name"] in {"workspace", "browser", "computer", "process"}:
             item["annotations"]["readOnlyHint"] = False
             item["annotations"]["openWorldHint"] = True
+    if profile == 'coding':
+        result = [item for item in result if item['name'] in CODING_TOOLS]
     result = [decorate_integration(item) for item in result]
     for item in result:
         if item['name'] == 'get_profile':
@@ -652,4 +677,4 @@ def tool_definitions(profile="core", authorization="fixed"):
             item['securitySchemes'] = schemes
             item['_meta']['securitySchemes'] = schemes
             item['_meta']['codepier/authorizationMode'] = 'role'
-    return result
+    return project_output_schemas(result, schemas)

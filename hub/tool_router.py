@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from hub import iam
 from hub.principal import refresh_principal
 from hub.tool_discovery import visible_definitions
-from shared.contracts import tool_definitions
+from shared.contracts import tool_definitions, project_output_schemas, CODING_TOOLS
 from shared.core_contracts import REPLACED_MCP_TOOLS
 from shared.integration_contracts import ADMIN_TOOLS, INCOMING_UPLOAD_TOOLS
 from shared.util import DevError
@@ -23,7 +23,7 @@ class ToolRouter:
         self.store, self.gateway = store, gateway
 
     @iam.read_decision
-    def definitions(self, principal, *, discovery=True):
+    def definitions(self, principal, *, discovery=True, profile="core", schemas="full"):
         principal = refresh_principal(self.store, principal)
         native = tool_definitions(authorization=principal.authorization_mode)
         collaboration = getattr(self.store, "collaboration", None)
@@ -40,10 +40,21 @@ class ToolRouter:
             raise DevError('TOOL_NAME_COLLISION', '工具发布名称冲突；未选择任意后端', 409)
         # Resolve against the full reserved namespace, before discovery projection.
         # Hiding a name is neither authorization nor permission for a gateway to claim it.
-        return principal, visible_definitions(native, principal.scopes) if discovery else native, external
+        if discovery:
+            if profile == 'coding':
+                native = [item for item in native if item['name'] in CODING_TOOLS]
+            elif profile not in {'core', 'full'}:
+                raise ValueError('Unknown MCP tool profile')
+            native = project_output_schemas(visible_definitions(native, principal.scopes), schemas)
+            if schemas == 'lean':
+                from shared.public_collaboration import PUBLIC_TOOLS, lean_input_schema
+                for item in native:
+                    if item['name'] in PUBLIC_TOOLS:
+                        item['inputSchema'] = lean_input_schema(item['inputSchema'])
+        return principal, native, external
 
-    def list_tools(self, principal, cursor=None):
-        principal, native, external = self.definitions(principal)
+    def list_tools(self, principal, cursor=None, profile="core", schemas="full"):
+        principal, native, external = self.definitions(principal, profile=profile, schemas=schemas)
         from hub.gateway.catalog import page, fingerprint
         result = page(native + external, cursor,
                     [principal.space_id, principal.user_id, principal.grant_id, principal.profile_id],

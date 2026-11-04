@@ -64,7 +64,7 @@ _CONTEXT = frozenset({'project', 'project_root', 'documents', 'instruction_index
     'skills', 'codex_skills', 'skills_catalog', 'root_entries', 'truncated',
     'remaining_documents', 'warnings', 'budget', 'scope', 'trust', 'next'})
 _FILE_INDEX = frozenset({'path', 'sha256', 'bytes', 'state', 'code', 'next',
-    'must_read_before_edit'})
+    'must_read_before_edit', 'read_hint'})
 _DOCUMENT = _FILE_INDEX | frozenset({'content', 'total_lines', 'start_line',
     'end_line', 'offset', 'truncated', 'next_offset', 'next_start_line'})
 _OPEN = _RECEIPT | frozenset({'context_id', 'context_unchanged', 'workspace',
@@ -486,7 +486,7 @@ def present(name, arguments, value):
         from shared.core_contracts import CORE_ACTIONS
         actions = {'list': 'projects_list', 'open': 'open_workspace', 'skills': 'skills_list',
             'skill': 'skills_read', 'tasks': 'tasks_list', 'status': 'execution_info',
-            'readiness': 'readiness_get', 'tree': 'fs_tree', **CORE_ACTIONS['workspace']}
+            'readiness': 'readiness_get', 'tree': 'fs_tree', 'search': 'fs_search', **CORE_ACTIONS['workspace']}
         name = actions.get(arguments.get('operation', 'list'), name)
         arguments = {**arguments, **arguments.get('options', {})}
     elif name in {'process', 'task_query'}:
@@ -513,6 +513,10 @@ def output_schema(name, schema):
         result = {key: visit(child) for key, child in node.items()}
         properties = result.get('properties')
         if isinstance(properties, dict):
+            if properties.get('mcp_view_version') == {'const': 1}:
+                properties['mcp_view_version'] = {'enum': [1, 2]}
+            if 'entries' in properties:
+                properties['entries'] = {'anyOf': [properties['entries'], {'type': 'string'}]}
             for key in _IDENTITY:
                 properties.pop(key, None)
             def resolved(value, seen=frozenset()):
@@ -546,3 +550,145 @@ def output_schema(name, schema):
         return result
 
     return visit(schema)
+
+
+def token_view(name, arguments, value, *, view=2, verbosity='lean', output_mode='raw'):
+    """Versioned presentation-only savings; never visit arbitrary user bodies."""
+    result = deepcopy(value)
+    if view == 1 or verbosity == 'full' or not isinstance(result, dict):
+        return result
+
+    def receipt(row):
+        if not isinstance(row, dict):
+            return
+        # Null error means no error. Keep required null continuation fields and
+        # all substantive denial/failure evidence, including unknown extensions.
+        if row.get('error', False) is None:
+            row.pop('error')
+        nested = row.get('result')
+        data = nested.get('data') if isinstance(nested, dict) else None
+        if isinstance(nested, dict) and nested.get('error', False) is None:
+            nested.pop('error')
+        execution = data if isinstance(data, dict) else row
+        succeeded = (execution.get('command_ok') is True
+                     and execution.get('exit_code') == 0
+                     and not execution.get('timed_out')
+                     and not execution.get('cancelled')
+                     and not row.get('pending')
+                     and row.get('state', 'succeeded') == 'succeeded'
+                     and (execution.get('failure_context') or {}).get('category') in (None, 'succeeded'))
+        if succeeded:
+            for key in ('continuation', 'failure_context', 'log_ref'):
+                execution.pop(key, None)
+            # Isolation and cleanup evidence is security-relevant even on success.
+            runtime = execution.get('runtime')
+            if isinstance(runtime, dict) and runtime.get('mode') == 'project_clean_v1':
+                execution.pop('runtime')
+            recovery = row.get('recovery')
+            if isinstance(recovery, dict) and recovery.get('task_outcome_confirmed'):
+                row['recovery'] = {key: item for key, item in recovery.items() if key != 'message'}
+        if isinstance(data, dict) and row.get('tool') in {'write', 'edit', 'fs_write', 'fs_edit', 'apply_patch'}:
+            tool = 'write' if row['tool'] in {'write', 'fs_write'} else 'edit'
+            nested['data'] = token_view(tool, row.get('args_summary') or {}, data, view=view, verbosity=verbosity)
+        # Only remove exact duplicates. A stream page is not the complete result
+        # and must never replace different output or silently discard old pages.
+        if isinstance(data, dict) and isinstance(row.get('output'), str) and data.get('output') == row['output']:
+            data.pop('output')
+            data['output_ref'] = 'output'
+
+    if {'id', 'tool', 'state'} <= result.keys():
+        receipt(result)
+    elif name in {'process', 'task_query'} and isinstance(result.get('operations'), list):
+        for row in result['operations']:
+            receipt(row)
+    elif name == 'exec':
+        receipt(result)
+
+    if name in {'write', 'edit'} and not result.get('pending') and not result.get('error'):
+        def diff(row, created=False):
+            if not isinstance(row, dict) or not isinstance(row.get('diff'), str):
+                return
+            if created:
+                row.pop('diff')
+                row['diff_omitted'] = 'created'
+            elif len(row['diff']) > 4000:
+                end = row['diff'].rfind('\n', 0, 4000)
+                row['diff'] = row['diff'][:end if end > 0 else 4000]
+                row['diff_truncated'] = True
+        diff(result, arguments.get('expected_sha256') == 'new')
+        for row in result.get('files', []):
+            diff(row)
+    if name in {'workspace', 'project_query'} and arguments.get('operation') == 'tree':
+        if arguments.get('options', {}).get('format') == 'compact' and isinstance(result.get('entries'), list):
+            rows = []
+            base = arguments.get('path', arguments.get('options', {}).get('path', '.')) or '.'
+            import posixpath
+            base = posixpath.normpath(base)
+            prefix = '' if base == '.' else base.rstrip('/') + '/'
+            result['base'] = base
+            for entry in result['entries']:
+                path = entry.get('path', '')
+                if prefix and path.startswith(prefix):
+                    path = path[len(prefix):]
+                # Quote only ambiguous filenames, preserving ordinary line compactness.
+                import json
+                if any(ord(char) < 32 for char in path) or path.startswith('\"'):
+                    path = json.dumps(path, ensure_ascii=False)
+                rows.append(path + ('/' if entry.get('type') == 'directory'
+                            else '\t' + str(entry.get('size', ''))))
+            result['entries'] = '\n'.join(rows)
+            result['entries_format'] = 'json_path_slash_or_tab_size'
+        if arguments.get('offset', arguments.get('options', {}).get('offset', 0)):
+            result.pop('exclusions', None)
+    if output_mode == 'normalized':
+        for row in output_records(result):
+            original = row['output']
+            plain = re.sub(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\\\))', '', original)
+            plain = '\n'.join(part.split('\r')[-1] for part in plain.replace('\r\n', '\n').split('\n'))
+            lines = plain.splitlines(keepends=True)
+            collapsed, count, previous = [], 0, None
+            for line in lines + [None]:
+                if line == previous and line is not None:
+                    count += 1
+                    continue
+                if previous is not None:
+                    collapsed.append(previous)
+                    if count > 1:
+                        collapsed.append(f'[… repeated {count} times]\n')
+                previous, count = line, 1
+            row['output'] = ''.join(collapsed)
+            if row['output'] != original:
+                row['output_normalized'] = True
+                row['output_original_chars'] = len(original)
+                row['output_recovery'] = 'Query the same operation_id using connection URL ?output=raw&verbosity=full; do not rerun the command.'
+    if name in {'workspace', 'project_query'} and arguments.get('operation') == 'open':
+        if result.get('context_detail', 'minimal') == 'minimal':
+            result.pop('capability_index', None)
+            result['help'] = 'project_query(help, tool, action)'
+            result.pop('context_scope', None)
+            context = result.get('context')
+            if isinstance(context, dict):
+                remaining = context.pop('remaining_documents', None)
+                if isinstance(remaining, list):
+                    context['remaining_documents_count'] = len(remaining)
+                    context['remaining_documents_truncated'] = len(remaining) >= 64
+                    context['documents_next'] = 'project_query(tree, path=docs)'
+                for key in ('scope', 'trust'):
+                    context.pop(key, None)
+        result['mcp_view_version'] = 2
+    return result
+
+
+def output_records(value):
+    """Known receipt output slots only; never traverse caller documents."""
+    if not isinstance(value, dict):
+        return []
+    rows = [value] if isinstance(value.get('output'), str) and ('operation_id' in value or {'id', 'tool', 'state'} <= value.keys()) else []
+    nested = value.get('result')
+    if isinstance(nested, dict) and isinstance(nested.get('data'), dict):
+        data = nested['data']
+        if value.get('tool') in {'exec', 'shell_exec', 'tasks_run', 'ssh_exec', 'vps_exec'} and isinstance(data.get('output'), str):
+            rows.append(data)
+    for operation in value.get('operations', []):
+        rows.extend(output_records(operation))
+    return rows

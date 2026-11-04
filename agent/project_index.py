@@ -10,7 +10,7 @@ ROOT_INDEX_NOISE = frozenset({'.DS_Store', 'Thumbs.db', '.Spotlight-V100', '.fse
     '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache'})
 
 def project_index(engine, project, args):
-    from agent.context import DOCUMENTS, SKILL_ROOTS
+    from agent.context import DOCUMENTS, SKILL_ROOTS, DOC_INDEX_MAX_BYTES, index_document
     root, _ = engine.root(project)
     deadline = time.monotonic() + 4
     documents, instructions, remaining, skills, warnings, entries = [], [], [], [], [], []
@@ -21,6 +21,8 @@ def project_index(engine, project, args):
 
     def index(relative, *, instruction=False, skill=False):
         nonlocal truncated
+        if not instruction and not skill and not index_document(relative):
+            return
         if relative in seen:
             return
         seen.add(relative)
@@ -42,6 +44,8 @@ def project_index(engine, project, args):
             item = engine.read(project, {'path': relative, 'max_lines': 1})
             meta = {key: item[key] for key in ('path', 'sha256', 'bytes')}
             meta['next'] = 'read'
+            if meta['bytes'] > DOC_INDEX_MAX_BYTES:
+                meta['read_hint'] = 'Use read with offset/limit to inspect relevant ranges.'
             if instruction:
                 instructions.append({**meta, 'state': 'available', 'must_read_before_edit': True})
             if skill:

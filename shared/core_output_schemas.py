@@ -110,6 +110,8 @@ def union(variants, *, pending=True):
     for variant in variants:
         for key, value in variant.get('properties', {}).items():
             properties[key] = either(properties[key], value) if key in properties else value
+    if 'error' in properties:
+        properties['error'] = either(properties['error'], NULL)
     branches = []
     for variant in variants:
         branch = {key: value for key, value in variant.items()
@@ -209,7 +211,7 @@ def build_core_output_schemas(legacy, *, include_queries=False):
     workspace = [project_list, help_index, help_detail, devices, project_created,
         *variants('projects_resolve', 'open_workspace', 'project_context',
                   'skills_list', 'skills_read', 'tasks_list', 'execution_info',
-                  'readiness_get', 'fs_tree', 'workspace_status', 'worktrees_create',
+                  'readiness_get', 'fs_tree', 'fs_search', 'workspace_status', 'worktrees_create',
                   'worktrees_list', 'worktrees_remove', 'workflows_create',
                   'workflows_list', 'workflows_get', 'workflows_update',
                   'workflows_handoff', 'lsp_status')]
@@ -320,7 +322,7 @@ def build_core_output_schemas(legacy, *, include_queries=False):
     }
     if include_queries:
         result['project_query'] = union([project_list, help_index, help_detail, *variants(
-            'fs_tree', 'skills_list', 'skills_read',
+            'fs_tree', 'fs_search', 'skills_list', 'skills_read',
             'open_workspace', 'tasks_list', 'execution_info', 'readiness_get',
             'workspace_status', 'workflows_list', 'workflows_get')])
         result['task_query'] = union([process[0], *variants(
