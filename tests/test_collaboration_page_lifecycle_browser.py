@@ -60,7 +60,7 @@ POLL_PROBE = """(() => {
     if (!probe.armed || url.pathname !== '/api/collaboration' ||
         !['timeline', 'overview', 'members', 'delegation_policies'].includes(kind))
       return originalFetch.call(this, input, init);
-    const row = {kind, beforePagehide: !probe.pagehide};
+    const row = {kind, beforePagehide: !probe.pagehide, keepalive: init.keepalive === true};
     probe.rows.push(row);
     probe.signals.push({kind, signal:init.signal});
     probe.record('read-start', {kind, hasSignal:!!init.signal, aborted:!!init.signal?.aborted});
@@ -126,10 +126,18 @@ def test_pending_reload_reads_use_the_original_document_without_page_errors(
         original = page.evaluate_handle("() => lifecycleProbe")
         original.evaluate("p => {clearTimeout(p.poll.id); p.armed = true;}")
         before_writes = list(writes)
-        page.route(stack.url + "/", lambda route: held.append(route))
+        def hold_navigation(route):
+            held.append(route)
+            original.evaluate("p => {p.navigationHeld = true;}")
+
+        page.route(stack.url + "/", hold_navigation)
         with page.expect_request(lambda request: request.is_navigation_request()
                                  and request.frame == page.main_frame):
             page.evaluate("() => {setTimeout(() => location.reload(), 0);}")
+        # The request event precedes interception. Wait for the route handler,
+        # not merely request creation, before starting old-document fetches.
+        page.wait_for_function("() => lifecycleProbe.navigationHeld === true")
+        assert len(held) == 1
         # Run the real scheduled callback in its original document while the
         # replacement response is held. Native fetches and API responses remain
         # real; no synthetic success, timer delay, retry or error filtering.
@@ -141,6 +149,7 @@ def test_pending_reload_reads_use_the_original_document_without_page_errors(
           await Promise.race([p.firstCycle, new Promise((_, reject) =>
             setTimeout(() => reject(new Error('Four polling reads did not finish: ' +
               JSON.stringify({pagehide:p.pagehide, hidden:document.hidden,
+                navigationHeld:p.navigationHeld === true,
                 sameDocument:p.origin === window.lifecycleProbe.origin,
                 pollAttempts:p.pollAttempts, pollCompletions:p.pollCompletions,
                 activeCycles:p.cycles.size, rows:p.rows,
