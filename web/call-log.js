@@ -40,6 +40,24 @@ window.CodePierCallLog = (() => {
       : '未记录';
   const source = (r) =>
     r.actor?.startsWith('mcp:') ? 'MCP' : r.actor?.startsWith('panel:') ? '面板' : '其他';
+  // actor is the identity snapshot recorded at invocation time, not today's grant label.
+  function authorization(r) {
+    const actor = typeof r.actor === 'string' ? r.actor : '';
+    if (!actor.startsWith('mcp:'))
+      return {
+        label: actor.startsWith('panel:')
+          ? '面板操作（不使用 MCP 授权）'
+          : '授权未知（未记录 MCP 身份）',
+        id: '',
+      };
+    const [id, ...label] = actor.slice(4).split(':');
+    return { label: label.join(':') || '名称未记录', id };
+  }
+  function authorizationHTML(r, full = false) {
+    const grant = authorization(r);
+    if (!r.actor?.startsWith('mcp:')) return esc(grant.label);
+    return `授权：${esc(grant.label)} · ${grant.id ? '<code title="' + esc(grant.id) + '">' + esc(full ? grant.id : grant.id.slice(0, 12)) + '</code>' : '编号未知'}`;
+  }
   const group = (r) =>
     /^(fs_read|read|fs_tree|fs_search|search)/.test(r.tool)
       ? ['read', '读取']
@@ -121,7 +139,7 @@ window.CodePierCallLog = (() => {
   function rowHTML(r) {
     const [tone, label] = group(r),
       saved = cache.get(r.id);
-    return `<details class="call-entry call-${tone}" data-call-id="${esc(r.id)}" ${opened.has(r.id) ? 'open' : ''}><summary aria-label="展开调用 项目 ${esc(r.alias || '未记录')} ${esc(r.tool)} ${esc(r.id)}"><span class="call-main"><span class="call-top"><span class="call-project${r.alias ? '' : ' call-project-unknown'}" style="--call-project-hue:${projectHues.get(projectKey(r)) ?? 270}"><span class="call-project-label">项目</span><strong>${esc(r.alias || '未记录')}</strong></span><span class="call-tool"><strong class="mono">${esc(r.tool)}</strong><span class="call-kind">${label}</span></span><span class="call-state">${status(r)}</span></span><span class="call-args">${summary(r)}</span><span class="call-meta"><time>${esc(stamp(r.created))}</time><span>${esc(r.device_name || '设备未记录')}</span><span>${source(r)}</span><code>#${esc(r.id.slice(0, 12))}</code><span class="call-filter-note" hidden>状态已变化，不再符合当前筛选</span></span></span><span class="call-chevron" aria-hidden="true">⌄</span></summary><div class="call-detail">${saved?.data ? detailHTML(saved.data) : '<p class="muted" role="status">展开后加载参数、输出与执行链路。</p>'}</div></details>`;
+    return `<details class="call-entry call-${tone}" data-call-id="${esc(r.id)}" ${opened.has(r.id) ? 'open' : ''}><summary aria-label="展开调用 项目 ${esc(r.alias || '未记录')} ${esc(r.tool)} ${esc(r.id)}"><span class="call-main"><span class="call-top"><span class="call-project${r.alias ? '' : ' call-project-unknown'}" style="--call-project-hue:${projectHues.get(projectKey(r)) ?? 270}"><span class="call-project-label">项目</span><strong>${esc(r.alias || '未记录')}</strong></span><span class="call-tool"><strong class="mono">${esc(r.tool)}</strong><span class="call-kind">${label}</span></span><span class="call-state">${status(r)}</span></span><span class="call-args">${summary(r)}</span><span class="call-meta"><time>${esc(stamp(r.created))}</time><span>${esc(r.device_name || '设备未记录')}</span><span>${source(r)}</span><span class="call-authorization">${authorizationHTML(r)}</span><code>#${esc(r.id.slice(0, 12))}</code><span class="call-filter-note" hidden>状态已变化，不再符合当前筛选</span></span></span><span class="call-chevron" aria-hidden="true">⌄</span></summary><div class="call-detail">${saved?.data ? detailHTML(saved.data) : '<p class="muted" role="status">展开后加载参数、输出与执行链路。</p>'}</div></details>`;
   }
   function section(title, value, name, { truncated = false, open = false } = {}) {
     const text = typeof value === 'string' ? value : json(value);
@@ -150,7 +168,7 @@ window.CodePierCallLog = (() => {
             .join('') || '<li>没有可用的阶段记录，可能由旧版 Agent 执行。</li>'
         }</ol><p class="form-note">只展示已保存的阶段，最多最近 200 项；Hub 时间是收到事件的时刻，不是同步的 Agent 时钟。</p></details>`
       : '';
-    return `<div class="call-detail-toolbar"><span class="muted tiny">${esc(d.actor)}</span><button type="button" class="btn ghost small" data-call-copy="all">${icon('copy')}复制调用详情</button><button type="button" class="btn ghost small" data-call-action="detail-refresh">${icon('refresh')}刷新详情</button></div><dl class="call-facts"><div><dt>操作编号</dt><dd><code>${esc(d.id)}</code></dd></div><div><dt>总历时</dt><dd>${duration(d.elapsed_ms)}</dd></div><div><dt>执行前等待（Hub 观测）</dt><dd>${duration(t.wait_ms)}</dd></div><div><dt>实际执行（本次 Agent 计时）</dt><dd>${duration(t.execution_ms)}</dd></div><div><dt>投递次数</dt><dd>${esc(d.attempts ?? '未记录')}</dd></div><div><dt>当前阶段</dt><dd>${esc(trace?.current?.reason || '未记录')}</dd></div></dl>${d.error ? `<div class="notice call-error" role="note">${esc(typeof d.error === 'string' ? d.error : json(d.error))}</div>` : ''}${d.transport_error ? `<p class="form-note">连接状态：${esc(d.transport_error)}</p>` : ''}${d.display?.truncated ? '<p class="form-note">此详情是有长度限制的已脱敏副本；部分输出或结果已截断，不代表完整记录。</p>' : ''}${section('参数摘要', d.args_summary, 'arguments', { open: true, truncated: d.arguments_truncated })}${section('任务输出（保存的尾部）', d.output, 'output', { truncated: d.output_truncated, open: !!d.error })}${section('保存的返回结果', d.result, 'result', { truncated: d.display?.sections?.result })}${timeline}${d.trace_error ? `<p class="form-note">执行链路暂不可用：${esc(d.trace_error)}</p>` : ''}<p class="form-note">工具状态以执行回执为准；HTTP 200 仅表示请求被接收。未采集的耗时不补造，自动脱敏不能识别所有无标签的秘密值。</p>`;
+    return `<div class="call-detail-toolbar"><span class="muted tiny">${esc(d.actor)}</span><button type="button" class="btn ghost small" data-call-copy="all">${icon('copy')}复制调用详情</button><button type="button" class="btn ghost small" data-call-action="detail-refresh">${icon('refresh')}刷新详情</button></div><dl class="call-facts"><div><dt>调用授权（调用时记录）</dt><dd class="call-authorization-detail">${authorizationHTML(d, true)}</dd></div><div><dt>操作编号</dt><dd><code>${esc(d.id)}</code></dd></div><div><dt>总历时</dt><dd>${duration(d.elapsed_ms)}</dd></div><div><dt>执行前等待（Hub 观测）</dt><dd>${duration(t.wait_ms)}</dd></div><div><dt>实际执行（本次 Agent 计时）</dt><dd>${duration(t.execution_ms)}</dd></div><div><dt>投递次数</dt><dd>${esc(d.attempts ?? '未记录')}</dd></div><div><dt>当前阶段</dt><dd>${esc(trace?.current?.reason || '未记录')}</dd></div></dl>${d.error ? `<div class="notice call-error" role="note">${esc(typeof d.error === 'string' ? d.error : json(d.error))}</div>` : ''}${d.transport_error ? `<p class="form-note">连接状态：${esc(d.transport_error)}</p>` : ''}${d.display?.truncated ? '<p class="form-note">此详情是有长度限制的已脱敏副本；部分输出或结果已截断，不代表完整记录。</p>' : ''}${section('参数摘要', d.args_summary, 'arguments', { open: true, truncated: d.arguments_truncated })}${section('任务输出（保存的尾部）', d.output, 'output', { truncated: d.output_truncated, open: !!d.error })}${section('保存的返回结果', d.result, 'result', { truncated: d.display?.sections?.result })}${timeline}${d.trace_error ? `<p class="form-note">执行链路暂不可用：${esc(d.trace_error)}</p>` : ''}<p class="form-note">工具状态以执行回执为准；HTTP 200 仅表示请求被接收。未采集的耗时不补造，自动脱敏不能识别所有无标签的秘密值。</p>`;
   }
   async function html(seq) {
     ensureOwner();

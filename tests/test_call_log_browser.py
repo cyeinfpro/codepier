@@ -25,15 +25,15 @@ async function renderPage(){const seq=++S.renderSeq;const html=await CodePierCal
 '''
 
 
-@pytest.fixture
-def log_page():
+@pytest.fixture(params=['chromium', 'webkit'])
+def log_page(request):
     requests=[]
     rows=[{'id':'a'*32,'tool':'shell_exec','actor':'mcp:test:ChatGPT','state':'running','created':100,'updated':101,'elapsed_ms':1000,'summary':'command=pytest -q <img src=x onerror=alert(1)>','alias':'MCP','device_name':'Node'},
           {'id':'b'*32,'tool':'fs_read','actor':'panel:admin','state':'succeeded','created':90,'updated':91,'elapsed_ms':1000,'summary':'path=README.md','alias':'MCP','device_name':'Node'}]
     details={rows[0]['id']:{**rows[0],'attempts':1,'args_summary':{'command':'pytest -q','env':'<redacted>'},'output':'output line\npassword=<redacted>','result':{'ok':True,'data':{'exit_code':0}},'timing':{'wait_ms':20,'execution_ms':150},'trace':{'current':{'reason':'本机正在执行'},'events':[]}}}
     with sync_playwright() as p:
-        executable=shutil.which('chromium')
-        browser=launch_browser(p.chromium, headless=True,**({'executable_path':executable} if executable else {}))
+        executable=shutil.which('chromium') if request.param == 'chromium' else None
+        browser=launch_browser(getattr(p, request.param), headless=True,**({'executable_path':executable} if executable else {}))
         page=browser.new_page(viewport={'width':1100,'height':900})
         errors=[]
         page.on('pageerror',lambda e:errors.append(str(e)))
@@ -148,7 +148,10 @@ def test_manual_detail_refresh_and_truncated_trace_are_usable(log_page):
     entry.locator('summary').first.click()
     entry.locator('.call-facts').wait_for()
     data['output']='new output after manual refresh'
-    entry.get_by_role('button',name='刷新详情',exact=True).click()
+    # WebKit does not focus buttons on pointer clicks; exercise keyboard focus restoration.
+    refresh = entry.get_by_role('button',name='刷新详情',exact=True)
+    refresh.focus()
+    refresh.press('Enter')
     page.wait_for_function('document.querySelector("[data-call-section=output] pre").textContent.includes("new output")')
     assert entry.get_by_role('button',name='刷新详情',exact=True).evaluate('(el)=>el===document.activeElement')
 
@@ -241,3 +244,35 @@ def test_project_colors_are_distinct_stable_and_readable(log_page):
     for theme in ['light', 'dark']:
         page.evaluate('(theme)=>document.documentElement.dataset.appearance=theme', theme)
         page.locator('.call-log').screenshot(path=str(screenshots/f'project-colors-{theme}.png'))
+
+
+def test_authorization_snapshot_is_visible_and_escaped(log_page):
+    page, rows, details, requests = log_page
+    rows[0]['actor'] = 'mcp:0123456789abcdef0123456789abcdef:开发授权:旧名称<img src=x onerror=alert(1)>'
+    details[rows[0]['id']]['actor'] = rows[0]['actor']
+    page.evaluate('renderPage()')
+    entry = page.locator('[data-call-id]').first
+    grant = entry.locator('.call-authorization')
+    assert '开发授权:旧名称<img' in grant.inner_text()
+    assert grant.locator('code').get_attribute('title') == '0123456789abcdef0123456789abcdef'
+    assert not page.locator('img').count()
+    entry.locator('summary').first.click()
+    detail = entry.locator('.call-authorization-detail')
+    detail.wait_for()
+    assert '0123456789abcdef0123456789abcdef' in detail.inner_text()
+    assert '开发授权:旧名称' in detail.inner_text()
+    page.set_viewport_size({'width': 390, 'height': 844})
+    assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
+
+
+@pytest.mark.parametrize('actor,expected', [
+    ('mcp:grant-legacy', '名称未记录'),
+    ('mcp::', '编号未知'),
+    ('', '授权未知'),
+    ('panel:admin', '面板操作（不使用 MCP 授权）'),
+])
+def test_authorization_missing_history_is_not_invented(log_page, actor, expected):
+    page, rows, details, requests = log_page
+    rows[0]['actor'] = actor
+    page.evaluate('renderPage()')
+    assert expected in page.locator('.call-authorization').first.inner_text()
