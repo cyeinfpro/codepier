@@ -94,6 +94,7 @@ def _exclusive_create_copy(source, destination, *, src_dir_fd=None, dst_dir_fd=N
             raise
         try:
             with os.fdopen(dest_fd, "w+b", buffering=0) as output:
+                os.fchmod(output.fileno(), stat.S_IMODE(original.st_mode))
                 created = os.fstat(output.fileno())
                 expected = hashlib.sha256()
                 remaining_bytes = original.st_size

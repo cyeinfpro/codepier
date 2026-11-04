@@ -295,12 +295,13 @@ def test_move_fallback_preserves_source_changes_and_foreign_destination(engine, 
     monkeypatch.setattr(file_publish, "_native_rename_no_replace", race)
     with pytest.raises(DevError) as caught:
         instance.move(project, {"path": "source.txt", "destination": "target.txt", "expected_sha256": digest(b"before")})
-    assert caught.value.code == "SHA_CONFLICT"
+    assert caught.value.code == "WRITE_OUTCOME_UNCONFIRMED"
+    assert caught.value.details["source_retained"] is True
     assert (root / "source.txt").read_bytes() == b"local source"
     if change_target:
         assert (root / "target.txt").read_bytes() == b"local target"
     else:
-        assert not (root / "target.txt").exists()
+        assert (root / "target.txt").read_bytes() == b"before"
     assert not list(root.glob(".rd-*"))
 
 
@@ -524,13 +525,20 @@ def test_copy_failure_never_unlinks_foreign_replacement(tmp_path, monkeypatch, e
     assert target.read_bytes() == b"foreign"
 
 
-def test_exclusive_move_verifies_new_inode(engine, exclusive_only):
+def test_exclusive_move_preserves_source_and_requests_review(engine, exclusive_only):
+    from shared.util import DevError
+    from shared.filesystem_errors import safe_filesystem_error_detail
     instance, project, root = engine
     receipt = instance.mutate(project, "source.txt", "new", b"complete")
-    moved = instance.move(project, {"path": "source.txt", "destination": "target.txt",
-                                   "expected_sha256": receipt["sha256"]})
-    assert moved["atomic"] is False
-    assert not (root / "source.txt").exists()
+    with pytest.raises(DevError) as caught:
+        instance.move(project, {"path": "source.txt", "destination": "target.txt",
+                               "expected_sha256": receipt["sha256"]})
+    assert caught.value.code == "WRITE_OUTCOME_UNCONFIRMED"
+    details = safe_filesystem_error_detail("fs_move", caught.value.code, caught.value.details)
+    assert details["atomic"] is False and details["source_retained"] is True
+    assert details["partial_content_visible"] is True
+    assert details["expected_sha256"] == receipt["sha256"]
+    assert (root / "source.txt").read_bytes() == b"complete"
     assert (root / "target.txt").read_bytes() == b"complete"
 
 
@@ -630,3 +638,101 @@ def test_exclusive_failure_engine_receipt_keeps_recovery_fields(engine, monkeypa
     assert len(detail["backup_id"]) == 32
     assert (root / "target.txt").read_bytes() == b"complete"
     assert not list(root.glob(".rd-*"))
+
+def test_exclusive_copy_preserves_mode_despite_umask(tmp_path, exclusive_only):
+    stage, target = tmp_path / "stage", tmp_path / "target"
+    stage.write_bytes(b"executable")
+    stage.chmod(0o751)
+    previous = os.umask(0o077)
+    try:
+        publish_new_file(stage, target, allow_exclusive_copy=True)
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE(target.stat().st_mode) == 0o751
+
+
+def test_exclusive_copy_mode_failure_requires_review(tmp_path, monkeypatch, exclusive_only):
+    stage, target = tmp_path / "stage", tmp_path / "target"
+    stage.write_bytes(b"payload")
+    def fail(fd, mode):
+        raise OSError(errno.EPERM, "chmod denied")
+    monkeypatch.setattr(file_publish.os, "fchmod", fail)
+    with pytest.raises(file_publish.ExclusiveCreateUnconfirmed):
+        publish_new_file(stage, target, allow_exclusive_copy=True)
+    assert target.exists() and stage.read_bytes() == b"payload"
+
+
+def test_exclusive_staging_cleanup_error_has_recovery_metadata(engine, monkeypatch, exclusive_only):
+    from shared.util import DevError
+    from shared.filesystem_errors import safe_filesystem_error_detail
+    instance, project, root = engine
+    original = os.unlink
+    def fail(path, *args, **kwargs):
+        if Path(path).name.startswith(".rd-"):
+            raise OSError(errno.EIO, "staging cleanup unavailable")
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(os, "unlink", fail)
+    with pytest.raises(DevError) as caught:
+        instance.mutate(project, "target.txt", "new", b"complete")
+    assert caught.value.code == "STAGING_CLEANUP_UNCONFIRMED"
+    detail = safe_filesystem_error_detail("write", caught.value.code, caught.value.details)
+    assert detail["atomic"] is False and detail["partial_content_visible"] is True
+    assert detail["path"] == "target.txt" and len(detail["backup_id"]) == 32
+    assert len(detail["expected_sha256"]) == 64 and detail["retryable"] is False
+    assert detail["staging_cleanup"] == "unconfirmed"
+    assert (root / "target.txt").read_bytes() == b"complete"
+
+
+def test_move_failed_source_unlink_never_removes_concurrent_target(engine, monkeypatch):
+    from shared.crypto import digest
+    from shared.util import DevError
+    instance, project, root = engine
+    source, target = root / "source", root / "target"
+    source.write_bytes(b"original")
+    original = Path.unlink
+    def fail(path, *args, **kwargs):
+        if path == source:
+            replacement = root / "replacement"
+            replacement.write_bytes(b"foreign")
+            os.replace(replacement, target)
+            raise PermissionError(errno.EACCES, "locked source")
+        if path == target:
+            pytest.fail("A move must never check then unlink a published target")
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "unlink", fail)
+    with pytest.raises(DevError) as caught:
+        instance.move(project, {"path": "source", "destination": "target",
+                               "expected_sha256": digest(b"original")})
+    assert caught.value.code == "WRITE_OUTCOME_UNCONFIRMED"
+    assert caught.value.details["path"] == "source"
+    assert caught.value.details["destination"] == "target"
+    assert caught.value.details["expected_sha256"] == digest(b"original")
+    assert target.read_bytes() == b"foreign"
+    assert source.read_bytes() == b"original"
+
+
+def test_move_source_directory_sync_error_has_recovery_metadata(engine, monkeypatch):
+    from shared.crypto import digest
+    from shared.util import DevError
+    instance, project, root = engine
+    (root / "source").write_bytes(b"original")
+    original = instance.sync_directory
+    calls = 0
+    def fail(directory, **recovery):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise DevError("DURABILITY_UNCONFIRMED", "source directory flush failed",
+                           500, durability="unconfirmed", retryable=False, **recovery)
+        return original(directory, **recovery)
+    monkeypatch.setattr(instance, "sync_directory", fail)
+    with pytest.raises(DevError) as caught:
+        instance.move(project, {"path": "source", "destination": "target",
+                               "expected_sha256": digest(b"original")})
+    assert caught.value.code == "DURABILITY_UNCONFIRMED"
+    assert caught.value.details["path"] == "source"
+    assert caught.value.details["destination"] == "target"
+    assert caught.value.details["atomic"] is True
+    assert caught.value.details["partial_content_visible"] is False
+    assert len(caught.value.details["backup_id"]) == 32
+    assert (root / "target").read_bytes() == b"original"

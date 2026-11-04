@@ -177,7 +177,8 @@ def test_move_preserves_source_and_target_if_destination_changes_after_publish(e
     monkeypatch.setattr(os, "link", concurrent_save)
     with pytest.raises(DevError) as exc:
         e.move(project, move_args())
-    assert exc.value.code == ("SHA_CONFLICT" if source_changes else "DESTINATION_CHANGED")
+    assert exc.value.code == "WRITE_OUTCOME_UNCONFIRMED"
+    assert exc.value.details["source_retained"] is True
     assert (root / "src/app.py").read_bytes() == (b"local source" if source_changes else b"original\n")
     assert (root / "src/moved.py").read_bytes() == b"local destination"
     assert (root / "src/moved.py").stat().st_nlink == 1
@@ -386,7 +387,7 @@ def test_diff_empty_ranges_use_valid_unified_diff_headers(before, after, header)
     assert header in FileEngine.diff("file.txt", before, after)["diff"]
 
 
-def test_move_failed_source_deletion_rolls_back_only_unchanged_destination(engine, monkeypatch):
+def test_move_failed_source_deletion_preserves_destination_for_review(engine, monkeypatch):
     e, project, root = engine
     real_unlink = Path.unlink
 
@@ -396,10 +397,12 @@ def test_move_failed_source_deletion_rolls_back_only_unchanged_destination(engin
         return real_unlink(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "unlink", locked_source)
-    with pytest.raises(PermissionError, match="source is locked"):
+    with pytest.raises(DevError) as exc:
         e.move(project, move_args())
+    assert exc.value.code == "WRITE_OUTCOME_UNCONFIRMED"
+    assert exc.value.details["atomic"] is True
     assert (root / "src/app.py").read_bytes() == b"original\n"
-    assert not (root / "src/moved.py").exists()
+    assert (root / "src/moved.py").read_bytes() == b"original\n"
     assert not list((root / "src").glob(".rd-*"))
 
 

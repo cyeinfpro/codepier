@@ -168,12 +168,12 @@ class FileEngine:
             raise
 
     @staticmethod
-    def cleanup_staging(path):
+    def cleanup_staging(staging_path, **recovery):
         # A rename fallback has already consumed this name.  Missing is normal;
         # a disconnected share is not proof that cleanup succeeded.
         original = sys.exception()
         try:
-            os.unlink(path)
+            os.unlink(staging_path)
         except FileNotFoundError:
             pass
         except OSError as exc:
@@ -184,7 +184,8 @@ class FileEngine:
             else:
                 raise DevError("STAGING_CLEANUP_UNCONFIRMED",
                                "临时文件清理未确认；目标可能已发布，请核查原操作和文件状态后再继续", 500,
-                               filesystem_errno=exc.errno, retryable=False) from exc
+                               filesystem_errno=exc.errno, retryable=False,
+                               staging_cleanup="unconfirmed", **recovery) from exc
 
     def read_bytes(self, path: Path, missing: bool = False, *, max_bytes: int = MAX_FILE) -> bytes | None:
         try:
@@ -546,7 +547,9 @@ class FileEngine:
                                            path=path, backup_id=backup_id, expected_sha256=after_sha) from exc
                         raise
             finally:
-                self.cleanup_staging(tmp)
+                self.cleanup_staging(tmp, path=path, backup_id=backup_id,
+                                     expected_sha256=after_sha, atomic=publication_atomic,
+                                     partial_content_visible=not publication_atomic, mutation_started=True)
         self.sync_directory(p.parent, path=path, backup_id=backup_id,
                             atomic=publication_atomic, partial_content_visible=not publication_atomic,
                             mutation_started=True, expected_sha256=after_sha)
@@ -596,6 +599,10 @@ class FileEngine:
         self.journal.add_backup(backup_id, str(root), src.relative_to(root).as_posix(), before, "new", before_mode=mode)
         # Stage complete content before attempting atomic publication. On storage
         # without atomic primitives, exclusive creation reports partial visibility.
+        recovery = dict(path=args["path"], destination=args["destination"],
+                        backup_id=backup_id, expected_sha256=args["expected_sha256"],
+                        atomic=True, partial_content_visible=False, mutation_started=True)
+        publication = None
         fd, tmp = tempfile.mkstemp(prefix=".rd-", dir=dest.parent)
         try:
             with os.fdopen(fd, "wb") as f:
@@ -616,12 +623,11 @@ class FileEngine:
                 if exc.code == "WRITE_OUTCOME_UNCONFIRMED":
                     exc.details.update(path=args["path"], destination=args["destination"], backup_id=backup_id)
                 raise
+            recovery.update(atomic=publication.atomic, partial_content_visible=not publication.atomic)
             published_identity = publication.identity or (staged_stat.st_dev, staged_stat.st_ino)
             # Persist the destination name before removing the source, including
             # when a move crosses two directories on the same volume.
-            self.sync_directory(dest.parent, path=args["path"], destination=args["destination"],
-                                backup_id=backup_id, atomic=publication.atomic,
-                                partial_content_visible=not publication.atomic, mutation_started=True)
+            self.sync_directory(dest.parent, **recovery)
             def destination_unchanged():
                 try:
                     destination_stat = dest.lstat()
@@ -653,37 +659,49 @@ class FileEngine:
             # Never remove a destination another process has replaced or edited.
             self.path(root, args["path"], False)
             if digest(self.read_bytes(src)) != args["expected_sha256"]:
-                if destination_unchanged():
-                    dest.unlink()
-                    self.sync_directory(dest.parent, path=args["path"], destination=args["destination"],
-                                backup_id=backup_id, atomic=publication.atomic,
-                                partial_content_visible=not publication.atomic, mutation_started=True)
-                raise DevError("SHA_CONFLICT", "移动期间源文件改变，未删除源文件", 409)
+                raise DevError("WRITE_OUTCOME_UNCONFIRMED",
+                               "移动期间源文件改变，已保留源和已发布目标；请核查后继续", 409,
+                               retryable=False, publication="unconfirmed", source_retained=True, **recovery)
             if not destination_unchanged():
-                raise DevError("DESTINATION_CHANGED", "移动期间目标文件改变，已保留源文件", 409)
+                raise DevError("WRITE_OUTCOME_UNCONFIRMED",
+                               "移动期间目标文件改变，已保留源文件；请核查后继续", 409,
+                               retryable=False, publication="unconfirmed", source_retained=True, **recovery)
+            if not publication.atomic:
+                # There is no portable compare-inode-and-unlink primitive.
+                # Never delete a source that another process may have replaced
+                # during a slow SMB copy. This is a copy awaiting review, not a
+                # completed move; do not replay it with a fresh operation key.
+                raise DevError("WRITE_OUTCOME_UNCONFIRMED",
+                               "兼容模式已复制并校验目标，但无法安全条件删除源；源文件已保留，移动尚未完成，请核查后处理",
+                               409, retryable=False, publication="unconfirmed", source_retained=True, **recovery)
             try:
+                # Legacy atomic-publication moves retain best-effort source
+                # removal. The checks above are not an OS transaction against
+                # external editors; see the documented concurrency boundary.
                 src.unlink()
             except OSError as exc:
-                # A network error can be reported after unlink took effect.
-                # Keep the published destination unless failure is definitive;
-                # otherwise rollback could erase the last copy of the file.
-                if isinstance(exc, PermissionError) or exc.errno in {errno.EACCES, errno.EPERM, errno.EROFS}:
-                    if destination_unchanged():
-                        dest.unlink()
-                        self.sync_directory(dest.parent, path=args["path"], destination=args["destination"],
-                                backup_id=backup_id, atomic=publication.atomic,
-                                partial_content_visible=not publication.atomic, mutation_started=True)
-                    raise
+                # Never check-then-unlink the destination as rollback: a
+                # concurrent replacement could be removed between those calls.
                 raise DevError("WRITE_OUTCOME_UNCONFIRMED",
-                               "移动目标已发布，但源文件删除结果尚未确认；已保留目标和备份，请核查后再继续", 500,
-                               filesystem_errno=exc.errno, retryable=False,
-                               path=args["path"], destination=args["destination"], backup_id=backup_id) from exc
-            self.sync_directory(src.parent)
+                               "移动目标已发布，但源文件删除未完成确认；已保留目标和备份，请核查后继续",
+                               500, filesystem_errno=exc.errno, retryable=False,
+                               publication="unconfirmed", **recovery) from exc
+            self.sync_directory(src.parent, **recovery)
+        except (DevError, OSError) as exc:
+            if publication is None:
+                raise
+            if isinstance(exc, DevError) and exc.code in {
+                    "WRITE_OUTCOME_UNCONFIRMED", "DURABILITY_UNCONFIRMED",
+                    "STAGING_CLEANUP_UNCONFIRMED"}:
+                for key, value in recovery.items():
+                    exc.details.setdefault(key, value)
+                raise
+            raise DevError("WRITE_OUTCOME_UNCONFIRMED",
+                           "移动目标已发布，但后续校验未完成；已保留目标，请核查原回执后继续",
+                           500, retryable=False, publication="unconfirmed", **recovery) from exc
         finally:
-            self.cleanup_staging(tmp)
-        self.sync_directory(dest.parent, path=args["path"], destination=args["destination"],
-                                backup_id=backup_id, atomic=publication.atomic,
-                                partial_content_visible=not publication.atomic, mutation_started=True)
+            self.cleanup_staging(tmp, **recovery)
+        self.sync_directory(dest.parent, **recovery)
         return {"path": args["path"], "destination": args["destination"], "sha256": digest(before), "backup_id": backup_id,
                 "publication_method": publication.method, "atomic": publication.atomic,
                 "partial_content_visible": not publication.atomic,
