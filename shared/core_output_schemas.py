@@ -308,7 +308,11 @@ def build_core_output_schemas(legacy, *, include_queries=False):
     result = {
         'workspace': union(workspace),
         'read': union(read), 'write': union(write), 'edit': union(edit),
-        'exec': union([execution]), 'process': union(process),
+        # An initial exec wait returns the full durable operation, not only
+        # its execution payload or the compact pending receipt. Share the same
+        # typed journal contract as task_query (including null/string errors).
+        'exec': union([execution, {**OPERATION, 'required': ['id', 'tool', 'state']}]),
+        'process': union(process),
         'browser': union(browser), 'computer': union(computer),
         'vps': union([obj({'vps': array(vps), 'total': INT,
                           'next_offset': nullable(INT)}, ('vps', 'total', 'next_offset'))],

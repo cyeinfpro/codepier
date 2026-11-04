@@ -239,3 +239,25 @@ def test_read_only_queries_advertise_only_their_output_variants():
     with pytest.raises(ValidationError):
         validate('task_query', {'validation_id': OP, 'state': 'failed', 'before': {}, 'after': {},
             'exit_code': None, 'execution_operation_id': OP})
+
+
+@pytest.mark.parametrize('profile', ['full', 'coding'])
+@pytest.mark.parametrize('state,error,result', [
+    ('running', None, None),
+    ('succeeded', None, {'ok': True, 'data': {'exit_code': 0, 'output': 'done'}}),
+    ('failed', 'command failed', {'ok': True, 'data': {'exit_code': 7, 'output': 'failed'}}),
+    ('cancelled', {'code': 'CANCELLED', 'message': 'Cancelled'}, None),
+])
+def test_exec_initial_wait_accepts_full_operation_receipt(profile, state, error, result):
+    schema = next(t['outputSchema'] for t in tool_definitions(profile) if t['name'] == 'exec')
+    receipt = {'id': OP, 'operation_id': OP, 'tool': 'exec', 'state': state,
+               'error': error, 'result': result, 'output': 'done',
+               'pending': state == 'running', 'deadline': None,
+               'next': 'task_query' if state == 'running' else None,
+               'next_call': None}
+    Draft202012Validator(schema).validate(receipt)
+    for field, wrong in [('error', 42), ('result', []), ('output', 42)]:
+        with pytest.raises(ValidationError):
+            Draft202012Validator(schema).validate({**receipt, field: wrong})
+    with pytest.raises(ValidationError):
+        Draft202012Validator(schema).validate({'error': None})
