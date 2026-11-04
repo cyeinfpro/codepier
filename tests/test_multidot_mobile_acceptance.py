@@ -25,7 +25,7 @@ pytestmark = [pytest.mark.browser, pytest.mark.integration, pytest.mark.slow]
 EVIDENCE = Path(os.environ.get("MULTIDOT_MOBILE_EVIDENCE", ".work/multidot-mobile-evidence"))
 
 HOOK = r"""(() => {
-  window.mobileEvidence={sources:[],changes:0,opens:0,reads:0,relayReads:[]};
+  window.mobileEvidence={sources:[],changes:0,opens:0,reads:0,relayReads:[],pollSyncsCompleted:0};
   const nativeFetch=window.fetch;
   window.fetch=function(input,init){
     const url=typeof input==='string'?input:input.url;
@@ -66,6 +66,18 @@ HOOK = r"""(() => {
       const create=value.create;
       value.create=function(ctx){
         const instance=create.call(this,ctx);
+        if(label==='Relay'){
+          // The page's fallback poll calls the public sync method. Hint and
+          // visibility handlers call the original internal function instead.
+          // Observe its real completion without delaying or replacing the read.
+          const sync=instance.sync;
+          instance.sync=function(...args){
+            const pending=sync.apply(this,args);
+            const finished=()=>mobileEvidence.pollSyncsCompleted++;
+            Promise.resolve(pending).then(finished,finished);
+            return pending;
+          };
+        }
         window['mobile'+label]=instance;
         window['mobile'+label+'Context']=ctx;
         return instance;
@@ -303,6 +315,13 @@ def test_mobile_background_restore_coalesces_real_hint_reads(collaboration_stack
     held, reads = [], []
     try:
         dot = prepare(page, stack)
+        # The first real fallback poll is scheduled shortly after page entry.
+        # Waiting only for the initial SSE sync lets that independent poll fall
+        # into the restore window and legitimately add a third read. Observe
+        # its completion before arming this separate visibility/hint scenario.
+        wait_js(page, "mobileEvidence.pollSyncsCompleted >= 1")
+        wait_js(page, "!mobileRelayContext.chat().relaySync")
+        initial_polls = page.evaluate("mobileEvidence.pollSyncsCompleted")
         page.locator("#cc-message-input").fill("后台恢复仍保留草稿")
         page.evaluate("""()=>{
           window.mobileHidden=true;
@@ -350,13 +369,18 @@ def test_mobile_background_restore_coalesces_real_hint_reads(collaboration_stack
         assert len(reads) == 1
         held[0].continue_()
         wait_js(page, "!mobileRelayContext.chat().relaySync")
-        assert len(reads) == 2, {"requests": reads, "diagnostics": page.evaluate("mobileEvidence.relayReads")}
+        assert len(reads) == 2, json.dumps({
+            "requests": reads, "diagnostics": page.evaluate("mobileEvidence.relayReads"),
+            "poll_syncs_completed": page.evaluate("mobileEvidence.pollSyncsCompleted"),
+        }, ensure_ascii=False)
+        assert page.evaluate("mobileEvidence.pollSyncsCompleted") == initial_polls
         assert page.evaluate("mobileEvidence.sources.filter(s=>!s.closed).length") == 1
         expect(page.locator("#cc-message-input")).to_have_value("后台恢复仍保留草稿")
         expect(page.locator(".cc-message.is-owner")).to_have_count(4, timeout=10000)
         record(page, engine, "background-singleflight", {
             "background_method": "Injected visibilitychange and document.hidden; not OS backgrounding",
             "sync_reads_after_reentry": len(reads), "server_messages": 4,
+            "initial_poll_completed": page.evaluate("mobileEvidence.pollSyncsCompleted") >= 1,
         })
         no_execution(stack)
     finally:
