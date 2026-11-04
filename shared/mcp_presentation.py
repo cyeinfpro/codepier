@@ -74,7 +74,7 @@ _OPEN = _RECEIPT | frozenset({'context_id', 'context_unchanged', 'workspace',
 _EXEC_RESULT = _RECEIPT | frozenset({'exit_code', 'output', 'output_truncated',
     'output_omitted', 'timed_out', 'cancelled', 'duration_ms', 'command_ok',
     'target', 'resource_coordination', 'host', 'port', 'username', 'ssh_error', 'ssh_diagnostics', 'transport_runtime',
-    'runtime', 'failure_context', 'continuation', 'log_ref', 'diagnostics', 'execution_isolation', 'runtime_cleanup', 'runtime_outcome'})
+    'runtime', 'failure_context', 'continuation', 'log_ref', 'diagnostics', 'build_storage_hints', 'execution_isolation', 'runtime_cleanup', 'runtime_outcome'})
 _STATUS_POLICY = frozenset({'version', 'local_block_codex', 'effective_block_codex',
     'local_block_native_computer', 'effective_block_native_computer',
     'split_capabilities', 'enforcement', 'os_sandbox', 'state', 'denial', 'code',
@@ -168,6 +168,16 @@ def _exec_result(value):
     if isinstance(result.get('diagnostics'), list):
         result['diagnostics'] = [_pick(row, {'path', 'line', 'column', 'message', 'source', 'untrusted'})
                                   for row in result['diagnostics'][:20]]
+    if 'build_storage_hints' in result:
+        rows = result['build_storage_hints']
+        allowed = {'BUILD_CACHE_PATH_MISMATCH', 'BUILD_CACHE_RENAME_FAILED', 'BUILD_INPUT_CHANGED'}
+        result['build_storage_hints'] = [
+            {'code': row['code'], 'message': row['message'][:400],
+             'source': 'command_output', 'untrusted': True,
+             'cause_confirmed': False, 'automatic_retry': False}
+            for row in rows[:3] if isinstance(row, dict)
+            and isinstance(row.get('code'), str) and row['code'] in allowed
+            and isinstance(row.get('message'), str)] if isinstance(rows, list) else []
     return result
 
 

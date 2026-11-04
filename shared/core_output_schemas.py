@@ -281,7 +281,7 @@ def build_core_output_schemas(legacy, *, include_queries=False):
         'command': array(STR), 'host': STR, 'port': INT, 'username': STR,
         'ssh_error': nullable(STR), 'ssh_diagnostics': OBJ, 'transport_runtime': OBJ,
         'runtime': OBJ, 'failure_context': OBJ, 'continuation': OBJ,
-        'log_ref': OBJ, 'diagnostics': array(OBJ), 'execution_isolation': nullable(OBJ),
+        'log_ref': OBJ, 'diagnostics': array(OBJ), 'build_storage_hints': array(OBJ), 'execution_isolation': nullable(OBJ),
         'runtime_cleanup': OBJ, 'runtime_outcome': OBJ}, ('operation_id', 'exit_code', 'output'))
 
     process = [obj({'operations': array(OPERATION),

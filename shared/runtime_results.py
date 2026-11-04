@@ -159,6 +159,29 @@ def diagnostics(output, root, *, cwd=None, command=None, workspace_root=None):
     return result
 
 
+def build_storage_hints(output):
+    """Bounded symptom hints, never mount detection or permission to retry."""
+    if not isinstance(output, str):
+        return []
+    tail = _ANSI.sub('', output[-65536:]).lower()
+    hints = []
+    def add(code, message):
+        hints.append({'code': code, 'message': message, 'source': 'command_output',
+                      'untrusted': True, 'cause_confirmed': False,
+                      'automatic_retry': False})
+    if 'was compiled with module cache path' in tail and 'but the path is currently' in tail:
+        add('BUILD_CACHE_PATH_MISMATCH',
+            '编译缓存记录了不同的绝对路径。为当前源码位置和工具链选择新的本机构建目录；保留原缓存供核查，不自动删除。')
+    if ('unable to rename temporary' in tail or 'failed to rename' in tail) and (
+            'modulecache' in tail or 'index/store' in tail or '.swiftmodule' in tail):
+        add('BUILD_CACHE_RENAME_FAILED',
+            '编译器报告缓存临时文件改名失败。核查错误及挂载类型；共享卷可改用本机独立构建目录，不代表源码或权限有错。')
+    if 'input file' in tail and 'was modified during the build' in tail:
+        add('BUILD_INPUT_CHANGED',
+            '构建器检测到输入变化。核对源码摘要及并发写入；需要稳定回归时使用本机独立源码副本，不用固定等待或盲目重试掩盖问题。')
+    return hints
+
+
 def decorate_result(data, project, operation_id, runtime, root, *,
                     cwd=None, command=None, workspace_root=None):
     result = dict(data)
@@ -174,6 +197,10 @@ def decorate_result(data, project, operation_id, runtime, root, *,
                          workspace_root=workspace_root)
     if parsed:
         result['diagnostics'] = parsed
+    if type(data.get('exit_code')) is int and data['exit_code'] != 0:
+        hints = build_storage_hints(data.get('output', ''))
+        if hints:
+            result['build_storage_hints'] = hints
     return result
 
 

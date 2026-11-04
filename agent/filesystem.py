@@ -24,7 +24,8 @@ MAX_DIFF = 100000
 MAX_DIFF_CHANGED_LINES = 4000
 MAX_SCAN_ENTRIES = 100000
 IGNORED_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".ssh", ".aws", ".azure", ".kube", ".codepier-agent", ".remote-dev-agent", ".remote-dev", ".codepier", ".cache"}
-CHECKPOINT_ARTIFACTS = {".next", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".turbo", "coverage", "playwright-report", "test-results"}
+GENERATED_SCAN_DIRS = frozenset({".build", ".next", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".turbo"})
+CHECKPOINT_ARTIFACTS = {".build", ".next", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".turbo", "coverage", "playwright-report", "test-results"}
 STORAGE_UNAVAILABLE = frozenset(getattr(errno, name) for name in (
     "EIO", "ESTALE", "ENOTCONN", "ETIMEDOUT", "ENODEV", "ENXIO",
     "ENETDOWN", "ENETUNREACH", "EHOSTUNREACH", "ECONNRESET", "ECONNABORTED",
@@ -54,7 +55,7 @@ def protected(relative: str) -> bool:
 def scan_ignored(relative: str) -> bool:
     # Generated work is excluded from enumeration, not an authorization rule.
     # Explicitly authorized projects can themselves live under a .work parent.
-    return any(part.casefold() == ".work" or part.casefold().startswith(".venv")
+    return any((part.casefold() in GENERATED_SCAN_DIRS or part.casefold() == ".work") or part.casefold().startswith(".venv")
                for part in PurePosixPath(relative).parts)
 
 
@@ -204,7 +205,7 @@ class FileEngine:
                                filesystem_errno=exc.errno, retryable=False,
                                staging_cleanup="unconfirmed", **recovery) from exc
 
-    def read_bytes(self, path: Path, missing: bool = False, *, max_bytes: int = MAX_FILE) -> bytes | None:
+    def read_bytes(self, path: Path, missing: bool = False, *, max_bytes: int = MAX_FILE, verify_path: bool = False) -> bytes | None:
         try:
             flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
             fd = os.open(path, flags)
@@ -240,6 +241,11 @@ class FileEngine:
             latest = os.fstat(fd)
             if (s.st_size, s.st_mtime_ns, s.st_ctime_ns) != (latest.st_size, latest.st_mtime_ns, latest.st_ctime_ns):
                 raise DevError("FILE_CHANGED", "文件在读取期间改变，请重新读取", 409)
+            if verify_path:
+                current = path.lstat()
+                if (not stat.S_ISREG(current.st_mode) or
+                        (current.st_dev, current.st_ino) != (latest.st_dev, latest.st_ino)):
+                    raise DevError("FILE_CHANGED", "文件名在读取核验期间指向了不同文件", 409)
             return data
         except OSError as exc:
             if exc.errno in STORAGE_UNAVAILABLE:
@@ -351,6 +357,12 @@ class FileEngine:
                         scanned += 1
                         check_budget()
                         p = Path(entry.path)
+                        rel = p.relative_to(root).as_posix()
+                        # Filter names before metadata I/O. SMB stat calls are
+                        # expensive; excluded build trees must not consume them.
+                        # Count every entry above so exclusions cannot evade budgets.
+                        if protected(rel) or (exclude is not None and exclude(rel)) or scan_ignored(rel):
+                            continue
                         st = entry.stat(follow_symlinks=False)
                         names.append((p, st))
             except OSError as exc:
@@ -408,7 +420,7 @@ class FileEngine:
             more, scan_error = True, exc.code
         return {"entries": rows, "truncated": more, "next_offset": args["offset"] + len(rows) if more and rows else None,
                 "scan_error": scan_error,
-                "exclusions": "Credentials, .git, dependencies, Agent state, links and unsupported non-UTF-8 or non-portable filenames are excluded."}
+                "exclusions": "Credentials, .git, dependencies, build caches (including .build), Agent state, links and unsupported non-UTF-8 or non-portable filenames are excluded."}
 
     def read(self, project, args):
         root, _ = self.root(project)
@@ -540,7 +552,7 @@ class FileEngine:
                 "hint": "结果被截断；请缩小 path 或 file_glob，0 条命中不代表不存在" if truncated else None,
                 "next_offset": args["offset"] + len(results) if truncated and results else None,
                 "scan_error": scan_error,
-                "limits": "20,000 files / 100,000 directory entries / 32 MiB / 8 seconds per call; narrow the path if the scan limit is reached. Protected and unsupported filenames are excluded."}
+                "limits": "20,000 files / 100,000 directory entries / 32 MiB / 8 seconds per call; narrow the path if the scan limit is reached. Protected paths, generated build caches (including .build) and unsupported filenames are excluded."}
 
     def preview(self, project, args):
         root, _ = self.root(project)
@@ -632,8 +644,24 @@ class FileEngine:
         self.sync_directory(p.parent, path=path, backup_id=backup_id,
                             atomic=publication_atomic, partial_content_visible=not publication_atomic,
                             mutation_started=True, expected_sha256=after_sha)
+        # A successful rename/fsync is not proof that a network client can read
+        # the intended bytes back. Do not replay on transient ENOENT or mismatch:
+        # the mutation has happened and must remain reviewable with its backup.
+        try:
+            self.path(root, path, False)
+            verified = self.read_bytes(p, missing=after is None, verify_path=True)
+            if verified != after:
+                raise DevError("FILE_CHANGED", "保存后文件内容与预期不一致", 409)
+        except (OSError, DevError) as exc:
+            raise DevError("WRITE_OUTCOME_UNCONFIRMED",
+                           "文件变更已执行，但保存后核验未确认；请核对当前文件、备份和原回执，勿直接重试", 500,
+                           retryable=False, mutation_started=True, publication="unconfirmed",
+                           path=path, backup_id=backup_id, expected_sha256=after_sha,
+                           atomic=publication_atomic, partial_content_visible=not publication_atomic) from exc
         return {"path": p.relative_to(root).as_posix(), "sha256": after_sha, "backup_id": backup_id,
                 "publication_method": publication_method, "atomic": publication_atomic,
+                "atomicity_scope": "filesystem_primitive", "continuous_visibility_guaranteed": False,
+                "content_verified": True,
                 "partial_content_visible": not publication_atomic, **self.diff(path, before, after)}
 
     def edit(self, project, args):
