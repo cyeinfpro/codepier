@@ -22,7 +22,7 @@
   color: inherit;
   border: 1px solid var(--ui-line);
   background: transparent;
-  border-radius: 999px;
+  border-radius: var(--ui-radius-pill);
   padding: 8px 14px;
   cursor: pointer;
 }
@@ -46,10 +46,10 @@
   align-items: start;
 }
 .settings-card h2 {
-  font-size: 16px;
+  font-size: var(--ui-text-input);
 }
 .settings-mode {
-  font-size: 11px;
+  font-size: var(--ui-text-xs);
   white-space: nowrap;
   color: var(--ui-muted);
 }
@@ -59,29 +59,29 @@
   flex-wrap: wrap;
 }
 .settings-tags span {
-  font-size: 11px;
+  font-size: var(--ui-text-xs);
   border: 1px solid var(--ui-line);
-  border-radius: 6px;
+  border-radius: var(--ui-radius-xs);
   padding: 3px 6px;
 }
 .settings-card .panel-body > p {
-  font-size: 13px;
+  font-size: var(--ui-text-sm);
   line-height: 1.7;
 }
 .settings-value {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  font: 12px/1.6 var(--ui-mono);
+  font: var(--ui-text-xs)/1.6 var(--ui-mono);
   background: var(--ui-surface);
   color: var(--ui-text);
   padding: 12px;
-  border-radius: 8px;
+  border-radius: var(--ui-radius-small);
   max-height: 260px;
   overflow: auto;
 }
 .settings-details {
   margin-top: 14px;
-  font-size: 12px;
+  font-size: var(--ui-text-xs);
   overflow-wrap: anywhere;
 }
 .settings-details summary {
@@ -99,13 +99,13 @@
 }
 .settings-chain li {
   border: 1px solid var(--ui-line);
-  border-radius: 10px;
+  border-radius: var(--ui-radius-small);
   padding: 12px;
 }
 .settings-chain strong,
 .settings-chain span {
   display: block;
-  font-size: 12px;
+  font-size: var(--ui-text-xs);
   line-height: 1.8;
 }
 .settings-scope-note {
@@ -183,7 +183,7 @@
 .settings-import-review {
   padding: 16px;
   border: 1px solid var(--ui-line);
-  border-radius: 10px;
+  border-radius: var(--ui-radius-small);
   margin-top: 16px;
 }
 .settings-import-review li {
@@ -213,15 +213,15 @@
   min-width: 0;
   padding: 22px 18px;
   border: 1px solid var(--ui-line);
-  border-radius: 18px;
+  border-radius: var(--ui-radius-lg);
   background: var(--ui-panel);
 }
 .settings-flow-card h2 {
-  font-size: 18px;
+  font-size: var(--ui-text-title);
   margin: 14px 0 8px;
 }
 .settings-flow-card p {
-  font-size: 13px;
+  font-size: var(--ui-text-sm);
   color: var(--ui-muted);
   line-height: 1.6;
   margin: 0 0 20px;
@@ -233,15 +233,15 @@
   height: 30px;
   border-radius: 50%;
   background: var(--ui-surface);
-  font-size: 12px;
-  font-weight: 700;
+  font-size: var(--ui-text-xs);
+  font-weight: var(--ui-weight-bold);
 }
 .settings-flow-card .actions {
   gap: 6px;
 }
 .settings-flow-card .btn {
   padding: 8px 10px;
-  font-size: 12px;
+  font-size: var(--ui-text-xs);
 }
 .settings-shortcuts {
   display: flex;
@@ -252,13 +252,13 @@
 .settings-section {
   margin: 18px 0;
   border: 1px solid var(--ui-line);
-  border-radius: 14px;
+  border-radius: var(--ui-radius-md);
   padding: 16px 18px;
 }
 .settings-section > summary {
   cursor: pointer;
-  font-size: 14px;
-  font-weight: 600;
+  font-size: var(--ui-text-base);
+  font-weight: var(--ui-weight-semibold);
   list-style-position: inside;
 }
 .settings-section[open] > summary {
@@ -279,8 +279,8 @@
 .settings-draft-note {
   padding: 10px 14px;
   background: var(--ui-surface);
-  border-radius: 10px;
-  font-size: 13px;
+  border-radius: var(--ui-radius-small);
+  font-size: var(--ui-text-sm);
 }
 #settings-filter-status:empty {
   display: none;
@@ -317,7 +317,7 @@
   .settings-flow-card h2 {
     grid-column: 2;
     margin: 0 0 5px;
-    font-size: 16px;
+    font-size: var(--ui-text-input);
   }
   .settings-flow-card p {
     grid-column: 2;

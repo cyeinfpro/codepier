@@ -255,10 +255,28 @@ function computerApprovalsConnection(connected) {
   if (connected) refreshComputerApprovals();
   else if (wasConnected || !computerApprovals.timer) scheduleComputerApprovals(5000);
 }
+function approvalInboxToggle(box) {
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'approval-inbox-toggle';
+  toggle.setAttribute('aria-expanded', 'false');
+  toggle.setAttribute('aria-controls', 'computer-approval-inbox');
+  toggle.addEventListener('click', () => {
+    const open = box.dataset.expanded !== 'true';
+    box.dataset.expanded = String(open);
+    toggle.setAttribute('aria-expanded', String(open));
+  });
+  return toggle;
+}
+function updateApprovalInboxCount() {
+  const toggle = document.querySelector('#computer-approval-inbox .approval-inbox-toggle');
+  if (toggle) toggle.textContent = '需要确认 · ' + computerApprovals.entries.size;
+}
 function removeComputerApproval(identifier) {
   const entry = computerApprovals.entries.get(identifier);
   entry?.card.remove();
   computerApprovals.entries.delete(identifier);
+  updateApprovalInboxCount();
   if (!computerApprovals.entries.size) document.getElementById('computer-approval-inbox')?.remove();
 }
 function updateComputerApproval(entry) {
@@ -388,7 +406,8 @@ function renderComputerApprovals(items, login) {
     box = document.createElement('aside');
     box.id = 'computer-approval-inbox';
     box.setAttribute('aria-label', '本机应用授权请求');
-    document.body.append(box);
+    box.append(approvalInboxToggle(box));
+    (window.CP?.ui.layerHost?.() || document.body).append(box);
   }
   for (const item of items) {
     const entry =
@@ -400,6 +419,7 @@ function renderComputerApprovals(items, login) {
     entry.text.textContent = item.message;
     updateComputerApproval(entry);
   }
+  updateApprovalInboxCount();
   expireComputerApprovals();
 }
 async function refreshComputerApprovals() {

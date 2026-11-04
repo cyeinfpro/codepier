@@ -126,6 +126,7 @@ def test_backup_restore_uses_button_scope_not_mutable_history_globals(scope_page
     assert page.evaluate('requests[1].arguments.workspace_id') == 'workspace-A'
     assert page.evaluate('requests[1].arguments.project') == 'project-one'
     page.evaluate('requests[1].finish({sha256:"fixture-sha"})')
+    page.locator('.ui-sheet button[type="submit"]').click()
     page.wait_for_function('requests.length===3')
     args = page.evaluate('requests[2].arguments')
     assert args['workspace_id'] == 'workspace-A'
@@ -167,6 +168,7 @@ def test_completed_restore_does_not_refresh_a_changed_work_scope(scope_page, tra
       window.restoreJob=restoreBackup(b.dataset.id,b.dataset.path,b.workScope).catch(e=>failures.push(e.message));
     }''')
     page.evaluate('requests[1].finish({sha256:"before-restore"})')
+    page.locator('.ui-sheet button[type="submit"]').click()
     page.wait_for_function('requests.length===3')
     page.evaluate(transition)
     page.evaluate('''() => {
@@ -190,6 +192,7 @@ def test_normal_restore_reads_restored_file_in_original_workspace(scope_page):
       window.restoreJob=restoreBackup(b.dataset.id,b.dataset.path,b.workScope).catch(e=>failures.push(e.message));
     }''')
     page.evaluate('requests[1].finish({sha256:"before-restore"})')
+    page.locator('.ui-sheet button[type="submit"]').click()
     page.wait_for_function('requests.length===3')
     page.evaluate('requests[2].finish({ok:true})')
     page.wait_for_function('requests.length===4')

@@ -65,6 +65,9 @@ vm.runInContext(fs.readFileSync('web/ui.js','utf8'),context);
 vm.runInContext(source,context);
 vm.runInContext(fs.readFileSync('web/identity.js','utf8'),context);
 context.CodePierIdentity=context.window.CodePierIdentity;
+// Native dialog interaction is exercised in test_ui_layers; this transport-only adapter
+// supplies a positive decision while preserving the caller's current-scope check.
+context.uiConfirmAction=async(options,{current=()=>true}={})=>current();
 const run=s=>vm.runInContext(s,context);
 const response=(body,status=200)=>({ok:status>=200&&status<300,status,json:async()=>body});
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b});return {promise,resolve,reject};};

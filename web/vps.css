@@ -14,12 +14,12 @@
   align-items: baseline;
 }
 .vps-summary strong {
-  font-size: 28px;
-  font-weight: 650;
+  font-size: var(--ui-page-title);
+  font-weight: var(--ui-weight-semibold);
   font-variant-numeric: tabular-nums;
 }
 .vps-summary span {
-  font-size: 13px;
+  font-size: var(--ui-text-sm);
   color: var(--ui-muted);
 }
 .vps-summary p {
@@ -27,7 +27,7 @@
   gap: 8px;
   align-items: center;
   margin: 0 0 0 auto;
-  font-size: 12px;
+  font-size: var(--ui-text-xs);
   color: var(--ui-muted);
 }
 .vps-filters {
@@ -78,12 +78,12 @@
   min-width: 0;
 }
 .vps-card h2 {
-  font-size: 17px;
+  font-size: var(--ui-text-title);
   margin: 0;
   overflow-wrap: anywhere;
 }
 .vps-card header p {
-  font-size: 12px;
+  font-size: var(--ui-text-xs);
   margin: 5px 0 0;
   color: var(--ui-muted);
   overflow-wrap: anywhere;
@@ -95,7 +95,7 @@
   height: 42px;
   flex: none;
   border: 1px solid var(--ui-line);
-  border-radius: 12px;
+  border-radius: var(--ui-radius-md);
 }
 .vps-address {
   display: flex;
@@ -106,7 +106,7 @@
   padding: 12px 0;
 }
 .vps-address code {
-  font-size: 15px;
+  font-size: var(--ui-text-md);
   overflow-wrap: anywhere;
   min-width: 0;
 }
@@ -123,12 +123,12 @@
   min-width: 0;
 }
 .vps-facts dt {
-  font-size: 11px;
+  font-size: var(--ui-text-xs);
   color: var(--ui-muted);
   margin-bottom: 4px;
 }
 .vps-facts dd {
-  font-size: 13px;
+  font-size: var(--ui-text-sm);
   margin: 0;
   overflow-wrap: anywhere;
 }
@@ -141,7 +141,7 @@
 .vps-projects button {
   cursor: pointer;
   font: inherit;
-  font-size: 12px;
+  font-size: var(--ui-text-xs);
   max-width: 100%;
   white-space: normal;
   overflow-wrap: anywhere;
@@ -151,7 +151,7 @@
   height: 13px;
 }
 .vps-notes {
-  font-size: 12px;
+  font-size: var(--ui-text-xs);
   line-height: 1.6;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -190,7 +190,7 @@
   margin-bottom: 18px;
 }
 .vps-extra summary {
-  font-size: 13px;
+  font-size: var(--ui-text-sm);
   cursor: pointer;
   padding: 8px 0 14px;
 }
@@ -204,7 +204,7 @@
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
 }
 #vps-check-output {
-  max-height: 40vh;
+  max-height: 40dvh;
   overflow: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -217,7 +217,7 @@
     gap: 14px 22px;
   }
   .vps-summary strong {
-    font-size: 23px;
+    font-size: var(--ui-text-h2);
   }
   .vps-summary p {
     width: 100%;

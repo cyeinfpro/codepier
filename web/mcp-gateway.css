@@ -26,7 +26,7 @@
   margin-top: 20px;
 }
 #gw-selection-count {
-  font-size: 13px;
+  font-size: var(--ui-text-sm);
   color: var(--ui-muted);
 }
 .gw-tools {
@@ -35,7 +35,7 @@
 .gw-tool-row {
   padding: 16px;
   border: 1px solid var(--ui-line);
-  border-radius: 14px;
+  border-radius: var(--ui-radius-md);
   margin-bottom: 10px;
   background: var(--ui-panel);
 }
@@ -55,13 +55,13 @@
   min-width: 0;
 }
 .gw-tool-choice strong {
-  font-size: 14px;
+  font-size: var(--ui-text-base);
   overflow-wrap: anywhere;
 }
 .gw-tool-choice small {
   color: var(--ui-muted);
-  font-size: 13px;
-  font-weight: 400;
+  font-size: var(--ui-text-sm);
+  font-weight: var(--ui-weight-regular);
   overflow-wrap: anywhere;
 }
 .gw-tool-row details {
@@ -71,7 +71,7 @@
 .gw-tool-row summary {
   min-height: 36px;
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--ui-text-sm);
   color: var(--ui-muted);
 }
 .gw-tool-row pre {
@@ -79,13 +79,13 @@
   overflow-wrap: anywhere;
   max-width: 100%;
   padding: 16px;
-  border-radius: 10px;
+  border-radius: var(--ui-radius-small);
   background: var(--ui-surface);
-  font: 12px/1.65 var(--ui-mono);
+  font: var(--ui-text-xs)/1.65 var(--ui-mono);
 }
 .gw-review-confirm {
   padding: 16px;
-  border-radius: 12px;
+  border-radius: var(--ui-radius-md);
   background: var(--ui-accent-soft);
   align-items: flex-start;
 }
@@ -102,7 +102,7 @@
     flex-wrap: wrap;
   }
   #gateway-page .mono {
-    font-size: 12px;
+    font-size: var(--ui-text-xs);
   }
   .gw-review-toolbar {
     gap: 8px 12px;

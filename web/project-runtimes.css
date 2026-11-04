@@ -30,8 +30,8 @@
   min-width: 0;
 }
 .runtime-legend {
-  font-size: 15px;
-  font-weight: 650;
+  font-size: var(--ui-text-md);
+  font-weight: var(--ui-weight-semibold);
   padding: 0;
   margin-bottom: 12px;
 }
@@ -77,12 +77,12 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  font-size: 15px;
+  font-size: var(--ui-text-md);
 }
 .runtime-option em {
-  font-size: 11px;
+  font-size: var(--ui-text-xs);
   font-style: normal;
-  font-weight: 500;
+  font-weight: var(--ui-weight-medium);
   color: var(--ui-accent);
 }
 .runtime-option small {
@@ -112,7 +112,7 @@
   cursor: pointer;
   padding: 16px 0;
   min-height: 44px;
-  font-weight: 600;
+  font-weight: var(--ui-weight-semibold);
 }
 .runtime-advanced[open] {
   padding-bottom: 16px;
@@ -146,14 +146,14 @@
 }
 [data-runtime-container] h3 {
   margin: 0;
-  font-size: 16px;
+  font-size: var(--ui-text-input);
 }
 .runtime-credentials {
   margin: 18px 0;
 }
 .runtime-credentials h3 {
   margin: 0 0 8px;
-  font-size: 16px;
+  font-size: var(--ui-text-input);
 }
 .runtime-credential-options {
   display: grid;
@@ -192,7 +192,7 @@
   overflow-wrap: anywhere;
 }
 .runtime-credential-option strong {
-  font-size: 14px;
+  font-size: var(--ui-text-base);
 }
 .runtime-credential-option small {
   display: block;
@@ -201,7 +201,7 @@
   line-height: 1.6;
 }
 .runtime-credential-status {
-  font-size: 12px;
+  font-size: var(--ui-text-xs);
 }
 @media (max-width: 640px) {
   .runtime-credential-options {

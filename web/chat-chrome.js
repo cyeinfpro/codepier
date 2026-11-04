@@ -528,9 +528,9 @@ function chatDialog({ title, body = '', value, confirmLabel = '确定', danger =
       if (finished) return;
       finished = true;
       if (ChatUI.dialogCancel === abort) ChatUI.dialogCancel = null;
-      dialog.close();
+      CP.ui.closeModalLayer(dialog);
       dialog.remove();
-      if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
+      CP.ui.restoreLayerFocus(returnFocus);
       resolve(result);
     };
     const abort = () => finish(null);
@@ -548,7 +548,7 @@ function chatDialog({ title, body = '', value, confirmLabel = '确定', danger =
     form.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && (e.isComposing || e.keyCode === 229)) e.preventDefault();
     });
-    dialog.showModal();
+    CP.ui.showModalLayer(dialog);
     (input || (danger ? cancel : confirm)).focus();
     input?.select();
   });
@@ -569,9 +569,9 @@ function chatPalette() {
     origin = document.activeElement;
   const close = () => {
     if (ChatUI.dialogCancel === close) ChatUI.dialogCancel = null;
-    dialog.close();
+    CP.ui.closeModalLayer(dialog);
     dialog.remove();
-    if (origin?.isConnected) origin.focus({ preventScroll: true });
+    CP.ui.restoreLayerFocus(origin);
   };
   ChatUI.dialogCancel = close;
   const modifier = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl';
@@ -650,6 +650,8 @@ function chatPalette() {
       close();
       return;
     }
+    // Global notices are hosted here too; their buttons keep their own keys.
+    if (e.target !== input && !results.contains(e.target)) return;
     if (['ArrowDown', 'ArrowUp'].includes(e.key) && filtered.length) {
       e.preventDefault();
       const focused = [...results.children].indexOf(document.activeElement);
@@ -664,7 +666,7 @@ function chatPalette() {
       choose(focused >= 0 ? focused : active);
     }
   });
-  dialog.showModal();
+  CP.ui.showModalLayer(dialog);
   render();
   input.focus();
 }

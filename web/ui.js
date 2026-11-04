@@ -1,6 +1,32 @@
 'use strict';
 // Presentation-only helpers. No credentials, commands or writes are cached here.
 // Navigation filtering is local presentation only; capability checks remain authoritative.
+// Async action confirmations capture their originating session, space and view.
+const uiPendingConfirmations = new WeakSet();
+async function uiConfirmAction(
+  options,
+  { owner = document.activeElement, current = () => true } = {},
+) {
+  const login = S.session,
+    space = S.space_id,
+    page = S.page,
+    render = S.renderSeq;
+  const valid = () =>
+    S.session === login &&
+    S.space_id === space &&
+    S.page === page &&
+    S.renderSeq === render &&
+    (!owner || owner.isConnected) &&
+    current();
+  if (!valid() || (owner && uiPendingConfirmations.has(owner))) return false;
+  if (owner) uiPendingConfirmations.add(owner);
+  try {
+    const yes = await CP.ui.confirmSheet(options);
+    return yes && valid();
+  } finally {
+    if (owner) uiPendingConfirmations.delete(owner);
+  }
+}
 function uiFilterNavigation() {
   const input = $('#navigation-query');
   if (!input) return;
@@ -68,27 +94,91 @@ function uiFocusable(root) {
       getComputedStyle(el).visibility === 'visible',
   );
 }
-function uiTrapTab(e, root) {
-  if (e.key !== 'Tab') return;
-  const items = uiFocusable(root),
-    first = items[0],
-    last = items.at(-1);
-  if (!first) {
-    e.preventDefault();
+function uiTrapTab(e, root, extraRoots = []) {
+  if (e.key !== 'Tab' || e.defaultPrevented) return;
+  const roots = [root, ...extraRoots].filter(
+    (node) => node?.isConnected && !node.closest('[inert]'),
+  );
+  const items = [...new Set(roots.flatMap((node) => uiFocusable(node)))];
+  e.preventDefault();
+  if (!items.length) {
     root.focus();
     return;
   }
-  if (e.shiftKey && (document.activeElement === first || !root.contains(document.activeElement))) {
-    e.preventDefault();
-    last.focus();
-  } else if (
-    !e.shiftKey &&
-    (document.activeElement === last || !root.contains(document.activeElement))
-  ) {
-    e.preventDefault();
-    first.focus();
+  const index = items.indexOf(document.activeElement);
+  const next =
+    index < 0
+      ? e.shiftKey
+        ? items.length - 1
+        : 0
+      : (index + (e.shiftKey ? -1 : 1) + items.length) % items.length;
+  items[next].focus();
+}
+// Re-evaluate open native details menus after viewport changes and scrolling.
+function uiPositionMenu(menu) {
+  if (!menu?.open || !menu.matches('.tool-menu')) return;
+  const list = menu.querySelector('.tool-menu-items');
+  if (!list) return;
+  delete list.dataset.placement;
+  delete list.dataset.align;
+  list.style.removeProperty('max-height');
+  list.style.removeProperty('max-width');
+  list.style.removeProperty('left');
+  list.style.removeProperty('right');
+  list.style.boxSizing = 'border-box';
+  const viewport = window.visualViewport;
+  const top = viewport?.offsetTop || 0,
+    left = viewport?.offsetLeft || 0;
+  const bottom = top + (viewport?.height || innerHeight);
+  const width = viewport?.width || innerWidth;
+  list.style.maxWidth = Math.max(0, width - 16) + 'px';
+  const rect = list.getBoundingClientRect(),
+    anchor = menu.getBoundingClientRect();
+  const below = bottom - anchor.bottom - 16,
+    above = anchor.top - top - 16;
+  const flip = rect.bottom > bottom - 8 && above > below;
+  if (flip) list.dataset.placement = 'top';
+  list.style.maxHeight =
+    Math.max(0, Math.min(420, (viewport?.height || innerHeight) * 0.6, flip ? above : below)) +
+    'px';
+  if (rect.left < left + 8) list.dataset.align = 'start';
+  const positioned = list.getBoundingClientRect();
+  const shift =
+    positioned.left < left + 8
+      ? left + 8 - positioned.left
+      : positioned.right > left + width - 8
+        ? left + width - 8 - positioned.right
+        : 0;
+  if (shift) {
+    list.style.left = list.offsetLeft + shift + 'px';
+    list.style.right = 'auto';
   }
 }
+document.addEventListener(
+  'toggle',
+  (event) => {
+    if (event.target instanceof HTMLDetailsElement) uiPositionMenu(event.target);
+  },
+  true,
+);
+let uiMenuFrame = 0;
+function uiRepositionMenus() {
+  if (uiMenuFrame || !document.querySelector('.tool-menu[open]')) return;
+  uiMenuFrame = requestAnimationFrame(() => {
+    uiMenuFrame = 0;
+    // ui.js loads before app.js supplies its global DOM helpers.
+    document.querySelectorAll('.tool-menu[open]').forEach(uiPositionMenu);
+  });
+}
+window.addEventListener('pagehide', () => {
+  if (uiMenuFrame) cancelAnimationFrame(uiMenuFrame);
+  uiMenuFrame = 0;
+});
+window.addEventListener('pageshow', uiRepositionMenus);
+window.addEventListener('resize', uiRepositionMenus);
+document.addEventListener('scroll', uiRepositionMenus, true);
+window.visualViewport?.addEventListener('resize', uiRepositionMenus);
+window.visualViewport?.addEventListener('scroll', uiRepositionMenus);
 const uiMobileMedia = matchMedia('(max-width:900px)');
 const uiDockPages = new Set(['overview', 'projects', 'native', 'workflows']);
 function uiSyncNavigation() {
@@ -503,7 +593,8 @@ document.addEventListener('click', (e) => {
   });
 });
 document.addEventListener('keydown', (e) => {
-  if (e.defaultPrevented || e.target?.closest?.('dialog.chat-sheet')) return;
+  if (e.defaultPrevented || e.target?.closest?.('dialog') || CP.ui.layerHost() !== document.body)
+    return;
   // Native terminal editor keys belong to Pi/Codex, not the panel palette.
   if (e.target?.closest?.('#native-terminal') && !$('.modal')) return;
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k' && !e.isComposing) {

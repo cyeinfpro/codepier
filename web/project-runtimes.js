@@ -586,10 +586,23 @@ window.CodePierProjectRuntime = (() => {
       groups();
       lock();
     });
-    refresh.onclick = () => {
+    refresh.onclick = async () => {
       attempts = 0;
       if (submission) return recover();
-      if (dirty && !confirm('重新读取将放弃此页未保存的输入，是否继续？')) return;
+      if (
+        dirty &&
+        !(await uiConfirmAction(
+          {
+            title: '重新读取运行环境？',
+            body: '重新读取将放弃此页未保存的输入，是否继续？',
+            confirmLabel: '放弃并重新读取',
+            danger: true,
+          },
+          { owner: refresh, current },
+        ))
+      )
+        return;
+      if (!current() || submission || busy || loading) return;
       markDirty(false);
       return load();
     };

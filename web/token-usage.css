@@ -20,23 +20,23 @@
 }
 .token-dashboard-head h3 {
   margin: 0;
-  font-size: 0.9rem;
+  font-size: var(--ui-text-md);
 }
 .token-dashboard-freshness {
   margin-left: auto;
   max-width: 100%;
-  font-size: 0.8rem;
+  font-size: var(--ui-text-sm);
   line-height: 1.6;
   opacity: 0.85;
 }
 .token-estimate-badge {
   display: inline-block;
-  font-size: 0.65rem;
+  font-size: var(--ui-text-xs);
   line-height: 1.5;
   padding: 0.05rem 0.4rem;
   border: 1px solid currentColor;
   border-color: color-mix(in srgb, currentColor 30%, transparent);
-  border-radius: 4px;
+  border-radius: var(--ui-radius-xs);
   opacity: 0.8;
 }
 .token-dashboard-metrics {
@@ -52,23 +52,23 @@
 .token-dashboard-metric > span,
 .token-dashboard-metric small {
   display: block;
-  font-size: 0.8rem;
+  font-size: var(--ui-text-sm);
   line-height: 1.5;
   opacity: 0.85;
 }
 .token-dashboard-metric strong {
   display: block;
   margin: 0.25rem 0;
-  font-size: clamp(1.35rem, 3vw, 1.75rem);
+  font-size: var(--ui-page-title);
   font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
 .token-dashboard-metric strong.is-unavailable {
-  font-size: 1.1rem;
+  font-size: var(--ui-text-title);
   line-height: 1.9;
 }
 .token-dashboard-metric.is-total strong {
-  font-size: clamp(1.6rem, 3vw, 2rem);
+  font-size: var(--ui-text-display);
   letter-spacing: -0.02em;
 }
 .token-dashboard-metric.is-cost {
@@ -76,14 +76,14 @@
   text-align: right;
 }
 .token-dashboard-metric.is-cost strong {
-  font-size: clamp(1.2rem, 2.5vw, 1.6rem);
+  font-size: var(--ui-text-h2);
 }
 .token-cache-assumption {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 0.5rem 1rem;
-  font-size: 0.8rem;
+  font-size: var(--ui-text-sm);
 }
 .token-cache-assumption input {
   width: 5.5rem;
@@ -96,7 +96,7 @@
 }
 .token-pricing-details p {
   margin: 0.4rem 0;
-  font-size: 0.8rem;
+  font-size: var(--ui-text-sm);
   line-height: 1.6;
   overflow-wrap: anywhere;
 }
@@ -108,7 +108,7 @@
 .token-dashboard-status,
 .token-dashboard details > p,
 .token-dashboard > [role='status'] {
-  font-size: 0.8rem;
+  font-size: var(--ui-text-sm);
   line-height: 1.6;
   opacity: 0.85;
   margin: 0.5rem 0;
@@ -123,13 +123,13 @@
 }
 .token-dashboard summary {
   cursor: pointer;
-  font-size: 0.8rem;
+  font-size: var(--ui-text-sm);
   padding: 0.25rem 0;
 }
 .token-dashboard summary:focus-visible {
   outline: 2px solid currentColor;
   outline-offset: 3px;
-  border-radius: 3px;
+  border-radius: var(--ui-radius-xs);
 }
 .token-usage-help[open] {
   padding-bottom: 0.25rem;
@@ -143,7 +143,7 @@
   gap: 0.3rem;
   flex: 1 1 9rem;
   min-width: 0;
-  font-size: 0.8rem;
+  font-size: var(--ui-text-sm);
 }
 .token-dashboard-filters select {
   width: 100%;
@@ -151,7 +151,7 @@
 }
 .token-dashboard-legend {
   gap: 0.4rem 1rem;
-  font-size: 0.75rem;
+  font-size: var(--ui-text-xs);
 }
 .token-dashboard-legend span::before {
   content: '';
@@ -159,7 +159,7 @@
   width: 0.7rem;
   height: 0.7rem;
   margin-right: 0.35rem;
-  border-radius: 2px;
+  border-radius: var(--ui-radius-xs);
   background: currentColor;
 }
 .token-dashboard-legend .is-output::before {
@@ -183,7 +183,7 @@
   grid-template-columns: minmax(4rem, 6rem) minmax(0, 1fr) minmax(6.5rem, 10rem);
   gap: 0.5rem;
   align-items: center;
-  font-size: 0.75rem;
+  font-size: var(--ui-text-xs);
 }
 .token-trend time,
 .token-trend small {
@@ -199,7 +199,7 @@
 }
 .token-trend-bar {
   height: 6px;
-  border-radius: 3px;
+  border-radius: var(--ui-radius-xs);
   width: var(--token-bar, 0%);
   background: currentColor;
 }
@@ -238,7 +238,7 @@
 
 .token-dashboard-limit {
   margin: 0.4rem 0;
-  font-size: 0.8rem;
+  font-size: var(--ui-text-sm);
   line-height: 1.6;
 }
 .token-dashboard-context {
@@ -252,7 +252,7 @@
   margin-top: 0.5rem;
 }
 .token-detail-panel > summary {
-  font-weight: 500;
+  font-weight: var(--ui-weight-medium);
 }
 .token-cache-assumption {
   margin: 0.5rem 0;
@@ -267,7 +267,7 @@
 }
 .token-export {
   margin-top: 0.65rem;
-  font-size: 0.75rem;
+  font-size: var(--ui-text-xs);
 }
 /* Keep short desktop overviews within their existing screen-height budget.
    Reclaim whitespace only; figures, context limits and controls keep their size. */

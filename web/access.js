@@ -49,9 +49,15 @@ window.CodePierAccess = (() => {
         };
         if (
           body.apply_to_existing &&
-          !confirm(
-            '将当前账号所有有效传统 OAuth 连接（不含 Profile）改为可访问全部现有及未来新增项目？\n只扩展项目范围，现有工具权限和凭据保持不变。',
-          )
+          !(await uiConfirmAction(
+            {
+              title: '扩大已有连接的项目范围？',
+              body: '将当前账号所有有效传统 OAuth 连接（不含 Profile）改为可访问全部现有及未来新增项目？\n只扩展项目范围，现有工具权限和凭据保持不变。',
+              confirmLabel: '确认扩大范围',
+              danger: true,
+            },
+            { owner: form, current: () => scope.current() },
+          ))
         )
           return;
         const controls = $$('input', form);

@@ -1,4 +1,3 @@
-/* Match the existing panel tokens without fixed viewport widths. */
 .panel-update {
   margin-block: 20px;
   min-width: 0;
@@ -26,9 +25,6 @@
 .panel-update .actions {
   flex-wrap: wrap;
 }
-.panel-update [hidden] {
-  display: none !important;
-}
 .panel-update details[open] > :not(summary) {
   margin-top: 12px;
 }
@@ -38,37 +34,28 @@
     white-space: normal;
   }
 }
-
 .panel-update-entry {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  border: 1px solid var(--accent, #2563eb);
-  border-radius: 10px;
+  border: 1px solid var(--ui-accent);
   padding: 8px 12px;
-  background: var(--accent, #2563eb);
-  color: #fff;
   font: inherit;
   white-space: nowrap;
   cursor: pointer;
   min-height: 40px;
 }
-/* Keep one native hit target while recovery repaints the display-only labels.
-   WebKit can drop click if pointerdown and pointerup hit different children. */
 .panel-update-entry > [data-panel-update-version],
 .panel-update-entry > [data-panel-update-status] {
   pointer-events: none;
 }
 .panel-update-entry:focus-visible {
-  outline: 3px solid var(--text, #111827);
+  outline: 3px solid var(--ui-text);
   outline-offset: 3px;
 }
-.panel-update-entry[data-state='available'] {
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, #2563eb) 20%, transparent);
-}
 .panel-update-version {
-  font-size: 12px;
+  font-size: var(--ui-text-xs);
   white-space: nowrap;
 }
 #panel-agent-rollout-nodes {
@@ -78,8 +65,8 @@
   gap: 12px;
 }
 #panel-agent-rollout-nodes li {
-  border: 1px solid var(--line, #cbd5e1);
-  border-radius: 10px;
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-radius-small);
   padding: 12px;
   overflow-wrap: anywhere;
 }
@@ -104,25 +91,20 @@
   }
   .panel-update-entry {
     padding: 7px 9px;
-    font-size: 12px;
-    gap: 6px;
   }
 }
-
-/* A nonmodal status surface never navigates or replaces the current page draft. */
 .panel-update-popover {
   position: fixed;
-  z-index: 90;
-  top: 80px;
+  z-index: var(--ui-z-popover);
+  top: calc(var(--ui-topbar-height) + 12px);
   right: 16px;
   width: min(560px, calc(100vw - 32px));
-  max-height: calc(100dvh - 100px);
+  max-height: calc(100dvh - var(--ui-topbar-height) - 24px);
   overflow: auto;
   margin: 0;
   background: var(--ui-panel);
   color: var(--ui-text);
   border: 1px solid var(--ui-line);
-  box-shadow: var(--ui-shadow);
   scrollbar-color: var(--ui-soft) var(--ui-panel);
 }
 .panel-update-popover .panel-head {
@@ -138,7 +120,54 @@
 }
 @media (max-width: 480px) {
   .panel-update-popover {
-    top: 120px;
-    max-height: calc(100dvh - 136px);
+    top: calc(var(--ui-topbar-height) + 12px);
+    max-height: calc(100dvh - var(--ui-topbar-height) - 24px);
   }
+}
+:where(.btn, .icon-btn, .quick-jump, .panel-update-entry, .settings-groups button) {
+  transition:
+    background-color var(--ui-motion-fast) var(--ui-ease),
+    border-color var(--ui-motion-fast) var(--ui-ease),
+    color var(--ui-motion-fast) var(--ui-ease);
+}
+.panel-update-entry {
+  border-color: var(--ui-line);
+  border-radius: var(--ui-radius-small);
+  background: var(--ui-panel);
+  color: var(--ui-muted);
+  font-size: var(--ui-text-sm);
+}
+.panel-update-entry:hover {
+  border-color: var(--ui-border);
+  color: var(--ui-text);
+}
+.panel-update-entry:focus-visible {
+  outline-color: var(--ui-focus);
+}
+.panel-update-entry[data-state='available'] {
+  background: var(--ui-accent-soft);
+  color: var(--ui-accent);
+  border-color: var(--ui-accent-line);
+  box-shadow: none;
+}
+@media (max-width: 760px), (pointer: coarse) {
+  .panel-update-entry {
+    min-height: var(--ui-touch-target);
+  }
+}
+@media (max-width: 640px) {
+  .panel-update-entry {
+    padding-inline: 8px;
+    font-size: var(--ui-text-xs);
+    gap: 5px;
+  }
+}
+@media (forced-colors: active) {
+  .panel-update-entry {
+    border: 1px solid CanvasText;
+  }
+}
+.panel-update-popover {
+  border-radius: var(--ui-radius-xl);
+  box-shadow: var(--ui-elev-2);
 }

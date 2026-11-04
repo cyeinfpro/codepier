@@ -15,7 +15,7 @@
   gap: 6px;
   min-width: 180px;
   max-width: 100%;
-  font-size: 12px;
+  font-size: var(--ui-text-xs);
   color: var(--ui-muted);
 }
 .integration-context select {
@@ -35,7 +35,7 @@
   background-repeat: no-repeat;
 }
 .integration-scope {
-  font-size: 12px;
+  font-size: var(--ui-text-xs);
   color: var(--ui-muted);
   padding-bottom: 10px;
 }
@@ -46,7 +46,7 @@
   max-width: 100%;
   padding: 4px;
   background: var(--ui-surface);
-  border-radius: 18px;
+  border-radius: var(--ui-radius-lg);
   margin-bottom: 12px;
   scrollbar-width: thin;
 }
@@ -54,9 +54,9 @@
   flex: 0 0 auto;
   padding: 9px 15px;
   border: 0;
-  border-radius: 14px;
+  border-radius: var(--ui-radius-md);
   font: inherit;
-  font-size: 13px;
+  font-size: var(--ui-text-sm);
   background: transparent;
   color: var(--ui-muted);
   cursor: pointer;
@@ -64,13 +64,13 @@
 .integration-tabs button[aria-pressed='true'] {
   background: var(--ui-panel);
   color: var(--ui-text);
-  box-shadow: 0 1px 3px rgb(0 0 0 / 8%);
+  box-shadow: var(--ui-elev-1);
 }
 .integration-tabs button:hover {
   color: var(--ui-text);
 }
 .integration-feedback {
-  font-size: 12px;
+  font-size: var(--ui-text-xs);
   overflow-wrap: anywhere;
   color: var(--ui-muted);
   min-height: 22px;
@@ -81,7 +81,7 @@
   border-inline-start: 3px solid var(--ui-danger);
   padding: 8px 12px;
   background: var(--ui-danger-bg);
-  border-radius: 8px;
+  border-radius: var(--ui-radius-small);
 }
 .integration-grid {
   display: grid;
@@ -96,12 +96,12 @@
 }
 .integration-section h2 {
   margin: 0 0 12px;
-  font-size: 17px;
-  font-weight: 650;
+  font-size: var(--ui-text-title);
+  font-weight: var(--ui-weight-semibold);
   letter-spacing: -0.3px;
 }
 .integration-section h3 {
-  font-size: 15px;
+  font-size: var(--ui-text-md);
   overflow-wrap: anywhere;
 }
 .integration-section p {
@@ -118,7 +118,7 @@
   align-content: start;
   gap: 6px;
   min-width: 0;
-  font-size: 12px;
+  font-size: var(--ui-text-xs);
   color: var(--ui-muted);
 }
 .integration-field:has(textarea) {
@@ -131,12 +131,12 @@
   min-width: 0;
   max-width: 100%;
   border: 1px solid var(--ui-border);
-  border-radius: 10px;
+  border-radius: var(--ui-radius-small);
   background: var(--ui-panel);
   color: var(--ui-text);
   padding: 10px 12px;
   font: inherit;
-  font-size: 14px;
+  font-size: var(--ui-text-base);
 }
 .integration-field textarea {
   font-family: var(--ui-mono);
@@ -153,7 +153,7 @@
   display: flex;
   align-items: start;
   gap: 8px;
-  font-size: 12px;
+  font-size: var(--ui-text-xs);
   margin-top: 16px;
   line-height: 1.5;
 }
@@ -169,12 +169,12 @@
   gap: 4px 12px;
   border-bottom: 1px solid var(--ui-line);
   padding: 10px 0;
-  font-size: 13px;
+  font-size: var(--ui-text-sm);
   overflow-wrap: anywhere;
 }
 .integration-check strong {
-  font-size: 13px;
-  font-weight: 550;
+  font-size: var(--ui-text-sm);
+  font-weight: var(--ui-weight-medium);
 }
 .integration-check span,
 .integration-check small {
@@ -194,7 +194,7 @@
 }
 .integration-table small {
   display: block;
-  font-size: 11px;
+  font-size: var(--ui-text-xs);
   color: var(--ui-muted);
 }
 .integration-row {
@@ -218,11 +218,11 @@
 .integration-row small {
   margin-top: 4px;
   color: var(--ui-muted);
-  font-size: 12px;
+  font-size: var(--ui-text-xs);
 }
 .integration-row code {
   margin-top: 4px;
-  font-size: 11px;
+  font-size: var(--ui-text-xs);
   color: var(--ui-muted);
 }
 .integration-row .actions {
@@ -233,13 +233,13 @@
 .integration-detail {
   margin: 12px 0;
   border: 1px solid var(--ui-line);
-  border-radius: 14px;
+  border-radius: var(--ui-radius-md);
   overflow: hidden;
   background: var(--ui-panel);
 }
 .integration-detail summary {
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--ui-text-sm);
   padding: 12px 16px;
   overflow-wrap: anywhere;
 }
@@ -254,12 +254,12 @@
   padding: 16px;
   background: var(--ui-surface);
   color: var(--ui-text);
-  font: 12px/1.6 var(--ui-mono);
+  font: var(--ui-text-xs)/1.6 var(--ui-mono);
   tab-size: 2;
 }
 .integration-page-text {
   margin-bottom: 16px;
-  border-radius: 12px;
+  border-radius: var(--ui-radius-md);
 }
 .integration-center button:focus-visible,
 .integration-center input:focus-visible,
@@ -291,7 +291,7 @@
     grid-template-columns: 1fr;
   }
   .integration-tabs {
-    border-radius: 14px;
+    border-radius: var(--ui-radius-md);
   }
   .integration-tabs button {
     min-height: 44px;
@@ -307,14 +307,14 @@
   .integration-field input,
   .integration-field select,
   .integration-field textarea {
-    font-size: 16px;
+    font-size: var(--ui-text-input);
   }
   .integration-detail pre {
-    font-size: 12px;
+    font-size: var(--ui-text-xs);
     padding: 12px;
   }
   .integration-section {
-    border-radius: 18px;
+    border-radius: var(--ui-radius-lg);
   }
 }
 @media (prefers-reduced-motion: reduce) {

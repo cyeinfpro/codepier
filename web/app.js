@@ -1135,7 +1135,19 @@ async function deviceDetail(id) {
       await renderPage();
     });
   $('#toggle-device', dialog).onclick = async () => {
-    if (d.enabled && !confirm('停用会断开节点；已经开始的本机操作可能仍会继续。确认停用？')) return;
+    if (
+      d.enabled &&
+      !(await uiConfirmAction(
+        {
+          title: '停用节点？',
+          body: '停用会断开节点；已经开始的本机操作可能仍会继续。确认停用？',
+          confirmLabel: '停用节点',
+          danger: true,
+        },
+        { owner: dialog },
+      ))
+    )
+      return;
     await busy($('#toggle-device', dialog), async () => {
       await api('/api/devices/' + id, {
         method: 'PATCH',
@@ -1147,9 +1159,15 @@ async function deviceDetail(id) {
   };
   $('#rotate-device', dialog).onclick = async () => {
     if (
-      !confirm(
-        '旧连接密钥会立刻失效，在线 Agent 将断开。需要在目标电脑更新配置或重新执行安装命令。继续？',
-      )
+      !(await uiConfirmAction(
+        {
+          title: '轮换连接密钥？',
+          body: '旧连接密钥会立刻失效，在线 Agent 将断开。需要在目标电脑更新配置或重新执行安装命令。继续？',
+          confirmLabel: '轮换密钥',
+          danger: true,
+        },
+        { owner: dialog },
+      ))
     )
       return;
     await busy($('#rotate-device', dialog), async () => {
@@ -1159,9 +1177,15 @@ async function deviceDetail(id) {
   };
   $('#delete-device', dialog).onclick = async () => {
     if (
-      !confirm(
-        '仅移除面板中的节点身份？必须先移除它的项目映射；目标电脑上的 Agent 和项目文件都不会被删除。',
-      )
+      !(await uiConfirmAction(
+        {
+          title: '移除节点记录？',
+          body: '仅移除面板中的节点身份？必须先移除它的项目映射；目标电脑上的 Agent 和项目文件都不会被删除。',
+          confirmLabel: '移除记录',
+          danger: true,
+        },
+        { owner: dialog },
+      ))
     )
       return;
     await busy($('#delete-device', dialog), async () => {
@@ -1324,7 +1348,15 @@ async function projectModal(id = null, device = '') {
       busy(remove, async () => {
         if (
           !current() ||
-          !confirm('只删除映射，不会删除家里文件。已开始的操作不会自动撤销。继续？')
+          !(await uiConfirmAction(
+            {
+              title: '删除项目映射？',
+              body: '只删除映射，不会删除家里文件。已开始的操作不会自动撤销。继续？',
+              confirmLabel: '删除映射',
+              danger: true,
+            },
+            { owner: dialog, current },
+          ))
         )
           return;
         await api('/api/projects/' + id, { method: 'DELETE' });
@@ -1505,10 +1537,30 @@ async function newFile() {
       toast('目录已创建');
       await loadTree();
     });
-  $('#new-file-confirm').onclick = () => {
+  $('#new-file-confirm').onclick = async () => {
     const path = $('#new-path').value.trim();
     if (!path) return;
-    if (S.work.dirty && !confirm('丢弃当前未保存草稿？')) return;
+    const scope = workDialogScope(),
+      revision = S.editRevision || 0;
+    if (
+      S.work.dirty &&
+      !(await uiConfirmAction(
+        {
+          title: '丢弃当前草稿？',
+          body: '当前未保存草稿将被新文件替换。',
+          confirmLabel: '丢弃并新建',
+          danger: true,
+        },
+        {
+          owner: $('#new-file-confirm'),
+          current: () =>
+            workDialogCurrent(scope) &&
+            revision === (S.editRevision || 0) &&
+            $('#new-path')?.value.trim() === path,
+        },
+      ))
+    )
+      return;
     S.fileGeneration = (S.fileGeneration || 0) + 1;
     S.readGeneration = (S.readGeneration || 0) + 1;
     Object.assign(S.work, {
@@ -1617,7 +1669,25 @@ async function deleteFile() {
   const snapshot = { ...workTarget(), path: S.work.path, sha: S.work.sha, content: S.work.content },
     generation = S.fileGeneration || 0;
   if (!snapshot.path || snapshot.sha === 'new') throw new Error('请先读取一个已存在的文件');
-  if (!confirm(`删除 ${snapshot.path}？仅删除该文件，修改前会保存备份。`)) return;
+  if (
+    !(await uiConfirmAction(
+      {
+        title: `删除 ${snapshot.path}？`,
+        body: '仅删除该文件，修改前会保存备份。',
+        confirmLabel: '删除文件',
+        danger: true,
+      },
+      {
+        current: () =>
+          S.work.project === snapshot.project &&
+          (S.work.workspace_id || '') === snapshot.workspace_id &&
+          S.work.path === snapshot.path &&
+          (S.fileGeneration || 0) === generation &&
+          S.work.content === snapshot.content,
+      },
+    ))
+  )
+    return;
   await settled(
     tool('fs_delete', {
       project: snapshot.project,
@@ -1797,7 +1867,26 @@ async function restoreBackup(id, path, scope) {
     revision = S.editRevision || 0;
   if (project !== S.work.project || workspace_id !== (S.work.workspace_id || ''))
     throw new Error('当前项目或工作目录已经变化，请重新打开备份。');
-  if (S.work.dirty && !confirm('恢复操作将重新读取文件，当前草稿可能丢失。继续？')) return;
+  if (
+    S.work.dirty &&
+    !(await uiConfirmAction(
+      {
+        title: '放弃草稿并恢复？',
+        body: '恢复操作将重新读取文件，当前草稿可能丢失。继续？',
+        confirmLabel: '继续恢复',
+        danger: true,
+      },
+      {
+        owner: dialog,
+        current: () =>
+          workDialogCurrent(scope) &&
+          !S.restoring &&
+          generation === (S.fileGeneration || 0) &&
+          revision === (S.editRevision || 0),
+      },
+    ))
+  )
+    return;
   S.restoring = true;
   try {
     let sha = 'new';
@@ -1814,7 +1903,24 @@ async function restoreBackup(id, path, scope) {
       revision !== (S.editRevision || 0)
     )
       throw new Error('编辑内容已经变化，已取消本次恢复，请重新核对。');
-    if (!confirm(`把 ${path} 恢复到这次操作之前的内容？`)) return;
+    if (
+      !(await uiConfirmAction(
+        {
+          title: '恢复文件版本？',
+          body: `把 ${path} 恢复到这次操作之前的内容？`,
+          confirmLabel: '恢复版本',
+          danger: true,
+        },
+        {
+          owner: dialog,
+          current: () =>
+            workDialogCurrent(scope) &&
+            generation === (S.fileGeneration || 0) &&
+            revision === (S.editRevision || 0),
+        },
+      ))
+    )
+      return;
     await settled(
       tool('history_restore', {
         project,
@@ -1866,13 +1972,18 @@ async function restoreBackup(id, path, scope) {
 }
 async function checkpoint() {
   if (!S.work.project) throw new Error('请先选择项目');
+  const scope = workDialogScope();
   if (
-    !confirm(
-      '为当前项目建立本机源码 ZIP 检查点？不包含依赖、凭据、链接或超过限制的文件，也不是整个硬盘备份。',
-    )
+    !(await uiConfirmAction(
+      {
+        title: '建立源码检查点？',
+        body: '为当前项目建立本机源码 ZIP 检查点？不包含依赖、凭据、链接或超过限制的文件，也不是整个硬盘备份。',
+        confirmLabel: '建立检查点',
+      },
+      { current: () => workDialogCurrent(scope) },
+    ))
   )
     return;
-  const scope = workDialogScope();
   let r;
   try {
     r = await settled(
@@ -1957,7 +2068,23 @@ async function runTask() {
           trackTask(null);
         }
       }
-      if (!confirm(`运行本机任务 ${name}？这会执行本机预先定义的程序。`)) return;
+      const scope = workDialogScope();
+      if (
+        !(await uiConfirmAction(
+          {
+            title: '运行本机任务？',
+            body: `运行本机任务 ${name}？这会执行本机预先定义的程序。`,
+            confirmLabel: '运行任务',
+          },
+          {
+            current: () =>
+              workDialogCurrent(scope) &&
+              S.work.project === project &&
+              $('#task-select')?.value === name,
+          },
+        ))
+      )
+        return;
       submission = { ...workTarget(project), task: name, idempotency_key: uid() };
       S.taskSubmission = submission;
       // Keep the original key even when every reply is lost, including a reload.
@@ -2655,7 +2782,17 @@ panelActions.register(['edit-grant-expiration'], async (b) => {
     });
 });
 panelActions.register(['revoke-grant'], async (b, e) => {
-  if (confirm('撤销这个凭据的全部访问权限？正在执行的本机任务不会自动停止。')) {
+  if (
+    await uiConfirmAction(
+      {
+        title: '撤销凭据？',
+        body: '撤销这个凭据的全部访问权限？正在执行的本机任务不会自动停止。',
+        confirmLabel: '撤销权限',
+        danger: true,
+      },
+      { owner: b },
+    )
+  ) {
     await api('/api/grants/' + b.dataset.id, { method: 'DELETE' });
     await renderPage(false);
   }

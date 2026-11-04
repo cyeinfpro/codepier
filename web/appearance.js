@@ -47,7 +47,9 @@
       meta.name = 'theme-color';
       document.head.append(meta);
     }
-    if (meta) meta.content = scheme === 'dark' ? '#191919' : '#f4f4f4';
+    if (!meta) return;
+    const token = getComputedStyle(document.documentElement).getPropertyValue('--ui-bg').trim();
+    meta.content = token || (scheme === 'dark' ? '#191919' : '#f4f4f4');
   }
   function apply(emit) {
     scheme = resolve(preference);

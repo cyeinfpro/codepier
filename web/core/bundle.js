@@ -34,6 +34,8 @@ var CP = (() => {
     badge: () => badge,
     busy: () => busy,
     buttons: () => buttons,
+    closeModalLayer: () => closeModalLayer,
+    confirmSheet: () => confirmSheet,
     createModal: () => createModal,
     download: () => download,
     empty: () => empty,
@@ -41,10 +43,13 @@ var CP = (() => {
     heading: () => heading,
     icon: () => icon,
     json: () => json,
+    layerHost: () => layerHost,
     notice: () => notice,
     onlineBadge: () => onlineBadge,
     paths: () => paths,
+    restoreLayerFocus: () => restoreLayerFocus,
     shortTime: () => shortTime,
+    showModalLayer: () => showModalLayer,
     stateNames: () => stateNames,
     timeText: () => timeText,
     toast: () => toast,
@@ -192,7 +197,8 @@ var CP = (() => {
       const focused = node.contains(document.activeElement);
       node.remove();
       if (focused) {
-        const dialog = $(".modal");
+        const host2 = layerHost();
+        const dialog = host2 === document.body ? $(".modal") : host2;
         const target = origin?.isConnected && origin.getClientRects().length && !origin.closest("[inert]") && (!dialog || dialog.contains(origin)) ? origin : dialog;
         target?.focus({ preventScroll: true });
       }
@@ -279,6 +285,203 @@ var CP = (() => {
       }
     }
   }
+  var nativeLayers = [];
+  var layerBindings = /* @__PURE__ */ new WeakSet();
+  var layerObserver = null;
+  var noticeSelectors = ["#toasts", "#computer-approval-inbox"];
+  function layerHost() {
+    return nativeLayers.findLast((dialog) => dialog.isConnected && dialog.open) || document.body;
+  }
+  function adoptNotices(source = document) {
+    const host = layerHost();
+    for (const selector of noticeSelectors) {
+      const node = document.querySelector(selector) || source.querySelector(selector);
+      if (!node) continue;
+      const modal = host === document.body && document.querySelector(".modal");
+      if (selector === "#toasts" && modal) {
+        const header = modal.querySelector(".modal-header");
+        if (header && header.nextElementSibling !== node) header.after(node);
+      } else if (node.parentElement !== host) host.append(node);
+    }
+  }
+  function releaseLayer(dialog) {
+    const index = nativeLayers.indexOf(dialog);
+    if (index < 0) return;
+    nativeLayers.splice(index, 1);
+    adoptNotices(dialog);
+    if (!nativeLayers.length) {
+      layerObserver?.disconnect();
+      layerObserver = null;
+    }
+  }
+  function showModalLayer(dialog) {
+    const opening = !dialog.open;
+    if (opening) dialog.showModal();
+    const index = nativeLayers.indexOf(dialog);
+    if (opening && index >= 0) nativeLayers.splice(index, 1);
+    if (opening || index < 0) nativeLayers.push(dialog);
+    if (!layerBindings.has(dialog)) {
+      layerBindings.add(dialog);
+      dialog.addEventListener("close", () => {
+        if (!dialog.open) releaseLayer(dialog);
+      });
+      dialog.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") event.stopPropagation();
+        if (event.key === "Tab" && layerHost() === dialog && !event.defaultPrevented) {
+          const items = [
+            ...dialog.querySelectorAll(
+              'button:not(:disabled),a[href],input:not(:disabled):not([type="hidden"]),select:not(:disabled),textarea:not(:disabled),summary,[tabindex="0"]'
+            )
+          ].filter(
+            (node) => node.tabIndex >= 0 && node.getClientRects().length && !node.closest("[inert]") && getComputedStyle(node).visibility === "visible"
+          );
+          event.preventDefault();
+          const index2 = items.indexOf(document.activeElement);
+          const next = index2 < 0 ? event.shiftKey ? items.length - 1 : 0 : (index2 + (event.shiftKey ? -1 : 1) + items.length) % items.length;
+          (items[next] || dialog).focus({ preventScroll: true });
+        }
+      });
+    }
+    adoptNotices();
+    if (!layerObserver) {
+      layerObserver = new MutationObserver(() => {
+        for (const layer of [...nativeLayers]) {
+          if (!layer.isConnected || !layer.open) {
+            releaseLayer(layer);
+            layer.dispatchEvent(new Event("ui-layer-dismiss"));
+          }
+        }
+        if (nativeLayers.length) adoptNotices();
+      });
+      layerObserver.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["open"]
+      });
+    }
+    return dialog;
+  }
+  function closeModalLayer(dialog) {
+    if (!dialog) return;
+    releaseLayer(dialog);
+    if (dialog.open) dialog.close();
+  }
+  function restoreLayerFocus(origin) {
+    const host = layerHost();
+    if (origin?.isConnected && origin.getClientRects().length && !origin.closest("[inert]") && (host === document.body || host.contains(origin)))
+      origin.focus({ preventScroll: true });
+  }
+  function confirmSheet({
+    title = "\u786E\u8BA4\u64CD\u4F5C",
+    body = "",
+    command = "",
+    typed = "",
+    confirmLabel = "\u786E\u5B9A",
+    cancelLabel = "\u53D6\u6D88",
+    danger = false,
+    signal,
+    formId = "",
+    inputId = "",
+    submitId = ""
+  } = {}) {
+    if (signal?.aborted) return Promise.resolve(false);
+    const id = "ui-sheet-" + uid(), dialog = document.createElement("dialog");
+    dialog.className = "ui-sheet";
+    dialog.setAttribute("aria-labelledby", id + "-title");
+    dialog.tabIndex = -1;
+    const form = document.createElement("form"), heading2 = document.createElement("h2");
+    if (formId) form.id = formId;
+    heading2.id = id + "-title";
+    heading2.textContent = title;
+    form.append(heading2);
+    if (body) {
+      const description = document.createElement("p");
+      description.id = id + "-body";
+      description.textContent = body;
+      dialog.setAttribute("aria-describedby", description.id);
+      form.append(description);
+    }
+    if (command) {
+      const preview = document.createElement("pre");
+      preview.className = "ui-sheet-command integration-page-text";
+      preview.textContent = command;
+      form.append(preview);
+    }
+    let input;
+    if (typed) {
+      const label = document.createElement("label");
+      label.className = "field ui-sheet-typed";
+      label.textContent = "\u8F93\u5165\u9879\u76EE\u540D\u79F0\u300C" + typed + "\u300D\u786E\u8BA4";
+      input = document.createElement("input");
+      input.id = inputId || id + "-input";
+      input.autocomplete = "off";
+      input.required = true;
+      label.append(input);
+      form.append(label);
+    }
+    const actions = document.createElement("div"), cancel = document.createElement("button"), confirm2 = document.createElement("button");
+    actions.className = "ui-sheet-actions";
+    cancel.type = "button";
+    cancel.className = "btn ghost";
+    cancel.textContent = cancelLabel;
+    confirm2.type = "submit";
+    confirm2.className = "btn " + (danger ? "danger" : "primary");
+    confirm2.textContent = confirmLabel;
+    if (submitId) confirm2.id = submitId;
+    confirm2.disabled = !!typed;
+    actions.append(cancel, confirm2);
+    form.append(actions);
+    dialog.append(form);
+    const origin = document.activeElement;
+    document.body.append(dialog);
+    return new Promise((resolve) => {
+      let settled = false, composing = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener("abort", abort);
+        const wasTop = layerHost() === dialog;
+        closeModalLayer(dialog);
+        dialog.remove();
+        if (wasTop) restoreLayerFocus(origin);
+        resolve(value);
+      };
+      const abort = () => finish(false);
+      cancel.addEventListener("click", abort);
+      dialog.addEventListener("cancel", (event) => {
+        event.preventDefault();
+        abort();
+      });
+      dialog.addEventListener("close", abort);
+      dialog.addEventListener("ui-layer-dismiss", abort);
+      signal?.addEventListener("abort", abort, { once: true });
+      input?.addEventListener("input", () => {
+        confirm2.disabled = input.value !== typed;
+      });
+      form.addEventListener("compositionstart", () => {
+        composing = true;
+      });
+      form.addEventListener("compositionend", () => {
+        composing = false;
+      });
+      form.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && (composing || event.isComposing || event.keyCode === 229))
+          event.preventDefault();
+      });
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (settled || composing || confirm2.disabled || input && input.value !== typed) return;
+        finish(true);
+      });
+      try {
+        showModalLayer(dialog);
+        (input || (danger ? cancel : confirm2)).focus({ preventScroll: true });
+      } catch {
+        finish(false);
+      }
+    });
+  }
   function createModal({
     state: S,
     labelFields: uiLabelFields,
@@ -356,8 +559,7 @@ var CP = (() => {
       }
       if (focus?.isConnected && !focus.getClientRects().length)
         focus = focus.closest(".tool-menu")?.querySelector("summary");
-      if (focus?.isConnected && focus.getClientRects().length && !focus.closest("[inert]"))
-        focus.focus({ preventScroll: true });
+      restoreLayerFocus(focus);
     }
     function modal(title, body, footer = "", large = false, closable = true) {
       const origin = $(".modal") ? S.modalLastFocus : document.activeElement;
@@ -367,8 +569,7 @@ var CP = (() => {
       document.body.style.overflow = "hidden";
       $("#app").inert = true;
       const dialog = $(".modal");
-      const toasts = $("#toasts");
-      if (toasts) $(".modal-header", dialog).after(toasts);
+      adoptNotices();
       const complex = dialog.querySelector(
         '#role-form,#profile-form,#vps-form,#project-form,#device-form,#device-rename,#agent-command-form,#grant-form,#workflow-create-form,#workflow-update-form,#artifact-form,.gw-tools,#gw-form [name="networks"],#iam-issuer,#iam-group_name'
       );
@@ -404,12 +605,14 @@ var CP = (() => {
       }
       uiLabelFields(dialog);
       const key2 = (e) => {
+        if (e.defaultPrevented || layerHost() !== document.body || e.target?.closest?.("dialog"))
+          return;
         if (e.key === "Escape" && closable) {
           e.preventDefault();
           requestClose(dialog);
           return;
         }
-        uiTrapTab(e, dialog);
+        uiTrapTab(e, dialog, [document.getElementById("computer-approval-inbox")]);
       };
       const scope = lifetime.mount(dialog);
       scope.listen(document, "keydown", key2);

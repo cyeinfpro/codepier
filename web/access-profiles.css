@@ -17,14 +17,14 @@
 }
 .role-rule {
   border: 1px solid var(--ui-border);
-  border-radius: 12px;
+  border-radius: var(--ui-radius-md);
   padding: 16px;
   margin: 16px 0;
   min-width: 0;
 }
 .role-rule legend {
   padding: 0 8px;
-  font-weight: 600;
+  font-weight: var(--ui-weight-semibold);
 }
 .role-rule .check-list {
   max-height: 200px;

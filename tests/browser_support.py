@@ -45,6 +45,8 @@ def chat_page(request, chat_browser_pool):
       document.addEventListener('click',e=>{const b=e.target.closest('[data-nav]');if(b)navigate(b.dataset.nav);});
       window.navigate=async page=>{S.page=page;chatDetach();$('#page').textContent='Management page';};
     }''')
+    # Chat dialogs use the same layer host primitives as the production page.
+    page.add_script_tag(path=str(ROOT / 'web/core/bundle.js'))
     page.add_script_tag(path=str(ROOT / 'web/chat-markdown.js'))
     page.add_script_tag(path=str(ROOT / 'web/chat-panels.js'))
     page.add_script_tag(path=str(ROOT / 'web/chat-chrome.js'))
@@ -61,3 +63,35 @@ def chat_page(request, chat_browser_pool):
 
 def event(page, kind, value, cursor):
     page.evaluate('([kind,value,cursor])=>streams.at(-1).emit(kind,value,cursor)', [kind,value,cursor])
+
+
+def login_panel(page, stack, route: str = "overview") -> None:
+    page.goto(f"{stack.url}/#{route}", wait_until="domcontentloaded")
+    expect(page.locator("#login-form")).to_be_visible()
+    page.fill('#username', 'admin');page.locator("#password").fill(stack.password)
+    page.locator("#login-form button[type=submit]").click()
+    # Login and the first page load share the same bounded readiness budget.
+    expect(page.locator(".shell")).to_be_visible(timeout=15_000)
+    expect(page.locator(".skeleton")).to_have_count(0, timeout=15_000)
+
+def set_appearance(page, scheme: str) -> None:
+    result = page.evaluate(
+        """scheme => {
+          if (!window.CodePierAppearance) return {missing: true};
+          window.CodePierAppearance.setPreference(scheme);
+          return {
+            preference: window.CodePierAppearance.getPreference(),
+            scheme: window.CodePierAppearance.getScheme(),
+            dataset: document.documentElement.dataset.appearance,
+          };
+        }""",
+        scheme,
+    )
+    assert result == {"preference": scheme, "scheme": scheme, "dataset": scheme}
+    page.wait_for_function(
+        "scheme => document.documentElement.dataset.appearance === scheme", arg=scheme
+    )
+    controls = page.locator("[data-ui-appearance]")
+    expect(controls).not_to_have_count(0)
+    for index in range(controls.count()):
+        expect(controls.nth(index)).to_have_value(scheme)

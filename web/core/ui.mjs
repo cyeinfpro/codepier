@@ -117,7 +117,8 @@ export function toast(message, error = false) {
     const focused = node.contains(document.activeElement);
     node.remove();
     if (focused) {
-      const dialog = $('.modal');
+      const host = layerHost();
+      const dialog = host === document.body ? $('.modal') : host;
       const target =
         origin?.isConnected &&
         origin.getClientRects().length &&
@@ -219,6 +220,234 @@ export async function busy(button, fn, notify = toast) {
   }
 }
 
+// Global notices must remain descendants of the native top layer.
+const nativeLayers = [];
+const layerBindings = new WeakSet();
+let layerObserver = null;
+const noticeSelectors = ['#toasts', '#computer-approval-inbox'];
+
+export function layerHost() {
+  return nativeLayers.findLast((dialog) => dialog.isConnected && dialog.open) || document.body;
+}
+
+function adoptNotices(source = document) {
+  const host = layerHost();
+  for (const selector of noticeSelectors) {
+    const node = document.querySelector(selector) || source.querySelector(selector);
+    if (!node) continue;
+    const modal = host === document.body && document.querySelector('.modal');
+    if (selector === '#toasts' && modal) {
+      const header = modal.querySelector('.modal-header');
+      if (header && header.nextElementSibling !== node) header.after(node);
+    } else if (node.parentElement !== host) host.append(node);
+  }
+}
+
+function releaseLayer(dialog) {
+  const index = nativeLayers.indexOf(dialog);
+  if (index < 0) return;
+  nativeLayers.splice(index, 1);
+  adoptNotices(dialog);
+  if (!nativeLayers.length) {
+    layerObserver?.disconnect();
+    layerObserver = null;
+  }
+}
+
+export function showModalLayer(dialog) {
+  const opening = !dialog.open;
+  if (opening) dialog.showModal();
+  const index = nativeLayers.indexOf(dialog);
+  // A direct close() queues its event. Reopening now changes native top-layer
+  // order even if that old entry has not been released yet.
+  if (opening && index >= 0) nativeLayers.splice(index, 1);
+  if (opening || index < 0) nativeLayers.push(dialog);
+  if (!layerBindings.has(dialog)) {
+    layerBindings.add(dialog);
+    dialog.addEventListener('close', () => {
+      // The close event is queued; this dialog may already have reopened.
+      if (!dialog.open) releaseLayer(dialog);
+    });
+    dialog.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') event.stopPropagation();
+      if (event.key === 'Tab' && layerHost() === dialog && !event.defaultPrevented) {
+        const items = [
+          ...dialog.querySelectorAll(
+            'button:not(:disabled),a[href],input:not(:disabled):not([type="hidden"]),select:not(:disabled),textarea:not(:disabled),summary,[tabindex="0"]',
+          ),
+        ].filter(
+          (node) =>
+            node.tabIndex >= 0 &&
+            node.getClientRects().length &&
+            !node.closest('[inert]') &&
+            getComputedStyle(node).visibility === 'visible',
+        );
+        event.preventDefault();
+        const index = items.indexOf(document.activeElement);
+        const next =
+          index < 0
+            ? event.shiftKey
+              ? items.length - 1
+              : 0
+            : (index + (event.shiftKey ? -1 : 1) + items.length) % items.length;
+        (items[next] || dialog).focus({ preventScroll: true });
+      }
+    });
+  }
+  adoptNotices();
+  if (!layerObserver) {
+    layerObserver = new MutationObserver(() => {
+      for (const layer of [...nativeLayers]) {
+        if (!layer.isConnected || !layer.open) {
+          releaseLayer(layer);
+          layer.dispatchEvent(new Event('ui-layer-dismiss'));
+        }
+      }
+      if (nativeLayers.length) adoptNotices();
+    });
+    layerObserver.observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['open'],
+    });
+  }
+  return dialog;
+}
+
+export function closeModalLayer(dialog) {
+  if (!dialog) return;
+  releaseLayer(dialog);
+  if (dialog.open) dialog.close();
+}
+
+export function restoreLayerFocus(origin) {
+  const host = layerHost();
+  if (
+    origin?.isConnected &&
+    origin.getClientRects().length &&
+    !origin.closest('[inert]') &&
+    (host === document.body || host.contains(origin))
+  )
+    origin.focus({ preventScroll: true });
+}
+
+export function confirmSheet({
+  title = '确认操作',
+  body = '',
+  command = '',
+  typed = '',
+  confirmLabel = '确定',
+  cancelLabel = '取消',
+  danger = false,
+  signal,
+  formId = '',
+  inputId = '',
+  submitId = '',
+} = {}) {
+  if (signal?.aborted) return Promise.resolve(false);
+  const id = 'ui-sheet-' + uid(),
+    dialog = document.createElement('dialog');
+  dialog.className = 'ui-sheet';
+  dialog.setAttribute('aria-labelledby', id + '-title');
+  dialog.tabIndex = -1;
+  const form = document.createElement('form'),
+    heading = document.createElement('h2');
+  if (formId) form.id = formId;
+  heading.id = id + '-title';
+  heading.textContent = title;
+  form.append(heading);
+  if (body) {
+    const description = document.createElement('p');
+    description.id = id + '-body';
+    description.textContent = body;
+    dialog.setAttribute('aria-describedby', description.id);
+    form.append(description);
+  }
+  if (command) {
+    const preview = document.createElement('pre');
+    preview.className = 'ui-sheet-command integration-page-text';
+    preview.textContent = command;
+    form.append(preview);
+  }
+  let input;
+  if (typed) {
+    const label = document.createElement('label');
+    label.className = 'field ui-sheet-typed';
+    label.textContent = '输入项目名称「' + typed + '」确认';
+    input = document.createElement('input');
+    input.id = inputId || id + '-input';
+    input.autocomplete = 'off';
+    input.required = true;
+    label.append(input);
+    form.append(label);
+  }
+  const actions = document.createElement('div'),
+    cancel = document.createElement('button'),
+    confirm = document.createElement('button');
+  actions.className = 'ui-sheet-actions';
+  cancel.type = 'button';
+  cancel.className = 'btn ghost';
+  cancel.textContent = cancelLabel;
+  confirm.type = 'submit';
+  confirm.className = 'btn ' + (danger ? 'danger' : 'primary');
+  confirm.textContent = confirmLabel;
+  if (submitId) confirm.id = submitId;
+  confirm.disabled = !!typed;
+  actions.append(cancel, confirm);
+  form.append(actions);
+  dialog.append(form);
+  const origin = document.activeElement;
+  document.body.append(dialog);
+  return new Promise((resolve) => {
+    let settled = false,
+      composing = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', abort);
+      const wasTop = layerHost() === dialog;
+      closeModalLayer(dialog);
+      dialog.remove();
+      if (wasTop) restoreLayerFocus(origin);
+      resolve(value);
+    };
+    const abort = () => finish(false);
+    cancel.addEventListener('click', abort);
+    dialog.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      abort();
+    });
+    dialog.addEventListener('close', abort);
+    dialog.addEventListener('ui-layer-dismiss', abort);
+    signal?.addEventListener('abort', abort, { once: true });
+    input?.addEventListener('input', () => {
+      confirm.disabled = input.value !== typed;
+    });
+    form.addEventListener('compositionstart', () => {
+      composing = true;
+    });
+    form.addEventListener('compositionend', () => {
+      composing = false;
+    });
+    form.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && (composing || event.isComposing || event.keyCode === 229))
+        event.preventDefault();
+    });
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      if (settled || composing || confirm.disabled || (input && input.value !== typed)) return;
+      finish(true);
+    });
+    try {
+      showModalLayer(dialog);
+      (input || (danger ? cancel : confirm)).focus({ preventScroll: true });
+    } catch {
+      finish(false);
+    }
+  });
+}
+
 export function createModal({
   state: S,
   labelFields: uiLabelFields,
@@ -308,8 +537,7 @@ export function createModal({
     }
     if (focus?.isConnected && !focus.getClientRects().length)
       focus = focus.closest('.tool-menu')?.querySelector('summary');
-    if (focus?.isConnected && focus.getClientRects().length && !focus.closest('[inert]'))
-      focus.focus({ preventScroll: true });
+    restoreLayerFocus(focus);
   }
   function modal(title, body, footer = '', large = false, closable = true) {
     const origin = $('.modal') ? S.modalLastFocus : document.activeElement;
@@ -320,8 +548,7 @@ export function createModal({
     document.body.style.overflow = 'hidden';
     $('#app').inert = true;
     const dialog = $('.modal');
-    const toasts = $('#toasts');
-    if (toasts) $('.modal-header', dialog).after(toasts);
+    adoptNotices();
     const complex = dialog.querySelector(
       '#role-form,#profile-form,#vps-form,#project-form,#device-form,#device-rename,#agent-command-form,#grant-form,#workflow-create-form,#workflow-update-form,#artifact-form,.gw-tools,#gw-form [name="networks"],#iam-issuer,#iam-group_name',
     );
@@ -367,12 +594,14 @@ export function createModal({
     }
     uiLabelFields(dialog);
     const key = (e) => {
+      if (e.defaultPrevented || layerHost() !== document.body || e.target?.closest?.('dialog'))
+        return;
       if (e.key === 'Escape' && closable) {
         e.preventDefault();
         requestClose(dialog);
         return;
       }
-      uiTrapTab(e, dialog);
+      uiTrapTab(e, dialog, [document.getElementById('computer-approval-inbox')]);
     };
     const scope = lifetime.mount(dialog);
     scope.listen(document, 'keydown', key);

@@ -353,10 +353,9 @@ function chatNewSession(projectHint = ChatUI.project, providerHint = ChatUI.prov
     finished = true;
     if (ChatUI.dialogCancel === close) ChatUI.dialogCancel = null;
     ChatUI.projectPickerRefresh = null;
-    dialog.close();
+    CP.ui.closeModalLayer(dialog);
     dialog.remove();
-    if (origin?.isConnected && origin.getClientRects().length && !origin.closest('[inert]'))
-      origin.focus({ preventScroll: true });
+    CP.ui.restoreLayerFocus(origin);
   }
   ChatUI.dialogCancel = close;
   async function choose(project) {
@@ -499,7 +498,7 @@ function chatNewSession(projectHint = ChatUI.project, providerHint = ChatUI.prov
     }
   });
   ChatUI.projectPickerRefresh = render;
-  dialog.showModal();
+  CP.ui.showModalLayer(dialog);
   render();
   input.focus();
 }

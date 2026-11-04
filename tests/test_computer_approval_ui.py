@@ -124,7 +124,7 @@ def test_failed_reads_back_off_without_concurrent_or_unbounded_retry(page):
 
 def test_pending_decision_is_once_and_old_read_cannot_resurrect_it(page):
     page.evaluate('fixture.approvals=[item()]; fixture.holdPost=true; login()')
-    page.evaluate('const button=document.querySelector("button"); void button.onclick(); void button.onclick()')
+    page.evaluate('const button=document.querySelector("[data-request-id] button"); void button.onclick(); void button.onclick()')
     assert len(page.evaluate('fixture.posts')) == 1
     expect(page.locator('[data-request-id]')).to_have_attribute('data-state', 'pending')
     page.evaluate('refreshComputerApprovals()')
@@ -143,7 +143,7 @@ def test_local_expiry_disables_decisions_without_a_server_event(page):
     page.clock.run_for(1000)
     expect(page.locator('[data-request-id]')).to_have_attribute('data-state', 'expired')
     expect(page.get_by_role('button', name='允许应用访问', exact=True)).to_be_disabled()
-    page.evaluate('void document.querySelector("button").onclick()')
+    page.evaluate('void document.querySelector("[data-request-id] button").onclick()')
     assert page.evaluate('fixture.posts') == []
 
 

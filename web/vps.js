@@ -145,12 +145,21 @@ async function vpsEdit(id = null) {
     submit();
   };
   if (id)
-    $('#vps-delete', dialog).onclick = () => {
-      if (
-        !confirm(`删除“${v.name}”的连接及全部项目分配？不会删除服务器；已下发的命令不会自动停止。`)
-      )
-        return;
-      busy($('#vps-delete', dialog), async () => {
+    $('#vps-delete', dialog).onclick = async () => {
+      const button = $('#vps-delete', dialog),
+        intent = S.vpsIntent;
+      if (button.disabled) return;
+      const ok = await uiConfirmAction(
+        {
+          title: `删除“${v.name}”？`,
+          body: '将删除连接及全部项目分配。不会删除服务器；已下发的命令不会自动停止。',
+          confirmLabel: '删除连接',
+          danger: true,
+        },
+        { owner: dialog, current: () => $('.modal') === dialog && S.vpsIntent === intent },
+      );
+      if (!ok) return;
+      return busy(button, async () => {
         await api('/api/vps/' + id + '?expected_version=' + v.version, { method: 'DELETE' });
         form.reset();
         closeModal(dialog);

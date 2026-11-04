@@ -73,7 +73,7 @@ window.CodePierIntegrations = (() => {
   function detach() {
     mounted?.abort();
     mounted = null;
-    if ($('#i-confirm-form')) closeModal($('.modal'));
+    U().cancelConfirm();
   }
   function inherit(from) {
     const v = state();

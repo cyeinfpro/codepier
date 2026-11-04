@@ -17,6 +17,7 @@ from playwright.sync_api import Page, expect, sync_playwright
 
 from shared.util import atomic_json
 from tests.browser_launch import launch_browser
+from tests.browser_support import login_panel as _login, set_appearance as _set_scheme
 from tests.test_chat_worker import FAKE
 
 
@@ -56,16 +57,6 @@ def _asset_positions(html: str) -> dict[str, int]:
     return positions
 
 
-def _login(page: Page, stack, route: str = "overview") -> None:
-    page.goto(f"{stack.url}/#{route}", wait_until="domcontentloaded")
-    expect(page.locator("#login-form")).to_be_visible()
-    page.fill('#username', 'admin');page.locator("#password").fill(stack.password)
-    page.locator("#login-form button[type=submit]").click()
-    # Login and the first page load share the same bounded readiness budget.
-    expect(page.locator(".shell")).to_be_visible(timeout=15_000)
-    expect(page.locator(".skeleton")).to_have_count(0, timeout=15_000)
-
-
 def _prepare_native_fixture(stack) -> None:
     """Force native catalog traffic through local deterministic CLI substitutes."""
     if getattr(stack, "_ui_unification_native_fixture", False):
@@ -103,29 +94,6 @@ def _prepare_native_fixture(stack) -> None:
     atomic_json(stack.config_path, stack.config)
     stack.start_agent()
     stack._ui_unification_native_fixture = True
-
-
-def _set_scheme(page: Page, scheme: str) -> None:
-    result = page.evaluate(
-        """scheme => {
-          if (!window.CodePierAppearance) return {missing: true};
-          window.CodePierAppearance.setPreference(scheme);
-          return {
-            preference: window.CodePierAppearance.getPreference(),
-            scheme: window.CodePierAppearance.getScheme(),
-            dataset: document.documentElement.dataset.appearance,
-          };
-        }""",
-        scheme,
-    )
-    assert result == {"preference": scheme, "scheme": scheme, "dataset": scheme}
-    page.wait_for_function(
-        "scheme => document.documentElement.dataset.appearance === scheme", arg=scheme
-    )
-    controls = page.locator("[data-ui-appearance]")
-    expect(controls).not_to_have_count(0)
-    for index in range(controls.count()):
-        expect(controls.nth(index)).to_have_value(scheme)
 
 
 def _navigate(page: Page, route: str) -> None:

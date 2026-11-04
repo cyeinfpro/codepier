@@ -275,7 +275,12 @@ window.CodePierIntegrationUI = (() => {
     container.append(article);
     return article;
   }
-  function confirmAction({
+  let confirmation = null;
+  function cancelConfirm() {
+    confirmation?.abort();
+    confirmation = null;
+  }
+  async function confirmAction({
     title,
     text,
     command = '',
@@ -283,36 +288,25 @@ window.CodePierIntegrationUI = (() => {
     confirmLabel = '确认',
     danger = false,
   }) {
-    return new Promise((resolve) => {
-      const d = modal(
+    cancelConfirm();
+    const controller = new AbortController();
+    confirmation = controller;
+    try {
+      return await CP.ui.confirmSheet({
         title,
-        `<form id="i-confirm-form"><p class="integration-help">${esc(text)}</p>${command ? `<pre class="integration-page-text">${esc(command)}</pre>` : ''}${typed ? `<label class="integration-field">输入项目名称「${esc(typed)}」确认<input id="i-confirm-name" autocomplete="off" required></label>` : ''}</form>`,
-        `<button type="button" class="btn ghost" data-action="close-modal">取消</button><button type="submit" form="i-confirm-form" class="btn ${danger ? 'danger' : 'primary'}" id="i-confirm-submit" ${typed ? 'disabled' : ''}>${esc(confirmLabel)}</button>`,
-      );
-      let done = false;
-      const previous = S.modalCleanup;
-      S.modalCleanup = () => {
-        previous?.();
-        if (!done) {
-          done = true;
-          resolve(false);
-        }
-      };
-      const input = $('#i-confirm-name', d),
-        button = $('#i-confirm-submit', d);
-      if (input) input.oninput = () => (button.disabled = input.value !== typed);
-      $('#i-confirm-form', d).onsubmit = (e) => {
-        e.preventDefault();
-        if (button.disabled || done) return;
-        done = true;
-        closeModal(d);
-        resolve(true);
-      };
-      d.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && (e.isComposing || e.keyCode === 229)) e.preventDefault();
+        body: text,
+        command,
+        typed,
+        confirmLabel,
+        danger,
+        signal: controller.signal,
+        formId: 'i-confirm-form',
+        inputId: 'i-confirm-name',
+        submitId: 'i-confirm-submit',
       });
-      if (danger && !typed) $('[data-action=close-modal]', d)?.focus();
-    });
+    } finally {
+      if (confirmation === controller) confirmation = null;
+    }
   }
   return {
     label,
@@ -329,5 +323,6 @@ window.CodePierIntegrationUI = (() => {
     details,
     result,
     confirmAction,
+    cancelConfirm,
   };
 })();

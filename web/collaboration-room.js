@@ -304,6 +304,7 @@ window.CodePierCollaboration = (() => {
     abortEvents = null;
     unsubscribe?.();
     unsubscribe = null;
+    CP.ui.closeModalLayer(root?.querySelector('dialog'));
     root = null;
     bound = null;
     panelEpoch++;
@@ -780,7 +781,7 @@ window.CodePierCollaboration = (() => {
     if (panel?.name === 'work') state.workDetail = null;
     panelEpoch++;
     panel = null;
-    dialog.close();
+    CP.ui.closeModalLayer(dialog);
   }
   function openPanel(name, heading, content, data = {}) {
     panel?.impactController?.abort();
@@ -797,7 +798,7 @@ window.CodePierCollaboration = (() => {
     panelError('');
     patchMutationRecovery();
     patchRoomPermissions();
-    if (!dialog.open) dialog.showModal();
+    if (!dialog.open) CP.ui.showModalLayer(dialog);
     const openingEpoch = panel.epoch;
     requestAnimationFrame(() => {
       if (!dialog.open || panel?.epoch !== openingEpoch) return;
@@ -2910,7 +2911,7 @@ window.CodePierCollaboration = (() => {
         if (panel?.name === 'work') state.workDetail = null;
         panel = null;
         const opener = dialog?._crOpener;
-        if (opener?.isConnected && !opener.disabled) opener.focus({ preventScroll: true });
+        if (!opener?.disabled) CP.ui.restoreLayerFocus(opener);
       },
       { signal },
     );

@@ -168,7 +168,22 @@ window.CodePierIdentity = (() => {
       const form = e.target;
       busy($('button[type="submit"]', dialog), async () => {
         if (!form.reportValidity()) return;
-        if (options.confirm && !confirm(options.confirm(form))) return;
+        if (
+          options.confirm &&
+          !(await uiConfirmAction(
+            {
+              title: '确认保存身份设置',
+              body: options.confirm(form),
+              confirmLabel: '确认保存',
+              danger: true,
+            },
+            {
+              owner: dialog,
+              current: () => S.session === login && S.space_id === space && S.page === page,
+            },
+          ))
+        )
+          return;
         const status = $('#iam-save-status', dialog);
         status.textContent = '正在保存…';
         try {
@@ -620,7 +635,18 @@ window.CodePierIdentity = (() => {
       (x) =>
         (x.onclick = () =>
           busy(x, async () => {
-            if (!confirm('解除关联并撤销此身份签发的会话和 MCP 连接？')) return;
+            if (
+              !(await uiConfirmAction(
+                {
+                  title: '解除身份关联？',
+                  body: '解除关联并撤销此身份签发的会话和 MCP 连接？',
+                  confirmLabel: '解除关联',
+                  danger: true,
+                },
+                { owner: x },
+              ))
+            )
+              return;
             const out = await api('/api/iam/identities/' + x.dataset.iamUnlink, {
               method: 'DELETE',
             });
@@ -644,9 +670,15 @@ window.CodePierIdentity = (() => {
         (x.onclick = () =>
           busy(x, async () => {
             if (
-              !confirm(
-                '更新此成员所有来源的暂停状态？暂停会限制后续访问；已经运行或结果不明的操作不会自动停止，请单独检查原操作。',
-              )
+              !(await uiConfirmAction(
+                {
+                  title: '更新成员暂停状态？',
+                  body: '更新此成员所有来源的暂停状态？暂停会限制后续访问；已经运行或结果不明的操作不会自动停止，请单独检查原操作。',
+                  confirmLabel: '确认更新',
+                  danger: true,
+                },
+                { owner: x },
+              ))
             )
               return;
             await api(`/api/iam/spaces/${S.space_id}/members/${x.dataset.iamBlock}/suspension`, {
@@ -663,7 +695,18 @@ window.CodePierIdentity = (() => {
       (x) =>
         (x.onclick = () =>
           busy(x, async () => {
-            if (!confirm('撤销这份未接受的邀请？这不会删除已接受的成员资格。')) return;
+            if (
+              !(await uiConfirmAction(
+                {
+                  title: '撤销邀请？',
+                  body: '撤销这份未接受的邀请？这不会删除已接受的成员资格。',
+                  confirmLabel: '撤销邀请',
+                  danger: true,
+                },
+                { owner: x },
+              ))
+            )
+              return;
             await api(`/api/iam/spaces/${S.space_id}/invites/${x.dataset.iamInvite}`, {
               method: 'DELETE',
             });

@@ -10,6 +10,7 @@
   --ui-selected: #e3e3e3;
   --ui-line: #e3e3e3;
   --ui-border: #cccccc;
+  --ui-control-border: #878787;
   --ui-text: #272727;
   --ui-muted: #606060;
   --ui-soft: #626262;
@@ -92,19 +93,56 @@
   --ui-icon-size: 18px;
   --ui-icon-small: 16px;
   --ui-radius-small: 8px;
-  --ui-panel-radius-compact: 18px;
+  --ui-panel-radius-compact: var(--ui-radius-lg);
   --ui-panel-inset: 20px;
   --ui-modal-inset: 24px;
   --ui-focus-width: 3px;
-  --ui-control-radius: 12px;
-  --ui-panel-radius: 20px;
-  --ui-window-radius: 20px;
+  --ui-control-radius: var(--ui-radius-small);
+  --ui-panel-radius: var(--ui-radius-xl);
+  --ui-window-radius: var(--ui-radius-xl);
   --ui-shadow: 0 12px 36px rgb(0 0 0 / 10%), 0 2px 6px rgb(0 0 0 / 5%);
   --ui-scrim: rgb(20 20 20 / 36%);
   --ui-motion-fast: 120ms;
   --ui-motion-normal: 180ms;
   --ui-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
 
+  /* One shared type, geometry and elevation scale. */
+  --ui-text-2xs: 11px;
+  --ui-text-md: 15px;
+  --ui-text-h2: 22px;
+  --ui-text-display: 36px;
+  --ui-weight-regular: 400;
+  --ui-weight-medium: 500;
+  --ui-weight-semibold: 600;
+  --ui-weight-bold: 700;
+  --ui-leading-tight: 1.3;
+  --ui-leading-body: 1.6;
+  --ui-leading-relaxed: 1.75;
+  --ui-radius-xs: 6px;
+  --ui-radius-md: 12px;
+  --ui-radius-lg: 16px;
+  --ui-radius-xl: 20px;
+  --ui-radius-pill: 999px;
+  --ui-elev-0: none;
+  --ui-elev-1: 0 1px 3px rgb(0 0 0 / 4%);
+  --ui-elev-2: 0 6px 20px rgb(0 0 0 / 8%), 0 1px 3px rgb(0 0 0 / 4%);
+  --ui-elev-3: var(--ui-shadow);
+  /* Global layers; component-local stacking is limited to 0–9. */
+  --ui-z-local: 1;
+  --ui-z-sticky: 100;
+  --ui-z-dropdown: 200;
+  --ui-z-dock: 300;
+  --ui-z-drawer-scrim: 390;
+  --ui-z-drawer: 400;
+  --ui-z-popover: 500;
+  --ui-z-modal: 600;
+  --ui-z-critical: 700;
+  --ui-z-toast: 800;
+  --ui-z-skip: 900;
+
+  --ui-nav-width: 232px;
+  --ui-reading-width: 76ch;
+  --ui-shadow-soft: var(--ui-elev-1);
   --ui-page-x: 28px;
   --ui-page-top: 20px;
   --ui-page-title: 28px;
@@ -123,6 +161,7 @@ html[data-appearance='dark'] {
   --ui-selected: #393939;
   --ui-line: #3a3a3a;
   --ui-border: #515151;
+  --ui-control-border: #818181;
   --ui-text: #e5e5e5;
   --ui-muted: #b9b9b9;
   --ui-soft: #ababab;
@@ -191,6 +230,7 @@ html[data-appearance='dark'] {
     --ui-selected: #393939;
     --ui-line: #3a3a3a;
     --ui-border: #515151;
+    --ui-control-border: #818181;
     --ui-text: #e5e5e5;
     --ui-muted: #b9b9b9;
     --ui-soft: #ababab;
@@ -268,5 +308,6 @@ html[data-appearance='dark'] {
     --ui-page-x: 16px;
     --ui-page-top: 18px;
     --ui-page-title: 26px;
+    --ui-topbar-height: 64px;
   }
 }

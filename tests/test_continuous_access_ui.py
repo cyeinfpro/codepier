@@ -116,11 +116,11 @@ def test_bulk_apply_requires_explicit_confirmation_and_does_not_change_pat(acces
     page.locator('#access-settings-advanced summary').click()
     form = page.locator('#access-batch-form')
     form.locator('[name="apply_to_existing"]').check()
-    page.once('dialog', lambda dialog: dialog.dismiss())
     form.locator('button[type="submit"]').click()
+    page.locator('.ui-sheet .ghost').click()
     assert not requests
-    page.once('dialog', lambda dialog: dialog.accept())
     form.locator('button[type="submit"]').click()
+    page.locator('.ui-sheet button[type="submit"]').click()
     expect(page.locator('#access-batch-status')).to_contain_text('无需重新连接')
     assert len(requests) == 1 and requests[0]['apply_to_existing'] is True
     expect(form.locator('[name="apply_to_existing"]')).not_to_be_checked()

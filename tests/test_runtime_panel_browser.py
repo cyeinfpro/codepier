@@ -19,7 +19,7 @@ def runtime_page(request, chat_browser_pool, stack):
     engine, width, height = request.param
     context = chat_browser_pool(engine).new_context(viewport={'width': width, 'height': height})
     page = context.new_page(); errors = []
-    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.on('pageerror', lambda error: errors.append(error.stack or str(error)))
     login(page, stack)
     page.evaluate("navigate('projects')")
     page.locator('[data-runtime-project="' + stack.project['id'] + '"]').click()
@@ -80,8 +80,8 @@ def test_conflicting_save_retains_draft_then_refresh_loads_current(runtime_page,
     expect(page.locator('[data-runtime-feedback]')).to_contain_text('草稿', timeout=25000)
     expect(form.locator('[value="native_compat"]')).to_be_checked()
     assert snapshot(stack)['profile']['path'] == ['new-tools']
-    page.once('dialog', lambda dialog: dialog.accept())
     page.locator('[data-runtime-refresh]').click()
+    page.locator('.ui-sheet button[type="submit"]').click()
     expect(form.locator('[value="project_clean_v1"]')).to_be_checked(timeout=25000)
     expect(form.locator('[name="runtime_path"]')).to_have_value('new-tools')
 

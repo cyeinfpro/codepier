@@ -37,6 +37,25 @@ npm --prefix web/mcp-apps run build
 
 主动排版使用 npm run format。ES Module 公共层在 web/core，已有功能通过生成的 CP bundle 渐进接入；不要手工编辑 bundle.js、index.html 或 assets-manifest.json。页面模板 index.source.html 不手写版本号。修改任何入口资源后重新构建并校验哈希，否则启动或发布检查应失败，而不是发布混合版本资源。
 
+## UI 设计系统约定
+
+颜色、字号、字重、圆角、浮层层级、动效与阴影的真值在 `web/tokens.css`。组件只引用语义 token；中文辅助文字至少 12px，输入框保持 16px，11px 仅允许明确的等宽数字或键盘标记。全局 z-index 使用 `--ui-z-*`，组件内部数值不得超过 9。
+
+原生面板经 `CP.ui.showModalLayer()` / `closeModalLayer()` 打开与关闭，移除面板前同步归还 toast 与授权收件箱。二次确认使用 `confirmSheet()`，不得复用单槽 modal 销毁正在编辑的窗口。异步业务确认在等待前后复核会话、空间、页面、元素与业务代次；同步导航/退出守卫需先重构状态机，不能机械改成 Promise。
+
+页内菜单放在非 `overflow:hidden/clip` 的祖先中；`uiMenu()` 处理视口边界翻转。模态入场只改变透明度，避免 transform 将 fixed 授权卡片的包含块变成面板。短屏验收除了没有页面双滚动，还须实际看见消息内容并保留独立滚动区。
+
+`scripts/ui_design_audit.py` 同时报告原始漂移与语义指标。`ui_design_fallbacks.json` 仅保存 conversation/approval 独立加载所需的精确回退声明（文件、条件、选择器、属性、值和次数），不能扩大为整文件或任意 var() 豁免。新增回退必须审阅，移除回退同时删除旧条目；`tests/test_ui_design_guard.py` 的原始及语义基线只降不升。
+
+```bash
+python3 scripts/ui_design_audit.py --json
+# 默认仅预览；应用前逐组件检查，不批量改整个前端。
+python3 scripts/ui_token_codemod.py web/chat.css
+.venv/bin/python -m pytest tests/test_ui_design_guard.py tests/test_ui_layers.py tests/test_ui_design_layout.py
+```
+
+CSS 覆盖报告只是保守候选，不是自动删除授权。合并样式必须保留各 owner 的加载顺序与条件，不能把原来最后加载的组件覆盖统一搬到最前面的全局文件。
+
 ## 分层测试
 
 ```bash

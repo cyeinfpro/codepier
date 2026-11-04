@@ -306,9 +306,22 @@ window.CodePierSettings = (() => {
         return;
       }
       if (
-        !confirm(
-          '将当前账号所有有效传统 OAuth 连接（不含 Profile）改为可访问全部现有及未来新增项目？\n只扩展项目范围，现有工具权限、PAT、凭据和有效期保持不变。',
-        )
+        !(await uiConfirmAction(
+          {
+            title: '批量扩大项目范围？',
+            body: '将当前账号所有有效传统 OAuth 连接（不含 Profile）改为可访问全部现有及未来新增项目？\n只扩展项目范围，现有工具权限、PAT、凭据和有效期保持不变。',
+            confirmLabel: '确认批量应用',
+            danger: true,
+          },
+          {
+            owner: form,
+            current: () =>
+              current() &&
+              !state.pending &&
+              checkbox.checked &&
+              equal(state.draft.access_defaults, state.base.access_defaults),
+          },
+        ))
       )
         return;
       const captured = state;
@@ -755,11 +768,25 @@ window.CodePierSettings = (() => {
         }
         if (
           key === 'public_url' &&
-          !confirm(
-            '将 MCP / OAuth 对外标识改为 ' +
-              submitted +
-              '？现有连接可能需要重新授权；不会修改监听或 Agent 地址。',
-          )
+          !(await uiConfirmAction(
+            {
+              title: '更改对外标识？',
+              body:
+                '将 MCP / OAuth 对外标识改为 ' +
+                submitted +
+                '？现有连接可能需要重新授权；不会修改监听或 Agent 地址。',
+              confirmLabel: '确认更改',
+              danger: true,
+            },
+            {
+              owner: form,
+              current: () =>
+                current() &&
+                !state.pending &&
+                equal(state.draft[key], submitted) &&
+                equal(state.base[key], baseline),
+            },
+          ))
         )
           return;
         state.pending = true;

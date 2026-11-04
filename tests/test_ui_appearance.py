@@ -20,7 +20,7 @@ function target(){
     dispatchEvent(event){for(const fn of [...(listeners.get(event.type)||[])])fn(event);return true;},
   };
 }
-function harness({saved=null,legacy=null,dark=false,storageFails=false}={}){
+function harness({saved=null,legacy=null,dark=false,storageFails=false,background=null}={}){
   const values=new Map();
   if(saved!==null)values.set('codepier-appearance',saved);
   if(legacy!==null)values.set('codepier-chat-appearance',legacy);
@@ -41,7 +41,11 @@ function harness({saved=null,legacy=null,dark=false,storageFails=false}={}){
   const window=Object.assign(target(),{document,localStorage:storage,matchMedia:()=>media});
   class CustomEvent{constructor(type,options={}){this.type=type;this.detail=options.detail;}}
   class MutationObserver{constructor(fn){this.fn=fn;}observe(){window.observer=this;}}
-  const context={window,document,CustomEvent,MutationObserver,Set,TypeError};
+  const getComputedStyle=()=>({getPropertyValue(name){
+    assert.equal(name,'--ui-bg');
+    return background === null ? (root.dataset.appearance==='dark' ? '#191919' : '#f4f4f4') : background;
+  }});
+  const context={window,document,CustomEvent,MutationObserver,Set,TypeError,getComputedStyle};
   vm.createContext(context);vm.runInContext(source,context);
   return {window,document,root,meta,controls,media,storage,values,api:window.CodePierAppearance};
 }
@@ -84,6 +88,11 @@ if(testCase==='preference'){
   assert.equal(h.api.getPreference(),'auto');assert.equal(h.api.getScheme(),'dark');
   h.api.setPreference('light');
   assert.equal(h.api.getPreference(),'light');assert.equal(h.root.dataset.appearance,'light');
+}else if(testCase==='token'){
+  const h=harness({background:'  #123456  '});
+  assert.equal(h.meta.content,'#123456');
+  h.api.setPreference('dark');assert.equal(h.meta.content,'#123456');
+  const missing=harness({background:'',dark:true});assert.equal(missing.meta.content,'#191919');
 }else throw new Error('unknown case');
 process.stdout.write(JSON.stringify({case:testCase,ok:true}));
 """
@@ -126,3 +135,7 @@ def test_cross_tab_storage_sync_and_unsubscribe():
 
 def test_storage_unavailable_keeps_in_memory_operation():
     run_case('unavailable')
+
+
+def test_theme_color_uses_token_and_only_falls_back_when_missing():
+    run_case('token')
