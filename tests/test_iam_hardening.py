@@ -125,6 +125,19 @@ def test_pending_receipt_revalidates_membership_after_wait(team,monkeypatch):
     from types import SimpleNamespace
     from hub import runtime as runtime_module
 
+    # The fixture has a live delivery worker on another event loop. Hold its
+    # delivery task until teardown, then drive real delivery explicitly below.
+    # Otherwise it may correctly persist AUTHORIZATION_CHANGED before the
+    # pending-receipt assertion, depending on thread scheduling.
+    async def hold_background_delivery(ids):
+        await asyncio.Future()
+    monkeypatch.setattr(runtime,'deliver_device',hold_background_delivery)
+
+    sends=[]
+    async def observe_send(identifier,prepared):
+        sends.append(identifier)
+    monkeypatch.setattr(runtime,'_send_prepared',observe_send)
+
     waited=[]
     dispatch_task=None
     async def wait_then_revoke(future,timeout):
@@ -156,8 +169,24 @@ def test_pending_receipt_revalidates_membership_after_wait(team,monkeypatch):
         assert caught.value.code=='SPACE_FORBIDDEN'
         identifier=caught.value.details['operation_id']
         assert waited==[identifier]
-        op=runtime.store.one('SELECT id,result FROM operations WHERE id=?',(identifier,))
-        assert op is not None and op['result'] is None
+        op=runtime.store.one('SELECT id,state,result,attempts FROM operations WHERE id=?',(identifier,))
+        assert op is not None and op['state']=='queued' and op['result'] is None
+        assert op['attempts']==0 and sends==[]
+
+        # Exercise the other legitimate ordering with real delivery logic:
+        # revoked work becomes a durable failure without any packet being sent.
+        await runtime.deliver(identifier)
+        op=runtime.store.one('SELECT id,state,result,attempts FROM operations WHERE id=?',(identifier,))
+        assert op['state']=='failed' and op['attempts']==0 and sends==[]
+        result=json.loads(op['result'])
+        assert result['ok'] is False and result['error']['code']=='AUTHORIZATION_CHANGED'
+        assert 'data' not in result
+        for read_receipt in (lambda:runtime._pending_receipt(identifier,principal),
+                             lambda:runtime.authorized_result(identifier,result,principal)):
+            with pytest.raises(DevError) as denied:
+                read_receipt()
+            assert denied.value.code=='SPACE_FORBIDDEN'
+            assert denied.value.details['operation_id']==identifier
     asyncio.run(run())
 
 

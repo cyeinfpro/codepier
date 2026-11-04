@@ -12,6 +12,7 @@ import pytest
 from playwright.sync_api import expect
 
 from tests.test_ui_unification import _login, _navigate, _prepare_native_fixture
+from tests.screenshot_support import capture_route_screenshot
 
 ROUTES = (
     'overview','devices','projects','vps','workbench','workflows','audit','connect',
@@ -39,9 +40,17 @@ def test_all_nineteen_routes_reflow_in_each_theme(stack, chat_browser_pool, tmp_
             else:
                 title=page.evaluate('route=>nav.find(item=>item[0]===route)[2]',route)
                 expect(page.locator('#page h1')).to_have_text(title)
-            assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+1'),route
+            layout = page.evaluate("""() => ({
+                width: document.documentElement.scrollWidth,
+                height: document.documentElement.scrollHeight,
+                viewportWidth: innerWidth, viewportHeight: innerHeight
+            })""")
+            assert layout['width'] <= layout['viewportWidth'] + 1,route
             assert page.evaluate('document.documentElement.dataset.appearance')==scheme
-            page.screenshot(path=str(tmp_path/f'{route}-{width}-{scheme}.png'),full_page=True)
+            capture_route_screenshot(
+                page, tmp_path/f'{route}-{width}-{scheme}.png', route=route, scheme=scheme,
+                viewport=(layout['viewportWidth'], layout['viewportHeight']),
+                document_size=(layout['width'], layout['height']))
         _navigate(page,'identity')
         panels=page.locator('.management-grid > .panel')
         expect(panels.locator('.panel-head h2')).to_have_text([
