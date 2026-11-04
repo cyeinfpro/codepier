@@ -188,7 +188,8 @@ async def test_invalid_preference_does_not_close_authenticated_transport(agent, 
             return next(self.initial)
 
         async def send(self, packet):
-            pass
+            if packet.get("type") == "hello":
+                ready["channel_binding"] = dict(packet["channel_binding"])
 
         def __aiter__(self):
             return self
@@ -223,6 +224,7 @@ async def test_invalid_preference_does_not_close_authenticated_transport(agent, 
     await instance.connect_once()
     assert received == ["probe-after-bad"]
     assert instance.connection_number == 1
+    assert instance.journal.meta("hub_channel_binding") == "1"
     assert instance.scheduler_revision == good["revision"]
     assert instance.scheduler_error == "SCHEDULER_SETTINGS_INVALID"
 

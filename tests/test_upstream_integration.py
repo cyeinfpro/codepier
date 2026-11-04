@@ -124,6 +124,11 @@ def test_rotation_covers_gateway_oidc_and_preserves_retry_and_idempotency(gw,oid
     start(oidc)  # Encrypted pending PKCE verifier must survive rotation as well.
     store.execute('INSERT INTO oidc_sync_state(identity_id,attempted_at,next_attempt,failures,code,credential_hash,provider_version,observed_checked_at) VALUES(?,1,9999999999,2,?,?,?,?)',
                   (identity['id'],'OIDC_UPSTREAM_ERROR',digest(identity['upstream_tokens']),provider['version'],identity['checked_at']))
+    # Composite-key chunks are rotated via SQLite's stable rowid selector.
+    # Populate two offsets so an attachment-only update would be detected.
+    for offset, plaintext in enumerate(('YQ==', 'Yg==')):
+        store.execute('INSERT INTO channel_attachment_chunks VALUES (?,?,?,?,?)',
+                      ('synthetic-rotation-chunks', offset, 1, digest(plaintext), store.encrypt(plaintext)))
     expected={}
     columns=[(table,column,'') for table,column in keyring.CIPHER_COLUMNS]
     for table,column,prefix in [*columns,*keyring.PREFIXED_CIPHER_COLUMNS]:
@@ -131,13 +136,19 @@ def test_rotation_covers_gateway_oidc_and_preserves_retry_and_idempotency(gw,oid
         primary_keys=[row['name'] for row in schema if row['pk']]
         # Independently check the production key mapping against real schema;
         # consumer tickets use ticket_hash, while OIDC transactions use state_hash.
-        assert primary_keys==[keyring.CIPHER_PRIMARY_KEYS.get(table,'id')]
-        primary=primary_keys[0]
+        primary=keyring.CIPHER_PRIMARY_KEYS.get(table,'id')
+        if primary == 'rowid':
+            assert table == 'channel_attachment_chunks'
+            assert primary_keys == ['attachment_id', 'offset']
+            # A future WITHOUT ROWID migration must update the rotation selector.
+            store.all(f'SELECT rowid FROM {table} LIMIT 0')
+        else:
+            assert primary_keys == [primary]
         condition=f' AND substr({column},1,?)=?' if prefix else ''
         for row in store.all(f"SELECT {primary} AS id,{column} AS cipher FROM {table} WHERE {column} IS NOT NULL AND {column}!=''"+condition,
                              (len(prefix),prefix) if prefix else ()):
             expected[(table,column,primary,row['id'],prefix)]=store.decrypt(row['cipher'][len(prefix):])
-    assert {'oidc_providers','oidc_transactions','external_identities','gateway_accounts','gateway_calls','gateway_secrets'}<={k[0] for k in expected}
+    assert {'oidc_providers','oidc_transactions','external_identities','gateway_accounts','gateway_calls','gateway_secrets','channel_attachment_chunks'}<={k[0] for k in expected}
     copied=tmp_path/'rotation-copy';copied.mkdir()
     with store.lock,sqlite3.connect(copied/'hub.sqlite3') as db:
         store.db.backup(db)

@@ -28,11 +28,14 @@ def populated_journal():
     db.execute('''INSERT INTO dot_wake_tickets VALUES
         ('ticket-hash','legacy-dot','generation','grant','subscription','delivery',
          'encrypted-ticket',900,'session',9)''')
-    db.execute('''INSERT INTO dot_mailbox_entries VALUES
+    db.execute('''INSERT INTO dot_mailbox_entries
+        (sequence,id,dot_id,generation,kind,object_id,object_version,reference,revision,acknowledged_at,created) VALUES
         (23,'entry','legacy-dot','generation','message','message',2,'{"message_id":"message"}',8,NULL,10)''')
-    db.execute('''INSERT INTO dot_mailbox_entries VALUES
+    db.execute('''INSERT INTO dot_mailbox_entries
+        (sequence,id,dot_id,generation,kind,object_id,object_version,reference,revision,acknowledged_at,created) VALUES
         (101,'deleted','legacy-dot','generation','message','deleted',1,'{}',9,12,11)''')
     db.execute("DELETE FROM dot_mailbox_entries WHERE id='deleted'")
+    db.execute("UPDATE dot_mailbox_entries SET acknowledged_scope_digest='preserved-scope' WHERE id='entry'")
     db.execute('ALTER TABLE dot_consumer_sessions ADD COLUMN preserved_extension TEXT')
     db.execute("UPDATE dot_consumer_sessions SET preserved_extension='original-extension'")
     db.execute('CREATE TABLE migration_fixture(source_id TEXT)')

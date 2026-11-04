@@ -202,3 +202,70 @@ def test_poll_crossing_pairing_deadline_preserves_account_for_explicit_rebind(co
     w.client_factory = lambda *args: pytest.fail('Expired pairing must not make provider requests')
     asyncio.run(w.poll_once(account['account_id']))
     no_work(c)
+
+
+@pytest.mark.parametrize("pairing", [True, False])
+def test_receiver_mismatch_rolls_back_valid_messages_in_the_same_batch(collab, pairing):
+    c, w, account, binding, scope = unpaired(collab) if pairing else fixture_channel(collab)
+    before_binding = w.binding(binding["binding_id"], c.owner, c.room)
+    before_cursor = c.s.store.one("SELECT cursor FROM weixin_accounts")["cursor"]
+    before_inbound = c.s.store.all("SELECT * FROM weixin_inbound")
+    before_messages = c.s.store.all("SELECT * FROM collaboration_messages")
+    valid = packet(10, binding["pairing_challenge"] if pairing else "valid synthetic message")
+    invalid = packet(11, "invalid recipient", to_user_id="another-bot")
+    valid["msgs"].extend(invalid["msgs"])
+    with pytest.raises(DevError) as caught:
+        w.commit_updates(w.claim_poll(account["account_id"]), valid)
+    assert caught.value.code == "WEIXIN_RECEIVER_MISMATCH"
+    assert w.binding(binding["binding_id"], c.owner, c.room) == before_binding
+    assert c.s.store.one("SELECT cursor FROM weixin_accounts")["cursor"] == before_cursor
+    assert c.s.store.all("SELECT * FROM weixin_inbound") == before_inbound
+    assert c.s.store.all("SELECT * FROM collaboration_messages") == before_messages
+    assert not c.s.store.all("SELECT * FROM channel_inbound_failures")
+    no_work(c)
+
+
+def test_legacy_quarantined_receiver_error_cannot_advance_a_new_cursor(collab, monkeypatch):
+    from hub.collaboration import channel_inbound
+    c, w, account, binding, scope = unpaired(collab)
+    wrong = packet(1, binding["pairing_challenge"], to_user_id="another-bot")
+    # Reproduce a persisted receipt from before identity errors were batch-fatal.
+    with monkeypatch.context() as old:
+        old.setattr(channel_inbound, "BATCH_ERRORS",
+                    channel_inbound.BATCH_ERRORS - {"WEIXIN_RECEIVER_MISMATCH"})
+        w.commit_updates(w.claim_poll(account["account_id"]), wrong)
+    saved = c.s.store.all("SELECT * FROM channel_inbound_failures")
+    assert len(saved) == 1 and saved[0]["reason_code"] == "WEIXIN_RECEIVER_MISMATCH"
+    before = c.s.store.one("SELECT cursor FROM weixin_accounts")["cursor"]
+    wrong["get_updates_buf"] = "must-not-commit"
+    c.clock[0] += 3
+    with pytest.raises(DevError) as caught:
+        w.commit_updates(w.claim_poll(account["account_id"]), wrong)
+    assert caught.value.code == "WEIXIN_RECEIVER_MISMATCH"
+    assert c.s.store.one("SELECT cursor FROM weixin_accounts")["cursor"] == before
+    assert c.s.store.all("SELECT * FROM channel_inbound_failures") == saved
+    pending = w.binding(binding["binding_id"], c.owner, c.room)
+    assert pending["state"] == "pairing" and not pending["pending_peer_id"]
+    assert not c.s.store.all("SELECT * FROM weixin_inbound")
+    no_work(c)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tasks", [False, True])
+async def test_native_room_receiver_mismatch_cannot_deliver_or_create_work(collab, tasks):
+    from tests.test_room_weixin_native import setup_channel
+    (s, owner, worker, clock, identity, credentials), flow, provider, action = await setup_channel(collab, tasks=tasks)
+    before_cursor = s.store.one("SELECT cursor FROM weixin_accounts")["cursor"]
+    before_mailbox = s.store.all("SELECT * FROM dot_mailbox_entries")
+    before_messages = s.store.all("SELECT * FROM collaboration_messages")
+    wrong = packet(22, "do not authorize this", to_user_id="another-bot",
+                   create_time_ms=int(clock[0] * 1000))
+    with pytest.raises(DevError) as caught:
+        s.weixin.commit_updates(s.weixin.claim_poll(flow["account_id"]), wrong)
+    assert caught.value.code == "WEIXIN_RECEIVER_MISMATCH"
+    assert s.store.one("SELECT cursor FROM weixin_accounts")["cursor"] == before_cursor
+    assert s.store.all("SELECT * FROM dot_mailbox_entries") == before_mailbox
+    assert s.store.all("SELECT * FROM collaboration_messages") == before_messages
+    assert not s.store.all("SELECT * FROM channel_inbound_failures")
+    assert not s.store.all("SELECT * FROM coordination_work")
+    assert not s.store.all("SELECT * FROM operations")

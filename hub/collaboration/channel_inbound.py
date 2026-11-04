@@ -10,7 +10,8 @@ BATCH_ERRORS = {
     'TELEGRAM_POLL_FENCE_LOST', 'TELEGRAM_BINDING_CHANGED', 'TELEGRAM_BATCH_LIMIT',
     'TELEGRAM_UPDATE_INVALID', 'TELEGRAM_UPDATE_CONFLICT', 'TELEGRAM_INBOX_QUOTA',
     'WEIXIN_POLL_FENCE_LOST', 'WEIXIN_BINDING_CHANGED', 'WEIXIN_BATCH_LIMIT',
-    'WEIXIN_DAILY_QUOTA', 'WEIXIN_DUPLICATE_CONFLICT', 'CHANNEL_QUARANTINE_QUOTA',
+    'WEIXIN_DAILY_QUOTA', 'WEIXIN_DUPLICATE_CONFLICT', 'WEIXIN_RECEIVER_MISMATCH',
+    'CHANNEL_QUARANTINE_QUOTA',
 }
 DEFERRED_ERRORS = {'TELEGRAM_DOT_QUOTA', 'WEIXIN_INBOX_QUOTA'}
 
@@ -37,6 +38,10 @@ def isolate(service, channel, account, scope, source, ingest, *, replay=False):
     identifier = identity(channel, account, scope, source)
     previous = store.one('SELECT * FROM channel_inbound_failures WHERE id=?', (identifier,))
     if previous and not replay:
+        # Older versions could quarantine an account-identity error. Reobserving
+        # that receipt must not turn a batch-fatal error into cursor advancement.
+        if previous['reason_code'] in BATCH_ERRORS:
+            raise DevError(previous['reason_code'], '历史隔离记录包含批次身份或一致性错误；保留原游标供核对', 409)
         return None, previous['state'] + ':' + previous['reason_code']
     try:
         with store.savepoint():
