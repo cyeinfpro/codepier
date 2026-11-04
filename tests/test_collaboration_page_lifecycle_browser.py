@@ -19,7 +19,8 @@ POLL_KINDS = ["delegation_policies", "members", "overview", "timeline"]
 POLL_PROBE = """(() => {
   const originalTimer = window.setTimeout, originalFetch = window.fetch;
   const probe = window.lifecycleProbe = {armed: false, rows: [], poll: null,
-    origin: crypto.randomUUID(), pagehide: false, signals: [], owners: [], cycles: new Set()};
+    origin: crypto.randomUUID(), pagehide: false, signals: [], owners: [], cycles: new Set(),
+    pollAttempts: 0, pollCompletions: 0};
   probe.record = (event, details={}) => {
     const key = 'codepier-lifecycle-read-evidence';
     const records = JSON.parse(sessionStorage.getItem(key) || '[]');
@@ -35,9 +36,10 @@ POLL_PROBE = """(() => {
     if (typeof callback !== 'function' || callback.name !== 'poll')
       return originalTimer.call(this, callback, delay, ...args);
     const run = () => {
+      probe.pollAttempts++;
       const pending = Promise.resolve(callback(...args));
       probe.cycles.add(pending);
-      const done = () => probe.cycles.delete(pending);
+      const done = () => {probe.pollCompletions++; probe.cycles.delete(pending);};
       pending.then(done, done);
       return pending;
     };
@@ -137,7 +139,15 @@ def test_pending_reload_reads_use_the_original_document_without_page_errors(
           // rather than treating that early return as completed work.
           void p.poll.run();
           await Promise.race([p.firstCycle, new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('Four polling reads did not finish')), 15000))]);
+            setTimeout(() => reject(new Error('Four polling reads did not finish: ' +
+              JSON.stringify({pagehide:p.pagehide, hidden:document.hidden,
+                sameDocument:p.origin === window.lifecycleProbe.origin,
+                pollAttempts:p.pollAttempts, pollCompletions:p.pollCompletions,
+                activeCycles:p.cycles.size, rows:p.rows,
+                owners:p.owners.map(item => ({kind:item.kind,
+                  hasSignal:!!item.signal, aborted:!!item.signal?.aborted})),
+                signals:p.signals.map(item => ({kind:item.kind,
+                  hasSignal:!!item.signal, aborted:!!item.signal?.aborted}))}))), 15000))]);
           return {origin:p.origin, currentOrigin:window.lifecycleProbe.origin,
             pagehide:p.pagehide, rows:p.rows};
         }""")
