@@ -120,7 +120,10 @@ def test_hint_access_change_clears_before_recheck_and_only_restores_authorized_i
 
         def directory(route):
             if not held:
-                held.append((route, route.fetch()))
+                # route.fetch yields to other handlers. Reserve the single
+                # response gate first so a concurrent read is still forwarded.
+                held.append((route, None))
+                held[0] = (route, route.fetch())
                 page.locator('html').evaluate('(n)=>n.dataset.hintDirectoryHeld="yes"')
             else:
                 route.continue_()
@@ -160,6 +163,9 @@ def test_hint_access_change_clears_before_recheck_and_only_restores_authorized_i
             expect(page.locator('#page h1')).to_have_text('项目映射')
             expect(page.locator('.collaboration')).to_have_count(0)
     finally:
+        # Do not dispose the API request context while a real route handler is
+        # still fetching. Stop new interception and let admitted handlers finish.
+        page.unroute_all(behavior='wait')
         context.close()
 
 
