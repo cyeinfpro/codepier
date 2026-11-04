@@ -27,8 +27,8 @@
       "bytes": 21356
     },
     "app.js": {
-      "sha256": "f511c6b53bc3d620786dec3bc41d47e67da0629769a0f223816e4231ca92e758",
-      "bytes": 129376
+      "sha256": "729a776313a8096abea0ef025aa62d263887707ac8b7ea9bb3546fd861a047a3",
+      "bytes": 129602
     },
     "appearance.js": {
       "sha256": "7fc8e8ffa85a4bb5836b8919cdf6ff12813cfb4a9e4736709f5858e5d8782bb1",
@@ -83,8 +83,8 @@
       "bytes": 27766
     },
     "collaboration-room.js": {
-      "sha256": "14b58a00b4fa3bfde893d88da2b21d940a514b5820afbfacdd9fcfd048deb6bb",
-      "bytes": 146230
+      "sha256": "7946dea38a576324ff35fcbe03b57d2c6eadc56c4eaf796ac8ecc9c853375640",
+      "bytes": 146311
     },
     "computer.css": {
       "sha256": "3bfd6993ecee11cf6c23d78cc7b4f9acd6759ffaccc5e241ff06e156da7dfcac",

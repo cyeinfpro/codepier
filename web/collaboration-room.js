@@ -2055,8 +2055,13 @@ window.CodePierCollaboration = (() => {
   function inboundHealthMarkup(accounts) {
     const items = (accounts || []).flatMap((account) =>
       (account.inbound_health || [])
-        .filter((item) => ['deferred', 'quarantined'].includes(item.state) && Number(item.count) > 0)
-        .map((item) => `<li><strong>${E(account.label || account.bot_id || '当前账号')}</strong> · ${item.state === 'deferred' ? '等待积压消化' : '已隔离'} ${E(item.count)} 条 · <code>${E(item.reason_code || 'unknown')}</code></li>`),
+        .filter(
+          (item) => ['deferred', 'quarantined'].includes(item.state) && Number(item.count) > 0,
+        )
+        .map(
+          (item) =>
+            `<li><strong>${E(account.label || account.bot_id || '当前账号')}</strong> · ${item.state === 'deferred' ? '等待积压消化' : '已隔离'} ${E(item.count)} 条 · <code>${E(item.reason_code || 'unknown')}</code></li>`,
+        ),
     );
     return items.length
       ? `<section class="cr-info" aria-label="渠道收件状态"><strong>部分消息需要留意</strong><ul>${items.join('')}</ul><p>延后消息保留在原连接，积压消化后自动核对；隔离消息不会执行任务。后续正常消息仍可接收。</p></section>`
@@ -2958,5 +2963,12 @@ window.CodePierCollaboration = (() => {
         renderPage(false).catch((error) => toast(error.message, true));
     }
   });
-  return { html, bind, detach, clear, open, presentation: { inboundHealthMarkup, uploadEstimateMarkup } };
+  return {
+    html,
+    bind,
+    detach,
+    clear,
+    open,
+    presentation: { inboundHealthMarkup, uploadEstimateMarkup },
+  };
 })();

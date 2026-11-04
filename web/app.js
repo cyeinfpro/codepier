@@ -2293,7 +2293,12 @@ async function consentModal(id) {
       busy(allow ? $('#allow-consent') : $('#deny-consent'), async () => {
         const out = await post(`/api/oauth/requests/${encodeURIComponent(id)}/decide`, {
           allow,
-          ...(allow ? { days: $('#oauth-days').value === 'unlimited' ? null : Number($('#oauth-days').value) } : {}),
+          ...(allow
+            ? {
+                days:
+                  $('#oauth-days').value === 'unlimited' ? null : Number($('#oauth-days').value),
+              }
+            : {}),
           scopes: checked('scope'),
           ...CodePierAccess.selection(),
           ...(allow ? profileBinding() : {}),
@@ -2603,33 +2608,51 @@ panelActions.register(['edit-grant-projects'], async (b, e) => {
 panelActions.register(['edit-grant-expiration'], async (b) => {
   const grant = S.grants.find((g) => g.id === b.dataset.id);
   if (!grant || grant.revoked) return;
-  const login = S.session, space = S.space_id;
+  const login = S.session,
+    space = S.space_id;
   const end = grant.authorization_expires || grant.expires || Date.now() / 1000 + 30 * 86400;
   const date = new Date(end * 1000);
-  const localDate = new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-  const dialog = modal('修改授权期限',
+  const localDate = new Date(date.getTime() - date.getTimezoneOffset() * 60000)
+    .toISOString()
+    .slice(0, 16);
+  const dialog = modal(
+    '修改授权期限',
     `<form id="grant-expiry-form"><p>${esc(grant.label)}</p><div class="field"><label for="grant-expiry-date">到期日期（本地时间）</label><input id="grant-expiry-date" name="expires" type="datetime-local" value="${esc(localDate)}" required></div><label class="check"><input type="checkbox" name="unlimited" ${grant.unlimited ? 'checked' : ''}>无限期，直到手动撤销</label><p class="form-note">无限期会持续保留访问权。缩短期限立即限制现存凭据；不会更改权限和项目范围。已撤销授权不能恢复。</p><label class="check"><input type="checkbox" name="confirm_reactivate">如果已过期，确认恢复仍保留的凭据。已清理的凭据必须重新连接。</label></form>`,
-    buttons('save-grant-expiry', '保存期限'));
+    buttons('save-grant-expiry', '保存期限'),
+  );
   const form = $('#grant-expiry-form');
-  const toggle = () => { form.elements.expires.disabled = form.elements.unlimited.checked; };
+  const toggle = () => {
+    form.elements.expires.disabled = form.elements.unlimited.checked;
+  };
   form.elements.unlimited.onchange = toggle;
   toggle();
-  $('#save-grant-expiry').onclick = () => busy($('#save-grant-expiry'), async () => {
-    if (!form.reportValidity()) return;
-    const expires = form.elements.unlimited.checked ? null : new Date(form.elements.expires.value).getTime() / 1000;
-    if (expires !== null && (!Number.isFinite(expires) || expires <= Date.now() / 1000)) {
-      toast('请选择未来的到期日期', true);
-      return;
-    }
-    const result = await api('/api/grants/' + encodeURIComponent(grant.id) + '/expiration', {
-      method: 'PUT', body: JSON.stringify({ expires, expected_revision: grant.expiry_revision,
-        confirm_reactivate: form.elements.confirm_reactivate.checked }),
+  $('#save-grant-expiry').onclick = () =>
+    busy($('#save-grant-expiry'), async () => {
+      if (!form.reportValidity()) return;
+      const expires = form.elements.unlimited.checked
+        ? null
+        : new Date(form.elements.expires.value).getTime() / 1000;
+      if (expires !== null && (!Number.isFinite(expires) || expires <= Date.now() / 1000)) {
+        toast('请选择未来的到期日期', true);
+        return;
+      }
+      const result = await api('/api/grants/' + encodeURIComponent(grant.id) + '/expiration', {
+        method: 'PUT',
+        body: JSON.stringify({
+          expires,
+          expected_revision: grant.expiry_revision,
+          confirm_reactivate: form.elements.confirm_reactivate.checked,
+        }),
+      });
+      if (login !== S.session || space !== S.space_id || !dialog.isConnected) return;
+      closeModal();
+      toast(
+        result.reconnect_required
+          ? '期限已更新，凭据已清理或尚未签发，请重新连接'
+          : '授权期限已更新',
+      );
+      await renderPage(false);
     });
-    if (login !== S.session || space !== S.space_id || !dialog.isConnected) return;
-    closeModal();
-    toast(result.reconnect_required ? '期限已更新，凭据已清理或尚未签发，请重新连接' : '授权期限已更新');
-    await renderPage(false);
-  });
 });
 panelActions.register(['revoke-grant'], async (b, e) => {
   if (confirm('撤销这个凭据的全部访问权限？正在执行的本机任务不会自动停止。')) {
