@@ -20,7 +20,7 @@
 ## 已实施
 
 - 修正输出 schema 对空 error 和 v2 展示字段的兼容，避免成功执行被宿主误拒。
-- 成功回执展示去重、去除无信息诊断块；保留失败及未完成结果的诊断语义。
+- 成功回执去除无信息诊断块；结构化结果保留 output 原契约，去重仅用于显式 compact 文本。保留失败及未完成结果的诊断语义。
 - 单文件和批量 read 的完整响应预算约束，保留按行续读能力。
 - 新建 write 不回显完整 diff，覆盖写/edit 对大 diff 截断并明确标记。
 - 输出目录 full/lean/none 和实际 coding 档位；目录指纹随展示内容变化。
@@ -40,7 +40,7 @@ v2 lean 的 exec/task_query 超预算 stdout 按头 20% + 尾 80% 裁剪，明�
 
 v2 的 `project_query(operation="tree", project="项目", options={"format":"compact"})` 返回相对 base 的紧凑目录，特殊字符用 JSON 引号保留边界，分页和错误信息保持；view1 返回结构化目录。tree 相关九项定向测试通过。
 
-通用 v2 原生文本预算会收缩已知 read/batch/stdout；无法安全缩减的元数据不会静默丢弃。此时返回 `RESPONSE_TOO_LARGE` 错误内容，同时保留 operation_id、state 恢复摘要和查询同一原操作的 full 提示，避免吞掉已执行 mutation 的回执或引导重放。该路径新增两项测试通过。图片沿用独立媒体预算，不删除截图来满足文本预算；远端工具返回保持不变。
+通用 v2 原生文本预算会收缩已知 read/batch/stdout；无法安全缩减的元数据不会静默丢弃。控制、授权、协作元数据及无 structuredContent 的协议错误/task 创建响应保持原样，不将成功响应变成预算错误。预算仅约束具备安全恢复路径的已知内容。图片沿用独立媒体预算，不删除截图来满足文本预算；远端工具返回保持不变。
 
 ## 同步搜索
 
@@ -76,7 +76,7 @@ v2 的 `project_query(operation="tree", project="项目", options={"format":"com
 
 ## 未实施与限制
 
-- 预算缩减仅处理已知 read/batch/stdout 结构，不任意截断元数据、图片或协作正文；其他原生文本超预算返回保留原操作恢复摘要的明确错误。媒体保留独立上限。输出裁剪不制造字节游标，不推进 after_output_seq，也不声称变换可逆。
+- 预算缩减仅处理已知 read/batch/stdout 结构，不任意截断元数据、图片或协作正文；无法安全分页的原生控制元数据保持完整，允许超过文本预算。媒体保留独立上限。输出裁剪不制造字节游标，不推进 after_output_seq，也不声称变换可逆。
 - 没有广泛移动带日期文档、删除旧文件或归档默认工作区未提交报告。
 - 外部宿主的 lean schema/compact text 实机体验、token dashboard 前后对照仍需实际客户端验证。
 
@@ -85,3 +85,12 @@ v2 的 `project_query(operation="tree", project="项目", options={"format":"com
 基线 CI 41768604390 的三个目录测试使用默认 JSON 序列化（含空格和 ASCII 转义），其 95,000 字节门禁与上表紧凑 UTF-8 口径不同。修复将纯类型 anyOf 等价折叠为 type 数组，对短重复节点复用引用，并在最终展示投影后再次因子化；保留原有 $defs 名称及类型约束，不提高门禁。当前默认目录为 94,748 字节、全权限投影 94,743 字节、紧凑 UTF-8 为 86,644 字节。
 
 只验证 test_core_tools.py、test_dot_tool_discovery.py、test_project_view_projection.py 三个模块：58 项通过；剩余一项 coding 旧 13 工具预期改为真实 9 工具后单项复测通过。包含已有 $defs、二次因子化、合法/非法类型等价和能力布尔值投影回归。Ruff 正确性及 diff 检查通过；未启动全量测试或 CI。
+
+## CI 兼容性补充修复（41774523641）
+
+- typed structuredContent 保留顶层及 result.data 的 output；原客户端、嵌套执行 schema 与默认 JSON 文本保持兼容。仅显式 text=compact 的人读文本可用 output_ref 去除完全相同副本，不改变结构化返回或持久结果。
+- 预算仅处理可恢复的 read/batch/stdout；保留无法安全裁剪的完整授权、协作控制和 activity 元数据，不伪造 RESPONSE_TOO_LARGE。现代 task 创建响应及参数错误没有 structuredContent，原样返回，不触发 KeyError/HTTP 500。
+- schema 引用保留直接发现所需注释；coding 九工具展示与隐藏调用权限分别验证。
+- 不提高预算、不改授权检查；按根因使用现有代表性 HTTP/Agent 回归及新增防退化测试，而非重新运行全量。
+
+本次兼容修复定向共 144 项通过：核心/诊断/现代任务/访问档位 85 项，真实协作 Agent 与 activity 2 项，展示及 continuation 30 项，授权 schema/目录/隐藏工具调用 27 项。修复后默认完整目录 94,788 字节，保持 95,000 字节门禁。

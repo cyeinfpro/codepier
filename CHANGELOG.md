@@ -3,7 +3,7 @@
 ## Unreleased · 2026-11-04 · MCP 上下文与响应预算
 
 - 修复成功回执的空 error schema 兼容，提供 view=1 回退、schemas=lean/none、实际 coding 目录、协作动作按需 schema、同步有界 search、tree compact 与显式 stdout 规范化。
-- 展示副本去除重复输出与新建文件 diff；默认文本预算 48 KiB，保留续读、原操作恢复及失败诊断，原授权、幂等、SHA 和持久回执不变。
+- 保留结构化 output 兼容契约，仅显式 compact 文本去重；新建文件省略 diff。可安全恢复的 read/stdout 默认预算 48 KiB，不裁剪授权/协作控制元数据，保留续读、原操作恢复及失败诊断，原授权、幂等、SHA 和持久回执不变。
 - 体积门禁：原生 full <91,000 B、lean <30,000 B、coding lean <23,000 B；本次实际为 90,100 / 28,617 / 19,554 B。常驻说明 1,602 字符，完整安全规则按需读取。具体兼容和验证见 docs/MCP_TOKEN_IMPLEMENTATION_2026-11-04.md。
 
 ## 1.32.0 · 2026-11-03 · 房间协作中心与稳定成员接入

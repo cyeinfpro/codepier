@@ -29,13 +29,18 @@ def test_terminal_exec_null_error_conforms(exit_code, view):
     assert ('error' in shown) == (view == 1)
 
 
-def test_only_identical_operation_output_is_deduplicated():
+def test_typed_output_is_preserved_and_only_compact_text_deduplicates():
+    from shared.mcp_presentation import compact_output_text
     raw = {'id': OP, 'tool': 'shell_exec', 'state': 'succeeded', 'output': 'same',
            'result': {'ok': True, 'data': {'operation_id': OP, 'exit_code': 0, 'output': 'same'}}}
     shown = checked('task_query', {'operation': 'get'}, {'operations': [raw]})['operations'][0]
-    assert shown['result']['data']['output_ref'] == 'output'
-    assert 'output' not in shown['result']['data']
+    assert shown['result']['data']['output'] == 'same'
+    compact = compact_output_text({'operations': [shown]})['operations'][0]
+    assert compact['result']['data']['output_ref'] == 'output'
+    assert 'output' not in compact['result']['data']
+    assert shown['result']['data']['output'] == 'same'
     raw['output'] = 'tail page'
+    assert compact_output_text(raw)['result']['data']['output'] == 'same'
     shown = checked('task_query', {'operation': 'get'}, {'operations': [raw]})['operations'][0]
     assert shown['result']['data']['output'] == 'same'
     shown = checked('task_query', {'operation': 'get'}, {'operations': [raw]}, verbosity='full')['operations'][0]
@@ -166,20 +171,27 @@ def test_polled_write_diff_is_bounded_without_mutating_saved_result():
 
 def test_oversized_metadata_keeps_receipt_and_never_claims_mutation_failed():
     from hub.core_tools import bound_batch_response
-    from shared.core_contracts import READ_BATCH_PAYLOAD_BYTES
     original = {'jsonrpc': '2.0', 'id': 1, 'result': {'structuredContent': {
         'operation_id': OP, 'state': 'succeeded', 'details': 'metadata' * 20000},
         'content': [{'type': 'text', 'text': 'metadata' * 20000}], 'isError': False}}
     saved = deepcopy(original)
     shown = bound_batch_response(original, output_budget=True)
     assert original == saved
-    assert len(json.dumps(shown, ensure_ascii=False, separators=(',', ':')).encode()) <= READ_BATCH_PAYLOAD_BYTES
-    error = shown['result']['structuredContent']['error']
-    assert error['code'] == 'RESPONSE_TOO_LARGE' and error['operation_id'] == OP
-    assert error['receipts'][0]['state'] == 'succeeded'
-    assert 'do not rerun mutations' in error['message']
-    schema = next(tool['outputSchema'] for tool in tool_definitions() if tool['name'] == 'write')
-    Draft202012Validator(schema).validate(shown['result']['structuredContent'])
+    assert shown == saved
+    # A successful authorization/control response cannot become a fake error.
+    assert shown['result']['isError'] is False
+
+
+@pytest.mark.parametrize('envelope', [
+    {'result': {'task': {'taskId': OP, 'status': 'working'}}},
+    {'error': {'code': -32602, 'message': 'Invalid params'}},
+    {'result': {'isError': True, 'content': [{'type': 'text', 'text': 'bad args'}]}},
+])
+def test_content_budget_preserves_non_content_protocol_envelopes(envelope):
+    from hub.core_tools import bound_batch_response
+    saved = deepcopy(envelope)
+    assert bound_batch_response(envelope, output_budget=True) == saved
+    assert envelope == saved
 
 
 def test_text_budget_does_not_erase_native_screenshots():

@@ -182,7 +182,11 @@ def factor(schema):
                 reserved.add(name)
                 names[fingerprint] = name
                 definitions[name] = reduce(node, inline=True)
-            return {'$ref': '#/$defs/' + names[fingerprint]}
+            # Keep lifecycle/access annotations visible to clients that inspect
+            # properties without resolving local references.
+            annotations = ('deprecated', 'readOnly', 'writeOnly')
+            return {'$ref': '#/$defs/' + names[fingerprint],
+                    **{name: deepcopy(node[name]) for name in annotations if name in node}}
         result = deepcopy(node)
         for name in ('properties', 'patternProperties', '$defs'):
             if name in node:

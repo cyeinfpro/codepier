@@ -294,7 +294,12 @@ def bound_batch_response(payload, *, output_budget=False):
     from shared.core_contracts import READ_BATCH_PAYLOAD_BYTES
     rendered = payload.get('result', {})
     from shared.mcp_presentation import output_records
-    if not _batch_reads(rendered.get('structuredContent')) and not output_budget:
+    public = rendered.get('structuredContent')
+    # Task-creation envelopes and protocol errors are not tool content. Metadata
+    # without a supported continuation cannot safely be replaced with an error.
+    if not isinstance(public, dict):
+        return payload
+    if not _batch_reads(public) and not (output_budget and output_records(public)):
         return payload
     # Native media has its own documented budget and lifetime checks. Never
     # discard screenshots because their base64 bytes exceed the text budget.
@@ -329,22 +334,8 @@ def bound_batch_response(payload, *, output_budget=False):
             continue
         if not candidates:
             if output_budget:
-                # Never erase an executed mutation's operation id with an outer
-                # JSON-RPC failure, or invite a new idempotency key/replay.
-                rows = public.get('operations', []) if isinstance(public, dict) else []
-                receipts = [{key: row[key] for key in ('operation_id', 'id', 'state', 'pending') if key in row}
-                            for row in [public, *rows] if isinstance(row, dict)
-                            and ('operation_id' in row or 'id' in row)]
-                error = {'code': 'RESPONSE_TOO_LARGE',
-                         'message': 'Response metadata exceeds the configured text budget. The original operation was not replayed. Query its receipt using connection URL ?verbosity=full; do not rerun mutations.',
-                         'receipts': receipts[:64]}
-                if isinstance(public, dict) and isinstance(public.get('operation_id'), str):
-                    error['operation_id'] = public['operation_id']
-                public = {'error': error, 'budget_limited': True,
-                          'payload_limit_bytes': READ_BATCH_PAYLOAD_BYTES}
-                rendered['structuredContent'] = public
-                rendered['content'] = [{'type': 'text', 'text': json.dumps(public, ensure_ascii=False, separators=(',', ':'))}]
-                rendered['isError'] = True
+                # Keep required control/authorization metadata intact even when
+                # its irreducible size is larger than the text content budget.
                 return payload
             raise DevError('READ_BATCH_RESPONSE_TOO_LARGE',
                            '读取响应元数据超过配置预算；请减少操作数或单独读取文件')
@@ -399,11 +390,12 @@ def _result(name, arguments, value, *, scopes=None):
 
 
 def result(name, arguments, value, *, scopes=None, view=2, verbosity='lean', text_mode='json', output_mode='raw'):
-    from shared.mcp_presentation import token_view
+    from shared.mcp_presentation import token_view, compact_output_text
     rendered = _result(name, arguments, value, scopes=scopes)
     public = token_view(name, arguments, rendered['structuredContent'], view=view, verbosity=verbosity, output_mode=output_mode)
     rendered['structuredContent'] = public
-    text = json.dumps(public, ensure_ascii=False, separators=(',', ':'))
+    text_public = compact_output_text(public) if text_mode == 'compact' else public
+    text = json.dumps(text_public, ensure_ascii=False, separators=(',', ':'))
     if text_mode == 'compact' and not rendered.get('isError') and not public.get('pending'):
         if name == 'read' and isinstance(public.get('content'), str) and 'sha256' in public:
             header = {key: item for key, item in public.items() if key != 'content'}

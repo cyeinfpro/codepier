@@ -590,11 +590,6 @@ def token_view(name, arguments, value, *, view=2, verbosity='lean', output_mode=
         if isinstance(data, dict) and row.get('tool') in {'write', 'edit', 'fs_write', 'fs_edit', 'apply_patch'}:
             tool = 'write' if row['tool'] in {'write', 'fs_write'} else 'edit'
             nested['data'] = token_view(tool, row.get('args_summary') or {}, data, view=view, verbosity=verbosity)
-        # Only remove exact duplicates. A stream page is not the complete result
-        # and must never replace different output or silently discard old pages.
-        if isinstance(data, dict) and isinstance(row.get('output'), str) and data.get('output') == row['output']:
-            data.pop('output')
-            data['output_ref'] = 'output'
 
     if {'id', 'tool', 'state'} <= result.keys():
         receipt(result)
@@ -692,3 +687,18 @@ def output_records(value):
     for operation in value.get('operations', []):
         rows.extend(output_records(operation))
     return rows
+
+
+def compact_output_text(value):
+    """De-duplicate only explicitly requested human text, never typed results."""
+    result = deepcopy(value)
+    rows = [result, *result.get('operations', [])] if isinstance(result, dict) else []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        nested = row.get('result')
+        data = nested.get('data') if isinstance(nested, dict) else None
+        if isinstance(data, dict) and isinstance(row.get('output'), str) and data.get('output') == row['output']:
+            data.pop('output')
+            data['output_ref'] = 'output'
+    return result
