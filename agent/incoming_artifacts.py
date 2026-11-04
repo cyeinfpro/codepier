@@ -219,6 +219,7 @@ class AnchoredDestination:
         self.engine,self.root=engine,root;self.parts=relative.split('/');self.fds=[];self.handles=[]
         self.parent=root;self.fd=None;self.temporary='.rd-import-'+uuid.uuid4().hex+'.part';self.published=False
         self.publication_method = None
+        self.publication_atomic = True
 
     def __enter__(self):
         try:
@@ -289,11 +290,36 @@ class AnchoredDestination:
                 publication = self.engine.publish_new_file(self.temporary,self.parts[-1],
                     src_dir_fd=self.fds[-1],dst_dir_fd=self.fds[-1],follow_symlinks=False)
                 self.publication_method = publication.method
+                self.publication_atomic = publication.atomic
+                if not publication.atomic:
+                    try:
+                        self.engine.path(self.root, '/'.join(self.parts), False)
+                    except DevError as exc:
+                        raise DevError('WRITE_OUTCOME_UNCONFIRMED',
+                            '兼容新建期间目标路径改变，请核查原回执；勿直接重试', 500,
+                            retryable=False, atomic=False, partial_content_visible=True,
+                            mutation_started=True, publication='unconfirmed') from exc
+                    current_parent, pinned_parent = self.parent.stat(), os.fstat(self.fds[-1])
+                    if ((current_parent.st_dev, current_parent.st_ino) !=
+                            (pinned_parent.st_dev, pinned_parent.st_ino)):
+                        raise DevError('WRITE_OUTCOME_UNCONFIRMED',
+                            '兼容新建期间目标目录改变，请核查原回执；勿直接重试', 500,
+                            retryable=False, atomic=False, partial_content_visible=True,
+                            mutation_started=True, publication='unconfirmed')
                 if publication.source_retained:
                     os.unlink(self.temporary,dir_fd=self.fds[-1])
             self.published=True
         except FileExistsError as exc:raise DevError('ARTIFACT_DESTINATION_EXISTS','目标文件已存在，未覆盖',409) from exc
-        self.engine.sync_directory(self.parent)
+        except OSError as exc:
+            if self.publication_method == 'exclusive_create':
+                raise DevError('WRITE_OUTCOME_UNCONFIRMED',
+                    '兼容新建后的校验或清理未完成确认，请核查目标和原回执；勿直接重试', 500,
+                    filesystem_errno=exc.errno, retryable=False, atomic=False,
+                    partial_content_visible=True, mutation_started=True,
+                    publication='unconfirmed') from exc
+            raise
+        self.engine.sync_directory(self.parent, atomic=self.publication_atomic,
+            partial_content_visible=not self.publication_atomic, mutation_started=True)
 
     def __exit__(self, exc_type, exc_value, traceback):
         # Cleanup failures must never strand pinned descriptors/Windows handles.
@@ -400,7 +426,13 @@ def import_artifact(engine,project,args,*,stream=None):
         if args.get('expected_sha256') and args['expected_sha256']!=actual:raise DevError('ARTIFACT_INTEGRITY','SHA-256 不匹配，未发布文件')
         with engine.mutation_lock:
             engine.root(project,True)
-            target.publish()
+            try:
+                target.publish()
+            except DevError as exc:
+                if exc.code in {'WRITE_OUTCOME_UNCONFIRMED', 'DURABILITY_UNCONFIRMED'}:
+                    exc.details.update(path=relative, expected_sha256=actual)
+                raise
     return {'path':relative,'bytes':total,'sha256':actual,'created':True,'overwritten':False,
             'extracted':False,'executed':False,'name':destination.name,
-            'publication_method':target.publication_method}
+            'publication_method':target.publication_method, 'atomic':target.publication_atomic,
+            'partial_content_visible':not target.publication_atomic}

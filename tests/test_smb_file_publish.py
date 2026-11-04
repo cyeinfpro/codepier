@@ -155,7 +155,8 @@ def test_native_rename_respects_directory_descriptors(tmp_path, monkeypatch):
     assert (tmp_path / "target").read_bytes() == b"complete"
 
 
-def test_concurrent_processes_publish_exactly_one_complete_file(tmp_path):
+@pytest.mark.parametrize("compatibility", [False, True])
+def test_concurrent_processes_publish_exactly_one_complete_file(tmp_path, compatibility):
     program = """
 import errno, os, sys
 from pathlib import Path
@@ -174,6 +175,11 @@ except FileExistsError:
 else:
     print('published')
 """
+    if compatibility:
+        program = program.replace("file_publish.os.link = unsupported",
+            "file_publish.os.link = unsupported\nfile_publish._native_rename_no_replace = unsupported")
+        program = program.replace("publish_new_file(stage, target)",
+                                  "publish_new_file(stage, target, allow_exclusive_copy=True)")
     root = Path(__file__).resolve().parents[1]
     env = dict(os.environ, PYTHONPATH=str(root))
     processes = [
@@ -199,7 +205,7 @@ else:
         assert results.count("conflict") == 5
         winner = results.index("published")
         assert (tmp_path / "target").read_bytes() == str(winner).encode() * 4096
-        assert not (tmp_path / f"stage-{winner}").exists()
+        assert (tmp_path / f"stage-{winner}").exists() is compatibility
         for index in range(6):
             if index != winner:
                 assert (tmp_path / f"stage-{index}").read_bytes() == str(index).encode() * 4096
@@ -349,16 +355,16 @@ def test_uncertain_publish_ack_is_not_replayed_or_deleted(engine, monkeypatch):
     assert not list(root.glob(".rd-*"))
 
 
-def test_explicit_capability_failure_never_publishes_target(engine, monkeypatch):
-    from shared.util import DevError
+def test_unsupported_atomic_publication_uses_explicit_compatibility(engine, monkeypatch):
 
     instance, project, root = engine
     monkeypatch.setattr(file_publish.os, "link", no_hard_links)
     monkeypatch.setattr(file_publish, "_native_rename_no_replace", no_hard_links)
-    with pytest.raises(DevError) as caught:
-        instance.mutate(project, "target.txt", "new", b"complete")
-    assert caught.value.code == "ATOMIC_CREATE_UNSUPPORTED"
-    assert not (root / "target.txt").exists()
+    receipt = instance.mutate(project, "target.txt", "new", b"complete")
+    assert receipt["publication_method"] == "exclusive_create"
+    assert receipt["atomic"] is False
+    assert receipt["partial_content_visible"] is True
+    assert (root / "target.txt").read_bytes() == b"complete"
     assert not list(root.glob(".rd-*"))
 
 
@@ -445,3 +451,182 @@ def test_import_competing_target_is_not_overwritten_by_smb_fallback(engine, monk
     assert caught.value.code == "ARTIFACT_DESTINATION_EXISTS"
     assert (root / "target.bin").read_bytes() == b"other writer"
     assert not list(root.rglob(".rd-*"))
+
+@pytest.fixture
+def exclusive_only(monkeypatch):
+    monkeypatch.setattr(file_publish.os, "link", no_hard_links)
+    monkeypatch.setattr(file_publish, "_native_rename_no_replace", no_hard_links)
+
+
+def test_exclusive_copy_retains_stage_and_reports_non_atomic(tmp_path, exclusive_only):
+    stage, target = tmp_path / "stage", tmp_path / "target"
+    stage.write_bytes(b"x" * (2 * 1024 * 1024 + 1))
+    receipt = publish_new_file(stage, target, allow_exclusive_copy=True)
+    assert receipt.method == "exclusive_create"
+    assert not receipt.atomic and receipt.source_retained
+    assert stage.read_bytes() == target.read_bytes()
+    assert receipt.identity == (target.stat().st_dev, target.stat().st_ino)
+
+
+@pytest.mark.parametrize("kind", ["file", "symlink", "directory"])
+def test_exclusive_copy_refuses_every_existing_target(tmp_path, exclusive_only, kind):
+    stage, target = tmp_path / "stage", tmp_path / "target"
+    stage.write_bytes(b"new")
+    if kind == "file":
+        target.write_bytes(b"old")
+    elif kind == "symlink":
+        target.symlink_to(stage)
+    else:
+        target.mkdir()
+    with pytest.raises(FileExistsError):
+        publish_new_file(stage, target, allow_exclusive_copy=True)
+    assert stage.read_bytes() == b"new"
+    if kind == "file":
+        assert target.read_bytes() == b"old"
+
+
+def test_exclusive_copy_blocks_symlink_parent(tmp_path, exclusive_only):
+    (tmp_path / "real").mkdir()
+    (tmp_path / "alias").symlink_to(tmp_path / "real", target_is_directory=True)
+    stage = tmp_path / "stage"
+    stage.write_bytes(b"new")
+    with pytest.raises(OSError):
+        publish_new_file(stage, tmp_path / "alias" / "target", allow_exclusive_copy=True)
+    assert not (tmp_path / "real" / "target").exists()
+
+
+@pytest.mark.parametrize("failure", [errno.ENOSPC, errno.EIO, errno.EACCES])
+def test_copy_failure_keeps_target_and_no_replay(tmp_path, monkeypatch, exclusive_only, failure):
+    stage, target = tmp_path / "stage", tmp_path / "target"
+    stage.write_bytes(b"new")
+    def fail(fd):
+        raise OSError(failure, "injected fsync failure")
+    monkeypatch.setattr(file_publish.os, "fsync", fail)
+    with pytest.raises(file_publish.ExclusiveCreateUnconfirmed):
+        publish_new_file(stage, target, allow_exclusive_copy=True)
+    assert target.read_bytes() == b"new"
+    assert stage.read_bytes() == b"new"
+    with pytest.raises(FileExistsError):
+        publish_new_file(stage, target, allow_exclusive_copy=True)
+
+
+def test_copy_failure_never_unlinks_foreign_replacement(tmp_path, monkeypatch, exclusive_only):
+    stage, target = tmp_path / "stage", tmp_path / "target"
+    stage.write_bytes(b"new")
+    original = file_publish.os.fsync
+    def replace(fd):
+        original(fd)
+        target.unlink()
+        target.write_bytes(b"foreign")
+    monkeypatch.setattr(file_publish.os, "fsync", replace)
+    with pytest.raises(file_publish.ExclusiveCreateUnconfirmed):
+        publish_new_file(stage, target, allow_exclusive_copy=True)
+    assert target.read_bytes() == b"foreign"
+
+
+def test_exclusive_move_verifies_new_inode(engine, exclusive_only):
+    instance, project, root = engine
+    receipt = instance.mutate(project, "source.txt", "new", b"complete")
+    moved = instance.move(project, {"path": "source.txt", "destination": "target.txt",
+                                   "expected_sha256": receipt["sha256"]})
+    assert moved["atomic"] is False
+    assert not (root / "source.txt").exists()
+    assert (root / "target.txt").read_bytes() == b"complete"
+
+
+def test_exclusive_import_reports_semantics(engine, exclusive_only):
+    from agent.incoming_artifacts import import_artifact
+    instance, project, root = engine
+    receipt = import_artifact(instance, project, {
+        "path": "incoming/data.bin",
+        "file": {"download_url": "https://files.oaiusercontent.com/fixture", "size": 9},
+    }, stream=[b"complete" + bytes([0])])
+    assert receipt["atomic"] is False
+    assert receipt["partial_content_visible"] is True
+    assert (root / "incoming/data.bin").read_bytes() == b"complete" + bytes([0])
+
+def test_exclusive_copy_exposes_partial_content_before_completion(tmp_path, monkeypatch, exclusive_only):
+    stage, target = tmp_path / "stage", tmp_path / "target"
+    payload = b"a" * (1024 * 1024 + 4)
+    stage.write_bytes(payload)
+    original_read = os.read
+    observations = []
+    def observe(fd, count):
+        observations.append(target.read_bytes())
+        return original_read(fd, count)
+    monkeypatch.setattr(file_publish.os, "read", observe)
+    result = publish_new_file(stage, target, allow_exclusive_copy=True)
+    assert observations == [b"", payload[:1024 * 1024]]
+    assert not result.atomic
+    assert target.read_bytes() == payload
+
+
+def test_exclusive_copy_crash_leaves_partial_target_and_retry_conflicts(tmp_path):
+    stage, target = tmp_path / "stage", tmp_path / "target"
+    stage.write_bytes(b"x" * (2 * 1024 * 1024))
+    program = """
+import os, sys
+from shared.file_publish import _exclusive_create_copy
+original = os.read
+calls = 0
+def crash(fd, count):
+    global calls
+    calls += 1
+    if calls == 2:
+        os._exit(71)
+    return original(fd, count)
+os.read = crash
+_exclusive_create_copy(sys.argv[1], sys.argv[2])
+"""
+    result = subprocess.run([sys.executable, "-c", program, str(stage), str(target)],
+                            cwd=Path(__file__).resolve().parents[1], timeout=20)
+    assert result.returncode == 71
+    assert target.read_bytes() == b"x" * (1024 * 1024)
+    assert stage.stat().st_size == 2 * 1024 * 1024
+    with pytest.raises(FileExistsError):
+        file_publish._exclusive_create_copy(stage, target)
+
+
+def test_exclusive_copy_keeps_pinned_parent_after_swap(tmp_path, monkeypatch, exclusive_only):
+    parent, outside = tmp_path / "parent", tmp_path / "outside"
+    parent.mkdir()
+    outside.mkdir()
+    stage = parent / "stage"
+    stage.write_bytes(b"payload")
+    original_read = os.read
+    def swap(fd, count):
+        parent.rename(tmp_path / "moved")
+        parent.symlink_to(outside, target_is_directory=True)
+        return original_read(fd, count)
+    monkeypatch.setattr(file_publish.os, "read", swap)
+    with pytest.raises(file_publish.ExclusiveCreateUnconfirmed):
+        publish_new_file(stage, parent / "target", allow_exclusive_copy=True)
+    assert not (outside / "target").exists()
+    assert (tmp_path / "moved" / "target").read_bytes() == b"payload"
+
+
+def test_exclusive_failure_engine_receipt_keeps_recovery_fields(engine, monkeypatch, exclusive_only):
+    from shared.util import DevError
+    from shared.filesystem_errors import safe_filesystem_error_detail
+    instance, project, root = engine
+    original = file_publish._exclusive_create_copy
+    def inject(*args, **kwargs):
+        real_fsync = os.fsync
+        def failed(fd):
+            raise OSError(errno.ENOSPC, "injected")
+        monkeypatch.setattr(os, "fsync", failed)
+        try:
+            return original(*args, **kwargs)
+        finally:
+            monkeypatch.setattr(os, "fsync", real_fsync)
+    monkeypatch.setattr(file_publish, "_exclusive_create_copy", inject)
+    with pytest.raises(DevError) as caught:
+        instance.mutate(project, "target.txt", "new", b"complete")
+    assert caught.value.code == "WRITE_OUTCOME_UNCONFIRMED"
+    detail = safe_filesystem_error_detail("write", caught.value.code, caught.value.details)
+    assert detail["atomic"] is False and detail["partial_content_visible"] is True
+    assert detail["mutation_started"] is True and detail["retryable"] is False
+    assert detail["path"] == "target.txt" and len(detail["expected_sha256"]) == 64
+    assert len(detail["backup_id"]) == 32
+    assert (root / "target.txt").read_bytes() == b"complete"
+    assert not list(root.glob(".rd-*"))

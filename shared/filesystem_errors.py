@@ -22,7 +22,7 @@ def safe_filesystem_error_detail(tool, code, details):
             or not isinstance(details, dict)):
         return {}
     result = {}
-    for key in ('retryable', 'mutation_started', 'destination_overwritten'):
+    for key in ('retryable', 'mutation_started', 'destination_overwritten', 'atomic', 'partial_content_visible'):
         if type(details.get(key)) is bool:
             result[key] = details[key]
     for key in ('publication', 'durability', 'staging_cleanup'):
