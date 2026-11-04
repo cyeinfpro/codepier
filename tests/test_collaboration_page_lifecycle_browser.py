@@ -147,7 +147,8 @@ def test_pending_reload_reads_use_the_original_document_without_page_errors(
         # Wait for the real HTTP server to receive the reload and hold its
         # response, rather than suspending WebKit at native request interception.
         assert stack.reload_arrived.wait(10), "Reload did not reach the HTTP response gate"
-        original.evaluate("p => {p.navigationHeld = true; p.armed = true;}")
+        stack.reload_marker = original.evaluate("p => p.origin")
+        original.evaluate("p => {p.navigationHeld = true; p.routeMarker = p.origin; p.armed = true;}")
         assert not stack.reload_release.is_set()
         # Run the real scheduled callback in its original document while the
         # replacement response is held. Native fetches and API responses remain

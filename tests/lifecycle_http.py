@@ -88,7 +88,11 @@ def held_legacy_reload(stack):
                 if not release.wait(30):
                     self.send_error(504, 'Test did not release the navigation response')
                     return
-            if parsed.path == '/api/collaboration' and arrived.is_set() and not release.is_set():
+            # Completion during the gate does not imply this read started in
+            # the armed probe: older/background reads must still pass through.
+            marker = self.headers.get('X-CodePier-Test-Lifecycle')
+            if (parsed.path == '/api/collaboration' and marker and marker == proxy.reload_marker
+                    and arrived.is_set() and not release.is_set()):
                 records.append({'event': 'read-response', 'kind': parse_qs(parsed.query).get('kind', [''])[0],
                                 'status': status})
             self.send_headers(status, headers, len(body))
@@ -107,6 +111,7 @@ def held_legacy_reload(stack):
         proxy.url = f'http://127.0.0.1:{server.server_port}'
         proxy.reload_armed, proxy.reload_arrived, proxy.reload_release = armed, arrived, release
         proxy.reload_records = records
+        proxy.reload_marker = None
         try:
             yield proxy
         finally:
