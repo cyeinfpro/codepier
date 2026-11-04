@@ -574,7 +574,7 @@ def test_consumer_read_cannot_approve_or_retarget_another_grant(bridge):
     assert 'INVALID_ARGUMENTS' in json.dumps(invented)
 
 
-def test_all_public_profiles_are_the_same_native_catalog_and_cached_aliases_still_work(bridge, monkeypatch):
+def test_public_profiles_keep_focused_coding_catalog_and_cached_aliases_still_work(bridge, monkeypatch):
     from shared.public_collaboration import LEGACY_TOOLS
     b = bridge
     catalogs = []
@@ -582,13 +582,23 @@ def test_all_public_profiles_are_the_same_native_catalog_and_cached_aliases_stil
     for profile in ('core', 'full', 'coding'):
         listing = rpc(b, 'tools/list', profile=profile).json()['result']['tools']
         names = {item['name'] for item in listing}
-        assert len(listing) == len(names) and names == expected
+        profile_expected = ({'project_query', 'task_query', 'workspace', 'read',
+                             'write', 'process', 'get_profile'} if profile == 'coding'
+                            else expected)
+        assert len(listing) == len(names) and names == profile_expected
         assert not names.intersection(LEGACY_TOOLS)
         catalogs.append(names)
-    assert catalogs[0] == catalogs[1] == catalogs[2]
+    assert catalogs[0] == catalogs[1] and catalogs[2] < catalogs[0]
     old = tool(b, 'collaboration_read', {**b.scope, 'kind': 'join_slots'})
     current = tool(b, 'collaboration_query', {**b.scope, 'action': 'join_slots'})
     assert current == old
+    # Discovery filtering must not retire an authorized cached native call.
+    hidden = rpc(b, 'tools/call', {'name': 'collaboration_query',
+                 'arguments': {**b.scope, 'action': 'join_slots'}}, profile='coding')
+    assert hidden.status_code == 200
+    hidden_result = hidden.json()['result']
+    assert not hidden_result.get('isError')
+    assert hidden_result['structuredContent'] == current
     plan = tool(b, 'collaboration_query', {**b.scope, 'action': 'plan'})
     assert plan == {'state': 'not_configured'}
     assert tool(b, 'collaboration_read', {**b.scope, 'kind': 'plan'}) == plan

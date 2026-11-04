@@ -58,7 +58,14 @@ def test_success_savings_preserve_isolation_evidence_and_failure_details():
     assert shown['runtime']['mode'] == 'container_v1'
     assert shown['runtime_cleanup']['state'] == 'failed'
     assert shown['execution_isolation']['state'] == 'verified'
-    assert 'log_ref' not in shown
+    assert shown['log_ref']['operation_id'] == OP
+    assert shown['continuation']['operation_id'] == OP
+    assert shown['failure_context']['category'] == 'succeeded'
+    from shared.mcp_presentation import compact_output_text
+    compact = compact_output_text(shown)
+    assert 'log_ref' not in compact and 'continuation' not in compact
+    assert compact['runtime_cleanup'] == shown['runtime_cleanup']
+    assert compact['execution_isolation'] == shown['execution_isolation']
     value.update(exit_code=1, command_ok=False)
     value['failure_context']['category'] = 'command_failed'
     shown = checked('exec', {}, value)
@@ -117,7 +124,7 @@ def test_minimal_open_is_versioned_and_source_not_pruned():
                     'scope': 'boilerplate', 'trust': 'boilerplate'}, 'truncated': False}
     shown = checked('project_query', {'operation': 'open'}, raw)
     assert shown['mcp_view_version'] == 2
-    assert 'capability_index' not in shown and 'help' in shown
+    assert 'capability_index' in shown and 'help' in shown
     assert shown['context']['remaining_documents_count'] == 1
     legacy = checked('project_query', {'operation': 'open'}, raw, view=1)
     assert legacy['mcp_view_version'] == 1 and 'capability_index' in legacy

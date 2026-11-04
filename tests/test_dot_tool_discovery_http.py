@@ -51,5 +51,10 @@ def test_http_catalog_help_and_bootstrap_share_current_scope(discovery_stack):
             headers={'Accept': 'application/json, text/event-stream',
                      'Authorization': 'Bearer ' + token},
             json={'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'}).json()['result']
-        assert reply['tools'] == before['tools']
+        if profile == 'coding':
+            coding_names = {'project_query', 'task_query', 'workspace', 'read', 'write',
+                            'edit', 'exec', 'process', 'get_profile'}
+            assert reply['tools'] == [tool for tool in before['tools'] if tool['name'] in coding_names]
+        else:
+            assert reply['tools'] == before['tools']
     assert json.loads(listed['content'][0]['text']) == listed['structuredContent']

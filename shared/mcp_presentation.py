@@ -570,23 +570,6 @@ def token_view(name, arguments, value, *, view=2, verbosity='lean', output_mode=
         if isinstance(nested, dict) and nested.get('error', False) is None:
             nested.pop('error')
         execution = data if isinstance(data, dict) else row
-        succeeded = (execution.get('command_ok') is True
-                     and execution.get('exit_code') == 0
-                     and not execution.get('timed_out')
-                     and not execution.get('cancelled')
-                     and not row.get('pending')
-                     and row.get('state', 'succeeded') == 'succeeded'
-                     and (execution.get('failure_context') or {}).get('category') in (None, 'succeeded'))
-        if succeeded:
-            for key in ('continuation', 'failure_context', 'log_ref'):
-                execution.pop(key, None)
-            # Isolation and cleanup evidence is security-relevant even on success.
-            runtime = execution.get('runtime')
-            if isinstance(runtime, dict) and runtime.get('mode') == 'project_clean_v1':
-                execution.pop('runtime')
-            recovery = row.get('recovery')
-            if isinstance(recovery, dict) and recovery.get('task_outcome_confirmed'):
-                row['recovery'] = {key: item for key, item in recovery.items() if key != 'message'}
         if isinstance(data, dict) and row.get('tool') in {'write', 'edit', 'fs_write', 'fs_edit', 'apply_patch'}:
             tool = 'write' if row['tool'] in {'write', 'fs_write'} else 'edit'
             nested['data'] = token_view(tool, row.get('args_summary') or {}, data, view=view, verbosity=verbosity)
@@ -658,7 +641,6 @@ def token_view(name, arguments, value, *, view=2, verbosity='lean', output_mode=
                 row['output_recovery'] = 'Query the same operation_id using connection URL ?output=raw&verbosity=full; do not rerun the command.'
     if name in {'workspace', 'project_query'} and arguments.get('operation') == 'open':
         if result.get('context_detail', 'minimal') == 'minimal':
-            result.pop('capability_index', None)
             result['help'] = 'project_query(help, tool, action)'
             result.pop('context_scope', None)
             context = result.get('context')
@@ -698,6 +680,13 @@ def compact_output_text(value):
             continue
         nested = row.get('result')
         data = nested.get('data') if isinstance(nested, dict) else None
+        execution = data if isinstance(data, dict) else row
+        if (execution.get('command_ok') is True and execution.get('exit_code') == 0
+                and not execution.get('timed_out') and not execution.get('cancelled')
+                and not row.get('pending') and row.get('state', 'succeeded') == 'succeeded'
+                and (execution.get('failure_context') or {}).get('category') in (None, 'succeeded')):
+            for key in ('continuation', 'failure_context', 'log_ref'):
+                execution.pop(key, None)
         if isinstance(data, dict) and isinstance(row.get('output'), str) and data.get('output') == row['output']:
             data.pop('output')
             data['output_ref'] = 'output'

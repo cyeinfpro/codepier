@@ -217,7 +217,12 @@ def test_role_catalog_oauth_schemes_and_entry_challenge(api,catalog):
     assert ROLE_SCOPE in unauth.headers['WWW-Authenticate']
     result=must(client.post(endpoint,json={'jsonrpc':'2.0','id':1,'method':'tools/list'},headers={
         'Authorization':'Bearer '+t['token'],'Accept':'application/json, text/event-stream'}))['result']['tools']
-    assert {'workspace','get_profile','get_access_context'} <= {tool['name'] for tool in result}
+    names = {tool['name'] for tool in result}
+    assert {'workspace', 'get_profile'} <= names
+    assert ('get_access_context' in names) is (catalog == 'full')
+    # The focused catalog does not revoke authorized hidden identity calls.
+    context = data(call(client, t['token'], 'get_access_context', endpoint=endpoint))
+    assert context['role']['version'] == r['version']
     assert not {'devices_list','projects_create'} & {tool['name'] for tool in result}
     for tool in result:
         assert tool['securitySchemes']==tool['_meta']['securitySchemes']==[{'type':'oauth2','scopes':[ROLE_SCOPE]}]

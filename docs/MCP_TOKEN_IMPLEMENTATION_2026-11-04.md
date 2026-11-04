@@ -20,7 +20,7 @@
 ## 已实施
 
 - 修正输出 schema 对空 error 和 v2 展示字段的兼容，避免成功执行被宿主误拒。
-- 成功回执去除无信息诊断块；结构化结果保留 output 原契约，去重仅用于显式 compact 文本。保留失败及未完成结果的诊断语义。
+- 结构化结果保留 output、continuation、failure_context、log_ref 和 runtime 原契约；去重与成功诊断精简仅用于显式 compact 文本。保留失败及未完成结果的诊断语义。
 - 单文件和批量 read 的完整响应预算约束，保留按行续读能力。
 - 新建 write 不回显完整 diff，覆盖写/edit 对大 diff 截断并明确标记。
 - 输出目录 full/lean/none 和实际 coding 档位；目录指纹随展示内容变化。
@@ -94,3 +94,9 @@ v2 的 `project_query(operation="tree", project="项目", options={"format":"com
 - 不提高预算、不改授权检查；按根因使用现有代表性 HTTP/Agent 回归及新增防退化测试，而非重新运行全量。
 
 本次兼容修复定向共 144 项通过：核心/诊断/现代任务/访问档位 85 项，真实协作 Agent 与 activity 2 项，展示及 continuation 30 项，授权 schema/目录/隐藏工具调用 27 项。修复后默认完整目录 94,788 字节，保持 95,000 字节门禁。
+
+## 后续 shard3 兼容修复（41783113706）
+
+保留结构化 capability_index、continuation、failure_context、log_ref 与 runtime，避免破坏 scope 发现、断线恢复和执行证据消费。成功诊断精简仅作用于显式 compact 人读文本，隔离与清理证据始终保留。coding 目录在只读、OAuth、委托和旧协议下分别按九工具集合与实际 scope 交集验证，原路由、撤销、授权及隐藏别名检查不变。
+
+本轮逐个覆盖 CI 的八个失败用例，全部通过；连同 profile 变体、隐藏别名拒绝和展示测试共 32 项去重通过。首次展示测试的一项旧裁剪预期改为结构化保留/compact 精简后单项通过；未重跑已通过的真实流程。此前执行结果体积数字对应当时状态，不代表恢复兼容字段后的当前输出大小。
