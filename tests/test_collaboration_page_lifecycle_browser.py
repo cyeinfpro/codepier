@@ -8,6 +8,7 @@ import pytest
 from playwright.sync_api import expect
 
 from tests.legacy_collaboration_ui import use_legacy_collaboration_ui
+from tests.lifecycle_http import held_legacy_reload
 
 from tests.collaboration_support import collaboration_stack  # noqa: F401
 from tests.test_collaboration_chatroom_browser import login, overview
@@ -93,6 +94,8 @@ def polling_page(stack, chat_browser_pool, engine):
     context = chat_browser_pool(engine).new_context(viewport={"width": 1440, "height": 900})
     page = context.new_page()
     page.add_init_script(POLL_PROBE)
+    if getattr(stack, 'native_legacy_document', False):
+        page._codepier_legacy_collaboration_fixture = True
     errors, writes = [], []
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.on("request", lambda request: writes.append(request.url)
@@ -121,28 +124,31 @@ def polling_page(stack, chat_browser_pool, engine):
     return context, page, errors, writes
 
 
+@pytest.fixture
+def pending_reload_stack(collaboration_stack):
+    with held_legacy_reload(collaboration_stack) as stack:
+        yield stack
+
+
 @pytest.mark.parametrize("engine", ["webkit"])
 def test_pending_reload_reads_use_the_original_document_without_page_errors(
-        collaboration_stack, chat_browser_pool, engine):
-    stack = collaboration_stack
+        pending_reload_stack, chat_browser_pool, tmp_path, engine):
+    stack = pending_reload_stack
     context, page, errors, writes = polling_page(stack, chat_browser_pool, engine)
-    held = []
     try:
         original = page.evaluate_handle("() => lifecycleProbe")
-        original.evaluate("p => {clearTimeout(p.poll.id); p.armed = true;}")
+        original_document = page.evaluate_handle("document")
+        original.evaluate("p => {clearTimeout(p.poll.id);}")
         before_writes = list(writes)
-        def hold_navigation(route):
-            held.append(route)
-            original.evaluate("p => {p.navigationHeld = true;}")
-
-        page.route(stack.url + "/", hold_navigation)
+        stack.reload_armed.set()
         with page.expect_request(lambda request: request.is_navigation_request()
                                  and request.frame == page.main_frame):
             page.evaluate("() => {setTimeout(() => location.reload(), 0);}")
-        # The request event precedes interception. Wait for the route handler,
-        # not merely request creation, before starting old-document fetches.
-        page.wait_for_function("() => lifecycleProbe.navigationHeld === true")
-        assert len(held) == 1
+        # Wait for the real HTTP server to receive the reload and hold its
+        # response, rather than suspending WebKit at native request interception.
+        assert stack.reload_arrived.wait(10), "Reload did not reach the HTTP response gate"
+        original.evaluate("p => {p.navigationHeld = true; p.armed = true;}")
+        assert not stack.reload_release.is_set()
         # Run the real scheduled callback in its original document while the
         # replacement response is held. Native fetches and API responses remain
         # real; no synthetic success, timer delay, retry or error filtering.
@@ -165,23 +171,26 @@ def test_pending_reload_reads_use_the_original_document_without_page_errors(
           return {origin:p.origin, currentOrigin:window.lifecycleProbe.origin,
             pagehide:p.pagehide, rows:p.rows};
         }""")
-        assert len(held) == 1
+        assert stack.reload_arrived.is_set() and not stack.reload_release.is_set()
+        assert page.evaluate("old => document === old", original_document)
+        original_document.dispose()
         assert result["origin"] == result["currentOrigin"]
         assert not result["pagehide"]
         assert sorted(row["kind"] for row in result["rows"]) == POLL_KINDS
         assert all(row.get("status") == 200 and row["beforePagehide"] for row in result["rows"])
         assert errors == []
+        assert sorted(row["kind"] for row in stack.reload_records
+                      if row["event"] == "read-response" and row["kind"] in POLL_KINDS) == POLL_KINDS
+        assert all(row["status"] == 200 for row in stack.reload_records)
         with page.expect_navigation(wait_until="domcontentloaded"):
-            # Let the previously registered legacy document fixture handle the
-            # released navigation instead of bypassing it to the new room UI.
-            held.pop().fallback()
+            stack.reload_release.set()
         expect(page.locator(".cc-chat-shell")).to_be_visible()
         assert page.evaluate("lifecycleProbe.origin") != result["origin"]
         assert writes == before_writes
         assert errors == []
     finally:
-        for route in held:
-            route.abort()
+        (tmp_path / "pending-reload-http.json").write_text(json.dumps(stack.reload_records, indent=2) + "\n")
+        stack.reload_release.set()
         context.close()
 
 
