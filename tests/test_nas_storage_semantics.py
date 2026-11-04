@@ -1,5 +1,6 @@
 """Synthetic NAS semantics: no replay after unconfirmed saves, bounded metadata I/O."""
 import errno
+import json
 import os
 import zipfile
 from pathlib import Path
@@ -158,3 +159,27 @@ def test_tracked_generated_files_are_excluded_from_git_search(engine):
                    check=True, capture_output=True)
     rows, capped = e.git_candidates(root, root)
     assert not capped and [rel for _, rel, _ in rows] == ["source.txt"]
+
+
+def test_invalid_generated_name_never_enters_checkpoint_manifest(engine, monkeypatch):
+    e, project, root = engine
+    real_scandir = os.scandir
+
+    class InvalidEntry:
+        path = str(root / "invalid\udcff.tsbuildinfo")
+        def stat(self, **kwargs):
+            pytest.fail("nonportable filename reached metadata I/O")
+
+    class Scan:
+        def __init__(self, directory):
+            self.iterator = real_scandir(directory)
+        def __enter__(self):
+            return iter([InvalidEntry(), *self.iterator])
+        def __exit__(self, *args):
+            self.iterator.close()
+
+    monkeypatch.setattr(filesystem.os, "scandir", Scan)
+    receipt = e.checkpoint(project, {"label": "portable"})
+    with zipfile.ZipFile(receipt["local_archive"]) as archive:
+        assert "files/source.txt" in archive.namelist()
+        assert json.loads(archive.read("manifest.json"))["skipped"] == []

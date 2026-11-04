@@ -357,7 +357,12 @@ class FileEngine:
                         scanned += 1
                         check_budget()
                         p = Path(entry.path)
-                        rel = p.relative_to(root).as_posix()
+                        try:
+                            rel = relative_path(p.relative_to(root).as_posix())
+                        except DevError as exc:
+                            if exc.code in {"PROTECTED_PATH", "INVALID_PATH"}:
+                                continue
+                            raise
                         # Filter names before metadata I/O. SMB stat calls are
                         # expensive; excluded build trees must not consume them.
                         # Count every entry above so exclusions cannot evade budgets.
