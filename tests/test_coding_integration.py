@@ -52,8 +52,10 @@ def test_profile_old_transport_and_default_full_remain_compatible(coding_stack):
     original=s.rpc('tools/list').json()['result']['tools']
     compact=rpc(s,'tools/list').json()['result']['tools']
     assert_task_catalog(original, 13)
-    assert_task_catalog(compact, 13)
-    assert {t['name'] for t in compact} == {t['name'] for t in original}
+    expected = {'project_query', 'task_query', 'workspace', 'read', 'write',
+                'edit', 'exec', 'process', 'get_profile'}
+    assert_task_catalog(compact, 9, expected_names=expected)
+    assert {t['name'] for t in compact} < {t['name'] for t in original}
     assert not {'integration_control','validations_accept'} & {t['name'] for t in original}
     initialized=rpc(s,'initialize',{'protocolVersion':'2025-11-25'}).json()['result']
     assert initialized['protocolVersion']=='2025-11-25'
@@ -95,6 +97,24 @@ def test_remote_non_git_review_patch_idempotency_and_grant_boundaries(coding_sta
     assert conflict['isError'] and conflict['structuredContent']['error']['code']=='SHA_CONFLICT'
 
 
+def test_remote_finalization_replays_original_result_through_public_facade(coding_stack):
+    s = coding_stack
+    baseline = value(s, tool(s, 'open_workspace', {'project': 'ProjectAlpha', 'capture_baseline': True}))
+    path = s.projectalpha/'finalized-review.txt'
+    path.write_text('final result\n')
+    args = {'project': 'ProjectAlpha', 'baseline_ref': baseline['baseline_ref'], 'finalize': True}
+    final = value(s, tool(s, 'show_changes', args))
+    assert final['baseline_released'] and final['review_ref'] == baseline['baseline_ref']
+    path.write_text('later unrelated result\n')
+    replay = value(s, tool(s, 'show_changes', args))
+    assert replay['review_ref'] == final['review_ref'] and replay['summary'] == final['summary']
+    assert replay['finished'] == final['finished'] and replay['expires_at'] == final['expires_at']
+    assert replay['started'] <= replay['finished'] < replay['expires_at']
+    detail = value(s, tool(s, 'show_changes', {
+        'project': 'ProjectAlpha', 'review_ref': replay['review_ref'], 'path': path.name}))
+    assert '+final result' in detail['diff'] and 'later unrelated' not in detail['diff']
+
+
 def test_coding_profile_uses_canonical_oauth_resource_and_revocation(coding_stack):
     from urllib.parse import parse_qs,urlparse
     from tests.test_integration import oauth_prepare
@@ -108,7 +128,7 @@ def test_coding_profile_uses_canonical_oauth_resource_and_revocation(coding_stac
     tokens=s.must(s.client.post('/oauth/token',data={'grant_type':'authorization_code','client_id':registration['client_id'],'code':code,'code_verifier':verifier,'redirect_uri':args['redirect_uri'],'resource':s.url+'/mcp'}))
     catalog = rpc(s,'tools/list',token=tokens['access_token']).json()['result']['tools']
     expected = {item['name'] for item in tool_definitions('coding')} - {'exec', 'edit'}
-    assert_task_catalog(catalog, 11, expected_names=expected)
+    assert_task_catalog(catalog, 7, expected_names=expected)
     opened=value(s,tool(s,'open_workspace',{'project':'ProjectAlpha'},tokens['access_token']))
     assert opened['workspace']['granted_scopes']==['read']
     assert s.client.post('/oauth/revoke',data={'token':tokens['access_token'],'client_id':registration['client_id']}).status_code==200

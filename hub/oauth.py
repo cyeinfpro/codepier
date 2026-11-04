@@ -41,7 +41,7 @@ class OAuth:
         # Older databases did not persist the audience. Bind existing OAuth
         # grants once, before a later public URL change can retarget them.
         self.store.execute("UPDATE grants SET resource=? WHERE client_id IS NOT NULL AND resource IS NULL", (self.resource(),))
-        self.redirect_hosts = {host.lower() for host in env_csv("OAUTH_REDIRECT_HOSTS", "chatgpt.com,chat.openai.com,platform.openai.com,localhost,127.0.0.1,::1")}
+        self.redirect_hosts = {host.lower() for host in env_csv("OAUTH_REDIRECT_HOSTS", "chatgpt.com,chat.openai.com,platform.openai.com,claude.ai,localhost,127.0.0.1,::1")}
         self.router = APIRouter()
         self.routes()
 

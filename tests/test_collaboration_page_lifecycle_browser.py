@@ -19,7 +19,8 @@ POLL_KINDS = ["delegation_policies", "members", "overview", "timeline"]
 POLL_PROBE = """(() => {
   const originalTimer = window.setTimeout, originalFetch = window.fetch;
   const probe = window.lifecycleProbe = {armed: false, rows: [], poll: null,
-    origin: crypto.randomUUID(), pagehide: false, signals: [], owners: [], cycles: new Set()};
+    origin: crypto.randomUUID(), pagehide: false, signals: [], owners: [], cycles: new Set(),
+    pollAttempts: 0, pollCompletions: 0};
   probe.record = (event, details={}) => {
     const key = 'codepier-lifecycle-read-evidence';
     const records = JSON.parse(sessionStorage.getItem(key) || '[]');
@@ -35,9 +36,10 @@ POLL_PROBE = """(() => {
     if (typeof callback !== 'function' || callback.name !== 'poll')
       return originalTimer.call(this, callback, delay, ...args);
     const run = () => {
+      probe.pollAttempts++;
       const pending = Promise.resolve(callback(...args));
       probe.cycles.add(pending);
-      const done = () => probe.cycles.delete(pending);
+      const done = () => {probe.pollCompletions++; probe.cycles.delete(pending);};
       pending.then(done, done);
       return pending;
     };
@@ -58,7 +60,7 @@ POLL_PROBE = """(() => {
     if (!probe.armed || url.pathname !== '/api/collaboration' ||
         !['timeline', 'overview', 'members', 'delegation_policies'].includes(kind))
       return originalFetch.call(this, input, init);
-    const row = {kind, beforePagehide: !probe.pagehide};
+    const row = {kind, beforePagehide: !probe.pagehide, keepalive: init.keepalive === true};
     probe.rows.push(row);
     probe.signals.push({kind, signal:init.signal});
     probe.record('read-start', {kind, hasSignal:!!init.signal, aborted:!!init.signal?.aborted});
@@ -73,6 +75,11 @@ POLL_PROBE = """(() => {
       init.signal?.removeEventListener('abort', aborted);
       if (probe.rows.filter(item => item.settled).length >= 4) probe.resolveCycle();
     };
+    if (probe.routeMarker) {
+      const headers = new Headers(init.headers);
+      headers.set('X-CodePier-Test-Lifecycle', probe.routeMarker);
+      init = {...init, headers};
+    }
     return originalFetch.call(this, input, init).then(response => {
       finish({status:response.status}); return response;
     }, error => {
@@ -124,10 +131,18 @@ def test_pending_reload_reads_use_the_original_document_without_page_errors(
         original = page.evaluate_handle("() => lifecycleProbe")
         original.evaluate("p => {clearTimeout(p.poll.id); p.armed = true;}")
         before_writes = list(writes)
-        page.route(stack.url + "/", lambda route: held.append(route))
+        def hold_navigation(route):
+            held.append(route)
+            original.evaluate("p => {p.navigationHeld = true;}")
+
+        page.route(stack.url + "/", hold_navigation)
         with page.expect_request(lambda request: request.is_navigation_request()
                                  and request.frame == page.main_frame):
             page.evaluate("() => {setTimeout(() => location.reload(), 0);}")
+        # The request event precedes interception. Wait for the route handler,
+        # not merely request creation, before starting old-document fetches.
+        page.wait_for_function("() => lifecycleProbe.navigationHeld === true")
+        assert len(held) == 1
         # Run the real scheduled callback in its original document while the
         # replacement response is held. Native fetches and API responses remain
         # real; no synthetic success, timer delay, retry or error filtering.
@@ -137,7 +152,16 @@ def test_pending_reload_reads_use_the_original_document_without_page_errors(
           // rather than treating that early return as completed work.
           void p.poll.run();
           await Promise.race([p.firstCycle, new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('Four polling reads did not finish')), 15000))]);
+            setTimeout(() => reject(new Error('Four polling reads did not finish: ' +
+              JSON.stringify({pagehide:p.pagehide, hidden:document.hidden,
+                navigationHeld:p.navigationHeld === true,
+                sameDocument:p.origin === window.lifecycleProbe.origin,
+                pollAttempts:p.pollAttempts, pollCompletions:p.pollCompletions,
+                activeCycles:p.cycles.size, rows:p.rows,
+                owners:p.owners.map(item => ({kind:item.kind,
+                  hasSignal:!!item.signal, aborted:!!item.signal?.aborted})),
+                signals:p.signals.map(item => ({kind:item.kind,
+                  hasSignal:!!item.signal, aborted:!!item.signal?.aborted}))}))), 15000))]);
           return {origin:p.origin, currentOrigin:window.lifecycleProbe.origin,
             pagehide:p.pagehide, rows:p.rows};
         }""")
@@ -188,7 +212,10 @@ def test_real_pagehide_aborts_pending_reads_and_history_return_reauthorizes(
 
     def hold_read(route):
         kind = parse_qs(urlsplit(route.request.url).query).get("kind", [""])[0]
-        if kind in POLL_KINDS:
+        # Routing is installed before arming. A background read in that gap
+        # belongs to the unarmed document setup, not the cycle under test.
+        if (kind in POLL_KINDS
+                and route.request.headers.get("x-codepier-test-lifecycle") == original_origin):
             held.append(route)
             page.evaluate("count => {lifecycleProbe.heldRoutes = count;}", len(held))
         else:
@@ -217,10 +244,12 @@ def test_real_pagehide_aborts_pending_reads_and_history_return_reauthorizes(
                                  .get("kind") == ["delegation_policies"]):
             page.evaluate("""() => {
               const p = lifecycleProbe;
-              clearTimeout(p.poll.id); p.armed = true; p.pending = p.poll.run();
+              clearTimeout(p.poll.id); p.routeMarker = p.origin;
+              p.armed = true; p.pending = p.poll.run();
             }""")
         page.wait_for_function("() => lifecycleProbe.heldRoutes === 4")
         assert len(held) == 4
+        assert page.evaluate("lifecycleProbe.rows.map(row => row.kind).sort()") == POLL_KINDS
         assert page.evaluate("lifecycleProbe.rows.every(row => !row.settled)")
         # Capture which view-owned signals started the four held reads before
         # navigation, so a stale in-flight cycle cannot masquerade as this one.
@@ -298,7 +327,9 @@ def test_cancelled_beforeunload_keeps_original_mutation_and_editable_document(
         page.locator('[data-cc-view="discussion"]').click()
         area = page.locator("#cc-message-input")
         area.fill("取消离开期间只保存一次的消息")
-        original_origin = page.evaluate("performance.timeOrigin")
+        # Retain the actual Document, not a timestamp whose precision can vary.
+        # A replacement document must fail even when its URL is unchanged.
+        original_document = page.evaluate_handle("document")
         page.route("**/api/collaboration/message", hold_acknowledgement)
         with page.expect_request(lambda request: request.url.endswith("/api/collaboration/message")):
             page.locator('#cc-command button[type="submit"]').click()
@@ -313,7 +344,8 @@ def test_cancelled_beforeunload_keeps_original_mutation_and_editable_document(
             page.close(run_before_unload=True)
         assert confirmation.value.type == "beforeunload"
         assert not page.is_closed()
-        assert page.evaluate("performance.timeOrigin") == original_origin
+        assert page.evaluate("original => document === original", original_document)
+        original_document.dispose()
         route, response = receipts.pop()
         route.fulfill(response=response)
         expect(area).to_have_value("")

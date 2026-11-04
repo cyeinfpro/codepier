@@ -25,7 +25,7 @@ from hub import mcp_apps
 from hub.mcp_request_audit import mark, request_id
 from hub.mcp_tasks import TaskService, CreatedTask, METHODS as TASK_METHODS, EXTENSION as TASK_EXTENSION, supported as task_supported, arguments as task_arguments
 from shared.contracts import tool_definitions,TOOLS
-from shared.core_contracts import CORE_INSTRUCTIONS, CORE_TOOLS, REPLACED_MCP_TOOLS
+from shared.core_contracts import CORE_INSTRUCTIONS, CORE_WORKFLOW_INSTRUCTIONS, CORE_TOOLS, REPLACED_MCP_TOOLS
 from hub.core_tools import result as core_result
 from shared.mcp_presentation import present, error_view
 from shared.integration_contracts import ADMIN_TOOLS,APP_ONLY_TOOLS
@@ -126,7 +126,15 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
         mark('protocol_validated',protocol='modern' if modern else 'legacy')
         profile=request.query_params.get('profile','core')
         if profile not in {'core','full','coding'}:return failure(identifier,-32602,'Unknown MCP profile; choose core, full or coding',400)
-        instructions=CORE_INSTRUCTIONS
+        schemas=request.query_params.get('schemas','full')
+        if schemas not in {'full','lean','none'}:return failure(identifier,-32602,'Unknown schemas mode; choose full, lean or none',400)
+        view=request.query_params.get('view','2')
+        verbosity=request.query_params.get('verbosity','lean')
+        text_mode=request.query_params.get('text','json')
+        output_mode=request.query_params.get('output','raw')
+        if view not in {'1','2'} or verbosity not in {'lean','full'} or text_mode not in {'json','compact'} or output_mode not in {'raw','normalized'}:
+            return failure(identifier,-32602,'Invalid presentation options: view=1|2, verbosity=lean|full, text=json|compact, output=raw|normalized',400)
+        instructions=CORE_WORKFLOW_INSTRUCTIONS if view == '1' else CORE_INSTRUCTIONS
         if 'id' not in body:return Response(status_code=202)
         try:
             principal=await runtime.store.run(refresh_principal,runtime.store,principal)
@@ -167,7 +175,7 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                 if method=='tasks/get':result=latest
                 if method=='tasks/cancel':mark('task_cancel_acknowledged',operation_id=task_id)
             elif method=='tools/list':
-                result=await runtime.store.run(tools.list_tools, principal, params.get('cursor'))
+                result=await runtime.store.run(tools.list_tools, principal, params.get('cursor'), profile, schemas)
             elif method=='tools/call':
                 name=params.get('name');arguments=params.get('arguments',{})
                 if not isinstance(name,str) or not isinstance(arguments,dict):return failure(identifier,-32602,'Expected tool name and arguments object',400 if modern else 200)
@@ -195,10 +203,10 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                         if name in COLLABORATION_TOOLS:
                             media = value.pop('_mcp_media_content', [])
                             value=present(name,arguments,value)
-                            result={'content':[{'type':'text','text':json.dumps(value,ensure_ascii=False)}, *media],
+                            result={'content':[{'type':'text','text':json.dumps(value,ensure_ascii=False,separators=(',',':'))}, *media],
                                     'structuredContent':value,'isError':bool(value.get('error'))}
                         else:
-                            result=await runtime.store.run(mcp_apps.attach,core_result(name,arguments,value,scopes=principal.scopes),name,arguments,value,request_public_url)
+                            result=await runtime.store.run(mcp_apps.attach,core_result(name,arguments,value,scopes=principal.scopes,view=int(view),verbosity=verbosity,text_mode=text_mode,output_mode=output_mode),name,arguments,value,request_public_url)
                         try:
                             await runtime.store.run(runtime.diagnostics.connection.returned, principal, name, arguments, value)
                         except Exception:
@@ -218,7 +226,7 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                     from shared.operation_recovery import error_recovery
                     value={'error':error_view({'code':exc.code,'message':exc.message,**exc.details}),
                            'recovery':error_recovery(exc.code, exc.details.get('operation_id'))}
-                    result={'content':[{'type':'text','text':json.dumps(value,ensure_ascii=False)}],'structuredContent':value,'isError':True}
+                    result={'content':[{'type':'text','text':json.dumps(value,ensure_ascii=False,separators=(',',':'))}],'structuredContent':value,'isError':True}
                     if name == 'get_profile' or route and route.backend=='remote':result.pop('structuredContent',None)
                     if exc.details.get('call_id'):result['_meta']={'codepier/callId':exc.details['call_id']}
                     if trace:trace['status']='tool_error';trace['operation_id']=exc.details.get('operation_id')
@@ -242,7 +250,7 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                 if 'read' not in principal.scopes:raise DevError('INSUFFICIENT_SCOPE','缺少读取权限',403)
                 if uri in mcp_apps.RESOURCES or uri in mcp_apps.LEGACY_RESOURCES:item=await runtime.store.run(mcp_apps.read_resource,uri,request_public_url)
                 elif uri=='rd://projects':item={'uri':uri,'mimeType':'application/json','text':json.dumps(await runtime.store.run(project_resources,principal),ensure_ascii=False)}
-                elif uri=='rd://workflow':item={'uri':uri,'mimeType':'text/plain','text':instructions}
+                elif uri=='rd://workflow':item={'uri':uri,'mimeType':'text/plain','text':CORE_WORKFLOW_INSTRUCTIONS}
                 else:return failure(identifier,-32602 if modern else -32002,'Resource not found',404 if modern else 200)
                 await runtime.store.run(auth.store.audit,principal.actor,'resources.read',uri);result={'contents':[item]}
             elif method=='prompts/list':
@@ -270,7 +278,7 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                 else:
                     result=complete(result)
             from shared.tool_protocol import CONTRACT_PROTOCOL
-            if modern or method in {'initialize', 'tools/list', 'tools/call'}:
+            if method in {'initialize', 'server/discover', 'tools/list'} or view == '1' and (modern or method == 'tools/call'):
                 result={**result,'_meta':{**result.get('_meta',{}),
                     'com.codepier/serviceVersion':VERSION,'com.codepier/toolContractProtocol':CONTRACT_PROTOCOL}}
             correlation=request_id()
@@ -280,7 +288,7 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
             from hub.core_tools import bound_batch_response
             response_body={'jsonrpc':'2.0','id':identifier,'result':result}
             if method == 'tools/call' and route and route.backend != 'remote':
-                response_body=bound_batch_response(response_body)
+                response_body=bound_batch_response(response_body, output_budget=(view == '2' and verbosity != 'full'))
             return JSONResponse(response_body,
                 headers={'Cache-Control':'no-store','Access-Control-Allow-Origin':origin or '*','Vary':'Authorization, MCP-Protocol-Version'})
         except ProtocolError as exc:return failure(identifier,exc.code,exc.message,400,exc.data)

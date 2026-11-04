@@ -18,6 +18,16 @@
 
 在客户端创建连接，选择 OAuth。CodePier 实现授权码、S256 PKCE、DCR 公共客户端 `token_endpoint_auth_method=none`，不实现 CIMD、private_key_jwt 或 client_secret_basic；采用服务实际支持的认证方式。跳转面板后登录、核对项目范围和工具权限，再明确确认。授权码及回调地址精确匹配；不要为解决回调失败放行任意域名。
 
+### Claude 远程连接器
+
+Claude 的托管连接器使用同一个公开 MCP URL。选择 OAuth 的“自动注册”（DCR）；CodePier 当前不支持 CIMD，不能假设“使用 Claude 已发布的身份”可用。客户端为 public client + S256 PKCE，认证方法是 `none`，不要把 PAT、Agent 密钥或管理员密码填进 OAuth client secret。
+
+[Claude 官方认证文档](https://claude.com/docs/connectors/building/authentication) 要求托管端回调为 `https://claude.ai/api/mcp/auth_callback`。原先只包含 OpenAI 域名的 `OAUTH_REDIRECT_HOSTS` 会在注册阶段拒绝该回调，常表现为“无法在 CodePier 的登录服务中注册”，并提示手填客户端 ID。手填 ID 不能绕过回调验证。
+
+源码、Compose、k3s 和环境示例的默认回调主机包含 `claude.ai`，但已有安装显式配置的 `OAUTH_REDIRECT_HOSTS` 不会被覆盖。运维应先核对实际 Hub 的有效配置；如需支持 Claude，经所有者批准后保留已有允许主机并加入精确的 `claude.ai`，按部署流程生效后再重新连接。不要使用通配符、关闭鉴权或放行任意 HTTPS 回调。默认值更新不是已修改生产配置的证据。
+
+DCR 只登记客户端身份，不授予项目或工具权限；登录后的明确同意、PKCE、HTTPS 和精确回调地址匹配仍然生效。合成测试不能替代真实 Claude 的登录与只读调用验收。
+
 ## 路线 B：官方 Tunnel 与本地 stdio 桥接器
 
 在面板“MCP 接入”创建限定范围 PAT，令牌仅显示一次。先给读取权限，确有需要再授予写入、执行或独立桌面权限。下面是在 Hub 所在服务器、原安装用户下准备桥接器的示例，路径按实际安装调整：

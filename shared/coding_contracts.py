@@ -22,7 +22,7 @@ class OpenWorkspace(CodingArgs):
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=128)
     context_id: str = Field(default='', pattern=r'^(|[a-f0-9]{64})$')
     context_detail: Literal['minimal', 'documents'] = Field(default='minimal', description='Minimal rule/document/skill index by default; documents explicitly requests bounded source previews. Neither probes execution capabilities.')
-    capture_baseline: bool = Field(default=False, description='Capture before editing, not after. Bounded source snapshot, not a Git commit or authorship proof.')
+    capture_baseline: bool = Field(default=False, description='Capture before editing, not after. New baselines expire in 24 hours; finish with show_changes(finalize=true) to release source storage. Not a Git commit or authorship proof.')
     max_chars: int = Field(default=6000, ge=1000, le=32000)
     max_files: int = Field(default=8, ge=1, le=32)
     include_skills: bool = True
@@ -34,6 +34,7 @@ class ShowChanges(CodingArgs):
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=128)
     baseline_ref: str = Field(default='', pattern=r'^(|[a-f0-9]{32})$')
     review_ref: str = Field(default='', pattern=r'^(|[a-f0-9]{32})$')
+    finalize: bool = Field(default=False, description='With baseline_ref, atomically replace the baseline with its final immutable review. Repeating returns that same result. Default keeps the baseline for further comparisons until expiry.')
     path: str = Field(default='', max_length=1024)
     offset: int = Field(default=0, ge=0, le=1000000)
     limit: int = Field(default=40, ge=1, le=100)
@@ -45,6 +46,8 @@ class ShowChanges(CodingArgs):
             raise ValueError('Supply exactly one of baseline_ref (freeze a review) or review_ref (read the same snapshot)')
         if self.baseline_ref and (self.path or self.offset):
             raise ValueError('Freeze first, then read paths/pages using the returned review_ref')
+        if self.finalize and not self.baseline_ref:
+            raise ValueError('finalize requires baseline_ref')
         return self
 
 

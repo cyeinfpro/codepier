@@ -46,6 +46,8 @@ class RemoteProject(Project):
         description="Optional key for this read. Reuse only to recover the same operation after a transport failure; use a fresh key for a fresh read.")
 
 class Tree(RemoteProject):
+    format: Literal["structured", "compact"] = Field(default="structured",
+        description="MCP presentation only; compact uses relative path lines. Agent results and pagination remain structured.")
     path: str = Field(default=".", max_length=1024)
     depth: int = Field(default=2, ge=1, le=8)
     offset: int = Field(default=0, ge=0, le=100000)
@@ -339,7 +341,7 @@ class Tool:
 
 TOOLS: dict[str, Tool] = {
     'open_workspace': Tool(OpenWorkspace, 'read', 'Open a project with bounded rules, skills and execution context. Pass context_id to omit unchanged content after revalidation. Optional capture_baseline snapshots allowed source BEFORE editing; works without Git. Not a full scan or authorization token.'),
-    'show_changes': Tool(ShowChanges, 'read', 'Freeze an immutable interval review from baseline_ref, or read a saved review_ref. List files first; path reads bounded diff pages via offset. Snapshots belong to the current project/mapping/grant, expire after seven days and do not prove session authorship.'),
+    'show_changes': Tool(ShowChanges, 'read', 'Freeze an immutable interval review from baseline_ref, or read a saved review_ref. finalize=true releases the baseline by atomically replacing it with its final review; retries return that result. New baselines last 24 hours, reviews seven days. Default retains the baseline for further comparisons. List files first; path reads bounded diff pages via offset. Bound to project/mapping/grant, not session authorship proof.'),
     'apply_patch': Tool(ApplyPatch, 'write', 'Apply up to 32 typed write/delete/move changes. Preflight ALL paths/SHA before writing; parent directories must exist. dry_run previews only. Whole-batch backups, per-file CAS and explicit rollback reports; NOT an atomic filesystem transaction. Reuse the same key only to recover the identical request.', True),
     "computer_status": Tool(ComputerStatus, "read", "Inspect local Codex Computer Use installation and opt-in. probe=true additionally requires computer scope and verifies native MCP tools only, without reading apps/screens. Executable presence is not OS permission verification."),
     "computer_apps": Tool(ComputerApps, "computer", "List native app inventory, which may include recent app usage. Requires distinct computer scope and local project opt-in; does not grant app access."),
@@ -515,7 +517,9 @@ OUTPUT_SCHEMAS.update({name: _object({**_RECEIPT, "session_id": _NULLABLE_STR,
 
 OUTPUT_SCHEMAS.update({
     'open_workspace': _object({**_RECEIPT, 'context_id': _STR, 'context_unchanged': _BOOL, 'workspace': {'type': 'object'}, 'context': {'type': ['object', 'null']}, 'baseline_ref': _STR, 'truncated': _BOOL}, ('operation_id', 'context_id', 'context_unchanged', 'workspace')),
-    'show_changes': _object({**_RECEIPT, 'review_ref': _STR, 'immutable': _BOOL, 'summary': {'type': 'object'}, 'coverage': {'type': 'object'}, 'files': {'type': 'array'}, 'diff': _STR, 'next_offset': _NULLABLE_INT}, ('operation_id', 'review_ref', 'summary', 'coverage')),
+    'show_changes': _object({**_RECEIPT, 'review_ref': _STR, 'baseline_ref': _STR, 'immutable': _BOOL, 'baseline_released': _BOOL,
+                            'started': _NUM, 'finished': _NUM, 'expires_at': _NUM, 'scope': _STR,
+                            'summary': {'type': 'object'}, 'coverage': {'type': 'object'}, 'files': {'type': 'array'}, 'diff': _STR, 'next_offset': _NULLABLE_INT}, ('operation_id', 'review_ref', 'summary', 'coverage')),
     'apply_patch': _object({**_RECEIPT, 'success': _BOOL, 'outcome': _STR, 'atomic': _BOOL, 'files': {'type': 'array'}, 'rollback_errors': {'type': 'array'}, 'error': {'type': 'object'}}, ('operation_id', 'success', 'outcome', 'files')),
 })
 
@@ -620,15 +624,37 @@ def _compact_input_schema(schema, *, output=False):
     return result
 
 
-def tool_definitions(profile="core", authorization="fixed"):
+CODING_TOOLS = frozenset({'project_query', 'task_query', 'workspace', 'read', 'write',
+                          'edit', 'exec', 'process', 'get_profile'})
+LEAN_OUTPUT_SCHEMA = {'type': 'object', 'additionalProperties': True,
+    'properties': {'operation_id': {'type': 'string'}, 'pending': {'type': 'boolean'},
+        'state': {'type': 'string'}, 'error': {'anyOf': [{'type': 'object'}, {'type': 'string'}, {'type': 'null'}]},
+        'truncated': {'type': 'boolean'}, 'next_offset': {'anyOf': [{'type': 'integer'}, {'type': 'null'}]}}}
+
+
+def project_output_schemas(definitions, schemas='full'):
+    """Catalog-only projection; runtime validation and remote schemas stay intact."""
+    if schemas not in {'full', 'lean', 'none'}:
+        raise ValueError('Unknown MCP schemas mode')
+    result = copy.deepcopy(definitions)
+    for item in result:
+        if schemas == 'lean':
+            item['outputSchema'] = copy.deepcopy(LEAN_OUTPUT_SCHEMA)
+        elif schemas == 'none':
+            item.pop('outputSchema', None)
+    return result
+
+
+def tool_definitions(profile="core", authorization="fixed", schemas="full"):
     from shared.mcp_presentation import output_schema
+    from shared.core_output_schemas import factor
     from shared.schema_cache import schema_for
     if authorization not in {"fixed", "role"}:
         raise ValueError("Unknown authorization mode")
     if profile not in {"core", "full", "coding"}:
         raise ValueError("Unknown MCP tool profile")
     result = [{"name": name, "description": t.description, "inputSchema": schema_for(t.model),
-             "outputSchema": output_schema(name, OUTPUT_SCHEMAS[name]),
+             "outputSchema": factor(output_schema(name, OUTPUT_SCHEMAS[name])),
              "annotations": {"readOnlyHint": t.scope in {"read", "devices.read"} or name in COMPUTER_READ_TOOLS, "destructiveHint": t.destructive,
                              "idempotentHint": True, "openWorldHint": t.scope in {"execute", "computer"}},
              "_meta": {"securitySchemes": [{"type": "oauth2", "scopes": [t.scope]}]}}
@@ -641,6 +667,8 @@ def tool_definitions(profile="core", authorization="fixed"):
         if item["name"] in {"workspace", "browser", "computer", "process"}:
             item["annotations"]["readOnlyHint"] = False
             item["annotations"]["openWorldHint"] = True
+    if profile == 'coding':
+        result = [item for item in result if item['name'] in CODING_TOOLS]
     result = [decorate_integration(item) for item in result]
     for item in result:
         if item['name'] == 'get_profile':
@@ -650,4 +678,4 @@ def tool_definitions(profile="core", authorization="fixed"):
             item['securitySchemes'] = schemes
             item['_meta']['securitySchemes'] = schemes
             item['_meta']['codepier/authorizationMode'] = 'role'
-    return result
+    return project_output_schemas(result, schemas)

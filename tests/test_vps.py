@@ -212,9 +212,12 @@ def test_missing_master_key_with_only_vps_credentials(inventory):
 @pytest.mark.parametrize('profile', ['full', 'coding'])
 def test_catalog_has_secret_free_inputs(profile):
     tools = {t['name']: t for t in tool_definitions(profile)}
-    for name in ['vps', 'exec']:
-        assert name in tools and 'password' not in tools[name]['inputSchema']['properties']
-    assert tools['vps']['annotations']['readOnlyHint']
+    for tool in tools.values():
+        assert 'password' not in tool['inputSchema']['properties']
+    if profile == 'full':
+        assert tools['vps']['annotations']['readOnlyHint']
+    else:
+        assert 'vps' not in tools
     assert not tools['exec']['annotations']['readOnlyHint']
     assert tools['exec']['annotations']['destructiveHint']
     with pytest.raises(ValidationError):
@@ -433,6 +436,10 @@ def test_offline_queue_unassign_before_delivery(vps_stack):
 def test_coding_profile_actual_rpc_catalog_and_call(vps_stack):
     s = vps_stack
     headers={'Authorization':'Bearer '+s.pat,'MCP-Protocol-Version':'2025-11-25','Accept':'application/json, text/event-stream'}
+    catalog=s.client.post('/mcp?profile=coding',headers=headers,json={
+        'jsonrpc':'2.0','id':0,'method':'tools/list'})
+    s.must(catalog)
+    assert 'vps' not in {tool['name'] for tool in catalog.json()['result']['tools']}
     payload={'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':'vps','arguments':{'project':'ProjectAlpha'}}}
     response=s.client.post('/mcp?profile=coding',headers=headers,json=payload)
     s.must(response)

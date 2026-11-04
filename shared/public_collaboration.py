@@ -376,3 +376,73 @@ def tool_definitions(authorization='fixed'):
                 'codepier/migration': 'Rescan to discover the three collaboration tools. Existing legacy tool calls remain compatible; existing native subscriptions and consumer mode are unchanged.'},
         })
     return result
+
+
+def lean_input_schema(schema):
+    """Discovery-only shallow envelope; preserve every accepted top-level name."""
+    def shallow(spec):
+        if not isinstance(spec, dict):
+            return deepcopy(spec)
+        result = {key: deepcopy(value) for key, value in spec.items()
+                  if key in {'type', 'enum', 'const', 'minimum', 'maximum', 'minLength',
+                             'maxLength', 'pattern', 'minItems', 'maxItems'}}
+        kinds = result.get('type', [])
+        kinds = [kinds] if isinstance(kinds, str) else kinds
+        if 'object' in kinds:
+            result['additionalProperties'] = True
+        if 'array' in kinds:
+            result['items'] = shallow(spec.get('items', {}))
+        return result
+    return {'type': 'object', 'properties': {name: shallow(spec) for name, spec in schema['properties'].items()},
+            'required': list(schema.get('required', [])), 'additionalProperties': False,
+            'description': 'Discovery envelope only. Before calling an unfamiliar action, fetch its exact schema with project_query(operation="help", tool="<tool>", action="<action>"). Server validation and authorization are unchanged.'}
+
+
+def action_help(tool, action='', *, scopes=None):
+    """Return an exact, bounded action schema, never grant execution authority."""
+    from shared.schema_cache import schema_for
+    from shared.contracts import _compact_input_schema
+    if tool not in PUBLIC_TOOLS:
+        raise DevError('UNKNOWN_OPERATION', 'Unknown collaboration tool')
+    if scopes is not None and 'read' not in scopes:
+        raise DevError('INSUFFICIENT_SCOPE', 'Collaboration discovery requires read', 403, required_scope='read')
+    if not action:
+        return {'tools': {tool: {'operations': sorted(ACTIONS[tool]), 'help': {
+            'tool': 'project_query', 'arguments': {'operation': 'help', 'tool': tool, 'action': '<action>'}}}}, 'note': 'Discovery is not execution authority.'}
+    if action not in ACTIONS[tool]:
+        raise DevError('UNKNOWN_OPERATION', 'Unknown collaboration action')
+    full = schema_for(ADAPTERS[tool])
+    definitions = full.get('$defs', {})
+    def matching(node):
+        if '$ref' in node:
+            return matching(definitions[node['$ref'].split('/')[-1]])
+        if node.get('properties', {}).get('action', {}).get('const') == action:
+            return True
+        return any(matching(child) for child in node.get('oneOf', node.get('anyOf', [])))
+    branches = [deepcopy(node) for node in full.get('oneOf', full.get('anyOf', [])) if matching(node)]
+    if len(branches) != 1:
+        raise ValueError('Expected exactly one collaboration action branch')
+    schema = branches[0]
+    if '$ref' in schema:
+        schema = deepcopy(definitions[schema['$ref'].split('/')[-1]])
+    needed = {}
+    def collect(node):
+        if isinstance(node, dict):
+            reference = node.get('$ref')
+            if reference:
+                key = reference.split('/')[-1]
+                if key not in needed:
+                    needed[key] = deepcopy(definitions[key])
+                    collect(needed[key])
+            for key, value in node.items():
+                if key != '$defs':
+                    collect(value)
+        elif isinstance(node, list):
+            for item in node:
+                collect(item)
+    collect(schema)
+    if needed:
+        schema['$defs'] = needed
+    return {'tool': tool, 'action': action, 'operation': action, 'scope': 'read', 'arguments_location': 'top-level',
+            'inputSchema': _compact_input_schema(schema),
+            'note': 'Exact action validation still runs before dispatch. Discovery grants no authority; original scopes, grants, approvals and leases remain required.'}

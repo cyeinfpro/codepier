@@ -167,3 +167,22 @@ def test_http_wait_timeout_does_not_cancel_local_execution(continuation_stack, c
     assert terminal["state"] == "succeeded" and terminal["result"]["data"]["exit_code"] == 0
     assert terminal["next_call"] is None
     assert (stack.projectalpha / counter).read_text() == "once\n"
+
+
+@pytest.mark.parametrize("profile", ["full", "coding"])
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_exec_initial_wait_returns_schema_valid_receipt_once(continuation_stack, catalog, profile, exit_code):
+    stack = continuation_stack
+    counter = f"initial-wait-{profile}-{exit_code}.count"
+    arguments = {"project": "ProjectAlpha",
+                 "command": shlex.join(command(counter, delay=0, exit_code=exit_code)),
+                 "yield_seconds": 10, "idempotency_key": uuid.uuid4().hex}
+    result = call(stack, catalog, profile, "exec", arguments)
+    receipt = result["structuredContent"]
+    assert receipt["state"] == ("failed" if exit_code else "succeeded")
+    assert receipt["pending"] is False
+    assert receipt["result"]["data"]["exit_code"] == exit_code
+    assert receipt["next_call"] is None
+    replay = call(stack, catalog, profile, "exec", arguments)["structuredContent"]
+    assert replay["operation_id"] == receipt["operation_id"]
+    assert (stack.projectalpha / counter).read_text() == "once\n"

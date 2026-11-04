@@ -14,7 +14,7 @@ from shared.query_contracts import QUERY_TOOLS
 
 WORKSPACE = {'list': 'projects_list', 'open': 'open_workspace', 'skills': 'skills_list',
              'skill': 'skills_read', 'tasks': 'tasks_list', 'status': 'execution_info',
-             'readiness': 'readiness_get', 'tree': 'fs_tree'}
+             'readiness': 'readiness_get', 'tree': 'fs_tree', 'search': 'fs_search'}
 COMPUTER = {'status': 'computer_status', 'apps': 'computer_apps', 'open': 'computer_session_open',
             'observe': 'computer_observe', 'action': 'computer_action', 'close': 'computer_session_close'}
 

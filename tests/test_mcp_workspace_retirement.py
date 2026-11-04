@@ -8,7 +8,10 @@ from shared.core_contracts import CORE_TOOLS, REPLACED_MCP_TOOLS
 @pytest.mark.parametrize('profile', ['core', 'coding', 'full'])
 def test_text_catalog_keeps_core_queries_identity_and_attachment_contract(profile):
     definitions = {item['name']: item for item in tool_definitions(profile)}
-    assert set(definitions) == CORE_TOOLS | {'project_query', 'task_query', 'get_profile', 'get_access_context'}
+    expected = ({'project_query', 'task_query', 'workspace', 'read', 'write',
+                 'edit', 'exec', 'process', 'get_profile'} if profile == 'coding'
+                else CORE_TOOLS | {'project_query', 'task_query', 'get_profile', 'get_access_context'})
+    assert set(definitions) == expected
     for item in definitions.values():
         assert 'openai/ui' not in item['_meta']
         assert 'openai/outputTemplate' not in item['_meta']

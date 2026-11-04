@@ -41,7 +41,10 @@ def test_entrypoint_metadata_and_conservative_facades(profile):
         assert item['annotations']['destructiveHint'] is False
         assert item['annotations']['openWorldHint'] is False
     assert 'workbench' not in definitions
-    for name in ('workspace', 'process', 'browser', 'computer'):
+    facades = ('workspace', 'process') if profile == 'coding' else ('workspace', 'process', 'browser', 'computer')
+    if profile == 'coding':
+        assert not {'browser', 'computer'} & definitions.keys()
+    for name in facades:
         assert definitions[name]['annotations']['readOnlyHint'] is False
     for name, definition in definitions.items():
         assert 'resourceUri' not in definition['_meta'].get('ui', {})

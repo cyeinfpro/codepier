@@ -220,6 +220,10 @@ def test_real_agent_discovery_receipts_and_panel_keep_distinct_views(stack):
             operation = polled['structuredContent']['operations'][0]
             assert operation['state'] == 'succeeded', operation
             value = {'operation_id': operation['id'], **operation['result']['data']}
+            if value.get('output_ref') == 'output':
+                # View 2 keeps one exact stdout copy on the enclosing receipt.
+                assert 'output' not in value and isinstance(operation['output'], str)
+                value['output'] = operation['output']
         Draft202012Validator(schema(name)).validate(value)
         return value
     for name, action in [('workspace', 'open'), ('project_query', 'status'),

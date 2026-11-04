@@ -110,6 +110,8 @@ def union(variants, *, pending=True):
     for variant in variants:
         for key, value in variant.get('properties', {}).items():
             properties[key] = either(properties[key], value) if key in properties else value
+    if 'error' in properties:
+        properties['error'] = either(properties['error'], NULL)
     branches = []
     for variant in variants:
         branch = {key: value for key, value in variant.items()
@@ -130,6 +132,20 @@ def factor(schema):
     import json
     from collections import Counter
 
+    def compact_types(node):
+        if isinstance(node, list):
+            return [compact_types(item) for item in node]
+        if not isinstance(node, dict):
+            return node
+        result = {key: compact_types(value) for key, value in node.items()}
+        choices = result.get('anyOf', [])
+        if set(result) == {'anyOf'} and choices and all(
+                isinstance(choice, dict) and set(choice) == {'type'}
+                and isinstance(choice['type'], str) for choice in choices):
+            return {'type': list(dict.fromkeys(choice['type'] for choice in choices))}
+        return result
+
+    schema = compact_types(schema)
     counts = Counter()
 
     def key(node):
@@ -146,22 +162,31 @@ def factor(schema):
 
     def count(node):
         fingerprint = key(node)
-        if len(fingerprint) >= 50:
+        if len(fingerprint) >= 30:
             counts[fingerprint] += 1
         for child in children(node):
             count(child)
 
     count(schema)
     definitions, names = {}, {}
+    reserved = set(schema.get('$defs', {}))
 
     def reduce(node, *, inline=False):
         fingerprint = key(node)
         if not inline and counts[fingerprint] > 1:
             if fingerprint not in names:
-                name = 'r' + str(len(names))
+                index = len(names)
+                while 'r' + str(index) in reserved:
+                    index += 1
+                name = 'r' + str(index)
+                reserved.add(name)
                 names[fingerprint] = name
                 definitions[name] = reduce(node, inline=True)
-            return {'$ref': '#/$defs/' + names[fingerprint]}
+            # Keep lifecycle/access annotations visible to clients that inspect
+            # properties without resolving local references.
+            annotations = ('deprecated', 'readOnly', 'writeOnly')
+            return {'$ref': '#/$defs/' + names[fingerprint],
+                    **{name: deepcopy(node[name]) for name in annotations if name in node}}
         result = deepcopy(node)
         for name in ('properties', 'patternProperties', '$defs'):
             if name in node:
@@ -176,7 +201,7 @@ def factor(schema):
 
     result = reduce(schema, inline=True)
     if definitions:
-        result['$defs'] = definitions
+        result['$defs'] = {**result.get('$defs', {}), **definitions}
     return result
 
 
@@ -209,7 +234,7 @@ def build_core_output_schemas(legacy, *, include_queries=False):
     workspace = [project_list, help_index, help_detail, devices, project_created,
         *variants('projects_resolve', 'open_workspace', 'project_context',
                   'skills_list', 'skills_read', 'tasks_list', 'execution_info',
-                  'readiness_get', 'fs_tree', 'workspace_status', 'worktrees_create',
+                  'readiness_get', 'fs_tree', 'fs_search', 'workspace_status', 'worktrees_create',
                   'worktrees_list', 'worktrees_remove', 'workflows_create',
                   'workflows_list', 'workflows_get', 'workflows_update',
                   'workflows_handoff', 'lsp_status')]
@@ -308,7 +333,11 @@ def build_core_output_schemas(legacy, *, include_queries=False):
     result = {
         'workspace': union(workspace),
         'read': union(read), 'write': union(write), 'edit': union(edit),
-        'exec': union([execution]), 'process': union(process),
+        # An initial exec wait returns the full durable operation, not only
+        # its execution payload or the compact pending receipt. Share the same
+        # typed journal contract as task_query (including null/string errors).
+        'exec': union([execution, {**OPERATION, 'required': ['id', 'tool', 'state']}]),
+        'process': union(process),
         'browser': union(browser), 'computer': union(computer),
         'vps': union([obj({'vps': array(vps), 'total': INT,
                           'next_offset': nullable(INT)}, ('vps', 'total', 'next_offset'))],
@@ -316,7 +345,7 @@ def build_core_output_schemas(legacy, *, include_queries=False):
     }
     if include_queries:
         result['project_query'] = union([project_list, help_index, help_detail, *variants(
-            'fs_tree', 'skills_list', 'skills_read',
+            'fs_tree', 'fs_search', 'skills_list', 'skills_read',
             'open_workspace', 'tasks_list', 'execution_info', 'readiness_get',
             'workspace_status', 'workflows_list', 'workflows_get')])
         result['task_query'] = union([process[0], *variants(

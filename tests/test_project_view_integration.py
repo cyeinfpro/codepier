@@ -43,7 +43,7 @@ def test_real_minimal_open_document_preview_and_original_receipt(view_stack):
     s = view_stack
     (s.projectalpha/'MEMORY.md').write_text('Fixture-only project rules')
     minimal = query(s, 'open')
-    assert minimal['mcp_view_version'] == 1
+    assert minimal['mcp_view_version'] == 2
     assert 'execution' not in minimal['context'] and 'tasks' not in minimal['context']
     assert all('content' not in item for item in minimal['context']['documents'])
     assert any(item['path'] == 'MEMORY.md' and item['state'] == 'available'

@@ -1,6 +1,7 @@
 """Recoverable room deletion in real browsers and disposable Hub fixtures."""
 import pytest
-from playwright.sync_api import expect
+from playwright.sync_api import Error as PlaywrightError, expect
+from shared.audit_redaction import redact_text
 from tests.collaboration_support import collaboration_stack  # noqa: F401
 from tests.test_collaboration_chatroom_browser import login, overview, click_room_refresh
 from tests.test_collaboration_dots_flow import create_dot, join_dot
@@ -260,6 +261,8 @@ def test_restore_uses_only_visible_history_project_for_navigation(
     page = context.new_page()
     other = stack.projects[1]
     pending_routes = set()
+    page_errors = []
+    page.on('pageerror', lambda error: page_errors.append(redact_text(str(error))[:400]))
 
     def tracked(handler):
         def handle(route):
@@ -276,7 +279,29 @@ def test_restore_uses_only_visible_history_project_for_navigation(
         login(page, stack)
         join_dot(stack, create_dot(stack, '合成历史助手'))
         form = manage_from_connections(page)
-        project_checkbox(form, other).check()
+        try:
+            project_checkbox(form, other).check()
+        except PlaywrightError as error:
+            # Preserve the original failure and timeout. CI currently has no
+            # evidence distinguishing a lost drawer click from missing choices.
+            # Capture only bounded UI state, never full DOM or credentials.
+            try:
+                picker = page.evaluate("""projectId => {
+                  const forms = document.querySelectorAll('#cc-room-projects');
+                  const form = forms[0], drawer = document.querySelector('#cc-drawer');
+                  const shell = document.querySelector('.cc-chat-shell');
+                  const choices = [...(form?.querySelectorAll('[name="room_projects"]') || [])];
+                  return {form_count: forms.length, form_visible: !!form?.getClientRects().length,
+                    drawer_open: !!drawer?.open, drawer_visible: !!drawer?.getClientRects().length,
+                    choice_count: choices.length,
+                    expected_choice_count: choices.filter(input => input.value === projectId).length,
+                    workspace_view: shell?.dataset.workspaceView || '',
+                    shell_busy: shell?.getAttribute('aria-busy') || ''};
+                }""", other['id'])
+            except PlaywrightError as diagnostic_error:
+                picker = {'diagnostic_error': type(diagnostic_error).__name__}
+            error.add_note(f'Room project picker state: {picker!r}; page_errors={page_errors[-5:]!r}')
+            raise
         save(form)
         expect(page.locator('#cc-drawer')).not_to_be_visible()
         conversation = overview(stack)['conversation']
