@@ -48,8 +48,10 @@ def test_login_rehash_and_ip_budget_cannot_be_reset(tmp_path):
         asyncio.run(auth.login(request(), 'owner', 'synthetic'))
         encoded = store.one("SELECT password_hash FROM users WHERE id='owner'")['password_hash']
         assert not password_needs_rehash(encoded) and password_verify('synthetic', encoded)
+        assert store.one("SELECT count(*) AS n FROM login_attempts")['n'] == 7
+        auth._login_attempt(request(), 'victim-next')
         with pytest.raises(DevError) as failure:
-            auth._login_attempt(request(), 'victim-next')
+            auth._login_attempt(request(), 'victim-over-limit')
         assert failure.value.code == 'LOGIN_THROTTLED'
     finally:
         store.close()

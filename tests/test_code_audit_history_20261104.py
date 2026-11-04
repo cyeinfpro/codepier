@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 
-from hub.operation_history import PREFIX, seal, unseal, retention_plan
+from hub.operation_history import PREFIX, seal, unseal, retention_plan, rewrite_task_ciphertext
 from hub.collaboration.retention import history_retention_plan
 from hub.keyring import rotate_key
 from hub.mcp_tasks import TaskService
@@ -33,8 +33,9 @@ async def test_complete_encrypts_result_tail_and_frozen_task_and_rekeys(task_run
     with pytest.raises(sqlite3.IntegrityError, match='immutable'):
         runtime.store.execute('UPDATE mcp_tasks SET terminal_result=? WHERE task_id=?', (seal(runtime.store, '{}'), identifier))
     # Equal plaintext can be re-encrypted; different or corrupt data stays immutable.
-    runtime.store.execute('UPDATE mcp_tasks SET terminal_result=? WHERE task_id=?',
-        (seal(runtime.store, unseal(runtime.store, frozen['terminal_result'])), identifier))
+    with runtime.store.transaction():
+        rewrite_task_ciphertext(runtime.store, identifier, 'terminal_result',
+                                seal(runtime.store, unseal(runtime.store, frozen['terminal_result'])))
     directory = runtime.store.directory
     runtime.store.close()
     rotate_key(directory)

@@ -17,3 +17,5 @@ hub.operation_history.prune_history(store, now=..., batch=100) 默认 dry-run。
 hub.operation_history.encrypt_legacy_history(store, batch=100) 是显式、可重复执行的有界迁移。迁移 operations 结果/输出、旧 live tails、冻结 terminal_result 和整个旧 terminal_operation；每列每批最多 batch 条。旧快照只有认证后明文完全相等才可重加密，状态与正文的修改仍被触发器拒绝。迁移保留既有截图/桌面文本短期 TTL 元数据；不把其延长到 30 天。升级不会自动运行此迁移。
 
 旧记录保持可读；旧备份、数据库空闲页和 WAL 不会因为逻辑列加密或清理而自动物理擦除。必须保护备份和匹配密钥，并在另行授权的维护流程处理备份保留及物理介质。日志、审计元数据、错误摘要不在正文加密范围内。
+
+冻结快照的持久触发器只依赖 SQLite 内置表达式，普通离线 SQLite 状态维护不依赖连接私有 UDF。显式无损重加密先验证认证明文相同，再在已有写事务和 savepoint 内暂设仅匹配该 task_id、原值与新值的精确例外，完成前恢复严格触发器；失败和进程崩溃一起回滚数据与触发器。

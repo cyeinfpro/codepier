@@ -50,15 +50,22 @@ def migrate(db):
             'operation_id',NEW.id,'state',NEW.state,'result',NULL,
             'error',NEW.error,'updated',NEW.updated),terminal_result=NEW.result
         WHERE task_id=NEW.id AND terminal_operation IS NULL; END""")
-    db.execute('DROP TRIGGER IF EXISTS mcp_tasks_terminal_immutable')
-    db.execute("""CREATE TRIGGER IF NOT EXISTS mcp_tasks_terminal_immutable
-        BEFORE UPDATE OF terminal_operation ON mcp_tasks
-        WHEN OLD.terminal_operation IS NOT NULL AND NEW.terminal_operation IS NOT OLD.terminal_operation
-            AND NOT history_same_body(OLD.terminal_operation,NEW.terminal_operation)
-        BEGIN SELECT RAISE(ABORT,'MCP task terminal state is immutable'); END""")
-    db.execute("""CREATE TRIGGER IF NOT EXISTS mcp_tasks_terminal_result_immutable
-        BEFORE UPDATE OF terminal_result ON mcp_tasks
-        WHEN OLD.terminal_operation IS NOT NULL AND NEW.terminal_result IS NOT OLD.terminal_result
-            AND NOT history_same_body(OLD.terminal_result,NEW.terminal_result)
-        BEGIN SELECT RAISE(ABORT,'MCP task terminal result is immutable'); END""")
+    for column in ('terminal_operation', 'terminal_result'):
+        db.execute('DROP TRIGGER IF EXISTS ' + immutable_trigger_name(column))
+        db.execute(immutable_trigger_sql(column))
     db.execute("INSERT OR REPLACE INTO meta VALUES ('mcp_tasks_schema','1')")
+
+
+def immutable_trigger_name(column):
+    if column not in {'terminal_operation', 'terminal_result'}:
+        raise ValueError('Unsupported frozen task column')
+    return 'mcp_tasks_terminal_immutable' if column == 'terminal_operation' else 'mcp_tasks_terminal_result_immutable'
+
+
+def immutable_trigger_sql(column, *, exception=None):
+    """Ordinary persistent invariants use only built-in SQLite operations."""
+    name = immutable_trigger_name(column)
+    allowed = (' AND NOT (' + exception + ')') if exception else ''
+    return f"""CREATE TRIGGER {name} BEFORE UPDATE OF {column} ON mcp_tasks
+        WHEN OLD.terminal_operation IS NOT NULL AND NEW.{column} IS NOT OLD.{column}{allowed}
+        BEGIN SELECT RAISE(ABORT,'MCP task terminal state or result is immutable'); END"""

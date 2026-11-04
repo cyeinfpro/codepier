@@ -129,19 +129,29 @@ def test_post_replace_fsync_failure_is_unknown_not_false_no_write(shell_agent, m
     value = json.loads(raw)
     value['project_runtimes'] = {'fixture': {'mode': 'project_clean_v1'}}
     replacement = json.dumps(value).encode()
-    calls = 0
-    def fail_after_replace(_):
-        nonlocal calls
-        calls += 1
-        if calls == 2:
+    flushed = []
+    sync_directory = runtime_config._sync_directory
+    def fail_after_replace(directory):
+        flushed.append(Path(directory))
+        if Path(directory) == agent.config_path.parent:
+            # Target the post-publication durability boundary, not an incidental
+            # call count that changes when private backup storage is improved.
+            assert agent.config_path.read_bytes() == replacement
             raise OSError('synthetic directory flush failure')
+        sync_directory(directory)
     monkeypatch.setattr(runtime_config, '_sync_directory', fail_after_replace)
     with pytest.raises(DevError) as caught:
         runtime_config._replace_config(agent.config_path, raw, info, replacement, hashlib.sha256(raw).hexdigest())
     assert caught.value.code == 'DURABILITY_UNCONFIRMED'
     assert agent.config_path.read_bytes() == replacement
-    backups = list(agent.config_path.parent.glob('*.runtime-backup-*'))
+    backup_directory = Path(agent.config['state_dir']) / 'config-backups'
+    prefix = hashlib.sha256(str(agent.config_path).encode()).hexdigest()[:16] + '-'
+    backups = list(backup_directory.glob(prefix + '*'))
+    assert flushed == [backup_directory, agent.config_path.parent]
     assert len(backups) == 1 and backups[0].read_bytes() == raw
+    if os.name == 'posix':
+        assert backups[0].stat().st_mode & 0o077 == 0
+    assert not list(agent.config_path.parent.glob('*.runtime-backup-*'))
 
 
 def test_cli_does_not_claim_not_applied_for_a_durability_failure(monkeypatch, capsys):

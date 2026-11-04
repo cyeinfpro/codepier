@@ -169,9 +169,10 @@ def test_denied_media_does_not_starve_later_authorized_attachment(collab, monkey
         assert c.clock[0] < row['next_attempt'] <= c.clock[0] + 300
 
 
-def test_concurrent_media_chunks_enforce_global_quota_and_duplicate_is_free(collab, monkeypatch):
+@pytest.mark.parametrize('quota_scope', ['MAX_CACHE', 'PER_OWNER_CACHE'])
+def test_concurrent_media_chunks_enforce_global_quota_and_duplicate_is_free(collab, monkeypatch, quota_scope):
     c, w, identifiers, content = media_fixture(collab, 2)
-    monkeypatch.setattr('hub.collaboration.channel_media.MAX_CACHE', 12)
+    monkeypatch.setattr('hub.collaboration.media_cache.' + quota_scope, 12)
     claims = [w.media.claim(identifier) for identifier in identifiers]
     def save(claim):
         try:
@@ -189,9 +190,10 @@ def test_concurrent_media_chunks_enforce_global_quota_and_duplicate_is_free(coll
     assert w.media.content(winner['id'], c.actor)[0] == content
 
 
-def test_media_commit_counts_other_unfinished_chunks(collab, monkeypatch):
+@pytest.mark.parametrize('quota_scope', ['MAX_CACHE', 'PER_OWNER_CACHE'])
+def test_media_commit_counts_other_unfinished_chunks(collab, monkeypatch, quota_scope):
     c, w, identifiers, content = media_fixture(collab, 2)
-    monkeypatch.setattr('hub.collaboration.channel_media.MAX_CACHE', 12)
+    monkeypatch.setattr('hub.collaboration.media_cache.' + quota_scope, 12)
     first, second = [w.media.claim(identifier) for identifier in identifiers]
     w.media.save_chunk(first, 0, content)
     with pytest.raises(DevError) as caught:

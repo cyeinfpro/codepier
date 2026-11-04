@@ -160,8 +160,12 @@ def encrypt_legacy_history(store, *, batch=100):
                         store.execute("""UPDATE operations SET media_expires_at=?
                             WHERE id=? AND (substr(tool,1,9)='computer_' OR tool IN ('browser_snapshot','read'))""",
                             (expiry, row['id']))
-                store.execute(f'UPDATE {table} SET {column}=? WHERE {primary}=?',
-                              (seal(store, row['body']), row['id']))
+                encrypted = seal(store, row['body'])
+                if table == 'mcp_tasks':
+                    rewrite_task_ciphertext(store, row['id'], column, encrypted)
+                else:
+                    store.execute(f'UPDATE {table} SET {column}=? WHERE {primary}=?',
+                                  (encrypted, row['id']))
             counts[table + '.' + column] = len(rows)
         tails = store.all("""SELECT operation_id,output FROM operation_output_tails
             WHERE (sealed_output IS NULL OR sealed_output='') AND output!=''
@@ -172,3 +176,41 @@ def encrypt_legacy_history(store, *, batch=100):
                 (seal(store, row['output']), len(row['output']), row['operation_id']))
         counts['operation_output_tails'] = len(tails)
     return counts
+
+
+def rewrite_task_ciphertext(store, task_id, column, encrypted):
+    """Authenticated one-pair rewrite, guarded by an atomic schema savepoint.
+
+    No UDF is installed in the durable schema. Within the existing writer
+    transaction, the replacement invariant permits only this exact row and
+    old/new ciphertext pair after checking equal authenticated plaintext.
+    Every other mutation remains forbidden. Restore the ordinary invariant
+    before return; exceptions/crashes roll schema and data back together.
+    """
+    from hub.mcp_tasks_schema import immutable_trigger_name, immutable_trigger_sql
+    store.require_transaction()
+    if not store.db.in_transaction:
+        raise RuntimeError('Task re-encryption requires an explicit writer transaction')
+    name = immutable_trigger_name(column)  # Validate before using identifiers.
+    row = store.one(f'SELECT {column} AS body FROM mcp_tasks WHERE task_id=?', (task_id,))
+    if row is None:
+        raise ValueError('Frozen task does not exist')
+    previous = row['body']
+    if previous == encrypted:
+        return
+    if not isinstance(encrypted, str) or not encrypted.startswith(PREFIX) or not same_body(store, previous, encrypted):
+        raise ValueError('Frozen task re-encryption must preserve authenticated plaintext')
+    # quote() is SQLite's string literal encoder; data cannot become SQL syntax.
+    quoted = store.one('SELECT quote(?) AS id,quote(?) AS old,quote(?) AS new',
+                       (task_id, previous, encrypted))
+    exception = (f"OLD.task_id={quoted['id']} AND OLD.{column} IS {quoted['old']} "
+                 f"AND NEW.{column} IS {quoted['new']}")
+    with store.savepoint():
+        store.execute('DROP TRIGGER ' + name)
+        store.execute(immutable_trigger_sql(column, exception=exception))
+        try:
+            store.execute(f'UPDATE mcp_tasks SET {column}=? WHERE task_id=?',
+                          (encrypted, task_id))
+        finally:
+            store.execute('DROP TRIGGER ' + name)
+            store.execute(immutable_trigger_sql(column))

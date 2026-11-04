@@ -92,9 +92,6 @@ class Store:
                     self.db.execute("BEGIN IMMEDIATE")
                     self._migrate()
                     self.cipher = self._load_cipher()
-                    from hub.operation_history import same_body
-                    connection.create_function('history_same_body', 2,
-                                               lambda before, after: same_body(self, before, after))
                     if self.db.execute("PRAGMA foreign_key_check").fetchall():
                         raise RuntimeError("Hub migration has invalid foreign-key relationships")
                 self.db.execute("PRAGMA foreign_keys=ON")

@@ -13,6 +13,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from hub.auth import Auth
 from hub.principal import Principal
+from hub.operation_history import PREFIX, unseal
 from hub.runtime import Connection, Runtime
 from hub.store import Store
 from shared.contracts import TOOLS
@@ -221,8 +222,15 @@ class AuthenticatedSocket:
         self.sent.append(frame)
         if frame['type'] == 'ack':
             with sqlite3.connect(self.fixture.store.state_directory / 'hub.sqlite3') as reader:
+                persisted = reader.execute(
+                    'SELECT state,output,result FROM operations WHERE id=?', (frame['id'],)).fetchone()
+                # Read through a separate connection at the exact ACK boundary:
+                # decrypt these committed bytes, never an in-memory Runtime view.
+                assert persisted[1].startswith(PREFIX) and 'final fixture tail' not in persisted[1]
+                assert persisted[2].startswith(PREFIX)
+                assert json.loads(unseal(self.fixture.store, persisted[2]))['ok'] is True
                 self.ack_state.append((
-                    reader.execute('SELECT state,output FROM operations WHERE id=?', (frame['id'],)).fetchone(),
+                    (persisted[0], unseal(self.fixture.store, persisted[1])),
                     reader.execute("SELECT value FROM meta WHERE key='control-outbox'").fetchone()))
 
     async def close(self, **_):
@@ -263,8 +271,13 @@ async def test_real_receive_loop_queues_once_and_ack_follows_durable_outbox(ingr
         row = e.store.one('SELECT result,payload FROM operations WHERE id=?', (identifier,))
         assert row['result'] is None and row['payload'] is not None
         assert e.store.one("SELECT value FROM meta WHERE key='control-outbox'") is None
-        assert e.store.one('SELECT output FROM operation_output_tails WHERE operation_id=?',
-                           (identifier,))['output'] == 'live fixture tail'
+        with sqlite3.connect(e.store.state_directory / 'hub.sqlite3') as reader:
+            output, sealed, chars = reader.execute(
+                'SELECT output,sealed_output,output_chars FROM operation_output_tails WHERE operation_id=?',
+                (identifier,)).fetchone()
+        assert output == '' and sealed.startswith(PREFIX) and 'live fixture tail' not in sealed
+        assert unseal(e.store, sealed) == 'live fixture tail'
+        assert chars == len('live fixture tail')
     else:
         assert socket.ack_state == [(('succeeded', 'final fixture tail'), ('committed',))]
         assert not e.store.all('SELECT * FROM operation_output_tails')

@@ -117,7 +117,7 @@ def test_account_attempt_storage_has_a_hard_bound_and_expires(auth, monkeypatch)
     assert auth.store.one("SELECT count(*) AS n FROM login_account_attempts")["n"] == 1
 
 
-def test_success_resets_only_the_successful_account_budget(auth):
+def test_success_refunds_only_its_own_account_attempt(auth):
     auth._login_attempt(request("198.51.100.1"), "another-user")
     async def exercise():
         for i in range(7):
@@ -126,7 +126,7 @@ def test_success_resets_only_the_successful_account_budget(auth):
         value = await auth.login(request("192.0.2.20"), "owner", "correct-password")
         assert auth.session(request(cookie=value["cookie"]))["user_id"] == "owner"
         assert auth.store.one("SELECT count(*) AS n FROM login_account_attempts WHERE username_hash=?",
-                              (digest("owner"),))["n"] == 0
+                              (digest("owner"),))["n"] == 7
         assert auth.store.one("SELECT count(*) AS n FROM login_account_attempts WHERE username_hash=?",
                               (digest("another-user"),))["n"] == 1
     asyncio.run(exercise())

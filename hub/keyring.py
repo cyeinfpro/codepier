@@ -242,7 +242,11 @@ def rotate_key(directory: str | Path, *, resume: bool = False) -> dict:
                     for row in rows:
                         plaintext = store.cipher.decrypt(row[column][len(prefix):].encode("ascii"))
                         encrypted = prefix + store.cipher.encrypt(plaintext).decode("ascii")
-                        store.db.execute(f"UPDATE {table} SET {column}=? WHERE {primary}=?", (encrypted, row["id"]))
+                        if table == 'mcp_tasks' and column in {'terminal_operation', 'terminal_result'}:
+                            from hub.operation_history import rewrite_task_ciphertext
+                            rewrite_task_ciphertext(store, row['id'], column, encrypted)
+                        else:
+                            store.db.execute(f"UPDATE {table} SET {column}=? WHERE {primary}=?", (encrypted, row["id"]))
                         if table == 'external_identities' and column == 'upstream_tokens':
                             # Re-encryption changes ciphertext, not identity ownership.
                             # Carry only the matching scheduler generation, atomically.

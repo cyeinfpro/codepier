@@ -138,9 +138,15 @@ class Auth:
             total = self.store.one("SELECT count(*) AS n FROM login_account_attempts")["n"]
             if total >= LOGIN_ATTEMPT_STORAGE_LIMIT:
                 raise DevError("LOGIN_THROTTLED", "登录服务繁忙，请稍后重试", 429)
-            self.store.db.execute("INSERT INTO login_attempts VALUES (?,?)", (ip, now))
-            self.store.db.execute("INSERT INTO login_account_attempts(username_hash,at) VALUES (?,?)", (username_hash, now))
-            return ip, self.store.one("SELECT u.*,s.local_login FROM users u JOIN iam_users s ON s.user_id=u.id WHERE username=?", (username,))
+            ip_row = self.store.db.execute("INSERT INTO login_attempts VALUES (?,?)", (ip, now)).lastrowid
+            account_row = self.store.db.execute("INSERT INTO login_account_attempts(username_hash,at) VALUES (?,?)", (username_hash, now)).lastrowid
+            user = self.store.one("SELECT u.*,s.local_login FROM users u JOIN iam_users s ON s.user_id=u.id WHERE username=?", (username,))
+            if user:
+                # Request-local receipt, never persisted with the user/session.
+                # Include time and subject so a stale receipt cannot refund a
+                # later row if SQLite reuses a rowid after window cleanup.
+                user["_login_reservation"] = (ip_row, account_row, now, ip, username_hash)
+            return ip, user
 
 
     def _login_session(self, user, ip, username, upgraded_hash=None):
@@ -149,9 +155,6 @@ class Auth:
             current = self.store.db.execute("SELECT password_hash FROM users WHERE id=?", (user["id"],)).fetchone()
             if not current or current["password_hash"] != user["password_hash"]:
                 raise DevError("LOGIN_FAILED", "密码已变化，请重新登录", 401)
-            # IP admission is a shared abuse budget: a valid account must not
-            # erase attempts against other accounts. Let the bounded window expire.
-            self.store.db.execute("DELETE FROM login_account_attempts WHERE username_hash=?", (digest(username),))
             self.store.db.execute("DELETE FROM sessions WHERE expires<=?", (now,))
             security = iam.user_security(self.store, user['id'])
             if not security['local_login']:
@@ -159,6 +162,15 @@ class Auth:
             if upgraded_hash is not None:
                 self.store.db.execute('UPDATE users SET password_hash=? WHERE id=?', (upgraded_hash, user['id']))
             value = self.new_session(user['id'])
+            reservation = user.get("_login_reservation")
+            if reservation:
+                ip_row, account_row, at, attempt_ip, username_hash = reservation
+                if attempt_ip == ip and username_hash == digest(username):
+                    # Refund exactly this successful admission in the same
+                    # transaction as session creation. Other failed/in-flight
+                    # logins and OAuth's shared IP budget remain untouched.
+                    self.store.db.execute("DELETE FROM login_attempts WHERE rowid=? AND ip=? AND at=?", (ip_row, ip, at))
+                    self.store.db.execute("DELETE FROM login_account_attempts WHERE rowid=? AND username_hash=? AND at=?", (account_row, username_hash, at))
             self.store.audit("panel:" + username, "auth.login", status="ok", detail={"ip": ip})
         return value
 

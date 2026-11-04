@@ -1,6 +1,5 @@
 """Boundary and failure-injection regressions for shared code and local CLI."""
 import base64
-import json
 import os
 import sqlite3
 import sys
@@ -164,6 +163,7 @@ def test_unconfirmed_file_durability_is_marked_for_review(tmp_path):
         operation = store.one("SELECT * FROM operations WHERE id='flush'")
         assert operation["state"] == "needs_review"
         assert operation["payload"] is None
-        assert json.loads(operation["result"])["error"]["code"] == "DURABILITY_UNCONFIRMED"
+        assert operation["result"].startswith("history:v1:")
+        assert runtime.operation_result(operation)["error"]["code"] == "DURABILITY_UNCONFIRMED"
     finally:
         store.close()
