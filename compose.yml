@@ -32,7 +32,7 @@ services:
       MCP_BLOCK_NATIVE_COMPUTER: "${MCP_BLOCK_NATIVE_COMPUTER:-false}"
       TZ: "${TZ:-Asia/Taipei}"
       FORWARDED_ALLOW_IPS: "${FORWARDED_ALLOW_IPS:-127.0.0.1}"
-      OAUTH_REDIRECT_HOSTS: "${OAUTH_REDIRECT_HOSTS:-chatgpt.com,chat.openai.com,platform.openai.com,localhost,127.0.0.1,::1}"
+      OAUTH_REDIRECT_HOSTS: "${OAUTH_REDIRECT_HOSTS:-chatgpt.com,chat.openai.com,platform.openai.com,claude.ai,localhost,127.0.0.1,::1}"
     volumes:
       - hub-data:/app/data
       - type: bind
