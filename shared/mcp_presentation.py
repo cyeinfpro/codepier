@@ -537,7 +537,7 @@ def output_schema(name, schema):
                     return tools
                 candidate = deepcopy(resolved(tools))
                 item = resolved(candidate.get('additionalProperties', {}))
-                if isinstance(item, dict) and any(isinstance(resolved(choice), dict) and resolved(choice).get('type') == 'string' for choice in item.get('anyOf', [])):
+                if isinstance(item, dict) and (isinstance(item.get('type'), list) and 'string' in item['type'] or any(isinstance(resolved(choice), dict) and resolved(choice).get('type') == 'string' for choice in item.get('anyOf', []))):
                     candidate['additionalProperties'] = {'type': 'boolean'}
                 for union in ('anyOf', 'oneOf', 'allOf'):
                     if union in candidate:

@@ -298,8 +298,10 @@ async def test_complete_capability_discovery_and_no_unmapped_public_tool(runtime
     assert set(TOOLS) - CORE_TOOLS - QUERY_TOOLS - set(REPLACED_MCP_TOOLS) - INCOMING_UPLOAD_TOOLS == {
         'integration_control', 'validations_accept', 'get_profile', 'get_access_context',
         *PANEL_RUNTIME_TOOLS, *PANEL_ROOTS_TOOLS}
+    from shared.contracts import CODING_TOOLS
     for profile in ('core', 'coding', 'full'):
-        assert {t['name'] for t in tool_definitions(profile)} == CORE_TOOLS | QUERY_TOOLS | {'get_profile', 'get_access_context'}
+        expected = CODING_TOOLS if profile == 'coding' else CORE_TOOLS | QUERY_TOOLS | {'get_profile', 'get_access_context'}
+        assert {t['name'] for t in tool_definitions(profile)} == expected
     from hub.core_tools import help_result
     for name, operations in CORE_ACTIONS.items():
         for operation, backend in operations.items():
@@ -357,3 +359,39 @@ def test_help_describes_public_batch_ids_and_skill_options():
     skills = help_result('workspace', 'skills')['inputSchema']
     Draft202012Validator(skills).validate({'operation': 'skills', 'project': 'Fixture', 'options': {'include_disabled': True}})
     assert 'include_disabled' not in skills['properties']
+
+
+def test_schema_refactoring_preserves_existing_definitions_and_type_unions():
+    from copy import deepcopy
+    from jsonschema import Draft202012Validator
+    from shared.core_output_schemas import factor
+    leaf = {'anyOf': [{'type': 'string'}, {'type': 'null'}]}
+    original = {'type': 'object', '$defs': {'r0': {'type': 'integer'}},
+        'properties': {'id': {'$ref': '#/$defs/r0'},
+                       'a': leaf, 'b': leaf, 'c': leaf,
+                       'nested': {'type': 'object', 'properties': {'value': leaf}}},
+        'required': ['id'], 'additionalProperties': False}
+    snapshot = deepcopy(original)
+    reduced = factor(factor(original))
+    assert original == snapshot
+    assert reduced['$defs']['r0'] == {'type': 'integer'}
+    cases = [{'id': 1}, {'id': 1, 'a': None, 'b': 'x', 'nested': {'value': 'y'}},
+             {'id': 'wrong'}, {'id': 1, 'a': 4}, {'id': 1, 'nested': {'value': False}},
+             {'id': 1, 'unexpected': True}]
+    for case in cases:
+        assert Draft202012Validator(original).is_valid(case) == Draft202012Validator(reduced).is_valid(case)
+
+
+def test_compact_published_status_schema_still_requires_boolean_capabilities():
+    from copy import deepcopy
+    from jsonschema import Draft202012Validator
+    from hub.core_tools import result
+    schema = next(t['outputSchema'] for t in tool_definitions() if t['name'] == 'project_query')
+    public = result('project_query', {'operation': 'status'}, {
+        'operation_id': 'a' * 32, 'shell': {'enabled': False},
+        'tools': {'git': '/usr/bin/git', 'sshpass': None}})['structuredContent']
+    validator = Draft202012Validator(schema)
+    validator.validate(public)
+    wrong = deepcopy(public)
+    wrong['tools']['git'] = '/private/executable'
+    assert not validator.is_valid(wrong)

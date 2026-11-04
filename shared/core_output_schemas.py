@@ -132,6 +132,20 @@ def factor(schema):
     import json
     from collections import Counter
 
+    def compact_types(node):
+        if isinstance(node, list):
+            return [compact_types(item) for item in node]
+        if not isinstance(node, dict):
+            return node
+        result = {key: compact_types(value) for key, value in node.items()}
+        choices = result.get('anyOf', [])
+        if set(result) == {'anyOf'} and choices and all(
+                isinstance(choice, dict) and set(choice) == {'type'}
+                and isinstance(choice['type'], str) for choice in choices):
+            return {'type': list(dict.fromkeys(choice['type'] for choice in choices))}
+        return result
+
+    schema = compact_types(schema)
     counts = Counter()
 
     def key(node):
@@ -148,19 +162,24 @@ def factor(schema):
 
     def count(node):
         fingerprint = key(node)
-        if len(fingerprint) >= 50:
+        if len(fingerprint) >= 30:
             counts[fingerprint] += 1
         for child in children(node):
             count(child)
 
     count(schema)
     definitions, names = {}, {}
+    reserved = set(schema.get('$defs', {}))
 
     def reduce(node, *, inline=False):
         fingerprint = key(node)
         if not inline and counts[fingerprint] > 1:
             if fingerprint not in names:
-                name = 'r' + str(len(names))
+                index = len(names)
+                while 'r' + str(index) in reserved:
+                    index += 1
+                name = 'r' + str(index)
+                reserved.add(name)
                 names[fingerprint] = name
                 definitions[name] = reduce(node, inline=True)
             return {'$ref': '#/$defs/' + names[fingerprint]}
@@ -178,7 +197,7 @@ def factor(schema):
 
     result = reduce(schema, inline=True)
     if definitions:
-        result['$defs'] = definitions
+        result['$defs'] = {**result.get('$defs', {}), **definitions}
     return result
 
 

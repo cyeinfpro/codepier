@@ -647,13 +647,14 @@ def project_output_schemas(definitions, schemas='full'):
 
 def tool_definitions(profile="core", authorization="fixed", schemas="full"):
     from shared.mcp_presentation import output_schema
+    from shared.core_output_schemas import factor
     from shared.schema_cache import schema_for
     if authorization not in {"fixed", "role"}:
         raise ValueError("Unknown authorization mode")
     if profile not in {"core", "full", "coding"}:
         raise ValueError("Unknown MCP tool profile")
     result = [{"name": name, "description": t.description, "inputSchema": schema_for(t.model),
-             "outputSchema": output_schema(name, OUTPUT_SCHEMAS[name]),
+             "outputSchema": factor(output_schema(name, OUTPUT_SCHEMAS[name])),
              "annotations": {"readOnlyHint": t.scope in {"read", "devices.read"} or name in COMPUTER_READ_TOOLS, "destructiveHint": t.destructive,
                              "idempotentHint": True, "openWorldHint": t.scope in {"execute", "computer"}},
              "_meta": {"securitySchemes": [{"type": "oauth2", "scopes": [t.scope]}]}}

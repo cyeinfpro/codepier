@@ -79,3 +79,9 @@ v2 的 `project_query(operation="tree", project="项目", options={"format":"com
 - 预算缩减仅处理已知 read/batch/stdout 结构，不任意截断元数据、图片或协作正文；其他原生文本超预算返回保留原操作恢复摘要的明确错误。媒体保留独立上限。输出裁剪不制造字节游标，不推进 after_output_seq，也不声称变换可逆。
 - 没有广泛移动带日期文档、删除旧文件或归档默认工作区未提交报告。
 - 外部宿主的 lean schema/compact text 实机体验、token dashboard 前后对照仍需实际客户端验证。
+
+## CI 目录门禁补充修复
+
+基线 CI 41768604390 的三个目录测试使用默认 JSON 序列化（含空格和 ASCII 转义），其 95,000 字节门禁与上表紧凑 UTF-8 口径不同。修复将纯类型 anyOf 等价折叠为 type 数组，对短重复节点复用引用，并在最终展示投影后再次因子化；保留原有 $defs 名称及类型约束，不提高门禁。当前默认目录为 94,748 字节、全权限投影 94,743 字节、紧凑 UTF-8 为 86,644 字节。
+
+只验证 test_core_tools.py、test_dot_tool_discovery.py、test_project_view_projection.py 三个模块：58 项通过；剩余一项 coding 旧 13 工具预期改为真实 9 工具后单项复测通过。包含已有 $defs、二次因子化、合法/非法类型等价和能力布尔值投影回归。Ruff 正确性及 diff 检查通过；未启动全量测试或 CI。
