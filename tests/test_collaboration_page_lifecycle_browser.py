@@ -75,6 +75,11 @@ POLL_PROBE = """(() => {
       init.signal?.removeEventListener('abort', aborted);
       if (probe.rows.filter(item => item.settled).length >= 4) probe.resolveCycle();
     };
+    if (probe.routeMarker) {
+      const headers = new Headers(init.headers);
+      headers.set('X-CodePier-Test-Lifecycle', probe.routeMarker);
+      init = {...init, headers};
+    }
     return originalFetch.call(this, input, init).then(response => {
       finish({status:response.status}); return response;
     }, error => {
@@ -207,7 +212,10 @@ def test_real_pagehide_aborts_pending_reads_and_history_return_reauthorizes(
 
     def hold_read(route):
         kind = parse_qs(urlsplit(route.request.url).query).get("kind", [""])[0]
-        if kind in POLL_KINDS:
+        # Routing is installed before arming. A background read in that gap
+        # belongs to the unarmed document setup, not the cycle under test.
+        if (kind in POLL_KINDS
+                and route.request.headers.get("x-codepier-test-lifecycle") == original_origin):
             held.append(route)
             page.evaluate("count => {lifecycleProbe.heldRoutes = count;}", len(held))
         else:
@@ -236,10 +244,12 @@ def test_real_pagehide_aborts_pending_reads_and_history_return_reauthorizes(
                                  .get("kind") == ["delegation_policies"]):
             page.evaluate("""() => {
               const p = lifecycleProbe;
-              clearTimeout(p.poll.id); p.armed = true; p.pending = p.poll.run();
+              clearTimeout(p.poll.id); p.routeMarker = p.origin;
+              p.armed = true; p.pending = p.poll.run();
             }""")
         page.wait_for_function("() => lifecycleProbe.heldRoutes === 4")
         assert len(held) == 4
+        assert page.evaluate("lifecycleProbe.rows.map(row => row.kind).sort()") == POLL_KINDS
         assert page.evaluate("lifecycleProbe.rows.every(row => !row.settled)")
         # Capture which view-owned signals started the four held reads before
         # navigation, so a stale in-flight cycle cannot masquerade as this one.
@@ -317,7 +327,9 @@ def test_cancelled_beforeunload_keeps_original_mutation_and_editable_document(
         page.locator('[data-cc-view="discussion"]').click()
         area = page.locator("#cc-message-input")
         area.fill("取消离开期间只保存一次的消息")
-        original_origin = page.evaluate("performance.timeOrigin")
+        # Retain the actual Document, not a timestamp whose precision can vary.
+        # A replacement document must fail even when its URL is unchanged.
+        original_document = page.evaluate_handle("document")
         page.route("**/api/collaboration/message", hold_acknowledgement)
         with page.expect_request(lambda request: request.url.endswith("/api/collaboration/message")):
             page.locator('#cc-command button[type="submit"]').click()
@@ -332,7 +344,8 @@ def test_cancelled_beforeunload_keeps_original_mutation_and_editable_document(
             page.close(run_before_unload=True)
         assert confirmation.value.type == "beforeunload"
         assert not page.is_closed()
-        assert page.evaluate("performance.timeOrigin") == original_origin
+        assert page.evaluate("original => document === original", original_document)
+        original_document.dispose()
         route, response = receipts.pop()
         route.fulfill(response=response)
         expect(area).to_have_value("")
