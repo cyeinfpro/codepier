@@ -66,7 +66,7 @@ def test_image_import_check_runs_after_switching_to_non_root():
     for path in SOURCE_PATHS:
         assert 'COPY --chown=root:root ' + path + ' ' in recipe
 
-def run_startup_probe(tmp_path, command=None, *, short_timeout=False):
+def run_startup_probe(tmp_path, command=None, *, short_timeout=False, fixture_ready=False):
     with socket.socket() as listener:
         listener.bind(('127.0.0.1', 0))
         port = listener.getsockname()[1]
@@ -78,12 +78,28 @@ def run_startup_probe(tmp_path, command=None, *, short_timeout=False):
     if short_timeout:
         program = program.replace('time.monotonic() + 30', 'time.monotonic() + 0.5')
         program = program.replace('wait(timeout=5)', 'wait(timeout=0.5)')
+    if fixture_ready:
+        # Synthetic candidates must reach the condition under test before its
+        # deadline starts. Keep this bounded setup inside the real try/finally
+        # so failed setup still terminates and reaps the candidate.
+        anchor = '        deadline = time.monotonic()'
+        assert program.count(anchor) == 1
+        preparation = """        ready_deadline = time.monotonic() + 60
+        while not Path(environment['FIXTURE_READY_FILE']).exists():
+            if process.poll() is not None or time.monotonic() >= ready_deadline:
+                log.seek(0, 2)
+                log.seek(max(0, log.tell()-4096))
+                raise RuntimeError('Synthetic candidate did not become ready: '+log.read().decode(errors='replace'))
+            time.sleep(0.05)
+"""
+        program = program.replace(anchor, preparation + anchor)
     scratch = tmp_path / 'tmp'
     scratch.mkdir()
     environment = dict(os.environ, TMPDIR=str(scratch), HUB_DATA_DIR=str(tmp_path / 'do-not-use'),
-                       HUB_STATE_DIR=str(tmp_path / 'do-not-use-state'))
+                       HUB_STATE_DIR=str(tmp_path / 'do-not-use-state'),
+                       FIXTURE_READY_FILE=str(tmp_path / 'fixture-ready'))
     result = subprocess.run([sys.executable, '-c', program], cwd=ROOT, env=environment,
-                            text=True, capture_output=True, timeout=45)
+                            text=True, capture_output=True, timeout=110 if fixture_ready else 45)
     assert not list(scratch.iterdir()), 'Preflight must remove its disposable state'
     assert not (tmp_path / 'do-not-use').exists()
     assert not (tmp_path / 'do-not-use-state').exists()
@@ -112,10 +128,13 @@ def test_updater_boot_acceptance_is_required_in_ci():
 @pytest.mark.parametrize('ignore_termination', [False, True])
 def test_unhealthy_candidate_is_bounded_and_reaped(tmp_path, ignore_termination):
     pid_file = tmp_path / 'pid'
-    child = ("import os,signal,time; from pathlib import Path; "
+    # Deliberately exceed the short validation deadline before signalling ready.
+    child = ("import os,signal,time; from pathlib import Path; time.sleep(0.75); "
              + ("signal.signal(signal.SIGTERM, signal.SIG_IGN); " if ignore_termination else "")
-             + f"Path({str(pid_file)!r}).write_text(str(os.getpid())); time.sleep(600)")
-    result = run_startup_probe(tmp_path, [sys.executable, '-c', child], short_timeout=True)
+             + f"Path({str(pid_file)!r}).write_text(str(os.getpid())); "
+             + "Path(os.environ['FIXTURE_READY_FILE']).touch(); time.sleep(600)")
+    result = run_startup_probe(tmp_path, [sys.executable, '-c', child],
+                               short_timeout=True, fixture_ready=True)
     assert result.returncode != 0
     assert 'startup health check timed out' in result.stderr
     with pytest.raises(ProcessLookupError):
@@ -126,13 +145,17 @@ def test_wrong_version_health_is_rejected(tmp_path):
     child = """import json,os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlsplit
+from pathlib import Path
+class Server(HTTPServer):
+    def service_actions(self):
+        Path(os.environ['FIXTURE_READY_FILE']).touch()
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(json.dumps({'status':'ok','version':'wrong-version'}).encode())
-HTTPServer(('127.0.0.1',urlsplit(os.environ['HUB_PUBLIC_URL']).port),Handler).serve_forever()
+Server(('127.0.0.1',urlsplit(os.environ['HUB_PUBLIC_URL']).port),Handler).serve_forever(poll_interval=0.05)
 """
-    result = run_startup_probe(tmp_path, [sys.executable, '-c', child])
+    result = run_startup_probe(tmp_path, [sys.executable, '-c', child], fixture_ready=True)
     assert result.returncode != 0
     assert 'startup health/version mismatch' in result.stderr

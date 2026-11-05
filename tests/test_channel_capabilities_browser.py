@@ -43,9 +43,21 @@ def test_capabilities_pending_recovery_and_manifest_have_truthful_evidence(qr_pa
     expect(page.locator(".cc-file-manifest")).to_contain_text("发送结果未知")
     expect(page.locator(".cc-file-manifest")).to_contain_text("尚无可验证转写")
     full_styles(page)
+    # Styling reparents the content into a top-layer modal. Wait for its real
+    # layout to stabilize before capturing, rather than just for fonts to load.
+    dialog = page.locator("#cc-drawer")
+    expect(dialog).to_be_visible()
+    dialog.scroll_into_view_if_needed()
+    expect(dialog).to_be_in_viewport(ratio=1)
     page.screenshot(path=str(tmp_path / f"capabilities-{engine}-{width}.png"), full_page=True)
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     assert page.locator(".cc-file-manifest").evaluate("(node) => node.scrollWidth <= node.clientWidth")
+    # Full-page capture does not expose the modal body below its own scrollport.
+    # Keep the first image and capture the actual, fully visible manifest too.
+    manifest = page.locator(".cc-file-manifest")
+    manifest.scroll_into_view_if_needed()
+    expect(manifest).to_be_in_viewport(ratio=1)
+    page.screenshot(path=str(tmp_path / f"manifest-{engine}-{width}.png"), full_page=True)
     action(page, "open")
     assert page.evaluate("writes.length") == 0
     assert page.locator('[aria-label="微信配对码"]').input_value() == "SYNTHETIC-PRIVATE-CODE"
