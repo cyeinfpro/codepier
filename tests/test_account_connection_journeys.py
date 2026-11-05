@@ -122,11 +122,15 @@ def test_invite_accept_lands_in_team_and_role_assignment_is_explicit(journey_pag
         expect(form.locator('[name="may_delegate"]')).not_to_be_checked()
         form.locator('[name="role_id"]').select_option(role["id"])
         expect(form.locator("[data-assignment-policy]")).to_contain_text("Explicit read role")
-        owner.once("dialog", lambda dialog: dialog.dismiss())
         owner.locator('button[form="iam-form"]').click()
+        confirmation = owner.get_by_role("dialog", name="确认保存身份设置")
+        confirmation.get_by_role("button", name="取消", exact=True).click()
+        expect(confirmation).to_have_count(0)
+        expect(form).to_be_visible()
+        expect(form.locator('[name="role_id"]')).to_have_value(role["id"])
         assert stack.must(stack.client.get("/api/iam/spaces/" + space["id"] + "/assignments", headers=headers))["assignments"] == []
-        owner.once("dialog", lambda dialog: dialog.accept())
         owner.locator('button[form="iam-form"]').click()
+        confirmation.get_by_role("button", name="确认保存", exact=True).click()
         expect(form).to_have_count(0)
         assigned = stack.must(stack.client.get("/api/iam/spaces/" + space["id"] + "/assignments", headers=headers))["assignments"]
         assert len(assigned) == 1 and not assigned[0]["may_delegate"]

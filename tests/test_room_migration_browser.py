@@ -61,7 +61,7 @@ def test_legacy_room_read_only_safe_stop_explicit_cutover_and_original_receipt(
     page = context.new_page()
     page.add_init_script("""(() => {
       window.panelTrace=[];
-      window.roomRefreshEvidence={started:0,completed:0,active:0,failed:[]};
+      window.roomRefreshEvidence={started:0,completed:0,active:0,succeeded:[],cancelled:[],failed:[]};
       let roomStore;
       Object.defineProperty(window,'CodePierRoomStore',{configurable:true,
         get(){return roomStore;},set(value){
@@ -71,11 +71,15 @@ def test_legacy_room_read_only_safe_stop_explicit_cutover_and_original_receipt(
             const instance=create.apply(this,args),refresh=instance.refresh;
             instance.refresh=function(...refreshArgs){
               const evidence=window.roomRefreshEvidence;
-              evidence.started++;evidence.active++;
+              const refreshId=++evidence.started;evidence.active++;
               const pending=refresh.apply(this,refreshArgs);
               const finished=()=>{evidence.completed++;evidence.active--;};
-              Promise.resolve(pending).then(finished,error=>{
-                evidence.failed.push(String(error));finished();
+              Promise.resolve(pending).then(()=>{
+                evidence.succeeded.push(refreshId);finished();
+              },error=>{
+                if(error?.name==='AbortError')evidence.cancelled.push(refreshId);
+                else evidence.failed.push(String(error));
+                finished();
               });
               return pending;
             };
@@ -125,7 +129,9 @@ def test_legacy_room_read_only_safe_stop_explicit_cutover_and_original_receipt(
         # this work; the unchanged draft is not evidence that it has finished.
         refresh_started = page.evaluate('roomRefreshEvidence.started')
         page.evaluate('document.dispatchEvent(new Event("visibilitychange"))')
-        page.wait_for_function('before => roomRefreshEvidence.completed > before && '
+        # Selecting a room legitimately aborts stale reads. Require a new
+        # successful refresh, not an older completion or a cancelled request.
+        page.wait_for_function('before => roomRefreshEvidence.succeeded.some(id => id > before) && '
             'roomRefreshEvidence.active === 0', arg=refresh_started, timeout=5000)
         assert not page.evaluate('roomRefreshEvidence.failed')
         expect(editor).to_have_value('迁移前未发送的草稿')

@@ -114,6 +114,14 @@ def test_worktree_editor_writes_only_selected_workspace(integrated_stack):
         expect(page.locator('.editor-path')).to_have_text('WORKTREE-README.md',timeout=15000)
         assert (target/'WORKTREE-README.md').exists() and not (s.projectalpha/'WORKTREE-README.md').exists()
         page.locator('[data-action=delete-file]').click()
+        confirmation=page.get_by_role('dialog',name='删除 WORKTREE-README.md？')
+        confirmation.get_by_role('button',name='取消',exact=True).click()
+        expect(confirmation).to_have_count(0)
+        expect(page.locator('.editor-path')).to_have_text('WORKTREE-README.md')
+        assert (target/'WORKTREE-README.md').exists()
+        assert page.evaluate('S.work.workspace_id')==workspace
+        page.locator('[data-action=delete-file]').click()
+        confirmation.get_by_role('button',name='删除文件',exact=True).click()
         expect(page.locator('.workspace-empty')).to_be_visible(timeout=15000)
         assert not (target/'WORKTREE-README.md').exists() and (s.projectalpha/'README.md').exists()
         assert not errors,errors

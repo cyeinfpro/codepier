@@ -181,7 +181,12 @@ def test_real_clone_is_cow_or_explicitly_unsupported(tmp_path):
         _clone_file(str(source), str(destination))
     except DevError as error:
         assert error.code == "SNAPSHOT_UNSUPPORTED"
-        pytest.skip("Host filesystem does not support reflink")
+        assert source.read_bytes() == b"original" * 100
+        # Explicit lack of reflink support is a valid fail-closed outcome,
+        # not a skipped contract. Never substitute a full-copy fallback.
+        assert not destination.exists() or destination.stat().st_size == 0
+        return
+    assert destination.read_bytes() == b"original" * 100
     destination.write_bytes(b"changed")
     assert source.read_bytes() == b"original" * 100
 

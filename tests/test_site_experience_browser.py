@@ -3,12 +3,14 @@
 The route matrix exercises real HTTP, rendered CSS, keyboard navigation and
 appearance media queries. It never connects a user account or changes production.
 """
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 from tests.legacy_collaboration_ui import LEGACY_ASSET_NAMES, legacy_asset
 from playwright.sync_api import expect
+from scripts.css_override_report import declarations, split_top
 
 ROOT = Path(__file__).resolve().parents[1]
 ROUTES = [
@@ -42,7 +44,9 @@ def test_every_route_has_consistent_frame_and_no_horizontal_overflow(chat_browse
     page.on("pageerror", lambda error: errors.append(str(error)))
     try:
         login(page, stack)
-        assert page.locator('link[href*="/static/experience.css"]').count() == 1
+        for asset in ("tokens.css", "styles.css"):
+            assert page.locator(f'link[href*="/static/{asset}"]').count() == 1
+        assert page.locator('link[href*="/static/experience.css"]').count() == 0
         for route in ROUTES:
             navigate(page, route)
             assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1"), route
@@ -240,9 +244,17 @@ def test_collaboration_shared_tokens_keep_reduced_motion(chat_browser_pool, engi
 
 def test_experience_asset_is_content_addressed():
     manifest = json.loads((ROOT / "web/assets-manifest.json").read_text())
-    assert "experience.css" in manifest["assets"]
-    css = (ROOT / "web/experience.css").read_text()
+    assert "experience.css" not in manifest["assets"]
+    for asset in ("tokens.css", "styles.css"):
+        content = (ROOT / "web" / asset).read_bytes()
+        assert manifest["assets"][asset]["sha256"] == hashlib.sha256(content).hexdigest()
+        assert manifest["assets"][asset]["bytes"] == len(content)
+        for _, selector, prop, value in declarations(content.decode()):
+            value = value.replace("!important", "").strip()
+            if prop in {"backdrop-filter", "-webkit-backdrop-filter"}:
+                assert value == "none", (asset, selector, prop, value)
+            if prop in {"transition", "transition-property"}:
+                assert all("all" not in item.split() for item in split_top(value)), (asset, selector, prop, value)
+    css = (ROOT / "web/styles.css").read_text()
     assert "prefers-reduced-motion" in css
     assert "prefers-contrast" in css
-    assert "backdrop-filter:" not in css
-    assert "transition: all" not in css
