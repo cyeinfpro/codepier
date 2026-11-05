@@ -201,7 +201,7 @@ class Protocol:
         receipt=self.settings_receipt
         if not self.settings_busy: return
         if not success:
-            for key in [k for k,v in self.calls.items() if v.startswith('settings_')]: self.calls.pop(key,None)
+            for key in [k for k,v in self.calls.items() if isinstance(v, str) and v.startswith('settings_')]: self.calls.pop(key,None)
             self.settings_busy=False; self.settings_receipt=None
             self.finish(receipt,'error')
             self.emit('error',receipt=receipt,text=error)

@@ -325,3 +325,15 @@ def test_empty_start_settings_use_native_defaults(chat):
     obj,project,sid=chat
     row=obj.action('start',project,{'id':uuid.uuid4().hex,'cli':'codex','mode':'chat','model':'','effort':''})
     assert json.loads(row['chat_settings'])['next']=={}
+
+
+def test_settings_rejection_ignores_unrelated_structured_call_tags():
+    p, wire, events, finished = protocol()
+    p.ready = True
+    p.change_settings('settings-receipt', {'model': 'provider/model'})
+    p.calls['structured-control'] = ('permission', {'request_id': 'synthetic'})
+    p.settings_response('settings_model', False, error='rejected')
+    assert not p.settings_busy
+    assert finished[-1] == ('settings-receipt', 'error')
+    assert p.calls['structured-control'][0] == 'permission'
+    assert not any(isinstance(tag, str) and tag.startswith('settings_') for tag in p.calls.values())
