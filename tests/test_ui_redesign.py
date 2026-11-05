@@ -47,6 +47,19 @@ def layout(page, label):
     return result
 
 
+def capture_painted_page(page, path):
+    # DOM visibility and loaded fonts do not guarantee a submitted capture frame.
+    # Wait for actual visible frames at the requested size, then capture once.
+    # A stalled renderer or screenshot protocol error still fails this test.
+    page.wait_for_function('''async expected => {
+      await document.fonts.ready;
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      return document.visibilityState === 'visible' &&
+        innerWidth === expected.width && innerHeight === expected.height;
+    }''', arg=page.viewport_size, timeout=5000)
+    return page.screenshot(path=str(path), full_page=True, animations='disabled')
+
+
 @pytest.mark.parametrize('width,height', [(1440,1000),(768,1024),(390,844),(320,568)])
 def test_all_pages_layout_and_screenshots(stack, width, height):
     OUT.mkdir(parents=True, exist_ok=True)
@@ -58,7 +71,7 @@ def test_all_pages_layout_and_screenshots(stack, width, height):
         page.goto(stack.url)
         expect(page.locator('#login-form')).to_be_visible()
         assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
-        page.screenshot(path=str(OUT/f'{width}-login.png'),full_page=True,animations='disabled')
+        capture_painted_page(page, OUT/f'{width}-login.png')
         page.fill('#username', 'admin');page.fill('#password', stack.password)
         page.click('#login-form button')
         # Authenticate and finish the initial overview load before measuring layout.
@@ -77,7 +90,7 @@ def test_all_pages_layout_and_screenshots(stack, width, height):
                 expect(page.locator('.mobile-work-tabs')).to_be_hidden()
             assert 'undefined' not in page.locator('#page').inner_text()
             measurements[name]=layout(page,name)
-            page.screenshot(path=str(OUT/f'{width}-{name}.png'),full_page=True,animations='disabled')
+            capture_painted_page(page, OUT/f'{width}-{name}.png')
         (OUT/f'{width}-layout.json').write_text(json.dumps(measurements,ensure_ascii=False,indent=2))
         assert not errors,errors
         browser.close()
