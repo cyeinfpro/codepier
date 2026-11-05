@@ -168,17 +168,24 @@ def test_trace_duplicate_events_and_untrusted_stage_input(env):
 async def test_artifact_channel_fences_old_connections_and_cleans_cancelled_requests(env,monkeypatch):
     runtime,_=env
     class Peer:
-        async def send(self,data):self.last=data
+        def __init__(self):self.sent=asyncio.Queue()
+        async def send(self,data):self.sent.put_nowait(data)
     peer=Peer();runtime.connections['d']=peer;monkeypatch.setattr(runtime,'online',lambda _:True)
     data=b'fixture';sha=hashlib.sha256(data).hexdigest()
     row={'id':uuid.uuid4().hex,'device_id':'d','bytes':len(data),'sha256':sha}
     p={'id':'p','alias':'P','root':'/tmp/project','mode':'write','allow_tasks':True}
-    task=asyncio.create_task(runtime.artifacts.chunk(row,p,0));await asyncio.sleep(0)
-    response={'request_id':peer.last['request_id'],'result':{'ok':True,'data':{'artifact_id':row['id'],'offset':0,'sha256':sha,'chunk_sha256':sha,'data':base64.b64encode(data).decode()}}}
+    task=asyncio.create_task(runtime.artifacts.chunk(row,p,0))
+    # The online check runs in the database executor. Wait for the actual send,
+    # not a scheduler turn, before testing connection fencing.
+    sent=await asyncio.wait_for(peer.sent.get(),5)
+    response={'request_id':sent['request_id'],'result':{'ok':True,'data':{'artifact_id':row['id'],'offset':0,'sha256':sha,'chunk_sha256':sha,'data':base64.b64encode(data).decode()}}}
     runtime.artifacts.receive(Peer(),response);await asyncio.sleep(0);assert not task.done()
     runtime.artifacts.receive(peer,response);assert await task==data
     assert not runtime.artifacts.pending
-    task=asyncio.create_task(runtime.artifacts.chunk(row,p,0));await asyncio.sleep(0);task.cancel()
+    task=asyncio.create_task(runtime.artifacts.chunk(row,p,0))
+    await asyncio.wait_for(peer.sent.get(),5)
+    assert runtime.artifacts.pending
+    task.cancel()
     await asyncio.gather(task,return_exceptions=True)
     assert not runtime.artifacts.pending
 

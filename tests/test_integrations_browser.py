@@ -19,7 +19,22 @@ def login(page,s):
     page.locator('#username').fill('admin');page.locator('#password').fill(s.password)
     page.locator('#login-form button[type=submit]').click()
     page.wait_for_selector('#integration-center')
+    # Selecting a project starts an async render while the old checks remain
+    # visible. Await this setup handler, not a selector from the previous root.
+    # The pending-refresh tests below still exercise real concurrent tab clicks.
+    page.evaluate('''() => {
+        const select = document.querySelector('#i-project');
+        const change = select.onchange;
+        if (typeof change !== 'function') throw new Error('Project selector is not bound');
+        select.onchange = function(event) {
+            return window.integrationProjectSelection = Promise.resolve(change.call(this, event));
+        };
+    }''')
     page.locator('#i-project').select_option(s.project['id'])
+    page.evaluate('''async () => {
+        if (!window.integrationProjectSelection) throw new Error('Project selection did not run');
+        await window.integrationProjectSelection;
+    }''')
     page.wait_for_selector('#i-checks .integration-check')
 
 

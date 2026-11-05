@@ -444,9 +444,14 @@ async def test_first_preflight_wait_expires_or_cancels_without_spawning(
                 await asyncio.sleep(.01)
         if ending == 'cancel':
             task.cancel()
-        await asyncio.wait_for(task, 3)
-        expected = 'QUEUE_EXPIRED' if ending == 'deadline' else 'INTERRUPTED'
-        assert agent.journal.status('preflight-ended')['result']['error']['code'] == expected
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 3)
+            # Never-started work retains its durable receipt for startup recovery.
+            receipt = agent.journal.status('preflight-ended')
+            assert receipt['status'] == 'accepted' and receipt['result'] is None
+        else:
+            await asyncio.wait_for(task, 3)
+            assert agent.journal.status('preflight-ended')['result']['error']['code'] == 'QUEUE_EXPIRED'
         assert not agent.scheduler.waiting
         assert len(agent.scheduler.active) == reserved
         assert not agent.resources.active and not agent.resources.waiting
@@ -608,7 +613,10 @@ async def test_fastpath_scheduler_rejection_reaps_before_wait_and_cancellation(
     assert len(agent.resources.waiting) == 1
     assert agent.resources.waiting[0][1] == 'contended-search'
     task.cancel()
-    await asyncio.wait_for(task, 3)
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 3)
+    receipt = agent.journal.status('contended-search')
+    assert receipt['status'] == 'accepted' and receipt['result'] is None
     assert not agent.scheduler.active and not agent.scheduler.waiting
     assert not agent.resources.active and not agent.resources.waiting
 

@@ -234,6 +234,7 @@ async def test_tool_specific_access_and_read_write_grant(harness):
     "UPDATE grants SET scopes='[]' WHERE id='worker'",
     "UPDATE operations SET owner_user_id='other'",
     "UPDATE operations SET args_summary='{}'",
+    "UPDATE operations SET args_summary='invalid-json'",
 ])
 async def test_live_reauthorization_blocks_reserved_delivery(harness, change):
     seed(harness)
@@ -244,7 +245,27 @@ async def test_live_reauthorization_blocks_reserved_delivery(harness, change):
     s.store.execute(change)
     await events.deliver(item)
     assert len(receiver.requests) == 1
-    assert s.store.one('SELECT state FROM mcp_event_deliveries')['state'] == 'abandoned'
+    row = s.store.one('SELECT state,reason_code FROM mcp_event_deliveries')
+    assert row['state'] == 'abandoned'
+    assert row['reason_code'] == 'authorization_revoked'
+    # Reusing the old reserved item never sends after permanent invalidation.
+    await events.deliver(item)
+    assert len(receiver.requests) == 1
+
+
+@pytest.mark.parametrize('code,status,transient', [
+    ('OPERATION_MAPPING_CHANGED', 409, False),
+    ('OPERATION_CONTEXT_INVALID', 409, False),
+    ('OPERATION_EVENT_OBSOLETE', 409, False),
+    ('ROOM_PAUSED', 409, True),
+    ('WORKER_BINDING_REQUIRED', 403, True),
+    ('GOAL_INACTIVE', 409, True),
+    ('RATE_LIMITED', 429, True),
+    ('UNAVAILABLE', 503, True),
+])
+def test_operation_event_authorization_retry_classification(code, status, transient):
+    from hub.collaboration.events import authorization_transient
+    assert authorization_transient(DevError(code, 'synthetic fixture', status)) is transient
 
 
 @pytest.mark.asyncio

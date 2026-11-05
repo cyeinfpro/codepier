@@ -766,10 +766,15 @@ def test_foreground_refresh_exposes_busy_actions_and_preserves_ime_draft(collabo
         assert overview(stack)['messages'] == []
         area.dispatch_event('compositionend')
         holding = False
-        for route in held:
-            response = route.fetch()
-            assert response.ok, response.status
-            route.fulfill(response=response)
+        # Release the browser's real pending requests instead of issuing a
+        # second request through Playwright's independent fetch transport.
+        # An earlier background request may have been superseded; require the
+        # latest foreground request itself to receive a successful response.
+        foreground_request = held[-1].request
+        with page.expect_response(lambda response: response.request == foreground_request) as completed:
+            for route in held:
+                route.continue_()
+        assert completed.value.ok, completed.value.status
         # Keep interception alive through the following options/goals requests.
         # Removing it at response release can strand a newly paused Chromium request.
         expect(mentions).to_be_enabled()

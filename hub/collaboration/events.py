@@ -35,6 +35,15 @@ DISPATCH_BUDGETS = {'global': (8., 16., 128 * 1024., 256 * 1024.),
 SEALED_BODY_PREFIX = 'sealed:v1:'
 
 
+def authorization_transient(exc):
+    # A changed operation binding cannot regain consent by waiting or by
+    # restoring the old mapping. Require a newly authorized subscription.
+    if exc.code in {'OPERATION_MAPPING_CHANGED', 'OPERATION_CONTEXT_INVALID', 'OPERATION_EVENT_OBSOLETE'}:
+        return False
+    return (exc.code in {'ROOM_PAUSED', 'WORKER_BINDING_REQUIRED', 'GOAL_INACTIVE'}
+            or exc.status in {409, 429} or exc.status >= 500)
+
+
 def migrate_dispatch(db):
     """Additive scheduling state; callback URLs never become metric keys."""
     db.execute("""CREATE TABLE IF NOT EXISTS mcp_event_dispatch_routes (
@@ -601,8 +610,7 @@ class EventService:
             try:
                 filters = self.authorize(sub, room)
             except DevError as exc:
-                if not (exc.code in {'ROOM_PAUSED', 'WORKER_BINDING_REQUIRED', 'GOAL_INACTIVE'}
-                        or exc.status in {409, 429} or exc.status >= 500):
+                if not authorization_transient(exc):
                     self.store.execute("UPDATE mcp_event_subscriptions SET state='revoked',version=version+1,updated=? WHERE id=?", (now, sub['id']))
                 continue
             self.dispatch_route(sub, room)
@@ -714,8 +722,7 @@ class EventService:
                 try:
                     self.authorize(sub, room)
                 except DevError as exc:
-                    if (exc.code in {'ROOM_PAUSED', 'WORKER_BINDING_REQUIRED', 'GOAL_INACTIVE'}
-                            or exc.status in {409, 429} or exc.status >= 500):
+                    if authorization_transient(exc):
                         continue
                     self.store.execute("UPDATE mcp_event_subscriptions SET state='revoked',version=version+1,updated=? WHERE id=?", (now, sub['id']))
                     continue
@@ -911,8 +918,7 @@ class EventService:
             await self.store.run(self.finish, item, reply.status, '', getattr(reply, 'retry_after_seconds', None))
         except DevError as exc:
             policy = exc.code in {'CALLBACK_URL_REJECTED', 'CALLBACK_ADDRESS_REJECTED', 'HTTP_REDIRECT_REJECTED', 'HTTP_RESPONSE_TOO_LARGE', 'EVENT_TOO_LARGE'}
-            transient = (exc.code in {'ROOM_PAUSED', 'WORKER_BINDING_REQUIRED', 'GOAL_INACTIVE'}
-                         or exc.status in {409, 429} or exc.status >= 500)
+            transient = authorization_transient(exc)
             reason = ('wake_ticket_expired' if exc.code == 'EVENT_WAKE_TICKET_EXPIRED'
                       else 'callback_policy_rejected' if policy
                       else 'authorization_stopped' if transient else 'authorization_revoked')

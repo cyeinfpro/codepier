@@ -115,12 +115,17 @@ def test_links_and_file_limits(engine):
     with pytest.raises(DevError):e.read(p,{'path':'link.txt'})
     os.link(outside,r/'hard.txt')
     with pytest.raises(DevError):e.read(p,{'path':'hard.txt'})
-    (r/'large.txt').write_bytes(b'x'*(1048576+1))
-    with pytest.raises(DevError):e.read(p,{'path':'large.txt'})
-    (r/'binary').write_bytes(b'\x00data')
-    with pytest.raises(DevError):e.read(p,{'path':'binary'})
-    (r/'invalid.txt').write_bytes(b'\xff\xfe')
-    with pytest.raises(DevError):e.read(p,{'path':'invalid.txt'})
+    for name, data, reason in [
+        ('large.txt', b'x' * (1048576 + 1), 'FILE_TOO_LARGE'),
+        ('binary', b'\x00data', 'BINARY_FILE'),
+        ('invalid.txt', b'\xff\xfe', 'ENCODING'),
+    ]:
+        (r / name).write_bytes(data)
+        result = e.read(p, {'path': name})
+        assert result['content_available'] is False and result['content'] == ''
+        assert result['content_unavailable_reason'] == reason
+        assert result['sha256'] == digest(data) and result['bytes'] == len(data)
+        assert result['truncated'] is True and result['next_start_line'] is None
 
 def test_checkpoint_exclusions(engine):
     e,p,r=engine;(r/'.env').write_text('secret');(r/'node_modules').mkdir();(r/'node_modules/x').write_text('dependency')

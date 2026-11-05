@@ -12,6 +12,8 @@ import base64
 import contextlib
 import hashlib
 import json
+import os
+from pathlib import Path
 import shlex
 import socket
 import sqlite3
@@ -19,6 +21,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
@@ -26,7 +29,7 @@ import httpx
 import pytest
 
 from tests.collaboration_support import key
-from tests.support import BASE, Stack, wait_for, wait_for_hub
+from tests.support import BASE, Stack, wait_for, wait_for_bound_port, wait_for_hub
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
@@ -106,12 +109,25 @@ class ProcessStack(Stack):
         super().__init__(directory)
 
     def start_hub(self):
+        receipt = self.directory / ('hub-port-' + uuid.uuid4().hex + '.json')
         self.hub = subprocess.Popen(
-            [sys.executable, '-m', 'tests.test_multidot_process_recovery',
-             '--hub', str(self.hubdir), str(self.port), str(self.callback_port)],
+            [os.environ.get('CODEPIER_TEST_STACK_PYTHON') or sys.executable,
+             '-m', 'tests.test_multidot_process_recovery',
+             '--hub', str(self.hubdir), str(self.port), str(self.callback_port), str(receipt)],
             cwd=BASE, env=self.env, stdout=self.hub_log, stderr=subprocess.STDOUT)
         self.hub_pids.append(self.hub.pid)
-        wait_for_hub(self.hub, self.url)
+        try:
+            self.port = wait_for_bound_port(self.hub, receipt)
+            self.url = f'http://127.0.0.1:{self.port}'
+            for key in ('HUB_PUBLIC_URL', 'MCP_PUBLIC_URL'):
+                if self.env.get(key) == 'http://127.0.0.1:0':
+                    self.env[key] = self.url
+            wait_for_hub(self.hub, self.url)
+        except AssertionError as exc:
+            from shared.audit_redaction import redact_text
+            details = redact_text((self.directory / 'hub.log').read_text(
+                encoding='utf-8', errors='replace'))[-6000:]
+            raise AssertionError(f'{exc}\n{details}') from exc
 
     def crash_hub(self):
         assert self.hub.poll() is None
@@ -716,12 +732,13 @@ def test_native_room_real_agent_restart_stop_continue_and_unique_publication(tmp
             'real_dot_host': False}))
 
 
-def serve_fixture_hub(directory, port, callback_port):
+def serve_fixture_hub(directory, port, callback_port, receipt):
     import uvicorn
     from hub.app import create_app
     from hub.collaboration.network import Reply, retry_after_seconds
 
-    app = create_app(directory)
+    from shared.util import atomic_json
+    from tests.fixture_hub import bind_listener
 
     async def local_callback(url, body, headers):
         parsed = urlsplit(url)
@@ -733,10 +750,20 @@ def serve_fixture_hub(directory, port, callback_port):
                  if reply.status_code in {429, 503} else None)
         return Reply(reply.status_code, reply.content, delay)
 
-    app.state.runtime.collaboration.events.sender = local_callback
-    uvicorn.run(app, host='127.0.0.1', port=port, log_level='warning')
+    with bind_listener(port) as listener:
+        port = listener.getsockname()[1]
+        os.environ['HUB_PORT'] = str(port)
+        for key in ('HUB_PUBLIC_URL', 'MCP_PUBLIC_URL'):
+            if os.environ.get(key) in {None, '', 'http://127.0.0.1:0'}:
+                os.environ[key] = f'http://127.0.0.1:{port}'
+        app = create_app(directory)
+        app.state.runtime.collaboration.events.sender = local_callback
+        server = uvicorn.Server(uvicorn.Config(
+            app, host='127.0.0.1', port=port, log_level='warning'))
+        atomic_json(Path(receipt), {'port': port})
+        server.run(sockets=[listener])
 
 
 if __name__ == '__main__':
-    assert len(sys.argv) == 5 and sys.argv[1] == '--hub'
-    serve_fixture_hub(sys.argv[2], int(sys.argv[3]), int(sys.argv[4]))
+    assert len(sys.argv) == 6 and sys.argv[1] == '--hub'
+    serve_fixture_hub(sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5])

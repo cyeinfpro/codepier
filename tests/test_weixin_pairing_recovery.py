@@ -140,17 +140,27 @@ def test_superseded_poll_error_never_changes_new_claim(collab):
     no_work(c)
 
 
-@pytest.mark.parametrize('code,status', [
-    ('WEIXIN_AUTH_REJECTED', 403), ('WEIXIN_SESSION_EXPIRED', 403),
-    ('WEIXIN_RECEIVER_MISMATCH', 409), ('WEIXIN_DUPLICATE_CONFLICT', 409),
+@pytest.mark.parametrize('code,status,state', [
+    ('WEIXIN_AUTH_REJECTED', 403, 'attention'),
+    ('WEIXIN_SESSION_EXPIRED', 403, 'attention'),
+    ('WEIXIN_RECEIVER_MISMATCH', 409, 'active'),
+    ('WEIXIN_DUPLICATE_CONFLICT', 409, 'active'),
 ])
-def test_security_and_identity_errors_still_stop_the_account(collab, code, status):
+def test_credential_failures_stop_account_but_message_errors_back_off(collab, code, status, state):
     c, w, account, binding, scope = fixture_channel(collab)
+    before = c.s.store.one('SELECT * FROM weixin_accounts')
     w.poll_failed(w.claim_poll(account['account_id']), DevError(code, 'synthetic denied', status))
     row = c.s.store.one('SELECT * FROM weixin_accounts')
-    assert row['state'] == 'attention' and row['reason_code'] == code
-    c.clock[0] += 4000
+    assert row['state'] == state and row['reason_code'] == code
+    assert row['failures'] == before['failures'] + 1 and row['poll_until'] == 0
+    assert row['next_poll'] > c.clock[0]
+    for field in ('cursor', 'secret', 'credential_version', 'generation'):
+        assert row[field] == before[field]
     assert w.claim_poll(account['account_id']) is None
+    # A bad message still rolls back its batch, but does not revoke credentials
+    # shared by other bindings. Genuine credential failures stay stopped.
+    c.clock[0] = row['next_poll'] + 0.01
+    assert (w.claim_poll(account['account_id']) is None) == (state == 'attention')
     no_work(c)
 
 

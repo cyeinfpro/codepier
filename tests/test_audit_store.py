@@ -96,7 +96,8 @@ def test_missing_master_key_cannot_silently_orphan_encrypted_records(tmp_path, e
         Store(directory)
     assert not (directory / "master.key").exists()
     # Restoring the real key must recover the same ciphertext and records.
-    (directory / "master.key").write_bytes(key)
+    from hub.keyring import atomic_private
+    atomic_private(directory / "master.key", key)
     recovered = Store(directory)
     try:
         table, column = ("devices", "secret") if encrypted_record == "device" else ("operations", "payload")

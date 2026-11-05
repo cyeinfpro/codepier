@@ -58,11 +58,28 @@ def open_settings(browser,stack,state,width=1440,post_handler=None,init_script=N
         elif get_handler:get_handler(r)
         else:r.fulfill(json=copy.deepcopy(state))
     page.route('**/api/panel-update/**',route)
+    # Approval polling is unrelated to updater recovery. Avoid real background
+    # requests racing reload and the fake clock; keep all pageerrors observable.
+    def approvals(r):
+        if r.request.method=='GET':r.fulfill(json={'approvals':[]})
+        else:r.continue_()
+    page.route('**/api/computer/approvals',approvals)
     page.goto(stack.url+'/#settings')
     page.fill('#username', 'admin');page.fill('#password',stack.password);page.click('#login-form button')
     expect(page.locator('#page h1')).to_have_text('设置中心')
     show_update_controls(page)
     return page,calls,errors
+
+
+def test_update_pageerror_collector_keeps_real_errors(update_browser,stack):
+    browser,_=update_browser
+    page,_,errors=open_settings(browser,stack,ready())
+    try:
+        message='Real request failed due to access control checks.'
+        with page.expect_event('pageerror'):
+            page.evaluate("message => setTimeout(() => { throw new Error(message); }, 0)",message)
+        assert errors==[message]
+    finally:page.close()
 
 
 @pytest.mark.parametrize('width',[1440,390])

@@ -152,8 +152,11 @@ def test_terminal_before_promotion_can_continue_without_redeploy(setup):
 def test_standalone_wrong_owner_cannot_perform(setup):
     manager, helper, runtime, body = setup
     helper.wrong_owner = True
-    with pytest.raises(UpdateError, match='固定'):
-        manager.perform(manager.current_job())
+    manager.perform(manager.current_job())
+    job = manager.current_job()
+    assert job['state'] == 'failed'
+    assert job['error']['code'] == 'ENGINE_OWNER_REQUIRED'
+    assert '固定' in job['error']['message']
     assert not runtime.calls
 
 

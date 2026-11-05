@@ -54,24 +54,25 @@ def _directory_identity(info):
 # Importing FileEngine here would add cryptography to the httpx/pydantic-only bridge.
 _PROTECTED_DIRECTORIES = {
     ".git", "node_modules", ".venv", "venv", "__pycache__", ".ssh", ".aws", ".azure",
-    ".kube", ".codepier-agent", ".remote-dev-agent", ".remote-dev", ".codepier", ".cache",
+    ".kube", ".docker", ".gnupg", ".password-store", ".codepier-agent", ".remote-dev-agent", ".remote-dev", ".codepier", ".cache",
 }
 _PROTECTED_NAMES = {
     ".env", ".npmrc", ".pypirc", ".netrc", "id_rsa", "id_ed25519", "auth.json",
     "credentials.json", ".credentials.json", "secrets.json",
+    "id_ecdsa", "id_dsa", ".git-credentials", ".pgpass", ".s3cfg", ".htpasswd", ".dockercfg",
 }
 
 
 def _protected_local_path(path):
-    parts = tuple(part.lower() for part in PurePosixPath(path).parts)
+    parts = tuple(part.rstrip(" .").lower() for part in PurePosixPath(path).parts)
     private_runtime = {".codex": {"sessions", "archived_sessions"}, ".claude": {"projects"}}
     if any(parts[index + 1] in private_runtime.get(part, ())
            for index, part in enumerate(parts[:-1])):
         return True
     return any(
-        part in _PROTECTED_DIRECTORIES or part.startswith(".rd-") or part in _PROTECTED_NAMES
+        part in _PROTECTED_DIRECTORIES or part.startswith((".rd-", ".venv-", ".venv.")) or part in _PROTECTED_NAMES
         or part.startswith(".env.") and not part.endswith((".example", ".sample", ".template"))
-        or part.endswith((".pem", ".key", ".p12", ".pfx"))
+        or part.endswith((".pem", ".key", ".p12", ".pfx", ".ppk", ".jks", ".keystore", ".ovpn", ".kdbx"))
         for part in parts
     )
 

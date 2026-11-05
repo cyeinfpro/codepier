@@ -487,6 +487,11 @@ PROTECTED_SAMPLES = [
     ".claude/projects/fake-session", ".codepier-agent/config.json",
     ".remote-dev-agent/state.db", ".remote-dev/state", ".codepier/state",
     ".rd-backup/private", ".git/config",
+    ".docker/config.json", ".gnupg/private", ".password-store/account",
+    ".venv-tools/config", ".venv.test/config", "id_ecdsa", "id_dsa",
+    ".git-credentials", ".pgpass", ".s3cfg", ".htpasswd", ".dockercfg",
+    "private.ppk", "store.jks", "store.keystore", "vpn.ovpn", "vault.kdbx",
+    ".ENV. ", ".SSH. /config", ".codex. /sessions. /fake-session",
 ]
 
 
@@ -546,7 +551,7 @@ def test_local_protection_matches_existing_filesystem_policy():
                  ".env.dev.template", ".codex/skills/guide.md", "empty.data", "图像.png"]
     for value in examples:
         for path in (value, "/synthetic/home/project/" + value, value.upper()):
-            assert adapter._protected_local_path(path) == protected(path)
+            assert adapter._protected_local_path(path) == protected(path), path
 
 
 @pytest.mark.parametrize("name", [".env.example", ".env.dev.sample", "ordinary.pdf"])

@@ -123,7 +123,15 @@ def test_backup_exclusive_private_and_restorable(tmp_path):
             assert output.stat().st_mode & 0o777 == 0o600
         with zipfile.ZipFile(output) as archive:
             assert archive.testzip() is None
-            archive.extractall(tmp_path / "restored")
+            # ZipFile.extractall ignores Unix permissions. Restore encryption
+            # metadata privately, as required by the production key loader.
+            from hub.keyring import atomic_private
+            directory = tmp_path / "restored"
+            directory.mkdir(mode=0o700)
+            archive.extract("hub.sqlite3", directory)
+            for name in ("master.key", "master.keys.json"):
+                if name in archive.namelist():
+                    atomic_private(directory / name, archive.read(name))
         restored = Store(tmp_path / "restored")
         try:
             assert restored.one("PRAGMA quick_check")["quick_check"] == "ok"

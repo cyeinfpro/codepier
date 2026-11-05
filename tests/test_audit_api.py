@@ -422,7 +422,13 @@ async def test_scan_sse_admission_is_atomic_and_scoped(api, monkeypatch):
     monkeypatch.setattr(iam, "project_permissions", lambda *args: {})
     monkeypatch.setattr(app.state.auth, "panel", lambda request: SimpleNamespace(
         user_id=request.headers.get("x-owner", "one"), space_id="legacy", admin=False, instance_admin=False))
-    endpoint = next(route.endpoint for route in app.routes if getattr(route, "path", "") == "/api/events")
+    # Included-router internals differ across FastAPI versions.
+    from hub.api.activity import make_activity_router
+    from hub.api.context import HubContext
+    context = HubContext(app.state.store, runtime, app.state.auth,
+        app.state.config, runtime.panel_maintenance,
+        lambda: "http://testserver", app_module.BASE)
+    endpoint = next(route.endpoint for route in make_activity_router(context).routes if route.path == "/api/events")
     def request(owner):
         return Request({"type": "http", "method": "GET", "path": "/api/events",
                         "headers": [(b"x-owner", owner.encode())], "query_string": b""})

@@ -129,6 +129,18 @@ def test_rotation_covers_gateway_oidc_and_preserves_retry_and_idempotency(gw,oid
     for offset, plaintext in enumerate(('YQ==', 'Yg==')):
         store.execute('INSERT INTO channel_attachment_chunks VALUES (?,?,?,?,?)',
                       ('synthetic-rotation-chunks', offset, 1, digest(plaintext), store.encrypt(plaintext)))
+    for index in range(2):
+        store.execute('INSERT INTO weixin_contexts(account_id,generation,peer_id,token,observed_at) VALUES (?,?,?,?,?)',
+                      ('synthetic-rotation', 1, f'peer-{index}', store.encrypt(f'context-{index}'), 1))
+        store.execute('''INSERT INTO telegram_inbox
+            (account_id,update_id,credential_version,generation,source_digest,body,state,created)
+            VALUES (?,?,1,1,?,?,?,1)''',
+                      ('synthetic-rotation', index, digest(str(index)), store.encrypt(f'inbox-{index}'), 'pending'))
+    composite_keys = {
+        'channel_attachment_chunks': ['attachment_id', 'offset'],
+        'weixin_contexts': ['account_id', 'generation', 'peer_id'],
+        'telegram_inbox': ['account_id', 'update_id'],
+    }
     expected={}
     columns=[(table,column,'') for table,column in keyring.CIPHER_COLUMNS]
     for table,column,prefix in [*columns,*keyring.PREFIXED_CIPHER_COLUMNS]:
@@ -138,8 +150,8 @@ def test_rotation_covers_gateway_oidc_and_preserves_retry_and_idempotency(gw,oid
         # consumer tickets use ticket_hash, while OIDC transactions use state_hash.
         primary=keyring.CIPHER_PRIMARY_KEYS.get(table,'id')
         if primary == 'rowid':
-            assert table == 'channel_attachment_chunks'
-            assert primary_keys == ['attachment_id', 'offset']
+            assert table in composite_keys
+            assert primary_keys == composite_keys[table]
             # A future WITHOUT ROWID migration must update the rotation selector.
             store.all(f'SELECT rowid FROM {table} LIMIT 0')
         else:
@@ -148,7 +160,7 @@ def test_rotation_covers_gateway_oidc_and_preserves_retry_and_idempotency(gw,oid
         for row in store.all(f"SELECT {primary} AS id,{column} AS cipher FROM {table} WHERE {column} IS NOT NULL AND {column}!=''"+condition,
                              (len(prefix),prefix) if prefix else ()):
             expected[(table,column,primary,row['id'],prefix)]=store.decrypt(row['cipher'][len(prefix):])
-    assert {'oidc_providers','oidc_transactions','external_identities','gateway_accounts','gateway_calls','gateway_secrets','channel_attachment_chunks'}<={k[0] for k in expected}
+    assert {'oidc_providers','oidc_transactions','external_identities','gateway_accounts','gateway_calls','gateway_secrets',*composite_keys}<={k[0] for k in expected}
     copied=tmp_path/'rotation-copy';copied.mkdir()
     with store.lock,sqlite3.connect(copied/'hub.sqlite3') as db:
         store.db.backup(db)
