@@ -25,6 +25,13 @@ def health_probe():
     return "import json,urllib.request; h=json.load(urllib.request.urlopen('http://127.0.0.1:8765/healthz')); m=json.load(urllib.request.urlopen('http://127.0.0.1:8765/agent/manifest.json')); assert h['version']=="+repr(VERSION)+" and m['version']=="+repr(VERSION)+"; print(json.dumps({'version':h['version'],'agent_package_bytes':m['bytes']}))"
 
 
+
+def confirm_occupied_refusal(result):
+    expected = "RuntimeError: Destination/backup is not empty"
+    if result.returncode != 1 or expected not in result.stderr.splitlines():
+        raise AssertionError("Expected occupied-volume guard was not observed")
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--image',required=True);parser.add_argument('--output',required=True,type=Path);args=parser.parse_args()
     docker=Docker();prefix='codepier-fixture-'+uuid.uuid4().hex[:12];volumes=[prefix+'-'+n for n in ('old','new','backup')]
@@ -44,9 +51,9 @@ def main():
             response=docker.run(['run','--rm','--network=none','--read-only','--user','10001:10001','--mount','type=volume,src='+volume+',dst=/fixture,readonly','--entrypoint','python',args.image,'-c',check])
             assert json.loads(response.stdout)=={'uid':10001,'verified':True}
         report['cases'].append({'case':'read-only-old-volume-to-canonical-and-backup','result':'passed',**result,'service_uid_can_read':True})
-        try:docker.worker(args.image,'copy',new,old,backup)
-        except RuntimeError:report['cases'].append({'case':'occupied-destination-refused','result':'passed'})
-        else:raise AssertionError('A repeated copy merged an occupied destination')
+        refused=docker.worker(args.image,'copy',new,old,backup,check=False)
+        confirm_occupied_refusal(refused)
+        report['cases'].append({'case':'occupied-destination-refused','result':'passed'})
         docker.run(['network','create','--label','com.docker.compose.project='+prefix,'--label','com.docker.compose.network=proxy',net])
         network=docker.json(['network','inspect',net])[0];subnet=network['IPAM']['Config'][0]['Subnet']
         docker.run(['run','-d','--name',container,'--label','com.codepier.fixture='+prefix,'--network',net,'--entrypoint','python',args.image,'-c','import time;time.sleep(300)'])

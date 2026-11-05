@@ -156,3 +156,15 @@ async def test_recovered_lifecycle_failure_cannot_turn_the_report_green(tmp_path
             await asyncio.gather(extra_loop, return_exceptions=True)
         await harness.close()
     assert harness.lifecycle_observer not in harness.lifecycle_logger.handlers
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_short_run_does_not_claim_unobserved_fault_coverage(tmp_path):
+    config = RunConfig(duration_seconds=.1, owners=2, dots_per_owner=1,
+                       fault_every_seconds=180, sample_interval_seconds=1,
+                       drain_timeout_seconds=10)
+    result = await run(tmp_path / 'unexercised-fault', config)
+    assert result['checks']['scheduled_fault_exercised'] is False
+    assert result['state'] == 'failed'
+    assert result['fault_window_progress'] == []

@@ -695,7 +695,7 @@ class SoakHarness:
             'no_unexpected_errors': not self.errors and self.lifecycle_observer.observed == 0,
             'lifecycle_failures_observable': self.lifecycle_logger.isEnabledFor(logging.WARNING)
                 and self.lifecycle_observer in self.lifecycle_logger.handlers,
-            'scheduled_fault_exercised': not fault_progress or any(row['injected_503_count'] > 0 for row in fault_progress),
+            'scheduled_fault_exercised': not every or any(row['injected_503_count'] > 0 for row in fault_progress),
             'other_owners_progress_during_injected_faults': all(
                 not row['injected_503_count'] or all(row['other_owner_accepted'].values()) for row in fault_progress),
             'worker_idle': after['worker']['queued'] == after['worker']['running'] == 0,

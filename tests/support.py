@@ -1,6 +1,6 @@
 """Real loopback Hub + outbound Agent used by integration and browser tests."""
 from __future__ import annotations
-import contextlib, json, os, socket, subprocess, sys, time, uuid
+import contextlib, json, os, subprocess, sys, time, uuid
 from pathlib import Path
 import httpx
 from hub.store import Store
@@ -33,6 +33,22 @@ def wait_for(fn, timeout=12):
         except Exception as exc: last=exc
         time.sleep(.1)
     raise AssertionError(f"Condition timed out: {last}")
+
+
+def wait_for_bound_port(process, receipt, timeout=45):
+    end=time.monotonic()+timeout
+    while time.monotonic()<end:
+        code=process.poll()
+        if code is not None:
+            raise AssertionError(f'Fixture Hub exited with code {code}; inspect its hub.log')
+        if receipt.exists():
+            value=json.loads(receipt.read_text())['port']
+            if type(value) is not int or not 1 <= value <= 65535:
+                raise AssertionError('Fixture Hub published an invalid port')
+            return value
+        time.sleep(.1)
+    raise AssertionError('Fixture Hub did not publish a bound port; inspect its hub.log')
+
 
 def wait_for_hub(process,url,timeout=45):
     """Probe the same owned child within a bounded cold-import budget.
@@ -80,8 +96,7 @@ def wait_for_agent(process, is_online, timeout=45):
 class Stack:
     def __init__(self, directory):
         self.directory=Path(directory); self.directory.mkdir(parents=True,exist_ok=True)
-        with socket.socket() as s:
-            s.bind(('127.0.0.1',0)); self.port=s.getsockname()[1]
+        self.port=0
         self.url=f'http://127.0.0.1:{self.port}'
         self.password='Integration-only-'+token(18)
         self.root=self.directory/'projects'; self.root.mkdir()
@@ -138,8 +153,14 @@ class Stack:
     def login(self):
         r=self.client.post('/api/login',json={'username':'admin','password':self.password});self.must(r);self.client.headers['X-RD-CSRF']=r.json()['csrf']
     def start_hub(self):
-        self.hub=subprocess.Popen([os.environ.get('CODEPIER_TEST_STACK_PYTHON') or sys.executable,'-m','hub','--data-dir',str(self.hubdir),'run','--host','127.0.0.1','--port',str(self.port)],cwd=BASE,env=self.env,stdout=self.hub_log,stderr=subprocess.STDOUT)
+        receipt=self.directory/('hub-port-'+uuid.uuid4().hex+'.json')
+        self.hub=subprocess.Popen([os.environ.get('CODEPIER_TEST_STACK_PYTHON') or sys.executable,'-m','tests.fixture_hub','--data-dir',str(self.hubdir),'--port',str(self.port),'--receipt',str(receipt)],cwd=BASE,env=self.env,stdout=self.hub_log,stderr=subprocess.STDOUT)
         try:
+            self.port=wait_for_bound_port(self.hub,receipt)
+            self.url=f'http://127.0.0.1:{self.port}'
+            for key in ('HUB_PUBLIC_URL','MCP_PUBLIC_URL'):
+                if self.env.get(key)=='http://127.0.0.1:0':
+                    self.env[key]=self.url
             wait_for_hub(self.hub,self.url)
         except AssertionError as exc:
             from shared.audit_redaction import redact_text

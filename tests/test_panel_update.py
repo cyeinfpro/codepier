@@ -663,3 +663,70 @@ def test_old_host_capability_is_explicit_without_blocking_hub_upgrade(tmp_path, 
                 assert '过渡 Hub' in data['host_update_notice']
     finally:
         store.close()
+
+
+def test_engine_owner_failure_durably_finishes_queued_job(tmp_path, monkeypatch):
+    manager, release = manager_fixture(tmp_path, monkeypatch)
+    manager.submit('check', body_for())
+    def denied(*args):
+        raise source.UpdateError('ENGINE_OWNER_REQUIRED', 'fixture mismatch', 409)
+    monkeypatch.setattr(manager, 'verify_engine_owner', denied)
+    manager.perform(manager.current_job())
+    status = manager.status()
+    assert status['operation']['state'] == 'failed'
+    assert not status['busy']
+    assert not manager.runtime.calls
+
+
+def test_install_lock_receipt_is_published_atomically(tmp_path, monkeypatch):
+    manager, release = manager_fixture(tmp_path, monkeypatch)
+    manager.submit('apply', body_for(release))
+    job = manager.current_job()
+    original = updater.publish_lock_directory
+    def publish(source_path, target_path):
+        assert read_json(source_path / 'panel-update-owner.json')['id'] == job['id']
+        assert not target_path.exists()
+        return original(source_path, target_path)
+    monkeypatch.setattr(updater, 'publish_lock_directory', publish)
+    manager.acquire_install_lock(job)
+    assert read_json(tmp_path / '.codepier-install.lock/panel-update-owner.json')['id'] == job['id']
+    manager.release_install_lock(job)
+
+
+def test_install_lock_owner_write_failure_leaves_no_canonical_lock(tmp_path, monkeypatch):
+    manager, release = manager_fixture(tmp_path, monkeypatch)
+    manager.submit('apply', body_for(release))
+    def fail(*args):
+        raise OSError('fixture disk full')
+    monkeypatch.setattr(updater, 'atomic_json', fail)
+    with pytest.raises(OSError):
+        manager.acquire_install_lock(manager.current_job())
+    assert not (tmp_path / '.codepier-install.lock').exists()
+
+
+def test_empty_legacy_lock_is_never_replaced_without_explicit_recovery(tmp_path, monkeypatch):
+    manager, release = manager_fixture(tmp_path, monkeypatch)
+    manager.submit('apply', body_for(release))
+    lock = tmp_path / '.codepier-install.lock'
+    lock.mkdir()
+    before = lock.stat().st_ino
+    with pytest.raises(source.UpdateError):
+        manager.acquire_install_lock(manager.current_job())
+    assert lock.stat().st_ino == before
+    with pytest.raises(source.UpdateError):
+        updater.recover_orphan_install_lock(tmp_path)
+    result = updater.recover_orphan_install_lock(tmp_path, confirm_installers_stopped=True)
+    assert Path(result['path']).stat().st_ino == before
+    assert not lock.exists()
+    manager.acquire_install_lock(manager.current_job())
+    manager.release_install_lock(manager.current_job())
+
+
+@pytest.mark.parametrize('name', ['pid', 'panel-update-owner.json', 'unknown'])
+def test_orphan_recovery_preserves_nonempty_lock(tmp_path, name):
+    lock = tmp_path / '.codepier-install.lock'
+    lock.mkdir()
+    (lock / name).write_text('existing owner')
+    with pytest.raises(source.UpdateError):
+        updater.recover_orphan_install_lock(tmp_path, confirm_installers_stopped=True)
+    assert (lock / name).read_text() == 'existing owner'

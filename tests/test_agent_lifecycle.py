@@ -270,3 +270,26 @@ def test_launchd_handoff_is_one_shot(tmp_path, monkeypatch):
     assert captured[0]["RunAtLoad"] is True
     assert captured[0]["ProgramArguments"][:3] == ["/python", "/helper", "--restart"]
     assert not (manager.plan_dir / "oneshot.plist").exists()
+
+
+def test_cli_refresh_failure_does_not_rollback_healthy_update(tmp_path, monkeypatch):
+    base = tmp_path / "agent"
+    runtime = base / "runtime"
+    candidate = base / ".runtime-update-operation"
+    write_runtime(runtime, "old")
+    write_runtime(candidate, "new")
+    atomic_json(base / "management.json", {"service_kind": "systemd", "service_scope": "user",
+                                         "installed_version": "old", "status": "ready"})
+    stops = []
+    monkeypatch.setattr(helper, "stop_service", lambda *_a, **_k: stops.append(True))
+    monkeypatch.setattr(helper, "_wait_for_exit", lambda *_a, **_k: None)
+    monkeypatch.setattr(helper, "start_service", lambda *_a, **_k: None)
+    monkeypatch.setattr(helper, "verify_service", lambda *_a, **_k: None)
+    def fail_refresh(*args):
+        raise OSError("fixture link failure")
+    monkeypatch.setattr(helper, "refresh_cli_commands", fail_refresh)
+    helper.apply_update(base, candidate, 123)
+    assert helper._version(runtime) == "new"
+    assert len(stops) == 1
+    state = json.loads((base / "management.json").read_text())
+    assert state["status"] == "ready" and "fixture link failure" in state["last_error"]

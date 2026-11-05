@@ -47,7 +47,7 @@ def inventory(directory, older_than):
             if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_FILE:
                 raise ValueError('Evidence must contain bounded regular files')
             # Do not turn this retention helper into a credentials/store backup.
-            if path.name in {'master.key', 'master.keys.json', 'config.json', 'pairing.json', 'auth.json', '.env'} or path.suffix in {'.db', '.sqlite', '.sqlite3', '.key', '.pem'}:
+            if path.name in {'master.key', 'master.keys.json', 'config.json', 'pairing.json', 'auth.json', '.env'} or path.suffix.lower() in {'.db', '.sqlite', '.sqlite3', '.key', '.pem'} or path.name.lower().endswith(('-wal', '-shm', '-journal')):
                 raise ValueError('Runtime credentials or databases require a dedicated backup process')
             selected.append({'path': path.relative_to(directory).as_posix(), 'bytes': info.st_size,
                              'identity': [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]})

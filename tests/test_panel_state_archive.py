@@ -92,6 +92,22 @@ class ArchiveTests(unittest.TestCase):
     def test_unknown_lock_fail_closed(self):
         self.assert_unknown_sidecar_rejected('.hub.lock')
 
+    def test_quiesced_instance_locks_are_excluded_and_preserved(self):
+        self.write('.hub.lock', b'')
+        self.write('.keys.lock', b'')
+        result = self.export()
+        self.assertNotIn('.hub.lock', {entry['path'] for entry in result['files']})
+        self.assertEqual((self.source / '.hub.lock').read_bytes(), b'')
+
+    def test_active_instance_lock_refuses_export(self):
+        import fcntl
+        self.write('.hub.lock', b'')
+        with (self.source / '.hub.lock').open('rb') as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaisesRegex(ValueError, 'State is live'):
+                self.export()
+        self.assertFalse(self.archive.exists())
+
     def test_unknown_rekey_journal_fail_closed(self):
         self.assert_unknown_sidecar_rejected('rekey.json')
 

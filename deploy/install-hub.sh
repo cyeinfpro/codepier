@@ -136,7 +136,7 @@ hub_data_volume=$("$bootstrap_python" scripts/migrate_hub.py probe-volume --root
 needs_init=0
 probe_compose=$("$bootstrap_python" scripts/migrate_hub.py probe-compose --root "$root")
 probe_status=0
-COMPOSE_FILE="$probe_compose" docker compose run --rm --no-deps --volume "$hub_data_volume:/app/data:ro" hub python -c 'import os,sys,sqlite3; from pathlib import Path; p=Path(os.environ["HUB_DATA_DIR"])/"hub.sqlite3"; sys.exit(3) if not p.exists() else None; s=sqlite3.connect(p.as_uri()+"?mode=ro",uri=True); found=s.execute("SELECT id FROM users LIMIT 1").fetchone(); s.close(); sys.exit(0 if found else 3)' || probe_status=$?
+COMPOSE_FILE="$probe_compose" docker compose run --rm --no-deps --volume "$hub_data_volume:/app/data:ro" hub python -c 'import os,sys; from scripts.migrate_hub_data import probe_admin; sys.exit(probe_admin(os.environ["HUB_DATA_DIR"]))' || probe_status=$?
 "$bootstrap_python" scripts/migrate_hub.py probe-finished --root "$root"
 if ((probe_status == 0)); then
   echo '检测到已有管理员，保留原账号和数据。'

@@ -87,3 +87,19 @@ def test_module_tiers_rechecks_source_when_a_path_is_reused(tmp_path, recreate):
     assert module_tiers(str(module)) == (False, False)
     module.write_text('from playwright.sync_api import sync_playwright\n', encoding='utf-8')
     assert module_tiers(str(module)) == (True, True)
+
+
+def test_fixture_listener_keeps_port_owned_until_server_uses_it():
+    import socket
+    from tests.fixture_hub import bind_listener
+    with bind_listener() as listener:
+        port = listener.getsockname()[1]
+        with socket.socket() as contender, pytest.raises(OSError):
+            contender.bind(("127.0.0.1", port))
+        assert listener.fileno() >= 0
+
+
+def test_bound_port_observer_reports_child_failure(clock, tmp_path):
+    with pytest.raises(AssertionError, match="exited with code 9"):
+        support.wait_for_bound_port(SimpleNamespace(poll=lambda: 9), tmp_path / "receipt")
+    assert clock["sleeps"] == 0

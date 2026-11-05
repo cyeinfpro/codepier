@@ -9,6 +9,8 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import copy
+import ctypes
+import errno
 import fcntl
 import hashlib
 import importlib.util
@@ -20,6 +22,7 @@ import re
 import shutil
 import socketserver
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -42,6 +45,40 @@ TERMINAL = {'succeeded', 'failed', 'rolled_back', 'recovery_required'}
 CUTOVER_PHASES = {'stopping', 'copying', 'starting', 'verifying', 'committing', 'committed', 'rolling_back'}
 PUBLIC_FIELDS = {'id', 'kind', 'state', 'phase', 'message', 'created', 'updated', 'from_version',
                  'target_version', 'request_key', 'error', 'events', 'backup', 'commit_decided'}
+
+
+
+def publish_lock_directory(source, target):
+    """Publish a fully populated lock atomically without replacing any owner."""
+    library = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        rename = library.renamex_np
+        rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        result = rename(os.fsencode(source), os.fsencode(target), 0x00000004)  # RENAME_EXCL
+    elif sys.platform.startswith("linux"):
+        rename = library.renameat2
+        rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        result = rename(-100, os.fsencode(source), -100, os.fsencode(target), 1)  # RENAME_NOREPLACE
+    else:
+        raise UpdateError("HOST_SETUP_REQUIRED", "原子安装锁仅支持 Linux 和 macOS", 409)
+    if result != 0:
+        code = ctypes.get_errno()
+        if code in {errno.EEXIST, errno.ENOTEMPTY}:
+            raise FileExistsError(code, os.strerror(code), str(target))
+        raise OSError(code, os.strerror(code), str(target))
+
+
+def recover_orphan_install_lock(root, *, confirm_installers_stopped=False):
+    """Quarantine only an empty historical lock after explicit offline confirmation."""
+    if not confirm_installers_stopped:
+        raise UpdateError("CONFIRMATION_REQUIRED", "请先停止所有安装器并显式确认", 409)
+    root = Path(root).resolve()
+    lock = root / ".codepier-install.lock"
+    if lock.is_symlink() or not lock.is_dir() or any(lock.iterdir()):
+        raise UpdateError("INSTALL_LOCK_NOT_ORPHAN", "只支持恢复空的无主安装锁；现有凭据和其他文件保持不变", 409)
+    quarantine = root / (".codepier-install-orphan-" + uuid.uuid4().hex)
+    publish_lock_directory(lock, quarantine)
+    return {"state": "quarantined", "path": str(quarantine)}
 
 
 def job_view(job):
@@ -217,11 +254,15 @@ class Manager:
 
     def acquire_install_lock(self, job):
         lock = self.root / '.codepier-install.lock'
+        staged = Path(tempfile.mkdtemp(prefix='.codepier-install-lock-', dir=self.root))
         try:
-            lock.mkdir(mode=0o700)
+            atomic_json(staged / 'panel-update-owner.json', {'id': job['id']})
+            publish_lock_directory(staged, lock)
         except FileExistsError as exc:
             raise UpdateError('INSTALL_BUSY', '已有宿主机安装或更新锁，未开始第二次部署', 409) from exc
-        atomic_json(lock / 'panel-update-owner.json', {'id': job['id']})
+        finally:
+            if staged.exists():
+                shutil.rmtree(staged)
 
     def release_install_lock(self, job):
         lock = self.root / '.codepier-install.lock'
@@ -241,8 +282,8 @@ class Manager:
                 raise UpdateError('ENGINE_OWNER_REQUIRED', '此操作必须使用任务固定的宿主更新器执行；请通过已安装 launcher 恢复，不能使用旧安装脚本替代', 409)
 
     def perform(self, job):
-        self.verify_engine_owner(job)
         try:
+            self.verify_engine_owner(job)
             if job['kind'] in {'apply', 'migrate-state'}:
                 self.acquire_install_lock(job)
             self.save(job, state='running', phase='checking', message='正在检查 GitHub 正式 Release')
@@ -600,17 +641,26 @@ def _install_locked(root, repository):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['install', 'serve', 'status', 'recover', 'migrate-state'])
+    parser.add_argument('action', choices=['install', 'serve', 'status', 'recover', 'migrate-state', 'recover-install-lock'])
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--supervised-lock-fd', type=int)
     parser.add_argument('--engine-id')
     parser.add_argument('--repository', default=DEFAULT_REPOSITORY)
     parser.add_argument('--confirm-layout-migration', action='store_true')
     parser.add_argument('--request-key', default='')
+    parser.add_argument('--confirm-installers-stopped', action='store_true')
     args = parser.parse_args()
     try:
         if args.action == 'install':
             install(args.root, args.repository)
+        elif args.action == 'recover-install-lock':
+            descriptor = acquire_lock(args.root / '.codepier-updater')
+            try:
+                result = recover_orphan_install_lock(args.root,
+                    confirm_installers_stopped=args.confirm_installers_stopped)
+            finally:
+                os.close(descriptor)
+            print(json.dumps(result, ensure_ascii=False))
         elif args.action == 'serve':
             return serve(args.root, args.supervised_lock_fd, args.engine_id)
         else:

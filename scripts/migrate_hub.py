@@ -37,6 +37,9 @@ def write_state(path,value):
         with os.fdopen(fd,'w',encoding='utf-8') as stream:
             json.dump(value,stream,ensure_ascii=False,indent=2);stream.flush();os.fsync(stream.fileno())
         os.chmod(name,0o600);os.replace(name,path)
+        directory=os.open(path.parent,os.O_RDONLY | getattr(os,'O_DIRECTORY',0))
+        try:os.fsync(directory)
+        finally:os.close(directory)
     finally:Path(name).unlink(missing_ok=True)
 
 
@@ -56,7 +59,7 @@ class Docker:
     def create_volume(self,name,transaction):
         if self.volume(name):raise RuntimeError('Migration volume name became occupied')
         self.run(['volume','create','--label','com.codepier.product=CodePier','--label','com.codepier.migration='+transaction,name])
-    def worker(self,image,action,destination,source=None,backup=None):
+    def worker(self,image,action,destination,source=None,backup=None,*,check=True):
         args=['run','--rm','--network=none','--user','0:0','--read-only','--cap-drop=ALL',
               '--cap-add=CHOWN','--cap-add=FOWNER','--cap-add=DAC_OVERRIDE','--security-opt=no-new-privileges',
               '--mount','type=volume,src='+destination+',dst=/destination,volume-nocopy','--entrypoint','python']
@@ -64,7 +67,7 @@ class Docker:
                          '--mount','type=volume,src='+backup+',dst=/backup,volume-nocopy']
         args+=[image,'/app/scripts/migrate_hub_data.py',action]
         if source:args+=[source,backup]
-        return self.run(args,timeout=1800)
+        return self.run(args,timeout=1800,check=check)
 
 
 def volume_name(value):
@@ -111,7 +114,7 @@ def save(path,state,**patch):
 
 def rollback(path,docker):
     path=Path(path)
-    if not path.exists():return {'stage':'nothing_to_restore'}
+    if not path.exists():raise RuntimeError('Migration journal is missing; recovery state cannot be confirmed')
     state=json.loads(path.read_text())
     if state.get('stage') in {'completed','rolled_back'}:return state
     if state.get('write_boundary'):
@@ -286,7 +289,7 @@ def main():
             result=proxy.apply(root,state.get('proxy_trust',[]),docker)
             if state and result.get('changed'):
                 save(path,state,proxy_trust_update=result)
-        elif not path.exists():result={'stage':'current'}
+        elif not path.exists():raise RuntimeError('Migration journal is missing; cutover cannot be confirmed')
         else:
             state=json.loads(path.read_text())
             if state.get('stage')=='completed':result=state

@@ -479,7 +479,6 @@ def apply_update(base: Path, candidate: Path, pid: int) -> None:
                            previous_version=previous_version, status="starting", last_error="", brand_migration="", brand_migration_error="")
         start_service(base)
         verify_service(base)
-        refresh_cli_commands(base)
         _update_management(base, status="ready", last_error="")
     except Exception as exc:
         detail = str(exc).strip()[:300]
@@ -524,6 +523,14 @@ def apply_update(base: Path, candidate: Path, pid: int) -> None:
                 pass
             raise RuntimeError(message) from exc
         raise
+
+
+    # A verified, committed runtime must never roll back for cosmetic links.
+    try:
+        refresh_cli_commands(base)
+    except Exception as exc:
+        _update_management(base, status="ready",
+                           last_error="Agent 更新成功；命令链接需要修复：" + str(exc).strip()[:200])
 
 
 def restart(base: Path, pid: int) -> None:

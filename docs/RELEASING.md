@@ -47,7 +47,7 @@ macOS 下，浏览器原生宿主若从 Downloads 等受限制目录启动，可
 
 通过后构建 linux/amd64 与 linux/arm64 清单并推送，附带 SBOM 与构建来源证明；依赖锁文件由 `uv pip compile --universal` 生成，两种架构都使用同一组哈希校验的 wheel。标签：正式版本 `VERSION`、`MAJOR.MINOR` 与 `latest`；`main` 及手动运行的分支使用分支名；所有构建另加 `sha-<完整 40 位提交>`。任务摘要与 `image-<run id>-<attempt>` 工件记录 `镜像@sha256 摘要`，部署应固定该摘要而不是可变标签。
 
-镜像工作流不运行完整回归；正式标签只能在同一提交的 CI 全绿后创建，这与上文发布顺序一致。首次推送生成的 GHCR 包默认私有：需要在包设置中公开，或为集群配置 imagePullSecret。Compose 安装脚本仍走本地构建路径，不受影响。k3s 单文件部署清单见 `deploy/k3s/deployment.yaml`（单副本 Recreate、local-path 数据卷、非 root 只读容器、Traefik Ingress、不启用宿主机更新服务）；其镜像标签由 `scripts/check_release.py` 与源码版本一同核对。
+镜像工作流不运行完整回归；正式标签只能在同一提交的 CI 全绿后创建，这与上文发布顺序一致。首次推送生成的 GHCR 包默认私有：需要在包设置中公开，或为集群配置 imagePullSecret。Compose 安装脚本仍走本地构建路径，不受影响。k3s 单文件部署模板见 `deploy/k3s/deployment.yaml`（单副本 Recreate、local-path 数据卷、非 root 只读容器、Traefik Ingress、不启用宿主机更新服务）；其版本与模板占位符由 `scripts/check_release.py` 核对，部署须使用下文生成的不可变摘要清单。
 
 ## 发布后
 
@@ -85,3 +85,12 @@ macOS 资源专片将本作业生成的虚拟环境、pip 缓存、公开源码�
 
 
 候选镜像可由同仓库的 workflow_dispatch 产生，但可复用来源严格限于与源码版本匹配的 release/v<VERSION>-<小写字母数字短横线后缀> 分支，且 dispatch 输入必须为空、forced 明确为 false。来源 run 的 event/head_branch 必须与 proof.origin.event/ref 一致，并核对同仓库 ID、相同源码 SHA/tree、workflow SHA/内容、固定构建配方、成功的完整构建/真实启动/多架构证明步骤、run/attempt 和 artifact ZIP 摘要；读取后再确认来源 run 未变化。PR、fork、任意 topic/main 手动触发、异版本候选、非空参数或不完整产物都不能作为复用来源。该规则保留正式版本与完整 SHA 标签的不可覆盖检查；改变源码后必须用新 SHA 重跑完整验收。
+
+
+### 不可变部署清单与安装恢复
+
+仓库的 deploy/k3s/deployment.yaml 是不可直接部署的模板，RELEASE_DIGEST 必须由镜像工作流在已验证镜像发布后替换。image artifact 内同时保留 deployment.yaml 和 deployment.json，后者绑定源码提交、版本、OCI index digest 与清单 SHA-256；部署前核对四者，不能直接应用可变标签模板。离线生成同一清单可用 python scripts/render_k3s.py --image ghcr.io/OWNER/codepier --digest sha256:VERIFIED_DIGEST --commit EXACT_SOURCE_SHA --output deployment.yaml --metadata deployment.json。不要为填入自身镜像 digest 再修改该版本源码。
+
+Caddy HTTPS overlay 要求 Compose 2.24.4+。它同时设置面板和 MCP 的 HTTPS 公共地址，HTTP 仅绑定宿主回环地址；既有 Agent 应改用 HTTPS Hub 地址后再启用该 overlay。MCP_DOMAIN 与 TLS_EMAIL 默认留空，必须由操作者填写真实配置。Caddy、OIDC 验收 PostgreSQL 与 Authentik 镜像使用经过 registry 元数据核验的不可变多架构 digest，升级时需重新核验后显式修改。
+
+更新器先完整写入 owner 收据，再原子发布安装锁，避免崩溃遗留空锁。历史空锁不可自动删除：先停止更新器和所有安装进程，再运行 python scripts/panel_updater.py recover-install-lock --root /实际安装目录 --confirm-installers-stopped。命令只隔离空的无主锁目录并保留原 inode；有 pid、owner 收据、未知文件或符号链接时拒绝，不接触数据卷。

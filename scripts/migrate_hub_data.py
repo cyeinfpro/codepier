@@ -13,6 +13,44 @@ import time
 MARKER='.codepier-volume.json'
 
 
+
+def probe_admin(root):
+    """Inspect a read-only, quiesced store without SQLite touching its sidecars."""
+    database = Path(root) / "hub.sqlite3"
+    if not database.exists() and not database.is_symlink():
+        return 3
+    try:
+        if database.is_symlink() or not database.is_file():
+            raise RuntimeError("Hub database is not a regular file")
+        sources = [database, Path(str(database) + "-wal")]
+        before = {str(path): (path.stat().st_size, path.stat().st_mtime_ns)
+                  for path in sources if path.exists()}
+        with tempfile.TemporaryDirectory(prefix="codepier-admin-probe-") as temporary:
+            probe = Path(temporary) / database.name
+            for original in sources:
+                if not original.exists():
+                    continue
+                if original.is_symlink() or not original.is_file():
+                    raise RuntimeError("Hub database sidecar is not a regular file")
+                # Do not copy read-only modes or the transient shared-memory file.
+                with original.open("rb") as source, (Path(temporary) / original.name).open("wb") as target:
+                    shutil.copyfileobj(source, target)
+            after = {str(path): (path.stat().st_size, path.stat().st_mtime_ns)
+                     for path in sources if path.exists()}
+            if before != after:
+                raise RuntimeError("Hub database changed during administrator probe")
+            connection = sqlite3.connect(probe, timeout=10)
+            try:
+                connection.execute("PRAGMA query_only=ON")
+                found = connection.execute("SELECT id FROM users LIMIT 1").fetchone()
+            finally:
+                connection.close()
+        return 0 if found else 3
+    except (OSError, sqlite3.Error, RuntimeError):
+        print("Hub administrator probe failed; original data was not modified", file=sys.stderr)
+        return 4
+
+
 def digest(path):
     result=hashlib.sha256()
     with path.open('rb') as stream:

@@ -1,7 +1,7 @@
 """Lossless, offline split-state archives; never copies attachments or deletes sources.
 
 Run as ``python -m scripts.panel_state_archive``. Export accepts ONLY a completed,
-quiesced snapshot, not a live state volume (locks, WALs and unknown files fail).
+quiesced snapshot, not a live state volume (held locks, WALs and unknown files fail).
 The operator must keep the source quiesced throughout export. Archives include
 private keys: gzip is NOT encryption. Keep archives and scratch directories on
 operator-protected storage with the same at-rest encryption/access policy as the
@@ -16,7 +16,7 @@ uncertain: inspect the destination, never automatically delete or retry in place
 from __future__ import annotations
 
 import argparse
-from contextlib import closing
+from contextlib import closing, contextmanager, ExitStack
 import hashlib
 import json
 import os
@@ -83,6 +83,11 @@ def _names(root):
     _private_directory(root)
     names = set()
     for child in root.iterdir():
+        if child.name in {".hub.lock", ".keys.lock"}:
+            with _open(child) as stream:
+                if stream.read(2) not in {b"", b"0"}:
+                    raise ValueError("Unrecognized instance lock")
+            continue
         if child.name == "native-cli":
             _private_directory(child)
             for nested in child.iterdir():
@@ -219,7 +224,32 @@ def _extract(stream, root, max_bytes):
     return manifest
 
 
+
+@contextmanager
+def _offline_locks(source):
+    # Reuse existing lock inodes without changing modes, content or source data.
+    import fcntl
+    with ExitStack() as stack:
+        for name in (".hub.lock", ".keys.lock"):
+            path = Path(source) / name
+            if not path.exists():
+                continue
+            stream = stack.enter_context(_open(path))
+            try:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                raise ValueError("State is live; stop the Hub and key maintenance first") from exc
+        yield
+
+
 def export_state(source, archive, *, confirm_offline=False, max_bytes=DEFAULT_LIMIT):
+    if confirm_offline is not True:
+        raise ValueError("Explicit offline snapshot confirmation required")
+    with _offline_locks(_path(source)):
+        return _export_state(source, archive, confirm_offline=True, max_bytes=max_bytes)
+
+
+def _export_state(source, archive, *, confirm_offline=False, max_bytes=DEFAULT_LIMIT):
     """Export a validated, completed offline snapshot without changing any byte."""
     if confirm_offline is not True:
         raise ValueError("Explicit offline snapshot confirmation required")

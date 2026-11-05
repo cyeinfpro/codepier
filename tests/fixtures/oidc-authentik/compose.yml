@@ -1,7 +1,7 @@
 # Disposable loopback-only acceptance fixture. No Docker socket or host data mounts.
 services:
   postgresql:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab
     environment:
       POSTGRES_DB: authentik
       POSTGRES_USER: authentik
@@ -13,7 +13,7 @@ services:
     volumes:
       - database:/var/lib/postgresql/data
   server:
-    image: ghcr.io/goauthentik/server:2026.8.3
+    image: ghcr.io/goauthentik/server:2026.8.3@sha256:ab9b4e8cc4ab3f8d1198d2db6aeea66bafea1963b3f2843589e0d163f97d9849
     command: server
     depends_on:
       postgresql:
@@ -32,7 +32,7 @@ services:
     ports:
       - '127.0.0.1:${TEST_AUTHENTIK_PORT:-19000}:9000'
   worker:
-    image: ghcr.io/goauthentik/server:2026.8.3
+    image: ghcr.io/goauthentik/server:2026.8.3@sha256:ab9b4e8cc4ab3f8d1198d2db6aeea66bafea1963b3f2843589e0d163f97d9849
     command: worker
     depends_on:
       postgresql:

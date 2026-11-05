@@ -263,6 +263,8 @@ jobs:
           print(json.dumps({'image': sys.argv[1], 'digest': os.environ['DIGEST'], 'version': os.environ['VERSION'],
                             'tags': os.environ['TAGS'].split()}, indent=2))
           PY
+          python3 scripts/render_k3s.py --image "$image" --digest "$DIGEST" --commit "$GITHUB_SHA" \
+            --output dist/image/deployment.yaml --metadata dist/image/deployment.json
 
       - name: Retain immutable build and hardened-boot proof
         if: steps.reuse.outputs.reused != 'true' && github.event_name != 'pull_request' && !(github.event_name == 'push' && github.event.forced)
@@ -278,6 +280,8 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-${{ github.run_id }}-${{ github.run_attempt }}
-          path: dist/image/*.json
+          path: |
+            dist/image/*.json
+            dist/image/deployment.yaml
           if-no-files-found: warn
           retention-days: 14

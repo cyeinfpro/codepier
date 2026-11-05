@@ -1,10 +1,14 @@
-# Optional overlay. Base HTTP/IP endpoint remains available for the home Agent.
+# HTTPS-only overlay. The direct HTTP listener is loopback-only for host diagnostics.
+# Requires Docker Compose 2.24.4+ for !override. Agents use the HTTPS Hub URL.
 # Persist COMPOSE_FILE=compose.yml:deploy/compose.https.yml in .env first
 # (Windows uses ; as the separator), then run bash install.sh.
 # Keeping this selection in .env also preserves HTTPS during later upgrades.
 services:
   hub:
+    ports: !override
+      - "127.0.0.1:${HUB_PORT:-8765}:8765"
     environment:
+      HUB_PUBLIC_URL: "https://${MCP_DOMAIN:?Set MCP_DOMAIN in .env}"
       MCP_PUBLIC_URL: "https://${MCP_DOMAIN:?Set MCP_DOMAIN in .env}"
       FORWARDED_ALLOW_IPS: "172.30.87.2"
     networks:
@@ -12,7 +16,16 @@ services:
       proxy:
         ipv4_address: 172.30.87.3
   caddy:
-    image: caddy:2
+    image: caddy:2@sha256:331f98eb44dac52de20de040cc38635bae9db91a4cec39b713963fb39b2b5350
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    tmpfs:
+      - /tmp:size=32m,mode=1777
     restart: unless-stopped
     environment:
       MCP_DOMAIN: "${MCP_DOMAIN:?Set MCP_DOMAIN in .env}"
