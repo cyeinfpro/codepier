@@ -322,7 +322,52 @@ COPY_MIGRATION = COPY_STATE.replace(
     "marker=json.loads((src/'.codepier-state.json').read_text())",
     "marker={'schema_version':1,'layout':'split-state-v1'}")
 
-PREFLIGHT = """import json
+# Run the actual server against fresh disposable state before any maintenance gate,
+# stop or data copy. Network isolation is supplied by DockerRuntime.build.
+STARTUP_PREFLIGHT = """
+import json,os,subprocess,sys,tempfile,time,urllib.error,urllib.request
+from pathlib import Path
+from shared.util import VERSION
+with tempfile.TemporaryDirectory(prefix='codepier-preflight-') as directory, tempfile.TemporaryFile() as log:
+    environment = dict(os.environ)
+    environment.update(HUB_DATA_DIR=str(Path(directory)/'data'),
+                       HUB_STATE_DIR='',
+                       HUB_PUBLIC_URL='http://127.0.0.1:18765',
+                       HUB_PANEL_UPDATE_SOCKET='', HUB_PANEL_UPDATE_MAINTENANCE='')
+    process = subprocess.Popen([sys.executable, '-m', 'hub', 'run', '--host',
+                                '127.0.0.1', '--port', '18765'],
+                               env=environment, stdout=log, stderr=subprocess.STDOUT)
+    try:
+        deadline = time.monotonic() + 30
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        while True:
+            if process.poll() is not None:
+                log.seek(0, 2)
+                log.seek(max(0, log.tell()-4096))
+                raise RuntimeError('Candidate Hub exited during startup: '+log.read().decode(errors='replace'))
+            try:
+                with opener.open('http://127.0.0.1:18765/healthz', timeout=1) as response:
+                    health = json.loads(response.read(65536))
+            except (urllib.error.URLError, TimeoutError, OSError):
+                health = None
+            if health is not None:
+                if health.get('status') != 'ok' or health.get('version') != VERSION:
+                    raise RuntimeError('Candidate Hub startup health/version mismatch')
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError('Candidate Hub startup health check timed out')
+            time.sleep(0.1)
+    finally:
+        if process.poll() is None:
+            process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+"""
+
+PREFLIGHT = STARTUP_PREFLIGHT + """
 from pathlib import Path
 from shared.util import VERSION
 from hub.agent_install import AgentPackage
@@ -436,6 +481,7 @@ class DockerRuntime:
         if job.get('kind') != 'migrate-state':
             self.command(['docker', 'build', '--pull', '--tag', job['image'], '--file', str(source / 'Dockerfile'), str(source)], timeout=1800, job=job)
         metadata = json.loads(self.command(['docker', 'run', '--rm', '--network', 'none', '--read-only',
+                             '--user', '10001:10001', '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m,mode=1777',
                              '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
                              '--entrypoint', 'python', job['image'], '-c', PREFLIGHT], job=job))
         if (metadata.get('version') != job['target_version'] or

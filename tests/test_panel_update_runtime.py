@@ -227,3 +227,37 @@ def test_first_install_channel_remains_readable_with_private_umask(tmp_path):
     assert home.stat().st_mode&0o777==0o700
     assert (home/'run').stat().st_mode&0o777==0o755
     assert not (home/'run/maintenance.json').exists()
+
+def test_build_preflight_is_non_root_and_never_mounts_production_data(tmp_path):
+    home, config, job, spec = deployment(tmp_path)
+    docker = DockerBoundary(tmp_path, spec)
+    runtime = DockerRuntime(tmp_path, home, config, execute=docker)
+    source = home / 'source'
+    source.mkdir()
+    job.update(runtime.prepare(job, source))
+    runtime.build(job, source)
+    command = next(command for command in docker.commands if command[:2] == ['docker', 'run'])
+    assert command[command.index('--user') + 1] == '10001:10001'
+    assert command[command.index('--network') + 1] == 'none'
+    assert command[command.index('--tmpfs') + 1] == '/tmp:rw,noexec,nosuid,size=64m,mode=1777'
+    assert '--read-only' in command and '--volume' not in command and '--mount' not in command
+    assert not runtime.gate.exists()
+    assert not any('stop' in command for command in docker.commands)
+
+
+def test_broken_startup_preflight_fails_before_maintenance_or_service_stop(tmp_path):
+    home, config, job, spec = deployment(tmp_path)
+    docker = DockerBoundary(tmp_path, spec)
+    def execute(command, **kwargs):
+        if command[:2] == ['docker', 'run']:
+            raise UpdateError('COMMAND_FAILED', 'Candidate Hub exited during startup', 500)
+        return docker(command, **kwargs)
+    runtime = DockerRuntime(tmp_path, home, config, execute=execute)
+    source = home / 'source'
+    source.mkdir()
+    job.update(runtime.prepare(job, source))
+    with pytest.raises(UpdateError, match='exited during startup'):
+        runtime.build(job, source)
+    assert not runtime.gate.exists()
+    assert not any('stop' in command or command[:3] == ['docker', 'volume', 'create']
+                   for command in docker.commands)

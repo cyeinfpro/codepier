@@ -22,7 +22,12 @@ COPY --chown=root:root scripts ./scripts
 COPY --chown=root:root deploy ./deploy
 COPY --chown=root:root requirements-agent.txt ./
 COPY --chown=root:root LICENSE ./
+# Host updater extraction uses umask 077. COPY preserves those private modes.
+# Normalize only immutable source; never change runtime data or secret permissions.
+RUN chmod -R a=rX,u+w hub shared web agent scripts deploy requirements-agent.txt LICENSE
 USER 10001:10001
+# Check the full application import graph as the final runtime user at build time.
+RUN python -c "from hub.app import create_app"
 VOLUME /app/data
 EXPOSE 8765
 HEALTHCHECK --interval=30s --timeout=4s --start-period=15s --retries=3 \
