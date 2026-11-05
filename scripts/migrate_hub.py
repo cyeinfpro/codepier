@@ -307,8 +307,16 @@ def main():
                 save(path,state,stage='starting',write_boundary=True);result=state
             else:
                 if state.get('stage')!='starting':raise RuntimeError('Hub cutover has not started')
-                hubs=[c for c in docker.containers('codepier') if c.get('Config',{}).get('Labels',{}).get('com.docker.compose.service')=='hub']
+                current = docker.containers('codepier')
+                hubs=[c for c in current if c.get('Config',{}).get('Labels',{}).get('com.docker.compose.service')=='hub']
                 if len(hubs)!=1 or not hubs[0].get('State',{}).get('Running') or hubs[0]['State'].get('Health',{}).get('Status')!='healthy':raise RuntimeError('New CodePier Hub health was not confirmed')
+                if state.get('adopted_existing'):
+                    # Same-image Compose up can reuse stopped containers. Restore
+                    # only their recorded policy; replacements keep Compose's policy.
+                    retained = {container['Id'] for container in current}
+                    for row in state.get('containers', []):
+                        if row.get('stop_requested') and row['id'] in retained:
+                            docker.run(['update', '--restart=' + row['restart'], row['id']])
                 save(path,state,stage='completed',completed_at=time.time());result=state
         print(json.dumps({k:result[k] for k in ('stage','destination','backup') if k in result},ensure_ascii=False))
     except (OSError,ValueError,RuntimeError,subprocess.SubprocessError) as exc:

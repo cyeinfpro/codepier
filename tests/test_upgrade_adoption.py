@@ -55,6 +55,7 @@ def test_current_installation_requires_new_boundary_and_health(tmp_path, monkeyp
     docker.stopped = False
     assert upgrade.main() == 0
     assert json.loads(path.read_text())['stage'] == 'completed'
+    assert ['update', '--restart=unless-stopped', 'a' * 64] in docker.commands
 
 
 def test_canonical_probe_failure_restores_old_container_and_keeps_volume(tmp_path):
@@ -75,3 +76,22 @@ def test_foreign_canonical_writer_is_rejected_before_stopping(tmp_path):
     with pytest.raises(RuntimeError, match='another container'):
         upgrade.prepare(path, docker)
     assert not docker.stopped and not path.exists()
+
+
+def test_canonical_restart_restore_failure_cannot_commit(tmp_path, monkeypatch):
+    path = tmp_path / upgrade.STATE
+    docker = CanonicalDocker(path)
+    state = upgrade.prepare(path, docker)
+    upgrade.save(path, state, stage='starting', write_boundary=True)
+    docker.stopped = False
+    original = docker.run
+    def fail_restore(args, **kwargs):
+        if args[:2] == ['update', '--restart=unless-stopped']:
+            raise RuntimeError('Synthetic restart policy update failure')
+        return original(args, **kwargs)
+    docker.run = fail_restore
+    monkeypatch.setattr(upgrade, 'Docker', lambda: docker)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, 'argv', ['upgrade', 'commit', '--root', str(tmp_path)])
+    assert upgrade.main() == 1
+    assert json.loads(path.read_text())['stage'] == 'starting'
