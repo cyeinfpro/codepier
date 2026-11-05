@@ -148,6 +148,26 @@ def rollback(path,docker):
     return state
 
 
+def canonical_writers(config, plans, docker):
+    selected = [container for container in docker.containers('codepier')
+        if container.get('Config', {}).get('Labels', {}).get('com.docker.compose.service') in config.get('services', {})]
+    owned = {container['Id'] for container in selected}
+    for plan in plans:
+        users = docker.run(['ps', '-q', '--filter', 'volume=' + plan['destination']]).stdout.split()
+        if any(not any(container.startswith(user) or user.startswith(container) for container in owned) for user in users):
+            raise RuntimeError('Canonical volume is in use by another container; upgrade refused')
+    return selected
+
+
+def container_receipt(container):
+    policy = container.get('HostConfig', {}).get('RestartPolicy', {})
+    restart = policy.get('Name') or 'no'
+    if restart == 'on-failure' and policy.get('MaximumRetryCount'):
+        restart += ':' + str(policy['MaximumRetryCount'])
+    return {'id': container['Id'], 'running': bool(container.get('State', {}).get('Running')),
+            'restart': restart, 'stop_requested': False}
+
+
 def prepare(path,docker):
     path=Path(path);prior=json.loads(path.read_text()) if path.exists() else None
     unfinished=bool(prior and prior.get('stage') not in {'completed','rolled_back'})
@@ -173,6 +193,22 @@ def prepare(path,docker):
             if not volume or plan.get('create_requested') and volume.get('Labels',{}).get('com.codepier.migration')!=prior.get('transaction'):
                 raise RuntimeError('New volume ownership changed; cutover was not resumed')
             docker.worker(image,'check',plan['destination'])
+        current = canonical_writers(config, plans, docker)
+        receipts = prior.setdefault('containers', [])
+        recorded = {row['id']: row for row in receipts}
+        for container in current:
+            if container['Id'] not in recorded:
+                row = container_receipt(container)
+                receipts.append(row)
+                recorded[row['id']] = row
+        save(path, prior)
+        for container in current:
+            row = recorded[container['Id']]
+            row['stop_requested'] = True
+            save(path, prior)
+            docker.run(['update', '--restart=no', row['id']])
+            if container.get('State', {}).get('Running'):
+                docker.run(['stop', '--time', '45', row['id']], timeout=90)
         save(path,prior,stage='prepared',image=image,resumed=True);return prior
     for plan in plans:
         source,dest=plan['source'],plan['destination']
@@ -189,13 +225,7 @@ def prepare(path,docker):
     if adopted_existing:
         # A canonical installation still needs a durable cutover boundary and
         # a quiesced database probe, including its very first managed upgrade.
-        selected_containers = [container for container in docker.containers('codepier')
-            if container.get('Config', {}).get('Labels', {}).get('com.docker.compose.service') in config.get('services', {})]
-        owned = {container['Id'] for container in selected_containers}
-        for plan in plans:
-            users = docker.run(['ps', '-q', '--filter', 'volume=' + plan['destination']]).stdout.split()
-            if any(not any(container.startswith(user) or user.startswith(container) for container in owned) for user in users):
-                raise RuntimeError('Canonical volume is in use by another container; upgrade refused')
+        selected_containers = canonical_writers(config, plans, docker)
     desired=set(config.get('services',{}));unexpected={c.get('Config',{}).get('Labels',{}).get('com.docker.compose.service') for c in legacy}-desired
     if unexpected:raise RuntimeError('Legacy stack has additional services; preserve the same COMPOSE_FILE selection before upgrading')
     for plan in plans:
@@ -206,10 +236,7 @@ def prepare(path,docker):
     transaction=uuid.uuid4().hex
     state={'schema':1,'product':'CodePier','transaction':transaction,'stage':'preparing','volumes':plans,'destination':target,
            'image':image,'write_boundary':False,'containers':[],'networks':network_plans,'proxy_trust':proxy_plans,'created_at':time.time(),'adopted_existing':adopted_existing}
-    for c in selected_containers:
-        policy=c.get('HostConfig',{}).get('RestartPolicy',{});restart=policy.get('Name') or 'no'
-        if restart=='on-failure' and policy.get('MaximumRetryCount'):restart+=':'+str(policy['MaximumRetryCount'])
-        state['containers'].append({'id':c['Id'],'running':bool(c.get('State',{}).get('Running')),'restart':restart,'stop_requested':False})
+    state['containers'] = [container_receipt(container) for container in selected_containers]
     save(path,state)
     try:
         for row in state['containers']:
@@ -310,7 +337,7 @@ def main():
                 current = docker.containers('codepier')
                 hubs=[c for c in current if c.get('Config',{}).get('Labels',{}).get('com.docker.compose.service')=='hub']
                 if len(hubs)!=1 or not hubs[0].get('State',{}).get('Running') or hubs[0]['State'].get('Health',{}).get('Status')!='healthy':raise RuntimeError('New CodePier Hub health was not confirmed')
-                if state.get('adopted_existing'):
+                if state.get('containers'):
                     # Same-image Compose up can reuse stopped containers. Restore
                     # only their recorded policy; replacements keep Compose's policy.
                     retained = {container['Id'] for container in current}
