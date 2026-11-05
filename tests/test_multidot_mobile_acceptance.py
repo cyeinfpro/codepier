@@ -408,10 +408,13 @@ def test_mobile_team_approval_and_explicit_goal_history_page(collaboration_stack
         form.locator('[name="coordinator_dot_id"]').select_option(second["id"])
         form.locator('[name="label"]').fill("移动双人协作验收")
         assert not form.locator('[name="confirm_tasks"]').is_checked()
-        form.locator('button[type="submit"]').click()
+        # Keep the mobile gesture sequence on touch input. A mouse click after
+        # touch navigation need not release WebKit's earlier :active target,
+        # which the workspace correctly protects from replacement while held.
+        form.locator('button[type="submit"]').tap()
         assert page.evaluate("mobileGoalsContext.state.snapshot.teams.length") == 0
         form.locator('[name="confirm_tasks"]').check()
-        form.locator('button[type="submit"]').click()
+        form.locator('button[type="submit"]').tap()
         expect(page.locator("#cc-drawer")).not_to_be_visible(timeout=10000)
         wait_js(page, "mobileGoalsContext.chat().teamId !== ''")
         assert page.evaluate("mobileGoalsContext.chat().mentions") == [second["id"]]
@@ -442,7 +445,23 @@ def test_mobile_team_approval_and_explicit_goal_history_page(collaboration_stack
 
         page.route("**/api/collaboration?*", goal_pages)
         page.evaluate("()=>mobileGoals.load().then(()=>mobileGoalsContext.onProjectionChange())")
-        expect(page.locator(".cc-coordination-list .cc-goal-summary")).to_have_count(40)
+        try:
+            expect(page.locator(".cc-coordination-list .cc-goal-summary")).to_have_count(40)
+        except AssertionError:
+            print("PAGINATION_FIRST_DIAGNOSTIC", json.dumps({
+                "queries": queries,
+                "ui": page.evaluate("""()=>({
+                  busy:!!mobileGoalsContext.state.busy,
+                  view:mobileGoalsContext.state.view,
+                  model_count:(mobileGoals.list().match(/class="cc-goal-summary"/g)||[]).length,
+                  deferred:document.querySelector('.cc-workspace')._ccWorkspaceDeferred,
+                  active:document.activeElement?.tagName,
+                  activeAction:document.activeElement?.dataset?.ccAction,
+                  feedback:document.querySelector('#cc-feedback')?.textContent,
+                  records_active:document.querySelector('.cc-workspace-records')?.matches(':active')
+                })"""),
+            }, ensure_ascii=False), flush=True)
+            raise
         assert queries == [{"cursor": "", "limit": ["40"]}]
         page.locator('[data-cc-action="goal-more"]').tap()
         deadline = time.monotonic() + 10
