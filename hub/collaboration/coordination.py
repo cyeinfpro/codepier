@@ -389,8 +389,9 @@ class CoordinationService:
 
     def options(self, principal, room, args):
         conversation = self.c.conversations.resolve(principal, room, args)
-        rows = self.store.all('SELECT id,label FROM grants WHERE user_id=? AND space_id=? AND revoked=0 ORDER BY id LIMIT 129',
-                              (principal.user_id, principal.space_id))
+        rows = self.store.all('SELECT id,label FROM grants WHERE user_id=? AND space_id=? AND revoked=0'
+                              + (' AND id=?' if principal.grant_id else '') + ' ORDER BY id LIMIT 129',
+                              (principal.user_id, principal.space_id) + ((principal.grant_id,) if principal.grant_id else ()))
         participants = []
         for row in rows[:128]:
             try:
@@ -975,7 +976,7 @@ class CoordinationService:
                                 member=self.c.rooms.member(saved['member_id'],goal['conversation_id'])
                                 receiver=self.c.rooms.principal(member)
                                 visible=native.visible_projects(goal,receiver,member['id'])
-                                self.c.room_consumers.enqueue_ref(member,'peer_handoff',identifier,1,
+                                self.c.room_consumers.enqueue_ref(member,'control_notice',identifier,1,
                                     {'goal_id':goal['id'],**({'message_id':identifier} if set(provenance)<=visible else {'reason_code':'project_visibility_limited'})})
                         continue
                     self.c.emit(room, WORK_EVENT, identifier, 1,
@@ -1055,7 +1056,11 @@ class CoordinationService:
                 room = self.store.one('SELECT * FROM collaboration_rooms WHERE id=?', (goal['room_id'],))
                 spec = json.loads(goal['spec'])
                 try:
-                    for grant_id in spec['participant_grant_ids']:
+                    native = self.c.room_work_bridge.native
+                    reference = native.reference(goal)
+                    participants = (native.record(reference)['participant_grant_ids']
+                                    if reference else spec['participant_grant_ids'])
+                    for grant_id in participants:
                         self.participant(room, goal, grant_id)
                 except DevError as exc:
                     self.stop_work(goal, exc.code)

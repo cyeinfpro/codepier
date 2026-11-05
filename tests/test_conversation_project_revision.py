@@ -552,3 +552,35 @@ def test_selected_partition_does_not_create_or_merge_independent_conversations(c
         migrate(c.s.store.db)
     assert {row['id'] for row in c.s.store.all('SELECT id FROM conversation_rooms')} == original_ids
     assert {row['id'] for row in c.s.conversations.listing(c.owner)['items']} == original_ids
+
+
+def test_multi_participant_goal_respects_existing_room_ceiling(collab):
+    from tests.legacy_iam_fixture import seed_grant
+    from hub.principal import Principal
+    c = fixture(collab)
+    select(c, ['proj'])
+    seed_grant(c.s.store, 'review-peer', 'owner', scopes=('read',), projects=('proj',))
+    peer = Principal('mcp:review-peer', c.owner.user_id, {'read'}, ['proj'],
+                     grant_id='review-peer', space_id=c.owner.space_id)
+    raw = {**c.scope, 'conversation_id': c.slot['conversation_id'], 'objective': 'Review together',
+           'acceptance': 'Read synthetic evidence', 'project_ids': ['proj'],
+           'participant_grant_ids': ['broad', 'review-peer'], 'capabilities': ['read'],
+           'idempotency_key': key()}
+    created = c.s.coordination.create(raw, c.owner)['goal']
+    approved = c.s.coordination.approve({**c.scope, 'goal_id': created['id'],
+        'expected_version': created['version'], 'digest': created['digest'], 'idempotency_key': key()}, c.owner)['goal']
+    assert approved['state'] == 'active'
+    item = c.s.coordination.work_create({**c.scope, 'goal_id': approved['id'], 'target_project_id': 'proj',
+        'objective': 'Read evidence', 'acceptance': 'Report', 'required_capabilities': ['read'],
+        'assignee_grant_id': peer.grant_id, 'idempotency_key': key()}, peer)['work_item']
+    assert c.s.coordination.work_claim({**c.scope, 'goal_id': approved['id'], 'work_item_id': item['id'],
+        'expected_version': item['version'], 'idempotency_key': key()}, peer)['work_item']['state'] == 'leased'
+    c.s.coordination.reconcile()
+    assert goal(c, {'goal_id': approved['id']})['state'] == 'active'
+    with pytest.raises(DevError):
+        c.s.coordination.create({**raw, 'project_ids': ['otherproj'], 'idempotency_key': key()}, c.owner)
+    record = service(c).current(c.slot['conversation_id'])
+    policy = c.s.store.one('SELECT * FROM delegation_policies WHERE id=?', (record['spec']['policy_id'],))
+    with pytest.raises(DevError) as denied:
+        service(c).authorize(peer, policy, record)
+    assert denied.value.code == 'DELEGATION_GRANT_REQUIRED'

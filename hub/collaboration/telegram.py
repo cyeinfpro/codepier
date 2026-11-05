@@ -749,7 +749,7 @@ class TelegramService:
             )
             state = (
                 "attention"
-                if isinstance(error, DevError) and error.status in {401, 403, 409, 422}
+                if isinstance(error, DevError) and error.code == "TELEGRAM_PROVIDER_REJECTED" and error.status == 401
                 else row["state"]
             )
             self.store.execute(

@@ -635,3 +635,14 @@ def test_same_budget_noop_does_not_skip_final_live_validation(collab, monkeypatc
         approve(c, w, binding, scope, budget_mode='lifetime', confirm_budget_change=True)
     assert caught.value.code == 'SYNTHETIC_LIVE_VALIDATION_FAILED'
     assert c.s.channel_owner.current(binding['binding_id']) == before
+
+
+def test_owner_budget_change_fences_inflight_poll_without_stopping_account(collab):
+    c, w, account, binding, scope = fixture_channel(collab)
+    claim = w.claim_poll(account['account_id'])
+    approve(c, w, binding, scope)
+    current = c.s.store.one('SELECT * FROM weixin_accounts WHERE id=?', (account['account_id'],))
+    assert current['poll_fence'] == claim['poll_fence'] + 1
+    assert current['poll_until'] == 0 and current['state'] == 'active'
+    w.poll_failed(claim, DevError('WEIXIN_BINDING_CHANGED', 'synthetic', 409))
+    assert c.s.store.one('SELECT * FROM weixin_accounts WHERE id=?', (account['account_id'],)) == current

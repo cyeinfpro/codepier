@@ -835,6 +835,11 @@ class EventService:
             room = self.event_room(sub)
             event = self.store.one('SELECT * FROM mcp_event_outbox WHERE id=?', (delivery['event_id'],))
             self.authorize(sub, room, json.loads(event['data']) if event['name'] in {WORK_EVENT, DELEGATION_EVENT, OPERATION_EVENT, MAILBOX_EVENT, ROOM_INBOX_EVENT} else None)
+            if event['name'] == MAILBOX_EVENT and not json.loads(event['data']).get('test'):
+                ticket = self.store.one('SELECT expires_at FROM dot_wake_tickets WHERE delivery_key=? AND subscription_id=?',
+                                        (event['id'], sub['id']))
+                if not ticket or ticket['expires_at'] <= self.c.clock():
+                    raise DevError('EVENT_WAKE_TICKET_EXPIRED', '唤醒票据已过期，等待原邮箱恢复生成新提示', 409)
             if event['name'] == TASK_EVENT and not json.loads(event['data']).get('test'):
                 job = self.store.one('SELECT * FROM collaboration_jobs WHERE id=? AND room_id=?', (event['object_id'], room['id']))
                 if (not self.c.config.analysis_dispatch_enabled or not job or job['state'] != 'queued'
@@ -864,7 +869,12 @@ class EventService:
             retryable = reason == 'network_error' or status in {408, 425, 429} or (status is not None and status >= 500)
             if accepted:
                 state, next_at, reason = 'accepted', 0, ''
-            elif sub['state'] != 'active' or sub['expires_at'] <= now or reason == 'authorization_stopped':
+            elif reason == 'authorization_stopped' and sub['expires_at'] > now:
+                # No send occurred. Keep the original event pending rather than
+                # consuming delivery attempts or advancing its consumer cursor.
+                state, next_at = 'retry_wait', now + 30
+                self.store.execute('UPDATE mcp_event_deliveries SET attempt=MAX(0,attempt-1) WHERE id=?', (row['id'],))
+            elif sub['state'] != 'active' or sub['expires_at'] <= now or reason == 'authorization_revoked':
                 state, next_at = 'abandoned', 0
             elif retryable and row['attempt'] < 5:
                 state, next_at = 'retry_wait', now + self.retry_delay(row, retry_after)
@@ -901,7 +911,12 @@ class EventService:
             await self.store.run(self.finish, item, reply.status, '', getattr(reply, 'retry_after_seconds', None))
         except DevError as exc:
             policy = exc.code in {'CALLBACK_URL_REJECTED', 'CALLBACK_ADDRESS_REJECTED', 'HTTP_REDIRECT_REJECTED', 'HTTP_RESPONSE_TOO_LARGE', 'EVENT_TOO_LARGE'}
-            await self.store.run(self.finish, item, None, 'callback_policy_rejected' if policy else 'authorization_stopped')
+            transient = (exc.code in {'ROOM_PAUSED', 'WORKER_BINDING_REQUIRED', 'GOAL_INACTIVE'}
+                         or exc.status in {409, 429} or exc.status >= 500)
+            reason = ('wake_ticket_expired' if exc.code == 'EVENT_WAKE_TICKET_EXPIRED'
+                      else 'callback_policy_rejected' if policy
+                      else 'authorization_stopped' if transient else 'authorization_revoked')
+            await self.store.run(self.finish, item, None, reason)
         except (TimeoutError, httpx.HTTPError, OSError):
             await self.store.run(self.finish, item, None, 'network_error')
         except Exception as exc:

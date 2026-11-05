@@ -256,6 +256,7 @@ class ChannelOwnerAuthority:
                      binding['conversation_id'], dot['id'], policy['id'], policy['version'],
                      canonical(scope), digest(scope), sequence, now, now))
                 self.store.execute("UPDATE " + channel + "_bindings SET lifetime_mode='until_revoked',version=version+1,updated=? WHERE id=?", (now, binding['id']))
+                self.store.execute("UPDATE " + channel + "_accounts SET poll_fence=poll_fence+1,poll_until=0 WHERE id=?", (binding['account_id'],))
                 for table, key in (('collaboration_join_slots', dot['id']), ('delegation_policies', policy['id'])):
                     self.store.execute("UPDATE " + table + " SET lifetime_mode='until_revoked',lifetime_authorization_id=? WHERE id=?", (identifier, key))
                 # Full existing validation happens after the timing-only transition,

@@ -322,3 +322,17 @@ async def test_explicit_persistent_scope_has_no_seven_day_fallback_after_pause(c
     assert s.room_work_bridge.persistent(current)
     clock[0]+=8*86400
     assert not s.channel_owner.expired(current)
+
+
+@pytest.mark.asyncio
+async def test_native_peer_mention_is_readable_notice_not_fake_handoff(collab):
+    s,owner,a,b,lead,acred,peer,bcred,created,task=await two_project_members(collab)
+    goal_id=created['goal_id']
+    sent=s.coordination.message({**mutation(s,lead,acred,goal_id),
+        'body_text':'Please inspect your portion', 'mention_grant_ids':[b.grant_id]},a)
+    items=s.room_consumers.inbox(peer,b)['items']
+    notice=next(row for row in items if row['object_id']==sent['message_id'])
+    assert notice['kind']=='control_notice'
+    assert notice['reference']['goal_id']==goal_id
+    assert s.room_runtime.work_view(s.room_runtime.goal(goal_id),a,member_id=lead['member_id'])['allowed_actions']==[]
+    assert 'pause' in s.room_runtime.work_view(s.room_runtime.goal(goal_id),owner)['allowed_actions']

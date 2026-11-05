@@ -73,6 +73,10 @@ async def test_same_member_new_grant_needs_explicit_restore_and_keeps_original_g
         continue_original(s,new_actor,current,new_credentials,goal_id,coordinator_epoch=1)
     resumed=continue_original(s,new_actor,current,new_credentials,goal_id)
     assert resumed['goal_id']==goal_id and resumed['scheduled']
+    for _ in range(3):
+        clock[0] += 5
+        s.coordination.reconcile()
+        assert s.room_runtime.goal(goal_id)['state'] == 'active'
     public_name,claim=resolve(resumed['next_request']['tool'],resumed['next_request']['arguments'])
     assert public_name=='collaboration_work_claim' and claim['coordinator_epoch']==2
     assert s.coordination.work_claim(claim,new_actor)['work_item']['state']=='leased'
@@ -103,6 +107,10 @@ async def test_owner_can_replace_lead_with_ready_member_without_expanding_role(c
         continue_original(s,other,replacement,replacement_credentials,goal_id,capabilities=['read','write'])
     continued=continue_original(s,other,replacement,replacement_credentials,goal_id)
     assert continued['goal_id']==goal_id and continued['scheduled']
+    for _ in range(3):
+        clock[0] += 5
+        s.coordination.reconcile()
+        assert s.room_runtime.goal(goal_id)['state'] == 'active'
     with pytest.raises(DevError,match='更新|世代'):
         control(s,owner,goal_id,'takeover',lead['member_id'],expected_coordinator_epoch=1)
     assert len(s.store.all('SELECT * FROM coordination_goals'))==1

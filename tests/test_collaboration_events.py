@@ -189,3 +189,25 @@ async def test_public_address_resolution_is_pinned_and_private_denied(monkeypatc
     for url in ('http://example.invalid', 'https://user:pass@example.invalid', 'https://example.invalid/#fragment'):
         with pytest.raises(DevError):
             network.callback_url(url)
+
+
+@pytest.mark.asyncio
+async def test_expired_unsent_lease_requeues_same_event_without_advancing_cursor(collab):
+    events, receiver, args = setup_events(collab)
+    await events.subscribe(args, collab[2])
+    command(collab)
+    item = events.reserve()[0]
+    service = collab[0]
+    before = service.store.one('SELECT ack_seq FROM mcp_event_subscriptions')['ack_seq']
+    collab[6][0] += 31
+    sent = len(receiver.requests)
+    await events.deliver(item)
+    row = service.store.one('SELECT * FROM mcp_event_deliveries WHERE id=?', (item['delivery_id'],))
+    assert row['state'] == 'retry_wait' and row['attempt'] == 0
+    assert len(receiver.requests) == sent
+    assert service.store.one('SELECT ack_seq FROM mcp_event_subscriptions')['ack_seq'] == before
+    collab[6][0] += 31
+    again = events.reserve()[0]
+    assert again['body'] == item['body'] and again['event_id'] == item['event_id']
+    await events.deliver(again)
+    assert service.store.one('SELECT state FROM mcp_event_deliveries WHERE id=?', (item['delivery_id'],))['state'] == 'accepted'

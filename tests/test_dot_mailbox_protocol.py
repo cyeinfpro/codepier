@@ -419,3 +419,22 @@ def test_old_final_message_backfill_revalidates_provenance(collab):
         c.s.dot_mailbox.settle_history()
     assert c.s.store.one('SELECT acknowledged_at FROM dot_mailbox_entries WHERE object_id=?', (source['id'],))['acknowledged_at'] is not None
     assert not read(c)['items']
+
+
+@pytest.mark.asyncio
+async def test_expired_wake_ticket_is_not_sent_or_recorded_as_route_rejection(collab):
+    c = setup(collab)
+    await subscribe(c)
+    message(c)
+    item = c.s.events.reserve()[0]
+    c.clock[0] += 601
+    c.s.store.execute('UPDATE mcp_event_deliveries SET lease_until=? WHERE id=?',
+                      (c.clock[0] + 30, item['delivery_id']))
+    before = len(c.requests)
+    await c.s.events.deliver(item)
+    delivery = c.s.store.one('SELECT * FROM mcp_event_deliveries WHERE id=?', (item['delivery_id'],))
+    assert delivery['state'] == 'dead_letter'
+    assert delivery['reason_code'] == 'wake_ticket_expired'
+    assert len(c.requests) == before
+    assert not c.s.dot_mailbox._permanently_rejected(c.subscription_id)
+    assert c.s.dot_mailbox.recover() > 0

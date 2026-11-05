@@ -599,7 +599,7 @@ class RoomRuntime:
             allowed.append('restore_binding')
         if recovery and recovery['takeover_candidates']:
             allowed.append('takeover')
-        if archived:
+        if archived or principal.grant_id:
             allowed=[]
         elif not native_scope or conversation and not conversation['room_protocol']:
             allowed=[action for action in allowed if action in {'pause','cancel'}]

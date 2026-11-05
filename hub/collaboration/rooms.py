@@ -329,8 +329,17 @@ class Rooms:
                 'next_cursor': sign_cursor(self.c.secret, binding, offset + args['limit']) if len(rows) > args['limit'] else None}
 
     def mutation(self, principal, action, args, perform):
-        identifier = digest([principal.space_id, principal.user_id, principal.grant_id, action, args['idempotency_key']])
+        identity = [principal.space_id, principal.user_id, principal.grant_id, action, args['idempotency_key']]
         fingerprint = digest(args)
+        if args.get('member_id'):
+            # Replay an older receipt only when its full request (including the
+            # member) matches. Other members get their own independent identity.
+            previous = self.store.one('SELECT * FROM room_mutations WHERE id=?', (digest(identity),))
+            if previous and previous['request_digest'] == fingerprint:
+                from hub.collaboration.history_retention import replay_response
+                return replay_response(previous['result'])
+            identity.append(args['member_id'])
+        identifier = digest(identity)
         saved = self.store.one('SELECT * FROM room_mutations WHERE id=?', (identifier,))
         if saved:
             if saved['request_digest'] != fingerprint:
@@ -483,8 +492,17 @@ class Rooms:
                     (args['title'] if args['title'] is not None else room['title'], state,
                      args['lead_member_id'] if args['lead_member_id'] is not None else room['lead_member_id'],
                      self.c.clock() if state == 'archived' else None, room['id']))
+                if state != room['state']:
+                    self.store.execute('''UPDATE collaboration_rooms SET state=?,version=version+1 WHERE id IN
+                        (SELECT room_id FROM conversation_projects WHERE conversation_id=?)
+                        AND (? != 'active' OR NOT EXISTS (
+                            SELECT 1 FROM conversation_projects p JOIN conversation_rooms c ON c.id=p.conversation_id
+                            WHERE p.room_id=collaboration_rooms.id AND c.state!='active'))''',
+                        ('active' if state == 'active' else 'paused', room['id'], state))
                 if state != 'active':
-                    self.store.execute("UPDATE mcp_event_subscriptions SET state='paused',version=version+1 WHERE conversation_id=? AND state='active'", (room['id'],))
+                    self.store.execute('''UPDATE mcp_event_subscriptions SET state='paused',version=version+1
+                        WHERE state='active' AND (conversation_id=? OR (conversation_id IS NULL AND room_id IN
+                        (SELECT room_id FROM conversation_projects WHERE conversation_id=?)))''', (room['id'], room['id']))
                 elif room['state'] != 'active':
                     self.store.execute("""UPDATE mcp_event_subscriptions SET state='active',version=version+1
                         WHERE conversation_id=? AND state='paused' AND id IN

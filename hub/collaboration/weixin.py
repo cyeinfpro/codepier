@@ -552,7 +552,7 @@ class WeixinService:
                 self.store.execute('UPDATE weixin_accounts SET reason_code=?,next_poll=?,poll_until=0,updated=? WHERE id=?',
                     (code, self.c.clock() + 2, self.c.clock(), row['id']))
                 return
-            permanent = isinstance(error, DevError) and error.status in {401, 403, 409, 422}
+            permanent = isinstance(error, DevError) and error.code in {'WEIXIN_AUTH_REJECTED', 'WEIXIN_SESSION_EXPIRED'}
             failures = min(row['failures'] + 1, 10)
             delay = min(3600, 5 * 2 ** failures) + secrets.randbelow(6)
             if isinstance(error, DevError):

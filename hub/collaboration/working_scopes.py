@@ -533,7 +533,7 @@ class WorkingScopes:
                         'paused_goal_ids': affected, 'changes_underlying_grant': False}
             return self.c.conversations.mutation(principal, 'conversation_work_projects', args, save)
 
-    def authorize(self, principal, policy, record):
+    def authorize(self, principal, policy, record, *, goal_participants=(), goal_capabilities=None):
         spec = record['spec']
         self.c.conversations.object(principal, spec['conversation_id'])
         dot = self.c.dots.find(spec['dot_id'])
@@ -543,8 +543,15 @@ class WorkingScopes:
                 or policy['grant_id'] != spec['connection']['grant_id']):
             raise DevError('ROOM_PROJECT_CONNECTION_CHANGED', '原房间连接或批准基线已变化', 409)
         room = self.store.one('SELECT * FROM collaboration_rooms WHERE id=?', (dot['room_id'],))
-        self.c.delegation.authorize_policy(principal, room, policy)
         actor = self.c.grant_reader(room, policy['grant_id'], snapshot=json.loads(policy['grant_snapshot']))
+        # A separately owner-approved multi-participant goal retains the original
+        # room policy as its ceiling; it does not turn peers into policy holders.
+        policy_subject = principal
+        if len(set(goal_participants)) > 1 and principal.grant_id:
+            if principal.grant_id not in goal_participants or policy['grant_id'] not in goal_participants:
+                raise DevError('ROOM_PROJECT_SCOPE_DENIED', '连接不在原目标批准参与者中', 403)
+            policy_subject = actor
+        self.c.delegation.authorize_policy(policy_subject, room, policy)
         owner = refresh_principal(self.store, Principal(**{**json.loads(policy['principal']), 'scopes': set()}))
         self.c.owner(owner)
         for rule in spec['projects']:
@@ -554,11 +561,13 @@ class WorkingScopes:
                 project = self.c.runtime.project(rule['project_id'], subject)
                 if self.c.coordination.project_snapshot(project) != rule['project_snapshot']:
                     raise DevError('ROOM_PROJECT_MAPPING_CHANGED', '房间项目目录或执行设置已变化', 409)
-                for capability in rule['capabilities']:
+                required = (goal_capabilities if subject is principal and goal_capabilities is not None
+                            else rule['capabilities'])
+                for capability in required:
                     self.c.coordination.require_capability(subject, capability, project['id'])
                 # File-only permission does not depend on an unused VPS mapping.
                 # Re-enabling execute still rebuilds and validates every target.
-                for target, snapshot in (rule['target_snapshots'].items() if 'execute' in rule['capabilities'] else []):
+                for target, snapshot in (rule['target_snapshots'].items() if 'execute' in required else []):
                     if self.c.delegation.target_snapshot(subject, project, target) != snapshot:
                         raise DevError('ROOM_PROJECT_TARGET_CHANGED', '原批准执行目标已改变', 409)
             if root_overlap_ids(self.store, project) - {r['project_id'] for r in spec['projects']}:
@@ -612,11 +621,11 @@ class WorkingScopes:
             raise DevError('ROOM_PROJECT_CONNECTION_CHANGED', '原连接批准已不可用', 409)
         allowed = {r['project_id']: r for r in spec['projects']}
         if (not project_ids or not set(project_ids) <= set(allowed)
-                or set(participant_grant_ids) != {policy['grant_id']}
+                or policy['grant_id'] not in participant_grant_ids
                 or any(not set(capabilities) <= set(allowed[p]['capabilities']) for p in project_ids)):
             raise DevError('ROOM_PROJECT_SCOPE_DENIED', '目标必须在已确认的房间项目和原连接范围内', 403)
         self.authorize(principal, policy, {**record, 'spec': {**spec,
-            'projects': [allowed[project_id] for project_id in project_ids]}})
+            'projects': [allowed[project_id] for project_id in project_ids]}}, goal_participants=participant_grant_ids, goal_capabilities=capabilities)
         return self.reference(record)
 
     def validate_goal(self, principal, goal):
@@ -647,7 +656,8 @@ class WorkingScopes:
                 raise DevError('ROOM_PROJECT_CONNECTION_CHANGED', '任务原连接已不可用', 409)
             # Validate only the task's original subset, not later unrelated additions.
             self.authorize(principal, policy, {**saved, 'spec': {**original,
-                'projects': [old[p] for p in goal_spec['project_ids']]}})
+                'projects': [old[p] for p in goal_spec['project_ids']]}}, goal_participants=goal_spec['participant_grant_ids'],
+                goal_capabilities=goal_spec['capabilities'])
         else:
             live = {r['project_id']: r for r in current['spec']['projects']}
             live_ids = set(live)

@@ -332,7 +332,7 @@ async def test_goal_event_reserved_delivery_rechecks_pause_or_revoke(collab, cha
         service.store.execute("UPDATE grants SET revoked=1 WHERE id='worker'")
     await events.deliver(reserved[0])
     assert len(received) == before
-    assert service.store.one('SELECT state FROM mcp_event_deliveries WHERE id=?', (reserved[0]['delivery_id'],))['state'] == 'abandoned'
+    assert service.store.one('SELECT state FROM mcp_event_deliveries WHERE id=?', (reserved[0]['delivery_id'],))['state'] == ('retry_wait' if change == 'pause' else 'abandoned')
 
 
 @pytest.mark.asyncio
@@ -449,6 +449,8 @@ def test_goal_options_report_per_project_capabilities_and_truncation(collab):
     args = {**scope, 'conversation_id': goal['conversation_id'], 'kind': 'coordination_options'}
     options = service.read(args, owner)
     assert not options['truncated']
+    member_options = service.read(args, worker)
+    assert {row['grant_id'] for row in member_options['participants']} == {'worker'}
     available = {row['grant_id']: row for row in options['participants']}
     assert available['worker']['project_capabilities']['proj'] == ['read']
     assert set(available['broad']['project_capabilities']['proj']) == {'read', 'write', 'execute'}
