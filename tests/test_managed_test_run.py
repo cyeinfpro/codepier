@@ -1,6 +1,7 @@
 """Local-only managed test run receipts, ownership and adversarial cleanup."""
 from __future__ import annotations
 
+import errno
 import json
 import os
 from pathlib import Path
@@ -546,3 +547,97 @@ def test_short_root_creation_failure_is_owned_and_reclaimed(tmp_path, monkeypatc
     data = json.loads((output / managed.MANIFEST).read_text())
     assert data['status'] == 'initialization_failed'
     assert data['short_tmp']['identity']
+
+
+@pytest.mark.parametrize('mutable', [False, True])
+def test_scan_directory_disappears_during_fstat(tmp_path, monkeypatch, mutable):
+    root = tmp_path / 'scan'
+    root.mkdir()
+    child = root / 'vanishing'
+    child.mkdir()
+    (root / 'retained').write_bytes(b'count me')
+    identity = managed._identity(child.stat())
+    original = os.fstat
+    opened = []
+
+    def disappear(fd):
+        info = original(fd)
+        if managed._matches(info, identity):
+            opened.append(fd)
+            child.rmdir()
+            # Darwin may report ENOENT for an opened directory removed here.
+            raise FileNotFoundError(2, 'directory removed during fstat')
+        return info
+
+    parent = managed._directory(root)
+    try:
+        monkeypatch.setattr(managed.os, 'fstat', disappear)
+        if mutable:
+            entries, size = managed._scan(parent, device=root.stat().st_dev, mutable=True)
+            assert set(entries) == {'retained'}
+            assert size == len(b'count me')
+        else:
+            with pytest.raises(FileNotFoundError):
+                managed._scan(parent, device=root.stat().st_dev)
+        assert len(opened) == 1
+        with pytest.raises(OSError) as closed:
+            original(opened[0])
+        assert closed.value.errno == errno.EBADF  # Even the skipped child is closed.
+    finally:
+        os.close(parent)
+
+
+@pytest.mark.parametrize('error_number', [errno.EACCES, errno.EIO])
+@pytest.mark.parametrize('mutable', [False, True])
+def test_scan_fstat_other_errors_are_not_ignored(tmp_path, monkeypatch, error_number, mutable):
+    child = tmp_path / 'child'
+    child.mkdir()
+    identity = managed._identity(child.stat())
+    original = os.fstat
+    opened = []
+
+    def fail(fd):
+        info = original(fd)
+        if managed._matches(info, identity):
+            opened.append(fd)
+            raise OSError(error_number, 'fstat fixture failure')
+        return info
+
+    parent = managed._directory(tmp_path)
+    try:
+        monkeypatch.setattr(managed.os, 'fstat', fail)
+        with pytest.raises(OSError) as failure:
+            managed._scan(parent, device=tmp_path.stat().st_dev, mutable=mutable)
+        assert failure.value.errno == error_number
+        assert len(opened) == 1
+        with pytest.raises(OSError) as closed:
+            original(opened[0])
+        assert closed.value.errno == errno.EBADF
+    finally:
+        os.close(parent)
+
+
+def test_mutable_scan_still_enforces_byte_budget_after_fstat_disappearance(tmp_path, monkeypatch):
+    child = tmp_path / 'vanishing'
+    child.mkdir()
+    (tmp_path / 'payload').write_bytes(b'over budget')
+    identity = managed._identity(child.stat())
+    original = os.fstat
+
+    def disappear(fd):
+        info = original(fd)
+        if managed._matches(info, identity):
+            child.rmdir()
+            raise FileNotFoundError(2, 'directory removed during fstat')
+        return info
+
+    parent = managed._directory(tmp_path)
+    try:
+        monkeypatch.setattr(managed.os, 'fstat', disappear)
+        # Exercise disappearance before the surviving file reaches the budget.
+        monkeypatch.setattr(managed.os, 'listdir', lambda fd: ['vanishing', 'payload'])
+        with pytest.raises(managed.AdmissionError, match='byte budget'):
+            managed._scan(parent, device=tmp_path.stat().st_dev, limit=1, mutable=True)
+        assert not child.exists()
+    finally:
+        os.close(parent)

@@ -149,7 +149,14 @@ def _scan(fd, *, device, limit=None, count=None, mutable=False, depth=0):
                     continue
                 raise
             try:
-                if not _matches(os.fstat(child), _identity(info)):
+                try:
+                    opened = os.fstat(child)
+                except FileNotFoundError:
+                    # Darwin can lose an opened directory while its owner removes it.
+                    if mutable:
+                        continue
+                    raise
+                if not _matches(opened, _identity(info)):
                     if mutable:
                         continue
                     raise SafetyError('Scratch directory identity changed')
