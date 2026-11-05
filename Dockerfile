@@ -13,7 +13,9 @@ COPY --from=dependencies /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 RUN groupadd --gid 10001 codepier \
     && useradd --uid 10001 --gid codepier --create-home --shell /usr/sbin/nologin codepier \
-    && mkdir -p /app/data && chown codepier:codepier /app/data
+    && mkdir -p /app/data /var/lib/codepier-probe \
+    && chown codepier:codepier /app/data /var/lib/codepier-probe \
+    && chmod 0700 /var/lib/codepier-probe
 COPY --chown=root:root hub ./hub
 COPY --chown=root:root shared ./shared
 COPY --chown=root:root web ./web

@@ -654,7 +654,13 @@ def main():
         if args.action == 'install':
             install(args.root, args.repository)
         elif args.action == 'recover-install-lock':
-            descriptor = acquire_lock(args.root / '.codepier-updater')
+            if not args.confirm_installers_stopped:
+                raise UpdateError('CONFIRMATION_REQUIRED', '请先停止所有安装器并显式确认', 409)
+            home = args.root.resolve() / '.codepier-updater'
+            if home.is_symlink() or (home.exists() and not home.is_dir()):
+                raise UpdateError('UNSAFE_HOST_PATH', '更新服务目录必须是真实目录')
+            home.mkdir(mode=0o700, exist_ok=True)
+            descriptor = acquire_lock(home)
             try:
                 result = recover_orphan_install_lock(args.root,
                     confirm_installers_stopped=args.confirm_installers_stopped)

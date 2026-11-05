@@ -14,7 +14,7 @@ MARKER='.codepier-volume.json'
 
 
 
-def probe_admin(root):
+def probe_admin(root, scratch_root=None):
     """Inspect a read-only, quiesced store without SQLite touching its sidecars."""
     database = Path(root) / "hub.sqlite3"
     if not database.exists() and not database.is_symlink():
@@ -23,9 +23,15 @@ def probe_admin(root):
         if database.is_symlink() or not database.is_file():
             raise RuntimeError("Hub database is not a regular file")
         sources = [database, Path(str(database) + "-wal")]
+        if any(path.is_symlink() for path in sources):
+            raise RuntimeError("Hub database sidecar must not be a symlink")
         before = {str(path): (path.stat().st_size, path.stat().st_mtime_ns)
                   for path in sources if path.exists()}
-        with tempfile.TemporaryDirectory(prefix="codepier-admin-probe-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="codepier-admin-probe-", dir=scratch_root) as temporary:
+            required = sum(size for size, _ in before.values())
+            required += before.get(str(sources[1]), (0, 0))[0] + 1024 * 1024
+            if shutil.disk_usage(temporary).free < required:
+                raise RuntimeError("Insufficient scratch space for administrator probe")
             probe = Path(temporary) / database.name
             for original in sources:
                 if not original.exists():

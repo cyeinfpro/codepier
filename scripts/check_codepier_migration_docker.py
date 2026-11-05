@@ -54,6 +54,15 @@ def main():
         refused=docker.worker(args.image,'copy',new,old,backup,check=False)
         confirm_occupied_refusal(refused)
         report['cases'].append({'case':'occupied-destination-refused','result':'passed'})
+        grow="import sqlite3; s=sqlite3.connect('/fixture/hub.sqlite3'); s.execute('CREATE TABLE probe_padding(data BLOB)'); s.execute('INSERT INTO probe_padding VALUES (zeroblob(?))',(65*1024*1024,)); s.commit(); s.close()"
+        docker.run(['run','--rm','--network=none','--mount','type=volume,src='+new+',dst=/fixture',
+                    '--entrypoint','python',args.image,'-c',grow])
+        probe="from scripts.migrate_hub_data import probe_admin; assert probe_admin('/fixture','/var/lib/codepier-probe') == 0"
+        docker.run(['run','--rm','--network=none','--read-only','--user','10001:10001',
+                    '--tmpfs','/tmp:size=64m,mode=1777','--cap-drop=ALL','--security-opt=no-new-privileges',
+                    '--volume','/var/lib/codepier-probe','--mount','type=volume,src='+new+',dst=/fixture,readonly',
+                    '--entrypoint','python',args.image,'-c',probe])
+        report['cases'].append({'case':'large-read-only-admin-probe-with-private-disk-scratch','result':'passed'})
         docker.run(['network','create','--label','com.docker.compose.project='+prefix,'--label','com.docker.compose.network=proxy',net])
         network=docker.json(['network','inspect',net])[0];subnet=network['IPAM']['Config'][0]['Subnet']
         docker.run(['run','-d','--name',container,'--label','com.codepier.fixture='+prefix,'--network',net,'--entrypoint','python',args.image,'-c','import time;time.sleep(300)'])

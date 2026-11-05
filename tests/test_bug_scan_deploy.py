@@ -143,3 +143,53 @@ def test_k3s_renderer_rejects_mutable_or_invalid_digest(digest):
 def test_admin_probe_dangling_symlink_is_not_empty_database(tmp_path):
     (tmp_path / "hub.sqlite3").symlink_to(tmp_path / "missing.sqlite3")
     assert migrate_hub_data.probe_admin(tmp_path) == 4
+
+
+def test_admin_probe_uses_disk_scratch_for_database_larger_than_tmpfs(tmp_path):
+    source, scratch = tmp_path / 'source', tmp_path / 'scratch'
+    source.mkdir(); scratch.mkdir()
+    database = source / 'hub.sqlite3'
+    with sqlite3.connect(database) as connection:
+        connection.execute('CREATE TABLE users(id TEXT)')
+        connection.execute("INSERT INTO users VALUES ('synthetic-admin')")
+        connection.execute('CREATE TABLE filler(data BLOB)')
+        connection.execute('INSERT INTO filler VALUES (zeroblob(?))', (65 * 1024 * 1024,))
+    assert database.stat().st_size > 64 * 1024 * 1024
+    before = (database.stat().st_size, database.stat().st_mtime_ns)
+    assert migrate_hub_data.probe_admin(source, scratch) == 0
+    assert not list(scratch.iterdir())
+    assert (database.stat().st_size, database.stat().st_mtime_ns) == before
+    root = Path(__file__).resolve().parents[1]
+    installer = (root / 'deploy/install-hub.sh').read_text()
+    assert '--volume /var/lib/codepier-probe' in installer
+    assert '"/var/lib/codepier-probe"' in installer
+    dockerfile = (root / 'Dockerfile').read_text()
+    assert 'chown codepier:codepier /app/data /var/lib/codepier-probe' in dockerfile
+    assert 'chmod 0700 /var/lib/codepier-probe' in dockerfile
+
+
+def test_admin_probe_rejects_dangling_wal_and_disk_exhaustion(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    database = tmp_path / 'hub.sqlite3'
+    with sqlite3.connect(database) as connection:
+        connection.execute('CREATE TABLE users(id TEXT)')
+    wal = Path(str(database) + '-wal')
+    wal.symlink_to(tmp_path / 'missing')
+    assert migrate_hub_data.probe_admin(tmp_path) == 4
+    wal.unlink()
+    monkeypatch.setattr(migrate_hub_data.shutil, 'disk_usage', lambda _: SimpleNamespace(free=0))
+    assert migrate_hub_data.probe_admin(tmp_path) == 4
+
+
+def test_recover_first_install_empty_lock_without_updater_home(tmp_path, monkeypatch):
+    from scripts import panel_updater
+    lock = tmp_path / '.codepier-install.lock'
+    lock.mkdir()
+    inode = lock.stat().st_ino
+    monkeypatch.setattr(sys, 'argv', ['panel_updater', 'recover-install-lock', '--root', str(tmp_path),
+                                    '--confirm-installers-stopped'])
+    assert panel_updater.main() in (None, 0)
+    assert not lock.exists()
+    quarantined = list(tmp_path.glob('.codepier-install-orphan-*'))
+    assert len(quarantined) == 1 and quarantined[0].stat().st_ino == inode
+    assert stat.S_IMODE((tmp_path / '.codepier-updater').stat().st_mode) == 0o700

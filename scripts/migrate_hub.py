@@ -184,20 +184,29 @@ def prepare(path,docker):
             docker.worker(image,'check',dest)
             if source and (not prior or prior.get('stage')!='completed' or legacy_running):raise RuntimeError('Both legacy and CodePier data exist; no data was merged or overwritten')
         if source and not docker.volume(source):raise RuntimeError('Legacy data volume is missing')
-    if all(p['existing'] for p in plans):
-        if prior and prior.get('stage')=='rolled_back':save(path,prior,stage='completed',destination=target,adopted_existing=True)
-        return {'stage':'current','destination':target}
+    adopted_existing = all(p['existing'] for p in plans)
+    selected_containers = legacy
+    if adopted_existing:
+        # A canonical installation still needs a durable cutover boundary and
+        # a quiesced database probe, including its very first managed upgrade.
+        selected_containers = [container for container in docker.containers('codepier')
+            if container.get('Config', {}).get('Labels', {}).get('com.docker.compose.service') in config.get('services', {})]
+        owned = {container['Id'] for container in selected_containers}
+        for plan in plans:
+            users = docker.run(['ps', '-q', '--filter', 'volume=' + plan['destination']]).stdout.split()
+            if any(not any(container.startswith(user) or user.startswith(container) for container in owned) for user in users):
+                raise RuntimeError('Canonical volume is in use by another container; upgrade refused')
     desired=set(config.get('services',{}));unexpected={c.get('Config',{}).get('Labels',{}).get('com.docker.compose.service') for c in legacy}-desired
     if unexpected:raise RuntimeError('Legacy stack has additional services; preserve the same COMPOSE_FILE selection before upgrading')
     for plan in plans:
         if not plan['source']:continue
         users=docker.run(['ps','-q','--filter','volume='+plan['source']]).stdout.split();owned={c['Id'] for c in legacy}
         if any(not any(c.startswith(x) or x.startswith(c) for c in owned) for x in users):raise RuntimeError('Legacy volume is in use by another container; migration refused')
-    network_plans=networks.preflight(config,legacy,docker,LEGACY_PROJECT)
+    network_plans=[] if adopted_existing else networks.preflight(config,legacy,docker,LEGACY_PROJECT)
     transaction=uuid.uuid4().hex
     state={'schema':1,'product':'CodePier','transaction':transaction,'stage':'preparing','volumes':plans,'destination':target,
-           'image':image,'write_boundary':False,'containers':[],'networks':network_plans,'proxy_trust':proxy_plans,'created_at':time.time()}
-    for c in legacy:
+           'image':image,'write_boundary':False,'containers':[],'networks':network_plans,'proxy_trust':proxy_plans,'created_at':time.time(),'adopted_existing':adopted_existing}
+    for c in selected_containers:
         policy=c.get('HostConfig',{}).get('RestartPolicy',{});restart=policy.get('Name') or 'no'
         if restart=='on-failure' and policy.get('MaximumRetryCount'):restart+=':'+str(policy['MaximumRetryCount'])
         state['containers'].append({'id':c['Id'],'running':bool(c.get('State',{}).get('Running')),'restart':restart,'stop_requested':False})
