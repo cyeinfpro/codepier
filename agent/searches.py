@@ -20,6 +20,8 @@ class Searches:
         with self.journal.lock,self.journal.db:
             self.journal.db.execute('CREATE TABLE IF NOT EXISTS search_sessions (id TEXT PRIMARY KEY, root TEXT NOT NULL, project_id TEXT NOT NULL, args TEXT NOT NULL, state TEXT NOT NULL, created REAL NOT NULL, expires REAL NOT NULL, scanned INTEGER NOT NULL DEFAULT 0, skipped INTEGER NOT NULL DEFAULT 0, result_count INTEGER NOT NULL DEFAULT 0, read_bytes INTEGER NOT NULL DEFAULT 0, stored_bytes INTEGER NOT NULL DEFAULT 0, truncated INTEGER NOT NULL DEFAULT 0, error TEXT, file_count INTEGER NOT NULL DEFAULT 0, spent REAL NOT NULL DEFAULT 0)')
             columns = {row[1] for row in self.journal.db.execute('PRAGMA table_info(search_sessions)')}
+            if 'skipped_reasons' not in columns:
+                self.journal.db.execute("ALTER TABLE search_sessions ADD COLUMN skipped_reasons TEXT NOT NULL DEFAULT '{}'")
             if 'scan_scope' not in columns:
                 self.journal.db.execute("ALTER TABLE search_sessions ADD COLUMN scan_scope TEXT NOT NULL DEFAULT 'filesystem_walk'")
             self.journal.db.execute('CREATE TABLE IF NOT EXISTS search_files (search_id TEXT NOT NULL, seq INTEGER NOT NULL, path TEXT NOT NULL, PRIMARY KEY(search_id,seq))')
@@ -85,6 +87,7 @@ class Searches:
         with self.journal.lock:
             files=self.journal.db.execute('SELECT seq,path FROM search_files WHERE search_id=? AND seq>? ORDER BY seq LIMIT 64',(row['id'],row['scanned'])).fetchall()
             storage=self.journal.db.execute('SELECT COALESCE(SUM(stored_bytes),0) FROM search_sessions').fetchone()[0]
+        skipped_reasons=json.loads(row.get('skipped_reasons', '{}'))
         needle=args['query'] if args['case_sensitive'] else args['query'].casefold();hits=[]
         for index,path in files:
             elapsed=time.monotonic()-begin
@@ -127,13 +130,17 @@ class Searches:
                     row['skipped']+=1
                     row.update(state='failed',truncated=1,error=exc.code);break
                 row['skipped']+=1
+                reason=exc.code if isinstance(exc,DevError) else 'FILESYSTEM_ERROR'
+                skipped_reasons[reason]=skipped_reasons.get(reason,0)+1
+                row['truncated']=1
             if row['state']!='running':break
         if row['state']=='running' and row['scanned']>=row['file_count']:row['state']='completed'
+        row['skipped_reasons']=json.dumps(skipped_reasons,sort_keys=True)
         row['spent']+=time.monotonic()-begin
         with self.journal.lock,self.journal.db:
             self.journal.db.executemany('INSERT INTO search_hits VALUES (?,?,?)',hits)
-            self.journal.db.execute('UPDATE search_sessions SET state=?,scanned=?,skipped=?,result_count=?,read_bytes=?,stored_bytes=?,truncated=?,error=?,spent=? WHERE id=?',
-                tuple(row[k] for k in ('state','scanned','skipped','result_count','read_bytes','stored_bytes','truncated','error','spent','id')))
+            self.journal.db.execute('UPDATE search_sessions SET state=?,scanned=?,skipped=?,result_count=?,read_bytes=?,stored_bytes=?,truncated=?,error=?,spent=?,skipped_reasons=? WHERE id=?',
+                tuple(row[k] for k in ('state','scanned','skipped','result_count','read_bytes','stored_bytes','truncated','error','spent','skipped_reasons','id')))
 
     def get(self,project,args):
         with self.lock:
@@ -164,7 +171,7 @@ class Searches:
             item.update(seq=hit[0],current_sha256=files[path],stale=files[path]!=item['sha256']);results.append(item)
         return {'search_id':row['id'],'state':row['state'],'results':results,'cursor':hits[-1][0] if hits else args['cursor'],
                 'has_more':more or row['state']=='running','scanned_files':row['scanned'],'file_count':row['file_count'],
-                'skipped_files':row['skipped'],'result_count':row['result_count'],'truncated':bool(row['truncated']),
+                'skipped_files':row['skipped'],'skipped_reasons':json.loads(row['skipped_reasons']),'result_count':row['result_count'],'truncated':bool(row['truncated']),
                 'error':row['error'],'expires':row['expires'],'scan_scope':row['scan_scope'],
                 'hint':'结果被截断；请缩小 path 或 file_glob，0 条命中不代表不存在' if row['truncated'] else None,
                 'consistency':'Saved file manifest and per-file content; not an atomic snapshot. Returned hits are SHA-rechecked. New files need a new search.',

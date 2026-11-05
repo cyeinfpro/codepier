@@ -138,6 +138,10 @@ def factor(schema):
         if not isinstance(node, dict):
             return node
         result = {key: compact_types(value) for key, value in node.items()}
+        # JSON Schema defaults additionalProperties to true. Removing only
+        # this explicit default is equivalent and keeps additive variants small.
+        if result.get('additionalProperties') is True:
+            result.pop('additionalProperties')
         choices = result.get('anyOf', [])
         if set(result) == {'anyOf'} and choices and all(
                 isinstance(choice, dict) and set(choice) == {'type'}
@@ -145,6 +149,8 @@ def factor(schema):
             return {'type': list(dict.fromkeys(choice['type'] for choice in choices))}
         return result
 
+    # Keep the facade's explicit extension contract visible to simple clients.
+    root_extensions = schema.get('additionalProperties') is True
     schema = compact_types(schema)
     counts = Counter()
 
@@ -200,6 +206,8 @@ def factor(schema):
         return result
 
     result = reduce(schema, inline=True)
+    if root_extensions:
+        result['additionalProperties'] = True
     if definitions:
         result['$defs'] = {**result.get('$defs', {}), **definitions}
     return result
@@ -258,6 +266,17 @@ def build_core_output_schemas(legacy, *, include_queries=False):
                       'files': array(either(batch_file, batch_error)), 'truncated': BOOL,
                       'budget_limited': BOOL, 'payload_limit_bytes': INT},
                      ('operation_id', 'batch', 'files', 'truncated'))
+    # Metadata-only reads expose a hash, never invented line counts.
+    # Batch text results above retain the original required line coordinates.
+    line_fields = ['offset', 'end_line', 'total_lines']
+    text_file['required'] = [key for key in text_file['required'] if key not in line_fields]
+    text_file['anyOf'] = [
+        {'required': line_fields},
+        {'required': ['content_available', 'content_unavailable_reason'],
+         'properties': {'content_available': {'const': False}, 'content': {'const': ''},
+                        'content_unavailable_reason': {'enum': ['FILE_TOO_LARGE', 'BINARY_FILE', 'ENCODING']},
+                        'truncated': {'const': True}, 'next_offset': NULL}},
+    ]
     read = [text_file, image_file, batch_read, *variants('show_changes', 'artifacts_get',
             'artifacts_list', 'history_list', 'code_symbols', 'lsp_query')]
     # Import.created is a boolean; registered artifact.created is a timestamp.

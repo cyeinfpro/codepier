@@ -16,6 +16,38 @@ MAX_BATCH_BYTES = 2 * 1024 * 1024
 def apply_patch(engine, project, args):
     with engine.mutation_lock:
         root, _ = engine.root(project, True)
+        # Single binary/large-file changes use the durable streaming path.
+        # Multi-file patches keep their bounded text snapshot/rollback contract.
+        if len(args['changes']) == 1 and args['changes'][0]['action'] in {'delete', 'move'}:
+            item = args['changes'][0]
+            source = engine.path(root, item['path'], False)
+            try:
+                data = engine.read_bytes(source, True)
+                if data is not None:
+                    engine.text(data)
+            except DevError as exc:
+                if exc.code not in {'FILE_TOO_LARGE', 'BINARY_FILE', 'ENCODING'}:
+                    raise
+                from agent.file_blobs import snapshot, change
+                info = snapshot(source)
+                if info['sha256'] != item['expected_sha256']:
+                    raise DevError('SHA_CONFLICT', '源文件已改变；没有写入', 409)
+                engine.check_local_write(source)
+                if item['action'] == 'move':
+                    target = engine.path(root, item['destination'], False)
+                    engine.check_local_write(target)
+                    if target.exists():
+                        raise DevError('DESTINATION_EXISTS', '目标已存在；没有写入', 409)
+                    if not target.parent.is_dir():
+                        raise DevError('PARENT_MISSING', '目标父目录不存在')
+                if args['dry_run']:
+                    return {'success': True, 'outcome': 'preview', 'atomic': False,
+                            'files': [dict(item, bytes=info['bytes'], binary_or_oversize=True)],
+                            'added_lines': 0, 'removed_lines': 0}
+                result = change(engine, project, item['path'], item['expected_sha256'],
+                                destination=item['destination'] if item['action'] == 'move' else None)
+                return {'success': True, 'outcome': 'completed', 'atomic': False,
+                        'files': [result], 'added_lines': 0, 'removed_lines': 0}
         plans, touched, budget = [], set(), 0
 
         def prepare(relative, expected, after, mode=None):

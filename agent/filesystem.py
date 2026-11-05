@@ -23,7 +23,7 @@ MAX_FILE = 1024 * 1024
 MAX_DIFF = 100000
 MAX_DIFF_CHANGED_LINES = 4000
 MAX_SCAN_ENTRIES = 100000
-IGNORED_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".ssh", ".aws", ".azure", ".kube", ".codepier-agent", ".remote-dev-agent", ".remote-dev", ".codepier", ".cache"}
+IGNORED_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".ssh", ".aws", ".azure", ".kube", ".docker", ".gnupg", ".password-store", ".codepier-agent", ".remote-dev-agent", ".remote-dev", ".codepier", ".cache"}
 GENERATED_SCAN_DIRS = frozenset({".build", ".next", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".turbo"})
 CHECKPOINT_ARTIFACTS = {".build", ".next", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".turbo", "coverage", "playwright-report", "test-results"}
 STORAGE_UNAVAILABLE = frozenset(getattr(errno, name) for name in (
@@ -33,7 +33,7 @@ STORAGE_UNAVAILABLE = frozenset(getattr(errno, name) for name in (
 
 
 def protected(relative: str) -> bool:
-    parts = tuple(part.lower() for part in PurePosixPath(relative).parts)
+    parts = tuple(part.rstrip(" .").lower() for part in PurePosixPath(relative).parts)
     private_runtime = {'.codex': {'sessions', 'archived_sessions'},
                        '.claude': {'projects'}}
     if any(parts[index + 1] in private_runtime.get(part, ())
@@ -42,12 +42,13 @@ def protected(relative: str) -> bool:
     for low in parts:
         if low in IGNORED_DIRS or low.startswith((".rd-", ".venv-", ".venv.")):
             return True
-        if low in {".env", ".npmrc", ".pypirc", ".netrc", "id_rsa", "id_ed25519",
+        if low in {".env", ".npmrc", ".pypirc", ".netrc", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa",
+                   ".git-credentials", ".pgpass", ".s3cfg", ".htpasswd", ".dockercfg",
                    "auth.json", "credentials.json", ".credentials.json", "secrets.json"}:
             return True
         if low.startswith(".env.") and not low.endswith((".example", ".sample", ".template")):
             return True
-        if low.endswith((".pem", ".key", ".p12", ".pfx")):
+        if low.endswith((".pem", ".key", ".p12", ".pfx", ".ppk", ".jks", ".keystore", ".ovpn", ".kdbx")):
             return True
     return False
 
@@ -69,6 +70,14 @@ def relative_path(value: str, allow_dot: bool = True) -> str:
     p = PurePosixPath(value)
     if p.is_absolute() or ".." in p.parts or (not allow_dot and str(p) == "."):
         raise DevError("INVALID_PATH", "不允许绝对路径、上级路径或空文件路径")
+    # Reject Win32 aliases on every platform before any access. This also
+    # keeps a POSIX-created project safe when it is later opened on Windows.
+    for part in p.parts:
+        stem = part.split(".", 1)[0].upper()
+        if (part.endswith((" ", ".")) or any(ord(ch) < 32 or ord(ch) == 127 for ch in part)
+                or stem in {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
+                or re.fullmatch(r"(?:COM|LPT)[1-9¹²³]", stem)):
+            raise DevError("INVALID_PATH", "路径包含不受支持的控制字符或 Windows 文件名别名")
     if protected(str(p)):
         raise DevError("PROTECTED_PATH", "该路径属于凭据或内部目录，不通过文件工具公开", 403)
     return str(p)
@@ -430,8 +439,18 @@ class FileEngine:
     def read(self, project, args):
         root, _ = self.root(project)
         p = self.path(root, args["path"], False)
-        data = self.read_bytes(p)
-        text = self.text(data)
+        try:
+            data = self.read_bytes(p)
+            text = self.text(data)
+        except DevError as exc:
+            if exc.code not in {"FILE_TOO_LARGE", "BINARY_FILE", "ENCODING"}:
+                raise
+            from agent.file_blobs import snapshot
+            info = snapshot(p)
+            return {"path": p.relative_to(root).as_posix(), "sha256": info["sha256"],
+                    "bytes": info["bytes"], "content": "", "content_available": False,
+                    "content_unavailable_reason": exc.code, "truncated": True,
+                    "next_start_line": None, "hint": "仅返回文件摘要；可用于校验后移动或删除，未读取为源码文本"}
         lines = text.splitlines(keepends=True)
         start, end = args.get("start_line", 1) - 1, args.get("start_line", 1) - 1 + args.get("max_lines", 400)
         content = "".join(lines[start:end])
@@ -511,6 +530,7 @@ class FileEngine:
         needle = args["query"] if args["case_sensitive"] else args["query"].casefold()
         results, seen, read_total, matches, skipped = [], 0, 0, 0, 0
         truncated, scan_error = False, None
+        skipped_reasons = {}
         iterator = iter(entries)
         while True:
             try:
@@ -532,8 +552,10 @@ class FileEngine:
                 self.path(root, rel, False)
                 data = self.read_bytes(p)
                 text = self.text(data)
-            except (DevError, OSError):
+            except (DevError, OSError) as exc:
                 skipped += 1
+                reason = exc.code if isinstance(exc, DevError) else "FILESYSTEM_ERROR"
+                skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
                 continue
             read_total += len(data)
             if read_total > 32 * MAX_FILE:
@@ -551,13 +573,13 @@ class FileEngine:
                 results.append({"path": rel, "line": n, "text": line[:1600], "line_truncated": len(line) > 1600})
             if truncated:
                 break
-        truncated = truncated or candidates_capped
+        truncated = truncated or candidates_capped or bool(skipped_reasons)
         return {"matches": results, "scanned_files": min(seen, 20000), "skipped_files": skipped, "truncated": truncated,
-                "scan_scope": scan_scope,
+                "scan_scope": scan_scope, "skipped_reasons": skipped_reasons,
                 "hint": "结果被截断；请缩小 path 或 file_glob，0 条命中不代表不存在" if truncated else None,
                 "next_offset": args["offset"] + len(results) if truncated and results else None,
                 "scan_error": scan_error,
-                "limits": "20,000 files / 100,000 directory entries / 32 MiB / 8 seconds per call; narrow the path if the scan limit is reached. Protected paths, generated build caches (including .build) and unsupported filenames are excluded."}
+                "limits": "1 MiB per file / 20,000 files / 100,000 directory entries / 32 MiB / 8 seconds per call; narrow the path if the scan limit is reached. Protected paths, generated build caches (including .build) and unsupported filenames are excluded."}
 
     def preview(self, project, args):
         root, _ = self.root(project)
@@ -576,9 +598,15 @@ class FileEngine:
         root, _ = self.root(project, True)
         p = self.path(root, path, False)
         self.check_local_write(p)
-        before = self.read_bytes(p, True)
-        if before is not None:
-            self.text(before)
+        try:
+            before = self.read_bytes(p, True)
+            if before is not None:
+                self.text(before)
+        except DevError as exc:
+            if after is not None or exc.code not in {"FILE_TOO_LARGE", "BINARY_FILE", "ENCODING"}:
+                raise
+            from agent.file_blobs import change
+            return change(self, project, path, expected)
         actual = digest(before) if before is not None else "new"
         if actual != expected:
             raise DevError("SHA_CONFLICT", f"文件已改变：当前 SHA 为 {actual}。请重新读取后再修改。", 409)
@@ -702,8 +730,15 @@ class FileEngine:
             raise DevError("DESTINATION_EXISTS", "目标文件已存在，不会覆盖", 409)
         if not dest.parent.is_dir():
             raise DevError("PARENT_MISSING", "目标父目录不存在")
-        before = self.read_bytes(src)
-        self.text(before)
+        try:
+            before = self.read_bytes(src)
+            self.text(before)
+        except DevError as exc:
+            if exc.code not in {"FILE_TOO_LARGE", "BINARY_FILE", "ENCODING"}:
+                raise
+            from agent.file_blobs import change
+            return change(self, project, args["path"], args["expected_sha256"],
+                          destination=args["destination"])
         if digest(before) != args["expected_sha256"]:
             raise DevError("SHA_CONFLICT", "源文件已改变", 409)
         backup_id = uuid.uuid4().hex
@@ -943,7 +978,7 @@ class FileEngine:
                                 if not protected(row["path"])]}
         if tool == "history_restore":
             root, _ = self.root(project, True)
-            row, data = self.journal.backup(str(root), args["backup_id"])
-            return self.mutate(project, row["path"], args["expected_sha256"], data, restore_mode=row.get("before_mode"))
+            from agent.file_blobs import restore
+            return restore(self, project, args)
         if tool == "project_checkpoint": return self.checkpoint(project, args)
         raise DevError("UNKNOWN_TOOL", "未知文件操作")

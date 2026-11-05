@@ -169,7 +169,10 @@ class NativeCLI:
                 self.pending_starts.pop(ticket,None)
 
     def _action(self, action, project, args):
-        root = self.authorize(project)
+        # Erasing this caller's stopped replay does not launch a shell or
+        # modify the project. Keep current mapping and session ownership checks.
+        root = (self.agent.engine.root(project)[0] if action in {'clear', 'delete'}
+                else self.authorize(project))
         if action == 'chat_catalog':
             cli = args.get('cli')
             if cli not in ('pi', 'codex', 'claude'): raise ValueError('CLI must be pi, codex or claude')

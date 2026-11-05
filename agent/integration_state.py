@@ -18,6 +18,7 @@ class Records:
         with journal.lock,journal.db:
             journal.db.execute('CREATE TABLE IF NOT EXISTS integration_records (kind TEXT NOT NULL,id TEXT NOT NULL,binding TEXT NOT NULL,body TEXT NOT NULL,created REAL NOT NULL,PRIMARY KEY(kind,id))')
             journal.db.execute('CREATE INDEX IF NOT EXISTS integration_record_time ON integration_records(kind,created)')
+            journal.db.execute('CREATE INDEX IF NOT EXISTS integration_record_binding ON integration_records(kind,binding)')
 
     def save(self,kind,identifier,project,body,*,replace=False):
         if not re.fullmatch('[a-f0-9]{32}',identifier):raise DevError('INVALID_RECORD','无效记录编号')
@@ -33,8 +34,16 @@ class Records:
                 if not replace:raise DevError('RECORD_EXISTS','记录已存在；读取原操作，不要重复执行',409)
                 j.db.execute('UPDATE integration_records SET body=? WHERE kind=? AND id=?',(text,kind,identifier))
             else:
-                count=j.db.execute('SELECT count(*) FROM integration_records').fetchone()[0]
-                if count>=2000:raise DevError('RECORD_QUOTA','证据记录达到上限；先在本机归档，不会删除活跃工作目录记录')
+                # Historical evidence is not an active resource reservation.
+                # Keep receipts readable; isolate admission by authenticated
+                # owner/project/workspace and resource kind, not the whole node.
+                terminal = {'browser': {'closed'}, 'workspace': {'removed'},
+                            'validation': {'passed', 'failed', 'stale', 'unverified', 'interrupted'}}
+                states = terminal.get(kind, set())
+                rows = j.db.execute('SELECT body FROM integration_records WHERE kind=? AND binding=?',
+                                    (kind, json.dumps(bound, sort_keys=True)))
+                count = sum(json.loads(row['body']).get('state') not in states for row in rows)
+                if count>=2000:raise DevError('RECORD_QUOTA','当前项目授权的此类活跃记录达到上限；请先结束活跃操作，历史证据仍保留')
                 j.db.execute('INSERT INTO integration_records VALUES(?,?,?,?,?)',(kind,identifier,json.dumps(bound,sort_keys=True),text,time.time()))
         return body
 
@@ -64,7 +73,14 @@ class Records:
     def list(self,kind,project,limit=100):
         j=self.journal;bound=binding(project)
         # Filter authorization before applying the visible limit.
-        with j.lock: rows=j.db.execute('SELECT * FROM integration_records WHERE kind=? ORDER BY created DESC,id DESC',(kind,)).fetchall()
+        # Live resources remain visible even after thousands of retained receipts.
+        terminal = {'browser': ('closed',), 'workspace': ('removed',),
+                    'validation': ('passed', 'failed', 'stale', 'unverified', 'interrupted')}.get(kind, ())
+        placeholders = ','.join('?' for _ in terminal) or "''"
+        order = f"CASE WHEN json_extract(body,'$.state') IN ({placeholders}) THEN 1 ELSE 0 END"
+        with j.lock:
+            rows=j.db.execute(f'SELECT * FROM integration_records WHERE kind=? ORDER BY {order},created DESC,id DESC',
+                              (kind, *terminal)).fetchall()
         result=[]
         for row in rows:
             actual=json.loads(row['binding'])

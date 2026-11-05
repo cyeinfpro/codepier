@@ -19,7 +19,12 @@ class CoreFiles:
     def read_one(self, root, args, *, text_only=False):
         engine = self.engine
         path = engine.path(root, args['path'], False)
-        data = engine.read_bytes(path, max_bytes=16 * 1024 * 1024)
+        try:
+            data = engine.read_bytes(path, max_bytes=16 * 1024 * 1024)
+        except DevError as exc:
+            if exc.code != 'FILE_TOO_LARGE' or text_only:
+                raise
+            return self.asset_metadata(path, args, exc.code)
         sha = digest(data)
         if args['expected_sha256'] and args['expected_sha256'] != sha:
             raise DevError('SHA_CONFLICT', '分页读取期间文件改变，请从头重新读取', 409)
@@ -35,7 +40,12 @@ class CoreFiles:
             from shared.computer_media import normalize_content
             return {**meta, **normalize_content({'content': [{'type': 'image', 'mimeType': mime,
                 'data': base64.b64encode(data).decode('ascii')}]}), 'truncated': False, 'next_offset': None}
-        lines = engine.text(data).splitlines(keepends=True)
+        try:
+            lines = engine.text(data).splitlines(keepends=True)
+        except DevError as exc:
+            if exc.code not in {'BINARY_FILE', 'ENCODING'} or text_only:
+                raise
+            return self.asset_metadata(path, args, exc.code)
         start = args['offset'] - 1
         if start > 0 and start >= len(lines):
             raise DevError('INVALID_OFFSET', 'offset 超出文件行数')
@@ -52,6 +62,17 @@ class CoreFiles:
         more = end < len(lines)
         return {**meta, 'content': ''.join(selected), 'offset': start + 1, 'end_line': end,
                 'total_lines': len(lines), 'truncated': more, 'next_offset': end + 1 if more else None}
+
+    @staticmethod
+    def asset_metadata(path, args, reason):
+        from agent.file_blobs import snapshot
+        info = snapshot(path)
+        if args['expected_sha256'] and args['expected_sha256'] != info['sha256']:
+            raise DevError('SHA_CONFLICT', '文件已改变，请重新读取', 409)
+        return {'path': args['path'], 'sha256': info['sha256'], 'bytes': info['bytes'],
+                'content': '', 'content_available': False, 'content_unavailable_reason': reason,
+                'truncated': True, 'next_offset': None,
+                'hint': '仅返回摘要；单项 edit delete/move 可处理此文件，不表示已读取文本'}
 
     def read_batch(self, root, args):
         # One admitted operation, one root, no sub-dispatch or authorization retry.
