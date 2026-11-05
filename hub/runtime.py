@@ -264,11 +264,13 @@ class Runtime:
         try:
             return require_role(self.store, principal, action, project_id=project_id, device_id=device_id, creation=creation)
         except DevError as exc:
-            # Do not commit a caller's mutation transaction merely to log a denial.
-            with self.store.lock:
-                if not self.store.db.in_transaction:
-                    self.store.audit(principal.actor, 'role.denied', project_id or device_id or '', 'denied',
-                                     {'action': action, 'code': exc.code})
+            # Readers collect denial audits for the original writer after the
+            # snapshot ends. Never commit a caller's mutation transaction here.
+            target, detail = project_id or device_id or '', {'action': action, 'code': exc.code}
+            if not self.store.defer_read_denial(principal.actor, target, detail):
+                with self.store.lock:
+                    if not self.store.db.in_transaction:
+                        self.store.audit(principal.actor, 'role.denied', target, 'denied', detail)
             raise
 
     def visible_project(self, p: dict, principal: Principal):
@@ -408,8 +410,11 @@ class Runtime:
             from shared.scheduler_config import safe_queue_detail
             safe = safe_queue_detail(detail)
             blockers, restricted = self._visible_operations(detail.get('blocked_by', []), principal, row['device_id'])
+            # A blocker/stage change emits another event. Preserve the Agent's
+            # elapsed wait rather than restarting the clock at that event.
+            queue_age_ms = safe.get('queue_age_ms', 0) + max(0, round((time.time() - latest['at']) * 1000))
             waiting = {'reason': safe.get('queue_reason', latest['stage']),
-                       'lane': safe.get('lane'), 'queue_age_ms': max(0, round((time.time() - latest['at']) * 1000)),
+                       'lane': safe.get('lane'), 'queue_age_ms': queue_age_ms,
                        'blocked_by': blockers}
             if restricted:
                 waiting['blocker_visibility'] = 'restricted_or_unavailable'

@@ -689,7 +689,7 @@ class CoordinationService:
                 return {'message_id': identifier, 'work_item': self.work_view(self.work(goal, item['id']))}
             return self.mutation(principal, room, 'work_progress', args, save)
 
-    def admit(self, raw, principal):
+    def admit(self, raw, principal, *, expected_device_id=None):
         args = validate(contracts.WorkExecute, raw)
         if args['operation_role'] == 'required':
             args.pop('operation_role')  # Preserve pre-extension idempotency fingerprints.
@@ -742,6 +742,8 @@ class CoordinationService:
                 prepared = self.runtime._invoke(args['tool'], tool_args, principal)
                 if not isinstance(prepared, DeferredCall) or prepared.action != 'dispatch':
                     raise DevError('GOAL_OPERATION_NOT_SUPPORTED', '请求不能通过已验证的项目执行路径', 422)
+                if expected_device_id is not None and prepared.project['device_id'] != expected_device_id:
+                    raise DevError('PROJECT_MAPPING_CHANGED', '项目执行设备在等待准入期间已改变，未执行操作', 409)
                 execution_budget = None
                 if args['tool'] == 'exec':
                     ceiling = spec['budget'].get('operation_timeout_seconds', 0)
@@ -794,9 +796,19 @@ class CoordinationService:
                         'consumer_lease_until': item['lease_until'], 'goal_expires_at': goal['expires_at']}
             return self.mutation(principal, room, 'work_execute', args, execute)
 
+    def _dispatch_device(self, raw, principal):
+        # Resolve a lock key only. This is not retained authority: admit repeats
+        # every scope/lease/fence check inside its writer transaction after await.
+        args = validate(contracts.WorkExecute, raw)
+        with self.store.transaction(immediate=False):
+            principal, _, goal = self.scope(principal, args, active=True)
+            item = self.work(goal, args['work_item_id'])
+            return self.runtime.project(item['project_id'], principal)['device_id']
+
     async def execute(self, raw, principal):
-        async with self.runtime.dispatch_lock:
-            receipt = await self.store.run(self.admit, raw, principal)
+        device_id = await self.store.run(self._dispatch_device, raw, principal)
+        async with self.runtime.device_dispatch_lock(device_id):
+            receipt = await self.store.run(self.admit, raw, principal, expected_device_id=device_id)
         self.runtime.wake_delivery()
         try:
             operation = await self.store.run(self.runtime.operation, receipt['operation_id'], principal,

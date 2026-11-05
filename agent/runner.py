@@ -529,7 +529,7 @@ class Agent:
                     # the existing file-I/O lane, just like core read, so long
                     # commands cannot starve directory navigation. Resource locks
                     # still exclude conflicting writes; searches stay heavy.
-                    lane = "read" if metadata or tool in BOUNDED_FILE_TOOLS else "execution"
+                    lane = "read" if metadata or tool in BOUNDED_FILE_TOOLS and tool != 'fs_search' else "execution"
                     # Match the typed execution dispatcher, including the panel's
                     # legacy SSH entry. Never infer remote work from shell text.
                     remote = args if tool == "ssh_exec" else None
@@ -613,7 +613,9 @@ class Agent:
                         admission = await workspace_probe.probe(
                             self.engine, tool, project, args, phase='admission', worker=worker)
                         claims = [] if metadata else [Claim(**item) for item in admission['claims']]
-                        lane = 'read'
+                        # Recursive content search retains execution pressure
+                        # accounting even though its path claim is read-only.
+                        lane = 'execution' if tool == 'fs_search' else 'read'
                         # One synchronous decision converts the preflight ticket
                         # and reserves resources. Failure leaves neither a path
                         # reservation nor a fairness turn behind while reaping.
@@ -1002,6 +1004,13 @@ class Agent:
         if profile['mode'] == 'native_compat':
             environment = legacy_environment(self.config['shell']['inherit_env'] if not args.get('task') else False,
                                              env, full_access=not args.get('task'))
+            enforce_argv(self.config, project, command, cwd, environment)
+        elif args.get('task'):
+            # Named tasks keep one executable-resolution point: run_process.
+            # Preflight validates authorization/environment without duplicating
+            # runtime preparation or changing the configured-task dispatcher.
+            from agent.project_runtime import build_environment
+            environment = build_environment(self.config, project, root, env, create=False)
             enforce_argv(self.config, project, command, cwd, environment)
         else:
             plan = prepare(self.config, project, root, command, cwd, env, create=False)

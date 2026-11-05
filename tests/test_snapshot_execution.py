@@ -217,3 +217,72 @@ def test_malformed_editable_metadata_fails_closed(project, manager):
     (project / "direct_url.json").write_text('{"dir_info": null}')
     with pytest.raises(DevError):
         manager.create(project, "unsafe")
+
+
+@pytest.mark.parametrize("kind", ["run", "snapshot"])
+def test_concurrent_ttl_cleanup_of_same_entry(project, manager, clone, monkeypatch, kind):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    if kind == "run":
+        entry = prepare_run_directory(project, "expired")
+        finish_run_directory(entry)
+        cleanup = lambda: cleanup_run_directories(project, 0, now=1e20)
+    else:
+        snapshot = manager.create(project, "expired")
+        manager.finish(snapshot, success=False)
+        entry = snapshot.root.parent
+        cleanup = lambda: manager.cleanup(0, now=1e20)
+    original = shutil.rmtree
+    barrier, removed, lock = threading.Barrier(2), threading.Event(), threading.Lock()
+    calls = 0
+    def ordered_remove(path, *args, **kwargs):
+        nonlocal calls
+        if Path(path) != entry:
+            return original(path, *args, **kwargs)
+        with lock:
+            calls += 1
+            first = calls == 1
+        barrier.wait(timeout=3)
+        if first:
+            try:
+                return original(path, *args, **kwargs)
+            finally:
+                removed.set()
+        assert removed.wait(3)
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(shutil, "rmtree", ordered_remove)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(cleanup) for _ in range(2)]
+        results = [future.result(timeout=5) for future in futures]
+    assert not entry.exists()
+    assert sorted(results, key=len) == [[], ["expired"]]
+
+
+@pytest.mark.parametrize("kind", ["run", "snapshot"])
+@pytest.mark.parametrize("failure", ["permission", "missing_child", "symlink"])
+def test_ttl_cleanup_preserves_io_errors_and_symlink_rejection(project, manager, clone, monkeypatch, kind, failure):
+    if kind == "run":
+        entry = prepare_run_directory(project, "expired")
+        finish_run_directory(entry)
+        cleanup = lambda: cleanup_run_directories(project, 0, now=1e20)
+    else:
+        snapshot = manager.create(project, "expired")
+        manager.finish(snapshot, success=False)
+        entry = snapshot.root.parent
+        cleanup = lambda: manager.cleanup(0, now=1e20)
+    original = shutil.rmtree
+    target = project.parent / "protected-target"
+    target.mkdir()
+    (target / "keep").write_text("keep")
+    def fail(path, *args, **kwargs):
+        if failure == "permission":
+            raise PermissionError("synthetic denied deletion")
+        if failure == "missing_child":
+            raise FileNotFoundError("synthetic child disappeared; entry still exists")
+        original(path)
+        Path(path).symlink_to(target, target_is_directory=True)
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(shutil, "rmtree", fail)
+    with pytest.raises(OSError):
+        cleanup()
+    assert (target / "keep").read_text() == "keep"

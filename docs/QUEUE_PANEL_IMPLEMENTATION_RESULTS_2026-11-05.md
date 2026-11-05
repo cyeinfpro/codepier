@@ -47,3 +47,13 @@
 - 新取消入口兼容 00902463 的 `CP.ui.confirmSheet({title,body,confirmLabel,danger})`；当前旧基线仍可使用浏览器原生确认。需在最终组合树再覆盖模态焦点/异步取消验收。
 - 运行目录当前为安全复制/产物名入口，而非浏览受保护目录。真正下载或受限文件读取应另行设计最小授权接口，不能泛化开放保护根。
 - 可选预算仅落配置及合成持久化证明；实际资源预算部署、生产启用和全量 CI 均由相应授权流程处理。
+
+## 全量前端失败复核（03:26 UTC）
+
+全量首轮的三项前端失败均为当前工作树缺少 Node 锁定依赖，未进入被测产品逻辑：
+
+- `test_template_lowering_preserves_runtime_string_bytes`：导入 esbuild 时 ERR_MODULE_NOT_FOUND。
+- SDK 卡片 1100/390 两项：host_bundle fixture 检测不到 `node_modules/esbuild/lib/main.js`，按设计要求安装锁定依赖。
+- 在该工作树执行 `npm --prefix web/mcp-apps ci --ignore-scripts` 后，`test_generated_release_hygiene.py` 与 `test_mcp_apps_host.py` 合计 4 项通过（9.87 秒）。无需修改生产源码或测试断言。
+- 原始全量失败日志保留；补验日志 `.work/queue-frontend-dependency-check.log`，原操作回执 `070b67c4419645b39d024f76085a1e74`。
+- 此补验仅解除这三项环境阻塞，不代表其余全量失败或跳过已经解决。本机 Node 22.22.0，正式 CI 仍按仓库要求使用 Node 24。

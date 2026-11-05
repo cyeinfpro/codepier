@@ -105,6 +105,16 @@ def cleanup_run_directories(root: Path, ttl_seconds: float = 7 * 86400, *, now: 
                 continue
         except (OSError, ValueError, AttributeError):
             continue
-        shutil.rmtree(path)
+        try:
+            shutil.rmtree(path)
+        except FileNotFoundError:
+            # Another cleanup may have removed this expired entry. Only
+            # suppress proven absence, not child I/O failures or replacement
+            # symlinks (lstat deliberately does not follow them).
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                continue
+            raise
         removed.append(path.name)
     return removed

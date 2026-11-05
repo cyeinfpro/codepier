@@ -229,6 +229,16 @@ class SnapshotManager:
                     continue
             except (OSError, ValueError, KeyError, TypeError):
                 continue
-            shutil.rmtree(container)
+            try:
+                shutil.rmtree(container)
+            except FileNotFoundError:
+                # Another cleanup may have removed this expired entry. Only
+                # suppress proven absence, not child I/O failures or replacement
+                # symlinks (lstat deliberately does not follow them).
+                try:
+                    container.lstat()
+                except FileNotFoundError:
+                    continue
+                raise
             removed.append(container.name)
         return removed

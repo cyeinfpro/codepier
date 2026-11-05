@@ -138,6 +138,9 @@ class Store:
         self._reader_state.binding = binding
         try:
             for attempt in range(4):
+                # Discard audits from invalidated snapshots. Only the final
+                # accepted/failed phase produces externally visible records.
+                self._reader_state.denial_audits = []
                 # A security write during the snapshot invalidates the entire
                 # decision. Under sustained churn make the last pass while
                 # briefly fencing the writer, rather than return stale authority.
@@ -155,7 +158,25 @@ class Store:
                         return value
             raise RuntimeError("Authorization changed during read phase")
         finally:
+            audits = getattr(self._reader_state, 'denial_audits', [])
             del self._reader_state.binding
+            del self._reader_state.denial_audits
+            # Both the reader transaction and final writer fence are released.
+            # Keep this admitted worker alive until its audit write settles, so
+            # cancellation and close drain the read and necessary audit together.
+            if audits:
+                def flush():
+                    for context, call in audits:
+                        context.run(call)
+                self._executor.submit(flush).result()
+
+    def defer_read_denial(self, actor, target, detail):
+        """Collect role denials only; never allow arbitrary writes in readers."""
+        if getattr(self._reader_state, 'binding', None) is None:
+            return False
+        self._reader_state.denial_audits.append((copy_context(), partial(
+            self.audit, actor, 'role.denied', target, 'denied', dict(detail))))
+        return True
 
     def _load_cipher(self):
         key_path = self.state_directory / "master.key"

@@ -536,7 +536,7 @@ def lost_finish_receipt(ingress, raw=b"", headers=None):
     return identifier, principal, row, completed
 
 
-@pytest.mark.parametrize("recovery_path", ["operation", "status", "shared_check"])
+@pytest.mark.parametrize("recovery_path", ["operation", "read_pool", "status", "shared_check"])
 def test_lost_finish_reply_recovers_past_begin_ttl_under_live_authority(ingress, monkeypatch, recovery_path):
     from types import SimpleNamespace
     import hub.incoming_files as module
@@ -549,6 +549,9 @@ def test_lost_finish_reply_recovers_past_begin_ttl_under_live_authority(ingress,
         response = b["owner"].get("/api/operations/" + identifier)
         assert response.status_code == 200, response.text
         assert response.json()["result"]["data"]["state"] == "complete"
+    elif recovery_path == "read_pool":
+        operation = asyncio.run(app.state.store.run_read(app.state.runtime.operation, identifier, principal))
+        assert operation["result"]["data"]["state"] == "complete"
     elif recovery_path == "status":
         response = b["owner"].get("/api/file-imports/" + row["upload_id"])
         assert response.status_code == 200 and response.json()["state"] == "complete", response.text
@@ -556,8 +559,14 @@ def test_lost_finish_reply_recovers_past_begin_ttl_under_live_authority(ingress,
         checked, _, _ = service._check(row, principal)
         assert checked["state"] == "finished"
     saved = app.state.store.one("SELECT * FROM incoming_file_imports WHERE request_key=?", (row["request_key"],))
-    assert saved["state"] == "finished"
-    assert saved["expires"] == completed["expires"]
+    if recovery_path in {"operation", "read_pool"}:
+        # Receipt authorization may reconstruct the proven lease but never
+        # mutate the manifest, even on a writer-capable calling thread.
+        assert saved["state"] == row["state"]
+        assert saved["expires"] == row["expires"]
+    else:
+        assert saved["state"] == "finished"
+        assert saved["expires"] == completed["expires"]
 
 
 @pytest.mark.parametrize("change", [

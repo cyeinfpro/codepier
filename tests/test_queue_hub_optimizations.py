@@ -13,6 +13,17 @@ from tests.test_reliability import runtime, Peer
 from tests.test_mcp_tasks import task_runtime
 
 
+def test_deployment_defaults_match_ten_second_wait_budget(monkeypatch):
+    from pathlib import Path
+    from shared.config import RuntimeConfig
+    monkeypatch.delenv('HUB_CALL_WAIT_SECONDS', raising=False)
+    assert RuntimeConfig.from_env().wait_seconds == 10
+    root = Path(__file__).resolve().parents[1]
+    assert 'HUB_CALL_WAIT_SECONDS=10' in (root / '.env.example').read_text()
+    assert 'HUB_CALL_WAIT_SECONDS: "${HUB_CALL_WAIT_SECONDS:-10}"' in (root / 'compose.yml').read_text()
+    assert 'HUB_CALL_WAIT_SECONDS: "10"' in (root / 'deploy/k3s/deployment.yaml').read_text()
+
+
 @pytest.mark.asyncio
 async def test_read_pool_parallel_query_only_and_fresh_snapshots(tmp_path):
     store = Store(tmp_path / 'hub')
@@ -149,6 +160,26 @@ async def test_batch_wait_reauthorizes_after_wake(runtime):
     result = await asyncio.wait_for(task, 2)
     assert all('error' in row and 'result' not in row for row in result['operations'])
     assert not r.operation_waiters
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reported,expected', [(65000, 67000), (None, 2000), (-1, 2000), ('65000', 2000)])
+async def test_queue_age_survives_repeated_wait_events(runtime, monkeypatch, reported, expected):
+    import time
+    r, p = runtime
+    identifier = await submit(r, p, 'repeated-wait-age')
+    r.diagnostics.record(identifier, 'waiting_resource', source='agent', seq=1,
+        detail={'queue_reason': 'resource_conflict', 'lane': 'read', 'queue_age_ms': 0})
+    r.diagnostics.record(identifier, 'waiting_resource', source='agent', seq=2,
+        detail={'queue_reason': 'resource_conflict', 'lane': 'read', 'queue_age_ms': reported})
+    now = time.time()
+    r.store.execute("UPDATE operation_events SET at=? WHERE operation_id=? AND source='agent' AND seq=2",
+                    (now - 2, identifier))
+    monkeypatch.setattr('hub.runtime.time.time', lambda: now)
+    receipt = r._pending_receipt(identifier, p)
+    assert receipt['waiting']['queue_age_ms'] == expected
+    r.store.execute("UPDATE operations SET state='succeeded' WHERE id=?", (identifier,))
+    assert r.queue_annotations(r.operation_row(identifier, p), p) == {'queue_stage': 'terminal'}
 
 
 @pytest.mark.asyncio

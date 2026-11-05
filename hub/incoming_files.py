@@ -152,7 +152,7 @@ class IncomingFileService:
         return (row["actor"] == principal.actor and row["grant_id"] == principal.grant_id
                 and row["owner_user_id"] == principal.user_id and row["space_id"] == principal.space_id)
 
-    def _check(self, row, principal, *, project=None):
+    def _check(self, row, principal, *, project=None, persist_recovery=True):
         if not row or not self._owner(row, principal):
             _error("FILE_IMPORT_NOT_FOUND", "File import was not found for this credential", 404)
         principal, current = self.project(row["project_id"], principal)
@@ -165,7 +165,14 @@ class IncomingFileService:
         # A lost finish response must not shorten the Agent's durable receipt
         # to the original 24-hour transfer lease. Authority and mapping were
         # checked above, before consulting any saved completion evidence.
-        row = self._recover_completion(row)
+        if persist_recovery:
+            row = self._recover_completion(row)
+        else:
+            # Authorization runs on a query-only snapshot. The same exact
+            # completion proof may extend its effective lease, without writes.
+            completion = self._completion_receipt(row)
+            if completion is not None:
+                row = {**row, "state": "finished", "expires": completion[0]["expires"]}
         if row["expires"] <= time.time() and row["state"] != "recovery_required":
             _error("FILE_IMPORT_EXPIRED", "File import expired", 410)
         return row, principal, current
@@ -259,8 +266,9 @@ class IncomingFileService:
             except (ValueError, TypeError, KeyError):
                 _error("FILE_IMPORT_NOT_FOUND", "Upload receipt binding is unavailable", 404)
             row = self.store.one("SELECT * FROM incoming_file_imports WHERE upload_id=?", (upload_id,))
-        self._check(row, principal)
-        self._record_operation(row, current)
+        self._check(row, principal, persist_recovery=False)
+        # Outcome bookkeeping belongs to writer-side reconciliation/cleanup,
+        # never receipt authorization on a read-only connection.
 
 
     @staticmethod
