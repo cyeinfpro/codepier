@@ -9,7 +9,7 @@ WINDOWS_CORE = {
     'test_runtime_config_lock_portable.py',
     'test_native_windows.py', 'test_windows_service.py', 'test_windows_local_uninstall.py',
     'test_maintenance_sqlite_diagnostics.py', 'test_windows_python_junction_contract.py',
-    'test_optimization_store.py',
+    'test_optimization_store.py', 'test_owned_child_diagnostics.py',
     'test_regression_plan.py', 'test_smoke.py', 'test_protocol_negotiation.py',
 }
 

@@ -1,6 +1,8 @@
 """Golden paths against a real isolated Hub, real Agent, and real local filesystem."""
 from __future__ import annotations
 import uuid
+import contextlib
+import os
 import json
 import httpx
 import pytest
@@ -13,6 +15,7 @@ def shell_enabled(stack):
     from agent.shell import default_command
     from shared.util import atomic_json
     stack.stop_agent()
+    stack.env['CODEPIER_TEST_PROCESS_DIAGNOSTICS'] = '1'
     stack.config['shell'] = {'enabled': True, 'projects': ['ProjectAlpha'], 'command': default_command()}
     atomic_json(stack.config_path, stack.config)
     stack.start_agent()
@@ -28,11 +31,17 @@ def result(stack, name, args):
         try:
             operation = stack.poll(data['operation_id'], timeout=30)
         except AssertionError as error:
-            # Preserve the original timing/assertion and report its exact
-            # receipt; do not hide a failed process behind a truncated dict.
-            from shared.audit_redaction import redact_text
-            snapshot = stack.client.get('/api/operations/' + data['operation_id']).json()
-            raise AssertionError(redact_text(json.dumps(snapshot, ensure_ascii=True))[-12000:]) from error
+            # Keep the original failure even if bounded, read-only diagnostics fail.
+            from tests.operation_diagnostics import failure_note
+            with contextlib.suppress(Exception):
+                error.add_note(failure_note(stack.client, data['operation_id'],
+                    save_first_status=name == 'exec' and args.get('command') == 'git status --short'))
+            raise
+        if (name == 'exec' and args.get('command') == 'git status --short'
+                and os.environ.get('CODEPIER_TEST_PROCESS_EVIDENCE') == '1'):
+            from tests.operation_diagnostics import failure_note
+            with contextlib.suppress(Exception):
+                failure_note(stack.client, data['operation_id'], save_first_status=True)
         from shared.audit_redaction import redact_text
         assert operation['state'] == 'succeeded', redact_text(json.dumps(operation, ensure_ascii=True))[-12000:]
         return operation['result']['data']
@@ -98,6 +107,24 @@ def test_project_creation_keeps_explicit_read_boundary(stack):
 def test_named_task_executes_once_and_returns_real_output(stack):
     data = result(stack, 'exec', {'project':'ProjectAlpha','task':'smoke','idempotency_key':uuid.uuid4().hex})
     assert data['exit_code'] == 0 and 'PASS: local task completed' in data['output']
+
+
+def test_owned_child_diagnostics_reach_real_http_trace(stack):
+    from tests.operation_diagnostics import bounded_json, failure_note
+    receipt = stack.call('exec', {'project': 'ProjectAlpha', 'task': 'smoke',
+        'yield_seconds': 0, 'idempotency_key': uuid.uuid4().hex})
+    identifier = receipt['operation_id']
+    assert stack.poll(identifier, timeout=30)['state'] == 'succeeded'
+    trace = bounded_json(stack.client, 'POST', '/api/tools/call',
+        json={'tool': 'operations_trace', 'arguments': {
+            'operation_id': identifier, 'after_event_id': 0, 'limit': 200}})
+    assert isinstance(trace['events'], list), trace.keys()
+    stages = {event['stage'] for event in trace['events']}
+    assert {'process_spawning', 'process_spawned'} <= stages
+    note = failure_note(stack.client, identifier)
+    assert 'process_spawning' in note and 'process_spawned' in note
+    print(json.dumps({'http_trace_keys': sorted(trace), 'owned_stages': sorted(
+        stage for stage in stages if stage.startswith('process_'))}))
 
 
 def test_secret_path_is_denied(stack):

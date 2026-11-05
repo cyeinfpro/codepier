@@ -67,7 +67,8 @@ class Agent:
             self.journal = Journal(self.state_dir)
             self.engine = FileEngine(self.config, self.journal, self.config_path)
             self._read_workers = {}
-            self.telemetry = AgentTelemetry(self.journal)
+            self.telemetry = AgentTelemetry(self.journal,
+                process_diagnostics=os.environ.get('CODEPIER_TEST_PROCESS_DIAGNOSTICS') == '1')
             self.build = BuildIdentity("agent")
             self.lifecycle = LifecycleManager(self.config_path, self.state_dir, lambda: self.config)
             self.native = NativeCLI(self)
@@ -1410,6 +1411,12 @@ class Agent:
         if os.name != "nt":
             from agent.owned_subprocess import create_owned_process
             spawn = create_owned_process
+        def process_event(stage, **detail):
+            # Observations must never replace a process exception or await I/O.
+            with contextlib.suppress(Exception):
+                self.telemetry.process_event(id, stage, **detail)
+
+        process_event('process_spawning')
         spawning = asyncio.create_task(spawn(*command, cwd=cwd, env=environment,
                       stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
                       stderr=asyncio.subprocess.STDOUT, **extra))
@@ -1425,6 +1432,7 @@ class Agent:
         except FileNotFoundError as exc:
             raise DevError("COMMAND_MISSING", f"找不到本机命令 {command[0]}，请安装或使用绝对路径") from exc
         self.processes[id] = process
+        process_event('process_spawned', pid=process.pid)
         output_truncated = False
         start = time.monotonic()
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
@@ -1462,6 +1470,7 @@ class Agent:
                 # Read available bytes in larger batches; StreamReader.read does not wait to fill n.
                 chunk = await process.stdout.read(65536)
                 if not chunk:
+                    process_event('process_stdout_eof', pid=process.pid)
                     append_output(output_filter.feed(decoder.decode(b"", final=True), final=True))
                     await snapshot(True)
                     return
@@ -1475,6 +1484,7 @@ class Agent:
             # completed task to its full timeout by retaining the pipe.
             while process.returncode is None:
                 await asyncio.sleep(.05)
+            process_event('process_leader_exited', pid=process.pid, returncode=process.returncode)
 
         reader = waiter = None
         timed_out = False
@@ -1500,8 +1510,10 @@ class Agent:
         except TimeoutError:
             timed_out = True
         finally:
+            process_event('process_cleanup_started', pid=process.pid, reader_done=reader is not None and reader.done())
             try:
                 await self.kill_process(process, include_finished=True)
+                process_event('process_cleanup_finished', pid=process.pid)
                 if reader is not None:
                     try:
                         await asyncio.wait_for(asyncio.shield(reader), 1)
