@@ -253,9 +253,15 @@
 }
 .call-filters {
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--ui-space-2);
+  padding-block: var(--ui-space-3);
+  border-top: 1px solid var(--ui-line);
 }
 .call-filters select {
+  min-height: var(--ui-control-height);
+  padding-inline: var(--ui-space-3);
+  font-size: var(--ui-text-input);
+  border-radius: var(--ui-control-radius);
   max-width: 240px;
 }
 .call-filters #call-search {

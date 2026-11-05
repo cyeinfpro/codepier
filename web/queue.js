@@ -5,7 +5,9 @@ window.CodePierQueue = (() => {
     epoch = 0,
     timer = null,
     controller = null,
-    live = true;
+    live = true,
+    stageFilter = '',
+    truncated = false;
   const pending = new Set();
   const rows = new Map();
   const stages = { hub_queue: 'Hub 待投递', agent_waiting: 'Agent 等资源', running: '运行中' };
@@ -40,10 +42,13 @@ window.CodePierQueue = (() => {
     root = null;
     rows.clear();
     pending.clear();
+    stageFilter = '';
+    truncated = false;
   }
   function placeholder() {
-    return '<section class="panel queue-panel" id="operation-queue" aria-label="当前操作队列"><div class="panel-head"><h2>当前队列</h2><button class="btn ghost small" type="button" data-queue-refresh>刷新队列</button></div><div class="panel-body"><p role="status" data-queue-status>正在读取当前可见操作…</p><div data-queue-content></div><div data-queue-diagnostics></div></div></section>';
+    return '<section class="panel queue-panel" id="operation-queue" aria-label="当前操作队列"><div class="panel-head queue-heading"><div><h2>当前队列</h2><p class="queue-sync" role="status" data-queue-status>正在读取活动操作…</p></div><button class="btn ghost small" type="button" data-queue-refresh>刷新队列</button></div><div class="panel-body"><div data-queue-content></div><div data-queue-diagnostics></div></div></section>';
   }
+
   function waitingHTML(item) {
     const waiting = item.waiting;
     if (!waiting) return '';
@@ -126,62 +131,99 @@ window.CodePierQueue = (() => {
       copy(button.dataset.queueCopy).catch((error) => toast(error.message, true));
   });
   function card(item) {
+    const summary = item.summary || item.id;
     return (
       '<article class="queue-item" data-queue-id="' +
       esc(item.id) +
-      '"><div class="queue-item-head"><strong>' +
-      esc(item.tool) +
-      '</strong>' +
-      badge(item.state) +
-      '</div><p>' +
+      '">' +
+      '<div class="queue-item-head"><div class="queue-identity"><strong class="queue-project">' +
       esc(item.alias || '未记录项目') +
-      ' · ' +
+      '</strong><code class="queue-tool">' +
+      esc(item.tool) +
+      '</code><span class="queue-device">' +
       esc(item.device_name || '未记录节点') +
-      '</p>' +
-      '<code class="queue-summary">' +
-      esc(item.summary || item.id) +
-      '</code>' +
+      '</span></div>' +
+      badge(item.state) +
+      '</div>' +
+      '<details class="queue-command"><summary aria-label="展开或收起参数摘要"><code class="queue-summary">' +
+      esc(summary) +
+      '</code><span class="queue-command-toggle" aria-hidden="true">参数 <span>⌄</span></span></summary>' +
+      '<pre tabindex="0" aria-label="完整参数摘要">' +
+      esc(summary) +
+      '</pre></details>' +
       waitingHTML(item) +
       liveHTML(item) +
-      '<div class="actions"><button type="button" class="btn ghost small" data-action="operation-detail" data-id="' +
+      '<div class="queue-item-footer"><code class="queue-operation-id" title="' +
+      esc(item.id) +
+      '">#' +
+      esc(String(item.id).slice(0, 12)) +
+      '</code><div class="actions">' +
+      '<button type="button" class="btn ghost small" data-action="operation-detail" data-id="' +
       esc(item.id) +
       '">查看操作</button>' +
       (item.can_cancel
-        ? '<button type="button" class="btn danger small" data-queue-cancel="' +
+        ? '<button type="button" class="btn ghost small queue-cancel" data-queue-cancel="' +
           esc(item.id) +
           '"' +
           (pending.has(item.id) ? ' disabled' : '') +
           '>请求取消</button>'
         : '') +
-      '</div></article>'
+      '</div></div></article>'
     );
   }
-  function render(data) {
-    rows.clear();
-    list(data.operations).forEach((item) => rows.set(item.id, item));
+  function render() {
+    const all = [...rows.values()];
+    const items = stageFilter ? all.filter((item) => item.queue_stage === stageFilter) : all;
     return (
-      '<div class="queue-columns">' +
-      Object.entries(stages)
+      '<div class="queue-overview" role="group" aria-label="按队列阶段筛选">' +
+      [['', '全部活动'], ...Object.entries(stages)]
         .map(([key, title]) => {
-          const items = [...rows.values()].filter((item) => item.queue_stage === key);
+          const count = key ? all.filter((item) => item.queue_stage === key).length : all.length;
           return (
-            '<section class="queue-column" aria-label="' +
+            '<button type="button" class="queue-stage" data-queue-stage="' +
+            key +
+            '" aria-pressed="' +
+            (stageFilter === key) +
+            '"><span>' +
             title +
-            '"><h3>' +
-            title +
-            ' <span>' +
-            items.length +
-            '</span></h3>' +
-            (items.map(card).join('') || '<p class="form-note">暂无操作</p>') +
-            '</section>'
+            '</span><strong>' +
+            count +
+            '</strong></button>'
           );
         })
         .join('') +
       '</div>' +
-      (data.truncated
-        ? '<p class="form-note">仅展示最早的 100 个可见活动操作，不代表全部队列。</p>'
+      '<div class="queue-list" tabindex="0" role="region" aria-label="活动操作列表">' +
+      (items.map(card).join('') ||
+        '<div class="queue-empty"><strong>' +
+          (stageFilter ? '此阶段暂无操作' : '当前没有活动操作') +
+          '</strong><span>' +
+          (stageFilter ? '可切换到全部活动查看其他操作。' : '新的活动操作将在同步后显示。') +
+          '</span></div>') +
+      '</div>' +
+      (truncated
+        ? '<p class="form-note queue-limit">仅展示最早的 100 个可见活动操作，不代表全部队列。</p>'
         : '')
     );
+  }
+  function paint() {
+    const target = root.querySelector('[data-queue-content]');
+    const focusedStage = document.activeElement?.closest('[data-queue-stage]')?.dataset.queueStage;
+    const expanded = new Set(
+      [...target.querySelectorAll('.queue-command[open]')].map(
+        (node) => node.closest('[data-queue-id]').dataset.queueId,
+      ),
+    );
+    const scroll = target.querySelector('.queue-list')?.scrollTop || 0;
+    target.innerHTML = render();
+    target.querySelectorAll('.queue-command').forEach((node) => {
+      node.open = expanded.has(node.closest('[data-queue-id]').dataset.queueId);
+    });
+    target.querySelector('.queue-list').scrollTop = scroll;
+    if (focusedStage !== undefined)
+      target.querySelectorAll('[data-queue-stage]').forEach((node) => {
+        if (node.dataset.queueStage === focusedStage) node.focus({ preventScroll: true });
+      });
   }
   function schedule() {
     clearTimeout(timer);
@@ -199,12 +241,17 @@ window.CodePierQueue = (() => {
       // A refresh must not replace a pressed/focused button or selected evidence.
       const selection = window.getSelection();
       if (
-        !target.contains(document.activeElement) &&
+        (!target.contains(document.activeElement) ||
+          document.activeElement?.closest('[data-queue-stage]')) &&
         (!selection || selection.isCollapsed || !target.contains(selection.anchorNode))
-      )
-        target.innerHTML = render(data);
+      ) {
+        rows.clear();
+        list(data.operations).forEach((item) => rows.set(item.id, item));
+        truncated = !!data.truncated;
+        paint();
+      }
       root.querySelector('[data-queue-status]').textContent =
-        '当前空间内有权查看的活动操作 · 已同步 ' +
+        '当前空间可见操作 · 已同步 ' +
         new Date().toLocaleTimeString('zh-CN', { hour12: false }) +
         (live ? '' : ' · 自动更新已暂停');
       const diagnostics = root.querySelector('[data-queue-diagnostics]');
@@ -272,7 +319,8 @@ window.CodePierQueue = (() => {
   async function cancel(button) {
     const id = button.dataset.queueCancel,
       item = rows.get(id),
-      c = context();
+      c = context(),
+      originFocus = document.activeElement;
     if (!item?.can_cancel || pending.has(id)) return;
     pending.add(id);
     button.disabled = true;
@@ -313,7 +361,11 @@ window.CodePierQueue = (() => {
         button.disabled = false;
         // The sheet cannot restore a disabled origin. Restore it only when
         // dismissal left focus unclaimed and the original queue is still live.
-        if (restoreFocus && current(c) && document.activeElement === document.body)
+        if (
+          restoreFocus &&
+          current(c) &&
+          (document.activeElement === document.body || document.activeElement === originFocus)
+        )
           button.focus({ preventScroll: true });
       }
     }
@@ -325,6 +377,14 @@ window.CodePierQueue = (() => {
     root.addEventListener('click', async (event) => {
       const button = event.target.closest('button');
       if (!button || button.disabled) return;
+      if (button.hasAttribute('data-queue-stage')) {
+        stageFilter = button.dataset.queueStage;
+        paint();
+        root.querySelectorAll('[data-queue-stage]').forEach((node) => {
+          if (node.dataset.queueStage === stageFilter) node.focus({ preventScroll: true });
+        });
+        return;
+      }
       if (button.hasAttribute('data-queue-cancel')) return cancel(button);
       if (button.hasAttribute('data-queue-refresh')) return refresh();
       if (button.hasAttribute('data-queue-report')) {

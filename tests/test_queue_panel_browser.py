@@ -56,10 +56,11 @@ def queue_page(request):
 
 def test_three_stages_blockers_xss_mobile_and_safe_run_entry(queue_page, tmp_path):
     page = queue_page
-    assert page.locator(".queue-column").count() == 3
-    assert page.locator(".queue-column").nth(0).locator("[data-queue-id=hub]").count() == 1
-    assert page.locator(".queue-column").nth(1).locator("[data-queue-id=reader]").count() == 1
-    assert page.locator(".queue-column").nth(2).locator("[data-queue-id=writer]").count() == 1
+    assert page.locator("[data-queue-stage]").count() == 4
+    assert page.locator("[data-queue-stage=hub_queue] strong").inner_text() == "1"
+    assert page.locator("[data-queue-stage=agent_waiting] strong").inner_text() == "1"
+    assert page.locator("[data-queue-stage=running] strong").inner_text() == "1"
+    assert page.locator(".queue-list > [data-queue-id]").count() == 3
     assert "24 秒" in page.locator("[data-queue-id=reader]").inner_text()
     assert "部分阻塞操作受限或不可用" in page.locator("[data-queue-id=reader]").inner_text()
     assert not page.locator("img").count()
@@ -243,3 +244,100 @@ def test_queue_missing_confirmation_component_fails_closed(queue_design_page):
     assert page.evaluate("window.nativeConfirmCalls") == 0
     assert page.evaluate("window.toolCalls") == []
     assert "确认组件" in page.evaluate("window.lastToast")
+
+
+def test_queue_stage_filters_are_keyboard_accessible_and_keep_totals(queue_page):
+    page = queue_page
+    stage = page.locator('[data-queue-stage="agent_waiting"]')
+    stage.focus()
+    page.keyboard.press("Enter")
+    expect(page.locator('[data-queue-stage="agent_waiting"]')).to_be_focused()
+    expect(page.locator('[data-queue-stage="agent_waiting"]')).to_have_attribute("aria-pressed", "true")
+    assert page.locator("[data-queue-id]").count() == 1
+    assert page.locator("[data-queue-id=reader]").count() == 1
+    assert page.locator('[data-queue-stage=""] strong').inner_text() == "3"
+    page.locator('[data-queue-stage=""]').click()
+    assert page.locator("[data-queue-id]").count() == 3
+    page.evaluate("document.activeElement.blur();window.queueData.operations=window.queueData.operations.filter(x=>x.queue_stage==='running');CodePierQueue.refresh()")
+    page.wait_for_function("document.querySelectorAll('[data-queue-id]').length===1")
+    page.locator('[data-queue-stage="hub_queue"]').click()
+    assert page.locator(".queue-empty").inner_text().startswith("此阶段暂无操作")
+    assert page.locator('[data-queue-stage="running"] strong').inner_text() == "1"
+    page.locator('[data-queue-stage=""]').click()
+    assert page.locator("[data-queue-id=writer]").count() == 1
+    page.evaluate("document.activeElement.blur();window.queueData.operations=[];CodePierQueue.refresh()")
+    page.wait_for_function("document.querySelector('.queue-empty')?.textContent.includes('当前没有活动操作')")
+    assert page.locator("[data-queue-id]").count() == 0
+    assert page.locator('[data-queue-stage=""] strong').inner_text() == "0"
+
+
+@pytest.mark.parametrize("scheme", ["light", "dark"])
+@pytest.mark.parametrize("width", [1440, 390, 320])
+def test_queue_long_commands_use_available_width_and_bounded_height(queue_page, scheme, width, tmp_path):
+    page = queue_page
+    page.set_viewport_size({"width": width, "height": 900})
+    page.evaluate(r"""scheme => {
+        document.documentElement.dataset.appearance=scheme;
+        const base=window.queueData.operations[2];
+        window.longSummary="command=python - <<'PY'\n" + "print('synthetic evidence <script>')\n".repeat(60);
+        window.queueData.operations=[{...base,id:'first',alias:'Atlas',device_name:'Studio',summary:window.longSummary},
+            {...base,id:'second',alias:'Console',device_name:'Studio',summary:window.longSummary}];
+        CodePierQueue.refresh();
+    }""", scheme)
+    page.locator("[data-queue-id=first]").wait_for()
+    assert page.evaluate("document.documentElement.scrollWidth<=innerWidth")
+    dimensions = page.evaluate("""() => {
+        const row=document.querySelector('.queue-item').getBoundingClientRect();
+        const list=document.querySelector('.queue-list').getBoundingClientRect();
+        return {ratio:row.width/list.width, rowHeight:row.height, panel:document.querySelector('.queue-panel').getBoundingClientRect().height};
+    }""")
+    assert dimensions["ratio"] > .90
+    assert dimensions["rowHeight"] < (200 if width > 680 else 280)
+    assert dimensions["panel"] < (560 if width > 680 else 740)
+    assert not page.locator(".queue-column").count()
+    assert not page.locator("[data-queue-id=first] pre").is_visible()
+    assert page.locator(".queue-summary").first.evaluate("el=>el.scrollHeight>el.clientHeight")
+    page.screenshot(path=str(tmp_path / f"queue-redesign-{scheme}-{width}.png"), full_page=True)
+    summary = page.locator("[data-queue-id=first] summary")
+    summary.focus()
+    page.keyboard.press("Enter")
+    expect(page.locator("[data-queue-id=first] pre")).to_be_visible()
+    assert page.locator("[data-queue-id=first] pre").inner_text() == page.evaluate("window.longSummary")
+    assert page.locator("[data-queue-id=first] script").count() == 0
+    page.get_by_role("button", name="刷新队列", exact=True).click()
+    expect(page.locator("[data-queue-id=first] details")).to_have_attribute("open", "")
+    page.locator("[data-queue-id=first] summary").click()
+    assert not page.locator("[data-queue-id=first] pre").is_visible()
+
+
+def test_queue_list_scroll_and_open_command_survive_refresh(queue_page):
+    page = queue_page
+    page.evaluate(r"""() => {
+        const base=window.queueData.operations[2];
+        window.queueData.truncated=true;
+        window.queueData.operations=Array.from({length:30},(_,i)=>({...base,id:'item-'+i,summary:'command='+('line\n'.repeat(60))}));
+        CodePierQueue.refresh();
+    }""")
+    page.locator("[data-queue-id=item-0]").wait_for()
+    page.locator("[data-queue-id=item-0] summary").click()
+    page.evaluate("""() => {
+        document.activeElement.blur();
+        document.querySelector('.queue-list').scrollTop=180;
+        window.listScroll=document.querySelector('.queue-list').scrollTop;
+        CodePierQueue.refresh();
+    }""")
+    page.wait_for_function("window.readCalls.length>=3")
+    assert page.evaluate("document.querySelector('.queue-list').scrollTop===window.listScroll")
+    assert page.locator("[data-queue-id=item-0] details").get_attribute("open") is not None
+    assert "不代表全部队列" in page.locator(".queue-limit").inner_text()
+
+
+
+def test_queue_filter_focus_does_not_freeze_live_updates(queue_page):
+    page = queue_page
+    page.locator('[data-queue-stage="running"]').click()
+    page.evaluate("window.queueData.operations[2].summary='updated while filter focused';CodePierQueue.refresh()")
+    page.wait_for_function("document.querySelector('[data-queue-id=writer]').textContent.includes('updated while filter focused')")
+    expect(page.locator('[data-queue-stage="running"]')).to_be_focused()
+    expect(page.locator('[data-queue-stage="running"]')).to_have_attribute("aria-pressed", "true")
+    assert page.locator('[data-queue-id]').count() == 1
