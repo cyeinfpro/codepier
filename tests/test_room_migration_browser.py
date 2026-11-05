@@ -61,6 +61,27 @@ def test_legacy_room_read_only_safe_stop_explicit_cutover_and_original_receipt(
     page = context.new_page()
     page.add_init_script("""(() => {
       window.panelTrace=[];
+      window.roomRefreshEvidence={started:0,completed:0,active:0,failed:[]};
+      let roomStore;
+      Object.defineProperty(window,'CodePierRoomStore',{configurable:true,
+        get(){return roomStore;},set(value){
+          roomStore=value;
+          const create=value.create;
+          value.create=function(...args){
+            const instance=create.apply(this,args),refresh=instance.refresh;
+            instance.refresh=function(...refreshArgs){
+              const evidence=window.roomRefreshEvidence;
+              evidence.started++;evidence.active++;
+              const pending=refresh.apply(this,refreshArgs);
+              const finished=()=>{evidence.completed++;evidence.active--;};
+              Promise.resolve(pending).then(finished,error=>{
+                evidence.failed.push(String(error));finished();
+              });
+              return pending;
+            };
+            return instance;
+          };
+        }});
       for(const method of ['showModal','close']) {
         const original=HTMLDialogElement.prototype[method];
         HTMLDialogElement.prototype[method]=function(...args){
@@ -99,7 +120,14 @@ def test_legacy_room_read_only_safe_stop_explicit_cutover_and_original_receipt(
         before = len(writes)
         editor.dispatch_event('keydown', {'key': 'Enter', 'code': 'Enter'})
         page.locator('#cr-composer').evaluate('(form) => form.requestSubmit()')
+        # Observe the actual background read before checking its effects and
+        # starting the separate project-panel action. The event only schedules
+        # this work; the unchanged draft is not evidence that it has finished.
+        refresh_started = page.evaluate('roomRefreshEvidence.started')
         page.evaluate('document.dispatchEvent(new Event("visibilitychange"))')
+        page.wait_for_function('before => roomRefreshEvidence.completed > before && '
+            'roomRefreshEvidence.active === 0', arg=refresh_started, timeout=5000)
+        assert not page.evaluate('roomRefreshEvidence.failed')
         expect(editor).to_have_value('迁移前未发送的草稿')
         assert len(writes) == before
 
@@ -260,6 +288,7 @@ def test_legacy_room_read_only_safe_stop_explicit_cutover_and_original_receipt(
         assert not errors, errors
     finally:
         print('PANEL_TRACE', page.evaluate('window.panelTrace || []'))
+        print('ROOM_REFRESH_TRACE', page.evaluate('window.roomRefreshEvidence'))
         context.close()
 
 
