@@ -193,10 +193,10 @@ def record(page, engine, label, extra=None):
     page.screenshot(path=str(EVIDENCE / f"{engine}-{label}.png"), animations="disabled", full_page=False)
 
 
-def mobile_context(pool, engine):
+def mobile_context(pool, engine, extra_hook=""):
     context = pool(engine).new_context(viewport={"width": 390, "height": 844},
                                        is_mobile=True, has_touch=True, device_scale_factor=1)
-    context.add_init_script(HOOK)
+    context.add_init_script(HOOK + ";\n" + extra_hook)
     return context
 
 
@@ -387,12 +387,101 @@ def test_mobile_background_restore_coalesces_real_hint_reads(collaboration_stack
         context.close()
 
 
+# Only this journey mixes real team approval with an isolated synthetic history.
+# Observe complete refresh lifecycles, then defer only automatic metadata timers
+# during that synthetic phase. Explicit goal loads and history actions stay live.
+PAGINATION_HOOK = r"""(() => {
+  const pending=new Set(), held=new Map();
+  let paused=false, draining=false;
+  const state=()=>window.mobileGoalsContext?.state;
+  const observe=value=>{
+    if(value && typeof value.then==='function'){
+      pending.add(value);
+      const settled=()=>pending.delete(value);
+      value.then(settled,settled);
+    }
+    return value;
+  };
+  for(const [name,method] of [
+    ['CodePierCollaborationGoals','load'],['CodePierCollaborationWorkspace','onOpen'],
+  ]){
+    const previous=Object.getOwnPropertyDescriptor(window,name);
+    let current;
+    Object.defineProperty(window,name,{configurable:true,
+      get(){return previous?.get ? previous.get.call(this) : current;},
+      set(value){
+        const create=value.create;
+        value.create=function(ctx){
+          if(method==='onOpen'){
+            const open=ctx.onOpen;
+            ctx={...ctx,onOpen(...args){return observe(open.apply(this,args));}};
+          }
+          const instance=create.call(this,ctx);
+          if(method==='load'){
+            const load=instance.load;
+            instance.load=function(...args){return observe(load.apply(this,args));};
+          }
+          return instance;
+        };
+        if(previous?.set)previous.set.call(this,value);
+        else current=value;
+      },
+    });
+  }
+  const schedule=window.setTimeout, cancel=window.clearTimeout;
+  window.setTimeout=function(callback,delay,...args){
+    if(typeof callback!=='function')return schedule.call(this,callback,delay,...args);
+    const id=schedule.call(this,function(){
+      const s=state();
+      const key=id===s?.timer ? 'timer' : id===s?.workspaceTimer ? 'workspaceTimer' : null;
+      if(!key)return callback.apply(this,args);
+      const run=()=>observe(callback.apply(this,args));
+      if(paused && !(key==='workspaceTimer' && draining)){
+        held.set(id,{key,generation:s.generation,run});
+        return;
+      }
+      return run();
+    },delay);
+    return id;
+  };
+  window.clearTimeout=function(id){
+    held.delete(id); // An app-cancelled/superseded callback must not be replayed.
+    return cancel.call(this,id);
+  };
+  window.mobilePagination={
+    pause(){
+      const s=state();
+      paused=true;
+      // A trailing timer can reschedule itself at the 4-second freshness
+      // boundary. Drain that whole promise chain, not just its first timer ID.
+      draining=true;
+      observe(s.workspacePending?.promise);
+    },
+    idle(){
+      const ready=!pending.size && !state()?.busy && !window.mobileRelayContext?.chat().relaySync;
+      if(ready)draining=false; // Atomically close admission before fixture setup.
+      return ready;
+    },
+    resume(){
+      paused=false;
+      draining=false;
+      for(const id of [...held.keys()]){
+        const item=held.get(id);
+        held.delete(id);
+        if(item && state()?.generation===item.generation && state()[item.key]===id)item.run();
+      }
+    },
+  };
+})()"""
+
+
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_mobile_team_approval_and_explicit_goal_history_page(collaboration_stack, chat_browser_pool, engine):
     stack = collaboration_stack
-    context = mobile_context(chat_browser_pool, engine)
+    context = mobile_context(chat_browser_pool, engine, PAGINATION_HOOK)
     page = context.new_page()
     queries, held_history = [], []
+    history_released = False
     try:
         first = prepare(page, stack)
         second = add_dot(stack, "移动验收成员")
@@ -423,6 +512,8 @@ def test_mobile_team_approval_and_explicit_goal_history_page(collaboration_stack
         assert approved["state"] == "active" and approved["coordinator_dot_id"] == second["id"]
         assert len(approved["participants"]) == 2
         wait_js(page, "!mobileGoalsContext.state.busy && !mobileRelayContext.chat().relaySync")
+        page.evaluate("()=>mobilePagination.pause()")
+        wait_js(page, "mobilePagination.idle()")
 
         def goal_pages(route):
             query = parse_qs(urlsplit(route.request.url).query)
@@ -476,6 +567,7 @@ def test_mobile_team_approval_and_explicit_goal_history_page(collaboration_stack
             "id": "discarded-history", "objective": "过期历史页不得渲染",
             "state": "proposed", "version": 1,
         }], "next_cursor": None})
+        history_released = True
         try:
             expect(page.locator(".cc-coordination-list .cc-goal-summary")).to_have_count(80)
         except AssertionError:
@@ -534,4 +626,12 @@ def test_mobile_team_approval_and_explicit_goal_history_page(collaboration_stack
         expect(area).to_have_value("选择团队期间保留的中文草稿")
         no_execution(stack)
     finally:
-        context.close()
+        try:
+            if held_history and not history_released:
+                held_history[0].continue_()
+            page.evaluate("()=>window.mobilePagination?.resume()")
+            # Await released work, not the next recurring timer it schedules.
+            # Closing the browser first would silently cancel the callbacks.
+            wait_js(page, "!window.mobilePagination || mobilePagination.idle()")
+        finally:
+            context.close()

@@ -321,7 +321,8 @@ def verify_evidence(snapshot, artifact_payloads, *, expected_sha, expected_workf
     prefix = "codepier-" + version
     asset_names = {prefix + suffix for suffix in
                    ("-source-full.zip", "-source-full.manifest.json", "-source.zip", "-source.manifest.json")}
-    require(set(source) == asset_names | {"public-check.json", "panel-update-check.json", "source-build.json", "runtime-acceptance.json"},
+    require(set(source) == asset_names | {"public-check.json", "panel-update-check.json", "source-build.json",
+                                         "runtime-acceptance.json", "hub-image-acceptance.json"},
             "Public-source artifact file set differs")
     assets = {name: source[name] for name in sorted(asset_names)}
     assets_receipt = {name: {"sha256": digest(raw), "bytes": len(raw)} for name, raw in assets.items()}
@@ -357,6 +358,18 @@ def verify_evidence(snapshot, artifact_payloads, *, expected_sha, expected_workf
     require(verified_receipt(load_json(source['runtime-acceptance.json']), commit=expected_sha,
             archive_sha256=full_digest, source_inventory_sha256=source_identity),
             'Mandatory real runtime qualification failed or belongs to different source bytes')
+    startup = load_json(source["hub-image-acceptance.json"])
+    require(set(startup) == {"commit", "archive_sha256", "extraction_umask", "startup", "version",
+                             "agent_sha256", "agent_bytes", "state_layout", "image_id"} and
+            startup.get("commit") == expected_sha and
+            startup.get("archive_sha256") == digest(source[prefix + "-source.zip"]) and
+            startup.get("extraction_umask") == "0077" and startup.get("startup") == "healthy" and
+            startup.get("version") == version and startup.get("state_layout") == "split-state-v1" and
+            sha256(startup.get("agent_sha256")) and exact_int(startup.get("agent_bytes")) and
+            startup["agent_bytes"] <= 8 * 1024 * 1024 and
+            isinstance(startup.get("image_id"), str) and
+            re.fullmatch(r"sha256:[0-9a-f]{64}", startup["image_id"]) is not None,
+            "Private-extraction Hub startup proof is missing or belongs to different source bytes")
     regression_identity = regression_inventory_sha256(source_files)
     for platform in PLATFORMS:
         platform_files = selected["complete-" + platform][1]

@@ -90,8 +90,13 @@ def evidence():
         'commit': SHA, 'archive_sha256': promotion.digest(assets['codepier-1.2.3-source-full.zip']),
         'source_inventory_sha256': full_inventory, 'source_files_unchanged': True,
         'cleanup_pending': False, 'checks': {name: True for name in CHECKS}}
+    startup = {"commit": SHA, "archive_sha256": promotion.digest(assets["codepier-1.2.3-source.zip"]),
+               "extraction_umask": "0077", "startup": "healthy", "version": "1.2.3",
+               "agent_sha256": "e" * 64, "agent_bytes": 1234, "state_layout": "split-state-v1",
+               "image_id": "sha256:" + "f" * 64}
     source_artifact = {**assets, "source-build.json": encode(build),
-                       "runtime-acceptance.json": encode(qualification)}
+                       "runtime-acceptance.json": encode(qualification),
+                       "hub-image-acceptance.json": encode(startup)}
     for panel, suffix in ((False, "-source-full"), (True, "-source")):
         raw = assets["codepier-1.2.3" + suffix + ".zip"]
         source_artifact["panel-update-check.json" if panel else "public-check.json"] = encode({
@@ -717,4 +722,52 @@ def test_ci_promotion_shell_falls_back_without_success(tmp_path, event, ref, exi
 def test_promotion_requires_real_container_qualification_bound_to_exact_bytes(evidence, field, value):
     replace_artifact(evidence, 'public-source', 'runtime-acceptance.json', lambda proof: proof.update({field: value}))
     with pytest.raises(promotion.EvidenceError, match='runtime qualification'):
+        verify(evidence)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("commit", "f" * 40), ("archive_sha256", "0" * 64), ("extraction_umask", "0022"),
+    ("startup", "unhealthy"), ("version", "1.2.4"), ("state_layout", "legacy"),
+    ("agent_sha256", "not-a-digest"), ("agent_bytes", 0), ("agent_bytes", True),
+    ("agent_bytes", 8 * 1024 * 1024 + 1), ("image_id", "codepier:mutable"),
+    ("image_id", None), ("unexpected", "field"),
+])
+def test_promotion_requires_private_extraction_hub_startup(evidence, field, value):
+    replace_artifact(evidence, "public-source", "hub-image-acceptance.json",
+                     lambda proof: proof.update({field: value}))
+    with pytest.raises(promotion.EvidenceError, match="Hub startup proof"):
+        verify(evidence)
+
+
+@pytest.mark.parametrize("field", [
+    "commit", "archive_sha256", "extraction_umask", "startup", "version",
+    "agent_sha256", "agent_bytes", "state_layout", "image_id",
+])
+def test_promotion_requires_complete_hub_startup_proof(evidence, field):
+    replace_artifact(evidence, "public-source", "hub-image-acceptance.json",
+                     lambda proof: proof.pop(field))
+    with pytest.raises(promotion.EvidenceError, match="Hub startup proof"):
+        verify(evidence)
+
+
+def test_promotion_binds_hub_startup_to_panel_not_full_archive(evidence):
+    snapshot, payloads, _ = evidence
+    item = next(item for item in snapshot["artifacts"] if item["name"] == "public-source")
+    files = promotion.unpack(payloads[item["id"]])
+    full_digest = promotion.digest(files["codepier-1.2.3-source-full.zip"][0])
+    replace_artifact(evidence, "public-source", "hub-image-acceptance.json",
+                     lambda proof: proof.update(archive_sha256=full_digest))
+    with pytest.raises(promotion.EvidenceError, match="Hub startup proof"):
+        verify(evidence)
+
+
+def test_promotion_rejects_missing_hub_startup_file(evidence):
+    snapshot, payloads, _ = evidence
+    item = next(item for item in snapshot["artifacts"] if item["name"] == "public-source")
+    files = {key: value[0] for key, value in promotion.unpack(payloads[item["id"]]).items()}
+    del files["hub-image-acceptance.json"]
+    raw = zip_bytes(files)
+    payloads[item["id"]] = raw
+    item.update(digest="sha256:" + promotion.digest(raw), size_in_bytes=len(raw))
+    with pytest.raises(promotion.EvidenceError, match="artifact file set"):
         verify(evidence)
