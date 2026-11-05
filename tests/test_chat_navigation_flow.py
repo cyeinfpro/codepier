@@ -10,6 +10,19 @@ from tests.test_chat_global_flow import seed_rows
 OUT=Path(__file__).resolve().parents[1]/'docs/evidence/cli-global-flow-20260917'
 
 
+def capture_painted_viewport(page, path):
+    # Theme/layout updates can resolve before Chromium has submitted a frame.
+    # Wait for real visible frames, then capture exactly once. A stalled render
+    # or protocol failure still fails the test; there is no screenshot retry.
+    page.wait_for_function('''async expected => {
+      await document.fonts.ready;
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      return document.visibilityState === 'visible' &&
+        innerWidth === expected.width && innerHeight === expected.height;
+    }''', arg=page.viewport_size, timeout=5000)
+    return page.screenshot(path=str(path))
+
+
 def test_history_filters_do_not_change_current_context(chat_page):
     p=chat_page;seed_rows(p)
     p.locator('[data-session-id="'+'a'*32+'"]').click()
@@ -116,13 +129,13 @@ def test_project_picker_and_composer_fit_all_viewports(chat_page,width,height):
     for appearance in ['light','dark']:
         p.evaluate('chatApplyAppearance('+repr(appearance)+')')
         if width<=760:p.click('#chat-history-toggle')
-        p.screenshot(path=str(OUT/f'history-{p.context.browser.browser_type.name}-{appearance}-{width}.png'))
+        capture_painted_viewport(p,OUT/f'history-{p.context.browser.browser_type.name}-{appearance}-{width}.png')
         p.click('#chat-new');expect(p.locator('#chat-project-search')).to_be_focused()
         box=p.locator('#chat-project-dialog').bounding_box()
         assert box and box['x']>=0 and box['y']>=0
         assert box['x']+box['width']<=width+1 and box['y']+box['height']<=height+1
         assert p.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
-        p.screenshot(path=str(OUT/f'project-picker-{p.context.browser.browser_type.name}-{appearance}-{width}.png'))
+        capture_painted_viewport(p,OUT/f'project-picker-{p.context.browser.browser_type.name}-{appearance}-{width}.png')
         p.fill('#chat-project-search','not found');expect(p.locator('#chat-project-results')).to_contain_text('没有匹配')
         p.press('#chat-project-search','Escape')
         if width<=760:p.keyboard.press('Escape')
