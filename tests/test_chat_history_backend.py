@@ -1,5 +1,7 @@
 """Global history: authorization before counts/search, stable ordering and paging."""
+import asyncio
 import json
+import threading
 import uuid
 from contextlib import closing
 from types import SimpleNamespace
@@ -24,6 +26,109 @@ def add(obj,project,**extra):
     with closing(database(obj.directory)) as db,db:
         db.execute('INSERT INTO sessions('+','.join(row)+') VALUES ('+','.join('?' for _ in row)+')',list(row.values()))
     return row['id']
+
+
+@pytest.mark.asyncio
+async def test_listing_batches_ownership_transaction(service, monkeypatch):
+    from contextlib import contextmanager
+    obj, project, _ = service
+    for _ in range(20):
+        add(obj, project)
+    calls = []
+    transaction = obj.runtime.store.transaction
+
+    @contextmanager
+    def counted(*args, **kwargs):
+        calls.append(1)
+        with transaction(*args, **kwargs):
+            yield
+
+    monkeypatch.setattr(obj.runtime.store, 'transaction', counted)
+    data = await endpoint(obj)(request())
+    assert data['total'] == 21
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_transcript_search_has_shared_byte_budget(service, monkeypatch):
+    import hub.native_cli as module
+    obj, project, sid = service
+    other = add(obj, project)
+    raw = b'{"type":"message","text":"no match"}\n'
+    with closing(database(obj.directory)) as db, db:
+        for identifier in (sid, other):
+            db.execute('INSERT INTO output VALUES (?,?,?)', (identifier, 0, raw))
+    monkeypatch.setattr(module, 'SEARCH_BYTES', len(raw) + 1)
+    with pytest.raises(DevError) as error:
+        await endpoint(obj)(request(), q='missing-search-text')
+    assert error.value.code == 'CLI_SEARCH_LIMIT'
+    assert not obj.searching
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('cancel', [False, True])
+async def test_search_does_not_block_writer_rechecks_access_and_drains_cancel(service, monkeypatch, cancel):
+    obj, project, _ = service
+    entered, release = threading.Event(), threading.Event()
+    worker = await obj.runtime.store.run(threading.get_ident)
+
+    def search(*args, **kwargs):
+        assert threading.get_ident() != worker
+        entered.set()
+        assert release.wait(5)
+        return True
+
+    monkeypatch.setattr(obj, 'search_transcript', search)
+    task = asyncio.create_task(endpoint(obj)(request(), q='needle'))
+    try:
+        assert await asyncio.to_thread(entered.wait, 3)
+        assert await asyncio.wait_for(obj.runtime.store.run(lambda: 'writer remains available'), 1) == 'writer remains available'
+        with pytest.raises(DevError) as busy:
+            await endpoint(obj)(request(), q='needle')
+        assert busy.value.code == 'CLI_SEARCH_BUSY'
+        if cancel:
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done() and obj.searching
+        else:
+            project['allow_tasks'] = False
+        release.set()
+        if cancel:
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            assert (await task)['total'] == 0
+        assert not obj.searching
+    finally:
+        release.set()
+        if not task.done():
+            await task
+
+
+@pytest.mark.asyncio
+async def test_markdown_export_tail_auth_runs_off_loop_and_rechecks_each_message(service):
+    obj, _, sid = service
+    loop_thread = threading.get_ident()
+    auth = TestAuth()
+    panel = auth.panel
+
+    def checked(*args, **kwargs):
+        assert threading.get_ident() != loop_thread
+        return panel(*args, **kwargs)
+
+    auth.panel = checked
+    raw = b'{"type":"user","text":"first"}\n{"type":"message","text":"second"}\n'
+    with closing(database(obj.directory)) as db, db:
+        db.execute('INSERT INTO output VALUES (?,?,?)', (sid, 0, raw))
+    export = next(r.endpoint for r in make_native_router(auth, obj.runtime).routes if r.path.endswith('/export'))
+    response = await export(sid, request(), format='md')
+    iterator = response.body_iterator
+    assert 'Chat export' in await anext(iterator)
+    assert 'first' in await anext(iterator)
+    auth.allowed = False
+    with pytest.raises(DevError) as error:
+        await anext(iterator)
+    assert error.value.code == 'LOGIN_REQUIRED'
 
 
 @pytest.mark.asyncio

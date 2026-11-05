@@ -14,6 +14,9 @@ from shared.native_cli import database, public, identifier, LIVE, TOTAL_QUOTA
 from shared.util import DevError
 from hub import iam
 
+SEARCH_BYTES = 8 * 1024 * 1024
+MAX_SEARCHES = 4
+
 
 class NativeService:
     def __init__(self,runtime):
@@ -23,6 +26,7 @@ class NativeService:
         self.changed=asyncio.Condition()
         self.revision=0
         self.event_cache=OrderedDict()
+        self.searching=set()
         with closing(database(self.directory)): pass
 
     def project(self,value,principal):
@@ -216,14 +220,18 @@ class NativeService:
         return offsets, changed
 
     @staticmethod
-    def search_transcript(db,sid,query):
+    def search_transcript(db,sid,query,*,budget=None):
         """Search synchronized text, including UTF-8/JSON split across chunks.
 
         Only public conversation text participates; settings, credentials and
         approval payloads are not a searchable side channel.
         """
         buffer=bytearray();tail='';last_key=None;keep=max(0,len(query)-1)
+        if budget is None: budget=[SEARCH_BYTES]
         for row in db.execute('SELECT data FROM output WHERE session=? ORDER BY offset',(sid,)):
+            budget[0]-=len(row['data'])
+            if budget[0]<0:
+                raise DevError('CLI_SEARCH_LIMIT','Transcript search exceeded its byte budget; narrow the project, provider or status filter',429)
             buffer.extend(row['data'])
             while b'\n' in buffer:
                 line,_,rest=buffer.partition(b'\n');buffer[:]=rest
@@ -294,40 +302,85 @@ def make_native_router(auth,runtime):
         return {'allowed':True,'project_id':current['id']}
 
     @router.get('/sessions')
-    @database_endpoint(runtime.store)
-    def sessions(request:Request,project:str='',provider:str='',status:str='',q:str='',offset:int=0,limit:int=40,mode:str=''):
-        principal=auth.panel(request)
+    async def sessions(request:Request,project:str='',provider:str='',status:str='',q:str='',offset:int=0,limit:int=40,mode:str=''):
         offset=max(0,offset);limit=max(1,min(limit,100));query=q[:200].strip().casefold()
-        result=[];projects={}
-        with closing(database(service.directory)) as db:
-            # Revalidate each mapping once per request, before filtering, counting
-            # or returning any metadata. No cross-request authorization cache.
-            for row in db.execute("SELECT * FROM sessions WHERE status!='deleted' ORDER BY updated DESC,created DESC,id DESC"):
-                pid=row['project_id']
-                if pid not in projects:
-                    try: projects[pid]=dict(service.project(pid,principal))
-                    except DevError: projects[pid]=None
-                p=projects[pid]
-                if not p or p['device_id']!=row['device_id'] or p['root']!=row['root']: continue
-                try:
-                    with runtime.store.transaction():service.ownership(row['id'],principal,p)
-                except DevError:continue
-                if project and p['id']!=project or provider and row['provider']!=provider or status and row['status']!=status: continue
-                if mode and row['mode']!=mode: continue
-                alias=p.get('alias','');node=p.get('device_name','')
-                metadata=' '.join((row['title'],alias,node,row['cwd'],row['root'],row['provider'])).casefold()
-                if query and query not in metadata:
-                    if not service.search_transcript(db,row['id'],query): continue
-                result.append({**public(row),'online':runtime.online(p['device_id']),
-                               'project_alias':alias,'device_name':node})
-            total=len(result)
-            # Removing the final row on a page returns the preceding valid page,
-            # including archives beyond the former 1,000-row offset ceiling.
-            offset=min(offset,((total-1)//limit)*limit) if total else 0
-            page=result[offset:offset+limit]
-            for row in page:
-                row['cached_bytes']=db.execute('SELECT COALESCE(MAX(offset+length(data)),0) FROM output WHERE session=?',(row['id'],)).fetchone()[0]
-        return {'sessions':page,'total':total,'offset':offset,'limit':limit}
+
+        def authorized(rows=None):
+            principal=auth.panel(request)
+            result=[];projects={}
+            if rows is None:
+                with closing(database(service.directory)) as db:
+                    rows=[dict(row) for row in db.execute("""SELECT * FROM sessions WHERE status!='deleted'
+                        AND (?='' OR project_id=?) AND (?='' OR provider=?)
+                        AND (?='' OR status=?) AND (?='' OR mode=?)
+                        ORDER BY updated DESC,created DESC,id DESC""",
+                        (project,project,provider,provider,status,status,mode,mode))]
+            # Legacy adoption uses at most one transaction, not one BEGIN per row.
+            # Transcript I/O never runs inside this writer phase.
+            with runtime.store.transaction():
+                for row in rows:
+                    pid=row['project_id']
+                    if pid not in projects:
+                        try: projects[pid]=dict(service.project(pid,principal))
+                        except DevError: projects[pid]=None
+                    p=projects[pid]
+                    if not p or p['device_id']!=row['device_id'] or p['root']!=row['root']: continue
+                    try: service.ownership(row['id'],principal,p)
+                    except DevError: continue
+                    result.append({**row,'online':runtime.online(p['device_id']),
+                                   'project_alias':p.get('alias',''),'device_name':p.get('device_name','')})
+            return principal.user_id,result
+
+        def search(rows):
+            found=[];budget=[SEARCH_BYTES]
+            with closing(database(service.directory)) as db:
+                for row in rows:
+                    metadata=' '.join((row['title'],row['project_alias'],row['device_name'],
+                                       row['cwd'],row['root'],row['provider'])).casefold()
+                    if query and query not in metadata and not service.search_transcript(db,row['id'],query,budget=budget): continue
+                    found.append(row)
+            return found
+
+        def page_rows(rows):
+            total=len(rows)
+            position=min(offset,((total-1)//limit)*limit) if total else 0
+            page=[]
+            with closing(database(service.directory)) as db:
+                for row in rows[position:position+limit]:
+                    cached=db.execute('SELECT COALESCE(MAX(offset+length(data)),0) FROM output WHERE session=?',(row['id'],)).fetchone()[0]
+                    page.append({**public(row),'online':row['online'],'project_alias':row['project_alias'],
+                                 'device_name':row['device_name'],'cached_bytes':cached})
+            return {'sessions':page,'total':total,'offset':position,'limit':limit}
+
+        owner=await run_db(runtime.store,lambda: auth.panel(request).user_id)
+        if owner in service.searching or len(service.searching)>=MAX_SEARCHES:
+            raise DevError('CLI_SEARCH_BUSY','Session search is busy; wait for the current request',429)
+        service.searching.add(owner)
+        try:
+            if not query:
+                def list_page():
+                    _,visible=authorized()
+                    return page_rows(visible)
+                return await run_db(runtime.store,list_page)
+            _,rows=await run_db(runtime.store,authorized)
+            # Independent native-cache reads and bounded transcript parsing do
+            # not monopolize Store's single writer or the ASGI event loop.
+            if query:
+                task=asyncio.create_task(asyncio.to_thread(search,rows))
+                cancelled=False
+                while not task.done():
+                    try: await asyncio.shield(task)
+                    except asyncio.CancelledError: cancelled=True
+                if cancelled:
+                    task.exception()  # Drain the worker before releasing capacity.
+                    raise asyncio.CancelledError()
+                rows=task.result()
+            def finish():
+                _,visible=authorized(rows)
+                return page_rows(visible)
+            return await run_db(runtime.store,finish)
+        finally:
+            service.searching.discard(owner)
 
     @router.get('/sessions/{sid}/output')
     @database_endpoint(runtime.store)
@@ -410,7 +463,7 @@ def make_native_router(auth,runtime):
             else:
                 await run_db(runtime.store, export_authorized)
                 for message in messages.values():
-                    service.session_project(sid,auth.panel(request))
+                    await run_db(runtime.store,export_authorized)
                     yield message['type']+'\n\n'+message['text']+'\n\n'
         return StreamingResponse(content(),media_type='application/json' if format=='json' else 'text/plain',headers={
             'Content-Disposition':f'attachment; filename="chat-{sid}.{format}"',

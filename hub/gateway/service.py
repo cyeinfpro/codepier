@@ -17,6 +17,14 @@ from hub.gateway.remote import RemotePool
 from shared.util import DevError, valid_json_value
 
 
+RECEIPT_RETENTION = 7 * 86400
+MAX_GRANT_RECEIPTS = 1000
+MAX_USER_RECEIPTS = 2000
+MAX_SPACE_RECEIPTS = 10000
+MAX_RECEIPTS = 100000
+CLEANUP_BATCH = 100
+
+
 def result_value(raw, tool):
     if not isinstance(raw, dict) or not valid_json_value(raw) or raw.get('resultType', 'complete') != 'complete':
         raise DevError('GATEWAY_UNSUPPORTED_RESULT', '后端未返回完整工具结果；未自动回应批准或输入请求', 502)
@@ -238,11 +246,36 @@ class Gateway:
                         receipt = self.receipt(principal, old['id'])
                         if receipt['result'] is not None:
                             return old['id'], self._with_receipt(receipt['result'], old['id'])
+                        if old['state'] == 'rejected':
+                            # This receipt proves that before_send never completed.
+                            # Only this explicit same-key call may retry it, with
+                            # the immutable fingerprint and current authority checked.
+                            self.store.db.execute("UPDATE gateway_calls SET state='running',error_code='',updated=? WHERE id=? AND state='rejected'",
+                                                  (time.time(), old['id']))
+                            return old['id'], None
                         raise DevError('GATEWAY_ORIGINAL_CALL', '原调用仍在执行或结果未知；请读取原 call_id，未重发', 409, call_id=old['id'])
-                self.store.db.execute("DELETE FROM gateway_calls WHERE space_id=? AND state!='running' AND updated<?", (principal.space_id, time.time() - 7 * 86400))
-                count = self.store.one('SELECT count(*) AS n FROM gateway_calls WHERE space_id=?', (principal.space_id,))['n']
-                if count >= 1000:
-                    raise DevError('GATEWAY_BUSY', '回执配额已满；未发送操作', 429)
+                # Unknown/running calls retain their idempotency evidence even
+                # after retention. Never turn a possibly sent request into a new one.
+                for scope, scope_args in (
+                        ('space_id=? AND grant_id=?', (principal.space_id, principal.grant_id)),
+                        ('space_id=? AND user_id=?', (principal.space_id, principal.user_id)),
+                        ('space_id=?', (principal.space_id,))):
+                    self.store.db.execute('DELETE FROM gateway_calls WHERE id IN ('
+                        'SELECT id FROM gateway_calls WHERE ' + scope + " AND state IN ('completed','tool_error','rejected')"
+                        ' AND updated<? ORDER BY updated,id LIMIT ?)',
+                        (*scope_args, time.time() - RECEIPT_RETENTION, CLEANUP_BATCH))
+                quotas = (
+                    ('space_id=? AND grant_id=?', (principal.space_id, principal.grant_id), MAX_GRANT_RECEIPTS, 'grant'),
+                    ('space_id=? AND user_id=?', (principal.space_id, principal.user_id), MAX_USER_RECEIPTS, 'user'),
+                    ('space_id=?', (principal.space_id,), MAX_SPACE_RECEIPTS, 'space'),
+                    ('1=1', (), MAX_RECEIPTS, 'instance'),
+                )
+                for where, params, limit, scope in quotas:
+                    count = self.store.one('SELECT count(*) AS n FROM (SELECT 1 FROM gateway_calls WHERE '
+                                           + where + ' LIMIT ?)', (*params, limit))['n']
+                    if count >= limit:
+                        raise DevError('GATEWAY_BUSY', '回执配额已满；请核对已有调用，未发送操作', 429,
+                                       quota_scope=scope, quota_limit=limit, retry_after=60, retry_after_seconds=60)
                 call_id = 'gwc_' + uuid.uuid4().hex
                 now = time.time()
                 self.store.db.execute("""INSERT INTO gateway_calls(id,space_id,user_id,grant_id,binding_id,tool,tool_hash,state,created,updated,request_key,fingerprint)

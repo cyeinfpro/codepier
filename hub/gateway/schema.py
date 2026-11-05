@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS gateway_calls (
     UNIQUE(space_id,grant_id,request_key)
 );
 CREATE INDEX IF NOT EXISTS gateway_calls_owner ON gateway_calls(space_id,user_id,created DESC,id);
+CREATE INDEX IF NOT EXISTS gateway_calls_cleanup ON gateway_calls(space_id,updated,id)
+    WHERE state IN ('completed','tool_error','rejected');
 """
 
 

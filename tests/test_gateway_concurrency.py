@@ -427,6 +427,96 @@ async def test_pool_isolation_and_idle_eviction_do_not_evict_active_identity():
     await pool.close()
 
 
+@pytest.mark.asyncio
+async def test_gateway_rejected_receipt_retries_same_key_only_after_proven_no_send(monkeypatch):
+    gateway, principal, backend, *_ = make_gateway(monkeypatch)
+    original = gateway.pool.get
+
+    async def unavailable(*args):
+        raise DevError('GATEWAY_BUSY', 'synthetic pre-send capacity', 429)
+
+    monkeypatch.setattr(gateway.pool, 'get', unavailable)
+    try:
+        with pytest.raises(DevError) as error:
+            await gateway.call(principal, 'run', {'number': 1}, lambda: principal, request_key='rejected-key')
+        assert error.value.details['outcome'] == 'not_sent'
+        rejected = gateway.store.one('SELECT * FROM gateway_calls')
+        assert rejected['state'] == 'rejected' and not backend.calls
+        with pytest.raises(DevError) as conflict:
+            await gateway.call(principal, 'run', {'number': 2}, lambda: principal, request_key='rejected-key')
+        assert conflict.value.code == 'GATEWAY_IDEMPOTENCY_CONFLICT'
+        monkeypatch.setattr(gateway.pool, 'get', original)
+        result = await gateway.call(principal, 'run', {'number': 1}, lambda: principal, request_key='rejected-key')
+        assert result['_meta']['codepier/callId'] == rejected['id']
+        assert backend.calls == [1]
+        assert gateway.store.one('SELECT state FROM gateway_calls')['state'] == 'completed'
+    finally:
+        await gateway.close()
+        gateway.store.db.close()
+
+
+@pytest.mark.asyncio
+async def test_gateway_expired_unknown_survives_cleanup_and_never_replays(monkeypatch):
+    gateway, principal, backend, *_ = make_gateway(monkeypatch)
+
+    async def fail(number, request):
+        raise httpx.ReadTimeout('unknown', request=request)
+
+    try:
+        backend.call_hook = fail
+        with pytest.raises(DevError):
+            await gateway.call(principal, 'run', {'number': 1}, lambda: principal, request_key='old-unknown')
+        old = gateway.store.one('SELECT * FROM gateway_calls')
+        gateway.store.execute('UPDATE gateway_calls SET updated=1,created=1')
+        backend.call_hook = None
+        await gateway.call(principal, 'run', {'number': 2}, lambda: principal, request_key='fresh-call')
+        with pytest.raises(DevError) as error:
+            await gateway.call(principal, 'run', {'number': 1}, lambda: principal, request_key='old-unknown')
+        assert error.value.code == 'GATEWAY_ORIGINAL_CALL'
+        assert backend.calls == [1, 2]
+        assert gateway.store.one('SELECT * FROM gateway_calls WHERE id=?', (old['id'],))['updated'] == 1
+    finally:
+        await gateway.close()
+        gateway.store.db.close()
+
+
+@pytest.mark.asyncio
+async def test_gateway_receipt_quotas_isolate_grants_users_and_keep_global_bounds(monkeypatch):
+    import hub.gateway.service as module
+    gateway, principal, backend, *_ = make_gateway(monkeypatch)
+    monkeypatch.setattr(module, 'MAX_GRANT_RECEIPTS', 2)
+    monkeypatch.setattr(module, 'MAX_USER_RECEIPTS', 3)
+    monkeypatch.setattr(module, 'MAX_SPACE_RECEIPTS', 8)
+    monkeypatch.setattr(module, 'MAX_RECEIPTS', 10)
+    try:
+        for number in range(2):
+            await gateway.call(principal, 'run', {'number': number}, lambda: principal)
+        with pytest.raises(DevError) as full:
+            await gateway.call(principal, 'run', {}, lambda: principal)
+        assert full.value.details['quota_scope'] == 'grant'
+        principal.grant_id = 'second-grant'
+        await gateway.call(principal, 'run', {'number': 2}, lambda: principal)
+        with pytest.raises(DevError) as full:
+            await gateway.call(principal, 'run', {}, lambda: principal)
+        assert full.value.details['quota_scope'] == 'user'
+        principal.user_id = 'other-user'
+        principal.grant_id = 'other-grant'
+        await gateway.call(principal, 'run', {'number': 3}, lambda: principal)
+        assert backend.calls == [0, 1, 2, 3]
+        monkeypatch.setattr(module, 'MAX_SPACE_RECEIPTS', 4)
+        with pytest.raises(DevError) as full:
+            await gateway.call(principal, 'run', {}, lambda: principal)
+        assert full.value.details['quota_scope'] == 'space'
+        principal.space_id = 'other-space'
+        monkeypatch.setattr(module, 'MAX_RECEIPTS', 4)
+        with pytest.raises(DevError) as full:
+            await gateway.call(principal, 'run', {}, lambda: principal)
+        assert full.value.details['quota_scope'] == 'instance'
+    finally:
+        await gateway.close()
+        gateway.store.db.close()
+
+
 class MemoryStore:
     """Real in-memory SQL receipts with synchronous authorization, no Hub server."""
     def __init__(self):

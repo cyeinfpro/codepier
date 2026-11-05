@@ -77,6 +77,59 @@ def begin(b, raw=b"", **changes):
     return request, response.json()
 
 
+@pytest.mark.parametrize("remote", [False, True])
+def test_inflight_buckets_isolate_users_and_are_released_on_cancel(ingress, remote):
+    from contextlib import ExitStack
+    from types import SimpleNamespace
+    from hub.incoming_files import MAX_INFLIGHT, MAX_GLOBAL_INFLIGHT
+    _, _, service, _, _, _ = ingress
+    owner = SimpleNamespace(user_id="owner")
+    other = SimpleNamespace(user_id="other")
+    counter = "remote_inflight" if remote else "inflight"
+    buckets = service.remote_inflight_by_owner if remote else service.inflight_by_owner
+    with ExitStack() as stack:
+        for _ in range(MAX_INFLIGHT):
+            stack.enter_context(service.capacity(owner, remote=remote))
+        with pytest.raises(DevError):
+            with service.capacity(owner, remote=remote):
+                pytest.fail("same user bypassed its quota")
+        with service.capacity(other, remote=remote):
+            assert getattr(service, counter) == MAX_INFLIGHT + 1
+        with pytest.raises(asyncio.CancelledError):
+            with service.capacity(other, remote=remote):
+                raise asyncio.CancelledError()
+        assert "other" not in buckets
+    assert getattr(service, counter) == 0 and not buckets
+    with ExitStack() as stack:
+        for number in range(MAX_GLOBAL_INFLIGHT):
+            stack.enter_context(service.capacity(SimpleNamespace(user_id=str(number)), remote=remote))
+        with pytest.raises(DevError):
+            with service.capacity(other, remote=remote):
+                pytest.fail("global guard was removed")
+    assert getattr(service, counter) == 0 and not buckets
+
+
+def test_expired_recovery_evidence_does_not_leak_active_quota(ingress, monkeypatch):
+    import hub.incoming_files as module
+    app, browsers, service, calls, _, _ = ingress
+    monkeypatch.setattr(module, "MAX_ACTIVE", 1)
+    monkeypatch.setattr(module, "MAX_GLOBAL_ACTIVE", 1)
+    original, first = begin(browsers["owner"])
+    principal = calls[-1][2]
+    app.state.store.execute("UPDATE incoming_file_imports SET state='recovery_required'")
+    blocked = browsers["owner"].post("/api/file-imports", json=metadata())
+    assert blocked.status_code == 429  # Live Agent lease still consumes capacity.
+    app.state.store.execute("UPDATE incoming_file_imports SET expires=?", (time.time() - module.RETENTION - 1,))
+    begin(browsers["owner"])
+    service.cleanup()
+    retained = app.state.store.one("SELECT * FROM incoming_file_imports WHERE upload_id=?", (first["upload_id"],))
+    assert retained["state"] == "recovery_required"
+    assert service.checked_for(first["upload_id"], principal)[0]["request_key"] == retained["request_key"]
+    # The old key is still bound to its original immutable metadata.
+    conflict = browsers["owner"].post("/api/file-imports", json={**original, "path": "different"})
+    assert conflict.status_code == 409
+
+
 def test_gate_preserves_explicit_disable_and_rejects_malformed(ingress, monkeypatch):
     app, b, service, calls, _, _ = ingress
     for value in ("", "1", "TRUE", "false", " true"):
@@ -474,7 +527,7 @@ def test_cleanup_has_bounded_seven_day_retention_and_preserves_operations(ingres
     assert app.state.store.one("SELECT COUNT(*) AS n FROM operations")["n"] == 4
 
 
-def test_expired_unknown_and_ambiguous_records_survive_cleanup_and_keep_quota(ingress, monkeypatch):
+def test_expired_unknown_and_ambiguous_records_survive_cleanup_without_live_quota(ingress, monkeypatch):
     import hub.incoming_files as module
     app, b, service, _, _, _ = ingress
     monkeypatch.setattr(module, "MAX_ACTIVE", 1)
@@ -482,8 +535,14 @@ def test_expired_unknown_and_ambiguous_records_survive_cleanup_and_keep_quota(in
     assert b["owner"].post("/api/file-imports", json=metadata()).status_code == 409
     app.state.store.execute("UPDATE incoming_file_imports SET expires=?", (time.time() - module.RETENTION * 2,))
     assert service.cleanup()["removed"] == 0
-    assert app.state.store.one("SELECT state FROM incoming_file_imports")["state"] == "recovery_required"
-    assert b["owner"].post("/api/file-imports", json=metadata()).status_code == 429
+    retained = app.state.store.one("SELECT * FROM incoming_file_imports")
+    assert retained["state"] == "recovery_required"
+    # A new request reaches the synthetic Agent and its explicit recovery error,
+    # rather than being permanently denied by expired Hub capacity accounting.
+    assert b["owner"].post("/api/file-imports", json=metadata()).status_code == 409
+    assert app.state.store.one("SELECT COUNT(*) AS n FROM incoming_file_imports")["n"] == 2
+    assert app.state.store.one("SELECT state FROM incoming_file_imports WHERE request_key=?",
+                               (retained["request_key"],))["state"] == "recovery_required"
 
 
 def test_expired_unfinished_pending_is_not_forgotten(ingress, monkeypatch):

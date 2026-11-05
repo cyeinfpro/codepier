@@ -9,6 +9,7 @@ from hub.operation_history import result as operation_result
 
 import asyncio
 import base64
+from contextlib import contextmanager
 import hashlib
 import json
 import math
@@ -34,6 +35,7 @@ MAX_GLOBAL_ACTIVE = 256
 MAX_BEGIN_HOURLY = 60
 MAX_RECORDS = 100000
 MAX_INFLIGHT = 8
+MAX_GLOBAL_INFLIGHT = 64
 BODY_TIMEOUT = 30
 TOOLS = frozenset("incoming_upload_" + name for name in ("begin", "status", "chunk", "finish"))
 _HEX = re.compile(r"[a-f0-9]{64}")
@@ -113,6 +115,8 @@ class IncomingFileService:
         self.store = runtime.store
         self.inflight = 0
         self.remote_inflight = 0
+        self.inflight_by_owner = {}
+        self.remote_inflight_by_owner = {}
         self.store.execute("""CREATE TABLE IF NOT EXISTS incoming_file_imports (
             request_key TEXT PRIMARY KEY, upload_id TEXT UNIQUE,
             actor TEXT NOT NULL, grant_id TEXT, owner_user_id TEXT NOT NULL,
@@ -124,6 +128,24 @@ class IncomingFileService:
             ON incoming_file_imports(space_id,owner_user_id,actor,created)""")
         self.store.execute("""CREATE INDEX IF NOT EXISTS incoming_file_imports_expiry
             ON incoming_file_imports(expires)""")
+
+    @contextmanager
+    def capacity(self, principal, *, remote=False):
+        """Loop-owned counters share a user bucket across credentials/spaces."""
+        counter = 'remote_inflight' if remote else 'inflight'
+        owners = self.remote_inflight_by_owner if remote else self.inflight_by_owner
+        owner = principal.user_id
+        if owners.get(owner, 0) >= MAX_INFLIGHT or getattr(self, counter) >= MAX_GLOBAL_INFLIGHT:
+            _error("FILE_IMPORT_BUSY", "Too many concurrent import requests for this user or instance", 429)
+        owners[owner] = owners.get(owner, 0) + 1
+        setattr(self, counter, getattr(self, counter) + 1)
+        try:
+            yield
+        finally:
+            setattr(self, counter, getattr(self, counter) - 1)
+            owners[owner] -= 1
+            if not owners[owner]:
+                del owners[owner]
 
     def principal(self, auth, request):
         if not ingress_enabled(self.store):
@@ -210,13 +232,16 @@ class IncomingFileService:
             self.cleanup()
             self._refresh_owner(principal)
             now = time.time()
+            # Retain uncertain publication evidence indefinitely, but an expired
+            # transfer lease no longer occupies a live upload slot. Recovery of
+            # the original ID remains possible; its key is never recycled here.
             counts = self.store.one("""SELECT
-                SUM(CASE WHEN state='recovery_required' OR (expires>? AND state NOT IN ('finished','failed')) THEN 1 ELSE 0 END) AS active,
+                SUM(CASE WHEN expires>? AND state NOT IN ('finished','failed') THEN 1 ELSE 0 END) AS active,
                 SUM(CASE WHEN created>? THEN 1 ELSE 0 END) AS recent
                 FROM incoming_file_imports WHERE space_id=? AND owner_user_id=?""",
                 (now, now - 3600, principal.space_id, principal.user_id))
             global_count = self.store.one("""SELECT COUNT(*) AS n FROM incoming_file_imports
-                WHERE state='recovery_required' OR (expires>? AND state NOT IN ('finished','failed'))""", (now,))["n"]
+                WHERE expires>? AND state NOT IN ('finished','failed')""", (now,))["n"]
             total = self.store.one("SELECT COUNT(*) AS n FROM incoming_file_imports")["n"]
             if (total >= MAX_RECORDS or (counts["active"] or 0) >= MAX_ACTIVE or (counts["recent"] or 0) >= MAX_BEGIN_HOURLY
                     or global_count >= MAX_GLOBAL_ACTIVE):
@@ -401,7 +426,7 @@ class IncomingFileService:
         # the original disconnected HTTP waiter. This scan is bounded by quota.
         rows = self.store.all("""SELECT * FROM incoming_file_imports
             WHERE space_id=? AND owner_user_id=? AND state NOT IN ('finished','failed')
-            AND (expires>? OR state='recovery_required') ORDER BY created LIMIT ?""",
+            AND expires>? ORDER BY created LIMIT ?""",
             (principal.space_id, principal.user_id, time.time(), MAX_GLOBAL_ACTIVE))
         for row in rows:
             operation = self.store.one("""SELECT * FROM operations
@@ -533,10 +558,7 @@ class IncomingFileService:
         return self._check(row, principal)
 
     async def _invoke_for(self, name, args, principal, row, *, begin=False):
-        if self.remote_inflight >= MAX_INFLIGHT:
-            _error("FILE_IMPORT_BUSY", "Too many concurrent import operations", 429)
-        self.remote_inflight += 1
-        try:
+        with self.capacity(principal, remote=True):
             try:
                 result = await self.runtime.invoke(name, args, principal)
             except DevError as exc:
@@ -549,8 +571,6 @@ class IncomingFileService:
                 if isinstance(identifier, str) and _ID.fullmatch(identifier):
                     exc.details.setdefault("operation_id", identifier)
                 raise
-        finally:
-            self.remote_inflight -= 1
 
     async def begin(self, args, principal):
         """For an already authenticated in-process adapter, never a URL fetcher."""
@@ -635,11 +655,8 @@ def make_incoming_file_router(auth, runtime):
 
     @router.post("/api/file-imports")
     async def begin(request: Request):
-        await run_db(runtime.store, service.principal, auth, request)
-        if service.inflight >= MAX_INFLIGHT:
-            _error("FILE_IMPORT_BUSY", "Too many concurrent import requests", 429)
-        service.inflight += 1
-        try:
+        principal = await run_db(runtime.store, service.principal, auth, request)
+        with service.capacity(principal):
             raw = await body(request, MAX_JSON, lambda: service.principal(auth, request))
             try:
                 args = begin_arguments(json.loads(raw))
@@ -648,8 +665,6 @@ def make_incoming_file_router(auth, runtime):
             row, principal = await run_db(runtime.store, service.reserve, auth, request, args)
             args["project"] = row["project_id"]
             return await invoke(request, "incoming_upload_begin", args, row, principal, begin=True)
-        finally:
-            service.inflight -= 1
 
     @router.get("/api/file-imports/{upload_id}")
     async def status(upload_id: str, request: Request):
@@ -674,10 +689,7 @@ def make_incoming_file_router(auth, runtime):
             _error("INVALID_IMPORT_HASH", "Expected X-Chunk-Sha256")
         if offset >= row["bytes"]:
             _error("INVALID_IMPORT_OFFSET", "Chunk starts outside the declared file")
-        if service.inflight >= MAX_INFLIGHT:
-            _error("FILE_IMPORT_BUSY", "Too many concurrent import requests", 429)
-        service.inflight += 1
-        try:
+        with service.capacity(principal):
             raw = await body(request, min(CHUNK, row["bytes"] - offset),
                              lambda: service.checked(auth, request, upload_id))
             if not raw or hashlib.sha256(raw).hexdigest() != digest:
@@ -688,8 +700,6 @@ def make_incoming_file_router(auth, runtime):
                     "data": base64.b64encode(raw).decode("ascii"),
                     "idempotency_key": _step_key(upload_id, "chunk", offset, digest)}
             return await invoke(request, "incoming_upload_chunk", args, row, principal)
-        finally:
-            service.inflight -= 1
 
     @router.post("/api/file-imports/{upload_id}/finish")
     async def finish(upload_id: str, request: Request):
