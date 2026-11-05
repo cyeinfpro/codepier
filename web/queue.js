@@ -276,6 +276,7 @@ window.CodePierQueue = (() => {
     if (!item?.can_cancel || pending.has(id)) return;
     pending.add(id);
     button.disabled = true;
+    let restoreFocus = false;
     try {
       const text =
         '请求取消 ' +
@@ -283,27 +284,38 @@ window.CodePierQueue = (() => {
         ' #' +
         id.slice(0, 12) +
         '？已发生的副作用不会回滚；运行中的命令需等待节点确认。';
-      const yes = CP.ui.confirmSheet
-        ? await CP.ui.confirmSheet({
-            title: '请求取消操作？',
-            body: text,
-            confirmLabel: '请求取消',
-            danger: true,
-          })
-        : confirm(text);
+      if (typeof CP.ui?.confirmSheet !== 'function')
+        throw new Error('确认组件未就绪，请刷新页面后重试。');
+      const yes = await CP.ui.confirmSheet({
+        title: '请求取消操作？',
+        body: text,
+        confirmLabel: '请求取消',
+        danger: true,
+      });
+      restoreFocus = !yes;
       if (!yes || !current(c)) return;
       await tool('operations_cancel', { operation_id: id });
       if (current(c)) {
         root.querySelector('[data-queue-status]').textContent =
           '取消请求已提交，等待执行回执确认结果。';
+        toast('取消请求已提交，等待执行回执确认结果。');
         button.blur();
+        // The request has settled. A refreshed card must not inherit the
+        // disabled state of the old button when live polling is paused.
+        pending.delete(id);
         await refresh();
       }
     } catch (error) {
       if (current(c)) toast(error.message, true);
     } finally {
       if (current(c)) pending.delete(id);
-      if (button.isConnected) button.disabled = false;
+      if (button.isConnected) {
+        button.disabled = false;
+        // The sheet cannot restore a disabled origin. Restore it only when
+        // dismissal left focus unclaimed and the original queue is still live.
+        if (restoreFocus && current(c) && document.activeElement === document.body)
+          button.focus({ preventScroll: true });
+      }
     }
   }
   function bind() {

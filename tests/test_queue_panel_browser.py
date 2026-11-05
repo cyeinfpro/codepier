@@ -2,7 +2,7 @@
 from pathlib import Path
 
 import pytest
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import expect, sync_playwright
 
 from tests.browser_launch import launch_browser
 
@@ -159,3 +159,87 @@ def test_old_cancel_completion_preserves_new_mount_duplicate_guard(queue_page):
     page.wait_for_function("window.readCalls.length>=3")
     assert page.locator("[data-queue-cancel=hub]").is_disabled()
     page.evaluate("window.decide(false)")
+
+
+@pytest.fixture(params=["chromium", "webkit"])
+def queue_design_page(request):
+    """Exercise the actual bundled confirmation layer rather than the test stub."""
+    with sync_playwright() as playwright:
+        browser = launch_browser(getattr(playwright, request.param), headless=True)
+        page = browser.new_page(viewport={"width": 390, "height": 844})
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.set_content('<html lang="zh-CN"><body><main id="page"></main><div id="toasts"></div></body></html>')
+        page.add_script_tag(path=str(ROOT / "web/core/bundle.js"))
+        harness = "\n".join(line for line in HARNESS.splitlines()
+                            if not line.startswith("const CP="))
+        page.add_script_tag(content=harness)
+        for name in ("tokens.css", "styles.css", "call-log.css", "queue.css"):
+            page.add_style_tag(path=str(ROOT / "web" / name))
+        page.add_script_tag(path=str(ROOT / "web/queue.js"))
+        page.evaluate("document.querySelector('#page').innerHTML=CodePierQueue.placeholder();CodePierQueue.bind();CodePierQueue.setLive(false)")
+        page.locator("[data-queue-id=reader]").wait_for()
+        try:
+            yield page
+            assert not errors
+        finally:
+            page.evaluate("CodePierQueue.detach()")
+            browser.close()
+
+
+@pytest.mark.parametrize("scheme", ["light", "dark"])
+def test_queue_real_sheet_cancel_focus_and_single_submission(queue_design_page, scheme, tmp_path):
+    page = queue_design_page
+    page.evaluate("scheme => document.documentElement.dataset.appearance=scheme", scheme)
+    button = page.locator("[data-queue-cancel=hub]")
+    button.click()
+    sheet = page.locator("dialog.ui-sheet")
+    sheet.wait_for()
+    assert "已发生的副作用不会回滚" in sheet.inner_text()
+    expect(sheet.get_by_role("button", name="取消", exact=True)).to_be_focused()
+    page.evaluate("document.querySelector('[data-queue-cancel=hub]').click()")
+    assert sheet.count() == 1
+    assert page.evaluate("document.documentElement.scrollWidth<=innerWidth")
+    expect(sheet).to_have_css("opacity", "1")
+    page.screenshot(path=str(tmp_path / ("queue-sheet-" + scheme + ".png")))
+    page.keyboard.press("Escape")
+    page.wait_for_function("!document.querySelector('dialog.ui-sheet')")
+    assert button.is_enabled()
+    expect(button).to_be_focused()
+    assert page.evaluate("window.toolCalls") == []
+    button.click()
+    page.evaluate("window.holdTool=true")
+    sheet.get_by_role("button", name="请求取消", exact=True).click()
+    page.wait_for_function("window.toolCalls.length===1")
+    assert button.is_disabled()
+    page.evaluate("document.querySelector('[data-queue-cancel=hub]').click()")
+    assert page.locator("dialog.ui-sheet").count() == 0
+    assert page.evaluate("window.toolCalls.length") == 1
+    page.evaluate("window.finishTool({pending:true})")
+    page.wait_for_function("!document.querySelector('[data-queue-cancel=hub]').disabled")
+    assert "等待执行回执确认结果" in page.evaluate("window.lastToast")
+
+
+@pytest.mark.parametrize("change", [
+    "S.space_id='changed'",
+    "S.session={user_id:'another'}",
+    "S.page='overview'",
+    "CodePierQueue.detach();document.querySelector('#page').replaceChildren()",
+])
+def test_queue_real_sheet_rechecks_context(queue_design_page, change):
+    page = queue_design_page
+    page.locator("[data-queue-cancel=hub]").click()
+    page.evaluate(change)
+    page.locator("dialog.ui-sheet").get_by_role("button", name="请求取消", exact=True).click()
+    page.wait_for_function("!document.querySelector('dialog.ui-sheet')")
+    assert page.evaluate("window.toolCalls") == []
+
+
+def test_queue_missing_confirmation_component_fails_closed(queue_design_page):
+    page = queue_design_page
+    page.evaluate("() => {CP={ui:{}};window.nativeConfirmCalls=0;window.confirm=()=>{window.nativeConfirmCalls++;return true}}")
+    page.locator("[data-queue-cancel=hub]").click()
+    page.wait_for_function("!document.querySelector('[data-queue-cancel=hub]').disabled")
+    assert page.evaluate("window.nativeConfirmCalls") == 0
+    assert page.evaluate("window.toolCalls") == []
+    assert "确认组件" in page.evaluate("window.lastToast")
