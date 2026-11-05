@@ -80,7 +80,21 @@ window.CodePierIdentity = (() => {
   }
   function bindShell() {
     const choice = $('#iam-active-space');
-    if (choice) choice.onchange = () => switchSpace(choice.value);
+    if (choice)
+      choice.onchange = async () => {
+        const login = S.session;
+        choice.disabled = true;
+        try {
+          await switchSpace(choice.value);
+        } catch (error) {
+          if (S.session === login && choice.isConnected) toast(error.message, true);
+        } finally {
+          if (choice.isConnected) {
+            choice.value = S.space_id || '';
+            choice.disabled = false;
+          }
+        }
+      };
     if (!admin()) $$('[data-nav="members"]').forEach((n) => (n.hidden = true));
     if (!me?.instance_admin) $$('[data-nav="identity-admin"]').forEach((n) => (n.hidden = true));
   }

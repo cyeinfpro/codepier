@@ -1155,6 +1155,10 @@ async function chatSend(retry = false) {
     return;
   }
   if (!v.pending) {
+    if (chatImageBytes(v.files) > CHAT_ATTACHMENT_MAX_BYTES) {
+      chatStatus('每条消息的图片合计不能超过 20 MiB', true);
+      return;
+    }
     const text = v.draft.trim();
     if (chatDraftBytes(v) > CHAT_MESSAGE_MAX_BYTES) {
       chatStatus('消息不能超过 64 KiB', true);
@@ -2223,6 +2227,10 @@ async function chatStop() {
     danger: true,
   });
   if (!confirmed || !chatCurrent(gen, v)) return;
+  if (v.stopSessionId !== row.id) {
+    v.stopSessionId = row.id;
+    v.stopReceipt = uid();
+  }
   v.stopReceipt = v.stopReceipt || uid();
   await chatAPI('stop', { id: row.id, receipt: v.stopReceipt }, project);
   if (chatCurrent(gen, v)) chatStatus('已请求停止，等待原生进程退出');
@@ -2360,6 +2368,17 @@ function chatFiles() {
   }
   chatSyncChrome();
 }
+function chatImageBytes(files) {
+  return files.reduce((total, entry) => {
+    const file = entry.source || entry;
+    return (
+      total +
+      (/\.(png|jpe?g|webp|gif)$/i.test(entry.name || file.name || '')
+        ? Number(file.size || entry.size || 0)
+        : 0)
+    );
+  }, 0);
+}
 async function chatUpload(files) {
   const v = chatView(),
     project = ChatUI.project,
@@ -2370,6 +2389,10 @@ async function chatUpload(files) {
   }
   if (v.files.length + files.length > CHAT_ATTACHMENT_MAX_COUNT) {
     chatStatus('每条消息最多 10 个附件', true);
+    return;
+  }
+  if (chatImageBytes([...v.files, ...files]) > CHAT_ATTACHMENT_MAX_BYTES) {
+    chatStatus('每条消息的图片合计不能超过 20 MiB', true);
     return;
   }
   const entries = files.map((file) => {

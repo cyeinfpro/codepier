@@ -598,3 +598,19 @@ store.applyWork(work(651));store.draft().reading={atEnd:true};end=651;await stor
 assert.equal(store.state.works.length,50);assert.equal(store.state.works.at(-1).id,'w602');
 assert.equal(store.state.worksCursor,'before-602');assert.equal(store.state.worksComplete,false);
 """)
+
+
+def test_large_attachment_gets_bounded_transfer_timeout_and_stable_retry():
+    run_js(r"""
+const calls=[];let fail=true;
+const store=create(async(url,options)=>{calls.push(options);if(fail){fail=false;throw Object.assign(new Error('lost'),{code:'NETWORK_UNCERTAIN'});}return {attachment:{id:'file'}};});
+store.reset('owner');store.state.roomId='room';
+store.applyRoom({room:{id:'room',state:'active',revision:1}});
+const entry=store.addFiles([{name:'large.bin',size:8*1024*1024,type:'application/octet-stream'}])[0];
+await assert.rejects(store.upload(entry));
+await store.upload(entry);
+assert.equal(calls[0].headers['X-Upload-Key'],calls[1].headers['X-Upload-Key']);
+assert.equal(calls[0].body,calls[1].body);
+assert.equal(calls[0].requestTimeout,143000);
+assert.ok(calls[0].requestTimeout<=180000);
+""")

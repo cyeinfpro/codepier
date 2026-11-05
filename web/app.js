@@ -89,6 +89,12 @@ function sessionValue(key, value) {
   }
   return null;
 }
+function taskSessionValue(key, value, owner = sessionOwner(S.session)) {
+  // Old unbound receipts cannot be safely attributed to the signed-in user.
+  sessionValue(key, null);
+  if (!owner) return null;
+  return sessionValue(key + ':' + encodeURIComponent(owner), value);
+}
 function uid(...args) {
   return CP.ui.uid(...args);
 }
@@ -134,15 +140,15 @@ function hasUnsavedChanges() {
       ))
   );
 }
-function discardLocalWork() {
+function discardLocalWork(owner = sessionOwner(S.session) || S.suspendedUser) {
   window.CodePierSettings?.reset();
   if (typeof chatDetach === 'function') chatDetach(true);
   resetWork('');
   S.work.operation = null;
   S.work.console = '';
   S.taskSubmission = null;
-  sessionValue('codepier-operation', null);
-  sessionValue('codepier-task-submission', null);
+  taskSessionValue('codepier-operation', null, owner);
+  taskSessionValue('codepier-task-submission', null, owner);
 }
 function clearSpaceSnapshots() {
   window.CodePierProjectRuntime?.reset();
@@ -206,7 +212,7 @@ function endSession(discard = false) {
   if (typeof stopComputerApprovals === 'function') stopComputerApprovals();
   S.readGeneration = (S.readGeneration || 0) + 1;
   S.treeGeneration = (S.treeGeneration || 0) + 1;
-  if (discard) discardLocalWork();
+  if (discard) discardLocalWork(owner);
   window.CodePierGateway?.reset();
   window.CodePierIdentity?.reset();
   S.identity = null;
@@ -546,7 +552,7 @@ async function loadBasics() {
 function restoreTaskSubmission() {
   if (S.taskSubmission) return;
   try {
-    const r = JSON.parse(sessionValue('codepier-task-submission') || 'null');
+    const r = JSON.parse(taskSessionValue('codepier-task-submission') || 'null');
     if (
       r &&
       typeof r.project === 'string' &&
@@ -575,8 +581,8 @@ async function revalidateSuspendedWork() {
     S.work.operation = null;
     S.work.console = '';
     S.taskSubmission = null;
-    sessionValue('codepier-operation', null);
-    sessionValue('codepier-task-submission', null);
+    taskSessionValue('codepier-operation', null);
+    taskSessionValue('codepier-task-submission', null);
   }
   if (typeof ChatUI === 'undefined') return;
   const cachedProjects = [
@@ -643,7 +649,8 @@ async function bootAuthenticated() {
       `<main class="boot"><div id="page" role="alert">${brand}${notice(esc(error.message))}<button class="btn primary" data-action="retry-identity">重试身份与空间校验</button><button class="btn ghost" data-action="logout">退出登录</button></div></main>`;
     return;
   }
-  if (S.suspendedUser && S.suspendedUser !== sessionOwner(S.session)) discardLocalWork();
+  if (S.suspendedUser && S.suspendedUser !== sessionOwner(S.session))
+    discardLocalWork(S.suspendedUser);
   if (S.suspendedUser && S.suspendedUser === sessionOwner(S.session)) {
     try {
       await revalidateSuspendedWork();
@@ -657,7 +664,7 @@ async function bootAuthenticated() {
   }
   S.suspendedUser = null;
   S.suspendedMappings = null;
-  S.work.operation = S.work.operation || sessionValue('codepier-operation');
+  S.work.operation = S.work.operation || taskSessionValue('codepier-operation');
   restoreTaskSubmission();
   renderShell();
   if (typeof startComputerApprovals === 'function') startComputerApprovals();
@@ -724,6 +731,23 @@ function connectEvents() {
       refreshPanel();
     else loadBasics().catch(() => {});
   };
+  events.addEventListener('resync', () => {
+    if (!current()) return;
+    invalidateBasics();
+    if (S.work.operation) pollTask().catch(() => {});
+    if (typeof refreshComputerApprovals === 'function') refreshComputerApprovals();
+    if (typeof CodePierIdentity !== 'undefined')
+      CodePierIdentity.refresh().catch((error) => current() && toast(error.message, true));
+    loadBasics()
+      .then(() => {
+        if (!current()) return;
+        if (S.page === 'audit' && S.auditMode === 'operations' && window.CodePierCallLog)
+          return CodePierCallLog.refresh(true);
+        if (['overview', 'devices', 'projects', 'audit', 'workflows', 'vps'].includes(S.page))
+          return refreshPanel();
+      })
+      .catch((error) => current() && toast(error.message, true));
+  });
   events.addEventListener('access_revoked', () => {
     if (!current()) return;
     endSession(true);
@@ -2041,12 +2065,12 @@ async function loadTasks() {
 }
 function trackTask(id) {
   S.work.operation = id;
-  sessionValue('codepier-operation', id);
+  taskSessionValue('codepier-operation', id);
 }
 function clearTaskSubmission(submission) {
   if (S.taskSubmission !== submission) return;
   S.taskSubmission = null;
-  sessionValue('codepier-task-submission', null);
+  taskSessionValue('codepier-task-submission', null);
 }
 async function runTask() {
   if (S.taskSubmitting) return;
@@ -2088,7 +2112,7 @@ async function runTask() {
       submission = { ...workTarget(project), task: name, idempotency_key: uid() };
       S.taskSubmission = submission;
       // Keep the original key even when every reply is lost, including a reload.
-      sessionValue('codepier-task-submission', JSON.stringify(submission));
+      taskSessionValue('codepier-task-submission', JSON.stringify(submission));
     } else toast('正在核实上次提交的任务 ' + submission.task + '，沿用原操作幂等键。');
     try {
       const r = await tool('tasks_run', submission);

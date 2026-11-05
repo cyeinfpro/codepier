@@ -647,6 +647,7 @@ window.CodePierRoomStore = (() => {
       entry.promise = request(path(entry.roomId) + '/attachments', {
         method: 'POST',
         body: entry.file,
+        requestTimeout: Math.min(180000, 15000 + Math.ceil(entry.file.size / 65536) * 1000),
         headers: {
           'Content-Type': 'application/octet-stream',
           'X-File-Name': encodeURIComponent(entry.name),

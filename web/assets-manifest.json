@@ -27,8 +27,8 @@
       "bytes": 21356
     },
     "app.js": {
-      "sha256": "ee581c259ca8a9705e3a87e6d99f5ebfa41788514f723b37c43c1e3c9184bb04",
-      "bytes": 133050
+      "sha256": "f853732078eea1f2f998065e3a2fb56eaf537a56fc81dc6a42a0e93ac90d960c",
+      "bytes": 134240
     },
     "appearance.js": {
       "sha256": "df23f28bfb8f464f5e8ddaa45bf1648f8bd095a8ce31579ba6a01979bb376950",
@@ -71,12 +71,12 @@
       "bytes": 80339
     },
     "chat.js": {
-      "sha256": "4bde869b6725f01c8fbe9e1cc80324f5a98d06d35c0a5d3393de6d90c95192cd",
-      "bytes": 95939
+      "sha256": "db27033466d84b440da138c6f7f725c07ef151902363f0a0145a4620942bdda7",
+      "bytes": 96647
     },
     "collaboration-room-store.js": {
-      "sha256": "ace07166dc58a78aa89381b795803f036509420cefe19f86633c5ad831558399",
-      "bytes": 32207
+      "sha256": "8eaeb2edb3c7c79447e25f9a7510263ad9cb65f9a332ac8798ec1675862c4ed8",
+      "bytes": 32300
     },
     "collaboration-room.css": {
       "sha256": "00a5f811c3c3031a97545065d9252a28973d1dda0ea485ca6ffd43e1fc199722",
@@ -111,8 +111,8 @@
       "bytes": 446
     },
     "identity.js": {
-      "sha256": "2340078a3d75402f4203df709f5f2c07742dc32ef067b4b56bf0e69e728d608f",
-      "bytes": 43344
+      "sha256": "1dda7612935fd95280d330d421843ba1f8e83f48960904d04b668b1299810fe7",
+      "bytes": 43733
     },
     "insights.js": {
       "sha256": "48a848f7c7d41ffdf04201db41063e46f022ca5a5dc22d1f268f9b2144471e22",

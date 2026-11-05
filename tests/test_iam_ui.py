@@ -102,3 +102,22 @@ def test_account_session_revocation_and_role_controls_respect_current_user(iam_p
     expect(page.locator('#login-form')).to_be_visible()
     assert page.locator('#page').count()==0
     assert stack.client.get('/api/session').json()['authenticated']  # Other session remains valid.
+
+
+def test_space_selector_restores_current_space_after_membership_failure(iam_page, stack):
+    page, errors = iam_page
+    space = stack.must(stack.client.post('/api/iam/spaces',
+        json={'label': 'Switch failure ' + uuid.uuid4().hex[:6], 'idempotency_key': uuid.uuid4().hex}))
+    page.reload()
+    expect(page.locator('#iam-active-space')).to_have_value('legacy')
+    me = stack.client.get('/api/iam/me').json()
+    me['spaces'] = [item for item in me['spaces'] if item['id'] != space['id']]
+    page.route('**/api/iam/me', lambda route: route.fulfill(json=me))
+    if not page.locator('#iam-active-space').is_visible():
+        page.locator('.mobile-menu').click()
+    page.locator('#iam-active-space').select_option(space['id'])
+    expect(page.locator('#iam-active-space')).to_have_value('legacy')
+    expect(page.locator('#iam-active-space')).to_be_enabled()
+    expect(page.locator('#toasts')).to_contain_text('你已不属于该空间')
+    assert page.evaluate('S.space_id') == 'legacy'
+    assert not errors

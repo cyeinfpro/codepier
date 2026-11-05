@@ -74,7 +74,7 @@ const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 const work=()=>run('S.work');
 function editor(content='base'){
-  run("S.session={csrf:'initial'};S.page='workbench';S.projects=[{id:'p',alias:'P',mode:'write'}];Object.assign(S.work,{project:'p',path:'old.txt',sha:'sha-base',content:'base',original:'base',dirty:false});bindEditor();");
+  run("S.session={csrf:'initial',user_id:'fixture-admin'};S.page='workbench';S.projects=[{id:'p',alias:'P',mode:'write'}];Object.assign(S.work,{project:'p',path:'old.txt',sha:'sha-base',content:'base',original:'base',dirty:false});bindEditor();");
   elements.get('#code-editor').value=content;
 }
 function type(text){const el=elements.get('#code-editor');el.value=text;el.oninput();}
@@ -151,9 +151,9 @@ async function scenario(name){
   }else if(name==='uncertain_task_reuses_key_after_reload'){
     editor();elements.get('#task-select').value='once';const keys=[];let fail=true;
     fetchImpl=async(path,options)=>{if(path.startsWith('/api/operations/'))return response({id:'op',state:'succeeded',pending:false,output:'once'});const args=JSON.parse(options.body).arguments;keys.push(args.idempotency_key);if(fail)throw Error('lost reply');return response({operation_id:'op'});};
-    await assert.rejects(run('runTask()'),/网络暂时不可用/);assert.ok(storage.has('codepier-task-submission'));
+    await assert.rejects(run('runTask()'),/网络暂时不可用/);assert.ok(!!run("taskSessionValue('codepier-task-submission')"));
     run('S.taskSubmission=null');elements.get('#task-select').value='different';fail=false;await run('runTask()');
-    assert.equal(new Set(keys).size,1);assert.equal(keys.length,6);assert.equal(work().operation,'op');assert.equal(storage.has('codepier-task-submission'),false);
+    assert.equal(new Set(keys).size,1);assert.equal(keys.length,6);assert.equal(work().operation,'op');assert.equal(!!run("taskSessionValue('codepier-task-submission')"),false);
   }else if(name==='missing_task_does_not_block_new_run'){
     editor();run("trackTask('gone')");elements.get('#task-select').value='once';
     fetchImpl=async path=>path.endsWith('/gone')?response({error:{code:'OPERATION_NOT_FOUND',message:'gone'}},404):path.startsWith('/api/operations/')?response({id:'new',state:'succeeded',pending:false}):response({operation_id:'new'});
