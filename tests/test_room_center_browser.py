@@ -141,7 +141,8 @@ def test_room_empty_projects_member_recovery_and_owner_scope(
         page.locator(f'[data-cr-form="member"] [data-project-id="{stack.projects[1]["id"]}"] [value="read"]').uncheck()
         page.locator('[data-cr-form="member"] button[type="submit"]').click()
         expect(page.locator('[data-cr-flow-view] h3').first).to_have_text('等待 dot 接入')
-        assert 'room_connect_join' in page.locator('.cr-instructions').input_value()
+        assert '"action":"join"' in page.locator('.cr-instructions').input_value()
+        assert '"code":"CPR-' in page.locator('.cr-instructions').input_value()
         record = stack.must(stack.client.get(f'/api/collaboration/rooms/{room_id}'))['room']
         assert len(record['members']) == 1
         member = record['members'][0]

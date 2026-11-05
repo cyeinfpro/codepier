@@ -5,7 +5,11 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+from jsonschema import Draft202012Validator
+from pydantic import ValidationError
 
+from shared.collaboration_contracts import JoinCode
+from shared.public_collaboration import resolve
 from hub.collaboration.common import canonical
 from hub.collaboration.events import EventService
 from hub.collaboration.network import Reply
@@ -61,6 +65,119 @@ async def subscribe(service, worker, joined, route='a'):
 
 def identity(joined):
     return {k: joined[k] for k in ('conversation_id', 'member_id', 'binding_generation', 'connection_proof')}
+
+
+
+def invitation(service, owner, created):
+    instructions = service.rooms.connect_read({'flow_id': created['flow']['id']}, owner)['join_instructions']
+    request, _ = json.JSONDecoder().raw_decode(instructions[instructions.index('{'):])
+    return request, instructions
+
+
+def room_join_canonical(request):
+    return {'action': 'room_connect_join', 'invite_code': request['code'],
+            'idempotency_key': request['idempotency_key']}
+
+
+@pytest.mark.parametrize('code', ['CPR-AbC_xyz-09' + 'aB' * 16, 'CPR-' + 'a' * 43])
+def test_room_code_preserves_case_in_cached_and_canonical_contracts(code):
+    raw = {'code': code, 'idempotency_key': key()}
+    assert JoinCode.model_validate(raw).code == code
+    target, args = resolve('collaboration', {'action': 'join', **raw})
+    assert target == 'collaboration_join'
+    assert args == raw
+
+
+@pytest.mark.parametrize('code', ['CPR-short', 'CPR-' + 'a' * 81,
+    'CPR-' + 'a b' * 14, 'CPR-' + 'a/b' * 14, ' CPR-' + 'a' * 43, 'cpr-' + 'a' * 43])
+def test_room_code_never_uses_legacy_whitespace_or_case_normalization(code):
+    with pytest.raises(ValidationError):
+        JoinCode.model_validate({'code': code, 'idempotency_key': key()})
+
+
+@pytest.mark.parametrize('prefix', ['cpj', 'cpd'])
+def test_legacy_hex_code_normalization_is_preserved(prefix):
+    code = prefix + '- abcd-0123-4567-89ef '
+    assert JoinCode.model_validate({'code': code, 'idempotency_key': key()}).code == prefix.upper() + '-ABCD-0123-4567-89EF'
+
+
+def test_generated_invitation_fits_cached_catalog_without_new_fields(rooms):
+    s, owner, _, _ = rooms
+    request, instructions = invitation(s, owner, add(s, owner, create(s, owner)))
+    Draft202012Validator({'type': 'object', 'additionalProperties': False,
+        'properties': {'action': {'enum': ['join']}, 'code': {'type': 'string', 'maxLength': 80},
+            'idempotency_key': {'type': 'string'}},
+        'required': ['action', 'code', 'idempotency_key']}).validate(request)
+    assert request['code'].startswith('CPR-')
+    assert 'Rescan' in instructions and '原生订阅' in instructions
+    assert '不要换成旧任务协议' in instructions
+    for extra in ({'invite_code': request['code']}, {'capabilities': ['execute']}, {'room_id': 'other'}):
+        with pytest.raises(DevError):
+            resolve('collaboration', {**request, **extra})
+
+
+@pytest.mark.parametrize('first_new', [False, True])
+def test_old_and_new_actions_share_room_proof_and_idempotency(rooms, first_new):
+    s, owner, worker, _ = rooms
+    request, _ = invitation(s, owner, add(s, owner, create(s, owner)))
+    first, second = (room_join_canonical(request), request) if first_new else (request, room_join_canonical(request))
+    joined = s.invoke('collaboration', first, worker)
+    replay = s.invoke('collaboration', second, worker)
+    assert replay['connection_proof'] == joined['connection_proof']
+    assert replay['member_id'] == joined['member_id']
+    legacy = s.invoke('collaboration_join', {k: v for k, v in request.items() if k != 'action'}, worker)
+    assert legacy['connection_proof'] == joined['connection_proof']
+    assert s.store.one('SELECT COUNT(*) n FROM room_members')['n'] == 1
+    assert joined['member']['state'] == 'waiting_host'
+    assert joined['grants_authority'] is False
+    assert not s.store.one('SELECT 1 FROM mcp_event_subscriptions')
+    assert not s.store.one('SELECT 1 FROM dot_consumer_sessions')
+    assert 'room_probe_read' in joined['required_host_actions']['collaboration']
+    assert 'Rescan' in joined['next_step']
+    assert '不伪造 callback' in joined['next_step']
+    for raw in (request, room_join_canonical(request)):
+        with pytest.raises(DevError) as caught:
+            s.invoke('collaboration', {**raw, 'idempotency_key': key()}, worker)
+        assert caught.value.code == 'ROOM_INVITE_REDEEMED'
+
+
+@pytest.mark.parametrize('condition', ['expired', 'revoked', 'other_owner'])
+def test_compatibility_route_preserves_canonical_denials(rooms, condition):
+    s, owner, worker, clock = rooms
+    created = add(s, owner, create(s, owner))
+    request, _ = invitation(s, owner, created)
+    if condition == 'expired':
+        clock[0] += 1801
+    elif condition == 'revoked':
+        s.store.execute('UPDATE room_connect_flows SET revoked_at=? WHERE id=?',
+                        (clock[0], created['flow']['id']))
+    else:
+        worker = replace(worker, user_id='different-owner')
+    codes = []
+    for raw in (request, room_join_canonical(request)):
+        with pytest.raises(DevError) as caught:
+            s.invoke('collaboration', raw, worker)
+        codes.append(caught.value.code)
+    assert codes[0] == codes[1]
+    assert not s.store.one('SELECT 1 FROM room_members WHERE grant_id != ?', ('',))
+
+
+@pytest.mark.asyncio
+async def test_compatibility_join_still_requires_real_synthetic_subscription_and_probe(rooms):
+    s, owner, worker, _ = rooms
+    request, _ = invitation(s, owner, add(s, owner, create(s, owner)))
+    joined = s.invoke('collaboration', request, worker)
+    assert joined['member']['state'] == 'waiting_host'
+    await subscribe(s, worker, joined)
+    nonce = s.rooms.probe_read({**identity(joined), 'wake_ticket': joined['wake_ticket'],
+        'idempotency_key': key()}, worker)['probe_nonce']
+    result = s.rooms.probe_reply({**identity(joined), 'probe_nonce': nonce,
+        'idempotency_key': key()}, worker)
+    assert result['member']['state'] == 'ready_chat'
+    replay = s.invoke('collaboration', request, worker)
+    assert replay['member']['state'] == 'ready_chat'
+    assert replay['connection_proof'] == joined['connection_proof']
+
 
 
 def test_empty_room_idempotency_and_current_visibility(rooms):

@@ -943,8 +943,10 @@ class Rooms:
         if not flow['redeemed_at'] and not flow['revoked_at'] and flow['expires_at'] is not None and flow['expires_at'] > self.c.clock() and member['status'] != 'removed':
             code = self.store.decrypt(flow['invite_secret'])
             result['join_instructions'] = ('@CodePier 请加入房间协作。调用 collaboration，参数：' +
-                canonical({'action': 'room_connect_join', 'invite_code': code, 'idempotency_key': flow['id'] + ':join'}) +
-                '。按返回的 subscription_request 使用宿主真实原生订阅能力完成连接。保存 connection_proof，'
+                canonical({'action': 'join', 'code': code, 'idempotency_key': flow['id'] + ':join'}) +
+                '。这是兼容旧工具目录的加入入口，与 room_connect_join 使用同一身份校验。'
+                '若宿主目录缺少 room_probe_read、room_probe_reply 或 room_inbox，先刷新 CodePier 工具目录（Rescan），不要换成旧任务协议。'
+                '按返回的 subscription_request 查找并使用宿主真实原生订阅能力完成连接；不要仅因 CodePier 工具列表没有订阅工具就断定宿主不支持。保存 connection_proof，'
                 '它只证明当前成员身份，不授予执行权限。完成后按返回步骤读取并回复连接检查；不要自行创建定时任务或伪造 callback。')
         elif member['grant_id'] and member['status'] not in {'removed', 'legacy'}:
             result['subscription_request'] = self.subscription_request(member)
@@ -1074,7 +1076,13 @@ class Rooms:
             'connection_proof': self.store.decrypt(member['connection_proof_secret']),
             'subscription_request': self.subscription_request(member), 'grants_authority': False,
             'pending_binding': bool(member.get('_pending_binding')),
-            'next_step': '使用宿主原生订阅注册 subscription_request；收到当前绑定通知中的 wake_ticket 后，连同当前成员 connection_proof 调用 room_probe_read，再将返回的 nonce 通过 room_probe_reply 回复。'}
+            'required_host_actions': {'collaboration': ['room_probe_read', 'room_probe_reply',
+                'room_consumer_begin', 'room_consumer_yield', 'room_reply'],
+                'collaboration_query': ['room_inbox']},
+            'next_step': '加入或重放这个接口本身不代表宿主订阅或往返通信成功；以 member 当前状态和验证证据为准。若 required_host_actions 中的操作未出现在宿主工具目录，先刷新 CodePier 工具目录（Rescan），保持原成员和 connection_proof，不重复兑换或改用旧任务协议。'
+                '查找宿主真实原生订阅能力及事件源，使用实际发现的连接器标识注册 subscription_request；不要仅因 CodePier 工具列表没有订阅工具就断定宿主不支持。'
+                '若实际查询确认宿主缺少原生订阅，报告这个阻塞并保持等待宿主，不创建定时轮询、不伪造 callback。'
+                '收到当前绑定通知中的 wake_ticket 后，连同当前成员 connection_proof 调用 room_probe_read，再将返回的 nonce 通过 room_probe_reply 回复。'}
 
     def event_scope(self, principal, filters, *, stopping=False):
         if principal.user_id != filters['owner_user_id']:

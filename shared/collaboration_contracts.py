@@ -267,10 +267,16 @@ class JoinCode(Model):
     @field_validator('code')
     @classmethod
     def normalize_code(cls, value):
-        value = ''.join(value.split()).upper()
         import re
+        # Room invitations are case-sensitive URL-safe tokens. Never apply the
+        # historical hex-code normalization to them, even for cached clients.
+        if value.startswith('CPR-'):
+            if not re.fullmatch(r'CPR-[A-Za-z0-9_-]{20,76}', value):
+                raise ValueError('Use the complete case-sensitive CPR room invitation from the panel')
+            return value
+        value = ''.join(value.split()).upper()
         if not re.fullmatch(r'CP[JD]-(?:[0-9A-F]{4}-){3}[0-9A-F]{4}', value):
-            raise ValueError('Use the complete CPJ notification or CPD task-dot code from the panel')
+            raise ValueError('Use the complete CPJ notification, CPD task-dot or CPR room code from the panel')
         return value
 
 

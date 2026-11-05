@@ -498,7 +498,8 @@ def native_room(s, receiver):
     flow = s.must(s.client.get('/api/collaboration/connect-flows/' + created['flow']['id']))
     instructions = flow['join_instructions']
     request, _ = json.JSONDecoder().raw_decode(instructions[instructions.index('{'):])
-    assert request['action'] == 'room_connect_join'
+    assert request['action'] == 'join'
+    assert request['code'].startswith('CPR-')
     joined = mcp(s, 'collaboration', request)
     identity = {field: joined[field] for field in
                 ('conversation_id', 'member_id', 'binding_generation', 'connection_proof')}

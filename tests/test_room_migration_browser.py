@@ -191,7 +191,8 @@ def test_legacy_room_read_only_safe_stop_explicit_cutover_and_original_receipt(
         expect(page.locator('[name="confirm_migration"]')).to_be_disabled()
         page.locator('[data-migration-blocker="MEMBER_MIGRATION_REQUIRED"] [data-cr-action="member-detail"]').click()
         page.locator('[data-flow-action="migrate"]').first.click()
-        expect(page.locator('.cr-instructions')).to_have_value(re.compile('room_connect_join'))
+        expect(page.locator('.cr-instructions')).to_have_value(re.compile('"action":"join"'))
+        expect(page.locator('.cr-instructions')).to_have_value(re.compile('"code":"CPR-'))
         still_legacy = stack.must(stack.client.get(f'/api/collaboration/rooms/{room_id}'))['room']
         assert still_legacy['legacy'] and still_legacy['read_only']
         assert not still_legacy['migration']['eligible']

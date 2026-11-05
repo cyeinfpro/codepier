@@ -66,6 +66,11 @@ class JoiningService:
 
     def join(self, raw, principal):
         args = validate(contracts.JoinCode, raw)
+        if args['code'].startswith('CPR-'):
+            # Stable discovery-compatible entry point; room identity, expiry,
+            # current-grant checks and idempotency stay in the room service.
+            return self.c.rooms.join({'invite_code': args['code'],
+                                     'idempotency_key': args['idempotency_key']}, principal)
         if args['code'].startswith('CPD-'):
             return self.c.dots.join(args, principal)
         with self.store.transaction():
