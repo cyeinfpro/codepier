@@ -60,6 +60,11 @@ class ArtifactService:
             if old['sha256']!=sha or old['bytes']!=size or old['project_id']!=op['project_id']:
                 raise DevError('ARTIFACT_CONFLICT','产物编号对应的已保存内容不同')
             return
+        # Agent clocks are not retention authority. Preserve the requested
+        # lifetime, but anchor metadata and its upper bound to Hub time.
+        lifetime = expires - created
+        created = time.time()
+        expires = min(expires, created + min(lifetime, 7 * 86400))
         payload=json.loads(self.runtime.store.decrypt(op['payload']))
         self.runtime.store.execute('INSERT INTO artifacts(id,project_id,device_id,grant_id,actor,root,name,bytes,sha256,created,expires,source_operation_id,space_id,owner_user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
             (identifier,op['project_id'],op['device_id'],op['grant_id'],op['actor'],payload['project']['root'],
@@ -104,7 +109,7 @@ class ArtifactService:
 
     async def chunk(self,row,project,offset):
         runtime=self.runtime;connection=runtime.connections.get(row['device_id'])
-        if not connection or not runtime.online(row['device_id']):
+        if not connection or not await runtime.store.run_read(runtime.online, row['device_id']):
             raise DevError('ARTIFACT_DEVICE_OFFLINE','产物保存在本机；设备离线，恢复连接后可从原位置续传',503)
         if len(self.pending)>=4:
             raise DevError('ARTIFACT_BUSY','同时传输的产物过多，请稍后继续',429)
@@ -167,7 +172,11 @@ def make_artifact_router(auth,runtime):
 
     @router.api_route('/api/artifacts/{identifier}/download',methods=['GET','HEAD'])
     async def download(identifier:str,request:Request):
-        owner=principal(request);row,project=service.row(identifier,owner)
+        def snapshot():
+            owner = principal(request)
+            row, project = service.row(identifier, owner)
+            return owner, row, project
+        owner,row,project=await runtime.store.run_read(snapshot)
         if row['expires']<=time.time():raise DevError('ARTIFACT_EXPIRED','产物快照已过期，请重新登记',410)
         etag='"'+row['sha256']+'"'
         requested=request.headers.get('range')
@@ -193,7 +202,7 @@ def make_artifact_router(auth,runtime):
         try:
             offset=(start//CHUNK)*CHUNK
             first=await service.chunk(row,project,offset)
-            service.row(identifier,principal(request))
+            await runtime.store.run_read(snapshot)
             await runtime.store.run(runtime.store.audit,owner.actor,'artifact.download',identifier,detail={'start':start,'end':end,'bytes':row['bytes']})
         except BaseException:
             release();raise
@@ -202,12 +211,11 @@ def make_artifact_router(auth,runtime):
             try:
                 while current<=end:
                     if await request.is_disconnected():return
-                    current_owner=principal(request)
-                    current_row,current_project=service.row(identifier,current_owner)
+                    current_owner,current_row,current_project=await runtime.store.run_read(snapshot)
                     if current_row['expires']<=time.time():raise DevError('ARTIFACT_EXPIRED','产物已过期',410)
                     if current!=offset:binary=await service.chunk(current_row,current_project,current)
                     # Authorization can change during an Agent round trip.
-                    checked,_=service.row(identifier,principal(request))
+                    _,checked,_=await runtime.store.run_read(snapshot)
                     if checked['expires']<=time.time():raise DevError('ARTIFACT_EXPIRED','产物已过期',410)
                     yield binary[max(0,start-current):min(len(binary),end-current+1)]
                     current+=CHUNK

@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json
 import math
+import re
 import time
 
 PREFIX = 'history:v1:'
@@ -13,11 +14,21 @@ def seal(store, value):
     return PREFIX + store.encrypt(value)
 
 
+def is_sealed(value):
+    # A textual prefix alone is legal historical output, not an envelope.
+    # Recognizable ciphertext is never downgraded on authentication failure.
+    return isinstance(value, str) and value.startswith((PREFIX + 'gAAAA', PREFIX + 'cp1:'))
+
+
+def is_archive_pointer(value):
+    return isinstance(value, str) and re.fullmatch(r'archive:v1:[^:\s]+:(?:result|output)', value) is not None
+
+
 def unseal(store, value):
-    from hub.operation_archive import POINTER, read_field
-    if isinstance(value, str) and value.startswith(POINTER):
+    from hub.operation_archive import read_field
+    if is_archive_pointer(value):
         return read_field(store, value)
-    if isinstance(value, str) and value.startswith(PREFIX):
+    if is_sealed(value):
         return store.decrypt(value[len(PREFIX):])
     return value
 
@@ -155,11 +166,12 @@ def encrypt_legacy_history(store, *, batch=100):
             ('mcp_tasks', 'task_id', 'terminal_result'),
             ('mcp_tasks', 'task_id', 'terminal_operation')):
             rows = store.all(f"SELECT {primary} AS id,{column} AS body FROM {table} "
-                f"WHERE {column} IS NOT NULL AND {column}!='' AND substr({column},1,?)!=? "
-                f"AND substr({column},1,11)!='archive:v1:' "
-                f"ORDER BY {primary} LIMIT ?", (len(PREFIX), PREFIX, batch))
+                f"WHERE {column} IS NOT NULL AND {column}!='' "
+                f"AND {column} NOT GLOB 'history:v1:gAAAA*' AND {column} NOT GLOB 'history:v1:cp1:*' "
+                f"AND {column} NOT GLOB 'archive:v1:*:result' AND {column} NOT GLOB 'archive:v1:*:output' "
+                f"ORDER BY {primary} LIMIT ?", (batch,))
             for row in rows:
-                if str(row['body']).startswith('archive:v1:'):
+                if is_archive_pointer(row['body']):
                     continue
                 if table == 'operations' and column == 'result':
                     value = json.loads(unseal(store, row['body']))

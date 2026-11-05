@@ -304,7 +304,7 @@ def event_visible(runtime, principal, item):
         try: runtime.project(data.get('id'), principal); return True
         except DevError: return False
     if kind in {'operation', 'operation_event', 'output', 'trace'}:
-        try: runtime.operation_row(data.get('id') or data.get('operation_id'), principal); return True
+        try: runtime.operation_row(data.get('id') or data.get('operation_id'), principal, status_only=True); return True
         except DevError: return False
     if kind == 'workflow':
         try: runtime.workflows.load(data.get('id'), principal); return True

@@ -115,11 +115,12 @@ def make_activity_router(context: HubContext):
                 access |= frozenset(('@', flag) for flag, allowed in [
                     ('space_admin', principal.admin), ('instance_admin', principal.instance_admin)] if allowed)
                 visible = item is not None and iam.event_visible(runtime, principal, item)
-                return access, visible
-        access, _ = await store.run(snapshot)
-        if len(runtime.watchers) >= 100:
+                return access, visible, (principal.space_id, principal.user_id)
+        access, _, owner = await store.run_read(snapshot)
+        if len(runtime.watchers) >= 100 or sum(getattr(q, "_stream_owner", None) == owner for q in runtime.watchers) >= 4:
             raise DevError("TOO_MANY_STREAMS", "实时连接过多", 429)
         q = asyncio.Queue(maxsize=100)
+        q._stream_owner = owner
         runtime.watchers.add(q)
         async def stream():
             nonlocal access
@@ -133,16 +134,18 @@ def make_activity_router(context: HubContext):
                     except asyncio.TimeoutError:
                         item = None
                     try:
-                        current_access, visible = await store.run(snapshot, item)
+                        current_access, visible, current_owner = await store.run_read(snapshot, item)
                     except DevError:
                         yield "event: access_revoked\ndata: {}\n\n"
                         break
-                    if not access <= current_access:
+                    if current_owner != owner or not access <= current_access:
                         yield "event: access_revoked\ndata: {}\n\n"
                         break
                     access = current_access
                     if item is None:
                         yield ": heartbeat\n\n"
+                    elif item.get("type") == "resync":
+                        yield "event: resync\ndata: {}\n\n"
                     elif visible:
                         yield "data: " + json.dumps({k:v for k,v in item.items() if k != '_audience'}, ensure_ascii=False) + "\n\n"
             finally:

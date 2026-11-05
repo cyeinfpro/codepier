@@ -61,7 +61,7 @@ def make_settings_router(context: HubContext):
                target["root"], target["mode"], target["allow_tasks"],
                principal.user_epoch, principal.identity_id, principal.admin,
                tuple(sorted(principal.scopes)), target["_settings_permissions"])
-        if not runtime.online(target["device_id"]):
+        if not await store.run_read(runtime.online, target["device_id"]):
             return {"state": "offline", "values": {}, "checked_at": time.time()}
         async def inspect(previous=None):
             if previous and previous.get("operation_id"):

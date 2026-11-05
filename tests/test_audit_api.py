@@ -396,3 +396,44 @@ def test_oauth_initialization_failure_releases_instance_lock(tmp_path, monkeypat
     monkeypatch.setenv("MCP_PUBLIC_URL", "http://testserver")
     with TestClient(create_app(str(tmp_path / "hub"))) as client:
         assert client.get("/healthz").status_code == 200
+
+def test_scan_dcr_capacity_is_bounded_and_only_unused_clients_expire(api, monkeypatch):
+    import hub.oauth as module
+    app, client, _ = api
+    monkeypatch.setattr(module, "DCR_CLIENT_LIMIT", 2)
+    monkeypatch.setattr(app.state.runtime.oauth, "throttle", lambda request: None)
+    store = app.state.store
+    store.execute("INSERT INTO oauth_clients VALUES ('old','unused','[]',?)", (time.time()-90000,))
+    first = client.post("/oauth/register", json={"redirect_uris": ["http://localhost:1234/callback"]})
+    assert first.status_code == 201
+    assert store.one("SELECT id FROM oauth_clients WHERE id='old'") is None
+    second = client.post("/oauth/register", json={"redirect_uris": ["http://localhost:1234/callback"]})
+    assert second.status_code == 201
+    blocked = client.post("/oauth/register", json={"redirect_uris": ["http://localhost:1234/callback"]})
+    assert blocked.status_code == 429 and blocked.json()["error"]["code"] == "REGISTRATION_BUSY"
+    assert store.one("SELECT count(*) AS n FROM oauth_clients")["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_scan_sse_admission_is_atomic_and_scoped(api, monkeypatch):
+    from hub import iam
+    app, _, _ = api
+    runtime = app.state.runtime
+    monkeypatch.setattr(iam, "project_permissions", lambda *args: {})
+    monkeypatch.setattr(app.state.auth, "panel", lambda request: SimpleNamespace(
+        user_id=request.headers.get("x-owner", "one"), space_id="legacy", admin=False, instance_admin=False))
+    endpoint = next(route.endpoint for route in app.routes if getattr(route, "path", "") == "/api/events")
+    def request(owner):
+        return Request({"type": "http", "method": "GET", "path": "/api/events",
+                        "headers": [(b"x-owner", owner.encode())], "query_string": b""})
+    responses = await asyncio.gather(*(endpoint(request("one")) for _ in range(12)), return_exceptions=True)
+    accepted = [value for value in responses if not isinstance(value, Exception)]
+    assert len(accepted) == 4
+    assert all(value.code == "TOO_MANY_STREAMS" for value in responses if isinstance(value, DevError))
+    other = await endpoint(request("two"))
+    accepted.append(other)
+    assert len(runtime.watchers) == 5
+    for response in accepted:
+        assert "event: ready" in await anext(response.body_iterator)
+        await response.body_iterator.aclose()
+    assert not runtime.watchers

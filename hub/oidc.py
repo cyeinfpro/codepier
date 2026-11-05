@@ -548,13 +548,26 @@ class OIDCService:
                 limit=8 if link_session else LOGIN_CLIENT_LIMIT
                 if self.store.one('SELECT count(*) AS n FROM oidc_transactions WHERE used=0 AND client_hash=?',(client_hash,))['n']>=limit:
                     raise DevError('OIDC_CLIENT_BUSY','此客户端已有过多登录请求；请完成现有请求或稍后重试',429)
-                if self.store.one('SELECT count(*) AS n FROM oidc_transactions WHERE used=0')['n']>=LOGIN_TOTAL_LIMIT:
-                    raise DevError('OIDC_BUSY','登录请求过多',429)
+                def make_room(predicate, values, capacity):
+                    count = self.store.one('SELECT count(*) AS n FROM oidc_transactions WHERE used=0 AND ' + predicate, values)['n']
+                    if count < capacity:
+                        return
+                    # Bound pending state without a global login lockout. Expire
+                    # an oldest transaction from the busiest source first.
+                    # Used states are replay tombstones and are never recycled.
+                    victim = self.store.one('''SELECT state_hash FROM oidc_transactions
+                        JOIN (SELECT client_hash,count(*) AS reservations FROM oidc_transactions
+                              WHERE used=0 GROUP BY client_hash) AS load USING(client_hash)
+                        WHERE used=0 AND ''' + predicate + ''' ORDER BY
+                        load.reservations DESC,expires,state_hash LIMIT 1''', values)
+                    if victim:
+                        self.store.db.execute('DELETE FROM oidc_transactions WHERE state_hash=?', (victim['state_hash'],))
                 if not link_session:
-                    public=self.store.one('SELECT count(*) AS n FROM oidc_transactions WHERE used=0 AND link_user_id IS NULL')['n']
-                    provider_count=self.store.one('SELECT count(*) AS n FROM oidc_transactions WHERE used=0 AND provider_id=? AND link_user_id IS NULL',(provider['id'],))['n']
-                    if public>=LOGIN_PUBLIC_LIMIT or provider_count>=LOGIN_PROVIDER_LIMIT:
-                        raise DevError('OIDC_BUSY','登录请求过多',429)
+                    make_room('provider_id=? AND link_user_id IS NULL', (provider['id'],), LOGIN_PROVIDER_LIMIT)
+                    make_room('link_user_id IS NULL', (), LOGIN_PUBLIC_LIMIT)
+                # Public traffic cannot evict authenticated linking reservations.
+                if link_session:
+                    make_room('link_user_id IS NOT NULL', (), LOGIN_TOTAL_LIMIT - LOGIN_PUBLIC_LIMIT)
                 self.store.db.execute('''INSERT INTO oidc_transactions
                     (state_hash,provider_id,browser_hash,nonce,verifier,return_to,link_user_id,link_session_hash,provider_version,expires,used,client_hash)
                     VALUES(?,?,?,?,?,?,?,?,?,?,0,?)''',

@@ -196,8 +196,13 @@ class Runtime:
     @staticmethod
     def _enqueue(q, message):
         if q.full():
-            with contextlib.suppress(asyncio.QueueEmpty):
-                q.get_nowait()
+            while not q.empty():
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    q.get_nowait()
+            # An explicit invalidation replaces lost deltas; never silently
+            # leave a subscriber believing that its view is current.
+            q.put_nowait({"type": "resync", "data": {}})
+            return
         with contextlib.suppress(asyncio.QueueFull):
             q.put_nowait(message)
 
@@ -1249,8 +1254,15 @@ class Runtime:
                             active_devices.pop(device)
                             task.result()
                     if time.monotonic() - self.computer_cleanup_at > 15:
-                        await self.store.run(self._purge_computer)
                         self.computer_cleanup_at = time.monotonic()
+                        try:
+                            await self.store.run(self._purge_computer)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as exc:
+                            with contextlib.suppress(Exception):
+                                await self.store.run(self.store.audit, "hub", "maintenance.error",
+                                    status="error", detail={"type": type(exc).__name__})
                     rows = await self.store.run(self._delivery_candidates, tuple(active_devices))
                     devices = {}
                     for row in rows:
@@ -1622,8 +1634,8 @@ class Runtime:
         if not future.done():
             future.set_result(result)
 
-    def _receive_operation_event(self, device_id, connection, data):
-        if self.connections.get(device_id) is not connection or not self.connection_authorized(device_id, connection):
+    def _receive_operation_event(self, device_id, connection, data, *, authenticated=False):
+        if self.connections.get(device_id) is not connection or (not authenticated and not self.connection_authorized(device_id, connection)):
             return None
         kind, id = data.get("type"), data.get("id")
         op = self.store.one('''SELECT id,tool,state,journal_id,output_seq,accepted_at,cancel_requested,deadline
@@ -1677,8 +1689,8 @@ class Runtime:
                 self.store.execute("UPDATE operations SET last_operation_verified_at=? WHERE id=?", (time.time(), id))
             return {"type": "ack", "id": id}
 
-    def _heartbeat(self, device_id, connection, info, data):
-        if self.connections.get(device_id) is not connection or not self.connection_authorized(device_id, connection):
+    def _heartbeat(self, device_id, connection, info, data, *, authenticated=False):
+        if self.connections.get(device_id) is not connection or (not authenticated and not self.connection_authorized(device_id, connection)):
             return
         changed = False
         build = data.get("build")
@@ -1732,7 +1744,9 @@ class Runtime:
         if self.connections.get(device_id) is not connection or not self.connection_authorized(device_id, connection):
             return False
         connection.last_seen = time.time()
-        self.store.execute("UPDATE devices SET last_seen=? WHERE id=?", (connection.last_seen, device_id))
+        if connection.last_seen - getattr(connection, "_persisted_last_seen", 0) >= 12:
+            self.store.execute("UPDATE devices SET last_seen=? WHERE id=?", (connection.last_seen, device_id))
+            connection._persisted_last_seen = connection.last_seen
         return True
 
     def _register_agent(self, device_id, connection, info, device):
@@ -1758,13 +1772,13 @@ class Runtime:
             return False, None
         kind = data.get('type')
         if kind == 'heartbeat':
-            return True, self._heartbeat(device_id, connection, info, data)
+            return True, self._heartbeat(device_id, connection, info, data, authenticated=True)
         if kind in {'computer_approval', 'computer_approval_closed'}:
             self.computer_approvals.receive(device_id, connection, data)
             return True, None
         if kind in {'native_reply', 'native_sync', 'artifact_chunk'}:
             return True, None
-        return True, self._receive_operation_event(device_id, connection, data)
+        return True, self._receive_operation_event(device_id, connection, data, authenticated=True)
 
     async def agent_socket(self, websocket: WebSocket, device_id: str):
         device = await self.store.run(self.store.one, "SELECT * FROM devices WHERE id=?", (device_id,))

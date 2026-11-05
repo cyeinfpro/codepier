@@ -31,6 +31,9 @@ from hub import iam, grant_expiry
 LEGACY_OAUTH_SCOPES = ["read", "write", "execute", "computer"]
 
 
+DCR_CLIENT_LIMIT = 4096
+
+
 class OAuth:
     def __init__(self, auth: Auth, runtime: Runtime, public_url):
         self.auth, self.runtime, self.store = auth, runtime, auth.store
@@ -222,7 +225,17 @@ class OAuth:
                 if body.get("token_endpoint_auth_method", "none") != "none":
                     raise DevError("INVALID_CLIENT_METADATA", "仅支持 public client + PKCE；token_endpoint_auth_method=none")
                 id = token(24)
-                self.store.execute("INSERT INTO oauth_clients VALUES (?,?,?,?)", (id, name, json.dumps(redirects), time.time()))
+                with self.store.transaction():
+                    # Expire unused registrations only. Existing grants, pending
+                    # consent and authorization codes keep their client identity.
+                    self.store.db.execute("""DELETE FROM oauth_clients WHERE created<?
+                        AND NOT EXISTS (SELECT 1 FROM grants WHERE client_id=oauth_clients.id)
+                        AND NOT EXISTS (SELECT 1 FROM oauth_requests WHERE client_id=oauth_clients.id AND expires>?)
+                        AND NOT EXISTS (SELECT 1 FROM oauth_codes WHERE client_id=oauth_clients.id AND expires>?)""",
+                        (time.time()-86400, time.time(), time.time()))
+                    if self.store.one("SELECT count(*) AS n FROM oauth_clients")['n'] >= DCR_CLIENT_LIMIT:
+                        raise DevError("REGISTRATION_BUSY", "Client registration capacity reached; retry later", 429)
+                    self.store.execute("INSERT INTO oauth_clients VALUES (?,?,?,?)", (id, name, json.dumps(redirects), time.time()))
                 return JSONResponse({"client_id": id, "client_name": name, "redirect_uris": redirects, "token_endpoint_auth_method": "none",
                     "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"]}, status_code=201, headers={"Cache-Control": "no-store"})
 

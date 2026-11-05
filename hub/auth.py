@@ -133,14 +133,14 @@ class Auth:
             account_count = self.store.one("SELECT count(*) AS n FROM login_account_attempts WHERE username_hash=? AND at>?", (username_hash, cutoff))["n"]
             if count >= LOGIN_IP_ATTEMPT_LIMIT or account_count >= LOGIN_ACCOUNT_ATTEMPT_LIMIT:
                 raise DevError("LOGIN_THROTTLED", "登录尝试过多，5 分钟后重试", 429)
-            # A rotating-username attack must not grow persistent state forever.
-            # Refuse new admissions at capacity; do not evict live security data.
+            # Unknown-user probes have a bounded shared budget. Existing accounts
+            # retain their independently bounded account/IP budgets at saturation.
+            user = self.store.one("SELECT u.*,s.local_login FROM users u JOIN iam_users s ON s.user_id=u.id WHERE username=?", (username,))
             total = self.store.one("SELECT count(*) AS n FROM login_account_attempts")["n"]
-            if total >= LOGIN_ATTEMPT_STORAGE_LIMIT:
+            if total >= LOGIN_ATTEMPT_STORAGE_LIMIT and not user:
                 raise DevError("LOGIN_THROTTLED", "登录服务繁忙，请稍后重试", 429)
             ip_row = self.store.db.execute("INSERT INTO login_attempts VALUES (?,?)", (ip, now)).lastrowid
             account_row = self.store.db.execute("INSERT INTO login_account_attempts(username_hash,at) VALUES (?,?)", (username_hash, now)).lastrowid
-            user = self.store.one("SELECT u.*,s.local_login FROM users u JOIN iam_users s ON s.user_id=u.id WHERE username=?", (username,))
             if user:
                 # Request-local receipt, never persisted with the user/session.
                 # Include time and subject so a stale receipt cannot refund a

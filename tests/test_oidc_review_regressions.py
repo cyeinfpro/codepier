@@ -279,9 +279,11 @@ def test_provider_capacity_and_link_reservation_are_independent(oidc,monkeypatch
     monkeypatch.setattr(service,'metadata',metadata)
     async def requests():
         for n in range(3):await service.begin(provider,'/',client_key=f'public-{n}')
-        with pytest.raises(DevError):await service.begin(provider,'/',client_key='different-ip')
+        await service.begin(provider,'/',client_key='different-ip')
+        assert app.state.store.one('SELECT count(*) AS n FROM oidc_transactions WHERE provider_id=?', (provider['id'],))['n'] == 3
         await service.begin(other,'/',client_key='other-provider')
-        with pytest.raises(DevError):await service.begin(other,'/',client_key='different-again')
+        await service.begin(other,'/',client_key='different-again')
+        assert app.state.store.one('SELECT count(*) AS n FROM oidc_transactions')['n'] == 4
         session=app.state.store.one('SELECT * FROM sessions WHERE user_id=?',('owner',))
         await service.begin(provider,'/',link_session=session)
     asyncio.run(requests())

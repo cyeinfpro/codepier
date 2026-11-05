@@ -171,7 +171,7 @@ async def test_worker_publish_is_bounded_and_delivered_on_queue_owner(store):
         await store.run(runtime.publish, "review", {"value": index})
     await asyncio.sleep(0)
     assert queue.qsize() == 2
-    assert (await queue.get())["data"]["value"] == 8
+    assert (await queue.get())["type"] == "resync"
     assert (await queue.get())["data"]["value"] == 9
     await runtime.stop()
 

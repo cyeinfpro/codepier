@@ -127,8 +127,10 @@ def install_http_behaviors(app):
     async def dev_error(request, exc: DevError):
         # OAuth authorization errors may be viewed as top-level browser pages.
         # Be explicit for browsers that otherwise guess a locale encoding.
+        retry = exc.details.get("retry_after")
+        headers = {"Retry-After": str(retry)} if type(retry) is int and 0 < retry <= 86400 else {}
         return JSONResponse({"error": {"code": exc.code, "message": exc.message, **exc.details}},
-                            status_code=exc.status, media_type="application/json; charset=utf-8")
+                            status_code=exc.status, headers=headers, media_type="application/json; charset=utf-8")
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request, exc):

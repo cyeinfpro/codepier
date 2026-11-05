@@ -156,7 +156,8 @@ class Store:
                         current_version = self.db.execute("PRAGMA data_version").fetchone()[0]
                     if revision == self.session_revision and version == current_version:
                         return value
-            raise RuntimeError("Authorization changed during read phase")
+            from shared.util import DevError
+            raise DevError("AUTHORIZATION_CHANGED", "Authorization changed during read; retry the read request", 503, retry_after=1)
         finally:
             audits = getattr(self._reader_state, 'denial_audits', [])
             del self._reader_state.binding
@@ -214,8 +215,8 @@ class Store:
                         os.close(directory_fd)
             finally:
                 os.unlink(temporary)
-        from hub.keyring import CipherSuite
-        return CipherSuite(self.state_directory, key_path.read_bytes().strip())
+        from hub.keyring import CipherSuite, private_read
+        return CipherSuite(self.state_directory, private_read(key_path).strip())
 
     def _migrate(self):
         # Execute DDL within the caller's transaction; executescript would

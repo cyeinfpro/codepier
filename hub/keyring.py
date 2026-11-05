@@ -34,7 +34,13 @@ CIPHER_COLUMNS = (("operation_payload_archives", "body"), ("devices", "secret"),
                   ("room_pending_bindings", "connection_proof_secret"),
                   ("room_pending_bindings", "probe_nonce_secret"),
                   ("channel_attachments", "content"), ("channel_attachments", "private_source"),
-                  ("channel_attachment_chunks", "content"), ("channel_inbound_failures", "body"))
+                  ("channel_attachment_chunks", "content"), ("channel_inbound_failures", "body"),
+                  ("weixin_accounts", "secret"), ("weixin_accounts", "cursor"),
+                  ("weixin_bindings", "pairing_secret"), ("weixin_contexts", "token"),
+                  ("weixin_enrollments", "payload"), ("weixin_parts", "body"),
+                  ("weixin_parts", "wire_body"), ("telegram_accounts", "secret"),
+                  ("telegram_bindings", "pairing_secret"), ("telegram_inbox", "body"),
+                  ("channel_onboarding_notices", "body"), ("room_weixin_logins", "payload"))
 # Delivery bodies from older protocols remain plaintext JSON; only explicitly
 # sealed bodies participate in rotation and missing-key detection.
 PREFIXED_CIPHER_COLUMNS = (("mcp_event_deliveries", "body", "sealed:v1:"),
@@ -42,7 +48,7 @@ PREFIXED_CIPHER_COLUMNS = (("mcp_event_deliveries", "body", "sealed:v1:"),
     ("operation_output_tails", "sealed_output", "history:v1:"),
     ("mcp_tasks", "terminal_result", "history:v1:"),
     ("mcp_tasks", "terminal_operation", "history:v1:"))
-CIPHER_PRIMARY_KEYS = {"operation_payload_archives": "operation_id", "oidc_transactions": "state_hash", "operation_output_tails": "operation_id", "mcp_tasks": "task_id", "dot_wake_tickets": "ticket_hash", "channel_attachment_chunks": "rowid"}
+CIPHER_PRIMARY_KEYS = {"operation_payload_archives": "operation_id", "oidc_transactions": "state_hash", "operation_output_tails": "operation_id", "mcp_tasks": "task_id", "dot_wake_tickets": "ticket_hash", "channel_attachment_chunks": "rowid", "weixin_contexts": "rowid", "telegram_inbox": "rowid"}
 
 
 def key_id(key: bytes) -> str:
@@ -161,6 +167,36 @@ def _backup(store, destination: Path) -> None:
         atomic_private(destination / RING_FILE, private_read(ring))
 
 
+def verify_cipher_inventory(store):
+    """Refuse retirement if an authenticated ciphertext lacks a rotation rule.
+
+    Inspect actual TEXT columns, independently of the hand-maintained inventory.
+    This offline streaming pass never treats unauthenticated text as ciphertext.
+    """
+    covered = {(table, column) for table, column in CIPHER_COLUMNS}
+    covered.update((table, column) for table, column, _ in PREFIXED_CIPHER_COLUMNS)
+    with store.lock:
+        for table_row in store.db.execute("SELECT name FROM sqlite_master WHERE type='table'"):
+            table = table_row[0]
+            quoted = '"' + table.replace('"', '""') + '"'
+            for info in store.db.execute(f"PRAGMA table_info({quoted})").fetchall():
+                column = info[1]
+                if (table, column) in covered:
+                    continue
+                field = '"' + column.replace('"', '""') + '"'
+                cursor = store.db.execute(f"SELECT {field} FROM {quoted} WHERE typeof({field})='text'")
+                while rows := cursor.fetchmany(128):
+                    for row in rows:
+                        value = row[0]
+                        if not value.startswith(('cp1:', 'gAAAA')):
+                            continue
+                        try:
+                            store.cipher.decrypt(value.encode('ascii'))
+                        except (InvalidToken, UnicodeError):
+                            continue
+                        raise RuntimeError(f"Unregistered encrypted column: {table}.{column}; no key retired")
+
+
 def rotate_key(directory: str | Path, *, resume: bool = False) -> dict:
     """Rotate an idle Hub's key, or resume exactly its recorded rotation.
 
@@ -180,6 +216,7 @@ def rotate_key(directory: str | Path, *, resume: bool = False) -> dict:
     try:
         key_lock = InstanceLock(directory / ".keys.lock")
         store = Store(data_directory)
+        verify_cipher_inventory(store)
         journal_path = directory / JOURNAL_FILE
         previous = json.loads(private_read(journal_path)) if journal_path.exists() or journal_path.is_symlink() else None
         if previous is not None and (not isinstance(previous, dict) or previous.get("version") != 1):
@@ -235,6 +272,8 @@ def rotate_key(directory: str | Path, *, resume: bool = False) -> dict:
                     continue
                 primary = CIPHER_PRIMARY_KEYS.get(table, "id")
                 condition = f" AND substr({column},1,?)=?" if prefix else ""
+                if prefix == "history:v1:":
+                    condition += f" AND ({column} GLOB 'history:v1:gAAAA*' OR {column} GLOB 'history:v1:cp1:*')"
                 cursor = store.db.execute(f"SELECT {primary} AS id,{column} FROM {table} "
                     f"WHERE {column} IS NOT NULL AND {column} != ''" + condition,
                     (len(prefix), prefix) if prefix else ())
