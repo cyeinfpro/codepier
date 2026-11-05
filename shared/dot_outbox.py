@@ -182,6 +182,18 @@ class DotOutbox:
                 (state, error, self.seal(canonical(receipt)) if receipt is not None else None,
                  self.clock() + delay, self.clock(), int(sending), claim['id'], claim['claim_owner'], claim['claim_fence']))
 
+    def _error_state(self, claim, state, *, error, delay):
+        # Expiry revokes permission to send, not permission to preserve the
+        # outcome of this exact attempt. Never overwrite a successor's fence.
+        with self.transaction():
+            lane = self.db.execute('SELECT owner,fence FROM dot_outbox_lanes WHERE id=?', (claim['lane'],)).fetchone()
+            if not lane or lane['owner'] != claim['claim_owner'] or lane['fence'] != claim['claim_fence']:
+                return False
+            self.db.execute("""UPDATE dot_outbox_entries SET state=?,error_code=?,next_attempt=?,updated=?
+                WHERE id=? AND claim_owner=? AND claim_fence=?""",
+                (state, error, self.clock() + delay, self.clock(), claim['id'], claim['claim_owner'], claim['claim_fence']))
+            return True
+
     @staticmethod
     def _receipt_matches(claim, receipt):
         return (isinstance(receipt, dict) and receipt.get('committed') is True
@@ -232,16 +244,19 @@ class DotOutbox:
                         self._state(claim, 'checking_receipt', error='COMMIT_UNCONFIRMED', delay=5)
                 else:
                     self._state(claim, 'checking_receipt', error='RECEIPT_UNCERTAIN', delay=5)
-        except asyncio.CancelledError:
-            self._state(claim, 'checking_receipt', error='HOST_INTERRUPTED', delay=5)
+        except asyncio.CancelledError as exc:
+            try:
+                self._error_state(claim, 'checking_receipt', error='HOST_INTERRUPTED', delay=5)
+            except Exception as persistence_error:
+                exc.add_note(f'Outbox interruption evidence could not be persisted: {type(persistence_error).__name__}')
             raise
         except (TimeoutError, OSError):
-            self._state(claim, 'checking_receipt', error='TRANSPORT_UNCERTAIN', delay=min(300, 5 * 2 ** min(claim['attempts'], 6)))
+            self._error_state(claim, 'checking_receipt', error='TRANSPORT_UNCERTAIN', delay=min(300, 5 * 2 ** min(claim['attempts'], 6)))
         except DevError as exc:
-            self._state(claim, 'attention' if exc.code in PERMANENT or exc.status in {401, 403, 409, 422} else 'checking_receipt',
+            self._error_state(claim, 'attention' if exc.code in PERMANENT or exc.status in {401, 403, 409, 422} else 'checking_receipt',
                         error=exc.code, delay=30)
         except (ValueError, KeyError, TypeError):
-            self._state(claim, 'attention', error='INVALID_RECEIPT_OR_STORAGE')
+            self._error_state(claim, 'attention', error='INVALID_RECEIPT_OR_STORAGE', delay=0)
         finally:
             with self.transaction():
                 self.db.execute('UPDATE dot_outbox_lanes SET until=0 WHERE id=? AND owner=? AND fence=?',

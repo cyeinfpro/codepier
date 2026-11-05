@@ -136,6 +136,7 @@ async def test_agent_rejects_before_any_process_creation(shell_agent, monkeypatc
         req['project']['_execution_policy'] = policy('panel', False)
     spawn = AsyncMock(side_effect=AssertionError('No process may start in this test'))
     monkeypatch.setattr(asyncio, 'create_subprocess_exec', spawn)
+    monkeypatch.setattr('agent.owned_subprocess.create_owned_process', spawn)
     await agent.handle(req)
     result = agent.journal.status(req['id'])['result']
     assert result['error']['code'] == 'CODEX_REMOTE_DISABLED', result

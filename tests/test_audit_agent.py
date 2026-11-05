@@ -79,7 +79,10 @@ async def test_storage_failure_reaps_child_and_process_registry(local_agent, mon
     agent, root = local_agent
     agent.journal.start("disk-full", {"tool": "tasks_run"})
     created = []
-    real_spawn = asyncio.create_subprocess_exec
+    import agent.owned_subprocess as owned_subprocess
+    spawn_module, spawn_name = ((asyncio, "create_subprocess_exec") if os.name == "nt"
+                                else (owned_subprocess, "create_owned_process"))
+    real_spawn = getattr(spawn_module, spawn_name)
 
     async def spawn(*args, **kwargs):
         process = await real_spawn(*args, **kwargs)
@@ -89,7 +92,7 @@ async def test_storage_failure_reaps_child_and_process_registry(local_agent, mon
     def fail(*args, **kwargs):
         raise sqlite3.OperationalError("injected disk full")
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(spawn_module, spawn_name, spawn)
     monkeypatch.setattr(agent.journal, fault, fail)
     with pytest.raises(sqlite3.OperationalError, match="injected disk full"):
         await asyncio.wait_for(agent.run_process("disk-full", [sys.executable, "-u", "-c", "import time; print('started'); time.sleep(30)"], root, 25, stream=True), 6)
@@ -103,7 +106,10 @@ async def test_cancellation_during_spawn_retains_handle_until_child_reaped(local
     agent.journal.start("spawn", {"tool": "tasks_run"})
     created = []
     release = asyncio.Event()
-    real_spawn = asyncio.create_subprocess_exec
+    import agent.owned_subprocess as owned_subprocess
+    spawn_module, spawn_name = ((asyncio, "create_subprocess_exec") if os.name == "nt"
+                                else (owned_subprocess, "create_owned_process"))
+    real_spawn = getattr(spawn_module, spawn_name)
 
     async def delayed_spawn(*args, **kwargs):
         process = await real_spawn(*args, **kwargs)
@@ -111,7 +117,7 @@ async def test_cancellation_during_spawn_retains_handle_until_child_reaped(local
         await release.wait()
         return process
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", delayed_spawn)
+    monkeypatch.setattr(spawn_module, spawn_name, delayed_spawn)
     operation = asyncio.create_task(agent.run_process("spawn", [sys.executable, "-c", "import time; time.sleep(30)"], root, 25))
     await eventually(lambda: created)
     operation.cancel()

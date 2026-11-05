@@ -107,6 +107,7 @@ async def test_ssh_permission_denial_before_spawn(shell_agent, monkeypatch, deni
     async def trap(*a, **kw):
         pytest.fail('Unauthorized SSH reached process creation')
     monkeypatch.setattr(asyncio, 'create_subprocess_exec', trap)
+    monkeypatch.setattr('agent.owned_subprocess.create_owned_process', trap)
     await agent.handle(req)
     result = agent.journal.status(req['id'])['result']
     assert not result['ok']

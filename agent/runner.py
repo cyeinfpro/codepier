@@ -89,6 +89,7 @@ class Agent:
         self.jobs: dict[str, asyncio.Task] = {}
         self.processes: dict[str, asyncio.subprocess.Process] = {}
         self.cancelled: set[str] = set()
+        self.shutdown_interrupted: set[str] = set()
         self.slot_owners = {}
         self.active_roots: set[Path] = set()
         self._active_slots: dict[object, tuple[Path, bool]] = {}
@@ -753,7 +754,9 @@ class Agent:
             self.integrations.control.guard(tool, project)
             if not_after is not None and (type(not_after) not in {int, float} or not math.isfinite(not_after)):
                 raise DevError("INVALID_REQUEST", "操作期限必须是有限时间戳")
-            if id in self.cancelled or self.journal.is_cancelled(id) or self.stop_event.is_set():
+            if self.stop_event.is_set() and id not in self.cancelled and not self.journal.is_cancelled(id):
+                raise asyncio.CancelledError
+            if id in self.cancelled or self.journal.is_cancelled(id):
                 raise DevError("CANCELLED", "操作开始前已取消")
             if not_after is not None and time.time() > not_after:
                 raise DevError("QUEUE_EXPIRED", "超过首次执行期限，尚未开始操作；请确认后重新提交")
@@ -839,7 +842,9 @@ class Agent:
                         slot_write = not task_config.get("allow_read_concurrency", False)
                     async with self.execution_slot(id, tool, project, args, root, slot_write, not_after,
                                                    read_admission=admission, reserved=reserved):
-                        if id in self.cancelled or self.journal.is_cancelled(id) or self.stop_event.is_set():
+                        if self.stop_event.is_set() and id not in self.cancelled and not self.journal.is_cancelled(id):
+                            raise asyncio.CancelledError
+                        if id in self.cancelled or self.journal.is_cancelled(id):
                             raise DevError("CANCELLED", "操作开始前已取消")
                         if not_after is not None and time.time() > not_after:
                             raise DevError("QUEUE_EXPIRED", "超过首次执行期限，尚未开始操作；请确认后重新提交")
@@ -865,10 +870,29 @@ class Agent:
                             concurrency = self.resources.concurrency_for(id)
                             if concurrency and isinstance(result, dict):
                                 result['concurrency'] = concurrency
+            if id in self.shutdown_interrupted:
+                raise DevError("INTERRUPTED", "Agent 停止时中断了执行中的进程；请核对本机结果，不自动重跑")
             result = {"ok": True, "data": result}
         except asyncio.CancelledError:
+            if self.journal.status(id)["status"] == "accepted" and not self.journal.is_cancelled(id):
+                # No side effect began. Leave the durable accepted receipt for
+                # startup's accepted -> retryable recovery, never finish it.
+                self.telemetry.starts.pop(id, None)
+                self.pending_output.pop(id, None)
+                self.integration_projects.pop(id, None)
+                self.integration_tool_names.pop(id, None)
+                raise
             result = {"ok": False, "error": {"code": "CANCELLED" if self.journal.is_cancelled(id) else "INTERRUPTED", "message": "操作已取消" if self.journal.is_cancelled(id) else "Agent 进程被停止；检查本机结果后再决定是否重做"}}
         except DevError as exc:
+            if (exc.code == "AGENT_STOPPING" and self.journal.status(id)["status"] == "accepted"
+                    and not self.journal.is_cancelled(id)):
+                # Scheduler.close may wake the waiter before shutdown cancels
+                # its task. It has exactly the same never-started receipt.
+                self.telemetry.starts.pop(id, None)
+                self.pending_output.pop(id, None)
+                self.integration_projects.pop(id, None)
+                self.integration_tool_names.pop(id, None)
+                raise asyncio.CancelledError from exc
             result = {"ok": False, "error": {"code": exc.code, "message": exc.message}}
             result['error'].update(safe_filesystem_error_detail(request.get('tool'), exc.code, exc.details))
             if exc.code == 'RESOURCE_BUSY':
@@ -893,6 +917,7 @@ class Agent:
                 result = {"ok": False, "error": {"code": "AGENT_ERROR", "message": str(exc)[:1500]}}
         finally:
             self.cancelled.discard(id)
+            self.shutdown_interrupted.discard(id)
         self.finishing.add(id)
         self.phase(id, "persisting")
         result["trace"] = self.telemetry.snapshot(id)
@@ -1381,7 +1406,11 @@ class Agent:
             # local task definitions, PATH overrides and resolved symlink targets.
             enforce_argv(self.config, execution_project, command, cwd, environment)
         extra = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
-        spawning = asyncio.create_task(asyncio.create_subprocess_exec(*command, cwd=cwd, env=environment,
+        spawn = asyncio.create_subprocess_exec
+        if os.name != "nt":
+            from agent.owned_subprocess import create_owned_process
+            spawn = create_owned_process
+        spawning = asyncio.create_task(spawn(*command, cwd=cwd, env=environment,
                       stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
                       stderr=asyncio.subprocess.STDOUT, **extra))
         try:
@@ -1454,6 +1483,8 @@ class Agent:
             reader = asyncio.create_task(drain())
             waiter = asyncio.create_task(exited())
             if id in self.cancelled or self.journal.is_cancelled(id) or self.stop_event.is_set():
+                if self.stop_event.is_set() and process.returncode is None and not self.journal.is_cancelled(id):
+                    self.shutdown_interrupted.add(id)
                 await self.kill_process(process, include_finished=True)
             async with asyncio.timeout(timeout):
                 done, _ = await asyncio.wait({reader, waiter}, return_when=asyncio.FIRST_COMPLETED)
@@ -1488,7 +1519,15 @@ class Agent:
 
     @staticmethod
     async def kill_process(process, include_finished=False):
-        if process.returncode is not None and not include_finished:
+        from agent.owned_subprocess import OwnedProcess
+        if isinstance(process, OwnedProcess):
+            # This adapter deliberately retains the leader until all owned
+            # descendants are stopped; finished leaders still pin the PGID.
+            await process.stop_owned()
+            return
+        # asyncio has reaped a completed leader. Its numeric PID/PGID is no
+        # longer an owned identity, even when descendant cleanup is requested.
+        if process.returncode is not None:
             return
         if os.name == "nt":
             # Windows taskkill resolves a PID, not a process-group identity.
@@ -1512,6 +1551,8 @@ class Agent:
                         process.kill()
         else:
             def signal_group(sig):
+                if process.returncode is not None:
+                    return
                 try:
                     os.killpg(process.pid, sig)
                 except ProcessLookupError:
@@ -1606,7 +1647,10 @@ class Agent:
                 task.cancel()
             await asyncio.gather(*background, return_exceptions=True)
             try:
-                self.cancelled.update(self.jobs)
+                # Shutdown is not a user cancellation. Preserve completed
+                # successes and distinguish only processes actually interrupted.
+                self.shutdown_interrupted.update(
+                    id for id, process in self.processes.items() if process.returncode is None)
                 for id, job in list(self.jobs.items()):
                     if id not in self.finishing and self.journal.status(id)["status"] == "accepted":
                         job.cancel()
