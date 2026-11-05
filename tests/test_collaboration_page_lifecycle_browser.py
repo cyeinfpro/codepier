@@ -1,6 +1,7 @@
 """Browser document lifecycle must cancel reads without replaying room actions."""
 import json
 import os
+import subprocess
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -21,7 +22,7 @@ POLL_PROBE = """(() => {
   const originalTimer = window.setTimeout, originalFetch = window.fetch;
   const probe = window.lifecycleProbe = {armed: false, rows: [], poll: null,
     origin: crypto.randomUUID(), pagehide: false, signals: [], owners: [], cycles: new Set(),
-    pollAttempts: 0, pollCompletions: 0};
+    pollAttempts: 0, pollCompletions: 0, paused: false, timers: new Set()};
   probe.record = (event, details={}) => {
     const key = 'codepier-lifecycle-read-evidence';
     const records = JSON.parse(sessionStorage.getItem(key) || '[]');
@@ -44,8 +45,13 @@ POLL_PROBE = """(() => {
       pending.then(done, done);
       return pending;
     };
-    const id = originalTimer.call(this, run, delay);
+    const id = originalTimer.call(this, () => {
+      probe.timers.delete(id);
+      if (!probe.paused) return run();
+    }, delay);
     probe.poll = {id, run};
+    if (probe.paused) clearTimeout(id);
+    else probe.timers.add(id);
     return id;
   };
   probe.drain = async () => {
@@ -54,6 +60,14 @@ POLL_PROBE = """(() => {
       await Promise.all([...probe.cycles]);
       clearTimeout(probe.poll?.id);
     }
+  };
+  probe.pause = async () => {
+    // Hold only setup scheduling. Keep the original callback and wait for
+    // admitted work; the measured pending-reload cycle is resumed explicitly.
+    probe.paused = true;
+    for (const id of probe.timers) clearTimeout(id);
+    probe.timers.clear();
+    await probe.drain();
   };
   window.fetch = function(input, init = {}) {
     const url = new URL(typeof input === 'string' ? input : input.url, location.href);
@@ -88,6 +102,81 @@ POLL_PROBE = """(() => {
     });
   };
 })();"""
+
+
+def test_poll_probe_pause_seals_setup_timer_window():
+    # A controlled timer unit test checks the probe, not browser/HTTP behavior.
+    # The end-to-end case below still executes the original callback and reads.
+    script = r"""
+const assert = require('node:assert/strict');
+const vm = require('node:vm');
+const source = require('node:fs').readFileSync(0, 'utf8');
+function fixture() {
+  let next = 0;
+  const timers = new Map();
+  const context = {
+    Promise, Set, URL, Headers, crypto: {randomUUID: () => 'fixture-document'},
+    location: {href: 'http://fixture/'}, console,
+    sessionStorage: {getItem: () => null, setItem() {}},
+    addEventListener() {},
+    fetch() {throw new Error('Unexpected network in timer unit test');},
+    setTimeout(callback, delay, ...args) {
+      const id = ++next;
+      timers.set(id, () => callback(...args));
+      return id;
+    },
+    clearTimeout(id) {timers.delete(id);}
+  };
+  context.window = context;
+  vm.runInNewContext(source, context);
+  return {context, timers, probe: context.lifecycleProbe};
+}
+(async () => {
+  // Draining admitted promises alone leaves a later scheduling window open.
+  const old = fixture();
+  async function poll() {}
+  old.context.setTimeout(poll, 5000);
+  await old.probe.drain();
+  old.context.setTimeout(poll, 5000);
+  assert.equal(old.timers.size, 1);
+
+  for (const alreadyRunning of [false, true]) {
+    const {context, timers, probe} = fixture();
+    let calls = 0, release;
+    const gate = new Promise(resolve => {release = resolve;});
+    async function poll() {calls++; await gate;}
+    const id = context.setTimeout(poll, 5000);
+    if (alreadyRunning) {
+      const fire = timers.get(id);
+      timers.delete(id);
+      void fire();
+      assert.equal(probe.cycles.size, 1);
+    }
+    let paused = false;
+    const pausing = probe.pause().then(() => {paused = true;});
+    await Promise.resolve();
+    if (alreadyRunning) assert.equal(paused, false);
+    assert.equal(timers.size, 0);
+    // A lifecycle rebind during/after the drain must not start an unarmed poll.
+    context.setTimeout(poll, 5000);
+    assert.equal(timers.size, 0);
+    assert.equal(calls, alreadyRunning ? 1 : 0);
+    release();
+    await pausing;
+    assert.equal(probe.cycles.size, 0);
+    probe.armed = true;
+    probe.paused = false;
+    await probe.poll.run();
+    await Promise.resolve();
+    assert.equal(calls, alreadyRunning ? 2 : 1);
+    assert.equal(probe.pollCompletions, calls);
+    assert.equal(probe.cycles.size, 0);
+  }
+})().catch(error => {console.error(error); process.exitCode = 1;});
+"""
+    result = subprocess.run(['node', '-e', script], input=POLL_PROBE, text=True,
+                            capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def polling_page(stack, chat_browser_pool, engine):
@@ -138,7 +227,7 @@ def test_pending_reload_reads_use_the_original_document_without_page_errors(
     try:
         original = page.evaluate_handle("() => lifecycleProbe")
         original_document = page.evaluate_handle("document")
-        original.evaluate("p => {clearTimeout(p.poll.id);}")
+        original.evaluate("p => p.pause()")
         before_writes = list(writes)
         stack.reload_armed.set()
         with page.expect_request(lambda request: request.is_navigation_request()
@@ -148,7 +237,7 @@ def test_pending_reload_reads_use_the_original_document_without_page_errors(
         # response, rather than suspending WebKit at native request interception.
         assert stack.reload_arrived.wait(10), "Reload did not reach the HTTP response gate"
         stack.reload_marker = original.evaluate("p => p.origin")
-        original.evaluate("p => {p.navigationHeld = true; p.routeMarker = p.origin; p.armed = true;}")
+        original.evaluate("p => {p.navigationHeld = true; p.routeMarker = p.origin;}")
         assert not stack.reload_release.is_set()
         # Run the real scheduled callback in its original document while the
         # replacement response is held. Native fetches and API responses remain
@@ -157,6 +246,9 @@ def test_pending_reload_reads_use_the_original_document_without_page_errors(
           // A wake while another poll is active may return immediately while
           // scheduling the real cycle. Await its four actual response records,
           // rather than treating that early return as completed work.
+          if (p.cycles.size) throw new Error('Setup poll is still active');
+          p.armed = true;
+          p.paused = false;
           void p.poll.run();
           await Promise.race([p.firstCycle, new Promise((_, reject) =>
             setTimeout(() => reject(new Error('Four polling reads did not finish: ' +

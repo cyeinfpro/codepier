@@ -278,6 +278,12 @@ def test_restore_uses_only_visible_history_project_for_navigation(
     try:
         login(page, stack)
         join_dot(stack, create_dot(stack, '合成历史助手'))
+        # Enrollment is fixture setup, not the restore transition under test.
+        # Enter a fresh document with that connection before opening a drawer;
+        # a pending old-page access refresh may legitimately replace the view.
+        page.reload()
+        expect(page.locator('#cc-message-input')).to_be_enabled()
+        expect(page.locator('.cc-member-strip')).to_contain_text('1 个助手')
         form = manage_from_connections(page)
         try:
             project_checkbox(form, other).check()

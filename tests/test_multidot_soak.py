@@ -1,6 +1,7 @@
 """Validate the isolated sustained-run harness without shortening a soak claim."""
 import asyncio
 import json
+import time
 
 import pytest
 
@@ -9,12 +10,34 @@ from scripts.soak_multidot import RunConfig, SoakHarness, budget_evidence, run
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_short_real_http_flow_preserves_every_source_and_excludes_setup(tmp_path):
+@pytest.mark.parametrize('input_delay', [0, 1.2], ids=['normal-input', 'delayed-input'])
+async def test_short_real_http_flow_preserves_every_source_and_excludes_setup(
+    tmp_path, monkeypatch, input_delay
+):
     output = tmp_path / 'fresh-soak'
     config = RunConfig(duration_seconds=2.2, owners=2, dots_per_owner=2,
                        batch_interval_seconds=1, slow_callback_seconds=.02,
                        fault_every_seconds=0, sample_interval_seconds=1,
                        drain_timeout_seconds=10)
+
+    async def three_real_batches(harness):
+        # Fixed-cardinality self-check, not a throughput claim: a busy runner
+        # need not fit three scheduled batches inside 2.2 seconds. Submit all
+        # twelve real sources, retaining the real clock, pacing and HTTP path.
+        # The production duration-bounded producer is not changed.
+        for round_number in range(3):
+            if input_delay:
+                await asyncio.sleep(input_delay)
+            await asyncio.gather(*(harness.produce_one(binding, round_number)
+                                   for binding in harness.bindings))
+            next_at = harness.started + min((round_number + 1) * config.batch_interval_seconds,
+                                           config.duration_seconds)
+            remaining = next_at - time.monotonic()
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+        harness.measurement_ended = time.monotonic()
+
+    monkeypatch.setattr(SoakHarness, 'produce', three_real_batches)
     result = await run(output, config)
     assert result['state'] == 'passed', result['checks']
     assert result['duration_class'] == 'short_self_check'
@@ -36,6 +59,23 @@ async def test_short_real_http_flow_preserves_every_source_and_excludes_setup(tm
     assert 'whsec_' not in serialized and 'consumer_proof' not in serialized
     assert result['memory']['sample_count'] >= 2
     assert result['store_final']['worker']['quantiles_omitted'] == 'recent window still includes setup'
+
+
+@pytest.mark.asyncio
+async def test_duration_producer_does_not_add_batches_after_a_slow_batch(tmp_path, monkeypatch):
+    harness = SoakHarness(tmp_path / 'duration-producer', RunConfig(duration_seconds=.1))
+    harness.bindings = ['first', 'second']
+    observed = []
+
+    async def slow_input(binding, round_number):
+        observed.append((binding, round_number))
+        await asyncio.sleep(.15)
+
+    monkeypatch.setattr(harness, 'produce_one', slow_input)
+    harness.started = time.monotonic()
+    await harness.produce()
+    assert observed == [('first', 0), ('second', 0)]
+    assert harness.measurement_ended - harness.started >= .1
 
 
 @pytest.mark.asyncio
