@@ -65,9 +65,18 @@ window.CodePierSchedulerSettings = (() => {
     );
   }
   function metrics(data) {
-    const info = data.reported;
-    if (!info) return '<p class="form-note">等待节点报告运行情况</p>';
+    const info = data.reported,
+      semantics = data.resource_semantics || {};
+    const effective =
+      { strict: '严格互斥', relaxed: '放宽文件/进程互斥' }[semantics.effective] || '等待节点报告';
+    const semanticNote =
+      '<p class="form-note" data-scheduler-semantics>资源语义实际生效：' +
+      esc(effective) +
+      (semantics.supported ? '' : ' · 旧节点保持严格规则，升级后才能启用放宽模式') +
+      '</p>';
+    if (!info) return semanticNote + '<p class="form-note">等待节点报告运行情况</p>';
     return (
+      semanticNote +
       '<div class="settings-tags"><span>运行 ' +
       info.running +
       '</span><span>排队 ' +
@@ -146,6 +155,11 @@ window.CodePierSchedulerSettings = (() => {
       (draft.adaptive === false ? ' selected' : '') +
       '>固定上限</option></select></label>' +
       number('maximum', '执行并发上限', draft.maximum) +
+      '<label class="field">资源互斥语义<select name="resource_semantics"><option value="">继承节点（首次默认严格）</option><option value="strict"' +
+      (draft.resource_semantics === 'strict' ? ' selected' : '') +
+      '>严格互斥</option><option value="relaxed"' +
+      (draft.resource_semantics === 'relaxed' ? ' selected' : '') +
+      '>放宽文件与进程互斥</option></select><small>放宽模式允许读取运行中命令写出的内容，进程普通 read 不再冻结文件编辑。门禁需声明 read_stable 或使用快照；仅协议 2 节点支持。</small></label>' +
       '</div>' +
       '<details class="settings-details"><summary>项目配额与高级设置</summary><p>新设置只影响后续准入。节点本机上限和资源保护仍生效。</p>' +
       '<div class="settings-import-fields">' +
@@ -222,6 +236,9 @@ window.CodePierSchedulerSettings = (() => {
     };
     const readDraft = () => {
       const value = clone(state.draft || {});
+      const semantics = form.elements.resource_semantics.value;
+      if (semantics === '') delete value.resource_semantics;
+      else value.resource_semantics = semantics;
       const adaptive = form.elements.adaptive.value;
       if (adaptive === '') delete value.adaptive;
       else value.adaptive = adaptive === 'true';
@@ -263,7 +280,12 @@ window.CodePierSchedulerSettings = (() => {
           feedback('其他窗口已修改设置；草稿保留，请取消改动后重新读取。');
           return;
         }
-        state.data = { ...state.data, reported: data.reported, state: data.state };
+        state.data = {
+          ...state.data,
+          reported: data.reported,
+          state: data.state,
+          resource_semantics: data.resource_semantics,
+        };
         repaint(data);
         if (dirty()) $('[data-scheduler-state]', mounted).textContent = '未保存';
         if (data.state === 'pending' && attempt < 15)

@@ -21,7 +21,8 @@ import websockets
 from agent.filesystem import FileEngine
 from agent.core_files import CoreFiles
 from agent import workspace_probe
-from agent.resource_queue import Claim, ResourceQueue, claims_for, canonical_path, PATH_READ_TOOLS
+from agent.resource_queue import (Claim, ResourceQueue, claims_for, canonical_path,
+                                  PATH_READ_TOOLS, SCOPED_READ_TOOLS, BOUNDED_FILE_TOOLS)
 from agent.scheduler import ProjectScheduler
 from agent.resource_pressure import ResourceSampler
 from shared.scheduler_config import effective_scheduler, validate_scheduler_overrides, is_metadata_observation
@@ -298,7 +299,7 @@ class Agent:
                           "version": VERSION, "build": self.build.describe(), "platform": platform.system(), "hostname": platform.node(),
                           "python": platform.python_version(), "roots": config["allowed_roots"], "capabilities": list(TOOLS),
                           "management": self.lifecycle.describe(), "device_actions": self.lifecycle.actions(),
-                          "scheduler_protocol": 1, "bounded_execution_protocol": 1,
+                          "scheduler_protocol": 1, "resource_semantics_protocol": 2, "snapshot_execution_protocol": 1, "bounded_execution_protocol": 1,
                           "project_runtime_protocol": 1, "project_runtime_profiles": advertised_profiles(config),
                           "journal_id": self.journal.journal_id, "delivery_protocol": 2, "cancel_pending_protocol": 1, "native_security_protocol": 1, "native_protocol": 1, "native_chat_protocol": 3, **advertisement(self.build.catalog_sha256)}))
             reply = channel.unpack(await asyncio.wait_for(socket.recv(), 10))
@@ -492,6 +493,9 @@ class Agent:
         async with contextlib.AsyncExitStack() as stack:
             try:
                 async with asyncio.timeout(timeout) as timer:
+                    if tool == 'exec' and args.get('isolation') == 'snapshot':
+                        await self.prepare_snapshot(identifier, project, args, root, deadline)
+                        stack.push_async_callback(self.finish_snapshot, identifier)
                     # Imports publish one destination. A project-wide writer
                     # here also stalls unrelated projects under a mapped parent.
                     if workspace_probe.eligible(tool, args):
@@ -500,10 +504,20 @@ class Agent:
                                 read_admission = await workspace_probe.probe(
                                     self.engine, tool, project, args, phase='claims', expected_root=root)
                         claims = [Claim(**item) for item in read_admission['claims']]
-                    elif tool in CORE_REMOTE or tool == 'download_artifact' or tool in PATH_READ_TOOLS:
-                        claims = claims_for(self.engine, tool, project, args, root)
+                    elif (tool in CORE_REMOTE or tool == 'download_artifact' or tool in PATH_READ_TOOLS
+                          or tool in SCOPED_READ_TOOLS or tool in {'project_checkpoint', 'worktrees_create'}):
+                        claims = claims_for(self.engine, tool, project, args, root, operation_id=identifier)
                     else:
-                        claims = [Claim('agent', 'path', canonical_path(root), write)]
+                        claims = [Claim('agent', 'path', canonical_path(root), write,
+                                        'process' if tool in {'shell_exec', 'tasks_run', 'ssh_exec', 'validation_run'} else 'file',
+                                        tool == 'tasks_run')]
+                    if tool == 'exec' and args.get('target', 'agent') == 'agent':
+                        if args.get('isolation') == 'snapshot':
+                            # File paths refer to the private cloned tree. Service
+                            # resources still name shared external dependencies.
+                            claims = [claim for claim in claims if claim.kind == 'service']
+                        claims.append(Claim('agent', 'path', canonical_path(root / '.codepier' / 'runs' / identifier),
+                                            True, 'process'))
                     metadata = is_metadata_observation(tool, args)
                     if metadata:
                         # The index is a bounded observation with per-file
@@ -515,7 +529,7 @@ class Agent:
                     # the existing file-I/O lane, just like core read, so long
                     # commands cannot starve directory navigation. Resource locks
                     # still exclude conflicting writes; searches stay heavy.
-                    lane = "read" if metadata or tool in {'read', 'write', 'edit', 'fs_tree', 'fs_read', 'fs_read_many'} else "execution"
+                    lane = "read" if metadata or tool in BOUNDED_FILE_TOOLS else "execution"
                     # Match the typed execution dispatcher, including the panel's
                     # legacy SSH entry. Never infer remote work from shell text.
                     remote = args if tool == "ssh_exec" else None
@@ -543,6 +557,10 @@ class Agent:
                         lambda reason: self.phase(identifier, "waiting_worker", queue_reason=reason, lane=lane,
                             queue_age_ms=round((time.monotonic()-queued_at)*1000)),
                         claims=claims,
+                        strict_order=args.get('options', {}).get('order') == 'strict',
+                        wait_policy=args.get('options', {}).get('wait_policy', 'queue'),
+                        initial_wait_seconds=max(.01, args.get('yield_seconds', 1)),
+                        on_bypass=lambda count: self.phase(identifier, 'bypassed', bypassed_count=count, lane=lane),
                         on_resource_wait=lambda blockers: self.phase(identifier, 'waiting_resource',
                             blocked_by=blockers, queue_reason='resource_conflict', lane=lane,
                             blocked_count=len(blockers), resource_kinds=sorted({claim.kind for claim in claims}),
@@ -595,12 +613,14 @@ class Agent:
                         admission = await workspace_probe.probe(
                             self.engine, tool, project, args, phase='admission', worker=worker)
                         claims = [] if metadata else [Claim(**item) for item in admission['claims']]
-                        lane = 'execution' if tool == 'fs_search' else 'read'
+                        lane = 'read'
                         # One synchronous decision converts the preflight ticket
                         # and reserves resources. Failure leaves neither a path
                         # reservation nor a fairness turn behind while reaping.
                         reserved = self.scheduler.try_reserve(identifier,
-                            admission['project_key'], lane, replace=ticket, claims=claims) is not None
+                            admission['project_key'], lane, replace=ticket, claims=claims,
+                            strict_order=args.get('options', {}).get('order') == 'strict',
+                            on_bypass=lambda count: self.phase(identifier, 'bypassed', bypassed_count=count, lane=lane)) is not None
                         if reserved:
                             timer.reschedule(None)
                             yield admission, worker, True
@@ -760,26 +780,14 @@ class Agent:
                 self.journal.mark_running(id)
                 await self.send({'type': 'started', 'id': id})
                 self.phase(id, 'directory_grants')
-                work = asyncio.create_task(asyncio.to_thread(roots_settings_call, self, tool, project, args))
-                try:
-                    result = await asyncio.shield(work)
-                except asyncio.CancelledError:
-                    # A config commit cannot be cancelled after dispatch. Keep
-                    # the original durable result, including uncertain saves.
-                    result = await work
+                result = await self._committed_io(roots_settings_call, self, tool, project, args)
             elif tool in PANEL_RUNTIME_TOOLS:
                 from agent.runtime_panel import call as runtime_settings_call
                 args = TOOLS[tool].model.model_validate(args).model_dump()
                 self.journal.mark_running(id)
                 await self.send({"type": "started", "id": id})
                 self.phase(id, "runtime_settings")
-                work = asyncio.create_task(asyncio.to_thread(runtime_settings_call, self, tool, project, args))
-                try:
-                    result = await asyncio.shield(work)
-                except asyncio.CancelledError:
-                    # An atomic config write in a worker cannot be cancelled.
-                    # Preserve its actual receipt, just as file writes do.
-                    result = await work
+                result = await self._committed_io(runtime_settings_call, self, tool, project, args)
             elif tool in {"execution_info", "agent_diagnostics"}:
                 TOOLS[tool].model.model_validate(args)
                 root, spec = self.engine.root(project)
@@ -852,12 +860,18 @@ class Agent:
                                 raise DevError("ROOT_CHANGED", "项目根目录发生变化，请确认映射后重新提交")
                             self.phase(id, "executing")
                             result = await self.execute(id, tool, project, args)
+                            concurrency = self.resources.concurrency_for(id)
+                            if concurrency and isinstance(result, dict):
+                                result['concurrency'] = concurrency
             result = {"ok": True, "data": result}
         except asyncio.CancelledError:
             result = {"ok": False, "error": {"code": "CANCELLED" if self.journal.is_cancelled(id) else "INTERRUPTED", "message": "操作已取消" if self.journal.is_cancelled(id) else "Agent 进程被停止；检查本机结果后再决定是否重做"}}
         except DevError as exc:
             result = {"ok": False, "error": {"code": exc.code, "message": exc.message}}
             result['error'].update(safe_filesystem_error_detail(request.get('tool'), exc.code, exc.details))
+            if exc.code == 'RESOURCE_BUSY':
+                result['error']['blocked_by'] = [value for value in exc.details.get('blocked_by', [])[:64]
+                                                if isinstance(value, str) and len(value) <= 100]
             if request.get('tool') == 'download_artifact':
                 result['error'].update(safe_import_error_detail(exc.details))
             if isinstance(request.get('tool'), str) and request['tool'] in COMPUTER_TOOLS:
@@ -934,6 +948,118 @@ class Agent:
                                       requested_seconds=budget['timeout_seconds'], now=time.time())
         return min(local_timeout, remaining)
 
+    @staticmethod
+    async def _committed_io(function, *args, **kwargs):
+        """Keep ownership until uncancellable I/O settles, even after repeated cancel.
+
+        Once dispatched, file/config mutation must report its actual outcome,
+        not cancellation after a successful commit. Only the wrapper is shielded;
+        worker exceptions still propagate unchanged to the durable receipt.
+        """
+        work = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+        while not work.done():
+            try:
+                await asyncio.shield(work)
+            except asyncio.CancelledError:
+                continue
+        return work.result()
+
+    @staticmethod
+    async def _snapshot_io(function, *args, **kwargs):
+        """Do not release source claims while an uncancellable clone is running."""
+        work = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+        cancelled = False
+        while not work.done():
+            try:
+                await asyncio.shield(work)
+            except asyncio.CancelledError:
+                cancelled = True
+        result = work.result()
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
+
+    def _preflight_local_execution(self, project, args, root):
+        from agent.project_runtime import prepare, selected, legacy_environment
+        current_root, spec = self.engine.root(project, True)
+        if current_root != root:
+            raise DevError('ROOT_CHANGED', 'Workspace mapping changed before preparation', 409)
+        if args.get('task'):
+            task = self.config.get('tasks', {}).get(args['task'])
+            if not project.get('allow_tasks') or not spec.get('allow_tasks'):
+                raise DevError('TASKS_DISABLED', 'Project execution is disabled', 403)
+            if not task or not self.task_allowed(task, project):
+                raise DevError('TASK_NOT_ALLOWED', 'Task is not authorized for this project', 403)
+            command = task.get('command')
+            if not isinstance(command, list) or not command or any(not isinstance(x, str) or '\x00' in x for x in command):
+                raise DevError('TASK_CONFIG', 'Task command must be an argument array')
+            cwd = self.engine.path(root, task.get('cwd', '.'))
+            env = task.get('env', {})
+        else:
+            command, cwd, env = prepare_shell(self.config, project, spec, root, args)
+        env = {key: value for key, value in env.items() if key != 'CODEPIER_RUN_DIR'}
+        profile = selected(self.config, project)
+        if profile['mode'] == 'native_compat':
+            environment = legacy_environment(self.config['shell']['inherit_env'] if not args.get('task') else False,
+                                             env, full_access=not args.get('task'))
+            enforce_argv(self.config, project, command, cwd, environment)
+        else:
+            plan = prepare(self.config, project, root, command, cwd, env, create=False)
+            enforce_argv(self.config, project, plan.command, plan.cwd, plan.environment)
+        return command, cwd, env
+
+    async def prepare_snapshot(self, id, project, args, root, deadline):
+        from agent.project_runtime import selected, descriptor
+        from agent.snapshots import SnapshotManager
+        if args.get('target', 'agent') != 'agent':
+            raise DevError('SNAPSHOT_RUNTIME_UNSUPPORTED', 'Snapshot execution is local only')
+        if args.get('options', {}).get('wait_policy') == 'fail_fast':
+            raise DevError('INVALID_ARGUMENT', 'Snapshot preparation cannot be combined with fail_fast')
+        command, cwd, env = self._preflight_local_execution(project, args, root)
+        if selected(self.config, project)['mode'] != 'project_clean_v1' or project.get('_runtime_requirement'):
+            raise DevError('SNAPSHOT_RUNTIME_UNSUPPORTED', 'Snapshots require project_clean_v1; native and container runtimes must use worktrees')
+        if not cwd.is_relative_to(root):
+            raise DevError('SNAPSHOT_UNSAFE', 'Snapshot cwd must remain inside the source workspace')
+        for resource in args.get('resources', []):
+            if resource.get('kind', 'path') != 'path':
+                continue
+            path = Path(resource['name'])
+            path = (path if path.is_absolute() else cwd / path).resolve()
+            if not path.is_relative_to(root):
+                raise DevError('SNAPSHOT_UNSAFE', 'Snapshot resource paths must remain inside the source workspace')
+        if not hasattr(self, '_execution_snapshots'):
+            self._execution_snapshots = {}
+        if id in self._execution_snapshots:
+            raise DevError('SNAPSHOT_EXISTS', 'This operation already owns a snapshot', 409)
+        project_id = project.get('id') or canonical_path(project.get('_original_root', root))
+        claim = Claim('agent', 'path', canonical_path(root), False, 'process', True)
+        async with self.scheduler.slot(id, project_id, 'execution', claims=[claim], strict_order=True,
+                on_resource_wait=lambda blockers: self.phase(id, 'waiting_resource', blocked_by=blockers,
+                                                            queue_reason='resource_conflict', lane='execution')):
+            if deadline is not None and time.time() >= deadline:
+                raise DevError('QUEUE_EXPIRED', 'Snapshot preparation deadline expired')
+            self._preflight_local_execution(project, args, root)
+            runtime = descriptor(self.config, project, root)
+            holder = {}
+            def clone():
+                manager = SnapshotManager(self.state_dir)
+                manager.cleanup()
+                snapshot = manager.create(root, id, str(cwd.relative_to(root)))
+                holder.update(manager=manager, snapshot=snapshot, root=root,
+                              revision=runtime['revision'], success=False)
+            try:
+                await self._snapshot_io(clone)
+            except BaseException:
+                if holder:
+                    await self._snapshot_io(holder['manager'].finish, holder['snapshot'], success=False)
+                raise
+            self._execution_snapshots[id] = holder
+
+    async def finish_snapshot(self, id):
+        holder = getattr(self, '_execution_snapshots', {}).pop(id, None)
+        if holder:
+            await self._snapshot_io(holder['manager'].finish, holder['snapshot'], success=holder['success'])
+
     async def execute(self, id, tool, project, args, *, saved_vps_target=None):
         if workspace_probe.eligible(tool, args):
             worker, root = self._read_workers.get(id, (None, None))
@@ -941,44 +1067,77 @@ class Agent:
                                                worker=worker, expected_root=root)
         from shared.integration_contracts import REMOTE_TOOLS
         if tool == 'exec':
-            if args['task']:
-                from shared.contracts import Task
-                forwarded = Task.model_validate({k: v for k, v in args.items() if k in Task.model_fields}).model_dump()
-                result = await self.execute(id, 'tasks_run', project, forwarded)
-            elif args['target'] == 'agent':
-                from shared.contracts import ShellExec
-                forwarded = ShellExec.model_validate({k: v for k, v in args.items() if k in ShellExec.model_fields}).model_dump()
-                result = await self.execute(id, 'shell_exec', project, forwarded)
-            else:
-                from shared.contracts import SSHExec
-                if not isinstance(project.get('_core_ssh'), dict):
-                    raise DevError('VPS_TRANSPORT_MISSING', '缺少 Hub 验证的 VPS 连接，未执行命令', 409)
-                forwarded = SSHExec.model_validate(project['_core_ssh']).model_dump()
-                result = await self.execute(id, 'ssh_exec', project, forwarded, saved_vps_target=args['target'])
-            output = result.get('output', '')
-            tail = '\n'.join(output.split('\n')[-2000:]).encode('utf-8')[-50 * 1024:].decode('utf-8', errors='ignore')
-            return {**result, 'output': tail, 'output_truncated': bool(result.get('output_truncated') or tail != output),
-                    **({'execution_budget': project['_bounded_execution'], 'execution_budget_enforced': True}
-                       if project.get('_bounded_execution') else {}),
-                    'target': args['target'], 'resource_coordination': 'configured_task' if args['task'] else 'declared' if args['resources'] else 'independent'}
-        if tool in {'read', 'write', 'edit'}:
-            work = asyncio.create_task(asyncio.to_thread(CoreFiles(self.engine).call, tool, project, args))
+            from agent.run_directories import prepare_run_directory, finish_run_directory, cleanup_run_directories
+            local = args.get('target', 'agent') == 'agent'
+            run_dir = None
+            holder = getattr(self, '_execution_snapshots', {}).get(id)
+            if args.get('isolation') == 'snapshot' and holder is None:
+                raise DevError('SNAPSHOT_UNPREPARED', 'Snapshot execution requires admitted preparation', 409)
+            if local:
+                root, _ = self.engine.root(project, True)
+                self._preflight_local_execution(project, args, root)
+                if not hasattr(self, '_execution_run_dirs'):
+                    self._execution_run_dirs = {}
+                # Allocation only after admission and permission preflight.
+                # Track it inside the worker so cancellation cannot orphan an active marker.
+                def allocate():
+                    cleanup_run_directories(root)
+                    path = prepare_run_directory(root, id)
+                    self._execution_run_dirs[id] = path
+                    return path
             try:
-                return await asyncio.shield(work)
-            except asyncio.CancelledError:
-                return await work
+                if local:
+                    run_dir = await self._snapshot_io(allocate)
+                if args['task']:
+                    from shared.contracts import Task
+                    forwarded = Task.model_validate({k: v for k, v in args.items() if k in Task.model_fields}).model_dump()
+                    result = await self.execute(id, 'tasks_run', project, forwarded)
+                elif local:
+                    from shared.contracts import ShellExec
+                    forwarded = ShellExec.model_validate({k: v for k, v in args.items() if k in ShellExec.model_fields}).model_dump()
+                    result = await self.execute(id, 'shell_exec', project, forwarded)
+                else:
+                    from shared.contracts import SSHExec
+                    if not isinstance(project.get('_core_ssh'), dict):
+                        raise DevError('VPS_TRANSPORT_MISSING', '缺少 Hub 验证的 VPS 连接，未执行命令', 409)
+                    forwarded = SSHExec.model_validate(project['_core_ssh']).model_dump()
+                    result = await self.execute(id, 'ssh_exec', project, forwarded, saved_vps_target=args['target'])
+                if holder:
+                    artifacts = await self._snapshot_io(holder['manager'].extract_artifacts,
+                        holder['snapshot'], args.get('snapshot_artifacts', []), run_dir)
+                    holder['success'] = result.get('exit_code') == 0 and not result.get('timed_out') and not result.get('cancelled')
+                    result.update(snapshot_artifacts=artifacts, snapshot_execution={
+                        'mode': 'copy_on_write', 'os_sandbox': False,
+                        'excluded': ['.git', '.codepier'], 'retained': not holder['success']})
+                if run_dir is not None:
+                    result['run_directory'] = '.codepier/runs/' + id
+                    if any(resource.get('kind', 'path') == 'path' and resource.get('mode') == 'write'
+                           and (Path(resource['name']) if Path(resource['name']).is_absolute()
+                                else root / args.get('cwd', '.') / resource['name']).resolve() == root
+                           for resource in args.get('resources', [])):
+                        result.setdefault('warnings', []).append('根目录写声明会阻塞项目写入及其他进程；strict 模式也会阻塞文件读取。请按实际修改范围声明资源。')
+                elif not local:
+                    result.setdefault('warnings', []).append('Remote execution does not provide CODEPIER_RUN_DIR; use a target-local unique output directory.')
+                output = result.get('output', '')
+                tail = '\n'.join(output.split('\n')[-2000:]).encode('utf-8')[-50 * 1024:].decode('utf-8', errors='ignore')
+                return {**result, 'output': tail, 'output_truncated': bool(result.get('output_truncated') or tail != output),
+                        **({'execution_budget': project['_bounded_execution'], 'execution_budget_enforced': True}
+                           if project.get('_bounded_execution') else {}),
+                        'target': args['target'], 'resource_coordination': 'configured_task' if args['task'] else 'declared' if args['resources'] else 'independent'}
+            finally:
+                owned_run = getattr(self, '_execution_run_dirs', {}).pop(id, None)
+                if owned_run is not None:
+                    await self._snapshot_io(finish_run_directory, owned_run)
+        if tool in {'read', 'write', 'edit'}:
+            return await self._committed_io(CoreFiles(self.engine).call, tool, project, args)
         if tool in REMOTE_TOOLS:
             return await self.integrations.execute(id, tool, project, args)
         if tool in {"searches_start", "searches_get", "searches_cancel"}:
             method = self.searches.start if tool == "searches_start" else self.searches.get if tool == "searches_get" else self.searches.cancel
             params = (id, project, args) if tool == "searches_start" else (project, args)
-            work=asyncio.create_task(asyncio.to_thread(method,*params))
-            try:return await asyncio.shield(work)
-            except asyncio.CancelledError:return await work
+            return await self._committed_io(method, *params)
         if tool == "artifacts_register":
-            work=asyncio.create_task(asyncio.to_thread(self.artifacts.register,id,project,args))
-            try:return await asyncio.shield(work)
-            except asyncio.CancelledError:return await work
+            return await self._committed_io(self.artifacts.register, id, project, args)
         if tool == "ssh_exec":
             root, spec = self.engine.root(project, True)
             # Preserve the original local denial before runtime compatibility
@@ -1078,13 +1237,7 @@ class Agent:
             if result["exit_code"] != 0:
                 raise DevError("GIT_ERROR", result["output"][-1500:] or "Git 命令失败")
             return result
-        work = asyncio.create_task(asyncio.to_thread(self.engine.call, tool, project, args))
-        try:
-            return await asyncio.shield(work)
-        except asyncio.CancelledError:
-            # A Python thread cannot be cancelled. Keep the project lock and
-            # persist its actual outcome before allowing another mutation.
-            return await work
+        return await self._committed_io(self.engine.call, tool, project, args)
 
     @staticmethod
     def task_allowed(task, project):
@@ -1104,14 +1257,51 @@ class Agent:
         profile = selected(config, execution_project)
         root, _ = self.engine.root(execution_project)
         runtime = descriptor(config, execution_project, root)
+        holder = getattr(self, '_execution_snapshots', {}).get(id)
+        run_dir = getattr(self, '_execution_run_dirs', {}).get(id)
+        task_env = dict(task_env or {})
+        if run_dir is not None:
+            task_env.pop('CODEPIER_RUN_DIR', None)
+        execution_root = root
+        if holder:
+            if root != holder['root']:
+                raise DevError('ROOT_CHANGED', 'Workspace mapping changed after snapshot creation', 409)
+            if profile['mode'] != 'project_clean_v1' or runtime['revision'] != holder['revision']:
+                raise DevError('RUNTIME_CONFIGURATION_CHANGED', 'Snapshot runtime changed before launch', 409)
+            execution_root = holder['snapshot'].root
+            try:
+                cwd = execution_root / Path(cwd).relative_to(root)
+            except ValueError as exc:
+                raise DevError('SNAPSHOT_UNSAFE', 'Command cwd escapes the snapshot') from exc
+            command = list(command)
+            executable = Path(command[0])
+            if executable.is_absolute() and executable.is_relative_to(root):
+                command[0] = str(execution_root / executable.relative_to(root))
         if profile['mode'] == 'native_compat':
             if execution_project.get('_runtime_requirement'):
                 raise DevError('RUNTIME_ISOLATION_REQUIRED', 'This operation requires its approved isolated runtime', 403)
-            result = await self._run_process_account(id, command, cwd, timeout, stream, task_env,
-                full_access, inherit_env, execution_project)
+            from agent.project_runtime import legacy_environment
+            environment = legacy_environment(inherit_env, task_env, full_access=full_access)
+            if run_dir is not None:
+                environment['CODEPIER_RUN_DIR'] = str(run_dir)
+            result = await self._run_process_account(id, command, cwd, timeout, stream,
+                full_access=full_access, execution_project=execution_project, environment_override=environment)
             return decorate_result(result, execution_project, id, runtime, root,
                                    cwd=cwd, command=command)
-        plan = prepare(config, execution_project, root, command, cwd, task_env)
+        plan = prepare(config, execution_project, execution_root, command, cwd, task_env)
+        if holder:
+            for key in ('PYTHONPATH', 'PYTHONHOME', 'VIRTUAL_ENV'):
+                plan.environment.pop(key, None)
+            plan.environment['PATH'] = os.pathsep.join(
+                str(execution_root / Path(entry).relative_to(root))
+                if Path(entry).is_absolute() and Path(entry).is_relative_to(root) else entry
+                for entry in plan.environment.get('PATH', '').split(os.pathsep))
+            if any(str(root) in value for key, value in plan.environment.items()
+                   if key not in {'PATH', 'CODEPIER_RUN_DIR'}):
+                raise DevError('SNAPSHOT_UNSAFE', 'Configured environment points to the original workspace')
+        if run_dir is not None:
+            plan.environment['CODEPIER_RUN_DIR'] = (
+                '/workspace/.codepier/runs/' + id if profile['mode'] == 'container_v1' else str(run_dir))
         # Check the exact workload before adding a trusted container transport.
         enforce_argv(config, execution_project, plan.command, plan.cwd, plan.environment)
         driver = None

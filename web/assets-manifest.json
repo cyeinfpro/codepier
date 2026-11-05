@@ -27,8 +27,8 @@
       "bytes": 21356
     },
     "app.js": {
-      "sha256": "729a776313a8096abea0ef025aa62d263887707ac8b7ea9bb3546fd861a047a3",
-      "bytes": 129602
+      "sha256": "270a13098a5729d36d0f77fd2a9ae8ccbd8d966e3eb6dafc7d6f181839a61cc2",
+      "bytes": 129730
     },
     "appearance.js": {
       "sha256": "7fc8e8ffa85a4bb5836b8919cdf6ff12813cfb4a9e4736709f5858e5d8782bb1",
@@ -43,8 +43,8 @@
       "bytes": 6163
     },
     "call-log.js": {
-      "sha256": "d55191af2a5a513d9eee7aef80b07a4fafa5140fab068f6bb3130d71e070435a",
-      "bytes": 25178
+      "sha256": "dbc8c6acac0d4d9db107f7cd38f3d46c34251c99d2867e6d4a8be3405bdb0025",
+      "bytes": 25522
     },
     "chat-catalog.js": {
       "sha256": "d9fd71d7f502d1d3ccd2b0e7c0b526739ebc1199c947f39f78f7f4f5ccc28fec",
@@ -166,6 +166,14 @@
       "sha256": "6df4ae54fd1e5b5e87a45c7337c4a0f6c5db14ca0ddfb3c3c1d960a016e8e074",
       "bytes": 29431
     },
+    "queue.css": {
+      "sha256": "8dfc04333a16afbee14b9ad75fedfb73151379e828d53a6d6ea8f381912b8cb9",
+      "bytes": 1375
+    },
+    "queue.js": {
+      "sha256": "0684ca3ad06cd7ea41764d409c73988861b256739ef2618bb799e8124528ee75",
+      "bytes": 13399
+    },
     "roles.js": {
       "sha256": "832649b780a3b592472ebaa16ccc4147fa77e95ab41b53e7400c5c092446977a",
       "bytes": 12022
@@ -175,8 +183,8 @@
       "bytes": 12465
     },
     "settings-scheduler.js": {
-      "sha256": "fe7acf26dec51b531023aedff94c5bbaa1d9b62336c3fe7a0900c3523331488d",
-      "bytes": 14004
+      "sha256": "68f6a8dd009381df72fcb3f156bd07440ee3ab9c2330de381a1167c0888c5c7b",
+      "bytes": 15363
     },
     "settings.css": {
       "sha256": "8c555dd58ae19a14dd1ae4017a2fd70b472440582a2d9cd5d32ae2b765d19e56",
@@ -231,5 +239,5 @@
       "bytes": 26032
     }
   },
-  "template_sha256": "333de333189038936e047431cf4692fef529c2c0affc22e9ce95eb9060f5bc8f"
+  "template_sha256": "817aef83ab81d28e4369fc8008a6f371f41df8ffb002aaa198d9c6899417ff2e"
 }

@@ -1,5 +1,7 @@
 # 并行与队列
 
+> 协议 v2 的 strict/relaxed 语义、独立产物目录、快照执行、Hub 只读池和归档运维见[队列争用优化实施](QUEUE_CONTENTION_IMPLEMENTATION.md)。默认仍为 strict。
+
 > 本页描述当前源码。Agent 自适应执行调度自 1.24.0 引入；Hub 资源感知持久准入自 1.25.0 引入，可下载版本以正式 Releases 为准。发布与源码验收不代表生产节点已升级。
 
 ## 在哪里设置

@@ -22,7 +22,7 @@ from shared.instance_lock import InstanceLock
 
 RING_FILE = "master.keys.json"
 JOURNAL_FILE = "rekey.json"
-CIPHER_COLUMNS = (("devices", "secret"), ("operations", "payload"), ("vps_connections", "secret"),
+CIPHER_COLUMNS = (("operation_payload_archives", "body"), ("devices", "secret"), ("operations", "payload"), ("vps_connections", "secret"),
                   ("oidc_providers", "client_secret"), ("external_identities", "upstream_tokens"),
                   ("oidc_transactions", "verifier"), ("gateway_secrets", "secret"), ("gateway_accounts", "secret"),
                   ("gateway_calls", "result"), ("collaboration_secrets", "secret"),
@@ -42,7 +42,7 @@ PREFIXED_CIPHER_COLUMNS = (("mcp_event_deliveries", "body", "sealed:v1:"),
     ("operation_output_tails", "sealed_output", "history:v1:"),
     ("mcp_tasks", "terminal_result", "history:v1:"),
     ("mcp_tasks", "terminal_operation", "history:v1:"))
-CIPHER_PRIMARY_KEYS = {"oidc_transactions": "state_hash", "operation_output_tails": "operation_id", "mcp_tasks": "task_id", "dot_wake_tickets": "ticket_hash", "channel_attachment_chunks": "rowid"}
+CIPHER_PRIMARY_KEYS = {"operation_payload_archives": "operation_id", "oidc_transactions": "state_hash", "operation_output_tails": "operation_id", "mcp_tasks": "task_id", "dot_wake_tickets": "ticket_hash", "channel_attachment_chunks": "rowid"}
 
 
 def key_id(key: bytes) -> str:

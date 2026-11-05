@@ -1,0 +1,77 @@
+.queue-columns {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--ui-space-4, 16px);
+}
+.queue-column {
+  min-width: 0;
+}
+.queue-column h3 {
+  font-size: var(--ui-text-base);
+  margin: 0 0 12px;
+}
+.queue-column h3 span {
+  color: var(--ui-muted);
+}
+.queue-item {
+  background: var(--ui-panel);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-control-radius);
+  padding: 12px;
+  margin-bottom: 12px;
+  overflow-wrap: anywhere;
+}
+.queue-item-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.queue-item p,
+.queue-wait,
+.queue-summary {
+  font-size: var(--ui-text-xs, 12px);
+}
+.queue-summary,
+.queue-blocker code {
+  display: block;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.queue-blocker {
+  padding: 8px 0;
+  border-top: 1px solid var(--ui-line);
+  display: grid;
+  gap: 8px;
+}
+.queue-item .actions {
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+.queue-live {
+  display: block;
+  margin-block: 12px;
+}
+.queue-run {
+  overflow-wrap: anywhere;
+}
+.queue-run button {
+  margin: 8px;
+}
+.queue-diagnostics {
+  margin-top: 16px;
+}
+.queue-diagnostics pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 320px;
+  overflow: auto;
+}
+@media (max-width: 900px) {
+  .queue-columns {
+    grid-template-columns: 1fr;
+  }
+  .queue-panel button {
+    min-height: 44px;
+  }
+}

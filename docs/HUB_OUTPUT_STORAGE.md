@@ -54,3 +54,34 @@ python -m pytest -q tests/test_operation_output_storage.py \
 ```
 
 测试使用临时数据库和合成凭据，覆盖旧 Agent 追加、快照跳号、重复消息、重启读取、终态竞争、outbox 失败回滚、撤权、输出游标、迁移保留及有界观测。查询计划测试比较同一组合成数据、同一授权条件加索引前后的结果与 SQLite 虚拟机工作量；该结果不能替代真实服务的吞吐与延迟压测。
+
+## 冷操作负载归档（显式离线维护）
+
+`operation_payload_archives` 在同一数据库保存压缩后加密的历史 result/output。
+启动仅建表，不搬迁、不删除历史、也不执行 VACUUM。只有终态 succeeded/failed/cancelled
+且 updated 超过 30 天、没有活动尾部和待清理媒体的操作可归档。ID、授权范围、幂等指纹、
+状态、输出游标和时间戳均不改变，当前授权检查之后按原 ID 透明恢复读取。
+单批最多 500 条，在同一事务内压缩、加密、读回验证并替换热字段；失败整体回滚。
+压缩发生在加密之前，密钥轮换和缺失密钥检测包含归档密文。
+
+先停止新准入、排空并停止 Hub，再执行（默认仅预览）：
+
+```sh
+python -m scripts.archive_operation_payloads --data /path/to/hub --batch 100
+python -m scripts.archive_operation_payloads --data /path/to/hub --batch 100 --apply
+```
+
+每次 apply 先保存并验证完整 SQLite 备份及匹配密钥到状态目录的 `.payload-backups`，
+不会自动清理备份；命令持有 Hub 与密钥维护锁，拒绝在线并发维护。按需重复有限批次。
+同库归档保留普通全库备份恢复语义；不得仅备份 operations 表。
+
+降级前用当前版本运行 `--restore --apply`，直到 operation_payload_archives 计数为 0，
+同时确认 operation_output_tails 计数为 0，再保存完整当前数据库与匹配密钥。
+不得用升级前的旧备份覆盖已经接受新写入的数据。需要回收数据库文件空间时，在另行授权的
+维护窗口手动执行 VACUUM；归档命令从不自动 VACUUM。
+
+管理员可用只读诊断 `python -m scripts.queue_contention_report --database /path/to/hub.sqlite3`。
+该命令使用 mode=ro/query_only 的一致性读取，不加载命令、凭据或输出正文。
+滚动 24 小时以 accepted 为分母，等待裁剪到窗口，按最后等待原因归类，阻塞链采用首个阻塞者；
+报告车队比例、根阻塞者以及 >60 秒、单项目 >5、单根持有者 >5 的当前等待告警。
+事件缺失或跨设备时间误差会影响归因，此报告不是精确的执行剖析。

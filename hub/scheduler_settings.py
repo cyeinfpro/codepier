@@ -60,6 +60,9 @@ def public_snapshot(value):
                 return None
             numbers[key] = number
         result["lanes"][name] = numbers
+    semantics = value.get('resource_semantics')
+    if isinstance(semantics, str) and semantics in {'strict', 'relaxed'}:
+        result['resource_semantics'] = semantics
     return result
 
 
@@ -83,8 +86,14 @@ def view(store, runtime, principal, device_id):
     stale_project_limits = sorted(project_id for project_id in saved["config"].get("project_limits", {})
         if not store.one("SELECT id FROM projects WHERE id=? AND device_id=? AND space_id=?",
                          (project_id, device_id, principal.space_id)))
+    semantics_supported = isinstance(info, dict) and type(info.get('resource_semantics_protocol')) is int and info['resource_semantics_protocol'] == 2
+    effective_semantics = reported.get('resource_semantics') if reported else None
+    if not semantics_supported:
+        effective_semantics = 'strict'
     admission = runtime._admission_budget(device_id)
     return {"device_id": device_id, **saved, "reported": reported,
+            "resource_semantics": {"supported": semantics_supported,
+                "configured": saved["config"].get("resource_semantics"), "effective": effective_semantics},
             "durable_admission": {"node_pending_limit": admission.node,
                 "project_pending_limit": admission.project, "reason": admission.reason,
                 "new_heavy_admission_paused": admission.paused,

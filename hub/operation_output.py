@@ -54,6 +54,12 @@ class OperationOutput:
         if live is not None:
             text = unseal(self.store, live.get('sealed_output') or live.get('output') or '') if include_body and limit else ''
             return (text[-limit:] if limit else '') if include_body else None, live['chars']
+        from hub.operation_archive import POINTER
+        if not include_body and str(row.get('output') or '').startswith(POINTER):
+            archived = self.store.one('SELECT output_chars FROM operation_payload_archives WHERE operation_id=?', (row['id'],))
+            if archived is None:
+                raise RuntimeError('Archived output is missing')
+            return None, archived['output_chars']
         legacy = unseal(self.store, row.get('output') or '')
         return (legacy[-limit:] if limit else '') if include_body else None, len(legacy)
 

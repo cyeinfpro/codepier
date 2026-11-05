@@ -86,7 +86,7 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
         # step-up challenges still request only the scopes the operation needs.
         auth_scope=ROLE_SCOPE if authorization=='role' else ' '.join(LEGACY_OAUTH_SCOPES)
         mark('authenticate')
-        try:principal=await runtime.store.run(auth.bearer, request)
+        try:principal=await runtime.store.run_read(auth.bearer, request)
         except DevError as exc:
             metadata=public_base+'/.well-known/oauth-protected-resource/mcp'
             if authorization=='role':metadata+='?authorization=role'
@@ -155,7 +155,7 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
             elif modern and method in {'events/list','events/subscribe','events/unsubscribe'} and runtime.collaboration.config.events_enabled:
                 try:
                     result = await runtime.collaboration.events.call(method, {key:value for key,value in params.items() if key != '_meta'}, principal)
-                    principal = await runtime.store.run(auth.bearer,request)
+                    principal = await runtime.store.run_read(auth.bearer,request)
                     if method == 'events/list':
                         mark('event_catalog_returned', event_count=len(result['events']))
                 except CallbackEndpointError as exc:
@@ -169,7 +169,7 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                         {'requiredCapabilities':{'extensions':{TASK_EXTENSION:{}}}})
                 task_id=task_arguments(method,params)
                 result=await tasks.call(method,task_id,principal)
-                principal=await runtime.store.run(auth.bearer,request)
+                principal=await runtime.store.run_read(auth.bearer,request)
                 # Refresh the original credential again after cooperative cancel.
                 latest=await runtime.store.run(tasks.get,task_id,principal)
                 if method=='tasks/get':result=latest
@@ -197,7 +197,7 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                             except Exception:runtime.integrations.write_errors+=1
                         mark('invoke_started')
                         value=await runtime.invoke(name,arguments,principal)
-                        principal=await runtime.store.run(auth.bearer,request)
+                        principal=await runtime.store.run_read(auth.bearer,request)
                         if name == 'get_access_context':
                             value={**value,'gateway':await runtime.store.run(runtime.gateway.context,principal)}
                         if name in COLLABORATION_TOOLS:

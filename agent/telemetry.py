@@ -8,7 +8,7 @@ from shared.computer_diagnostics import COMPUTER_STAGES, safe_detail
 from shared.scheduler_config import safe_queue_detail
 from shared.ssh_diagnostics import SSH_STAGES, safe_ssh_detail
 
-STAGES = {'accepted', 'waiting_project', 'waiting_resource', 'waiting_worker', 'executing', 'persisting', 'result_ready'} | set(COMPUTER_STAGES) | set(SSH_STAGES)
+STAGES = {'accepted', 'waiting_project', 'waiting_resource', 'waiting_worker', 'bypassed', 'executing', 'persisting', 'result_ready'} | set(COMPUTER_STAGES) | set(SSH_STAGES)
 
 class AgentTelemetry:
     def __init__(self, journal):
@@ -27,7 +27,7 @@ class AgentTelemetry:
             allowed = safe_detail(detail)
         elif stage in SSH_STAGES:
             allowed = safe_ssh_detail(detail)
-        elif stage in {'waiting_worker', 'waiting_resource'}:
+        elif stage in {'waiting_worker', 'waiting_resource', 'bypassed'}:
             allowed.update(safe_queue_detail(detail))
         # A wait is a transition, not a periodic heartbeat. Its original elapsed
         # time remains durable; reason/blocker changes get a new event. Excluding

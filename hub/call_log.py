@@ -146,7 +146,7 @@ def register_call_log(app, runtime, auth):
     store = runtime.store
 
     @app.get("/api/call-log")
-    @database_endpoint(store)
+    @database_endpoint(store, read_only=True)
     def call_log(request: Request, limit: int = Query(40, ge=1, le=100), cursor: str = Query("", max_length=1024), q: str = Query("", max_length=200), source: str = Query("", max_length=20), status: str = Query("", max_length=30), project: str = Query("", max_length=100), tool: str = Query("", max_length=100), watch: str = Query("", max_length=4096), include_filters: bool = True):
         principal = auth.panel(request)
         if source not in {"", "mcp", "panel"} or status not in STATES | {""}:
@@ -191,7 +191,7 @@ def register_call_log(app, runtime, auth):
         return {"updates": [public_row(row, observed) for row in updates], "operations": [public_row(row, observed) for row in rows], "next_cursor": _cursor(rows[-1]["created"], rows[-1]["id"], filters) if more else None, "observed_at": observed, "projects": [{k: row[k] for k in ('id', 'alias')} for row in runtime.list_projects(principal)] if include_filters else [], "tools": [x["tool"] for x in store.all("SELECT DISTINCT o.tool FROM operations o WHERE " + clause + " ORDER BY o.tool LIMIT 200", scope_args)] if include_filters else []}
 
     @app.get("/api/call-log/{identifier}")
-    @database_endpoint(store)
+    @database_endpoint(store, read_only=True)
     def call_log_detail(identifier: str, request: Request):
         principal = auth.panel(request)
         original = runtime.operation(identifier, principal)
@@ -218,6 +218,9 @@ def register_call_log(app, runtime, auth):
         data = result.get("data") if isinstance(result, dict) else None
         if isinstance(data, dict) and type(data.get("exit_code")) is int:
             row["exit_code"] = data["exit_code"]
+        row.update({key: original[key] for key in ('queue_stage', 'waiting') if key in original})
+        if isinstance(data, dict) and isinstance(data.get('concurrency'), dict):
+            row['concurrency'] = data['concurrency']
         row["timing"] = {"wait_ms": None, "execution_ms": None}
         try:
             # Read evidence directly: polling must not generate more audit calls.

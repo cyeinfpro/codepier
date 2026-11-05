@@ -42,7 +42,7 @@ def iso(value):
     return datetime.fromtimestamp(value, timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
 
 
-def render_exec_v1(snapshot, *, scopes=None):
+def render_exec_v1(snapshot, *, scopes=None, result_filter=None):
     from hub.core_tools import result as core_result
     from hub.runtime import Runtime
     try:
@@ -60,6 +60,8 @@ def render_exec_v1(snapshot, *, scopes=None):
     # remains inside the same IAM/SQLite decision with no intervening await.
     # Reuse the actual synchronous unwrap/redaction implementation, on a fresh
     # decoded copy only; never mutate the immutable stored terminal snapshot.
+    if result_filter is not None:
+        saved = result_filter(saved)
     try:
         value = Runtime.unwrap(identifier, saved)
     except DevError as exc:
@@ -137,7 +139,8 @@ class TaskService:
                     body['status'] = 'cancelled'
                 else:
                     try:
-                        body['result'] = render_exec_v1(snapshot, scopes=principal.scopes)
+                        body['result'] = render_exec_v1(snapshot, scopes=principal.scopes,
+                            result_filter=lambda value: self.runtime._filter_concurrency(value, principal, operation['device_id']))
                         body['status'] = 'completed'
                     except ProtocolError as exc:
                         body['status'] = 'failed'

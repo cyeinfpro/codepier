@@ -1,6 +1,6 @@
 from __future__ import annotations
 import json
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import os
 import sqlite3
 import tempfile
@@ -13,6 +13,8 @@ from hub.worker_metrics import WorkerMetrics
 from hub.store_metrics import LockMetrics, TransactionMetrics
 from hub.store_worker import StoreWorker
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from cryptography.fernet import Fernet
 
@@ -54,7 +56,12 @@ CREATE TABLE IF NOT EXISTS workflow_replays (actor TEXT NOT NULL, idem TEXT NOT 
 """
 
 class Store:
-    def __init__(self, directory: str | Path):
+    def __init__(self, directory: str | Path, *, read_workers=3):
+        if type(read_workers) is not int or not 2 <= read_workers <= 4:
+            raise ValueError("read_workers must be between 2 and 4")
+        self._reader_state = threading.local()
+        self._read_connections = []
+        self._read_connections_lock = threading.Lock()
         self.directory = Path(directory).resolve()
         from hub.state_layout import state_directory
         self.state_directory = state_directory(self.directory)
@@ -63,12 +70,12 @@ class Store:
         connection = sqlite3.connect(self.state_directory / "hub.sqlite3", check_same_thread=False, timeout=30)
         connection.row_factory = sqlite3.Row
         self.lock_metrics = LockMetrics()
-        self.lock = OwnedRLock(on_release=self.lock_metrics.observe)
+        self._writer_lock = OwnedRLock(on_release=self.lock_metrics.observe)
         self.iam_enabled = True
         self.session_revision = 0
         self._event_loop = None
         self.transaction_metrics = TransactionMetrics()
-        self.db = CheckedConnection(connection, self.lock, self._security_write,
+        self._writer_db = CheckedConnection(connection, self.lock, self._security_write,
                                     on_transaction=self.transaction_metrics.observe)
         self._executor = StoreWorker()
         self.worker_metrics = WorkerMetrics()
@@ -99,6 +106,56 @@ class Store:
             except BaseException:
                 self.db.close()
                 raise
+
+        self._read_executor = ThreadPoolExecutor(max_workers=read_workers, thread_name_prefix="hub-sqlite-read")
+        self.read_worker_metrics = WorkerMetrics()
+
+    @property
+    def lock(self):
+        binding = getattr(self._reader_state, 'binding', None)
+        return binding[0] if binding else self._writer_lock
+
+    @property
+    def db(self):
+        binding = getattr(self._reader_state, 'binding', None)
+        return binding[1] if binding else self._writer_db
+
+    def _read_phase(self, call):
+        # One connection belongs to each worker. No transaction, authorization
+        # memo or connection binding survives this synchronous phase.
+        binding = getattr(self._reader_state, 'connection', None)
+        if binding is None:
+            connection = sqlite3.connect((self.state_directory / "hub.sqlite3").as_uri() + "?mode=ro",
+                                         uri=True, check_same_thread=False, timeout=30)
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA query_only=ON")
+            connection.execute("PRAGMA cache_size=-2048")
+            lock = OwnedRLock()
+            binding = (lock, CheckedConnection(connection, lock))
+            self._reader_state.connection = binding
+            with self._read_connections_lock:
+                self._read_connections.append(binding)
+        self._reader_state.binding = binding
+        try:
+            for attempt in range(4):
+                # A security write during the snapshot invalidates the entire
+                # decision. Under sustained churn make the last pass while
+                # briefly fencing the writer, rather than return stale authority.
+                fence = self._writer_lock if attempt == 3 else nullcontext()
+                with fence:
+                    revision = self.session_revision
+                    with self.lock:
+                        version = self.db.execute("PRAGMA data_version").fetchone()[0]
+                    with self.lock, self.db:
+                        self.db.execute("BEGIN")
+                        value = call()
+                    with self.lock:
+                        current_version = self.db.execute("PRAGMA data_version").fetchone()[0]
+                    if revision == self.session_revision and version == current_version:
+                        return value
+            raise RuntimeError("Authorization changed during read phase")
+        finally:
+            del self._reader_state.binding
 
     def _load_cipher(self):
         key_path = self.state_directory / "master.key"
@@ -289,6 +346,14 @@ class Store:
         """
         return await self._run(function, args, kwargs, control=False)
 
+    async def run_read(self, function, /, *args, **kwargs):
+        """Explicit pure read phase on a fresh WAL snapshot; SQL writes fail closed.
+
+        Rechecked from scratch after each await. Callers must not perform
+        network I/O or non-database side effects inside this retryable phase.
+        """
+        return await self._run(function, args, kwargs, control=False, read_only=True)
+
     async def run_control(self, function, /, *args, **kwargs):
         """Internal authenticated Agent receipt/final-send-fence path only.
 
@@ -297,31 +362,32 @@ class Store:
         """
         return await self._run(function, args, kwargs, control=True)
 
-    async def _run(self, function, args, kwargs, *, control):
+    async def _run(self, function, args, kwargs, *, control, read_only=False):
         if self.lock.owned:
             raise RuntimeError("Do not await Store.run while holding Store.lock")
         loop = asyncio.get_running_loop()
         self._event_loop = loop
         context = copy_context()
         call = partial(function, *args, **kwargs)
-        submitted = self.worker_metrics.submit()
+        metrics = self.read_worker_metrics if read_only else self.worker_metrics
+        submitted = metrics.submit()
 
         def measured():
-            started = self.worker_metrics.start(submitted)
+            started = metrics.start(submitted)
             failed = False
             try:
-                return context.run(call)
+                return context.run(self._read_phase, call) if read_only else context.run(call)
             except BaseException:
                 failed = True
                 raise
             finally:
-                self.worker_metrics.finish(started, failed=failed)
+                metrics.finish(started, failed=failed)
 
         try:
-            submit = self._executor.submit_control if control else self._executor.submit
+            submit = self._read_executor.submit if read_only else self._executor.submit_control if control else self._executor.submit
             future = asyncio.wrap_future(submit(measured), loop=loop)
         except BaseException:
-            self.worker_metrics.reject()
+            metrics.reject()
             raise
         return await self._settle(future)
 
@@ -357,6 +423,7 @@ class Store:
         """
         return {'schema_version': 1, 'scope': 'hub_process', 'read_only': True,
                 'worker': self.worker_metrics.snapshot(),
+                'read_worker': self.read_worker_metrics.snapshot(),
                 'lock': self.lock_metrics.snapshot(),
                 'transactions': self.transaction_metrics.snapshot()}
 
@@ -366,6 +433,10 @@ class Store:
     def close(self):
         if self.lock.owned:
             raise RuntimeError("Release Store.lock before closing the database worker")
+        self._read_executor.shutdown(wait=True, cancel_futures=False)
         self._executor.shutdown(wait=True, cancel_futures=False)
+        for lock, db in self._read_connections:
+            with lock:
+                db.close()
         with self.lock:
             self.db.close()

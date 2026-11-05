@@ -214,10 +214,15 @@ async def test_completion_between_subscription_and_wait_is_not_lost(runtime, mon
     r, p = runtime
     identifier = (await submit(r, p))['operation_id']
     original = r.operation_row
+    loop = asyncio.get_running_loop()
+    completed = False
     def completing(*args, **kwargs):
+        nonlocal completed
         row = original(*args, **kwargs)
-        if kwargs.get('status_only'):
-            finish(r, identifier)
+        if kwargs.get('status_only') and not completed:
+            completed = True
+            # Completion belongs to the writer, never the read-only snapshot.
+            asyncio.run_coroutine_threadsafe(r.store.run(finish, r, identifier), loop).result(2)
         return row
     monkeypatch.setattr(r, 'operation_row', completing)
     result = await asyncio.wait_for(r.invoke('operations_wait', {'operation_id': identifier}, p), 1)

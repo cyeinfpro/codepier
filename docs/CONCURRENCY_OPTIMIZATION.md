@@ -1,5 +1,7 @@
 # 队列优化与容量验证
 
+> 协议 v2 的 strict/relaxed 语义、独立产物目录、快照执行、Hub 只读池和归档运维见[队列争用优化实施](QUEUE_CONTENTION_IMPLEMENTATION.md)。默认仍为 strict。
+
 本指南对应 v1.31.0。源码、同提交 CI、Release、镜像及生产运行版本分别核对；发布不证明已有节点完成升级。
 
 ## 从等待阶段定位瓶颈

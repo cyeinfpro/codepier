@@ -30,7 +30,7 @@ def safe_queue_detail(detail):
                         if isinstance(value, str) and value in {"path", "service"}})
         if kinds:
             result["resource_kinds"] = kinds
-    for key, maximum in (("blocked_count", 65536), ("queue_age_ms", 7 * 86400000)):
+    for key, maximum in (("blocked_count", 65536), ("bypassed_count", 65536), ("queue_age_ms", 7 * 86400000)):
         number = detail.get(key)
         if type(number) is int and 0 <= number <= maximum:
             result[key] = number
@@ -44,7 +44,7 @@ def is_metadata_observation(tool, args):
             and args.get("context_detail", "minimal") == "minimal")
 
 
-FIELDS = frozenset({"adaptive", "minimum", "maximum", "initial", "read_limit", "remote_limit", "remote_target_limit", "project_limits"})
+FIELDS = frozenset({"adaptive", "minimum", "maximum", "initial", "read_limit", "remote_limit", "remote_target_limit", "project_limits", "resource_semantics"})
 
 
 def validate_scheduler_overrides(value, *, effective=False):
@@ -53,9 +53,12 @@ def validate_scheduler_overrides(value, *, effective=False):
     result = dict(value)
     if "adaptive" in result and type(result["adaptive"]) is not bool:
         raise ValueError("scheduler.adaptive 必须是 true/false")
-    for key in FIELDS - {"adaptive", "project_limits"}:
+    for key in FIELDS - {"adaptive", "project_limits", "resource_semantics"}:
         if key in result and (type(result[key]) is not int or not 1 <= result[key] <= 64):
             raise ValueError(f"scheduler.{key} 必须是 1–64 的整数")
+    if "resource_semantics" in result and (not isinstance(result["resource_semantics"], str)
+                                          or result["resource_semantics"] not in {"strict", "relaxed"}):
+        raise ValueError("scheduler.resource_semantics 必须是 strict 或 relaxed")
     projects = result.get("project_limits", {})
     # Each source remains bounded to 256 entries. The effective configuration
     # may retain the disjoint union of both sources without dropping local caps.
@@ -81,7 +84,7 @@ def validate_scheduler(value, *, effective=False):
         "adaptive": True, "minimum": 2,
         "maximum": min(32, max(4, (os.cpu_count() or 2) * 2)),
         "initial": 8, "read_limit": 8, "remote_limit": 12,
-        "remote_target_limit": 3, "project_limits": {},
+        "remote_target_limit": 3, "project_limits": {}, "resource_semantics": "strict",
     }
     result = {**defaults, **overrides}
     if "initial" not in overrides:

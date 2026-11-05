@@ -15,7 +15,7 @@ async def run_db(store, function, /, *args, **kwargs):
     return await asyncio.to_thread(function, *args, **kwargs)
 
 
-def database_endpoint(store):
+def database_endpoint(store, *, read_only=False):
     """Keep the async endpoint contract while the entire body runs as one job.
 
     The decorated function must not await or manipulate loop-owned objects.
@@ -27,6 +27,8 @@ def database_endpoint(store):
 
         @wraps(function)
         async def endpoint(*args, **kwargs):
+            if read_only and hasattr(store, "run_read"):
+                return await store.run_read(function, *args, **kwargs)
             return await run_db(store, function, *args, **kwargs)
 
         endpoint.__signature__ = inspect.signature(function, eval_str=True)

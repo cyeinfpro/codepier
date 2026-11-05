@@ -24,6 +24,7 @@ def deployment(root):
         'user':'10001:10001','environment':{'HUB_PORT':'8765','HUB_PANEL_UPDATE_SOCKET':'/run/codepier-updater/updater.sock','SECRET':'keep$me'},
         'ports':[{'target':8765,'published':'18888','host_ip':'127.0.0.1','protocol':'tcp'}],
         'read_only':True,'cap_drop':['ALL'],'security_opt':['no-new-privileges:true'],
+        'cpus':1.5,'mem_limit':'1g','mem_reservation':'512m',
         'volumes':[{'type':'volume','source':'hub-data','target':'/app/data'},
                    {'type':'bind','source':str(home/'run'),'target':'/run/codepier-updater','read_only':True}],
         'networks':{'default':None}},
@@ -76,11 +77,15 @@ def test_real_runtime_pipeline_preserves_proxy_ports_configuration_and_backup(tm
     assert 'build' not in target['services']['hub']
     assert target['services']['proxy']==spec['services']['proxy']
     assert target['services']['hub']['ports']==spec['services']['hub']['ports']
+    for field in ('cpus', 'mem_limit', 'mem_reservation'):
+        assert old['services']['hub'][field] == target['services']['hub'][field] == spec['services']['hub'][field]
     assert target['services']['hub']['environment']==spec['services']['hub']['environment']
     job['package']=runtime.build(job,source)
     runtime.quiesce(job);runtime.stop(job);runtime.copy_data(job);runtime.start(job,'target');runtime.verify(job);runtime.commit(job)
     assert runtime.gate.exists()  # Only Manager's durable commit decision opens admission.
     assert read_json(home/'current.json')['version']==TARGET
+    assert read_json(home/'current.json')['compose']['services']['hub']['cpus'] == 1.5
+    assert read_json(home/'current.json')['compose']['services']['hub']['mem_limit'] == '1g'
     assert 'SECRET=\'keep$me\'' in (tmp_path/'.env').read_text()
     assert 'CODEPIER_HUB_DATA_VOLUME='+job['new_volume'] in (tmp_path/'.env').read_text()
     starts=[c for c in docker.commands if 'up' in c]
@@ -90,6 +95,8 @@ def test_real_runtime_pipeline_preserves_proxy_ports_configuration_and_backup(tm
     assert not any('sh' in c or 'bash' in c for c in docker.commands)
     runtime.rollback(job)
     assert read_json(home/'current.json')['version']==VERSION
+    assert read_json(home/'current.json')['compose']['services']['hub']['cpus'] == 1.5
+    assert read_json(home/'current.json')['compose']['services']['hub']['mem_limit'] == '1g'
     assert (tmp_path/'.env').read_text()=='HUB_PUBLIC_URL=https://panel.example\nSECRET=\'keep$me\'\n'
     assert not runtime.gate.exists()
     stops=[c for c in docker.commands if 'stop' in c]

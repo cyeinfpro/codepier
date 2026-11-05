@@ -69,6 +69,10 @@ def make_activity_router(context: HubContext):
         rows = operation_rows(store, principal, limit + 1, offset, status, project, source)
         return {"operations": rows[:limit], "next_offset": offset + limit if len(rows) > limit else None}
 
+    # Exact queue route must precede the operation-id route.
+    from hub.queue_panel import register_queue_routes
+    register_queue_routes(router, store, runtime, auth)
+
     @router.get("/api/operations/{id}")
     @database_endpoint(store)
     def operation(id: str, request: Request):

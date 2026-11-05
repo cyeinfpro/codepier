@@ -70,6 +70,6 @@ class RuntimeConfig:
     def from_env(cls) -> RuntimeConfig:
         return cls(
             env_float("HUB_QUEUE_TTL_SECONDS", 1800, 5, 86400),
-            env_float("HUB_CALL_WAIT_SECONDS", 8, 0, OPERATION_WAIT_SECONDS),
+            env_float("HUB_CALL_WAIT_SECONDS", 10, 0, OPERATION_WAIT_SECONDS),
             env_float("HUB_DELIVERY_RETRY_SECONDS", 5, .2, 30),
         )

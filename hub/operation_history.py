@@ -14,6 +14,9 @@ def seal(store, value):
 
 
 def unseal(store, value):
+    from hub.operation_archive import POINTER, read_field
+    if isinstance(value, str) and value.startswith(POINTER):
+        return read_field(store, value)
     if isinstance(value, str) and value.startswith(PREFIX):
         return store.decrypt(value[len(PREFIX):])
     return value
@@ -49,6 +52,8 @@ def same_body(store, before, after):
 
 
 def migrate(db):
+    from hub.operation_archive import migrate as migrate_archive
+    migrate_archive(db)
     columns = {row[1] for row in db.execute('PRAGMA table_info(operations)')}
     if 'history_pruned_at' not in columns:
         db.execute('ALTER TABLE operations ADD COLUMN history_pruned_at REAL')
@@ -120,6 +125,7 @@ def prune_history(store, *, now=None, operation_days=30, audit_days=365,
                 'code': 'HISTORY_EXPIRED', 'message': 'Operation body retention expired'},
                 'history_expired': True}, separators=(',', ':')))
             for row in rows:
+                store.execute('DELETE FROM operation_payload_archives WHERE operation_id=?', (row['id'],))
                 store.execute("""UPDATE operations SET result=?,output='',
                     history_pruned_at=?,media_expires_at=NULL WHERE id=?""",
                     (tombstone, now, row['id']))
@@ -150,17 +156,20 @@ def encrypt_legacy_history(store, *, batch=100):
             ('mcp_tasks', 'task_id', 'terminal_operation')):
             rows = store.all(f"SELECT {primary} AS id,{column} AS body FROM {table} "
                 f"WHERE {column} IS NOT NULL AND {column}!='' AND substr({column},1,?)!=? "
+                f"AND substr({column},1,11)!='archive:v1:' "
                 f"ORDER BY {primary} LIMIT ?", (len(PREFIX), PREFIX, batch))
             for row in rows:
+                if str(row['body']).startswith('archive:v1:'):
+                    continue
                 if table == 'operations' and column == 'result':
-                    value = json.loads(row['body'])
+                    value = json.loads(unseal(store, row['body']))
                     data = value.get('data') if isinstance(value, dict) else None
                     expiry = data.get('computer_expires_at') if isinstance(data, dict) else None
                     if isinstance(expiry, (int, float)) and math.isfinite(expiry):
                         store.execute("""UPDATE operations SET media_expires_at=?
                             WHERE id=? AND (substr(tool,1,9)='computer_' OR tool IN ('browser_snapshot','read'))""",
                             (expiry, row['id']))
-                encrypted = seal(store, row['body'])
+                encrypted = seal(store, unseal(store, row['body']))
                 if table == 'mcp_tasks':
                     rewrite_task_ciphertext(store, row['id'], column, encrypted)
                 else:

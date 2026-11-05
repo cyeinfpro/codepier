@@ -208,12 +208,15 @@ async def invoke(runtime, name, raw, principal):
                 ('project', 'state', 'idempotency_key', 'limit', 'before_created')} | options, principal)
         # Authorization is checked by each real operation endpoint. Batch waits
         # share one wall-clock budget; one slow job never serializes the others.
+        batch_wait = action == 'wait' and len(args['operation_ids']) > 1
+        if batch_wait:
+            await runtime.wait_operations(args['operation_ids'], principal, args['wait_seconds'])
         async def one(identifier):
             call = {**options, 'operation_id': identifier}
             if action not in {'cancel', 'trace'}:
                 call.update({k: args[k] for k in ('include_output', 'include_result', 'output_limit', 'after_output_seq')})
             if action == 'wait':
-                call['wait_seconds'] = args['wait_seconds']
+                call['wait_seconds'] = 0 if batch_wait else args['wait_seconds']
             if action == 'trace' and 'limit' in model.model_fields_set:
                 call['limit'] = args['limit']
             try:

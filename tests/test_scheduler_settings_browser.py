@@ -168,3 +168,24 @@ def test_scheduler_late_refresh_does_not_replace_another_page(scheduler_page):
             pass
     expect(page.locator("#password-form")).to_be_visible()
     expect(page.locator("#settings-scheduler")).to_have_count(0)
+
+
+def test_resource_semantics_save_and_actual_agent_report(scheduler_page):
+    page, get = scheduler_page
+    form = page.locator("#scheduler-settings-form")
+    control = form.locator('[name="resource_semantics"]')
+    control.select_option("relaxed")
+    assert page.evaluate("CodePierSettings.dirty()")
+    form.locator('[type="submit"]').click()
+    expect(page.locator("[data-scheduler-state]")).to_have_text("已生效", timeout=35000)
+    expect(page.locator("[data-scheduler-semantics]")).to_contain_text("放宽文件/进程互斥", timeout=35000)
+    state = get()
+    assert state["config"]["resource_semantics"] == "relaxed"
+    assert state["resource_semantics"] == {"supported": True, "configured": "relaxed", "effective": "relaxed"}
+    control.select_option("strict")
+    form.locator("[data-scheduler-refresh]").click()
+    expect(control).to_have_value("strict")
+    assert page.evaluate("CodePierSettings.dirty()")
+    form.locator('[type="submit"]').click()
+    expect(page.locator("[data-scheduler-semantics]")).to_contain_text("严格互斥", timeout=35000)
+    assert get()["resource_semantics"]["effective"] == "strict"

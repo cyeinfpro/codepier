@@ -91,6 +91,7 @@ window.CodePierCallLog = (() => {
     }
   }
   function detach() {
+    window.CodePierQueue?.detach();
     clearTimeout(timer);
     timer = null;
     epoch++;
@@ -168,7 +169,7 @@ window.CodePierCallLog = (() => {
             .join('') || '<li>没有可用的阶段记录，可能由旧版 Agent 执行。</li>'
         }</ol><p class="form-note">只展示已保存的阶段，最多最近 200 项；Hub 时间是收到事件的时刻，不是同步的 Agent 时钟。</p></details>`
       : '';
-    return `<div class="call-detail-toolbar"><span class="muted tiny">${esc(d.actor)}</span><button type="button" class="btn ghost small" data-call-copy="all">${icon('copy')}复制调用详情</button><button type="button" class="btn ghost small" data-call-action="detail-refresh">${icon('refresh')}刷新详情</button></div><dl class="call-facts"><div><dt>调用授权（调用时记录）</dt><dd class="call-authorization-detail">${authorizationHTML(d, true)}</dd></div><div><dt>操作编号</dt><dd><code>${esc(d.id)}</code></dd></div><div><dt>总历时</dt><dd>${duration(d.elapsed_ms)}</dd></div><div><dt>执行前等待（Hub 观测）</dt><dd>${duration(t.wait_ms)}</dd></div><div><dt>实际执行（本次 Agent 计时）</dt><dd>${duration(t.execution_ms)}</dd></div><div><dt>投递次数</dt><dd>${esc(d.attempts ?? '未记录')}</dd></div><div><dt>当前阶段</dt><dd>${esc(trace?.current?.reason || '未记录')}</dd></div></dl>${d.error ? `<div class="notice call-error" role="note">${esc(typeof d.error === 'string' ? d.error : json(d.error))}</div>` : ''}${d.transport_error ? `<p class="form-note">连接状态：${esc(d.transport_error)}</p>` : ''}${d.display?.truncated ? '<p class="form-note">此详情是有长度限制的已脱敏副本；部分输出或结果已截断，不代表完整记录。</p>' : ''}${section('参数摘要', d.args_summary, 'arguments', { open: true, truncated: d.arguments_truncated })}${section('任务输出（保存的尾部）', d.output, 'output', { truncated: d.output_truncated, open: !!d.error })}${section('保存的返回结果', d.result, 'result', { truncated: d.display?.sections?.result })}${timeline}${d.trace_error ? `<p class="form-note">执行链路暂不可用：${esc(d.trace_error)}</p>` : ''}<p class="form-note">工具状态以执行回执为准；HTTP 200 仅表示请求被接收。未采集的耗时不补造，自动脱敏不能识别所有无标签的秘密值。</p>`;
+    return `<div class="call-detail-toolbar"><span class="muted tiny">${esc(d.actor)}</span><button type="button" class="btn ghost small" data-call-copy="all">${icon('copy')}复制调用详情</button><button type="button" class="btn ghost small" data-call-action="detail-refresh">${icon('refresh')}刷新详情</button></div><dl class="call-facts"><div><dt>调用授权（调用时记录）</dt><dd class="call-authorization-detail">${authorizationHTML(d, true)}</dd></div><div><dt>操作编号</dt><dd><code>${esc(d.id)}</code></dd></div><div><dt>总历时</dt><dd>${duration(d.elapsed_ms)}</dd></div><div><dt>执行前等待（Hub 观测）</dt><dd>${duration(t.wait_ms)}</dd></div><div><dt>实际执行（本次 Agent 计时）</dt><dd>${duration(t.execution_ms)}</dd></div><div><dt>投递次数</dt><dd>${esc(d.attempts ?? '未记录')}</dd></div><div><dt>当前阶段</dt><dd>${esc(trace?.current?.reason || '未记录')}</dd></div></dl>${window.CodePierQueue?.waitingHTML(d) || ''}${window.CodePierQueue?.liveHTML(d) || ''}${window.CodePierQueue?.runHTML(d) || ''}${d.error ? `<div class="notice call-error" role="note">${esc(typeof d.error === 'string' ? d.error : json(d.error))}</div>` : ''}${d.transport_error ? `<p class="form-note">连接状态：${esc(d.transport_error)}</p>` : ''}${d.display?.truncated ? '<p class="form-note">此详情是有长度限制的已脱敏副本；部分输出或结果已截断，不代表完整记录。</p>' : ''}${section('参数摘要', d.args_summary, 'arguments', { open: true, truncated: d.arguments_truncated })}${section('任务输出（保存的尾部）', d.output, 'output', { truncated: d.output_truncated, open: !!d.error })}${section('保存的返回结果', d.result, 'result', { truncated: d.display?.sections?.result })}${timeline}${d.trace_error ? `<p class="form-note">执行链路暂不可用：${esc(d.trace_error)}</p>` : ''}<p class="form-note">工具状态以执行回执为准；HTTP 200 仅表示请求被接收。未采集的耗时不补造，自动脱敏不能识别所有无标签的秘密值。</p>`;
   }
   async function html(seq) {
     ensureOwner();
@@ -197,6 +198,7 @@ window.CodePierCallLog = (() => {
         '',
         `<button type="button" class="btn ghost" data-call-action="export">${icon('download')}导出本页调用</button>`,
       ) +
+      (window.CodePierQueue?.placeholder() || '') +
       `<div class="filters call-filters"><div class="tabs"><button class="active" data-action="audit-mode" data-mode="operations">工具执行</button><button data-action="audit-mode" data-mode="events">全部事件</button></div><select id="audit-source" aria-label="来源"><option value="">全部来源</option>${['mcp', 'panel'].map((x) => `<option value="${x}" ${S.auditSource === x ? 'selected' : ''}>${x.toUpperCase()}</option>`).join('')}</select><select id="audit-status" aria-label="操作状态"><option value="">全部状态</option>${[...ACTIVE_STATES, ...TERMINAL_STATES].map((x) => `<option value="${x}" ${S.auditStatus === x ? 'selected' : ''}>${esc(stateNames[x] || x)}</option>`).join('')}</select><select id="call-project" aria-label="筛选调用项目"><option value="">全部项目</option>${options(r.projects || [], st().project, 'alias')}</select><select id="call-tool" aria-label="筛选调用工具"><option value="">全部工具</option>${options(r.tools || [], st().tool, 'name')}</select><form id="call-search"><input id="audit-query" type="search" aria-label="搜索调用" maxlength="200" placeholder="搜索路径、命令、调用者或编号" value="${esc(S.auditQuery)}"><button type="submit" class="btn small">搜索</button></form></div><div class="call-controls"><button type="button" class="btn ghost small" data-call-action="live" aria-pressed="${st().live}">${st().live ? '暂停实时更新' : '恢复实时更新'}</button><button type="button" class="btn ghost small" data-call-action="refresh">${icon('refresh')}刷新</button><span id="call-sync" class="muted tiny" role="status">${st().cursor ? '正在查看历史页，不自动插入新调用' : st().live ? '实时更新已开启' : '实时更新已暂停'}</span><button type="button" id="call-new" class="btn small" data-call-action="latest" hidden>列表有更新，显示最新</button></div><section class="call-log" aria-label="工具调用流水">${r.operations.map(rowHTML).join('') || empty('当前筛选范围没有调用记录。')}</section><div class="pagination"><span id="call-count">本页 ${r.operations.length} 项 · 每页最多 40 项</span><div class="actions"><button type="button" class="btn ghost small" data-call-action="prev" ${st().history.length ? '' : 'disabled'}>上一页</button><button type="button" class="btn ghost small" data-call-action="next" ${r.next_cursor ? '' : 'disabled'}>下一页</button></div></div>${uiHelp('记录范围与隐私', '展示已保存的工具执行证据，不含完整对话；搜索仅覆盖已保存的摘要，导出仅包含当前页。参数正文仍按原有策略省略；密码、令牌、授权请求头和环境变量值默认脱敏。列表按创建时间及操作编号稳定分页；新调用不会挤动正在阅读的历史或已展开内容。旧记录缺少字段时显示未记录。')}`
     );
   }
@@ -422,6 +424,8 @@ window.CodePierCallLog = (() => {
     detach();
     root = document.querySelector('#page');
     if (!root) return;
+    window.CodePierQueue?.setLive(st().live);
+    window.CodePierQueue?.bind();
     const update = (selector, fn) => {
       const input = root.querySelector(selector);
       if (input)
@@ -484,6 +488,7 @@ window.CodePierCallLog = (() => {
       );
     if (name === 'live') {
       st().live = !st().live;
+      window.CodePierQueue?.setLive(st().live);
       b.setAttribute('aria-pressed', String(st().live));
       b.textContent = st().live ? '暂停实时更新' : '恢复实时更新';
       setSync(st().live ? '实时更新已开启' : '实时更新已暂停');

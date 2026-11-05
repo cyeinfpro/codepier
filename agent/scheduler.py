@@ -140,6 +140,7 @@ class ProjectScheduler:
         self._resource_tokens = set()
         self._reported = {}
         if resources is not None:
+            resources.relaxed = self.config["resource_semantics"] == "relaxed"
             resources.add_listener(self._drain)
 
     def lane_limit(self, lane):
@@ -180,7 +181,8 @@ class ProjectScheduler:
         return min(eligible, key=lambda row: row[:3])[-1] if eligible else None
 
     def _blockers(self, item):
-        return self.resources.blockers(item.token) if item.token in self._resource_tokens else []
+        return (self.resources.blockers(item.token)
+                if item.token in self._resource_tokens and self.resources.blocked(item.token) else [])
 
     def _drain(self):
         """Publish complete grants before waking only their owning coroutine."""
@@ -229,6 +231,8 @@ class ProjectScheduler:
                                    else max(config["minimum"], min(self.capacity.limit, config["maximum"])))
             self.capacity.healthy = 0
             self.capacity.changed_at = self.capacity.clock()
+            if self.resources is not None:
+                self.resources.reconfigure(config["resource_semantics"])
             self._drain_all()
 
     async def update_pressure(self, sample):
@@ -243,7 +247,7 @@ class ProjectScheduler:
         if self._notifications:
             await asyncio.gather(*self._notifications)
 
-    def try_reserve(self, operation_id, project, lane="execution", target="", *, replace, claims=None):
+    def try_reserve(self, operation_id, project, lane="execution", target="", *, replace, claims=None, strict_order=False, on_bypass=None):
         """Non-waiting fair admission, converting an owned preflight slot.
 
         All state changes are synchronous on this event loop. No reservation is
@@ -266,7 +270,8 @@ class ProjectScheduler:
                     or any(identifier == operation_id for identifier, _ in self.resources.active.values())
                     or any(identifier == operation_id for _, identifier, _ in self.resources.waiting)):
                 return None
-            self.resources.enqueue(replace.token, operation_id, claims)
+            self.resources.enqueue(replace.token, operation_id, claims, bounded=lane == "read",
+                                   strict=strict_order, on_bypass=on_bypass)
             self._resource_tokens.add(replace.token)
         item = Ticket(replace.token, operation_id, project, lane, target)
         self.active.pop(replace.token)
@@ -323,7 +328,8 @@ class ProjectScheduler:
 
     @asynccontextmanager
     async def slot(self, operation_id, project, lane="execution", target="", on_wait=None,
-                   *, claims=None, on_resource_wait=None):
+                   *, claims=None, on_resource_wait=None, strict_order=False,
+                   on_bypass=None, wait_policy="queue", initial_wait_seconds=1):
         if lane not in LANES or not isinstance(project, str) or not project:
             raise ValueError("Invalid scheduler admission identity")
         item = Ticket(object(), operation_id, project, lane, target)
@@ -343,10 +349,21 @@ class ProjectScheduler:
                 if claims is not None:
                     if self.resources is None:
                         raise ValueError("Resource claims require a joint resource queue")
-                    self.resources.enqueue(item.token, operation_id, claims)
+                    self.resources.enqueue(item.token, operation_id, claims, bounded=lane == "read",
+                                           strict=strict_order, on_bypass=on_bypass)
                     self._resource_tokens.add(item.token)
                 self._drain_all()
-            await event.wait()
+            if wait_policy == "fail_fast":
+                try:
+                    await asyncio.wait_for(event.wait(), initial_wait_seconds)
+                except TimeoutError:
+                    async with self.condition:
+                        if not event.is_set() and self._blockers(item):
+                            raise DevError("RESOURCE_BUSY", "资源仍被其他操作占用，未执行任何副作用", 409,
+                                           blocked_by=self._blockers(item))
+                    await event.wait()
+            else:
+                await event.wait()
             if self.closed:
                 raise DevError("AGENT_STOPPING", "Agent 正在停止，尚未开始执行", 409)
             yield item
@@ -379,4 +396,5 @@ class ProjectScheduler:
                              "queued": sum(entry.lane == lane for entry in waiting),
                              "capacity": self.lane_limit(lane)} for lane in LANES},
             "scope": "node" if project is None else "project",
+            "resource_semantics": self.config["resource_semantics"],
         }
