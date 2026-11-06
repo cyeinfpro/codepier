@@ -146,11 +146,35 @@ class ResourceQueue:
                 pending.extend(self._dependencies.get(current, {}))
         return roots
 
+    def _strict_bypass_allowed(self, token, dependencies):
+        """Convoy relief that keeps strict-mode ordering guarantees.
+
+        Under strict semantics a short read could otherwise wait for a queued
+        command that is itself waiting for a long-running root (diagnosed
+        2026-11-06: one 272 s Git command held up an exec and every read queued
+        behind it). A read-only file operation may overtake *queued process
+        holders* only. It never overtakes a queued edit/write, so read-your-
+        writes for file edits is preserved, and it never writes itself. It still
+        cannot overlap any *active* holder (``blocked`` checks that first), and
+        the long-running-root and writer-turn gates below apply unchanged.
+        """
+        claims = self._entries.get(token, (None, ()))[1]
+        if not claims or any(claim.write or claim.holder != 'file' for claim in claims):
+            return False
+        for blocker in dependencies:
+            held = self._entries.get(blocker, (None, ()))[1]
+            for other in held:
+                if other.holder != 'process' and any(mine.conflicts(other, relaxed=False) for mine in claims):
+                    return False
+        return True
+
     def _bypassable(self, token):
-        if not self.relaxed or not self._bounded.get(token):
+        if not self._bounded.get(token):
             return False
         dependencies = self._dependencies.get(token, {})
         if not dependencies:
+            return False
+        if not self.relaxed and not self._strict_bypass_allowed(token, dependencies):
             return False
         now = self.clock()
         for blocker in dependencies:
@@ -174,7 +198,9 @@ class ResourceQueue:
         return bool(self._dependencies.get(token)) and not self._bypassable(token)
 
     def _schedule_bypass(self):
-        if not self.relaxed or self._timer is not None or not self.waiting or not self.active:
+        # Strict mode has a narrower bypass (see _strict_bypass_allowed) that
+        # still needs the timer to notice when a root has run long enough.
+        if self._timer is not None or not self.waiting or not self.active:
             return
         now = self.clock()
         deadlines = [at + self.bypass_seconds for at in self._started.values()

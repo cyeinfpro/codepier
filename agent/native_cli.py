@@ -33,6 +33,9 @@ class NativeCLI:
         self.launch_gate = threading.Lock()
         self.pending_starts = {}
         self.sync_wake = asyncio.Event()
+        from agent.native_sync_flow import SyncFlow
+        # Persisted per-session refusal state + in-memory window/backoff.
+        self.sync_flow = SyncFlow(self.directory / 'sync-paused.json')
         with self.connect_db() as db:
             db.execute('CREATE TABLE IF NOT EXISTS session_files (session TEXT, file TEXT, PRIMARY KEY(session,file))')
 
@@ -689,7 +692,13 @@ class NativeCLI:
         if self.agent.socket is socket:
             await self.agent.send({'type':'native_reply','request_id':request,'result':response})
 
-    def snapshot(self):
+    def on_ack(self,data):
+        """Hub transcript receipt: authoritative offsets plus per-session status."""
+        self.sync_flow.on_ack(data,self.offsets)
+        # ACK-clocked: the next packet may go out as soon as the window opens.
+        self.sync_wake.set()
+
+    def snapshot(self,skip=frozenset(),allow_chunks=True):
         all_rows=self.rows()
         live=[r for r in all_rows if r['status'] in LIVE]
         history=[r for r in all_rows if r['status'] not in LIVE]
@@ -710,6 +719,9 @@ class NativeCLI:
         with self.connect_db() as db:
             self.sync_active=bool(db.execute("SELECT 1 FROM commands WHERE state IN ('queued','claimed') AND kind IN ('chat_prompt','chat_settings') LIMIT 1").fetchone())
             for row in sessions:
+                # Metadata is still offered; transcript bytes wait for the window,
+                # and paused/backed-off sessions send none.
+                if not allow_chunks or row['id'] in skip: continue
                 after=self.offsets.get(row['id'],0)
                 packed=bytearray(); start=after; emitted=0
                 for out in db.execute('SELECT * FROM output WHERE session=? AND offset>=? ORDER BY offset LIMIT 4096',(row['id'],after)):
@@ -728,19 +740,31 @@ class NativeCLI:
         return {'type':'native_sync','sessions':sessions,'chunks':chunks}
 
     async def sync(self):
+        # Offsets are re-learned from the Hub on every connection. Rejected or
+        # non-progressing sessions are skipped by SyncFlow, so a reset no longer
+        # turns into a 90 ms resend loop of the same history.
         self.offsets={}
+        flow=self.sync_flow
+        flow.reset_connection()
         sent_metadata={}
         idle=.1
         while not self.agent.stop_event.is_set():
             try:
-                packet=await asyncio.to_thread(self.snapshot)
+                window_open=flow.window_open()
+                for sid in flow.due_probes(): sent_metadata.pop(sid,None)
+                packet=await asyncio.to_thread(self.snapshot,flow.skip(),window_open)
+                flow.observe_rows(packet['sessions'])
                 active=bool(packet['chunks']) or getattr(self,'sync_active',False) or any(r['status']=='starting' for r in packet['sessions'])
                 chunk_ids={chunk['id'] for chunk in packet['chunks']}
                 packet['sessions']=[row for row in packet['sessions']
                                     if row['id'] in chunk_ids or sent_metadata.get(row['id'])!=row]
                 if packet['sessions'] or packet['chunks']:
-                    await self.agent.send(packet)
-                    for row in packet['sessions']: sent_metadata[row['id']]=row
+                    packet['seq']=flow.next_seq()
+                    if await self.agent.send(packet):
+                        flow.sent(packet['seq'],packet['chunks'])
+                        for row in packet['sessions']: sent_metadata[row['id']]=row
+                if flow.dirty:
+                    await asyncio.to_thread(flow.write,flow.dump())
                 idle=.09 if active else min(1.5,idle*1.4)
             except Exception:
                 # Durable spool remains authoritative; retry without logging terminal content.

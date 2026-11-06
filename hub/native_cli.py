@@ -16,6 +16,42 @@ from hub import iam
 
 SEARCH_BYTES = 8 * 1024 * 1024
 MAX_SEARCHES = 4
+# Queued transcript packets per Agent connection before coalescing.
+SYNC_LANE_DEPTH = 4
+
+
+class _SyncLane:
+    __slots__ = ('queue', 'task')
+
+    def __init__(self):
+        from collections import deque
+        self.queue = deque()
+        self.task = None
+
+
+def _valid_seq(value):
+    return type(value) is int and 0 <= value < 2 ** 53
+
+
+def _coalesce(older, newer):
+    """Merge two queued sync packets without losing session metadata.
+
+    Rows keep the newest copy per session (wire order). Only the newer chunks
+    are kept: they were cut from the Agent's latest offsets, and persistence
+    ignores any chunk whose offset is not the Hub's current offset, so a
+    dropped chunk is simply re-sent after the ACK and never acknowledged early.
+    """
+    rows = {}
+    for packet in (older, newer):
+        sessions = packet.get('sessions')
+        if isinstance(sessions, list):
+            for row in sessions:
+                if isinstance(row, dict) and isinstance(row.get('id'), str):
+                    rows.pop(row['id'], None)
+                    rows[row['id']] = row
+    chunks = newer.get('chunks')
+    return {'type': 'native_sync', 'sessions': list(rows.values())[-1000:],
+            'chunks': chunks if isinstance(chunks, list) else []}
 
 
 class NativeService:
@@ -27,6 +63,8 @@ class NativeService:
         self.revision=0
         self.event_cache=OrderedDict()
         self.searching=set()
+        self._lane_tasks=set()
+        self.sync_errors=0
         with closing(database(self.directory)): pass
 
     def project(self,value,principal):
@@ -131,66 +169,152 @@ class NativeService:
             raise DevError('CLI_UNCERTAIN','控制回执尚未到达；使用同一会话/输入回执重试，不要重复输入',409)
         finally: self.pending.pop(request,None)
 
+    def _reply(self,connection,data):
+        pending=self.pending.get(data.get('request_id'))
+        if pending and pending[0] is connection and not pending[1].done():
+            pending[1].set_result(data.get('result',{}))
+
     async def receive(self,device,connection,data):
+        """Process one native frame to completion (direct callers and tests)."""
         if data['type']=='native_reply':
-            pending=self.pending.get(data.get('request_id'))
-            if pending and pending[0] is connection and not pending[1].done():
-                pending[1].set_result(data.get('result',{}))
+            self._reply(connection,data)
             return
-        persisted = await run_db(self.runtime.store, self._persist_sync, device, data)
+        seq=data.get('seq')
+        await self._process_sync(device,connection,data,[seq] if _valid_seq(seq) else [])
+
+    def submit(self,device,connection,data):
+        """Non-blocking receive for the Agent socket reader.
+
+        Transcript backfill is persisted on a per-connection lane, in wire
+        order, so the reader keeps admitting accepted/started/result receipts
+        while history is written. The mailbox is bounded: when the Agent
+        outruns the database the newest queued packet is coalesced (see
+        ``_coalesce``) instead of blocking the reader or growing memory.
+        """
+        if data.get('type')=='native_reply':
+            self._reply(connection,data)
+            return
+        lane=getattr(connection,'_native_sync_lane',None)
+        if lane is None:
+            lane=_SyncLane()
+            connection._native_sync_lane=lane
+        seq=data.get('seq')
+        seqs=[seq] if _valid_seq(seq) else []
+        if len(lane.queue)>=SYNC_LANE_DEPTH:
+            last,last_seqs=lane.queue.pop()
+            data=_coalesce(last,data)
+            seqs=(last_seqs+seqs)[-1024:]
+        lane.queue.append((data,seqs))
+        if lane.task is None or lane.task.done():
+            lane.task=asyncio.create_task(self._drain_lane(device,connection,lane))
+            self._lane_tasks.add(lane.task)
+            lane.task.add_done_callback(self._lane_tasks.discard)
+
+    async def _drain_lane(self,device,connection,lane):
+        # No await between the emptiness check and return, so submit() either
+        # sees this task still draining or already done; never a lost packet.
+        while lane.queue:
+            data,seqs=lane.queue.popleft()
+            try:
+                await self._process_sync(device,connection,data,seqs)
+            except Exception:
+                # Only the ACK send can raise here: the socket is gone and the
+                # reader owns teardown. The Agent re-learns offsets on reconnect.
+                self.sync_errors+=1
+                lane.queue.clear()
+                return
+
+    async def _process_sync(self,device,connection,data,seqs):
+        try:
+            persisted=await run_db(self.runtime.store,self._persist_sync_detailed,device,data)
+        except Exception:
+            # A cache write failure must not tear down the operation socket.
+            self.sync_errors+=1
+            persisted=None
         if persisted is None:
-            return
-        offsets, changed = persisted
-        if changed:
+            if not seqs:
+                return  # Legacy Agents: an unprocessed packet gets no ACK.
+            persisted={'offsets':{},'changed':False,'rejected':{},'deferred':{}}
+        if persisted['changed']:
             async with self.changed:
                 self.changed.notify_all()
-        await connection.send({'type': 'native_ack', 'offsets': offsets})
+        ack={'type':'native_ack','offsets':persisted['offsets']}
+        if seqs: ack['seqs']=seqs
+        if persisted['rejected']: ack['rejected']=persisted['rejected']
+        if persisted['deferred']: ack['deferred']=persisted['deferred']
+        await connection.send(ack)
 
     def _persist_sync(self, device, data):
+        """Legacy result shape: ``(offsets, changed)`` or ``None``."""
+        result=self._persist_sync_detailed(device,data)
+        return None if result is None else (result['offsets'],result['changed'])
+
+    def _persist_sync_detailed(self, device, data):
+        """Persist rows/chunks and classify every offered session.
+
+        ``offsets``: accepted sessions with the Hub's authoritative offset.
+        ``rejected``: the session can never be stored under the current mapping
+        or ownership (the Agent pauses it and re-offers metadata only later).
+        ``deferred``: a temporary condition (stale metadata, cache quota); the
+        Agent backs off. The authorization boundary is unchanged: rejection
+        only adds a reason code, never adopts or re-homes a session.
+        """
         rows=data.get('sessions',[]); chunks=data.get('chunks',[])
         if not isinstance(rows,list) or len(rows)>1000 or not isinstance(chunks,list) or len(chunks)>16:
             return
-        offsets={}; changed=False
+        offsets={}; rejected={}; deferred={}; changed=False
+        store=self.runtime.store
+        device_row=store.one('SELECT owner_user_id FROM devices WHERE id=?',(device,))
+        fallback=device_row['owner_user_id'] if device_row else None
         with closing(database(self.directory)) as db, db:
             for row in rows:
+                sid=None
                 try:
                     sid=identifier(row['id'])
-                    p=self.runtime.store.one('SELECT * FROM projects WHERE id=? AND device_id=?',(row['project_id'],device))
-                    if not p or p['root']!=row['root'] or p['mode']!='write' or not p['allow_tasks']: continue
-                    if row['device_id']!=device or row['provider'] not in ('pi','codex','claude') or row['status'] not in LIVE|{'exited','interrupted','quota_error','cleared','deleted'}: continue
-                    if any(not isinstance(row[k],str) or len(row[k])>2048 for k in ('title','cwd','root','error')): continue
+                    p=store.one('SELECT * FROM projects WHERE id=? AND device_id=?',(row['project_id'],device))
+                    if not p: rejected[sid]='project_unavailable'; continue
+                    if p['root']!=row['root']: rejected[sid]='mapping_changed'; continue
+                    if p['mode']!='write' or not p['allow_tasks']: rejected[sid]='project_not_writable'; continue
+                    if row['device_id']!=device or row['provider'] not in ('pi','codex','claude') or row['status'] not in LIVE|{'exited','interrupted','quota_error','cleared','deleted'}:
+                        rejected[sid]='invalid'; continue
+                    if any(not isinstance(row[k],str) or len(row[k])>2048 for k in ('title','cwd','root','error')):
+                        rejected[sid]='invalid'; continue
                     prior=db.execute('SELECT * FROM sessions WHERE id=?',(sid,)).fetchone()
-                    if prior and (prior['device_id'],prior['project_id'],prior['root'])!=(device,p['id'],p['root']): continue
+                    if prior and (prior['device_id'],prior['project_id'],prior['root'])!=(device,p['id'],p['root']):
+                        rejected[sid]='mapping_changed'; continue
                     if prior:
                         # Session IDs are never restarted/reused: destructive states
                         # are permanent tombstones, even if a buffered old packet or
                         # the original HTTP start reply arrives after deletion.
                         if prior['status'] == 'deleted' and row['status'] != 'deleted':
-                            continue
+                            rejected[sid]='tombstoned'; continue
                         if prior['status'] == 'cleared' and row['status'] not in {'cleared','deleted'}:
-                            continue
+                            rejected[sid]='tombstoned'; continue
                         if prior['status'] not in LIVE and row['status'] in LIVE:
-                            continue
+                            deferred[sid]='stale_metadata'; continue
                         if prior['status'] != 'starting' and row['status'] == 'starting':
-                            continue
+                            deferred[sid]='stale_metadata'; continue
                         if row['status'] not in {'cleared','deleted'} and row['updated'] < prior['updated']:
-                            continue
-                    store=self.runtime.store
+                            deferred[sid]='stale_metadata'; continue
                     owner=row.get('_native_owner','');space=row.get('_native_space','')
                     bound=store.one('SELECT * FROM native_ownership WHERE id=?',(sid,))
-                    device_row=store.one('SELECT owner_user_id FROM devices WHERE id=?',(device,))
-                    fallback=device_row['owner_user_id'] if device_row else None
                     if bound:
-                        if bound['space_id']!=p['space_id'] or bound['project_id']!=p['id'] or bound['device_id']!=device:continue
-                        if owner and (owner!='user:'+bound['owner_user_id'] or space!=p['space_id']):continue
-                        if not owner and bound['owner_user_id']!=fallback:continue
+                        if bound['space_id']!=p['space_id'] or bound['project_id']!=p['id'] or bound['device_id']!=device:
+                            rejected[sid]='ownership'; continue
+                        if owner and (owner!='user:'+bound['owner_user_id'] or space!=p['space_id']):
+                            rejected[sid]='ownership'; continue
+                        if not owner and bound['owner_user_id']!=fallback:
+                            rejected[sid]='ownership'; continue
                     else:
                         uid=owner[5:] if owner.startswith('user:') and space==p['space_id'] else fallback if not owner else None
-                        if not uid or not store.one('SELECT id FROM users WHERE id=?',(uid,)):continue
+                        if not uid or not store.one('SELECT id FROM users WHERE id=?',(uid,)):
+                            rejected[sid]='ownership'; continue
                         store.execute('INSERT OR IGNORE INTO native_ownership(id,space_id,owner_user_id,project_id,device_id,created) VALUES(?,?,?,?,?,?)',(sid,p['space_id'],uid,p['id'],device,time.time()))
                     normalized=public(row)
-                    if normalized.get('mode','terminal') not in {'chat','terminal'}: continue
-                    if prior and prior['mode']!=normalized.get('mode','terminal'): continue
+                    if normalized.get('mode','terminal') not in {'chat','terminal'}:
+                        rejected[sid]='invalid'; continue
+                    if prior and prior['mode']!=normalized.get('mode','terminal'):
+                        rejected[sid]='invalid'; continue
                     keys=list(normalized)
                     if not prior or any(prior[k]!=normalized[k] for k in keys):
                         changed=True
@@ -198,9 +322,12 @@ class NativeService:
                     if row['status'] in {'cleared','deleted'}:
                         db.execute('DELETE FROM output WHERE session=?',(sid,))
                     offsets[sid]=db.execute('SELECT COALESCE(MAX(offset+length(data)),0) FROM output WHERE session=?',(sid,)).fetchone()[0]
-                except (KeyError,ValueError,TypeError): continue
+                except (KeyError,ValueError,TypeError,AttributeError):
+                    if isinstance(sid,str): rejected[sid]='invalid'
+                    continue
+            used=None
             for chunk in chunks:
-                sid=chunk.get('id')
+                sid=chunk.get('id') if isinstance(chunk,dict) else None
                 if sid not in offsets: continue
                 state=db.execute('SELECT status FROM sessions WHERE id=?',(sid,)).fetchone()[0]
                 if state in {'cleared','deleted'}: continue
@@ -209,15 +336,18 @@ class NativeService:
                     offset=chunk['offset']
                     if type(offset) is not int or offset!=offsets[sid] or not 0<len(raw)<=65536: continue
                     # Cache quota is explicit; withhold ACK so the Agent retains and retries data.
-                    used=db.execute('SELECT COALESCE(sum(length(data)),0) FROM output').fetchone()[0]
+                    # One table scan per packet, not per chunk.
+                    if used is None:
+                        used=db.execute('SELECT COALESCE(sum(length(data)),0) FROM output').fetchone()[0]
                     if used+len(raw)>TOTAL_QUOTA:
-                        db.execute("UPDATE sessions SET error='HUB_CACHE_QUOTA: local Agent transcript retained; export/clear cache' WHERE id=?",(sid,));continue
-                    db.execute('INSERT OR IGNORE INTO output VALUES (?,?,?)',(sid,offset,raw));offsets[sid]+=len(raw);changed=True
+                        db.execute("UPDATE sessions SET error='HUB_CACHE_QUOTA: local Agent transcript retained; export/clear cache' WHERE id=?",(sid,))
+                        deferred[sid]='cache_quota'; continue
+                    db.execute('INSERT OR IGNORE INTO output VALUES (?,?,?)',(sid,offset,raw));offsets[sid]+=len(raw);used+=len(raw);changed=True
                 except (ValueError,KeyError,TypeError): continue
         if changed:
             self.revision += 1
             self.event_cache.clear()
-        return offsets, changed
+        return {'offsets':offsets,'changed':changed,'rejected':rejected,'deferred':deferred}
 
     @staticmethod
     def search_transcript(db,sid,query,*,budget=None):

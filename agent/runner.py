@@ -86,7 +86,14 @@ class Agent:
             raise
         self.socket = None
         self.channel = None
-        self.send_lock = asyncio.Lock()
+        # Control receipts (accepted/started/result/heartbeat) are served before
+        # queued bulk frames (native transcript backfill, artifact chunks).
+        from agent.send_priority import PrioritySendLock
+        self.send_lock = PrioritySendLock()
+        # Small nodes: keep the Agent's own heap from triggering admission pause.
+        from agent import memory_relief
+        memory_relief.configure()
+        self.memory_relief = memory_relief.MemoryRelief()
         self.jobs: dict[str, asyncio.Task] = {}
         self.processes: dict[str, asyncio.subprocess.Process] = {}
         self.cancelled: set[str] = set()
@@ -131,7 +138,8 @@ class Agent:
             raise ValueError("Agent 配置读取期间发生变化，保留原运行配置") from exc
 
     async def send(self, body: dict):
-        async with self.send_lock:
+        from agent.send_priority import is_bulk
+        async with self.send_lock.hold(is_bulk(body)):
             socket, channel = self.socket, self.channel
             if not socket or not channel:
                 return False
@@ -240,6 +248,12 @@ class Agent:
             except (TimeoutError, OSError, ValueError, TypeError):
                 sample = None
             await self.scheduler.update_pressure(sample)
+            if sample is not None:
+                try:
+                    await asyncio.wait_for(asyncio.to_thread(
+                        self.memory_relief.observe, sample, idle=not self.jobs), 5)
+                except (TimeoutError, OSError, ValueError):
+                    pass
             try:
                 await asyncio.wait_for(self.stop_event.wait(), 3)
             except TimeoutError:
@@ -334,9 +348,9 @@ class Agent:
                         await self.apply_scheduler_config(data)
                         continue
                     if kind == "native_ack":
-                        offsets = data.get("offsets", {})
-                        if isinstance(offsets, dict):
-                            self.native.offsets.update({k: v for k, v in offsets.items() if isinstance(k,str) and type(v) is int and v >= 0})
+                        # Applies offsets, per-session rejection/deferral and
+                        # releases the bounded in-flight transcript window.
+                        self.native.on_ack(data)
                         continue
                     if kind == "native_request":
                         if self.lifecycle.handoff_pending:

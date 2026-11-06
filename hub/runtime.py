@@ -1885,7 +1885,10 @@ class Runtime:
                 if kind in {"computer_approval", "computer_approval_closed"}:
                     continue
                 if kind in {"native_reply", "native_sync"}:
-                    await self.native.receive(device_id, connection, data)
+                    # Never await transcript persistence here: the next frame may
+                    # be an accepted/started/result receipt. Sync runs on a
+                    # per-connection lane in wire order (NativeService.submit).
+                    self.native.submit(device_id, connection, data)
                     continue
                 if kind == "artifact_chunk":
                     self.artifacts.receive(connection,data)

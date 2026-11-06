@@ -24,6 +24,12 @@ NODE_BYTES = 64 * 1024**2
 PROJECT_BYTES = 32 * 1024**2
 GLOBAL_BYTES = 256 * 1024**2
 REPORT_TTL = 45
+# While a node is memory-paused its Agent still runs one read-lane job, and
+# that lane carries plain file writes/edits. Admit a few small ones so a config
+# fix is not refused while the node is idle; commands stay paused.
+LIGHT_MUTATIONS = frozenset({"write", "edit"})
+LIGHT_MUTATION_BYTES = 512 * 1024
+LIGHT_MUTATION_SLOTS = 2
 SOURCES = frozenset({"linux_os_counters", "darwin_os_counters", "windows_os_counters"})
 
 
@@ -226,7 +232,10 @@ def check_admission(budget, counts, tool, payload_bytes, *, args=None):
             busy("node", "control_reserve")
         return
     if budget.paused and not read:
-        busy("node", "resource_pressure")
+        light = (tool in LIGHT_MUTATIONS and payload_bytes <= LIGHT_MUTATION_BYTES
+                 and counts["node_count"] < LIGHT_MUTATION_SLOTS)
+        if not light:
+            busy("node", "resource_pressure")
     if (read and budget.overload_read_reserve
             and counts["node_reads"] < budget.overload_read_reserve
             and counts["project_reads"] < OVERLOAD_PROJECT_READS):
