@@ -140,6 +140,60 @@ window.CodePierCollaboration = (() => {
           : '宿主尚未登记');
   const members = () => (state.room?.members || []).filter((item) => item.state !== 'removed');
   const title = (item) => item?.display?.title || stages[item?.stage || item?.state] || '等待连接';
+  // Rooms carried over from project partitions were titled with raw project
+  // IDs ("267454898aed… · production"). Show the project alias instead.
+  const rawPartitionTitle = /^([0-9a-f]{32})(?:\s*·\s*(.+))?$/i;
+  const projectLabel = (id, room) =>
+    S.projects?.find((p) => p.id === id)?.alias ||
+    S.projects?.find((p) => p.id === id)?.name ||
+    room?.projects?.find((p) => p.project_id === id)?.project_label ||
+    room?.projects?.find((p) => p.project_id === id)?.alias ||
+    '';
+  function roomName(room) {
+    const raw = String(room?.title || '').trim();
+    const match = rawPartitionTitle.exec(raw);
+    if (!match) return raw || '未命名房间';
+    const alias = projectLabel(match[1], room);
+    const env = match[2] && match[2] !== 'production' ? ' · ' + match[2] : '';
+    return (alias || '项目 ' + match[1].slice(0, 6)) + env;
+  }
+  const roomProjects = (room) =>
+    (room?.projects || [])
+      .filter((p) => p.state !== 'removed')
+      .map((p) => projectLabel(p.project_id, room) || p.project_id?.slice(0, 6))
+      .filter(Boolean);
+  function roomSubtitle(room) {
+    if (!room) return '';
+    if (room.state === 'archived') return '已归档';
+    if (room.state === 'paused') return '已暂停';
+    const names = roomProjects(room);
+    const title = roomName(room);
+    const count = (room.projects || []).filter((p) => p.state !== 'removed').length;
+    const projects =
+      names.length === 1 && names[0] === title
+        ? '1 个项目'
+        : names.length
+          ? names.slice(0, 2).join('、') + (names.length > 2 ? ` 等 ${names.length} 个项目` : '')
+          : count
+            ? `${count} 个项目`
+            : '无关联项目';
+    return projects;
+  }
+  function roomChip(room) {
+    if (!room) return null;
+    if (room.legacy) return { tone: 'warning', text: '只读 · 待迁移' };
+    if (room.state === 'archived') return { tone: 'muted', text: '已归档' };
+    if (room.state === 'paused') return { tone: 'muted', text: '已暂停' };
+    const list = members();
+    if (!list.length) return { tone: 'muted', text: '还没有 dot' };
+    const ready = list.filter((m) => ['ready_chat', 'ready_work'].includes(m.stage || m.state));
+    return ready.length
+      ? { tone: 'success', text: `${ready.length}/${list.length} 个 dot 在线` }
+      : { tone: 'warning', text: '等待 dot 接入' };
+  }
+  let roomFilter = '';
+  const hue = (value) =>
+    [...String(value || '')].reduce((sum, char) => (sum * 31 + char.charCodeAt(0)) % 360, 7);
   const actionLabel = (action) =>
     ({
       refresh_invite: '刷新加入说明',
@@ -338,27 +392,40 @@ window.CodePierCollaboration = (() => {
       }
     } else await store.select('');
     return `<section class="collaboration cr-shell" aria-label="协作中心">
-      <aside class="cr-sidebar" aria-label="房间列表"><header><div><span class="cr-eyebrow">WORKSPACE</span><h2>协作中心</h2></div>${btn('create', icon('plus'), 'aria-label="新建房间"', 'cr-icon cr-primary')}</header><div class="cr-room-list" data-cr-rooms></div>${btn('more-rooms', '更多房间', 'data-cr-more-rooms hidden', 'cr-text-button')}<footer>${btn('archives', '显示已归档', 'aria-pressed="false"', 'cr-text-button')}<span class="cr-status-dot" aria-hidden="true"></span></footer></aside>
-      <main class="cr-main"><header class="cr-topbar"><div class="cr-room-heading">${btn('rooms', icon('menu'), 'aria-label="显示房间列表" aria-expanded="false"', 'cr-icon cr-mobile')}<div><h1 tabindex="-1" data-cr-title></h1><span class="cr-subtitle" data-cr-status></span></div></div><nav class="cr-room-actions" aria-label="房间管理">${btn('projects', icon('folder') + '<span data-cr-project-count>项目</span>')}${btn('members', '<span class="cr-avatars" data-cr-avatars></span><span>成员</span>')}${btn('weixin', icon('message') + '<span data-cr-weixin-label>连接微信</span>')}${btn('settings', icon('settings'), 'aria-label="房间设置"', 'cr-icon')}</nav></header>
-        <div class="cr-legacy-note" data-cr-legacy hidden><div><strong>原房间当前只读</strong><p>历史和原工作已保留，可查看诊断、迁移成员或停止工作。所有旧连接处理完毕后，由你明确启用新房间界面。</p></div>${btn('migration', '查看迁移要求', 'data-cr-migration-open')}</div>
+      <aside class="cr-sidebar" aria-label="房间列表"><header class="cr-side-head"><div><h2>房间</h2><span class="cr-count" data-cr-room-count></span></div>${btn('create', icon('plus') + '<span>新建</span>', 'aria-label="新建房间"', 'cr-primary cr-new-room')}</header><label class="cr-search"><span class="sr-only">搜索房间</span><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg><input type="search" data-cr-room-filter placeholder="搜索房间或项目" autocomplete="off"></label><div class="cr-room-list" data-cr-rooms></div>${btn('more-rooms', '加载更多房间', 'data-cr-more-rooms hidden', 'cr-text-button cr-full')}<footer>${btn('archives', '显示已归档', 'aria-pressed="false"', 'cr-text-button')}</footer></aside>
+      <main class="cr-main"><header class="cr-topbar"><div class="cr-room-heading">${btn('rooms', icon('menu'), 'aria-label="显示房间列表" aria-expanded="false"', 'cr-icon cr-mobile')}<div class="cr-heading-text"><h1 tabindex="-1" data-cr-title></h1><div class="cr-heading-meta"><span class="cr-chip" data-cr-chip hidden></span><span class="cr-subtitle" data-cr-status></span></div></div></div><nav class="cr-room-actions" aria-label="房间管理">${btn('projects', icon('folder') + '<span data-cr-project-count>项目</span>')}${btn('members', '<span class="cr-avatars" data-cr-avatars></span><span>成员</span>')}${btn('weixin', '<span class="cr-channel-dot" data-cr-weixin-dot aria-hidden="true"></span>' + icon('message') + '<span data-cr-weixin-label>连接微信</span>')}${btn('settings', icon('settings'), 'aria-label="房间设置"', 'cr-icon')}</nav></header>
+        <div class="cr-legacy-note" data-cr-legacy hidden><span class="cr-legacy-icon" aria-hidden="true">!</span><div><strong>原房间当前只读</strong><p data-cr-legacy-progress>历史和原工作已保留。处理完旧连接后，由你明确启用新房间界面。</p></div>${btn('migration', '查看迁移要求', 'data-cr-migration-open')}</div>
         <div class="cr-feedback" role="status" aria-live="polite" data-cr-feedback></div>
         <section class="cr-feed" aria-label="房间对话" tabindex="0"><div class="cr-load-older" data-cr-older hidden>${btn('older', '更早的消息')}</div><p class="cr-window-note" data-cr-message-window hidden></p><div data-cr-empty></div><div class="cr-messages" role="log" aria-live="polite" aria-relevant="additions text" data-cr-messages></div><div class="cr-history-end" data-cr-history-end hidden><p>当前历史窗口到此结束，后续消息尚未载入。</p>${btn('latest', '返回最新消息窗口')}</div><div class="cr-pending" data-cr-pending></div><div class="cr-work-list" data-cr-work></div></section>
         ${btn('latest', '查看新消息 ↓', 'data-cr-latest hidden', 'cr-latest')}
         <form class="cr-composer" id="cr-composer"><div class="cr-reply cr-context-correction" data-cr-correction hidden></div><div class="cr-reply" data-cr-reply hidden></div><div class="cr-draft-files" data-cr-files aria-label="待发送的附件" aria-live="polite" hidden></div><div class="cr-composer-line"><textarea id="cr-message" name="body_text" aria-label="消息" placeholder="说说你想做什么…" rows="1" maxlength="8000"></textarea><button type="submit" class="cr-send" aria-label="发送消息">${icon('arrow')}</button></div><footer><div class="cr-composer-tools">${btn('attach', icon('plus'), 'aria-label="添加附件" title="每个附件最多 8 MiB"', 'cr-icon cr-attach')}<input type="file" id="cr-file" multiple hidden aria-label="选择附件"><label class="cr-recipient"><span>发送给</span><select name="member_id" aria-label="选择处理成员"><option value="">主责 dot</option></select></label></div><span data-cr-compose-status>Enter 发送 · Shift + Enter 换行</span></footer></form>
-      </main><dialog class="cr-panel" aria-labelledby="cr-panel-title"><header><h2 id="cr-panel-title"></h2>${btn('close', '×', 'aria-label="关闭面板"', 'cr-icon')}</header><div class="cr-panel-content"></div><p role="alert" class="cr-error" data-cr-panel-error hidden></p><div class="cr-mutation-recovery" data-cr-panel-recovery hidden></div></dialog>
+      </main><dialog class="cr-panel" aria-labelledby="cr-panel-title"><header><h2 id="cr-panel-title"></h2>${btn('close', icon('close'), 'aria-label="关闭面板"', 'cr-icon')}</header><div class="cr-panel-content"></div><p role="alert" class="cr-error" data-cr-panel-error hidden></p><div class="cr-mutation-recovery" data-cr-panel-recovery hidden></div></dialog>
     </section>`;
   }
   function patchRooms() {
     const list = root?.querySelector('[data-cr-rooms]');
     if (!list) return;
-    const markup = state.rooms.length
-      ? state.rooms
-          .map(
-            (room) =>
-              `<button type="button" class="cr-room ${room.id === state.roomId ? 'is-current' : ''}" data-cr-action="select" data-id="${E(room.id)}" aria-current="${room.id === state.roomId ? 'true' : 'false'}"><span class="cr-room-symbol" aria-hidden="true">${icon('message')}</span><span><strong>${E(room.title || '未命名房间')}</strong><small>${E(room.display?.subtitle || (room.state === 'archived' ? '已归档' : room.state === 'paused' ? '已暂停' : (room.projects?.length || 0) + ' 个项目'))}</small></span><span class="cr-room-chevron" aria-hidden="true">›</span></button>`,
-          )
+    const needle = roomFilter.trim().toLowerCase();
+    const visible = needle
+      ? state.rooms.filter((room) =>
+          [roomName(room), room.title, ...roomProjects(room)].some((value) =>
+            String(value || '')
+              .toLowerCase()
+              .includes(needle),
+          ),
+        )
+      : state.rooms;
+    const count = root.querySelector('[data-cr-room-count]');
+    if (count) count.textContent = state.rooms.length ? String(state.rooms.length) : '';
+    const markup = visible.length
+      ? visible
+          .map((room) => {
+            const name = roomName(room);
+            const current = room.id === state.roomId;
+            return `<button type="button" class="cr-room ${current ? 'is-current' : ''} ${room.legacy ? 'is-legacy' : ''}" data-cr-action="select" data-id="${E(room.id)}" aria-current="${current ? 'true' : 'false'}" title="${E(room.title || name)}"><span class="cr-room-avatar" style="--cr-hue:${hue(room.id)}" aria-hidden="true">${E([...name][0] || '房')}</span><span class="cr-room-text"><strong>${E(name)}</strong><small>${E(roomSubtitle(room))}</small></span>${room.legacy ? '<span class="cr-room-flag" aria-label="待迁移">只读</span>' : ''}</button>`;
+          })
           .join('')
-      : '<p class="cr-list-empty">还没有房间</p>';
+      : `<p class="cr-list-empty">${needle ? '没有匹配的房间' : '还没有房间'}</p>`;
     if (list._markup !== markup) {
       list.innerHTML = markup;
       list._markup = markup;
@@ -371,23 +438,39 @@ window.CodePierCollaboration = (() => {
   function patchHeader() {
     if (!root) return;
     const room = state.room;
-    root.querySelector('[data-cr-title]').textContent = room?.title || '开始一段协作';
-    root.querySelector('[data-cr-status]').textContent =
-      room?.display?.subtitle ||
-      room?.display?.title ||
-      (room?.state === 'paused'
-        ? '已暂停'
-        : room?.state === 'archived'
-          ? '已归档'
-          : room
-            ? '待命'
-            : '把项目和 dot 放进同一个房间');
+    const heading = root.querySelector('[data-cr-title]');
+    heading.textContent = room ? roomName(room) : '开始一段协作';
+    heading.title = room?.title && room.title !== heading.textContent ? room.title : '';
+    const projectNames = room ? roomProjects(room) : [];
+    const activeProjectCount = room?.projects?.filter((p) => p.state !== 'removed').length || 0;
+    const customStatus =
+      room?.display?.subtitle && !['待命', '只读'].includes(room.display.subtitle)
+        ? room.display.subtitle
+        : '';
+    root.querySelector('[data-cr-status]').textContent = room
+      ? projectNames.length && projectNames.join(' · ') !== heading.textContent
+        ? projectNames.join(' · ') + (customStatus ? ' · ' + customStatus : '')
+        : customStatus || `${activeProjectCount} 个项目 · ${members().length} 个成员`
+      : '把项目和 dot 放进同一个房间';
+    const chip = root.querySelector('[data-cr-chip]'),
+      chipValue = roomChip(room);
+    chip.hidden = !chipValue;
+    if (chipValue) {
+      chip.textContent = chipValue.text;
+      chip.dataset.tone = chipValue.tone;
+    }
     root.querySelector('[data-cr-project-count]').textContent =
       '项目 ' + (room?.projects?.filter((p) => p.state !== 'removed').length || 0);
     root.querySelector('[data-cr-legacy]').hidden = !room?.legacy;
-    root.querySelector('[data-cr-migration-open]').textContent = room?.migration?.eligible
-      ? '启用新房间界面'
-      : '查看迁移要求';
+    const blockers = room?.migration?.blockers?.length || 0;
+    root.querySelector('[data-cr-legacy-progress]').textContent = room?.migration?.eligible
+      ? '迁移条件已满足。确认后即可继续协作，历史与原工作保留。'
+      : blockers
+        ? `还有 ${blockers} 项旧连接待处理。历史与原工作已保留，处理完后由你明确启用新房间界面。`
+        : '历史和原工作已保留。处理完旧连接后，由你明确启用新房间界面。';
+    const migrationOpen = root.querySelector('[data-cr-migration-open]');
+    migrationOpen.textContent = room?.migration?.eligible ? '启用新房间界面' : '查看迁移要求';
+    migrationOpen.classList.toggle('cr-primary', !!room?.migration?.eligible);
     const avatars = root.querySelector('[data-cr-avatars]');
     const avatarMarkup = members()
       .slice(0, 3)
@@ -395,8 +478,31 @@ window.CodePierCollaboration = (() => {
       .join('');
     if (avatars.innerHTML !== avatarMarkup) avatars.innerHTML = avatarMarkup;
     const label = room?.channels?.find((channel) => channel.kind === 'weixin');
-    root.querySelector('[data-cr-weixin-label]').textContent =
-      label?.display?.title || (label?.state === 'ready' ? '微信已连接' : '连接微信');
+    const channelStage = label?.stage || label?.state || '';
+    const connected = channelStage === 'ready';
+    const attention = ['needs_reconnect', 'degraded', 'pairing_expired', 'route_conflict'].includes(
+      channelStage,
+    );
+    const pending =
+      !!channelStage &&
+      !connected &&
+      !['choose_account', 'cancelled', 'closed', 'disconnected'].includes(channelStage);
+    root.querySelector('[data-cr-weixin-label]').textContent = connected
+      ? '微信已连接'
+      : channelStage === 'paused'
+        ? '微信已暂停'
+        : attention
+          ? '微信需处理'
+          : pending
+            ? '继续连接微信'
+            : '连接微信';
+    root.querySelector('[data-cr-weixin-dot]').dataset.state = connected
+      ? 'ready'
+      : attention
+        ? 'attention'
+        : pending
+          ? 'pending'
+          : '';
     for (const node of root.querySelectorAll('.cr-room-actions button')) node.disabled = !room;
     patchRooms();
     patchComposer();
@@ -409,15 +515,56 @@ window.CodePierCollaboration = (() => {
     if (!node) return;
     const show = !state.messages.length && !state.works.length;
     node.hidden = !show;
+    const activeProjectCount = (state.room?.projects || []).filter(
+      (p) => p.state !== 'removed',
+    ).length;
     const markup = !state.room
       ? `<div class="cr-empty"><div class="cr-orbit" aria-hidden="true"><span></span><i>${icon('message')}</i><span></span></div><h3>事情，从这里开始</h3><p>一个房间，一段持续的协作。</p>${btn('create', '新建房间', '', 'cr-primary')}</div>`
       : !activeRoom()
-        ? `<div class="cr-empty"><h3>${state.room.legacy ? '先核对原房间的连接' : '房间当前只读'}</h3><p>${E(readOnlyReason())}</p>${state.room.legacy ? btn('migration', '查看迁移要求') : btn('settings', '查看房间状态')}</div>`
-        : `<div class="cr-empty"><div class="cr-orbit" aria-hidden="true"><span></span><i>${icon('network')}</i><span></span></div><h3>${members().length ? '想一起做点什么？' : '让你的 dot 加入'}</h3><p>${members().length ? '直接发消息，工作和进展都会留在这里。' : '先连接成员，也可以先把目标写下来。'}</p><div class="cr-empty-actions">${!members().length ? btn('add-member', '添加 dot', '', 'cr-primary') : ''}${!(state.room.projects || []).length ? btn('projects', '添加项目') : ''}</div></div>`;
+        ? state.room.legacy
+          ? migrationChecklist()
+          : `<div class="cr-empty"><h3>房间当前只读</h3><p>${E(readOnlyReason())}</p>${btn('settings', '查看房间状态')}</div>`
+        : `<div class="cr-empty"><div class="cr-orbit" aria-hidden="true"><span></span><i>${icon('network')}</i><span></span></div><h3>${members().length ? '想一起做点什么？' : '让你的 dot 加入'}</h3><p>${members().length ? '直接发消息，工作和进展都会留在这里。' : '先连接成员，也可以先把目标写下来。'}</p><div class="cr-empty-actions">${!members().length ? btn('add-member', '添加 dot', '', 'cr-primary') : ''}${!activeProjectCount ? btn('projects', '添加项目') : ''}</div></div>`;
     if (node._markup !== markup) {
       node.innerHTML = markup;
       node._markup = markup;
     }
+  }
+  // Legacy rooms: one actionable checklist instead of three copies of the same
+  // read-only sentence. Each line carries the exact next step for that blocker.
+  function migrationChecklist() {
+    const room = state.room,
+      migration = room.migration || {},
+      blockers = migration.blockers || [],
+      counts = migration.member_counts;
+    const groups = [
+      [
+        '成员连接',
+        blockers.filter((b) => b.code?.startsWith('MEMBER_') || b.code === 'ROOM_MEMBER_LIMIT'),
+      ],
+      ['旧 dot 路线', blockers.filter((b) => b.code === 'LEGACY_ROUTE_ACTIVE')],
+      ['微信 / Telegram', blockers.filter((b) => b.code === 'LEGACY_CHANNEL_ACTIVE')],
+      ['房间状态', blockers.filter((b) => ['ROOM_PAUSED', 'ROOM_ARCHIVED'].includes(b.code))],
+    ];
+    const steps = groups
+      .map(
+        ([label, items]) =>
+          `<li class="${items.length ? 'is-open' : 'is-done'}"><span class="cr-check" aria-hidden="true">${items.length ? items.length : '✓'}</span><div><strong>${E(label)}</strong>${
+            items.length
+              ? `<ul>${items
+                  .slice(0, 6)
+                  .map((item) => migrationBlockerMarkup(item, true))
+                  .join(
+                    '',
+                  )}${items.length > 6 ? `<li>另有 ${items.length - 6} 项，打开迁移要求查看全部</li>` : ''}</ul>`
+              : '<p>已处理</p>'
+          }</div></li>`,
+      )
+      .join('');
+    const progress = counts
+      ? `<p class="cr-muted">原成员 ${E(supplied(counts.total))} 个 · 已验证 ${E(supplied(counts.verified))} · 已移除 ${E(supplied(counts.removed))}</p>`
+      : '';
+    return `<div class="cr-migrate-card"><div class="cr-migrate-head"><span class="cr-legacy-icon" aria-hidden="true">!</span><div><h3>先核对原房间的连接</h3><p>这个房间来自旧版协作中心。处理完下面的条目并启用新界面后，就能继续发消息、加 dot 和连接微信；历史、原工作和回执都会保留。</p>${progress}</div></div>${migration.eligibility_checked === false ? '<p class="cr-info">迁移条件尚未核对。</p>' : `<ol class="cr-migrate-steps">${steps}</ol>`}<div class="cr-empty-actions">${migration.eligible ? btn('migration', '启用新房间界面', '', 'cr-primary') : btn('migration', '查看迁移要求')}${btn('refresh-migration', '重新核对', '', 'cr-text-button')}</div></div>`;
   }
   function patchComposer() {
     const editor = root?.querySelector('#cr-message'),
@@ -425,6 +572,7 @@ window.CodePierCollaboration = (() => {
     if (!editor) return;
     const draft = store.draft();
     const disabled = !activeRoom();
+    root.querySelector('#cr-composer').classList.toggle('is-locked', disabled && !!state.room);
     editor.disabled = disabled;
     if (select) select.disabled = disabled;
     const unfinished = draft.files.some((entry) => entry.state !== 'ready');
@@ -541,7 +689,8 @@ window.CodePierCollaboration = (() => {
   function patchWindowHints() {
     if (!root) return;
     const note = root.querySelector('[data-cr-message-window]');
-    note.hidden = !state.messages.length;
+    // Only worth saying when the window is actually paged.
+    note.hidden = !state.messages.length || (!state.cursor && !state.messageHistory);
     note.textContent = `消息窗口 ${state.messages.length} / ${store.limits.messages} 条 · 历史按页读取${state.messageHistory ? ' · 正在查看较早内容' : ''}`;
     root.querySelector('[data-cr-older]').hidden = !state.cursor;
     const boundary = root.querySelector('[data-cr-history-end]');
@@ -876,23 +1025,30 @@ window.CodePierCollaboration = (() => {
       ? remediation
       : null;
   }
-  function migrationBlockerMarkup(blocker) {
+  function migrationBlockerMarkup(blocker, inline = false) {
     const memberAction =
       blocker.member_id && members().some((member) => memberId(member) === blocker.member_id)
-        ? btn('member-detail', '管理此成员', `data-id="${E(blocker.member_id)}"`, 'cr-text-button')
+        ? btn(
+            inline ? 'open-member' : 'member-detail',
+            '管理此成员',
+            `data-id="${E(blocker.member_id)}"`,
+            'cr-text-button',
+          )
         : '';
     const roomAction = ['ROOM_PAUSED', 'ROOM_ARCHIVED'].includes(blocker.code)
       ? btn('settings', '查看房间状态', '', 'cr-text-button')
       : '';
     const channelAction = legacyChannelRemediation(blocker)
       ? btn(
-          'legacy-channel-pause',
+          inline ? 'inline-channel-pause' : 'legacy-channel-pause',
           blocker.channel === 'weixin' ? '暂停原微信连接' : '暂停原 Telegram 连接',
           `data-id="${E(blocker.binding_id)}"`,
           'cr-text-button',
         )
       : '';
-    return `<li data-migration-blocker="${E(blocker.code)}"><span>${E(blocker.title || blocker.code)}</span>${memberAction}${roomAction}${channelAction}</li>`;
+    // The migration dialog owns data-migration-blocker; summaries elsewhere
+    // (room checklist, WeChat wizard) use a separate hook.
+    return `<li ${inline ? 'data-migration-item' : 'data-migration-blocker'}="${E(blocker.code)}"><span>${E(blocker.title || blocker.code)}</span>${memberAction}${roomAction}${channelAction}</li>`;
   }
   function renderMigration() {
     if (panel?.name !== 'migration') return;
@@ -1232,11 +1388,15 @@ window.CodePierCollaboration = (() => {
     if (panel === current && epoch === panelEpoch && writeEpoch === (current.writeEpoch || 0))
       renderFlow(response);
   }
-  async function mutation(method, url, body, current = panel) {
+  async function mutation(method, url, body, current = panel, options = {}) {
     requireMutation(method, url, body, current?.roomId || state.roomId);
-    const unresolved = [...state.mutations.values()].find(
-      (item) => item.state !== 'not_saved' && item.method === method && item.url === url,
-    );
+    // Background polls (QR status) are read-like and keyed per flow version.
+    // They never hijack, and are never hijacked by, an explicit user action.
+    const unresolved = options.transient
+      ? null
+      : [...state.mutations.values()].find(
+          (item) => item.state !== 'not_saved' && item.method === method && item.url === url,
+        );
     if (unresolved) {
       await recoverAction(unresolved.id);
       return null;
@@ -1287,16 +1447,16 @@ window.CodePierCollaboration = (() => {
     if (current) {
       current.busy = true;
       current.writeEpoch = (current.writeEpoch || 0) + 1;
-      panelError('');
+      if (!options.transient) panelError('');
     }
-    const forms = [...(root?.querySelectorAll('dialog form') || [])];
+    const forms = options.transient ? [] : [...(root?.querySelectorAll('dialog form') || [])];
     for (const form of forms) {
       form.setAttribute('aria-busy', 'true');
       for (const button of form.querySelectorAll('button[type="submit"]')) button.disabled = true;
     }
-    const actionButtons = [
-      ...(root?.querySelectorAll('.cr-panel-content button[data-cr-action]') || []),
-    ];
+    const actionButtons = options.transient
+      ? []
+      : [...(root?.querySelectorAll('.cr-panel-content button[data-cr-action]') || [])];
     for (const button of actionButtons) button.disabled = true;
     try {
       const response = await api(url, {
@@ -1313,10 +1473,11 @@ window.CodePierCollaboration = (() => {
       return response;
     } catch (error) {
       if (owner !== state.owner) throw error;
-      if (error.code === 'NETWORK_UNCERTAIN' || error.status >= 500) {
+      if (!options.transient && (error.code === 'NETWORK_UNCERTAIN' || error.status >= 500)) {
         state.mutations.set(receipt.id, receipt);
         patchPending();
       }
+      if (options.transient) throw error;
       if (current === panel) {
         panelError(error.message);
         if (error.status === 409) {
@@ -1425,6 +1586,20 @@ window.CodePierCollaboration = (() => {
             await store.refresh().catch(() => {});
             if (epoch === state.epoch)
               panel?.name === 'migration' ? panelError(receipt.error) : announce(receipt.error);
+          }
+          return;
+        }
+        if (!saved && receipt.kind === 'channel' && error.status === 409) {
+          // A WeChat step is checked against its flow version before any
+          // write, so a conflict on the exact original key proves it was not
+          // saved. Drop it instead of replaying it on every later click.
+          state.mutations.delete(id);
+          patchPending();
+          if (root && epoch === state.epoch && receipt.roomId === state.roomId) {
+            if (panel?.name === 'weixin') {
+              panelError('原请求未保存（连接状态已前进），已按当前状态刷新。');
+              await refreshChannel().catch(() => {});
+            } else announce('原微信连接请求未保存，状态已前进。');
           }
           return;
         }
@@ -2043,8 +2218,12 @@ window.CodePierCollaboration = (() => {
         );
         if (panel === current) renderChannel(result);
       } else {
-        root.querySelector('[data-cr-channel-view]').innerHTML =
-          `<p class="cr-info">${E(readOnlyReason())}</p><p>此处不会创建新的微信接入或批准工作许可。</p>${state.room?.legacy ? btn('migration', '查看旧连接与迁移要求') : btn('settings', '查看房间状态')}`;
+        const legacyChannels = (state.room?.migration?.blockers || []).filter(
+          (blocker) => blocker.code === 'LEGACY_CHANNEL_ACTIVE',
+        );
+        root.querySelector('[data-cr-channel-view]').innerHTML = state.room?.legacy
+          ? `<ol class="cr-steps" aria-label="连接微信进度"><li class="is-current" aria-current="step"><span>!</span>先完成房间迁移</li><li><span>1</span>登录微信</li><li><span>2</span>本人验证</li></ol><div class="cr-wx-head"><span class="cr-legacy-icon" aria-hidden="true">!</span><div><h3>迁移后就能连接微信</h3><p>这个房间还在旧版协作中心，此处不会创建新的微信接入或批准工作许可。完成迁移条目并启用新房间界面后，回到这里扫码；之前登记过的微信可以直接沿用。</p></div></div>${legacyChannels.length ? `<p class="cr-info">这个房间还有 ${legacyChannels.length} 条旧渠道连接需要先暂停。暂停会保留账号、历史和投递回执。</p><ul class="cr-wx-legacy">${legacyChannels.map((item) => migrationBlockerMarkup(item, true)).join('')}</ul>` : ''}${btn('migration', '查看旧连接与迁移要求', '', 'cr-primary cr-full')}`
+          : `<p class="cr-info">${E(readOnlyReason())}</p><p>此处不会创建新的微信接入或批准工作许可。</p>${btn('settings', '查看房间状态')}`;
       }
       return;
     }
@@ -2074,6 +2253,111 @@ window.CodePierCollaboration = (() => {
     const duration = seconds >= 60 ? Math.ceil(seconds / 60) + ' 分钟' : seconds + ' 秒';
     return `<p class="cr-muted" data-cr-upload-estimate>附件外发参考：${estimate.reference_bytes ? E(fileSize(estimate.reference_bytes)) + ' 文件' : '所选文件'}约 ${E(duration)}。 ${E(estimate.note || '')} 外发文件仍需单独批准。</p>`;
   }
+  const channelSteps = [
+    ['登录微信', ['choose_account', 'scan', 'confirm_account', 'needs_reconnect']],
+    [
+      '选择 dot 与范围',
+      ['choose_member', 'waiting_member', 'waiting_project', 'route_conflict', 'confirm_binding'],
+    ],
+    ['本人验证', ['pairing', 'pairing_expired', 'confirm_owner']],
+    ['完成', ['ready', 'paused', 'disconnected', 'closed', 'cancelled']],
+  ];
+  const channelCopy = {
+    choose_account: [
+      '连接你的微信',
+      '用手机微信扫码登录，或沿用已经登记过的微信。登录只登记账号，不会自动开放权限或发送消息。',
+    ],
+    scan: ['用手机微信扫一扫', '扫码后在手机上确认登录。二维码 5 分钟内有效，本页会自动刷新状态。'],
+    confirm_account: [
+      '确认扫码的是你',
+      '核对手机返回的扫码身份。确认后加密保存这个微信的登录凭据。',
+    ],
+    needs_reconnect: [
+      '微信需要重新登录',
+      '原登录已过期或被微信拒绝。重新扫码后沿用原账号和原房间连接。',
+    ],
+    choose_member: [
+      '选择接收微信消息的 dot',
+      '房间里有多个 dot 但还没有主责。微信消息会交给这里选择的 dot 处理和回复。',
+    ],
+    waiting_member: [
+      '先为房间添加一个 dot',
+      '微信消息需要一个 dot 来接收和回复。添加并连上 dot 后回到这里继续。',
+    ],
+    waiting_project: ['先为原连接关联项目', '旧连接需要先关联一个项目才能继续。'],
+    route_conflict: ['先解除原来的微信连接', ''],
+    confirm_binding: [
+      '确认这个房间的私聊范围',
+      '允许你本人微信私聊里的消息进入这个房间；也可以选择允许你在微信里直接交办工作。',
+    ],
+    pairing: ['在微信里发送配对码', '用来证明这个私聊确实是你本人。发送后本页会自动进入下一步。'],
+    pairing_expired: ['配对码已过期', '配对码 15 分钟内有效。生成新的配对码后再发送一次。'],
+    confirm_owner: ['确认是你本人发送的', '已收到配对码。核对发送者后完成连接。'],
+    ready: ['微信已连接', ''],
+    paused: ['微信已暂停', '暂停期间不接收新的微信消息。恢复后沿用原联系人和原房间。'],
+    disconnected: ['微信已断开', '可以重新确认连接范围后再次配对。'],
+    cancelled: ['已取消连接', '可以随时重新开始。'],
+    closed: ['微信已解除', '原消息和投递回执保留在房间中。'],
+  };
+  const channelReasons = {
+    WEIXIN_QR_EXPIRED: '二维码已过期，请重新生成。',
+    WEIXIN_QR_ATTENTION: '微信没有返回可用的扫码结果，请重新生成二维码。',
+    WEIXIN_QR_CANCELLED: '上一次扫码已取消。',
+    WEIXIN_QR_RESPONSE_UNCONFIRMED: '暂时连不上微信扫码服务，请稍后重新生成二维码。',
+    WEIXIN_QR_RESPONSE_UNSUPPORTED: '微信返回了无法识别的扫码结果，请重新生成二维码。',
+    WEIXIN_CREDENTIAL_CHANGED: '微信登录凭据已变化，请重新扫码。',
+    WEIXIN_ACCOUNT_CONFLICT: '这个微信已由其他账号登记，不能在这里接入。',
+    WEIXIN_SESSION_EXPIRED: '微信登录已过期，请重新扫码。',
+    WEIXIN_AUTH_REJECTED: '微信拒绝了当前登录凭据，请重新扫码。',
+    WEIXIN_RENEWAL_BOT_MISMATCH: '扫码的不是原来的微信，请用原微信重新扫码。',
+    WEIXIN_DISABLED: '空间管理员已关闭微信接入。',
+  };
+  const quietInbound = new Set([
+    '',
+    'WEIXIN_POLL_IDLE',
+    'WEIXIN_POLL_FENCE_LOST',
+    'WEIXIN_BINDING_CHANGED',
+    'WEIXIN_POLL_CANCELLED',
+    'WEIXIN_PAIRING_EXPIRED',
+  ]);
+  const safeImage = (value) =>
+    typeof value === 'string' &&
+    value.length <= 1500000 &&
+    /^data:image\/svg\+xml;base64,[A-Za-z0-9+/]+={0,2}$/.test(value);
+  const reasonText = (code) =>
+    !code ? '' : channelReasons[code] || (/^[A-Z0-9_]+$/.test(code) ? '状态代码：' + code : code);
+  const facts = (rows) =>
+    `<dl class="cr-wx-facts">${rows
+      .filter(([, value]) => value)
+      .map(([name, value]) => `<div><dt>${E(name)}</dt><dd>${E(value)}</dd></div>`)
+      .join('')}</dl>`;
+  function channelLiveParts(box, flow) {
+    // Clock-driven text is patched in place so a poll never re-renders the
+    // form (and never clears boxes the owner has already ticked).
+    const inbound = box.querySelector('[data-cr-inbound]');
+    if (inbound) {
+      const value = flow.inbound || {};
+      const code = value.reason_code || '';
+      const problem = !quietInbound.has(code);
+      const age = value.last_sync_at
+        ? Math.max(0, Math.round(Date.now() / 1000 - Number(value.last_sync_at)))
+        : null;
+      inbound.className = 'cr-inbound ' + (problem ? 'is-problem' : age !== null ? 'is-live' : '');
+      inbound.textContent = problem
+        ? '收件通道异常：' + reasonText(code)
+        : age === null
+          ? '正在连接微信收件通道…'
+          : '收件通道正常 · ' +
+            (age < 60 ? Math.max(1, age) + ' 秒前同步' : Math.round(age / 60) + ' 分钟前同步');
+    }
+    const countdown = box.querySelector('[data-cr-countdown]');
+    if (countdown) {
+      const left = Math.max(0, Math.round(Number(countdown.dataset.until) - Date.now() / 1000));
+      countdown.textContent = left
+        ? String(Math.floor(left / 60)).padStart(2, '0') + ':' + String(left % 60).padStart(2, '0')
+        : '已到期';
+    }
+  }
   function renderChannel(result) {
     if (!panel || !root) return;
     const flow = result.flow || result;
@@ -2085,90 +2369,168 @@ window.CodePierCollaboration = (() => {
       fields = next.form_fields || [];
     const action = next.body?.action || flow.primary_action;
     const allowedActions = flow.allowed_actions || (flow.actions || []).map((item) => item.action);
+    const writable = activeRoom();
+    const stage = flow.stage;
     const accounts =
-      activeRoom() && flow.stage === 'choose_account' && allowedActions.includes('select_account')
+      writable && stage === 'choose_account' && allowedActions.includes('select_account')
         ? flow.accounts || []
         : [];
-    const qr = flow.qr?.qrcode_image;
-    const safeQr =
-      typeof qr === 'string' &&
-      qr.length <= 1500000 &&
-      /^data:image\/svg\+xml;base64,[A-Za-z0-9+/]+={0,2}$/.test(qr);
     const label =
       flow.actions?.find((item) => item.action === action)?.label || actionLabel(action);
+    const current = channelSteps.findIndex(([, stages]) => stages.includes(stage));
+    const existing = flow.existing_binding;
+    const [heading, copy] = channelCopy[stage] || [flow.display?.title || title(flow), ''];
+    const lead =
+      stage === 'route_conflict' && existing
+        ? existing.same_room
+          ? `这个房间还保留着一条${existing.legacy ? '旧版' : ''}微信连接（${existing.state === 'paused' ? '已暂停' : '仍在使用'}）。解除后才能绑定新的连接；原消息和投递回执会保留。`
+          : `这个微信目前连接在「${existing.room_title ? roomName({ title: existing.room_title }) : '另一个房间'}」。一个私聊只能连接一个房间，确认后新消息进入当前房间，原房间的历史保留。`
+        : stage === 'ready'
+          ? flow.work_authorized
+            ? '已允许本人交办工作：你在微信里提出的明确请求，会在批准范围内自动转成工作。'
+            : '已连接房间聊天：微信私聊的消息会进入这个房间，dot 的回复会发回私聊。'
+          : copy;
+    const reason = reasonText(flow.reason_code || flow.display?.reason);
     const parts = [
-      `<div class="cr-flow-state"><span class="cr-flow-symbol ${flow.stage === 'ready' ? 'is-ready' : ''}" aria-hidden="true">${flow.stage === 'ready' ? '✓' : icon('message')}</span><h3>${E(flow.display?.title || title(flow))}</h3><p>${E(flow.display?.reason || flow.message || '')}</p></div>`,
-      `<ol class="cr-channel-steps" aria-label="连接微信进度"><li class="${['choose_account', 'scan', 'confirm_account'].includes(flow.stage) ? 'is-current' : ''}">扫码</li><li class="${['confirm_binding', 'pairing', 'pairing_expired'].includes(flow.stage) ? 'is-current' : ''}">确认本人</li><li class="${['confirm_owner', 'ready'].includes(flow.stage) ? 'is-current' : ''}">完成连接</li></ol>`,
+      `<ol class="cr-steps" aria-label="连接微信进度">${channelSteps
+        .map(
+          ([name], index) =>
+            `<li class="${index < current || (index === current && stage === 'ready') ? 'is-done' : index === current ? 'is-current' : ''}" ${index === current ? 'aria-current="step"' : ''}><span>${index < current || stage === 'ready' ? '✓' : index + 1}</span>${E(name)}</li>`,
+        )
+        .join('')}</ol>`,
+      `<div class="cr-wx-head ${stage === 'ready' ? 'is-ready' : ''}"><span class="cr-flow-symbol ${stage === 'ready' ? 'is-ready' : ''}" aria-hidden="true">${stage === 'ready' ? '✓' : icon('message')}</span><div><h3>${E(heading)}</h3>${lead ? `<p>${E(lead)}</p>` : ''}</div></div>`,
     ];
-    if (!activeRoom())
+    if (reason && !['ready', 'pairing'].includes(stage))
+      parts.push(`<p class="cr-warning" role="status">${E(reason)}</p>`);
+    if (!writable)
       parts.push(`<p class="cr-info">${E(readOnlyReason())} 此处仅保留安全暂停或撤销操作。</p>`);
     if (accounts.length)
       parts.push(
-        `<section class="cr-channel-existing">${field('已连接的微信', `<select name="existing_account_id"><option value="">选择账号</option>${accounts.map((account) => `<option value="${E(account.id)}">${E(account.label || account.bot_id)}</option>`).join('')}</select>`)}${btn('channel-existing', '使用此账号', '', 'cr-full')}</section>`,
+        `<section class="cr-wx-option cr-channel-existing"><h4>沿用已登记的微信</h4>${field('已连接的微信', `<select name="existing_account_id"><option value="">选择账号</option>${accounts.map((account) => `<option value="${E(account.id)}">${E(account.label || account.bot_id)}</option>`).join('')}</select>`)}${btn('channel-existing', '使用此账号', '', 'cr-full')}</section><p class="cr-or"><span>或者扫码登录新的微信</span></p>`,
       );
     parts.push(inboundHealthMarkup(flow.account ? [flow.account] : accounts));
-    if (flow.account_connected) parts.push(uploadEstimateMarkup(flow.upload_estimate));
-    if (safeQr)
+    const qr = flow.qr || {};
+    if (safeImage(qr.qrcode_image))
       parts.push(
-        `<img class="cr-qr" src="${E(qr)}" alt="用微信扫描二维码登录" referrerpolicy="no-referrer">`,
+        `<figure class="cr-qr-frame"><img class="cr-qr" src="${E(qr.qrcode_image)}" alt="用微信扫描二维码登录" referrerpolicy="no-referrer"><figcaption>${qr.state === 'scaned' ? '已扫码，请在手机上点“确认登录”' : qr.state === 'need_verifycode' ? '请在下方输入手机上显示的数字' : '打开手机微信 → 右上角 ＋ → 扫一扫'}</figcaption></figure>`,
       );
-    if (flow.qr?.scanner_id)
-      parts.push(`<div class="cr-info">扫码身份：${E(flow.qr.scanner_id)}</div>`);
-    if (flow.binding?.pairing_challenge)
+    if (stage === 'confirm_account')
       parts.push(
-        `<div class="cr-info"><strong>在这个微信私聊发送</strong><p class="cr-pairing-code">${E(flow.binding.pairing_challenge)}</p><p>收到后会自动进入本人确认。</p></div>`,
+        facts([
+          ['扫码身份', qr.scanner_id],
+          ['已登记账号', qr.existing_account?.label],
+        ]) +
+          (qr.re_pair_required
+            ? '<p class="cr-info">这个微信之前登记过。确认后沿用原账号；它在其他房间的连接需要重新确认。</p>'
+            : ''),
       );
-    if (flow.existing_binding)
+    if (stage === 'route_conflict' && existing)
       parts.push(
-        `<div class="cr-info">此微信已有房间绑定。确认迁移后，新消息进入当前房间；原工作与回复保留在原处。</div>`,
+        facts([
+          ['原连接', identifier(existing.id)],
+          [
+            '所在房间',
+            existing.same_room
+              ? '当前房间'
+              : roomName({ title: existing.room_title }) || '另一个房间',
+          ],
+          [
+            '状态',
+            { paused: '已暂停', active: '使用中', pairing: '等待配对', awaiting_owner: '等待确认' }[
+              existing.state
+            ] || existing.state,
+          ],
+        ]),
       );
+    if (['confirm_binding', 'choose_member'].includes(stage))
+      parts.push(
+        facts([
+          ['房间', roomName(state.room)],
+          ['接收消息的 dot', flow.member?.name],
+          ['微信', flow.account?.label || flow.account?.bot_id],
+        ]),
+      );
+    if (stage === 'waiting_member' && writable)
+      parts.push(btn('add-member', '添加 dot', '', 'cr-primary cr-full'));
+    const binding = flow.binding || {};
+    if (binding.pairing_challenge) {
+      parts.push(
+        `<section class="cr-pair" aria-label="配对码"><div class="cr-pair-code"><code class="cr-pairing-code">${E(binding.pairing_challenge)}</code>${btn('copy-pairing', '复制', 'aria-label="复制配对码"', 'cr-copy')}</div>${safeImage(binding.pairing_qr) ? `<figure class="cr-pair-qr"><img src="${E(binding.pairing_qr)}" alt="配对码二维码：用手机扫码后可直接复制" referrerpolicy="no-referrer"><figcaption>手机扫一扫，可直接复制配对码</figcaption></figure>` : ''}<ol class="cr-pair-steps"><li>在手机微信里打开与这个微信机器人的私聊。</li><li>把配对码原样发过去（大小写、空格都没关系）。</li><li>收到后这里会自动进入下一步。</li></ol><p class="cr-muted">剩余有效时间 <span data-cr-countdown data-until="${E(binding.pairing_until || 0)}"></span></p></section>`,
+      );
+      if (flow.pairing_feedback)
+        parts.push(
+          `<p class="cr-warning" role="status">${flow.pairing_feedback.state === 'different_peer' ? '收到的配对码来自另一位联系人。恢复连接必须由原联系人发送。' : '收到了一条微信消息，但不是当前配对码。请复制完整的配对码再发一次。'}</p>`,
+        );
+    }
+    if (stage === 'confirm_owner')
+      parts.push(
+        facts([
+          ['发送配对码的联系人', binding.pending_peer_id],
+          ['房间', roomName(state.room)],
+        ]),
+      );
+    if (['pairing', 'confirm_owner', 'ready', 'confirm_binding'].includes(stage) && flow.inbound)
+      parts.push('<p class="cr-inbound" data-cr-inbound></p>');
+    if (stage === 'ready')
+      parts.push(
+        facts([
+          ['微信', flow.account?.label || flow.account?.bot_id],
+          ['房间', roomName(state.room)],
+          ['范围', flow.work_authorized ? '已允许本人交办工作' : '已连接房间聊天'],
+        ]),
+      );
+    if (flow.account_connected && stage === 'ready')
+      parts.push(uploadEstimateMarkup(flow.upload_estimate));
     if (flow.task_scope) {
       const preview = flow.task_scope;
       const projects =
         preview.projects || preview.project_scopes || (preview.project_id ? [preview] : []);
       parts.push(
-        `<details class="cr-diagnostics" open><summary>允许工作的范围</summary><p>${E(preview.summary || preview.intent || '按以下已批准项目参与协作')}</p><ul>${projects.map((project) => `<li>${E(project.project_label || project.alias || S.projects.find((item) => item.id === project.project_id)?.alias || project.project_id || project)}${project.capabilities ? ' · ' + E(project.capabilities.map((cap) => ({ read: '读取', write: '修改', execute: '执行' })[cap] || cap).join('、')) : ''}${project.execution_targets?.length ? '<br>执行位置：' + E(project.execution_targets.map((target) => (target === 'project_agent' ? '项目 Agent' : target)).join('、')) : ''}</li>`).join('')}</ul>${preview.max_delegations !== undefined ? `<p>累计工作额度：${E(preview.max_delegations)}</p>` : ''}<p>${E(preview.result_destination || '结果回复到原私聊及当前房间')}</p></details>`,
+        `<details class="cr-diagnostics" ${stage === 'ready' ? '' : 'open'}><summary>允许工作的范围</summary><p>${E(preview.summary || preview.intent || '按以下已批准项目参与协作')}</p><ul>${projects.map((project) => `<li>${E(project.project_label || project.alias || S.projects.find((item) => item.id === project.project_id)?.alias || project.project_id || project)}${project.capabilities ? ' · ' + E(project.capabilities.map((cap) => ({ read: '读取', write: '修改', execute: '执行' })[cap] || cap).join('、')) : ''}${project.execution_targets?.length ? '<br>执行位置：' + E(project.execution_targets.map((target) => (target === 'project_agent' ? '项目 Agent' : target)).join('、')) : ''}</li>`).join('')}</ul>${preview.max_delegations !== undefined ? `<p>累计工作额度：${E(preview.max_delegations)}</p>` : ''}<p>${E(preview.result_destination || '结果回复到原私聊及当前房间')}</p></details>`,
       );
     }
-    if (flow.stage === 'ready')
-      parts.push(
-        `<p class="cr-info">${E(flow.account?.label || '微信')} · ${E(state.room?.title || '')}<br>${flow.work_authorized ? '已允许本人交办工作' : '已连接房间聊天'}</p>`,
-      );
     if ((flow.actions || []).some((item) => item.action === 'revoke_tasks'))
       parts.push(
-        '<p class="cr-info">可以仅撤销这个微信的工作许可，保留聊天连接。新的微信任务与后续步骤会停止准入；已启动操作继续核对原回执。</p>',
+        '<p class="cr-muted">可以仅撤销这个微信的工作许可，保留聊天连接。新的微信任务与后续步骤会停止准入；已启动操作继续核对原回执。</p>',
       );
-    if (
+    const showForm =
       action &&
-      (activeRoom() || safeChannelActions.has(action)) &&
-      (flow.stage !== 'ready' || !['refresh', ''].includes(action))
-    )
-      parts.push(
-        `<form data-cr-form="weixin" data-channel-action="${E(action)}">${fields.map(channelField).join('')}${flow.qr?.re_pair_required && action === 'accept_account' ? channelField({ name: 'confirm_replace_existing', type: 'checkbox', required: true, label: '确认替换此账号的原连接' }) : ''}${flow.stage === 'confirm_owner' ? `<div class="cr-info"><strong>${E(state.room?.title)}</strong><p>微信联系人：${E(flow.binding?.pending_peer_id || '')}</p></div>` : ''}<button type="submit" class="cr-button cr-primary cr-full">${E(label)}</button></form>`,
+      (writable || safeChannelActions.has(action)) &&
+      (stage !== 'ready' || !['refresh', ''].includes(action));
+    if (showForm) {
+      const optional = fields.filter(
+        (item) => item.depends_on || (item.name || item.key) === 'allow_owner_tasks',
       );
+      const basic = fields.filter((item) => !optional.includes(item));
+      const quiet =
+        ['pairing', 'waiting_member', 'waiting_project'].includes(stage) && action === 'refresh';
+      parts.push(
+        `<form data-cr-form="weixin" data-channel-action="${E(action)}" class="cr-wx-form">${basic.map(channelField).join('')}${optional.length ? `<fieldset class="cr-wx-optional"><legend>可选：在微信里交办工作</legend>${optional.map(channelField).join('')}</fieldset>` : ''}<button type="submit" class="cr-button ${quiet ? '' : 'cr-primary'} cr-full">${E(quiet ? (stage === 'pairing' ? '我已发送，检查状态' : '刷新状态') : label)}</button></form>`,
+      );
+    }
     const secondary = (flow.actions || []).filter(
-      (item) => item.action !== action && (activeRoom() || safeChannelActions.has(item.action)),
+      (item) => item.action !== action && (writable || safeChannelActions.has(item.action)),
     );
     if (secondary.length)
       parts.push(
-        `<div class="cr-setting-actions">${secondary.map((item) => btn('channel-action', E(item.action === 'revoke_tasks' ? '仅撤销工作许可' : item.label), `data-channel-action="${E(item.action)}"`, ['disconnect', 'revoke_tasks'].includes(item.action) ? 'cr-danger' : '')).join('')}</div>`,
+        `<div class="cr-setting-actions cr-wx-secondary">${secondary.map((item) => btn('channel-action', E(item.action === 'revoke_tasks' ? '仅撤销工作许可' : item.label), `data-channel-action="${E(item.action)}"`, ['disconnect', 'revoke_tasks'].includes(item.action) ? 'cr-danger' : 'cr-text-button')).join('')}</div>`,
       );
     const markup = parts.join('');
     const consentRevision = JSON.stringify([
-      activeRoom(),
+      writable,
       flow.id,
       flow.version,
       flow.account?.id,
       flow.account?.credential_version,
-      flow.binding?.id,
-      flow.binding?.version,
-      flow.binding?.generation,
-      flow.binding?.pending_peer_id,
+      binding.id,
+      binding.version,
+      binding.generation,
+      binding.pending_peer_id,
       flow.task_scope?.scope_digest,
-      flow.qr?.scanner_id,
-      flow.qr?.re_pair_required,
-      flow.existing_binding?.id,
-      flow.existing_binding?.version,
+      qr.scanner_id,
+      qr.re_pair_required,
+      existing?.id,
+      existing?.version,
     ]);
     const changedConsent = box._consentRevision && box._consentRevision !== consentRevision;
     const checkedBeforeChange =
@@ -2178,6 +2540,7 @@ window.CodePierCollaboration = (() => {
       box._markup = markup;
     }
     box._consentRevision = consentRevision;
+    channelLiveParts(box, flow);
     if (checkedBeforeChange) panelError('连接身份或参与范围已变化，请核对后重新确认。');
     updateChannelDependencies();
     patchRoomPermissions();
@@ -2197,6 +2560,10 @@ window.CodePierCollaboration = (() => {
     const name = item.name || item.key,
       label = item.label || name;
     if (!name) return '';
+    // Identity confirmations carry the exact value the server showed above;
+    // they are confirmed by submitting, not retyped.
+    if (['confirm_scanner_id', 'confirm_peer_id', 'confirm_migrate_binding_id'].includes(name))
+      return `<input type="hidden" name="${E(name)}" value="${E(item.value || '')}">`;
     if (item.options)
       return field(
         E(label),
@@ -2206,7 +2573,7 @@ window.CodePierCollaboration = (() => {
       return `<label class="cr-choice"><input type="checkbox" name="${E(name)}" ${item.required ? 'required' : ''} ${item.depends_on ? `data-depends-on="${E(item.depends_on)}"` : ''}><span>${E(label)}</span></label>`;
     return field(
       E(label),
-      `<input name="${E(name)}" value="${E(item.value || '')}" ${item.required ? 'required' : ''} autocomplete="off">`,
+      `<input name="${E(name)}" value="${E(item.value || '')}" ${item.required ? 'required' : ''} autocomplete="off" ${name === 'verify_code' ? 'inputmode="numeric"' : ''}>`,
     );
   }
   async function submitChannel(form) {
@@ -2257,7 +2624,12 @@ window.CodePierCollaboration = (() => {
             idempotency_key: flow.id + ':poll:' + flow.version,
           },
           current,
-        );
+          { transient: true },
+        ).catch(() => {
+          // A failed background poll is retried by the next tick; it is not a
+          // pending user action and must not block the wizard.
+          return null;
+        });
         if (response && current === panel) renderChannel(response);
       }
     }
@@ -2315,9 +2687,10 @@ window.CodePierCollaboration = (() => {
     else if (action === 'rooms') {
       const visible = root.classList.toggle('cr-show-rooms');
       button.setAttribute('aria-expanded', String(visible));
-    } else if (action === 'migration') migrationPanel();
+    } else if (action === 'open-member') await memberPanel(id);
+    else if (action === 'migration') migrationPanel();
     else if (action === 'refresh-migration') await store.refresh();
-    else if (action === 'legacy-channel-pause') {
+    else if (action === 'legacy-channel-pause' || action === 'inline-channel-pause') {
       const blocker = state.room?.migration?.blockers.find((item) => item.binding_id === id);
       const remediation = blocker && legacyChannelRemediation(blocker);
       if (!remediation) {
@@ -2348,7 +2721,21 @@ window.CodePierCollaboration = (() => {
     else if (action === 'close') closePanel();
     else if (action === 'settings') settingsPanel();
     else if (action === 'weixin') await weixinPanel();
-    else if (action === 'channel-existing') {
+    else if (action === 'copy-pairing') {
+      const code = panel?.channel?.binding?.pairing_challenge;
+      if (!code) return;
+      try {
+        await navigator.clipboard.writeText(code);
+        button.textContent = '已复制';
+        setTimeout(() => {
+          if (button.isConnected) button.textContent = '复制';
+        }, 1600);
+      } catch {
+        const node = root.querySelector('.cr-pairing-code');
+        if (node) window.getSelection()?.selectAllChildren(node);
+        panelError('浏览器不允许写入剪贴板，已选中配对码，请按 ⌘C / Ctrl+C 复制。');
+      }
+    } else if (action === 'channel-existing') {
       const account = root.querySelector('[name="existing_account_id"]')?.value;
       if (!account) {
         panelError('请选择微信账号。');
@@ -2823,6 +3210,14 @@ window.CodePierCollaboration = (() => {
       },
       { signal },
     );
+    root.querySelector('[data-cr-room-filter]')?.addEventListener(
+      'input',
+      (event) => {
+        roomFilter = event.target.value;
+        patchRooms();
+      },
+      { signal },
+    );
     editor.addEventListener(
       'compositionstart',
       () => {
@@ -2886,7 +3281,8 @@ window.CodePierCollaboration = (() => {
             name.value = source.name;
           panel.lastSourceName = source?.name || '';
         }
-        if (event.target.name === 'member_id') store.draft().member = event.target.value;
+        if (event.target.name === 'member_id' && event.target.closest('#cr-composer'))
+          store.draft().member = event.target.value;
         if (event.target.name === 'allow_owner_tasks') updateChannelDependencies();
         if (event.target.name === 'capability') {
           const group = event.target.closest('[data-project-id]');
@@ -2952,7 +3348,7 @@ window.CodePierCollaboration = (() => {
     return navigate('collaboration');
   }
   window.addEventListener('pagehide', () => {
-    if (S.page === 'collaboration') {
+    if (typeof S !== 'undefined' && S.page === 'collaboration') {
       suspended = true;
       detach();
     }

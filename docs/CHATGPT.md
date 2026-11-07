@@ -26,7 +26,15 @@ Claude 的托管连接器使用同一个公开 MCP URL。选择 OAuth 的“自�
 
 源码、Compose、k3s 和环境示例的默认回调主机包含 `claude.ai`，但已有安装显式配置的 `OAUTH_REDIRECT_HOSTS` 不会被覆盖。运维应先核对实际 Hub 的有效配置；如需支持 Claude，经所有者批准后保留已有允许主机并加入精确的 `claude.ai`，按部署流程生效后再重新连接。不要使用通配符、关闭鉴权或放行任意 HTTPS 回调。默认值更新不是已修改生产配置的证据。
 
-DCR 只登记客户端身份，不授予项目或工具权限；登录后的明确同意、PKCE、HTTPS 和精确回调地址匹配仍然生效。合成测试不能替代真实 Claude 的登录与只读调用验收。
+### Grok 托管连接器
+
+在 Grok 的 Connectors 中选择 New Connector → Custom，填写同一个公开 MCP URL，并完成 OAuth 登录授权。参见 [Grok 官方连接器说明](https://docs.x.ai/grok/connectors)。服务必须能从公网访问。
+
+CodePier 默认允许精确 HTTPS 回调主机 `grok.com`，支持公共客户端 DCR 和 S256 PKCE；例如 `https://grok.com/connectors-oauth-exchange-code/`。完整回调 URI 在注册、授权和换取令牌时必须一致，包含末尾斜线。不要填写 CodePier PAT 或管理员密码作为客户端密钥。
+
+如果注册返回 `INVALID_REDIRECT`，先检查运行中 Hub 和更新器持久配置的 `OAUTH_REDIRECT_HOSTS`。已有自定义列表需由管理员保留原值并追加 `grok.com`，重建 Hub 后重新连接；不放行子域名、通配符或非本机 HTTP。仅注册和跳转成功不代表已完成 Grok 端登录、授权和工具发现。
+
+DCR 只登记客户端身份，不授予项目或工具权限；登录后的明确同意、PKCE、HTTPS 和精确回调地址匹配仍然生效。合成测试不能替代真实 Claude / Grok 的登录与只读调用验收。
 
 ## 路线 B：官方 Tunnel 与本地 stdio 桥接器
 
@@ -101,6 +109,6 @@ stdio 桥接器为所有请求使用同一个 PAT，并移除客户端 OAuth 元
 
 收到 pending、queued 或 reconnecting 后继续查询原 operation_id；响应丢失按原幂等键查找。工具调用超时不能证明远端没有执行，不要生成新键盲目重做。更多恢复步骤见 [FAQ](FAQ.md) 和 [长操作](LONG_OPERATIONS.md)。
 
-### 旧版 Claude 回调允许列表
+### 旧版 OAuth 回调允许列表
 
-2026-09-20 至 2026-11-04 期间安装的部署可能在 `.env` 显式保存了不含 `claude.ai` 的历史默认 `OAUTH_REDIRECT_HOSTS`。更新器和重新运行安装脚本只迁移完全一致的旧默认值，保留自定义列表；更新详情会记录 `oauth_redirect_hosts_migrated`。自定义策略仍需管理员自行确认加入 `claude.ai` 并重建 Hub。k3s 需重新应用 ConfigMap 并重启 Deployment。Claude Code 的回环回调不受此项影响。
+旧部署可能在 `.env` 显式保存了不含 `claude.ai` 或 `grok.com` 的历史默认 `OAUTH_REDIRECT_HOSTS`。更新器和重新运行安装脚本只迁移完全一致的两版旧默认值（OpenAI-only、OpenAI + Claude），保留自定义列表；更新详情会记录 `oauth_redirect_hosts_migrated`。自定义策略仍需管理员自行确认加入所需的 `claude.ai` / `grok.com` 并重建 Hub。k3s 需重新应用 ConfigMap 并重启 Deployment。Claude Code 的回环回调不受此项影响。

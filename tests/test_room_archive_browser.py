@@ -1,4 +1,8 @@
 """Recoverable room deletion in real browsers and disposable Hub fixtures."""
+from contextlib import contextmanager
+import json
+from urllib.parse import parse_qs, urlsplit
+
 import pytest
 from playwright.sync_api import Error as PlaywrightError, expect
 from shared.audit_redaction import redact_text
@@ -7,6 +11,96 @@ from tests.test_collaboration_chatroom_browser import login, overview, click_roo
 from tests.test_collaboration_dots_flow import create_dot, join_dot
 from tests.test_room_projects_browser import evidence_sizes, manage_from_connections, project_checkbox, save
 pytestmark = [pytest.mark.browser, pytest.mark.integration, pytest.mark.slow]
+
+
+@contextmanager
+def _archive_project_setup_diagnostics(page):
+    """Keep bounded control/network evidence if the unchanged setup fails."""
+    network = []
+
+    def record_response(response):
+        url = urlsplit(response.url)
+        if not url.path.startswith('/api/collaboration'):
+            return
+        network.append({'event': 'response', 'path': url.path,
+                        'kind': parse_qs(url.query).get('kind', [''])[0],
+                        'status': response.status})
+        del network[:-40]
+
+    def record_failure(request):
+        url = urlsplit(request.url)
+        if not url.path.startswith('/api/collaboration'):
+            return
+        network.append({'event': 'requestfailed', 'path': url.path,
+                        'kind': parse_qs(url.query).get('kind', [''])[0],
+                        'failure': request.failure})
+        del network[:-40]
+
+    page.on('response', record_response)
+    page.on('requestfailed', record_failure)
+    page.evaluate("""() => {
+      const events = [];
+      const snapshot = () => {
+        const root = document.querySelector('.collaboration');
+        const manager = document.querySelector(
+          '.cc-channel-project-entry [data-cc-action="manage-projects"]');
+        const drawer = document.querySelector('#cc-drawer');
+        return {
+          page: S.page, renderSequence: S.renderSeq,
+          rootPresent: !!root, rootInert: root?.inert, rootBusy: root?.getAttribute('aria-busy'),
+          view: root?.dataset.workspaceView, managerPresent: !!manager,
+          managerDisabled: manager?.disabled, managerAriaDisabled: manager?.getAttribute('aria-disabled'),
+          drawerPresent: !!drawer, drawerOpen: drawer?.open,
+          projectFormPresent: !!document.querySelector('#cc-room-projects'),
+          projectCheckboxCount: document.querySelectorAll('#cc-room-projects [name="room_projects"]').length
+        };
+      };
+      const record = (phase, action = '') => {
+        events.push({phase, action, ...snapshot()});
+        if (events.length > 40) events.shift();
+      };
+      const clicked = event => {
+        const control = event.target.closest(
+          '.cc-channel-project-entry [data-cc-action="manage-projects"], [data-cc-view="agents"]');
+        if (control) record(event.type, control.dataset.ccAction || control.dataset.ccView);
+      };
+      for (const type of ['pointerdown', 'pointerup', 'click'])
+        document.addEventListener(type, clicked, true);
+      const observer = new MutationObserver(() => record('drawer-change'));
+      const drawer = document.querySelector('#cc-drawer');
+      if (drawer) observer.observe(drawer, {attributes: true, attributeFilter: ['open'], childList: true});
+      record('setup-start');
+      window.__archiveProjectSetupEvidence = {events, snapshot, stop: () => {
+        observer.disconnect();
+        for (const type of ['pointerdown', 'pointerup', 'click'])
+          document.removeEventListener(type, clicked, true);
+      }};
+    }""")
+    try:
+        yield
+    except Exception:
+        try:
+            controls = page.evaluate("""() => ({
+              events: window.__archiveProjectSetupEvidence.events,
+              current: window.__archiveProjectSetupEvidence.snapshot()
+            })""")
+        except Exception as error:
+            controls = {'diagnostic_error': type(error).__name__}
+        print('Archive project setup evidence: ' +
+              json.dumps({'controls': controls, 'network': network}, ensure_ascii=False))
+        raise
+    finally:
+        page.remove_listener('response', record_response)
+        page.remove_listener('requestfailed', record_failure)
+        if not page.is_closed():
+            try:
+                page.evaluate("""() => {
+                  window.__archiveProjectSetupEvidence?.stop();
+                  delete window.__archiveProjectSetupEvidence;
+                }""")
+            except Exception:
+                # Diagnostic teardown must not replace the original test result.
+                pass
 
 
 def archive_preview(page):
@@ -284,7 +378,8 @@ def test_restore_uses_only_visible_history_project_for_navigation(
         page.reload()
         expect(page.locator('#cc-message-input')).to_be_enabled()
         expect(page.locator('.cc-member-strip')).to_contain_text('1 个助手')
-        form = manage_from_connections(page)
+        with _archive_project_setup_diagnostics(page):
+            form = manage_from_connections(page)
         try:
             project_checkbox(form, other).check()
         except PlaywrightError as error:

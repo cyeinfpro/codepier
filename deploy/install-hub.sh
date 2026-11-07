@@ -88,10 +88,13 @@ fi
 from pathlib import Path
 import os, re, tempfile
 path = Path('.env')
-old = 'chatgpt.com,chat.openai.com,platform.openai.com,localhost,127.0.0.1,::1'
-new = 'chatgpt.com,chat.openai.com,platform.openai.com,claude.ai,localhost,127.0.0.1,::1'
+old = (
+    'chatgpt.com,chat.openai.com,platform.openai.com,localhost,127.0.0.1,::1',
+    'chatgpt.com,chat.openai.com,platform.openai.com,claude.ai,localhost,127.0.0.1,::1',
+)
+new = 'chatgpt.com,chat.openai.com,platform.openai.com,claude.ai,grok.com,localhost,127.0.0.1,::1'
 content = path.read_bytes()
-pattern = rb"(?m)^(OAUTH_REDIRECT_HOSTS=)([\"']?)" + re.escape(old.encode()) + rb"\2(\r?\n|$)"
+pattern = rb"(?m)^(OAUTH_REDIRECT_HOSTS=)([\"']?)" + rb'(?:' + b'|'.join(re.escape(value.encode()) for value in old) + rb')' + rb"\2(\r?\n|$)"
 updated = re.sub(pattern, lambda m: m[1] + m[2] + new.encode() + m[2] + m[3], content)
 if updated != content:
     fd, temporary = tempfile.mkstemp(prefix='.env.tmp.', dir='.')
@@ -105,7 +108,7 @@ if updated != content:
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
-    print('已为 Claude 回调补充 OAuth 允许主机 claude.ai')
+    print('已为 Claude / Grok 回调更新 OAuth 默认允许主机 claude.ai、grok.com')
 PYOAUTH
 [[ ! -L "$root/.codepier-updater" && ! -L "$root/.codepier-updater/run" ]] || { echo "更新服务目录不能是符号链接" >&2; exit 1; }
 mkdir -p "$root/.codepier-updater/run"

@@ -445,7 +445,8 @@ class WeixinService:
             disposition = 'group_or_echo_quarantined'
         elif binding['state'] == 'pairing' and binding['pairing_until'] > self.c.clock():
             body = '\n'.join(incoming_text(i.get('text_item', {}).get('text'), 12000, empty=True) for i in items if isinstance(i, dict) and i.get('type') == 1)
-            matched = hmac.compare_digest(digest(body.strip()), binding['pairing_hash'])
+            from hub.collaboration.room_weixin_native import pairing_text
+            matched = hmac.compare_digest(digest(pairing_text(body)), binding['pairing_hash'])
             preapproval = self.c.channel_enrollment.current(binding['id'])
             fresh = (not old and not int(deleted) and not int(updated)
                      and (not created or not preapproval or int(created) >= int(preapproval['created'] * 1000)))

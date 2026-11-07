@@ -223,6 +223,7 @@ class Runtime:
                     (getattr(connection, "device_secret", None) is None or connection.device_secret == device["secret"]))
 
     def _detach_fence(self, device_id, connection):
+        self.native.detach(connection)
         # Production attach/detach runs on the owning event loop. Keep this
         # identity check and removal synchronous: an old socket must never
         # remove the authenticated replacement while awaiting its cleanup.
@@ -1921,6 +1922,7 @@ class Runtime:
         for id in self.operation_waiters:
             self.notify_operation(id)
         self.artifacts.close()
+        await self.native.close()
         self.wake_delivery()
         if self.worker:
             self.worker.cancel()

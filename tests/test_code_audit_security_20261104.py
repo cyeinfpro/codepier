@@ -11,7 +11,7 @@ from hub.store import Store
 from hub.store_contract import TransactionAborted
 from shared.crypto import password_hash, password_verify, password_needs_rehash
 from shared.util import DevError
-from scripts.panel_update_runtime import (DockerRuntime, OAUTH_OLD_DEFAULT,
+from scripts.panel_update_runtime import (DockerRuntime, OAUTH_LEGACY_DEFAULTS,
     OAUTH_CURRENT_DEFAULT, migrate_oauth_redirect_hosts, atomic_json, fingerprint, read_json)
 from tests.test_bug_report_auth_20261020 import request
 from tests.test_panel_update_runtime import deployment, DockerBoundary
@@ -114,26 +114,28 @@ def test_caught_nested_failure_keeps_outer_rollback_only(tmp_path):
         store.close()
 
 
+@pytest.mark.parametrize('legacy', OAUTH_LEGACY_DEFAULTS)
 @pytest.mark.parametrize('quote', ['', '"', "'"])
 @pytest.mark.parametrize('newline', ['', '\n', '\r\n'])
-def test_oauth_migration_preserves_quote_and_newline(quote, newline):
-    before = f'OAUTH_REDIRECT_HOSTS={quote}{OAUTH_OLD_DEFAULT}{quote}{newline}'.encode()
+def test_oauth_migration_preserves_quote_and_newline(quote, newline, legacy):
+    before = f'OAUTH_REDIRECT_HOSTS={quote}{legacy}{quote}{newline}'.encode()
     after, changed = migrate_oauth_redirect_hosts(before)
-    assert changed and after == before.replace(OAUTH_OLD_DEFAULT.encode(), OAUTH_CURRENT_DEFAULT.encode())
+    assert changed and after == before.replace(legacy.encode(), OAUTH_CURRENT_DEFAULT.encode())
     assert migrate_oauth_redirect_hosts(after) == (after, False)
 
 
-@pytest.mark.parametrize('value', ['custom.example', OAUTH_CURRENT_DEFAULT, OAUTH_OLD_DEFAULT + ',custom.example'])
+@pytest.mark.parametrize('value', ['custom.example', OAUTH_CURRENT_DEFAULT, *[value + ',custom.example' for value in OAUTH_LEGACY_DEFAULTS]])
 def test_oauth_migration_preserves_custom_policy(value):
     before = f'# preserve\nOAUTH_REDIRECT_HOSTS={value}\nSECRET=unchanged\n'.encode()
     assert migrate_oauth_redirect_hosts(before) == (before, False)
     assert migrate_oauth_redirect_hosts(b'SECRET=unchanged\n') == (b'SECRET=unchanged\n', False)
 
 
-def test_oauth_migration_updates_frozen_target_not_rollback(tmp_path):
+@pytest.mark.parametrize('legacy', OAUTH_LEGACY_DEFAULTS)
+def test_oauth_migration_updates_frozen_target_not_rollback(tmp_path, legacy):
     home, config, job, spec = deployment(tmp_path)
-    spec['services']['hub']['environment']['OAUTH_REDIRECT_HOSTS'] = OAUTH_OLD_DEFAULT
-    before = f'OAUTH_REDIRECT_HOSTS={OAUTH_OLD_DEFAULT}\n'.encode()
+    spec['services']['hub']['environment']['OAUTH_REDIRECT_HOSTS'] = legacy
+    before = f'OAUTH_REDIRECT_HOSTS={legacy}\n'.encode()
     (tmp_path / '.env').write_bytes(before)
     current = read_json(home / 'current.json')
     current['compose'] = spec
@@ -143,7 +145,7 @@ def test_oauth_migration_updates_frozen_target_not_rollback(tmp_path):
     source = tmp_path / 'source'; source.mkdir()
     job.update(runtime.prepare(job, source))
     directory = home / 'jobs' / job['id']
-    assert read_json(directory / 'old.json')['services']['hub']['environment']['OAUTH_REDIRECT_HOSTS'] == OAUTH_OLD_DEFAULT
+    assert read_json(directory / 'old.json')['services']['hub']['environment']['OAUTH_REDIRECT_HOSTS'] == legacy
     assert read_json(directory / 'target.json')['services']['hub']['environment']['OAUTH_REDIRECT_HOSTS'] == OAUTH_CURRENT_DEFAULT
     assert (directory / 'env.before').read_bytes() == before
     assert OAUTH_CURRENT_DEFAULT.encode() in runtime.committed_env(job, before)

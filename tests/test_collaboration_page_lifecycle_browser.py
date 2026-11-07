@@ -542,3 +542,174 @@ def test_pagehide_cancels_refresh_and_cached_restore_preserves_draft(
         assert errors == []
     finally:
         context.close()
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_repeated_lifecycle_does_not_replay_pending_message_or_erase_new_draft(
+        collaboration_stack, chat_browser_pool, engine):
+    stack = collaboration_stack
+    from tests.legacy_collaboration_ui import use_legacy_collaboration_ui
+    context = chat_browser_pool(engine).new_context(viewport={"width": 1440, "height": 900})
+    page = context.new_page()
+    use_legacy_collaboration_ui(page, stack)
+    errors, messages, held, response_order = [], [], [], []
+    forwarded = 0
+    page.on("pageerror", lambda error: errors.append(True))
+
+    def observe(request):
+        parsed = urlsplit(request.url)
+        if parsed.path == "/api/collaboration/message" and request.method == "POST":
+            messages.append(request)
+
+    def hold_message(route):
+        held.append(route)
+        page.locator("html").evaluate("(node) => node.dataset.lifecycleMessageHeld = 'yes'")
+
+    page.on("request", observe)
+    try:
+        page.goto(stack.url + "/#projects")
+        page.fill("#username", "admin")
+        page.fill("#password", stack.password)
+        page.click("#login-form button")
+        expect(page.locator("#page h1")).to_have_text("项目映射")
+        page.locator(f'[data-action="project-collaboration"][data-id="{stack.project["id"]}"]').click()
+        page.locator('[data-cc-action="create-room"]').click()
+        area = page.locator("#cc-message-input")
+        expect(area).to_be_enabled()
+        area.fill("生命周期切换期间只保存一次的合成消息")
+        page.route("**/api/collaboration/message", hold_message)
+        page.locator('#cc-command button[type="submit"]').click()
+        expect(page.locator("html")).to_have_attribute("data-lifecycle-message-held", "yes")
+        assert len(messages) == len(held) == 1
+        original_request = messages[0]
+        original_payload = original_request.post_data_json
+        identity_matches = (original_payload["idempotency_key"] == original_payload["client_message_id"])
+        assert identity_matches
+
+        # These are explicit handler-contract events, not proof of bfcache.
+        # Duplicate hide is harmless; ordinary pageshow must not restore an
+        # already suspended room, and duplicate cached show must not replay it.
+        page.evaluate("""() => {
+          dispatchEvent(new PageTransitionEvent('pagehide', {persisted:true}));
+          dispatchEvent(new PageTransitionEvent('pagehide', {persisted:true}));
+          dispatchEvent(new PageTransitionEvent('pageshow', {persisted:false}));
+        }""")
+        expect(page.locator(".collaboration")).to_have_attribute("aria-busy", "true")
+        page.evaluate("""() => {
+          dispatchEvent(new PageTransitionEvent('pageshow', {persisted:true}));
+          dispatchEvent(new PageTransitionEvent('pageshow', {persisted:true}));
+        }""")
+        expect(page.locator(".collaboration")).not_to_have_attribute("aria-busy", "true")
+        expect(area).to_be_enabled()
+        expect(area).to_have_value("生命周期切换期间只保存一次的合成消息")
+        area.fill("恢复之后新输入的合成草稿")
+        assert len(messages) == len(held) == 1
+        def original_ack(response):
+            if response.request != original_request:
+                return False
+            response_order.append("ack")
+            return True
+
+        def saved_projection(response):
+            parsed = urlsplit(response.url)
+            query = parse_qs(parsed.query)
+            if (response.request.method != "GET" or parsed.path != "/api/collaboration"
+                    or query.get("kind") != ["timeline"] or not response.ok
+                    or not all(query.get(name) == [original_payload[name]] for name in
+                               ("project", "environment_id", "conversation_id", "room_id"))):
+                return False
+            # The unique synthetic body is an event anchor only. Below, its ID
+            # must equal the original server/client POST receipt and durable row.
+            if not any(item.get("body_text") == original_payload["body_text"]
+                       for item in response.json()["items"]):
+                return False
+            response_order.append("projection")
+            return True
+
+        # Install both observers before the only forward. A legitimate poll can
+        # project the saved message before the browser receives the POST reply,
+        # including a GET already in flight. Never require a later empty delta
+        # to contain it again, or install an observer after pumping body events.
+        with page.expect_response(original_ack, timeout=15000) as response:
+            with page.expect_response(saved_projection, timeout=15000) as projection:
+                forwarded += 1
+                actual_response = held[0].fetch(max_redirects=0, max_retries=0, timeout=15000)
+                assert actual_response.ok
+            # Deliberately force projection-before-ack using the real response.
+            # No fabricated success, second POST, retry, or route.continue_().
+            held[0].fulfill(response=actual_response)
+        assert response_order == ["projection", "ack"]
+        assert forwarded == 1
+        assert response.value.ok
+        persisted_message_id = response.value.json()["message"]["id"]
+        same_receipt = actual_response.json()["message"]["id"] == persisted_message_id
+        assert same_receipt
+        projected = [item for item in projection.value.json()["items"]
+                     if item.get("body_text") == original_payload["body_text"]]
+        assert len(projected) == 1
+        same_projection = projected[0].get("id") == persisted_message_id
+        assert same_projection
+        page.unroute("**/api/collaboration/message", hold_message)
+        expect(page.locator(".cc-feed")).to_contain_text("生命周期切换期间只保存一次的合成消息")
+        expect(area).to_have_value("恢复之后新输入的合成草稿")
+        assert len(messages) == 1
+        # Read the durable result independently; do not issue a second POST to
+        # turn a missing response into success or simulate a mutation receipt.
+        timeline = stack.must(stack.client.get("/api/collaboration", params={
+            "project": original_payload["project"],
+            "environment_id": original_payload["environment_id"],
+            "conversation_id": original_payload["conversation_id"],
+            "room_id": original_payload["room_id"], "kind": "timeline", "limit": 100}))
+        stored = [message for message in timeline["items"]
+                  if message.get("id") == persisted_message_id]
+        assert len(stored) == 1
+        same_body = stored[0].get("body_text") == original_payload["body_text"]
+        assert same_body
+        assert sum(message.get("body_text") == original_payload["body_text"]
+                   for message in timeline["items"]) == 1
+        assert errors == []
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+@pytest.mark.parametrize("transition", ["resume", "leave"])
+def test_lifecycle_before_app_initialization_is_a_safe_noop(
+        collaboration_stack, chat_browser_pool, engine, transition):
+    stack = collaboration_stack
+    context = chat_browser_pool(engine).new_context()
+    page = context.new_page()
+    errors, held_app = [], []
+    page.on("pageerror", lambda error: errors.append(
+        "ReferenceError" if error.name == "ReferenceError" else "other"))
+
+    def hold_app(route):
+        held_app.append(route)
+
+    def app_script(url):
+        return urlsplit(url).path == "/static/app.js"
+    page.route(app_script, hold_app)
+    try:
+        # Use the real ordered entrypoint. Only app.js is withheld: the
+        # collaboration listeners exist while app.js has not declared S yet.
+        page.goto(stack.url + "/#projects", wait_until="commit")
+        page.wait_for_function("() => Boolean(window.CodePierCollaboration)", timeout=5000)
+        assert len(held_app) == 1
+        assert page.evaluate("typeof S") == "undefined"
+        if transition == "resume":
+            # Synthetic events cover handler safety/repetition, not bfcache.
+            for persisted in (False, True):
+                page.evaluate("""persisted => {
+                  dispatchEvent(new PageTransitionEvent('pagehide', {persisted}));
+                  dispatchEvent(new PageTransitionEvent('pageshow', {persisted}));
+                }""", persisted)
+            held_app[0].continue_()
+            page.unroute(app_script, hold_app)
+            expect(page.locator("#username")).to_be_visible()
+        else:
+            # This navigation exercises a genuine early document departure.
+            page.goto("about:blank")
+            assert page.url == "about:blank"
+        assert errors == []
+    finally:
+        context.close()

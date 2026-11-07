@@ -43,7 +43,7 @@ class OAuth:
         # Older databases did not persist the audience. Bind existing OAuth
         # grants once, before a later public URL change can retarget them.
         self.store.execute("UPDATE grants SET resource=? WHERE client_id IS NOT NULL AND resource IS NULL", (self.resource(),))
-        self.redirect_hosts = {host.lower() for host in env_csv("OAUTH_REDIRECT_HOSTS", "chatgpt.com,chat.openai.com,platform.openai.com,claude.ai,localhost,127.0.0.1,::1")}
+        self.redirect_hosts = {host.lower() for host in env_csv("OAUTH_REDIRECT_HOSTS", "chatgpt.com,chat.openai.com,platform.openai.com,claude.ai,grok.com,localhost,127.0.0.1,::1")}
         self.router = APIRouter()
         self.routes()
 
@@ -75,7 +75,7 @@ class OAuth:
             if u.port is not None and not 1 <= u.port <= 65535:
                 raise ValueError()
         except (ValueError, TypeError) as exc:
-            raise DevError("INVALID_REDIRECT", "回调必须是允许主机上的完整 HTTPS 地址（本机回调可用 HTTP），不可使用通配符；管理员请检查 OAUTH_REDIRECT_HOSTS（Claude 需 claude.ai），修改后重启 Hub") from exc
+            raise DevError("INVALID_REDIRECT", "回调必须是允许主机上的完整 HTTPS 地址（本机回调可用 HTTP），不可使用通配符；管理员请检查 OAUTH_REDIRECT_HOSTS（Claude 需 claude.ai，Grok 需 grok.com），修改后重启 Hub") from exc
         return value
 
     def auth_request(self, params):

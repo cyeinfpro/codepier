@@ -200,48 +200,163 @@ def approve_in_ui(page, goal_id):
         page.remove_listener('request', approval_request)
         page.remove_listener('response', approval_response)
 
+class _GoalPageDiagnostics:
+    """Observe failures without retaining URL/query/body/error text in reports."""
+
+    limit = 96
+    kinds = {'timeline', 'overview', 'members', 'delegation_policies',
+             'coordination_options', 'coordination_goals', 'coordination_goal'}
+    paths = {'/api/collaboration', '/api/collaboration/goal-create',
+             '/api/collaboration/goal-update', '/api/collaboration/goal-approve',
+             '/api/collaboration/relay-hints', '/api/collaboration/conversations',
+             '/api/collaboration/status'}
+    names = {'Error', 'TypeError', 'AbortError', 'SecurityError', 'NetworkError',
+             'ReferenceError', 'SyntaxError', 'RangeError'}
+    phases = {'setup', 'create', 'owner-consent', 'conflict', 'approve',
+              'reload', 'reloaded', 'composition', 'mobile'}
+    script = """(() => {
+      const callbacks = [];
+      const names = ['Error', 'TypeError', 'AbortError', 'SecurityError', 'NetworkError',
+                     'ReferenceError', 'SyntaxError', 'RangeError'];
+      const emit = (event, reason) => { try { console.debug('GOAL_DIAGNOSTIC ' + JSON.stringify({
+        event, document: performance.timeOrigin,
+        name: names.includes(reason?.name) ? reason.name : 'other',
+        access_check: String(reason || '').includes('access control checks')
+      })); } catch { /* Diagnostic observers must not change application failures. */ } };
+      for (const name of ['beforeunload', 'pagehide', 'unhandledrejection', 'error']) {
+        const callback = event => emit(name, event.reason || event.error);
+        addEventListener(name, callback);
+        callbacks.push([name, callback]);
+      }
+      window.__stopGoalDiagnostics = () => {
+        for (const [name, callback] of callbacks) removeEventListener(name, callback);
+        delete window.__stopGoalDiagnostics;
+      };
+    })();"""
+
+    def __init__(self, page, origin, errors):
+        self.page, self.origin, self.errors = page, urlsplit(origin), errors
+        self.phase, self.generation, self.sequence = 'setup', 0, 0
+        self.events, self.requests, self.documents, self.listeners, self.failures = [], [], [], [], []
+        self.error_count = self.observer_errors = 0
+
+    def record(self, event, **data):
+        self.sequence += 1
+        self.events.append({'seq': self.sequence, 'phase': self.phase,
+                            'generation': self.generation, 'event': event, **data})
+        del self.events[:-self.limit]
+
+    def mark(self, phase):
+        assert phase in self.phases
+        self.phase = phase
+        self.record('phase')
+
+    def request(self, event, request):
+        parsed = urlsplit(request.url)
+        if not parsed.path.startswith('/api/collaboration'):
+            return
+        owned = next((item for item in self.requests if item[0] is request), None)
+        if owned is None:
+            kind = parse_qs(parsed.query).get('kind', [''])[0]
+            shape = {'id': self.sequence + 1,
+                     'started_generation': self.generation,
+                     'endpoint': parsed.path if parsed.path in self.paths else 'other',
+                     'kind': kind if kind in self.kinds else 'other',
+                     'method': request.method if request.method in {'GET', 'POST'} else 'other',
+                     'same_origin': (parsed.scheme, parsed.netloc) == (self.origin.scheme, self.origin.netloc)}
+            owned = (request, request.url, shape)
+            self.requests.append(owned)
+            del self.requests[:-self.limit]
+        failure = request.failure if event == 'requestfailed' else ''
+        self.record(event, **owned[2], cancelled=bool(failure and
+                    any(word in failure.lower() for word in ('cancel', 'abort'))))
+
+    def page_error(self, error):
+        # Record the failure before optional introspection. Even malformed
+        # diagnostic inputs must still fail the original zero-pageerror guard.
+        self.error_count += 1
+        if len(self.errors) < 8:
+            self.errors.append(True)
+        message = str(error)
+        matches = [item[2] for item in self.requests if item[1] in message]
+        self.record('pageerror', name=error.name if error.name in self.names else 'other',
+                    access_check='access control checks' in message,
+                    matched_requests=matches[-4:], match_count=len(matches))
+        if len(self.failures) < 8:
+            self.failures.append(self.events[-1])
+
+    def console(self, message):
+        prefix = 'GOAL_DIAGNOSTIC '
+        if not message.text.startswith(prefix) or len(message.text) > 512:
+            return
+        value = json.loads(message.text[len(prefix):])
+        if value.get('event') not in {'beforeunload', 'pagehide', 'unhandledrejection', 'error'}:
+            return
+        document = value.get('document')
+        if not isinstance(document, (int, float)):
+            return
+        if document not in self.documents and len(self.documents) < 8:
+            self.documents.append(document)
+        self.record('lifecycle', lifecycle=value['event'],
+                    document=self.documents.index(document) + 1 if document in self.documents else 0,
+                    name=value.get('name') if value.get('name') in self.names else 'other',
+                    access_check=value.get('access_check') is True)
+
+    def navigated(self, frame):
+        if frame == self.page.main_frame:
+            self.generation += 1
+            self.record('document-committed')
+
+    def safe(self, callback):
+        def observe(*args):
+            try:
+                callback(*args)
+            except Exception:
+                self.observer_errors += 1
+        return observe
+
+    def start(self):
+        callbacks = [('pageerror', self.page_error), ('console', self.console),
+                     ('framenavigated', self.navigated)]
+        callbacks += [(event, lambda request, event=event: self.request(event, request))
+                      for event in ('request', 'requestfinished', 'requestfailed')]
+        for event, callback in callbacks:
+            listener = self.safe(callback)
+            self.page.on(event, listener)
+            self.listeners.append((event, listener))
+        self.page.add_init_script(self.script)
+
+    def snapshot(self):
+        return {'pageerrors': self.error_count, 'observer_errors': self.observer_errors,
+                'failures': list(self.failures), 'events': list(self.events)}
+
+    def close(self):
+        try:
+            self.page.evaluate('window.__stopGoalDiagnostics?.()')
+        except Exception:
+            self.observer_errors += 1
+        for event, listener in self.listeners:
+            try:
+                self.page.remove_listener(event, listener)
+            except Exception:
+                self.observer_errors += 1
+        self.listeners.clear()
+
 
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
 def test_goal_draft_owner_confirmation_conflict_refresh_and_mobile(collaboration_stack, chat_browser_pool, tmp_path, engine):
     stack = collaboration_stack
     context = chat_browser_pool(engine).new_context(viewport={'width': 1440, 'height': 900})
     page = context.new_page()
-    errors, lifecycle = [], []
-    started = time.monotonic()
-    phase = {'value': 'initial'}
-
-    def record(event, **details):
-        lifecycle.append({'event': event, 'phase': phase['value'],
-            'elapsed': round(time.monotonic() - started, 3), **details})
-        del lifecycle[:-160]
-
-    def page_error(error):
-        errors.append(str(error))
-        record('pageerror', message=str(error))
-
-    def request_failed(request):
-        parsed = urlsplit(request.url)
-        record('requestfailed', route=parsed.path,
-            kind=parse_qs(parsed.query).get('kind', [''])[0],
-            method=request.method, failure=request.failure)
-
-    def lifecycle_console(message):
-        if message.text.startswith('GOAL_DOCUMENT '):
-            record('document', detail=message.text[len('GOAL_DOCUMENT '):])
-
-    page.add_init_script("""(() => {
-      for (const type of ['beforeunload', 'pagehide', 'pageshow'])
-        window.addEventListener(type, event => console.log('GOAL_DOCUMENT ' +
-          JSON.stringify({type, persisted: !!event.persisted, origin: performance.timeOrigin})));
-    })();""")
-    page.on('pageerror', page_error)
-    page.on('requestfailed', request_failed)
-    page.on('console', lifecycle_console)
+    errors = []
+    diagnostics = _GoalPageDiagnostics(page, stack.url, errors)
     shots = Path(os.getenv('CODEPIER_COLLABORATION_SCREENSHOTS', str(tmp_path / 'screenshots')))
     shots.mkdir(parents=True, exist_ok=True)
     try:
+        diagnostics.start()
         login(page, stack)
         area = page.locator('#cc-message-input')
+        diagnostics.mark('create')
         area.fill('创建目标期间保留中文草稿')
         goal = create_in_ui(page, stack, '目标 <img src=x onerror="window.goalXss=true">')
         expect(area).to_have_value('创建目标期间保留中文草稿')
@@ -253,6 +368,7 @@ def test_goal_draft_owner_confirmation_conflict_refresh_and_mobile(collaboration
         assert not page.evaluate('Boolean(window.goalXss)')
         assert page.locator('.cc-coordination-list img').count() == 0
         review = page.locator(f'.cc-coordination-list [data-cc-action="goal-review"][data-id="{goal["id"]}"]')
+        diagnostics.mark('owner-consent')
         review.click()
         form = page.locator('#cc-goal-approve')
         expect(form.locator('[name="confirm"]')).not_to_be_checked()
@@ -266,6 +382,7 @@ def test_goal_draft_owner_confirmation_conflict_refresh_and_mobile(collaboration
         expect(review).to_be_focused()
         assert read(stack, 'coordination_goal', id=goal['id'])['goal']['state'] == 'proposed'
         review.click()
+        diagnostics.mark('conflict')
         approval = []
 
         def hold_approval(route):
@@ -286,22 +403,22 @@ def test_goal_draft_owner_confirmation_conflict_refresh_and_mobile(collaboration
         expect(page.locator('#cc-drawer')).not_to_be_visible()
         assert read(stack, 'coordination_goal', id=goal['id'])['goal']['state'] == 'proposed'
         review.click()
+        diagnostics.mark('approve')
         expect(form).to_have_attribute('data-version', str(revised['version']))
         expect(form.locator('[name="confirm"]')).not_to_be_checked()
         form.locator('[name="confirm"]').check()
         form.locator('button[type="submit"]').click()
         expect(page.locator('#cc-feedback')).to_contain_text('已批准')
         assert read(stack, 'coordination_goal', id=goal['id'])['goal']['state'] == 'active'
-        phase['value'] = 'reload'
-        record('reload-start')
+        diagnostics.mark('reload')
         page.reload()
-        record('reload-return')
+        diagnostics.mark('reloaded')
         expect(page.locator('.cc-chat-shell')).to_be_visible()
         open_goals(page)
         expect(page.locator('.cc-coordination-list')).to_contain_text('执行范围已批准')
-        phase['value'] = 'restored-ui'
         page.screenshot(animations='disabled', path=str(shots / f'{engine}-goals-desktop.png'))
         page.locator('[data-cc-view="discussion"]').click()
+        diagnostics.mark('composition')
         area.fill('目标启用后普通消息仍不创建工作项')
         area.dispatch_event('compositionstart')
         area.dispatch_event('keydown', {'key': 'Enter', 'isComposing': True})
@@ -310,6 +427,7 @@ def test_goal_draft_owner_confirmation_conflict_refresh_and_mobile(collaboration
         assert initial_work[0]['required_capabilities'] == ['read']
         assert initial_work[0]['assignee_grant_id'] == stack.grant
         area.dispatch_event('compositionend')
+        diagnostics.mark('mobile')
         for width in (390, 360, 320, 390):
             page.set_viewport_size({'width': width, 'height': 844 if width == 390 else 800})
             page.wait_for_function("""() => {
@@ -330,14 +448,9 @@ def test_goal_draft_owner_confirmation_conflict_refresh_and_mobile(collaboration
             page.keyboard.press('Escape')
             expect(area).to_have_value('手机草稿\n')
             page.screenshot(animations='disabled', path=str(shots / f'{engine}-goals-mobile-{width}.png'))
-        assert not errors, errors
-    except Exception:
-        print('GOAL_DOCUMENT_DIAGNOSTIC', json.dumps(lifecycle), flush=True)
-        raise
+        assert not errors, diagnostics.snapshot()
     finally:
-        page.remove_listener('pageerror', page_error)
-        page.remove_listener('requestfailed', request_failed)
-        page.remove_listener('console', lifecycle_console)
+        diagnostics.close()
         context.close()
 
 

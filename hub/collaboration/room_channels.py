@@ -6,6 +6,7 @@ separate facts. Network calls use the original QR operation and request key.
 """
 from __future__ import annotations
 
+import base64
 import json
 import uuid
 from typing import Literal
@@ -212,6 +213,37 @@ class RoomChannels:
             raise DevError('CHANNEL_MEMBER_REQUIRED', '请选择此房间的可用主责 dot，再继续连接', 409)
         return member
 
+    def flow_member(self, conversation, row):
+        """Effective dot for this flow without raising on a stale selection."""
+        for identifier in (row['member_id'], conversation.get('lead_member_id', '')):
+            if not identifier:
+                continue
+            member = self.store.one('SELECT * FROM room_members WHERE id=? AND conversation_id=?',
+                                    (identifier, conversation['id']))
+            if member and member['status'] not in {'removed', 'paused'}:
+                return member
+        options = self.member_options(conversation)
+        if len(options) == 1:
+            return self.store.one('SELECT * FROM room_members WHERE id=?', (options[0]['id'],))
+        return None
+
+    def member_options(self, conversation):
+        rows = self.store.all("""SELECT id,name,status FROM room_members WHERE conversation_id=?
+            AND status NOT IN ('removed','paused') ORDER BY created_at,id LIMIT 32""", (conversation['id'],))
+        return [{'id': row['id'], 'label': row['name'] or ('dot #' + row['id'][:8])} for row in rows]
+
+    def conflict(self, row, account_id):
+        """Any other live route that would make a new binding fail.
+
+        One private chat keeps one active room route, and one room keeps one
+        WeChat route. Room migration pauses (not revokes) the old binding, so
+        the same room must be checked as well as the same account.
+        """
+        return self.store.one("""SELECT id,conversation_id,version,state,account_id,native_member_id FROM weixin_bindings
+            WHERE state!='revoked' AND id!=? AND (account_id=? OR conversation_id=?)
+            ORDER BY account_id=? DESC,created,id LIMIT 1""",
+            (row['binding_id'], account_id, row['conversation_id'], account_id))
+
     def read(self, identifier, principal):
         with self.store.transaction(immediate=False):
             row, principal, conversation = self.get(identifier, principal)
@@ -247,16 +279,33 @@ class RoomChannels:
                 if state in {'expired','cancelled','attention'}:
                     stage, action = 'needs_reconnect', 'start_qr'
                     value['reason_code'] = value['qr'].get('reason_code') or 'WEIXIN_QR_' + state.upper()
+                if state == 'confirmed' and value['qr'].get('bot_id'):
+                    known = self.store.one('SELECT id,label,owner_user_id,space_id FROM weixin_accounts WHERE bot_id=?',
+                                           (value['qr']['bot_id'],))
+                    if known and (known['owner_user_id'], known['space_id']) == (principal.user_id, principal.space_id):
+                        value['qr'].update(re_pair_required=True, existing_account={'id': known['id'], 'label': known['label']})
+                    elif known:
+                        value['qr']['account_conflict'] = True
+                        value['reason_code'] = 'WEIXIN_ACCOUNT_CONFLICT'
         if row['account_id']:
             account = self.c.weixin.account(row['account_id'], principal)
             value['account'] = {k: account[k] for k in ('id','label','bot_id','state','credential_version')}
             value['account']['inbound_health'] = health.get(account['id'], [])
             value['account_connected'] = account['state'] == 'active'
             stage, action = ('confirm_binding','bind') if account['state'] == 'active' else ('needs_reconnect','start_qr')
-            if account['state'] == 'active':
-                conflict = self.store.one("SELECT id,conversation_id,version FROM weixin_bindings WHERE account_id=? AND state!='revoked' AND id!=?", (account['id'], row['binding_id']))
+            synced = self.store.one('SELECT last_sync_at,reason_code,failures FROM weixin_accounts WHERE id=?', (account['id'],))
+            value['inbound'] = {'last_sync_at': synced['last_sync_at'], 'reason_code': synced['reason_code'] or '',
+                                'failures': synced['failures'] or 0}
+            if account['state'] == 'active' and not row['binding_id']:
+                conflict = self.conflict(row, account['id'])
                 if conflict:
-                    value['existing_binding'] = conflict
+                    room = self.store.one('SELECT title FROM conversation_rooms WHERE id=? AND owner_user_id=?',
+                                          (conflict['conversation_id'], principal.user_id))
+                    value['existing_binding'] = {'id': conflict['id'], 'conversation_id': conflict['conversation_id'],
+                        'version': conflict['version'], 'state': conflict['state'],
+                        'same_room': conflict['conversation_id'] == row['conversation_id'],
+                        'same_account': conflict['account_id'] == account['id'],
+                        'legacy': not conflict['native_member_id'], 'room_title': room['title'] if room else ''}
                     stage, action = 'route_conflict', 'migrate'
         if row['binding_id']:
             binding = self.store.one('SELECT * FROM weixin_bindings WHERE id=?', (row['binding_id'],))
@@ -265,7 +314,19 @@ class RoomChannels:
                 if binding['state'] == 'pairing':
                     stage, action = 'pairing','refresh'
                     if binding['pairing_until'] > self.c.clock() and binding.get('pairing_secret'):
-                        value['binding']['pairing_challenge'] = self.store.decrypt(binding['pairing_secret'])
+                        challenge = self.store.decrypt(binding['pairing_secret'])
+                        value['binding']['pairing_challenge'] = challenge
+                        # Scanning this with the phone shows copyable text, so
+                        # the code need not be retyped from another screen.
+                        from hub.collaboration.qr_image import qr_svg
+                        value['binding']['pairing_qr'] = 'data:image/svg+xml;base64,' + base64.b64encode(
+                            qr_svg(challenge).encode()).decode()
+                        seen = self.store.one("""SELECT disposition,created FROM weixin_inbound WHERE account_id=? AND generation=?
+                            AND created>=? AND disposition IN ('pairing_code_mismatch','different_peer_quarantined')
+                            ORDER BY created DESC LIMIT 1""", (binding['account_id'], binding['generation'], binding['updated']))
+                        if seen:
+                            value['pairing_feedback'] = {'at': seen['created'],
+                                'state': 'mismatch' if seen['disposition'] == 'pairing_code_mismatch' else 'different_peer'}
                     else:
                         stage, action = 'pairing_expired','refresh_pairing'
                 elif binding['state'] == 'awaiting_owner':
@@ -301,8 +362,17 @@ class RoomChannels:
             if state in {'expired','attention','verify_code_blocked','binded_redirect'}:
                 stage,action='needs_reconnect','start_qr'
         if stage == 'confirm_binding':
-            member = self.member(conversation, row['member_id'], required=False)
-            if not member or (not row.get('native') and not member.get('legacy_dot_id')):
+            member = self.flow_member(conversation, row)
+            if member:
+                value['member'] = {'id': member['id'], 'name': member['name']}
+            if not member:
+                options = self.member_options(conversation)
+                if options:
+                    value['member_options'] = options
+                    stage, action = 'choose_member', 'refresh'
+                else:
+                    stage, action = 'waiting_member', 'refresh'
+            elif not row.get('native') and not member.get('legacy_dot_id'):
                 stage, action = 'waiting_member','refresh'
             else:
                 try:
@@ -325,12 +395,13 @@ class RoomChannels:
         value.update(stage=stage, primary_action=action)
         title={'choose_account':'连接微信','scan':'等待微信扫码','confirm_account':'确认扫码身份',
             'confirm_binding':'确认此房间的私聊范围','waiting_member':'先为此房间添加 dot',
+            'choose_member':'选择接收微信消息的 dot',
             'waiting_project':'先为原连接关联项目','pairing':'在本人微信私聊发送配对码',
             'pairing_expired':'配对码已过期','confirm_owner':'确认本人联系人','ready':'微信已连接',
             'needs_reconnect':'微信需要重新连接','route_conflict':'此微信已有连接，需明确迁移',
             'paused':'微信已暂停','disconnected':'微信已断开','cancelled':'接入已取消','closed':'微信已解除'}.get(stage,'等待连接')
         value['display']={'title':title,'primary_action':action,'reason':value.get('reason_code','')}
-        value['actions'] = [{'action': action, 'label': self.action_label(action)}] if action else []
+        value['actions'] = [{'action': action, 'label': '使用此 dot' if stage == 'choose_member' else self.action_label(action)}] if action else []
         if row['state'] == 'active':
             if row['binding_id']:
                 authority=self.store.one('SELECT state,version FROM '+('room_channel_owner_authorizations' if row.get('native') else 'channel_owner_authorizations')+' WHERE binding_id=?',(row['binding_id'],))
@@ -354,6 +425,7 @@ class RoomChannels:
         value['allowed_actions']=[item['action'] for item in value['actions']]
         value['next_request'] = {'method':'POST','path':'/api/collaboration/channel-connect-flows/' + row['id'] + '/actions',
             'body':{'action':action,'expected_version':row['version'],
+                    **({'member_id':value['member']['id']} if action=='bind' and value.get('member') else {}),
                     **({'expected_scope_digest':value['task_scope']['scope_digest']} if value.get('task_scope') else {}),
                     **({'expected_binding_version':value['existing_binding']['version']} if value.get('existing_binding') else {})},
             'form_fields':self.fields(action, value)} if action else None
@@ -373,8 +445,15 @@ class RoomChannels:
         if action == 'start_qr':
             return [field('confirm_credential_storage','允许加密保存此微信凭据'),field('confirm_provider_terms','确认使用微信机器人服务')]
         if action == 'accept_account':
-            return [field('label','显示名称','text',value='微信'),
-                    field('confirm_scanner_id','确认扫码身份','text',value=value.get('qr',{}).get('scanner_id',''))]
+            qr = value.get('qr', {})
+            fields = [field('label','显示名称','text',value=qr.get('existing_account',{}).get('label') or '微信'),
+                      field('confirm_scanner_id','确认扫码身份','text',value=qr.get('scanner_id',''))]
+            if qr.get('re_pair_required'):
+                fields.append(field('confirm_replace_existing','确认替换此微信的原连接（其他房间的微信路由需重新确认）'))
+            return fields
+        if action == 'refresh' and value.get('member_options') and value.get('stage') == 'choose_member':
+            return [field('member_id','接收微信消息的 dot','select',
+                          options=[{'value': m['id'], 'label': m['label']} for m in value['member_options']])]
         if action in {'bind','approve_tasks'}:
             fields = [field('confirm_external_data_ingress','允许此私聊进入当前房间'),
                       field('allow_replies','允许回复回到原私聊'),field('confirm_until_revoked','连接持续至我解除')]
@@ -533,7 +612,8 @@ class RoomChannels:
                     if action=='disconnect':
                         updates['state']='closed'
                 elif action=='migrate':
-                    binding=self.store.one("SELECT * FROM weixin_bindings WHERE account_id=? AND state!='revoked'",(row['account_id'],))
+                    conflict=self.conflict(row,row['account_id'])
+                    binding=self.store.one('SELECT * FROM weixin_bindings WHERE id=?',(conflict['id'],)) if conflict else None
                     if not binding or args['confirm_migrate_binding_id']!=binding['id'] or args['expected_binding_version']!=binding['version']:
                         raise DevError('CHANNEL_ROUTE_CONFLICT','请明确核对原房间与原绑定版本',409)
                     self.c.rooms.owner(principal,binding['conversation_id'],include_archived=True)
@@ -562,6 +642,10 @@ class RoomChannels:
                         updates['enrollment_id']=''
                     else:
                         updates['state']='cancelled'
+                elif action=='refresh' and args['member_id']:
+                    if row['binding_id']:
+                        raise DevError('CHANNEL_FLOW_CONFLICT','已有绑定必须先明确解除',409)
+                    updates['member_id']=self.member(conversation,args['member_id'])['id']
                 elif action=='refresh' and not row['project_id'] and not row.get('native'):
                     anchor=self.store.one('''SELECT r.project_id,r.environment_id FROM conversation_projects p
                         JOIN collaboration_rooms r ON r.id=p.room_id WHERE p.conversation_id=? ORDER BY p.created,p.room_id LIMIT 1''',(conversation['id'],))

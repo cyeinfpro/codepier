@@ -1,5 +1,5 @@
 {
-  "version": "1.32.4",
+  "version": "1.32.5",
   "algorithm": "sha256",
   "assets": {
     "access-profiles.css": {
@@ -79,12 +79,12 @@
       "bytes": 32300
     },
     "collaboration-room.css": {
-      "sha256": "00a5f811c3c3031a97545065d9252a28973d1dda0ea485ca6ffd43e1fc199722",
-      "bytes": 32899
+      "sha256": "8298cda9816c55b3d79951373e0452982e6443626080cfca8ef19867970ee566",
+      "bytes": 47429
     },
     "collaboration-room.js": {
-      "sha256": "4265e266588d91c6a92d6ae03c54a6e2efeaae7a6b7c72310c1ac5094a7792ff",
-      "bytes": 146366
+      "sha256": "de32b726e741e5d2e22726f7142d90df22f966a4ad806e292c2465cbd0857320",
+      "bytes": 168723
     },
     "computer.css": {
       "sha256": "031dff13225cec17fc8d445c565feccddd0db33fc277d28a468e19060a54eed2",
@@ -151,8 +151,8 @@
       "bytes": 3834
     },
     "panel-update.js": {
-      "sha256": "680c873a39f617b18d9f986df792e35c50fcda1ad8ab2f7ed24c7532265a4bc8",
-      "bytes": 34633
+      "sha256": "b13ba14e1833650d57f75b8c3b15765024baecd62877e120cbe0a15abfb2850f",
+      "bytes": 34661
     },
     "project-runtimes.css": {
       "sha256": "eef8d535f7727dae124d015b9a08f2dc53350a8ca5626694cd24efb49ecb1ba1",

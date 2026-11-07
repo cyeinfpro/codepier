@@ -1,8 +1,9 @@
 """Room-only project revisions in disposable Hub/Agent fixtures and real browsers."""
 
+from contextlib import contextmanager
 import json
 import time
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from playwright.sync_api import expect
@@ -14,6 +15,102 @@ from tests.test_collaboration_chatroom_browser import click_room_refresh, login,
 from tests.test_collaboration_dots_flow import create_dot, join_dot
 
 pytestmark = [pytest.mark.browser, pytest.mark.integration, pytest.mark.slow]
+
+
+@contextmanager
+def room_reload_diagnostic(page, expected):
+    """Failure-only bounded metadata; never record URL parameters or payloads."""
+    endpoints = (
+        '/api/session', '/api/iam/me', '/api/devices', '/api/projects',
+        '/api/events', '/api/grants', '/api/collaboration/status',
+        '/api/collaboration', '/api/collaboration/conversations',
+    )
+    kinds = ('overview', 'timeline', 'members', 'delegation_policies',
+             'teams', 'coordination_options', 'coordination_goals')
+    started, network, requests = time.monotonic(), [], {}
+
+    def record(event, request, status=None):
+        try:
+            parsed = urlsplit(request.url)
+            if parsed.path not in endpoints:
+                return
+            if request not in requests:
+                if len(requests) >= 128:
+                    return
+                requests[request] = len(requests) + 1
+            kind = parse_qs(parsed.query).get('kind', [''])[0]
+            network.append({
+                'event': event, 'id': requests[request], 'endpoint': parsed.path,
+                'kind': kind if kind in kinds else 'other',
+                'method': request.method if request.method in ('GET', 'HEAD', 'POST') else 'other',
+                'status': status if isinstance(status, int) else None,
+                'ms': round((time.monotonic() - started) * 1000),
+            })
+            del network[:-96]
+        except Exception:
+            # Observation must never alter the original browser operation.
+            pass
+
+    def responded(response):
+        try:
+            record('response', response.request, response.status)
+        except Exception:
+            pass
+
+    callbacks = {
+        'request': lambda request: record('request', request),
+        'response': responded,
+        'requestfinished': lambda request: record('finished', request),
+        'requestfailed': lambda request: record('failed', request),
+    }
+    for event, callback in callbacks.items():
+        try:
+            page.on(event, callback)
+        except Exception:
+            pass
+    try:
+        yield
+    except Exception:
+        try:
+            browser = page.evaluate("""expected => {
+                const app = typeof S === 'undefined' ? null : S;
+                let saved = null;
+                try { saved = JSON.parse(sessionStorage.getItem('codepier-collaboration-selection')); }
+                catch {}
+                const root = document.querySelector('.collaboration'), data = root?.dataset;
+                return {
+                    collaborationPage: app?.page === 'collaboration', sessionPresent: !!app?.session,
+                    sequence: Number.isSafeInteger(app?.renderSeq) ? app.renderSeq : null,
+                    selectionPresent: !!saved, savedSpaceMatches: !!app && saved?.space === app.space_id,
+                    savedProjectMatches: saved?.project === expected.project,
+                    savedConversationMatches: saved?.conversation === expected.conversation,
+                    savedEnvironmentMatches: saved?.environment === expected.environment,
+                    mappedProjectPresent: !!app?.projects?.some(p => p.id === expected.project),
+                    pageBusy: document.querySelector('#page')?.getAttribute('aria-busy') === 'true',
+                    rootPresent: !!root, rootInert: !!root?.inert,
+                    rootBusy: root?.getAttribute('aria-busy') === 'true',
+                    rootProjectMatches: data?.project === expected.project,
+                    rootConversationMatches: data?.conversation === expected.conversation,
+                    rootEnvironmentMatches: data?.environment === expected.environment,
+                    agentsPresent: !!document.querySelector('[data-cc-view="agents"]'),
+                    createRoomPresent: !!document.querySelector('[data-cc-action="create-room"]'),
+                    identityRetryPresent: !!document.querySelector('[data-action="retry-identity"]')
+                };
+            }""", expected)
+        except Exception:
+            browser = {'snapshotUnavailable': True}
+        try:
+            print('ROOM_RELOAD_DIAGNOSTIC', json.dumps({
+                'network': network, 'browser': browser}, ensure_ascii=True), flush=True)
+        except Exception:
+            pass
+        raise
+    finally:
+        for event, callback in callbacks.items():
+            try:
+                page.remove_listener(event, callback)
+            except Exception:
+                pass
 
 
 def project_checkbox(form, project):
@@ -858,8 +955,11 @@ def test_room_permission_preview_root_overlap_blocks_apply_without_adding_projec
             'device_id': stack.device, 'description': 'Disposable overlapping mapping',
             'mode': 'write', 'allow_tasks': True,
         })
-        page.reload()
-        group = advanced_connections(page)
+        with room_reload_diagnostic(page, {
+                'project': stack.project['id'], 'conversation': before['id'],
+                'environment': 'production'}):
+            page.reload()
+            group = advanced_connections(page)
         group.locator('[data-cc-action="manage-room-permissions"]').click()
         form = page.locator('#cc-room-projects')
         expect(form).to_have_attribute('data-permissions-only', 'true')

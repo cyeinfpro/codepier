@@ -804,7 +804,7 @@ window.CodePierPanelUpdate = (() => {
   // A back-forward cached document survives pagehide and must resume its
   // original idempotency-key watch instead of submitting a second update.
   window.addEventListener('pageshow', (event) => {
-    if (event.persisted && S.session?.instance_admin) resume();
+    if (event.persisted && typeof S !== 'undefined' && S.session?.instance_admin) resume();
   });
   return { html, bind, detach, resume, entry, open };
 })();

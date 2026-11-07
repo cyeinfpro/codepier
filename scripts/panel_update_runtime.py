@@ -161,17 +161,19 @@ def compose_command(spec_path, project):
 
 
 OAUTH_OLD_DEFAULT = 'chatgpt.com,chat.openai.com,platform.openai.com,localhost,127.0.0.1,::1'
-OAUTH_CURRENT_DEFAULT = 'chatgpt.com,chat.openai.com,platform.openai.com,claude.ai,localhost,127.0.0.1,::1'
+OAUTH_CLAUDE_DEFAULT = 'chatgpt.com,chat.openai.com,platform.openai.com,claude.ai,localhost,127.0.0.1,::1'
+OAUTH_LEGACY_DEFAULTS = (OAUTH_OLD_DEFAULT, OAUTH_CLAUDE_DEFAULT)
+OAUTH_CURRENT_DEFAULT = 'chatgpt.com,chat.openai.com,platform.openai.com,claude.ai,grok.com,localhost,127.0.0.1,::1'
 
 
 def migrate_oauth_redirect_hosts(content):
-    """Upgrade only the exact historical default, preserving custom policy and bytes."""
+    """Upgrade only exact historical defaults, preserving custom policy and bytes."""
     lines = content.decode('utf-8').splitlines(keepends=True)
     changed = False
     pattern = re.compile(r'''(OAUTH_REDIRECT_HOSTS=)(["']?)([^\r\n]*?)\2(\r?\n)?''')
     for index, line in enumerate(lines):
         match = pattern.fullmatch(line)
-        if match and match[3] == OAUTH_OLD_DEFAULT:
+        if match and match[3] in OAUTH_LEGACY_DEFAULTS:
             lines[index] = f'{match[1]}{match[2]}{OAUTH_CURRENT_DEFAULT}{match[2]}{match[4] or ""}'
             changed = True
     return ''.join(lines).encode('utf-8'), changed
@@ -448,7 +450,7 @@ class DockerRuntime:
         # The frozen target Compose spec, not .env, starts the new container.
         # Migrate it too; otherwise committed_env would only fix the next restart.
         target_env = target['services']['hub']['environment']
-        if job.get('kind') != 'migrate-state' and target_env.get('OAUTH_REDIRECT_HOSTS') == OAUTH_OLD_DEFAULT:
+        if job.get('kind') != 'migrate-state' and target_env.get('OAUTH_REDIRECT_HOSTS') in OAUTH_LEGACY_DEFAULTS:
             target_env['OAUTH_REDIRECT_HOSTS'] = OAUTH_CURRENT_DEFAULT
         migration = job.get('kind') == 'migrate-state' or (job.get('kind') == 'apply' and mount_path == '/app/data')
         if migration:

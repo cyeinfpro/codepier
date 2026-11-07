@@ -64,6 +64,7 @@ class NativeService:
         self.event_cache=OrderedDict()
         self.searching=set()
         self._lane_tasks=set()
+        self._closing=False
         self.sync_errors=0
         with closing(database(self.directory)): pass
 
@@ -191,6 +192,8 @@ class NativeService:
         outruns the database the newest queued packet is coalesced (see
         ``_coalesce``) instead of blocking the reader or growing memory.
         """
+        if self._closing or getattr(connection,'unusable',False):
+            return
         if data.get('type')=='native_reply':
             self._reply(connection,data)
             return
@@ -210,19 +213,34 @@ class NativeService:
             self._lane_tasks.add(lane.task)
             lane.task.add_done_callback(self._lane_tasks.discard)
 
+    def detach(self,connection):
+        lane=getattr(connection,'_native_sync_lane',None)
+        if lane is not None:
+            lane.queue.clear()
+            if lane.task is not None and not lane.task.done():
+                lane.task.cancel()
+
+    async def close(self):
+        self._closing=True
+        tasks=list(self._lane_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            # Store.run drains any already executing transaction on cancellation.
+            # Finish that drain before Runtime.stop lets the store close.
+            await asyncio.gather(*tasks,return_exceptions=True)
+
     async def _drain_lane(self,device,connection,lane):
-        # No await between the emptiness check and return, so submit() either
-        # sees this task still draining or already done; never a lost packet.
-        while lane.queue:
-            data,seqs=lane.queue.popleft()
-            try:
-                await self._process_sync(device,connection,data,seqs)
-            except Exception:
-                # Only the ACK send can raise here: the socket is gone and the
-                # reader owns teardown. The Agent re-learns offsets on reconnect.
-                self.sync_errors+=1
-                lane.queue.clear()
-                return
+        try:
+            while lane.queue and not self._closing and not getattr(connection,'unusable',False):
+                data,seqs=lane.queue.popleft()
+                try:
+                    await self._process_sync(device,connection,data,seqs)
+                except Exception:
+                    self.sync_errors+=1
+                    return
+        finally:
+            lane.queue.clear()
 
     async def _process_sync(self,device,connection,data,seqs):
         try:

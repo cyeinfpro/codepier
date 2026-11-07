@@ -421,3 +421,32 @@ def test_memory_paused_node_still_admits_small_file_writes_but_not_commands():
         with pytest.raises(DevError) as caught:
             check_admission(paused, counts, tool, size)
         assert caught.value.code == "DEVICE_BUSY"
+
+
+@pytest.mark.asyncio
+async def test_runtime_shutdown_drains_native_sync_tasks_and_discards_queued_frames(service):
+    obj, _, sid = service
+    entered, blocked = asyncio.Event(), asyncio.Event()
+    sent = []
+    async def send(data):
+        entered.set()
+        await blocked.wait()
+        sent.append(data)
+    connection = SimpleNamespace(send=send)
+    row = row_of(obj, sid)
+    obj.submit('device', connection, {'type': 'native_sync', 'seq': 1, 'sessions': [row],
+                                      'chunks': [chunk(sid, 0, 8)]})
+    await asyncio.wait_for(entered.wait(), 5)
+    obj.submit('device', connection, {'type': 'native_sync', 'seq': 2, 'sessions': [row],
+                                      'chunks': [chunk(sid, 8, 8)]})
+    await asyncio.wait_for(obj.runtime.stop(), 5)
+    task = connection._native_sync_lane.task
+    try:
+        assert task.done(), 'shutdown returned with a native sync task still using the store'
+        assert not connection._native_sync_lane.queue
+        assert not sent
+        with closing(database(obj.directory)) as db:
+            assert db.execute('SELECT SUM(length(data)) FROM output WHERE session=?', (sid,)).fetchone()[0] == 8
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

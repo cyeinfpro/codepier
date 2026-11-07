@@ -11,6 +11,7 @@ import hmac
 import json
 import re
 import secrets
+import unicodedata
 import uuid
 from dataclasses import asdict
 
@@ -21,6 +22,23 @@ from hub.collaboration.weixin_protocol import API_BASE, ITEM_NAMES, approved_url
 from hub.collaboration.qr_image import qr_svg
 from hub.collaboration.weixin_protocol import incoming_text, incoming_items
 from shared.util import DevError
+
+
+PAIRING_CODE = re.compile(r'CPW-[A-F0-9]{32}')
+
+
+def pairing_text(value):
+    """Normalize how people actually type or paste the one-time pairing code.
+
+    Phone keyboards lower-case letters, IMEs produce full-width dashes and a
+    paste can carry spaces or line breaks. Only the 32 hex digits carry the
+    secret; the hash comparison itself stays constant-time and exact.
+    """
+    raw = unicodedata.normalize('NFKC', value or '')
+    compact = re.sub(r'[^0-9A-Za-z]', '', raw).upper()
+    if compact.startswith('CPW'):
+        compact = compact[3:]
+    return 'CPW-' + compact if re.fullmatch(r'[0-9A-F]{32}', compact) else raw.strip()
 
 
 def migrate(db):
@@ -190,13 +208,24 @@ class RoomWeixin:
             raise DevError('WEIXIN_SCANNER_MISMATCH','请确认当前扫码返回的真实身份',409)
         existing=self.store.one('SELECT * FROM weixin_accounts WHERE bot_id=?',(body['bot_id'],))
         if existing:
-            if (existing['owner_user_id']!=principal.user_id or existing['space_id']!=principal.space_id
-                    or not body.get('renewal') or body['renewal']['id']!=existing['id']
-                    or body['renewal']['credential_version']!=existing['credential_version'] or not args['confirm_replace_existing']):
+            renewal=body.get('renewal')
+            if existing['owner_user_id']!=principal.user_id or existing['space_id']!=principal.space_id:
+                raise DevError('WEIXIN_ACCOUNT_CONFLICT','此微信已由其他账号登记，不能在这里接入',409)
+            if renewal and (renewal['id']!=existing['id'] or renewal['credential_version']!=existing['credential_version']):
                 raise DevError('WEIXIN_ACCOUNT_CONFLICT','请明确恢复原账号，不覆盖其他绑定',409)
+            if not args['confirm_replace_existing']:
+                # Re-scanning a WeChat this owner already registered is the
+                # common path after a room migration. It reuses the original
+                # account identity, but only with an explicit confirmation.
+                raise (DevError('WEIXIN_ACCOUNT_CONFLICT','请明确恢复原账号，不覆盖其他绑定',409) if renewal else
+                    DevError('WEIXIN_ACCOUNT_REUSE_CONFIRM','此微信已登记过；请勾选“确认替换此账号的原连接”后继续',409))
             for binding in self.store.all("SELECT * FROM weixin_bindings WHERE account_id=? AND state!='revoked'",(existing['id'],)):
                 if not binding.get('native_member_id'):
-                    raise DevError('CHANNEL_ROUTE_CONFLICT','此账号仍保留旧连接，请先明确解除旧绑定再继续此房间接入',409)
+                    # A legacy route (often left paused by room migration)
+                    # stops with the original safe-stop path; no work replays.
+                    self.channels.stop_legacy(binding['conversation_id'],binding['id'],'weixin','revoke',binding['version'],
+                        'reuse-account:'+digest([row['id'],binding['id'],binding['version']]),principal)
+                    continue
                 self.require_room(binding['conversation_id'])
         else:
             count=self.store.one('SELECT COUNT(*) n FROM weixin_accounts WHERE owner_user_id=? AND space_id=?',(principal.user_id,principal.space_id))['n']
@@ -213,7 +242,7 @@ class RoomWeixin:
             (identifier,principal.space_id,principal.user_id,body['bot_id'],args['label'],body['api_base'],self.store.encrypt(body['token']),
              existing['credential_version']+1 if existing else 1,self.store.encrypt(''),now,now))
         if existing:
-            for binding in self.store.all("SELECT * FROM weixin_bindings WHERE account_id=? AND state!='revoked'",(identifier,)):
+            for binding in self.store.all("SELECT * FROM weixin_bindings WHERE account_id=? AND state!='revoked' AND native_member_id!=''",(identifier,)):
                 # Same identity still requires the old peer to prove the new
                 # credential generation. Unsent previous-generation parts stop.
                 challenge='CPW-'+secrets.token_hex(16).upper()
@@ -227,7 +256,10 @@ class RoomWeixin:
 
     def bind(self,flow,args,principal,conversation):
         self.c.rooms.require_native(conversation)
-        member=self.channels.member(conversation,args['member_id'] or flow['member_id'])
+        member=(self.channels.member(conversation,args['member_id']) if args['member_id']
+                else self.channels.flow_member(conversation,flow))
+        if not member:
+            raise DevError('CHANNEL_MEMBER_REQUIRED','请选择此房间的可用主责 dot，再继续连接',409)
         account=self.c.weixin.account(flow['account_id'],principal)
         if not args['confirm_external_data_ingress'] or not args['confirm_until_revoked']:
             raise DevError('CHANNEL_CONSENT_REQUIRED','请明确确认私聊入站和连接期限',422)
@@ -507,15 +539,18 @@ class RoomWeixin:
         if not direct:
             disposition='group_or_echo_quarantined'
         elif binding['state']=='pairing' and binding['pairing_until']>self.c.clock():
-            if (not prior and not int(updated) and not int(deleted) and int(created)>=int(binding['updated']*1000)
-                    and hmac.compare_digest(digest(content.strip()),binding['pairing_hash'])):
+            # The fresh one-time secret is itself the freshness proof. Provider
+            # update stamps and Hub/provider clock skew must not reject it.
+            if not prior and not int(deleted) and hmac.compare_digest(digest(pairing_text(content)),binding['pairing_hash']):
                 if binding['peer_id'] and binding['peer_id']!=peer:
                     disposition='different_peer_quarantined'
                 else:
                     self.store.execute("UPDATE weixin_bindings SET state='awaiting_owner',pending_peer_id=?,pairing_hash='',pairing_secret='',version=version+1,updated=? WHERE id=?",
                         (peer,self.c.clock(),binding['id']))
                     disposition='pairing_waits_for_panel_owner'
-        elif re.fullmatch(r'CPW-[A-F0-9]{32}',content.strip()):
+            else:
+                disposition='pairing_code_mismatch'
+        elif PAIRING_CODE.fullmatch(pairing_text(content)):
             disposition='pairing_code_never_a_task'
         elif binding['state']=='active' and hmac.compare_digest(peer,binding['peer_id']):
             attachment_items=[]
