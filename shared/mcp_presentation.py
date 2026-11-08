@@ -606,8 +606,11 @@ def token_view(name, arguments, value, *, view=2, verbosity='lean', output_mode=
                 row['diff'] = row['diff'][:end if end > 0 else 4000]
                 row['diff_truncated'] = True
         diff(result, arguments.get('expected_sha256') == 'new')
-        for row in result.get('files', []):
-            diff(row)
+        # Checkpoint/restore results may report a file count, not batch rows.
+        # Keep that receipt intact instead of failing after the mutation finished.
+        if isinstance(result.get('files'), list):
+            for row in result['files']:
+                diff(row)
     if name in {'workspace', 'project_query'} and arguments.get('operation') == 'tree':
         if arguments.get('options', {}).get('format') == 'compact' and isinstance(result.get('entries'), list):
             rows = []

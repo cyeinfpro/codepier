@@ -249,6 +249,9 @@ window.CodePierCollaboration = (() => {
     if (node) {
       node.textContent = value || '';
       node.hidden = !value;
+      // The alert follows a potentially long project list. Keep a rejected
+      // save visible without moving keyboard focus or scrolling a closed panel.
+      if (value && node.closest('dialog')?.open) node.scrollIntoView({ block: 'nearest' });
     }
   }
   function remember() {
@@ -938,6 +941,7 @@ window.CodePierCollaboration = (() => {
     panelEpoch++;
     panel = { name, roomId: state.roomId, epoch: panelEpoch, key: store.key(), ...data };
     const dialog = root.querySelector('dialog');
+    dialog._crOpeningEpoch = panel.epoch;
     if (!dialog.open)
       dialog._crOpener = root._panelOpener?.isConnected
         ? root._panelOpener
@@ -1079,7 +1083,7 @@ window.CodePierCollaboration = (() => {
       ? S.projects
           .map(
             (project) =>
-              `<label class="cr-choice"><input type="checkbox" name="project" value="${E(project.id)}" ${ids.has(project.id) ? 'checked' : ''}><span class="cr-choice-icon" aria-hidden="true">${icon('folder')}</span><span><strong>${E(project.alias || project.name || project.id)}</strong><small>${project.mode === 'write' ? '可修改' : '只读'}${project.allow_tasks ? ' · 可执行' : ''}</small></span></label>`,
+              `<label class="cr-choice"><input type="checkbox" name="project" value="${E(project.id)}" ${ids.has(project.id) ? 'checked' : ''}><span class="cr-choice-icon" aria-hidden="true">${icon('folder')}</span><span><strong>${E(project.alias || project.name || project.id)}</strong><small>项目允许：${project.mode === 'write' ? '可修改' : '只读'}${project.allow_tasks ? ' · 可执行' : ''}</small></span></label>`,
           )
           .join('')
       : '<p class="cr-muted">暂无可关联项目，房间仍然可以创建和聊天。</p>';
@@ -1096,7 +1100,7 @@ window.CodePierCollaboration = (() => {
     openPanel(
       'projects',
       '房间项目',
-      `${activeRoom() ? '' : `<p class="cr-info">${E(readOnlyReason())} 当前项目仅供查看。</p>`}<form data-cr-form="projects"><p class="cr-muted">关联项目后，可在成员里分配参与范围。</p><fieldset><legend class="sr-only">关联项目</legend>${projectOptions(state.room.projects || [])}</fieldset><div class="cr-impact" data-cr-project-impact hidden></div><button class="cr-button cr-primary" type="submit">保存项目</button></form>`,
+      `${activeRoom() ? '' : `<p class="cr-info">${E(readOnlyReason())} 当前项目仅供查看。</p>`}<form data-cr-form="projects"><p class="cr-muted">下方是项目允许的操作。关联项目不会自动扩大 dot 的权限，成员实际权限以单独授权的参与范围为准。</p><fieldset><legend class="sr-only">关联项目</legend>${projectOptions(state.room.projects || [])}</fieldset><div class="cr-impact" data-cr-project-impact hidden></div><button class="cr-button cr-primary" type="submit">保存项目</button></form>`,
       { version: state.room.version },
     );
   }
@@ -1402,7 +1406,8 @@ window.CodePierCollaboration = (() => {
       return null;
     }
     const epoch = state.epoch,
-      owner = state.owner;
+      owner = state.owner,
+      opening = panelEpoch;
     const requestBody = JSON.stringify({
       ...body,
       idempotency_key: body.idempotency_key || current?.key || store.key(),
@@ -1464,6 +1469,7 @@ window.CodePierCollaboration = (() => {
         body: requestBody,
       });
       if (owner !== state.owner) return null;
+      options.onConfirmed?.();
       if (epoch === state.epoch && response.room) {
         store.invalidateReads();
         store.applyRoom(response);
@@ -1478,6 +1484,10 @@ window.CodePierCollaboration = (() => {
         patchPending();
       }
       if (options.transient) throw error;
+      // A late rejection belongs to its original room and panel opening.
+      // Keep uncertain receipts above, but never overwrite a newer view.
+      if (epoch !== state.epoch || receipt.roomId !== state.roomId || opening !== panelEpoch)
+        throw error;
       if (current === panel) {
         panelError(error.message);
         if (error.status === 409) {
@@ -1665,18 +1675,68 @@ window.CodePierCollaboration = (() => {
         panelError('请核对当前的原步骤和原操作影响后，再次保存。');
         return;
       }
-      const result = await mutation('PUT', store.path() + '/projects', {
-        expected_version: current.version,
-        projects: selectedProjects(data.getAll('project')),
-      });
-      if (!result) return;
-      closePanel();
-      await store.refresh();
-      announce(
-        impact.removed.length
-          ? '房间项目已更新，移出范围的新步骤已停止准入。运行中原操作的停止请继续核对各自回执。'
-          : '房间项目已更新',
-      );
+      const save = form.querySelector('[type="submit"]'),
+        label = save.textContent,
+        owner = state.owner;
+      let result,
+        confirmed = false;
+      save.textContent = '正在保存项目…';
+      try {
+        result = await mutation(
+          'PUT',
+          store.path() + '/projects',
+          { expected_version: current.version, projects: selectedProjects(data.getAll('project')) },
+          current,
+          {
+            onConfirmed: () => {
+              confirmed = true;
+            },
+          },
+        );
+      } finally {
+        if (save.isConnected) save.textContent = label;
+      }
+      if (owner !== state.owner || current.roomId !== state.roomId) return;
+      const invalidation = current.accessInvalidation;
+      const receiptOnly =
+        confirmed &&
+        !result &&
+        !panel &&
+        invalidation?.owner === owner &&
+        invalidation.roomId === state.roomId &&
+        invalidation.epoch === state.epoch &&
+        invalidation.openingEpoch === root?.querySelector('dialog')?._crOpeningEpoch;
+      if (!result && !receiptOnly) return;
+      if (result) closePanel();
+      const completionEpoch = state.epoch,
+        completionOpeningEpoch = current.epoch;
+      const saved = impact.removed.length
+        ? '房间项目已保存，移出范围的新步骤已停止准入。运行中原操作的停止请继续核对各自回执。'
+        : '房间项目已保存。dot 的参与范围仍需在成员设置中单独授权。';
+      const savedFeedback = {
+        owner,
+        roomId: current.roomId,
+        epoch: completionEpoch,
+        openingEpoch: completionOpeningEpoch,
+        message: saved,
+      };
+      root._crProjectSaveFeedback = savedFeedback;
+      announce(saved);
+      try {
+        await store.refresh();
+        if (root?._crProjectSaveFeedback === savedFeedback) delete root._crProjectSaveFeedback;
+      } catch (error) {
+        // The PUT receipt already confirmed the save. A failed follow-up read
+        // must not look like an unsaved request or encourage another write.
+        if (
+          owner === state.owner &&
+          current.roomId === state.roomId &&
+          completionEpoch === state.epoch &&
+          completionOpeningEpoch === root?.querySelector('dialog')?._crOpeningEpoch &&
+          !panel
+        )
+          announce(saved + ' 视图刷新失败：' + error.message, true);
+      }
     } else if (type === 'member' || type === 'member-scope') {
       const project_scopes = formScopes(form);
       const lifetime =
@@ -3053,11 +3113,22 @@ window.CodePierCollaboration = (() => {
     source.addEventListener('access_changed', () => {
       if (!current()) return;
       // Clear the old projection before waiting on a new authorization check.
+      const invalidatedPanel = panel;
       closeHints();
       store.abort();
       store.clearWindows();
       root._restoringReading = false;
       closePanel();
+      // A project edit can invalidate its own room stream before its PUT
+      // response arrives. Retain only the identity of that closed submission,
+      // never its old projection or permission. A later panel changes the fence.
+      if (invalidatedPanel?.name === 'projects' && invalidatedPanel.busy)
+        invalidatedPanel.accessInvalidation = {
+          owner,
+          roomId,
+          epoch: state.epoch,
+          openingEpoch: invalidatedPanel.epoch,
+        };
       root.querySelector('.cr-panel-content').replaceChildren();
       const pending = root.querySelector('[data-cr-pending]');
       pending.replaceChildren();
@@ -3101,17 +3172,33 @@ window.CodePierCollaboration = (() => {
   async function poll() {
     if (!root || document.hidden || accessBlocked || S.page !== 'collaboration') return schedule();
     if (pollPromise) return pollPromise;
-    const epoch = state.epoch;
+    const epoch = state.epoch,
+      savedFeedback = root._crProjectSaveFeedback;
     pollPromise = (async () => {
       try {
         await store.refresh();
         if (epoch !== state.epoch) return;
+        if (root && root._crProjectSaveFeedback === savedFeedback)
+          delete root._crProjectSaveFeedback;
         if (panel?.name === 'member') await refreshFlow();
         if (panel?.name === 'weixin') await refreshChannel();
         if (panel?.name === 'work' && !panel.busy) await store.work(panel.work.id);
       } catch (error) {
-        if (error.name !== 'AbortError' && root)
-          announce('刷新暂时失败，草稿与原工作已保留。' + error.message, true);
+        if (error.name !== 'AbortError' && root && epoch === state.epoch) {
+          const saved = root._crProjectSaveFeedback;
+          const confirmed =
+            saved &&
+            saved.owner === state.owner &&
+            saved.roomId === state.roomId &&
+            saved.epoch === state.epoch &&
+            !panel &&
+            saved.openingEpoch === root.querySelector('dialog')?._crOpeningEpoch;
+          announce(
+            (confirmed ? saved.message + ' 视图刷新失败：' : '刷新暂时失败，草稿与原工作已保留。') +
+              error.message,
+            true,
+          );
+        }
       }
     })().finally(() => {
       pollPromise = null;
@@ -3197,7 +3284,25 @@ window.CodePierCollaboration = (() => {
             if (error.code === 'CONTEXT_VERSION_CHANGED') await store.refresh().catch(() => {});
             if (state.roomId === roomId && state.owner === owner) announce(error.message, true);
           });
-        } else if (event.target.matches('[data-cr-form]')) submitForm(event.target).catch(() => {});
+        } else if (event.target.matches('[data-cr-form]')) {
+          const current = panel,
+            owner = state.owner,
+            epoch = state.epoch;
+          if (current && !current.busy) panelError('');
+          submitForm(event.target).catch((error) => {
+            if (
+              error.name === 'AbortError' ||
+              current !== panel ||
+              owner !== state.owner ||
+              epoch !== state.epoch
+            )
+              return;
+            // mutation() owns HTTP/CAS messages; also surface failures thrown
+            // before it runs, while preserving this submission's precise hint.
+            const existing = root?.querySelector('[data-cr-panel-error]')?.textContent;
+            panelError(existing || error.message || '未能完成提交，请核对当前选择。');
+          });
+        }
       },
       { signal },
     );
