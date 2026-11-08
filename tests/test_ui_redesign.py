@@ -1,5 +1,6 @@
 """Command Deck: real browser, real isolated Hub + outbound Agent, no production data."""
 from tests.browser_launch import launch_browser
+from tests.screenshot_support import capture_painted_page
 import json
 import os
 import uuid
@@ -45,19 +46,6 @@ def layout(page, label):
     assert result['document'] <= result['width'], (label, result)
     assert not result['errors'], (label, result)
     return result
-
-
-def capture_painted_page(page, path):
-    # DOM visibility and loaded fonts do not guarantee a submitted capture frame.
-    # Wait for actual visible frames at the requested size, then capture once.
-    # A stalled renderer or screenshot protocol error still fails this test.
-    page.wait_for_function('''async expected => {
-      await document.fonts.ready;
-      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-      return document.visibilityState === 'visible' &&
-        innerWidth === expected.width && innerHeight === expected.height;
-    }''', arg=page.viewport_size, timeout=5000)
-    return page.screenshot(path=str(path), full_page=True, animations='disabled')
 
 
 @pytest.mark.parametrize('width,height', [(1440,1000),(768,1024),(390,844),(320,568)])

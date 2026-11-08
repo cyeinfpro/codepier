@@ -17,6 +17,7 @@ from playwright.sync_api import Page, expect, sync_playwright
 
 from shared.util import atomic_json
 from tests.browser_launch import launch_browser
+from tests.screenshot_support import capture_painted_page
 from tests.browser_support import login_panel as _login, set_appearance as _set_scheme
 from tests.test_chat_worker import FAKE
 
@@ -252,11 +253,7 @@ def exercise_matrix(stack, output: Path, *, screenshots: bool = True, schemes=SC
                         )
                         name = f"{scheme}-{width}-{route}.png"
                         if screenshots:
-                            page.screenshot(
-                                path=str(output / name),
-                                full_page=True,
-                                animations="disabled",
-                            )
+                            capture_painted_page(page, output / name)
                             report["screenshots"].append(name)
 
                     _navigate(page, "native")
@@ -270,11 +267,7 @@ def exercise_matrix(stack, output: Path, *, screenshots: bool = True, schemes=SC
                     assert not submitted, submitted
                     native_name = f"{scheme}-{width}-native.png"
                     if screenshots:
-                        page.screenshot(
-                            path=str(output / native_name),
-                            full_page=True,
-                            animations="disabled",
-                        )
+                        capture_painted_page(page, output / native_name)
                         report["screenshots"].append(native_name)
 
                     report["cases"].append(
