@@ -392,10 +392,15 @@ def _result(name, arguments, value, *, scopes=None):
     return rendered
 
 
-def result(name, arguments, value, *, scopes=None, view=2, verbosity='lean', text_mode='json', output_mode='raw'):
+def result(name, arguments, value, *, scopes=None, view=2, verbosity='lean', text_mode='json', output_mode='raw',
+           unified=False):
     from shared.mcp_presentation import token_view, compact_output_text
     rendered = _result(name, arguments, value, scopes=scopes)
     public = token_view(name, arguments, rendered['structuredContent'], view=view, verbosity=verbosity, output_mode=output_mode)
+    if unified:
+        # Presentation only: unified next-call hints and no duplicated output.
+        from shared.unified_contracts import present_unified
+        public = present_unified(public, verbosity=verbosity)
     rendered['structuredContent'] = public
     text_public = compact_output_text(public) if text_mode == 'compact' else public
     text = json.dumps(text_public, ensure_ascii=False, separators=(',', ':'))

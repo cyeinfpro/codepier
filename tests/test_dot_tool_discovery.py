@@ -20,7 +20,8 @@ class Gateway:
 
 
 def catalog(runtime, principal):
-    return ToolRouter(runtime.store, Gateway()).list_tools(principal)
+    # Legacy facade pruning is still served under profile=core.
+    return ToolRouter(runtime.store, Gateway()).list_tools(principal, profile='core')
 
 
 def test_read_catalog_prunes_controls_and_related_definitions(runtime):

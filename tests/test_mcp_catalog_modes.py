@@ -45,7 +45,10 @@ def test_http_catalog_and_hidden_route(api, modern):
     base = call(client, credential, 'tools/list', modern=modern).json()['result']
     lean = call(client, credential, 'tools/list', query='?profile=coding&schemas=lean', modern=modern).json()['result']
     assert {x['name'] for x in lean['tools']} <= CODING_TOOLS
-    assert 'get_access_context' in {x['name'] for x in base['tools']}
+    assert {'query', 'get_profile'} <= {x['name'] for x in base['tools']}
+    assert 'get_access_context' not in {x['name'] for x in base['tools']}
+    legacy = call(client, credential, 'tools/list', query='?profile=core', modern=modern).json()['result']
+    assert 'get_access_context' in {x['name'] for x in legacy['tools']}
     assert base['_meta']['com.codepier/catalogSha256'] != lean['_meta']['com.codepier/catalogSha256']
     result = call(client, credential, 'tools/call', {'name': 'get_access_context', 'arguments': {}},
                   query='?profile=coding&schemas=none', modern=modern).json()['result']

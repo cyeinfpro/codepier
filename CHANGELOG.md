@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased · 统一 query / act 工具目录
+
+- 默认 MCP 目录（profile=unified）改为 query（只读）、act（变更与执行）和保留的 get_profile，目录从 156,407 字符降到 5,368 字符。`?profile=core|full|coding` 原样保留旧目录，所有旧工具名（含 90 个旧协作名）仍可直接调用。
+- 每个统一调用只翻译成一个既有公开调用，再走原有 runtime.invoke 路径；授权、scope、幂等、恢复、审计与渲染不变。新增可达性测试：所有门面操作与 115 个协作 action 都有统一地址、内部目标字段均可表达、query 只到达无副作用目标。
+- act/query 默认在服务端按同一 operation_id 等待最多 30 秒（wait=0 关闭），不重启或重放操作。
+- 协作 begin/join 结果额外返回加密 handle（绑定用户与空间，7 天过期），后续调用传 handle 即可补齐会话、fence 与 proof；显式字段优先，原处理器照常校验。
+- 统一调用的回执去掉重复输出与成功终态下的恢复样板，next_call 提示指向统一地址；verbosity=full 保留完整回执。
+- 连接诊断的“当前目录”与默认目录保持一致（路由默认 profile 改为 unified）。
+
 ## 1.32.6 · 2026-11-08 · 房间项目保存反馈与权限说明
 
 - 明确区分项目允许的读写执行能力与房间成员实际授权范围，关联项目不会扩大成员权限。

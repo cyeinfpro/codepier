@@ -23,7 +23,7 @@ class ToolRouter:
         self.store, self.gateway = store, gateway
 
     @iam.read_decision
-    def definitions(self, principal, *, discovery=True, profile="core", schemas="full"):
+    def definitions(self, principal, *, discovery=True, profile="unified", schemas="full"):
         principal = refresh_principal(self.store, principal)
         native = tool_definitions(authorization=principal.authorization_mode)
         collaboration = getattr(self.store, "collaboration", None)
@@ -41,6 +41,19 @@ class ToolRouter:
         # Resolve against the full reserved namespace, before discovery projection.
         # Hiding a name is neither authorization nor permission for a gateway to claim it.
         if discovery:
+            if profile == 'unified':
+                from hub.unified_tools import tool_definitions as unified_definitions
+                from shared.unified_contracts import UNIFIED_TOOLS
+                if any(item['name'] in UNIFIED_TOOLS for item in external):
+                    raise DevError('TOOL_NAME_COLLISION', '远端工具不能覆盖统一工具 query/act', 409)
+                enabled = collaboration is not None and collaboration.config.enabled
+                # get_profile stays published: hosts use its openai/profile marker
+                # as the identity protocol, which a merged tool cannot carry.
+                identity = project_output_schemas(visible_definitions(
+                    [item for item in native if item['name'] == 'get_profile'], principal.scopes), schemas)
+                native = unified_definitions(principal.scopes, collaboration=enabled,
+                                             authorization=principal.authorization_mode) + identity
+                return principal, native, external
             if profile == 'coding':
                 native = [item for item in native if item['name'] in CODING_TOOLS]
             elif profile not in {'core', 'full'}:
@@ -53,7 +66,7 @@ class ToolRouter:
                         item['inputSchema'] = lean_input_schema(item['inputSchema'])
         return principal, native, external
 
-    def list_tools(self, principal, cursor=None, profile="core", schemas="full"):
+    def list_tools(self, principal, cursor=None, profile="unified", schemas="full"):
         principal, native, external = self.definitions(principal, profile=profile, schemas=schemas)
         from hub.gateway.catalog import page, fingerprint
         result = page(native + external, cursor,
@@ -70,6 +83,11 @@ class ToolRouter:
         if name in ADMIN_TOOLS:
             raise DevError('OWNER_REQUIRED', '此操作只接受已授权的管理入口', 403)
         principal, native, external = self.definitions(principal, discovery=False)
+        from shared.unified_contracts import UNIFIED_TOOLS
+        if name in UNIFIED_TOOLS:
+            # A call-shape adapter over the native facades; each translated call
+            # is re-resolved and re-authorized by the same native handlers.
+            return ToolRoute('native', name)
         from shared.public_collaboration import LEGACY_TOOLS
         collaboration = getattr(self.store, "collaboration", None)
         if name in LEGACY_TOOLS and collaboration is not None and collaboration.config.enabled:

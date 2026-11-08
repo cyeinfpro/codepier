@@ -79,9 +79,15 @@ def test_native_catalog_matches_read_scope_and_stable_identity(team):
         'jsonrpc':'2.0','id':1,'method':'tools/list','params':{}})
     tools=response.json()['result']['tools']
     names = {t['name'] for t in tools}
-    assert names == (CORE_TOOLS - {'exec', 'edit'}) | QUERY_TOOLS | {'get_profile', 'get_access_context'}
+    assert names - {'act'} == {'query', 'get_profile'}
+    if 'act' in names:  # read-only credentials only discover collaboration writes there
+        act = next(t for t in tools if t['name'] == 'act')
+        assert all(a.startswith('collab.') for a in act['inputSchema']['properties']['action']['enum'])
     assert len(tools) == len(names)
     assert next(t for t in tools if t['name']=='get_profile')['_meta']['openai/profile'] is True
+    legacy=b['alice'].post('/mcp?profile=core',headers={'Authorization':'Bearer '+g['token'],'Accept':'application/json, text/event-stream'},json={
+        'jsonrpc':'2.0','id':2,'method':'tools/list','params':{}}).json()['result']['tools']
+    assert {t['name'] for t in legacy} == (CORE_TOOLS - {'exec', 'edit'}) | QUERY_TOOLS | {'get_profile', 'get_access_context'}
 
 
 def test_first_pat_consent_atomic_and_fixed_grant_cannot_opt_in(gw):

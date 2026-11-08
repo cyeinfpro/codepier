@@ -12,6 +12,7 @@ from hub.db_worker import database_endpoint
 from hub.principal import refresh_principal
 from shared.public_collaboration import PUBLIC_TOOLS, LEGACY_TOOLS
 COLLABORATION_TOOLS = PUBLIC_TOOLS | LEGACY_TOOLS
+from shared.unified_contracts import UNIFIED_TOOLS
 from hub.collaboration.event_errors import CallbackEndpointError, event_error
 from hub.tool_router import ToolRouter
 from shared.role_contracts import ROLE_SCOPE
@@ -124,8 +125,8 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
             version=request.headers.get('mcp-protocol-version')
             if version and version not in LEGACY:return failure(identifier,-32600,'Unsupported MCP-Protocol-Version',400)
         mark('protocol_validated',protocol='modern' if modern else 'legacy')
-        profile=request.query_params.get('profile','core')
-        if profile not in {'core','full','coding'}:return failure(identifier,-32602,'Unknown MCP profile; choose core, full or coding',400)
+        profile=request.query_params.get('profile','unified')
+        if profile not in {'unified','core','full','coding'}:return failure(identifier,-32602,'Unknown MCP profile; choose unified, core, full or coding',400)
         schemas=request.query_params.get('schemas','full')
         if schemas not in {'full','lean','none'}:return failure(identifier,-32602,'Unknown schemas mode; choose full, lean or none',400)
         view=request.query_params.get('view','2')
@@ -135,6 +136,9 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
         if view not in {'1','2'} or verbosity not in {'lean','full'} or text_mode not in {'json','compact'} or output_mode not in {'raw','normalized'}:
             return failure(identifier,-32602,'Invalid presentation options: view=1|2, verbosity=lean|full, text=json|compact, output=raw|normalized',400)
         instructions=CORE_WORKFLOW_INSTRUCTIONS if view == '1' else CORE_INSTRUCTIONS
+        if profile=='unified':
+            from shared.unified_contracts import UNIFIED_INSTRUCTIONS
+            instructions=UNIFIED_INSTRUCTIONS
         if 'id' not in body:return Response(status_code=202)
         try:
             principal=await runtime.store.run(refresh_principal,runtime.store,principal)
@@ -189,6 +193,13 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                         result=await runtime.gateway.call(principal,name,arguments,lambda:auth.bearer(request),
                                                           request_key=metadata.get('codepier/idempotencyKey'))
                     else:
+                        plan=None
+                        if name in UNIFIED_TOOLS:
+                            # Translate once into the exact legacy public call; every
+                            # later step (trace, authorization, rendering) uses it.
+                            from hub import unified_tools
+                            plan=await unified_tools.prepare(runtime,name,arguments,principal)
+                            name,arguments=plan.tool,plan.args
                         if name not in COLLABORATION_TOOLS and arguments.get('project') and isinstance(arguments['project'],str):
                             project=await runtime.store.run(runtime.project, arguments['project'], principal)
                             try:
@@ -196,17 +207,23 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                                 request.state.codepier_call_trace=trace
                             except Exception:runtime.integrations.write_errors+=1
                         mark('invoke_started')
-                        value=await runtime.invoke(name,arguments,principal)
+                        if plan is not None:
+                            value,name,arguments=await unified_tools.execute(runtime,plan,principal)
+                        else:
+                            value=await runtime.invoke(name,arguments,principal)
                         principal=await runtime.store.run_read(auth.bearer,request)
                         if name == 'get_access_context':
                             value={**value,'gateway':await runtime.store.run(runtime.gateway.context,principal)}
                         if name in COLLABORATION_TOOLS:
                             media = value.pop('_mcp_media_content', [])
                             value=present(name,arguments,value)
+                            if plan is not None:
+                                from shared.unified_contracts import present_unified
+                                value=present_unified(value,verbosity=verbosity)
                             result={'content':[{'type':'text','text':json.dumps(value,ensure_ascii=False,separators=(',',':'))}, *media],
                                     'structuredContent':value,'isError':bool(value.get('error'))}
                         else:
-                            result=await runtime.store.run(mcp_apps.attach,core_result(name,arguments,value,scopes=principal.scopes,view=int(view),verbosity=verbosity,text_mode=text_mode,output_mode=output_mode),name,arguments,value,request_public_url)
+                            result=await runtime.store.run(mcp_apps.attach,core_result(name,arguments,value,scopes=principal.scopes,view=int(view),verbosity=verbosity,text_mode=text_mode,output_mode=output_mode,unified=plan is not None),name,arguments,value,request_public_url)
                         try:
                             await runtime.store.run(runtime.diagnostics.connection.returned, principal, name, arguments, value)
                         except Exception:

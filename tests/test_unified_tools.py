@@ -1,0 +1,317 @@
+"""The unified query/act tools must keep every capability and add none.
+
+Reachability is checked against the live registries, not a hand-written list:
+every legacy facade operation (hub.tool_discovery.catalogs) and every public
+collaboration action (shared.public_collaboration.ACTIONS) has exactly one
+unified address, every internal target field stays expressible, and query
+never reaches a mutation.
+"""
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+
+import pytest
+
+import shared.public_collaboration as pc
+from hub.principal import Principal
+from hub.tool_discovery import catalogs
+from hub import unified_tools as ut
+from shared import unified_contracts as u
+from shared.contracts import TOOLS
+from shared.util import DevError
+
+ME = Principal(actor='user:u1', user_id='u1', scopes={'read', 'write', 'execute'}, projects=[])
+KEY = 'k' * 12
+
+
+def run(coroutine):
+    return asyncio.run(coroutine)
+
+
+def legacy_pairs():
+    pairs = {(tool, op) for tool, ops in catalogs().items() for op in ops}
+    return pairs | {('get_profile', None), ('get_access_context', None), ('workspace', 'help')}
+
+
+def core_addresses():
+    found = {}
+    for unified in ('query', 'act'):
+        for action, views in u.CORE_ACTIONS[unified].items():
+            for view, (tool, op) in views.items():
+                found.setdefault((tool, op or u.IMPLICIT_OPERATION.get(tool)), []).append((unified, action, view))
+    return found
+
+
+def internal_target(tool, op):
+    if tool in {'get_profile', 'get_access_context'}:
+        return tool
+    return catalogs()[tool][op or u.IMPLICIT_OPERATION[tool]]
+
+
+def test_every_legacy_facade_operation_has_a_unified_address():
+    found = core_addresses()
+    missing = legacy_pairs() - set(found)
+    assert not missing
+    assert set(found) <= legacy_pairs()
+    # workspace.open is reachable read-only (query project) and with a baseline (act baseline).
+    assert {key for key, value in found.items() if len(value) > 1} == {('workspace', 'open')}
+
+
+def test_every_public_collaboration_action_has_exactly_one_address():
+    seen = {}
+    for unified in ('query', 'act'):
+        for action, views in u.COLLAB_ACTIONS[unified].items():
+            for view, (tool, op) in views.items():
+                assert view == op
+                seen.setdefault((tool, op), []).append((unified, action))
+    expected = {(tool, op) for tool, ops in pc.ACTIONS.items() for op in ops}
+    assert set(seen) == expected
+    assert all(len(addresses) == 1 for addresses in seen.values())
+    assert len(expected) == 115
+    assert all(tool == u.CQ for views in u.COLLAB_ACTIONS['query'].values() for tool, _ in views.values())
+    assert all(tool != u.CQ for views in u.COLLAB_ACTIONS['act'].values() for tool, _ in views.values())
+
+
+def test_legacy_collaboration_names_route_to_a_unified_address():
+    addresses = {(tool, op) for unified in ('query', 'act')
+                 for views in u.COLLAB_ACTIONS[unified].values() for tool, op in views.values()}
+    routed = 0
+    for name in pc.LEGACY_TOOLS:
+        try:
+            request = pc.request(name, {})
+        except ValueError:
+            continue  # Not a public action today; still routable by its legacy name.
+        routed += 1
+        assert (request['tool'], request['arguments']['action']) in addresses, name
+    assert routed >= 60
+
+
+def test_query_never_reaches_a_mutation():
+    for action, views in u.CORE_ACTIONS['query'].items():
+        if action == 'help':
+            continue
+        for view, (tool, op) in views.items():
+            target = internal_target(tool, op)
+            scope = TOOLS[target].scope
+            assert scope in {'read', 'devices.read'} or target in u.READ_ONLY_COMPUTER_TARGETS, (action, view, target)
+
+
+def test_query_rejects_baseline_capture():
+    with pytest.raises(DevError):
+        u.translate('query', {'action': 'project', 'project': 'P', 'args': {'capture_baseline': True}})
+    plan = u.translate('act', {'action': 'baseline', 'project': 'P'})
+    assert (plan.tool, plan.args) == ('workspace', {'operation': 'open', 'project': 'P', 'capture_baseline': True})
+
+
+@pytest.mark.parametrize('address', sorted(
+    (unified, action, view) for unified in ('query', 'act') for action, views in u.CORE_ACTIONS[unified].items()
+    for view in views if action != 'help'))
+def test_every_internal_target_field_stays_expressible(address):
+    unified, action, view = address
+    tool, op = u.CORE_ACTIONS[unified][action][view]
+    target = internal_target(tool, op)
+    wanted = set(TOOLS[target].model.model_fields) - {'operation'}
+    if tool == 'process':
+        wanted -= {'operation_id'}  # expressed as ids -> operation_ids
+    legacy = u.legacy_call(tool, op, {name: name for name in wanted})
+    placed = set(legacy) | set(legacy.get('options', {}))
+    assert wanted <= placed
+
+
+def test_translation_produces_valid_legacy_calls():
+    cases = [
+        ('act', {'action': 'exec', 'project': 'P', 'idempotency_key': KEY, 'command': 'ls'},
+         'exec', {'project': 'P', 'idempotency_key': KEY, 'command': 'ls'}),
+        ('act', {'action': 'edit', 'project': 'P', 'idempotency_key': KEY, 'path': 'a.txt', 'content': 'x',
+                 'expected_sha256': 'new'},
+         'write', {'operation': 'file', 'project': 'P', 'idempotency_key': KEY, 'path': 'a.txt', 'content': 'x',
+                   'expected_sha256': 'new'}),
+        ('act', {'action': 'edit', 'project': 'P', 'idempotency_key': KEY, 'path': 'a.txt',
+                 'edits': [{'old_text': 'a', 'new_text': 'b'}], 'expected_sha256': 'f' * 64},
+         'edit', {'operation': 'file', 'project': 'P', 'idempotency_key': KEY, 'path': 'a.txt',
+                  'edits': [{'old_text': 'a', 'new_text': 'b'}], 'expected_sha256': 'f' * 64}),
+        ('query', {'action': 'job', 'ids': ['a' * 32]}, 'process', {'operation': 'get', 'operation_ids': ['a' * 32]}),
+        ('query', {'action': 'job'}, 'process', {'operation': 'list'}),
+        ('query', {'action': 'file', 'project': 'P', 'path': 'README.md'},
+         'read', {'operation': 'file', 'project': 'P', 'path': 'README.md'}),
+        ('query', {'action': 'file', 'project': 'P', 'args': {'items': [{'path': 'a'}]}},
+         'read', {'operation': 'batch', 'project': 'P', 'options': {'items': [{'path': 'a'}]}}),
+        ('query', {'action': 'project', 'project': 'P'}, 'workspace', {'operation': 'open', 'project': 'P'}),
+        ('query', {'action': 'project'}, 'workspace', {'operation': 'list'}),
+        ('query', {'action': 'tree', 'project': 'P', 'args': {'depth': 3}},
+         'workspace', {'operation': 'tree', 'project': 'P', 'depth': 3}),
+        ('query', {'action': 'targets'}, 'vps', {}),
+        ('query', {'action': 'whoami'}, 'get_access_context', {}),
+        ('act', {'action': 'cancel', 'ids': ['b' * 32], 'idempotency_key': KEY},
+         'process', {'operation': 'cancel', 'operation_ids': ['b' * 32], 'idempotency_key': KEY}),
+    ]
+    for unified, raw, tool, args in cases:
+        plan = u.translate(unified, raw)
+        assert (plan.tool, plan.args) == (tool, args), raw
+        TOOLS[tool].model.model_validate(args)
+
+
+def test_collaboration_translation_keeps_the_public_action():
+    plan = u.translate('act', {'action': 'collab.send', 'view': 'room_reply',
+                               'args': {'body_text': 'hi', 'handle': 'cph1.x'}})
+    assert (plan.tool, plan.args, plan.handle, plan.wait) == ('collaboration', {'action': 'room_reply', 'body_text': 'hi'},
+                                                              'cph1.x', 0)
+    with pytest.raises(DevError):
+        u.translate('act', {'action': 'collab.room', 'view': 'room_update', 'args': {'action': 'pause'}})
+
+
+def test_translation_rejects_ambiguity_and_wrong_tool():
+    with pytest.raises(DevError):
+        u.translate('query', {'action': 'exec', 'project': 'P'})
+    with pytest.raises(DevError):
+        u.translate('act', {'action': 'exec', 'project': 'P', 'args': {'project': 'Q'}})
+    with pytest.raises(DevError):
+        u.translate('query', {'action': 'tree', 'ids': ['x']})
+    with pytest.raises(DevError):
+        u.translate('query', {'action': 'job', 'view': 'nope'})
+    with pytest.raises(DevError):
+        u.translate('query', {'action': 'file', 'unknown_top_level': 1})
+
+
+def test_hints_point_to_unified_addresses():
+    assert u.unified_hint('task_query', {'operation': 'wait', 'operation_ids': ['x'], 'wait_seconds': 10}) == {
+        'name': 'query', 'arguments': {'action': 'job', 'view': 'wait', 'ids': ['x'], 'args': {'wait_seconds': 10}}}
+    assert u.unified_hint('project_query', {'operation': 'open', 'project': 'P'}) == {
+        'name': 'query', 'arguments': {'action': 'project', 'project': 'P'}}
+    assert u.unified_hint('workspace', {'operation': 'open', 'project': 'P', 'capture_baseline': True}) == {
+        'name': 'act', 'arguments': {'action': 'baseline', 'project': 'P'}}
+    assert u.unified_hint('collaboration_query', {'action': 'room_inbox', 'conversation_id': 'c'}) == {
+        'name': 'query', 'arguments': {'action': 'collab.inbox', 'view': 'room_inbox', 'args': {'conversation_id': 'c'}}}
+    assert u.unified_hint('read', {'operation': 'changes', 'project': 'P', 'options': {'review_ref': 'r'}}) == {
+        'name': 'query', 'arguments': {'action': 'changes', 'project': 'P', 'args': {'review_ref': 'r'}}}
+    assert u.unified_hint('unknown', {}) is None
+
+
+def test_presentation_drops_duplicates_only():
+    receipt = {'operation_id': 'x', 'state': 'succeeded', 'pending': False, 'output': 'hello',
+               'next_call': None, 'recovery': {'task_state': 'succeeded', 'task_outcome_confirmed': True},
+               'result': {'ok': True, 'data': {'exit_code': 0, 'output': 'hello', 'command_ok': True,
+                                               'failure_context': {'category': 'succeeded'}, 'continuation': {'a': 1}}}}
+    lean = u.present_unified({'operations': [receipt]})['operations'][0]
+    assert lean['output'] == 'hello' and lean['result']['data']['output_at'] == 'output'
+    assert 'output' not in lean['result']['data'] and 'recovery' not in lean and 'next_call' not in lean
+    assert 'failure_context' not in lean['result']['data'] and 'continuation' not in lean['result']['data']
+    full = u.present_unified(receipt, verbosity='full')
+    assert full['result']['data']['output'] == 'hello' and 'recovery' in full
+    failed = u.present_unified({**receipt, 'state': 'failed', 'error': 'boom'})
+    assert 'recovery' in failed
+    pending = {'operation_id': 'x', 'pending': True, 'next_call': {'name': 'task_query', 'arguments': {
+        'operation': 'wait', 'operation_ids': ['x']}}}
+    assert u.present_unified(pending)['next_call'] == {'name': 'query', 'arguments': {
+        'action': 'job', 'view': 'wait', 'ids': ['x']}}
+
+
+def test_catalog_is_small_and_annotated():
+    definitions = ut.tool_definitions(None, collaboration=True)
+    assert [item['name'] for item in definitions] == ['query', 'act']
+    from shared.contracts import tool_definitions as legacy_definitions
+    identity = [item for item in legacy_definitions() if item['name'] == 'get_profile']
+    size = len(json.dumps(definitions + identity, ensure_ascii=False))
+    assert size <= 10_000, size
+    query, act = definitions
+    assert query['annotations']['readOnlyHint'] is True and act['annotations']['readOnlyHint'] is False
+    assert len(query['inputSchema']['properties']['action']['enum']) == 28
+    assert len(act['inputSchema']['properties']['action']['enum']) == 26
+    assert 'outputSchema' not in query
+
+
+def test_discovery_follows_scopes():
+    assert ut.visible_actions('act', {'read'}) == []
+    assert [item['name'] for item in ut.tool_definitions({'read'})] == ['query']
+    readable = ut.visible_actions('query', {'read'})
+    assert 'devices' not in readable and 'file' in readable and 'collab.inbox' not in readable
+    assert 'devices' in ut.visible_actions('query', {'read', 'devices.read'})
+    assert 'collab.inbox' in ut.visible_actions('query', {'read'}, collaboration=True)
+    writable = ut.visible_actions('act', {'read', 'write'})
+    assert 'edit' in writable and 'baseline' in writable and 'exec' not in writable
+    assert 'exec' in ut.visible_actions('act', {'read', 'execute'})
+    assert 'gui' in ut.visible_actions('act', {'read', 'computer'})
+
+
+class FakeStore:
+    def encrypt(self, value):
+        return base64.urlsafe_b64encode(value[::-1].encode()).decode()
+
+    def decrypt(self, value):
+        return base64.urlsafe_b64decode(value.encode()).decode()[::-1]
+
+    async def run(self, function, *args):
+        return function(*args)
+
+
+class FakeRuntime:
+    def __init__(self, responses):
+        self.responses, self.calls, self.store = list(responses), [], FakeStore()
+
+    async def invoke(self, name, arguments, principal):
+        self.calls.append((name, arguments))
+        return self.responses.pop(0)
+
+
+def test_handle_is_bound_to_identity_and_expires(monkeypatch):
+    store = FakeStore()
+    token = ut.mint_handle(store, ME, {'consumer_proof': 'p', 'consumer_fence': 3, 'ignored': 'x'})
+    assert ut.open_handle(store, ME, token) == {'consumer_proof': 'p', 'consumer_fence': 3}
+    other = Principal(actor='user:u2', user_id='u2', scopes={'read'}, projects=[])
+    with pytest.raises(DevError):
+        ut.open_handle(store, other, token)
+    with pytest.raises(DevError):
+        ut.open_handle(store, ME, 'cph1.not-a-token')
+    monkeypatch.setattr(ut.time, 'time', lambda: 10 ** 12)
+    with pytest.raises(DevError):
+        ut.open_handle(store, ME, token)
+
+
+def test_handle_replaces_repeated_consumer_credentials():
+    runtime = FakeRuntime([{'consumer_session_id': 's1', 'consumer_fence': 2, 'consumer_proof': 's' * 40},
+                           {'ok': True}])
+    begin = run(ut.prepare(runtime, 'act', {'action': 'collab.consume', 'view': 'consumer_begin', 'args': {
+        'project': 'P', 'dot_id': 'd1', 'binding_generation': 1, 'wake_ticket': 'w' * 32,
+        'consumer_run_id': 'r1', 'idempotency_key': KEY}}, ME))
+    value, name, args = run(ut.execute(runtime, begin, ME))
+    assert name == 'collaboration' and args['action'] == 'consumer_begin'
+    handle = value['handle']
+    beat = run(ut.prepare(runtime, 'act', {'action': 'collab.consume', 'view': 'consumer_heartbeat', 'args': {
+        'project': 'P', 'handle': handle, 'idempotency_key': KEY + 'x'}}, ME))
+    assert beat.args['consumer_session_id'] == 's1' and beat.args['consumer_fence'] == 2
+    assert beat.args['consumer_proof'] == 's' * 40 and beat.args['dot_id'] == 'd1'
+    pc.ADAPTERS['collaboration'].validate_python(beat.args)
+    explicit = run(ut.prepare(runtime, 'act', {'action': 'collab.consume', 'view': 'consumer_heartbeat', 'args': {
+        'project': 'P', 'handle': handle, 'consumer_fence': 5, 'idempotency_key': KEY + 'y'}}, ME))
+    assert explicit.args['consumer_fence'] == 5
+
+
+def test_inline_wait_polls_the_same_operation():
+    runtime = FakeRuntime([{'operation_id': 'op1', 'pending': True, 'state': 'queued'},
+                           {'operations': [{'operation_id': 'op1', 'pending': True, 'state': 'running'}]},
+                           {'operations': [{'operation_id': 'op1', 'pending': False, 'state': 'succeeded'}]}])
+    plan = run(ut.prepare(runtime, 'act', {'action': 'exec', 'project': 'P', 'idempotency_key': KEY,
+                                           'command': 'ls'}, ME))
+    value, name, args = run(ut.execute(runtime, plan, ME))
+    assert (name, args) == ('process', {'operation': 'wait', 'operation_ids': ['op1']})
+    assert value['operations'][0]['state'] == 'succeeded'
+    assert [call[0] for call in runtime.calls] == ['exec', 'process', 'process']
+    assert all(call[1]['operation_ids'] == ['op1'] for call in runtime.calls[1:])
+
+
+def test_wait_zero_returns_the_receipt():
+    runtime = FakeRuntime([{'operation_id': 'op1', 'pending': True}])
+    plan = run(ut.prepare(runtime, 'act', {'action': 'exec', 'project': 'P', 'idempotency_key': KEY,
+                                           'command': 'ls', 'wait': 0}, ME))
+    value, name, _ = run(ut.execute(runtime, plan, ME))
+    assert name == 'exec' and value['pending'] is True and len(runtime.calls) == 1
+
+
+def test_help_resolves_to_the_legacy_schema():
+    unified, action, view, tool, operation = u.resolve_help('job', 'wait')
+    assert (unified, action, view, tool, operation) == ('query', 'job', 'wait', 'process', 'wait')
+    assert u.resolve_help('exec')[3:] == ('exec', 'run')
+    assert u.resolve_help('collab.send', 'room_reply')[3:] == ('collaboration', 'room_reply')
+    assert u.resolve_help('workflow', 'update')[:3] == ('act', 'workflow', 'update')

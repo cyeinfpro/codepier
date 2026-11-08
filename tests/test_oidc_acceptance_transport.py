@@ -70,7 +70,7 @@ def test_acceptance_helper_roundtrips_real_mcp_without_panel_credentials(team):
     result = data(mcp_request(client, token, 'tools/call', {'name': 'get_profile', 'arguments': {}}))
     assert result['id'] == identity['id']
     catalog = required(mcp_request(client, token, 'tools/list'))['result']['tools']
-    assert any(tool['name'] == 'get_access_context' for tool in catalog)
+    assert any(tool['name'] == 'query' for tool in catalog)
     assert not client.cookies
 
 
