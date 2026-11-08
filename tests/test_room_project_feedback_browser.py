@@ -4,26 +4,46 @@ import json
 import pytest
 from playwright.sync_api import expect
 
-from tests.collaboration_support import collaboration_stack  # noqa: F401
+from tests.collaboration_support import collaboration_stack, key  # noqa: F401
 
 pytestmark = [pytest.mark.browser, pytest.mark.integration, pytest.mark.slow]
 
 
 def open_project_editor(page, stack):
+    # Room creation is not the behavior under test. Seed it before mounting
+    # the browser so its asynchronous creation/selection cannot overlap the
+    # project editor; the save, SSE, rejection and interruption paths stay real.
+    stack.must(stack.client.post('/api/collaboration/rooms', json={
+        'title': 'Project feedback fixture', 'idempotency_key': key(),
+        'projects': [{'project': stack.projects[0]['id'], 'environment_id': 'production'}],
+    }))
     page.goto(stack.url + '/#collaboration')
     page.fill('#username', 'admin')
     page.fill('#password', stack.password)
     page.click('#login-form button')
     expect(page.locator('.cr-shell')).to_be_visible()
-    page.locator('[data-cr-action="create"]:visible').first.click()
-    page.locator('[data-cr-form="create"] [name="title"]').fill('Project feedback fixture')
-    page.locator(f'[data-cr-form="create"] [value="{stack.projects[0]["id"]}"]').check()
-    page.locator('[data-cr-form="create"] button[type="submit"]').click()
-    expect(page.locator('dialog.cr-panel')).not_to_be_visible()
+    expect(page.locator('[data-cr-title]')).to_have_text('Project feedback fixture')
     expect(page.locator('[data-cr-project-count]')).to_have_text('项目 1')
     page.locator('.cr-room-actions [data-cr-action="projects"]').click()
     form = page.locator('[data-cr-form="projects"]')
-    form.locator(f'[value="{stack.projects[1]["id"]}"]').check()
+    try:
+        expect(form).to_be_visible()
+        form.locator(f'[value="{stack.projects[1]["id"]}"]').check()
+    except Exception:
+        # Failure-only shape diagnostics, never request bodies or credentials.
+        try:
+            print('PROJECT_EDITOR_SETUP', json.dumps(page.evaluate("""() => ({
+                shellCount: document.querySelectorAll('.cr-shell').length,
+                dialogOpen: document.querySelector('dialog.cr-panel')?.open ?? false,
+                formKinds: [...document.querySelectorAll('[data-cr-form]')].map(n => n.dataset.crForm),
+                projectButtons: [...document.querySelectorAll('.cr-room-actions [data-cr-action="projects"]')]
+                    .map(n => ({disabled: n.disabled, connected: n.isConnected})),
+                fixtureSelected: document.querySelector('[data-cr-title]')?.textContent === 'Project feedback fixture',
+                collaborationPage: typeof S !== 'undefined' && S.page === 'collaboration'
+            })"""), sort_keys=True))
+        except Exception:
+            print('PROJECT_EDITOR_SETUP unavailable')
+        raise
     expect(form).to_contain_text('成员实际权限以单独授权')
     expect(form.locator('small').first).to_contain_text('项目允许：')
     return form
