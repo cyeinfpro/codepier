@@ -12,7 +12,7 @@ mypy==2.4.0
 ast-serialize==0.12.1
 coverage==7.17.0
 certifi==2026.10.19
-filelock==4.2.1
+filelock==4.2.9
 platformdirs==4.12.3
 pluggy==1.7.0
 pycparser==3.1 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'
