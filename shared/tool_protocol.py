@@ -32,6 +32,8 @@ TOOL_WIRE_VERSIONS.update(agent_roots_get=2, agent_roots_preview=2, agent_roots_
 TOOL_WIRE_VERSIONS.update({name: 2 for name in (
     'incoming_upload_begin', 'incoming_upload_status',
     'incoming_upload_chunk', 'incoming_upload_finish')})
+# Knowledge storage must never fall back to a shell or legacy file primitive.
+TOOL_WIRE_VERSIONS.update(project_knowledge_build=2, project_knowledge_query=2)
 TOOL_MINIMUM_RELEASES: dict[str, tuple[int, int, int]] = {}
 MINIMUM_RELEASE = (1, 0, 0)
 

@@ -1,6 +1,6 @@
 # MCP 工具与调用约定
 
-基础目录有 13 个工具：九个开发原语 `workspace`、`read`、`write`、`edit`、`exec`、`process`、`vps`、`browser`、`computer`，两个专用只读查询 `project_query`、`task_query`，以及身份与当前权限 `get_profile`、`get_access_context`。协作开启后增加三个入口，标准目录合计 16 个；按授权可用的外部网关工具另外计算。
+基础目录有 15 个工具：九个开发原语 `workspace`、`read`、`write`、`edit`、`exec`、`process`、`vps`、`browser`、`computer`，两个专用只读查询 `project_query`、`task_query`，两个项目知识接口 `project_knowledge_build`、`project_knowledge_query`，以及身份与当前权限 `get_profile`、`get_access_context`。协作开启后增加三个入口，标准目录合计 18 个；按授权可用的外部网关工具另外计算。
 
 保留标准身份、原生附件写入和精确补丁各自的语义。此前已退役的旧开发工具仍返回 `TOOL_REMOVED`，`full`、`coding` 不恢复它们。1.20 对旧协作工具采用不同的兼容方式：旧名称不再出现在工具目录中，但已缓存客户端的调用继续进入相同权限检查和业务处理；不能用别名绕过功能开关或授权。
 
@@ -72,6 +72,10 @@ ChatGPT 内的项目选择与任务看板已移除。`workbench` 不再出现在
 只读发现从 `project_query` 开始，目录和技能读取无需调用混合工具。公开回执的等待、补读和追踪继续指向 `task_query`，保留原操作编号；捕获基线仍使用 `workspace`，显式取消仍使用 `process`。这些路由不改变实际授权，也不能保证宿主不再出现取消或拒绝提示。
 
 这两个专用入口标注为只读；混合读写的 `workspace/process/browser/computer` 保持保守的非只读注解。工具目录不注册 global/thread 工作台或自动展示模板。九个核心工具的 `outputSchema` 描述实际成功、错误、持久 pending 变体；错误/等待不是成功，仍须核对原操作编号、状态和退出码。
+
+## 项目知识地图
+
+`project_knowledge_build` 显式生成或刷新有界结构地图，要求 read + write 权限与幂等键；可补充经过当前源码 SHA 校验的摘要。`project_knowledge_query` 只读查询，逐条检查当前 SHA，过期摘要不返回。两者在 core、full、coding 目录可发现，查询不会隐式生成或调用模型。地图是非权威参考，不能授权执行；旧 Agent 不回退到 Shell。参数、配额和工作时自动参考见[项目知识地图](PROJECT_KNOWLEDGE.md)。
 
 ## 项目视图 v1 与动作诊断
 

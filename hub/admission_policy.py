@@ -13,7 +13,7 @@ from hub.scheduler_settings import public_snapshot
 from shared.scheduler_config import is_metadata_observation
 from shared.util import DevError
 
-READ_TOOLS = frozenset({"read", "fs_read", "fs_read_many", "fs_tree", "tasks_list"})
+READ_TOOLS = frozenset({"read", "fs_read", "fs_read_many", "fs_tree", "tasks_list", "project_knowledge_query"})
 ACTIVE_SQL = "state IN ('queued','running','reconnecting','cancelling')"
 MAX_NODE = 512
 MAX_PROJECT = 256

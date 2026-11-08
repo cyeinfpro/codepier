@@ -79,7 +79,7 @@ def test_native_catalog_matches_read_scope_and_stable_identity(team):
         'jsonrpc':'2.0','id':1,'method':'tools/list','params':{}})
     tools=response.json()['result']['tools']
     names = {t['name'] for t in tools}
-    assert names == (CORE_TOOLS - {'exec', 'edit'}) | QUERY_TOOLS | {'get_profile', 'get_access_context'}
+    assert names == (CORE_TOOLS - {'exec', 'edit'}) | QUERY_TOOLS | {'get_profile', 'get_access_context', 'project_knowledge_query'}
     assert len(tools) == len(names)
     assert next(t for t in tools if t['name']=='get_profile')['_meta']['openai/profile'] is True
 

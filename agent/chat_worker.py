@@ -24,6 +24,7 @@ MAX_EVENT = 256 * 1024
 
 
 from agent.chat_catalog import public_model, commands, CAPABILITIES, COMMANDS, validate_settings
+from agent.native_project_knowledge import NativeProjectKnowledge, reference_text
 
 
 def bounded_event(event):
@@ -112,6 +113,7 @@ class Protocol:
         self.message_serial = 0
         self.message_id = ""
         self.command_prompt = False
+        self.knowledge_context = None
 
     def call(self, method, params=None, tag=None):
         self.serial += 1
@@ -140,6 +142,7 @@ class Protocol:
             raise ValueError('Native session is not ready')
         images, files = image_inputs(payload.get('attachments', []), self.provider)
         text = payload['text']
+        reference = reference_text(self.knowledge_context, text, self.emit, receipt=receipt)
         if files:
             text += '\n\nAttached files:\n' + '\n'.join(files)
         self.active, self.interrupted, self.failure = receipt, False, None
@@ -147,11 +150,15 @@ class Protocol:
         self.command_prompt = self.provider=='pi' and payload['text'].lstrip().startswith('/')
         self.emit('user', receipt=receipt, text=payload['text'], attachments=[{'name': a.get('name', ''), 'mime': a.get('mime', '')} for a in payload.get('attachments', [])])
         if self.provider == 'pi':
-            self.call('prompt', {'message': text, **({'images': images} if images else {})}, 'prompt')
+            message = text + ('\n\n' + reference if reference else '')
+            self.call('prompt', {'message': message, **({'images': images} if images else {})}, 'prompt')
         else:
             self.turn_settings=dict(self.next_settings)
             self.turn_settings_receipt=self.next_settings_receipt
-            params = {'threadId': self.thread, 'input': [{'type': 'text', 'text': text}] + images, **self.turn_settings}
+            content = [{'type': 'text', 'text': text}] + images
+            if reference:
+                content.append({'type': 'text', 'text': reference})
+            params = {'threadId': self.thread, 'input': content, **self.turn_settings}
             self.turn_start_call = self.call('turn/start', params)
 
     def save_settings(self):
@@ -309,9 +316,16 @@ class Protocol:
             raise ValueError('Steer requires an observed active native turn; send a prompt while idle')
         images,files=image_inputs(payload.get('attachments',[]),self.provider)
         text=payload['text'] + ('\n\nAttached files:\n'+'\n'.join(files) if files else '')
+        reference = reference_text(self.knowledge_context, payload['text'], self.emit, receipt=receipt)
         self.emit('user',receipt=receipt,parent_receipt=self.active,steering=True,text=payload['text'],attachments=[{'name':a.get('name',''),'mime':a.get('mime','')} for a in payload.get('attachments',[])])
-        if self.provider=='pi': self.operation(receipt,'steer','steer',{'message':text,**({'images':images} if images else {})})
-        else: self.operation(receipt,'steer','turn/steer',{'threadId':self.thread,'expectedTurnId':self.turn,'input':[{'type':'text','text':text}]+images})
+        if self.provider=='pi':
+            message = text + ('\n\n' + reference if reference else '')
+            self.operation(receipt,'steer','steer',{'message':message,**({'images':images} if images else {})})
+        else:
+            content = [{'type':'text','text':text}] + images
+            if reference:
+                content.append({'type': 'text', 'text': reference})
+            self.operation(receipt,'steer','turn/steer',{'threadId':self.thread,'expectedTurnId':self.turn,'input':content})
 
     def interrupt(self):
         if not self.active:
@@ -718,6 +732,8 @@ def run(directory, sid, config_path=None):
             protocol = ClaudeProtocol(row['provider'], row, send, emit, finish, persist)
         else:
             protocol = Protocol(row['provider'], row, send, emit, finish, persist)
+        if config_path:
+            protocol.knowledge_context = NativeProjectKnowledge(directory, row, config_path)
         def receive_output(data):
             buffer = buffers[child.stdout]
             buffer.extend(data)

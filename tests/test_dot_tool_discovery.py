@@ -8,6 +8,7 @@ from jsonschema import Draft202012Validator
 from hub.core_tools import help_result, result as core_result
 from hub.tool_router import ToolRouter
 from shared.contracts import tool_definitions
+from shared.knowledge_contracts import KNOWLEDGE_TOOLS
 from shared.runtime_results import capability_index
 from shared.util import DevError
 from tests.test_core_tools import runtime, reader_principal
@@ -137,7 +138,8 @@ def test_schema_help_hints_share_one_policy_without_mutating_cached_schema(scope
         assert set(properties['operation']['enum']) == expected
     for item in projected:
         Draft202012Validator.check_schema(item['inputSchema'])
-    assert len(json.dumps(projected).encode()) < 95000
+    assert len(json.dumps([item for item in projected if item['name'] not in KNOWLEDGE_TOOLS]).encode()) < 95000
+    assert len(json.dumps([item for item in projected if item['name'] in KNOWLEDGE_TOOLS]).encode()) < 10000
 
 
 def test_result_hints_hide_unavailable_actions_preserve_original_evidence():

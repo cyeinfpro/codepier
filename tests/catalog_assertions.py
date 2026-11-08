@@ -1,11 +1,12 @@
 """Public catalogs contain core tools, explicit queries and stable identity tools."""
+from shared.knowledge_contracts import KNOWLEDGE_TOOLS
 from shared.core_contracts import CORE_TOOLS, REPLACED_MCP_TOOLS
 from shared.query_contracts import QUERY_TOOLS
 
 
-def assert_task_catalog(catalog, model_count=13, *, expected_names=None):
+def assert_task_catalog(catalog, model_count=15, *, expected_names=None):
     names = {tool['name'] for tool in catalog}
-    expected = (CORE_TOOLS | QUERY_TOOLS | {'get_profile','get_access_context'}
+    expected = (CORE_TOOLS | QUERY_TOOLS | KNOWLEDGE_TOOLS | {'get_profile','get_access_context'}
                 if expected_names is None else set(expected_names))
     assert len(catalog) == len(names) == len(expected)
     assert names == expected

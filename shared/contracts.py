@@ -536,6 +536,8 @@ from shared.core_contracts import register as register_core, CORE_TOOLS, CORE_IN
 register_core(Tool, TOOLS, OUTPUT_SCHEMAS)
 from shared.query_contracts import register as register_queries, QUERY_TOOLS
 register_queries(Tool, TOOLS, OUTPUT_SCHEMAS)
+from shared.knowledge_contracts import register as register_knowledge, KNOWLEDGE_TOOLS
+register_knowledge(Tool, TOOLS, OUTPUT_SCHEMAS)
 MUTATING = {name for name, tool in TOOLS.items() if tool.scope != 'read' and name not in COMPUTER_READ_TOOLS | READ_WITH_SCOPE}
 PROCESS_TOOLS |= {'exec', 'validation_run', 'lsp_query', 'worktrees_create', 'worktrees_remove'}
 
@@ -625,7 +627,7 @@ def _compact_input_schema(schema, *, output=False):
 
 
 CODING_TOOLS = frozenset({'project_query', 'task_query', 'workspace', 'read', 'write',
-                          'edit', 'exec', 'process', 'get_profile'})
+                          'edit', 'exec', 'process', 'get_profile'}) | KNOWLEDGE_TOOLS
 LEAN_OUTPUT_SCHEMA = {'type': 'object', 'additionalProperties': True,
     'properties': {'operation_id': {'type': 'string'}, 'pending': {'type': 'boolean'},
         'state': {'type': 'string'}, 'error': {'anyOf': [{'type': 'object'}, {'type': 'string'}, {'type': 'null'}]},
@@ -658,7 +660,7 @@ def tool_definitions(profile="core", authorization="fixed", schemas="full"):
              "annotations": {"readOnlyHint": t.scope in {"read", "devices.read"} or name in COMPUTER_READ_TOOLS, "destructiveHint": t.destructive,
                              "idempotentHint": True, "openWorldHint": t.scope in {"execute", "computer"}},
              "_meta": {"securitySchemes": [{"type": "oauth2", "scopes": [t.scope]}]}}
-            for name, t in TOOLS.items() if name in CORE_TOOLS | QUERY_TOOLS or name in {"get_profile", "get_access_context"}]
+            for name, t in TOOLS.items() if name in CORE_TOOLS | QUERY_TOOLS | KNOWLEDGE_TOOLS or name in {"get_profile", "get_access_context"}]
     if profile in {"full", "coding", "core"}:
         for definition in result:
             definition['inputSchema'] = _compact_input_schema(definition['inputSchema'])

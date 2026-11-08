@@ -4,10 +4,11 @@ import pytest
 from scripts.mcp_stdio_bridge import token_from_file
 from tests.support import BASE
 from tests.catalog_assertions import assert_task_catalog
+from shared.knowledge_contracts import KNOWLEDGE_TOOLS
 from shared.core_contracts import CORE_TOOLS
 from shared.query_contracts import QUERY_TOOLS
 
-@pytest.mark.parametrize('profile,count',[(None,13),('coding',9)])
+@pytest.mark.parametrize('profile,count',[(None,15),('coding',11)])
 def test_stdio_bridge_initialize_tools_read(stack,tmp_path,profile,count):
     f=tmp_path/'token.txt';f.write_text(stack.pat);f.chmod(0o600)
     env={**os.environ,'CODEPIER_TOKEN_FILE':str(f),'CODEPIER_HUB_URL':stack.url}
@@ -22,8 +23,8 @@ def test_stdio_bridge_initialize_tools_read(stack,tmp_path,profile,count):
     replies=[json.loads(l) for l in p.stdout.splitlines()];assert len(replies)==3
     assert replies[0]['result']['serverInfo']['name']=='codepier-agent'
     expected = ({'project_query', 'task_query', 'workspace', 'read', 'write',
-                 'edit', 'exec', 'process', 'get_profile'} if profile == 'coding'
-                else CORE_TOOLS | QUERY_TOOLS | {'get_profile', 'get_access_context'})
+                 'edit', 'exec', 'process', 'get_profile'} | KNOWLEDGE_TOOLS if profile == 'coding'
+                else CORE_TOOLS | QUERY_TOOLS | KNOWLEDGE_TOOLS | {'get_profile', 'get_access_context'})
     assert_task_catalog(replies[1]['result']['tools'], count, expected_names=expected)
     names={t['name'] for t in replies[1]['result']['tools']}
     assert expected == names

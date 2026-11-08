@@ -383,6 +383,7 @@ def open_workspace(engine, project, args):
                 'workspace_id': args.get('workspace_id', ''),
                 'authority_revision': project.get('_authority_revision'),
                 'instruction_index': context.get('instruction_index'),
+                'project_knowledge': context.get('project_knowledge'),
                 'limits': {k: args[k] for k in ('max_files', 'max_chars', 'include_skills')},
                 'permissions': {'mode': project['mode'], 'allow_tasks': project.get('allow_tasks'), 'granted_scopes': project.get('_coding_scopes'),
                                 'local_roots': engine.config.get('allowed_roots', [])}}

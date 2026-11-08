@@ -15,6 +15,7 @@ from collections import OrderedDict, deque
 from agent.chat_catalog import validate_settings
 from agent.chat_worker import Protocol, image_inputs
 from agent.claude_cli import CAPS, catalog
+from agent.native_project_knowledge import reference_text
 
 
 def text_content(value):
@@ -71,6 +72,7 @@ class ClaudeProtocol(Protocol):
         if text.split() and text.split()[0] in {'/clear', '/reset', '/resume', '/new'}:
             raise ValueError('请使用面板的新对话或恢复会话，不在同一记录内切换原生会话')
         images, files = image_inputs(payload.get('attachments', []), 'claude')
+        reference = reference_text(self.knowledge_context, text, self.emit, receipt=receipt)
         self.active, self.interrupted, self.failure = receipt, False, None
         self.streams.clear(); self.thoughts.clear(); self.tools.clear()
         self.message_streams.clear()
@@ -81,6 +83,8 @@ class ClaudeProtocol(Protocol):
         if files:
             text += '\n\nAttached files:\n' + '\n'.join(files)
         content = ([{'type': 'text', 'text': text}] if text else []) + images
+        if reference:
+            content.append({'type': 'text', 'text': reference})
         self.send({'type': 'user', 'uuid': str(uuid.uuid4()),
                    'session_id': self.thread or '', 'parent_tool_use_id': None,
                    'message': {'role': 'user', 'content': content}})
