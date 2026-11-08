@@ -15,17 +15,16 @@ from tests.collaboration_support import collab as collab, key
 from tests.test_room_migration_boundary import legacy, verify_legacy_member, activate
 from tests.test_weixin_qr_enrollment import confirm
 from tests.test_dot_weixin_channel import packet
+from tests.test_room_managed_work import save_room_permissions
 
 
 def install(c):
     c.s.config=replace(c.s.config,weixin_enabled=True)
     c.joined=asyncio.run(verify_legacy_member(c,c.member))
     assert activate(c)['activated']
-    room=c.s.rooms.read({'conversation_id':c.conversation_id},c.owner)['room']
-    c.s.rooms.projects({'conversation_id':c.conversation_id,'expected_version':room['version'],
-        'projects':[c.scope], 'member_approvals':[{'member_id':c.member['id'],
-            'project_scopes':[{'project_id':c.scope['project'],'environment_id':c.scope['environment_id'],
-                'capabilities':['read'],'execution_targets':[]}]}], 'idempotency_key':key()},c.owner)
+    save_room_permissions(c.s,c.owner,c.conversation_id,
+        [{'project_id':c.scope['project'],'environment_id':c.scope['environment_id'],
+          'capabilities':['read'],'execution_targets':[]}])
     c.member=c.s.rooms.member(c.member['id'],c.conversation_id)
     enqueued=[]
     original=c.s.room_consumers.enqueue

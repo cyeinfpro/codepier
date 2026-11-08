@@ -32,7 +32,7 @@ def run(coroutine):
 
 def legacy_pairs():
     pairs = {(tool, op) for tool, ops in catalogs().items() for op in ops}
-    return pairs | {('get_profile', None), ('get_access_context', None), ('workspace', 'help')}
+    return pairs | {(name, None) for name in u.KNOWLEDGE_TOOLS} | {('get_profile', None), ('get_access_context', None), ('workspace', 'help')}
 
 
 def core_addresses():
@@ -45,7 +45,7 @@ def core_addresses():
 
 
 def internal_target(tool, op):
-    if tool in {'get_profile', 'get_access_context'}:
+    if tool in u.STANDALONE_TOOLS:
         return tool
     return catalogs()[tool][op or u.IMPLICIT_OPERATION[tool]]
 
@@ -217,8 +217,8 @@ def test_catalog_is_small_and_annotated():
     assert size <= 10_000, size
     query, act = definitions
     assert query['annotations']['readOnlyHint'] is True and act['annotations']['readOnlyHint'] is False
-    assert len(query['inputSchema']['properties']['action']['enum']) == 28
-    assert len(act['inputSchema']['properties']['action']['enum']) == 26
+    assert len(query['inputSchema']['properties']['action']['enum']) == 29
+    assert len(act['inputSchema']['properties']['action']['enum']) == 27
     assert 'outputSchema' not in query
 
 
@@ -315,3 +315,58 @@ def test_help_resolves_to_the_legacy_schema():
     assert u.resolve_help('exec')[3:] == ('exec', 'run')
     assert u.resolve_help('collab.send', 'room_reply')[3:] == ('collaboration', 'room_reply')
     assert u.resolve_help('workflow', 'update')[:3] == ('act', 'workflow', 'update')
+
+
+@pytest.mark.parametrize('tool,action', [('query', 'source_check'), ('act', 'import')])
+def test_native_attachment_contract_and_legacy_translation(tool, action):
+    from jsonschema import Draft202012Validator
+    from hub.core_tools import public_call
+    file = {'file_id': 'synthetic-id', 'download_url': 'https://files.oaiusercontent.com/fixture'}
+    raw = {'action': action, 'project': 'P', 'file': file, 'args': {'idempotency_key': KEY}}
+    if action == 'import':
+        raw['args'].update(path='fixture.txt', expected_sha256='a' * 64)
+    definition = next(item for item in ut.tool_definitions() if item['name'] == tool)
+    assert definition['_meta']['openai/fileParams'] == ['file']
+    assert definition['annotations']['openWorldHint'] is True
+    Draft202012Validator(definition['inputSchema']).validate(raw)
+    plan = u.translate(tool, raw)
+    expected = public_call('inspect_file_source' if action == 'source_check' else 'download_artifact',
+                           {'project': 'P', 'file': file, **raw['args']})
+    assert plan.tool == 'write'
+    assert TOOLS['write'].model.model_validate(plan.args) == TOOLS['write'].model.model_validate(expected[1])
+    assert plan.args['file'] == file and 'file' not in plan.args.get('options', {})
+    TOOLS['write'].model.model_validate(plan.args)
+    nested = {**raw, 'args': {**raw['args'], 'file': file}}
+    with pytest.raises(DevError):
+        u.translate(tool, nested)
+    legacy_nested = {k: v for k, v in nested.items() if k != 'file'}
+    assert u.translate(tool, legacy_nested).args == plan.args
+
+
+def test_capability_help_hints_round_trip():
+    from shared.runtime_results import capability_index
+    for hint in capability_index('P').values():
+        rewritten = u.unified_hint(hint['name'], hint['arguments'])
+        plan = u.translate(rewritten['name'], rewritten['arguments'])
+        request = plan.help_for
+        _, _, _, tool, operation = u.resolve_help(request['action'], request['view'], request['tool'])
+        assert (tool, operation) == (hint['arguments']['tool'], hint['arguments']['action'])
+    unknown = {'operation': 'help', 'tool': 'unknown', 'action': 'unknown'}
+    assert u.unified_hint('project_query', unknown) is None
+
+
+@pytest.mark.parametrize('tool', ['query', 'act'])
+def test_native_attachment_rejects_malformed_identity(tool):
+    with pytest.raises(DevError):
+        u.translate(tool, {'action': 'source_check' if tool == 'query' else 'import',
+                           'file': {'download_url': 'https://files.oaiusercontent.com/fixture'}})
+
+
+@pytest.mark.parametrize('legacy_tool,operation', [('process', 'search_start'), ('process', 'validate'),
+                                                   ('workspace', 'tasks'), ('read', 'changes'),
+                                                   ('read', 'artifacts')])
+def test_rewritten_help_identifies_unified_target(legacy_tool, operation):
+    hint = u.unified_hint('project_query', {'operation': 'help', 'tool': legacy_tool, 'action': operation})
+    request = hint['arguments']['args']
+    assert request['tool'] in {'query', 'act'}
+    assert u.resolve_help(request['action'], request['view'], request['tool'])[3:] == (legacy_tool, operation)

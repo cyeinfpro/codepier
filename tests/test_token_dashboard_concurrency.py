@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import datetime
 import threading
 import time
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -148,6 +149,40 @@ def test_combined_overview_rechecks_short_retention_after_final_worker_wait(api,
     assert combined_phases == [1]
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "STATISTICS_CHANGED"
+
+
+@pytest.mark.parametrize("clock", ["wall", "monotonic"])
+def test_cache_hit_expiring_before_final_check_is_rejected_and_next_read_recovers(api, monkeypatch, clock):
+    """A cache hit cannot bypass either expiry clock after a DB-worker wait."""
+    import hub.token_dashboard as module
+    app, client, _token = api
+    first = client.get("/api/token-usage")
+    assert first.status_code == 200, first.text
+    run = app.state.store.run
+    real_time, real_monotonic = time.time, time.monotonic
+    advance, phases = [0], []
+    # Replace only this module's clock, never asyncio's process-wide clock.
+    monkeypatch.setattr(module, "time", SimpleNamespace(
+        time=lambda: real_time() + (advance[0] if clock == "wall" else 0),
+        monotonic=lambda: real_monotonic() + (advance[0] if clock == "monotonic" else 0),
+    ))
+
+    async def cross_expiry(function, *args, **kwargs):
+        result = await run(function, *args, **kwargs)
+        if function is module._prepare and result[1] is not None and not phases:
+            phases.append("cache_hit")
+            advance[0] = module.CACHE_SECONDS + 1
+        return result
+
+    monkeypatch.setattr(app.state.store, "run", cross_expiry)
+    expired = client.get("/api/token-usage")
+    assert phases == ["cache_hit"]
+    assert expired.status_code == 409, expired.text
+    assert expired.json()["error"]["code"] == "STATISTICS_CHANGED"
+    fresh = client.get("/api/token-usage")
+    assert fresh.status_code == 200, fresh.text
+    assert fresh.json()["freshness"]["age_seconds"] < module.CACHE_SECONDS
+    assert app.state.runtime._token_dashboard_service.computed == 2
 
 
 def test_same_scope_singleflight_survives_one_reader_cancellation(api, monkeypatch):

@@ -3,6 +3,8 @@ import json
 
 import pytest
 from tests.support import running_stack
+from tests.catalog_assertions import profile_catalog
+from shared.knowledge_contracts import KNOWLEDGE_TOOLS
 
 
 @pytest.fixture(scope='module')
@@ -19,9 +21,12 @@ def discovery_stack(tmp_path_factory):
 def test_http_catalog_help_and_bootstrap_share_current_scope(discovery_stack):
     stack = discovery_stack
     token = stack.discovery_reader
-    before = stack.rpc('tools/list', token_value=token).json()['result']
+    default = stack.rpc('tools/list', token_value=token).json()['result']
+    assert {tool['name'] for tool in default['tools']} == {'query', 'get_profile'}
+    before = profile_catalog(stack, 'core', token=token)
     tools = {tool['name']: tool for tool in before['tools']}
-    assert 'exec' not in tools and 'edit' not in tools
+    assert not {'exec', 'edit', 'project_knowledge_build'} & tools.keys()
+    assert 'project_knowledge_query' in tools
     assert tools['computer']['inputSchema']['properties']['operation']['enum'] == ['status']
     listed = stack.mcp('project_query', {'operation': 'help'}, token)
     assert not listed['isError']
@@ -40,12 +45,21 @@ def test_http_catalog_help_and_bootstrap_share_current_scope(discovery_stack):
             {'operation': 'get', 'operation_ids': [value['operation_id']]}, token)
         value = polled['structuredContent']['operations'][0]['result']['data']
     assert set(value['capability_index']) == {'search', 'changes', 'tasks', 'artifacts'}
-    after = stack.rpc('tools/list', token_value=token).json()['result']
+    assert stack.rpc('tools/list', token_value=token).json()['result'] == default
+    after = profile_catalog(stack, 'core', token=token)
+    # Modern envelopes have a fresh trace ID; every catalog field must remain stable.
+    request_id = 'com.codepier/requestId'
+    assert before['_meta'][request_id] != after['_meta'][request_id]
+    after['_meta'][request_id] = before['_meta'][request_id]
     assert before == after
     # A different grant on the same connection does not inherit the reader's catalog.
-    writer = stack.rpc('tools/list').json()['result']
+    writer_default = stack.rpc('tools/list').json()['result']
+    assert {tool['name'] for tool in writer_default['tools']} == {'query', 'act', 'get_profile'}
+    assert writer_default['_meta'] != default['_meta']
+    writer = profile_catalog(stack, 'core')
     assert 'exec' in {tool['name'] for tool in writer['tools']}
-    assert writer['_meta'] != after['_meta']
+    fingerprint = 'com.codepier/catalogSha256'
+    assert writer['_meta'][fingerprint] != after['_meta'][fingerprint]
     for profile in ('core', 'coding', 'full'):
         reply = stack.client.post('/mcp?profile=' + profile,
             headers={'Accept': 'application/json, text/event-stream',
@@ -53,8 +67,9 @@ def test_http_catalog_help_and_bootstrap_share_current_scope(discovery_stack):
             json={'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'}).json()['result']
         if profile == 'coding':
             coding_names = {'project_query', 'task_query', 'workspace', 'read', 'write',
-                            'edit', 'exec', 'process', 'get_profile'}
+                            'edit', 'exec', 'process', 'get_profile'} | KNOWLEDGE_TOOLS
             assert reply['tools'] == [tool for tool in before['tools'] if tool['name'] in coding_names]
+            assert len(reply['tools']) == 8
         else:
             assert reply['tools'] == before['tools']
     assert json.loads(listed['content'][0]['text']) == listed['structuredContent']

@@ -2,7 +2,7 @@
 
 让 ChatGPT 在你授权的电脑和服务器上读代码、改文件、跑测试，并拿到可核对的执行结果。
 
-[![Version](https://img.shields.io/badge/version-1.32.6-2563eb)](RELEASE.json)
+[![Version](https://img.shields.io/badge/version-1.33.0-2563eb)](RELEASE.json)
 [![License](https://img.shields.io/badge/license-MIT-16a34a)](LICENSE)
 
 CodePier 是自托管的 MCP 服务和开发面板。**Hub** 负责接入与管理，**Agent** 在 macOS、Windows 或 Linux 上运行本机工具。你也可以在网页里继续 Pi、Codex、Claude Code 会话，管理多台电脑和服务器。
@@ -21,10 +21,10 @@ CodePier 是自托管的 MCP 服务和开发面板。**Hub** 负责接入与管�
 
 ### 1. 安装 Hub
 
-服务器需准备 Git、Bash、Python 3.9+、Docker 和支持 `up --wait` 的 Docker Compose v2。以下安装本版本 **v1.32.6**，最新正式版本见 [Releases](https://github.com/cyeinfpro/codepier/releases/latest)：
+服务器需准备 Git、Bash、Python 3.9+、Docker 和支持 `up --wait` 的 Docker Compose v2。以下安装本版本 **v1.33.0**，最新正式版本见 [Releases](https://github.com/cyeinfpro/codepier/releases/latest)：
 
 ```bash
-git clone --branch v1.32.6 --depth 1 https://github.com/cyeinfpro/codepier.git
+git clone --branch v1.33.0 --depth 1 https://github.com/cyeinfpro/codepier.git
 cd codepier
 bash install.sh
 ```
@@ -63,6 +63,7 @@ https://你的域名/mcp
 
 | 场景 | 能做什么 |
 | --- | --- |
+| **项目知识地图** | 按当前源码 SHA 保存有界结构和摘要，读取文件及原生会话可自动参考；过期内容不作为当前结论，不自动调用模型或授予权限。[说明](docs/PROJECT_KNOWLEDGE.md) |
 | **真实项目开发** | 按授权目录搜索、读取、SHA 校验修改文件，审阅差异、运行命令与测试；需要时使用 worktree。 |
 | **原生 AI 编程会话** | 在网页继续 Pi、Codex、Claude Code 会话，查看历史、附件和审批；CLI 安装与登录留在 Agent 电脑。 |
 | **多电脑与 VPS** | 一台 Hub 接入多台 macOS、Windows、Linux Agent；通过项目访问已分配的 SSH 服务器。 |
@@ -76,6 +77,8 @@ CodePier **不提供模型服务**。只使用 MCP 文件与命令工具，不�
 清洁模式使用独立 HOME、缓存和非登录 Shell，并默认复用 Agent 执行账号已有的 GitHub CLI 登录、Git 全局配置和 SSH Agent。可在项目的 **执行环境 → 复用已有登录** 中逐项关闭。它**不是操作系统沙箱**：Shell 仍以本机 Agent 账号权限执行。依赖个人终端启动脚本、特殊签名或硬编码 HOME 的工具仍需配置。[项目运行时与边界](docs/PROJECT_RUNTIMES.md)
 
 ### 最近版本变化
+
+- **v1.33.0 — 统一工具、项目知识与房间权限**：默认使用 query / act 精简工具目录，保留旧接口；新增有界项目知识地图及自动参考；房间权限统一配置，微信可跟随或使用更小范围。
 
 - **v1.32.6 — 房间项目保存反馈**：区分项目能力与成员实际权限；保存错误保持可见，成功回执不再被权限刷新或后续读取失败覆盖。
 
@@ -98,6 +101,8 @@ CodePier **不提供模型服务**。只使用 MCP 文件与命令工具，不�
 - **v1.30.2 — 清洁模式授权复用**：默认复用既有 GitHub CLI、Git 配置及 SSH Agent，按项目可关闭，不会复制私钥或自动新增授权。
 
 版本功能是否已经运行，取决于实际部署的 **Hub、Agent 和客户端工具目录**，不能仅凭仓库代码或版本说明判断。[完整更新记录](CHANGELOG.md)
+
+默认 MCP 目录为 `query`、`act` 和身份入口 `get_profile`；原工具名继续可调用，`?profile=core|full|coding` 保留原目录。原生附件上传和帮助入口仍沿用原权限校验。[统一工具说明](docs/UNIFIED_TOOLS.md)
 
 ## 使用示例
 
@@ -148,9 +153,9 @@ CodePier **不提供模型服务**。只使用 MCP 文件与命令工具，不�
 
 ## 版本与许可
 
-当前仓库的 `RELEASE.json` 标记为 **1.32.6 / prepared / source-and-image**；可下载版本以 [Releases](https://github.com/cyeinfpro/codepier/releases/latest) 为准，`main` 可能包含尚未发布的改动。
+当前仓库的 `RELEASE.json` 标记为 **1.33.0 / prepared / source-and-image**；可下载版本以 [Releases](https://github.com/cyeinfpro/codepier/releases/latest) 为准，`main` 可能包含尚未发布的改动。
 
-- **Version:** 1.32.6
+- **Version:** 1.33.0
 - **License:** [MIT](LICENSE)
 
 第三方依赖保留各自许可证，见 `web/vendor/` 与 [MCP Apps 声明](web/mcp-apps/THIRD_PARTY_NOTICES.txt)。

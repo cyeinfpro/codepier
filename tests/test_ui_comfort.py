@@ -9,6 +9,7 @@ from scripts.ui_comfort_audit import MEASURE
 from tests.browser_launch import launch_browser
 from tests.test_ui_unification import _login, _navigate, _prepare_native_fixture, _set_scheme
 from tests.browser_support import chat_page
+from shared.audit_redaction import redact_text
 from shared.token_estimate import summarize, usage
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -112,9 +113,31 @@ def test_short_desktop_token_states_keep_figures_notes_and_actions_reachable(sta
         errors = []
         page.on('pageerror', lambda error: errors.append(str(error)))
 
+        responses = []
+
         def token_usage_fixture(route):
+            # Preserve the real status/body, recording only bounded diagnostic
+            # fields before substituting this layout test's summary.
+            recorded = {'state': selected['name']}
+            responses.append(recorded)
+            del responses[:-12]
             response = route.fetch()
+            recorded['status'] = response.status
             data = response.json()
+            if isinstance(data, dict):
+                failure = data.get('error')
+                code = failure.get('code') if isinstance(failure, dict) else None
+                recorded['error_code'] = (
+                    code if isinstance(code, str) and re.fullmatch(r'[A-Z0-9_]{1,64}', code)
+                    else None
+                )
+                freshness = data.get('freshness')
+                if isinstance(freshness, dict):
+                    recorded['freshness'] = {
+                        key: freshness[key]
+                        for key in ('as_of', 'age_seconds', 'max_cache_age_seconds')
+                        if type(freshness.get(key)) in (int, float)
+                    }
             data['summary'] = samples[selected['name']]
             route.fulfill(response=response, json=data)
 
@@ -166,6 +189,15 @@ def test_short_desktop_token_states_keep_figures_notes_and_actions_reachable(sta
             expect(card.locator('[data-token-filter=cache_read_percent]')).to_have_value('95')
             expect(card.locator('[data-token-export]')).to_be_visible()
             assert not errors
+        except Exception as error:
+            # Exception notes survive in pytest output/JUnit after managed
+            # scratch cleanup. Never record headers, cookies or response bodies.
+            error.add_note('Token dashboard diagnostics: ' + json.dumps({
+                'state': selected['name'],
+                'http': responses,
+                'pageerror': [redact_text(message)[:400] for message in errors[-8:]],
+            }, ensure_ascii=False))
+            raise
         finally:
             browser.close()
 

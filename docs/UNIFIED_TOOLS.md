@@ -1,7 +1,6 @@
 # Unified tools: `query` and `act`
 
-The default MCP catalog (`/mcp`, profile `unified`) publishes three tools, 5,368 characters in total
-(the previous default `core` + collaboration catalog was 156,407):
+The default MCP catalog (`/mcp`, profile `unified`) publishes at most three tools, filtered by current scopes:
 
 | Tool | Annotation | Purpose |
 | --- | --- | --- |
@@ -34,11 +33,11 @@ tool would force hosts to either approve every read or auto-approve every write.
 
 Each unified call is translated (`shared/unified_contracts.py`) into exactly one legacy public call
 (`workspace`, `read`, `write`, `edit`, `exec`, `process`, `vps`, `browser`, `computer`, `get_profile`,
-`get_access_context`, or one public collaboration tool) and then runs through the unchanged `runtime.invoke`
+`get_access_context`, `project_knowledge_query`, `project_knowledge_build`, or one public collaboration tool) and then runs through the unchanged `runtime.invoke`
 path (`hub/unified_tools.py`, `hub/mcp.py`). Authorization, scope checks, idempotency records, recovery, audit and
 rendering are the same code. `tests/test_unified_tools.py` enforces, against the live registries:
 
-* every legacy facade operation (`hub.tool_discovery.catalogs()`) and every one of the 115 public collaboration
+* every legacy facade operation (`hub.tool_discovery.catalogs()`), both standalone knowledge tools, and every one of the 115 public collaboration
   actions has a unified address;
 * every field of every internal target model stays expressible;
 * `query` only reaches targets with `read`/`devices.read` scope or side-effect-free computer reads
@@ -70,3 +69,32 @@ call returns the same structured result as the legacy call.
   in the unified catalog.
 * Initialize instructions describe the unified tools when the profile is `unified`.
 * Connection evidence compares the served catalog with the router default, which is now `unified`.
+
+### Native attachments and help pointers
+
+Native attachments use the top-level `file` field: `query(action="source_check", file=..., ...)`
+previews the source without saving it; `act(action="import", file=..., ...)` imports it under
+the existing write policy. Both catalogs advertise `openai/fileParams=["file"]`. Keep
+`download_url` and `file_id` in that native object, never move it into `args` for host
+attachment resolution. Existing nested callers remain compatible, but sending the same
+field at both levels is rejected. Import destinations remain `path`.
+
+Capability-index help pointers translate both the help call and its queried legacy
+tool/operation to unified action/view addresses. Following project-open → capability
+index → help preserves the original scope-filtered schema and does not authorize execution.
+
+### Project knowledge
+
+`query(action="knowledge", project="P", args={"query": "routing", "paths": ["src/app.py"]})`
+reads existing knowledge (default view `query`), without building or refreshing it.
+`act(action="knowledge", project="P", idempotency_key="knowledge-refresh-001",
+args={"max_files": 2000})` builds/refreshes it (default view `build`).
+Both route to the unchanged standalone tools and preserve their typed contracts, project
+authorization, source-SHA checks, idempotency and recovery. Build requires read + write;
+read-only credentials neither discover nor execute build.
+
+Discover the exact schema with `query(action="help", args={"action": "knowledge",
+"view": "query"})` (or `view: "build"` with write scope). Standalone help carries the original
+input/output schema plus a `unified_call` address. Existing `project_knowledge_query` and
+`project_knowledge_build` names remain callable and listed in explicit core/full/coding profiles.
+See [Project knowledge](PROJECT_KNOWLEDGE.md) for limits, freshness and trust boundaries.

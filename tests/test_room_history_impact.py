@@ -5,6 +5,7 @@ from shared.util import DevError
 from tests.collaboration_support import collab as collab, collaboration_stack as collaboration_stack, key
 from tests.test_collaboration_coordination import setup_goal
 from tests.test_room_goal_scope_boundaries import two_project_members, admit_read
+from tests.test_room_managed_work import save_room_permissions
 
 
 def test_more_than_one_hundred_original_goals_remain_reachable_when_an_old_goal_updates(collab):
@@ -56,11 +57,15 @@ async def test_project_removal_preview_is_read_only_and_matches_only_affected_or
     assert preview['read_only'] and not preview['grants_authority']
     assert {row['id'] for row in preview['impact']['work_items']} == {a_item['id']}
     assert {row['id'] for row in preview['impact']['operations']} == {a_op['operation_id']}
-    assert {row['member_id'] for row in preview['impact']['members']} == {lead['member_id']}
+    # Both member projections follow the room policy, while only the affected
+    # project's original work and operation receipts may be stopped.
+    assert {row['member_id'] for row in preview['impact']['members']} == {lead['member_id'], peer['member_id']}
     assert not preview['impact']['running_operations_confirmed_stopped']
-    applied = s.rooms.projects({'conversation_id': room['id'], 'expected_version': room['version'],
-        'projects': [{'project': 'otherproj'}], 'idempotency_key': key()}, owner)
-    assert set(applied['impact']['blocked_work_item_ids']) == {a_item['id']}
+    policy = s.room_permissions.read(room['id'], owner)
+    save_room_permissions(s, owner, room['id'], [rule for rule in policy['scope']['project_scopes']
+        if rule['project_id'] == 'otherproj'])
+    blocked = s.store.all("SELECT id FROM coordination_work WHERE goal_id=? AND state='blocked'", (goal['goal_id'],))
+    assert {item['id'] for item in blocked} == {a_item['id']}
     assert not s.store.one('SELECT cancel_requested FROM operations WHERE id=?', (b_op['operation_id'],))['cancel_requested']
     with pytest.raises(DevError) as stale:
         s.rooms.project_impact(request, owner)

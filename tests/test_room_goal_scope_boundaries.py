@@ -8,13 +8,30 @@ from hub.collaboration.common import digest
 from shared.util import DevError
 from tests.collaboration_support import collab as collab,key
 from tests.legacy_iam_fixture import seed_grant
-from tests.test_room_managed_work import connected,current_epoch
+from tests.test_room_managed_work import connected,current_epoch,save_room_permissions
 
 
 def worker_for(s,worker,name,scopes=('read','write'),projects=('proj','otherproj')):
     seed_grant(s.store,name,'owner',scopes=scopes,projects=projects)
     return replace(worker,grant_id=name,actor='mcp:'+name+':fixture',scopes=set(scopes),projects=list(projects))
 
+
+
+async def renew_consumer(s, identity, actor, old_credentials):
+    # Room-wide revocation fences every old turn, even when this host's
+    # original work is unaffected. Recover via the real subscription wake.
+    with pytest.raises(DevError) as stale:
+        s.room_consumers.authorize_member({**identity, **old_credentials}, actor, require_revision=False)
+    assert stale.value.code in {'DOT_CONSUMER_SCOPE_CHANGED', 'DOT_CONSUMER_FENCE_LOST'}
+    recovered = s.room_consumers.request_recovery({**identity, 'idempotency_key': key()}, actor)
+    assert recovered['wakeup_queued']
+    await s.events.tick()
+    ticket = next(payload['data']['wake_ticket'] for payload in reversed(s.native_test_callbacks)
+        if payload['data'].get('member_id') == identity['member_id'])
+    session = s.room_consumers.begin({**identity, 'wake_ticket': ticket,
+        'consumer_run_id': key(), 'idempotency_key': key()}, actor)
+    assert session['consumer_fence'] > old_credentials['consumer_fence']
+    return {k: session[k] for k in ('consumer_session_id', 'consumer_fence', 'consumer_proof')}
 
 def mutation(s,identity,credentials,goal_id,*,project='proj'):
     return {'project':project,'environment_id':'production','goal_id':goal_id,**credentials,
@@ -70,9 +87,9 @@ async def test_same_goal_work_handoff_uses_real_second_member_consumer(collab):
     first=worker_for(s,worker,'room-first',scopes=('read',),projects=('proj',))
     second=worker_for(s,worker,'room-second',scopes=('read',),projects=('otherproj',))
     projects=[{'project':'proj'},{'project':'otherproj'}]
-    rules=[{'project_id':'proj','capabilities':['read']}]
+    rules=[{'project_id':'proj','capabilities':['read']},{'project_id':'otherproj','capabilities':['read']}]
     s,owner,first,clock,lead,lead_credentials=await connected(collab,projects,rules,worker_override=first)
-    _,_,second,_,peer,peer_credentials=await connected(collab,scopes=[{'project_id':'otherproj','capabilities':['read']}],worker_override=second,conversation_id=lead['conversation_id'])
+    _,_,second,_,peer,peer_credentials=await connected(collab,worker_override=second,conversation_id=lead['conversation_id'])
     result,_=start(s,owner,first,lead,lead_credentials,participant_member_ids=[peer['member_id']])
     source=s.store.one('SELECT room_id FROM collaboration_messages WHERE id=(SELECT message_id FROM delegation_requests WHERE goal_id=?)',(result['goal_id'],))
     assert source['room_id'] is None
@@ -172,8 +189,8 @@ async def two_project_members(collab):
     a=worker_for(s,worker,'only-a',scopes=('read',),projects=('proj',))
     b=worker_for(s,worker,'only-b',scopes=('read',),projects=('otherproj',))
     s,owner,a,clock,lead,lead_credentials=await connected(collab,[{'project':'proj'},{'project':'otherproj'}],
-        [{'project_id':'proj'}],worker_override=a)
-    _,_,b,_,peer,peer_credentials=await connected(collab,scopes=[{'project_id':'otherproj'}],
+        [{'project_id':'proj'},{'project_id':'otherproj'}],worker_override=a)
+    _,_,b,_,peer,peer_credentials=await connected(collab,
         worker_override=b,conversation_id=lead['conversation_id'])
     goal,request=start(s,owner,a,lead,lead_credentials,participant_member_ids=[peer['member_id']])
     task=s.coordination.work_create({**mutation(s,lead,lead_credentials,goal['goal_id']),
@@ -207,15 +224,16 @@ async def test_removing_one_project_blocks_only_its_work_even_when_it_was_the_an
     first=s.store.one('SELECT * FROM coordination_work WHERE id=?',(goal['next_request']['arguments']['work_item_id'],))
     alease,aop=admit_read(s,lead,acred,a,goal['goal_id'],first,'proj')
     blease,bop=admit_read(s,peer,bcred,b,goal['goal_id'],task,'otherproj')
-    current=s.rooms.read({'conversation_id':lead['conversation_id']},owner)['room']
     remaining='otherproj' if removed=='proj' else 'proj'
-    s.rooms.projects({'conversation_id':lead['conversation_id'],'expected_version':current['version'],
-        'projects':[{'project':remaining}],'idempotency_key':key()},owner)
+    save_room_permissions(s,owner,lead['conversation_id'],[{'project_id':remaining}])
     blocked=first if removed=='proj' else task
     assert s.store.one('SELECT state FROM coordination_work WHERE id=?',(blocked['id'],))['state']=='blocked'
     assert s.room_runtime.goal(goal['goal_id'])['state']=='active'
     identity,credentials,actor,lease,op=(peer,bcred,b,blease,bop) if remaining=='otherproj' else (lead,acred,a,alease,aop)
     assert s.store.one('SELECT cancel_requested FROM operations WHERE id=?',(op['operation_id'],))['cancel_requested']==0
+    collab[6][0] += 91  # Original 90s consumer turn expires before the 300s work lease.
+    credentials=await renew_consumer(s,identity,actor,credentials)
+    lease={**lease,**credentials}
     done=report(s,identity,credentials,actor,goal['goal_id'],lease,op)
     assert done['state']=='succeeded'
     old_identity,old_credentials,old_actor,old_lease=(lead,acred,a,alease) if removed=='proj' else (peer,bcred,b,blease)

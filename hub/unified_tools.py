@@ -40,7 +40,7 @@ def visible_actions(tool, scopes=None, *, collaboration=False):
         if action == 'baseline' and scopes is not None and 'write' not in scopes:
             continue
         for legacy_tool, operation in spec.values():
-            if legacy_tool in {'get_profile', 'get_access_context'}:
+            if legacy_tool in u.STANDALONE_TOOLS:
                 allowed = scope_allows(legacy_tool, {}, scopes) is not False
             else:
                 allowed = (operation or u.IMPLICIT_OPERATION[legacy_tool]) in visible.get(legacy_tool, {})
@@ -61,6 +61,9 @@ def tool_definitions(scopes=None, *, collaboration=False, authorization='fixed')
                 'annotations': dict(u.ANNOTATIONS[tool]),
                 '_meta': {'securitySchemes': [{'type': 'oauth2', 'scopes': ['read']}],
                           'codepier/inputSchemaVersion': 'unified-v1'}}
+        if any(action in actions for action in ('source_check', 'import')):
+            item['_meta']['openai/fileParams'] = ['file']
+            item['annotations']['openWorldHint'] = True
         if authorization == 'role':
             from shared.role_contracts import ROLE_SCOPE
             schemes = [{'type': 'oauth2', 'scopes': [ROLE_SCOPE]}]
@@ -171,6 +174,18 @@ async def _prepare_help(runtime, plan, principal):
     if legacy_tool in {'get_profile', 'get_access_context'}:
         plan.local = {'tool': unified, 'action': action, 'view': view,
                       'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False},
+                      'unified_call': note}
+        return
+    if legacy_tool in u.KNOWLEDGE_TOOLS:
+        from shared.contracts import TOOLS, OUTPUT_SCHEMAS
+        from hub.tool_discovery import scope_allows
+        if not scope_allows(legacy_tool, {}, user.scopes):
+            raise DevError('INSUFFICIENT_SCOPE', '缺少知识地图权限', 403,
+                           required_scope=TOOLS[legacy_tool].scope)
+        plan.local = {'tool': unified, 'action': action, 'view': view,
+                      'description': TOOLS[legacy_tool].description,
+                      'inputSchema': TOOLS[legacy_tool].model.model_json_schema(),
+                      'outputSchema': OUTPUT_SCHEMAS[legacy_tool],
                       'unified_call': note}
         return
     plan.args = {'operation': 'help', 'tool': legacy_tool, 'action': operation}

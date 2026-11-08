@@ -166,7 +166,8 @@ def test_public_catalog_exposes_current_reply_and_delegation_contracts(bridge):
     tools = {item['name']: item for item in listed['tools']}
     assert {'collaboration_query', 'collaboration', 'collaboration_work'} <= tools.keys()
     expected = {item['name'] for item in core_definitions()} | PUBLIC_TOOLS
-    assert set(tools) == expected - {'exec', 'edit'}
+    assert set(tools) == expected - {'exec', 'edit', 'project_knowledge_build'}
+    assert 'project_knowledge_query' in tools and 'project_knowledge_build' not in tools
     assert len(listed['tools']) == len(tools)
     query = tools['collaboration_query']['inputSchema']
     assert {'timeline', 'thread', 'message_status', 'connection', 'inbox', 'dot_connection', 'dot_inbox'} <= set(
@@ -578,15 +579,16 @@ def test_public_profiles_keep_focused_coding_catalog_and_cached_aliases_still_wo
     from shared.public_collaboration import LEGACY_TOOLS
     b = bridge
     catalogs = []
-    expected = ({item['name'] for item in core_definitions()} | PUBLIC_TOOLS) - {'exec', 'edit'}
+    denied_tools = {'exec', 'edit', 'project_knowledge_build'}
+    expected = ({item['name'] for item in core_definitions()} | PUBLIC_TOOLS) - denied_tools
     for profile in ('core', 'full', 'coding'):
         listing = rpc(b, 'tools/list', profile=profile).json()['result']['tools']
         names = {item['name'] for item in listing}
-        profile_expected = ({'project_query', 'task_query', 'workspace', 'read',
-                             'write', 'process', 'get_profile'} if profile == 'coding'
-                            else expected)
+        profile_expected = ({item['name'] for item in core_definitions('coding')} - denied_tools
+                            if profile == 'coding' else expected)
         assert len(listing) == len(names) and names == profile_expected
-        assert not names.intersection(LEGACY_TOOLS)
+        assert not names.intersection(LEGACY_TOOLS | denied_tools)
+        assert 'project_knowledge_query' in names
         catalogs.append(names)
     assert catalogs[0] == catalogs[1] and catalogs[2] < catalogs[0]
     old = tool(b, 'collaboration_read', {**b.scope, 'kind': 'join_slots'})

@@ -15,7 +15,7 @@ from shared.contracts import OUTPUT_SCHEMAS
 from shared.computer_contracts import NATIVE_ACTIONS
 from tests.browser_launch import launch_browser
 from tests.support import running_stack, wait_for
-from tests.catalog_assertions import assert_task_catalog
+from tests.catalog_assertions import assert_task_catalog, profile_catalog
 from tests.test_computer import fixture_provider
 
 @pytest.fixture(scope='module')
@@ -77,8 +77,10 @@ def test_scope_catalog_and_status_never_expand_existing_grants(desktop):
     status,_=rpc(s,'computer_status',{'probe':True})
     assert status['capabilities_verified'] and len(status['native_tools'])==10
     assert status['screen_permissions_verified'] is False
-    out=s.rpc('tools/list').json()['result']['tools']
-    assert_task_catalog(out, 13)
+    default=s.rpc('tools/list').json()['result']['tools']
+    assert_task_catalog(default, 3, expected_names={'query', 'act', 'get_profile'})
+    out=profile_catalog(s, 'core')['tools']
+    assert_task_catalog(out, 15)
     assert not {'integration_control','validations_accept'} & {t['name'] for t in out}
     definition=next(t for t in out if t['name']=='computer')
     assert set(definition['_meta']['securitySchemes'][0]['scopes'])=={'read'}

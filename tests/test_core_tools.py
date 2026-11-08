@@ -14,6 +14,7 @@ from hub.store import Store
 from hub.vps import VPSInput, VPSAssignments
 from hub.core_tools import result as core_result
 from scripts.mcp_stdio_bridge import prepare_request
+from shared.knowledge_contracts import KNOWLEDGE_TOOLS
 from shared.contracts import TOOLS, tool_definitions
 from shared.crypto import digest, token
 from shared.tool_protocol import wire_version, negotiate, require_compatible
@@ -76,9 +77,10 @@ def file_call(agent, name, **args):
 
 def test_catalog_compact_and_legacy_compatibility():
     core = tool_definitions('core')
-    assert {t['name'] for t in core} == CORE_TOOLS | QUERY_TOOLS | {'get_profile', 'get_access_context'}
-    # Typed outcomes plus explicit query tools: measured ~85 KB; retain a bounded catalog.
-    assert len(json.dumps(core).encode()) < 95000
+    assert {t['name'] for t in core} == CORE_TOOLS | QUERY_TOOLS | KNOWLEDGE_TOOLS | {'get_profile', 'get_access_context'}
+    # Preserve the original catalog budget; two typed knowledge APIs have a separate cap.
+    assert len(json.dumps([item for item in core if item['name'] not in KNOWLEDGE_TOOLS]).encode()) < 95000
+    assert len(json.dumps([item for item in core if item['name'] in KNOWLEDGE_TOOLS]).encode()) < 10000
     assert {'browser', 'computer', 'exec', 'edit'} <= {t['name'] for t in tool_definitions('full')}
     assert not {'browser_open', 'computer_action', 'vps_exec', 'fs_read', 'shell_exec'} & {t['name'] for t in tool_definitions('full')}
     with pytest.raises(DevError, match='不兼容'):
@@ -295,12 +297,12 @@ async def test_complete_capability_discovery_and_no_unmapped_public_tool(runtime
     from shared.agent_roots_contracts import PANEL_ROOTS_TOOLS
     assert PANEL_RUNTIME_TOOLS == {'project_runtime_get', 'project_runtime_set'}
     assert PANEL_ROOTS_TOOLS == {'agent_roots_get', 'agent_roots_preview', 'agent_roots_set'}
-    assert set(TOOLS) - CORE_TOOLS - QUERY_TOOLS - set(REPLACED_MCP_TOOLS) - INCOMING_UPLOAD_TOOLS == {
+    assert set(TOOLS) - CORE_TOOLS - QUERY_TOOLS - KNOWLEDGE_TOOLS - set(REPLACED_MCP_TOOLS) - INCOMING_UPLOAD_TOOLS == {
         'integration_control', 'validations_accept', 'get_profile', 'get_access_context',
         *PANEL_RUNTIME_TOOLS, *PANEL_ROOTS_TOOLS}
     from shared.contracts import CODING_TOOLS
     for profile in ('core', 'coding', 'full'):
-        expected = CODING_TOOLS if profile == 'coding' else CORE_TOOLS | QUERY_TOOLS | {'get_profile', 'get_access_context'}
+        expected = CODING_TOOLS if profile == 'coding' else CORE_TOOLS | QUERY_TOOLS | KNOWLEDGE_TOOLS | {'get_profile', 'get_access_context'}
         assert {t['name'] for t in tool_definitions(profile)} == expected
     from hub.core_tools import help_result
     for name, operations in CORE_ACTIONS.items():
@@ -374,7 +376,19 @@ def test_schema_refactoring_preserves_existing_definitions_and_type_unions():
     snapshot = deepcopy(original)
     reduced = factor(factor(original))
     assert original == snapshot
-    assert reduced['$defs']['r0'] == {'type': 'integer'}
+    # Private definition names/layout may change or be inlined; the existing
+    # reference must still resolve to its exact original integer constraint.
+    def resolve(node):
+        if '$ref' in node:
+            assert node['$ref'].startswith('#/$defs/')
+            name = node['$ref'][len('#/$defs/'):].replace('~1', '/').replace('~0', '~')
+            return resolve(reduced['$defs'][name])
+        return node
+    assert resolve(reduced['properties']['id']) == original['$defs']['r0']
+    for name in ('a', 'b', 'c'):
+        assert resolve(reduced['properties'][name]) == {'type': ['string', 'null']}
+    nested = resolve(reduced['properties']['nested'])
+    assert resolve(nested['properties']['value']) == {'type': ['string', 'null']}
     cases = [{'id': 1}, {'id': 1, 'a': None, 'b': 'x', 'nested': {'value': 'y'}},
              {'id': 'wrong'}, {'id': 1, 'a': 4}, {'id': 1, 'nested': {'value': False}},
              {'id': 1, 'unexpected': True}]

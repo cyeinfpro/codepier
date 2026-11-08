@@ -132,12 +132,142 @@ def factor(schema):
     import json
     from collections import Counter
 
+    # Moving a scoped/anchored or recursive resource can change its meaning.
+    # This catalog optimizer deliberately leaves such schemas untouched. It
+    # never resolves external references or fetches another schema.
+    if not isinstance(schema, dict):
+        return deepcopy(schema)
+    original_defs = schema.get('$defs', {})
+    local_targets = {'#/$defs/' + name.replace('~', '~0').replace('/', '~1'): name
+                     for name in original_defs}
+
+    def reference_nodes(node):
+        if isinstance(node, dict):
+            yield node
+            for child in node.values():
+                yield from reference_nodes(child)
+        elif isinstance(node, list):
+            for child in node:
+                yield from reference_nodes(child)
+
+    nodes = list(reference_nodes(schema))
+
+    def known_nodes(node):
+        if not isinstance(node, dict):
+            return
+        yield node
+        for field in ('properties', 'patternProperties', '$defs'):
+            for child in node.get(field, {}).values():
+                yield from known_nodes(child)
+        for field in ('items', 'additionalProperties', 'not'):
+            if isinstance(node.get(field), dict):
+                yield from known_nodes(node[field])
+        for field in ('anyOf', 'oneOf', 'allOf', 'prefixItems'):
+            for child in node.get(field, []):
+                yield from known_nodes(child)
+
+    visited_nodes = {id(node) for node in known_nodes(schema)}
+    if any('$ref' in node and id(node) not in visited_nodes for node in nodes):
+        return deepcopy(schema)
+    if any(set(node) & {'$id', '$anchor', '$dynamicAnchor', '$dynamicRef', '$recursiveRef',
+                       '$recursiveAnchor', 'if', 'then', 'else', 'dependentSchemas', 'contains',
+                       'propertyNames', 'unevaluatedProperties', 'unevaluatedItems',
+                       'definitions', 'dependencies', 'additionalItems'}
+           or ('$ref' in node and node['$ref'] not in local_targets) for node in nodes):
+        return deepcopy(schema)
+    dependencies = {name: {local_targets[node['$ref']]
+                          for node in reference_nodes(value) if '$ref' in node}
+                    for name, value in original_defs.items()}
+    visited, visiting = set(), set()
+
+    def acyclic(name):
+        if name in visiting:
+            return False
+        if name in visited:
+            return True
+        visiting.add(name)
+        if not all(acyclic(other) for other in dependencies[name]):
+            return False
+        visiting.remove(name)
+        visited.add(name)
+        return True
+
+    if not all(acyclic(name) for name in original_defs):
+        return deepcopy(schema)
+
+    def group_required(branches):
+        # (C and A) or (C and B) == C and (A or B), on the same instance.
+        # Only explicit required clauses in anyOf participate. References,
+        # conditionals and oneOf multiplicity are never moved or regrouped.
+        def size(value):
+            return len(json.dumps(value, separators=(',', ':')))
+        while True:
+            fields = {field for branch in branches if isinstance(branch, dict)
+                      and not set(branch) & {'$ref', 'if', 'then', 'else', 'anyOf', 'oneOf'}
+                      for field in branch.get('required', [])}
+            best = None
+            for field in sorted(fields):
+                selected = [index for index, branch in enumerate(branches)
+                            if isinstance(branch, dict) and field in branch.get('required', [])
+                            and not set(branch) & {'$ref', 'if', 'then', 'else', 'anyOf', 'oneOf'}]
+                if len(selected) < 2:
+                    continue
+                common = set.intersection(*(set(branches[index]['required']) for index in selected))
+                grouped = []
+                for index in selected:
+                    branch = deepcopy(branches[index])
+                    branch['required'] = [name for name in branch['required'] if name not in common]
+                    if not branch['required']:
+                        branch.pop('required')
+                    grouped.append(branch)
+                combined = {'required': [name for name in branches[selected[0]]['required'] if name in common],
+                            'anyOf': grouped}
+                candidate = [combined if index == selected[0] else branch
+                             for index, branch in enumerate(branches)
+                             if index == selected[0] or index not in selected]
+                saving = size(branches) - size(candidate)
+                if saving > 0 and (best is None or saving > best[0]):
+                    best = saving, candidate
+            if best is None:
+                return branches
+            branches = best[1]
+
     def compact_types(node):
         if isinstance(node, list):
             return [compact_types(item) for item in node]
         if not isinstance(node, dict):
             return node
-        result = {key: compact_types(value) for key, value in node.items()}
+        result = deepcopy(node)
+        for field in ('properties', 'patternProperties', '$defs'):
+            if field in node:
+                result[field] = {key: compact_types(value) for key, value in node[field].items()}
+        for field in ('items', 'additionalProperties', 'not'):
+            if isinstance(node.get(field), dict):
+                result[field] = compact_types(node[field])
+        for field in ('anyOf', 'oneOf', 'allOf', 'prefixItems'):
+            if field in node:
+                result[field] = [compact_types(value) for value in node[field]]
+        # Every branch is conjoined with its parent. Keep an identical
+        # constraint once at the parent, including required/optional fields.
+        # Conflicting or narrower branch constraints remain in that branch.
+        for field in ('anyOf', 'oneOf', 'allOf'):
+            for branch in result.get(field, []):
+                if not isinstance(branch, dict):
+                    continue
+                if result.get('type') == branch.get('type'):
+                    branch.pop('type', None)
+                if (isinstance(result.get('properties'), dict) and isinstance(branch.get('properties'), dict)
+                        and branch.get('additionalProperties', True) is True
+                        and 'unevaluatedProperties' not in branch):
+                    branch['properties'] = {key: value for key, value in branch['properties'].items()
+                                            if json.dumps(value, sort_keys=True) !=
+                                            json.dumps(result['properties'].get(key), sort_keys=True)}
+                    if not branch['properties']:
+                        branch.pop('properties')
+        if result.get('required') == []:
+            result.pop('required')
+        if isinstance(result.get('anyOf'), list):
+            result['anyOf'] = group_required(result['anyOf'])
         # JSON Schema defaults additionalProperties to true. Removing only
         # this explicit default is equivalent and keeps additive variants small.
         if result.get('additionalProperties') is True:
@@ -158,6 +288,8 @@ def factor(schema):
         return json.dumps(node, sort_keys=True, separators=(',', ':'))
 
     def children(node):
+        if not isinstance(node, dict):
+            return
         for name in ('properties', 'patternProperties', '$defs'):
             yield from node.get(name, {}).values()
         for name in ('items', 'additionalProperties', 'not'):
@@ -178,13 +310,16 @@ def factor(schema):
     reserved = set(schema.get('$defs', {}))
 
     def reduce(node, *, inline=False):
+        if not isinstance(node, dict):
+            return deepcopy(node)
         fingerprint = key(node)
         if not inline and counts[fingerprint] > 1:
             if fingerprint not in names:
                 index = len(names)
-                while 'r' + str(index) in reserved:
+                name = chr(97 + index) if index < 26 else 'r' + str(index)
+                while name in reserved:
                     index += 1
-                name = 'r' + str(index)
+                    name = chr(97 + index) if index < 26 else 'r' + str(index)
                 reserved.add(name)
                 names[fingerprint] = name
                 definitions[name] = reduce(node, inline=True)
@@ -210,6 +345,71 @@ def factor(schema):
         result['additionalProperties'] = True
     if definitions:
         result['$defs'] = {**result.get('$defs', {}), **definitions}
+
+    # Factoring a parent can leave its children referenced just once. Count the
+    # resulting graph, not the original tree, and inline references that cost
+    # more than their definition saves. Recount after every replacement: one
+    # inlined parent may expose several references to another definition.
+    candidates_left = set(result.get('$defs', {}))
+    while candidates_left:
+        references = Counter()
+        protected = set()
+        local_refs = {'#/$defs/' + name.replace('~', '~0').replace('/', '~1')
+                      for name in candidates_left}
+
+        def count_references(node):
+            if not isinstance(node, dict):
+                return
+            if node.get('$ref') in local_refs:
+                references[node['$ref']] += 1
+                if set(node) - {'$ref', 'title', 'description', 'deprecated', 'readOnly', 'writeOnly'}:
+                    protected.add(node['$ref'])
+            for child in children(node):
+                count_references(child)
+
+        count_references(result)
+        candidates = []
+        for name in candidates_left:
+            value = result['$defs'][name]
+            if not isinstance(value, dict):
+                continue  # Preserve boolean definitions and their annotation siblings.
+            reference = '#/$defs/' + name.replace('~', '~0').replace('/', '~1')
+            if reference in protected:
+                continue
+            count = references[reference]
+            saving = (len(key({'$ref': reference})) - len(key(value))) * count
+            saving += len(key({name: value})) - 1
+            if saving >= 0:
+                candidates.append((saving, name))
+        if not candidates:
+            break
+        _, name = max(candidates)
+        value = result['$defs'].pop(name)
+        reference = '#/$defs/' + name.replace('~', '~0').replace('/', '~1')
+        candidates_left.remove(name)
+
+        def inline(node):
+            if not isinstance(node, dict):
+                return deepcopy(node)
+            if node.get('$ref') == reference:
+                # Generated references have only identical lifecycle annotations
+                # beside $ref. Preserve those annotations for simple clients.
+                return {**deepcopy(value), **{k: v for k, v in node.items() if k != '$ref'}}
+            node = dict(node)
+            for field in ('properties', 'patternProperties', '$defs'):
+                if field in node:
+                    node[field] = {k: inline(v) for k, v in node[field].items()}
+            for field in ('items', 'additionalProperties', 'not'):
+                if isinstance(node.get(field), dict):
+                    node[field] = inline(node[field])
+            for field in ('anyOf', 'oneOf', 'allOf', 'prefixItems'):
+                if field in node:
+                    node[field] = [inline(v) for v in node[field]]
+            return node
+
+        result = inline(result)
+    if not result.get('$defs'):
+        result.pop('$defs', None)
     return result
 
 

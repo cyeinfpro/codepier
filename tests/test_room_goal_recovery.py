@@ -7,7 +7,7 @@ from hub.collaboration.common import digest
 from shared.public_collaboration import resolve,checked_request
 from shared.util import DevError
 from tests.collaboration_support import collab as collab,key
-from tests.test_room_managed_work import connected,current_epoch
+from tests.test_room_managed_work import connected,current_epoch,save_room_permissions
 from tests.test_room_members_rebuild import join,subscribe,identity as joined_identity
 from tests.test_room_goal_scope_boundaries import (worker_for,start,mutation,two_project_members,
     admit_read,report,final_request)
@@ -92,7 +92,7 @@ async def test_owner_can_replace_lead_with_ready_member_without_expanding_role(c
     created,_=start(s,owner,actor,lead,credentials,project_ids=['proj'])
     goal_id=created['goal_id']
     other=worker_for(s,actor,'replacement-lead',scopes=('read','write'),projects=('proj',))
-    _,_,other,_,replacement,replacement_credentials=await connected(collab,scopes=[{'project_id':'proj','capabilities':['read','write']}],
+    _,_,other,_,replacement,replacement_credentials=await connected(collab,
         worker_override=other,conversation_id=lead['conversation_id'])
     old=s.room_runtime.goal(goal_id)
     view=s.room_runtime.work_view(old,owner)
@@ -234,21 +234,15 @@ async def test_recovery_cannot_extend_timed_original_member_approval(collab):
     s,owner,actor,clock,lead,credentials=await connected(collab,[{'project':'proj'}],[{'project_id':'proj'}])
     # Approve a shorter original lifetime through the owner API, then establish
     # a fresh current consumer using the real staged binding flow.
-    room=s.rooms.read({'conversation_id':lead['conversation_id']},owner)['room']
     deadline=clock[0]+600
-    s.rooms.projects({'conversation_id':room['id'],'expected_version':room['version'],
-        'projects':[{'project':'proj'}],'member_approvals':[{'member_id':lead['member_id'],
-            'project_scopes':[{'project_id':'proj'}],'lifetime':{'mode':'timed','expires_at':deadline}}],
-        'idempotency_key':key()},owner)
+    save_room_permissions(s,owner,lead['conversation_id'],[{'project_id':'proj'}],
+        lifetime={'mode':'timed','expires_at':deadline})
     lead,credentials=await rebind(s,owner,lead,actor)
     created,_=start(s,owner,actor,lead,credentials,project_ids=['proj'])
     goal_id=created['goal_id']
     original=s.room_runtime.goal(goal_id)
-    room=s.rooms.read({'conversation_id':lead['conversation_id']},owner)['room']
-    s.rooms.projects({'conversation_id':room['id'],'expected_version':room['version'],
-        'projects':[{'project':'proj'}],'member_approvals':[{'member_id':lead['member_id'],
-            'project_scopes':[{'project_id':'proj'}],'lifetime':{'mode':'until_revoked'}}],
-        'idempotency_key':key()},owner)
+    save_room_permissions(s,owner,lead['conversation_id'],[{'project_id':'proj'}],
+        lifetime={'mode':'until_revoked'})
     # A stronger/newer current approval still cannot renew this existing Goal.
     clock[0]+=61  # Respect the production verification challenge window.
     current,new_credentials=await rebind(s,owner,lead,actor)

@@ -15,7 +15,7 @@ from tests.test_dot_telegram_channel import post
 from tests.test_collaboration_dot_chat import inbox, owner_message
 from tests.test_collaboration_dots import call, lease
 from tests.test_dot_weixin_owner_authority import task
-from tests.test_room_managed_work import connected
+from tests.test_room_managed_work import connected, save_room_permissions
 from tests.test_room_migration_boundary import legacy
 from tests.legacy_iam_fixture import seed_grant
 
@@ -375,9 +375,7 @@ async def test_native_channel_after_explicit_cutover_keeps_original_history_and_
     activate(c, cid)
     # The replacement can chat without resurrecting the removed project. Its
     # explicitly approved private execution adapter uses a different project.
-    room = c.s.rooms.read({'conversation_id': cid}, c.owner)['room']
-    c.s.rooms.projects({'conversation_id': cid, 'expected_version': room['version'],
-        'projects': [{'project': 'otherproj', 'environment_id': 'production'}], 'idempotency_key': key()}, c.owner)
+    save_room_permissions(c.s, c.owner, cid, [{'project_id': 'otherproj', 'capabilities': ['read']}])
     seed_grant(c.s.store, 'native-other', 'owner', scopes=('read',), projects=('otherproj',))
     s, owner, actor, clock, identity, _ = await connected(collab,
         scopes=[{'project_id': 'otherproj'}], conversation_id=cid,

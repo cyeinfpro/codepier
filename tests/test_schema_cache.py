@@ -75,5 +75,7 @@ def test_cached_inputs_preserve_each_authorization_mode_and_mutation_isolation()
         fixed[0]['inputSchema']['poison'] = 'not-shared'
         assert 'poison' not in factory(authorization='fixed')[0]['inputSchema']
         assert 'poison' not in factory(authorization='role')[0]['inputSchema']
+    from tests.test_project_knowledge_contracts import _validation_fingerprint
     for item in tool_definitions():
-        assert item['inputSchema'] == _compact_input_schema(TOOLS[item['name']].model.model_json_schema())
+        expected = _compact_input_schema(TOOLS[item['name']].model.model_json_schema())
+        assert _validation_fingerprint(item['inputSchema']) == _validation_fingerprint(expected)

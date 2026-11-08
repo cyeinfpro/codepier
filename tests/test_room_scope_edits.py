@@ -5,17 +5,13 @@ import pytest
 
 from shared.util import DevError
 from tests.collaboration_support import collab as collab,key
-from tests.test_room_managed_work import connected
+from tests.test_room_managed_work import connected, save_room_permissions
 from tests.test_room_goal_scope_boundaries import worker_for,start,admit_read,report
 from tests.test_room_goal_recovery import rebind
 
 
 def approve(s,owner,identity,scopes,**extra):
-    room=s.rooms.read({'conversation_id':identity['conversation_id']},owner)['room']
-    return s.rooms.projects({'conversation_id':room['id'],'expected_version':room['version'],
-        'projects':[{'project':'proj'},{'project':'otherproj'}],
-        'member_approvals':[{'member_id':identity['member_id'],'project_scopes':scopes,**extra}],
-        'idempotency_key':key()},owner)
+    return save_room_permissions(s,owner,identity['conversation_id'],scopes,**extra)
 
 
 @pytest.mark.asyncio

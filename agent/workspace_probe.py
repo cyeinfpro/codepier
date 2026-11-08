@@ -17,7 +17,7 @@ from shared.util import DevError
 
 PROBE_TIMEOUT = 15
 READ_TOOLS = frozenset({'open_workspace', 'project_context', 'read',
-                        'fs_read', 'fs_read_many', 'fs_tree', 'fs_search'})
+                        'fs_read', 'fs_read_many', 'fs_tree', 'fs_search', 'project_knowledge_query'})
 
 
 def eligible(tool, args):

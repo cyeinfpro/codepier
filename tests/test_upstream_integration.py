@@ -87,7 +87,7 @@ def test_native_catalog_matches_read_scope_and_stable_identity(team):
     assert next(t for t in tools if t['name']=='get_profile')['_meta']['openai/profile'] is True
     legacy=b['alice'].post('/mcp?profile=core',headers={'Authorization':'Bearer '+g['token'],'Accept':'application/json, text/event-stream'},json={
         'jsonrpc':'2.0','id':2,'method':'tools/list','params':{}}).json()['result']['tools']
-    assert {t['name'] for t in legacy} == (CORE_TOOLS - {'exec', 'edit'}) | QUERY_TOOLS | {'get_profile', 'get_access_context'}
+    assert {t['name'] for t in legacy} == (CORE_TOOLS - {'exec', 'edit'}) | QUERY_TOOLS | {'get_profile', 'get_access_context', 'project_knowledge_query'}
 
 
 def test_first_pat_consent_atomic_and_fixed_grant_cannot_opt_in(gw):

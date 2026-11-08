@@ -98,7 +98,14 @@ class CoreFiles:
         engine = self.engine
         root, _ = engine.root(project, tool != 'read')
         if tool == 'read':
-            return self.read_batch(root, args) if args.get('operation') == 'batch' else self.read_one(root, args)
+            result = self.read_batch(root, args) if args.get('operation') == 'batch' else self.read_one(root, args)
+            from agent.project_knowledge import auto_context
+            paths = ([item['path'] for item in args['options']['items']]
+                     if args.get('operation') == 'batch' else [args['path']])
+            knowledge = auto_context(engine, project, paths=paths, max_chars=2200)
+            if knowledge is not None:
+                result['project_knowledge'] = knowledge
+            return result
         if tool == 'edit' and args.get('changes'):
             return engine.call('apply_patch', project, args)
         path = engine.path(root, args['path'], False)

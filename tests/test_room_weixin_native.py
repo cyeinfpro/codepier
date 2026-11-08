@@ -8,7 +8,7 @@ import pytest
 from hub.collaboration.common import digest
 from shared.util import DevError
 from tests.collaboration_support import collab as collab, key
-from tests.test_room_managed_work import connected,current_epoch
+from tests.test_room_managed_work import connected,current_epoch,save_room_permissions
 from tests.test_weixin_qr_enrollment import confirm
 from tests.test_dot_weixin_channel import packet
 from tests.legacy_iam_fixture import seed_grant
@@ -110,7 +110,7 @@ async def test_wechat_goal_takeover_preserves_channel_origin_and_current_lead_de
     assert stale_delivery and s.weixin.delivery.validate(stale_delivery)
     replacement_actor=worker_for(s,actor,'wechat-replacement',scopes=('read','write'),projects=('proj',))
     _,_,replacement_actor,_,replacement,replacement_credentials=await connected(collab,
-        scopes=[{'project_id':'proj','capabilities':['read','write']}],worker_override=replacement_actor,
+        worker_override=replacement_actor,
         conversation_id=lead['conversation_id'])
     if pause_original_member:
         connect=s.store.one('SELECT id FROM room_connect_flows WHERE member_id=?',(lead['member_id'],))
@@ -194,12 +194,21 @@ async def test_native_owner_task_to_managed_result_same_wechat_source(collab):
 async def test_wechat_input_cannot_enlarge_its_consent_with_another_member_project(collab):
     (s,owner,worker,clock,identity,credentials),flow,provider,action=await setup_channel(collab,tasks=True)
     room=s.rooms.read({'conversation_id':identity['conversation_id']},owner)['room']
-    s.rooms.projects({'conversation_id':room['id'],'expected_version':room['version'],
-        'projects':[{'project':'proj'},{'project':'otherproj'}],'idempotency_key':key()},owner)
+    policy=save_room_permissions(s,owner,room['id'],[{'project_id':'proj'},{'project_id':'otherproj'}])
+    s.room_permissions.save({'conversation_id':room['id'],'expected_version':policy['version'],
+        'scope':policy['scope'],'channels':{'weixin':{'mode':'custom','scope':{'project_scopes':[
+            {'project_id':'proj','environment_id':'production','capabilities':['read'],'execution_targets':[]}]}},
+            'telegram':{'mode':'follow_room'}},'idempotency_key':key()},owner)
     seed_grant(s.store,'wx-peer','owner',scopes=('read',),projects=('otherproj',))
     actor=replace(worker,grant_id='wx-peer',actor='mcp:wx-peer:fixture',projects=['otherproj'])
-    _,_,actor,_,peer,peer_credentials=await connected(collab,scopes=[{'project_id':'otherproj'}],
+    _,_,actor,_,peer,peer_credentials=await connected(collab,
         worker_override=actor,conversation_id=room['id'])
+    clock[0]+=91
+    s.room_consumers.request_recovery({**identity,'idempotency_key':key()},worker)
+    await s.events.tick()
+    ticket=next(p['data']['wake_ticket'] for p in reversed(s.native_test_callbacks) if p['data'].get('member_id')==identity['member_id'])
+    session=s.room_consumers.begin({**identity,'wake_ticket':ticket,'consumer_run_id':key(),'idempotency_key':key()},worker)
+    credentials={k:session[k] for k in ('consumer_session_id','consumer_fence','consumer_proof')}
     received=s.weixin.commit_updates(s.weixin.claim_poll(flow['account_id']),packet(2,'请检查项目文档',
         create_time_ms=int(clock[0]*1000)))['message_ids'][0]
     source=s.store.one('SELECT * FROM collaboration_messages WHERE id=?',(received,))
@@ -229,8 +238,7 @@ async def test_existing_wechat_goal_keeps_unchanged_project_after_other_project_
         'target_project_id':'proj','project_ids':['proj','otherproj'],'acceptance':'报告真实原项目检查结果',
         'confirm_task':True,'idempotency_key':key()},actor)
     room=s.rooms.read({'conversation_id':identity['conversation_id']},owner)['room']
-    s.rooms.projects({'conversation_id':room['id'],'expected_version':room['version'],
-        'projects':[{'project':'proj'}],'idempotency_key':key()},owner)
+    save_room_permissions(s,owner,room['id'],[{'project_id':'proj'}])
     assert not s.channel_owner.author(source)['authenticated']  # No new scope consent is invented.
     assert s.room_work_bridge.native.owner_author(s.room_runtime.goal(result['goal_id']),source)['authenticated']
     clock[0]+=91
@@ -256,7 +264,9 @@ async def test_existing_wechat_goal_keeps_unchanged_project_after_other_project_
     assert delivery and s.weixin.delivery.validate(delivery)[3]['goal_id']==result['goal_id']
     newer=s.weixin.commit_updates(s.weixin.claim_poll(flow['account_id']),packet(3,'新的请求',
         create_time_ms=int(clock[0]*1000)))['message_ids'][0]
-    assert not s.channel_owner.author(s.store.one('SELECT * FROM collaboration_messages WHERE id=?',(newer,)))['authenticated']
+    assert s.channel_owner.author(s.store.one('SELECT * FROM collaboration_messages WHERE id=?',(newer,)))['authenticated']
+    current_input=s.store.one('SELECT scope FROM room_channel_owner_inputs WHERE message_id=?',(newer,))
+    assert [rule['project_id'] for rule in json.loads(current_input['scope'])['projects']]==['proj']
     assert len(s.store.all('SELECT * FROM coordination_goals'))==1
 
 

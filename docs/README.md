@@ -10,6 +10,7 @@
 - [连接 ChatGPT 与其他 MCP 客户端](CHATGPT.md)
 - [连接改进验收](CONNECTION_ACCEPTANCE.md)：批读、连接证据、刷新提示、恢复与 Tunnel 的已验收边界
 - [MCP 工具参考](CORE_TOOLS.md)：定向项目发现、最小上下文、动作诊断与原操作恢复
+- [项目知识地图](PROJECT_KNOWLEDGE.md)：两个原生接口、源码 SHA 刷新、只读查询与自动参考
 - [项目执行环境](PROJECT_RUNTIMES.md)：面板切换运行模式、默认清洁环境、保存与生效核对
 - [项目运行时](PROJECT_RUNTIMES.md)：清洁执行环境、项目任务、结果恢复及真实隔离边界
 - [CLI 会话](CLI_SESSIONS.md)：Pi、Codex 和 Claude Code

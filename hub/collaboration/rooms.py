@@ -588,7 +588,7 @@ class Rooms:
                 target: self.c.delegation.target_snapshot(principal, project, target) for target in scope['execution_targets']}}
             previous=self.store.one('SELECT * FROM room_member_scopes WHERE member_id=? AND project_id=? AND environment_id=?',
                 (member_id,*key))
-            effective_lifetime=lifetime or ({'mode':previous['lifetime_mode'],'expires_at':previous['expires_at']}
+            effective_lifetime=scope.get('lifetime') or lifetime or ({'mode':previous['lifetime_mode'],'expires_at':previous['expires_at']}
                 if previous else {'mode':'until_revoked','expires_at':None})
             capabilities=sorted(scope['capabilities'])
             targets=sorted(set(scope['execution_targets']))
@@ -714,6 +714,17 @@ class Rooms:
                     WHERE d.conversation_id=? AND d.room_id=? AND p.state='active' ''', (room['id'], partition_id)):
                 self.c.delegation.stop(policy, 'ROOM_PROJECT_REMOVED')
                 self.store.execute("UPDATE delegation_policies SET state='paused',updated=? WHERE id=?", (self.c.clock(), policy['id']))
+            # Detached approvals are already inactive before canonical member
+            # synchronization. Retire their exact adapters here as well; they
+            # must not remain advertised as active or accept a later join.
+            for scope in scopes:
+                for bridge in self.store.all("""SELECT legacy_dot_id FROM room_member_work_bridges
+                        WHERE member_id=? AND project_id=? AND environment_id=? AND state='active'""",
+                        (scope['member_id'], project_id, environment_id)):
+                    self.store.execute("UPDATE room_member_work_bridges SET state='superseded',updated=? WHERE legacy_dot_id=?",
+                        (self.c.clock(), bridge['legacy_dot_id']))
+                    self.store.execute("UPDATE collaboration_join_slots SET state='revoked',version=version+1,updated=? WHERE id=?",
+                        (self.c.clock(), bridge['legacy_dot_id']))
         return {'blocked_work_item_ids': affected_work, 'operations': operations}
 
     def member_scope_authorized(self, row):
@@ -789,10 +800,13 @@ class Rooms:
                                                   'scanned_per_project_kind': 1000},
                 'note': '提交时重新核对房间版本并禁止相关新步骤；运行操作只请求停止，实际结果沿原回执核对。'}
 
-    def projects(self, raw, principal):
+    def projects(self, raw, principal, *, _canonical=False):
         args = validate(contracts.RoomProjects, raw)
         with self.store.transaction():
             principal, room = self.owner(principal, args['conversation_id'])
+            if room['room_protocol'] and not _canonical:
+                raise DevError('ROOM_PERMISSION_SETTINGS_REQUIRED', '请在房间唯一权限设置页修改项目与权限', 409,
+                    endpoint='/api/collaboration/rooms/' + room['id'] + '/permissions')
             for item in args['projects']:
                 self.c.runtime.project(item['project'], principal)
             def perform():
@@ -857,9 +871,18 @@ class Rooms:
         args = validate(contracts.MemberCreate, raw)
         with self.store.transaction():
             principal, room = self.owner(principal, args['conversation_id'])
+            if room['room_protocol']:
+                if not self.c.room_permissions.is_configured(room['id']):
+                    raise DevError('ROOM_PERMISSION_SETTINGS_REQUIRED', '请先在房间权限设置页确认权限', 409)
+                if 'project_scopes' in raw or 'lifetime' in raw:
+                    raise DevError('ROOM_PERMISSION_SETTINGS_REQUIRED', '成员跟随房间权限，不能单独设置', 409)
             def perform():
                 self.require_native(room)
                 self.check_version(room, args['expected_version'])
+                # Derive live permissions only for first execution. The replay
+                # fingerprint describes the wire request, never changing policy.
+                scopes = self.c.room_permissions.effective_scopes(room['id'])
+                lifetime = None
                 if self.store.one("SELECT COUNT(*) n FROM room_members WHERE conversation_id=? AND status!='removed'", (room['id'],))['n'] >= 32:
                     raise DevError('ROOM_MEMBER_LIMIT', '房间最多可添加 32 个成员', 409)
                 identifier, now = uuid.uuid4().hex, self.c.clock()
@@ -868,10 +891,10 @@ class Rooms:
                 if args['reuse_member_id']:
                     self.c.room_connections.attach_source(principal, self.member(identifier),
                         args['reuse_member_id'], args['reuse_binding_generation'])
-                self.approve_scopes(principal, identifier, room['id'], args['project_scopes'], args['lifetime'])
+                self.approve_scopes(principal, identifier, room['id'], scopes, lifetime)
                 member = self.member(identifier)
                 bridge = getattr(self.c, 'room_work_bridge', None)
-                if bridge is not None and args['project_scopes']:
+                if bridge is not None and scopes:
                     bridge.ensure(member, principal)
                     member = self.member(identifier)
                 flow = self._invite(member)

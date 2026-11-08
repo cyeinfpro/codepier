@@ -213,7 +213,8 @@ class RoomRuntime:
             native_reference,native_scope=self.c.room_work_bridge.native.prepare(member,source,principal,args)
             self.c.room_work_bridge.scopes(member)
             project_id=native_scope['anchor_project_id']
-            bridge,scope=self.c.room_work_bridge.adapter(member,project_id,args['environment_id'] or None)
+            environment_id=next(rule['environment_id'] for rule in native_scope['projects'] if rule['project_id']==project_id)
+            bridge,scope=self.c.room_work_bridge.adapter(member,project_id,environment_id)
             owner=self.c.room_work_bridge.owner(member,scope)
             dot=self.c.dots.find(bridge['legacy_dot_id'])
             partition=self.store.one('SELECT * FROM collaboration_rooms WHERE id=?',(dot['room_id'],))

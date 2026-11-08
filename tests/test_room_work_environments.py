@@ -6,8 +6,8 @@ import pytest
 from hub.collaboration.common import digest
 from shared.util import DevError
 from tests.collaboration_support import collab as collab, key
-from tests.test_room_managed_work import connected
-from tests.test_room_goal_scope_boundaries import worker_for, mutation, start, report, final_request
+from tests.test_room_managed_work import connected, save_room_permissions
+from tests.test_room_goal_scope_boundaries import worker_for, mutation, start, report, final_request, renew_consumer
 
 
 async def cross_environment_work(collab):
@@ -15,18 +15,20 @@ async def cross_environment_work(collab):
     a = worker_for(s, worker, 'environment-a', scopes=('read',), projects=('proj',))
     b = worker_for(s, worker, 'environment-b', scopes=('read',), projects=('otherproj',))
     projects = [{'project': 'proj', 'environment_id': 'production'},
-                {'project': 'otherproj', 'environment_id': 'production'},
                 {'project': 'otherproj', 'environment_id': 'staging'}]
     s, owner, a, clock, lead, acredentials = await connected(collab, projects,
-        [{'project_id': 'proj', 'environment_id': 'production'}], worker_override=a)
+        [{'project_id': p['project'], 'environment_id': p['environment_id']} for p in projects], worker_override=a)
     _, _, b, _, peer, bcredentials = await connected(collab,
-        scopes=[{'project_id': 'otherproj', 'environment_id': 'staging'}],
         worker_override=b, conversation_id=lead['conversation_id'])
     goal, _ = start(s, owner, a, lead, acredentials, participant_member_ids=[peer['member_id']])
     b_item = s.coordination.work_create({**mutation(s, lead, acredentials, goal['goal_id']),
         'target_project_id': 'otherproj', 'objective': '核对 B staging 文档', 'acceptance': '原操作读取回执',
         'assignee_grant_id': b.grant_id, 'assignee_member_id': peer['member_id']}, a)['work_item']
     a_item = s.store.one('SELECT * FROM coordination_work WHERE id=?', (goal['next_request']['arguments']['work_item_id'],))
+    # A later room expansion must not rewrite the original work environments.
+    save_room_permissions(s, owner, lead['conversation_id'],
+        [{'project_id': p['project'], 'environment_id': p['environment_id']} for p in projects]
+        + [{'project_id': 'otherproj', 'environment_id': 'production'}])
     return s, owner, a, b, lead, acredentials, peer, bcredentials, goal, a_item, b_item
 
 
@@ -87,10 +89,15 @@ async def test_removal_preview_and_commit_match_exact_original_work_environment(
     assert {row['id'] for row in preview['impact']['operations']} == expected_operation
     kept = [{'project': p['project_id'], 'environment_id': p['environment_id']} for p in room['projects']
             if p['room_id'] != partition['room_id']]
-    applied = s.rooms.projects({'conversation_id': room['id'], 'expected_version': room['version'],
-        'projects': kept, 'idempotency_key': key()}, owner)
-    assert set(applied['impact']['blocked_work_item_ids']) == expected_work
-    assert {row['operation_id'] for row in applied['impact']['operations']} == expected_operation
+    save_room_permissions(s, owner, room['id'],
+        [{'project_id': p['project'], 'environment_id': p['environment_id']} for p in kept])
+    blocked_work = {row['id'] for row in s.store.all(
+        "SELECT id FROM coordination_work WHERE goal_id=? AND state='blocked'", (goal['goal_id'],))}
+    stopped_operations = {row['id'] for row in s.store.all(
+        "SELECT id FROM operations WHERE cancel_requested=1 OR state='cancelled'")}
+    assert blocked_work == expected_work
+    assert stopped_operations == expected_operation
+    collab[6][0] += 91  # Renew fenced room consumers without expiring original work leases.
     assert s.room_runtime.goal(goal['goal_id'])['state'] == 'active'
     remaining = [(lead, ac, a, alease, aop, a_item), (peer, bc, b, blease, bop, b_item)]
     for identity, credentials, actor, lease, operation, item in remaining:
@@ -102,6 +109,8 @@ async def test_removal_preview_and_commit_match_exact_original_work_environment(
                     'idempotency_key': key(), 'expected_inbox_revision': s.room_consumers.inbox(identity, actor)['inbox_revision']}, actor)
         else:
             assert not current['cancel_requested']
+            credentials = await renew_consumer(s, identity, actor, credentials)
+            lease = {**lease, **credentials}
             done = report(s, identity, credentials, actor, goal['goal_id'], lease, operation)
             assert done['state'] == 'succeeded'
     assert s.store.one('SELECT COUNT(*) AS n FROM coordination_goals')['n'] == 1
@@ -109,13 +118,12 @@ async def test_removal_preview_and_commit_match_exact_original_work_environment(
 
 
 @pytest.mark.asyncio
-async def test_same_project_different_member_environments_are_not_merged(collab):
+async def test_same_project_room_environments_require_explicit_work_selection(collab):
     s, owner, actor, *_ = collab
     s, owner, actor, clock, lead, ac = await connected(collab,
         [{'project': 'proj', 'environment_id': 'production'}, {'project': 'proj', 'environment_id': 'staging'}],
-        [{'project_id': 'proj', 'environment_id': 'production'}])
-    _, _, peer_actor, _, peer, _ = await connected(collab,
-        scopes=[{'project_id': 'proj', 'environment_id': 'staging'}], conversation_id=lead['conversation_id'])
+        [{'project_id': 'proj', 'environment_id': env} for env in ('production', 'staging')])
+    _, _, peer_actor, _, peer, _ = await connected(collab, conversation_id=lead['conversation_id'])
     with pytest.raises(DevError) as refused:
         start(s, owner, actor, lead, ac, project_ids=['proj'], participant_member_ids=[peer['member_id']])
     assert refused.value.code == 'ROOM_WORK_ENVIRONMENT_REQUIRED'

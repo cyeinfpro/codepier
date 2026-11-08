@@ -16,6 +16,31 @@ def current_epoch(service,goal_id):
     return service.room_goal_recovery.epoch(goal_id)
 
 
+def permission_rules(scopes, previous=(), lifetime=None):
+    """Normalize test intent without resetting unchanged approval deadlines."""
+    prior={(r['project_id'],r['environment_id']):r for r in previous}
+    rules=[]
+    for scope in scopes:
+        environment=scope.get('environment_id','production')
+        old=prior.get((scope['project_id'],environment),{})
+        rules.append({**scope,'environment_id':environment,
+            'capabilities':sorted(scope.get('capabilities',['read'])),
+            'execution_targets':sorted(scope.get('execution_targets',[])),
+            'lifetime':scope.get('lifetime',lifetime or old.get('lifetime',
+                {'mode':'until_revoked','expires_at':None}))})
+    return sorted(rules,key=lambda r:(r['project_id'],r['environment_id']))
+
+
+def save_room_permissions(service, owner, conversation_id, scopes, lifetime=None):
+    policy=service.room_permissions.read(conversation_id,owner)
+    return service.room_permissions.save({'conversation_id':conversation_id,
+        'expected_version':policy['version'],
+        'scope':{'project_scopes':permission_rules(scopes,policy['scope']['project_scopes'],lifetime)},
+        'channels':{name:{'mode':entry['mode'],'scope':entry['scope']}
+                    for name,entry in policy['channels'].items()},
+        'idempotency_key':key()},owner)
+
+
 async def connected(collab, projects=None, scopes=None, *, worker_override=None,conversation_id=None):
     s,owner,worker,_,_,_,clock,_=collab
     worker=worker_override or worker
@@ -29,8 +54,21 @@ async def connected(collab, projects=None, scopes=None, *, worker_override=None,
         return Reply(204)
     s.events=EventService(s,receiver)
     s.native_test_callbacks=received
-    room={'id':conversation_id} if conversation_id else s.rooms.create({'title':'Native room','projects':projects or [],'idempotency_key':key()},owner)['room']
-    added=s.rooms.create_member({'conversation_id':room['id'],'name':'Native dot','project_scopes':scopes or [],'idempotency_key':key()},owner)
+    room={'id':conversation_id} if conversation_id else s.rooms.create({'title':'Native room','idempotency_key':key()},owner)['room']
+    if conversation_id:
+        policy=s.room_permissions.read(conversation_id,owner)
+        assert policy['configured'], 'Configure canonical room permissions before adding a member'
+        if scopes is not None:
+            assert permission_rules(scopes,policy['scope']['project_scopes'])==policy['scope']['project_scopes'], (
+                'Existing-room membership cannot change policy; save canonical permissions explicitly '
+                'or express narrower access with the worker grant ceiling')
+    else:
+        rules=permission_rules(scopes or [])
+        if projects is not None:
+            attached={(p.get('project_id',p.get('project')),p.get('environment_id','production')) for p in projects}
+            assert {(r['project_id'],r['environment_id']) for r in rules} <= attached
+        save_room_permissions(s,owner,room['id'],rules)
+    added=s.rooms.create_member({'conversation_id':room['id'],'name':'Native dot','idempotency_key':key()},owner)
     flow=s.store.one('SELECT * FROM room_connect_flows WHERE id=?',(added['flow']['id'],))
     joined=s.rooms.join({'invite_code':s.store.decrypt(flow['invite_secret']),'idempotency_key':key()},worker)
     await s.events.subscribe({**joined['subscription_request'],'delivery':{'mode':'webhook',

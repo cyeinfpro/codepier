@@ -79,6 +79,9 @@ EVIDENCE_FILES = {'full-regression-final.xml','focused-verified.xml','worker-rea
 
 
 REQUIRED_FILES = {
+    'agent/project_knowledge.py', 'agent/native_project_knowledge.py',
+    'shared/knowledge_contracts.py', 'docs/PROJECT_KNOWLEDGE.md',
+    'hub/unified_tools.py', 'shared/unified_contracts.py', 'docs/UNIFIED_TOOLS.md',
     'agent/roots_panel.py', 'hub/agent_roots.py', 'hub/api/agent_roots.py',
     'shared/agent_roots_contracts.py', 'shared/file_publish.py', 'shared/filesystem_errors.py',
     'web/agent-roots.js', 'web/agent-roots.css', 'docs/AGENT_PATHS_AND_SMB.md',
@@ -196,7 +199,7 @@ PUBLIC_DOCS = {
     'docs/QUEUE_CONTENTION_IMPLEMENTATION.md',
     'docs/COLLABORATION_CENTER.md', 'docs/COLLABORATION_CENTER_OPERATIONS.md',
     'docs/MCP_EVENTS_MULTI_DOT.md',
-    'docs/PROJECT_RUNTIMES.md',
+    'docs/PROJECT_RUNTIMES.md', 'docs/PROJECT_KNOWLEDGE.md', 'docs/UNIFIED_TOOLS.md',
     'docs/OWNER_TASK_CONTEXT.md',
     'docs/TEST_CLEANUP.md',
     'docs/COLLABORATION_FLUID_UX_2026-10-12.md',

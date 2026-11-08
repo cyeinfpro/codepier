@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from shared import collaboration_contracts as c
 from shared.contracts import tool_definitions as core_definitions
+from shared.knowledge_contracts import KNOWLEDGE_TOOLS
 from shared.public_collaboration import ACTIONS, ADAPTERS, LEGACY_TOOLS, PUBLIC_TOOLS, request, resolve, tool_definitions
 from shared.util import DevError
 
@@ -129,11 +130,12 @@ def test_every_action_accepts_exact_shape_and_rejects_missing_or_foreign_fields(
 
 @pytest.mark.parametrize('profile', ['core', 'full', 'coding'])
 @pytest.mark.parametrize('authorization', ['fixed', 'role'])
-def test_public_catalog_has_sixteen_native_tools_with_correct_hints(profile, authorization):
+def test_public_catalog_has_profile_tools_with_correct_hints(profile, authorization):
     base = core_definitions(profile, authorization)
     collaboration = tool_definitions(authorization)
-    assert len(base) == (9 if profile == 'coding' else 13)
-    assert len(base + collaboration) == (12 if profile == 'coding' else 16)
+    assert len(base) == (11 if profile == 'coding' else 15)
+    assert KNOWLEDGE_TOOLS <= {item['name'] for item in base}
+    assert len(base + collaboration) == (14 if profile == 'coding' else 18)
     names = [item['name'] for item in base + collaboration]
     assert len(names) == len(set(names))
     assert not LEGACY_TOOLS.intersection(names)

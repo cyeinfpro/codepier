@@ -4,7 +4,7 @@ import httpx, pytest
 from shared.crypto import digest
 from shared.util import atomic_json
 from tests.support import wait_for
-from tests.catalog_assertions import assert_task_catalog
+from tests.catalog_assertions import assert_task_catalog, profile_catalog
 
 def ident():return uuid.uuid4().hex
 
@@ -91,8 +91,10 @@ def test_tasks_success_failure_timeout_cancel(stack):
 def test_mcp_protocol_and_catalog(stack):
     r=stack.rpc('initialize',{'protocolVersion':'2025-11-25','capabilities':{},'clientInfo':{'name':'integration','version':'1'}})
     assert r.json()['result']['protocolVersion']=='2025-11-25'
-    catalog=stack.rpc('tools/list').json()['result']['tools']
-    assert_task_catalog(catalog, 13)
+    default=stack.rpc('tools/list').json()['result']['tools']
+    assert_task_catalog(default, 3, expected_names={'query', 'act', 'get_profile'})
+    catalog=profile_catalog(stack, 'core')['tools']
+    assert_task_catalog(catalog, 15)
     overview=stack.client.get("/api/overview")
     assert overview.status_code==200
     assert overview.json()["tool_count"]==len(catalog)

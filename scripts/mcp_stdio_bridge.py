@@ -127,7 +127,9 @@ def forward(client, base, request, headers, *, retry_seconds=30, sleep=time.slee
     """
     if profile not in {"core", "full", "coding"}:
         raise ValueError("MCP profile must be core, full or coding")
-    endpoint = base + "/mcp" + ("?profile=" + profile if profile != "core" else "")
+    # The HTTP default catalog is unified; preserve the bridge's core default
+    # and every explicitly selected legacy profile across all request attempts.
+    endpoint = base + "/mcp?profile=" + profile
     deadline = clock() + retry_seconds
     attempt = 0
     while True:

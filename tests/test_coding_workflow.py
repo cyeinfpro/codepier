@@ -5,6 +5,7 @@ from pathlib import Path
 import time
 import pytest
 from pydantic import ValidationError
+from shared.knowledge_contracts import KNOWLEDGE_TOOLS
 from shared.contracts import TOOLS, tool_definitions
 from shared.crypto import digest
 from shared.util import DevError
@@ -29,11 +30,11 @@ def test_catalog_profiles_preserve_full_and_focus_coding_discovery():
     from shared.query_contracts import QUERY_TOOLS
     for profile in ('core', 'full'):
         tools = tool_definitions(profile)
-        assert {definition['name'] for definition in tools} == CORE_TOOLS | QUERY_TOOLS | {'get_profile','get_access_context'}
+        assert {definition['name'] for definition in tools} == CORE_TOOLS | QUERY_TOOLS | KNOWLEDGE_TOOLS | {'get_profile','get_access_context'}
         assert not CORE_TOOLS.intersection(REPLACED_MCP_TOOLS)
     assert {item['name'] for item in tool_definitions('coding')} == {
         'project_query', 'task_query', 'workspace', 'read', 'write',
-        'edit', 'exec', 'process', 'get_profile'}
+        'edit', 'exec', 'process', 'get_profile'} | KNOWLEDGE_TOOLS
     assert next(item for item in tool_definitions() if item['name'] == 'process')['inputSchema']['properties']['output_limit']['default'] == 8000
 
 

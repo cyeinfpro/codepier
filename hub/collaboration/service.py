@@ -80,6 +80,8 @@ class CollaborationService:
         from hub.collaboration.room_goal_recovery import RoomGoalRecovery
         from hub.collaboration.room_goal_handoffs import RoomGoalHandoffs
         self.rooms = Rooms(self)
+        from hub.collaboration.room_permissions import RoomPermissions
+        self.room_permissions = RoomPermissions(self)
         self.room_connections = RoomConnections(self)
         self.room_work_bridge = RoomWorkBridge(self)
         self.room_goal_recovery = RoomGoalRecovery(self)

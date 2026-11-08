@@ -4,6 +4,7 @@ from hub import mcp_apps
 from hub.core_tools import help_result
 from shared.contracts import tool_definitions
 from shared.core_contracts import CORE_TOOLS, REPLACED_MCP_TOOLS
+from shared.knowledge_contracts import KNOWLEDGE_TOOLS
 
 @pytest.mark.parametrize('profile', ['core', 'coding', 'full'])
 def test_text_catalog_keeps_core_queries_identity_and_attachment_contract(profile):
@@ -11,7 +12,7 @@ def test_text_catalog_keeps_core_queries_identity_and_attachment_contract(profil
     expected = ({'project_query', 'task_query', 'workspace', 'read', 'write',
                  'edit', 'exec', 'process', 'get_profile'} if profile == 'coding'
                 else CORE_TOOLS | {'project_query', 'task_query', 'get_profile', 'get_access_context'})
-    assert set(definitions) == expected
+    assert set(definitions) == expected | KNOWLEDGE_TOOLS
     for item in definitions.values():
         assert 'openai/ui' not in item['_meta']
         assert 'openai/outputTemplate' not in item['_meta']

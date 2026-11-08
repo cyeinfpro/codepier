@@ -337,9 +337,17 @@ class RoomChannels:
                     if binding.get('native_member_id'):
                         auth=self.store.one('SELECT * FROM room_channel_owner_authorizations WHERE binding_id=?',(binding['id'],))
                         value['task_scope']=self.native.preview(binding,principal)
-                        value['work_authorized']=bool(auth and auth['state']=='active' and auth['scope_digest']==value['task_scope']['scope_digest'])
-                        if not value['work_authorized'] and value['task_scope']['project_ids']:
+                        value['permission_member_id']=binding['native_member_id']
+                        policy=getattr(self.c,'room_permissions',None)
+                        configured=bool(policy and policy.is_configured(binding['conversation_id']))
+                        value['permission_mode']=(policy.channel_mode(binding['conversation_id'],'weixin') if configured else
+                            json.loads(auth['scope']).get('scope_mode','fixed') if auth else 'room_member')
+                        value['work_authorized']=bool(auth and auth['state']=='active' and self.native.approved_scope(auth,binding,principal))
+                        value['scope_upgrade_available']=bool(not configured and auth and auth['state']=='active' and value['permission_mode']=='fixed')
+                        if not value['work_authorized'] and value['task_scope']['project_ids'] and not value['scope_upgrade_available']:
                             action='approve_tasks'
+                        if value['scope_upgrade_available']:
+                            value['task_scope']={**value['task_scope'],'summary':'当前微信仍使用原先确认的固定权限。请在房间权限设置中统一管理；后续消息使用新设置，旧消息不追溯扩权。'}
                     else:
                         auth = self.c.channel_owner.current(binding['id'])
                         try:
@@ -401,7 +409,8 @@ class RoomChannels:
             'needs_reconnect':'微信需要重新连接','route_conflict':'此微信已有连接，需明确迁移',
             'paused':'微信已暂停','disconnected':'微信已断开','cancelled':'接入已取消','closed':'微信已解除'}.get(stage,'等待连接')
         value['display']={'title':title,'primary_action':action,'reason':value.get('reason_code','')}
-        value['actions'] = [{'action': action, 'label': '使用此 dot' if stage == 'choose_member' else self.action_label(action)}] if action else []
+        value['actions'] = [{'action': action, 'label': '使用此 dot' if stage == 'choose_member' else
+            '改为跟随房间权限' if action=='approve_tasks' and value.get('scope_upgrade_available') else self.action_label(action)}] if action else []
         if row['state'] == 'active':
             if row['binding_id']:
                 authority=self.store.one('SELECT state,version FROM '+('room_channel_owner_authorizations' if row.get('native') else 'channel_owner_authorizations')+' WHERE binding_id=?',(row['binding_id'],))
@@ -460,7 +469,8 @@ class RoomChannels:
             if value.get('task_scope'):
                 fields += [{'name':'allow_owner_tasks','type':'checkbox','label':'允许本人在所列范围内交办工作','required':False}]
                 fields += [{**field('confirm_' + key,label),'required':False,'depends_on':'allow_owner_tasks'} for key,label in (
-                    ('owner_identity','发送配对码的是我本人'),('future_tasks','允许所列项目的后续工作'),
+                    ('owner_identity','发送配对码的是我本人'),('future_tasks',
+                        '允许后续工作按房间权限设置（含本渠道独立设置）执行' if value['task_scope'].get('scope',{}).get('scope_mode')=='room_member' else '允许所列项目的后续工作'),
                     ('result_delivery','允许工作结果回到此私聊'),('pairing_notices','允许必要的配对和阻塞提示'))]
             if action=='approve_tasks':
                 fields=[{k:v for k,v in f.items() if k!='depends_on'}|{'required':True}

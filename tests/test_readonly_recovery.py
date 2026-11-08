@@ -8,6 +8,7 @@ from hub.core_tools import public_call, result
 from shared.contracts import TOOLS, tool_definitions
 from jsonschema import Draft202012Validator
 from tests.support import running_stack
+from tests.catalog_assertions import profile_catalog
 
 
 @pytest.mark.parametrize('backend', ['operations_get', 'operations_wait', 'operations_trace'])
@@ -77,8 +78,11 @@ def test_readonly_discovery_and_recovery_over_real_http(tmp_path):
             Draft202012Validator(catalog[name]['outputSchema']).validate(value)
             return value
 
+        unified = s.rpc('tools/list', token_value=grant['token']).json()['result']['tools']
+        assert {item['name'] for item in unified} == {'query', 'get_profile'}
         read_catalog = {item['name']: item for item in
-                        s.rpc('tools/list', token_value=grant['token']).json()['result']['tools']}
+                        profile_catalog(s, 'core', token=grant['token'])['tools']}
+        assert not {'exec', 'edit', 'project_knowledge_build'} & read_catalog.keys()
         assert 'lsp' not in read_catalog['read']['inputSchema']['properties']['operation']['enum']
         help_value = call('project_query', {'operation': 'help'})
         assert 'lsp' not in help_value['tools']['read']['operations']

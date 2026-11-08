@@ -11,6 +11,7 @@ import copy
 from shared.contracts import TOOLS, required_scope
 from shared.core_contracts import CORE_ACTIONS, CORE_TOOLS
 from shared.query_contracts import QUERY_TOOLS
+from shared.knowledge_contracts import KNOWLEDGE_TOOLS
 
 WORKSPACE = {'list': 'projects_list', 'open': 'open_workspace', 'skills': 'skills_list',
              'skill': 'skills_read', 'tasks': 'tasks_list', 'status': 'execution_info',
@@ -183,7 +184,7 @@ def visible_definitions(definitions, scopes):
     for original in definitions:
         name = original['name']
         tool = {'project_query': 'workspace', 'task_query': 'process'}.get(name, name)
-        if name not in CORE_TOOLS | QUERY_TOOLS | {'get_profile', 'get_access_context'}:
+        if name not in CORE_TOOLS | QUERY_TOOLS | KNOWLEDGE_TOOLS | {'get_profile', 'get_access_context'}:
             result.append(original)
             continue
         if tool in CORE_TOOLS:

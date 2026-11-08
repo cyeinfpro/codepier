@@ -3,6 +3,7 @@ import pytest
 
 from tests.collaboration_support import collaboration_stack, key
 from tests.support import running_stack
+from tests.catalog_assertions import profile_catalog
 from tests.test_mcp_tasks_http import modern
 
 
@@ -14,7 +15,11 @@ def test_chat_tool_owner_permission_csrf_and_no_implicit_jobs(collaboration_stac
     assert status['schema_version'] == 3 and status['capabilities']['plain_messages']
     grant = s.must(s.client.post('/api/grants', json={'label': 'Chat fixture', 'scopes': ['read'], 'projects': [s.project['id']], 'days': 1}))
     catalog = modern(s, 'tools/list', token=grant['token']).json()['result']['tools']
-    assert any(tool['name'] == 'collaboration' for tool in catalog)
+    unified = {tool['name']: tool for tool in catalog}
+    assert set(unified) == {'query', 'act', 'get_profile'}
+    assert 'collab.send' in unified['act']['inputSchema']['properties']['action']['enum']
+    legacy_catalog = profile_catalog(s, 'core', token=grant['token'])['tools']
+    assert any(tool['name'] == 'collaboration' for tool in legacy_catalog)
     args = {**scope, 'room_id': room['id'], 'body_text': 'ordinary @Work', 'client_message_id': key(), 'idempotency_key': key()}
     assert s.client.post('/api/collaboration/message', json=args, headers={'X-RD-CSRF': 'invalid'}).status_code == 403
     posted = s.must(s.client.post('/api/collaboration/message', json=args))
@@ -44,8 +49,13 @@ def test_disabled_feature_does_not_discover_chat_tool(tmp_path, monkeypatch):
     monkeypatch.setenv('CODEPIER_COLLABORATION_ENABLED', 'false')
     with running_stack(tmp_path / 'disabled-chat') as s:
         catalog = modern(s, 'tools/list').json()['result']['tools']
-        assert all(not tool['name'].startswith('collaboration') for tool in catalog)
-        assert len(catalog) == 13
+        assert {tool['name'] for tool in catalog} == {'query', 'act', 'get_profile'}
+        for tool in catalog:
+            actions = tool['inputSchema']['properties'].get('action', {}).get('enum', [])
+            assert not any(action.startswith('collab.') for action in actions)
+        legacy_catalog = profile_catalog(s, 'core')['tools']
+        assert all(not tool['name'].startswith('collaboration') for tool in legacy_catalog)
+        assert len(legacy_catalog) == 15
         for name in ('collaboration_query', 'collaboration', 'collaboration_work',
                      'collaboration_read', 'collaboration_join', 'collaboration_work_execute'):
             result = modern(s, 'tools/call', {'name': name, 'arguments': {}}).json()

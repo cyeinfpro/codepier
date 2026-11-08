@@ -912,6 +912,9 @@ class FileEngine:
                 "exclusions": "Protected paths, dependencies, links, unsupported filenames, Next.js builds, caches and test reports are excluded. Not an atomic filesystem snapshot. Restore manually on the home machine."}
 
     def call(self, tool: str, project: dict, args: dict):
+        if tool in {"project_knowledge_build", "project_knowledge_query"}:
+            from agent.project_knowledge import build, query
+            return (build if tool == "project_knowledge_build" else query)(self, project, args)
         if tool == "apply_patch":
             from agent.batch_patch import apply_patch
             return apply_patch(self, project, args)

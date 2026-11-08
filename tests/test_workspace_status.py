@@ -7,6 +7,7 @@ import uuid
 import pytest
 
 from hub.mcp_apps import attach
+from shared.knowledge_contracts import KNOWLEDGE_TOOLS
 from shared.contracts import TOOLS, tool_definitions
 from shared.integration_contracts import REMOTE_TOOLS
 from shared.core_contracts import CORE_TOOLS
@@ -185,10 +186,10 @@ def test_dashboard_query_and_workflow_remain_available_without_widget(env):
         tools = {tool['name']: tool for tool in tool_definitions(profile)}
         assert 'workspace_status' not in tools
         assert tools['workspace']['_meta']['ui']['visibility'] == ['model', 'app']
-    assert set(t['name'] for t in tool_definitions('full')) == CORE_TOOLS | QUERY_TOOLS | {'get_profile','get_access_context'}
+    assert set(t['name'] for t in tool_definitions('full')) == CORE_TOOLS | QUERY_TOOLS | KNOWLEDGE_TOOLS | {'get_profile','get_access_context'}
     assert set(t['name'] for t in tool_definitions('coding')) == {
         'project_query', 'task_query', 'workspace', 'read', 'write',
-        'edit', 'exec', 'process', 'get_profile'}
+        'edit', 'exec', 'process', 'get_profile'} | KNOWLEDGE_TOOLS
     receipt = create(env)
     value = call(env, 'workflows_get', workflow_id=receipt['workflow_id'])
     bound = attach({'structuredContent': value}, 'workflows_get', {'workflow_id': receipt['workflow_id']}, value, lambda: 'https://panel.example')

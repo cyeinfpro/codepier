@@ -19,6 +19,8 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from shared.util import DevError
+from shared.integration_contracts import NativeFile
+from shared.knowledge_contracts import KNOWLEDGE_TOOLS
 
 UNIFIED_TOOLS = frozenset({'query', 'act'})
 DEFAULT_WAIT_SECONDS = 30
@@ -34,6 +36,7 @@ def _same(tool, *ops):
 # action -> {view: (legacy tool, legacy operation)}. The first view is the default.
 CORE_ACTIONS = {
     'query': {
+        'knowledge': {'query': ('project_knowledge_query', None)},
         'file': {'file': ('read', 'file'), 'batch': ('read', 'batch')},
         'tree': {'tree': ('workspace', 'tree')},
         'search': {'sync': ('workspace', 'search'), 'start': ('process', 'search_start'),
@@ -66,6 +69,7 @@ CORE_ACTIONS = {
                 'observe': ('computer', 'observe')},
     },
     'act': {
+        'knowledge': {'build': ('project_knowledge_build', None)},
         'exec': {'run': ('exec', None)},
         'cancel': {'cancel': ('process', 'cancel')},
         'validate': {'run': ('process', 'validate')},
@@ -133,14 +137,15 @@ COLLAB_ACTIONS = {
 
 ACTIONS = {tool: {**CORE_ACTIONS[tool], **COLLAB_ACTIONS[tool]} for tool in ('query', 'act')}
 COLLAB_TOOLS = frozenset({CQ, CD, CW})
+STANDALONE_TOOLS = KNOWLEDGE_TOOLS | {'get_profile', 'get_access_context'}
 IMPLICIT_OPERATION = {'exec': 'run', 'vps': 'list'}
 # Read-only discovery of a computer-scoped surface is still free of side effects.
 READ_ONLY_COMPUTER_TARGETS = frozenset({'browser_snapshot', 'computer_observe', 'computer_apps'})
 
 TOP_LEVEL = {
-    'query': ('project', 'workspace_id', 'path', 'offset', 'limit', 'ids'),
+    'query': ('project', 'workspace_id', 'path', 'offset', 'limit', 'ids', 'file'),
     'act': ('project', 'workspace_id', 'idempotency_key', 'command', 'cwd', 'target', 'timeout_seconds',
-            'path', 'edits', 'content', 'expected_sha256', 'ids'),
+            'path', 'edits', 'content', 'expected_sha256', 'ids', 'file'),
 }
 CONTROL_FIELDS = frozenset({'action', 'view', 'args', 'wait'})
 NO_WAIT_ACTIONS = frozenset({'job', 'cancel', 'help', 'whoami', 'targets'})
@@ -163,6 +168,7 @@ class _Envelope(BaseModel):
     ids: list[str] = Field(default_factory=list, max_length=16)
     wait: int | None = Field(default=None, ge=0, le=MAX_WAIT_SECONDS)
     args: dict[str, Any] = Field(default_factory=dict)
+    file: NativeFile | None = None
 
 
 class QueryCall(_Envelope):
@@ -270,6 +276,8 @@ def translate(tool, raw):
         raise DevError('UNKNOWN_OPERATION', f'{tool} 没有 action {call.action}{hint}', 422,
                        actions=sorted(ACTIONS[tool]))
     flat = {key: getattr(call, key) for key in call.model_fields_set if key not in CONTROL_FIELDS}
+    if isinstance(flat.get('file'), NativeFile):
+        flat['file'] = flat['file'].model_dump(exclude_unset=True)
     overlap = flat.keys() & call.args.keys()
     if overlap:
         raise DevError('INVALID_ARGUMENTS', '同一参数不能同时出现在顶层和 args：' + ', '.join(sorted(overlap)), 422)
@@ -354,11 +362,17 @@ def unified_hint(name, arguments):
     args = copy.deepcopy(arguments)
     if name in COLLAB_TOOLS:
         operation = args.pop('action', None)
-    elif name in {'get_profile', 'get_access_context'}:
+    elif name in STANDALONE_TOOLS:
         operation = None
     else:
         operation = args.pop('operation', _DEFAULT_OPERATION.get(name))
     key = (name, operation)
+    if key == ('workspace', 'help') and args.get('action'):
+        help_tool = {'project_query': 'workspace', 'task_query': 'process'}.get(args.get('tool'), args.get('tool'))
+        address = REVERSE.get((help_tool, args['action']))
+        if address is None:
+            return None  # Keep an unknown legacy help pointer intact.
+        args['tool'], args['action'], args['view'] = address
     if key == ('workspace', 'open') and args.get('capture_baseline'):
         unified, action, view = 'act', 'baseline', 'open'
         args.pop('capture_baseline')
@@ -389,6 +403,8 @@ _STRING_HINTS = {
     'task_query': "query(action='job')",
     'project_query.skills': "query(action='skills')",
     'project_query': "query",
+    'project_knowledge_query': "query(action='knowledge')",
+    'project_knowledge_build': "act(action='knowledge')",
 }
 
 
@@ -465,7 +481,7 @@ DESCRIPTIONS = {
         "Pick an action; view selects a sub-operation (first view is the default). "
         "Files: file (path, offset/limit; args.items for up to 8 files), tree, search, changes, history, symbols, "
         "artifacts, source_check. Receipts: job (ids; views get/wait/list/trace/diagnostics/activity). "
-        "Context: project (open/list/...), whoami, skills, tasks, workflow, worktrees, targets, devices. "
+        "Context: knowledge (query), project (open/list/...), whoami, skills, tasks, workflow, worktrees, targets, devices. "
         "GUI: gui. Collaboration: collab.*, view = original action name. "
         "Fields not shown at top level go in args. Exact schema of any action: "
         "query(action='help', args={'action': '<action>', 'view': '<view>'}). "
@@ -476,7 +492,7 @@ DESCRIPTIONS = {
         "edit: edits (exact unique replacements), content (whole file) or args.changes (multi-file), each with "
         "expected_sha256 from read ('new' to create). Every mutation needs a unique idempotency_key; to recover, "
         "query job with the SAME operation id, never replay with a new key. Also: cancel, validate, lsp, restore, "
-        "checkpoint, import, artifact, baseline, project_create, worktree, workflow, gui, collab.* "
+        "checkpoint, import, artifact, knowledge (build), baseline, project_create, worktree, workflow, gui, collab.* "
         "(collab handle replaces repeated consumer credentials). Fields not shown at top level go in args; "
         "exact schemas via query(action='help')."),
 }
@@ -488,6 +504,7 @@ ANNOTATIONS = {
 
 _STR = {'type': 'string'}
 _PROPERTIES = {
+    'file': NativeFile.model_json_schema(),
     'view': {'type': 'string', 'maxLength': 64},
     'project': {'type': 'string', 'maxLength': 100},
     'workspace_id': {'type': 'string', 'pattern': '^(|[a-f0-9]{32})$'},

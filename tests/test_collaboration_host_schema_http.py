@@ -12,6 +12,7 @@ from tests import test_collaboration_dots_flow as flow
 from tests.test_collaboration_delivery_flow import scope
 from tests.test_collaboration_host_schema import first_branch_import
 from tests.test_mcp_tasks_http import modern
+from tests.catalog_assertions import profile_catalog
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
@@ -20,8 +21,10 @@ def test_discovered_host_schema_accepts_dot_inbox_replies_and_real_managed_steps
     stack = task_stack
     response = modern(stack, 'tools/list', {}, token=stack.pat).json()
     assert 'error' not in response, response
-    tools = {tool['name']: tool for tool in response['result']['tools']}
-    assert len(tools) == 16
+    assert {tool['name'] for tool in response['result']['tools']} == {'query', 'act', 'get_profile'}
+    # Existing hosts may explicitly rediscover the full native compatibility schema.
+    tools = {tool['name']: tool for tool in profile_catalog(stack, 'core')['tools']}
+    assert len(tools) == 18
     names = ('collaboration_query', 'collaboration', 'collaboration_work')
     validators = {}
     for name in names:

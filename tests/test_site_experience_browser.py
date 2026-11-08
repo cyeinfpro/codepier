@@ -152,7 +152,15 @@ def test_color_contrast_reduced_motion_and_readable_controls(chat_browser_pool, 
             assert ratio(*values) >= 4.5, (scheme, pair, values, ratio(*values))
         assert page.locator("#page").evaluate("el => getComputedStyle(el).animationName") == "none"
         assert page.locator(".settings-groups button").first.evaluate("el => el.getBoundingClientRect().height") >= 44
-        page.locator(".settings-groups button").first.focus()
+        # Login used a pointer. Programmatic focus alone does not activate
+        # :focus-visible; exercise the keyboard interaction this ring serves.
+        button = page.locator(".settings-groups button").first
+        page.keyboard.press("Tab")
+        # Native WebKit tab order may omit buttons; set the same target after
+        # entering keyboard modality, then verify the actual visible focus.
+        button.focus()
+        expect(button).to_be_focused()
+        assert button.evaluate("el => el.matches(':focus-visible')")
         assert page.locator(".settings-groups button").first.evaluate("el => parseFloat(getComputedStyle(el).outlineWidth)") >= 2
         page.emulate_media(contrast="more")
         assert page.locator(".panel").first.evaluate("el => getComputedStyle(el).borderTopColor") == page.locator("body").evaluate("el => getComputedStyle(el).color")

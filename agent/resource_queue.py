@@ -347,7 +347,7 @@ class ResourceQueue:
 
 PATH_READ_TOOLS = frozenset({'fs_tree', 'fs_read', 'fs_read_many', 'fs_search'})
 SCOPED_READ_TOOLS = frozenset({'searches_start', 'code_symbols', 'history_list'})
-BOUNDED_FILE_TOOLS = PATH_READ_TOOLS | SCOPED_READ_TOOLS | {'read', 'write', 'edit'}
+BOUNDED_FILE_TOOLS = PATH_READ_TOOLS | SCOPED_READ_TOOLS | {'read', 'write', 'edit', 'project_knowledge_query'}
 
 
 def canonical_path(path):

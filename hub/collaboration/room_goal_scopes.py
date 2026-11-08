@@ -102,7 +102,23 @@ class RoomGoalScopes:
 
     def prepare(self,member,source,principal,args):
         scopes=self.bridge.scopes(member)
-        project_ids=sorted(set(args.get('project_ids') or ([args['target_project_id']] if args.get('target_project_id') else [s['project_id'] for s in scopes])))
+        channel_rules=None
+        if json.loads(source['body']).get('external_origin',{}).get('native_room'):
+            author=self.c.room_channels.native.author(source)
+            auth=self.store.one('SELECT * FROM room_channel_owner_authorizations WHERE id=?',(author['authorization_id'],))
+            channel_rules={(r['project_id'],r['environment_id']):r
+                for r in self.c.room_channels.native.input_scope(source,auth)['projects']}
+        defaults=[s['project_id'] for s in scopes if channel_rules is None or
+            (s['project_id'],s['environment_id']) in channel_rules]
+        project_ids=sorted(set(args.get('project_ids') or ([args['target_project_id']] if args.get('target_project_id') else defaults)))
+        if channel_rules is not None:
+            channel_projects={key[0] for key in channel_rules}
+            channel_caps=set().union(*(set(r['capabilities']) for r in channel_rules.values()))
+            channel_targets=set().union(*(set(r['execution_targets']) for r in channel_rules.values()))
+            if (not set(project_ids)<=channel_projects or not set(args.get('capabilities',[]))<=channel_caps
+                    or not set(args.get('execution_targets',[]))<=channel_targets
+                    or (args.get('environment_id') and any((project_id,args['environment_id']) not in channel_rules for project_id in project_ids))):
+                raise DevError('CHANNEL_OWNER_SCOPE_DENIED','本次协作超出这个微信入口明确批准的项目或能力',403)
         if not project_ids or len(project_ids)>16:
             raise DevError('ROOM_WORK_PROJECT_REQUIRED','请选择此成员已批准的工作项目',409)
         if args.get('target_project_id') and args['target_project_id'] not in project_ids:
@@ -121,7 +137,8 @@ class RoomGoalScopes:
             rules=[]
             for project_id in project_ids:
                 available=[s for s in self.bridge.scopes(current) if s['project_id']==project_id and
-                    (not args.get('environment_id') or s['environment_id']==args['environment_id'])]
+                    (not args.get('environment_id') or s['environment_id']==args['environment_id']) and
+                    (channel_rules is None or (s['project_id'],s['environment_id']) in channel_rules)]
                 if not available:
                     continue
                 if len(available)!=1:
@@ -129,15 +146,22 @@ class RoomGoalScopes:
                 capabilities,_=self.bridge.effective(available[0],actor)
                 if 'read' not in capabilities:
                     continue
-                adapter,scope=self.bridge.adapter(current,project_id,args.get('environment_id') or None)
+                adapter,scope=self.bridge.adapter(current,project_id,available[0]['environment_id'])
                 policy=self.store.one('SELECT * FROM delegation_policies WHERE id=?',(adapter['policy_id'],))
                 if not policy or not self.bridge.authorized(policy):
                     raise DevError('ROOM_WORK_SCOPE_CHANGED','成员的原项目批准已不可用',403)
                 policy_spec=json.loads(policy['spec'])
                 capabilities=list(policy_spec['capabilities'])
+                channel_rule=channel_rules.get((project_id,scope['environment_id'])) if channel_rules is not None else None
+                if channel_rules is not None:
+                    if not channel_rule:
+                        raise DevError('CHANNEL_OWNER_SCOPE_DENIED','本次环境不在微信当前项目权限内',403)
+                    capabilities=sorted(set(capabilities)&set(channel_rule['capabilities']))
                 if args.get('capabilities'):
                     capabilities=sorted(set(capabilities)&set(args['capabilities']))
                 targets=list(policy_spec['execution_targets']) if 'execute' in capabilities else []
+                if channel_rule is not None:
+                    targets=sorted(set(targets)&set(channel_rule['execution_targets']))
                 if args.get('execution_targets'):
                     targets=sorted(set(targets)&set(args['execution_targets']))
                 if 'execute' in capabilities and not targets:
@@ -187,10 +211,11 @@ class RoomGoalScopes:
             'participant_grant_ids':sorted({m['grant_id'] for m in members}),'members':members,'projects':projects}
         if json.loads(source['body']).get('external_origin',{}).get('native_room'):
             author=self.c.room_channels.native.author(source)
-            auth=self.store.one('SELECT scope FROM room_channel_owner_authorizations WHERE id=?',(author['authorization_id'],))
-            approved={r['project_id']:r for r in json.loads(auth['scope'])['projects']}
-            if any(r['project_id'] not in approved or not set(r['capabilities'])<=set(approved[r['project_id']]['capabilities'])
-                    or not set(r['execution_targets'])<=set(approved[r['project_id']]['execution_targets'])
+            auth=self.store.one('SELECT * FROM room_channel_owner_authorizations WHERE id=?',(author['authorization_id'],))
+            approved={(r['project_id'],r['environment_id']):r for r in self.c.room_channels.native.input_scope(source,auth)['projects']}
+            if any((r['project_id'],r['environment_id']) not in approved
+                    or not set(r['capabilities'])<=set(approved[(r['project_id'],r['environment_id'])]['capabilities'])
+                    or not set(r['execution_targets'])<=set(approved[(r['project_id'],r['environment_id'])]['execution_targets'])
                     for saved in members for r in saved['projects']):
                 raise DevError('CHANNEL_OWNER_SCOPE_DENIED','本次协作超出这个微信入口明确批准的项目或能力',403)
         identifier='roomscope_'+digest(value)[:32]
@@ -451,12 +476,23 @@ class RoomGoalScopes:
         rows=self.store.all('''SELECT w.* FROM coordination_work w JOIN room_native_work_assignments a ON a.work_id=w.id
             WHERE a.member_id=? AND w.project_id=?''',(record['member_id'],record['project_id']))
         grouped={}
+        goals={}
         for row in rows:
+            if row['goal_id'] not in goals:
+                goals[row['goal_id']]=self.store.one('SELECT * FROM coordination_goals WHERE id=?',(row['goal_id'],))
+            goal=goals[row['goal_id']]
+            if not goal or not self.reference(goal):
+                continue
+            # A member may use the same project in several environments.
+            # Stop only work whose immutable assignment names this adapter,
+            # never another environment's original approval for that member.
+            rule=self.work_rule(goal,row)
+            if (rule['environment_id']!=record['environment_id']
+                    or rule['legacy_dot_id']!=record['legacy_dot_id']):
+                continue
             grouped.setdefault(row['goal_id'],[]).append(row['id'])
         for goal_id,identifiers in grouped.items():
-            goal=self.store.one('SELECT * FROM coordination_goals WHERE id=?',(goal_id,))
-            if goal and self.reference(goal):
-                self.c.coordination.stop_work(goal,reason,work_item_ids=identifiers)
+            self.c.coordination.stop_work(goals[goal_id],reason,work_item_ids=identifiers)
 
     def result_ready(self,goal,item):
         reference=self.reference(goal)

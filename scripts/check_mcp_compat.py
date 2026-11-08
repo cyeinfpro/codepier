@@ -29,32 +29,77 @@ async def probe(url,token_file,project,mode='legacy'):
         transport=streamable_http_client(url,http_client=http,terminate_on_close=False)
         async with Client(transport,mode=mode,read_timeout_seconds=20) as client:
             catalog=await client.list_tools()
-            schemas={tool.name:tool.model_dump(by_alias=True)['outputSchema'] for tool in catalog.tools}
-            for schema in schemas.values():Draft202012Validator.check_schema(schema)
+            definitions={tool.name:tool.model_dump(by_alias=True) for tool in catalog.tools}
+            # Read-only grants can omit act; discovery must not require write access.
+            unified='query' in definitions
+            schemas={name:tool.get('outputSchema') for name,tool in definitions.items()}
+            for tool in definitions.values():
+                Draft202012Validator.check_schema(tool['inputSchema'])
+            # MCP outputSchema is optional. Never report an omitted schema as
+            # validated, and still validate every schema actually advertised.
+            for schema in schemas.values():
+                if schema is not None:Draft202012Validator.check_schema(schema)
             checks=[]
-            async def invoke(name,args):
+            async def invoke(name,args,*,cached=False):
+                assert cached or name in definitions, 'Call was not advertised'
+                if name in definitions:
+                    Draft202012Validator(definitions[name]['inputSchema']).validate(args)
                 result=await client.call_tool(name,args)
                 value=result.model_dump(by_alias=True,exclude_none=True)
-                Draft202012Validator(schemas[name]).validate(value['structuredContent'])
-                checks.append({'tool':name,'is_error':value.get('isError',False),'schema_valid':True})
+                assert isinstance(value.get('structuredContent'),dict)
+                schema=schemas.get(name)
+                if schema is not None:
+                    Draft202012Validator(schema).validate(value['structuredContent'])
+                checks.append({'tool':name,'action':args.get('action',args.get('operation')),
+                    'is_error':value.get('isError',False),'advertised':name in definitions,
+                    'schema_valid':True if schema is not None else None})
                 return value
-            resolved=await invoke('workspace',{'operation':'resolve','project':project})
+
+            async def call(legacy_name,legacy_args,action,view='',**args):
+                if unified:
+                    return await invoke('query',{'action':action,**({'view':view} if view else {}),**args})
+                return await invoke(legacy_name,legacy_args)
+
+            resolved=await call('workspace',{'operation':'resolve','project':project},
+                                'project','resolve',project=project)
             assert not resolved.get('isError')
-            diagnosis=await invoke('process',{'operation':'diagnostics','project':project})
+            diagnosis=await call('process',{'operation':'diagnostics','project':project},
+                                 'job','diagnostics',project=project)
+            assert not diagnosis.get('isError')
             assert diagnosis['structuredContent']['client_catalog']['matches'] is None
-            read=await invoke('read',{'project':project,'path':'README.md','limit':20})
-            data=read['structuredContent']
-            if data.get('pending'):
-                for _ in range(5):
-                    receipt=await invoke('process',{'operation':'wait','operation_ids':[data['operation_id']],'wait_seconds':2})
-                    operation=receipt['structuredContent']['operations'][0]
-                    if not operation['pending']:
-                        assert operation['state']=='succeeded';break
-                else:raise AssertionError('Read did not complete')
-            else:assert 'content' in data
-            error=await invoke('read',{'project':project,'path':'.env'})
+
+            async def read_content(value):
+                assert not value.get('isError')
+                data=value['structuredContent']
+                if data.get('pending'):
+                    for _ in range(5):
+                        receipt=await call('process',{'operation':'wait','operation_ids':[data['operation_id']],
+                            'wait_seconds':2},'job','wait',ids=[data['operation_id']],wait=2)
+                        assert not receipt.get('isError')
+                        operation=receipt['structuredContent']['operations'][0]
+                        assert operation['operation_id']==data['operation_id']
+                        if not operation['pending']:
+                            assert operation['state']=='succeeded'
+                            data=operation['result']['data']
+                            break
+                    else:raise AssertionError('Read did not complete')
+                assert isinstance(data.get('content'),str)
+                return data['content']
+
+            read=await call('read',{'project':project,'path':'README.md','limit':20},
+                           'file',project=project,path='README.md',limit=20)
+            content=await read_content(read)
+            if unified:
+                # Existing SDK clients may still call a cached legacy tool even
+                # though default discovery now advertises only unified tools.
+                cached=await invoke('read',{'project':project,'path':'README.md','limit':20},cached=True)
+                assert await read_content(cached)==content
+            error=await call('read',{'project':project,'path':'.env'},
+                            'file',project=project,path='.env')
             assert error.get('isError') and error['structuredContent']['error']['code']=='PROTECTED_PATH'
-            await invoke('read',{'operation':'artifacts','project':project})
+            artifacts=await call('read',{'operation':'artifacts','project':project},
+                                 'artifacts',project=project)
+            assert not artifacts.get('isError')
             resources=await client.list_resources();prompts=await client.list_prompts()
             assert resources.resources and prompts.prompts
             if client.protocol_version in {'2025-03-26','2025-06-18','2025-11-25'}:
@@ -62,7 +107,9 @@ async def probe(url,token_file,project,mode='legacy'):
             else:
                 assert client.protocol_version=='2026-07-28', 'Unverified MCP revision'
             return {'sdk':'official mcp '+version('mcp'),'mode':mode,'protocol_version':client.protocol_version,
-                    'server':client.server_info.model_dump(by_alias=True),'tool_count':len(schemas),'checks':checks,
+                    'server':client.server_info.model_dump(by_alias=True),'tool_count':len(schemas),
+                    'tool_names':sorted(definitions),'catalog':'unified' if unified else 'legacy',
+                    'output_schema_count':sum(schema is not None for schema in schemas.values()),'checks':checks,
                     'resources':len(resources.resources),'prompts':len(prompts.prompts),
                     'scope':'Read-only real HTTP interoperability; not certification of every optional MCP extension.'}
 
