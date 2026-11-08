@@ -304,6 +304,11 @@ def test_permission_lifetime_renewal_and_custom_inheritance(
             'expected_version': 0, 'scope': {'project_scopes': projects},
             'channels': {'weixin': {'mode': 'follow_room'}, 'telegram': {'mode': 'follow_room'}},
         }))
+        # The out-of-band setup changes the room SSE access snapshot. Start a
+        # fresh page at that committed scope before testing lifetime edits;
+        # a late access_changed must otherwise dismiss the old editor.
+        page.reload()
+        expect(page.locator('[data-cr-project-count]')).to_have_text('项目 2')
         retained = deepcopy(policy)
         deadline = next(rule for rule in policy['scope']['project_scopes'] if rule['project_id'] == stack.projects[1]['id'])['lifetime']['expires_at']
         next(rule for rule in retained['scope']['project_scopes'] if rule['project_id'] == stack.projects[0]['id'])['lifetime']['expires_at'] = int(time.time()) - 60
@@ -361,5 +366,70 @@ def test_permission_lifetime_renewal_and_custom_inheritance(
         final_rules = {rule['project_id']: rule for rule in writes[2]['scope']['project_scopes']}
         assert final_rules[stack.projects[0]['id']]['lifetime']['expires_at'] == renewal
         assert final_rules[stack.projects[1]['id']]['lifetime']['expires_at'] == deadline
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_external_permission_setup_invalidates_open_editor(
+    collaboration_stack, chat_browser_pool, engine
+):
+    """A real scope-change hint must clear an old unsaved permission editor."""
+    stack = collaboration_stack
+    context = chat_browser_pool(engine).new_context(viewport={'width': 1280, 'height': 1000})
+    page = context.new_page()
+    page.add_init_script("""(() => {
+        const Native = window.EventSource;
+        window.permissionHints = {ready: 0, access: 0};
+        window.EventSource = class extends Native {
+            constructor(url, ...args) {
+                super(url, ...args);
+                if (!String(url).includes('/api/collaboration/rooms/')) return;
+                this.addEventListener('change', () => window.permissionHints.ready++);
+                this.addEventListener('access_changed', () => window.permissionHints.access++);
+            }
+        };
+    })();""")
+    writes = []
+    try:
+        sign_in(page, stack)
+        create_room(page, '外部权限准备失效')
+        # Establish the empty-room access snapshot before changing its projects.
+        page.wait_for_function('() => window.permissionHints.ready > 0')
+        room = next(item for item in stack.must(stack.client.get('/api/collaboration/rooms'))['items']
+                    if item['title'] == '外部权限准备失效')
+        path = f'/api/collaboration/rooms/{room["id"]}/permissions'
+        def track_write(route):
+            if route.request.method == 'PUT':
+                writes.append(route.request.post_data_json)
+            route.continue_()
+        page.route('**' + path, track_write)
+        page.locator('.cr-room-actions [data-cr-action="permissions"]').click()
+        section = page.locator('[data-permission-section="room"]')
+        section.locator('[data-permission-bulk="none"]').click()
+        row = section.locator(f'[data-project-id="{stack.projects[0]["id"]}"]')
+        row.locator('[data-permission-project]').check()
+        row.locator('[data-permission-cap][value="write"]').check()
+        old_checkbox = row.locator('[data-permission-cap][value="write"]').element_handle()
+        assert old_checkbox.is_checked()
+        policy = stack.must(stack.client.put(path, json={
+            'expected_version': 0,
+            'scope': {'project_scopes': [
+                {'project_id': item['id'], 'environment_id': 'production',
+                 'capabilities': ['read'], 'execution_targets': [],
+                 'lifetime': {'mode': 'until_revoked'}}
+                for item in stack.projects[:2]
+            ]},
+            'channels': {'weixin': {'mode': 'follow_room'}, 'telegram': {'mode': 'follow_room'}},
+        }))
+        page.wait_for_function('() => window.permissionHints.access === 1')
+        expect(page.locator('dialog.cr-panel')).not_to_be_visible()
+        expect(page.locator('[data-cr-form="permissions"]')).to_have_count(0)
+        assert not old_checkbox.evaluate('(element) => element.isConnected')
+        expect(page.locator('[data-cr-project-count]')).to_have_text('项目 2')
+        assert writes == []
+        saved = stack.must(stack.client.get(path))
+        assert saved['version'] == policy['version']
+        assert all(rule['capabilities'] == ['read'] for rule in saved['scope']['project_scopes'])
     finally:
         context.close()

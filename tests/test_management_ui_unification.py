@@ -225,8 +225,67 @@ def test_large_reader_is_full_page_and_keyboard_back_is_safe(stack,chat_browser_
     try:
         _login(page,stack,'workbench')
         prompts=[];page.on('dialog',lambda dialog:(prompts.append(dialog.message),dialog.dismiss()))
-        page.evaluate("""modal('长只读详情',
-            '<pre>'+'Synthetic read-only detail\\n'.repeat(100)+'</pre>','',true)""")
+        # Cache bounded, synthetic state as events happen. Failure reporting below
+        # makes no browser calls, so a stalled renderer cannot stall diagnostics.
+        reader_events=[]
+        def record_reader_event(message):
+            prefix='reader-scroll-context:'
+            try:
+                text=message.text
+                if len(reader_events)>=12 or not text.startswith(prefix) or len(text)>2048:
+                    return
+                event=json.loads(text[len(prefix):])
+                fields={'event','key','target','active','prevented','firstFrame',
+                        'visibility','hasFocus','top','height','total','overflow','rect'}
+                if not isinstance(event,dict) or set(event)!=fields:
+                    return
+                if (event['event'] not in ('focusin','keydown','keyup','scroll')
+                    or event['key'] not in (None,'Tab','PageDown')
+                    or event['target'] not in ('reader','back','other')
+                    or event['active'] not in ('reader','back','other')
+                    or event['visibility'] not in ('visible','hidden')
+                    or event['overflow'] not in ('auto','scroll','hidden','clip','visible')):
+                    return
+                rect=event['rect']
+                if not isinstance(rect,dict) or set(rect)!={'x','y','width','height'}:
+                    return
+                if not all(type(event[key]) is bool
+                           for key in ('prevented','firstFrame','hasFocus')):
+                    return
+                if not all(type(value) in (int,float) for value in
+                           [event['top'],event['height'],event['total'],*rect.values()]):
+                    return
+                reader_events.append(event)
+            except Exception:
+                pass  # Diagnostic collection must not replace a test failure.
+        page.on('console',record_reader_event)
+        page.evaluate("""() => {
+            let count=0, firstFrame=false;
+            requestAnimationFrame(() => { firstFrame=true; });
+            const targetName=node=>node?.matches?.('.modal-body')?'reader':
+                node?.closest?.('.editor-back')?'back':'other';
+            const record=event=>{
+                if (count>=12 || (event.type.startsWith('key') &&
+                    !['Tab','PageDown'].includes(event.key))) return;
+                const body=document.querySelector('.modal-body');
+                if (!body) return;
+                count++;
+                const rect=body.getBoundingClientRect();
+                console.debug('reader-scroll-context:'+JSON.stringify({
+                    event:event.type, key:['Tab','PageDown'].includes(event.key)?event.key:null,
+                    target:targetName(event.target), active:targetName(document.activeElement),
+                    prevented:event.defaultPrevented, firstFrame,
+                    visibility:document.visibilityState, hasFocus:document.hasFocus(),
+                    top:body.scrollTop, height:body.clientHeight, total:body.scrollHeight,
+                    overflow:getComputedStyle(body).overflowY,
+                    rect:{x:rect.x,y:rect.y,width:rect.width,height:rect.height}
+                }));
+            };
+            for (const type of ['focusin','keydown','keyup']) window.addEventListener(type,record);
+            document.addEventListener('scroll',record,true);
+            modal('长只读详情',
+                '<pre>'+'Synthetic read-only detail\\n'.repeat(100)+'</pre>','',true);
+        }""")
         expect(page.locator('.modal')).to_have_attribute('data-presentation','reader')
         rect=page.locator('.modal').bounding_box()
         assert rect and rect['x']==0 and rect['y']==0 and rect['height']==844
@@ -234,8 +293,17 @@ def test_large_reader_is_full_page_and_keyboard_back_is_safe(stack,chat_browser_
         page.get_by_role('button',name='返回上一页').focus()
         page.keyboard.press('Tab')
         expect(page.locator('.modal-body')).to_be_focused()
-        page.keyboard.press('PageDown')
-        page.wait_for_function("() => document.querySelector('.modal-body').scrollTop>0")
+        try:
+            page.keyboard.press('PageDown')
+            page.wait_for_function("() => document.querySelector('.modal-body').scrollTop>0")
+        except Exception as error:
+            try:
+                BaseException.add_note(error,'Reader scroll context: '+json.dumps({
+                    'engine':engine,'events':reader_events,
+                },ensure_ascii=True))
+            except Exception:
+                BaseException.add_note(error,'Reader scroll context unavailable')
+            raise
         page.go_back()
         expect(page.locator('.modal')).to_have_count(0)
         expect(page.locator('#page h1')).to_have_text('远程工作台')
