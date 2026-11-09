@@ -1302,7 +1302,7 @@
 .page-tabs button.active {
   background: var(--ui-raised);
   color: var(--ui-text);
-  font-weight: 650;
+  font-weight: var(--ui-weight-semibold);
 }
 .onboarding {
   padding: var(--ui-space-5);

@@ -4,7 +4,7 @@
 function chatWorkspaceBar() {
   const back =
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m10 5-7 7 7 7M3 12h18"/></svg>';
-  return `<button type="button" id="chat-back" class="chat-back-button" data-nav="overview" title="返回面板，当前会话和草稿会保留">${back}<span>返回面板</span></button>`;
+  return `<button type="button" id="chat-back" class="chat-back-button" data-nav="overview" aria-label="返回面板" title="返回面板，当前会话和草稿会保留">${back}<span>返回面板</span></button>`;
 }
 function chatRememberView() {
   if (!$('#chat-root') || !ChatUI.listeners) return;

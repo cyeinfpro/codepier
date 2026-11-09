@@ -3454,6 +3454,19 @@ html[data-appearance='dark'] .chat-workspace .chat-message-user .chat-message-bo
   }
 }
 @media (max-width: 360px) {
+  /* Keep the conversation title and header controls reachable on 320px screens. */
+  .chat-workspace .chat-back-button {
+    width: 44px;
+    min-width: 44px;
+    padding-inline: 10px;
+  }
+  .chat-workspace .chat-back-button span {
+    display: none;
+  }
+  .chat-heading,
+  .chat-header-right {
+    min-width: 0;
+  }
   .chat-scroll {
     padding-inline: 18px;
   }
@@ -3607,7 +3620,7 @@ html[data-appearance='dark'] .chat-workspace .chat-message-user .chat-message-bo
   }
   .chat-options-head {
     grid-column: 1 / -1;
-    grid-template-columns: 1fr auto;
+    grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
   }
   .chat-options .chat-config-bar {
@@ -3622,5 +3635,10 @@ html[data-appearance='dark'] .chat-workspace .chat-message-user .chat-message-bo
 @media (max-width: 760px) {
   .chat-header-right > :is(#chat-find-toggle, #chat-inspector-toggle) {
     display: inline-grid;
+  }
+  /* iOS keeps the layout viewport full-height while its keyboard is open. */
+  body.ui-keyboard-open .chat-workspace {
+    height: max(0px, calc(100dvh - var(--ui-visual-viewport-bottom, 0px)));
+    min-height: 0;
   }
 }

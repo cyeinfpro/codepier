@@ -79,18 +79,20 @@
   margin: 8px 0;
 }
 @media (max-width: 640px) {
-  .topbar {
-    flex-wrap: wrap;
-    gap: 8px;
-    height: auto;
-    min-height: 64px;
-    padding-block: 8px;
-  }
-  .topbar .top-right {
-    margin-left: auto;
-  }
-  .panel-update-entry {
+  /* A feature stylesheet must not turn the global mobile header into two rows. */
+  .topbar .panel-update-entry {
+    flex: none;
+    min-height: var(--ui-touch-target);
     padding: 7px 9px;
+  }
+  .topbar .panel-update-entry [data-panel-update-status] {
+    display: none;
+  }
+}
+@media (max-width: 360px) {
+  /* Read-only version metadata is available in settings; retain header space. */
+  .topbar .panel-update-version {
+    display: none;
   }
 }
 .panel-update-popover {

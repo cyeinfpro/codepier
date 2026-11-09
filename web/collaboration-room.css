@@ -1732,6 +1732,11 @@
   align-items: center;
   gap: 8px;
 }
+@media (max-width: 460px) {
+  .cr-permission-row-main {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
 
 .cr-scope .cr-permission-project {
   min-height: 40px;
@@ -1752,7 +1757,7 @@
 
 .cr-permission-select-all .cr-muted {
   margin-inline-start: 6px;
-  font-weight: normal;
+  font-weight: var(--ui-weight-regular);
 }
 
 .cr-scope label {
@@ -2383,7 +2388,7 @@
   .cr-room-actions {
     width: 100%;
     display: grid;
-    grid-template-columns: 1fr 1fr 1fr 44px;
+    grid-template-columns: repeat(3, minmax(0, 1fr)) 44px;
     gap: 6px;
   }
   .cr-room-actions .cr-button {
@@ -2458,6 +2463,11 @@
     border-top: 1px solid var(--cr-line);
     border-radius: var(--ui-radius-xl);
     padding-bottom: env(safe-area-inset-bottom);
+  }
+  /* Bottom-sheet controls remain above the on-screen keyboard. */
+  body.ui-keyboard-open .cr-panel {
+    bottom: var(--ui-visual-viewport-bottom, 0px);
+    max-height: max(0px, calc(100dvh - var(--ui-visual-viewport-bottom, 0px) - 16px));
   }
   .cr-panel > header {
     min-height: 56px;
@@ -2581,7 +2591,7 @@
   max-height: 230px;
   overflow: auto;
   border: 1px solid var(--cr-line);
-  border-radius: 12px;
+  border-radius: var(--ui-radius-md);
 }
 .cr-permission-bulk label,
 .cr-permission-row-main select {
