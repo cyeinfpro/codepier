@@ -174,7 +174,7 @@ def test_room_empty_projects_member_recovery_and_owner_scope(
         page.locator('dialog [data-cr-action="permissions"]').click()
         form = page.locator('[data-cr-form="permissions"]')
         first_project = form.locator(f'[data-permission-section="room"] [data-project-id="{stack.projects[0]["id"]}"]')
-        first_project.locator('[data-permission-cap][value="write"]').check()
+        first_project.locator('[data-permission-level]').select_option('write')
         with page.expect_response(lambda response: response.request.method == 'PUT'
                                   and response.url.endswith(f'/rooms/{room_id}/permissions')) as first_save:
             form.locator('button[type="submit"]').click()
@@ -188,8 +188,8 @@ def test_room_empty_projects_member_recovery_and_owner_scope(
         # Adding another project preserves the existing approval's exact expiry
         # and version. It cannot implicitly renew old work authority.
         second_project = form.locator(f'[data-permission-section="room"] [data-project-id="{stack.projects[1]["id"]}"]')
-        expect(second_project.locator('[data-permission-project]')).not_to_be_checked()
-        second_project.locator('[data-permission-project]').check()
+        expect(second_project.locator('[data-permission-level]')).to_have_value('')
+        second_project.locator('[data-permission-level]').select_option('read')
         with page.expect_response(lambda response: response.request.method == 'PUT'
                                   and response.url.endswith(f'/rooms/{room_id}/permissions')) as scope_save:
             form.locator('button[type="submit"]').click()
@@ -219,7 +219,7 @@ def test_room_empty_projects_member_recovery_and_owner_scope(
         page.locator('.cr-room-actions [data-cr-action="permissions"]').click()
         expect(form).to_be_visible()
         for project in stack.projects[:2]:
-            form.locator(f'[data-permission-section="room"] [data-project-id="{project["id"]}"] [data-permission-project]').uncheck()
+            form.locator(f'[data-permission-section="room"] [data-project-id="{project["id"]}"] [data-permission-level]').select_option('')
         form.locator('button[type="submit"]').click()
         expect(page.locator('[data-cr-project-count]')).to_have_text('项目 0')
         expect(page.locator('dialog.cr-panel')).not_to_be_visible()

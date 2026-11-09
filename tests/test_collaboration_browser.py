@@ -35,7 +35,7 @@ def test_collaboration_panel_complete_readonly_flow(collaboration_stack, chat_br
         page.fill('#username', 'admin')
         page.fill('#password', stack.password)
         page.click('#login-form button')
-        expect(page.locator('#page h1')).to_have_text('项目映射')
+        expect(page.locator('#page h1')).to_have_text('项目')
         page.locator(f'[data-action="project-collaboration"][data-id="{stack.project["id"]}"]').click()
         expect(page.locator('#page h1')).to_have_text('协作中心')
         expect(page.locator('#cc-scope [name="project"]')).to_have_value(stack.project['id'])

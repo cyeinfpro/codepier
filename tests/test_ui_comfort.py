@@ -261,7 +261,7 @@ def test_mobile_reflow_and_navigation_remain_reachable(stack,engine,width,height
         within(page,'.side-bottom',width,height)
         page.keyboard.press('Escape')
         page.locator('.mobile-dock [data-nav="projects"]').click()
-        expect(page.locator('#page h1')).to_have_text('项目映射')
+        expect(page.locator('#page h1')).to_have_text('项目')
         report=page.evaluate(MEASURE);assert report['documentWidth']<=width+1
         assert not report['failures'],report['failures']
         page.screenshot(path=str(OUT/f'{engine}-{width}-mobile.png'),animations='disabled')

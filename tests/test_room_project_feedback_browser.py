@@ -33,7 +33,7 @@ def open_project_editor(page, stack):
     form = page.locator('[data-cr-form="permissions"]')
     try:
         expect(form).to_be_visible()
-        form.locator(f'[data-permission-section="room"] [data-project-id="{stack.projects[1]["id"]}"] [data-permission-project]').check()
+        form.locator(f'[data-permission-section="room"] [data-project-id="{stack.projects[1]["id"]}"] [data-permission-level]').select_option('read')
     except Exception:
         # Failure-only shape diagnostics, never request bodies or credentials.
         try:
@@ -49,8 +49,8 @@ def open_project_editor(page, stack):
         except Exception:
             print('PROJECT_EDITOR_SETUP unavailable')
         raise
-    expect(page.locator('[data-cr-permissions-view]')).to_contain_text('本房间唯一的项目权限设置')
-    expect(form).to_contain_text('项目 / 宿主的安全上限不能在这里突破')
+    expect(page.locator('[data-cr-permissions-view]')).to_contain_text('保存后生效。')
+    expect(form.locator('[data-permission-level]').first).to_have_attribute('title', '可选权限受项目和电脑的设置限制')
     return form
 
 
@@ -75,7 +75,7 @@ def test_project_rejection_visible_and_selection_retained(collaboration_stack, c
         error = page.locator('[data-cr-panel-error]')
         expect(error).to_contain_text('需要空间管理员确认')
         expect(error).to_be_in_viewport()
-        expect(form.locator(f'[data-permission-section="room"] [data-project-id="{stack.projects[1]["id"]}"] [data-permission-project]')).to_be_checked()
+        expect(form.locator(f'[data-permission-section="room"] [data-project-id="{stack.projects[1]["id"]}"] [data-permission-level]')).to_have_value('read')
         assert len(writes) == 1
         page.unroute('**/api/collaboration/rooms/*/permissions', reject)
         with page.expect_request(lambda request: request.method == 'PUT' and request.url.endswith('/permissions')) as success:
@@ -119,7 +119,7 @@ def test_project_preflight_error_is_visible_without_request(collaboration_stack,
         form.locator('button[type="submit"]').click()
         expect(page.locator('[data-cr-panel-error]')).to_contain_text('无法读取项目选择')
         assert writes == []
-        expect(form.locator(f'[data-permission-section="room"] [data-project-id="{stack.projects[1]["id"]}"] [data-permission-project]')).to_be_checked()
+        expect(form.locator(f'[data-permission-section="room"] [data-project-id="{stack.projects[1]["id"]}"] [data-permission-level]')).to_have_value('read')
     finally:
         context.close()
 

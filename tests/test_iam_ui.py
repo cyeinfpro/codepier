@@ -40,7 +40,7 @@ def test_space_creation_and_two_tab_selection_are_independent(iam_page,stack):
     second=page.context.new_page();second.goto(stack.url+'/#identity');expect(second.locator('#iam-active-space')).to_have_value('legacy')
     page.locator('[data-iam-space="'+sid+'"]').click()
     expect(page.locator('#iam-active-space')).to_have_value(sid)
-    expect(page.locator('#page h1')).to_have_text('控制总览')
+    expect(page.locator('#page h1')).to_have_text('总览')
     assert page.evaluate("S.projects.length")==0
     assert second.locator('#iam-active-space').input_value()=='legacy'
     # The original tab re-reads legacy resources using the same cookie.

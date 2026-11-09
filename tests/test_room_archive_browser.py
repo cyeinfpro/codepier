@@ -252,10 +252,10 @@ def test_archive_late_preview_and_list_do_not_undo_navigation(
         form.locator('button[type="submit"]').click()
         expect(page.locator('html')).to_have_attribute('data-held-room-list', 'ready')
         page.evaluate("navigate('projects')")
-        expect(page.locator('#page h1')).to_have_text('项目映射')
+        expect(page.locator('#page h1')).to_have_text('项目')
         route, response = held.pop()
         route.fulfill(response=response)
-        expect(page.locator('#page h1')).to_have_text('项目映射')
+        expect(page.locator('#page h1')).to_have_text('项目')
         assert next(r for r in all_rooms(stack) if r['id'] == original)['archived_at']
     finally:
         page.unroute_all(behavior='ignoreErrors')
@@ -324,7 +324,7 @@ def test_late_archived_overview_does_not_clear_new_room_selection(
         click_room_refresh(page)
         expect(page.locator('html')).to_have_attribute('data-held-archived-overview', 'ready')
         page.evaluate("navigate('projects')")
-        expect(page.locator('#page h1')).to_have_text('项目映射')
+        expect(page.locator('#page h1')).to_have_text('项目')
         other = stack.projects[1]
         page.locator(f'[data-action="project-collaboration"][data-id="{other["id"]}"]').click()
         page.locator('[data-cc-action="create-room"]').click()
@@ -640,7 +640,7 @@ def test_restore_route_teardown_drains_pending_refresh_before_unroute(
         if holding:
             # Deterministically park the original callback, without a sleep or
             # replay, until cleanup performs the normal navigation lifecycle.
-            expect(route.request.frame.page.locator('#page h1')).to_have_text('项目映射', timeout=5000)
+            expect(route.request.frame.page.locator('#page h1')).to_have_text('项目', timeout=5000)
         return response
 
     def overlapping_cleanup(page, pending_routes):
@@ -656,7 +656,7 @@ def test_restore_route_teardown_drains_pending_refresh_before_unroute(
         overlap_seen.append(len(pending_routes))
         original_drain(page, pending_routes)
         assert not pending_routes
-        expect(page.locator('#page h1')).to_have_text('项目映射')
+        expect(page.locator('#page h1')).to_have_text('项目')
 
     monkeypatch.setattr(Route, 'fetch', gated_fetch)
     monkeypatch.setattr(sys.modules[__name__], '_drain_restored_history_routes', overlapping_cleanup)

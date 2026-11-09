@@ -41,7 +41,7 @@ def login(page, stack):
     page.fill('#username', 'admin')
     page.fill('#password', stack.password)
     page.click('#login-form button')
-    expect(page.locator('#page h1')).to_have_text('项目映射')
+    expect(page.locator('#page h1')).to_have_text('项目')
     page.locator(f'[data-action="project-collaboration"][data-id="{stack.project["id"]}"]').click()
     page.locator('[data-cc-action="create-room"]').click()
     expect(page.locator('#cc-message-input')).to_be_enabled()
@@ -521,11 +521,11 @@ def test_goal_room_project_add_does_not_widen_goal_and_back_keeps_draft(collabor
         page.keyboard.press('Escape')
         page.locator('[data-cc-view="discussion"]').click()
         page.evaluate("navigate('projects')")
-        expect(page.locator('#page h1')).to_have_text('项目映射')
+        expect(page.locator('#page h1')).to_have_text('项目')
         page.go_back()
         expect(area).to_have_value('跨项目目标范围需要明确修订')
         page.go_forward()
-        expect(page.locator('#page h1')).to_have_text('项目映射')
+        expect(page.locator('#page h1')).to_have_text('项目')
         page.go_back()
         expect(area).to_have_value('跨项目目标范围需要明确修订')
         assert read(stack, 'coordination_goal', id=goal['id'])['goal']['state'] == 'proposed'
@@ -774,7 +774,7 @@ def test_goal_all_pages_and_stale_page_cannot_replace_new_navigation(collaborati
         # request settled. Wait on its actual owner after releasing the payload.
         assert page.evaluate('window.goalWorkspaceRefresh.settled') is True
         page.evaluate("navigate('projects')")
-        expect(page.locator('#page h1')).to_have_text('项目映射')
+        expect(page.locator('#page h1')).to_have_text('项目')
         state_after_navigation = page.evaluate('window.goalListState()')
         assert state_after_navigation['loading'] is True
         page.evaluate("""async () => {
@@ -791,7 +791,7 @@ def test_goal_all_pages_and_stale_page_cannot_replace_new_navigation(collaborati
         state_after_release = page.evaluate('window.goalListState()')
         assert state_after_release['loading'] is False
         assert state_after_release['markup'] == state_after_navigation['markup']
-        expect(page.locator('#page h1')).to_have_text('项目映射')
+        expect(page.locator('#page h1')).to_have_text('项目')
         expect(page.locator('.cc-coordination-list')).to_have_count(0)
         page.go_back()
         expect(page.locator('#cc-message-input')).to_be_enabled()

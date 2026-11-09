@@ -137,9 +137,9 @@ def test_hint_access_change_clears_before_recheck_and_only_restores_authorized_i
         expect(page.locator('#cc-drawer')).not_to_be_visible()
         expect(page.locator('#cc-drawer')).to_be_empty()
         if outcome == 'navigation':
-            page.get_by_role('button', name='项目映射', exact=True).click()
-            expect(page.locator('#page h1')).to_have_text('项目映射')
-        external = page.get_by_role('button', name='项目映射', exact=True)
+            page.get_by_role('button', name='项目', exact=True).click()
+            expect(page.locator('#page h1')).to_have_text('项目')
+        external = page.get_by_role('button', name='项目', exact=True)
         if outcome == 'focus':
             external.focus()
             expect(external).to_be_focused()
@@ -160,7 +160,7 @@ def test_hint_access_change_clears_before_recheck_and_only_restores_authorized_i
             expect(page.locator('#cc-message-input')).to_be_disabled()
             expect(form).to_have_count(0)
         else:
-            expect(page.locator('#page h1')).to_have_text('项目映射')
+            expect(page.locator('#page h1')).to_have_text('项目')
             expect(page.locator('.collaboration')).to_have_count(0)
     finally:
         # Do not dispose the API request context while a real route handler is
@@ -222,11 +222,11 @@ def test_hint_waits_for_original_mutation_receipt_without_replay(
         expect(page.locator('#cc-message-input')).to_be_disabled()
         expect(page.locator('#cc-drawer')).to_be_empty()
         if outcome == 'navigation':
-            page.get_by_role('button', name='项目映射', exact=True).click()
-            expect(page.locator('#page h1')).to_have_text('项目映射')
+            page.get_by_role('button', name='项目', exact=True).click()
+            expect(page.locator('#page h1')).to_have_text('项目')
         held[0][0].fulfill(response=held[0][1])
         if outcome == 'navigation':
-            expect(page.locator('#page h1')).to_have_text('项目映射')
+            expect(page.locator('#page h1')).to_have_text('项目')
             expect(page.locator('.collaboration')).to_have_count(0)
         elif outcome == 'applied' and kind == 'archive':
             expect(page.locator('.cc-archived-empty')).to_be_visible()

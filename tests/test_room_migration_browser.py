@@ -336,7 +336,7 @@ def test_saved_business_receipt_remains_queryable_after_room_becomes_read_only(
                 route.continue_()
         page.route(f'**/api/collaboration/rooms/{room_id}/permissions', lose_project_response)
         page.locator('.cr-room-actions [data-cr-action="permissions"]').click()
-        page.locator(f'[data-cr-form="permissions"] [data-permission-section="room"] [data-project-id="{stack.project["id"]}"] [data-permission-project]').check()
+        page.locator(f'[data-cr-form="permissions"] [data-permission-section="room"] [data-project-id="{stack.project["id"]}"] [data-permission-level]').select_option('read')
         page.locator('[data-cr-form="permissions"] button[type="submit"]').click()
         # Pausing changes the access projection. SSE intentionally clears the
         # stale dialog before reauthorizing; the original receipt survives in

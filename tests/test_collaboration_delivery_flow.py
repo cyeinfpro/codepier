@@ -48,7 +48,7 @@ def login(page, stack):
     with page.expect_response(lambda response: response.request.method == 'POST' and response.url.endswith('/api/login'), timeout=15000) as signed_in:
         page.click('#login-form button')
     assert signed_in.value.status == 200
-    expect(page.locator('#page h1')).to_have_text('项目映射')
+    expect(page.locator('#page h1')).to_have_text('项目')
     page.locator(f'[data-action="project-collaboration"][data-id="{stack.project["id"]}"]').click()
     page.locator('[data-cc-action="create-room"]').click()
     expect(page.locator('#cc-message-input')).to_be_enabled()

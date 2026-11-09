@@ -37,7 +37,7 @@ def login(page, stack):
     page.fill('#username', 'admin')
     page.fill('#password', stack.password)
     page.click('#login-form button')
-    expect(page.locator('#page h1')).to_have_text('项目映射')
+    expect(page.locator('#page h1')).to_have_text('项目')
 
 
 def open_room(page, stack):
@@ -525,7 +525,7 @@ def test_join_panel_drafts_navigation_and_logout_fence(collaboration_stack, chat
         expect(page.locator('html')).to_have_attribute('data-join-server-saved', 'true')
         assert len(overview(stack)['join_slots']) == 1
         page.evaluate("navigate('projects')")
-        expect(page.locator('#page h1')).to_have_text('项目映射')
+        expect(page.locator('#page h1')).to_have_text('项目')
         page.locator(f'[data-action="project-collaboration"][data-id="{stack.project["id"]}"]').click()
         expect(page.locator('#cc-join-slot')).to_be_visible()
         page.locator('#cc-join-slot [name="label"]').fill('A newer draft')
@@ -823,7 +823,7 @@ def test_join_panel_old_overview_cannot_replace_new_scope(collaboration_stack, c
         # Returning through browser history re-enters the current scope without
         # resurrecting the aborted response or the previous project's code.
         page.evaluate("navigate('projects')")
-        expect(page.locator('#page h1')).to_have_text('项目映射')
+        expect(page.locator('#page h1')).to_have_text('项目')
         page.go_back()
         expect(page.locator('#page h1')).to_have_text('协作中心')
         expect(page.locator('#cc-scope [name="project"]')).to_have_value(stack.projects[1]['id'])

@@ -50,7 +50,7 @@ def test_reference_navigation_filter_and_reachability(stack, engine, scheme, wid
                 rect = button.bounding_box()
                 assert rect["width"] >= 40 and rect["height"] >= 44, rect
             dock.locator('[data-nav="projects"]').click()
-            expect(page.locator("#page h1")).to_have_text("项目映射")
+            expect(page.locator("#page h1")).to_have_text("项目")
             expect(dock.locator('[data-nav="projects"]')).to_have_attribute("aria-current", "page")
             more = dock.locator('[data-action="toggle-menu"]')
             more.click()
@@ -62,7 +62,7 @@ def test_reference_navigation_filter_and_reachability(stack, engine, scheme, wid
         else:
             expect(dock).to_be_hidden()
             page.locator('.nav [data-nav="projects"]').click()
-            expect(page.locator("#page h1")).to_have_text("项目映射")
+            expect(page.locator("#page h1")).to_have_text("项目")
         search = page.locator("#project-query")
         search.fill("__no_matching_reference_project__")
         expect(page.locator("#project-no-match")).to_be_visible()
