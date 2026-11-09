@@ -224,6 +224,35 @@ export async function busy(button, fn, notify = toast) {
 const nativeLayers = [];
 const layerBindings = new WeakSet();
 let layerObserver = null;
+
+function hidingDisclosure(node) {
+  let outermost;
+  for (
+    let closed = node?.closest('details:not([open])');
+    closed;
+    closed = closed.parentElement?.closest('details:not([open])')
+  ) {
+    if (!closed.querySelector(':scope > summary')?.contains(node)) outermost = closed;
+  }
+  return outermost;
+}
+
+export function focusable(root) {
+  return $$(
+    'button:not(:disabled),a[href],input:not(:disabled):not([type="hidden"]),select:not(:disabled),textarea:not(:disabled),summary,[tabindex="0"]',
+    root,
+  ).filter((node) => {
+    if (
+      node.tabIndex < 0 ||
+      !node.getClientRects().length ||
+      node.closest('[inert]') ||
+      getComputedStyle(node).visibility !== 'visible'
+    )
+      return false;
+    return !hidingDisclosure(node);
+  });
+}
+
 const noticeSelectors = ['#toasts', '#computer-approval-inbox'];
 
 export function layerHost() {
@@ -271,17 +300,7 @@ export function showModalLayer(dialog) {
     dialog.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') event.stopPropagation();
       if (event.key === 'Tab' && layerHost() === dialog && !event.defaultPrevented) {
-        const items = [
-          ...dialog.querySelectorAll(
-            'button:not(:disabled),a[href],input:not(:disabled):not([type="hidden"]),select:not(:disabled),textarea:not(:disabled),summary,[tabindex="0"]',
-          ),
-        ].filter(
-          (node) =>
-            node.tabIndex >= 0 &&
-            node.getClientRects().length &&
-            !node.closest('[inert]') &&
-            getComputedStyle(node).visibility === 'visible',
-        );
+        const items = focusable(dialog);
         event.preventDefault();
         const index = items.indexOf(document.activeElement);
         const next =
@@ -290,7 +309,7 @@ export function showModalLayer(dialog) {
               ? items.length - 1
               : 0
             : (index + (event.shiftKey ? -1 : 1) + items.length) % items.length;
-        (items[next] || dialog).focus({ preventScroll: true });
+        (items[next] || dialog).focus();
       }
     });
   }
@@ -323,13 +342,15 @@ export function closeModalLayer(dialog) {
 
 export function restoreLayerFocus(origin) {
   const host = layerHost();
+  const target = hidingDisclosure(origin)?.querySelector(':scope > summary') || origin;
   if (
-    origin?.isConnected &&
-    origin.getClientRects().length &&
-    !origin.closest('[inert]') &&
-    (host === document.body || host.contains(origin))
+    target?.isConnected &&
+    target.getClientRects().length &&
+    getComputedStyle(target).visibility === 'visible' &&
+    !target.closest('[inert]') &&
+    (host === document.body || host.contains(target))
   )
-    origin.focus({ preventScroll: true });
+    target.focus({ preventScroll: true });
 }
 
 export function confirmSheet({
@@ -525,7 +546,7 @@ export function createModal({
     $('#modal-root').innerHTML = '';
     $('#app').inert = false;
     document.body.style.overflow = $('.sidebar.open') ? 'hidden' : '';
-    let focus = S.modalLastFocus;
+    const focus = S.modalLastFocus;
     S.modalLastFocus = null;
     if (!preserveRoute && editorRoute) {
       const owned = history.state?.codepierEditor === editorRoute.id;
@@ -535,8 +556,6 @@ export function createModal({
         history.back();
       }
     }
-    if (focus?.isConnected && !focus.getClientRects().length)
-      focus = focus.closest('.tool-menu')?.querySelector('summary');
     restoreLayerFocus(focus);
   }
   function modal(title, body, footer = '', large = false, closable = true) {
@@ -616,13 +635,11 @@ export function createModal({
     S.modalCleanup = () => scope.dispose();
     // Establish focus while opening; a delayed callback could steal focus after
     // the user has already moved to another field or started submitting the form.
-    const editable = $(
-      'input:not(:disabled),textarea:not(:disabled),select:not(:disabled)',
-      dialog,
-    );
-    (editable?.getClientRects().length ? editable : uiFocusable(dialog)[0] || dialog).focus({
-      preventScroll: true,
-    });
+    const controls = uiFocusable(dialog);
+    const preferred =
+      controls.find((control) => control.matches('[autofocus]')) ||
+      controls.find((control) => control.matches('input,textarea,select'));
+    (preferred || controls[0] || dialog).focus({ preventScroll: true });
     return dialog;
   }
   return { modal, closeModal, requestClose };

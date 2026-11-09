@@ -397,3 +397,54 @@ def test_mobile_room_switch_preserves_ime_draft_and_stable_message_node(
         page.screenshot(path=str(screenshots / f'{engine}-room-center-mobile.png'), full_page=True)
     finally:
         context.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_nested_room_diagnostics_failure_can_retry_without_losing_focus(
+    collaboration_stack, chat_browser_pool, engine
+):
+    stack = collaboration_stack
+    context = chat_browser_pool(engine).new_context(
+        viewport={'width': 390, 'height': 568}, reduced_motion='reduce',
+    )
+    page = context.new_page()
+    attempts = []
+
+    def diagnostic(route):
+        attempts.append(route.request.method)
+        if len(attempts) == 1:
+            route.fulfill(status=409, json={'error': {'message': '测试诊断暂时不可用'}})
+        else:
+            route.continue_()
+
+    try:
+        sign_in(page, stack)
+        page.locator('.cr-empty [data-cr-action="create"]').click()
+        page.locator('[data-cr-form="create"] [name="title"]').fill('短屏诊断验收')
+        page.locator('[data-cr-form="create"] button[type="submit"]').click()
+        expect(page.locator('[data-cr-title]')).to_have_text('短屏诊断验收')
+        page.route('**/api/collaboration/rooms/*/diagnostics*', diagnostic)
+        opener = page.locator('.cr-room-actions [data-cr-action="settings"]')
+        opener.focus()
+        opener.click()
+        button = page.locator('dialog [data-cr-action="diagnostics"]')
+        button.focus()
+        button.click()
+        dialog = page.locator('dialog.cr-panel')
+        expect(dialog.get_by_role('heading', name='运行诊断')).to_be_visible()
+        expect(dialog.get_by_role('alert')).to_contain_text('测试诊断暂时不可用')
+        expect(dialog.get_by_text('正在读取…', exact=True)).to_have_count(0)
+        close = dialog.get_by_role('button', name='关闭面板')
+        expect(close).to_be_focused()
+        retry = dialog.get_by_role('button', name='重试读取')
+        retry.focus()
+        retry.press("Enter")
+        expect(dialog.get_by_role('heading', name='等待与队列')).to_be_visible()
+        expect(dialog.get_by_role('button', name='刷新', exact=True)).to_be_focused()
+        expect(dialog.get_by_role('alert')).to_be_hidden()
+        assert attempts == ['GET', 'GET']
+        page.keyboard.press('Escape')
+        expect(dialog).not_to_be_visible()
+        expect(opener).to_be_focused()
+    finally:
+        context.close()

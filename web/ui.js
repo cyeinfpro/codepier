@@ -46,16 +46,7 @@ function uiMenu(label, body) {
   return `<details class="tool-menu"><summary class="btn ghost">${icon('menu')}${esc(label)}</summary><div class="tool-menu-items">${body}</div></details>`;
 }
 function uiFocusable(root) {
-  return $$(
-    'button:not(:disabled),a[href],input:not(:disabled):not([type="hidden"]),select:not(:disabled),textarea:not(:disabled),summary,[tabindex="0"]',
-    root,
-  ).filter(
-    (el) =>
-      el.tabIndex >= 0 &&
-      el.getClientRects().length &&
-      !el.closest('[inert]') &&
-      getComputedStyle(el).visibility === 'visible',
-  );
+  return CP.ui.focusable(root);
 }
 function uiTrapTab(e, root, extraRoots = []) {
   if (e.key !== 'Tab' || e.defaultPrevented) return;
@@ -82,19 +73,59 @@ function uiPositionMenu(menu) {
   if (!menu?.open || !menu.matches('.tool-menu')) return;
   const list = menu.querySelector('.tool-menu-items');
   if (!list) return;
+  const scrollTop = list.scrollTop;
   delete list.dataset.placement;
   delete list.dataset.align;
   list.style.removeProperty('max-height');
   list.style.removeProperty('max-width');
-  list.style.removeProperty('left');
-  list.style.removeProperty('right');
+  list.style.removeProperty('translate');
   list.style.boxSizing = 'border-box';
   const viewport = window.visualViewport;
-  const top = viewport?.offsetTop || 0,
-    left = viewport?.offsetLeft || 0;
-  const bottom = top + (viewport?.height || innerHeight);
-  const width = viewport?.width || innerWidth;
-  list.style.maxWidth = Math.max(0, width - 16) + 'px';
+  const viewportHeight = viewport?.height || innerHeight;
+  let top = viewport?.offsetTop || 0,
+    left = viewport?.offsetLeft || 0,
+    bottom = top + viewportHeight,
+    right = left + (viewport?.width || innerWidth);
+
+  // A menu in a scrolling pane must fit the pane as well as the screen.
+  const clips = /^(auto|scroll|hidden|clip|overlay)$/;
+  for (
+    let parent = menu.parentElement;
+    parent && parent !== document.body;
+    parent = parent.parentElement
+  ) {
+    const style = getComputedStyle(parent);
+    const clipX = clips.test(style.overflowX);
+    const clipY = clips.test(style.overflowY);
+    if (!clipX && !clipY) continue;
+    const box = parent.getBoundingClientRect();
+    if (clipX) {
+      left = Math.max(left, box.left + parent.clientLeft);
+      right = Math.min(right, box.left + parent.clientLeft + parent.clientWidth);
+    }
+    if (clipY) {
+      top = Math.max(top, box.top + parent.clientTop);
+      bottom = Math.min(bottom, box.top + parent.clientTop + parent.clientHeight);
+    }
+  }
+
+  const page = menu.closest('#page');
+  if (page?.parentElement?.matches('.main')) {
+    const chrome = page.parentElement.querySelectorAll(':scope > .topbar, :scope > .mobile-dock');
+    for (const bar of chrome) {
+      const style = getComputedStyle(bar);
+      if (style.visibility !== 'visible' || !['sticky', 'fixed'].includes(style.position)) continue;
+      const box = bar.getBoundingClientRect();
+      if (box.height && box.bottom > top && box.top < bottom) {
+        if (bar.matches('.topbar')) top = Math.max(top, box.bottom);
+        else bottom = Math.min(bottom, box.top);
+      }
+    }
+  }
+
+  const availableWidth = Math.max(0, right - left - 16) + 'px';
+  list.style.setProperty('--ui-menu-available-width', availableWidth);
+  list.style.maxWidth = availableWidth;
   const rect = list.getBoundingClientRect(),
     anchor = menu.getBoundingClientRect();
   const below = bottom - anchor.bottom - 16,
@@ -102,20 +133,15 @@ function uiPositionMenu(menu) {
   const flip = rect.bottom > bottom - 8 && above > below;
   if (flip) list.dataset.placement = 'top';
   list.style.maxHeight =
-    Math.max(0, Math.min(420, (viewport?.height || innerHeight) * 0.6, flip ? above : below)) +
-    'px';
+    Math.max(0, Math.min(420, viewportHeight * 0.6, flip ? above : below)) + 'px';
   if (rect.left < left + 8) list.dataset.align = 'start';
   const positioned = list.getBoundingClientRect();
   const shift =
     positioned.left < left + 8
       ? left + 8 - positioned.left
-      : positioned.right > left + width - 8
-        ? left + width - 8 - positioned.right
-        : 0;
-  if (shift) {
-    list.style.left = list.offsetLeft + shift + 'px';
-    list.style.right = 'auto';
-  }
+      : Math.min(0, right - 8 - positioned.right);
+  if (shift) list.style.translate = shift + 'px 0';
+  list.scrollTop = scrollTop;
 }
 document.addEventListener(
   'toggle',
@@ -139,7 +165,13 @@ window.addEventListener('pagehide', () => {
 });
 window.addEventListener('pageshow', uiRepositionMenus);
 window.addEventListener('resize', uiRepositionMenus);
-document.addEventListener('scroll', uiRepositionMenus, true);
+document.addEventListener(
+  'scroll',
+  (event) => {
+    if (!event.target.closest?.('.tool-menu-items')) uiRepositionMenus();
+  },
+  true,
+);
 window.visualViewport?.addEventListener('resize', uiRepositionMenus);
 window.visualViewport?.addEventListener('scroll', uiRepositionMenus);
 const uiMobileMedia = matchMedia('(max-width:900px)');
@@ -591,13 +623,23 @@ if (typeof uiMobileMedia.addEventListener === 'function')
   uiMobileMedia.addEventListener('change', uiViewportChanged);
 else if (typeof uiMobileMedia.addListener === 'function')
   uiMobileMedia.addListener(uiViewportChanged);
-function uiSyncVisualViewport() {
+function uiSyncVisualViewport(event) {
   const viewport = window.visualViewport;
-  const covered = viewport
-    ? Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop)
-    : 0;
+  const top = Math.max(0, viewport?.offsetTop || 0);
+  const covered = viewport ? Math.max(0, window.innerHeight - viewport.height - top) : 0;
+  document.documentElement.style.setProperty('--ui-visual-viewport-top', top + 'px');
   document.documentElement.style.setProperty('--ui-visual-viewport-bottom', covered + 'px');
-  document.body.classList.toggle('ui-keyboard-open', covered > 96);
+  const keyboardOpen = covered > 96;
+  document.body.classList.toggle('ui-keyboard-open', keyboardOpen);
+  if (!keyboardOpen || event?.type !== 'resize') return;
+  const field = document.activeElement;
+  if (!field?.matches('input,textarea,[contenteditable="true"]')) return;
+  const scrollArea = field.closest('.modal-body,dialog[open]');
+  if (!scrollArea) return;
+  const bounds = scrollArea.getBoundingClientRect();
+  const control = field.getBoundingClientRect();
+  if (control.top < bounds.top || control.bottom > bounds.bottom)
+    field.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 }
 if (window.visualViewport) {
   window.visualViewport.addEventListener('resize', uiSyncVisualViewport);
@@ -818,6 +860,20 @@ function uiPolicyEditor(dialog, preferLast = false) {
   choose(selected);
   uiLabelFields(form);
 }
+
+// Close the focused menu before an enclosing dialog receives Escape.
+document.addEventListener(
+  'keydown',
+  (event) => {
+    if (event.defaultPrevented || event.key !== 'Escape') return;
+    const menu = event.target.closest?.('.tool-menu[open]');
+    if (!menu) return;
+    event.preventDefault();
+    menu.open = false;
+    menu.querySelector('summary')?.focus();
+  },
+  true,
+);
 
 // Menu movement follows the visible items; native select controls remain native.
 document.addEventListener('keydown', (event) => {

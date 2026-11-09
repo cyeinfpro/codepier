@@ -1047,12 +1047,15 @@ function onboardingHTML(o) {
   ];
   const next = steps.findIndex(([, done]) => !done);
   if (next === -1) return '';
-  return `<section class="panel onboarding" aria-labelledby="onboarding-title"><h2 id="onboarding-title">开始使用</h2><ol>${steps
+  const checklist = `<ol>${steps
     .map(
       ([label, done, action], index) =>
         `<li class="${done ? 'done' : ''}" ${next === index ? 'aria-current="step"' : ''}><strong>${esc(label)}</strong>${done ? '<span>已完成</span>' : next === index ? action : ''}</li>`,
     )
-    .join('')}</ol></section>`;
+    .join('')}</ol>`;
+  if (o.devices.length)
+    return `<details id="overview-onboarding" class="panel onboarding onboarding-compact"><summary>继续设置 <strong>${esc(steps[next][0])}</strong></summary>${checklist}</details>`;
+  return `<section class="panel onboarding" aria-labelledby="onboarding-title"><h2 id="onboarding-title">开始使用</h2>${checklist}</section>`;
 }
 function overviewHTML() {
   const o = S.overview;
@@ -1106,8 +1109,8 @@ function devicesHTML() {
       return `<article class="panel device-card workspace-device" data-cp-key="device:${esc(d.id)}" data-device-state="${state}">
       <header class="workspace-device-head"><div class="device-symbol workspace-device-symbol">${icon('device')}</div><div class="workspace-device-title">${d.enabled ? onlineBadge(d.online) : '<span class="badge failed">已停用</span>'}<h2>${esc(d.name)}</h2></div></header>
       <dl class="card-meta workspace-device-facts"><div><dt>平台 / 主机</dt><dd>${esc(info.platform || '等待上线')} · ${esc(info.hostname || '—')}</dd></div><div><dt>项目</dt><dd>${esc(d.project_count)} 个</dd></div><div><dt>最近连接</dt><dd>${esc(d.last_seen ? shortTime(d.last_seen) : '未连接')}</dd></div><div><dt>可访问的目录</dt><dd>${Array.isArray(info.roots) ? info.roots.length : 0} 个</dd></div></dl>
-      ${agentLifecycleSummary(d)}
       <div class="actions workspace-device-actions"><button class="btn primary small" data-action="add-project" data-device="${esc(d.id)}">${icon('plus')}添加项目</button><button class="btn ghost small" data-action="device-detail" data-id="${esc(d.id)}">管理</button>${d.agent?.update_available && d.agent?.can_update && !agentLifecycleBusy(d) ? `<button class="btn small" data-action="agent-update" data-id="${esc(d.id)}">更新</button>` : ''}</div>
+      ${agentLifecycleSummary(d)}
     </article>`;
     })
     .join('');

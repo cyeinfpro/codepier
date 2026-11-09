@@ -1446,6 +1446,13 @@
   animation: cr-panel-in var(--ui-motion-normal) var(--ui-ease);
 }
 
+@media (min-width: 721px) {
+  body.ui-keyboard-open .cr-panel {
+    top: var(--ui-visual-viewport-top, 0px);
+    max-height: var(--ui-keyboard-viewport, 100dvh);
+  }
+}
+
 .cr-panel::backdrop {
   background: color-mix(in srgb, var(--ui-scrim) 40%, transparent);
   backdrop-filter: none;
@@ -1455,6 +1462,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: var(--ui-space-3);
   min-height: 64px;
   padding: 12px 22px;
   position: sticky;
@@ -1464,7 +1472,13 @@
   border-bottom: 1px solid var(--cr-line);
 }
 
+.cr-panel > header > button {
+  flex: none;
+}
+
 .cr-panel h2 {
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-size: var(--ui-text-title);
   font-weight: var(--ui-weight-semibold);
   letter-spacing: -0.025em;
@@ -2467,7 +2481,7 @@
   /* Bottom-sheet controls remain above the on-screen keyboard. */
   body.ui-keyboard-open .cr-panel {
     bottom: var(--ui-visual-viewport-bottom, 0px);
-    max-height: max(0px, calc(100dvh - var(--ui-visual-viewport-bottom, 0px) - 16px));
+    max-height: max(0px, calc(var(--ui-keyboard-viewport) - var(--ui-space-4)));
   }
   .cr-panel > header {
     min-height: 56px;

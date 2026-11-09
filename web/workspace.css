@@ -1237,7 +1237,7 @@
   #page[data-page='overview'] > .editorial-board {
     flex: 1;
     min-height: 0;
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: max-content minmax(108px, 1fr);
   }
   #page[data-page='overview'] .workspace-operations,
   #page[data-page='overview'] .workspace-recent-projects {
@@ -1326,6 +1326,29 @@
 }
 .onboarding .endpoint {
   margin-block: var(--ui-space-2);
+}
+.onboarding-compact {
+  margin-block-end: var(--ui-space-3);
+  padding-block: var(--ui-space-2);
+}
+.onboarding-compact > summary {
+  min-height: var(--ui-touch-target);
+  align-content: center;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.onboarding-compact > summary strong {
+  margin-inline-start: var(--ui-space-2);
+}
+.onboarding-compact li {
+  min-width: 0;
+  padding-block: 0;
+}
+@media (min-width: 901px) {
+  .onboarding-compact ol {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 2fr);
+    gap: var(--ui-space-4);
+  }
 }
 .form-advanced {
   margin-block: var(--ui-space-3);

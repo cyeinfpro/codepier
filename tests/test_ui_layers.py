@@ -1,5 +1,6 @@
 """Synthetic source-module regression for floating notices and confirmations."""
 from pathlib import Path
+import re
 
 import pytest
 from playwright.sync_api import expect, sync_playwright
@@ -369,3 +370,196 @@ def test_vps_delete_cancel_duplicate_and_single_submission(vps_delete_page):
     assert page.evaluate("deletes") == ["/api/vps/fixture-vps?expected_version=7"]
     page.evaluate("finishDelete({})")
     expect(page.locator("#vps-form")).to_have_count(0)
+
+
+def test_native_dialog_tab_wrap_scrolls_controls_into_view(layer_page):
+    page = layer_page
+    page.set_viewport_size({"width": 390, "height": 360})
+    page.evaluate("""() => {
+      const dialog = document.createElement('dialog');
+      dialog.innerHTML = '<button id="first-control">First</button><div style="height:600px"></div>' +
+        '<button id="last-control">Last</button><details><summary>More</summary><button>Hidden</button></details>';
+      document.body.append(dialog);
+      CP.ui.showModalLayer(dialog);
+    }""")
+    first = page.locator("#first-control")
+    summary = page.locator("dialog summary")
+    first.focus()
+    page.keyboard.press("Shift+Tab")
+    expect(summary).to_be_focused()
+    expect(summary).to_be_in_viewport()
+    page.keyboard.press("Shift+Tab")
+    expect(page.locator("#last-control")).to_be_in_viewport()
+    page.keyboard.press("Tab")
+    page.keyboard.press("Tab")
+    expect(first).to_be_focused()
+    expect(first).to_be_in_viewport()
+
+
+def test_confirmation_sheet_fits_reduced_visual_viewport(layer_page):
+    page = layer_page
+    page.set_viewport_size({"width": 390, "height": 360})
+    for name in ("tokens.css", "styles.css"):
+        page.add_style_tag(path=str(ROOT / "web" / name))
+    page.evaluate("""() => {
+      CP.ui.confirmSheet({title:'Confirm', body:'Details\\n'.repeat(20), typed:'Project'});
+      const viewport = window.visualViewport;
+      Object.defineProperties(viewport, {offsetTop:{value:20}, height:{value:190}});
+      viewport.dispatchEvent(new Event('resize'));
+    }""")
+    bounds = page.locator(".ui-sheet").bounding_box()
+    assert bounds and bounds["y"] >= 20 and bounds["y"] + bounds["height"] <= 210
+    field = page.locator(".ui-sheet input")
+    expect(field).to_be_focused()
+    field_bounds = field.bounding_box()
+    assert field_bounds and field_bounds["y"] >= bounds["y"]
+    assert field_bounds["y"] + field_bounds["height"] <= bounds["y"] + bounds["height"]
+    assert page.locator(".ui-sheet").evaluate("el => el.scrollHeight > el.clientHeight")
+
+
+def test_tool_menu_respects_fixed_navigation_and_scroll_pane(layer_page):
+    page = layer_page
+    page.set_viewport_size({"width": 390, "height": 360})
+    page.add_style_tag(content="""
+      .topbar {position:fixed;inset:0 0 auto;height:60px;}
+      .mobile-dock {position:fixed;inset:auto 0 0;height:60px;}
+      #page {position:fixed;inset:60px 12px 60px 34px;overflow:auto;}
+      .tool-menu {position:relative;margin-top:80px;width:66px;height:40px;}
+      .tool-menu-items {position:absolute;top:calc(100% + 8px);right:0;width:210px;height:240px;overflow:auto;}
+      .tool-menu-items button {display:block;height:40px;}
+      .tool-menu-items[data-placement="top"] {top:auto;bottom:calc(100% + 8px);}
+      .tool-menu-items[data-align="start"] {right:auto;left:0;}
+    """)
+    page.evaluate("""() => {
+      document.querySelector('#app').innerHTML = '<main class="main"><header class="topbar"></header>' +
+        '<div id="page">' + uiMenu('Tools', '<button>Item</button>'.repeat(14)) +
+        '</div><nav class="mobile-dock"></nav></main>';
+      document.querySelector('.tool-menu').open = true;
+    }""")
+    menu = page.locator(".tool-menu-items")
+    expect(menu).to_have_attribute("style", re.compile("max-height:"))
+    bounds = menu.bounding_box()
+    assert bounds and bounds["x"] >= 42
+    assert bounds["y"] >= 60 and bounds["y"] + bounds["height"] <= 300
+    bottom = menu.evaluate("el => { el.scrollTop = el.scrollHeight; return el.scrollTop; }")
+    assert bottom > 0
+    page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+    assert menu.evaluate("el => el.scrollTop") == bottom
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_escape_closes_tool_menu_before_its_dialog(layer_page, native):
+    page = layer_page
+    page.evaluate("""native => {
+      const menu = uiMenu('Tools', '<button>Item</button>');
+      if (native) {
+        const dialog = document.createElement('dialog');
+        dialog.innerHTML = menu;
+        document.body.append(dialog);
+        CP.ui.showModalLayer(dialog);
+      } else {
+        modal('Editor', menu);
+      }
+      document.querySelector('.tool-menu').open = true;
+    }""", native)
+    page.get_by_role("button", name="Item").focus()
+    page.keyboard.press("Escape")
+    expect(page.locator(".tool-menu")).not_to_have_attribute("open", "")
+    expect(page.get_by_text("Tools")).to_be_focused()
+    expect(page.get_by_role("dialog")).to_be_visible()
+
+
+def test_long_editor_numbers_and_project_label_fit_mobile_layout(layer_page):
+    page = layer_page
+    page.set_viewport_size({"width": 320, "height": 568})
+    for name in ("tokens.css", "styles.css"):
+        page.add_style_tag(path=str(ROOT / "web" / name))
+    page.evaluate("""() => {
+      document.querySelector('#app').innerHTML = '<div class="editor"><div class="editor-lines">14001</div>' +
+        '<textarea>Code</textarea></div><div class="editor-bottom"><span>' +
+        'Project_' + 'A'.repeat(80) + '</span><span>SHA abcdef</span></div>';
+    }""")
+    assert page.locator(".editor-lines").evaluate("""el => {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const text = range.getBoundingClientRect(), box = el.getBoundingClientRect();
+      return text.left >= box.left && text.right <= box.right;
+    }""")
+    assert page.locator(".editor-bottom").evaluate("el => el.scrollWidth <= el.clientWidth")
+
+
+def test_long_room_panel_title_keeps_close_button_in_bounds(layer_page):
+    page = layer_page
+    page.set_viewport_size({"width": 320, "height": 568})
+    for name in ("tokens.css", "styles.css", "collaboration-room.css"):
+        page.add_style_tag(path=str(ROOT / "web" / name))
+    page.evaluate("""() => {
+      const dialog = document.createElement('dialog');
+      dialog.className = 'cr-panel';
+      dialog.innerHTML = '<header><h2>' + 'Collaborator'.repeat(16) +
+        '</h2><button class="cr-button">Close</button></header><div class="cr-panel-content">Room</div>';
+      document.body.append(dialog);
+      CP.ui.showModalLayer(dialog);
+    }""")
+    assert page.locator(".cr-panel").evaluate("""el => {
+      const panel = el.getBoundingClientRect(), button = el.querySelector('button').getBoundingClientRect();
+      return el.scrollWidth <= el.clientWidth && button.right <= panel.right;
+    }""")
+
+
+def test_panel_skips_hidden_fields_and_restores_collapsed_menu_origin(layer_page):
+    page = layer_page
+    page.evaluate("""() => {
+      const root = document.querySelector('#app');
+      root.innerHTML = '<details class="tool-menu" open><summary id="trigger">Actions</summary>' +
+        '<div class="tool-menu-items"><button id="edit">Edit</button></div></details>';
+      document.querySelector('#edit').focus();
+      modal('Edit', '<input type="hidden" name="id"><details><summary>Advanced</summary>' +
+        '<input name="advanced"></details><input name="label">');
+      root.querySelector('details').open = false;
+    }""")
+    expect(page.locator('[name="label"]')).to_be_focused()
+    page.keyboard.press('Escape')
+    expect(page.locator('#trigger')).to_be_focused()
+
+
+def test_tool_menu_can_shrink_inside_narrow_editor_pane(layer_page):
+    page = layer_page
+    for name in ('tokens.css', 'styles.css'):
+        page.add_style_tag(path=str(ROOT / 'web' / name))
+    page.evaluate("""() => {
+      document.querySelector('#app').innerHTML = '<div id="clip" style="width:170px;height:350px;' +
+        'margin:50px;overflow:auto;padding:12px">' + uiMenu('Actions', '<button class="btn">Action</button>') + '</div>';
+      document.querySelector('.tool-menu').open = true;
+    }""")
+    menu = page.locator('.tool-menu-items')
+    expect(menu).to_have_attribute('style', re.compile('max-width:'))
+    assert menu.evaluate("""el => {
+      const box = el.getBoundingClientRect(), pane = el.closest('#clip').getBoundingClientRect();
+      return box.width > 0 && box.left >= pane.left && box.right <= pane.right;
+    }""")
+
+
+def test_tablet_room_panel_fits_the_keyboard_viewport(layer_page):
+    page = layer_page
+    page.set_viewport_size({"width": 768, "height": 700})
+    for name in ('tokens.css', 'styles.css', 'collaboration-room.css'):
+        page.add_style_tag(path=str(ROOT / 'web' / name))
+    page.evaluate("""() => {
+      const dialog = document.createElement('dialog');
+      dialog.className = 'cr-panel';
+      dialog.innerHTML = '<header><h2>Permissions</h2></header><div class="cr-panel-content">' +
+        '<div style="height:550px"></div><input name="label"></div>';
+      document.body.append(dialog);
+      CP.ui.showModalLayer(dialog);
+      const viewport = window.visualViewport;
+      Object.defineProperties(viewport, {offsetTop:{value:30}, height:{value:360}});
+      viewport.dispatchEvent(new Event('resize'));
+    }""")
+    bounds = page.locator('.cr-panel').bounding_box()
+    assert bounds and bounds['y'] >= 30 and bounds['y'] + bounds['height'] <= 390
+    field = page.locator('.cr-panel input')
+    expect(field).to_be_focused()
+    field_bounds = field.bounding_box()
+    assert field_bounds and field_bounds['y'] >= bounds['y']
+    assert field_bounds['y'] + field_bounds['height'] <= bounds['y'] + bounds['height']

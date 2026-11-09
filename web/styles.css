@@ -1252,7 +1252,7 @@ kbd {
   right: 0;
   z-index: var(--ui-z-dropdown);
   display: grid;
-  min-width: 210px;
+  min-width: min(210px, var(--ui-menu-available-width, calc(100vw - 16px)));
   gap: 3px;
   padding: 8px;
   border: 1px solid var(--ui-border);
@@ -1420,8 +1420,7 @@ input[type='checkbox'] {
 }
 .modal-backdrop {
   position: fixed;
-  inset: 0;
-  bottom: var(--ui-visual-viewport-bottom, 0px);
+  inset: var(--ui-visual-viewport-top, 0px) 0 var(--ui-visual-viewport-bottom, 0px);
   z-index: var(--ui-z-modal);
   display: flex;
   align-items: center;
@@ -1750,7 +1749,7 @@ input[type='checkbox'] {
   flex: 1;
 }
 .editor-lines {
-  width: 45px;
+  min-width: 45px;
   max-height: 480px;
   flex: none;
   padding: 17px 9px;
@@ -1792,6 +1791,10 @@ input[type='checkbox'] {
   background: var(--ui-surface);
   color: var(--ui-muted);
   font: var(--ui-text-xs) var(--ui-mono);
+}
+.editor-bottom > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .workspace-empty {
   display: grid;
@@ -3283,7 +3286,7 @@ button.ui-busy {
     grid-template-columns: minmax(0, 1fr);
   }
   .tool-menu-items {
-    min-width: 196px;
+    min-width: min(196px, var(--ui-menu-available-width, calc(100vw - 16px)));
   }
   .page-help {
     margin-top: 15px;
@@ -3345,7 +3348,7 @@ button.ui-busy {
     justify-content: flex-end;
   }
   .editor-lines {
-    width: 36px;
+    min-width: 36px;
     padding: 14px 7px;
     font-size: var(--ui-text-xs);
   }
@@ -4475,6 +4478,20 @@ html {
   box-shadow: var(--ui-elev-3);
   font: var(--ui-text-base)/var(--ui-leading-body) var(--ui-font);
   animation: dialog-in var(--ui-motion-fast) var(--ui-ease);
+}
+body.ui-keyboard-open {
+  --ui-keyboard-viewport: max(
+    0px,
+    calc(100dvh - var(--ui-visual-viewport-top, 0px) - var(--ui-visual-viewport-bottom, 0px))
+  );
+}
+body.ui-keyboard-open :is(.ui-sheet, .chat-sheet, .chat-workspace .chat-project-sheet) {
+  inset-block: var(--ui-visual-viewport-top, 0px) var(--ui-visual-viewport-bottom, 0px);
+  max-height: max(0px, calc(var(--ui-keyboard-viewport) - var(--ui-space-4)));
+}
+body.ui-keyboard-open .modal-footer {
+  max-height: min(140px, max(56px, calc(var(--ui-keyboard-viewport) * 0.4)));
+  overflow-y: auto;
 }
 .ui-sheet::backdrop {
   background: var(--ui-scrim);

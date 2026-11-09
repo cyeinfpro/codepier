@@ -1003,9 +1003,10 @@ window.CodePierCollaboration = (() => {
     editor.style.height = 'auto';
     editor.style.height = Math.min(editor.scrollHeight, 180) + 'px';
   }
-  function closePanel() {
+  function closePanel({ restoreFocus = true } = {}) {
     const dialog = root?.querySelector('dialog');
     if (!dialog) return;
+    if (!restoreFocus) dialog._crOpener = null;
     panel?.impactController?.abort();
     if (panel?.name === 'work') state.workDetail = null;
     panelEpoch++;
@@ -1025,6 +1026,7 @@ window.CodePierCollaboration = (() => {
         : document.activeElement;
     dialog.querySelector('h2').textContent = heading;
     dialog.querySelector('.cr-panel-content').innerHTML = content;
+    dialog.scrollTop = 0;
     panelError('');
     patchMutationRecovery();
     patchRoomPermissions();
@@ -1034,7 +1036,8 @@ window.CodePierCollaboration = (() => {
       if (!dialog.open || panel?.epoch !== openingEpoch) return;
       const focused = document.activeElement;
       if (focused && focused !== dialog && dialog.contains(focused)) return;
-      dialog.querySelector('[autofocus]')?.focus();
+      const controls = CP.ui.focusable(dialog);
+      (controls.find((control) => control.matches('[autofocus]')) || controls[0])?.focus();
     });
   }
   function patchRoomPermissions() {
@@ -1452,7 +1455,9 @@ window.CodePierCollaboration = (() => {
     for (const project of section.querySelectorAll(
       '[data-permission-project]:checked:not(:disabled)',
     )) {
-      const controls = project.closest('[data-permission-row]').querySelector('[data-permission-lifetime]');
+      const controls = project
+        .closest('[data-permission-row]')
+        .querySelector('[data-permission-lifetime]');
       controls.dataset.lifetimeEdited = 'true';
       controls.querySelector('[data-permission-lifetime-mode]').value = mode;
       controls.querySelector('[data-permission-lifetime-until]').value =
@@ -2232,6 +2237,8 @@ window.CodePierCollaboration = (() => {
   function renderDiagnostics(data) {
     const box = root?.querySelector('[data-cr-diagnostics-view]');
     if (!box || panel?.name !== 'diagnostics') return;
+    const refresh = box.querySelector('[data-cr-action="refresh-diagnostics"]');
+    const restoreRefresh = refresh && refresh === document.activeElement;
     const truncated = Object.values(data.truncated || {}).some(Boolean);
     const labels = {
       members: '成员',
@@ -2358,17 +2365,26 @@ window.CodePierCollaboration = (() => {
           .filter(([key]) => data.limits?.[key] !== undefined)
           .map(([key, label]) => [label, data.limits[key]]),
       )}</details>`;
+    if (restoreRefresh)
+      box.querySelector('[data-cr-action="refresh-diagnostics"]')?.focus({ preventScroll: true });
   }
   async function loadDiagnostics() {
     const current = panel,
       owner = state.owner;
     if (current?.name !== 'diagnostics' || current.loading) return;
+    const isCurrent = () =>
+      panel === current && state.owner === owner && state.roomId === current.roomId;
     current.loading = true;
     try {
       const data = await api(store.path(current.roomId) + '/diagnostics');
-      if (panel !== current || state.owner !== owner || state.roomId !== current.roomId) return;
+      if (!isCurrent()) return;
       renderDiagnostics(data);
       panelError('');
+    } catch (error) {
+      if (!isCurrent() || error.name === 'AbortError') return;
+      const loading = root.querySelector('[data-cr-diagnostics-loading]');
+      if (loading) loading.outerHTML = btn('refresh-diagnostics', '重试读取');
+      panelError(error.message);
     } finally {
       current.loading = false;
     }
@@ -3478,7 +3494,7 @@ window.CodePierCollaboration = (() => {
       store.draft().work = panel.work.id;
       store.draft().workVersion = panel.work.version;
       store.draft().contextCorrection = null;
-      closePanel();
+      closePanel({ restoreFocus: false });
       patchComposer();
       root.querySelector('#cr-message').focus();
       announce('下一条消息将补充到这项工作');
@@ -3486,7 +3502,7 @@ window.CodePierCollaboration = (() => {
       openPanel(
         'diagnostics',
         '运行诊断',
-        '<div data-cr-diagnostics-view><p class="cr-muted">正在读取…</p></div>',
+        '<div data-cr-diagnostics-view><p class="cr-muted" data-cr-diagnostics-loading role="status">正在读取…</p></div>',
       );
       await loadDiagnostics();
     } else if (action === 'refresh-diagnostics') await loadDiagnostics();
@@ -3901,7 +3917,9 @@ window.CodePierCollaboration = (() => {
             ? [target]
             : section.querySelectorAll('[data-permission-project]:not(:disabled)');
           for (const project of projects) {
-            const select = project.closest('[data-permission-row]').querySelector('[data-permission-level]');
+            const select = project
+              .closest('[data-permission-row]')
+              .querySelector('[data-permission-level]');
             if (!target.checked || !select.value)
               applyPermissionLevel(select, target.checked ? 'read' : '');
           }
@@ -3914,7 +3932,9 @@ window.CodePierCollaboration = (() => {
           for (const project of section.querySelectorAll(
             '[data-permission-project]:checked:not(:disabled)',
           )) {
-            const select = project.closest('[data-permission-row]').querySelector('[data-permission-level]');
+            const select = project
+              .closest('[data-permission-row]')
+              .querySelector('[data-permission-level]');
             const available = [...select.options].filter((option) => !option.disabled);
             const best = available
               .reverse()
