@@ -91,7 +91,7 @@ def identity(version):
         branch = ref.removeprefix("refs/heads/")
         require(trusted_ref(origin["event"], branch, version) == ref
                 and origin["forced"] is False and origin["inputs"] == {},
-                "Only an empty-input version-matching release candidate dispatch may publish")
+                "Only an empty-input dispatch on main or a version-matching release candidate may publish")
     require(text_command("git", "rev-parse", "HEAD") == sha, "Checkout is not the event SHA")
     require(not command("git", "diff", "--name-only", "HEAD"), "Tracked source changed before build")
     tree = text_command("git", "rev-parse", "HEAD^{tree}")
@@ -118,7 +118,7 @@ def trusted_ref(event, branch, version):
             return "refs/heads/main"
         if branch == "v" + version:
             return "refs/tags/" + branch
-    elif event == "workflow_dispatch" and candidate_branch(branch, version):
+    elif event == "workflow_dispatch" and (branch == "main" or candidate_branch(branch, version)):
         return "refs/heads/" + branch
     return None
 
@@ -176,7 +176,7 @@ def validate_proof(proof, expected, run=None):
     require(origin.get("forced") is False, "Forced or ambiguous origin cannot supply reusable proof")
     require(isinstance(ref, str), "Missing origin ref")
     if event == "workflow_dispatch":
-        require(origin.get("inputs") == {}, "Candidate dispatch inputs must be explicitly empty")
+        require(origin.get("inputs") == {}, "Dispatch inputs must be explicitly empty")
         branch = ref.removeprefix("refs/heads/")
     else:
         branch = "main" if ref == "refs/heads/main" else ref.removeprefix("refs/tags/")

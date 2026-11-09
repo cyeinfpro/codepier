@@ -77,7 +77,7 @@ def test_discovers_successful_exact_source(monkeypatch, expected, run, proof):
 
 @pytest.mark.parametrize(("key", "value"), [
     ("status", "in_progress"), ("conclusion", "failure"), ("conclusion", "cancelled"),
-    ("event", "pull_request"), ("event", "workflow_dispatch"), ("head_sha", "a" * 7),
+    ("event", "pull_request"), ("event", "schedule"), ("head_sha", "a" * 7),
     ("head_sha", "d" * 40), ("path", ".github/workflows/untrusted.yml"), ("head_branch", "topic"),
     ("repository", {"full_name": "other/codepier"}), ("head_repository", {"full_name": "fork/codepier"}),
     ("run_attempt", 0), ("id", 18),
@@ -549,9 +549,9 @@ def test_oversize_verifier_output_falls_back_without_partial_proof(
     assert "full build required" in capsys.readouterr().out
 
 @pytest.mark.parametrize("branch", [
-    "release/v1.27.3-weixin-owner", "release/v1.27.3-candidate", "release/v1.27.3-ci-speedup-2",
+    "main", "release/v1.27.3-weixin-owner", "release/v1.27.3-candidate", "release/v1.27.3-ci-speedup-2",
 ])
-def test_trusted_candidate_dispatch_can_promote_without_rebuild(monkeypatch, expected, run, proof, branch):
+def test_trusted_dispatch_can_promote_without_rebuild(monkeypatch, expected, run, proof, branch):
     run.update(event="workflow_dispatch", head_branch=branch)
     proof["origin"].update(event="workflow_dispatch", ref="refs/heads/" + branch, inputs={})
     setup_discovery(monkeypatch, expected, run, proof)
@@ -561,7 +561,7 @@ def test_trusted_candidate_dispatch_can_promote_without_rebuild(monkeypatch, exp
 
 
 @pytest.mark.parametrize("branch", [
-    "main", "topic", "v1.27.3", "release/v1.27.2-candidate", "release/v1.27.30-candidate",
+    "topic", "v1.27.3", "release/v1.27.2-candidate", "release/v1.27.30-candidate",
     "release/v1.27.3", "release/v1.27.3-", "release/v1.27.3-Owner", "release/v1.27.3-foo/bar",
     "release/v1.27.3--candidate", "release/v1.27.3-candidate-", "release/v1.27.3-a..b",
     "refs/pull/1/merge", "release/v1.27.3-" + "a" * 130,
@@ -672,7 +672,7 @@ def test_dispatch_event_inputs_are_recorded_without_accepting_overrides(monkeypa
 
 
 @pytest.mark.parametrize("ref,inputs", [
-    ("refs/heads/main", {}), ("refs/heads/topic", {}),
+    ("refs/heads/main", {"sha": SHA}), ("refs/heads/topic", {}),
     ("refs/heads/release/v1.27.2-candidate", {}),
     ("refs/heads/release/v1.27.3-candidate", {"sha": SHA}),
 ])
@@ -685,5 +685,5 @@ def test_untrusted_manual_dispatch_fails_before_build_or_registry(monkeypatch, t
                        "GITHUB_SHA": SHA, "GITHUB_REPOSITORY": "example/codepier"}.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setattr(m, "command", lambda *args, **kwargs: pytest.fail("Rejected dispatch ran a command"))
-    with pytest.raises(m.EvidenceError, match="release candidate dispatch"):
+    with pytest.raises(m.EvidenceError, match="empty-input dispatch"):
         m.identity("1.27.3")

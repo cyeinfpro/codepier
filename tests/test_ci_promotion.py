@@ -3,11 +3,8 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import io
 import json
-import os
 from pathlib import Path
 import stat
-import subprocess
-import sys
 import urllib.error
 import zipfile
 
@@ -655,65 +652,28 @@ def test_current_main_must_still_point_to_expected_commit(evidence):
     with pytest.raises(promotion.EvidenceError, match="Main has moved"):
         verify(evidence)
 
-def test_ci_actions_read_is_limited_to_main_promotion_validator():
-    root = Path(__file__).resolve().parents[1]
-    workflow = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())
-    assert workflow["permissions"] == {"contents": "read"}
-    for name, job in workflow["jobs"].items():
-        expected = {"contents": "read", "actions": "read"} if name == "promotion" else {"contents": "read"}
-        assert job.get("permissions", workflow["permissions"]) == expected
-    job = workflow["jobs"]["promotion"]
-    proof = next(step for step in job["steps"] if step.get("id") == "proof")
-    assert proof["if"] == "github.event_name == 'push' && github.ref == 'refs/heads/main'"
-    assert proof["env"]["GH_TOKEN"] == "${{ github.token }}"
-    assert "--token-env GH_TOKEN" in proof["run"]
-    assert not proof.get("continue-on-error")
-    for step in job["steps"]:
-        if step is not proof:
-            assert "GH_TOKEN" not in step.get("env", {})
-
-
-@pytest.mark.parametrize("event,ref,exit_code,reused", [
-    ("push", "refs/heads/main", 0, "true"),
-    ("push", "refs/heads/main", 1, "false"),
-    ("push", "refs/heads/other", 0, "false"),
-    ("workflow_dispatch", "refs/heads/main", 0, "false"),
-    ("pull_request", "refs/pull/1/merge", 0, "false"),
-])
-def test_ci_promotion_shell_falls_back_without_success(tmp_path, event, ref, exit_code, reused):
-    root = Path(__file__).resolve().parents[1]
-    workflow = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())
-    proof = next(step for step in workflow["jobs"]["promotion"]["steps"] if step.get("id") == "proof")
-    binary = tmp_path / "bin"
-    binary.mkdir()
-    call_file = tmp_path / "called.json"
-    stub = binary / "python3"
-    stub.write_text(
-        f"#!{sys.executable}\nimport json,os,sys\nfrom pathlib import Path\n"
-        f"Path({str(call_file)!r}).write_text(json.dumps(sys.argv[1:]))\n"
-        "assert os.environ['GH_TOKEN'] == 'synthetic-read-only-token'\n"
-        f"raise SystemExit({exit_code})\n"
-    )
-    stub.chmod(0o755)
-    output = tmp_path / "github-output"
-    environment = {
-        **os.environ, "PATH": str(binary) + os.pathsep + os.environ.get("PATH", ""),
-        "EVENT_NAME": event, "REF_NAME": ref, "GITHUB_OUTPUT": str(output),
-        "GITHUB_REPOSITORY": promotion.REPOSITORY, "GITHUB_SHA": SHA, "GITHUB_RUN_ID": "101",
-        "GH_TOKEN": "synthetic-read-only-token",
-    }
-    environment.pop("BASH_ENV", None)
-    result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", proof["run"]],
-                            cwd=tmp_path, env=environment, text=True, capture_output=True, timeout=5)
-    assert result.returncode == 0, result.stderr
-    assert output.read_text().splitlines()[-1] == f"reused={reused}"
-    assert call_file.exists() == (event == "push" and ref == "refs/heads/main")
-    if call_file.exists():
-        args = json.loads(call_file.read_text())
-        assert args == ["scripts/check_ci_promotion.py", "--repository", promotion.REPOSITORY,
-                        "--sha", SHA, "--current-run-id", "101", "--token-env", "GH_TOKEN",
-                        "--output", "dist/promotion/proof.json"]
-    assert "synthetic-read-only-token" not in result.stdout + result.stderr
+def test_workflows_run_only_when_requested_or_a_version_tag_is_pushed():
+    root = Path(__file__).resolve().parents[1] / ".github/workflows"
+    ci = yaml.load((root / "ci.yml").read_text(), Loader=yaml.BaseLoader)
+    image = yaml.load((root / "image.yml").read_text(), Loader=yaml.BaseLoader)
+    assert set(ci["on"]) == {"workflow_dispatch"}
+    mode = ci["on"]["workflow_dispatch"]["inputs"]["mode"]
+    assert mode["type"] == "choice"
+    assert mode["default"] == "full"
+    assert mode["options"] == ["full", "release-source"]
+    assert "inputs.mode" in ci["concurrency"]["group"]
+    assert ci["permissions"] == {"contents": "read"}
+    jobs = ci["jobs"]
+    assert jobs["source"]["name"] == "Build verified public source"
+    assert "if" not in jobs["source"] and "needs" not in jobs["source"]
+    assert jobs["verify"]["needs"] == "source"
+    assert set(jobs["release-gate"]["needs"]) == {"source", "windows-core", "verify", "complete", "oidc-authentik"}
+    for name, job in jobs.items():
+        assert job.get("permissions", ci["permissions"]) == ci["permissions"]
+        if name != "source":
+            assert "inputs.mode == 'full'" in job["if"]
+    assert set(image["on"]) == {"push", "workflow_dispatch"}
+    assert image["on"]["push"] == {"tags": ["v*.*.*"]}
 
 
 @pytest.mark.parametrize('field,value', [('verified', False), ('commit', 'f'*40),

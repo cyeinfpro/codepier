@@ -35,11 +35,18 @@ macOS 下，浏览器原生宿主若从 Downloads 等受限制目录启动，可
 
 使用公开包解压后的干净目录建立仓库，不要在混有私人资料的旧工作目录直接执行 `git add .`。检查暂存差异和文件列表，确认许可证、第三方声明、README 相对链接和执行权限完整。维护者确认仓库所有者、名称、可见性和 Git 提交身份后，才创建远程仓库并推送。
 
-建议分支名 `main`。在 GitHub 启用私密漏洞报告、依赖安全告警与分支保护，并把 CI 设为合并条件；禁止把生产凭据暴露给 PR 工作流。CI 工作流只检查和构建；容器镜像工作流把通过启动验证的 Hub 镜像发布到 GHCR，但同样不会创建 Release 或部署服务。
+建议分支名 `main`。在 GitHub 启用私密漏洞报告、依赖安全告警。分支保护可按需配置，完整 CI 由维护者手动触发；禁止把生产凭据暴露给 PR 工作流。CI 工作流只检查和构建；容器镜像工作流把通过启动验证的 Hub 镜像发布到 GHCR，但同样不会创建 Release 或部署服务。
 
 正式发布核对同一提交的两个 GitHub 作业。源码作业 **Build verified public source** 校验两种 ZIP、容器运行资格与更新器启动。镜像作业 **Build, boot-test and publish** 验证镜像启动、多架构清单并将该提交的镜像推送到 GHCR。完整 CI、长时测试与跨平台汇总独立报告，发布可以在这些作业仍在运行或失败时继续。
 
-在干净的本地 main 上，用对应提交的源码运行号和镜像运行号发布。源码运行号可以来自仍在执行完整回归的同仓库 main 工作流。
+日常推送 main 不触发完整 CI 或镜像构建。准备发版时，先推送最终提交，然后手动触发对应的源码与镜像作业。源码运行号也可来自同一提交上已经完成源码作业的 full 模式。
+
+```bash
+gh workflow run ci.yml --ref main -f mode=release-source
+gh workflow run image.yml --ref main
+```
+
+两项作业通过后，在干净的本地 main 上用对应运行号发布。
 
 ```bash
 python3 scripts/publish_release.py --repo OWNER/REPO \
@@ -50,7 +57,7 @@ python3 scripts/publish_release.py --repo OWNER/REPO \
 
 ## 容器镜像
 
-`.github/workflows/image.yml` 用仓库根目录的 `Dockerfile` 构建 Hub 镜像并发布到 `ghcr.io/<仓库所有者>/codepier`；Kubernetes/k3s 等部署直接拉取该镜像，不再依赖 `install.sh` 在服务器上现场构建。触发条件：推送 `main`、推送 `v*.*.*` 标签、Pull Request（只构建不发布）以及手动运行（发布当前分支名标签）。
+`.github/workflows/image.yml` 用仓库根目录的 `Dockerfile` 构建 Hub 镜像并发布到 `ghcr.io/<仓库所有者>/codepier`；Kubernetes/k3s 等部署直接拉取该镜像，不再依赖 `install.sh` 在服务器上现场构建。在 main 或与源码版本匹配的发布候选分支手动运行，或推送 `v*.*.*` 正式标签时触发。
 
 发布前的门禁在同一任务内完成：宿主机 Python 运行 `scripts/check_release.py` 核对源码版本、RELEASE.json、Compose 与文档一致；标签必须等于 `v${VERSION}`；先构建 linux/amd64 候选镜像，用与 `compose.yml` 相同的只读根文件系统、tmpfs `/tmp`、`cap_drop ALL` 和 `no-new-privileges` 从空数据目录启动，要求 `/healthz` 在 60 秒内返回 `ok` 且版本与源码一致、未处于维护状态、`/agent/manifest.json` 可用、进程 UID 为 10001。任一检查失败即不发布。
 
@@ -76,11 +83,9 @@ macOS 资源专片将本作业生成的虚拟环境、pip 缓存、公开源码�
 
 外部 OS 预检不证明 Hub 已扩容。真实 Hub/Agent 进程启动后，128 请求准入验收另有单次准备阶段，以开始后 300 秒为接受准备成功的绝对截止时间，每 3 秒通过同一 HTTP 连接观察真实 Hub 状态；只有经过认证的 Agent 心跳使 Hub 达到原有 adaptive 准入容量才开始突发请求。最后一次在途读取仍可按既有 35 秒网络超时上限返回，因此阶段返回可能晚于截止时间；到达或超过 300 秒的成功不算通过，持续压力、未知状态或请求错误仍超时失败，并保留最后真实状态与错误类型。此等待不重启进程、不自动重跑测试，也不改变生产阈值、128 请求断言或其执行期限；失败仍使完整回归失败。
 
-## 同提交晋级与长测并行
+## 手动回归与发布证据
 
-候选分支在最终源码提交上运行完整 CodePier CI。晋级不是重新生成测试成功状态：scripts/check_ci_promotion.py 只读核验同一仓库、完整 SHA、Git tree、workflow ID/路径/内容哈希、最新有效成功 job、Windows/OIDC、两平台六片完整证明、coverage 及公开归档。public-source 工件包含四个发布附件、两份发布检查、source-build.json、runtime-acceptance.json 和 hub-image-acceptance.json；后者绑定当前提交、更新 ZIP 摘要、0077 解包权限、真实健康启动、版本和固定镜像身份，缺失或不符不得复用；真实容器资格验证必须从同一公开归档执行，`shared/runtime_qualification.py` 中 `CHECKS` 规定的全部边界、读写、恢复及归档一致性检查通过且清理完成，证明同时绑定提交、归档与源码清单，缺少或不匹配则禁止复用；每个来源工件绑定不可变 artifact ID 与 GitHub 给出的 ZIP digest。过期、缺失、来源不符、后续同 workflow 失败或未结束都使复用失败并回退完整 CI。
-
-通过候选完整回归后，把同一 SHA 快进到 main 可复用回归证据。main 的快速路径保留候选 run、job、artifact、源码和四附件摘要。SHA 或 workflow 有变化时重新验证。若 main 的源码作业因复用而跳过，可在同一 main 提交上手动运行 CodePier CI，源码作业通过后即可发布。镜像仍独立验证启动、多架构清单、SBOM 和构建来源。
+CodePier CI 的 full 模式运行完整回归。release-source 仅运行源码作业，保留相同的四个发布附件、两份发布检查、source-build.json、runtime-acceptance.json 和 hub-image-acceptance.json。运行资格和 Hub 启动证明继续绑定提交、归档与源码清单。
 
 长时进程模块专片仍实际并行等待 600 与 1800 秒。将它从普通片移出只消除前后排队和其他串行验收拖尾，不能把真实 30 分钟变成几分钟。动态测试集合全部纳入六片恰好一次证明，新增用例只能增加覆盖，不能因为分片而遗漏。这组证据用于完整回归的结论。
 
@@ -90,11 +95,9 @@ macOS 资源专片将本作业生成的虚拟环境、pip 缓存、公开源码�
 正式 VERSION 与完整 SHA 标签一旦指向另一个摘要就失败，不自动覆盖；main 与 MAJOR.MINOR/latest 仍是明确的可变别名。完整 SHA 级工作流串行化配合仓库镜像发布 job 锁降低本工作流的 main/tag 竞态，不声称约束外部发布者或提供注册表级不可变策略。GitHub concurrency 可能替换尚未开始的旧 pending 运行，因此不承诺每条旧 main 提交都产生镜像。image-proof-SHA-run-attempt 成功证明保留 14 天；首个新流水线版本不能复用旧格式镜像记录，缺失、过期或无法验证时回退完整构建及启动门禁。此流程不创建 Release、不部署，也不设置仓库权限或凭据。
 
 
-跨运行的 Actions 产物读取仅由 CI 与镜像各自独立的晋级验证 job 执行，job 权限限定为 contents: read 与 actions: read，使用 GitHub 内置短时令牌；不新增凭据或持久授权。CI 的令牌只传给 main push 的验证步骤。普通测试/源码构建 job 不获得 Actions 读取权限；镜像构建与发布 job 保持原有 contents: read、packages: write，不获得 actions: read。镜像只读验证结果通过本次运行的有界 job output 传递，构建 job 在使用前重新核对源码身份与注册表摘要。读取被拒绝、缺少或无法校验的证明一律不允许复用，回到完整构建和既有门禁；取消运行仍尊重取消，不继续发布。
+跨运行的 Actions 产物由镜像晋级验证 job 只读获取，使用 contents: read、actions: read 及 GitHub 内置短时令牌。CI 仅需 contents: read。镜像构建 job 在使用证明前重新核对源码身份与注册表摘要。证明缺失、过期或无法核验时重新构建并执行启动门禁。
 
-
-候选镜像可由同仓库的 workflow_dispatch 产生，但可复用来源严格限于与源码版本匹配的 release/v<VERSION>-<小写字母数字短横线后缀> 分支，且 dispatch 输入必须为空、forced 明确为 false。来源 run 的 event/head_branch 必须与 proof.origin.event/ref 一致，并核对同仓库 ID、相同源码 SHA/tree、workflow SHA/内容、固定构建配方、成功的完整构建/真实启动/多架构证明步骤、run/attempt 和 artifact ZIP 摘要；读取后再确认来源 run 未变化。PR、fork、任意 topic/main 手动触发、异版本候选、非空参数或不完整产物都不能作为复用来源。该规则保留正式版本与完整 SHA 标签的不可覆盖检查；改变源码后必须用新 SHA 重跑完整验收。
-
+镜像可复用来源包括同仓库 main 或匹配源码版本的 release/v<VERSION>-<小写字母数字短横线后缀> 分支手动运行。必须使用空输入，来源事件和分支须与证明匹配，且同一仓库、SHA、Git tree、workflow、构建配方、运行编号和产物摘要均通过校验。
 
 ### 不可变部署清单与安装恢复
 
