@@ -1146,6 +1146,7 @@ window.CodePierCollaboration = (() => {
       box.innerHTML = markup;
       box._markup = markup;
     }
+    if (changed && room.legacy) panelError('房间或迁移条件已变化，请重新核对并确认。');
   }
   function createPanel() {
     const projects = (S.projects || [])
@@ -1399,7 +1400,7 @@ window.CodePierCollaboration = (() => {
     }
     patchRoomPermissions();
   }
-  function applyPermissionLevel(select, value) {
+  function applyPermissionLevel(select, value, allTargets = false) {
     if (
       select.disabled ||
       ![...select.options].some((option) => option.value === value && !option.disabled)
@@ -1412,7 +1413,8 @@ window.CodePierCollaboration = (() => {
       input.checked = caps.includes(input.value);
     if (
       caps.includes('execute') &&
-      !group.querySelector('[data-permission-target-option][data-available="true"]:checked')
+      (allTargets ||
+        !group.querySelector('[data-permission-target-option][data-available="true"]:checked'))
     )
       for (const input of group.querySelectorAll(
         '[data-permission-target-option][data-available="true"]',
@@ -2091,6 +2093,8 @@ window.CodePierCollaboration = (() => {
         panelError('请先处理服务器列出的迁移条件，再明确确认启用。');
         return;
       }
+      const revision = current.migrationRevision;
+      const expectedVersion = current.version;
       const confirmed = await uiConfirmAction(
         {
           title: '启用新版房间？',
@@ -2099,13 +2103,13 @@ window.CodePierCollaboration = (() => {
         },
         {
           owner: form,
-          current: () => panel === current && current.migrationRevision === migrationRevision(),
+          current: () => panel === current && revision === migrationRevision(),
         },
       );
       if (!confirmed) return;
       const result = await mutation('POST', store.path() + '/migration', {
         action: 'activate',
-        expected_version: current.version,
+        expected_version: expectedVersion,
       });
       if (result) {
         closePanel();
@@ -3877,7 +3881,7 @@ window.CodePierCollaboration = (() => {
               .find((option) =>
                 permissionLevels[option.value][1].every((cap) => requested.includes(cap)),
               );
-            if (best) applyPermissionLevel(select, best.value);
+            if (best) applyPermissionLevel(select, best.value, true);
           }
           event.target.value = '-';
           updatePermissionControls();

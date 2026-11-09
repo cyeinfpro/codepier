@@ -95,12 +95,12 @@ def test_invite_accept_lands_in_team_and_role_assignment_is_explicit(journey_pag
     page.locator('[data-iam="accept-invite"]').click()
     page.locator('#iam-form [name="invitation"]').fill(invite["invitation"])
     page.locator('button[form="iam-form"]').click()
-    expect(page.locator("#page h1")).to_have_text("项目映射")
+    expect(page.locator("#page h1")).to_have_text("项目")
     assert page.evaluate("S.space_id") == space["id"]
     assert page.evaluate("S.projects.length") == 0
     assert page.evaluate("S.space_id") != personal
     page.reload()
-    expect(page.locator("#page h1")).to_have_text("项目映射")
+    expect(page.locator("#page h1")).to_have_text("项目")
     assert page.evaluate("S.space_id") == space["id"]
     owner = page.context.browser.new_page(viewport=page.viewport_size)
     try:
@@ -145,8 +145,8 @@ def test_connection_preview_defaults_and_stale_response_do_not_leak(journey_page
     profile = stack.must(stack.client.post("/api/access-profiles", json={"label": label, "scopes": ["read", "write", "execute", "computer"], "all_projects": True, "projects": [], "idempotency_key": uuid.uuid4().hex}))
     grant = stack.must(stack.client.post("/api/grants", json={"label": label, "scopes": ["read"], "projects": [stack.project["id"]], "profile_id": profile["id"], "profile_version": profile["version"]}))
     login(page, stack, route="connect")
-    expect(page.locator("#page")).to_contain_text("助手访问 CodePier")
-    expect(page.locator("#page")).to_contain_text("CodePier 使用外部工具")
+    expect(page.locator("#connection-setup h2")).to_have_text("连接检查")
+    expect(page.locator("#page")).to_contain_text("ChatGPT 连接地址")
     page.locator('#other-clients > summary').click()
     page.locator('[data-action="new-grant"]').click()
     page.locator("#access-profile-selector").select_option(profile["id"])
@@ -156,10 +156,10 @@ def test_connection_preview_defaults_and_stale_response_do_not_leak(journey_page
     page.locator('.modal [data-action="close-modal"]').first.click()
     expect(page.locator(".modal")).to_have_count(0)
     page.evaluate("(id) => CodePierProfiles.preview(id)", grant["grant_id"])
-    expect(page.locator("[data-access-preview]")).to_contain_text("fixedProfile")
-    expect(page.locator("[data-access-preview]")).to_contain_text("原同意 ∩ 当前上限")
+    expect(page.locator("[data-access-preview]")).to_contain_text("固定访问配置")
+    expect(page.locator("[data-access-preview]")).to_contain_text("电脑上的限制在调用时检查")
     expect(page.locator("[data-access-preview]")).to_contain_text("拒绝")
-    expect(page.locator("[data-access-preview]")).to_contain_text("没有执行任何工具")
+    expect(page.locator("[data-access-preview]")).to_contain_text("只读预览未联系节点或试跑操作")
     assert grant["token"] not in page.content()
     page.locator("[data-refresh-access]").click()
     expect(page.locator("[data-access-preview]")).to_be_visible()

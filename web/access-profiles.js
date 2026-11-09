@@ -221,7 +221,7 @@ window.CodePierProfiles = (() => {
         refresh_required: '等待客户端刷新凭据',
         unavailable: '没有可用凭据',
       }[r.grant.state] || r.grant.state;
-    return `<div data-access-preview><dl class="kv"><dt>连接持有人</dt><dd>${esc(r.owner.label)} <small class="mono">${esc(r.owner.id)}</small></dd><dt>当前空间</dt><dd>${esc(r.space.label)}</dd><dt>连接</dt><dd>${esc(r.grant.label)}</dd><dt>授权模式</dt><dd>${esc(mode)}</dd><dt>状态 / 到期</dt><dd>${esc(state)} · ${r.grant.expires_at ? esc(timeText(r.grant.expires_at)) : '尚无有效凭据'}${r.grant.revoked ? ' · 已撤销' : ''}</dd>${r.profile ? `<dt>Profile</dt><dd>${esc(r.profile.label)} · ${esc(r.profile.id)}</dd>` : ''}${r.role ? `<dt>角色</dt><dd>${esc(r.role.label)}</dd>` : ''}</dl>${r.grant.reason?.message ? notice(esc(r.grant.reason.message)) : ''}${notice('以下是当前面板权限，电脑上的限制在调用时检查。')}${
+    return `<div data-access-preview><dl class="kv"><dt>连接持有人</dt><dd>${esc(r.owner.label)}</dd><dt>当前空间</dt><dd>${esc(r.space.label)}</dd><dt>连接</dt><dd>${esc(r.grant.label)}</dd><dt>授权模式</dt><dd>${esc(mode)}</dd><dt>状态 / 到期</dt><dd>${esc(state)} · ${r.grant.expires_at ? esc(timeText(r.grant.expires_at)) : '尚无有效凭据'}${r.grant.revoked ? ' · 已撤销' : ''}</dd>${r.profile ? `<dt>访问配置</dt><dd>${esc(r.profile.label)}</dd>` : ''}${r.role ? `<dt>角色</dt><dd>${esc(r.role.label)}</dd>` : ''}</dl>${r.grant.reason?.message ? notice(esc(r.grant.reason.message)) : ''}${notice('以下是当前面板权限，电脑上的限制在调用时检查。')}${
       r.projects
         .map(
           (p) =>

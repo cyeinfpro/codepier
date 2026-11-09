@@ -152,7 +152,7 @@ def test_copy_fallback_retains_dialog_and_expiry_clears_command(install_page):
     expect(page.locator('#agent-install-copy')).to_be_enabled()
     page.evaluate('Object.defineProperty(navigator,"clipboard",{value:undefined,configurable:true}); document.execCommand=()=>false')
     page.locator('#agent-install-copy').dispatch_event('click')
-    expect(page.locator('#agent-install-status')).to_contain_text('已选中安装命令')
+    expect(page.locator('#agent-install-status')).to_contain_text('命令已选中')
     assert page.locator('#agent-install-command').evaluate('(field)=>field.selectionEnd-field.selectionStart') == len(state['command'])
     state['hold'] = True
     expect(page.locator('#agent-install-copy')).to_be_disabled(timeout=8000)

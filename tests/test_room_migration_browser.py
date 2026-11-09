@@ -167,8 +167,9 @@ def test_legacy_room_read_only_safe_stop_explicit_cutover_and_original_receipt(
                 'X-File-Name': 'blocked.txt', 'X-Upload-Key': key()})
         assert response.status_code == 409, response.text
 
-        # This is the actual old approval, not a synthetic work projection.
-        page.locator(f'[data-cr-action="work-detail"][data-id="{goal["id"]}"]').click()
+        # Open the real old approval from the room work list.
+        page.locator('[data-cr-action="work-list"]').click()
+        page.locator(f'[data-cr-work-list-view] [data-cr-action="work-detail"][data-id="{goal["id"]}"]').click()
         expect(page.locator('[data-cr-work-view]')).to_contain_text('核对原操作，不重复启动')
         expect(page.locator('[data-work-action="pause"]')).to_be_enabled()
         expect(page.locator('[data-cr-form="work-recovery"]')).to_have_count(0)
@@ -188,7 +189,7 @@ def test_legacy_room_read_only_safe_stop_explicit_cutover_and_original_receipt(
 
         page.locator('[data-cr-migration-open]').click()
         expect(page.locator('[data-cr-form="migration"] button')).to_be_disabled()
-        expect(page.locator('[name="confirm_migration"]')).to_be_disabled()
+        expect(page.get_by_role('dialog', name='启用新版房间？')).to_have_count(0)
         page.locator('[data-migration-blocker="MEMBER_MIGRATION_REQUIRED"] [data-cr-action="member-detail"]').click()
         page.locator('[data-flow-action="migrate"]').first.click()
         expect(page.locator('.cr-instructions')).to_have_value(re.compile('"action":"join"'))
@@ -212,21 +213,23 @@ def test_legacy_room_read_only_safe_stop_explicit_cutover_and_original_receipt(
         page.locator('[data-cr-migration-open]').click()
         form = page.locator('[data-cr-form="migration"]')
         expect(form.locator('button[type="submit"]')).to_be_enabled()
-        expect(form.locator('[name="confirm_migration"]')).not_to_be_checked()
+        confirmation = page.get_by_role('dialog', name='启用新版房间？')
+        expect(confirmation).to_have_count(0)
         assert stack.must(stack.client.get(f'/api/collaboration/rooms/{room_id}'))['room']['legacy']
 
         # Server eligibility enables review, never automatic activation. Any
         # changed room version clears the original owner confirmation.
-        form.locator('[name="confirm_migration"]').check()
+        form.locator('button[type="submit"]').click()
+        expect(confirmation).to_be_visible()
         current = stack.must(stack.client.get(f'/api/collaboration/rooms/{room_id}'))['room']
         stack.must(stack.client.patch(f'/api/collaboration/rooms/{room_id}', json={
             'title': '核对后的原房间', 'expected_version': current['version'], 'idempotency_key': key(),
         }))
         page.evaluate('document.dispatchEvent(new Event("visibilitychange"))')
         expect(page.locator('[data-cr-title]')).to_have_text('核对后的原房间')
-        expect(form.locator('[name="confirm_migration"]')).not_to_be_checked()
         expect(page.locator('[data-cr-panel-error]')).to_contain_text('重新核对并确认')
-        form.locator('button[type="submit"]').click()
+        confirmation.get_by_role('button', name='启用', exact=True).click()
+        expect(confirmation).to_have_count(0)
         assert stack.must(stack.client.get(f'/api/collaboration/rooms/{room_id}'))['room']['legacy']
 
         committed = []
@@ -247,8 +250,9 @@ def test_legacy_room_read_only_safe_stop_explicit_cutover_and_original_receipt(
                     assert response.json()['error']['not_saved'] is True
                 route.fulfill(response=response)
         page.route(f'**/api/collaboration/rooms/{room_id}/migration', lose_activation_response)
-        form.locator('[name="confirm_migration"]').check()
         form.locator('button[type="submit"]').evaluate('(button) => {button.click();button.click();}')
+        expect(confirmation).to_have_count(1)
+        confirmation.get_by_role('button', name='启用', exact=True).click()
         expect(page.locator('[data-cr-panel-recovery] [data-cr-action="recover-action"]')).to_be_visible()
         page.locator('[data-cr-action="close"]').click()
         if lost_before_commit:
@@ -265,11 +269,11 @@ def test_legacy_room_read_only_safe_stop_explicit_cutover_and_original_receipt(
             assert not committed
             assert stack.must(stack.client.get(f'/api/collaboration/rooms/{room_id}'))['room']['legacy']
             page.locator('[data-cr-pending] [data-cr-action="migration"]').click()
-            expect(form.locator('[name="confirm_migration"]')).not_to_be_checked()
+            expect(confirmation).to_have_count(0)
             form.locator('button[type="submit"]').click()
-            assert len(activations) == 2  # a newer version is not consent
-            form.locator('[name="confirm_migration"]').check()
-            form.locator('button[type="submit"]').click()
+            expect(confirmation).to_be_visible()
+            assert len(activations) == 2
+            confirmation.get_by_role('button', name='启用', exact=True).click()
             expect(page.locator('dialog.cr-panel')).not_to_be_visible()
             assert len(activations) == 3
             assert activations[2]['idempotency_key'] != activations[0]['idempotency_key']

@@ -93,6 +93,7 @@ async function agentInstallSetup(device = null) {
             })
           ).pairing;
       if (!current()) return;
+      delete dialog.dataset.editorDirty;
       form.hidden = button.hidden = true;
       showAgentInstallCommand(
         dialog,

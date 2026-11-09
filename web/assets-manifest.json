@@ -7,16 +7,16 @@
       "bytes": 908
     },
     "access-profiles.js": {
-      "sha256": "5a3001974331fadc37047f01bd08ad6e901eccad42f78bca903e563ff672468b",
-      "bytes": 15828
+      "sha256": "bff61df52c95d04ac2690fb8e6adb8fdff19a7ac7e58b242d8a7feb9a95b214f",
+      "bytes": 15762
     },
     "access.js": {
       "sha256": "b589d8801a544dd6531adf43eeb97ea2b67eab450ea4412643711fab7c81d66b",
       "bytes": 7868
     },
     "agent-install.js": {
-      "sha256": "7ce2259e5494e0060b688a2e290b3441eab194568307748d22b95b0c04ee8c02",
-      "bytes": 32669
+      "sha256": "74f4d4981e47593ec21cf0f1607bf68db8c5e31446b7867c1c27dd90ea4f4a01",
+      "bytes": 32710
     },
     "agent-roots.css": {
       "sha256": "c2bd26edc5cc69fd07625c816274c79367cb5309c83970ab0de255fb50d88b4b",
@@ -27,8 +27,8 @@
       "bytes": 21958
     },
     "app.js": {
-      "sha256": "6d071e2e31730f823d618c375adc55915703736cfab59aa807ed1cbf5b4d5471",
-      "bytes": 134531
+      "sha256": "362b1759dc64c5c37a75bd68e197d15ce4427ba7f5e052d4984b6220fb5df613",
+      "bytes": 134458
     },
     "appearance.js": {
       "sha256": "df23f28bfb8f464f5e8ddaa45bf1648f8bd095a8ce31579ba6a01979bb376950",
@@ -83,8 +83,8 @@
       "bytes": 48121
     },
     "collaboration-room.js": {
-      "sha256": "5e3c4357d9c0f25feddf94b65d40e6a6db81da2a03bba467b24e17fb835be251",
-      "bytes": 189536
+      "sha256": "2cd16fa7eae2dcb6a3d236a164b34667fb60e3dcc19aef924b44493b28d7735f",
+      "bytes": 189774
     },
     "computer.css": {
       "sha256": "031dff13225cec17fc8d445c565feccddd0db33fc277d28a468e19060a54eed2",

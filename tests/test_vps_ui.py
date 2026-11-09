@@ -233,7 +233,11 @@ def test_returning_mobile_dock_preserves_held_page_click(browser,ui_stack):
           const dock=document.querySelector('.mobile-dock');
           dock.style.cssText='visibility:hidden;opacity:0;pointer-events:none;transform:translateY(100px)';
           const button=document.querySelector('[data-vps-card]:not([hidden]) [data-vps-action="edit"]');
-          window.scrollTo(0,scrollY+button.getBoundingClientRect().bottom-innerHeight+5);
+          const spacer=document.createElement('div');
+          spacer.style.height='400px';
+          button.closest('[data-vps-card]').before(spacer);
+          button.style.scrollMarginBlock='0';
+          button.scrollIntoView({block:'end'});
           button.addEventListener('pointerdown',()=>{
             dock.removeAttribute('style');
           },{once:true});
