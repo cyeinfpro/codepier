@@ -343,11 +343,19 @@ def _validation_fingerprint(schema):
             result.pop('additionalProperties')
         if result.get('required') == []:
             result.pop('required')
-        choices = result.get('anyOf', [])
-        if set(result) == {'anyOf'} and choices and all(
-                isinstance(choice, dict) and set(choice) == {'type'}
-                and isinstance(choice['type'], str) for choice in choices):
-            return {'type': list(dict.fromkeys(choice['type'] for choice in choices))}
+        # Independently expand type-array shorthand into the verbose union;
+        # do not call factor or reproduce its constraint-hoisting algorithm.
+        types = result.get('type')
+        if isinstance(types, list) and types and 'anyOf' not in result:
+            constraints = {}
+            if set(types) == {'string', 'null'}:
+                for keyword in ('minLength', 'maxLength', 'pattern'):
+                    if keyword in result:
+                        constraints[keyword] = result.pop(keyword)
+            result.pop('type')
+            result['anyOf'] = [
+                {'type': kind, **(constraints if kind == 'string' else {})}
+                for kind in types]
         return result
     return json.dumps(normalize(_expanded_schema(schema)), sort_keys=True, separators=(',', ':'))
 
@@ -494,3 +502,175 @@ def test_factor_keeps_literal_json_data_and_reference_sibling_constraints():
     for value in ({'data': literal, 'number': 2}, {'data': literal, 'number': 1},
                   {'data': {}, 'number': 2}, {'data': literal, 'number': True}):
         assert Draft202012Validator(schema).is_valid(value) == Draft202012Validator(compact).is_valid(value)
+
+
+_UNION_VALUES = (None, '', 'a', 'ab', 'abc', 'abcd', 'abcde', 'ZZ', '\n',
+                 True, False, 0, 1, 1.5, [], ['ab'], {}, {'value': 'ab'})
+
+
+def _assert_union_factor_equivalent(schema):
+    from shared.core_output_schemas import factor
+    before = deepcopy(schema)
+    compact = factor(schema)
+    Draft202012Validator.check_schema(schema)
+    Draft202012Validator.check_schema(compact)
+    for value in _UNION_VALUES:
+        assert Draft202012Validator(schema).is_valid(value) == Draft202012Validator(compact).is_valid(value), (schema, value)
+    assert schema == before
+    assert factor(schema) == compact
+    return compact
+
+
+@pytest.mark.parametrize('siblings', [
+    {'title': 'Nullable value', 'description': 'Preserve this explanation',
+     'default': None, 'deprecated': True, 'readOnly': True, 'writeOnly': False},
+    {'minLength': 2, 'maxLength': 4, 'pattern': '^[a-z]+$'},
+    {'enum': [None, 'ab']},
+    {'not': {'const': 'ab'}},
+])
+def test_factor_pure_type_anyof_keeps_all_siblings(siblings):
+    schema = {**deepcopy(siblings), 'anyOf': [{'type': 'string'}, {'type': 'null'}]}
+    compact = _assert_union_factor_equivalent(schema)
+    assert 'anyOf' not in compact
+    assert set(compact['type']) == {'string', 'null'}
+    for name, value in siblings.items():
+        assert compact[name] == value
+
+
+@pytest.mark.parametrize('reverse', [False, True])
+@pytest.mark.parametrize('constraints', [
+    {'minLength': 2}, {'maxLength': 3}, {'pattern': '^[a-z]+$'},
+    {'minLength': 2, 'maxLength': 4, 'pattern': '^[a-z]+$'},
+])
+def test_factor_nullable_string_constraints_keep_type_and_metadata(reverse, constraints):
+    branches = [{'type': 'string', **constraints}, {'type': 'null'}]
+    if reverse:
+        branches.reverse()
+    metadata = {'title': 'Optional text', 'description': 'Keep explicit type and this hint',
+                'default': None, 'examples': [None, 'ab'], 'deprecated': True,
+                'readOnly': False, 'writeOnly': True}
+    schema = {**deepcopy(metadata), 'anyOf': branches, 'not': {'const': 'ZZ'}}
+    compact = _assert_union_factor_equivalent(schema)
+    assert 'anyOf' not in compact
+    assert set(compact['type']) == {'string', 'null'}
+    for name, value in {**metadata, **constraints, 'not': {'const': 'ZZ'}}.items():
+        assert compact[name] == value
+    assert Draft202012Validator(compact).is_valid(None)
+
+
+@pytest.mark.parametrize('schema', [
+    {'type': 'string', 'anyOf': [{'type': 'string', 'minLength': 1}, {'type': 'null'}]},
+    {'type': ['string'], 'anyOf': [{'type': 'string', 'minLength': 1}, {'type': 'null'}]},
+    {'type': 'object', 'anyOf': [{'type': 'string'}, {'type': 'null'}]},
+    {'minLength': 3, 'anyOf': [{'type': 'string', 'minLength': 1}, {'type': 'null'}]},
+    {'maxLength': 1, 'anyOf': [{'type': 'string', 'maxLength': 4}, {'type': 'null'}]},
+    {'pattern': '^a$', 'anyOf': [{'type': 'string', 'pattern': '^[a-z]+$'}, {'type': 'null'}]},
+    {'anyOf': [{'type': 'string', 'minLength': 1, 'description': 'String branch hint'}, {'type': 'null'}]},
+    {'anyOf': [{'type': 'string', 'minLength': 1}, {'type': 'null', 'description': 'Null branch hint'}]},
+    {'anyOf': [{'type': 'string', 'minLength': 1, 'enum': ['ab']}, {'type': 'null'}]},
+    {'anyOf': [{'type': 'string', 'minLength': 1}, {'type': 'null'}, {'type': 'integer'}]},
+    {'oneOf': [{'type': 'string'}, {'type': 'string'}, {'type': 'null'}]},
+    {'$defs': {'text': {'type': 'string', 'minLength': 2}},
+     'anyOf': [{'$ref': '#/$defs/text', 'maxLength': 3}, {'type': 'null'}]},
+    {'type': 'object', 'properties': {'literal': {'const': {
+        'anyOf': [{'type': 'string'}, {'type': 'null'}], 'description': 'literal JSON'}}}},
+])
+def test_factor_type_union_guards_keep_intersections_and_branch_annotations(schema):
+    compact = _assert_union_factor_equivalent(schema)
+    if 'anyOf' in schema:
+        assert 'anyOf' in compact
+    if 'oneOf' in schema:
+        assert compact['oneOf'] == schema['oneOf']
+    for keyword in ('type', 'minLength', 'maxLength', 'pattern'):
+        if keyword in schema:
+            assert compact[keyword] == schema[keyword]
+    for branch in schema.get('anyOf', []):
+        if 'description' in branch:
+            assert any(candidate.get('description') == branch['description']
+                       for candidate in compact['anyOf'])
+
+
+def test_validation_fingerprint_nullable_string_retains_each_constraint():
+    constraints = {'minLength': 2, 'maxLength': 4, 'pattern': '^[a-z]+$'}
+    verbose = {'anyOf': [{'type': 'string', **constraints}, {'type': 'null'}], 'default': None}
+    shorthand = {'type': ['string', 'null'], **constraints, 'default': None}
+    assert _validation_fingerprint(verbose) == _validation_fingerprint(shorthand)
+    for keyword, replacement in {'minLength': 3, 'maxLength': 3, 'pattern': '^a+$'}.items():
+        assert _validation_fingerprint(shorthand) != _validation_fingerprint({**shorthand, keyword: replacement})
+        missing = {key: value for key, value in shorthand.items() if key != keyword}
+        assert _validation_fingerprint(shorthand) != _validation_fingerprint(missing)
+    assert _validation_fingerprint(shorthand) != _validation_fingerprint({**shorthand, 'type': 'string'})
+    for schema in (verbose, shorthand):
+        _assert_union_factor_equivalent(schema)
+
+
+@pytest.mark.parametrize('extensions', [True, False])
+def test_factor_recompacts_type_union_after_short_reference_inlining(extensions):
+    from shared.core_output_schemas import factor
+    schema = {'$defs': {'short_text': {'type': 'string'}},
+              'type': 'object', 'additionalProperties': extensions,
+              'description': 'Keep the explicit root extension contract and hint.',
+              'properties': {'operation_id': {
+                  'description': 'Original operation ID, never execution authority.',
+                  'anyOf': [{'$ref': '#/$defs/short_text'}, {'type': 'string'}]}},
+              'required': ['operation_id']}
+    before = deepcopy(schema)
+    compact = factor(schema)
+    field = compact['properties']['operation_id']
+    assert 'anyOf' not in field
+    assert field['type'] in ('string', ['string'])
+    assert field['description'] == schema['properties']['operation_id']['description']
+    assert compact['description'] == schema['description']
+    assert compact['additionalProperties'] is extensions
+    Draft202012Validator.check_schema(compact)
+    values = [{}, [], None, {'operation_id': 'original-id', 'extra': 1}]
+    values += [{'operation_id': value} for value in _UNION_VALUES]
+    for value in values:
+        assert Draft202012Validator(schema).is_valid(value) == Draft202012Validator(compact).is_valid(value), value
+    assert schema == before
+    assert factor(schema) == compact
+
+
+def test_factor_short_nullable_nodes_use_cost_checks_without_changing_validation():
+    import json
+    from shared.core_output_schemas import factor
+    nullable = {'type': ['string', 'null']}
+    assert len(json.dumps(nullable, separators=(',', ':'))) == 26
+    schema = {'type': 'object', 'additionalProperties': False,
+              'properties': {**{f'field_{index}': deepcopy(nullable) for index in range(24)},
+                             'plain_a': {'type': 'string'}, 'plain_b': {'type': 'string'}},
+              'required': ['field_0']}
+    before = deepcopy(schema)
+    compact = factor(schema)
+    # A frequent 26-byte node saves space; a tiny type:string node must stay inline.
+    refs = [compact['properties'][f'field_{index}']['$ref'] for index in range(24)]
+    assert len(set(refs)) == 1
+    assert compact['properties']['plain_a'] == compact['properties']['plain_b'] == {'type': 'string'}
+    assert len(json.dumps(compact)) < len(json.dumps(schema))
+    Draft202012Validator.check_schema(compact)
+    values = [{}, {'field_0': None}, {'field_0': 'ok', 'extra': 1}, [], None]
+    for name in schema['properties']:
+        values += [{**{'field_0': 'required'}, name: value} for value in _UNION_VALUES]
+    for value in values:
+        assert Draft202012Validator(schema).is_valid(value) == Draft202012Validator(compact).is_valid(value), value
+    assert schema == before
+    assert factor(schema) == compact
+
+
+def test_factor_post_inline_nullable_string_keeps_minimum_null_and_hint():
+    schema = {'$defs': {'text': {'type': 'string', 'minLength': 2}},
+              'description': 'Optional identifier; retain the minimum length for strings.',
+              'default': None,
+              'anyOf': [{'$ref': '#/$defs/text'}, {'type': 'null'}]}
+    compact = _assert_union_factor_equivalent(schema)
+    assert 'anyOf' not in compact
+    assert set(compact['type']) == {'string', 'null'}
+    assert compact['minLength'] == 2
+    assert compact['description'] == schema['description']
+    assert compact['default'] is None
+    validator = Draft202012Validator(compact)
+    assert validator.is_valid(None)
+    assert validator.is_valid('ab')
+    assert not validator.is_valid('a')
+    assert not validator.is_valid('')
+    assert not validator.is_valid(2)

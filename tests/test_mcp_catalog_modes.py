@@ -28,6 +28,14 @@ def test_catalog_modes_and_budget():
         tool_definitions(schemas='invalid')
 
 
+
+def test_catalog_preserves_room_for_small_contract_additions():
+    # Keep growth room below the existing hard budgets, not just a passing byte.
+    assert len(json.dumps(tool_definitions()).encode()) + 512 < 95000
+    assert size(tool_definitions(schemas='lean')) + 256 < 30000
+    assert size(tool_definitions('coding', schemas='lean')) + 512 < 23000
+
+
 def call(client, credential, method, params=None, query='', modern=False):
     params = dict(params or {})
     if modern:

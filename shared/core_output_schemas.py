@@ -273,10 +273,24 @@ def factor(schema):
         if result.get('additionalProperties') is True:
             result.pop('additionalProperties')
         choices = result.get('anyOf', [])
-        if set(result) == {'anyOf'} and choices and all(
+        if 'type' not in result and choices and all(
                 isinstance(choice, dict) and set(choice) == {'type'}
                 and isinstance(choice['type'], str) for choice in choices):
-            return {'type': list(dict.fromkeys(choice['type'] for choice in choices))}
+            # The same type union applies with sibling annotations/constraints.
+            # Keep every sibling instead of dropping defaults or descriptions.
+            result.pop('anyOf')
+            result['type'] = list(dict.fromkeys(choice['type'] for choice in choices))
+        elif 'type' not in result and len(choices) == 2 and {'type': 'null'} in choices:
+            text = next((choice for choice in choices if choice != {'type': 'null'}), {})
+            # These three assertions apply only to strings. Lifting them from
+            # a nullable string branch preserves null and the explicit types.
+            # Do not move annotations, references or conflicting parent keys.
+            if (isinstance(text, dict) and text.get('type') == 'string'
+                    and set(text) <= {'type', 'minLength', 'maxLength', 'pattern'}
+                    and not set(text) & (set(result) - {'anyOf'})):
+                result.pop('anyOf')
+                result.update(text)
+                result['type'] = ['string', 'null']
         return result
 
     # Keep the facade's explicit extension contract visible to simple clients.
@@ -300,7 +314,7 @@ def factor(schema):
 
     def count(node):
         fingerprint = key(node)
-        if len(fingerprint) >= 30:
+        if len(fingerprint) >= 25:
             counts[fingerprint] += 1
         for child in children(node):
             count(child)
@@ -410,6 +424,11 @@ def factor(schema):
         result = inline(result)
     if not result.get('$defs'):
         result.pop('$defs', None)
+    # Inlining short references can expose type-only unions again. Normalize
+    # once more, retaining the facade's explicit extension hint at the root.
+    result = compact_types(result)
+    if root_extensions:
+        result['additionalProperties'] = True
     return result
 
 
