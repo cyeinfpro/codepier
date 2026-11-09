@@ -6,7 +6,7 @@ import re
 from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from shared.util import valid_json_value
-from shared.coding_contracts import OpenWorkspace, ShowChanges, ApplyPatch
+from shared.coding_contracts import OpenWorkspace, ShowChanges, ApplyPatch, ReviewSnapshots, ReviewSnapshotsManage
 from shared.computer_contracts import (ComputerStatus, ComputerApps, ComputerOpen, ComputerObserve, ComputerAction, ComputerClose, COMPUTER_TOOLS, COMPUTER_READ_TOOLS)
 
 def required_scope(name: str, args: object) -> str:
@@ -340,6 +340,8 @@ class Tool:
     local: bool = False
 
 TOOLS: dict[str, Tool] = {
+    'review_snapshots': Tool(ReviewSnapshots, 'read', 'Inspect shared Agent quota and list only this project/mapping/caller retained snapshots. No source content or other caller references. Does not expire or release snapshots.'),
+    'review_snapshots_manage': Tool(ReviewSnapshotsManage, 'write', 'Release one owned baseline for an ended/abandoned task, or losslessly compact owned snapshots without changing IDs, contents or leases. Finished reviews cannot be released. Recover uncertain results with the same idempotency key.', True),
     'open_workspace': Tool(OpenWorkspace, 'read', 'Open a project with bounded rules, skills and execution context. Pass context_id to omit unchanged content after revalidation. Optional capture_baseline snapshots allowed source BEFORE editing; works without Git. Not a full scan or authorization token.'),
     'show_changes': Tool(ShowChanges, 'read', 'Freeze an immutable interval review from baseline_ref, or read a saved review_ref. finalize=true releases the baseline by atomically replacing it with its final review; retries return that result. New baselines last 24 hours, reviews seven days. Default retains the baseline for further comparisons. List files first; path reads bounded diff pages via offset. Bound to project/mapping/grant, not session authorship proof.'),
     'apply_patch': Tool(ApplyPatch, 'write', 'Apply up to 32 typed write/delete/move changes. Preflight ALL paths/SHA before writing; parent directories must exist. dry_run previews only. Whole-batch backups, per-file CAS and explicit rollback reports; NOT an atomic filesystem transaction. Reuse the same key only to recover the identical request.', True),
@@ -516,6 +518,8 @@ OUTPUT_SCHEMAS.update({name: _object({**_RECEIPT, "session_id": _NULLABLE_STR,
     for name in COMPUTER_TOOLS})
 
 OUTPUT_SCHEMAS.update({
+    'review_snapshots': _object({**_RECEIPT, 'quota_scope': _STR, 'used_bytes': _INT, 'limit_bytes': _INT, 'records': _INT, 'limit_records': _INT, 'completion_reserve_bytes': _INT, 'effective_limit_bytes': _INT, 'owned_records': _INT, 'snapshots': {'type': 'array'}, 'next_offset': {'type': ['integer', 'null']}}, ('operation_id', 'quota_scope', 'snapshots')),
+    'review_snapshots_manage': _object({**_RECEIPT, 'action': _STR, 'released': _BOOL, 'baseline_ref': _STR, 'compacted': _INT, 'reclaimed_bytes': _INT, 'leases_preserved': _BOOL}, ('operation_id', 'action')),
     'open_workspace': _object({**_RECEIPT, 'context_id': _STR, 'context_unchanged': _BOOL, 'workspace': {'type': 'object'}, 'context': {'type': ['object', 'null']}, 'baseline_ref': _STR, 'truncated': _BOOL}, ('operation_id', 'context_id', 'context_unchanged', 'workspace')),
     'show_changes': _object({**_RECEIPT, 'review_ref': _STR, 'baseline_ref': _STR, 'immutable': _BOOL, 'baseline_released': _BOOL,
                             'started': _NUM, 'finished': _NUM, 'expires_at': _NUM, 'scope': _STR,

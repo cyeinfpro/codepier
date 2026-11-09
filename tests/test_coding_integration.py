@@ -115,6 +115,29 @@ def test_remote_finalization_replays_original_result_through_public_facade(codin
     assert '+final result' in detail['diff'] and 'later unrelated' not in detail['diff']
 
 
+def test_remote_scoped_review_inventory_release_and_scope_denial(coding_stack):
+    s = coding_stack
+    baseline = value(s, tool(s, 'open_workspace', {
+        'project': 'ProjectAlpha', 'capture_baseline': True,
+        'baseline_paths': ['new-scoped.svg']}))
+    assert baseline['baseline_coverage']['scope'] == 'paths'
+    inventory = value(s, tool(s, 'review_snapshots', {'project':'ProjectAlpha'}))
+    assert any(item['ref'] == baseline['baseline_ref'] for item in inventory['snapshots'])
+    grant = s.must(s.client.post('/api/grants', json={
+        'label':'review-inventory-reader', 'scopes':['read'], 'projects':[s.project['id']], 'days':1}))
+    private = value(s, tool(s, 'review_snapshots', {'project':'ProjectAlpha'}, grant['token']))
+    assert private['owned_records'] == 0 and not private['snapshots']
+    args = {'project':'ProjectAlpha', 'action':'release', 'baseline_ref':baseline['baseline_ref'],
+            'idempotency_key':'release-review-'+uuid.uuid4().hex}
+    denied = tool(s, 'review_snapshots_manage', args, grant['token'])
+    assert denied['isError'] and denied['structuredContent']['error']['code'] == 'INSUFFICIENT_SCOPE'
+    released = value(s, tool(s, 'review_snapshots_manage', args))
+    replay = value(s, tool(s, 'review_snapshots_manage', args))
+    assert released['released'] and replay['operation_id'] == released['operation_id']
+    inventory = value(s, tool(s, 'review_snapshots', {'project':'ProjectAlpha'}))
+    assert not any(item['ref'] == baseline['baseline_ref'] for item in inventory['snapshots'])
+
+
 def test_coding_profile_uses_canonical_oauth_resource_and_revocation(coding_stack):
     from urllib.parse import parse_qs,urlparse
     from tests.test_integration import oauth_prepare

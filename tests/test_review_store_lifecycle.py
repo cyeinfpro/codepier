@@ -25,10 +25,10 @@ def records(workspace):
 
 
 def rewrite(path, **changes):
-    data = json.loads(path.read_text())
-    data['payload'].update(changes)
-    data['sha256'] = reviews.fingerprint(data['payload'])
-    path.write_text(json.dumps(data))
+    document, _ = reviews.ReviewStore._read(path)
+    document.update(changes)
+    wrapped, _, _ = reviews.ReviewStore._pack(document)
+    path.write_text(json.dumps(wrapped))
 
 
 def native_reviews(workspace):
@@ -73,9 +73,10 @@ def test_duplicate_review_reuses_original_interval_and_expiry(workspace, monkeyp
 
 
 def test_finalization_fits_by_replacing_baseline_and_replays_without_recapture(workspace, monkeypatch):
-    (workspace[2]/'large.txt').write_text('unchanged source\n'*1000)
+    import hashlib
+    (workspace[2]/'large.txt').write_text(''.join(hashlib.sha256(str(i).encode()).hexdigest() for i in range(1000)))
     baseline = call(workspace, 'open_workspace', capture_baseline=True)
-    original_size = records(workspace)[0].stat().st_size
+    original_size = sum(p.stat().st_size for p in records(workspace)[0].parent.iterdir() if p.suffix in {'.json', '.zlib'})
     monkeypatch.setattr(reviews, 'MAX_RECORDS', 1)
     monkeypatch.setattr(reviews, 'MAX_STORAGE_BYTES', original_size)
     final = call(workspace, 'show_changes', baseline_ref=baseline['baseline_ref'], finalize=True)

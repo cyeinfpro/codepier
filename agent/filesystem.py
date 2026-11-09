@@ -915,6 +915,9 @@ class FileEngine:
         if tool == "apply_patch":
             from agent.batch_patch import apply_patch
             return apply_patch(self, project, args)
+        if tool in {"review_snapshots", "review_snapshots_manage"}:
+            from agent.coding_reviews import review_snapshots, review_snapshots_manage
+            return (review_snapshots if tool == "review_snapshots" else review_snapshots_manage)(self, project, args)
         if tool in {"open_workspace", "show_changes"}:
             from agent.coding_reviews import open_workspace, show_changes
             return (open_workspace if tool == "open_workspace" else show_changes)(self, project, args)

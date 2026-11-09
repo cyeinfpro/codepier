@@ -277,7 +277,7 @@ def build_core_output_schemas(legacy, *, include_queries=False):
                         'content_unavailable_reason': {'enum': ['FILE_TOO_LARGE', 'BINARY_FILE', 'ENCODING']},
                         'truncated': {'const': True}, 'next_offset': NULL}},
     ]
-    read = [text_file, image_file, batch_read, *variants('show_changes', 'artifacts_get',
+    read = [text_file, image_file, batch_read, *variants('review_snapshots', 'show_changes', 'artifacts_get',
             'artifacts_list', 'history_list', 'code_symbols', 'lsp_query')]
     # Import.created is a boolean; registered artifact.created is a timestamp.
     # Both must be declared before factoring shared fields across the facade.
@@ -290,7 +290,7 @@ def build_core_output_schemas(legacy, *, include_queries=False):
                                      'backup_id': STR}, ('path', 'code', 'message'))),
         'error': ERROR, 'next': STR,
     })
-    edit = [copy('fs_edit'), patch, *variants('history_restore', 'project_checkpoint')]
+    edit = [copy('fs_edit'), patch, *variants('review_snapshots_manage', 'history_restore', 'project_checkpoint')]
 
     # A saved task, local shell and saved VPS command all expose real exit/output
     # fields. cwd/host/command are transport-specific optional metadata.

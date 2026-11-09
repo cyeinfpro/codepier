@@ -1,6 +1,6 @@
 """Small, typed coding surface; a profile is never an authorization grant."""
 from __future__ import annotations
-from typing import Literal
+from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from shared.util import valid_json_value
 
@@ -23,9 +23,16 @@ class OpenWorkspace(CodingArgs):
     context_id: str = Field(default='', pattern=r'^(|[a-f0-9]{64})$')
     context_detail: Literal['minimal', 'documents'] = Field(default='minimal', description='Minimal rule/document/skill index by default; documents explicitly requests bounded source previews. Neither probes execution capabilities.')
     capture_baseline: bool = Field(default=False, description='Capture before editing, not after. New baselines expire in 24 hours; finish with show_changes(finalize=true) to release source storage. Not a Git commit or authorship proof.')
+    baseline_paths: list[Annotated[str, Field(min_length=1, max_length=1024)]] = Field(default_factory=list, max_length=128, description='Optional exact relative file paths, including not-yet-existing files. Limits the baseline and all later reviews to this scope; empty captures the project.')
     max_chars: int = Field(default=6000, ge=1000, le=32000)
     max_files: int = Field(default=8, ge=1, le=32)
     include_skills: bool = True
+
+    @model_validator(mode='after')
+    def baseline_scope_requires_capture(self):
+        if self.baseline_paths and not self.capture_baseline:
+            raise ValueError('baseline_paths requires capture_baseline=true')
+        return self
 
 
 class ShowChanges(CodingArgs):
@@ -75,3 +82,24 @@ class ApplyPatch(CodingArgs):
     idempotency_key: str = Field(min_length=8, max_length=128)
     changes: list[PatchChange] = Field(min_length=1, max_length=32)
     dry_run: bool = Field(default=False, description='Preflight every path/SHA and preview changes without writing. Use a different key for the intentional apply.')
+
+
+class ReviewSnapshots(CodingArgs):
+    project: str = Field(min_length=1, max_length=100)
+    workspace_id: str = Field(default='', pattern=r'^(|[a-f0-9]{32})$')
+    offset: int = Field(default=0, ge=0, le=1000000)
+    limit: int = Field(default=40, ge=1, le=100)
+
+
+class ReviewSnapshotsManage(CodingArgs):
+    project: str = Field(min_length=1, max_length=100)
+    workspace_id: str = Field(default='', pattern=r'^(|[a-f0-9]{32})$')
+    idempotency_key: str = Field(min_length=8, max_length=128)
+    action: Literal['release', 'compact']
+    baseline_ref: str = Field(default='', pattern=r'^(|[a-f0-9]{32})$')
+
+    @model_validator(mode='after')
+    def release_reference(self):
+        if (self.action == 'release') != bool(self.baseline_ref):
+            raise ValueError('Only release requires baseline_ref; compact preserves all leases')
+        return self

@@ -89,4 +89,11 @@ def validate_config(value: object, config_path: Path) -> dict:
     c["scheduler"] = validate_scheduler(c.get("scheduler"))
     from agent.journal_retention import validate as validate_retention
     c["journal_retention"] = validate_retention(c.get("journal_retention", {}))
+    review = c.get('review_storage', {})
+    if not isinstance(review, dict) or set(review) - {'max_storage_mib', 'max_records'}:
+        raise ValueError('review_storage 只支持 max_storage_mib 和 max_records')
+    for key, low, high in [('max_storage_mib', 64, 65536), ('max_records', 16, 10000)]:
+        if key in review and (type(review[key]) is not int or not low <= review[key] <= high):
+            raise ValueError(f'review_storage.{key} 必须是 {low}–{high} 的整数')
+    c['review_storage'] = review
     return c
