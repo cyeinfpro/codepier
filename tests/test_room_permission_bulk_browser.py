@@ -58,6 +58,7 @@ def test_bulk_permissions_select_vps_and_constrain_custom_channels(
         path = open_permissions(page, stack, 'VPS bulk permission fixture')
         section = page.locator('[data-permission-section="room"]')
         first = section.locator(f'[data-project-id="{stack.project["id"]}"]')
+        section.locator('[data-permission-select-all]').check()
         section.locator('[data-permission-bulk-level]').select_option('execute')
         expect(first.locator(f'[data-permission-target-option][value="{remote}"]')).to_be_checked()
         expect(first).to_contain_text('Synthetic room VPS')
@@ -66,6 +67,7 @@ def test_bulk_permissions_select_vps_and_constrain_custom_channels(
         for channel in ('weixin',):
             page.locator(f'[data-permission-mode="{channel}"]').uncheck()
             custom = page.locator(f'[data-permission-section="{channel}"]')
+            custom.locator('[data-permission-select-all]').check()
             custom.locator('[data-permission-bulk-level]').select_option('execute')
             expect(custom.locator(f'[data-project-id="{stack.project["id"]}"] '
                                   f'[data-permission-target-option][value="{remote}"]')).to_be_checked()
@@ -94,8 +96,10 @@ def test_bulk_permissions_select_vps_and_constrain_custom_channels(
             rule = next(r for r in scope['project_scopes'] if r['project_id'] == stack.project['id'])
             assert set(rule['execution_targets']) == {'project_agent', other_remote, *extra_remotes}
         page.locator('.cr-room-actions [data-cr-action="permissions"]').click()
-        section.locator('[data-permission-bulk-level]').select_option('')
+        section.locator('[data-permission-select-all]').check()
+        section.locator('[data-permission-select-all]').uncheck()
         expect(section.locator('[data-permission-targets]:visible')).to_have_count(0)
+        section.locator('[data-permission-select-all]').check()
         section.locator('[data-permission-bulk-level]').select_option('execute')
         expect(first.locator(f'[data-permission-target-option][value="{remote}"]')).to_be_checked()
         # Merely closing never commits the newly expanded selection.
@@ -132,7 +136,15 @@ def test_bulk_projects_saves_above_old_limit_without_contract_error(
     try:
         path = open_permissions(page, stack, 'Unlimited project permissions')
         section = page.locator('[data-permission-section="room"]')
+        select_all = section.locator('[data-permission-select-all]')
+        first = section.locator('[data-permission-project]').first
+        first.check()
+        expect(select_all).to_have_js_property('indeterminate', True)
+        expect(section.locator('[data-permission-count]')).to_have_text('已选 1 / 129')
         section.locator('[data-permission-bulk-level]').select_option('read')
+        expect(section.locator('[data-permission-project]:checked')).to_have_count(1)
+        select_all.check()
+        expect(select_all).to_have_js_property('indeterminate', False)
         expect(section.locator('[data-permission-project]:checked')).to_have_count(129)
         payload = submit_permissions(page)
         assert len(payload['scope']['project_scopes']) == 129

@@ -1242,21 +1242,24 @@ window.CodePierCollaboration = (() => {
             : targets;
           const label = project.name || project.project_label || '项目';
           const env = project.environment_id || 'production';
-          return `<fieldset class="cr-scope" data-permission-row data-project-id="${E(project.project_id)}" data-environment-id="${E(env)}" data-project-label="${E(label)}">
-            <legend>${E(label)}${env === 'production' ? '' : ' · ' + E(env)}</legend>
-            <select data-permission-level aria-label="${E(label)}的权限" title="可选权限受项目和电脑的设置限制">${permissionOptions(permissionLevel(selected))}</select>
-            <div hidden><input type="checkbox" data-permission-project ${selected.length ? 'checked' : ''}>${permissionCaps.map((cap) => `<input type="checkbox" data-permission-cap value="${cap}" data-host-available="${available.includes(cap)}" ${selected.includes(cap) ? 'checked' : ''}>`).join('')}</div>
+          return `<div class="cr-scope" data-permission-row data-project-id="${E(project.project_id)}" data-environment-id="${E(env)}" data-project-label="${E(label)}">
+            <div class="cr-permission-row-main">
+              <label class="cr-choice cr-permission-project"><input type="checkbox" data-permission-project ${selected.length ? 'checked' : ''}><span>${E(label)}${env === 'production' ? '' : ' · ' + E(env)}</span></label>
+              <select data-permission-level aria-label="${E(label)}的权限" title="可选权限受项目和电脑的设置限制">${permissionOptions(permissionLevel(selected))}</select>
+            </div>
+            <div hidden>${permissionCaps.map((cap) => `<input type="checkbox" data-permission-cap value="${cap}" data-host-available="${available.includes(cap)}" ${selected.includes(cap) ? 'checked' : ''}>`).join('')}</div>
             ${targets.length ? `<details data-permission-targets><summary>运行位置</summary>${targets.map((target) => `<label class="cr-choice"><input type="checkbox" data-permission-target-option value="${E(target)}" ${selectedTargets.includes(target) ? 'checked' : ''}><span>${E(project.execution_target_labels?.[target] || (target === 'project_agent' ? '项目电脑' : target))}</span></label>`).join('')}</details>` : ''}
             <details class="cr-permission-expiry"><summary>有效期</summary>${permissionLifetimeControls(lifetime, section !== 'room' && !rule)}</details>
-          </fieldset>`;
+          </div>`;
         })
         .join('') || '<p class="cr-muted">没有可授权项目。</p>'
     );
   }
   function permissionSection(policy, scope, section) {
     return `<section data-permission-section="${section}"><div class="cr-permission-bulk">
-      <label>全部设为 <select data-permission-bulk-level><option value="-" selected>选择权限</option>${permissionOptions('-', true)}</select></label>
-      ${section === 'room' ? '<label>全部项目有效期 <select data-permission-global-expiry><option value="">各项目设置</option><option value="until_revoked">直到撤销</option><option value="timed">指定时间</option></select></label><label data-permission-global-date hidden>截止时间 <input type="datetime-local"></label>' : ''}
+      <label class="cr-choice cr-permission-select-all"><input type="checkbox" data-permission-select-all><span>全选</span><span class="cr-muted" data-permission-count aria-live="polite"></span></label>
+      <label>所选权限 <select data-permission-bulk-level><option value="-" selected>选择权限</option>${permissionOptions('-', true)}</select></label>
+      ${section === 'room' ? '<label>所选项目有效期 <select data-permission-global-expiry><option value="">各项目设置</option><option value="until_revoked">直到撤销</option><option value="timed">指定时间</option></select></label><label data-permission-global-date hidden>截止时间 <input type="datetime-local"></label>' : ''}
       </div>${permissionRows(policy, scope, section)}</section>`;
   }
   function renderPermissions(policy) {
@@ -1403,6 +1406,20 @@ window.CodePierCollaboration = (() => {
         ? '有效期 · 已过期'
         : '有效期';
     }
+    for (const section of form.querySelectorAll('[data-permission-section]')) {
+      const projects = [...section.querySelectorAll('[data-permission-project]:not(:disabled)')];
+      const selected = projects.filter((project) => project.checked).length;
+      const all = section.querySelector('[data-permission-select-all]');
+      all.disabled = !projects.length;
+      all.checked = selected > 0 && selected === projects.length;
+      all.indeterminate = selected > 0 && selected < projects.length;
+      section.querySelector('[data-permission-count]').textContent =
+        '已选 ' + selected + ' / ' + projects.length;
+      for (const control of section.querySelectorAll(
+        '[data-permission-bulk-level], [data-permission-global-expiry], [data-permission-global-date] input',
+      ))
+        control.disabled = !selected;
+    }
     patchRoomPermissions();
   }
   function applyPermissionLevel(select, value, allTargets = false) {
@@ -1432,8 +1449,10 @@ window.CodePierCollaboration = (() => {
     const date = section.querySelector('[data-permission-global-date]');
     date.hidden = mode !== 'timed';
     if (!mode) return;
-    for (const row of section.querySelectorAll('[data-permission-row]')) {
-      const controls = row.querySelector('[data-permission-lifetime]');
+    for (const project of section.querySelectorAll(
+      '[data-permission-project]:checked:not(:disabled)',
+    )) {
+      const controls = project.closest('[data-permission-row]').querySelector('[data-permission-lifetime]');
       controls.dataset.lifetimeEdited = 'true';
       controls.querySelector('[data-permission-lifetime-mode]').value = mode;
       controls.querySelector('[data-permission-lifetime-until]').value =
@@ -3875,11 +3894,27 @@ window.CodePierCollaboration = (() => {
           applyPermissionLevel(event.target, event.target.value);
           updatePermissionControls();
         }
+        if (event.target.matches('[data-permission-project], [data-permission-select-all]')) {
+          const { target } = event;
+          const section = target.closest('[data-permission-section]');
+          const projects = target.matches('[data-permission-project]')
+            ? [target]
+            : section.querySelectorAll('[data-permission-project]:not(:disabled)');
+          for (const project of projects) {
+            const select = project.closest('[data-permission-row]').querySelector('[data-permission-level]');
+            if (!target.checked || !select.value)
+              applyPermissionLevel(select, target.checked ? 'read' : '');
+          }
+          updatePermissionControls();
+        }
         if (event.target.matches('[data-permission-bulk-level]')) {
           const section = event.target.closest('[data-permission-section]');
           const requested = permissionLevels[event.target.value]?.[1];
           if (!requested) return;
-          for (const select of section.querySelectorAll('[data-permission-level]')) {
+          for (const project of section.querySelectorAll(
+            '[data-permission-project]:checked:not(:disabled)',
+          )) {
+            const select = project.closest('[data-permission-row]').querySelector('[data-permission-level]');
             const available = [...select.options].filter((option) => !option.disabled);
             const best = available
               .reverse()

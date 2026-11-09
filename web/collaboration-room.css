@@ -1722,29 +1722,37 @@
 }
 
 .cr-panel .cr-scope {
-  padding: 14px 0;
-  margin: 0;
-  border: 0;
+  padding: 6px 0;
   border-bottom: 1px solid var(--cr-line);
 }
 
-.cr-scope legend {
-  padding: 0;
+.cr-permission-row-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 10rem);
+  align-items: center;
+  gap: 8px;
+}
+
+.cr-scope .cr-permission-project {
+  min-height: 40px;
   font-size: var(--ui-text-sm);
   font-weight: var(--ui-weight-semibold);
-  color: var(--ui-text);
-  margin-bottom: 8px;
+  overflow-wrap: anywhere;
 }
 
-.cr-scope > div {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 16px;
+.cr-permission-project input,
+.cr-permission-select-all input {
+  flex: none;
 }
 
-.cr-scope > small {
-  display: block;
-  margin-top: 6px;
+.cr-permission-bulk .cr-permission-select-all {
+  flex-basis: 100%;
+  min-height: 40px;
+}
+
+.cr-permission-select-all .cr-muted {
+  margin-inline-start: 6px;
+  font-weight: normal;
 }
 
 .cr-scope label {
@@ -2576,11 +2584,11 @@
   border-radius: 12px;
 }
 .cr-permission-bulk label,
-.cr-scope > select {
+.cr-permission-row-main select {
   max-width: 100%;
 }
 .cr-scope > details {
-  margin-top: 8px;
+  margin: 4px 0 4px 22px;
 }
 .cr-permission-expiry summary,
 .cr-scope > details > summary {

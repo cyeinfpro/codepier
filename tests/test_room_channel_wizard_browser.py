@@ -157,6 +157,7 @@ def test_unified_room_permissions_bulk_channel_modes_and_return(
         assert initial['configured'] and initial['version'] == 0
         assert not initial['scope']['project_scopes']
         room_section = page.locator('[data-permission-section="room"]')
+        room_section.locator('[data-permission-select-all]').check()
         room_section.locator('[data-permission-bulk-level]').select_option('execute')
         # "All" respects each project's upper bound, including read-only rows.
         for project in initial['available_projects']:
@@ -177,11 +178,10 @@ def test_unified_room_permissions_bulk_channel_modes_and_return(
         assert unchanged['scope'] == initial['scope']
         page.locator('.cr-room-actions [data-cr-action="permissions"]').click()
         expect(page.locator('[data-cr-form="permissions"]')).to_be_visible()
-        room_section.locator('[data-permission-bulk-level]').select_option(label='不加入')
         first_id, second_id = [project['id'] for project in stack.projects[:2]]
         first = room_section.locator(f'[data-permission-row][data-project-id="{first_id}"]')
         second = room_section.locator(f'[data-permission-row][data-project-id="{second_id}"]')
-        first.locator('[data-permission-level]').select_option('read')
+        first.locator('[data-permission-project]').check()
         expect(first.locator('[data-permission-level]')).to_have_value('read')
         expect(first.locator('[data-permission-level]')).to_have_value('read')
         expect(second.locator('[data-permission-level]')).to_have_value('')
@@ -238,7 +238,6 @@ def test_unified_room_permissions_bulk_channel_modes_and_return(
         first.locator('[data-permission-level]').select_option('write')
         page.locator('[data-permission-mode="weixin"]').uncheck()
         wx_section = page.locator('[data-permission-section="weixin"]')
-        wx_section.locator('[data-permission-bulk-level]').select_option(label='不加入')
         wx_section.locator(f'[data-project-id="{first_id}"] [data-permission-level]').select_option('read')
         page.locator('[data-cr-form="permissions"] button[type="submit"]').click()
         expect(page.locator('[data-cr-channel-view]')).to_be_visible()
@@ -418,7 +417,6 @@ def test_external_permission_setup_invalidates_open_editor(
         page.route('**' + path, track_write)
         page.locator('.cr-room-actions [data-cr-action="permissions"]').click()
         section = page.locator('[data-permission-section="room"]')
-        section.locator('[data-permission-bulk-level]').select_option(label='不加入')
         row = section.locator(f'[data-project-id="{stack.projects[0]["id"]}"]')
         old_selector = row.locator('[data-permission-level]')
         old_selector.select_option('write')
