@@ -183,7 +183,7 @@ def relations(entry, paths):
     return sorted({p for p in candidates if p in paths and p != entry["path"]})[:16]
 
 
-def build(engine, project, args):
+def build(engine, project, args, *, reuse=None):
     root, owner, key = identity(engine, project, True)
     previous = load(engine, key, repair=True)
     base = previous["revision"] if previous else "new"
@@ -210,12 +210,22 @@ def build(engine, project, args):
             raise DevError("KNOWLEDGE_SCAN_LIMIT", "知识地图达到扫描预算；原地图未改变", 409)
         try:
             actual = engine.path(root, path, False)
+            before, cached = reuse.before(engine, root, path, old.get(path)) if reuse else (None, None)
+            if cached is not None:
+                used += before[2]
+                if used > SCAN_BYTES:
+                    raise DevError("KNOWLEDGE_SCAN_LIMIT", "知识地图覆盖内容达到 64 MiB 预算；原地图未改变", 409)
+                entries[path] = cached
+                reused += 1
+                continue
             data = engine.read_bytes(actual, max_bytes=FILE_BYTES, verify_path=True)
             text = engine.text(data)
             used += len(data)
             if used > SCAN_BYTES:
                 raise DevError("KNOWLEDGE_SCAN_LIMIT", "知识地图达到 64 MiB 读取预算；原地图未改变", 409)
             sha = digest(data)
+            if reuse:
+                reuse.after(engine, root, path, before, sha)
             prior = old.get(path)
             if prior and prior["sha256"] == sha:
                 entry = dict(prior)

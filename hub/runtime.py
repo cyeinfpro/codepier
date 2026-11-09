@@ -151,6 +151,8 @@ class Runtime:
         self.queue_seconds = config.queue_seconds
         self.wait_seconds = config.wait_seconds
         self.retry_seconds = config.retry_seconds
+        from hub.knowledge_maintenance import KnowledgeMaintenance
+        self.knowledge_maintenance = KnowledgeMaintenance(self)
 
     async def start(self):
         self._loop = asyncio.get_running_loop()
@@ -159,6 +161,7 @@ class Runtime:
         await self.store.run(self.store.execute, "UPDATE operations SET state='reconnecting',next_attempt=0,transport_error='Hub restarted; reconciling with Agent' WHERE state IN ('running','reconnecting','cancelling') AND payload IS NOT NULL")
         await self.store.run(self.store.execute, "UPDATE operations SET state='needs_review',error='Legacy operation has no durable request; inspect its outcome' WHERE state IN ('queued','running','reconnecting','cancelling','unknown','interrupted') AND payload IS NULL AND result IS NULL")
         self.worker = asyncio.create_task(self.delivery_loop(), name="durable-delivery")
+        await self.knowledge_maintenance.start()
 
     def operation_result(self, row):
         from hub.operation_history import result
@@ -684,6 +687,14 @@ class Runtime:
             await self.store.run(self.store.audit, principal.actor, 'operations_wait', args['operation_id'])
             return await self.store.run_read(self._read_after_wait, args, principal)
         receipt = await self.dispatch(name, prepared.arguments, prepared.project, principal, background=name in PROCESS_TOOLS)
+        if name in {'project_knowledge_build', 'project_knowledge_query'}:
+            receipt['auto_refresh'] = await self.store.run_read(
+                self.knowledge_maintenance.status, prepared.project, prepared.arguments)
+            if (name == 'project_knowledge_build' and prepared.arguments.get('auto_refresh')
+                    and not principal.grant_id):
+                receipt['auto_refresh_request'] = {
+                    'state': 'unsupported_subject',
+                    'reason': 'Background registration requires a grant-bound identity; manual build remains supported.'}
         yield_seconds = prepared.arguments.get('yield_seconds', 0)
         # This is response waiting, not execution intent. Keep the normalized
         # arguments/fingerprint unchanged so pre-upgrade idempotency keys still
@@ -914,9 +925,9 @@ class Runtime:
                    "device_id": device_id}
         return project
 
-    async def dispatch(self, name: str, args: dict, project: dict, principal: Principal, background=False):
+    async def dispatch(self, name: str, args: dict, project: dict, principal: Principal, background=False, maintenance=None):
         async with self.device_dispatch_lock(project['device_id']):
-            id, completed = await self.store.run(self._admit_operation, name, args, project, principal, background)
+            id, completed = await self.store.run(self._admit_operation, name, args, project, principal, background, maintenance)
             if completed is not None:
                 return await self.store.run_read(self.authorized_result, id, completed, principal)
             future = self.futures.get(id)
@@ -966,7 +977,7 @@ class Runtime:
                 "elapsed_seconds": round(max(0, (time.time() if pending else op["updated"]) - op["created"]), 1),
                 "deadline": op["deadline"], "note": "已持久保存。网络恢复后继续同一操作；请查询 operation_id，不要换新幂等键重复提交。"}
 
-    def _admit_operation(self, name: str, args: dict, project: dict, principal: Principal, background=False):
+    def _admit_operation(self, name: str, args: dict, project: dict, principal: Principal, background=False, maintenance=None):
         if name == 'exec':
             # Additive defaults must neither change pre-upgrade idempotency
             # fingerprints nor reach older extra=forbid Agent models.
@@ -1018,10 +1029,20 @@ class Runtime:
         if name in COMPUTER_TOOLS:
             snapshot["_computer_owner"] = "grant:" + principal.grant_id if principal.grant_id else principal.actor
             snapshot["_computer_admin"] = principal.instance_admin
-        fingerprint = digest(json.dumps({"tool": name, "args": args, "project": snapshot, "device": project["device_id"]}, sort_keys=True, ensure_ascii=False))
+        fingerprint_args = args
+        if name == 'project_knowledge_build':
+            # Additive defaults must recover the original pre-maintenance key,
+            # never execute or enable maintenance again for that old operation.
+            fingerprint_args = dict(args)
+            if fingerprint_args.get('auto_refresh') is True:
+                fingerprint_args.pop('auto_refresh')
+            if fingerprint_args.get('incremental') is False:
+                fingerprint_args.pop('incremental')
+        fingerprint = digest(json.dumps({"tool": name, "args": fingerprint_args, "project": snapshot, "device": project["device_id"]}, sort_keys=True, ensure_ascii=False))
         # Count, same-key recovery and durable insertion share one SQLite write
         # transaction, including direct/multi-connection admission callers.
         with self.store.transaction():
+            self.knowledge_maintenance.guard(maintenance)
             from shared.integration_contracts import INCOMING_UPLOAD_TOOLS
             if name in INCOMING_UPLOAD_TOOLS:
                 service = getattr(self, 'incoming_files', None)
@@ -1070,6 +1091,8 @@ class Runtime:
                 request = {"tool": name, "args": args, "project": snapshot, "tool_contract_version": wire_version(name),
                            "principal_context": {"user_id": principal.user_id, "space_id": principal.space_id,
                            "user_epoch": principal.user_epoch, "identity_id": principal.identity_id}}
+                if maintenance is not None:
+                    request['knowledge_maintenance'] = list(maintenance)
                 if name == "exec" and args["target"].startswith("vps:"):
                     vps_args = {**args, "vps": args["target"][4:]}
                     request["vps_ref"] = self.vps.reference(vps_args, project)
@@ -1090,6 +1113,7 @@ class Runtime:
                      json.dumps(operation_summary(args), ensure_ascii=False), fingerprint, idem, now, now, payload, now + deadline_seconds, principal.space_id, principal.user_id))
                 self.store.audit(principal.actor, name, project.get("alias", ""), "queued", {"operation_id": id, "args": operation_summary(args)})
                 self.diagnostics.record(id, "hub_received")
+                self.knowledge_maintenance.admitted(name, args, project, principal, id, maintenance)
                 self.publish("operation", {"id": id, "state": "queued", "tool": name})
         return id, None
 
@@ -1166,6 +1190,7 @@ class Runtime:
 
     def permission_error(self, op, request):
         try:
+            self.knowledge_maintenance.guard(request.get('knowledge_maintenance'))
             caller = self.operation_principal(op, request)
             if op['tool'] in PANEL_ROOTS_TOOLS:
                 from hub.agent_roots import authorize
@@ -1919,6 +1944,7 @@ class Runtime:
 
     async def _stop_runtime(self):
         self.stopping = True
+        await self.knowledge_maintenance.stop()
         for id in self.operation_waiters:
             self.notify_operation(id)
         self.artifacts.close()
