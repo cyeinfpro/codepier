@@ -836,7 +836,8 @@ window.CodePierCollaboration = (() => {
       requestAnimationFrame(() => {
         if (!feed.isConnected || epoch !== state.epoch || root?._restoringReading) return;
         if (Math.abs(feed.scrollTop - top) < 2) feed.scrollTop = feed.scrollHeight;
-        else root.querySelector('[data-cr-latest]').hidden = false;
+        else if (feed.scrollHeight - feed.scrollTop - feed.clientHeight >= 90)
+          root.querySelector('[data-cr-latest]').hidden = false;
       });
     } else if (changed && !root._loadingOlder && !root._restoringReading)
       root.querySelector('[data-cr-latest]').hidden = false;
@@ -3354,21 +3355,33 @@ window.CodePierCollaboration = (() => {
         }
       }
     } else if (action === 'latest') {
+      const view = root,
+        epoch = state.epoch,
+        hadFocus = document.activeElement === button;
+      const current = () => root === view && state.epoch === epoch;
       store.draft().reading = {
         atEnd: true,
         anchorId: '',
         workId: '',
         visibilityRevision: state.visibilityRevision,
       };
-      root._restoringReading = true;
+      view._restoringReading = true;
       try {
         if (state.messageHistory || state.newerMessages) await store.latestMessages();
+      } catch (error) {
+        if (current()) throw error;
       } finally {
-        if (root) root._restoringReading = false;
+        if (current()) view._restoringReading = false;
       }
-      const feed = root.querySelector('.cr-feed');
+      if (!current()) return;
+      const feed = view.querySelector('.cr-feed');
+      if (
+        hadFocus &&
+        (document.activeElement === button || document.activeElement === document.body)
+      )
+        feed.focus({ preventScroll: true });
       feed.scrollTop = feed.scrollHeight;
-      root.querySelector('[data-cr-latest]').hidden = true;
+      view.querySelector('[data-cr-latest]').hidden = true;
       rememberReading();
     } else if (action === 'recover-send') await recoverSend(id);
     else if (action === 'recover-action') await recoverAction(id);

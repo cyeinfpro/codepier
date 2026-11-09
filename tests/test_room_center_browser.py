@@ -255,6 +255,10 @@ def test_room_empty_projects_member_recovery_and_owner_scope(
         page.locator('[data-cr-latest]').focus()
         page.keyboard.press('Enter')
         expect(page.locator('[data-cr-latest]')).not_to_be_visible()
+        expect(page.locator('.cr-feed')).to_be_focused()
+        assert page.locator('.cr-feed').evaluate(
+            'feed => feed.scrollHeight - feed.scrollTop - feed.clientHeight < 2'
+        )
 
         screenshot_dir = Path(os.getenv('CODEPIER_COLLABORATION_SCREENSHOTS', str(tmp_path / 'screenshots')))
         screenshot_dir.mkdir(parents=True, exist_ok=True)
