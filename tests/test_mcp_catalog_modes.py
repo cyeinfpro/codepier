@@ -110,3 +110,61 @@ def test_collaboration_help_http(api):
     from jsonschema import Draft202012Validator
     schema = next(t['outputSchema'] for t in tool_definitions() if t['name'] == 'project_query')
     Draft202012Validator(schema).validate(result['structuredContent'])
+
+
+@pytest.mark.parametrize('name', [
+    'workspace', 'read', 'write', 'edit', 'process', 'project_query', 'task_query',
+])
+def test_duplicate_options_help_preserves_schema_boundaries_and_cache(name):
+    from copy import deepcopy
+    from jsonschema import Draft202012Validator
+    from shared.contracts import TOOLS, _compact_input_schema
+    from shared.core_output_schemas import factor
+    from shared.schema_cache import schema_for
+
+    model = TOOLS[name].model
+    original = model.model_json_schema()
+    cached = deepcopy(schema_for(model))
+    catalog = {item['name']: item for item in tool_definitions()}
+    advertised = catalog[name]['inputSchema']
+    expected = _compact_input_schema(cached)
+    options = expected['properties']['options']
+    assert options['description'] == 'Help: project_query.'
+    if name == 'task_query':
+        # Without a help route in the tool description, the field must retain it.
+        assert 'project_query' not in catalog[name]['description']
+        assert advertised['properties']['options']['description'] == 'Help: project_query.'
+    else:
+        assert name == 'project_query' or 'project_query' in catalog[name]['description']
+        options.pop('description')
+        assert 'description' not in advertised['properties']['options']
+    # No validation-bearing field or other annotation was removed by help deduplication.
+    assert advertised == factor(expected)
+    assert catalog['exec']['inputSchema']['properties']['options']['description'] == (
+        'order=default|strict; wait_policy=queue|fail_fast.')
+
+    Draft202012Validator.check_schema(original)
+    Draft202012Validator.check_schema(advertised)
+    source_validator = Draft202012Validator(original)
+    catalog_validator = Draft202012Validator(advertised)
+    properties = original['properties']
+    base = {field: value for field, value in {
+        'project': 'Fixture', 'idempotency_key': 'fixture-schema-key',
+    }.items() if field in properties}
+    cases = [
+        (base, True),
+        ({**base, 'options': {}}, True),
+        ({**base, 'options': {'synthetic_extension': {'value': 1}}}, True),
+        ({**base, 'options': []}, False),
+        ({**base, 'options': 'not-an-object'}, False),
+        ({**base, 'operation': 'not-an-operation'}, False),
+        ({**base, 'synthetic_unknown_top_level': True}, False),
+    ]
+    for field in original.get('required', []):
+        cases.append(({key: value for key, value in base.items() if key != field}, False))
+    for payload, valid in cases:
+        assert source_validator.is_valid(payload) is valid, (name, payload)
+        assert catalog_validator.is_valid(payload) is valid, (name, payload)
+    assert schema_for(model) == cached
+    assert model.model_json_schema() == original
+    assert tool_definitions() == list(catalog.values())
