@@ -167,7 +167,7 @@ def test_loading_error_retry_and_stale_navigation_have_context(chat_browser_pool
         pending = []
         page.route("**/api/vps*", lambda route: pending.append(route))
         page.evaluate("void navigate('vps')")
-        expect(page.locator(".page-loading")).to_contain_text("VPS 管理")
+        expect(page.locator(".page-loading")).to_contain_text("VPS")
         expect(page.locator("#page")).to_have_attribute("aria-busy", "true")
         navigate(page, "projects")
         expect(page.locator("#page h1")).to_have_text("项目")
@@ -178,12 +178,12 @@ def test_loading_error_retry_and_stale_navigation_have_context(chat_browser_pool
         page.route("**/api/vps*", lambda route: route.fulfill(status=400, json={"error": {"message": "Fixture unavailable"}}))
         page.evaluate("void navigate('vps')")
         expect(page.locator(".page-error")).to_be_visible()
-        expect(page.locator(".page-error h1")).to_have_text("VPS 管理")
+        expect(page.locator(".page-error h1")).to_have_text("VPS")
         expect(page.locator("#page")).not_to_have_attribute("aria-busy", "true")
         page.unroute("**/api/vps*")
         page.locator('.page-error [data-action="refresh"]').click()
         expect(page.locator(".page-error")).to_have_count(0)
-        expect(page.locator("#page h1")).to_have_text("VPS 管理")
+        expect(page.locator("#page h1")).to_have_text("VPS")
     finally:
         context.close()
 

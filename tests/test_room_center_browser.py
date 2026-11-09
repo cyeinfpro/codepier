@@ -140,7 +140,7 @@ def test_room_empty_projects_member_recovery_and_owner_scope(
         page.locator('.cr-room-actions [data-cr-action="members"]').click()
         page.locator('dialog [data-cr-action="add-member"]').click()
         page.locator('[name="connection_mode"][value="existing"]').check()
-        expect(page.locator('[data-cr-connection-status]')).to_contain_text('还没有其他房间的已验证连接')
+        expect(page.locator('[data-cr-connection-status]')).to_contain_text('其他房间还没有连好的 dot')
         page.locator('[name="connection_mode"][value="new"]').check()
         page.locator('[data-cr-form="member"] [name="name"]').fill('产品 dot')
         expect(page.locator('[data-cr-form="member"] [data-project-id]')).to_have_count(0)
@@ -312,7 +312,12 @@ def test_mobile_room_switch_preserves_ime_draft_and_stable_message_node(
         # macOS WebKit follows Safari's native full-control traversal shortcut;
         # plain Tab can intentionally skip checkboxes/buttons on this platform.
         tab = 'Alt+Tab' if engine == 'webkit' and sys.platform == 'darwin' else 'Tab'
-        expect(page.locator('[data-cr-form="create"] [name="project"]')).to_have_count(0)
+        projects = page.locator('[data-cr-form="create"] [name="project"]')
+        expect(projects).to_have_count(len(stack.projects))
+        expect(page.locator('[data-cr-form="create"] [name="project"]:checked')).to_have_count(0)
+        for project in projects.all():
+            page.keyboard.press(tab)
+            expect(project).to_be_focused()
         page.keyboard.press(tab)
         expect(page.locator('[data-cr-form="create"] button[type="submit"]')).to_be_focused()
         assert page.evaluate('matchMedia("(prefers-reduced-motion: reduce)").matches')
