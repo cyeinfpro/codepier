@@ -137,7 +137,7 @@ def test_palette_and_model_picker_are_keyboard_operable(chat_page):
 def test_rename_dialog_does_not_block_stream_and_requires_explicit_save(chat_page):
     p=chat_page;r=send(p)['args']['receipt'];dialogs=[]
     p.on('dialog',lambda d:(dialogs.append(d.type),d.dismiss()))
-    p.locator('.chat-overflow summary').click();p.click('#chat-rename')
+    p.locator('.chat-overflow > summary').click();p.click('#chat-rename')
     expect(p.get_by_role('dialog',name='重命名对话')).to_be_visible()
     event(p,'chat',{'type':'delta','receipt':r,'text':'The stream is still alive.'},10)
     expect(p.locator('.chat-message-assistant')).to_contain_text('still alive')

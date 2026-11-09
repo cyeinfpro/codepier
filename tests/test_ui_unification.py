@@ -257,7 +257,7 @@ def exercise_matrix(stack, output: Path, *, screenshots: bool = True, schemes=SC
                             report["screenshots"].append(name)
 
                     _navigate(page, "native")
-                    expect(page.locator("#chat-root")).to_have_attribute("data-appearance", scheme if scheme != "auto" else "light")
+                    expect(page.locator("#chat-root")).to_have_attribute("data-appearance", scheme)
                     assert _font(page, "#chat-root") == management_font
                     _assert_control_is_uncovered(page, "#chat-compose")
                     native_layout = _layout(page, f"{scheme}-{width}-native")
@@ -415,7 +415,7 @@ def test_native_and_management_share_theme_without_transcript_scans(stack):
               } finally {document.querySelectorAll=original;}
             }""")
             assert scans == 0
-            page.locator('#app [data-ui-appearance]').select_option('light')
+            page.evaluate("CodePierAppearance.setPreference('light')")
             expect(page.locator('html')).to_have_attribute('data-appearance','light')
             assert page.evaluate("themeComposer===document.querySelector('#chat-compose')")
             assert composer.evaluate('el=>[el.selectionStart,el.selectionEnd]') == [2,7]

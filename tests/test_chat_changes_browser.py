@@ -74,11 +74,7 @@ def test_review_and_inspector_fit_without_hiding_composer(chat_page,width,height
     assert p.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
     box=p.locator('#chat-send').bounding_box()
     assert box and box['y']+box['height']<=height+1
-    if width<=760:
-        p.locator('.chat-overflow summary').click()
-        p.click('[data-chat-action="chat-inspector-toggle"]')
-    else:
-        p.click('#chat-inspector-toggle')
+    p.locator('#chat-inspector-toggle').click()
     p.click('[data-chat-tab="changes"]')
     expect(p.locator('.chat-review-jump')).to_be_visible()
     p.locator('.chat-review-jump').click()

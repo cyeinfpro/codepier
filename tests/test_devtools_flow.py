@@ -282,8 +282,11 @@ def test_handoff_is_readable_bound_and_enters_draft_without_sending(tools_page, 
     expect(page.locator('#chat-compose')).to_have_value(re.compile('Preserve the original goal'))
     assert wid in page.input_value('#chat-compose')
     assert not page.evaluate("nativeCalls.some(r=>r.path.endsWith('/start')||r.path.endsWith('/chat_prompt'))")
-    page.locator('.chat-overflow summary').click()
-    page.locator('[data-devtools=validation]').click()
+    page.locator('.chat-overflow > summary').click()
+    page.evaluate("navigate('projects')")
+    project_row = page.locator('[data-project-row]').filter(has=page.locator('[data-devtools=validation]')).first
+    project_row.locator('details > summary').click()
+    project_row.locator('[data-devtools=validation]').click()
     expect(page.locator('#i-project')).to_have_value(s.project['id'])
     expect(page.locator('[data-i-tab=validation]')).to_have_attribute('aria-selected','true')
 
@@ -351,7 +354,7 @@ def test_cli_developer_links_remain_reachable_on_short_screens(tools_page):
     page.set_viewport_size({'width':390,'height':360})
     page.click('[data-i-action=start-chat]')
     expect(page.locator('#chat-compose')).to_be_visible()
-    page.locator('.chat-overflow summary').click()
+    page.locator('.chat-overflow > summary').click()
     menu=page.locator('.chat-overflow>div')
     expect(menu).to_be_visible()
     rect=menu.bounding_box()
@@ -359,7 +362,10 @@ def test_cli_developer_links_remain_reachable_on_short_screens(tools_page):
     menu.locator('button').last.scroll_into_view_if_needed()
     last=menu.locator('button').last.bounding_box()
     assert last and last['y']>=rect['y'] and last['y']+last['height']<=rect['y']+rect['height'],last
-    page.locator('[data-devtools=validation]').click()
+    page.evaluate("navigate('projects')")
+    project_row = page.locator('[data-project-row]').filter(has=page.locator('[data-devtools=validation]')).first
+    project_row.locator('details > summary').click()
+    project_row.locator('[data-devtools=validation]').click()
     expect(page.locator('#i-body')).to_have_attribute('aria-labelledby','i-tab-validation')
     expect(page.locator('#i-project')).to_have_value(project)
     assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+2')

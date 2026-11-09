@@ -21,7 +21,9 @@ def test_send_reenables_when_pending_model_setting_finishes_without_more_typing(
 def test_every_sidebar_control_remains_visible_on_short_screens(chat_page,width,height):
     p=chat_page;p.set_viewport_size({'width':width,'height':height})
     p.click('#chat-history-toggle')
+    p.locator('.chat-history-chips details > summary').last.click()
     p.select_option('#chat-history-filter','running')
+    p.locator('.chat-history-chips details > summary').first.click()
     for selector in ['#chat-back','#chat-new','#chat-history-project','#chat-history-search','#chat-history-filter','#chat-history-clear','#chat-command-menu']:
         box=p.locator(selector).bounding_box()
         assert box and box['height']>0 and box['y']>=0 and box['y']+box['height']<=height+1,(selector,box)

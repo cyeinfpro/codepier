@@ -257,16 +257,16 @@ def test_open_mobile_settings_survive_orientation_and_desktop_resizes(chat_page)
 
 
 @pytest.mark.parametrize('chat_page', ['chromium', 'webkit'], indirect=True)
-def test_mobile_more_menu_preserves_search_and_inspector_access(chat_page):
+def test_mobile_header_keeps_search_and_inspector_accessible(chat_page):
     page = chat_page
     resize(page, 320, 568)
-    expect(page.locator('#chat-find-toggle')).to_be_hidden()
-    expect(page.locator('#chat-inspector-toggle')).to_be_hidden()
+    expect(page.locator('#chat-find-toggle')).to_be_visible()
+    expect(page.locator('#chat-inspector-toggle')).to_be_visible()
     page.click('#chat-history-toggle')
     expect(page.locator('#chat-root')).to_have_class('chat-workspace drawer-open')
-    page.locator('.chat-overflow summary').click()
+    page.keyboard.press('Escape')
     expect(page.locator('#chat-root')).not_to_have_class('chat-workspace drawer-open')
-    page.locator('[data-chat-action="chat-find-toggle"]').click()
+    page.locator('#chat-find-toggle').click()
     expect(page.locator('#chat-find-input')).to_be_focused()
     page.keyboard.press('Escape')
     expect(page.locator('#chat-find-bar')).to_be_hidden()
@@ -282,20 +282,21 @@ def test_mobile_more_menu_preserves_search_and_inspector_access(chat_page):
 
 
 @pytest.mark.parametrize('chat_page', ['chromium', 'webkit'], indirect=True)
-@pytest.mark.parametrize('origin', ['settings', 'more'])
+@pytest.mark.parametrize('origin', ['history', 'shortcut'])
 def test_cancel_mobile_project_choice_returns_to_visible_origin(chat_page, origin):
     page = chat_page
     resize(page, 320, 568)
     draft = 'Keep the current project and this unsent draft'
     page.fill('#chat-compose', draft)
     for cancellation in ['button', 'escape']:
-        if origin == 'settings':
-            page.click('#chat-options-toggle')
-            page.locator('#chat-options-close').click();page.click('#chat-new')
-            return_focus = '#chat-options-toggle'
-        else:
-            page.click('#chat-new')
+        if origin == 'history':
+            if not page.locator('.chat-sidebar').is_visible():
+                page.locator('#chat-history-toggle').click()
+            page.locator('#chat-new').press('Enter')
             return_focus = '#chat-new'
+        else:
+            page.locator('#chat-compose').press('Control+Shift+O')
+            return_focus = '#chat-compose'
         expect(page.locator('#chat-project-search')).to_be_focused()
         page.fill('#chat-project-search', 'Workspace two')
         if cancellation == 'button':

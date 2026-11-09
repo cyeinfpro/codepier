@@ -46,7 +46,7 @@ def test_repeated_resume_uses_new_session_id_for_each_stopped_process(chat_page)
     p=chat_page;send(p);ids=[p.evaluate('ChatUI.selected.id')]
     for i in range(2):
         event(p,'session',{'status':'exited'},10+i)
-        p.locator('.chat-overflow summary').click();p.click('#chat-resume')
+        p.locator('#chat-resume').click()
         p.wait_for_function('(id)=>ChatUI.selected.id!==id',arg=ids[-1])
         ids.append(p.evaluate('ChatUI.selected.id'))
     assert len(set(ids))==3
@@ -56,18 +56,20 @@ def test_repeated_resume_uses_new_session_id_for_each_stopped_process(chat_page)
 
 def test_delete_does_not_recreate_deleted_view(chat_page):
     p=chat_page;send(p);key=p.evaluate('chatKey()');event(p,'session',{'status':'exited'},10)
-    p.locator('.chat-overflow summary').click();p.click('#chat-delete');p.click('#chat-dialog-confirm')
+    p.locator('.chat-overflow > summary').click();p.click('#chat-delete');p.click('#chat-dialog-confirm')
     p.wait_for_function('ChatUI.selected===null')
     assert not p.evaluate('(key)=>ChatUI.views.has(key)',key)
 
 
 def test_command_search_survives_catalog_updates_and_focus_returns(chat_page):
-    p=chat_page;p.set_viewport_size({'width':390,'height':844});p.click('#chat-options-toggle');open_chat_inspector(p, 'commands')
+    p=chat_page;p.set_viewport_size({'width':390,'height':844})
+    p.locator('#chat-inspector-toggle').press('Enter')
     expect(p.locator('#chat-inspector-close')).to_be_focused()
+    open_chat_inspector(p, 'commands')
     p.fill('#chat-command-filter','review');p.evaluate('chatInspectorRender()')
     expect(p.locator('#chat-command-filter')).to_have_value('review')
     expect(p.locator('#chat-command-filter')).to_be_focused()
-    p.click('#chat-inspector-close');expect(p.locator('#chat-options-toggle')).to_be_focused()
+    p.click('#chat-inspector-close');expect(p.locator('#chat-inspector-toggle')).to_be_focused()
 
 
 def test_returning_online_enables_send_without_refresh_or_losing_draft(chat_page):

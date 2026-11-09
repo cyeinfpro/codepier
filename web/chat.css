@@ -3551,6 +3551,17 @@ html[data-appearance='dark'] .chat-workspace .chat-message-user .chat-message-bo
 .chat-history-chips {
   padding: 0 12px 8px;
 }
+.chat-history-chips details {
+  position: relative;
+}
+.chat-history-chips select {
+  position: absolute;
+  z-index: 1;
+  inset: calc(100% + 4px) auto auto 0;
+  min-width: 96px;
+  max-width: min(150px, 40vw);
+  box-shadow: var(--chat-shadow);
+}
 .chat-history-chips summary,
 .chat-segmented label {
   cursor: pointer;

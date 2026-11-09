@@ -27,6 +27,7 @@ def test_history_filters_do_not_change_current_context(chat_page):
     p=chat_page;seed_rows(p)
     p.locator('[data-session-id="'+'a'*32+'"]').click()
     p.fill('#chat-compose','keep current draft')
+    p.locator('.chat-history-chips details > summary').first.click()
     p.select_option('#chat-history-project','p2')
     expect(p.locator('#chat-compose')).to_have_value('keep current draft')
     assert p.evaluate('ChatUI.selected.project_id')=='p1'
@@ -87,16 +88,17 @@ def test_typing_query_invalidates_previous_response_before_debounce(chat_page):
 
 
 def test_all_session_menu_actions_explain_disabled_states(chat_page):
-    p=chat_page;p.locator('.chat-overflow summary').click()
+    p=chat_page;p.locator('.chat-overflow > summary').click()
     for name in ('chat-rename','chat-resume','chat-export','chat-export-json','chat-stop','chat-delete'):
         expect(p.locator('#'+name)).to_be_disabled()
         assert p.locator('#'+name).get_attribute('title')
-    p.press('.chat-overflow summary','Escape');send(p)
-    p.locator('.chat-overflow summary').click()
+    p.press('.chat-overflow > summary','Escape');send(p)
+    p.locator('.chat-overflow > summary').click()
     expect(p.locator('#chat-rename')).to_be_enabled()
     expect(p.locator('#chat-stop')).to_be_enabled()
     expect(p.locator('#chat-resume')).to_be_disabled()
-    expect(p.locator('#chat-delete')).to_be_disabled()
+    expect(p.locator('#chat-delete')).to_be_enabled()
+    expect(p.locator('#chat-resume')).to_be_hidden()
 
 
 def test_usage_and_find_are_view_local(chat_page):
