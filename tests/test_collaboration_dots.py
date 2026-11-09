@@ -294,11 +294,12 @@ async def test_task_dot_single_event_challenge_signed_retry_and_duplicate_wakeup
 
 
 def test_native_event_catalog_guides_cpd_to_persisted_inbox_without_upgrading_legacy():
-    from hub.collaboration.event_contracts import definitions
+    from hub.collaboration.event_contracts import definitions, event_help
     event = next(row for row in definitions() if row['name'] == DELEGATION_EVENT)
-    assert 'CPD' in event['description'] and 'dot_inbox' in event['description']
-    assert 'dot_connection' in event['description'] and 'notification_only' in event['description']
-    assert 'explicitly user-approved managed_execution' in event['description']
+    guide = event_help(event['name'])['consume']
+    assert 'CPD' in guide and 'dot_inbox' in guide
+    assert 'dot_connection' in guide and 'notification_only' in guide
+    assert 'explicitly user-approved managed_execution' in guide
 
 
 @pytest.mark.parametrize('change', ['grant_revoked', 'slot_revoked', 'lease_expired', 'message_budget'])

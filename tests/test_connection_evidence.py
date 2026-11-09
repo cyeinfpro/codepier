@@ -110,7 +110,7 @@ def test_recovery_preserves_original_identity_and_cursor(state, pending, confirm
     assert value['operation_id'] == 'original' and value['after_output_seq'] == 7
     assert value['task_state'] == state and value['task_outcome_confirmed'] is confirmed
     assert value['automatic_replay'] is False and value['new_operation_recommended'] is False
-    assert value['next_action'] == ('query_original_operation' if pending else 'inspect_terminal_result')
+    assert value['next_action'] == ('inspect_terminal_result' if confirmed else 'query_original_operation')
     assert original['state'] == state
 
 
