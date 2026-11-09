@@ -65,12 +65,16 @@ async def test_empty_room_wechat_pair_inbox_reply_reuses_original_outbox(collab)
     assert not s.channel_owner.author(source)['authenticated']
     inbox=s.room_consumers.inbox(identity,worker)
     reference=next(item for item in inbox['items'] if item['kind']=='message')
-    reply=s.room_runtime.reply({**identity,**credentials,'source_message_id':received,
-        'source_version':reference['source_version'],'source_digest':reference['source_digest'],
-        'expected_inbox_revision':inbox['inbox_revision'],'body_text':'可以，先聊聊你的目标。','idempotency_key':key()},worker)
+    assert 'room_reply' in inbox['handling_instructions']
+    assert reference['message']['owner_task_blocker']=='CHANNEL_OWNER_NOT_APPROVED'
+    assert reference['message']['requires_owner_execution_request']
+    assert 'work_start_arguments' not in reference
+    reply=s.room_runtime.reply({**identity,**credentials,**reference['reply_arguments'],
+        'body_text':'可以，先聊聊你的目标。','idempotency_key':key()},worker)
     deliveries=s.store.all('SELECT * FROM weixin_deliveries')
     assert len(deliveries)==1 and deliveries[0]['message_id']==reply['message']['id']
     assert deliveries[0]['source_message_id']==received
+    assert not any(item['object_id']==received for item in s.room_consumers.inbox(identity,worker)['items'])
     assert s.weixin.delivery.validate(deliveries[0])[3]['id']==reply['message']['id']
     clock[0]+=3
     duplicate=s.weixin.commit_updates(s.weixin.claim_poll(flow['account_id']),message)
@@ -86,6 +90,26 @@ async def test_empty_room_wechat_pair_inbox_reply_reuses_original_outbox(collab)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('timestamp,reason', [
+    (0, 'WEIXIN_SOURCE_TIME_MISSING'),
+    (1, 'WEIXIN_SOURCE_BEFORE_APPROVAL'),
+])
+async def test_wechat_unverified_task_has_reason_and_can_receive_reply(collab, timestamp, reason):
+    (s,_,worker,_,identity,credentials),flow,_,_=await setup_channel(collab,tasks=True)
+    source=s.weixin.commit_updates(s.weixin.claim_poll(flow['account_id']),
+        packet(2,'请检查项目',create_time_ms=timestamp))['message_ids'][0]
+    inbox=s.room_consumers.inbox(identity,worker)
+    entry=next(item for item in inbox['items'] if item['object_id']==source)
+    assert entry['message']['owner_task_blocker']==reason
+    assert entry['message']['owner_task_reason']
+    assert 'work_start_arguments' not in entry
+    reply=s.room_runtime.reply({**identity,**credentials,**entry['reply_arguments'],
+        'body_text':entry['message']['owner_task_reason'],'idempotency_key':key()},worker)
+    delivery=s.store.one('SELECT * FROM weixin_deliveries WHERE message_id=?',(reply['message']['id'],))
+    assert delivery['source_message_id']==source and delivery['state']=='queued'
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('pause_original_member',[False,True])
 async def test_wechat_goal_takeover_preserves_channel_origin_and_current_lead_delivery(collab,pause_original_member):
     from tests.test_room_goal_recovery import control,continue_original
@@ -97,9 +121,11 @@ async def test_wechat_goal_takeover_preserves_channel_origin_and_current_lead_de
     source=s.store.one('SELECT * FROM collaboration_messages WHERE id=?',(source_id,))
     inbox=s.room_consumers.inbox(lead,actor)
     entry=next(item for item in inbox['items'] if item['kind']=='message')
-    request={**lead,**credentials,'source_message_id':source_id,'source_version':entry['source_version'],
-        'source_digest':entry['source_digest'],'expected_inbox_revision':inbox['inbox_revision'],
-        'target_project_id':'proj','acceptance':'按原回执报告结果','confirm_task':True,'idempotency_key':key()}
+    assert entry['message']['trusted_author']['kind']=='verified_external_owner'
+    assert not entry['message']['requires_owner_execution_request']
+    assert 'owner_task_blocker' not in entry['message']
+    request={**lead,**credentials,**entry['work_start_arguments'],
+        'target_project_id':'proj','acceptance':'按原回执报告结果','idempotency_key':key()}
     started=s.room_runtime.start_work(request,actor)
     goal_id=started['goal_id'];original=s.room_runtime.goal(goal_id)
     progress=s.room_runtime.reply({**lead,**credentials,'source_message_id':source_id,

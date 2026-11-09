@@ -1259,7 +1259,8 @@ class Rooms:
                 '使用本次或之后实际回调中的 wake_ticket、当前成员身份和 connection_proof 调用 '
                 'room_consumer_begin，保存返回的 consumer_session_id、consumer_fence 和 consumer_proof。'
                 '重新读取 room_inbox 后，以当前 inbox_revision 处理原输入，回复使用 room_reply，明确工作使用 '
-                'room_work_start；用户输入由原处理流程完成，不以普通提示 ack 代替。完成后调用 '
+                'room_work_start。已核验本人且在既有范围内的明确任务直接开始；范围不足时用 room_reply 说明原因。'
+                '把阶段与最终答复关联原输入提交 room_reply，ChatGPT 内的文字不会回传微信。完成后调用 '
                 'room_consumer_yield，携带 expected_inbox_revision；more=true 时继续读取原待办，'
                 'more=false 时等待新通知。没有输入时不创建任务、租约或定时轮询。'}
 

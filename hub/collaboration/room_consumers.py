@@ -10,6 +10,15 @@ from shared import room_consumer_contracts as contracts
 from shared.util import DevError
 
 
+ROOM_HANDLING = (
+    '用本次唤醒的 wake_ticket 领取消费租约并读取 room_inbox。'
+    '已核验本人且在既有项目授权内的明确任务，直接用 room_work_start，无需再次向本人确认。'
+    '若本人任务未获准，按 owner_task_blocker 或工具拒绝原因说明，用 room_reply 完成原消息的回复。'
+    '用原消息编号、版本、摘要和当前消费凭据提交回复；微信输入已提供 reply_arguments。当前 ChatGPT 对话里的回答不会写回房间或微信。'
+    '提交后查看原房间回复和渠道投递状态，再处理后续待办。'
+)
+
+
 class RoomConsumers(FencedConsumerEngine):
     subject_column = 'member_id'
     begin_model = contracts.RoomConsumerBegin
@@ -279,6 +288,12 @@ class RoomConsumers(FencedConsumerEngine):
             item['message'] = self.c.room_runtime.message_view(message, principal)
             item['source_version'] = message['version']
             item['source_digest'] = digest(json.loads(message['body']).get('body_text', ''))
+            if item['message'].get('source_channel') == 'weixin':
+                source = {'source_message_id': message['id'], 'source_version': item['source_version'],
+                          'source_digest': item['source_digest'], 'expected_inbox_revision': member['dirty_revision']}
+                item['reply_arguments'] = source
+                if item['message'].get('external_execution_authority'):
+                    item['work_start_arguments'] = {**source, 'confirm_task': True}
         elif row['kind'] in {'work_ready', 'result_ready', 'peer_handoff'}:
             goal_id = reference.get('goal_id')
             if goal_id:
@@ -397,6 +412,7 @@ class RoomConsumers(FencedConsumerEngine):
                 'pagination_complete': not more, 'read_only': True, 'read_is_consumption': False,
                 'grants_authority': False, 'context_reference':context_reference,
                 'context_version':self.c.room_context.version(room['id']),
+                'handling_instructions': ROOM_HANDLING,
                 'actions': {'reply': 'room_reply', 'work': 'room_work_start',
                     'ack_notice': 'room_inbox_ack', 'yield': 'room_consumer_yield'}}
 

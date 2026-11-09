@@ -524,8 +524,19 @@ class RoomWeixin:
         body=json.loads(message['body']);origin=body.get('external_origin',{})
         record=self.store.one('SELECT * FROM room_channel_owner_inputs WHERE message_id=?',(message['id'],))
         auth=self.store.one('SELECT * FROM room_channel_owner_authorizations WHERE id=?',(record['authorization_id'],)) if record else None
-        if not auth or auth['state']!='active' or auth['version']!=record['authorization_version'] or record['message_digest']!=digest(body.get('body_text','')):
-            raise DevError('CHANNEL_OWNER_NOT_APPROVED','原私聊消息没有有效的本人任务批准',403)
+        if not record:
+            reason=body.get('owner_task_blocker','CHANNEL_OWNER_NOT_APPROVED')
+            detail={
+                'WEIXIN_SOURCE_TIME_MISSING':'微信没有提供这条原消息的发送时间，无法核验它是在授权后发送的。',
+                'WEIXIN_SOURCE_BEFORE_APPROVAL':'这条消息早于微信本人交办授权。请在原微信发送一条新请求。',
+                'CHANNEL_OWNER_SOURCE_CHANGED':'这条微信消息已修订或删除。请在原微信发送一条新请求。',
+                'CHANNEL_OWNER_SCOPE_DENIED':'微信入口当时没有可交办的项目。请查看房间权限设置。',
+            }
+            raise DevError(reason,detail.get(reason,'原私聊消息没有有效的本人任务批准'),403)
+        if not auth or auth['state']!='active' or auth['version']!=record['authorization_version']:
+            raise DevError('CHANNEL_OWNER_NOT_APPROVED','原微信本人任务批准已撤销或更改',403)
+        if record['message_digest']!=digest(body.get('body_text','')):
+            raise DevError('CHANNEL_OWNER_NOT_APPROVED','原微信消息正文已改变',403)
         binding=self.store.one('SELECT * FROM weixin_bindings WHERE id=?',(auth['binding_id'],))
         if recovery_owner is not None:
             self.goal_source(goal,message,binding)
@@ -657,6 +668,20 @@ class RoomWeixin:
                     'generation':binding['generation'],'peer_id':peer,'external_message_id':external_id,'provider_version':version,
                     'provider_created':created,'provider_deleted':bool(int(deleted)),'revision_is_latest_at_commit':newest},
                 'requires_owner_execution_request':True}
+            auth=self.store.one("SELECT * FROM room_channel_owner_authorizations WHERE binding_id=? AND state='active'",(binding['id'],))
+            scope=None
+            if not auth:
+                body['owner_task_blocker']='CHANNEL_OWNER_NOT_APPROVED'
+            elif prior or int(updated) or int(deleted):
+                body['owner_task_blocker']='CHANNEL_OWNER_SOURCE_CHANGED'
+            elif not int(created):
+                body['owner_task_blocker']='WEIXIN_SOURCE_TIME_MISSING'
+            elif int(created)<int(auth['created']*1000):
+                body['owner_task_blocker']='WEIXIN_SOURCE_BEFORE_APPROVAL'
+            else:
+                scope=self.approved_scope(auth,binding,owner)
+                if not scope or not scope['projects']:
+                    body['owner_task_blocker']='CHANNEL_OWNER_SCOPE_DENIED'
             parent=prior['message_id'] if prior and prior['message_id'] else ''
             previous=self.store.one('SELECT thread_root_id FROM collaboration_messages WHERE id=? AND conversation_id=?',(parent,room['id'])) if parent else None
             root=previous['thread_root_id'] if previous else message_id
@@ -667,17 +692,14 @@ class RoomWeixin:
                  'generation:'+str(binding['generation'])+':'+external_id+':version:'+version,canonical(body),self.c.clock()))
             for ordinal,item in attachment_items:
                 self.c.weixin.media.add_inbound(binding,message_id,ordinal,item)
-            auth=self.store.one("SELECT * FROM room_channel_owner_authorizations WHERE binding_id=? AND state='active'",(binding['id'],))
-            if auth and not prior and not int(updated) and not int(deleted) and int(created)>=int(auth['created']*1000):
-                scope=self.approved_scope(auth,binding,owner)
-                if scope and scope['projects']:
-                    # Freeze the room-approved scope for this input. Later
-                    # room expansion applies only to new messages, never to
-                    # queued inputs or an already approved Goal.
-                    self.store.execute('''INSERT INTO room_channel_owner_inputs
-                        (message_id,authorization_id,authorization_version,message_digest,created,scope,scope_digest)
-                        VALUES (?,?,?,?,?,?,?)''',(message_id,auth['id'],auth['version'],digest(body['body_text']),
-                        self.c.clock(),canonical(scope),digest(scope)))
+            if scope and scope['projects']:
+                # Freeze the room-approved scope for this input. Later
+                # room expansion applies only to new messages, never to
+                # queued inputs or an already approved Goal.
+                self.store.execute('''INSERT INTO room_channel_owner_inputs
+                    (message_id,authorization_id,authorization_version,message_digest,created,scope,scope_digest)
+                    VALUES (?,?,?,?,?,?,?)''',(message_id,auth['id'],auth['version'],digest(body['body_text']),
+                    self.c.clock(),canonical(scope),digest(scope)))
             canonical_message=self.store.one('SELECT * FROM collaboration_messages WHERE id=?',(message_id,))
             if newest:
                 self.c.room_consumers.enqueue(canonical_message,member,owner)

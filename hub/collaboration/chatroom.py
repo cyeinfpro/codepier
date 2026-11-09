@@ -132,8 +132,16 @@ class ChatroomService:
             result['source_channel'] = body.get('external_origin', {}).get('channel', 'weixin')
             result['canonical_message_id'] = row['id']
             result['author_kind'] = 'external_channel'
-            trusted = self.c.channel_owner.author(row)
             origin = body.get('external_origin')
+            if isinstance(origin, dict) and origin.get('native_room'):
+                try:
+                    trusted = self.c.room_channels.native.author(row)
+                except DevError as exc:
+                    trusted = {'kind': 'external_channel', 'authenticated': False}
+                    result['owner_task_blocker'] = exc.code
+                    result['owner_task_reason'] = str(exc)
+            else:
+                trusted = self.c.channel_owner.author(row)
             if isinstance(origin, dict):
                 origin['execution_authority'] = trusted['authenticated']
             body['requires_owner_execution_request'] = not trusted['authenticated']
