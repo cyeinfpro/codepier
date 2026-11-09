@@ -913,7 +913,8 @@ class FileEngine:
 
     def call(self, tool: str, project: dict, args: dict):
         if tool in {"project_knowledge_build", "project_knowledge_query"}:
-            from agent.project_knowledge import build, query
+            from agent.project_knowledge import query
+            from agent.knowledge_refresh import build
             return (build if tool == "project_knowledge_build" else query)(self, project, args)
         if tool == "apply_patch":
             from agent.batch_patch import apply_patch

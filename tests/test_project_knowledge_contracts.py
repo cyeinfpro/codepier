@@ -175,13 +175,13 @@ async def test_agent_routes_to_typed_file_engine_not_process(agent, monkeypatch,
 
 @pytest.mark.parametrize('name', [BUILD, QUERY])
 def test_legacy_or_unadvertised_peers_fail_closed(name):
-    assert wire_version(name) == 2
+    assert wire_version(name) == (3 if name == BUILD else 2)
     with pytest.raises(DevError) as denied:
         require_compatible(negotiate({'version': '1.13.0'}), name)
     assert denied.value.code == 'AGENT_UPGRADE_REQUIRED'
     with pytest.raises(DevError):
         validate_call_epoch(name, None)
-    validate_call_epoch(name, 2)
+    validate_call_epoch(name, wire_version(name))
 
 
 def test_query_uses_read_lane_and_build_retains_write_admission():

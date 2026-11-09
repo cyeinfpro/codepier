@@ -18,6 +18,7 @@ from shared.crypto import digest
 from shared.util import DevError
 
 VERSION = 1
+STRUCTURE_VERSION = 2
 FILE_BYTES = 512 * 1024
 SCAN_BYTES = 64 * 1024 * 1024
 MAP_BYTES = 8 * 1024 * 1024
@@ -29,8 +30,14 @@ TEXT_SUFFIXES = frozenset({
     ".java", ".c", ".h", ".cpp", ".hpp", ".cs", ".rb", ".php", ".swift",
     ".kt", ".vue", ".svelte", ".css", ".scss", ".html", ".sql", ".sh",
     ".ps1", ".md", ".rst", ".txt", ".toml", ".yaml", ".yml", ".json",
+    ".proto", ".service",
 })
-TEXT_NAMES = frozenset({"Dockerfile", "Makefile", "LICENSE"})
+TEXT_NAMES = frozenset({"Dockerfile", "Makefile", "LICENSE", "VERSION"})
+DOCKER_INSTRUCTIONS = frozenset({
+    "ADD", "ARG", "CMD", "COPY", "ENTRYPOINT", "ENV", "EXPOSE", "FROM",
+    "HEALTHCHECK", "LABEL", "MAINTAINER", "ONBUILD", "RUN", "SHELL",
+    "STOPSIGNAL", "USER", "VOLUME", "WORKDIR",
+})
 NOISE = frozenset({"dist", "build", "vendor", "coverage", "test-results", "playwright-report"})
 SECRET = re.compile(
     r"(?i)(?:-----BEGIN [A-Z ]*PRIVATE KEY-----|"
@@ -111,13 +118,19 @@ def load(engine, key, *, repair=False):
     return {"revision": row[0], "payload": payload, "generated_at": row[2]}
 
 
+def dockerfile(name):
+    return name == "Dockerfile" or bool(re.fullmatch(
+        r"(?:Dockerfile\.[A-Za-z0-9_.-]+|[A-Za-z0-9_.-]+\.Dockerfile)", name))
+
+
 def eligible(path):
     parts = PurePosixPath(path).parts
     name = PurePosixPath(path).name
     return (not any(part.casefold() in NOISE for part in parts)
             and not name.endswith((".min.js", ".min.css", ".lock"))
             and name not in {"package-lock.json", "MANIFEST.sha256"}
-            and (PurePosixPath(path).suffix.lower() in TEXT_SUFFIXES or name in TEXT_NAMES))
+            and (PurePosixPath(path).suffix.lower() in TEXT_SUFFIXES or name in TEXT_NAMES
+                 or dockerfile(name)))
 
 
 def cleaned(value, limit):
@@ -130,14 +143,39 @@ def cleaned(value, limit):
 def structural(path, text, sha):
     """Heuristic identifiers only. This is not a semantic or type-resolved graph."""
     names, imports, headings = [], [], []
+    suffix, basename = PurePosixPath(path).suffix.lower(), PurePosixPath(path).name
+    container = dockerfile(basename)
+    metadata = container or suffix == ".service" or basename == "VERSION"
+    sections, directives, instructions = [], [], []
     for line in text.splitlines()[:10000]:
         if len(line) > 4096 or SECRET.search(line):
             continue
-        match = DEFINITION.match(line)
-        if match and match.group(1) not in names and len(names) < 24:
+        match = (re.match(r"^\s*(?:message|enum|service|rpc)\s+(" + IDENTIFIER + r")", line)
+                 if suffix == ".proto" else None if metadata else DEFINITION.match(line))
+        if match and len(match.group(1)) <= 200 and match.group(1) not in names and len(names) < 24:
             names.append(match.group(1))
+        if suffix == ".proto":
+            match = re.match(r'^\s*import\s+(?:(?:public|weak)\s+)?["\']([\w./-]+\.proto)["\']\s*;', line)
+            if match:
+                value = match.group(1)
+                parts = PurePosixPath(value).parts
+                if len(value) <= 200 and not value.startswith("/") and ".." not in parts:
+                    imports.append(value)
+        if container:
+            match = re.match(r"^\s*([A-Za-z]+)\s+", line)
+            if match and match.group(1).upper() in DOCKER_INSTRUCTIONS:
+                value = match.group(1).upper()
+                if value not in instructions:
+                    instructions.append(value)
+        if suffix == ".service":
+            match = re.fullmatch(r"\s*\[(Unit|Service|Install)\]\s*", line)
+            if match and match.group(1) not in sections:
+                sections.append(match.group(1))
+            match = re.match(r"^\s*([A-Z][A-Za-z0-9]{0,79})\s*=", line)
+            if match and match.group(1) not in directives and len(directives) < 24:
+                directives.append(match.group(1))
         match = re.match(r"^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))", line)
-        if match:
+        if match and suffix != ".proto" and not metadata:
             imports.extend(x for x in match.groups() if x and len(x) <= 200)
         if PurePosixPath(path).suffix.lower() in {".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx"}:
             match = re.match(r"^\s*(?:import|export)\b.*?\bfrom\s*[\"']([\w@./-]+)[\"']", line)
@@ -149,11 +187,30 @@ def structural(path, text, sha):
                 headings.append(value)
         if len(imports) >= 24:
             imports = imports[:24]
-    suffix = PurePosixPath(path).suffix.lower()
     kind = ("documentation" if suffix in {".md", ".rst", ".txt"} else
             "tests" if any(p in {"tests", "test"} for p in PurePosixPath(path).parts) else
-            "configuration" if suffix in {".json", ".toml", ".yaml", ".yml"} else "source")
+            "configuration" if suffix in {".json", ".toml", ".yaml", ".yml", ".service"}
+            or container or basename == "VERSION" else "source")
     summary = kind.capitalize()
+    if suffix == ".proto":
+        summary = "Protocol schema"
+    elif container:
+        summary = "Container build"
+        if instructions:
+            summary += "; instructions: " + ", ".join(instructions)
+    elif suffix == ".service":
+        summary = "Service configuration"
+        if sections:
+            summary += "; sections: " + ", ".join(sections)
+        if directives:
+            summary += "; directives: " + ", ".join(directives[:12])
+    elif basename == "VERSION":
+        summary = "Version metadata"
+        # Never retain arbitrary release-file contents or command/environment values.
+        value = text.strip()
+        if (len(value) <= 100 and not SECRET.search(value)
+                and re.fullmatch(r"v?\d+(?:\.\d+){0,3}(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?", value)):
+            summary += "; version: " + value
     if names:
         summary += "; definitions: " + ", ".join(names[:8])
     elif headings:
@@ -166,6 +223,11 @@ def structural(path, text, sha):
 def relations(entry, paths):
     candidates = []
     for name in entry.get("imports", []):
+        if PurePosixPath(entry["path"]).suffix.lower() == ".proto":
+            # Import roots are not resolved by a compiler; only retain known local files.
+            candidates.extend([posixpath.normpath(name),
+                               posixpath.normpath(posixpath.join(posixpath.dirname(entry["path"]), name))])
+            continue
         if name.startswith(".") and "/" in name:
             base = posixpath.normpath(posixpath.join(posixpath.dirname(entry["path"]), name))
             candidates.extend([base, base + ".ts", base + ".js", base + ".tsx",
@@ -183,7 +245,7 @@ def relations(entry, paths):
     return sorted({p for p in candidates if p in paths and p != entry["path"]})[:16]
 
 
-def build(engine, project, args):
+def build(engine, project, args, *, reuse=None):
     root, owner, key = identity(engine, project, True)
     previous = load(engine, key, repair=True)
     base = previous["revision"] if previous else "new"
@@ -210,14 +272,26 @@ def build(engine, project, args):
             raise DevError("KNOWLEDGE_SCAN_LIMIT", "知识地图达到扫描预算；原地图未改变", 409)
         try:
             actual = engine.path(root, path, False)
+            before, cached = reuse.before(engine, root, path, old.get(path)) if reuse else (None, None)
+            if cached is not None:
+                used += before[2]
+                if used > SCAN_BYTES:
+                    raise DevError("KNOWLEDGE_SCAN_LIMIT", "知识地图覆盖内容达到 64 MiB 预算；原地图未改变", 409)
+                entries[path] = cached
+                reused += 1
+                continue
             data = engine.read_bytes(actual, max_bytes=FILE_BYTES, verify_path=True)
             text = engine.text(data)
             used += len(data)
             if used > SCAN_BYTES:
                 raise DevError("KNOWLEDGE_SCAN_LIMIT", "知识地图达到 64 MiB 读取预算；原地图未改变", 409)
             sha = digest(data)
+            if reuse:
+                reuse.after(engine, root, path, before, sha)
             prior = old.get(path)
-            if prior and prior["sha256"] == sha:
+            if (prior and prior["sha256"] == sha
+                    and (prior.get("origin") == "agent"
+                         or previous["payload"].get("structure_version") == STRUCTURE_VERSION)):
                 entry = dict(prior)
                 reused += 1
             else:
@@ -250,7 +324,8 @@ def build(engine, project, args):
             if ref != path and ref not in related:
                 related.append(ref)
         entry.update(summary=cleaned(annotation["summary"], 1200), related_paths=related[:16], origin="agent")
-    payload = {"version": VERSION, "entries": [entries[p] for p in sorted(entries)],
+    payload = {"version": VERSION, "structure_version": STRUCTURE_VERSION,
+               "entries": [entries[p] for p in sorted(entries)],
                "scan_scope": scope, "skipped_reasons": skipped}
     raw = encoded(payload)
     if len(raw.encode()) > MAP_BYTES:

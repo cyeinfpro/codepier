@@ -349,3 +349,158 @@ def test_non_text_and_oversized_map_can_be_rebuilt(workspace, monkeypatch, paylo
     assert error.value.code == "KNOWLEDGE_CORRUPT"
     assert build(workspace)["entries_count"] == 1
     assert query(workspace)["entries"][0]["state"] == "current"
+
+
+@pytest.mark.parametrize("path", [
+    "protocol/plugin.proto", "VERSION", "bridge/VERSION", "bridge/Dockerfile",
+    "bridge/Dockerfile.release", "bridge/bridge.Dockerfile", "deploy/bridge@.service",
+])
+def test_protocol_and_deployment_files_are_eligible(path):
+    assert knowledge.eligible(path)
+
+
+@pytest.mark.parametrize("path", [
+    "dist/plugin.proto", "vendor/bridge.service", "VERSION.backup", "Dockerfileish",
+    "bridge/Dockerfile.lock", "build/VERSION", "bridge/bridge.service.lock",
+])
+def test_added_formats_do_not_expand_generated_or_arbitrary_names(path):
+    assert not knowledge.eligible(path)
+
+
+def test_proto_extracts_identifiers_imports_and_safe_relations(workspace):
+    _, _, root = workspace
+    (root / "protocol").mkdir()
+    (root / "protocol/common.proto").write_text('message Request {}\n')
+    source = '''syntax = "proto3";
+import public "protocol/common.proto";
+import weak "external/missing.proto";
+import "/outside.proto";
+import "../outside.proto";
+message Reply { string body = 1; }
+enum Status { OK = 0; }
+service Plugin {
+    rpc Call(Request) returns (Reply);
+}
+// SOURCE_BODY_MUST_NOT_BE_INDEXED
+'''
+    (root / "protocol/plugin.proto").write_text(source)
+    build(workspace)
+    entry = query(workspace, paths=["protocol/plugin.proto"])["entries"][0]
+    assert entry["symbols"] == ["Reply", "Status", "Plugin", "Call"]
+    assert entry["imports"] == ["external/missing.proto", "protocol/common.proto"]
+    assert entry["related_paths"] == ["protocol/common.proto"]
+    assert "Protocol schema" in entry["summary"]
+    assert "SOURCE_BODY_MUST_NOT_BE_INDEXED" not in json.dumps(entry)
+
+
+def test_deployment_summaries_keep_structure_not_commands_or_environment(workspace):
+    _, _, root = workspace
+    files = {
+        "Dockerfile.bridge": 'FROM python:3.13\nCOPY . /app\nRUN echo DO_NOT_COPY_COMMAND\nENV PRIVATE_VALUE=DO_NOT_COPY_VALUE\n',
+        "bridge.service": '[Unit]\nDescription=DO_NOT_COPY_DESCRIPTION\n[Service]\nExecStart=/secret/path DO_NOT_COPY_COMMAND\nEnvironment=PRIVATE_VALUE=DO_NOT_COPY_VALUE\n[Install]\nWantedBy=multi-user.target\n',
+        "VERSION": 'v1.2.3-rc.1+build.2\n',
+    }
+    for path, source in files.items():
+        (root / path).write_text(source)
+    build(workspace)
+    entries = {entry["path"]: entry for entry in query(workspace)["entries"]}
+    assert set(entries) == set(files)
+    assert "instructions: FROM, COPY, RUN, ENV" in entries["Dockerfile.bridge"]["summary"]
+    assert "sections: Unit, Service, Install" in entries["bridge.service"]["summary"]
+    assert "directives: Description, ExecStart, Environment, WantedBy" in entries["bridge.service"]["summary"]
+    assert entries["VERSION"]["summary"] == "Version metadata; version: v1.2.3-rc.1+build.2"
+    assert "DO_NOT_COPY" not in json.dumps(entries)
+    (root / "VERSION").write_text("PRIVATE_ARBITRARY_CONTENT\n")
+    build(workspace)
+    assert query(workspace, paths=["VERSION"])["entries"][0]["summary"] == "Version metadata"
+
+
+def test_all_32_annotations_and_deployment_references_are_retained(workspace):
+    _, _, root = workspace
+    paths = ["plugin.proto", "VERSION", "Dockerfile.bridge", "bridge.service"]
+    paths.extend(f"entry_{index}.py" for index in range(28))
+    for path in paths:
+        (root / path).write_text("synthetic source\n")
+    entries = [{"path": path, "expected_sha256": digest((root / path).read_bytes()),
+                "summary": f"Entry {index}", "related_paths": paths[:4] if index >= 4 else []}
+               for index, path in enumerate(paths)]
+    assert build(workspace, entries=entries)["entries_count"] == 32
+    result = query(workspace, limit=40, max_chars=16000)
+    assert len(result["entries"]) == 32
+    assert all(entry["origin"] == "agent" for entry in result["entries"])
+    assert next(e for e in result["entries"] if e["path"] == "entry_0.py")["related_paths"] == paths[:4]
+
+
+def test_added_formats_keep_file_budget_and_old_map_atomicity(workspace):
+    _, _, root = workspace
+    (root / "a.py").write_text("pass\n")
+    revision = build(workspace)["revision"]
+    (root / "plugin.proto").write_text("message Plugin {}\n")
+    with pytest.raises(DevError) as error:
+        build(workspace, max_files=1)
+    assert error.value.code == "KNOWLEDGE_SCAN_LIMIT"
+    assert query(workspace)["revision"] == revision
+
+
+def test_structure_refresh_upgrades_legacy_extractor_but_preserves_annotations(workspace):
+    engine, _, root = workspace
+    (root / "Dockerfile").write_text("FROM python:3.13\n")
+    (root / "manual.py").write_text("pass\n")
+    build(workspace, entries=[{"path": "manual.py", "expected_sha256": digest(b"pass\n"),
+                               "summary": "User supplied summary"}])
+    with engine.journal.lock, engine.journal.db:
+        payload = json.loads(engine.journal.db.execute("SELECT payload FROM project_knowledge").fetchone()[0])
+        payload.pop("structure_version", None)
+        next(e for e in payload["entries"] if e["path"] == "Dockerfile")["summary"] = "Source"
+        engine.journal.db.execute("UPDATE project_knowledge SET payload=?", (knowledge.encoded(payload),))
+    result = build(workspace)
+    assert result["changed_entries"] == 1 and result["reused_entries"] == 1
+    entries = {e["path"]: e for e in query(workspace)["entries"]}
+    assert entries["Dockerfile"]["summary"] == "Container build; instructions: FROM"
+    assert entries["manual.py"]["summary"] == "User supplied summary"
+    assert build(workspace)["revision"] == result["revision"]
+
+
+def test_added_formats_preserve_secret_link_binary_and_size_guards(workspace, tmp_path):
+    _, _, root = workspace
+    (root / ".ssh").mkdir()
+    (root / ".ssh/key.proto").write_text("message Private {}\n")
+    (root / "real.proto").write_text('message Safe {}\n// password=SECRET_NOT_FOR_INDEX\n')
+    (root / "linked.proto").symlink_to(root / "real.proto")
+    (root / "hard.service").write_text("[Service]\n")
+    os.link(root / "hard.service", tmp_path / "outside.service")
+    (root / "VERSION").write_text("1.2.3+sk-12345678901234567890\n")
+    (root / "binary.proto").write_bytes(b"\x00\x01\xff")
+    (root / "large.service").write_bytes(b"x" * (knowledge.FILE_BYTES + 1))
+    result = build(workspace)
+    assert result["skipped_files"] >= 2
+    entries = query(workspace, limit=40)["entries"]
+    assert {e["path"] for e in entries} == {"real.proto", "VERSION"}
+    assert "SECRET_NOT_FOR_INDEX" not in json.dumps(entries)
+    assert "sk-1234" not in json.dumps(entries)
+
+
+def test_metadata_does_not_retain_code_like_command_payloads():
+    for path in ("Dockerfile.bridge", "bridge.service", "VERSION"):
+        entry = knowledge.structural(path, "def COMMAND_BODY():\nimport PRIVATE_BODY\n", "0" * 64)
+        assert entry["symbols"] == [] and entry["imports"] == []
+        assert "COMMAND_BODY" not in entry["summary"] and "PRIVATE_BODY" not in entry["summary"]
+
+
+def test_protocol_structural_identifiers_and_imports_stay_bounded():
+    text = "\n".join(f"message Name{n} {{}}\nimport 'path{n}.proto';" for n in range(40))
+    text += "\nmessage " + ("x" * 1100) + " {}"
+    entry = knowledge.structural("plugin.proto", text, "0" * 64)
+    assert len(entry["symbols"]) == 24 and len(entry["imports"]) == 24
+    assert all(len(value) <= 200 for value in entry["symbols"] + entry["imports"])
+
+
+def test_protocol_relative_import_resolves_only_existing_local_entry(workspace):
+    _, _, root = workspace
+    (root / "protocol").mkdir()
+    (root / "protocol/common.proto").write_text("message Common {}\n")
+    (root / "protocol/plugin.proto").write_text('import "./common.proto";\nmessage Plugin {}\n')
+    build(workspace)
+    entry = query(workspace, paths=["protocol/plugin.proto"])["entries"][0]
+    assert entry["imports"] == ["./common.proto"]
+    assert entry["related_paths"] == ["protocol/common.proto"]
