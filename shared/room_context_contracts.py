@@ -2,7 +2,7 @@
 from typing import Literal
 
 from pydantic import ConfigDict, Field, model_validator
-from shared.collaboration_contracts import Model, Identifier
+from shared.collaboration_contracts import MAX_ROOM_PROJECTS, Model, Identifier
 from shared.room_contracts import MemberIdentity
 from shared.room_runtime_contracts import RoomConsumerMutation
 from shared.team_collaboration_contracts import ArtifactRef
@@ -19,7 +19,7 @@ class ContextFact(Model):
     key: str = Field(pattern=r'^[A-Za-z0-9_.:-]{1,80}$')
     text: str = Field(min_length=1, max_length=1000)
     sources: list[ContextSource] = Field(min_length=1, max_length=4)
-    project_ids: list[Identifier] = Field(default_factory=list, max_length=16)
+    project_ids: list[Identifier] = Field(default_factory=list, max_length=MAX_ROOM_PROJECTS)
     artifact_refs: list[ArtifactRef] = Field(default_factory=list, max_length=8)
 
     @model_validator(mode='after')

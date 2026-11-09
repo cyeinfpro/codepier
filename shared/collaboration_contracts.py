@@ -11,6 +11,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from shared.util import valid_json_value
 
+# Shared bounded project capacity for room permissions and their downstream work.
+MAX_ROOM_PROJECTS = 128
+
 Identifier = Annotated[str, Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9_.:-]+$')]
 Key = Annotated[str, Field(min_length=8, max_length=128, pattern=r'^[A-Za-z0-9_.:-]+$')]
 ShortText = Annotated[str, Field(min_length=1, max_length=1000)]
@@ -62,7 +65,7 @@ class Read(Scope):
 
 class ConversationCreate(Model):
     title: str = Field(min_length=1, max_length=120)
-    projects: list[Scope] = Field(min_length=1, max_length=16)
+    projects: list[Scope] = Field(min_length=1, max_length=MAX_ROOM_PROJECTS)
     idempotency_key: Key
 
     @field_validator('title')
@@ -609,7 +612,7 @@ class GoalCreate(Scope):
     conversation_id: Identifier
     objective: str = Field(min_length=1, max_length=4000)
     acceptance: str = Field(min_length=1, max_length=2000)
-    project_ids: list[Identifier] = Field(min_length=1, max_length=16)
+    project_ids: list[Identifier] = Field(min_length=1, max_length=MAX_ROOM_PROJECTS)
     participant_grant_ids: list[Identifier] = Field(min_length=1, max_length=16)
     capabilities: list[GoalCapability] = Field(min_length=1, max_length=3)
     duration_seconds: int = Field(default=3600, ge=60, le=86400)

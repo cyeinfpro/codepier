@@ -168,7 +168,7 @@ def test_unified_room_permissions_bulk_channel_modes_and_return(
             if 'execute' in project['capabilities']:
                 chosen_targets = row.locator('[data-permission-target-option]:checked').evaluate_all(
                     '(inputs) => inputs.map(input => input.value)')
-                assert chosen_targets == (['project_agent'] if 'project_agent' in project['execution_targets'] else [])
+                assert chosen_targets == project['execution_targets']
         page.keyboard.press('Escape')
         expect(page.locator('dialog.cr-panel')).not_to_be_visible()
         assert not stack.must(stack.client.get(room_path + '/permissions'))['configured']

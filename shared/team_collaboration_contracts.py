@@ -1,7 +1,7 @@
 """Explicit owner-approved multi-Dot teams layered on coordination goals."""
 from typing import Literal
 from pydantic import Field, model_validator
-from shared.collaboration_contracts import Scope, Model, Identifier, Key, GoalRead, CoordinationBudget, GoalCapability
+from shared.collaboration_contracts import MAX_ROOM_PROJECTS, Scope, Model, Identifier, Key, GoalRead, CoordinationBudget, GoalCapability
 
 
 class TeamCreate(Scope):
@@ -9,7 +9,7 @@ class TeamCreate(Scope):
     label: str = Field(min_length=1, max_length=80)
     dot_ids: list[Identifier] = Field(min_length=2, max_length=16)
     coordinator_dot_id: Identifier
-    project_ids: list[Identifier] = Field(min_length=1, max_length=16)
+    project_ids: list[Identifier] = Field(min_length=1, max_length=MAX_ROOM_PROJECTS)
     capabilities: list[GoalCapability] = Field(default_factory=lambda: ['read'], min_length=1, max_length=3)
     duration_seconds: int = Field(strict=True, default=3600, ge=60, le=86400)
     policy_duration_seconds: int = Field(strict=True, default=86400, ge=60, le=2592000)

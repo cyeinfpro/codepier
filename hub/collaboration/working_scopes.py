@@ -39,7 +39,7 @@ class WorkingProject(contracts.Scope):
 
 class Selection(contracts.Model):
     conversation_id: contracts.Identifier
-    projects: list[WorkingProject] = Field(default_factory=list, max_length=16)
+    projects: list[WorkingProject] = Field(default_factory=list, max_length=contracts.MAX_ROOM_PROJECTS)
     permissions_only: bool = False
     dot_id: str = Field(default='', max_length=128)
 

@@ -354,3 +354,40 @@ async def test_native_peer_mention_is_readable_notice_not_fake_handoff(collab):
     assert notice['reference']['goal_id']==goal_id
     assert s.room_runtime.work_view(s.room_runtime.goal(goal_id),a,member_id=lead['member_id'])['allowed_actions']==[]
     assert 'pause' in s.room_runtime.work_view(s.room_runtime.goal(goal_id),owner)['allowed_actions']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('count', [28, 128])
+async def test_large_room_work_scope_starts_and_keeps_exact_project_boundary(collab, count):
+    s, owner, worker, *_ = collab
+    ids = ['proj', 'otherproj'] + [f'project-{i:03}' for i in range(count - 2)]
+    for pid in ids[2:]:
+        s.store.execute("""INSERT INTO projects
+            (id,alias,alias_key,device_id,root,mode,allow_tasks,created)
+            VALUES (?,?,?,'dev','/tmp/fixture','write',1,?)""",
+            (pid, pid, pid, collab[6][0]))
+    actor = worker_for(s, worker, 'large-room', scopes=('read',), projects=ids)
+    scopes = [{'project_id': pid, 'capabilities': ['read']} for pid in ids]
+    s, owner, actor, _, identity, credentials = await connected(collab,
+        [{'project': pid} for pid in ids], scopes, worker_override=actor)
+    result, request = start(s, owner, actor, identity, credentials, project_ids=ids)
+    assert set(result['goal']['project_ids']) == set(ids)
+    with pytest.raises(DevError) as stale:
+        s.room_runtime.start_work(request, actor)
+    assert stale.value.code == 'ROOM_INBOX_CHANGED'
+    replay = s.room_runtime.start_work({**request, 'idempotency_key': key(),
+        'coordinator_epoch': current_epoch(s, result['goal_id']),
+        'expected_inbox_revision': s.room_consumers.inbox(identity, actor)['inbox_revision']}, actor)
+    assert replay['goal_id'] == result['goal_id']
+    assert len(s.store.all('SELECT * FROM coordination_goals')) == 1
+    raw = {**mutation(s, identity, credentials, result['goal_id']),
+        'objective': 'Read the final selected project', 'acceptance': 'Report its facts',
+        'assignee_grant_id': actor.grant_id, 'assignee_member_id': identity['member_id'],
+        'required_capabilities': ['read']}
+    work = s.coordination.work_create({**raw, 'target_project_id': ids[-1]}, actor)['work_item']
+    assert work['project_id'] == ids[-1]
+    with pytest.raises(DevError):
+        s.coordination.work_create({**raw, 'idempotency_key': key(),
+            'target_project_id': 'not-approved'}, actor)
+    assert len(s.store.all('SELECT * FROM coordination_work WHERE goal_id=?',
+        (result['goal_id'],))) >= 1

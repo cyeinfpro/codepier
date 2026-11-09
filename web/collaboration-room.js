@@ -1086,7 +1086,8 @@ window.CodePierCollaboration = (() => {
   }
   const permissionCaps = ['read', 'write', 'execute'];
   const permissionLabels = { read: '读取', write: '修改', execute: '执行' };
-  const permissionKey = (value) => value.project_id + ':' + (value.environment_id || 'production');
+  const permissionKey = (value) =>
+    JSON.stringify([value.project_id, value.environment_id || 'production']);
   function permissionDateValue(timestamp) {
     if (!Number.isFinite(Number(timestamp)) || timestamp == null) return '';
     const value = new Date(Number(timestamp) * 1000);
@@ -1131,7 +1132,7 @@ window.CodePierCollaboration = (() => {
           const selectedTargets = rule?.capabilities?.includes('execute')
             ? rule.execution_targets || []
             : ['project_agent'];
-          return `<fieldset class="cr-scope" data-permission-row data-project-id="${E(project.project_id)}" data-environment-id="${E(project.environment_id || 'production')}"><legend><label><input type="checkbox" data-permission-project ${available.length ? '' : 'disabled'} ${selected.length ? 'checked' : ''}>${E(project.name || project.project_label || project.project_id)} · ${E(project.environment_id || 'production')}</label></legend><div>${permissionCaps.map((cap) => `<label><input type="checkbox" data-permission-cap value="${cap}" data-available="${available.includes(cap)}" ${selected.includes(cap) ? 'checked' : ''} ${available.includes(cap) && selected.length ? '' : 'disabled'}>${permissionLabels[cap]}</label>`).join('')}</div>${targets.length ? `<div><span>执行位置：</span>${targets.map((target) => `<label><input type="checkbox" data-permission-target-option value="${E(target)}" ${selectedTargets.includes(target) ? 'checked' : ''}>${E(target === 'project_agent' ? '项目 Agent' : target)}</label>`).join('')}</div>` : ''}<small class="cr-muted">项目 / 宿主可授予上限：${E(available.map((cap) => permissionLabels[cap] || cap).join('、') || '无')}。这不是当前已授予权限。</small>${permissionLifetimeControls(lifetime, section !== 'room' && !rule)}</fieldset>`;
+          return `<fieldset class="cr-scope" data-permission-row data-project-id="${E(project.project_id)}" data-environment-id="${E(project.environment_id || 'production')}"><legend><label><input type="checkbox" data-permission-project ${available.length ? '' : 'disabled'} ${selected.length ? 'checked' : ''}>${E(project.name || project.project_label || project.project_id)} · ${E(project.environment_id || 'production')}</label></legend><div>${permissionCaps.map((cap) => `<label><input type="checkbox" data-permission-cap value="${cap}" data-available="${available.includes(cap)}" data-host-available="${available.includes(cap)}" ${selected.includes(cap) ? 'checked' : ''} ${available.includes(cap) && selected.length ? '' : 'disabled'}>${permissionLabels[cap]}</label>`).join('')}</div>${targets.length ? `<div><span>执行位置：</span>${targets.map((target) => `<label><input type="checkbox" data-permission-target-option value="${E(target)}" ${selectedTargets.includes(target) ? 'checked' : ''}>${E(project.execution_target_labels?.[target] || (target === 'project_agent' ? '项目 Agent' : target))}</label>`).join('')}</div>` : ''}<small class="cr-muted">项目 / 宿主可授予上限：${E(available.map((cap) => permissionLabels[cap] || cap).join('、') || '无')}。这不是当前已授予权限。</small>${permissionLifetimeControls(lifetime, section !== 'room' && !rule)}</fieldset>`;
         })
         .join('') || '<p class="cr-muted">没有可授权项目。</p>'
     );
@@ -1146,11 +1147,11 @@ window.CodePierCollaboration = (() => {
     panel.stale = false;
     const channels = ['weixin', 'telegram'];
     root.querySelector('[data-cr-permissions-view]').innerHTML =
-      `${panel.returnChannel ? btn('channel-scope-back', '返回微信', '', 'cr-text-button') : ''}<p class="cr-info">这是本房间唯一的项目权限设置。房间成员统一使用下方范围；微信、Telegram 可跟随房间或使用自定义范围。更改仅在保存后生效。</p>${policy.configured ? '' : '<p class="cr-info">以下是原有实际授权的保守预览，不会自动扩权。首次保存后统一使用此处设置。</p>'}${activeRoom() ? '' : `<p class="cr-info">${E(readOnlyReason())}</p>`}<form data-cr-form="permissions"><h3>房间项目权限</h3><p class="cr-muted">选择项目默认勾选读取；修改、执行可逐项勾选，也可使用全选权限。未选择的项目不授予权限。项目 / 宿主的安全上限不能在这里突破。</p>${permissionSection(policy, policy.scope, 'room')}${channels
+      `${panel.returnChannel ? btn('channel-scope-back', '返回微信', '', 'cr-text-button') : ''}<p class="cr-info">这是本房间唯一的项目权限设置。房间成员统一使用下方范围；微信、Telegram 可跟随房间或使用自定义范围。更改仅在保存后生效。</p>${policy.configured ? '' : '<p class="cr-info">以下是原有实际授权的保守预览，不会自动扩权。首次保存后统一使用此处设置。</p>'}${activeRoom() ? '' : `<p class="cr-info">${E(readOnlyReason())}</p>`}<form data-cr-form="permissions"><h3>房间项目权限</h3><p class="cr-muted">选择项目默认勾选读取；修改、执行可逐项勾选；全选权限或全选执行会同时勾选可用的项目 Agent 和 VPS，也可逐一取消。全选项目仅补选读取。未选择的项目不授予权限。项目 / 宿主的安全上限不能在这里突破。</p>${permissionSection(policy, policy.scope, 'room')}${channels
         .map((channel) => {
           const entry = policy.channels?.[channel] || { mode: 'follow_room', scope: {} };
           const name = channel === 'weixin' ? '微信' : 'Telegram';
-          return `<section class="cr-inspection-section"><h3>${name}权限</h3>${entry.transport_supported === false ? '<p class="cr-info">此房间尚不支持该渠道传输；此处仅保存权限策略，不代表已连接或可执行。</p>' : ''}${field(name + '权限模式', `<select data-permission-mode="${channel}"><option value="follow_room" ${entry.mode === 'follow_room' ? 'selected' : ''}>跟随房间权限</option><option value="custom" ${entry.mode === 'custom' ? 'selected' : ''}>单独设置权限</option></select>`)}<div data-permission-custom="${channel}" ${entry.mode === 'custom' ? '' : 'hidden'}>${permissionSection(policy, entry.scope, channel)}</div><p class="cr-muted">跟随模式随房间设置同步变化；自定义范围不能超过房间及项目 / 宿主允许的范围。渠道连接、本人确认和消息投递许可仍需完成，但不另设项目权限。</p></section>`;
+          return `<section class="cr-inspection-section"><h3>${name}权限</h3>${entry.transport_supported === false ? '<p class="cr-info">此房间尚不支持该渠道传输；此处仅保存权限策略，不代表已连接或可执行。</p>' : ''}${field(name + '权限模式', `<select data-permission-mode="${channel}"><option value="follow_room" ${entry.mode === 'follow_room' ? 'selected' : ''}>跟随房间权限</option><option value="custom" ${entry.mode === 'custom' ? 'selected' : ''}>单独设置权限</option></select>`)}<div data-permission-custom="${channel}" ${entry.mode === 'custom' ? '' : 'hidden'}>${permissionSection(policy, entry.scope, channel)}</div><p class="cr-muted">跟随模式随房间设置同步变化；自定义范围不能超过房间及项目 / 宿主允许的范围；灰色选项不在当前房间选择内，保存时不会授予。渠道连接、本人确认和消息投递许可仍需完成，但不另设项目权限。</p></section>`;
         })
         .join(
           '',
@@ -1199,8 +1200,26 @@ window.CodePierCollaboration = (() => {
         lifetime.expires_at,
       );
     }
+    // Room rows are evaluated first. Custom channels are bounded by this
+    // unsaved room selection, not just the host's maximum grant.
     for (const group of form.querySelectorAll('[data-permission-row]')) {
-      const enabled = group.querySelector('[data-permission-project]').checked;
+      const channel = group.closest('[data-permission-section]').dataset.permissionSection;
+      const parent =
+        channel === 'room'
+          ? null
+          : roomRows.find(
+              (item) =>
+                item.dataset.projectId === group.dataset.projectId &&
+                item.dataset.environmentId === group.dataset.environmentId,
+            );
+      const project = group.querySelector('[data-permission-project]');
+      const parentEnabled = parent?.querySelector(
+        '[data-permission-project]:checked:not(:disabled)',
+      );
+      project.disabled =
+        !group.querySelector('[data-host-available="true"]') ||
+        (channel !== 'room' && !parentEnabled);
+      const enabled = project.checked && !project.disabled;
       const lifetimeMode = group.querySelector('[data-permission-lifetime-mode]');
       const lifetimeUntil = group.querySelector('[data-permission-lifetime-until]');
       lifetimeMode.disabled = !enabled;
@@ -1209,11 +1228,27 @@ window.CodePierCollaboration = (() => {
       const lifetime = permissionLifetimeValue(group);
       group.querySelector('[data-permission-expired]').hidden =
         lifetime.mode !== 'timed' || !(Number(lifetime.expires_at) <= Date.now() / 1000);
-      for (const input of group.querySelectorAll('[data-permission-cap]'))
-        input.disabled = !enabled || input.dataset.available !== 'true';
+      for (const input of group.querySelectorAll('[data-permission-cap]')) {
+        const parentCap = parent?.querySelector(
+          '[data-permission-cap][value="' + input.value + '"]:checked:not(:disabled)',
+        );
+        const available =
+          input.dataset.hostAvailable === 'true' && (channel === 'room' || !!parentCap);
+        input.dataset.available = String(available);
+        input.disabled = !enabled || !available;
+      }
       const execution = group.querySelector('[data-permission-cap][value="execute"]');
-      for (const input of group.querySelectorAll('[data-permission-target-option]'))
-        input.disabled = !enabled || !execution?.checked || execution.disabled;
+      const parentTargets = new Set(
+        [
+          ...(parent?.querySelectorAll('[data-permission-target-option]:checked:not(:disabled)') ||
+            []),
+        ].map((input) => input.value),
+      );
+      for (const input of group.querySelectorAll('[data-permission-target-option]')) {
+        const available = channel === 'room' || parentTargets.has(input.value);
+        input.dataset.available = String(available);
+        input.disabled = !enabled || !execution?.checked || execution.disabled || !available;
+      }
     }
     patchRoomPermissions();
   }
@@ -1234,13 +1269,21 @@ window.CodePierCollaboration = (() => {
         )
           input.checked = true;
       }
+      for (const input of group.querySelectorAll('[data-permission-target-option]')) {
+        if (selection === 'none') input.checked = false;
+        else if (selection === 'all' || selection === 'execute')
+          input.checked =
+            project.checked &&
+            group.querySelector('[data-permission-cap][value="execute"]').checked &&
+            input.dataset.available === 'true';
+      }
     }
     updatePermissionControls();
   }
   function collectPermissionScope(section, original = {}, parentScope = null) {
     const rules = [];
     for (const group of section.querySelectorAll('[data-permission-row]')) {
-      if (!group.querySelector('[data-permission-project]').checked) continue;
+      if (!group.querySelector('[data-permission-project]:checked:not(:disabled)')) continue;
       const capabilities = [
         ...group.querySelectorAll('[data-permission-cap]:checked:not(:disabled)'),
       ].map((item) => item.value);
@@ -1272,6 +1315,9 @@ window.CodePierCollaboration = (() => {
         : [];
       if (capabilities.includes('execute') && !executionTargets.length)
         throw new Error('允许执行的项目需要选择至少一个执行位置。');
+      const targetLimit = panel.permissions.limits?.execution_targets || 16;
+      if (executionTargets.length > targetLimit)
+        throw new Error('单个项目最多选择 ' + targetLimit + ' 个执行位置，请取消部分位置后保存。');
       rules.push({
         ...project,
         capabilities,
@@ -1279,6 +1325,9 @@ window.CodePierCollaboration = (() => {
         lifetime,
       });
     }
+    const projectLimit = panel.permissions.limits?.project_scopes || 16;
+    if (rules.length > projectLimit)
+      throw new Error('房间最多选择 ' + projectLimit + ' 个项目与环境，请取消部分项目后保存。');
     return {
       project_ids: [...new Set(rules.map((item) => item.project_id))],
       project_scopes: rules,
@@ -3519,7 +3568,8 @@ window.CodePierCollaboration = (() => {
               input.checked = false;
           }
         }
-        if (event.target.matches('[data-permission-cap]')) updatePermissionControls();
+        if (event.target.matches('[data-permission-cap],[data-permission-target-option]'))
+          updatePermissionControls();
         if (
           event.target.matches('[data-permission-lifetime-mode],[data-permission-lifetime-until]')
         ) {

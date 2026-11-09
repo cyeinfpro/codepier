@@ -11,6 +11,7 @@ import json
 from hub.collaboration.projection_cache import project as projected_project
 from hub.collaboration.common import canonical, digest
 from hub.principal import Principal, refresh_principal
+from shared.collaboration_contracts import MAX_ROOM_PROJECTS
 from shared.util import DevError
 
 
@@ -119,7 +120,7 @@ class RoomGoalScopes:
                     or not set(args.get('execution_targets',[]))<=channel_targets
                     or (args.get('environment_id') and any((project_id,args['environment_id']) not in channel_rules for project_id in project_ids))):
                 raise DevError('CHANNEL_OWNER_SCOPE_DENIED','本次协作超出这个微信入口明确批准的项目或能力',403)
-        if not project_ids or len(project_ids)>16:
+        if not project_ids or len(project_ids)>MAX_ROOM_PROJECTS:
             raise DevError('ROOM_WORK_PROJECT_REQUIRED','请选择此成员已批准的工作项目',409)
         if args.get('target_project_id') and args['target_project_id'] not in project_ids:
             raise DevError('ROOM_WORK_PROJECT_REQUIRED','初始工作项目必须在本次项目范围内',409)

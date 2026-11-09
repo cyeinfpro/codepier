@@ -205,3 +205,96 @@ async def test_unavailable_member_grant_does_not_block_owner_policy_reduction(co
         (second['member_id'],))
     with pytest.raises(DevError):
         service.rooms.principal(service.rooms.member(first['member_id']))
+
+
+@pytest.mark.parametrize('count', [28, 128])
+def test_large_room_scope_save_member_sync_and_channel_subset(collab, count):
+    service, owner, cid = room(collab)
+    ids = [f'project-{i:03}' for i in range(count)]
+    for pid in ids:
+        service.store.execute("""INSERT INTO projects
+            (id,alias,alias_key,device_id,root,mode,allow_tasks,created)
+            VALUES (?,?,?,'dev','/tmp/fixture','write',1,?)""",
+            (pid, pid, pid, collab[6][0]))
+    rules = [rule(pid) for pid in ids]
+    result = save(service, owner, cid, rules)
+    assert result['scope']['project_ids'] == ids
+    assert result['limits']['project_scopes'] == 128
+    m = member(service, owner, cid)
+    assert len(service.rooms.scopes(service.rooms.member(m['id']))) == count
+    channels = {'weixin': {'mode': 'custom', 'scope': {'project_scopes': rules[:-1]}},
+                'telegram': {'mode': 'follow_room'}}
+    updated = save(service, owner, cid, rules, channels)
+    assert len(updated['channels']['weixin']['effective_scope']['project_scopes']) == count - 1
+    assert len(updated['channels']['telegram']['effective_scope']['project_scopes']) == count
+    save(service, owner, cid, [])
+    assert service.room_permissions.effective_scopes(cid) == []
+
+
+def test_room_scope_limit_rejects_oversized_request_without_changes(collab):
+    service, owner, cid = room(collab)
+    save(service, owner, cid, [rule()])
+    before = service.store.all('SELECT * FROM room_permission_revisions')
+    with pytest.raises(DevError) as exc:
+        save(service, owner, cid, [rule(f'project-{i}') for i in range(129)])
+    assert exc.value.code == 'INVALID_ARGUMENTS'
+    assert service.store.all('SELECT * FROM room_permission_revisions') == before
+
+
+def test_room_vps_targets_are_per_project_and_inherited_without_expansion(collab):
+    from hub.vps import VPSInput
+    service, owner, cid = room(collab)
+    def vps(name, projects, enabled=True):
+        return service.runtime.vps.save(VPSInput(name=name, host=name + '.example.invalid',
+            username='fixture', password='synthetic-only', project_ids=projects,
+            enabled=enabled), owner)
+    selected = vps('selected', ['proj'])
+    other = vps('other', ['otherproj'])
+    disabled = vps('disabled', ['proj'], enabled=False)
+    preview = service.room_permissions.read(cid, owner)
+    project = next(p for p in preview['available_projects'] if p['project_id'] == 'proj')
+    assert set(project['execution_targets']) == {'project_agent', selected['target']}
+    assert project['execution_target_labels'][selected['target']] == 'VPS · selected'
+    assert other['target'] not in project['execution_target_labels']
+    assert disabled['target'] not in project['execution_target_labels']
+    assert preview['scope']['project_scopes'] == []
+    full = rule(caps=['read', 'execute'])
+    full['execution_targets'].append(selected['target'])
+    saved = save(service, owner, cid, [full])
+    for channel in ('weixin', 'telegram'):
+        assert saved['channels'][channel]['effective_scope']['project_scopes'][0]['execution_targets'] == sorted(full['execution_targets'])
+    assert saved['channels']['telegram']['transport_supported'] is False
+    limited = rule(caps=['read', 'execute'])
+    saved = save(service, owner, cid, [full], {
+        'weixin': {'mode': 'custom', 'scope': {'project_scopes': [limited]}},
+        'telegram': {'mode': 'follow_room'}})
+    assert saved['channels']['weixin']['effective_scope']['project_scopes'][0]['execution_targets'] == ['project_agent']
+    outside = rule(caps=['read', 'execute'])
+    outside['execution_targets'] = [other['target']]
+    with pytest.raises(DevError):
+        save(service, owner, cid, [outside])
+    assert service.room_permissions.read(cid, owner)['version'] == 2
+
+
+def test_project_capacity_is_consistent_through_room_work_contracts():
+    from shared import collaboration_contracts as collaboration
+    from shared import room_contracts as rooms
+    from shared.room_context_contracts import ContextFact
+    from shared.room_runtime_contracts import RoomWorkStart
+    from shared.team_collaboration_contracts import TeamCreate
+    from hub.collaboration.working_scopes import Selection
+    fields = [(rooms.RoomCreate, 'projects'), (rooms.RoomProjects, 'projects'),
+        (rooms.MemberApproval, 'project_scopes'), (rooms.MemberCreate, 'project_scopes'),
+        (rooms.RoomProjectImpact, 'removed_partition_ids'),
+        (rooms.RoomPermissionScope, 'project_scopes'),
+        (collaboration.ConversationCreate, 'projects'), (collaboration.GoalCreate, 'project_ids'),
+        (ContextFact, 'project_ids'), (RoomWorkStart, 'project_ids'),
+        (TeamCreate, 'project_ids'), (Selection, 'projects')]
+    for model, field in fields:
+        assert model.model_json_schema()['properties'][field]['maxItems'] == collaboration.MAX_ROOM_PROJECTS
+    scope = rooms.RoomPermissionScope(project_ids=[f'project-{i}' for i in range(128)],
+        project_scopes=[rule(f'project-{i}') for i in range(128)])
+    assert len(scope.project_ids) == 128
+    # Project capacity must not relax unrelated resource or participant limits.
+    assert rooms.MemberProjectScope.model_json_schema()['properties']['execution_targets']['maxItems'] == 16
+    assert collaboration.GoalCreate.model_json_schema()['properties']['participant_grant_ids']['maxItems'] == 16

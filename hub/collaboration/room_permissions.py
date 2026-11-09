@@ -113,9 +113,11 @@ class RoomPermissions:
                 except DevError:
                     continue
             environments = {p['environment_id'] for p in attached + known if p['project_id'] == project['id']} or {'production'}
-            targets = {'project_agent'}
-            targets.update('vps:' + row['id'] for row in self.store.all('''SELECT v.id FROM vps_connections v
-                JOIN vps_projects p ON p.vps_id=v.id WHERE p.project_id=? AND v.enabled=1''', (project['id'],)))
+            target_labels = {'project_agent': '项目 Agent'}
+            target_labels.update({'vps:' + row['id']: 'VPS · ' + row['name']
+                for row in self.store.all('''SELECT v.id,v.name FROM vps_connections v
+                JOIN vps_projects p ON p.vps_id=v.id WHERE p.project_id=? AND v.enabled=1''', (project['id'],))})
+            targets = set(target_labels)
             for rule in known:
                 if rule['project_id'] == project['id']:
                     targets.update(rule['execution_targets'])
@@ -129,7 +131,9 @@ class RoomPermissions:
             for environment in sorted(environments):
                 result.append({'project_id': project['id'], 'environment_id': environment,
                     'name': project.get('alias', project['id']), 'capabilities': caps,
-                    'execution_targets': allowed_targets if 'execute' in caps else []})
+                    'execution_targets': allowed_targets if 'execute' in caps else [],
+                    'execution_target_labels': {target: target_labels.get(target, target)
+                        for target in allowed_targets} if 'execute' in caps else {}})
         return result
 
     def read(self, conversation_id, principal):
@@ -156,6 +160,7 @@ class RoomPermissions:
                                   'transport_supported': name == 'weixin'}
             return {'conversation_id': conversation_id, 'version': row['version'] if row else 0,
                 'configured': bool(row), 'scope': policy['scope'],
+                'limits': {'project_scopes': contracts.MAX_ROOM_PROJECTS, 'execution_targets': 16},
                 'effective_scope': effective(),
                 'available_projects': available, 'channels': channels,
                 'authority': 'room', 'host_constraints_are_hard_limits': True,

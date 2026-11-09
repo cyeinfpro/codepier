@@ -3,12 +3,12 @@ from __future__ import annotations
 
 from typing import Literal
 from pydantic import Field, field_validator, model_validator
-from shared.collaboration_contracts import Model, Identifier, Key, Scope
+from shared.collaboration_contracts import MAX_ROOM_PROJECTS, Model, Identifier, Key, Scope
 
 
 class RoomCreate(Model):
     title: str = Field(min_length=1, max_length=120)
-    projects: list[Scope] = Field(default_factory=list, max_length=16)
+    projects: list[Scope] = Field(default_factory=list, max_length=MAX_ROOM_PROJECTS)
     idempotency_key: Key
 
     @field_validator('title')
@@ -80,7 +80,7 @@ class Lifetime(Model):
 
 class MemberApproval(Model):
     member_id: Identifier
-    project_scopes: list[MemberProjectScope] = Field(default_factory=list, max_length=16)
+    project_scopes: list[MemberProjectScope] = Field(default_factory=list, max_length=MAX_ROOM_PROJECTS)
     # Existing approvals keep their independent original deadlines unless the
     # owner explicitly chooses a new lifetime; newly added projects default to
     # until_revoked. Member creation still has its own explicit default.
@@ -88,14 +88,14 @@ class MemberApproval(Model):
 
 
 class RoomProjects(RoomRead):
-    projects: list[Scope] = Field(default_factory=list, max_length=16)
+    projects: list[Scope] = Field(default_factory=list, max_length=MAX_ROOM_PROJECTS)
     member_approvals: list[MemberApproval] = Field(default_factory=list, max_length=32)
     expected_version: int = Field(ge=1)
     idempotency_key: Key
 
 
 class RoomProjectImpact(RoomRead):
-    removed_partition_ids: list[Identifier] = Field(default_factory=list, max_length=16)
+    removed_partition_ids: list[Identifier] = Field(default_factory=list, max_length=MAX_ROOM_PROJECTS)
     expected_version: int = Field(ge=1)
 
     @field_validator('removed_partition_ids')
@@ -110,7 +110,7 @@ class MemberCreate(RoomRead):
     name: str = Field(min_length=1, max_length=80)
     reuse_member_id: Identifier | None = None
     reuse_binding_generation: int | None = Field(default=None, ge=1)
-    project_scopes: list[MemberProjectScope] = Field(default_factory=list, max_length=16)
+    project_scopes: list[MemberProjectScope] = Field(default_factory=list, max_length=MAX_ROOM_PROJECTS)
     lifetime: Lifetime = Field(default_factory=Lifetime)
     expected_version: int | None = Field(default=None, ge=1)
     idempotency_key: Key
@@ -185,8 +185,8 @@ class RoomPermissionProject(MemberProjectScope):
 
 
 class RoomPermissionScope(Model):
-    project_ids: list[Identifier] | None = Field(default=None, max_length=16)
-    project_scopes: list[RoomPermissionProject] = Field(default_factory=list, max_length=16)
+    project_ids: list[Identifier] | None = Field(default=None, max_length=MAX_ROOM_PROJECTS)
+    project_scopes: list[RoomPermissionProject] = Field(default_factory=list, max_length=MAX_ROOM_PROJECTS)
 
     @model_validator(mode='after')
     def matching_projects(self):
