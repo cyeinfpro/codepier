@@ -1,7 +1,7 @@
 """Finish regressions: buttons, draft safety, late replies and reconnects."""
 import pytest
 from playwright.sync_api import expect
-from tests.browser_support import chat_page,event
+from tests.browser_support import chat_page,event, open_chat_settings, open_chat_inspector
 from tests.test_chat_complete_browser import send
 
 
@@ -30,7 +30,7 @@ def test_multiple_recovered_messages_and_existing_draft_are_retained(chat_page):
 
 
 def test_cwd_validates_early_and_enter_preserves_directory_drafts(chat_page):
-    p=chat_page;p.fill('#chat-compose','root draft');p.click('#chat-cwd-button')
+    p=chat_page;p.fill('#chat-compose','root draft');open_chat_settings(p);p.click('#chat-cwd-button')
     p.fill('#chat-cwd-input','../outside');p.press('#chat-cwd-input','Enter')
     expect(p.locator('#chat-cwd-error')).to_contain_text('相对目录')
     assert p.evaluate('ChatUI.cwd')=='.'
@@ -62,7 +62,7 @@ def test_delete_does_not_recreate_deleted_view(chat_page):
 
 
 def test_command_search_survives_catalog_updates_and_focus_returns(chat_page):
-    p=chat_page;p.set_viewport_size({'width':390,'height':844});p.click('#chat-options-toggle');p.click('#chat-commands')
+    p=chat_page;p.set_viewport_size({'width':390,'height':844});p.click('#chat-options-toggle');open_chat_inspector(p, 'commands')
     expect(p.locator('#chat-inspector-close')).to_be_focused()
     p.fill('#chat-command-filter','review');p.evaluate('chatInspectorRender()')
     expect(p.locator('#chat-command-filter')).to_have_value('review')
@@ -89,9 +89,9 @@ def test_starter_requires_confirmation_before_replacing_a_draft(chat_page):
 def test_malformed_catalog_retry_keeps_last_successful_choices(chat_page):
     p=chat_page
     p.evaluate('''() => {const original=api;window.badCatalog=true;window.api=async(path,opts)=>path.endsWith('/chat_catalog')&&badCatalog?{models:null}:original(path,opts);return chatLoadCatalog(true);}''')
-    expect(p.locator('#chat-catalog-notice')).to_contain_text('有效')
+    expect(p.locator('#chat-target-notice')).to_contain_text('有效')
     expect(p.locator('#chat-model-name')).to_have_text('Native Model')
-    p.evaluate('badCatalog=false');p.click('#chat-catalog-retry');expect(p.locator('#chat-catalog-notice')).to_be_hidden()
+    p.evaluate('badCatalog=false');p.click('#chat-catalog-retry');expect(p.locator('#chat-target-notice')).to_be_hidden()
 
 
 def test_project_close_button_enter_never_selects_or_starts(chat_page):

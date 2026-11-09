@@ -1,14 +1,14 @@
 """Final button-level regressions, using isolated native transport fixtures."""
 import pytest
 from playwright.sync_api import expect
-from tests.browser_support import chat_page,event
+from tests.browser_support import chat_page,event, open_chat_settings
 from tests.test_chat_complete_browser import send
 
 
 def test_send_reenables_when_pending_model_setting_finishes_without_more_typing(chat_page):
     p=chat_page;send(p)
     p.evaluate("window.receiptState='queued'")
-    p.select_option('#chat-effort-select','high')
+    open_chat_settings(p);p.select_option('#chat-effort-select','high')
     p.fill('#chat-compose','send after model confirmation')
     expect(p.locator('#chat-send')).to_be_disabled()
     p.evaluate("window.receiptState='completed'")
@@ -22,7 +22,7 @@ def test_every_sidebar_control_remains_visible_on_short_screens(chat_page,width,
     p=chat_page;p.set_viewport_size({'width':width,'height':height})
     p.click('#chat-history-toggle')
     p.select_option('#chat-history-filter','running')
-    for selector in ['#chat-back','#chat-new','#chat-history-project','#chat-history-search','#chat-history-filter','#chat-history-clear','#chat-command-menu','#chat-appearance','.chat-sidebar-preferences [data-nav="projects"]']:
+    for selector in ['#chat-back','#chat-new','#chat-history-project','#chat-history-search','#chat-history-filter','#chat-history-clear','#chat-command-menu']:
         box=p.locator(selector).bounding_box()
         assert box and box['height']>0 and box['y']>=0 and box['y']+box['height']<=height+1,(selector,box)
     assert p.locator('#chat-history').bounding_box()['height']>=40

@@ -15,20 +15,22 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 function control(value='') {
   let html='';
   return {value, disabled:false, textContent:'', options:[], get innerHTML(){return html;},
+    replaceChildren(...options){this.options=options;this.value=options[0]?.value||'';},
+    add(option){this.options.push(option);},
     set innerHTML(value){html=value;this.options=[...value.matchAll(/<option value="([^"]*)"/g)].map(m=>({value:m[1]}));this.value=this.options[0]?.value||'';}};
 }
 const S = {session:{user_id:'owner'},page:'workflows',space_id:'legacy',
   projects:[{id:'p',mode:'write',alias:'P'},{id:'q',mode:'write',alias:'Q'}],work:{project:'p'}};
-const context = vm.createContext({console, S, window:{}, document:{addEventListener(){}},
+const context = vm.createContext({console, S, window:{}, Option:class {constructor(text,value){Object.assign(this,{text,value});}}, document:{addEventListener(){}},
   esc:String, buttons:()=>'', toast(){}, closeModal(dialog){dialog.isConnected=false;},
   loadBasics:async()=>{}, api(path){const job=deferred();requests.push({path,...job});return job.promise;},
   modal(title,body){for(const old of dialogs)old.isConnected=false;const fields={};
-    for(const id of ['wf-assignee','wf-assignee-status','wf-assignee-refresh','wf-project','workflow-create-form','workflow-create-save'])
+    for(const id of ['wf-assignee','wf-assignee-status','wf-project','workflow-create-form','workflow-create-save'])
       fields['#'+id]=control(id==='wf-project'?'p':'');
     const dialog={isConnected:true,fields};dialogs.push(dialog);return dialog;},
   $(selector,dialog){return (dialog||dialogs.at(-1)).fields[selector];},
   FormData:class {constructor(){this.items=[['project',dialogs.at(-1).fields['#wf-project'].value],
-    ['assignee_grant_id',dialogs.at(-1).fields['#wf-assignee'].value]];}[Symbol.iterator](){return this.items[Symbol.iterator]();}},
+    ['assignee_grant_id',dialogs.at(-1).fields['#wf-assignee'].value], ['goal','Fix the upload'], ['title','']];}[Symbol.iterator](){return this.items[Symbol.iterator]();}},
 });
 vm.runInContext(fs.readFileSync('web/workflows.js','utf8'),context);
 context.capture=(dialog,form,button,name,readArgs,done)=>submissions.push({readArgs,done});
@@ -39,7 +41,8 @@ async function main(name){
   const pending=run('workflowCreate()');await tick();
   const dialog=dialogs.at(-1), fields=dialog.fields, select=fields['#wf-assignee'];
   assert.equal(requests[0].path,'/api/projects/p/workflow-assignees');
-  assert.throws(()=>submissions[0].readArgs(),/核实/);
+  assert.equal(submissions[0].readArgs().title,'Fix the upload');
+  assert.equal('assignee_grant_id' in submissions[0].readArgs(),false);
   if(name==='role_candidates_and_panel_only'){
     reply(requests[0],'p',['role-connection']);await pending;
     assert.deepEqual(select.options.map(x=>x.value),['','role-connection']);
@@ -52,23 +55,24 @@ async function main(name){
   }else if(name==='close_ignores_late_response'){
     dialog.isConnected=false;const before=select.innerHTML;
     reply(requests[0],'p',['old-grant']);await pending;
-    assert.equal(select.innerHTML,before);assert.equal(select.disabled,true);
+    assert.equal(select.innerHTML,before);assert.deepEqual(select.options.map(x=>x.value),['']);
   }else if(name==='session_change_ignores_late_response'){
     S.session={user_id:'different'};reply(requests[0],'p',['old-grant']);await pending;
-    assert.equal(select.innerHTML,'');assert.equal(select.disabled,true);
+    assert.equal(select.innerHTML,'');assert.deepEqual(select.options.map(x=>x.value),['']);
   }else if(name==='failed_read_retries_without_creation'){
     requests[0].reject(Error('offline'));await pending;
-    assert.equal(select.disabled,true);assert.match(fields['#wf-assignee-status'].textContent,/offline/);
-    assert.throws(()=>submissions[0].readArgs(),/核实/);
-    const retry=fields['#wf-assignee-refresh'].onclick();await tick();reply(requests[1],'p',['current']);await retry;
+    assert.deepEqual(select.options.map(x=>x.value),['']);assert.match(fields['#wf-assignee-status'].textContent,/暂不可用/);
+    assert.equal(submissions[0].readArgs().title,'Fix the upload');
+  assert.equal('assignee_grant_id' in submissions[0].readArgs(),false);
+    const retry=fields['#wf-project'].onchange();await tick();reply(requests[1],'p',['current']);await retry;
     assert.equal(select.disabled,false);assert.deepEqual(select.options.map(x=>x.value),['','current']);
   }else if(name==='refresh_removes_revoked_selection'){
     reply(requests[0],'p',['revoked']);await pending;select.value='revoked';
-    const refresh=fields['#wf-assignee-refresh'].onclick();await tick();reply(requests[1],'p',[]);await refresh;
+    const refresh=fields['#wf-project'].onchange();await tick();reply(requests[1],'p',[]);await refresh;
     assert.equal(select.value,'');assert.equal('assignee_grant_id' in submissions[0].readArgs(),false);
   }else if(name==='mismatched_project_is_not_accepted'){
     reply(requests[0],'q',['wrong']);await pending;
-    assert.equal(select.disabled,true);assert.match(fields['#wf-assignee-status'].textContent,/未核实/);
+    assert.deepEqual(select.options.map(x=>x.value),['']);assert.equal(fields['#wf-assignee-status'].textContent,'');
   }else throw Error(name);
 }
 main(process.argv[1]).then(()=>console.log('SCENARIO_COMPLETED')).catch(error=>{console.error(error);process.exitCode=1;});

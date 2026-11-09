@@ -16,6 +16,7 @@ from tests.browser_launch import launch_browser
 from tests.support import running_stack, wait_for
 from tests.claude_fixture import FAKE_CLAUDE
 from tests.browser_support import chat_page  # noqa: F401
+from tests.browser_support import open_chat_settings
 from tests import test_chat_fullstack as fullstack
 from tests.browser_support import event
 
@@ -62,9 +63,9 @@ def test_actual_claude_questions_approvals_models_and_resume(claude_stack, brows
         try:
             page.goto(s.url + '/#native')
             expect(page.locator('#chat-compose')).to_be_visible(timeout=15000)
-            page.select_option('#chat-project', s.project['id'])
-            page.select_option('#chat-provider', 'claude')
-            page.locator('#chat-model-picker').click()
+            open_chat_settings(page);page.select_option('#chat-project', s.project['id'])
+            open_chat_settings(page);page.select_option('#chat-provider', 'claude')
+            open_chat_settings(page);page.locator('#chat-model-picker').click()
             expect(page.locator('.chat-model-group')).to_contain_text('Claude', timeout=10000)
             page.locator('.chat-model-option[data-model="sonnet"]').click()
             page.fill('#chat-compose', 'approve');page.press('#chat-compose', 'Enter')
@@ -102,8 +103,8 @@ def test_actual_claude_questions_approvals_models_and_resume(claude_stack, brows
 @pytest.mark.parametrize('chat_page', ['chromium', 'webkit'], indirect=True)
 def test_claude_provider_label_and_capability_switch_no_stale_steer(chat_page):
     page = chat_page
-    page.select_option('#chat-provider', 'claude')
-    expect(page.locator('#chat-empty p')).to_contain_text('Claude')
+    open_chat_settings(page);page.select_option('#chat-provider', 'claude')
+    expect(page.locator('#chat-empty strong')).to_contain_text('Claude')
     page.evaluate('''() => {
       const v=chatView();v.mode='steer';
       v.catalog={models:[],capabilities:{steer:false,effort_runtime:false}};
@@ -111,8 +112,8 @@ def test_claude_provider_label_and_capability_switch_no_stale_steer(chat_page):
     }''')
     assert page.evaluate('chatView().mode') == 'followup'
     expect(page.locator('#chat-send-mode option[value="steer"]')).to_be_disabled()
-    page.select_option('#chat-provider', 'codex')
-    expect(page.locator('#chat-empty p')).to_contain_text('Codex')
+    open_chat_settings(page);page.select_option('#chat-provider', 'codex')
+    expect(page.locator('#chat-empty strong')).to_contain_text('Codex')
     page.wait_for_function('() => !chatView().catalogLoading')
     expect(page.locator('#chat-send-mode option[value="steer"]')).to_be_enabled()
 
@@ -120,7 +121,7 @@ def test_claude_provider_label_and_capability_switch_no_stale_steer(chat_page):
 @pytest.mark.parametrize('chat_page', ['chromium', 'webkit'], indirect=True)
 def test_legacy_claude_history_reconciles_only_matching_message_blocks(chat_page):
     page=chat_page
-    page.select_option('#chat-provider','claude')
+    open_chat_settings(page);page.select_option('#chat-provider','claude')
     page.fill('#chat-compose','history');page.click('#chat-send')
     receipt=page.evaluate("requests.find(r=>r.path.endsWith('/chat_prompt')).args.receipt")
     for cursor, (kind, item_id) in enumerate([
@@ -140,7 +141,7 @@ def test_cli_composer_and_interrupt_fit_with_panel_styles(chat_page,width,height
     # Reproduce the real panel cascade, including global select width:100%.
     for name in ('tokens.css','styles.css','chat.css'):
         page.add_style_tag(path=str(ROOT/'web'/name))
-    page.select_option('#chat-provider','claude')
+    open_chat_settings(page);page.select_option('#chat-provider','claude')
     page.set_viewport_size({'width':width,'height':height})
     page.fill('#chat-compose','hold');page.click('#chat-send')
     receipt=page.evaluate("requests.find(r=>r.path.endsWith('/chat_prompt')).args.receipt")

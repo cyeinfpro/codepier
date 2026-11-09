@@ -3,13 +3,13 @@
 import pytest
 from playwright.sync_api import expect
 
-from tests.browser_support import chat_page, event
+from tests.browser_support import chat_page, event, open_chat_settings
 
 
 MOBILE_VIEWPORTS = [(390, 844, .65), (320, 568, .55), (667, 375, .40)]
 PRIMARY_CONTROLS = [
     '#chat-back', '#chat-attach', '#chat-send',
-    '#chat-model-picker', '#chat-options-toggle',
+    '#chat-options-toggle',
 ]
 
 
@@ -108,8 +108,7 @@ def test_mobile_settings_float_without_stealing_reading_space(chat_page, width, 
 
     for selector in [
         '#chat-provider', '#chat-effort-select', '#chat-cwd-button',
-        '#chat-project', '#chat-change-project', '#chat-commands',
-        '#chat-file-library', '#chat-usage',
+        '#chat-project', '#chat-model-picker', '#chat-file-library',
     ]:
         assert page.locator('#chat-options ' + selector).count() == 1
         page.locator(selector).scroll_into_view_if_needed()
@@ -143,7 +142,7 @@ def test_mobile_nested_directory_picker_escape_restores_settings_focus(chat_page
     resize(page, width, height)
     page.fill('#chat-compose', 'A draft kept through nested settings')
     page.click('#chat-options-toggle')
-    page.click('#chat-cwd-button')
+    open_chat_settings(page);page.click('#chat-cwd-button')
     expect(page.locator('#chat-cwd-input')).to_be_focused()
     bounds_in_viewport(page, '#chat-popover', width, height)
     page.keyboard.press('Escape')
@@ -214,7 +213,7 @@ def test_mobile_settings_failure_stays_actionable_after_sheet_closes(chat_page, 
         };
     }''')
     page.click('#chat-options-toggle')
-    page.select_option('#chat-effort-select', 'high')
+    open_chat_settings(page);page.select_option('#chat-effort-select', 'high')
     expect(page.locator('#chat-settings-retry')).to_be_visible()
     page.click('#chat-options-close')
     expect(page.locator('#chat-options')).to_be_hidden()
@@ -242,9 +241,9 @@ def test_open_mobile_settings_survive_orientation_and_desktop_resizes(chat_page)
     expect(page.locator('#chat-compose')).to_have_value(draft)
 
     resize(page, 1440, 1000)
-    expect(page.locator('#chat-options-toggle')).to_be_hidden()
+    expect(page.locator('#chat-options-toggle')).to_be_visible()
     expect(page.locator('#chat-options-close')).to_be_hidden()
-    for selector in ['#chat-provider', '#chat-effort-select', '#chat-cwd-button', '#chat-find-toggle', '#chat-inspector-toggle']:
+    for selector in ['#chat-find-toggle', '#chat-inspector-toggle']:
         bounds_in_viewport(page, selector, 1440, 1000)
     expect(page.locator('#chat-compose')).to_have_value(draft)
     page.locator('#chat-compose').click()
@@ -271,8 +270,7 @@ def test_mobile_more_menu_preserves_search_and_inspector_access(chat_page):
     expect(page.locator('#chat-find-input')).to_be_focused()
     page.keyboard.press('Escape')
     expect(page.locator('#chat-find-bar')).to_be_hidden()
-    page.locator('.chat-overflow summary').click()
-    page.locator('[data-chat-action="chat-inspector-toggle"]').click()
+    page.locator('#chat-inspector-toggle').click()
     expect(page.locator('#chat-inspector')).to_be_visible()
     page.keyboard.press('Escape')
     expect(page.locator('#chat-inspector')).to_be_hidden()
@@ -293,12 +291,11 @@ def test_cancel_mobile_project_choice_returns_to_visible_origin(chat_page, origi
     for cancellation in ['button', 'escape']:
         if origin == 'settings':
             page.click('#chat-options-toggle')
-            page.click('#chat-change-project')
+            page.locator('#chat-options-close').click();page.click('#chat-new')
             return_focus = '#chat-options-toggle'
         else:
-            page.locator('.chat-overflow summary').click()
-            page.locator('[data-chat-action="chat-new"]').click()
-            return_focus = '.chat-overflow summary'
+            page.click('#chat-new')
+            return_focus = '#chat-new'
         expect(page.locator('#chat-project-search')).to_be_focused()
         page.fill('#chat-project-search', 'Workspace two')
         if cancellation == 'button':
@@ -335,7 +332,7 @@ def test_long_draft_keeps_controls_and_messages_reachable_when_viewport_shrinks(
     assert textarea['height'] <= keyboard_height * .25
     assert page.locator('#chat-compose').evaluate('(el) => el.scrollHeight > el.clientHeight')
 
-    page.click('#chat-model-picker')
+    open_chat_settings(page);page.click('#chat-model-picker')
     expect(page.locator('#chat-model-search')).to_be_focused()
     bounds_in_viewport(page, '#chat-popover', width, keyboard_height)
     page.keyboard.press('Escape')
@@ -352,7 +349,7 @@ def test_directory_picker_does_not_restore_focus_to_hidden_control_after_mobile_
     page = chat_page
     draft = 'Keep the draft when the desktop settings move into a mobile sheet'
     page.fill('#chat-compose', draft)
-    page.click('#chat-cwd-button')
+    open_chat_settings(page);page.click('#chat-cwd-button')
     expect(page.locator('#chat-cwd-input')).to_be_focused()
     resize(page, 390, 844)
     expect(page.locator('#chat-popover')).to_be_hidden()

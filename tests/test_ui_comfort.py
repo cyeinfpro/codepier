@@ -8,7 +8,7 @@ from playwright.sync_api import expect, sync_playwright
 from scripts.ui_comfort_audit import MEASURE
 from tests.browser_launch import launch_browser
 from tests.test_ui_unification import _login, _navigate, _prepare_native_fixture, _set_scheme
-from tests.browser_support import chat_page
+from tests.browser_support import chat_page, open_chat_settings
 from shared.audit_redaction import redact_text
 from shared.token_estimate import summarize, usage
 
@@ -80,7 +80,7 @@ def test_desktop_essentials_fit_and_text_is_readable(stack,engine,scheme,width,h
                 # Fixture draft is intentionally discarded before leaving; never save.
                 page.evaluate('() => {S.work.dirty=false;}')
             if route=='native':
-                within(page,'#chat-root,#chat-compose,#chat-send,#chat-model-picker',width,height)
+                within(page,'#chat-root,#chat-compose,#chat-send,#chat-options-toggle',width,height)
                 expect(page.locator('.chat-new-button')).to_be_visible()
             result['route']=route;measurements.append(result)
             page.screenshot(path=str(OUT/f'{engine}-{scheme}-{width}-{height}-{route}.png'),animations='disabled')
@@ -271,12 +271,12 @@ def test_mobile_reflow_and_navigation_remain_reachable(stack,engine,width,height
 @pytest.mark.parametrize('chat_page',['chromium','webkit'],indirect=True)
 @pytest.mark.parametrize('scheme',['light','dark'])
 def test_standalone_chat_color_pairs_and_draft_preserved(chat_page,scheme):
-    page=chat_page;page.select_option('#chat-appearance',scheme)
+    page=chat_page;page.evaluate('value => chatApplyAppearance(value)', scheme)
     page.set_viewport_size({'width':1280,'height':720})
     page.emulate_media(reduced_motion='reduce')
     report=page.evaluate(MEASURE);assert not report['failures'],report['failures']
     page.fill('#chat-compose','保留草稿，不向模型提交')
-    page.click('#chat-model-picker');expect(page.locator('#chat-model-search')).to_be_visible()
+    open_chat_settings(page);page.click('#chat-model-picker');expect(page.locator('#chat-model-search')).to_be_visible()
     report=page.evaluate(MEASURE);assert not report['failures'],report['failures']
     page.keyboard.press('Escape');expect(page.locator('#chat-compose')).to_have_value('保留草稿，不向模型提交')
     assert not page.evaluate("requests.some(r=>r.path.endsWith('/start'))")

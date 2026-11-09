@@ -1389,7 +1389,13 @@ window.CodePierCollaboration = (() => {
         targets.querySelector('summary').textContent =
           '运行位置：' + (selected === allowed.length ? '全部' : '已选') + '（' + selected + '）';
       }
-      group.querySelector('.cr-permission-expiry').hidden = !enabled;
+      const expiry = group.querySelector('.cr-permission-expiry');
+      expiry.hidden = !enabled;
+      expiry.querySelector('summary').textContent = !group.querySelector(
+        '[data-permission-expired]',
+      ).hidden
+        ? '有效期 · 已过期'
+        : '有效期';
     }
     patchRoomPermissions();
   }
@@ -2645,9 +2651,8 @@ window.CodePierCollaboration = (() => {
       );
       if (panel === current) renderChannel(result);
     } else {
-      root.querySelector('[data-cr-channel-view]').innerHTML =
-        '<p>用手机微信扫码登录。扫码确认后，面板会加密保存这个微信的登录凭据。</p>' +
-        btn('channel-start', '连接微信', '', 'cr-primary cr-full');
+      // Opening the local flow does not start QR login. That needs its own consent.
+      await startWeixin(current);
     }
   }
   async function startWeixin(current) {
@@ -2921,7 +2926,7 @@ window.CodePierCollaboration = (() => {
           ['微信', flow.account?.label || channelIdentity(null, flow.account?.bot_id)],
           ['房间', roomName(state.room)],
         ]) +
-          `<p class="cr-wx-toggle">在微信里交办工作：${flow.work_authorized ? '已允许' : '未开启'} ${flow.work_authorized ? btn('channel-action', '关闭', 'data-channel-action="revoke_tasks"', 'cr-text-button') : ''}</p>` +
+          `<p class="cr-wx-toggle">在微信里交办工作：${flow.work_authorized ? '已允许' : '未开启'} ${flow.work_authorized ? btn('channel-action', '关闭', 'data-channel-action="revoke_tasks" title="保留聊天连接" aria-label="关闭微信交办工作"', 'cr-text-button') : ''}</p>` +
           btn('channel-project-permissions', '修改权限', '', 'cr-text-button'),
       );
     if (flow.task_scope && (stage !== 'ready' || action === 'approve_tasks')) {
@@ -3863,8 +3868,17 @@ window.CodePierCollaboration = (() => {
         }
         if (event.target.matches('[data-permission-bulk-level]')) {
           const section = event.target.closest('[data-permission-section]');
-          for (const select of section.querySelectorAll('[data-permission-level]'))
-            applyPermissionLevel(select, event.target.value);
+          const requested = permissionLevels[event.target.value]?.[1];
+          if (!requested) return;
+          for (const select of section.querySelectorAll('[data-permission-level]')) {
+            const available = [...select.options].filter((option) => !option.disabled);
+            const best = available
+              .reverse()
+              .find((option) =>
+                permissionLevels[option.value][1].every((cap) => requested.includes(cap)),
+              );
+            if (best) applyPermissionLevel(select, best.value);
+          }
           event.target.value = '-';
           updatePermissionControls();
         }

@@ -3,7 +3,7 @@ from pathlib import Path
 from urllib.parse import parse_qs,urlsplit
 import pytest
 from playwright.sync_api import expect
-from tests.browser_support import chat_page,event
+from tests.browser_support import chat_page,event, open_chat_inspector
 from tests.test_chat_complete_browser import send
 from tests.test_chat_global_flow import seed_rows
 
@@ -102,10 +102,14 @@ def test_all_session_menu_actions_explain_disabled_states(chat_page):
 def test_usage_and_find_are_view_local(chat_page):
     p=chat_page;send(p)
     event(p,'chat',{'type':'stats','stats':{'contextUsage':{'percent':75}}},10)
-    expect(p.locator('#chat-usage')).to_have_text('上下文 75%')
+    open_chat_inspector(p)
+    expect(p.locator('#chat-inspector-body')).to_contain_text('75%')
+    p.locator('#chat-inspector-close').click()
     p.click('#chat-find-toggle');p.fill('#chat-find-input','one')
     p.evaluate("chatSwitch(null,'p2',{cwd:'.'})")
-    expect(p.locator('#chat-usage')).to_have_text('上下文')
+    open_chat_inspector(p)
+    expect(p.locator('#chat-inspector-body')).not_to_contain_text('75%')
+    p.locator('#chat-inspector-close').click()
     p.click('#chat-find-toggle');expect(p.locator('#chat-find-input')).to_have_value('')
     expect(p.locator('#chat-find-next')).to_be_disabled()
 
@@ -139,7 +143,7 @@ def test_project_picker_and_composer_fit_all_viewports(chat_page,width,height):
         p.fill('#chat-project-search','not found');expect(p.locator('#chat-project-results')).to_contain_text('没有匹配')
         p.press('#chat-project-search','Escape')
         if width<=760:p.keyboard.press('Escape')
-        for selector in ['#chat-compose','#chat-model-picker','#chat-send']:
+        for selector in ['#chat-compose','#chat-options-toggle','#chat-send']:
             rect=p.locator(selector).bounding_box()
             assert rect and rect['y']>=0 and rect['y']+rect['height']<=height+1
 

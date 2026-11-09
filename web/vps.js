@@ -241,6 +241,8 @@ async function vpsCheck(id, { dialog = null, saved = null, autoRun = false } = {
     <p id="vps-check-state" class="form-note" role="status">${!v.enabled ? '连接已停用。' : !projects.length ? '暂无允许运行命令的项目。' : autoRun && !projects[0].online ? '已保存。可以在项目电脑上线后检查连接。' : '等待检查。'}</p><div class="code-box"><pre id="vps-check-output"></pre></div>`;
   const footer = `<button class="btn ghost" data-action="close-modal">关闭</button><button class="btn primary" id="vps-check-run" ${eligible ? '' : 'disabled'}>开始检查</button>`;
   if (dialog) {
+    dialog.classList.remove('modal-editor');
+    delete dialog.dataset.presentation;
     delete dialog.dataset.editorDirty;
     delete dialog.dataset.editorForm;
     $('#modal-title', dialog).textContent = title;

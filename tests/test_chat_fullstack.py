@@ -6,6 +6,7 @@ from pathlib import Path
 import json, os, sys, time, uuid
 import pytest
 from playwright.sync_api import sync_playwright,expect
+from tests.browser_support import open_chat_settings
 from shared.native_cli import database
 from shared.util import atomic_json
 from tests.browser_launch import launch_browser
@@ -48,8 +49,8 @@ def test_full_panel_direct_chat_actual_sse_history_and_responsive_layout(chat_st
         try:
             page.goto(s.url+'/#native')
             expect(page.locator('#chat-compose')).to_be_visible(timeout=12000)
-            page.select_option('#chat-project',s.project['id'])
-            page.select_option('#chat-provider',cli)
+            open_chat_settings(page);page.select_option('#chat-project',s.project['id'])
+            open_chat_settings(page);page.select_option('#chat-provider',cli)
             requests.clear()
             page.fill('#chat-compose','检查这个项目的上传队列与重试流程。')
             assert not any('/api/native/start' in r or '/api/native/input' in r for r in requests)

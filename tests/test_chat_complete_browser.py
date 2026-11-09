@@ -4,7 +4,7 @@ No native model calls. Full-stack and installed-native smoke run separately.
 from pathlib import Path
 import pytest
 from playwright.sync_api import expect
-from tests.browser_support import chat_page, event
+from tests.browser_support import chat_page, event, open_chat_settings, open_chat_inspector
 ROOT=Path(__file__).resolve().parents[1]
 OUT=ROOT/'docs/evidence/chat-complete-20260915'
 
@@ -25,32 +25,32 @@ def assert_composer_controls_fit(page,width,height):
         assert box and box['x']>=0 and box['x']+box['width']<=width+1,(selector,box)
         assert box['y']>=0 and box['y']+box['height']<=height+1,(selector,box)
 
-    for selector in ['#chat-compose','#chat-model-picker','#chat-send']:
+    if page.locator('#chat-options').is_visible():
+        page.locator('#chat-options-close').click()
+    for selector in ['#chat-compose','#chat-options-toggle','#chat-send']:
         within_viewport(selector)
-    if width<=760:
-        expect(page.locator('#chat-options')).to_be_hidden()
-        within_viewport('#chat-options-toggle')
-        page.click('#chat-options-toggle')
+    expect(page.locator('#chat-options')).to_be_hidden()
+    open_chat_settings(page)
+    if width <= 760:
         expect(page.get_by_role('dialog',name='会话设置')).to_be_visible()
-        page.locator('#chat-effort-select').scroll_into_view_if_needed()
+    page.locator('#chat-effort-select').scroll_into_view_if_needed()
     within_viewport('#chat-effort-select')
-    if width<=760:
-        page.keyboard.press('Escape')
-        expect(page.locator('#chat-options')).to_be_hidden()
-        expect(page.locator('#chat-options-toggle')).to_be_focused()
+    page.keyboard.press('Escape')
+    expect(page.locator('#chat-options')).to_be_hidden()
+    expect(page.locator('#chat-options-toggle')).to_be_focused()
 
 
 def test_model_and_effort_are_selectable_before_first_message(chat_page):
     p=chat_page
     expect(p.locator('#chat-model-name')).to_have_text('Native Model')
     expect(p.locator('#chat-effort-select')).to_be_enabled()
-    p.click('#chat-model-picker')
+    open_chat_settings(p);p.click('#chat-model-picker')
     p.fill('#chat-model-search','Advanced')
     expect(p.locator('.chat-model-option')).to_have_count(1)
     p.locator('.chat-model-option').click()
     expect(p.locator('#chat-model-name')).to_have_text('Advanced Model')
     expect(p.locator('#chat-effort-select')).to_be_enabled()
-    p.select_option('#chat-effort-select','high')
+    open_chat_settings(p);p.select_option('#chat-effort-select','high')
     assert not p.evaluate(r"requests.some(x=>/\/(start|chat_prompt|input|lease)$/.test(x.path))")
     send(p)
     start=p.evaluate("requests.find(x=>x.path.endsWith('/start')).args")
@@ -67,7 +67,7 @@ def test_settings_pending_ack_and_explicit_retry_after_known_rejection(chat_page
     event(p,'chat',{'type':'user','receipt':receipt,'text':'Review this project'},10)
     event(p,'chat',{'type':'done','receipt':receipt,'status':'completed'},20)
     p.evaluate("window.receiptState='queued'")
-    p.select_option('#chat-effort-select','high')
+    open_chat_settings(p);p.select_option('#chat-effort-select','high')
     expect(p.locator('#chat-setting-state')).to_contain_text('切换')
     op=p.evaluate("requests.filter(x=>x.path.endsWith('/chat_settings')).at(-1).args")
     event(p,'chat',{'type':'error','receipt':op['receipt'],'text':'Model does not support high'},30)
@@ -93,7 +93,7 @@ def test_controls_and_searchable_model_panel_fit_every_viewport(chat_page,width,
     expect(p.locator('#chat-model-name')).to_have_text('Native Model')
     assert_composer_controls_fit(p,width,height)
     assert p.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
-    p.click('#chat-model-picker')
+    open_chat_settings(p);p.click('#chat-model-picker')
     expect(p.locator('#chat-model-search')).to_be_visible()
     p.fill('#chat-model-search','local')
     expect(p.locator('.chat-model-option')).to_have_count(1)
@@ -120,7 +120,7 @@ def test_markdown_tools_usage_commands_and_queue_are_functional(chat_page):
     p.locator('.chat-message-tool summary').click()
     expect(p.locator('.chat-message-tool pre')).to_be_visible()
     event(p,'chat',{'type':'stats','stats':{'tokens':{'input':1000,'output':400,'total':1400},'contextUsage':{'percent':12,'tokens':15360,'contextWindow':128000}}},40)
-    p.click('#chat-usage')
+    open_chat_inspector(p)
     expect(p.locator('#chat-inspector-body')).to_contain_text('1,400')
     p.click('[data-chat-tab="commands"]')
     expect(p.locator('.chat-command-list')).to_contain_text('/skill:review')
@@ -151,11 +151,11 @@ def test_live_steering_and_full_export_use_real_backend_actions(chat_page):
 def test_catalog_failure_is_visible_and_can_be_retried_without_losing_draft(chat_page):
     p=chat_page;p.fill('#chat-compose','Keep my draft')
     p.evaluate('window.catalogFailure=true;chatLoadCatalog(true)')
-    expect(p.locator('#chat-catalog-notice')).to_contain_text('offline')
-    expect(p.locator('#chat-model-picker')).to_be_visible()
+    expect(p.locator('#chat-target-notice')).to_contain_text('offline')
+    expect(p.locator('#chat-options-toggle')).to_be_visible()
     p.evaluate('window.catalogFailure=false')
     p.click('#chat-catalog-retry')
-    expect(p.locator('#chat-catalog-notice')).to_be_hidden()
+    expect(p.locator('#chat-target-notice')).to_be_hidden()
     expect(p.locator('#chat-compose')).to_have_value('Keep my draft')
 
 
@@ -163,7 +163,7 @@ def test_model_catalog_and_reply_cannot_overwrite_new_project(chat_page):
     p=chat_page;p.evaluate('window.delayCatalog=true')
     p.evaluate('void chatLoadCatalog(true)');p.wait_for_function('!!window.finishCatalog')
     p.evaluate('window.oldCatalog=window.finishCatalog;window.delayCatalog=false')
-    p.select_option('#chat-project','p2')
+    open_chat_settings(p);p.select_option('#chat-project','p2')
     p.fill('#chat-compose','Project two')
     p.evaluate('oldCatalog()')
     expect(p.locator('#chat-compose')).to_have_value('Project two')
@@ -186,10 +186,10 @@ def test_stopped_session_can_change_model_before_resume_and_resets_stream_cursor
     event(p,'chat',{'type':'done','receipt':r,'status':'completed'},200)
     old=p.evaluate('ChatUI.selected.id')
     event(p,'session',{'status':'exited'},201)
-    p.click('#chat-model-picker');p.fill('#chat-model-search','Advanced')
+    open_chat_settings(p);p.click('#chat-model-picker');p.fill('#chat-model-search','Advanced')
     p.locator('.chat-model-option').click()
     expect(p.locator('#chat-effort-select')).to_be_enabled()
-    p.select_option('#chat-effort-select','high')
+    open_chat_settings(p);p.select_option('#chat-effort-select','high')
     assert not p.evaluate("requests.some(x=>x.path.endsWith('/chat_settings'))")
     send(p,'Continue with another model')
     start=p.evaluate("requests.filter(x=>x.path.endsWith('/start')).at(-1).args")

@@ -1,7 +1,7 @@
 """Catalog reuse at the real browser boundary, without model inference."""
 import pytest
 from playwright.sync_api import expect
-from tests.browser_support import chat_page, event
+from tests.browser_support import chat_page, event, open_chat_settings, open_chat_inspector
 from tests.test_chat_complete_browser import send
 
 
@@ -15,6 +15,7 @@ def test_catalog_reply_during_model_picker_press_keeps_the_click(chat_page):
     page.evaluate('ChatUI.catalogCache.clear();window.delayCatalog=true;void chatLoadCatalog()')
     page.wait_for_function('!!window.finishCatalog')
     # A delayed model discovery can complete between pointer down and up.
+    open_chat_settings(page)
     picker = page.locator('#chat-model-picker')
     box = picker.bounding_box()
     page.mouse.move(box['x'] + box['width'] / 2, box['y'] + box['height'] / 2)
@@ -28,7 +29,7 @@ def test_catalog_reply_during_model_picker_press_keeps_the_click(chat_page):
 
 
 def choose(page, model):
-    page.click('#chat-model-picker')
+    open_chat_settings(page);page.click('#chat-model-picker')
     page.locator(f'[data-model="{model}"]').click()
 
 
@@ -37,12 +38,12 @@ def test_project_session_and_directory_switches_reuse_model_catalog(chat_page):
     expect(p.locator('#chat-model-name')).to_have_text('Native Model')
     assert len(catalogs(p)) == 1
     for project in ['p2', 'p1', 'p2']:
-        p.select_option('#chat-project', project)
+        open_chat_settings(p);p.select_option('#chat-project', project)
         expect(p.locator('#chat-effort-select')).to_be_enabled()
         assert not p.evaluate('chatView().catalogLoading')
     p.click('#chat-new');p.locator('#chat-project-results button:not(:disabled)').first.click()
     p.evaluate("chatSwitch(null, 'p2', {cwd:'src'})")
-    p.click('#chat-model-picker')
+    open_chat_settings(p);p.click('#chat-model-picker')
     expect(p.locator('[data-model="remote/advanced-model"]')).to_be_visible()
     assert len(catalogs(p)) == 1
     # Shared choices must not claim that p1's defaults belong to p2/src.
@@ -53,17 +54,17 @@ def test_project_session_and_directory_switches_reuse_model_catalog(chat_page):
 def test_model_thinking_levels_are_reused_and_drafts_keep_explicit_choices(chat_page):
     p = chat_page
     choose(p, 'remote/advanced-model')
-    p.select_option('#chat-effort-select', 'high')
+    open_chat_settings(p);p.select_option('#chat-effort-select', 'high')
     assert len(catalogs(p)) == 2
     choose(p, 'local/native-model')
     choose(p, 'remote/advanced-model')
-    p.select_option('#chat-effort-select', 'high')
+    open_chat_settings(p);p.select_option('#chat-effort-select', 'high')
     p.fill('#chat-compose', 'Keep this project draft')
     assert len(catalogs(p)) == 2
-    p.select_option('#chat-project', 'p2')
+    open_chat_settings(p);p.select_option('#chat-project', 'p2')
     choose(p, 'remote/advanced-model')
     expect(p.locator('#chat-effort-select option[value="high"]')).to_have_count(1)
-    p.select_option('#chat-project', 'p1')
+    open_chat_settings(p);p.select_option('#chat-project', 'p1')
     expect(p.locator('#chat-model-name')).to_have_text('Advanced Model')
     expect(p.locator('#chat-effort-select')).to_have_value('high')
     expect(p.locator('#chat-compose')).to_have_value('Keep this project draft')
@@ -83,7 +84,7 @@ def test_codex_model_metadata_supplies_its_own_efforts_without_probe(chat_page):
         return data;
       };
     }''')
-    p.select_option('#chat-provider', 'codex')
+    open_chat_settings(p);p.select_option('#chat-provider', 'codex')
     expect(p.locator('#chat-model-name')).to_have_text('Native Model')
     count = len(catalogs(p))
     choose(p, 'fast-model')
@@ -95,17 +96,17 @@ def test_codex_model_metadata_supplies_its_own_efforts_without_probe(chat_page):
 def test_cache_is_isolated_by_node_cli_and_unknown_node(chat_page):
     p = chat_page
     p.evaluate("S.projects[1].device_id='node-2'")
-    p.select_option('#chat-project', 'p2')
+    open_chat_settings(p);p.select_option('#chat-project', 'p2')
     expect(p.locator('#chat-model-name')).to_have_text('Native Model')
     assert len(catalogs(p)) == 2
-    p.select_option('#chat-provider', 'codex')
+    open_chat_settings(p);p.select_option('#chat-provider', 'codex')
     expect(p.locator('#chat-model-name')).to_have_text('Native Model')
     assert len(catalogs(p)) == 3
-    p.select_option('#chat-provider', 'pi')
-    p.select_option('#chat-project', 'p1')
+    open_chat_settings(p);p.select_option('#chat-provider', 'pi')
+    open_chat_settings(p);p.select_option('#chat-project', 'p1')
     assert len(catalogs(p)) == 3
     p.evaluate('delete S.projects[1].device_id')
-    p.select_option('#chat-project', 'p2')
+    open_chat_settings(p);p.select_option('#chat-project', 'p2')
     expect(p.locator('#chat-model-name')).to_have_text('Native Model')
     assert len(catalogs(p)) == 4
 
@@ -114,13 +115,13 @@ def test_switches_join_inflight_discovery_and_preserve_origin_defaults(chat_page
     p = chat_page
     p.evaluate('ChatUI.catalogCache.clear();window.delayCatalog=true;void chatLoadCatalog()')
     p.wait_for_function('!!window.finishCatalog')
-    p.select_option('#chat-project', 'p2')
-    p.select_option('#chat-project', 'p1')
+    open_chat_settings(p);p.select_option('#chat-project', 'p2')
+    open_chat_settings(p);p.select_option('#chat-project', 'p1')
     assert len(catalogs(p)) == 2
     p.evaluate('window.delayCatalog=false;finishCatalog()')
     expect(p.locator('#chat-model-name')).to_have_text('Native Model')
     expect(p.locator('#chat-effort-select')).to_be_enabled()
-    p.select_option('#chat-project', 'p2')
+    open_chat_settings(p);p.select_option('#chat-project', 'p2')
     expect(p.locator('#chat-model-name')).to_have_text('本机默认')
     assert len(catalogs(p)) == 2
 
@@ -131,12 +132,12 @@ def test_refresh_coalesces_and_keeps_cached_controls_usable(chat_page):
     p.wait_for_function('!!window.finishCatalog')
     expect(p.locator('#chat-model-name')).to_have_text('Native Model')
     expect(p.locator('#chat-effort-select')).to_be_enabled()
-    p.select_option('#chat-effort-select', 'high')
-    p.select_option('#chat-project', 'p2')
+    open_chat_settings(p);p.select_option('#chat-effort-select', 'high')
+    open_chat_settings(p);p.select_option('#chat-project', 'p2')
     assert not p.evaluate('chatView().catalogLoading')
     assert len(catalogs(p)) == 2
     p.evaluate('window.delayCatalog=false;finishCatalog()')
-    p.select_option('#chat-project', 'p1')
+    open_chat_settings(p);p.select_option('#chat-project', 'p1')
     expect(p.locator('#chat-effort-select')).to_have_value('high')
     assert len(catalogs(p)) == 2
 
@@ -165,12 +166,12 @@ def test_project_commands_load_on_demand_and_do_not_leak_across_directories(chat
       };
     }''')
     assert len(catalogs(p)) == 1 and catalogs(p)[0]['args']['include_commands'] is False
-    p.click('#chat-commands')
+    open_chat_inspector(p, 'commands')
     expect(p.locator('.chat-command-list')).to_contain_text('/p1-.')
     p.click('#chat-inspector-close')
-    p.select_option('#chat-project', 'p2')
+    open_chat_settings(p);p.select_option('#chat-project', 'p2')
     assert len(catalogs(p)) == 2
-    p.click('#chat-commands')
+    open_chat_inspector(p, 'commands')
     expect(p.locator('.chat-command-list')).to_contain_text('/p2-.')
     expect(p.locator('.chat-command-list')).not_to_contain_text('/p1-.')
     p.evaluate("chatSwitch(null, 'p2', {cwd:'src'})")
@@ -183,7 +184,7 @@ def test_native_defaults_are_not_pinned_by_discovery_or_other_projects(chat_page
     p = chat_page
     send(p, 'Use project one defaults')
     p.click('#chat-new');p.locator('#chat-project-results button:not(:disabled)').first.click()
-    p.select_option('#chat-project', 'p2')
+    open_chat_settings(p);p.select_option('#chat-project', 'p2')
     send(p, 'Use project two defaults')
     starts = p.evaluate("requests.filter(r=>r.path.endsWith('/start'))")
     assert [r['project'] for r in starts] == ['p1', 'p2']
@@ -193,11 +194,11 @@ def test_native_defaults_are_not_pinned_by_discovery_or_other_projects(chat_page
 
 def test_effort_interaction_fetches_unknown_project_defaults_only_when_needed(chat_page):
     p = chat_page
-    p.select_option('#chat-project', 'p2')
+    open_chat_settings(p);p.select_option('#chat-project', 'p2')
     assert len(catalogs(p)) == 1
-    p.focus('#chat-effort-select')
+    open_chat_settings(p);p.focus('#chat-effort-select')
     expect(p.locator('#chat-model-name')).to_have_text('Native Model')
-    p.select_option('#chat-effort-select', 'high')
+    open_chat_settings(p);p.select_option('#chat-effort-select', 'high')
     assert len(catalogs(p)) == 2
     assert catalogs(p)[-1]['project'] == 'p2'
     send(p)
@@ -207,7 +208,7 @@ def test_effort_interaction_fetches_unknown_project_defaults_only_when_needed(ch
 
 def test_live_native_efforts_and_commands_take_precedence_over_discovery(chat_page):
     p = chat_page
-    p.click('#chat-commands')
+    open_chat_inspector(p, 'commands')
     expect(p.locator('.chat-command-list')).to_contain_text('/skill:review')
     p.click('#chat-inspector-close')
     send(p)
@@ -219,7 +220,7 @@ def test_live_native_efforts_and_commands_take_precedence_over_discovery(chat_pa
     p.evaluate('row=>chatSwitch(row)', row)
     expect(p.locator('#chat-effort-select')).to_have_value('xhigh')
     expect(p.locator('#chat-effort-select option[value="high"]')).to_have_count(0)
-    p.click('#chat-commands')
+    open_chat_inspector(p, 'commands')
     expect(p.locator('.chat-command-list')).to_contain_text('/session-only')
     expect(p.locator('.chat-command-list')).not_to_contain_text('/skill:review')
     assert len(catalogs(p)) == 2
@@ -232,10 +233,10 @@ def test_explicit_reset_to_defaults_is_preserved_when_resuming(chat_page, resume
     event(p, 'chat', {'type': 'settings', 'model': {'provider': 'remote', 'id': 'advanced-model'},
                      'thinkingLevel': 'high'}, 10)
     event(p, 'session', {'status': 'exited'}, 20)
-    p.click('#chat-model-picker')
+    open_chat_settings(p);p.click('#chat-model-picker')
     p.get_by_text('恢复本机默认模型', exact=True).click()
     expect(p.locator('#chat-model-name')).to_have_text('Native Model')
-    p.select_option('#chat-effort-select', '')
+    open_chat_settings(p);p.select_option('#chat-effort-select', '')
     if resume_button:
         p.evaluate('chatResume()')
     else:
@@ -263,12 +264,12 @@ def test_late_model_probe_does_not_overwrite_a_newer_choice(chat_page):
 def test_switching_back_during_command_load_joins_and_finishes_the_same_request(chat_page):
     p = chat_page
     p.evaluate('window.delayCatalog=true')
-    p.click('#chat-commands')
+    open_chat_inspector(p, 'commands')
     p.wait_for_function('!!window.finishCatalog')
     p.click('#chat-inspector-close')
-    p.select_option('#chat-project', 'p2')
-    p.select_option('#chat-project', 'p1')
-    p.click('#chat-commands')
+    open_chat_settings(p);p.select_option('#chat-project', 'p2')
+    open_chat_settings(p);p.select_option('#chat-project', 'p1')
+    open_chat_inspector(p, 'commands')
     assert len(catalogs(p)) == 2
     p.evaluate('window.delayCatalog=false;finishCatalog()')
     expect(p.locator('.chat-command-list')).to_contain_text('/skill:review')
@@ -288,8 +289,8 @@ def test_switching_back_during_refresh_receives_new_models_without_a_second_requ
       window.delayCatalog=true;void chatLoadCatalog(true);
     }''')
     p.wait_for_function('!!window.finishCatalog')
-    p.select_option('#chat-project', 'p2')
-    p.select_option('#chat-project', 'p1')
+    open_chat_settings(p);p.select_option('#chat-project', 'p2')
+    open_chat_settings(p);p.select_option('#chat-project', 'p1')
     expect(p.locator('#chat-model-name')).to_have_text('Native Model')
     assert len(catalogs(p)) == 2
     p.evaluate('window.delayCatalog=false;finishCatalog()')

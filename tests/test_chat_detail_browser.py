@@ -1,13 +1,13 @@
 """User-facing detail regressions. Real browser; mocked native transport."""
 import pytest
 from playwright.sync_api import expect
-from tests.browser_support import chat_page, event
+from tests.browser_support import chat_page, event, open_chat_settings
 from tests.test_chat_complete_browser import send
 
 
 def test_model_arrow_navigation_and_filter_reset(chat_page):
     p=chat_page
-    p.click('#chat-model-picker')
+    open_chat_settings(p);p.click('#chat-model-picker')
     p.press('#chat-model-search','ArrowDown')
     expect(p.locator('[data-keyboard="true"]')).to_have_text('恢复本机默认模型')
     p.press('#chat-model-search','End')
@@ -22,7 +22,7 @@ def test_model_arrow_navigation_and_filter_reset(chat_page):
 
 
 def test_tabbing_to_model_confirms_focused_option(chat_page):
-    p=chat_page;p.click('#chat-model-picker')
+    p=chat_page;open_chat_settings(p);p.click('#chat-model-picker')
     p.press('#chat-model-search','ArrowDown')
     p.locator('.chat-model-option').last.focus()
     p.keyboard.press('Enter')
@@ -53,7 +53,7 @@ def test_composed_transcript_and_touch_controls_fit(chat_page,width,height):
     event(p,'chat',{'type':'delta','receipt':receipt,'text':'## Review\n\nReadable **result**.\n\n```python\n'+('long_identifier_'*35)+'\n```'},10)
     p.wait_for_function("document.querySelector('.chat-code') !== null")
     p.fill('#chat-compose','继续检查\n保留输入草稿')
-    for selector in ['#chat-compose','#chat-send','#chat-attach','#chat-model-picker']:
+    for selector in ['#chat-compose','#chat-send','#chat-attach','#chat-options-toggle']:
         box=p.locator(selector).bounding_box()
         assert box and box['x']>=0 and box['x']+box['width']<=width+1
         assert box['y']>=0 and box['y']+box['height']<=height+1
@@ -64,7 +64,7 @@ def test_composed_transcript_and_touch_controls_fit(chat_page,width,height):
 
 
 def test_model_close_button_enter_does_not_select_model(chat_page):
-    p=chat_page;p.click('#chat-model-picker')
+    p=chat_page;open_chat_settings(p);p.click('#chat-model-picker')
     p.focus('#chat-popover-close');p.keyboard.press('Enter')
     expect(p.locator('#chat-popover')).to_be_hidden()
     expect(p.locator('#chat-model-name')).to_have_text('Native Model')

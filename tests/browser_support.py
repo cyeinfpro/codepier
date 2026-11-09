@@ -10,6 +10,19 @@ from playwright.sync_api import sync_playwright, expect
 
 ROOT = Path(__file__).resolve().parents[1]
 
+
+def open_chat_settings(page):
+    if not page.locator('#chat-options').is_visible():
+        page.locator('#chat-options-toggle').click()
+    expect(page.locator('#chat-options')).to_be_visible()
+
+
+def open_chat_inspector(page, tab='overview'):
+    if not page.locator('#chat-inspector').is_visible():
+        page.locator('#chat-inspector-toggle').click()
+    if tab != 'overview':
+        page.locator(f'[data-chat-tab="{tab}"]').click()
+
 @pytest.fixture
 def chat_page(request, chat_browser_pool):
     browser = chat_browser_pool(getattr(request,'param','chromium'))

@@ -90,8 +90,9 @@ def test_browser_task_creation_evidence_gate_progress_context_and_responsiveness
             page.goto(stack.url + '/#workflows')
             page.fill('#username', 'admin');page.fill('#password', stack.password)
             page.click('#login-form button')
-            expect(page.locator('#page h1')).to_have_text('开发任务')
+            expect(page.locator('#page h1')).to_have_text('任务进度')
             page.click('[data-wf-action="create"]')
+            page.locator('#workflow-create-form details summary').click()
             page.fill('#wf-title', '浏览器验收')
             page.fill('#wf-goal', '验证断点、执行证据与最终验收。<img src=x onerror=window.unexpectedXss=1>')
             page.click('#workflow-create-save')
@@ -110,7 +111,8 @@ def test_browser_task_creation_evidence_gate_progress_context_and_responsiveness
             evidence = stack.fs('fs_read', path='README.md')
             if evidence.get('pending'):
                 stack.poll(evidence['operation_id'])
-            page.fill('#wf-evidence', evidence['operation_id'])
+            page.locator('#wf-evidence-refresh').click()
+            page.locator('#wf-evidence-list input[value="' + evidence['operation_id'] + '"]').check()
             page.click('#workflow-update-save')
             expect(page.locator('#workflow-edit')).to_be_visible()
             for step in ('s2', 's3'):
@@ -121,7 +123,7 @@ def test_browser_task_creation_evidence_gate_progress_context_and_responsiveness
                 page.click('#workflow-update-save')
                 expect(page.locator('#workflow-edit')).to_be_visible()
             page.click('#workflow-edit')
-            page.select_option('#wf-action', 'complete')
+            page.locator('#workflow-update-form input[name="action"][value="complete"]').check()
             page.fill('#wf-summary', '已核对真实读取结果和步骤记录；其余步骤已说明不适用。')
             page.click('#workflow-update-save')
             expect(page.locator('.workflow-detail-meta')).to_contain_text('已验收')
@@ -130,7 +132,7 @@ def test_browser_task_creation_evidence_gate_progress_context_and_responsiveness
             page.screenshot(path=str(screenshots / 'workflow-desktop-list.png'), full_page=True)
             page.set_viewport_size({'width': 390, 'height': 844})
             page.reload()
-            expect(page.locator('#page h1')).to_have_text('开发任务')
+            expect(page.locator('#page h1')).to_have_text('任务进度')
             assert page.evaluate('document.documentElement.scrollWidth<=window.innerWidth')
             page.screenshot(path=str(screenshots / 'workflow-mobile-list.png'), full_page=True)
             page.locator(f'#page [data-wf-action="detail"][data-id="{identifier}"]').click()
@@ -139,7 +141,7 @@ def test_browser_task_creation_evidence_gate_progress_context_and_responsiveness
             page.screenshot(path=str(screenshots / 'workflow-mobile-detail.png'), full_page=True)
             page.locator('.modal [data-action="close-modal"]').first.click()
             page.set_viewport_size({'width': 1440, 'height': 1000})
-            page.click('[data-nav="workbench"]')
+            page.locator('.sidebar [data-nav="workbench"]').click()
             page.locator('.tool-menu summary').click()
             page.click('[data-wf-action="context"]')
             expect(page.locator('#modal-title')).to_contain_text('项目上下文 ·')
@@ -147,8 +149,8 @@ def test_browser_task_creation_evidence_gate_progress_context_and_responsiveness
             page.locator('.context-document summary').first.click()
             page.screenshot(path=str(screenshots / 'context-desktop.png'), full_page=True)
             page.locator('.modal [data-action="close-modal"]').first.click()
-            page.click('[data-nav="workflows"]')
-            expect(page.locator('#page h1')).to_have_text('开发任务')
+            page.locator('.sidebar [data-nav="workflows"]').click()
+            expect(page.locator('#page h1')).to_have_text('任务进度')
             page.evaluate('''() => {
               const original=window.fetch;
               window.fetch=async (...args)=>{
@@ -161,7 +163,7 @@ def test_browser_task_creation_evidence_gate_progress_context_and_responsiveness
               };
             }''')
             page.locator(f'#page [data-wf-action="detail"][data-id="{identifier}"]').click()
-            expect(page.locator('#modal-title')).to_have_text('读取开发任务')
+            expect(page.locator('#modal-title')).to_have_text('读取任务')
             page.locator('.modal [data-action="close-modal"]').first.click()
             page.wait_for_function('() => typeof window.releaseWorkflowRead==="function"')
             page.evaluate('window.releaseWorkflowRead()')

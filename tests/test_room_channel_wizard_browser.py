@@ -95,8 +95,8 @@ def test_ready_chat_can_approve_tasks_but_scope_drift_clears_old_checked_consent
         original_account = deepcopy(flow['account'])
         original_binding = deepcopy(flow['binding'])
         revoke = page.locator('[data-channel-action="revoke_tasks"]')
-        expect(revoke).to_have_text('仅撤销工作许可')
-        expect(page.locator('[data-cr-channel-view]')).to_contain_text('保留聊天连接')
+        expect(revoke).to_have_accessible_name('关闭微信交办工作')
+        expect(revoke).to_have_attribute('title', '保留聊天连接')
         revoke.click()
         expect(revoke).to_have_count(0)
         expect(page.locator('[data-cr-channel-view]')).to_contain_text('已连接房间聊天')
@@ -152,11 +152,12 @@ def test_unified_room_permissions_bulk_channel_modes_and_return(
         room_path = f'/api/collaboration/rooms/{room["id"]}'
         page.locator('.cr-room-actions [data-cr-action="permissions"]').click()
         expect(page.locator('[data-cr-form="permissions"]')).to_be_visible()
-        expect(page.locator('.cr-panel-content')).to_contain_text('唯一的项目权限设置')
+        expect(page.locator('.cr-panel-content')).to_contain_text('保存后生效。')
         initial = stack.must(stack.client.get(room_path + '/permissions'))
-        assert not initial['configured']
+        assert initial['configured'] and initial['version'] == 0
+        assert not initial['scope']['project_scopes']
         room_section = page.locator('[data-permission-section="room"]')
-        room_section.locator('[data-permission-bulk="all"]').click()
+        room_section.locator('[data-permission-bulk-level]').select_option('execute')
         # "All" respects each project's upper bound, including read-only rows.
         for project in initial['available_projects']:
             row = room_section.locator(
@@ -171,19 +172,21 @@ def test_unified_room_permissions_bulk_channel_modes_and_return(
                 assert chosen_targets == project['execution_targets']
         page.keyboard.press('Escape')
         expect(page.locator('dialog.cr-panel')).not_to_be_visible()
-        assert not stack.must(stack.client.get(room_path + '/permissions'))['configured']
+        unchanged = stack.must(stack.client.get(room_path + '/permissions'))
+        assert unchanged['version'] == initial['version']
+        assert unchanged['scope'] == initial['scope']
         page.locator('.cr-room-actions [data-cr-action="permissions"]').click()
         expect(page.locator('[data-cr-form="permissions"]')).to_be_visible()
-        room_section.locator('[data-permission-bulk="none"]').click()
+        room_section.locator('[data-permission-bulk-level]').select_option(label='不加入')
         first_id, second_id = [project['id'] for project in stack.projects[:2]]
         first = room_section.locator(f'[data-permission-row][data-project-id="{first_id}"]')
         second = room_section.locator(f'[data-permission-row][data-project-id="{second_id}"]')
-        first.locator('[data-permission-project]').check()
-        expect(first.locator('[value="read"]')).to_be_checked()
-        expect(first.locator('[value="write"]')).not_to_be_checked()
-        expect(second.locator('[data-permission-project]')).not_to_be_checked()
-        expect(page.locator('[data-permission-mode="weixin"]')).to_have_value('follow_room')
-        expect(page.locator('.cr-panel-content')).to_contain_text('尚不支持该渠道传输')
+        first.locator('[data-permission-level]').select_option('read')
+        expect(first.locator('[data-permission-level]')).to_have_value('read')
+        expect(first.locator('[data-permission-level]')).to_have_value('read')
+        expect(second.locator('[data-permission-level]')).to_have_value('')
+        expect(page.locator('[data-permission-mode="weixin"]')).to_be_checked()
+        expect(page.locator('[data-permission-mode="telegram"]')).to_have_count(0)
         page.locator('[data-cr-form="permissions"] button[type="submit"]').click()
         # Adding the first room project invalidates the old visibility stream.
         # The confirmed save must survive that safe dismissal, without reopening it.
@@ -195,8 +198,8 @@ def test_unified_room_permissions_bulk_channel_modes_and_return(
         assert policy['scope']['project_scopes'][0]['project_id'] == first_id
         assert policy['scope']['project_scopes'][0]['capabilities'] == ['read']
         page.locator('.cr-room-actions [data-cr-action="permissions"]').click()
-        expect(first.locator('[value="read"]')).to_be_checked()
-        expect(second.locator('[data-permission-project]')).not_to_be_checked()
+        expect(first.locator('[data-permission-level]')).to_have_value('read')
+        expect(second.locator('[data-permission-level]')).to_have_value('')
         page.locator('[data-cr-action="close"]').click()
         page.locator('.cr-room-actions [data-cr-action="members"]').click()
         page.locator('dialog.cr-panel [data-cr-action="add-member"]').click()
@@ -224,26 +227,26 @@ def test_unified_room_permissions_bulk_channel_modes_and_return(
         for _ in range(2):
             page.locator('[data-cr-action="channel-project-permissions"]').click()
             expect(page.locator('[data-cr-form="permissions"]')).to_be_visible()
-            expect(first.locator('[value="read"]')).to_be_checked()
-            expect(first.locator('[value="write"]')).not_to_be_checked()
-            expect(second.locator('[data-permission-project]')).not_to_be_checked()
-            first.locator('[value="write"]').check()
+            expect(first.locator('[data-permission-level]')).to_have_value('read')
+            expect(first.locator('[data-permission-level]')).to_have_value('read')
+            expect(second.locator('[data-permission-level]')).to_have_value('')
+            first.locator('[data-permission-level]').select_option('write')
             page.locator('[data-cr-action="channel-scope-back"]').click()
             expect(page.locator('[data-cr-channel-view]')).to_be_visible()
         page.locator('[data-cr-action="channel-project-permissions"]').click()
-        expect(first.locator('[value="write"]')).not_to_be_checked()
-        first.locator('[value="write"]').check()
-        page.locator('[data-permission-mode="weixin"]').select_option('custom')
+        expect(first.locator('[data-permission-level]')).to_have_value('read')
+        first.locator('[data-permission-level]').select_option('write')
+        page.locator('[data-permission-mode="weixin"]').uncheck()
         wx_section = page.locator('[data-permission-section="weixin"]')
-        wx_section.locator('[data-permission-bulk="none"]').click()
-        wx_section.locator(f'[data-project-id="{first_id}"] [data-permission-project]').check()
+        wx_section.locator('[data-permission-bulk-level]').select_option(label='不加入')
+        wx_section.locator(f'[data-project-id="{first_id}"] [data-permission-level]').select_option('read')
         page.locator('[data-cr-form="permissions"] button[type="submit"]').click()
         expect(page.locator('[data-cr-channel-view]')).to_be_visible()
         page.locator('[data-cr-action="channel-project-permissions"]').click()
-        expect(first.locator('[value="write"]')).to_be_checked()
-        expect(page.locator('[data-permission-mode="weixin"]')).to_have_value('custom')
-        expect(wx_section.locator(f'[data-project-id="{first_id}"] [value="write"]')).not_to_be_checked()
-        expect(second.locator('[data-permission-project]')).not_to_be_checked()
+        expect(first.locator('[data-permission-level]')).to_have_value('write')
+        expect(page.locator('[data-permission-mode="weixin"]')).not_to_be_checked()
+        expect(wx_section.locator(f'[data-project-id="{first_id}"] [data-permission-level]')).to_have_value('read')
+        expect(second.locator('[data-permission-level]')).to_have_value('')
         # A conflict must not reuse the room version or replay the same selection.
         conflicts = []
         permission_pattern = '**' + room_path + '/permissions'
@@ -325,11 +328,13 @@ def test_permission_lifetime_renewal_and_custom_inheritance(
         section = page.locator('[data-permission-section="room"]')
         first = section.locator(f'[data-project-id="{stack.projects[0]["id"]}"]')
         second = section.locator(f'[data-project-id="{stack.projects[1]["id"]}"]')
+        expect(first.locator('.cr-permission-expiry summary')).to_contain_text('已过期')
+        first.locator('.cr-permission-expiry summary').click()
         expect(first.locator('[data-permission-expired]')).to_be_visible()
         expect(first.locator('[data-permission-lifetime-mode]')).to_have_value('timed')
-        second.locator('[data-permission-cap][value="write"]').check()
+        second.locator('[data-permission-level]').select_option('write')
         page.locator('[data-cr-form="permissions"] button[type="submit"]').click()
-        expect(page.locator('[data-cr-panel-error]')).to_contain_text('修改该行有效期')
+        expect(page.locator('[data-cr-panel-error]')).to_contain_text('请更新“ProjectAlpha”的有效期')
         assert writes == []
         first.locator('[data-permission-lifetime-mode]').select_option('until_revoked')
         expect(first.locator('[data-permission-expired]')).not_to_be_visible()
@@ -347,10 +352,10 @@ def test_permission_lifetime_renewal_and_custom_inheritance(
                 writes.append(route.request.post_data_json)
             route.continue_()
         page.route(pattern, track_write)
-        page.locator('[data-permission-mode="weixin"]').select_option('custom')
+        page.locator('[data-permission-mode="weixin"]').uncheck()
         custom = page.locator('[data-permission-section="weixin"]')
         custom_second = custom.locator(f'[data-project-id="{stack.projects[1]["id"]}"]')
-        custom_second.locator('[data-permission-project]').check()
+        custom_second.locator('[data-permission-level]').select_option('read')
         expect(custom_second.locator('[data-permission-lifetime-mode]')).to_have_value('timed')
         page.locator('[data-cr-form="permissions"] button[type="submit"]').click()
         expect(page.locator('[data-cr-panel-error]')).to_contain_text('已保存')
@@ -358,6 +363,8 @@ def test_permission_lifetime_renewal_and_custom_inheritance(
         assert writes[1]['channels']['weixin']['scope']['project_scopes'][0]['lifetime']['expires_at'] == deadline
         # Intentional deadline editing replaces only the chosen row's timestamp.
         renewal = (int(time.time()) // 60 + 60) * 60 + renewal_second
+        if not first.locator('[data-permission-lifetime-mode]').is_visible():
+            first.locator('.cr-permission-expiry summary').click()
         first.locator('[data-permission-lifetime-mode]').select_option('timed')
         # datetime-local normalizes zero seconds away. Playwright fill requires
         # that canonical value; cover both minute and second precision.
@@ -411,12 +418,12 @@ def test_external_permission_setup_invalidates_open_editor(
         page.route('**' + path, track_write)
         page.locator('.cr-room-actions [data-cr-action="permissions"]').click()
         section = page.locator('[data-permission-section="room"]')
-        section.locator('[data-permission-bulk="none"]').click()
+        section.locator('[data-permission-bulk-level]').select_option(label='不加入')
         row = section.locator(f'[data-project-id="{stack.projects[0]["id"]}"]')
-        row.locator('[data-permission-project]').check()
-        row.locator('[data-permission-cap][value="write"]').check()
-        old_checkbox = row.locator('[data-permission-cap][value="write"]').element_handle()
-        assert old_checkbox.is_checked()
+        old_selector = row.locator('[data-permission-level]')
+        old_selector.select_option('write')
+        old_control = old_selector.element_handle()
+        assert old_control.input_value() == 'write'
         policy = stack.must(stack.client.put(path, json={
             'expected_version': 0,
             'scope': {'project_scopes': [
@@ -430,7 +437,7 @@ def test_external_permission_setup_invalidates_open_editor(
         page.wait_for_function('() => window.permissionHints.access === 1')
         expect(page.locator('dialog.cr-panel')).not_to_be_visible()
         expect(page.locator('[data-cr-form="permissions"]')).to_have_count(0)
-        assert not old_checkbox.evaluate('(element) => element.isConnected')
+        assert not old_control.evaluate('(element) => element.isConnected')
         expect(page.locator('[data-cr-project-count]')).to_have_text('项目 2')
         assert writes == []
         saved = stack.must(stack.client.get(path))

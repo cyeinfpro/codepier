@@ -2,7 +2,7 @@
 from urllib.parse import parse_qs, urlsplit
 import pytest
 from playwright.sync_api import expect
-from tests.browser_support import chat_page, event
+from tests.browser_support import chat_page, event, open_chat_settings
 from tests.test_chat_complete_browser import send
 
 
@@ -34,12 +34,12 @@ def test_catalog_timeout_releases_pending_and_retry_recovers(chat_page):
     p.evaluate('ChatUI.catalogCache.clear();window.delayCatalog=true;void chatLoadCatalog()')
     p.wait_for_function('!!window.finishCatalog')
     p.clock.fast_forward(25000)
-    expect(p.locator('#chat-catalog-notice')).to_be_visible(timeout=1200)
+    expect(p.locator('#chat-target-notice')).to_be_visible(timeout=1200)
     assert not p.evaluate('chatView().catalogLoading')
     assert p.evaluate('[...ChatUI.catalogCache.values()][0].pending.size')==0
     p.evaluate('window.delayCatalog=false');p.click('#chat-catalog-retry')
     expect(p.locator('#chat-model-name')).to_have_text('Native Model')
-    expect(p.locator('#chat-catalog-notice')).to_be_hidden()
+    expect(p.locator('#chat-target-notice')).to_be_hidden()
     p.evaluate('finishCatalog()')
     assert not p.evaluate('chatView().catalogLoading')
 
@@ -57,7 +57,7 @@ def test_refresh_does_not_join_an_older_stalled_read(chat_page):
 def test_live_settings_do_not_hide_refreshed_model_choices(chat_page):
     p=chat_page;send(p)
     event(p,'chat',{'type':'settings','model':{'provider':'old','id':'retired'},'models':[{'provider':'old','id':'retired','name':'Old Model'}]},10)
-    p.evaluate('chatLoadCatalog(true)');p.click('#chat-model-picker')
+    p.evaluate('chatLoadCatalog(true)');open_chat_settings(p);p.click('#chat-model-picker')
     expect(p.locator('[data-model="local/native-model"]')).to_be_visible()
     expect(p.locator('[data-model="remote/advanced-model"]')).to_be_visible()
 

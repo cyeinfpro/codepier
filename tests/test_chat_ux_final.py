@@ -1,7 +1,7 @@
 """Final user-flow regressions: keyboard, recovery, and async view ownership."""
 import pytest
 from playwright.sync_api import expect
-from tests.browser_support import chat_page, event
+from tests.browser_support import chat_page, event, open_chat_settings
 from tests.test_chat_complete_browser import send
 
 pytestmark = pytest.mark.parametrize('chat_page', ['chromium', 'webkit'], indirect=True)
@@ -17,7 +17,7 @@ def test_project_arrow_from_focused_option_selects_highlighted_target(chat_page)
 
 
 def test_model_arrow_from_focused_option_confirms_highlight(chat_page):
-    p=chat_page;p.click('#chat-model-picker')
+    p=chat_page;open_chat_settings(p);p.click('#chat-model-picker')
     p.locator('[data-model="local/native-model"]').focus()
     p.keyboard.press('ArrowDown');p.keyboard.press('Enter')
     expect(p.locator('#chat-model-name')).to_have_text('Advanced Model')
@@ -33,8 +33,8 @@ def test_palette_arrow_from_focused_option_confirms_highlight(chat_page):
 
 def test_explicit_default_effort_is_shown_as_default(chat_page):
     p=chat_page
-    p.select_option('#chat-effort-select','high')
-    p.select_option('#chat-effort-select','')
+    open_chat_settings(p);p.select_option('#chat-effort-select','high')
+    open_chat_settings(p);p.select_option('#chat-effort-select','')
     expect(p.locator('#chat-effort-select')).to_have_value('')
     send(p)
     args=p.evaluate("requests.find(r=>r.path.endsWith('/start')).args")
@@ -58,7 +58,7 @@ def test_late_failed_settings_reply_is_retryable_after_returning_to_view(chat_pa
         return original(path,opts);
       };
     }''')
-    p.select_option('#chat-effort-select','high');p.wait_for_function('!!window.finishSettings')
+    open_chat_settings(p);p.select_option('#chat-effort-select','high');p.wait_for_function('!!window.finishSettings')
     p.evaluate("chatSwitch(null,'p2')");p.fill('#chat-compose','must remain')
     p.evaluate('finishSettings()');p.wait_for_timeout(100)
     assert p.evaluate('originalView.settingOp.state')=='error'
@@ -97,6 +97,6 @@ def test_catalog_pending_read_has_bounded_timeout_even_if_api_never_returns(chat
     p=chat_page;p.clock.install()
     p.evaluate("() => {const original=api;window.api=(path,opts)=>path.endsWith('/chat_catalog')?new Promise(()=>{}):original(path,opts);return void chatLoadCatalog(true);}")
     p.clock.fast_forward(23000)
-    expect(p.locator('#chat-catalog-notice')).to_contain_text('超时')
+    expect(p.locator('#chat-target-notice')).to_contain_text('超时')
     assert p.evaluate('[...ChatUI.catalogCache.values()][0].pending.size')==0
     assert not p.evaluate('chatView().catalogLoading')

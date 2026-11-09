@@ -7,7 +7,7 @@ import uuid
 from types import SimpleNamespace
 import pytest
 from playwright.sync_api import expect
-from tests.browser_support import chat_page,event
+from tests.browser_support import chat_page,event, open_chat_settings
 from tests.test_chat_complete_browser import send
 from tests.test_chat_complete_backend import protocol,reply
 from tests.test_chat_admission import chat
@@ -22,7 +22,7 @@ def test_ambiguous_setting_retry_keeps_original_receipt(chat_page):
       if(path.endsWith('/chat_settings')&&failSetting){failSetting=false;requests.push({path,...JSON.parse(opts.body)});throw Object.assign(new Error('Reply lost'),{code:'NETWORK_UNCERTAIN'});}
       return original(path,opts);
     }}''')
-    p.select_option('#chat-effort-select','high')
+    open_chat_settings(p);p.select_option('#chat-effort-select','high')
     expect(p.locator('#chat-setting-state')).to_have_text('设置待核实')
     first=p.evaluate("requests.filter(x=>x.path.endsWith('/chat_settings')).at(-1).args.receipt")
     p.click('#chat-settings-retry')

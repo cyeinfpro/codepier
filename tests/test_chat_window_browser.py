@@ -7,7 +7,7 @@ import json
 import re
 import pytest
 from playwright.sync_api import expect
-from tests.browser_support import chat_page, event
+from tests.browser_support import chat_page, event, open_chat_settings
 from tests.test_chat_complete_browser import assert_composer_controls_fit, send
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -120,13 +120,15 @@ def test_slash_enter_completes_without_sending_a_prompt(chat_page):
 def test_palette_and_model_picker_are_keyboard_operable(chat_page):
     p=chat_page;p.focus('#chat-compose');p.keyboard.press('Control+k')
     expect(p.get_by_role('dialog',name='快捷操作')).to_be_visible()
-    p.get_by_role('searchbox',name='搜索操作与会话').fill('选择模型')
+    p.get_by_role('searchbox',name='搜索操作与会话').fill('会话设置')
     p.keyboard.press('Enter')
+    open_chat_settings(p)
+    p.locator('#chat-model-picker').press('Enter')
     expect(p.locator('#chat-model-search')).to_be_focused()
     p.fill('#chat-model-search','Advanced');p.keyboard.press('Enter')
     expect(p.locator('#chat-model-name')).to_have_text('Advanced Model')
     expect(p.locator('#chat-model-picker')).to_be_focused()
-    p.click('#chat-model-picker');p.keyboard.press('Escape')
+    open_chat_settings(p);p.click('#chat-model-picker');p.keyboard.press('Escape')
     expect(p.locator('#chat-popover')).to_be_hidden()
     expect(p.locator('#chat-model-picker')).to_be_focused()
     assert not p.evaluate("requests.some(r=>r.path.endsWith('/start'))")
@@ -161,7 +163,7 @@ def test_switch_cancels_pending_confirmation_without_wrong_project_write(chat_pa
 def test_layers_follow_actual_composer_and_viewport(chat_page,width,height):
     p=chat_page;p.set_viewport_size({'width':width,'height':height})
     p.fill('#chat-compose','A multiline draft\nsecond line\nthird line\nfourth line')
-    p.click('#chat-model-picker')
+    open_chat_settings(p);p.click('#chat-model-picker')
     expect(p.locator('#chat-model-search')).to_be_visible()
     p.wait_for_timeout(180)
     popup=p.locator('#chat-popover').bounding_box();anchor=p.locator('#chat-model-picker').bounding_box()
@@ -176,12 +178,12 @@ def test_layers_follow_actual_composer_and_viewport(chat_page,width,height):
 
 @pytest.mark.parametrize('appearance',['light','dark'])
 def test_neutral_appearance_and_reduced_motion(chat_page,appearance):
-    p=chat_page;p.select_option('#chat-appearance',appearance)
+    p=chat_page;p.evaluate('value => chatApplyAppearance(value)', appearance)
     expect(p.locator('#chat-root')).to_have_attribute('data-appearance',appearance)
     bg=p.evaluate("getComputedStyle($('#chat-root')).backgroundColor")
     assert bg==('rgb(255, 255, 255)' if appearance=='light' else 'rgb(34, 34, 34)')
     p.emulate_media(reduced_motion='reduce')
-    p.click('#chat-model-picker')
+    open_chat_settings(p);p.click('#chat-model-picker')
     assert p.evaluate("getComputedStyle($('#chat-popover')).animationName")=='none'
     p.press('#chat-model-search','Escape')
     p.screenshot(path=str(OUT/f'window-{appearance}-desktop.png'))
@@ -194,7 +196,7 @@ def test_session_settings_confirmation_recovers_after_switch(chat_page):
     event(p,'chat',{'type':'user','receipt':r,'text':'Review'},10)
     event(p,'chat',{'type':'done','receipt':r,'status':'completed'},20)
     p.evaluate("window.receiptState='queued';window.savedRow=ChatUI.selected")
-    p.select_option('#chat-effort-select','high')
+    open_chat_settings(p);p.select_option('#chat-effort-select','high')
     expect(p.locator('#chat-setting-state')).to_contain_text('切换')
     p.click('#chat-new');p.locator('#chat-project-results button:not(:disabled)').first.click();p.evaluate("window.receiptState='completed';chatSwitch(savedRow)")
     expect(p.locator('#chat-settings-retry')).to_be_hidden()
@@ -203,11 +205,11 @@ def test_session_settings_confirmation_recovers_after_switch(chat_page):
 
 
 def test_old_errors_do_not_overwrite_new_view_and_new_errors_are_visible(chat_page):
-    p=chat_page;p.select_option('#chat-project','p2')
+    p=chat_page;open_chat_settings(p);p.select_option('#chat-project','p2')
     p.fill('#chat-compose','Keep the new project draft')
     p.evaluate('window.catalogFailure=true')
-    p.click('#chat-model-picker');p.click('#chat-model-refresh')
-    expect(p.locator('#chat-catalog-notice')).to_contain_text('offline')
+    open_chat_settings(p);p.click('#chat-model-picker');p.click('#chat-model-refresh')
+    expect(p.locator('#chat-target-notice')).to_contain_text('offline')
     expect(p.locator('#chat-compose')).to_have_value('Keep the new project draft')
     assert p.evaluate('ChatUI.project')=='p2'
 
@@ -281,5 +283,5 @@ def test_resize_does_not_turn_focus_scroll_into_extra_window_height(chat_page,wi
     }""")
     assert before<0
     assert p.locator('#chat-root').bounding_box()['height']<=height+1
-    p.click('#chat-model-picker');p.press('#chat-model-search','Escape')
+    open_chat_settings(p);p.click('#chat-model-picker');p.press('#chat-model-search','Escape')
     assert_composer_controls_fit(p,width,height)

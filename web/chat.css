@@ -3572,6 +3572,9 @@ html[data-appearance='dark'] .chat-workspace .chat-message-user .chat-message-bo
   margin: 12px auto;
 }
 @media (min-width: 761px) {
+  .chat-compose-frame {
+    position: relative;
+  }
   .chat-options {
     display: none;
     position: absolute;
@@ -3592,8 +3595,17 @@ html[data-appearance='dark'] .chat-workspace .chat-message-user .chat-message-bo
     gap: 10px;
   }
   .chat-options-head {
+    grid-column: 1 / -1;
     grid-template-columns: 1fr auto;
     align-items: center;
+  }
+  .chat-options .chat-config-bar {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .chat-options .chat-config-bar > * {
+    min-width: 0;
   }
 }
 @media (max-width: 760px) {

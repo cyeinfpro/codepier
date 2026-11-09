@@ -122,6 +122,7 @@ def test_project_and_vps_assignment_both_directions(browser,ui_stack):
         page.click('#vps-save')
         expect(page.locator('#vps-check-state')).to_be_visible()
         page.locator('.modal-footer [data-action="close-modal"]').click()
+        expect(page.locator('#vps-check-state')).to_have_count(0)
         current=s.must(s.client.get('/api/vps/'+v['id']))
         assert set(current['project_ids'])=={s.projects[0]['id'],s.projects[2]['id']}
         page.locator('[data-nav="projects"]').first.click()

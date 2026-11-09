@@ -74,7 +74,7 @@ def test_real_panel_roundtrip_retains_session_draft_and_theme(stack, engine, sch
             _navigate(page, 'native')
             expect(page.locator('#chat-compose')).to_have_value('保留草稿与模型选择，返回面板后继续')
             expect(page.locator('#chat-root')).to_have_attribute('data-appearance', scheme)
-            for selector in ['#chat-back', '#chat-compose', '#chat-send', '#chat-model-picker']:
+            for selector in ['#chat-back', '#chat-compose', '#chat-send', '#chat-options-toggle']:
                 bounds = page.locator(selector).bounding_box()
                 assert bounds and bounds['x'] >= 0 and bounds['y'] >= 0, (selector, bounds)
                 assert bounds['x'] + bounds['width'] <= width + 1, (selector, bounds)

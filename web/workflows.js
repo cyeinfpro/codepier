@@ -237,7 +237,7 @@ function workflowEdit(w) {
         <div class="field"><label for="wf-step-state">步骤状态</label><select name="step_state" id="wf-step-state"><option value="completed">已完成</option><option value="running">进行中</option><option value="pending">待处理</option><option value="skipped">已跳过</option></select></div>
       </div></div>
       <div class="field"><label for="wf-summary" id="wf-summary-label">实际结果</label><textarea id="wf-summary" name="summary" required maxlength="4000" rows="4"></textarea></div>
-      <div class="field" id="wf-evidence"><p>选这一步用到的操作。</p><div class="check-list" id="wf-evidence-list" role="status">正在读取操作…</div></div>
+      <div class="field" id="wf-evidence"><p>选这一步用到的操作。</p><button type="button" class="btn ghost small" id="wf-evidence-refresh">刷新操作</button><div class="check-list" id="wf-evidence-list" role="status">正在读取操作…</div></div>
       <p class="form-note" data-workflow-hint role="status">跳过步骤请写明原因。</p></form>`,
     buttons('workflow-update-save', '保存进度'),
   );
@@ -255,25 +255,26 @@ function workflowEdit(w) {
   form.addEventListener('change', sync);
   sync();
   const list = $('#wf-evidence-list', dialog);
-  api(
-    '/api/operations?' +
-      new URLSearchParams({ project: w.project_id, status: 'succeeded', limit: '20' }),
-  ).then(
-    ({ operations }) => {
+  const refreshEvidence = $('#wf-evidence-refresh', dialog);
+  const loadEvidence = () =>
+    busy(refreshEvidence, async () => {
+      const { operations } = await api(
+        '/api/operations?' +
+          new URLSearchParams({ project: w.project_id, status: 'succeeded', limit: '20' }),
+      );
       if (!dialog.isConnected) return;
-      const rows = operations.filter((op) => op.created >= (w.created || 0));
+      const checked = new Set($$('[name="evidence"]:checked', list).map((input) => input.value));
       list.innerHTML =
-        rows
+        operations
+          .filter((op) => op.created >= (w.created || 0))
           .map(
             (op) =>
-              `<label class="check"><input type="checkbox" name="evidence" value="${esc(op.id)}"><span>${esc(op.tool)} · ${esc(shortTime(op.created))}</span></label>`,
+              `<label class="check"><input type="checkbox" name="evidence" value="${esc(op.id)}" ${checked.has(op.id) ? 'checked' : ''}><span>${esc(op.tool)} · ${esc(shortTime(op.created))}</span></label>`,
           )
           .join('') || '<small>此任务建立后还没有成功的操作。</small>';
-    },
-    (error) => {
-      if (dialog.isConnected) list.textContent = error.message;
-    },
-  );
+    });
+  refreshEvidence.onclick = loadEvidence;
+  void loadEvidence();
   bindWorkflowSubmit(
     dialog,
     $('#workflow-update-form'),

@@ -257,7 +257,7 @@ def exercise_matrix(stack, output: Path, *, screenshots: bool = True, schemes=SC
                             report["screenshots"].append(name)
 
                     _navigate(page, "native")
-                    expect(page.locator("#chat-appearance")).to_have_value(scheme)
+                    expect(page.locator("#chat-root")).to_have_attribute("data-appearance", scheme if scheme != "auto" else "light")
                     assert _font(page, "#chat-root") == management_font
                     _assert_control_is_uncovered(page, "#chat-compose")
                     native_layout = _layout(page, f"{scheme}-{width}-native")
@@ -415,7 +415,7 @@ def test_native_and_management_share_theme_without_transcript_scans(stack):
               } finally {document.querySelectorAll=original;}
             }""")
             assert scans == 0
-            page.locator('#chat-appearance').select_option('light')
+            page.locator('#app [data-ui-appearance]').select_option('light')
             expect(page.locator('html')).to_have_attribute('data-appearance','light')
             assert page.evaluate("themeComposer===document.querySelector('#chat-compose')")
             assert composer.evaluate('el=>[el.selectionStart,el.selectionEnd]') == [2,7]
@@ -432,7 +432,7 @@ def test_native_and_management_share_theme_without_transcript_scans(stack):
             page.emulate_media(color_scheme='light')
             expect(page.locator('html')).to_have_attribute('data-appearance','light')
             _navigate(page,'native')
-            expect(page.locator('#chat-appearance')).to_have_value('auto')
+            expect(page.locator('#app [data-ui-appearance]')).to_have_value('auto')
             expect(page.locator('#chat-compose')).to_have_value('Theme changes must keep this draft and selection.')
             assert not errors, errors
         finally:
