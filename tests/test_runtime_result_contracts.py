@@ -46,7 +46,8 @@ def test_validation_becomes_stale_after_runtime_change_without_rewriting_history
 
 
 @pytest.mark.parametrize('code,category', [('CONVERSATION_ARCHIVED', 'codepier_authorization'),
-    ('RUNTIME_CREATION_UNCERTAIN', 'outcome_unconfirmed'), ('COMMAND_MISSING', 'execution_unavailable')])
+    ('RUNTIME_CREATION_UNCERTAIN', 'outcome_unconfirmed'), ('COMMAND_MISSING', 'command_missing'),
+    ('INVALID_CWD', 'execution_unavailable'), ('RUNTIME_ENGINE_MISSING', 'execution_unavailable')])
 def test_project_failures_keep_real_domain_and_never_grant_approval(code, category):
     result = failure_context(error={'code': code}, operation_id='original')
     assert result['category'] == category and result['code'] == code
