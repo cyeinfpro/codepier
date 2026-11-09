@@ -277,8 +277,9 @@ def test_unified_room_permissions_bulk_channel_modes_and_return(
         context.close()
 
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+@pytest.mark.parametrize('renewal_second', [0, 17])
 def test_permission_lifetime_renewal_and_custom_inheritance(
-    collaboration_stack, chat_browser_pool, engine
+    collaboration_stack, chat_browser_pool, engine, renewal_second
 ):
     """Expired retained projection is synthetic; policy writes use the real Hub."""
     from datetime import datetime, timezone
@@ -356,10 +357,14 @@ def test_permission_lifetime_renewal_and_custom_inheritance(
         assert len(writes) == 2
         assert writes[1]['channels']['weixin']['scope']['project_scopes'][0]['lifetime']['expires_at'] == deadline
         # Intentional deadline editing replaces only the chosen row's timestamp.
-        renewal = int(time.time()) + 3600
+        renewal = (int(time.time()) // 60 + 60) * 60 + renewal_second
         first.locator('[data-permission-lifetime-mode]').select_option('timed')
+        # datetime-local normalizes zero seconds away. Playwright fill requires
+        # that canonical value; cover both minute and second precision.
         first.locator('[data-permission-lifetime-until]').fill(
-            datetime.fromtimestamp(renewal, timezone.utc).strftime('%Y-%m-%dT%H:%M:%S'))
+            datetime.fromtimestamp(renewal, timezone.utc).isoformat(
+                timespec='seconds' if renewal_second else 'minutes')
+            .removesuffix('+00:00'))
         page.locator('[data-cr-form="permissions"] button[type="submit"]').click()
         expect(page.locator('[data-cr-panel-error]')).to_contain_text('已保存')
         assert len(writes) == 3
