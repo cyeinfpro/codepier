@@ -1847,6 +1847,8 @@ class Runtime:
                 return
             authenticated = True
             info = {k: safe_summary(hello[k], 1024) for k in ("name", "version", "platform", "hostname", "python", "roots", "journal_id", "delivery_protocol") if k in hello}
+            if type(hello.get("computer_enabled")) is bool:
+                info["computer_enabled"] = hello["computer_enabled"]
             capabilities = hello.get("capabilities")
             if isinstance(capabilities, list) and len(capabilities) <= 256 and all(isinstance(x, str) and len(x) <= 100 for x in capabilities):
                 info["capabilities"] = capabilities

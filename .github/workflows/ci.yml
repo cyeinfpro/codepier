@@ -88,6 +88,7 @@ jobs:
           .venv/bin/python scripts/build_integration_assets.py
           .venv/bin/python scripts/build_web_assets.py --check
           git diff --exit-code -- web
+          node scripts/check-ui-copy.mjs
           .venv/bin/python -m ruff check agent hub shared scripts tests
           .venv/bin/python -m mypy
           git diff --check

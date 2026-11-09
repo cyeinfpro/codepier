@@ -84,9 +84,6 @@ function chatMountChrome() {
   root.querySelector('[data-chat-shortcut="new"]').textContent = modifier + ' ⇧ O';
   root.querySelector('[data-chat-shortcut="command"]').textContent = modifier + ' K';
   $('#chat-history-toggle').title = '会话历史 · ' + modifier + ' B';
-  $('#chat-appearance').addEventListener('change', (e) => chatApplyAppearance(e.target.value), {
-    signal,
-  });
   if (window.CodePierAppearance) {
     c.appearanceUnsubscribe?.();
     c.appearanceUnsubscribe = window.CodePierAppearance.subscribe(() => chatApplyAppearance());
@@ -171,7 +168,7 @@ function chatOptions(open, restoreFocus = false) {
   const panel = $('#chat-options');
   if (!panel) return;
   const mobile = innerWidth <= 760;
-  open = !!open && mobile;
+  open = !!open;
   if (open) {
     chatClosePopover();
     chatDrawer(false, true);
@@ -181,13 +178,12 @@ function chatOptions(open, restoreFocus = false) {
   }
   panel.classList.toggle('is-open', open);
   panel.setAttribute('role', mobile ? 'dialog' : 'region');
-  panel.setAttribute('aria-hidden', String(mobile && !open));
+  panel.setAttribute('aria-hidden', String(!open));
   $('#chat-options-toggle').setAttribute('aria-expanded', String(open));
   $('#chat-options-shade').hidden = !open;
   if (open) $('#chat-options-close').focus({ preventScroll: true });
   else if (restoreFocus) {
-    const target = mobile ? $('#chat-options-toggle') : $('#chat-model-picker');
-    target.focus({ preventScroll: true });
+    $('#chat-options-toggle').focus({ preventScroll: true });
   }
   chatScheduleLayout();
 }
@@ -343,8 +339,9 @@ function chatSyncChrome() {
         : row.status === 'stopping'
           ? '正在等待进程退出'
           : target.reason,
-    'chat-delete': !row ? '先打开一条会话' : live ? '请先停止会话并确认进程退出' : '',
+    'chat-delete': !row ? '先打开一条会话' : v.deleteBusy ? '正在删除会话' : '',
   };
+  $('#chat-resume').hidden = !row || !!live;
   for (const [id, reason] of Object.entries(availability)) {
     const button = $('#' + id);
     button.disabled = !!reason;
@@ -586,9 +583,8 @@ function chatPalette() {
         $('#chat-history-search').focus({ preventScroll: true });
       },
     },
-    { label: '选择模型', hint: '设置', action: chatModelPopover },
+    { label: '会话设置', hint: '项目、CLI 与模型', action: () => chatOptions(true) },
     { label: '搜索当前对话', hint: modifier + ' F', action: () => chatFindToggle(true) },
-    { label: '指令与技能', hint: '会话', action: () => chatInspector('commands') },
     { label: '消息队列', hint: '会话', action: () => chatInspector('queue') },
     { label: '文件与图片', hint: '会话', action: () => chatInspector('files') },
     ...ChatUI.rows.map((row) => ({
@@ -671,12 +667,15 @@ function chatPalette() {
   input.focus();
 }
 function chatProjectButtons(project) {
-  return `<button class="btn small" data-native-launch="pi" data-project="${esc(project)}">Pi</button><button class="btn small" data-native-launch="codex" data-project="${esc(project)}">Codex</button><button class="btn small" data-native-launch="claude" data-project="${esc(project)}">Claude</button>`;
+  return `<button class="btn small" data-native-launch data-project="${esc(project)}">对话</button>`;
 }
 document.addEventListener('click', (e) => {
   const b = e.target.closest('[data-native-launch]');
-  if (b)
-    chatOpenProject(b.dataset.project, b.dataset.nativeLaunch).catch((err) =>
-      typeof toast === 'function' ? toast(err.message, true) : chatStatus(err.message, true),
-    );
+  if (!b) return;
+  (async () => {
+    if (S.page !== 'native') await navigate('native');
+    if (S.page === 'native') chatNewSession(b.dataset.project);
+  })().catch((err) =>
+    typeof toast === 'function' ? toast(err.message, true) : chatStatus(err.message, true),
+  );
 });

@@ -1267,3 +1267,76 @@
     transform: none;
   }
 }
+
+/* Setup and grouped navigation share the existing panel and button tokens. */
+.login-screen {
+  display: grid;
+  grid-template-columns: minmax(0, 440px);
+  place-content: center;
+}
+.login-panel > h1 {
+  margin: var(--ui-space-5) 0;
+  font-size: var(--ui-page-title);
+}
+.user-box button.avatar {
+  border: 0;
+  cursor: pointer;
+}
+.nav button[data-nav-group] {
+  grid-template-columns: auto 1fr;
+}
+.page-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ui-space-2);
+  padding: var(--ui-space-2) 0;
+  border-bottom: 1px solid var(--ui-line);
+}
+.page-tabs button {
+  padding: var(--ui-space-2) var(--ui-space-3);
+  border: 0;
+  border-radius: var(--ui-radius-md);
+  background: transparent;
+  color: var(--ui-muted);
+}
+.page-tabs button.active {
+  background: var(--ui-raised);
+  color: var(--ui-text);
+  font-weight: 650;
+}
+.onboarding {
+  padding: var(--ui-space-5);
+}
+.onboarding ol {
+  display: grid;
+  gap: var(--ui-space-3);
+  margin: var(--ui-space-3) 0 0;
+  padding-inline-start: var(--ui-space-5);
+}
+.onboarding li {
+  padding: var(--ui-space-2) 0;
+  color: var(--ui-muted);
+}
+.onboarding li[aria-current] {
+  color: var(--ui-text);
+}
+.onboarding li > span,
+.onboarding li > button {
+  margin-inline-start: var(--ui-space-3);
+}
+.onboarding .endpoint {
+  margin-block: var(--ui-space-2);
+}
+.form-advanced {
+  margin-block: var(--ui-space-3);
+}
+.form-advanced > summary {
+  cursor: pointer;
+  color: var(--ui-muted);
+}
+.form-advanced[open] > summary {
+  margin-bottom: var(--ui-space-3);
+}
+.workspace-project-actions .tool-menu-items > .actions {
+  display: contents;
+}

@@ -60,7 +60,12 @@ def test_every_route_has_consistent_frame_and_no_horizontal_overflow(chat_browse
                     return !r.height || r.bottom <= bar.bottom + 1;
                   });
                 }"""), route
-                assert page.locator('.nav [aria-current="page"]').get_attribute("data-nav") == route
+                active = page.locator('.sidebar [aria-current="page"]')
+                expected = {"profiles": "connect", "mcp-gateway": "connect",
+                            "roles": "members", "identity-admin": "members"}.get(route, route)
+                assert active.get_attribute("data-nav") == expected
+                if expected != route:
+                    expect(page.locator('.page-tabs [aria-current="page"]')).to_have_attribute("data-nav", route)
                 assert page.locator("#breadcrumb-page").inner_text().strip()
         assert not errors, errors
     finally:
@@ -68,56 +73,40 @@ def test_every_route_has_consistent_frame_and_no_horizontal_overflow(chat_browse
 
 
 @pytest.mark.parametrize("width", [360, 390, 1440])
-def test_navigation_search_keyboard_escape_and_focus_return(chat_browser_pool, stack, width):
+def test_navigation_group_keyboard_and_focus_return(chat_browser_pool, stack, width):
     context = chat_browser_pool("chromium").new_context(viewport={"width": width, "height": 844})
     page = context.new_page()
     try:
         login(page, stack)
+        expect(page.locator("#navigation-query, .nav-num, #clock")).to_have_count(0)
         if width < 900:
-            page.locator(".mobile-menu").click()
+            page.locator('.mobile-dock [data-action="toggle-menu"]').click()
             expect(page.locator(".mobile-close")).to_be_focused()
             assert page.locator(".main").evaluate("el => el.inert")
-        query = page.locator("#navigation-query")
-        query.fill("not-a-page")
-        expect(page.locator("#navigation-status")).to_contain_text("没有匹配")
-        expect(page.locator(".nav [data-nav]:visible")).to_have_count(0)
-        query.press("Escape")
-        expect(query).to_have_value("")
-        expect(query).to_be_focused()
-        if width < 900:
-            expect(page.locator(".sidebar")).to_have_class("sidebar open")
-        query.fill("设置中心")
-        expect(page.locator(".nav [data-nav]:visible")).to_have_count(1)
-        query.press("Tab")
-        expect(page.locator('.nav [data-nav="settings"]')).to_be_focused()
+            page.keyboard.press("Escape")
+            expect(page.locator('.mobile-dock [data-action="toggle-menu"]')).to_be_focused()
+            page.locator(".mobile-menu").click()
+        settings = page.locator('.nav [data-nav="settings"]')
+        settings.focus()
         page.keyboard.press("Enter")
         expect(page.locator("#settings-center")).to_be_visible()
         expect(page.locator("#page h1")).to_be_focused()
-        expect(query).to_have_value("")
-        if width < 900:
-            assert not page.locator(".main").evaluate("el => el.inert")
-            page.locator(".mobile-menu").click()
-            page.keyboard.press("Escape")
-            expect(page.locator(".mobile-menu")).to_be_focused()
+        assert not page.locator(".main").evaluate("el => el.inert")
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
     finally:
         context.close()
 
 
-def test_navigation_filter_cannot_reveal_unavailable_identity_routes(chat_browser_pool, stack):
+def test_grouped_navigation_respects_identity_capabilities(chat_browser_pool, stack):
     from tests.test_account_connection_journeys import local_user
     username, _ = local_user(stack)
     context = chat_browser_pool("chromium").new_context(viewport={"width": 1440, "height": 1000})
     page = context.new_page()
     try:
         login(page, stack, username=username)
-        query = page.locator("#navigation-query")
-        for name in ["", "members", "身份管理", "identity-admin"]:
-            query.fill(name)
-            # Personal-space owners retain the members explanation.
-            if not page.evaluate("CodePierIdentity.canNavigate('members')"):
-                expect(page.locator('.nav [data-nav="members"]')).to_be_hidden()
-            expect(page.locator('.nav [data-nav="identity-admin"]')).to_be_hidden()
+        page.locator('.nav [data-nav-group="members"]').click()
+        expect(page.locator('.page-tabs [data-nav="identity-admin"]')).to_have_count(0)
+        expect(page.locator('.sidebar .avatar[data-nav="identity"]')).to_be_visible()
     finally:
         context.close()
 
@@ -182,11 +171,11 @@ def test_loading_error_retry_and_stale_navigation_have_context(chat_browser_pool
         expect(page.locator(".page-loading")).to_contain_text("VPS 管理")
         expect(page.locator("#page")).to_have_attribute("aria-busy", "true")
         navigate(page, "projects")
-        expect(page.locator("#page h1")).to_have_text("项目映射")
+        expect(page.locator("#page h1")).to_have_text("项目")
         for route in pending:
             route.fulfill(status=400, json={"error": {"message": "Fixture unavailable"}})
         page.unroute("**/api/vps*")
-        expect(page.locator("#page h1")).to_have_text("项目映射")
+        expect(page.locator("#page h1")).to_have_text("项目")
         page.route("**/api/vps*", lambda route: route.fulfill(status=400, json={"error": {"message": "Fixture unavailable"}}))
         page.evaluate("void navigate('vps')")
         expect(page.locator(".page-error")).to_be_visible()

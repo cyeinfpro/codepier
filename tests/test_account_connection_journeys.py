@@ -147,6 +147,7 @@ def test_connection_preview_defaults_and_stale_response_do_not_leak(journey_page
     login(page, stack, route="connect")
     expect(page.locator("#page")).to_contain_text("助手访问 CodePier")
     expect(page.locator("#page")).to_contain_text("CodePier 使用外部工具")
+    page.locator('#other-clients > summary').click()
     page.locator('[data-action="new-grant"]').click()
     page.locator("#access-profile-selector").select_option(profile["id"])
     expect(page.locator('#grant-form [name="all_projects"]')).not_to_be_checked()

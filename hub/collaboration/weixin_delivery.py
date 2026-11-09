@@ -385,6 +385,39 @@ class WeixinDelivery:
                 return {'delivery_id': row['id'], 'provider_delivery_verified': False, 'automatic_resend': False}
             return self.c.mutation(principal, room, 'weixin_delivery_control', args, save)
 
+    def retry_room(self, conversation_id, delivery_id, args, principal):
+        """Requeue only parts whose send was never attempted."""
+        with self.store.transaction():
+            principal, room = self.c.rooms.owner(principal, conversation_id)
+            self.c.rooms.require_native(room)
+            if room['state'] != 'active':
+                raise DevError('ROOM_PAUSED', '恢复房间后可以重试。', 409)
+
+            def retry():
+                delivery = self.store.one("""SELECT d.* FROM weixin_deliveries d
+                    JOIN weixin_bindings b ON b.id=d.binding_id
+                    WHERE d.id=? AND b.conversation_id=? AND b.native_member_id!=''""",
+                    (delivery_id, conversation_id))
+                if not delivery:
+                    raise DevError('WEIXIN_DELIVERY_NOT_FOUND', '此房间没有这条消息的发送记录。', 404)
+                if delivery['version'] != args['expected_version']:
+                    raise DevError('STALE_VERSION', '发送状态已变化，请刷新。', 409)
+                self.validate(delivery)
+                parts = self.store.all("""SELECT id FROM weixin_parts
+                    WHERE delivery_id=? AND state='attention' AND attempts=0""", (delivery_id,))
+                if not parts:
+                    raise DevError('WEIXIN_RETRY_UNAVAILABLE', '没有可以安全重试的分项。', 409)
+                now = self.c.clock()
+                self.store.execute("""UPDATE weixin_parts SET state='queued',next_attempt=?,reason_code='',
+                    lease_fence=lease_fence+1,lease_until=0,updated=?
+                    WHERE delivery_id=? AND state='attention' AND attempts=0""", (now, now, delivery_id))
+                self.refresh(delivery_id)
+                self.c.rooms.change(conversation_id, 'message', delivery['message_id'])
+                return {'delivery_id': delivery_id, 'queued_parts': len(parts)}
+
+            return self.c.room_channels.receipt(principal, room, 'weixin_delivery_retry',
+                {**args, 'delivery_id': delivery_id}, retry)
+
     def for_messages(self, identifiers):
         identifiers = list(dict.fromkeys(identifiers))[:124]
         if not identifiers:

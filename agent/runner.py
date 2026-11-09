@@ -314,6 +314,7 @@ class Agent:
             await socket.send(channel.pack({"type": "hello", "channel_binding": binding, "name": config.get("name", platform.node()),
                           "version": VERSION, "build": self.build.describe(), "platform": platform.system(), "hostname": platform.node(),
                           "python": platform.python_version(), "roots": config["allowed_roots"], "capabilities": list(TOOLS),
+                          "computer_enabled": config.get("computer", {}).get("enabled") is True,
                           "management": self.lifecycle.describe(), "device_actions": self.lifecycle.actions(),
                           "scheduler_protocol": 1, "resource_semantics_protocol": 2, "snapshot_execution_protocol": 1, "bounded_execution_protocol": 1,
                           "project_runtime_protocol": 1, "project_runtime_profiles": advertised_profiles(config),

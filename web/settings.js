@@ -60,7 +60,7 @@ window.CodePierSettings = (() => {
   const viewItems = {
     devices: ['device', 'roots'],
     projects: ['project_mapping', 'vps', 'sharing', 'artifacts'],
-    connect: ['grants', 'access_defaults', 'profiles', 'gateway', 'oauth_policy', 'public_url'],
+    connect: ['grants', 'profiles', 'gateway', 'oauth_policy', 'public_url'],
     files: [
       'hub_ingress',
       'native_relay',
@@ -101,7 +101,6 @@ window.CodePierSettings = (() => {
     'device',
     'project_mapping',
     'grants',
-    'access_defaults',
     'native_session',
     'delegation',
     'usage_privacy',
@@ -151,7 +150,6 @@ window.CodePierSettings = (() => {
       base: {},
       node: null,
       pending: false,
-      batchApply: false,
     },
     generation = 0,
     controller = null,
@@ -161,7 +159,6 @@ window.CodePierSettings = (() => {
   const owner = () => (S.session?.user_id || S.session?.username || '') + ':' + S.space_id;
   function dirty() {
     return (
-      state.batchApply ||
       !!window.CodePierFileImportSettings?.dirty() ||
       !!window.CodePierSchedulerSettings?.dirty() ||
       Object.keys(state.draft).some((key) => !equal(state.draft[key], state.base[key]))
@@ -185,7 +182,6 @@ window.CodePierSettings = (() => {
       base: {},
       node: null,
       pending: false,
-      batchApply: false,
     };
   }
   function detach() {
@@ -208,7 +204,6 @@ window.CodePierSettings = (() => {
     if (!dirty()) return true;
     if (!confirm('设置有未保存的改动。放弃这些草稿并离开？')) return false;
     state.draft = clone(state.base);
-    state.batchApply = false;
     window.CodePierFileImportSettings?.discard();
     window.CodePierSchedulerSettings?.discard();
     return true;
@@ -217,7 +212,6 @@ window.CodePierSettings = (() => {
     state.data = data;
     const values = {
       appearance: window.CodePierAppearance?.getPreference() || 'auto',
-      access_defaults: data.items.find((item) => item.id === 'access_defaults').effective_value,
       public_url: data.items.find((item) => item.id === 'public_url').effective_value,
     };
     for (const [key, value] of Object.entries(values)) {
@@ -227,9 +221,8 @@ window.CodePierSettings = (() => {
       }
     }
   }
-  const buttons = (key) =>
-    '<div class="actions"><button class="btn primary" type="submit">保存并核对</button><button class="btn ghost" type="button" data-settings-cancel>取消改动</button></div><p class="form-note settings-save-status" ' +
-    (key === 'access_defaults' ? 'id="access-settings-status" ' : '') +
+  const buttons = () =>
+    '<div class="actions"><button class="btn primary" type="submit">保存</button><button class="btn ghost" type="button" data-settings-cancel>取消改动</button></div><p class="form-note settings-save-status" ' +
     'role="status"></p>';
   function editor(item) {
     if (!item.editable_here) return '';
@@ -256,18 +249,7 @@ window.CodePierSettings = (() => {
           )
           .join('') +
         '</select></label>' +
-        buttons(item.id) +
-        '</form>'
-      );
-    if (item.id === 'access_defaults')
-      return (
-        '<form id="access-settings-form" data-settings-form="access_defaults"><div class="check-list"><label class="check"><input name="all_projects" type="checkbox" ' +
-        (value.all_projects ? 'checked' : '') +
-        '>默认选择全部现有及未来项目</label><label class="check"><input name="developer_scopes" type="checkbox" ' +
-        (value.developer_scopes ? 'checked' : '') +
-        '>默认勾选读取、写入和执行权限</label></div>' +
-        '<p class="form-note">这里只保存你的预选，不批量更改已有连接。已有授权请到 MCP 接入逐项核对。</p>' +
-        buttons(item.id) +
+        buttons() +
         '</form>'
       );
     if (item.id === 'public_url')
@@ -275,96 +257,10 @@ window.CodePierSettings = (() => {
         '<form id="settings-form" data-settings-form="public_url"><label class="field">基础地址<input name="public_url" type="url" maxlength="500" required value="' +
         esc(value) +
         '"></label><p class="form-note">HTTP / HTTPS 根地址，不带 /mcp。</p>' +
-        buttons(item.id) +
+        buttons() +
         '</form>'
       );
     return '';
-  }
-  function advancedHTML() {
-    const enabled = state.base.access_defaults.all_projects;
-    return (
-      '<details class="settings-details" id="access-settings-advanced"><summary>高级：已有 OAuth 连接的项目范围</summary><form id="access-batch-form"><p>先保存“默认选择全部项目”，再单独确认是否扩大当前账号已有有效传统 OAuth 的项目范围。不影响 PAT、Profile、工具权限或凭据有效期。</p>' +
-      '<label class="check"><input type="checkbox" name="apply_to_existing" ' +
-      (state.batchApply ? 'checked' : '') +
-      (enabled ? '' : ' disabled') +
-      '>我希望将全部现有及未来项目应用到已有传统 OAuth 连接</label><button type="submit" class="btn">单独确认并批量应用</button><p id="access-batch-status" class="form-note" role="status"></p></form></details>'
-    );
-  }
-  function bindAdvanced(mounted, current, listen) {
-    const form = $('#access-batch-form', mounted);
-    if (!form) return;
-    const checkbox = form.elements.apply_to_existing;
-    listen(checkbox, 'change', () => {
-      state.batchApply = checkbox.checked;
-    });
-    listen(form, 'submit', async (event) => {
-      event.preventDefault();
-      if (state.pending || !checkbox.checked) return;
-      if (!equal(state.draft.access_defaults, state.base.access_defaults)) {
-        $('#access-batch-status', form).textContent =
-          '请先保存或取消上面的个人预选草稿，再进行批量操作。';
-        return;
-      }
-      if (
-        !(await uiConfirmAction(
-          {
-            title: '批量扩大项目范围？',
-            body: '将当前账号所有有效传统 OAuth 连接（不含 Profile）改为可访问全部现有及未来新增项目？\n只扩展项目范围，现有工具权限、PAT、凭据和有效期保持不变。',
-            confirmLabel: '确认批量应用',
-            danger: true,
-          },
-          {
-            owner: form,
-            current: () =>
-              current() &&
-              !state.pending &&
-              checkbox.checked &&
-              equal(state.draft.access_defaults, state.base.access_defaults),
-          },
-        ))
-      )
-        return;
-      const captured = state;
-      captured.pending = true;
-      $('button', form).disabled = true;
-      checkbox.disabled = true;
-      try {
-        const result = await api('/api/settings/access', {
-          method: 'PUT',
-          body: JSON.stringify({
-            ...captured.base.access_defaults,
-            all_projects: true,
-            apply_to_existing: true,
-            expected_defaults: captured.base.access_defaults,
-          }),
-        });
-        if (!current()) return;
-        const fresh = await api(
-          '/api/settings/catalog' +
-            (captured.project ? '?project=' + encodeURIComponent(captured.project) : ''),
-        );
-        if (!current()) return;
-        if (!fresh.items.find((item) => item.id === 'access_defaults').effective_value.all_projects)
-          throw new Error('重新读取的默认值已变化，请核对原连接范围。');
-        hydrate(fresh);
-        captured.batchApply = false;
-        checkbox.checked = false;
-        checkbox.defaultChecked = false;
-        $('#access-batch-status', form).textContent =
-          result.note + ' 已更新 ' + result.updated_grants + ' 个连接，无需重新连接。';
-      } catch (error) {
-        if (current())
-          $('#access-batch-status', form).textContent =
-            error.message + '；请核对原连接，不自动重试。';
-      } finally {
-        captured.pending = false;
-        if (current()) {
-          $('button', form).disabled = false;
-          checkbox.disabled = !state.base.access_defaults.all_projects;
-          refreshDraftNote();
-        }
-      }
-    });
   }
   function valueText(item) {
     if (item.state === 'restricted') return '仅管理员可查看部署细节';
@@ -418,7 +314,6 @@ window.CodePierSettings = (() => {
       '</span></div>' +
       content +
       entry +
-      (item.id === 'access_defaults' && state.data.space_admin ? advancedHTML() : '') +
       '<details class="settings-details"><summary>详情</summary><p>' +
       esc(item.description) +
       '</p><pre class="settings-value" data-setting-value>' +
@@ -519,7 +414,7 @@ window.CodePierSettings = (() => {
       throw sessionChanged();
 
     return (
-      heading('设置中心', 'SETTINGS', '按你要做的事开始。') +
+      heading('设置') +
       '<section id="settings-center" class="settings-center"><div class="settings-toolbar">' +
       '<label class="field">搜索设置<input id="settings-search" type="search" placeholder="搜索功能或设置…" value="' +
       esc(state.query) +
@@ -567,7 +462,7 @@ window.CodePierSettings = (() => {
       '<details id="settings-more" class="settings-section"><summary>更多设置 <span id="settings-more-count"></span></summary>' +
       '<div class="settings-grid settings-catalog">' +
       data.items
-        .filter((item) => !commonItems.has(item.id))
+        .filter((item) => item.id !== 'access_defaults' && !commonItems.has(item.id))
         .map(card)
         .join('') +
       '</div></details><p id="settings-no-results" hidden>没有匹配的设置</p>' +
@@ -734,18 +629,10 @@ window.CodePierSettings = (() => {
       });
     listen(mounted, 'input', refreshDraftNote);
     listen(mounted, 'change', refreshDraftNote);
-    bindAdvanced(mounted, current, listen);
     for (const form of $$('[data-settings-form]', mounted)) {
       const key = form.dataset.settingsForm;
       const read = () =>
-        key === 'appearance'
-          ? form.elements.appearance.value
-          : key === 'public_url'
-            ? form.elements.public_url.value
-            : {
-                all_projects: form.elements.all_projects.checked,
-                developer_scopes: form.elements.developer_scopes.checked,
-              };
+        key === 'appearance' ? form.elements.appearance.value : form.elements.public_url.value;
       listen(form, 'input', () => {
         state.draft[key] = read();
       });
@@ -804,17 +691,10 @@ window.CodePierSettings = (() => {
               throw new Error('外观已应用，但浏览器未保存偏好；请检查本地存储限制。');
             state.base[key] = submitted;
           } else {
-            const saved = await api(
-              key === 'public_url' ? '/api/settings' : '/api/settings/access',
-              {
-                method: 'PUT',
-                body: JSON.stringify(
-                  key === 'public_url'
-                    ? { public_url: submitted, expected_public_url: baseline }
-                    : { ...submitted, apply_to_existing: false, expected_defaults: baseline },
-                ),
-              },
-            );
+            const saved = await api('/api/settings', {
+              method: 'PUT',
+              body: JSON.stringify({ public_url: submitted, expected_public_url: baseline }),
+            });
             if (!current()) return;
             const fresh = await api(
               '/api/settings/catalog' +
@@ -822,7 +702,7 @@ window.CodePierSettings = (() => {
             );
             if (!current()) return;
             const actual = fresh.items.find((item) => item.id === key).effective_value;
-            const wanted = key === 'public_url' ? saved.public_url : submitted;
+            const wanted = saved.public_url;
             if (!equal(actual, wanted))
               throw new Error('保存后有效值与草稿不同；请核对其他窗口的更改，草稿已保留。');
             state.data = fresh;
@@ -835,22 +715,15 @@ window.CodePierSettings = (() => {
             if (field.type === 'checkbox') field.defaultChecked = field.checked;
             else field.defaultValue = field.value;
           }
-          const batch = $('#access-batch-form', mounted);
-          if (batch)
-            $('[name="apply_to_existing"]', batch).disabled =
-              !state.base.access_defaults.all_projects;
-          feedback(
-            form,
-            (key === 'access_defaults' ? '默认选项已保存，' : '已保存，') + '并重新核对生效值。',
-          );
-          toast('设置已保存并核对');
+          feedback(form, '已保存。');
+          toast('设置已保存');
         } catch (error) {
           feedback(
             form,
             error.code === 'SETTINGS_CHANGED'
               ? '设置已在其他窗口修改。你的草稿仍保留，请取消改动后重新读取，或核对当前有效值。'
               : error.code === 'NETWORK_UNCERTAIN'
-                ? '回执暂未确认，草稿已保留。请重新读取核对，不要假定保存失败。'
+                ? '网络中断，保存结果待确认。草稿已保留。'
                 : error.message,
           );
         } finally {

@@ -292,36 +292,35 @@ async function chatPage() {
   <header class="chat-header chat-workspace-bar">${chatWorkspaceBar()}<button class="chat-square chat-drawer-toggle" id="chat-history-toggle" aria-label="切换会话历史" title="会话历史 · ⌘ B" aria-expanded="false">${chatIcon('menu')}</button>
   <div class="chat-heading"><h1 tabindex="-1" id="chat-title">新对话</h1><div class="chat-subline"><span id="chat-subtitle"></span><span id="chat-connection" class="chat-connection" title="连接状态"><i></i><span>就绪</span></span></div></div><div class="chat-header-right">
   <button id="chat-find-toggle" class="chat-square" aria-label="搜索当前对话" title="搜索当前对话">${chatIcon('search')}</button><button id="chat-focus" class="chat-square chat-focus-button" aria-label="切换专注模式" title="专注模式">${chatIcon('expand')}</button><button id="chat-inspector-toggle" class="chat-square" aria-label="会话详情" title="会话详情">${chatIcon('settings')}</button>
-  <details class="chat-overflow"><summary aria-label="更多操作">···</summary><div><button type="button" data-chat-action="chat-new">新对话</button><button type="button" class="chat-mobile-action" data-chat-action="chat-find-toggle">搜索当前对话</button><button type="button" class="chat-mobile-action" data-chat-action="chat-inspector-toggle">会话详情</button><button data-devtools="overview">当前项目开发工具</button><button data-devtools="validation">测试与验收</button><button data-devtools="handoff">任务衔接</button><button id="chat-rename">重命名</button><button id="chat-resume">恢复会话</button><button id="chat-export">导出完整 Markdown</button><button id="chat-export-json">导出完整 JSON</button><button id="chat-stop">停止会话进程</button><button id="chat-delete" class="danger">删除网页记录</button></div></details></div></header>
+  <details class="chat-overflow"><summary aria-label="更多操作">···</summary><div><button id="chat-rename">重命名</button><details class="chat-export-menu"><summary>导出</summary><button id="chat-export">Markdown</button><button id="chat-export-json">JSON</button></details><button id="chat-stop">停止会话</button><button id="chat-delete" class="danger">删除会话</button></div></details></div></header>
   <div class="chat-body">
   <button id="chat-shade" class="chat-shade" aria-label="关闭会话历史"></button>
-  <aside class="chat-sidebar" aria-label="会话历史"><div class="chat-sidebar-head"><span class="chat-sidebar-label">${chatIcon('terminal')}会话空间</span><span class="chat-sidebar-hint">Pi / Codex / Claude</span></div><button type="button" id="chat-new" class="chat-new-button" title="新对话" aria-label="新对话">${chatIcon('plus')}<span>新对话</span><kbd data-chat-shortcut="new">⌘ ⇧ O</kbd></button>
+  <aside class="chat-sidebar" aria-label="会话历史"><button type="button" id="chat-new" class="chat-new-button" title="新对话" aria-label="新对话">${chatIcon('plus')}<span>新对话</span><kbd data-chat-shortcut="new">⌘ ⇧ O</kbd></button>
   <div class="chat-history-heading"><strong>全部会话</strong><button type="button" id="chat-history-clear" class="chat-text-button" hidden>清除筛选</button></div>
-  <label class="chat-history-scope">筛选项目<select id="chat-history-project" aria-label="筛选历史项目"><option value="">所有项目</option>${S.projects.map((p) => `<option value="${esc(p.id)}">${esc(p.alias)}</option>`).join('')}</select></label>
-  <div class="chat-history-filter"><input id="chat-history-search" type="search" placeholder="搜索会话、项目或内容" aria-label="查找对话"><select id="chat-history-filter" aria-label="筛选会话"><option value="">全部</option><option value="running">运行中</option><option value="exited">已停止</option><option value="interrupted">已中断</option></select></div>
+  <div class="chat-history-filter"><input id="chat-history-search" type="search" placeholder="搜索会话、项目或内容" aria-label="查找对话"></div>
+  <div class="chat-history-chips"><details><summary>项目</summary><select id="chat-history-project" aria-label="筛选历史项目"><option value="">所有项目</option>${S.projects.map((p) => `<option value="${esc(p.id)}">${esc(p.alias)}</option>`).join('')}</select></details><details><summary>状态</summary><select id="chat-history-filter" aria-label="筛选会话"><option value="">全部</option><option value="running">运行中</option><option value="exited">已停止</option><option value="interrupted">已中断</option></select></details></div>
   <div id="chat-history-notice" class="chat-history-notice" role="alert" hidden><span></span><button type="button" id="chat-history-retry">重试列表</button></div>
   <div id="chat-history" class="chat-history" aria-label="历史对话列表" aria-busy="false"></div><div class="chat-history-pages"><button id="chat-history-prev" hidden>较新</button><span id="chat-history-count"></span><button id="chat-history-next" hidden>较早</button></div>
-  <footer class="chat-sidebar-footer"><button type="button" id="chat-command-menu" class="chat-sidebar-action" aria-label="快捷操作" title="快捷操作">${chatIcon('command')}<span>快捷操作</span><kbd data-chat-shortcut="command">⌘ K</kbd></button><div class="chat-sidebar-preferences"><button type="button" data-nav="projects">${chatIcon('folder')}项目管理</button><select id="chat-appearance" aria-label="外观"><option value="auto">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></div></footer></aside>
+  <footer class="chat-sidebar-footer"><button type="button" id="chat-command-menu" class="chat-sidebar-action" aria-label="快捷操作" title="快捷操作">${chatIcon('command')}<span>快捷操作</span><kbd data-chat-shortcut="command">⌘ K</kbd></button></footer></aside>
   <div class="chat-main">
   <div id="chat-find-bar" class="chat-find-bar" hidden><input id="chat-find-input" type="search" placeholder="在已载入消息中查找" aria-label="消息关键词"><span id="chat-find-count"></span><button id="chat-find-prev" aria-label="上一个匹配">↑</button><button id="chat-find-next" aria-label="下一个匹配">↓</button><button id="chat-find-close" aria-label="关闭查找">×</button></div>
-  <div id="chat-scroll" class="chat-scroll" tabindex="0" aria-label="对话消息"><button id="chat-older" class="chat-text-button" hidden>显示更早消息</button><div id="chat-empty" class="chat-empty"><div class="chat-empty-mark">${chatIcon('command')}</div><span class="chat-eyebrow">CLI 工作空间</span><h2>今天，想推进什么？</h2><p>选择项目并描述任务，与 ${chatProviderName(c.provider)} 一起推进工作。</p><div class="chat-starters"><button data-chat-starter="梳理这个项目的结构，指出值得优先处理的问题。">${chatIcon('folder')}<span><strong>了解项目</strong><small>梳理结构与关键入口</small></span></button><button data-chat-starter="检查当前改动，找出可复现的问题并给出修复建议。">${chatIcon('check')}<span><strong>检查改动</strong><small>找出问题与潜在风险</small></span></button><button data-chat-starter="先阅读项目说明和已有实现，再制定实施计划。">${chatIcon('command')}<span><strong>制定计划</strong><small>把想法拆成具体步骤</small></span></button></div></div><div id="chat-messages" class="chat-messages"></div></div>
+  <div id="chat-scroll" class="chat-scroll" tabindex="0" aria-label="对话消息"><button id="chat-older" class="chat-text-button" hidden>显示更早消息</button><div id="chat-empty" class="chat-empty"><div class="chat-empty-mark">${chatIcon('command')}</div><h2 id="chat-empty-title"></h2><div class="chat-starters"><button data-chat-starter="梳理这个项目的结构，指出值得优先处理的问题。">${chatIcon('folder')}<span><strong>了解项目</strong><small>梳理结构与关键入口</small></span></button><button data-chat-starter="检查当前改动，找出可复现的问题并给出修复建议。">${chatIcon('check')}<span><strong>检查改动</strong><small>找出问题与潜在风险</small></span></button><button data-chat-starter="先阅读项目说明和已有实现，再制定实施计划。">${chatIcon('command')}<span><strong>制定计划</strong><small>把想法拆成具体步骤</small></span></button></div></div><div id="chat-messages" class="chat-messages"></div><button type="button" class="chat-text-button" id="chat-resume" hidden>恢复会话</button></div>
   <button id="chat-latest" class="chat-latest" hidden>↓ 回到最新</button>
-  <div class="chat-composer-wrap"><div id="chat-activity" class="chat-activity" hidden role="status"><i aria-hidden="true"></i><span id="chat-activity-text"></span><button type="button" id="chat-activity-queue"></button><div class="chat-run-controls"><select id="chat-send-mode" aria-label="发送方式" title="正在执行时如何发送新消息"><option value="followup">排队跟进</option><option value="steer">立即补充</option></select><button type="button" id="chat-interrupt" class="chat-stop-turn" aria-label="中断当前" title="中断当前回复" hidden>${chatIcon('stop')}<span>中断当前</span></button></div></div><div id="chat-outbox" class="chat-outbox" aria-live="polite"></div><div id="chat-files" class="chat-files" aria-live="polite"></div>
-  <div id="chat-target-notice" class="chat-catalog-notice" role="status" hidden><span></span><button type="button" id="chat-target-refresh">检查连接</button></div>
-  <div id="chat-catalog-notice" class="chat-catalog-notice" hidden><span></span><button id="chat-catalog-retry">重新加载</button></div>
+  <div class="chat-composer-wrap"><div id="chat-activity" class="chat-activity" hidden role="status"><i aria-hidden="true"></i><span id="chat-activity-text"></span><button type="button" id="chat-activity-queue"></button><div class="chat-run-controls"><select id="chat-send-mode" aria-label="发送方式" title="正在执行时如何发送新消息"><option value="followup">等这轮结束再发</option><option value="steer">插入当前回复</option></select><button type="button" id="chat-interrupt" class="chat-stop-turn" aria-label="中断当前" title="中断当前回复" hidden>${chatIcon('stop')}<span>中断当前</span></button></div></div><div id="chat-outbox" class="chat-outbox" aria-live="polite"></div><div id="chat-files" class="chat-files" aria-live="polite"></div>
+  <div id="chat-target-notice" class="chat-catalog-notice" role="status" hidden><span></span><button type="button" id="chat-target-refresh" hidden>检查连接</button><button type="button" id="chat-catalog-retry" hidden>重新加载</button></div>
 
 
   <form id="chat-form" class="chat-composer"><textarea id="chat-compose" rows="1" aria-label="消息" aria-describedby="chat-status chat-text-limit" placeholder="描述任务，输入 / 查看指令…" maxlength="${CHAT_MESSAGE_MAX_BYTES}"></textarea>
-  <div class="chat-compose-bottom"><div class="chat-compose-controls"><button class="chat-square" type="button" id="chat-attach" aria-label="添加文件或图片" title="上传图片与文件">${chatIcon('plus')}</button><input type="file" id="chat-file-input" multiple hidden>  <button type="button" id="chat-model-picker" class="chat-model-picker" aria-label="选择模型" aria-haspopup="dialog" aria-expanded="false">${chatIcon('model')}<span id="chat-model-name">选择模型</span>${chatIcon('chevron')}</button></div>
-  <div class="chat-send-actions"><button type="button" id="chat-options-toggle" class="chat-square" aria-label="会话设置" aria-controls="chat-options" aria-expanded="false" title="项目、思考强度与工具">${chatIcon('settings')}</button><button type="submit" id="chat-send" class="chat-send" aria-label="发送消息">${chatIcon('send')}</button></div></div></form>
+  <div class="chat-compose-bottom"><div class="chat-compose-controls"><button class="chat-square" type="button" id="chat-attach" aria-label="添加文件或图片" title="上传图片与文件">${chatIcon('plus')}</button><input type="file" id="chat-file-input" multiple hidden><button type="button" id="chat-options-toggle" class="chat-model-picker" aria-label="项目、CLI 与模型" aria-controls="chat-options" aria-expanded="false">${chatIcon('settings')}<span id="chat-config-summary">会话设置</span>${chatIcon('chevron')}</button></div>
+  <div class="chat-send-actions"><button type="submit" id="chat-send" class="chat-send" aria-label="发送消息">${chatIcon('send')}</button></div></div></form>
   <button type="button" id="chat-options-shade" class="chat-options-shade" aria-label="关闭会话设置" tabindex="-1" hidden></button>
-  <section id="chat-options" class="chat-options" role="region" aria-label="会话设置"><header class="chat-options-head"><div><strong>会话设置</strong><span>按你的工作方式调整</span></div><button type="button" id="chat-options-close" class="chat-square" aria-label="关闭会话设置">${chatIcon('close')}</button></header>
-  <div id="chat-new-context" class="chat-new-context"><label>工作项目<select id="chat-project" aria-label="项目">${S.projects.map((p) => `<option value="${esc(p.id)}" ${p.id === c.project ? 'selected' : ''}>${esc(p.alias)}</option>`).join('')}</select></label><button type="button" id="chat-change-project" class="chat-text-button" aria-label="搜索并选择工作项目">选择项目</button><span id="chat-target-info"></span></div>
-  <div class="chat-config-bar"><label class="chat-cli-label"><span>CLI</span><select id="chat-provider" aria-label="原生 CLI"><option value="pi">Pi</option><option value="codex">Codex</option><option value="claude">Claude</option></select></label>  <label class="chat-effort-label">${chatIcon('brain')}<span>思考</span><select id="chat-effort-select" aria-label="思考强度"><option value="">本机默认</option></select></label>
+  <section id="chat-options" class="chat-options" role="region" aria-label="会话设置"><header class="chat-options-head"><div><strong>会话设置</strong></div><button type="button" id="chat-options-close" class="chat-square" aria-label="关闭会话设置">${chatIcon('close')}</button></header>
+  <div id="chat-new-context" class="chat-new-context"><label>工作项目<select id="chat-project" aria-label="项目">${S.projects.map((p) => `<option value="${esc(p.id)}" ${p.id === c.project ? 'selected' : ''}>${esc(p.alias)}</option>`).join('')}</select></label><span id="chat-target-info"></span></div>
+  <div class="chat-config-bar"><button type="button" id="chat-model-picker" class="chat-model-picker" aria-label="选择模型" aria-haspopup="dialog" aria-expanded="false">${chatIcon('model')}<span id="chat-model-name">选择模型</span>${chatIcon('chevron')}</button><label class="chat-cli-label"><span>CLI</span><select id="chat-provider" aria-label="原生 CLI"><option value="pi">Pi</option><option value="codex">Codex</option><option value="claude">Claude</option></select></label>  <label class="chat-effort-label">${chatIcon('brain')}<span>思考</span><select id="chat-effort-select" aria-label="思考强度"><option value="">本机默认</option></select></label>
   <button type="button" id="chat-cwd-button" class="chat-cwd-button" title="工作目录">${chatIcon('folder')}<span>.</span></button></div>
-  <div class="chat-option-tools"><button type="button" id="chat-commands" aria-label="指令与技能">${chatIcon('command')}<span>指令与技能</span></button><button type="button" id="chat-file-library" aria-label="附件库">${chatIcon('file')}<span>附件库</span></button><button type="button" id="chat-usage" title="查看用量">上下文</button></div></section>
+  <div class="chat-option-tools"><button type="button" id="chat-file-library" aria-label="附件库">${chatIcon('file')}<span>附件库</span></button></div></section>
   <div class="chat-setting-feedback"><span id="chat-setting-state" class="chat-setting-state"></span><button type="button" id="chat-settings-retry" class="chat-text-button" hidden>重试设置</button></div>
-  <div class="chat-composer-note"><span id="chat-status" role="status" data-quiet="true">Enter 发送 · Shift+Enter 换行</span><span id="chat-text-limit" role="status" hidden></span><button id="chat-retry" hidden>重试原请求</button></div></div>
+  <div class="chat-composer-note"><span id="chat-status" role="status" data-quiet="true">Enter 发送 · Shift+Enter 换行</span><span id="chat-text-limit" role="status" hidden></span><button id="chat-retry" hidden>重试</button></div></div>
   </div>
   <aside id="chat-inspector" class="chat-inspector" hidden><header><strong>会话详情</strong><button id="chat-inspector-close" class="chat-square" aria-label="关闭会话详情">${chatIcon('close')}</button></header><nav class="chat-inspector-tabs">${[
     ['overview', '概览'],
@@ -381,7 +380,6 @@ async function chatPage() {
   );
   on('chat-options-close', 'click', () => chatOptions(false, true));
   on('chat-options-shade', 'click', () => chatOptions(false, true));
-  on('chat-change-project', 'click', () => chatNewSession());
   on('chat-target-refresh', 'click', async () => {
     const b = $('#chat-target-refresh');
     b.disabled = true;
@@ -509,11 +507,9 @@ async function chatPage() {
   on('chat-catalog-retry', 'click', () => chatLoadCatalog(true));
   on('chat-settings-retry', 'click', () => chatSubmitSettings(null, true));
   on('chat-cwd-button', 'click', chatCwdPopover);
-  on('chat-commands', 'click', () => chatInspector(c.inspector === 'commands' ? '' : 'commands'));
   on('chat-file-library', 'click', () => chatInspector(c.inspector === 'files' ? '' : 'files'));
   on('chat-inspector-toggle', 'click', () => chatInspector(c.inspector ? '' : 'overview'));
   on('chat-inspector-close', 'click', () => chatInspector(''));
-  on('chat-usage', 'click', () => chatInspector('overview'));
   on('chat-focus', 'click', () => {
     c.focus = !c.focus;
     document.body.classList.toggle('chat-focus', c.focus);
@@ -646,8 +642,6 @@ function chatRestore(history = true) {
   $('#chat-provider').disabled = !!c.selected;
   $('#chat-title').textContent = c.selected?.title || '新对话';
   $('#chat-subtitle').textContent = S.projects.find((p) => p.id === c.project)?.alias || '选择项目';
-  $('#chat-empty p').textContent =
-    '描述目标，与 ' + chatProviderName(c.provider) + ' 一起把想法变成进展。';
   $('#chat-cwd-button span').textContent = c.cwd;
   $('#chat-cwd-button').title = '工作目录：' + (c.selected?.cwd || c.cwd);
   $('#chat-send').disabled = v.busy;
@@ -659,7 +653,6 @@ function chatRestore(history = true) {
   chatOutbox();
   chatSettings(v.settings);
   if (history) chatRenderHistory();
-  chatStats();
   $('#chat-find-input').value = v.search || '';
   $('#chat-find-count').textContent = '';
   chatTargetSync();
@@ -785,10 +778,6 @@ function chatSettings(settings) {
     'has-update',
     !!v.settingOp || !!v.pendingSettings || !!v.configForResume,
   );
-  const notice = $('#chat-catalog-notice');
-  notice.hidden = !v.catalogError;
-  if (v.catalogError)
-    notice.querySelector('span').textContent = '模型目录加载失败：' + v.catalogError;
   const caps = v.settings?.capabilities || v.catalog?.capabilities;
   if (caps?.effort_runtime === false && ['starting', 'running'].includes(ChatUI.selected?.status)) {
     select.disabled = true;
@@ -1044,7 +1033,7 @@ async function chatWatchReceipt(id, receipt, gen, v, op) {
       }
       if (['error', 'cancelled', 'uncertain', 'interrupted'].includes(result.state)) {
         op.state = result.state === 'uncertain' ? 'uncertain' : 'error';
-        chatStatus('设置未生效，请查看错误或重试原请求', true);
+        chatStatus('设置未生效，请查看错误或重试', true);
         chatSettings(v.settings);
         return;
       }
@@ -1151,7 +1140,7 @@ async function chatSend(retry = false) {
     return;
   }
   if (v.pending && !retry) {
-    chatStatus('上一条请求尚未确认，请重试原请求', true);
+    chatStatus('上一条请求尚未确认，请重试', true);
     return;
   }
   if (!v.pending) {
@@ -1443,7 +1432,6 @@ function chatEvent(e) {
   }
   if (e.type === 'stats') {
     v.stats = e.stats || e;
-    chatStats();
     if (c.inspector === 'overview') chatInspectorRender();
     return;
   }
@@ -1910,7 +1898,7 @@ function chatApproval(item) {
       );
       if (op.identity !== S.session) return;
       if (['error', 'uncertain', 'cancelled', 'interrupted'].includes(result.state))
-        throw new Error('回答未被原生确认，请重试原回答核实。');
+        throw new Error('回答还未确认送达，点“重试”。');
       item.answered = true;
     } catch (error) {
       if (op.identity === S.session) {
@@ -1936,7 +1924,7 @@ function chatApproval(item) {
     if (!op.busy) {
       const retry = document.createElement('button');
       retry.type = 'button';
-      retry.textContent = '重试原回答';
+      retry.textContent = '重试';
       retry.onclick = () => answer(op.value);
       box.append(retry);
     }
@@ -2163,11 +2151,11 @@ async function chatResume() {
     identity = S.session;
   if (!row || v.resumeBusy || v.busy) return;
   if (v.pending) {
-    chatStatus('上一条消息尚未确认，请重试原请求。草稿已保留。', true);
+    chatStatus('上一条消息还没确认发出，点“重试”。', true);
     return;
   }
   if (['running', 'starting', 'stopping', 'orphaned'].includes(row.status)) {
-    chatStatus('会话进程尚未退出，请先核实节点状态。');
+    chatStatus('会话还在运行，先停止再恢复。');
     return;
   }
   v.resumeId = v.resumeId || uid();
@@ -2222,7 +2210,7 @@ async function chatStop() {
   if (!row) return;
   const confirmed = await chatDialog({
     title: '停止会话？',
-    body: '当前任务和排队消息会中断。对话历史与项目文件会保留。',
+    body: '正在进行的回复和排队消息会取消。',
     confirmLabel: '停止会话',
     danger: true,
   });
@@ -2233,7 +2221,7 @@ async function chatStop() {
   }
   v.stopReceipt = v.stopReceipt || uid();
   await chatAPI('stop', { id: row.id, receipt: v.stopReceipt }, project);
-  if (chatCurrent(gen, v)) chatStatus('已请求停止，等待原生进程退出');
+  if (chatCurrent(gen, v)) chatStatus('正在停止…');
 }
 async function chatDelete() {
   const c = ChatUI,
@@ -2241,24 +2229,49 @@ async function chatDelete() {
     v = chatView(),
     gen = c.generation,
     project = c.project;
-  if (!row) return;
-  if (['starting', 'running', 'stopping', 'orphaned'].includes(row.status)) {
-    chatStatus('请先停止会话，确认进程退出后再删除记录', true);
-    return;
-  }
-  const confirmed = await chatDialog({
-    title: '删除网页记录？',
-    body: '仅删除这条网页会话记录，不删除本机原生历史或项目文件。',
-    confirmLabel: '删除记录',
-    danger: true,
-  });
-  if (!confirmed || !chatCurrent(gen, v)) return;
-  await chatAPI('delete', { id: row.id, confirm: row.id }, project);
-  if (chatCurrent(gen)) await chatSwitch(null, project);
-  c.views.delete(chatKey(project, row.id));
-  for (const file of v.files) {
-    file.removed = true;
-    if (file.preview) URL.revokeObjectURL(file.preview);
+  if (!row || v.deleteBusy) return;
+  const live = () => ['starting', 'running', 'stopping', 'orphaned'].includes(row.status);
+  const running = live();
+  v.deleteBusy = true;
+  try {
+    const confirmed = await chatDialog({
+      title: running ? '停止并删除这个会话？' : '删除这个会话？',
+      body:
+        (running ? '正在进行的回复和排队消息会取消。' : '') + '电脑上的 CLI 历史和项目文件会保留。',
+      confirmLabel: running ? '停止并删除' : '删除',
+      danger: true,
+    });
+    if (!confirmed || !chatCurrent(gen, v)) return;
+    if (live()) {
+      if (v.stopSessionId !== row.id) {
+        v.stopSessionId = row.id;
+        v.stopReceipt = uid();
+      }
+      v.stopReceipt ||= uid();
+      if (row.status !== 'stopping')
+        await chatAPI('stop', { id: row.id, receipt: v.stopReceipt }, project);
+      if (!chatCurrent(gen, v)) return;
+      chatStatus('正在停止…');
+      const deadline = Date.now() + 30000;
+      while (live() && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        if (!chatCurrent(gen, v)) return;
+      }
+      if (live()) {
+        chatStatus('会话还在停止，稍后再试。', true);
+        return;
+      }
+    }
+    await chatAPI('delete', { id: row.id, confirm: row.id }, project);
+    if (chatCurrent(gen, v)) await chatSwitch(null, project);
+    c.views.delete(chatKey(project, row.id));
+    for (const file of v.files) {
+      file.removed = true;
+      if (file.preview) URL.revokeObjectURL(file.preview);
+    }
+  } finally {
+    v.deleteBusy = false;
+    if (chatCurrent(gen, v)) chatSyncChrome();
   }
 }
 function chatExport(format) {

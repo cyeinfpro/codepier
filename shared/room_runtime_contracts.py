@@ -168,6 +168,7 @@ class ChannelAction(Model):
     label: str = Field(default='微信', min_length=1, max_length=80)
     confirm_scanner_id: str = Field(default='', max_length=256)
     confirm_peer_id: str = Field(default='', max_length=256)
+    confirm_pairing_sender: bool = False
     verify_code: str = Field(default='', max_length=32)
     confirm_credential_storage: bool = False
     confirm_provider_terms: bool = False

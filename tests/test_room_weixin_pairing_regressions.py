@@ -25,7 +25,7 @@ async def start_flow(s, owner, provider, conversation_id, member_id=''):
     return flow, action
 
 
-async def bound_until_pairing(collab):
+async def bound_until_pairing(collab, *, auto_confirm=False):
     ctx = await connected(collab)
     s, owner, worker, clock, identity, credentials = ctx
     from dataclasses import replace
@@ -47,7 +47,7 @@ async def bound_until_pairing(collab):
     flow = await action(flow, 'poll_qr')
     flow = await action(flow, 'accept_account', confirm_scanner_id=flow['qr']['scanner_id'])
     flow = await action(flow, 'bind', confirm_external_data_ingress=True, allow_replies=True,
-        confirm_until_revoked=True)
+        confirm_until_revoked=True, confirm_pairing_sender=auto_confirm)
     assert flow['stage'] == 'pairing'
     return ctx, flow, provider, action
 
@@ -194,3 +194,21 @@ async def test_member_removed_during_setup_binds_the_member_shown_in_preview(col
     assert flow['stage'] == 'pairing'
     binding = s.store.one('SELECT * FROM weixin_bindings WHERE id=?', (flow['binding']['id'],))
     assert binding['native_member_id'] == replacement['member_id']
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('expired', [False, True])
+async def test_explicit_single_confirmation_respects_pairing_deadline(collab, expired):
+    (service, owner, _, clock, _, _), flow, _, _ = await bound_until_pairing(collab, auto_confirm=True)
+    if expired:
+        clock[0] = flow['binding']['pairing_until'] + 1
+        result = service.room_channels.read(flow['id'], owner)['flow']
+        assert result['stage'] == 'pairing_expired'
+        assert not result['peer_verified']
+    else:
+        service.weixin.commit_updates(service.weixin.claim_poll(flow['account_id']),
+            packet(1, flow['binding']['pairing_challenge']))
+        result = service.room_channels.read(flow['id'], owner)['flow']
+        assert result['stage'] == 'ready'
+        assert result['peer_verified']
+        assert result['binding']['peer_id'] == 'synthetic-peer'
+        assert not result['work_authorized']

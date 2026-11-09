@@ -27,12 +27,11 @@ def show_draft_field(page, dirty_field):
     selector = {
         'address': '#settings-form',
         'appearance': '[data-settings-form="appearance"]',
-        'access': '#access-settings-form',
     }[dirty_field]
     expect(page.locator(selector)).to_be_visible()
 
 
-@pytest.mark.parametrize('dirty_field', ['address', 'appearance', 'access', 'draft'])
+@pytest.mark.parametrize('dirty_field', ['address', 'appearance', 'draft'])
 def test_auto_refresh_defers_unsaved_values_and_resumes_after_resolution(update_browser, stack, dirty_field):
     browser, _ = update_browser
     state = ready()
@@ -43,13 +42,11 @@ def test_auto_refresh_defers_unsaved_values_and_resumes_after_resolution(update_
             page.fill('#settings-form [name="public_url"]', stack.url + '/unsaved')
         elif dirty_field == 'appearance':
             page.locator('[data-settings-form="appearance"] select').select_option('dark')
-        elif dirty_field == 'access':
-            page.locator('#access-settings-form [name="all_projects"]').check()
         else:
             page.evaluate('S.work.dirty=true')
         show_update_controls(page)
         complete(state)
-        page.click('#panel-update-refresh')
+        page.evaluate('CodePierPanelUpdate.resume()')
         expect(page.locator('#panel-update-note')).to_contain_text('暂缓自动刷新')
         assert '_codepier_updated=' not in page.url
         show_draft_field(page, dirty_field)
@@ -59,9 +56,6 @@ def test_auto_refresh_defers_unsaved_values_and_resumes_after_resolution(update_
         elif dirty_field == 'appearance':
             expect(page.locator('[data-settings-form="appearance"] select')).to_have_value('dark')
             page.locator('[data-settings-form="appearance"] select').select_option('auto')
-        elif dirty_field == 'access':
-            expect(page.locator('#access-settings-form [name="all_projects"]')).to_be_checked()
-            page.locator('#access-settings-form [name="all_projects"]').uncheck()
         else:
             page.evaluate('S.work.dirty=false')
         expect(page).to_have_url(re.compile(r'_codepier_updated=.*#settings$'), timeout=12000)
@@ -82,14 +76,14 @@ def test_no_early_reload_and_monitor_survives_navigation_and_service_recovery(up
         expect(page.locator('#panel-update-note')).to_contain_text('等待目标版本')
         assert '_codepier_updated=' not in page.url
         page.evaluate("navigate('devices')")
-        expect(page.locator('#page h1')).to_have_text('设备节点')
+        expect(page.locator('#page h1')).to_have_text('电脑')
         # A successful HTTP response with unavailable updater is not an update failure.
         state.update(enabled=False, code='UPDATER_UNAVAILABLE')
         page.wait_for_timeout(2400)
         assert '_codepier_updated=' not in page.url
         complete(state)
         expect(page).to_have_url(re.compile(r'_codepier_updated=.*#devices$'), timeout=12000)
-        expect(page.locator('#page h1')).to_have_text('设备节点')
+        expect(page.locator('#page h1')).to_have_text('电脑')
         assert not calls and not errors, errors
     finally:
         page.close()
@@ -108,11 +102,11 @@ def test_completed_update_does_not_reload_loop_when_storage_is_unavailable(updat
     page.on('request', lambda request: documents.append(request.url) if request.resource_type == 'document' else None)
     try:
         complete(state)
-        page.click('#panel-update-refresh')
+        page.evaluate('CodePierPanelUpdate.resume()')
         expect(page).to_have_url(re.compile(r'_codepier_updated=.*#settings$'), timeout=12000)
         show_update_controls(page)
         expect(page.locator('#panel-update-state')).to_contain_text('更新成功')
-        page.click('#panel-update-refresh')
+        page.evaluate('CodePierPanelUpdate.resume()')
         page.wait_for_timeout(2400)
         assert len(documents) == 1, documents
         assert not calls and not errors, errors
@@ -129,7 +123,7 @@ def test_failed_or_rolled_back_update_never_auto_reloads(update_browser, stack, 
         complete(state)
         state['operation'].update(state=terminal_state, message=terminal_state)
         state['recovery_required'] = terminal_state == 'recovery_required'
-        page.click('#panel-update-refresh')
+        page.evaluate('CodePierPanelUpdate.resume()')
         expect(page.locator('#panel-update-state')).to_contain_text(terminal_state)
         expect(page.locator('#panel-update-reload')).to_be_hidden()
         assert '_codepier_updated=' not in page.url
@@ -145,7 +139,7 @@ def test_already_current_document_does_not_reload_for_historic_success(update_br
     page, calls, errors = open_settings(browser, stack, state)
     try:
         expect(page.locator('#panel-update-state')).to_contain_text('更新成功')
-        page.click('#panel-update-refresh')
+        page.evaluate('CodePierPanelUpdate.resume()')
         assert '_codepier_updated=' not in page.url
         assert not calls and not errors, errors
     finally:

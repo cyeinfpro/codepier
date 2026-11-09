@@ -1,7 +1,14 @@
 """Room-first panel resources. All writes use live session + CSRF validation."""
 from typing import Annotated
 from fastapi import Query, Request, Response
+from pydantic import Field
+from shared.collaboration_contracts import Key, Model
 from shared.util import DevError
+
+
+class RoomDeliveryRetry(Model):
+    expected_version: int = Field(strict=True, ge=1)
+    idempotency_key: Key
 
 
 def install_routes(router, auth, runtime):
@@ -25,6 +32,11 @@ def install_routes(router, auth, runtime):
     @router.get('/rooms/{identifier}')
     async def room(request: Request, identifier: str):
         return await store.run(lambda: service.rooms.read({'conversation_id': identifier}, auth.panel(request)))
+
+    @router.post('/rooms/{identifier}/weixin-deliveries/{delivery_id}/retry')
+    async def retry_weixin_delivery(request: Request, identifier: str, delivery_id: str, body: RoomDeliveryRetry):
+        return await store.run(lambda: service.weixin.delivery.retry_room(
+            identifier, delivery_id, body.model_dump(), auth.admin(request, True)))
 
     @router.get('/rooms/{identifier}/context')
     async def context(request: Request, response: Response, identifier: str, cursor: str = '',

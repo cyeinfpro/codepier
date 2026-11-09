@@ -488,6 +488,9 @@ class RoomChannels:
 
     async def action(self, raw, principal):
         args = validate(ChannelAction, raw)
+        # Keep the fingerprint of requests made before this optional field.
+        if not args['confirm_pairing_sender']:
+            args.pop('confirm_pairing_sender')
         row, principal, conversation = await self.store.run(self.get, args['flow_id'], principal)
         # QR operations own durable attempt markers and never hold SQLite while
         # waiting for the provider. Their original key survives lost responses.

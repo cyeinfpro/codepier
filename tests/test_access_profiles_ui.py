@@ -89,8 +89,11 @@ def test_oauth_profile_filters_scope_and_project_then_binds_real_token(profiles_
     request_id = parse_qs(urlsplit(response.headers['location']).query)['authorize'][0]
     page.route('http://localhost:12345/callback*', lambda route: route.fulfill(body='Authorized test callback'))
     page.evaluate('(id)=>consentModal(id)', request_id)
+    page.locator('#oauth-options > summary').click()
     expect(page.locator('#access-profile-selector')).to_be_visible()
     page.select_option('#access-profile-selector', profile['id'])
+    expect(page.locator('#allow-read')).to_be_hidden()
+    expect(page.locator('#allow-dev')).to_be_hidden()
     dialog = page.locator('.modal')
     expect(dialog.locator('[name="scope"][value="execute"]')).to_have_count(0)
     expect(dialog.locator('[name="scope"][value="computer"]')).not_to_be_checked()

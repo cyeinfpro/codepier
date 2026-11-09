@@ -66,7 +66,7 @@ def open_settings(browser,stack,state,width=1440,post_handler=None,init_script=N
     page.route('**/api/computer/approvals',approvals)
     page.goto(stack.url+'/#settings')
     page.fill('#username', 'admin');page.fill('#password',stack.password);page.click('#login-form button')
-    expect(page.locator('#page h1')).to_have_text('设置中心')
+    expect(page.locator('#page h1')).to_have_text('设置')
     show_update_controls(page)
     return page,calls,errors
 
@@ -122,7 +122,7 @@ def test_update_confirmation_single_submission_restart_recovery_and_escaping(upd
         expect(page.locator('#panel-update-apply')).to_be_disabled()
         assert len(calls)==1 and calls[0]['body']['confirmation']=='1.11.0'
         page.reload()
-        expect(page.locator('#page h1')).to_have_text('设置中心')
+        expect(page.locator('#page h1')).to_have_text('设置')
         show_update_controls(page)
         expect(page.locator('#panel-update-state')).to_contain_text('正在构建')
         assert len(calls)==1
@@ -156,7 +156,7 @@ def test_lost_submission_response_queries_receipt_without_second_post(update_bro
         assert len(calls)==1
         state.update(busy=False,request_found=True)
         state['operation'].update(state='failed',message='GitHub 请求限流，请稍后重新检查')
-        page.click('#panel-update-refresh')
+        page.evaluate('CodePierPanelUpdate.resume()')
         expect(page.locator('#panel-update-state')).to_contain_text('GitHub 请求限流')
         expect(page.locator('#panel-update-check')).to_be_enabled()
         assert len(calls)==1 and not errors,errors
@@ -209,7 +209,7 @@ def test_global_update_entry_and_failure_banner_removal(update_browser,stack,wid
             route.fulfill(response=response,json=value)
         page.route(lambda url: urlsplit(url).path == '/api/overview', overview)
         page.evaluate("navigate('overview')")
-        expect(page.locator('#page h1')).to_have_text('控制总览')
+        expect(page.locator('#page h1')).to_have_text('总览')
         expect(page.locator('.attention-strip')).to_have_count(0)
         expect(page.locator('[data-cp-key="operation:synthetic-failure"] .badge.failed')).to_be_visible()
         entry=page.locator('[data-panel-update-open]')
@@ -226,7 +226,7 @@ def test_global_update_entry_and_failure_banner_removal(update_browser,stack,wid
         path=Path('.work/panel-agent-update/screenshots');path.mkdir(parents=True,exist_ok=True)
         page.screenshot(path=str(path/f'{kind}-{theme}-{width}-entry.png'),animations='disabled')
         entry.click()
-        expect(page.locator('#page h1')).to_have_text('控制总览')
+        expect(page.locator('#page h1')).to_have_text('总览')
         expect(page.locator('#panel-update-popover')).to_be_visible()
         assert not calls
         page.locator('[data-panel-update-close]').click()
@@ -275,7 +275,7 @@ def test_top_update_entry_keeps_same_settings_draft(update_browser,stack):
         expect(page.locator('#panel-update-popover')).to_be_visible()
         expect(page.locator('#panel-update')).to_be_visible()
         expect(field).to_have_value(stack.url+'/unsaved')
-        assert len(calls)==1 and calls[0]['body']['update_agents'] is False
+        assert not calls
         assert not errors,errors
     finally:page.close()
 
@@ -293,12 +293,15 @@ def test_top_entry_direct_apply_double_click_and_original_receipt(update_browser
     page,calls,errors=open_settings(browser,stack,state,post_handler=post,get_handler=get)
     try:
         page.evaluate("navigate('overview')")
-        expect(page.locator('#page h1')).to_have_text('控制总览')
+        expect(page.locator('#page h1')).to_have_text('总览')
         entry=page.locator('[data-panel-update-open]')
-        page.on('dialog',lambda dialog:(dialogs.append(dialog.message),dialog.dismiss()))
+        page.on('dialog',lambda dialog:(dialogs.append(dialog.message),dialog.accept()))
         entry.dblclick()
+        assert not calls
+        page.uncheck('#panel-update-float-agents')
+        page.locator('#panel-update-float-apply').dblclick()
         expect(page.locator('#panel-update-float-state')).to_contain_text('正在构建')
-        assert len(calls)==1 and not dialogs
+        assert len(calls)==1 and len(dialogs)==1
         original=copy.deepcopy(calls[0]['body'])
         assert calls[0]['path']=='/api/panel-update/apply'
         assert original['confirmation']=='1.11.0' and original['update_agents'] is False
@@ -313,14 +316,14 @@ def test_top_entry_direct_apply_double_click_and_original_receipt(update_browser
         # A terminal receipt alone must never claim the target version is running.
         state.update(busy=False)
         state['operation'].update(state='succeeded',message='面板更新成功')
-        page.click('#panel-update-refresh')
+        page.evaluate('CodePierPanelUpdate.resume()')
         expect(page.locator('#panel-update-note')).to_contain_text('等待目标版本')
         expect(page.locator('#panel-update-apply')).to_be_disabled()
         expect(page.locator('[data-panel-update-open]')).to_have_attribute('data-state','verifying')
         expect(page.locator('#panel-update-reload')).to_be_hidden()
         expect(page.locator('[data-panel-update-version]')).to_have_text('v'+VERSION)
         state.update(running_version='1.11.0',current_version='1.11.0',update_available=False)
-        page.click('#panel-update-refresh')
+        page.evaluate('CodePierPanelUpdate.resume()')
         expect(page).to_have_url(re.compile(r'_codepier_updated=.*#settings$'))
         expect(page.locator('[data-panel-update-version]')).to_have_text('v1.11.0')
         assert len(calls)==1 and not errors,errors
@@ -345,7 +348,7 @@ def test_automatic_check_never_silently_applies(update_browser,stack):
         expect(page.locator('[data-panel-update-status]')).to_contain_text('更新面板至 v1.11.0')
         page.evaluate("navigate('overview')")
         assert not calls
-        expect(page.locator('#page h1')).to_have_text('控制总览')
+        expect(page.locator('#page h1')).to_have_text('总览')
         assert not errors,errors
     finally:page.close()
 
@@ -366,15 +369,15 @@ def test_automatic_check_ttl_uses_fresh_candidate_and_rechecks_expiry(update_bro
         expect(entry).to_have_attribute('data-state','latest')
         assert not calls and not discovery
         page.clock.fast_forward(240000)
-        page.click('#panel-update-refresh')
+        page.evaluate('CodePierPanelUpdate.resume()')
         expect(entry).to_have_attribute('data-state','latest')
         assert not calls and not discovery
         page.clock.fast_forward(61000)
-        page.click('#panel-update-refresh')
+        page.evaluate('CodePierPanelUpdate.resume()')
         expect(entry).to_have_attribute('data-state','latest')
         assert len(discovery)==1 and not calls
         page.clock.fast_forward(240000)
-        page.click('#panel-update-refresh')
+        page.evaluate('CodePierPanelUpdate.resume()')
         expect(entry).to_have_attribute('data-state','latest')
         assert len(discovery)==1 and not calls
         assert not errors,errors
@@ -394,7 +397,7 @@ def test_automatic_check_never_displaces_existing_work(update_browser,stack,bloc
     page,calls,errors=open_settings(browser,stack,state,clock=True)
     try:
         page.clock.fast_forward(360000)
-        page.click('#panel-update-refresh')
+        page.evaluate('CodePierPanelUpdate.resume()')
         expect(page.locator('#panel-update-state')).to_contain_text('原更新处理中')
         assert not calls and not errors,errors
     finally:page.close()
@@ -416,10 +419,12 @@ def test_top_entry_lost_response_recovers_without_post_replay(update_browser,sta
     try:
         page.evaluate("navigate('overview')")
         page.locator('[data-panel-update-open]').click()
+        page.once('dialog', lambda dialog: dialog.accept())
+        page.click('#panel-update-float-apply')
         expect(page.locator('#panel-update-float-state')).to_contain_text('原更新处理中')
         key=calls[0]['body']['idempotency_key']
         offline=True
-        page.click('#panel-update-float-refresh')
+        page.evaluate('CodePierPanelUpdate.resume()')
         expect(page.locator('#panel-update-float-note')).to_contain_text('连接')
         page.clock.fast_forward(8000)
         assert len(calls)==1
@@ -473,7 +478,7 @@ def test_top_entry_native_activation_survives_repeated_status_refresh(update_bro
         width=390 if activation=='touch' else 1440,has_touch=activation=='touch')
     try:
         page.evaluate("navigate('overview')")
-        expect(page.locator('#page h1')).to_have_text('控制总览')
+        expect(page.locator('#page h1')).to_have_text('总览')
         entry=page.locator('[data-panel-update-open]')
         for _ in range(2):
             if activation=='touch':entry.tap()
@@ -481,7 +486,7 @@ def test_top_entry_native_activation_survives_repeated_status_refresh(update_bro
                 entry.focus()
                 page.keyboard.press(activation)
             expect(page.locator('#panel-update-float-state')).to_contain_text('原更新处理中')
-            page.click('#panel-update-float-refresh')
+            page.evaluate('CodePierPanelUpdate.resume()')
             expect(entry).to_have_attribute('data-state','updating')
             page.keyboard.press('Escape')
             expect(page.locator('#panel-update-popover')).to_have_count(0)
@@ -509,7 +514,7 @@ def test_permission_or_unsupported_status_stops_background_checks(update_browser
         page.clock.fast_forward(360000)
         assert len(queries)==count and not calls
         page.locator('[data-panel-update-open]').click()
-        expect(page.locator('#page h1')).to_have_text('设置中心')
+        expect(page.locator('#page h1')).to_have_text('设置')
         assert not calls and not errors,errors
     finally:page.close()
 
@@ -528,7 +533,7 @@ def test_logout_stops_update_watch_and_cleans_floating_controls(update_browser,s
         expect(page.locator('#panel-update-popover')).to_be_visible()
         hold=True
         with page.expect_request(lambda request:'/api/panel-update/status' in request.url):
-            page.click('#panel-update-float-refresh')
+            page.evaluate('CodePierPanelUpdate.resume()')
         with page.expect_event('requestfailed',predicate=lambda request:'/api/panel-update/status' in request.url):
             page.click('[data-action="logout"]')
         expect(page.locator('#login-form')).to_be_visible()
@@ -555,14 +560,14 @@ def test_stale_status_never_advertises_or_applies_cached_candidate(update_browse
         entry=page.locator('[data-panel-update-open]')
         expect(entry).to_have_attribute('data-state','available')
         offline=True
-        page.click('#panel-update-refresh')
+        page.evaluate('CodePierPanelUpdate.resume()')
         expect(entry).to_have_attribute('data-state','unknown')
         expect(page.locator('#panel-update-apply')).to_be_disabled()
         entry.click()
         expect(page.locator('#panel-update-float-apply')).to_be_disabled()
         assert not calls
         offline=False
-        page.click('#panel-update-float-refresh')
+        page.evaluate('CodePierPanelUpdate.resume()')
         expect(entry).to_have_attribute('data-state','available')
         assert not calls and not errors,errors
     finally:page.close()
@@ -585,11 +590,11 @@ def test_automatic_discovery_failure_never_creates_durable_jobs(update_browser,s
         expect(entry).to_have_attribute('data-state','failed')
         assert len(discovery)==1 and not calls
         page.clock.fast_forward(30000)
-        page.click('#panel-update-refresh')
+        page.evaluate('CodePierPanelUpdate.resume()')
         expect(entry).to_have_attribute('data-state','failed')
         assert len(discovery)==1 and not calls
         page.clock.fast_forward(300000)
-        page.click('#panel-update-refresh')
+        page.evaluate('CodePierPanelUpdate.resume()')
         expect(entry).to_have_attribute('data-state','failed')
         assert len(discovery)>=2 and not calls
         assert not errors,errors
@@ -623,6 +628,10 @@ def test_top_discovery_click_checks_exact_release_then_applies_once(update_brows
         assert not calls
         page.evaluate("navigate('overview')")
         entry.dblclick()
+        assert not calls
+        page.uncheck('#panel-update-float-agents')
+        page.once('dialog', lambda dialog: dialog.accept())
+        page.locator('#panel-update-float-apply').dblclick()
         expect(page.locator('#panel-update-float-state')).to_contain_text('核验所选发布')
         assert len(calls)==1 and calls[0]['path'].endswith('/check')
         check_key=calls[0]['body']['idempotency_key']
@@ -635,7 +644,7 @@ def test_top_discovery_click_checks_exact_release_then_applies_once(update_brows
         if outcome=='changed_release':verified['sha256']='b'*64
         state.update(busy=False,request_found=True,candidate=verified,update_available=True)
         state['operation'].update(state='succeeded',message='所选发布核验完成')
-        page.click('#panel-update-float-refresh')
+        page.evaluate('CodePierPanelUpdate.resume()')
         if outcome=='changed_release':
             expect(page.locator('#panel-update-float-state')).to_contain_text('核验完成')
             page.clock.fast_forward(10000)
@@ -675,7 +684,7 @@ def test_manual_check_reload_has_no_implicit_install_continuation(update_browser
         expect(page.locator('#panel-update-state')).to_contain_text('检查原请求')
         state.update(busy=False)
         state['operation'].update(state='succeeded',message='发现可用发布')
-        page.click('#panel-update-refresh')
+        page.evaluate('CodePierPanelUpdate.resume()')
         expect(page.locator('#panel-update-state')).to_contain_text('发现可用发布')
         expect(page.locator('#panel-update-apply')).to_be_enabled()
         page.clock.fast_forward(10000)
@@ -697,7 +706,7 @@ def test_legacy_host_notice_and_engine_activation_are_not_hidden(update_browser,
         expect(page.locator('#panel-update-apply')).to_be_enabled()
         state.update(host_setup_required=False, host_update_notice='', busy=True,
                      host_engine={'active': VERSION, 'ready': False, 'activating': True})
-        page.click('#panel-update-refresh')
+        page.evaluate('CodePierPanelUpdate.resume()')
         expect(page.locator('#panel-update-state')).to_contain_text('请等待就绪回执')
         expect(page.locator('#panel-update-apply')).to_be_disabled()
         assert not calls and not errors

@@ -8,10 +8,10 @@ import pytest
 from playwright.sync_api import expect, sync_playwright
 
 
-@pytest.fixture(scope='module')
-def browser():
+@pytest.fixture(scope='module', params=['chromium', 'webkit'])
+def browser(request):
     with sync_playwright() as playwright:
-        browser = launch_browser(playwright.chromium)
+        browser = launch_browser(getattr(playwright, request.param))
         yield browser
         browser.close()
 
@@ -32,6 +32,9 @@ def install_page(browser, stack):
             for device in data['devices']:
                 if device['id'] == state['lifecycle_device']:
                     device.update(enabled=True, online=True)
+                    if state.get('onboarding_online'):
+                        device['info'] = {'hostname': 'Studio Mac', 'platform': 'Darwin', 'roots': [
+                            {'path': '/Users/studio/Projects', 'writable': True, 'allow_tasks': True}]}
                     device['agent'] = {
                         'version': '1.6.2', 'target_version': '1.7.0',
                         'update_available': True, 'managed': True, 'service': True,
@@ -60,7 +63,7 @@ def install_page(browser, stack):
     page.goto(stack.url + '/#devices')
     page.fill('#username', 'admin');page.fill('#password', stack.password)
     page.click('#login-form button')
-    expect(page.locator('#page h1')).to_have_text('设备节点')
+    expect(page.locator('#page h1')).to_have_text('电脑')
     assert page.evaluate('typeof agentInstallSetup==="function"'), 'agent-install.js must be loaded by index.html'
     try:
         yield page, state
@@ -77,6 +80,8 @@ def open_form(page):
 
 
 def fill_form(page, platform='posix', root='/home/me/Projects'):
+    if not page.locator('#device-form details').evaluate('el => el.open'):
+        page.locator('#device-form details > summary').click()
     page.locator('#device-form input[name="name"]').fill('Install fixture')
     page.locator('#device-form select[name="platform"]').select_option(platform)
     page.locator('#device-form input[name="allow_root"]').fill(root)
@@ -88,7 +93,7 @@ def test_create_collects_explicit_root_and_displays_literal_command(install_page
     open_form(page)
     field = page.locator('#device-form input[name="allow_root"]')
     expect(field).to_have_value('')
-    expect(page.locator('#device-form select[name="platform"]')).to_have_value('')
+    expect(page.locator('#device-form select[name="platform"]')).to_have_value('posix')
     fill_form(page, platform, 'relative/path')
     page.click('#create-device')
     assert not state['creates']
@@ -99,13 +104,9 @@ def test_create_collects_explicit_root_and_displays_literal_command(install_page
     assert len(state['creates']) == 1 and set(state['creates'][0]) == {'name', 'hub_url'}
     assert state['tickets'][0]['body'] == {'hub_url': state['creates'][0]['hub_url'], 'platform': platform, 'allow_root': root, 'enable_execution': True}
     expect(page.locator('.modal img')).to_have_count(0)
-    expect(page.locator('#agent-install-status')).to_contain_text('前执行')
-    expect(page.locator('.modal')).to_contain_text('原节点')
+    expect(page.locator('#agent-install-status')).to_contain_text('前有效')
     assert page.evaluate('JSON.stringify({...localStorage,...sessionStorage})').find('PRIVATE-ONCE') == -1
-    with page.expect_download() as download:
-        page.click('#download-pairing')
-    pairing = json.loads(Path(download.value.path()).read_text())
-    assert pairing['device_id'] in state['tickets'][0]['url'] and pairing['secret']
+    expect(page.locator('#download-pairing')).to_be_hidden()
 
 
 def test_fresh_execution_opt_out_is_sent_and_explained(install_page):
@@ -118,7 +119,6 @@ def test_fresh_execution_opt_out_is_sent_and_explained(install_page):
     page.click('#create-device')
     expect(page.locator('#agent-install-command')).to_have_value(state['command'])
     assert state['tickets'][0]['body']['enable_execution'] is False
-    expect(page.locator('.modal')).to_contain_text('关闭 Shell / 目录任务')
 
 
 def test_ticket_failure_retries_without_creating_a_second_device(install_page):
@@ -127,8 +127,12 @@ def test_ticket_failure_retries_without_creating_a_second_device(install_page):
     open_form(page)
     fill_form(page)
     page.click('#create-device')
-    expect(page.locator('#agent-install-status')).to_contain_text('设备已保留')
-    expect(page.locator('#download-pairing')).to_be_enabled()
+    expect(page.locator('#agent-install-status')).to_contain_text('安装包暂时不可用')
+    expect(page.locator('#download-pairing')).to_be_visible()
+    with page.expect_download() as download:
+        page.click('#download-pairing')
+    pairing = json.loads(Path(download.value.path()).read_text())
+    assert pairing['device_id'] in state['tickets'][0]['url'] and pairing['secret']
     expect(page.locator('#agent-install-copy')).to_be_disabled()
     state['fail'] = False
     page.click('#agent-install-refresh')
@@ -150,9 +154,12 @@ def test_copy_fallback_retains_dialog_and_expiry_clears_command(install_page):
     page.locator('#agent-install-copy').dispatch_event('click')
     expect(page.locator('#agent-install-status')).to_contain_text('已选中安装命令')
     assert page.locator('#agent-install-command').evaluate('(field)=>field.selectionEnd-field.selectionStart') == len(state['command'])
+    state['hold'] = True
     expect(page.locator('#agent-install-copy')).to_be_disabled(timeout=8000)
     expect(page.locator('#agent-install-command')).to_have_value('')
-    expect(page.locator('#agent-install-status')).to_contain_text('已过期')
+    assert len(state['creates']) == 1 and len(state['tickets']) == 2
+    state['held'].pop().fulfill(json={'command': 'renewed ticket', 'expires_at': time.time() + 900})
+    expect(page.locator('#agent-install-command')).to_have_value('renewed ticket')
 
 
 def test_closing_install_dialog_fences_late_ticket_response(install_page):
@@ -181,7 +188,7 @@ def test_install_dialog_mobile_layout_and_keyboard_focus(install_page, width, he
     page.click('#create-device')
     command = page.locator('#agent-install-command')
     expect(command).to_have_value(state['command'])
-    expect(command).to_be_focused()
+    expect(page.locator('#agent-install-copy')).to_be_focused()
     assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
     bounds = command.bounding_box()
     assert bounds['x'] >= 0 and bounds['x'] + bounds['width'] <= width
@@ -197,8 +204,7 @@ def test_existing_offline_device_issues_ticket_without_rotation(install_page, st
     page.locator('.modal [data-action="agent-repair"]').click()
     expect(page.locator('#device-form input[name="name"]')).to_have_count(0)
     expect(page.locator('#device-form input[name="enable_execution"]')).to_have_count(0)
-    expect(page.locator('#device-form')).to_contain_text('已有节点保留原执行权限')
-    expect(page.locator('#device-form')).to_contain_text('原节点')
+    expect(page.locator('#device-form')).to_contain_text('在原电脑上运行')
     page.locator('#device-form input[name="allow_root"]').fill('/home/me/Projects')
     expect(page.locator('#device-form select[name="platform"]')).to_have_value('')
     page.click('#create-device')
@@ -392,7 +398,7 @@ def test_space_switch_fences_late_installation_commands(install_page, dialog_kin
         open_form(page);fill_form(page)
         page.click('#create-device')
         expect(page.locator('#agent-install-command')).to_be_visible()
-        page.wait_for_function("() => document.querySelector('#agent-install-refresh').disabled")
+        expect(page.locator('#agent-install-copy')).to_be_disabled()
         route=state['held'][0]
         field=page.locator('#agent-install-command')
         payload={'command':'STALE-SPACE-SECRET','expires_at':time.time()+900}
@@ -412,3 +418,24 @@ def test_space_switch_fences_late_installation_commands(install_page, dialog_kin
     expect(field).to_have_value('')
     assert 'STALE-SPACE-SECRET' not in page.locator('body').inner_text()
     page.evaluate('(space)=>{S.space_id=space;closeModal();}',original_space)
+
+
+def test_install_online_updates_same_dialog_and_prefills_project(install_page):
+    page, state = install_page
+    open_form(page)
+    page.evaluate("window.openInstallDialog = document.querySelector('.modal')")
+    page.locator('#device-form [name="platform"]').select_option('posix')
+    page.locator('#device-form [name="allow_root"]').fill('/Users/studio/Projects')
+    page.locator('#create-device').click()
+    expect(page.locator('#agent-install-command')).to_have_value(state['command'])
+    identifier = state['tickets'][0]['url'].split('/')[-2]
+    state.update(lifecycle_device=identifier, onboarding_online=True)
+    page.evaluate("""id => S.events.onmessage({data: JSON.stringify({type: 'device', data: {id, online: true}})})""", identifier)
+    expect(page.locator('#agent-install-status')).to_have_text('Studio Mac 已连接。')
+    assert page.evaluate("openInstallDialog === document.querySelector('.modal')")
+    assert state['creates'][0]['name'] == '新电脑'
+    page.locator('#agent-install-copy').click()
+    expect(page.locator('#project-form [name="device_id"]')).to_have_value(identifier)
+    expect(page.locator('#project-form [name="root"]')).to_have_value('/Users/studio/Projects')
+    expect(page.locator('#project-form [name="alias"]')).to_have_value('Projects')
+    expect(page.locator('#project-form [name="access"]')).to_have_value('full')

@@ -54,19 +54,20 @@ def test_production_render_and_bind_keep_inline_and_safe_flows_separate(api):
     result = render(client)
     assert result["dirty"] is False
     html = result["html"]
-    for identifier in ("settings-center", "settings-form", "access-settings-form", "access-batch-form",
+    for identifier in ("settings-center", "settings-form",
                        "file-import-settings-form", "settings-project", "panel-update"):
         assert 'id="' + identifier + '"' in html
     assert 'id="password-form"' not in html
     assert 'data-settings-entry="identity"' in html
-    assert "预览修改" in html and "单独确认并批量应用" in html
+    assert "预览修改" in html
+    assert "access-settings-form" not in html and "access-batch-form" not in html
 
 
 def test_non_admin_render_has_personal_controls_and_no_instance_editor(api):
     app, client, _ = api
     app.state.store.execute("UPDATE iam_users SET instance_admin=0 WHERE user_id='owner'")
     result = render(client)
-    assert 'id="access-settings-form"' in result["html"]
+    assert 'id="access-settings-form"' not in result["html"]
     assert 'id="settings-form"' not in result["html"]
     assert 'id="file-import-settings-form"' not in result["html"]
     assert str(app.state.store.directory) not in result["html"]

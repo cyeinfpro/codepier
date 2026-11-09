@@ -75,7 +75,7 @@ window.CodePierIdentity = (() => {
   }
   function selector() {
     if (me?.spaces.length === 1 && current()?.kind === 'personal')
-      return `<div class="iam-space-switch"><span class="form-note">个人空间 · ${esc(current().label)}</span><button class="btn ghost small" data-nav="identity">账号与团队</button></div>`;
+      return `<div class="iam-space-switch"><span class="form-note">个人空间 · ${esc(current().label)}</span></div>`;
     return `<div class="field iam-space-switch"><label for="iam-active-space">当前空间</label><select id="iam-active-space" aria-label="当前空间">${(me?.spaces || []).map((s) => `<option value="${esc(s.id)}" ${s.id === S.space_id ? 'selected' : ''}>${esc(s.label)} · ${esc(levels[s.level] || s.level)}</option>`).join('')}</select></div>`;
   }
   function bindShell() {

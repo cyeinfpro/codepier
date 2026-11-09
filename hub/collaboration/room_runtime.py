@@ -610,6 +610,7 @@ class RoomRuntime:
         deliveries,delivery_truncated=work_deliveries(self.c,goal,principal,intent_revision=revision,member_id=member_id)
         return {'id':goal['id'],'conversation_id':goal['conversation_id'],'version':goal['version'],
                 'intent_revision':revision,
+                **({'source_message_id': intent['source_message_id']} if intent and not partial and not principal.grant_id else {}),
                 **({'coordinator_epoch':native_scope['coordinator_epoch']} if native_scope else {}),
                 **({'recovery':recovery} if recovery else {}),
                 'recovery_requires_detail':bool(not include_recovery and native_scope and not principal.grant_id and not archived),

@@ -199,9 +199,24 @@ window.CodePierRoots = (() => {
       const message = labels[value.state] || ['暂不可编辑', value.reason || '正在核对节点状态。'];
       state(...message);
       if (value.reason) tell(value.reason);
-      if (!initialized && options.initial) {
+      if (!initialized && !record && !awaiting && options.initial) {
         initialized = true;
         edit(options.initial, 'upsert', false);
+        if (options.autoSave && value.state === 'applied' && value.config_sha256) {
+          const initialPath = field('path').value;
+          const initialMode = field('mode').value;
+          const initialTasks = field('tasks').checked;
+          setTimeout(() => {
+            if (
+              options.autoSave() &&
+              !editor.hidden &&
+              field('path').value === initialPath &&
+              field('mode').value === initialMode &&
+              field('tasks').checked === initialTasks
+            )
+              save();
+          }, 0);
+        }
       }
       lock();
     }

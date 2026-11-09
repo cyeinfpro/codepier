@@ -30,6 +30,22 @@ class RoomPermissions:
     def row(self, conversation_id):
         return self.store.one('SELECT * FROM room_permission_policies WHERE conversation_id=?', (conversation_id,))
 
+    def initialize(self, conversation_id, partitions, principal):
+        """Persist the explicitly selected read-only scope within room creation."""
+        rules = self.normalize([
+            {'project_id': part['project_id'], 'environment_id': part['environment_id'],
+             'capabilities': ['read'], 'execution_targets': [],
+             'lifetime': {'mode': 'until_revoked', 'expires_at': None}}
+            for part in partitions
+        ], principal)
+        policy = {'scope': self.scope(rules), 'channels': {
+            name: {'mode': 'follow_room', 'scope': self.scope([])}
+            for name in ('weixin', 'telegram')
+        }}
+        values = (conversation_id, 0, canonical(policy), principal.actor, self.c.clock())
+        self.store.execute('INSERT INTO room_permission_policies VALUES (?,?,?,?,?)', values)
+        self.store.execute('INSERT INTO room_permission_revisions VALUES (?,?,?,?,?)', values)
+
     def is_configured(self, conversation_id):
         return self.row(conversation_id) is not None
 

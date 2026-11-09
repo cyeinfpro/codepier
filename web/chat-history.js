@@ -314,9 +314,19 @@ function chatTargetSync() {
   box.dataset.unavailable = String(!!info.reason);
   const notice = $('#chat-target-notice');
   if (notice) {
-    notice.hidden = !info.reason;
-    notice.querySelector('span').textContent = info.reason;
+    const catalogError = chatView().catalogError;
+    notice.hidden = !info.reason && !catalogError;
+    notice.querySelector('span').textContent =
+      info.reason || (catalogError ? '模型目录读取失败：' + catalogError : '');
+    $('#chat-target-refresh').hidden = !info.reason;
+    $('#chat-catalog-retry').hidden = !!info.reason || !catalogError;
   }
+  const title = [info.project ? info.alias : '选择项目', chatProviderName(c.provider)].join(' · ');
+  $('#chat-empty-title').textContent = title;
+  const summary = $('#chat-config-summary');
+  const label = title + ' · ' + ($('#chat-model-name').textContent || '默认模型');
+  if (summary.firstChild?.nodeType === Node.TEXT_NODE) summary.firstChild.nodeValue = label;
+  else summary.textContent = label;
   $('#chat-subtitle').textContent = info.project ? info.alias + ' · ' + info.node : '选择工作项目';
   $('#chat-subtitle').title = [info.root, c.selected?.cwd || c.cwd].filter(Boolean).join('\n');
 }
@@ -339,11 +349,12 @@ function chatNewSession(projectHint = ChatUI.project, providerHint = ChatUI.prov
   dialog.id = 'chat-project-dialog';
   dialog.className = 'chat-sheet chat-project-sheet';
   dialog.setAttribute('aria-labelledby', 'chat-project-dialog-title');
-  dialog.setAttribute('aria-describedby', 'chat-project-dialog-description');
-  dialog.innerHTML =
-    '<header class="chat-project-sheet-head"><div><span class="chat-eyebrow">新对话 · 选择项目</span><h2 id="chat-project-dialog-title">这次在哪个项目工作？</h2></div><button type="button" id="chat-project-dialog-close" class="chat-square" aria-label="取消新对话">×</button></header><p id="chat-project-dialog-description">选定项目后再写消息。现在不会启动 CLI，也不会离开或停止原会话。</p><input id="chat-project-search" type="search" role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="chat-project-results" aria-label="搜索工作项目" placeholder="搜索项目、节点或目录…"><div id="chat-project-results" role="listbox" aria-label="工作项目"></div><footer class="chat-project-sheet-foot"><span>↑ ↓ 选择 · Enter 进入</span><button type="button" id="chat-project-manage" class="chat-text-button">管理项目</button></footer>';
+  dialog.innerHTML = `<header class="chat-project-sheet-head"><h2 id="chat-project-dialog-title">新对话</h2><button type="button" id="chat-project-dialog-close" class="chat-square" aria-label="取消新对话">×</button></header>
+    <fieldset class="chat-segmented"><legend>CLI</legend>${['pi', 'codex', 'claude'].map((id) => `<label><input type="radio" name="cli" value="${id}" ${id === providerHint ? 'checked' : ''}>${chatProviderName(id)}</label>`).join('')}</fieldset>
+    <input id="chat-project-search" type="search" role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="chat-project-results" aria-label="搜索工作项目" placeholder="搜索项目">
+    <div id="chat-project-results" role="listbox" aria-label="工作项目"></div><footer class="chat-project-sheet-foot"><span>↑ ↓ 选择 · Enter 进入</span><button type="button" id="chat-project-manage" class="chat-text-button">管理项目</button></footer>`;
   root.append(dialog);
-  const input = dialog.querySelector('input'),
+  const input = dialog.querySelector('#chat-project-search'),
     results = dialog.querySelector('#chat-project-results');
   let active = -1,
     finished = false,
@@ -360,13 +371,14 @@ function chatNewSession(projectHint = ChatUI.project, providerHint = ChatUI.prov
   ChatUI.dialogCancel = close;
   async function choose(project) {
     if (finished) return;
+    const provider = dialog.querySelector('[name="cli"]:checked')?.value || providerHint;
     close();
     ChatUI.recentProjects = [
       project,
       ...(ChatUI.recentProjects || []).filter((id) => id !== project),
     ].slice(0, 12);
     try {
-      await chatSwitch(null, project, { provider: providerHint, cwd: '.' });
+      await chatSwitch(null, project, { provider, cwd: '.' });
       if (chatView().draft.trim()) chatStatus('已恢复这个项目的未发送草稿；发送后才创建会话。');
     } catch (e) {
       chatStatus(e.message, true);
@@ -445,7 +457,9 @@ function chatNewSession(projectHint = ChatUI.project, providerHint = ChatUI.prov
         : '还没有项目。请先在「管理项目」中添加项目映射。';
       results.append(note);
     }
-    const index = buttons.findIndex((b) => b.dataset.projectId === (focusedId || previousId));
+    const index = buttons.findIndex(
+      (b) => b.dataset.projectId === (focusedId || previousId || (q ? '' : projectHint)),
+    );
     if (index >= 0) {
       highlight(index);
       if (focusedId) buttons[index].focus({ preventScroll: true });

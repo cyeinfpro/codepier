@@ -27,43 +27,6 @@ async function uiConfirmAction(
     if (owner) uiPendingConfirmations.delete(owner);
   }
 }
-function uiFilterNavigation() {
-  const input = $('#navigation-query');
-  if (!input) return;
-  const query = input.value.trim().toLocaleLowerCase();
-  let count = 0;
-  $$('.nav [data-nav]').forEach((button) => {
-    const permitted = CodePierIdentity.canNavigate(button.dataset.nav);
-    const matches = (button.textContent + ' ' + button.dataset.nav)
-      .toLocaleLowerCase()
-      .includes(query);
-    button.hidden = !permitted || !matches;
-    if (!button.hidden) count++;
-  });
-  $$('.nav-group').forEach((group) => {
-    group.hidden = !$$('[data-nav]', group).some((button) => !button.hidden);
-  });
-  const status = $('#navigation-status');
-  if (status) {
-    status.hidden = !query;
-    status.textContent = count ? `找到 ${count} 个页面` : '没有匹配的页面，换个关键词试试';
-  }
-}
-document.addEventListener('input', (event) => {
-  if (event.target.id === 'navigation-query') uiFilterNavigation();
-});
-document.addEventListener(
-  'keydown',
-  (event) => {
-    if (event.key === 'Escape' && event.target.id === 'navigation-query' && event.target.value) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      event.target.value = '';
-      uiFilterNavigation();
-    }
-  },
-  true,
-);
 function uiLoadingPage(page) {
   const title = nav.find((item) => item[0] === page)?.[2] || '页面';
   return `<section class="page-loading" role="status" aria-label="正在加载${esc(title)}"><strong>${esc(title)}</strong><span>正在读取最新内容…</span><div class="skeleton" aria-hidden="true"></div></section>`;
@@ -183,7 +146,9 @@ const uiMobileMedia = matchMedia('(max-width:900px)');
 const uiDockPages = new Set(['overview', 'projects', 'native', 'workflows']);
 function uiSyncNavigation() {
   $$('[data-nav]').forEach((b) => {
-    const chosen = b.dataset.nav === S.page;
+    const chosen = b.dataset.navGroup
+      ? b.dataset.navGroup === (tabParent[S.page] || S.page)
+      : b.dataset.nav === S.page;
     b.classList.toggle('active', chosen);
     if (chosen) b.setAttribute('aria-current', 'page');
     else b.removeAttribute('aria-current');
@@ -227,11 +192,6 @@ function uiSetMenu(value, restore = true, origin = null) {
         : $('.mobile-menu');
     if (restore && mobile && trigger?.isConnected) trigger.focus({ preventScroll: true });
     S.uiMenuTrigger = null;
-    const query = $('#navigation-query');
-    if (query?.value) {
-      query.value = '';
-      uiFilterNavigation();
-    }
   }
 }
 function uiSetPane(pane, focus = false) {
@@ -573,7 +533,10 @@ async function uiCommand() {
 document.addEventListener('click', (e) => {
   const button = e.target.closest('[data-ui]');
   if (button && !button.disabled) {
-    if (button.dataset.ui === 'command') uiCommand().catch((err) => toast(err.message, true));
+    if (button.dataset.ui === 'command') {
+      if ($('#chat-root')) chatPalette();
+      else uiCommand().catch((err) => toast(err.message, true));
+    }
     if (button.dataset.ui === 'close-menu') uiSetMenu(false);
     if (button.dataset.ui === 'clear-project-query') {
       const input = $('#project-query');
@@ -601,7 +564,10 @@ document.addEventListener('keydown', (e) => {
     if (!S.session) return;
     e.preventDefault();
     if ($('.command-dialog')) closeModal();
-    else if (!$('.modal')) uiCommand().catch((err) => toast(err.message, true));
+    else if (!$('.modal')) {
+      if ($('#chat-root')) chatPalette();
+      else uiCommand().catch((err) => toast(err.message, true));
+    }
     return;
   }
   if ($('.modal')) return;

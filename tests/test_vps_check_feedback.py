@@ -73,7 +73,7 @@ const terminal = (state, extra = {}) => ({state, pending: false, output: '', ...
   assert.notEqual(again.submissions[0].idempotency_key, again.submissions[1].idempotency_key);
   const recovery = fixture([new Error('temporary read failure'), terminal('succeeded')]);
   await recovery.open(); await recovery.click();
-  assert.equal(recovery.nodes['#vps-check-run'].textContent, '恢复本次检查');
+  assert.equal(recovery.nodes['#vps-check-run'].textContent, '重试');
   assert.equal(recovery.nodes['#vps-check-project'].disabled, true);
   await recovery.click();
   assert.equal(recovery.submissions.length, 1, 'recovery must poll the original operation');

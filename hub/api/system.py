@@ -3,6 +3,7 @@ from fastapi import APIRouter, Query
 from hub.db_worker import database_endpoint
 from hub.api.context import HubContext
 import sqlite3
+import time
 from datetime import datetime
 from fastapi import Request, WebSocket
 from fastapi.responses import FileResponse, JSONResponse
@@ -50,8 +51,18 @@ def make_system_router(context: HubContext):
             clause += ' AND (project_id IS NULL OR project_id IN (%s))' % (','.join('?' for _ in principal.projects) or 'NULL')
             args.extend(principal.projects)
         counts = {r['state']:r['n'] for r in store.all('SELECT state,count(*) AS n FROM operations WHERE '+clause+' AND created>=? GROUP BY state', (*args,today))}
+        now = time.time()
+        active_grants = store.one(
+            """SELECT count(*) AS n FROM grants g
+               LEFT JOIN grant_expirations e ON e.grant_id=g.id
+               WHERE g.user_id=? AND g.space_id=? AND g.revoked=0 AND g.client_id IS NOT NULL
+                 AND (e.expires IS NULL OR e.expires>?)
+                 AND EXISTS (SELECT 1 FROM tokens t WHERE t.grant_id=g.id
+                             AND t.kind IN ('access','refresh') AND t.expires>?)""",
+            (principal.user_id, principal.space_id, now, now),
+        )["n"]
         return {"devices": devices, "projects": projects, "online_devices": sum(1 for d in devices if d["online"]),
-            "today_operations": sum(counts.values()), "today_succeeded": counts.get("succeeded", 0), "today_failed": counts.get("failed", 0),
+            "active_grants": active_grants, "today_operations": sum(counts.values()), "today_succeeded": counts.get("succeeded", 0), "today_failed": counts.get("failed", 0),
             "active_operations": store.one("SELECT count(*) AS n FROM operations WHERE "+clause+" AND state IN ('running','queued','reconnecting','cancelling')",args)["n"],
             "recent_operations": operation_rows(store, principal, limit=8), "recent_audit": audit_rows(store, principal, limit=6),
             "token_usage": token_usage,

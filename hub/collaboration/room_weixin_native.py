@@ -45,6 +45,7 @@ def migrate(db):
     for table,name,decl in (
         ('room_channel_flows','native','INTEGER NOT NULL DEFAULT 0'),
         ('weixin_bindings','native_member_id',"TEXT NOT NULL DEFAULT ''"),
+        ('weixin_bindings','auto_confirm_pairing','INTEGER NOT NULL DEFAULT 0'),
     ):
         if name not in {row[1] for row in db.execute('PRAGMA table_info('+table+')')}:
             db.execute('ALTER TABLE '+table+' ADD COLUMN '+name+' '+decl)
@@ -276,11 +277,11 @@ class RoomWeixin:
         self.store.execute('''INSERT INTO weixin_bindings
             (id,account_id,space_id,owner_user_id,room_id,conversation_id,project_id,environment_id,dot_id,
              owner_principal,dot_principal,project_snapshot,credential_version,generation,state,pairing_hash,pairing_until,
-             allow_replies,allow_media_outbound,expires_at,created,updated,pairing_secret,lifetime_mode,native_member_id)
-            VALUES (?,?,?,?,'',?,'','',?,?,?,'{}',?,?,'pairing',?,?,?,0,?,?,?,?,'until_revoked',?)''',
+             allow_replies,allow_media_outbound,expires_at,created,updated,pairing_secret,lifetime_mode,native_member_id,auto_confirm_pairing)
+            VALUES (?,?,?,?,'',?,'','',?,?,?,'{}',?,?,'pairing',?,?,?,0,?,?,?,?,'until_revoked',?,?)''',
             (identifier,account['id'],principal.space_id,principal.user_id,conversation['id'],member.get('legacy_dot_id',''),
              canonical(owner),member.get('principal','{}'),account['credential_version'],account['generation']+1,
-             digest(challenge),now+900,int(args['allow_replies']),now+86400,now,now,self.store.encrypt(challenge),member['id']))
+             digest(challenge),now+900,int(args['allow_replies']),now+86400,now,now,self.store.encrypt(challenge),member['id'],int(args.get('confirm_pairing_sender', False))))
         if args['allow_owner_tasks']:
             self.approve_tasks(identifier,args,principal,pending=True)
         return {'binding_id':identifier,'member_id':member['id']}
@@ -416,6 +417,20 @@ class RoomWeixin:
             (current['id'] if current else uuid.uuid4().hex,binding_id,binding['native_member_id'],
              'pending_pairing' if pending else 'active',canonical(preview['scope']),preview['scope_digest'],canonical(owner),self.c.clock(),self.c.clock()))
 
+    def pairing_scope_matches(self, binding, principal):
+        authorization = self.store.one(
+            "SELECT scope_digest FROM room_channel_owner_authorizations WHERE binding_id=? AND state='pending_pairing'",
+            (binding['id'],))
+        return not authorization or authorization['scope_digest'] == self.preview(binding, principal)['scope_digest']
+
+    def activate_peer(self, binding, peer):
+        now = self.c.clock()
+        self.store.execute("""UPDATE weixin_bindings SET state='active',peer_id=?,pending_peer_id='',
+            pairing_hash='',pairing_secret='',revalidation_required=0,version=version+1,updated=? WHERE id=?""",
+            (peer, now, binding['id']))
+        self.store.execute("""UPDATE room_channel_owner_authorizations SET state='active',updated=?
+            WHERE binding_id=? AND state='pending_pairing'""", (now, binding['id']))
+
     def control(self,binding,args,principal):
         action=args['action']
         if action not in {'pause','disconnect','migrate','cancel'}:
@@ -425,8 +440,9 @@ class RoomWeixin:
                 raise DevError('WEIXIN_PAIRING_UNVERIFIED','请确认当前配对返回的本人联系人',409)
             if binding['peer_id'] and binding['peer_id']!=binding['pending_peer_id']:
                 raise DevError('CHANNEL_OWNER_PEER_CHANGED','恢复必须由原联系人验证',403)
-            self.store.execute("UPDATE weixin_bindings SET state='active',peer_id=pending_peer_id,pending_peer_id='',revalidation_required=0,version=version+1,updated=? WHERE id=?",(self.c.clock(),binding['id']))
-            self.store.execute("UPDATE room_channel_owner_authorizations SET state='active',updated=? WHERE binding_id=? AND state='pending_pairing'",(self.c.clock(),binding['id']))
+            if not self.pairing_scope_matches(binding, principal):
+                self.revoke_tasks(binding['id'], principal)
+            self.activate_peer(binding, binding['pending_peer_id'])
         elif action=='refresh_pairing':
             if binding['state'] not in {'pairing','awaiting_owner','paused'}:
                 raise DevError('WEIXIN_PAIRING_UNAVAILABLE','此绑定无需重新配对',409)
@@ -607,6 +623,9 @@ class RoomWeixin:
             if not prior and not int(deleted) and hmac.compare_digest(digest(pairing_text(content)),binding['pairing_hash']):
                 if binding['peer_id'] and binding['peer_id']!=peer:
                     disposition='different_peer_quarantined'
+                elif binding.get('auto_confirm_pairing') and self.pairing_scope_matches(binding, owner):
+                    self.activate_peer(binding, peer)
+                    disposition='pairing_confirmed'
                 else:
                     self.store.execute("UPDATE weixin_bindings SET state='awaiting_owner',pending_peer_id=?,pairing_hash='',pairing_secret='',version=version+1,updated=? WHERE id=?",
                         (peer,self.c.clock(),binding['id']))

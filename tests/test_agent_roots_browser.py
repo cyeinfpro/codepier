@@ -509,6 +509,7 @@ def project_editor(editor):
       window.closeModal = (...args) => dialogs.closeModal(...args);
       window.buttons = (...args) => CP.ui.buttons(...args);
       window.busy = (button, fn) => CP.ui.busy(button, fn, toast);
+      window.uiConfirmAction = options => CP.ui.confirmSheet(options);
     }""", {"device": DEVICE, "other": OTHER_DEVICE})
     app = SOURCE.with_name("app.js").read_text(encoding="utf-8")
     start = app.index("async function projectModal(")
@@ -517,8 +518,9 @@ def project_editor(editor):
     page.evaluate("device => projectModal(null, device)", DEVICE)
     page.locator('[name="alias"]').fill("NAS Project")
     page.locator('[name="root"]').fill("/Volumes/Shared/Project")
+    page.locator('#project-form details > summary').click()
     page.locator('[name="description"]').fill("Keep this draft")
-    page.locator('[name="allow_tasks"]').check()
+    page.locator('[name="access"]').select_option('full')
     return page, transport
 
 
@@ -541,12 +543,10 @@ def test_mapping_draft_authorization_then_save_is_one_continuous_flow(project_ed
 
     transport.handler = handler
     page.locator('#save-project').click()
-    expect(page.locator('#project-roots-manager')).to_be_visible()
-    expect(page.locator('[data-roots="save"]')).to_be_enabled()
+    expect(page.locator('.ui-sheet')).to_contain_text("/Volumes/Shared/Project")
     expect(page.locator('[name="alias"]')).to_have_value("NAS Project")
     expect(page.locator('[name="description"]')).to_have_value("Keep this draft")
-    expect(page.locator('[data-root-field="path"]')).to_have_value("/Volumes/Shared/Project")
-    page.locator('[data-roots="save"]').click()
+    page.locator('.ui-sheet button[type="submit"]').click()
     expect(page.locator('.modal')).to_have_count(0)
     attempts = transport.matching("POST", "/api/projects")
     assert len(attempts) == 2
@@ -556,7 +556,7 @@ def test_mapping_draft_authorization_then_save_is_one_continuous_flow(project_ed
         key: value for key, value in second.items() if key != "idempotency_key"
     }
     assert len(transport.matching("POST", ENDPOINT)) == 1
-    assert page.evaluate("window.toasts") == ["映射已保存"]
+    assert page.evaluate("window.toasts") == ["项目已保存"]
 
 
 @pytest.mark.parametrize("changed_field", ["alias", "device_id"])
@@ -577,8 +577,7 @@ def test_changed_mapping_draft_is_never_automatically_submitted(project_editor, 
 
     transport.handler = handler
     page.locator('#save-project').click()
-    expect(page.locator('[data-roots="save"]')).to_be_enabled()
-    page.locator('[data-roots="save"]').click()
+    page.locator('.ui-sheet button[type="submit"]').click()
     expect(page.locator('[data-roots-state]')).to_have_text("正在保存")
     if changed_field == "alias":
         page.locator('[name="alias"]').fill("Changed draft")
@@ -633,7 +632,7 @@ def test_pending_mapping_validation_reuses_original_key_and_finishes(project_edi
       }
     }""")
     assert page.evaluate("window.initialPendingMappingState") == {
-        "text": "正在等待节点完成目录验证，完成后自动保存映射…",
+        "text": "正在等待电脑检查目录…",
         "enabled": True,
     }
     expect(page.locator('.modal')).to_have_count(1)
@@ -654,7 +653,7 @@ def test_pending_mapping_validation_reuses_original_key_and_finishes(project_edi
     reply(held.pop(), {"id": "mapped-project"})
     expect(page.locator('.modal')).to_have_count(0, timeout=7000)
     assert len(transport.matching("POST", "/api/projects")) == 2
-    assert page.evaluate("window.toasts") == ["映射已保存"]
+    assert page.evaluate("window.toasts") == ["项目已保存"]
 
 
 def test_space_change_stops_pending_mapping_validation_retry(project_editor):
@@ -689,7 +688,7 @@ def test_space_change_stops_pending_mapping_validation_retry(project_editor):
     page.locator('#save-project').click()
     page.evaluate("() => window.afterPendingMappingRetryWindow")
     assert page.evaluate("window.initialPendingMappingState") == {
-        "text": "正在等待节点完成目录验证，完成后自动保存映射…",
+        "text": "正在等待电脑检查目录…",
         "enabled": True,
         "space": "owner-space",
     }
@@ -719,3 +718,49 @@ def test_late_mapping_save_keeps_edits_made_while_request_was_running(project_ed
     expect(page.locator('.modal')).to_have_count(1)
     expect(page.locator('[name="alias"]')).to_have_value("Newer unsaved draft")
     assert len(transport.matching("POST", "/api/projects")) == 1
+
+
+@pytest.mark.parametrize("failure", ["cancel", "offline", "preview", "uncertain"])
+def test_confirmed_project_directory_grant_preserves_failure_boundaries(project_editor, failure):
+    page, transport = project_editor
+    if failure == "offline":
+        transport.snapshots[DEVICE] = snapshot(state="offline", sha=None)
+
+    def handler(route, row):
+        path = row["path"]
+        if path == "/api/projects":
+            reply(route, {"error": {"code": "ROOT_NOT_ALLOWED", "message": "目录未授权"}}, 403)
+            return True
+        if failure == "preview" and path == ENDPOINT + "/preview":
+            reply(route, {"valid": False, "reason": "目录预检失败"})
+            return True
+        if failure == "uncertain" and path == ENDPOINT and row["method"] == "POST":
+            reply(route, {"error": {"code": "NETWORK_UNCERTAIN", "message": "网络中断"}}, 503)
+            return True
+        if failure == "uncertain" and path.startswith(ENDPOINT + "/requests/"):
+            reply(route, {"state": "not_found"})
+            return True
+        return preview_ok(route, row)
+
+    transport.handler = handler
+    page.locator("#save-project").click()
+    if failure == "cancel":
+        page.locator(".ui-sheet .ghost").click()
+        expect(page.locator("#project-roots-manager")).to_be_hidden()
+        expect(page.locator("#save-project")).to_be_enabled()
+    else:
+        page.locator('.ui-sheet button[type="submit"]').click()
+        if failure == "offline":
+            expect(page.locator("[data-roots-state]")).to_contain_text("离线")
+            expect(page.locator('[data-roots="save"]')).to_be_disabled()
+        elif failure == "preview":
+            expect(page.locator("[data-roots-feedback]")).to_contain_text("目录预检失败")
+        else:
+            expect(page.locator("[data-roots-recovery]")).to_be_visible()
+            expect(page.locator('[data-roots="save"]')).to_be_disabled()
+            page.wait_for_function("document.querySelector('[data-roots-state]').textContent.includes('未确认')")
+    assert len(transport.matching("POST", "/api/projects")) == 1
+    assert len(transport.matching("POST", ENDPOINT)) == int(failure == "uncertain")
+    if failure == "uncertain":
+        key = transport.matching("POST", ENDPOINT)[0]["body"]["idempotency_key"]
+        assert transport.matching("GET", f"{ENDPOINT}/requests/{key}")

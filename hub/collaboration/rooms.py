@@ -438,6 +438,7 @@ class Rooms:
                     (identifier, principal.space_id, principal.user_id, args['title'], self.c.clock()))
                 for part in parts:
                     self.store.execute('INSERT INTO conversation_projects VALUES (?,?,?)', (identifier, part['id'], self.c.clock()))
+                self.c.room_permissions.initialize(identifier, parts, principal)
                 self.change(identifier, 'room', identifier)
                 return {'conversation_id': identifier}
             receipt = self.mutation(principal, 'room_create', args, perform)

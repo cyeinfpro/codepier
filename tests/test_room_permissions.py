@@ -32,14 +32,24 @@ def member(service, owner, cid):
     return service.rooms.create_member({'conversation_id': cid, 'name': 'worker', 'idempotency_key': key()}, owner)['member']
 
 
-def test_empty_preview_does_not_expand_or_write(collab):
+def test_new_room_starts_configured_with_only_explicit_read_access(collab):
     service, owner, cid = room(collab)
     preview = service.room_permissions.read(cid, owner)
-    assert preview['version'] == 0 and not preview['configured']
+    assert preview['version'] == 0 and preview['configured']
     assert preview['scope']['project_scopes'] == []
     assert preview['available_projects']
-    assert not service.room_permissions.is_configured(cid)
-    assert not service.store.all('SELECT * FROM room_permission_policies')
+    assert member(service, owner, cid)['id']
+
+    created = service.rooms.create({'title': 'selected', 'projects': [
+        {'project': 'proj', 'environment_id': 'production'},
+        {'project': 'otherproj', 'environment_id': 'production'}], 'idempotency_key': key()}, owner)
+    cid = created['room']['id']
+    policy = service.room_permissions.read(cid, owner)
+    assert policy['configured'] and policy['version'] == 0
+    assert policy['scope']['project_scopes'] == [rule('otherproj'), rule()]
+    assert policy['channels']['weixin']['mode'] == 'follow_room'
+    added = member(service, owner, cid)
+    assert {tuple(scope['capabilities']) for scope in service.rooms.scopes(service.rooms.member(added['id']))} == {('read',)}
 
 
 def test_canonical_follow_custom_subset_and_stale_version(collab):
@@ -65,8 +75,7 @@ def test_canonical_follow_custom_subset_and_stale_version(collab):
 
 def test_only_room_page_controls_native_members_and_projects(collab):
     service, owner, cid = room(collab)
-    with pytest.raises(DevError, match='房间'):
-        member(service, owner, cid)
+    assert member(service, owner, cid)['id']
     save(service, owner, cid, [rule(caps=['read', 'write'])])
     m = member(service, owner, cid)
     scopes = service.rooms.scopes(service.rooms.member(m['id']))
@@ -137,7 +146,7 @@ def test_replay_is_once_and_sync_failure_rolls_back(collab, monkeypatch):
     service.room_permissions.save(request, owner)
     service.room_permissions.save(request, owner)
     assert service.room_permissions.read(cid, owner)['version'] == 1
-    assert len(service.store.all('SELECT * FROM room_permission_revisions WHERE conversation_id=?', (cid,))) == 1
+    assert [row['version'] for row in service.store.all('SELECT version FROM room_permission_revisions WHERE conversation_id=? ORDER BY version', (cid,))] == [0, 1]
     m = member(service, owner, cid)
     before = service.store.one('SELECT * FROM room_member_scopes WHERE member_id=?', (m['id'],))
     def interrupted(*args):
@@ -158,7 +167,7 @@ def test_worker_cannot_mutate_and_grants_are_unchanged(collab):
         'channels': {'weixin': {'mode': 'follow_room'}, 'telegram': {'mode': 'follow_room'}}}
     with pytest.raises(DevError):
         service.room_permissions.save(request, collab[2])
-    assert not service.room_permissions.is_configured(cid)
+    assert service.room_permissions.read(cid, owner)['scope']['project_scopes'] == []
     service.room_permissions.save(request, owner)
     assert service.store.all('SELECT * FROM grants ORDER BY id') == before
 

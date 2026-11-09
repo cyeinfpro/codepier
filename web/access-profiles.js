@@ -124,7 +124,7 @@ window.CodePierProfiles = (() => {
     }
   }
   function selectorHTML(profiles) {
-    return `<div class="field"><label for="access-profile-selector">以哪个 Profile 连接</label><select id="access-profile-selector" name="access_profile"><option value="">传统逐次授权（不使用 Profile）</option>${profiles.map((p) => `<option value="${esc(p.id)}" ${p.enabled ? '' : 'disabled'}>${esc(p.label)}${p.enabled ? '' : ' · 已停用'}</option>`).join('')}</select><small>不同用途请连接不同 Profile。重新连接或增加权限时选择原 Profile，身份 ID 才会保持一致。</small><a href="/#profiles" target="_blank" rel="noopener noreferrer">在新标签页管理 Profiles</a></div>`;
+    return `<div class="field"><label for="access-profile-selector">访问配置</label><select id="access-profile-selector" name="access_profile"><option value="">手动选择权限</option>${profiles.map((p) => `<option value="${esc(p.id)}" ${p.enabled ? '' : 'disabled'}>${esc(p.label)}${p.enabled ? '' : ' · 已停用'}</option>`).join('')}</select><small>为已有连接增加权限时，请选择原来的访问配置。</small></div>`;
   }
   function bindSelector(dialog, profiles, requested = allScopes, defaults = {}) {
     const select = $('#access-profile-selector', dialog),
@@ -140,10 +140,9 @@ window.CodePierProfiles = (() => {
       if (profile?.role_id && requested.includes(roleScope)) {
         fields.innerHTML =
           CodePierRoles.summary(profile.role) +
-          `<label class="check"><input type="checkbox" name="confirm_dynamic_role">我同意此身份按角色的当前及未来政策工作，包含之后增加的能力和 projects。</label><p class="form-note">这不是初次权限快照。角色暂停或收权会限制后续操作；已开始的命令不会自动停止。</p><label class="check"><input type="checkbox" name="confirm_external_mcp">同时允许此角色使用已审阅并授权的外部 MCP 帐户与工具，包括后续明确配置到角色的外部能力。</label><p class="form-note">外部帐户须先在 MCP 网关连接。此选项不会共享其他人的私有帐户，可随时在网关撤回。</p>`;
+          `<label class="check"><input type="checkbox" name="confirm_dynamic_role">我同意连接跟随角色权限，包括未来新增的能力和项目。</label><label class="check"><input type="checkbox" name="confirm_external_mcp">同时允许此角色使用已审阅并授权的外部 MCP 帐户与工具，包括后续明确配置到角色的外部能力。</label><p class="form-note">外部帐户须先在 MCP 网关连接。此选项不会共享其他人的私有帐户，可随时在网关撤回。</p>`;
       } else if (roleOnly) {
-        fields.innerHTML =
-          '<p class="form-note">请选择已启用并关联角色的 Profile。传统身份不能转换成动态角色授权。</p>';
+        fields.innerHTML = '<p class="form-note">请选择已启用并关联角色的 Profile。</p>';
       } else if (!profile) {
         fields.innerHTML = permissionsHTML(
           S.projects,
@@ -169,7 +168,7 @@ window.CodePierProfiles = (() => {
         // Computer is deliberately NOT prechecked, even for a desktop profile.
         fields.insertAdjacentHTML(
           'beforeend',
-          `<p class="form-note">Profile 上限：${esc(profile.label)} · 版本 ${profile.version}。下面可进一步缩小本次连接权限；桌面控制需要另行勾选。</p>`,
+          `<p class="form-note">权限上限：${esc(profile.label)} · 版本 ${profile.version}。可缩小本次连接的权限。</p>`,
         );
       }
       uiLabelFields(fields);
@@ -204,6 +203,38 @@ window.CodePierProfiles = (() => {
       return { profile_id: profile.id, profile_version: profile.version };
     };
   }
+  function previewHTML(r) {
+    const mode =
+      {
+        fixed: '固定授权',
+        fixedProfile: '固定访问配置',
+        role: '角色授权',
+      }[r.grant.mode] || r.grant.mode;
+    const state =
+      {
+        active: '有效',
+        revoked: '已撤销',
+        expired: '已过期',
+        pending: '等待连接完成',
+        paused: '角色已暂停',
+        blocked: '当前已阻止',
+        refresh_required: '等待客户端刷新凭据',
+        unavailable: '没有可用凭据',
+      }[r.grant.state] || r.grant.state;
+    return `<div data-access-preview><dl class="kv"><dt>连接持有人</dt><dd>${esc(r.owner.label)} <small class="mono">${esc(r.owner.id)}</small></dd><dt>当前空间</dt><dd>${esc(r.space.label)}</dd><dt>连接</dt><dd>${esc(r.grant.label)}</dd><dt>授权模式</dt><dd>${esc(mode)}</dd><dt>状态 / 到期</dt><dd>${esc(state)} · ${r.grant.expires_at ? esc(timeText(r.grant.expires_at)) : '尚无有效凭据'}${r.grant.revoked ? ' · 已撤销' : ''}</dd>${r.profile ? `<dt>Profile</dt><dd>${esc(r.profile.label)} · ${esc(r.profile.id)}</dd>` : ''}${r.role ? `<dt>角色</dt><dd>${esc(r.role.label)}</dd>` : ''}</dl>${r.grant.reason?.message ? notice(esc(r.grant.reason.message)) : ''}${notice('以下是当前面板权限，电脑上的限制在调用时检查。')}${
+      r.projects
+        .map(
+          (p) =>
+            `<section class="form-section"><h3>${esc(p.alias)}</h3><dl class="kv">${allScopes
+              .map((scope) => {
+                const a = p.actions[scope];
+                return `<dt>${esc(scopeNames[scope])}</dt><dd><strong>${a.allowed ? 'Hub 允许' : '拒绝'}</strong> · ${esc(a.reason?.message || a.reason?.code || a.status)}</dd>`;
+              })
+              .join('')}</dl></section>`,
+        )
+        .join('') || empty('当前空间没有可显示的项目权限。')
+    }${r.runtime_checks?.message ? notice(esc(r.runtime_checks.message)) : ''}<p class="form-note">校验时间：${esc(timeText(r.checked_at))}。角色或 Profile 变化后请刷新结果。</p></div>`;
+  }
   async function preview(id) {
     const login = S.session,
       space = S.space_id,
@@ -219,36 +250,7 @@ window.CodePierProfiles = (() => {
     try {
       const r = await api('/api/grants/' + encodeURIComponent(id) + '/access-preview');
       if (!current()) return;
-      const mode =
-        {
-          fixed: '固定授权（fixed）',
-          fixedProfile: '固定 Profile（fixedProfile）：原同意 ∩ 当前上限',
-          role: '动态角色（role）：明确同意的当前及未来政策',
-        }[r.grant.mode] || r.grant.mode;
-      const state =
-        {
-          active: '有效',
-          revoked: '已撤销',
-          expired: '已过期',
-          pending: '等待连接完成',
-          paused: '角色已暂停',
-          blocked: '当前已阻止',
-          refresh_required: '等待客户端刷新凭据',
-          unavailable: '没有可用凭据',
-        }[r.grant.state] || r.grant.state;
-      const body = `<div data-access-preview><dl class="kv"><dt>连接持有人</dt><dd>${esc(r.owner.label)} <small class="mono">${esc(r.owner.id)}</small></dd><dt>当前空间</dt><dd>${esc(r.space.label)}</dd><dt>连接</dt><dd>${esc(r.grant.label)}</dd><dt>授权模式</dt><dd>${esc(mode)}</dd><dt>状态 / 到期</dt><dd>${esc(state)} · ${r.grant.expires_at ? esc(timeText(r.grant.expires_at)) : '尚无有效凭据'}${r.grant.revoked ? ' · 已撤销' : ''}</dd>${r.profile ? `<dt>Profile</dt><dd>${esc(r.profile.label)} · ${esc(r.profile.id)}</dd>` : ''}${r.role ? `<dt>角色</dt><dd>${esc(r.role.label)}</dd>` : ''}</dl>${r.grant.reason?.message ? notice(esc(r.grant.reason.message)) : ''}${notice('以下是当前 Hub 权限检查。没有执行任何工具；Agent 本机政策、在线状态、具体路径/命令和审批仍在实际调用时检查。撤销不等于杀死已经运行的进程。')}${
-        r.projects
-          .map(
-            (p) =>
-              `<section class="form-section"><h3>${esc(p.alias)}</h3><dl class="kv">${allScopes
-                .map((scope) => {
-                  const a = p.actions[scope];
-                  return `<dt>${esc(scopeNames[scope])}</dt><dd><strong>${a.allowed ? 'Hub 允许' : '拒绝'}</strong> · ${esc(a.reason?.message || a.reason?.code || a.status)}</dd>`;
-                })
-                .join('')}</dl></section>`,
-          )
-          .join('') || empty('当前空间没有可显示的项目权限。')
-      }${r.runtime_checks?.message ? notice(esc(r.runtime_checks.message)) : ''}<p class="form-note">校验时间：${esc(timeText(r.checked_at))}。角色或 Profile 变化后请刷新结果。</p></div>`;
+      const body = previewHTML(r);
       const result = modal(
         '连接实际访问结果',
         body,
@@ -261,5 +263,5 @@ window.CodePierProfiles = (() => {
       modal('连接实际访问结果', notice(esc(error.message), true), '', true);
     }
   }
-  return { html, bind, edit, selectorHTML, bindSelector, preview };
+  return { html, bind, edit, selectorHTML, bindSelector, preview, previewHTML };
 })();

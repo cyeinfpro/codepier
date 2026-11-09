@@ -29,52 +29,24 @@ def view(page, name):
     page.locator('.settings-groups button[data-settings-group="' + name + '"]').click()
 
 
-def test_search_scopes_cancel_and_save_readback(settings_page, stack):
+def test_search_and_personal_setting_save(settings_page, stack):
     page, _ = settings_page
     login(page, stack)
-    view(page, "connect")
-    writes = []
-    page.on("request", lambda request: writes.append(request.url) if request.method == "PUT" else None)
-    form = page.locator("#access-settings-form")
-    form.locator('[name="all_projects"]').check()
-    page.once("dialog", lambda dialog: dialog.dismiss())
-    page.evaluate("navigate('identity')")
-    expect(page.locator("#settings-center")).to_be_visible()
-    expect(form.locator('[name="all_projects"]')).to_be_checked()
+    view(page, "usage")
+    form = page.locator('[data-settings-form="appearance"]')
+    form.locator("select").select_option("dark")
+    expect(page.locator("#settings-draft-note")).to_be_visible()
     form.locator("[data-settings-cancel]").click()
-    expect(form.locator('[name="all_projects"]')).not_to_be_checked()
-    assert not writes
-    form.locator('[name="developer_scopes"]').check()
+    expect(form.locator("select")).to_have_value("auto")
+    form.locator("select").select_option("dark")
     form.locator('[type="submit"]').click()
-    expect(form.locator('[role="status"]')).to_contain_text("核对")
-    assert stack.client.get("/api/settings").json()["access_defaults"] == {
-        "all_projects": False, "developer_scopes": True}
-    assert page.evaluate("CodePierSettings.dirty()") is False
+    expect(form.locator('[role="status"]')).to_contain_text("已保存")
     expect(page.locator("#settings-draft-note")).to_be_hidden()
     page.locator("#settings-search").fill("HUB_PORT")
     expect(page.locator("#setting-hub_process")).to_be_visible()
-    expect(page.locator("#setting-access_defaults")).not_to_be_visible()
     page.locator("#settings-search").fill("不存在的设置")
     expect(page.locator("#settings-no-results")).to_be_visible()
-    page.locator("#settings-search").fill("")
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
-
-
-def test_conflict_keeps_draft_and_cancel_reads_current_value(settings_page, stack):
-    page, _ = settings_page
-    login(page, stack)
-    view(page, "connect")
-    form = page.locator("#access-settings-form")
-    form.locator('[name="developer_scopes"]').check()
-    stack.must(stack.client.put("/api/settings/access", json={"all_projects": True, "developer_scopes": False}))
-    form.locator('[type="submit"]').click()
-    expect(form.locator('[role="status"]')).to_contain_text("草稿")
-    expect(form.locator('[name="developer_scopes"]')).to_be_checked()
-    assert stack.client.get("/api/settings").json()["access_defaults"] == {
-        "all_projects": True, "developer_scopes": False}
-    form.locator("[data-settings-cancel]").click()
-    expect(form.locator('[name="all_projects"]')).to_be_checked()
-    expect(form.locator('[name="developer_scopes"]')).not_to_be_checked()
 
 
 def test_non_instance_admin_has_personal_editor_without_deployment_paths(settings_page, stack):
@@ -82,7 +54,7 @@ def test_non_instance_admin_has_personal_editor_without_deployment_paths(setting
     username, _ = local_user(stack)
     login(page, stack, username)
     view(page, "connect")
-    expect(page.locator("#access-settings-form")).to_be_visible()
+    expect(page.locator("#access-settings-form")).to_have_count(0)
     expect(page.locator("#settings-form")).to_have_count(0)
     assert str(stack.hubdir) not in page.content()
     expect(page.locator("#setting-hub_process")).to_contain_text("仅管理员")
@@ -168,44 +140,20 @@ def test_start_is_compact_and_every_scene_is_reachable(settings_page, stack):
     assert page.locator("[data-file-import-open]:visible").count() == 0
 
 
-def test_scene_switch_keeps_unsaved_draft_and_does_not_save(settings_page, stack):
+def test_scene_switch_keeps_unsaved_draft(settings_page, stack):
     page, _ = settings_page
     login(page, stack)
-    writes = []
-    page.on("request", lambda request: writes.append(request.url) if request.method == "PUT" else None)
-    view(page, "connect")
-    form = page.locator("#access-settings-form")
-    form.locator('[name="all_projects"]').check()
-    expect(page.locator("#settings-draft-note")).to_be_visible()
     view(page, "usage")
+    form = page.locator('[data-settings-form="appearance"]')
+    form.locator("select").select_option("dark")
+    expect(page.locator("#settings-draft-note")).to_be_visible()
+    view(page, "connect")
     expect(form).not_to_be_visible()
     expect(page.locator("#settings-draft-note")).to_be_visible()
-    view(page, "connect")
-    expect(form.locator('[name="all_projects"]')).to_be_checked()
-    assert not writes
+    view(page, "usage")
+    expect(form.locator("select")).to_have_value("dark")
     form.locator("[data-settings-cancel]").click()
-    expect(form.locator('[name="all_projects"]')).not_to_be_checked()
-
-
-def test_successful_save_preserves_banner_for_another_unsaved_section(settings_page, stack):
-    page, _ = settings_page
-    login(page, stack)
-    view(page, "usage")
-    appearance = page.locator('[data-settings-form="appearance"]')
-    select = appearance.locator('[name="appearance"]')
-    select.select_option("light" if select.input_value() == "dark" else "dark")
-    expect(page.locator("#settings-draft-note")).to_be_visible()
-    view(page, "connect")
-    access = page.locator("#access-settings-form")
-    access.locator('[name="all_projects"]').check()
-    access.locator('[type="submit"]').click()
-    expect(access.locator('[role="status"]')).to_contain_text("默认选项已保存")
-    expect(page.locator("#settings-draft-note")).to_be_visible()
-    assert page.evaluate("CodePierSettings.dirty()")
-    view(page, "usage")
-    appearance.locator('[type="submit"]').click()
-    expect(page.locator("#settings-draft-note")).to_be_hidden()
-    assert page.evaluate("CodePierSettings.dirty()") is False
+    expect(form.locator("select")).to_have_value("auto")
 
 
 def test_five_start_actions_open_the_real_destination(settings_page, stack):

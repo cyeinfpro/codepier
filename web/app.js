@@ -6,27 +6,44 @@ const esc = CP.ui.esc;
 const paths = CP.ui.paths;
 const icon = CP.ui.icon;
 const nav = [
-  ['native', 'terminal', 'CLI 会话', '11'],
-  ['overview', 'dashboard', '控制总览', '01'],
-  ['devices', 'device', '设备节点', '02'],
-  ['projects', 'folder', '项目映射', '03'],
-  ['vps', 'cloud', 'VPS 管理', '13'],
-  ['workbench', 'code', '远程工作台', '04'],
-  ['workflows', 'history', '开发任务', '05'],
-  ['collaboration', 'network', '协作中心', '20'],
-  ['audit', 'audit', '操作审计', '06'],
-  ['connect', 'plug', 'MCP 接入', '07'],
-  ['profiles', 'shield', '访问 Profiles', '14'],
-  ['roles', 'shield', '访问角色', '15'],
-  ['mcp-gateway', 'network', 'MCP 网关', '19'],
-  ['diagnostics', 'activity', '运行诊断', '08'],
-  ['integrations', 'network', '开发工具', '12'],
-  ['artifacts', 'download', '产物交付', '09'],
-  ['identity', 'key', '我的账号', '16'],
-  ['members', 'shield', '空间成员', '17'],
-  ['identity-admin', 'shield', '身份管理', '18'],
-  ['settings', 'settings', '设置中心', '10'],
+  ['native', 'terminal', 'CLI 会话'],
+  ['overview', 'dashboard', '总览'],
+  ['devices', 'device', '电脑'],
+  ['projects', 'folder', '项目'],
+  ['vps', 'cloud', 'VPS'],
+  ['workbench', 'code', '工作台'],
+  ['workflows', 'history', '任务进度'],
+  ['collaboration', 'network', '协作中心'],
+  ['audit', 'audit', '操作审计'],
+  ['connect', 'plug', '连接'],
+  ['profiles', 'shield', '访问配置'],
+  ['roles', 'shield', '角色'],
+  ['mcp-gateway', 'network', 'MCP 网关'],
+  ['diagnostics', 'activity', '运行诊断'],
+  ['integrations', 'network', '开发工具'],
+  ['artifacts', 'download', '产物交付'],
+  ['identity', 'key', '我的账号'],
+  ['members', 'shield', '成员'],
+  ['identity-admin', 'shield', '身份管理'],
+  ['settings', 'settings', '设置'],
 ];
+const navTabs = {
+  connect: ['connect', 'profiles', 'mcp-gateway'],
+  members: ['members', 'roles', 'identity-admin'],
+};
+const tabParent = Object.fromEntries(
+  Object.entries(navTabs).flatMap(([parent, pages]) => pages.map((page) => [page, parent])),
+);
+function pageTabsHTML(page) {
+  const pages = navTabs[tabParent[page]]?.filter(CodePierIdentity.canNavigate);
+  if (!pages || pages.length < 2) return '';
+  return `<nav class="page-tabs" aria-label="${tabParent[page] === 'connect' ? '连接' : '成员与权限'}">${pages
+    .map(
+      (id) =>
+        `<button type="button" data-nav="${id}" ${id === page ? 'class="active" aria-current="page"' : ''}>${id === 'connect' ? 'ChatGPT' : nav.find((row) => row[0] === id)[2]}</button>`,
+    )
+    .join('')}</nav>`;
+}
 const S = {
   space_id: null,
   identity: null,
@@ -105,6 +122,7 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 function networkState(text, online = false) {
   if ($('#event-state')) $('#event-state').textContent = text;
   if ($('#event-dot')) $('#event-dot').className = 'dot ' + (online ? 'online' : 'offline');
+  if ($('#topbar-refresh')) $('#topbar-refresh').hidden = online;
 }
 function sessionChanged() {
   return Object.assign(new Error('登录状态已变化，请在当前会话中重试。'), {
@@ -182,7 +200,6 @@ function endSession(discard = false) {
   window.CodePierConnectionSetup?.detach();
   window.CodePierCollaboration?.clear();
   window.CodePierCallLog?.clear();
-  window.CodePierAccess?.detach();
   window.CodePierPanelUpdate?.detach(true);
   // Expiry suspends in-memory drafts, never persists message text or files.
   // Only the same authenticated account can recover them after signing in.
@@ -435,7 +452,7 @@ function renderLogin(configured = true) {
   closeModal();
   document.title = '登录 · CodePier';
   $('#app').innerHTML =
-    `<main class="login-screen"><section class="login-art">${brand}<div class="eyebrow">CodePier / 远程开发</div><h1>连接你的<br><span>开发现场</span></h1><p>AI 与本地代码对接、任务停靠的地方。</p><div class="login-orbit" aria-hidden="true"><span class="brand-mark" aria-hidden="true">C</span><span class="login-orbit-caption">MCP · CodePier · AGENT</span></div></section><section class="login-panel"><div class="eyebrow">CodePier / 登录</div><h2>登录控制台</h2><p>使用外部身份或本地账号继续</p><div id="oidc-login-buttons" aria-label="外部身份登录"></div>${appearanceControl()}${!configured ? notice('请先在服务器运行 <code>python -m hub init</code> 初始化账号。') : ''}<form id="login-form"><div class="field"><label for="username">账号</label><input id="username" name="username" autocomplete="username" placeholder="输入账号" required maxlength="80"></div><div class="field"><label for="password">密码</label><input id="password" name="password" type="password" autocomplete="current-password" required maxlength="256" placeholder="输入密码"></div><p id="login-error" class="error-text" role="alert"></p><button class="btn primary" type="submit">进入控制台 ${icon('arrow')}</button></form><div class="spacer"></div>${location.protocol === 'http:' ? notice('HTTP 连接未加密，请在可信网络或 SSH 转发中使用。') : '<span class="badge">HTTPS 连接</span>'}<div class="login-footer">自托管 · 由管理员控制</div></section></main>`;
+    `<main class="login-screen"><section class="login-panel">${brand}<h1>登录</h1><div id="oidc-login-buttons" aria-label="外部身份登录"></div>${appearanceControl()}${!configured ? notice('请先在服务器运行 <code>python -m hub init</code> 初始化账号。') : ''}<form id="login-form"><div class="field"><label for="username">账号</label><input id="username" name="username" autocomplete="username" placeholder="输入账号" required maxlength="80"></div><div class="field"><label for="password">密码</label><input id="password" name="password" type="password" autocomplete="current-password" required maxlength="256" placeholder="输入密码"></div><p id="login-error" class="error-text" role="alert"></p><button class="btn primary" type="submit">登录 ${icon('arrow')}</button></form><div class="spacer"></div>${location.protocol === 'http:' ? notice('HTTP 连接未加密，请在可信网络或 SSH 转发中使用。') : ''}</section></main>`;
   uiLabelFields($('#login-form'));
   CodePierIdentity.loginButtons();
   $('#login-form').addEventListener('submit', async (e) => {
@@ -463,42 +480,26 @@ function renderShell() {
   const groups = [
     [
       '工作',
-      [
-        'overview',
-        'projects',
-        'workbench',
-        'native',
-        'collaboration',
-        'workflows',
-        'artifacts',
-        'audit',
-      ],
+      ['overview', 'projects', 'workbench', 'native', 'workflows', 'collaboration', 'artifacts'],
     ],
-    ['连接', ['connect', 'profiles', 'mcp-gateway', 'integrations']],
-    [
-      '设置',
-      [
-        'identity',
-        'members',
-        'roles',
-        'devices',
-        'vps',
-        'identity-admin',
-        'diagnostics',
-        'settings',
-      ],
-    ],
+    ['资源', ['devices', 'vps']],
+    ['连接', ['connect', 'integrations']],
+    ['管理', ['members', 'audit', 'diagnostics', 'settings']],
   ];
   const navigation = groups
-    .map(
-      ([label, ids]) =>
-        `<div class="nav-group"><div class="nav-label">${label}</div>${ids
-          .map((id) => {
-            const [, ico, title, n] = nav.find((row) => row[0] === id);
-            return `<button class="${id === S.page ? 'active' : ''}" data-nav="${id}" ${id === S.page ? 'aria-current="page"' : ''}>${icon(ico)}<span>${title}</span><span class="nav-num">${n}</span></button>`;
-          })
-          .join('')}</div>`,
-    )
+    .map(([label, ids]) => {
+      const items = ids
+        .map((id) => {
+          const page = (navTabs[id] || [id]).find(CodePierIdentity.canNavigate);
+          if (!page) return '';
+          const [, ico, title] = nav.find((row) => row[0] === id);
+          return `<button type="button" data-nav="${page}" data-nav-group="${id}">${icon(ico)}<span>${id === 'members' ? '成员与权限' : title}</span></button>`;
+        })
+        .join('');
+      return items
+        ? `<div class="nav-group"><div class="nav-label">${label}</div>${items}</div>`
+        : '';
+    })
     .join('');
   const dock = [
     ['overview', 'dashboard', '总览'],
@@ -512,16 +513,21 @@ function renderShell() {
     )
     .join('');
   $('#app').innerHTML =
-    `<a class="skip-link" href="#page">跳到主要内容</a><div class="shell"><aside class="sidebar" id="sidebar" aria-label="主导航"><button class="icon-btn mobile-close" data-action="toggle-menu" aria-label="收起菜单">${icon('close')}</button>${brand}<div class="nav-search" role="search">${icon('search')}<input id="navigation-query" type="search" autocomplete="off" placeholder="查找页面" aria-label="查找导航页面" aria-controls="primary-navigation"></div><p class="nav-search-status" id="navigation-status" role="status" hidden></p><nav class="nav" id="primary-navigation" aria-label="主导航">${navigation}</nav><div class="side-bottom">${CodePierIdentity.selector()}${appearanceControl()}<div class="transport"><div class="transport-top"><i class="dot offline" id="event-dot"></i><span id="event-state">正在连接实时通道…</span></div></div><div class="user-box"><span class="avatar">${esc(S.session.username?.[0]?.toUpperCase() || 'A')}</span><div>${esc(S.session.username)}<br><small class="tiny">${esc(CodePierIdentity.levelLabel(CodePierIdentity.current()?.level))}</small></div><button class="icon-btn" data-action="logout" aria-label="退出登录">${icon('logout')}</button></div></div></aside><button class="sidebar-scrim" data-ui="close-menu" aria-label="关闭导航" tabindex="-1" hidden></button><main class="main"><header class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-menu" data-action="toggle-menu" aria-controls="sidebar" aria-expanded="false" aria-label="展开菜单">${icon('menu')}</button><span class="breadcrumb-prefix">CodePier</span><span>/</span><span id="breadcrumb-page" aria-live="polite">${chosen[2]}</span></div><div class="top-right">${window.CodePierPanelUpdate?.entry() || ''}<span class="clock" id="clock"></span><button class="quick-jump" data-ui="command" aria-label="快速前往页面或项目">${icon('search')}<span>快速前往</span><kbd>${/Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl'} K</kbd></button><button class="icon-btn" data-computer-use aria-label="桌面控制">${icon('device')}</button><button class="icon-btn" data-action="refresh" aria-label="刷新">${icon('refresh')}</button></div></header><div id="page" class="page" tabindex="-1"></div><nav class="mobile-dock" aria-label="移动快捷导航">${dock}<button type="button" data-action="toggle-menu" aria-controls="sidebar" aria-expanded="false" aria-label="更多页面">${icon('menu')}<span>更多</span></button></nav></main></div>`;
-  updateClock();
+    `<a class="skip-link" href="#page">跳到主要内容</a><div class="shell"><aside class="sidebar" id="sidebar" aria-label="主导航"><button class="icon-btn mobile-close" data-action="toggle-menu" aria-label="收起菜单">${icon('close')}</button>${brand}<nav class="nav" id="primary-navigation" aria-label="主导航">${navigation}</nav><div class="side-bottom">${CodePierIdentity.selector()}${appearanceControl()}<div class="transport"><div class="transport-top"><i class="dot offline" id="event-dot"></i><span id="event-state">正在连接实时通道…</span></div></div><div class="user-box"><button type="button" class="avatar" data-nav="identity" aria-label="我的账号">${esc(S.session.username?.[0]?.toUpperCase() || 'A')}</button><div>${esc(S.session.username)}<br><small class="tiny">${esc(CodePierIdentity.levelLabel(CodePierIdentity.current()?.level))}</small></div><button class="icon-btn" data-action="logout" aria-label="退出登录">${icon('logout')}</button></div></div></aside><button class="sidebar-scrim" data-ui="close-menu" aria-label="关闭导航" tabindex="-1" hidden></button><main class="main"><header class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-menu" data-action="toggle-menu" aria-controls="sidebar" aria-expanded="false" aria-label="展开菜单">${icon('menu')}</button><span class="breadcrumb-prefix">CodePier</span><span>/</span><span id="breadcrumb-page" aria-live="polite">${chosen[2]}</span></div><div class="top-right">${window.CodePierPanelUpdate?.entry() || ''}<button class="quick-jump" data-ui="command" aria-label="快速前往页面或项目">${icon('search')}<span>快速前往</span><kbd>${/Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl'} K</kbd></button><button class="icon-btn" data-computer-use aria-label="桌面控制" hidden>${icon('device')}</button><button class="icon-btn" data-action="refresh" id="topbar-refresh" aria-label="刷新">${icon('refresh')}</button></div></header><div id="page" class="page" tabindex="-1"></div><nav class="mobile-dock" aria-label="移动快捷导航">${dock}<button type="button" data-action="toggle-menu" aria-controls="sidebar" aria-expanded="false" aria-label="更多页面">${icon('menu')}<span>更多</span></button></nav></main></div>`;
   uiSetMenu(false, false);
   uiSyncNavigation();
   CodePierIdentity.bindShell();
-  uiFilterNavigation();
+  syncComputerShortcut();
 }
-function updateClock() {
-  const n = $('#clock');
-  if (n) n.textContent = new Date().toLocaleString('zh-CN', { hour12: false });
+function computerProjects() {
+  return S.projects.filter((p) =>
+    S.devices.some((d) => d.id === p.device_id && d.enabled && d.info?.computer_enabled === true),
+  );
+}
+function syncComputerShortcut() {
+  const shortcut = $('[data-computer-use]');
+  if (!shortcut) return;
+  shortcut.hidden = !computerProjects().length;
 }
 function invalidateBasics() {
   S.basicsRevision = (S.basicsRevision || 0) + 1;
@@ -542,6 +548,7 @@ async function loadBasics() {
       if ((S.basicsRevision || 0) !== revision) return loadBasics();
       S.devices = d.devices;
       S.projects = p.projects;
+      syncComputerShortcut();
     })
     .finally(() => {
       if (S.basicsRequest === request) S.basicsRequest = null;
@@ -794,6 +801,13 @@ function connectEvents() {
       return;
     }
     if (['device', 'project'].includes(m.type)) invalidateBasics();
+    if (['device', 'workflow'].includes(m.type))
+      window.dispatchEvent(new CustomEvent('cp:event', { detail: m }));
+    if (
+      ['device', 'project'].includes(m.type) &&
+      !['overview', 'devices', 'projects'].includes(S.page)
+    )
+      loadBasics().catch(() => {});
     if (m.type === 'computer_approval' && typeof refreshComputerApprovals === 'function')
       refreshComputerApprovals();
     if (
@@ -822,7 +836,7 @@ function connectEvents() {
     // change project/device mappings; rebuilding them on every operation makes
     // ordinary navigation compete with the live audit stream.
     const dependencies = {
-      overview: ['operation', 'device', 'project'],
+      overview: ['operation', 'device', 'project', 'iam'],
       devices: ['device', 'project'],
       projects: ['device', 'project'],
       workflows: ['workflow', 'project', 'device'],
@@ -874,7 +888,6 @@ async function renderPage(showLoading = true) {
   window.CodePierSettings?.detach();
   window.CodePierCollaboration?.detach();
   window.CodePierCallLog?.detach();
-  window.CodePierAccess?.detach();
   window.CodePierPanelUpdate?.detach();
   // Non-loading integration refreshes leave the old tabs visible while basics
   // load. Keep their listeners until bind replaces them so clicks are not lost.
@@ -913,6 +926,7 @@ async function renderPage(showLoading = true) {
       S.overview.token_usage = { loading: true };
       S.projects = S.overview.projects;
       S.devices = S.overview.devices;
+      syncComputerShortcut();
       html = overviewHTML();
     } else if (page === 'devices') {
       await loadBasics();
@@ -952,7 +966,11 @@ async function renderPage(showLoading = true) {
       html = CodePierIntegrations.html();
     } else if (page === 'diagnostics') {
       await loadBasics();
-      html = await diagnosticsHTML(seq);
+      const [settings, diagnostics] = await Promise.all([
+        api('/api/settings'),
+        diagnosticsHTML(seq),
+      ]);
+      html = diagnostics + toolCatalogHTML(settings.tools || []);
     } else if (page === 'artifacts') {
       await loadBasics();
       html = await artifactsHTML(seq);
@@ -960,6 +978,7 @@ async function renderPage(showLoading = true) {
       S.settings = await api('/api/settings');
       html = await settingsHTML();
     }
+    html = pageTabsHTML(page) + html;
     if (!showLoading) await uiWaitForPagePointer();
     if (seq !== S.renderSeq || !S.session) return;
     const presentation = showLoading ? null : uiCapturePage();
@@ -1007,18 +1026,48 @@ function operationsTable(rows) {
     })
     .join('')}</tbody></table></div>`;
 }
+function onboardingHTML(o) {
+  const connected = o.online_devices > 0 || o.devices.some((d) => d.last_seen);
+  const steps = [
+    [
+      '接入电脑',
+      connected,
+      '<button class="btn primary small" data-action="add-device">接入电脑</button>',
+    ],
+    [
+      '添加项目',
+      o.projects.length > 0,
+      '<button class="btn primary small" data-action="add-project">添加项目</button>',
+    ],
+    [
+      '在 ChatGPT 添加连接',
+      o.active_grants > 0,
+      `<div class="endpoint"><code>${esc(o.mcp_url)}</code><button class="icon-btn" data-action="copy-endpoint" data-url="${esc(o.mcp_url)}" aria-label="复制地址">${icon('copy')}</button></div><small>在 ChatGPT 中添加此地址并确认访问范围。</small>`,
+    ],
+  ];
+  const next = steps.findIndex(([, done]) => !done);
+  if (next === -1) return '';
+  return `<section class="panel onboarding" aria-labelledby="onboarding-title"><h2 id="onboarding-title">开始使用</h2><ol>${steps
+    .map(
+      ([label, done, action], index) =>
+        `<li class="${done ? 'done' : ''}" ${next === index ? 'aria-current="step"' : ''}><strong>${esc(label)}</strong>${done ? '<span>已完成</span>' : next === index ? action : ''}</li>`,
+    )
+    .join('')}</ol></section>`;
+}
 function overviewHTML() {
   const o = S.overview;
+  const onboarding = onboardingHTML(o);
+  if (!o.devices.length && onboarding) return heading('总览') + onboarding;
   const stats = [
     [
-      '在线节点',
+      '在线电脑',
       o.online_devices,
       `/ ${o.devices.length}`,
       'device',
-      o.online_devices ? '连接已建立' : '等待设备上线',
+      o.online_devices ? '连接已建立' : '等待电脑上线',
       'is-highlight',
     ],
-    ['映射项目', o.projects.length, '', 'folder', '本机项目', ''],
+    ['项目', o.projects.length, '', 'folder', '本机项目', ''],
     [
       '今日操作',
       o.today_operations,
@@ -1030,14 +1079,10 @@ function overviewHTML() {
     ['执行中', o.active_operations, '', 'terminal', `${o.tool_count} 项 MCP 工具可用`, ''],
   ];
   return (
-    heading(
-      '控制总览',
-      'CodePier 工作区',
-      '',
-      `<button class="btn ghost" data-nav="workbench">${icon('code')}工作台</button><button class="btn primary" data-action="add-device">${icon('plus')}接入设备</button>`,
-    ) +
+    heading('总览') +
+    onboarding +
     `<div class="overview-grid workspace-overview editorial-board">
-      <section class="panel codepier-focus-card overview-summary" aria-label="工作区概览"><div class="overview-summary-heading"><h2>工作区概览</h2><span class="editorial-label">CodePier</span></div><div class="stats workspace-stats" aria-label="工作区统计">${stats.map(([label, value, suffix, ico, foot, tone]) => `<article class="stat workspace-stat ${tone}"><div class="stat-top"><span>${label}</span>${icon(ico)}</div><div class="stat-value">${esc(value)}<small>${esc(suffix)}</small></div><div class="stat-foot">${esc(foot)}</div></article>`).join('')}</div>${window.CodePierTokenUsage?.dashboard(o.token_usage) || ''}</section>
+      <section class="panel codepier-focus-card overview-summary" aria-label="工作区概览"><div class="stats workspace-stats" aria-label="工作区统计">${stats.map(([label, value, suffix, ico, foot, tone]) => `<article class="stat workspace-stat ${tone}" ${label === '今日操作' ? `title="${esc(o.timezone)}"` : ''}><div class="stat-top"><span>${label}</span>${icon(ico)}</div><div class="stat-value">${esc(value)}<small>${esc(suffix)}</small></div><div class="stat-foot">${esc(foot)}</div></article>`).join('')}</div>${window.CodePierTokenUsage?.dashboard(o.token_usage) || ''}</section>
       <section class="panel workspace-operations"><div class="panel-head"><h2>最近操作</h2><button class="btn ghost small" data-nav="audit">查看全部 ${icon('arrow')}</button></div>${operationsTable(o.recent_operations.slice(0, 6))}</section>
       <section class="panel overview-projects workspace-recent-projects"><div class="panel-head"><h2>项目入口</h2><button class="icon-btn" data-nav="projects" aria-label="查看全部项目">${icon('arrow')}</button></div>${
         o.projects.length
@@ -1050,69 +1095,50 @@ function overviewHTML() {
               .join('')
           : empty('添加项目，开始远程开发。', 'add-project', '添加项目')
       }</section>
-    </div>` +
-    uiHelp(
-      '统计与连接说明',
-      `按 ${esc(o.timezone)} 统计今日操作。结果以 Agent 回传为准；调用来源按凭据记录。${location.protocol === 'http:' ? '当前浏览器 HTTP 通道未加密，请在可信网络使用。' : ''}`,
-    )
+    </div>`
   );
 }
 function devicesHTML() {
   const cards = S.devices
     .map((d) => {
-      const info = d.info || {},
-        roots = Array.isArray(info.roots) ? info.roots : [];
-      const rootRows = roots
-        .map((root) => {
-          const item = typeof root === 'string' ? { path: root } : root || {},
-            writable = item.writable === undefined ? null : item.writable !== false;
-          return `<div class="device-root-row"><code>${esc(item.path || '未声明路径')}</code><div>${writable === null ? '<span class="badge neutral">权限未声明</span>' : `<span class="badge ${writable ? 'purple' : 'neutral'}">${writable ? '可编辑' : '只读'}</span>`}${item.allow_tasks ? '<span class="badge neutral">可执行</span>' : ''}</div></div>`;
-        })
-        .join('');
+      const info = d.info || {};
       const state = !d.enabled ? 'disabled' : d.online ? 'online' : 'offline';
-      return `<article class="panel device-card workspace-device" data-cp-key="device:${esc(d.id)}" data-device-state="${state}"><header class="workspace-device-head"><div class="device-symbol workspace-device-symbol"><span>${icon('device')}</span></div><div class="workspace-device-title"><div>${d.enabled ? onlineBadge(d.online) : '<span class="badge failed">已停用</span>'}</div><h2>${esc(d.name)}</h2><span class="mono tiny">${esc(
-        String(d.id || '')
-          .slice(0, 12)
-          .toUpperCase(),
-      )}</span></div></header><dl class="card-meta workspace-device-facts"><div><dt>平台 / 主机</dt><dd>${esc(info.platform || '等待上线')} · ${esc(info.hostname || '—')}</dd></div><div><dt>映射项目</dt><dd>${esc(d.project_count)} 个</dd></div><div><dt>最近心跳</dt><dd>${esc(d.last_seen ? shortTime(d.last_seen) : '未连接')}</dd></div><div><dt>授权目录</dt><dd>${roots.length} 个</dd></div></dl><div class="actions agent-card-actions workspace-device-actions">${agentLifecycleButtons(d, true)}<button class="btn ghost small" data-action="agent-roots" data-id="${esc(d.id)}">${icon('folder')}授权目录</button><button class="btn ghost small" data-action="device-detail" data-id="${esc(d.id)}">${icon('settings')}完整管理</button><button class="btn ghost small" data-action="add-project" data-device="${esc(d.id)}">${icon('folder')}映射项目</button></div>${agentLifecycleSummary(d)}<details class="device-roots workspace-device-roots"><summary>目录与权限 · ${roots.length}</summary><div class="device-root-list">${rootRows || '<p>设备上线后显示授权目录</p>'}</div></details><details class="device-raw workspace-device-raw"><summary>完整本机信息</summary><div class="code-box"><pre>${esc(json(info))}</pre></div></details></article>`;
+      return `<article class="panel device-card workspace-device" data-cp-key="device:${esc(d.id)}" data-device-state="${state}">
+      <header class="workspace-device-head"><div class="device-symbol workspace-device-symbol">${icon('device')}</div><div class="workspace-device-title">${d.enabled ? onlineBadge(d.online) : '<span class="badge failed">已停用</span>'}<h2>${esc(d.name)}</h2></div></header>
+      <dl class="card-meta workspace-device-facts"><div><dt>平台 / 主机</dt><dd>${esc(info.platform || '等待上线')} · ${esc(info.hostname || '—')}</dd></div><div><dt>项目</dt><dd>${esc(d.project_count)} 个</dd></div><div><dt>最近连接</dt><dd>${esc(d.last_seen ? shortTime(d.last_seen) : '未连接')}</dd></div><div><dt>可访问的目录</dt><dd>${Array.isArray(info.roots) ? info.roots.length : 0} 个</dd></div></dl>
+      ${agentLifecycleSummary(d)}
+      <div class="actions workspace-device-actions"><button class="btn primary small" data-action="add-project" data-device="${esc(d.id)}">${icon('plus')}添加项目</button><button class="btn ghost small" data-action="device-detail" data-id="${esc(d.id)}">管理</button>${d.agent?.update_available && d.agent?.can_update && !agentLifecycleBusy(d) ? `<button class="btn small" data-action="agent-update" data-id="${esc(d.id)}">更新</button>` : ''}</div>
+    </article>`;
     })
     .join('');
   return (
     heading(
-      '设备节点',
-      '本机连接',
+      '电脑',
       '',
-      `<button class="btn primary" data-action="add-device">${icon('plus')}接入设备</button>`,
+      '',
+      `<button class="btn primary" data-action="add-device">${icon('plus')}接入电脑</button>`,
     ) +
-    `<section class="cards device-cards workspace-device-collection">${cards || empty('还没有设备。', 'add-device', '接入设备')}</section>` +
-    uiHelp(
-      '节点与 Agent 管理',
-      '节点主动连接 Hub，无需开放家里入站端口。受管 Agent 可从这里校验并更新、重启或卸载；更新只替换运行时并保留配置、授权目录、状态和日志。卸载 Agent 与移除面板节点是两个独立操作，都不会删除项目文件。',
-    )
+    `<section class="cards device-cards workspace-device-collection">${cards || empty('还没有电脑。')}</section>`
   );
 }
 function projectsHTML() {
   const rows = S.projects
     .map(
-      (p, index) =>
-        `<article class="panel workspace-project-row" data-cp-key="project:${esc(p.id)}" data-project-row data-project-search="${esc((p.alias + ' ' + p.root + ' ' + p.device_name + ' ' + (p.description || '')).toLocaleLowerCase())}"><header class="workspace-project-head"><span class="project-index" aria-hidden="true">${icon('folder')}</span><div><span class="project-cover-label">PROJECT</span><h2>${esc(p.alias)}</h2>${p.description ? `<p>${esc(p.description)}</p>` : ''}</div>${onlineBadge(p.online)}</header><div class="workspace-project-path"><span>本机路径</span><code title="${esc(p.root)}">${esc(p.root)}</code></div><dl class="workspace-project-facts"><div><dt>设备</dt><dd>${esc(p.device_name)}</dd></div><div><dt>文件权限</dt><dd><span class="badge ${p.mode === 'write' ? 'purple' : 'neutral'}">${p.mode === 'write' ? '可编辑' : '只读'}</span></dd></div><div><dt>任务执行</dt><dd><span class="badge neutral">${p.allow_tasks ? '已授权' : '未授权'}</span></dd></div></dl><footer class="workspace-project-actions"><div class="actions">${typeof chatProjectButtons === 'function' ? chatProjectButtons(p.id) : ''}<button class="btn small" data-action="project-collaboration" data-id="${esc(p.id)}">${icon('network')}协作</button><button class="btn primary small" data-action="open-project" data-id="${esc(p.id)}">工作台 ${icon('arrow')}</button></div><button class="btn ghost small" data-runtime-project="${esc(p.id)}">${icon('settings')}执行环境</button><button class="btn ghost small" data-vps-action="project" data-project="${esc(p.id)}">${icon('cloud')}VPS 分配</button><button class="icon-btn" data-action="edit-project" data-id="${esc(p.id)}" aria-label="编辑 ${esc(p.alias)} 项目映射">${icon('edit')}</button></footer></article>`,
+      (p) =>
+        `<article class="panel workspace-project-row" data-cp-key="project:${esc(p.id)}" data-project-row data-project-search="${esc((p.alias + ' ' + p.root + ' ' + p.device_name + ' ' + (p.description || '')).toLocaleLowerCase())}"><header class="workspace-project-head"><span class="project-index" aria-hidden="true">${icon('folder')}</span><div><h2>${esc(p.alias)}</h2>${p.description ? `<p>${esc(p.description)}</p>` : ''}</div>${onlineBadge(p.online)}</header><div class="workspace-project-path"><span>本机路径</span><code title="${esc(p.root)}">${esc(p.root)}</code></div><dl class="workspace-project-facts"><div><dt>设备</dt><dd>${esc(p.device_name)}</dd></div><div><dt>文件权限</dt><dd><span class="badge ${p.mode === 'write' ? 'purple' : 'neutral'}">${p.mode === 'write' ? '可编辑' : '只读'}</span></dd></div><div><dt>任务执行</dt><dd><span class="badge neutral">${p.allow_tasks ? '已授权' : '未授权'}</span></dd></div></dl><footer class="workspace-project-actions"><button class="btn primary small" data-action="open-project" data-id="${esc(p.id)}">打开 ${icon('arrow')}</button>${uiMenu('更多', `${typeof chatProjectButtons === 'function' ? chatProjectButtons(p.id) : ''}<button class="btn small" data-action="project-collaboration" data-id="${esc(p.id)}">协作</button><button class="btn ghost small" data-runtime-project="${esc(p.id)}">执行环境</button><button class="btn ghost small" data-vps-action="project" data-project="${esc(p.id)}">VPS</button><button class="btn ghost small" data-devtools="overview" data-project="${esc(p.id)}">开发工具</button><button class="btn ghost small" data-devtools="validation" data-project="${esc(p.id)}">测试</button><button class="btn ghost small" data-devtools="handoff" data-project="${esc(p.id)}">任务交接</button><button class="btn ghost small" data-action="edit-project" data-id="${esc(p.id)}">编辑</button>`)}</footer></article>`,
     )
     .join('');
   return (
     heading(
-      '项目映射',
-      '工作空间',
+      '项目',
       '',
-      `<button class="btn primary" data-action="add-project">${icon('plus')}添加映射</button>`,
+      '在 ChatGPT 里用项目名称称呼它。',
+      `<button class="btn primary" data-action="add-project">${icon('plus')}添加项目</button>`,
     ) +
     (S.projects.length
-      ? `<div class="project-search workspace-project-search"><label for="project-query">${icon('search')}<input id="project-query" type="search" aria-label="筛选项目" placeholder="搜索项目、设备或路径"></label><small id="project-count" role="status"></small></div>`
+      ? `<div class="project-search workspace-project-search"><label for="project-query">${icon('search')}<input id="project-query" type="search" aria-label="筛选项目" placeholder="搜索项目、电脑或路径"></label><small id="project-count" role="status"></small></div>`
       : '') +
-    `${S.projects.length ? `<section class="workspace-project-collection">${rows}<div class="empty panel" id="project-no-match" hidden><p>没有匹配的项目</p><button type="button" class="btn ghost small" data-ui="clear-project-query">清除筛选</button></div></section>` : empty('接入设备后，映射本机项目目录。', 'add-project', '添加映射')}` +
-    uiHelp(
-      '别名与授权',
-      '通过别名访问项目，例如 ProjectAlpha；不区分大小写。选择“全部现有及未来新增项目”的连接会自动包含新增映射；限定项目的连接可在“MCP 接入”调整范围，无需更换凭据。',
-    )
+    `${S.projects.length ? `<section class="workspace-project-collection">${rows}<div class="empty panel" id="project-no-match" hidden><p>没有匹配的项目</p><button type="button" class="btn ghost small" data-ui="clear-project-query">清除筛选</button></div></section>` : empty('接入电脑后即可添加项目。', 'add-project', '添加项目')}`
   );
 }
 async function addDevice() {
@@ -1121,7 +1147,7 @@ async function addDevice() {
 function pairingModal(pairing, rePair = false) {
   modal(
     rePair ? '更新同一设备的连接凭据' : '设备密钥已生成',
-    `${notice('这是设备连接凭据，不是 MCP 访问令牌。请保存配对文件；页面关闭后不能再次查看。')}<div class="spacer"></div><div class="code-box"><pre>${esc(json(pairing))}</pre></div><p class="form-note">${rePair ? '在原 Agent 运行目录使用原配置重新配对；保留目录权限、任务和历史。使用自定义配置时，在 init 前加 --config 指定原文件。完成后按原维护流程重启。' : '家里电脑安装依赖后，使用下方命令导入；将授权目录换成你的实际路径。'}</p><div class="code-box"><pre>${rePair ? 'python -m agent init --re-pair --pairing-file pairing.json' : 'python -m agent init --pairing-file pairing.json --allow &quot;D:/Projects&quot;'}</pre></div>`,
+    `${notice('请先下载配对文件，关闭后无法再次查看。')}<div class="spacer"></div><div class="code-box"><pre>${esc(json(pairing))}</pre></div><p class="form-note">${rePair ? '在原 Agent 运行目录使用原配置重新配对；保留目录权限、任务和历史。使用自定义配置时，在 init 前加 --config 指定原文件。完成后按原维护流程重启。' : '在目标电脑运行下方命令，把示例目录换成你的路径。'}</p><div class="code-box"><pre>${rePair ? 'python -m agent init --re-pair --pairing-file pairing.json' : 'python -m agent init --pairing-file pairing.json --allow &quot;D:/Projects&quot;'}</pre></div>`,
     `<button class="btn ghost" data-action="close-modal">已保存</button><button class="btn primary" id="download-pairing">${icon('download')}下载 pairing.json</button>`,
   );
   $('#download-pairing').onclick = () => download('pairing.json', json(pairing));
@@ -1134,8 +1160,8 @@ async function deviceDetail(id) {
     ? `<button class="btn danger small" data-action="agent-uninstall" data-id="${esc(d.id)}">${icon('trash')}卸载本机 Agent</button>`
     : '';
   const dialog = modal(
-    '管理节点 · ' + d.name,
-    `<div class="field"><label>节点名称</label><input id="device-rename" value="${esc(d.name)}" maxlength="80"></div><dl class="kv device-kv"><dt>节点编号</dt><dd><code>${esc(d.id)}</code></dd><dt>连接状态</dt><dd>${d.enabled ? onlineBadge(d.online) : '<span class="badge failed">已停用</span>'}</dd><dt>最近连接</dt><dd>${esc(timeText(d.last_seen))}</dd><dt>平台 / 主机</dt><dd>${esc(d.info.platform || '等待上线')} · ${esc(d.info.hostname || '—')}</dd><dt>项目映射</dt><dd>${d.project_count} 个</dd></dl>${agentLifecycleSummary(d)}<section class="node-manage-section"><div class="node-section-head"><div><h3>Agent 生命周期</h3><p>更新先校验完整新运行时，面板记录结果后才切换；节点有任务执行时不会强行更新或重启。</p></div></div><div class="actions">${agentLifecycleButtons(d, false)}</div></section><section class="node-manage-section"><div id="device-roots-manager"></div></section><section class="node-manage-section"><h3>开发工具配置</h3><p class="form-note">按项目连接语言服务与后台浏览器。只进入配置引导，不自动安装、授权或重启。</p><div class="actions">${
+    '管理电脑 · ' + d.name,
+    `<div class="field"><label>电脑名称</label><input id="device-rename" value="${esc(d.name)}" maxlength="80"></div><dl class="kv device-kv"><dt>电脑编号</dt><dd><code>${esc(d.id)}</code></dd><dt>连接状态</dt><dd>${d.enabled ? onlineBadge(d.online) : '<span class="badge failed">已停用</span>'}</dd><dt>最近连接</dt><dd>${esc(timeText(d.last_seen))}</dd><dt>平台 / 主机</dt><dd>${esc(d.info.platform || '等待上线')} · ${esc(d.info.hostname || '—')}</dd><dt>项目映射</dt><dd>${d.project_count} 个</dd></dl>${agentLifecycleSummary(d)}<section class="node-manage-section"><div class="node-section-head"><div><h3>Agent 生命周期</h3><p>有任务运行时，更新会等待任务结束。</p></div></div><div class="actions">${agentLifecycleButtons(d, false)}</div></section><section class="node-manage-section"><div id="device-roots-manager"></div></section><section class="node-manage-section"><h3>开发工具配置</h3><p class="form-note">为项目配置语言服务和后台浏览器。</p><div class="actions">${
       S.projects
         .filter((p) => p.device_id === d.id)
         .map(
@@ -1143,7 +1169,7 @@ async function deviceDetail(id) {
             `<button class="btn ghost small" data-devtools="setup" data-project="${esc(p.id)}">${esc(p.alias)} · 配置引导</button>`,
         )
         .join('') ||
-      `<button class="btn ghost small" data-action="add-project" data-device="${esc(d.id)}">先添加项目映射</button>`
+      `<button class="btn ghost small" data-action="add-project" data-device="${esc(d.id)}">先添加项目</button>`
     }</div></section><details class="device-raw"><summary>本机声明与能力</summary><div class="code-box"><pre>${esc(json(d.info))}</pre></div></details><p class="form-note">更换 IP / 端口：在目标电脑运行 <code>python -m agent configure --hub http://新IP:新端口</code>。新增或调整授权目录可直接使用上方的目录管理。</p><section class="danger-zone"><div><h3>节点与凭据</h3><p>卸载只清理目标电脑上的 Agent；“移除面板记录”只删除 Hub 中的节点身份。两者都不会删除项目文件。</p></div><div class="actions">${uninstall}<button class="btn small" id="toggle-device">${d.enabled ? '停用节点' : '启用节点'}</button><button class="btn small" id="rotate-device">轮换连接密钥</button><button class="btn danger small" id="delete-device">仅移除面板记录</button></div></section>`,
     buttons('rename-device', '保存名称'),
     true,
@@ -1219,7 +1245,7 @@ async function deviceDetail(id) {
     });
   };
 }
-async function projectModal(id = null, device = '') {
+async function projectModal(id = null, device = '', prefill = {}) {
   const session = S.session,
     space = S.space_id,
     page = S.page,
@@ -1235,14 +1261,19 @@ async function projectModal(id = null, device = '') {
   )
     return;
   if (!S.devices.length) {
-    toast('请先接入一台设备');
+    toast('请先接入一台电脑');
     return addDevice();
   }
   const p = S.projects.find((p) => p.id === id) || {};
   const dialog = modal(
-    id ? '编辑项目映射' : '添加项目映射',
-    `<form id="project-form"><p class="form-note">未单独配置的项目默认使用清洁执行环境。保存映射后，可从项目卡片的“执行环境”选择其他模式。</p><div class="form-row"><div class="field"><label>项目别名</label><input name="alias" required value="${esc(p.alias || '')}" placeholder="ProjectAlpha" maxlength="64"></div><div class="field"><label>所属设备</label><select name="device_id">${S.devices.map((d) => `<option value="${d.id}" ${(p.device_id || device) === d.id ? 'selected' : ''}>${esc(d.name)} · ${d.online ? '在线' : '离线'}</option>`).join('')}</select></div></div><div class="field"><label>本机项目路径</label><input name="root" required value="${esc(p.root || '')}" placeholder="D:/Projects/ProjectAlpha 或 /home/me/Projects/ProjectAlpha"><small>保存时验证目录与权限。SMB 共享请填写节点上已挂载的路径。</small></div><div class="project-root-access"><button class="btn ghost small" type="button" id="project-authorize-root">${icon('folder')}新增或调整目录授权</button><div id="project-roots-manager" hidden></div></div><div class="field"><label>项目说明</label><input name="description" value="${esc(p.description || '')}" placeholder="可选，简要说明" maxlength="1000"></div><div class="field"><label>文件访问权限</label><select name="mode"><option value="write" ${p.mode === 'read' ? '' : 'selected'}>可读取和编辑</option><option value="read" ${p.mode === 'read' ? 'selected' : ''}>只读</option></select></div><label class="check"><input name="allow_tasks" type="checkbox" ${p.allow_tasks ? 'checked' : ''}>允许本机任务及已授权的 Shell 执行</label><p class="form-note">执行还需要本机允许。若本机开启完整 Shell 权限，MCP 可执行任意命令，使用 Agent 系统用户的权限。</p></form>`,
-    `${id ? '<button class="btn danger" id="unmap-project">删除映射</button>' : ''}${buttons('save-project', '验证并保存')}`,
+    id ? '编辑项目' : '添加项目',
+    `<form id="project-form"><div class="field"><label>电脑</label><select name="device_id">${S.devices.map((d) => `<option value="${esc(d.id)}" ${(p.device_id || device) === d.id ? 'selected' : ''}>${esc(d.name)} · ${d.online ? '在线' : '离线'}</option>`).join('')}</select></div>
+      <div class="field"><label>项目路径</label><input name="root" required value="${esc(p.root || prefill.root || '')}" placeholder="/Users/me/Projects/ProjectAlpha"><small>网络共享请填挂载后的路径。</small></div>
+      <div class="field"><label>项目名称</label><input name="alias" required value="${esc(p.alias || '')}" placeholder="ProjectAlpha" maxlength="64"></div>
+      <div class="field"><label>AI 可以</label><select name="access"><option value="read">只看代码</option><option value="write">看和改代码</option><option value="full">看、改代码和运行命令</option></select></div>
+      <details class="form-advanced"${p.description ? ' open' : ''}><summary>项目说明</summary><div class="field"><label>说明</label><input name="description" value="${esc(p.description || '')}" maxlength="1000"></div></details>
+      <div id="project-roots-manager" hidden></div></form>`,
+    `${id ? '<button class="btn danger" id="unmap-project">删除项目</button>' : ''}${buttons('save-project', '保存')}`,
   );
   const form = $('#project-form', dialog),
     button = $('#save-project', dialog),
@@ -1260,39 +1291,94 @@ async function projectModal(id = null, device = '') {
     resumeSignature = null,
     rootsManager = null,
     validationTimer = null;
-  const projectData = () => ({
-    ...Object.fromEntries(new FormData(form)),
-    allow_tasks: form.elements.allow_tasks.checked,
+  const root = form.elements.root,
+    alias = form.elements.alias,
+    access = form.elements.access;
+  let aliasTouched = !!p.alias,
+    accessTouched = !!p.id;
+  function selectedRoot() {
+    const info = S.devices.find((d) => d.id === form.elements.device_id.value)?.info;
+    const windows = /^win/i.test(info?.platform || '');
+    const normalize = (value) => {
+      const normalized = windows ? value.replace(/\\/g, '/').toLowerCase() : value;
+      return normalized.replace(/\/+$/, '');
+    };
+    const path = normalize(root.value.trim());
+    return (info?.roots || [])
+      .filter((r) => r?.path && !r.path.includes('\\..\\'))
+      .map((entry) => ({ entry, path: normalize(entry.path) }))
+      .filter((r) => path === r.path || path.startsWith(r.path + '/'))
+      .sort((a, b) => b.path.length - a.path.length)[0]?.entry;
+  }
+  function updateDefaults() {
+    if (!aliasTouched)
+      alias.value = (
+        root.value
+          .trim()
+          .replace(/[\\/]+$/, '')
+          .split(/[\\/]/)
+          .pop() || ''
+      ).slice(0, 64);
+    if (!accessTouched) {
+      const allowed = selectedRoot();
+      access.value = allowed?.writable === false ? 'read' : allowed?.allow_tasks ? 'full' : 'write';
+    }
+  }
+  const prefillDevice = () => {
+    const first = S.devices.find((d) => d.id === form.elements.device_id.value)?.info?.roots?.[0];
+    root.value ||= (typeof first === 'string' ? first : first?.path) || '';
+  };
+  if (!p.id) prefillDevice();
+  if (p.id) access.value = p.mode === 'read' ? 'read' : p.allow_tasks ? 'full' : 'write';
+  updateDefaults();
+  alias.addEventListener('input', () => {
+    aliasTouched = true;
   });
-  const openRootManager = () => {
-    if (!current()) return;
-    const data = projectData(),
-      host = $('#project-roots-manager', dialog);
+  access.addEventListener('change', () => {
+    accessTouched = true;
+  });
+  root.addEventListener('input', updateDefaults);
+  const projectData = () => {
+    const { access, ...rest } = Object.fromEntries(new FormData(form));
+    return { ...rest, mode: access === 'read' ? 'read' : 'write', allow_tasks: access === 'full' };
+  };
+  const openRootManager = (data, signature) => {
+    if (!current() || JSON.stringify(projectData()) !== signature) return;
+    const host = $('#project-roots-manager', dialog);
     rootsManager?.dispose();
     host.hidden = false;
     rootsManager = CodePierRoots.mount(host, data.device_id, {
       initial: { path: data.root, writable: data.mode === 'write', allow_tasks: data.allow_tasks },
+      autoSave: () => current() && JSON.stringify(projectData()) === signature,
       current: () => current() && form.elements.device_id.value === data.device_id,
-      onApplied: async () => {
+      onApplied: () => {
         if (!current()) return;
-        if (resumeSignature && JSON.stringify(projectData()) === resumeSignature) {
+        if (resumeSignature === signature && JSON.stringify(projectData()) === signature) {
           submission = null;
           resumeSignature = null;
-          status.textContent = '目录授权已生效，正在继续保存映射…';
-          await submit();
+          host.hidden = true;
+          status.textContent = '目录已授权，正在保存项目…';
+          // The original Save handler may still be releasing its busy button.
+          validationTimer = setTimeout(() => {
+            if (current() && JSON.stringify(projectData()) === signature) submit();
+          }, 0);
         } else {
-          status.textContent = '目录授权已生效，可以验证并保存映射。';
+          status.textContent = '目录已授权。请检查当前输入后保存项目。';
         }
       },
     });
   };
-  $('#project-authorize-root', dialog).onclick = openRootManager;
   form.elements.device_id.addEventListener('change', () => {
     rootsManager?.dispose();
     rootsManager = null;
     $('#project-roots-manager', dialog).hidden = true;
     resumeSignature = null;
     clearTimeout(validationTimer);
+    if (!p.id) {
+      root.value = '';
+      prefillDevice();
+    }
+    updateDefaults();
   });
   const previousCleanup = S.modalCleanup;
   S.modalCleanup = () => {
@@ -1307,7 +1393,7 @@ async function projectModal(id = null, device = '') {
       const data = projectData();
       const signature = JSON.stringify(data);
       if (submission && submission.signature !== signature && submission.uncertain) {
-        status.textContent = '原保存结果尚未核实，请保留原参数继续核实，或关闭后先刷新项目列表。';
+        status.textContent = '上次保存结果待确认。请恢复原输入后重试，或刷新项目列表。';
         return;
       }
       if (!submission || submission.signature !== signature)
@@ -1322,15 +1408,15 @@ async function projectModal(id = null, device = '') {
         if (JSON.stringify(projectData()) !== signature) {
           if (!id && typeof saved?.id === 'string') {
             id = saved.id;
-            $('#modal-title', dialog).textContent = '编辑项目映射';
+            $('#modal-title', dialog).textContent = '编辑项目';
           }
           submission = null;
           resumeSignature = null;
-          status.textContent = '原映射已保存。当前新增修改已保留，可继续验证并保存。';
+          status.textContent = '项目已保存。你之后的修改还没保存。';
           return;
         }
         closeModal(dialog);
-        toast('映射已保存');
+        toast('项目已保存');
         await renderPage(false);
       } catch (error) {
         submission.uncertain = error.code === 'NETWORK_UNCERTAIN' || error.status >= 500;
@@ -1344,9 +1430,7 @@ async function projectModal(id = null, device = '') {
           return;
         }
         status.textContent =
-          error.code === 'VALIDATION_PENDING'
-            ? '正在等待节点完成目录验证，完成后自动保存映射…'
-            : error.message;
+          error.code === 'VALIDATION_PENDING' ? '正在等待电脑检查目录…' : error.message;
         if (error.code === 'VALIDATION_PENDING') {
           validationTimer = setTimeout(() => {
             if (current() && JSON.stringify(projectData()) === signature) submit();
@@ -1356,8 +1440,27 @@ async function projectModal(id = null, device = '') {
             error.code,
           )
         ) {
+          const accessLabel = data.allow_tasks
+            ? '读取、修改和运行命令'
+            : data.mode === 'write'
+              ? '读取和修改'
+              : '读取';
+          const approved = await uiConfirmAction(
+            {
+              title: '授权目录并保存项目？',
+              body:
+                data.root +
+                '\n允许' +
+                accessLabel +
+                '。' +
+                (data.allow_tasks ? '命令使用这台电脑当前用户的权限。' : ''),
+              confirmLabel: '授权并保存',
+            },
+            { owner: dialog, current },
+          );
+          if (!approved || !current() || JSON.stringify(projectData()) !== signature) return;
           resumeSignature = signature;
-          openRootManager();
+          openRootManager(data, signature);
         }
       }
     });
@@ -1374,9 +1477,9 @@ async function projectModal(id = null, device = '') {
           !current() ||
           !(await uiConfirmAction(
             {
-              title: '删除项目映射？',
-              body: '只删除映射，不会删除家里文件。已开始的操作不会自动撤销。继续？',
-              confirmLabel: '删除映射',
+              title: '删除项目？',
+              body: '只删除项目，不会删除家里文件。已开始的操作不会自动撤销。继续？',
+              confirmLabel: '删除项目',
               danger: true,
             },
             { owner: dialog, current },
@@ -2294,14 +2397,18 @@ function grantListHTML() {
           ? '待连接'
           : '';
     const projects = g.projects.map((id) => S.projects.find((p) => p.id === id)?.alias || id);
-    const scopeNames = { read: '读取', write: '写入', execute: '执行', computer: '桌面' };
+    const scopeNames = { read: '读取', write: '写入', execute: '运行命令', computer: '桌面控制' };
     const range =
       g.authorization_mode === 'role'
-        ? '<span>范围及能力以当前动态角色为准</span>'
+        ? '<span>权限随角色变化</span>'
         : g.projects.includes('*')
-          ? '<span>原同意项目：全部项目（含未来新增）</span>'
-          : `<details class="grant-projects"><summary>原同意 ${projects.length} 个项目</summary><div>${projects.map((name) => `<span>${esc(name)}</span>`).join('')}</div></details>`;
-    return `<article class="grant-row ${historical(g) ? 'grant-inactive' : ''}" data-grant-id="${esc(g.id)}"><div class="grant-info"><h3><span>${esc(g.label)}</span><span class="badge purple">${g.client_id ? 'OAuth' : 'PAT'}</span>${status ? `<span class="badge neutral">${status}</span>` : ''}</h3><div class="grant-meta"><span>${g.authorization_mode === 'role' ? '动态角色（role）' : g.profile_id ? '固定 Profile（fixedProfile）' : '固定授权（fixed）'}</span>${g.profile_id ? `<span>Profile：${esc(g.profile_id)}</span>` : ''}<span>原同意能力：${esc(g.scopes.map((scope) => scopeNames[scope] || scope).join(' · '))}</span>${range}</div><p>${g.status === 'pending' ? '等待客户端完成连接' : g.unlimited ? '无限期，直到手动撤销' : g.expires ? `${expired ? '已于' : '到期'} ${esc(timeText(g.expires))}${expired ? ' 过期' : ''}` : expired ? '已无有效凭据' : '尚未连接'}</p></div><div class="actions"><button class="btn small" data-action="grant-access-preview" data-id="${esc(g.id)}">查看实际访问结果</button>${!g.revoked ? `<button class="btn small" data-action="edit-grant-expiration" data-id="${esc(g.id)}">修改授权期限</button>${!expired && !g.profile_id ? `<button class="btn small" data-action="edit-grant-projects" data-id="${esc(g.id)}">调整项目范围</button>` : ''}<button class="btn danger small" data-action="revoke-grant" data-id="${esc(g.id)}">撤销</button>` : ''}</div></article>`;
+          ? '<span>全部现有及未来项目</span>'
+          : `<details class="grant-projects"><summary>${projects.length} 个项目</summary><div>${projects.map((name) => `<span>${esc(name)}</span>`).join('')}</div></details>`;
+    return `<article class="grant-row ${historical(g) ? 'grant-inactive' : ''}" data-grant-id="${esc(g.id)}"><div class="grant-info"><h3><span>${esc(g.label)}</span><span class="badge purple">${g.client_id ? '连接' : '访问令牌'}</span>${status ? `<span class="badge neutral">${status}</span>` : ''}</h3><div class="grant-meta"><span>${g.authorization_mode === 'role' ? '角色授权' : g.profile_id ? '访问配置' : '固定授权'}</span>${g.profile_id ? `<span>访问配置：${esc(g.profile_id)}</span>` : ''}<span>权限：${esc(g.scopes.map((scope) => scopeNames[scope] || scope).join(' · '))}</span>${range}</div><p>${g.status === 'pending' ? '等待客户端完成连接' : g.unlimited ? '无限期，直到手动撤销' : g.expires ? `${expired ? '已于' : '到期'} ${esc(timeText(g.expires))}${expired ? ' 过期' : ''}` : expired ? '已无有效凭据' : '尚未连接'}</p></div><div class="actions">${
+      g.revoked
+        ? `<button class="btn small" data-action="grant-access-preview" data-id="${esc(g.id)}">查看</button>`
+        : `<button class="btn small" data-action="edit-grant" data-id="${esc(g.id)}">编辑</button><button class="btn danger small" data-action="revoke-grant" data-id="${esc(g.id)}">撤销</button>`
+    }</div></article>`;
   };
   const list = (items, group) => {
     const size = 5;
@@ -2315,7 +2422,7 @@ function grantListHTML() {
         '',
       )}</div>${pages > 1 ? `<nav class="pagination grant-pagination" aria-label="${group === 'current' ? '当前' : '历史'}授权分页"><span role="status">${page * size + 1}–${Math.min((page + 1) * size, items.length)} / ${items.length}</span><div class="actions"><button class="btn ghost small" data-action="grant-page" data-group="${group}" data-delta="-1" ${page === 0 ? 'disabled' : ''}>上一页</button><button class="btn ghost small" data-action="grant-page" data-group="${group}" data-delta="1" ${page === pages - 1 ? 'disabled' : ''}>下一页</button></div></nav>` : ''}`;
   };
-  return `<div class="panel-head"><h2>${icon('key')}访问授权</h2><span class="badge neutral">${current.length} 当前授权</span></div><div class="panel-body">${current.length ? list(current, 'current') : empty(S.grants.length ? '暂无当前授权，历史记录保留在下方。' : '还没有访问授权。', 'new-grant', '创建凭据')}${history.length ? `<div class="grant-history"><button class="btn ghost grant-history-toggle" data-action="grant-history" aria-expanded="${S.grantHistoryOpen}" aria-controls="grant-history-list">${S.grantHistoryOpen ? '收起' : '查看'}历史授权 <span class="badge neutral">${history.length}</span><span class="muted">已撤销 / 已过期</span></button><div id="grant-history-list" ${S.grantHistoryOpen ? '' : 'hidden'}>${S.grantHistoryOpen ? list(history, 'history') : ''}</div></div>` : ''}</div>`;
+  return `<div class="panel-head"><h2>${icon('key')}已有连接</h2><span class="badge neutral">${current.length} 个当前连接</span></div><div class="panel-body">${current.length ? list(current, 'current') : empty('暂无有效连接。')}${history.length ? `<div class="grant-history"><button class="btn ghost grant-history-toggle" data-action="grant-history" aria-expanded="${S.grantHistoryOpen}" aria-controls="grant-history-list">${S.grantHistoryOpen ? '收起' : '查看'}历史授权 <span class="badge neutral">${history.length}</span><span class="muted">已撤销 / 已过期</span></button><div id="grant-history-list" ${S.grantHistoryOpen ? '' : 'hidden'}>${S.grantHistoryOpen ? list(history, 'history') : ''}</div></div>` : ''}</div>`;
 }
 function refreshGrantList(button) {
   const focusAction = button.dataset.action;
@@ -2333,33 +2440,32 @@ function refreshGrantList(button) {
       ?.focus({ preventScroll: true });
 }
 function connectHTML() {
-  const s = S.settings;
-  const guide = `<div class="step"><span class="step-number">01</span><div><h3>设备上线，映射项目</h3><p>先在工作台读取文件，确认链路正常。</p></div></div><div class="step"><span class="step-number">02</span><div><h3>添加 MCP 连接</h3><p>公开 HTTPS 使用 OAuth；无域名时可选择官方 Secure MCP Tunnel，需账号具备相应权限。</p></div></div><div class="step"><span class="step-number">03</span><div><h3>选择项目与权限</h3><p>在客户端完成授权后，通过项目别名调用。详细步骤见项目内 <code>docs/CHATGPT.md</code>。</p></div></div>`;
+  const settings = S.settings;
   return (
-    heading(
-      'MCP 接入',
-      'CONNECTION / ACCESS',
-      '助手访问 CodePier · 客户端、Profile 与授权政策',
-      `<button class="btn primary" data-action="new-grant">${icon('key')}创建凭据</button><button class="btn ghost" data-nav="profiles">管理访问 Profiles</button>`,
-    ) +
-    `<section class="panel"><div class="panel-body"><h2>两种连接方向</h2><p>此页管理「助手访问 CodePier」：谁通过哪个客户端，以何种身份访问当前空间。</p><p>「CodePier 使用外部工具」单独管理网关账号与已审阅工具，不会由这里的 Profile 自动取得外部账号。</p><button class="btn ghost" data-nav="mcp-gateway">CodePier 使用外部工具</button></div></section>` +
-    `<div class="connect-grid"><section class="panel"><div class="panel-head"><h2>${icon('plug')}连接地址</h2><span class="badge neutral">MCP</span></div><div class="panel-body"><div class="eyebrow">STREAMABLE HTTP</div><div class="endpoint"><code>${esc(s.mcp_url)}</code><button class="icon-btn" data-action="copy-endpoint" aria-label="复制 MCP 地址">${icon('copy')}</button></div><div class="mcp-coding-entry"><div><strong>核心开发工具</strong><small>统一九工具入口；实际权限由当前角色决定。</small></div><button class="btn ghost small" data-action="copy-coding-endpoint">复制核心地址</button></div><div class="mcp-coding-entry"><div><strong>动态角色连接</strong><small>明确委派已分配角色的当前与后续能力。</small></div><button class="btn ghost small" data-action="copy-role-endpoint">复制角色地址</button></div><div class="connection-route"><span>客户端</span>${icon('arrow')}<span>CodePier</span>${icon('arrow')}<span>本机项目</span></div>${notice('面板与 Agent 支持 HTTP。ChatGPT 直连需公开 HTTPS，或使用已获授权的 Secure MCP Tunnel。')}${uiHelp('接入步骤', guide)}</div></section>
-    <section class="panel" id="grant-panel">${grantListHTML()}</section></div>` +
-    CodePierConnectionSetup.html() +
-    uiHelp(
-      `工具目录 · ${s.tools.length} 项`,
-      `<div class="project-search"><input id="tool-query" type="search" aria-label="搜索工具" placeholder="搜索工具名称或权限"><small id="tool-count" role="status"></small></div><div class="tool-grid">${s.tools
-        .map((t) => {
-          const scope =
-            t.scope ||
-            t._meta?.securitySchemes?.[0]?.scopes?.[0] ||
-            (t.annotations?.readOnlyHint ? 'read' : 'write');
-          return `<div class="tool-chip" data-tool-name="${esc((t.name + ' ' + scope).toLowerCase())}" title="${esc(t.description)}"><span>${esc(t.name)}</span><span class="tool-scope ${esc(scope)}">${esc(scope)}</span></div>`;
-        })
-        .join(
-          '',
-        )}</div><p class="form-note">读取、写入、执行分别授权；项目范围同时由 Hub 和本机限制。</p>`,
-    )
+    heading('连接') +
+    `<section class="panel"><div class="panel-head"><h2>ChatGPT 连接地址</h2></div><div class="panel-body">
+      <div class="endpoint"><code>${esc(settings.mcp_url)}</code><button class="icon-btn" data-action="copy-endpoint" aria-label="复制 MCP 地址">${icon('copy')}</button></div>
+      <p>在 ChatGPT 中添加此地址。直连使用公开 HTTPS，私有部署可使用 Secure MCP Tunnel。</p>
+      <details class="form-advanced" id="other-clients"><summary>其他客户端</summary>
+        <div class="actions"><button class="btn small" data-action="copy-coding-endpoint">复制核心地址</button><button class="btn small" data-action="copy-role-endpoint">复制角色地址</button><button class="btn small" data-action="new-grant">创建访问令牌</button></div>
+        ${CodePierConnectionSetup.tunnelHTML()}
+      </details></div></section>
+      ${CodePierConnectionSetup.html()}
+      <section class="panel" id="grant-panel">${grantListHTML()}</section>`
+  );
+}
+function toolCatalogHTML(tools) {
+  return uiHelp(
+    `工具目录 · ${tools.length} 项`,
+    `<div class="project-search"><input id="tool-query" type="search" aria-label="搜索工具" placeholder="搜索工具名称或权限"><small id="tool-count" role="status"></small></div><div class="tool-grid">${tools
+      .map((t) => {
+        const scope =
+          t.scope ||
+          t._meta?.securitySchemes?.[0]?.scopes?.[0] ||
+          (t.annotations?.readOnlyHint ? 'read' : 'write');
+        return `<div class="tool-chip" data-tool-name="${esc((t.name + ' ' + scope).toLowerCase())}" title="${esc(t.description)}"><span>${esc(t.name)}</span><span class="tool-scope ${esc(scope)}">${esc(scope)}</span></div>`;
+      })
+      .join('')}</div>`,
   );
 }
 function permissionsHTML(
@@ -2368,8 +2474,12 @@ function permissionsHTML(
   defaults = S.settings?.access_defaults || {},
 ) {
   return (
-    `<div class="field"><label>工具权限</label><div class="check-list">${scopes.map((scope) => `<label class="check"><input type="checkbox" name="scope" value="${esc(scope)}" ${scope === 'read' ? 'checked disabled' : defaults.developer_scopes && ['write', 'execute'].includes(scope) ? 'checked' : ''}>${{ read: '读取项目与文件（必须）', write: '编辑文件、恢复备份和建立检查点', execute: '运行 / 停止本机任务及已授权的 Shell', computer: '读取屏幕与操作桌面应用（独立高权限）' }[scope]}</label>`).join('')}</div></div>` +
-    CodePierAccess.projectFields(projects, defaults.all_projects === true)
+    `<div class="field"><label>工具权限</label><div class="check-list">${scopes.map((scope) => `<label class="check"><input type="checkbox" name="scope" value="${esc(scope)}" ${scope === 'read' ? 'checked disabled' : defaults.developer_scopes && ['write', 'execute'].includes(scope) ? 'checked' : ''}>${{ read: '读取项目与文件', write: '编辑文件、恢复备份和建立检查点', execute: '运行和停止命令', computer: '读取屏幕和操作桌面应用' }[scope]}</label>`).join('')}</div></div>` +
+    CodePierAccess.projectFields(
+      projects,
+      defaults.all_projects === true,
+      defaults.selected_projects || [],
+    )
   );
 }
 function checked(name) {
@@ -2386,7 +2496,7 @@ async function newGrant() {
   if (!current() || intent !== (S.modalIntent || 0)) return;
   const dialog = modal(
     '创建限定范围访问凭据',
-    `<form id="grant-form"><div class="form-row"><div class="field"><label>凭据名称</label><input name="label" required maxlength="80" placeholder="例如 ChatGPT Tunnel"></div><div class="field"><label>有效期限</label><select name="days"><option value="30">30 天（默认）</option><option value="7">7 天</option><option value="90">90 天</option><option value="365">365 天</option><option value="unlimited">无限期，直到手动撤销</option></select><small>无限期会持续保留访问权，请妥善保管凭据。</small></div></div>${CodePierProfiles.selectorHTML(profiles)}<div data-profile-permissions></div>${notice('凭据只显示一次，不会写入浏览器持久存储。适用于 stdio bridge、MCP Inspector 或支持 Bearer 的客户端；ChatGPT 直连使用 OAuth。')}</form>`,
+    `<form id="grant-form"><div class="form-row"><div class="field"><label>凭据名称</label><input name="label" required maxlength="80" placeholder="例如 ChatGPT Tunnel"></div><div class="field"><label>有效期限</label><select name="days"><option value="30">30 天（默认）</option><option value="7">7 天</option><option value="90">90 天</option><option value="365">365 天</option><option value="unlimited">无限期，直到手动撤销</option></select><small>无限期会持续保留访问权，请妥善保管凭据。</small></div></div>${CodePierProfiles.selectorHTML(profiles)}<div data-profile-permissions></div>${notice('适用于 Claude Code、Inspector 等支持 Bearer 的客户端。令牌只显示这一次。')}</form>`,
     buttons('create-grant', '创建凭据'),
   );
   const profileBinding = CodePierProfiles.bindSelector(
@@ -2409,7 +2519,7 @@ async function newGrant() {
       if (!current() || !dialog.isConnected) return;
       modal(
         '保存你的访问凭据',
-        `${notice('复制后存入云端受权限保护的 token 文件。任何持有此凭据的人，都能执行已授权操作。')}<div class="spacer"></div><div class="code-box secret">${esc(r.token)}</div><p class="form-note">期限：${r.unlimited ? '无限期' : esc(timeText(r.expires))}。需要时可随时撤销。</p>`,
+        `${notice('持有此令牌的人可使用你的授权，请妥善保存。')}<div class="spacer"></div><div class="code-box secret">${esc(r.token)}</div><p class="form-note">期限：${r.unlimited ? '无限期' : esc(timeText(r.expires))}。需要时可随时撤销。</p>`,
         `<button class="btn ghost" data-action="close-modal">完成</button><button class="btn" id="copy-token">复制</button><button class="btn primary" id="download-token">下载 token.txt</button>`,
       );
       $('#copy-token').onclick = () => copy(r.token);
@@ -2423,42 +2533,130 @@ async function consentModal(id) {
     intent = S.modalIntent || 0;
   const current = () => login === S.session && space === S.space_id && page === S.page;
   try {
-    const r = await api('/api/oauth/requests/' + encodeURIComponent(id));
-    const profiles = (await api('/api/access-profiles')).profiles;
+    const [r, { profiles }] = await Promise.all([
+      api('/api/oauth/requests/' + encodeURIComponent(id)),
+      api('/api/access-profiles'),
+    ]);
     if (!current() || intent !== (S.modalIntent || 0)) return;
+    const roleScope = 'codepier.role_access';
+    const roleOnly = r.scopes.length === 1 && r.scopes.includes(roleScope);
+    const devScopes = ['read', 'write', 'execute'].filter((scope) => r.scopes.includes(scope));
+    const devLabel = devScopes.includes('execute')
+      ? devScopes.includes('write')
+        ? '允许读写和运行'
+        : '允许读取和运行'
+      : '允许读写';
+    const choiceKey = ['codepier-oauth-choice', sessionOwner(login), space, r.client_id]
+      .map(encodeURIComponent)
+      .join(':');
+    let remembered = {};
+    try {
+      remembered = JSON.parse(localStorage.getItem(choiceKey)) || {};
+    } catch {}
+    const defaults = {
+      all_projects: remembered.all_projects ?? r.access_defaults?.all_projects === true,
+      selected_projects: Array.isArray(remembered.projects)
+        ? remembered.projects
+        : S.projects.map((p) => p.id),
+      developer_scopes: false,
+    };
     const dialog = modal(
-      '确认 MCP 应用授权',
-      `<p class="form-note"><strong>${esc(r.client_name)}</strong> 正在申请访问你的本机项目。</p><dl class="kv"><dt>客户端</dt><dd><code>${esc(r.client_id)}</code></dd><dt>回调地址</dt><dd>${esc(r.redirect_uri)}</dd><dt>资源</dt><dd>${esc(r.resource)}</dd></dl><div class="field"><label for="oauth-days">授权期限</label><select id="oauth-days"><option value="30">30 天（默认）</option><option value="7">7 天</option><option value="90">90 天</option><option value="365">365 天</option><option value="unlimited">无限期，直到手动撤销</option></select><small>无限期允许持续访问，泄露风险持续存在；可随时在 MCP 接入撤销。</small></div>${CodePierProfiles.selectorHTML(profiles)}<div data-profile-permissions></div>${notice('固定授权按本次同意限制；动态角色授权会跟随之后的角色能力和项目变更。请核对身份、角色、应用及回调地址。')}`,
-      `<button class="btn ghost" id="deny-consent">拒绝</button><button class="btn primary" id="allow-consent">允许所选范围</button>`,
+      esc(r.client_name) + ' 想访问你的项目',
+      `<p id="oauth-summary" role="status"></p>
+       <details class="form-advanced" id="oauth-options" ${roleOnly ? 'open' : ''}><summary>调整期限、项目或权限</summary>
+        <div class="field"><label for="oauth-days">期限</label><select id="oauth-days"><option value="30">30 天</option><option value="7">7 天</option><option value="90">90 天</option><option value="365">365 天</option><option value="unlimited">无限期</option></select></div>
+        ${CodePierProfiles.selectorHTML(profiles)}<div data-profile-permissions></div>
+        <details><summary>客户端信息</summary><dl class="kv"><dt>客户端</dt><dd><code>${esc(r.client_id)}</code></dd><dt>回调地址</dt><dd>${esc(r.redirect_uri)}</dd><dt>资源</dt><dd>${esc(r.resource)}</dd></dl></details>
+       </details>`,
+      `<button class="btn ghost" id="deny-consent">拒绝</button>
+       <button class="btn ${devScopes.length > 1 ? '' : 'primary'}" id="allow-read">只允许读取</button>
+       ${devScopes.length > 1 ? `<button class="btn primary" id="allow-dev">${devLabel}</button>` : ''}
+       <button class="btn primary" id="allow-consent" hidden>允许所选范围</button>`,
       false,
       false,
     );
-    const profileBinding = CodePierProfiles.bindSelector(
-      $('.modal'),
-      profiles,
-      r.scopes,
-      // Offering capabilities is not consent: optional scopes start unchecked.
-      { ...(r.access_defaults || {}), developer_scopes: false },
-    );
-    const decide = (allow) =>
-      busy(allow ? $('#allow-consent') : $('#deny-consent'), async () => {
-        const out = await post(`/api/oauth/requests/${encodeURIComponent(id)}/decide`, {
-          allow,
-          ...(allow
-            ? {
-                days:
-                  $('#oauth-days').value === 'unlimited' ? null : Number($('#oauth-days').value),
-              }
-            : {}),
-          scopes: checked('scope'),
-          ...CodePierAccess.selection(),
-          ...(allow ? profileBinding() : {}),
-        });
-        if (current() && dialog.isConnected) location.assign(out.redirect);
+    const profileBinding = CodePierProfiles.bindSelector(dialog, profiles, r.scopes, defaults);
+    const select = $('#access-profile-selector', dialog),
+      options = $('#oauth-options', dialog),
+      days = $('#oauth-days', dialog),
+      summary = $('#oauth-summary', dialog),
+      deny = $('#deny-consent', dialog),
+      read = $('#allow-read', dialog),
+      dev = $('#allow-dev', dialog),
+      custom = $('#allow-consent', dialog);
+    // Remember finite durations and project choices. Desktop and role consent
+    // always require a new explicit selection.
+    if (['7', '30', '90', '365'].includes(remembered.days)) days.value = remembered.days;
+    const priorScopes = Array.isArray(remembered.scopes) ? remembered.scopes : [];
+    if (priorScopes.length) {
+      for (const input of $$('[name="scope"]:not(:disabled)', dialog))
+        input.checked = input.value !== 'computer' && priorScopes.includes(input.value);
+      if (dev && priorScopes.every((scope) => scope === 'read')) {
+        dev.classList.remove('primary');
+        read.classList.add('primary');
+      }
+    }
+    const sync = () => {
+      const profile = profiles.find((item) => item.id === select.value);
+      const { all_projects, projects } = CodePierAccess.selection(dialog);
+      const range =
+        profile?.role_id && r.scopes.includes(roleScope)
+          ? '权限会随角色变化'
+          : all_projects
+            ? '全部现有及未来项目'
+            : `${projects.length} 个项目`;
+      summary.textContent = `${days.selectedOptions[0].textContent} · ${range}。可随时在“连接”撤销。`;
+      const isCustom = roleOnly || !!profile;
+      read.hidden = isCustom || !r.scopes.includes('read');
+      if (dev) dev.hidden = isCustom;
+      custom.hidden = !isCustom && !options.open;
+      custom.disabled = roleOnly && !profile;
+    };
+    dialog.addEventListener('change', sync);
+    options.addEventListener('toggle', sync);
+    sync();
+    let submitting = false;
+    const decide = (button, allow, preset) => {
+      if (submitting || !current() || !dialog.isConnected) return;
+      return busy(button, async () => {
+        submitting = true;
+        try {
+          const scopes =
+            preset || $$('input[name="scope"]:checked', dialog).map((input) => input.value);
+          const selection = CodePierAccess.selection(dialog);
+          const choice = allow ? profileBinding() : {};
+          const out = await post(`/api/oauth/requests/${encodeURIComponent(id)}/decide`, {
+            allow,
+            ...(allow ? { days: days.value === 'unlimited' ? null : Number(days.value) } : {}),
+            scopes,
+            ...selection,
+            ...choice,
+          });
+          if (!current() || !dialog.isConnected) return;
+          if (allow && !choice.profile_id) {
+            try {
+              localStorage.setItem(
+                choiceKey,
+                JSON.stringify({
+                  ...selection,
+                  days: days.value,
+                  scopes: scopes.filter((scope) => scope !== 'computer'),
+                }),
+              );
+            } catch {}
+          }
+          location.assign(out.redirect);
+        } finally {
+          submitting = false;
+        }
       });
-    $('#deny-consent').onclick = () => decide(false);
-    $('#allow-consent').onclick = () => decide(true);
+    };
+    deny.onclick = () => decide(deny, false);
+    read.onclick = () => decide(read, true, ['read']);
+    if (dev) dev.onclick = () => decide(dev, true, devScopes);
+    custom.onclick = () => decide(custom, true);
   } catch (e) {
+    if (!current()) return;
     toast(e.message, true);
     history.replaceState(null, '', location.pathname + location.hash);
   }
@@ -2731,7 +2929,7 @@ panelActions.register(['export-audit'], async (b, e) => {
   }
 });
 panelActions.register(['copy-endpoint'], async (b, e) => {
-  await copy(S.settings.mcp_url);
+  await copy(b.dataset.url || S.settings.mcp_url);
   return;
 });
 panelActions.register(['copy-coding-endpoint'], async (b, e) => {
@@ -2752,65 +2950,15 @@ panelActions.register(['grant-page'], (button) => {
   S.grantPages[group] += Number(button.dataset.delta);
   refreshGrantList(button);
 });
-panelActions.register(['edit-grant-projects'], async (b, e) => {
-  await CodePierAccess.editGrant(b.dataset.id);
-  return;
-});
-panelActions.register(['edit-grant-expiration'], async (b) => {
-  const grant = S.grants.find((g) => g.id === b.dataset.id);
-  if (!grant || grant.revoked) return;
-  const login = S.session,
-    space = S.space_id;
-  const end = grant.authorization_expires || grant.expires || Date.now() / 1000 + 30 * 86400;
-  const date = new Date(end * 1000);
-  const localDate = new Date(date.getTime() - date.getTimezoneOffset() * 60000)
-    .toISOString()
-    .slice(0, 16);
-  const dialog = modal(
-    '修改授权期限',
-    `<form id="grant-expiry-form"><p>${esc(grant.label)}</p><div class="field"><label for="grant-expiry-date">到期日期（本地时间）</label><input id="grant-expiry-date" name="expires" type="datetime-local" value="${esc(localDate)}" required></div><label class="check"><input type="checkbox" name="unlimited" ${grant.unlimited ? 'checked' : ''}>无限期，直到手动撤销</label><p class="form-note">无限期会持续保留访问权。缩短期限立即限制现存凭据；不会更改权限和项目范围。已撤销授权不能恢复。</p><label class="check"><input type="checkbox" name="confirm_reactivate">如果已过期，确认恢复仍保留的凭据。已清理的凭据必须重新连接。</label></form>`,
-    buttons('save-grant-expiry', '保存期限'),
-  );
-  const form = $('#grant-expiry-form');
-  const toggle = () => {
-    form.elements.expires.disabled = form.elements.unlimited.checked;
-  };
-  form.elements.unlimited.onchange = toggle;
-  toggle();
-  $('#save-grant-expiry').onclick = () =>
-    busy($('#save-grant-expiry'), async () => {
-      if (!form.reportValidity()) return;
-      const expires = form.elements.unlimited.checked
-        ? null
-        : new Date(form.elements.expires.value).getTime() / 1000;
-      if (expires !== null && (!Number.isFinite(expires) || expires <= Date.now() / 1000)) {
-        toast('请选择未来的到期日期', true);
-        return;
-      }
-      const result = await api('/api/grants/' + encodeURIComponent(grant.id) + '/expiration', {
-        method: 'PUT',
-        body: JSON.stringify({
-          expires,
-          expected_revision: grant.expiry_revision,
-          confirm_reactivate: form.elements.confirm_reactivate.checked,
-        }),
-      });
-      if (login !== S.session || space !== S.space_id || !dialog.isConnected) return;
-      closeModal();
-      toast(
-        result.reconnect_required
-          ? '期限已更新，凭据已清理或尚未签发，请重新连接'
-          : '授权期限已更新',
-      );
-      await renderPage(false);
-    });
+panelActions.register(['edit-grant'], async (button) => {
+  await CodePierAccess.editGrant(button.dataset.id);
 });
 panelActions.register(['revoke-grant'], async (b, e) => {
   if (
     await uiConfirmAction(
       {
-        title: '撤销凭据？',
-        body: '撤销这个凭据的全部访问权限？正在执行的本机任务不会自动停止。',
+        title: '撤销连接？',
+        body: '撤销后，客户端将失去访问权限。已启动的任务可能继续执行。',
         confirmLabel: '撤销权限',
         danger: true,
       },
@@ -2851,7 +2999,6 @@ window.addEventListener('hashchange', () => {
   const page = location.hash.slice(1) === 'terminal' ? 'native' : location.hash.slice(1);
   if (page !== S.page && nav.some((n) => n[0] === page)) navigate(page);
 });
-setInterval(updateClock, 1000);
 (async () => {
   try {
     const page = location.hash.slice(1) === 'terminal' ? 'native' : location.hash.slice(1);

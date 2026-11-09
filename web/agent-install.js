@@ -8,8 +8,20 @@ function agentKnownPlatform(device) {
   if (['linux', 'darwin', 'macos', 'mac os', 'mac os x'].includes(observed)) return 'posix';
   return '';
 }
-function agentInstallFields(platform = '', repair = false) {
-  return `<div class="field"><label>面板地址</label><input name="hub_url" value="${esc(location.origin)}" required placeholder="http://服务器IP:8765"><small>目标电脑通过这个地址连接面板。</small></div><div class="field"><label>目标电脑系统</label><select name="platform" required><option value="" disabled ${platform ? '' : 'selected'}>请选择目标电脑系统</option><option value="posix" ${platform === 'posix' ? 'selected' : ''}>Linux / macOS</option><option value="windows" ${platform === 'windows' ? 'selected' : ''}>Windows PowerShell</option></select></div><div class="field"><label>允许访问的目录</label><input name="allow_root" required maxlength="2048" autocomplete="off" spellcheck="false"><small>填写目标电脑上的完整目录路径。文件工具限制在授权目录内，完整 Shell 不受目录沙箱限制。</small></div>${repair ? '<p class="form-note">已有节点保留原执行权限，不会因为修复安装而打开已关闭的权限。旧版开启执行的方法见“系统设置 → 已有 Agent 开启执行能力”。</p>' : '<label class="check"><input name="enable_execution" type="checkbox" checked>安装时开启 Shell 与目录任务（默认）</label><p class="form-note">Shell 使用 Agent 当前系统用户的完整权限，不是目录沙箱；还需要面板项目与客户端的执行授权。桌面控制仍独立关闭。取消勾选可安装为无执行能力模式。</p>'}`;
+function agentInstallFields(platform, repair) {
+  const selected =
+    platform ||
+    (!repair &&
+      (/^win/i.test(navigator.userAgentData?.platform || navigator.platform)
+        ? 'windows'
+        : 'posix'));
+  return `<div class="field"><label>系统</label><select name="platform" required><option value="" disabled ${selected ? '' : 'selected'}>请选择目标电脑系统</option><option value="posix" ${selected === 'posix' ? 'selected' : ''}>macOS / Linux</option><option value="windows" ${selected === 'windows' ? 'selected' : ''}>Windows</option></select></div>
+    <div class="field"><label>项目所在目录</label><input name="allow_root" required maxlength="2048" autocomplete="off" spellcheck="false"><small>文件访问范围包含这个目录及其子目录。</small></div>
+    <details class="form-advanced"><summary>更多选项</summary>
+      ${repair ? '' : '<div class="field"><label>名称</label><input name="name" maxlength="80" placeholder="留空则用电脑主机名"></div>'}
+      <div class="field"><label>面板地址</label><input name="hub_url" value="${esc(location.origin)}" required></div>
+      ${repair ? '' : '<label class="check"><input name="enable_execution" type="checkbox" checked>允许运行命令</label><p class="form-note">命令使用电脑当前用户的权限，访问范围可超出上述目录。</p>'}
+    </details>`;
 }
 function agentExecutionHelp() {
   const posix =
@@ -26,42 +38,40 @@ async function agentInstallSetup(device = null) {
     space = S.space_id;
   const dialog = modal(
     device ? '安装 / 修复 Agent · ' + device.name : '接入电脑',
-    `<form id="device-form">${device ? '' : '<div class="field"><label>设备名称</label><input name="name" placeholder="例如：Home-PC" required maxlength="80"></div>'}${agentInstallFields(agentKnownPlatform(device), !!device)}<p class="form-note">${device ? '在这台原节点执行新命令，会校验设备身份并安全修复或升级受管 Agent；授权目录、配置、状态和日志会保留。' : '仅用于首次接入新节点。如果电脑上的 CodePier 曾安装失败，先在设备节点 → 命令管理使用“Windows 失败安装恢复”，安全归档旧状态后再接入；如果已有正常 Agent，应在原节点修复或升级。不要直接删除 config.json。'}</p><p id="device-install-error" class="form-note" role="status"></p></form>`,
-    `<button class="btn ghost" data-action="close-modal">取消</button><button class="btn primary" id="create-device" type="submit" form="device-form">生成安装命令</button>`,
+    `<form id="device-form">${agentInstallFields(agentKnownPlatform(device), !!device)}${device ? '<p class="form-note">在原电脑上运行，配置和目录授权会保留。</p>' : ''}<p id="device-install-error" class="form-note" role="status"></p></form>
+     <section id="device-install-run" hidden><div class="field" id="agent-install-field"><label for="agent-install-command">安装命令</label><textarea id="agent-install-command" class="agent-install-command" rows="5" readonly spellcheck="false" autocomplete="off"></textarea></div>
+     <p id="agent-install-status" role="status" aria-live="polite"></p>
+     <div class="actions" id="agent-install-recovery" hidden><button class="btn small" id="agent-install-refresh">重试</button><button class="btn ghost small" id="download-pairing" hidden>下载配对文件</button></div></section>`,
+    '<button class="btn ghost" data-action="close-modal">关闭</button><button class="btn primary" id="create-device" type="submit" form="device-form">生成安装命令</button><button class="btn primary" id="agent-install-copy" hidden disabled>复制命令</button>',
   );
   const form = $('#device-form', dialog),
     button = $('#create-device', dialog),
     error = $('#device-install-error', dialog);
   const current = () => dialog.isConnected && S.session === login && S.space_id === space;
-  let submitting = false,
-    uncertain = false,
-    pairing = null;
+  const root = form.elements.allow_root;
   const hint = () => {
-    form.elements.allow_root.placeholder =
+    root.placeholder =
       form.elements.platform.value === 'windows'
         ? '例如：D:\\Projects'
-        : form.elements.platform.value === 'posix'
-          ? '例如：/home/me/Projects 或 /Users/me/Projects'
-          : '请先选择目标电脑系统';
-    form.elements.allow_root.setCustomValidity('');
+        : '例如：/Users/me/Projects';
+    root.setCustomValidity('');
   };
   form.elements.platform.onchange = hint;
-  form.elements.allow_root.oninput = () => form.elements.allow_root.setCustomValidity('');
+  root.oninput = () => root.setCustomValidity('');
   hint();
-  if (device?.info?.roots?.[0]?.path) form.elements.allow_root.value = device.info.roots[0].path;
+  const firstRoot = device?.info?.roots?.[0];
+  if (firstRoot) root.value = typeof firstRoot === 'string' ? firstRoot : firstRoot.path || '';
   form.onsubmit = async (event) => {
     event.preventDefault();
-    if (submitting || uncertain || !current()) return;
+    if (button.disabled || !current()) return;
     const platform = form.elements.platform.value,
-      allow_root = form.elements.allow_root.value.trim();
+      allow_root = root.value.trim();
     const absolute =
       platform === 'windows'
         ? /^(?:[a-zA-Z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)/.test(allow_root)
         : allow_root.startsWith('/');
-    form.elements.allow_root.setCustomValidity(
-      absolute && !/[\u0000-\u001f\u007f]/.test(allow_root)
-        ? ''
-        : '请输入目标电脑上的完整目录路径。',
+    root.setCustomValidity(
+      absolute && !/[\u0000-\u001f\u007f]/.test(allow_root) ? '' : '请输入目标电脑的完整目录路径。',
     );
     if (!form.reportValidity()) return;
     const options = {
@@ -70,119 +80,142 @@ async function agentInstallSetup(device = null) {
       allow_root,
       enable_execution: form.elements.enable_execution?.checked ?? true,
     };
-    submitting = true;
+    const name = form.elements.name?.value.trim();
     button.disabled = true;
     error.textContent = '';
     try {
-      pairing = device
+      const pairing = device
         ? null
         : (
             await post('/api/devices', {
-              name: form.elements.name.value.trim(),
+              name: name || '新电脑',
               hub_url: options.hub_url,
             })
           ).pairing;
       if (!current()) return;
+      form.hidden = button.hidden = true;
       showAgentInstallCommand(
+        dialog,
         device || { id: pairing.device_id, name: pairing.name },
         options,
         pairing,
+        !name && !device,
       );
-      loadBasics().catch(() => {});
     } catch (cause) {
       if (!current()) return;
-      uncertain = cause.code === 'NETWORK_UNCERTAIN';
-      if (pairing && !device) {
-        showAgentInstallCommand(
-          { id: pairing.device_id, name: pairing.name },
-          options,
-          pairing,
-          false,
-        );
-        return;
-      }
-      error.textContent = uncertain
-        ? '设备创建结果暂时无法确认。请先回到设备列表查看，避免重复添加。'
-        : cause.message;
-    } finally {
-      if (current()) {
-        submitting = false;
-        button.disabled = uncertain;
-      }
+      const uncertain = cause.code === 'NETWORK_UNCERTAIN';
+      error.textContent = uncertain ? '暂时无法确认是否已添加。请先查看电脑列表。' : cause.message;
+      button.disabled = uncertain;
     }
   };
 }
-function showAgentInstallCommand(device, options, pairing = null, autoGenerate = true) {
+
+function showAgentInstallCommand(dialog, device, options, pairing, autoName) {
   const login = S.session,
     space = S.space_id;
   const terminal = options.platform === 'windows' ? 'PowerShell' : '终端';
-  const dialog = modal(
-    '在目标电脑安装 · ' + device.name,
-    `<p>在要接入的电脑上打开${terminal}，粘贴并执行下方命令。这条命令只绑定当前面板节点。新节点可首次安装；已有受管节点必须从原节点生成命令才能修复或升级，错节点会被安全拒绝；失败安装可先执行带备份的 Windows 归档恢复。</p><dl class="kv"><dt>允许访问</dt><dd>${esc(options.allow_root)}</dd><dt>系统</dt><dd>${options.platform === 'windows' ? 'Windows' : 'Linux / macOS'}</dd><dt>新装执行能力</dt><dd>${options.enable_execution === false ? '关闭 Shell / 目录任务' : '开启 Shell / 目录任务'}；已有配置保持不变</dd></dl><div class="field"><label for="agent-install-command">安装命令</label><textarea id="agent-install-command" class="agent-install-command" rows="6" readonly spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="正在生成安装命令…"></textarea></div><p id="agent-install-status" class="form-note" role="status">正在生成安装命令…</p><p class="form-note">命令会下载并校验当前面板的 Agent 包，使用一次性连接凭据。已有节点的配置、授权目录、状态和日志会保留；请只在对应目标电脑执行。遇到设备身份不一致，请回设备列表找到原节点并重新生成命令；不要删除 config.json。</p>`,
-    `<button class="btn ghost" data-action="close-modal">完成</button>${pairing ? '<button class="btn ghost" id="download-pairing">下载配对文件</button>' : ''}<button class="btn" id="agent-install-refresh">重新生成</button><button class="btn primary" id="agent-install-copy" disabled>复制安装命令</button>`,
-    true,
-  );
   const field = $('#agent-install-command', dialog),
     status = $('#agent-install-status', dialog),
     copyButton = $('#agent-install-copy', dialog),
-    refresh = $('#agent-install-refresh', dialog);
+    recovery = $('#agent-install-recovery', dialog),
+    refresh = $('#agent-install-refresh', dialog),
+    downloadButton = $('#download-pairing', dialog);
+  $('#device-install-run', dialog).hidden = copyButton.hidden = false;
   let command = '',
     expires = 0,
     creating = false,
+    checking = false,
+    connected = false,
     disposed = false;
   const current = () =>
     !disposed && dialog.isConnected && S.session === login && S.space_id === space;
-  function expiry() {
-    if (!current()) return;
-    if (command && Date.now() / 1000 >= expires) {
-      command = '';
-      field.value = '';
-      copyButton.disabled = true;
-      status.textContent = '安装命令已过期，请重新生成。';
-    }
-  }
-  async function generate() {
-    if (creating || !current()) return;
+  const instructions = (copied = false) =>
+    (copied ? '命令已复制。' : '') +
+    `在目标电脑的${terminal}里粘贴运行。命令只能用一次，${timeText(expires)}前有效。`;
+  async function generate(autoCopy = false) {
+    if (creating || connected || !current()) return;
     creating = true;
-    refresh.disabled = true;
-    copyButton.disabled = true;
+    recovery.hidden = copyButton.disabled = true;
     status.textContent = '正在生成安装命令…';
     try {
       const result = await post(
         '/api/devices/' + encodeURIComponent(device.id) + '/install-ticket',
         options,
       );
-      if (!current()) return;
+      if (!current() || connected) return;
       if (
-        typeof result.command !== 'string' ||
         !result.command ||
-        !Number.isFinite(result.expires_at)
+        typeof result.command !== 'string' ||
+        !Number.isFinite(result.expires_at) ||
+        result.expires_at <= Date.now() / 1000
       )
-        throw new Error('没有收到有效安装命令，请重新生成。');
-      command = result.command;
+        throw new Error('安装命令无效，请重试。');
+      command = field.value = result.command;
       expires = result.expires_at;
-      field.value = command;
       copyButton.disabled = false;
-      status.textContent = '请在 ' + timeText(expires) + ' 前执行。命令使用一次后失效。';
-      expiry();
-      field.focus({ preventScroll: true });
-    } catch (cause) {
-      if (!current()) return;
-      // A generation failure must not create another device or discard its pairing fallback.
-      command = '';
-      field.value = '';
-      status.textContent =
-        '设备已保留，安装命令暂时无法生成。' +
-        cause.message +
-        ' 可重试' +
-        (pairing ? '，或下载配对文件手动接入。' : '。');
-    } finally {
-      if (current()) {
-        creating = false;
-        refresh.disabled = false;
+      status.textContent = instructions();
+      if (autoCopy) copyButton.focus({ preventScroll: true });
+      if (autoCopy) {
+        const issued = command;
+        navigator.clipboard?.writeText(issued).then(
+          () => {
+            if (current() && !connected && command === issued)
+              status.textContent = instructions(true);
+          },
+          () => {},
+        );
       }
+    } catch (cause) {
+      if (!current() || connected) return;
+      command = field.value = '';
+      recovery.hidden = false;
+      status.textContent = cause.message || '安装命令生成失败，请重试。';
+    } finally {
+      creating = false;
     }
   }
+  function expiry() {
+    if (!current() || connected || !command || Date.now() / 1000 < expires) return;
+    command = field.value = '';
+    generate();
+  }
+  async function checkOnline() {
+    if (!pairing || checking || connected || !current()) return;
+    checking = true;
+    try {
+      await loadBasics();
+      const fresh = S.devices.find((d) => d.id === device.id);
+      if (!current() || !fresh?.online) return;
+      connected = true;
+      const hostname = String(fresh.info?.hostname || '')
+        .trim()
+        .slice(0, 80);
+      if (autoName && hostname && fresh.name === '新电脑')
+        api('/api/devices/' + encodeURIComponent(device.id), {
+          method: 'PATCH',
+          body: JSON.stringify({ name: hostname }),
+        }).catch(() => {});
+      command = field.value = '';
+      clearInterval(ticker);
+      clearInterval(poll);
+      $('#agent-install-field', dialog).hidden = recovery.hidden = true;
+      status.textContent = (hostname || fresh.name) + ' 已连接。';
+      copyButton.textContent = '添加项目';
+      copyButton.disabled = false;
+      copyButton.onclick = () => {
+        closeModal(dialog);
+        return projectModal(null, device.id, { root: options.allow_root });
+      };
+      copyButton.focus({ preventScroll: true });
+    } catch {
+      // The next matching event or poll will read the current connection state.
+    } finally {
+      checking = false;
+    }
+  }
+  const onEvent = ({ detail }) => {
+    if (detail.type === 'device' && detail.data?.id === device.id) checkOnline();
+  };
   copyButton.onclick = async () => {
     expiry();
     if (!current() || !command || copyButton.disabled) return;
@@ -194,32 +227,33 @@ function showAgentInstallCommand(device, options, pairing = null, autoGenerate =
         field.select();
         if (!document.execCommand('copy')) throw new Error('copy');
       }
-      if (current()) toast('已复制安装命令');
+      if (current() && !connected) status.textContent = instructions(true);
     } catch {
-      if (current()) {
-        field.focus();
-        field.select();
-        status.textContent = '已选中安装命令，请按 Ctrl+C 或 ⌘C 复制。';
-      }
+      if (!current() || connected) return;
+      field.focus();
+      field.select();
+      status.textContent = '命令已选中，按 Ctrl+C 或 ⌘C 复制。';
     }
   };
-  refresh.onclick = generate;
-  if (pairing)
-    $('#download-pairing', dialog).onclick = () => {
-      if (current()) download('pairing.json', json(pairing));
-    };
+  refresh.onclick = () => generate();
+  downloadButton.hidden = !pairing;
+  downloadButton.onclick = () => {
+    if (current() && pairing) download('pairing.json', json(pairing));
+  };
   const ticker = setInterval(expiry, 1000),
+    poll = pairing ? setInterval(checkOnline, 5000) : null,
     cleanup = S.modalCleanup;
+  if (pairing) window.addEventListener('cp:event', onEvent);
   S.modalCleanup = () => {
     disposed = true;
     clearInterval(ticker);
-    command = '';
-    field.value = '';
+    clearInterval(poll);
+    window.removeEventListener('cp:event', onEvent);
+    command = field.value = '';
     pairing = null;
     cleanup?.();
   };
-  if (autoGenerate) generate();
-  else status.textContent = '设备已创建，但安装命令暂时无法生成。可重试，或下载配对文件手动接入。';
+  generate(true);
 }
 
 const AGENT_LIFECYCLE = {

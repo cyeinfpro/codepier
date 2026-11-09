@@ -4,16 +4,6 @@ function chatNumber(n) {
     ? new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 }).format(n)
     : '—';
 }
-function chatStats() {
-  const s = chatView().stats || {},
-    u = s.contextUsage || {};
-  $('#chat-usage').textContent =
-    u.percent != null
-      ? '上下文 ' + Math.round(u.percent) + '%'
-      : s.tokens?.total != null
-        ? '用量 ' + chatNumber(s.tokens.total)
-        : '上下文';
-}
 function chatInspector(tab) {
   const previous = ChatUI.inspector;
   if (tab && !previous)
@@ -107,14 +97,10 @@ function chatInspectorRender() {
     chatInfoRow(session, '状态', c.selected ? chatStateName(c.selected.status) : '尚未创建');
     if (c.selected) chatInfoRow(session, '会话 ID', c.selected.id);
     const config = chatSection(holder, '模型设置');
+    chatInfoRow(config, '模型', chatModelKey(v.settings?.model || v.catalog?.model) || '原生默认');
     chatInfoRow(
       config,
-      '已确认模型',
-      chatModelKey(v.settings?.model || v.catalog?.model) || '原生默认',
-    );
-    chatInfoRow(
-      config,
-      '已确认思考',
+      '思考强度',
       v.settings?.effort ||
         v.settings?.thinkingLevel ||
         v.settings?.reasoningEffort ||
@@ -123,10 +109,19 @@ function chatInspectorRender() {
         '原生默认',
     );
     if (v.pendingSettings) {
-      chatInfoRow(config, '下一轮模型', v.pendingSettings.model || '不变');
-      chatInfoRow(config, '下一轮思考', v.pendingSettings.effort || '不变');
+      const pending = [v.pendingSettings.model, v.pendingSettings.effort]
+        .filter(Boolean)
+        .join(' · ');
+      if (pending) chatInfoRow(config, '下一轮改为', pending);
     }
-    chatPanelButton(config, '更换模型', chatModelPopover);
+    if (c.project) {
+      const links = chatSection(holder, '项目');
+      chatPanelButton(links, '协作中心', () => CodePierCollaboration.open(c.project));
+      chatPanelButton(links, '任务进度', () => {
+        Object.assign(workflowState(), { project: c.project, state: '', cursor: '', history: [] });
+        return navigate('workflows');
+      });
+    }
     const stats = v.stats || {},
       tokens = stats.tokens || {},
       usage = stats.contextUsage || {},
@@ -144,7 +139,7 @@ function chatInspectorRender() {
       '上下文',
       usage.tokens != null
         ? chatNumber(usage.tokens) + ' / ' + chatNumber(usage.contextWindow)
-        : '等待原生统计',
+        : '暂无数据',
     );
     chatInfoRow(
       section,
@@ -153,7 +148,7 @@ function chatInspectorRender() {
     );
     chatInfoRow(section, '缓存读取', chatNumber(tokens.cacheRead));
     chatInfoRow(section, '总用量', chatNumber(tokens.total));
-    if (stats.cost != null) chatInfoRow(section, '费用（原生统计）', stats.cost);
+    if (stats.cost != null) chatInfoRow(section, '费用', stats.cost);
     if (stats.toolCalls != null) chatInfoRow(section, '工具调用', stats.toolCalls);
     chatPanelButton(section, '刷新状态', () => chatRunCommand('refresh'));
     const compact = chatPanelButton(section, '压缩上下文', () => chatRunCommand('compact'));
@@ -166,7 +161,7 @@ function chatInspectorRender() {
       : '调用原生 CLI 压缩上下文，执行前会再次确认';
     const note = document.createElement('p');
     note.className = 'chat-inspector-note';
-    note.textContent = '关闭页面不会停止会话。模型参数只影响当前会话，不覆盖本机全局配置。';
+    note.textContent = '关闭页面后会话继续运行。';
     holder.append(note);
   } else if (c.inspector === 'changes') {
     chatReviewPanel(holder);

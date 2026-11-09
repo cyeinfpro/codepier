@@ -30,8 +30,7 @@ def access_page(access_browser, stack):
     page.fill('#username', 'admin')
     page.fill('#password', stack.password)
     page.click('#login-form button')
-    page.locator('.settings-groups [data-settings-group="connect"]').click()
-    expect(page.locator('#access-settings-form')).to_be_visible()
+    expect(page.locator("#settings-center")).to_be_visible()
     try:
         yield page, errors, kind
     finally:
@@ -39,35 +38,15 @@ def access_page(access_browser, stack):
         stack.must(stack.client.put('/api/settings/access', json={'all_projects': False, 'developer_scopes': False}))
 
 
-def test_settings_preselect_new_grant_without_desktop_access_and_preserve_other_inputs(access_page, stack):
-    page, errors, kind = access_page
-    form = page.locator('#access-settings-form')
-    expect(form.locator('[name="all_projects"]')).not_to_be_checked()
-    expect(page.locator('#access-batch-form [name="apply_to_existing"]')).to_be_disabled()
-    page.locator('#settings-more > summary').click()
-    expect(page.locator('#settings-form')).to_be_visible()
-    original_url = page.locator('#settings-form [name="public_url"]').input_value()
-    page.fill('#settings-form [name="public_url"]', original_url + '/unsaved')
-    form.locator('[name="all_projects"]').check()
-    form.locator('[name="developer_scopes"]').check()
-    form.locator('button[type="submit"]').click()
-    expect(page.locator('#access-settings-status')).to_contain_text('默认选项已保存')
-    expect(page.locator('#settings-form [name="public_url"]')).to_have_value(original_url + '/unsaved')
-    assert stack.client.get('/api/settings').json()['access_defaults'] == {'all_projects': True, 'developer_scopes': True}
-    assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
-    screenshots = Path('.work/robustness-20260923/screenshots'); screenshots.mkdir(parents=True, exist_ok=True)
-    page.screenshot(path=str(screenshots / f'{kind}-access-settings-mobile.png'), full_page=True)
-    page.fill('#settings-form [name="public_url"]', original_url)
+def test_oauth_defaults_settings_removed_and_pat_controls_are_explicit(access_page, stack):
+    page, errors, _ = access_page
+    expect(page.locator('#access-settings-form')).to_have_count(0)
+    expect(page.locator('#access-batch-form')).to_have_count(0)
     page.evaluate("navigate('connect')")
+    page.locator('#other-clients > summary').click()
     page.click('[data-action="new-grant"]')
-    expect(page.locator('#grant-form [name="all_projects"]')).to_be_checked()
-    expect(page.locator('#grant-form [name="scope"][value="write"]')).to_be_checked()
-    expect(page.locator('#grant-form [name="scope"][value="execute"]')).to_be_checked()
     expect(page.locator('#grant-form [name="scope"][value="computer"]')).not_to_be_checked()
-    for field in page.locator('#grant-form [name="project"]').all():
-        expect(field).to_be_disabled()
-    page.locator('#grant-form [name="all_projects"]').uncheck()
-    expect(page.locator('#grant-form [name="project"]').first).to_be_enabled()
+    expect(page.locator('#grant-form [name="all_projects"]')).not_to_be_checked()
     assert not errors, errors
 
 
@@ -78,7 +57,7 @@ def test_existing_connection_range_edit_without_reissuing_token_and_rejects_stal
     grant_id = created['grant_id']
     try:
         page.evaluate("navigate('connect')")
-        page.locator('[data-action="edit-grant-projects"][data-id="' + grant_id + '"]').click()
+        page.locator('[data-action="edit-grant"][data-id="' + grant_id + '"]').click()
         dialog = page.locator('.modal')
         expect(dialog.locator('[name="all_projects"]')).not_to_be_checked()
         dialog.locator('[name="all_projects"]').check()
@@ -88,45 +67,21 @@ def test_existing_connection_range_edit_without_reissuing_token_and_rejects_stal
         assert snapshot['projects'] == ['*'] and snapshot['scopes'] == ['read']
         # The exact original credential is still accepted after editing.
         assert stack.rpc('ping', token_value=created['token']).status_code == 200
-        page.locator('[data-action="edit-grant-projects"][data-id="' + grant_id + '"]').click()
-        expect(page.locator('#grant-projects-form')).to_be_visible()
+        page.locator('[data-action="edit-grant"][data-id="' + grant_id + '"]').click()
+        expect(page.locator('#grant-edit-form')).to_be_visible()
         changed = stack.must(stack.client.put('/api/grants/' + grant_id + '/projects', json={
             'projects': [stack.project['id']], 'all_projects': False,
             'expected_projects': snapshot['projects'], 'expected_revision': snapshot['project_revision']}))
         assert changed['projects'] == [stack.project['id']]
+        page.locator('.modal [name="all_projects"]').uncheck()
+        page.locator('.modal [name="project"]').first.check()
+        page.locator('.modal [name="project"]').last.check()
         page.locator('.modal button[type="submit"]').click()
-        expect(page.locator('#grant-projects-status')).to_contain_text('其他窗口修改')
+        expect(page.locator('#grant-edit-status')).to_contain_text('其他窗口修改')
         assert stack.must(stack.client.get('/api/grants/' + grant_id + '/projects'))['projects'] == [stack.project['id']]
         assert not errors, errors
     finally:
         stack.must(stack.client.delete('/api/grants/' + grant_id))
-
-
-def test_bulk_apply_requires_explicit_confirmation_and_does_not_change_pat(access_page, stack):
-    page, errors, _ = access_page
-    requests = []
-    page.on('request', lambda request: requests.append(request.post_data_json)
-            if request.method == 'PUT' and urlsplit(request.url).path == '/api/settings/access' else None)
-    form = page.locator('#access-settings-form')
-    form.locator('[name="all_projects"]').check()
-    form.locator('button[type="submit"]').click()
-    expect(page.locator('#access-settings-status')).to_contain_text('默认选项已保存')
-    assert len(requests) == 1 and requests[0]['apply_to_existing'] is False
-    requests.clear()
-    page.locator('#access-settings-advanced summary').click()
-    form = page.locator('#access-batch-form')
-    form.locator('[name="apply_to_existing"]').check()
-    form.locator('button[type="submit"]').click()
-    page.locator('.ui-sheet .ghost').click()
-    assert not requests
-    form.locator('button[type="submit"]').click()
-    page.locator('.ui-sheet button[type="submit"]').click()
-    expect(page.locator('#access-batch-status')).to_contain_text('无需重新连接')
-    assert len(requests) == 1 and requests[0]['apply_to_existing'] is True
-    expect(form.locator('[name="apply_to_existing"]')).not_to_be_checked()
-    grant = stack.must(stack.client.get('/api/grants/' + stack.grant + '/projects'))
-    assert grant['projects'] == [p['id'] for p in stack.projects] or set(grant['projects']) == {p['id'] for p in stack.projects}
-    assert not errors, errors
 
 
 def test_oauth_defaults_never_include_unrequested_scopes_or_submit_without_click(access_page, stack):
@@ -145,6 +100,8 @@ def test_oauth_defaults_never_include_unrequested_scopes_or_submit_without_click
     expect(page.locator('.modal [name="all_projects"]')).to_be_checked()
     expect(page.locator('.modal [name="scope"]')).to_have_count(1)
     expect(page.locator('.modal [name="scope"][value="read"]')).to_be_checked()
+    expect(page.locator('#allow-read')).to_be_visible()
+    expect(page.locator('#allow-dev')).to_have_count(0)
     assert not decisions
     # Consent is pinned to the browser session that displayed it. Another
     # administrator session must not be allowed to take over that transaction.
@@ -171,14 +128,14 @@ def test_grants_compact_history_pagination_and_project_disclosure(access_page, s
     page.evaluate("navigate('connect')")
     panel = page.locator('#grant-panel')
     current = panel.locator('[data-grant-group="current"]')
-    expect(panel.locator('.panel-head')).to_contain_text('7 当前授权')
+    expect(panel.locator('.panel-head')).to_contain_text('7 个当前连接')
     expect(current.locator('.grant-row')).to_have_count(5)
     toggle = panel.locator('[data-action="grant-history"]')
     expect(toggle).to_have_attribute('aria-expanded', 'false')
     expect(page.locator('#grant-history-list')).not_to_be_visible()
     expect(panel.locator('[data-grant-group="history"] .grant-row')).to_have_count(0)
     projects = current.locator('.grant-projects').first
-    expect(projects.locator('summary')).to_have_text('原同意 13 个项目')
+    expect(projects.locator('summary')).to_have_text('13 个项目')
     expect(projects.locator('div')).not_to_be_visible()
     projects.locator('summary').click()
     expect(projects.locator('div')).to_contain_text('<img src=x onerror=alert(1)>')
@@ -234,7 +191,7 @@ def test_grants_compact_history_pagination_and_project_disclosure(access_page, s
     for grant in grants:
         grant.update(status='revoked', revoked=True)
     page.evaluate('renderPage(false)')
-    expect(panel.locator('.panel-head')).to_contain_text('0 当前授权')
-    expect(panel).to_contain_text('暂无当前授权')
+    expect(panel.locator('.panel-head')).to_contain_text('0 个当前连接')
+    expect(panel).to_contain_text('暂无有效连接')
     expect(panel.locator('[data-grant-group="current"] .grant-row')).to_have_count(0)
     assert not mutations and not errors, (mutations, errors)

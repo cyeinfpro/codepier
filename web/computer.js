@@ -207,8 +207,10 @@ async function computerPanel(project = S.work.project) {
   }
 }
 document.addEventListener('click', (e) => {
-  if (e.target.closest('[data-computer-use]') && S.session)
-    computerPanel().catch((error) => toast(error.message, true));
+  if (!e.target.closest('[data-computer-use]') || !S.session) return;
+  const available = computerProjects();
+  const project = available.find((p) => p.id === S.work.project) || available[0];
+  if (project) computerPanel(project.id).catch((error) => toast(error.message, true));
 });
 
 // Human approval inbox is separate from the busy observe dialog and from MCP.
