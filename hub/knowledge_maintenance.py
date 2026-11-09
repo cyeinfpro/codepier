@@ -49,6 +49,10 @@ class KnowledgeMaintenance:
             max_files INTEGER NOT NULL, operation_id TEXT NOT NULL, pending_key TEXT NOT NULL,
             next_at REAL NOT NULL, failures INTEGER NOT NULL, last_error TEXT NOT NULL,
             last_success REAL, updated REAL NOT NULL)''')
+        if 'build_options' not in {r['name'] for r in self.store.all('PRAGMA table_info(knowledge_maintenance)')}:
+            self.store.execute("ALTER TABLE knowledge_maintenance ADD COLUMN build_options TEXT NOT NULL DEFAULT '{}'")
+        if 'cursor' not in {r['name'] for r in self.store.all('PRAGMA table_info(knowledge_maintenance)')}:
+            self.store.execute("ALTER TABLE knowledge_maintenance ADD COLUMN cursor TEXT NOT NULL DEFAULT ''")
 
     def guard(self, maintenance):
         if maintenance is None:
@@ -91,12 +95,15 @@ class KnowledgeMaintenance:
         value['scopes'] = sorted(value['scopes'])
         value['token_hash'] = value['session_hash'] = ''
         now = time.time()
+        build_options = {name: args[name] for name in ('paths', 'exclude_paths', 'batch_size', 'time_budget_seconds') if name in args}
         self.store.execute('''INSERT OR REPLACE INTO knowledge_maintenance
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+            (id,project_id,device_id,root,workspace,principal,generation,enabled,state,max_files,
+             operation_id,pending_key,next_at,failures,last_error,last_success,updated,build_options,cursor)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
             (identifier, project['id'], project['device_id'], project['root'], args.get('workspace_id', ''),
              self.store.encrypt(json.dumps(value)), uuid.uuid4().hex, int(enabled),
-             'initializing' if enabled else 'disabled', args.get('max_files', 2000), operation_id, '',
-             now + INTERVAL, 0, '', None, now))
+             'initializing' if enabled else 'disabled', args.get('max_files', 0), operation_id, '',
+             now + INTERVAL, 0, '', None, now, json.dumps(build_options), args.get('cursor', '')))
 
     def status(self, project, args):
         if not self.exists():
@@ -150,8 +157,9 @@ class KnowledgeMaintenance:
             # including legacy installations without IAM migrations enabled.
             data['admin'] = data['instance_admin'] = False
             principal = refresh_principal(self.store, Principal(**data))
-            args = {'project': row['project_id'], 'max_files': row['max_files'],
+            args = {**json.loads(row['build_options']), 'project': row['project_id'], 'max_files': row['max_files'],
                     'auto_refresh': None, 'incremental': True,
+                    'cursor': row['cursor'],
                     'idempotency_key': row['pending_key'] or 'knowledge-auto-' + uuid.uuid4().hex}
             if row['workspace']:
                 args['workspace_id'] = row['workspace']
@@ -177,8 +185,27 @@ class KnowledgeMaintenance:
                                 delay=min(3600, INTERVAL * 2 ** min(row['failures'] + 1, 5)))
                     return None
                 self.store.execute("UPDATE knowledge_maintenance SET operation_id='',pending_key='' WHERE id=? AND generation=?", (row['id'], row['generation']))
-                self.update(row, 'watching', success=True, success_at=operation['updated'])
-                row = {**row, 'operation_id': '', 'pending_key': '', 'failures': 0, 'last_success': operation['updated']}
+                outcome = json.loads(operation['result'] or '{}').get('data', {})
+                if outcome.get('state') == 'building':
+                    args['cursor'] = outcome['cursor']
+                    continuation = outcome.get('continuation', {})
+                    if continuation.get('entries'):
+                        args['entries'] = continuation['entries']
+                    build_options = json.loads(row['build_options'])
+                    build_options['entries'] = args.get('entries', [])
+                    self.store.execute('UPDATE knowledge_maintenance SET cursor=?,build_options=? WHERE id=? AND generation=?',
+                        (args['cursor'], json.dumps(build_options), row['id'], row['generation']))
+                    self.update(row, 'building', delay=0)
+                else:
+                    args['cursor'] = ''
+                    args.pop('entries', None)
+                    build_options = json.loads(row['build_options'])
+                    build_options.pop('entries', None)
+                    self.store.execute("UPDATE knowledge_maintenance SET cursor='',build_options=? WHERE id=? AND generation=?",
+                        (json.dumps(build_options), row['id'], row['generation']))
+                    self.update(row, 'watching', success=True, success_at=operation['updated'])
+                row = {**row, 'operation_id': '', 'pending_key': '', 'failures': 0,
+                       'last_success': row['last_success'] if outcome.get('state') == 'building' else operation['updated']}
                 args['idempotency_key'] = 'knowledge-auto-' + uuid.uuid4().hex
                 prepared = self.runtime._invoke('project_knowledge_build', args, principal)
             if not self.runtime.online(project['device_id']):

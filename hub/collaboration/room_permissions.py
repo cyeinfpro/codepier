@@ -160,7 +160,7 @@ class RoomPermissions:
                                   'transport_supported': name == 'weixin'}
             return {'conversation_id': conversation_id, 'version': row['version'] if row else 0,
                 'configured': bool(row), 'scope': policy['scope'],
-                'limits': {'project_scopes': contracts.MAX_ROOM_PROJECTS, 'execution_targets': 16},
+                'limits': {'project_scopes': None, 'execution_targets': None},
                 'effective_scope': effective(),
                 'available_projects': available, 'channels': channels,
                 'authority': 'room', 'host_constraints_are_hard_limits': True,

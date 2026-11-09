@@ -309,9 +309,6 @@ class ConversationService:
                 _, room = self.c.scope(principal, args, create=True)
                 existing = self.store.one('SELECT 1 FROM conversation_projects WHERE conversation_id=? AND room_id=?', (conversation['id'], room['id']))
                 if not existing:
-                    count = self.store.one('SELECT COUNT(*) AS n FROM conversation_projects WHERE conversation_id=?', (conversation['id'],))['n']
-                    if count >= 16:
-                        raise DevError('CONVERSATION_PROJECT_LIMIT', '一个聊天室最多加入16个项目环境', 409)
                     self.store.execute('INSERT INTO conversation_projects VALUES (?,?,?)', (conversation['id'], room['id'], self.c.clock()))
                     self.store.execute('UPDATE conversation_rooms SET version=version+1 WHERE id=?', (conversation['id'],))
                 if authorization and existing:

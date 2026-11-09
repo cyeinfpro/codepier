@@ -39,7 +39,15 @@ def checked_signature(engine, root, path):
         # Rewalk every component after opening; cached descriptors confer no access.
         engine.path(root, path, False)
         current = actual.lstat()
-        if signature(current) != signature(info):
+        # Windows stat/lstat can expose creation time as ctime while fstat
+        # exposes change time. Compare shared object attributes across APIs,
+        # then compare the complete descriptor signature to detect real edits.
+        def object_signature(value):
+            return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns,
+                    value.st_mode, value.st_nlink)
+        latest = os.fstat(fd)
+        if (object_signature(current) != object_signature(info)
+                or signature(latest) != signature(info)):
             raise DevError('FILE_CHANGED', '缓存源在核验期间变化', 409)
         return signature(info)
     finally:
@@ -76,13 +84,15 @@ def build(engine, project, args):
     with _LOCK:
         cached = _CACHES.get(cache_key)
     saved = knowledge.load(engine, key, repair=True)
-    if args.get('incremental') and saved is None:
+    if args.get('incremental') and saved is None and not args.get('cursor'):
         raise DevError('KNOWLEDGE_MISSING', '自动刷新需要原目录中显式生成的地图；请重新生成', 409)
     full = (not args.get('incremental') or not cached or not saved
             or cached['revision'] != saved['revision']
             or now - cached['full_at'] >= FULL_INTERVAL)
     reuse = Reuse(None if full else cached['files'])
     result = knowledge.build(engine, project, args, reuse=reuse)
+    if result['state'] == 'building':
+        return result
     # Cache is only published following successful map CAS. Errors keep old state.
     with _LOCK:
         _CACHES[cache_key] = {'files': reuse.current, 'revision': result['revision'],

@@ -162,14 +162,33 @@ def test_incremental_cannot_initialize_replaced_or_missing_map(workspace):
         build(workspace, incremental=True)
 
 
-def test_metadata_reuse_obeys_total_covered_byte_budget(workspace, monkeypatch):
+def test_metadata_reuse_does_not_consume_source_read_budget(workspace, monkeypatch):
     _, _, root = workspace
     (root / 'a.py').write_text('pass\n')
     build(workspace)
     monkeypatch.setattr(knowledge, 'SCAN_BYTES', 1)
-    with pytest.raises(DevError) as error:
-        build(workspace, incremental=True)
-    assert error.value.code == 'KNOWLEDGE_SCAN_LIMIT'
+    result = build(workspace, incremental=True)
+    assert result['state'] == 'ready' and result['refresh']['metadata_reused'] == 1
+
+
+def test_windows_path_ctime_can_differ_from_descriptor_without_source_change(workspace, monkeypatch):
+    from pathlib import Path
+    from types import SimpleNamespace
+    engine, _, root = workspace
+    source = root / 'source.py'
+    source.write_text('def stable(): pass\n')
+    original = Path.lstat
+    def windows_stat(path, *args, **kwargs):
+        info = original(path, *args, **kwargs)
+        if path != source:
+            return info
+        values = {field: getattr(info, field) for field in dir(info) if field.startswith('st_')}
+        values['st_ctime_ns'] -= 1000000000
+        return SimpleNamespace(**values)
+    monkeypatch.setattr(Path, 'lstat', windows_stat)
+    assert refresh.checked_signature(engine, root, 'source.py')
+    assert build(workspace)['entries_count'] == 1
+    assert build(workspace, incremental=True)['refresh']['metadata_reused'] == 1
 
 
 def test_added_formats_refresh_together_after_external_changes(workspace):

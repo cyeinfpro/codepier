@@ -11,9 +11,6 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from shared.util import valid_json_value
 
-# Shared bounded project capacity for room permissions and their downstream work.
-MAX_ROOM_PROJECTS = 128
-
 Identifier = Annotated[str, Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9_.:-]+$')]
 Key = Annotated[str, Field(min_length=8, max_length=128, pattern=r'^[A-Za-z0-9_.:-]+$')]
 ShortText = Annotated[str, Field(min_length=1, max_length=1000)]
@@ -65,7 +62,7 @@ class Read(Scope):
 
 class ConversationCreate(Model):
     title: str = Field(min_length=1, max_length=120)
-    projects: list[Scope] = Field(min_length=1, max_length=MAX_ROOM_PROJECTS)
+    projects: list[Scope] = Field(min_length=1)
     idempotency_key: Key
 
     @field_validator('title')
@@ -109,7 +106,7 @@ class DelegationSend(Model):
     policy_id: Identifier
     policy_version: int = Field(ge=1)
     acceptance: str = Field(min_length=1, max_length=2000)
-    execution_targets: list[Annotated[str, Field(pattern=r'^(project_agent|vps:[A-Za-z0-9_.:-]+)$', max_length=132)]] | None = Field(default=None, min_length=1, max_length=16)
+    execution_targets: list[Annotated[str, Field(pattern=r'^(project_agent|vps:[A-Za-z0-9_.:-]+)$', max_length=132)]] | None = Field(default=None, min_length=1)
     capabilities: list[Literal['read', 'write', 'execute']] | None = Field(default=None, min_length=1, max_length=3)
 
     @model_validator(mode='after')
@@ -612,7 +609,7 @@ class GoalCreate(Scope):
     conversation_id: Identifier
     objective: str = Field(min_length=1, max_length=4000)
     acceptance: str = Field(min_length=1, max_length=2000)
-    project_ids: list[Identifier] = Field(min_length=1, max_length=MAX_ROOM_PROJECTS)
+    project_ids: list[Identifier] = Field(min_length=1)
     participant_grant_ids: list[Identifier] = Field(min_length=1, max_length=16)
     capabilities: list[GoalCapability] = Field(min_length=1, max_length=3)
     duration_seconds: int = Field(default=3600, ge=60, le=86400)
@@ -764,7 +761,7 @@ class DelegationPolicySet(Scope):
     purpose: str = Field(min_length=1, max_length=1000)
     capabilities: list[GoalCapability] = Field(default_factory=lambda: ['read'], min_length=1, max_length=3)
     execution_target: str = Field(default='project_agent', pattern=r'^(project_agent|vps:[A-Za-z0-9_.:-]+)$', max_length=132)
-    execution_targets: list[Annotated[str, Field(pattern=r'^(project_agent|vps:[A-Za-z0-9_.:-]+)$', max_length=132)]] = Field(default_factory=list, max_length=16)
+    execution_targets: list[Annotated[str, Field(pattern=r'^(project_agent|vps:[A-Za-z0-9_.:-]+)$', max_length=132)]] = Field(default_factory=list)
     acknowledge_unsandboxed_exec: bool = False
     duration_seconds: int = Field(default=604800, ge=60, le=604800)
     goal_duration_seconds: int = Field(default=3600, ge=60, le=3600)
@@ -849,7 +846,7 @@ class DotCreate(Scope):
     label: str = Field(min_length=1, max_length=80)
     capabilities: list[GoalCapability] = Field(default_factory=lambda: ['read'], min_length=1, max_length=3)
     execution_target: str = Field(default='project_agent', pattern=r'^(project_agent|vps:[A-Za-z0-9_.:-]+)$', max_length=132)
-    execution_targets: list[Annotated[str, Field(pattern=r'^(project_agent|vps:[A-Za-z0-9_.:-]+)$', max_length=132)]] = Field(default_factory=list, max_length=16, exclude_if=lambda value: not value)
+    execution_targets: list[Annotated[str, Field(pattern=r'^(project_agent|vps:[A-Za-z0-9_.:-]+)$', max_length=132)]] = Field(default_factory=list, exclude_if=lambda value: not value)
     acknowledge_unsandboxed_exec: bool = False
     confirm_tasks: Literal[True]
     idempotency_key: Key

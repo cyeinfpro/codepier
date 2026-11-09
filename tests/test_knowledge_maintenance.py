@@ -110,6 +110,29 @@ def test_initial_failure_does_not_create_background_work(runtime):
     assert instance.store.one('SELECT state,enabled FROM knowledge_maintenance') == {'state': 'initial_build_failed', 'enabled': 0}
 
 
+def test_building_cursor_and_scope_survive_offline_deferral(runtime, monkeypatch):
+    import json
+    instance, principal = runtime
+    args = TOOLS[BUILD].model.model_validate({'project': 'p', 'idempotency_key': key(),
+        'paths': ['src'], 'exclude_paths': ['src/generated'], 'batch_size': 2}).model_dump()
+    project = instance.project('p', principal)
+    operation, _ = instance._admit_operation(BUILD, args, project, principal)
+    identifier = key_for(project, args)
+    cursor = 'a' * 64
+    instance.store.execute("UPDATE operations SET state='succeeded',result=? WHERE id=?",
+        (json.dumps({'ok': True, 'data': {'state': 'building', 'cursor': cursor}}), operation))
+    due(instance)
+    monkeypatch.setattr(instance, 'online', lambda _: False)
+    assert instance.knowledge_maintenance.prepare(identifier) is None
+    assert instance.store.one('SELECT cursor FROM knowledge_maintenance')['cursor'] == cursor
+    due(instance)
+    monkeypatch.setattr(instance, 'online', lambda _: True)
+    prepared = instance.knowledge_maintenance.prepare(identifier)
+    assert prepared[0]['cursor'] == cursor and prepared[0]['batch_size'] == 2
+    assert prepared[0]['paths'] == ['src'] and prepared[0]['exclude_paths'] == ['src/generated']
+    assert instance.store.one('SELECT last_success FROM knowledge_maintenance')['last_success'] is None
+
+
 def test_offline_and_user_work_defer_without_queueing(runtime, monkeypatch):
     instance, _ = runtime
     operation, identifier, _, _ = register(runtime)
@@ -356,8 +379,10 @@ def test_device_budget_rejects_new_registration_before_operation_commit(runtime,
 
 def test_legacy_key_recovers_without_enabling_maintenance(runtime):
     instance, principal = runtime
-    args = TOOLS[BUILD].model.model_validate({'project': 'p', 'idempotency_key': 'pre-maintenance-build'}).model_dump()
-    legacy = {key: value for key, value in args.items() if key not in {'auto_refresh', 'incremental'}}
+    args = TOOLS[BUILD].model.model_validate({'project': 'p', 'max_files': 2000,
+        'idempotency_key': 'pre-maintenance-build'}).model_dump()
+    legacy = {key: value for key, value in args.items() if key not in {
+        'auto_refresh', 'incremental', 'batch_size', 'time_budget_seconds', 'cursor', 'paths', 'exclude_paths'}}
     project = instance.project('p', principal)
     original, _ = instance._admit_operation(BUILD, legacy, project, principal)
     assert not instance.knowledge_maintenance.exists()

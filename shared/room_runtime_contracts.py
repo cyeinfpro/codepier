@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Literal
 from pydantic import Field, field_validator, model_validator
-from shared.collaboration_contracts import MAX_ROOM_PROJECTS, Model, Identifier, Key
+from shared.collaboration_contracts import Model, Identifier, Key
 from shared.room_contracts import MemberIdentity
 from shared.team_collaboration_contracts import ArtifactRef
 
@@ -105,12 +105,12 @@ class RoomWorkStart(RoomConsumerMutation):
     source_digest: str = Field(pattern=r'^[a-f0-9]{64}$')
     coordinator_epoch: int | None = Field(default=None, strict=True, ge=1)
     target_project_id: str = Field(default='', max_length=128)
-    project_ids: list[Identifier] = Field(default_factory=list,max_length=MAX_ROOM_PROJECTS)
+    project_ids: list[Identifier] = Field(default_factory=list)
     participant_member_ids: list[Identifier] = Field(default_factory=list,max_length=12)
     environment_id: str = Field(default='', max_length=100)
     acceptance: str = Field(min_length=1, max_length=2000)
     capabilities: list[Literal['read','write','execute']] = Field(default_factory=list,max_length=3)
-    execution_targets: list[str] = Field(default_factory=list,max_length=16)
+    execution_targets: list[str] = Field(default_factory=list)
     confirm_task: Literal[True]
 
 

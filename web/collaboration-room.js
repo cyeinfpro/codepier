@@ -1315,9 +1315,6 @@ window.CodePierCollaboration = (() => {
         : [];
       if (capabilities.includes('execute') && !executionTargets.length)
         throw new Error('允许执行的项目需要选择至少一个执行位置。');
-      const targetLimit = panel.permissions.limits?.execution_targets || 16;
-      if (executionTargets.length > targetLimit)
-        throw new Error('单个项目最多选择 ' + targetLimit + ' 个执行位置，请取消部分位置后保存。');
       rules.push({
         ...project,
         capabilities,
@@ -1325,9 +1322,6 @@ window.CodePierCollaboration = (() => {
         lifetime,
       });
     }
-    const projectLimit = panel.permissions.limits?.project_scopes || 16;
-    if (rules.length > projectLimit)
-      throw new Error('房间最多选择 ' + projectLimit + ' 个项目与环境，请取消部分项目后保存。');
     return {
       project_ids: [...new Set(rules.map((item) => item.project_id))],
       project_scopes: rules,

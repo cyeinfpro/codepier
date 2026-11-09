@@ -277,7 +277,7 @@ def _session_main(admission):
         except (ValueError, KeyError, TypeError):
             result = {'ok': False, 'error': {'code': 'INVALID_REQUEST',
                        'message': '独立读取会话阶段或请求无效'}}
-        sys.stdout.write(json.dumps(result, ensure_ascii=False) + '\n')
+        sys.stdout.write(json.dumps(result, ensure_ascii=True) + '\n')
         sys.stdout.flush()
         if not result['ok']:
             return
@@ -285,7 +285,7 @@ def _session_main(admission):
 
 
 def main():
-    sys.stdout.write(json.dumps(response(json.load(sys.stdin)), ensure_ascii=False))
+    sys.stdout.write(json.dumps(response(json.load(sys.stdin)), ensure_ascii=True))
 
 
 if __name__ == '__main__':

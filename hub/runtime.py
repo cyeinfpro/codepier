@@ -1038,6 +1038,10 @@ class Runtime:
                 fingerprint_args.pop('auto_refresh')
             if fingerprint_args.get('incremental') is False:
                 fingerprint_args.pop('incremental')
+            for field, default in (('batch_size', 2000), ('time_budget_seconds', 30),
+                                   ('cursor', ''), ('paths', []), ('exclude_paths', [])):
+                if fingerprint_args.get(field) == default:
+                    fingerprint_args.pop(field, None)
         fingerprint = digest(json.dumps({"tool": name, "args": fingerprint_args, "project": snapshot, "device": project["device_id"]}, sort_keys=True, ensure_ascii=False))
         # Count, same-key recovery and durable insertion share one SQLite write
         # transaction, including direct/multi-connection admission callers.

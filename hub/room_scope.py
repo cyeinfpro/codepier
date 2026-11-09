@@ -31,7 +31,7 @@ FORBIDDEN_DOMAINS = ('computer', 'browser', 'gateway', 'device_', 'devices_', 'p
 class ProjectRule(AccessModel):
     project_id: str = Field(min_length=1, max_length=100)
     capabilities: list[Literal['read', 'write', 'execute']] = Field(min_length=1, max_length=3)
-    execution_targets: list[str] = Field(default_factory=lambda: ['agent'], min_length=1, max_length=16)
+    execution_targets: list[str] = Field(default_factory=lambda: ['agent'], min_length=1)
 
     @model_validator(mode='after')
     def exact(self):
@@ -50,7 +50,7 @@ class ScopeSet(AccessModel):
     conversation_id: str = Field(min_length=1, max_length=100)
     grant_id: str = Field(min_length=1, max_length=100)
     expected_version: int = Field(ge=0)
-    project_rules: list[ProjectRule] = Field(default_factory=list, max_length=32)
+    project_rules: list[ProjectRule] = Field(default_factory=list)
     execution_mode: Literal['file_tools_only', 'account_permissions_acknowledged', 'require_os_isolation'] = 'file_tools_only'
     expires_seconds: int = Field(default=86400, ge=0, le=30 * 86400, strict=True)
     confirm_connection_wide_ceiling: Literal[True]

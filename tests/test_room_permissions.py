@@ -207,7 +207,7 @@ async def test_unavailable_member_grant_does_not_block_owner_policy_reduction(co
         service.rooms.principal(service.rooms.member(first['member_id']))
 
 
-@pytest.mark.parametrize('count', [28, 128])
+@pytest.mark.parametrize('count', [28, 129, 257])
 def test_large_room_scope_save_member_sync_and_channel_subset(collab, count):
     service, owner, cid = room(collab)
     ids = [f'project-{i:03}' for i in range(count)]
@@ -219,7 +219,7 @@ def test_large_room_scope_save_member_sync_and_channel_subset(collab, count):
     rules = [rule(pid) for pid in ids]
     result = save(service, owner, cid, rules)
     assert result['scope']['project_ids'] == ids
-    assert result['limits']['project_scopes'] == 128
+    assert result['limits'] == {'project_scopes': None, 'execution_targets': None}
     m = member(service, owner, cid)
     assert len(service.rooms.scopes(service.rooms.member(m['id']))) == count
     channels = {'weixin': {'mode': 'custom', 'scope': {'project_scopes': rules[:-1]}},
@@ -231,13 +231,28 @@ def test_large_room_scope_save_member_sync_and_channel_subset(collab, count):
     assert service.room_permissions.effective_scopes(cid) == []
 
 
-def test_room_scope_limit_rejects_oversized_request_without_changes(collab):
+def test_room_targets_save_above_old_limit_and_sync_member(collab):
+    from hub.vps import VPSInput
     service, owner, cid = room(collab)
-    save(service, owner, cid, [rule()])
+    targets = ['project_agent']
+    for index in range(32):
+        saved = service.runtime.vps.save(VPSInput(name=f'target-{index}',
+            host=f'target-{index}.example.invalid', username='fixture',
+            password='synthetic-only', project_ids=['proj']), owner)
+        targets.append(saved['target'])
+    full = rule(caps=['read', 'execute'])
+    full['execution_targets'] = targets
+    result = save(service, owner, cid, [full])
+    assert result['scope']['project_scopes'][0]['execution_targets'] == sorted(targets)
+    for channel in ('weixin', 'telegram'):
+        assert result['channels'][channel]['effective_scope'] == result['effective_scope']
+    m = member(service, owner, cid)
+    assert service.rooms.scopes(service.rooms.member(m['id']))[0]['execution_targets'] == sorted(targets)
+    # A valid large selection must still reject a target outside the project.
     before = service.store.all('SELECT * FROM room_permission_revisions')
-    with pytest.raises(DevError) as exc:
-        save(service, owner, cid, [rule(f'project-{i}') for i in range(129)])
-    assert exc.value.code == 'INVALID_ARGUMENTS'
+    full['execution_targets'].append('vps:' + 'f' * 32)
+    with pytest.raises(DevError):
+        save(service, owner, cid, [full])
     assert service.store.all('SELECT * FROM room_permission_revisions') == before
 
 
@@ -291,10 +306,12 @@ def test_project_capacity_is_consistent_through_room_work_contracts():
         (ContextFact, 'project_ids'), (RoomWorkStart, 'project_ids'),
         (TeamCreate, 'project_ids'), (Selection, 'projects')]
     for model, field in fields:
-        assert model.model_json_schema()['properties'][field]['maxItems'] == collaboration.MAX_ROOM_PROJECTS
-    scope = rooms.RoomPermissionScope(project_ids=[f'project-{i}' for i in range(128)],
-        project_scopes=[rule(f'project-{i}') for i in range(128)])
-    assert len(scope.project_ids) == 128
-    # Project capacity must not relax unrelated resource or participant limits.
-    assert rooms.MemberProjectScope.model_json_schema()['properties']['execution_targets']['maxItems'] == 16
+        assert 'maxItems' not in model.model_json_schema()['properties'][field]
+    scope = rooms.RoomPermissionScope(project_ids=[f'project-{i}' for i in range(257)],
+        project_scopes=[rule(f'project-{i}') for i in range(257)])
+    assert len(scope.project_ids) == 257
+    for model in (rooms.MemberProjectScope, RoomWorkStart, collaboration.DotCreate,
+                  collaboration.DelegationPolicySet):
+        assert 'maxItems' not in model.model_json_schema()['properties']['execution_targets']
+    # Participant capacity is independent of room project and target selection.
     assert collaboration.GoalCreate.model_json_schema()['properties']['participant_grant_ids']['maxItems'] == 16

@@ -57,7 +57,7 @@ def test_exactly_two_knowledge_tools_are_public_with_honest_annotations(profile)
 
 def test_defaults_bound_work_and_build_requires_mutation_key():
     build, query = validate(BUILD), validate(QUERY)
-    assert build['max_files'] == 2000 and build['entries'] == [] and build['expected_revision'] == ''
+    assert build['max_files'] == 0 and build['entries'] == [] and build['expected_revision'] == ''
     assert (query['offset'], query['limit'], query['max_chars']) == (0, 8, 6000)
     assert query['paths'] == [] and query['query'] == '' and query['idempotency_key'] is None
     with pytest.raises(ValidationError):
@@ -70,11 +70,11 @@ def test_defaults_bound_work_and_build_requires_mutation_key():
 
 
 @pytest.mark.parametrize('name,field,value', [
-    (BUILD, 'max_files', 0), (BUILD, 'max_files', 5001), (BUILD, 'max_files', True),
+    (BUILD, 'max_files', -1), (BUILD, 'max_files', 100001), (BUILD, 'max_files', True),
     (BUILD, 'max_files', '20'), (BUILD, 'expected_revision', 'A' * 64),
     (BUILD, 'expected_revision', '../index'), (BUILD, 'entries', [{}] * 33),
     (QUERY, 'query', 'a' * 301), (QUERY, 'paths', ['file.py'] * 17),
-    (QUERY, 'offset', -1), (QUERY, 'offset', 5001), (QUERY, 'limit', 0),
+    (QUERY, 'offset', -1), (BUILD, 'batch_size', 5001), (QUERY, 'limit', 0),
     (QUERY, 'limit', 41), (QUERY, 'max_chars', 511), (QUERY, 'max_chars', 16001),
 ])
 def test_bounds_and_strict_types(name, field, value):
@@ -175,7 +175,7 @@ async def test_agent_routes_to_typed_file_engine_not_process(agent, monkeypatch,
 
 @pytest.mark.parametrize('name', [BUILD, QUERY])
 def test_legacy_or_unadvertised_peers_fail_closed(name):
-    assert wire_version(name) == (3 if name == BUILD else 2)
+    assert wire_version(name) == (4 if name == BUILD else 2)
     with pytest.raises(DevError) as denied:
         require_compatible(negotiate({'version': '1.13.0'}), name)
     assert denied.value.code == 'AGENT_UPGRADE_REQUIRED'

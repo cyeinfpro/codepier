@@ -20,7 +20,7 @@ from shared.util import DevError
 
 class WorkingProject(contracts.Scope):
     capabilities: list[Literal['read', 'write', 'execute']] | None = Field(default=None, max_length=3)
-    execution_targets: list[str] | None = Field(default=None, max_length=16)
+    execution_targets: list[str] | None = Field(default=None)
 
     @model_validator(mode='after')
     def exact_permissions(self):
@@ -39,7 +39,7 @@ class WorkingProject(contracts.Scope):
 
 class Selection(contracts.Model):
     conversation_id: contracts.Identifier
-    projects: list[WorkingProject] = Field(default_factory=list, max_length=contracts.MAX_ROOM_PROJECTS)
+    projects: list[WorkingProject] = Field(default_factory=list)
     permissions_only: bool = False
     dot_id: str = Field(default='', max_length=128)
 

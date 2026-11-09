@@ -10,7 +10,6 @@ import sqlite3
 from contextlib import closing
 import posixpath
 import re
-import stat
 import time
 from pathlib import PurePosixPath
 
@@ -99,7 +98,7 @@ def load(engine, key, *, repair=False):
             raise ValueError()
         payload = json.loads(row[1])
         if (payload.get("version") != VERSION or not isinstance(payload.get("entries"), list)
-                or len(payload["entries"]) > 5000):
+                or not isinstance(payload.get("scan_scope"), str)):
             raise ValueError()
         for entry in payload["entries"]:
             if (not isinstance(entry, dict) or not isinstance(entry.get("path"), str)
@@ -140,7 +139,7 @@ def index_status(engine, project):
     if row is None:
         return {'state': 'missing'}
     revision, generated, version, count, scope, skipped = row
-    if version != VERSION or type(count) is not int or not 0 <= count <= 5000:
+    if version != VERSION or type(count) is not int or count < 0:
         return {'state': 'unavailable'}
     return {'state': 'ready', 'revision': revision, 'generated_at': generated,
             'entries_count': count, 'scan_scope': scope, 'skipped_files': skipped}
@@ -279,41 +278,58 @@ def build(engine, project, args, *, reuse=None):
     base = previous["revision"] if previous else "new"
     if args.get("expected_revision") and args["expected_revision"] != base:
         raise DevError("KNOWLEDGE_CONFLICT", "知识地图版本已变化；请先查询当前版本", 409)
-    limit = args.get("max_files", 2000)
-    if not 1 <= limit <= 5000:
-        raise DevError("KNOWLEDGE_LIMIT", "知识地图文件预算为 1–5000")
-    start = time.monotonic()
-    candidates = engine.git_candidates(root, root, max_files=50000)
-    scope = "git_index" if candidates is not None else "filesystem_walk"
-    if candidates is not None:
-        inventory, capped = candidates
-        if capped:
-            raise DevError("KNOWLEDGE_SCAN_LIMIT", "项目清单不完整，未替换原知识地图", 409)
-    else:
-        inventory = engine.walk(root, root, deadline=start + 25, files_first=True)
+    for annotation in args.get('entries', []):
+        # Progress is durable too; reject sensitive annotations before staging.
+        cleaned(annotation['summary'], 1200)
+    from agent import knowledge_batches as batches
+    limit = args.get("max_files", 0)
+    if not 0 <= limit <= 100000:
+        raise DevError("KNOWLEDGE_LIMIT", "max_files 须为 0（不限总数）或 1–100000")
+    cursor = args.get('cursor', '')
+    state = (batches.load(engine, key, cursor, args, base) if cursor else
+             batches.start(engine, root, args, base))
     old = {item["path"]: item for item in previous["payload"]["entries"]} if previous else {}
-    entries, skipped, used, changed, reused = {}, {}, 0, 0, 0
-    for _, path, info in inventory:
-        if not stat.S_ISREG(info.st_mode) or not eligible(path):
+    entries, skipped = state['entries'], state['skipped']
+    changed, reused = state['changed'], state['reused']
+    scope, used, processed = state['scan_scope'], 0, 0
+    started = time.monotonic()
+    batch_size = args.get('batch_size', 2000)
+    seconds = args.get('time_budget_seconds', 30)
+    for candidate in batches.inventory(engine, root, state):
+        exhausted = processed >= batch_size or time.monotonic() - started >= seconds or used >= SCAN_BYTES
+        if exhausted:
+            if candidate is not None:
+                state['pending'].append(candidate[1])
+            break
+        if candidate is None:
             continue
-        if len(entries) >= limit or time.monotonic() - start > 30:
-            raise DevError("KNOWLEDGE_SCAN_LIMIT", "知识地图达到扫描预算；原地图未改变", 409)
+        _, path, info = candidate
+        if limit and len(entries) >= limit:
+            raise DevError("KNOWLEDGE_SCAN_LIMIT", "达到显式指定的文件总数；原地图未改变，请提高 max_files 或设为 0", 409)
+        processed += 1
         try:
             actual = engine.path(root, path, False)
-            before, cached = reuse.before(engine, root, path, old.get(path)) if reuse else (None, None)
+            if info.st_size > FILE_BYTES:
+                raise DevError('FILE_TOO_LARGE', '文件超过结构提取预算', 409)
+            # A transient metadata race (for example a network-file hydration)
+            # gets one fresh guarded read. Continuous writers remain withheld.
+            for attempt in range(2):
+                try:
+                    before, cached = reuse.before(engine, root, path, old.get(path)) if reuse else (None, None)
+                    if cached is not None:
+                        data = None
+                    else:
+                        data = engine.read_bytes(actual, max_bytes=FILE_BYTES, verify_path=True)
+                    break
+                except DevError as error:
+                    if error.code != 'FILE_CHANGED' or attempt:
+                        raise
             if cached is not None:
-                used += before[2]
-                if used > SCAN_BYTES:
-                    raise DevError("KNOWLEDGE_SCAN_LIMIT", "知识地图覆盖内容达到 64 MiB 预算；原地图未改变", 409)
                 entries[path] = cached
                 reused += 1
                 continue
-            data = engine.read_bytes(actual, max_bytes=FILE_BYTES, verify_path=True)
-            text = engine.text(data)
             used += len(data)
-            if used > SCAN_BYTES:
-                raise DevError("KNOWLEDGE_SCAN_LIMIT", "知识地图达到 64 MiB 读取预算；原地图未改变", 409)
-            sha = digest(data)
+            text, sha = engine.text(data), digest(data)
             if reuse:
                 reuse.after(engine, root, path, before, sha)
             prior = old.get(path)
@@ -327,11 +343,22 @@ def build(engine, project, args, *, reuse=None):
                 changed += 1
             entries[path] = entry
         except DevError as exc:
-            if exc.code == "KNOWLEDGE_SCAN_LIMIT":
-                raise
             skipped[exc.code] = skipped.get(exc.code, 0) + 1
         except OSError:
             skipped["FILE_READ_FAILED"] = skipped.get("FILE_READ_FAILED", 0) + 1
+    if state['pending']:
+        if identity(engine, project, True)[2] != key:
+            raise DevError('KNOWLEDGE_CONFLICT', '项目根目录发生变化；未保存构建进度', 409)
+        state.update(changed=changed, reused=reused)
+        next_cursor = batches.save(engine, key, state, cursor)
+        return {"state": "building", "revision": base, "entries_count": len(entries),
+                "changed_entries": changed, "reused_entries": reused,
+                "skipped_files": sum(skipped.values()), "skipped_reasons": skipped,
+                "scan_scope": scope, "coverage": "Build in progress; the last published map is preserved.",
+                "generated_by": "deterministic_structure", "truncated": True,
+                "cursor": next_cursor, "remaining_paths": len(state['pending']),
+                "next": "project_knowledge_build",
+                "continuation": {**args, "cursor": next_cursor, "idempotency_key": "knowledge-resume-" + next_cursor[:32]}}
     for entry in entries.values():
         if entry.get("origin") == "structure":
             entry["related_paths"] = relations(entry, entries)
@@ -354,7 +381,8 @@ def build(engine, project, args, *, reuse=None):
         entry.update(summary=cleaned(annotation["summary"], 1200), related_paths=related[:16], origin="agent")
     payload = {"version": VERSION, "structure_version": STRUCTURE_VERSION,
                "entries": [entries[p] for p in sorted(entries)],
-               "scan_scope": scope, "skipped_reasons": skipped}
+               "scan_scope": scope, "skipped_reasons": skipped,
+               "scan_options": {k: v for k, v in state["options"].items() if k != "entries"}}
     raw = encoded(payload)
     if len(raw.encode()) > MAP_BYTES:
         raise DevError("KNOWLEDGE_STORAGE_LIMIT", "知识地图超过 8 MiB；原地图未改变", 409)
@@ -373,6 +401,12 @@ def build(engine, project, args, *, reuse=None):
                                 (revision, raw, generated, key, base))
         if result.rowcount != 1:
             raise DevError("KNOWLEDGE_CONFLICT", "其他调用已经更新地图；本次未覆盖", 409)
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='knowledge_build_progress'").fetchone():
+            if cursor:
+                row = db.execute('SELECT cursor FROM knowledge_build_progress WHERE map_key=?', (key,)).fetchone()
+                if not row or row[0] != cursor:
+                    raise DevError('KNOWLEDGE_CURSOR_CONFLICT', '构建进度已被另一调用更新', 409)
+            db.execute('DELETE FROM knowledge_build_progress WHERE map_key=?', (key,))
         count, size = db.execute("SELECT count(*),COALESCE(sum(length(CAST(payload AS BLOB))),0) FROM project_knowledge").fetchone()
         if count > MAX_MAPS or size > STORE_BYTES:
             raise DevError("KNOWLEDGE_STORAGE_LIMIT", "Agent 知识地图存储配额不足；本次未发布", 409)
@@ -380,7 +414,7 @@ def build(engine, project, args, *, reuse=None):
             "entries_count": len(entries), "changed_entries": changed,
             "reused_entries": reused, "skipped_files": sum(skipped.values()),
             "skipped_reasons": skipped, "scan_scope": scope,
-            "coverage": "Eligible text files within budgets; not an atomic filesystem snapshot.",
+            "coverage": "Completed selected source scope; excluded/unsupported files omitted. Not an atomic filesystem snapshot.",
             "generated_by": "deterministic_structure", "truncated": bool(skipped),
             "next": "project_knowledge_query"}
 
