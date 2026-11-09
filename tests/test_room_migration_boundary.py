@@ -16,6 +16,7 @@ from tests.collaboration_support import collab as collab, key
 from tests.test_collaboration_dot_chat import duplex, owner_message, inbox
 from tests.test_collaboration_dots import call, setup
 from tests.test_room_members_rebuild import join, subscribe, identity
+from tests.test_room_managed_work import save_room_permissions
 
 
 def legacy(fixture):
@@ -324,6 +325,7 @@ async def test_verified_paused_member_remains_paused_across_explicit_room_cutove
 def test_native_room_projection_does_not_reinspect_migration_candidates(collab, monkeypatch):
     service, owner, *_ = collab
     room = service.rooms.create({'title': '新房间', 'idempotency_key': key()}, owner)['room']
+    save_room_permissions(service, owner, room['id'], [])
     service.rooms.create_member({'conversation_id': room['id'], 'name': '尚未接入', 'idempotency_key': key()}, owner)
     def unexpected(*_args, **_kwargs):
         raise AssertionError('native projection must not scan legacy eligibility')
@@ -393,11 +395,8 @@ async def test_private_bridge_after_cutover_does_not_reopen_old_public_admission
     c = legacy(collab)
     joined = await verify_legacy_member(c, c.member)
     activate(c)
-    room = current(c)
-    c.s.rooms.projects({'conversation_id': c.conversation_id, 'projects': [{'project': 'proj'}],
-        'expected_version': room['version'], 'idempotency_key': key(), 'member_approvals': [{
-            'member_id': joined['member_id'], 'project_scopes': [{'project_id': 'proj',
-            'capabilities': ['read', 'write', 'execute'], 'execution_targets': ['project_agent']}]}]}, c.owner)
+    save_room_permissions(c.s, c.owner, c.conversation_id, [{'project_id': 'proj',
+        'capabilities': ['read', 'write', 'execute'], 'execution_targets': ['project_agent']}])
     bridge = c.s.store.one("SELECT * FROM room_member_work_bridges WHERE member_id=? AND state='active'", (joined['member_id'],))
     assert bridge and bridge['legacy_dot_id'] != c.slot['id']
     assert c.s.store.one('SELECT 1 FROM room_legacy_member_links WHERE dot_id=?', (c.slot['id'],))
@@ -444,9 +443,10 @@ async def test_native_invited_private_adapter_keeps_original_input_until_real_co
     room = service.rooms.create({'title': '尚未接入的新房间', 'projects': [{'project': 'proj'}],
         'idempotency_key': key()}, owner)['room']
     c = SimpleNamespace(s=service, owner=owner, conversation_id=room['id'])
+    save_room_permissions(service, owner, room['id'],
+        [{'project_id': 'proj', 'capabilities': ['read'], 'execution_targets': []}])
     created = service.rooms.create_member({'conversation_id': room['id'], 'name': '等待接入',
-        'project_scopes': [{'project_id': 'proj', 'capabilities': ['read'], 'execution_targets': []}],
-        'expected_version': room['version'], 'idempotency_key': key()}, owner)
+        'idempotency_key': key()}, owner)
     member = service.rooms.member(created['member']['id'])
     assert member['status'] == 'invited' and member['legacy_dot_id'] and not member['connection_proof_hash']
     assert service.store.one('SELECT 1 FROM room_member_work_bridges WHERE member_id=?', (member['id'],))
@@ -454,8 +454,7 @@ async def test_native_invited_private_adapter_keeps_original_input_until_real_co
     connect_action(c, member, 'pause')
     connect_action(c, member, 'resume')
     if detach_project:
-        service.rooms.projects({'conversation_id': room['id'], 'projects': [],
-            'expected_version': current(c)['version'], 'idempotency_key': key()}, owner)
+        save_room_permissions(service, owner, room['id'], [])
     member = service.rooms.member(member['id'])
     assert member['status'] == 'invited' and member['legacy_dot_id']
     assert not service.rooms.migration.member_requires_migration(member)

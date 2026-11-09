@@ -135,17 +135,23 @@ class CoordinationService:
 
     def candidate(self, args, principal, room, *, native_scope=None):
         conversation = self.c.conversations.resolve(principal, room, args)
+        native=self.c.room_work_bridge.native.validate(native_scope,principal) if native_scope else None
         projects = []
         for project_id in sorted(args['project_ids']):
             project = projected_project(self.c, project_id, principal)
             if project['id'] != project_id:
                 raise DevError('PROJECT_ID_REQUIRED', '目标必须绑定明确的项目 ID', 422)
-            if not self.store.one('''SELECT 1 FROM conversation_projects p JOIN collaboration_rooms r ON r.id=p.room_id
-                WHERE p.conversation_id=? AND r.project_id=? AND r.environment_id=?''',
-                (conversation['id'], project_id, room['environment_id'])):
+            # Native approvals record each project's actual environment. The
+            # anchor is provenance, not an extra unapproved project partition.
+            environments = ({rule['environment_id'] for member in native['members']
+                for rule in member['projects'] if rule['project_id'] == project_id}
+                if native else {room['environment_id']})
+            if not environments or any(not self.store.one('''SELECT 1 FROM conversation_projects p
+                JOIN collaboration_rooms r ON r.id=p.room_id WHERE p.conversation_id=?
+                AND r.project_id=? AND r.environment_id=?''',
+                (conversation['id'], project_id, environment)) for environment in environments):
                 raise DevError('GOAL_PROJECT_NOT_IN_ROOM', '目标项目必须已明确加入当前聊天室和环境', 409)
             projects.append(self.project_snapshot(project))
-        native=self.c.room_work_bridge.native.validate(native_scope,principal) if native_scope else None
         if native and (native['conversation_id']!=conversation['id'] or set(args['project_ids'])!=set(native['project_ids'])
                 or set(args['participant_grant_ids'])!=set(native['participant_grant_ids'])
                 or set(args['capabilities'])!=set(native['capabilities'])):

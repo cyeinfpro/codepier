@@ -6,7 +6,7 @@ import pytest
 from hub.collaboration.common import canonical, digest
 from shared.util import DevError
 from tests.collaboration_support import collab as collab, key
-from tests.test_room_managed_work import connected
+from tests.test_room_managed_work import connected, save_room_permissions
 from tests.test_room_goal_scope_boundaries import worker_for, start, admit_read, report
 
 
@@ -249,8 +249,7 @@ async def test_context_scope_intersection_correction_provenance_and_revocation(c
         facts=[fact(s, corrected, key='b', kind='decision', text='B 待重新核对')]), lead_actor)
     room = s.rooms.read({'conversation_id': lead['conversation_id']}, owner)['room']
     old_page = s.room_context.read({**lead, 'limit': 1}, lead_actor)
-    s.rooms.projects({'conversation_id': room['id'], 'expected_version': room['version'],
-        'projects': [{'project': 'proj'}], 'idempotency_key': key()}, owner)
+    save_room_permissions(s, owner, room['id'], [{'project_id': 'proj'}])
     current = s.room_context.read(lead, lead_actor)
     assert [f['key'] for f in current['facts']] == ['a']
     assert {p['project_id'] for p in current['active_projects']} == {'proj'}
@@ -269,33 +268,37 @@ async def test_context_migrated_partition_source_respects_narrow_member_scope(co
     broad = worker_for(s, worker, 'context-wide-grant', scopes=('read',), projects=('proj', 'otherproj'))
     room, message, partition = migrated_partition_source(s, owner,
         [{'project': 'proj'}, {'project': 'otherproj'}], 'otherproj', 'production', '原 B 分区记录。')
+    save_room_permissions(s, owner, room['id'], [{'project_id': 'proj'}, {'project_id': 'otherproj'}])
     s, owner, actor, _, lead, credentials = await connected(collab,
         scopes=[{'project_id': 'proj'}, {'project_id': 'otherproj'}],
         worker_override=broad, conversation_id=room['id'])
-    _, _, _, _, peer, _ = await connected(collab, scopes=[{'project_id': 'proj'}],
-        worker_override=broad, conversation_id=lead['conversation_id'])
+    narrow = worker_for(s, worker, 'context-narrow-grant', scopes=('read',), projects=('proj',))
+    _, _, _, _, peer, _ = await connected(collab,
+        worker_override=narrow, conversation_id=lead['conversation_id'])
     row = s.store.one('SELECT * FROM collaboration_messages WHERE id=?', (message['id'],))
     assert row['room_id'] == partition and not json.loads(row['body']).get('provenance_project_ids')
     s.room_context.update(request(s, actor, lead, credentials, facts=[fact(s, message)]), actor)
     assert s.room_context.read(lead, actor)['facts'][0]['project_ids'] == ['otherproj']
-    assert not s.room_context.read(peer, actor)['facts']
-    assert not s.room_consumers._visible_message(s.rooms.member(peer['member_id']), actor, row)
+    assert not s.room_context.read(peer, narrow)['facts']
+    assert not s.room_consumers._visible_message(s.rooms.member(peer['member_id']), narrow, row)
 
 
 @pytest.mark.asyncio
 async def test_context_environment_scope_survives_correction_replies_and_renaming(collab):
-    s, owner, *_ = collab
+    s, owner, worker, *_ = collab
     room, source, partition = migrated_partition_source(s, owner,
         [{'project': 'proj', 'environment_id': 'production'}, {'project': 'proj', 'environment_id': 'staging'}],
         'proj', 'staging', 'Staging 私有约束。')
-    s, owner, actor, _, lead, credentials = await connected(collab,
-        scopes=[{'project_id': 'proj', 'environment_id': 'staging'}], conversation_id=room['id'])
+    save_room_permissions(s, owner, room['id'],
+        [{'project_id': 'proj', 'environment_id': 'staging'}, {'project_id': 'otherproj'}])
+    s, owner, actor, _, lead, credentials = await connected(collab, conversation_id=room['id'])
+    peer_actor = worker_for(s, worker, 'context-other-project', scopes=('read',), projects=('otherproj',))
     _, _, _, _, peer, peer_credentials = await connected(collab,
-        scopes=[{'project_id': 'proj', 'environment_id': 'production'}], conversation_id=lead['conversation_id'])
+        worker_override=peer_actor, conversation_id=lead['conversation_id'])
     assert s.store.one('SELECT room_id FROM collaboration_messages WHERE id=?', (source['id'],))['room_id'] == partition
     first = s.room_context.update(request(s, actor, lead, credentials,
         facts=[fact(s, source, kind='constraint')]), actor)
-    assert not s.room_context.read(peer, actor)['facts']
+    assert not s.room_context.read(peer, peer_actor)['facts']
     expected = [{'project_id': 'proj', 'environment_id': 'staging'}]
     corrected = send(s, owner, lead, 'Staging 约束纠正。',
         supersedes_context_ids=first['fact_ids'], expected_context_version=first['version'])
@@ -309,15 +312,15 @@ async def test_context_environment_scope_survives_correction_replies_and_renamin
     for message in (corrected, owner_reply, reply, continued):
         row = s.store.one('SELECT * FROM collaboration_messages WHERE id=?', (message['id'],))
         assert json.loads(row['body'])['provenance_scopes'] == expected
-        assert not s.room_consumers._visible_message(s.rooms.member(peer['member_id']), actor, row)
-    wrong_recipient = send(s, owner, lead, '不能给 production-only 成员扩大读取范围。',
+        assert not s.room_consumers._visible_message(s.rooms.member(peer['member_id']), peer_actor, row)
+    wrong_recipient = send(s, owner, lead, '不能给 无该项目授权的成员扩大读取范围。',
         reply_to_id=reply['id'], member_id=peer['member_id'])
     with pytest.raises(DevError):
         s.room_runtime.reply({**peer, **peer_credentials,
             'source_message_id': wrong_recipient['id'], 'source_version': wrong_recipient['version'],
             'source_digest': reference(s, wrong_recipient)['digest'],
-            'expected_inbox_revision': s.room_consumers.inbox(peer, actor)['inbox_revision'],
-            'body_text': '不得直用已知原消息绕过成员环境范围。', 'idempotency_key': key()}, actor)
+            'expected_inbox_revision': s.room_consumers.inbox(peer, peer_actor)['inbox_revision'],
+            'body_text': '不得直用已知原消息绕过主机项目范围。', 'idempotency_key': key()}, peer_actor)
     s.room_context.update(request(s, actor, lead, credentials,
         facts=[fact(s, corrected, kind='constraint', text='Staging 新约束')]), actor)
     new_source = send(s, owner, lead, '重新整理约束结构。')
@@ -325,10 +328,9 @@ async def test_context_environment_scope_survives_correction_replies_and_renamin
     s.room_context.update(request(s, actor, lead, credentials,
         supersedes=[current['id']], facts=[fact(s, new_source, key='renamed', kind='constraint')]), actor)
     assert s.room_context.read(lead, actor)['facts'][0]['project_scopes'] == expected
-    assert not s.room_context.read(peer, actor)['facts']
+    assert not s.room_context.read(peer, peer_actor)['facts']
     room = s.rooms.read({'conversation_id': room['id']}, owner)['room']
-    s.rooms.projects({'conversation_id': room['id'], 'expected_version': room['version'],
-        'projects': [{'project': 'proj', 'environment_id': 'production'}], 'idempotency_key': key()}, owner)
+    save_room_permissions(s, owner, room['id'], [{'project_id': 'proj', 'environment_id': 'production'}])
     assert not s.room_context.owner_read(room['id'], owner)['facts']
 
 

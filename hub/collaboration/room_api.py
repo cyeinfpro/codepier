@@ -38,6 +38,17 @@ def install_routes(router, auth, runtime):
         body = await request.json()
         return await store.run(lambda: service.rooms.update({**body, 'conversation_id': identifier}, auth.admin(request, True)))
 
+    @router.get('/rooms/{identifier}/permissions')
+    async def permissions(request: Request, response: Response, identifier: str):
+        response.headers['Cache-Control'] = 'private, no-store'
+        return await store.run(lambda: service.room_permissions.read(identifier, auth.panel(request)))
+
+    @router.put('/rooms/{identifier}/permissions')
+    async def permissions_update(request: Request, identifier: str):
+        body = await request.json()
+        return await store.run(lambda: service.room_permissions.save(
+            {**body, 'conversation_id': identifier}, auth.admin(request, True)))
+
     @router.put('/rooms/{identifier}/projects')
     async def projects(request: Request, identifier: str):
         body = await request.json()

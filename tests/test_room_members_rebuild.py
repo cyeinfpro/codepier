@@ -16,6 +16,7 @@ from hub.collaboration.network import Reply
 from hub.collaboration.rooms import Rooms, migrate
 from shared.util import DevError
 from tests.collaboration_support import collab as collab, key
+from tests.test_room_managed_work import save_room_permissions
 
 
 @pytest.fixture
@@ -29,7 +30,11 @@ def rooms(collab):
 
 
 def create(service, owner, projects=None):
-    return service.rooms.create({'title': '工作房间', 'projects': projects or [], 'idempotency_key': key()}, owner)['room']
+    room = service.rooms.create({'title': '工作房间', 'idempotency_key': key()}, owner)['room']
+    save_room_permissions(service, owner, room['id'], [
+        {'project_id': item['project'], 'environment_id': item.get('environment_id', 'production'),
+         'capabilities': ['read']} for item in projects or []])
+    return service.rooms.read({'conversation_id': room['id']}, owner)['room']
 
 
 def add(service, owner, room, name='助手'):
@@ -197,9 +202,8 @@ def test_remove_last_project_survives_repeated_migration(rooms):
     s, owner, _, _ = rooms
     room = create(s, owner, [{'project': 'otherproj', 'environment_id': 'production'}])
     partition = room['projects'][0]['room_id']
-    updated = s.rooms.projects({'conversation_id': room['id'], 'projects': [],
-        'expected_version': room['version'], 'idempotency_key': key()}, owner)['room']
-    assert not updated['projects']
+    updated = save_room_permissions(s, owner, room['id'], [])
+    assert not updated['scope']['project_scopes']
     from hub.collaboration.conversations import migrate as migrate_conversations
     with s.store.transaction():
         migrate_conversations(s.store.db)
@@ -456,8 +460,10 @@ def test_project_association_never_approves_member_scope(rooms):
     room = create(s, owner)
     created = add(s, owner, room)
     current = s.rooms.read({'conversation_id': room['id']}, owner)['room']
-    s.rooms.projects({'conversation_id': room['id'], 'expected_version': current['version'],
-        'projects': [{'project': 'proj', 'environment_id': 'production'}], 'idempotency_key': key()}, owner)
+    with pytest.raises(DevError) as denied:
+        s.rooms.projects({'conversation_id': room['id'], 'expected_version': current['version'],
+            'projects': [{'project': 'proj', 'environment_id': 'production'}], 'idempotency_key': key()}, owner)
+    assert denied.value.code == 'ROOM_PERMISSION_SETTINGS_REQUIRED'
     assert s.rooms.scopes(s.rooms.member(created['member']['id'])) == []
 
 
@@ -474,27 +480,28 @@ def test_removed_member_never_resumes_or_renews_invite(rooms):
     assert caught.value.code == 'ROOM_MEMBER_REMOVED'
 
 
-def test_project_removal_does_not_restore_approval_when_readded(rooms):
+def test_project_removal_requires_explicit_canonical_reapproval(rooms):
     s, owner, _, _ = rooms
     room = create(s, owner, [{'project': 'proj', 'environment_id': 'production'}])
     created = s.rooms.create_member({'conversation_id': room['id'], 'name': '研究助手',
-        'project_scopes': [{'project_id': 'proj', 'capabilities': ['read']}], 'idempotency_key': key()}, owner)
+        'idempotency_key': key()}, owner)
     member_id = created['member']['id']
     assert s.rooms.scopes(s.rooms.member(member_id))[0]['capabilities'] == ['read']
-    current = s.rooms.read({'conversation_id': room['id']}, owner)['room']
-    detached = s.rooms.projects({'conversation_id': room['id'], 'projects': [],
-        'expected_version': current['version'], 'idempotency_key': key()}, owner)['room']
-    s.rooms.projects({'conversation_id': room['id'], 'projects': [{'project': 'proj', 'environment_id': 'production'}],
-        'expected_version': detached['version'], 'idempotency_key': key()}, owner)
+    save_room_permissions(s, owner, room['id'], [])
     assert not s.rooms.scopes(s.rooms.member(member_id))[0]['capabilities']
-    assert s.store.one('SELECT COUNT(*) n FROM room_member_scope_revisions')['n'] == 2
+    with s.store.transaction():
+        migrate(s.store.db)
+    assert not s.rooms.scopes(s.rooms.member(member_id))[0]['capabilities']
+    save_room_permissions(s, owner, room['id'], [{'project_id': 'proj', 'capabilities': ['read']}])
+    assert s.rooms.scopes(s.rooms.member(member_id))[0]['capabilities'] == ['read']
+    assert s.store.one('SELECT COUNT(*) n FROM room_member_scope_revisions')['n'] == 3
 
 
 def test_resource_change_only_invalidates_affected_approval_and_never_recreates_member(rooms):
     s, owner, _, _ = rooms
     room = create(s, owner, [{'project': 'proj', 'environment_id': 'production'}])
     created = s.rooms.create_member({'conversation_id': room['id'], 'name': '研究助手',
-        'project_scopes': [{'project_id': 'proj', 'capabilities': ['read']}], 'idempotency_key': key()}, owner)
+        'idempotency_key': key()}, owner)
     member_id = created['member']['id']
     before = s.store.one('SELECT COUNT(*) n FROM room_members')['n']
     s.store.execute("UPDATE projects SET root='/tmp/changed-project' WHERE id='proj'")

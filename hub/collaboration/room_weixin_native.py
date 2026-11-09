@@ -59,6 +59,10 @@ def migrate(db):
     db.execute('''CREATE TABLE IF NOT EXISTS room_channel_owner_inputs(
         message_id TEXT PRIMARY KEY,authorization_id TEXT NOT NULL,authorization_version INTEGER NOT NULL,
         message_digest TEXT NOT NULL,created REAL NOT NULL)''')
+    columns={row[1] for row in db.execute('PRAGMA table_info(room_channel_owner_inputs)')}
+    for name in ('scope','scope_digest'):
+        if name not in columns:
+            db.execute("ALTER TABLE room_channel_owner_inputs ADD COLUMN "+name+" TEXT NOT NULL DEFAULT ''")
 
 
 class RoomWeixin:
@@ -312,15 +316,75 @@ class RoomWeixin:
     def preview(self,binding,principal):
         member=self.c.rooms.member(binding['native_member_id'],binding['conversation_id'])
         scopes=self.c.room_work_bridge.scopes(member)
-        scope={'binding_id':binding['id'],'account_id':binding['account_id'],'credential_version':binding['credential_version'],
+        policy=getattr(self.c,'room_permissions',None)
+        configured=bool(policy and policy.is_configured(binding['conversation_id']))
+        mode=policy.channel_mode(binding['conversation_id'],'weixin') if configured else 'room_member'
+        if configured:
+            rules={(r['project_id'],r['environment_id']):r for r in policy.effective_scopes(binding['conversation_id'],'weixin')}
+            effective=[]
+            for row in scopes:
+                rule=rules.get((row['project_id'],row['environment_id']))
+                if not rule:
+                    continue
+                caps=sorted(set(json.loads(row['capabilities'])) & set(rule['capabilities']))
+                targets=sorted(set(json.loads(row['execution_targets'])) & set(rule['execution_targets'])) if 'execute' in caps else []
+                if caps:
+                    scoped={**row,'capabilities':canonical(caps),'execution_targets':canonical(targets)}
+                    deadline=rule['lifetime']['expires_at']
+                    if deadline is not None:
+                        scoped['expires_at']=min(row['expires_at'],deadline) if row['lifetime_mode']=='timed' else deadline
+                        scoped['lifetime_mode']='timed'
+                    effective.append(scoped)
+            scopes=effective
+        scope={'scope_mode':'room_member','binding_id':binding['id'],'account_id':binding['account_id'],'credential_version':binding['credential_version'],
             'generation':binding['generation'],'member_id':member['id'],'conversation_id':member['conversation_id'],
             'owner_user_id':principal.user_id,'space_id':principal.space_id,
             'projects':[{'project_id':s['project_id'],'environment_id':s['environment_id'],'version':s['version'],
                 'capabilities':json.loads(s['capabilities']),'execution_targets':json.loads(s['execution_targets']),
                 'scope_digest':self.c.room_work_bridge.fingerprint([s])} for s in scopes]}
-        return {'scope':scope,'scope_digest':digest(scope),'text_version':'room-channel-consent-v1',
-                'project_ids':[s['project_id'] for s in scopes],'projects':scope['projects'],
-                'summary':'仅限此成员已获房主批准的项目和能力；连接持续至解除。','lifetime_mode':'until_revoked'}
+        return {'scope':scope,'scope_digest':digest(scope),'text_version':'room-channel-consent-v2',
+                'permission_mode':mode,'project_ids':[s['project_id'] for s in scopes],'projects':scope['projects'],
+                'summary':('使用房间权限设置中的微信独立权限；后续调整对新消息生效，连接持续至解除。' if mode=='custom' else
+                    '跟随房间权限设置；后续调整对新消息生效，连接持续至解除。' if configured else
+                    '默认跟随此房间中微信绑定成员已批准的项目权限；后续权限调整对新消息生效，连接持续至解除。'),
+                'lifetime_mode':'until_revoked'}
+
+    @staticmethod
+    def scope_identity(scope):
+        return {k:v for k,v in scope.items() if k!='projects'}
+
+    def current_scope(self,binding,principal,saved):
+        current=dict(self.preview(binding,principal)['scope'])
+        # Older authorizations keep their exact frozen scope until the owner
+        # explicitly approves the new inheritance contract in the panel.
+        if 'scope_mode' not in saved:
+            current.pop('scope_mode',None)
+        return current
+
+    def approved_scope(self,auth,binding,principal):
+        saved=json.loads(auth['scope'])
+        if digest(saved)!=auth['scope_digest']:
+            return None
+        current=self.current_scope(binding,principal,saved)
+        policy=getattr(self.c,'room_permissions',None)
+        configured=bool(policy and policy.is_configured(binding['conversation_id']))
+        if saved.get('scope_mode')=='room_member' or configured:
+            # Saving the canonical room policy explicitly controls project
+            # permissions. The channel record continues to prove identity,
+            # lifetime and revocation, not a second editable project policy.
+            return current if self.scope_identity(current)==self.scope_identity(saved) else None
+        return current if current==saved else None
+
+    def input_scope(self,message,auth):
+        saved=json.loads(auth['scope'])
+        record=self.store.one('SELECT * FROM room_channel_owner_inputs WHERE message_id=?',(message['id'],))
+        if saved.get('scope_mode')!='room_member' and record and not record['scope']:
+            return saved
+        scope=json.loads(record['scope']) if record and record['scope'] else {}
+        if (not record or digest(scope)!=record['scope_digest']
+                or self.scope_identity(scope)!=self.scope_identity(saved)):
+            raise DevError('CHANNEL_OWNER_SCOPE_CHANGED','原微信消息的房间权限记录已不可用',403)
+        return scope
 
     def approve_tasks(self,binding_id,args,principal,*,pending=False):
         binding=self.store.one('SELECT * FROM weixin_bindings WHERE id=?',(binding_id,))
@@ -453,20 +517,19 @@ class RoomWeixin:
         else:
             recovered=self.recovered_goal(goal,message,binding) if goal else None
         _,_,owner,_,_=self._valid(binding,require_member=not bool(recovered))
-        preview=self.preview(binding,owner)
-        saved=json.loads(auth['scope'])
-        scope_matches=preview['scope_digest']==auth['scope_digest']
+        authorized=json.loads(auth['scope'])
+        current=self.current_scope(binding,owner,authorized)
+        saved=self.input_scope(message,auth)
+        scope_matches=current==saved
         if project_ids is not None:
             # Existing Goals may continue their unchanged project rules after
             # an unrelated rule is removed. This is never used to trust a new
             # inbound input or to add authority outside the original consent.
-            current=preview['scope']
-            old_rules={r['project_id']:r for r in saved['projects']}
-            new_rules={r['project_id']:r for r in current['projects']}
-            scope_matches=bool(project_ids) and ({k:v for k,v in current.items() if k!='projects'}==
-                {k:v for k,v in saved.items() if k!='projects'}) and all(
-                p in old_rules and p in new_rules and old_rules[p]==new_rules[p] for p in project_ids)
-        if (not scope_matches or digest(saved)!=auth['scope_digest']
+            old_rules={(r['project_id'],r['environment_id']):r for r in saved['projects'] if r['project_id'] in project_ids}
+            new_rules={(r['project_id'],r['environment_id']):r for r in current['projects'] if r['project_id'] in project_ids}
+            scope_matches=(bool(project_ids) and self.scope_identity(current)==self.scope_identity(saved)
+                and set(project_ids)<={key[0] for key in old_rules} and old_rules==new_rules)
+        if (not scope_matches or digest(authorized)!=auth['scope_digest']
                 or origin.get('peer_id')!=binding['peer_id'] or origin.get('generation')!=binding['generation']
                 or message['conversation_id']!=binding['conversation_id']):
             raise DevError('CHANNEL_OWNER_SCOPE_CHANGED','原微信身份或任务范围已改变',403)
@@ -587,9 +650,15 @@ class RoomWeixin:
                 self.c.weixin.media.add_inbound(binding,message_id,ordinal,item)
             auth=self.store.one("SELECT * FROM room_channel_owner_authorizations WHERE binding_id=? AND state='active'",(binding['id'],))
             if auth and not prior and not int(updated) and not int(deleted) and int(created)>=int(auth['created']*1000):
-                preview=self.preview(binding,owner)
-                if preview['scope_digest']==auth['scope_digest']:
-                    self.store.execute('INSERT INTO room_channel_owner_inputs VALUES (?,?,?,?,?)',(message_id,auth['id'],auth['version'],digest(body['body_text']),self.c.clock()))
+                scope=self.approved_scope(auth,binding,owner)
+                if scope and scope['projects']:
+                    # Freeze the room-approved scope for this input. Later
+                    # room expansion applies only to new messages, never to
+                    # queued inputs or an already approved Goal.
+                    self.store.execute('''INSERT INTO room_channel_owner_inputs
+                        (message_id,authorization_id,authorization_version,message_digest,created,scope,scope_digest)
+                        VALUES (?,?,?,?,?,?,?)''',(message_id,auth['id'],auth['version'],digest(body['body_text']),
+                        self.c.clock(),canonical(scope),digest(scope)))
             canonical_message=self.store.one('SELECT * FROM collaboration_messages WHERE id=?',(message_id,))
             if newest:
                 self.c.room_consumers.enqueue(canonical_message,member,owner)

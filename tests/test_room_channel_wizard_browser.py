@@ -133,3 +133,233 @@ def test_ready_chat_can_approve_tasks_but_scope_drift_clears_old_checked_consent
         assert len(writes) == 2
     finally:
         context.close()
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_unified_room_permissions_bulk_channel_modes_and_return(
+    collaboration_stack, chat_browser_pool, engine
+):
+    stack = collaboration_stack
+    context = chat_browser_pool(engine).new_context(viewport={'width': 1280, 'height': 1000})
+    page = context.new_page()
+    channel_writes = []
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    try:
+        sign_in(page, stack)
+        create_room(page, '统一房间权限')
+        room = next(item for item in stack.must(stack.client.get('/api/collaboration/rooms'))['items']
+                    if item['title'] == '统一房间权限')
+        room_path = f'/api/collaboration/rooms/{room["id"]}'
+        page.locator('.cr-room-actions [data-cr-action="permissions"]').click()
+        expect(page.locator('[data-cr-form="permissions"]')).to_be_visible()
+        expect(page.locator('.cr-panel-content')).to_contain_text('唯一的项目权限设置')
+        initial = stack.must(stack.client.get(room_path + '/permissions'))
+        assert not initial['configured']
+        room_section = page.locator('[data-permission-section="room"]')
+        room_section.locator('[data-permission-bulk="all"]').click()
+        # "All" respects each project's upper bound, including read-only rows.
+        for project in initial['available_projects']:
+            row = room_section.locator(
+                f'[data-permission-row][data-project-id="{project["project_id"]}"]'
+                f'[data-environment-id="{project.get("environment_id", "production")}"]')
+            for capability in ('read', 'write', 'execute'):
+                assert row.locator(f'[data-permission-cap][value="{capability}"]').is_checked() == (
+                    capability in project['capabilities'])
+            if 'execute' in project['capabilities']:
+                chosen_targets = row.locator('[data-permission-target-option]:checked').evaluate_all(
+                    '(inputs) => inputs.map(input => input.value)')
+                assert chosen_targets == (['project_agent'] if 'project_agent' in project['execution_targets'] else [])
+        page.keyboard.press('Escape')
+        expect(page.locator('dialog.cr-panel')).not_to_be_visible()
+        assert not stack.must(stack.client.get(room_path + '/permissions'))['configured']
+        page.locator('.cr-room-actions [data-cr-action="permissions"]').click()
+        expect(page.locator('[data-cr-form="permissions"]')).to_be_visible()
+        room_section.locator('[data-permission-bulk="none"]').click()
+        first_id, second_id = [project['id'] for project in stack.projects[:2]]
+        first = room_section.locator(f'[data-permission-row][data-project-id="{first_id}"]')
+        second = room_section.locator(f'[data-permission-row][data-project-id="{second_id}"]')
+        first.locator('[data-permission-project]').check()
+        expect(first.locator('[value="read"]')).to_be_checked()
+        expect(first.locator('[value="write"]')).not_to_be_checked()
+        expect(second.locator('[data-permission-project]')).not_to_be_checked()
+        expect(page.locator('[data-permission-mode="weixin"]')).to_have_value('follow_room')
+        expect(page.locator('.cr-panel-content')).to_contain_text('尚不支持该渠道传输')
+        page.locator('[data-cr-form="permissions"] button[type="submit"]').click()
+        # Adding the first room project invalidates the old visibility stream.
+        # The confirmed save must survive that safe dismissal, without reopening it.
+        expect(page.locator('[data-cr-feedback]')).to_contain_text('权限设置已保存')
+        expect(page.locator('dialog.cr-panel')).not_to_be_visible()
+        policy = stack.must(stack.client.get(room_path + '/permissions'))
+        assert policy['configured'] and policy['version'] == initial['version'] + 1
+        assert len(policy['scope']['project_scopes']) == 1
+        assert policy['scope']['project_scopes'][0]['project_id'] == first_id
+        assert policy['scope']['project_scopes'][0]['capabilities'] == ['read']
+        page.locator('.cr-room-actions [data-cr-action="permissions"]').click()
+        expect(first.locator('[value="read"]')).to_be_checked()
+        expect(second.locator('[data-permission-project]')).not_to_be_checked()
+        page.locator('[data-cr-action="close"]').click()
+        page.locator('.cr-room-actions [data-cr-action="members"]').click()
+        page.locator('dialog.cr-panel [data-cr-action="add-member"]').click()
+        expect(page.locator('[data-cr-form="member"]')).to_be_visible()
+        expect(page.locator('[data-cr-form="member"] [name="capability"]')).to_have_count(0)
+        expect(page.locator('[data-cr-form="member"] [name="lifetime"]')).to_have_count(0)
+        page.locator('[data-cr-form="member"] [name="name"]').fill('继承房间成员')
+        with page.expect_request(lambda request: request.method == 'POST' and request.url.endswith(room_path + '/members')) as added:
+            page.locator('[data-cr-form="member"] button[type="submit"]').click()
+        assert 'project_scopes' not in added.value.post_data_json
+        expect(page.locator('[data-cr-flow-view]')).to_be_visible()
+        page.locator('[data-cr-action="close"]').click()
+        flow = {
+            'id': 'synthetic-unified-permissions', 'kind': 'weixin', 'stage': 'ready', 'version': 1,
+            'work_authorized': True, 'primary_action': 'refresh', 'actions': [], 'allowed_actions': [],
+            'next_request': {'body': {'action': 'refresh'}, 'form_fields': []},
+        }
+        def channel_projection(route):
+            if route.request.method == 'POST' and route.request.url.endswith('/actions'):
+                channel_writes.append(route.request.post_data_json)
+            route.fulfill(status=200, json={'flow': deepcopy(flow)})
+        page.route('**/api/collaboration/rooms/*/channels/weixin/connect', channel_projection)
+        page.route('**/api/collaboration/channel-connect-flows/**', channel_projection)
+        page.locator('.cr-room-actions [data-cr-action="weixin"]').click()
+        for _ in range(2):
+            page.locator('[data-cr-action="channel-project-permissions"]').click()
+            expect(page.locator('[data-cr-form="permissions"]')).to_be_visible()
+            expect(first.locator('[value="read"]')).to_be_checked()
+            expect(first.locator('[value="write"]')).not_to_be_checked()
+            expect(second.locator('[data-permission-project]')).not_to_be_checked()
+            first.locator('[value="write"]').check()
+            page.locator('[data-cr-action="channel-scope-back"]').click()
+            expect(page.locator('[data-cr-channel-view]')).to_be_visible()
+        page.locator('[data-cr-action="channel-project-permissions"]').click()
+        expect(first.locator('[value="write"]')).not_to_be_checked()
+        first.locator('[value="write"]').check()
+        page.locator('[data-permission-mode="weixin"]').select_option('custom')
+        wx_section = page.locator('[data-permission-section="weixin"]')
+        wx_section.locator('[data-permission-bulk="none"]').click()
+        wx_section.locator(f'[data-project-id="{first_id}"] [data-permission-project]').check()
+        page.locator('[data-cr-form="permissions"] button[type="submit"]').click()
+        expect(page.locator('[data-cr-channel-view]')).to_be_visible()
+        page.locator('[data-cr-action="channel-project-permissions"]').click()
+        expect(first.locator('[value="write"]')).to_be_checked()
+        expect(page.locator('[data-permission-mode="weixin"]')).to_have_value('custom')
+        expect(wx_section.locator(f'[data-project-id="{first_id}"] [value="write"]')).not_to_be_checked()
+        expect(second.locator('[data-permission-project]')).not_to_be_checked()
+        # A conflict must not reuse the room version or replay the same selection.
+        conflicts = []
+        permission_pattern = '**' + room_path + '/permissions'
+        def stale_permission(route):
+            if route.request.method == 'PUT':
+                conflicts.append(route.request.post_data_json)
+                route.fulfill(status=409, json={'detail': 'synthetic stale policy version'})
+            else:
+                route.continue_()
+        page.route(permission_pattern, stale_permission)
+        page.locator('[data-cr-form="permissions"] button[type="submit"]').click()
+        expect(page.locator('[data-cr-panel-error]')).to_contain_text('重新载入')
+        page.locator('[data-cr-form="permissions"] button[type="submit"]').click()
+        assert len(conflicts) == 1
+        page.unroute(permission_pattern, stale_permission)
+        page.locator('[data-cr-action="reload-permissions"]').click()
+        expect(page.locator('[data-cr-form="permissions"]')).to_be_visible()
+        # A late read after dismissal must not resurrect this page or another dialog.
+        pending = []
+        policy = stack.must(stack.client.get(room_path + '/permissions'))
+        page.route(permission_pattern, lambda route: pending.append(route))
+        page.locator('[data-cr-action="reload-permissions"]').click()
+        expect(page.locator('[data-cr-permissions-view]')).to_contain_text('正在读取')
+        page.locator('[data-cr-action="close"]').click()
+        assert len(pending) == 1
+        pending[0].fulfill(status=200, json=policy)
+        expect(page.locator('dialog.cr-panel')).not_to_be_visible()
+        assert channel_writes == []
+        assert errors == []
+    finally:
+        context.close()
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_permission_lifetime_renewal_and_custom_inheritance(
+    collaboration_stack, chat_browser_pool, engine
+):
+    """Expired retained projection is synthetic; policy writes use the real Hub."""
+    from datetime import datetime, timezone
+    import time
+
+    stack = collaboration_stack
+    context = chat_browser_pool(engine).new_context(
+        viewport={'width': 1280, 'height': 1000}, timezone_id='UTC')
+    page = context.new_page()
+    writes = []
+    try:
+        sign_in(page, stack)
+        create_room(page, '权限有效期')
+        room = next(item for item in stack.must(stack.client.get('/api/collaboration/rooms'))['items']
+                    if item['title'] == '权限有效期')
+        path = f'/api/collaboration/rooms/{room["id"]}/permissions'
+        deadline = (int(time.time()) // 60 + 120) * 60 + 0.375
+        projects = [{'project_id': item['id'], 'environment_id': 'production',
+                     'capabilities': ['read'], 'execution_targets': [],
+                     'lifetime': {'mode': 'timed', 'expires_at': deadline}}
+                    for item in stack.projects[:2]]
+        policy = stack.must(stack.client.put(path, json={
+            'expected_version': 0, 'scope': {'project_scopes': projects},
+            'channels': {'weixin': {'mode': 'follow_room'}, 'telegram': {'mode': 'follow_room'}},
+        }))
+        retained = deepcopy(policy)
+        deadline = next(rule for rule in policy['scope']['project_scopes'] if rule['project_id'] == stack.projects[1]['id'])['lifetime']['expires_at']
+        next(rule for rule in retained['scope']['project_scopes'] if rule['project_id'] == stack.projects[0]['id'])['lifetime']['expires_at'] = int(time.time()) - 60
+        def policy_projection(route):
+            if route.request.method == 'GET':
+                route.fulfill(status=200, json=deepcopy(retained))
+            else:
+                writes.append(route.request.post_data_json)
+                route.continue_()
+        pattern = '**' + path
+        page.route(pattern, policy_projection)
+        page.locator('.cr-room-actions [data-cr-action="permissions"]').click()
+        section = page.locator('[data-permission-section="room"]')
+        first = section.locator(f'[data-project-id="{stack.projects[0]["id"]}"]')
+        second = section.locator(f'[data-project-id="{stack.projects[1]["id"]}"]')
+        expect(first.locator('[data-permission-expired]')).to_be_visible()
+        expect(first.locator('[data-permission-lifetime-mode]')).to_have_value('timed')
+        second.locator('[data-permission-cap][value="write"]').check()
+        page.locator('[data-cr-form="permissions"] button[type="submit"]').click()
+        expect(page.locator('[data-cr-panel-error]')).to_contain_text('修改该行有效期')
+        assert writes == []
+        first.locator('[data-permission-lifetime-mode]').select_option('until_revoked')
+        expect(first.locator('[data-permission-expired]')).not_to_be_visible()
+        page.locator('[data-cr-form="permissions"] button[type="submit"]').click()
+        expect(page.locator('[data-cr-panel-error]')).to_contain_text('已保存')
+        assert len(writes) == 1
+        sent = {rule['project_id']: rule for rule in writes[0]['scope']['project_scopes']}
+        assert sent[stack.projects[0]['id']]['lifetime'] == {'mode': 'until_revoked', 'expires_at': None}
+        assert sent[stack.projects[1]['id']]['lifetime']['expires_at'] == deadline
+        # No destructive remove/save/re-add workaround was used for renewal.
+        assert len(sent) == 2
+        page.unroute(pattern, policy_projection)
+        def track_write(route):
+            if route.request.method == 'PUT':
+                writes.append(route.request.post_data_json)
+            route.continue_()
+        page.route(pattern, track_write)
+        page.locator('[data-permission-mode="weixin"]').select_option('custom')
+        custom = page.locator('[data-permission-section="weixin"]')
+        custom_second = custom.locator(f'[data-project-id="{stack.projects[1]["id"]}"]')
+        custom_second.locator('[data-permission-project]').check()
+        expect(custom_second.locator('[data-permission-lifetime-mode]')).to_have_value('timed')
+        page.locator('[data-cr-form="permissions"] button[type="submit"]').click()
+        expect(page.locator('[data-cr-panel-error]')).to_contain_text('已保存')
+        assert len(writes) == 2
+        assert writes[1]['channels']['weixin']['scope']['project_scopes'][0]['lifetime']['expires_at'] == deadline
+        # Intentional deadline editing replaces only the chosen row's timestamp.
+        renewal = int(time.time()) + 3600
+        first.locator('[data-permission-lifetime-mode]').select_option('timed')
+        first.locator('[data-permission-lifetime-until]').fill(
+            datetime.fromtimestamp(renewal, timezone.utc).strftime('%Y-%m-%dT%H:%M:%S'))
+        page.locator('[data-cr-form="permissions"] button[type="submit"]').click()
+        expect(page.locator('[data-cr-panel-error]')).to_contain_text('已保存')
+        assert len(writes) == 3
+        final_rules = {rule['project_id']: rule for rule in writes[2]['scope']['project_scopes']}
+        assert final_rules[stack.projects[0]['id']]['lifetime']['expires_at'] == renewal
+        assert final_rules[stack.projects[1]['id']]['lifetime']['expires_at'] == deadline
+    finally:
+        context.close()

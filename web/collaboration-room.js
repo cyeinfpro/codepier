@@ -211,7 +211,7 @@ window.CodePierCollaboration = (() => {
       confirm_owner: '完成连接',
       refresh_pairing: '刷新配对说明',
       cancel: '取消连接',
-      approve_tasks: '确认工作范围',
+      approve_tasks: '允许微信交办工作',
       revoke_tasks: '仅撤销工作许可',
       rebind: '更换连接',
     })[action] || '继续';
@@ -396,7 +396,7 @@ window.CodePierCollaboration = (() => {
     } else await store.select('');
     return `<section class="collaboration cr-shell" aria-label="协作中心">
       <aside class="cr-sidebar" aria-label="房间列表"><header class="cr-side-head"><div><h2>房间</h2><span class="cr-count" data-cr-room-count></span></div>${btn('create', icon('plus') + '<span>新建</span>', 'aria-label="新建房间"', 'cr-primary cr-new-room')}</header><label class="cr-search"><span class="sr-only">搜索房间</span><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg><input type="search" data-cr-room-filter placeholder="搜索房间或项目" autocomplete="off"></label><div class="cr-room-list" data-cr-rooms></div>${btn('more-rooms', '加载更多房间', 'data-cr-more-rooms hidden', 'cr-text-button cr-full')}<footer>${btn('archives', '显示已归档', 'aria-pressed="false"', 'cr-text-button')}</footer></aside>
-      <main class="cr-main"><header class="cr-topbar"><div class="cr-room-heading">${btn('rooms', icon('menu'), 'aria-label="显示房间列表" aria-expanded="false"', 'cr-icon cr-mobile')}<div class="cr-heading-text"><h1 tabindex="-1" data-cr-title></h1><div class="cr-heading-meta"><span class="cr-chip" data-cr-chip hidden></span><span class="cr-subtitle" data-cr-status></span></div></div></div><nav class="cr-room-actions" aria-label="房间管理">${btn('projects', icon('folder') + '<span data-cr-project-count>项目</span>')}${btn('members', '<span class="cr-avatars" data-cr-avatars></span><span>成员</span>')}${btn('weixin', '<span class="cr-channel-dot" data-cr-weixin-dot aria-hidden="true"></span>' + icon('message') + '<span data-cr-weixin-label>连接微信</span>')}${btn('settings', icon('settings'), 'aria-label="房间设置"', 'cr-icon')}</nav></header>
+      <main class="cr-main"><header class="cr-topbar"><div class="cr-room-heading">${btn('rooms', icon('menu'), 'aria-label="显示房间列表" aria-expanded="false"', 'cr-icon cr-mobile')}<div class="cr-heading-text"><h1 tabindex="-1" data-cr-title></h1><div class="cr-heading-meta"><span class="cr-chip" data-cr-chip hidden></span><span class="cr-subtitle" data-cr-status></span><span data-cr-project-count class="cr-muted" aria-label="房间项目数量">项目</span></div></div></div><nav class="cr-room-actions" aria-label="房间管理">${btn('permissions', icon('folder') + '<span>权限设置</span>')}${btn('members', '<span class="cr-avatars" data-cr-avatars></span><span>成员</span>')}${btn('weixin', '<span class="cr-channel-dot" data-cr-weixin-dot aria-hidden="true"></span>' + icon('message') + '<span data-cr-weixin-label>连接微信</span>')}${btn('settings', icon('settings'), 'aria-label="房间设置"', 'cr-icon')}</nav></header>
         <div class="cr-legacy-note" data-cr-legacy hidden><span class="cr-legacy-icon" aria-hidden="true">!</span><div><strong>原房间当前只读</strong><p data-cr-legacy-progress>历史和原工作已保留。处理完旧连接后，由你明确启用新房间界面。</p></div>${btn('migration', '查看迁移要求', 'data-cr-migration-open')}</div>
         <div class="cr-feedback" role="status" aria-live="polite" data-cr-feedback></div>
         <section class="cr-feed" aria-label="房间对话" tabindex="0"><div class="cr-load-older" data-cr-older hidden>${btn('older', '更早的消息')}</div><p class="cr-window-note" data-cr-message-window hidden></p><div data-cr-empty></div><div class="cr-messages" role="log" aria-live="polite" aria-relevant="additions text" data-cr-messages></div><div class="cr-history-end" data-cr-history-end hidden><p>当前历史窗口到此结束，后续消息尚未载入。</p>${btn('latest', '返回最新消息窗口')}</div><div class="cr-pending" data-cr-pending></div><div class="cr-work-list" data-cr-work></div></section>
@@ -976,7 +976,7 @@ window.CodePierCollaboration = (() => {
     for (const form of root.querySelectorAll('dialog [data-cr-form]')) {
       const kind = form.dataset.crForm;
       const business =
-        ['projects', 'member', 'member-scope', 'work-recovery'].includes(kind) ||
+        ['permissions', 'member', 'work-recovery'].includes(kind) ||
         (kind === 'weixin' && !safeChannelActions.has(form.dataset.channelAction));
       if (!business) continue;
       for (const control of form.querySelectorAll('input,select,textarea,button'))
@@ -1077,98 +1077,329 @@ window.CodePierCollaboration = (() => {
     }
     if (changed && checked) panelError('房间或迁移条件已变化，请重新核对并确认。');
   }
-  function projectOptions(selected = []) {
-    const ids = new Set(selected.map((p) => (typeof p === 'string' ? p : p.project_id)));
-    return S.projects.length
-      ? S.projects
-          .map(
-            (project) =>
-              `<label class="cr-choice"><input type="checkbox" name="project" value="${E(project.id)}" ${ids.has(project.id) ? 'checked' : ''}><span class="cr-choice-icon" aria-hidden="true">${icon('folder')}</span><span><strong>${E(project.alias || project.name || project.id)}</strong><small>项目允许：${project.mode === 'write' ? '可修改' : '只读'}${project.allow_tasks ? ' · 可执行' : ''}</small></span></label>`,
-          )
-          .join('')
-      : '<p class="cr-muted">暂无可关联项目，房间仍然可以创建和聊天。</p>';
-  }
   function createPanel() {
     openPanel(
       'create',
       '新建房间',
-      `<form data-cr-form="create">${field('房间名称', '<input name="title" required maxlength="120" placeholder="例如：产品工作室" autofocus>')}<fieldset><legend>项目 <span>可稍后添加</span></legend>${projectOptions(requestedProject ? [requestedProject] : [])}</fieldset><button class="cr-button cr-primary" type="submit">创建房间</button></form>`,
+      `<form data-cr-form="create">${field('房间名称', '<input name="title" required maxlength="120" placeholder="例如：产品工作室" autofocus>')}<p class="cr-muted">创建后在房间的权限设置中统一选择项目及读取、修改、执行权限。</p><button class="cr-button cr-primary" type="submit">创建房间</button></form>`,
     );
   }
-  function projectsPanel() {
+  const permissionCaps = ['read', 'write', 'execute'];
+  const permissionLabels = { read: '读取', write: '修改', execute: '执行' };
+  const permissionKey = (value) => value.project_id + ':' + (value.environment_id || 'production');
+  function permissionDateValue(timestamp) {
+    if (!Number.isFinite(Number(timestamp)) || timestamp == null) return '';
+    const value = new Date(Number(timestamp) * 1000);
+    return new Date(value.getTime() - value.getTimezoneOffset() * 60000).toISOString().slice(0, 19);
+  }
+  function permissionLifetimeControls(lifetime, inherit) {
+    const value = lifetime || { mode: 'until_revoked', expires_at: null };
+    return `<div data-permission-lifetime data-original-lifetime="${E(JSON.stringify(value))}" data-inherit-lifetime="${inherit}">${field('有效期', `<select data-permission-lifetime-mode><option value="until_revoked" ${value.mode === 'until_revoked' ? 'selected' : ''}>直到我撤销</option><option value="timed" ${value.mode === 'timed' ? 'selected' : ''}>指定截止时间</option></select>`)}${field('截止时间（本地时间）', `<input type="datetime-local" step="1" data-permission-lifetime-until value="${E(permissionDateValue(value.expires_at))}">`)}<small class="cr-warning" data-permission-expired hidden>已过期：请在这里选择新的截止时间或改为直到我撤销，再保存续期。</small>${inherit ? '<small class="cr-muted">新自定义范围默认继承当前房间项目有效期；不能晚于房间截止时间。</small>' : ''}</div>`;
+  }
+  function permissionLifetimeValue(group) {
+    const controls = group.querySelector('[data-permission-lifetime]');
+    const original = JSON.parse(controls.dataset.originalLifetime);
+    const displayed = controls.querySelector('[data-permission-lifetime-until]').value;
+    const normalized = displayed.length === 16 ? displayed + ':00' : displayed;
+    if (
+      !controls.dataset.lifetimeEdited &&
+      controls.querySelector('[data-permission-lifetime-mode]').value === original.mode &&
+      normalized === permissionDateValue(original.expires_at)
+    )
+      return original;
+    const mode = controls.querySelector('[data-permission-lifetime-mode]').value;
+    const value = controls.querySelector('[data-permission-lifetime-until]').value;
+    return {
+      mode,
+      expires_at: mode === 'timed' && value ? new Date(value).getTime() / 1000 : null,
+    };
+  }
+  function permissionRows(policy, scope, section) {
+    const prior = scope?.project_scopes || [];
+    return (
+      (policy.available_projects || [])
+        .map((project) => {
+          const rule = prior.find((item) => permissionKey(item) === permissionKey(project));
+          const parent = (policy.scope?.project_scopes || []).find(
+            (item) => permissionKey(item) === permissionKey(project),
+          );
+          const lifetime = rule?.lifetime || (section !== 'room' ? parent?.lifetime : null);
+          const selected = rule?.capabilities || [];
+          const available = project.capabilities || [];
+          const targets =
+            project.execution_targets || (available.includes('execute') ? ['project_agent'] : []);
+          const selectedTargets = rule?.capabilities?.includes('execute')
+            ? rule.execution_targets || []
+            : ['project_agent'];
+          return `<fieldset class="cr-scope" data-permission-row data-project-id="${E(project.project_id)}" data-environment-id="${E(project.environment_id || 'production')}"><legend><label><input type="checkbox" data-permission-project ${available.length ? '' : 'disabled'} ${selected.length ? 'checked' : ''}>${E(project.name || project.project_label || project.project_id)} · ${E(project.environment_id || 'production')}</label></legend><div>${permissionCaps.map((cap) => `<label><input type="checkbox" data-permission-cap value="${cap}" data-available="${available.includes(cap)}" ${selected.includes(cap) ? 'checked' : ''} ${available.includes(cap) && selected.length ? '' : 'disabled'}>${permissionLabels[cap]}</label>`).join('')}</div>${targets.length ? `<div><span>执行位置：</span>${targets.map((target) => `<label><input type="checkbox" data-permission-target-option value="${E(target)}" ${selectedTargets.includes(target) ? 'checked' : ''}>${E(target === 'project_agent' ? '项目 Agent' : target)}</label>`).join('')}</div>` : ''}<small class="cr-muted">项目 / 宿主可授予上限：${E(available.map((cap) => permissionLabels[cap] || cap).join('、') || '无')}。这不是当前已授予权限。</small>${permissionLifetimeControls(lifetime, section !== 'room' && !rule)}</fieldset>`;
+        })
+        .join('') || '<p class="cr-muted">没有可授权项目。</p>'
+    );
+  }
+  function permissionSection(policy, scope, section) {
+    return `<section data-permission-section="${section}"><div class="cr-setting-actions">${btn('permission-bulk', '全选项目', `data-permission-target="${section}" data-permission-bulk="projects"`)}${btn('permission-bulk', '全选权限', `data-permission-target="${section}" data-permission-bulk="all"`)}${permissionCaps.map((cap) => btn('permission-bulk', '全选' + permissionLabels[cap], `data-permission-target="${section}" data-permission-bulk="${cap}"`)).join('')}${btn('permission-bulk', '清空选择', `data-permission-target="${section}" data-permission-bulk="none"`)}</div>${permissionRows(policy, scope, section)}</section>`;
+  }
+  function renderPermissions(policy) {
+    if (panel?.name !== 'permissions') return;
+    panel.permissions = policy;
+    panel.version = policy.version;
+    panel.stale = false;
+    const channels = ['weixin', 'telegram'];
+    root.querySelector('[data-cr-permissions-view]').innerHTML =
+      `${panel.returnChannel ? btn('channel-scope-back', '返回微信', '', 'cr-text-button') : ''}<p class="cr-info">这是本房间唯一的项目权限设置。房间成员统一使用下方范围；微信、Telegram 可跟随房间或使用自定义范围。更改仅在保存后生效。</p>${policy.configured ? '' : '<p class="cr-info">以下是原有实际授权的保守预览，不会自动扩权。首次保存后统一使用此处设置。</p>'}${activeRoom() ? '' : `<p class="cr-info">${E(readOnlyReason())}</p>`}<form data-cr-form="permissions"><h3>房间项目权限</h3><p class="cr-muted">选择项目默认勾选读取；修改、执行可逐项勾选，也可使用全选权限。未选择的项目不授予权限。项目 / 宿主的安全上限不能在这里突破。</p>${permissionSection(policy, policy.scope, 'room')}${channels
+        .map((channel) => {
+          const entry = policy.channels?.[channel] || { mode: 'follow_room', scope: {} };
+          const name = channel === 'weixin' ? '微信' : 'Telegram';
+          return `<section class="cr-inspection-section"><h3>${name}权限</h3>${entry.transport_supported === false ? '<p class="cr-info">此房间尚不支持该渠道传输；此处仅保存权限策略，不代表已连接或可执行。</p>' : ''}${field(name + '权限模式', `<select data-permission-mode="${channel}"><option value="follow_room" ${entry.mode === 'follow_room' ? 'selected' : ''}>跟随房间权限</option><option value="custom" ${entry.mode === 'custom' ? 'selected' : ''}>单独设置权限</option></select>`)}<div data-permission-custom="${channel}" ${entry.mode === 'custom' ? '' : 'hidden'}>${permissionSection(policy, entry.scope, channel)}</div><p class="cr-muted">跟随模式随房间设置同步变化；自定义范围不能超过房间及项目 / 宿主允许的范围。渠道连接、本人确认和消息投递许可仍需完成，但不另设项目权限。</p></section>`;
+        })
+        .join(
+          '',
+        )}<p class="cr-muted">收窄权限后，新的任务和后续步骤按新范围核验；已启动操作的结果仍需核对原回执。</p><button class="cr-button cr-primary" type="submit">保存权限设置</button></form>${btn('reload-permissions', '重新载入（放弃未保存选择）', '', 'cr-text-button')}`;
+    updatePermissionControls();
+    patchRoomPermissions();
+  }
+  async function permissionsPanel(returnChannel = null) {
     if (!state.room) return;
     openPanel(
-      'projects',
-      '房间项目',
-      `${activeRoom() ? '' : `<p class="cr-info">${E(readOnlyReason())} 当前项目仅供查看。</p>`}<form data-cr-form="projects"><p class="cr-muted">下方是项目允许的操作。关联项目不会自动扩大 dot 的权限，成员实际权限以单独授权的参与范围为准。</p><fieldset><legend class="sr-only">关联项目</legend>${projectOptions(state.room.projects || [])}</fieldset><div class="cr-impact" data-cr-project-impact hidden></div><button class="cr-button cr-primary" type="submit">保存项目</button></form>`,
-      { version: state.room.version },
+      'permissions',
+      '权限设置',
+      `<div data-cr-permissions-view>${returnChannel ? btn('channel-scope-back', '返回微信', '', 'cr-text-button') : ''}<p class="cr-muted">正在读取房间权限…</p>${btn('reload-permissions', '重新读取', '', 'cr-text-button')}</div>`,
+      { returnChannel },
     );
+    const current = panel;
+    const policy = await api(store.path(current.roomId) + '/permissions');
+    if (panel === current && current.roomId === state.roomId) renderPermissions(policy);
+    return current;
   }
-  function projectImpactSelection(form) {
-    const chosen = new Set(
-      [...form.querySelectorAll('[name="project"]:checked')].map((item) => item.value),
+  function updatePermissionControls() {
+    const form = root?.querySelector('[data-cr-form="permissions"]');
+    if (!form) return;
+    for (const select of form.querySelectorAll('[data-permission-mode]')) {
+      const box = form.querySelector(
+        '[data-permission-custom="' + select.dataset.permissionMode + '"]',
+      );
+      box.hidden = select.value !== 'custom';
+    }
+    const roomRows = [
+      ...form.querySelectorAll('[data-permission-section="room"] [data-permission-row]'),
+    ];
+    for (const controls of form.querySelectorAll('[data-inherit-lifetime="true"]')) {
+      if (controls.dataset.lifetimeEdited) continue;
+      const row = controls.closest('[data-permission-row]');
+      const parent = roomRows.find(
+        (item) =>
+          item.dataset.projectId === row.dataset.projectId &&
+          item.dataset.environmentId === row.dataset.environmentId,
+      );
+      if (!parent) continue;
+      const lifetime = permissionLifetimeValue(parent);
+      controls.dataset.originalLifetime = JSON.stringify(lifetime);
+      controls.querySelector('[data-permission-lifetime-mode]').value = lifetime.mode;
+      controls.querySelector('[data-permission-lifetime-until]').value = permissionDateValue(
+        lifetime.expires_at,
+      );
+    }
+    for (const group of form.querySelectorAll('[data-permission-row]')) {
+      const enabled = group.querySelector('[data-permission-project]').checked;
+      const lifetimeMode = group.querySelector('[data-permission-lifetime-mode]');
+      const lifetimeUntil = group.querySelector('[data-permission-lifetime-until]');
+      lifetimeMode.disabled = !enabled;
+      lifetimeUntil.disabled = !enabled || lifetimeMode.value !== 'timed';
+      lifetimeUntil.closest('label').hidden = lifetimeMode.value !== 'timed';
+      const lifetime = permissionLifetimeValue(group);
+      group.querySelector('[data-permission-expired]').hidden =
+        lifetime.mode !== 'timed' || !(Number(lifetime.expires_at) <= Date.now() / 1000);
+      for (const input of group.querySelectorAll('[data-permission-cap]'))
+        input.disabled = !enabled || input.dataset.available !== 'true';
+      const execution = group.querySelector('[data-permission-cap][value="execute"]');
+      for (const input of group.querySelectorAll('[data-permission-target-option]'))
+        input.disabled = !enabled || !execution?.checked || execution.disabled;
+    }
+    patchRoomPermissions();
+  }
+  function permissionBulk(button) {
+    if (panel?.name !== 'permissions' || !activeRoom() || panel.busy) return;
+    const section = root.querySelector(
+      '[data-permission-section="' + button.dataset.permissionTarget + '"]',
     );
-    const removed = (state.room?.projects || []).filter((item) => !chosen.has(item.project_id));
-    return { removed, key: JSON.stringify([panel?.version, [...chosen].sort()]) };
+    const selection = button.dataset.permissionBulk;
+    for (const group of section.querySelectorAll('[data-permission-row]')) {
+      const project = group.querySelector('[data-permission-project]');
+      project.checked = selection !== 'none' && !project.disabled;
+      for (const input of group.querySelectorAll('[data-permission-cap]')) {
+        if (selection === 'none') input.checked = false;
+        else if (
+          input.dataset.available === 'true' &&
+          (selection === 'all' || input.value === selection || input.value === 'read')
+        )
+          input.checked = true;
+      }
+    }
+    updatePermissionControls();
   }
-  function projectImpactMarkup(value) {
-    const impact = value.impact || {};
-    const effectLabels = {
-      block_new_steps: '禁止新的步骤准入',
-      cancel_requested: '请求停止，等待原操作回执',
-      retain_receipt: '保留原回执',
-      revoke_scope: '撤销该项目范围',
+  function collectPermissionScope(section, original = {}, parentScope = null) {
+    const rules = [];
+    for (const group of section.querySelectorAll('[data-permission-row]')) {
+      if (!group.querySelector('[data-permission-project]').checked) continue;
+      const capabilities = [
+        ...group.querySelectorAll('[data-permission-cap]:checked:not(:disabled)'),
+      ].map((item) => item.value);
+      if (!capabilities.length) throw new Error('所选项目至少需要一项可授予权限。');
+      const project = {
+        project_id: group.dataset.projectId,
+        environment_id: group.dataset.environmentId,
+      };
+      const lifetime = permissionLifetimeValue(group);
+      if (
+        lifetime.mode === 'timed' &&
+        (!Number.isFinite(lifetime.expires_at) || lifetime.expires_at <= Date.now() / 1000)
+      )
+        throw new Error(
+          '项目 ' + project.project_id + ' 的有效期已过期或无效。请修改该行有效期后保存。',
+        );
+      const parent = parentScope?.project_scopes?.find(
+        (item) => permissionKey(item) === permissionKey(project),
+      );
+      if (
+        parent?.lifetime?.mode === 'timed' &&
+        (lifetime.mode !== 'timed' || lifetime.expires_at > parent.lifetime.expires_at)
+      )
+        throw new Error('渠道自定义有效期不能晚于对应房间项目的截止时间，请调整该行有效期。');
+      const executionTargets = capabilities.includes('execute')
+        ? [...group.querySelectorAll('[data-permission-target-option]:checked:not(:disabled)')].map(
+            (input) => input.value,
+          )
+        : [];
+      if (capabilities.includes('execute') && !executionTargets.length)
+        throw new Error('允许执行的项目需要选择至少一个执行位置。');
+      rules.push({
+        ...project,
+        capabilities,
+        execution_targets: executionTargets,
+        lifetime,
+      });
+    }
+    return {
+      project_ids: [...new Set(rules.map((item) => item.project_id))],
+      project_scopes: rules,
     };
-    return `<h3>移出后会发生什么</h3><p>房间、通用消息和项目文件保留；其他项目的工作范围保留。移出范围不再接受新步骤。</p>${value.note ? `<p>${E(value.note)}</p>` : ''}<p class="cr-muted">此预览没有执行撤销，也不表示运行中的原操作已经停止。</p>${Object.values(value.truncated || {}).some(Boolean) ? '<p class="cr-info">影响记录超过本次观察上限，以下列表不完整。</p>' : ''}
-      ${impact.members?.length ? `<details><summary>受影响的成员范围（${E(impact.members.length)} 条）</summary><ul>${impact.members.map((member) => `<li>${E(identifier(member.member_id))} · ${E(S.projects.find((item) => item.id === member.project_id)?.alias || member.project_id)} · ${E(member.environment_id)}${member.lifetime_mode === 'timed' ? ' · 原截止 ' + E(dateTime(member.expires_at)) : ''}</li>`).join('')}</ul></details>` : ''}
-      <details open><summary>原工作步骤（${E(impact.work_items?.length || 0)} 条）</summary>${impact.work_items?.length ? `<ul>${impact.work_items.map((item) => `<li data-impact-work="${E(item.id)}"><strong>${E(item.title || '原步骤')}</strong> · ${E(workLabels[item.state] || item.state)}<small>步骤 ${E(identifier(item.id))} · 工作 ${E(identifier(item.goal_id))}</small><p>${E(effectLabels[item.effect] || item.effect || '新步骤将按移出后的范围重新核验')}</p></li>`).join('')}</ul>` : '<p>当前窗口没有受影响的工作步骤。</p>'}</details>
-      <details open><summary>原操作（${E(impact.operations?.length || 0)} 条）</summary>${impact.operations?.length ? `<ul>${impact.operations.map((operation) => `<li data-impact-operation="${E(operation.id)}"><strong>${E(identifier(operation.id))}</strong> · ${E(workLabels[operation.state] || operation.state)}${operation.cancel_requested ? '<p>已请求停止，仍需核对原回执</p>' : ''}<p>${E(effectLabels[operation.effect] || operation.effect || '保留原操作状态和回执')}</p></li>`).join('')}</ul>` : '<p>当前窗口没有受影响的原操作。</p>'}</details>`;
   }
-  async function loadProjectImpact(form) {
-    const current = panel,
+  async function savePermissions(form, current) {
+    if (current.stale) throw new Error('权限已在其他位置更新，请重新载入后核对。');
+    updatePermissionControls();
+    const original = current.permissions,
       owner = state.owner;
-    if (current?.name !== 'projects') return;
-    const { removed, key } = projectImpactSelection(form);
-    current.impactController?.abort();
-    const controller = new AbortController();
-    current.impactController = controller;
-    current.impactReadyKey = '';
-    const node = root.querySelector('[data-cr-project-impact]');
-    const save = form.querySelector('[type="submit"]');
-    node.hidden = !removed.length;
-    if (!removed.length) {
-      node.replaceChildren();
-      save.disabled = false;
-      current.impactReadyKey = key;
+    let confirmed = false;
+    const scope = collectPermissionScope(
+      form.querySelector('[data-permission-section="room"]'),
+      original.scope,
+    );
+    const channels = {};
+    for (const channel of ['weixin', 'telegram']) {
+      const mode = form.querySelector('[data-permission-mode="' + channel + '"]').value;
+      channels[channel] = {
+        mode,
+        scope:
+          mode === 'custom'
+            ? collectPermissionScope(
+                form.querySelector('[data-permission-section="' + channel + '"]'),
+                original.channels?.[channel]?.scope,
+                scope,
+              )
+            : original.channels?.[channel]?.scope || { project_scopes: [] },
+      };
+    }
+    const controls = [...form.querySelectorAll('input,select,button')].map((control) => [
+      control,
+      control.disabled,
+    ]);
+    for (const [control] of controls) control.disabled = true;
+    let result;
+    try {
+      result = await mutation(
+        'PUT',
+        store.path(current.roomId) + '/permissions',
+        {
+          expected_version: original.version,
+          scope,
+          channels,
+        },
+        current,
+        {
+          onConfirmed: () => {
+            confirmed = true;
+          },
+        },
+      );
+    } finally {
+      for (const [control, disabled] of controls)
+        if (control.isConnected) control.disabled = disabled;
+      patchRoomPermissions();
+    }
+    const invalidation = current.accessInvalidation;
+    const receiptOnly =
+      confirmed &&
+      !result &&
+      !panel &&
+      owner === state.owner &&
+      current.roomId === state.roomId &&
+      invalidation?.owner === owner &&
+      invalidation.roomId === state.roomId &&
+      invalidation.epoch === state.epoch &&
+      invalidation.openingEpoch === root?.querySelector('dialog')?._crOpeningEpoch;
+    if (receiptOnly) {
+      const feedback = {
+        owner,
+        roomId: current.roomId,
+        epoch: state.epoch,
+        openingEpoch: current.epoch,
+        message: '权限设置已保存。',
+      };
+      root._crProjectSaveFeedback = feedback;
+      announce(feedback.message);
+      try {
+        await store.refresh();
+        if (root?._crProjectSaveFeedback === feedback) delete root._crProjectSaveFeedback;
+      } catch (error) {
+        if (
+          owner === state.owner &&
+          current.roomId === state.roomId &&
+          feedback.epoch === state.epoch &&
+          !panel &&
+          feedback.openingEpoch === root?.querySelector('dialog')?._crOpeningEpoch
+        )
+          announce(feedback.message + ' 房间视图刷新失败：' + error.message, true);
+      }
       return;
     }
-    save.disabled = true;
-    node.textContent = '正在核对受影响的原步骤与原操作…';
+    if (!result || panel !== current) return;
+    renderPermissions(result);
+    panelError('权限设置已保存。');
+    const feedback = {
+      owner,
+      roomId: current.roomId,
+      epoch: state.epoch,
+      openingEpoch: current.epoch,
+      message: '权限设置已保存。',
+    };
+    current.savedPermissionFeedback = feedback;
+    root._crProjectSaveFeedback = feedback;
+    announce(feedback.message);
+    const savedPanel = current.returnChannel ? await returnToChannel(current) : current;
     try {
-      const query = new URLSearchParams({ expected_version: String(current.version) });
-      for (const project of removed) query.append('removed_partition_ids', project.room_id);
-      const value = await api(store.path(current.roomId) + '/projects/impact?' + query, {
-        signal: controller.signal,
-      });
-      if (
-        panel !== current ||
-        state.owner !== owner ||
-        controller.signal.aborted ||
-        projectImpactSelection(form).key !== key
-      )
-        return;
-      node.innerHTML = projectImpactMarkup(value);
-      current.impactReadyKey = key;
-      save.disabled = false;
-      panelError('');
+      await store.refresh();
+      if (root?._crProjectSaveFeedback === feedback) delete root._crProjectSaveFeedback;
     } catch (error) {
-      if (panel !== current || controller.signal.aborted) return;
-      node.innerHTML =
-        '<p>影响预览尚未完成，请重新核对后保存。</p>' +
-        btn('refresh-project-impact', '重新核对影响');
-      panelError(error.message);
-    } finally {
-      patchRoomPermissions();
+      if (panel === savedPanel) panelError('权限设置已保存，但房间视图刷新失败：' + error.message);
+      else if (
+        feedback.accessInvalidated &&
+        !panel &&
+        owner === state.owner &&
+        current.roomId === state.roomId &&
+        feedback.epoch === state.epoch &&
+        feedback.openingEpoch === root?.querySelector('dialog')?._crOpeningEpoch
+      )
+        announce('权限设置已保存，但房间视图刷新失败：' + error.message, true);
     }
   }
   function membersPanel() {
@@ -1188,51 +1419,25 @@ window.CodePierCollaboration = (() => {
       }</div>${btn('add-member', '添加 dot', '', 'cr-primary cr-full')}`,
     );
   }
-  function scopeOptions(existing) {
-    return (
-      (state.room?.projects || [])
-        .filter((p) => p.state !== 'removed')
-        .map((project) => {
-          const candidate = S.projects.find((p) => p.id === project.project_id);
-          const capabilities = project.capabilities?.length
-            ? project.capabilities
-            : [
-                'read',
-                ...(candidate?.mode === 'write' ? ['write'] : []),
-                ...(candidate?.allow_tasks ? ['execute'] : []),
-              ];
-          const prior = existing?.find(
-            (item) =>
-              item.project_id === project.project_id &&
-              (item.environment_id || 'production') === (project.environment_id || 'production'),
-          );
-          const selected = existing ? prior?.capabilities || [] : ['read'];
-          const targets = prior?.execution_targets?.length
-            ? prior.execution_targets
-            : ['project_agent'];
-          const lifetime = !prior
-            ? '新项目：直到我撤销'
-            : prior.lifetime?.mode === 'until_revoked'
-              ? '原有效期：直到我撤销'
-              : prior.lifetime?.mode === 'timed' && prior.lifetime.expires_at
-                ? '原有效期：' +
-                  new Date(prior.lifetime.expires_at * 1000).toLocaleString('zh-CN') +
-                  ' 截止'
-                : '原有效期：需要核对';
-          return `<fieldset class="cr-scope" data-project-id="${E(project.project_id)}" data-environment-id="${E(project.environment_id || 'production')}" data-execution-targets="${E(JSON.stringify(targets))}"><legend>${E(project.project_label || candidate?.alias || project.project_id)}${project.environment_id && project.environment_id !== 'production' ? ' · ' + E(project.environment_id) : ''}</legend><div>${['read', 'write', 'execute'].map((cap) => `<label><input type="checkbox" name="capability" value="${cap}" ${selected.includes(cap) ? 'checked' : ''} ${capabilities.includes(cap) ? '' : 'disabled'}>${{ read: '读取', write: '修改', execute: '执行' }[cap]}</label>`).join('')}</div><small class="cr-muted">执行位置：${E(targets.map((target) => (target === 'project_agent' ? '项目 Agent' : target)).join('、'))}</small>${existing ? `<small class="cr-muted" data-cr-scope-lifetime>${E(lifetime)}</small>` : ''}</fieldset>`;
-        })
-        .join('') || '<div class="cr-info">当前没有项目。dot 接入后可在房间聊天。</div>'
-    );
-  }
-  function addMemberPanel() {
+  async function addMemberPanel() {
     if (!activeRoom()) {
       announce(readOnlyReason(), true);
+      return;
+    }
+    const roomId = state.roomId,
+      epoch = state.epoch,
+      opening = panelEpoch;
+    const policy = await api(store.path(roomId) + '/permissions');
+    if (roomId !== state.roomId || epoch !== state.epoch || opening !== panelEpoch) return;
+    if (!policy.configured) {
+      await permissionsPanel();
+      panelError('请先在此保存房间权限，再添加继承该权限的成员。');
       return;
     }
     openPanel(
       'add-member',
       '添加 dot',
-      `<form data-cr-form="member"><fieldset class="cr-connection-mode"><legend class="sr-only">选择连接方式</legend><label><input type="radio" name="connection_mode" value="new" checked><span>新 dot</span></label><label><input type="radio" name="connection_mode" value="existing"><span>已有 dot</span></label></fieldset><section data-cr-connections hidden>${field('已验证的连接', '<select name="reuse_member_id" disabled><option value="">选择已验证的 dot</option></select>')}<p class="cr-muted" data-cr-connection-status></p>${btn('more-connections', '读取已有连接', 'data-cr-more-connections', 'cr-text-button')}<p class="cr-info">此房间会获得独立的成员身份与下方授权。创建后，需在所选的原 dot 中确认并验证连接。</p></section>${field('成员名称', '<input name="name" required maxlength="80" placeholder="给这个 dot 起个名字" autofocus>')}<section class="cr-scopes"><h3>参与范围</h3>${scopeOptions()}</section>${field('有效期', '<select name="lifetime"><option value="until_revoked">直到我撤销</option><option value="timed">7 天</option></select>')}<p class="cr-muted">创建后，把加入说明发给目标 dot；连接进度会自动更新。</p><button class="cr-button cr-primary" type="submit">添加并连接</button></form>`,
+      `<form data-cr-form="member"><fieldset class="cr-connection-mode"><legend class="sr-only">选择连接方式</legend><label><input type="radio" name="connection_mode" value="new" checked><span>新 dot</span></label><label><input type="radio" name="connection_mode" value="existing"><span>已有 dot</span></label></fieldset><section data-cr-connections hidden>${field('已验证的连接', '<select name="reuse_member_id" disabled><option value="">选择已验证的 dot</option></select>')}<p class="cr-muted" data-cr-connection-status></p>${btn('more-connections', '读取已有连接', 'data-cr-more-connections', 'cr-text-button')}<p class="cr-info">此房间会获得独立的成员身份，并继承房间的统一权限。创建后，需在所选的原 dot 中确认并验证连接。</p></section>${field('成员名称', '<input name="name" required maxlength="80" placeholder="给这个 dot 起个名字" autofocus>')}<p class="cr-info">新成员统一继承此房间的权限设置，不再单独授权项目。</p><p class="cr-muted">创建后，把加入说明发给目标 dot；连接进度会自动更新。</p><button class="cr-button cr-primary" type="submit">添加并连接</button></form>`,
       {
         version: state.room.version,
         connections: [],
@@ -1296,38 +1501,17 @@ window.CodePierCollaboration = (() => {
       if (current === panel) moreButton.disabled = false;
     }
   }
-  function memberScopePanel(member) {
-    openPanel(
-      'member-scope',
-      '参与范围 · ' + (member.name || member.label),
-      `${activeRoom() ? '' : `<p class="cr-info">${E(readOnlyReason())} 当前参与范围仅供查看。</p>`}<form data-cr-form="member-scope"><section class="cr-scopes">${scopeOptions(member.project_scopes || [])}</section>${field('有效期调整', '<select name="lifetime"><option value="preserve">保持原有效期（新项目直到我撤销）</option><option value="until_revoked">所有所选项目重新设为：直到我撤销</option><option value="timed">所有所选项目重新设为：从现在起 7 天</option></select>')}<p class="cr-muted">默认保留各项目原期限。保存只调整此成员的房间范围；已移出项目的历史仍按当前权限查看。</p><button class="cr-button cr-primary" type="submit">保存参与范围</button></form>`,
-      { member, version: state.room.version },
-    );
-  }
-  function formScopes(form) {
-    return [...form.querySelectorAll('[data-project-id]')]
-      .map((group) => {
-        const capabilities = [...group.querySelectorAll('input:checked:not(:disabled)')].map(
-          (input) => input.value,
-        );
-        return {
-          project_id: group.dataset.projectId,
-          environment_id: group.dataset.environmentId || 'production',
-          capabilities,
-          execution_targets: capabilities.includes('execute')
-            ? JSON.parse(group.dataset.executionTargets)
-            : [],
-        };
-      })
-      .filter((item) => item.capabilities.length);
-  }
-  function selectedProjects(ids) {
-    return ids.flatMap((project) => {
-      const existing = (state.room?.projects || []).filter((item) => item.project_id === project);
-      return existing.length
-        ? existing.map((item) => ({ project, environment_id: item.environment_id }))
-        : [{ project, environment_id: 'production' }];
-    });
+  async function returnToChannel(current) {
+    if (panel !== current || current.roomId !== state.roomId || !current.returnChannel) return;
+    openPanel('weixin', '连接微信', '<div data-cr-channel-view></div>');
+    const destination = panel;
+    renderChannel(current.returnChannel);
+    try {
+      await refreshChannel();
+    } catch (error) {
+      if (panel === destination) panelError('微信状态刷新失败：' + error.message);
+    }
+    return destination;
   }
   async function memberPanel(id) {
     const member = members().find((m) => memberId(m) === id);
@@ -1367,7 +1551,7 @@ window.CodePierCollaboration = (() => {
     const stage = flow.stage || flow.state || member?.state;
     const ready = ['ready_chat', 'ready_work'].includes(stage);
     if (ready) panel.joinInstructions = '';
-    const markup = `<div class="cr-flow-state" data-stage="${E(stage)}"><span class="cr-flow-symbol ${ready ? 'is-ready' : ''}" aria-hidden="true">${ready ? '✓' : icon('network')}</span><h3>${E(flow.display?.title || title(flow))}</h3>${flow.display?.reason ? `<p>${E(flow.display.reason)}</p>` : ''}</div>${flow.pending_binding ? '<p class="cr-info">新连接验证通过后才会替换当前连接。原成员和工作保持原来的身份。</p>' : member?.connection_source || member?.connection_source_member_id ? '<p class="cr-info">请在已选择的原 dot 中完成本房间的独立接入与验证。此房间的参与范围单独生效。</p>' : ''}${panel.joinInstructions ? `<label class="cr-field"><span>加入说明</span><textarea class="cr-instructions" readonly rows="7" aria-label="dot 加入说明"></textarea></label>${btn('copy-instructions', '复制加入说明', '', 'cr-primary cr-full')}` : ''}${primary && !['copy_instructions', 'copy_join_instructions', 'send_message', 'start_work', 'none'].includes(primary) ? btn('flow-action', actionLabel(primary), `data-flow-action="${E(primary)}"`, 'cr-primary cr-full') : ''}${member ? `<section class="cr-member-controls">${btn('member-scope', '参与范围')}${member.legacy ? btn('flow-action', '迁移此连接', 'data-flow-action="migrate"') : member.state !== 'removed' ? btn('rebind-member', flow.pending_binding ? '查看更换说明' : '更换连接') : ''}${state.room?.lead_member_id !== memberId(member) && member.state !== 'removed' ? btn('lead', '设为主责', `data-id="${E(memberId(member))}"`) : ''}${member.state !== 'removed' && member.state !== 'paused' ? btn('flow-action', '暂停', 'data-flow-action="pause"') : ''}${member.state !== 'removed' ? btn('remove-member', '移除成员', '', 'cr-danger') : ''}</section>` : ''}<details class="cr-diagnostics"><summary>连接详情</summary><dl>${Object.entries(
+    const markup = `<div class="cr-flow-state" data-stage="${E(stage)}"><span class="cr-flow-symbol ${ready ? 'is-ready' : ''}" aria-hidden="true">${ready ? '✓' : icon('network')}</span><h3>${E(flow.display?.title || title(flow))}</h3>${flow.display?.reason ? `<p>${E(flow.display.reason)}</p>` : ''}</div>${flow.pending_binding ? '<p class="cr-info">新连接验证通过后才会替换当前连接。原成员和工作保持原来的身份。</p>' : member?.connection_source || member?.connection_source_member_id ? '<p class="cr-info">请在已选择的原 dot 中完成本房间的独立接入与验证。此房间的参与范围单独生效。</p>' : ''}${panel.joinInstructions ? `<label class="cr-field"><span>加入说明</span><textarea class="cr-instructions" readonly rows="7" aria-label="dot 加入说明"></textarea></label>${btn('copy-instructions', '复制加入说明', '', 'cr-primary cr-full')}` : ''}${primary && !['copy_instructions', 'copy_join_instructions', 'send_message', 'start_work', 'none'].includes(primary) ? btn('flow-action', actionLabel(primary), `data-flow-action="${E(primary)}"`, 'cr-primary cr-full') : ''}${member ? `<section class="cr-member-controls">${btn('permissions', '权限设置')}${member.legacy ? btn('flow-action', '迁移此连接', 'data-flow-action="migrate"') : member.state !== 'removed' ? btn('rebind-member', flow.pending_binding ? '查看更换说明' : '更换连接') : ''}${state.room?.lead_member_id !== memberId(member) && member.state !== 'removed' ? btn('lead', '设为主责', `data-id="${E(memberId(member))}"`) : ''}${member.state !== 'removed' && member.state !== 'paused' ? btn('flow-action', '暂停', 'data-flow-action="pause"') : ''}${member.state !== 'removed' ? btn('remove-member', '移除成员', '', 'cr-danger') : ''}</section>` : ''}<details class="cr-diagnostics"><summary>连接详情</summary><dl>${Object.entries(
       flow.evidence || {},
     )
       .map(
@@ -1491,6 +1675,11 @@ window.CodePierCollaboration = (() => {
       if (current === panel) {
         panelError(error.message);
         if (error.status === 409) {
+          if (current?.name === 'permissions') {
+            current.stale = true;
+            panelError('权限已在其他位置更新。你的选择尚未保存，请重新载入后核对。');
+            throw error;
+          }
           await store.refresh().catch(() => {});
           if (current !== panel || owner !== state.owner || epoch !== state.epoch) throw error;
           panelError('房间刚有更新。你的选择已保留，请核对后再次保存。');
@@ -1664,113 +1853,12 @@ window.CodePierCollaboration = (() => {
         await store.refresh();
         announce('新房间界面已启用。历史、草稿和原工作已保留。');
       }
-    } else if (type === 'projects') {
-      const impact = projectImpactSelection(form);
-      if (
-        impact.removed.length &&
-        (current.impactReadyKey !== impact.key || current.version !== state.room.version)
-      ) {
-        current.version = state.room.version;
-        await loadProjectImpact(form);
-        panelError('请核对当前的原步骤和原操作影响后，再次保存。');
-        return;
-      }
-      const save = form.querySelector('[type="submit"]'),
-        label = save.textContent,
-        owner = state.owner;
-      let result,
-        confirmed = false;
-      save.textContent = '正在保存项目…';
-      try {
-        result = await mutation(
-          'PUT',
-          store.path() + '/projects',
-          { expected_version: current.version, projects: selectedProjects(data.getAll('project')) },
-          current,
-          {
-            onConfirmed: () => {
-              confirmed = true;
-            },
-          },
-        );
-      } finally {
-        if (save.isConnected) save.textContent = label;
-      }
-      if (owner !== state.owner || current.roomId !== state.roomId) return;
-      const invalidation = current.accessInvalidation;
-      const receiptOnly =
-        confirmed &&
-        !result &&
-        !panel &&
-        invalidation?.owner === owner &&
-        invalidation.roomId === state.roomId &&
-        invalidation.epoch === state.epoch &&
-        invalidation.openingEpoch === root?.querySelector('dialog')?._crOpeningEpoch;
-      if (!result && !receiptOnly) return;
-      if (result) closePanel();
-      const completionEpoch = state.epoch,
-        completionOpeningEpoch = current.epoch;
-      const saved = impact.removed.length
-        ? '房间项目已保存，移出范围的新步骤已停止准入。运行中原操作的停止请继续核对各自回执。'
-        : '房间项目已保存。dot 的参与范围仍需在成员设置中单独授权。';
-      const savedFeedback = {
-        owner,
-        roomId: current.roomId,
-        epoch: completionEpoch,
-        openingEpoch: completionOpeningEpoch,
-        message: saved,
-      };
-      root._crProjectSaveFeedback = savedFeedback;
-      announce(saved);
-      try {
-        await store.refresh();
-        if (root?._crProjectSaveFeedback === savedFeedback) delete root._crProjectSaveFeedback;
-      } catch (error) {
-        // The PUT receipt already confirmed the save. A failed follow-up read
-        // must not look like an unsaved request or encourage another write.
-        if (
-          owner === state.owner &&
-          current.roomId === state.roomId &&
-          completionEpoch === state.epoch &&
-          completionOpeningEpoch === root?.querySelector('dialog')?._crOpeningEpoch &&
-          !panel
-        )
-          announce(saved + ' 视图刷新失败：' + error.message, true);
-      }
-    } else if (type === 'member' || type === 'member-scope') {
-      const project_scopes = formScopes(form);
-      const lifetime =
-        type === 'member-scope' && data.get('lifetime') === 'preserve'
-          ? null
-          : data.get('lifetime') === 'timed'
-            ? { mode: 'timed', expires_at: Math.floor(Date.now() / 1000) + 7 * 86400 }
-            : { mode: 'until_revoked' };
-      if (type === 'member-scope') {
-        const result = await mutation('PUT', store.path() + '/projects', {
-          expected_version: current.version,
-          projects: (state.room.projects || []).map((project) => ({
-            project: project.project_id,
-            environment_id: project.environment_id,
-          })),
-          member_approvals: [
-            {
-              member_id: memberId(current.member),
-              project_scopes,
-              ...(lifetime ? { lifetime } : {}),
-            },
-          ],
-        });
-        if (result) {
-          await store.refresh();
-          await memberPanel(memberId(current.member));
-        }
-        return;
-      }
+    } else if (type === 'permissions') {
+      await savePermissions(form, current);
+    } else if (type === 'member') {
       const result = await mutation('POST', store.path() + '/members', {
         name: data.get('name').trim(),
         expected_version: current.version,
-        project_scopes,
-        lifetime,
         ...(data.get('connection_mode') === 'existing'
           ? {
               reuse_member_id: data.get('reuse_member_id'),
@@ -1782,6 +1870,7 @@ window.CodePierCollaboration = (() => {
       });
       if (!result) return;
       await store.refresh();
+      if (panel !== current) return;
       openPanel(
         'member',
         result.member?.name || data.get('name'),
@@ -2539,6 +2628,10 @@ window.CodePierCollaboration = (() => {
           ['范围', flow.work_authorized ? '已允许本人交办工作' : '已连接房间聊天'],
         ]),
       );
+    if (stage === 'ready')
+      parts.push(
+        `<section class="cr-wx-option"><h4>项目权限</h4><p class="cr-muted">房间与渠道的项目权限统一在权限设置中管理，可选择跟随房间或单独设置。</p>${btn('channel-project-permissions', '修改项目权限', '', 'cr-full')}</section>`,
+      );
     if (flow.account_connected && stage === 'ready')
       parts.push(uploadEstimateMarkup(flow.upload_estimate));
     if (flow.task_scope) {
@@ -2546,7 +2639,7 @@ window.CodePierCollaboration = (() => {
       const projects =
         preview.projects || preview.project_scopes || (preview.project_id ? [preview] : []);
       parts.push(
-        `<details class="cr-diagnostics" ${stage === 'ready' ? '' : 'open'}><summary>允许工作的范围</summary><p>${E(preview.summary || preview.intent || '按以下已批准项目参与协作')}</p><ul>${projects.map((project) => `<li>${E(project.project_label || project.alias || S.projects.find((item) => item.id === project.project_id)?.alias || project.project_id || project)}${project.capabilities ? ' · ' + E(project.capabilities.map((cap) => ({ read: '读取', write: '修改', execute: '执行' })[cap] || cap).join('、')) : ''}${project.execution_targets?.length ? '<br>执行位置：' + E(project.execution_targets.map((target) => (target === 'project_agent' ? '项目 Agent' : target)).join('、')) : ''}</li>`).join('')}</ul>${preview.max_delegations !== undefined ? `<p>累计工作额度：${E(preview.max_delegations)}</p>` : ''}<p>${E(preview.result_destination || '结果回复到原私聊及当前房间')}</p></details>`,
+        `<details class="cr-diagnostics" ${stage === 'ready' ? '' : 'open'}><summary>当前项目权限（只读）</summary><p>${E(preview.summary || preview.intent || '按以下已批准项目参与协作')}</p><ul>${projects.map((project) => `<li>${E(project.project_label || project.alias || S.projects.find((item) => item.id === project.project_id)?.alias || project.project_id || project)}${project.capabilities ? ' · ' + E(project.capabilities.map((cap) => ({ read: '读取', write: '修改', execute: '执行' })[cap] || cap).join('、')) : ''}${project.execution_targets?.length ? '<br>执行位置：' + E(project.execution_targets.map((target) => (target === 'project_agent' ? '项目 Agent' : target)).join('、')) : ''}</li>`).join('')}</ul>${preview.max_delegations !== undefined ? `<p>累计工作额度：${E(preview.max_delegations)}</p>` : ''}<p>${E(preview.result_destination || '结果回复到原私聊及当前房间')}</p></details>`,
       );
     }
     if ((flow.actions || []).some((item) => item.action === 'revoke_tasks'))
@@ -2770,14 +2863,17 @@ window.CodePierCollaboration = (() => {
         await store.refresh();
         migrationPanel();
       }
-    } else if (action === 'projects') projectsPanel();
-    else if (action === 'refresh-project-impact')
-      await loadProjectImpact(root.querySelector('[data-cr-form="projects"]'));
+    } else if (action === 'projects' || action === 'permissions' || action === 'member-scope')
+      await permissionsPanel();
+    else if (action === 'reload-permissions') await permissionsPanel(panel?.returnChannel);
+    else if (action === 'permission-bulk') permissionBulk(button);
     else if (action === 'members') membersPanel();
-    else if (action === 'add-member') addMemberPanel();
+    else if (action === 'add-member') await addMemberPanel();
     else if (action === 'more-connections') await loadConnections(!!panel.connectionsCursor);
     else if (action === 'member-detail') await memberPanel(id);
-    else if (action === 'member-scope') memberScopePanel(panel.member);
+    else if (action === 'channel-project-permissions') {
+      if (panel?.name === 'weixin') await permissionsPanel(panel.channel);
+    } else if (action === 'channel-scope-back') await returnToChannel(panel);
     else if (action === 'close') closePanel();
     else if (action === 'settings') settingsPanel();
     else if (action === 'weixin') await weixinPanel();
@@ -3122,13 +3218,25 @@ window.CodePierCollaboration = (() => {
       // A project edit can invalidate its own room stream before its PUT
       // response arrives. Retain only the identity of that closed submission,
       // never its old projection or permission. A later panel changes the fence.
-      if (invalidatedPanel?.name === 'projects' && invalidatedPanel.busy)
+      if (invalidatedPanel?.name === 'permissions' && invalidatedPanel.busy)
         invalidatedPanel.accessInvalidation = {
           owner,
           roomId,
           epoch: state.epoch,
           openingEpoch: invalidatedPanel.epoch,
         };
+      const saved = invalidatedPanel?.savedPermissionFeedback;
+      if (
+        saved &&
+        saved.owner === owner &&
+        saved.roomId === roomId &&
+        saved.openingEpoch === invalidatedPanel.epoch
+      ) {
+        saved.epoch = state.epoch;
+        saved.accessInvalidated = true;
+        root._crProjectSaveFeedback = saved;
+        announce(saved.message);
+      }
       root.querySelector('.cr-panel-content').replaceChildren();
       const pending = root.querySelector('[data-cr-pending]');
       pending.replaceChildren();
@@ -3389,15 +3497,36 @@ window.CodePierCollaboration = (() => {
         if (event.target.name === 'member_id' && event.target.closest('#cr-composer'))
           store.draft().member = event.target.value;
         if (event.target.name === 'allow_owner_tasks') updateChannelDependencies();
-        if (event.target.name === 'capability') {
-          const group = event.target.closest('[data-project-id]');
-          if (event.target.value === 'read' && !event.target.checked) {
-            for (const input of group.querySelectorAll('input')) input.checked = false;
-          } else if (event.target.checked) group.querySelector('[value="read"]').checked = true;
+        if (event.target.matches('[data-permission-project]')) {
+          const group = event.target.closest('[data-permission-row]');
+          if (event.target.checked && !group.querySelector('[data-permission-cap]:checked')) {
+            const read = group.querySelector(
+              '[data-permission-cap][value="read"][data-available="true"]',
+            );
+            if (read) read.checked = true;
+          }
+          updatePermissionControls();
         }
-        if (event.target.name === 'project' && panel?.name === 'projects') {
-          void loadProjectImpact(event.target.form);
+        if (event.target.matches('[data-permission-cap]')) {
+          const group = event.target.closest('[data-permission-row]');
+          if (event.target.checked) {
+            const read = group.querySelector(
+              '[data-permission-cap][value="read"][data-available="true"]',
+            );
+            if (read) read.checked = true;
+          } else if (event.target.value === 'read') {
+            for (const input of group.querySelectorAll('[data-permission-cap]'))
+              input.checked = false;
+          }
         }
+        if (event.target.matches('[data-permission-cap]')) updatePermissionControls();
+        if (
+          event.target.matches('[data-permission-lifetime-mode],[data-permission-lifetime-until]')
+        ) {
+          event.target.closest('[data-permission-lifetime]').dataset.lifetimeEdited = 'true';
+          updatePermissionControls();
+        }
+        if (event.target.matches('[data-permission-mode]')) updatePermissionControls();
       },
       { signal },
     );

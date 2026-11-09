@@ -137,9 +137,9 @@ def test_legacy_room_read_only_safe_stop_explicit_cutover_and_original_receipt(
         expect(editor).to_have_value('迁移前未发送的草稿')
         assert len(writes) == before
 
-        page.locator('.cr-room-actions [data-cr-action="projects"]').click()
-        expect(page.locator('[data-cr-form="projects"] button[type="submit"]')).to_be_disabled()
-        expect(page.locator('[data-cr-form="projects"] input').first).to_be_disabled()
+        page.locator('.cr-room-actions [data-cr-action="permissions"]').click()
+        expect(page.locator('[data-cr-form="permissions"] button[type="submit"]')).to_be_disabled()
+        expect(page.locator('[data-cr-form="permissions"] input').first).to_be_disabled()
         page.keyboard.press('Escape')
         page.locator('.cr-room-actions [data-cr-action="weixin"]').click()
         expect(page.locator('[data-cr-channel-view]')).to_contain_text('不会创建新的微信接入')
@@ -196,8 +196,8 @@ def test_legacy_room_read_only_safe_stop_explicit_cutover_and_original_receipt(
         still_legacy = stack.must(stack.client.get(f'/api/collaboration/rooms/{room_id}'))['room']
         assert still_legacy['legacy'] and still_legacy['read_only']
         assert not still_legacy['migration']['eligible']
-        page.locator('[data-cr-action="member-scope"]').click()
-        expect(page.locator('[data-cr-form="member-scope"] button[type="submit"]')).to_be_disabled()
+        page.locator('dialog [data-cr-action="permissions"]').click()
+        expect(page.locator('[data-cr-form="permissions"] button[type="submit"]')).to_be_disabled()
         page.keyboard.press('Escape')
         page.locator('.cr-room-actions [data-cr-action="members"]').click()
         expect(page.locator('dialog [data-cr-action="add-member"]')).to_be_disabled()
@@ -315,11 +315,14 @@ def test_saved_business_receipt_remains_queryable_after_room_becomes_read_only(
         room_id = room['id']
         page.locator('#cr-message').fill('在暂停前写好的独立草稿')
         def lose_project_response(route):
+            if route.request.method != 'PUT':
+                route.continue_()
+                return
             attempts.append(route.request.post_data_json)
             if len(attempts) == 1:
                 response = route.fetch()
                 assert response.ok, response.text()
-                saved = response.json()['room']
+                saved = stack.must(stack.client.get(f'/api/collaboration/rooms/{room_id}'))['room']
                 paused = stack.must(stack.client.patch(f'/api/collaboration/rooms/{room_id}', json={
                     'state': 'paused', 'expected_version': saved['version'], 'idempotency_key': key(),
                 }))['room']
@@ -327,10 +330,10 @@ def test_saved_business_receipt_remains_queryable_after_room_becomes_read_only(
                 route.abort('failed')
             else:
                 route.continue_()
-        page.route(f'**/api/collaboration/rooms/{room_id}/projects', lose_project_response)
-        page.locator('.cr-room-actions [data-cr-action="projects"]').click()
-        page.locator(f'[data-cr-form="projects"] [value="{stack.project["id"]}"]').check()
-        page.locator('[data-cr-form="projects"] button[type="submit"]').click()
+        page.route(f'**/api/collaboration/rooms/{room_id}/permissions', lose_project_response)
+        page.locator('.cr-room-actions [data-cr-action="permissions"]').click()
+        page.locator(f'[data-cr-form="permissions"] [data-permission-section="room"] [data-project-id="{stack.project["id"]}"] [data-permission-project]').check()
+        page.locator('[data-cr-form="permissions"] button[type="submit"]').click()
         # Pausing changes the access projection. SSE intentionally clears the
         # stale dialog before reauthorizing; the original receipt survives in
         # the main room, and reopening projects must remain read-only.
@@ -339,8 +342,8 @@ def test_saved_business_receipt_remains_queryable_after_room_becomes_read_only(
         expect(page.locator('#cr-message')).to_be_disabled()
         expect(page.locator('#cr-message')).to_have_value('在暂停前写好的独立草稿')
         expect(page.locator('dialog.cr-panel')).not_to_be_visible()
-        page.locator('.cr-room-actions [data-cr-action="projects"]').click()
-        expect(page.locator('[data-cr-form="projects"] button[type="submit"]')).to_be_disabled()
+        page.locator('.cr-room-actions [data-cr-action="permissions"]').click()
+        expect(page.locator('[data-cr-form="permissions"] button[type="submit"]')).to_be_disabled()
         recovery = page.locator('[data-cr-panel-recovery] [data-cr-action="recover-action"]')
         expect(recovery).to_be_enabled()
         expect(page.locator('[data-cr-panel-recovery]')).to_contain_text('仅按原请求键核对')

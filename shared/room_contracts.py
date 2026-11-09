@@ -172,3 +172,43 @@ ROOM_MUTATION_ACTIONS = {
     'room_connect_resume': ConnectAction, 'room_connect_join': ConnectJoin,
     'room_probe_read': ConnectProbeRead, 'room_probe_reply': ConnectProbeReply,
 }
+
+
+class RoomPermissionProject(MemberProjectScope):
+    lifetime: Lifetime = Field(default_factory=Lifetime)
+
+    @model_validator(mode='after')
+    def targets_require_execute(self):
+        if self.execution_targets and 'execute' not in self.capabilities:
+            raise ValueError('Execution targets require execute capability')
+        return self
+
+
+class RoomPermissionScope(Model):
+    project_ids: list[Identifier] | None = Field(default=None, max_length=16)
+    project_scopes: list[RoomPermissionProject] = Field(default_factory=list, max_length=16)
+
+    @model_validator(mode='after')
+    def matching_projects(self):
+        if self.project_ids is not None and set(self.project_ids) != {s.project_id for s in self.project_scopes}:
+            raise ValueError('Project IDs must match the explicit project scopes')
+        return self
+
+
+class RoomChannelPermission(Model):
+    mode: Literal['follow_room', 'custom'] = 'follow_room'
+    scope: RoomPermissionScope = Field(default_factory=RoomPermissionScope)
+
+
+class RoomPermissionsUpdate(RoomRead):
+    expected_version: int = Field(ge=0)
+    scope: RoomPermissionScope
+    channels: dict[Literal['weixin', 'telegram'], RoomChannelPermission]
+    idempotency_key: Key | None = None
+
+    @field_validator('channels')
+    @classmethod
+    def both_channels(cls, value):
+        if set(value) != {'weixin', 'telegram'}:
+            raise ValueError('Both channel policies must be explicit')
+        return value

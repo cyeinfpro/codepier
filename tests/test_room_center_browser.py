@@ -5,6 +5,7 @@ readiness is intentionally left pending: an invitation is not a working dot.
 """
 import os
 import sys
+import time
 from pathlib import Path
 from uuid import uuid4
 
@@ -123,13 +124,18 @@ def test_room_empty_projects_member_recovery_and_owner_scope(
             download.click()
         assert Path(downloaded.value.path()).read_bytes() == contents
 
-        # Project association works before a dot exists and can include several.
-        page.locator('.cr-room-actions [data-cr-action="projects"]').click()
-        for project in stack.projects[:2]:
-            page.locator(f'[data-cr-form="projects"] [value="{project["id"]}"]').check()
-        page.locator('[data-cr-form="projects"] button[type="submit"]').click()
-        expect(page.locator('[data-cr-project-count]')).to_have_text('项目 2')
-        expect(page.locator('dialog.cr-panel')).not_to_be_visible()
+        # Seed a timed canonical room approval, then extend it through the UI.
+        deadline = time.time() + 3600
+        stack.must(stack.client.put(f'/api/collaboration/rooms/{room_id}/permissions', json={
+            'expected_version': 0, 'scope': {'project_scopes': [{
+                'project_id': stack.projects[0]['id'], 'environment_id': 'production',
+                'capabilities': ['read'], 'execution_targets': [],
+                'lifetime': {'mode': 'timed', 'expires_at': deadline},
+            }]}, 'channels': {name: {'mode': 'follow_room', 'scope': {'project_scopes': []}}
+                              for name in ('weixin', 'telegram')}, 'idempotency_key': uuid4().hex,
+        }))
+        page.reload()
+        expect(page.locator('[data-cr-project-count]')).to_have_text('项目 1')
 
         page.locator('.cr-room-actions [data-cr-action="members"]').click()
         page.locator('dialog [data-cr-action="add-member"]').click()
@@ -137,8 +143,8 @@ def test_room_empty_projects_member_recovery_and_owner_scope(
         expect(page.locator('[data-cr-connection-status]')).to_contain_text('还没有其他房间的已验证连接')
         page.locator('[name="connection_mode"][value="new"]').check()
         page.locator('[data-cr-form="member"] [name="name"]').fill('产品 dot')
-        expect(page.locator('[data-cr-form="member"] [value="read"]').first).to_be_enabled()
-        page.locator(f'[data-cr-form="member"] [data-project-id="{stack.projects[1]["id"]}"] [value="read"]').uncheck()
+        expect(page.locator('[data-cr-form="member"] [data-project-id]')).to_have_count(0)
+        expect(page.locator('[data-cr-form="member"] [name="lifetime"]')).to_have_count(0)
         page.locator('[data-cr-form="member"] button[type="submit"]').click()
         expect(page.locator('[data-cr-flow-view] h3').first).to_have_text('等待 dot 接入')
         assert '"action":"join"' in page.locator('.cr-instructions').input_value()
@@ -163,33 +169,35 @@ def test_room_empty_projects_member_recovery_and_owner_scope(
         same = stack.must(stack.client.get(f'/api/collaboration/rooms/{room_id}'))['room']['members'][0]
         assert same['id'] == member_id and same['flow_id'] == flow_id
 
-        # Adjust one member, with the displayed lifecycle chosen explicitly.
-        page.locator('[data-cr-action="member-scope"]').click()
-        first_project = page.locator(f'[data-cr-form="member-scope"] [data-project-id="{stack.projects[0]["id"]}"]')
-        first_project.locator('[value="write"]').check()
-        page.locator('[data-cr-form="member-scope"] [name="lifetime"]').select_option('timed')
-        page.locator('[data-cr-form="member-scope"] button[type="submit"]').click()
-        expect(page.locator('[data-cr-flow-view]')).to_be_visible()
+        # The member entry opens the same room-wide permission page. Changing
+        # capabilities keeps its explicit timed deadline, with no second editor.
+        page.locator('dialog [data-cr-action="permissions"]').click()
+        form = page.locator('[data-cr-form="permissions"]')
+        first_project = form.locator(f'[data-permission-section="room"] [data-project-id="{stack.projects[0]["id"]}"]')
+        first_project.locator('[data-permission-cap][value="write"]').check()
+        with page.expect_response(lambda response: response.request.method == 'PUT'
+                                  and response.url.endswith(f'/rooms/{room_id}/permissions')) as first_save:
+            form.locator('button[type="submit"]').click()
+        assert first_save.value.ok
+        expect(form.locator('button[type="submit"]')).to_be_enabled()
         updated = stack.must(stack.client.get(f'/api/collaboration/rooms/{room_id}'))['room']['members'][0]
         first_scope = next(scope for scope in updated['project_scopes'] if scope['project_id'] == stack.projects[0]['id'])
         assert 'write' in first_scope['capabilities']
-        assert first_scope['lifetime']['mode'] == 'timed'
+        assert first_scope['lifetime'] == {'mode': 'timed', 'expires_at': deadline}
 
-        # Adding a new approved project preserves each unchanged project's
-        # original expiry and version. It does not turn a timed grant into an
-        # indefinite one or invalidate work on the original project.
-        page.locator('[data-cr-action="member-scope"]').click()
-        expect(page.locator('[data-cr-form="member-scope"] [name="lifetime"]')).to_have_value('preserve')
-        expect(first_project.locator('[data-cr-scope-lifetime]')).to_contain_text('原有效期：')
-        expect(first_project.locator('[data-cr-scope-lifetime]')).to_contain_text('截止')
-        second_project = page.locator(f'[data-cr-form="member-scope"] [data-project-id="{stack.projects[1]["id"]}"]')
-        expect(second_project.locator('[data-cr-scope-lifetime]')).to_have_text('新项目：直到我撤销')
-        expect(second_project.locator('[value="read"]')).not_to_be_checked()
-        second_project.locator('[value="read"]').check()
-        with page.expect_request(lambda request: request.method == 'PUT' and request.url.endswith(f'/rooms/{room_id}/projects')) as scope_save:
-            page.locator('[data-cr-form="member-scope"] button[type="submit"]').click()
-        assert 'lifetime' not in scope_save.value.post_data_json['member_approvals'][0]
-        expect(page.locator('[data-cr-flow-view]')).to_be_visible()
+        # Adding another project preserves the existing approval's exact expiry
+        # and version. It cannot implicitly renew old work authority.
+        second_project = form.locator(f'[data-permission-section="room"] [data-project-id="{stack.projects[1]["id"]}"]')
+        expect(second_project.locator('[data-permission-project]')).not_to_be_checked()
+        second_project.locator('[data-permission-project]').check()
+        with page.expect_response(lambda response: response.request.method == 'PUT'
+                                  and response.url.endswith(f'/rooms/{room_id}/permissions')) as scope_save:
+            form.locator('button[type="submit"]').click()
+        assert scope_save.value.ok
+        payload = scope_save.value.request.post_data_json
+        assert 'member_approvals' not in payload
+        assert next(rule for rule in payload['scope']['project_scopes']
+                    if rule['project_id'] == stack.projects[0]['id'])['lifetime'] == first_scope['lifetime']
         updated = stack.must(stack.client.get(f'/api/collaboration/rooms/{room_id}'))['room']['members'][0]
         preserved = next(scope for scope in updated['project_scopes'] if scope['project_id'] == stack.projects[0]['id'])
         added = next(scope for scope in updated['project_scopes'] if scope['project_id'] == stack.projects[1]['id'])
@@ -198,14 +206,23 @@ def test_room_empty_projects_member_recovery_and_owner_scope(
         assert preserved['capabilities'] == first_scope['capabilities']
         assert added['lifetime']['mode'] == 'until_revoked' and added['lifetime']['expires_at'] is None
         assert updated['id'] == member_id and updated['flow_id'] == flow_id
-
-        page.locator('[data-cr-action="close"]').click()
-        page.locator('.cr-room-actions [data-cr-action="projects"]').click()
+        expect(page.locator('[data-cr-project-count]')).to_have_text('项目 2')
+        saved_policy = stack.must(stack.client.get(f'/api/collaboration/rooms/{room_id}/permissions'))
+        assert saved_policy['version'] == payload['expected_version'] + 1
+        assert saved_policy['scope'] == scope_save.value.json()['scope']
+        assert {rule['project_id'] for rule in saved_policy['scope']['project_scopes']} == {
+            project['id'] for project in stack.projects[:2]}
+        # Project membership changes invalidate the old access projection. The
+        # stale dialog must close; explicitly load the canonical policy again.
+        expect(page.locator('dialog.cr-panel')).not_to_be_visible()
+        expect(page.locator('[data-cr-feedback]')).to_contain_text('权限设置已保存')
+        page.locator('.cr-room-actions [data-cr-action="permissions"]').click()
+        expect(form).to_be_visible()
         for project in stack.projects[:2]:
-            page.locator(f'[data-cr-form="projects"] [value="{project["id"]}"]').uncheck()
-        expect(page.locator('[data-cr-project-impact]')).to_contain_text('项目文件保留')
-        page.locator('[data-cr-form="projects"] button[type="submit"]').click()
+            form.locator(f'[data-permission-section="room"] [data-project-id="{project["id"]}"] [data-permission-project]').uncheck()
+        form.locator('button[type="submit"]').click()
         expect(page.locator('[data-cr-project-count]')).to_have_text('项目 0')
+        expect(page.locator('dialog.cr-panel')).not_to_be_visible()
         assert (stack.projectalpha / 'README.md').is_file()
         expect(page.locator('.cr-message')).to_have_count(2)
 
@@ -265,7 +282,7 @@ def test_deferred_panel_autofocus_does_not_steal_user_focus(collaboration_stack,
     try:
         sign_in(page, collaboration_stack)
         page.locator('.cr-empty [data-cr-action="create"]').click()
-        checkbox = page.locator('[data-cr-form="create"] [name="project"]').first
+        checkbox = page.locator('[data-cr-form="create"] button[type="submit"]')
         expect(checkbox).to_be_visible()
         checkbox.focus()
         assert page.evaluate('window.heldPanelFocus.length') == 1
@@ -295,9 +312,7 @@ def test_mobile_room_switch_preserves_ime_draft_and_stable_message_node(
         # macOS WebKit follows Safari's native full-control traversal shortcut;
         # plain Tab can intentionally skip checkboxes/buttons on this platform.
         tab = 'Alt+Tab' if engine == 'webkit' and sys.platform == 'darwin' else 'Tab'
-        for checkbox in page.locator('[data-cr-form="create"] [name="project"]').all():
-            page.keyboard.press(tab)
-            expect(checkbox).to_be_focused()
+        expect(page.locator('[data-cr-form="create"] [name="project"]')).to_have_count(0)
         page.keyboard.press(tab)
         expect(page.locator('[data-cr-form="create"] button[type="submit"]')).to_be_focused()
         assert page.evaluate('matchMedia("(prefers-reduced-motion: reduce)").matches')

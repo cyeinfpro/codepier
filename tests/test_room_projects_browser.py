@@ -889,13 +889,21 @@ def test_global_connection_scope_is_separate_confirmed_and_unblocks_archive_depe
         with page.expect_response('**/api/collaboration/room-scope-control') as revoked:
             page.locator('[data-cc-action="dot-channel-scope-revoke"]').click()
         assert revoked.value.ok, revoked.value.text()
+        # The credential mutation invalidates the previous drawer. Reopen the
+        # connection scope explicitly and verify its persisted revoke receipt.
+        expect(page.locator('#cc-drawer')).not_to_be_visible()
+        group = advanced_connections(page)
+        group.locator('[data-cc-action="dot-channel-view-connection-scope"]').click()
         expect(page.locator('.cc-channel-binding').first).to_contain_text('已撤销')
+        expect(page.locator('.cc-channel-binding').first).to_contain_text('版本 3')
+        expect(page.locator('[data-cc-action="dot-channel-scope-revoke"]')).to_have_count(0)
         assert len(shared_writes) == 2 and shared_writes[-1][0] == 'room-scope-control'
         assert shared_writes[-1][1]['grant_id'] == grant
         assert shared_writes[-1][1]['expected_version'] == 2
         current = stack.must(stack.client.get('/api/collaboration/room-scopes', params={
             **scope(stack), 'conversation_id': before['id']}))['items'][0]
-        assert current['state'] == 'revoked'
+        assert current['state'] == 'revoked' and current['version'] == 3
+        assert current['grant_id'] == grant
         ready = stack.must(stack.client.post('/api/collaboration/conversation-archive-preview',
                                             json={'conversation_id': before['id']}))
         assert ready['ready'] is True and ready['dependent_connections'] == []

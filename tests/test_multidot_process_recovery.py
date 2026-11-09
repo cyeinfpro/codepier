@@ -491,10 +491,17 @@ def native_room(s, receiver):
         'title': 'Native room process recovery',
         'projects': [{'project': s.project['id'], 'environment_id': 'production'}],
         'idempotency_key': key()}))['room']
+    permissions_path = '/api/collaboration/rooms/' + room['id'] + '/permissions'
+    preview = s.must(s.client.get(permissions_path))
+    s.must(s.client.put(permissions_path, json={
+        'expected_version': preview['version'], 'scope': {'project_scopes': [{
+            'project_id': s.project['id'], 'environment_id': 'production',
+            'capabilities': ['read', 'write', 'execute'], 'execution_targets': ['project_agent'],
+            'lifetime': {'mode': 'until_revoked', 'expires_at': None}}]},
+        'channels': {'weixin': {'mode': 'follow_room'}, 'telegram': {'mode': 'follow_room'}},
+        'idempotency_key': key()}))
     created = s.must(s.client.post('/api/collaboration/rooms/' + room['id'] + '/members', json={
-        'name': 'Synthetic native host', 'project_scopes': [{
-            'project_id': s.project['id'], 'capabilities': ['read', 'write', 'execute'],
-            'execution_targets': ['project_agent']}], 'idempotency_key': key()}))
+        'name': 'Synthetic native host', 'idempotency_key': key()}))
     flow = s.must(s.client.get('/api/collaboration/connect-flows/' + created['flow']['id']))
     instructions = flow['join_instructions']
     request, _ = json.JSONDecoder().raw_decode(instructions[instructions.index('{'):])

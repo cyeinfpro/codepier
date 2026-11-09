@@ -10,6 +10,7 @@ import pytest
 
 from shared.util import DevError
 from tests.collaboration_support import collab as collab, key
+from tests.test_room_managed_work import save_room_permissions
 from tests.test_room_members_rebuild import rooms as rooms, create, add, join, subscribe, identity
 
 
@@ -141,12 +142,12 @@ async def test_reused_host_scopes_messages_and_watermarks_remain_separate(rooms)
     s, owner, actor, _ = rooms
     actor = replace(actor, grant_id='broad', actor='mcp:broad:fixture')
     source_room = create(s, owner, [{'project': 'proj', 'environment_id': 'production'}])
+    save_room_permissions(s, owner, source_room['id'],
+        [{'project_id': 'proj', 'capabilities': ['read', 'write']}])
     original = await verified(s, actor, s.rooms.create_member({'conversation_id': source_room['id'],
-        'name': '原授权', 'project_scopes': [{'project_id': 'proj', 'capabilities': ['read', 'write']}],
-        'idempotency_key': key()}, owner))
+        'name': '原授权', 'idempotency_key': key()}, owner))
     target_room = create(s, owner, [{'project': 'proj', 'environment_id': 'production'}])
-    target = await verified(s, actor, reuse(s, owner, target_room, original,
-        project_scopes=[{'project_id': 'proj', 'capabilities': ['read']}]))
+    target = await verified(s, actor, reuse(s, owner, target_room, original))
     assert s.rooms.scopes(s.rooms.member(original['member_id']), s.rooms.principal(s.rooms.member(original['member_id'])))[0]['capabilities'] == ['read', 'write']
     assert s.rooms.scopes(s.rooms.member(target['member_id']), s.rooms.principal(s.rooms.member(target['member_id'])))[0]['capabilities'] == ['read']
     source_message = s.room_runtime.send({'conversation_id': source_room['id'], 'body_text': '只属于原房间',
