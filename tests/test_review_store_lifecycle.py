@@ -25,10 +25,10 @@ def records(workspace):
 
 
 def rewrite(path, **changes):
-    data = json.loads(path.read_text())
-    data['payload'].update(changes)
-    data['sha256'] = reviews.fingerprint(data['payload'])
-    path.write_text(json.dumps(data))
+    document, _ = reviews.ReviewStore._read(path)
+    document.update(changes)
+    wrapped, _, _ = reviews.ReviewStore._pack(document)
+    path.write_text(json.dumps(wrapped))
 
 
 def native_reviews(workspace):
@@ -73,9 +73,10 @@ def test_duplicate_review_reuses_original_interval_and_expiry(workspace, monkeyp
 
 
 def test_finalization_fits_by_replacing_baseline_and_replays_without_recapture(workspace, monkeypatch):
-    (workspace[2]/'large.txt').write_text('unchanged source\n'*1000)
+    import hashlib
+    (workspace[2]/'large.txt').write_text(''.join(hashlib.sha256(str(i).encode()).hexdigest() for i in range(1000)))
     baseline = call(workspace, 'open_workspace', capture_baseline=True)
-    original_size = records(workspace)[0].stat().st_size
+    original_size = sum(p.stat().st_size for p in records(workspace)[0].parent.iterdir() if p.suffix in {'.json', '.zlib'})
     monkeypatch.setattr(reviews, 'MAX_RECORDS', 1)
     monkeypatch.setattr(reviews, 'MAX_STORAGE_BYTES', original_size)
     final = call(workspace, 'show_changes', baseline_ref=baseline['baseline_ref'], finalize=True)
@@ -267,18 +268,19 @@ def test_finalize_option_is_exposed_in_public_discovery_and_validated():
         ShowChanges(project='P', review_ref='a'*32, finalize=True)
 
 
-def test_finalization_requires_matching_peer_semantics():
+@pytest.mark.parametrize('tool', ['show_changes', 'open_workspace', 'review_snapshots', 'review_snapshots_manage'])
+def test_finalization_requires_matching_peer_semantics(tool):
     from shared.tool_protocol import advertisement, negotiate, require_compatible, validate_call_epoch
     current = advertisement('a'*64)
-    require_compatible(negotiate(current), 'show_changes')
-    validate_call_epoch('show_changes', 2)
-    current['tool_contracts']['show_changes'] = 1
+    require_compatible(negotiate(current), tool)
+    validate_call_epoch(tool, 2)
+    current['tool_contracts'][tool] = 1
     for peer in (negotiate(current), negotiate({'version': '1.30.7'})):
         with pytest.raises(DevError) as exc:
-            require_compatible(peer, 'show_changes')
+            require_compatible(peer, tool)
         assert exc.value.code == 'AGENT_UPGRADE_REQUIRED'
     with pytest.raises(DevError) as exc:
-        validate_call_epoch('show_changes', 1)
+        validate_call_epoch(tool, 1)
     assert exc.value.code == 'TOOL_PROTOCOL_MISMATCH'
 
 
@@ -385,3 +387,14 @@ def test_cleanup_cancellation_waits_for_filesystem_writer(workspace, monkeypatch
                 await asyncio.wait_for(task, 2)
         assert finished.is_set()
     asyncio.run(scenario())
+
+
+def test_scoped_baseline_distinguishes_captured_absent_and_budget(workspace, monkeypatch):
+    engine, _, root = workspace
+    (root / 'a.txt').write_text('present')
+    (root / 'b.txt').write_text('over budget')
+    monkeypatch.setattr(reviews, 'MAX_FILES', 1)
+    captured = reviews.capture(engine, bound(workspace), ['a.txt', 'b.txt', 'new.txt'])
+    coverage = captured['coverage']
+    assert coverage['scope'] == 'paths' and not coverage['complete'] and coverage['truncated']
+    assert coverage['path_status'] == {'a.txt': 'captured', 'b.txt': 'not_captured', 'new.txt': 'absent'}

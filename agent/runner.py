@@ -47,7 +47,7 @@ from shared.agent_roots_contracts import PANEL_ROOTS_TOOLS
 from shared.crypto import SecureChannel
 from shared.util import DevError, VERSION
 from shared.file_sources import safe_import_error_detail
-from shared.filesystem_errors import safe_filesystem_error_detail
+from shared.filesystem_errors import safe_filesystem_error_detail, safe_review_error_detail
 from shared.tool_protocol import advertisement, negotiate, validate_call_epoch
 from shared.execution_policy import (enforce_argv, agent_blocks_codex, agent_blocks_computer,
     computer_denial, codex_computer_target, DENIAL_MESSAGE, COMPUTER_DENIAL_MESSAGE, COMPUTER_DENIAL_CODE)
@@ -910,6 +910,7 @@ class Agent:
                 raise asyncio.CancelledError from exc
             result = {"ok": False, "error": {"code": exc.code, "message": exc.message}}
             result['error'].update(safe_filesystem_error_detail(request.get('tool'), exc.code, exc.details))
+            result['error'].update(safe_review_error_detail(exc.code, exc.details))
             if exc.code == 'RESOURCE_BUSY':
                 result['error']['blocked_by'] = [value for value in exc.details.get('blocked_by', [])[:64]
                                                 if isinstance(value, str) and len(value) <= 100]

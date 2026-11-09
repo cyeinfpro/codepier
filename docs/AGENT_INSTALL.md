@@ -206,3 +206,7 @@ Windows 原生验收可在管理员终端运行 `python scripts/check_windows_se
 本轮在 macOS 的隔离测试目录执行 Python、Bash 和 Chromium 回归；真实系统服务调用通过测试替身隔离，没有停止或卸载现用 Agent。Windows PowerShell 分支有命令契约检查，但没有 Windows 实机安装、升级、卸载验收；Linux systemd 也没有本轮实机部署验收。完整记录见 [开发与验证](DEVELOPMENT.md)。
 
 2026-10-10 的 Windows 下载专项在 macOS/Python 3.13 上通过 52 项下载与安装相关测试，覆盖断流、响应头等待超时、读取超时、有限重试、401/403/409、重定向、错误页面、包身份及 SHA 校验。另在已授权的 Windows 测试节点上，以原生 PowerShell 5.1 和现有 Python 3.14.5 执行抽取的纯下载代码，验证本地 HTTP 503 后重试成功与错误 SHA 拒绝两例；只使用临时文件和 127.0.0.1，不执行完整安装器、配对或服务操作。这不等于已复现用户另一台 Windows 的网络超时，也不替代新 Hub 部署及目标电脑安装验收。
+
+## 审阅快照容量
+
+审阅池使用 Agent 本机状态目录。配额诊断、任务收尾、按文件捕获、无损压缩、容量配置与旧格式回滚见 [审阅快照存储](REVIEW_STORAGE.md)。

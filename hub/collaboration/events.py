@@ -21,7 +21,8 @@ from hub.collaboration.event_errors import CallbackEndpointError, callback_reaso
 from hub.collaboration import network
 from hub.collaboration.common import (TASK_EVENT, RESULT_EVENT, INCIDENT_EVENT, STATUS_EVENT, MESSAGE_EVENT, WORK_EVENT, DELEGATION_EVENT, OPERATION_EVENT, MAILBOX_EVENT, ROOM_INBOX_EVENT,
     SEVERITIES, canonical, digest, read_cursor, sign_cursor, timestamp, validate)
-from hub.collaboration.event_contracts import FILTERS, PAYLOADS, Subscribe, Unsubscribe, definitions
+from hub.collaboration.event_contracts import (FILTERS, PAYLOADS, Subscribe, Unsubscribe,
+    UnifiedOperationPayload, definitions, event_help)
 from shared.util import DevError
 
 logger = logging.getLogger(__name__)
@@ -141,17 +142,34 @@ class EventService:
         # only one current and one pending binding for each of 32 members.
         return 64 if room.get('_event_conversation') else 32
 
-    def catalog(self, raw, principal):
+    def available_events(self, principal):
         self.guard()
-        if set(raw) - {'cursor'} or raw.get('cursor') not in (None, ''):
-            raise DevError('INVALID_CURSOR', '事件目录只有一页', 400)
         principal = refresh_principal(self.store, principal)
         if not principal.grant_id or 'read' not in principal.scopes:
+            return ()
+        return tuple(PAYLOADS) if self.c.runtime.list_projects(principal) else (ROOM_INBOX_EVENT,)
+
+    def catalog(self, raw, principal, *, unified=False):
+        if set(raw) - {'cursor'} or raw.get('cursor') not in (None, ''):
+            raise DevError('INVALID_CURSOR', '事件目录只有一页', 400)
+        names = self.available_events(principal)
+        if not names:
             return {'events': []}
         from hub.collaboration.channel_capabilities import subscription_proposal
-        return {'events': (definitions() if self.c.runtime.list_projects(principal) else
-                           [item for item in definitions() if item['name'] == ROOM_INBOX_EVENT]),
-                '_meta': {'codepier/subscription_lifetime': subscription_proposal()}}
+        metadata = {'codepier/subscription_lifetime': subscription_proposal()}
+        if unified:
+            metadata['codepier/eventHelp'] = {'name': 'query', 'arguments': {'action': 'help', 'args': {'event': 'list'}}}
+        return {'events': definitions(names=names, unified=unified), '_meta': metadata}
+
+    def help(self, name, principal, detail):
+        names = self.available_events(principal)
+        if name == 'list':
+            from hub.collaboration.event_contracts import DESCRIPTIONS
+            return {'events': {name: DESCRIPTIONS[name] for name in names},
+                    'note': 'Use args.event with an event name; args.detail=schema returns exact filters and payload.'}
+        if name not in names:
+            raise DevError('EVENT_NOT_FOUND', '此事件不在当前订阅目录', 404)
+        return event_help(name, detail=detail)
 
     @staticmethod
     def scope_column(room):
@@ -264,7 +282,7 @@ class EventService:
             self.event_audit(room, principal.actor, 'subscription.challenge', identity)
         return args, principal, room, identity, existing, cached
 
-    async def subscribe(self, raw, principal):
+    async def subscribe(self, raw, principal, *, unified=False):
         def begin():
             with self.store.transaction():
                 prepared = self.prepare(raw, principal)
@@ -331,10 +349,14 @@ class EventService:
                 stored = {'url': args['delivery']['url'], 'current': args['delivery']['secret']}
                 if old:
                     prior = json.loads(self.store.decrypt(old['secret']))
+                    if prior.get('recovery_view') == 'unified':
+                        stored['recovery_view'] = 'unified'
                     if prior['current'] != stored['current']:
                         stored.update(retiring=prior['current'], retire_at=now + 300)
                     elif prior.get('retire_at', 0) > now:
                         stored.update(retiring=prior['retiring'], retire_at=prior['retire_at'])
+                elif unified and args['name'] == OPERATION_EVENT:
+                    stored['recovery_view'] = 'unified'
                 active = old and old['state'] == 'active' and old['expires_at'] > now
                 position, truncated = (old['ack_seq'] if old else 0), False
                 if not active:
@@ -401,11 +423,12 @@ class EventService:
                 self.event_audit(room, principal.actor, 'subscription.removed', identifier)
             return {}
 
-    async def call(self, method, raw, principal):
+    async def call(self, method, raw, principal, *, unified=False):
         if method == 'events/subscribe':
-            return await self.subscribe(raw, principal)
-        handler = self.catalog if method == 'events/list' else self.unsubscribe
-        return await self.store.run(handler, raw, principal)
+            return await self.subscribe(raw, principal, unified=unified)
+        if method == 'events/list':
+            return await self.store.run(self.catalog, raw, principal, unified=unified)
+        return await self.store.run(self.unsubscribe, raw, principal)
 
     def authorize(self, subscription, room, payload=None):
         if subscription['name'] == ROOM_INBOX_EVENT:
@@ -788,6 +811,17 @@ class EventService:
                     elif event['name'] == ROOM_INBOX_EVENT:
                         payload = validate(PAYLOADS[event['name']],
                                            self.c.room_consumers.delivery_payload(sub, payload, event['id']))
+                    elif event['name'] == OPERATION_EVENT and payload.get('next_call'):
+                        stored = json.loads(self.store.decrypt(sub['secret']))
+                        if stored.get('recovery_view') == 'unified':
+                            from shared.unified_contracts import recovery_call
+                            payload['next_call'] = recovery_call(payload['operation_id'], project=payload['project_id'],
+                                                                 workspace_id=payload['workspace_id'])
+                            payload = validate(UnifiedOperationPayload, payload)
+                            # Preserve the omission of the optional workspace ID
+                            # in the call for the main project checkout.
+                            if not payload['workspace_id']:
+                                payload['next_call']['arguments'].pop('workspace_id', None)
                     body = canonical({'eventId': event['id'], 'name': event['name'],
                         'timestamp': timestamp(event['created']), 'data': payload,
                         'cursor': sign_cursor(self.c.secret, sub['id'], event['seq'])})

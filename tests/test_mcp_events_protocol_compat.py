@@ -131,6 +131,26 @@ def test_catalog_audit_distinguishes_project_and_room_scoped_discovery(wire, mon
     assert SECRET not in json.dumps(events) and PRIVATE not in json.dumps(events)
 
 
+def test_event_discovery_is_typed_and_exact_help_is_on_demand(wire):
+    from jsonschema import Draft202012Validator
+
+    catalog = rpc(wire, 'events/list', {}).json()['result']
+    assert sum(len(item['description']) for item in catalog['events']) < 700
+    assert all(item['inputSchema']['type'] == 'object' for item in catalog['events'])
+    name = 'codepier.operation.completed.v1'
+    advertised = next(item for item in catalog['events'] if item['name'] == name)
+    assert advertised['inputSchema']['properties']['operation_ids']['items']['type'] == 'string'
+    arguments = {'action': 'help', 'args': {'event': name, 'detail': 'schema'}}
+    response = rpc(wire, 'tools/call', {'name': 'query', 'arguments': arguments}, {'Mcp-Name': 'query'})
+    result = response.json()['result']
+    assert not result['isError'], result
+    value = result['structuredContent']
+    Draft202012Validator(value['inputSchema']).validate({'project_id': 'project',
+        'environment_id': 'production', 'operation_ids': ['original']})
+    assert 'after_output_seq' in value['consume']
+    assert not wire[4]
+
+
 @pytest.mark.parametrize('method', ['events/subscribe', 'events/unsubscribe'])
 @pytest.mark.parametrize('name', ['wrong', '=?base64?%%%?='])
 def test_supplied_event_name_header_must_match(wire, method, name):
@@ -182,7 +202,7 @@ def test_event_http_errors_use_specific_codes_without_challenge(wire, change, st
     ('STALE_VERSION', 409, -32000, {}),
 ])
 def test_event_mapping_preserves_http_status(wire, monkeypatch, name, status, code, extra):
-    async def denied(*_):
+    async def denied(*_, **_kwargs):
         raise DevError(name, 'fixture denial', status)
     monkeypatch.setattr(wire[0].state.runtime.collaboration.events, 'call', denied)
     response = rpc(wire, 'events/subscribe', wire[3])

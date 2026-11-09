@@ -136,13 +136,14 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
         if view not in {'1','2'} or verbosity not in {'lean','full'} or text_mode not in {'json','compact'} or output_mode not in {'raw','normalized'}:
             return failure(identifier,-32602,'Invalid presentation options: view=1|2, verbosity=lean|full, text=json|compact, output=raw|normalized',400)
         instructions=CORE_WORKFLOW_INSTRUCTIONS if view == '1' else CORE_INSTRUCTIONS
-        if profile=='unified':
-            from shared.unified_contracts import UNIFIED_INSTRUCTIONS
-            instructions=UNIFIED_INSTRUCTIONS
         if 'id' not in body:return Response(status_code=202)
         try:
             principal=await runtime.store.run(refresh_principal,runtime.store,principal)
             await observe(principal, 'authentication')
+            if profile == 'unified' and method in {'initialize', 'server/discover'}:
+                from hub.unified_tools import runtime_directory
+                from shared.unified_contracts import server_instructions
+                instructions = server_instructions(runtime_directory(runtime, principal.scopes))
             if method=='initialize' and not modern:
                 offered=params.get('protocolVersion','')
                 if not isinstance(offered,str):return failure(identifier,-32602,'protocolVersion must be a string')
@@ -158,7 +159,9 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                     result['capabilities']['events'] = {}
             elif modern and method in {'events/list','events/subscribe','events/unsubscribe'} and runtime.collaboration.config.events_enabled:
                 try:
-                    result = await runtime.collaboration.events.call(method, {key:value for key,value in params.items() if key != '_meta'}, principal)
+                    result = await runtime.collaboration.events.call(
+                        method, {key: value for key, value in params.items() if key != '_meta'}, principal,
+                        unified=profile == 'unified')
                     principal = await runtime.store.run_read(auth.bearer,request)
                     if method == 'events/list':
                         mark('event_catalog_returned', event_count=len(result['events']))
@@ -185,6 +188,8 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                 if not isinstance(name,str) or not isinstance(arguments,dict):return failure(identifier,-32602,'Expected tool name and arguments object',400 if modern else 200)
                 trace=None
                 route=None
+                plan=None
+                requested_name, requested_arguments = name, arguments
                 try:
                     route=await runtime.store.run(tools.resolve, principal, name)
                     mark('route_resolved',tool=name)
@@ -193,7 +198,6 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                         result=await runtime.gateway.call(principal,name,arguments,lambda:auth.bearer(request),
                                                           request_key=metadata.get('codepier/idempotencyKey'))
                     else:
-                        plan=None
                         if name in UNIFIED_TOOLS:
                             # Translate once into the exact legacy public call; every
                             # later step (trace, authorization, rendering) uses it.
@@ -212,6 +216,8 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                         else:
                             value=await runtime.invoke(name,arguments,principal)
                         principal=await runtime.store.run_read(auth.bearer,request)
+                        unified_views = (unified_tools.runtime_directory(runtime, principal.scopes)
+                                         if plan is not None else None)
                         if name == 'get_access_context':
                             value={**value,'gateway':await runtime.store.run(runtime.gateway.context,principal)}
                         if name in COLLABORATION_TOOLS:
@@ -219,11 +225,16 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                             value=present(name,arguments,value)
                             if plan is not None:
                                 from shared.unified_contracts import present_unified
-                                value=present_unified(value,verbosity=verbosity)
+                                value=present_unified(value, verbosity=verbosity, plan=plan,
+                                                      visible=unified_views, convert=unified_tools.convert_hint)
                             result={'content':[{'type':'text','text':json.dumps(value,ensure_ascii=False,separators=(',',':'))}, *media],
                                     'structuredContent':value,'isError':bool(value.get('error'))}
                         else:
-                            result=await runtime.store.run(mcp_apps.attach,core_result(name,arguments,value,scopes=principal.scopes,view=int(view),verbosity=verbosity,text_mode=text_mode,output_mode=output_mode,unified=plan is not None),name,arguments,value,request_public_url)
+                            result = await runtime.store.run(mcp_apps.attach,
+                                core_result(name, arguments, value, scopes=principal.scopes, view=int(view),
+                                            verbosity=verbosity, text_mode=text_mode, output_mode=output_mode,
+                                            unified=plan, unified_views=unified_views),
+                                name, arguments, value, request_public_url)
                         try:
                             await runtime.store.run(runtime.diagnostics.connection.returned, principal, name, arguments, value)
                         except Exception:
@@ -243,6 +254,20 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                     from shared.operation_recovery import error_recovery
                     value={'error':error_view({'code':exc.code,'message':exc.message,**exc.details}),
                            'recovery':error_recovery(exc.code, exc.details.get('operation_id'))}
+                    if requested_name in UNIFIED_TOOLS:
+                        from hub import unified_tools
+                        visible = unified_tools.runtime_directory(runtime, principal.scopes)
+                        if value['recovery']['category'] == 'argument_rejected':
+                            action = requested_arguments.get('action')
+                            if 'actions' in value['error']:
+                                value['error']['actions'] = list(visible[requested_name])
+                            if 'views' in value['error'] and isinstance(action, str):
+                                value['error']['views'] = visible[requested_name].get(action, value['error']['views'])
+                        next_call = unified_tools.error_followup(value['recovery'], requested_name,
+                                                                 requested_arguments, plan, visible)
+                        if next_call:
+                            value['next_call'] = next_call
+                        value['error_code'] = exc.code
                     result={'content':[{'type':'text','text':json.dumps(value,ensure_ascii=False,separators=(',',':'))}],'structuredContent':value,'isError':True}
                     if name == 'get_profile' or route and route.backend=='remote':result.pop('structuredContent',None)
                     if exc.details.get('call_id'):result['_meta']={'codepier/callId':exc.details['call_id']}

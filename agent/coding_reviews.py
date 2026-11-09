@@ -19,6 +19,7 @@ import stat
 import time
 import uuid
 from agent.context import project_context
+from agent import review_content
 from agent.filesystem import MAX_FILE, CHECKPOINT_ARTIFACTS
 from shared.util import DevError, atomic_json, fsync_directory
 
@@ -94,7 +95,7 @@ class ReviewStore:
             os.close(fd)
 
     @staticmethod
-    def _read(path):
+    def _read(path, *, hydrate=True):
         """Validate before using metadata for reclamation or quota accounting."""
         if path.is_symlink():
             raise DevError('REVIEW_STORAGE_INVALID', '快照存储存在符号链接', 403)
@@ -108,11 +109,19 @@ class ReviewStore:
             wrapped = json.loads(raw)
             document = wrapped['payload']
             expires = document['expires_at']
-            if (wrapped['sha256'] != fingerprint(document) or document['id'] != path.stem
+            checksum = wrapped.get('storage_sha256') if wrapped.get('storage_version') == 2 else wrapped['sha256']
+            if (checksum != fingerprint(document) or document['id'] != path.stem
                     or type(expires) not in (int, float) or not math.isfinite(expires)):
                 raise ValueError('Invalid snapshot metadata')
         except (ValueError, KeyError, TypeError) as exc:
             raise DevError('REVIEW_INTEGRITY', '快照格式或校验损坏', 409) from exc
+        version = wrapped.get('storage_version', 1)
+        if type(version) is not int or version not in (1, 2):
+            raise DevError('REVIEW_STORAGE_INVALID', '不支持的审阅存储版本', 409)
+        if version == 2 and hydrate:
+            document = review_content.decode(document, path.parent)
+            if fingerprint(document) != wrapped['sha256']:
+                raise DevError('REVIEW_INTEGRITY', '审阅内容校验失败', 409)
         return document, st.st_size
 
     @staticmethod
@@ -120,8 +129,10 @@ class ReviewStore:
     def _metadata(path, signature):
         # Cache only metadata, never source text. Atomic writes and even in-place
         # edits invalidate via inode/ctime/mtime/size; permissions and links count too.
-        document, size = ReviewStore._read(path)
-        return {'expires_at': document['expires_at'], 'review_key': ReviewStore._review_key(document)}, size
+        document, size = ReviewStore._read(path, hydrate=False)
+        return {'expires_at': document['expires_at'], 'review_key': ReviewStore._review_key(document),
+                'refs': review_content.references(document), 'binding': document['binding'],
+                'kind': document['kind'], 'created': document['created']}, size
 
     def _records(self, *, now=None):
         # Caller holds the cross-process lock. Never infer expiry from mtime:
@@ -153,8 +164,8 @@ class ReviewStore:
         with self.lock(blocking=False) as acquired:
             if not acquired:
                 return
-            for _ in self._records():
-                pass
+            records = list(self._records())
+            review_content.collect(self.directory, self._refs(records))
 
     @staticmethod
     def _review_key(document):
@@ -164,6 +175,52 @@ class ReviewStore:
         return fingerprint({k: document[k] for k in
                             ('binding', 'baseline_ref', 'started', 'files', 'summary', 'coverage', 'scope')})
 
+    @property
+    def storage_limit(self):
+        mib = self.engine.config.get('review_storage', {}).get('max_storage_mib')
+        return MAX_STORAGE_BYTES if mib is None else mib * 1024 * 1024
+
+    @property
+    def record_limit(self):
+        return self.engine.config.get('review_storage', {}).get('max_records', MAX_RECORDS)
+
+    @staticmethod
+    def _refs(records):
+        return set().union(*(row[1]['refs'] for row in records)) if records else set()
+
+    def _usage(self, records, blobs=None):
+        blobs = blobs or {}
+        refs = self._refs(records)
+        existing = {key for key in refs if review_content.blob_path(self.directory, key).exists() or review_content.blob_path(self.directory, key).is_symlink()}
+        if refs - existing - blobs.keys():
+            raise DevError('REVIEW_INTEGRITY', '审阅内容缺失', 409)
+        return sum(row[2] for row in records) + sum(review_content.sizes(self.directory, existing).values()) + sum(len(blobs[key]) for key in refs - existing)
+
+    @staticmethod
+    def _pack(document):
+        payload, blobs = review_content.encode(document)
+        wrapped = {'sha256': fingerprint(document), 'payload': payload}
+        if blobs:
+            # Old readers fail closed rather than accepting text references as source.
+            wrapped.update(storage_version=2, storage_sha256=fingerprint(payload))
+        return wrapped, blobs, len(json.dumps(wrapped, ensure_ascii=False, indent=2).encode())
+
+    def _compact(self, records, expected=None):
+        # Retain IDs, bindings, original leases, and logical contents exactly.
+        # Publishing each manifest separately makes interruption recoverable.
+        converted = 0
+        for path, metadata, size in records:
+            if metadata['refs'] or expected is not None and metadata['binding'] != expected:
+                continue
+            document, _ = self._read(path)
+            wrapped, blobs, packed_size = self._pack(document)
+            if packed_size + sum(len(v) for v in blobs.values()) >= size:
+                continue
+            review_content.publish(self.directory, blobs)
+            atomic_json(path, wrapped)
+            converted += 1
+        return converted
+
     def save(self, document, *, finalize_project=None):
         finalizing = finalize_project is not None
         ref = document['baseline_ref'] if finalizing else uuid.uuid4().hex
@@ -172,70 +229,112 @@ class ReviewStore:
         document = {**document, 'id': ref, 'created': now, 'expires_at': now+ttl}
         if finalizing:
             document['baseline_released'] = True
-        wrapped = {'sha256': fingerprint(document), 'payload': document}
-        size = len(json.dumps(wrapped, ensure_ascii=False, indent=2).encode())
-        if size > MAX_DOCUMENT_BYTES:
+        # Compression must not relax the logical per-document safety bound.
+        if len(json.dumps({'sha256': fingerprint(document), 'payload': document}, ensure_ascii=False, indent=2).encode()) > MAX_DOCUMENT_BYTES:
             raise DevError('REVIEW_TOO_LARGE', '快照序列化超过 32 MiB；没有发布不完整快照', 413)
+        wrapped, blobs, size = self._pack(document)
+        if size > MAX_DOCUMENT_BYTES:
+            raise DevError('REVIEW_TOO_LARGE', '快照序列化超过 32 MiB', 413)
         with self.lock():
             sweep_time = time.time()
-            replaced_size = 0
             if finalizing:
-                previous = self.load(ref, finalize_project, ('baseline', 'review'))
+                previous = self._load(ref, finalize_project, ('baseline', 'review'))
                 if previous['binding'] != document['binding']:
                     raise DevError('REVIEW_NOT_FOUND', '快照不属于当前项目映射和授权', 404)
                 if previous['kind'] == 'review':
                     if previous.get('baseline_released') and previous.get('baseline_ref') == ref:
                         return previous
                     raise DevError('REVIEW_NOT_FOUND', '此编号不是可完成的基线', 404)
-                replaced_size = (self.directory / (ref+'.json')).stat().st_size
-            used, count = 0, 0
-            key = self._review_key(document) if not finalizing else None
-            reused = None
-            for path, existing, stored_size in self._records(now=sweep_time):
-                used += stored_size
-                count += 1
-                if key is not None and existing['review_key'] == key:
-                    reused = path
-            if reused is not None:
-                return self._read(reused)[0]
-            # New baselines leave room for completing reviews. Finalization
-            # atomically replaces the baseline at the same reference, so neither
-            # record count nor bytes are charged twice and crashes cannot lose both.
+            records = list(self._records(now=sweep_time))
+            review_content.collect(self.directory, self._refs(records))
+            key = self._review_key(wrapped['payload']) if not finalizing else None
+            for path, metadata, _ in records:
+                if key is not None and metadata['review_key'] == key:
+                    return self._read(path)[0]
             reserve = MAX_DOCUMENT_BYTES if document['kind'] == 'baseline' else 0
-            if count + (0 if finalizing else 1) > MAX_RECORDS or used-replaced_size+size > MAX_STORAGE_BYTES-reserve:
-                raise DevError('REVIEW_QUOTA', '审阅快照配额不足；新基线保留 24 小时，审阅结果保留七天。请完成已有基线或等待到期回收', 409,
-                               used_bytes=used, limit_bytes=MAX_STORAGE_BYTES, records=count,
-                               limit_records=MAX_RECORDS, completion_reserve_bytes=reserve)
+            candidate = (self.directory / (ref + '.json'), {'refs': set(blobs), 'expires_at': document['expires_at']}, size)
+            def projected(current):
+                return [row for row in current if not (finalizing and row[0].stem == ref)] + [candidate]
+            future = projected(records)
+            if self._usage(future, blobs) > self.storage_limit - reserve:
+                # Lossless legacy compaction, never early eviction or TTL changes.
+                self._compact(records)
+                records = list(self._records(now=sweep_time))
+                review_content.collect(self.directory, self._refs(records))
+                future = projected(records)
+            used = self._usage(records)
+            required = self._usage(future, blobs)
+            if len(future) > self.record_limit or required > self.storage_limit - reserve:
+                remaining = list(records)
+                reclaim_at = None
+                for expiry in sorted({row[1]['expires_at'] for row in records}):
+                    # Finalization cannot outlive its original baseline lease.
+                    if document['kind'] == 'review':
+                        break
+                    remaining = [row for row in remaining if row[1]['expires_at'] > expiry]
+                    if len(projected(remaining)) <= self.record_limit and self._usage(projected(remaining), blobs) <= self.storage_limit - reserve:
+                        reclaim_at = expiry
+                        break
+                raise DevError('REVIEW_QUOTA', '审阅快照配额不足；请完成或释放已有基线，或按 next_reclaim_at 再试。不会提前删除有效快照', 409,
+                    used_bytes=used, limit_bytes=self.storage_limit, records=len(records), limit_records=self.record_limit,
+                    completion_reserve_bytes=reserve, required_bytes=required,
+                    effective_limit_bytes=max(0, self.storage_limit-reserve), next_reclaim_at=reclaim_at,
+                    quota_scope='agent', retryable=False)
+            review_content.publish(self.directory, blobs)
             atomic_json(self.directory / (ref+'.json'), wrapped)
+            review_content.collect(self.directory, self._refs(future))
         return document
+
+    def inspect(self, project, *, offset=0, limit=40):
+        expected = binding(self.engine, project)
+        with self.lock():
+            # Read-only inspection neither expires records nor collects blobs.
+            records = []
+            for path in self.directory.glob('*.json'):
+                document, size = self._read(path, hydrate=False)
+                records.append((path, {'refs': review_content.references(document), **{k: document[k] for k in ('binding', 'kind', 'created', 'expires_at')}}, size))
+            mine = sorted((row for row in records if row[1]['binding'] == expected), key=lambda r: (r[1]['created'], r[0].name))
+            return {'quota_scope': 'agent', 'used_bytes': self._usage(records), 'limit_bytes': self.storage_limit,
+                    'records': len(records), 'limit_records': self.record_limit, 'completion_reserve_bytes': MAX_DOCUMENT_BYTES,
+                    'effective_limit_bytes': max(0, self.storage_limit-MAX_DOCUMENT_BYTES), 'owned_records': len(mine),
+                    'snapshots': [{'ref': path.stem, 'kind': meta['kind'], 'created': meta['created'], 'expires_at': meta['expires_at'], 'manifest_bytes': size} for path, meta, size in mine[offset:offset+limit]],
+                    'next_offset': offset+limit if offset+limit < len(mine) else None}
+
+    def compact(self, project):
+        expected = binding(self.engine, project)
+        with self.lock():
+            records = list(self._records())
+            before = self._usage(records)
+            converted = self._compact(records, expected)
+            records = list(self._records())
+            review_content.collect(self.directory, self._refs(records))
+            return {'compacted': converted, 'reclaimed_bytes': max(0, before-self._usage(records)), 'leases_preserved': True}
 
     def purge_owner(self, project):
         expected = binding(self.engine, project)
         removed = 0
         with self.lock():
             for path in self.directory.glob('*.json'):
-                fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
-                with os.fdopen(fd, 'rb') as source:
-                    st = os.fstat(source.fileno())
-                    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size > MAX_DOCUMENT_BYTES:
-                        raise DevError('REVIEW_CLEANUP_UNCONFIRMED', '快照缓存异常，清理未完成；请在节点核查', 409)
-                    wrapped = json.loads(source.read(MAX_DOCUMENT_BYTES+1))
-                document = wrapped.get('payload', {})
-                if wrapped.get('sha256') != fingerprint(document):
-                    raise DevError('REVIEW_CLEANUP_UNCONFIRMED', '快照缓存校验失败，清理未完成；请在节点核查', 409)
+                document, _ = self._read(path, hydrate=False)
                 if document.get('binding') == expected:
                     path.unlink()
                     removed += 1
             fsync_directory(self.directory)
+            review_content.collect(self.directory, self._refs(list(self._records())))
         return removed
 
     def release_baseline(self, ref, project):
         with self.lock():
-            self.load(ref, project, 'baseline')
+            self._load(ref, project, 'baseline')
             (self.directory / (ref+'.json')).unlink(missing_ok=True)
             fsync_directory(self.directory)
+            review_content.collect(self.directory, self._refs(list(self._records())))
 
     def load(self, ref, project, kind):
+        with self.lock():
+            return self._load(ref, project, kind)
+
+    def _load(self, ref, project, kind):
         expected_binding = binding(self.engine, project)  # Reauthorize on EVERY read.
         if not isinstance(ref, str) or not re.fullmatch('[a-f0-9]{32}', ref):
             raise DevError('REVIEW_INVALID_REF', '快照编号无效')
@@ -254,15 +353,31 @@ class ReviewStore:
         return document
 
 
-def capture(engine, project):
+def capture(engine, project, paths=None):
     bound = binding(engine, project)
     root, _ = engine.root(project)
     started = time.time()
+    selected = sorted({engine.path(root, path, False).relative_to(root).as_posix() for path in paths or []})
+    # Validate the entire explicit scope before capturing anything. Missing
+    # paths are legitimate new-file baselines; directories are not implicit scans.
     files, skipped = {}, []
     size, incomplete = 0, False
     with engine.mutation_lock:
+        entries, absent = [], set()
+        for relative in selected:
+            path = engine.path(root, relative, False)
+            if review_excluded(relative):
+                raise DevError('REVIEW_SCOPE_INVALID', '审阅范围包含排除路径', 400)
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                absent.add(relative)
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                raise DevError('REVIEW_SCOPE_INVALID', '审阅范围必须是文件路径', 400)
+            entries.append((path, relative, info))
         try:
-            for path, relative, st in engine.walk(root, root, exclude=review_excluded, deadline=time.monotonic()+2, files_first=True):
+            for path, relative, st in (entries if selected else engine.walk(root, root, exclude=review_excluded, deadline=time.monotonic()+2, files_first=True)):
                 if not stat.S_ISREG(st.st_mode):
                     continue
                 if len(files)+len(skipped) >= MAX_FILES or size+min(st.st_size, MAX_FILE) > MAX_SOURCE_BYTES:
@@ -287,10 +402,17 @@ def capture(engine, project):
         except (DevError, OSError) as exc:
             incomplete = True
             skipped.append({'path': '.', 'code': getattr(exc, 'code', 'SCAN_FAILED')})
-    return {'kind': 'baseline', 'binding': bound, 'started': started, 'finished': time.time(), 'files': files,
-            'coverage': {'complete': not incomplete and not skipped, 'captured_files': len(files),
-                         'captured_bytes': size, 'skipped': skipped, 'truncated': incomplete,
-                         'max_files': MAX_FILES, 'max_bytes': MAX_SOURCE_BYTES, 'exclusions': EXCLUSIONS}}
+    coverage = {'complete': not incomplete and not skipped, 'scope': 'paths' if selected else 'project',
+                'paths': selected, 'captured_files': len(files), 'captured_bytes': size, 'skipped': skipped,
+                'truncated': incomplete, 'max_files': MAX_FILES, 'max_bytes': MAX_SOURCE_BYTES, 'exclusions': EXCLUSIONS}
+    if selected:
+        failures = {row['path']: row['code'] for row in skipped}
+        coverage['path_status'] = {
+            path: ('captured' if path in files else 'absent' if path in absent
+                   else failures.get(path, 'not_captured')) for path in selected}
+    return {'kind': 'baseline', 'binding': bound, 'started': started, 'finished': time.time(),
+            'files': files, 'coverage': coverage}
+
 
 
 def public_summary(review):
@@ -304,7 +426,8 @@ def freeze_review(engine, project, baseline_ref, *, finalize=False):
         if baseline.get('baseline_released') and baseline.get('baseline_ref') == baseline_ref:
             return public_summary(baseline)
         raise DevError('REVIEW_NOT_FOUND', '此编号不是可完成的基线', 404)
-    after = capture(engine, project)
+    paths = baseline['coverage'].get('paths')
+    after = capture(engine, project, paths=paths) if paths else capture(engine, project)
     files, added, removed, approximate = [], 0, 0, False
     for path in sorted(baseline['files'].keys() | after['files'].keys()):
         if review_excluded(path):
@@ -333,7 +456,7 @@ def freeze_review(engine, project, baseline_ref, *, finalize=False):
                                        'line_counts_approximate': approximate,
                                        'unverified_files': sum(x['status'] == 'unverified' for x in files)},
                            'coverage': {'before': baseline['coverage'], 'after': after['coverage'],
-                                        'complete': baseline['coverage']['complete'] and after['coverage']['complete']}, 'scope': SCOPE},
+                                        'complete': baseline['coverage']['complete'] and after['coverage']['complete']}, 'scope': SCOPE + (' 仅覆盖指定文件，不代表全项目。' if paths else '')},
                           finalize_project=project if finalize else None)
     return public_summary(document)
 
@@ -372,6 +495,8 @@ def open_workspace(engine, project, args):
     git = freshness(engine.root(project)[0])
     from agent.project_runtime import descriptor
     from shared.runtime_results import capability_index
+    from agent.project_knowledge import index_status
+    knowledge = index_status(engine, project)
     runtime = descriptor(engine.config, project, engine.root(project)[0])
     manifest = {'binding': binding(engine, project),
                 'documents': [{k: d[k] for k in ('path', 'sha256')} for d in context['documents']],
@@ -390,20 +515,20 @@ def open_workspace(engine, project, args):
     context_id = fingerprint(manifest)
     unchanged = context_id == args.get('context_id')
     result = {'view_version': 1, 'runtime': runtime, 'capability_index': capability_index(project.get('alias')), 'context_detail': args.get('context_detail', 'minimal'),
-              'observed_at': time.time(), 'git': git,
+              'observed_at': time.time(), 'git': git, 'knowledge': knowledge,
               'context_id': context_id, 'context_unchanged': unchanged,
               'workspace': {'project': project.get('alias'), 'project_id': project.get('id'),
                             'root': context['project_root'], 'mode': project['mode'], 'allow_tasks': project.get('allow_tasks'), 'granted_scopes': project.get('_coding_scopes')},
               'context': None if unchanged else context, 'truncated': context['truncated'],
               'context_scope': 'Bounded bootstrap only. Revalidated on every open; context_id is not an access token.',
-              'next': 'fs_read / skills_read on demand; capture baseline BEFORE edits; show_changes to freeze results.'}
+              'next': 'fs_read / skills_read on demand; capture baseline BEFORE edits; show_changes(finalize=true) when finished; read(reviews) lists retained baselines.'}
     result['_project_view_binding'] = {
         'project_id': project.get('id'), 'root': project.get('_original_root', project.get('root')),
         'device_id': project.get('_coding_device', project.get('device_id')),
         'workspace_id': args.get('workspace_id', ''), 'authority_revision': project.get('_authority_revision'),
         'mode': project.get('mode'), 'allow_tasks': bool(project.get('allow_tasks'))}
     if args.get('capture_baseline'):
-        baseline = ReviewStore(engine).save(capture(engine, project))
+        baseline = ReviewStore(engine).save(capture(engine, project, paths=args.get('baseline_paths')))
         result.update(baseline_ref=baseline['id'], baseline_coverage=baseline['coverage'], baseline_expires_at=baseline['expires_at'])
     return result
 
@@ -439,3 +564,16 @@ async def watch_cleanup(engine, stop_event):
             await asyncio.wait_for(stop_event.wait(), CLEANUP_INTERVAL)
         except asyncio.TimeoutError:
             pass
+
+
+def review_snapshots(engine, project, args):
+    return ReviewStore(engine).inspect(project, offset=args.get('offset', 0), limit=args.get('limit', 40))
+
+
+def review_snapshots_manage(engine, project, args):
+    engine.root(project, write=True)
+    store = ReviewStore(engine)
+    if args['action'] == 'compact':
+        return {'action': 'compact', **store.compact(project)}
+    store.release_baseline(args['baseline_ref'], project)
+    return {'action': 'release', 'released': True, 'baseline_ref': args['baseline_ref']}

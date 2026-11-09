@@ -101,8 +101,28 @@ def test_query_never_reaches_a_mutation():
 def test_query_rejects_baseline_capture():
     with pytest.raises(DevError):
         u.translate('query', {'action': 'project', 'project': 'P', 'args': {'capture_baseline': True}})
-    plan = u.translate('act', {'action': 'baseline', 'project': 'P'})
-    assert (plan.tool, plan.args) == ('workspace', {'operation': 'open', 'project': 'P', 'capture_baseline': True})
+    with pytest.raises(DevError, match='idempotency_key'):
+        u.translate('act', {'action': 'baseline', 'project': 'P'})
+    plan = u.translate('act', {'action': 'baseline', 'project': 'P', 'idempotency_key': KEY})
+    assert (plan.tool, plan.args) == ('workspace', {'operation': 'open', 'project': 'P',
+                                                   'idempotency_key': KEY, 'capture_baseline': True})
+
+
+def test_review_management_keeps_write_authority_and_does_not_capture_baseline():
+    plan = u.translate('query', {'action': 'changes', 'view': 'reviews', 'project': 'P'})
+    assert (plan.tool, plan.args) == ('read', {'operation': 'reviews', 'project': 'P'})
+    assert TOOLS[internal_target(plan.tool, 'reviews')].scope == 'read'
+    for action in ('compact', 'release'):
+        options = {'action': action}
+        if action == 'release':
+            options['baseline_ref'] = 'a' * 32
+        plan = u.translate('act', {'action': 'baseline', 'view': 'manage',
+                                  'project': 'P', 'idempotency_key': KEY, 'args': options})
+        assert (plan.tool, plan.args) == ('edit', {'operation': 'reviews', 'project': 'P',
+                                                  'idempotency_key': KEY, 'options': options})
+        target = TOOLS[internal_target(plan.tool, 'reviews')]
+        assert target.scope == 'write'
+        target.model.model_validate({'project': 'P', 'idempotency_key': KEY, **options})
 
 
 @pytest.mark.parametrize('address', sorted(
@@ -370,3 +390,88 @@ def test_rewritten_help_identifies_unified_target(legacy_tool, operation):
     request = hint['arguments']['args']
     assert request['tool'] in {'query', 'act'}
     assert u.resolve_help(request['action'], request['view'], request['tool'])[3:] == (legacy_tool, operation)
+
+
+def test_unified_help_projects_actual_inputs_and_visible_views():
+    from jsonschema import Draft202012Validator
+    from hub.unified_help import _EXAMPLES, action_help
+
+    visible = ut.directory(ME.scopes, collaboration=True)
+    for tool, action, view in _EXAMPLES:
+        address = u.resolve_help(action, view, tool, visible=visible)
+        brief = action_help(address, visible[tool][action], project='P')
+        detailed = action_help(address, visible[tool][action], project='P', detail='schema')
+        assert 'inputSchema' not in brief and 'outputSchema' not in brief
+        example = detailed['example']
+        Draft202012Validator(detailed['inputSchema']).validate(example)
+        plan = u.translate(tool, example)
+        TOOLS[plan.tool].model.model_validate(plan.args)
+    open_help = action_help(u.resolve_help('project', 'open', 'query'), ['open', 'list'], detail='schema')
+    assert {'capture_baseline', 'baseline_paths'}.isdisjoint(open_help['inputSchema']['properties']['args']['properties'])
+    assert 'idempotency_key' in action_help(u.resolve_help('baseline'), ['open'])['required']
+    assert 'max_results' in action_help(u.resolve_help('search', 'start'), ['sync', 'start'])['args']
+    assert 'max_results' not in action_help(u.resolve_help('search', 'sync'), ['sync', 'start'])['args']
+    app_status = u.resolve_help('gui', 'app_status', 'query', visible=ut.directory({'read'}))
+    gui_help = action_help(app_status, ['status', 'app_status'], detail='schema', scopes={'read'})
+    assert gui_help['inputSchema']['properties']['args']['properties']['probe']['const'] is False
+    with pytest.raises(DevError, match='outside the current tool directory'):
+        u.resolve_help('exec', tool='act', visible=ut.directory({'read'}))
+    with pytest.raises(DevError, match='Unknown action'):
+        u.resolve_help('made_up', tool='query')
+
+
+def test_hints_filter_scope_preserve_cursor_and_project_nested_requests():
+    from shared.runtime_results import capability_index
+    visible = ut.directory({'read'}, collaboration=True)
+    value = {'capability_index': capability_index('P'),
+             'configuration': {'inbox_request': {'tool': 'collaboration_query', 'arguments': {
+                 'action': 'room_inbox', 'conversation_id': 'room1'}}},
+             'next_call': {'name': 'task_query', 'arguments': {'operation': 'get',
+                 'operation_ids': ['original'], 'after_output_seq': 2}}}
+    plan = u.translate('query', {'action': 'project', 'project': 'P'})
+    public = u.present_unified(value, visible=visible, plan=plan)
+    assert 'validation' not in public['capability_index']
+    assert public['capability_index']['search']['arguments']['args']['view'] == 'sync'
+    assert public['next_call']['arguments']['ids'] == ['original']
+    assert public['next_call']['arguments']['args']['after_output_seq'] == 2
+    assert public['configuration']['inbox_request']['arguments'] == {
+        'action': 'collab.inbox', 'view': 'room_inbox', 'args': {'conversation_id': 'room1'}}
+    assert 'tool' in value['configuration']['inbox_request']
+
+
+def test_successful_exec_projection_matches_inline_wait_and_retains_failure_evidence():
+    plan = u.translate('act', {'action': 'exec', 'project': 'P', 'command': 'ls', 'idempotency_key': KEY})
+    data = {'exit_code': 0, 'command_ok': True, 'output': 'output', 'output_truncated': False,
+            'runtime': {'runtime_ref': 'ref', 'revision': 'rev', 'mode': 'clean', 'schema_version': 1}}
+    terminal = {'operation_id': 'original', 'id': 'original', 'state': 'succeeded', 'pending': False,
+                'output': 'output', 'output_seq': 2, 'created': 12, 'next_attempt': 13,
+                'result': {'ok': True, 'data': data}}
+    lean = u.present_unified(terminal, plan=plan)
+    assert lean == u.present_unified({'operations': [terminal]}, plan=plan)
+    assert lean['output_seq'] == 2 and lean['exit_code'] == 0 and lean['output'] == 'output'
+    assert lean['runtime']['runtime_ref'] == 'ref' and 'next_attempt' not in lean
+    assert u.present_unified(terminal, plan=plan, verbosity='full')['created'] == 12
+    assert terminal['result']['data']['runtime']['schema_version'] == 1
+
+    failed = {'operation_id': 'original', 'state': 'failed', 'output_seq': 2,
+              'output': '/bin/sh: 1: rg: not found\n', 'result': {'ok': True,
+                  'data': {'exit_code': 127, 'command_ok': False}}}
+    shown = u.present_unified(failed, plan=plan, visible=ut.directory({'read', 'execute'}))
+    assert shown['error']['code'] == shown['error_code'] == 'COMMAND_MISSING'
+    assert shown['state'] == 'failed' and shown['exit_code'] == 127 and shown['output_seq'] == 2
+    assert shown['search_help']['arguments']['args']['view'] == 'sync'
+
+
+def test_recovery_separates_argument_rejection_from_transport_and_unknown_outcomes():
+    from shared.operation_recovery import error_recovery, operation_recovery
+
+    rejected = error_recovery('INVALID_ARGUMENTS')
+    assert rejected['execution_started'] is False and rejected['next_action'] == 'correct_arguments'
+    assert error_recovery('INVALID_ARGUMENTS', 'original')['next_action'] == 'query_original_operation'
+    disconnected = operation_recovery({'state': 'reconnecting', 'id': 'original', 'pending': True},
+                                      online=False, after_output_seq=2)
+    assert disconnected['category'] == 'transport_interrupted'
+    assert disconnected['operation_id'] == 'original' and disconnected['after_output_seq'] == 2
+    uncertain = operation_recovery({'state': 'needs_review', 'id': 'original'}, online=True)
+    assert uncertain['category'] == 'outcome_unconfirmed' and not uncertain['task_outcome_confirmed']
+    assert uncertain['next_action'] == 'query_original_operation' and not uncertain['automatic_replay']

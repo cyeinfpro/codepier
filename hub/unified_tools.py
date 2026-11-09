@@ -22,41 +22,46 @@ _ISSUED = frozenset({'consumer_session_id', 'consumer_fence', 'consumer_proof', 
                      'binding_generation'})
 
 
-def visible_actions(tool, scopes=None, *, collaboration=False):
-    """Unified actions the caller may discover. Discovery is never authorization."""
+def directory(scopes=None, *, collaboration=False):
+    """Project one action/view directory for the caller's current scopes."""
     from hub.tool_discovery import catalogs, scope_allows
-    visible = catalogs(scopes)
-    readable = scopes is None or 'read' in scopes
-    result = []
-    for action, spec in u.ACTIONS[tool].items():
-        if action.startswith('collab.'):
-            if collaboration and readable:
-                result.append(action)
-            continue
-        if action == 'help':
-            if readable:
-                result.append(action)
-            continue
-        if action == 'baseline' and scopes is not None and 'write' not in scopes:
-            continue
-        for legacy_tool, operation in spec.values():
-            if legacy_tool in u.STANDALONE_TOOLS:
-                allowed = scope_allows(legacy_tool, {}, scopes) is not False
+
+    visible = {'query': {}, 'act': {}}
+    if scopes is not None and 'read' not in scopes:
+        return visible
+    native = catalogs(scopes)
+    for tool, actions in u.ACTIONS.items():
+        for action, routes in actions.items():
+            if action.startswith('collab.'):
+                views = list(routes) if collaboration else []
+            elif action == 'help':
+                views = list(routes)
+            elif action == 'baseline' and scopes is not None and 'write' not in scopes:
+                continue
             else:
-                allowed = (operation or u.IMPLICIT_OPERATION[legacy_tool]) in visible.get(legacy_tool, {})
-            if allowed:
-                result.append(action)
-                break
-    return result
+                views = [view for view, (legacy, operation) in routes.items()
+                         if (scope_allows(legacy, {}, scopes) if legacy in u.STANDALONE_TOOLS
+                             else (operation or u.IMPLICIT_OPERATION[legacy]) in native.get(legacy, {}))]
+            if views:
+                visible[tool][action] = views
+    return visible
+
+
+def visible_actions(tool, scopes=None, *, collaboration=False):
+    return list(directory(scopes, collaboration=collaboration)[tool])
+
+
+def runtime_directory(runtime, scopes):
+    collaboration = getattr(runtime, 'collaboration', None)
+    return directory(scopes, collaboration=bool(collaboration and collaboration.config.enabled))
 
 
 def tool_definitions(scopes=None, *, collaboration=False, authorization='fixed'):
     result = []
-    for tool in ('query', 'act'):
-        actions = visible_actions(tool, scopes, collaboration=collaboration)
+    for tool, actions in directory(scopes, collaboration=collaboration).items():
         if not actions:
             continue
-        item = {'name': tool, 'description': u.DESCRIPTIONS[tool],
+        item = {'name': tool, 'description': u.description(tool, actions),
                 'inputSchema': u.input_schema(tool, actions),
                 'annotations': dict(u.ANNOTATIONS[tool]),
                 '_meta': {'securitySchemes': [{'type': 'oauth2', 'scopes': ['read']}],
@@ -75,13 +80,51 @@ def tool_definitions(scopes=None, *, collaboration=False, authorization='fixed')
 
 
 def catalog(scopes=None, *, collaboration=False):
-    return {'tools': {tool: {action: list(u.ACTIONS[tool][action])
-                             for action in visible_actions(tool, scopes, collaboration=collaboration)}
-                      for tool in ('query', 'act')},
-            'top_level': {tool: list(fields) for tool, fields in u.TOP_LEVEL.items()},
-            'note': "Values are views; the first is the default. Put every other field in args. "
-                    "query(action='help', args={'action': '<action>', 'view': '<view>'}) returns the exact schema. "
-                    "Discovery is not authorization."}
+    return {'tools': directory(scopes, collaboration=collaboration),
+            'note': "Choose a view or use the default. query help accepts args.tool/action/view; "
+                    "args.detail=schema returns machine schemas. Action-specific fields go in args."}
+
+
+def convert_hint(name, arguments):
+    from shared.public_collaboration import LEGACY_TOOLS, request
+    from hub.core_tools import public_call
+    try:
+        if name in LEGACY_TOOLS:
+            public = request(name, arguments)
+            return u.unified_hint(public['tool'], public['arguments'])
+        return u.unified_hint(*public_call(name, arguments))
+    except (KeyError, ValueError):
+        return None
+
+
+def error_followup(recovery, name, raw, plan, visible):
+    project = plan.project if plan else raw.get('project')
+    project = project if isinstance(project, str) and 0 < len(project) <= 100 else ''
+    workspace = plan.workspace_id if plan else ''
+    if recovery['next_action'] == 'query_original_operation':
+        hint = u.recovery_call(recovery['operation_id'], project=project, workspace_id=workspace,
+                               after_output_seq=plan.after_output_seq if plan else None)
+    elif recovery['category'] == 'argument_rejected' and 'help' in visible.get('query', {}):
+        action = plan.action if plan else raw.get('action')
+        arguments = {'action': 'help'}
+        if project:
+            arguments['project'] = project
+        if isinstance(action, str) and action in visible.get(name, {}) and action != 'help':
+            arguments['args'] = {'tool': name, 'action': action}
+            view = plan.view if plan else raw.get('view')
+            if view in visible[name][action]:
+                arguments['args']['view'] = view
+            options = raw.get('args', {})
+            if name == 'query' and action == 'project' and isinstance(options, dict) and (
+                    options.get('capture_baseline') or 'baseline_paths' in options):
+                if 'baseline' in visible.get('act', {}):
+                    arguments['args'] = {'tool': 'act', 'action': 'baseline'}
+        elif isinstance(action, str) and name == 'query' and action in visible.get('act', {}):
+            arguments['args'] = {'tool': 'act', 'action': action}
+        hint = {'name': 'query', 'arguments': arguments}
+    else:
+        return None
+    return hint if u.hint_is_visible(hint, visible) else None
 
 
 # ---- Collaboration handles ------------------------------------------------
@@ -162,34 +205,25 @@ async def _prepare_help(runtime, plan, principal):
     if 'read' not in user.scopes:
         raise DevError('INSUFFICIENT_SCOPE', '缺少 read 权限', 403, required_scope='read')
     request = plan.help_for
-    plan.args = {'operation': 'help', 'tool': '', 'action': ''}
+    collaboration = getattr(runtime, 'collaboration', None)
+    if 'event' in request:
+        if set(request) & {'action', 'view', 'tool'}:
+            raise DevError('INVALID_ARGUMENTS', 'Choose either an action or an event for help.', 422)
+        if collaboration is None or not collaboration.config.events_enabled:
+            raise DevError('EVENTS_DISABLED', 'Events are unavailable on this connection.', 403)
+        plan.local = await runtime.store.run(collaboration.events.help, request['event'], user,
+                                             request.get('detail', 'brief'))
+        return
     if not request.get('action'):
-        collaboration = getattr(runtime, 'collaboration', None)
-        enabled = bool(collaboration is not None and collaboration.config.enabled)
-        plan.local = catalog(user.scopes, collaboration=enabled)
+        plan.local = catalog(user.scopes, collaboration=bool(collaboration and collaboration.config.enabled))
         return
-    unified, action, view, legacy_tool, operation = u.resolve_help(
-        request['action'], request.get('view', ''), request.get('tool', ''))
-    note = u.unified_call_note(unified, action, view)
-    if legacy_tool in {'get_profile', 'get_access_context'}:
-        plan.local = {'tool': unified, 'action': action, 'view': view,
-                      'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False},
-                      'unified_call': note}
-        return
-    if legacy_tool in u.KNOWLEDGE_TOOLS:
-        from shared.contracts import TOOLS, OUTPUT_SCHEMAS
-        from hub.tool_discovery import scope_allows
-        if not scope_allows(legacy_tool, {}, user.scopes):
-            raise DevError('INSUFFICIENT_SCOPE', '缺少知识地图权限', 403,
-                           required_scope=TOOLS[legacy_tool].scope)
-        plan.local = {'tool': unified, 'action': action, 'view': view,
-                      'description': TOOLS[legacy_tool].description,
-                      'inputSchema': TOOLS[legacy_tool].model.model_json_schema(),
-                      'outputSchema': OUTPUT_SCHEMAS[legacy_tool],
-                      'unified_call': note}
-        return
-    plan.args = {'operation': 'help', 'tool': legacy_tool, 'action': operation}
-    request['note'] = note
+    visible = runtime_directory(runtime, user.scopes)
+    address = u.resolve_help(request['action'], request.get('view', ''), request.get('tool', ''), visible=visible)
+    tool, action = address[:2]
+    from hub.unified_help import action_help
+    plan.local = action_help(address, visible[tool][action], project=request.get('project', ''),
+                             workspace_id=request.get('workspace_id', ''), detail=request.get('detail', 'brief'),
+                             scopes=user.scopes)
 
 
 async def prepare(runtime, name, raw, principal):
@@ -225,8 +259,6 @@ async def execute(runtime, plan, principal):
     if plan.local is not None:
         return plan.local, plan.tool, plan.args
     value = await runtime.invoke(plan.tool, plan.args, principal)
-    if plan.help_for is not None and plan.help_for.get('note') and isinstance(value, dict):
-        value = {**value, 'unified_call': plan.help_for['note']}
     if plan.collab and isinstance(value, dict):
         value = await _mint(runtime, plan, value, principal)
     if plan.wait and isinstance(value, dict) and value.get('pending') and isinstance(value.get('operation_id'), str):

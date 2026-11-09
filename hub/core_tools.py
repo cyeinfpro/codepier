@@ -393,14 +393,28 @@ def _result(name, arguments, value, *, scopes=None):
 
 
 def result(name, arguments, value, *, scopes=None, view=2, verbosity='lean', text_mode='json', output_mode='raw',
-           unified=False):
+           unified=False, unified_views=None):
     from shared.mcp_presentation import token_view, compact_output_text
     rendered = _result(name, arguments, value, scopes=scopes)
-    public = token_view(name, arguments, rendered['structuredContent'], view=view, verbosity=verbosity, output_mode=output_mode)
+    presentation_args = arguments
+    if getattr(unified, 'action', '') == 'tree':
+        options = {'format': 'compact', **unified.args.get('options', {})}
+        presentation_args = {**unified.args, 'options': options}
+    public = token_view(name, presentation_args, rendered['structuredContent'], view=view,
+                        verbosity=verbosity, output_mode=output_mode)
+    if getattr(unified, 'action', '') == 'tree' and name == 'process':
+        for row in public.get('operations', []):
+            data = (row.get('result') or {}).get('data')
+            if isinstance(data, dict):
+                row['result']['data'] = token_view('workspace', presentation_args, data, view=view,
+                                                  verbosity=verbosity, output_mode=output_mode)
     if unified:
         # Presentation only: unified next-call hints and no duplicated output.
         from shared.unified_contracts import present_unified
-        public = present_unified(public, verbosity=verbosity)
+        from hub.unified_tools import convert_hint
+        public = present_unified(public, verbosity=verbosity,
+                                 plan=None if unified is True else unified,
+                                 visible=unified_views, convert=convert_hint)
     rendered['structuredContent'] = public
     text_public = compact_output_text(public) if text_mode == 'compact' else public
     text = json.dumps(text_public, ensure_ascii=False, separators=(',', ':'))
@@ -408,7 +422,7 @@ def result(name, arguments, value, *, scopes=None, view=2, verbosity='lean', tex
         if name == 'read' and isinstance(public.get('content'), str) and 'sha256' in public:
             header = {key: item for key, item in public.items() if key != 'content'}
             text = json.dumps(header, ensure_ascii=False, separators=(',', ':')) + '\n' + public['content']
-        elif name == 'exec' and 'exit_code' in public and isinstance(public.get('output'), str):
+        elif (name == 'exec' or getattr(unified, 'action', '') == 'exec') and 'exit_code' in public and isinstance(public.get('output'), str):
             header = {key: item for key, item in public.items() if key != 'output'}
             text = json.dumps(header, ensure_ascii=False, separators=(',', ':')) + '\n' + public['output']
     rendered['content'][0]['text'] = text

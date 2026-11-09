@@ -51,7 +51,10 @@ class Searches:
                 used=self.journal.db.execute('SELECT COUNT(*),COALESCE(SUM(stored_bytes),0) FROM search_sessions').fetchone()
             if old:
                 if old['root']!=str(root) or old['args']!=encoded:raise DevError('IDEMPOTENCY_CONFLICT','搜索编号已用于另一请求')
-                return {'search_id':identifier,'state':old['state'],'project_root':str(root),'expires':old['expires'],'scan_scope':old['scan_scope']}
+                return {'search_id':identifier,'state':old['state'],'project_root':str(root),'expires':old['expires'],
+                        'scan_scope':old['scan_scope'],'file_count':old['file_count'],'truncated':bool(old['truncated']),
+                        'scan_status':'scan_limited' if old['truncated'] else 'ready' if old['file_count'] else 'no_files',
+                        'next':'searches_get'}
             if used[0]>=32 or used[1]>=MAX_STORAGE:
                 raise DevError('SEARCH_BUSY','搜索保留达到 32 个会话或 128 MiB 结果预算；一小时后过期回收',429)
             paths=[];manifest_bytes=0;truncated=False;error=None;begin=time.monotonic();scan_scope='filesystem_walk'
@@ -80,7 +83,9 @@ class Searches:
                 self.journal.db.execute('UPDATE search_sessions SET scan_scope=? WHERE id=?', (scan_scope, identifier))
                 self.journal.db.executemany('INSERT INTO search_files VALUES (?,?,?)',((identifier,i+1,path) for i,path in enumerate(paths)))
             return {'search_id':identifier,'state':state,'project_root':str(root),'expires':now+TTL,'file_count':len(paths),
-                    'truncated':truncated,'scan_scope':scan_scope,'next':'searches_get','execution':'Scanning advances on searches_get; no automatic background execution.'}
+                    'truncated':truncated,'scan_scope':scan_scope,
+                    'scan_status':'scan_limited' if truncated else 'ready' if paths else 'no_files',
+                    'next':'searches_get','execution':'Scanning advances when the original search session is read.'}
 
     def advance(self,project,row,minimum_results=0):
         args=json.loads(row['args']);root,_=self.engine.root(project);begin=time.monotonic()
@@ -169,11 +174,17 @@ class Searches:
             if files[path] is False:
                 continue
             item.update(seq=hit[0],current_sha256=files[path],stale=files[path]!=item['sha256']);results.append(item)
+        scan_status = 'running' if row['state'] == 'running' else row['state']
+        if row['state'] == 'completed':
+            scan_status = ('scan_limited' if row['truncated'] else 'no_files' if not row['file_count']
+                           else 'no_matches' if not row['result_count'] else 'matches')
         return {'search_id':row['id'],'state':row['state'],'results':results,'cursor':hits[-1][0] if hits else args['cursor'],
+                'scan_status':scan_status,
                 'has_more':more or row['state']=='running','scanned_files':row['scanned'],'file_count':row['file_count'],
                 'skipped_files':row['skipped'],'skipped_reasons':json.loads(row['skipped_reasons']),'result_count':row['result_count'],'truncated':bool(row['truncated']),
                 'error':row['error'],'expires':row['expires'],'scan_scope':row['scan_scope'],
-                'hint':'结果被截断；请缩小 path 或 file_glob，0 条命中不代表不存在' if row['truncated'] else None,
+                'hint':('path 和 file_glob 范围内没有可扫描文件。file_glob 匹配项目相对路径。' if scan_status == 'no_files'
+                        else '结果被截断；请缩小 path 或 file_glob，0 条命中不代表不存在' if row['truncated'] else None),
                 'consistency':'Saved file manifest and per-file content; not an atomic snapshot. Returned hits are SHA-rechecked. New files need a new search.',
                 'precision':'References are syntactic candidates, not LSP type resolution; unsupported and unparsable files count as skipped.'}
 

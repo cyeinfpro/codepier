@@ -50,3 +50,19 @@ def safe_filesystem_error_detail(tool, code, details):
         if isinstance(value, str) and re.fullmatch('[a-f0-9]{' + str(length) + '}', value):
             result[key] = value
     return result
+
+
+def safe_review_error_detail(code, details):
+    if code != 'REVIEW_QUOTA' or not isinstance(details, dict):
+        return {}
+    import math
+    result = {'quota_scope': 'agent', 'retryable': False}
+    for key in ('used_bytes', 'limit_bytes', 'records', 'limit_records',
+                'completion_reserve_bytes', 'required_bytes', 'effective_limit_bytes'):
+        value = details.get(key)
+        if type(value) is int and 0 <= value <= 2**53 - 1:
+            result[key] = value
+    value = details.get('next_reclaim_at')
+    if value is None or type(value) in (int, float) and math.isfinite(value) and 0 <= value <= 2**53 - 1:
+        result['next_reclaim_at'] = value
+    return result

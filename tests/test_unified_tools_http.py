@@ -37,7 +37,8 @@ def test_default_catalog_is_unified_and_small(api, modern):  # noqa: F811
 def test_unified_call_matches_legacy_call(api, modern):  # noqa: F811
     _, client, credential = api
     unified = structured(call(client, credential, 'tools/call',
-                              {'name': 'query', 'arguments': {'action': 'project', 'view': 'list'}}, modern=modern))
+                              {'name': 'query', 'arguments': {'action': 'project', 'view': 'list'}},
+                              query='?verbosity=full', modern=modern))
     legacy = structured(call(client, credential, 'tools/call',
                              {'name': 'workspace', 'arguments': {'operation': 'list'}}, modern=modern))
     assert not unified.get('isError'), unified
@@ -59,10 +60,14 @@ def test_help_and_guards(api):  # noqa: F811
     schema = structured(call(client, credential, 'tools/call',
                              {'name': 'query', 'arguments': {'action': 'help', 'args': {'action': 'job', 'view': 'wait'}}}))
     assert not schema.get('isError'), schema
-    assert schema['structuredContent']['unified_call']['view'] == 'wait'
+    assert schema['structuredContent']['view'] == 'wait'
+    assert schema['structuredContent']['required'] == ['ids']
+    assert 'inputSchema' not in schema['structuredContent']
     blocked = structured(call(client, credential, 'tools/call', {'name': 'query', 'arguments': {
         'action': 'project', 'project': 'x', 'args': {'capture_baseline': True}}}))
     assert blocked['isError']
+    assert blocked['structuredContent']['recovery']['execution_started'] is False
+    assert blocked['structuredContent']['next_call']['arguments']['action'] == 'help'
     wrong = structured(call(client, credential, 'tools/call', {'name': 'query', 'arguments': {'action': 'exec'}}))
     assert wrong['isError']
     assert json.loads(wrong['content'][0]['text'])['error']['code'] == 'UNKNOWN_OPERATION'
@@ -114,7 +119,7 @@ def test_open_capability_help_round_trip(api, monkeypatch, modern):  # noqa: F81
     for hint in index.values():
         helped = structured(call(client, credential, 'tools/call', hint, modern=modern))
         assert not helped.get('isError'), (hint, helped)
-        assert 'unified_call' in helped['structuredContent']
+        assert helped['structuredContent']['action'] in {'search', 'changes', 'tasks', 'artifacts', 'validate'}
 
 
 @pytest.mark.parametrize('modern', [False, True])
@@ -131,8 +136,13 @@ def test_knowledge_discovery_help_and_read_token_guards(api, modern):  # noqa: F
     helped = structured(call(client, credential, 'tools/call', {'name': 'query',
         'arguments': {'action': 'help', 'args': {'action': 'knowledge'}}}, modern=modern))
     assert not helped.get('isError'), helped
-    assert helped['structuredContent']['unified_call']['view'] == 'query'
-    assert 'paths' in helped['structuredContent']['inputSchema']['properties']
+    assert helped['structuredContent']['view'] == 'query'
+    assert 'paths' in helped['structuredContent']['args']
+    assert 'outputSchema' not in helped['structuredContent']
+    detailed = structured(call(client, credential, 'tools/call', {'name': 'query',
+        'arguments': {'action': 'help', 'args': {'action': 'knowledge', 'detail': 'schema'}}}, modern=modern))
+    assert 'paths' in detailed['structuredContent']['inputSchema']['properties']['args']['properties']
+    assert 'outputSchema' in detailed['structuredContent']
     for name, arguments in (
         ('act', {'action': 'knowledge', 'project': 'fixture', 'idempotency_key': 'http-denied-build'}),
         ('project_knowledge_build', {'project': 'fixture', 'idempotency_key': 'http-denied-build'}),

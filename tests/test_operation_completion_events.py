@@ -510,3 +510,29 @@ async def test_exact_subscription_target_and_current_snapshot_guard(harness):
         matches = events.matches(sub, filters, event)
         assert matches == (event['object_id'] == events.operations.object_id(identifier, data))
         assert not events.matches(sub, filters, {**event, 'target_grant_id': ''})
+
+
+@pytest.mark.asyncio
+async def test_unified_operation_webhook_recovers_original_and_legacy_receipt_stays_compatible(harness):
+    from jsonschema import Draft202012Validator
+    from hub.collaboration.event_contracts import definition
+    from shared.unified_contracts import translate
+
+    s, events, receiver, worker, room, _ = harness
+    seed(harness)
+    subscription = await events.subscribe(arguments('operation1'), worker, unified=True)
+    finish(harness)
+    await events.tick()
+    delivery = s.store.one('SELECT body,state FROM mcp_event_deliveries WHERE subscription_id=?', (subscription['id'],))
+    assert delivery['state'] == 'accepted'
+    payload = json.loads(delivery['body'])['data']
+    catalog = definition(OPERATION_EVENT, unified=True)
+    Draft202012Validator(catalog['payloadSchema']).validate(payload)
+    hint = payload['next_call']
+    assert hint['name'] == 'query' and hint['arguments']['ids'] == ['operation1']
+    assert hint['arguments']['project'] == payload['project_id']
+    assert hint['arguments']['workspace_id'] == WORKSPACE
+    plan = translate('query', {**hint['arguments'], 'args': {'after_output_seq': 2}})
+    assert plan.args['operation_ids'] == ['operation1'] and plan.args['after_output_seq'] == 2
+    assert payload['output_seq'] == 4
+    assert json.loads(outbox(harness)[0]['data'])['next_call']['name'] == 'task_query'

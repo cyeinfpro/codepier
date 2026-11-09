@@ -67,17 +67,17 @@ def identity(engine, project, write=False):
     return root, owner, key
 
 
-def load(engine, key, *, repair=False):
+def _read_record(engine, key, statement):
     # A read, including the first read on a fresh Agent, never creates a table.
     def read_row(db):
         if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_knowledge'").fetchone():
             return None
-        return db.execute("SELECT revision,payload,updated FROM project_knowledge WHERE map_key=?", (key,)).fetchone()
+        return db.execute(statement, (key,)).fetchone()
 
     try:
         if hasattr(engine.journal, "db"):
             with engine.journal.lock:
-                row = read_row(engine.journal.db)
+                return read_row(engine.journal.db)
         else:
             # Native turn readers and isolated probes get only a state directory.
             # mode=ro cannot create the DB, migrations or operation records.
@@ -85,9 +85,13 @@ def load(engine, key, *, repair=False):
             if not database.is_file():
                 return None
             with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
-                row = read_row(db)
+                return read_row(db)
     except sqlite3.Error as exc:
         raise DevError("KNOWLEDGE_STORE_UNAVAILABLE", "知识地图暂时不可读取", 503) from exc
+
+
+def load(engine, key, *, repair=False):
+    row = _read_record(engine, key, "SELECT revision,payload,updated FROM project_knowledge WHERE map_key=?")
     if row is None:
         return None
     try:
@@ -116,6 +120,30 @@ def load(engine, key, *, repair=False):
             raise DevError("KNOWLEDGE_CORRUPT", "知识地图格式无效；请重新生成", 409) from exc
         payload = {"version": VERSION, "entries": []}
     return {"revision": row[0], "payload": payload, "generated_at": row[2]}
+
+
+def index_status(engine, project):
+    """Read stored index metadata without opening source files or scheduling work."""
+    try:
+        _, _, key = identity(engine, project)
+        row = _read_record(engine, key, f"""SELECT revision,updated,
+            json_extract(doc,'$.version'),
+            CASE WHEN json_type(doc,'$.entries') = 'array' THEN json_array_length(doc,'$.entries') END,
+            json_extract(doc,'$.scan_scope'),
+            (SELECT COALESCE(SUM(value),0) FROM json_each(doc,'$.skipped_reasons'))
+            FROM (SELECT revision,updated,
+                         CASE WHEN length(CAST(payload AS BLOB)) <= {MAP_BYTES} AND json_valid(payload)
+                              THEN payload END AS doc
+                  FROM project_knowledge WHERE map_key=?)""")
+    except (DevError, OSError):
+        return {'state': 'unavailable'}
+    if row is None:
+        return {'state': 'missing'}
+    revision, generated, version, count, scope, skipped = row
+    if version != VERSION or type(count) is not int or not 0 <= count <= 5000:
+        return {'state': 'unavailable'}
+    return {'state': 'ready', 'revision': revision, 'generated_at': generated,
+            'entries_count': count, 'scan_scope': scope, 'skipped_files': skipped}
 
 
 def dockerfile(name):
@@ -367,11 +395,11 @@ def query(engine, project, args):
     result = {"state": "missing", "revision": "new", "entries": [],
               "total_matches": 0, "offset": args.get("offset", 0),
               "truncated": False, "next_offset": None, "trust": TRUST,
-              "freshness": "Selected files SHA-rechecked; no whole-repository freshness claim.",
               "refresh_required": False}
     if saved is None:
         return result
-    result.update(state="ready", revision=saved["revision"], generated_at=saved["generated_at"])
+    result.update(state="ready", revision=saved["revision"], generated_at=saved["generated_at"],
+                  freshness="Selected files SHA-rechecked; no whole-repository freshness claim.")
     text = args.get("query", "")[:300].casefold()
     terms = re.findall(r"[\w./-]+", text)[:24]
     matches = []

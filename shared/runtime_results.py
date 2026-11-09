@@ -20,6 +20,19 @@ _LINE = re.compile(r'^(?P<path>(?:[A-Za-z]:)?[^\r\n:]+):(?P<line>[1-9][0-9]{0,7}
 _ANSI = re.compile(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))')
 
 
+_SHELL_MISSING = re.compile(r"^(?:(?:[\w./-]+/)?(?:ba|da|z|k)?sh): "
+                            r"(?:(?:line )?\d+: )?(?P<command>[\w./+-]{1,200}): (?:command )?not found$")
+
+
+def missing_shell_command(output):
+    if isinstance(output, str):
+        for line in reversed(output[-4096:].splitlines()):
+            match = _SHELL_MISSING.fullmatch(_ANSI.sub('', line))
+            if match:
+                return PurePosixPath(match['command']).name
+    return None
+
+
 def failure_context(*, data=None, error=None, operation_id=None, source='agent_operation'):
     data, error = data or {}, error or {}
     cleanup = data.get('runtime_cleanup') if isinstance(data.get('runtime_cleanup'), dict) else {}
@@ -37,6 +50,8 @@ def failure_context(*, data=None, error=None, operation_id=None, source='agent_o
             code = ssh_code
     if code in DENIALS or (code and code.startswith(('ROOM_SCOPE_', 'DELEGATION_', 'LEASE_', 'FENCING_'))):
         category = 'codepier_authorization'
+    elif code == 'COMMAND_MISSING':
+        category = 'command_missing'
     elif code in UNAVAILABLE or outcome.get('state') == 'not_started':
         category = 'execution_unavailable'
     elif code in {'RUNTIME_CONTROL_UNCERTAIN', 'RUNTIME_CREATION_UNCERTAIN', 'RUNTIME_CLEANUP_PENDING', 'RUNTIME_OPERATION_REQUIRES_RECOVERY'} or cleanup.get('pending') or outcome.get('state') == 'unconfirmed':
@@ -51,6 +66,8 @@ def failure_context(*, data=None, error=None, operation_id=None, source='agent_o
         category = 'ssh_host_verification_failed'
     elif code == 'SSH_COMMAND_OR_CONNECTION_FAILED':
         category = 'ssh_command_or_connection_failed'
+    elif data.get('exit_code') == 127 and missing_shell_command(data.get('output')):
+        category, code = 'command_missing', 'COMMAND_MISSING'
     elif type(data.get('exit_code')) is int:
         category = 'succeeded' if data['exit_code'] == 0 else 'command_failed'
     else:

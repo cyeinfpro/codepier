@@ -119,6 +119,48 @@ def test_remote_finalization_replays_original_result_through_public_facade(codin
     assert '+final result' in detail['diff'] and 'later unrelated' not in detail['diff']
 
 
+def test_remote_scoped_review_inventory_release_and_scope_denial(coding_stack):
+    s = coding_stack
+    baseline = value(s, tool(s, 'open_workspace', {
+        'project': 'ProjectAlpha', 'capture_baseline': True,
+        'baseline_paths': ['new-scoped.svg']}))
+    assert baseline['baseline_coverage']['scope'] == 'paths'
+    inventory = value(s, tool(s, 'review_snapshots', {'project':'ProjectAlpha'}))
+    assert any(item['ref'] == baseline['baseline_ref'] for item in inventory['snapshots'])
+    grant = s.must(s.client.post('/api/grants', json={
+        'label':'review-inventory-reader', 'scopes':['read'], 'projects':[s.project['id']], 'days':1}))
+    private = value(s, tool(s, 'review_snapshots', {'project':'ProjectAlpha'}, grant['token']))
+    assert private['owned_records'] == 0 and not private['snapshots']
+    args = {'project':'ProjectAlpha', 'action':'release', 'baseline_ref':baseline['baseline_ref'],
+            'idempotency_key':'release-review-'+uuid.uuid4().hex}
+    denied = tool(s, 'review_snapshots_manage', args, grant['token'])
+    assert denied['isError'] and denied['structuredContent']['error']['code'] == 'INSUFFICIENT_SCOPE'
+    released = value(s, tool(s, 'review_snapshots_manage', args))
+    replay = value(s, tool(s, 'review_snapshots_manage', args))
+    assert released['released'] and replay['operation_id'] == released['operation_id']
+    inventory = value(s, tool(s, 'review_snapshots', {'project':'ProjectAlpha'}))
+    assert not any(item['ref'] == baseline['baseline_ref'] for item in inventory['snapshots'])
+
+
+def test_unified_review_inventory_and_management_reach_agent(coding_stack):
+    s = coding_stack
+    baseline = value(s, s.mcp('act', {'action': 'baseline', 'project': 'ProjectAlpha',
+        'idempotency_key': 'scoped-baseline-' + uuid.uuid4().hex,
+        'args': {'baseline_paths': ['unified-scoped.svg']}}))
+    assert baseline['baseline_coverage']['paths'] == ['unified-scoped.svg']
+    request = {'action': 'changes', 'view': 'reviews', 'project': 'ProjectAlpha'}
+    inventory = value(s, s.mcp('query', request))
+    assert baseline['baseline_ref'] in {item['ref'] for item in inventory['snapshots']}
+    args = {'action': 'baseline', 'view': 'manage', 'project': 'ProjectAlpha',
+        'idempotency_key': 'unified-release-' + uuid.uuid4().hex,
+        'args': {'action': 'release', 'baseline_ref': baseline['baseline_ref']}}
+    released = value(s, s.mcp('act', args))
+    assert released['released']
+    assert value(s, s.mcp('act', args))['operation_id'] == released['operation_id']
+    inventory = value(s, s.mcp('query', request))
+    assert baseline['baseline_ref'] not in {item['ref'] for item in inventory['snapshots']}
+
+
 def test_coding_profile_uses_canonical_oauth_resource_and_revocation(coding_stack):
     from urllib.parse import parse_qs,urlparse
     from tests.test_integration import oauth_prepare
@@ -137,3 +179,28 @@ def test_coding_profile_uses_canonical_oauth_resource_and_revocation(coding_stac
     assert opened['workspace']['granted_scopes']==['read']
     assert s.client.post('/oauth/revoke',data={'token':tokens['access_token'],'client_id':registration['client_id']}).status_code==200
     assert rpc(s,'tools/list',token=tokens['access_token']).status_code==401
+
+
+def test_unified_open_surfaces_knowledge_and_tree_is_compact_only_in_presentation(coding_stack):
+    s = coding_stack
+    project = 'ProjectGamma'
+    opened = value(s, s.mcp('query', {'action': 'project', 'project': project}))
+    assert opened['knowledge']['state'] == 'missing'
+    next_call = opened['knowledge']['next']
+    assert next_call['name'] == 'query' and next_call['arguments']['args']['action'] == 'knowledge'
+    tree_args = {'action': 'tree', 'project': project, 'limit': 2}
+    compact = value(s, s.mcp('query', tree_args))
+    assert isinstance(compact['entries'], str) and compact['next_offset']
+    structured = value(s, s.mcp('query', {**tree_args, 'args': {'format': 'structured'}}))
+    assert isinstance(structured['entries'], list) and structured['next_offset'] == compact['next_offset']
+    built = value(s, s.mcp('act', {'action': 'knowledge', 'project': project,
+        'idempotency_key': 'coding-knowledge-' + uuid.uuid4().hex, 'args': {'auto_refresh': False}}))
+    assert built['state'] == 'ready'
+    latest = value(s, s.mcp('query', {'action': 'project', 'project': project,
+        'args': {'context_id': opened['context_id']}}))
+    assert latest['knowledge']['state'] == 'ready' and latest['knowledge']['revision'] == built['revision']
+    assert latest['knowledge']['maintenance'] == {'state': 'disabled', 'enabled': False}
+    warm = value(s, s.mcp('query', {'action': 'project', 'project': project,
+        'args': {'context_id': latest['context_id']}}))
+    assert warm['context_unchanged'] and warm['context'] is None
+    assert 'capability_index' not in warm and warm['knowledge']['state'] == 'ready'

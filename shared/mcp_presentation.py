@@ -70,7 +70,7 @@ _DOCUMENT = _FILE_INDEX | frozenset({'content', 'total_lines', 'start_line',
 _OPEN = _RECEIPT | frozenset({'context_id', 'context_unchanged', 'workspace',
     'context', 'context_detail', 'view_version', 'observed_at', 'truncated',
     'baseline_ref', 'baseline_coverage', 'baseline_expires_at', 'context_scope',
-    'context_refresh_required', 'compatibility', 'runtime', 'capability_index'})
+    'context_refresh_required', 'compatibility', 'runtime', 'capability_index', 'knowledge'})
 _EXEC_RESULT = _RECEIPT | frozenset({'exit_code', 'output', 'output_truncated',
     'output_omitted', 'timed_out', 'cancelled', 'duration_ms', 'command_ok',
     'target', 'resource_coordination', 'host', 'port', 'username', 'ssh_error', 'ssh_diagnostics', 'transport_runtime',
@@ -279,6 +279,9 @@ def _open(value, args):
             'head', 'ahead', 'behind', 'dirty', 'network_checked', 'last_fetch_age_seconds', 'warning'})
     if 'context' in value:
         result['context'] = _context(value['context'], detail)
+    if isinstance(value.get('knowledge'), dict):
+        result['knowledge'] = _pick(value['knowledge'], {'state', 'revision', 'generated_at', 'entries_count',
+                                                        'scan_scope', 'skipped_files', 'maintenance', 'next'})
     if value.get('context_unchanged') and value.get('view_version') != VIEW_VERSION:
         # Old receipt contains no body from which to construct the new index.
         # Never pretend this was a fresh minimal-context observation.

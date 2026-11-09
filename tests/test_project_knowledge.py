@@ -504,3 +504,22 @@ def test_protocol_relative_import_resolves_only_existing_local_entry(workspace):
     entry = query(workspace, paths=["protocol/plugin.proto"])["entries"][0]
     assert entry["imports"] == ["./common.proto"]
     assert entry["related_paths"] == ["protocol/common.proto"]
+
+
+def test_index_status_is_read_only_and_query_revalidates_selected_files(workspace):
+    engine, project, root = workspace
+    before = engine.journal.db.total_changes
+    assert knowledge.index_status(engine, project) == {'state': 'missing'}
+    missing = query(workspace)
+    assert missing['state'] == 'missing' and 'freshness' not in missing
+    assert engine.journal.db.total_changes == before
+    source = root / 'handler.py'
+    source.write_text('def handler(): pass\n')
+    saved = build(workspace)
+    status = knowledge.index_status(engine, project)
+    assert status['state'] == 'ready' and status['revision'] == saved['revision']
+    assert status['entries_count'] == 1 and status['scan_scope'] == saved['scan_scope']
+    source.write_text('def changed(): pass\n')
+    assert knowledge.index_status(engine, project) == status
+    selected = query(workspace, paths=['handler.py'])
+    assert selected['entries'][0]['state'] == 'stale' and selected['refresh_required']

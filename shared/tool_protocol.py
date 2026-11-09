@@ -23,6 +23,9 @@ TOOL_WIRE_VERSIONS['inspect_file_source'] = 2
 # Finalization consumes a baseline. Legacy peers must reject this operation
 # explicitly rather than ignore the option or fail on a new default argument.
 TOOL_WIRE_VERSIONS['show_changes'] = 2
+# Scoped capture and snapshot management must not reach legacy peers that
+# ignore baseline_paths or do not implement the new storage operations.
+TOOL_WIRE_VERSIONS.update(open_workspace=2, review_snapshots=2, review_snapshots_manage=2)
 # Epoch 3 includes project-scoped credential reuse. Older Agents must not
 # accept a save while silently dropping these authorization choices.
 TOOL_WIRE_VERSIONS.update(project_runtime_get=3, project_runtime_set=3)

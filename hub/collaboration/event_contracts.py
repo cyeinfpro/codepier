@@ -2,6 +2,8 @@
 from typing import Literal
 from pydantic import Field, model_validator
 from shared.collaboration_contracts import Model, Identifier, Queue, JobKind, Severity
+from shared.host_parameter_schema import host_parameter_schema
+from shared.schema_cache import schema_for
 from hub.collaboration.common import TASK_EVENT, RESULT_EVENT, INCIDENT_EVENT, STATUS_EVENT, MESSAGE_EVENT, WORK_EVENT, DELEGATION_EVENT, OPERATION_EVENT, MAILBOX_EVENT, ROOM_INBOX_EVENT
 
 
@@ -227,6 +229,19 @@ class OperationQuery(Model):
     arguments: OperationQueryArguments
 
 
+class UnifiedOperationQueryArguments(Model):
+    action: Literal['job']
+    view: Literal['get']
+    project: Identifier
+    workspace_id: str = Field(default='', pattern=r'^(|[a-f0-9]{32})$')
+    ids: list[Identifier] = Field(min_length=1, max_length=1)
+
+
+class UnifiedOperationQuery(Model):
+    name: Literal['query']
+    arguments: UnifiedOperationQueryArguments
+
+
 class OperationPayload(BasePayload):
     operation_id: Identifier
     state: Literal['succeeded', 'failed', 'cancelled', 'needs_review', 'interrupted']
@@ -240,9 +255,21 @@ class OperationPayload(BasePayload):
         if self.test:
             if self.next_call is not None:
                 raise ValueError('test events must not carry a resume request')
-        elif self.next_call is None or self.next_call.arguments.operation_ids != [self.operation_id]:
+        elif self.next_call is None:
+            raise ValueError('resume request must read the original operation ID')
+        elif isinstance(self.next_call, UnifiedOperationQuery):
+            args = self.next_call.arguments
+            if (args.ids != [self.operation_id] or args.project != self.project_id
+                    or args.workspace_id != self.workspace_id):
+                raise ValueError('resume request must use the original operation and workspace')
+        elif self.next_call.arguments.operation_ids != [self.operation_id]:
             raise ValueError('resume request must read the original operation ID')
         return self
+
+
+class UnifiedOperationPayload(OperationPayload):
+    # Existing subscriptions and frozen deliveries still use the legacy call.
+    next_call: UnifiedOperationQuery | OperationQuery | None = None
 
 
 PAYLOADS = {ROOM_INBOX_EVENT: RoomInboxPayload, MAILBOX_EVENT: MailboxPayload, OPERATION_EVENT: OperationPayload, DELEGATION_EVENT: DelegationPayload, WORK_EVENT: WorkPayload, MESSAGE_EVENT: MessagePayload, TASK_EVENT: TaskPayload, RESULT_EVENT: ResultPayload,
@@ -251,19 +278,58 @@ FILTERS = {ROOM_INBOX_EVENT: RoomInboxFilters, MAILBOX_EVENT: MailboxFilters, OP
            INCIDENT_EVENT: EventFilters, STATUS_EVENT: EventFilters}
 
 
-def definitions():
-    descriptions = {
-        ROOM_INBOX_EVENT: 'The inbox changed for one current room member and binding generation. This room-scoped event does not require a project and never expands a legacy project subscription. Read the current room inbox through the server-issued request; recheck member and resource permissions before every effect. A callback acceptance is not host consumption. Probe replies prove connectivity only and never create business work.',
-        MAILBOX_EVENT: 'A stable inbox changed for this exact approved Dot binding. Native subscription is separately confirmed. Read the current mailbox and original message/work ledgers; delivery is only a hint, not execution authority. Synthetic tests never issue a consumer ticket or create work. V2 consumer writes require the live proof and fence; legacy notification-only purposes never upgrade.',
-        OPERATION_EVENT: 'A bounded hint for explicitly subscribed original operation IDs on this exact grant. Read task_query(operation=get, operation_ids=[original ID]) and use your saved output cursor; never execute again. needs_review/interrupted do not prove success, and cancellation requires its durable terminal receipt. environment_id is notification context, not proof of execution environment. Delivery is accepted only, never host consumption or permission to continue a chat. Synthetic test events create no operation.',
-        DELEGATION_EVENT: 'Wake-up for this exact owner policy/version and slot. For a CPD task dot use the saved collaboration_query(action=dot_inbox, dot_id=recipient_slot_id) request; its initial baseline is stored once on the server. Recover its exact setup via collaboration_query(action=dot_connection), not a fresh legacy checkpoint. Read the inbox immediately after native subscription and on every wake; paginate and reconcile original operations. For legacy non-CPD consumers only at initial enrollment, read collaboration_delegation_connection_read and persist its checkpoint/inbox_request in the host consumer. On future wakes use the saved inbox_request/resume_request to reconcile collaboration_delegation_inbox, even without this payload; never refresh the initial baseline per event. Preserve existing notification_only consumers. Only an explicitly user-approved managed_execution host may fresh-read, claim, heartbeat, work_execute, poll the original operation and work_result. Test events only confirm delivery; a requested mode or notification never grants permission.',
-        WORK_EVENT: 'An approved goal has work or a peer message for this exact connection. Requires separate native opt-in. Re-read current approval, work and capabilities; delivery never authorizes execution and a test creates no work.',
-        MESSAGE_EVENT: 'For an owner-approved duplex dot, a new addressed message or a human thread reply is available: use its saved dot_inbox request and dot_message to converse; no task lease is required for chat, and proactive dot posts never wake bots. An owner explicitly mentioned this exact room slot. Requires separate opt-in; read the bounded room message. This creates no task and a connector reply must not wake peers.',
-        TASK_EVENT: 'A bounded read-only task is available in the authorized project queue. Read its current state before claiming. A test payload creates no work.',
-        RESULT_EVENT: 'Validated analysis was saved. Read and acknowledge the result; this does not prove business recovery.',
-        INCIDENT_EVENT: 'A deterministic monitoring incident changed state. Recovery is established by probes, not model assertions.',
-        STATUS_EVENT: 'Collection, delivery or task consumption became degraded or recovered. This event does not create another analysis job.',
-    }
-    return [{'name': name, 'description': descriptions[name], 'delivery': ['webhook'],
-             'inputSchema': FILTERS[name].model_json_schema(), 'payloadSchema': PAYLOADS[name].model_json_schema()}
-            for name in PAYLOADS]
+# The host repeats these descriptions in its generated create/update tools.
+# Keep the always-visible directory short and put exact consumption here.
+DESCRIPTIONS = {
+    ROOM_INBOX_EVENT: 'Room member inbox changed.',
+    MAILBOX_EVENT: 'Authorized Dot mailbox changed. Delivery grants no execution rights.',
+    OPERATION_EVENT: 'Original operation updated. Reconcile its receipt without replay.',
+    DELEGATION_EVENT: 'An approved delegation has an inbox update.',
+    WORK_EVENT: 'An approved goal has work or a peer message.',
+    MESSAGE_EVENT: 'An authorized member was addressed.',
+    TASK_EVENT: 'An authorized read-only analysis task is available.',
+    RESULT_EVENT: 'Validated analysis was saved.',
+    INCIDENT_EVENT: 'A monitoring incident changed state.',
+    STATUS_EVENT: 'Monitoring component status changed.',
+}
+_GUIDES = {
+    ROOM_INBOX_EVENT: 'Use the server-issued room inbox request for the exact member and binding generation. Recheck member and resource rights. Probe replies prove connectivity only.',
+    MAILBOX_EVENT: 'Read the current mailbox and original ledgers. V2 writes require live consumer proof and fence. Synthetic tests issue no ticket. Preserve notification-only bindings.',
+    OPERATION_EVENT: 'Use query action=job, view=get with ids=[operation_id]. Supply your last-read args.after_output_seq, never the event’s new output_seq as a read checkpoint. Preserve project and workspace. needs_review and interrupted require reconciliation. A cancellation needs its durable terminal receipt. Delivery is not host consumption or execution proof.',
+    DELEGATION_EVENT: 'Use the saved query collab.inbox view=dot_inbox and recover the setup through query collab.get view=dot_connection. On every wake, paginate and reconcile original operations. Legacy consumers keep their saved baseline and exact inbox/resume requests. Only explicitly approved managed execution may claim, heartbeat, execute or record work results.',
+    WORK_EVENT: 'Read the latest approval, work and capabilities on the original connection before acting. Native opt-in and execution approval are separate.',
+    MESSAGE_EVENT: 'Read the saved inbox with query collab.inbox and reply within the existing authorization. Chat creates no task and connector replies must not wake peers.',
+    TASK_EVENT: 'Read current task state before claiming; the project task scope is read-only.',
+    RESULT_EVENT: 'Read and acknowledge the original analysis result. A saved analysis does not establish business recovery.',
+    INCIDENT_EVENT: 'Confirm recovery from probe evidence.',
+    STATUS_EVENT: 'Read the affected component status. The event does not create another analysis job.',
+}
+
+
+def definition(name, *, unified=False, exact=False):
+    filter_schema = schema_for(FILTERS[name])
+    payload = UnifiedOperationPayload if unified and name == OPERATION_EVENT else PAYLOADS[name]
+    # Some importers cannot translate refs and nullable anyOf branches. Each
+    # event still has a typed object envelope; validation uses FILTERS[name].
+    description = DESCRIPTIONS[name]
+    if unified and name == ROOM_INBOX_EVENT:
+        description += ' Use query help with args.event for filters and recovery.'
+    return {'name': name, 'description': description, 'delivery': ['webhook'],
+            'inputSchema': host_parameter_schema(filter_schema) if unified and not exact else filter_schema,
+            'payloadSchema': schema_for(payload)}
+
+
+def definitions(*, names=None, unified=False):
+    return [definition(name, unified=unified) for name in (PAYLOADS if names is None else names)]
+
+
+def event_help(name, *, detail='brief'):
+    schema = schema_for(FILTERS[name])
+    result = {'event': name, 'description': DESCRIPTIONS[name], 'filters': list(schema['properties']),
+              'required_filters': schema.get('required', []), 'consume': _GUIDES[name],
+              'subscription': ('Subscribe separately for this binding. Delivery and synthetic tests grant no execution rights. '
+                               'When updating triggers, supply the complete desired list.')}
+    if detail == 'schema':
+        definition_for_help = definition(name, unified=True, exact=True)
+        result.update(inputSchema=definition_for_help['inputSchema'], payloadSchema=definition_for_help['payloadSchema'])
+    return result

@@ -529,7 +529,7 @@ class FileEngine:
             raise DevError("NOT_FOUND", "搜索路径不存在或不是普通文件/目录", 404)
         needle = args["query"] if args["case_sensitive"] else args["query"].casefold()
         results, seen, read_total, matches, skipped = [], 0, 0, 0, 0
-        truncated, scan_error = False, None
+        truncated, page_full, scan_error = False, False, None
         skipped_reasons = {}
         iterator = iter(entries)
         while True:
@@ -568,15 +568,32 @@ class FileEngine:
                 if matches <= args["offset"]:
                     continue
                 if len(results) >= args["limit"]:
-                    truncated = True
+                    truncated = page_full = True
                     break
                 results.append({"path": rel, "line": n, "text": line[:1600], "line_truncated": len(line) > 1600})
             if truncated:
                 break
+        if candidates_capped or (truncated and not page_full):
+            scan_status = "scan_limited"
+        elif page_full:
+            scan_status = "page_limited"
+        elif not seen:
+            scan_status = "no_files"
+        elif seen == skipped:
+            scan_status = "no_readable_files"
+        elif not results:
+            scan_status = "end_of_results" if matches else "no_matches"
+        else:
+            scan_status = "matches"
         truncated = truncated or candidates_capped or bool(skipped_reasons)
+        hint = None
+        if scan_status == "no_files":
+            hint = "path 和 file_glob 范围内没有可扫描文件。file_glob 匹配项目相对路径。"
+        elif truncated:
+            hint = "结果不完整；检查分页或缩小 path / file_glob。"
         return {"matches": results, "scanned_files": min(seen, 20000), "skipped_files": skipped, "truncated": truncated,
-                "scan_scope": scan_scope, "skipped_reasons": skipped_reasons,
-                "hint": "结果被截断；请缩小 path 或 file_glob，0 条命中不代表不存在" if truncated else None,
+                "scan_scope": scan_scope, "scan_status": scan_status, "skipped_reasons": skipped_reasons,
+                "hint": hint,
                 "next_offset": args["offset"] + len(results) if truncated and results else None,
                 "scan_error": scan_error,
                 "limits": "1 MiB per file / 20,000 files / 100,000 directory entries / 32 MiB / 8 seconds per call; narrow the path if the scan limit is reached. Protected paths, generated build caches (including .build) and unsupported filenames are excluded."}
@@ -919,6 +936,9 @@ class FileEngine:
         if tool == "apply_patch":
             from agent.batch_patch import apply_patch
             return apply_patch(self, project, args)
+        if tool in {"review_snapshots", "review_snapshots_manage"}:
+            from agent.coding_reviews import review_snapshots, review_snapshots_manage
+            return (review_snapshots if tool == "review_snapshots" else review_snapshots_manage)(self, project, args)
         if tool in {"open_workspace", "show_changes"}:
             from agent.coding_reviews import open_workspace, show_changes
             return (open_workspace if tool == "open_workspace" else show_changes)(self, project, args)

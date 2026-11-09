@@ -34,7 +34,7 @@ from shared.computer_contracts import COMPUTER_TOOLS
 from shared.computer_media import scrub_expired, purge_database
 from shared.crypto import SecureChannel, digest, token
 from shared.util import DevError, safe_summary
-from shared.filesystem_errors import safe_filesystem_error_detail
+from shared.filesystem_errors import safe_filesystem_error_detail, safe_review_error_detail
 from shared.tool_protocol import advertisement, catalog_digest, negotiate, require_compatible, validate_call_epoch, wire_version
 from shared.execution_policy import (DENIAL_MESSAGE, COMPUTER_DENIAL_MESSAGE, COMPUTER_DENIAL_CODE,
     InvocationInspector, hub_blocks_codex, hub_blocks_computer, hub_execution_policy,
@@ -830,7 +830,7 @@ class Runtime:
                 raise DevError("READ_ONLY", "面板中的这个项目设为只读", 403)
             if name in PROCESS_TOOLS and not project["allow_tasks"]:
                 raise DevError("TASKS_DISABLED", "面板中的这个项目没有允许执行任务", 403)
-            if name in (COMPUTER_TOOLS | INTEGRATION_REMOTE_TOOLS | {"open_workspace", "show_changes", "apply_patch", "skills_list", "skills_read", "agent_diagnostics", "artifacts_register", "searches_start", "searches_get", "searches_cancel", "code_symbols"}) and self.online(project["device_id"]):
+            if name in (COMPUTER_TOOLS | INTEGRATION_REMOTE_TOOLS | {"review_snapshots", "review_snapshots_manage", "open_workspace", "show_changes", "apply_patch", "skills_list", "skills_read", "agent_diagnostics", "artifacts_register", "searches_start", "searches_get", "searches_cancel", "code_symbols"}) and self.online(project["device_id"]):
                 device=self.store.one("SELECT info FROM devices WHERE id=?",(project["device_id"],))
                 capabilities=json.loads(device["info"]).get("capabilities") if device else None
                 if isinstance(capabilities,list) and name not in capabilities:
@@ -1022,7 +1022,7 @@ class Runtime:
                 raise DevError('INSUFFICIENT_SCOPE', 'MCP 不允许设备生命周期操作', 403)
             iam.require_device(self.store, principal, project['device_id'], manage=True)
         snapshot = {k: project[k] for k in ("id", "alias", "root", "mode", "allow_tasks") if k in project}
-        if name in {"open_workspace", "show_changes", "apply_patch", "edit"}:
+        if name in {"review_snapshots", "review_snapshots_manage", "open_workspace", "show_changes", "apply_patch", "edit"}:
             snapshot["_coding_owner"] = "grant:" + principal.grant_id if principal.grant_id else principal.actor
             snapshot["_coding_device"] = project["device_id"]
             snapshot["_coding_scopes"] = sorted(role_project_scopes(self.store, principal, project['id']))
@@ -1161,6 +1161,7 @@ class Runtime:
             error = result.get("error") or {}
             details = safe_detail(error)
             details.update(safe_filesystem_error_detail(tool, error.get('code'), error))
+            details.update(safe_review_error_detail(error.get('code'), error))
             # The synchronous error already carries retryable=False below;
             # keep one explicit value, independent from remote details.
             details.pop('retryable', None)

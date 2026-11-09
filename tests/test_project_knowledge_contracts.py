@@ -259,10 +259,14 @@ async def test_unified_knowledge_mapping_help_and_runtime(runtime, monkeypatch, 
     help_plan = await ut.prepare(instance, 'query', {
         'action': 'help', 'args': {'action': 'knowledge', 'view': view}}, principal)
     help_value, _, _ = await ut.execute(instance, help_plan, principal)
-    assert help_value['inputSchema'] == TOOLS[name].model.model_json_schema()
-    assert help_value['unified_call']['tool'] == unified
-    assert u.translate(unified, {**help_value['unified_call']['example'],
-                                **raw}).tool == name
+    assert 'inputSchema' not in help_value
+    assert help_value['tool'] == unified and help_value['view'] == view
+    assert u.translate(unified, help_value['example']).tool == name
+    detailed = await ut.prepare(instance, 'query', {'action': 'help', 'args': {
+        'tool': unified, 'action': 'knowledge', 'view': view, 'detail': 'schema'}}, principal)
+    schema, _, _ = await ut.execute(instance, detailed, principal)
+    assert set(schema['inputSchema']['required']) >= {'action', 'project'}
+    assert 'outputSchema' in schema
     captured = []
     async def dispatch(tool, args, project, caller, **options):
         captured.append((tool, args, project))
@@ -674,3 +678,28 @@ def test_factor_post_inline_nullable_string_keeps_minimum_null_and_hint():
     assert not validator.is_valid('a')
     assert not validator.is_valid('')
     assert not validator.is_valid(2)
+
+
+@pytest.mark.parametrize('closed', ['neither', 'parent', 'branch'])
+def test_factor_shared_union_properties_preserves_closed_objects_and_values(closed):
+    from shared.core_output_schemas import factor
+    shared = {'type': 'string', 'minLength': 2}
+    schema = {'type': 'object', 'anyOf': [
+        {'properties': {'common': shared, 'left': {'const': True}}, 'required': ['common', 'left']},
+        {'properties': {'common': shared, 'right': {'const': 1}}, 'required': ['common', 'right']},
+    ]}
+    if closed == 'parent':
+        schema['additionalProperties'] = False
+        schema['properties'] = {'left': {}, 'right': {}}
+    elif closed == 'branch':
+        schema['anyOf'][0]['additionalProperties'] = False
+    before = deepcopy(schema)
+    compact = factor(schema)
+    for common in (None, '', 'a', 'ab', 1, True, [], {}):
+        for fields in ({}, {'left': True}, {'left': 1}, {'right': 1}, {'right': True},
+                       {'left': True, 'right': 1}, {'left': True, 'extra': 1}):
+            for value in (fields, {'common': common, **fields}):
+                assert Draft202012Validator(schema).is_valid(value) == Draft202012Validator(compact).is_valid(value)
+    assert schema == before
+    if closed == 'neither':
+        assert compact['properties']['common'] == shared

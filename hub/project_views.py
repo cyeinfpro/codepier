@@ -116,6 +116,17 @@ def validate_context(runtime, args, data, principal, *, operation=None):
         original = request.get('project') if isinstance(request, dict) else None
         if original and any(original.get(k) != project.get(k) for k in ('id', 'root', 'device_id', 'mode', 'allow_tasks')):
             raise DevError('PROJECT_CONTEXT_CHANGED', 'Legacy context belongs to a changed project mapping; request a fresh open.', 409)
+    if 'context_id' in data:
+        knowledge = dict(data.get('knowledge') or {'state': 'unknown'})
+        if knowledge.get('state') == 'ready':
+            maintenance = runtime.knowledge_maintenance.status(project, args)
+            knowledge['maintenance'] = {key: maintenance[key] for key in ('state', 'enabled')}
+            knowledge['next'] = 'project_knowledge_query'
+        elif knowledge.get('state') == 'missing' and project['mode'] == 'write':
+            from hub.roles import role_project_scopes
+            if 'write' in role_project_scopes(runtime.store, principal, project['id']):
+                knowledge['next'] = 'project_knowledge_build'
+        data['knowledge'] = knowledge
     return data
 
 
