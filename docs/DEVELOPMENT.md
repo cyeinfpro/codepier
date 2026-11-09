@@ -101,7 +101,7 @@ CODEPIER_LONG_BUDGET_TEST=1 .venv/bin/python scripts/check_full_regression.py \
 
 CI 的 Linux 源码构建 job 与 macOS 的第 0 片分别保留本平台的构建、静态检查与依赖审计；其他普通片只建立各自的依赖环境、安装测试需要的构建依赖，不重复相同构建检查。资源与长时片不安装浏览器。pip/npm/浏览器仅复用下载缓存，不共享或上传虚拟环境。
 
-候选完整通过后，main 的“Validate same-commit promotion”可以只读验证同一仓库、同一完整 SHA、同一 workflow、最新有效成功 job 集合、两平台完整证明、coverage、公开 ZIP 和 manifest 的精确哈希，再复用候选证据。已失败/未结束的后续同 workflow 验证、过期或缺失 artifact、不同源码/workflow/归档都不允许复用；读取失败回退全量。复用不伪造本轮测试执行：Release gate 明确报告来源 run，受复用替代的 job 显示 skipped。首次候选、PR 和没有合格证据的 main 仍跑完整六片。
+候选完整通过后，main 的“Validate same-commit promotion”可以只读验证同一仓库、同一完整 SHA、同一 workflow、最新有效成功 job 集合、两平台完整证明、coverage、公开 ZIP 和 manifest 的精确哈希，再复用候选证据。已失败/未结束的后续同 workflow 验证、过期或缺失 artifact、不同源码/workflow/归档都不允许复用；读取失败回退全量。复用不伪造本轮测试执行：完整回归的 Release gate 作业报告来源 run，受复用替代的 job 显示 skipped。首次候选、PR 和没有合格证据的 main 仍跑完整六片。正式 GitHub 发布使用独立的源码和镜像作业结果，见 [GitHub 发布清单](RELEASING.md)。
 
 覆盖率采集包括 Python 子进程，保存 XML/JSON 和可合并的数据。diff coverage 仅报告新增/修改的可执行 Python 行、未测量文件和未覆盖行，不设置旧代码全仓 80% 门槛，也不把没有数据说成 100%。分片先合并覆盖数据，再计算整个变更的覆盖率。
 
