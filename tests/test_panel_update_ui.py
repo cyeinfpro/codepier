@@ -593,8 +593,9 @@ def test_automatic_discovery_failure_never_creates_durable_jobs(update_browser,s
         page.evaluate('CodePierPanelUpdate.resume()')
         expect(entry).to_have_attribute('data-state','failed')
         assert len(discovery)==1 and not calls
-        page.clock.fast_forward(300000)
-        page.evaluate('CodePierPanelUpdate.resume()')
+        with page.expect_response(lambda response: urlsplit(response.url).path.endswith('/available')):
+            page.clock.fast_forward(300000)
+            page.evaluate('CodePierPanelUpdate.resume()')
         expect(entry).to_have_attribute('data-state','failed')
         assert len(discovery)>=2 and not calls
         assert not errors,errors

@@ -48,7 +48,7 @@ function element(value='') {
 const document = {body:element(),activeElement:null,querySelector:s=>elements.get(s)?.isConnected?elements.get(s):null,querySelectorAll:()=>[],addEventListener(){},removeEventListener(){},createElement:()=>element()};
 for(const s of ['#app','#modal-root','#toasts','#page','#editor-wrap','#file-tree','#code-editor','#dirty-state','#editor-lines','#task-select','#task-output','#task-status'])elements.set(s,element());
 document.body.append(elements.get('#app'),elements.get('#modal-root'),elements.get('#toasts'));
-const context = vm.createContext({document, console, URLSearchParams, AbortController, Uint8Array, Blob, URL, Event, crypto:require('node:crypto').webcrypto,
+const context = vm.createContext({document, console, URLSearchParams, AbortController, Uint8Array, Blob, URL, Event, CustomEvent:class extends Event {constructor(type,{detail}={}){super(type);this.detail=detail;}}, crypto:require('node:crypto').webcrypto,
   location:{hash:'',protocol:'http:',origin:'http://fixture.invalid',search:''},history:{replaceState(){}},navigator:{},confirm:()=>true,
   // Load the same presentation module as index.html; this VM models a desktop viewport.
   matchMedia:()=>({matches:false,addEventListener(){},removeEventListener(){}}),
@@ -56,7 +56,7 @@ const context = vm.createContext({document, console, URLSearchParams, AbortContr
   sessionStorage:{getItem:k=>storage.get(k)??null,setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},
   setTimeout(fn,ms){const id=++timerId;timers.set(id,{fn,ms});if([500,1000,2000,4000].includes(ms))queueMicrotask(()=>{if(timers.delete(id))fn();});return id;},
   clearTimeout:id=>timers.delete(id),clearInterval:id=>timers.delete(id),setInterval:()=>++timerId,
-  fetch:(...args)=>fetchImpl(...args),window:{addEventListener(){},isSecureContext:false},
+  fetch:(...args)=>fetchImpl(...args),window:{addEventListener(){},dispatchEvent(){},isSecureContext:false},
   EventSource:class extends EventTarget {constructor(){super();this.closed=false;}close(){this.closed=true;}}
 });
 const source=fs.readFileSync(process.argv[2],'utf8');

@@ -7,6 +7,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from playwright.sync_api import expect
+from tests.browser_support import open_project_collaboration
 
 from tests.legacy_collaboration_ui import use_legacy_collaboration_ui
 from tests.lifecycle_http import held_legacy_reload
@@ -487,7 +488,7 @@ def test_pagehide_cancels_refresh_and_cached_restore_preserves_draft(
         page.fill("#password", stack.password)
         page.click("#login-form button")
         expect(page.locator("#page h1")).to_have_text("项目")
-        page.locator(f'[data-action="project-collaboration"][data-id="{stack.project["id"]}"]').click()
+        open_project_collaboration(page, stack.project["id"])
         page.locator('[data-cc-action="create-room"]').click()
         area = page.locator("#cc-message-input")
         expect(area).to_be_enabled()
@@ -572,7 +573,7 @@ def test_repeated_lifecycle_does_not_replay_pending_message_or_erase_new_draft(
         page.fill("#password", stack.password)
         page.click("#login-form button")
         expect(page.locator("#page h1")).to_have_text("项目")
-        page.locator(f'[data-action="project-collaboration"][data-id="{stack.project["id"]}"]').click()
+        open_project_collaboration(page, stack.project["id"])
         page.locator('[data-cc-action="create-room"]').click()
         area = page.locator("#cc-message-input")
         expect(area).to_be_enabled()

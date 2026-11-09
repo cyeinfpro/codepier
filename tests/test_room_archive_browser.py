@@ -5,6 +5,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from playwright.sync_api import Error as PlaywrightError, expect
+from tests.browser_support import open_project_collaboration
 from shared.audit_redaction import redact_text
 from tests.collaboration_support import collaboration_stack  # noqa: F401
 from tests.test_collaboration_chatroom_browser import login, overview, click_room_refresh
@@ -326,7 +327,7 @@ def test_late_archived_overview_does_not_clear_new_room_selection(
         page.evaluate("navigate('projects')")
         expect(page.locator('#page h1')).to_have_text('项目')
         other = stack.projects[1]
-        page.locator(f'[data-action="project-collaboration"][data-id="{other["id"]}"]').click()
+        open_project_collaboration(page, other["id"])
         page.locator('[data-cc-action="create-room"]').click()
         expect(page.locator('#cc-message-input')).to_be_enabled()
         selected = page.locator('.cc-chat-shell').get_attribute('data-conversation')

@@ -11,6 +11,19 @@ from playwright.sync_api import sync_playwright, expect
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def open_project_collaboration(page, project_id):
+    action = page.locator(f'[data-action="project-collaboration"][data-id="{project_id}"]')
+    action.locator('xpath=ancestor::details').locator(':scope > summary').click()
+    action.click()
+
+
+def open_project_codex(page, project_id):
+    page.locator(f'[data-native-launch][data-project="{project_id}"]').click()
+    dialog = page.locator('#chat-project-dialog')
+    dialog.locator('[name="cli"][value="codex"]').check()
+    dialog.locator(f'#chat-project-results [data-project-id="{project_id}"]').click()
+
+
 def open_chat_settings(page):
     if not page.locator('#chat-options').is_visible():
         page.locator('#chat-options-toggle').click()

@@ -72,11 +72,12 @@ def test_reference_navigation_filter_and_reachability(stack, engine, scheme, wid
         assert page.locator('[data-project-row]:visible').count() > 0
         _layout(page, f"{engine}-{scheme}-{width}-projects")
         page.locator("#page h1").click()
-        help_summary = page.locator(".page-help > summary").last
-        help_summary.scroll_into_view_if_needed()
-        _uncovered(help_summary)
-        help_summary.click()
-        expect(page.locator(".page-help").last).to_have_attribute("open", "")
+        tools = page.locator("[data-project-row]:visible details.tool-menu").first
+        summary = tools.locator(":scope > summary")
+        summary.scroll_into_view_if_needed()
+        _uncovered(summary)
+        summary.click()
+        expect(tools).to_have_attribute("open", "")
         if width <= 900:
             page.set_viewport_size({"width": 1440, "height": 1000})
             expect(dock).to_be_hidden()

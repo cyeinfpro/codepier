@@ -707,10 +707,13 @@ window.CodePierCollaboration = (() => {
     if (!deliveries?.length) return '';
     return `<section class="cr-deliveries" aria-label="发送状态" data-cr-deliveries>${deliveries
       .map((delivery) => {
+        const uncertain = (delivery.parts || []).some((part) => part.state === 'unknown');
         const state =
           delivery.read_verified || delivery.provider_delivery_verified
             ? '已送达'
-            : deliveryLabels[delivery.state] || '未确认';
+            : uncertain
+              ? '未确认'
+              : deliveryLabels[delivery.state] || '未确认';
         const name = delivery.channel === 'weixin' ? '微信' : delivery.channel || '渠道';
         const detail = ['发送失败', '未确认'].includes(state);
         const retry =
@@ -742,8 +745,10 @@ window.CodePierCollaboration = (() => {
     if (state.newerMessages) root.querySelector('[data-cr-latest]').hidden = false;
   }
   function patchMessageContent(node, message) {
-    const expanded = [...node.querySelectorAll('[data-delivery-id][open]')].map(
-      (item) => item.dataset.deliveryId,
+    const expanded = new Set(
+      [...node.querySelectorAll('[data-delivery-id] > details[open]')].map(
+        (item) => item.parentElement.dataset.deliveryId,
+      ),
     );
     const template = document.createElement('div');
     template.innerHTML = messageMarkup(message);
@@ -770,8 +775,8 @@ window.CodePierCollaboration = (() => {
       else body.textContent = text;
       body._crText = text;
     }
-    for (const details of node.querySelectorAll('[data-delivery-id]'))
-      if (expanded.includes(details.dataset.deliveryId)) details.open = true;
+    for (const details of node.querySelectorAll('[data-delivery-id] > details'))
+      if (expanded.has(details.parentElement.dataset.deliveryId)) details.open = true;
   }
   function patchMessages() {
     if (!root) return;

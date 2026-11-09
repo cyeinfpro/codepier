@@ -76,8 +76,10 @@ def test_owner_restores_original_participant_and_selects_original_goal_successor
             lambda route: route.fulfill(status=200, json={'work': deepcopy(work), 'revision': 1, 'read_only': True}))
         page.route('**/api/collaboration/work/original-goal/control', control)
         page.evaluate('document.dispatchEvent(new Event("visibilitychange"))')
-        expect(page.locator('[data-work-id="original-goal"]')).to_be_visible()
-        page.locator('[data-cr-action="work-detail"]').click()
+        page.locator('[data-cr-action="work-list"]').click()
+        card = page.locator('[data-cr-work-list-view] [data-work-id="original-goal"]')
+        expect(card).to_be_visible()
+        card.locator('[data-cr-action="work-detail"]').click()
         expect(page.locator('[data-cr-work-view]')).to_contain_text('核对原操作回执后完成检查')
         expect(page.locator('[data-cr-work-view]')).to_contain_text('原检查步骤')
         expect(page.locator('[data-operation-id="original-operation"]')).to_contain_text('原操作已结束')
@@ -123,7 +125,7 @@ def test_owner_restores_original_participant_and_selects_original_goal_successor
         assert writes[0]['idempotency_key'] != writes[1]['idempotency_key']
         expect(page.locator('[data-cr-work-coordinator]')).to_contain_text(candidate['name'])
         expect(page.locator('[data-operation-id="original-operation"]')).to_have_count(1)
-        expect(page.locator('[data-work-id="original-goal"]')).to_have_count(1)
+        expect(page.locator('[data-cr-work-view]')).to_contain_text('核对原操作回执后完成检查')
 
         # Explicitly synthetic transport projection, independent of business
         # completion. Inspecting either receipt never sends or reruns anything.
@@ -139,13 +141,13 @@ def test_owner_restores_original_participant_and_selects_original_goal_successor
             delivery_display={'state': 'unknown', 'title': '已完成，微信回复发送待核对',
                 'reason': '核对原分项前不会自动重发或重跑工作。'})
         page.evaluate('document.dispatchEvent(new Event("visibilitychange"))')
-        expect(page.locator('[data-work-id="original-goal"]')).to_contain_text('工作已完成')
-        expect(page.locator('[data-cr-work-delivery]')).to_have_text('已完成，微信回复发送待核对')
+        expect(page.locator('[data-cr-work-view] .cr-flow-state h3')).to_contain_text('完成')
         details = page.locator('[data-cr-work-view] [data-delivery-id="original-delivery"]')
+        expect(details).to_contain_text('微信 · 未确认')
         details.locator('summary').click()
-        expect(details.locator('[data-delivery-part="unknown-part"]')).to_contain_text('发送结果待核对')
-        expect(details.locator('[data-delivery-part="accepted-part"]')).to_contain_text('平台已接受')
-        expect(details).to_contain_text('平台接受不等于对端送达或已读')
+        expect(details.locator('[data-delivery-part="unknown-part"]')).to_contain_text('未确认')
+        expect(details.locator('[data-delivery-part="accepted-part"]')).to_contain_text('已发送')
+        expect(details).not_to_contain_text('已送达')
         expect(page.locator('[data-cr-work-view] [data-cr-action="work-control"]')).to_have_count(0)
         expect(page.locator('[data-message-id="original-final"] [data-delivery-id="original-delivery"]')).to_have_count(1)
         assert len(writes) == 2

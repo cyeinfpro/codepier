@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from playwright.sync_api import expect
+from tests.browser_support import open_project_collaboration
 
 from tests.legacy_collaboration_ui import use_legacy_collaboration_ui
 
@@ -41,7 +42,7 @@ def login(page, stack):
 
 
 def open_room(page, stack):
-    page.locator(f'[data-action="project-collaboration"][data-id="{stack.project["id"]}"]').click()
+    open_project_collaboration(page, stack.project["id"])
     expect(page.locator('#page h1')).to_have_text('协作中心')
     page.locator('[data-cc-action="create-room"]').click()
     expect(page.locator('#cc-command')).to_be_visible()
@@ -526,7 +527,7 @@ def test_join_panel_drafts_navigation_and_logout_fence(collaboration_stack, chat
         assert len(overview(stack)['join_slots']) == 1
         page.evaluate("navigate('projects')")
         expect(page.locator('#page h1')).to_have_text('项目')
-        page.locator(f'[data-action="project-collaboration"][data-id="{stack.project["id"]}"]').click()
+        open_project_collaboration(page, stack.project["id"])
         expect(page.locator('#cc-join-slot')).to_be_visible()
         page.locator('#cc-join-slot [name="label"]').fill('A newer draft')
         held[0][0].fulfill(response=held[0][1])

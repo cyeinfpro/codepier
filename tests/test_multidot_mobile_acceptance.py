@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from playwright.sync_api import expect
+from tests.browser_support import open_project_collaboration
 
 from tests.legacy_collaboration_ui import use_legacy_collaboration_ui
 
@@ -135,7 +136,7 @@ def prepare(page, stack):
         page.click("#login-form button")
     assert response.value.status == 200
     expect(page.locator("#page h1")).to_have_text("项目")
-    page.locator(f'[data-action="project-collaboration"][data-id="{stack.project["id"]}"]').click()
+    open_project_collaboration(page, stack.project["id"])
     page.locator('[data-cc-action="create-room"]').click()
     expect(page.locator("#cc-message-input")).to_be_enabled()
     dot = add_dot(stack, "移动验收主责")

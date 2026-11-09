@@ -15,6 +15,7 @@ import uuid
 import httpx
 import pytest
 from playwright.sync_api import sync_playwright,expect
+from tests.browser_support import open_project_codex
 from shared.native_cli import database
 from shared.util import atomic_json
 from tests.support import running_stack,wait_for
@@ -127,8 +128,7 @@ def test_real_chromium_terminal_mobile_detach_and_escape_policy(cli_stack):
         errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
         try:
             page.goto(s.url+'/#projects');page.fill('#username', 'admin');page.fill('#password',s.password);page.click('#login-form button')
-            expect(page.locator('[data-native-launch="codex"]').first).to_be_visible()
-            page.locator('[data-native-launch="codex"][data-project="'+s.project['id']+'"]').click()
+            open_project_codex(page, s.project["id"])
             mount_archived_terminal(page)
             expect(page.locator('#native-root')).to_be_visible()
             page.fill('#native-model','native-model');page.click('#native-start')

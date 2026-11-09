@@ -172,6 +172,9 @@ def test_pairing_scope_choices_are_optional_and_reopen_safely(pairing_page, pair
         page.evaluate("(id)=>consentModal(id)", request_id)
         dialog = page.locator(".modal")
         expect(dialog.locator('[name="scope"][value="read"]')).to_be_checked()
+        if requested != "read":
+            write = dialog.locator('[name="scope"][value="write"]')
+            write.locator('xpath=ancestor::details').locator(':scope > summary').click()
         for scope in ("write", "execute", "computer"):
             field = dialog.locator(f'[name="scope"][value="{scope}"]')
             if requested == "read":

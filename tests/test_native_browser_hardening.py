@@ -10,6 +10,7 @@ import time
 import uuid
 
 from playwright.sync_api import sync_playwright,expect
+from tests.browser_support import open_project_codex
 from tests.test_native_cli_integration import cli_stack,read,call
 from tests.support import wait_for
 from scripts.check_native_cli_real import png
@@ -29,7 +30,7 @@ def test_http_upload_reload_binding_input_batch_queries_and_export(cli_stack,tmp
         page.add_init_script("Object.defineProperty(window.crypto,'subtle',{get:()=>undefined,configurable:true})")
         try:
             page.goto(s.url+'/#projects');page.fill('#username', 'admin');page.fill('#password',s.password);page.click('#login-form button')
-            page.locator('[data-native-launch="codex"][data-project="'+s.project['id']+'"]').click()
+            open_project_codex(page, s.project["id"])
             mount_archived_terminal(page)
             expect(page.locator('#native-root')).to_be_visible()
             assert page.evaluate('typeof crypto.subtle')=='undefined'
