@@ -120,6 +120,7 @@ async def test_wake_evidence_follows_original_ticket_and_preserves_coalescing(co
     origin = next(row for row in s.rooms.diagnostics({'conversation_id': args['conversation_id']}, owner)['traces']
                   if row['kind'] == 'reply' and row['message_id'] == reply['id'])
     assert origin['consumer_session_id'] == credentials['consumer_session_id']
+    assert origin['source_message_id'] == source['id']
 
     send('尚未领取的第二条')
     send('尚未领取的第三条')

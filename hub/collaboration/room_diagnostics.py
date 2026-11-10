@@ -252,7 +252,7 @@ def projection(c, room, principal):
               'channel_delivery': '等待渠道投递或核对'}
 
     def age(at):
-        return round(max(0, now - at), 3) if isinstance(at, (float, int)) else None
+        return round(now - at, 3) if isinstance(at, (float, int)) and at <= now else None
 
     def trace(item):
         same_kind = sum(existing['kind'] == item['kind'] for existing in traces)
@@ -393,6 +393,13 @@ def projection(c, room, principal):
     originals = {row['id']: row for row in messages[:LIMITS['messages']]
                  if c.chatroom.message_visible(principal, row)}
     channel_map = c.channels.for_messages(originals)
+    source_refs = {row['id']: json.loads(row['body']).get('source_message_id') for row in originals.values()}
+    source_ids = tuple(dict.fromkeys(value for value in source_refs.values() if value))
+    visible_sources = set()
+    if source_ids:
+        visible_sources = {row['id'] for row in store.all(f"""SELECT * FROM collaboration_messages
+            WHERE conversation_id=? AND id IN ({','.join('?' for _ in source_ids)})""",
+            (room['id'], *source_ids)) if c.chatroom.message_visible(principal, row)}
     reply_ids = [row['id'] for row in originals.values() if row['kind'] == 'reply']
     origins = {}
     if reply_ids:
@@ -402,7 +409,9 @@ def projection(c, room, principal):
     for message_id in reply_ids:
         message = originals[message_id]
         origin = origins.get(message_id)
+        source_id = source_refs[message_id]
         trace({'kind': 'reply', 'id': message_id, 'message_id': message_id, 'updated_at': message['created'],
+               'source_message_id': source_id if source_id in visible_sources else '',
                'state': 'saved', 'origin': 'recorded' if origin else 'unknown_legacy',
                **({key: origin[key] for key in ('consumer_session_id', 'member_id', 'binding_generation')}
                   if origin else {})})
@@ -411,10 +420,8 @@ def projection(c, room, principal):
         message = originals.get(message_id)
         if not message:
             continue
-        source_id = json.loads(message['body']).get('source_message_id', '')
-        source = store.one('SELECT * FROM collaboration_messages WHERE id=? AND conversation_id=?',
-                           (source_id, room['id'])) if source_id else None
-        if not source or not c.chatroom.message_visible(principal, source):
+        source_id = source_refs[message_id]
+        if source_id not in visible_sources:
             source_id = ''
         for delivery in deliveries:
             if delivery['state'] == 'not_requested':
