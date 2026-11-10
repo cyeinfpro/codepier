@@ -10,7 +10,8 @@ import json
 import math
 import uuid
 
-from shared.room_runtime_contracts import RoomMessage, WorkControl, RoomMemberReply, RoomWorkStart
+from shared.room_runtime_contracts import RoomMessage, WorkControl, RoomMemberReply, RoomReplyReceiptRead, RoomWorkStart
+from hub.collaboration.history_retention import replay_response
 from hub.collaboration.projection_cache import projection
 from hub.collaboration.room_waiting_inputs import record_input, route_input
 from hub.collaboration.common import canonical, digest, read_cursor, redact, sign_cursor, validate
@@ -51,6 +52,18 @@ def migrate(db):
         goal_id TEXT NOT NULL REFERENCES coordination_goals(id),intent_revision INTEGER NOT NULL,
         message_id TEXT NOT NULL,created REAL NOT NULL,PRIMARY KEY(goal_id,intent_revision))''')
 
+    db.execute('''CREATE TABLE IF NOT EXISTS room_reply_origins (
+        message_id TEXT PRIMARY KEY REFERENCES collaboration_messages(id),
+        consumer_session_id TEXT NOT NULL REFERENCES dot_consumer_sessions(id),
+        member_id TEXT NOT NULL REFERENCES room_members(id),
+        binding_generation INTEGER NOT NULL,
+        request_digest TEXT NOT NULL,
+        created REAL NOT NULL)''')
+    db.execute('''CREATE INDEX IF NOT EXISTS room_reply_origins_session
+        ON room_reply_origins(consumer_session_id, created, message_id)''')
+    db.execute('''CREATE INDEX IF NOT EXISTS room_reply_origins_member
+        ON room_reply_origins(member_id, binding_generation, created, message_id)''')
+
 
 class RoomRuntime:
     def __init__(self, collaboration):
@@ -77,12 +90,16 @@ class RoomRuntime:
             raise DevError('ROOM_SOURCE_CHANGED','原始输入已修订，请重新读取',409)
         return row
 
-    def member_receipt(self,args,member,principal,action,perform):
-        # Consumer proofs rotate; they authorize replay but are not business
-        # identity. A retry under the current lease recovers the same result.
-        stable={k:v for k,v in args.items() if k not in {'consumer_session_id','consumer_fence','consumer_proof','expected_inbox_revision','connection_proof'}}
-        conversation=self.store.one('SELECT * FROM conversation_rooms WHERE id=?',(member['conversation_id'],))
-        return self.c.room_channels.receipt(principal,conversation,action+':'+member['id'],stable,perform)
+    @staticmethod
+    def member_receipt_args(args):
+        credentials = {'consumer_session_id', 'consumer_fence', 'consumer_proof',
+                       'expected_inbox_revision', 'connection_proof'}
+        return {key: value for key, value in args.items() if key not in credentials}
+
+    def member_receipt(self, args, member, principal, action, perform):
+        conversation = self.store.one('SELECT * FROM conversation_rooms WHERE id=?', (member['conversation_id'],))
+        return self.c.room_channels.receipt(principal, conversation, action + ':' + member['id'],
+                                            self.member_receipt_args(args), perform)
 
     def provenance(self,message):
         body=json.loads(message['body']) if message else {}
@@ -95,91 +112,269 @@ class RoomRuntime:
                 scopes.add((partition['project_id'],partition['environment_id']))
         return sorted(projects),[{'project_id':project,'environment_id':environment} for project,environment in sorted(scopes)]
 
-    def reply(self,raw,principal):
-        args=validate(RoomMemberReply,raw)
+    def reply(self, raw, principal):
+        args = validate(RoomMemberReply, raw)
+        consumers = self.c.room_consumers
+        channels = self.c.room_channels
+        fingerprint = channels.receipt_fingerprint(self.member_receipt_args(args))
         with self.store.transaction():
-            member=self.c.room_consumers.authorize_member(args,principal,require_revision=False)
-            source=self.source(args,member,principal)
-            source_body=json.loads(source['body'])
-            related_id=source_body.get('work_id') or source.get('goal_id')
-            related=self.goal(related_id) if related_id else None
-            strict=bool(related) or any(args.get(key) for key in
-                ('expected_intent_revision','coordinator_epoch','outcome','artifact_refs'))
-            self.c.room_consumers.guard_reply_revision(args,principal,member,source,strict=strict)
-            publication=self.publication(args,member,source,related,principal) if related and args['complete'] else None
-            def save():
-                identifier=uuid.uuid4().hex
-                if publication:
-                    revision=publication['intent_revision']
-                    published=self.store.one('SELECT * FROM room_goal_publications WHERE goal_id=? AND intent_revision=?',(related['id'],revision))
-                    if published:
-                        existing=self.store.one('SELECT body FROM collaboration_messages WHERE id=?',(published['message_id'],))
-                        saved=json.loads(existing['body']) if existing else {}
-                        if (saved.get('body_text')!=redact(args['body_text']) or saved.get('outcome')!=publication['outcome']
-                                or saved.get('artifact_refs')!=publication['artifact_refs']
-                                or saved.get('coordinator_epoch',1)!=publication['coordinator_epoch']):
-                            raise DevError('ROOM_PUBLICATION_CONFLICT','原工作本次意图已有不同的最终汇总，不能用新请求覆盖',409)
-                        return {'message_id':published['message_id'],'complete':True}
-                source_projects,source_scopes=self.provenance(source)
-                body={'body_text':redact(args['body_text']),'sender_member_id':member['id'],
-                      'sender_name':member['name'],'dot_reply_complete':args['complete'],
-                      'source_message_id':source['id'],'provenance_project_ids':source_projects,
-                      'provenance_scopes':source_scopes}
-                if related:
-                    native=self.c.room_work_bridge.native
-                    projects=native.visible_projects(related,principal,member['id']) if native.reference(related) else set(json.loads(related['spec'])['project_ids'])
-                    body['provenance_project_ids']=sorted(set(body['provenance_project_ids'])|projects)
-                    if reference:=native.reference(related):
-                        scopes={(r['project_id'],r['environment_id']) for r in source_scopes}
-                        scopes.update((r['project_id'],r['environment_id']) for saved in native.record(reference)['members']
-                            for r in saved['projects'] if r['project_id'] in projects)
-                        body['provenance_scopes']=[{'project_id':p,'environment_id':e} for p,e in sorted(scopes)]
-                    body['intent_revision']=self.intent_revision(related['id'])
-                if publication:
-                    body.update(publication,goal_id=related['id'],acceptance_verified_by_owner=False)
-                if member.get('legacy_dot_id'):
-                    body['sender_dot_id']=member['legacy_dot_id']
-                root=source['thread_root_id'] or source['id']
-                self.store.execute('''INSERT INTO collaboration_messages
-                    (id,room_id,conversation_id,thread_id,thread_root_id,reply_to_id,author,origin,source_id,kind,body,state,created,goal_id)
-                    VALUES (?,?,?,?,?,?,?,'bound_connector',?,'reply',?,'saved',?,?)''',
-                    (identifier,source['room_id'],source['conversation_id'],root,root,source['id'],principal.grant_id,
-                     'room-reply:'+digest([member['id'],args['idempotency_key']]),canonical(body),self.c.clock(),related['id'] if related else source.get('goal_id')))
-                message=self.store.one('SELECT * FROM collaboration_messages WHERE id=?',(identifier,))
-                if publication:
-                    self.store.execute('INSERT INTO room_goal_publications VALUES (?,?,?,?)',
-                        (related['id'],self.intent_revision(related['id']),identifier,self.c.clock()))
-                    self.store.execute('''INSERT INTO team_publications
-                        (id,goal_id,intent_revision,result_digest,artifact_refs,outcome,summary,message_id,created)
-                        VALUES (?,?,?,?,?,?,?,?,?)''',(identifier,related['id'],publication['intent_revision'],publication['result_digest'],
-                            canonical(publication['artifact_refs']),publication['outcome'],redact(args['body_text']),identifier,self.c.clock()))
-                self.c.rooms.change(member['conversation_id'],'message',identifier,message['version'])
-                if source.get('room_id'):
-                    self.c.channels.queue(message)
-                else:
-                    self.c.weixin.delivery.queue_reply(message)
-                if args['complete']:
-                    self.c.room_consumers.ack_message(member,source['id'])
-                return {'message_id':identifier,'complete':args['complete']}
-            receipt=self.member_receipt(args,member,principal,'room_reply',save)
-            return {'message':self.message_view(self.store.one('SELECT * FROM collaboration_messages WHERE id=?',(receipt['message_id'],)),principal),
-                    'complete':receipt['complete'],'scheduled':False}
+            member, session = consumers.reply_identity(args, principal)
+            identity = (principal.user_id, member['conversation_id'], 'room_reply:' + member['id'], args['idempotency_key'])
+            prior = channels.receipt_record(identity)
+            if prior and prior['fingerprint'] != fingerprint:
+                raise DevError('IDEMPOTENCY_CONFLICT', '同一请求标识不能用于另一项操作', 409)
+            created = False
+            if not prior:
+                member = consumers.authorize_member(args, principal, require_revision=False)
+                receipt, created = self.save_reply(args, principal, member, session, fingerprint)
+                channels.save_receipt(identity, fingerprint, receipt)
+
+        # Reauthorize in a new snapshot, including when the write just committed.
+        with self.store.transaction(immediate=False):
+            member, session = consumers.reply_identity(args, principal)
+            original = channels.receipt_record(identity)
+            return self.reply_response(original, principal, member, session, replayed=bool(prior),
+                                       effects_created=created)
+
+    def reply_receipt(self, raw, principal):
+        args = validate(RoomReplyReceiptRead, raw)
+        with self.store.transaction(immediate=False):
+            member = None
+            if principal.grant_id:
+                member, _ = self.c.room_consumers.reply_identity(args, principal)
+            else:
+                if args['connection_proof'] is not None:
+                    raise DevError('INVALID_ARGUMENTS', '房主历史查询不接受成员凭据', 422)
+                principal, _ = self.owner(principal, args['conversation_id'], archived=True)
+            identity = (principal.user_id, args['conversation_id'], 'room_reply:' + args['member_id'], args['request_key'])
+            original = self.c.room_channels.receipt_record(identity)
+            if not original:
+                raise DevError('ROOM_REPLY_RECEIPT_NOT_FOUND', '没有可查询的原回复回执', 404)
+            if member and json.loads(original['result']).get('binding_generation') != member['binding_generation']:
+                raise DevError('ROOM_REPLY_RECEIPT_NOT_FOUND', '当前绑定没有可查询的原回复回执', 404)
+            return self.reply_response(original, principal, member, None, replayed=True, effects_created=False)
+
+    def reply_response(self, original, principal, member, session, *, replayed, effects_created):
+        receipt = replay_response(original['result'])
+        identifier = receipt['message_id']
+        row = self.store.one('SELECT * FROM collaboration_messages WHERE id=? AND conversation_id=?',
+                             (identifier, original['conversation_id']))
+        visible = bool(row and self.c.chatroom.message_visible(principal, row))
+        if visible:
+            source_id = receipt.get('source_message_id') or row['reply_to_id']
+            source = self.store.one('SELECT * FROM collaboration_messages WHERE id=? AND conversation_id=?',
+                                    (source_id, original['conversation_id']))
+            if member:
+                visible = (self.c.room_consumers._visible_message(member, principal, row) and
+                           self.c.room_consumers._visible_message(member, principal, source))
+            elif source:
+                room = self.store.one('SELECT * FROM conversation_rooms WHERE id=?', (original['conversation_id'],))
+                scopes = {(item['project_id'], item['environment_id']) for item in self.c.room_context.projects(principal, room)}
+                visible = (self.c.chatroom.message_visible(principal, source) and
+                           (self.c.room_context.message_scopes(row) | self.c.room_context.message_scopes(source)) <= scopes)
+        history = {'committed': True, 'message_id': identifier}
+        result = {'message': {'id': identifier, 'withheld': True}, 'complete': receipt['complete'],
+                  'scheduled': False, 'replayed': replayed, 'historical_result': history,
+                  'effects_created': effects_created,
+                  'current_consumer': self.c.room_consumers.reply_consumer_view(session) if session else None}
+        if visible:
+            origin = self.store.one('SELECT consumer_session_id FROM room_reply_origins WHERE message_id=?', (identifier,))
+            history.update(source_message_id=receipt.get('source_message_id') or row['reply_to_id'],
+                           original_session_id=origin['consumer_session_id'] if origin else None,
+                           complete=receipt['complete'], yielded_at_commit=bool(receipt.get('yielded_at_commit')))
+            result.update(message=self.message_view(row, principal),
+                          channel_dispositions=receipt.get('channel_dispositions', []))
+            if not replayed and effects_created and 'yielded_at_commit' in receipt:
+                result.update({key: receipt[key] for key in
+                               ('yielded_at_commit', 'inbox_revision', 'more', 'reason_code') if key in receipt})
+        return result
+
+    def reply_goal(self, source, body, explicit):
+        identifier = body.get('work_id') or source.get('goal_id')
+        if not identifier and explicit:
+            mapped = self.store.one('''SELECT MIN(goal_id) AS goal_id FROM room_work_sources
+                WHERE message_id=? AND goal_id!='' HAVING COUNT(DISTINCT goal_id)=1''', (source['id'],))
+            identifier = mapped['goal_id'] if mapped else None
+        if not identifier:
+            return None
+        goal = self.goal(identifier)
+        if goal['conversation_id'] != source['conversation_id']:
+            raise DevError('GOAL_NOT_FOUND', '此工作不在当前房间', 404)
+        return goal
+
+    def reply_artifacts(self, args, member, goal, principal):
+        refs = args['artifact_refs']
+        if not refs:
+            return [], set()
+        native = self.c.room_work_bridge.native
+        if not goal or not native.reference(goal):
+            raise DevError('ROOM_REPLY_WORK_REQUIRED', '成果引用必须关联当前房间的原工作', 422)
+        refs = self.c.coordination.teams.artifacts(goal, refs)
+        visible = native.visible_scope_keys(goal, principal, member['id'])
+        scopes = {native.artifact_scope_key(goal, ref['work_item_id']) for ref in refs}
+        if not scopes <= visible:
+            raise DevError('ROOM_WORK_ARTIFACT_NOT_VISIBLE', '当前范围没有引用的工作成果', 404)
+        return refs, scopes
+
+    def save_reply(self, args, principal, member, session, fingerprint):
+        source = self.source(args, member, principal)
+        explicit = 'publish_work' in args
+        related = self.reply_goal(source, json.loads(source['body']), explicit)
+        strict = not explicit and (bool(related) or any(args.get(key) for key in
+                     ('expected_intent_revision', 'coordinator_epoch', 'outcome', 'artifact_refs')))
+        self.c.room_consumers.guard_reply_revision(args, principal, member, source, strict=strict)
+        wants_publication = args.get('publish_work') if explicit else bool(related and args['complete'])
+        native = self.c.room_work_bridge.native
+        if args.get('publish_work') is True and (not related or not native.reference(related)):
+            raise DevError('ROOM_REPLY_WORK_REQUIRED', '正式发表必须关联当前房间的原工作', 422)
+        if explicit and not wants_publication:
+            self.guard_discussion_work(args, related)
+
+        publication = self.publication(args, member, source, related, principal) if wants_publication else None
+        refs, artifact_scopes = self.reply_artifacts(args, member, related, principal) if explicit or publication else ([], set())
+        if publication:
+            publication.update(artifact_refs=refs, result_digest=digest(refs))
+            published = self.store.one('SELECT * FROM room_goal_publications WHERE goal_id=? AND intent_revision=?',
+                                       (related['id'], publication['intent_revision']))
+            if published:
+                return self.existing_publication(args, source, member, published, publication), False
+
+        identifier = uuid.uuid4().hex
+        source_projects, source_scopes = self.provenance(source)
+        scopes = {(r['project_id'], r['environment_id']) for r in source_scopes} | artifact_scopes
+        projects = set(source_projects) | {project for project, _ in artifact_scopes}
+        if related and (not explicit or publication):
+            if native.reference(related):
+                visible = native.visible_scope_keys(related, principal, member['id'])
+                scopes.update(visible)
+                projects.update(project for project, _ in visible)
+            else:
+                projects.update(json.loads(related['spec'])['project_ids'])
+        body = {'body_text': redact(args['body_text']), 'sender_member_id': member['id'],
+                'sender_name': member['name'], 'dot_reply_complete': args['complete'],
+                'source_message_id': source['id'], 'provenance_project_ids': sorted(projects),
+                'provenance_scopes': [{'project_id': project, 'environment_id': env} for project, env in sorted(scopes)]}
+        if related:
+            body['intent_revision'] = self.intent_revision(related['id'])
+        if explicit:
+            body['publish_work'] = args['publish_work']
+        if 'input_handling' in args:
+            body['input_handling'] = args['input_handling']
+        if refs:
+            body['artifact_refs'] = refs
+        if publication:
+            body.update(publication, goal_id=related['id'], acceptance_verified_by_owner=False)
+        if member.get('legacy_dot_id'):
+            body['sender_dot_id'] = member['legacy_dot_id']
+        root = source['thread_root_id'] or source['id']
+        self.store.execute('''INSERT INTO collaboration_messages
+            (id,room_id,conversation_id,thread_id,thread_root_id,reply_to_id,author,origin,source_id,kind,body,state,created,goal_id)
+            VALUES (?,?,?,?,?,?,?,'bound_connector',?,'reply',?,'saved',?,?)''',
+            (identifier, source['room_id'], source['conversation_id'], root, root, source['id'], principal.grant_id,
+             'room-reply:' + digest([member['id'], args['idempotency_key']]), canonical(body), self.c.clock(),
+             related['id'] if related else source.get('goal_id')))
+        message = self.store.one('SELECT * FROM collaboration_messages WHERE id=?', (identifier,))
+        if publication:
+            self.store.execute('INSERT INTO room_goal_publications VALUES (?,?,?,?)',
+                               (related['id'], publication['intent_revision'], identifier, self.c.clock()))
+            self.store.execute('''INSERT INTO team_publications
+                (id,goal_id,intent_revision,result_digest,artifact_refs,outcome,summary,message_id,created)
+                VALUES (?,?,?,?,?,?,?,?,?)''', (identifier, related['id'], publication['intent_revision'],
+                    publication['result_digest'], canonical(refs), publication['outcome'], body['body_text'],
+                    identifier, self.c.clock()))
+        self.c.rooms.change(member['conversation_id'], 'message', identifier, message['version'])
+        handling = args.get('input_handling')
+        if args['complete'] and (handling == 'answered' or (handling is None and (not explicit or publication))):
+            self.c.room_consumers.ack_message(member, source['id'], source_version=source['version'])
+        dispositions = self.reply_dispositions(message, source, related, explicit, bool(publication))
+        self.store.execute('INSERT INTO room_reply_origins VALUES (?,?,?,?,?,?)',
+                           (identifier, session['id'], member['id'], member['binding_generation'],
+                            fingerprint, self.c.clock()))
+        turn = self.c.room_consumers.yield_after_reply(args, principal, member, session) if args.get('yield_after') else {}
+        return {'message_id': identifier, 'source_message_id': source['id'], 'complete': args['complete'],
+                'binding_generation': member['binding_generation'], 'channel_dispositions': dispositions, **turn}, True
+
+    def guard_discussion_work(self, args, goal):
+        revision, epoch = args['expected_intent_revision'], args['coordinator_epoch']
+        if revision is not None and (not goal or revision != self.intent_revision(goal['id'])):
+            raise DevError('ROOM_INTENT_CHANGED', '引用的工作意图已变化，请重新读取', 409)
+        if epoch is not None and (not goal or epoch != self.c.room_goal_recovery.epoch(goal['id'])):
+            raise DevError('ROOM_WORK_LEAD_CHANGED', '引用的工作主责已变化，请重新读取', 409)
+
+    def original_reply_receipt(self, owner_id, conversation_id, message_id):
+        row = self.store.one("""SELECT result FROM room_runtime_receipts
+            WHERE owner_user_id=? AND conversation_id=? AND json_valid(result) AND action LIKE 'room_reply:%'
+            AND json_extract(result,'$.message_id')=? ORDER BY created,request_key LIMIT 1""",
+            (owner_id, conversation_id, message_id))
+        return json.loads(row['result']) if row else {}
+
+    def existing_publication(self, args, source, member, published, publication):
+        existing = self.store.one('SELECT body,reply_to_id FROM collaboration_messages WHERE id=?',
+                                  (published['message_id'],))
+        saved = json.loads(existing['body']) if existing else {}
+        if (not existing or saved.get('body_text') != redact(args['body_text'])
+                or saved.get('outcome') != publication['outcome'] or saved.get('artifact_refs') != publication['artifact_refs']
+                or saved.get('coordinator_epoch', 1) != publication['coordinator_epoch']
+                or ('publish_work' in args and (existing['reply_to_id'] != source['id']
+                    or saved.get('publish_work') != args['publish_work']))):
+            raise DevError('ROOM_PUBLICATION_CONFLICT', '原工作本次意图已有不同的最终汇总，不能用新请求覆盖', 409)
+        room = self.store.one('SELECT owner_user_id FROM conversation_rooms WHERE id=?', (member['conversation_id'],))
+        receipt = self.original_reply_receipt(room['owner_user_id'], member['conversation_id'], published['message_id'])
+        if 'retention_tombstone' in receipt:
+            return {**receipt, 'binding_generation': member['binding_generation']}
+        return {**receipt, 'message_id': published['message_id'], 'complete': True,
+                'binding_generation': member['binding_generation']}
+
+    def reply_dispositions(self, message, source, goal, explicit, publication):
+        delivery = self.c.weixin.delivery
+        if not explicit and source.get('room_id'):
+            self.c.channels.queue(message)
+            queued = self.c.channels.for_messages([message['id']]).get(message['id'], [])
+            if queued:
+                return [{'channel': row['channel'], 'binding_id': row.get('binding_id'),
+                         'disposition': 'queued', 'reason_code': '', 'delivery_id': row['id']} for row in queued]
+        candidates = [source] if explicit else [delivery.root_source(message)]
+        if explicit and publication:
+            native = self.c.room_work_bridge.native
+            original = native.original(native.reference(goal))
+            candidates.append(self.store.one('SELECT * FROM collaboration_messages WHERE id=?',
+                                             (original['source_message_id'],)))
+        targets = {}
+        for candidate in candidates:
+            if candidate and candidate['origin'] == 'external_channel':
+                origin = json.loads(candidate['body']).get('external_origin', {})
+                if origin.get('channel') == 'weixin':
+                    targets.setdefault((origin.get('binding_id'), origin.get('generation'), origin.get('peer_id')), candidate)
+        if not targets:
+            return [{'channel': 'weixin', 'binding_id': None, 'disposition': 'not_requested',
+                     'reason_code': '', 'delivery_id': None}]
+        result = []
+        for target in targets.values():
+            queued = delivery.queue_reply_result(message, source=target)
+            result.append({'channel': 'weixin', 'binding_id': queued.binding_id, 'disposition': queued.disposition,
+                           'reason_code': queued.reason_code, 'delivery_id': queued.delivery_id})
+        return result
 
     def publication(self,args,member,source,goal,principal):
         native=self.c.room_work_bridge.native
         reference=native.reference(goal)
         if not reference:
             return None
-        native.guard(args,principal,goal,action='publish')
-        if not native.owner_author(goal,source)['authenticated']:
-            raise DevError('ROOM_OWNER_SOURCE_REQUIRED','原输入的本人身份批准已失效',403)
+        explicit = args.get('publish_work') is True
+        native.guard(args,principal,goal,action='publish',require_revision=not explicit)
         original=native.record(reference)
         revision=self.intent_revision(goal['id'])
         intent=self.store.one('SELECT * FROM room_work_intent_sources WHERE goal_id=? AND intent_revision=?',(goal['id'],revision))
         current=intent or original
-        if (source['id']!=current['source_message_id'] or source['version']!=current['source_version']
-                or args['source_digest']!=current['source_digest']):
-            raise DevError('ROOM_INTENT_CHANGED','最终汇总必须回复当前意图的原始输入',409)
+        intent_source = source if not explicit else self.publication_source(current, source['conversation_id'])
+        self.require_publication_source(current, intent_source, member, principal)
+        if not native.owner_author(goal, intent_source)['authenticated']:
+            raise DevError('ROOM_OWNER_SOURCE_REQUIRED','原输入的本人身份批准已失效',403)
+        if explicit and original['source_message_id'] != current['source_message_id']:
+            original_source = self.publication_source(original, source['conversation_id'])
+            self.require_publication_source(original, original_source, member, principal)
+            if not native.owner_author(goal, original_source)['authenticated']:
+                raise DevError('ROOM_OWNER_SOURCE_REQUIRED','原交办的本人身份批准已失效',403)
         if args['outcome'] is None:
             raise DevError('ROOM_WORK_OUTCOME_REQUIRED','工作汇总需要明确全部完成、部分完成或受阻',422)
         works=self.store.all('''SELECT w.* FROM coordination_work w JOIN room_native_work_assignments a ON a.work_id=w.id
@@ -189,13 +384,28 @@ class RoomRuntime:
             raise DevError('ROOM_WORK_NOT_COMPLETE','原工作仍有未完成或不确定操作，请发送进展并继续核对',409)
         if args['outcome']=='succeeded' and (goal['state']!='active' or not works or any(w['state']!='succeeded' for w in works)):
             raise DevError('ROOM_WORK_NOT_SUCCESSFUL','仍有未成功的当前工作项，不能声明全部完成',409)
-        refs=self.c.coordination.teams.artifacts(goal,args['artifact_refs'])
+        refs=args['artifact_refs']
         required = {w['id'] for w in works if w['result']}
         required.update(ref['work_item_id'] for ref in self.c.room_goal_recovery.reused_artifact_refs(goal))
         if {r['work_item_id'] for r in refs} != required:
             raise DevError('ROOM_WORK_RESULT_SET_CHANGED','汇总需要精确引用当前意图和已批准续办的全部已有结果',409)
         return {'intent_revision':revision,'coordinator_epoch':self.c.room_goal_recovery.epoch(goal['id']),
-                'outcome':args['outcome'],'artifact_refs':refs,'result_digest':digest(refs)}
+                'outcome':args['outcome']}
+
+    def publication_source(self, snapshot, conversation_id):
+        return self.store.one('SELECT * FROM collaboration_messages WHERE id=? AND conversation_id=?',
+                              (snapshot['source_message_id'], conversation_id))
+
+    def require_publication_source(self, snapshot, source, member, principal):
+        if (not source or source['id'] != snapshot['source_message_id']
+                or source['version'] != snapshot['source_version']):
+            raise DevError('ROOM_INTENT_CHANGED', '原工作意图的来源已修订，请重新读取', 409)
+        body = json.loads(source['body'])
+        if (digest(body.get('body_text', '')) != snapshot['source_digest']
+                or not self.c.room_consumers.source_is_current(source, body)):
+            raise DevError('ROOM_INTENT_CHANGED', '原工作意图的来源已修订，请重新读取', 409)
+        if not self.c.room_consumers._visible_message(member, principal, source):
+            raise DevError('ROOM_SOURCE_NOT_FOUND', '当前成员范围内没有原工作意图来源', 404)
 
     def start_work(self,raw,principal):
         args=validate(RoomWorkStart,raw)
@@ -384,6 +594,10 @@ class RoomRuntime:
         view['work_id']=row.get('goal_id') or body.get('work_id','')
         view['client_message_id']=row['source_id']
         view['routing'],view['display']=self.message_status(row,body,body.get('room_routing',{}))
+        if row['origin'] == 'bound_connector' and row['source_id'].startswith('room-reply:'):
+            conversation = self.store.one('SELECT owner_user_id FROM conversation_rooms WHERE id=?', (row['conversation_id'],))
+            receipt = self.original_reply_receipt(conversation['owner_user_id'], row['conversation_id'], row['id'])
+            view['channel_dispositions'] = receipt.get('channel_dispositions', [])
         return view
 
     def message_status(self,row,body,route):
