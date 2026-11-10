@@ -52,6 +52,19 @@ def migrate(db):
         message_id TEXT NOT NULL,created REAL NOT NULL,PRIMARY KEY(goal_id,intent_revision))''')
 
 
+    db.execute('''CREATE TABLE IF NOT EXISTS room_reply_origins(
+        message_id TEXT PRIMARY KEY REFERENCES collaboration_messages(id),
+        consumer_session_id TEXT NOT NULL REFERENCES dot_consumer_sessions(id),
+        member_id TEXT NOT NULL REFERENCES room_members(id),
+        binding_generation INTEGER NOT NULL,
+        request_digest TEXT NOT NULL,
+        created REAL NOT NULL)''')
+    db.execute('''CREATE INDEX IF NOT EXISTS room_reply_origins_session
+        ON room_reply_origins(consumer_session_id,created,message_id)''')
+    db.execute('''CREATE INDEX IF NOT EXISTS room_reply_origins_member
+        ON room_reply_origins(member_id,binding_generation,created,message_id)''')
+
+
 class RoomRuntime:
     def __init__(self, collaboration):
         self.c, self.store = collaboration, collaboration.store
@@ -77,12 +90,26 @@ class RoomRuntime:
             raise DevError('ROOM_SOURCE_CHANGED','原始输入已修订，请重新读取',409)
         return row
 
+    @staticmethod
+    def member_business_args(args):
+        transport = {'consumer_session_id', 'consumer_fence', 'consumer_proof',
+                     'expected_inbox_revision', 'connection_proof'}
+        return {key: value for key, value in args.items() if key not in transport}
+
     def member_receipt(self,args,member,principal,action,perform):
         # Consumer proofs rotate; they authorize replay but are not business
         # identity. A retry under the current lease recovers the same result.
-        stable={k:v for k,v in args.items() if k not in {'consumer_session_id','consumer_fence','consumer_proof','expected_inbox_revision','connection_proof'}}
         conversation=self.store.one('SELECT * FROM conversation_rooms WHERE id=?',(member['conversation_id'],))
-        return self.c.room_channels.receipt(principal,conversation,action+':'+member['id'],stable,perform)
+        return self.c.room_channels.receipt(principal,conversation,action+':'+member['id'],
+                                            self.member_business_args(args),perform)
+
+    def record_reply_origin(self, message, args, member, request_digest):
+        self.store.require_transaction()
+        self.store.execute('''INSERT INTO room_reply_origins
+            (message_id,consumer_session_id,member_id,binding_generation,request_digest,created)
+            VALUES (?,?,?,?,?,?)''',
+            (message['id'], args['consumer_session_id'], member['id'], member['binding_generation'],
+             request_digest, message['created']))
 
     def provenance(self,message):
         body=json.loads(message['body']) if message else {}
@@ -99,15 +126,15 @@ class RoomRuntime:
         args=validate(RoomMemberReply,raw)
         with self.store.transaction():
             member=self.c.room_consumers.authorize_member(args,principal,require_revision=False)
-            source=self.source(args,member,principal)
-            source_body=json.loads(source['body'])
-            related_id=source_body.get('work_id') or source.get('goal_id')
-            related=self.goal(related_id) if related_id else None
-            strict=bool(related) or any(args.get(key) for key in
-                ('expected_intent_revision','coordinator_epoch','outcome','artifact_refs'))
-            self.c.room_consumers.guard_reply_revision(args,principal,member,source,strict=strict)
-            publication=self.publication(args,member,source,related,principal) if related and args['complete'] else None
             def save():
+                source=self.source(args,member,principal)
+                source_body=json.loads(source['body'])
+                related_id=source_body.get('work_id') or source.get('goal_id')
+                related=self.goal(related_id) if related_id else None
+                strict=bool(related) or any(args.get(key) for key in
+                    ('expected_intent_revision','coordinator_epoch','outcome','artifact_refs'))
+                self.c.room_consumers.guard_reply_revision(args,principal,member,source,strict=strict)
+                publication=self.publication(args,member,source,related,principal) if related and args['complete'] else None
                 identifier=uuid.uuid4().hex
                 if publication:
                     revision=publication['intent_revision']
@@ -119,7 +146,9 @@ class RoomRuntime:
                                 or saved.get('artifact_refs')!=publication['artifact_refs']
                                 or saved.get('coordinator_epoch',1)!=publication['coordinator_epoch']):
                             raise DevError('ROOM_PUBLICATION_CONFLICT','原工作本次意图已有不同的最终汇总，不能用新请求覆盖',409)
-                        return {'message_id':published['message_id'],'complete':True}
+                        dispositions = self.c.channels.reply_dispositions([published['message_id']])
+                        return {'message_id':published['message_id'],'complete':True,
+                                'channel_dispositions':dispositions.get(published['message_id'], [])}
                 source_projects,source_scopes=self.provenance(source)
                 body={'body_text':redact(args['body_text']),'sender_member_id':member['id'],
                       'sender_name':member['name'],'dot_reply_complete':args['complete'],
@@ -153,14 +182,17 @@ class RoomRuntime:
                         (id,goal_id,intent_revision,result_digest,artifact_refs,outcome,summary,message_id,created)
                         VALUES (?,?,?,?,?,?,?,?,?)''',(identifier,related['id'],publication['intent_revision'],publication['result_digest'],
                             canonical(publication['artifact_refs']),publication['outcome'],redact(args['body_text']),identifier,self.c.clock()))
+                business = self.member_business_args(args)
+                request_digest = digest({key: value for key, value in business.items() if key != 'idempotency_key'})
+                self.record_reply_origin(message, args, member, request_digest)
                 self.c.rooms.change(member['conversation_id'],'message',identifier,message['version'])
                 if source.get('room_id'):
-                    self.c.channels.queue(message)
+                    dispositions = self.c.channels.queue_reply_dispositions(message)
                 else:
-                    self.c.weixin.delivery.queue_reply(message)
+                    dispositions = [self.c.weixin.delivery.queue_reply_result(message).view()]
                 if args['complete']:
                     self.c.room_consumers.ack_message(member,source['id'])
-                return {'message_id':identifier,'complete':args['complete']}
+                return {'message_id':identifier,'complete':args['complete'],'channel_dispositions':dispositions}
             receipt=self.member_receipt(args,member,principal,'room_reply',save)
             return {'message':self.message_view(self.store.one('SELECT * FROM collaboration_messages WHERE id=?',(receipt['message_id'],)),principal),
                     'complete':receipt['complete'],'scheduled':False}

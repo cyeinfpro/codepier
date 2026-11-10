@@ -5,6 +5,8 @@ import asyncio
 import json
 import secrets
 import uuid
+from dataclasses import dataclass
+from typing import Literal
 
 from hub.collaboration.common import canonical, digest
 from hub.collaboration import weixin_schema as models
@@ -31,6 +33,22 @@ TERMINAL_SOURCE = frozenset(TASK_STATUSES) | {
 RATE_LIMITED = 'WEIXIN_RATE_LIMITED'
 REQUEST_LIMIT = 'WEIXIN_REQUEST_LIMIT'
 MAX_SEND_ATTEMPTS = 6
+
+
+@dataclass(frozen=True)
+class EnqueueResult:
+    disposition: Literal['queued', 'existing', 'not_requested', 'blocked', 'rejected']
+    reason_code: str
+    binding_id: str = ''
+    delivery: dict | None = None
+
+    def view(self):
+        result = {'channel': 'weixin', 'disposition': self.disposition, 'reason_code': self.reason_code}
+        if self.binding_id:
+            result['binding_id'] = self.binding_id
+        if self.delivery:
+            result['delivery_id'] = self.delivery['id']
+        return result
 
 
 def text_items(value):
@@ -64,6 +82,8 @@ class WeixinDelivery:
             if current['origin'] == 'external_channel':
                 return current
             if not current['reply_to_id']:
+                if json.loads(message['body']).get('publish_work') is False:
+                    return None
                 return self.work_source(message, current)
             current = self.store.one('SELECT * FROM collaboration_messages WHERE id=? AND conversation_id=?',
                                     (current['reply_to_id'], message['conversation_id']))
@@ -113,37 +133,47 @@ class WeixinDelivery:
     def task_author(self, message, source, body):
         native = self.c.room_channels.native
         author = native.reply_author(message, source)
-        if (message.get('goal_id') or body.get('provenance_project_ids') or body.get('dot_reply_complete') is False):
+        if (message.get('goal_id') and body.get('publish_work') is not False
+                or body.get('provenance_project_ids') or body.get('dot_reply_complete') is False):
             if not author['authenticated']:
                 raise DevError('CHANNEL_OWNER_NOT_APPROVED', '此微信来源没有有效的工作回传授权', 403)
         return author
 
     def queue_reply(self, message):
-        if not self.c.config.enabled:
-            return None
+        return self.queue_reply_result(message).delivery
+
+    def queue_reply_result(self, message):
+        self.store.require_transaction()
         body = json.loads(message['body'])
         if message['origin'] != 'bound_connector' or not (body.get('sender_dot_id') or body.get('sender_member_id')):
-            return None
+            return EnqueueResult('not_requested', 'no_external_reply')
         source = self.root_source(message)
-        if not source:
-            return None
-        origin = json.loads(source['body']).get('external_origin', {})
+        origin = json.loads(source['body']).get('external_origin', {}) if source else {}
+        if origin.get('channel') != 'weixin':
+            return EnqueueResult('not_requested', 'no_weixin_source')
+        binding_id = origin.get('binding_id', '')
+        if not self.c.config.enabled:
+            return EnqueueResult('blocked', 'channel_disabled', binding_id)
         native = self.c.room_channels.native if origin.get('native_room') else None
         try:
             if native:
-                candidate = self.store.one('SELECT * FROM weixin_bindings WHERE id=?', (origin.get('binding_id', ''),))
-                binding, account, _, _, member = native.reply_binding(candidate, message, source)
-                if not native.sender_matches(binding, message, source):
-                    return None
+                candidate = self.store.one('SELECT * FROM weixin_bindings WHERE id=?', (binding_id,))
+                binding, account, binding_owner, _, member = native.reply_binding(
+                    candidate, message, source, allow_disconnected=True)
+                self.c.chatroom.require_message_visible(binding_owner, message)
+                if not native.sender_matches(binding, message, source, allow_disconnected=True):
+                    return EnqueueResult('blocked', 'sender_changed', binding_id)
                 sender = member['id']
             else:
-                binding, account, _, _, member = self.w.valid(origin.get('binding_id', ''))
+                binding, account, _, _, member = self.w.valid(binding_id)
                 sender = body.get('sender_dot_id')
-            if (not binding['allow_replies'] or origin.get('generation') != binding['generation']
-                    or origin.get('peer_id') != binding['peer_id'] or sender != member['id']):
-                return None
-        except DevError:
-            return None
+            if not binding['allow_replies']:
+                return EnqueueResult('blocked', 'reply_permission_revoked', binding_id)
+            if (origin.get('generation') != binding['generation'] or origin.get('peer_id') != binding['peer_id']
+                    or sender != member['id']):
+                return EnqueueResult('blocked', 'recipient_changed', binding_id)
+        except DevError as exc:
+            return EnqueueResult('blocked', exc.code, binding_id)
 
         try:
             if native:
@@ -152,17 +182,17 @@ class WeixinDelivery:
                 self.c.channel_owner.require_reply_source(source)
                 author = self.c.channel_owner.author(source)
                 if body.get('dot_reply_complete') is False and not author['authenticated']:
-                    return None
+                    return EnqueueResult('blocked', 'reply_permission_revoked', binding_id)
         except DevError as exc:
             if native:
                 self.queue_task_status(source, exc.code, projection_message_id=message['id'])
-            return None
+            return EnqueueResult('blocked', exc.code, binding_id)
 
         old = self.store.one('''SELECT * FROM weixin_deliveries
             WHERE binding_id=? AND generation=? AND message_id=? AND message_version=?''',
             (binding['id'], binding['generation'], message['id'], message['version']))
         if old:
-            return old
+            return EnqueueResult('existing', '', binding_id, old)
         prior = self.store.one('''SELECT id FROM weixin_deliveries
             WHERE binding_id=? AND generation=? AND peer_id=? AND message_id=?
             ORDER BY message_version DESC LIMIT 1''',
@@ -182,13 +212,23 @@ class WeixinDelivery:
             self.add_part(identifier, 0, 'text', {'text': ''})
             self.store.execute("UPDATE weixin_parts SET state='rejected',reason_code='daily_reply_quota' WHERE delivery_id=?", (identifier,))
             self.refresh(identifier)
-            return self.store.one('SELECT * FROM weixin_deliveries WHERE id=?', (identifier,))
+            delivery = self.store.one('SELECT * FROM weixin_deliveries WHERE id=?', (identifier,))
+            return EnqueueResult('rejected', 'daily_reply_quota', binding_id, delivery)
         pieces = text_chunks(body.get('body_text', ''))
         for ordinal, piece in enumerate(pieces):
             self.add_part(identifier, ordinal, 'text', {'text': piece})
+        reason = ''
         if not pieces:
             self.store.execute("UPDATE weixin_deliveries SET state='waiting_media' WHERE id=?", (identifier,))
-        return self.store.one('SELECT * FROM weixin_deliveries WHERE id=?', (identifier,))
+        elif account['state'] != 'active' or not self.store.one("""SELECT 1 FROM weixin_contexts
+                WHERE account_id=? AND generation=? AND peer_id=?""",
+                (account['id'], binding['generation'], binding['peer_id'])):
+            reason = 'context_missing' if account['state'] == 'active' else 'account_waiting_reconnect'
+            self.store.execute("UPDATE weixin_parts SET state='waiting_context',reason_code=? WHERE delivery_id=?",
+                               (reason, identifier))
+            self.refresh(identifier)
+        delivery = self.store.one('SELECT * FROM weixin_deliveries WHERE id=?', (identifier,))
+        return EnqueueResult('queued', reason, binding_id, delivery)
 
     def status_source(self, source):
         body = json.loads(source['body'])
@@ -277,7 +317,10 @@ class WeixinDelivery:
 
         binding = self.store.one('SELECT * FROM weixin_bindings WHERE id=?', (delivery['binding_id'],))
         if binding and binding.get('native_member_id'):
-            valid = self.c.room_channels.native.delivery_validate(delivery, require_task_authority=False)
+            valid = self.c.room_channels.native.delivery_validate(
+                delivery, require_task_authority=False, allow_disconnected=True)
+            if valid[1]['state'] != 'active':
+                raise DevError('WEIXIN_WAITING_RECONNECT', '原微信账号恢复连接后继续投递', 409)
             message = valid[-1]
             source = self.store.one('SELECT * FROM collaboration_messages WHERE id=?', (delivery['source_message_id'],))
             self.task_author(message, source, json.loads(message['body']))

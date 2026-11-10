@@ -37,6 +37,9 @@ def migrate(db):
         owner_user_id TEXT NOT NULL,conversation_id TEXT NOT NULL,action TEXT NOT NULL,
         request_key TEXT NOT NULL,fingerprint TEXT NOT NULL,result TEXT NOT NULL,created REAL NOT NULL,
         PRIMARY KEY(owner_user_id,conversation_id,action,request_key))''')
+    db.execute('''CREATE INDEX IF NOT EXISTS room_runtime_receipts_message
+        ON room_runtime_receipts(owner_user_id,conversation_id,json_extract(result,'$.message_id'))
+        WHERE json_valid(result)''')
     from hub.collaboration.room_weixin_native import migrate as migrate_native
     migrate_native(db)
     from hub.collaboration.room_waiting_inputs import migrate as migrate_waiting
