@@ -71,7 +71,7 @@ async def test_completed_goal_keeps_unknown_wechat_delivery_separate_and_correla
         if part['delivery_id'] == final_delivery['id']:
             s.weixin.delivery.finish(claim, error=TimeoutError('synthetic response lost'))
         else:
-            s.weixin.delivery.finish(claim, result={'ret': 0, 'synthetic': True})
+            s.weixin.delivery.finish(claim, result={'provider_state': 'accepted'})
     before = s.store.one('SELECT total_changes() AS n')['n']
     view = s.room_runtime.work_view(s.room_runtime.goal(goal_id), owner)
     diagnostic = s.rooms.diagnostics({'conversation_id': identity['conversation_id']}, owner)
