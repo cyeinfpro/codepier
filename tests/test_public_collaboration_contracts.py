@@ -36,6 +36,7 @@ VALUES = {
     'recipient_dot_id': 'peer-dot', 'coordinator_dot_id': 'coordinator-dot',
     'recipient_member_id': 'peer-member', 'target_member_id': 'peer-member', 'expected_coordinator_epoch': 1,
     'handoff_id': 'handoff',
+    'mode': 'decoupled', 'reason': 'Verify room rollout',
     'purpose': 'Review original constraints',
     'artifact_refs': [{'work_item_id': 'work', 'version': 1, 'digest': 'a' * 64}],
     'source_version': 1, 'source_digest': 'a' * 64,

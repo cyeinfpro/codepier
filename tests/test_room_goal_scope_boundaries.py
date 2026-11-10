@@ -129,8 +129,10 @@ async def test_same_goal_work_handoff_uses_real_second_member_consumer(collab):
         for row in s.store.all('SELECT * FROM coordination_work WHERE goal_id=?',(task['goal_id'],))]
     with pytest.raises(DevError):
         s.room_runtime.reply(final_request(s,peer,peer_credentials,second,source,refs),second)
-    final=s.room_runtime.reply(final_request(s,lead,lead_credentials,first,source,refs),first)
-    assert final['complete'] and len(s.store.all('SELECT * FROM team_publications'))==1
+    with pytest.raises(DevError) as inaccessible:
+        s.room_runtime.reply(final_request(s,lead,lead_credentials,first,source,refs),first)
+    assert inaccessible.value.code == 'ROOM_WORK_ARTIFACT_NOT_VISIBLE'
+    assert not s.store.all('SELECT * FROM team_publications')
     assert len(s.store.all('SELECT * FROM coordination_goals'))==1
 
 
@@ -157,7 +159,15 @@ async def test_owner_supplement_fences_old_attempt_and_continues_same_goal(colla
     assert resumed['goal_id']==result['goal_id'] and resumed['intent_revision']==2 and resumed['scheduled']
     assert resumed['continued_work_item_id']!=item['id']
     assert s.store.one('SELECT state FROM coordination_work WHERE id=?',(item['id'],))['state']=='blocked'
+    goal=s.room_runtime.goal(result['goal_id'])
+    s.room_runtime.control({'work_id':goal['id'],'expected_version':goal['version'],
+        'action':'supplement','body_text':'最新补充：先暂停文档检查。','idempotency_key':key()},owner)
+    replay=s.room_runtime.start_work({**request,
+        'expected_inbox_revision':s.room_consumers.inbox(identity,actor)['inbox_revision']},actor)
+    assert replay['continued_work_item_id']==resumed['continued_work_item_id']
+    assert replay['intent_revision']==3 and not replay['scheduled'] and replay['next_request'] is None
     assert len(s.store.all('SELECT * FROM coordination_goals'))==1
+    assert len(s.store.all('SELECT * FROM coordination_work'))==2
     assert not s.store.all('SELECT * FROM operations')
 
 
@@ -298,8 +308,10 @@ async def test_final_publication_reuses_original_artifact_evidence_and_is_unique
     assert len(s.store.all('SELECT * FROM room_goal_publications WHERE goal_id=?',(goal['goal_id'],)))==1
     s.room_runtime.control({'work_id':goal['goal_id'],'expected_version':s.room_runtime.goal(goal['goal_id'])['version'],
         'action':'supplement','body_text':'改为仅检查标题','idempotency_key':key()},owner)
-    with pytest.raises(DevError,match='意图'):
-        s.room_runtime.reply({**request,'expected_inbox_revision':s.room_consumers.inbox(identity,actor)['inbox_revision']},actor)
+    replay = s.room_runtime.reply({**request,
+        'expected_inbox_revision':s.room_consumers.inbox(identity,actor)['inbox_revision']},actor)
+    assert replay['replayed'] and not replay['effects_created']
+    assert replay['historical_result']['message_id'] == final['message']['id']
     with pytest.raises(DevError,match='当前意图'):
         s.room_runtime.reply({**request,'expected_intent_revision':2,'idempotency_key':key(),
             'expected_inbox_revision':s.room_consumers.inbox(identity,actor)['inbox_revision']},actor)
@@ -391,3 +403,75 @@ async def test_large_room_work_scope_starts_and_keeps_exact_project_boundary(col
             'target_project_id': 'not-approved'}, actor)
     assert len(s.store.all('SELECT * FROM coordination_work WHERE goal_id=?',
         (result['goal_id'],))) >= 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('explicit', [False,True])
+async def test_owner_can_discuss_the_original_work_without_revising_it(collab, explicit):
+    s,owner,actor,_,identity,credentials=await connected(
+        collab,[{'project':'proj'}],[{'project_id':'proj'}])
+    result,_=start(s,owner,actor,identity,credentials,project_ids=['proj'])
+    goal_id=result['goal_id']
+    source=s.store.one('SELECT id FROM collaboration_messages WHERE goal_id=? AND origin=?',
+        (goal_id,'panel_owner'))
+    assert s.room_runtime.work_read(goal_id,owner)['work']['original_source_message_id']==source['id']
+    original=s.room_runtime.goal(goal_id)
+    if explicit:
+        linked={'work_id':goal_id,'revise_work_intent':False}
+    else:
+        linked={'reply_to_id':source['id']}
+    discussion=s.room_runtime.send({'conversation_id':identity['conversation_id'],
+        'body_text':'为什么这样安排？','idempotency_key':key(),'client_message_id':key(),**linked},owner)
+    assert discussion['message']['work_id']==goal_id
+    assert s.room_runtime.intent_revision(goal_id)==1
+    assert s.room_runtime.goal(goal_id)['version']==original['version']
+    assert s.room_runtime.goal(goal_id)['state']==original['state']
+    inbox=s.room_consumers.inbox(identity,actor)
+    assert any(item['object_id']==discussion['message']['id'] for item in inbox['items'])
+    assert len(s.store.all('SELECT id FROM coordination_goals'))==1
+
+
+@pytest.mark.asyncio
+async def test_same_project_alternate_environment_cannot_read_original_work(collab):
+    s,owner,actor,_,identity,credentials=await connected(collab,
+        [{'project':'proj','environment_id':'production'},{'project':'proj','environment_id':'staging'}],
+        [{'project_id':'proj','environment_id':environment} for environment in ('production','staging')])
+    result,_=start(s,owner,actor,identity,credentials,project_ids=['proj'],environment_id='staging')
+    assert result['next_request']['arguments']['environment_id']=='staging'
+    request={'goal_id':result['goal_id'],'project':'proj','environment_id':'production'}
+    with pytest.raises(DevError) as denied:
+        s.coordination.read(request,actor)
+    assert denied.value.code=='GOAL_PROJECT_DENIED'
+    detail=s.coordination.read({**request,'environment_id':'staging'},actor)
+    assert detail['goal']['environment_id']=='staging'
+    assert {rule['environment_id'] for rule in detail['room_work_context']['scope']['work_routes']}=={'staging'}
+
+
+@pytest.mark.asyncio
+async def test_decoupled_claim_checks_only_the_affected_work_scope(collab, monkeypatch):
+    monkeypatch.setenv('CODEPIER_ROOM_CHAT_SCOPE_MODE','decoupled')
+    s,owner,worker,*_=collab
+    actor=worker_for(s,worker,'decoupled-work-isolation',scopes=('read','write'))
+    s,owner,actor,_,identity,credentials=await connected(collab,
+        [{'project':'proj'},{'project':'otherproj'}],
+        [{'project_id':'proj','capabilities':['read','write']},{'project_id':'otherproj','capabilities':['read']}],
+        worker_override=actor)
+    result,_=start(s,owner,actor,identity,credentials)
+    goal_id=result['goal_id']
+    work=s.coordination.work_create({**mutation(s,identity,credentials,goal_id),
+        'target_project_id':'otherproj','objective':'核对独立项目的文件','acceptance':'保留原始结果',
+        'assignee_grant_id':actor.grant_id,'assignee_member_id':identity['member_id']},actor)['work_item']
+    claim={**mutation(s,identity,credentials,goal_id,project='otherproj'),
+           'work_item_id':work['id'],'expected_version':work['version']}
+    s.store.execute("UPDATE projects SET mode='read' WHERE id='proj'")
+    member=s.rooms.member(identity['member_id'])
+    assert ('proj','production') in s.rooms.read_scope_keys(member,actor)
+    s.room_runtime.send({'conversation_id':identity['conversation_id'],'body_text':'另外，看看今天的安排。',
+        'client_message_id':key(),'idempotency_key':key()},owner)
+    claimed=s.coordination.work_claim(claim,actor)['work_item']
+    assert claimed['id']==work['id'] and claimed['state']=='leased'
+    admitted=s.coordination.admit({**mutation(s,identity,credentials,goal_id,project='otherproj'),
+        'work_item_id':work['id'],'attempt':claimed['attempt'],'fencing_token':claimed['fencing_token'],
+        'tool':'read','arguments':{'path':'README.md'}},actor)
+    operation=s.store.one('SELECT * FROM operations WHERE id=?',(admitted['operation_id'],))
+    assert s.coordination.operation_denial(operation) is None

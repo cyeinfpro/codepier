@@ -15,6 +15,7 @@ from pydantic import Field
 from shared.collaboration_contracts import Model, Key
 from shared.room_runtime_contracts import ChannelConnect, ChannelAction
 from hub.collaboration.common import canonical, digest, validate
+from hub.collaboration.history_retention import replay_response
 from shared.util import DevError
 
 
@@ -37,6 +38,9 @@ def migrate(db):
         owner_user_id TEXT NOT NULL,conversation_id TEXT NOT NULL,action TEXT NOT NULL,
         request_key TEXT NOT NULL,fingerprint TEXT NOT NULL,result TEXT NOT NULL,created REAL NOT NULL,
         PRIMARY KEY(owner_user_id,conversation_id,action,request_key))''')
+    db.execute('''CREATE INDEX IF NOT EXISTS room_reply_receipt_message
+        ON room_runtime_receipts(owner_user_id,conversation_id,json_extract(result,'$.message_id'))
+        WHERE json_valid(result) AND action LIKE 'room_reply:%' ''')
     from hub.collaboration.room_weixin_native import migrate as migrate_native
     migrate_native(db)
     from hub.collaboration.room_waiting_inputs import migrate as migrate_waiting
@@ -67,19 +71,29 @@ class RoomChannels:
         return {'project': row['project_id'], 'environment_id': row['environment_id'],
                 'conversation_id': row['conversation_id']}
 
-    def receipt(self, principal, conversation, action, args, perform):
-        fingerprint = digest({k: v for k, v in args.items()
-                              if k != 'idempotency_key' and (k != 'confirm_follow_room' or v)})
-        identity = (principal.user_id, conversation['id'], action, args['idempotency_key'])
-        prior = self.store.one('''SELECT * FROM room_runtime_receipts
+    @staticmethod
+    def receipt_fingerprint(args):
+        return digest({k: v for k, v in args.items()
+                       if k != 'idempotency_key' and (k != 'confirm_follow_room' or v)})
+
+    def receipt_record(self, identity):
+        return self.store.one('''SELECT * FROM room_runtime_receipts
             WHERE owner_user_id=? AND conversation_id=? AND action=? AND request_key=?''', identity)
-        if prior:
+
+    def save_receipt(self, identity, fingerprint, result):
+        self.store.execute('''INSERT INTO room_runtime_receipts
+            (owner_user_id,conversation_id,action,request_key,fingerprint,result,created)
+            VALUES (?,?,?,?,?,?,?)''', (*identity, fingerprint, canonical(result), self.c.clock()))
+
+    def receipt(self, principal, conversation, action, args, perform):
+        fingerprint = self.receipt_fingerprint(args)
+        identity = (principal.user_id, conversation['id'], action, args['idempotency_key'])
+        if prior := self.receipt_record(identity):
             if prior['fingerprint'] != fingerprint:
                 raise DevError('IDEMPOTENCY_CONFLICT', '同一请求标识不能用于另一项操作', 409)
-            return json.loads(prior['result'])
+            return replay_response(prior['result'])
         result = perform()
-        self.store.execute('INSERT INTO room_runtime_receipts VALUES (?,?,?,?,?,?,?)',
-                           (*identity, fingerprint, canonical(result), self.c.clock()))
+        self.save_receipt(identity, fingerprint, result)
         return result
 
     def create(self, raw, principal):
@@ -580,9 +594,9 @@ class RoomChannels:
                     raise DevError('CONNECT_STEP_INVALID','请先生成二维码',409)
                 request.update(enrollment_id=qr['id'],expected_version=qr['version'],verify_code=args['verify_code'])
             generation = row['version']
-            self.store.execute('INSERT INTO room_runtime_receipts VALUES (?,?,?,?,?,?,?)',
-                (principal.user_id,conversation['id'],'channel_network:'+row['id'],args['idempotency_key'],fingerprint,
-                 canonical({'request':{k:v for k,v in request.items() if k!='verify_code'},'generation':generation,'complete':False}),self.c.clock()))
+            self.save_receipt((principal.user_id,conversation['id'],'channel_network:'+row['id'],args['idempotency_key']),
+                fingerprint, {'request':{k:v for k,v in request.items() if k!='verify_code'},
+                              'generation':generation,'complete':False})
             return request,generation
 
     def finish_network(self,args,principal,generation,result):

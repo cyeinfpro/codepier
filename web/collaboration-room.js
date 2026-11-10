@@ -79,16 +79,16 @@ window.CodePierCollaboration = (() => {
     queued: '排队中',
     leased: '排队中',
     running: '进行中',
-    verifying: '进行中',
+    verifying: '正在验收',
     waiting_input: '等你回复',
     waiting_user: '等你回复',
-    waiting_member: '等待中',
-    waiting_authorization: '等待中',
-    waiting_target: '等待中',
-    reconciling: '等待中',
-    blocked: '等待中',
-    unknown: '等待中',
-    reconnecting: '等待中',
+    waiting_member: '等待 dot 处理',
+    waiting_authorization: '等待授权',
+    waiting_target: '等待执行环境',
+    reconciling: '正在核对原操作回执',
+    blocked: '暂时受阻',
+    unknown: '结果待核对',
+    reconnecting: '等待连接恢复',
     succeeded: '已完成',
     completed: '已完成',
     paused: '已暂停',
@@ -130,6 +130,9 @@ window.CodePierCollaboration = (() => {
   };
   const finishedWork = (work) =>
     ['succeeded', 'completed', 'cancelled', 'failed', 'expired'].includes(work.state);
+  const workSourceId = (work) =>
+    work.original_source_message_id || work.source_message_id || work.intent?.source_message_id;
+  const workStatus = (work) => work.display?.title || workLabels[work.state] || '状态待核对';
   const contextKinds = {
     objective: '当前目标',
     decision: '已确认决策',
@@ -470,7 +473,7 @@ window.CodePierCollaboration = (() => {
         <div class="cr-feedback" role="status" aria-live="polite" data-cr-feedback></div>
         <section class="cr-feed" aria-label="房间对话" tabindex="0"><div class="cr-load-older" data-cr-older hidden>${btn('older', '更早的消息')}</div><div data-cr-empty></div><div class="cr-messages" role="log" aria-live="polite" aria-relevant="additions text" data-cr-messages></div><div class="cr-history-end" data-cr-history-end hidden>${btn('latest', '回到最新')}</div><div class="cr-pending" data-cr-pending></div></section><div class="cr-work-bar" data-cr-work hidden></div>
         ${btn('latest', '查看新消息 ↓', 'data-cr-latest hidden', 'cr-latest')}
-        <form class="cr-composer" id="cr-composer"><div class="cr-reply cr-context-correction" data-cr-correction hidden></div><div class="cr-reply" data-cr-reply hidden></div><div class="cr-draft-files" data-cr-files aria-label="待发送的附件" aria-live="polite" hidden></div><div class="cr-composer-line"><textarea id="cr-message" name="body_text" aria-label="消息" placeholder="说说你想做什么…" rows="1" maxlength="8000"></textarea><button type="submit" class="cr-send" aria-label="发送消息">${icon('arrow')}</button></div><footer><div class="cr-composer-tools">${btn('attach', icon('plus'), 'aria-label="添加附件" title="每个附件最多 8 MiB"', 'cr-icon cr-attach')}<input type="file" id="cr-file" multiple hidden aria-label="选择附件"><label class="cr-recipient"><span>发送给</span><select name="member_id" aria-label="选择处理成员"><option value="">主责 dot</option></select></label></div><span data-cr-compose-status>Enter 发送 · Shift + Enter 换行</span></footer></form>
+        <form class="cr-composer" id="cr-composer"><div class="cr-reply cr-context-correction" data-cr-correction hidden></div><div class="cr-reply" data-cr-reply hidden></div><div class="cr-draft-files" data-cr-files aria-label="待发送的附件" aria-live="polite" hidden></div><div class="cr-composer-line"><textarea id="cr-message" name="body_text" aria-label="消息" placeholder="继续对话，或交办工作…" rows="1" maxlength="8000"></textarea><button type="submit" class="cr-send" aria-label="发送消息">${icon('arrow')}</button></div><footer><div class="cr-composer-tools">${btn('attach', icon('plus'), 'aria-label="添加附件" title="每个附件最多 8 MiB"', 'cr-icon cr-attach')}<input type="file" id="cr-file" multiple hidden aria-label="选择附件"><label class="cr-recipient"><span>发送给</span><select name="member_id" aria-label="选择处理成员"><option value="">主责 dot</option></select></label></div><span data-cr-compose-status>Enter 发送 · Shift + Enter 换行</span></footer></form>
       </main><dialog class="cr-panel" aria-labelledby="cr-panel-title"><header><h2 id="cr-panel-title"></h2>${btn('close', icon('close'), 'aria-label="关闭面板"', 'cr-icon')}</header><div class="cr-panel-content"></div><p role="alert" class="cr-error" data-cr-panel-error hidden></p><div class="cr-mutation-recovery" data-cr-panel-recovery hidden></div></dialog>
     </section>`;
   }
@@ -672,7 +675,7 @@ window.CodePierCollaboration = (() => {
               ? '请重新核对当前事实'
               : '发送后纠正所选事实'
             : draft.work
-              ? '补充到当前工作'
+              ? '发送后更新原交办'
               : 'Enter 发送 · Shift + Enter 换行';
     patchFiles();
     const correction = root.querySelector('[data-cr-correction]');
@@ -710,7 +713,7 @@ window.CodePierCollaboration = (() => {
     if (draft.reply || draft.work) {
       const original = state.messages.find((m) => m.id === draft.reply);
       const work = state.works.find((item) => item.id === draft.work);
-      const markup = `<span>${draft.work ? '补充工作：' + E(work?.title || '当前工作') : '回复：' + E((original?.body_text || '原消息').slice(0, 100))}</span>${btn(draft.work ? 'cancel-supplement' : 'cancel-reply', '×', `aria-label="${draft.work ? '取消补充工作' : '取消引用'}"`, 'cr-icon')}`;
+      const markup = `<span>${draft.work ? '修改交办 · ' + E(work?.title || '当前工作') : '回复：' + E((original?.body_text || '原消息').slice(0, 100))}</span>${btn(draft.work ? 'cancel-supplement' : 'cancel-reply', '×', `aria-label="${draft.work ? '取消修改交办' : '取消引用'}"`, 'cr-icon')}`;
       if (reply._markup !== markup) {
         reply.innerHTML = markup;
         reply._markup = markup;
@@ -776,7 +779,7 @@ window.CodePierCollaboration = (() => {
   }
   function messageMarkup(message) {
     const owner = ['owner', 'user', 'human'].includes(message.author_kind);
-    return `<header><strong>${E(message.author_name || message.display_name || message.member_name || (owner ? '你' : message.author_kind === 'system' ? '房间动态' : 'dot'))}</strong><time>${E(time(message.created_at || message.created))}</time></header>${message.reply_to_id ? '<span class="cr-message-reference">回复原消息</span>' : ''}<div class="cr-message-body" ${message.body_text ? '' : 'hidden'}></div>${message.attachments?.length ? `<div class="cr-message-files">${message.attachments.map(attachmentMarkup).join('')}</div>` : ''}${deliveryMarkup(message.channel_deliveries)}<div data-cr-completed-work hidden></div><footer>${messageProgress(message)}${btn('reply', '回复', `data-id="${E(message.id)}"`, 'cr-text-button')}</footer>`;
+    return `<header><strong>${E(message.author_name || message.display_name || message.member_name || (owner ? '你' : message.author_kind === 'system' ? '房间动态' : 'dot'))}</strong><time>${E(time(message.created_at || message.created))}</time></header>${message.reply_to_id ? '<span class="cr-message-reference">回复原消息</span>' : ''}<div class="cr-message-body" ${message.body_text ? '' : 'hidden'}></div>${message.attachments?.length ? `<div class="cr-message-files">${message.attachments.map(attachmentMarkup).join('')}</div>` : ''}${deliveryMarkup(message.channel_deliveries)}${channelDispositionMarkup(message.channel_dispositions)}<div class="cr-source-works" data-cr-source-works hidden></div><footer>${messageProgress(message)}${btn('reply', '回复', `data-id="${E(message.id)}"`, 'cr-text-button')}</footer>`;
   }
   function deliveryReason(code) {
     return (
@@ -841,6 +844,20 @@ window.CodePierCollaboration = (() => {
       .join(
         '',
       )}${truncated && display?.reason ? `<p class="cr-muted">${E(display.reason)}</p>` : ''}</section>`;
+  }
+  function channelDispositionMarkup(dispositions = []) {
+    const prevented = dispositions.filter((item) =>
+      ['blocked', 'rejected'].includes(item.disposition),
+    );
+    if (!prevented.length) return '';
+    return `<section class="cr-deliveries" aria-label="未发送的渠道回复">${prevented
+      .map((item) => {
+        const channel = { weixin: '微信', telegram: 'Telegram' }[item.channel] || '渠道';
+        const status = item.disposition === 'blocked' ? '回传受阻' : '回传未受理';
+        const reason = item.reason_code ? deliveryReason(item.reason_code) : '';
+        return `<div class="cr-delivery"><span>${channel} · ${status}${reason ? ' · ' + E(reason) : ''}</span></div>`;
+      })
+      .join('')}</section>`;
   }
   function patchWindowHints() {
     if (!root) return;
@@ -1000,40 +1017,38 @@ window.CodePierCollaboration = (() => {
   function patchWorks() {
     const node = root?.querySelector('[data-cr-work]');
     if (!node) return;
-    const waiting = state.works.filter((work) => workLabels[work.state] === '等你回复').length;
-    const active = state.works.filter((work) => !finishedWork(work)).length;
-    const markup = btn(
-      'work-list',
-      '进行中 ' + (active - waiting) + (waiting ? ' · 等你回复 ' + waiting : ''),
-      '',
-      'cr-text-button',
-    );
+    const markup = btn('work-list', '工作记录', '', 'cr-text-button');
     node.hidden = !state.works.length && state.worksComplete && !state.worksCursor;
     if (node._markup !== markup) {
       node.innerHTML = markup;
       node._markup = markup;
     }
     if (panel?.name === 'work-list') renderWorkList();
-    for (const message of root.querySelectorAll('[data-cr-completed-work]')) {
-      const works = state.works.filter(
-        (work) =>
-          ['completed', 'succeeded'].includes(work.state) &&
-          (work.source_message_id || work.intent?.source_message_id) ===
-            message.closest('[data-message-id]')?.dataset.messageId,
-      );
+    const bySource = new Map();
+    for (const work of state.works) {
+      const sourceId = workSourceId(work);
+      if (!sourceId) continue;
+      if (!bySource.has(sourceId)) bySource.set(sourceId, []);
+      bySource.get(sourceId).push(work);
+    }
+    for (const message of root.querySelectorAll('[data-cr-source-works]')) {
+      const works = bySource.get(message.closest('[data-message-id]')?.dataset.messageId) || [];
       const items = works
-        .map((work) =>
-          btn(
-            'work-detail',
-            '已完成：' + E(work.title || '工作'),
-            'data-id="' + E(work.id) + '"',
-            'cr-text-button',
-          ),
+        .map(
+          (work) =>
+            `<button type="button" class="cr-timeline-work" data-cr-action="work-detail" data-id="${E(work.id)}" data-work-state="${E(work.state)}"><span class="cr-work-indicator ${E(work.state)}" aria-hidden="true"></span><span class="cr-timeline-work-title">${E(work.title || '工作')}</span><small>${E(workStatus(work))}</small></button>`,
         )
         .join('');
       if (message._markup !== items) {
+        const focusedId = message.contains(document.activeElement)
+          ? document.activeElement.dataset.id
+          : '';
         message.innerHTML = items;
         message._markup = items;
+        if (focusedId)
+          [...message.querySelectorAll('button')]
+            .find((button) => button.dataset.id === focusedId)
+            ?.focus({ preventScroll: true });
       }
       message.hidden = !items;
     }
@@ -1050,7 +1065,7 @@ window.CodePierCollaboration = (() => {
         .map(
           (work) => `<article class="cr-work" data-work-id="${E(work.id)}">
       <span class="cr-work-indicator ${E(work.state)}" aria-hidden="true"></span><div><strong>${E(work.title || '工作')}</strong>
-      <p>${E(workLabels[work.state] || work.display?.title || work.state)}${work.display?.reason ? ' · ' + E(work.display.reason) : ''}</p></div>
+      <p>${E(workStatus(work))}${work.display?.reason ? ' · ' + E(work.display.reason) : ''}</p></div>
       ${btn('work-detail', '查看', 'data-id="' + E(work.id) + '"', 'cr-text-button')}</article>`,
         )
         .join('') +
@@ -3382,7 +3397,7 @@ window.CodePierCollaboration = (() => {
     const focusedAction = document.activeElement?.closest?.('[data-cr-form="work-recovery"]')
       ?.dataset.workAction;
     panel.work = work;
-    const markup = `<div class="cr-flow-state"><h3>${E(work.display?.title || workLabels[work.state] || work.state)}</h3><p>${E(work.display?.reason || work.reason_code || '')}</p></div>${!activeRoom() ? '<p class="cr-info">房间已暂停或归档。可以查看历史，也可以停止已有工作。</p>' : ''}${work.result_summary ? `<p>${E(work.result_summary)}</p>` : ''}${deliveryMarkup(work.channel_deliveries, work.delivery_display, work.channel_deliveries_truncated)}
+    const markup = `<div class="cr-flow-state"><h3>${E(workStatus(work))}</h3><p>${E(work.display?.reason || work.reason_code || '')}</p></div>${!activeRoom() ? '<p class="cr-info">房间已暂停或归档。可以查看历史，也可以停止已有工作。</p>' : ''}${work.result_summary ? `<p>${E(work.result_summary)}</p>` : ''}${deliveryMarkup(work.channel_deliveries, work.delivery_display, work.channel_deliveries_truncated)}
       <section class="cr-work-summary">${work.acceptance ? `<h3>完成条件</h3><p>${E(work.acceptance)}</p>` : ''}${coordinatorId ? `<p data-cr-work-coordinator><strong>当前主责</strong> ${E(coordinator?.name || recovery.coordinator_name || 'dot')}</p>` : ''}${team.length ? `<h3>参与成员</h3><ul>${team.map((member) => `<li>${E(member.name || 'dot')}${(member.member_id || member.id) === coordinatorId ? ' · 主责' : ''}</li>`).join('')}</ul>` : ''}</section>
       <details class="cr-diagnostics cr-work-evidence"><summary>步骤与执行记录</summary>${work.items?.length ? `<ul>${work.items.map((item) => `<li><strong>${E(item.title || '工作步骤')}</strong> · ${E(workLabels[item.state] || item.state)}${item.display?.reason || item.reason_code ? `<p>${E(item.display?.reason || item.reason_code)}</p>` : ''}</li>`).join('')}</ul>` : '<p class="cr-muted">当前没有可显示的执行步骤。</p>'}<div data-cr-operation-receipts>${operations.length ? `<ul>${operations.map((operation) => `<li data-operation-id="${E(operation.id || operation.operation_id)}"><strong>${E(operation.display?.title || workLabels[operation.state] || operation.state)}</strong>${operation.cancel_requested && !['succeeded', 'failed', 'cancelled'].includes(operation.state) ? '<p>已请求停止，等待原操作回执</p>' : ''}${operation.display?.reason ? `<p>${E(operation.display.reason)}</p>` : ''}</li>`).join('')}</ul>` : '<p class="cr-muted">还没开始执行。</p>'}</div></details>
       ${recovery.state === 'waiting_operations' ? '<p class="cr-info">等当前操作结束后才能恢复或接替。</p>' : ''}
@@ -3401,7 +3416,7 @@ window.CodePierCollaboration = (() => {
             ['cancel', 'stop'].includes(action) ? 'cr-danger' : 'cr-primary',
           ),
         )
-        .join('')}${actions.includes('supplement') ? btn('supplement', '补充说明') : ''}</div>`;
+        .join('')}${activeRoom() && workSourceId(work) ? btn('reply-work', '在对话中追问') : ''}${actions.includes('supplement') ? btn('supplement', '修改交办') : ''}</div>`;
     if (box._markup !== markup || changedReview) {
       box.innerHTML = markup;
       box._markup = markup;
@@ -4116,6 +4131,7 @@ window.CodePierCollaboration = (() => {
     if (
       [
         'reply',
+        'reply-work',
         'attach',
         'retry-file',
         'supplement',
@@ -4242,8 +4258,16 @@ window.CodePierCollaboration = (() => {
     } else if (action === 'copy-instructions') {
       await navigator.clipboard.writeText(panel.joinInstructions);
       button.textContent = '已复制';
-    } else if (action === 'reply') {
-      store.draft().reply = id;
+    } else if (action === 'reply' || action === 'reply-work') {
+      const source = action === 'reply-work' ? workSourceId(panel.work) : id;
+      if (!source) return;
+      Object.assign(store.draft(), {
+        reply: source,
+        work: '',
+        workVersion: 0,
+        contextCorrection: null,
+      });
+      if (action === 'reply-work') closePanel({ restoreFocus: false });
       patchComposer();
       root.querySelector('#cr-message').focus();
     } else if (action === 'cancel-reply') {
@@ -4441,11 +4465,12 @@ window.CodePierCollaboration = (() => {
     else if (action === 'supplement') {
       store.draft().work = panel.work.id;
       store.draft().workVersion = panel.work.version;
+      store.draft().reply = '';
       store.draft().contextCorrection = null;
       closePanel({ restoreFocus: false });
       patchComposer();
       root.querySelector('#cr-message').focus();
-      announce('下一条消息将补充到这项工作');
+      announce('下一条消息将更新原交办');
     } else if (action === 'diagnostics') {
       openPanel(
         'diagnostics',

@@ -105,6 +105,10 @@ def test_missing_or_unrecognized_transport_receipt_never_claims_acceptance():
     assert delivery_display('completed', [{'channel': 'weixin', 'state': 'unrecognized'}])['state'] == 'unavailable'
     accepted = delivery_display('completed', [{'channel': 'weixin', 'state': 'accepted'}])
     assert accepted['state'] == 'accepted' and '不证明对方已读' in accepted['reason']
+    assert delivery_display('completed', [{'channel': 'weixin', 'state': 'waiting_context'}])['state'] == 'pending'
+    confirmed = delivery_display('completed', [{'channel': 'weixin', 'state': 'accepted',
+                                                'parts': [{'state': 'owner_confirmed'}]}])
+    assert confirmed['state'] == 'owner_confirmed' and '房主核对' in confirmed['title']
 
 
 def test_legacy_team_delivery_projection_uses_current_intent_publication(collab, monkeypatch):

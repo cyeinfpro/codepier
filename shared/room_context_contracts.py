@@ -3,7 +3,7 @@ from typing import Literal
 
 from pydantic import ConfigDict, Field, model_validator
 from shared.collaboration_contracts import Model, Identifier
-from shared.room_contracts import MemberIdentity
+from shared.room_contracts import MemberTurnRead
 from shared.room_runtime_contracts import RoomConsumerMutation
 from shared.team_collaboration_contracts import ArtifactRef
 
@@ -31,7 +31,7 @@ class ContextFact(Model):
         return self
 
 
-class RoomContextRead(MemberIdentity):
+class RoomContextRead(MemberTurnRead):
     cursor: str = Field(default='', max_length=2048)
     limit: int = Field(default=20, strict=True, ge=1, le=50)
     byte_budget: int = Field(default=16000, strict=True, ge=4096, le=24000)

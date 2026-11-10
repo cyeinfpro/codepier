@@ -68,11 +68,7 @@ class RoomAttachments:
         message = self.store.one('SELECT * FROM collaboration_messages WHERE id=? AND conversation_id=?',
                                  (row['message_id'], room['id']))
         if actor.grant_id:
-            self.c.notification_reader(actor)
-            members = self.store.all("SELECT * FROM room_members WHERE conversation_id=? AND grant_id=? AND status='bound'",
-                                      (room['id'], actor.grant_id))
-            if not message or not any(self.c.room_consumers._visible_message(member, actor, message) for member in members):
-                raise DevError('ATTACHMENT_NOT_FOUND', '当前连接没有这个房间附件', 404)
+            self.require_member_message(actor, room, message)
         else:
             self.c.owner(actor)
             if message:
@@ -80,6 +76,21 @@ class RoomAttachments:
         if row['expires_at'] <= self.c.clock() or row['state'] == 'expired':
             raise DevError('ATTACHMENT_EXPIRED', '附件已到保留期限；不会重新生成', 410)
         return row
+
+    def require_member_message(self, actor, room, message):
+        self.c.notification_reader(actor)
+        if message:
+            members = self.store.all("SELECT * FROM room_members WHERE conversation_id=? AND grant_id=? AND status='bound'",
+                                     (room['id'], actor.grant_id))
+            for member in members:
+                try:
+                    current_actor, _, current = self.c.rooms.member_scope(actor, room['id'], member['id'],
+                        member['binding_generation'])
+                except DevError:
+                    continue
+                if current['probe_replied_at'] and self.c.room_consumers._visible_message(current, current_actor, message):
+                    return
+        raise DevError('ATTACHMENT_NOT_FOUND', '当前连接没有这个房间附件', 404)
 
     def attach(self, identifiers, message, principal):
         self.store.require_transaction()
@@ -92,10 +103,8 @@ class RoomAttachments:
                                (message['id'], ordinal, self.c.clock(), self.c.clock() + 7 * 86400, identifier))
 
     def read(self, raw, principal):
-        args = validate(RoomAttachmentRead, raw)
         with self.store.transaction(immediate=False):
-            actor, _, member = self.c.rooms.member_scope(principal, args['conversation_id'], args['member_id'],
-                args['binding_generation'], args['connection_proof'], require_proof=True)
+            args, actor, _, member, _, _, _ = self.c.room_consumers.read_scope(raw, principal, RoomAttachmentRead)
             row = self.c.channels.media.row(args['attachment_id'], actor)
             message = self.store.one('SELECT * FROM collaboration_messages WHERE id=?', (row['message_id'],))
             if not self.c.room_consumers._visible_message(member, actor, message):

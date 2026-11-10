@@ -69,7 +69,7 @@ def test_every_public_collaboration_action_has_exactly_one_address():
     expected = {(tool, op) for tool, ops in pc.ACTIONS.items() for op in ops}
     assert set(seen) == expected
     assert all(len(addresses) == 1 for addresses in seen.values())
-    assert len(expected) == 115
+    assert len(expected) == 126
     assert all(tool == u.CQ for views in u.COLLAB_ACTIONS['query'].values() for tool, _ in views.values())
     assert all(tool != u.CQ for views in u.COLLAB_ACTIONS['act'].values() for tool, _ in views.values())
 

@@ -124,6 +124,10 @@ def migrate_delivery_order(db):
         ('kind', "TEXT NOT NULL DEFAULT 'reply'"),
         ('status_code', "TEXT NOT NULL DEFAULT ''"),
         ('projection_message_id', 'TEXT'),
+        ('ordering_schema_version', 'INTEGER NOT NULL DEFAULT 1'),
+        ('ordering_revision', 'INTEGER NOT NULL DEFAULT 1'),
+        ('canonical_source_id', "TEXT NOT NULL DEFAULT ''"),
+        ('dependency_mode', "TEXT NOT NULL DEFAULT 'after_settled'"),
     ):
         if name not in columns:
             db.execute(f'ALTER TABLE weixin_deliveries ADD COLUMN {name} {definition}')
@@ -131,6 +135,20 @@ def migrate_delivery_order(db):
         ON weixin_deliveries(binding_id,generation,peer_id,ordering_key,created)''')
     db.execute('''CREATE INDEX IF NOT EXISTS weixin_delivery_projection
         ON weixin_deliveries(projection_message_id) WHERE projection_message_id IS NOT NULL''')
+    if 'state' in columns:
+        db.execute('''CREATE INDEX IF NOT EXISTS weixin_delivery_order_backfill
+            ON weixin_deliveries(created,id) WHERE kind='reply' AND ordering_revision=1
+            AND state NOT IN ('accepted','owner_confirmed','cancelled')''')
+    db.execute('''CREATE TABLE IF NOT EXISTS weixin_delivery_peer_rotation(
+        account_id TEXT NOT NULL,peer_id TEXT NOT NULL,admitted_sequence INTEGER NOT NULL,
+        PRIMARY KEY(account_id,peer_id))''')
+    db.execute('''CREATE INDEX IF NOT EXISTS weixin_delivery_peer_admissions
+        ON weixin_delivery_peer_rotation(admitted_sequence)''')
+    db.execute('''CREATE TABLE IF NOT EXISTS weixin_delivery_late_observations(
+        part_id TEXT NOT NULL,send_fence INTEGER NOT NULL,delivery_id TEXT NOT NULL,
+        binding_id TEXT NOT NULL,channel_generation INTEGER NOT NULL,account_id TEXT NOT NULL,peer_id TEXT NOT NULL,
+        client_id TEXT NOT NULL,body_digest TEXT NOT NULL,provider_receipt TEXT NOT NULL,created REAL NOT NULL,
+        PRIMARY KEY(part_id,send_fence))''')
     if not new_order:
         return
     db.execute("""UPDATE weixin_deliveries AS d

@@ -259,6 +259,34 @@ class Rooms:
         return refresh_principal(self.store, Principal(**{**saved, 'scopes': set()}))
 
     @memoized
+    def read_scope_keys(self, member, principal):
+        """Current exact read access, independent of write and execution targets."""
+        if member['status'] in {'removed','paused','invited','legacy'} or principal.grant_id!=member['grant_id']:
+            return set()
+        rows=self.store.all("""SELECT s.* FROM room_member_scopes s
+            JOIN conversation_projects p ON p.conversation_id=?
+            JOIN collaboration_rooms r ON r.id=p.room_id AND r.project_id=s.project_id
+                AND r.environment_id=s.environment_id
+            WHERE s.member_id=? AND s.state='active' AND
+                (s.lifetime_mode='until_revoked' OR s.expires_at>?)""",
+            (member['conversation_id'],member['id'],self.c.clock()))
+        visible=set()
+        for row in rows:
+            saved=json.loads(row['owner_principal'])
+            if not saved or 'read' not in json.loads(row['capabilities']):
+                continue
+            try:
+                owner=refresh_principal(self.store,Principal(**{**saved,'scopes':set()}))
+                self.owner(owner,member['conversation_id'])
+                if (self.c.runtime.project(row['project_id'],owner)['id']!=row['project_id']
+                        or self.c.runtime.project(row['project_id'],principal)['id']!=row['project_id']):
+                    continue
+            except DevError:
+                continue
+            visible.add((row['project_id'],row['environment_id']))
+        return visible
+
+    @memoized
     def scopes(self, member, principal=None):
         result = []
         for row in self.store.all("SELECT * FROM room_member_scopes WHERE member_id=? ORDER BY project_id,environment_id", (member['id'],)):
@@ -1011,7 +1039,8 @@ class Rooms:
                             bridge.bind(member, self.principal(member))
                     if any(delta.values()) and previous['grant_id'] and previous['status']!='legacy':
                         self.c.room_consumers.scope_updated(self.member(approval['member_id']),previous_digest,
-                            additions_only=bool(delta['added'] and not delta['changed'] and not delta['revoked']))
+                            additions_only=bool(delta['added'] and not delta['changed'] and not delta['revoked']),
+                            scope_changes=delta)
                 self.store.execute('UPDATE conversation_rooms SET version=version+1 WHERE id=?', (room['id'],))
                 self.change(room['id'], 'projects', room['id'], room['version'] + 1)
                 return {'conversation_id': room['id'], 'impact': {'removed_partition_ids': removed,
@@ -1322,6 +1351,7 @@ class Rooms:
             'subscription_request': self.subscription_request(member), 'grants_authority': False,
             'pending_binding': bool(member.get('_pending_binding')),
             'subscription_renewal': self.renewals.view(member),
+            'turn_capabilities': dict(contracts.TURN_CAPABILITIES),
             'required_host_actions': {'collaboration': ['room_probe_read', 'room_probe_reply',
                 'room_consumer_begin', 'room_consumer_yield', 'room_reply'],
                 'collaboration_query': ['room_inbox']},
@@ -1540,11 +1570,15 @@ class Rooms:
                 f'使用{wake_context}中的 wake_ticket、当前成员身份和 connection_proof 调用 '
                 'room_consumer_begin，保存返回的 consumer_session_id、consumer_fence 和 consumer_proof。'
                 '仅当宿主工具协议声明 include_inbox 时，可传 true 读取第一页；缺少或读取失败时调用 room_inbox。'
-                '使用本回合 inbox_revision 处理原输入，回复使用 room_reply，明确工作使用 '
-                'room_work_start。已核验本人且在既有范围内的明确任务直接开始；范围不足时用 room_reply 说明原因。'
-                '把阶段与最终答复关联原输入提交 room_reply，ChatGPT 内的文字不会回传微信。完成后调用 '
-                'room_consumer_yield，携带 expected_inbox_revision；more=true 时继续读取原待办，'
-                'more=false 时等待新通知。没有输入时不创建任务、租约或定时轮询。'}
+                '沿原消息与工作记录继续同一段对话。已核验本人的明确交办在已有授权内用 room_work_start 准入一次。'
+                '同一输入可以先说明情况并继续工作。缺少必要信息时只追问缺项。'
+                '用 room_reply 回复实际正在回答的消息，微信答复也由协作工具提交。'
+                '协议声明 explicit_publication 时，普通回复使用 publish_work=false，正式发表完整结果时使用 true。'
+                '解释后仍有交办待准入时，填 input_handling=pending；只需回答且已经回答完整时填 answered。'
+                '请求结果未知时沿原请求键和参数恢复，待核对操作沿原 ID 查询。'
+                '排空后使用 room_consumer_yield；协议声明 reply_yield_after 时可在完整回复中填 yield_after=true。'
+                '协议声明 consumer_continue_later 时，可用 yield_mode=continue_later 保留待办并交还回合。'
+                '没有可处理输入时等待新通知。'}
 
     def changes(self, raw, principal):
         args = validate(contracts.RoomChanges, raw)
@@ -1566,6 +1600,15 @@ class Rooms:
             principal, room = self.owner(principal, args['conversation_id'], include_archived=True)
             return projection(self.c, room, principal)
 
+    def turn_policy(self, raw, principal):
+        from hub.collaboration.room_turn_policy import read
+        args = validate(contracts.RoomRead, raw)
+        return read(self.c, args['conversation_id'], principal)
+
+    def update_turn_policy(self, raw, principal):
+        from hub.collaboration.room_turn_policy import update
+        return update(self.c, raw, principal)
+
     def invoke(self, action, raw, principal):
         handlers = {'room_list': self.listing, 'room_view': self.read, 'room_create': self.create,
             'room_migrate': self.migrate_room,
@@ -1574,6 +1617,7 @@ class Rooms:
             'room_connect': self.connect_read, 'room_connect_resume': self.connect_action,
             'room_connect_join': self.join, 'room_probe_read': self.probe_read, 'room_probe_reply': self.probe_reply,
             'room_changes': self.changes, 'room_diagnostics': self.diagnostics,
+            'room_turn_policy': self.turn_policy, 'room_turn_policy_update': self.update_turn_policy,
             'room_connection_list': self.connections.host_listing,
             'room_connection_view': self.connections.host_view,
             'room_connection_impact': self.connections.impact,

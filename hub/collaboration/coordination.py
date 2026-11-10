@@ -36,31 +36,36 @@ class CoordinationService:
             raise DevError('GOAL_NOT_FOUND', '当前项目中没有这个协作目标', 404)
         return row
 
-    def scope(self, principal, args, *, active=False):
+    def scope(self, principal, args, *, active=False, work_effect=False):
         candidate=self.store.one('SELECT * FROM coordination_goals WHERE id=?',(args['goal_id'],))
         native=self.c.room_work_bridge.native
         if candidate and native.reference(candidate):
             principal,route=self.c.scope(principal,args)
             room=self.store.one('SELECT * FROM collaboration_rooms WHERE id=?',(candidate['room_id'],))
-            if route['project_id'] not in native.record(native.reference(candidate))['project_ids']:
-                raise DevError('GOAL_PROJECT_DENIED','读取路由不属于原工作项目',403)
+            route_key=(route['project_id'],route['environment_id'])
+            if route_key not in {native.scope_key(rule) for rule in native.record(native.reference(candidate))['projects']}:
+                raise DevError('GOAL_PROJECT_DENIED','读取路由不属于原工作的项目和环境',403)
+            session=None
             if principal.grant_id and args.get('consumer_session_id'):
                 session=self.store.one('SELECT member_id FROM dot_consumer_sessions WHERE id=?',(args['consumer_session_id'],))
                 if session and session['member_id']:
                     member=self.c.rooms.member(session['member_id'],candidate['conversation_id'])
                     conversation=self.store.one('SELECT * FROM conversation_rooms WHERE id=?',(candidate['conversation_id'],))
-                    self.c.room_consumers.guard_session(args,principal,conversation,member,require_revision=False)
+                    session=self.c.room_consumers.guard_session(args,principal,conversation,member,require_revision=False)
                     candidate['_reader_member_id']=member['id']
-            if route['project_id'] not in native.visible_projects(candidate,principal,candidate.get('_reader_member_id','')):
+            if route_key not in native.visible_scope_keys(candidate,principal,candidate.get('_reader_member_id','')):
                 raise DevError('GOAL_PROJECT_DENIED','当前成员不能使用此项目读取原工作',403)
-            self.authorize(principal,room,candidate,active=active)
+            exact=bool(work_effect and session and session.get('turn_policy')=='decoupled')
+            self.authorize(principal,room,candidate,active=active,exact_work_effect=exact)
+            if exact:
+                candidate['_exact_work_effect']=True
             return principal,room,candidate
         principal, room = self.c.scope(principal, args)
         goal = self.object(room, args['goal_id'])
         self.authorize(principal, room, goal, active=active)
         return principal, room, goal
 
-    def authorize(self, principal, room, goal, *, active=False, include_archived=False):
+    def authorize(self, principal, room, goal, *, active=False, include_archived=False, exact_work_effect=False):
         principal = refresh_principal(self.store, principal)
         if include_archived and (active or principal.grant_id):
             raise DevError('GOAL_ARCHIVE_READ_ONLY', '归档工作仅供房主查阅，不能继续处理', 403)
@@ -96,7 +101,8 @@ class CoordinationService:
         if active:
             self.c.conversations.working_scopes.validate_goal(principal, goal)
             self.c.delegation.authorize_goal(principal, room, goal)
-            self.c.live_room(room)
+            if not exact_work_effect:
+                self.c.live_room(room)
             if goal['state'] != 'active' or not goal['approval_id'] or (goal['expires_at'] or 0) <= self.c.clock():
                 raise DevError('GOAL_INACTIVE', '目标未批准、已暂停或已到期；不能开始新步骤', 409)
             approval = self.store.one('SELECT * FROM coordination_approvals WHERE id=? AND goal_id=?',
@@ -105,7 +111,9 @@ class CoordinationService:
                 raise DevError('GOAL_APPROVAL_CHANGED', '原目标批准已失效', 409)
             owner = refresh_principal(self.store, Principal(**{**json.loads(approval['principal']), 'scopes': set()}))
             self.c.owner(owner)
-            for snapshot in spec['projects']:
+            # Native work mutations check the affected assignment and partition
+            # in the same transaction. Other projects cannot gate that step.
+            for snapshot in (() if exact_work_effect else spec['projects']):
                 if spec.get('room_member_scope') and snapshot['project_id'] not in source_projects:
                     continue
                 current = projected_project(self.c, snapshot['project_id'], owner)
@@ -182,17 +190,23 @@ class CoordinationService:
     def view(self, goal, principal):
         spec = json.loads(goal['spec'])
         native=self.c.room_work_bridge.native
-        visible=native.visible_projects(goal,principal,goal.get('_reader_member_id','')) if native.reference(goal) else set(spec['project_ids'])
-        if native.reference(goal):
-            effective=native.record(native.reference(goal))
+        reference=native.reference(goal)
+        scope_keys=native.visible_scope_keys(goal,principal,goal.get('_reader_member_id','')) if reference else set()
+        visible={project for project,_ in scope_keys} if reference else set(spec['project_ids'])
+        if reference:
+            effective=native.record(reference)
             spec={**spec,'project_ids':sorted(visible),'projects':[p for p in spec['projects'] if p['project_id'] in visible],
-                'capabilities':sorted(set().union(*(set(r['capabilities']) for r in native.record(native.reference(goal))['projects'] if r['project_id'] in visible))),
+                'capabilities':sorted(set().union(*(set(r['capabilities']) for r in effective['projects'] if native.scope_key(r) in scope_keys))),
                 'participant_grant_ids':effective['participant_grant_ids'],'coordinator_grant_id':effective['coordinator_grant_id'],
                 'coordinator_epoch':effective['coordinator_epoch'],
-                'visibility_limited':visible!=set(json.loads(goal['spec'])['project_ids'])}
+                'visibility_limited':scope_keys!={native.scope_key(rule) for rule in effective['projects']}}
             if spec['visibility_limited']:
+                spec['objective']='协作工作'
                 spec['acceptance']=''
         anchor = self.store.one('SELECT project_id,environment_id FROM collaboration_rooms WHERE id=?', (goal['room_id'],))
+        anchor_key=native.scope_key(anchor)
+        if reference and anchor_key not in scope_keys:
+            anchor_key=next(iter(sorted(scope_keys)),('',''))
         count = self.store.one('SELECT COUNT(*) AS n FROM coordination_work WHERE goal_id=?', (goal['id'],))['n']
         delegation = self.c.delegation.goal_metadata(goal)
         if delegation and native.reference(goal):
@@ -205,7 +219,7 @@ class CoordinationService:
                 'can_approve': bool(principal.admin and not principal.grant_id and not delegation and not team),
                 **({'team': team} if team else {}),
                 'delegation': delegation,
-                'anchor_project_id': anchor['project_id'] if anchor['project_id'] in visible else next(iter(sorted(visible)),''), 'environment_id': anchor['environment_id'],
+                'anchor_project_id': anchor_key[0], 'environment_id': anchor_key[1],
                 'usage': {'work_items': count, 'steps': goal['steps'], 'messages': goal['messages']}}
 
     def mutation(self, principal, room, action, args, perform):
@@ -445,36 +459,54 @@ class CoordinationService:
                 message[key] = json.loads(message[key])
             message['body_text'] = message.pop('body')
         native=self.c.room_work_bridge.native
-        visible=native.visible_projects(goal,principal,goal.get('_reader_member_id','')) if native.reference(goal) else set(json.loads(goal['spec'])['project_ids'])
-        related=[{'id':row['id'],'state':row['state'],**({'artifact_ref':{'work_item_id':row['id'],'version':row['version'],
-            'digest':digest(json.loads(row['result']))}} if row['result'] else {})} for row in rows if row['project_id'] not in visible]
-        rows=[row for row in rows if row['project_id'] in visible]
+        native_reference=native.reference(goal)
+        member_id=goal.get('_reader_member_id','')
+        scope_keys=native.visible_scope_keys(goal,principal,member_id) if native_reference else set()
+        visible={project for project,_ in scope_keys} if native_reference else set(json.loads(goal['spec'])['project_ids'])
+        visible_rows=[row for row in rows if (native.work_is_visible(goal,row,scope_keys)
+            if native_reference else row['project_id'] in visible)]
+        visible_ids={row['id'] for row in visible_rows}
+        related=[{'id':row['id'],'state':row['state']} for row in rows if row['id'] not in visible_ids]
         messages=[message for message in messages if set(message['provenance_project_ids'])<=visible]
         native_context=({'intent_revision':self.c.room_runtime.intent_revision(goal['id']),
             'coordinator_epoch':self.c.room_goal_recovery.epoch(goal['id']),
             'scope':native.public_scope(goal,principal,goal.get('_reader_member_id','')),
             'current_intent_source':self.store.one('SELECT source_message_id,intent_revision FROM room_work_intents WHERE goal_id=?',(goal['id'],)),
-            'assignments':self.store.all('''SELECT a.work_id,a.member_id,a.intent_revision FROM room_native_work_assignments a
-                JOIN coordination_work w ON w.id=a.work_id WHERE w.goal_id=?''',(goal['id'],))} if native.reference(goal) else None)
+            'assignments':[assignment for assignment in self.store.all('''SELECT a.work_id,a.member_id,a.intent_revision FROM room_native_work_assignments a
+                JOIN coordination_work w ON w.id=a.work_id WHERE w.goal_id=?''',(goal['id'],))
+                if assignment['work_id'] in visible_ids]} if native_reference else None)
         if native_context:
             revision=native_context['intent_revision']
-            original=native.record(native.reference(goal))
+            original=native.record(native_reference)
             intent=self.store.one('SELECT * FROM room_work_intent_sources WHERE goal_id=? AND intent_revision=?',(goal['id'],revision)) or original
+            source=self.store.one('SELECT * FROM collaboration_messages WHERE id=? AND conversation_id=?',
+                (intent['source_message_id'],goal['conversation_id']))
+            conversation=self.store.one('SELECT * FROM conversation_rooms WHERE id=?',(goal['conversation_id'],))
+            reader=self.c.rooms.member(member_id,goal['conversation_id']) if member_id else None
+            context=self.c.room_context
+            source_visible=context.source_visible(source,principal,conversation,reader)
+            if source_visible and principal.grant_id and not reader:
+                source_visible=(context.message_scopes(source)<=scope_keys
+                    and context.message_projects(source)<=visible)
+            if not source_visible:
+                native_context['current_intent_source']=None
+        if native_context and source_visible and not native_context['scope']['visibility_limited']:
             evidence=self.store.all('''SELECT w.* FROM coordination_work w JOIN room_native_work_assignments a ON a.work_id=w.id
                 WHERE w.goal_id=? AND w.approval_id=? AND a.intent_revision=? AND w.result IS NOT NULL''',
                 (goal['id'],goal['approval_id'],revision))
             native_context['publication_requirements']={'action':'room_reply','complete':True,
                 'coordinator_epoch':self.c.room_goal_recovery.epoch(goal['id']),
                 'expected_intent_revision':revision,**{k:intent[k] for k in ('source_message_id','source_version','source_digest')},
-                'artifact_refs':[{'work_item_id':w['id'],'version':w['version'],'digest':digest(json.loads(w['result']))} for w in evidence]
-                                + self.c.room_goal_recovery.reused_artifact_refs(goal),
+                'artifact_refs':[{'work_item_id':w['id'],'version':w['version'],'digest':digest(json.loads(w['result']))}
+                                 for w in evidence if w['id'] in visible_ids]
+                                + [ref for ref in self.c.room_goal_recovery.reused_artifact_refs(goal) if ref['work_item_id'] in visible_ids],
                 'outcome_required':True,'allowed_outcomes':['succeeded','partial','blocked'],
                 'credential_required':'current_coordinator_member_identity_and_consumer_proof'}
         return {'goal': self.view(goal, principal), 'can_approve': bool(principal.admin and not principal.grant_id and not self.c.delegation.goal_link(goal) and not self.teams.link(goal)),
                 **({'room_work_context':native_context,'related_work':related} if native_context else {}),
                 **({'team_context': self.teams.goal_context(goal, principal)} if self.teams.link(goal) else {}),
-                'work_items': [self.work_view(row) for row in rows], 'messages': messages,
-                'operations': [op for op in self.operations(goal) if op['project_id'] in visible]}
+                'work_items': [self.work_view(row) for row in visible_rows], 'messages': messages,
+                'operations': [op for op in self.operations(goal) if op['work_item_id'] in visible_ids]}
 
     def listing(self, args, principal, room):
         if args['kind'] == 'coordination_options':
@@ -529,7 +561,7 @@ class CoordinationService:
                 'result': json.loads(row['result']) if row['result'] else None,
                 'provenance_project_ids': json.loads(row['result']).get('provenance_project_ids', [row['project_id']]) if row['result'] else [row['project_id']]}
 
-    def participant(self, room, goal, grant_id, member_id=''):
+    def participant(self, room, goal, grant_id, member_id='', *, exact_work_effect=False):
         native=self.c.room_work_bridge.native
         participants=native.record(native.reference(goal))['participant_grant_ids'] if native.reference(goal) else json.loads(goal['spec'])['participant_grant_ids']
         if grant_id not in participants:
@@ -540,7 +572,8 @@ class CoordinationService:
         participant_goal={k:v for k,v in goal.items() if k!='_reader_member_id'}
         if member_id and native.reference(goal):
             participant_goal['_reader_member_id']=member_id
-        return self.authorize(actor, room, participant_goal, active=True)
+        return self.authorize(actor, room, participant_goal, active=True,
+            exact_work_effect=exact_work_effect or bool(goal.get('_exact_work_effect')))
 
     def admit_current_work_surface(self, goal):
         """Cutover stops new legacy work, never historical operation receipts.
@@ -554,7 +587,7 @@ class CoordinationService:
     def work_create(self, raw, principal):
         args = validate(contracts.WorkCreate, raw)
         with self.store.transaction():
-            principal, room, goal = self.scope(principal, args, active=True)
+            principal, room, goal = self.scope(principal, args, active=True, work_effect=True)
             self.teams.guard(args, principal, goal, 'create')
             spec = json.loads(goal['spec'])
             if args['target_project_id'] not in spec['project_ids']:
@@ -591,7 +624,7 @@ class CoordinationService:
     def work_assign(self, raw, principal):
         args = validate(contracts.WorkAssign, raw)
         with self.store.transaction():
-            principal, room, goal = self.scope(principal, args, active=True)
+            principal, room, goal = self.scope(principal, args, active=True, work_effect=True)
             self.teams.guard(args, principal, goal, 'assign')
             item = self.work(goal, args['work_item_id'])
             assignee = self.participant(room, goal, args['assignee_grant_id'],args.get('assignee_member_id',''))
@@ -613,7 +646,7 @@ class CoordinationService:
     def work_claim(self, raw, principal):
         args = validate(contracts.WorkClaim, raw)
         with self.store.transaction():
-            principal, room, goal = self.scope(principal, args, active=True)
+            principal, room, goal = self.scope(principal, args, active=True, work_effect=True)
             self.teams.guard(args, principal, goal, 'claim', self.work(goal, args['work_item_id']))
             item = self.work(goal, args['work_item_id'])
             if not principal.grant_id or item['assignee_grant_id'] != principal.grant_id:
@@ -642,7 +675,7 @@ class CoordinationService:
                 self.store.execute('INSERT INTO coordination_attempts VALUES (?,?,?,?,?)',
                     (item['id'], attempt, fence, principal.grant_id, now))
                 self.c.delegation.project_progress(room, goal, self.work(goal, item['id']),
-                    '已领取任务，开始处理。', principal, 'delegation-received:' + item['id'] + ':' + str(attempt),
+                    '已领取任务，等待执行。', principal, 'delegation-received:' + item['id'] + ':' + str(attempt),
                     system_receipt=True)
                 return {'work_item': self.work_view(self.work(goal, item['id']))}
             return self.mutation(principal, room, 'work_claim', args, take)
@@ -665,7 +698,7 @@ class CoordinationService:
     def heartbeat(self, raw, principal):
         args = validate(contracts.WorkLease, raw)
         with self.store.transaction():
-            principal, room, goal = self.scope(principal, args, active=True)
+            principal, room, goal = self.scope(principal, args, active=True, work_effect=True)
             self.teams.guard(args, principal, goal, 'heartbeat', self.work(goal, args['work_item_id']))
             def extend():
                 item = self.lease(principal, goal, args)
@@ -677,7 +710,7 @@ class CoordinationService:
     def progress(self, raw, principal):
         args = validate(contracts.WorkProgress, raw)
         with self.store.transaction():
-            principal, room, goal = self.scope(principal, args, active=True)
+            principal, room, goal = self.scope(principal, args, active=True, work_effect=True)
             self.teams.guard(args, principal, goal, 'progress', self.work(goal, args['work_item_id']))
             def save():
                 item = self.lease(principal, goal, args)
@@ -705,7 +738,7 @@ class CoordinationService:
         if not args['supersedes_operation_id']:
             args.pop('supersedes_operation_id')
         with self.store.transaction():
-            principal, room, goal = self.scope(principal, args, active=True)
+            principal, room, goal = self.scope(principal, args, active=True, work_effect=True)
             self.teams.guard(args, principal, goal, 'execute', self.work(goal, args['work_item_id']))
             spec = json.loads(goal['spec'])
             item = self.work(goal, args['work_item_id'])
@@ -799,6 +832,8 @@ class CoordinationService:
                 self.store.execute('UPDATE operations SET deadline=MIN(deadline,?) WHERE id=?', (start_deadline, operation_id))
                 self.store.execute('UPDATE coordination_goals SET steps=steps+1 WHERE id=?', (goal['id'],))
                 self.store.execute("UPDATE coordination_work SET state='running',updated=?,last_consumer_contact_at=? WHERE id=?", (self.c.clock(), self.c.clock(), item['id']))
+                if self.c.room_work_bridge.native.reference(goal):
+                    self.c.room_consumers.record_work_handling(goal,item,operation_id)
                 return {'operation_id': operation_id, 'work_item_id': item['id'], 'attempt': item['attempt'],
                         'project_id': item['project_id'],
                         'deadline_policy': execution_budget or {'version': 0, 'consumer_lease_bounded': True},
@@ -810,7 +845,7 @@ class CoordinationService:
         # every scope/lease/fence check inside its writer transaction after await.
         args = validate(contracts.WorkExecute, raw)
         with self.store.transaction(immediate=False):
-            principal, _, goal = self.scope(principal, args, active=True)
+            principal, _, goal = self.scope(principal, args, active=True, work_effect=True)
             item = self.work(goal, args['work_item_id'])
             return self.runtime.project(item['project_id'], principal)['device_id']
 
@@ -833,7 +868,8 @@ class CoordinationService:
         for identifier in identifiers:
             item = self.work(goal, identifier)
             native=self.c.room_work_bridge.native
-            if native.reference(goal) and principal is not None and item['project_id'] not in native.visible_projects(goal,principal,goal.get('_reader_member_id','')):
+            if native.reference(goal) and principal is not None and not native.work_is_visible(goal,item,
+                    native.visible_scope_keys(goal,principal,goal.get('_reader_member_id',''))):
                 raise DevError('WORK_INPUT_NOT_VISIBLE','汇总只能引用当前成员可读取的原工作结果',403)
             self.teams.operation_guard(goal, item)
             if item['state'] != 'succeeded' or not item['result']:
@@ -913,7 +949,7 @@ class CoordinationService:
         args = validate(model, raw)
         action = 'work_archive_result' if archive else 'work_result_v2' if version2 else 'work_result'
         with self.store.transaction():
-            principal, room, goal = self.scope(principal, args, active=True)
+            principal, room, goal = self.scope(principal, args, active=True, work_effect=True)
             self.teams.guard(args, principal, goal, 'result', self.work(goal, args['work_item_id']))
             def save():
                 item = self.archive_item(principal, goal, args) if archive else self.lease(principal, goal, args)
@@ -1060,7 +1096,16 @@ class CoordinationService:
         try:
             goal = self.store.one('SELECT * FROM coordination_goals WHERE id=?', (link['goal_id'],))
             room = self.store.one('SELECT * FROM collaboration_rooms WHERE id=?', (goal['room_id'],))
-            actor = self.participant(room, goal, link['grant_id'])
+            native=self.c.room_work_bridge.native
+            exact=bool(native.reference(goal))
+            member_id=''
+            if exact:
+                assignment=self.store.one('SELECT member_id FROM room_native_work_assignments WHERE work_id=?',
+                    (link['work_item_id'],))
+                if not assignment:
+                    raise DevError('ROOM_WORK_ASSIGNEE_REQUIRED','原操作没有稳定成员分配证据',403)
+                member_id=assignment['member_id']
+            actor = self.participant(room, goal, link['grant_id'], member_id, exact_work_effect=exact)
             item = self.lease(actor, goal, link)
             self.teams.operation_guard(goal, item)
             self.c.room_work_bridge.native.check_dispatch_target(goal, item, operation, actor)
