@@ -116,6 +116,35 @@ class RoomMemberReply(RoomConsumerMutation):
     coordinator_epoch: int | None = Field(default=None,strict=True,ge=1)
     outcome: Literal['succeeded','partial','blocked'] | None = None
     artifact_refs: list[ArtifactRef] = Field(default_factory=list,max_length=100)
+    publish_work: bool | None = Field(default=None, strict=True, exclude_if=lambda value: value is None)
+    yield_after: bool = Field(default=False, strict=True, exclude_if=lambda value: not value)
+    input_handling: Literal['answered', 'pending'] | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @model_validator(mode='after')
+    def explicit_effects(self):
+        if 'publish_work' in self.model_fields_set and self.publish_work is None:
+            raise ValueError('Omit publish_work or send a boolean')
+        if 'input_handling' in self.model_fields_set and self.input_handling is None:
+            raise ValueError('Omit input_handling or specify answered/pending')
+        if (self.publish_work is True or self.yield_after or self.input_handling) and not self.complete:
+            raise ValueError('Publication, input handling and yielding require a complete reply')
+        if self.publish_work is False and self.outcome is not None:
+            raise ValueError('Work outcome requires formal publication')
+        return self
+
+
+class RoomReplyReceiptRead(Model):
+    conversation_id: Identifier
+    member_id: Identifier
+    request_key: Key
+    binding_generation: int | None = Field(default=None, strict=True, ge=1)
+    connection_proof: str | None = Field(default=None, min_length=24, max_length=256)
+
+    @model_validator(mode='after')
+    def member_credential(self):
+        if (self.binding_generation is None) != (self.connection_proof is None):
+            raise ValueError('Member identity requires both binding generation and connection proof')
+        return self
 
 
 class RoomWorkStart(RoomConsumerMutation):
@@ -159,7 +188,8 @@ class RoomWorkHandoffRead(MemberIdentity):
 
 
 ROOM_RUNTIME_QUERIES = {'room_work_handoff_read': RoomWorkHandoffRead,
-                        'room_works': RoomWorksRead, 'room_work': RoomWorkRead}
+                        'room_works': RoomWorksRead, 'room_work': RoomWorkRead,
+                        'room_reply_receipt': RoomReplyReceiptRead}
 
 
 ROOM_RUNTIME_MUTATION_ACTIONS = {

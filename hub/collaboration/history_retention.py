@@ -10,10 +10,23 @@ AUDIT_TOMBSTONE = '{"retention_tombstone":"audit-detail-v1"}'
 
 def replay_response(value):
     """A retired receipt is a conflict, never permission to repeat its side effect."""
-    if value == RETIRED_RESPONSE:
+    response = json.loads(value)
+    if isinstance(response, dict) and response.get('retention_tombstone') == 'collaboration-response-v1':
+        reference = {'message_id': response['message_id']} if response.get('message_id') else {}
         raise DevError('IDEMPOTENCY_RESPONSE_EXPIRED',
-                       '请求已执行，历史响应已按保留期清理；不会重新执行，请查询当前状态', 409)
-    return json.loads(value)
+                       '请求已执行，历史响应已按保留期清理；不会重新执行，请查询当前状态', 409,
+                       **reference)
+    return response
+
+
+def retired_room_reply(result):
+    # Retain delivery dispositions and original identities after expiration.
+    # The original request key and fingerprint remain in the receipt row.
+    original = json.loads(result)
+    minimum = ('message_id', 'source_message_id', 'binding_generation', 'complete',
+               'yielded_at_commit', 'channel_dispositions')
+    return json.dumps({**json.loads(RETIRED_RESPONSE), **{key: original[key] for key in minimum if key in original}},
+                      ensure_ascii=False, sort_keys=True, separators=(',', ':'))
 
 
 # A paused room alone is not terminal: pending goals/jobs and subscription
@@ -95,6 +108,10 @@ def prune_collaboration_history(store, *, now, before, limit=100, dry_run=False,
          """),
         ('collaboration_audit', 'detail', AUDIT_TOMBSTONE, audit_before, ROOM_SETTLED),
         ('room_mutations', 'result', RETIRED_RESPONSE, before, CONVERSATION_SETTLED),
+        ('room_runtime_receipts', 'result', RETIRED_RESPONSE, before, '''
+         t.action LIKE 'room_reply:%' AND json_valid(t.result)
+         AND json_extract(t.result,'$.retention_tombstone') IS NULL AND ('''
+         + CONVERSATION_SETTLED.replace(ROOM_SCOPE_ID, 't.conversation_id') + ')'),
         ('dot_consumer_mutations', 'result', RETIRED_RESPONSE, before, """
          EXISTS (SELECT 1 FROM dot_consumer_sessions s WHERE s.id=t.session_id
              AND s.state IN ('yielded','expired') AND s.updated<? AND s.lease_until<?
@@ -112,7 +129,7 @@ def prune_collaboration_history(store, *, now, before, limit=100, dry_run=False,
         params.extend([before] * predicate.count('?'))
         params.append(remaining)
         created_column = 'created_at' if table == 'room_mutations' else 'created'
-        rows = store.all(f"""SELECT t.rowid AS retention_rowid FROM {table} t
+        rows = store.all(f"""SELECT t.rowid AS retention_rowid,t.{column} AS retention_payload FROM {table} t
             WHERE t.{created_column}<? AND t.{column} IS NOT ? AND ({predicate})
             ORDER BY t.{created_column},t.rowid LIMIT ?""", tuple(params))
         for row in rows:
@@ -121,8 +138,9 @@ def prune_collaboration_history(store, *, now, before, limit=100, dry_run=False,
                     store.execute(f'''INSERT OR IGNORE INTO room_mutation_scopes
                         SELECT t.id,{ROOM_SCOPE_ID} FROM room_mutations t WHERE t.rowid=?''',
                         (row['retention_rowid'],))
+                payload = retired_room_reply(row['retention_payload']) if table == 'room_runtime_receipts' else replacement
                 store.execute(f'UPDATE {table} SET {column}=? WHERE rowid=?',
-                              (replacement, row['retention_rowid']))
+                              (payload, row['retention_rowid']))
         counts[table] = len(rows)
         remaining -= len(rows)
     return counts
