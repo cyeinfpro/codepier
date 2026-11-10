@@ -1084,6 +1084,7 @@ class CollaborationService:
         with self.store.transaction():
             self.conversations.archive.reconcile_legacy()
             self.dot_mailbox.settle_history()
+        self.room_connections.hosts.cleanup()
         self.coordination.reconcile()
         now = self.clock()
         after = getattr(self, '_reconcile_after', '')

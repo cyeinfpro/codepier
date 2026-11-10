@@ -71,7 +71,8 @@ class PendingBindings:
             '_pending_binding': True, '_pending_binding_id': candidate['id'],
             '_base_generation': candidate['base_generation'],
             '_prepare_expires_at': candidate['prepare_expires_at'],
-            'connection_source_member_id': '', 'connection_source_generation': 0}
+            'connection_source_member_id': '', 'connection_source_generation': 0,
+            'host_connection_id': '', 'route_generation': 0, 'connection_identity_version': 2}
 
     def cancel(self, member_id):
         candidate = self.current(member_id)
@@ -144,7 +145,7 @@ class PendingBindings:
         self.rooms.change(member['conversation_id'], 'connection', member['id'], member['version'])
         return self.by_generation(member, candidate['binding_generation'])
 
-    def activate(self, candidate_member, principal):
+    def activate(self, candidate_member, principal, probe_args):
         """Called after the genuine ticket/nonce round trip in the same transaction."""
         member = self.rooms.member(candidate_member['id'])
         candidate = self.current(member['id'])
@@ -160,7 +161,8 @@ class PendingBindings:
         now = self.c.clock()
         fields = {key: candidate_member[key] for key in BINDING_FIELDS}
         fields['probe_replied_at'] = now
-        fields.update(connection_source_member_id='', connection_source_generation=0)
+        fields.update(connection_source_member_id='', connection_source_generation=0,
+                      host_connection_id='', route_generation=0, connection_identity_version=2)
         assignment = ','.join(key + '=?' for key in fields)
         changed = self.store.execute('UPDATE room_members SET ' + assignment +
             ",status='bound',version=version+1,updated_at=? WHERE id=? AND binding_generation=?",
@@ -171,6 +173,7 @@ class PendingBindings:
             (now, now, now, candidate['id']))
         self.store.execute("""UPDATE room_connect_flows SET status='ready',invite_digest='',invite_secret='',
             redeemed_at=?,expires_at=NULL,version=version+1,updated_at=? WHERE member_id=?""", (now, now, member['id']))
+        self.c.room_connections.hosts.adopt_verified(self.rooms.member(member['id']), probe_args)
         current = self.rooms.member(member['id'])
         bridge = getattr(self.c, 'room_work_bridge', None)
         if bridge is not None:
