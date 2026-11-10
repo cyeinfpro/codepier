@@ -406,8 +406,17 @@ try:
     from hub.state_layout import STATE_LAYOUT
 except ImportError:
     STATE_LAYOUT = 'legacy'
+try:
+    from hub.collaboration.config import CollaborationConfig
+    from hub.collaboration.room_host_rollout import activate
+    from shared.hub_data_contract import CONTRACT, verify_compatibility
+    verify_compatibility(CONTRACT, VERSION)
+    host_connections_auto = callable(activate) and CollaborationConfig.from_env().host_connections_mode == 'auto'
+except (ImportError, RuntimeError):
+    host_connections_auto = False
 p=AgentPackage(Path('/app')).build()
-print(json.dumps({'version':VERSION,'agent_sha256':p.sha256,'agent_bytes':len(p.content),'state_layout':STATE_LAYOUT}))
+print(json.dumps({'version':VERSION,'agent_sha256':p.sha256,'agent_bytes':len(p.content),
+                  'state_layout':STATE_LAYOUT,'host_connections_auto':host_connections_auto}))
 """
 HEALTH = "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8765/healthz',timeout=3).read().decode())"
 MANIFEST = "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8765/agent/manifest.json',timeout=5).read().decode())"
@@ -534,6 +543,7 @@ class DockerRuntime:
                 'image': image, 'source': str(source.relative_to(self.root)), 'old_container': ids[0],
                 'state_layout': 'split-state-v1' if migration or mount_path == '/app/state' else 'legacy',
                 'volume_env': volume_env, 'layout_migration': migration,
+                'host_connections_mode': target_env.get('CODEPIER_ROOM_HOST_CONNECTIONS_MODE', 'auto'),
                 'asset_volume': old_volume if migration else asset_name if mount_path == '/app/state' else '',
                 'layout_config': '.codepier-updater/layouts/' + job['id'] + '.json' if migration or mount_path == '/app/state' else ''}
 
@@ -591,7 +601,33 @@ class DockerRuntime:
                             '--volume', job['old_volume'] + ':/backup:ro',
                             '--volume', job['new_volume'] + ':/app/data',
                             '--entrypoint', 'python', job['old_image'], '-c', COPY_MIGRATION if job.get('layout_migration') else COPY_STATE if job.get('state_layout') == 'split-state-v1' else COPY_DATA], timeout=1800, job=job)
-        return json.loads(raw)
+        summary = json.loads(raw)
+        package = job.get('package', {})
+        if (job.get('kind') == 'apply' and job.get('host_connections_mode') == 'auto'
+                and package.get('host_connections_auto') is True and summary.get('data_contract') is None):
+            if summary.get('integrity') != 'ok':
+                raise UpdateError('PREFLIGHT_FAILED', '候选数据卷完整性未通过，无法启用独立宿主', 500)
+            summary['target_data_contract'] = self._activate_host_connections(job, package['image_id'])
+        return summary
+
+    def _activate_host_connections(self, job, image_id):
+        # Only the isolated, verified candidate is writable here. The previous
+        # version can resume on its original volume until cutover commits.
+        split = job.get('state_layout') == 'split-state-v1'
+        state = '/app/state' if split else '/app/data'
+        mounts = ['--volume', job['new_volume'] + ':' + state]
+        if split:
+            mounts += ['--env', 'HUB_STATE_DIR=/app/state',
+                       '--tmpfs', '/app/data:rw,noexec,nosuid,size=64m,mode=0700,uid=10001,gid=10001']
+        raw = self.command(['docker', 'run', '--rm', '--network', 'none', '--read-only', '--user', '10001:10001',
+                            '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', *mounts,
+                            '--entrypoint', 'python', image_id, '-m', 'hub', '--data-dir', '/app/data',
+                            'room-host-activate', '--confirm-compatible-deployment'], job=job)
+        receipt = json.loads(raw)
+        if not isinstance(receipt, dict) or receipt.get('activated') is not True:
+            raise UpdateError('PREFLIGHT_FAILED', '独立宿主兼容声明未通过校验', 500)
+        verify_data_contract(receipt, job['target_version'])
+        return receipt
 
     def check_database_floor(self, job, which):
         image = job['package']['image_id'] if which == 'target' else job['old_image']
@@ -621,7 +657,10 @@ class DockerRuntime:
             raise UpdateError('DATABASE_COMPATIBILITY_FLOOR', '目标镜像不满足当前数据库的协作读取或写入能力；未启动目标 Hub', 409)
 
     def start(self, job, which):
-        contract = job.get('copy_summary', {}).get('data_contract')
+        summary = job.get('copy_summary', {})
+        contract = summary.get('data_contract')
+        if which == 'target':
+            contract = summary.get('target_data_contract', contract)
         version = job['from_version'] if which == 'old' else job['target_version']
         verify_data_contract(contract, version)
         self.check_database_floor(job, which)

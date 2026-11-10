@@ -74,6 +74,53 @@ class DockerBoundary:
         raise AssertionError(command)
 
 
+@pytest.mark.parametrize('mode,capable,activates', [
+    (None, True, True), ('auto', True, True), ('off', True, False),
+    ('shadow', True, False), ('on', True, False), (None, False, False),
+])
+def test_managed_upgrade_activates_only_the_verified_candidate(tmp_path, mode, capable, activates):
+    home, config, job, spec = deployment(tmp_path)
+    if mode is not None:
+        spec['services']['hub']['environment']['CODEPIER_ROOM_HOST_CONNECTIONS_MODE'] = mode
+        current = read_json(home / 'current.json')
+        atomic_json(home / 'current.json', {**current, 'compose': spec})
+
+    class HostActivationDocker(DockerBoundary):
+        def __call__(self, command, **kwargs):
+            if 'room-host-activate' in command:
+                self.commands.append(command)
+                return json.dumps({'activated': True, 'version': 1,
+                                   'min_reader_version': '1.33.9', 'min_writer_version': '1.33.9'})
+            return super().__call__(command, **kwargs)
+
+    docker = HostActivationDocker(tmp_path, spec)
+    runtime = DockerRuntime(tmp_path, home, config, execute=docker)
+    job['kind'] = 'apply'
+    job.update(runtime.prepare(job, tmp_path))
+    image_id = 'sha256:' + 'c' * 64
+    job.update(from_version='1.33.8', target_version='1.33.9',
+               package={'host_connections_auto': capable, 'image_id': image_id})
+    runtime.stop(job)
+    job['copy_summary'] = runtime.copy_data(job)
+
+    commands = [command for command in docker.commands if 'room-host-activate' in command]
+    assert bool(commands) == activates
+    assert job['copy_summary'].get('data_contract') is None
+    assert ('target_data_contract' in job['copy_summary']) == activates
+    if activates:
+        command, = commands
+        assert command[command.index('--volume') + 1] == job['new_volume'] + ':/app/state'
+        assert command.count('--volume') == 1
+        assert command[command.index('--env') + 1] == 'HUB_STATE_DIR=/app/state'
+        assert command[command.index('--entrypoint') + 2] == image_id
+        assert command[command.index('--network') + 1] == 'none'
+        assert docker.commands.index(command) > next(
+            i for i, args in enumerate(docker.commands) if '/backup' in args[-1])
+    runtime.start(job, 'target')
+    runtime.start(job, 'old')
+    assert docker.phase == 'old'
+
+
 def test_real_runtime_pipeline_preserves_proxy_ports_configuration_and_backup(tmp_path):
     home,config,job,spec=deployment(tmp_path);docker=DockerBoundary(tmp_path,spec)
     runtime=DockerRuntime(tmp_path,home,config,execute=docker)

@@ -54,6 +54,7 @@ BASE = Path(__file__).resolve().parent.parent
 
 def create_app(data_dir: str | None = None):
     from hub.collaboration.config import CollaborationConfig
+    from hub.collaboration.room_host_rollout import resolve_startup_mode
     collaboration_config = CollaborationConfig.from_env()  # Check rollout before opening the database.
     config = HubConfig.from_env()
     directory = Path(data_dir or os.getenv("HUB_DATA_DIR", str(BASE / "data"))).resolve()
@@ -66,11 +67,11 @@ def create_app(data_dir: str | None = None):
     try:
         host_connections_on = collaboration_config.host_connections_mode == 'on'
         check_path(state, VERSION, required=host_connections_on)
-        store = Store(directory)
-        if host_connections_on and not store.one('SELECT id FROM room_host_backfill_progress WHERE id=1 AND completed=1'):
-            raise RuntimeError('Finish room-host-backfill --apply before enabling independent host connections')
+        store = Store(directory, initialize_host_contract=collaboration_config.host_connections_mode == 'auto')
+        collaboration_config, host_backfill_pending = resolve_startup_mode(store, collaboration_config)
         initialize_file_import_settings(store)
-        runtime, auth = Runtime(store), Auth(store)
+        runtime, auth = Runtime(store, collaboration_config=collaboration_config), Auth(store)
+        runtime.collaboration.loops.host_backfill_pending = host_backfill_pending
         runtime.gateway = Gateway(store)
         def public_url():
             row = store.one("SELECT value FROM meta WHERE key='public_url'")

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import closing
+from dataclasses import replace
 
 from hub.collaboration.delivery_compatibility import raise_floor
 from hub.collaboration.room_host_migration import HostBindingBackfill
@@ -24,6 +25,45 @@ class ReadOnlyStore:
 
     def all(self, sql, args=()):
         return [dict(row) for row in self.connection.execute(sql, args)]
+
+
+def has_unscanned_legacy_members(store):
+    return bool(store.one("""SELECT 1 FROM room_members m WHERE m.connection_identity_version=1
+        AND NOT EXISTS (SELECT 1 FROM room_host_backfill_results r
+            WHERE r.member_id=m.id AND r.binding_generation=m.binding_generation) LIMIT 1"""))
+
+
+def advance_auto_backfill(store):
+    with store.transaction():
+        report = HostBindingBackfill(store).batch(apply=True)
+        if report['next_after'] is not None:
+            return False
+        # A legacy member may have appeared before the saved cursor while the
+        # Hub was serving requests in shadow mode. Give it a separate pass.
+        if has_unscanned_legacy_members(store):
+            store.execute("""UPDATE room_host_backfill_progress SET after_member_id='',scanned_count=0,
+                completed=0 WHERE id=1""")
+            return False
+        return True
+
+
+def resolve_startup_mode(store, config):
+    if config.host_connections_mode == 'on':
+        if not store.one('SELECT id FROM room_host_backfill_progress WHERE id=1 AND completed=1'):
+            raise RuntimeError('Finish room-host-backfill --apply before enabling independent host connections')
+        return config, False
+    if config.host_connections_mode != 'auto':
+        return config, False
+    if not config.enabled or not store.one('SELECT 1 FROM meta WHERE key=?', (CONTRACT_KEY,)):
+        return replace(config, host_connections_mode='off'), False
+    if store.one('SELECT 1 FROM room_members WHERE connection_identity_version=1 LIMIT 1'):
+        completed = (bool(store.one('SELECT 1 FROM room_host_backfill_progress WHERE id=1 AND completed=1'))
+                     and not has_unscanned_legacy_members(store))
+    else:
+        # No legacy rows need migration. Initialize the empty checkpoint before
+        # the server accepts its first independent binding.
+        completed = advance_auto_backfill(store)
+    return replace(config, host_connections_mode='on' if completed else 'shadow'), not completed
 
 
 def activate(data_directory, *, confirmed):

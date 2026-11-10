@@ -43,14 +43,20 @@ def check_database(state: str | Path):
 def raise_floor(store):
     """Activate the floor in the same transaction as the first protected effect."""
     store.require_transaction()
-    assert_compatible(store.db)
-    schema = store.db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0]
+    raise_floor_in_transaction(store.db)
+
+
+def raise_floor_in_transaction(db):
+    if not db.in_transaction:
+        raise RuntimeError('A transaction is required to raise the collaboration floor')
+    assert_compatible(db)
+    schema = db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0]
     if schema == PROTECTED_SCHEMA_VERSION:
         return
     if schema != LEGACY_SCHEMA_VERSION:
         raise RuntimeError('Hub core schema must finish migration before raising the collaboration floor')
-    store.db.executemany("INSERT INTO meta(key,value) VALUES (?,?)",
+    db.executemany("INSERT INTO meta(key,value) VALUES (?,?)",
                          ((MIN_READER_KEY, str(CONTRACT_VERSION)),
                           (MIN_WRITER_KEY, str(CONTRACT_VERSION))))
     # Existing Hub binaries reject schema 11 even if they ignore the new keys.
-    store.db.execute("UPDATE meta SET value=? WHERE key='schema'", (PROTECTED_SCHEMA_VERSION,))
+    db.execute("UPDATE meta SET value=? WHERE key='schema'", (PROTECTED_SCHEMA_VERSION,))

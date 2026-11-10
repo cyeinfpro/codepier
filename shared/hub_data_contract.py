@@ -21,6 +21,12 @@ def version_tuple(version):
     return tuple(map(int, version.split('.')))
 
 
+def initialize_fresh_contract(connection, version):
+    if version_tuple(version) >= version_tuple(HOST_CONNECTIONS_MIN_VERSION):
+        connection.execute('INSERT INTO meta(key,value) VALUES (?,?)',
+                           (CONTRACT_KEY, json.dumps(CONTRACT, sort_keys=True)))
+
+
 def verify_compatibility(contract, version):
     if not isinstance(contract, dict) or type(contract.get('version')) is not int or contract['version'] != 1:
         raise RuntimeError('Unknown Hub data contract version')
