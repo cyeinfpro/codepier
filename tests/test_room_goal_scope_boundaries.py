@@ -470,3 +470,8 @@ async def test_decoupled_claim_checks_only_the_affected_work_scope(collab, monke
         'client_message_id':key(),'idempotency_key':key()},owner)
     claimed=s.coordination.work_claim(claim,actor)['work_item']
     assert claimed['id']==work['id'] and claimed['state']=='leased'
+    admitted=s.coordination.admit({**mutation(s,identity,credentials,goal_id,project='otherproj'),
+        'work_item_id':work['id'],'attempt':claimed['attempt'],'fencing_token':claimed['fencing_token'],
+        'tool':'read','arguments':{'path':'README.md'}},actor)
+    operation=s.store.one('SELECT * FROM operations WHERE id=?',(admitted['operation_id'],))
+    assert s.coordination.operation_denial(operation) is None

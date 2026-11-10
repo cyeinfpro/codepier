@@ -55,8 +55,10 @@ class CoordinationService:
                     candidate['_reader_member_id']=member['id']
             if route_key not in native.visible_scope_keys(candidate,principal,candidate.get('_reader_member_id','')):
                 raise DevError('GOAL_PROJECT_DENIED','当前成员不能使用此项目读取原工作',403)
-            exact=work_effect and session and session.get('turn_policy')=='decoupled'
-            self.authorize(principal,room,candidate,active=active,exact_work_effect=bool(exact))
+            exact=bool(work_effect and session and session.get('turn_policy')=='decoupled')
+            self.authorize(principal,room,candidate,active=active,exact_work_effect=exact)
+            if exact:
+                candidate['_exact_work_effect']=True
             return principal,room,candidate
         principal, room = self.c.scope(principal, args)
         goal = self.object(room, args['goal_id'])
@@ -547,7 +549,7 @@ class CoordinationService:
                 'result': json.loads(row['result']) if row['result'] else None,
                 'provenance_project_ids': json.loads(row['result']).get('provenance_project_ids', [row['project_id']]) if row['result'] else [row['project_id']]}
 
-    def participant(self, room, goal, grant_id, member_id=''):
+    def participant(self, room, goal, grant_id, member_id='', *, exact_work_effect=False):
         native=self.c.room_work_bridge.native
         participants=native.record(native.reference(goal))['participant_grant_ids'] if native.reference(goal) else json.loads(goal['spec'])['participant_grant_ids']
         if grant_id not in participants:
@@ -558,7 +560,8 @@ class CoordinationService:
         participant_goal={k:v for k,v in goal.items() if k!='_reader_member_id'}
         if member_id and native.reference(goal):
             participant_goal['_reader_member_id']=member_id
-        return self.authorize(actor, room, participant_goal, active=True)
+        return self.authorize(actor, room, participant_goal, active=True,
+            exact_work_effect=exact_work_effect or bool(goal.get('_exact_work_effect')))
 
     def admit_current_work_surface(self, goal):
         """Cutover stops new legacy work, never historical operation receipts.
@@ -1081,7 +1084,16 @@ class CoordinationService:
         try:
             goal = self.store.one('SELECT * FROM coordination_goals WHERE id=?', (link['goal_id'],))
             room = self.store.one('SELECT * FROM collaboration_rooms WHERE id=?', (goal['room_id'],))
-            actor = self.participant(room, goal, link['grant_id'])
+            native=self.c.room_work_bridge.native
+            exact=bool(native.reference(goal))
+            member_id=''
+            if exact:
+                assignment=self.store.one('SELECT member_id FROM room_native_work_assignments WHERE work_id=?',
+                    (link['work_item_id'],))
+                if not assignment:
+                    raise DevError('ROOM_WORK_ASSIGNEE_REQUIRED','原操作没有稳定成员分配证据',403)
+                member_id=assignment['member_id']
+            actor = self.participant(room, goal, link['grant_id'], member_id, exact_work_effect=exact)
             item = self.lease(actor, goal, link)
             self.teams.operation_guard(goal, item)
             self.c.room_work_bridge.native.check_dispatch_target(goal, item, operation, actor)
