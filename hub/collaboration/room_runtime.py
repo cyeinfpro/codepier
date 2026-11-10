@@ -197,11 +197,15 @@ class RoomRuntime:
                   'current_consumer': self.c.room_consumers.reply_consumer_view(session) if session else None}
         if visible:
             origin = self.store.one('SELECT consumer_session_id FROM room_reply_origins WHERE message_id=?', (identifier,))
+            handling = receipt.get('input_handling') or json.loads(row['body']).get('input_handling')
+            if handling is None:
+                handling = 'answered' if receipt['complete'] else 'pending'
             history.update(source_message_id=receipt.get('source_message_id') or row['reply_to_id'],
                            original_session_id=origin['consumer_session_id'] if origin else None,
-                           complete=receipt['complete'], yielded_at_commit=bool(receipt.get('yielded_at_commit')))
+                           complete=receipt['complete'], input_handling=handling,
+                           yielded_at_commit=bool(receipt.get('yielded_at_commit')))
             result.update(message=self.message_view(row, principal), complete=receipt['complete'],
-                          channel_dispositions=receipt.get('channel_dispositions', []))
+                          input_handling=handling, channel_dispositions=receipt.get('channel_dispositions', []))
             if not replayed and effects_created and 'yielded_at_commit' in receipt:
                 result.update({key: receipt[key] for key in
                                ('yielded_at_commit', 'inbox_revision', 'more', 'reason_code') if key in receipt})
@@ -281,7 +285,8 @@ class RoomRuntime:
                 projects.update(json.loads(related['spec'])['project_ids'])
         body = {'body_text': redact(args['body_text']), 'sender_member_id': member['id'],
                 'sender_name': member['name'], 'dot_reply_complete': args['complete'],
-                'source_message_id': source['id'], 'provenance_project_ids': sorted(projects),
+                'source_message_id': source['id'], 'source_version': source['version'],
+                'provenance_project_ids': sorted(projects),
                 'provenance_scopes': [{'project_id': project, 'environment_id': env} for project, env in sorted(scopes)]}
         if related:
             body['intent_revision'] = self.intent_revision(related['id'])
@@ -327,6 +332,7 @@ class RoomRuntime:
         turn = self.c.room_consumers.yield_after_reply(args, principal, member, session) if args.get('yield_after') else {}
         return {'message_id': identifier, 'source_message_id': source['id'], 'complete': args['complete'],
                 'binding_generation': member['binding_generation'], 'channel_dispositions': dispositions,
+                'input_handling': handling or ('answered' if args['complete'] else 'pending'),
                 'fingerprint_schema_version': 1, **turn}, True
 
     def guard_discussion_work(self, args, goal):

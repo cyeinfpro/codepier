@@ -427,7 +427,10 @@ async def test_drain_check_reaches_pending_items_after_a_bounded_invisible_prefi
 
 @pytest.mark.asyncio
 async def test_continue_later_persists_one_wake_and_preserves_pending_inputs(rooms, monkeypatch):
-    from hub.collaboration.room_consumers import CONTINUATION_DELAY, RoomConsumers
+    from hub.collaboration.room_consumers import CONTINUATION_DELAY
+    from hub.collaboration.service import CollaborationService
+    from hub.runtime import Runtime
+    from hub.store import Store
 
     monkeypatch.setenv('CODEPIER_ROOM_CHAT_SCOPE_MODE', 'decoupled')
     c = await connect(rooms)
@@ -446,18 +449,76 @@ async def test_continue_later_persists_one_wake_and_preserves_pending_inputs(roo
     member = c.s.rooms.member(c.joined['member_id'])
     assert member['drained_revision'] < member['dirty_revision']
     assert member['consumer_continuation_at'] == c.clock[0] + CONTINUATION_DELAY
-    before = len(c.received)
-    latest = send(c, 'new input while continuing later')['message']['id']
-    await dispatch(c)
-    assert len(c.received) == before
+    previous = c.s
+    restarted_store = Store(previous.store.directory)
+    try:
+        c.s = CollaborationService(Runtime(restarted_store), previous.config, clock=lambda: c.clock[0])
+        c.s.events = EventService(c.s, previous.events.sender)
+        assert c.s.room_consumers.yield_session(request, c.actor) == outcome
+        before = len(c.received)
+        latest = send(c, 'new input while continuing later')['message']['id']
+        await dispatch(c)
+        assert len(c.received) == before
 
-    c.s.room_consumers = RoomConsumers(c.s)
-    c.clock[0] += CONTINUATION_DELAY
-    assert c.s.room_consumers.recover() == 1
-    assert c.s.room_consumers.recover() == 0
+        c.clock[0] += CONTINUATION_DELAY
+        assert c.s.room_consumers.recover() == 1
+        assert c.s.room_consumers.recover() == 0
+        await dispatch(c)
+        assert len(c.received) == before + 1
+        _, next_session = begin(c, c.received[-1][1]['data']['wake_ticket'])
+        assert next_session['consumer_fence'] == session['consumer_fence'] + 1
+        items = c.s.room_consumers.inbox(identity(c.joined), c.actor)['items']
+        assert {item['object_id'] for item in items} == {initial, latest}
+    finally:
+        restarted_store.close()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_and_yield_cannot_cross_the_expiry_of_a_replaced_fence(rooms, monkeypatch):
+    import asyncio
+    from threading import Barrier
+
+    monkeypatch.setenv('CODEPIER_ROOM_CHAT_SCOPE_MODE', 'decoupled')
+    c = await connect(rooms)
+    verify(c)
+    pending = send(c, '旧回合尚未确认的输入')['message']['id']
     await dispatch(c)
-    assert len(c.received) == before + 1
-    _, next_session = begin(c, c.received[-1][1]['data']['wake_ticket'])
-    assert next_session['consumer_fence'] == session['consumer_fence'] + 1
-    items = c.s.room_consumers.inbox(identity(c.joined), c.actor)['items']
-    assert {item['object_id'] for item in items} == {initial, latest}
+    old_ticket = c.received[-1][1]['data']['wake_ticket']
+    begin_request, old = begin(c, old_ticket)
+    next_input = send(c, '新回合输入')['message']['id']
+    await dispatch(c)
+    next_ticket = c.received[-1][1]['data']['wake_ticket']
+    assert next_ticket != old_ticket
+    c.clock[0] = old['lease_until']
+
+    start = Barrier(3)
+    consumers = c.s.room_consumers
+    old_credentials = credentials(c, old)
+
+    def concurrent(action):
+        start.wait(timeout=5)
+        return action()
+
+    heartbeat, yielding, replacement = await asyncio.gather(
+        asyncio.to_thread(concurrent, lambda: consumers.heartbeat({
+            **old_credentials, 'lease_seconds': 300, 'idempotency_key': key()}, c.actor)),
+        asyncio.to_thread(concurrent, lambda: consumers.yield_session({
+            **old_credentials, 'yield_mode': 'continue_later',
+            'expected_inbox_revision': old['inbox_revision'], 'idempotency_key': key()}, c.actor)),
+        asyncio.to_thread(concurrent, lambda: begin(c, next_ticket)[1]),
+        return_exceptions=True,
+    )
+    for result in (heartbeat, yielding):
+        assert isinstance(result, DevError) and result.code == 'DOT_CONSUMER_LEASE_EXPIRED'
+    assert replacement['state'] == 'active' and replacement['consumer_fence'] == old['consumer_fence'] + 1
+    original = consumers.begin(begin_request, c.actor)
+    assert original['state'] == 'expired' and original['hard_deadline'] == old['hard_deadline']
+
+    c.clock[0] += 1
+    renewed = consumers.heartbeat({**credentials(c, replacement), 'lease_seconds': 300,
+                                  'idempotency_key': key()}, c.actor)
+    assert renewed['hard_deadline'] == replacement['hard_deadline']
+    assert c.s.store.all("SELECT id,fence FROM dot_consumer_sessions WHERE member_id=? AND state='active'",
+        (c.joined['member_id'],)) == [{'id': replacement['consumer_session_id'], 'fence': replacement['consumer_fence']}]
+    items = consumers.inbox(identity(c.joined), c.actor)['items']
+    assert {item['object_id'] for item in items} == {pending, next_input}

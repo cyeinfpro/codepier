@@ -5,6 +5,7 @@ import pytest
 
 from hub.collaboration.common import digest
 from hub.collaboration.room_diagnostics import delivery_display
+from hub.collaboration.weixin_delivery import text_items
 from shared.util import DevError
 from tests.collaboration_support import collab as collab, key
 from tests.test_room_managed_work import connected
@@ -60,17 +61,34 @@ async def test_completed_goal_keeps_unknown_wechat_delivery_separate_and_correla
     done = report(s, identity, credentials, actor, goal_id, lease, operation)
     source = s.store.one('SELECT * FROM collaboration_messages WHERE id=?', (message_id,))
     clock[0] += 1
+    progress = s.weixin.delivery.queue_task_status(source, 'ROOM_WORK_SCOPE_CHANGED')
+    progress_evidence = json.loads(progress['ordering_evidence'])
+    progress_part = s.store.one('SELECT id FROM weixin_parts WHERE delivery_id=?', (progress['id'],))
+    progress_claim = None
+    while candidates := s.weixin.delivery.candidates(clock[0]):
+        claim = s.weixin.delivery.claim(candidates[0]['id'])
+        assert claim
+        s.weixin.delivery.mark_sending(claim, text_items(json.loads(s.store.decrypt(claim['body']))['text']))
+        if claim['id'] == progress_part['id']:
+            progress_claim = claim
+            s.weixin.delivery.finish(claim, error=TimeoutError('synthetic progress response lost'))
+            break
+        s.weixin.delivery.finish(claim, result={'provider_state': 'accepted'})
+    assert progress_claim
+    clock[0] += 1
     final = s.room_runtime.reply(final_request(s, identity, credentials, actor, source,
         [{'work_item_id': done['id'], 'version': done['version'], 'digest': digest(done['result'])}]), actor)['message']
     final_delivery = s.store.one('SELECT * FROM weixin_deliveries WHERE message_id=?', (final['id'],))
     # Exercise the real prepare/send/finish journal with a synthetic transport
     # loss. Older progress parts must finish first, respecting original order.
+    final_claim = None
     while candidates := s.weixin.delivery.candidates(clock[0]):
         part = s.store.one('SELECT * FROM weixin_parts WHERE id=?', (candidates[0]['id'],))
         claim = s.weixin.delivery.claim(part['id'])
         assert claim
-        s.weixin.delivery.mark_sending(claim, [{'type': 1, 'text_item': {'text': 'synthetic protocol fixture'}}])
+        s.weixin.delivery.mark_sending(claim, text_items(json.loads(s.store.decrypt(claim['body']))['text']))
         if part['delivery_id'] == final_delivery['id']:
+            final_claim = claim
             s.weixin.delivery.finish(claim, error=TimeoutError('synthetic response lost'))
         else:
             s.weixin.delivery.finish(claim, result={'provider_state': 'accepted'})
@@ -91,6 +109,22 @@ async def test_completed_goal_keeps_unknown_wechat_delivery_separate_and_correla
     assert len(s.store.all('SELECT * FROM operations')) == 1
     assert len(s.store.all('SELECT * FROM coordination_goals')) == 1
     assert s.weixin.delivery.claim(view['channel_deliveries'][0]['parts'][0]['id']) is None
+
+    # The answer is observed first. The older status observation must settle
+    # its own part without changing the canonical answer or queueing it again.
+    assert final_claim
+    s.weixin.delivery.finish(final_claim, {'provider_state': 'accepted', 'provider_message_id': 'answer-receipt'})
+    s.weixin.delivery.reconcile()
+    clock[0] += 1
+    s.weixin.delivery.finish(progress_claim, {'provider_state': 'accepted', 'provider_message_id': 'status-receipt'})
+    s.weixin.delivery.reconcile()
+    status = s.store.one('SELECT * FROM weixin_deliveries WHERE id=?', (progress['id'],))
+    assert status['state'] == 'accepted' and json.loads(status['ordering_evidence']) == progress_evidence
+    assert status['created'] < final_delivery['created']
+    current = s.room_runtime.work_view(s.room_runtime.goal(goal_id), owner)
+    assert current['state'] == 'completed' and current['delivery_display']['state'] == 'accepted'
+    assert {row['message_id'] for row in current['channel_deliveries']} == {final['id']}
+    assert not s.weixin.delivery.candidates(clock[0])
 
 
 @pytest.mark.asyncio

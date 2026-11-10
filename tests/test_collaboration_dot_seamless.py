@@ -96,8 +96,11 @@ def test_consumer_uses_context_and_interim_reply_instead_of_panel_modes(collab):
     config = c.connected['consumer_configuration']
     assert config['panel_mode_switch_required'] is False
     assert config['next_action_decided_by'] == 'dot_with_conversation_context'
-    assert 'thread_request' in config['wake_instructions']
-    assert 'interim_reply_arguments' in config['wake_instructions']
-    assert '不按问号或关键词硬分模式' in config['wake_instructions']
-    assert '需要新授权或宿主确认' in config['wake_instructions']
+    assert config['grants_authority'] is False
+    instructions = config['wake_instructions']
+    assert 'thread_request' in instructions
+    assert 'interim_reply_arguments' in instructions
+    assert '根据可信房主消息和原话题上下文' in instructions
+    assert '不为切换模式重复确认' in instructions
+    assert '需要新授权或宿主确认' in instructions
     assert json.loads(c.s.dots.find(c.slot['id'])['setup'])['capabilities'] == ['read', 'write', 'execute']

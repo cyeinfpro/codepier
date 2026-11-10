@@ -49,7 +49,24 @@ TURN_ACTION_CAPABILITIES = {
     **dict.fromkeys(('room_inbox', 'room_consumer', 'room_message_read', 'room_attachment_read', 'room_context'),
                     ('expired_route_session_read',)),
 }
-TURN_CAPABILITIES = {capability: True for names in TURN_ACTION_CAPABILITIES.values() for capability in names}
+TURN_CAPABILITY_REQUIREMENTS = dict.fromkeys(
+    ('consumer_continue_later', 'expired_route_session_read'), 'decoupled')
+_TURN_CAPABILITIES = frozenset(capability for names in TURN_ACTION_CAPABILITIES.values() for capability in names)
+
+
+def turn_capabilities(policy):
+    return {name: True for name in sorted(_TURN_CAPABILITIES)
+            if TURN_CAPABILITY_REQUIREMENTS.get(name, policy) == policy}
+
+
+def turn_action_help(action):
+    names = TURN_ACTION_CAPABILITIES.get(action, ())
+    declared = {name: True for name in names if name not in TURN_CAPABILITY_REQUIREMENTS}
+    conditional = {name: TURN_CAPABILITY_REQUIREMENTS[name] for name in names if name in TURN_CAPABILITY_REQUIREMENTS}
+    info = {'turn_capabilities': declared} if declared else {}
+    if conditional:
+        info['turn_capability_requirements'] = conditional
+    return info
 
 
 class RoomList(Model):

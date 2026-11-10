@@ -189,7 +189,7 @@ class HostConnections:
     def project_host(self, host):
         state, next_action = 'recovering', 'wait_for_host_refresh'
         aggregate = self.store.one("""SELECT COUNT(DISTINCT m.conversation_id) AS room_count,
-                MAX(m.probe_replied_at) AS last_round_trip_at,
+                MIN(r.title) AS single_room_title, MAX(m.probe_replied_at) AS last_round_trip_at,
                 COUNT(CASE WHEN m.status='paused' OR r.state!='active' THEN 1 END) AS paused_count,
                 COUNT(CASE WHEN m.status='invited' THEN 1 END) AS invited_count,
                 COUNT(CASE WHEN m.status='bound' AND m.subscription_verified_at IS NOT NULL
@@ -233,7 +233,9 @@ class HostConnections:
             'display_state': state, 'next_action': next_action, 'verified_at': host['verified_at'],
             'last_round_trip_at': aggregate['last_round_trip_at'],
             'authority_version': host['authority_version'], 'health_version': host['health_version'],
-            'room_count': aggregate['room_count'], 'turn_capacity': 'unverified',
+            'room_count': aggregate['room_count'],
+            'single_room_title': aggregate['single_room_title'] if aggregate['room_count'] == 1 else None,
+            'turn_capacity': 'unverified',
             'reuse_member_id': anchor['id'] if anchor else None,
             'reuse_binding_generation': anchor['binding_generation'] if anchor else None,
             'connection_capabilities': {'host_reference': True, 'verified_reuse': can_reuse,

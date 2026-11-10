@@ -4,17 +4,18 @@ import json
 
 from cryptography.fernet import InvalidToken
 
+from hub.collaboration import weixin_delivery_order as order
 from hub.collaboration.common import canonical, digest
 from shared.util import DevError
 
-QUARANTINED = {'credential_changed', 'credential_generation_changed'}
 SUCCESSFUL = {'accepted', 'owner_confirmed'}
 
 
 def unsent_quarantined(part):
     # Provider attempts, including a frozen rate-limited request, belong to
     # their original credential generation. Never replay them on a new route.
-    return part['state'] == 'cancelled' and part['reason_code'] in QUARANTINED and part['attempts'] == 0
+    return (part['state'] == 'cancelled' and part['reason_code'] in order.RECOVERY_QUARANTINE_REASONS
+            and part['attempts'] == 0)
 
 
 def _scope_changed():
@@ -136,6 +137,11 @@ def authorize_parts(service, delivery, part_ids, principal):
             settled_before = False
     if set(authorized) != selected or not authorized:
         raise DevError('WEIXIN_RECOVERY_PART_UNAVAILABLE', '没有选择属于此原回复且可安全恢复的分项', 409)
+    dependency = order.dependency_state(service.store, delivery['id'])
+    if dependency == 'waiting':
+        raise DevError('WEIXIN_RECOVERY_DEPENDENCY_WAITING', '请先处理前置回复，再恢复此段。', 409)
+    if dependency == 'failed':
+        raise DevError('WEIXIN_RECOVERY_DEPENDENCY_FAILED', '前置回复未能发送，无法恢复此段。', 409)
     now = service.c.clock()
     for identifier, saved in authorized.items():
         service.store.execute('''INSERT INTO weixin_part_route_recoveries

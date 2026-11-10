@@ -5,6 +5,7 @@ from dataclasses import replace
 
 import pytest
 
+from hub.collaboration import telemetry
 from hub.collaboration.room_host_migration import HostBindingBackfill
 from hub.collaboration.room_host_rollout import backfill
 from scripts.panel_update_runtime import verify_data_contract
@@ -17,8 +18,10 @@ from tests.test_room_members_rebuild import add, create, rooms as rooms
 
 
 @pytest.mark.asyncio
-async def test_adopts_own_round_trip_without_guessing_shared_gateway_identity(rooms, caplog):
+async def test_adopts_own_round_trip_without_guessing_shared_gateway_identity(rooms, caplog, monkeypatch):
     s, owner, actor, _ = rooms
+    metrics = telemetry.CollaborationTelemetry()
+    monkeypatch.setattr(telemetry, 'collaboration_telemetry', metrics)
     source = await verified(s, actor, add(s, owner, create(s, owner)))
     target = await verified(s, actor, reuse(s, owner, create(s, owner), source))
     s.store.execute("UPDATE room_members SET status='paused' WHERE id=?", (source['member_id'],))
@@ -52,6 +55,12 @@ async def test_adopts_own_round_trip_without_guessing_shared_gateway_identity(ro
     with pytest.raises(DevError) as revoked:
         s.room_connections.guard_join(member_target, actor)
     assert revoked.value.code == 'ROOM_CONNECTION_REVOKED'
+    assert [item for item in metrics.snapshot()['series'] if item['action'] == 'host_shadow'] == [
+        {'action': 'host_shadow', 'stage': 'shadow_would_allow', 'channel': 'host',
+         'reason': 'source_paused', 'count': 1},
+        {'action': 'host_shadow', 'stage': 'shadow_would_block', 'channel': 'host',
+         'reason': 'host_revoked', 'count': 1},
+    ]
     s.store.execute("UPDATE room_members SET connection_identity_version=1,host_connection_id='' WHERE id=?",
                     (target['member_id'],))
     repeat = backfill_service.batch(apply=True, restart=True)

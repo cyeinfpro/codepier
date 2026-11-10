@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import secrets
 import uuid
 from dataclasses import dataclass
@@ -44,6 +45,7 @@ REQUEST_LIMIT = 'WEIXIN_REQUEST_LIMIT'
 MAX_SEND_ATTEMPTS = 6
 MAX_ACTIVE_SENDERS = 4
 MAX_ACTIVE_MEDIA = 2
+LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -217,26 +219,29 @@ class WeixinDelivery:
             (binding['id'], binding['generation'], message['id'], message['version']))
         if old:
             return EnqueueResult('existing', '', binding_id, old)
-        ordering, evidence, predecessor = order.reply_ordering(
-            self.store, message, source, binding, predecessor_id=predecessor_id, dependency_mode=dependency_mode)
-        schema_version = order.ORDERING_VERSION
-        checked_version = schema_version
-        if not self.c.config.weixin_delivery_order_v2:
+        if self.c.config.weixin_delivery_order_v2:
+            ordering, evidence, predecessor = order.reply_ordering(
+                self.store, message, source, binding, predecessor_id=predecessor_id, dependency_mode=dependency_mode)
+            schema_version = checked_version = order.ORDERING_VERSION
+        else:
             ordering = models.delivery_order_key(self.related_goal(message, source), source.get('thread_root_id'), source['id'])
+            predecessor, evidence = order.legacy_reply_dependency(
+                self.store, message, binding, predecessor_id=predecessor_id, dependency_mode=dependency_mode)
             schema_version, checked_version = 1, 0
-        raise_floor(self.store)
+        if schema_version == order.ORDERING_VERSION or evidence or dependency_mode == 'requires_success':
+            raise_floor(self.store)
         now, identifier = self.c.clock(), uuid.uuid4().hex
         pending = self.store.one('''SELECT COUNT(*) AS n FROM weixin_deliveries d JOIN weixin_bindings b ON b.id=d.binding_id
             WHERE b.account_id=? AND d.created>? AND d.state NOT IN ('accepted','owner_confirmed','cancelled')''',
             (account['id'], now - 86400))['n']
         self.store.execute('''INSERT INTO weixin_deliveries
             (id,binding_id,generation,message_id,message_version,message_digest,source_message_id,peer_id,
-             state,created,updated,ordering_key,depends_on_delivery_id,ordering_evidence,
+             state,created,updated,ordering_key,depends_on_delivery_id,dependency_mode,ordering_evidence,
              ordering_schema_version,ordering_checked_version)
-            VALUES (?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?)''',
+            VALUES (?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?,?)''',
             (identifier, binding['id'], binding['generation'], message['id'], message['version'], digest(body),
-             source['id'], binding['peer_id'], now, now, ordering, predecessor, evidence, schema_version,
-             checked_version))
+             source['id'], binding['peer_id'], now, now, ordering, predecessor, dependency_mode, evidence,
+             schema_version, checked_version))
         if pending >= 1000:
             self.add_part(identifier, 0, 'text', {'text': ''})
             self.store.execute("UPDATE weixin_parts SET state='rejected',reason_code='daily_reply_quota' WHERE delivery_id=?", (identifier,))
@@ -325,6 +330,8 @@ class WeixinDelivery:
             (id,delivery_id,ordinal,client_id,kind,body,body_digest,state,created,updated)
             VALUES (?,?,?,?,?,?,?,'queued',?,?)''',
             (identifier, delivery_id, ordinal, 'cpw-' + identifier, kind, self.store.encrypt(canonical(body)), digest(body), now, now))
+        if ordinal == 0:
+            transport.enter_rotation(self.store, delivery_id)
         return identifier
 
     def add_attachment_parts(self, delivery, attachment_ids):
@@ -700,12 +707,8 @@ class WeixinDelivery:
                 state, next_attempt = 'waiting_context', now + 5
             elif error and (isinstance(error, (TimeoutError, ConnectionError, TimeoutException, NetworkError))
                             or isinstance(error, DevError) and error.status in {429, 502, 503, 504}):
-                preparation_failures += 1
-                if preparation_failures < transport.MAX_PREPARATION_FAILURES:
-                    state = 'queued'
-                    next_attempt = now + transport.delay(preparation_failures)
-                else:
-                    state, code = 'attention', 'WEIXIN_PREPARATION_BUDGET_EXHAUSTED'
+                state, next_attempt, code, preparation_failures = transport.preparation_retry(
+                    preparation_failures, now, code)
             else:
                 state = 'attention'
             self.store.execute('''UPDATE weixin_parts SET state=?,reason_code=?,provider_receipt=?,
@@ -796,16 +799,23 @@ class WeixinDelivery:
 
     def reconcile(self):
         with self.store.transaction():
-            rows = self.store.all("SELECT * FROM weixin_parts WHERE state IN ('preparing','sending') AND lease_until<=? ORDER BY lease_until LIMIT 100", (self.c.clock(),))
+            now = self.c.clock()
+            rows = self.store.all("SELECT * FROM weixin_parts WHERE state IN ('preparing','sending') AND lease_until<=? ORDER BY lease_until LIMIT 100", (now,))
             for row in rows:
-                state = 'unknown' if row['state'] == 'sending' else 'queued'
-                reason = RATE_LIMITED if state == 'queued' and row['retry_rejected'] else 'host_restarted_before_receipt'
-                self.store.execute('UPDATE weixin_parts SET state=?,reason_code=?,lease_fence=lease_fence+1,lease_until=0,updated=? WHERE id=?',
-                                   (state, reason, self.c.clock(), row['id']))
+                reason = 'host_restarted_before_receipt'
+                failures = row['preparation_failures']
+                if row['state'] == 'sending':
+                    state, next_attempt = 'unknown', 0
+                else:
+                    state, next_attempt, reason, failures = transport.preparation_retry(
+                        failures, now, RATE_LIMITED if row['retry_rejected'] else reason)
+                self.store.execute('''UPDATE weixin_parts SET state=?,reason_code=?,preparation_failures=?,
+                    next_attempt=?,lease_fence=lease_fence+1,lease_until=0,updated=? WHERE id=?''',
+                    (state, reason, failures, next_attempt, now, row['id']))
                 if state == 'unknown':
                     transport.record_transition(self.store, Stage.UNKNOWN, Reason.EXPIRED)
                 self.refresh(row['delivery_id'])
-            for delivery_id in transport.adopt_late(self.store, self.c.clock()):
+            for delivery_id in transport.adopt_late(self.store, now):
                 self.refresh(delivery_id)
             return [r['id'] for r in rows]
 
@@ -814,7 +824,10 @@ class WeixinDelivery:
             return
         await self.store.run(self.reconcile)
         if self.c.config.weixin_delivery_order_v2:
-            await self.store.run(order.backfill, self.store, self.c.clock())
+            try:
+                await self.store.run(order.backfill, self.store, self.c.clock())
+            except Exception as exc:
+                LOG.warning('Weixin ordering backfill failed (%s)', type(exc).__name__)
         rows = await self.store.run(self.candidates, self.c.clock())
         # At most four concurrent peers, with the same fenced check in claim.
         semaphore = asyncio.Semaphore(MAX_ACTIVE_SENDERS)
@@ -1042,7 +1055,11 @@ class WeixinDelivery:
             row_parts = by_delivery.get(row['id'], [])
             next_part = next((part for part in row_parts if part['state'] not in routes.SUCCESSFUL), None)
             if next_part and routes.unsent_quarantined(next_part) and routes.available_part(self, row['id']) == next_part['id']:
-                next_part['route_recovery_available'] = True
+                dependency = order.dependency_state(self.store, row['id'])
+                if dependency == 'ready':
+                    next_part['route_recovery_available'] = True
+                else:
+                    next_part['route_recovery_blocked'] = 'dependency_' + dependency
             grouped.setdefault(row['message_id'], []).append({**row, 'parts': row_parts,
                 'ordering_reason': ordering_reason, 'provider_delivery_verified': False, 'read_verified': False})
         return grouped

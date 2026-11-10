@@ -10,6 +10,7 @@ import uuid
 from collections import Counter
 from dataclasses import dataclass
 
+from hub.collaboration import telemetry
 from hub.collaboration.common import ROOM_INBOX_EVENT, digest
 
 LOG = logging.getLogger('codepier.collaboration.host_connections')
@@ -47,6 +48,10 @@ def record_shadow(legacy_error, host_error):
                                                'ROOM_CONNECTION_IDENTITY_REQUIRED'} else
         'source_invalid'
     )
+    stage = (telemetry.Stage.SHADOW_WOULD_BLOCK if host_error is not None
+             else telemetry.Stage.SHADOW_WOULD_ALLOW)
+    telemetry.collaboration_telemetry.record(telemetry.Action.HOST_SHADOW, stage,
+                                              channel=telemetry.Channel.HOST, reason=telemetry.Reason(reason))
     LOG.info('room_host_shadow reason=%s', reason)
 
 

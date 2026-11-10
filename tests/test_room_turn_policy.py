@@ -5,12 +5,15 @@ from unittest.mock import patch
 
 import pytest
 
+from hub import mcp_request_audit
+from hub.collaboration import telemetry
 from hub.collaboration.room_turn_policy import record_shadow
 from hub.unified_help import action_help
 from shared.public_collaboration import action_help as collaboration_help
 from shared.unified_contracts import ACTIONS, resolve_help
 from shared.util import DevError
 from tests.collaboration_support import collab as collab, key
+from tests.test_audit_api import api as api
 from tests.test_room_consumer_sessions import begin, connect, credentials, verify
 from tests.test_room_members_rebuild import create, identity, rooms as rooms
 
@@ -60,19 +63,43 @@ def test_room_help_declares_exact_turn_capabilities():
     arguments = help_view['inputSchema']['properties']['args']['properties']
     assert {'publish_work', 'yield_after'} <= arguments.keys()
     inbox = collaboration_help('collaboration_query', 'room_inbox')
-    assert inbox['turn_capabilities'] == {'expired_route_session_read': True}
+    assert 'turn_capabilities' not in inbox
+    assert inbox['turn_capability_requirements'] == {'expired_route_session_read': 'decoupled'}
     assert {'consumer_session_id', 'consumer_fence', 'consumer_proof'} <= inbox['inputSchema']['properties'].keys()
 
 
-def test_shadow_telemetry_uses_only_fixed_dimensions_and_cannot_break_decisions(caplog):
+def test_shadow_telemetry_uses_only_fixed_dimensions_and_cannot_break_decisions(api, caplog, monkeypatch):
+    _, client, _ = api
+
+    def broken_sink(event):
+        raise OSError('shadow sink unavailable')
+
+    metrics = telemetry.CollaborationTelemetry(broken_sink)
+    monkeypatch.setattr(telemetry, 'collaboration_telemetry', metrics)
     with caplog.at_level(logging.INFO, logger='hub.collaboration.room_turn_policy'):
         record_shadow('reply', 'would_allow', 'scope_changed')
         record_shadow('reply', 'would_allow', 'sensitive arbitrary content')
-    [entry] = caplog.records
+    entry, = [entry for entry in caplog.records if entry.name == 'hub.collaboration.room_turn_policy']
     assert (entry.action_class, entry.decision_class, entry.reason_code, entry.policy_revision) == (
         'reply', 'would_allow', 'scope_changed', 1)
-    with patch('hub.collaboration.room_turn_policy._LOG.info', side_effect=RuntimeError):
-        record_shadow('reply', 'would_allow', 'scope_changed')
+    assert 'action=reply decision=would_allow reason=scope_changed revision=1' in entry.getMessage()
+    trace = mcp_request_audit._CURRENT.set(mcp_request_audit.Trace(True, 'POST'))
+    try:
+        with patch('hub.collaboration.room_turn_policy._LOG.info', side_effect=RuntimeError):
+            record_shadow('work_continue', 'would_block', 'inbox_revision')
+    finally:
+        mcp_request_audit._CURRENT.reset(trace)
+
+    response = client.get('/api/system/collaboration-telemetry')
+    assert response.status_code == 200, response.text
+    snapshot = response.json()
+    assert [item for item in snapshot['series'] if item['stage'].startswith('shadow_')] == [
+        {'action': 'reply', 'stage': 'shadow_would_allow', 'channel': 'room', 'reason': 'scope_changed', 'count': 1},
+        {'action': 'work_continue', 'stage': 'shadow_would_block', 'channel': 'room',
+         'reason': 'inbox_revision', 'count': 1},
+    ]
+    assert snapshot['omitted_events'] == snapshot['sink_errors'] == 2
+    assert 'sensitive arbitrary content' not in response.text
 
 
 @pytest.mark.asyncio

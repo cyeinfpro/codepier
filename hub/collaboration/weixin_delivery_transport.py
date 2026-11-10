@@ -69,6 +69,17 @@ def migrate(db):
               AND state IN ('queued','waiting_context','waiting_media','preparing','attention')""")
 
 
+def enter_rotation(store, delivery_id):
+    # Assign first-time contacts a position when their first part is queued.
+    # Existing contacts keep their place until they actually obtain a lease.
+    store.execute("""INSERT INTO weixin_peer_admission(account_id,peer_id,last_admitted_sequence)
+        SELECT b.account_id,d.peer_id,
+            (SELECT COALESCE(MAX(last_admitted_sequence),0)+1 FROM weixin_peer_admission)
+        FROM weixin_deliveries d JOIN weixin_bindings b ON b.id=d.binding_id
+        WHERE d.id=?
+        ON CONFLICT(account_id,peer_id) DO NOTHING""", (delivery_id,))
+
+
 def admit(store, account_id, peer_id):
     store.execute("""INSERT INTO weixin_peer_admission(account_id,peer_id,last_admitted_sequence)
         SELECT ?,?,COALESCE(MAX(last_admitted_sequence),0)+1 FROM weixin_peer_admission WHERE 1
@@ -85,6 +96,13 @@ def cooldown(store, account_id, retry_at):
 def delay(attempts, *, provider_delay=0):
     # Jitter bounded to five seconds preserves an exact longer Retry-After.
     return max(provider_delay, min(900, 15 * 2 ** attempts + secrets.randbelow(6)))
+
+
+def preparation_retry(failures, now, reason):
+    failures += 1
+    if failures >= MAX_PREPARATION_FAILURES:
+        return 'attention', 0, 'WEIXIN_PREPARATION_BUDGET_EXHAUSTED', failures
+    return 'queued', now + delay(failures), reason, failures
 
 
 def dispatch_identity(claim, part, wire):

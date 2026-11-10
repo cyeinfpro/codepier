@@ -39,6 +39,8 @@ window.CodePierCollaboration = (() => {
   const connectionState = (item) =>
     hostStates[item.display_state || item.state] || '路线待核对';
   const connectionName = (item) => item.label || item.name || 'dot 连接';
+  const connectionRoomSummary = (item) => item.single_room_title ||
+    (Number.isInteger(item.room_count) ? `${item.room_count} 个房间` : '');
   const reuseAnchor = (item) =>
     item.host_connection_id ? item.reuse_member_id : item.member_id || item.id;
   const supportsHostReuse = (item, capabilities) =>
@@ -50,7 +52,7 @@ window.CodePierCollaboration = (() => {
     return [
       connectionName(item),
       connectionState(item),
-      Number.isInteger(item.room_count) ? `${item.room_count} 个房间` : '',
+      connectionRoomSummary(item),
       last ? `最近往返 ${dateTime(last)}` : '',
     ].filter(Boolean).join(' · ');
   };
@@ -791,7 +793,8 @@ window.CodePierCollaboration = (() => {
         daily_reply_quota: '已达到今日回传额度',
         context_missing: '等待原微信私聊的会话上下文',
         WEIXIN_RECOVERY_SCOPE_CHANGED: '原内容、收件人或发送权限发生变化',
-        dependency_failed: '同一回复的前一段发送失败',
+        dependency_waiting: '等待前置回复发送完成',
+        dependency_failed: '前置回复未能发送',
         source_unavailable: '原消息或微信连接已失效',
         provider_response_unknown: '微信未返回可核对的发送结果',
         authorization_revoked: '工作许可已撤销',
@@ -933,7 +936,7 @@ window.CodePierCollaboration = (() => {
             ? `<details><summary>查看原回复和分项</summary>
         ${delivery.display?.reason ? `<p>${E(delivery.display.reason)}</p>` : ''}
         ${delivery.ordering_reason || delivery.reason_code ? `<p>${E(deliveryReason(delivery.ordering_reason || delivery.reason_code))}</p>` : ''}
-        ${parts.length ? `<ul class="cr-delivery-parts">${parts.map((part) => `<li data-delivery-part="${E(part.id || part.ordinal)}" data-state="${E(part.state)}">第 ${E(Number(part.ordinal) + 1)} 段 · ${E({ text: '文字', image: '图片', file: '文件', voice: '语音', video: '视频' }[part.kind] || '消息')} · ${E(deliveryLabels[part.state] || '状态待核对')}${part.reason_code && part.state !== 'owner_confirmed' ? `<p>${E(deliveryReason(part.reason_code))}</p>` : ''}${controllable && part.id && part.state === 'unknown' ? btn('preview-delivery-control', '核对这一段', `${attr} data-control="confirm_received" data-part="${E(part.id)}"`, 'cr-text-button') : ''}${controllable && part.id && part.route_recovery_available === true ? btn('retry-delivery', '恢复发送此段', `${attr} data-version="${E(delivery.version)}" data-ordering="${E(delivery.ordering_revision)}" data-part="${E(part.id)}"`, 'cr-text-button') : ''}</li>`).join('')}</ul>` : ''}
+        ${parts.length ? `<ul class="cr-delivery-parts">${parts.map((part) => `<li data-delivery-part="${E(part.id || part.ordinal)}" data-state="${E(part.state)}">第 ${E(Number(part.ordinal) + 1)} 段 · ${E({ text: '文字', image: '图片', file: '文件', voice: '语音', video: '视频' }[part.kind] || '消息')} · ${E(deliveryLabels[part.state] || '状态待核对')}${part.reason_code && part.state !== 'owner_confirmed' ? `<p>${E(deliveryReason(part.reason_code))}</p>` : ''}${controllable && part.id && part.state === 'unknown' ? btn('preview-delivery-control', '核对这一段', `${attr} data-control="confirm_received" data-part="${E(part.id)}"`, 'cr-text-button') : ''}${controllable && part.route_recovery_blocked ? `<p>${E(deliveryReason(part.route_recovery_blocked))}</p>` : ''}${controllable && part.id && part.route_recovery_available === true ? btn('retry-delivery', '恢复发送此段', `${attr} data-version="${E(delivery.version)}" data-ordering="${E(delivery.ordering_revision)}" data-part="${E(part.id)}"`, 'cr-text-button') : ''}</li>`).join('')}</ul>` : ''}
         ${retry ? btn('retry-delivery', '重试可发送分项', `${attr} data-version="${E(delivery.version)}"`, 'cr-text-button') : ''}
         ${stop ? btn('preview-delivery-control', '停止尚未发送的后续内容', `${attr} data-control="cancel_unsent"`, 'cr-text-button') : ''}
         <div data-cr-delivery-control-preview aria-live="polite">${deliveryControlPreviewMarkup(deliveryControlPreviews.get(deliveryControlKey(delivery.id)))}</div>
@@ -2255,7 +2258,8 @@ window.CodePierCollaboration = (() => {
     openPanel(
       'host-list',
       'dot 连接',
-      '<div data-cr-host-list aria-live="polite"></div>' +
+      '<p class="cr-info">旧房间可能各自登记了同名连接。每条连接独立管理，撤销前可核对受影响的房间。</p>' +
+        '<div data-cr-host-list aria-live="polite"></div>' +
         btn('more-hosts', '更多连接', 'data-cr-more-hosts hidden', 'cr-text-button'),
       { hostCursor: '', hosts: [] },
     );
@@ -2280,7 +2284,9 @@ window.CodePierCollaboration = (() => {
       box.innerHTML = current.hosts.length
         ? current.hosts.map((item) => {
             const last = item.last_round_trip_at || item.verified_at;
-            return `<article class="cr-member"><div><h3>${E(connectionName(item))}</h3><p>${E(connectionState(item))} · ${E(item.room_count ?? 0)} 个房间</p>${last ? `<small>最近往返 ${E(dateTime(last))}</small>` : ''}</div>${btn('host-detail', '详情', `data-id="${E(item.host_connection_id)}" aria-label="查看 ${E(connectionName(item))} 的连接详情"`)}</article>`;
+            const summary = connectionRoomSummary(item);
+            const label = [connectionName(item), summary].filter(Boolean).join(' · ');
+            return `<article class="cr-member"><div><h3>${E(connectionName(item))}</h3><p>${E([connectionState(item), summary].filter(Boolean).join(' · '))}</p>${last ? `<small>最近往返 ${E(dateTime(last))}</small>` : ''}</div>${btn('host-detail', '详情', `data-id="${E(item.host_connection_id)}" aria-label="查看 ${E(label)} 的连接详情"`)}</article>`;
           }).join('')
         : '<p class="cr-muted">当前没有已登记的独立连接。仍可在房间管理成员。</p>';
       more.hidden = !current.hostCursor;
@@ -2326,7 +2332,7 @@ window.CodePierCollaboration = (() => {
       const box = root.querySelector('[data-cr-host-summary]');
       const markup = `<section class="cr-connect-summary"><h3>${E(connectionName(host))}</h3>${facts([
         ['连接状态', connectionState(host)],
-        ['使用中的房间', supplied(host.room_count)],
+        ['使用中的房间', host.single_room_title || supplied(host.room_count)],
         ['最近一次往返', last ? dateTime(last) : '等待真实往返'],
       ])}${['wait_for_host_refresh', 'awaiting_host_refresh'].includes(host.next_action) ? '<p>请在原 dot 中继续连接。</p>' : ''}</section>`;
       if (box._markup !== markup) {
@@ -2362,7 +2368,7 @@ window.CodePierCollaboration = (() => {
         ['房间', supplied(impact.room_count)],
         ['排队工作', supplied(impact.queued_work_count)],
         ['已派发操作', supplied(impact.dispatched_operation_count)],
-      ])}<p class="cr-muted">已派发的操作可能仍在结束，原结果会继续核对。</p>${canBatch ? '<p class="cr-muted">勾选成员可单独发起批量更换。</p>' : ''}<ul class="cr-host-members" data-cr-impact-members></ul>${btn('more-host-impact', '更多受影响房间', 'data-cr-more-impact hidden', 'cr-text-button')}${canBatch ? `<div data-cr-batch-target hidden>${field('更换为', '<select name="batch_host_connection"><option value="">分别验证新连接</option></select>')}<p class="cr-muted" data-cr-batch-target-status aria-live="polite"></p>${btn('load-batch-targets', '查看已有 dot', 'data-cr-more-targets', 'cr-text-button')}</div>${btn('start-host-batch', '为所选成员更换连接', 'data-cr-start-batch disabled', 'cr-text-button')}` : ''}${btn('revoke-host', '撤销此 dot 的全部连接', 'data-cr-revoke-host', 'cr-danger cr-full')}</section>`;
+      ])}<p class="cr-muted">撤销这条连接会影响此处列出的房间。同名的其他连接继续使用。已派发的操作可能仍在结束，原结果会继续核对。</p>${canBatch ? '<p class="cr-muted">勾选成员可单独发起批量更换。</p>' : ''}<ul class="cr-host-members" data-cr-impact-members></ul>${btn('more-host-impact', '更多受影响房间', 'data-cr-more-impact hidden', 'cr-text-button')}${canBatch ? `<div data-cr-batch-target hidden>${field('更换为', '<select name="batch_host_connection"><option value="">分别验证新连接</option></select>')}<p class="cr-muted" data-cr-batch-target-status aria-live="polite"></p>${btn('load-batch-targets', '查看已有 dot', 'data-cr-more-targets', 'cr-text-button')}</div>${btn('start-host-batch', '为所选成员更换连接', 'data-cr-start-batch disabled', 'cr-text-button')}` : ''}${btn('revoke-host', '撤销这条连接', 'data-cr-revoke-host', 'cr-danger cr-full')}</section>`;
     }
     const membersBox = box.querySelector('[data-cr-impact-members]');
     const displayed = new Set([...membersBox.children].map((row) => row.dataset.binding));
@@ -2446,7 +2452,7 @@ window.CodePierCollaboration = (() => {
       if (result) {
         await hostDetailPanel(current.hostId);
         await store.refresh();
-        announce('此 dot 的连接已撤销。已派发操作会继续核对原结果。');
+        announce('这条连接已撤销。已派发操作会继续核对原结果。');
       }
     } catch (error) {
       if (panel === current && error.code === 'ROOM_CONNECTION_IMPACT_CHANGED') {
@@ -2707,7 +2713,7 @@ window.CodePierCollaboration = (() => {
     if (ready || flow.awaiting_host_control) panel.joinInstructions = '';
     const renewal = flow.subscription_renewal || member?.subscription_renewal;
     const renewalMarkup = connectionRenewalMarkup(renewal, member, flow.pending_binding);
-    const markup = `<div class="cr-flow-state" data-stage="${E(stage)}"><span class="cr-flow-symbol ${ready ? 'is-ready' : ''}" aria-hidden="true">${ready ? '✓' : icon('network')}</span><h3>${E(flow.display?.title || title(flow))}</h3>${flow.display?.reason ? `<p>${E(flow.display.reason)}</p>` : ''}</div>${renewalMarkup}${flow.pending_binding ? '<p class="cr-info">新连接验证通过后才会替换当前连接。原成员和工作保持原来的身份。</p>' : !ready && (member?.host_connection_id || member?.connection_source || member?.connection_source_member_id) ? '<p class="cr-info">请在所选 dot 中完成本房间的接入验证。此房间的参与范围单独生效。</p>' : ''}${panel.joinInstructions ? `<label class="cr-field"><span>加入说明</span><textarea class="cr-instructions" readonly rows="7" aria-label="dot 加入说明"></textarea></label>${btn('copy-instructions', '复制加入说明', '', 'cr-primary cr-full')}` : ''}${primary && !['copy_instructions', 'copy_join_instructions', 'send_message', 'start_work', 'none'].includes(primary) ? btn('flow-action', actionLabel(primary), `data-flow-action="${E(primary)}"`, 'cr-primary cr-full') : ''}${member ? `<section class="cr-member-controls">${btn('permissions', '权限设置')}${member.host_connection_id ? btn('host-detail', '管理此 dot 的连接', `data-id="${E(member.host_connection_id)}"`) : ''}${member.legacy ? btn('flow-action', '迁移此连接', 'data-flow-action="migrate"') : member.state !== 'removed' && primary !== 'rebind' ? btn('rebind-member', flow.pending_binding ? '查看更换说明' : '更换连接') : ''}${state.room?.lead_member_id !== memberId(member) && member.state !== 'removed' ? btn('lead', '设为主责', `data-id="${E(memberId(member))}"`) : ''}${member.state !== 'removed' && member.state !== 'paused' ? btn('flow-action', '暂停此成员', 'data-flow-action="pause"') : ''}${member.state !== 'removed' ? btn('remove-member', '移除成员', '', 'cr-danger') : ''}</section>` : ''}<details class="cr-diagnostics"><summary>连接详情</summary><dl>${Object.entries(
+    const markup = `<div class="cr-flow-state" data-stage="${E(stage)}"><span class="cr-flow-symbol ${ready ? 'is-ready' : ''}" aria-hidden="true">${ready ? '✓' : icon('network')}</span><h3>${E(flow.display?.title || title(flow))}</h3>${flow.display?.reason ? `<p>${E(flow.display.reason)}</p>` : ''}</div>${renewalMarkup}${flow.pending_binding ? '<p class="cr-info">新连接验证通过后才会替换当前连接。原成员和工作保持原来的身份。</p>' : !ready && (member?.host_connection_id || member?.connection_source || member?.connection_source_member_id) ? '<p class="cr-info">请在所选 dot 中完成本房间的接入验证。此房间的参与范围单独生效。</p>' : ''}${panel.joinInstructions ? `<label class="cr-field"><span>加入说明</span><textarea class="cr-instructions" readonly rows="7" aria-label="dot 加入说明"></textarea></label>${btn('copy-instructions', '复制加入说明', '', 'cr-primary cr-full')}` : ''}${primary && !['copy_instructions', 'copy_join_instructions', 'send_message', 'start_work', 'none'].includes(primary) ? btn('flow-action', actionLabel(primary), `data-flow-action="${E(primary)}"`, 'cr-primary cr-full') : ''}${member ? `<section class="cr-member-controls">${btn('permissions', '权限设置')}${member.host_connection_id ? btn('host-detail', '管理这条连接', `data-id="${E(member.host_connection_id)}"`) : ''}${member.legacy ? btn('flow-action', '迁移此连接', 'data-flow-action="migrate"') : member.state !== 'removed' && primary !== 'rebind' ? btn('rebind-member', flow.pending_binding ? '查看更换说明' : '更换连接') : ''}${state.room?.lead_member_id !== memberId(member) && member.state !== 'removed' ? btn('lead', '设为主责', `data-id="${E(memberId(member))}"`) : ''}${member.state !== 'removed' && member.state !== 'paused' ? btn('flow-action', '暂停此成员', 'data-flow-action="pause"') : ''}${member.state !== 'removed' ? btn('remove-member', '移除成员', '', 'cr-danger') : ''}</section>` : ''}<details class="cr-diagnostics"><summary>连接详情</summary><dl>${Object.entries(
       flow.evidence || {},
     )
       .map(

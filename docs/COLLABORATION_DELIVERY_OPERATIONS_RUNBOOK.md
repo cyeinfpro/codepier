@@ -10,6 +10,37 @@
 4. 只有能实时执行新安全契约的 writer，才在第一个需要该契约的效果事务内抬高持久兼容下限。普通启动和关闭新功能开关不抬高或清除该下限。当前核心 schema 的哨兵也会拒绝不认识该版本的旧程序。
 5. 上线前核验恢复原回执、结果未知、旧分项有界等待、权限变化和手机上的分项状态。分阶段扩大使用范围，依据通过矩阵、有效样本和实际订阅生命周期证据决定放量。
 
+## 回合策略放量
+
+`CODEPIER_ROOM_CHAT_SCOPE_MODE` 的实例默认值为 `strict`。实例管理员先对隔离房间读取 `GET /api/collaboration/rooms/{id}/turn-policy`，再向同一路径 `PUT` 提交 `mode: shadow`、当前 `expected_version`、`reason` 和 `idempotency_key`。覆盖仅作用于新领取回合。使用协作遥测观察回合判定差异，并结合原回执核对受影响的对象。
+
+独立宿主通过 `CODEPIER_ROOM_HOST_CONNECTIONS_MODE=shadow` 单独比对旧来源链和当前连接身份。结合两个 shadow 计数核对跨所有者、空间、grant 的差异，发现未分类的权限差异时暂停放量。
+
+定向矩阵、真实订阅生命周期及真实宿主和微信场景都有证据后，再把已核验房间切换为 `decoupled`。逐批核对同一对话内的工作追问、独立回复、原工作回传和订阅到期收尾。需要收缩时，对房间恢复 `strict`，已领取回合沿用原策略和硬期限。
+
+## 核对历史宿主连接
+
+历史来源链保留为迁移证据。只有独立往返的旧房间可能各自登记一条同名连接，显式复用验证成功后，多个房间才会出现在同一连接的影响清单。撤销前在面板展开所选连接的影响范围并核对房间。要停掉其他同名连接，逐条核对各自的范围后操作。
+
+## 核对历史微信投递影响
+
+在获准使用的 Hub 数据库快照上，以 SQLite 只读模式执行以下查询。结果只包含计数。
+
+```sql
+SELECT COUNT(*) AS unsettled_grouped_v1,
+       COALESCE(SUM(d.ordering_checked_version < 2), 0) AS unchecked_upper_bound,
+       COALESCE(SUM(CASE WHEN json_valid(d.ordering_evidence)
+                    THEN json_extract(d.ordering_evidence, '$.unresolved') = 1
+                    ELSE 0 END), 0) AS previously_marked_unresolved
+FROM weixin_deliveries d
+WHERE d.kind = 'reply' AND d.ordering_schema_version = 1 AND d.ordering_key <> ''
+  AND (d.state = 'waiting_media' OR EXISTS (
+       SELECT 1 FROM weixin_parts p WHERE p.delivery_id = d.id
+       AND p.state NOT IN ('accepted', 'owner_confirmed', 'cancelled', 'rejected')));
+```
+
+未核对数是待分类上界。历史上已标记为未解析的旧分组回复沿用原分组约束，空组键继续按保守范围等待。将各列计数与快照时间、Hub 版本一起记录。
+
 ## 证据记录
 
 | 范围 | 记录 |

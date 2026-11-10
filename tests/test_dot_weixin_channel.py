@@ -185,6 +185,8 @@ def test_crash_before_send_requeues_but_after_send_intent_never_retries(collab):
     old = w.delivery.claim(part['id'])
     c.clock[0] += 181
     w.delivery.reconcile()
+    retry = c.s.store.one('SELECT next_attempt FROM weixin_parts WHERE id=?', (part['id'],))
+    c.clock[0] = retry['next_attempt']
     fresh = w.delivery.claim(part['id'])
     assert fresh['lease_fence'] > old['lease_fence']
     with pytest.raises(DevError):

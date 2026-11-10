@@ -20,6 +20,22 @@ class Action(str, Enum):
     LEGACY_CONSUMER = 'legacy_consumer'
     WAKE = 'wake'
     WEIXIN_SEND = 'weixin_send'
+    HOST_SHADOW = 'host_shadow'
+    NOTICE_ACK = 'notice_ack'
+    WORK_CONTINUE = 'work_continue'
+    CONTEXT_UPDATE = 'context_update'
+    HANDOFF = 'handoff'
+    CREATE = 'create'
+    ASSIGN = 'assign'
+    CLAIM = 'claim'
+    HEARTBEAT = 'heartbeat'
+    PROGRESS = 'progress'
+    EXECUTE = 'execute'
+    RESULT = 'result'
+    ARCHIVE_RESULT = 'archive_result'
+    PUBLISH = 'publish'
+    SCOPE_UPDATE = 'scope_update'
+    OTHER = 'other'
 
 
 class Channel(str, Enum):
@@ -41,6 +57,8 @@ class Stage(str, Enum):
     CANCELLED = 'cancelled'
     RETRY = 'retry'
     OWNER_CONFIRMED = 'owner_confirmed'
+    SHADOW_WOULD_ALLOW = 'shadow_would_allow'
+    SHADOW_WOULD_BLOCK = 'shadow_would_block'
 
 
 class Reason(str, Enum):
@@ -51,6 +69,18 @@ class Reason(str, Enum):
     POLICY = 'policy'
     EXPIRED = 'expired'
     OTHER = 'other'
+    INBOX_REVISION = 'inbox_revision'
+    SCOPE_CHANGED = 'scope_changed'
+    ROUTE_EXPIRED = 'route_expired'
+    SOURCE_CHANGED = 'source_changed'
+    HOST_REVOKED = 'host_revoked'
+    IDENTITY_MISMATCH = 'identity_mismatch'
+    SOURCE_GENERATION_CHANGED = 'source_generation_changed'
+    SOURCE_ARCHIVED = 'source_archived'
+    SOURCE_PAUSED = 'source_paused'
+    SOURCE_REMOVED = 'source_removed'
+    SOURCE_UNAVAILABLE = 'source_unavailable'
+    SOURCE_INVALID = 'source_invalid'
 
 
 TOOL_ACTIONS = {

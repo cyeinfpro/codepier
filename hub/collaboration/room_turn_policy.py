@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import os
 
+from hub.collaboration import telemetry
 from hub.collaboration.common import validate
 from shared.room_contracts import RoomTurnPolicyUpdate
 from shared.util import DevError
@@ -95,8 +96,14 @@ def record_shadow(action, decision, reason):
             or reason not in _REASONS):
         return
     try:
-        _LOG.info('room_turn_shadow', extra={'action_class': action, 'decision_class': decision,
-                                            'reason_code': reason, 'policy_revision': POLICY_REVISION})
+        stage = (telemetry.Stage.SHADOW_WOULD_ALLOW if decision == 'would_allow'
+                 else telemetry.Stage.SHADOW_WOULD_BLOCK)
+        telemetry.collaboration_telemetry.record(telemetry.Action(action), stage,
+                                                  channel=telemetry.Channel.ROOM, reason=telemetry.Reason(reason))
+        _LOG.info('room_turn_shadow action=%s decision=%s reason=%s revision=%s',
+                  action, decision, reason, POLICY_REVISION,
+                  extra={'action_class': action, 'decision_class': decision,
+                         'reason_code': reason, 'policy_revision': POLICY_REVISION})
     except Exception:
         # A logging handler failure cannot change the authoritative decision.
         pass

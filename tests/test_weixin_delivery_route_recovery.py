@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from hub.collaboration import weixin_delivery_order as order
 from hub.collaboration.weixin_delivery import text_items
 from shared.util import DevError
 from tests.collaboration_support import collab as collab, key
@@ -16,12 +17,16 @@ def parts_for(s, delivery):
     return s.store.all('SELECT * FROM weixin_parts WHERE delivery_id=? ORDER BY ordinal', (delivery['id'],))
 
 
-def reply(s, worker, clock, identity, credentials, flow):
+def reply(s, worker, clock, identity, credentials, flow, *, identifier=2, body_text='原结果' * 710,
+          predecessor_id=None):
     source = s.weixin.commit_updates(s.weixin.claim_poll(flow['account_id']),
-        packet(2, '原输入', create_time_ms=int(clock[0] * 1000), context_token='old-context'))['message_ids'][0]
+        packet(identifier, '原输入', create_time_ms=int(clock[0] * 1000), context_token='old-context'))['message_ids'][0]
     entry = next(item for item in s.room_consumers.inbox(identity, worker)['items'] if item['object_id'] == source)
-    result = s.room_runtime.reply({**identity, **credentials, **entry['reply_arguments'],
-        'body_text': '原结果' * 710, 'idempotency_key': key()}, worker)
+    args = {**identity, **credentials, **entry['reply_arguments'],
+            'body_text': body_text, 'idempotency_key': key()}
+    if predecessor_id:
+        args.update(depends_on_delivery_id=predecessor_id, dependency_mode='requires_success')
+    result = s.room_runtime.reply(args, worker)
     return s.store.one('SELECT * FROM weixin_deliveries WHERE message_id=?', (result['message']['id'],))
 
 
@@ -95,6 +100,43 @@ async def test_same_peer_can_resume_only_selected_unsent_original_part(collab):
     assert saved['channel_generation'] == flow['binding']['generation']
     assert 'renewed-context' not in saved['evidence'] and 'old-context' not in saved['evidence']
     assert third['client_id'] == parts_for(s, delivery)[2]['client_id']
+
+
+@pytest.mark.asyncio
+async def test_route_recovery_waits_for_quarantined_success_dependency(collab):
+    (s, owner, worker, clock, identity, credentials), flow, provider, action = await setup_channel(collab)
+    prior = reply(s, worker, clock, identity, credentials, flow, body_text='前置回复')
+    clock[0] += 3
+    successor = reply(s, worker, clock, identity, credentials, flow, identifier=3,
+                      body_text='后续回复', predecessor_id=prior['id'])
+    prior_part, = parts_for(s, prior)
+    successor_part, = parts_for(s, successor)
+    sender = s.weixin.delivery
+    conversation = identity['conversation_id']
+
+    await renew(s, owner, clock, flow, provider, action)
+
+    def projected_part():
+        return sender.for_messages([successor['message_id']])[successor['message_id']][0]['parts'][0]
+
+    assert order.dependency_state(s.store, successor['id']) == 'waiting'
+    assert projected_part()['route_recovery_blocked'] == 'dependency_waiting'
+    assert not projected_part().get('route_recovery_available')
+    with pytest.raises(DevError) as waiting:
+        sender.retry_room(conversation, successor['id'], approval(s, successor, successor_part['id']), owner)
+    assert waiting.value.code == 'WEIXIN_RECOVERY_DEPENDENCY_WAITING'
+    assert parts_for(s, successor)[0]['state'] == 'cancelled'
+
+    sender.retry_room(conversation, prior['id'], approval(s, prior, prior_part['id']), owner)
+    assert order.dependency_state(s.store, successor['id']) == 'waiting'
+    send_observation(s, prior_part, accepted=True)
+    assert order.dependency_state(s.store, successor['id']) == 'ready'
+    assert projected_part()['route_recovery_available']
+
+    sender.retry_room(conversation, successor['id'], approval(s, successor, successor_part['id']), owner)
+    send_observation(s, successor_part, accepted=True)
+    accepted, = parts_for(s, successor)
+    assert (accepted['state'], accepted['client_id']) == ('accepted', successor_part['client_id'])
 
 
 @pytest.mark.asyncio

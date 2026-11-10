@@ -24,8 +24,8 @@ def test_host_batch_and_revoke_confirm_current_impact(collaboration_stack, chat_
         'connection_capabilities': {'host_reference': True, 'host_revoke': True, 'batch_rebind': True},
     }
     target = {
-        **host, 'host_connection_id': 'target-host', 'label': '备用 dot',
-        'display_state': 'connected',
+        **host, 'host_connection_id': 'target-host', 'room_count': 1,
+        'display_state': 'connected', 'single_room_title': '工作室丙',
         'connection_capabilities': {'host_reference': True, 'verified_reuse': True},
     }
     impact = {
@@ -80,11 +80,15 @@ def test_host_batch_and_revoke_confirm_current_impact(collaboration_stack, chat_
         page.route(re.compile(r'/api/collaboration/connections(?:[/?]|$)'), connection_projection)
         page.locator('.cr-room-actions [data-cr-action="members"]').click()
         page.locator('[data-cr-action="host-list"]').click()
+        expect(page.get_by_text('旧房间可能各自登记了同名连接。', exact=False)).to_be_visible()
+        expect(page.get_by_role('button', name='查看 测试 dot · 工作室丙 的连接详情')).to_be_visible()
         page.locator('[data-cr-action="host-detail"][data-id="synthetic-host"]').click()
         expect(page.locator('[data-cr-host-summary]')).to_contain_text('等待宿主续订')
         page.locator('[data-cr-action="host-impact"]').click()
         expect(page.locator('[data-cr-host-impact]')).to_contain_text('工作室甲')
         expect(page.locator('[data-cr-host-impact]')).to_contain_text('工作室乙')
+        expect(page.get_by_role('button', name='撤销这条连接')).to_be_visible()
+        expect(page.locator('[data-cr-host-impact]')).to_contain_text('同名的其他连接继续使用')
         assert revoke_bodies == []
         page.get_by_label('工作室甲').check()
         page.get_by_label('工作室乙').check()

@@ -286,30 +286,43 @@ async def test_same_route_signing_rotation_preserves_probe_and_active_turn(rooms
 
 
 @pytest.mark.asyncio
-async def test_real_subscription_refresh_wins_against_stale_health_challenge(rooms):
+@pytest.mark.parametrize('maintenance_accepted', [False, True])
+async def test_real_subscription_refresh_wins_against_stale_health_challenge(rooms, maintenance_accepted):
+    service, _, _, _ = rooms
+    service.config = replace(service.config, host_connections_mode='on')
     c = await start(rooms, managed=True, ttl=86_400_000)
     initial = subscription(c)
+    member = c.s.rooms.member(c.joined['member_id'])
+    assert member['host_connection_id']
     c.clock[0] = initial['expires_at'] - 1799
     checking, release = asyncio.Event(), asyncio.Event()
 
     async def delayed(url, body, headers):
         checking.set()
         await release.wait()
-        return await c.callback(url, body, headers)
+        return await c.callback(url, body, headers) if maintenance_accepted else Reply(503)
 
-    old_events = EventService(c.s, delayed)
-    maintenance = asyncio.create_task(c.s.rooms.renewals.tick(old_events))
-    await asyncio.wait_for(checking.wait(), 5)
+    maintenance = asyncio.create_task(c.s.rooms.renewals.tick(EventService(c.s, delayed)))
     try:
-        renewed = await c.s.events.subscribe(c.raw, c.actor)
+        await asyncio.wait_for(checking.wait(), 5)
+        new_signing_key = 'whsec_' + base64.b64encode(b'n' * 32).decode()
+        renewed = await c.s.events.subscribe({**c.raw, 'delivery': {
+            **c.raw['delivery'], 'secret': new_signing_key}}, c.actor)
         after = subscription(c)
         assert renewed['id'] == initial['id'] and after['expires_at'] > initial['expires_at']
+        assert after['key_digest'] == digest(new_signing_key)
+        renewed_member = c.s.rooms.member(member['id'])
+        renewal_after = c.s.rooms.renewals.record(renewed_member)
+        assert renewal_after['credential_digest'] == after['key_digest']
+        assert renewal_after['reason_code'] == ''
+        assert renewed_member['binding_generation'] == member['binding_generation']
+        assert renewed_member['route_generation'] == member['route_generation'] + 1
     finally:
         release.set()
         await maintenance
     assert subscription(c) == after
-    renewal = c.s.rooms.renewals.record(c.s.rooms.member(c.joined['member_id']))
-    assert renewal['reason_code'] == ''
+    assert c.s.rooms.member(member['id']) == renewed_member
+    assert c.s.rooms.renewals.record(renewed_member) == renewal_after
 
 
 @pytest.mark.asyncio

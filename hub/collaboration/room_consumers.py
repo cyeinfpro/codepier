@@ -10,6 +10,7 @@ from hub.collaboration.room_turn_policy import (
     MAX_TURN_AGE_SECONDS, POLICY_REVISION, ROUTE_GRACE_SECONDS, mode, record_shadow,
 )
 from shared import room_consumer_contracts as contracts
+from shared.room_contracts import turn_capabilities
 from shared.util import DevError
 
 
@@ -21,7 +22,7 @@ ROOM_HANDLING = (
     '只追问缺失信息；结果通过协作工具回写，宿主对话文字不会回传。'
     '结果未知时查询原操作，或用同键和原参数恢复原回执。'
     '收到 work_attempt_settled 时，用 archive_arguments 归档原结果及验收证据。'
-    '处理完一页后继续分页；支持 continue_later 时可交还回合并保留待办。'
+    '处理完一页后继续分页；领取回执的 turn_capabilities 声明 consumer_continue_later 时可交还回合并保留待办。'
 )
 
 FAST_WAKE_DELAYS = (30, 120, 600)
@@ -32,6 +33,7 @@ MAX_WAKE_ATTEMPTS = len(FAST_WAKE_DELAYS) + MAX_WAKE_AGE // SLOW_WAKE_DELAY
 CONTINUATION_SOURCE = 'continuation_source'
 PAUSED_ARCHIVE_NOTICE = 'work_attempt_settled'
 DRAIN_SCAN_LIMIT = 128
+RECOVERY_COALESCED = -1
 CONTINUATION_DELAY = 30
 OBJECT_GUARDED_ACTIONS = frozenset({
     'work_start', 'work_continue', 'context_update', 'handoff', 'notice_ack',
@@ -192,13 +194,14 @@ class RoomConsumers(FencedConsumerEngine):
             return
         if row['turn_policy'] != 'decoupled':
             self._strict_live_scope(room, dot, binding, row, row['observed_scope_digest'] or row['scope_digest'])
+        now = self.c.clock()
         if row['turn_policy'] == 'decoupled' or self._independent_turn_route(row, binding):
             route = self._original_route(row)
             if route['state'] == 'revoked':
                 raise DevError('ROOM_SUBSCRIPTION_REVOKED', '原通知连接已撤销', 403)
-            if self._route_finish_limit(row, route) <= self.c.clock():
+            if self._route_finish_limit(row, route, now) <= now:
                 raise DevError('DOT_CONSUMER_LEASE_EXPIRED', '原通知路线的收尾期限已结束', 409)
-        if row['hard_deadline'] <= self.c.clock():
+        if row['hard_deadline'] <= now:
             raise DevError('DOT_CONSUMER_LEASE_EXPIRED', '原消费回合已达到最长存续期限', 409)
 
     def _original_route(self, row):
@@ -207,16 +210,21 @@ class RoomConsumers(FencedConsumerEngine):
         return route or {'state': 'unavailable', 'expires_at': row['route_expires_at']}
 
     @staticmethod
-    def _route_finish_limit(row, route):
-        if row['route_expires_at'] is None:
-            return row['hard_deadline']  # Migrated turns have only their original lease evidence.
-        return min(route['expires_at'], row['route_expires_at']) + ROUTE_GRACE_SECONDS
+    def _route_finish_limit(row, route, now):
+        original_expiry = row['route_expires_at']
+        if original_expiry is None or (route['state'] == 'active' and route['expires_at'] > now):
+            return row['hard_deadline']
+        expiry = route['expires_at']
+        if route['state'] not in {'active', 'expired'}:
+            # Retiring or pausing transport does not extend its original finish window.
+            expiry = min(expiry, original_expiry)
+        return expiry + ROUTE_GRACE_SECONDS
 
     def _renew_until(self, now, args, row, binding, sub):
         route = self._original_route(row)
         limit = route['expires_at']
         if row['turn_policy'] == 'decoupled' or self._independent_turn_route(row, binding):
-            limit = self._route_finish_limit(row, route)
+            limit = self._route_finish_limit(row, route, now)
         if limit <= now:
             raise DevError('DOT_CONSUMER_LEASE_EXPIRED', '原通知路线的收尾期限已结束', 409)
         return min(now + args['lease_seconds'], row['hard_deadline'], limit)
@@ -284,7 +292,8 @@ class RoomConsumers(FencedConsumerEngine):
         result = super()._reply(row, include_proof=include_proof)
         result['binding_generation'] = int(row['generation'].rsplit(':', 1)[1])
         result.update(turn_policy=row['turn_policy'], policy_revision=row['policy_revision'],
-                      hard_deadline=row['hard_deadline'], route_generation=row['route_generation'])
+                      hard_deadline=row['hard_deadline'], route_generation=row['route_generation'],
+                      turn_capabilities=turn_capabilities(row['turn_policy']))
         return result
 
     @staticmethod
@@ -765,13 +774,25 @@ class RoomConsumers(FencedConsumerEngine):
                             'expected_intent_revision': revision}
         return item
 
-    def _scan_ready(self, member, principal, *, after=0):
+    def _has_complete_pending_reply(self, row, member):
+        return bool(self.store.one("""SELECT 1 FROM collaboration_messages
+            WHERE room_id IS (SELECT room_id FROM collaboration_messages WHERE id=?)
+            AND conversation_id=? AND reply_to_id=? AND origin='bound_connector'
+            AND json_extract(body,'$.sender_member_id')=? AND json_extract(body,'$.dot_reply_complete')=1
+            AND json_extract(body,'$.input_handling')='pending'
+            AND COALESCE(json_extract(body,'$.source_version'),1)=? LIMIT 1""",
+            (row['object_id'], member['conversation_id'], row['object_id'], member['id'], row['object_version'])))
+
+    def _scan_ready(self, member, principal, *, after=0, unanswered_only=False):
         rows = self.store.all('''SELECT * FROM dot_mailbox_entries WHERE member_id=? AND generation=?
             AND acknowledged_at IS NULL AND superseded_by='' AND sequence>? ORDER BY sequence LIMIT ?''',
             (member['id'], self.generation(member), after, DRAIN_SCAN_LIMIT + 1))
         for row in rows[:DRAIN_SCAN_LIMIT]:
             item = self._entry(row, member, principal, include_actions=False)
             if item and item['ready']:
+                if (unanswered_only and message_reference(row['kind'], item['reference'])
+                        and self._has_complete_pending_reply(row, member)):
+                    continue
                 return True, after
         if len(rows) > DRAIN_SCAN_LIMIT:
             return None, rows[DRAIN_SCAN_LIMIT - 1]['sequence']
@@ -780,15 +801,23 @@ class RoomConsumers(FencedConsumerEngine):
     def _ready(self, member, principal):
         return self._scan_ready(member, principal)[0] is not False
 
-    def _drain_ready(self, member, principal):
+    def _drain_ready(self, member, principal, *, unanswered_only=False):
         generation = self.generation(member)
         room = self.store.one('SELECT * FROM conversation_rooms WHERE id=?', (member['conversation_id'],))
         revision, visibility = member['dirty_revision'], self._visibility_digest(room, member, principal)
+        if unanswered_only:
+            visibility = digest([visibility, room['revision'], 'unanswered'])
         checkpoint = self.store.one('''SELECT after_sequence FROM room_consumer_drain_checks
             WHERE member_id=? AND generation=? AND dirty_revision=? AND visibility_digest=?''',
             (member['id'], generation, revision, visibility))
-        ready, after = self._scan_ready(member, principal, after=checkpoint['after_sequence'] if checkpoint else 0)
-        if ready is None:
+        if checkpoint and checkpoint['after_sequence'] == RECOVERY_COALESCED:
+            return False
+        ready, after = self._scan_ready(member, principal, after=checkpoint['after_sequence'] if checkpoint else 0,
+                                        unanswered_only=unanswered_only)
+        if unanswered_only and ready is False:
+            # Reconsider on a room, inbox or visibility change without rescanning each tick.
+            after = RECOVERY_COALESCED
+        if ready is None or after == RECOVERY_COALESCED:
             self.store.execute('''INSERT INTO room_consumer_drain_checks VALUES (?,?,?,?,?)
                 ON CONFLICT(member_id) DO UPDATE SET generation=excluded.generation,
                     dirty_revision=excluded.dirty_revision,visibility_digest=excluded.visibility_digest,
@@ -1101,7 +1130,11 @@ class RoomConsumers(FencedConsumerEngine):
                     actor = self.c.rooms.principal(member)
                     room = self.c.conversations.object(actor, member['conversation_id'])
                     _, sub = self.binding(room, member, actor)
-                    if self._rejected(sub['id']) or self._drain_ready(member, actor) is not True:
+                    if self._rejected(sub['id']):
+                        continue
+                    # Keep partial replies pending, but stop the slow retry series when all
+                    # remaining visible inputs already received a complete reply.
+                    if self._drain_ready(member, actor, unanswered_only=attempts >= len(FAST_WAKE_DELAYS)) is not True:
                         continue
                 except DevError:
                     continue

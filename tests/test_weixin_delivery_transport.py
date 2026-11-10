@@ -30,21 +30,25 @@ def test_four_admission_batches_serve_64_contacts_and_resume_persisted_order(col
     context = store.one('SELECT * FROM weixin_contexts WHERE account_id=?', (account['id'],))
     first_part = store.one('SELECT * FROM weixin_parts WHERE delivery_id=?', (first['id'],))
     part_ids = {}
+    original_lanes = store.one('SELECT COUNT(*) AS count FROM weixin_peer_admission')['count']
 
-    def seed_contact(contact, *, ready):
+    def seed_contact(contact, *, ready, register=False):
         account_key, binding_key, peer = (f'{name}-{contact}' for name in ('account', 'binding', 'peer'))
         clone(store, 'weixin_accounts', account, id=account_key, bot_id=f'bot-{contact}')
         clone(store, 'weixin_bindings', binding, id=binding_key, account_id=account_key,
               peer_id=peer, conversation_id=f'conversation-{contact}')
         if ready:
             clone(store, 'weixin_contexts', context, account_id=account_key, peer_id=peer)
-        for backlog in range(5 if ready else 1):
+        for backlog in range(5 if ready and not register else 1):
             identifier = f'delivery-{contact}-{backlog}'
             clone(store, 'weixin_deliveries', first, id=identifier, binding_id=binding_key,
                   message_id=identifier, peer_id=peer, created=c.clock[0] + contact, ordering_key=f'contact:{contact}')
             part_id = f'part-{contact}-{backlog}'
-            clone(store, 'weixin_parts', first_part, id=part_id, delivery_id=identifier, client_id=part_id,
-                  state='queued' if ready else 'waiting_context')
+            if register:
+                channel.delivery.add_part(identifier, 0, 'text', {'text': 'new'}, identifier=part_id)
+            else:
+                clone(store, 'weixin_parts', first_part, id=part_id, delivery_id=identifier, client_id=part_id,
+                      state='queued' if ready else 'waiting_context')
             part_ids[part_id] = (contact, backlog)
 
     with store.transaction():
@@ -73,8 +77,24 @@ def test_four_admission_batches_serve_64_contacts_and_resume_persisted_order(col
             delivery.mark_sending(claim, text_items('original'))
             delivery.finish(claim, {'provider_state': 'accepted'})
     assert len(seen) == 64
-    assert store.one('SELECT COUNT(*) AS count FROM weixin_peer_admission')['count'] == 64
+    assert store.one('SELECT COUNT(*) AS count FROM weixin_peer_admission')['count'] == original_lanes + 64
     assert [part_ids[row['id']][1] for row in delivery.candidates(c.clock[0])] == [1] * 16
+
+    served_again = set()
+    for start in range(64, 128, 16):
+        with store.transaction():
+            for contact in range(start, start + 16):
+                seed_contact(contact, ready=True, register=True)
+        candidates = delivery.candidates(c.clock[0])
+        assert len(candidates) == 16
+        for candidate in candidates:
+            contact, backlog = part_ids[candidate['id']]
+            assert contact in seen and contact not in served_again and backlog == 1
+            served_again.add(contact)
+            claim = delivery.claim(candidate['id'])
+            delivery.mark_sending(claim, text_items('original'))
+            delivery.finish(claim, {'provider_state': 'accepted'})
+    assert served_again == seen
     clone(store, 'weixin_contexts', context, account_id='account--16', peer_id='peer--16')
     assert delivery.candidates(c.clock[0])[0]['id'] == 'part--16-0'
 
@@ -241,6 +261,30 @@ def test_preparation_retries_keep_original_identity_and_stop_at_budget(collab):
             assert saved['state'] == 'queued'
             c.clock[0] = saved['next_attempt']
     assert (saved['state'], saved['reason_code']) == ('attention', 'WEIXIN_PREPARATION_BUDGET_EXHAUSTED')
+
+
+def test_expired_preparation_leases_share_retry_budget_without_dispatch(collab):
+    c, channel, account_id, _, _ = fixture_channel(collab)
+    _, _, delivery = reply(c, channel, account_id)
+    store, sender = c.s.store, channel.delivery
+    part = store.one('SELECT * FROM weixin_parts WHERE delivery_id=?', (delivery['id'],))
+
+    for failure in range(1, transport.MAX_PREPARATION_FAILURES + 1):
+        claim = sender.claim(part['id'])
+        assert claim is not None
+        c.clock[0] += 180
+        assert sender.reconcile() == [part['id']]
+        saved = store.one('SELECT * FROM weixin_parts WHERE id=?', (part['id'],))
+        assert saved['preparation_failures'] == failure
+        assert (saved['attempts'], saved['client_id']) == (0, part['client_id'])
+        assert saved['lease_fence'] > claim['lease_fence']
+        assert sender.claim(part['id']) is None
+        if failure < transport.MAX_PREPARATION_FAILURES:
+            assert saved['state'] == 'queued' and saved['next_attempt'] > c.clock[0]
+            c.clock[0] = saved['next_attempt']
+
+    assert (saved['state'], saved['reason_code']) == ('attention', 'WEIXIN_PREPARATION_BUDGET_EXHAUSTED')
+    assert not store.one('SELECT 1 FROM weixin_dispatch_attempts WHERE part_id=?', (part['id'],))
 
 
 def test_send_telemetry_follows_commits_and_late_evidence(collab, monkeypatch):

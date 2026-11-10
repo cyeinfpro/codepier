@@ -48,7 +48,8 @@ def host_rooms(rooms):
 async def test_host_revoke_is_immediate_across_rollback_and_preserves_other_hosts(host_rooms):
     service, owner, actor, clock = host_rooms
     first = await verify_through_shared_gateway(service, actor, add(service, owner, create(service, owner)), b'a' * 32)
-    second = await verify_through_shared_gateway(service, actor, add(service, owner, create(service, owner)), b'b' * 32)
+    second_room = create(service, owner)
+    second = await verify_through_shared_gateway(service, actor, add(service, owner, second_room), b'b' * 32)
     connections = service.room_connections
     first_member = service.rooms.member(first['member_id'])
     second_member = service.rooms.member(second['member_id'])
@@ -58,6 +59,7 @@ async def test_host_revoke_is_immediate_across_rollback_and_preserves_other_host
     assert first_member['endpoint_digest'] == second_member['endpoint_digest']
     available = connections.host_view({'host_connection_id': second_host}, owner)
     assert available['display_state'] == 'connected'
+    assert available['single_room_title'] == second_room['title']
     assert available['connection_capabilities']['route_rotation']
     with pytest.raises(DevError):
         connections.host_view({'host_connection_id': first_host}, actor)
@@ -151,6 +153,7 @@ async def test_revocation_impact_and_cleanup_use_all_pages(host_rooms):
         'name': f'待接入 {index}', 'host_connection_id': host_id, 'idempotency_key': key()}, owner)['member']['id']
         for index in range(2)]
     page = connections.impact(query, owner)
+    assert connections.host_view({'host_connection_id': host_id}, owner)['single_room_title'] is None
     assert initial['impact_digest'] != page['impact_digest']
     assert page['room_count'] == 3 and len(page['items']) == 1
     second = connections.impact({**query, 'cursor': page['next_cursor']}, owner)

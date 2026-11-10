@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from hub.collaboration import weixin_delivery_order as order
 from hub.collaboration.common import digest
 from shared.util import DevError
 from tests.collaboration_support import collab as collab, key
@@ -480,9 +481,11 @@ async def test_reply_disposition_keeps_authority_and_transport_separate(collab, 
     assert any('room_reply_receipt_message' in row['detail'] for row in plan)
 
 
+@pytest.mark.parametrize('ordering_v2', [True, False])
 @pytest.mark.asyncio
-async def test_room_reply_can_declare_a_visible_delivery_dependency(collab):
+async def test_room_reply_can_declare_a_visible_delivery_dependency(collab, ordering_v2):
     (s, _, worker, clock, identity, credentials), flow, _, _ = await setup_channel(collab)
+    s.config = replace(s.config, weixin_delivery_order_v2=ordering_v2)
 
     def request_for(sequence):
         incoming = packet(sequence, f'原问题 {sequence}', create_time_ms=int(clock[0] * 1000))
@@ -504,7 +507,14 @@ async def test_room_reply_can_declare_a_visible_delivery_dependency(collab):
     second = s.room_runtime.reply(args, worker)
     row = s.store.one('SELECT * FROM weixin_deliveries WHERE message_id=?', (second['message']['id'],))
     assert row['depends_on_delivery_id'] == prior['id']
-    assert json.loads(row['ordering_evidence'])['dependency_mode'] == 'requires_success'
+    assert row['dependency_mode'] == 'requires_success'
+    if ordering_v2:
+        assert json.loads(row['ordering_evidence'])['dependency_mode'] == 'requires_success'
+    else:
+        assert row['ordering_schema_version'] == 1 and row['ordering_evidence'] == ''
+    assert order.dependency_state(s.store, row['id']) == 'waiting'
+    s.store.execute("UPDATE weixin_parts SET state='rejected' WHERE delivery_id=?", (prior['id'],))
+    assert order.dependency_state(s.store, row['id']) == 'failed'
     with pytest.raises(DevError) as conflict:
         s.room_runtime.reply({**args, 'dependency_mode': 'after_settled'}, worker)
     assert conflict.value.code == 'IDEMPOTENCY_CONFLICT'

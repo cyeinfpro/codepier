@@ -1345,13 +1345,16 @@ class Rooms:
             return self.join_result(member, room)
 
     def join_result(self, member, room):
+        from hub.collaboration.room_turn_policy import mode
+        policy = mode(self.store, room['id'])
         return {'member': self.member_view(member), 'conversation_id': room['id'],
             'member_id': member['id'], 'binding_generation': member['binding_generation'],
             'connection_proof': self.store.decrypt(member['connection_proof_secret']),
             'subscription_request': self.subscription_request(member), 'grants_authority': False,
             'pending_binding': bool(member.get('_pending_binding')),
             'subscription_renewal': self.renewals.view(member),
-            'turn_capabilities': dict(contracts.TURN_CAPABILITIES),
+            'turn_capabilities': contracts.turn_capabilities(policy),
+            'turn_capabilities_apply_to': 'new_turns',
             'required_host_actions': {'collaboration': ['room_probe_read', 'room_probe_reply',
                 'room_consumer_begin', 'room_consumer_yield', 'room_reply'],
                 'collaboration_query': ['room_inbox']},
@@ -1577,7 +1580,7 @@ class Rooms:
                 '解释后仍有交办待准入时，填 input_handling=pending；只需回答且已经回答完整时填 answered。'
                 '请求结果未知时沿原请求键和参数恢复，待核对操作沿原 ID 查询。'
                 '排空后使用 room_consumer_yield；协议声明 reply_yield_after 时可在完整回复中填 yield_after=true。'
-                '协议声明 consumer_continue_later 时，可用 yield_mode=continue_later 保留待办并交还回合。'
+                '领取回执的 turn_capabilities 声明 consumer_continue_later 时，可用 yield_mode=continue_later 保留待办并交还回合。'
                 '没有可处理输入时等待新通知。'}
 
     def changes(self, raw, principal):

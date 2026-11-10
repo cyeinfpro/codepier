@@ -199,10 +199,8 @@ def action_help(address, views, *, project='', workspace_id='', detail='brief', 
             example['workspace_id'] = workspace_id
         info['example'] = example
     if legacy in u.COLLAB_TOOLS:
-        from shared.room_contracts import TURN_ACTION_CAPABILITIES
-        capabilities = TURN_ACTION_CAPABILITIES.get(operation)
-        if capabilities:
-            info['turn_capabilities'] = dict.fromkeys(capabilities, True)
+        from shared.room_contracts import turn_action_help
+        info.update(turn_action_help(operation))
     if detail == 'schema':
         info['inputSchema'] = schema
         if output is not None:
