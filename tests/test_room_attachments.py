@@ -4,10 +4,14 @@ import json
 
 import pytest
 
+from hub.collaboration.room_host_migration import HostBindingBackfill
 from shared.util import DevError
 from tests.collaboration_support import collab as collab, key
-from tests.test_room_members_rebuild import rooms as rooms, create, identity
+from tests.test_dot_weixin_channel import packet
+from tests.test_room_members_rebuild import rooms as rooms, add, create, identity, join
+from tests.test_room_host_integration import finish_probe, independent as independent, native_subscribe
 from tests.test_room_consumer_sessions import connect, verify
+from tests.test_room_weixin_native import setup_channel
 
 
 def test_owner_file_upload_is_idempotent_and_same_message_atomic(rooms):
@@ -69,3 +73,51 @@ async def test_member_file_read_uses_current_room_identity_and_images_are_native
                                   (sent['message']['id'],))['body'])['attachment_ids'] == [text, picture]
     with pytest.raises(DevError):
         c.s.room_attachments.read({**identity(c.joined), 'connection_proof': 'invalid-proof' * 4, 'attachment_id': text}, c.actor)
+
+
+@pytest.mark.asyncio
+async def test_bearer_attachment_read_ends_when_the_current_host_is_revoked(independent):
+    service, owner, actor, _ = independent
+    room = create(service, owner)
+    member, _ = join(service, actor, add(service, owner, room))
+    ticket = await native_subscribe(service, actor, member, b'a')
+    result, _ = finish_probe(service, actor, member, ticket)
+    identifier = service.room_attachments.upload(room['id'], 'source.txt', b'room source', key(), owner)['attachment']['id']
+    service.room_runtime.send({'conversation_id': room['id'], 'body_text': 'Room input',
+        'attachment_ids': [identifier], 'client_message_id': key(), 'idempotency_key': key()}, owner)
+    assert service.channels.media.content(identifier, actor)[0] == b'room source'
+
+    host = {'host_connection_id': result['member']['host_connection_id']}
+    impact = service.room_connections.impact(host, owner)
+    service.room_connections.revoke({**host, 'expected_authority_version': impact['authority_version'],
+        'impact_digest': impact['impact_digest'], 'idempotency_key': key()}, owner)
+    with pytest.raises(DevError) as revoked:
+        service.channels.media.content(identifier, actor)
+    assert revoked.value.code == 'ATTACHMENT_NOT_FOUND'
+    assert service.channels.media.content(identifier, owner)[0] == b'room source'
+
+
+@pytest.mark.asyncio
+async def test_native_weixin_attachment_metadata_requires_a_current_host(collab):
+    (service, owner, actor, clock, member, _), flow, *_ = await setup_channel(collab)
+    HostBindingBackfill(service.store, clock=lambda: clock[0]).batch(apply=True)
+    host_id = service.rooms.member(member['member_id'])['host_connection_id']
+    assert host_id
+    data = packet(2, create_time_ms=int(clock[0] * 1000), item_list=[
+        {'type': 4, 'file_item': {'file_name': 'source.txt', 'media': {
+            'aes_key': base64.b64encode(b'k' * 16).decode(),
+            'encrypt_query_param': 'synthetic-cdn-reference', 'encrypt_type': 1}}},
+    ])
+    incoming = service.weixin.commit_updates(service.weixin.claim_poll(flow['account_id']), data)
+    message_id = incoming['message_ids'][0]
+    identifier = service.store.one('SELECT id FROM channel_attachments WHERE message_id=?', (message_id,))['id']
+    assert service.channels.media.row(identifier, actor)['message_id'] == message_id
+
+    host = {'host_connection_id': host_id}
+    impact = service.room_connections.impact(host, owner)
+    service.room_connections.revoke({**host, 'expected_authority_version': impact['authority_version'],
+        'impact_digest': impact['impact_digest'], 'idempotency_key': key()}, owner)
+    with pytest.raises(DevError) as revoked:
+        service.channels.media.row(identifier, actor)
+    assert revoked.value.code == 'ATTACHMENT_NOT_FOUND'
+    assert service.channels.media.row(identifier, owner)['message_id'] == message_id
