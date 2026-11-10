@@ -44,11 +44,14 @@ def delivery_display(work_state, deliveries):
     if stopped and (accepted or confirmed):
         return {'state': 'partial', 'title': prefix + channel + '部分发送',
                 'reason': f'接口受理 {accepted} 段，本人核对 {confirmed} 段，{stopped} 段已停止。'}
-    if states & {'waiting_context', 'waiting_media', 'attention', 'needs_attention', 'failed', 'rejected',
+    if states & {'attention', 'needs_attention', 'failed', 'rejected',
                  'blocked', 'cancelled', 'superseded'}:
         return {'state': 'waiting_recovery', 'title': prefix + channel + '待处理',
                 'reason': '查看原渠道状态和受影响的分项。'}
-    if states & {'queued', 'preparing', 'sending', 'leased', 'pending'}:
+    if 'waiting_context' in states:
+        return {'state': 'pending', 'title': prefix + channel + '等待连接恢复',
+                'reason': '原投递会在原收件路线可用后继续。'}
+    if states & {'queued', 'preparing', 'sending', 'leased', 'pending', 'waiting_media'}:
         return {'state': 'pending', 'title': prefix + channel + '等待发送',
                 'reason': '原投递仍在等待处理。'}
     if states and states <= {'accepted', 'owner_confirmed', 'sent', 'completed'}:
@@ -240,6 +243,7 @@ def work_deliveries(c, goal, principal, *, intent_revision, member_id=''):
     else:
         rows = c.store.all('''SELECT * FROM collaboration_messages WHERE goal_id=?
             AND kind IN ('reply','delegation_progress','delegation_result')
+            AND (kind!='reply' OR json_extract(body,'$.publish_work') IS NOT 0)
             ORDER BY conversation_sequence DESC LIMIT 9''', (goal['id'],))
     member = c.rooms.member(member_id, goal['conversation_id']) if member_id else None
     identifiers = []

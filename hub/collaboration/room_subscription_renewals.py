@@ -152,7 +152,7 @@ class RoomSubscriptionRenewals:
             (now + delay, reason, row['member_id'], row['version']))
 
     def reject(self, row, now, exc):
-        if exc.code == 'ROOM_RENEWAL_STOPPED' or exc.status in {401, 403, 404, 410}:
+        if exc.code in {'ROOM_RENEWAL_STOPPED', 'ROOM_CONNECTION_REVOKED'} or exc.status in {401, 403, 404, 410}:
             self.stop(row['subscription_id'], exc.code)
         else:
             self.defer(row, now, exc.code)

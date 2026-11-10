@@ -37,7 +37,7 @@ Each unified call is translated (`shared/unified_contracts.py`) into exactly one
 path (`hub/unified_tools.py`, `hub/mcp.py`). Authorization, scope checks, idempotency records, recovery, audit and
 rendering are the same code. `tests/test_unified_tools.py` enforces, against the live registries:
 
-* every legacy facade operation (`hub.tool_discovery.catalogs()`), both standalone knowledge tools, and every one of the 115 public collaboration
+* every legacy facade operation (`hub.tool_discovery.catalogs()`), both standalone knowledge tools, and every one of the 122 public collaboration
   actions has a unified address;
 * every field of every internal target model stays expressible;
 * `query` only reaches targets with `read`/`devices.read` scope or side-effect-free computer reads

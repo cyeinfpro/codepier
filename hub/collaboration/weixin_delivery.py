@@ -84,6 +84,11 @@ class WeixinDelivery:
         self.w, self.c, self.store = channel, channel.c, channel.store
 
     def root_source(self, message):
+        body = json.loads(message['body'])
+        if type(body.get('publish_work')) is bool:
+            return self.store.one("""SELECT * FROM collaboration_messages
+                WHERE id=? AND conversation_id=? AND origin='external_channel'""",
+                (message['reply_to_id'], message['conversation_id']))
         current, seen = message, set()
         for _ in range(16):
             if current['id'] in seen:
@@ -91,8 +96,6 @@ class WeixinDelivery:
             seen.add(current['id'])
             if current['origin'] == 'external_channel':
                 return current
-            if current['origin'] == 'panel_owner' and json.loads(message['body']).get('publish_work') is False:
-                return None
             if not current['reply_to_id']:
                 return self.work_source(message, current)
             current = self.store.one('SELECT * FROM collaboration_messages WHERE id=? AND conversation_id=?',
@@ -140,14 +143,16 @@ class WeixinDelivery:
             WHERE message_id=? AND COALESCE(goal_id,'')!='' HAVING COUNT(DISTINCT goal_id)=1""", (source['id'],))
         return row['goal_id'] if row else None
 
-    def task_author(self, message, source, body):
+    def task_author(self, message, source, body, *, allow_disconnected=False):
         native = self.c.room_channels.native
-        author = native.reply_author(message, source)
-        if (message.get('goal_id') and body.get('publish_work') is not False
-                or body.get('provenance_project_ids') or body.get('dot_reply_complete') is False):
+        if native.current_conversation_reply(message, source):
+            if body.get('provenance_project_ids') or body.get('publish_work') is True:
+                native.conversation_reply_author(body, source, allow_disconnected=allow_disconnected)
+            return
+        author = native.reply_author(message, source, allow_disconnected=allow_disconnected)
+        if (message.get('goal_id') or body.get('provenance_project_ids') or body.get('dot_reply_complete') is False):
             if not author['authenticated']:
                 raise DevError('CHANNEL_OWNER_NOT_APPROVED', '此微信来源没有有效的工作回传授权', 403)
-        return author
 
     def queue_reply(self, message):
         return self.queue_reply_result(message).delivery
@@ -191,7 +196,7 @@ class WeixinDelivery:
 
         try:
             if native:
-                self.task_author(message, source, body)
+                self.task_author(message, source, body, allow_disconnected=True)
             else:
                 self.c.channel_owner.require_reply_source(source)
                 author = self.c.channel_owner.author(source)

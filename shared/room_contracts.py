@@ -138,6 +138,7 @@ class RoomProjectImpact(RoomRead):
 class MemberCreate(RoomRead):
     name: str = Field(min_length=1, max_length=80)
     reuse_member_id: Identifier | None = None
+    host_connection_id: Identifier | None = Field(default=None, exclude_if=lambda value: value is None)
     reuse_binding_generation: int | None = Field(default=None, ge=1)
     keep_connected: bool = Field(default=False, strict=True, exclude_if=lambda value: not value)
     project_scopes: list[MemberProjectScope] = Field(default_factory=list)
@@ -151,6 +152,32 @@ class MemberCreate(RoomRead):
         if not value.strip():
             raise ValueError('A member name is required')
         return value.strip()
+
+
+    @model_validator(mode='after')
+    def one_reuse_identity(self):
+        if self.host_connection_id and (self.reuse_member_id or self.reuse_binding_generation):
+            raise ValueError('Use either a host connection or the legacy member reference')
+        return self
+
+
+class RoomConnectionList(Model):
+    cursor: str = Field(default='', max_length=2048)
+    limit: int = Field(default=40, ge=1, le=100)
+
+
+class RoomConnectionRead(Model):
+    host_connection_id: Identifier
+
+
+class RoomConnectionImpact(RoomConnectionRead, RoomConnectionList):
+    pass
+
+
+class RoomConnectionRevoke(RoomConnectionRead):
+    expected_authority_version: int = Field(strict=True, ge=1)
+    impact_digest: str = Field(pattern='^[0-9a-f]{64}$')
+    idempotency_key: Key
 
 
 class ConnectRead(Model):
@@ -167,6 +194,8 @@ class ConnectAction(ConnectRead):
 
 class ConnectJoin(Model):
     invite_code: str = Field(min_length=24, max_length=256)
+    host_control_handle: str | None = Field(default=None, min_length=32, max_length=256,
+                                           exclude_if=lambda value: value is None)
     idempotency_key: Key
 
 
@@ -209,6 +238,8 @@ ROOM_QUERY_ACTIONS = {
     'room_list': RoomList, 'room_view': RoomRead, 'room_connect': ConnectRead,
     'room_changes': RoomChanges, 'room_diagnostics': RoomDiagnosticsRead,
     'room_project_impact': RoomProjectImpact, 'room_turn_policy': RoomRead,
+    'room_connection_list': RoomConnectionList, 'room_connection_view': RoomConnectionRead,
+    'room_connection_impact': RoomConnectionImpact,
 }
 ROOM_MUTATION_ACTIONS = {
     'room_create': RoomCreate, 'room_update': RoomPatch, 'room_turn_policy_update': RoomTurnPolicyUpdate,
@@ -216,6 +247,7 @@ ROOM_MUTATION_ACTIONS = {
     'room_projects': RoomProjects, 'room_member_create': MemberCreate,
     'room_connect_resume': ConnectAction, 'room_connect_join': ConnectJoin,
     'room_probe_read': ConnectProbeRead, 'room_probe_reply': ConnectProbeReply,
+    'room_connection_revoke': RoomConnectionRevoke,
 }
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 from pydantic import Field
 
 from hub.principal import refresh_principal
+from hub.collaboration.room_host_connections import RoomHostConnections, migrate as migrate_hosts
 from hub.collaboration.common import digest, read_cursor, sign_cursor, validate
 from shared.collaboration_contracts import Model
 from shared.util import DevError
@@ -30,11 +31,16 @@ def migrate(db):
             db.execute(f'ALTER TABLE room_members ADD COLUMN {name} {declaration}')
     db.execute('''CREATE INDEX IF NOT EXISTS room_connection_owner
         ON room_members(owner_user_id,connection_source_member_id,created_at,id)''')
+    migrate_hosts(db)
 
 
 class RoomConnections:
     def __init__(self, collaboration):
         self.c, self.store = collaboration, collaboration.store
+        self.hosts = RoomHostConnections(self)
+
+    def identity(self, member):
+        return self.hosts.identity(member)
 
     def conversation(self, member):
         room = self.store.one('SELECT * FROM conversation_rooms WHERE id=?', (member['conversation_id'],))
@@ -55,6 +61,8 @@ class RoomConnections:
             if (current['owner_user_id'] != member['owner_user_id']
                     or room['space_id'] != first_room['space_id']):
                 raise DevError('ROOM_CONNECTION_DENIED', '不能复用其他账号或工作区的连接', 403)
+            if current.get('host_connection_id'):
+                self.identity(current)
             if current['id'] != member['id'] or require_leaf_ready:
                 if self.c.rooms.state(current, check_connection=False) not in {'ready_chat', 'ready_work'}:
                     raise DevError('ROOM_CONNECTION_UNAVAILABLE', '原 dot 需要先恢复已验证连接', 409)
@@ -127,6 +135,10 @@ class RoomConnections:
         return source
 
     def guard_join(self, member, principal):
+        if member.get('connection_identity_version', 1) == 2:
+            if not self.identity(member)['host_connection_id']:
+                self.hosts.selected_current(member, principal)
+            return None
         if not member.get('connection_source_member_id'):
             return None
         principal = refresh_principal(self.store, principal)
@@ -148,6 +160,17 @@ class RoomConnections:
                 or member['conversation_id'] == other_member['conversation_id']
                 or member['owner_user_id'] != other_member['owner_user_id']
                 or not member.get('grant_id') or member['grant_id'] != other_member.get('grant_id')):
+            return False
+        try:
+            left_host = self.identity(member)['host_connection_id']
+            if not left_host:
+                selected = self.hosts.selection(member)
+                if selected and selected['claimed_at'] is not None and selected['expires_at'] > self.c.clock():
+                    left_host = self.hosts.require_host(member, selected['host_connection_id'],
+                        expected_epoch=selected['host_revocation_epoch'])['id']
+            if left_host and left_host == self.identity(other_member)['host_connection_id']:
+                return True
+        except DevError:
             return False
         if not member.get('connection_source_member_id') and not other_member.get('connection_source_member_id'):
             return False

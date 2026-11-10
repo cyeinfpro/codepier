@@ -16,8 +16,8 @@ from shared.util import DevError
 ROOM_HANDLING = (
     '用本次唤醒的 wake_ticket 领取当前回合，支持 include_inbox 时随领取读取第一页。'
     '沿原消息、房间上下文和工作记录继续对话，已有明确交办时在当前授权内准入一次。'
-    '调用 room_reply；声明 explicit_publication 时，普通回复填 publish_work=false，正式发表经核对的完整成果才填 true。'
-    '同一输入可以先说明情况；支持 input_handling 时，执行仍待准入则用 pending 保留待办。'
+    '用 room_reply 回复原消息。声明 explicit_publication 时，普通回复填 publish_work=false，正式发表经核对的完整成果才填 true。'
+    '支持 input_handling 时，已完整回答且没有剩余要求填 answered；仍待准入的执行用 pending 保留。'
     '只追问缺失信息；结果通过协作工具回写，宿主对话文字不会回传。'
     '结果未知时查询原操作，或用同键和原参数恢复原回执。'
     '收到 work_attempt_settled 时，用 archive_arguments 归档原结果及验收证据。'
@@ -176,18 +176,21 @@ class RoomConsumers(FencedConsumerEngine):
     def _requires_bound_route(self, row):
         return False  # A strict live action checks the route separately.
 
+    def _strict_live_scope(self, room, member, binding, row, scope_digest):
+        self.binding(room, member)
+        if row['subscription_id'] != binding['subscription_id']:
+            raise DevError('ROOM_BINDING_CHANGED', '消费回合的原通知路线已变更', 409)
+        if self.scope_digest(room, member) != scope_digest:
+            if row['turn_policy'] == 'shadow':
+                record_shadow('scope_update', 'would_allow', 'scope_changed')
+            raise DevError('DOT_CONSUMER_SCOPE_CHANGED', '消费期间授权或项目范围已改变，请恢复当前绑定', 409)
+
     def _check_scope(self, room, dot, binding, row, *, live):
         self._check_session_host(binding, row)
         if not live:
             return
         if row['turn_policy'] != 'decoupled':
-            self.binding(room, dot)
-            if row['subscription_id'] != binding['subscription_id']:
-                raise DevError('ROOM_BINDING_CHANGED', '消费回合的原通知路线已变更', 409)
-            if self.scope_digest(room, dot) != (row['observed_scope_digest'] or row['scope_digest']):
-                if row['turn_policy'] == 'shadow':
-                    record_shadow('scope_update', 'would_allow', 'scope_changed')
-                raise DevError('DOT_CONSUMER_SCOPE_CHANGED', '消费期间授权或项目范围已改变，请恢复当前绑定', 409)
+            self._strict_live_scope(room, dot, binding, row, row['observed_scope_digest'] or row['scope_digest'])
         else:
             route = self._original_route(row)
             if route['state'] == 'revoked':
@@ -322,22 +325,26 @@ class RoomConsumers(FencedConsumerEngine):
             return None
         return {'consumer_session_id': current['id'], 'state': 'active', 'more': self._ready(member, actor)}
 
-    def authorize_member(self, raw, principal, *, require_revision=True, action=None):
+    def authorize_member(self, raw, principal, *, require_revision=True, action=None, legacy_policy=False):
         """The caller holds the same transaction as the protected effect."""
         actor, room, member = self._identity(raw, principal)
-        self.guard_session(raw, actor, room, member, require_revision=require_revision, action=action)
+        self.guard_session(raw, actor, room, member, require_revision=require_revision, action=action,
+                           legacy_policy=legacy_policy)
         return member
 
-    def guard_session(self, raw, principal, room, member, *, require_revision=True, action=None):
+    def guard_session(self, raw, principal, room, member, *, require_revision=True, action=None, legacy_policy=False):
         """For original work APIs, session proof also binds the stable member."""
         self.c.rooms.require_native(room)
         if not member['probe_replied_at']:
             raise DevError('ROOM_PROBE_REQUIRED', '先完成当前成员的真实通知读取和回复验证', 409)
-        row = self._credential(raw, principal, room, member, self._identity_binding(member))
+        binding = self._identity_binding(member)
+        row = self._credential(raw, principal, room, member, binding)
+        if legacy_policy and row['turn_policy'] == 'decoupled':
+            self._strict_live_scope(room, member, binding, row, row['scope_digest_at_begin'])
         expected = raw.get('expected_inbox_revision')
         stale = type(expected) is not int or expected != member['dirty_revision']
         scoped = action in OBJECT_GUARDED_ACTIONS and type(expected) is int and 0 <= expected <= member['dirty_revision']
-        if require_revision and stale and (not scoped or row['turn_policy'] != 'decoupled'):
+        if require_revision and stale and (legacy_policy or not scoped or row['turn_policy'] != 'decoupled'):
             if scoped and row['turn_policy'] == 'shadow':
                 # Only this revision gate would allow; object guards still decide the effect.
                 record_shadow(action, 'would_allow', 'inbox_revision')
