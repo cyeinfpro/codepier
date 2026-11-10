@@ -56,9 +56,12 @@ async def setup_channel(collab, *, tasks=False,projects=None,scopes=None,worker_
 
 
 @pytest.mark.asyncio
-async def test_empty_room_wechat_pair_inbox_reply_reuses_original_outbox(collab):
+@pytest.mark.parametrize('initial_update_stamp', [False, True])
+async def test_empty_room_wechat_pair_inbox_reply_reuses_original_outbox(collab, initial_update_stamp):
     (s,owner,worker,clock,identity,credentials),flow,provider,action=await setup_channel(collab)
-    message=packet(2,'请聊聊这个想法',create_time_ms=int(clock[0]*1000))
+    created = int(clock[0] * 1000)
+    message = packet(2, '请聊聊这个想法', create_time_ms=created,
+                     **({'update_time_ms': created} if initial_update_stamp else {}))
     received=s.weixin.commit_updates(s.weixin.claim_poll(flow['account_id']),message)['message_ids'][0]
     source=s.store.one('SELECT * FROM collaboration_messages WHERE id=?',(received,))
     assert source['room_id'] is None
@@ -88,6 +91,19 @@ async def test_empty_room_wechat_pair_inbox_reply_reuses_original_outbox(collab)
     flow=await action(flow,'disconnect')
     with pytest.raises(DevError):
         s.weixin.delivery.validate(deliveries[0])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('field, offset', [('update_time_ms', 1), ('update_time_ms', -1), ('delete_time_ms', 0)])
+async def test_first_seen_changed_provider_message_stays_out_of_inbox(collab, field, offset):
+    (s, _, worker, clock, identity, _), flow, _, _ = await setup_channel(collab, tasks=True)
+    created = int(clock[0] * 1000)
+    message = packet(2, '不能开始的任务', create_time_ms=created, **{field: created + offset})
+    received = s.weixin.commit_updates(s.weixin.claim_poll(flow['account_id']), message)['message_ids'][0]
+    source = s.store.one('SELECT * FROM collaboration_messages WHERE id=?', (received,))
+    assert json.loads(source['body'])['owner_task_blocker'] == 'CHANNEL_OWNER_SOURCE_CHANGED'
+    assert not s.channel_owner.author(source)['authenticated']
+    assert received not in {entry['object_id'] for entry in s.room_consumers.inbox(identity, worker)['items']}
 
 
 @pytest.mark.asyncio
@@ -222,13 +238,18 @@ async def test_wechat_goal_takeover_preserves_channel_origin_and_current_lead_de
 
 
 @pytest.mark.asyncio
-async def test_native_owner_task_to_managed_result_same_wechat_source(collab):
+@pytest.mark.parametrize('initial_update_stamp', [False, True])
+async def test_native_owner_task_to_managed_result_same_wechat_source(collab, initial_update_stamp):
     (s,owner,worker,clock,identity,credentials),flow,provider,action=await setup_channel(collab,tasks=True)
-    received=s.weixin.commit_updates(s.weixin.claim_poll(flow['account_id']),packet(2,'请检查项目 README',
-        create_time_ms=int(clock[0]*1000)))['message_ids'][0]
+    created = int(clock[0] * 1000)
+    message = packet(2, '请检查项目 README', create_time_ms=created,
+                     **({'update_time_ms': created} if initial_update_stamp else {}))
+    received = s.weixin.commit_updates(s.weixin.claim_poll(flow['account_id']), message)['message_ids'][0]
     source=s.store.one('SELECT * FROM collaboration_messages WHERE id=?',(received,))
     assert s.channel_owner.author(source)['authenticated']
     inbox=s.room_consumers.inbox(identity,worker)
+    entry = next(item for item in inbox['items'] if item['object_id'] == received)
+    assert 'work_start_arguments' in entry
     result=s.room_runtime.start_work({**identity,**credentials,'source_message_id':received,'source_version':source['version'],
         'source_digest':digest(json.loads(source['body'])['body_text']),'expected_inbox_revision':inbox['inbox_revision'],
         'acceptance':'阅读并报告内容','confirm_task':True,'idempotency_key':key()},worker)

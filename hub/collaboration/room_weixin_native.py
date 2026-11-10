@@ -31,6 +31,11 @@ PAIRING_CODE = re.compile(r'CPW-[A-F0-9]{32}')
 MAX_PENDING_NATIVE_INPUTS = 200
 
 
+def _initial_provider_revision(created: str, updated: str, deleted: str) -> bool:
+    """iLink can stamp a first delivery with matching create and update times."""
+    return deleted == '0' and updated in ('0', created)
+
+
 def pairing_text(value):
     """Normalize how people actually type or paste the one-time pairing code.
 
@@ -780,7 +785,7 @@ class RoomWeixin:
                     attachment_items.append((ordinal,item))
                 elif item['type']!=1:
                     content+='\n[未支持的外部消息分项]'
-            original = newest and not (prior or int(updated) or int(deleted))
+            original = newest and not prior and _initial_provider_revision(created, updated, deleted)
             replacement = None
             if newest and prior and prior['message_id'] and not int(deleted):
                 # An already-delivered conversation can show its newest
@@ -822,7 +827,7 @@ class RoomWeixin:
             scope=None
             if not auth:
                 body['owner_task_blocker']='CHANNEL_OWNER_NOT_APPROVED'
-            elif prior or not newest or int(updated) or int(deleted):
+            elif not original:
                 body['owner_task_blocker']='CHANNEL_OWNER_SOURCE_CHANGED'
             elif not int(created):
                 body['owner_task_blocker']='WEIXIN_SOURCE_TIME_MISSING'
@@ -889,13 +894,15 @@ class RoomWeixin:
         return None if follow and member and member['status'] in BLOCKED_MEMBERS else member
 
     def deferred_evidence(self, binding, owner, room, member, message):
-        created = int(uint64(message.get('create_time_ms', 0)))
+        created = uint64(message.get('create_time_ms', 0))
+        updated = uint64(message.get('update_time_ms', 0))
+        deleted = uint64(message.get('delete_time_ms', 0))
         peer = message.get('from_user_id')
         auth = self.store.one('''SELECT * FROM room_channel_owner_authorizations
             WHERE binding_id=? AND state='active' ''', (binding['id'],))
         if (not auth or not isinstance(peer, str) or not hmac.compare_digest(peer, binding['peer_id'])
-                or not created or created < int(auth['created'] * 1000)
-                or int(uint64(message.get('update_time_ms', 0))) or int(uint64(message.get('delete_time_ms', 0)))):
+                or created == '0' or int(created) < int(auth['created'] * 1000)
+                or not _initial_provider_revision(created, updated, deleted)):
             return {}
         scope = self.approved_scope(auth, binding, owner)
         if not scope or not scope['projects']:

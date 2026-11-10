@@ -98,7 +98,8 @@ async def test_deferred_weixin_replay_uses_first_observation_or_chat_only(collab
     room_id = identity['conversation_id']
     occupied = s.room_runtime.send({'conversation_id': room_id, 'body_text': '占用一个输入位置',
         'client_message_id': key(), 'idempotency_key': key()}, owner)['message']
-    response = packet(2, '检查原项目说明', create_time_ms=int(clock[0] * 1000))
+    created = int(clock[0] * 1000)
+    response = packet(2, '检查原项目说明', create_time_ms=created, update_time_ms=created)
     account_id = flow['account_id']
     before = s.store.one('SELECT cursor,last_sync_at FROM weixin_accounts WHERE id=?', (account_id,))
     deferred = s.weixin.commit_updates(s.weixin.claim_poll(account_id), response)
@@ -127,6 +128,8 @@ async def test_deferred_weixin_replay_uses_first_observation_or_chat_only(collab
     receipt = s.store.one('SELECT state FROM channel_inbound_failures WHERE id=?', (failure['id'],))
     assert receipt['state'] == 'committed'
     source_id = s.store.one("SELECT message_id FROM weixin_inbound WHERE external_id='2'")['message_id']
+    inbox = s.room_consumers.inbox(identity, worker)
+    assert [entry['object_id'] for entry in inbox['items'] if entry['kind'] == 'message'] == [source_id]
     source = s.store.one('SELECT * FROM collaboration_messages WHERE id=?', (source_id,))
     proof = s.room_work_bridge.native.input_authority.load(source)
     if historical:
