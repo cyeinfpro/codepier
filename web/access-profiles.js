@@ -36,6 +36,7 @@ window.CodePierProfiles = (() => {
       )
         return;
       const key = crypto.randomUUID();
+      let submission = null;
       const dialog = modal(
         saved ? '编辑访问 Profile' : '新建访问 Profile',
         `<form id="profile-form" class="profile-editor-grid"><section class="form-section"><h3>连接身份</h3><div class="field"><label for="profile-label">名称</label><input id="profile-label" name="label" required maxlength="80" value="${esc(saved?.label || '')}" placeholder="例如 NewAPI Dev / Codex Review"></div><div class="field"><label class="check"><input name="enabled" type="checkbox" ${!saved || saved.enabled ? 'checked' : ''}>启用此身份</label></div><div class="field"><label for="profile-role">关联角色</label><select id="profile-role" name="role_id"><option value="">不关联（固定授权）</option>${roles.map((role) => `<option value="${esc(role.id)}" ${saved?.role_id === role.id ? 'selected' : ''}>${esc(role.label)}${role.enabled ? '' : ' · 已暂停'}</option>`).join('')}</select><small>关联角色不会静默转换旧 grant。改绑另一个角色会令旧角色连接失效，需要明确重新授权。</small></div></section><section class="form-section" data-fixed-policy><h3>固定授权范围</h3>${permissionsHTML(S.projects, allScopes, {})}</section><section class="form-section" data-role-policy hidden><h3>当前角色政策</h3><div data-role-summary></div><p class="form-note">角色的后续能力与项目变化会作用于已同意的角色连接。</p></section><section class="form-section form-review profile-policy-note"><h3>影响范围</h3><p class="form-note">${esc(boundary)}</p><p class="form-note">固定连接仍取首次同意与 Profile 上限的交集；角色连接跟随关联角色的最新政策，包括新增项目。停用身份不等于停止命令，重新启用也不会复活已撤销的 grant。</p><p id="profile-save-status" class="form-note" role="status"></p></section></form>`,
@@ -84,6 +85,14 @@ window.CodePierProfiles = (() => {
                 }),
             ...(saved ? { expected_version: saved.version } : { idempotency_key: key }),
           };
+          const signature = JSON.stringify(body);
+          if (submission?.uncertain && submission.signature !== signature) {
+            status.textContent =
+              '上次请求尚需核对。请恢复原输入后重试，或先刷新 Profile 列表核对；不能改用新参数重发。';
+            return;
+          }
+          if (!submission || submission.signature !== signature)
+            submission = { signature, body, uncertain: false };
           const controls = $$('input,select', form),
             disabled = controls.map((x) => x.disabled);
           controls.forEach((x) => {
@@ -93,7 +102,7 @@ window.CodePierProfiles = (() => {
           try {
             await api('/api/access-profiles' + (id ? '/' + encodeURIComponent(id) : ''), {
               method: id ? 'PUT' : 'POST',
-              body: JSON.stringify(body),
+              body: JSON.stringify(submission.body),
             });
             if (
               S.session !== login ||
@@ -106,11 +115,15 @@ window.CodePierProfiles = (() => {
             toast('Profile 已保存；角色政策对角色连接生效，旧固定授权不自动转换');
             if (S.page === page) await renderPage(false);
           } catch (error) {
+            const ambiguous =
+              error.status >= 500 || error.status === 408 || error.code === 'NETWORK_UNCERTAIN';
+            submission.uncertain =
+              ambiguous ||
+              ['IDEMPOTENCY_CONFLICT', 'IDEMPOTENCY_RESPONSE_EXPIRED'].includes(error.code);
             if (S.session === login && dialog.isConnected)
-              status.textContent =
-                error.code === 'NETWORK_UNCERTAIN'
-                  ? '保存结果未确认。请先检查 Profile 列表；仅可使用原参数重试，不要重新创建。'
-                  : error.message;
+              status.textContent = ambiguous
+                ? '保存结果未确认。请先检查 Profile 列表；仅可使用原参数重试，不要重新创建。'
+                : error.message;
           } finally {
             if (S.session === login && dialog.isConnected)
               controls.forEach((x, i) => {

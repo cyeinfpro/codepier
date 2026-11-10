@@ -439,3 +439,59 @@ def test_install_online_updates_same_dialog_and_prefills_project(install_page):
     expect(page.locator('#project-form [name="root"]')).to_have_value('/Users/studio/Projects')
     expect(page.locator('#project-form [name="alias"]')).to_have_value('Projects')
     expect(page.locator('#project-form [name="access"]')).to_have_value('full')
+
+
+@pytest.mark.parametrize('failure', [503, 408, 'network'])
+def test_device_creation_uncertain_response_never_reposts(install_page, failure):
+    page, state = install_page
+    before = len(page.request.get(page.url.split('#')[0] + 'api/devices').json()['devices'])
+    calls = []
+    def committed_but_lost(route):
+        if route.request.method != 'POST':
+            route.continue_()
+            return
+        response = route.fetch()
+        assert response.ok
+        calls.append(route.request.post_data_json)
+        if failure == 'network':
+            route.abort('failed')
+        else:
+            route.fulfill(status=failure, json={'error': {'code': 'UPSTREAM_UNAVAILABLE', 'message': 'synthetic ambiguous response'}})
+    page.route('**/api/devices', committed_but_lost)
+    open_form(page)
+    fill_form(page)
+    page.click('#create-device')
+    expect(page.locator('#device-install-error')).not_to_have_text('')
+    # Reproduce the user's natural retry if the UI mistakenly permits it.
+    if page.locator('#create-device').is_enabled():
+        page.click('#create-device')
+        expect(page.locator('#device-install-error')).not_to_have_text('')
+    assert len(page.request.get(page.url.split('#')[0] + 'api/devices').json()['devices']) == before + 1
+    assert len(calls) == 1
+    expect(page.locator('#create-device')).to_be_disabled()
+    expect(page.locator('#device-install-error')).to_contain_text('请先查看电脑列表')
+    assert not state['tickets']
+
+
+def test_device_creation_definite_validation_failure_can_be_corrected(install_page):
+    page, state = install_page
+    attempts = []
+    def reject_first(route):
+        if route.request.method != 'POST':
+            route.continue_()
+            return
+        attempts.append(route.request.post_data_json)
+        if len(attempts) == 1:
+            route.fulfill(status=422, json={'error': {'code': 'INVALID_ARGUMENTS', 'message': '请修改输入'}})
+        else:
+            route.fallback()
+    page.route('**/api/devices', reject_first)
+    open_form(page)
+    fill_form(page)
+    page.click('#create-device')
+    expect(page.locator('#device-install-error')).to_have_text('请修改输入')
+    expect(page.locator('#create-device')).to_be_enabled()
+    page.locator('#device-form input[name="name"]').fill('Corrected fixture')
+    page.click('#create-device')
+    expect(page.locator('#agent-install-command')).to_have_value(state['command'])
+    assert len(attempts) == 2 and len(state['creates']) == 1

@@ -7,6 +7,7 @@ import pytest
 from playwright.sync_api import expect, sync_playwright
 from scripts.ui_comfort_audit import MEASURE
 from tests.browser_launch import launch_browser
+from tests.browser_support import open_chat_settings
 from tests.test_ui_unification import _login, _navigate, _prepare_native_fixture, _set_scheme
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -59,7 +60,16 @@ def test_editorial_composition_navigation_and_live_controls(stack,engine,scheme,
                 expect(page.locator('.codepier-focus-path,.codepier-focus-actions')).to_have_count(0)
             if route=='projects':
                 expect(page.locator('[data-project-row]')).to_have_count(page.evaluate('() => S.projects.length'))
-                expect(page.locator('[data-action="edit-project"]').first).to_be_visible()
+                row = page.locator('[data-project-row]').first
+                edit = row.locator('[data-action="edit-project"]')
+                # Secondary actions moved into the explicit More menu in 1.33.4.
+                expect(edit).to_be_hidden()
+                row.locator('.tool-menu > summary').click()
+                expect(edit).to_be_visible()
+                expect(edit).to_have_accessible_name('编辑')
+                edit.click(trial=True)
+                row.locator('.tool-menu > summary').click()
+                expect(edit).to_be_hidden()
                 page.fill('#project-query','__nothing__')
                 expect(page.locator('#project-no-match')).to_be_visible()
                 page.get_by_role('button',name='清除筛选').click()
@@ -72,6 +82,7 @@ def test_editorial_composition_navigation_and_live_controls(stack,engine,scheme,
                 page.locator('.chat-starters button').first.click()
                 expect(page.locator('#chat-compose')).not_to_have_value('')
                 page.fill('#chat-compose','保留草稿，不发送')
+                open_chat_settings(page)
                 page.locator('#chat-model-picker').click()
                 expect(page.locator('#chat-model-search')).to_be_visible()
                 page.keyboard.press('Escape')
@@ -96,6 +107,10 @@ def test_long_names_empty_states_and_colored_card_actions(stack,engine,width,hei
           document.querySelector('#page').innerHTML=projectsHTML();uiPageReady();
         }''')
         within(page,'.workspace-project-row,.workspace-project-actions,.workspace-project-path')
+        row = page.locator('.workspace-project-row').first
+        expect(row.locator('[data-action="edit-project"]')).to_be_hidden()
+        row.locator('.tool-menu > summary').click()
+        expect(row.locator('[data-action="edit-project"]')).to_be_visible()
         expect(page.locator('[data-action="edit-project"]').first).to_have_accessible_name(__import__('re').compile('编辑'))
         for btn in page.locator('.workspace-project-row').first.locator('button').all():
             btn.scroll_into_view_if_needed();btn.click(trial=True)

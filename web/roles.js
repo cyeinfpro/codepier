@@ -74,6 +74,7 @@ window.CodePierRoles = (() => {
       const role = id ? await api('/api/access-roles/' + encodeURIComponent(id)) : null;
       if (login !== S.session || page !== S.page || intent !== (S.modalIntent || 0)) return;
       const key = crypto.randomUUID();
+      let submission = null;
       const dialog = modal(
         role ? '编辑动态角色' : '新建动态角色',
         `<form id="role-form"><label class="field">角色名称<input name="label" maxlength="80" required value="${esc(role?.label || '')}" placeholder="例如 secretary / reviewer"></label><label class="check"><input type="checkbox" name="enabled" ${!role || role.enabled ? 'checked' : ''}>启用角色</label><p class="form-note">${esc(note)}</p><p class="form-note">${role ? `本次修改会作用于 ${role.bound_profiles} 个身份、${role.active_grants} 个未撤销角色授权。` : ''}每条规则仅对它选择的资源生效；不同规则可以叠加，但不会把某项目的执行权套用到其他项目。</p><div id="role-project-rules">${(role?.project_rules || []).map(projectRule).join('')}</div><button class="btn small" type="button" id="role-add-project-rule">添加项目规则</button><div id="role-device-rules">${(role?.device_rules || []).map(deviceRule).join('')}</div><button class="btn small" type="button" id="role-add-device-rule">添加设备委派</button><p class="form-note">完整 Shell 不是项目沙箱。暂停只阻止后续操作，不会回滚或自动终止已开始的任务。</p><p id="role-save-status" class="form-note" role="status"></p></form>`,
@@ -133,6 +134,14 @@ window.CodePierRoles = (() => {
             connector_rules: role?.connector_rules || [],
             ...(role ? { expected_version: role.version } : { idempotency_key: key }),
           };
+          const signature = JSON.stringify(body);
+          if (submission?.uncertain && submission.signature !== signature) {
+            status.textContent =
+              '上次请求尚需核对。请恢复原输入后重试，或先刷新角色列表核对；不能改用新参数重发。';
+            return;
+          }
+          if (!submission || submission.signature !== signature)
+            submission = { signature, body, uncertain: false };
           const controls = $$('input,select,textarea,button', form),
             disabled = controls.map((x) => x.disabled);
           controls.forEach((x) => {
@@ -142,14 +151,22 @@ window.CodePierRoles = (() => {
           try {
             await api('/api/access-roles' + (id ? '/' + encodeURIComponent(id) : ''), {
               method: id ? 'PUT' : 'POST',
-              body: JSON.stringify(body),
+              body: JSON.stringify(submission.body),
             });
             if (login !== S.session || !dialog.isConnected) return;
             closeModal(dialog);
             toast('角色已保存；现有角色连接按新政策执行');
             if (S.page === page) await renderPage(false);
           } catch (error) {
-            if (login === S.session && dialog.isConnected) status.textContent = error.message;
+            const ambiguous =
+              error.status >= 500 || error.status === 408 || error.code === 'NETWORK_UNCERTAIN';
+            submission.uncertain =
+              ambiguous ||
+              ['IDEMPOTENCY_CONFLICT', 'IDEMPOTENCY_RESPONSE_EXPIRED'].includes(error.code);
+            if (login === S.session && dialog.isConnected)
+              status.textContent = ambiguous
+                ? '保存结果未确认。请先核对角色列表；仅可使用原参数重试。'
+                : error.message;
           } finally {
             if (login === S.session && dialog.isConnected)
               controls.forEach((x, i) => {

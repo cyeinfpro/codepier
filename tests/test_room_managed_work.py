@@ -104,10 +104,20 @@ async def test_native_empty_room_reply_is_fenced_and_canonical(collab):
 
 
 @pytest.mark.asyncio
-async def test_native_project_request_starts_one_original_work_and_claims_it(collab):
+@pytest.mark.parametrize("recover_permissions", [False, True])
+async def test_native_project_request_starts_one_original_work_and_claims_it(collab, recover_permissions):
     s,owner,worker,clock,identity,credentials=await connected(collab,
         [{'project':'proj','environment_id':'production'}],
         [{'project_id':'proj','capabilities':['read'],'execution_targets':[]}])
+    if recover_permissions:
+        # Long-lived members survive expired enrollment codes and compacted
+        # enrollment responses, then execute through the real fenced receipt path.
+        from hub.collaboration.history_retention import RETIRED_RESPONSE
+        bridges=s.store.all("SELECT legacy_dot_id FROM room_member_work_bridges WHERE member_id=? AND state='active'", (identity['member_id'],))
+        for bridge in bridges:
+            s.store.execute('UPDATE collaboration_join_slots SET code_expires_at=? WHERE id=?', (clock[0]-1,bridge['legacy_dot_id']))
+        s.store.execute('UPDATE collaboration_idempotency SET response=?', (RETIRED_RESPONSE,))
+        save_room_permissions(s,owner,identity['conversation_id'],[{'project_id':'proj','capabilities':['read'],'execution_targets':[]}])
     sent=s.room_runtime.send({'conversation_id':identity['conversation_id'],'body_text':'请检查 README 并给出检查结果',
         'client_message_id':key(),'idempotency_key':key()},owner)['message']
     inbox=s.room_consumers.inbox(identity,worker)

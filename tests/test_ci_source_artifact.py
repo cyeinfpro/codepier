@@ -20,7 +20,8 @@ def workflow():
 def test_source_build_is_shared_and_static_checks_still_cover_both_platforms():
     jobs = workflow()
     assert jobs['verify']['strategy']['matrix']['shard'] == list(range(6))
-    assert jobs['verify']['needs'] == ['promotion', 'source']
+    assert jobs['verify']['needs'] == 'source'
+    assert 'promotion' not in jobs
     source_steps = jobs['source']['steps']
     verify_steps = jobs['verify']['steps']
     source = '\n'.join(step.get('run', '') for step in source_steps)
@@ -42,18 +43,25 @@ def test_source_build_is_shared_and_static_checks_still_cover_both_platforms():
 
 
 @pytest.mark.parametrize('reused', ['true', 'false'])
-@pytest.mark.parametrize('failed', [None, 'PROMOTION_RESULT', 'SOURCE_RESULT', 'WINDOWS_RESULT',
+@pytest.mark.parametrize('failed', [None, 'SOURCE_RESULT', 'WINDOWS_RESULT',
                                     'VERIFY_RESULT', 'COMPLETE_RESULT', 'OIDC_RESULT'])
-def test_release_gate_requires_the_selected_complete_path(reused, failed):
-    run = workflow()['release-gate']['steps'][0]['run']
-    env = dict(os.environ, REUSED=reused)
-    keys = ['PROMOTION_RESULT', 'SOURCE_RESULT', 'WINDOWS_RESULT', 'VERIFY_RESULT', 'COMPLETE_RESULT', 'OIDC_RESULT']
-    env.update({key: 'skipped' if reused == 'true' and key != 'PROMOTION_RESULT' else 'success' for key in keys})
+@pytest.mark.parametrize('failure_state', ['failure', 'skipped', 'cancelled', 'timed_out', ''])
+def test_full_regression_gate_requires_every_current_commit_job(reused, failed, failure_state):
+    gate = workflow()['release-gate']
+    assert set(gate['needs']) == {'source', 'windows-core', 'verify', 'complete', 'oidc-authentik'}
+    assert gate['if'] == "always() && !cancelled() && inputs.mode == 'full'"
+    step = gate['steps'][0]
+    expected = {'SOURCE_RESULT': 'source', 'WINDOWS_RESULT': 'windows-core',
+                'VERIFY_RESULT': 'verify', 'COMPLETE_RESULT': 'complete', 'OIDC_RESULT': 'oidc-authentik'}
+    assert step['env'] == {key: '${{ needs.' + job + '.result }}' for key, job in expected.items()}
+    # Legacy promotion/reuse flags must not bypass fresh full-commit evidence.
+    env = dict(os.environ, REUSED=reused, PROMOTION_RESULT='success')
+    env.update({key: 'success' for key in expected})
     if failed:
-        env[failed] = 'failure'
-    result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', run], env=env, capture_output=True, timeout=5)
-    accepted = failed is None
-    assert (result.returncode == 0) == accepted
+        env[failed] = failure_state
+    result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', step['run']],
+                            env=env, capture_output=True, timeout=5)
+    assert (result.returncode == 0) == (failed is None)
 
 
 @pytest.fixture

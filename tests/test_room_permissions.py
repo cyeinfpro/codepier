@@ -324,3 +324,61 @@ def test_project_capacity_is_consistent_through_room_work_contracts():
         assert 'maxItems' not in model.model_json_schema()['properties']['execution_targets']
     # Participant capacity is independent of room project and target selection.
     assert collaboration.GoalCreate.model_json_schema()['properties']['participant_grant_ids']['maxItems'] == 16
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("receipt_state", ["missing", "retired"])
+@pytest.mark.parametrize("add_project", [False, True])
+async def test_permission_save_reuses_registered_adapter_after_join_receipt_retention(collab, receipt_state, add_project):
+    """An enrolled adapter must not redeem its short-lived invite on policy save."""
+    from tests.test_room_managed_work import connected
+    service, owner, worker, clock, joined, _ = await connected(collab, scopes=[rule()])
+    cid = joined['conversation_id']
+    bridge = service.store.one("SELECT * FROM room_member_work_bridges WHERE member_id=? AND state='active'", (joined['member_id'],))
+    dot_id = bridge['legacy_dot_id']
+    service.store.execute('UPDATE collaboration_join_slots SET code_expires_at=? WHERE id=?', (clock[0] - 1, dot_id))
+    # A retained binding must not depend on the old enrollment response payload.
+    from hub.collaboration.common import digest
+    from hub.collaboration.history_retention import RETIRED_RESPONSE
+    dot = service.dots.find(dot_id)
+    partition = service.store.one('SELECT * FROM collaboration_rooms WHERE id=?', (dot['room_id'],))
+    join_key = 'room-adapter-join:' + digest([dot_id, joined['binding_generation'], worker.grant_id])
+    receipt_id = digest([partition['space_id'], partition['owner_user_id'], worker.grant_id,
+                         'dot_join', partition['id'], join_key])
+    assert service.store.one('SELECT id FROM collaboration_idempotency WHERE id=?', (receipt_id,))
+    if receipt_state == 'missing':
+        service.store.execute('DELETE FROM collaboration_idempotency WHERE id=?', (receipt_id,))
+    else:
+        service.store.execute('UPDATE collaboration_idempotency SET response=? WHERE id=?',
+                              (RETIRED_RESPONSE, receipt_id))
+    before = service.room_permissions.read(cid, owner)['version']
+    result = save(service, owner, cid, [rule(), rule('otherproj')] if add_project else [rule()])
+    assert result['version'] == before + 1
+    assert len(result['scope']['project_scopes']) == (2 if add_project else 1)
+    current = service.store.one("SELECT * FROM room_member_work_bridges WHERE member_id=? AND state='active'", (joined['member_id'],))
+    assert current['legacy_dot_id'] == dot_id
+    assert service.store.one('SELECT state FROM collaboration_join_slots WHERE id=?', (dot_id,))['state'] == 'registered'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('boundary', ['binding', 'approval'])
+async def test_registered_adapter_recovery_preserves_identity_and_owner_proof(collab, boundary, monkeypatch):
+    from tests.test_room_managed_work import connected
+    service, owner, _, _, joined, _ = await connected(collab, scopes=[rule()])
+    cid = joined['conversation_id']
+    bridge = service.store.one("SELECT * FROM room_member_work_bridges WHERE member_id=? AND state='active'", (joined['member_id'],))
+    if boundary == 'binding':
+        service.store.execute("UPDATE collaboration_join_slots SET grant_id='other-identity' WHERE id=?", (bridge['legacy_dot_id'],))
+        expected = 'ROOM_WORK_BINDING_CHANGED'
+    else:
+        original_find = service.dots.find
+        def invalid_approval(identifier):
+            dot = original_find(identifier)
+            return {**dot, 'setup_digest': 'invalid-proof'} if identifier == bridge['legacy_dot_id'] else dot
+        monkeypatch.setattr(service.dots, 'find', invalid_approval)
+        expected = 'DOT_APPROVAL_CHANGED'
+    before = service.room_permissions.read(cid, owner)['version']
+    with pytest.raises(DevError) as error:
+        save(service, owner, cid, [rule()])
+    assert error.value.code == expected
+    assert service.room_permissions.read(cid, owner)['version'] == before

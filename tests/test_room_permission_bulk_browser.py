@@ -265,3 +265,70 @@ def test_permission_continuation_reviews_and_submits_exact_selection(
         assert saved_requests[0]['idempotency_key']
     finally:
         context.close()
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+@pytest.mark.parametrize('code,status', [('JOIN_CODE_EXPIRED', 409), ('INVALID_SCOPE', 422),
+                                        ('IDEMPOTENCY_CONFLICT', 409), ('IDEMPOTENCY_RESPONSE_EXPIRED', 409),
+                                        ('STALE_VERSION', 409), ('NETWORK_UNCERTAIN', 0)])
+def test_permission_save_errors_preserve_identity_and_real_conflicts(
+        collaboration_stack, chat_browser_pool, engine, code, status):
+    stack = collaboration_stack
+    context = chat_browser_pool(engine).new_context()
+    page = context.new_page()
+    attempts = []
+    try:
+        path = open_permissions(page, stack, 'Permission error recovery')
+        original = stack.must(stack.client.get(path))
+
+        def save(route):
+            if route.request.method != 'PUT':
+                route.continue_()
+                return
+            attempts.append(route.request.post_data_json)
+            if len(attempts) == 1 or (code in {'IDEMPOTENCY_CONFLICT', 'IDEMPOTENCY_RESPONSE_EXPIRED'} and len(attempts) == 2):
+                if code == 'NETWORK_UNCERTAIN':
+                    response = route.fetch()
+                    assert response.ok, response.text()
+                    route.abort('failed')
+                else:
+                    route.fulfill(status=status, json={'error': {
+                        'code': code, 'message': 'Synthetic permission rejection'}})
+            else:
+                route.continue_()
+
+        page.route('**' + path, save)
+        form = page.locator('[data-cr-form="permissions"]')
+        submit = form.locator('button[type="submit"]')
+        submit.click()
+        error = page.locator('[data-cr-panel-error]')
+        if code == 'NETWORK_UNCERTAIN':
+            recovery = page.locator('[data-cr-panel-recovery] [data-cr-action="recover-action"]')
+            expect(recovery).to_be_visible()
+            # Changed draft must not replace the uncertain serialized request.
+            form.locator('[data-permission-select-all]').first.check()
+            recovery.click()
+            expect(page.locator('dialog.cr-panel')).not_to_be_visible()
+            assert len(attempts) == 2 and attempts[0] == attempts[1]
+            assert stack.must(stack.client.get(path))['version'] == original['version'] + 1
+        elif code in {'IDEMPOTENCY_CONFLICT', 'IDEMPOTENCY_RESPONSE_EXPIRED'}:
+            expect(error).to_contain_text('Synthetic permission rejection')
+            expect(error).not_to_contain_text('权限已在其他位置更新')
+            with page.expect_response(lambda r: r.request.method == 'PUT' and r.url.endswith('/permissions')):
+                submit.click()
+            assert len(attempts) == 2 and attempts[0] == attempts[1]
+        else:
+            if code == 'STALE_VERSION':
+                expect(error).to_contain_text('权限已在其他位置更新')
+                submit.click()
+                assert len(attempts) == 1
+                page.locator('[data-cr-action="reload-permissions"]').click()
+                expect(form).to_be_visible()
+            else:
+                expect(error).to_contain_text('Synthetic permission rejection')
+                expect(error).not_to_contain_text('权限已在其他位置更新')
+                form.locator('[data-permission-select-all]').first.check()
+            submit_permissions(page, closes=code != 'STALE_VERSION')
+            assert len(attempts) == 2
+            assert attempts[0]['idempotency_key'] != attempts[1]['idempotency_key']
+    finally:
+        context.close()

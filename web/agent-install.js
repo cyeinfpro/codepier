@@ -104,7 +104,10 @@ async function agentInstallSetup(device = null) {
       );
     } catch (cause) {
       if (!current()) return;
-      const uncertain = cause.code === 'NETWORK_UNCERTAIN';
+      // Creation has no replay identity: an upstream timeout/server failure may
+      // arrive after the device was committed. Never offer a blind second POST.
+      const uncertain =
+        cause.code === 'NETWORK_UNCERTAIN' || cause.status === 408 || cause.status >= 500;
       error.textContent = uncertain ? '暂时无法确认是否已添加。请先查看电脑列表。' : cause.message;
       button.disabled = uncertain;
     }

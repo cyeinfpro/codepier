@@ -2251,13 +2251,26 @@ window.CodePierCollaboration = (() => {
         throw error;
       if (current === panel) {
         panelError(error.message);
-        if (error.status === 409) {
-          if (current?.name === 'permissions') {
-            if (retryableContinuationPreview.has(error.code)) throw error;
+        if (current?.name === 'permissions') {
+          // A rejected permission write may be corrected, but an uncertain
+          // result or reused identity must retain its original recovery key.
+          if (
+            error.status >= 400 &&
+            error.status < 500 &&
+            error.status !== 408 &&
+            !['NETWORK_UNCERTAIN', 'IDEMPOTENCY_CONFLICT', 'IDEMPOTENCY_RESPONSE_EXPIRED'].includes(
+              error.code,
+            )
+          )
+            current.key = store.key();
+          if (error.code === 'STALE_VERSION') {
             current.stale = true;
             panelError('权限已在其他位置更新。你的选择尚未保存，请重新载入后核对。');
-            throw error;
           }
+          // Other 409s are business errors, not proof of a newer policy.
+          throw error;
+        }
+        if (error.status === 409) {
           await store.refresh().catch(() => {});
           if (current !== panel || owner !== state.owner || epoch !== state.epoch) throw error;
           panelError('房间刚有更新。你的选择已保留，请核对后再次保存。');

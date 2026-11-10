@@ -92,8 +92,8 @@ class RoomWorkBridge:
                     (member_id,legacy_dot_id,scope_revision,scope_digest,project_id,environment_id,created,updated,binding_generation)
                     VALUES (?,?,?,?,?,?,?,?,?)""",
                     (member['id'],identifier,scope['version'],fingerprint,scope['project_id'],scope['environment_id'],now,now,member['binding_generation']))
-                self.lifetime(member,scope,identifier)
                 dot=self.c.dots.find(identifier)
+            self.lifetime(member,scope,dot['id'])
             if chosen is None or dot['id']==member.get('legacy_dot_id'):
                 chosen=dot
         if chosen and chosen['id']!=member.get('legacy_dot_id'):
@@ -127,11 +127,13 @@ class RoomWorkBridge:
         return record,scopes[0]
 
     def lifetime(self,member,scope,identifier):
+        # Native room approval is the lifetime authority; the legacy adapter's
+        # default seven days must not truncate an explicit room deadline.
         if scope['lifetime_mode']=='until_revoked':
             self.store.execute("UPDATE collaboration_join_slots SET lifetime_mode='until_revoked',lifetime_authorization_id=? WHERE id=?",
                 ('room-member:'+member['id'],identifier))
         else:
-            self.store.execute("UPDATE collaboration_join_slots SET lifetime_mode='timed',lifetime_authorization_id=?,expires_at=MIN(expires_at,?) WHERE id=?",
+            self.store.execute("UPDATE collaboration_join_slots SET lifetime_mode='timed',lifetime_authorization_id=?,expires_at=? WHERE id=?",
                 ('room-member:'+member['id'],scope['expires_at'],identifier))
 
     def bind(self,member,principal):
@@ -157,9 +159,19 @@ class RoomWorkBridge:
             slot=self.store.one('SELECT * FROM collaboration_join_slots WHERE id=?',(dot['id'],))
             if slot['state']=='registered' and slot['grant_id']!=principal.grant_id:
                 raise DevError('ROOM_WORK_BINDING_CHANGED','原执行连接属于另一个身份，请明确更换成员绑定',409)
-            result=self.c.dots.join({'code':slot['join_code'],
-                'idempotency_key':'room-adapter-join:'+digest([dot['id'],member['binding_generation'],principal.grant_id])},principal,
-                room_member_id=member['id'])
+            if slot['state'] == 'registered':
+                # Enrollment codes and their replay receipts are short-lived;
+                # the verified member binding is durable. Recover that binding
+                # instead of redeeming its expired code on every policy save.
+                request = {'project': scope['project_id'], 'environment_id': scope['environment_id'],
+                           'dot_id': dot['id']}
+                _, actor, room, _, current_dot = self.c.dots.scope(request, principal)
+                self.c.dots.approved_owner(room, current_dot, actor)
+                result = self.c.dots.connection(request, actor)
+            else:
+                result=self.c.dots.join({'code':slot['join_code'],
+                    'idempotency_key':'room-adapter-join:'+digest([dot['id'],member['binding_generation'],principal.grant_id])},principal,
+                    room_member_id=member['id'])
             dot=self.c.dots.find(dot['id'])
             policy=self.store.one('SELECT * FROM delegation_policies WHERE id=?',(dot['policy_id'],))
             self.store.execute("""UPDATE room_member_work_bridges SET policy_id=?,policy_version=?,policy_digest=?,updated=? WHERE legacy_dot_id=?""",
@@ -168,7 +180,7 @@ class RoomWorkBridge:
                 self.store.execute("UPDATE delegation_policies SET lifetime_mode='until_revoked',lifetime_authorization_id=? WHERE id=?",
                     ('room-member:'+member['id'],policy['id']))
             else:
-                self.store.execute("UPDATE delegation_policies SET lifetime_mode='timed',lifetime_authorization_id=?,expires_at=MIN(expires_at,?) WHERE id=?",
+                self.store.execute("UPDATE delegation_policies SET lifetime_mode='timed',lifetime_authorization_id=?,expires_at=? WHERE id=?",
                     ('room-member:'+member['id'],scope['expires_at'],policy['id']))
             results.append(result)
         return results

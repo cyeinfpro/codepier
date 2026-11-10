@@ -7,16 +7,16 @@
       "bytes": 908
     },
     "access-profiles.js": {
-      "sha256": "bff61df52c95d04ac2690fb8e6adb8fdff19a7ac7e58b242d8a7feb9a95b214f",
-      "bytes": 15762
+      "sha256": "afd51091c1148c13788faa38d3deefe2f96be443351179dcdb4f5cfd87c15083",
+      "bytes": 16501
     },
     "access.js": {
       "sha256": "b589d8801a544dd6531adf43eeb97ea2b67eab450ea4412643711fab7c81d66b",
       "bytes": 7868
     },
     "agent-install.js": {
-      "sha256": "74f4d4981e47593ec21cf0f1607bf68db8c5e31446b7867c1c27dd90ea4f4a01",
-      "bytes": 32710
+      "sha256": "553b9f9fab4e6a2343438dac9d2e0b10ce0a46dd277d61ef21bbb2f15f47f3ac",
+      "bytes": 32927
     },
     "agent-roots.css": {
       "sha256": "c2bd26edc5cc69fd07625c816274c79367cb5309c83970ab0de255fb50d88b4b",
@@ -83,8 +83,8 @@
       "bytes": 49698
     },
     "collaboration-room.js": {
-      "sha256": "84a26e4526af22eef8433f0c125a1194001c24128ec01f3c2c45083ce201776d",
-      "bytes": 214483
+      "sha256": "a88910285cb324ba30729efc086fef994f20721876dabbda5a5a8bd3bfedada4",
+      "bytes": 215002
     },
     "computer.css": {
       "sha256": "031dff13225cec17fc8d445c565feccddd0db33fc277d28a468e19060a54eed2",
@@ -171,8 +171,8 @@
       "bytes": 16915
     },
     "roles.js": {
-      "sha256": "832649b780a3b592472ebaa16ccc4147fa77e95ab41b53e7400c5c092446977a",
-      "bytes": 12022
+      "sha256": "c54b877839cb9ad3b5c6557195e494e5a2f0debd88ea61a8e8ebd924e41e9240",
+      "bytes": 12947
     },
     "settings-file-import.js": {
       "sha256": "5a692d6b03d2c48e46299f95fe160d5b4af5e8f9495eab48b7c1786dcecd4405",

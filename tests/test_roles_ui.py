@@ -98,3 +98,87 @@ def test_explicit_role_oauth_and_live_new_project_without_reconnect(role_page,st
     assert {item['id'] for item in context['projects']} >= {project['id'] for project in stack.projects}
     assert data(call(stack.client,token,'get_profile'))['id']==p['id']
     assert not errors,errors
+
+@pytest.mark.parametrize("failure", ["network", "server", "conflict", "expired"])
+def test_uncertain_role_creation_cannot_change_original_request(role_page, stack, failure):
+    page, errors = role_page
+    label = 'Recover role ' + uuid.uuid4().hex[:8]
+    page.click('#role-create')
+    form = page.locator('#role-form')
+    form.locator('[name="label"]').fill(label)
+    page.click('#role-add-project-rule')
+    form.locator('[name="project"][value="' + stack.project['id'] + '"]').check()
+    requests = []
+    def save_then_disconnect(route):
+        if route.request.method != 'POST':
+            return route.continue_()
+        requests.append(route.request.post_data_json)
+        if len(requests) == 1:
+            response = route.fetch()
+            assert response.ok
+            if failure == 'network':
+                route.abort('failed')
+            elif failure == 'server':
+                route.fulfill(status=503, content_type='application/json',
+                              body='{"error": {"code": "SERVICE_UNAVAILABLE", "message": "响应未确认"}}')
+            else:
+                code, message = ('IDEMPOTENCY_CONFLICT', '原请求键已用于其他参数') if failure == 'conflict' else (
+                    'IDEMPOTENCY_RESPONSE_EXPIRED', '原请求已执行，历史响应已清理')
+                route.fulfill(status=409, content_type='application/json',
+                              body='{"error": {"code": "' + code + '", "message": "' + message + '"}}')
+        else:
+            route.continue_()
+    page.route('**/api/access-roles', save_then_disconnect)
+    page.locator('button[form="role-form"]').click()
+    first_message = {'conflict': '原请求键已用于其他参数', 'expired': '原请求已执行，历史响应已清理'}.get(failure, '未确认')
+    expect(page.locator('#role-save-status')).to_contain_text(first_message)
+    form.locator('[name="label"]').fill(label + ' changed')
+    page.locator('button[form="role-form"]').click()
+    expect(page.locator('#role-save-status')).to_contain_text('恢复原输入')
+    assert len(requests) == 1
+    form.locator('[name="label"]').fill(label)
+    page.locator('button[form="role-form"]').click()
+    expect(form).to_have_count(0)
+    assert len(requests) == 2 and requests[0] == requests[1]
+    roles = stack.must(stack.client.get('/api/access-roles'))['roles']
+    assert len([p for p in roles if p['label'].startswith(label)]) == 1
+    assert not errors, errors
+
+
+@pytest.mark.parametrize("concurrent", [False, True])
+def test_uncertain_role_update_retries_original_without_overwriting_concurrent(role_page, stack, concurrent):
+    page, errors = role_page
+    label = 'Update role ' + uuid.uuid4().hex[:8]
+    saved = stack.must(stack.client.post('/api/access-roles', json={'label': label, 'project_rules': [{'actions': ['read'], 'projects': [stack.project['id']]}], 'device_rules': [], 'idempotency_key': uuid.uuid4().hex}))
+    page.reload()
+    page.locator('[data-role-edit="' + saved['id'] + '"]').click()
+    form = page.locator('#role-form')
+    form.locator('[name="label"]').fill(label + ' saved')
+    requests = []
+    def update_then_disconnect(route):
+        if route.request.method != 'PUT':
+            return route.continue_()
+        requests.append(route.request.post_data_json)
+        response = route.fetch()
+        if len(requests) == 1:
+            assert response.ok
+            route.abort('failed')
+        else:
+            route.fulfill(response=response)
+    page.route('**/api/access-roles/' + saved['id'], update_then_disconnect)
+    page.locator('button[form="role-form"]').click()
+    expect(page.locator('#role-save-status')).to_contain_text('未确认')
+    if concurrent:
+        current = stack.must(stack.client.get('/api/access-roles/' + saved['id']))
+        changed = dict(requests[0], label=label + ' concurrent', expected_version=current['version'])
+        stack.must(stack.client.put('/api/access-roles/' + saved['id'], json=changed))
+    page.locator('button[form="role-form"]').click()
+    if concurrent:
+        expect(page.locator('#role-save-status')).to_contain_text('其他')
+    else:
+        expect(form).to_have_count(0)
+    assert len(requests) == 2 and requests[0] == requests[1]
+    current = stack.must(stack.client.get('/api/access-roles/' + saved['id']))
+    assert current['label'] == label + (' concurrent' if concurrent else ' saved')
+    assert current['version'] == saved['version'] + (2 if concurrent else 1)
+    assert not errors, errors
