@@ -124,6 +124,10 @@ def migrate_delivery_order(db):
         ('kind', "TEXT NOT NULL DEFAULT 'reply'"),
         ('status_code', "TEXT NOT NULL DEFAULT ''"),
         ('projection_message_id', 'TEXT'),
+        ('ordering_revision', 'INTEGER NOT NULL DEFAULT 1'),
+        ('ordering_evidence', "TEXT NOT NULL DEFAULT ''"),
+        ('ordering_schema_version', 'INTEGER NOT NULL DEFAULT 1'),
+        ('ordering_checked_version', 'INTEGER NOT NULL DEFAULT 0'),
     ):
         if name not in columns:
             db.execute(f'ALTER TABLE weixin_deliveries ADD COLUMN {name} {definition}')
@@ -131,6 +135,14 @@ def migrate_delivery_order(db):
         ON weixin_deliveries(binding_id,generation,peer_id,ordering_key,created)''')
     db.execute('''CREATE INDEX IF NOT EXISTS weixin_delivery_projection
         ON weixin_deliveries(projection_message_id) WHERE projection_message_id IS NOT NULL''')
+    db.execute('''CREATE INDEX IF NOT EXISTS weixin_order_pending
+        ON weixin_deliveries(id) WHERE ordering_checked_version<2''')
+    db.execute('''CREATE INDEX IF NOT EXISTS weixin_order_dependency
+        ON weixin_deliveries(depends_on_delivery_id) WHERE depends_on_delivery_id IS NOT NULL''')
+    db.execute('''CREATE TABLE IF NOT EXISTS weixin_order_migrations(
+        name TEXT PRIMARY KEY,last_delivery_id TEXT NOT NULL DEFAULT '',
+        checked_count INTEGER NOT NULL DEFAULT 0,changed_count INTEGER NOT NULL DEFAULT 0,
+        unresolved_count INTEGER NOT NULL DEFAULT 0,started_at REAL NOT NULL,finished_at REAL)''')
     if not new_order:
         return
     db.execute("""UPDATE weixin_deliveries AS d
