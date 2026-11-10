@@ -4,8 +4,32 @@ import json
 import secrets
 
 from hub.collaboration.common import canonical, digest
+from hub.collaboration.telemetry import Action, Channel, Reason, Stage, collaboration_telemetry
 
 MAX_PREPARATION_FAILURES = 5
+BACKLOG_SAMPLE_LIMIT = 200
+BACKLOG_STATES = ('queued', 'waiting_context', 'waiting_media', 'preparing', 'sending', 'attention', 'unknown')
+
+
+def record_metric(stage, reason=Reason.NONE):
+    collaboration_telemetry.record(Action.WEIXIN_SEND, stage, channel=Channel.WEIXIN, reason=reason)
+
+
+def record_transition(store, stage, reason=Reason.NONE):
+    store.after_commit(lambda: record_metric(stage, reason))
+
+
+def backlog_snapshot(store, now):
+    """Bounded operational inventory, measured from original enqueue time."""
+    states = []
+    for state in BACKLOG_STATES:
+        rows = store.all("""SELECT created FROM weixin_parts WHERE state=?
+            ORDER BY created,id LIMIT ?""", (state, BACKLOG_SAMPLE_LIMIT + 1))
+        created = rows[0]['created'] if rows else None
+        states.append({'state': state, 'count_lower_bound': len(rows),
+                       'truncated': len(rows) > BACKLOG_SAMPLE_LIMIT,
+                       'oldest_enqueued_age_seconds': now - created if created is not None and now >= created else None})
+    return {'observed_at': now, 'states': states}
 
 
 def migrate(db):
@@ -15,6 +39,8 @@ def migrate(db):
             PRIMARY KEY(account_id,peer_id))""",
         """CREATE INDEX IF NOT EXISTS weixin_admission_sequence
             ON weixin_peer_admission(last_admitted_sequence)""",
+        """CREATE INDEX IF NOT EXISTS weixin_parts_state_age
+            ON weixin_parts(state,created,id)""",
         """CREATE TABLE IF NOT EXISTS weixin_account_cooldown(
             account_id TEXT PRIMARY KEY, retry_at REAL NOT NULL)""",
         """CREATE TABLE IF NOT EXISTS weixin_dispatch_attempts(
@@ -104,7 +130,9 @@ def adopt_late(store, now):
             SELECT MAX(lease_fence) FROM weixin_dispatch_attempts WHERE part_id=p.id)
         ORDER BY o.observed_at,p.id LIMIT 100""")
     for row in rows:
-        store.execute("""UPDATE weixin_parts SET state='accepted',provider_receipt=?,
+        updated = store.execute("""UPDATE weixin_parts SET state='accepted',provider_receipt=?,
             reason_code='provider_accepted_late',updated=? WHERE id=? AND state='unknown'""",
             (row['receipt'], now, row['id']))
+        if updated.rowcount:
+            record_transition(store, Stage.ACCEPTED)
     return {row['delivery_id'] for row in rows}
