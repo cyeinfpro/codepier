@@ -23,6 +23,12 @@ class RoomRead(Model):
     conversation_id: Identifier
 
 
+class RoomDiagnosticsRead(RoomRead):
+    member_id: Identifier | None = None
+    delivery_id: Identifier | None = None
+    cursor: str = Field(default='', max_length=2048)
+
+
 class RoomList(Model):
     cursor: str = Field(default='', max_length=2048)
     limit: int = Field(default=40, ge=1, le=100)

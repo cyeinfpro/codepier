@@ -79,6 +79,12 @@ def migrate_dispatch(db):
     db.execute("""CREATE INDEX IF NOT EXISTS mcp_event_deliveries_head
         ON mcp_event_deliveries(subscription_id,event_seq)
         WHERE state IN ('pending','retry_wait','leased')""")
+    # A retained wake identifies an exact pre-send merge. Old rows retain
+    # their reason, but cannot be attributed to a retained wake retroactively.
+    if 'coalesced_into_delivery_id' not in {row[1] for row in db.execute('PRAGMA table_info(mcp_event_deliveries)')}:
+        db.execute("ALTER TABLE mcp_event_deliveries ADD COLUMN coalesced_into_delivery_id TEXT NOT NULL DEFAULT ''")
+    db.execute("""CREATE INDEX IF NOT EXISTS mcp_event_deliveries_diagnostics
+        ON mcp_event_deliveries(subscription_id,event_seq DESC)""")
     # Global concurrency checks must visit only currently leased deliveries,
     # not all accepted/abandoned history retained for audit and replay.
     db.execute("""CREATE INDEX IF NOT EXISTS mcp_event_deliveries_live_leases
@@ -618,15 +624,17 @@ class EventService:
             AND json_extract(e.data,'$.binding_generation')=?"""
         parameters = (subscription['id'], subscription['name'],
                       filters.get('member_id') or filters.get('slot_id'), filters['binding_generation'])
-        latest = self.store.one('SELECT MAX(d.event_seq) AS n ' + eligible, parameters)['n']
-        if latest is None:
+        latest = self.store.one('SELECT d.id,d.event_seq ' + eligible + ' ORDER BY d.event_seq DESC LIMIT 1',
+                                parameters)
+        if not latest:
             return
         old = self.store.all('SELECT d.id ' + eligible + ' AND d.event_seq<? ORDER BY d.event_seq LIMIT 100',
-                             (*parameters, latest))
+                             (*parameters, latest['event_seq']))
         if old:
             self.store.execute("""UPDATE mcp_event_deliveries SET state='abandoned',
-                reason_code='mailbox_coalesced',fence=fence+1
-                WHERE id IN (SELECT value FROM json_each(?))""", (canonical([row['id'] for row in old]),))
+                reason_code='mailbox_coalesced',coalesced_into_delivery_id=?,fence=fence+1
+                WHERE id IN (SELECT value FROM json_each(?))""",
+                (latest['id'], canonical([row['id'] for row in old])))
 
     def discover_deliveries(self, now):
         """Materialize one bounded outbox page, independently of send fairness.
