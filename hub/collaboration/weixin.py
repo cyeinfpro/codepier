@@ -110,6 +110,12 @@ class WeixinService:
         self.c.grant_reader(room, slot['grant_id'], snapshot=json.loads(binding['dot_principal']))
         return binding, account, owner, room, dot
 
+    def valid_inbound(self, identifier, *, pairing=False):
+        binding = self.store.one('SELECT * FROM weixin_bindings WHERE id=?', (identifier,))
+        if binding and binding.get('native_member_id'):
+            return self.c.room_channels.native.inbound(identifier, pairing=pairing)
+        return self.valid(identifier, pairing=pairing)
+
     def import_account(self, raw, principal, *, renewal=None):
         with self.store.transaction():
             args, principal, room = self.owner(raw, principal, models.AccountImport)
@@ -351,7 +357,7 @@ class WeixinService:
             if not binding:
                 return None
             try:
-                current, account, *_ = self.valid(binding['id'], pairing=True)
+                current, account, *_ = self.valid_inbound(binding['id'], pairing=True)
             except DevError as exc:
                 # Persist backoff even when authorization fails before acquiring
                 # a poll. Otherwise a few invalid accounts monopolize every scan.
@@ -374,7 +380,7 @@ class WeixinService:
     def commit_updates(self, claim, response):
         with self.store.transaction():
             self.poll_current(claim)
-            binding, account, owner, room, dot = self.valid(claim['binding_id'], pairing=True)
+            binding, account, owner, room, dot = self.valid_inbound(claim['binding_id'], pairing=True)
             if binding['version'] != claim['binding_version'] or binding['generation'] != claim['generation']:
                 raise DevError('WEIXIN_BINDING_CHANGED', '轮询期间房间绑定变化，丢弃旧批次且不前移游标', 409)
             validate_updates(response)
@@ -385,8 +391,13 @@ class WeixinService:
             for message in messages:
                 binding = self.store.one('SELECT * FROM weixin_bindings WHERE id=?', (binding['id'],))
                 scope = {'binding_id': binding['id'], 'version': binding['version'], 'generation': binding['generation']}
+                capture = None
+                if binding.get('native_member_id'):
+                    capture = lambda: self.c.room_channels.native.deferred_evidence(
+                        binding, owner, room, dot, message)
                 receipt, _ = channel_inbound.isolate(self, 'weixin', account, scope, message,
-                    lambda: self.ingest_one(binding, account, owner, room, dot, message))
+                    lambda: self.ingest_one(binding, account, owner, room, dot, message),
+                    deferred_evidence=capture)
                 if receipt:
                     received.append(receipt)
             # Canonical message, ordered attachment jobs, Dot inbox, dedup and
@@ -397,10 +408,10 @@ class WeixinService:
                  self.c.clock(), self.c.clock(), account['id'], claim['poll_owner'], claim['poll_fence']))
             return {'committed': True, 'message_ids': received, 'cursor_persisted': bool(cursor)}
 
-    def ingest_one(self, binding, account, owner, room, dot, message):
+    def ingest_one(self, binding, account, owner, room, dot, message, *, deferred=None):
         incoming_items(message)
         if binding.get('native_member_id'):
-            return self.c.room_channels.native.ingest(binding,account,owner,room,dot,message)
+            return self.c.room_channels.native.ingest(binding,account,owner,room,dot,message,deferred=deferred)
         self.c.rooms.migration.legacy_write(binding['conversation_id'])
         if not isinstance(message, dict):
             raise DevError('WEIXIN_MESSAGE_INVALID', '消息不是结构化对象；整批保留原游标', 422)
@@ -579,9 +590,17 @@ class WeixinService:
                         or account['generation'] != saved['generation']):
                     channel_inbound.stale(self, row)
                     continue
+                try:
+                    current, current_account, owner, room, dot = self.valid_inbound(binding['id'])
+                except DevError as exc:
+                    if exc.code == 'ROOM_PAUSED':
+                        break
+                    channel_inbound.stale(self, row)
+                    continue
+
                 def ingest():
-                    current, current_account, owner, room, dot = self.valid(binding['id'])
-                    return self.ingest_one(current, current_account, owner, room, dot, saved['source'])
+                    return self.ingest_one(current, current_account, owner, room, dot, saved['source'],
+                                           deferred=saved.get('authority') or {})
                 _, failure = channel_inbound.isolate(self, 'weixin', account, scope, saved['source'], ingest, replay=True)
                 if failure.startswith('deferred:'):
                     break

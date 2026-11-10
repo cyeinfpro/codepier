@@ -329,6 +329,10 @@ def event_help(name, *, detail='brief'):
               'required_filters': schema.get('required', []), 'consume': _GUIDES[name],
               'subscription': ('Subscribe separately for this binding. Delivery and synthetic tests grant no execution rights. '
                                'When updating triggers, supply the complete desired list.')}
+    if name == ROOM_INBOX_EVENT:
+        result['renewal'] = {'host': 'Persist the original subscription ID, callback identity, signing key, and last signed cursor. Renew the same subscription before refreshBefore.',
+            'managed': 'A room owner can approve renewal of this verified connection. Hub rechecks the original grant and callback. Unsubscribe stops renewal.',
+            'restore': 'Use the original signed cursor when available. Observe truncated and resume pending room inbox work with a fresh ticket.'}
     if detail == 'schema':
         definition_for_help = definition(name, unified=True, exact=True)
         result.update(inputSchema=definition_for_help['inputSchema'], payloadSchema=definition_for_help['payloadSchema'])

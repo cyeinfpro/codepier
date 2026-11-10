@@ -13,11 +13,13 @@ import json
 import uuid
 
 from hub.collaboration.common import canonical, digest
+from hub.collaboration.room_continuations import RoomContinuations, migrate as migrate_continuations
 from hub.principal import Principal, refresh_principal
 from shared.util import DevError
 
 
 def migrate(db):
+    migrate_continuations(db)
     db.execute('''CREATE TABLE IF NOT EXISTS room_goal_recovery_revisions(
         id TEXT PRIMARY KEY,goal_id TEXT NOT NULL REFERENCES coordination_goals(id),
         scope_id TEXT NOT NULL REFERENCES room_native_work_scopes(id),
@@ -37,6 +39,10 @@ def migrate(db):
 class RoomGoalRecovery:
     def __init__(self, collaboration):
         self.c, self.store = collaboration, collaboration.store
+        self.continuations = RoomContinuations(collaboration)
+
+    def recover_continuations(self, *, limit=8):
+        return self.continuations.recover(limit=limit)
 
     @property
     def native(self):
@@ -118,7 +124,7 @@ class RoomGoalRecovery:
                            coordinator_epoch=current)
         return current
 
-    def candidate(self, member, bounds, conversation_id):
+    def candidate(self, member, bounds, conversation_id, *, explicit_reapproval=False):
         if self.c.rooms.state(member) != 'ready_work':
             raise DevError('ROOM_RECOVERY_MEMBER_UNAVAILABLE', '接续成员必须完成真实连接及当前工作范围批准', 409)
         actor = self.c.rooms.principal(member)
@@ -126,7 +132,7 @@ class RoomGoalRecovery:
         self.c.room_consumers.binding(self.store.one('SELECT * FROM conversation_rooms WHERE id=?',(conversation_id,)), member, actor)
         rules = []
         for old in bounds['projects']:
-            if old.get('expires_at') is not None and old['expires_at'] <= self.c.clock():
+            if not explicit_reapproval and old.get('expires_at') is not None and old['expires_at'] <= self.c.clock():
                 raise DevError('ROOM_WORK_APPROVAL_EXPIRED', '原成员对此工作的批准已到期，恢复不能延长原批准', 403)
             adapter, scope = self.c.room_work_bridge.adapter(member,old['project_id'],old['environment_id'])
             policy = self.store.one('SELECT * FROM delegation_policies WHERE id=?',(adapter['policy_id'],))
@@ -142,12 +148,136 @@ class RoomGoalRecovery:
                 raise DevError('ROOM_RECOVERY_SCOPE_DENIED', '接续成员未被明确批准原角色的项目、能力和执行位置', 403)
             for capability in old['capabilities']:
                 self.c.coordination.require_capability(actor,capability,old['project_id'])
-            finite = [v for v in (old.get('expires_at'),scope['expires_at'] if scope['lifetime_mode']=='timed' else None) if v is not None]
+            old_expiry = None if explicit_reapproval else old.get('expires_at')
+            finite = [v for v in (old_expiry,scope['expires_at'] if scope['lifetime_mode']=='timed' else None) if v is not None]
             rules.append({**old, 'scope_version':scope['version'], 'scope_digest':self.c.room_work_bridge.fingerprint([scope]),
                 'legacy_dot_id':adapter['legacy_dot_id'], 'policy_id':policy['id'], 'policy_version':policy['version'],
                 'policy_digest':policy['digest'], 'expires_at':min(finite) if finite else None})
         return {'member_id':member['id'], 'name':member['name'], 'grant_id':member['grant_id'],
                 'binding_generation':member['binding_generation'], 'projects':rules}
+
+    def reused_artifact_refs(self, goal):
+        """Exact successful old receipts admitted by the current continuation approval."""
+        if not self.native.reference(goal):
+            return []
+        row = self.store.one("""SELECT spec,digest FROM room_goal_recovery_revisions WHERE goal_id=?
+            AND json_extract(spec,'$.action')='continue_approved' AND json_extract(spec,'$.approval_id')=?
+            ORDER BY coordinator_epoch DESC LIMIT 1""", (goal['id'], goal['approval_id']))
+        if not row:
+            return []
+        value = json.loads(row['spec'])
+        if digest(value) != row['digest']:
+            raise DevError('ROOM_RECOVERY_EVIDENCE_CHANGED', '原工作续办回执证据已改变', 403)
+        return value.get('reused_artifact_refs', [])
+
+    def reused_work_item(self, goal, item):
+        if not item['result'] or item['state'] != 'succeeded':
+            return False
+        expected = {'work_item_id': item['id'], 'version': item['version'], 'digest': digest(json.loads(item['result']))}
+        return expected in self.reused_artifact_refs(goal)
+
+    def continue_approved(self, goal, source, owner, conversation, batch_id, evidence):
+        """Apply a separately confirmed approval revision without replaying old operations."""
+        reference = self.native.reference(goal)
+        original = self.native.original(reference)
+        epoch = self.epoch(goal['id']) + 1
+        previous_intent = self.c.room_runtime.intent_revision(goal['id'])
+        roles = self.roles(reference, original)
+        for key, role in roles.items():
+            member = self.c.rooms.member(role['member_id'], conversation['id'])
+            roles[key] = self.candidate(member, role, conversation['id'], explicit_reapproval=True)
+            rules = self.native.input_authority.rules(source, member, proof=evidence)
+            for rule in roles[key]['projects']:
+                current = rules.get((rule['project_id'], rule['environment_id']), {})
+                if (not set(rule['capabilities']) <= set(current.get('capabilities', []))
+                        or not set(rule['execution_targets']) <= set(current.get('execution_targets', []))):
+                    raise DevError('ROOM_CONTINUATION_SCOPE_DENIED', '续办来源或成员未获准原工作所需范围', 403)
+                finite = [v for v in (rule['expires_at'], current.get('expires_at')) if v is not None]
+                rule['expires_at'] = min(finite) if finite else None
+        lead = roles[original['coordinator_member_id']]
+        now = self.c.clock()
+        expires = min([now + json.loads(goal['spec'])['duration_seconds'],
+                       *(rule['expires_at'] for role in roles.values() for rule in role['projects']
+                         if rule['expires_at'] is not None)])
+        if expires <= now:
+            raise DevError('ROOM_WORK_APPROVAL_EXPIRED', '本次续办批准已到期', 403)
+        owner_snapshot = {**asdict(owner), 'scopes': [], 'token_hash': '', 'session_hash': ''}
+        approval_id = uuid.uuid4().hex
+        carried = {ref['work_item_id']: ref for ref in self.reused_artifact_refs(goal)}
+        completed = self.store.all("""SELECT w.id,w.version,w.result FROM coordination_work w
+            JOIN room_native_work_assignments a ON a.work_id=w.id WHERE w.goal_id=? AND w.approval_id=?
+            AND a.intent_revision=? AND w.state='succeeded' AND w.result IS NOT NULL ORDER BY w.created,w.id""",
+            (goal['id'], goal['approval_id'], previous_intent))
+        for result in completed:
+            carried[result['id']] = {'work_item_id': result['id'], 'version': result['version'],
+                                      'digest': digest(json.loads(result['result']))}
+        value = {'goal_id': goal['id'], 'scope_id': reference['id'], 'original_digest': reference['digest'],
+                 'conversation_id': conversation['id'], 'coordinator_epoch': epoch, 'intent_revision': previous_intent + 1,
+                 'action': 'continue_approved', 'target_member_id': lead['member_id'], 'roles': roles,
+                 'owner_principal': owner_snapshot, 'batch_id': batch_id, 'approval_id': approval_id,
+                 'previous_approval_id': goal['approval_id'], 'reused_artifact_refs': list(carried.values())}
+        identifier = uuid.uuid4().hex
+        self.store.execute('INSERT INTO room_goal_recovery_revisions VALUES (?,?,?,?,?,?,?)',
+            (identifier, goal['id'], reference['id'], epoch, canonical(value), digest(value), now))
+        self.store.execute("""INSERT INTO room_goal_recovery_current VALUES (?,?,?,?) ON CONFLICT(goal_id)
+            DO UPDATE SET revision_id=excluded.revision_id,coordinator_epoch=excluded.coordinator_epoch""",
+            (goal['id'], reference['id'], identifier, epoch))
+        self.store.execute('INSERT INTO coordination_approvals VALUES (?,?,?,?,?,?,?,?)',
+            (approval_id, goal['id'], goal['version'], goal['digest'], goal['spec'], canonical(owner_snapshot), now, expires))
+        self.store.execute('UPDATE coordination_goals SET approval_id=?,expires_at=?,version=version+1,updated=? WHERE id=?',
+            (approval_id, expires, now, goal['id']))
+        self.store.execute('UPDATE delegation_requests SET approval_id=? WHERE goal_id=? AND approval_id=?',
+            (approval_id, goal['id'], goal['approval_id']))
+        current = self.c.room_runtime.goal(goal['id'])
+        partition = self.store.one('SELECT * FROM collaboration_rooms WHERE id=?', (goal['room_id'],))
+        self.c.coordination.authorize(owner, partition, {**current, 'state': 'active'}, active=True)
+        items = self.store.all("""SELECT w.*,a.member_id FROM coordination_work w
+            JOIN room_native_work_assignments a ON a.work_id=w.id WHERE w.goal_id=? AND w.approval_id=?
+            AND a.intent_revision=? AND w.state IN ('queued','leased','running','blocked') AND w.result IS NULL
+            AND NOT EXISTS(SELECT 1 FROM coordination_operations o WHERE o.work_item_id=w.id
+                AND o.cancel_note!='cancelled_before_delivery') ORDER BY w.created,w.id""",
+            (goal['id'], goal['approval_id'], previous_intent))
+        reusable = {item['id'] for item in items}
+        remaining = {row['id'] for row in self.store.all(
+            """SELECT w.id FROM coordination_work w
+            JOIN room_native_work_assignments a ON a.work_id=w.id
+            WHERE w.goal_id=? AND w.approval_id=? AND a.intent_revision=? AND w.state!='succeeded'""",
+            (goal['id'], goal['approval_id'], previous_intent))}
+        succeeded = {row['id'] for row in self.store.all(
+            "SELECT id FROM coordination_work WHERE goal_id=? AND state='succeeded'", (goal['id'],))}
+        while True:
+            valid = {item['id'] for item in items if item['id'] in reusable
+                     and set(json.loads(item['dependencies'])) <= (reusable | succeeded)}
+            if valid == reusable:
+                break
+            reusable = valid
+        prior = self.store.one('SELECT source_message_id FROM room_work_intents WHERE goal_id=?', (goal['id'],))
+        key = 'room-continuation:' + digest([batch_id, goal['id']])
+        intent_input = self.c.room_runtime.send({'conversation_id': conversation['id'],
+            'body_text': '房主已批准续办原工作。按已有工作记录继续未完成步骤，复用已完成操作的原回执。',
+            'client_message_id': key, 'idempotency_key': key, 'member_id': lead['member_id'],
+            'reply_to_id': prior['source_message_id'] if prior else source['id'], 'work_id': goal['id']}, owner)
+        if reusable:
+            self.store.execute("UPDATE coordination_goals SET state='active',version=version+1,updated=? WHERE id=?", (now, goal['id']))
+            current = self.c.room_runtime.goal(goal['id'])
+            roles_by_member = {role['member_id']: role for role in roles.values()}
+            for item in items:
+                if item['id'] not in reusable:
+                    continue
+                assignee = roles_by_member[item['member_id']]
+                self.store.execute("""UPDATE coordination_work SET approval_id=?,assignee_grant_id=?,state='queued',
+                    reason_code='',lease_until=NULL,version=version+1,fencing_token=fencing_token+1,updated=? WHERE id=?""",
+                    (approval_id, assignee['grant_id'], now, item['id']))
+                work = self.c.coordination.work(current, item['id'])
+                self.native.assign(current, work, assignee['member_id'])
+                self.c.coordination.emit_work(partition, current, work)
+            # Keep the coordinator input when any old step still needs
+            # receipt reconciliation or replanning, even if others resumed.
+            if remaining <= reusable:
+                self.c.room_consumers.ack_message(self.c.rooms.member(lead['member_id']), intent_input['message']['id'])
+        self.c.rooms.change(conversation['id'], 'work', goal['id'], self.c.room_runtime.goal(goal['id'])['version'])
+        self.store.audit(owner.actor, 'room_work.continue_approved', goal['id'], 'ok',
+                         {'batch_id': batch_id, 'coordinator_epoch': epoch, 'intent_revision': previous_intent + 1})
 
     def eligible_base(self, goal, owner):
         if goal['state'] not in {'active','paused'} or not goal['approval_id'] or (goal['expires_at'] or 0) <= self.c.clock():

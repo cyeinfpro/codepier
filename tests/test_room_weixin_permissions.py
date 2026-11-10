@@ -8,6 +8,7 @@ from hub.collaboration.common import canonical, digest
 from shared.util import DevError
 from tests.collaboration_support import collab as collab, key
 from tests.test_dot_weixin_channel import packet
+from tests.test_room_goal_scope_boundaries import mutation
 from tests.test_room_weixin_native import setup_channel
 
 
@@ -72,7 +73,9 @@ async def test_room_permission_expansion_applies_only_to_new_wechat_inputs(colla
     assert current['work_authorized']
     assert set(current['task_scope']['projects'][0]['capabilities']) == {'read', 'write', 'execute'}
     assert s.store.one('SELECT * FROM room_channel_owner_authorizations WHERE id=?', (before['id'],)) == before
-    assert not s.channel_owner.author(old)['authenticated']
+    assert s.channel_owner.author(old)['authenticated']
+    member = s.rooms.member(identity['member_id'])
+    assert s.room_work_bridge.native.input_authority.rules(old, member)[('proj', 'production')]['capabilities'] == ['read']
     source = receive(s, flow, clock, 3)
     assert s.channel_owner.author(source)['authenticated']
     saved = s.room_channels.native.input_scope(source, before)
@@ -93,7 +96,9 @@ async def test_room_permission_reduction_and_removal_apply_to_wechat_immediately
     broad = receive(s, flow, clock, 2)
     assert s.channel_owner.author(broad)['authenticated']
     change_scope(s, owner, identity, ['read'])
-    assert not s.channel_owner.author(broad)['authenticated']
+    assert s.channel_owner.author(broad)['authenticated']
+    member = s.rooms.member(identity['member_id'])
+    assert s.room_work_bridge.native.input_authority.rules(broad, member)[('proj', 'production')]['capabilities'] == ['read']
     restricted = receive(s, flow, clock, 3)
     assert s.channel_owner.author(restricted)['authenticated']
     row = s.store.one('SELECT scope FROM room_channel_owner_inputs WHERE message_id=?', (restricted['id'],))
@@ -126,7 +131,7 @@ async def test_legacy_fixed_scope_changes_only_via_canonical_room_policy(collab)
     upgraded = s.room_channels.read(flow['id'], owner)['flow']
     assert upgraded['permission_mode'] == 'follow_room'
     assert upgraded['work_authorized'] and not upgraded['scope_upgrade_available']
-    assert not s.channel_owner.author(old)['authenticated']
+    assert s.channel_owner.author(old)['authenticated']
     assert s.channel_owner.author(receive(s, flow, clock, 3))['authenticated']
 
 
@@ -180,6 +185,8 @@ async def test_custom_lifetime_extension_does_not_extend_older_input(collab):
     old = receive(s, flow, clock, 2)
     assert s.channel_owner.author(old)['authenticated']
     change_scope(s, owner, identity, ['read'], channel=channel(clock[0] + 300))
+    assert s.channel_owner.author(old)['authenticated']
+    clock[0] += 30
     assert not s.channel_owner.author(old)['authenticated']
     assert s.channel_owner.author(receive(s, flow, clock, 3))['authenticated']
 
@@ -211,6 +218,14 @@ async def test_channel_environment_change_cannot_hide_behind_same_project_other_
         project_ids=['proj'], environment_id='production')
     goal = s.room_runtime.goal(result['goal_id'])
     assert s.room_work_bridge.native.owner_author(goal, source)['authenticated']
+    read_item = s.coordination.work_create({**mutation(s, identity, credentials, goal['id']),
+        'objective': '读取说明', 'acceptance': '记录读取结果',
+        'target_project_id': 'proj', 'assignee_grant_id': actor.grant_id,
+        'assignee_member_id': identity['member_id'], 'required_capabilities': ['read']}, actor)['work_item']
+    write_item = s.coordination.work_create({**mutation(s, identity, credentials, goal['id']),
+        'objective': '修改说明', 'acceptance': '记录原操作结果',
+        'target_project_id': 'proj', 'assignee_grant_id': actor.grant_id,
+        'assignee_member_id': identity['member_id'], 'required_capabilities': ['read', 'write']}, actor)['work_item']
     if change == 'expire':
         clock[0] += 300
     else:
@@ -223,14 +238,24 @@ async def test_channel_environment_change_cannot_hide_behind_same_project_other_
             'channels': {'weixin': {'mode': 'custom', 'scope': {'project_scopes': narrowed}},
                 'telegram': {'mode': 'follow_room'}}, 'idempotency_key': key(),
         }, owner)
-    # The room/member rule is unchanged; channel validation must independently
-    # reject production even though the same project's staging rule survives.
-    spec = s.room_work_bridge.native.record(s.room_work_bridge.native.reference(goal))
-    lead = spec['members'][0]
-    s.room_work_bridge.native.validate_rule(lead, lead['projects'][0], identity['conversation_id'])
+    # Staging still has write. It cannot supply authority to a production step.
+    native = s.room_work_bridge.native
+    if change == 'reduce':
+        assert native.owner_author(goal, source)['authenticated']
+        _, read_rule = native.check_work(actor, goal,
+            {'project_id': 'proj', 'required_capabilities': canonical(['read'])}, identity['member_id'])
+        assert read_rule['capabilities'] == ['read']
+        assert s.store.one('SELECT state FROM coordination_work WHERE id=?', (read_item['id'],))['state'] == 'queued'
+        write_state = s.store.one('SELECT state,reason_code FROM coordination_work WHERE id=?', (write_item['id'],))
+        assert write_state == {'state': 'blocked', 'reason_code': 'ROOM_INPUT_APPROVAL_REVOKED'}
+    else:
+        with pytest.raises(DevError) as denied:
+            native.owner_author(goal, source)
+        assert denied.value.code == 'CHANNEL_OWNER_SCOPE_CHANGED'
     with pytest.raises(DevError) as denied:
-        s.room_work_bridge.native.owner_author(goal, source)
-    assert denied.value.code == 'CHANNEL_OWNER_SCOPE_CHANGED'
+        native.check_work(actor, goal, {'project_id': 'proj',
+            'required_capabilities': canonical(['read', 'write'])}, identity['member_id'])
+    assert denied.value.code == 'ROOM_WORK_SCOPE_CHANGED'
 
 
 
@@ -257,3 +282,26 @@ async def test_custom_channel_selects_its_only_environment_by_default(collab):
     goal = s.room_runtime.goal(result['goal_id'])
     spec = s.room_work_bridge.native.record(s.room_work_bridge.native.reference(goal))
     assert [(r['project_id'], r['environment_id']) for r in spec['projects']] == [('proj', 'staging')]
+
+
+@pytest.mark.asyncio
+async def test_panel_and_wechat_inputs_keep_same_continuous_capability_after_reapproval(collab):
+    (s, owner, actor, clock, identity, _), flow, _, _ = await broad_channel(collab)
+    change_scope(s, owner, identity, ['read', 'write'])
+    panel_id = s.room_runtime.send({'conversation_id': identity['conversation_id'],
+        'body_text': '读取项目并更新说明', 'client_message_id': key(), 'idempotency_key': key()}, owner)['message']['id']
+    panel = s.store.one('SELECT * FROM collaboration_messages WHERE id=?', (panel_id,))
+    weixin = receive(s, flow, clock, 2)
+    change_scope(s, owner, identity, ['read'])
+    change_scope(s, owner, identity, ['read', 'write'])
+    member = s.rooms.member(identity['member_id'])
+    authority = s.room_work_bridge.native.input_authority
+    for source in (panel, weixin):
+        assert authority.rules(source, member)[('proj', 'production')]['capabilities'] == ['read']
+    fresh = receive(s, flow, clock, 3)
+    assert authority.rules(fresh, member)[('proj', 'production')]['capabilities'] == ['read', 'write']
+    credentials = await current_credentials(s, actor, clock, identity)
+    for source in (panel, weixin):
+        with pytest.raises(DevError, match='能力'):
+            start_work(s, actor, identity, credentials, source, capabilities=['read', 'write'])
+    assert not s.store.all('SELECT * FROM coordination_goals')

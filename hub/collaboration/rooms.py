@@ -13,6 +13,8 @@ import uuid
 from dataclasses import asdict
 
 from hub.collaboration.projection_cache import projection, memoized
+from hub.collaboration.room_subscription_renewals import RoomSubscriptionRenewals, migrate as migrate_renewals
+from hub.collaboration.room_waiting_inputs import fence_follow_poll, recover_waiting
 from hub.principal import Principal, refresh_principal
 from hub.collaboration.common import ROOM_INBOX_EVENT, canonical, digest, read_cursor, sign_cursor, validate
 from shared import room_contracts as contracts
@@ -108,6 +110,10 @@ def migrate(db):
     migrate_connections(db)
     from hub.collaboration.room_migration import migrate as migrate_room_migration
     migrate_room_migration(db)
+    migrate_renewals(db)
+    db.execute('''CREATE INDEX IF NOT EXISTS room_work_transient_pause
+        ON coordination_work(id,goal_id) WHERE state='blocked'
+        AND reason_code IN ('ROOM_PAUSED','ROOM_MEMBER_PAUSE')''')
 
 
 class Rooms:
@@ -117,6 +123,7 @@ class Rooms:
         self.pending = PendingBindings(self)
         from hub.collaboration.room_migration import RoomMigration
         self.migration = RoomMigration(self)
+        self.renewals = RoomSubscriptionRenewals(self)
 
     @staticmethod
     def require_native(room):
@@ -261,6 +268,7 @@ class Rooms:
             'connection_source_generation': member.get('connection_source_generation', 0),
             'legacy': member['status'] == 'legacy', 'legacy_dot_id': member['legacy_dot_id'],
             'project_scopes': self.scopes(member, actor), 'verified_at': member['probe_replied_at'],
+            'subscription_renewal': self.renewals.view(member),
             'evidence': {'member_created': True, 'host_bound': bool(member['grant_id']),
                 'subscription_verified': bool(member['subscription_verified_at']),
                 'round_trip_verified': bool(member['probe_replied_at'])}}
@@ -508,6 +516,15 @@ class Rooms:
                     self.store.execute("""UPDATE mcp_event_subscriptions SET state='active',version=version+1
                         WHERE conversation_id=? AND state='paused' AND id IN
                         (SELECT subscription_id FROM room_members WHERE conversation_id=? AND status NOT IN ('paused','removed'))""", (room['id'], room['id']))
+                lead_changed = args['lead_member_id'] is not None and args['lead_member_id'] != room['lead_member_id']
+                if lead_changed:
+                    fence_follow_poll(self.c, room['id'])
+                if state == 'active' and (lead_changed or room['state'] != 'active'):
+                    recover_waiting(self.c, conversation_id=room['id'])
+                    if room['state'] != 'active':
+                        self.recover_paused_work(conversation_id=room['id'])
+                        for member in self.store.all("SELECT * FROM room_members WHERE conversation_id=? AND status NOT IN ('paused','removed')", (room['id'],)):
+                            self.c.room_consumers.recover_connection(member)
                 self.change(room['id'], 'room', room['id'], room['version'] + 1)
                 return {'conversation_id': room['id']}
             return self.read(self.mutation(principal, 'room_update', args, perform), principal)
@@ -554,14 +571,57 @@ class Rooms:
             self.store.execute("UPDATE mcp_event_subscriptions SET state='unsubscribed',version=version+1 WHERE id=?", (member['subscription_id'],))
 
     def resume_member_policies(self, member):
-        # Restore only pauses recorded by this room action. Original goal states
-        # and already-started operations remain unchanged until explicit resume.
+        # Restore only adapter policies paused by this room/member action.
         for saved in self.store.all('SELECT * FROM room_member_paused_policies WHERE member_id=?', (member['id'],)):
             policy = self.store.one('SELECT * FROM delegation_policies WHERE id=?', (saved['policy_id'],))
             if (policy and policy['state'] == 'paused' and policy['version'] == saved['policy_version']
                     and policy['digest'] == saved['policy_digest']):
                 self.store.execute("UPDATE delegation_policies SET state='active',updated=? WHERE id=?", (self.c.clock(), policy['id']))
             self.store.execute('DELETE FROM room_member_paused_policies WHERE member_id=? AND policy_id=?', (member['id'], saved['policy_id']))
+
+    def recover_paused_work(self, *, conversation_id=None):
+        # Undispatched items may return to the same intent. Dispatched
+        # attempts keep their fence and settle through original result archival.
+        with self.store.transaction():
+            after = getattr(self, '_transient_work_after', '') if conversation_id is None else ''
+            rows = self.store.all('''SELECT w.*,a.member_id FROM coordination_work w
+                JOIN room_native_work_assignments a ON a.work_id=w.id
+                JOIN coordination_goals g ON g.id=w.goal_id AND g.approval_id=w.approval_id
+                JOIN conversation_rooms r ON r.id=g.conversation_id
+                LEFT JOIN room_work_intents i ON i.goal_id=g.id
+                WHERE w.state='blocked' AND w.reason_code IN ('ROOM_PAUSED','ROOM_MEMBER_PAUSE')
+                AND w.id>? AND g.state='active' AND r.state='active' AND r.room_protocol!=0
+                AND (? IS NULL OR r.id=?) AND a.intent_revision=COALESCE(i.intent_revision,1)
+                ORDER BY w.id LIMIT 32''', (after, conversation_id, conversation_id))
+            if conversation_id is None:
+                self._transient_work_after = rows[-1]['id'] if len(rows)==32 else ''
+            native = self.c.room_work_bridge.native
+            coordination = self.c.coordination
+            for item in rows:
+                goal = self.c.room_runtime.goal(item['goal_id'])
+                partition = self.store.one('SELECT * FROM collaboration_rooms WHERE id=?', (goal['room_id'],))
+                try:
+                    member = self.member(item['member_id'], goal['conversation_id'])
+                    if self.state(member) != 'ready_work':
+                        continue
+                    actor = coordination.participant(partition, goal, member['grant_id'], member['id'])
+                    native.check_work(actor, goal, item, member['id'])
+                    dispatched = self.store.one("""SELECT 1 FROM coordination_operations WHERE work_item_id=?
+                        AND COALESCE(cancel_note,'')!='cancelled_before_delivery' LIMIT 1""", (item['id'],))
+                    if dispatched:
+                        if coordination.paused_archive_evidence(actor, goal, item):
+                            self.c.room_consumers.enqueue_paused_archive(member, item)
+                        continue
+                except DevError:
+                    continue
+                if item['attempt'] >= json.loads(goal['spec'])['budget']['max_attempts']:
+                    continue
+                changed = self.store.execute('''UPDATE coordination_work SET state='queued',reason_code='',
+                    version=version+1,updated=? WHERE id=? AND version=? AND state='blocked' ''',
+                    (self.c.clock(), item['id'], item['version'])).rowcount
+                if changed:
+                    coordination.emit_work(partition, goal, coordination.work(goal, item['id']))
+                    self.change(goal['conversation_id'], 'work', goal['id'], goal['version'])
 
     def approve_scopes(self, principal, member_id, conversation_id, scopes, lifetime):
         if lifetime and lifetime['mode'] == 'timed' and lifetime['expires_at'] <= self.c.clock():
@@ -899,8 +959,12 @@ class Rooms:
                     bridge.ensure(member, principal)
                     member = self.member(identifier)
                 flow = self._invite(member)
+                if args.get('keep_connected'):
+                    self.renewals.set(member, principal, True)
                 if not room['lead_member_id']:
                     self.store.execute('UPDATE conversation_rooms SET lead_member_id=? WHERE id=?', (identifier, room['id']))
+                    fence_follow_poll(self.c, room['id'])
+                    recover_waiting(self.c, conversation_id=room['id'])
                 self.store.execute('UPDATE conversation_rooms SET version=version+1 WHERE id=?', (room['id'],))
                 self.change(room['id'], 'member', identifier)
                 return {'flow_id': flow['id']}
@@ -928,7 +992,8 @@ class Rooms:
             'conversation_id': member['conversation_id'], 'stage': state, 'state': state, 'version': flow['version'],
             'revision': flow['version'], 'display': display, 'evidence': self.member_view(member)['evidence'],
             'last_error_code': flow['last_error_code'], 'invite_expired': expired,
-            'pending_binding': bool(candidate), 'current_binding_generation': live_member['binding_generation']}
+            'pending_binding': bool(candidate), 'current_binding_generation': live_member['binding_generation'],
+            'subscription_renewal': self.renewals.view(live_member)}
         if room and room['state'] != 'active':
             result['display'] = {'title': '房间已暂停，请先继续房间' if room['state'] == 'paused' else '房间已归档',
                 'primary_action': 'view_details' if room['state'] == 'paused' else None}
@@ -971,13 +1036,16 @@ class Rooms:
                 '。这是兼容旧工具目录的加入入口，与 room_connect_join 使用同一身份校验。'
                 '若宿主目录缺少 room_probe_read、room_probe_reply 或 room_inbox，先刷新 CodePier 工具目录（Rescan），不要换成旧任务协议。'
                 '按返回的 subscription_request 查找并使用宿主真实原生订阅能力完成连接；不要仅因 CodePier 工具列表没有订阅工具就断定宿主不支持。保存 connection_proof，'
-                '它只证明当前成员身份，不授予执行权限。完成后按返回步骤读取并回复连接检查；不要自行创建定时任务或伪造 callback。')
+                '它只证明当前成员身份，不授予执行权限。完成后按返回步骤读取并回复连接检查。'
+                '宿主续订模式下，支持后台续订的宿主保存原订阅、签名游标和 refreshBefore，提前续订；'
+                '由房间托管时保持原回调与签名，禁止伪造 callback。')
         elif member['grant_id'] and member['status'] not in {'removed', 'legacy'}:
             result['subscription_request'] = self.subscription_request(member)
             result['resume_instructions'] = ('@CodePier 请在原 dot 恢复同一个房间成员，不新建成员或定时任务。'
                 f"conversation_id={member['conversation_id']}，member_id={member['id']}，binding_generation={member['binding_generation']}。"
                 '保留原 connection_proof；按宿主原生流程恢复或续订这条订阅：' + canonical(self.subscription_request(member)) +
-                '。收到当前绑定通知中的 wake_ticket 后，调用 collaboration(action=room_probe_read)，带上述身份、'
+                '。保持原回调与签名，能取到原签名游标时一并提交。原连接证据仍有效时直接处理待办；'
+                '收到需要验证的通知时，调用 collaboration(action=room_probe_read)，带上述身份、'
                 'connection_proof、wake_ticket 和新的 idempotency_key，再用 room_probe_reply 回复返回的 probe_nonce。'
                 '如果原成员证明已丢失，请报告 ROOM_MEMBER_PROOF_REQUIRED，由房主在此成员里更换绑定，不能借用其他 dot 的证明。')
         return result
@@ -995,7 +1063,14 @@ class Rooms:
                 action = args['action']
                 if member['status'] == 'removed':
                     raise DevError('ROOM_MEMBER_REMOVED', '已移除的成员不能自动恢复', 410)
-                if action == 'refresh_invite':
+                if action == 'set_renewal':
+                    if 'keep_connected' not in args:
+                        raise DevError('INVALID_ARGUMENTS', '请选择是否由房间保持原连接', 422)
+                    self.require_native(room)
+                    self.renewals.set(member, principal, args['keep_connected'])
+                    self.store.execute('UPDATE room_connect_flows SET version=version+1,updated_at=? WHERE id=?',
+                        (self.c.clock(), flow['id']))
+                elif action == 'refresh_invite':
                     if not self.pending.refresh(member):
                         if flow['redeemed_at']:
                             raise DevError('INVITE_ALREADY_REDEEMED', '成员已登记，请继续原连接', 409)
@@ -1038,6 +1113,13 @@ class Rooms:
                         self.store.execute("UPDATE room_member_scopes SET state='revoked',version=version+1 WHERE member_id=?", (member['id'],))
                         self.store.execute('UPDATE room_connect_flows SET revoked_at=? WHERE id=?', (self.c.clock(), flow['id']))
                         self.store.execute("UPDATE conversation_rooms SET lead_member_id='' WHERE id=? AND lead_member_id=?", (member['conversation_id'], member['id']))
+                        if room['lead_member_id']==member['id']:
+                            fence_follow_poll(self.c, room['id'])
+                            recover_waiting(self.c, conversation_id=room['id'])
+                    elif action == 'resume':
+                        recover_waiting(self.c, conversation_id=room['id'])
+                        self.recover_paused_work(conversation_id=room['id'])
+                        self.c.room_consumers.recover_connection(self.member(member['id']))
                 self.change(member['conversation_id'], 'member', member['id'], member['version'] + 1)
                 return {'flow_id': flow['id']}
             return self.connect_read(self.mutation(principal, 'room_connect_action', args, perform), principal)
@@ -1100,12 +1182,14 @@ class Rooms:
             'connection_proof': self.store.decrypt(member['connection_proof_secret']),
             'subscription_request': self.subscription_request(member), 'grants_authority': False,
             'pending_binding': bool(member.get('_pending_binding')),
+            'subscription_renewal': self.renewals.view(member),
             'required_host_actions': {'collaboration': ['room_probe_read', 'room_probe_reply',
                 'room_consumer_begin', 'room_consumer_yield', 'room_reply'],
                 'collaboration_query': ['room_inbox']},
             'next_step': '加入或重放这个接口本身不代表宿主订阅或往返通信成功；以 member 当前状态和验证证据为准。若 required_host_actions 中的操作未出现在宿主工具目录，先刷新 CodePier 工具目录（Rescan），保持原成员和 connection_proof，不重复兑换或改用旧任务协议。'
                 '查找宿主真实原生订阅能力及事件源，使用实际发现的连接器标识注册 subscription_request；不要仅因 CodePier 工具列表没有订阅工具就断定宿主不支持。'
-                '若实际查询确认宿主缺少原生订阅，报告这个阻塞并保持等待宿主，不创建定时轮询、不伪造 callback。'
+                '有原生订阅、但无后台续期能力时，可由房主在房间开通原连接托管续期。'
+                '若缺少原生订阅，报告该连接阻塞，保留待办，不创建定时轮询、不伪造 callback。'
                 '收到当前绑定通知中的 wake_ticket 后，连同当前成员 connection_proof 调用 room_probe_read，再将返回的 nonce 通过 room_probe_reply 回复。'}
 
     def event_scope(self, principal, filters, *, stopping=False):
@@ -1140,7 +1224,7 @@ class Rooms:
                 raise DevError('ROOM_HOST_CHANGED', '宿主通知路线改变，请在面板显式更换绑定', 409)
         return member
 
-    def event_subscription_attached(self, principal, filters, subscription, *, reset_verification=False):
+    def event_subscription_attached(self, principal, filters, subscription, *, reset_verification=False, restored=False, ttl=86400):
         member = self.event_subscription_guard(principal, filters)
         stored = json.loads(self.store.decrypt(subscription['secret']))
         changed = (member['subscription_id'] != subscription['id'] or reset_verification or
@@ -1155,12 +1239,21 @@ class Rooms:
                 probe_read_at=NULL,probe_replied_at=NULL WHERE id=?''', (digest(nonce), self.store.encrypt(nonce), self.c.clock(), identifier))
         if member.get('_pending_binding'):
             self.store.execute("UPDATE room_pending_bindings SET status='verifying' WHERE id=?", (identifier,))
-        if member.get('_pending_binding') or not self.pending.current(member['id']):
+        if (changed or not member['probe_nonce_hash'] or not member['probe_replied_at']) and (
+                member.get('_pending_binding') or not self.pending.current(member['id'])):
             self.store.execute("UPDATE room_connect_flows SET status='verifying',version=version+1,updated_at=? WHERE member_id=?", (self.c.clock(), member['id']))
         self.change(member['conversation_id'], 'member', member['id'], member['version'] + 1)
+        current = self.event_member(member['id'], member['conversation_id'], member['binding_generation'])
+        self.renewals.attach(current, subscription, ttl)
         consumers = getattr(self.c, 'room_consumers', None)
-        if consumers is not None and (changed or not member['probe_nonce_hash']):
-            consumers.connection_probe(self.event_member(member['id'], member['conversation_id'], member['binding_generation']))
+        if consumers is not None:
+            if changed or not member['probe_nonce_hash']:
+                consumers.connection_probe(current)
+            elif restored and not current.get('_pending_binding'):
+                if current['probe_replied_at']:
+                    consumers.recover_connection(current)
+                else:
+                    consumers.connection_probe(current)
 
     @staticmethod
     def binding_storage(member):
@@ -1240,6 +1333,8 @@ class Rooms:
                 if not self.pending.current(member['id']):
                     self.store.execute("UPDATE room_connect_flows SET status='ready',version=version+1,updated_at=? WHERE member_id=?", (self.c.clock(), member['id']))
                 self.change(room['id'], 'member', member['id'], member['version'] + 1)
+            if not member['probe_replied_at']:
+                recover_waiting(self.c, conversation_id=room['id'])
             return self.probe_result(self.member(member['id']), args)
 
     def probe_result(self, member, verified_args):
@@ -1258,7 +1353,8 @@ class Rooms:
             'next_step': '连接检查已完成。用 next_request 读取原收件箱。只在有当前可处理输入时，'
                 '使用本次或之后实际回调中的 wake_ticket、当前成员身份和 connection_proof 调用 '
                 'room_consumer_begin，保存返回的 consumer_session_id、consumer_fence 和 consumer_proof。'
-                '重新读取 room_inbox 后，以当前 inbox_revision 处理原输入，回复使用 room_reply，明确工作使用 '
+                '仅当宿主工具协议声明 include_inbox 时，可传 true 读取第一页；缺少或读取失败时调用 room_inbox。'
+                '使用本回合 inbox_revision 处理原输入，回复使用 room_reply，明确工作使用 '
                 'room_work_start。已核验本人且在既有范围内的明确任务直接开始；范围不足时用 room_reply 说明原因。'
                 '把阶段与最终答复关联原输入提交 room_reply，ChatGPT 内的文字不会回传微信。完成后调用 '
                 'room_consumer_yield，携带 expected_inbox_revision；more=true 时继续读取原待办，'

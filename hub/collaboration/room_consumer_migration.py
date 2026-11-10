@@ -66,6 +66,8 @@ def migrate(db):
         ON dot_consumer_sessions(member_id) WHERE member_id IS NOT NULL AND state='active'""")
     db.execute('''CREATE INDEX IF NOT EXISTS dot_mailbox_member_scan
         ON dot_mailbox_entries(member_id,generation,sequence) WHERE member_id IS NOT NULL''')
+    db.execute('''CREATE INDEX IF NOT EXISTS dot_mailbox_member_revision
+        ON dot_mailbox_entries(member_id,generation,revision) WHERE member_id IS NOT NULL''')
     entries = {row[1] for row in db.execute('PRAGMA table_info(dot_mailbox_entries)')}
     if 'superseded_by' not in entries:
         db.execute("ALTER TABLE dot_mailbox_entries ADD COLUMN superseded_by TEXT NOT NULL DEFAULT ''")
@@ -73,6 +75,7 @@ def migrate(db):
     for name, declaration in (
         ('wake_count', 'INTEGER NOT NULL DEFAULT 0'),
         ('last_wake_at', 'REAL NOT NULL DEFAULT 0'),
+        ('wake_episode_at', 'REAL'),
         ('wake_generation', 'INTEGER NOT NULL DEFAULT 0'),
         ('manual_wakes', 'INTEGER NOT NULL DEFAULT 0'),
         ('manual_window_at', 'REAL NOT NULL DEFAULT 0'),

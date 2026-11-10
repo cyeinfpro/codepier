@@ -39,6 +39,8 @@ def migrate(db):
         PRIMARY KEY(owner_user_id,conversation_id,action,request_key))''')
     from hub.collaboration.room_weixin_native import migrate as migrate_native
     migrate_native(db)
+    from hub.collaboration.room_waiting_inputs import migrate as migrate_waiting
+    migrate_waiting(db)
 
 
 class RoomChannels:
@@ -66,7 +68,8 @@ class RoomChannels:
                 'conversation_id': row['conversation_id']}
 
     def receipt(self, principal, conversation, action, args, perform):
-        fingerprint = digest({k: v for k, v in args.items() if k != 'idempotency_key'})
+        fingerprint = digest({k: v for k, v in args.items()
+                              if k != 'idempotency_key' and (k != 'confirm_follow_room' or v)})
         identity = (principal.user_id, conversation['id'], action, args['idempotency_key'])
         prior = self.store.one('''SELECT * FROM room_runtime_receipts
             WHERE owner_user_id=? AND conversation_id=? AND action=? AND request_key=?''', identity)
@@ -337,14 +340,22 @@ class RoomChannels:
                     if binding.get('native_member_id'):
                         auth=self.store.one('SELECT * FROM room_channel_owner_authorizations WHERE binding_id=?',(binding['id'],))
                         value['task_scope']=self.native.preview(binding,principal)
-                        value['permission_member_id']=binding['native_member_id']
+                        value['routing_mode']='follow_room' if self.native.follows_room(binding) else 'member'
+                        recipient=self.native.recipient(binding,conversation)
+                        value['permission_member_id']=recipient['id'] if recipient else ''
+                        if value['routing_mode']=='member':
+                            follow_binding={**binding,'routing_mode':'follow_room'}
+                            if self.native.follows_room(follow_binding):
+                                value['follow_task_scope']=self.native.preview(follow_binding,principal)
                         policy=getattr(self.c,'room_permissions',None)
                         configured=bool(policy and policy.is_configured(binding['conversation_id']))
                         value['permission_mode']=(policy.channel_mode(binding['conversation_id'],'weixin') if configured else
                             json.loads(auth['scope']).get('scope_mode','fixed') if auth else 'room_member')
                         value['work_authorized']=bool(auth and auth['state']=='active' and self.native.approved_scope(auth,binding,principal))
                         value['scope_upgrade_available']=bool(not configured and auth and auth['state']=='active' and value['permission_mode']=='fixed')
-                        if not value['work_authorized'] and value['task_scope']['project_ids'] and not value['scope_upgrade_available']:
+                        if (not value['work_authorized'] and value['task_scope']['project_ids']
+                                and not value['scope_upgrade_available']) or (
+                                value.get('follow_task_scope') and value['permission_mode']!='fixed'):
                             action='approve_tasks'
                         if value['scope_upgrade_available']:
                             value['task_scope']={**value['task_scope'],'summary':'当前微信仍使用原先确认的固定权限。请在房间权限设置中统一管理；后续消息使用新设置，旧消息不追溯扩权。'}
@@ -386,9 +397,13 @@ class RoomChannels:
                 try:
                     if row.get('native'):
                         account=self.c.weixin.account(row['account_id'],principal)
-                        value['task_scope']=self.native.preview({'id':'','account_id':account['id'],
+                        preview_binding={'id':'','account_id':account['id'],
                             'credential_version':account['credential_version'],'generation':account['generation'],
-                            'native_member_id':member['id'],'conversation_id':conversation['id']},principal)
+                            'native_member_id':member['id'],'conversation_id':conversation['id']}
+                        value['task_scope']=self.native.preview(preview_binding,principal)
+                        follow_binding={**preview_binding,'routing_mode':'follow_room'}
+                        if self.native.follows_room(follow_binding):
+                            value['follow_task_scope']=self.native.preview(follow_binding,principal)
                         if not value['task_scope']['project_ids']:
                             value.pop('task_scope')
                     else:
@@ -410,7 +425,9 @@ class RoomChannels:
             'paused':'微信已暂停','disconnected':'微信已断开','cancelled':'接入已取消','closed':'微信已解除'}.get(stage,'等待连接')
         value['display']={'title':title,'primary_action':action,'reason':value.get('reason_code','')}
         value['actions'] = [{'action': action, 'label': '使用此 dot' if stage == 'choose_member' else
-            '改为跟随房间权限' if action=='approve_tasks' and value.get('scope_upgrade_available') else self.action_label(action)}] if action else []
+            '改为跟随房间权限' if action=='approve_tasks' and value.get('scope_upgrade_available') else
+            '设置跟随房间主责' if action=='approve_tasks' and value.get('follow_task_scope') and (
+                value.get('work_authorized') or not value['follow_task_scope']['project_ids']) else self.action_label(action)}] if action else []
         if row['state'] == 'active':
             if row['binding_id']:
                 authority=self.store.one('SELECT state,version FROM '+('room_channel_owner_authorizations' if row.get('native') else 'channel_owner_authorizations')+' WHERE binding_id=?',(row['binding_id'],))
@@ -466,15 +483,23 @@ class RoomChannels:
         if action in {'bind','approve_tasks'}:
             fields = [field('confirm_external_data_ingress','允许此私聊进入当前房间'),
                       field('allow_replies','允许回复回到原私聊'),field('confirm_until_revoked','连接持续至我解除')]
-            if value.get('task_scope'):
+            task_scope = value.get('task_scope') or {}
+            follow_scope = value.get('follow_task_scope') or {}
+            if task_scope.get('project_ids') or follow_scope.get('project_ids'):
                 fields += [{'name':'allow_owner_tasks','type':'checkbox','label':'允许本人在所列范围内交办工作','required':False}]
                 fields += [{**field('confirm_' + key,label),'required':False,'depends_on':'allow_owner_tasks'} for key,label in (
                     ('owner_identity','发送配对码的是我本人'),('future_tasks',
-                        '允许后续工作按房间权限设置（含本渠道独立设置）执行' if value['task_scope'].get('scope',{}).get('scope_mode')=='room_member' else '允许所列项目的后续工作'),
+                        '允许后续工作按房间权限设置（含本渠道独立设置）执行' if (value.get('task_scope') or value['follow_task_scope']).get('scope',{}).get('scope_mode')=='room_member' else '允许所列项目的后续工作'),
                     ('result_delivery','允许工作结果回到此私聊'),('pairing_notices','允许必要的配对和阻塞提示'))]
             if action=='approve_tasks':
                 fields=[{k:v for k,v in f.items() if k!='depends_on'}|{'required':True}
                     for f in fields if f['name'] not in {'confirm_external_data_ingress','allow_replies','allow_owner_tasks'}]
+            if follow_scope:
+                follow_only = action == 'approve_tasks' and not follow_scope['project_ids']
+                if follow_only:
+                    fields = []
+                fields.append({'name':'confirm_follow_room','type':'checkbox','label':'跟随此房间当前主责 dot',
+                               'required':follow_only})
             return fields
         if action=='select_account':
             return [field('account_id','已连接微信','select',options=[{'value':a['id'],'label':a['label']} for a in value['accounts']])]
@@ -489,8 +514,9 @@ class RoomChannels:
     async def action(self, raw, principal):
         args = validate(ChannelAction, raw)
         # Keep the fingerprint of requests made before this optional field.
-        if not args['confirm_pairing_sender']:
-            args.pop('confirm_pairing_sender')
+        for optional in ('confirm_pairing_sender', 'confirm_follow_room'):
+            if not args.get(optional):
+                args.pop(optional, None)
         row, principal, conversation = await self.store.run(self.get, args['flow_id'], principal)
         # QR operations own durable attempt markers and never hold SQLite while
         # waiting for the provider. Their original key survives lost responses.

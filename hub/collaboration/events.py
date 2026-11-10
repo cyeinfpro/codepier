@@ -282,41 +282,45 @@ class EventService:
             self.event_audit(room, principal.actor, 'subscription.challenge', identity)
         return args, principal, room, identity, existing, cached
 
+    async def verify_callback(self, url, secret, identifier):
+        verified_at = self.c.clock()
+        challenge = secrets.token_urlsafe(32)
+        body = canonical({'type': 'verification', 'challenge': challenge}).encode()
+        headers = signed_headers('msg_verification_' + secrets.token_hex(16), identifier, body,
+                                 [secret], verified_at)
+        reply_status = None
+        try:
+            try:
+                async with self._challenge_limit:
+                    async with asyncio.timeout(12):
+                        reply = await self.sender(url, body, headers)
+                reply_status = reply.status
+                if 400 <= reply.status < 500:
+                    raise CallbackEndpointError('http_4xx', reply.status)
+                if 500 <= reply.status < 600:
+                    raise CallbackEndpointError('http_5xx', reply.status)
+                answer = json.loads(reply.body)
+                if (not 200 <= reply.status < 300 or not isinstance(answer, dict)
+                        or not isinstance(answer.get('challenge'), str)
+                        or not hmac.compare_digest(answer['challenge'].encode(), challenge.encode())
+                        or self.c.clock() - verified_at > 30):
+                    raise CallbackEndpointError('challenge_failed', reply.status)
+            except (TimeoutError, ValueError, UnicodeError, httpx.HTTPError, OSError, DevError) as exc:
+                raise CallbackEndpointError(callback_reason(exc), reply_status) from None
+        except CallbackEndpointError as exc:
+            # Fixed categories only: never log callback URLs, bodies or secrets.
+            mark('event_callback_failed', callback_reason=exc.reason,
+                 callback_http_status=exc.http_status)
+            raise
+
     async def subscribe(self, raw, principal, *, unified=False):
         def begin():
             with self.store.transaction():
                 prepared = self.prepare(raw, principal)
                 return (*prepared, self.subscription_snapshot(prepared[1], prepared[0]))
         args, authenticated, room, identifier, previous, cached, authenticated_snapshot = await self.store.run(begin)
-        verified_at = self.c.clock()
         if not cached:
-            challenge = secrets.token_urlsafe(32)
-            body = canonical({'type': 'verification', 'challenge': challenge}).encode()
-            headers = signed_headers('msg_verification_' + secrets.token_hex(16), identifier, body,
-                                     [args['delivery']['secret']], verified_at)
-            reply_status = None
-            try:
-                try:
-                    async with self._challenge_limit:
-                        reply = await self.sender(args['delivery']['url'], body, headers)
-                    reply_status = reply.status
-                    if 400 <= reply.status < 500:
-                        raise CallbackEndpointError('http_4xx', reply.status)
-                    if 500 <= reply.status < 600:
-                        raise CallbackEndpointError('http_5xx', reply.status)
-                    answer = json.loads(reply.body)
-                    if (not 200 <= reply.status < 300 or not isinstance(answer, dict)
-                            or not isinstance(answer.get('challenge'), str)
-                            or not hmac.compare_digest(answer['challenge'].encode(), challenge.encode())
-                            or self.c.clock() - verified_at > 30):
-                        raise CallbackEndpointError('challenge_failed', reply.status)
-                except (TimeoutError, ValueError, UnicodeError, httpx.HTTPError, OSError, DevError) as exc:
-                    raise CallbackEndpointError(callback_reason(exc), reply_status) from None
-            except CallbackEndpointError as exc:
-                # Fixed categories only: never log callback URLs, bodies or secrets.
-                mark('event_callback_failed', callback_reason=exc.reason,
-                     callback_http_status=exc.http_status)
-                raise
+            await self.verify_callback(args['delivery']['url'], args['delivery']['secret'], identifier)
         def commit():
             with self.store.transaction():
                 # Current authorization and owner pause win over an in-flight challenge.
@@ -347,6 +351,8 @@ class EventService:
                 ttl = 86400 if args['ttlMs'] is None else max(60, min(86400000, args['ttlMs']) / 1000)
                 lifetime = now + ttl
                 stored = {'url': args['delivery']['url'], 'current': args['delivery']['secret']}
+                if args['name'] == ROOM_INBOX_EVENT:
+                    stored['room_ttl_seconds'] = ttl
                 if old:
                     prior = json.loads(self.store.decrypt(old['secret']))
                     if prior.get('recovery_view') == 'unified':
@@ -358,14 +364,18 @@ class EventService:
                 elif unified and args['name'] == OPERATION_EVENT:
                     stored['recovery_view'] = 'unified'
                 active = old and old['state'] == 'active' and old['expires_at'] > now
+                same_room_connection = bool(args['name'] == ROOM_INBOX_EVENT and old
+                    and old['state'] in {'active', 'expired'} and prior['current'] == stored['current']
+                    and prior['url'] == stored['url'])
                 position, truncated = (old['ack_seq'] if old else 0), False
                 if not active:
-                    if args['cursor'] is None:
-                        # Omitted/null means now, including expired/unsubscribed
-                        # identities. Never replay history merely on enrollment.
+                    if args['cursor'] is None and not same_room_connection:
+                        # A new identity enrolls from now. Restoring the same
+                        # room binding keeps its durable acknowledged position.
                         position = self.store.one(f'SELECT MAX(seq) AS n FROM mcp_event_outbox WHERE {scope_column}=?', (room['id'],))['n'] or 0
                     else:
-                        position = read_cursor(self.c.secret, identifier, args['cursor'])
+                        if args['cursor'] is not None:
+                            position = read_cursor(self.c.secret, identifier, args['cursor'])
                         # Explicit replay alone observes maxAgeMs. Keep the seven
                         # day server ceiling, announcing every skipped position.
                         age_ms = 7 * 86400000
@@ -401,15 +411,21 @@ class EventService:
                 saved = self.store.one('SELECT * FROM mcp_event_subscriptions WHERE id=?', (identifier,))
                 if args['name'] == ROOM_INBOX_EVENT:
                     self.c.rooms.event_subscription_attached(current_principal, current_filters, saved,
-                                                            reset_verification=not active)
+                        reset_verification=not same_room_connection, restored=not active and same_room_connection,
+                        ttl=ttl)
                 else:
                     self.c.joining.attach_subscription(current_room, current_principal,
                         validate(FILTERS[args['name']], args['arguments']), saved, reset_verification=not active)
                 self.dispatch_route(saved, current_room)
                 if args['name'] == OPERATION_EVENT:
                     self.operations.catch_up(saved, current_room, current_principal, current_filters)
-                return {'id': identifier, 'refreshBefore': timestamp(lifetime),
-                        'cursor': sign_cursor(self.c.secret, identifier, saved['ack_seq']), 'truncated': truncated}
+                result = {'id': identifier, 'refreshBefore': timestamp(lifetime),
+                          'cursor': sign_cursor(self.c.secret, identifier, saved['ack_seq']), 'truncated': truncated}
+                if args['name'] == ROOM_INBOX_EVENT:
+                    member = self.c.rooms.event_member(current_filters['member_id'],
+                        current_filters['conversation_id'], current_filters['binding_generation'])
+                    result['renewal'] = self.c.rooms.renewals.view(member)
+                return result
         return await self.store.run(commit)
 
     def unsubscribe(self, raw, principal):
@@ -420,6 +436,8 @@ class EventService:
             if existing:
                 self.store.execute("UPDATE mcp_event_subscriptions SET state='unsubscribed',version=version+1,updated=? WHERE id=?", (self.c.clock(), identifier))
                 self.store.execute("UPDATE mcp_event_deliveries SET state='abandoned',lease_until=NULL,fence=fence+1,reason_code='unsubscribed' WHERE subscription_id=? AND state IN ('pending','retry_wait','leased')", (identifier,))
+                if existing['name'] == ROOM_INBOX_EVENT:
+                    self.c.rooms.renewals.stop(identifier, 'unsubscribed')
                 self.event_audit(room, principal.actor, 'subscription.removed', identifier)
             return {}
 
@@ -876,7 +894,7 @@ class EventService:
             room = self.event_room(sub)
             event = self.store.one('SELECT * FROM mcp_event_outbox WHERE id=?', (delivery['event_id'],))
             self.authorize(sub, room, json.loads(event['data']) if event['name'] in {WORK_EVENT, DELEGATION_EVENT, OPERATION_EVENT, MAILBOX_EVENT, ROOM_INBOX_EVENT} else None)
-            if event['name'] == MAILBOX_EVENT and not json.loads(event['data']).get('test'):
+            if event['name'] in {MAILBOX_EVENT, ROOM_INBOX_EVENT} and not json.loads(event['data']).get('test'):
                 ticket = self.store.one('SELECT expires_at FROM dot_wake_tickets WHERE delivery_key=? AND subscription_id=?',
                                         (event['id'], sub['id']))
                 if not ticket or ticket['expires_at'] <= self.c.clock():
@@ -983,6 +1001,10 @@ class EventService:
                         wake.clear()
                     if self.c.clock() >= self._relay_recover_after:
                         self._relay_recover_after = self.c.clock() + 5
+                        await self.store.run(self.c.rooms.recover_paused_work)
+                        recovery = getattr(getattr(self.c, 'room_goal_recovery', None), 'recover_continuations', None)
+                        if recovery is not None:
+                            await self.store.run(lambda: recovery(limit=8))
                         chat_wakes = await self.store.run(self.c.dot_relay.recover)
                         mailbox = getattr(self.c, 'dot_mailbox', None)
                         mailbox_wakes = (await self.store.run(lambda: mailbox.recover(max_wakes=max(0, 4 - chat_wakes)))

@@ -104,6 +104,62 @@ def migrate(db):
             FROM weixin_inbound''')
 
 
+    migrate_delivery_order(db)
+
+
+def delivery_order_key(goal_id, thread_root_id, source_id):
+    if goal_id:
+        return 'work:' + goal_id
+    if source_id and thread_root_id:
+        return 'thread:' + thread_root_id
+    return ''
+
+
+def migrate_delivery_order(db):
+    columns = {row[1] for row in db.execute('PRAGMA table_info(weixin_deliveries)')}
+    new_order = 'ordering_key' not in columns
+    for name, definition in (
+        ('ordering_key', "TEXT NOT NULL DEFAULT ''"),
+        ('depends_on_delivery_id', 'TEXT'),
+        ('kind', "TEXT NOT NULL DEFAULT 'reply'"),
+        ('status_code', "TEXT NOT NULL DEFAULT ''"),
+        ('projection_message_id', 'TEXT'),
+    ):
+        if name not in columns:
+            db.execute(f'ALTER TABLE weixin_deliveries ADD COLUMN {name} {definition}')
+    db.execute('''CREATE INDEX IF NOT EXISTS weixin_delivery_order
+        ON weixin_deliveries(binding_id,generation,peer_id,ordering_key,created)''')
+    db.execute('''CREATE INDEX IF NOT EXISTS weixin_delivery_projection
+        ON weixin_deliveries(projection_message_id) WHERE projection_message_id IS NOT NULL''')
+    if not new_order:
+        return
+    db.execute("""UPDATE weixin_deliveries AS d
+        SET ordering_key=COALESCE((
+            SELECT CASE
+                WHEN COALESCE(NULLIF(m.goal_id,''),NULLIF(s.goal_id,''),g.goal_id) IS NOT NULL
+                    THEN 'work:' || COALESCE(NULLIF(m.goal_id,''),NULLIF(s.goal_id,''),g.goal_id)
+                WHEN COALESCE(s.thread_root_id,'')!='' THEN 'thread:' || s.thread_root_id
+                ELSE ''
+            END FROM collaboration_messages m
+            JOIN collaboration_messages s ON s.id=d.source_message_id AND s.conversation_id=m.conversation_id
+                AND s.origin='external_channel'
+            LEFT JOIN (
+                SELECT message_id,MIN(goal_id) AS goal_id
+                FROM delegation_requests WHERE COALESCE(goal_id,'')!=''
+                GROUP BY message_id HAVING COUNT(DISTINCT goal_id)=1
+            ) g ON g.message_id=s.id
+            WHERE m.id=d.message_id AND m.origin='bound_connector'
+        ),''),
+        depends_on_delivery_id=(
+            SELECT prior.id FROM collaboration_messages m
+            JOIN weixin_deliveries prior ON prior.message_id=m.reply_to_id
+            WHERE m.id=d.message_id AND prior.binding_id=d.binding_id
+                AND prior.generation=d.generation AND prior.peer_id=d.peer_id
+                AND (prior.created,prior.rowid)<(d.created,d.rowid)
+            ORDER BY prior.message_version DESC LIMIT 1
+        )""")
+
+
 class Scope(AccessModel):
     project: str = Field(min_length=1, max_length=100)
     environment_id: str = Field(default='production', min_length=1, max_length=100)

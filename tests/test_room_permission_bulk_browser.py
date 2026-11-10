@@ -193,3 +193,75 @@ def test_project_environment_identity_does_not_collapse_colons(
         expect(second.locator('[data-permission-cap][value="write"]')).to_be_checked()
     finally:
         context.close()
+
+
+
+def test_permission_continuation_reviews_and_submits_exact_selection(
+        collaboration_stack, chat_browser_pool):
+    stack = collaboration_stack
+    context = chat_browser_pool('chromium').new_context(viewport={'width': 390, 'height': 844})
+    page = context.new_page()
+    try:
+        path = open_permissions(page, stack, 'Continuation permissions fixture')
+        current = stack.must(stack.client.get(path))
+        preview_requests = []
+        saved_requests = []
+
+        def preview(route):
+            preview_requests.append(route.request.post_data_json)
+            route.fulfill(json={
+                'policy_preview_digest': 'draft-digest',
+                'continuation_preview_id': 'draft-preview',
+                'candidates': [
+                    {'task_id': 'work-a', 'label': '房间读取工作', 'selected_by_default': True,
+                     'remaining_operations': [{'label': '读取原文件'}]},
+                    {'task_id': 'source-b', 'label': '微信原消息', 'selected_by_default': True,
+                     'remaining_operations': [{'label': '保存项目结果'}]},
+                    {'task_id': 'source-c', 'label': '授权已撤销的微信消息', 'eligible': False,
+                     'reason_code': 'CHANNEL_OWNER_NOT_APPROVED'},
+                ],
+            })
+
+        def permissions(route):
+            if route.request.method != 'PUT':
+                route.continue_()
+                return
+            saved_requests.append(route.request.post_data_json)
+            route.fulfill(json=current | {
+                'version': current['version'] + 1,
+                'continuation': {'batch_id': 'receipt-one', 'state': 'complete',
+                                 'counts': {'continued': 1, 'waiting_operations': 0,
+                                            'skipped': 0, 'pending': 0},
+                                 'results': [{'task_id': 'source-b', 'state': 'continued'}]},
+            })
+
+        page.route('**' + path + '/continuation-preview', preview)
+        page.route('**' + path, permissions)
+        form = page.locator('[data-cr-form="permissions"]')
+        opt_in = form.locator('[data-cr-continue-selected]')
+        all_tasks = form.locator('[data-cr-continuation-all]')
+        submit = form.locator('button[type="submit"]')
+        expect(opt_in).not_to_be_checked()
+        expect(submit).to_have_text('保存权限')
+        opt_in.check()
+        expect(form.locator('[data-cr-continuation-count]')).to_have_text('已选 2 / 2')
+        expect(form).to_contain_text('保存项目结果')
+        expect(form.locator('[data-cr-continuation-task][value="source-c"]')).to_be_disabled()
+        expect(form).to_contain_text('需要先在微信连接里重新允许本人交办')
+        all_tasks.uncheck()
+        expect(form.locator('[data-cr-continuation-task]:checked')).to_have_count(0)
+        all_tasks.check()
+        form.locator('[data-cr-continuation-task][value="work-a"]').uncheck()
+        expect(form.locator('[data-cr-continuation-count]')).to_have_text('已选 1 / 2')
+        expect(submit).to_have_text('保存并继续')
+        submit.click()
+        expect(page.locator('[data-cr-continuation-result]')).to_contain_text('1 项已继续')
+        expect(page.locator('[data-cr-continuation-result]')).to_contain_text('微信原消息')
+        assert len(saved_requests) == len(preview_requests) == 1
+        assert saved_requests[0]['continue_selected'] is True
+        assert saved_requests[0]['selected_task_ids'] == ['source-b']
+        assert saved_requests[0]['policy_preview_digest'] == 'draft-digest'
+        assert saved_requests[0]['continuation_preview_id'] == 'draft-preview'
+        assert saved_requests[0]['idempotency_key']
+    finally:
+        context.close()

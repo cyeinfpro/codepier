@@ -20,11 +20,15 @@ from hub.principal import Principal, refresh_principal
 from hub.collaboration.common import canonical, digest, redact
 from hub.collaboration.weixin_protocol import API_BASE, ITEM_NAMES, approved_url, text, uint64
 from hub.collaboration.qr_image import qr_svg
+from hub.collaboration.room_waiting_inputs import (
+    BLOCKED_MEMBERS, fence_follow_poll, record_input, recover_waiting, retire_input, route_input,
+)
 from hub.collaboration.weixin_protocol import incoming_text, incoming_items
 from shared.util import DevError
 
 
 PAIRING_CODE = re.compile(r'CPW-[A-F0-9]{32}')
+MAX_PENDING_NATIVE_INPUTS = 200
 
 
 def pairing_text(value):
@@ -46,6 +50,7 @@ def migrate(db):
         ('room_channel_flows','native','INTEGER NOT NULL DEFAULT 0'),
         ('weixin_bindings','native_member_id',"TEXT NOT NULL DEFAULT ''"),
         ('weixin_bindings','auto_confirm_pairing','INTEGER NOT NULL DEFAULT 0'),
+        ('weixin_bindings','routing_mode',"TEXT NOT NULL DEFAULT 'member'"),
     ):
         if name not in {row[1] for row in db.execute('PRAGMA table_info('+table+')')}:
             db.execute('ALTER TABLE '+table+' ADD COLUMN '+name+' '+decl)
@@ -284,18 +289,24 @@ class RoomWeixin:
              digest(challenge),now+900,int(args['allow_replies']),now+86400,now,now,self.store.encrypt(challenge),member['id'],int(args.get('confirm_pairing_sender', False))))
         if args['allow_owner_tasks']:
             self.approve_tasks(identifier,args,principal,pending=True)
+        elif args.get('confirm_follow_room'):
+            binding = self.store.one('SELECT * FROM weixin_bindings WHERE id=?', (identifier,))
+            self.consent_preview(binding, args, principal, pending=True)
+            self.enable_follow_room(binding)
         return {'binding_id':identifier,'member_id':member['id']}
 
     def valid(self,binding,*,pairing=False):
         return self._valid(binding,pairing=pairing,require_member=True)
 
     @memoized
-    def _valid(self,binding,*,pairing=False,require_member):
+    def _binding_identity(self, binding, *, pairing=False):
         if not binding:
             raise DevError('WEIXIN_BINDING_INACTIVE','原微信绑定已不可用',403)
         allowed={'active','pairing','awaiting_owner'} if pairing else {'active'}
-        if binding['state'] not in allowed:
-            raise DevError('WEIXIN_BINDING_INACTIVE','原微信绑定已暂停或解除',403)
+        if (binding['state'] not in allowed or
+                (binding.get('lifetime_mode') != 'until_revoked' and binding['expires_at'] <= self.c.clock())
+                or (binding['state'] == 'active' and (not binding['peer_id'] or binding['revalidation_required']))):
+            raise DevError('WEIXIN_BINDING_INACTIVE','原微信绑定已暂停、到期或解除',403)
         if binding['state']=='pairing' and binding['pairing_until']<=self.c.clock():
             raise DevError('WEIXIN_PAIRING_EXPIRED','原配对码已到期，请刷新配对码',403)
         self.c.weixin.require_enabled(binding)
@@ -305,21 +316,77 @@ class RoomWeixin:
         self.c.rooms.require_native(room)
         if room['state']!='active':
             raise DevError('ROOM_PAUSED','原房间已暂停',409)
-        member=self.c.rooms.member(binding['native_member_id'],room['id'])
-        if require_member and member['status'] in {'removed','paused'}:
-            raise DevError('WEIXIN_MEMBER_REMOVED','原主责 dot 已移出',403)
         account=self.c.weixin.account(binding['account_id'],owner)
-        if account['state']!='active' or account['generation']!=binding['generation'] or account['credential_version']!=binding['credential_version']:
+        if (binding['owner_user_id']!=owner.user_id or binding['space_id']!=owner.space_id
+                or account['state']!='active' or account['generation']!=binding['generation']
+                or account['credential_version']!=binding['credential_version']):
             raise DevError('WEIXIN_CREDENTIAL_CHANGED','原账号凭据或绑定世代已改变',403)
-        return binding,account,owner,room,member
+        return binding,account,owner,room
+
+    def follows_room(self, binding):
+        policy = getattr(self.c, 'room_permissions', None)
+        return (binding.get('routing_mode') == 'follow_room'
+                and (not policy or policy.channel_mode(binding['conversation_id'], 'weixin') != 'custom'))
+
+    def bound_member(self, binding):
+        return self.store.one('SELECT * FROM room_members WHERE id=? AND conversation_id=?',
+                              (binding['native_member_id'], binding['conversation_id']))
+
+    def recipient(self, binding, room):
+        if self.follows_room(binding):
+            return self.c.room_runtime.recipient(room, '')
+        return self.bound_member(binding)
+
+    def _valid(self, binding, *, pairing=False, require_member):
+        identity = self._binding_identity(binding, pairing=pairing)
+        member = self.bound_member(binding)
+        if require_member and (not member or member['status'] in {'removed', 'paused'}):
+            raise DevError('WEIXIN_MEMBER_REMOVED','原主责 dot 已移出或暂停',403)
+        return (*identity, member)
+
+    def inbound(self, binding_id, *, pairing=False):
+        binding = self.store.one('SELECT * FROM weixin_bindings WHERE id=?', (binding_id,))
+        identity = self._binding_identity(binding, pairing=pairing)
+        # The actual pairing exchange retains the original member checks.
+        # Ordinary active private chat intake keeps working while routing waits.
+        if binding['state'] != 'active':
+            return self._valid(binding, pairing=pairing, require_member=True)
+        return (*identity, self.recipient(binding, identity[3]))
+
+    def source_binding(self, source):
+        body = json.loads(source['body'])
+        origin = body.get('external_origin', {})
+        binding = self.store.one('SELECT * FROM weixin_bindings WHERE id=?', (origin.get('binding_id'),))
+        if binding and binding['state'] == 'paused':
+            raise DevError('WEIXIN_BINDING_PAUSED','原微信绑定已暂停',409)
+        identity = self._binding_identity(binding)
+        if (source['origin'] != 'external_channel' or source['state'] != 'saved'
+                or origin.get('channel') != 'weixin' or not origin.get('native_room')
+                or origin.get('provider_deleted') or source['conversation_id'] != binding['conversation_id']
+                or not binding['peer_id'] or origin.get('peer_id') != binding['peer_id']
+                or origin.get('account_id') != binding['account_id']
+                or origin.get('generation') != binding['generation']):
+            raise DevError('WEIXIN_DELIVERY_SCOPE_CHANGED','原微信来源或私聊身份已改变',403)
+        latest = self.store.one('''SELECT message_id,provider_version FROM weixin_inbound
+            WHERE account_id=? AND generation=? AND peer_id=? AND external_id=?''',
+            (binding['account_id'], binding['generation'], binding['peer_id'], origin.get('external_message_id')))
+        if (not latest or latest['message_id'] != source['id']
+                or latest['provider_version'] != origin.get('provider_version')):
+            raise DevError('WEIXIN_DELIVERY_SOURCE_CHANGED','原微信消息已有其他版本',403)
+        member = self.store.one('SELECT * FROM room_members WHERE id=? AND conversation_id=?',
+                                (body.get('room_member_id', ''), source['conversation_id']))
+        return (*identity, member or self.recipient(binding, identity[3]))
 
     @memoized
     def preview(self,binding,principal):
-        member=self.c.rooms.member(binding['native_member_id'],binding['conversation_id'])
-        scopes=self.c.room_work_bridge.scopes(member)
+        follow = self.follows_room(binding)
+        conversation_id = binding['conversation_id']
+        room = self.store.one('SELECT * FROM conversation_rooms WHERE id=?', (conversation_id,))
+        member = self.recipient(binding, room)
+        scopes = self.c.room_work_bridge.scopes(member) if member else []
         policy=getattr(self.c,'room_permissions',None)
-        configured=bool(policy and policy.is_configured(binding['conversation_id']))
-        mode=policy.channel_mode(binding['conversation_id'],'weixin') if configured else 'room_member'
+        configured=bool(policy and policy.is_configured(conversation_id))
+        mode=policy.channel_mode(conversation_id,'weixin') if configured else 'room_member'
         if configured:
             rules={(r['project_id'],r['environment_id']):r for r in policy.effective_scopes(binding['conversation_id'],'weixin')}
             effective=[]
@@ -337,22 +404,31 @@ class RoomWeixin:
                         scoped['lifetime_mode']='timed'
                     effective.append(scoped)
             scopes=effective
+        projects = [{'project_id': s['project_id'], 'environment_id': s['environment_id'], 'version': s['version'],
+            'capabilities': json.loads(s['capabilities']), 'execution_targets': json.loads(s['execution_targets']),
+            'scope_digest': self.c.room_work_bridge.fingerprint([s])} for s in scopes]
+        if follow and not member and policy:
+            policy_row = policy.row(conversation_id)
+            projects = [{**r, 'version': policy_row['version'] if policy_row else 0, 'scope_digest': digest(r)}
+                        for r in policy.effective_scopes(conversation_id, 'weixin')]
         scope={'scope_mode':'room_member','binding_id':binding['id'],'account_id':binding['account_id'],'credential_version':binding['credential_version'],
-            'generation':binding['generation'],'member_id':member['id'],'conversation_id':member['conversation_id'],
-            'owner_user_id':principal.user_id,'space_id':principal.space_id,
-            'projects':[{'project_id':s['project_id'],'environment_id':s['environment_id'],'version':s['version'],
-                'capabilities':json.loads(s['capabilities']),'execution_targets':json.loads(s['execution_targets']),
-                'scope_digest':self.c.room_work_bridge.fingerprint([s])} for s in scopes]}
+            'generation':binding['generation'],'member_id':binding['native_member_id'],'conversation_id':conversation_id,
+            'owner_user_id':principal.user_id,'space_id':principal.space_id,'projects':projects}
+        if binding.get('routing_mode') == 'follow_room':
+            scope['routing_mode'] = 'follow_room'
+        display_projects = [{**project, 'expires_at': row['expires_at'] if row['lifetime_mode'] == 'timed' else None}
+                            for project, row in zip(projects, scopes)] if member else projects
         return {'scope':scope,'scope_digest':digest(scope),'text_version':'room-channel-consent-v2',
-                'permission_mode':mode,'project_ids':[s['project_id'] for s in scopes],'projects':scope['projects'],
-                'summary':('使用房间权限设置中的微信独立权限；后续调整对新消息生效，连接持续至解除。' if mode=='custom' else
-                    '跟随房间权限设置；后续调整对新消息生效，连接持续至解除。' if configured else
-                    '默认跟随此房间中微信绑定成员已批准的项目权限；后续权限调整对新消息生效，连接持续至解除。'),
+                'permission_mode':mode,'project_ids':[s['project_id'] for s in projects],'projects':display_projects,
+                'summary':('使用房间权限设置中的微信独立权限，并保留原指定 dot。' if mode=='custom' else
+                    '跟随此房间当前主责 dot 和房间权限。工作结果回到已配对的本人私聊，连接持续至解除。' if follow else
+                    '跟随房间权限设置，并保留原指定 dot。' if configured else
+                    '使用微信绑定成员已批准的项目权限，连接持续至解除。'),
                 'lifetime_mode':'until_revoked'}
 
     @staticmethod
     def scope_identity(scope):
-        return {k:v for k,v in scope.items() if k!='projects'}
+        return {k:v for k,v in scope.items() if k not in {'projects', 'routing_mode'}}
 
     def current_scope(self,binding,principal,saved):
         current=dict(self.preview(binding,principal)['scope'])
@@ -387,35 +463,61 @@ class RoomWeixin:
             raise DevError('CHANNEL_OWNER_SCOPE_CHANGED','原微信消息的房间权限记录已不可用',403)
         return scope
 
+    def consent_preview(self, binding, args, principal, *, pending):
+        follow = bool(args.get('confirm_follow_room'))
+        proposed = {**binding, 'routing_mode': 'follow_room'} if follow else binding
+        if follow and not self.follows_room(proposed):
+            raise DevError('CHANNEL_OWNER_SCOPE_CHANGED','微信独立权限模式保留原指定 dot',409)
+        preview = self.preview(proposed, principal)
+        # At the pre-binding step, the binding ID does not exist yet and
+        # the displayed account is still on its prior provider generation.
+        scope = preview['scope']
+        if pending:
+            scope = {**scope, 'binding_id': '', 'generation': binding['generation'] - 1}
+        if args['expected_scope_digest'] != digest(scope):
+            raise DevError('CHANNEL_OWNER_SCOPE_CHANGED','微信任务范围已改变，请重新核对',409)
+        return preview
+
+    def enable_follow_room(self, binding):
+        if binding.get('routing_mode') != 'follow_room':
+            self.store.execute("UPDATE weixin_bindings SET routing_mode='follow_room' WHERE id=?", (binding['id'],))
+            fence_follow_poll(self.c, binding['conversation_id'])
+
     def approve_tasks(self,binding_id,args,principal,*,pending=False):
         binding=self.store.one('SELECT * FROM weixin_bindings WHERE id=?',(binding_id,))
         if not binding:
             raise DevError('WEIXIN_BINDING_INACTIVE','原微信绑定已不可用',403)
         self.require_room(binding['conversation_id'])
-        preview=self.preview(binding,principal)
+        follow = bool(args.get('confirm_follow_room'))
+        preview = self.consent_preview(binding, args, principal, pending=pending)
         if not preview['scope']['projects']:
+            if follow and not pending:
+                self.enable_follow_room(binding)
+                return
             raise DevError('CHANNEL_TASK_PROJECT_REQUIRED','先明确此成员可工作的项目，再开通微信交办',409)
         if (not all(args.get('confirm_'+key) for key in ('owner_identity','future_tasks','result_delivery','until_revoked','pairing_notices'))
                 or not binding['allow_replies']):
             raise DevError('CHANNEL_CONSENT_REQUIRED','本人任务范围和回传需明确确认',422)
-        # Pre-binding preview freezes the account/member/scopes without a
-        # binding ID. The final transaction compares that exact preview.
-        expected=args['expected_scope_digest']
         current=self.store.one('SELECT * FROM room_channel_owner_authorizations WHERE binding_id=?',(binding_id,))
-        if not pending and expected!=preview['scope_digest']:
-            raise DevError('CHANNEL_OWNER_SCOPE_CHANGED','微信任务范围已改变，请重新核对',409)
-        if pending:
-            preview_scope={**preview['scope'],'binding_id':'','generation':binding['generation']-1}
-            if expected!=digest(preview_scope):
-                raise DevError('CHANNEL_OWNER_SCOPE_CHANGED','微信任务范围已改变，请重新核对',409)
+        if follow:
+            self.enable_follow_room(binding)
+        # An explicit routing opt-in changes only new routing. Preserve an
+        # uninterrupted existing task approval for already assigned inputs.
+        previous_scope = json.loads(current['scope']) if current else {}
+        preserve = (not pending and current and current['state'] == 'active'
+                    and previous_scope.get('scope_mode') == 'room_member'
+                    and digest(previous_scope) == current['scope_digest']
+                    and self.scope_identity(previous_scope) == self.scope_identity(preview['scope']))
         owner=asdict(principal);owner.update(scopes=[],session_hash='',token_hash='')
         self.store.execute('''INSERT INTO room_channel_owner_authorizations
             (id,binding_id,member_id,state,scope,scope_digest,owner_principal,created,updated)
             VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(binding_id) DO UPDATE SET state=excluded.state,
             scope=excluded.scope,scope_digest=excluded.scope_digest,owner_principal=excluded.owner_principal,
-            version=version+1,created=excluded.created,updated=excluded.updated''',
+            version=version+?,created=CASE WHEN ? THEN room_channel_owner_authorizations.created ELSE excluded.created END,
+            updated=excluded.updated''',
             (current['id'] if current else uuid.uuid4().hex,binding_id,binding['native_member_id'],
-             'pending_pairing' if pending else 'active',canonical(preview['scope']),preview['scope_digest'],canonical(owner),self.c.clock(),self.c.clock()))
+             'pending_pairing' if pending else 'active',canonical(preview['scope']),preview['scope_digest'],canonical(owner),
+             self.c.clock(),self.c.clock(),int(not preserve),bool(preserve)))
 
     def pairing_scope_matches(self, binding, principal):
         authorization = self.store.one(
@@ -453,6 +555,7 @@ class RoomWeixin:
             if binding['state']!='paused' or not binding['peer_id'] or binding['revalidation_required']:
                 raise DevError('WEIXIN_RESUME_DENIED','此绑定需要先完成原联系人配对',409)
             self.store.execute("UPDATE weixin_bindings SET state='active',version=version+1,updated=? WHERE id=?",(self.c.clock(),binding['id']))
+            recover_waiting(self.c, conversation_id=binding['conversation_id'])
         else:
             state='revoked' if action in {'disconnect','migrate','cancel'} else 'paused'
             self.store.execute('UPDATE weixin_bindings SET state=?,version=version+1,updated=? WHERE id=?',(state,self.c.clock(),binding['id']))
@@ -476,7 +579,7 @@ class RoomWeixin:
                 or digest(body.get('body_text',''))!=original['source_digest']
                 or original['conversation_id']!=goal['conversation_id'] or source['conversation_id']!=binding['conversation_id']
                 or goal['conversation_id']!=binding['conversation_id']
-                or original['coordinator_member_id']!=binding['native_member_id']
+                or original['coordinator_member_id']!=body.get('room_member_id', binding['native_member_id'])
                 or not origin.get('native_room') or origin.get('binding_id')!=binding['id']
                 or not link or link['message_id']!=source['id'] or link['approval_id']!=goal['approval_id']
                 or link['goal_digest']!=goal['digest'] or not approval or approval['digest']!=goal['digest']):
@@ -518,6 +621,13 @@ class RoomWeixin:
         return self._author(message,project_ids=project_ids,goal=goal,recovery_owner=owner)
 
     def author(self,message,*,project_ids=None,goal=None):
+        authority = self.c.room_work_bridge.native.input_authority
+        if authority.proof(message, goal=goal):
+            if not goal:
+                *_, member = self.source_binding(message)
+                if not member or member['status'] in {'removed', 'paused'}:
+                    raise DevError('WEIXIN_MEMBER_REMOVED','原主责 dot 已暂停或移出',403)
+            return authority.author(message, project_ids=project_ids, goal=goal)
         return self._author(message,project_ids=project_ids,goal=goal)
 
     def _author(self,message,*,project_ids=None,goal=None,recovery_owner=None):
@@ -543,7 +653,9 @@ class RoomWeixin:
             recovered=True
         else:
             recovered=self.recovered_goal(goal,message,binding) if goal else None
-        _,_,owner,_,_=self._valid(binding,require_member=not bool(recovered))
+        _,_,owner,_,member=self.source_binding(message)
+        if not recovered and (not member or member['status'] in {'removed','paused'}):
+            raise DevError('WEIXIN_MEMBER_REMOVED','原消息指定的成员已暂停或移出',403)
         authorized=json.loads(auth['scope'])
         current=self.current_scope(binding,owner,authorized)
         saved=self.input_scope(message,auth)
@@ -584,12 +696,24 @@ class RoomWeixin:
             if goal['state'] not in {'cancelled','expired'}:
                 self.store.execute("UPDATE coordination_goals SET state='paused',version=version+1,updated=? WHERE id=?",(self.c.clock(),goal['id']))
             self.c.rooms.change(binding['conversation_id'],'work',goal['id'],goal['version']+1)
-        member=self.c.rooms.member(binding['native_member_id'],binding['conversation_id'])
-        self.c.room_consumers.enqueue_ref(member,'control_notice',auth['id'],auth['version']+1,{'reason_code':'channel_owner_revoked'})
+        for source in self.store.all('''SELECT DISTINCT m.* FROM collaboration_messages m
+                JOIN room_channel_owner_inputs i ON i.message_id=m.id
+                JOIN delegation_requests d ON d.message_id=m.id
+                JOIN coordination_goals g ON g.id=d.goal_id
+                WHERE i.authorization_id=? AND g.state='paused' ''', (auth['id'],)):
+            self.c.weixin.delivery.queue_task_status(source, 'CHANNEL_OWNER_REVOKED')
+        members = self.store.all('''SELECT DISTINCT m.* FROM room_members m
+            JOIN dot_mailbox_entries e ON e.member_id=m.id AND e.kind='message'
+            JOIN room_channel_owner_inputs i ON i.message_id=e.object_id
+            WHERE i.authorization_id=? AND m.conversation_id=? AND m.status NOT IN ('removed','legacy')''',
+            (auth['id'], binding['conversation_id']))
+        for member in members:
+            self.c.room_consumers.enqueue_ref(member,'control_notice',auth['id'],auth['version']+1,
+                                              {'reason_code':'channel_owner_revoked'})
         return {'work_permission_revoked':True,'chat_connected':binding['state']=='active',
             'affected_work_ids':[goal['id'] for goal in goals]}
 
-    def ingest(self,binding,account,owner,room,member,message):
+    def ingest(self,binding,account,owner,room,member,message,*,deferred=None):
         incoming_items(message)
         self.c.rooms.require_native(room)
         if not isinstance(message,dict):
@@ -608,7 +732,7 @@ class RoomWeixin:
         if prior and prior['source_digest']==source_hash:
             return prior['message_id']
         if prior and (not int(version) or not prior['provider_version'] or version==prior['provider_version']
-                or created!='0' and prior['provider_created'] and created!=prior['provider_created']):
+                or created!='0' and prior['provider_created'] not in ('', '0') and created!=prior['provider_created']):
             raise DevError('WEIXIN_DUPLICATE_CONFLICT','原微信消息没有可比较版本',409)
         newest=not prior or int(version)>int(prior['provider_version'])
         count=self.store.one('SELECT COUNT(*) n FROM weixin_inbound_versions WHERE account_id=? AND created>?',
@@ -654,16 +778,40 @@ class RoomWeixin:
                     attachment_items.append((ordinal,item))
                 elif item['type']!=1:
                     content+='\n[未支持的外部消息分项]'
-            pending=self.store.one("SELECT COUNT(*) n FROM dot_mailbox_entries WHERE member_id=? AND kind='message' AND acknowledged_at IS NULL",(member['id'],))['n']
-            if newest and pending>=200:
-                raise DevError('WEIXIN_INBOX_QUOTA','原 dot 未处理消息达到积压上限，保留原游标',429)
+            original = newest and not (prior or int(updated) or int(deleted))
+            replacement = None
+            if newest and prior and prior['message_id'] and not int(deleted):
+                # An already-delivered conversation can show its newest
+                # revision as chat. This replaces an unhandled slot and
+                # preserves the original recipient across lead changes.
+                replacement = self.store.one('''SELECT m.* FROM dot_mailbox_entries e
+                    JOIN room_members m ON m.id=e.member_id
+                    WHERE e.object_id=? AND e.kind='message' AND e.acknowledged_at IS NULL
+                    AND e.superseded_by='' AND m.conversation_id=?
+                    AND e.generation=('room:' || m.id || ':' || m.binding_generation)
+                    ORDER BY e.sequence LIMIT 1''', (prior['message_id'], room['id']))
+                if replacement:
+                    member = replacement
+            dispatchable = original or bool(replacement)
+            if original:
+                pending = self.store.one('''SELECT COUNT(*) n FROM (
+                    SELECT w.message_id FROM room_waiting_inputs w WHERE w.conversation_id=?
+                    UNION
+                    SELECT e.object_id FROM dot_mailbox_entries e JOIN room_members m ON m.id=e.member_id
+                    WHERE m.conversation_id=? AND e.kind='message' AND e.acknowledged_at IS NULL AND e.superseded_by=''
+                    AND e.generation=('room:' || m.id || ':' || m.binding_generation))''', (room['id'], room['id']))['n']
+                if pending >= MAX_PENDING_NATIVE_INPUTS:
+                    raise DevError('WEIXIN_INBOX_QUOTA','原 dot 未处理消息达到积压上限，保留原游标',429)
             message_id=uuid.uuid4().hex
             if int(deleted):
                 content,attachment_items='[微信消息已删除]',[]
             if not content:
                 content='[附件消息]'
             content=incoming_text(content,24000)
-            body={'body_text':redact(content),'room_member_id':member['id'],'room_routing':{'state':'queued','member_id':member['id'],'reason_code':''},
+            route = route_input(self.c, room, member)
+            if not dispatchable:
+                route = {'state': 'terminal', 'member_id': route['member_id'], 'reason_code': 'source_unavailable'}
+            body={'body_text':redact(content),'room_member_id':route['member_id'],'room_routing':route,
                 'external_origin':{'channel':'weixin','native_room':True,'binding_id':binding['id'],'account_id':account['id'],
                     'generation':binding['generation'],'peer_id':peer,'external_message_id':external_id,'provider_version':version,
                     'provider_created':created,'provider_deleted':bool(int(deleted)),'revision_is_latest_at_commit':newest},
@@ -672,14 +820,18 @@ class RoomWeixin:
             scope=None
             if not auth:
                 body['owner_task_blocker']='CHANNEL_OWNER_NOT_APPROVED'
-            elif prior or int(updated) or int(deleted):
+            elif prior or not newest or int(updated) or int(deleted):
                 body['owner_task_blocker']='CHANNEL_OWNER_SOURCE_CHANGED'
             elif not int(created):
                 body['owner_task_blocker']='WEIXIN_SOURCE_TIME_MISSING'
             elif int(created)<int(auth['created']*1000):
                 body['owner_task_blocker']='WEIXIN_SOURCE_BEFORE_APPROVAL'
             else:
-                scope=self.approved_scope(auth,binding,owner)
+                if deferred is None:
+                    scope = self.approved_scope(auth, binding, owner)
+                elif (deferred.get('evidence') and deferred.get('authorization_id') == auth['id']
+                        and deferred.get('authorization_version') == auth['version']):
+                    scope = deferred.get('scope')
                 if not scope or not scope['projects']:
                     body['owner_task_blocker']='CHANNEL_OWNER_SCOPE_DENIED'
             parent=prior['message_id'] if prior and prior['message_id'] else ''
@@ -700,10 +852,6 @@ class RoomWeixin:
                     (message_id,authorization_id,authorization_version,message_digest,created,scope,scope_digest)
                     VALUES (?,?,?,?,?,?,?)''',(message_id,auth['id'],auth['version'],digest(body['body_text']),
                     self.c.clock(),canonical(scope),digest(scope)))
-            canonical_message=self.store.one('SELECT * FROM collaboration_messages WHERE id=?',(message_id,))
-            if newest:
-                self.c.room_consumers.enqueue(canonical_message,member,owner)
-            self.c.rooms.change(room['id'],'message',message_id,1)
             disposition='message_committed'
         context=message.get('context_token')
         if direct and newest and context and (peer==binding['peer_id'] or disposition=='pairing_waits_for_panel_owner'):
@@ -718,9 +866,45 @@ class RoomWeixin:
                 source_digest=excluded.source_digest,message_id=excluded.message_id,disposition=excluded.disposition,
                 provider_version=excluded.provider_version,provider_created=excluded.provider_created''',
                 (*identity,source_hash,message_id,disposition,self.c.clock(),version,created))
+        if message_id:
+            canonical_message = self.store.one('SELECT * FROM collaboration_messages WHERE id=?', (message_id,))
+            follow = self.follows_room(binding) and not replacement
+            if newest and scope and scope['projects']:
+                authority = self.c.room_work_bridge.native.input_authority
+                proof_member = self.evidence_recipient(member, follow)
+                if deferred is None:
+                    authority.capture(canonical_message, owner, proof_member)
+                else:
+                    authority.capture(canonical_message, owner, proof_member, evidence=deferred['evidence'])
+            if newest and prior:
+                retire_input(self.c, prior['message_id'], message_id)
+            record_input(self.c, canonical_message, member, owner, follow_lead=follow, allow_dispatch=dispatchable)
+            self.c.rooms.change(room['id'], 'message', message_id, 1)
         return message_id
 
-    def delivery_validate(self,delivery):
+    @staticmethod
+    def evidence_recipient(member, follow):
+        return None if follow and member and member['status'] in BLOCKED_MEMBERS else member
+
+    def deferred_evidence(self, binding, owner, room, member, message):
+        created = int(uint64(message.get('create_time_ms', 0)))
+        peer = message.get('from_user_id')
+        auth = self.store.one('''SELECT * FROM room_channel_owner_authorizations
+            WHERE binding_id=? AND state='active' ''', (binding['id'],))
+        if (not auth or not isinstance(peer, str) or not hmac.compare_digest(peer, binding['peer_id'])
+                or not created or created < int(auth['created'] * 1000)
+                or int(uint64(message.get('update_time_ms', 0))) or int(uint64(message.get('delete_time_ms', 0)))):
+            return {}
+        scope = self.approved_scope(auth, binding, owner)
+        if not scope or not scope['projects']:
+            return {}
+        authority = self.c.room_work_bridge.native.input_authority
+        proof_member = self.evidence_recipient(member, self.follows_room(binding))
+        evidence = authority.ingress_evidence(owner, room, proof_member, binding=binding, channel_scope=scope, auth=auth)
+        return {'authorization_id': auth['id'], 'authorization_version': auth['version'],
+                'scope': scope, 'evidence': evidence}
+
+    def delivery_validate(self,delivery,*,require_task_authority=True):
         binding=self.store.one('SELECT * FROM weixin_bindings WHERE id=?',(delivery['binding_id'],))
         if not binding:
             raise DevError('WEIXIN_BINDING_INACTIVE','原微信绑定已不可用',403)
@@ -735,27 +919,36 @@ class RoomWeixin:
                 or not self.sender_matches(binding,message,source) or message['version']!=delivery['message_version'] or digest(body)!=delivery['message_digest']
                 or origin.get('binding_id')!=binding['id'] or origin.get('generation')!=binding['generation'] or origin.get('peer_id')!=binding['peer_id']):
             raise DevError('WEIXIN_DELIVERY_SCOPE_CHANGED','原微信回复内容或收件身份已改变',403)
-        if self.store.one('SELECT 1 FROM room_channel_owner_inputs WHERE message_id=?',(source['id'],)):
+        if require_task_authority and self.store.one('SELECT 1 FROM room_channel_owner_inputs WHERE message_id=?',(source['id'],)):
             self.reply_author(message,source)
         return binding,account,owner,message
 
     def reply_binding(self,binding,message,source):
-        goal=self.store.one('SELECT * FROM coordination_goals WHERE id=?',(message.get('goal_id'),)) if message.get('goal_id') else None
-        recovered=self.recovered_goal(goal,source,binding)
-        return self._valid(binding,require_member=not bool(recovered))
+        identity = self.source_binding(source)
+        if identity[0]['id'] != binding['id']:
+            raise DevError('WEIXIN_DELIVERY_SCOPE_CHANGED','原微信回复绑定已改变',403)
+        member = identity[-1]
+        if not member or member['status'] in {'removed', 'paused'}:
+            goal = self.store.one('SELECT * FROM coordination_goals WHERE id=?', (message['goal_id'],)) if message.get('goal_id') else None
+            if not self.recovered_goal(goal, source, binding):
+                raise DevError('WEIXIN_MEMBER_REMOVED','原主责 dot 已暂停或移出',403)
+        return identity
 
     def reply_author(self,message,source):
         goal=self.store.one('SELECT * FROM coordination_goals WHERE id=?',(message.get('goal_id'),)) if message.get('goal_id') else None
         native=self.c.room_work_bridge.native
-        if goal and native.reference(goal):
-            spec=native.record(native.reference(goal))
-            if (source['id']!=spec['source_message_id'] or source['conversation_id']!=spec['conversation_id']
-                    or source['version']!=spec['source_version'] or digest(json.loads(source['body']).get('body_text',''))!=spec['source_digest']):
+        if goal and (reference := native.reference(goal)):
+            original = native.original(reference)
+            if (source['id']!=original['source_message_id'] or source['conversation_id']!=original['conversation_id']
+                    or source['version']!=original['source_version']
+                    or digest(json.loads(source['body']).get('body_text',''))!=original['source_digest']):
                 raise DevError('WEIXIN_DELIVERY_SOURCE_CHANGED','原工作回复的输入证据已改变',403)
-            projects=set(json.loads(message['body']).get('provenance_project_ids',[]))
-            if not projects or not projects<=set(spec['project_ids']):
+            projects = set(json.loads(message['body']).get('provenance_project_ids', []))
+            if not projects or not projects <= set(native.record(reference)['project_ids']):
                 raise DevError('WEIXIN_DELIVERY_SCOPE_CHANGED','原工作回复缺少有效项目来源',403)
-            return self.author(source,project_ids=projects,goal=goal)
+            if native.input_authority.proof(source, goal=goal):
+                native.require_delivery_projects(goal, source, projects)
+            return native.owner_author(goal, source)
         if self.store.one('SELECT 1 FROM room_channel_owner_inputs WHERE message_id=?',(source['id'],)):
             return self.author(source)
         return self.c.channel_owner.author(source)
@@ -788,8 +981,14 @@ class RoomWeixin:
                     (goal['id'],revision))
                 return bool(intent and body.get('source_message_id')==intent['source_message_id']
                     and message['reply_to_id']==intent['source_message_id'])
-        member=self.c.rooms.member(binding['native_member_id'],binding['conversation_id'])
-        if message['author']!=member['grant_id'] or message['conversation_id']!=member['conversation_id']:
+        if source and json.loads(source['body']).get('external_origin', {}).get('native_room'):
+            try:
+                *_, member = self.source_binding(source)
+            except DevError:
+                return False
+        else:
+            member = self.bound_member(binding)
+        if not member or message['author']!=member['grant_id'] or message['conversation_id']!=member['conversation_id']:
             return False
         if body.get('sender_member_id')==member['id']:
             return True

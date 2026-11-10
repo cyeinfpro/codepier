@@ -1,5 +1,5 @@
 {
-  "version": "1.33.4",
+  "version": "1.33.5",
   "algorithm": "sha256",
   "assets": {
     "access-profiles.css": {
@@ -75,16 +75,16 @@
       "bytes": 95566
     },
     "collaboration-room-store.js": {
-      "sha256": "8eaeb2edb3c7c79447e25f9a7510263ad9cb65f9a332ac8798ec1675862c4ed8",
-      "bytes": 32300
+      "sha256": "3331a07e34b571f4527d686b7d34f958997c65f8484847c6aeb41da56fb7e454",
+      "bytes": 32762
     },
     "collaboration-room.css": {
-      "sha256": "80bac3c5640f4a0bb2bed6c376993d041b6a10c5349966f0c5a9ddadc9fd2f73",
-      "bytes": 49064
+      "sha256": "671ccefb6638cb03ba2704762028496aef783d540db803d4f6ca6a1134cae972",
+      "bytes": 49699
     },
     "collaboration-room.js": {
-      "sha256": "9781a37e2c7aa53e12747778b1cebe695aedfb3c4d61d6cdf3acb19562abb74c",
-      "bytes": 193565
+      "sha256": "6204766d22205023f52b3fffc8df8044449721acf9203f4658d0a1b5946dae30",
+      "bytes": 213355
     },
     "computer.css": {
       "sha256": "031dff13225cec17fc8d445c565feccddd0db33fc277d28a468e19060a54eed2",

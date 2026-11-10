@@ -12,6 +12,7 @@ import uuid
 
 from shared.room_runtime_contracts import RoomMessage, WorkControl, RoomMemberReply, RoomWorkStart
 from hub.collaboration.projection_cache import projection
+from hub.collaboration.room_waiting_inputs import record_input, route_input
 from hub.collaboration.common import canonical, digest, read_cursor, redact, sign_cursor, validate
 from shared.util import DevError
 
@@ -72,6 +73,8 @@ class RoomRuntime:
         addressed=(body.get('room_member_id')==member['id'] or member.get('legacy_dot_id') in body.get('duplex_recipients',[]))
         if not addressed:
             raise DevError('ROOM_SOURCE_NOT_ADDRESSED','原始输入没有发给此成员',403)
+        if not self.c.room_consumers.source_is_current(row, body):
+            raise DevError('ROOM_SOURCE_CHANGED','原始输入已修订，请重新读取',409)
         return row
 
     def member_receipt(self,args,member,principal,action,perform):
@@ -95,11 +98,14 @@ class RoomRuntime:
     def reply(self,raw,principal):
         args=validate(RoomMemberReply,raw)
         with self.store.transaction():
-            member=self.c.room_consumers.authorize_member(args,principal,require_revision=True)
+            member=self.c.room_consumers.authorize_member(args,principal,require_revision=False)
             source=self.source(args,member,principal)
             source_body=json.loads(source['body'])
             related_id=source_body.get('work_id') or source.get('goal_id')
             related=self.goal(related_id) if related_id else None
+            strict=bool(related) or any(args.get(key) for key in
+                ('expected_intent_revision','coordinator_epoch','outcome','artifact_refs'))
+            self.c.room_consumers.guard_reply_revision(args,principal,member,source,strict=strict)
             publication=self.publication(args,member,source,related,principal) if related and args['complete'] else None
             def save():
                 identifier=uuid.uuid4().hex
@@ -184,8 +190,10 @@ class RoomRuntime:
         if args['outcome']=='succeeded' and (goal['state']!='active' or not works or any(w['state']!='succeeded' for w in works)):
             raise DevError('ROOM_WORK_NOT_SUCCESSFUL','仍有未成功的当前工作项，不能声明全部完成',409)
         refs=self.c.coordination.teams.artifacts(goal,args['artifact_refs'])
-        if {r['work_item_id'] for r in refs}!={w['id'] for w in works if w['result']}:
-            raise DevError('ROOM_WORK_RESULT_SET_CHANGED','汇总需要精确引用当前意图全部已有结果，包括失败与受阻项',409)
+        required = {w['id'] for w in works if w['result']}
+        required.update(ref['work_item_id'] for ref in self.c.room_goal_recovery.reused_artifact_refs(goal))
+        if {r['work_item_id'] for r in refs} != required:
+            raise DevError('ROOM_WORK_RESULT_SET_CHANGED','汇总需要精确引用当前意图和已批准续办的全部已有结果',409)
         return {'intent_revision':revision,'coordinator_epoch':self.c.room_goal_recovery.epoch(goal['id']),
                 'outcome':args['outcome'],'artifact_refs':refs,'result_digest':digest(refs)}
 
@@ -373,14 +381,62 @@ class RoomRuntime:
         if body.get('sender_member_id'):
             view['display_name']=body.get('sender_name','dot')
         view['created_at']=row['created']
-        view['work_id']=row.get('goal_id') or json.loads(row['body']).get('work_id','')
+        view['work_id']=row.get('goal_id') or body.get('work_id','')
         view['client_message_id']=row['source_id']
-        view['routing']=json.loads(row['body']).get('room_routing',{})
-        route=view['routing']
-        view['display']={'title':('已保存，等待主责 dot' if route.get('reason_code')=='lead_member_required' else
-            '已保存，等待恢复连接' if route.get('state')=='waiting' else
-            '已发送，等待 dot' if route.get('state')=='queued' else '已保存')}
+        view['routing'],view['display']=self.message_status(row,body,body.get('room_routing',{}))
         return view
+
+    def message_status(self,row,body,route):
+        state,reason=route.get('state','saved'),route.get('reason_code','')
+        if state in {'waiting','queued'} and reason not in {'member_paused','member_removed','lead_member_required'}:
+            member=self.store.one('SELECT * FROM room_members WHERE id=? AND conversation_id=?',
+                (route.get('member_id',''),row['conversation_id']))
+            entry=self.store.one("""SELECT acknowledged_at FROM dot_mailbox_entries
+                WHERE member_id=? AND kind IN ('message','continuation_source') AND object_id=?
+                AND object_version=? AND superseded_by='' ORDER BY sequence DESC LIMIT 1""",
+                (route.get('member_id',''),row['id'],row['version']))
+            work=self.store.one("""SELECT g.state, EXISTS (
+                    SELECT 1 FROM room_goal_publications p WHERE p.goal_id=g.id
+                    AND p.intent_revision=COALESCE(i.intent_revision,1)) AS published
+                FROM coordination_goals g LEFT JOIN room_work_intents i ON i.goal_id=g.id
+                WHERE g.id=COALESCE(NULLIF(?,''),(SELECT s.goal_id FROM room_work_sources s
+                    WHERE s.message_id=? AND s.goal_id!='' LIMIT 1))""",
+                (body.get('work_id') or row.get('goal_id') or '',row['id']))
+            if work and (work['published'] or work['state'] in {'completed','succeeded'}):
+                state,reason='completed',''
+            elif work and work['state'] in {'cancelled','expired','paused'}:
+                state,reason=('waiting' if work['state']=='paused' else 'terminal'),'work_'+work['state']
+            elif work and work['state']=='active':
+                state,reason='processing',''
+            elif entry and entry['acknowledged_at'] is not None:
+                state,reason='completed',''
+            elif entry and member and self.c.rooms.state(member) in {'ready_chat','ready_work'}:
+                from hub.collaboration.room_consumers import MAX_WAKE_AGE, MAX_WAKE_ATTEMPTS
+
+                episode=member.get('wake_episode_at') or member.get('last_wake_at')
+                exhausted=(member['dirty_revision']>member['drained_revision'] and
+                    (member['wake_count']>=MAX_WAKE_ATTEMPTS or
+                     episode is not None and episode + MAX_WAKE_AGE <= self.c.clock()))
+                state,reason=('waiting','member_not_connected') if exhausted else ('queued','')
+            elif member and reason!='waiting_earlier_input':
+                state,reason='waiting','member_not_connected'
+        title={
+            'lead_member_required':'已保存，等待主责',
+            'member_paused':'已保存，等待 dot 恢复',
+            'member_not_connected':'已保存，等待 dot 恢复',
+            'member_removed':'原成员已移除',
+            'waiting_earlier_input':'已保存，等待前序消息入队',
+            'source_unavailable':'原消息已失效',
+            'work_unavailable':'原工作已结束',
+            'work_paused':'工作已暂停',
+            'work_cancelled':'工作已取消',
+            'work_expired':'工作授权已到期',
+        }.get(reason,{
+            'saved':'已保存','waiting':'已保存，等待 dot 恢复','queued':'待 dot 处理',
+            'processing':'处理中','completed':'已完成','terminal':'已停止',
+        }.get(state,'已保存'))
+        return ({**route,'state':state,'reason_code':reason} if route else {},
+            {'state':state,'title':title,'reason_code':reason})
 
     @projection
     def read(self,conversation_id,principal,*,cursor='',limit=50,client_message_id='',message_id=''):
@@ -466,13 +522,7 @@ class RoomRuntime:
                 member=self.recipient(conversation,args['member_id'])
                 if member and self.c.rooms.migration.member_requires_migration(member):
                     raise DevError('ROOM_MEMBER_MIGRATION_REQUIRED','此成员仍是原连接，请先明确迁移或移除，不能从新入口向旧路线发送',409)
-                connected=bool(member and member['grant_id'] and member['connection_proof_hash'])
-                routing={'state':'queued' if connected and member['status'] not in {'paused','removed'} else 'waiting',
-                         'member_id':member['id'] if member else '',
-                         'reason_code':'member_paused' if member and member['status']=='paused' else
-                                       'member_removed' if member and member['status']=='removed' else
-                                       'lead_member_required' if not member else
-                                       'member_not_connected' if not connected else ''}
+                routing=route_input(self.c,conversation,member)
                 identifier=uuid.uuid4().hex
                 parent=None
                 if args['reply_to_id']:
@@ -491,7 +541,7 @@ class RoomRuntime:
                         if args['member_id'] and args['member_id']!=original['coordinator_member_id']:
                             raise DevError('ROOM_WORK_LEAD_REQUIRED','原工作补充须发给原主责成员',403)
                         member=self.c.rooms.member(original['coordinator_member_id'],conversation['id'])
-                        routing={'state':'queued','member_id':member['id'],'reason_code':''}
+                        routing=route_input(self.c,conversation,member)
                 root=parent['thread_root_id'] or parent['id'] if parent else identifier
                 provenance,provenance_scopes=self.provenance(parent)
                 body={'body_text':redact(args['body_text']),'room_request_digest':fingerprint,'room_routing':routing,
@@ -519,13 +569,11 @@ class RoomRuntime:
                     provenance=body.get('provenance_project_ids',[])
                 if args['work_id']:
                     self.revise_intent(goal,message,member)
-                # Waiting for the first binding still needs its durable input
-                # reference. Enqueue does not claim a lease or create work, and
-                # an unbound member cannot emit a callback or consume it.
-                if member and (routing['state']=='queued' or routing['reason_code']=='member_not_connected'):
-                    self.store.execute('UPDATE collaboration_messages SET body=? WHERE id=?',(canonical(body),identifier))
-                    message=self.store.one('SELECT * FROM collaboration_messages WHERE id=?',(identifier,))
-                    self.c.room_consumers.enqueue(message,member,principal)
+                follow_lead=not (args['member_id'] or args['work_id'])
+                ingress_member=member if not follow_lead or routing['reason_code'] not in {
+                    'lead_member_required','member_paused','member_removed'} else None
+                self.c.room_work_bridge.native.input_authority.capture(message,principal,ingress_member)
+                record_input(self.c,message,member,principal,follow_lead=follow_lead)
                 self.c.rooms.change(conversation['id'],'message',identifier,message['version'])
                 return {'message_id':identifier}
             result=self.c.room_channels.receipt(principal,conversation,'room_message',args,save)

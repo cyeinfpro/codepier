@@ -110,6 +110,7 @@ class MemberCreate(RoomRead):
     name: str = Field(min_length=1, max_length=80)
     reuse_member_id: Identifier | None = None
     reuse_binding_generation: int | None = Field(default=None, ge=1)
+    keep_connected: bool = Field(default=False, strict=True, exclude_if=lambda value: not value)
     project_scopes: list[MemberProjectScope] = Field(default_factory=list)
     lifetime: Lifetime = Field(default_factory=Lifetime)
     expected_version: int | None = Field(default=None, ge=1)
@@ -129,7 +130,8 @@ class ConnectRead(Model):
 
 
 class ConnectAction(ConnectRead):
-    action: Literal['refresh_invite', 'resume', 'pause', 'remove', 'rebind', 'migrate']
+    action: Literal['refresh_invite', 'resume', 'pause', 'remove', 'rebind', 'migrate', 'set_renewal']
+    keep_connected: bool | None = Field(default=None, strict=True, exclude_if=lambda value: value is None)
     expected_version: int = Field(ge=1)
     idempotency_key: Key
 

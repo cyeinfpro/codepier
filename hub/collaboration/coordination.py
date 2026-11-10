@@ -466,7 +466,8 @@ class CoordinationService:
             native_context['publication_requirements']={'action':'room_reply','complete':True,
                 'coordinator_epoch':self.c.room_goal_recovery.epoch(goal['id']),
                 'expected_intent_revision':revision,**{k:intent[k] for k in ('source_message_id','source_version','source_digest')},
-                'artifact_refs':[{'work_item_id':w['id'],'version':w['version'],'digest':digest(json.loads(w['result']))} for w in evidence],
+                'artifact_refs':[{'work_item_id':w['id'],'version':w['version'],'digest':digest(json.loads(w['result']))} for w in evidence]
+                                + self.c.room_goal_recovery.reused_artifact_refs(goal),
                 'outcome_required':True,'allowed_outcomes':['succeeded','partial','blocked'],
                 'credential_required':'current_coordinator_member_identity_and_consumer_proof'}
         return {'goal': self.view(goal, principal), 'can_approve': bool(principal.admin and not principal.grant_id and not self.c.delegation.goal_link(goal) and not self.teams.link(goal)),
@@ -566,7 +567,8 @@ class CoordinationService:
                 dependency = self.work(goal, identifier)
                 if self.teams.link(goal):
                     self.teams.operation_guard(goal, dependency)
-                if dependency['approval_id'] != goal['approval_id']:
+                if (dependency['approval_id'] != goal['approval_id']
+                        and not self.c.room_goal_recovery.reused_work_item(goal, dependency)):
                     raise DevError('WORK_APPROVAL_CHANGED', '依赖不属于当前目标批准', 409)
             def save():
                 self.admit_current_work_surface(goal)
@@ -860,12 +862,34 @@ class CoordinationService:
         if (not principal.grant_id or item['assignee_grant_id'] != principal.grant_id
                 or not attempt or attempt['grant_id'] != principal.grant_id):
             raise DevError('WORK_ASSIGNEE_REQUIRED', '归档仅限原尝试的当前授权连接', 403)
+        lifecycle_pause = (item['reason_code'] in {'ROOM_PAUSED', 'ROOM_MEMBER_PAUSE'} and goal['state'] == 'active'
+                           and self.c.room_work_bridge.native.reference(goal))
         if (item['approval_id'] != goal['approval_id'] or item['state'] != 'blocked' or item['result']
-                or item['reason_code'] != 'LEASE_EXPIRED' or item['lease_until'] is not None
+                or (item['reason_code'] != 'LEASE_EXPIRED' and not lifecycle_pause) or item['lease_until'] is not None
                 or item['attempt'] != args['attempt'] or attempt['fencing_token'] != args['fencing_token']
                 or item['fencing_token'] != args['fencing_token'] + 1):
-            raise DevError('WORK_ARCHIVE_FENCED', '只能归档未重领、未取消的原过期尝试；不能恢复租约或回退 fencing token', 409)
+            raise DevError('WORK_ARCHIVE_FENCED', '只能归档未重领的原过期尝试或因连接暂停的原尝试', 409)
         return item
+
+    def result_operations(self, item, args, principal):
+        return self.store.all("""SELECT o.id,o.state,c.operation_role,c.supersedes_operation_id,c.cancel_note
+            FROM coordination_operations c JOIN operations o ON o.id=c.operation_id
+            WHERE c.work_item_id=? AND c.attempt=? AND c.fencing_token=? AND c.grant_id=? AND c.project_id=?
+            ORDER BY c.created,o.id""",
+            (item['id'], args['attempt'], args['fencing_token'], principal.grant_id, item['project_id']))
+
+    def paused_archive_evidence(self, principal, goal, item):
+        if (item['reason_code'] not in {'ROOM_PAUSED', 'ROOM_MEMBER_PAUSE'} or not item['attempt']
+                or self.pending_operations(item)):
+            return None
+        args = {'work_item_id': item['id'], 'expected_version': item['version'],
+                'attempt': item['attempt'], 'fencing_token': item['fencing_token'] - 1}
+        self.archive_item(principal, goal, args)
+        rows = self.result_operations(item, args, principal)
+        if not any(row['cancel_note'] != 'cancelled_before_delivery' for row in rows):
+            return None
+        return {**args, 'operation_ids': [row['id'] for row in rows]}, [
+            {'operation_id': row['id'], 'state': row['state']} for row in rows]
 
     @staticmethod
     def recovered_explorations(rows):
@@ -893,10 +917,7 @@ class CoordinationService:
             self.teams.guard(args, principal, goal, 'result', self.work(goal, args['work_item_id']))
             def save():
                 item = self.archive_item(principal, goal, args) if archive else self.lease(principal, goal, args)
-                rows = self.store.all('''SELECT o.id,o.state,c.operation_role,c.supersedes_operation_id
-                    FROM coordination_operations c JOIN operations o ON o.id=c.operation_id
-                    WHERE c.work_item_id=? AND c.attempt=? AND c.fencing_token=? AND c.grant_id=? AND c.project_id=?''',
-                    (item['id'], args['attempt'], args['fencing_token'], principal.grant_id, item['project_id']))
+                rows = self.result_operations(item, args, principal)
                 actual = {row['id']: row['state'] for row in rows}
                 if (set(args['operation_ids']) != set(actual)
                         or (version2 or archive) and len(args['operation_ids']) != len(actual)):
@@ -941,7 +962,8 @@ class CoordinationService:
                 if archive:
                     self.c.audit(room, principal.actor, 'work.expired_attempt_archived', item['id'],
                                  {'original_attempt': args['attempt'], 'original_fencing_token': args['fencing_token'],
-                                  'current_fencing_token': item['fencing_token'], 'lease_restored': False})
+                                  'current_fencing_token': item['fencing_token'], 'original_reason': item['reason_code'],
+                                  'lease_restored': False})
                 if args['outcome'] == 'succeeded':
                     for dependent in self.store.all("SELECT * FROM coordination_work WHERE goal_id=? AND approval_id=? AND state='queued'",
                                                     (goal['id'], goal['approval_id'])):
@@ -1041,6 +1063,7 @@ class CoordinationService:
             actor = self.participant(room, goal, link['grant_id'])
             item = self.lease(actor, goal, link)
             self.teams.operation_guard(goal, item)
+            self.c.room_work_bridge.native.check_dispatch_target(goal, item, operation, actor)
             if item['project_id'] != operation['project_id'] or operation['grant_id'] != link['grant_id']:
                 raise DevError('WORK_OPERATION_MISMATCH', '执行操作归属改变', 403)
         except DevError as exc:
@@ -1064,10 +1087,23 @@ class CoordinationService:
                 try:
                     native = self.c.room_work_bridge.native
                     reference = native.reference(goal)
-                    participants = (native.record(reference)['participant_grant_ids']
-                                    if reference else spec['participant_grant_ids'])
-                    for grant_id in participants:
-                        self.participant(room, goal, grant_id)
+                    if reference:
+                        conversation = self.store.one('SELECT * FROM conversation_rooms WHERE id=?', (goal['conversation_id'],))
+                        if conversation and conversation['state'] == 'paused' and conversation['archived_at'] is None:
+                            # Room lifecycle already stopped its work items.
+                            # Keep the active Goal so the same intent can resume.
+                            continue
+                        for saved in native.record(reference)['members']:
+                            member = self.c.rooms.member(saved['member_id'], goal['conversation_id'])
+                            if (member['status'] == 'paused' and member['grant_id'] == saved['grant_id']
+                                    and member['binding_generation'] == saved['binding_generation']):
+                                # Only the current unchanged member is paused.
+                                # Continue validating other original participants.
+                                continue
+                            self.participant(room, goal, saved['grant_id'], saved['member_id'])
+                    else:
+                        for grant_id in spec['participant_grant_ids']:
+                            self.participant(room, goal, grant_id)
                 except DevError as exc:
                     self.stop_work(goal, exc.code)
                     self.store.execute("UPDATE coordination_goals SET state='paused',version=version+1,updated=? WHERE id=?", (now, goal['id']))

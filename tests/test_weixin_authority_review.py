@@ -149,27 +149,37 @@ def test_revoke_fences_preparing_reply_before_any_send(collab):
     assert row['lease_fence'] > claim['lease_fence']
 
 
-def test_unknown_send_is_not_replayed_or_skipped_after_new_consent(collab):
+def test_unknown_send_blocks_related_replies_but_not_fresh_consent_source(collab):
     c, w, account, binding, scope = fixture_channel(collab)
     approve(c, w, binding, scope)
-    old = interim(c, fresh(c, w, account))
+    source = fresh(c, w, account)
+    old = interim(c, source)
+    related = interim(c, source)
     calls = []
     class Provider:
         async def send(self, peer, context, client_id, items):
             calls.append(client_id)
-            raise TimeoutError('Provider may have accepted this synthetic send')
+            if client_id == old['client_id']:
+                raise TimeoutError('Provider may have accepted this synthetic send')
+            return {'provider_state': 'accepted'}
     w.client_factory = lambda *args: Provider()
     asyncio.run(w.delivery.send_once(old['id']))
     assert c.s.store.one('SELECT state FROM weixin_parts WHERE id=?',
                          (old['id'],))['state'] == 'unknown'
+    # Related progress cannot overtake the uncertain reply.
+    assert w.delivery.claim(related['id']) is None
+    assert related['id'] not in {row['id'] for row in w.delivery.candidates(c.clock[0])}
     revoke(c, w, binding, scope)
     approve(c, w, binding, scope)
     new = interim(c, fresh(c, w, account, 10))
     c.clock[0] += 200
     w.delivery.reconcile()
     asyncio.run(w.delivery.send_once(old['id']))
-    assert w.delivery.claim(new['id']) is None
-    assert calls == [old['client_id']]
+    # A different authorized source is an independent ordering group.
+    asyncio.run(w.delivery.send_once(new['id']))
+    assert calls == [old['client_id'], new['client_id']]
+    assert c.s.store.one('SELECT state FROM weixin_parts WHERE id=?',
+                         (new['id'],))['state'] == 'accepted'
     assert c.s.store.one('SELECT state FROM weixin_parts WHERE id=?',
                          (old['id'],))['state'] == 'unknown'
 
@@ -254,7 +264,9 @@ def test_same_peer_renewal_unblocks_unsent_lane_but_preserves_unknown(collab, in
     class Provider:
         async def send(self, peer, context, client_id, items):
             calls.append(client_id)
-            raise TimeoutError('Provider may have accepted this synthetic send')
+            if client_id == old['client_id']:
+                raise TimeoutError('Provider may have accepted this synthetic send')
+            return {'provider_state': 'accepted'}
     if initial_state == 'preparing':
         assert w.delivery.claim(old['id']) is not None
     elif initial_state == 'attention_unsent':
@@ -290,9 +302,13 @@ def test_same_peer_renewal_unblocks_unsent_lane_but_preserves_unknown(collab, in
     current_old = c.s.store.one('SELECT * FROM weixin_parts WHERE id=?', (old['id'],))
     if initial_state == 'unknown':
         assert current_old['state'] == 'unknown'
-        assert w.delivery.claim(new['id']) is None
         asyncio.run(w.delivery.send_once(old['id']))
-        assert calls == [old['client_id']]
+        asyncio.run(w.delivery.send_once(new['id']))
+        assert calls == [old['client_id'], new['client_id']]
+        assert c.s.store.one('SELECT state FROM weixin_parts WHERE id=?',
+                             (new['id'],))['state'] == 'accepted'
+        assert c.s.store.one('SELECT state,attempts FROM weixin_parts WHERE id=?',
+                             (old['id'],)) == {'state': 'unknown', 'attempts': 1}
     else:
         assert current_old['state'] in {'cancelled', 'rejected'}
         assert current_old['attempts'] == 0

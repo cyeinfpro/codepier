@@ -545,9 +545,11 @@ class TeamService:
             seen.add(ref['work_item_id'])
             item = self.q.work(goal, ref['work_item_id'])
             assignment = self.store.one('SELECT * FROM '+assignments+' WHERE work_id=?', (item['id'],))
-            if (item['approval_id'] != goal['approval_id'] or not item['result'] or item['version'] != ref['version']
+            reused = native and self.c.room_goal_recovery.reused_work_item(goal, item)
+            if (not item['result'] or item['version'] != ref['version']
                     or digest(json.loads(item['result'])) != ref['digest'] or not assignment
-                    or assignment['intent_revision'] != link['intent_revision']):
+                    or (not reused and (item['approval_id'] != goal['approval_id']
+                        or assignment['intent_revision'] != link['intent_revision']))):
                 raise DevError('TEAM_ARTIFACT_STALE', '产物引用不是当前批准和意图下的最新结果版本', 409)
             current.append(ref)
         return sorted(current, key=lambda r: r['work_item_id'])

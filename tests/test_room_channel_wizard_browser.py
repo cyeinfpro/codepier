@@ -38,6 +38,9 @@ def test_ready_chat_can_approve_tasks_but_scope_drift_clears_old_checked_consent
         'display': {'title': '微信已连接', 'reason': '本用例使用合成渠道投影'},
         'task_scope': {'scope_digest': 'scope-before', 'summary': '核对当前范围', 'projects': [
             {'project_id': stack.projects[0]['id'], 'capabilities': ['read'], 'execution_targets': []}]},
+        'follow_task_scope': {'scope_digest': 'follow-before', 'scope': {'routing_mode': 'follow_room'},
+            'projects': [{'project_id': stack.projects[0]['id'], 'capabilities': ['read']}]},
+        'routing_mode': 'member',
         'actions': [{'action': 'approve_tasks', 'label': '允许本人交办工作'}],
         'next_request': {'method': 'POST', 'path': '/api/collaboration/channel-connect-flows/synthetic-wizard-only/actions',
             'body': {'action': 'approve_tasks', 'expected_version': 1}, 'form_fields': fields},
@@ -48,7 +51,8 @@ def test_ready_chat_can_approve_tasks_but_scope_drift_clears_old_checked_consent
             writes.append(submitted)
             flow['version'] += 1
             if submitted['action'] == 'approve_tasks':
-                flow.update(work_authorized=True, primary_action='refresh')
+                flow.update(work_authorized=True, primary_action='refresh',
+                            routing_mode='follow_room' if submitted.get('confirm_follow_room') else 'member')
                 flow['next_request'] = {'body': {'action': 'refresh'}, 'form_fields': []}
                 flow['actions'] = [{'action': 'revoke_tasks', 'label': '撤销工作许可'}]
                 flow['allowed_actions'] = ['revoke_tasks']
@@ -78,6 +82,7 @@ def test_ready_chat_can_approve_tasks_but_scope_drift_clears_old_checked_consent
         flow['version'] = 2
         flow['next_request']['body']['expected_version'] = 2
         flow['task_scope']['scope_digest'] = 'scope-after'
+        flow['follow_task_scope']['scope_digest'] = 'follow-after'
         flow['task_scope']['projects'][0]['capabilities'] = ['read', 'write']
         page.evaluate('document.dispatchEvent(new Event("visibilitychange"))')
         expect(page.locator('[data-cr-panel-error]')).to_contain_text('参与范围已变化')
@@ -89,7 +94,9 @@ def test_ready_chat_can_approve_tasks_but_scope_drift_clears_old_checked_consent
         page.locator('[data-cr-form="weixin"] button[type="submit"]').click()
         expect(page.locator('[data-cr-channel-view]')).to_contain_text('已允许本人交办工作')
         assert len(writes) == 1
-        assert writes[0]['expected_scope_digest'] == 'scope-after'
+        assert writes[0]['expected_scope_digest'] == 'follow-after'
+        assert writes[0]['confirm_follow_room'] is True
+        expect(page.locator('[data-cr-channel-view]')).to_contain_text('房间当前主责 dot')
         assert writes[0]['expected_version'] == 2
         assert all(writes[0][item['name']] is True for item in fields)
         original_account = deepcopy(flow['account'])
@@ -111,20 +118,37 @@ def test_ready_chat_can_approve_tasks_but_scope_drift_clears_old_checked_consent
         assert flow['binding'] == original_binding
         assert flow['stage'] == 'ready' and flow['work_authorized'] is False
 
+        flow.update(version=5, task_scope=None, follow_task_scope={
+            'scope_digest': 'chat-follow', 'scope': {'routing_mode': 'follow_room'},
+            'project_ids': [],
+        }, next_request={
+            'body': {'action': 'approve_tasks', 'expected_version': 5},
+            'form_fields': [{'name': 'confirm_follow_room', 'type': 'checkbox', 'required': True}],
+        })
+        page.evaluate('document.dispatchEvent(new Event("visibilitychange"))')
+        chat_scope = page.locator('[aria-label="微信交办授权摘要"]')
+        expect(chat_scope).to_contain_text('当前没有可交办的项目')
+        follow = page.locator('[name="confirm_follow_room"]')
+        expect(follow).to_be_visible()
+        expect(follow).not_to_be_checked()
+        expect(follow).to_have_attribute('required', '')
+        page.locator('[data-cr-form="weixin"] button[type="submit"]').click()
+        assert len(writes) == 2
+
         # A writable native room may still contain a historical flow whose
         # only allowed operation is cancellation. Account presence is not
         # permission to bind that old flow or replace its credentials.
-        flow.update(stage='choose_account', version=5, primary_action='cancel',
+        flow.update(stage='choose_account', version=6, primary_action='cancel',
             accounts=[{'id': 'retained-account', 'label': '原账号'}],
             actions=[{'action': 'cancel', 'label': '取消原流程'}], allowed_actions=['cancel'],
-            next_request={'body': {'action': 'cancel', 'expected_version': 5}, 'form_fields': []})
+            next_request={'body': {'action': 'cancel', 'expected_version': 6}, 'form_fields': []})
         page.evaluate('document.dispatchEvent(new Event("visibilitychange"))')
         expect(page.locator('[data-cr-form="weixin"]')).to_have_attribute('data-channel-action', 'cancel')
         expect(page.locator('[name="existing_account_id"]')).to_have_count(0)
         expect(page.locator('[data-cr-action="channel-existing"]')).to_have_count(0)
         assert len(writes) == 2
 
-        flow['version'] = 6
+        flow['version'] = 7
         flow['actions'].append({'action': 'select_account', 'label': '使用已有微信'})
         flow['allowed_actions'].append('select_account')
         page.evaluate('document.dispatchEvent(new Event("visibilitychange"))')

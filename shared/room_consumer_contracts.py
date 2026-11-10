@@ -26,6 +26,7 @@ class RoomAttachmentRead(MemberIdentity):
 
 
 class RoomConsumerBegin(MemberIdentity):
+    include_inbox: bool = Field(default=False, strict=True)
     wake_ticket: str = Field(min_length=32, max_length=256, repr=False)
     consumer_run_id: Identifier
     lease_seconds: int = Field(default=90, ge=30, le=300, strict=True)

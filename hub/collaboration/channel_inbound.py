@@ -32,7 +32,7 @@ def identity(channel, account, scope, source):
                    account['generation'], scope, source])
 
 
-def isolate(service, channel, account, scope, source, ingest, *, replay=False):
+def isolate(service, channel, account, scope, source, ingest, *, replay=False, deferred_evidence=None):
     """Only known message-level failures are isolated; batch/storage faults abort."""
     store, now = service.store, service.c.clock()
     identifier = identity(channel, account, scope, source)
@@ -50,8 +50,11 @@ def isolate(service, channel, account, scope, source, ingest, *, replay=False):
         if exc.code in BATCH_ERRORS or exc.status >= 500:
             raise
         state = 'deferred' if exc.code in DEFERRED_ERRORS else 'quarantined'
-        body = store.encrypt(canonical({'source': source, 'scope': scope,
-            'generation': account['generation'], 'credential_version': account['credential_version']}))
+        payload = {'source': source, 'scope': scope, 'generation': account['generation'],
+                   'credential_version': account['credential_version']}
+        if state == 'deferred' and not previous and deferred_evidence:
+            payload['authority'] = deferred_evidence()
+        body = store.encrypt(canonical(payload))
         if not previous:
             usage = store.one("""SELECT COUNT(*) AS n,COALESCE(SUM(length(body)),0) AS bytes
                 FROM channel_inbound_failures WHERE channel=? AND account_id=? AND state!='committed'""", (channel, account['id']))
@@ -70,7 +73,7 @@ def isolate(service, channel, account, scope, source, ingest, *, replay=False):
 
 def pending(service, channel, account_id):
     return service.store.all("""SELECT * FROM channel_inbound_failures
-        WHERE channel=? AND account_id=? AND state='deferred' ORDER BY created,id LIMIT 20""",
+        WHERE channel=? AND account_id=? AND state='deferred' ORDER BY created,rowid LIMIT 20""",
         (channel, account_id))
 
 

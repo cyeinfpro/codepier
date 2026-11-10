@@ -84,11 +84,15 @@ class FencedConsumerEngine:
         return result
 
 
+    @staticmethod
+    def begin_fingerprint(args):
+        return digest({key: value for key, value in args.items() if key != 'wake_ticket'} |
+                      {'wake_ticket_hash': digest(args['wake_ticket'])})
+
     def begin(self, raw, principal):
         with self.store.transaction():
             args, principal, room, _, dot, binding, sub = self.scope(raw, principal, self.begin_model)
-            fingerprint = digest({key: value for key, value in args.items() if key != 'wake_ticket'} |
-                                 {'wake_ticket_hash': digest(args['wake_ticket'])})
+            fingerprint = self.begin_fingerprint(args)
             ticket = self._one('SELECT * FROM dot_wake_tickets WHERE ticket_hash=?',
                                     (digest(args['wake_ticket']),))
             if (not ticket or ticket[self.subject_column] != dot['id'] or ticket['generation'] != binding['generation']

@@ -350,6 +350,16 @@ window.CodePierRoomStore = (() => {
       pruneReceipts(workReceipts, state.works);
       emit('works');
     }
+    function previewPermissionContinuation(roomId, draft, signal) {
+      return request(path(roomId) + '/permissions/continuation-preview', {
+        method: 'POST',
+        body: JSON.stringify(draft),
+        signal,
+      });
+    }
+    function permissionContinuation(roomId, batchId) {
+      return request(path(roomId) + '/permissions/continuations/' + encodeURIComponent(batchId));
+    }
     async function list({ more = false, includeArchived = state.includeArchived } = {}) {
       state.includeArchived = includeArchived;
       const cursor = more ? state.roomsCursor || '' : '';
@@ -813,6 +823,8 @@ window.CodePierRoomStore = (() => {
     return {
       state,
       path,
+      previewPermissionContinuation,
+      permissionContinuation,
       key,
       writable,
       reset,

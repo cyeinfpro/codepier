@@ -450,7 +450,7 @@ class ChannelOwnerAuthority:
         if message['origin'] == 'external_channel':
             try:
                 if json.loads(message['body']).get('external_origin',{}).get('native_room'):
-                    return self.c.room_channels.native.author(message)
+                    return self.c.room_work_bridge.native.input_authority.author(message)
                 return self.trusted(message)
             except DevError:
                 return {'kind': 'external_channel', 'authenticated': False}

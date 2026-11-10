@@ -261,6 +261,7 @@ class RoomPermissions:
             def perform():
                 current = self.row(room['id'])
                 version = current['version'] if current else 0
+                previous_channels = self.policy(room['id'])['channels']
                 if args['expected_version'] != version:
                     raise DevError('STALE_VERSION', '权限已更新，请重新核对后保存', 409, current_version=version)
                 rules = self.normalize(args['scope']['project_scopes'], principal)
@@ -286,6 +287,12 @@ class RoomPermissions:
                     ON CONFLICT(conversation_id) DO UPDATE SET version=excluded.version,policy=excluded.policy,
                     approved_by=excluded.approved_by,approved_at=excluded.approved_at""", values)
                 self.store.execute('INSERT INTO room_permission_revisions VALUES (?,?,?,?,?)', values)
+                if previous_channels != channels:
+                    for member in members:
+                        if member['grant_id']:
+                            self.c.room_consumers.enqueue_ref(self.c.rooms.member(member['id']),
+                                'control_notice', room['id'], version + 1, {'reason_code': 'channel_scope_changed'})
+                self.c.room_work_bridge.native.stop_revoked_inputs(room['id'])
                 self.c.rooms.change(room['id'], 'permissions', room['id'], version + 1)
                 return {'conversation_id': room['id'], 'permission_version': version + 1}
             self.c.rooms.mutation(principal, 'room_permissions', args, perform)

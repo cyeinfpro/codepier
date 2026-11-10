@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Literal
 from pydantic import Field, field_validator, model_validator
 from shared.collaboration_contracts import Model, Identifier, Key
-from shared.room_contracts import MemberIdentity
+from shared.room_contracts import MemberIdentity, RoomPermissionsUpdate
 from shared.team_collaboration_contracts import ArtifactRef
 
 
@@ -76,6 +76,24 @@ class WorkControl(Model):
         if self.action in {'takeover', 'restore_binding'}:
             if not self.target_member_id or self.expected_coordinator_epoch is None or self.expected_intent_revision is None:
                 raise ValueError('Recovery requires the selected original member, current lead epoch and current intent')
+        return self
+
+
+class RoomPermissionContinuationSave(RoomPermissionsUpdate):
+    policy_preview_digest: str = Field(default='', max_length=64)
+    continuation_preview_id: str = Field(default='', max_length=128)
+    continue_selected: bool = Field(default=False, strict=True)
+    selected_task_ids: list[Identifier] = Field(default_factory=list, max_length=50)
+
+    @model_validator(mode='after')
+    def explicit_selection(self):
+        if self.continue_selected:
+            if (not self.idempotency_key or not self.continuation_preview_id
+                    or len(self.policy_preview_digest) != 64 or not self.selected_task_ids
+                    or len(set(self.selected_task_ids)) != len(self.selected_task_ids)):
+                raise ValueError('Continuation requires a unique selection, policy preview and request key')
+        elif self.selected_task_ids or self.continuation_preview_id or self.policy_preview_digest:
+            raise ValueError('Selection and preview require explicit continuation approval')
         return self
 
 
@@ -178,6 +196,7 @@ class ChannelAction(Model):
     allow_owner_tasks: bool = False
     confirm_owner_identity: bool = False
     confirm_future_tasks: bool = False
+    confirm_follow_room: bool = False
     confirm_result_delivery: bool = False
     confirm_pairing_notices: bool = False
     expected_scope_digest: str = Field(default='', max_length=64)

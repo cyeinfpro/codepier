@@ -27,7 +27,10 @@ class CollaborationLoops:
             self._wake_scheduled = None
         operations = [('reconcile', self.reconcile, 5)]
         if self.service.config.events_enabled:
-            operations.append(('events', partial(self.service.events.tick, wake=self._event_wake), 2))
+            operations.extend([
+                ('events', partial(self.service.events.tick, wake=self._event_wake), 2),
+                ('room_subscription_renewal', self.renew_room_subscriptions, 5),
+            ])
         if self.service.config.collector_enabled:
             operations.append(('collector', self.service.monitor.tick, 2))
         # Owner switches are persisted and can change without a Hub restart.
@@ -95,6 +98,9 @@ class CollaborationLoops:
 
     async def reconcile(self):
         await self.service.store.run(self.service.reconcile)
+
+    async def renew_room_subscriptions(self):
+        await self.service.rooms.renewals.tick(self.service.events)
 
     async def loop(self, name, operation, interval):
         while True:

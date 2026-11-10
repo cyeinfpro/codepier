@@ -64,9 +64,9 @@ def credentials(c, session):
     return {**identity(c.joined), **{k: session[k] for k in ('consumer_session_id', 'consumer_fence', 'consumer_proof')}}
 
 
-def send(c, text='你好，帮我看看这段想法。'):
+def send(c, text='你好，帮我看看这段想法。', **routing):
     return c.s.room_runtime.send({'conversation_id': c.room['id'], 'member_id': c.joined['member_id'],
-        'body_text': text, 'client_message_id': key(), 'idempotency_key': key()}, c.owner)
+        'body_text': text, 'client_message_id': key(), 'idempotency_key': key(), **routing}, c.owner)
 
 
 @pytest.mark.asyncio
@@ -164,3 +164,133 @@ async def test_synthetic_events_have_no_ticket_and_empty_room_never_loops(rooms)
         assert c.s.room_consumers.recover() == 0
     assert c.s.store.one('SELECT COUNT(*) AS n FROM dot_consumer_sessions WHERE member_id=?',
                          (c.joined['member_id'],))['n'] == 0
+
+
+@pytest.mark.asyncio
+async def test_begin_includes_live_inbox_without_consuming_it(rooms):
+    c = await connect(rooms)
+    verify(c)
+    sent = send(c)
+    raw = {**identity(c.joined), 'wake_ticket': c.ticket, 'consumer_run_id': key(),
+           'idempotency_key': key(), 'include_inbox': True}
+    session = c.s.room_consumers.begin(raw, c.actor)
+    entry = session['inbox']['items'][0]
+    assert entry['message']['id'] == sent['message']['id']
+    assert entry['reply_arguments']['source_message_id'] == entry['object_id']
+    assert entry['reply_arguments']['expected_inbox_revision'] == session['inbox_revision']
+    assert 'work_start_arguments' not in entry  # chat-only room
+    assert session['inbox']['read_is_consumption'] is False
+
+    replay = c.s.room_consumers.begin(raw, c.actor)
+    assert replay['replayed'] is True
+    assert replay['inbox']['items'][0]['id'] == entry['id']
+    assert replay['consumer_proof'] == session['consumer_proof']
+    c.clock[0] += 91
+    expired = c.s.room_consumers.begin(raw, c.actor)
+    assert expired['state'] == 'expired'
+    assert 'inbox' not in expired
+
+
+@pytest.mark.asyncio
+async def test_begin_default_fingerprint_and_page_read_failure(rooms, monkeypatch):
+    c = await connect(rooms)
+    verify(c)
+    raw, session = begin(c)
+    replay = c.s.room_consumers.begin({**raw, 'include_inbox': False}, c.actor)
+    assert replay['consumer_session_id'] == session['consumer_session_id']
+    assert replay['replayed'] and 'inbox' not in replay
+
+    c.clock[0] += 91
+    send(c)
+    await dispatch(c)
+    next_raw = {**identity(c.joined), 'wake_ticket': c.received[-1][1]['data']['wake_ticket'],
+                'consumer_run_id': key(), 'idempotency_key': key(), 'include_inbox': True}
+
+    def unavailable(*_args):
+        raise DevError('INBOX_READ_TEMPORARY', 'temporary projection error', 503)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(c.s.room_consumers, 'inbox', unavailable)
+        lease = c.s.room_consumers.begin(next_raw, c.actor)
+    assert lease['state'] == 'active'
+    assert lease['inbox_unavailable'] == 'INBOX_READ_TEMPORARY'
+    recovered = c.s.room_consumers.begin(next_raw, c.actor)
+    assert recovered['consumer_session_id'] == lease['consumer_session_id']
+    assert recovered['inbox']['items']
+
+
+@pytest.mark.asyncio
+async def test_chat_reply_ignores_independent_topic_but_requires_same_thread_refresh(rooms):
+    c = await connect(rooms)
+    verify(c)
+    first = send(c, '第一话题')
+    _, session = begin(c)
+    page = c.s.room_consumers.inbox(identity(c.joined), c.actor)
+    first_entry = page['items'][0]
+    unrelated = send(c, '第二话题')
+    reply = {**credentials(c, session), **first_entry['reply_arguments'], 'body_text': '回答第一话题。',
+             'idempotency_key': key(), 'complete': False}
+    assert c.s.room_runtime.reply(reply, c.actor)['message']['reply_to_id'] == first['message']['id']
+
+    send(c, '同一话题的补充', reply_to_id=first['message']['id'])
+    with pytest.raises(DevError) as changed:
+        c.s.room_runtime.reply({**reply, 'idempotency_key': key()}, c.actor)
+    assert changed.value.code == 'ROOM_INBOX_CHANGED'
+    page = c.s.room_consumers.inbox(identity(c.joined), c.actor)
+    second_entry = next(item for item in page['items'] if item['object_id'] == unrelated['message']['id'])
+    member = c.s.rooms.member(c.joined['member_id'])
+    c.s.room_consumers.enqueue_ref(member, 'control_notice', key(), 1, {'reason_code': 'channel_owner_revoked'})
+    with pytest.raises(DevError) as revoked:
+        c.s.room_runtime.reply({**credentials(c, session), **second_entry['reply_arguments'], 'body_text': '回答第二话题。',
+                                'idempotency_key': key()}, c.actor)
+    assert revoked.value.code == 'ROOM_INBOX_CHANGED'
+
+
+@pytest.mark.asyncio
+async def test_room_wake_recovery_continues_after_fast_retries(rooms):
+    c = await connect(rooms)
+    verify(c)
+    send(c)
+    for count, delay in enumerate((30, 120, 600, 1800, 1800), start=1):
+        c.clock[0] += delay
+        assert c.s.room_consumers.recover() == 1
+        assert c.s.rooms.member(c.joined['member_id'])['wake_count'] == count
+    c.s.store.execute('UPDATE room_members SET wake_episode_at=? WHERE id=?',
+                      (c.clock[0] - 86400, c.joined['member_id']))
+    c.clock[0] += 1800
+    assert c.s.room_consumers.recover() == 0
+    member = c.s.rooms.member(c.joined['member_id'])
+    assert member['dirty_revision'] > member['drained_revision']
+    c.s.room_consumers.recover_connection(member)
+    assert c.s.rooms.member(member['id'])['wake_count'] == 0
+
+
+@pytest.mark.asyncio
+async def test_expired_room_wake_is_dead_lettered_before_callback(rooms):
+    c = await connect(rooms)
+    verify(c)
+    send(c)
+    good_sender = c.s.events.sender
+
+    async def temporarily_offline(*_args):
+        return Reply(503)
+
+    c.s.events.sender = temporarily_offline
+    await dispatch(c)
+    delivery = c.s.store.one("""SELECT id FROM mcp_event_deliveries
+        WHERE subscription_id=? AND state='retry_wait'""", (c.sub['id'],))
+    assert delivery is not None
+
+    c.clock[0] += 700
+    c.s.events.sender = good_sender
+    before = len(c.received)
+    await dispatch(c)
+    expired = c.s.store.one('SELECT state,reason_code FROM mcp_event_deliveries WHERE id=?', (delivery['id'],))
+    assert expired == {'state': 'dead_letter', 'reason_code': 'wake_ticket_expired'}
+    assert len(c.received) == before
+
+    assert c.s.room_consumers.recover() == 1
+    await dispatch(c)
+    assert len(c.received) == before + 1
+    assert c.received[-1][1]['data']['wake_ticket']
+    assert c.received[-1][1]['data']['wake_ticket'] != c.ticket

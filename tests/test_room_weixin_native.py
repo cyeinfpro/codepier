@@ -90,6 +90,42 @@ async def test_empty_room_wechat_pair_inbox_reply_reuses_original_outbox(collab)
 
 
 @pytest.mark.asyncio
+async def test_revised_provider_source_is_fenced_even_at_current_inbox_revision(collab):
+    (s, owner, worker, clock, identity, credentials), flow, _, action = await setup_channel(collab)
+    created = int(clock[0] * 1000)
+    original = s.weixin.commit_updates(s.weixin.claim_poll(flow['account_id']),
+        packet(2, '原先的话题', create_time_ms=created))['message_ids'][0]
+    page = s.room_consumers.inbox(identity, worker)
+    original_entry = next(item for item in page['items'] if item['object_id'] == original)
+    clock[0] += 3
+    edited = s.weixin.commit_updates(s.weixin.claim_poll(flow['account_id']),
+        packet(2, '现在的话题', create_time_ms=created, update_time_ms=created + 1000))['message_ids'][0]
+    page = s.room_consumers.inbox(identity, worker)
+    assert original not in {item['object_id'] for item in page['items']}
+    current = next(item for item in page['items'] if item['object_id'] == edited)
+
+    with pytest.raises(DevError) as changed:
+        s.room_runtime.reply({**identity, **credentials, **original_entry['reply_arguments'],
+            'expected_inbox_revision': page['inbox_revision'], 'body_text': '已看到原话题。',
+            'idempotency_key': key()}, worker)
+    assert changed.value.code == 'ROOM_SOURCE_CHANGED'
+
+    # Losing the channel after an input was saved stops its transport reply,
+    # while the current source can still have a room-only status response.
+    await action(flow, 'disconnect')
+    reply = s.room_runtime.reply({**identity, **credentials, **current['reply_arguments'],
+        'expected_inbox_revision': s.room_consumers.inbox(identity, worker)['inbox_revision'],
+        'body_text': '已保存，原微信连接已解除。', 'idempotency_key': key()}, worker)
+    assert reply['message']['reply_to_id'] == edited
+    assert not s.store.all('SELECT id FROM weixin_deliveries')
+    page = s.room_consumers.inbox(identity, worker)
+    assert not page['items']
+    yielded = s.room_consumers.yield_session({**identity, **credentials,
+        'expected_inbox_revision': page['inbox_revision'], 'idempotency_key': key()}, worker)
+    assert yielded['state'] == 'yielded'
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('timestamp,reason', [
     (0, 'WEIXIN_SOURCE_TIME_MISSING'),
     (1, 'WEIXIN_SOURCE_BEFORE_APPROVAL'),
@@ -265,7 +301,7 @@ async def test_existing_wechat_goal_keeps_unchanged_project_after_other_project_
         'confirm_task':True,'idempotency_key':key()},actor)
     room=s.rooms.read({'conversation_id':identity['conversation_id']},owner)['room']
     save_room_permissions(s,owner,room['id'],[{'project_id':'proj'}])
-    assert not s.channel_owner.author(source)['authenticated']  # No new scope consent is invented.
+    assert s.channel_owner.author(source)['authenticated']  # The unchanged original project stays authorized.
     assert s.room_work_bridge.native.owner_author(s.room_runtime.goal(result['goal_id']),source)['authenticated']
     clock[0]+=91
     assert s.room_consumers.request_recovery({**identity,'idempotency_key':key()},actor)['wakeup_queued']

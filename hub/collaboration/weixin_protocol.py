@@ -3,17 +3,20 @@
 Reference: Tencent/openclaw-weixin c6643f6f0ac03574eb126f2d69569ea4267cc3c6,
 package 2.4.10, docs/protocol.md. Client source is not a complete server SLA:
 no native groups, outbound receipt lookup, client_id idempotency, delivery/read
-proof, context TTL or arbitrary redirect is assumed. No automatic send retry.
+proof, context TTL or arbitrary redirect is assumed. Only definite HTTP rate
+rejections are eligible for retry by the persisted delivery queue.
 """
 from __future__ import annotations
 
 import asyncio
 import base64
 from dataclasses import dataclass, field
+from email.utils import parsedate_to_datetime
 import hashlib
 import json
 import os
 import re
+import time
 from urllib.parse import urlencode, urlsplit
 
 import httpx
@@ -197,6 +200,41 @@ async def public_transport(method, url, headers, body, *, timeout=40, maximum=MA
                                   {'retry-after', 'x-encrypted-param', 'content-type', 'content-length'}})
 
 
+def encode_request(payload, *, auth=True):
+    if payload is None:
+        return None
+    if auth:
+        payload = {**payload, 'base_info': {'channel_version': SOURCE_VERSION, 'bot_agent': 'CodePier/1'}}
+    body = json.dumps(payload, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode()
+    if len(body) > MAX_JSON:
+        raise DevError('WEIXIN_REQUEST_LIMIT', '微信请求超过传输预算', 413)
+    return body
+
+
+def send_payload(peer, context, client_id, items):
+    text(peer, 256)
+    text(context, 65536)
+    text(client_id, 128)
+    if not isinstance(items, list) or not 1 <= len(items) <= 32:
+        raise DevError('WEIXIN_ITEMS_INVALID', '微信发送内容必须具有有界、有序的分项', 422)
+    return {'msg': {'from_user_id': '', 'to_user_id': peer, 'client_id': client_id,
+                    'message_type': 2, 'message_state': 2, 'context_token': context, 'item_list': items}}
+
+
+def retry_after(value):
+    if not isinstance(value, str) or len(value) > 128:
+        return 60
+    if re.fullmatch(r'[0-9]{1,9}', value):
+        return int(value)
+    try:
+        parsed = parsedate_to_datetime(value)
+        if parsed.tzinfo is not None:
+            return max(0, int(parsed.timestamp() - time.time() + 1))
+    except (TypeError, ValueError, OverflowError, OSError):
+        pass
+    return 60
+
+
 class WeixinClient:
     def __init__(self, api_base=API_BASE, *, token='', allowed_api_bases=(API_BASE,), transport=public_transport):
         self.base = approved_url(api_base, bases=allowed_api_bases, exact_base=True)
@@ -219,11 +257,7 @@ class WeixinClient:
     async def call(self, method, path, payload=None, *, auth=True, qr_status=False, timeout=40, read_timeout=None):
         if not path.startswith('/ilink/bot/') or '..' in path or '#' in path:
             raise DevError('WEIXIN_ENDPOINT_DENIED', '不允许任意微信 API 路径', 403)
-        if payload is not None and auth:
-            payload = {**payload, 'base_info': {'channel_version': SOURCE_VERSION, 'bot_agent': 'CodePier/1'}}
-        body = json.dumps(payload, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode() if payload is not None else None
-        if body is not None and len(body) > MAX_JSON:
-            raise DevError('WEIXIN_REQUEST_LIMIT', '微信请求超过传输预算', 413)
+        body = encode_request(payload, auth=auth)
         limits = {'timeout': timeout, 'maximum': MAX_JSON}
         if read_timeout is not None:
             limits['read_timeout'] = read_timeout
@@ -232,9 +266,8 @@ class WeixinClient:
         if reply.status in (401, 403):
             raise DevError('WEIXIN_AUTH_REJECTED', '微信凭据被拒绝，通道需要重新确认', 403)
         if reply.status == 429:
-            value = reply.headers.get('retry-after', '')
-            retry = min(3600, max(1, int(value))) if re.fullmatch(r'[0-9]{1,6}', value) else 60
-            raise DevError('WEIXIN_RATE_LIMITED', '微信接口限流；未确认的发送不会自动重发', 429, retry_after_seconds=retry)
+            delay = retry_after(reply.headers.get('retry-after', ''))
+            raise DevError('WEIXIN_RATE_LIMITED', '微信明确拒绝本次限流请求', 429, retry_after_seconds=delay)
         if not 200 <= reply.status < 300:
             raise DevError('WEIXIN_HTTP_ERROR', '微信接口返回非成功 HTTP 状态', 502, upstream_status=reply.status)
         result = strict_json(reply.body)
@@ -255,12 +288,7 @@ class WeixinClient:
         return validate_updates(result)
 
     async def send(self, peer, context, client_id, items):
-        text(peer, 256); text(context, 65536); text(client_id, 128)
-        if not isinstance(items, list) or not 1 <= len(items) <= 32:
-            raise DevError('WEIXIN_ITEMS_INVALID', '微信发送内容必须具有有界、有序的分项', 422)
-        result = await self.call('POST', '/ilink/bot/sendmessage', {'msg': {'from_user_id': '',
-            'to_user_id': peer, 'client_id': client_id, 'message_type': 2, 'message_state': 2,
-            'context_token': context, 'item_list': items}})
+        result = await self.call('POST', '/ilink/bot/sendmessage', send_payload(peer, context, client_id, items))
         # Pinned api.ts treats omitted ret as accepted, as protobuf JSON may
         # omit a zero default. This is no delivery/read proof and adds no retry.
         if any(type(result.get(k, 0)) is not int or result.get(k, 0) != 0 for k in ('ret', 'errcode')):

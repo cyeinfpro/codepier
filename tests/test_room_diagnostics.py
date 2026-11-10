@@ -63,8 +63,8 @@ async def test_completed_goal_keeps_unknown_wechat_delivery_separate_and_correla
     final_delivery = s.store.one('SELECT * FROM weixin_deliveries WHERE message_id=?', (final['id'],))
     # Exercise the real prepare/send/finish journal with a synthetic transport
     # loss. Older progress parts must finish first, respecting original order.
-    for part in s.store.all('''SELECT p.* FROM weixin_parts p JOIN weixin_deliveries d ON d.id=p.delivery_id
-            WHERE p.state IN ('queued','waiting_context','waiting_media') ORDER BY d.created,d.id,p.ordinal'''):
+    while candidates := s.weixin.delivery.candidates(clock[0]):
+        part = s.store.one('SELECT * FROM weixin_parts WHERE id=?', (candidates[0]['id'],))
         claim = s.weixin.delivery.claim(part['id'])
         assert claim
         s.weixin.delivery.mark_sending(claim, [{'type': 1, 'text_item': {'text': 'synthetic protocol fixture'}}])
