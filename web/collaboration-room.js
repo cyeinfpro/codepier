@@ -36,10 +36,10 @@ window.CodePierCollaboration = (() => {
     paused: '已暂停',
     revoked: '已撤销',
   };
-  const connectionState = (item) =>
-    hostStates[item.display_state || item.state] || '路线待核对';
+  const connectionState = (item) => hostStates[item.display_state || item.state] || '路线待核对';
   const connectionName = (item) => item.label || item.name || 'dot 连接';
-  const connectionRoomSummary = (item) => item.single_room_title ||
+  const connectionRoomSummary = (item) =>
+    item.single_room_title ||
     (Number.isInteger(item.room_count) ? `${item.room_count} 个房间` : '');
   const reuseAnchor = (item) =>
     item.host_connection_id ? item.reuse_member_id : item.member_id || item.id;
@@ -47,17 +47,22 @@ window.CodePierCollaboration = (() => {
     item.connection_capabilities?.verified_reuse ?? capabilities.verified_reuse ?? false;
   const connectionChoice = (item) => item.host_connection_id || reuseAnchor(item);
   const connectionChoiceLabel = (item) => {
-    if (!item.host_connection_id) return connectionName(item) + ' · ' + (item.room_title || '原房间');
+    if (!item.host_connection_id)
+      return connectionName(item) + ' · ' + (item.room_title || '原房间');
     const last = item.last_round_trip_at || item.verified_at;
     return [
       connectionName(item),
       connectionState(item),
       connectionRoomSummary(item),
       last ? `最近往返 ${dateTime(last)}` : '',
-    ].filter(Boolean).join(' · ');
+    ]
+      .filter(Boolean)
+      .join(' · ');
   };
   const connectionListPath = (cursor, host = true) =>
-    connectionsPath + '?limit=40' + (host ? '&host_connections=true' : '') +
+    connectionsPath +
+    '?limit=40' +
+    (host ? '&host_connections=true' : '') +
     (cursor ? '&cursor=' + encodeURIComponent(cursor) : '');
   const stages = {
     invited: '等待 dot 接入',
@@ -171,7 +176,10 @@ window.CodePierCollaboration = (() => {
   const safeChannelActions = new Set(['pause', 'disconnect', 'revoke_tasks', 'cancel']);
   function mutationAllowed(method, url, body, roomId = state.roomId) {
     if (url === base + '/rooms' || store.writable(roomId)) return true;
-    if (method === 'POST' && (url === batchPath || /^\/api\/collaboration\/connections\/[^/]+\/revoke$/.test(url)))
+    if (
+      method === 'POST' &&
+      (url === batchPath || /^\/api\/collaboration\/connections\/[^/]+\/revoke$/.test(url))
+    )
       return true;
     if (url === store.path(roomId) + '/migration') return body.action === 'activate';
     if (url.startsWith(store.path(roomId) + '/legacy-channels/') && url.endsWith('/pause'))
@@ -205,11 +213,11 @@ window.CodePierCollaboration = (() => {
       ? '独立 dot 连接'
       : item.connection_source_member_id
         ? '来自连接 #' + item.connection_source_member_id.slice(0, 8)
-      : item.legacy
-        ? '原连接待迁移'
-        : item.evidence?.host_bound
-          ? '本房间已登记的宿主'
-          : '宿主尚未登记');
+        : item.legacy
+          ? '原连接待迁移'
+          : item.evidence?.host_bound
+            ? '本房间已登记的宿主'
+            : '宿主尚未登记');
   const members = () => (state.room?.members || []).filter((item) => item.state !== 'removed');
   const title = (item) => item?.display?.title || stages[item?.stage || item?.state] || '等待连接';
   // Rooms carried over from project partitions were titled with raw project
@@ -817,7 +825,10 @@ window.CodePierCollaboration = (() => {
     return `<p>${confirming ? '核对所选分项' : '将停止尚未发送的内容'} · ${E(preview.affected_count)} 段</p>${
       preview.affected_count
         ? `<ul class="cr-delivery-parts">${preview.affected_parts
-            .map((part) => `<li>${part.delivery_id === preview.delivery_id ? '原回复' : '关联回复'} · 第 ${E(Number(part.ordinal) + 1)} 段 · ${E(deliveryLabels[part.state] || part.state)}</li>`)
+            .map(
+              (part) =>
+                `<li>${part.delivery_id === preview.delivery_id ? '原回复' : '关联回复'} · 第 ${E(Number(part.ordinal) + 1)} 段 · ${E(deliveryLabels[part.state] || part.state)}</li>`,
+            )
             .join('')}</ul>${btn('apply-delivery-control', label, attr, 'cr-text-button')}`
         : '<p class="cr-muted">当前没有符合条件的分项。</p>'
     }${btn('dismiss-delivery-control', '关闭核对', attr, 'cr-text-button')}`;
@@ -827,7 +838,9 @@ window.CodePierCollaboration = (() => {
   }
   function paintDeliveryControl(button, id) {
     const item = deliveryControlPreviews.get(deliveryControlKey(id));
-    const box = button.closest('[data-delivery-id]')?.querySelector('[data-cr-delivery-control-preview]');
+    const box = button
+      .closest('[data-delivery-id]')
+      ?.querySelector('[data-cr-delivery-control-preview]');
     if (!box) return;
     box.innerHTML = deliveryControlPreviewMarkup(item);
     box.querySelector('button')?.focus({ preventScroll: true });
@@ -861,14 +874,19 @@ window.CodePierCollaboration = (() => {
         expected_version: preview.delivery_version,
         expected_ordering_revision: preview.ordering_revision,
         preview_digest: preview.preview_digest,
-        confirmation_note: selection.action === 'confirm_received' ? '本人核对手机微信收到所选分项' : '',
+        confirmation_note:
+          selection.action === 'confirm_received' ? '本人核对手机微信收到所选分项' : '',
         idempotency_key: requestKey,
       });
       if (!result || key !== deliveryControlKey(id)) return;
       deliveryControlPreviews.delete(key);
       paintDeliveryControl(button, id);
       await store.messages();
-      announce(selection.action === 'confirm_received' ? '已保存所选分项的核对结果' : '已停止所选范围内未发送的内容');
+      announce(
+        selection.action === 'confirm_received'
+          ? '已保存所选分项的核对结果'
+          : '已停止所选范围内未发送的内容',
+      );
     } catch (error) {
       if (error.status !== 409 || key !== deliveryControlKey(id)) throw error;
       await previewDeliveryControl(button, selection);
@@ -881,12 +899,21 @@ window.CodePierCollaboration = (() => {
     const id = button.dataset.id;
     const roomId = state.roomId;
     const target = button.closest('[data-cr-delivery-relationships]');
-    const data = await api(store.path(roomId) + '/diagnostics?' + new URLSearchParams({ delivery_id: id }));
+    const data = await api(
+      store.path(roomId) + '/diagnostics?' + new URLSearchParams({ delivery_id: id }),
+    );
     if (state.roomId !== roomId || !target?.isConnected) return;
     const prior = data.direct_blocker;
     const count = (value) => (data.truncated ? '至少 ' : '') + supplied(value);
     target.innerHTML = diagnosticFields([
-      ['最近前置投递', prior?.restricted ? '当前授权下不可查看' : prior?.delivery_id ? identifier(prior.delivery_id) : '无'],
+      [
+        '最近前置投递',
+        prior?.restricted
+          ? '当前授权下不可查看'
+          : prior?.delivery_id
+            ? identifier(prior.delivery_id)
+            : '无',
+      ],
       ['关系', prior?.reason_code ? deliveryReason(prior.reason_code) : '—'],
       ['直接等待', count(data.direct_waiting_count)],
       ['受影响的后续回复', count(data.affected_waiting_count)],
@@ -901,7 +928,9 @@ window.CodePierCollaboration = (() => {
         const accepted = parts.filter((part) => part.state === 'accepted').length;
         const confirmed = parts.filter((part) => part.state === 'owner_confirmed').length;
         const unknown = parts.filter((part) => part.state === 'unknown').length;
-        const stopped = parts.filter((part) => ['cancelled', 'rejected', 'superseded'].includes(part.state)).length;
+        const stopped = parts.filter((part) =>
+          ['cancelled', 'rejected', 'superseded'].includes(part.state),
+        ).length;
         const name = delivery.channel === 'weixin' ? '微信' : delivery.channel || '渠道';
         let label = name + ' · ' + (deliveryLabels[delivery.state] || '状态待核对');
         if (delivery.state === 'blocked' && !delivery.id) label = name + '回复待处理';
@@ -918,18 +947,41 @@ window.CodePierCollaboration = (() => {
         if (delivery.read_verified === true || delivery.provider_delivery_verified === true)
           label = name + '已送达';
         const controllable =
-          activeRoom() && delivery.channel === 'weixin' && !!delivery.id &&
-          Number.isInteger(delivery.version) && Number.isInteger(delivery.ordering_revision);
-        const stop = controllable && parts.some((part) =>
-          ['queued', 'preparing', 'waiting_context', 'waiting_media'].includes(part.state) ||
-          (part.state === 'attention' && (part.attempts === 0 || part.reason_code === 'WEIXIN_RATE_LIMITED')),
-        );
-        if (!unknown && parts.some((part) => part.state === 'queued' && part.reason_code === 'WEIXIN_RATE_LIMITED'))
+          activeRoom() &&
+          delivery.channel === 'weixin' &&
+          !!delivery.id &&
+          Number.isInteger(delivery.version) &&
+          Number.isInteger(delivery.ordering_revision);
+        const stop =
+          controllable &&
+          parts.some(
+            (part) =>
+              ['queued', 'preparing', 'waiting_context', 'waiting_media'].includes(part.state) ||
+              (part.state === 'attention' &&
+                (part.attempts === 0 || part.reason_code === 'WEIXIN_RATE_LIMITED')),
+          );
+        if (
+          !unknown &&
+          parts.some(
+            (part) => part.state === 'queued' && part.reason_code === 'WEIXIN_RATE_LIMITED',
+          )
+        )
           label = `平台限流，${delivery.next_attempt_at ? dateTime(delivery.next_attempt_at) + ' 后继续发送' : '稍后自动继续'}`;
-        const retry = activeRoom() && delivery.channel === 'weixin' && !!delivery.id &&
-          Number.isInteger(delivery.version) && parts.some((part) => part.state === 'attention' && part.attempts === 0);
-        const detail = unknown || confirmed || stopped || retry || stop || !!delivery.ordering_reason ||
-          !!delivery.reason_code || ['unknown', 'needs_attention', 'blocked'].includes(delivery.state);
+        const retry =
+          activeRoom() &&
+          delivery.channel === 'weixin' &&
+          !!delivery.id &&
+          Number.isInteger(delivery.version) &&
+          parts.some((part) => part.state === 'attention' && part.attempts === 0);
+        const detail =
+          unknown ||
+          confirmed ||
+          stopped ||
+          retry ||
+          stop ||
+          !!delivery.ordering_reason ||
+          !!delivery.reason_code ||
+          ['unknown', 'needs_attention', 'blocked'].includes(delivery.state);
         const attr = `data-id="${E(delivery.id)}"`;
         return `<div class="cr-delivery" data-delivery-id="${E(delivery.id)}" data-state="${E(unknown ? 'unknown' : delivery.state)}"><span class="cr-delivery-title">${E(label)}${delivery.kind === 'status' ? ' · 状态通知' : ''}</span>${
           detail
@@ -945,7 +997,9 @@ window.CodePierCollaboration = (() => {
             : ''
         }</div>`;
       })
-      .join('')}${truncated && display?.reason ? `<p class="cr-muted">${E(display.reason)}</p>` : ''}</section>`;
+      .join(
+        '',
+      )}${truncated && display?.reason ? `<p class="cr-muted">${E(display.reason)}</p>` : ''}</section>`;
   }
   function patchWindowHints() {
     if (!root) return;
@@ -2197,7 +2251,11 @@ window.CodePierCollaboration = (() => {
           .map(reuseAnchor)
           .filter(Boolean),
       );
-      const presentHosts = new Set(members().map((member) => member.host_connection_id).filter(Boolean));
+      const presentHosts = new Set(
+        members()
+          .map((member) => member.host_connection_id)
+          .filter(Boolean),
+      );
       const available = (response.items || []).filter((item) =>
         item.host_connection_id
           ? !presentHosts.has(item.host_connection_id) &&
@@ -2205,7 +2263,9 @@ window.CodePierCollaboration = (() => {
             item.state !== 'revoked' &&
             !['authorization_expired', 'grant_expired'].includes(item.display_state) &&
             (supportsHostReuse(item, capabilities) || !!item.reuse_member_id)
-          : item.conversation_id !== current.roomId && !!reuseAnchor(item) && !hostAnchors.has(reuseAnchor(item)),
+          : item.conversation_id !== current.roomId &&
+            !!reuseAnchor(item) &&
+            !hostAnchors.has(reuseAnchor(item)),
       );
       if (current !== panel) return;
       current.connections = [
@@ -2277,17 +2337,21 @@ window.CodePierCollaboration = (() => {
       const result = await api(connectionListPath(current.hostCursor));
       if (panel !== current) return;
       const items = (result.items || []).filter((item) => item.host_connection_id);
-      current.hosts = [...new Map(
-        [...current.hosts, ...items].map((item) => [item.host_connection_id, item]),
-      ).values()];
+      current.hosts = [
+        ...new Map(
+          [...current.hosts, ...items].map((item) => [item.host_connection_id, item]),
+        ).values(),
+      ];
       current.hostCursor = result.next_cursor || '';
       box.innerHTML = current.hosts.length
-        ? current.hosts.map((item) => {
-            const last = item.last_round_trip_at || item.verified_at;
-            const summary = connectionRoomSummary(item);
-            const label = [connectionName(item), summary].filter(Boolean).join(' · ');
-            return `<article class="cr-member"><div><h3>${E(connectionName(item))}</h3><p>${E([connectionState(item), summary].filter(Boolean).join(' · '))}</p>${last ? `<small>最近往返 ${E(dateTime(last))}</small>` : ''}</div>${btn('host-detail', '详情', `data-id="${E(item.host_connection_id)}" aria-label="查看 ${E(label)} 的连接详情"`)}</article>`;
-          }).join('')
+        ? current.hosts
+            .map((item) => {
+              const last = item.last_round_trip_at || item.verified_at;
+              const summary = connectionRoomSummary(item);
+              const label = [connectionName(item), summary].filter(Boolean).join(' · ');
+              return `<article class="cr-member"><div><h3>${E(connectionName(item))}</h3><p>${E([connectionState(item), summary].filter(Boolean).join(' · '))}</p>${last ? `<small>最近往返 ${E(dateTime(last))}</small>` : ''}</div>${btn('host-detail', '详情', `data-id="${E(item.host_connection_id)}" aria-label="查看 ${E(label)} 的连接详情"`)}</article>`;
+            })
+            .join('')
         : '<p class="cr-muted">当前没有已登记的独立连接。仍可在房间管理成员。</p>';
       more.hidden = !current.hostCursor;
       more.textContent = '更多连接';
@@ -2310,7 +2374,14 @@ window.CodePierCollaboration = (() => {
       'dot 连接详情',
       '<div data-cr-host-summary aria-live="polite"><p class="cr-muted">正在读取连接状态…</p></div>' +
         btn('host-impact', '查看影响范围与连接操作', 'hidden', 'cr-text-button cr-full') +
-        (original ? btn('view-host-batch', '查看最近一次更换', `data-id="${E(original)}"`, 'cr-text-button cr-full') : '') +
+        (original
+          ? btn(
+              'view-host-batch',
+              '查看最近一次更换',
+              `data-id="${E(original)}"`,
+              'cr-text-button cr-full',
+            )
+          : '') +
         btn('host-list', '所有 dot 连接', '', 'cr-text-button cr-full') +
         '<div data-cr-host-impact></div>',
       { hostId: id },
@@ -2319,7 +2390,12 @@ window.CodePierCollaboration = (() => {
   }
   async function refreshHostDetail() {
     const current = panel;
-    if (current?.name !== 'host-detail' || current.hostLoading || current.impactLoading || current.busy)
+    if (
+      current?.name !== 'host-detail' ||
+      current.hostLoading ||
+      current.impactLoading ||
+      current.busy
+    )
       return;
     current.hostLoading = true;
     try {
@@ -2330,11 +2406,13 @@ window.CodePierCollaboration = (() => {
       const last = host.last_round_trip_at || host.verified_at;
       const capabilities = host.connection_capabilities || result.connection_capabilities || {};
       const box = root.querySelector('[data-cr-host-summary]');
-      const markup = `<section class="cr-connect-summary"><h3>${E(connectionName(host))}</h3>${facts([
-        ['连接状态', connectionState(host)],
-        ['使用中的房间', host.single_room_title || supplied(host.room_count)],
-        ['最近一次往返', last ? dateTime(last) : '等待真实往返'],
-      ])}${['wait_for_host_refresh', 'awaiting_host_refresh'].includes(host.next_action) ? '<p>请在原 dot 中继续连接。</p>' : ''}</section>`;
+      const markup = `<section class="cr-connect-summary"><h3>${E(connectionName(host))}</h3>${facts(
+        [
+          ['连接状态', connectionState(host)],
+          ['使用中的房间', host.single_room_title || supplied(host.room_count)],
+          ['最近一次往返', last ? dateTime(last) : '等待真实往返'],
+        ],
+      )}${['wait_for_host_refresh', 'awaiting_host_refresh'].includes(host.next_action) ? '<p>请在原 dot 中继续连接。</p>' : ''}</section>`;
       if (box._markup !== markup) {
         box.innerHTML = markup;
         box._markup = markup;
@@ -2356,19 +2434,23 @@ window.CodePierCollaboration = (() => {
     const box = root.querySelector('[data-cr-host-impact]');
     if (!box) return;
     const impact = current.impact;
-    const selected = changed ? new Set() : new Set(
-      [...box.querySelectorAll('[data-cr-host-member]:checked')].map((input) => input.value),
-    );
+    const selected = changed
+      ? new Set()
+      : new Set(
+          [...box.querySelectorAll('[data-cr-host-member]:checked')].map((input) => input.value),
+        );
     if (!more || !box.querySelector('[data-cr-impact-members]')) {
       const changedNotice = changed
         ? `<p role="status">影响范围已更新。${added.length ? ` 新增 ${E(added.map(hostImpactLabel).join('、'))}。` : ''}${removed.length ? ` 移出 ${E(removed.map(hostImpactLabel).join('、'))}。` : ''}</p>`
         : '';
       const canBatch = current.host.connection_capabilities?.batch_rebind === true;
-      box.innerHTML = `<section class="cr-connect-summary" aria-label="受影响的房间"><h3>受影响的房间</h3>${changedNotice}${facts([
-        ['房间', supplied(impact.room_count)],
-        ['排队工作', supplied(impact.queued_work_count)],
-        ['已派发操作', supplied(impact.dispatched_operation_count)],
-      ])}<p class="cr-muted">撤销这条连接会影响此处列出的房间。同名的其他连接继续使用。已派发的操作可能仍在结束，原结果会继续核对。</p>${canBatch ? '<p class="cr-muted">勾选成员可单独发起批量更换。</p>' : ''}<ul class="cr-host-members" data-cr-impact-members></ul>${btn('more-host-impact', '更多受影响房间', 'data-cr-more-impact hidden', 'cr-text-button')}${canBatch ? `<div data-cr-batch-target hidden>${field('更换为', '<select name="batch_host_connection"><option value="">分别验证新连接</option></select>')}<p class="cr-muted" data-cr-batch-target-status aria-live="polite"></p>${btn('load-batch-targets', '查看已有 dot', 'data-cr-more-targets', 'cr-text-button')}</div>${btn('start-host-batch', '为所选成员更换连接', 'data-cr-start-batch disabled', 'cr-text-button')}` : ''}${btn('revoke-host', '撤销这条连接', 'data-cr-revoke-host', 'cr-danger cr-full')}</section>`;
+      box.innerHTML = `<section class="cr-connect-summary" aria-label="受影响的房间"><h3>受影响的房间</h3>${changedNotice}${facts(
+        [
+          ['房间', supplied(impact.room_count)],
+          ['排队工作', supplied(impact.queued_work_count)],
+          ['已派发操作', supplied(impact.dispatched_operation_count)],
+        ],
+      )}<p class="cr-muted">撤销这条连接会影响此处列出的房间。同名的其他连接继续使用。已派发的操作可能仍在结束，原结果会继续核对。</p>${canBatch ? '<p class="cr-muted">勾选成员可单独发起批量更换。</p>' : ''}<ul class="cr-host-members" data-cr-impact-members></ul>${btn('more-host-impact', '更多受影响房间', 'data-cr-more-impact hidden', 'cr-text-button')}${canBatch ? `<div data-cr-batch-target hidden>${field('更换为', '<select name="batch_host_connection"><option value="">分别验证新连接</option></select>')}<p class="cr-muted" data-cr-batch-target-status aria-live="polite"></p>${btn('load-batch-targets', '查看已有 dot', 'data-cr-more-targets', 'cr-text-button')}</div>${btn('start-host-batch', '为所选成员更换连接', 'data-cr-start-batch disabled', 'cr-text-button')}` : ''}${btn('revoke-host', '撤销这条连接', 'data-cr-revoke-host', 'cr-danger cr-full')}</section>`;
     }
     const membersBox = box.querySelector('[data-cr-impact-members]');
     const displayed = new Set([...membersBox.children].map((row) => row.dataset.binding));
@@ -2376,9 +2458,14 @@ window.CodePierCollaboration = (() => {
     for (const item of current.impactMembers) {
       const binding = hostImpactBinding(item);
       if (displayed.has(binding)) continue;
-      const selectable = !!start && !item.candidate &&
+      const selectable =
+        !!start &&
+        !item.candidate &&
         Number.isInteger(item.binding_generation ?? item.expected_generation);
-      membersBox.insertAdjacentHTML('beforeend', `<li data-binding="${E(binding)}">${selectable ? `<label><input type="checkbox" data-cr-host-member value="${E(item.member_id)}" ${selected.has(item.member_id) ? 'checked' : ''}>${E(hostImpactLabel(item))}</label>` : E(hostImpactLabel(item)) + (item.candidate ? ' · 待验证的新连接' : '')}</li>`);
+      membersBox.insertAdjacentHTML(
+        'beforeend',
+        `<li data-binding="${E(binding)}">${selectable ? `<label><input type="checkbox" data-cr-host-member value="${E(item.member_id)}" ${selected.has(item.member_id) ? 'checked' : ''}>${E(hostImpactLabel(item))}</label>` : E(hostImpactLabel(item)) + (item.candidate ? ' · 待验证的新连接' : '')}</li>`,
+      );
     }
     updateHostBatchControls();
     if (!more && current.batchTargets?.length) renderHostBatchTargets(current);
@@ -2391,13 +2478,18 @@ window.CodePierCollaboration = (() => {
     if (current?.name !== 'host-detail' || !current.host || current.impactLoading) return;
     current.impactLoading = true;
     const box = root.querySelector('[data-cr-host-impact]');
-    const trigger = root.querySelector(more ? '[data-cr-more-impact]' : '[data-cr-action="host-impact"]');
+    const trigger = root.querySelector(
+      more ? '[data-cr-more-impact]' : '[data-cr-action="host-impact"]',
+    );
     if (trigger) trigger.disabled = true;
     if (!current.impact) box.textContent = '正在核对受影响的房间…';
     try {
       const result = await api(
-        hostPath(current.hostId) + '/impact?limit=40' +
-          (more && current.impactCursor ? '&cursor=' + encodeURIComponent(current.impactCursor) : ''),
+        hostPath(current.hostId) +
+          '/impact?limit=40' +
+          (more && current.impactCursor
+            ? '&cursor=' + encodeURIComponent(current.impactCursor)
+            : ''),
       );
       if (panel !== current) return;
       const impact = result.impact || result;
@@ -2411,19 +2503,25 @@ window.CodePierCollaboration = (() => {
         return;
       }
       const added = changed
-        ? items.filter((item) => !oldItems.some((old) => hostImpactBinding(old) === hostImpactBinding(item)))
+        ? items.filter(
+            (item) => !oldItems.some((old) => hostImpactBinding(old) === hostImpactBinding(item)),
+          )
         : [];
-      const removed = changed && !impact.next_cursor
-        ? oldItems.filter((item) => !items.some((next) => hostImpactBinding(next) === hostImpactBinding(item)))
-        : [];
+      const removed =
+        changed && !impact.next_cursor
+          ? oldItems.filter(
+              (item) => !items.some((next) => hostImpactBinding(next) === hostImpactBinding(item)),
+            )
+          : [];
       current.impact = { ...impact, impact_digest: impactDigest };
       current.impactCursor = impact.next_cursor || result.next_cursor || '';
-      current.impactMembers = [...new Map(
-        [...(more ? oldItems : []), ...items].map((item) => [hostImpactBinding(item), item]),
-      ).values()];
+      current.impactMembers = [
+        ...new Map(
+          [...(more ? oldItems : []), ...items].map((item) => [hostImpactBinding(item), item]),
+        ).values(),
+      ];
       renderHostImpact(current, more, changed, added, removed);
-      if (changed)
-        panelError('连接影响范围已变化，请核对当前房间列表后再确认。');
+      if (changed) panelError('连接影响范围已变化，请核对当前房间列表后再确认。');
       if (!more) box.querySelector('h3')?.scrollIntoView({ block: 'nearest' });
     } catch (error) {
       if (panel === current) {
@@ -2445,10 +2543,15 @@ window.CodePierCollaboration = (() => {
     const impact = current?.impact;
     if (!impact?.impact_digest || !Number.isInteger(impact.authority_version)) return;
     try {
-      const result = await mutation('POST', hostPath(current.hostId) + '/revoke', {
-        expected_authority_version: impact.authority_version,
-        impact_digest: impact.impact_digest,
-      }, current);
+      const result = await mutation(
+        'POST',
+        hostPath(current.hostId) + '/revoke',
+        {
+          expected_authority_version: impact.authority_version,
+          impact_digest: impact.impact_digest,
+        },
+        current,
+      );
       if (result) {
         await hostDetailPanel(current.hostId);
         await store.refresh();
@@ -2482,16 +2585,23 @@ window.CodePierCollaboration = (() => {
   function renderHostBatchTargets(current) {
     const select = root.querySelector('[name="batch_host_connection"]');
     const selected = select.value;
-    select.innerHTML = '<option value="">分别验证新连接</option>' + current.batchTargets.map((item) =>
-      `<option value="${E(item.host_connection_id)}">${E(connectionChoiceLabel(item))}</option>`,
-    ).join('');
+    select.innerHTML =
+      '<option value="">分别验证新连接</option>' +
+      current.batchTargets
+        .map(
+          (item) =>
+            `<option value="${E(item.host_connection_id)}">${E(connectionChoiceLabel(item))}</option>`,
+        )
+        .join('');
     if ([...select.options].some((option) => option.value === selected)) select.value = selected;
     const button = root.querySelector('[data-cr-more-targets]');
     button.hidden = !current.batchTargetCursor;
     button.textContent = '更多已登记的 dot';
     root.querySelector('[data-cr-batch-target-status]').textContent = current.batchTargets.length
       ? ''
-      : current.batchTargetCursor ? '这一页没有可用连接。' : '当前没有其他可复用的 dot。';
+      : current.batchTargetCursor
+        ? '这一页没有可用连接。'
+        : '当前没有其他可复用的 dot。';
   }
   async function loadHostBatchTargets() {
     const current = panel;
@@ -2504,13 +2614,20 @@ window.CodePierCollaboration = (() => {
     try {
       const response = await api(connectionListPath(current.batchTargetCursor));
       if (panel !== current || !button.isConnected) return;
-      const items = (response.items || []).filter((item) =>
-        item.host_connection_id && item.host_connection_id !== current.hostId &&
-        supportsHostReuse(item, response.connection_capabilities || {}),
+      const items = (response.items || []).filter(
+        (item) =>
+          item.host_connection_id &&
+          item.host_connection_id !== current.hostId &&
+          supportsHostReuse(item, response.connection_capabilities || {}),
       );
-      current.batchTargets = [...new Map(
-        [...(current.batchTargets || []), ...items].map((item) => [item.host_connection_id, item]),
-      ).values()];
+      current.batchTargets = [
+        ...new Map(
+          [...(current.batchTargets || []), ...items].map((item) => [
+            item.host_connection_id,
+            item,
+          ]),
+        ).values(),
+      ];
       current.batchTargetCursor = response.next_cursor || '';
       renderHostBatchTargets(current);
     } catch (error) {
@@ -2529,10 +2646,12 @@ window.CodePierCollaboration = (() => {
     const checked = new Set(
       [...root.querySelectorAll('[data-cr-host-member]:checked')].map((input) => input.value),
     );
-    const selected = current.impactMembers.filter((item) => !item.candidate && checked.has(item.member_id)).map((item) => ({
-      member_id: item.member_id,
-      expected_generation: item.binding_generation ?? item.expected_generation,
-    }));
+    const selected = current.impactMembers
+      .filter((item) => !item.candidate && checked.has(item.member_id))
+      .map((item) => ({
+        member_id: item.member_id,
+        expected_generation: item.binding_generation ?? item.expected_generation,
+      }));
     if (!selected.length) return;
     const hostId = root.querySelector('[name="batch_host_connection"]')?.value;
     const result = await mutation(
@@ -2582,7 +2701,9 @@ window.CodePierCollaboration = (() => {
       '<p class="cr-muted">各房间会分别验证新连接，原连接在验证通过后切换。</p>' +
         '<div data-cr-batch-results aria-live="polite"></div>' +
         btn('more-host-batch', '更多结果', 'data-cr-more-batch hidden', 'cr-text-button') +
-        (hostId ? btn('host-detail', '返回连接详情', `data-id="${E(hostId)}"`, 'cr-text-button cr-full') : ''),
+        (hostId
+          ? btn('host-detail', '返回连接详情', `data-id="${E(hostId)}"`, 'cr-text-button cr-full')
+          : ''),
       { batchId, batchItems: [], batchCursor: '' },
     );
     if (result) renderHostBatch(panel, result, false);
@@ -2591,22 +2712,31 @@ window.CodePierCollaboration = (() => {
   function renderHostBatch(current, result, more) {
     current.batchCursor = result.next_cursor || '';
     current.batchComplete = result.complete === true;
-    current.batchItems = [...new Map(
-      [...(more ? current.batchItems : []), ...(result.items || [])].map((item) => [item.member_id, item]),
-    ).values()];
+    current.batchItems = [
+      ...new Map(
+        [...(more ? current.batchItems : []), ...(result.items || [])].map((item) => [
+          item.member_id,
+          item,
+        ]),
+      ).values(),
+    ];
     const box = root.querySelector('[data-cr-batch-results]');
-    const markup = `<ul class="cr-host-members">${current.batchItems.map((item) => {
-      const label = hostBatchLabels[item.status] || '正在读取状态';
-      const message = item.message || hostBatchErrors[item.error_code];
-      const canOpen = item.conversation_id && item.member_id && item.flow_id;
-      return `<li><span>${E(hostImpactLabel(item))} · ${E(label)}${message ? ` · ${E(message)}` : ''}</span>${canOpen ? btn('open-batch-member', '查看成员', `data-id="${E(item.member_id)}" data-room-id="${E(item.conversation_id)}"`, 'cr-text-button') : ''}</li>`;
-    }).join('')}</ul>`;
+    const markup = `<ul class="cr-host-members">${current.batchItems
+      .map((item) => {
+        const label = hostBatchLabels[item.status] || '正在读取状态';
+        const message = item.message || hostBatchErrors[item.error_code];
+        const canOpen = item.conversation_id && item.member_id && item.flow_id;
+        return `<li><span>${E(hostImpactLabel(item))} · ${E(label)}${message ? ` · ${E(message)}` : ''}</span>${canOpen ? btn('open-batch-member', '查看成员', `data-id="${E(item.member_id)}" data-room-id="${E(item.conversation_id)}"`, 'cr-text-button') : ''}</li>`;
+      })
+      .join('')}</ul>`;
     if (box._markup !== markup) {
       const focused = box.contains(document.activeElement) ? document.activeElement.dataset.id : '';
       box.innerHTML = markup;
       box._markup = markup;
       if (focused)
-        [...box.querySelectorAll('button')].find((button) => button.dataset.id === focused)?.focus({ preventScroll: true });
+        [...box.querySelectorAll('button')]
+          .find((button) => button.dataset.id === focused)
+          ?.focus({ preventScroll: true });
     }
     root.querySelector('[data-cr-more-batch]').hidden = !current.batchCursor;
   }
@@ -2621,8 +2751,13 @@ window.CodePierCollaboration = (() => {
       const items = [];
       let result;
       do {
-        result = await api(batchPath + '/' + encodeURIComponent(current.batchId) + '?limit=40' +
-          (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''));
+        result = await api(
+          batchPath +
+            '/' +
+            encodeURIComponent(current.batchId) +
+            '?limit=40' +
+            (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''),
+        );
         if (panel !== current) return;
         items.push(...(result.items || []));
         cursor = result.next_cursor;
@@ -2684,11 +2819,13 @@ window.CodePierCollaboration = (() => {
             'cr-text-button',
           )
         : '';
-    return `<section class="cr-connect-summary" aria-label="连接保持方式"><strong>由 dot 宿主续订</strong>${status ? `<p class="cr-muted">${E(status)}</p>` : ''}${facts([
-      ['自动恢复', managed ? '已开启' : '已关闭'],
-      ['恢复授权至', managed && renewal.approved_until ? dateTime(renewal.approved_until) : null],
-      ['当前订阅到期', renewal.expires_at ? dateTime(renewal.expires_at) : null],
-    ])}${control}</section>`;
+    return `<section class="cr-connect-summary" aria-label="连接保持方式"><strong>由 dot 宿主续订</strong>${status ? `<p class="cr-muted">${E(status)}</p>` : ''}${facts(
+      [
+        ['自动恢复', managed ? '已开启' : '已关闭'],
+        ['恢复授权至', managed && renewal.approved_until ? dateTime(renewal.approved_until) : null],
+        ['当前订阅到期', renewal.expires_at ? dateTime(renewal.expires_at) : null],
+      ],
+    )}${control}</section>`;
   }
   function renderFlow(result) {
     if (!panel || !root) return;
@@ -2770,15 +2907,15 @@ window.CodePierCollaboration = (() => {
               : url.startsWith(connectionsPath + '/') && url.endsWith('/revoke')
                 ? 'host-revoke'
                 : url.endsWith('/members')
-              ? 'member'
-              : url.includes('/connect-flows/')
-                ? 'flow'
-                : url.includes('/channel-connect-flows/') ||
-                    url.endsWith('/channels/weixin/connect')
-                  ? 'channel'
-                  : url.includes('/work/')
-                    ? 'work'
-                    : 'room';
+                  ? 'member'
+                  : url.includes('/connect-flows/')
+                    ? 'flow'
+                    : url.includes('/channel-connect-flows/') ||
+                        url.endsWith('/channels/weixin/connect')
+                      ? 'channel'
+                      : url.includes('/work/')
+                        ? 'work'
+                        : 'room';
     const receipt = {
       id: JSON.parse(requestBody).idempotency_key,
       method,
@@ -3066,7 +3203,8 @@ window.CodePierCollaboration = (() => {
         panelError('请选择要使用的 dot 连接。');
         return;
       }
-      const verifiedReuse = chosen?.host_connection_id &&
+      const verifiedReuse =
+        chosen?.host_connection_id &&
         supportsHostReuse(chosen, current.connectionCapabilities || {});
       const reuse = !existing
         ? {}
@@ -3074,7 +3212,8 @@ window.CodePierCollaboration = (() => {
           ? { host_connection_id: chosen.host_connection_id }
           : {
               reuse_member_id: reuseAnchor(chosen),
-              reuse_binding_generation: chosen.reuse_binding_generation ?? chosen.binding_generation,
+              reuse_binding_generation:
+                chosen.reuse_binding_generation ?? chosen.binding_generation,
             };
       const result = await mutation('POST', store.path() + '/members', {
         name: data.get('name').trim(),
@@ -3165,15 +3304,22 @@ window.CodePierCollaboration = (() => {
   };
   function wakeEvidenceMarkup(item) {
     const title = wakeEvidenceLabels[item.state] || '证据不足';
-    return `<details><summary>${E(title)} · ${E(dateTime(item.created_at))}</summary>${diagnosticFields([
-      ['原通知', identifier(item.notification_delivery_id)],
-      ['接口受理', dateTime(item.accepted_at)],
-      ['票据到期', dateTime(item.ticket_expires_at)],
-      ['原回合', identifier(item.consumer_session_id)],
-      ['实际领取', dateTime(item.claimed_at)],
-      ['回合创建回复', item.reply_origin_truncated ? '至少 ' + item.created_reply_count : item.created_reply_count],
-      ['保留的通知', identifier(item.retained_notification_delivery_id)],
-    ])}${item.claim_preceded_recorded_acceptance ? '<p>先观察到领取，随后保存接口受理回执。</p>' : ''}</details>`;
+    return `<details><summary>${E(title)} · ${E(dateTime(item.created_at))}</summary>${diagnosticFields(
+      [
+        ['原通知', identifier(item.notification_delivery_id)],
+        ['接口受理', dateTime(item.accepted_at)],
+        ['票据到期', dateTime(item.ticket_expires_at)],
+        ['原回合', identifier(item.consumer_session_id)],
+        ['实际领取', dateTime(item.claimed_at)],
+        [
+          '回合创建回复',
+          item.reply_origin_truncated
+            ? '至少 ' + item.created_reply_count
+            : item.created_reply_count,
+        ],
+        ['保留的通知', identifier(item.retained_notification_delivery_id)],
+      ],
+    )}${item.claim_preceded_recorded_acceptance ? '<p>先观察到领取，随后保存接口受理回执。</p>' : ''}</details>`;
   }
   async function loadWakeEvidence(button) {
     const current = panel;
@@ -3562,7 +3708,9 @@ window.CodePierCollaboration = (() => {
             ['cancel', 'stop'].includes(action) ? 'cr-danger' : 'cr-primary',
           ),
         )
-        .join('')}${activeRoom() && workSourceId(work) ? btn('reply-work', '在对话中追问') : ''}${actions.includes('supplement') ? btn('supplement', '修改交办') : ''}</div>`;
+        .join(
+          '',
+        )}${activeRoom() && workSourceId(work) ? btn('reply-work', '在对话中追问') : ''}${actions.includes('supplement') ? btn('supplement', '修改交办') : ''}</div>`;
     if (box._markup !== markup || changedReview) {
       box.innerHTML = markup;
       box._markup = markup;
@@ -3853,14 +4001,8 @@ window.CodePierCollaboration = (() => {
         ],
         ['新消息交给', following ? '房间当前主责 dot' : flow.member?.name || '已指定的 dot'],
         ['回传', '当前房间和发起任务的原私聊'],
-        [
-          '连接保持',
-          renewal ? '由 dot 宿主续订' : null,
-        ],
-        [
-          '当前订阅到期',
-          renewal?.expires_at ? dateTime(renewal.expires_at) : null,
-        ],
+        ['连接保持', renewal ? '由 dot 宿主续订' : null],
+        ['当前订阅到期', renewal?.expires_at ? dateTime(renewal.expires_at) : null],
       ])}
       ${
         projects.length
@@ -4407,7 +4549,12 @@ window.CodePierCollaboration = (() => {
         store.path() + '/weixin-deliveries/' + encodeURIComponent(id) + '/retry',
         {
           expected_version: Number(button.dataset.version),
-          ...(button.dataset.part ? { part_ids: [button.dataset.part], expected_ordering_revision: Number(button.dataset.ordering) } : {}),
+          ...(button.dataset.part
+            ? {
+                part_ids: [button.dataset.part],
+                expected_ordering_revision: Number(button.dataset.ordering),
+              }
+            : {}),
         },
       );
       if (result) {
