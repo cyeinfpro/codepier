@@ -138,7 +138,7 @@ def _dispatch(c, row):
     elif message['origin'] != 'panel_owner' or message['author'] != room['owner_user_id']:
         _finish(c, row, message, body, 'source_unavailable')
         return
-    if work_id := body.get('work_id'):
+    if (work_id := body.get('work_id')) and body.get('work_intent_change',True):
         try:
             goal = c.room_runtime.goal(work_id)
         except DevError:
