@@ -19,6 +19,32 @@ def install_routes(router, auth, runtime):
         response.headers['Cache-Control'] = 'private, no-store'
         return await store.run(lambda: service.room_connections.listing({'cursor': cursor, 'limit': limit}, auth.panel(request)))
 
+    @router.get('/host-connections')
+    async def host_connections(request: Request, response: Response, cursor: str = '',
+                               limit: int = Query(40, ge=1, le=100)):
+        response.headers['Cache-Control'] = 'private, no-store'
+        return await store.run(lambda: service.room_connections.hosts.listing(
+            {'cursor': cursor, 'limit': limit}, auth.panel(request)))
+
+    @router.get('/host-connections/{identifier}')
+    async def host_connection(request: Request, response: Response, identifier: str):
+        response.headers['Cache-Control'] = 'private, no-store'
+        return await store.run(lambda: service.room_connections.hosts.view(
+            {'host_connection_id': identifier}, auth.panel(request)))
+
+    @router.get('/host-connections/{identifier}/impact')
+    async def host_connection_impact(request: Request, response: Response, identifier: str,
+                                     cursor: str = '', limit: int = Query(40, ge=1, le=100)):
+        response.headers['Cache-Control'] = 'private, no-store'
+        return await store.run(lambda: service.room_connections.hosts.impact(
+            {'host_connection_id': identifier, 'cursor': cursor, 'limit': limit}, auth.panel(request)))
+
+    @router.post('/host-connections/{identifier}/revoke')
+    async def host_connection_revoke(request: Request, identifier: str):
+        body = await request.json()
+        return await store.run(lambda: service.room_connections.hosts.revoke(
+            {**body, 'host_connection_id': identifier}, auth.admin(request, True)))
+
     @router.get('/rooms')
     async def listing(request: Request, cursor: str = '', limit: int = Query(40, ge=1, le=100), include_archived: bool = False):
         return await store.run(lambda: service.rooms.listing({'cursor': cursor, 'limit': limit,

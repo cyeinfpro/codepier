@@ -103,7 +103,7 @@ COLLAB_ACTIONS = {
         'collab.list': _same(CQ, 'overview', 'rooms', 'room_list', 'jobs', 'messages', 'room_messages', 'goals',
                              'coordination_goals', 'coordination_options', 'incidents', 'agents', 'subscriptions',
                              'join_slots', 'members', 'delegations', 'delegation_policies', 'teams', 'room_works',
-                             'timeline'),
+                             'timeline', 'room_connection_list'),
         'collab.changes': _same(CQ, 'changes', 'room_changes', 'room_project_impact'),
         'collab.context': _same(CQ, 'room_context'),
         'collab.search': _same(CQ, 'search'),
