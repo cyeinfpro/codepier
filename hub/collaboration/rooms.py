@@ -215,8 +215,9 @@ class Rooms:
             try:
                 owner=refresh_principal(self.store,Principal(**{**saved,'scopes':set()}))
                 self.owner(owner,member['conversation_id'])
-                self.c.coordination.require_capability(owner,'read',row['project_id'])
-                self.c.coordination.require_capability(principal,'read',row['project_id'])
+                if (self.c.runtime.project(row['project_id'],owner)['id']!=row['project_id']
+                        or self.c.runtime.project(row['project_id'],principal)['id']!=row['project_id']):
+                    continue
             except DevError:
                 continue
             visible.add((row['project_id'],row['environment_id']))
