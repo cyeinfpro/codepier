@@ -32,11 +32,20 @@ def identity(channel, account, scope, source):
                    account['generation'], scope, source])
 
 
-def isolate(service, channel, account, scope, source, ingest, *, replay=False, deferred_evidence=None):
+def isolate(service, channel, account, scope, source, ingest, *, replay=False, deferred_evidence=None,
+            backpressure_key=None, replay_id=None):
     """Only known message-level failures are isolated; batch/storage faults abort."""
     store, now = service.store, service.c.clock()
-    identifier = identity(channel, account, scope, source)
+    identifier = replay_id or identity(channel, account, scope, source)
     previous = store.one('SELECT * FROM channel_inbound_failures WHERE id=?', (identifier,))
+    if backpressure_key and not replay:
+        original_id, source_digest = backpressure_key
+        original = store.one('SELECT * FROM channel_inbound_failures WHERE id=?', (original_id,))
+        if original:
+            if json.loads(original['scope']).get('source_digest') != source_digest:
+                raise DevError('WEIXIN_DUPLICATE_CONFLICT', '同一微信版本内容不同，保留原游标', 409)
+            if original['state'] != 'committed':
+                identifier, previous = original_id, original
     if previous and not replay:
         # Older versions could quarantine an account-identity error. Reobserving
         # that receipt must not turn a batch-fatal error into cursor advancement.
@@ -50,6 +59,9 @@ def isolate(service, channel, account, scope, source, ingest, *, replay=False, d
         if exc.code in BATCH_ERRORS or exc.status >= 500:
             raise
         state = 'deferred' if exc.code in DEFERRED_ERRORS else 'quarantined'
+        if state == 'deferred' and backpressure_key and not replay:
+            identifier, source_digest = backpressure_key
+            scope = {**scope, 'source_digest': source_digest}
         payload = {'source': source, 'scope': scope, 'generation': account['generation'],
                    'credential_version': account['credential_version']}
         if state == 'deferred' and not previous and deferred_evidence:
