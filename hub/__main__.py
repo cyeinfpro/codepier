@@ -114,7 +114,10 @@ def main():
                       else backfill(args.data_dir, apply=args.apply, after=args.after,
                                     limit=args.limit, restart=args.restart_scan))
         except (OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
-            parser.error(str(exc))
+            message = str(exc)
+            if isinstance(exc, sqlite3.Error) and getattr(exc, 'sqlite_errorname', None):
+                message += f" ({exc.sqlite_errorname}, code {exc.sqlite_errorcode})"
+            parser.error(message)
         print(json.dumps(result, ensure_ascii=False))
         return
     if args.command == "rekey":

@@ -620,7 +620,8 @@ class DockerRuntime:
             mounts += ['--env', 'HUB_STATE_DIR=/app/state',
                        '--tmpfs', '/app/data:rw,noexec,nosuid,size=64m,mode=0700,uid=10001,gid=10001']
         raw = self.command(['docker', 'run', '--rm', '--network', 'none', '--read-only', '--user', '10001:10001',
-                            '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', *mounts,
+                            '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
+                            '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m,mode=1777', *mounts,
                             '--entrypoint', 'python', image_id, '-m', 'hub', '--data-dir', '/app/data',
                             'room-host-activate', '--confirm-compatible-deployment'], job=job)
         receipt = json.loads(raw)

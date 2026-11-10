@@ -70,9 +70,13 @@ def migrate(db):
         db.execute('ALTER TABLE operations ADD COLUMN history_pruned_at REAL')
     if 'media_expires_at' not in columns:
         db.execute('ALTER TABLE operations ADD COLUMN media_expires_at REAL')
-    # Old JSON expression indexes cannot parse encrypted receipt bodies.
-    # This drops only a derived index, never records or media.
-    db.execute('DROP INDEX IF EXISTS operations_media_expiry')
+    from shared.computer_media import MEDIA_EXPIRY, MEDIA_PENDING
+    legacy_index = db.execute("SELECT sql FROM sqlite_master WHERE type='index' AND name='operations_media_expiry'").fetchone()
+    guarded_sql = f'CREATE INDEX operations_media_expiry ON operations({MEDIA_EXPIRY}) WHERE {MEDIA_PENDING}'
+    # Reuse the guarded index so the cleanup worker does not rebuild it after
+    # every startup. Older expressions must be replaced before sealed writes.
+    if legacy_index and legacy_index[0] != guarded_sql:
+        db.execute('DROP INDEX operations_media_expiry')
     db.execute('CREATE INDEX IF NOT EXISTS operations_sealed_media_expiry ON operations(media_expires_at) WHERE media_expires_at IS NOT NULL')
 
 

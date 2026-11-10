@@ -86,12 +86,20 @@ def test_retention_plans_are_read_only_and_preserve_unknown(tmp_path):
         store.close()
 
 
-def test_json_media_index_accepts_encrypted_read_and_keeps_existing_expiry(tmp_path):
+@pytest.mark.parametrize('guarded', [False, True])
+def test_json_media_index_accepts_encrypted_read_and_keeps_existing_expiry(tmp_path, guarded):
     store = Store(tmp_path / 'hub')
     try:
         runtime = Runtime(store)
-        # Install the same derived legacy-media index used by the periodic pump.
-        runtime._purge_computer()
+        if guarded:
+            runtime._purge_computer()
+        else:
+            store.execute("CREATE INDEX operations_media_expiry ON operations(json_extract(result,'$.data.computer_expires_at'))")
+        store.close()
+        store = Store(tmp_path / 'hub')
+        runtime = Runtime(store)
+        index = store.one("SELECT sql FROM sqlite_master WHERE type='index' AND name='operations_media_expiry'")
+        assert bool(index) == guarded
         store.execute("INSERT INTO operations(id,actor,tool,args_summary,fingerprint,state,created,updated) VALUES ('media','fixture','read','{}','','running',1,1)")
         runtime.complete({'id': 'media'}, {'ok': True, 'data': {'text': 'private pixels',
             '_computer_content': [], 'computer_expires_at': 1}})

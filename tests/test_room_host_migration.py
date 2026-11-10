@@ -17,6 +17,28 @@ from tests.test_room_connections import reuse, verified
 from tests.test_room_members_rebuild import add, create, rooms as rooms
 
 
+def test_activation_cli_preserves_sqlite_error_details(tmp_path, monkeypatch, capsys):
+    from hub.__main__ import main
+    from hub.collaboration import room_host_rollout
+
+    def unavailable_temporary_directory(*args, **kwargs):
+        error = sqlite3.OperationalError('disk I/O error')
+        error.sqlite_errorname = 'SQLITE_IOERR_GETTEMPPATH'
+        error.sqlite_errorcode = 6410
+        raise error
+
+    monkeypatch.setattr(room_host_rollout, 'activate', unavailable_temporary_directory)
+    monkeypatch.setattr('sys.argv', ['hub', '--data-dir', str(tmp_path),
+                                   'room-host-activate', '--confirm-compatible-deployment'])
+    with pytest.raises(SystemExit) as stopped:
+        main()
+    assert stopped.value.code == 2
+    error = capsys.readouterr().err
+    assert 'disk I/O error' in error
+    assert 'SQLITE_IOERR_GETTEMPPATH' in error
+    assert '6410' in error
+
+
 @pytest.mark.asyncio
 async def test_adopts_own_round_trip_without_guessing_shared_gateway_identity(rooms, caplog, monkeypatch):
     s, owner, actor, _ = rooms

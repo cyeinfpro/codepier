@@ -114,6 +114,10 @@ def test_managed_upgrade_activates_only_the_verified_candidate(tmp_path, mode, c
         assert command[command.index('--env') + 1] == 'HUB_STATE_DIR=/app/state'
         assert command[command.index('--entrypoint') + 2] == image_id
         assert command[command.index('--network') + 1] == 'none'
+        assert '--read-only' in command
+        assert command[command.index('--user') + 1] == '10001:10001'
+        temporary_mounts = [command[i + 1] for i, flag in enumerate(command) if flag == '--tmpfs']
+        assert '/tmp:rw,noexec,nosuid,size=64m,mode=1777' in temporary_mounts
         assert docker.commands.index(command) > next(
             i for i, args in enumerate(docker.commands) if '/backup' in args[-1])
     runtime.start(job, 'target')
