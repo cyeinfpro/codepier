@@ -29,6 +29,29 @@ class RoomDiagnosticsRead(RoomRead):
     cursor: str = Field(default='', max_length=2048)
 
 
+class RoomTurnPolicyUpdate(RoomRead):
+    mode: Literal['strict', 'shadow', 'decoupled'] | None
+    expected_version: int = Field(ge=0, strict=True)
+    reason: str = Field(min_length=1, max_length=160)
+    idempotency_key: Key
+
+    @field_validator('reason')
+    @classmethod
+    def nonblank(cls, value):
+        if not value.strip():
+            raise ValueError('A reason is required')
+        return value.strip()
+
+
+TURN_ACTION_CAPABILITIES = {
+    'room_reply': ('explicit_publication', 'reply_yield_after'),
+    'room_consumer_yield': ('consumer_continue_later',),
+    **dict.fromkeys(('room_inbox', 'room_consumer', 'room_message_read', 'room_attachment_read', 'room_context'),
+                    ('expired_route_session_read',)),
+}
+TURN_CAPABILITIES = {capability: True for names in TURN_ACTION_CAPABILITIES.values() for capability in names}
+
+
 class RoomList(Model):
     cursor: str = Field(default='', max_length=2048)
     limit: int = Field(default=40, ge=1, le=100)
@@ -153,6 +176,20 @@ class MemberIdentity(RoomRead):
     connection_proof: str = Field(min_length=24, max_length=256)
 
 
+class MemberTurnRead(MemberIdentity):
+    consumer_session_id: Identifier | None = None
+    consumer_fence: int | None = Field(default=None, ge=1, strict=True)
+    consumer_proof: str | None = Field(default=None, min_length=32, max_length=256, repr=False)
+
+    @model_validator(mode='after')
+    def complete_turn_proof(self):
+        supplied = sum(getattr(self, name) is not None for name in (
+            'consumer_session_id', 'consumer_fence', 'consumer_proof'))
+        if supplied not in (0, 3):
+            raise ValueError('Provide the session, fence and proof together')
+        return self
+
+
 class ConnectProbeRead(MemberIdentity):
     wake_ticket: str = Field(min_length=32, max_length=256)
     idempotency_key: Key
@@ -170,11 +207,11 @@ class RoomChanges(RoomRead):
 
 ROOM_QUERY_ACTIONS = {
     'room_list': RoomList, 'room_view': RoomRead, 'room_connect': ConnectRead,
-    'room_changes': RoomChanges, 'room_diagnostics': RoomRead,
-    'room_project_impact': RoomProjectImpact,
+    'room_changes': RoomChanges, 'room_diagnostics': RoomDiagnosticsRead,
+    'room_project_impact': RoomProjectImpact, 'room_turn_policy': RoomRead,
 }
 ROOM_MUTATION_ACTIONS = {
-    'room_create': RoomCreate, 'room_update': RoomPatch,
+    'room_create': RoomCreate, 'room_update': RoomPatch, 'room_turn_policy_update': RoomTurnPolicyUpdate,
     'room_migrate': RoomMigrate,
     'room_projects': RoomProjects, 'room_member_create': MemberCreate,
     'room_connect_resume': ConnectAction, 'room_connect_join': ConnectJoin,

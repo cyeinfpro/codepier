@@ -72,9 +72,11 @@ class RoomContext:
     @memoized
     def projects(self, principal, room, member=None):
         if member:
+            readable=self.c.rooms.read_scope_keys(member,principal)
             return [{'project_id':r['project_id'],'environment_id':r['environment_id'],
-                'capabilities':r['capabilities'],'execution_target_count':len(r.get('execution_targets',[]))}
-                for r in self.c.rooms.scopes(member,principal) if 'read' in r['capabilities']]
+                'capabilities':sorted({'read',*r['capabilities']}),
+                'execution_target_count':len(r.get('execution_targets',[]))}
+                for r in self.c.rooms.scopes(member,principal) if (r['project_id'],r['environment_id']) in readable]
         return [{'project_id':r['project_id'],'environment_id':r['environment_id'],
             'project_label':r['project_label']} for r in self.c.conversations.visible(principal,room,
                 include_archived=room['state']=='archived')]
@@ -177,7 +179,9 @@ class RoomContext:
         return False
 
     def artifacts(self,refs,sources,principal,room,member=None):
-        projects=set()
+        scopes=set()
+        allowed={(row['project_id'],row['environment_id']) for row in self.projects(principal,room,member)}
+        native=self.c.room_work_bridge.native
         for ref in refs:
             item=self.store.one('SELECT * FROM coordination_work WHERE id=?',(ref['work_item_id'],))
             goal=self.store.one('SELECT * FROM coordination_goals WHERE id=?',(item['goal_id'],)) if item else None
@@ -187,8 +191,12 @@ class RoomContext:
             if not any(row.get('goal_id')==goal['id'] and (json.loads(row['body']).get('work_item_id')==item['id']
                 or ref in json.loads(row['body']).get('artifact_refs',[])) for row in sources):
                 raise DevError('CONTEXT_ARTIFACT_SOURCE_REQUIRED','产物引用需要包含原工作结果或最终发表的来源消息',409)
-            projects.add(item['project_id'])
-        return projects
+            scope=native.work_scope_key(goal,item)
+            if scope not in allowed or (native.reference(goal) and member
+                    and scope not in native.visible_scope_keys(goal,principal,member['id'])):
+                raise DevError('CONTEXT_ARTIFACT_NOT_VISIBLE','当前成员没有此产物所属项目和环境的读取权限',403)
+            scopes.add(scope)
+        return scopes
 
     def fact(self,row,principal,room,member=None):
         projects=self.projects(principal,room,member)
@@ -292,11 +300,12 @@ class RoomContext:
         args=validate(RoomContextUpdate,raw)
         with self.store.transaction():
             principal=refresh_principal(self.store,principal)
-            member=self.c.room_consumers.authorize_member(args,principal,require_revision=True)
+            member=self.c.room_consumers.authorize_member(args,principal,action='context_update')
             room=self.c.conversations.object(principal,member['conversation_id'])
             if room['state']!='active' or room['lead_member_id']!=member['id']:
                 raise DevError('CONTEXT_LEAD_REQUIRED','只有当前房间主责可更新上下文',403)
-            allowed={p['project_id'] for p in self.projects(principal,room,member)}
+            allowed_keys={(p['project_id'],p['environment_id']) for p in self.projects(principal,room,member)}
+            allowed={project for project,_ in allowed_keys}
             def save():
                 version=self.check_version(room['id'],args['expected_context_version'])+1
                 old=[];old_projects={};old_scopes={}
@@ -320,9 +329,12 @@ class RoomContext:
                     projects|=old_projects.get((fact['kind'],fact['key']),set().union(*old_projects.values()))
                     scopes=set().union(*(self.message_scopes(s) for s in sources))
                     scopes|=old_scopes.get((fact['kind'],fact['key']),set().union(*old_scopes.values()))
-                    projects|=self.artifacts(fact['artifact_refs'],sources,principal,room,member)
-                    if not projects<=allowed:
-                        raise DevError('CONTEXT_SCOPE_DENIED','上下文不能引用当前成员未获批准的项目',403)
+                    scopes|=self.artifacts(fact['artifact_refs'],sources,principal,room,member)
+                    projects|={project for project,_ in scopes}
+                    unspecified=projects-{project for project,_ in scopes}
+                    scopes|={key for key in allowed_keys if key[0] in unspecified}
+                    if not projects<=allowed or not scopes<=allowed_keys:
+                        raise DevError('CONTEXT_SCOPE_DENIED','上下文不能引用当前成员未获批准的项目和环境',403)
                     current=self.store.one('SELECT fact_id FROM room_context_current WHERE conversation_id=? AND kind=? AND fact_key=?',
                         (room['id'],fact['kind'],fact['key']))
                     if current and current['fact_id'] not in old_ids:
@@ -413,10 +425,8 @@ class RoomContext:
         return {'message_id':row['id'],'version':row['version'],'digest':digest(json.loads(row['body']).get('body_text',''))}
 
     def read(self,raw,principal):
-        args=validate(RoomContextRead,raw)
         with self.store.transaction(immediate=False):
-            actor,room,member=self.c.rooms.member_scope(principal,args['conversation_id'],args['member_id'],
-                args['binding_generation'],args['connection_proof'],require_proof=True)
+            args, actor, room, member, _, _, _ = self.c.room_consumers.read_scope(raw, principal, RoomContextRead)
             return self.project(actor,room,member,cursor=args['cursor'],limit=args['limit'],
                 byte_budget=args['byte_budget'],input_message_id=args['input_message_id'])
 

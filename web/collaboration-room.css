@@ -982,6 +982,47 @@
   margin: 4px 0;
 }
 
+.cr-source-works:not([hidden]) {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.cr-timeline-work {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  color: inherit;
+  text-align: left;
+  font: inherit;
+  border: 1px solid var(--cr-line);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-side);
+  cursor: pointer;
+}
+
+.cr-timeline-work:hover {
+  border-color: var(--cr-blue);
+}
+
+.cr-timeline-work .cr-work-indicator {
+  flex: 0 0 auto;
+}
+
+.cr-timeline-work-title {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.cr-timeline-work small {
+  flex: 0 1 auto;
+  color: var(--cr-muted);
+  font-size: var(--ui-text-xs);
+}
+
 .cr-message-files {
   display: grid;
   gap: 6px;

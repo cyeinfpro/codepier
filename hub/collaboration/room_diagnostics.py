@@ -9,6 +9,7 @@ import json
 import re
 
 from hub.collaboration.common import ROOM_INBOX_EVENT, digest, read_cursor, sign_cursor
+from hub.collaboration.room_turn_policy import view as turn_policy_view
 from hub.collaboration.events import DISPATCH_BUDGETS, DISPATCH_CAPACITY, MAX_ENVELOPE_BYTES, WIRE_HEADER_BYTES
 from shared.util import DevError
 
@@ -106,6 +107,16 @@ def _wake_evidence(row, now):
                 accepted and row['claimed_at'] is not None and row['claimed_at'] < row['accepted_at'])}
 
 
+def _message_scope_filter(c, room, principal):
+    scopes = {(entry['project_id'], entry['environment_id']) for entry in c.room_context.projects(principal, room)}
+
+    def visible(row):
+        return (c.chatroom.message_visible(principal, row)
+                and c.room_context.message_scopes(row) <= scopes)
+
+    return visible
+
+
 def _reply_origins(c, room, principal, session_ids):
     if not session_ids:
         return {}, False
@@ -116,8 +127,9 @@ def _reply_origins(c, room, principal, session_ids):
         WHERE o.consumer_session_id IN ({','.join('?' for _ in session_ids)})
         ORDER BY o.consumer_session_id,o.created,o.message_id LIMIT ?""", (room['id'], *session_ids, limit + 1))
     grouped = {}
+    visible_message = _message_scope_filter(c, room, principal)
     for row in rows[:limit]:
-        if c.chatroom.message_visible(principal, row):
+        if visible_message(row):
             grouped.setdefault(row['consumer_session_id'], []).append(row)
     return grouped, len(rows) > limit
 
@@ -156,7 +168,8 @@ def delivery_relationships(c, room, principal, delivery_id):
     delivery = store.one("""SELECT m.* FROM weixin_deliveries d JOIN collaboration_messages m
         ON m.id=COALESCE(d.projection_message_id,d.message_id) WHERE d.id=? AND m.conversation_id=?""",
         (delivery_id, room['id']))
-    if not delivery or not c.chatroom.message_visible(principal, delivery):
+    visible_message = _message_scope_filter(c, room, principal)
+    if not delivery or not visible_message(delivery):
         raise DevError('NOT_FOUND', '当前授权下没有这条原投递', 404)
 
     def visible(rows):
@@ -165,7 +178,7 @@ def delivery_relationships(c, room, principal, delivery_id):
             return []
         authorized = {row['id'] for row in store.all(f"""SELECT * FROM collaboration_messages
             WHERE conversation_id=? AND id IN ({','.join('?' for _ in ids)})""",
-            (room['id'], *ids)) if c.chatroom.message_visible(principal, row)}
+            (room['id'], *ids)) if visible_message(row)}
         return [row for row in rows if row['message_id'] in authorized]
 
     def edge(row):
@@ -251,6 +264,8 @@ def projection(c, room, principal):
               'waiting_resource': '等待执行资源', 'waiting_input': '等待补充或恢复',
               'channel_delivery': '等待渠道投递或核对'}
 
+    visible_message = _message_scope_filter(c, room, principal)
+
     def age(at):
         return round(max(0, now - at), 3) if isinstance(at, (float, int)) else None
 
@@ -268,10 +283,12 @@ def projection(c, room, principal):
         state = c.rooms.state(member)
         sub = store.one('SELECT id,state,expires_at,last_accepted FROM mcp_event_subscriptions WHERE id=?',
                         (member['subscription_id'],))
-        current = store.one('''SELECT id,state,fence,lease_until,updated FROM dot_consumer_sessions
+        current = store.one('''SELECT id,state,fence,lease_until,hard_deadline,turn_policy,policy_revision,
+            route_expires_at,route_generation,scope_digest_evidence,updated FROM dot_consumer_sessions
             WHERE member_id=? AND generation=? ORDER BY fence DESC LIMIT 1''',
                             (member['id'], c.room_consumers.generation(member)))
-        if current and current['state'] == 'active' and current['lease_until'] <= now:
+        if (current and current['state'] == 'active'
+                and min(current['lease_until'], current['hard_deadline'] or current['lease_until']) <= now):
             current['state'] = 'expired'
         pending = store.all('''SELECT * FROM dot_mailbox_entries WHERE member_id=? AND generation=?
             AND acknowledged_at IS NULL AND superseded_by='' ORDER BY sequence LIMIT ?''',
@@ -283,7 +300,7 @@ def projection(c, room, principal):
             message_id = entry['object_id'] if entry['kind'] == 'message' else reference.get('message_id')
             message = store.one('SELECT * FROM collaboration_messages WHERE id=? AND conversation_id=?',
                                 (message_id, room['id'])) if message_id else None
-            if message_id and (not message or not c.chatroom.message_visible(principal, message)):
+            if message_id and (not message or not visible_message(message)):
                 continue
             goal_id = reference.get('goal_id')
             if goal_id:
@@ -320,10 +337,17 @@ def projection(c, room, principal):
             WHERE subscription_id=? AND state IN ('pending','retry_wait','leased')''', (member['subscription_id'],))
         if state in {'invited', 'waiting_host', 'verifying'}:
             queue_data['waiting_subscription'].append(member['created_at'])
+        wake = store.one('''SELECT d.id AS notification_delivery_id,d.event_id,d.accepted_at,
+                t.expires_at AS ticket_expires_at,s.created AS claimed_at
+            FROM dot_consumer_sessions s
+            JOIN dot_wake_tickets t ON t.redeemed_session_id=s.id AND t.member_id=s.member_id
+              AND t.generation=s.generation AND t.grant_id=s.grant_id
+            LEFT JOIN mcp_event_deliveries d ON d.subscription_id=t.subscription_id AND d.event_id=t.delivery_key
+            WHERE s.id=? AND t.redeemed_session_id!='' ORDER BY t.created,t.delivery_key LIMIT 1''', (current['id'],)) if current else None
         members.append({'member_id': member['id'], 'binding_generation': member['binding_generation'],
             'state': state, 'subscription_verified_at': member['subscription_verified_at'],
             'probe_read_at': member['probe_read_at'], 'probe_replied_at': member['probe_replied_at'],
-            'subscription': sub, 'consumer': current,
+            'subscription': sub, 'consumer': current, 'current_turn_wake': wake,
             'inbox': {'dirty_revision': member['dirty_revision'], 'drained_revision': member['drained_revision'],
                 'pending_count': len(visible_pending), 'complete': len(pending) <= LIMITS['pending_per_member'],
                 'oldest_age_seconds': age(min((item['created'] for item in visible_pending), default=None))},
@@ -347,7 +371,7 @@ def projection(c, room, principal):
         source = intent['source_message_id'] if intent else ''
         source_row = store.one('SELECT * FROM collaboration_messages WHERE id=? AND conversation_id=?',
                                (source, room['id'])) if source else None
-        if not source_row or not c.chatroom.message_visible(principal, source_row):
+        if not source_row or not visible_message(source_row):
             source = ''
         member_id = work.get('coordinator_member_id', '')
         lead = store.one('SELECT binding_generation FROM room_members WHERE id=?', (member_id,)) if member_id else None
@@ -386,22 +410,29 @@ def projection(c, room, principal):
 
     messages = store.all('''SELECT * FROM collaboration_messages WHERE conversation_id=?
         ORDER BY conversation_sequence DESC LIMIT ?''', (room['id'], LIMITS['messages'] + 1))
-    originals = {row['id']: row for row in messages[:LIMITS['messages']]
-                 if c.chatroom.message_visible(principal, row)}
-    channel_map = c.channels.for_messages(originals)
-    reply_ids = [row['id'] for row in originals.values() if row['kind'] == 'reply']
+    identifiers = [row['id'] for row in messages[:LIMITS['messages']] if visible_message(row)]
+    originals = {row['id']: row for row in messages[:LIMITS['messages']]}
+    reply_ids = [identifier for identifier in identifiers if originals[identifier]['kind'] == 'reply']
     origins = {}
     if reply_ids:
-        origins = {row['message_id']: row for row in store.all(f"""SELECT message_id,consumer_session_id,
-            member_id,binding_generation,created FROM room_reply_origins
-            WHERE message_id IN ({','.join('?' for _ in reply_ids)})""", tuple(reply_ids))}
-    for message_id in reply_ids:
-        message = originals[message_id]
-        origin = origins.get(message_id)
-        trace({'kind': 'reply', 'id': message_id, 'message_id': message_id, 'updated_at': message['created'],
-               'state': 'saved', 'origin': 'recorded' if origin else 'unknown_legacy',
+        placeholders = ','.join('?' for _ in reply_ids)
+        origins = {row['message_id']: row for row in store.all(f'''SELECT o.message_id,o.consumer_session_id,
+            o.member_id,o.binding_generation,o.created FROM room_reply_origins o
+            JOIN room_members m ON m.id=o.member_id AND m.conversation_id=?
+            JOIN dot_consumer_sessions s ON s.id=o.consumer_session_id AND s.member_id=m.id
+            WHERE o.message_id IN ({placeholders})''', (room['id'], *reply_ids))}
+    for identifier in reply_ids:
+        message = originals[identifier]
+        source_id = json.loads(message['body']).get('source_message_id', '')
+        source = store.one('SELECT * FROM collaboration_messages WHERE id=? AND conversation_id=?',
+                           (source_id, room['id'])) if source_id else None
+        origin = origins.get(identifier)
+        trace({'kind': 'reply', 'id': identifier, 'message_id': identifier,
+               'origin': 'verified' if origin else 'unknown_legacy', 'updated_at': message['created'],
+               **({'source_message_id': source_id} if source and visible_message(source) else {}),
                **({key: origin[key] for key in ('consumer_session_id', 'member_id', 'binding_generation')}
                   if origin else {})})
+    channel_map = c.channels.for_messages(identifiers)
     truncated['traces'] |= len(messages) > LIMITS['messages']
     for message_id, deliveries in channel_map.items():
         message = originals.get(message_id)
@@ -410,7 +441,7 @@ def projection(c, room, principal):
         source_id = json.loads(message['body']).get('source_message_id', '')
         source = store.one('SELECT * FROM collaboration_messages WHERE id=? AND conversation_id=?',
                            (source_id, room['id'])) if source_id else None
-        if not source or not c.chatroom.message_visible(principal, source):
+        if not source or not visible_message(source):
             source_id = ''
         for delivery in deliveries:
             if delivery['state'] == 'not_requested':
@@ -454,6 +485,7 @@ def projection(c, room, principal):
             'capacity_is_authorization': False})
     return {'schema_version': 1, 'conversation_id': room['id'], 'revision': room['revision'], 'state': room['state'],
         'observed_at': now, 'read_only': True, 'redacted': True, 'raw_body_included': False, 'grants_authority': False,
+        'turn_policy': turn_policy_view(store, room['id']),
         'members': members, 'traces': traces, 'budgets': budgets[:LIMITS['budgets']],
         'anomalies': anomalies[:LIMITS['anomalies']],
         'queues': [{'kind': name, 'label': labels[name], 'pending_count': len(values),

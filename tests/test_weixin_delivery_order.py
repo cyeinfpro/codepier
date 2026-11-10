@@ -44,7 +44,7 @@ def test_edited_input_shares_reply_chain_and_new_question_in_thread_can_send(col
     assert [row['id'] for row in order.blocking_predecessors(store, edited['id'])] == [first['id']]
     assert [row['id'] for row in order.blocked_successors(store, first['id'])] == [edited['id']]
     assert order.dependency_state(store, later['id']) == 'ready'
-    assert channel.delivery.candidates(c.clock[0]) == [{'id': part_for(store, later)['id']}]
+    assert [row['id'] for row in channel.delivery.candidates(c.clock[0])] == [part_for(store, later)['id']]
     assert store.one('SELECT state FROM weixin_parts WHERE id=?', (original_part_id,))['state'] == 'unknown'
 
 
@@ -77,7 +77,7 @@ def test_explicit_success_dependency_survives_proven_relogin_and_stops_on_failur
     assert order.dependency_state(store, second['id']) == 'failed'
     assert order.blocking_predecessors(store, second['id'])[0]['decision'] == 'failed'
     part = part_for(store, second)
-    assert channel.delivery.candidates(c.clock[0]) == [{'id': part['id']}]
+    assert [row['id'] for row in channel.delivery.candidates(c.clock[0])] == [part['id']]
     assert channel.delivery.claim(part['id']) is None
     assert part_for(store, second)['reason_code'] == 'dependency_failed'
 

@@ -1,8 +1,10 @@
 """Authorized retention policy, using temporary synthetic databases only."""
+import json
+
 import pytest
 
 from hub.collaboration.history_retention import (
-    AUDIT_TOMBSTONE, RETIRED_RESPONSE, prune_collaboration_history,
+    AUDIT_TOMBSTONE, RETIRED_RESPONSE, prune_collaboration_history, replay_response,
 )
 from shared.util import DevError
 from tests.collaboration_support import collab as collab, key
@@ -162,6 +164,33 @@ def test_room_receipts_backfill_only_verified_archived_scope_and_dry_run(collab)
         with pytest.raises(DevError) as exc:
             service.rooms.mutation(owner,'retention-test',args,lambda:pytest.fail('must not repeat'))
         assert exc.value.code=='IDEMPOTENCY_RESPONSE_EXPIRED'
+
+
+def test_room_reply_retention_keeps_original_channel_disposition_and_fingerprint(collab):
+    service, owner, _, _, room, _, clock, _ = collab
+    store, now = service.store, clock[0]
+    identity = (owner.user_id, room['id'], 'room_reply:member', key())
+    disposition = {'channel': 'weixin', 'binding_id': 'binding', 'disposition': 'blocked',
+                   'reason_code': 'authorization_revoked', 'delivery_id': None}
+    with store.transaction():
+        service.room_channels.save_receipt(identity, 'original-fingerprint', {
+            'message_id': 'reply-id', 'source_message_id': 'source-id', 'binding_generation': 1,
+            'complete': True, 'channel_dispositions': [disposition], 'transient_detail': 'discard'})
+        store.execute('UPDATE room_runtime_receipts SET created=?', (now - 31 * DAY,))
+        assert prune(store, now)['room_runtime_receipts'] == 0
+        store.execute("UPDATE conversation_rooms SET state='archived',archived_at=? WHERE id=?",
+                      (now - 31 * DAY, room['id']))
+        assert prune(store, now)['room_runtime_receipts'] == 1
+        assert prune(store, now)['room_runtime_receipts'] == 0
+        row = service.room_channels.receipt_record(identity)
+        assert row['fingerprint'] == 'original-fingerprint'
+        tombstone = json.loads(row['result'])
+        assert tombstone['channel_dispositions'] == [disposition]
+        assert 'transient_detail' not in tombstone
+        with pytest.raises(DevError) as expired:
+            replay_response(row['result'])
+        assert expired.value.code == 'IDEMPOTENCY_RESPONSE_EXPIRED'
+        assert expired.value.details == {'message_id': 'reply-id'}
 
 
 def test_expired_legacy_update_receipt_never_advises_resend(collab,monkeypatch):
