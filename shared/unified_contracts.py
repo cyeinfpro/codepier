@@ -98,7 +98,7 @@ COLLAB_ACTIONS = {
         'collab.get': _same(CQ, 'job', 'result', 'plan', 'thread', 'goal', 'coordination_goal', 'delegation', 'team',
                             'message_by_id', 'message_status', 'room_view', 'room_work', 'room_message_read',
                             'room_attachment_read', 'room_reply_receipt', 'room_work_handoff_read', 'room_channel', 'room_connect',
-                            'room_turn_policy',
+                            'room_turn_policy', 'room_connection_view', 'room_connection_impact',
                             'connection', 'dot_connection', 'dot_recovery', 'dot_receipt'),
         'collab.list': _same(CQ, 'overview', 'rooms', 'room_list', 'jobs', 'messages', 'room_messages', 'goals',
                              'coordination_goals', 'coordination_options', 'incidents', 'agents', 'subscriptions',
@@ -132,7 +132,7 @@ COLLAB_ACTIONS = {
                           **_same(CD, 'team_publish')},
         'collab.handoff': _same(CD, 'room_work_handoff', 'room_work_control', 'team_handoff', 'team_takeover'),
         'collab.room': _same(CD, 'room_create', 'room_update', 'room_migrate', 'room_projects', 'room_member_create',
-                             'room_context_update', 'room_turn_policy_update'),
+                             'room_context_update', 'room_turn_policy_update', 'room_connection_revoke'),
     },
 }
 
