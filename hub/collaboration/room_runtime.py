@@ -421,9 +421,9 @@ class RoomRuntime:
                     'idempotency_key':'room-claim:'+digest([queued['id'],queued['version'],args['consumer_session_id']])})
             return {**result,**detail,'intent_revision':self.intent_revision(goal['id']),'scheduled':bool(eligible),'next_request':next_request}
 
-    def message_view(self,row,principal):
+    def message_view(self,row,principal,*,channel_map=None):
         self.c.chatroom.require_message_visible(principal,row)
-        view=self.c.chatroom.view(row)
+        view=self.c.chatroom.view(row,channel_map=channel_map)
         body=json.loads(row['body'])
         if body.get('sender_member_id'):
             view['display_name']=body.get('sender_name','dot')
@@ -529,7 +529,8 @@ class RoomRuntime:
             next_sequence=(selected[0]['conversation_sequence'] if len(allowed)>limit and selected else
                 rows[-1]['conversation_sequence'] if rows else None)
             work_page=self.work_page(conversation_id,principal,limit=100)
-            return {'messages':[self.message_view(row,principal) for row in selected],
+            channels=self.c.channels.for_messages([row['id'] for row in selected])
+            return {'messages':[self.message_view(row,principal,channel_map=channels) for row in selected],
                 'next_cursor':sign_cursor(self.c.secret,binding,next_sequence) if has_more and next_sequence is not None else None,
                 'works':work_page['works'],'works_next_cursor':work_page['next_cursor'],
                 'works_pagination_complete':work_page['pagination_complete'],

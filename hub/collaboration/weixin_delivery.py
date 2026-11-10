@@ -939,7 +939,7 @@ class WeixinDelivery:
         if not identifiers:
             return {}
         keys = ','.join('?' for _ in identifiers)
-        rows = self.store.all(f'''SELECT id,COALESCE(projection_message_id,message_id) AS message_id,state,version,
+        rows = self.store.all(f'''SELECT id,binding_id,COALESCE(projection_message_id,message_id) AS message_id,state,version,
             message_version,updated,kind,status_code,ordering_key,ordering_revision,ordering_evidence FROM weixin_deliveries
             WHERE message_id IN ({keys}) OR projection_message_id IN ({keys})
             ORDER BY message_id,created,id''', (*identifiers, *identifiers))

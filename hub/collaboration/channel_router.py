@@ -757,7 +757,8 @@ class ChannelRouter:
             row["parts"] = parts.get(row["id"], [])
             result.setdefault(row["message_id"], []).append(row)
         for message_id, recorded in self.reply_dispositions(ids).items():
-            active = {(item["channel"], item.get("binding_id")) for item in result.get(message_id, [])}
+            active = {(item["channel"], item.get("binding_id")) for item in result.get(message_id, [])
+                      if item.get("kind") != "status"}
             for disposition in recorded:
                 if disposition["disposition"] not in {"blocked", "rejected"}:
                     continue
@@ -787,7 +788,7 @@ class ChannelRouter:
                 AND json_valid(r.result) AND json_extract(r.result,'$.message_id')=m.id
                 AND r.action LIKE 'room_reply:%'
                 AND json_type(r.result,'$.channel_dispositions')='array'
-            ORDER BY r.created LIMIT 1
+            ORDER BY r.created,r.request_key LIMIT 1
             ) AS receipt FROM collaboration_messages m
             JOIN conversation_rooms c ON c.id=m.conversation_id
             WHERE m.id IN ({marks}) AND m.kind='reply' AND m.source_id LIKE 'room-reply:%'""",
