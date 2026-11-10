@@ -299,7 +299,7 @@ class RoomWeixin:
         return self._valid(binding,pairing=pairing,require_member=True)
 
     @memoized
-    def _binding_identity(self, binding, *, pairing=False):
+    def _binding_identity(self, binding, *, pairing=False, allow_disconnected=False):
         if not binding:
             raise DevError('WEIXIN_BINDING_INACTIVE','原微信绑定已不可用',403)
         allowed={'active','pairing','awaiting_owner'} if pairing else {'active'}
@@ -317,8 +317,9 @@ class RoomWeixin:
         if room['state']!='active':
             raise DevError('ROOM_PAUSED','原房间已暂停',409)
         account=self.c.weixin.account(binding['account_id'],owner)
+        allowed_account_states = {'active', 'attention'} if allow_disconnected else {'active'}
         if (binding['owner_user_id']!=owner.user_id or binding['space_id']!=owner.space_id
-                or account['state']!='active' or account['generation']!=binding['generation']
+                or account['state'] not in allowed_account_states or account['generation']!=binding['generation']
                 or account['credential_version']!=binding['credential_version']):
             raise DevError('WEIXIN_CREDENTIAL_CHANGED','原账号凭据或绑定世代已改变',403)
         return binding,account,owner,room
@@ -353,13 +354,13 @@ class RoomWeixin:
             return self._valid(binding, pairing=pairing, require_member=True)
         return (*identity, self.recipient(binding, identity[3]))
 
-    def source_binding(self, source):
+    def source_binding(self, source, *, allow_disconnected=False):
         body = json.loads(source['body'])
         origin = body.get('external_origin', {})
         binding = self.store.one('SELECT * FROM weixin_bindings WHERE id=?', (origin.get('binding_id'),))
         if binding and binding['state'] == 'paused':
             raise DevError('WEIXIN_BINDING_PAUSED','原微信绑定已暂停',409)
-        identity = self._binding_identity(binding)
+        identity = self._binding_identity(binding, allow_disconnected=allow_disconnected)
         if (source['origin'] != 'external_channel' or source['state'] != 'saved'
                 or origin.get('channel') != 'weixin' or not origin.get('native_room')
                 or origin.get('provider_deleted') or source['conversation_id'] != binding['conversation_id']
@@ -904,7 +905,7 @@ class RoomWeixin:
         return {'authorization_id': auth['id'], 'authorization_version': auth['version'],
                 'scope': scope, 'evidence': evidence}
 
-    def delivery_validate(self,delivery,*,require_task_authority=True):
+    def delivery_validate(self,delivery,*,require_task_authority=True,allow_disconnected=False):
         binding=self.store.one('SELECT * FROM weixin_bindings WHERE id=?',(delivery['binding_id'],))
         if not binding:
             raise DevError('WEIXIN_BINDING_INACTIVE','原微信绑定已不可用',403)
@@ -912,19 +913,21 @@ class RoomWeixin:
         source=self.store.one('SELECT * FROM collaboration_messages WHERE id=? AND conversation_id=?',(delivery['source_message_id'],binding['conversation_id']))
         if not message or not source:
             raise DevError('WEIXIN_DELIVERY_SOURCE_CHANGED','原房间消息已不可用',403)
-        binding,account,owner,room,member=self.reply_binding(binding,message,source)
+        binding,account,owner,room,member=self.reply_binding(
+            binding,message,source,allow_disconnected=allow_disconnected)
         body=json.loads(message['body']);origin=json.loads(source['body']).get('external_origin',{})
         self.c.chatroom.require_message_visible(owner,message)
         if (not binding['allow_replies'] or delivery['generation']!=binding['generation'] or delivery['peer_id']!=binding['peer_id']
-                or not self.sender_matches(binding,message,source) or message['version']!=delivery['message_version'] or digest(body)!=delivery['message_digest']
+                or not self.sender_matches(binding,message,source,allow_disconnected=allow_disconnected)
+                or message['version']!=delivery['message_version'] or digest(body)!=delivery['message_digest']
                 or origin.get('binding_id')!=binding['id'] or origin.get('generation')!=binding['generation'] or origin.get('peer_id')!=binding['peer_id']):
             raise DevError('WEIXIN_DELIVERY_SCOPE_CHANGED','原微信回复内容或收件身份已改变',403)
         if require_task_authority and self.store.one('SELECT 1 FROM room_channel_owner_inputs WHERE message_id=?',(source['id'],)):
             self.reply_author(message,source)
         return binding,account,owner,message
 
-    def reply_binding(self,binding,message,source):
-        identity = self.source_binding(source)
+    def reply_binding(self,binding,message,source,*,allow_disconnected=False):
+        identity = self.source_binding(source, allow_disconnected=allow_disconnected)
         if identity[0]['id'] != binding['id']:
             raise DevError('WEIXIN_DELIVERY_SCOPE_CHANGED','原微信回复绑定已改变',403)
         member = identity[-1]
@@ -937,7 +940,8 @@ class RoomWeixin:
     def reply_author(self,message,source):
         goal=self.store.one('SELECT * FROM coordination_goals WHERE id=?',(message.get('goal_id'),)) if message.get('goal_id') else None
         native=self.c.room_work_bridge.native
-        if goal and (reference := native.reference(goal)):
+        if (goal and json.loads(message['body']).get('publish_work') is not False
+                and (reference := native.reference(goal))):
             original = native.original(reference)
             if (source['id']!=original['source_message_id'] or source['conversation_id']!=original['conversation_id']
                     or source['version']!=original['source_version']
@@ -953,10 +957,11 @@ class RoomWeixin:
             return self.author(source)
         return self.c.channel_owner.author(source)
 
-    def sender_matches(self,binding,message,source=None):
+    def sender_matches(self,binding,message,source=None,*,allow_disconnected=False):
         body=json.loads(message['body'])
         goal=self.store.one('SELECT * FROM coordination_goals WHERE id=?',(message.get('goal_id'),)) if message.get('goal_id') else None
-        if goal and self.c.room_work_bridge.native.reference(goal):
+        if (goal and body.get('publish_work') is not False
+                and self.c.room_work_bridge.native.reference(goal)):
             source=source or self.c.weixin.delivery.root_source(message)
             if not source:
                 return False
@@ -983,7 +988,7 @@ class RoomWeixin:
                     and message['reply_to_id']==intent['source_message_id'])
         if source and json.loads(source['body']).get('external_origin', {}).get('native_room'):
             try:
-                *_, member = self.source_binding(source)
+                *_, member = self.source_binding(source, allow_disconnected=allow_disconnected)
             except DevError:
                 return False
         else:

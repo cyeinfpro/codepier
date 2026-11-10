@@ -92,7 +92,14 @@ class ChannelRouter:
     def queue_reply(self, message):
         return self.queue(message)
 
-    def queue(self, message):
+    def queue_reply_dispositions(self, message):
+        dispositions = []
+        self.queue(message, dispositions=dispositions)
+        return dispositions[:24] or [{
+            "channel": "weixin", "disposition": "not_requested", "reason_code": "no_external_reply"
+        }]
+
+    def queue(self, message, *, dispositions=None):
         self.store.require_transaction()
         body = json.loads(message["body"])
         if message["origin"] not in {
@@ -107,12 +114,10 @@ class ChannelRouter:
         origin = json.loads(source["body"]).get("external_origin", {}) if source else {}
         legacy = None
         if origin.get("channel") == "weixin":
-            wx = self.store.one(
-                "SELECT * FROM weixin_bindings WHERE id=?",
-                (origin.get("binding_id", ""),),
-            )
-            if wx:
-                legacy = self.c.weixin.delivery.queue_reply(message)
+            direct_reply = self.c.weixin.delivery.queue_reply_result(message)
+            legacy = direct_reply.delivery
+            if dispositions is not None and direct_reply.disposition != "not_requested":
+                dispositions.append(direct_reply.view())
         targets = []
         if self.c.config.enabled:
             targets += [
@@ -137,14 +142,16 @@ class ChannelRouter:
         for channel, binding in targets:
             # Keep the original Weixin source-reply/file ledger as the single
             # transport owner; full mirroring must not add a duplicate text.
-            if channel == "weixin" and legacy and legacy["binding_id"] == binding["id"]:
+            if (channel == "weixin" and origin.get("channel") == "weixin"
+                    and origin.get("binding_id") == binding["id"]
+                    and direct_reply.disposition != "not_requested"):
                 older = self.store.all(
                     """SELECT d.id FROM channel_mirrors d JOIN collaboration_messages m ON m.id=d.message_id
                     WHERE d.channel='weixin' AND d.binding_id=? AND m.reply_to_id=?
                     AND json_extract(m.body,'$.sender_dot_id')=? AND json_extract(m.body,'$.dot_reply_complete')=0""",
                     (binding["id"], message["reply_to_id"], body.get("sender_dot_id")),
                 )
-                for prior in older:
+                for prior in older if legacy else ():
                     self.store.execute(
                         "UPDATE channel_mirror_parts SET state='superseded' WHERE delivery_id=? AND state IN ('queued','waiting_context','preparing')",
                         (prior["id"],),
@@ -165,7 +172,10 @@ class ChannelRouter:
                     version=binding["version"],
                     generation=binding["generation"],
                 )
-            except DevError:
+            except DevError as exc:
+                if dispositions is not None:
+                    dispositions.append({"channel": channel, "binding_id": binding["id"],
+                                         "disposition": "blocked", "reason_code": exc.code})
                 continue
             if body.get("sender_dot_id") and body["sender_dot_id"] != binding["dot_id"]:
                 continue
@@ -182,6 +192,9 @@ class ChannelRouter:
             )
             if old:
                 queued.append(old)
+                if dispositions is not None:
+                    dispositions.append({"channel": channel, "binding_id": binding["id"],
+                                         "disposition": "existing", "reason_code": "", "delivery_id": old["id"]})
                 continue
             limited = (
                 self.store.one(
@@ -228,6 +241,10 @@ class ChannelRouter:
                     (uuid.uuid4().hex, did, now, now),
                 )
                 self.refresh(did)
+                if dispositions is not None:
+                    dispositions.append({"channel": channel, "binding_id": binding["id"],
+                                         "disposition": "rejected", "reason_code": "daily_mirror_quota",
+                                         "delivery_id": did})
                 queued.append(
                     {"id": did, "channel": channel, "state": "needs_attention"}
                 )
@@ -302,6 +319,9 @@ class ChannelRouter:
                     ),
                 )
             queued.append({"id": did, "channel": channel, "state": "queued"})
+            if dispositions is not None:
+                dispositions.append({"channel": channel, "binding_id": binding["id"],
+                                     "disposition": "queued", "reason_code": "", "delivery_id": did})
         return queued or legacy
 
     def validate(self, delivery):
@@ -734,7 +754,45 @@ class ChannelRouter:
         for row in rows:
             row["parts"] = parts.get(row["id"], [])
             result.setdefault(row["message_id"], []).append(row)
+        for message_id, recorded in self.reply_dispositions(ids).items():
+            active = {(item["channel"], item.get("binding_id")) for item in result.get(message_id, [])}
+            for disposition in recorded:
+                if disposition["disposition"] not in {"blocked", "rejected"}:
+                    continue
+                if (disposition["channel"], disposition.get("binding_id")) in active:
+                    continue
+                # A blocked intent without an outbox has no control target.
+                result.setdefault(message_id, []).append({
+                    **disposition, "state": disposition["disposition"], "parts": [],
+                    "delivered_verified": False, "read_verified": False,
+                })
+            if not recorded and message_id not in result:
+                result[message_id] = [{
+                    "channel": "weixin", "state": "insufficient_evidence", "parts": [],
+                    "reason_code": "legacy_disposition_unavailable",
+                }]
         return result
+
+    def reply_dispositions(self, ids):
+        # Only accept message IDs already filtered for visibility by the caller.
+        # The correlated lookup uses the owner/conversation/message index.
+        if not ids:
+            return {}
+        marks = ",".join("?" for _ in ids)
+        rows = self.store.all(f"""SELECT m.id, (
+            SELECT r.result FROM room_runtime_receipts r
+            WHERE r.owner_user_id=c.owner_user_id AND r.conversation_id=c.id
+                AND json_valid(r.result) AND json_extract(r.result,'$.message_id')=m.id
+                AND r.action LIKE 'room_reply:%'
+                AND json_type(r.result,'$.channel_dispositions')='array'
+            ORDER BY r.created LIMIT 1
+            ) AS receipt FROM collaboration_messages m
+            JOIN conversation_rooms c ON c.id=m.conversation_id
+            WHERE m.id IN ({marks}) AND m.kind='reply' AND m.source_id LIKE 'room-reply:%'""",
+            tuple(ids),
+        )
+        return {row["id"]: json.loads(row["receipt"])["channel_dispositions"] if row["receipt"] else []
+                for row in rows}
 
     def control(self, raw, principal):
         with self.store.transaction():
