@@ -275,8 +275,7 @@ DESCRIPTIONS['collaboration'] += (' join(code=CPR-...) is the stable cached-cata
 DESCRIPTIONS['collaboration_query'] += (' Host connection listing, details, impact and batch status require a current owner panel session.')
 DESCRIPTIONS['collaboration'] += (' A real host_control_request in a verified callback may be redeemed with room_connection_control for its exact owner operation. This proof only continues that onboarding or route operation. Host revocation, batch replacement and preparing a new route require the current owner panel session.')
 DESCRIPTIONS['collaboration'] += (
-    ' When the callback requires connection_check_required or room_inbox reports probe_required,'
-    ' use the actual wake ticket with room_probe_read and room_probe_reply.'
+    ' On a connection check, use the actual wake ticket with room_probe_read and room_probe_reply.'
     ' On a business wake, use the saved member identity, connection_proof and actual wake_ticket with'
     ' room_consumer_begin. Use include_inbox when declared, otherwise room_inbox, and follow its cursor.'
     ' New writes require the active session, fence, proof and current source arguments.'
@@ -291,7 +290,7 @@ DESCRIPTIONS['collaboration'] += (
     ' Use input_handling=pending when an execution request still needs admission and answered when the answer resolves the input.'
     ' Recover uncertain submissions with the original key and arguments, and check original operation IDs.'
     ' Yield after draining. Use yield_after=true on a complete reply if reply_yield_after is declared.'
-    ' If consumer_continue_later is declared, use yield_mode=continue_later to preserve pending inputs.'
+    ' On a decoupled turn, use yield_mode=continue_later to preserve pending inputs if declared.'
     ' Wait for a real wake when the inbox has no processable input. Synthetic tests only verify connectivity.'
     ' room_work_handoff preserves the original Goal and approved scope, with the recipient, current intent,'
     ' epoch, bounded causation and artifact versions. Owner recovery uses room_work_control to select an'

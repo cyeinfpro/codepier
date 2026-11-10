@@ -140,6 +140,8 @@ class ChannelMedia:
                 raise DevError('ATTACHMENT_SCOPE_CHANGED','附件原房间、联系人或绑定已改变',403)
             self.c.conversations.object(principal,room['id'])
             self.c.chatroom.require_message_visible(principal,message)
+            if principal.grant_id:
+                self.c.room_attachments.require_member_message(principal, room, message)
             if row['direction']!='inbound':
                 self.c.runtime.project(row['project_id'],principal)
             if row['expires_at']<=self.c.clock() or row['state']=='expired':

@@ -94,8 +94,6 @@ def migrate(db):
         ('hard_deadline', 'REAL'),
         ('route_expires_at', 'REAL'),
         ('route_generation', 'INTEGER'),
-        ('host_connection_id', 'TEXT'),
-        ('host_revocation_epoch', 'INTEGER'),
     ):
         if name not in columns:
             db.execute(f'ALTER TABLE dot_consumer_sessions ADD COLUMN {name} {declaration}')

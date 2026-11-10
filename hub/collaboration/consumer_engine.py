@@ -125,8 +125,7 @@ class FencedConsumerEngine:
                 WHERE dot_id=? AND generation=? AND (request_key=? OR run_id=?)""",
                 (dot['id'], binding['generation'], args['idempotency_key'], args['consumer_run_id']))
             valid_ticket = (ticket and ticket[self.subject_column] == dot['id']
-                and ticket['generation'] == binding['generation'] and ticket['grant_id'] == principal.grant_id
-                and ticket['purpose'] == 'business')
+                and ticket['generation'] == binding['generation'] and ticket['grant_id'] == principal.grant_id)
             if not valid_ticket:
                 if previous and sub is None:
                     raise DevError('IDEMPOTENCY_CONFLICT', '原消费请求标识不能用于不同参数', 409)
@@ -140,7 +139,7 @@ class FencedConsumerEngine:
                         'inbox_revision': self._revision(dot, binding), 'replayed': True}
             if sub is None:
                 binding, sub = self.binding(room, dot, principal, binding['generation'])
-            if ticket['subscription_id'] != sub['id'] or not self.ticket_current(ticket, binding):
+            if ticket['subscription_id'] != sub['id'] or ticket['purpose'] != 'business' or not self.ticket_current(ticket, binding):
                 raise DevError('DOT_WAKE_TICKET_INVALID', '消费票据的原通知路线已失效', 403)
             if ticket['redeemed_session_id']:
                 raise DevError('DOT_WAKE_TICKET_REDEEMED', '原票据已被其他消费回合使用', 409)
@@ -166,7 +165,7 @@ class FencedConsumerEngine:
                  args['consumer_run_id'], args['idempotency_key'], fingerprint, digest(proof),
                  self.store.encrypt(proof), self.scope_digest(room, dot),
                  fence, self._initial_lease(now, args, room, dot, sub), now, now,
-                 binding.get('host_connection_id') or '', binding.get('host_revocation_epoch') or 0))
+                 binding.get('host_connection_id', ''), binding.get('host_revocation_epoch', 0)))
             self._record_turn_policy(identifier, room, dot, binding, sub, now)
             self._execute('UPDATE dot_wake_tickets SET redeemed_session_id=? WHERE ticket_hash=?',
                                (identifier, ticket['ticket_hash']))
@@ -181,16 +180,13 @@ class FencedConsumerEngine:
         if self.scope_digest(room, dot) != row['scope_digest']:
             raise DevError('DOT_CONSUMER_SCOPE_CHANGED', '消费期间授权或项目范围已改变，请恢复当前绑定', 409)
 
-    def _requires_bound_route(self, row):
-        return True
-
     def _credential(self, raw, principal, room, dot, binding, *, live=True):
         row = self._one('SELECT * FROM dot_consumer_sessions WHERE id=?',
                              (raw.get('consumer_session_id', ''),))
         proof = raw.get('consumer_proof', '')
         if (not row or row[self.subject_column] != dot['id'] or row['grant_id'] != principal.grant_id
                 or row['generation'] != binding['generation']
-                or (self._requires_bound_route(row) and not self.session_current(row, binding))
+                or not self.session_current(row, binding)
                 or not isinstance(raw.get('consumer_fence'), int) or isinstance(raw.get('consumer_fence'), bool)
                 or row['fence'] != raw['consumer_fence'] or not isinstance(proof, str)
                 or not hmac.compare_digest(row['proof_hash'], digest(proof))):
@@ -219,7 +215,7 @@ class FencedConsumerEngine:
     def _lease_fingerprint(args):
         return digest({key: value for key, value in args.items() if key != 'consumer_proof'})
 
-    def _renew_until(self, now, args, row, sub):
+    def _renew_until(self, now, args, row, binding, sub):
         return self.lease_deadline(now, args['lease_seconds'], sub)
 
     def _yield(self, args, principal, dot, binding, row):
@@ -256,7 +252,7 @@ class FencedConsumerEngine:
                 outcome = self._yield(args, principal, dot, binding, row)
             else:
                 self._execute('UPDATE dot_consumer_sessions SET lease_until=?,updated=? WHERE id=?',
-                                   (self._renew_until(now, args, row, sub), now, row['id']))
+                                   (self._renew_until(now, args, row, binding, sub), now, row['id']))
                 outcome = {'more': False}
             current = self._one('SELECT * FROM dot_consumer_sessions WHERE id=?', (row['id'],))
             result = {**self._reply(current), 'inbox_revision': revision, **outcome,

@@ -108,66 +108,58 @@ class RoomConsumers(FencedConsumerEngine):
         self.enqueue_ref(member, 'control_notice', member['id'], member['scope_revision'], reference,
                          scope_targets=targets)
 
-    def _identity(self, raw, principal, *, pending=False):
+    def _identity(self, raw, principal, *, bootstrap=False):
         return self.c.rooms.member_scope(principal, raw.get('conversation_id'), raw.get('member_id'),
-            raw.get('binding_generation'), raw.get('connection_proof'), require_proof=True, pending=pending,
-            bootstrap=pending)
+            raw.get('binding_generation'), raw.get('connection_proof'), require_proof=True,
+            pending=bootstrap, bootstrap=bootstrap)
 
     @staticmethod
-    def _needs_probe(member):
+    def _bootstrap(member):
         return bool(member.get('_pending_binding')
                     or (member.get('connection_identity_version', 1) >= 2 and not member['probe_replied_at']))
 
-    def _identity_binding(self, member):
-        return {**member, 'generation': self.generation(member)}
-
-    def _check_session_host(self, room, binding, row):
-        host_id = binding.get('host_connection_id') or ''
-        epoch = 0
-        if host_id:
-            host = self.c.room_connections.require_member(room, binding,
-                expected_epoch=binding.get('host_revocation_epoch'))
-            epoch = host['host_revocation_epoch']
-        elif binding.get('connection_identity_version', 1) >= 2:
-            raise DevError('ROOM_CONNECTION_INVALID', '已验证成员缺少原连接身份', 409)
-        if (row['host_connection_id'] or '', row['host_revocation_epoch'] or 0) != (host_id, epoch):
-            raise DevError('ROOM_BINDING_CHANGED', '消费回合的宿主身份已变更', 409)
+    def _identity_binding(self, room, member, principal):
+        host = (self.c.room_connections.require_host_current(principal, room, member,
+                    expected_epoch=member['host_revocation_epoch'])
+                if member.get('host_connection_id') else None)
+        return {**member, 'generation': self.generation(member),
+                'host_revocation_epoch': host['host_revocation_epoch'] if host else 0}
 
     def _begin_scope(self, raw, principal):
         args = validate(self.begin_model, raw)
-        actor, room, member = self._identity(args, principal, pending=True)
-        if self._needs_probe(member):
+        actor, room, member = self._identity(args, principal, bootstrap=True)
+        if self._bootstrap(member):
             raise DevError('ROOM_PROBE_REQUIRED', '连接需要先使用真实通知票据读取并回复探针', 409)
         self.c.rooms.require_native(room)
-        return args, actor, room, member, member, self._identity_binding(member), None
+        return args, actor, room, member, member, self._identity_binding(room, member, actor), None
 
     def _check_begin_replay(self, room, dot, binding, row):
-        self._check_session_host(room, binding, row)
+        if not self.session_current(row, binding):
+            raise DevError('ROOM_BINDING_CHANGED', '消费回合的宿主身份已变更', 409)
 
     def _initial_lease(self, now, args, room, dot, sub):
-        if mode(self.store, room['id']) == 'decoupled':
-            return min(now + args['lease_seconds'], now + MAX_TURN_AGE_SECONDS, sub['expires_at'] + ROUTE_GRACE_SECONDS)
-        return super()._initial_lease(now, args, room, dot, sub)
+        return min(now + args['lease_seconds'], now + MAX_TURN_AGE_SECONDS,
+                   sub['expires_at'] + ROUTE_GRACE_SECONDS)
 
     def _record_turn_policy(self, identifier, room, dot, binding, sub, now):
         self.store.execute('''UPDATE dot_consumer_sessions SET turn_policy=?,policy_revision=?,
             scope_digest_at_begin=scope_digest,observed_scope_digest=scope_digest,scope_digest_evidence='at_begin',
             hard_deadline=?,route_expires_at=?,route_generation=?
             WHERE id=?''', (mode(self.store, room['id']), POLICY_REVISION, now + MAX_TURN_AGE_SECONDS,
-            sub['expires_at'], binding['route_generation'], identifier))
+            sub['expires_at'], binding.get('route_generation', 0), identifier))
         self.store.execute('''UPDATE room_members SET consumer_continuation_at=NULL,consumer_continuation_attempts=0
             WHERE id=?''', (dot['id'],))
 
     def _expire_activated_turns(self, dot, generation, subscription_id):
         self.store.execute("""UPDATE dot_consumer_sessions SET state='expired',updated=?
             WHERE member_id=? AND state='active' AND (generation!=? OR
-                (subscription_id!=? AND turn_policy!='decoupled'))""",
+                (subscription_id!=? AND turn_policy!='decoupled' AND COALESCE(host_connection_id,'')=''))""",
             (self.c.clock(), dot['id'], generation, subscription_id))
 
     def _lease_scope(self, raw, principal, model):
         args = validate(model, raw)
         actor, room, member = self._identity(args, principal)
-        return args, actor, room, member, member, self._identity_binding(member), None
+        return args, actor, room, member, member, self._identity_binding(room, member, actor), None
 
     @staticmethod
     def _lease_fingerprint(args):
@@ -175,29 +167,36 @@ class RoomConsumers(FencedConsumerEngine):
             args = {key: value for key, value in args.items() if key != 'yield_mode'}
         return FencedConsumerEngine._lease_fingerprint(args)
 
-    def _requires_bound_route(self, row):
-        return False  # A strict live action checks the route separately.
+    @staticmethod
+    def _independent_turn_route(row, binding):
+        return bool(binding.get('host_connection_id') or (
+            row['subscription_id'] == binding['subscription_id']
+            and row['route_generation'] is not None
+            and binding.get('route_generation', 0) > row['route_generation']))
 
     def _strict_live_scope(self, room, member, binding, row, scope_digest):
-        self.binding(room, member)
-        if row['subscription_id'] != binding['subscription_id']:
-            raise DevError('ROOM_BINDING_CHANGED', '消费回合的原通知路线已变更', 409)
+        # A verified host keeps its turn through route cutover. Legacy members
+        # retain strict binding, except for a verified signing rotation on the
+        # same subscription.
+        if not binding.get('host_connection_id'):
+            self.binding(room, member, require_subscription=not self._independent_turn_route(row, binding))
+            if row['subscription_id'] != binding['subscription_id']:
+                raise DevError('ROOM_BINDING_CHANGED', '消费回合的原通知路线已变更', 409)
         if self.scope_digest(room, member) != scope_digest:
             if row['turn_policy'] == 'shadow':
                 record_shadow('scope_update', 'would_allow', 'scope_changed')
             raise DevError('DOT_CONSUMER_SCOPE_CHANGED', '消费期间授权或项目范围已改变，请恢复当前绑定', 409)
 
     def _check_scope(self, room, dot, binding, row, *, live):
-        self._check_session_host(room, binding, row)
         if not live:
             return
         if row['turn_policy'] != 'decoupled':
             self._strict_live_scope(room, dot, binding, row, row['observed_scope_digest'] or row['scope_digest'])
-        else:
+        if row['turn_policy'] == 'decoupled' or self._independent_turn_route(row, binding):
             route = self._original_route(row)
             if route['state'] == 'revoked':
                 raise DevError('ROOM_SUBSCRIPTION_REVOKED', '原通知连接已撤销', 403)
-            if min(route['expires_at'], row['route_expires_at']) + ROUTE_GRACE_SECONDS <= self.c.clock():
+            if self._route_finish_limit(row, route) <= self.c.clock():
                 raise DevError('DOT_CONSUMER_LEASE_EXPIRED', '原通知路线的收尾期限已结束', 409)
         if row['hard_deadline'] <= self.c.clock():
             raise DevError('DOT_CONSUMER_LEASE_EXPIRED', '原消费回合已达到最长存续期限', 409)
@@ -207,11 +206,17 @@ class RoomConsumers(FencedConsumerEngine):
                                (row['subscription_id'],))
         return route or {'state': 'unavailable', 'expires_at': row['route_expires_at']}
 
-    def _renew_until(self, now, args, row, sub):
+    @staticmethod
+    def _route_finish_limit(row, route):
+        if row['route_expires_at'] is None:
+            return row['hard_deadline']  # Migrated turns have only their original lease evidence.
+        return min(route['expires_at'], row['route_expires_at']) + ROUTE_GRACE_SECONDS
+
+    def _renew_until(self, now, args, row, binding, sub):
         route = self._original_route(row)
         limit = route['expires_at']
-        if row['turn_policy'] == 'decoupled':
-            limit = min(limit, row['route_expires_at']) + ROUTE_GRACE_SECONDS
+        if row['turn_policy'] == 'decoupled' or self._independent_turn_route(row, binding):
+            limit = self._route_finish_limit(row, route)
         if limit <= now:
             raise DevError('DOT_CONSUMER_LEASE_EXPIRED', '原通知路线的收尾期限已结束', 409)
         return min(now + args['lease_seconds'], row['hard_deadline'], limit)
@@ -231,8 +236,7 @@ class RoomConsumers(FencedConsumerEngine):
                 or (require_subscription and (sub['state'] != 'active' or sub['expires_at'] <= self.c.clock()))):
             raise DevError('ROOM_SUBSCRIPTION_INACTIVE', '原成员通知订阅尚未就绪或已经失效', 409)
         self.c.rooms.event_authorize(sub, json.loads(sub['arguments']))
-        host = (self.c.room_connections.require_member(room, current, expected_epoch=current.get('host_revocation_epoch'))
-                if current.get('host_connection_id') else None)
+        host = self.c.room_connections.require_member(room, current) if current.get('host_connection_id') else None
         stored = json.loads(self.store.decrypt(sub['secret'])) if require_subscription or ticket_context else {}
         return {**current, 'generation': internal, 'grant_id': actor.grant_id,
             'host_revocation_epoch': host['host_revocation_epoch'] if host else 0,
@@ -244,28 +248,25 @@ class RoomConsumers(FencedConsumerEngine):
             or (ticket['route_generation'] == binding['previous_route_generation']
                 and binding['previous_route_until'] > self.c.clock()))
 
+    def session_current(self, row, binding):
+        if binding.get('host_connection_id'):
+            return (row['host_connection_id'] == binding['host_connection_id']
+                and row['host_revocation_epoch'] == binding['host_revocation_epoch'])
+        return not row['host_connection_id'] and super().session_current(row, binding)
+
     def scope(self, raw, principal, model):
         args = validate(model, raw)
-        can_verify = model in (contracts.RoomInboxRead, contracts.RoomConsumerBegin)
-        actor, room, member = self._identity(args, principal, pending=can_verify)
-        if can_verify and self._needs_probe(member):
-            if model is contracts.RoomConsumerBegin:
-                raise DevError('ROOM_PROBE_REQUIRED', '连接需要先使用真实通知票据读取并回复探针', 409)
-            return args, actor, room, member, member, None, None
-        if can_verify:
-            self.c.rooms.require_native(room)
-        binding, sub = self.binding(room, member, actor, self.generation(member),
-                                    require_subscription=model is not contracts.RoomConsumerBegin,
-                                    ticket_context=model is contracts.RoomConsumerBegin)
+        actor, room, member = self._identity(args, principal)
+        binding, sub = self.binding(room, member, actor, self.generation(member))
         return args, actor, room, member, member, binding, sub
 
     def read_scope(self, raw, principal, model):
         args = validate(model, raw)
         can_verify = model is contracts.RoomInboxRead
-        actor, room, member = self._identity(args, principal, pending=can_verify)
-        if can_verify and self._needs_probe(member):
+        actor, room, member = self._identity(args, principal, bootstrap=can_verify)
+        if can_verify and self._bootstrap(member):
             if args.get('consumer_session_id') is not None:
-                raise DevError('ROOM_PROBE_REQUIRED', '连接尚未领取业务回合', 409)
+                raise DevError('ROOM_PROBE_REQUIRED', '候选连接尚未领取业务回合', 409)
             return args, actor, room, member, member, None, None
         self.c.rooms.require_native(room)
         try:
@@ -273,7 +274,7 @@ class RoomConsumers(FencedConsumerEngine):
         except DevError as exc:
             if exc.code != 'ROOM_SUBSCRIPTION_INACTIVE' or args.get('consumer_session_id') is None:
                 raise
-            binding, sub = self._identity_binding(member), None
+            binding, sub = self._identity_binding(room, member, actor), None
             row = self._credential(args, actor, room, member, binding)
             if row['turn_policy'] != 'decoupled' or row['created'] >= row['route_expires_at']:
                 raise
@@ -322,7 +323,7 @@ class RoomConsumers(FencedConsumerEngine):
             raise DevError('ROOM_PROBE_REQUIRED', '先完成当前成员的真实通知读取和回复验证', 409)
         if raw.get('consumer_session_id') is None:
             return member, None
-        return member, self._credential(raw, actor, room, member, self._identity_binding(member), live=False)
+        return member, self._credential(raw, actor, room, member, self._identity_binding(room, member, actor), live=False)
 
     def reply_consumer_view(self, session):
         if not session:
@@ -335,7 +336,10 @@ class RoomConsumers(FencedConsumerEngine):
         actor = self.c.rooms.principal(member)
         room = self.c.conversations.object(actor, member['conversation_id'])
         try:
-            self._check_scope(room, member, self._identity_binding(member), current, live=True)
+            binding = self._identity_binding(room, member, actor)
+            if not self.session_current(current, binding):
+                return None
+            self._check_scope(room, member, binding, current, live=True)
         except DevError:
             return None
         return {'consumer_session_id': current['id'], 'state': 'active', 'more': self._ready(member, actor)}
@@ -352,7 +356,9 @@ class RoomConsumers(FencedConsumerEngine):
         self.c.rooms.require_native(room)
         if not member['probe_replied_at']:
             raise DevError('ROOM_PROBE_REQUIRED', '先完成当前成员的真实通知读取和回复验证', 409)
-        binding = self._identity_binding(member)
+        principal, room, member = self.c.rooms.member_scope(
+            principal, room['id'], member['id'], member['binding_generation'])
+        binding = self._identity_binding(room, member, principal)
         row = self._credential(raw, principal, room, member, binding)
         if legacy_policy and row['turn_policy'] == 'decoupled':
             self._strict_live_scope(room, member, binding, row, row['scope_digest_at_begin'])

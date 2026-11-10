@@ -1039,7 +1039,8 @@ class Rooms:
                             bridge.bind(member, self.principal(member))
                     if any(delta.values()) and previous['grant_id'] and previous['status']!='legacy':
                         self.c.room_consumers.scope_updated(self.member(approval['member_id']),previous_digest,
-                            additions_only=bool(delta['added'] and not delta['changed'] and not delta['revoked']), scope_changes=delta)
+                            additions_only=bool(delta['added'] and not delta['changed'] and not delta['revoked']),
+                            scope_changes=delta)
                 self.store.execute('UPDATE conversation_rooms SET version=version+1 WHERE id=?', (room['id'],))
                 self.change(room['id'], 'projects', room['id'], room['version'] + 1)
                 return {'conversation_id': room['id'], 'impact': {'removed_partition_ids': removed,
@@ -1350,6 +1351,7 @@ class Rooms:
             'subscription_request': self.subscription_request(member), 'grants_authority': False,
             'pending_binding': bool(member.get('_pending_binding')),
             'subscription_renewal': self.renewals.view(member),
+            'turn_capabilities': dict(contracts.TURN_CAPABILITIES),
             'required_host_actions': {'collaboration': ['room_probe_read', 'room_probe_reply',
                 'room_consumer_begin', 'room_consumer_yield', 'room_reply'],
                 'collaboration_query': ['room_inbox']},
@@ -1624,6 +1626,7 @@ class Rooms:
             'room_connect': self.connect_read, 'room_connect_resume': self.connect_action,
             'room_connect_join': self.join, 'room_probe_read': self.probe_read, 'room_probe_reply': self.probe_reply,
             'room_changes': self.changes, 'room_diagnostics': self.diagnostics,
+            'room_turn_policy': self.turn_policy, 'room_turn_policy_update': self.update_turn_policy,
             'room_connection_list': self.connections.host_listing,
             'room_connection_view': self.connections.host_view,
             'room_connection_impact': self.connections.impact,

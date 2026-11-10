@@ -65,19 +65,6 @@ def migrate(db):
         ON room_reply_origins(member_id, binding_generation, created, message_id)''')
 
 
-    db.execute('''CREATE TABLE IF NOT EXISTS room_reply_origins(
-        message_id TEXT PRIMARY KEY REFERENCES collaboration_messages(id),
-        consumer_session_id TEXT NOT NULL REFERENCES dot_consumer_sessions(id),
-        member_id TEXT NOT NULL REFERENCES room_members(id),
-        binding_generation INTEGER NOT NULL,
-        request_digest TEXT NOT NULL,
-        created REAL NOT NULL)''')
-    db.execute('''CREATE INDEX IF NOT EXISTS room_reply_origins_session
-        ON room_reply_origins(consumer_session_id,created,message_id)''')
-    db.execute('''CREATE INDEX IF NOT EXISTS room_reply_origins_member
-        ON room_reply_origins(member_id,binding_generation,created,message_id)''')
-
-
 class RoomRuntime:
     def __init__(self, collaboration):
         self.c, self.store = collaboration, collaboration.store
@@ -471,7 +458,7 @@ class RoomRuntime:
                     receipt_args={**args,'coordinator_epoch':None}
                 result=self.member_receipt(receipt_args,member,principal,'room_work_start',recover)
                 return self.work_response({**result,'resumed_existing':True},args,member,principal)
-            self.c.room_consumers.guard_reply_revision(args,principal,member,source,strict=False)
+            self.c.room_consumers.guard_reply_revision(args,principal,member,source,strict=False,action='work_start')
             native_reference,native_scope=self.c.room_work_bridge.native.prepare(member,source,principal,args)
             self.c.room_work_bridge.scopes(member)
             project_id=native_scope['anchor_project_id']
