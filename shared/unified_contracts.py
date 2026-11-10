@@ -89,7 +89,7 @@ CORE_ACTIONS = {
     },
 }
 
-# Collaboration: 115 public actions grouped by noun. A view is the original
+# Collaboration: 122 public actions grouped by noun. A view is the original
 # public action name, so every business contract, idempotency record and
 # receipt is reused verbatim.
 COLLAB_ACTIONS = {
