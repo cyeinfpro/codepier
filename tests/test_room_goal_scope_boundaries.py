@@ -300,8 +300,10 @@ async def test_final_publication_reuses_original_artifact_evidence_and_is_unique
     assert len(s.store.all('SELECT * FROM room_goal_publications WHERE goal_id=?',(goal['goal_id'],)))==1
     s.room_runtime.control({'work_id':goal['goal_id'],'expected_version':s.room_runtime.goal(goal['goal_id'])['version'],
         'action':'supplement','body_text':'改为仅检查标题','idempotency_key':key()},owner)
-    with pytest.raises(DevError,match='意图'):
-        s.room_runtime.reply({**request,'expected_inbox_revision':s.room_consumers.inbox(identity,actor)['inbox_revision']},actor)
+    replay = s.room_runtime.reply({**request,
+        'expected_inbox_revision':s.room_consumers.inbox(identity,actor)['inbox_revision']},actor)
+    assert replay['replayed'] and not replay['effects_created']
+    assert replay['historical_result']['message_id'] == final['message']['id']
     with pytest.raises(DevError,match='当前意图'):
         s.room_runtime.reply({**request,'expected_intent_revision':2,'idempotency_key':key(),
             'expected_inbox_revision':s.room_consumers.inbox(identity,actor)['inbox_revision']},actor)
