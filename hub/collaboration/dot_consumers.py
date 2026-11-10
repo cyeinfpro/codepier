@@ -105,7 +105,7 @@ class DotConsumers(FencedConsumerEngine):
         if member:
             conversation = self.c.conversations.object(principal, member['conversation_id'])
             return self.c.room_consumers.guard_session(raw, principal, conversation, member,
-                                                      require_revision=require_revision)
+                                                      require_revision=require_revision, legacy_policy=True)
         if not self.active_binding(dot['id']):
             return None
         self.c.dot_chat.authorize(principal, room, dot, connector=True)
@@ -168,7 +168,7 @@ class DotConsumers(FencedConsumerEngine):
                 raise DevError('DOT_CONSUMER_WORK_MISMATCH', '此消费回合不属于原工作的成员', 403)
             conversation = self.c.conversations.object(principal, goal['conversation_id'])
             return self.c.room_consumers.guard_session(raw, principal, conversation, member,
-                                                      require_revision=require_revision)
+                                                      require_revision=require_revision, legacy_policy=True)
         if session and raw.get('dot_id') and raw['dot_id'] != session['dot_id']:
             raise DevError('DOT_CONSUMER_WORK_MISMATCH', '显式 Dot 与消费回合不一致', 403)
         if dot_id:
