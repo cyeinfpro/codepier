@@ -228,7 +228,7 @@ class RoomRuntime:
                     receipt_args={**args,'coordinator_epoch':None}
                 result=self.member_receipt(receipt_args,member,principal,'room_work_start',recover)
                 return self.work_response({**result,'resumed_existing':True},args,member,principal)
-            self.c.room_consumers.guard_reply_revision(args,principal,member,source,strict=False)
+            self.c.room_consumers.guard_reply_revision(args,principal,member,source,strict=False,action='work_start')
             native_reference,native_scope=self.c.room_work_bridge.native.prepare(member,source,principal,args)
             self.c.room_work_bridge.scopes(member)
             project_id=native_scope['anchor_project_id']
