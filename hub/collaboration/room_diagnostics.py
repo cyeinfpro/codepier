@@ -83,6 +83,13 @@ def projection(c, room, principal):
               'waiting_resource': '等待执行资源', 'waiting_input': '等待补充或恢复',
               'channel_delivery': '等待渠道投递或核对'}
 
+    visible_scopes = {(entry['project_id'], entry['environment_id'])
+                      for entry in c.room_context.projects(principal, room)}
+
+    def visible_message(row):
+        return (c.chatroom.message_visible(principal, row)
+                and c.room_context.message_scopes(row) <= visible_scopes)
+
     def age(at):
         return round(max(0, now - at), 3) if isinstance(at, (float, int)) else None
 
@@ -117,7 +124,7 @@ def projection(c, room, principal):
             message_id = entry['object_id'] if entry['kind'] == 'message' else reference.get('message_id')
             message = store.one('SELECT * FROM collaboration_messages WHERE id=? AND conversation_id=?',
                                 (message_id, room['id'])) if message_id else None
-            if message and not c.chatroom.message_visible(principal, message):
+            if message and not visible_message(message):
                 continue
             project_id = reference.get('source_project_id')
             if project_id:
@@ -206,7 +213,7 @@ def projection(c, room, principal):
 
     messages = store.all('''SELECT * FROM collaboration_messages WHERE conversation_id=?
         ORDER BY conversation_sequence DESC LIMIT ?''', (room['id'], LIMITS['messages'] + 1))
-    identifiers = [row['id'] for row in messages[:LIMITS['messages']] if c.chatroom.message_visible(principal, row)]
+    identifiers = [row['id'] for row in messages[:LIMITS['messages']] if visible_message(row)]
     originals = {row['id']: row for row in messages[:LIMITS['messages']]}
     reply_ids = [identifier for identifier in identifiers if originals[identifier]['kind'] == 'reply']
     origins = {}
@@ -225,7 +232,7 @@ def projection(c, room, principal):
         origin = origins.get(identifier)
         trace({'kind': 'reply', 'id': identifier, 'message_id': identifier,
                'origin': 'verified' if origin else 'unknown_legacy', 'updated_at': message['created'],
-               **({'source_message_id': source_id} if source and c.chatroom.message_visible(principal, source) else {}),
+               **({'source_message_id': source_id} if source and visible_message(source) else {}),
                **({key: origin[key] for key in ('consumer_session_id', 'member_id', 'binding_generation')}
                   if origin else {})})
     channel_map = c.channels.for_messages(identifiers)
