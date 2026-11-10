@@ -348,7 +348,7 @@ class FileEngine:
             if truncated: break
         return {"diff": "".join(parts), "diff_truncated": truncated, "added_lines": added, "removed_lines": removed}
 
-    def walk(self, root: Path, start: Path, depth: int | None = None, *, exclude=None, deadline=None, files_first=False):
+    def walk(self, root: Path, start: Path, depth: int | None = None, *, exclude=None, deadline=None, files_first=False, descend=None):
         # Bound directory enumeration as well as matching files. A tree containing
         # only directories or ignored names must not bypass search/checkpoint limits.
         scanned = 0
@@ -409,7 +409,8 @@ class FileEngine:
             if exclude is not None and exclude(rel):
                 continue
             yield p, rel, s
-            if stat.S_ISDIR(s.st_mode) and (depth is None or level < depth):
+            if (stat.S_ISDIR(s.st_mode) and (depth is None or level < depth)
+                    and (descend is None or descend(rel))):
                 stack.append((entries(p), level + 1))
 
     def tree(self, project, args):
@@ -417,24 +418,64 @@ class FileEngine:
         start = self.path(root, args["path"])
         if not start.is_dir():
             raise DevError("NOT_DIRECTORY", "目录不存在", 404)
-        rows, more = [], False
+        scope = args.get("scope", "git")
+        per_dir = args.get("per_dir", 40)
+        indexed = self.git_candidates(root, start, paths_only=True) if scope == "git" else None
+        visible = None
         scan_error = None
+        if indexed is not None:
+            paths, capped = indexed
+            visible = set()
+            base = start.relative_to(root).as_posix()
+            prefix = "" if base == "." else base + "/"
+            depth = args["depth"]
+            for path in paths:
+                if path.startswith(prefix):
+                    parts = path[len(prefix):].split("/", depth)[:depth]
+                    visible.update(prefix + "/".join(parts[:end]) for end in range(1, len(parts) + 1))
+            if capped:
+                scan_error = "SCAN_LIMIT"
+
+        def excluded(rel):
+            return rel.rsplit("/", 1)[-1].casefold() == ".ds_store" or visible is not None and rel not in visible
+
+        shown, omitted, pruned = {}, {}, set()
+        rows, more, index = [], False, 0
+        walk_limited = False
         try:
-            for i, (p, rel, st) in enumerate(self.walk(root, start, args["depth"], deadline=time.monotonic() + 8)):
-                if i < args["offset"]:
+            for p, rel, st in self.walk(root, start, args["depth"], exclude=excluded,
+                    deadline=time.monotonic() + 8, descend=lambda rel: rel not in pruned):
+                parent = rel.rpartition("/")[0] or "."
+                shown[parent] = shown.get(parent, 0) + 1
+                if shown[parent] > per_dir:
+                    omitted[parent] = omitted.get(parent, 0) + 1
+                    if stat.S_ISDIR(st.st_mode):
+                        pruned.add(rel)
+                    continue
+                index += 1
+                if index <= args["offset"]:
                     continue
                 if len(rows) >= args["limit"]:
                     more = True
                     break
                 is_file = stat.S_ISREG(st.st_mode)
-                rows.append({"path": rel, "name": p.name, "type": "file" if is_file else "directory", "size": st.st_size if is_file else None})
+                rows.append({"path": rel, "name": p.name, "type": "file" if is_file else "directory",
+                             "size": st.st_size if is_file else None})
         except DevError as exc:
             if exc.code not in {"SCAN_LIMIT", "SCAN_FAILED"}:
                 raise
-            more, scan_error = True, exc.code
-        return {"entries": rows, "truncated": more, "next_offset": args["offset"] + len(rows) if more and rows else None,
-                "scan_error": scan_error,
-                "exclusions": "Credentials, .git, dependencies, build caches (including .build), Agent state, links and unsupported non-UTF-8 or non-portable filenames are excluded."}
+            scan_error = exc.code
+            walk_limited = True
+        result = {"entries": rows, "truncated": bool(more or scan_error or omitted),
+                  "next_offset": args["offset"] + len(rows) if (more or walk_limited) and rows else None,
+                  "scan_scope": "git_index" if indexed is not None else "filesystem_walk",
+                  "scan_error": scan_error}
+        if omitted:
+            result["omitted"] = omitted
+        if scope == "all" or scan_error:
+            result["exclusions"] = ("Credentials, .git, dependencies, build caches (including .build), Agent state, "
+                                    ".DS_Store, links and unsupported non-UTF-8 or non-portable filenames are excluded.")
+        return result
 
     def read(self, project, args):
         root, _ = self.root(project)
@@ -458,7 +499,7 @@ class FileEngine:
                 "total_lines": len(lines), "start_line": start + 1, "end_line": min(end, len(lines)),
                 "truncated": start > 0 or end < len(lines), "next_start_line": end + 1 if end < len(lines) else None}
 
-    def git_candidates(self, root, start, *, max_files=20000):
+    def git_candidates(self, root, start, *, max_files=20000, paths_only=False):
         """Bounded Git enumeration; content still passes every filesystem guard."""
         if not (root / ".git").exists():
             return None
@@ -494,6 +535,14 @@ class FileEngine:
             try:
                 rel = name.decode("utf-8")
                 if scan_ignored(rel):
+                    continue
+                if paths_only:
+                    if rel not in seen:
+                        if len(rows) >= max_files:
+                            capped = True
+                            break
+                        seen.add(rel)
+                        rows.append(rel)
                     continue
                 path = self.path(root, rel, False)
                 if rel in seen:

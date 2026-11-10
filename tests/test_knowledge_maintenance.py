@@ -43,7 +43,10 @@ def due(instance):
 
 
 def succeed(instance, identifier):
-    instance.store.execute("UPDATE operations SET state='succeeded',result=? WHERE id=?", ('{"ok":true,"data":{"state":"ready"}}', identifier))
+    from hub.operation_history import seal
+
+    result = seal(instance.store, '{"ok":true,"data":{"state":"ready"}}')
+    instance.store.execute("UPDATE operations SET state='succeeded',result=? WHERE id=?", (result, identifier))
 
 
 def test_read_status_missing_is_pure(runtime):
@@ -574,3 +577,94 @@ def test_new_room_tool_ceiling_blocks_prepared_workspace_maintenance(collab, mon
     assert instance.knowledge_maintenance.prepare(guard[0]) is None
     row = instance.store.one('SELECT state,enabled,last_error FROM knowledge_maintenance')
     assert row == {'state': 'paused', 'enabled': 0, 'last_error': 'ROOM_SCOPE_WORKSPACE_DENIED'}
+
+
+def admit_fixture_write(instance, principal, key, project='p'):
+    prepared = instance._invoke('write', {'project': project, 'path': 'new.py', 'content': 'value = 1\n',
+        'expected_sha256': 'new', 'idempotency_key': key}, principal)
+    return instance._admit_operation('write', prepared.arguments, prepared.project, principal)[0]
+
+
+def test_auto_enrollment_bootstraps_then_switches_to_incremental(runtime, monkeypatch):
+    from hub.knowledge_maintenance import IDLE_INTERVAL
+
+    instance, principal = runtime
+    maintenance = instance.knowledge_maintenance
+    monkeypatch.setattr(instance, 'online', lambda _: True)
+    write = admit_fixture_write(instance, principal, 'bootstrap-write')
+    identifier = key_for(instance.project('p', principal), {})
+    registration = instance.store.one('SELECT * FROM knowledge_maintenance WHERE id=?', (identifier,))
+    assert registration['origin'] == 'auto' and registration['state'] == 'initializing'
+    due(instance)
+    assert maintenance.prepare(identifier) is None
+    assert maintenance.status(instance.project('p', principal), {})['state'] == 'deferred_busy'
+    succeed(instance, write)
+    due(instance)
+    args, project, identity, guard = maintenance.prepare(identifier)
+    assert args['incremental'] is False and identity.grant_id == principal.grant_id
+    initial, _ = instance._admit_operation(BUILD, args, project, identity, maintenance=guard)
+    succeed(instance, initial)
+    due(instance)
+    args, _, _, _ = maintenance.prepare(identifier)
+    assert args['incremental'] is True
+    instance.store.execute("UPDATE knowledge_maintenance SET last_write=?,next_at=?,updated=?,state='refreshing' WHERE id=?",
+                           (time.time() - 90000, time.time() + IDLE_INTERVAL, time.time() - 60, identifier))
+    assert maintenance.status(project, {})['interval_seconds'] == IDLE_INTERVAL
+    maintenance.nudge('p', 'dev', 'write')
+    first = maintenance.status(project, {})
+    assert first['interval_seconds'] < IDLE_INTERVAL and first['next_check_at'] < time.time() + 12
+    maintenance.nudge('p', 'dev', 'write')
+    assert maintenance.status(project, {})['next_check_at'] == first['next_check_at']
+
+
+def test_auto_enrollment_respects_opt_out_and_isolates_failed_registration(runtime, monkeypatch):
+    instance, principal = runtime
+    maintenance = instance.knowledge_maintenance
+    monkeypatch.setattr(maintenance, 'auto_enroll', False)
+    admit_fixture_write(instance, principal, 'enrollment-feature-off')
+    assert not maintenance.exists()
+    monkeypatch.setattr(maintenance, 'auto_enroll', True)
+    original = maintenance._register
+
+    def fail_after_insert(*args, **kwargs):
+        original(*args, **kwargs)
+        raise RuntimeError('synthetic registration failure')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(maintenance, '_register', fail_after_insert)
+        write = admit_fixture_write(instance, principal, 'enrollment-savepoint')
+    assert instance.store.one('SELECT state FROM operations WHERE id=?', (write,))['state'] == 'queued'
+    assert not maintenance.exists()
+    _, identifier, _, _ = register(runtime, enabled=False)
+    admit_fixture_write(instance, principal, 'enrollment-opt-out')
+    assert instance.store.one('SELECT state FROM knowledge_maintenance WHERE id=?', (identifier,))['state'] == 'disabled'
+
+
+def test_auto_enrollment_evicts_only_automatic_registration(runtime, monkeypatch):
+    import hub.knowledge_maintenance as module
+
+    instance, principal = runtime
+    _, explicit, _, _ = register(runtime)
+    for name in ('p2', 'p3'):
+        instance.store.execute("""INSERT INTO projects(id,alias,alias_key,device_id,root,mode,created)
+            VALUES (?,?,?,'dev',?,'write',?)""", (name, name, name, '/synthetic/' + name, time.time()))
+    seed_grant(instance.store, 'writer2', 'owner', scopes=('read', 'write'), projects=('p2', 'p3'))
+    identity = Principal('mcp:writer2:test', 'owner', {'read', 'write'}, ['p2', 'p3'], grant_id='writer2')
+    monkeypatch.setattr(module, 'MAX_DEVICE_RECORDS', 2)
+    admit_fixture_write(instance, identity, 'enrollment-second-project', 'p2')
+    admit_fixture_write(instance, identity, 'enrollment-third-project', 'p3')
+    rows = instance.store.all('SELECT id,project_id,origin FROM knowledge_maintenance ORDER BY project_id')
+    assert [(row['project_id'], row['origin']) for row in rows] == [('p', 'explicit'), ('p3', 'auto')]
+    assert rows[0]['id'] == explicit
+
+
+def test_auto_maintenance_keeps_unreadable_success_receipt_for_review(runtime, monkeypatch):
+    instance, _ = runtime
+    initial, identifier, _, project = register(runtime)
+    monkeypatch.setattr(instance, 'online', lambda _: True)
+    instance.store.execute("UPDATE operations SET state='succeeded',result=? WHERE id=?",
+                           ('history:v1:gAAAAcorrupt', initial))
+    due(instance)
+    assert instance.knowledge_maintenance.prepare(identifier) is None
+    status = instance.knowledge_maintenance.status(project, {})
+    assert status['state'] == 'needs_review' and status['operation_id'] == initial

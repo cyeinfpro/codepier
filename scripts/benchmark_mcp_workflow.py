@@ -39,8 +39,11 @@ def body_chars(value):
 
 
 class Workflow:
-    def __init__(self, stack):
+    def __init__(self, stack, view):
         self.stack = stack
+        self.view = view
+        self.wire_bytes = 0
+        self.steps = {}
         self.turns = self.parameter_errors = self.help_before_first_success = 0
         self.valid = False
         self.polls = {}
@@ -48,11 +51,21 @@ class Workflow:
         self.repeated_log_chars = self.response_chars = self.response_bytes = self.body = 0
 
     def call(self, tool, **arguments):
-        result = self.stack.mcp(tool, arguments)
-        # Measure one business JSON projection. The protocol text mirror is
-        # deliberately excluded. Never print or persist arguments/response data.
+        response = self.stack.rpc('tools/call', {'name': tool, 'arguments': arguments},
+                                  url=f'/mcp?view={self.view}')
+        result = response.json()['result']
         value = result['structuredContent']
+        for key in ('content', 'output'):
+            if value.get(key + '_in') == 'text':
+                _, body = result['content'][0]['text'].split('\n', 1)
+                value = {**value, key: body}
         measured = size(value)
+        wire_bytes = len(response.content)
+        self.wire_bytes += wire_bytes
+        step = arguments['action']
+        if step == 'file' and 'path' in arguments:
+            step = 'large_file'
+        self.steps[step] = {'business': measured, 'wire_bytes': wire_bytes}
         self.turns += 1
         self.response_chars += measured['chars']
         self.response_bytes += measured['bytes']
@@ -88,36 +101,42 @@ class Workflow:
             'polls_per_operation': sorted(self.polls.values()),
             'repeated_log_chars': self.repeated_log_chars,
             'response_chars': self.response_chars, 'response_bytes': self.response_bytes,
+            'wire_bytes': self.wire_bytes, 'steps': self.steps,
             'body_chars': self.body, 'non_body_chars': self.response_chars - self.body,
             'body_fraction': round(self.body / self.response_chars, 4),
         }
 
 
-def scenario(stack, *, context_id=''):
-    meter = Workflow(stack)
+def scenario(stack, view, *, context_id=''):
+    meter = Workflow(stack, view)
     project = 'ProjectAlpha'
     opened = meter.call('query', action='project', project=project,
                         args={'context_id': context_id} if context_id else {})
+    tree = meter.call('query', action='tree', project=project, args={'depth': 2})
+    assert 'src/' in tree['entries']
     found = meter.call('query', action='search', project=project, path='src', limit=4,
                        args={'query': 'def greeting', 'file_glob': 'src/*.py'})
-    assert len(found['matches']) == 1
+    assert ('src/main.py' in found['matches'] if view == 3 else len(found['matches']) == 1)
     read = meter.call('query', action='file', project=project,
-                      args={'items': [{'path': found['matches'][0]['path']}, {'path': 'README.md'}]})
+                      args={'items': [{'path': 'src/main.py'}, {'path': 'README.md'}]})
     assert len(read['files']) == 2
+    large = meter.call('query', action='file', project=project, path='large.py', limit=1000)
+    assert (large.get('next_offset') is None) == (view == 3)
     executed = meter.call('act', action='exec', project=project, args={'task': 'smoke'},
                           idempotency_key='benchmark-' + uuid4().hex, wait=30)
     row = executed.get('operations', [executed])[0]
     if row.get('pending'):
         polled = meter.call('query', action='job', view='wait', ids=[row['operation_id']])
         row = polled['operations'][0]
-    assert row['state'] == 'succeeded'
+    assert row['exit_code'] == 0
     assert row['output'] == 'PASS: local task completed\n'
     cursor = row['output_seq']
     incremental = meter.call('query', action='job', ids=[row['operation_id']], args={'after_output_seq': cursor})
     assert incremental['operations'][0]['output_unchanged']
     report = meter.report()
-    report.update(project_open=size(opened), exec_receipt=size(executed), incremental_job=size(incremental))
-    assert opened['context_unchanged'] is bool(context_id)
+    report.update(project_open=size(opened), exec_receipt=size(executed), incremental_job=size(incremental),
+                  large_file_lines=large['end_line'], large_file_total_lines=large['total_lines'])
+    assert opened.get('context_unchanged', False) is bool(context_id)
     return opened['context_id'], report
 
 
@@ -139,13 +158,15 @@ def main():
     work = Path.cwd() / '.work'
     work.mkdir(exist_ok=True)
     with TemporaryDirectory(prefix='mcp-workflow-', dir=work) as scratch, running_stack(Path(scratch)) as stack:
+        (stack.projectalpha / 'large.py').write_text(('print("fixture")  # ' + 'a' * 56 + '\n') * 500)
         catalog = directory_metrics(stack)
-        context_id, cold = scenario(stack)
-        _, warm = scenario(stack, context_id=context_id)
-        projects = stack.mcp('query', {'action': 'project', 'view': 'list'})['structuredContent']
-        print(json.dumps({'scope': 'loopback_fixture', 'measurement': 'compact_json_unicode_chars_and_utf8_bytes',
-                          'actual_usage': None, 'directory': catalog, 'cold': cold, 'warm': warm,
-                          'project_list': {'rows': len(projects['projects']), **size(projects)}},
+        comparison = {}
+        for view in (2, 3):
+            context_id, cold = scenario(stack, view)
+            _, warm = scenario(stack, view, context_id=context_id)
+            comparison[f'view_{view}'] = {'cold': cold, 'warm': warm}
+        print(json.dumps({'scope': 'loopback_fixture', 'measurement': 'JSON characters and HTTP body bytes',
+                          'actual_usage': None, 'directory': catalog, 'comparison': comparison},
                          ensure_ascii=False, indent=2))
 
 

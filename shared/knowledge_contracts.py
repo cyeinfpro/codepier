@@ -6,6 +6,7 @@ from pydantic import Field, model_validator
 from shared.coding_contracts import CodingArgs
 
 KNOWLEDGE_TOOLS = frozenset({'project_knowledge_build', 'project_knowledge_query'})
+HEALTHY_MAINTENANCE_STATES = frozenset({'watching', 'refreshing', 'submitting', 'building', 'initializing'})
 ProjectPath = Annotated[str, Field(min_length=1, max_length=1024)]
 
 

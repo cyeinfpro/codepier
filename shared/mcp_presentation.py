@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 import hashlib
+import json
+import posixpath
 import re
 
 
@@ -281,7 +283,7 @@ def _open(value, args):
         result['context'] = _context(value['context'], detail)
     if isinstance(value.get('knowledge'), dict):
         result['knowledge'] = _pick(value['knowledge'], {'state', 'revision', 'generated_at', 'entries_count',
-                                                        'scan_scope', 'skipped_files', 'maintenance', 'next'})
+                                                        'scan_scope', 'skipped_files', 'maintenance', 'maintenance_request', 'next'})
     if value.get('context_unchanged') and value.get('view_version') != VIEW_VERSION:
         # Old receipt contains no body from which to construct the new index.
         # Never pretend this was a fresh minimal-context observation.
@@ -568,6 +570,47 @@ def output_schema(name, schema):
     return visit(schema)
 
 
+def path_label(path):
+    if path.startswith(('"', ' ')) or any(ord(char) < 32 or char in '\x7f\u0085\u2028\u2029' for char in path):
+        return json.dumps(path, ensure_ascii=True)
+    return path
+
+
+def _tree_lines(entries, prefix, *, indent):
+    rows, parents = [], []
+    for entry in entries:
+        path = entry.get('path', '')
+        if prefix and path.startswith(prefix):
+            path = path[len(prefix):]
+        parent, _, leaf = path.rpartition('/')
+        while parents and parents[-1] != parent:
+            parents.pop()
+        label = ' ' * len(parents) + path_label(leaf) if indent and parents else path_label(path)
+        directory = entry.get('type') == 'directory'
+        rows.append(label + ('/' if directory else '\t' + str(entry.get('size', ''))))
+        if directory and indent:
+            parents.append(path)
+    return '\n'.join(rows)
+
+
+def _compact_search(result):
+    groups = {}
+    for match in result['matches']:
+        line = f"{match.get('line')}:{match.get('text', '').strip()}"
+        groups.setdefault(path_label(match.get('path', '')), []).append(
+            line + (' …' if match.get('line_truncated') else ''))
+    result['matches'] = '\n'.join(path + '\n' + '\n'.join(rows) for path, rows in groups.items())
+    result['matches_format'] = 'path_line_then_line_colon_text'
+    status = result.get('scan_status')
+    if status in {'matches', 'page_limited', 'no_matches', 'end_of_results', 'no_files'} and not result.get('scan_error'):
+        result.pop('limits', None)
+    if status in {'matches', 'page_limited', 'no_matches', 'end_of_results'} and not result.get('skipped_reasons'):
+        result.pop('hint', None)
+    for key in ('hint', 'scan_error', 'skipped_reasons', 'skipped_files'):
+        if not result.get(key):
+            result.pop(key, None)
+
+
 def token_view(name, arguments, value, *, view=2, verbosity='lean', output_mode='raw'):
     """Versioned presentation-only savings; never visit arbitrary user bodies."""
     result = deepcopy(value)
@@ -616,26 +659,20 @@ def token_view(name, arguments, value, *, view=2, verbosity='lean', output_mode=
                 diff(row)
     if name in {'workspace', 'project_query'} and arguments.get('operation') == 'tree':
         if arguments.get('options', {}).get('format') == 'compact' and isinstance(result.get('entries'), list):
-            rows = []
             base = arguments.get('path', arguments.get('options', {}).get('path', '.')) or '.'
-            import posixpath
             base = posixpath.normpath(base)
             prefix = '' if base == '.' else base.rstrip('/') + '/'
             result['base'] = base
-            for entry in result['entries']:
-                path = entry.get('path', '')
-                if prefix and path.startswith(prefix):
-                    path = path[len(prefix):]
-                # Quote only ambiguous filenames, preserving ordinary line compactness.
-                import json
-                if any(ord(char) < 32 for char in path) or path.startswith('\"'):
-                    path = json.dumps(path, ensure_ascii=False)
-                rows.append(path + ('/' if entry.get('type') == 'directory'
-                            else '\t' + str(entry.get('size', ''))))
-            result['entries'] = '\n'.join(rows)
-            result['entries_format'] = 'json_path_slash_or_tab_size'
-        if arguments.get('offset', arguments.get('options', {}).get('offset', 0)):
+            result['entries'] = _tree_lines(result['entries'], prefix, indent=view >= 3)
+            result['entries_format'] = ('indent_name_slash_or_tab_size' if view >= 3
+                                        else 'json_path_slash_or_tab_size')
+        if (arguments.get('offset', arguments.get('options', {}).get('offset', 0))
+                and (view < 3 or not result.get('scan_error'))):
             result.pop('exclusions', None)
+    if (view >= 3 and name in {'workspace', 'project_query'} and arguments.get('operation') == 'search'
+            and arguments.get('options', {}).get('format') != 'structured'
+            and isinstance(result.get('matches'), list) and not result.get('error')):
+        _compact_search(result)
     if output_mode == 'normalized':
         for row in output_records(result):
             original = row['output']

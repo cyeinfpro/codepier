@@ -64,11 +64,35 @@ call returns the same structured result as the legacy call.
 
 ## Compatibility
 
-* `?profile=core`, `full` or `coding` restore the previous catalogs exactly.
+* `?profile=core`, `full` or `coding` restore the legacy tool catalogs and response layouts.
 * Every legacy tool name (including the 90 legacy collaboration names) remains callable; it is simply not listed
   in the unified catalog.
 * Initialize instructions describe the unified tools when the profile is `unified`.
 * Connection evidence compares the served catalog with the router default, which is now `unified`.
+
+### Opt-in compact view
+
+Use `?view=3` on the unified connection to try the smaller tool responses. Successful inline reads have
+the same shape as direct reads. Project open returns compact document and directory lines and keeps the
+full context ID, baseline reference and Git commit. Project lists group aliases by shared defaults.
+Sync search groups matches by path. Pass `args.format="structured"` on tree, sync search or project
+list for object rows. Catalog help lists collaboration action names; action-specific help lists their views.
+
+Successful single-file reads and command runs default to `text=compact&mirror=meta` in view 3. The text block
+contains a one-line JSON header and the raw body. `structuredContent` contains the header and a
+`content_in` or `output_in` marker. Use `?view=3&text=json&mirror=full` for a full JSON mirror, or
+`?verbosity=full` for expanded receipts. Reads keep their SHA, preserve complete lines and report
+`next_offset` when a page is limited. Successful reads retain their original operation ID.
+
+Lean responses omit default fields such as `truncated: false` and `next_offset: null`. A successful
+command reports `exit_code: 0` and retains its operation ID and output sequence. Errors and pending
+or uncertain operations retain their recovery information. The default connection uses view 2 until
+the text-only body has been verified in both Claude and ChatGPT.
+
+Agents with tree options list Git-visible paths by default. `args.scope="all"` includes ignored files
+that pass filesystem protection rules. `args.per_dir` increases the default 40 entries per directory.
+The `omitted` map names directories with capped results. Narrow `path`, increase `per_dir` or use
+`next_offset` to inspect more. Older Agents return the previous filesystem listing.
 
 ### Native attachments and help pointers
 

@@ -118,14 +118,29 @@ def validate_context(runtime, args, data, principal, *, operation=None):
             raise DevError('PROJECT_CONTEXT_CHANGED', 'Legacy context belongs to a changed project mapping; request a fresh open.', 409)
     if 'context_id' in data:
         knowledge = dict(data.get('knowledge') or {'state': 'unknown'})
-        if knowledge.get('state') == 'ready':
+        if knowledge.get('state') in {'ready', 'missing'}:
             maintenance = runtime.knowledge_maintenance.status(project, args)
             knowledge['maintenance'] = {key: maintenance[key] for key in ('state', 'enabled')}
-            knowledge['next'] = 'project_knowledge_query'
-        elif knowledge.get('state') == 'missing' and project['mode'] == 'write':
-            from hub.roles import role_project_scopes
-            if 'write' in role_project_scopes(runtime.store, principal, project['id']):
-                knowledge['next'] = 'project_knowledge_build'
+            if knowledge['state'] == 'ready':
+                knowledge['next'] = 'project_knowledge_query'
+            from shared.knowledge_contracts import HEALTHY_MAINTENANCE_STATES
+            if maintenance['state'] not in HEALTHY_MAINTENANCE_STATES:
+                for key in ('last_error', 'last_success_at'):
+                    if maintenance.get(key):
+                        knowledge['maintenance'][key] = maintenance[key]
+                from hub.roles import role_project_scopes
+                from hub.room_scope import require_tool
+                if project['mode'] == 'write' and 'write' in principal.scopes and 'write' in role_project_scopes(
+                        runtime.store, principal, project['id']):
+                    try:
+                        require_tool(runtime.store, principal, 'project_knowledge_build', {
+                            'project': project['id'], 'workspace_id': args.get('workspace_id', '')})
+                    except DevError:
+                        pass
+                    else:
+                        knowledge['maintenance_request'] = 'project_knowledge_build'
+            if knowledge['state'] == 'missing' and knowledge.get('maintenance_request'):
+                knowledge['next'] = knowledge['maintenance_request']
         data['knowledge'] = knowledge
     return data
 

@@ -70,7 +70,7 @@ def test_http_catalog_and_hidden_route(api, modern):
     assert 'com.codepier/serviceVersion' in old['_meta']
 
 
-@pytest.mark.parametrize('query', ['?schemas=bad', '?profile=bad', '?view=3', '?verbosity=bad', '?text=bad', '?output=bad'])
+@pytest.mark.parametrize('query', ['?schemas=bad', '?profile=bad', '?view=4', '?verbosity=bad', '?text=bad', '?output=bad', '?mirror=bad', '?mirror=meta'])
 def test_invalid_modes_rejected(api, query):
     _, client, credential = api
     response = call(client, credential, 'tools/list', query=query)

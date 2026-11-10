@@ -151,3 +151,28 @@ def test_knowledge_discovery_help_and_read_token_guards(api, modern):  # noqa: F
             {'name': name, 'arguments': arguments}, modern=modern))
         assert result['isError']
         assert json.loads(result['content'][0]['text'])['error']['code'] == 'INSUFFICIENT_SCOPE'
+
+
+def test_modern_v3_read_body_survives_the_protocol_envelope(api, monkeypatch):  # noqa: F811
+    from hub.runtime import Runtime
+    from shared.core_contracts import READ_BATCH_PAYLOAD_BYTES
+
+    original = Runtime.invoke
+    content = ('文 = "' + 'a' * 66 + '"\n') * 550
+
+    async def read_fixture(self, name, args, principal):
+        if name == 'read':
+            return {'content': content, 'sha256': 'a' * 64, 'path': 'source.py',
+                    'operation_id': 'b' * 32, 'offset': 1, 'end_line': 550, 'total_lines': 550,
+                    'bytes': len(content.encode()), 'truncated': False}
+        return await original(self, name, args, principal)
+
+    monkeypatch.setattr(Runtime, 'invoke', read_fixture)
+    _, client, credential = api
+    response = call(client, credential, 'tools/call',
+        {'name': 'query', 'arguments': {'action': 'file', 'project': 'fixture', 'path': 'source.py'}},
+        query='?view=3', modern=True)
+    result = structured(response)
+    assert result['structuredContent']['content_in'] == 'text'
+    assert result['content'][0]['text'].split('\n', 1)[1] == content
+    assert len(response.content) <= READ_BATCH_PAYLOAD_BYTES

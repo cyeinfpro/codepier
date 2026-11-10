@@ -129,6 +129,9 @@ def _input_schema(tool, action, view, legacy, schema):
         required.add('idempotency_key')
     if action == 'tree':
         fields['format']['default'] = 'compact'
+    if (action, view) in {('search', 'sync'), ('project', 'list')}:
+        fields['format'] = {'enum': ['compact', 'structured'],
+                            'description': 'Unified view=3 presentation. Use structured for object rows.'}
     if action == 'help':
         fields = {key: fields[key] for key in ('project', 'workspace_id')}
         fields.update({key: {'type': 'string'} for key in ('action', 'tool', 'view', 'event')})

@@ -206,6 +206,7 @@ class Plan:
     project: str = ''
     workspace_id: str = ''
     after_output_seq: int | None = None
+    format: str = ''
 
 
 def _fields(tool):
@@ -313,6 +314,11 @@ def translate(tool, raw):
         if not isinstance(flat.get('idempotency_key'), str) or len(flat['idempotency_key']) < 8:
             raise DevError('INVALID_ARGUMENTS', 'baseline requires idempotency_key', 422)
         flat['capture_baseline'] = True
+    presentation_format = ''
+    if (call.action, view) in {('search', 'sync'), ('project', 'list')}:
+        presentation_format = flat.pop('format', '')
+        if presentation_format not in ('', 'compact', 'structured'):
+            raise DevError('INVALID_ARGUMENTS', 'format must be compact or structured', 422)
     args = legacy_call(legacy_tool, operation, flat)
     if call.wait is not None:
         wait = call.wait
@@ -321,7 +327,7 @@ def translate(tool, raw):
     return Plan(tool, call.action, view, legacy_tool, args, wait=wait,
                 collab=legacy_tool in COLLAB_TOOLS, handle=handle,
                 project=args.get('project', ''), workspace_id=args.get('workspace_id', ''),
-                after_output_seq=args.get('after_output_seq'))
+                after_output_seq=args.get('after_output_seq'), format=presentation_format)
 
 
 def resolve_help(target, view='', tool='', *, visible=None):
@@ -594,7 +600,7 @@ def _command_error(row, *, project, workspace_id, visible):
             row['search_help'] = hint
 
 
-def _present_exec(row, *, project, workspace_id, visible, lean):
+def _present_exec(row, *, project, workspace_id, visible, lean, view):
     data = _exec_data(row)
     _command_error(row, project=project, workspace_id=workspace_id, visible=visible)
     if row.get('pending'):
@@ -630,6 +636,15 @@ def _present_exec(row, *, project, workspace_id, visible, lean):
         runtime = result.get('runtime')
         if isinstance(runtime, dict) and runtime.get('runtime_ref'):
             result['runtime'] = {key: runtime[key] for key in ('runtime_ref', 'revision', 'mode') if key in runtime}
+        if view >= 3 and result['exit_code'] == 0 and not result.get('error') and not result.get('timed_out') and not result.get('cancelled'):
+            for key in ('state', 'command_ok', 'pending'):
+                result.pop(key, None)
+            if result.get('output_truncated') is False:
+                result.pop('output_truncated')
+            if result.get('target') == 'agent':
+                result.pop('target')
+            if isinstance(runtime, dict) and runtime.get('runtime_ref'):
+                result['runtime'] = _runtime_label(runtime)
     return result
 
 
@@ -660,7 +675,137 @@ def _project_list(value):
         value['connection_observation'] = common
 
 
-def present_unified(value, *, verbosity='lean', plan=None, visible=None, convert=None):
+def _runtime_label(runtime):
+    return f"{runtime.get('mode', '')}@{runtime['runtime_ref'][:12]}"
+
+
+def _lean_open(value):
+    from shared.mcp_presentation import path_label
+    keys = ('operation_id', 'context_id', 'baseline_ref', 'baseline_expires_at',
+            'context_refresh_required', 'compatibility', 'error')
+    out = {key: value[key] for key in keys if key in value}
+    if value.get('context_unchanged'):
+        out['context_unchanged'] = True
+    workspace = value.get('workspace') or {}
+    out['workspace'] = {key: workspace[key] for key in ('project', 'mode', 'granted_scopes') if key in workspace}
+    if not workspace.get('allow_tasks', True):
+        out['workspace']['allow_tasks'] = False
+    runtime = value.get('runtime') or {}
+    if runtime.get('runtime_ref'):
+        out['runtime'] = _runtime_label(runtime)
+        if runtime.get('isolation') not in (None, 'none'):
+            out['runtime_isolation'] = runtime['isolation']
+    git = value.get('git')
+    if isinstance(git, dict):
+        out['git'] = {key: item for key, item in git.items()
+                      if not (key in {'ahead', 'behind', 'dirty'} and item == 0)
+                      and not (key == 'available' and item is True)}
+        # A Git ref can be used as a worktree base. Keep the full commit SHA.
+    knowledge = value.get('knowledge')
+    if isinstance(knowledge, dict):
+        summary = {key: knowledge[key] for key in ('state', 'entries_count', 'scan_scope') if key in knowledge}
+        maintenance = knowledge.get('maintenance') or {}
+        from shared.knowledge_contracts import HEALTHY_MAINTENANCE_STATES
+        if maintenance and maintenance.get('state') not in HEALTHY_MAINTENANCE_STATES:
+            summary['maintenance'] = {key: int(item) if key == 'last_success_at' and isinstance(item, float) else item
+                                      for key, item in maintenance.items()}
+        for key in ('maintenance_request', 'next'):
+            if knowledge.get(key) and (key != 'next' or knowledge.get('state') != 'ready'):
+                summary[key] = knowledge[key]
+        out['knowledge'] = summary
+    context = value.get('context')
+    if isinstance(context, dict):
+        ctx = {key: context[key] for key in ('skills', 'codex_skills', 'warnings') if context.get(key)}
+        if context.get('documents'):
+            ctx['documents'] = '\n'.join(f"{path_label(row['path'])}\t{row.get('bytes', '')}"
+                                         for row in context['documents'])
+        if context.get('remaining_documents_count'):
+            ctx['more_documents'] = (str(context['remaining_documents_count'])
+                                     + ('+' if context.get('remaining_documents_truncated') else ''))
+        rules = context.get('instruction_index') or []
+        if present := [row for row in rules if row.get('state') != 'absent']:
+            ctx['rules'] = present
+        if absent := [row['path'] for row in rules if row.get('state') == 'absent']:
+            ctx['rules_absent'] = absent
+        if context.get('root_entries'):
+            ctx['root'] = '\n'.join(path_label(row['path']) + ('/' if row.get('type') == 'directory' else '')
+                                    for row in context['root_entries'])
+            if context.get('truncated'):
+                ctx['root_truncated'] = True
+        out['context'] = ctx
+    coverage = value.get('baseline_coverage')
+    if isinstance(coverage, dict):
+        out['baseline_coverage'] = {key: item for key, item in coverage.items()
+            if not (coverage.get('complete') and not coverage.get('truncated')
+                    and key in {'exclusions', 'max_files', 'max_bytes', 'skipped', 'truncated'})}
+    return out
+
+
+def _compact_projects(value):
+    from collections import Counter
+    rows = value['projects']
+    keys = ('mode', 'allow_tasks', 'online')
+    aliases = Counter(row['alias'] for row in rows)
+    defaults = {key: Counter(row.get(key) for row in rows).most_common(1)[0][0]
+                for key in keys} if rows else {}
+    out = {'defaults': defaults, 'projects': [], 'total': value.get('total', len(rows))}
+    exceptions = {}
+    for row in rows:
+        alias = row['alias']
+        if aliases[alias] > 1:
+            exceptions.setdefault(alias, []).append({key: item for key, item in row.items() if key != 'alias'})
+            continue
+        detail = {key: item for key, item in row.items() if key not in {'alias', 'id', 'project_id'}
+                  and (key not in defaults or defaults[key] != item)}
+        if detail:
+            exceptions[alias] = detail
+        else:
+            out['projects'].append(alias)
+    if exceptions:
+        out['exceptions'] = exceptions
+    for key in ('connection_observation', 'next_offset', 'operation_id'):
+        if value.get(key) is not None:
+            out[key] = value[key]
+    observation = out.get('connection_observation', {})
+    if isinstance(observation.get('observed_at'), float):
+        observation['observed_at'] = int(observation['observed_at'])
+    return out
+
+
+def unwrap_waited(value, plan):
+    """Return the same business result as direct delivery for proven read success."""
+    if plan.action not in {'file', 'tree', 'search', 'symbols', 'history', 'changes'}:
+        return value
+    if plan.action == 'search' and plan.view == 'cancel':
+        return value
+    rows = value.get('operations')
+    if not isinstance(rows, list) or len(rows) != 1:
+        return value
+    row = rows[0]
+    if not isinstance(row, dict):
+        return value
+    nested = row.get('result')
+    data = nested.get('data') if isinstance(nested, dict) else None
+    if (row.get('pending') or row.get('error') or row.get('output') or row.get('state') != 'succeeded'
+            or not isinstance(data, dict) or nested.get('ok') is not True):
+        return value
+    return {**data, 'operation_id': row.get('operation_id') or row.get('id')}
+
+
+def _compact_catalog(value):
+    collab = {}
+    for tool, actions in value['tools'].items():
+        names = [action for action in actions if action.startswith('collab.')]
+        if names:
+            collab[tool] = names
+            value['tools'][tool] = {action: views for action, views in actions.items() if action not in names}
+    if collab:
+        value['collab'] = collab
+        value['note'] += " Collaboration views: query help with args.action='collab.<name>'."
+    return value
+
+
+def present_unified(value, *, verbosity='lean', plan=None, visible=None, convert=None, view=2):
     """Presentation-only projection for unified callers."""
     result = copy.deepcopy(value)
     lean = verbosity != 'full'
@@ -669,7 +814,7 @@ def present_unified(value, *, verbosity='lean', plan=None, visible=None, convert
         rows = result.get('operations')
         if isinstance(rows, list) and len(rows) == 1:
             result = rows[0]
-        result = _present_exec(result, project=project, workspace_id=workspace_id, visible=visible, lean=lean)
+        result = _present_exec(result, project=project, workspace_id=workspace_id, visible=visible, lean=lean, view=view)
     elif plan and plan.action == 'job':
         for row in result.get('operations', []):
             _command_error(row, project=project, workspace_id=workspace_id, visible=visible)
@@ -685,6 +830,25 @@ def present_unified(value, *, verbosity='lean', plan=None, visible=None, convert
             if result.get('context_unchanged') and result.get('context') is None:
                 result.pop('capability_index', None)
     _rewrite_hints(result, visible=visible, project=project, workspace_id=workspace_id, convert=convert)
+    if lean and view >= 3 and plan and not result.get('pending') and not result.get('error'):
+        action = (plan.action, plan.view)
+        if (action in {('project', 'open'), ('baseline', 'open')} and 'context_id' in result
+                and result.get('context_detail', 'minimal') == 'minimal'):
+            return _lean_open(result)
+        if action == ('project', 'list') and isinstance(result.get('projects'), list):
+            if plan.format != 'structured':
+                return _compact_projects(result)
+        if plan.action == 'help' and isinstance(result.get('tools'), dict):
+            return _compact_catalog(result)
+        if plan.action in {'file', 'tree', 'search', 'project', 'skills', 'knowledge'}:
+            for key, default in (('truncated', False), ('next_offset', None), ('scan_error', None),
+                                 ('warnings', []), ('skills', []), ('hint', None)):
+                if key in result and result[key] == default:
+                    result.pop(key)
+            for key in ('view_version', 'mcp_view_version'):
+                result.pop(key, None)
+            if plan.action == 'knowledge' and isinstance(result.get('generated_at'), float):
+                result['generated_at'] = int(result['generated_at'])
     return result
 
 
@@ -748,11 +912,27 @@ _PROPERTIES = {
 }
 
 
+def _slim_schema(node):
+    if isinstance(node, list):
+        return [_slim_schema(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+    alternatives = node.get('anyOf', [])
+    real = [item for item in alternatives if item != {'type': 'null'}]
+    if len(real) == 1 and len(alternatives) > 1:
+        node = {**{key: item for key, item in node.items() if key != 'anyOf'}, **real[0]}
+    return {key: ({name: _slim_schema(schema) for name, schema in item.items()}
+                  if key in {'properties', '$defs'} else _slim_schema(item))
+            for key, item in node.items() if key not in {'title', 'default', 'maxLength'}}
+
+
 def input_schema(tool, actions):
-    names = ('action', 'view', *TOP_LEVEL[tool], 'wait', 'args')
+    names = ('view', *TOP_LEVEL[tool], 'wait', 'args')
     properties = {'action': {'type': 'string', 'enum': list(actions)}}
-    properties.update({name: copy.deepcopy(_PROPERTIES[name]) for name in names if name != 'action'})
-    return {'type': 'object', 'properties': properties, 'required': ['action'], 'additionalProperties': False}
+    properties.update({name: _PROPERTIES[name] for name in names
+                       if name != 'file' or {'source_check', 'import'} & set(actions)})
+    return _slim_schema({'type': 'object', 'properties': properties,
+                         'required': ['action'], 'additionalProperties': False})
 
 
 def server_instructions(visible):

@@ -287,38 +287,75 @@ def _batch_reads(public):
             for batch in _batch_reads(item)]
 
 
-def bound_batch_response(payload, *, output_budget=False):
-    """Bound the final JSON-RPC bytes, including both copies and all metadata.
+def _render_text(rendered, public, *, text_mode, body_key, mirror):
+    from shared.mcp_presentation import compact_output_text
 
-    Called once more by the MCP boundary after modern protocol and App metadata.
-    Only the presentation copy changes; the original authorized operation/result
-    remains available. Never split a UTF-8 character or a file line.
-    """
+    rendered['structuredContent'] = public
+    if body_key:
+        header = {key: value for key, value in public.items() if key != body_key}
+        text = json.dumps(header, ensure_ascii=False, separators=(',', ':')) + '\n' + public[body_key]
+        if mirror == 'meta':
+            rendered['structuredContent'] = {**header, body_key + '_in': 'text'}
+    else:
+        value = compact_output_text(public) if text_mode == 'compact' else public
+        text = json.dumps(value, ensure_ascii=False, separators=(',', ':'))
+    rendered['content'][0]['text'] = text
+
+
+def _fit_prefix(count, measure, budget):
+    low, high = 0, count
+    while low < high:
+        middle = (low + high + 1) // 2
+        if measure(middle) <= budget:
+            low = middle
+        else:
+            high = middle - 1
+    return low
+
+
+def bound_batch_response(payload, *, output_budget=False, text_mode='json', body_key=None, mirror='full'):
+    """Bound final JSON-RPC bytes without changing the authorized stored result."""
     from shared.core_contracts import READ_BATCH_PAYLOAD_BYTES
-    rendered = payload.get('result', {})
     from shared.mcp_presentation import output_records
+
+    rendered = payload.get('result', {})
     public = rendered.get('structuredContent')
-    # Task-creation envelopes and protocol errors are not tool content. Metadata
-    # without a supported continuation cannot safely be replaced with an error.
-    if not isinstance(public, dict):
+    if not isinstance(public, dict) or any(block.get('type') != 'text' for block in rendered.get('content', [])):
         return payload
+
+    # The HTTP boundary runs after protocol metadata is attached. Recover the
+    # raw body from the first rendering so the final cap measures the same shape.
+    if text_mode == 'compact' and rendered.get('content') and not rendered.get('isError'):
+        first, separator, body = rendered['content'][0]['text'].partition('\n')
+        if separator:
+            for key in ('content', 'output'):
+                if public.get(key + '_in') == 'text':
+                    public = {name: value for name, value in public.items() if name != key + '_in'}
+                    public[key], body_key, mirror = body, key, 'meta'
+                    break
+                if isinstance(public.get(key), str) and public[key] == body and first.startswith('{'):
+                    body_key = key
+                    break
     if not _batch_reads(public) and not (output_budget and output_records(public)):
         return payload
-    # Native media has its own documented budget and lifetime checks. Never
-    # discard screenshots because their base64 bytes exceed the text budget.
-    if any(block.get('type') != 'text' for block in rendered.get('content', [])):
-        return payload
+
     payload = copy.deepcopy(payload)
     rendered = payload['result']
-    public = rendered['structuredContent']
+    public = copy.deepcopy(public)
     batches = _batch_reads(public)
+    budget = READ_BATCH_PAYLOAD_BYTES
 
     def size():
-        # Match Starlette JSONResponse, including JSON-in-JSON string escaping.
         return len(json.dumps(payload, ensure_ascii=False, allow_nan=False,
                               separators=(',', ':')).encode('utf-8'))
 
-    while size() > READ_BATCH_PAYLOAD_BYTES:
+    def render():
+        _render_text(rendered, public, text_mode=text_mode, body_key=body_key, mirror=mirror)
+        return size()
+
+    if size() <= budget:
+        return payload
+    while size() > budget:
         candidates = [(batch, item) for batch in batches for item in batch['files']
                       if item.get('ok', True) is True and item.get('content')]
         outputs = [row for row in output_records(public) if row.get('output')] if output_budget else []
@@ -333,25 +370,26 @@ def bound_batch_response(payload, *, output_budget=False):
                              original[-(keep - head):]) if keep > 100 else ''
             row['output_truncated'] = row['output_budget_limited'] = True
             row['output_recovery'] = 'Query the same operation_id using connection URL ?verbosity=full&output=raw and a larger output_limit; do not rerun the command. output_seq is not a byte cursor.'
-            rendered['content'][0]['text'] = json.dumps(public, ensure_ascii=False, separators=(',', ':'))
+            render()
             continue
         if not candidates:
-            if output_budget:
-                # Keep required control/authorization metadata intact even when
-                # its irreducible size is larger than the text content budget.
-                return payload
+            if output_budget and not batches:
+                return payload  # Required control/authorization metadata is irreducible.
             raise DevError('READ_BATCH_RESPONSE_TOO_LARGE',
                            '读取响应元数据超过配置预算；请减少操作数或单独读取文件')
         batch, item = max(candidates, key=lambda pair: len(pair[1]['content'].encode('utf-8')))
         lines = item['content'].splitlines(keepends=True)
-        # Halving the largest page converges quickly even for escape-heavy text.
-        kept = lines[:len(lines) // 2]
-        item.update(content=''.join(kept), end_line=item['offset'] - 1 + len(kept),
-                    next_offset=item['offset'] + len(kept), truncated=True,
-                    budget_limited=True)
-        batch.update(truncated=True, budget_limited=True,
-                     payload_limit_bytes=READ_BATCH_PAYLOAD_BYTES)
-        rendered['content'][0]['text'] = json.dumps(public, ensure_ascii=False, separators=(',', ':'))
+        batch.update(truncated=True, budget_limited=True, payload_limit_bytes=budget)
+
+        def measure(count):
+            item.update(content=''.join(lines[:count]), end_line=item['offset'] - 1 + count,
+                        next_offset=item['offset'] + count, truncated=True, budget_limited=True)
+            return render()
+
+        fit = _fit_prefix(len(lines) - 1, measure, budget)
+        # Share pressure across several pages before sacrificing a single
+        # file's usable prefix. Each pass strictly reduces one candidate.
+        measure(max(fit, len(lines) // 2) if len(candidates) > 1 else fit)
     return payload
 
 
@@ -393,13 +431,20 @@ def _result(name, arguments, value, *, scopes=None):
 
 
 def result(name, arguments, value, *, scopes=None, view=2, verbosity='lean', text_mode='json', output_mode='raw',
-           unified=False, unified_views=None):
-    from shared.mcp_presentation import token_view, compact_output_text
+           unified=False, unified_views=None, mirror='full'):
+    from shared.mcp_presentation import token_view
+    if view >= 3 and verbosity != 'full' and unified and unified is not True and name == 'process':
+        from shared.unified_contracts import unwrap_waited
+        unwrapped = unwrap_waited(value, unified)
+        if unwrapped is not value and not failed(unwrapped):
+            name, arguments, value = unified.tool, unified.args, unwrapped
     rendered = _result(name, arguments, value, scopes=scopes)
     presentation_args = arguments
     if getattr(unified, 'action', '') == 'tree':
         options = {'format': 'compact', **unified.args.get('options', {})}
         presentation_args = {**unified.args, 'options': options}
+    elif view >= 3 and getattr(unified, 'action', '') == 'search':
+        presentation_args = {**arguments, 'options': {**arguments.get('options', {}), 'format': unified.format}}
     public = token_view(name, presentation_args, rendered['structuredContent'], view=view,
                         verbosity=verbosity, output_mode=output_mode)
     if getattr(unified, 'action', '') == 'tree' and name == 'process':
@@ -414,17 +459,15 @@ def result(name, arguments, value, *, scopes=None, view=2, verbosity='lean', tex
         from hub.unified_tools import convert_hint
         public = present_unified(public, verbosity=verbosity,
                                  plan=None if unified is True else unified,
-                                 visible=unified_views, convert=convert_hint)
-    rendered['structuredContent'] = public
-    text_public = compact_output_text(public) if text_mode == 'compact' else public
-    text = json.dumps(text_public, ensure_ascii=False, separators=(',', ':'))
+                                 visible=unified_views, convert=convert_hint, view=view)
+    body_key = None
     if text_mode == 'compact' and not rendered.get('isError') and not public.get('pending'):
-        if name == 'read' and isinstance(public.get('content'), str) and 'sha256' in public:
-            header = {key: item for key, item in public.items() if key != 'content'}
-            text = json.dumps(header, ensure_ascii=False, separators=(',', ':')) + '\n' + public['content']
-        elif (name == 'exec' or getattr(unified, 'action', '') == 'exec') and 'exit_code' in public and isinstance(public.get('output'), str):
-            header = {key: item for key, item in public.items() if key != 'output'}
-            text = json.dumps(header, ensure_ascii=False, separators=(',', ':')) + '\n' + public['output']
-    rendered['content'][0]['text'] = text
+        action = getattr(unified, 'action', '')
+        if (name == 'read' or action == 'file') and isinstance(public.get('content'), str) and 'sha256' in public:
+            body_key = 'content'
+        elif (name == 'exec' or action == 'exec') and public.get('exit_code') == 0 and isinstance(public.get('output'), str):
+            body_key = 'output'
+    _render_text(rendered, public, text_mode=text_mode, body_key=body_key, mirror=mirror)
     return bound_batch_response({'jsonrpc': '2.0', 'id': None, 'result': rendered},
-                                output_budget=view == 2 and verbosity != 'full')['result']
+                                output_budget=view >= 2 and verbosity != 'full',
+                                text_mode=text_mode, body_key=body_key, mirror=mirror)['result']

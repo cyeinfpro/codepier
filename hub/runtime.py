@@ -1118,6 +1118,8 @@ class Runtime:
                 self.store.audit(principal.actor, name, project.get("alias", ""), "queued", {"operation_id": id, "args": operation_summary(args)})
                 self.diagnostics.record(id, "hub_received")
                 self.knowledge_maintenance.admitted(name, args, project, principal, id, maintenance)
+                if maintenance is None:
+                    self.knowledge_maintenance.enroll_on_write(name, args, project, principal)
                 self.publish("operation", {"id": id, "state": "queued", "tool": name})
         return id, None
 
@@ -1554,6 +1556,9 @@ class Runtime:
                         request = {**request, 'args': dict(request['args'])}
                         for field in ('isolation', 'snapshot_artifacts', 'options'):
                             request['args'].pop(field, None)
+                    if op['tool'] == 'fs_tree' and getattr(con, 'tree_options_protocol', 0) != 1:
+                        request = {**request, 'args': {key: value for key, value in request['args'].items()
+                                                       if key not in {'scope', 'per_dir'}}}
                     self.store.execute("UPDATE operations SET attempts=attempts+1,journal_id=COALESCE(journal_id,?),updated=? WHERE id=?", (con.journal_id, now, id))
                     packets.append({"type": "call", "id": id, **request, "not_after": op["deadline"], "tool_contract_version": request.get("tool_contract_version", 1)})
         return op["device_id"], con, packets
@@ -1648,6 +1653,8 @@ class Runtime:
             self.diagnostics.connection.write_errors += 1
         # Notify after commit, even if auxiliary auditing subsequently fails.
         self.notify_operation(op["id"])
+        self.store.after_commit(lambda: self.knowledge_maintenance.nudge(
+            op.get("project_id"), op["device_id"], op["tool"]))
         self.store.audit(op["actor"], op["tool"], op["id"], state,
             {"operation_id": op["id"], "duration_ms": round((time.time() - op["created"]) * 1000),
              "error": error.get("message"), "path": data.get("path"), "backup_id": data.get("backup_id"), "exit_code": data.get("exit_code")}, target_kind="operation")
@@ -1829,6 +1836,7 @@ class Runtime:
             if hello.get("type") != "hello":
                 raise ValueError("Invalid hello")
             connection.tool_protocol = negotiate(hello)
+            connection.tree_options_protocol = hello.get('tree_options_protocol') if type(hello.get('tree_options_protocol')) is int else 0
             connection.resource_semantics_protocol = 2 if type(hello.get('resource_semantics_protocol')) is int and hello['resource_semantics_protocol'] == 2 else 0
             from hub.project_runtimes import parse_advertisement
             connection.project_runtime_protocol, connection.project_runtime_profiles = parse_advertisement(hello)

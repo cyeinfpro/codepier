@@ -131,10 +131,18 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
         if schemas not in {'full','lean','none'}:return failure(identifier,-32602,'Unknown schemas mode; choose full, lean or none',400)
         view=request.query_params.get('view','2')
         verbosity=request.query_params.get('verbosity','lean')
-        text_mode=request.query_params.get('text','json')
+        lean_v3=profile == 'unified' and view == '3' and verbosity == 'lean'
+        text_mode=request.query_params.get('text','compact' if lean_v3 else 'json')
+        mirror=request.query_params.get('mirror','meta' if lean_v3 and text_mode == 'compact' else 'full')
         output_mode=request.query_params.get('output','raw')
-        if view not in {'1','2'} or verbosity not in {'lean','full'} or text_mode not in {'json','compact'} or output_mode not in {'raw','normalized'}:
-            return failure(identifier,-32602,'Invalid presentation options: view=1|2, verbosity=lean|full, text=json|compact, output=raw|normalized',400)
+        if view not in {'1','2','3'} or verbosity not in {'lean','full'} or text_mode not in {'json','compact'} or output_mode not in {'raw','normalized'}:
+            return failure(identifier,-32602,'Invalid presentation options: view=1|2|3, verbosity=lean|full, text=json|compact, output=raw|normalized',400)
+        if mirror not in {'full','meta'} or mirror == 'meta' and (profile != 'unified' or text_mode != 'compact'):
+            return failure(identifier,-32602,'mirror must be full or meta; meta requires unified text=compact',400)
+        if verbosity == 'full':
+            mirror = 'full'
+        if profile != 'unified' and view == '3':
+            view = '2'
         instructions=CORE_WORKFLOW_INSTRUCTIONS if view == '1' else CORE_INSTRUCTIONS
         if 'id' not in body:return Response(status_code=202)
         try:
@@ -226,14 +234,14 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
                             if plan is not None:
                                 from shared.unified_contracts import present_unified
                                 value=present_unified(value, verbosity=verbosity, plan=plan,
-                                                      visible=unified_views, convert=unified_tools.convert_hint)
+                                                      visible=unified_views, convert=unified_tools.convert_hint, view=int(view))
                             result={'content':[{'type':'text','text':json.dumps(value,ensure_ascii=False,separators=(',',':'))}, *media],
                                     'structuredContent':value,'isError':bool(value.get('error'))}
                         else:
                             result = await runtime.store.run(mcp_apps.attach,
                                 core_result(name, arguments, value, scopes=principal.scopes, view=int(view),
                                             verbosity=verbosity, text_mode=text_mode, output_mode=output_mode,
-                                            unified=plan, unified_views=unified_views),
+                                            unified=plan, unified_views=unified_views, mirror=mirror),
                                 name, arguments, value, request_public_url)
                         try:
                             await runtime.store.run(runtime.diagnostics.connection.returned, principal, name, arguments, value)
@@ -330,7 +338,8 @@ def make_router(auth:Auth,runtime:Runtime,public_url):
             from hub.core_tools import bound_batch_response
             response_body={'jsonrpc':'2.0','id':identifier,'result':result}
             if method == 'tools/call' and route and route.backend != 'remote':
-                response_body=bound_batch_response(response_body, output_budget=(view == '2' and verbosity != 'full'))
+                response_body=bound_batch_response(response_body, output_budget=(view != '1' and verbosity != 'full'),
+                                                   text_mode=text_mode, mirror=mirror)
             return JSONResponse(response_body,
                 headers={'Cache-Control':'no-store','Access-Control-Allow-Origin':origin or '*','Vary':'Authorization, MCP-Protocol-Version'})
         except ProtocolError as exc:return failure(identifier,exc.code,exc.message,400,exc.data)

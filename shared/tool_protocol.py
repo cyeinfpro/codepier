@@ -59,7 +59,7 @@ def advertisement(catalog_sha256):
     from shared.agent_lifecycle import DEVICE_ACTIONS
     names = {name for name, tool in TOOLS.items() if not tool.local} | DEVICE_ACTIONS | {'system_validate'}
     return {'version': VERSION, 'contract_protocol': CONTRACT_PROTOCOL,
-            'project_view_protocol': 1,
+            'project_view_protocol': 1, 'tree_options_protocol': 1,
             'catalog_sha256': catalog_sha256,
             'tool_contracts': {name: wire_version(name) for name in sorted(names)}}
 

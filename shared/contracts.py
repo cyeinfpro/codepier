@@ -48,6 +48,9 @@ class RemoteProject(Project):
 class Tree(RemoteProject):
     format: Literal["structured", "compact"] = Field(default="structured",
         description="MCP presentation only; compact uses relative path lines. Agent results and pagination remain structured.")
+    scope: Literal["git", "all"] = Field(default="git",
+        description="List tracked and non-ignored files in Git projects, or all allowed filesystem entries.")
+    per_dir: int = Field(default=40, ge=1, le=2000, description="Maximum shown siblings in each directory.")
     path: str = Field(default=".", max_length=1024)
     depth: int = Field(default=2, ge=1, le=8)
     offset: int = Field(default=0, ge=0, le=100000)

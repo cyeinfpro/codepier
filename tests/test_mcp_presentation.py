@@ -274,3 +274,70 @@ def test_artifact_receipt_keeps_authenticated_download_metadata_and_hides_host_p
                'snapshot_path': ROOT}
     assert present(name, args, pending) == {key: pending[key]
         for key in ('operation_id', 'state', 'pending')}
+
+
+def test_unified_v3_keeps_one_large_body_and_lists_git_visible_paths(stack):
+    from shared.core_contracts import READ_BATCH_PAYLOAD_BYTES
+
+    project = stack.projectalpha
+    source = 'print("字" * 2)  # ' + 'a' * 53 + '\n'
+    large = source * 550
+    (project / 'large.py').write_text(large)
+    (project / '.gitignore').write_text('dist/\n')
+    (project / 'dist').mkdir()
+    (project / 'dist' / 'asset.js').write_text('generated')
+    (project / '.DS_Store').touch()
+
+    def query(action, *, url='?view=3', **arguments):
+        response = stack.rpc('tools/call', {'name': 'query',
+            'arguments': {'action': action, 'project': 'ProjectAlpha', **arguments}}, url='/mcp' + url)
+        result = response.json()['result']
+        assert not result['isError'], result
+        return response, result
+
+    http, result = query('file', path='large.py', limit=1000)
+    metadata, body = result['content'][0]['text'].split('\n', 1)
+    assert body == large
+    assert len(http.content) <= READ_BATCH_PAYLOAD_BYTES
+    assert result['structuredContent']['content_in'] == 'text'
+    assert 'content' not in result['structuredContent']
+    assert json.loads(metadata)['sha256'] == result['structuredContent']['sha256']
+
+    _, full = query('file', path='large.py', limit=1000, url='?view=3&text=json&mirror=full')
+    first = full['structuredContent']
+    assert first['content'] == source * first['end_line']
+    assert first['budget_limited'] and first['next_offset'] == first['end_line'] + 1
+    assert first['end_line'] > 290
+    assert first['sha256'] == result['structuredContent']['sha256']
+
+    _, tree = query('tree', args={'depth': 2})
+    compact = tree['structuredContent']
+    assert compact['scan_scope'] == 'git_index'
+    assert 'src/\n main.py\t' in compact['entries']
+    assert 'dist/' not in compact['entries'] and '.DS_Store' not in compact['entries']
+    _, everything = query('tree', args={'scope': 'all', 'per_dir': 100})
+    assert 'dist/\n asset.js\t' in everything['structuredContent']['entries']
+    _, limited = query('tree', args={'per_dir': 1})
+    assert limited['structuredContent']['omitted']['.'] > 0
+    _, page = query('tree', limit=1, offset=1)
+    assert not page['structuredContent']['entries'].startswith(' ')
+    _, search = query('search', args={'query': 'def greeting'})
+    assert search['structuredContent']['matches'].startswith('src/main.py\n3:def greeting')
+    _, structured = query('search', args={'query': 'def greeting', 'format': 'structured'})
+    assert structured['structuredContent']['matches'][0]['path'] == 'src/main.py'
+
+
+def test_v3_inline_wait_unwraps_only_confirmed_read_results():
+    from hub.core_tools import result
+    from shared.unified_contracts import translate
+
+    plan = translate('query', {'action': 'file', 'project': 'Fixture', 'path': 'source.py'})
+    data = {'content': 'answer = 42\n', 'offset': 1, 'end_line': 1, 'total_lines': 1,
+            'sha256': 'a' * 64, 'path': 'source.py'}
+    row = {'id': 'b' * 32, 'tool': 'read', 'state': 'succeeded', 'result': {'ok': True, 'data': data}}
+    direct = result(plan.tool, plan.args, {**data, 'operation_id': row['id']}, unified=plan, view=3)
+    waited = result('process', {'operation': 'wait'}, {'operations': [row]}, unified=plan, view=3)
+    assert direct == waited
+    uncertain = result('process', {'operation': 'wait'}, {'operations': [{**row, 'state': 'needs_review'}]},
+                       unified=plan, view=3)
+    assert uncertain['structuredContent']['operations'][0]['state'] == 'needs_review'
