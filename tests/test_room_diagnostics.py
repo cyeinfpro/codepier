@@ -98,6 +98,69 @@ async def test_diagnostics_never_exposes_another_room_to_a_member_connection(col
         s.rooms.diagnostics({'conversation_id': identity['conversation_id']}, actor)
 
 
+@pytest.mark.asyncio
+async def test_wake_evidence_follows_original_ticket_and_preserves_coalescing(collab):
+    s, owner, worker, clock, identity, credentials = await connected(collab)
+    args = {name: identity[name] for name in ('conversation_id', 'member_id')}
+
+    def send(text):
+        return s.room_runtime.send({'conversation_id': identity['conversation_id'], 'body_text': text,
+            'client_message_id': key(), 'idempotency_key': key()}, owner)['message']
+
+    source = send('原始问题')
+    inbox = s.room_consumers.inbox(identity, worker)
+    item = next(row for row in inbox['items'] if row['kind'] == 'message')
+    request = {**identity, **credentials, 'source_message_id': source['id'], 'source_version': item['source_version'],
+        'source_digest': item['source_digest'], 'expected_inbox_revision': inbox['inbox_revision'],
+        'body_text': '原回复', 'complete': True, 'idempotency_key': key()}
+    reply = s.room_runtime.reply(request, worker)['message']
+    assert s.room_runtime.reply(request, worker)['message']['id'] == reply['id']
+    origin = next(row for row in s.rooms.diagnostics({'conversation_id': args['conversation_id']}, owner)['traces']
+                  if row['kind'] == 'reply' and row['message_id'] == reply['id'])
+    assert origin['consumer_session_id'] == credentials['consumer_session_id']
+
+    send('尚未领取的第二条')
+    send('尚未领取的第三条')
+    await s.events.tick()
+    page = s.rooms.diagnostics(args, owner)
+    assert page['read_only'] and page['counts_are_global_totals'] is False
+    original = next(row for row in page['items'] if row['state'] == 'redeemed')
+    assert original['consumer_session_id'] == credentials['consumer_session_id']
+    assert original['created_reply_count'] == 1
+    waiting = next(row for row in page['items'] if row['state'] == 'accepted_waiting_claim')
+    merged = next(row for row in page['items'] if row['state'] == 'coalesced_before_send')
+    assert merged['retained_notification_delivery_id'] == waiting['notification_delivery_id']
+    assert not waiting['consumer_session_id']
+    s.store.execute('UPDATE dot_wake_tickets SET expires_at=? WHERE delivery_key=?',
+                    (clock[0] - 1, waiting['event_id']))
+    s.store.execute('UPDATE mcp_event_deliveries SET accepted_at=? WHERE id=?',
+                    (clock[0] + 1, original['notification_delivery_id']))
+    by_event = {row['event_id']: row for row in s.rooms.diagnostics(args, owner)['items']}
+    assert by_event[waiting['event_id']]['state'] == 'accepted_without_observed_claim'
+    assert by_event[original['event_id']]['claim_preceded_recorded_acceptance']
+    assert by_event[original['event_id']]['created_reply_count'] == 1
+    other = s.rooms.create({'title': '其他房间', 'idempotency_key': key()}, owner)['room']
+    with pytest.raises(DevError):
+        s.rooms.diagnostics({**args, 'conversation_id': other['id']}, owner)
+
+
+def test_delivery_display_preserves_distinct_owner_and_provider_evidence():
+    for state, display_state, title in (
+        ('accepted', 'accepted', '接口已受理'),
+        ('owner_confirmed', 'owner_confirmed', '由本人核对收到'),
+    ):
+        result = delivery_display('completed', [{'channel': 'weixin', 'state': 'accepted',
+                                                 'parts': [{'state': state}]}])
+        assert result['state'] == display_state and title in result['title']
+    mixed = delivery_display('completed', [{'channel': 'weixin', 'state': 'needs_attention',
+        'parts': [{'state': 'accepted'}, {'state': 'accepted'}, {'state': 'unknown'}]}])
+    assert mixed['state'] == 'unknown'
+    assert '已受理 2 段，1 段待核对' in mixed['reason']
+    stopped = delivery_display('completed', [{'channel': 'weixin', 'state': 'needs_attention',
+        'parts': [{'state': 'accepted'}, {'state': 'cancelled'}]}])
+    assert stopped['state'] == 'partial'
+
+
 def test_missing_or_unrecognized_transport_receipt_never_claims_acceptance():
     assert delivery_display('completed', []) is None
     assert delivery_display('completed', [{'channel': 'weixin', 'state': 'unrecognized'}])['state'] == 'unavailable'

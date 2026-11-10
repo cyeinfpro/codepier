@@ -2204,9 +2204,23 @@
   font-weight: var(--ui-weight-semibold);
 }
 
-.cr-delivery-title,
 .cr-work-delivery {
   color: var(--cr-blue);
+}
+
+.cr-delivery-title {
+  display: block;
+  padding-top: 5px;
+  overflow-wrap: anywhere;
+}
+
+.cr-delivery[data-state='unknown'] .cr-delivery-title {
+  font-weight: var(--ui-weight-semibold);
+}
+
+.cr-delivery [data-cr-delivery-control-preview]:not(:empty) {
+  border-inline-start: 2px solid var(--ui-warning);
+  padding-inline-start: 10px;
 }
 
 .cr-delivery-parts {

@@ -75,12 +75,13 @@ window.CodePierCollaboration = (() => {
     waiting_media: '等待附件',
     blocked: '等待前一条回复',
     accepted: '已受理',
-    owner_confirmed: '房主已确认收到',
+    owner_confirmed: '本人已核对收到',
     needs_attention: '发送失败',
     attention: '发送失败',
     rejected: '发送失败',
     failed: '发送失败',
-    unknown: '送达待核对',
+    unknown: '发送结果待核对',
+    insufficient_evidence: '无投递证据',
     cancelled: '已取消',
     superseded: '已替换',
   };
@@ -746,51 +747,147 @@ window.CodePierCollaboration = (() => {
       }[code] || reasonText(code)
     );
   }
+  const deliveryControlPreviews = new Map();
+  function deliveryControlKey(id) {
+    return [state.owner, state.roomId, id].join(':');
+  }
+  function deliveryControlPreviewMarkup(item) {
+    if (!item) return '';
+    const { preview, selection } = item;
+    const confirming = selection.action === 'confirm_received';
+    const label = confirming ? '确认已收到所选分项' : '停止这些分项';
+    const attr = `data-id="${E(preview.delivery_id)}"`;
+    return `<p>${confirming ? '核对所选分项' : '将停止尚未发送的内容'} · ${E(preview.affected_count)} 段</p>${
+      preview.affected_count
+        ? `<ul class="cr-delivery-parts">${preview.affected_parts
+            .map((part) => `<li>${part.delivery_id === preview.delivery_id ? '原回复' : '关联回复'} · 第 ${E(Number(part.ordinal) + 1)} 段 · ${E(deliveryLabels[part.state] || part.state)}</li>`)
+            .join('')}</ul>${btn('apply-delivery-control', label, attr, 'cr-text-button')}`
+        : '<p class="cr-muted">当前没有符合条件的分项。</p>'
+    }${btn('dismiss-delivery-control', '关闭核对', attr, 'cr-text-button')}`;
+  }
+  function deliveryPath(id) {
+    return store.path() + '/weixin-deliveries/' + encodeURIComponent(id);
+  }
+  function paintDeliveryControl(button, id) {
+    const item = deliveryControlPreviews.get(deliveryControlKey(id));
+    const box = button.closest('[data-delivery-id]')?.querySelector('[data-cr-delivery-control-preview]');
+    if (!box) return;
+    box.innerHTML = deliveryControlPreviewMarkup(item);
+    box.querySelector('button')?.focus({ preventScroll: true });
+  }
+  async function previewDeliveryControl(button, selection) {
+    const id = button.dataset.id;
+    const key = deliveryControlKey(id);
+    button.disabled = true;
+    try {
+      const preview = await api(deliveryPath(id) + '/control-preview', {
+        method: 'POST',
+        body: JSON.stringify(selection),
+      });
+      if (key !== deliveryControlKey(id)) return;
+      deliveryControlPreviews.set(key, { preview, selection, requestKey: store.key() });
+      paintDeliveryControl(button, id);
+    } finally {
+      button.disabled = false;
+    }
+  }
+  async function applyDeliveryControl(button) {
+    const id = button.dataset.id;
+    const key = deliveryControlKey(id);
+    const item = deliveryControlPreviews.get(key);
+    if (!item) return;
+    const { selection, preview, requestKey } = item;
+    button.disabled = true;
+    try {
+      const result = await mutation('POST', deliveryPath(id) + '/control', {
+        ...selection,
+        expected_version: preview.delivery_version,
+        expected_ordering_revision: preview.ordering_revision,
+        preview_digest: preview.preview_digest,
+        confirmation_note: selection.action === 'confirm_received' ? '本人核对手机微信收到所选分项' : '',
+        idempotency_key: requestKey,
+      });
+      if (!result || key !== deliveryControlKey(id)) return;
+      deliveryControlPreviews.delete(key);
+      paintDeliveryControl(button, id);
+      await store.messages();
+      announce(selection.action === 'confirm_received' ? '已保存所选分项的核对结果' : '已停止所选范围内未发送的内容');
+    } catch (error) {
+      if (error.status !== 409 || key !== deliveryControlKey(id)) throw error;
+      await previewDeliveryControl(button, selection);
+      announce('发送状态刚有变化，请核对更新后的范围。');
+    } finally {
+      button.disabled = false;
+    }
+  }
+  async function loadDeliveryRelationships(button) {
+    const id = button.dataset.id;
+    const roomId = state.roomId;
+    const target = button.closest('[data-cr-delivery-relationships]');
+    const data = await api(store.path(roomId) + '/diagnostics?' + new URLSearchParams({ delivery_id: id }));
+    if (state.roomId !== roomId || !target?.isConnected) return;
+    const prior = data.direct_blocker;
+    const count = (value) => (data.truncated ? '至少 ' : '') + supplied(value);
+    target.innerHTML = diagnosticFields([
+      ['最近前置投递', prior?.restricted ? '当前授权下不可查看' : prior?.delivery_id ? identifier(prior.delivery_id) : '无'],
+      ['关系', prior?.reason_code ? deliveryReason(prior.reason_code) : '—'],
+      ['直接等待', count(data.direct_waiting_count)],
+      ['受影响的后续回复', count(data.affected_waiting_count)],
+    ]);
+  }
   function deliveryMarkup(deliveries = [], display, truncated = false) {
-    if (!deliveries?.length) return '';
-    return `<section class="cr-deliveries" aria-label="发送状态" data-cr-deliveries>${deliveries
+    const visible = (deliveries || []).filter((item) => item.state !== 'not_requested');
+    if (!visible.length) return '';
+    return `<section class="cr-deliveries" aria-label="发送状态" data-cr-deliveries>${visible
       .map((delivery) => {
         const parts = delivery.parts || [];
-        const verified =
-          delivery.read_verified === true || delivery.provider_delivery_verified === true;
-        const uncertain =
-          delivery.state === 'unknown' || parts.some((part) => part.state === 'unknown');
-        const manuallyConfirmed =
-          parts.some((part) => part.state === 'owner_confirmed') &&
-          parts.every((part) => ['accepted', 'owner_confirmed'].includes(part.state));
-        const state = verified
-          ? '已送达'
-          : uncertain
-            ? '送达待核对'
-            : manuallyConfirmed
-              ? '房主已确认收到'
-              : deliveryLabels[delivery.state] || '状态待核对';
+        const accepted = parts.filter((part) => part.state === 'accepted').length;
+        const confirmed = parts.filter((part) => part.state === 'owner_confirmed').length;
+        const unknown = parts.filter((part) => part.state === 'unknown').length;
+        const stopped = parts.filter((part) => ['cancelled', 'rejected', 'superseded'].includes(part.state)).length;
         const name = delivery.channel === 'weixin' ? '微信' : delivery.channel || '渠道';
-        const label =
-          state === '已受理' || state === '已送达' ? name + state : name + ' · ' + state;
-        const detail =
-          uncertain ||
-          manuallyConfirmed ||
-          !!delivery.ordering_reason ||
-          ['发送失败', '已取消'].includes(state);
-        const retry =
-          activeRoom() &&
-          delivery.channel === 'weixin' &&
-          Number.isInteger(delivery.version) &&
-          (delivery.parts || []).some((part) => part.state === 'attention' && part.attempts === 0);
-        return `<div class="cr-delivery" data-delivery-id="${E(delivery.id)}"><span>${E(label)}${delivery.kind === 'status' ? ' · 状态通知' : ''}</span>${retry ? btn('retry-delivery', '重试', 'data-id="' + E(delivery.id) + '" data-version="' + E(delivery.version) + '"', 'cr-text-button') : ''}${
+        let label = name + ' · ' + (deliveryLabels[delivery.state] || '状态待核对');
+        if (delivery.state === 'blocked' && !delivery.id) label = name + '回复待处理';
+        if (unknown || delivery.state === 'unknown')
+          label = accepted
+            ? `${name}接口已受理 ${accepted} 段，${unknown} 段待核对`
+            : name + '发送结果待核对';
+        else if (stopped && (accepted || confirmed))
+          label = `${name} · ${accepted ? '已受理 ' + accepted + ' 段，' : ''}${confirmed ? '本人核对 ' + confirmed + ' 段，' : ''}${stopped} 段已停止`;
+        else if (confirmed)
+          label = `${name} · ${accepted ? '已受理 ' + accepted + ' 段，' : ''}本人已核对收到 ${confirmed} 段`;
+        else if (delivery.state === 'accepted') label = name + '接口已受理';
+        if (delivery.read_verified === true || delivery.provider_delivery_verified === true)
+          label = name + '已送达';
+        const controllable =
+          activeRoom() && delivery.channel === 'weixin' && !!delivery.id &&
+          Number.isInteger(delivery.version) && Number.isInteger(delivery.ordering_revision);
+        const stop = controllable && parts.some((part) =>
+          ['queued', 'preparing', 'waiting_context', 'waiting_media'].includes(part.state) ||
+          (part.state === 'attention' && (part.attempts === 0 || part.reason_code === 'WEIXIN_RATE_LIMITED')),
+        );
+        if (!unknown && parts.some((part) => part.state === 'queued' && part.reason_code === 'WEIXIN_RATE_LIMITED'))
+          label = `平台限流，${delivery.next_attempt_at ? dateTime(delivery.next_attempt_at) + ' 后继续发送' : '稍后自动继续'}`;
+        const retry = activeRoom() && delivery.channel === 'weixin' && !!delivery.id &&
+          Number.isInteger(delivery.version) && parts.some((part) => part.state === 'attention' && part.attempts === 0);
+        const detail = unknown || confirmed || stopped || retry || stop || !!delivery.ordering_reason ||
+          !!delivery.reason_code || ['unknown', 'needs_attention', 'blocked'].includes(delivery.state);
+        const attr = `data-id="${E(delivery.id)}"`;
+        return `<div class="cr-delivery" data-delivery-id="${E(delivery.id)}" data-state="${E(unknown ? 'unknown' : delivery.state)}"><span class="cr-delivery-title">${E(label)}${delivery.kind === 'status' ? ' · 状态通知' : ''}</span>${
           detail
-            ? `<details><summary>详情</summary>
+            ? `<details><summary>查看原回复和分项</summary>
         ${delivery.display?.reason ? `<p>${E(delivery.display.reason)}</p>` : ''}
-        ${delivery.ordering_reason ? `<p>${E(deliveryReason(delivery.ordering_reason))}</p>` : ''}
-        <ul>${parts.map((part) => `<li data-delivery-part="${E(part.id || part.ordinal)}" data-state="${E(part.state)}">${E({ text: '文字', image: '图片', file: '文件', voice: '语音', video: '视频' }[part.kind] || '消息')} · ${E(deliveryLabels[part.state] || '状态待核对')}${part.reason_code && part.state !== 'owner_confirmed' ? `<p>${E(deliveryReason(part.reason_code))}</p>` : ''}</li>`).join('')}</ul>
+        ${delivery.ordering_reason || delivery.reason_code ? `<p>${E(deliveryReason(delivery.ordering_reason || delivery.reason_code))}</p>` : ''}
+        ${parts.length ? `<ul class="cr-delivery-parts">${parts.map((part) => `<li data-delivery-part="${E(part.id || part.ordinal)}" data-state="${E(part.state)}">第 ${E(Number(part.ordinal) + 1)} 段 · ${E({ text: '文字', image: '图片', file: '文件', voice: '语音', video: '视频' }[part.kind] || '消息')} · ${E(deliveryLabels[part.state] || '状态待核对')}${part.reason_code && part.state !== 'owner_confirmed' ? `<p>${E(deliveryReason(part.reason_code))}</p>` : ''}${controllable && part.id && part.state === 'unknown' ? btn('preview-delivery-control', '核对这一段', `${attr} data-control="confirm_received" data-part="${E(part.id)}"`, 'cr-text-button') : ''}${controllable && part.id && part.route_recovery_available === true ? btn('retry-delivery', '恢复发送此段', `${attr} data-version="${E(delivery.version)}" data-ordering="${E(delivery.ordering_revision)}" data-part="${E(part.id)}"`, 'cr-text-button') : ''}</li>`).join('')}</ul>` : ''}
+        ${retry ? btn('retry-delivery', '重试可发送分项', `${attr} data-version="${E(delivery.version)}"`, 'cr-text-button') : ''}
+        ${stop ? btn('preview-delivery-control', '停止尚未发送的后续内容', `${attr} data-control="cancel_unsent"`, 'cr-text-button') : ''}
+        <div data-cr-delivery-control-preview aria-live="polite">${deliveryControlPreviewMarkup(deliveryControlPreviews.get(deliveryControlKey(delivery.id)))}</div>
+        ${delivery.channel === 'weixin' && delivery.id ? `<div data-cr-delivery-relationships>${btn('delivery-relationships', '查看关联等待', attr, 'cr-text-button')}</div>` : ''}
         </details>`
             : ''
         }</div>`;
       })
-      .join(
-        '',
-      )}${truncated && display?.reason ? `<p class="cr-muted">${E(display.reason)}</p>` : ''}</section>`;
+      .join('')}${truncated && display?.reason ? `<p class="cr-muted">${E(display.reason)}</p>` : ''}</section>`;
   }
   function patchWindowHints() {
     if (!root) return;
@@ -2571,6 +2668,53 @@ window.CodePierCollaboration = (() => {
   function diagnosticFields(fields) {
     return `<dl class="cr-facts">${fields.map(([label, value]) => `<div><dt>${E(label)}</dt><dd>${E(supplied(value))}</dd></div>`).join('')}</dl>`;
   }
+  const wakeEvidenceLabels = {
+    redeemed: '已开始处理',
+    coalesced_before_send: '发送前已合并',
+    accepted_waiting_claim: '宿主接口已受理，等待领取',
+    accepted_without_observed_claim: '宿主接口已受理，尚未观察到领取',
+    insufficient_evidence: '证据不足',
+  };
+  function wakeEvidenceMarkup(item) {
+    const title = wakeEvidenceLabels[item.state] || '证据不足';
+    return `<details><summary>${E(title)} · ${E(dateTime(item.created_at))}</summary>${diagnosticFields([
+      ['原通知', identifier(item.notification_delivery_id)],
+      ['接口受理', dateTime(item.accepted_at)],
+      ['票据到期', dateTime(item.ticket_expires_at)],
+      ['原回合', identifier(item.consumer_session_id)],
+      ['实际领取', dateTime(item.claimed_at)],
+      ['回合创建回复', item.reply_origin_truncated ? '至少 ' + item.created_reply_count : item.created_reply_count],
+      ['保留的通知', identifier(item.retained_notification_delivery_id)],
+    ])}${item.claim_preceded_recorded_acceptance ? '<p>先观察到领取，随后保存接口受理回执。</p>' : ''}</details>`;
+  }
+  async function loadWakeEvidence(button) {
+    const current = panel;
+    const target = button.closest('[data-cr-wake-evidence]');
+    const cursor = button.dataset.cursor;
+    if (!target || current?.name !== 'diagnostics') return;
+    const params = new URLSearchParams({ member_id: button.dataset.id });
+    if (cursor) params.set('cursor', cursor);
+    button.disabled = true;
+    try {
+      const data = await api(store.path(current.roomId) + '/diagnostics?' + params);
+      if (current !== panel || !target.isConnected) return;
+      button.insertAdjacentHTML(
+        'beforebegin',
+        (data.items || []).map(wakeEvidenceMarkup).join('') ||
+          '<p class="cr-muted">当前路线没有可显示的通知证据。</p>',
+      );
+      if (data.next_cursor) {
+        button.dataset.cursor = data.next_cursor;
+        button.textContent = '读取更早的通知';
+      } else {
+        button.remove();
+        target.setAttribute('tabindex', '-1');
+        target.focus({ preventScroll: true });
+      }
+    } finally {
+      button.disabled = false;
+    }
+  }
   function renderDiagnostics(data) {
     const box = root?.querySelector('[data-cr-diagnostics-view]');
     if (!box || panel?.name !== 'diagnostics') return;
@@ -2583,6 +2727,7 @@ window.CodePierCollaboration = (() => {
       budgets: '额度',
       pending: '待处理输入',
       goals: '工作',
+      anomalies: '待核对项',
     };
     const traceLabels = {
       member: '成员',
@@ -2591,6 +2736,7 @@ window.CodePierCollaboration = (() => {
       work: '步骤',
       operation: '原操作',
       delivery: '渠道投递',
+      reply: '原回复',
     };
     const limitLabels = {
       members: '成员',
@@ -2612,6 +2758,11 @@ window.CodePierCollaboration = (() => {
           )}。</p>`
         : ''
     }
+      <section class="cr-inspection-section" data-cr-diagnostic-anomalies><h3>当前待核对</h3>${
+        data.anomalies?.length
+          ? `<ul>${data.anomalies.map((item) => `<li>${E(item.display?.title || wakeEvidenceLabels[item.state] || '证据待核对')} · ${E(dateTime(item.created_at))}</li>`).join('')}</ul>`
+          : '<p class="cr-muted">本次查看范围内没有待核对项。</p>'
+      }</section>
       <section class="cr-inspection-section" data-cr-diagnostic-queues><h3>等待与队列</h3>${
         data.queues?.length
           ? data.queues
@@ -2664,7 +2815,7 @@ window.CodePierCollaboration = (() => {
                       ['平台接受时间', dateTime(member.notification?.last_accepted_at)],
                       ['下一通知尝试', dateTime(member.notification?.next_attempt_at)],
                     ],
-                  )}<p class="cr-muted">平台接受通知不证明模型在线或已经消费。${member.inbox?.complete === false ? '输入列表尚不完整。' : ''}</p></details>`,
+                  )}<p class="cr-muted">宿主接口受理、票据领取和回复保存各有记录。${member.inbox?.complete === false ? '输入列表尚不完整。' : ''}</p>${member.notification?.latest_wake ? `<p>${E(wakeEvidenceLabels[member.notification.latest_wake.state] || '证据不足')}</p>` : ''}<div data-cr-wake-evidence>${btn('wake-evidence', '查看通知证据', `data-id="${E(member.member_id)}"`, 'cr-text-button')}</div></details>`,
               )
               .join('')
           : '<p class="cr-muted">当前没有可显示的成员证据。</p>'
@@ -2685,6 +2836,7 @@ window.CodePierCollaboration = (() => {
                         ['步骤', 'work_item_id'],
                         ['原操作', 'operation_id'],
                         ['原投递', 'delivery_id'],
+                        ['原回合', 'consumer_session_id'],
                       ]
                         .filter(([, key]) => trace[key] !== undefined && trace[key] !== '')
                         .map(([label, key]) => [
@@ -3744,11 +3896,24 @@ window.CodePierCollaboration = (() => {
         renderChannel(result);
         await store.refresh();
       }
-    } else if (action === 'retry-delivery') {
+    } else if (action === 'preview-delivery-control') {
+      await previewDeliveryControl(button, {
+        action: button.dataset.control,
+        ...(button.dataset.part ? { part_ids: [button.dataset.part] } : {}),
+      });
+    } else if (action === 'apply-delivery-control') await applyDeliveryControl(button);
+    else if (action === 'dismiss-delivery-control') {
+      deliveryControlPreviews.delete(deliveryControlKey(id));
+      paintDeliveryControl(button, id);
+    } else if (action === 'delivery-relationships') await loadDeliveryRelationships(button);
+    else if (action === 'retry-delivery') {
       const result = await mutation(
         'POST',
         store.path() + '/weixin-deliveries/' + encodeURIComponent(id) + '/retry',
-        { expected_version: Number(button.dataset.version) },
+        {
+          expected_version: Number(button.dataset.version),
+          ...(button.dataset.part ? { part_ids: [button.dataset.part], expected_ordering_revision: Number(button.dataset.ordering) } : {}),
+        },
       );
       if (result) {
         await store.messages();
@@ -3982,6 +4147,7 @@ window.CodePierCollaboration = (() => {
       );
       await loadDiagnostics();
     } else if (action === 'refresh-diagnostics') await loadDiagnostics();
+    else if (action === 'wake-evidence') await loadWakeEvidence(button);
     else if (action === 'context') {
       openPanel(
         'context',
