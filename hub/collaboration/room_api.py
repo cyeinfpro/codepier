@@ -14,10 +14,52 @@ class RoomDeliveryRetry(Model):
 def install_routes(router, auth, runtime):
     service, store = runtime.collaboration, runtime.store
 
-    @router.get('/connections')
-    async def connections(request: Request, response: Response, cursor: str = '', limit: int = Query(40, ge=1, le=100)):
+    async def connection_read(request, response, action, args):
         response.headers['Cache-Control'] = 'private, no-store'
-        return await store.run(lambda: service.room_connections.listing({'cursor': cursor, 'limit': limit}, auth.panel(request)))
+        return await store.run(lambda: service.rooms.invoke(action, args, auth.panel(request)))
+
+    async def connection_write(request, response, action, path_args=None):
+        response.headers['Cache-Control'] = 'private, no-store'
+        body = await request.json()
+        return await store.run(lambda: service.rooms.invoke(action,
+            {**body, **(path_args or {})}, auth.admin(request, True)))
+
+    @router.get('/connections')
+    async def connections(request: Request, response: Response, cursor: str = '',
+                          limit: int = Query(40, ge=1, le=100), host_connections: bool = False):
+        args = {'cursor': cursor, 'limit': limit}
+        if host_connections:
+            return await connection_read(request, response, 'room_connection_list', args)
+        response.headers['Cache-Control'] = 'private, no-store'
+        return await store.run(lambda: service.room_connections.listing(args, auth.panel(request)))
+
+    @router.post('/connections/rebind-batch')
+    async def rebind_connections(request: Request, response: Response):
+        return await connection_write(request, response, 'room_connection_rebind_batch')
+
+    @router.get('/connections/rebind-batch/{batch_id}')
+    async def rebind_status(request: Request, response: Response, batch_id: str, cursor: str = '',
+                            limit: int = Query(40, ge=1, le=100)):
+        return await connection_read(request, response, 'room_connection_rebind_status',
+            {'batch_id': batch_id, 'cursor': cursor, 'limit': limit})
+
+    @router.post('/connections/route-prepare')
+    async def prepare_route(request: Request, response: Response):
+        return await connection_write(request, response, 'room_connection_route_prepare')
+
+    @router.get('/connections/{identifier}')
+    async def host_connection(request: Request, response: Response, identifier: str):
+        return await connection_read(request, response, 'room_connection_view', {'host_connection_id': identifier})
+
+    @router.get('/connections/{identifier}/impact')
+    async def connection_impact(request: Request, response: Response, identifier: str, cursor: str = '',
+                                limit: int = Query(40, ge=1, le=100)):
+        return await connection_read(request, response, 'room_connection_impact',
+            {'host_connection_id': identifier, 'cursor': cursor, 'limit': limit})
+
+    @router.post('/connections/{identifier}/revoke')
+    async def revoke_connection(request: Request, response: Response, identifier: str):
+        return await connection_write(request, response, 'room_connection_revoke', {'host_connection_id': identifier})
 
     @router.get('/rooms')
     async def listing(request: Request, cursor: str = '', limit: int = Query(40, ge=1, le=100), include_archived: bool = False):

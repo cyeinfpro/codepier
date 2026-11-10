@@ -13,6 +13,50 @@ window.CodePierCollaboration = (() => {
   const field = (label, control) =>
     `<label class="cr-field"><span>${label}</span>${control}</label>`;
   const base = '/api/collaboration';
+  const connectionsPath = base + '/connections';
+  const hostPath = (id) => connectionsPath + '/' + encodeURIComponent(id);
+  const batchPath = connectionsPath + '/rebind-batch';
+  const hostStates = {
+    invited: '等待接入',
+    pending: '等待接入',
+    waiting_host: '等待接入',
+    waiting_for_host: '等待接入',
+    verifying: '正在验证',
+    connected: '已连接',
+    ready: '已连接',
+    ready_chat: '已连接',
+    ready_work: '已连接',
+    active: '已登记',
+    recovering: '正在恢复',
+    awaiting_host_refresh: '等待宿主续订',
+    waiting_host_refresh: '等待宿主续订',
+    waiting_host_renewal: '等待宿主续订',
+    authorization_expired: '授权已到期',
+    grant_expired: '授权已到期',
+    paused: '已暂停',
+    revoked: '已撤销',
+  };
+  const connectionState = (item) =>
+    hostStates[item.display_state || item.state] || '路线待核对';
+  const connectionName = (item) => item.label || item.name || 'dot 连接';
+  const reuseAnchor = (item) =>
+    item.host_connection_id ? item.reuse_member_id : item.member_id || item.id;
+  const supportsHostReuse = (item, capabilities) =>
+    item.connection_capabilities?.verified_reuse ?? capabilities.verified_reuse ?? false;
+  const connectionChoice = (item) => item.host_connection_id || reuseAnchor(item);
+  const connectionChoiceLabel = (item) => {
+    if (!item.host_connection_id) return connectionName(item) + ' · ' + (item.room_title || '原房间');
+    const last = item.last_round_trip_at || item.verified_at;
+    return [
+      connectionName(item),
+      connectionState(item),
+      Number.isInteger(item.room_count) ? `${item.room_count} 个房间` : '',
+      last ? `最近往返 ${dateTime(last)}` : '',
+    ].filter(Boolean).join(' · ');
+  };
+  const connectionListPath = (cursor, host = true) =>
+    connectionsPath + '?limit=40' + (host ? '&host_connections=true' : '') +
+    (cursor ? '&cursor=' + encodeURIComponent(cursor) : '');
   const stages = {
     invited: '等待 dot 接入',
     joining: '正在连接',
@@ -121,6 +165,8 @@ window.CodePierCollaboration = (() => {
   const safeChannelActions = new Set(['pause', 'disconnect', 'revoke_tasks', 'cancel']);
   function mutationAllowed(method, url, body, roomId = state.roomId) {
     if (url === base + '/rooms' || store.writable(roomId)) return true;
+    if (method === 'POST' && (url === batchPath || /^\/api\/collaboration\/connections\/[^/]+\/revoke$/.test(url)))
+      return true;
     if (url === store.path(roomId) + '/migration') return body.action === 'activate';
     if (url.startsWith(store.path(roomId) + '/legacy-channels/') && url.endsWith('/pause'))
       return ['weixin', 'telegram'].includes(body.channel);
@@ -149,8 +195,10 @@ window.CodePierCollaboration = (() => {
   const memberShort = (item) => '#' + memberId(item).slice(0, 8);
   const memberOrigin = (item) =>
     item.host_label ||
-    (item.connection_source_member_id
-      ? '来自连接 #' + item.connection_source_member_id.slice(0, 8)
+    (item.host_connection_id
+      ? '独立 dot 连接'
+      : item.connection_source_member_id
+        ? '来自连接 #' + item.connection_source_member_id.slice(0, 8)
       : item.legacy
         ? '原连接待迁移'
         : item.evidence?.host_bound
@@ -221,6 +269,8 @@ window.CodePierCollaboration = (() => {
       remove: '移除成员',
       continue_connection: '继续连接',
       recover_connection: '恢复连接',
+      wait_for_host_refresh: '在原 dot 继续连接',
+      awaiting_host_refresh: '在原 dot 继续连接',
       copy_instructions: '复制加入说明',
       view_details: '查看详情',
       start_qr: '生成二维码',
@@ -540,7 +590,7 @@ window.CodePierCollaboration = (() => {
       (p) => p.state !== 'removed',
     ).length;
     const markup = !state.room
-      ? `<div class="cr-empty"><div class="cr-orbit" aria-hidden="true"><span></span><i>${icon('message')}</i><span></span></div><h3>还没有房间</h3><p>新建房间后就可以添加项目和 dot。</p>${btn('create', '新建房间', '', 'cr-primary')}</div>`
+      ? `<div class="cr-empty"><div class="cr-orbit" aria-hidden="true"><span></span><i>${icon('message')}</i><span></span></div><h3>还没有房间</h3><p>新建房间后就可以添加项目和 dot。</p><div class="cr-empty-actions">${btn('create', '新建房间', '', 'cr-primary')}${btn('host-list', '管理 dot 连接', '', 'cr-text-button')}</div></div>`
       : !activeRoom()
         ? state.room.legacy
           ? migrationChecklist()
@@ -1964,11 +2014,11 @@ window.CodePierCollaboration = (() => {
           ? members()
               .map(
                 (member) =>
-                  `<article class="cr-member"><span class="cr-member-avatar" aria-hidden="true">${E((member.name || member.label || 'D').slice(0, 1))}</span><div><h3>${E(member.name || member.label)}${state.room.lead_member_id === memberId(member) ? '<span class="cr-tag">主责</span>' : ''}</h3><p>${E(memberBadges[member.stage || member.state] || '连接中')}</p><small>${E(memberOrigin(member))}</small></div>${btn('member-detail', '管理', `data-id="${E(memberId(member))}" aria-label="管理 ${E(member.name || member.label)} ${E(memberShort(member))}"`)}</article>`,
+                  `<article class="cr-member"><span class="cr-member-avatar" aria-hidden="true">${E((member.name || member.label || 'D').slice(0, 1))}</span><div><h3>${E(member.name || member.label)}${state.room.lead_member_id === memberId(member) ? '<span class="cr-tag">主责</span>' : ''}</h3><p>${E(hostStates[member.host_connection_state] || memberBadges[member.stage || member.state] || '连接中')}</p><small>${E(memberOrigin(member))}</small></div>${btn('member-detail', '管理', `data-id="${E(memberId(member))}" aria-label="管理 ${E(member.name || member.label)} ${E(memberShort(member))}"`)}</article>`,
               )
               .join('')
           : '<p class="cr-muted">连接一个 dot，让工作持续推进。</p>'
-      }</div>${btn('add-member', '添加 dot', '', 'cr-primary cr-full')}`,
+      }</div>${btn('add-member', '添加 dot', '', 'cr-primary cr-full')}${btn('host-list', '管理 dot 连接', '', 'cr-text-button cr-full')}`,
     );
   }
   async function addMemberPanel() {
@@ -2005,7 +2055,7 @@ window.CodePierCollaboration = (() => {
     openPanel(
       'add-member',
       '添加 dot',
-      `<form data-cr-form="member"><fieldset class="cr-connection-mode"><legend class="sr-only">选择连接方式</legend><label><input type="radio" name="connection_mode" value="new" checked><span>新 dot</span></label><label><input type="radio" name="connection_mode" value="existing"><span>已有 dot</span></label></fieldset><section data-cr-connections hidden>${field('已验证的连接', '<select name="reuse_member_id" disabled><option value="">选择已验证的 dot</option></select>')}<p class="cr-muted" data-cr-connection-status></p>${btn('more-connections', '读取已有连接', 'data-cr-more-connections', 'cr-text-button')}<p class="cr-info">加入后使用房间的项目权限。</p></section>${field('成员名称', '<input name="name" required maxlength="80" placeholder="给这个 dot 起个名字" autofocus>')}<section class="cr-connect-summary" aria-label="接入范围"><p class="cr-muted">dot 加入「${E(roomName(state.room))}」并使用房间已批准的项目权限。读取和回复探测通过后就可在房间收发消息。</p><label class="cr-choice"><input type="checkbox" name="keep_connected"><span>在房间授权有效期间保持连接<small>由 CodePier 定期续期。可在连接详情关闭。</small></span></label></section><button class="cr-button cr-primary" type="submit">添加并连接</button></form>`,
+      `<form data-cr-form="member"><fieldset class="cr-connection-mode"><legend class="sr-only">选择连接方式</legend><label><input type="radio" name="connection_mode" value="new" checked><span>新 dot</span></label><label><input type="radio" name="connection_mode" value="existing"><span>已有 dot</span></label></fieldset><section data-cr-connections hidden>${field('已验证的连接', '<select name="reuse_member_id" disabled><option value="">选择已验证的 dot</option></select>')}<p class="cr-muted" data-cr-connection-status></p>${btn('more-connections', '读取已有连接', 'data-cr-more-connections', 'cr-text-button')}<p class="cr-info">加入后使用房间的项目权限。</p></section>${field('成员名称', '<input name="name" required maxlength="80" placeholder="给这个 dot 起个名字" autofocus>')}<section class="cr-connect-summary" aria-label="接入范围"><p class="cr-muted">dot 加入「${E(roomName(state.room))}」并使用房间已批准的项目权限。读取和回复探测通过后就可在房间收发消息。</p><label class="cr-choice"><input type="checkbox" name="keep_connected"><span>在房间授权有效期间保持连接<small>自动处理可恢复的连接故障。订阅由 dot 宿主续订。</small></span></label></section><button class="cr-button cr-primary" type="submit">添加并连接</button></form>`,
       {
         version: state.room.version,
         connections: [],
@@ -2024,21 +2074,46 @@ window.CodePierCollaboration = (() => {
     const moreButton = root.querySelector('[data-cr-more-connections]');
     moreButton.disabled = true;
     try {
-      const response = await api(
-        base +
-          '/connections?limit=40' +
-          (more && current.connectionsCursor
-            ? '&cursor=' + encodeURIComponent(current.connectionsCursor)
-            : ''),
+      const cursor = more ? current.connectionsCursor : '';
+      const useHost = current.connectionsUseHost !== false;
+      let response = await api(connectionListPath(cursor, useHost));
+      const capabilities = useHost ? response.connection_capabilities || {} : {};
+      if (useHost && capabilities.host_reference === true && !response.next_cursor) {
+        // Retain legacy anchors that have yet to be adopted. The two catalogs
+        // use separate cursors.
+        const legacy = await api(connectionListPath('', false));
+        response = {
+          items: [...(response.items || []), ...(legacy.items || [])],
+          next_cursor: legacy.next_cursor,
+        };
+        current.connectionsUseHost = false;
+      }
+      const hostAnchors = new Set(
+        [...current.connections, ...(response.items || [])]
+          .filter((item) => item.host_connection_id)
+          .map(reuseAnchor)
+          .filter(Boolean),
+      );
+      const presentHosts = new Set(members().map((member) => member.host_connection_id).filter(Boolean));
+      const available = (response.items || []).filter((item) =>
+        item.host_connection_id
+          ? !presentHosts.has(item.host_connection_id) &&
+            !item.room_ids?.includes(current.roomId) &&
+            item.state !== 'revoked' &&
+            !['authorization_expired', 'grant_expired'].includes(item.display_state) &&
+            (supportsHostReuse(item, capabilities) || !!item.reuse_member_id)
+          : item.conversation_id !== current.roomId && !!reuseAnchor(item) && !hostAnchors.has(reuseAnchor(item)),
       );
       if (current !== panel) return;
       current.connections = [
         ...new Map(
-          [...(more ? current.connections : []), ...(response.items || [])]
-            .filter((item) => item.conversation_id !== current.roomId)
-            .map((item) => [item.member_id || item.id, item]),
+          [...(more ? current.connections : []), ...available].map((item) => [
+            connectionChoice(item),
+            item,
+          ]),
         ).values(),
       ];
+      if (useHost) current.connectionCapabilities = capabilities;
       current.connectionsCursor = response.next_cursor || '';
       current.connectionsLoaded = true;
       const select = root.querySelector('[name="reuse_member_id"]'),
@@ -2048,10 +2123,10 @@ window.CodePierCollaboration = (() => {
         current.connections
           .map(
             (item) =>
-              `<option value="${E(item.member_id || item.id)}">${E(item.name)} · ${E(item.room_title || '原房间')}</option>`,
+              `<option value="${E(connectionChoice(item))}">${E(connectionChoiceLabel(item))}</option>`,
           )
           .join('');
-      select.value = selected;
+      if ([...select.options].some((option) => option.value === selected)) select.value = selected;
       const modes = [...root.querySelectorAll('[name="connection_mode"]')];
       if (!more && current.connections.length && !current.modeTouched) {
         const existing = modes.find((input) => input.value === 'existing');
@@ -2074,6 +2149,381 @@ window.CodePierCollaboration = (() => {
     } finally {
       current.connectionsLoading = false;
       if (current === panel) moreButton.disabled = false;
+    }
+  }
+  function hostListPanel() {
+    openPanel(
+      'host-list',
+      'dot 连接',
+      '<div data-cr-host-list aria-live="polite"></div>' +
+        btn('more-hosts', '更多连接', 'data-cr-more-hosts hidden', 'cr-text-button'),
+      { hostCursor: '', hosts: [] },
+    );
+    return loadHostList();
+  }
+  async function loadHostList() {
+    const current = panel;
+    if (current?.name !== 'host-list' || current.loading) return;
+    current.loading = true;
+    const box = root.querySelector('[data-cr-host-list]');
+    const more = root.querySelector('[data-cr-more-hosts]');
+    more.disabled = true;
+    if (!current.hosts.length) box.textContent = '正在读取 dot 连接…';
+    try {
+      const result = await api(connectionListPath(current.hostCursor));
+      if (panel !== current) return;
+      const items = (result.items || []).filter((item) => item.host_connection_id);
+      current.hosts = [...new Map(
+        [...current.hosts, ...items].map((item) => [item.host_connection_id, item]),
+      ).values()];
+      current.hostCursor = result.next_cursor || '';
+      box.innerHTML = current.hosts.length
+        ? current.hosts.map((item) => {
+            const last = item.last_round_trip_at || item.verified_at;
+            return `<article class="cr-member"><div><h3>${E(connectionName(item))}</h3><p>${E(connectionState(item))} · ${E(item.room_count ?? 0)} 个房间</p>${last ? `<small>最近往返 ${E(dateTime(last))}</small>` : ''}</div>${btn('host-detail', '详情', `data-id="${E(item.host_connection_id)}" aria-label="查看 ${E(connectionName(item))} 的连接详情"`)}</article>`;
+          }).join('')
+        : '<p class="cr-muted">当前没有已登记的独立连接。仍可在房间管理成员。</p>';
+      more.hidden = !current.hostCursor;
+      more.textContent = '更多连接';
+    } catch (error) {
+      if (panel === current) {
+        panelError(error.message);
+        more.hidden = false;
+        more.textContent = '重新读取';
+      }
+    } finally {
+      current.loading = false;
+      if (panel === current) more.disabled = false;
+    }
+  }
+  async function hostDetailPanel(id) {
+    if (!id) return;
+    const original = rememberedBatch(id);
+    openPanel(
+      'host-detail',
+      'dot 连接详情',
+      '<div data-cr-host-summary aria-live="polite"><p class="cr-muted">正在读取连接状态…</p></div>' +
+        btn('host-impact', '查看影响范围与连接操作', 'hidden', 'cr-text-button cr-full') +
+        (original ? btn('view-host-batch', '查看最近一次更换', `data-id="${E(original)}"`, 'cr-text-button cr-full') : '') +
+        btn('host-list', '所有 dot 连接', '', 'cr-text-button cr-full') +
+        '<div data-cr-host-impact></div>',
+      { hostId: id },
+    );
+    await refreshHostDetail();
+  }
+  async function refreshHostDetail() {
+    const current = panel;
+    if (current?.name !== 'host-detail' || current.hostLoading || current.impactLoading || current.busy)
+      return;
+    current.hostLoading = true;
+    try {
+      const result = await api(hostPath(current.hostId));
+      if (panel !== current || current.busy) return;
+      const host = result.connection || result;
+      current.host = host;
+      const last = host.last_round_trip_at || host.verified_at;
+      const capabilities = host.connection_capabilities || result.connection_capabilities || {};
+      const box = root.querySelector('[data-cr-host-summary]');
+      const markup = `<section class="cr-connect-summary"><h3>${E(connectionName(host))}</h3>${facts([
+        ['连接状态', connectionState(host)],
+        ['使用中的房间', supplied(host.room_count)],
+        ['最近一次往返', last ? dateTime(last) : '等待真实往返'],
+      ])}${['wait_for_host_refresh', 'awaiting_host_refresh'].includes(host.next_action) ? '<p>请在原 dot 中继续连接。</p>' : ''}</section>`;
+      if (box._markup !== markup) {
+        box.innerHTML = markup;
+        box._markup = markup;
+      }
+      const impactButton = root.querySelector('[data-cr-action="host-impact"]');
+      impactButton.hidden = host.state === 'revoked' || capabilities.host_revoke !== true;
+      if (impactButton.hidden && current.impact) {
+        root.querySelector('[data-cr-host-impact]').replaceChildren();
+        current.impact = null;
+      }
+    } finally {
+      current.hostLoading = false;
+    }
+  }
+  const hostImpactLabel = (item) =>
+    item.room_title || item.conversation_title || '房间 ' + identifier(item.conversation_id);
+  const hostImpactBinding = (item) => [item.member_id, item.binding_generation].join(':');
+  function renderHostImpact(current, more, changed, added, removed) {
+    const box = root.querySelector('[data-cr-host-impact]');
+    if (!box) return;
+    const impact = current.impact;
+    const selected = changed ? new Set() : new Set(
+      [...box.querySelectorAll('[data-cr-host-member]:checked')].map((input) => input.value),
+    );
+    if (!more || !box.querySelector('[data-cr-impact-members]')) {
+      const changedNotice = changed
+        ? `<p role="status">影响范围已更新。${added.length ? ` 新增 ${E(added.map(hostImpactLabel).join('、'))}。` : ''}${removed.length ? ` 移出 ${E(removed.map(hostImpactLabel).join('、'))}。` : ''}</p>`
+        : '';
+      const canBatch = current.host.connection_capabilities?.batch_rebind === true;
+      box.innerHTML = `<section class="cr-connect-summary" aria-label="受影响的房间"><h3>受影响的房间</h3>${changedNotice}${facts([
+        ['房间', supplied(impact.room_count)],
+        ['排队工作', supplied(impact.queued_work_count)],
+        ['已派发操作', supplied(impact.dispatched_operation_count)],
+      ])}<p class="cr-muted">已派发的操作可能仍在结束，原结果会继续核对。</p>${canBatch ? '<p class="cr-muted">勾选成员可单独发起批量更换。</p>' : ''}<ul class="cr-host-members" data-cr-impact-members></ul>${btn('more-host-impact', '更多受影响房间', 'data-cr-more-impact hidden', 'cr-text-button')}${canBatch ? `<div data-cr-batch-target hidden>${field('更换为', '<select name="batch_host_connection"><option value="">分别验证新连接</option></select>')}<p class="cr-muted" data-cr-batch-target-status aria-live="polite"></p>${btn('load-batch-targets', '查看已有 dot', 'data-cr-more-targets', 'cr-text-button')}</div>${btn('start-host-batch', '为所选成员更换连接', 'data-cr-start-batch disabled', 'cr-text-button')}` : ''}${btn('revoke-host', '撤销此 dot 的全部连接', 'data-cr-revoke-host', 'cr-danger cr-full')}</section>`;
+    }
+    const membersBox = box.querySelector('[data-cr-impact-members]');
+    const displayed = new Set([...membersBox.children].map((row) => row.dataset.binding));
+    const start = box.querySelector('[data-cr-start-batch]');
+    for (const item of current.impactMembers) {
+      const binding = hostImpactBinding(item);
+      if (displayed.has(binding)) continue;
+      const selectable = !!start && !item.candidate &&
+        Number.isInteger(item.binding_generation ?? item.expected_generation);
+      membersBox.insertAdjacentHTML('beforeend', `<li data-binding="${E(binding)}">${selectable ? `<label><input type="checkbox" data-cr-host-member value="${E(item.member_id)}" ${selected.has(item.member_id) ? 'checked' : ''}>${E(hostImpactLabel(item))}</label>` : E(hostImpactLabel(item)) + (item.candidate ? ' · 待验证的新连接' : '')}</li>`);
+    }
+    updateHostBatchControls();
+    if (!more && current.batchTargets?.length) renderHostBatchTargets(current);
+    box.querySelector('[data-cr-more-impact]').hidden = !current.impactCursor;
+    box.querySelector('[data-cr-revoke-host]').disabled =
+      !impact.impact_digest || !Number.isInteger(impact.authority_version);
+  }
+  async function loadHostImpact(more = false) {
+    const current = panel;
+    if (current?.name !== 'host-detail' || !current.host || current.impactLoading) return;
+    current.impactLoading = true;
+    const box = root.querySelector('[data-cr-host-impact]');
+    const trigger = root.querySelector(more ? '[data-cr-more-impact]' : '[data-cr-action="host-impact"]');
+    if (trigger) trigger.disabled = true;
+    if (!current.impact) box.textContent = '正在核对受影响的房间…';
+    try {
+      const result = await api(
+        hostPath(current.hostId) + '/impact?limit=40' +
+          (more && current.impactCursor ? '&cursor=' + encodeURIComponent(current.impactCursor) : ''),
+      );
+      if (panel !== current) return;
+      const impact = result.impact || result;
+      const items = impact.items || result.items || [];
+      const impactDigest = impact.impact_digest || impact.digest;
+      const oldItems = current.impactMembers || [];
+      const changed = current.impact && current.impact.impact_digest !== impactDigest;
+      if (more && changed) {
+        current.impactLoading = false;
+        await loadHostImpact();
+        return;
+      }
+      const added = changed
+        ? items.filter((item) => !oldItems.some((old) => hostImpactBinding(old) === hostImpactBinding(item)))
+        : [];
+      const removed = changed && !impact.next_cursor
+        ? oldItems.filter((item) => !items.some((next) => hostImpactBinding(next) === hostImpactBinding(item)))
+        : [];
+      current.impact = { ...impact, impact_digest: impactDigest };
+      current.impactCursor = impact.next_cursor || result.next_cursor || '';
+      current.impactMembers = [...new Map(
+        [...(more ? oldItems : []), ...items].map((item) => [hostImpactBinding(item), item]),
+      ).values()];
+      renderHostImpact(current, more, changed, added, removed);
+      if (changed)
+        panelError('连接影响范围已变化，请核对当前房间列表后再确认。');
+      if (!more) box.querySelector('h3')?.scrollIntoView({ block: 'nearest' });
+    } catch (error) {
+      if (panel === current) {
+        if (more && error.code === 'INVALID_CURSOR') {
+          current.impactLoading = false;
+          await loadHostImpact();
+          return;
+        }
+        if (!current.impact) box.textContent = '';
+        panelError(error.message);
+      }
+    } finally {
+      current.impactLoading = false;
+      if (panel === current && trigger?.isConnected) trigger.disabled = false;
+    }
+  }
+  async function revokeHost() {
+    const current = panel;
+    const impact = current?.impact;
+    if (!impact?.impact_digest || !Number.isInteger(impact.authority_version)) return;
+    try {
+      const result = await mutation('POST', hostPath(current.hostId) + '/revoke', {
+        expected_authority_version: impact.authority_version,
+        impact_digest: impact.impact_digest,
+      }, current);
+      if (result) {
+        await hostDetailPanel(current.hostId);
+        await store.refresh();
+        announce('此 dot 的连接已撤销。已派发操作会继续核对原结果。');
+      }
+    } catch (error) {
+      if (panel === current && error.code === 'ROOM_CONNECTION_IMPACT_CHANGED') {
+        await loadHostImpact();
+        return;
+      }
+      throw error;
+    }
+  }
+  function rememberedBatch(hostId, batchId) {
+    try {
+      const key = ['codepier-host-batch', state.owner, hostId].join(':');
+      if (batchId) sessionStorage.setItem(key, batchId);
+      return sessionStorage.getItem(key);
+    } catch {
+      return '';
+    }
+  }
+  function updateHostBatchControls() {
+    const start = root.querySelector('[data-cr-start-batch]');
+    const target = root.querySelector('[data-cr-batch-target]');
+    if (!start || !target) return;
+    const checked = !!root.querySelector('[data-cr-host-member]:checked');
+    start.disabled = !checked;
+    target.hidden = !checked;
+  }
+  function renderHostBatchTargets(current) {
+    const select = root.querySelector('[name="batch_host_connection"]');
+    const selected = select.value;
+    select.innerHTML = '<option value="">分别验证新连接</option>' + current.batchTargets.map((item) =>
+      `<option value="${E(item.host_connection_id)}">${E(connectionChoiceLabel(item))}</option>`,
+    ).join('');
+    if ([...select.options].some((option) => option.value === selected)) select.value = selected;
+    const button = root.querySelector('[data-cr-more-targets]');
+    button.hidden = !current.batchTargetCursor;
+    button.textContent = '更多已登记的 dot';
+    root.querySelector('[data-cr-batch-target-status]').textContent = current.batchTargets.length
+      ? ''
+      : current.batchTargetCursor ? '这一页没有可用连接。' : '当前没有其他可复用的 dot。';
+  }
+  async function loadHostBatchTargets() {
+    const current = panel;
+    if (current?.name !== 'host-detail' || current.batchTargetsLoading) return;
+    current.batchTargetsLoading = true;
+    const status = root.querySelector('[data-cr-batch-target-status]');
+    const button = root.querySelector('[data-cr-more-targets]');
+    status.textContent = '正在读取已有 dot…';
+    button.disabled = true;
+    try {
+      const response = await api(connectionListPath(current.batchTargetCursor));
+      if (panel !== current || !button.isConnected) return;
+      const items = (response.items || []).filter((item) =>
+        item.host_connection_id && item.host_connection_id !== current.hostId &&
+        supportsHostReuse(item, response.connection_capabilities || {}),
+      );
+      current.batchTargets = [...new Map(
+        [...(current.batchTargets || []), ...items].map((item) => [item.host_connection_id, item]),
+      ).values()];
+      current.batchTargetCursor = response.next_cursor || '';
+      renderHostBatchTargets(current);
+    } catch (error) {
+      if (panel === current && button.isConnected) {
+        status.textContent = error.message;
+        button.textContent = '重新读取已有 dot';
+      }
+    } finally {
+      current.batchTargetsLoading = false;
+      if (panel === current && button.isConnected) button.disabled = false;
+    }
+  }
+  async function startHostBatch() {
+    const current = panel;
+    if (current?.name !== 'host-detail') return;
+    const checked = new Set(
+      [...root.querySelectorAll('[data-cr-host-member]:checked')].map((input) => input.value),
+    );
+    const selected = current.impactMembers.filter((item) => !item.candidate && checked.has(item.member_id)).map((item) => ({
+      member_id: item.member_id,
+      expected_generation: item.binding_generation ?? item.expected_generation,
+    }));
+    if (!selected.length) return;
+    const hostId = root.querySelector('[name="batch_host_connection"]')?.value;
+    const result = await mutation(
+      'POST',
+      batchPath,
+      { members: selected, ...(hostId ? { host_connection_id: hostId } : {}) },
+      current,
+    );
+    if (result?.batch_id) {
+      rememberedBatch(current.hostId, result.batch_id);
+      await hostBatchPanel(result.batch_id, current.hostId, result);
+    }
+  }
+  const hostBatchLabels = {
+    queued: '等待验证',
+    pending: '等待验证',
+    pending_validation: '等待验证',
+    invited: '等待 dot 接入',
+    bound: '正在验证',
+    activated: '已更换',
+    waiting: '等待 dot 接入',
+    waiting_host: '等待 dot 接入',
+    waiting_connection: '等待 dot 接入',
+    prepared: '等待 dot 接入',
+    candidate: '等待 dot 接入',
+    verifying: '正在验证',
+    switched: '已更换',
+    succeeded: '已更换',
+    completed: '已更换',
+    failed: '更换失败',
+    expired: '候选已过期',
+    cancelled: '更换已取消',
+  };
+  const hostBatchErrors = {
+    ROOM_MEMBER_INACTIVE: '该房间成员当前已停用',
+    ROOM_BINDING_CHANGED: '成员的连接已更换',
+    ROOM_BINDING_PENDING: '该成员已有待验证的新连接',
+    ROOM_BINDING_CANCELLED: '接入流程已关闭',
+    ROOM_BINDING_EXPIRED: '接入邀请已过期',
+    CONNECT_FLOW_NOT_FOUND: '原接入流程已不可用',
+  };
+  async function hostBatchPanel(batchId, hostId = '', result = null) {
+    if (!batchId) return;
+    openPanel(
+      'host-batch',
+      '批量更换连接',
+      '<p class="cr-muted">各房间会分别验证新连接，原连接在验证通过后切换。</p>' +
+        '<div data-cr-batch-results aria-live="polite"></div>' +
+        btn('more-host-batch', '更多结果', 'data-cr-more-batch hidden', 'cr-text-button') +
+        (hostId ? btn('host-detail', '返回连接详情', `data-id="${E(hostId)}"`, 'cr-text-button cr-full') : ''),
+      { batchId, batchItems: [], batchCursor: '' },
+    );
+    if (result) renderHostBatch(panel, result, false);
+    else await refreshHostBatch();
+  }
+  function renderHostBatch(current, result, more) {
+    current.batchCursor = result.next_cursor || '';
+    current.batchComplete = result.complete === true;
+    current.batchItems = [...new Map(
+      [...(more ? current.batchItems : []), ...(result.items || [])].map((item) => [item.member_id, item]),
+    ).values()];
+    const box = root.querySelector('[data-cr-batch-results]');
+    const markup = `<ul class="cr-host-members">${current.batchItems.map((item) => {
+      const label = hostBatchLabels[item.status] || '正在读取状态';
+      const message = item.message || hostBatchErrors[item.error_code];
+      const canOpen = item.conversation_id && item.member_id && item.flow_id;
+      return `<li><span>${E(hostImpactLabel(item))} · ${E(label)}${message ? ` · ${E(message)}` : ''}</span>${canOpen ? btn('open-batch-member', '查看成员', `data-id="${E(item.member_id)}" data-room-id="${E(item.conversation_id)}"`, 'cr-text-button') : ''}</li>`;
+    }).join('')}</ul>`;
+    if (box._markup !== markup) {
+      const focused = box.contains(document.activeElement) ? document.activeElement.dataset.id : '';
+      box.innerHTML = markup;
+      box._markup = markup;
+      if (focused)
+        [...box.querySelectorAll('button')].find((button) => button.dataset.id === focused)?.focus({ preventScroll: true });
+    }
+    root.querySelector('[data-cr-more-batch]').hidden = !current.batchCursor;
+  }
+  async function refreshHostBatch(more = false) {
+    const current = panel;
+    if (current?.name !== 'host-batch' || current.batchLoading) return;
+    current.batchLoading = true;
+    try {
+      // Reload from the beginning after a hint so statuses are reconciled in
+      // order, even when the owner has already viewed additional pages.
+      let cursor = more ? current.batchCursor : '';
+      const items = [];
+      let result;
+      do {
+        result = await api(batchPath + '/' + encodeURIComponent(current.batchId) + '?limit=40' +
+          (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''));
+        if (panel !== current) return;
+        items.push(...(result.items || []));
+        cursor = result.next_cursor;
+      } while (!more && cursor && items.length < current.batchItems.length);
+      renderHostBatch(current, { ...result, items }, more);
+    } finally {
+      current.batchLoading = false;
     }
   }
   async function returnToChannel(current) {
@@ -2109,27 +2559,30 @@ window.CodePierCollaboration = (() => {
     return typeof value === 'string' ? value : value.text || value.prompt || '';
   }
   function connectionRenewalMarkup(renewal, member, pendingBinding) {
-    if (!renewal) return '';
+    if (!renewal || member?.host_connection_state === 'revoked') return '';
     const managed = renewal.approved === true && renewal.mode === 'managed';
-    const end = renewal.approved_until || renewal.expires_at;
-    const mode = managed ? 'CodePier 定期保持连接' : '由 dot 宿主负责续期';
     const status = {
-      active: managed ? '续期已启用' : '',
-      stopped: '续期已停止',
+      stopped: renewal.reason_code === 'authorization_expired' ? '授权已到期' : '自动恢复已停止',
       awaiting_probe: '等待连接验证',
       waiting: '等待 dot 恢复',
-      expired: '连接租期已到',
+      recovering: '正在恢复',
+      expired: '等待宿主续订',
+      awaiting_host_refresh: '等待宿主续订',
     }[renewal.state];
     const control =
       activeRoom() && member && !member.legacy && member.state !== 'removed' && !pendingBinding
         ? btn(
             'connection-renewal',
-            managed ? '关闭托管续期' : '开启托管续期',
+            managed ? '关闭自动恢复' : '开启自动恢复',
             `data-renewal-enable="${!managed}"`,
             'cr-text-button',
           )
         : '';
-    return `<section class="cr-connect-summary" aria-label="连接保持方式"><strong>${E(mode)}</strong>${status ? `<p class="cr-muted">${E(status)}</p>` : ''}${end ? `<p class="cr-muted">${managed ? '批准至' : '当前租期至'} ${E(dateTime(end))}</p>` : ''}${control}</section>`;
+    return `<section class="cr-connect-summary" aria-label="连接保持方式"><strong>由 dot 宿主续订</strong>${status ? `<p class="cr-muted">${E(status)}</p>` : ''}${facts([
+      ['自动恢复', managed ? '已开启' : '已关闭'],
+      ['恢复授权至', managed && renewal.approved_until ? dateTime(renewal.approved_until) : null],
+      ['当前订阅到期', renewal.expires_at ? dateTime(renewal.expires_at) : null],
+    ])}${control}</section>`;
   }
   function renderFlow(result) {
     if (!panel || !root) return;
@@ -2145,13 +2598,16 @@ window.CodePierCollaboration = (() => {
     const box = root.querySelector('[data-cr-flow-view]');
     if (!box) return;
     const primary =
-      flow.display?.primary_action || flow.primary_action || member?.display?.primary_action;
+      flow.host_connection_state === 'waiting_host_renewal' &&
+      flow.display?.primary_action === 'continue_connection'
+        ? 'wait_for_host_refresh'
+        : flow.display?.primary_action || flow.primary_action || member?.display?.primary_action;
     const stage = flow.stage || flow.state || member?.state;
     const ready = ['ready_chat', 'ready_work'].includes(stage);
-    if (ready) panel.joinInstructions = '';
+    if (ready || flow.awaiting_host_control) panel.joinInstructions = '';
     const renewal = flow.subscription_renewal || member?.subscription_renewal;
     const renewalMarkup = connectionRenewalMarkup(renewal, member, flow.pending_binding);
-    const markup = `<div class="cr-flow-state" data-stage="${E(stage)}"><span class="cr-flow-symbol ${ready ? 'is-ready' : ''}" aria-hidden="true">${ready ? '✓' : icon('network')}</span><h3>${E(flow.display?.title || title(flow))}</h3>${flow.display?.reason ? `<p>${E(flow.display.reason)}</p>` : ''}</div>${renewalMarkup}${flow.pending_binding ? '<p class="cr-info">新连接验证通过后才会替换当前连接。原成员和工作保持原来的身份。</p>' : member?.connection_source || member?.connection_source_member_id ? '<p class="cr-info">请在已选择的原 dot 中完成本房间的独立接入与验证。此房间的参与范围单独生效。</p>' : ''}${panel.joinInstructions ? `<label class="cr-field"><span>加入说明</span><textarea class="cr-instructions" readonly rows="7" aria-label="dot 加入说明"></textarea></label>${btn('copy-instructions', '复制加入说明', '', 'cr-primary cr-full')}` : ''}${primary && !['copy_instructions', 'copy_join_instructions', 'send_message', 'start_work', 'none'].includes(primary) ? btn('flow-action', actionLabel(primary), `data-flow-action="${E(primary)}"`, 'cr-primary cr-full') : ''}${member ? `<section class="cr-member-controls">${btn('permissions', '权限设置')}${member.legacy ? btn('flow-action', '迁移此连接', 'data-flow-action="migrate"') : member.state !== 'removed' ? btn('rebind-member', flow.pending_binding ? '查看更换说明' : '更换连接') : ''}${state.room?.lead_member_id !== memberId(member) && member.state !== 'removed' ? btn('lead', '设为主责', `data-id="${E(memberId(member))}"`) : ''}${member.state !== 'removed' && member.state !== 'paused' ? btn('flow-action', '暂停', 'data-flow-action="pause"') : ''}${member.state !== 'removed' ? btn('remove-member', '移除成员', '', 'cr-danger') : ''}</section>` : ''}<details class="cr-diagnostics"><summary>连接详情</summary><dl>${Object.entries(
+    const markup = `<div class="cr-flow-state" data-stage="${E(stage)}"><span class="cr-flow-symbol ${ready ? 'is-ready' : ''}" aria-hidden="true">${ready ? '✓' : icon('network')}</span><h3>${E(flow.display?.title || title(flow))}</h3>${flow.display?.reason ? `<p>${E(flow.display.reason)}</p>` : ''}</div>${renewalMarkup}${flow.pending_binding ? '<p class="cr-info">新连接验证通过后才会替换当前连接。原成员和工作保持原来的身份。</p>' : !ready && (member?.host_connection_id || member?.connection_source || member?.connection_source_member_id) ? '<p class="cr-info">请在所选 dot 中完成本房间的接入验证。此房间的参与范围单独生效。</p>' : ''}${panel.joinInstructions ? `<label class="cr-field"><span>加入说明</span><textarea class="cr-instructions" readonly rows="7" aria-label="dot 加入说明"></textarea></label>${btn('copy-instructions', '复制加入说明', '', 'cr-primary cr-full')}` : ''}${primary && !['copy_instructions', 'copy_join_instructions', 'send_message', 'start_work', 'none'].includes(primary) ? btn('flow-action', actionLabel(primary), `data-flow-action="${E(primary)}"`, 'cr-primary cr-full') : ''}${member ? `<section class="cr-member-controls">${btn('permissions', '权限设置')}${member.host_connection_id ? btn('host-detail', '管理此 dot 的连接', `data-id="${E(member.host_connection_id)}"`) : ''}${member.legacy ? btn('flow-action', '迁移此连接', 'data-flow-action="migrate"') : member.state !== 'removed' && primary !== 'rebind' ? btn('rebind-member', flow.pending_binding ? '查看更换说明' : '更换连接') : ''}${state.room?.lead_member_id !== memberId(member) && member.state !== 'removed' ? btn('lead', '设为主责', `data-id="${E(memberId(member))}"`) : ''}${member.state !== 'removed' && member.state !== 'paused' ? btn('flow-action', '暂停此成员', 'data-flow-action="pause"') : ''}${member.state !== 'removed' ? btn('remove-member', '移除成员', '', 'cr-danger') : ''}</section>` : ''}<details class="cr-diagnostics"><summary>连接详情</summary><dl>${Object.entries(
       flow.evidence || {},
     )
       .map(
@@ -2203,7 +2659,11 @@ window.CodePierCollaboration = (() => {
           ? 'migration'
           : url.includes('/legacy-channels/')
             ? 'legacy-channel'
-            : url.endsWith('/members')
+            : url === batchPath
+              ? 'host-batch'
+              : url.startsWith(connectionsPath + '/') && url.endsWith('/revoke')
+                ? 'host-revoke'
+                : url.endsWith('/members')
               ? 'member'
               : url.includes('/connect-flows/')
                 ? 'flow'
@@ -2220,6 +2680,7 @@ window.CodePierCollaboration = (() => {
       body: requestBody,
       owner,
       roomId: current?.roomId || state.roomId,
+      hostId: current?.hostId,
       kind,
       label: {
         create: '创建房间',
@@ -2230,6 +2691,8 @@ window.CodePierCollaboration = (() => {
         room: '房间设置调整',
         migration: '启用新房间界面',
         'legacy-channel': '暂停原渠道连接',
+        'host-batch': '批量更换 dot 连接',
+        'host-revoke': '撤销 dot 连接',
       }[kind],
       state: 'unknown',
     };
@@ -2380,6 +2843,11 @@ window.CodePierCollaboration = (() => {
         } else if (receipt.kind === 'work') {
           store.applyWork(result.work);
           workPanel(result.work.id);
+        } else if (receipt.kind === 'host-batch' && result.batch_id) {
+          if (receipt.hostId) rememberedBatch(receipt.hostId, result.batch_id);
+          await hostBatchPanel(result.batch_id, receipt.hostId, result);
+        } else if (receipt.kind === 'host-revoke' && receipt.hostId) {
+          await hostDetailPanel(receipt.hostId);
         } else closePanel();
         await store.refresh();
       }
@@ -2484,18 +2952,29 @@ window.CodePierCollaboration = (() => {
     } else if (type === 'permissions') {
       await savePermissions(form, current);
     } else if (type === 'member') {
+      const existing = data.get('connection_mode') === 'existing';
+      const chosen = current.connections.find(
+        (item) => connectionChoice(item) === data.get('reuse_member_id'),
+      );
+      if (existing && !chosen) {
+        panelError('请选择要使用的 dot 连接。');
+        return;
+      }
+      const verifiedReuse = chosen?.host_connection_id &&
+        supportsHostReuse(chosen, current.connectionCapabilities || {});
+      const reuse = !existing
+        ? {}
+        : verifiedReuse
+          ? { host_connection_id: chosen.host_connection_id }
+          : {
+              reuse_member_id: reuseAnchor(chosen),
+              reuse_binding_generation: chosen.reuse_binding_generation ?? chosen.binding_generation,
+            };
       const result = await mutation('POST', store.path() + '/members', {
         name: data.get('name').trim(),
         expected_version: current.version,
         ...(data.get('keep_connected') ? { keep_connected: true } : {}),
-        ...(data.get('connection_mode') === 'existing'
-          ? {
-              reuse_member_id: data.get('reuse_member_id'),
-              reuse_binding_generation: current.connections.find(
-                (item) => (item.member_id || item.id) === data.get('reuse_member_id'),
-              )?.binding_generation,
-            }
-          : {}),
+        ...reuse,
       });
       if (!result) return;
       await store.refresh();
@@ -3215,19 +3694,11 @@ window.CodePierCollaboration = (() => {
         ['回传', '当前房间和发起任务的原私聊'],
         [
           '连接保持',
-          renewal?.mode === 'managed'
-            ? 'CodePier 定期保持连接'
-            : renewal?.mode === 'host'
-              ? '由 dot 宿主负责续期'
-              : null,
+          renewal ? '由 dot 宿主续订' : null,
         ],
         [
-          '连接期限',
-          renewal?.approved_until
-            ? dateTime(renewal.approved_until)
-            : renewal?.expires_at
-              ? dateTime(renewal.expires_at)
-              : null,
+          '当前订阅到期',
+          renewal?.expires_at ? dateTime(renewal.expires_at) : null,
         ],
       ])}
       ${
@@ -3700,7 +4171,21 @@ window.CodePierCollaboration = (() => {
     } else if (action === 'members') membersPanel();
     else if (action === 'add-member') await addMemberPanel();
     else if (action === 'more-connections') await loadConnections(!!panel.connectionsCursor);
-    else if (action === 'member-detail') await memberPanel(id);
+    else if (action === 'host-list') await hostListPanel();
+    else if (action === 'more-hosts') await loadHostList();
+    else if (action === 'host-detail') await hostDetailPanel(id);
+    else if (action === 'host-impact' || action === 'more-host-impact')
+      await loadHostImpact(action === 'more-host-impact');
+    else if (action === 'revoke-host') await revokeHost();
+    else if (action === 'load-batch-targets') await loadHostBatchTargets();
+    else if (action === 'start-host-batch') await startHostBatch();
+    else if (action === 'view-host-batch') await hostBatchPanel(id, panel.hostId);
+    else if (action === 'more-host-batch') await refreshHostBatch(true);
+    else if (action === 'open-batch-member') {
+      const targetRoomId = button.dataset.roomId;
+      if (state.roomId !== targetRoomId) await selectRoom(targetRoomId);
+      if (state.roomId === targetRoomId) await memberPanel(id);
+    } else if (action === 'member-detail') await memberPanel(id);
     else if (action === 'channel-project-permissions') {
       if (panel?.name === 'weixin') await permissionsPanel(panel.channel);
     } else if (action === 'channel-scope-back') await returnToChannel(panel);
@@ -3821,21 +4306,6 @@ window.CodePierCollaboration = (() => {
       const current = panel;
       const keepConnected = button.dataset.renewalEnable === 'true';
       const flow = current.flow;
-      if (
-        keepConnected &&
-        !(await uiConfirmAction(
-          {
-            title: '在房间授权有效期间保持连接？',
-            body: 'CodePier 会为此房间的当前 dot 连接定期续期。可以在连接详情关闭。',
-            confirmLabel: '开启托管续期',
-          },
-          {
-            owner: button,
-            current: () => panel === current && current.flow.version === flow.version,
-          },
-        ))
-      )
-        return;
       const result = await mutation(
         'POST',
         base + '/connect-flows/' + encodeURIComponent(current.flowId) + '/actions',
@@ -3857,6 +4327,8 @@ window.CodePierCollaboration = (() => {
         {
           continue_connection: 'resume',
           recover_connection: 'resume',
+          wait_for_host_refresh: 'resume',
+          awaiting_host_refresh: 'resume',
           retry_probe: 'resume',
           refresh_invitation: 'refresh_invite',
         }[requestAction] || requestAction;
@@ -4173,6 +4645,8 @@ window.CodePierCollaboration = (() => {
         if (root && root._crProjectSaveFeedback === savedFeedback)
           delete root._crProjectSaveFeedback;
         if (panel?.name === 'member') await refreshFlow();
+        if (panel?.name === 'host-detail') await refreshHostDetail();
+        if (panel?.name === 'host-batch' && !panel.batchComplete) await refreshHostBatch();
         if (panel?.name === 'weixin') await refreshChannel();
         if (panel?.name === 'work' && !panel.busy) await store.work(panel.work.id);
         if (panel?.name === 'permissions') void refreshContinuationResult(panel);
@@ -4371,14 +4845,16 @@ window.CodePierCollaboration = (() => {
           select.required = existing;
           if (existing && !panel.connectionsLoaded) void loadConnections();
         }
+        if (event.target.matches('[data-cr-host-member]') && panel?.name === 'host-detail')
+          updateHostBatchControls();
         if (event.target.name === 'reuse_member_id' && panel?.name === 'add-member') {
           const source = panel.connections.find(
-            (item) => (item.member_id || item.id) === event.target.value,
+            (item) => connectionChoice(item) === event.target.value,
           );
           const name = root.querySelector('[data-cr-form="member"] [name="name"]');
           if (source && (!name.value.trim() || name.value === panel.lastSourceName))
-            name.value = source.name;
-          panel.lastSourceName = source?.name || '';
+            name.value = connectionName(source);
+          panel.lastSourceName = source ? connectionName(source) : '';
         }
         if (event.target.name === 'member_id' && event.target.closest('#cr-composer'))
           store.draft().member = event.target.value;

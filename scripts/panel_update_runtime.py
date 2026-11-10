@@ -199,6 +199,32 @@ def updated_env(content, changes):
 
 
 # This copy program belongs to the installed updater, not to downloaded code.
+# The host updater can start an older image. Read the declaration from
+# the verified copy while the candidate writer is still stopped.
+COPY_CONTRACT = """
+with sqlite3.connect((dst/'hub.sqlite3').as_uri()+'?mode=ro', uri=True) as contract_db:
+    has_meta = contract_db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone()
+    row = contract_db.execute("SELECT value FROM meta WHERE key='room_host_connections_contract'").fetchone() if has_meta else None
+    data_contract = json.loads(row[0]) if row else None
+    if row and not isinstance(data_contract, dict):
+        raise RuntimeError('Invalid Hub data contract')
+"""
+
+
+def verify_data_contract(contract, version):
+    if contract is None:
+        return
+    keys = ('min_reader_version', 'min_writer_version')
+    values = [version] + [contract.get(key) for key in keys] if isinstance(contract, dict) else []
+    if (not values or type(contract.get('version')) is not int or contract['version'] != 1
+            or not all(isinstance(value, str) and re.fullmatch(r'[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}', value)
+                       for value in values)):
+        raise UpdateError('DATA_CONTRACT_UNKNOWN', 'Hub 数据兼容声明或目标版本无法核验，已停止启动', 409)
+    candidate, reader, writer = [tuple(map(int, value.split('.'))) for value in values]
+    if candidate < max(reader, writer, (1, 33, 9)):
+        raise UpdateError('DATA_CONTRACT_INCOMPATIBLE', '目标 Hub 版本无法打开此数据，请选择兼容版本', 409)
+
+
 COPY_DATA = r'''
 import hashlib,json,os,shutil,sqlite3,stat
 from pathlib import Path
@@ -237,7 +263,8 @@ for root,dirs,names in os.walk(dst,topdown=False):
     finally: os.close(fd)
 with sqlite3.connect('file:/app/data/hub.sqlite3?mode=ro',uri=True) as db:
     if db.execute('PRAGMA integrity_check').fetchone()[0]!='ok': raise RuntimeError('SQLite integrity')
-print(json.dumps({'files':files,'bytes':total,'integrity':'ok'}))
+''' + COPY_CONTRACT + '''
+print(json.dumps({'files':files,'bytes':total,'integrity':'ok','data_contract':data_contract}))
 '''
 
 COPY_STATE = r'''
@@ -314,7 +341,8 @@ os.chmod(receipt,0o600)
 fd=os.open(dst,os.O_RDONLY|os.O_DIRECTORY)
 try: os.fsync(fd)
 finally: os.close(fd)
-print(json.dumps({'files':files,'bytes':total,'integrity':'ok','state_layout':'split-state-v1','attachments_copied':False}))
+''' + COPY_CONTRACT + '''
+print(json.dumps({'files':files,'bytes':total,'integrity':'ok','state_layout':'split-state-v1','attachments_copied':False,'data_contract':data_contract}))
 '''
 
 # First transition retains all non-state files in the original stable asset volume.
@@ -536,6 +564,9 @@ class DockerRuntime:
         return json.loads(raw)
 
     def start(self, job, which):
+        contract = job.get('copy_summary', {}).get('data_contract')
+        version = job['from_version'] if which == 'old' else job['target_version']
+        verify_data_contract(contract, version)
         self.compose(job, which, 'up', '-d', '--no-deps', '--no-build', '--force-recreate',
                      '--pull', 'never', '--wait', '--wait-timeout', '90', 'hub', timeout=120)
 

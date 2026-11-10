@@ -44,7 +44,7 @@ class FencedConsumerEngine:
                 (self.c.clock(), dot['id'], generation, subscription_id))
 
 
-    def issue_ticket(self, room, dot, subscription, generation, delivery_key, *, ttl_seconds=600):
+    def issue_ticket(self, room, dot, subscription, generation, delivery_key, *, ttl_seconds=600, purpose='business'):
         """Internal immutable delivery body input; never expose from read tools."""
         if not isinstance(delivery_key, str) or not delivery_key or len(delivery_key) > 256:
             raise ValueError('A bounded durable delivery identity is required')
@@ -63,12 +63,23 @@ class FencedConsumerEngine:
             now = self.c.clock()
             ticket = secrets.token_urlsafe(32)
             self._execute("""INSERT INTO dot_wake_tickets
-                (ticket_hash,dot_id,generation,grant_id,subscription_id,delivery_key,ticket_secret,expires_at,created)
-                VALUES (?,?,?,?,?,?,?,?,?)""",
+                (ticket_hash,dot_id,generation,grant_id,subscription_id,delivery_key,ticket_secret,
+                 expires_at,created,route_generation,purpose)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                 (digest(ticket), dot['id'], generation, binding['grant_id'], current['id'],
-                 delivery_key, self.store.encrypt(ticket), min(now + ttl_seconds, current['expires_at']), now))
+                 delivery_key, self.store.encrypt(ticket), min(now + ttl_seconds, current['expires_at']), now,
+                 binding.get('route_generation', 0), purpose))
             return ticket
 
+
+    def ticket_current(self, ticket, binding):
+        return ticket['route_generation'] == binding.get('route_generation', 0)
+
+    def session_current(self, row, binding):
+        return row['subscription_id'] == binding['subscription_id']
+
+    def lease_deadline(self, now, seconds, sub):
+        return min(now + seconds, sub['expires_at'])
 
     def _revision(self, dot, binding):
         return self.mailbox().current_revision(dot['id'], binding['generation'])
@@ -96,23 +107,26 @@ class FencedConsumerEngine:
             ticket = self._one('SELECT * FROM dot_wake_tickets WHERE ticket_hash=?',
                                     (digest(args['wake_ticket']),))
             if (not ticket or ticket[self.subject_column] != dot['id'] or ticket['generation'] != binding['generation']
-                    or ticket['grant_id'] != principal.grant_id or ticket['subscription_id'] != sub['id']):
+                    or ticket['grant_id'] != principal.grant_id):
                 raise DevError('DOT_WAKE_TICKET_INVALID', '消费票据不属于这个 Dot 与原订阅', 403)
             previous = self._one("""SELECT * FROM dot_consumer_sessions
                 WHERE dot_id=? AND generation=? AND (request_key=? OR run_id=?)""",
                 (dot['id'], binding['generation'], args['idempotency_key'], args['consumer_run_id']))
             if previous:
-                if previous['request_digest'] != fingerprint or ticket['redeemed_session_id'] != previous['id']:
+                if (previous['request_digest'] != fingerprint or ticket['redeemed_session_id'] != previous['id']
+                        or ticket['subscription_id'] != previous['subscription_id']):
                     raise DevError('IDEMPOTENCY_CONFLICT', '原消费请求标识不能用于不同参数', 409)
-                if self.scope_digest(room, dot) != previous['scope_digest']:
+                if not self.session_current(previous, binding) or self.scope_digest(room, dot) != previous['scope_digest']:
                     raise DevError('DOT_CONSUMER_SCOPE_CHANGED', '原消费范围已改变，不能恢复旧消费凭证', 409)
                 return {**self._reply(previous, include_proof=True),
                         'inbox_revision': self._revision(dot, binding), 'replayed': True}
+            if ticket['subscription_id'] != sub['id'] or ticket['purpose'] != 'business' or not self.ticket_current(ticket, binding):
+                raise DevError('DOT_WAKE_TICKET_INVALID', '消费票据的原通知路线已失效', 403)
             if ticket['redeemed_session_id']:
                 raise DevError('DOT_WAKE_TICKET_REDEEMED', '原票据已被其他消费回合使用', 409)
             now = self.c.clock()
-            if ticket['expires_at'] <= now:
-                raise DevError('DOT_WAKE_TICKET_EXPIRED', '消费票据已过期，业务待办仍保留', 409)
+            if ticket['expires_at'] <= now or sub['state'] != 'active' or sub['expires_at'] <= now:
+                raise DevError('DOT_WAKE_TICKET_EXPIRED', '消费票据或原订阅已过期，业务待办仍保留', 409)
             self._execute("""UPDATE dot_consumer_sessions SET state='expired',updated=?
                 WHERE dot_id=? AND state='active' AND lease_until<=?""", (now, dot['id'], now))
             active = self._one("SELECT * FROM dot_consumer_sessions WHERE dot_id=? AND state='active'", (dot['id'],))
@@ -125,12 +139,14 @@ class FencedConsumerEngine:
             identifier, proof = uuid.uuid4().hex, secrets.token_urlsafe(32)
             self._execute("""INSERT INTO dot_consumer_sessions
                 (id,dot_id,generation,grant_id,subscription_id,run_id,request_key,request_digest,
-                 proof_hash,proof_secret,scope_digest,fence,state,lease_until,created,updated)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'active',?,?,?)""",
+                 proof_hash,proof_secret,scope_digest,fence,state,lease_until,created,updated,
+                 host_connection_id,host_revocation_epoch)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'active',?,?,?,?,?)""",
                 (identifier, dot['id'], binding['generation'], principal.grant_id, sub['id'],
                  args['consumer_run_id'], args['idempotency_key'], fingerprint, digest(proof),
                  self.store.encrypt(proof), self.scope_digest(room, dot),
-                 fence, min(now + args['lease_seconds'], sub['expires_at']), now, now))
+                 fence, self.lease_deadline(now, args['lease_seconds'], sub), now, now,
+                 binding.get('host_connection_id', ''), binding.get('host_revocation_epoch', 0)))
             self._execute('UPDATE dot_wake_tickets SET redeemed_session_id=? WHERE ticket_hash=?',
                                (identifier, ticket['ticket_hash']))
             self.consumer_audit(room, principal.actor, 'dot.consumer_started', identifier,
@@ -146,7 +162,7 @@ class FencedConsumerEngine:
         proof = raw.get('consumer_proof', '')
         if (not row or row[self.subject_column] != dot['id'] or row['grant_id'] != principal.grant_id
                 or row['generation'] != binding['generation']
-                or row['subscription_id'] != binding['subscription_id']
+                or not self.session_current(row, binding)
                 or not isinstance(raw.get('consumer_fence'), int) or isinstance(raw.get('consumer_fence'), bool)
                 or row['fence'] != raw['consumer_fence'] or not isinstance(proof, str)
                 or not hmac.compare_digest(row['proof_hash'], digest(proof))):
@@ -194,7 +210,7 @@ class FencedConsumerEngine:
                                        (now, now, row['id']))
             else:
                 self._execute('UPDATE dot_consumer_sessions SET lease_until=?,updated=? WHERE id=?',
-                                   (min(now + args['lease_seconds'], sub['expires_at']), now, row['id']))
+                                   (self.lease_deadline(now, args['lease_seconds'], sub), now, row['id']))
             current = self._one('SELECT * FROM dot_consumer_sessions WHERE id=?', (row['id'],))
             result = {**self._reply(current), 'inbox_revision': revision, 'more': more,
                       'read_is_consumption': False, 'work_lease_changed': False}

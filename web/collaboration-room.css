@@ -2662,3 +2662,22 @@
 .cr-continuation li small {
   display: block;
 }
+
+.cr-host-members {
+  display: grid;
+  gap: 0.5rem;
+  list-style: none;
+  padding: 0;
+}
+
+.cr-host-members li,
+.cr-host-members label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+[data-cr-host-list] .cr-member {
+  justify-content: space-between;
+}

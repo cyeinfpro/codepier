@@ -14,7 +14,7 @@ MARKER='.codepier-volume.json'
 
 
 
-def probe_admin(root, scratch_root=None):
+def probe_admin(root, scratch_root=None, *, check_contract=False):
     """Inspect a read-only, quiesced store without SQLite touching its sidecars."""
     database = Path(root) / "hub.sqlite3"
     if not database.exists() and not database.is_symlink():
@@ -48,6 +48,10 @@ def probe_admin(root, scratch_root=None):
             connection = sqlite3.connect(probe, timeout=10)
             try:
                 connection.execute("PRAGMA query_only=ON")
+                if check_contract:
+                    from shared.hub_data_contract import check_database
+                    from shared.util import VERSION
+                    check_database(connection, VERSION)
                 found = connection.execute("SELECT id FROM users LIMIT 1").fetchone()
             finally:
                 connection.close()

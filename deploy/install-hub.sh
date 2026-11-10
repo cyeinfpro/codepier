@@ -141,7 +141,7 @@ probe_compose=$("$bootstrap_python" scripts/migrate_hub.py probe-compose --root 
 probe_status=0
 # A disposable disk-backed anonymous volume avoids the Hub's 64 MiB /tmp limit.
 # Its image directory is owned by the ordinary Hub UID; --rm removes the volume.
-COMPOSE_FILE="$probe_compose" docker compose run --rm --no-deps --volume "$hub_data_volume:/app/data:ro" --volume /var/lib/codepier-probe hub python -c 'import os,sys; from scripts.migrate_hub_data import probe_admin; sys.exit(probe_admin(os.environ["HUB_DATA_DIR"], "/var/lib/codepier-probe"))' || probe_status=$?
+COMPOSE_FILE="$probe_compose" docker compose run --rm --no-deps --volume "$hub_data_volume:/app/data:ro" --volume /var/lib/codepier-probe --entrypoint python hub -c 'import os,sys; from scripts.migrate_hub_data import probe_admin; sys.exit(probe_admin(os.environ["HUB_DATA_DIR"], "/var/lib/codepier-probe", check_contract=True))' || probe_status=$?
 "$bootstrap_python" scripts/migrate_hub.py probe-finished --root "$root"
 if ((probe_status == 0)); then
   echo '检测到已有管理员，保留原账号和数据。'

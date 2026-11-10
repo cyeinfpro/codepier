@@ -130,6 +130,18 @@ def projection(c, room, principal):
                        'message_id': message['id'], 'updated_at': entry['created']})
         delivered = store.one('''SELECT MAX(accepted_at) AS accepted_at FROM mcp_event_deliveries
             WHERE subscription_id=? AND state='accepted' ''', (member['subscription_id'],))
+        recent = store.one('''SELECT d.id AS delivery_id,d.event_id,d.accepted_at,
+            t.redeemed_session_id AS consumer_session_id
+            FROM mcp_event_deliveries d
+            JOIN dot_wake_tickets t ON t.subscription_id=d.subscription_id AND t.delivery_key=d.event_id
+            WHERE d.subscription_id=? AND d.state='accepted' AND t.purpose='business'
+            AND t.member_id=? AND t.generation=?
+            ORDER BY d.event_seq DESC LIMIT 1''',
+            (member['subscription_id'], member['id'], c.room_consumers.generation(member)))
+        notification_evidence = None
+        if recent:
+            notification_evidence = {**recent,
+                'state': 'claimed' if recent['consumer_session_id'] else 'accepted_unclaimed'}
         notifications = store.one('''SELECT COUNT(*) AS pending_count,MIN(created) AS oldest,
             MIN(next_at) AS next_attempt_at FROM mcp_event_deliveries
             WHERE subscription_id=? AND state IN ('pending','retry_wait','leased')''', (member['subscription_id'],))
@@ -143,6 +155,7 @@ def projection(c, room, principal):
                 'pending_count': len(visible_pending), 'complete': len(pending) <= LIMITS['pending_per_member'],
                 'oldest_age_seconds': age(min((item['created'] for item in visible_pending), default=None))},
             'notification': {'last_accepted_at': delivered['accepted_at'], 'read_verified': False,
+                'correlated_receipt': notification_evidence,
                 'pending_count': notifications['pending_count'], 'oldest_age_seconds': age(notifications['oldest']),
                 'next_attempt_at': notifications['next_attempt_at']}})
         trace({'kind': 'member', 'id': member['id'], 'member_id': member['id'],

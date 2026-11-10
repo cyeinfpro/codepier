@@ -30,6 +30,8 @@ async def test_room_diagnostics_has_real_consumer_and_queue_evidence_without_mut
     assert member['consumer']['state'] == 'active'
     assert member['notification']['last_accepted_at'] is not None
     assert member['notification']['read_verified'] is False
+    receipt = member['notification']['correlated_receipt']
+    assert receipt['state'] == 'claimed' and receipt['consumer_session_id'] == credentials['consumer_session_id']
     queue = next(item for item in view['queues'] if item['kind'] == 'waiting_consumer')
     assert queue['pending_count'] == 1 and queue['oldest_age_seconds'] == 12
     trace = next(item for item in view['traces'] if item['kind'] == 'message')

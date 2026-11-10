@@ -1,8 +1,9 @@
-"""Owner-approved maintenance for the original verified room subscription."""
+"""Owner-approved health checks for a verified native room subscription."""
 from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 
 from hub.collaboration.common import ROOM_INBOX_EVENT, digest
 from hub.collaboration.event_errors import CallbackEndpointError
@@ -55,25 +56,31 @@ class RoomSubscriptionRenewals:
         subscription = (self.store.one('SELECT state,expires_at FROM mcp_event_subscriptions WHERE id=?',
                                        (member['subscription_id'],)) if member['subscription_id'] else None)
         expires = subscription['expires_at'] if subscription else None
-        if not row or row['binding_generation'] != member['binding_generation']:
-            return {'mode': 'host', 'approved': False, 'expires_at': expires,
-                    'state': 'active' if subscription and subscription['state'] == 'active' and expires > self.c.clock()
-                    else 'waiting'}
         now = self.c.clock()
+        current = bool(subscription and subscription['state'] == 'active' and expires > now)
+        awaiting_refresh = bool(subscription and subscription['state'] in {'active', 'expired'} and expires <= now)
+        state = 'active' if current else 'awaiting_host_refresh' if awaiting_refresh else 'waiting'
+        lifecycle = {'state': state, 'expires_at': expires, 'renewal_managed_by': 'host'}
+        if not row or row['binding_generation'] != member['binding_generation']:
+            return {**lifecycle, 'mode': 'host', 'approved': False}
         approval_expired = row['approved_until'] is not None and row['approved_until'] <= now
         approved = row['state'] == 'approved' and not approval_expired
-        state = 'stopped' if not approved else 'awaiting_probe' if not member['probe_replied_at'] else (
-            'active' if subscription and subscription['state'] == 'active' and expires > now else 'waiting')
-        return {'mode': 'managed', 'approved': approved, 'state': state, 'expires_at': expires,
+        if not approved:
+            state = 'stopped'
+        elif not member['probe_replied_at']:
+            state = 'awaiting_probe'
+        elif current and row['reason_code'] == 'callback_unverified':
+            state = 'recovering'
+        return {**lifecycle, 'mode': 'managed', 'approved': approved, 'state': state,
                 'next_at': row['next_at'], 'approved_until': row['approved_until'],
                 'reason_code': 'authorization_expired' if approval_expired else row['reason_code']}
 
     def set(self, member, owner, enabled):
+        if member['owner_user_id'] != owner.user_id or owner.grant_id:
+            raise DevError('ROOM_OWNER_REQUIRED', '只有房主能批准保持连接', 403)
         if not enabled:
             self.store.execute('DELETE FROM room_subscription_renewals WHERE member_id=?', (member['id'],))
             return
-        if member['owner_user_id'] != owner.user_id or owner.grant_id:
-            raise DevError('ROOM_OWNER_REQUIRED', '只有房主能批准保持连接', 403)
         self.store.execute("""INSERT INTO room_subscription_renewals
             (member_id,conversation_id,owner_user_id,binding_generation,approved_until)
             VALUES (?,?,?,?,?) ON CONFLICT(member_id) DO UPDATE SET
@@ -97,24 +104,27 @@ class RoomSubscriptionRenewals:
             reason_code=?,version=version+1 WHERE subscription_id=? AND state='approved'""",
             (reason, subscription_id))
 
-    def attach(self, member, sub, ttl):
+    def attach(self, member, sub, ttl, *, authenticated_rotation=False, authenticated_route_change=False):
         row = self.record(member)
         if (not row or row['state'] != 'approved' or row['binding_generation'] != member['binding_generation']
                 or row['conversation_id'] != member['conversation_id'] or row['owner_user_id'] != member['owner_user_id']
                 or sub['name'] != ROOM_INBOX_EVENT):
             return
-        if row['subscription_id'] and (
-                row['subscription_id'] != sub['id'] or row['grant_id'] != sub['grant_id']
-                or row['endpoint_digest'] != member['endpoint_digest'] or row['credential_digest'] != sub['key_digest']):
+        if row['subscription_id'] and (row['grant_id'] != sub['grant_id'] or (
+                not authenticated_route_change and (row['subscription_id'] != sub['id']
+                    or row['endpoint_digest'] != member['endpoint_digest']
+                    or (row['credential_digest'] != sub['key_digest'] and not authenticated_rotation)))):
             self.stop(row['subscription_id'], 'connection_changed')
             return
         approved_until = row['approved_until'] if row['subscription_id'] else self.grant_end(sub['grant_id'])
-        ttl = row['ttl_seconds'] or ttl
+        next_at = next_renewal(sub['expires_at'], ttl)
+        if approved_until is not None:
+            next_at = min(next_at, approved_until)
         self.store.execute("""UPDATE room_subscription_renewals SET subscription_id=?,grant_id=?,
             endpoint_digest=?,credential_digest=?,approved_until=?,ttl_seconds=?,next_at=?,
             attempts=0,reason_code='',version=version+1 WHERE member_id=?""",
             (sub['id'], sub['grant_id'], member['endpoint_digest'], sub['key_digest'], approved_until, ttl,
-             next_renewal(sub['expires_at'], ttl), member['id']))
+             next_at, member['id']))
 
     def current(self, events, row, now):
         events.guard()
@@ -145,17 +155,24 @@ class RoomSubscriptionRenewals:
             raise DevError('ROOM_RENEWAL_STOPPED', '原回调身份已变化', 410)
         return member, sub, stored, expires
 
-    def defer(self, row, now, reason):
+    def defer(self, row, now, reason, *, before=None):
         delay = min(900, 15 * 2 ** min(row['attempts'], 6))
+        delay += secrets.randbelow(max(1, delay // 4))
+        next_at = min(now + delay, before) if before is not None else now + delay
         self.store.execute("""UPDATE room_subscription_renewals SET next_at=?,attempts=attempts+1,
             reason_code=?,version=version+1 WHERE member_id=? AND version=?""",
-            (now + delay, reason, row['member_id'], row['version']))
+            (next_at, reason, row['member_id'], row['version']))
 
     def reject(self, row, now, exc):
-        if exc.code == 'ROOM_RENEWAL_STOPPED' or exc.status in {401, 403, 404, 410}:
+        if exc.code in {'ROOM_RENEWAL_STOPPED', 'ROOM_CONNECTION_REVOKED'} or exc.status in {401, 403, 404, 410}:
             self.stop(row['subscription_id'], exc.code)
         else:
             self.defer(row, now, exc.code)
+
+    def wait_for_host(self, row, next_at):
+        self.store.execute("""UPDATE room_subscription_renewals SET next_at=?,attempts=0,
+            reason_code='awaiting_host_refresh',version=version+1 WHERE member_id=? AND version=?""",
+            (next_at, row['member_id'], row['version']))
 
     def claim(self, events):
         with self.store.transaction():
@@ -165,9 +182,12 @@ class RoomSubscriptionRenewals:
             result = []
             for row in rows:
                 try:
-                    _, sub, stored, _ = self.current(events, row, now)
+                    _, sub, stored, authorized_until = self.current(events, row, now)
                 except DevError as exc:
                     self.reject(row, now, exc)
+                    continue
+                if sub['state'] == 'expired' or sub['expires_at'] <= now:
+                    self.wait_for_host(row, authorized_until)
                     continue
                 # The timestamp is also a crash-recoverable claim lease.
                 self.store.execute("""UPDATE room_subscription_renewals SET next_at=?,version=version+1
@@ -190,24 +210,17 @@ class RoomSubscriptionRenewals:
                 return
             if sub['id'] != subscription_id or sub['version'] != subscription_version:
                 return
-            if not accepted:
-                self.defer(row, now, 'callback_unverified')
-                return
-            expires = min(now + row['ttl_seconds'], authorized_until or float('inf'))
-            if expires <= sub['expires_at']:
-                if authorized_until is not None and sub['expires_at'] >= authorized_until:
-                    self.store.execute('UPDATE room_subscription_renewals SET next_at=?,version=version+1 WHERE member_id=?',
-                                       (authorized_until, member_id))
+            if sub['state'] == 'expired' or sub['expires_at'] <= now:
+                self.wait_for_host(row, authorized_until)
+            else:
+                next_at = min(sub['expires_at'], authorized_until) if authorized_until is not None else sub['expires_at']
+                if accepted:
+                    # A verification response establishes reachability only. Only
+                    # a real events/subscribe request can grant another lifetime.
+                    self.wait_for_host(row, next_at)
                 else:
-                    self.defer(row, now, 'renewal_not_due')
-                return
-            expired = sub['expires_at'] <= now or sub['state'] == 'expired'
-            self.store.execute("""UPDATE mcp_event_subscriptions SET expires_at=?,verified_until=?,state='active',
-                updated=? WHERE id=?""", (expires, min(expires, now + 1800), now, subscription_id))
-            self.store.execute("""UPDATE room_subscription_renewals SET next_at=?,attempts=0,reason_code='',
-                version=version+1 WHERE member_id=?""", (next_renewal(expires, row['ttl_seconds']), member_id))
-            if expired:
-                self.c.room_consumers.recover_connection(member)
+                    self.defer(row, now, 'callback_unverified', before=next_at)
+            self.c.room_connections.touch_health(member.get('host_connection_id'))
             self.rooms.change(member['conversation_id'], 'member', member_id, member['version'])
 
     async def tick(self, events):

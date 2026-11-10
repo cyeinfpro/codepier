@@ -21,6 +21,8 @@ BINDING_FIELDS = (
     'connection_proof_secret', 'subscription_id', 'subscription_verified_at',
     'endpoint_digest', 'credential_digest', 'probe_nonce_hash', 'probe_nonce_secret',
     'probe_created_at', 'probe_read_at', 'probe_replied_at',
+    'host_connection_id', 'host_revocation_epoch', 'route_generation', 'connection_identity_version',
+    'host_control_evidence_id', 'host_control_verified_at',
 )
 
 
@@ -69,19 +71,24 @@ class PendingBindings:
         return {**member, **{key: candidate[key] for key in BINDING_FIELDS},
             'status': 'invited' if candidate['status'] == 'invited' else 'bound',
             '_pending_binding': True, '_pending_binding_id': candidate['id'],
-            '_base_generation': candidate['base_generation'],
+            '_binding_operation_id': candidate['id'], '_base_generation': candidate['base_generation'],
             '_prepare_expires_at': candidate['prepare_expires_at'],
             'connection_source_member_id': '', 'connection_source_generation': 0}
 
     def cancel(self, member_id):
         candidate = self.current(member_id)
         if candidate:
+            self.rooms.host_proofs.cancel_target(member_id, candidate['binding_generation'])
+            self.rooms.connections.touch_authority(candidate['host_connection_id'])
             self.store.execute("UPDATE mcp_event_subscriptions SET state='unsubscribed',version=version+1 WHERE id=?",
                 (candidate['subscription_id'],))
             self.store.execute("UPDATE room_pending_bindings SET status='cancelled',revoked_at=?,version=version+1,updated_at=? WHERE id=?",
                 (self.c.clock(), self.c.clock(), candidate['id']))
 
-    def prepare(self, member, owner):
+    def prepare(self, member, owner, *, host=None):
+        independent = self.rooms.host_connections_enabled()
+        if not independent and (host or member['connection_identity_version'] >= 2):
+            raise DevError('ROOM_CONNECTION_FEATURE_DISABLED', '独立连接接入当前未开启', 409)
         self.cancel(member['id'])
         maximum = self.store.one('SELECT COALESCE(MAX(binding_generation),0) n FROM room_pending_bindings WHERE member_id=?',
             (member['id'],))['n']
@@ -89,15 +96,20 @@ class PendingBindings:
         owner_snapshot = asdict(owner)
         owner_snapshot.update(scopes=[], session_hash='', token_hash='')
         now, code = self.c.clock(), 'CPR-' + secrets.token_urlsafe(32)
+        candidate_id = uuid.uuid4().hex
+        identity_version = 2 if independent else 1
         sequence = self.store.one('SELECT COALESCE(MAX(sequence),0) n FROM dot_mailbox_entries WHERE member_id=?',
             (member['id'],))['n']
         self.store.execute('''INSERT INTO room_pending_bindings
             (id,member_id,base_generation,binding_generation,owner_principal,prepare_expires_at,
              invite_digest,invite_secret,expires_at,source_dirty_revision,source_drained_revision,
-             source_inbox_sequence,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-            (uuid.uuid4().hex, member['id'], member['binding_generation'], generation, canonical(owner_snapshot),
+             source_inbox_sequence,created_at,updated_at,connection_identity_version)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+            (candidate_id, member['id'], member['binding_generation'], generation, canonical(owner_snapshot),
              now + 3600, digest(code), self.store.encrypt(code), now + 1800,
-             member['dirty_revision'], member['drained_revision'], sequence, now, now))
+             member['dirty_revision'], member['drained_revision'], sequence, now, now, identity_version))
+        if host:
+            self.rooms.host_proofs.prepare(owner, host, self.by_generation(member, generation), candidate_id)
         self.store.execute("UPDATE room_connect_flows SET status='invited',last_error_code='',version=version+1,updated_at=? WHERE member_id=?",
             (now, member['id']))
         return self.current(member['id'])
@@ -112,6 +124,8 @@ class PendingBindings:
         self.store.execute('''UPDATE room_pending_bindings SET invite_digest=?,invite_secret=?,
             expires_at=?,prepare_expires_at=?,version=version+1,updated_at=? WHERE id=?''',
             (digest(code), self.store.encrypt(code), now + 1800, now + 3600, now, candidate['id']))
+        if candidate['host_connection_id']:
+            self.rooms.host_proofs.refresh(self.by_generation(member, candidate['binding_generation']), candidate['id'])
         self.store.execute('UPDATE room_connect_flows SET version=version+1,updated_at=? WHERE member_id=?', (now, member['id']))
         return True
 
@@ -124,6 +138,7 @@ class PendingBindings:
             raise DevError('ROOM_INVITE_INVALID', '该候选加入说明已失效', 403)
         else:
             binding = self.by_generation(member, candidate['binding_generation'])
+        self.rooms.host_proofs.authorize_join(binding, principal, args)
         fingerprint = digest([principal.grant_id, args['idempotency_key'], candidate['invite_digest']])
         if candidate['redeemed_at']:
             if binding['grant_id'] != principal.grant_id or candidate['join_request_digest'] != fingerprint:
@@ -153,11 +168,23 @@ class PendingBindings:
             raise DevError('ROOM_BINDING_CHANGED', '原连接已改变，不能切换过期候选', 409)
         saved = json.loads(candidate['owner_principal'])
         owner = refresh_principal(self.store, Principal(**{**saved, 'scopes': set()}))
-        self.rooms.owner(owner, member['conversation_id'])
+        _, room = self.rooms.owner(owner, member['conversation_id'])
+        now = self.c.clock()
+        if candidate['prepare_expires_at'] <= now:
+            raise DevError('ROOM_BINDING_CHANGED', '候选连接已失效，请继续当前成员连接', 409)
+        if candidate['connection_identity_version'] == 2:
+            self.rooms.host_proofs.require_preselection(candidate_member, principal)
+            evidence = digest([candidate_member['subscription_id'], candidate_member['probe_nonce_hash']])
+            host = self.rooms.connections.register_verified(principal, room, candidate_member,
+                verified_at=now, evidence_id=evidence)
+            candidate_member = self.by_generation(member, candidate['binding_generation'])
+            self.rooms.connections.require_host_current(principal, room, candidate_member,
+                expected_epoch=host['host_revocation_epoch'])
         # All destructive effects are deferred to this transaction. If current
         # authority or bridge setup fails, SQLite restores the original route.
         self.rooms.stop_member_work(member, 'ROOM_MEMBER_REBOUND', revoke=True)
-        now = self.c.clock()
+        if member['host_connection_id'] != candidate_member['host_connection_id']:
+            self.rooms.connections.touch_authority(member['host_connection_id'])
         fields = {key: candidate_member[key] for key in BINDING_FIELDS}
         fields['probe_replied_at'] = now
         fields.update(connection_source_member_id='', connection_source_generation=0)

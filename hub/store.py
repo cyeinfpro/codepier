@@ -67,6 +67,10 @@ class Store:
         self.state_directory = state_directory(self.directory)
         self.directory.mkdir(parents=True, exist_ok=True)
         os.chmod(self.directory, 0o700)
+        from shared.hub_data_contract import check_database, check_path
+        from shared.util import VERSION
+
+        check_path(self.state_directory, VERSION)
         connection = sqlite3.connect(self.state_directory / "hub.sqlite3", check_same_thread=False, timeout=30)
         connection.row_factory = sqlite3.Row
         self.lock_metrics = LockMetrics()
@@ -97,6 +101,7 @@ class Store:
                     # Serialize the reads that decide which migrations/key creation
                     # are needed with all writes made by other Store instances.
                     self.db.execute("BEGIN IMMEDIATE")
+                    check_database(self.db, VERSION)
                     self._migrate()
                     self.cipher = self._load_cipher()
                     if self.db.execute("PRAGMA foreign_key_check").fetchall():

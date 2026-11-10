@@ -1,7 +1,7 @@
 """Closed wire contracts for the versioned collaboration events."""
 from typing import Literal
 from pydantic import Field, model_validator
-from shared.collaboration_contracts import Model, Identifier, Queue, JobKind, Severity
+from shared.collaboration_contracts import Model, Identifier, Key, Queue, JobKind, Severity
 from shared.host_parameter_schema import host_parameter_schema
 from shared.schema_cache import schema_for
 from hub.collaboration.common import TASK_EVENT, RESULT_EVENT, INCIDENT_EVENT, STATUS_EVENT, MESSAGE_EVENT, WORK_EVENT, DELEGATION_EVENT, OPERATION_EVENT, MAILBOX_EVENT, ROOM_INBOX_EVENT
@@ -37,9 +37,26 @@ class RoomInboxFilters(Model):
     binding_generation: int = Field(ge=1)
 
 
+class HostControlEventArguments(Model):
+    action: Literal['room_connection_control']
+    owner_operation_id: Identifier
+    challenge_proof: str = Field(min_length=24, max_length=256)
+    idempotency_key: Key
+
+
+class HostControlEventRequest(Model):
+    tool: Literal['collaboration']
+    arguments: HostControlEventArguments
+
+
 class RoomInboxPayload(RoomInboxFilters):
     schema_version: Literal[1]
     connection_check_required: bool = Field(default=False, exclude_if=lambda required: not required)
+    host_control_challenge_id: Identifier | None = Field(default=None, exclude_if=lambda value: value is None)
+    host_control_subscription_id: Identifier | None = Field(default=None, exclude_if=lambda value: value is None)
+    host_control_request: HostControlEventRequest | None = Field(default=None, exclude_if=lambda value: value is None)
+    connection_probe: bool = Field(default=False, exclude_if=lambda probe: not probe)
+    route_probe_id: str = Field(default='', max_length=128, exclude_if=lambda identifier: not identifier)
     dirty_revision: int = Field(ge=0)
     test: bool = False
     test_subscription_id: str = Field(default='', max_length=128)
@@ -49,6 +66,12 @@ class RoomInboxPayload(RoomInboxFilters):
     def synthetic_ticket(self):
         if self.test and self.wake_ticket is not None:
             raise ValueError('Test events cannot carry a consumer ticket')
+        if bool(self.host_control_challenge_id) != bool(self.host_control_subscription_id):
+            raise ValueError('Host control events must target their original subscription')
+        if self.host_control_request and not self.host_control_challenge_id:
+            raise ValueError('Host control requests must have an original challenge')
+        if self.host_control_challenge_id and (self.test or self.wake_ticket is not None or self.route_probe_id):
+            raise ValueError('Host control events cannot carry a probe or consumer ticket')
         return self
 
 
@@ -294,7 +317,7 @@ DESCRIPTIONS = {
     STATUS_EVENT: 'Monitoring component status changed.',
 }
 _GUIDES = {
-    ROOM_INBOX_EVENT: 'Use the server-issued room inbox request for the exact member and binding generation. Recheck member and resource rights. Probe replies prove connectivity only.',
+    ROOM_INBOX_EVENT: 'For a host_control_request, execute the restricted request to continue the approved connection. It creates no work. Otherwise use the server-issued room inbox request for the exact member and binding generation. Probe replies prove connectivity only.',
     MAILBOX_EVENT: 'Read the current mailbox and original ledgers. V2 writes require live consumer proof and fence. Synthetic tests issue no ticket. Preserve notification-only bindings.',
     OPERATION_EVENT: 'Use query action=job, view=get with ids=[operation_id]. Supply your last-read args.after_output_seq, never the event’s new output_seq as a read checkpoint. Preserve project and workspace. needs_review and interrupted require reconciliation. A cancellation needs its durable terminal receipt. Delivery is not host consumption or execution proof.',
     DELEGATION_EVENT: 'For CPD, use the saved query collab.inbox view=dot_inbox and recover the setup through query collab.get view=dot_connection. On every wake, paginate and reconcile original operations. Legacy notification_only consumers keep their saved baseline and exact inbox/resume requests. Only explicitly user-approved managed_execution may claim, heartbeat, execute or record work results.',
@@ -332,7 +355,7 @@ def event_help(name, *, detail='brief'):
                                'When updating triggers, supply the complete desired list.')}
     if name == ROOM_INBOX_EVENT:
         result['renewal'] = {'host': 'Persist the original subscription ID, callback identity, signing key, and last signed cursor. Renew the same subscription before refreshBefore.',
-            'managed': 'A room owner can approve renewal of this verified connection. Hub rechecks the original grant and callback. Unsubscribe stops renewal.',
+            'managed': 'A room owner can enable connection health checks. Only a real host subscribe call renews a finite lifetime. Unsubscribe stops maintenance.',
             'restore': 'Use the original signed cursor when available. Observe truncated and resume pending room inbox work with a fresh ticket.'}
     if detail == 'schema':
         definition_for_help = definition(name, unified=True, exact=True)

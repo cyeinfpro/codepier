@@ -53,6 +53,14 @@ def migrate(db):
             db.execute(sql)
         for _, sql in triggers:
             db.execute(sql)
+    for table, name, declaration in (
+        ('dot_wake_tickets', 'route_generation', 'INTEGER NOT NULL DEFAULT 0'),
+        ('dot_wake_tickets', 'purpose', "TEXT NOT NULL DEFAULT 'business'"),
+        ('dot_consumer_sessions', 'host_connection_id', "TEXT NOT NULL DEFAULT ''"),
+        ('dot_consumer_sessions', 'host_revocation_epoch', 'INTEGER NOT NULL DEFAULT 0'),
+    ):
+        if name not in {row[1] for row in db.execute(f'PRAGMA table_info({table})')}:
+            db.execute(f'ALTER TABLE {table} ADD COLUMN {name} {declaration}')
     for table, suffix, columns in (
         ('dot_consumer_fences', 'identity', 'member_id'),
         ('dot_consumer_sessions', 'request', 'member_id,generation,request_key'),
