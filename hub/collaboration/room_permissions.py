@@ -311,7 +311,8 @@ class RoomPermissions:
                 bridge.bind(current, actor)
         if (detached or any(delta.values())) and member['grant_id'] and member['status'] != 'legacy':
             self.c.room_consumers.scope_updated(self.c.rooms.member(member['id']), previous_digest,
-                additions_only=bool(not detached and delta['added'] and not delta['changed'] and not delta['revoked']))
+                additions_only=bool(not detached and delta['added'] and not delta['changed'] and not delta['revoked']),
+                scope_changes=delta)
 
     def save(self, raw, principal):
         args = validate(contracts.RoomPermissionsUpdate, raw)

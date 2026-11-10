@@ -51,7 +51,8 @@ async def test_added_scope_preserves_original_goal_operation_deadline_and_fence(
     assert s.store.one("SELECT * FROM room_member_work_bridges WHERE member_id=? AND project_id='proj' AND state='active'",(identity['member_id'],))==old_bridge
     current=s.store.one('SELECT * FROM dot_consumer_sessions WHERE id=?',(credentials['consumer_session_id'],))
     assert current['state']=='active' and current['fence']==old_consumer['fence'] and current['proof_hash']==old_consumer['proof_hash']
-    assert current['scope_digest']!=old_consumer['scope_digest']
+    assert current['scope_digest_at_begin'] == old_consumer['scope_digest_at_begin']
+    assert current['observed_scope_digest'] != old_consumer['observed_scope_digest']
     assert s.store.one('SELECT cancel_requested FROM operations WHERE id=?',(operation['operation_id'],))['cancel_requested']==0
     assert s.room_runtime.goal(goal_id)['spec']==old_goal['spec'] and s.room_runtime.goal(goal_id)['expires_at']==old_goal['expires_at']
     assert json.loads(old_goal['spec'])['project_ids']==['proj']

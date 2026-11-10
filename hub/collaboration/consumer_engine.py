@@ -89,25 +89,42 @@ class FencedConsumerEngine:
         return digest({key: value for key, value in args.items() if key != 'wake_ticket'} |
                       {'wake_ticket_hash': digest(args['wake_ticket'])})
 
+    def _begin_scope(self, raw, principal):
+        return self.scope(raw, principal, self.begin_model)
+
+    def _check_begin_replay(self, room, dot, binding, row):
+        if self.scope_digest(room, dot) != row['scope_digest']:
+            raise DevError('DOT_CONSUMER_SCOPE_CHANGED', '原消费范围已改变，不能恢复旧消费凭证', 409)
+
+    def _initial_lease(self, now, args, room, dot, sub):
+        return min(now + args['lease_seconds'], sub['expires_at'])
+
+    def _record_turn_policy(self, identifier, room, dot, binding, sub, now):
+        pass
+
     def begin(self, raw, principal):
         with self.store.transaction():
-            args, principal, room, _, dot, binding, sub = self.scope(raw, principal, self.begin_model)
+            args, principal, room, _, dot, binding, sub = self._begin_scope(raw, principal)
             fingerprint = self.begin_fingerprint(args)
             ticket = self._one('SELECT * FROM dot_wake_tickets WHERE ticket_hash=?',
                                     (digest(args['wake_ticket']),))
             if (not ticket or ticket[self.subject_column] != dot['id'] or ticket['generation'] != binding['generation']
-                    or ticket['grant_id'] != principal.grant_id or ticket['subscription_id'] != sub['id']):
+                    or ticket['grant_id'] != principal.grant_id or (sub and ticket['subscription_id'] != sub['id'])):
                 raise DevError('DOT_WAKE_TICKET_INVALID', '消费票据不属于这个 Dot 与原订阅', 403)
             previous = self._one("""SELECT * FROM dot_consumer_sessions
                 WHERE dot_id=? AND generation=? AND (request_key=? OR run_id=?)""",
                 (dot['id'], binding['generation'], args['idempotency_key'], args['consumer_run_id']))
             if previous:
-                if previous['request_digest'] != fingerprint or ticket['redeemed_session_id'] != previous['id']:
+                if (previous['request_digest'] != fingerprint or ticket['redeemed_session_id'] != previous['id']
+                        or ticket['subscription_id'] != previous['subscription_id'] or previous['grant_id'] != principal.grant_id):
                     raise DevError('IDEMPOTENCY_CONFLICT', '原消费请求标识不能用于不同参数', 409)
-                if self.scope_digest(room, dot) != previous['scope_digest']:
-                    raise DevError('DOT_CONSUMER_SCOPE_CHANGED', '原消费范围已改变，不能恢复旧消费凭证', 409)
+                self._check_begin_replay(room, dot, binding, previous)
                 return {**self._reply(previous, include_proof=True),
                         'inbox_revision': self._revision(dot, binding), 'replayed': True}
+            if sub is None:
+                binding, sub = self.binding(room, dot, principal, binding['generation'])
+                if ticket['subscription_id'] != sub['id']:
+                    raise DevError('DOT_WAKE_TICKET_INVALID', '消费票据不属于当前通知路线', 403)
             if ticket['redeemed_session_id']:
                 raise DevError('DOT_WAKE_TICKET_REDEEMED', '原票据已被其他消费回合使用', 409)
             now = self.c.clock()
@@ -130,7 +147,8 @@ class FencedConsumerEngine:
                 (identifier, dot['id'], binding['generation'], principal.grant_id, sub['id'],
                  args['consumer_run_id'], args['idempotency_key'], fingerprint, digest(proof),
                  self.store.encrypt(proof), self.scope_digest(room, dot),
-                 fence, min(now + args['lease_seconds'], sub['expires_at']), now, now))
+                 fence, self._initial_lease(now, args, room, dot, sub), now, now))
+            self._record_turn_policy(identifier, room, dot, binding, sub, now)
             self._execute('UPDATE dot_wake_tickets SET redeemed_session_id=? WHERE ticket_hash=?',
                                (identifier, ticket['ticket_hash']))
             self.consumer_audit(room, principal.actor, 'dot.consumer_started', identifier,
@@ -140,19 +158,25 @@ class FencedConsumerEngine:
                     'replayed': False}
 
 
+    def _check_scope(self, room, dot, binding, row, *, live):
+        if self.scope_digest(room, dot) != row['scope_digest']:
+            raise DevError('DOT_CONSUMER_SCOPE_CHANGED', '消费期间授权或项目范围已改变，请恢复当前绑定', 409)
+
+    def _requires_bound_route(self, row):
+        return True
+
     def _credential(self, raw, principal, room, dot, binding, *, live=True):
         row = self._one('SELECT * FROM dot_consumer_sessions WHERE id=?',
                              (raw.get('consumer_session_id', ''),))
         proof = raw.get('consumer_proof', '')
         if (not row or row[self.subject_column] != dot['id'] or row['grant_id'] != principal.grant_id
                 or row['generation'] != binding['generation']
-                or row['subscription_id'] != binding['subscription_id']
+                or (self._requires_bound_route(row) and row['subscription_id'] != binding['subscription_id'])
                 or not isinstance(raw.get('consumer_fence'), int) or isinstance(raw.get('consumer_fence'), bool)
                 or row['fence'] != raw['consumer_fence'] or not isinstance(proof, str)
                 or not hmac.compare_digest(row['proof_hash'], digest(proof))):
             raise DevError('DOT_CONSUMER_PROOF_REQUIRED', '当前 Dot 写入需要原消费回合的有效凭证与 fence', 403)
-        if self.scope_digest(room, dot) != row['scope_digest']:
-            raise DevError('DOT_CONSUMER_SCOPE_CHANGED', '消费期间授权或项目范围已改变，请恢复当前绑定', 409)
+        self._check_scope(room, dot, binding, row, live=live)
         if live:
             current = self._one('SELECT fence FROM dot_consumer_fences WHERE dot_id=?', (dot['id'],))
             if (row['state'] != 'active' or row['lease_until'] <= self.c.clock()
@@ -169,12 +193,36 @@ class FencedConsumerEngine:
         return self._lease_action(raw, principal, 'yield')
 
 
+    def _lease_scope(self, raw, principal, model):
+        return self.scope(raw, principal, model)
+
+    @staticmethod
+    def _lease_fingerprint(args):
+        return digest({key: value for key, value in args.items() if key != 'consumer_proof'})
+
+    def _renew_until(self, now, args, row, sub):
+        return min(now + args['lease_seconds'], sub['expires_at'])
+
+    def _yield(self, args, principal, dot, binding, row):
+        drained = self.mailbox().mark_drained(dot['id'], binding['generation'], args['expected_inbox_revision'])
+        if drained:
+            self._close_turn(row, 'yielded')
+        return {'more': not drained}
+
+    def _close_turn(self, row, state):
+        now = self.c.clock()
+        return bool(self._execute('''UPDATE dot_consumer_sessions SET state=?,lease_until=?,updated=?
+            WHERE id=? AND dot_id=? AND generation=? AND fence=? AND state='active' AND lease_until>?
+                AND EXISTS (SELECT 1 FROM dot_consumer_fences f WHERE f.dot_id=? AND f.fence=?)''',
+            (state, now, now, row['id'], row[self.subject_column], row['generation'], row['fence'], now,
+             row[self.subject_column], row['fence'])).rowcount)
+
     def _lease_action(self, raw, principal, action):
         model = self.yield_model if action == 'yield' else self.lease_model
         with self.store.transaction():
-            args, principal, room, _, dot, binding, sub = self.scope(raw, principal, model)
+            args, principal, room, _, dot, binding, sub = self._lease_scope(raw, principal, model)
             row = self._credential(args, principal, room, dot, binding, live=False)
-            fingerprint = digest({key: value for key, value in args.items() if key != 'consumer_proof'})
+            fingerprint = self._lease_fingerprint(args)
             old = self._one("""SELECT * FROM dot_consumer_mutations
                 WHERE session_id=? AND action=? AND request_key=?""", (row['id'], action, args['idempotency_key']))
             if old:
@@ -185,18 +233,14 @@ class FencedConsumerEngine:
             row = self._credential(args, principal, room, dot, binding)
             now = self.c.clock()
             revision = self._revision(dot, binding)
-            more = False
             if action == 'yield':
-                drained = self.mailbox().mark_drained(dot['id'], binding['generation'], args['expected_inbox_revision'])
-                more = not drained
-                if drained:
-                    self._execute("UPDATE dot_consumer_sessions SET state='yielded',lease_until=?,updated=? WHERE id=?",
-                                       (now, now, row['id']))
+                outcome = self._yield(args, principal, dot, binding, row)
             else:
                 self._execute('UPDATE dot_consumer_sessions SET lease_until=?,updated=? WHERE id=?',
-                                   (min(now + args['lease_seconds'], sub['expires_at']), now, row['id']))
+                                   (self._renew_until(now, args, row, sub), now, row['id']))
+                outcome = {'more': False}
             current = self._one('SELECT * FROM dot_consumer_sessions WHERE id=?', (row['id'],))
-            result = {**self._reply(current), 'inbox_revision': revision, 'more': more,
+            result = {**self._reply(current), 'inbox_revision': revision, **outcome,
                       'read_is_consumption': False, 'work_lease_changed': False}
             self._execute('INSERT INTO dot_consumer_mutations VALUES (?,?,?,?,?,?)',
                 (row['id'], action, args['idempotency_key'], fingerprint, canonical(result), now))
