@@ -43,7 +43,7 @@ def admit(s, identity, credentials, actor, goal_id, item, project, environment):
 
 
 @pytest.mark.asyncio
-async def test_staging_progress_result_and_final_use_original_work_partition(collab):
+async def test_staging_progress_result_and_publication_use_original_work_partition(collab):
     s, owner, a, b, lead, ac, peer, bc, goal, a_item, b_item = await cross_environment_work(collab)
     alease, aop = admit(s, lead, ac, a, goal['goal_id'], a_item, 'proj', 'production')
     blease, bop = admit(s, peer, bc, b, goal['goal_id'], b_item, 'otherproj', 'staging')
@@ -61,12 +61,12 @@ async def test_staging_progress_result_and_final_use_original_work_partition(col
     refs = [{'work_item_id': item['id'], 'version': item['version'], 'digest': digest(item['result'])}
             for item in (a_done, b_done)]
     request = final_request(s, lead, ac, a, source, refs)
-    final = s.room_runtime.reply(request, a)
-    again = s.room_runtime.reply({**request, 'idempotency_key': key()}, a)
-    assert final['message']['id'] == again['message']['id']
+    with pytest.raises(DevError) as denied:
+        s.room_runtime.reply(request, a)
+    assert denied.value.code == 'ROOM_WORK_ARTIFACT_NOT_VISIBLE'
     assert s.store.one('SELECT COUNT(*) AS n FROM coordination_goals')['n'] == 1
     assert s.store.one('SELECT COUNT(*) AS n FROM operations')['n'] == 2
-    assert s.store.one('SELECT COUNT(*) AS n FROM team_publications')['n'] == 1
+    assert s.store.one('SELECT COUNT(*) AS n FROM team_publications')['n'] == 0
     assert {row['id'] for row in s.store.all('SELECT id FROM operations')} == {aop['operation_id'], bop['operation_id']}
 
 
