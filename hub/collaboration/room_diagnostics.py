@@ -34,16 +34,22 @@ def delivery_display(work_state, deliveries):
     if 'unknown' in states:
         return {'state': 'unknown', 'title': ('已完成，' if completed else '') + channel + '发送待核对',
                 'reason': '结果已保存。原投递结果未知，核对原分项前不会自动重发或重跑工作。'}
-    if states & {'waiting_context', 'waiting_media', 'attention', 'needs_attention', 'failed', 'rejected', 'blocked', 'cancelled'}:
+    if states & {'attention', 'needs_attention', 'failed', 'rejected', 'blocked', 'cancelled'}:
         return {'state': 'waiting_recovery', 'title': ('已完成，' if completed else '') + channel + '待恢复',
                 'reason': '业务结果与投递分别保存；请查看原渠道状态和投递分项。'}
-    if states & {'queued', 'preparing', 'sending', 'leased', 'pending'}:
+    if 'waiting_context' in states:
+        return {'state': 'pending', 'title': ('已完成，' if completed else '') + channel + '等待连接恢复',
+                'reason': '回复已保存。原投递会在原收件路线可用后继续。'}
+    if states & {'queued', 'preparing', 'sending', 'leased', 'pending', 'waiting_media'}:
         return {'state': 'pending', 'title': ('已完成，' if completed else '') + channel + '等待发送',
                 'reason': '结果已保存，原投递仍在等待处理。'}
     if states - {'accepted', 'owner_confirmed', 'sent', 'completed'}:
         return {'state': 'unavailable', 'title': channel + '状态待核对', 'reason': '请核对原投递记录，尚不能确认平台已接受。'}
+    if 'owner_confirmed' in states:
+        return {'state': 'owner_confirmed', 'title': channel + '已有房主核对',
+                'reason': '房主已确认选中分项。其余分项的状态以各自的投递记录为准。'}
     return {'state': 'accepted', 'title': channel + '已有平台回执',
-            'reason': '平台接受和人工确认分别记录；这不证明对方已读。'}
+            'reason': '平台已经受理；这不证明对方已读。'}
 
 
 def work_deliveries(c, goal, principal, *, intent_revision, member_id=''):
@@ -59,6 +65,7 @@ def work_deliveries(c, goal, principal, *, intent_revision, member_id=''):
     else:
         rows = c.store.all('''SELECT * FROM collaboration_messages WHERE goal_id=?
             AND kind IN ('reply','delegation_progress','delegation_result')
+            AND (kind!='reply' OR json_extract(body,'$.publish_work') IS NOT 0)
             ORDER BY conversation_sequence DESC LIMIT 9''', (goal['id'],))
     member = c.rooms.member(member_id, goal['conversation_id']) if member_id else None
     identifiers = []
