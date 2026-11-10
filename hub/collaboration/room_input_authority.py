@@ -224,12 +224,9 @@ class RoomInputAuthority:
                 or binding['conversation_id'] != message['conversation_id'] or origin.get('provider_deleted')
                 or any(binding[k] != origin.get(k) for k in ('account_id', 'peer_id', 'generation'))):
             raise DevError('CHANNEL_OWNER_SOURCE_CHANGED', '原微信消息或私聊绑定已失效', 403)
-        native = self.c.room_channels.native
-        valid = getattr(native, 'inbound', None)
-        if valid is not None:
-            _, account, owner, room, _ = valid(binding['id'], pairing=False)
-        else:
-            _, account, owner, room, _ = native._valid(binding, require_member=False)
+        # Revalidate the original channel grant independently of live account
+        # transport. Inbound polling and actual outbound dispatch still require it.
+        _, account, owner, room = self.c.room_channels.native._binding_identity(binding, allow_unready=True)
         latest = self.store.one('''SELECT message_id FROM weixin_inbound WHERE account_id=? AND generation=?
             AND peer_id=? AND external_id=?''', (account['id'], binding['generation'], binding['peer_id'], origin['external_message_id']))
         if not latest or latest['message_id'] != message['id'] or message.get('reply_to_id'):
