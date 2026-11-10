@@ -355,8 +355,8 @@ class RoomRuntime:
         if explicit and publication:
             native = self.c.room_work_bridge.native
             original = native.original(native.reference(goal))
-            candidates.append(self.store.one('SELECT * FROM collaboration_messages WHERE id=?',
-                                             (original['source_message_id'],)))
+            # A shared recipient must pass the original work delivery guard.
+            candidates.insert(0, self.publication_source(original, source['conversation_id']))
         targets = {}
         for candidate in candidates:
             if candidate and candidate['origin'] == 'external_channel':
