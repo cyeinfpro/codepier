@@ -39,10 +39,12 @@ class FencedConsumerEngine:
             if binding['subscription_id'] != subscription_id or binding['grant_id'] != slot['grant_id']:
                 raise DevError('DOT_CONSUMER_BINDING_CHANGED', '订阅不能激活其他消费者绑定', 409)
             self._execute('INSERT OR IGNORE INTO dot_consumer_fences(dot_id) VALUES (?)', (dot['id'],))
-            self._execute("""UPDATE dot_consumer_sessions SET state='expired',updated=?
-                WHERE dot_id=? AND state='active' AND (generation!=? OR subscription_id!=?)""",
-                (self.c.clock(), dot['id'], generation, subscription_id))
+            self._expire_activated_turns(dot, generation, subscription_id)
 
+    def _expire_activated_turns(self, dot, generation, subscription_id):
+        self._execute("""UPDATE dot_consumer_sessions SET state='expired',updated=?
+            WHERE dot_id=? AND state='active' AND (generation!=? OR subscription_id!=?)""",
+            (self.c.clock(), dot['id'], generation, subscription_id))
 
     def issue_ticket(self, room, dot, subscription, generation, delivery_key, *, ttl_seconds=600):
         """Internal immutable delivery body input; never expose from read tools."""
@@ -213,8 +215,8 @@ class FencedConsumerEngine:
             self._close_turn(row, 'yielded')
         return {'more': not drained}
 
-    def _close_turn(self, row, state):
-        now = self.c.clock()
+    def _close_turn(self, row, state, *, now=None):
+        now = self.c.clock() if now is None else now
         return bool(self._execute('''UPDATE dot_consumer_sessions SET state=?,lease_until=?,updated=?
             WHERE id=? AND dot_id=? AND generation=? AND fence=? AND state='active' AND lease_until>?
                 AND EXISTS (SELECT 1 FROM dot_consumer_fences f WHERE f.dot_id=? AND f.fence=?)''',
