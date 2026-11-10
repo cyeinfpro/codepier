@@ -917,7 +917,8 @@ class Rooms:
                             bridge.bind(member, self.principal(member))
                     if any(delta.values()) and previous['grant_id'] and previous['status']!='legacy':
                         self.c.room_consumers.scope_updated(self.member(approval['member_id']),previous_digest,
-                            additions_only=bool(delta['added'] and not delta['changed'] and not delta['revoked']))
+                            additions_only=bool(delta['added'] and not delta['changed'] and not delta['revoked']),
+                            scope_changes=delta)
                 self.store.execute('UPDATE conversation_rooms SET version=version+1 WHERE id=?', (room['id'],))
                 self.change(room['id'], 'projects', room['id'], room['version'] + 1)
                 return {'conversation_id': room['id'], 'impact': {'removed_partition_ids': removed,

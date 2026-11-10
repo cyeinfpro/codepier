@@ -92,10 +92,8 @@ class RoomAttachments:
                                (message['id'], ordinal, self.c.clock(), self.c.clock() + 7 * 86400, identifier))
 
     def read(self, raw, principal):
-        args = validate(RoomAttachmentRead, raw)
         with self.store.transaction(immediate=False):
-            actor, _, member = self.c.rooms.member_scope(principal, args['conversation_id'], args['member_id'],
-                args['binding_generation'], args['connection_proof'], require_proof=True)
+            args, actor, _, member, _, _, _ = self.c.room_consumers.read_scope(raw, principal, RoomAttachmentRead)
             row = self.c.channels.media.row(args['attachment_id'], actor)
             message = self.store.one('SELECT * FROM collaboration_messages WHERE id=?', (row['message_id'],))
             if not self.c.room_consumers._visible_message(member, actor, message):

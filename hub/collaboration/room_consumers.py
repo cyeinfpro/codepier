@@ -6,21 +6,22 @@ import json
 from hub.collaboration.common import ROOM_INBOX_EVENT, canonical, digest, read_cursor, sign_cursor, validate
 from hub.collaboration.consumer_engine import FencedConsumerEngine
 from hub.collaboration.dot_mailbox import KINDS, ITEM_BYTE_BUDGET, REFERENCE_KEYS
+from hub.collaboration.room_turn_policy import (
+    MAX_TURN_AGE_SECONDS, POLICY_REVISION, ROUTE_GRACE_SECONDS, mode, record_shadow,
+)
 from shared import room_consumer_contracts as contracts
 from shared.util import DevError
 
 
 ROOM_HANDLING = (
-    '用本次唤醒的 wake_ticket 领取消费租约，读取本回合的收件箱。'
-    '工具声明 include_inbox 时可在领取时读取第一页，否则调用 room_inbox。'
-    '明确交办且提供 work_start_arguments 时，在服务端允许的项目与能力内用 room_work_start 直接开工。'
-    '普通聊天用 reply_arguments 回复，有歧义时只追问缺失信息。'
-    '遇到权限或状态拦截时，用 room_reply 说明具体原因。'
-    '结果通过协作工具回写，宿主对话里的文字不会回传。'
-    '收到 work_attempt_settled 提示时，核对原操作回执和验收要求，'
-    '用 archive_arguments 调用 collaboration_work 的 archive_result，补充真实结果与幂等键。'
-    '归档不重新领取或执行原操作。'
-    '处理完当前页后继续分页或交还回合。'
+    '用本次唤醒的 wake_ticket 领取当前回合，支持 include_inbox 时随领取读取第一页。'
+    '沿原消息、房间上下文和工作记录继续对话，已有明确交办时在当前授权内准入一次。'
+    '同一输入可以先说明情况；执行仍待准入时使用 input_handling=pending 保留待办。'
+    '声明 explicit_publication 时，普通回复填 publish_work=false，正式发表经核对的完整成果才填 true。'
+    '只追问缺失信息；结果通过协作工具回写，宿主对话文字不会回传。'
+    '结果未知时查询原操作，或用同键和原参数恢复原回执。'
+    '收到 work_attempt_settled 时，用 archive_arguments 归档原结果及验收证据。'
+    '处理完一页后继续分页；支持 continue_later 时可交还回合并保留待办。'
 )
 
 FAST_WAKE_DELAYS = (30, 120, 600)
@@ -30,6 +31,17 @@ MAX_WAKE_AGE = 86400
 MAX_WAKE_ATTEMPTS = len(FAST_WAKE_DELAYS) + MAX_WAKE_AGE // SLOW_WAKE_DELAY
 CONTINUATION_SOURCE = 'continuation_source'
 PAUSED_ARCHIVE_NOTICE = 'work_attempt_settled'
+DRAIN_SCAN_LIMIT = 128
+CONTINUATION_DELAY = 30
+OBJECT_GUARDED_ACTIONS = frozenset({
+    'work_start', 'work_continue', 'context_update', 'handoff', 'notice_ack',
+    'create', 'assign', 'claim', 'heartbeat', 'progress', 'execute', 'result',
+})
+SCOPE_NOTICE_KINDS = frozenset({
+    'member_scope_changed', 'room_scope_changed', 'channel_scope_changed',
+    'channel_owner_revoked', 'authorization_revoked', 'permission_changed',
+})
+ROOM_REFERENCE_KEYS = REFERENCE_KEYS | {'scope_change_kind'}
 
 
 def message_reference(kind, reference):
@@ -65,28 +77,124 @@ class RoomConsumers(FencedConsumerEngine):
         self.store.audit(actor, action.replace('dot.', 'room_member.'), target, 'ok',
                          {'conversation_id': room['id'], **(details or {})})
 
-    def scope_updated(self, member, previous_digest, *, additions_only=False):
-        """Owner-approved additions keep existing fenced work usable.
-
-        Only an exact still-current scope hash can advance. The identity,
-        generation, grant and fence remain unchanged. Dirty revision forces a
-        fresh inbox read; original native Goal rules still bound every effect.
-        Shrinks/replacements expire the old turn and preserve durable work.
-        """
-        room=self.store.one('SELECT * FROM conversation_rooms WHERE id=?',(member['conversation_id'],))
-        current_digest=None
+    def scope_updated(self, member, previous_digest, *, additions_only=False, scope_changes=None):
+        room = self.store.one('SELECT * FROM conversation_rooms WHERE id=?', (member['conversation_id'],))
+        now = self.c.clock()
         try:
-            current_digest=self.scope_digest(room,member)
+            current_digest = self.scope_digest(room, member)
         except DevError:
-            pass
+            current_digest = None
+        if current_digest:
+            self.store.execute('''UPDATE dot_consumer_sessions SET observed_scope_digest=?,updated=?
+                WHERE member_id=? AND generation=? AND grant_id=? AND state='active' AND turn_policy='decoupled' ''',
+                (current_digest, now, member['id'], self.generation(member), member['grant_id']))
         if additions_only and previous_digest and current_digest:
-            self.store.execute('''UPDATE dot_consumer_sessions SET scope_digest=?,updated=? WHERE member_id=?
-                AND generation=? AND grant_id=? AND state='active' AND scope_digest=? AND lease_until>?''',
-                (current_digest,self.c.clock(),member['id'],self.generation(member),member['grant_id'],previous_digest,self.c.clock()))
+            self.store.execute('''UPDATE dot_consumer_sessions SET observed_scope_digest=?,updated=?
+                WHERE member_id=? AND generation=? AND grant_id=? AND state='active' AND turn_policy!='decoupled'
+                AND COALESCE(NULLIF(observed_scope_digest,''),scope_digest)=? AND lease_until>?''',
+                (current_digest, now, member['id'], self.generation(member), member['grant_id'], previous_digest, now))
         else:
-            self.store.execute("UPDATE dot_consumer_sessions SET state='expired',updated=? WHERE member_id=? AND state='active'",
-                (self.c.clock(),member['id']))
-        self.enqueue_ref(member,'control_notice',member['id'],member['scope_revision'],{'reason_code':'member_scope_changed'})
+            if self.store.one("""SELECT 1 FROM dot_consumer_sessions
+                WHERE member_id=? AND state='active' AND turn_policy='shadow'""", (member['id'],)):
+                record_shadow('scope_update', 'would_allow', 'scope_changed')
+            self.store.execute("""UPDATE dot_consumer_sessions SET state='expired',updated=?
+                WHERE member_id=? AND state='active' AND turn_policy!='decoupled'""", (now, member['id']))
+        reference = {'reason_code': 'member_scope_changed'}
+        if scope_changes is not None:
+            reference['scope_change_kind'] = 'added' if additions_only else 'restricted'
+        self.enqueue_ref(member, 'control_notice', member['id'], member['scope_revision'], reference)
+
+    def _identity(self, raw, principal, *, pending=False):
+        return self.c.rooms.member_scope(principal, raw.get('conversation_id'), raw.get('member_id'),
+            raw.get('binding_generation'), raw.get('connection_proof'), require_proof=True, pending=pending)
+
+    def _identity_binding(self, member):
+        return {**member, 'generation': self.generation(member)}
+
+    def _host_identity(self, member):
+        connections = getattr(self.c, 'room_connections', None)
+        if connections is None or not hasattr(connections, 'identity'):
+            return member.get('host_connection_id'), member.get('host_revocation_epoch')
+        identity = connections.identity(member)
+        return identity['host_connection_id'] or None, identity['host_revocation_epoch']
+
+    def _check_session_host(self, binding, row):
+        host, epoch = self._host_identity(binding)
+        if row['host_connection_id'] is not None and (
+                row['host_connection_id'] != host or row['host_revocation_epoch'] != epoch):
+            raise DevError('ROOM_BINDING_CHANGED', '消费回合的宿主身份已变更', 409)
+
+    def _begin_scope(self, raw, principal):
+        args = validate(self.begin_model, raw)
+        actor, room, member = self._identity(args, principal, pending=True)
+        if member.get('_pending_binding'):
+            raise DevError('ROOM_PROBE_REQUIRED', '候选连接需要先使用真实通知票据读取并回复探针', 409)
+        self.c.rooms.require_native(room)
+        if member.get('connection_identity_version') == 2 and not member['probe_replied_at']:
+            raise DevError('ROOM_PROBE_REQUIRED', '先完成当前成员的真实通知读取和回复验证', 409)
+        return args, actor, room, member, member, self._identity_binding(member), None
+
+    def _check_begin_replay(self, room, dot, binding, row):
+        self._check_session_host(binding, row)
+
+    def _initial_lease(self, now, args, room, dot, sub):
+        if mode(self.store, room['id']) == 'decoupled':
+            return min(now + args['lease_seconds'], now + MAX_TURN_AGE_SECONDS, sub['expires_at'] + ROUTE_GRACE_SECONDS)
+        return super()._initial_lease(now, args, room, dot, sub)
+
+    def _record_turn_policy(self, identifier, room, dot, binding, sub, now):
+        host, epoch = self._host_identity(binding)
+        self.store.execute('''UPDATE dot_consumer_sessions SET turn_policy=?,policy_revision=?,
+            scope_digest_at_begin=scope_digest,observed_scope_digest=scope_digest,scope_digest_evidence='at_begin',
+            hard_deadline=?,route_expires_at=?,route_generation=?,host_connection_id=?,host_revocation_epoch=?
+            WHERE id=?''', (mode(self.store, room['id']), POLICY_REVISION, now + MAX_TURN_AGE_SECONDS,
+            sub['expires_at'], binding.get('route_generation', sub['version']), host, epoch, identifier))
+        self.store.execute('UPDATE room_members SET consumer_continuation_at=NULL WHERE id=?', (dot['id'],))
+
+    def _lease_scope(self, raw, principal, model):
+        args = validate(model, raw)
+        actor, room, member = self._identity(args, principal)
+        return args, actor, room, member, member, self._identity_binding(member), None
+
+    @staticmethod
+    def _lease_fingerprint(args):
+        if args.get('yield_mode') == 'if_drained':
+            args = {key: value for key, value in args.items() if key != 'yield_mode'}
+        return FencedConsumerEngine._lease_fingerprint(args)
+
+    def _requires_bound_route(self, row):
+        return False  # A strict live action checks the route separately.
+
+    def _check_scope(self, room, dot, binding, row, *, live):
+        self._check_session_host(binding, row)
+        if not live:
+            return
+        if row['turn_policy'] != 'decoupled':
+            self.binding(room, dot)
+            if row['subscription_id'] != binding['subscription_id']:
+                raise DevError('ROOM_BINDING_CHANGED', '消费回合的原通知路线已变更', 409)
+            if self.scope_digest(room, dot) != (row['observed_scope_digest'] or row['scope_digest']):
+                if row['turn_policy'] == 'shadow':
+                    record_shadow('scope_update', 'would_allow', 'scope_changed')
+                raise DevError('DOT_CONSUMER_SCOPE_CHANGED', '消费期间授权或项目范围已改变，请恢复当前绑定', 409)
+        elif self._original_route(row)['state'] == 'revoked':
+            raise DevError('ROOM_SUBSCRIPTION_REVOKED', '原通知连接已撤销', 403)
+        if row['hard_deadline'] <= self.c.clock():
+            raise DevError('DOT_CONSUMER_LEASE_EXPIRED', '原消费回合已达到最长存续期限', 409)
+
+    def _original_route(self, row):
+        route = self.store.one('SELECT state,expires_at FROM mcp_event_subscriptions WHERE id=?',
+                               (row['subscription_id'],))
+        return route or {'state': 'unavailable', 'expires_at': row['route_expires_at']}
+
+    def _renew_until(self, now, args, row, sub):
+        route = self._original_route(row)
+        limit = route['expires_at']
+        if row['turn_policy'] == 'decoupled':
+            limit = min(limit, row['route_expires_at']) + ROUTE_GRACE_SECONDS
+        if limit <= now:
+            raise DevError('DOT_CONSUMER_LEASE_EXPIRED', '原通知路线的收尾期限已结束', 409)
+        return min(now + args['lease_seconds'], row['hard_deadline'], limit)
 
     def binding(self, room, member, principal=None, generation=None):
         pending = bool(member.get('_pending_binding'))
@@ -108,8 +216,7 @@ class RoomConsumers(FencedConsumerEngine):
     def scope(self, raw, principal, model):
         args = validate(model, raw)
         can_verify = model in (contracts.RoomInboxRead, contracts.RoomConsumerBegin)
-        actor, room, member = self.c.rooms.member_scope(principal, args['conversation_id'], args['member_id'],
-            args['binding_generation'], args['connection_proof'], require_proof=True, pending=can_verify)
+        actor, room, member = self._identity(args, principal, pending=can_verify)
         if member.get('_pending_binding'):
             if model is contracts.RoomConsumerBegin:
                 raise DevError('ROOM_PROBE_REQUIRED', '候选连接需要先使用真实通知票据读取并回复探针', 409)
@@ -119,9 +226,31 @@ class RoomConsumers(FencedConsumerEngine):
         binding, sub = self.binding(room, member, actor, self.generation(member))
         return args, actor, room, member, member, binding, sub
 
+    def read_scope(self, raw, principal, model):
+        args = validate(model, raw)
+        can_verify = model is contracts.RoomInboxRead
+        actor, room, member = self._identity(args, principal, pending=can_verify)
+        if member.get('_pending_binding'):
+            if args.get('consumer_session_id') is not None:
+                raise DevError('ROOM_PROBE_REQUIRED', '候选连接尚未领取业务回合', 409)
+            return args, actor, room, member, member, None, None
+        self.c.rooms.require_native(room)
+        try:
+            binding, sub = self.binding(room, member, actor)
+        except DevError as exc:
+            if exc.code != 'ROOM_SUBSCRIPTION_INACTIVE' or args.get('consumer_session_id') is None:
+                raise
+            binding, sub = self._identity_binding(member), None
+            row = self._credential(args, actor, room, member, binding)
+            if row['turn_policy'] != 'decoupled' or row['created'] >= row['route_expires_at']:
+                raise
+        return args, actor, room, member, member, binding, sub
+
     def _reply(self, row, *, include_proof=False):
         result = super()._reply(row, include_proof=include_proof)
         result['binding_generation'] = int(row['generation'].rsplit(':', 1)[1])
+        result.update(turn_policy=row['turn_policy'], policy_revision=row['policy_revision'],
+                      hard_deadline=row['hard_deadline'], route_generation=row['route_generation'])
         return result
 
     @staticmethod
@@ -137,9 +266,10 @@ class RoomConsumers(FencedConsumerEngine):
             return result
         identity = {key: raw[key] for key in
                     ('conversation_id', 'member_id', 'binding_generation', 'connection_proof')}
+        identity.update({key: result[key] for key in ('consumer_session_id', 'consumer_fence', 'consumer_proof')})
         try:
             with self.store.transaction(immediate=False):
-                _, actor, room, _, member, binding, _ = self.scope(identity, principal, contracts.RoomInboxRead)
+                _, actor, room, _, member, binding, _ = self.read_scope(identity, principal, contracts.RoomInboxRead)
                 self._credential(result, actor, room, member, binding)
                 page = self.inbox(identity, actor)
         except DevError as exc:
@@ -153,24 +283,48 @@ class RoomConsumers(FencedConsumerEngine):
             raise DevError('ROOM_BINDING_CHANGED', '收件箱绑定已改变', 409)
         return member['dirty_revision']
 
-    def authorize_member(self, raw, principal, *, require_revision=True):
-        """The caller holds the same transaction as the protected effect."""
-        actor, room, member = self.c.rooms.member_scope(principal, raw.get('conversation_id'), raw.get('member_id'),
-            raw.get('binding_generation'), raw.get('connection_proof'), require_proof=True)
+    def reply_identity(self, raw, principal):
+        actor, room, member = self._identity(raw, principal)
         if not member['probe_replied_at']:
             raise DevError('ROOM_PROBE_REQUIRED', '先完成当前成员的真实通知读取和回复验证', 409)
-        self.guard_session(raw, actor, room, member, require_revision=require_revision)
+        if raw.get('consumer_session_id') is None:
+            return member, None
+        return member, self._credential(raw, actor, room, member, self._identity_binding(member), live=False)
+
+    def reply_consumer_view(self, session):
+        if not session:
+            return None
+        current = self.store.one('SELECT * FROM dot_consumer_sessions WHERE id=?', (session['id'],))
+        fence = self.store.one('SELECT fence FROM dot_consumer_fences WHERE member_id=?', (session['member_id'],))
+        if not current or not fence or current['fence'] != fence['fence'] or self._reply(current)['state'] != 'active':
+            return None
+        member = self.c.rooms.member(current['member_id'])
+        actor = self.c.rooms.principal(member)
+        room = self.c.conversations.object(actor, member['conversation_id'])
+        try:
+            self._check_scope(room, member, self._identity_binding(member), current, live=True)
+        except DevError:
+            return None
+        return {'consumer_session_id': current['id'], 'state': 'active', 'more': self._ready(member, actor)}
+
+    def authorize_member(self, raw, principal, *, require_revision=True, action=None):
+        """The caller holds the same transaction as the protected effect."""
+        actor, room, member = self._identity(raw, principal)
+        self.guard_session(raw, actor, room, member, require_revision=require_revision, action=action)
         return member
 
-    def guard_session(self, raw, principal, room, member, *, require_revision=True):
+    def guard_session(self, raw, principal, room, member, *, require_revision=True, action=None):
         """For original work APIs, session proof also binds the stable member."""
         self.c.rooms.require_native(room)
         if not member['probe_replied_at']:
             raise DevError('ROOM_PROBE_REQUIRED', '先完成当前成员的真实通知读取和回复验证', 409)
-        binding, _ = self.binding(room, member, principal)
-        row = self._credential(raw, principal, room, member, binding)
+        row = self._credential(raw, principal, room, member, self._identity_binding(member))
         expected = raw.get('expected_inbox_revision')
-        if require_revision and (type(expected) is not int or expected != member['dirty_revision']):
+        stale = type(expected) is not int or expected != member['dirty_revision']
+        scoped = action in OBJECT_GUARDED_ACTIONS and type(expected) is int and 0 <= expected <= member['dirty_revision']
+        if require_revision and stale and (not scoped or row['turn_policy'] != 'decoupled'):
+            if scoped and row['turn_policy'] == 'shadow':
+                record_shadow(action, 'would_allow', 'inbox_revision')
             self._inbox_changed(member)
         return row
 
@@ -179,33 +333,49 @@ class RoomConsumers(FencedConsumerEngine):
         raise DevError('ROOM_INBOX_CHANGED', '房主输入或工作状态已更新，请先读取当前收件箱', 409,
                        inbox_revision=member['dirty_revision'])
 
-    def guard_reply_revision(self, raw, _principal, member, source, *, strict):
-        """The runtime has already verified the lease and exact source."""
+    def guard_reply_revision(self, raw, principal, member, source, *, strict, action='reply'):
+        """The runtime already checked this session and the exact visible source."""
         expected = raw['expected_inbox_revision']
         if expected == member['dirty_revision']:
             return
-        if strict or not 0 <= expected < member['dirty_revision']:
+        if not 0 <= expected < member['dirty_revision']:
             self._inbox_changed(member)
-
-        # Source identity and digest are checked against the current message by
-        # RoomRuntime.source. Its inbox reference must also exist at the read revision.
+        session = self.store.one('SELECT turn_policy FROM dot_consumer_sessions WHERE id=?',
+                                 (raw.get('consumer_session_id'),))
+        policy = session['turn_policy'] if session else 'strict'
         generation = self.generation(member)
         seen = self.store.one("""SELECT 1 FROM dot_mailbox_entries WHERE member_id=? AND generation=?
-            AND kind='message' AND object_id=? AND object_version=? AND revision<=? AND superseded_by=''""",
-            (member['id'], generation, source['id'], source['version'], expected))
+            AND (kind='message' OR (kind='control_notice' AND json_extract(reference,'$.reason_code')=?))
+            AND object_id=? AND object_version=? AND revision<=? AND superseded_by=''""",
+            (member['id'], generation, CONTINUATION_SOURCE, source['id'], source['version'], expected))
         if not seen:
             self._inbox_changed(member)
-
         thread = source['thread_root_id'] or source['id']
-        changed = self.store.one("""SELECT 1 FROM dot_mailbox_entries WHERE member_id=? AND generation=?
-            AND revision>? AND superseded_by='' AND (
-                ((kind='message' OR (kind='control_notice' AND json_extract(reference,'$.reason_code')=?))
-                    AND json_extract(reference,'$.thread_root_id')=?) OR
-                (kind='control_notice' AND acknowledged_at IS NULL AND json_extract(reference,'$.reason_code') IN (
-                    'member_scope_changed','room_scope_changed','channel_scope_changed','channel_owner_revoked',
-                    'authorization_revoked','permission_changed'))) LIMIT 1""",
-            (member['id'], generation, expected, CONTINUATION_SOURCE, thread))
-        if changed:
+        changed = self.store.all("""SELECT kind,object_id,object_version,reference,acknowledged_at
+            FROM dot_mailbox_entries WHERE member_id=? AND generation=? AND revision>? AND superseded_by=''
+            AND (json_extract(reference,'$.thread_root_id')=? OR kind='control_notice')
+            ORDER BY revision LIMIT ?""",
+            (member['id'], generation, expected, thread, DRAIN_SCAN_LIMIT + 1))
+        same_thread, notices, legacy_notices = False, False, False
+        for entry in changed:
+            reference = json.loads(entry['reference'])
+            if message_reference(entry['kind'], reference) and reference.get('thread_root_id') == thread:
+                message = self.store.one('SELECT * FROM collaboration_messages WHERE id=?', (entry['object_id'],))
+                if (message and message['version'] == entry['object_version']
+                        and self._visible_message(member, principal, message)
+                        and self.source_is_current(message, json.loads(message['body']))):
+                    same_thread = True
+                    break
+            if entry['kind'] == 'control_notice' and entry['acknowledged_at'] is None:
+                if reference.get('reason_code') in SCOPE_NOTICE_KINDS:
+                    notices = True
+                    legacy_notices |= not bool(reference.get('scope_change_kind'))
+        targeted_block = same_thread or legacy_notices or len(changed) > DRAIN_SCAN_LIMIT
+        strict_block = strict or same_thread or notices or len(changed) > DRAIN_SCAN_LIMIT
+        if policy == 'shadow' and strict_block != targeted_block:
+            record_shadow(action, 'would_block' if targeted_block else 'would_allow', 'inbox_revision')
+        blocked = targeted_block if policy == 'decoupled' else strict_block
+        if blocked:
             self._inbox_changed(member)
 
     def verify_probe_ticket(self, raw, principal, member):
@@ -336,7 +506,7 @@ class RoomConsumers(FencedConsumerEngine):
             reference = {**reference, 'reason_code': CONTINUATION_SOURCE}
         if (kind not in KINDS or not isinstance(object_id, str) or not 1 <= len(object_id) <= 128
                 or isinstance(version, bool) or not isinstance(version, int) or version < 0
-                or not isinstance(reference, dict) or set(reference) - REFERENCE_KEYS
+                or not isinstance(reference, dict) or set(reference) - ROOM_REFERENCE_KEYS
                 or any(not isinstance(v, str) or len(v) > 128 for v in reference.values())):
             raise DevError('ROOM_INBOX_REFERENCE_INVALID', '收件箱只接受原对象的有界引用', 422)
         with self.store.transaction():
@@ -465,6 +635,8 @@ class RoomConsumers(FencedConsumerEngine):
             source = {'source_message_id': message['id'], 'source_version': item['source_version'],
                       'source_digest': item['source_digest'], 'expected_inbox_revision': member['dirty_revision']}
             item['reply_arguments'] = source
+            if body.get('work_intent_change') is False:
+                return item
             try:
                 rules = self.c.room_work_bridge.native.input_authority.rules(message, member)
             except DevError as exc:
@@ -496,62 +668,183 @@ class RoomConsumers(FencedConsumerEngine):
                                           (reference.get('work_item_id', row['object_id']),))
                     item['ready'] = bool(work and work['state'] in {'queued', 'leased', 'running'})
                     if native.reference(goal):
+                        revision = self.c.room_runtime.intent_revision(goal['id'])
+                        if item['ready'] and self._work_is_handed_off(work, member, revision):
+                            return None
                         assignment=self.store.one('SELECT member_id FROM room_native_work_assignments WHERE work_id=?',(work['id'],)) if work else None
                         if not assignment or assignment['member_id']!=member['id'] or work['project_id'] not in allowed:
                             return None
-                        item['work_item']=self.c.coordination.work_view(work)
                         environment=next((r['environment_id'] for r in native.record(native.reference(goal))['projects']
                             if r['project_id']==work['project_id']),None)
-                        if environment is None:
-                            raise DevError('ROOM_WORK_SCOPE_DENIED','工作项目不在原批准范围中',403)
+                        visible = {(scope['project_id'], scope['environment_id'])
+                                   for scope in self.c.rooms.scopes(member, principal) if 'read' in scope['capabilities']}
+                        if (work['project_id'], environment) not in visible:
+                            return None
+                        if not include_actions:
+                            return item
+                        item['work_item'] = self.c.coordination.work_view(work)
                         item['work_route']={'project':work['project_id'],'environment_id':environment,
                             'goal_id':goal['id'],'work_item_id':work['id'],'expected_version':work['version'],
                             'coordinator_epoch':self.c.room_goal_recovery.epoch(goal['id']),
-                            'expected_intent_revision':self.c.room_runtime.intent_revision(goal['id'])}
+                            'expected_intent_revision': revision}
         return item
 
+    def _scan_ready(self, member, principal, *, after=0):
+        rows = self.store.all('''SELECT * FROM dot_mailbox_entries WHERE member_id=? AND generation=?
+            AND acknowledged_at IS NULL AND superseded_by='' AND sequence>? ORDER BY sequence LIMIT ?''',
+            (member['id'], self.generation(member), after, DRAIN_SCAN_LIMIT + 1))
+        for row in rows[:DRAIN_SCAN_LIMIT]:
+            item = self._entry(row, member, principal, include_actions=False)
+            if item and item['ready']:
+                return True, after
+        if len(rows) > DRAIN_SCAN_LIMIT:
+            return None, rows[DRAIN_SCAN_LIMIT - 1]['sequence']
+        return False, after
+
     def _ready(self, member, principal):
-        after = 0
-        while True:
-            rows = self.store.all('''SELECT * FROM dot_mailbox_entries WHERE member_id=? AND generation=?
-                AND acknowledged_at IS NULL AND superseded_by='' AND sequence>? ORDER BY sequence LIMIT 64''',
-                (member['id'], self.generation(member), after))
-            for row in rows:
-                item = self._entry(row, member, principal, include_actions=False)
-                if item and item['ready']:
-                    return True
-            if len(rows) < 64:
-                return False
-            after = rows[-1]['sequence']
+        return self._scan_ready(member, principal)[0] is not False
+
+    def _drain_ready(self, member, principal):
+        generation = self.generation(member)
+        room = self.store.one('SELECT * FROM conversation_rooms WHERE id=?', (member['conversation_id'],))
+        revision, visibility = member['dirty_revision'], self.scope_digest(room, member)
+        checkpoint = self.store.one('''SELECT after_sequence FROM room_consumer_drain_checks
+            WHERE member_id=? AND generation=? AND dirty_revision=? AND visibility_digest=?''',
+            (member['id'], generation, revision, visibility))
+        ready, after = self._scan_ready(member, principal, after=checkpoint['after_sequence'] if checkpoint else 0)
+        if ready is None:
+            self.store.execute('''INSERT INTO room_consumer_drain_checks VALUES (?,?,?,?,?)
+                ON CONFLICT(member_id) DO UPDATE SET generation=excluded.generation,
+                    dirty_revision=excluded.dirty_revision,visibility_digest=excluded.visibility_digest,
+                    after_sequence=excluded.after_sequence''', (member['id'], generation, revision, visibility, after))
+        else:
+            self.store.execute('DELETE FROM room_consumer_drain_checks WHERE member_id=?', (member['id'],))
+        return ready
+
+    def _mark_drained(self, member, principal, expected_revision):
+        if member['dirty_revision'] != expected_revision:
+            return 'inbox_changed'
+        ready = self._drain_ready(member, principal)
+        if ready is None:
+            return 'drain_check_pending'
+        if ready:
+            return 'pending_input'
+        updated = self.store.execute('''UPDATE room_members SET drained_revision=?,updated_at=?,
+                consumer_continuation_at=NULL
+            WHERE id=? AND binding_generation=? AND dirty_revision=?''',
+            (expected_revision, self.c.clock(), member['id'], member['binding_generation'], expected_revision))
+        return 'drained' if updated.rowcount else 'inbox_changed'
 
     def mark_drained(self, member_id, generation, expected_revision):
         member = self.c.rooms.member(member_id)
-        if generation != self.generation(member) or member['dirty_revision'] != expected_revision:
-            return False
-        if self._ready(member, self.c.rooms.principal(member)):
-            return False
-        return bool(self.store.execute('''UPDATE room_members SET drained_revision=?,updated_at=?
-            WHERE id=? AND binding_generation=? AND dirty_revision=?''',
-            (expected_revision, self.c.clock(), member_id, member['binding_generation'], expected_revision)).rowcount)
+        return (generation == self.generation(member) and
+                self._mark_drained(member, self.c.rooms.principal(member), expected_revision) == 'drained')
 
-    def ack_message(self, member, message_id):
+    def _yield(self, args, principal, dot, binding, row):
+        if args.get('yield_mode') == 'continue_later':
+            if row['turn_policy'] != 'decoupled':
+                raise DevError('ROOM_CONSUMER_POLICY_REQUIRED', '当前回合未启用保留待办让出', 409)
+            ready = self._drain_ready(dot, principal)
+            queued = ready is not False
+            if not self._close_turn(row, 'yielded'):
+                raise DevError('DOT_CONSUMER_LEASE_EXPIRED', '原消费回合已过期，不能让出', 409)
+            if queued:
+                eligible = self.c.clock() + CONTINUATION_DELAY
+                self.store.execute('''UPDATE room_members SET consumer_continuation_at=
+                    MIN(COALESCE(consumer_continuation_at,?),?) WHERE id=? AND binding_generation=?''',
+                    (eligible, eligible, dot['id'], dot['binding_generation']))
+            return {'more': queued, 'pending_preserved': True, 'continuation_queued': queued,
+                    'reason_code': 'drain_check_pending' if ready is None else 'yielded'}
+        reason = self._mark_drained(dot, principal, args['expected_inbox_revision'])
+        if reason == 'drained' and not self._close_turn(row, 'yielded'):
+            raise DevError('DOT_CONSUMER_LEASE_EXPIRED', '原消费回合已过期，不能让出', 409)
+        return {'more': reason != 'drained', 'reason_code': reason}
+
+    def yield_after_reply(self, args, principal, member, session):
+        current = self.c.rooms.member(member['id'])
+        outcome = {'yielded_at_commit': False, 'inbox_revision': current['dirty_revision'], 'more': True}
+        if (session['state'] != 'active' or session['lease_until'] <= self.c.clock()
+                or session['hard_deadline'] <= self.c.clock()):
+            return {**outcome, 'reason_code': 'turn_expired'}
+        reason = self._mark_drained(current, principal, args['expected_inbox_revision'])
+        if reason != 'drained':
+            return {**outcome, 'reason_code': reason}
+        if not self._close_turn(session, 'yielded'):
+            return {**outcome, 'reason_code': 'turn_expired'}
+        return {**outcome, 'yielded_at_commit': True, 'more': False, 'reason_code': 'drained'}
+
+    def record_work_handling(self, goal, item, operation_id):
+        """Persist admission evidence atomically with the original operation."""
+        self.store.require_transaction()
+        revision = self.c.room_runtime.intent_revision(goal['id'])
+        assignment = self.store.one('''SELECT member_id FROM room_native_work_assignments
+            WHERE work_id=? AND intent_revision=?''', (item['id'], revision))
+        if not assignment:
+            return
+        self.store.execute('''INSERT OR IGNORE INTO room_work_input_handling
+            (operation_id,work_id,work_version,intent_revision,assignee_member_id,recovery_owner,created)
+            VALUES (?,?,?,?,?,?,?)''', (operation_id, item['id'], item['version'], revision,
+            assignment['member_id'], 'operation_dispatcher', self.c.clock()))
+
+    def _work_is_handed_off(self, work, member, revision):
+        return bool(self.store.one('''SELECT 1 FROM room_work_input_handling h
+            JOIN coordination_operations o ON o.operation_id=h.operation_id
+            WHERE h.assignee_member_id=? AND h.work_id=? AND h.work_version<=? AND h.intent_revision=?
+                AND o.attempt=? AND o.fencing_token=? LIMIT 1''',
+            (member['id'], work['id'], work['version'], revision, work['attempt'], work['fencing_token'])))
+
+    def ack_message(self, member, message_id, *, source_version=None):
         """Internal only, after a durable reply or managed work admission."""
         self.store.execute('''UPDATE dot_mailbox_entries SET acknowledged_at=COALESCE(acknowledged_at,?)
-            WHERE member_id=? AND object_id=? AND (kind='message' OR
+            WHERE member_id=? AND generation=? AND object_id=? AND (
+                (kind='message' AND (? IS NULL OR object_version=?)) OR
                 (kind='control_notice' AND json_extract(reference,'$.reason_code')=?))''',
-            (self.c.clock(), member['id'], message_id, CONTINUATION_SOURCE))
+            (self.c.clock(), member['id'], self.generation(member), message_id,
+             source_version, source_version, CONTINUATION_SOURCE))
 
     def read(self, raw, principal):
         with self.store.transaction(immediate=False):
-            _, _, _, _, member, _, _ = self.scope(raw, principal, contracts.RoomConsumerRead)
+            _, _, _, _, member, _, _ = self.read_scope(raw, principal, contracts.RoomConsumerRead)
             latest = self.store.one('SELECT * FROM dot_consumer_sessions WHERE member_id=? ORDER BY fence DESC LIMIT 1', (member['id'],))
             return {'member_id': member['id'], 'conversation_id': member['conversation_id'],
                 'binding_generation': member['binding_generation'], 'inbox_revision': member['dirty_revision'],
                 'consumer': self._reply(latest) if latest else None, 'read_only': True, 'grants_authority': False}
 
+    def _inbox_scan(self, args, room, member, binding, actor):
+        generation = binding['generation']
+        visibility = self.scope_digest(room, member)
+        position = self.store.one('''SELECT COALESCE(MAX(sequence),0) AS upper
+            FROM dot_mailbox_entries WHERE member_id=? AND generation=?''', (member['id'], generation))
+        after, upper, previous_visibility = 0, position['upper'], visibility
+        cursor_scope = digest(['room-inbox-v2', member['owner_user_id'], actor.space_id, room['id'],
+                               member['id'], member['binding_generation'], generation])
+        cursor = args['cursor']
+        if cursor.startswith('v2.'):
+            decoded = read_cursor(self.c.secret, cursor_scope, cursor[3:])
+            if (not isinstance(decoded, list) or len(decoded) != 3 or type(decoded[0]) is not int
+                    or type(decoded[1]) is not int or not 0 <= decoded[0] <= decoded[1]
+                    or not isinstance(decoded[2], str) or len(decoded[2]) != 64):
+                raise DevError('INVALID_CURSOR', '收件箱游标无效', 400)
+            after, upper, previous_visibility = decoded
+        elif cursor:
+            legacy_scope = digest(['room-inbox', member['id'], generation, visibility])
+            after = read_cursor(self.c.secret, legacy_scope, cursor)
+            if type(after) is not int or not 0 <= after <= upper:
+                raise DevError('INVALID_CURSOR', '收件箱游标无效', 400)
+
+        def token(sequence):
+            return 'v2.' + sign_cursor(self.c.secret, cursor_scope, [sequence, upper, visibility])
+
+        rows = self.store.all('''SELECT * FROM dot_mailbox_entries WHERE member_id=? AND generation=?
+            AND acknowledged_at IS NULL AND superseded_by=''
+            AND sequence>? AND sequence<=? ORDER BY sequence LIMIT ?''',
+            (member['id'], generation, after, upper, args['limit'] + 1))
+        changed = previous_visibility != visibility
+        return rows, after, token, changed
+
     def inbox(self, raw, principal):
         with self.store.transaction(immediate=False):
-            args, actor, room, _, member, binding, _ = self.scope(raw, principal, contracts.RoomInboxRead)
+            args, actor, room, _, member, binding, _ = self.read_scope(raw, principal, contracts.RoomInboxRead)
             if member.get('_pending_binding'):
                 if args['cursor']:
                     raise DevError('INVALID_CURSOR', '候选连接没有可分页的收件箱', 400)
@@ -565,13 +858,7 @@ class RoomConsumers(FencedConsumerEngine):
                         '没有当前票据时等待原订阅的通知，或请房主重新发送连接检查。'
                         '验证通过后再读取业务收件箱。'
                     ) if ready else '先按加入回执的 subscription_request 注册宿主原生订阅。'}
-            cursor_scope = digest(['room-inbox', member['id'], binding['generation'], self.scope_digest(room, member)])
-            after = read_cursor(self.c.secret, cursor_scope, args['cursor']) if args['cursor'] else 0
-            if isinstance(after, bool) or not isinstance(after, int) or after < 0:
-                raise DevError('INVALID_CURSOR', '收件箱游标无效', 400)
-            rows = self.store.all('''SELECT * FROM dot_mailbox_entries WHERE member_id=? AND generation=?
-                AND acknowledged_at IS NULL AND superseded_by=''
-                AND sequence>? ORDER BY sequence LIMIT ?''', (member['id'], binding['generation'], after, args['limit'] + 1))
+            rows, after, token, visibility_changed = self._inbox_scan(args, room, member, binding, actor)
             items, count, scanned = [], 0, after
             limited = False
             for row in rows[:args['limit']]:
@@ -602,7 +889,8 @@ class RoomConsumers(FencedConsumerEngine):
             return {'conversation_id': room['id'], 'member_id': member['id'],
                 'binding_generation': member['binding_generation'], 'inbox_revision': member['dirty_revision'],
                 'drained_revision': member['drained_revision'], 'items': items,
-                'next_cursor': sign_cursor(self.c.secret, cursor_scope, scanned) if more else None,
+                'next_cursor': token(scanned) if more else None,
+                'visibility_changed': visibility_changed, 'restart_cursor': token(0) if visibility_changed else None,
                 'pagination_complete': not more, 'read_only': True, 'read_is_consumption': False,
                 'grants_authority': False, 'context_reference':context_reference,
                 'context_version':self.c.room_context.version(room['id']),
@@ -612,7 +900,7 @@ class RoomConsumers(FencedConsumerEngine):
 
     def message(self, raw, principal):
         with self.store.transaction(immediate=False):
-            args, actor, _, _, member, _, _ = self.scope(raw, principal, contracts.RoomMessageRead)
+            args, actor, _, _, member, _, _ = self.read_scope(raw, principal, contracts.RoomMessageRead)
             row = self.store.one('SELECT * FROM collaboration_messages WHERE id=?', (args['message_id'],))
             if not self._visible_message(member, actor, row):
                 raise DevError('ROOM_SOURCE_NOT_FOUND', '当前成员范围没有这条消息', 404)
@@ -622,8 +910,8 @@ class RoomConsumers(FencedConsumerEngine):
 
     def ack(self, raw, principal):
         with self.store.transaction():
-            args, actor, room, _, member, _, _ = self.scope(raw, principal, contracts.RoomInboxAck)
-            self.guard_session(args, actor, room, member)
+            args, actor, room, _, member, _, _ = self._lease_scope(raw, principal, contracts.RoomInboxAck)
+            self.guard_session(args, actor, room, member, action='notice_ack')
             rows = []
             for identifier in dict.fromkeys(args['entry_ids']):
                 row = self.store.one('SELECT * FROM dot_mailbox_entries WHERE id=? AND member_id=? AND generation=?',
@@ -663,6 +951,40 @@ class RoomConsumers(FencedConsumerEngine):
                 return {'wakeup_queued': True, 'delivery_scope': 'original_subscription'}
             return self.c.rooms.mutation(actor, 'room_inbox_recover', args, save)
 
+    def _recover_continuations(self, maximum):
+        now = self.c.clock()
+        rows = self.store.all('''SELECT * FROM room_members WHERE status='bound' AND consumer_continuation_at<=?
+            ORDER BY consumer_continuation_at LIMIT 32''', (now,))
+        count = 0
+        for member in rows:
+            if count >= maximum:
+                break
+            if self.store.one("""SELECT 1 FROM dot_consumer_sessions
+                WHERE member_id=? AND state='active' AND lease_until>?""", (member['id'], now)):
+                continue
+            attempts = member['wake_count']
+            try:
+                actor = self.c.rooms.principal(member)
+                room = self.c.conversations.object(actor, member['conversation_id'])
+                _, sub = self.binding(room, member, actor)
+                if self._rejected(sub['id']):
+                    raise DevError('ROOM_RECOVERY_UNAVAILABLE', '原通知路线暂不可用', 409)
+                ready = self._drain_ready(member, actor)
+            except DevError:
+                self.store.execute('UPDATE room_members SET consumer_continuation_at=? WHERE id=?',
+                                   (now + min(SLOW_WAKE_DELAY, CONTINUATION_DELAY * 2 ** min(attempts, 6)), member['id']))
+                continue
+            if ready is None:
+                self.store.execute('UPDATE room_members SET consumer_continuation_at=? WHERE id=?',
+                                   (now + CONTINUATION_DELAY, member['id']))
+                continue
+            self.store.execute('UPDATE room_members SET consumer_continuation_at=NULL WHERE id=?', (member['id'],))
+            if ready:
+                member = self._reset_wake_episode(member)
+                if self._wake(member, 'continue-later'):
+                    count += 1
+        return count
+
     def recover(self, *, max_wakes=4):
         """Bounded deterministic reminders; no idle model polling or execution."""
         if not self.c.config.enabled or not self.c.config.events_enabled or max_wakes <= 0:
@@ -677,9 +999,12 @@ class RoomConsumers(FencedConsumerEngine):
             count += self._maintain(max_wakes - count)
             if count >= max_wakes:
                 return count
+            count += self._recover_continuations(max_wakes - count)
+            if count >= max_wakes:
+                return count
             now = self.c.clock()
             rows = self.store.all('''SELECT * FROM room_members WHERE status='bound' AND id>?
-                AND dirty_revision>drained_revision AND wake_count<?
+                AND dirty_revision>drained_revision AND consumer_continuation_at IS NULL AND wake_count<?
                 AND COALESCE(wake_episode_at,last_wake_at)>? ORDER BY id LIMIT 64''',
                 (self._after, MAX_WAKE_ATTEMPTS, now - MAX_WAKE_AGE))
             for member in rows:

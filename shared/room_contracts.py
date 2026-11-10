@@ -170,6 +170,20 @@ class MemberIdentity(RoomRead):
     connection_proof: str = Field(min_length=24, max_length=256)
 
 
+class MemberTurnRead(MemberIdentity):
+    consumer_session_id: Identifier | None = None
+    consumer_fence: int | None = Field(default=None, ge=1, strict=True)
+    consumer_proof: str | None = Field(default=None, min_length=32, max_length=256, repr=False)
+
+    @model_validator(mode='after')
+    def complete_turn_proof(self):
+        supplied = sum(getattr(self, name) is not None for name in (
+            'consumer_session_id', 'consumer_fence', 'consumer_proof'))
+        if supplied not in (0, 3):
+            raise ValueError('Provide the session, fence and proof together')
+        return self
+
+
 class ConnectProbeRead(MemberIdentity):
     wake_ticket: str = Field(min_length=32, max_length=256)
     idempotency_key: Key
