@@ -193,6 +193,33 @@ class Rooms:
         return refresh_principal(self.store, Principal(**{**saved, 'scopes': set()}))
 
     @memoized
+    def read_scope_keys(self, member, principal):
+        """Current exact read access, independent of write and execution targets."""
+        if member['status'] in {'removed','paused','invited','legacy'} or principal.grant_id!=member['grant_id']:
+            return set()
+        rows=self.store.all("""SELECT s.* FROM room_member_scopes s
+            JOIN conversation_projects p ON p.conversation_id=?
+            JOIN collaboration_rooms r ON r.id=p.room_id AND r.project_id=s.project_id
+                AND r.environment_id=s.environment_id
+            WHERE s.member_id=? AND s.state='active' AND
+                (s.lifetime_mode='until_revoked' OR s.expires_at>?)""",
+            (member['conversation_id'],member['id'],self.c.clock()))
+        visible=set()
+        for row in rows:
+            saved=json.loads(row['owner_principal'])
+            if not saved or 'read' not in json.loads(row['capabilities']):
+                continue
+            try:
+                owner=refresh_principal(self.store,Principal(**{**saved,'scopes':set()}))
+                self.owner(owner,member['conversation_id'])
+                self.c.coordination.require_capability(owner,'read',row['project_id'])
+                self.c.coordination.require_capability(principal,'read',row['project_id'])
+            except DevError:
+                continue
+            visible.add((row['project_id'],row['environment_id']))
+        return visible
+
+    @memoized
     def scopes(self, member, principal=None):
         result = []
         for row in self.store.all("SELECT * FROM room_member_scopes WHERE member_id=? ORDER BY project_id,environment_id", (member['id'],)):

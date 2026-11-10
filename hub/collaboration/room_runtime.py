@@ -409,8 +409,10 @@ class RoomRuntime:
 
     def start_work(self,raw,principal):
         args=validate(RoomWorkStart,raw)
+        if args.get('expected_intent_revision') is None:
+            args.pop('expected_intent_revision',None)
         with self.store.transaction():
-            member=self.c.room_consumers.authorize_member(args,principal,require_revision=True)
+            member=self.c.room_consumers.authorize_member(args,principal,action='work_start')
             source=self.source(args,member,principal)
             source_body=json.loads(source['body'])
             original_id=source_body.get('work_id') or source.get('goal_id')
@@ -421,13 +423,18 @@ class RoomRuntime:
             if original_id:
                 partition=self.store.one('SELECT * FROM collaboration_rooms WHERE id=?',(original['room_id'],))
                 self.c.coordination.authorize(principal,partition,original)
-                if source_body.get('work_id'):
+                if source_body.get('work_id') and source_body.get('work_intent_change',True):
+                    self.c.room_consumers.guard_reply_revision(args,principal,member,source,strict=False)
                     return self.continue_work(args,member,source,original,principal)
-                result={'goal_id':original['id'],'resumed_existing':True}
-                selected=set(args['project_ids'] or ([args['target_project_id']] if args['target_project_id'] else []))
-                if selected and selected!=set(json.loads(original['spec'])['project_ids']):
-                    result['scope_revision_required']=True
-                return self.work_response(result,args,member,principal)
+                def recover():
+                    result={'goal_id':original['id'],'resumed_existing':True}
+                    selected=set(args['project_ids'] or ([args['target_project_id']] if args['target_project_id'] else []))
+                    if selected and selected!=set(json.loads(original['spec'])['project_ids']):
+                        result['scope_revision_required']=True
+                    return result
+                result=self.member_receipt(args,member,principal,'room_work_start',recover)
+                return self.work_response({**result,'resumed_existing':True},args,member,principal)
+            self.c.room_consumers.guard_reply_revision(args,principal,member,source,strict=False)
             native_reference,native_scope=self.c.room_work_bridge.native.prepare(member,source,principal,args)
             self.c.room_work_bridge.scopes(member)
             project_id=native_scope['anchor_project_id']
@@ -519,6 +526,9 @@ class RoomRuntime:
         intent=self.store.one('SELECT * FROM room_work_intents WHERE goal_id=?',(goal['id'],))
         if not intent or intent['source_message_id']!=source['id']:
             raise DevError('ROOM_INTENT_CHANGED','此补充已被更新，请读取最新本人输入',409)
+        if args.get('expected_intent_revision') is not None and args['expected_intent_revision']!=intent['intent_revision']:
+            raise DevError('ROOM_INTENT_CHANGED','本人意图已更新，请核对原工作',409,
+                intent_revision=intent['intent_revision'])
         record=self.store.one('SELECT * FROM room_work_intent_sources WHERE goal_id=? AND intent_revision=?',(goal['id'],intent['intent_revision']))
         if record['source_version']!=source['version'] or record['source_digest']!=args['source_digest']:
             raise DevError('ROOM_SOURCE_CHANGED','原补充的正文或版本已改变',409)
@@ -539,7 +549,7 @@ class RoomRuntime:
             objective='在原目标中处理本人最新补充；先核对并复用已有操作回执，不能盲目重跑。\n'+json.loads(source['body'])['body_text']
             if len(objective)>4000:
                 raise DevError('ROOM_WORK_INPUT_TOO_LONG','补充超过工作规划长度，请将本次要执行的要求缩短',422)
-            created=self.c.coordination.work_create({'project':partition['project_id'],'environment_id':partition['environment_id'],
+            created=self.c.coordination.work_create({'project':project_id,'environment_id':rule['environment_id'],
                 'goal_id':goal['id'],'target_project_id':project_id,'assignee_grant_id':principal.grant_id,
                 'assignee_member_id':member['id'],'objective':objective,'acceptance':args['acceptance'],
                 'required_capabilities':capabilities,'expected_intent_revision':intent['intent_revision'],
@@ -573,8 +583,10 @@ class RoomRuntime:
                     eligible=False
             if eligible:
                 from shared.public_collaboration import checked_request
-                next_request=checked_request('collaboration_work_claim',{'project':partition['project_id'],
-                    'environment_id':partition['environment_id'],'goal_id':goal['id'],
+                route=(queued['project_id'],native.work_environment(goal,self.c.coordination.work(goal,queued['id']))) \
+                    if native.reference(goal) else (partition['project_id'],partition['environment_id'])
+                next_request=checked_request('collaboration_work_claim',{'project':route[0],
+                    'environment_id':route[1],'goal_id':goal['id'],
                     'work_item_id':queued['id'],'expected_version':queued['version'],
                     'consumer_session_id':args['consumer_session_id'],'consumer_fence':args['consumer_fence'],
                     'consumer_proof':args['consumer_proof'],
@@ -606,24 +618,34 @@ class RoomRuntime:
             member=self.store.one('SELECT * FROM room_members WHERE id=? AND conversation_id=?',
                 (route.get('member_id',''),row['conversation_id']))
             entry=self.store.one("""SELECT acknowledged_at FROM dot_mailbox_entries
-                WHERE member_id=? AND kind IN ('message','continuation_source') AND object_id=?
-                AND object_version=? AND superseded_by='' ORDER BY sequence DESC LIMIT 1""",
+                WHERE member_id=? AND (kind='message' OR
+                    (kind='control_notice' AND json_extract(reference,'$.reason_code')='continuation_source'))
+                AND object_id=? AND object_version=? AND superseded_by='' ORDER BY sequence DESC LIMIT 1""",
                 (route.get('member_id',''),row['id'],row['version']))
             work=self.store.one("""SELECT g.state, EXISTS (
                     SELECT 1 FROM room_goal_publications p WHERE p.goal_id=g.id
-                    AND p.intent_revision=COALESCE(i.intent_revision,1)) AS published
+                    AND p.intent_revision=COALESCE(i.intent_revision,1)) AS published,
+                    EXISTS (SELECT 1 FROM coordination_operations c JOIN operations o ON o.id=c.operation_id
+                        LEFT JOIN room_native_work_assignments a ON a.work_id=c.work_item_id
+                        WHERE c.goal_id=g.id AND COALESCE(a.intent_revision,1)=COALESCE(i.intent_revision,1)
+                        AND o.state IN ('running','reconnecting','cancelling','unknown')) AS processing
                 FROM coordination_goals g LEFT JOIN room_work_intents i ON i.goal_id=g.id
                 WHERE g.id=COALESCE(NULLIF(?,''),(SELECT s.goal_id FROM room_work_sources s
                     WHERE s.message_id=? AND s.goal_id!='' LIMIT 1))""",
-                (body.get('work_id') or row.get('goal_id') or '',row['id']))
+                (body.get('work_id') or row.get('goal_id') or '',row['id'])) if body.get('work_intent_change',True) else None
             if work and (work['published'] or work['state'] in {'completed','succeeded'}):
                 state,reason='completed',''
             elif work and work['state'] in {'cancelled','expired','paused'}:
                 state,reason=('waiting' if work['state']=='paused' else 'terminal'),'work_'+work['state']
             elif work and work['state']=='active':
-                state,reason='processing',''
+                state,reason=('processing','') if work['processing'] else ('queued','work_admitted')
             elif entry and entry['acknowledged_at'] is not None:
                 state,reason='completed',''
+            elif entry and self.store.one('''SELECT 1 FROM collaboration_messages
+                    WHERE conversation_id=? AND thread_root_id=? AND reply_to_id=?
+                    AND json_extract(body,'$.input_handling')='pending' LIMIT 1''',
+                    (row['conversation_id'],row['thread_root_id'] or row['id'],row['id'])):
+                state,reason='queued','input_partially_handled'
             elif entry and member and self.c.rooms.state(member) in {'ready_chat','ready_work'}:
                 from hub.collaboration.room_consumers import MAX_WAKE_AGE, MAX_WAKE_ATTEMPTS
 
@@ -642,6 +664,8 @@ class RoomRuntime:
             'waiting_earlier_input':'已保存，等待前序消息入队',
             'source_unavailable':'原消息已失效',
             'work_unavailable':'原工作已结束',
+            'input_partially_handled':'已回复，仍有待处理事项',
+            'work_admitted':'工作已接收，等待执行',
             'work_paused':'工作已暂停',
             'work_cancelled':'工作已取消',
             'work_expired':'工作授权已到期',
@@ -716,6 +740,11 @@ class RoomRuntime:
 
     def send(self,raw,principal):
         args=validate(RoomMessage,raw)
+        if args.get('revise_work_intent') is None:
+            # Keep existing request fingerprints for clients omitting this field.
+            args.pop('revise_work_intent',None)
+        if 'revise_work_intent' in args and not args['work_id']:
+            raise DevError('ROOM_WORK_REQUIRED','关联原工作需要工作标识',422)
         with self.store.transaction():
             principal,conversation=self.owner(principal,args['conversation_id'])
             def save():
@@ -744,23 +773,40 @@ class RoomRuntime:
                     if not parent:
                         raise DevError('THREAD_NOT_FOUND','引用消息不在当前房间',404)
                     self.c.chatroom.require_message_visible(principal,parent)
-                if args['work_id']:
-                    goal=self.goal(args['work_id'])
+                parent_work_id=''
+                if parent:
+                    parent_work_id=parent.get('goal_id') or json.loads(parent['body']).get('work_id','')
+                goal=None
+                revise_intent=bool(args['work_id']) and args.get('revise_work_intent',True)
+                if work_id:=args['work_id'] or parent_work_id:
+                    goal=self.goal(work_id)
                     if goal['conversation_id']!=conversation['id']:
                         raise DevError('GOAL_NOT_FOUND','此工作不在当前房间',404)
-                    partition=self.store.one('SELECT * FROM collaboration_rooms WHERE id=?',(goal['room_id'],))
-                    self.c.coordination.authorize(principal,partition,goal)
-                    if reference:=self.c.room_work_bridge.native.reference(goal):
-                        original=self.c.room_work_bridge.native.validate(reference,principal)
-                        if args['member_id'] and args['member_id']!=original['coordinator_member_id']:
-                            raise DevError('ROOM_WORK_LEAD_REQUIRED','原工作补充须发给原主责成员',403)
-                        member=self.c.rooms.member(original['coordinator_member_id'],conversation['id'])
-                        routing=route_input(self.c,conversation,member)
+                    native=self.c.room_work_bridge.native
+                    reference=native.reference(goal)
+                    if not args['work_id'] and not reference:
+                        goal=None  # Keep legacy thread behavior.
+                    else:
+                        if not revise_intent and parent_work_id and self.goal(parent_work_id)['id']!=goal['id']:
+                            raise DevError('ROOM_WORK_THREAD_MISMATCH','引用消息属于另一项原工作',409)
+                        partition=self.store.one('SELECT * FROM collaboration_rooms WHERE id=?',(goal['room_id'],))
+                        self.c.coordination.authorize(principal,partition,goal)
+                        if reference:
+                            original=native.validate(reference,principal,active=revise_intent)
+                            if revise_intent and args['member_id'] and args['member_id']!=original['coordinator_member_id']:
+                                raise DevError('ROOM_WORK_LEAD_REQUIRED','原工作补充须发给原主责成员',403)
+                            if not args['member_id'] or revise_intent:
+                                member=self.c.rooms.member(original['coordinator_member_id'],conversation['id'])
+                            elif member['id'] not in {saved['member_id'] for saved in original['members']}:
+                                raise DevError('ROOM_WORK_MEMBER_REQUIRED','该成员不在此原工作范围内',403)
+                            routing=route_input(self.c,conversation,member)
                 root=parent['thread_root_id'] or parent['id'] if parent else identifier
                 provenance,provenance_scopes=self.provenance(parent)
                 body={'body_text':redact(args['body_text']),'room_request_digest':fingerprint,'room_routing':routing,
-                      'room_member_id':member['id'] if member else '', 'work_id':args['work_id'],
+                      'room_member_id':member['id'] if member else '', 'work_id':goal['id'] if goal else '',
                       'attachment_ids':args['attachment_ids']}
+                if goal and not revise_intent:
+                    body['work_intent_change']=False
                 if provenance:
                     body['provenance_project_ids']=provenance
                 if provenance_scopes:
@@ -781,9 +827,9 @@ class RoomRuntime:
                     message=self.store.one('SELECT * FROM collaboration_messages WHERE id=?',(identifier,))
                     body=json.loads(message['body'])
                     provenance=body.get('provenance_project_ids',[])
-                if args['work_id']:
+                if revise_intent:
                     self.revise_intent(goal,message,member)
-                follow_lead=not (args['member_id'] or args['work_id'])
+                follow_lead=not (args['member_id'] or goal)
                 ingress_member=member if not follow_lead or routing['reason_code'] not in {
                     'lead_member_required','member_paused','member_removed'} else None
                 self.c.room_work_bridge.native.input_authority.capture(message,principal,ingress_member)
@@ -830,9 +876,9 @@ class RoomRuntime:
                 state,reason='reconciling','operation_unconfirmed'
             elif items and all(item['state']=='succeeded' for item in items):
                 state='completed'
-            elif any(item['state'] in {'leased','running'} for item in items):
+            elif any(op['state'] in {'running','reconnecting','cancelling'} for op in operations):
                 state='running'
-            elif any(item['state']=='queued' for item in items):
+            elif any(item['state'] in {'queued','leased','running'} for item in items):
                 state='queued'
             else:
                 state,reason='blocked',next((item['reason_code'] for item in items if item['reason_code']),'waiting_host')
@@ -846,7 +892,7 @@ class RoomRuntime:
             allowed.insert(0,'pause')
         if goal['state']=='paused' and not active and not (intent and reason=='intent_revised'):
             allowed.insert(0,'resume')
-        title={'queued':'等待 dot 开始','running':'正在处理','reconciling':'正在核对原操作回执',
+        title={'queued':'工作已接收，等待执行','running':'正在处理','reconciling':'正在核对原操作回执',
             'completed':'工作已完成','paused':'工作已暂停','stopping':'正在停止，等待原操作回执',
             'cancelled':'工作已取消','waiting_member':'已保存补充，等待 dot 核对',
             'blocked':'工作暂时受阻','proposed':'等待批准','expired':'原工作批准已到期'}.get(state,'工作状态已更新')
@@ -855,8 +901,13 @@ class RoomRuntime:
             'ROOM_PROJECT_REMOVED':'原工作使用的项目已移出，需要核对范围。',
             'ROOM_MEMBER_SCOPE_REVISED':'原成员工作范围已改变，旧范围不能继续执行。'}
         native_scope=self.c.room_work_bridge.native.record(spec['room_member_scope']) if spec.get('room_member_scope') else None
-        visible=native.visible_projects(goal,principal,member_id) if native_scope else set(spec['project_ids'])
-        partial=visible!=set(spec['project_ids'])
+        scope_keys=native.visible_scope_keys(goal,principal,member_id) if native_scope else set()
+        visible={project for project,_ in scope_keys} if native_scope else set(spec['project_ids'])
+        partial=scope_keys!={native.scope_key(rule) for rule in native_scope['projects']} if native_scope else False
+        visible_ids={item['id'] for item in items if (native.work_is_visible(goal,item,scope_keys)
+            if native_scope else item['project_id'] in visible)}
+        visible_operation_items={item['id'] for item in self.store.all('SELECT * FROM coordination_work WHERE goal_id=?',(goal['id'],))
+            if native.work_is_visible(goal,item,scope_keys)} if native_scope and principal.grant_id else None
         recovery=self.c.room_goal_recovery.projection(goal,principal) if include_recovery and native_scope and not principal.grant_id and not archived and conversation['room_protocol'] else None
         if recovery and recovery['restore_candidates']:
             allowed.append('restore_binding')
@@ -870,8 +921,16 @@ class RoomRuntime:
             FROM room_native_work_assignments a JOIN coordination_work w ON w.id=a.work_id WHERE w.goal_id=?''',(goal['id'],))} if native_scope else {}
         from hub.collaboration.room_diagnostics import delivery_display,work_deliveries
         deliveries,delivery_truncated=work_deliveries(self.c,goal,principal,intent_revision=revision,member_id=member_id)
+        original_source_id=''
+        if not principal.grant_id:
+            link=self.c.delegation.goal_link(goal)
+            source_id=native_scope['source_message_id'] if native_scope else (link or {}).get('message_id','')
+            source=self.store.one('SELECT * FROM collaboration_messages WHERE id=?',(source_id,)) if source_id else None
+            if source and self.c.chatroom.message_visible(principal,source):
+                original_source_id=source['id']
         return {'id':goal['id'],'conversation_id':goal['conversation_id'],'version':goal['version'],
                 'intent_revision':revision,
+                **({'original_source_message_id':original_source_id} if original_source_id else {}),
                 **({'source_message_id': intent['source_message_id']} if intent and not partial and not principal.grant_id else {}),
                 **({'coordinator_epoch':native_scope['coordinator_epoch']} if native_scope else {}),
                 **({'recovery':recovery} if recovery else {}),
@@ -887,11 +946,11 @@ class RoomRuntime:
                 'delivery_display':delivery_display(state,deliveries),
                 'items':[{'id':item['id'],'state':item['state'],'reason_code':item['reason_code'],
                     'member_id':assignments.get(item['id'],''),'project_id':item['project_id'],
-                    'title':redact(item['objective'])[:160]} for item in items if item['project_id'] in visible],
+                    'title':redact(item['objective'])[:160]} for item in items if item['id'] in visible_ids],
                 'operations':[{k:op[k] for k in ('id','state','cancel_requested')} | {
                     'display':{'title':'原操作 '+op['state'],'reason':op.get('cancel_note','')}}
-                    for op in operations if not principal.grant_id or op['project_id'] in visible],
-                'related_work':[{'id':item['id'],'state':item['state']} for item in items if item['project_id'] not in visible]}
+                    for op in operations if visible_operation_items is None or op['work_item_id'] in visible_operation_items],
+                'related_work':[{'id':item['id'],'state':item['state']} for item in items if item['id'] not in visible_ids]}
 
     def work_binding(self,principal,conversation):
         projects=self.c.conversations.visible(principal,conversation,include_archived=True)
