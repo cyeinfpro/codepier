@@ -16,8 +16,8 @@ from shared.util import DevError
 ROOM_HANDLING = (
     '用本次唤醒的 wake_ticket 领取当前回合，支持 include_inbox 时随领取读取第一页。'
     '沿原消息、房间上下文和工作记录继续对话，已有明确交办时在当前授权内准入一次。'
-    '同一输入可以先说明情况；执行仍待准入时使用 input_handling=pending 保留待办。'
     '声明 explicit_publication 时，普通回复填 publish_work=false，正式发表经核对的完整成果才填 true。'
+    '同一输入可以先说明情况；支持 input_handling 时，执行仍待准入则用 pending 保留待办。'
     '只追问缺失信息；结果通过协作工具回写，宿主对话文字不会回传。'
     '结果未知时查询原操作，或用同键和原参数恢复原回执。'
     '收到 work_attempt_settled 时，用 archive_arguments 归档原结果及验收证据。'
@@ -155,6 +155,12 @@ class RoomConsumers(FencedConsumerEngine):
             sub['expires_at'], binding.get('route_generation', sub['version']), host, epoch, identifier))
         self.store.execute('''UPDATE room_members SET consumer_continuation_at=NULL,consumer_continuation_attempts=0
             WHERE id=?''', (dot['id'],))
+
+    def _expire_activated_turns(self, dot, generation, subscription_id):
+        self.store.execute("""UPDATE dot_consumer_sessions SET state='expired',updated=?
+            WHERE member_id=? AND state='active' AND (generation!=? OR
+                (subscription_id!=? AND turn_policy!='decoupled'))""",
+            (self.c.clock(), dot['id'], generation, subscription_id))
 
     def _lease_scope(self, raw, principal, model):
         args = validate(model, raw)
@@ -355,9 +361,10 @@ class RoomConsumers(FencedConsumerEngine):
         policy = session['turn_policy'] if session else 'strict'
         generation = self.generation(member)
         seen = self.store.one("""SELECT 1 FROM dot_mailbox_entries WHERE member_id=? AND generation=?
-            AND (kind='message' OR (kind='control_notice' AND json_extract(reference,'$.reason_code')=?))
-            AND object_id=? AND object_version=? AND revision<=? AND superseded_by=''""",
-            (member['id'], generation, CONTINUATION_SOURCE, source['id'], source['version'], expected))
+            AND ((kind='message' AND object_version=?)
+                OR (kind='control_notice' AND json_extract(reference,'$.reason_code')=?))
+            AND object_id=? AND revision<=? AND superseded_by=''""",
+            (member['id'], generation, source['version'], CONTINUATION_SOURCE, source['id'], expected))
         if not seen:
             self._inbox_changed(member)
         thread = source['thread_root_id'] or source['id']
@@ -371,7 +378,7 @@ class RoomConsumers(FencedConsumerEngine):
             reference = json.loads(entry['reference'])
             if message_reference(entry['kind'], reference) and reference.get('thread_root_id') == thread:
                 message = self.store.one('SELECT * FROM collaboration_messages WHERE id=?', (entry['object_id'],))
-                if (message and message['version'] == entry['object_version']
+                if (message and (entry['kind'] != 'message' or message['version'] == entry['object_version'])
                         and self._visible_message(member, principal, message)
                         and self.source_is_current(message, json.loads(message['body']))):
                     same_thread = True
@@ -699,17 +706,22 @@ class RoomConsumers(FencedConsumerEngine):
                         revision = self.c.room_runtime.intent_revision(goal['id'])
                         if item['ready'] and self._work_is_handed_off(work, member, revision):
                             return None
-                        assignment=self.store.one('SELECT member_id FROM room_native_work_assignments WHERE work_id=?',(work['id'],)) if work else None
-                        if not assignment or assignment['member_id']!=member['id'] or work['project_id'] not in allowed:
+                        if not work:
                             return None
-                        environment=next((r['environment_id'] for r in native.record(native.reference(goal))['projects']
-                            if r['project_id']==work['project_id']),None)
-                        if (work['project_id'], environment) not in self._visible_scope_keys(member, principal):
+                        assignment = self.store.one('''SELECT member_id FROM room_native_work_assignments
+                            WHERE work_id=? AND intent_revision=?''', (work['id'], revision))
+                        if not assignment or assignment['member_id'] != member['id']:
+                            return None
+                        try:
+                            project, environment = native.work_scope_key(goal, work)
+                        except DevError:
+                            return None
+                        if (project, environment) not in self._visible_scope_keys(member, principal):
                             return None
                         if not include_actions:
                             return item
                         item['work_item'] = self.c.coordination.work_view(work)
-                        item['work_route']={'project':work['project_id'],'environment_id':environment,
+                        item['work_route']={'project':project,'environment_id':environment,
                             'goal_id':goal['id'],'work_item_id':work['id'],'expected_version':work['version'],
                             'coordinator_epoch':self.c.room_goal_recovery.epoch(goal['id']),
                             'expected_intent_revision': revision}
@@ -767,12 +779,13 @@ class RoomConsumers(FencedConsumerEngine):
                 self._mark_drained(member, self.c.rooms.principal(member), expected_revision) == 'drained')
 
     def _yield(self, args, principal, dot, binding, row):
+        now = self.c.clock()
         if args.get('yield_mode') == 'continue_later':
             if row['turn_policy'] != 'decoupled':
                 raise DevError('ROOM_CONSUMER_POLICY_REQUIRED', '当前回合未启用保留待办让出', 409)
             ready = self._drain_ready(dot, principal)
             queued = ready is not False
-            if not self._close_turn(row, 'yielded'):
+            if not self._close_turn(row, 'yielded', now=now):
                 raise DevError('DOT_CONSUMER_LEASE_EXPIRED', '原消费回合已过期，不能让出', 409)
             if queued:
                 eligible = self.c.clock() + CONTINUATION_DELAY
@@ -782,20 +795,21 @@ class RoomConsumers(FencedConsumerEngine):
             return {'more': queued, 'pending_preserved': True, 'continuation_queued': queued,
                     'reason_code': 'drain_check_pending' if ready is None else 'yielded'}
         reason = self._mark_drained(dot, principal, args['expected_inbox_revision'])
-        if reason == 'drained' and not self._close_turn(row, 'yielded'):
+        if reason == 'drained' and not self._close_turn(row, 'yielded', now=now):
             raise DevError('DOT_CONSUMER_LEASE_EXPIRED', '原消费回合已过期，不能让出', 409)
         return {'more': reason != 'drained', 'reason_code': reason}
 
     def yield_after_reply(self, args, principal, member, session):
         current = self.c.rooms.member(member['id'])
+        now = self.c.clock()
         outcome = {'yielded_at_commit': False, 'inbox_revision': current['dirty_revision'], 'more': True}
-        if (session['state'] != 'active' or session['lease_until'] <= self.c.clock()
-                or session['hard_deadline'] <= self.c.clock()):
+        if (session['state'] != 'active' or session['lease_until'] <= now
+                or session['hard_deadline'] <= now):
             return {**outcome, 'reason_code': 'turn_expired'}
         reason = self._mark_drained(current, principal, args['expected_inbox_revision'])
         if reason != 'drained':
             return {**outcome, 'reason_code': reason}
-        if not self._close_turn(session, 'yielded'):
+        if not self._close_turn(session, 'yielded', now=now):
             return {**outcome, 'reason_code': 'turn_expired'}
         return {**outcome, 'yielded_at_commit': True, 'more': False, 'reason_code': 'drained'}
 
