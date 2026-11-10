@@ -175,7 +175,7 @@ class RoomRuntime:
             if visible:
                 visible = bool(source and self.c.room_consumers.source_is_current(source, json.loads(source['body'])))
         history = {'committed': True, 'message_id': identifier}
-        result = {'message': {'id': identifier, 'withheld': True}, 'complete': receipt['complete'],
+        result = {'message': {'id': identifier, 'withheld': True},
                   'scheduled': False, 'replayed': replayed, 'historical_result': history,
                   'effects_created': effects_created,
                   'current_consumer': self.c.room_consumers.reply_consumer_view(session) if session else None}
@@ -184,7 +184,7 @@ class RoomRuntime:
             history.update(source_message_id=receipt.get('source_message_id') or row['reply_to_id'],
                            original_session_id=origin['consumer_session_id'] if origin else None,
                            complete=receipt['complete'], yielded_at_commit=bool(receipt.get('yielded_at_commit')))
-            result.update(message=self.message_view(row, principal),
+            result.update(message=self.message_view(row, principal), complete=receipt['complete'],
                           channel_dispositions=receipt.get('channel_dispositions', []))
             if not replayed and effects_created and 'yielded_at_commit' in receipt:
                 result.update({key: receipt[key] for key in
@@ -419,11 +419,11 @@ class RoomRuntime:
     def require_publication_source(self, snapshot, source, member, principal):
         if (not source or source['id'] != snapshot['source_message_id']
                 or source['version'] != snapshot['source_version']):
-            raise DevError('ROOM_INTENT_CHANGED', '原工作意图的来源已修订，请重新读取', 409)
+            raise DevError('ROOM_INTENT_CHANGED', '原工作当前意图的来源已修订，请重新读取', 409)
         body = json.loads(source['body'])
         if (digest(body.get('body_text', '')) != snapshot['source_digest']
                 or not self.c.room_consumers.source_is_current(source, body)):
-            raise DevError('ROOM_INTENT_CHANGED', '原工作意图的来源已修订，请重新读取', 409)
+            raise DevError('ROOM_INTENT_CHANGED', '原工作当前意图的来源已修订，请重新读取', 409)
         if not self.c.room_consumers._visible_message(member, principal, source):
             raise DevError('ROOM_SOURCE_NOT_FOUND', '当前成员范围内没有原工作意图来源', 404)
 
