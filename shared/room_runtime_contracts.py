@@ -115,6 +115,14 @@ class RoomMemberReply(RoomConsumerMutation):
     coordinator_epoch: int | None = Field(default=None,strict=True,ge=1)
     outcome: Literal['succeeded','partial','blocked'] | None = None
     artifact_refs: list[ArtifactRef] = Field(default_factory=list,max_length=100)
+    depends_on_delivery_id: Identifier | None = None
+    dependency_mode: Literal['after_settled', 'requires_success'] | None = None
+
+    @model_validator(mode='after')
+    def declared_delivery_dependency(self):
+        if (self.depends_on_delivery_id is None) != (self.dependency_mode is None):
+            raise ValueError('A delivery dependency requires both the original delivery and its dependency mode')
+        return self
 
 
 class RoomWorkStart(RoomConsumerMutation):

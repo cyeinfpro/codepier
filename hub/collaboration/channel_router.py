@@ -92,14 +92,14 @@ class ChannelRouter:
     def queue_reply(self, message):
         return self.queue(message)
 
-    def queue_reply_dispositions(self, message):
+    def queue_reply_dispositions(self, message, *, delivery_dependency=None):
         dispositions = []
-        self.queue(message, dispositions=dispositions)
+        self.queue(message, dispositions=dispositions, delivery_dependency=delivery_dependency)
         return dispositions[:24] or [{
             "channel": "weixin", "disposition": "not_requested", "reason_code": "no_external_reply"
         }]
 
-    def queue(self, message, *, dispositions=None):
+    def queue(self, message, *, dispositions=None, delivery_dependency=None):
         self.store.require_transaction()
         body = json.loads(message["body"])
         if message["origin"] not in {
@@ -114,10 +114,12 @@ class ChannelRouter:
         origin = json.loads(source["body"]).get("external_origin", {}) if source else {}
         legacy = None
         if origin.get("channel") == "weixin":
-            direct_reply = self.c.weixin.delivery.queue_reply_result(message)
+            direct_reply = self.c.weixin.delivery.queue_reply_result(message, **(delivery_dependency or {}))
             legacy = direct_reply.delivery
             if dispositions is not None and direct_reply.disposition != "not_requested":
                 dispositions.append(direct_reply.view())
+        elif delivery_dependency:
+            raise DevError('WEIXIN_DELIVERY_RELATION_INVALID', '当前回复没有可承接原依赖的微信收件人', 409)
         targets = []
         if self.c.config.enabled:
             targets += [

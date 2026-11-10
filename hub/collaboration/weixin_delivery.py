@@ -43,6 +43,10 @@ class EnqueueResult:
     binding_id: str = ''
     delivery: dict | None = None
 
+    @property
+    def delivery_id(self):
+        return self.delivery['id'] if self.delivery else None
+
     def view(self):
         result = {'channel': 'weixin', 'disposition': self.disposition, 'reason_code': self.reason_code}
         if self.binding_id:
@@ -82,9 +86,9 @@ class WeixinDelivery:
             seen.add(current['id'])
             if current['origin'] == 'external_channel':
                 return current
+            if current['origin'] == 'panel_owner' and json.loads(message['body']).get('publish_work') is False:
+                return None
             if not current['reply_to_id']:
-                if json.loads(message['body']).get('publish_work') is False:
-                    return None
                 return self.work_source(message, current)
             current = self.store.one('SELECT * FROM collaboration_messages WHERE id=? AND conversation_id=?',
                                     (current['reply_to_id'], message['conversation_id']))
@@ -143,14 +147,18 @@ class WeixinDelivery:
     def queue_reply(self, message):
         return self.queue_reply_result(message).delivery
 
-    def queue_reply_result(self, message):
+    def queue_reply_result(self, message, *, source=None, predecessor_id=None, dependency_mode='after_settled'):
         self.store.require_transaction()
         body = json.loads(message['body'])
         if message['origin'] != 'bound_connector' or not (body.get('sender_dot_id') or body.get('sender_member_id')):
             return EnqueueResult('not_requested', 'no_external_reply')
-        source = self.root_source(message)
+        source = source or self.root_source(message)
+        if source and source['conversation_id'] != message['conversation_id']:
+            raise DevError('WEIXIN_DELIVERY_SOURCE_CHANGED', '微信回复必须使用同一房间的原输入', 409)
         origin = json.loads(source['body']).get('external_origin', {}) if source else {}
         if origin.get('channel') != 'weixin':
+            if predecessor_id:
+                raise DevError('WEIXIN_DELIVERY_RELATION_INVALID', '当前回复没有可承接原依赖的微信收件人', 409)
             return EnqueueResult('not_requested', 'no_weixin_source')
         binding_id = origin.get('binding_id', '')
         if not self.c.config.enabled:
@@ -194,7 +202,8 @@ class WeixinDelivery:
             (binding['id'], binding['generation'], message['id'], message['version']))
         if old:
             return EnqueueResult('existing', '', binding_id, old)
-        ordering, evidence, predecessor = order.reply_ordering(self.store, message, source, binding)
+        ordering, evidence, predecessor = order.reply_ordering(
+            self.store, message, source, binding, predecessor_id=predecessor_id, dependency_mode=dependency_mode)
         now, identifier = self.c.clock(), uuid.uuid4().hex
         pending = self.store.one('''SELECT COUNT(*) AS n FROM weixin_deliveries d JOIN weixin_bindings b ON b.id=d.binding_id
             WHERE b.account_id=? AND d.created>? AND d.state NOT IN ('accepted','owner_confirmed','cancelled')''',

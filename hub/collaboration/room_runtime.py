@@ -94,7 +94,9 @@ class RoomRuntime:
     def member_business_args(args):
         transport = {'consumer_session_id', 'consumer_fence', 'consumer_proof',
                      'expected_inbox_revision', 'connection_proof'}
-        return {key: value for key, value in args.items() if key not in transport}
+        optional_dependency = {'depends_on_delivery_id', 'dependency_mode'}
+        return {key: value for key, value in args.items()
+                if key not in transport and (key not in optional_dependency or value is not None)}
 
     def member_receipt(self,args,member,principal,action,perform):
         # Consumer proofs rotate; they authorize replay but are not business
@@ -110,6 +112,18 @@ class RoomRuntime:
             VALUES (?,?,?,?,?,?)''',
             (message['id'], args['consumer_session_id'], member['id'], member['binding_generation'],
              request_digest, message['created']))
+
+    def delivery_dependency(self, args, member, principal):
+        predecessor = args.get('depends_on_delivery_id')
+        if not predecessor:
+            return {}
+        message = self.store.one("""SELECT m.* FROM weixin_deliveries d
+            JOIN collaboration_messages m ON m.id=COALESCE(d.projection_message_id,d.message_id)
+            WHERE d.id=? AND m.conversation_id=?""", (predecessor, member['conversation_id']))
+        if (not message or not self.c.chatroom.message_visible(principal, message)
+                or not self.c.room_consumers._visible_message(member, principal, message)):
+            raise DevError('WEIXIN_DELIVERY_RELATION_INVALID', '当前房间和成员范围内没有此前置投递', 409)
+        return {'predecessor_id': predecessor, 'dependency_mode': args['dependency_mode']}
 
     def provenance(self,message):
         body=json.loads(message['body']) if message else {}
@@ -186,10 +200,11 @@ class RoomRuntime:
                 request_digest = digest({key: value for key, value in business.items() if key != 'idempotency_key'})
                 self.record_reply_origin(message, args, member, request_digest)
                 self.c.rooms.change(member['conversation_id'],'message',identifier,message['version'])
+                dependency = self.delivery_dependency(args, member, principal)
                 if source.get('room_id'):
-                    dispositions = self.c.channels.queue_reply_dispositions(message)
+                    dispositions = self.c.channels.queue_reply_dispositions(message, delivery_dependency=dependency)
                 else:
-                    dispositions = [self.c.weixin.delivery.queue_reply_result(message).view()]
+                    dispositions = [self.c.weixin.delivery.queue_reply_result(message, **dependency).view()]
                 if args['complete']:
                     self.c.room_consumers.ack_message(member,source['id'])
                 return {'message_id':identifier,'complete':args['complete'],'channel_dispositions':dispositions}
