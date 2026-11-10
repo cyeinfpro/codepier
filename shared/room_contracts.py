@@ -23,6 +23,29 @@ class RoomRead(Model):
     conversation_id: Identifier
 
 
+class RoomTurnPolicyUpdate(RoomRead):
+    mode: Literal['strict', 'shadow', 'decoupled'] | None
+    expected_version: int = Field(ge=0, strict=True)
+    reason: str = Field(min_length=1, max_length=160)
+    idempotency_key: Key
+
+    @field_validator('reason')
+    @classmethod
+    def nonblank(cls, value):
+        if not value.strip():
+            raise ValueError('A reason is required')
+        return value.strip()
+
+
+TURN_ACTION_CAPABILITIES = {
+    'room_reply': ('explicit_publication', 'reply_yield_after'),
+    'room_consumer_yield': ('consumer_continue_later',),
+    **dict.fromkeys(('room_inbox', 'room_consumer', 'room_message_read', 'room_attachment_read', 'room_context'),
+                    ('expired_route_session_read',)),
+}
+TURN_CAPABILITIES = {capability: True for names in TURN_ACTION_CAPABILITIES.values() for capability in names}
+
+
 class RoomList(Model):
     cursor: str = Field(default='', max_length=2048)
     limit: int = Field(default=40, ge=1, le=100)
@@ -165,10 +188,10 @@ class RoomChanges(RoomRead):
 ROOM_QUERY_ACTIONS = {
     'room_list': RoomList, 'room_view': RoomRead, 'room_connect': ConnectRead,
     'room_changes': RoomChanges, 'room_diagnostics': RoomRead,
-    'room_project_impact': RoomProjectImpact,
+    'room_project_impact': RoomProjectImpact, 'room_turn_policy': RoomRead,
 }
 ROOM_MUTATION_ACTIONS = {
-    'room_create': RoomCreate, 'room_update': RoomPatch,
+    'room_create': RoomCreate, 'room_update': RoomPatch, 'room_turn_policy_update': RoomTurnPolicyUpdate,
     'room_migrate': RoomMigrate,
     'room_projects': RoomProjects, 'room_member_create': MemberCreate,
     'room_connect_resume': ConnectAction, 'room_connect_join': ConnectJoin,

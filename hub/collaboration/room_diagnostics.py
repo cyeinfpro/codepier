@@ -9,12 +9,13 @@ import json
 import re
 
 from hub.collaboration.common import digest
+from hub.collaboration.room_turn_policy import view as turn_policy_view
 from hub.collaboration.events import DISPATCH_BUDGETS, DISPATCH_CAPACITY, MAX_ENVELOPE_BYTES, WIRE_HEADER_BYTES
 from shared.util import DevError
 
 LIMITS = {'members': 64, 'goals': 32, 'pending_per_member': 100, 'traces': 256,
           'budgets': 34, 'messages': 64, 'parts_per_delivery': 32}
-TRACE_LIMITS = {'member': 32, 'message': 32, 'goal': 32, 'work': 48, 'operation': 64, 'delivery': 48}
+TRACE_LIMITS = {'member': 32, 'message': 32, 'reply': 32, 'goal': 32, 'work': 48, 'operation': 64, 'delivery': 48}
 
 
 def code(value):
@@ -99,10 +100,12 @@ def projection(c, room, principal):
         state = c.rooms.state(member)
         sub = store.one('SELECT id,state,expires_at FROM mcp_event_subscriptions WHERE id=?',
                         (member['subscription_id'],))
-        current = store.one('''SELECT id,state,fence,lease_until,updated FROM dot_consumer_sessions
+        current = store.one('''SELECT id,state,fence,lease_until,hard_deadline,turn_policy,policy_revision,
+            route_expires_at,route_generation,scope_digest_evidence,updated FROM dot_consumer_sessions
             WHERE member_id=? AND generation=? ORDER BY fence DESC LIMIT 1''',
                             (member['id'], c.room_consumers.generation(member)))
-        if current and current['state'] == 'active' and current['lease_until'] <= now:
+        if (current and current['state'] == 'active'
+                and min(current['lease_until'], current['hard_deadline'] or current['lease_until']) <= now):
             current['state'] = 'expired'
         pending = store.all('''SELECT * FROM dot_mailbox_entries WHERE member_id=? AND generation=?
             AND acknowledged_at IS NULL AND superseded_by='' ORDER BY sequence LIMIT ?''',
@@ -135,10 +138,17 @@ def projection(c, room, principal):
             WHERE subscription_id=? AND state IN ('pending','retry_wait','leased')''', (member['subscription_id'],))
         if state in {'invited', 'waiting_host', 'verifying'}:
             queue_data['waiting_subscription'].append(member['created_at'])
+        wake = store.one('''SELECT d.id AS notification_delivery_id,d.event_id,d.accepted_at,
+                t.expires_at AS ticket_expires_at,s.created AS claimed_at
+            FROM dot_consumer_sessions s
+            JOIN dot_wake_tickets t ON t.redeemed_session_id=s.id AND t.member_id=s.member_id
+              AND t.generation=s.generation AND t.grant_id=s.grant_id
+            LEFT JOIN mcp_event_deliveries d ON d.subscription_id=t.subscription_id AND d.event_id=t.delivery_key
+            WHERE s.id=? AND t.redeemed_session_id!='' ORDER BY t.created,t.delivery_key LIMIT 1''', (current['id'],)) if current else None
         members.append({'member_id': member['id'], 'binding_generation': member['binding_generation'],
             'state': state, 'subscription_verified_at': member['subscription_verified_at'],
             'probe_read_at': member['probe_read_at'], 'probe_replied_at': member['probe_replied_at'],
-            'subscription': sub, 'consumer': current,
+            'subscription': sub, 'consumer': current, 'current_turn_wake': wake,
             'inbox': {'dirty_revision': member['dirty_revision'], 'drained_revision': member['drained_revision'],
                 'pending_count': len(visible_pending), 'complete': len(pending) <= LIMITS['pending_per_member'],
                 'oldest_age_seconds': age(min((item['created'] for item in visible_pending), default=None))},
@@ -198,6 +208,26 @@ def projection(c, room, principal):
         ORDER BY conversation_sequence DESC LIMIT ?''', (room['id'], LIMITS['messages'] + 1))
     identifiers = [row['id'] for row in messages[:LIMITS['messages']] if c.chatroom.message_visible(principal, row)]
     originals = {row['id']: row for row in messages[:LIMITS['messages']]}
+    reply_ids = [identifier for identifier in identifiers if originals[identifier]['kind'] == 'reply']
+    origins = {}
+    if reply_ids:
+        placeholders = ','.join('?' for _ in reply_ids)
+        origins = {row['message_id']: row for row in store.all(f'''SELECT o.message_id,o.consumer_session_id,
+            o.member_id,o.binding_generation,o.created FROM room_reply_origins o
+            JOIN room_members m ON m.id=o.member_id AND m.conversation_id=?
+            JOIN dot_consumer_sessions s ON s.id=o.consumer_session_id AND s.member_id=m.id
+            WHERE o.message_id IN ({placeholders})''', (room['id'], *reply_ids))}
+    for identifier in reply_ids:
+        message = originals[identifier]
+        source_id = json.loads(message['body']).get('source_message_id', '')
+        source = store.one('SELECT * FROM collaboration_messages WHERE id=? AND conversation_id=?',
+                           (source_id, room['id'])) if source_id else None
+        origin = origins.get(identifier)
+        trace({'kind': 'reply', 'id': identifier, 'message_id': identifier,
+               'origin': 'verified' if origin else 'unknown_legacy', 'updated_at': message['created'],
+               **({'source_message_id': source_id} if source and c.chatroom.message_visible(principal, source) else {}),
+               **({key: origin[key] for key in ('consumer_session_id', 'member_id', 'binding_generation')}
+                  if origin else {})})
     channel_map = c.channels.for_messages(identifiers)
     truncated['traces'] |= len(messages) > LIMITS['messages']
     for message_id, deliveries in channel_map.items():
@@ -234,6 +264,7 @@ def projection(c, room, principal):
             'capacity_is_authorization': False})
     return {'schema_version': 1, 'conversation_id': room['id'], 'revision': room['revision'], 'state': room['state'],
         'observed_at': now, 'read_only': True, 'redacted': True, 'raw_body_included': False, 'grants_authority': False,
+        'turn_policy': turn_policy_view(store, room['id']),
         'members': members, 'traces': traces, 'budgets': budgets[:LIMITS['budgets']],
         'queues': [{'kind': name, 'label': labels[name], 'pending_count': len(values),
                     'oldest_age_seconds': age(min(values, default=None))} for name, values in queue_data.items()],

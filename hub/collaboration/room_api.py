@@ -50,6 +50,17 @@ def install_routes(router, auth, runtime):
         body = await request.json()
         return await store.run(lambda: service.rooms.update({**body, 'conversation_id': identifier}, auth.admin(request, True)))
 
+    @router.get('/rooms/{identifier}/turn-policy')
+    async def turn_policy(request: Request, response: Response, identifier: str):
+        response.headers['Cache-Control'] = 'private, no-store'
+        return await store.run(lambda: service.rooms.turn_policy({'conversation_id': identifier}, auth.instance(request)))
+
+    @router.put('/rooms/{identifier}/turn-policy')
+    async def update_turn_policy(request: Request, identifier: str):
+        body = await request.json()
+        return await store.run(lambda: service.rooms.update_turn_policy(
+            {**body, 'conversation_id': identifier}, auth.instance(request, True)))
+
     @router.get('/rooms/{identifier}/permissions')
     async def permissions(request: Request, response: Response, identifier: str):
         response.headers['Cache-Control'] = 'private, no-store'

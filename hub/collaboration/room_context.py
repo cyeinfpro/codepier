@@ -413,10 +413,8 @@ class RoomContext:
         return {'message_id':row['id'],'version':row['version'],'digest':digest(json.loads(row['body']).get('body_text',''))}
 
     def read(self,raw,principal):
-        args=validate(RoomContextRead,raw)
         with self.store.transaction(immediate=False):
-            actor,room,member=self.c.rooms.member_scope(principal,args['conversation_id'],args['member_id'],
-                args['binding_generation'],args['connection_proof'],require_proof=True)
+            args, actor, room, member, _, _, _ = self.c.room_consumers.read_scope(raw, principal, RoomContextRead)
             return self.project(actor,room,member,cursor=args['cursor'],limit=args['limit'],
                 byte_budget=args['byte_budget'],input_message_id=args['input_message_id'])
 

@@ -1198,6 +1198,7 @@ class Rooms:
             'subscription_request': self.subscription_request(member), 'grants_authority': False,
             'pending_binding': bool(member.get('_pending_binding')),
             'subscription_renewal': self.renewals.view(member),
+            'turn_capabilities': dict(contracts.TURN_CAPABILITIES),
             'required_host_actions': {'collaboration': ['room_probe_read', 'room_probe_reply',
                 'room_consumer_begin', 'room_consumer_yield', 'room_reply'],
                 'collaboration_query': ['room_inbox']},
@@ -1402,6 +1403,15 @@ class Rooms:
             principal, room = self.owner(principal, args['conversation_id'], include_archived=True)
             return projection(self.c, room, principal)
 
+    def turn_policy(self, raw, principal):
+        from hub.collaboration.room_turn_policy import read
+        args = validate(contracts.RoomRead, raw)
+        return read(self.c, args['conversation_id'], principal)
+
+    def update_turn_policy(self, raw, principal):
+        from hub.collaboration.room_turn_policy import update
+        return update(self.c, raw, principal)
+
     def invoke(self, action, raw, principal):
         handlers = {'room_list': self.listing, 'room_view': self.read, 'room_create': self.create,
             'room_migrate': self.migrate_room,
@@ -1409,7 +1419,8 @@ class Rooms:
             'room_member_create': self.create_member,
             'room_connect': self.connect_read, 'room_connect_resume': self.connect_action,
             'room_connect_join': self.join, 'room_probe_read': self.probe_read, 'room_probe_reply': self.probe_reply,
-            'room_changes': self.changes, 'room_diagnostics': self.diagnostics}
+            'room_changes': self.changes, 'room_diagnostics': self.diagnostics,
+            'room_turn_policy': self.turn_policy, 'room_turn_policy_update': self.update_turn_policy}
         if action not in handlers:
             raise DevError('ROOM_ACTION_UNKNOWN', '未知的房间操作', 404)
         return handlers[action](raw, principal)
