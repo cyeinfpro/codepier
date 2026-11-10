@@ -69,6 +69,18 @@ python3 scripts/publish_release.py --repo OWNER/REPO \
 
 在测试设备演练升级与回滚/恢复流程，再分批更新实际 Hub 和 Agent。分别核对运行版本、目录、服务名、数据完整性和权限。更新文档中的已知限制，不把未经验证的平台标记为支持验收完成。
 
+## 独立宿主连接灰度
+
+独立宿主接入默认关闭。先部署支持宿主撤销闸的桥接版本（至少 `1.33.9`），停止使用目标数据库的 Hub 实例，并核对部署入口能拒绝低于数据库声明的版本。以下命令在桥接版的运行环境中执行，使用与 Hub 相同的状态目录配置。
+
+```bash
+python -m hub room-host-backfill
+python -m hub room-host-activate --confirm-compatible-deployment
+python -m hub room-host-backfill --apply
+```
+
+首条命令只读。检查报告中的身份和往返证据缺口，再激活版本门。重复执行 `--apply`，直到持久进度显示扫描完成。以 `CODEPIER_ROOM_HOST_CONNECTIONS_MODE=shadow` 核对旧来源链与独立宿主判定，再按验收结果切换到 `on`。切回 `off` 可暂停新接入，已有撤销继续生效。回退使用满足数据库版本门的桥接版本。
+
 ## 构建与证据门禁
 
 先按 [开发与验证](DEVELOPMENT.md) 安装哈希锁依赖，运行前端格式、类型检查、前端构建和资源清单生成。六片通过只能作为分片证据；每个平台必须合并完整收集清单和覆盖数据，所有测试恰好一次、零跳过、源码不变才算完整。diff coverage 是新增/修改可执行行的观察报告，不强加历史全仓 80% 门槛。

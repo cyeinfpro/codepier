@@ -54,14 +54,21 @@ BASE = Path(__file__).resolve().parent.parent
 
 def create_app(data_dir: str | None = None):
     from hub.collaboration.config import CollaborationConfig
-    CollaborationConfig.from_env()  # Reject inconsistent gates before opening the database.
+    collaboration_config = CollaborationConfig.from_env()  # Check rollout before opening the database.
     config = HubConfig.from_env()
     directory = Path(data_dir or os.getenv("HUB_DATA_DIR", str(BASE / "data"))).resolve()
     from hub.state_layout import state_directory
-    instance_lock = InstanceLock(state_directory(directory) / ".hub.lock")
+    from shared.hub_data_contract import check_path
+
+    state = state_directory(directory)
+    instance_lock = InstanceLock(state / ".hub.lock")
     store = None
     try:
+        host_connections_on = collaboration_config.host_connections_mode == 'on'
+        check_path(state, VERSION, required=host_connections_on)
         store = Store(directory)
+        if host_connections_on and not store.one('SELECT id FROM room_host_backfill_progress WHERE id=1 AND completed=1'):
+            raise RuntimeError('Finish room-host-backfill --apply before enabling independent host connections')
         initialize_file_import_settings(store)
         runtime, auth = Runtime(store), Auth(store)
         runtime.gateway = Gateway(store)

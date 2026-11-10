@@ -45,8 +45,8 @@ def validate(model, value):
         raise DevError('INVALID_ARGUMENTS', '参数不符合协作契约', 422, issues=issues) from None
 
 
-SENSITIVE_KEY = re.compile(r'(?i)(authorization|cookie|password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|private[_-]?key|wake[_-]?ticket|(?:consumer|connection|member)[_-]?proof|invite[_-]?code|probe[_-]?nonce)')
-ASSIGNMENT = re.compile(r'''(?ix)\b(authorization|cookie|password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|wake[_-]?ticket|(?:consumer|connection|member)[_-]?proof|invite[_-]?code|probe[_-]?nonce)\b\s*[=:]\s*(?:"[^"\n]*"|'[^'\n]*'|[^\s,;]+)''')
+SENSITIVE_KEY = re.compile(r'(?i)(authorization|cookie|password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|private[_-]?key|control[_-]?handle|challenge[_-]?proof|wake[_-]?ticket|(?:consumer|connection|member)[_-]?proof|invite[_-]?code|probe[_-]?nonce)')
+ASSIGNMENT = re.compile(r'''(?ix)\b(authorization|cookie|password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|control[_-]?handle|challenge[_-]?proof|wake[_-]?ticket|(?:consumer|connection|member)[_-]?proof|invite[_-]?code|probe[_-]?nonce)\b\s*[=:]\s*(?:"[^"\n]*"|'[^'\n]*'|[^\s,;]+)''')
 BEARER = re.compile(r'(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+')
 KEY_TOKEN = re.compile(r'\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|whsec_[A-Za-z0-9+/=]{20,})')
 PEM = re.compile(r'-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----', re.S)

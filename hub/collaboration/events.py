@@ -39,7 +39,8 @@ SEALED_BODY_PREFIX = 'sealed:v1:'
 def authorization_transient(exc):
     # A changed operation binding cannot regain consent by waiting or by
     # restoring the old mapping. Require a newly authorized subscription.
-    if exc.code in {'OPERATION_MAPPING_CHANGED', 'OPERATION_CONTEXT_INVALID', 'OPERATION_EVENT_OBSOLETE'}:
+    if exc.code in {'OPERATION_MAPPING_CHANGED', 'OPERATION_CONTEXT_INVALID', 'OPERATION_EVENT_OBSOLETE',
+                    'ROOM_CONNECTION_REVOKED', 'ROOM_ROUTE_CHANGED'}:
         return False
     return (exc.code in {'ROOM_PAUSED', 'WORKER_BINDING_REQUIRED', 'GOAL_INACTIVE'}
             or exc.status in {409, 429} or exc.status >= 500)
@@ -240,8 +241,8 @@ class EventService:
             self.c.delegation.authorize_event(principal, filters)
         if args['name'] == WORK_EVENT and not stopping:
             self.c.coordination.authorize_event(principal, filters)
-        if not stopping:
-            self.binding_guard(room, principal, filters, args['delivery'])
+        binding = self.binding_guard(room, principal, filters, args['delivery']) if not stopping else None
+        route = binding.get('_route_candidate') if args['name'] == ROOM_INBOX_EVENT and binding else None
         if args['name'] != ROOM_INBOX_EVENT and room['project_id'] != filters['project_id']:
             raise DevError('PROJECT_ID_REQUIRED', '事件过滤器需要不可变项目 ID，而非别名', 400)
         url = args['delivery']['url']
@@ -253,13 +254,14 @@ class EventService:
                 raise DevError('INVALID_CURSOR', '事件游标格式不正确', 400)
         existing = self.store.one('SELECT * FROM mcp_event_subscriptions WHERE id=?', (identity,))
         if stopping:
-            return args, principal, room, identity, existing, False
+            return args, principal, room, identity, existing, False, None
         self.live_scope(room)
         signing_key(args['delivery']['secret'])
         if existing and existing['state'] == 'paused':
             raise DevError('SUBSCRIPTION_PAUSED', '订阅已由面板暂停；自动续订不能恢复所有者暂停', 409)
         scope_column = self.scope_column(room)
-        count = self.store.one(f"SELECT COUNT(*) AS n FROM mcp_event_subscriptions WHERE {scope_column}=? AND state IN ('active','paused')", (room['id'],))['n']
+        count = self.store.one(f"SELECT COUNT(*) AS n FROM mcp_event_subscriptions WHERE {scope_column}=? AND state IN ('active','paused') AND id!=?",
+                               (room['id'], route['old_subscription_id'] if route else ''))['n']
         if not existing and count >= self.subscription_limit(room):
             raise DevError('SUBSCRIPTION_LIMIT', '试点协作室订阅数量已达上限', 409)
         key_digest = digest(args['delivery']['secret'])
@@ -269,7 +271,7 @@ class EventService:
             (room['id'], principal.grant_id, key_digest, self.c.clock())):
             saved = json.loads(self.store.decrypt(candidate['secret']))
             if hmac.compare_digest(saved['url'].encode(), url.encode()):
-                cached = True
+                cached = not route or route['state'] == 'verifying'
                 break
         if not cached:
             recent = (self.store.one("SELECT COUNT(*) AS n FROM audit WHERE actor=? AND action='subscription.challenge' AND at>?",
@@ -280,7 +282,7 @@ class EventService:
             if recent >= 6:
                 raise DevError('CHALLENGE_RATE_LIMIT', '回调验证请求过于频繁，请稍后重试', 429)
             self.event_audit(room, principal.actor, 'subscription.challenge', identity)
-        return args, principal, room, identity, existing, cached
+        return args, principal, room, identity, existing, cached, route
 
     async def verify_callback(self, url, secret, identifier):
         verified_at = self.c.clock()
@@ -318,7 +320,7 @@ class EventService:
             with self.store.transaction():
                 prepared = self.prepare(raw, principal)
                 return (*prepared, self.subscription_snapshot(prepared[1], prepared[0]))
-        args, authenticated, room, identifier, previous, cached, authenticated_snapshot = await self.store.run(begin)
+        args, authenticated, room, identifier, previous, cached, candidate, authenticated_snapshot = await self.store.run(begin)
         if not cached:
             await self.verify_callback(args['delivery']['url'], args['delivery']['secret'], identifier)
         def commit():
@@ -328,7 +330,10 @@ class EventService:
                 self.c.notification_reader(current_principal)
                 self.live_scope(current_room)
                 current_filters = validate(FILTERS[args['name']], args['arguments'])
-                self.binding_guard(current_room, current_principal, current_filters, args['delivery'])
+                binding = self.binding_guard(current_room, current_principal, current_filters, args['delivery'])
+                route = binding.get('_route_candidate') if args['name'] == ROOM_INBOX_EVENT else None
+                if route != candidate:
+                    raise DevError('ROOM_ROUTE_CHANGED', '验证期间候选路线已改变', 409)
                 if args['name'] in {MESSAGE_EVENT, MAILBOX_EVENT}:
                     conversation = self.c.conversations.resolve(current_principal, current_room, current_filters)
                     self.c.rooms.migration.legacy_write(conversation['id'])
@@ -343,7 +348,8 @@ class EventService:
                     raise DevError('SUBSCRIPTION_IDENTITY_CHANGED', '回调验证期间身份发生变化，请重新确认连接', 409)
                 old = self.store.one('SELECT * FROM mcp_event_subscriptions WHERE id=?', (identifier,))
                 scope_column = self.scope_column(current_room)
-                if not old and self.store.one(f"SELECT COUNT(*) AS n FROM mcp_event_subscriptions WHERE {scope_column}=? AND state IN ('active','paused')", (room['id'],))['n'] >= self.subscription_limit(current_room):
+                if not old and self.store.one(f"SELECT COUNT(*) AS n FROM mcp_event_subscriptions WHERE {scope_column}=? AND state IN ('active','paused') AND id!=?",
+                        (room['id'], route['old_subscription_id'] if route else ''))['n'] >= self.subscription_limit(current_room):
                     raise DevError('SUBSCRIPTION_LIMIT', '试点协作室订阅数量已达上限', 409)
                 if (old['version'] if old else 0) != (previous['version'] if previous else 0):
                     raise DevError('STALE_VERSION', '订阅在验证期间已改变，请重新读取', 409)
@@ -353,23 +359,27 @@ class EventService:
                 stored = {'url': args['delivery']['url'], 'current': args['delivery']['secret']}
                 if args['name'] == ROOM_INBOX_EVENT:
                     stored['room_ttl_seconds'] = ttl
+                prior = json.loads(self.store.decrypt(old['secret'])) if old else {}
+                same_room_connection = bool(args['name'] == ROOM_INBOX_EVENT and old
+                    and old['state'] in {'active', 'expired'} and prior['url'] == stored['url'])
+                signing_rotation = bool(same_room_connection and prior['current'] != stored['current'])
                 if old:
-                    prior = json.loads(self.store.decrypt(old['secret']))
                     if prior.get('recovery_view') == 'unified':
                         stored['recovery_view'] = 'unified'
                     if prior['current'] != stored['current']:
                         stored.update(retiring=prior['current'], retire_at=now + 300)
+                        if signing_rotation and not route:
+                            stored['previous_route_generation'] = binding['route_generation']
                     elif prior.get('retire_at', 0) > now:
                         stored.update(retiring=prior['retiring'], retire_at=prior['retire_at'])
+                        if 'previous_route_generation' in prior:
+                            stored['previous_route_generation'] = prior['previous_route_generation']
                 elif unified and args['name'] == OPERATION_EVENT:
                     stored['recovery_view'] = 'unified'
                 active = old and old['state'] == 'active' and old['expires_at'] > now
-                same_room_connection = bool(args['name'] == ROOM_INBOX_EVENT and old
-                    and old['state'] in {'active', 'expired'} and prior['current'] == stored['current']
-                    and prior['url'] == stored['url'])
                 position, truncated = (old['ack_seq'] if old else 0), False
                 if not active:
-                    if args['cursor'] is None and not same_room_connection:
+                    if (route and route['state'] == 'controlled') or (args['cursor'] is None and not same_room_connection):
                         # A new identity enrolls from now. Restoring the same
                         # room binding keeps its durable acknowledged position.
                         position = self.store.one(f'SELECT MAX(seq) AS n FROM mcp_event_outbox WHERE {scope_column}=?', (room['id'],))['n'] or 0
@@ -412,7 +422,7 @@ class EventService:
                 if args['name'] == ROOM_INBOX_EVENT:
                     self.c.rooms.event_subscription_attached(current_principal, current_filters, saved,
                         reset_verification=not same_room_connection, restored=not active and same_room_connection,
-                        ttl=ttl)
+                        ttl=ttl, signing_rotation=signing_rotation, route_candidate=route)
                 else:
                     self.c.joining.attach_subscription(current_room, current_principal,
                         validate(FILTERS[args['name']], args['arguments']), saved, reset_verification=not active)
@@ -424,13 +434,15 @@ class EventService:
                 if args['name'] == ROOM_INBOX_EVENT:
                     member = self.c.rooms.event_member(current_filters['member_id'],
                         current_filters['conversation_id'], current_filters['binding_generation'])
-                    result['renewal'] = self.c.rooms.renewals.view(member)
+                    result['renewal'] = (self.c.rooms.renewals.view(member) if not route else {
+                        'mode': 'host', 'renewal_managed_by': 'host', 'state': 'awaiting_probe',
+                        'approved': False, 'expires_at': lifetime})
                 return result
         return await self.store.run(commit)
 
     def unsubscribe(self, raw, principal):
         with self.store.transaction():
-            args, principal, room, identifier, existing, _ = self.prepare(raw, principal, stopping=True)
+            args, principal, room, identifier, existing, _, _ = self.prepare(raw, principal, stopping=True)
             if not existing:
                 raise DevError('SUBSCRIPTION_NOT_FOUND', '没有匹配当前身份和过滤器的订阅', 404)
             if existing:
@@ -453,6 +465,10 @@ class EventService:
             filters = validate(FILTERS[ROOM_INBOX_EVENT], json.loads(subscription['arguments']))
             self.c.rooms.event_authorize(subscription, filters, payload)
             self.live_scope(room)
+            if payload is None:
+                route = self.c.rooms.routes.for_subscription(subscription['id'])
+                if route:
+                    filters['_route_probe_id'] = route['id']
             return filters
         principal = self.c.grant_reader(room, subscription['grant_id'], snapshot=json.loads(subscription['principal']))
         self.live_scope(room)
@@ -488,6 +504,11 @@ class EventService:
         if event['name'] == ROOM_INBOX_EVENT and (not event['target_grant_id']
                 or any(payload.get(key) != filters.get(key) for key in
                        ('owner_user_id', 'conversation_id', 'member_id', 'binding_generation'))):
+            return False
+        if event['name'] == ROOM_INBOX_EVENT and (payload.get('route_probe_id') or filters.get('_route_probe_id')):
+            return payload.get('route_probe_id') == filters.get('_route_probe_id')
+        if (event['name'] == ROOM_INBOX_EVENT and payload.get('host_control_challenge_id')
+                and payload.get('host_control_subscription_id') != subscription['id']):
             return False
         if event['name'] == MAILBOX_EVENT and (not event['target_grant_id']
                 or payload.get('recipient_grant_id') != subscription['grant_id']
@@ -614,6 +635,9 @@ class EventService:
         eligible = f"""FROM mcp_event_deliveries d JOIN mcp_event_outbox e ON e.id=d.event_id
             WHERE d.subscription_id=? AND d.state='pending' AND d.attempt=0 AND d.body IS NULL
             AND e.name=? AND COALESCE(json_extract(e.data,'$.test'),0)=0
+            AND json_extract(e.data,'$.host_control_challenge_id') IS NULL
+            AND json_extract(e.data,'$.route_probe_id') IS NULL
+            AND COALESCE(json_extract(e.data,'$.connection_probe'),0)=0
             AND json_extract(e.data,'$.{member_key}')=?
             AND json_extract(e.data,'$.binding_generation')=?"""
         parameters = (subscription['id'], subscription['name'],
@@ -635,6 +659,14 @@ class EventService:
         In particular, an empty global bucket must not discard that recipient's
         place in the durable owner/subscription service rings.
         """
+        self.c.rooms.routes.expire(now)
+        # A crashed send on a retired route is ambiguous. Preserve that
+        # uncertainty and never replay it through either route.
+        self.store.execute("""UPDATE mcp_event_deliveries SET state='abandoned',next_at=0,lease_until=NULL,
+            reason_code=reason_code || '_unknown' WHERE id IN (
+                SELECT id FROM mcp_event_deliveries WHERE state='leased'
+                AND reason_code IN ('route_rotated_in_flight','route_candidate_ended_in_flight')
+                AND lease_until<=? LIMIT 32)""", (now,))
         subscriptions = self.store.all("""SELECT * FROM mcp_event_subscriptions s
             WHERE s.state='active' AND s.id>? AND (s.expires_at<=?
                 OR (s.room_id IS NOT NULL AND EXISTS (SELECT 1 FROM mcp_event_outbox e
@@ -893,19 +925,29 @@ class EventService:
                 return None
             room = self.event_room(sub)
             event = self.store.one('SELECT * FROM mcp_event_outbox WHERE id=?', (delivery['event_id'],))
-            self.authorize(sub, room, json.loads(event['data']) if event['name'] in {WORK_EVENT, DELEGATION_EVENT, OPERATION_EVENT, MAILBOX_EVENT, ROOM_INBOX_EVENT} else None)
-            if event['name'] in {MAILBOX_EVENT, ROOM_INBOX_EVENT} and not json.loads(event['data']).get('test'):
-                ticket = self.store.one('SELECT expires_at FROM dot_wake_tickets WHERE delivery_key=? AND subscription_id=?',
+            payload = json.loads(event['data'])
+            self.authorize(sub, room, payload if event['name'] in {WORK_EVENT, DELEGATION_EVENT,
+                OPERATION_EVENT, MAILBOX_EVENT, ROOM_INBOX_EVENT} else None)
+            stored = json.loads(self.store.decrypt(sub['secret']))
+            if (event['name'] in {MAILBOX_EVENT, ROOM_INBOX_EVENT} and not payload.get('test')
+                    and not payload.get('host_control_challenge_id') and not payload.get('route_probe_id')):
+                ticket = self.store.one('SELECT * FROM dot_wake_tickets WHERE delivery_key=? AND subscription_id=?',
                                         (event['id'], sub['id']))
                 if not ticket or ticket['expires_at'] <= self.c.clock():
                     raise DevError('EVENT_WAKE_TICKET_EXPIRED', '唤醒票据已过期，等待原邮箱恢复生成新提示', 409)
-            if event['name'] == TASK_EVENT and not json.loads(event['data']).get('test'):
+                if event['name'] == ROOM_INBOX_EVENT:
+                    member = self.c.rooms.event_member(payload['member_id'], payload['conversation_id'], payload['binding_generation'])
+                    route = {'route_generation': member['route_generation'],
+                        'previous_route_generation': stored.get('previous_route_generation'),
+                        'previous_route_until': stored.get('retire_at', 0)}
+                    if not self.c.room_consumers.ticket_current(ticket, route):
+                        raise DevError('EVENT_WAKE_TICKET_EXPIRED', '原唤醒票据路线已失效', 409)
+            if event['name'] == TASK_EVENT and not payload.get('test'):
                 job = self.store.one('SELECT * FROM collaboration_jobs WHERE id=? AND room_id=?', (event['object_id'], room['id']))
                 if (not self.c.config.analysis_dispatch_enabled or not job or job['state'] != 'queued'
                         or job['version'] != event['object_version'] or job['deadline_at'] <= self.c.clock()):
                     return None
                 self.c.check_plan(room, job)
-            stored = json.loads(self.store.decrypt(sub['secret']))
             keys = [stored['current']]
             if stored.get('retire_at', 0) > self.c.clock():
                 keys.append(stored['retiring'])
@@ -918,6 +960,19 @@ class EventService:
                 return
             now = self.c.clock()
             sub = self.store.one('SELECT * FROM mcp_event_subscriptions WHERE id=?', (row['subscription_id'],))
+            settled_reason = row['reason_code']
+            if sub['name'] == ROOM_INBOX_EVENT and settled_reason not in {'host_revoked_in_flight', 'route_rotated_in_flight', 'route_candidate_ended_in_flight'}:
+                try:
+                    self.authorize(sub, self.event_room(sub))
+                except DevError as exc:
+                    if exc.code == 'ROOM_CONNECTION_REVOKED':
+                        settled_reason = 'host_revoked_in_flight'
+            if settled_reason in {'host_revoked_in_flight', 'route_rotated_in_flight', 'route_candidate_ended_in_flight'}:
+                accepted = status is not None and 200 <= status < 300
+                self.store.execute('''UPDATE mcp_event_deliveries SET state=?,next_at=0,lease_until=NULL,
+                    status_code=?,reason_code=?,accepted_at=? WHERE id=?''',
+                    ('accepted' if accepted else 'abandoned', status, settled_reason, now if accepted else None, row['id']))
+                return
             if sub['version'] != item['subscription_version']:
                 # Preserve the old in-flight receipt as audit, not as ACK for a new
                 # generation. Its lease will expire and replay with a current fence.

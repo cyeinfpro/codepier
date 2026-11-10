@@ -272,6 +272,8 @@ DESCRIPTIONS['collaboration_query'] += (' V2 dot_mailbox is a typed, read-only i
 DESCRIPTIONS['collaboration_query'] += (' New room actions address conversation_id without a fabricated project. Owner-only room management never becomes grant authority. room_connect recovers one durable onboarding flow.')
 DESCRIPTIONS['collaboration'] += (' Explicit dot_mailbox_configure prepares v2 only; activation requires a verified native host subscription. On a v2 wake, consumer_begin requires its wake ticket, then all Dot writes require the live consumer session/fence/proof. Drain the inbox and consumer_yield with its exact revision; a dirty response means continue draining. Tickets and proofs must never appear in chat. Team handoffs are bounded and publication requires exact artifact versions.')
 DESCRIPTIONS['collaboration'] += (' join(code=CPR-...) is the stable cached-catalog entry point for room invitations and uses the same checks as room_connect_join(invite_code=...). CPR codes are case-sensitive. Both exchange a short owner invitation for one member binding. If room actions are missing from host discovery, Rescan before continuing; registration is not proof of native subscription support. Subscribe to the returned room_inbox_dirty.v1 request using the native host; then use its actual wake_ticket and connection_proof for room_probe_read and return the nonce with room_probe_reply. Registration or callback acceptance alone is not ready. Resource sub-actions use flow_action; no action expands an MCP credential.')
+DESCRIPTIONS['collaboration_query'] += (' Host connection listing, details, impact and batch status require a current owner panel session.')
+DESCRIPTIONS['collaboration'] += (' A real host_control_request in a verified callback may be redeemed with room_connection_control for its exact owner operation. This proof only continues that onboarding or route operation. Host revocation, batch replacement and preparing a new route require the current owner panel session.')
 DESCRIPTIONS['collaboration'] += (
     ' On a connection check, use the actual wake ticket with room_probe_read and room_probe_reply.'
     ' On a business wake, use the saved member identity, connection_proof and actual wake_ticket with'
@@ -288,7 +290,7 @@ DESCRIPTIONS['collaboration'] += (
     ' Use input_handling=pending when an execution request still needs admission and answered when the answer resolves the input.'
     ' Recover uncertain submissions with the original key and arguments, and check original operation IDs.'
     ' Yield after draining. Use yield_after=true on a complete reply if reply_yield_after is declared.'
-    ' If consumer_continue_later is declared, use yield_mode=continue_later to preserve pending inputs.'
+    ' On a decoupled turn, use yield_mode=continue_later to preserve pending inputs if declared.'
     ' Wait for a real wake when the inbox has no processable input. Synthetic tests only verify connectivity.'
     ' room_work_handoff preserves the original Goal and approved scope, with the recipient, current intent,'
     ' epoch, bounded causation and artifact versions. Owner recovery uses room_work_control to select an'

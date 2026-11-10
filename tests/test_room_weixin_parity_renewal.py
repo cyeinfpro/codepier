@@ -1,16 +1,19 @@
 """Subscription renewal uses an isolated callback, never the real dot host."""
+import asyncio
 import base64
 import json
+from dataclasses import replace
 
 import pytest
 
-from hub.collaboration.common import canonical
+from hub.collaboration.common import canonical, digest
 from hub.collaboration.events import EventService
 from hub.collaboration.lifecycle import CollaborationLoops
 from hub.collaboration.network import Reply
 from tests.collaboration_support import collab as collab, key
-from tests.test_room_members_rebuild import add, create, join, rooms as rooms
-from tests.test_room_consumer_sessions import send, verify
+from shared.util import DevError
+from tests.test_room_members_rebuild import add, create, identity, join, rooms as rooms
+from tests.test_room_consumer_sessions import begin, credentials, send, verify
 
 
 async def start(rooms, *, managed=False, ttl=60_000):
@@ -43,7 +46,7 @@ async def start(rooms, *, managed=False, ttl=60_000):
     c.subscription = await s.events.subscribe(c.raw, actor)
     await s.events.tick()
     c.ticket = c.deliveries[-1]['data']['wake_ticket']
-    verify(c)
+    c.verified = verify(c)
     return c
 
 
@@ -52,22 +55,27 @@ def subscription(c):
 
 
 @pytest.mark.asyncio
-async def test_managed_subscription_survives_ttl_and_dispatcher_restart(rooms):
+async def test_callback_health_never_extends_subscription_after_dispatcher_restart(rooms):
     c = await start(rooms, managed=True, ttl=86_400_000)
     initial = subscription(c)
     c.clock[0] = initial['expires_at'] - 1799
     c.s.events = EventService(c.s, c.callback)
     await CollaborationLoops(c.s).renew_room_subscriptions()
-    renewed = subscription(c)
     assert c.challenges == 2
-    assert renewed['expires_at'] == c.clock[0] + 86400
-    assert renewed['id'] == initial['id']
+    assert subscription(c)['expires_at'] == initial['expires_at']
     c.clock[0] = initial['expires_at'] + 1
-    message = send(c, '跨过原订阅到期点后仍可交办')['message']
+    before = len(c.deliveries)
+    message = send(c, '跨过原订阅到期点后先保存')['message']
     await c.s.events.tick()
-    assert message['display']['state'] == 'queued'
-    assert c.deliveries[-1]['data']['wake_ticket']
-    assert c.s.rooms.member_view(c.s.rooms.member(c.joined['member_id']))['subscription_renewal']['state'] == 'active'
+    assert message['display']['state'] == 'waiting'
+    assert len(c.deliveries) == before
+    state = c.s.rooms.member_view(c.s.rooms.member(c.joined['member_id']))['subscription_renewal']
+    assert state['state'] == 'awaiting_host_refresh'
+    refreshed = await c.s.events.subscribe({**c.raw, 'cursor': c.subscription['cursor']}, c.actor)
+    assert refreshed['id'] == initial['id']
+    assert subscription(c)['expires_at'] == c.clock[0] + 86400
+    await c.s.events.tick()
+    assert len(c.deliveries) > before and c.deliveries[-1]['data']['wake_ticket']
 
 
 @pytest.mark.asyncio
@@ -83,6 +91,9 @@ async def test_managed_short_ttl_retries_without_claiming_host_is_ready(rooms):
     assert message['display']['state'] == 'waiting'
     c.fail_callback = False
     await CollaborationLoops(c.s).renew_room_subscriptions()
+    await c.s.events.tick()
+    assert subscription(c)['expires_at'] == original['expires_at']
+    await c.s.events.subscribe(c.raw, c.actor)
     await c.s.events.tick()
     assert subscription(c)['expires_at'] > c.clock[0]
     assert c.deliveries[-1]['data']['wake_ticket']
@@ -243,6 +254,119 @@ async def test_owner_can_opt_in_after_verified_subscription_expires(rooms):
     flow = c.s.rooms.connect_read({'flow_id': flow_id}, c.owner)['flow']
     c.s.rooms.connect_action({'flow_id': flow_id, 'action': 'set_renewal', 'keep_connected': True,
         'expected_version': flow['version'], 'idempotency_key': key()}, c.owner)
+    expired = subscription(c)['expires_at']
     await CollaborationLoops(c.s).renew_room_subscriptions()
+    assert subscription(c)['expires_at'] == expired
+    assert c.challenges == 1
+    await c.s.events.subscribe(c.raw, c.actor)
     assert subscription(c)['expires_at'] == c.clock[0] + 60
-    assert c.challenges == 2
+
+
+@pytest.mark.asyncio
+async def test_same_route_signing_rotation_preserves_probe_and_active_turn(rooms):
+    c = await start(rooms, managed=True)
+    member = c.s.rooms.member(c.joined['member_id'])
+    _, session = begin(c)
+    c.clock[0] += 10
+    original = subscription(c)
+    secret = 'whsec_' + base64.b64encode(b'n' * 32).decode()
+    refreshed = await c.s.events.subscribe({**c.raw, 'delivery': {**c.raw['delivery'], 'secret': secret}}, c.actor)
+    current = c.s.rooms.member(member['id'])
+    assert refreshed['id'] == original['id']
+    assert current['binding_generation'] == member['binding_generation']
+    assert current['route_generation'] == member['route_generation'] + 1
+    assert current['probe_replied_at'] == member['probe_replied_at']
+    assert refreshed['renewal']['approved']
+    assert c.s.rooms.renewals.record(current)['credential_digest'] == digest(secret)
+    c.clock[0] = subscription(c)['expires_at'] + 1
+    await c.s.events.tick()
+    row = c.s.room_consumers.guard_session(credentials(c, session), c.actor, c.s.conversations.object(c.actor, c.room['id']), current,
+                                            require_revision=False)
+    assert row['state'] == 'active'
+
+
+@pytest.mark.asyncio
+async def test_real_subscription_refresh_wins_against_stale_health_challenge(rooms):
+    c = await start(rooms, managed=True, ttl=86_400_000)
+    initial = subscription(c)
+    c.clock[0] = initial['expires_at'] - 1799
+    checking, release = asyncio.Event(), asyncio.Event()
+
+    async def delayed(url, body, headers):
+        checking.set()
+        await release.wait()
+        return await c.callback(url, body, headers)
+
+    old_events = EventService(c.s, delayed)
+    maintenance = asyncio.create_task(c.s.rooms.renewals.tick(old_events))
+    await asyncio.wait_for(checking.wait(), 5)
+    try:
+        renewed = await c.s.events.subscribe(c.raw, c.actor)
+        after = subscription(c)
+        assert renewed['id'] == initial['id'] and after['expires_at'] > initial['expires_at']
+    finally:
+        release.set()
+        await maintenance
+    assert subscription(c) == after
+    renewal = c.s.rooms.renewals.record(c.s.rooms.member(c.joined['member_id']))
+    assert renewal['reason_code'] == ''
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('expire_candidate', [False, True])
+async def test_same_host_callback_changes_only_after_the_candidate_round_trip(rooms, expire_candidate):
+    s, _, _, _ = rooms
+    s.config = replace(s.config, host_connections_mode='on')
+    c = await start(rooms, managed=True, ttl=86_400_000)
+    old = s.rooms.member(c.joined['member_id'])
+    with pytest.raises(DevError) as bootstrap:
+        begin(c)
+    assert bootstrap.value.code == 'DOT_WAKE_TICKET_INVALID'
+    send(c, '在旧路线领取的回合可以完成')
+    await s.events.tick()
+    begin_raw, session = begin(c, c.deliveries[-1]['data']['wake_ticket'])
+    callback_url = 'https://callback.example.invalid/new-verified-route'
+    raw = {**c.raw, 'delivery': {**c.raw['delivery'], 'url': callback_url}}
+    with pytest.raises(DevError, match='批准'):
+        await s.events.subscribe(raw, c.actor)
+    prepared = s.rooms.routes.prepare({'conversation_id': c.room['id'], 'member_id': old['id'],
+        'expected_route_generation': old['route_generation'], 'callback_url': callback_url,
+        'idempotency_key': key()}, c.owner)
+    controlled = s.rooms.host_proofs.control({'owner_operation_id': prepared['owner_operation_id'],
+        'control_handle': c.verified['control_handle'], 'idempotency_key': key()}, c.actor)
+    assert controlled['state'] == 'controlled'
+    candidate = await s.events.subscribe(raw, c.actor)
+    assert candidate['id'] != old['subscription_id']
+    assert s.rooms.member(old['id'])['subscription_id'] == old['subscription_id']
+    await s.events.tick()
+    probe = next(item['data'] for item in c.deliveries if item['data'].get('route_probe_id'))
+    assert probe['dirty_revision'] == 0
+    if expire_candidate:
+        c.clock[0] = prepared['expires_at'] + 1
+        await s.events.tick()
+        expired = s.rooms.routes.get(prepared['owner_operation_id'])
+        assert expired['state'] == 'expired' and expired['ticket_secret'] is None and expired['nonce_secret'] is None
+        assert s.store.one('SELECT state FROM mcp_event_subscriptions WHERE id=?', (candidate['id'],))['state'] == 'unsubscribed'
+        assert s.rooms.member(old['id'])['subscription_id'] == old['subscription_id']
+        assert subscription(c)['state'] == 'active'
+        with pytest.raises(DevError) as stale:
+            s.rooms.probe_read({**identity(c.joined), 'wake_ticket': probe['wake_ticket'],
+                                'idempotency_key': key()}, c.actor)
+        assert stale.value.code == 'ROOM_ROUTE_CHANGED'
+        return
+    nonce = s.rooms.probe_read({**identity(c.joined), 'wake_ticket': probe['wake_ticket'],
+                              'idempotency_key': key()}, c.actor)['probe_nonce']
+    switched = s.rooms.probe_reply({**identity(c.joined), 'probe_nonce': nonce,
+                                    'idempotency_key': key()}, c.actor)
+    current = s.rooms.member(old['id'])
+    assert switched['state'] == 'active'
+    assert current['subscription_id'] == candidate['id']
+    assert current['host_connection_id'] == old['host_connection_id']
+    assert current['binding_generation'] == old['binding_generation']
+    assert current['route_generation'] == old['route_generation'] + 1
+    assert subscription(c)['state'] == 'unsubscribed'
+    assert s.rooms.renewals.view(current)['approved']
+    replayed = s.room_consumers.begin(begin_raw, c.actor)
+    assert replayed['replayed'] and replayed['consumer_session_id'] == session['consumer_session_id']
+    assert s.room_consumers.guard_session(credentials(c, session), c.actor, c.s.conversations.object(c.actor, c.room['id']), current,
+                                            require_revision=False)['state'] == 'active'

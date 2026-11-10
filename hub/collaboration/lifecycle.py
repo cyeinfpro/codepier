@@ -97,6 +97,8 @@ class CollaborationLoops:
         return 30
 
     async def reconcile(self):
+        await self.service.store.run(self.service.room_connections.drain_revoke_jobs)
+        await self.service.store.run(self.service.rooms.host_proofs.expire)
         await self.service.store.run(self.service.reconcile)
 
     async def renew_room_subscriptions(self):

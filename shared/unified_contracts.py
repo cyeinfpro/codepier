@@ -89,7 +89,7 @@ CORE_ACTIONS = {
     },
 }
 
-# Collaboration: 122 public actions grouped by noun. A view is the original
+# Collaboration: 126 public actions grouped by noun. A view is the original
 # public action name, so every business contract, idempotency record and
 # receipt is reused verbatim.
 COLLAB_ACTIONS = {
@@ -97,13 +97,14 @@ COLLAB_ACTIONS = {
         'collab.inbox': _same(CQ, 'inbox', 'dot_inbox', 'dot_mailbox', 'room_inbox', 'dot_consumer', 'room_consumer'),
         'collab.get': _same(CQ, 'job', 'result', 'plan', 'thread', 'goal', 'coordination_goal', 'delegation', 'team',
                             'message_by_id', 'message_status', 'room_view', 'room_work', 'room_message_read',
-                            'room_attachment_read', 'room_reply_receipt', 'room_work_handoff_read', 'room_channel', 'room_connect',
-                            'room_turn_policy', 'room_connection_view', 'room_connection_impact',
-                            'connection', 'dot_connection', 'dot_recovery', 'dot_receipt'),
+                            'room_attachment_read', 'room_reply_receipt', 'room_work_handoff_read',
+                            'room_channel', 'room_connect', 'room_turn_policy', 'connection', 'dot_connection',
+                            'dot_recovery', 'dot_receipt', 'room_connection_view', 'room_connection_impact',
+                            'room_connection_rebind_status'),
         'collab.list': _same(CQ, 'overview', 'rooms', 'room_list', 'jobs', 'messages', 'room_messages', 'goals',
                              'coordination_goals', 'coordination_options', 'incidents', 'agents', 'subscriptions',
                              'join_slots', 'members', 'delegations', 'delegation_policies', 'teams', 'room_works',
-                             'timeline'),
+                             'timeline', 'room_connection_list'),
         'collab.changes': _same(CQ, 'changes', 'room_changes', 'room_project_impact'),
         'collab.context': _same(CQ, 'room_context'),
         'collab.search': _same(CQ, 'search'),
@@ -114,7 +115,8 @@ COLLAB_ACTIONS = {
     'act': {
         'collab.connect': _same(CD, 'join', 'room_connect_join', 'room_connect_resume', 'room_probe_read',
                                 'room_probe_reply', 'room_channel_connect', 'room_channel_action',
-                                'dot_mailbox_configure'),
+                                'dot_mailbox_configure', 'room_connection_control', 'room_connection_revoke',
+                                'room_connection_rebind_batch', 'room_connection_route_prepare'),
         'collab.consume': _same(CD, 'consumer_begin', 'consumer_heartbeat', 'consumer_yield', 'room_consumer_begin',
                                 'room_consumer_heartbeat', 'room_consumer_yield'),
         'collab.ack': {**_same(CD, 'dot_ack', 'dot_mailbox_ack', 'room_inbox_ack'), **_same(CW, 'ack')},
@@ -132,7 +134,7 @@ COLLAB_ACTIONS = {
                           **_same(CD, 'team_publish')},
         'collab.handoff': _same(CD, 'room_work_handoff', 'room_work_control', 'team_handoff', 'team_takeover'),
         'collab.room': _same(CD, 'room_create', 'room_update', 'room_migrate', 'room_projects', 'room_member_create',
-                             'room_context_update', 'room_turn_policy_update', 'room_connection_revoke'),
+                             'room_context_update', 'room_turn_policy_update'),
     },
 }
 
