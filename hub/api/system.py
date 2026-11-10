@@ -72,6 +72,13 @@ def make_system_router(context: HubContext):
         with store.transaction(immediate=False), iam.read_scope(store):
             return overview_data(request, token_usage, token_snapshot)
 
+    @router.get("/api/system/collaboration-telemetry")
+    @database_endpoint(store, read_only=True)
+    def collaboration_telemetry_snapshot(request: Request):
+        auth.instance(request)
+        from hub.collaboration.telemetry import collaboration_telemetry
+        return collaboration_telemetry.snapshot()
+
     @router.get("/api/overview")
     async def overview(request: Request, include_token_usage: bool = True):
         # The panel may fetch live status independently. The default retains the
