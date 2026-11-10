@@ -102,6 +102,9 @@ async def test_room_control_previews_confirm_and_stop_exact_parts(collab):
     result = delivery.control_room(conversation_id, row['id'], confirm, owner)
     assert result == delivery.control_room(conversation_id, row['id'], confirm, owner)
     assert result['provider_delivery_verified'] is False
+    audit = store.one("SELECT space_id,owner_user_id,detail FROM audit WHERE action='weixin.delivery_confirm_received'")
+    assert (audit['space_id'], audit['owner_user_id']) == (owner.space_id, owner.user_id)
+    assert '本人核对选中分项' in audit['detail']
     with pytest.raises(DevError) as exc:
         delivery.control_room(conversation_id, row['id'], stop, owner)
     assert exc.value.code == 'STALE_VERSION'

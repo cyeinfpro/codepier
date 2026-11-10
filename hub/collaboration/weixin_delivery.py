@@ -10,10 +10,11 @@ from typing import Literal
 
 from httpx import NetworkError, TimeoutException
 
-from hub.collaboration.common import canonical, digest
+from hub import iam
 from hub.collaboration import weixin_delivery_order as order
 from hub.collaboration import weixin_delivery_transport as transport
 from hub.collaboration import weixin_schema as models
+from hub.collaboration.common import canonical, digest, redact
 from hub.collaboration.weixin_protocol import encode_request, send_payload
 from shared.util import DevError
 
@@ -865,7 +866,7 @@ class WeixinDelivery:
         detail = {'note': args['confirmation_note'], 'affected_parts': plan['affected_parts'],
                   'provider_delivery_verified': False}
         if require_preview:
-            self.store.audit(principal.actor, action, row['id'], 'ok', detail)
+            iam.audit(self.store, principal, action, row['id'], detail=redact(detail))
         else:
             self.c.audit(room, principal.actor, action, row['id'], detail)
         return {'delivery_id': row['id'], 'affected_count': plan['affected_count'],
