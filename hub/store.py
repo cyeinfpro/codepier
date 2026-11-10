@@ -65,8 +65,8 @@ class Store:
         self.directory = Path(directory).resolve()
         from hub.state_layout import state_directory
         self.state_directory = state_directory(self.directory)
-        from hub.collaboration.delivery_compatibility import check_database
-        check_database(self.state_directory)
+        from hub.collaboration.delivery_compatibility import check_database as check_delivery_path
+        check_delivery_path(self.state_directory)
         self.directory.mkdir(parents=True, exist_ok=True)
         os.chmod(self.directory, 0o700)
         from shared.hub_data_contract import check_database, check_path
