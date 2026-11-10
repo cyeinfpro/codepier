@@ -211,12 +211,19 @@ class RoomRuntime:
         native = self.c.room_work_bridge.native
         if not goal or not native.reference(goal):
             raise DevError('ROOM_REPLY_WORK_REQUIRED', '成果引用必须关联当前房间的原工作', 422)
-        refs = self.c.coordination.teams.artifacts(goal, refs)
         visible = native.visible_scope_keys(goal, principal, member['id'])
-        scopes = {native.artifact_scope_key(goal, ref['work_item_id']) for ref in refs}
+        scopes = self.require_artifact_scopes(native, goal, (ref['work_item_id'] for ref in refs), visible)
+        return self.c.coordination.teams.artifacts(goal, refs), scopes
+
+    @staticmethod
+    def require_artifact_scopes(native, goal, work_item_ids, visible):
+        try:
+            scopes = {native.artifact_scope_key(goal, identifier) for identifier in work_item_ids}
+        except DevError:
+            raise DevError('ROOM_WORK_ARTIFACT_NOT_VISIBLE', '当前范围没有引用的工作成果', 404) from None
         if not scopes <= visible:
             raise DevError('ROOM_WORK_ARTIFACT_NOT_VISIBLE', '当前范围没有引用的工作成果', 404)
-        return refs, scopes
+        return scopes
 
     def save_reply(self, args, principal, member, session, fingerprint):
         source = self.source(args, member, principal)
@@ -398,6 +405,8 @@ class RoomRuntime:
         refs=args['artifact_refs']
         required = {w['id'] for w in works if w['result']}
         required.update(ref['work_item_id'] for ref in self.c.room_goal_recovery.reused_artifact_refs(goal))
+        visible = native.visible_scope_keys(goal, principal, member['id'])
+        self.require_artifact_scopes(native, goal, required, visible)
         if {r['work_item_id'] for r in refs} != required:
             raise DevError('ROOM_WORK_RESULT_SET_CHANGED','汇总需要精确引用当前意图和已批准续办的全部已有结果',409)
         return {'intent_revision':revision,'coordinator_epoch':self.c.room_goal_recovery.epoch(goal['id']),
