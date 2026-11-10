@@ -475,3 +475,33 @@ async def test_reply_disposition_keeps_authority_and_transport_separate(collab, 
         WHERE owner_user_id=? AND conversation_id=? AND json_valid(result)
           AND json_extract(result,'$.message_id')=?""", (owner.user_id, identity['conversation_id'], reply_id))
     assert any('room_runtime_receipts_message' in row['detail'] for row in plan)
+
+
+@pytest.mark.asyncio
+async def test_room_reply_can_declare_a_visible_delivery_dependency(collab):
+    (s, _, worker, clock, identity, credentials), flow, _, _ = await setup_channel(collab)
+
+    def request_for(sequence):
+        incoming = packet(sequence, f'原问题 {sequence}', create_time_ms=int(clock[0] * 1000))
+        received = s.weixin.commit_updates(s.weixin.claim_poll(flow['account_id']), incoming)['message_ids'][0]
+        entry = next(item for item in s.room_consumers.inbox(identity, worker)['items']
+                     if item['object_id'] == received)
+        return {**identity, **credentials, **entry['reply_arguments'],
+                'body_text': f'回复 {sequence}', 'idempotency_key': key()}
+
+    first = s.room_runtime.reply(request_for(2), worker)
+    prior = s.store.one('SELECT id FROM weixin_deliveries WHERE message_id=?', (first['message']['id'],))
+    clock[0] += 3
+    request = request_for(3)
+    with pytest.raises(DevError) as invalid:
+        s.room_runtime.reply({**request, 'depends_on_delivery_id': 'missing', 'dependency_mode': 'requires_success'}, worker)
+    assert invalid.value.code == 'WEIXIN_DELIVERY_RELATION_INVALID'
+    assert not s.store.one('SELECT 1 FROM collaboration_messages WHERE reply_to_id=?', (request['source_message_id'],))
+    args = {**request, 'depends_on_delivery_id': prior['id'], 'dependency_mode': 'requires_success'}
+    second = s.room_runtime.reply(args, worker)
+    row = s.store.one('SELECT * FROM weixin_deliveries WHERE message_id=?', (second['message']['id'],))
+    assert row['depends_on_delivery_id'] == prior['id']
+    assert json.loads(row['ordering_evidence'])['dependency_mode'] == 'requires_success'
+    with pytest.raises(DevError) as conflict:
+        s.room_runtime.reply({**args, 'dependency_mode': 'after_settled'}, worker)
+    assert conflict.value.code == 'IDEMPOTENCY_CONFLICT'
