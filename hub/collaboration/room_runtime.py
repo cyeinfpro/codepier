@@ -445,7 +445,6 @@ class RoomRuntime:
                 partition=self.store.one('SELECT * FROM collaboration_rooms WHERE id=?',(original['room_id'],))
                 self.c.coordination.authorize(principal,partition,original)
                 if source_body.get('work_id') and source_body.get('work_intent_change',True):
-                    self.c.room_consumers.guard_reply_revision(args,principal,member,source,strict=False)
                     return self.continue_work(args,member,source,original,principal)
                 def recover():
                     result={'goal_id':original['id'],'resumed_existing':True}
@@ -543,25 +542,27 @@ class RoomRuntime:
         reference=native.reference(goal)
         if not reference:
             raise DevError('ROOM_WORK_CONTINUATION_UNAVAILABLE','原工作需沿其原任务继续入口恢复',409)
-        spec=native.validate(reference,principal)
-        self.c.room_goal_recovery.require_epoch(goal,args.get('coordinator_epoch'))
-        if member['id']!=spec['coordinator_member_id'] or goal['conversation_id']!=source['conversation_id']:
-            raise DevError('ROOM_WORK_LEAD_REQUIRED','继续原工作需要原主责成员',403)
-        if args['project_ids'] and set(args['project_ids'])!=set(spec['project_ids']):
-            raise DevError('ROOM_WORK_SCOPE_CHANGED','补充只适用原工作范围，不能自动增加项目',409)
-        intent=self.store.one('SELECT * FROM room_work_intents WHERE goal_id=?',(goal['id'],))
-        if not intent or intent['source_message_id']!=source['id']:
-            raise DevError('ROOM_INTENT_CHANGED','此补充已被更新，请读取最新本人输入',409)
-        if args.get('expected_intent_revision') is not None and args['expected_intent_revision']!=intent['intent_revision']:
-            raise DevError('ROOM_INTENT_CHANGED','本人意图已更新，请核对原工作',409,
-                intent_revision=intent['intent_revision'])
-        record=self.store.one('SELECT * FROM room_work_intent_sources WHERE goal_id=? AND intent_revision=?',(goal['id'],intent['intent_revision']))
-        if record['source_version']!=source['version'] or record['source_digest']!=args['source_digest']:
-            raise DevError('ROOM_SOURCE_CHANGED','原补充的正文或版本已改变',409)
-        if any(op['state'] not in {'succeeded','failed','cancelled'} for op in self.c.coordination.operations(goal)):
-            return self.work_response({'goal_id':goal['id'],'resumed_existing':True,'reason_code':'WORK_OPERATION_PENDING'},args,member,principal)
+        original=self.store.one("""SELECT * FROM room_work_intent_sources
+            WHERE goal_id=? AND source_message_id=? AND member_id=?""",(goal['id'],source['id'],member['id']))
+        if not original or original['source_version']!=source['version'] or original['source_digest']!=args['source_digest']:
+            raise DevError('ROOM_SOURCE_CHANGED','原补充的正文、版本或成员已改变',409)
         partition=self.store.one('SELECT * FROM collaboration_rooms WHERE id=?',(goal['room_id'],))
         def save():
+            spec=native.validate(reference,principal)
+            self.c.room_goal_recovery.require_epoch(goal,args.get('coordinator_epoch'))
+            if member['id']!=spec['coordinator_member_id'] or goal['conversation_id']!=source['conversation_id']:
+                raise DevError('ROOM_WORK_LEAD_REQUIRED','继续原工作需要原主责成员',403)
+            if args['project_ids'] and set(args['project_ids'])!=set(spec['project_ids']):
+                raise DevError('ROOM_WORK_SCOPE_CHANGED','补充只适用原工作范围，不能自动增加项目',409)
+            self.c.room_consumers.guard_reply_revision(args,principal,member,source,strict=False,action='work_start')
+            intent=self.store.one('SELECT * FROM room_work_intents WHERE goal_id=?',(goal['id'],))
+            if not intent or intent['source_message_id']!=source['id']:
+                raise DevError('ROOM_INTENT_CHANGED','此补充已被更新，请读取最新本人输入',409)
+            if args.get('expected_intent_revision') is not None and args['expected_intent_revision']!=intent['intent_revision']:
+                raise DevError('ROOM_INTENT_CHANGED','本人意图已更新，请核对原工作',409,
+                    intent_revision=intent['intent_revision'])
+            if any(op['state'] not in {'succeeded','failed','cancelled'} for op in self.c.coordination.operations(goal)):
+                raise DevError('WORK_OPERATION_PENDING','先核对原操作结果，再继续此补充',409)
             session=self.store.one('SELECT * FROM dot_consumer_sessions WHERE id=?',(args['consumer_session_id'],))
             exact=bool(session and session.get('turn_policy')=='decoupled')
             self.c.coordination.authorize(principal,partition,{**goal,'state':'active'},active=True,exact_work_effect=exact)
@@ -588,10 +589,17 @@ class RoomRuntime:
             self.c.room_consumers.ack_message(member,source['id'])
             self.c.rooms.change(goal['conversation_id'],'work',goal['id'],goal['version']+1)
             return {'goal_id':goal['id'],'resumed_existing':True,'continued_work_item_id':created['work_item']['id']}
-        result=self.member_receipt(args,member,principal,'room_work_continue',save)
-        return self.work_response(result,args,member,principal)
+        try:
+            with self.store.savepoint():
+                result=self.member_receipt(args,member,principal,'room_work_continue',save)
+        except DevError as exc:
+            if exc.code!='WORK_OPERATION_PENDING':
+                raise
+            result={'goal_id':goal['id'],'resumed_existing':True,'reason_code':exc.code}
+        return self.work_response(result,args,member,principal,
+            allow_schedule=original['intent_revision']==self.intent_revision(goal['id']) and not result.get('reason_code'))
 
-    def work_response(self,result,args,member,principal):
+    def work_response(self,result,args,member,principal,*,allow_schedule=True):
             goal=self.goal(result['goal_id'])
             if self.c.room_work_bridge.native.reference(goal):
                 goal={**goal,'_reader_member_id':member['id']}
@@ -602,7 +610,7 @@ class RoomRuntime:
             queued=next((item for item in detail['work_items'] if item['state']=='queued'
                 and item['assignee_grant_id']==principal.grant_id and (not native.reference(goal) or item['id'] in assignments)),None)
             next_request=None
-            eligible=goal['state']=='active' and queued and not result.get('scope_revision_required')
+            eligible=allow_schedule and goal['state']=='active' and queued and not result.get('scope_revision_required')
             if eligible:
                 try:
                     self.c.coordination.authorize(principal,partition,goal,active=True)

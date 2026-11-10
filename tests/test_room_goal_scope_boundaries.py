@@ -159,7 +159,15 @@ async def test_owner_supplement_fences_old_attempt_and_continues_same_goal(colla
     assert resumed['goal_id']==result['goal_id'] and resumed['intent_revision']==2 and resumed['scheduled']
     assert resumed['continued_work_item_id']!=item['id']
     assert s.store.one('SELECT state FROM coordination_work WHERE id=?',(item['id'],))['state']=='blocked'
+    goal=s.room_runtime.goal(result['goal_id'])
+    s.room_runtime.control({'work_id':goal['id'],'expected_version':goal['version'],
+        'action':'supplement','body_text':'最新补充：先暂停文档检查。','idempotency_key':key()},owner)
+    replay=s.room_runtime.start_work({**request,
+        'expected_inbox_revision':s.room_consumers.inbox(identity,actor)['inbox_revision']},actor)
+    assert replay['continued_work_item_id']==resumed['continued_work_item_id']
+    assert replay['intent_revision']==3 and not replay['scheduled'] and replay['next_request'] is None
     assert len(s.store.all('SELECT * FROM coordination_goals'))==1
+    assert len(s.store.all('SELECT * FROM coordination_work'))==2
     assert not s.store.all('SELECT * FROM operations')
 
 
