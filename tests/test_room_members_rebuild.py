@@ -343,10 +343,19 @@ async def test_rebind_fences_old_proof_and_preserves_member(rooms):
     assert s.store.one('SELECT state FROM mcp_event_subscriptions WHERE id=?', (old_sub['id'],))['state'] == 'active'
     assert s.store.one('SELECT state FROM dot_consumer_sessions WHERE id=?', (lease['consumer_session_id'],))['state'] == 'active'
     candidate, candidate_join = join(s, worker, replaced)
+    waiting = s.invoke('collaboration_query', {'action': 'room_inbox', **identity(candidate)}, worker)
+    assert waiting['state'] == 'waiting_host' and waiting['items'] == []
     candidate_sub = await subscribe(s, worker, candidate, 'replacement')
-    with pytest.raises(DevError):
+    verifying = s.invoke('collaboration_query', {'action': 'room_inbox', **identity(candidate)}, worker)
+    assert verifying['state'] == 'verifying' and verifying['probe_required']
+    assert verifying['items'] == [] and 'wake_ticket' not in verifying
+    with pytest.raises(DevError) as wrong_proof:
+        s.room_consumers.inbox({**identity(candidate), 'connection_proof': joined['connection_proof']}, worker)
+    assert wrong_proof.value.code == 'ROOM_MEMBER_PROOF_REQUIRED'
+    with pytest.raises(DevError) as blocked:
         s.room_consumers.begin({**identity(candidate), 'wake_ticket': candidate['wake_ticket'],
             'consumer_run_id': key(), 'idempotency_key': key()}, worker)
+    assert blocked.value.code == 'ROOM_PROBE_REQUIRED'
     with pytest.raises(DevError):
         s.rooms.probe_reply({**identity(candidate), 'probe_nonce': nonce, 'idempotency_key': key()}, worker)
     assert s.rooms.member(joined['member_id'])['binding_generation'] == joined['binding_generation']
@@ -364,6 +373,56 @@ async def test_rebind_fences_old_proof_and_preserves_member(rooms):
         s.rooms.join(old_join, worker)
     with pytest.raises(DevError):
         s.rooms.probe_read({**identity(joined), 'wake_ticket': joined['wake_ticket'], 'idempotency_key': key()}, worker)
+
+
+@pytest.mark.asyncio
+async def test_accepted_candidate_probe_recovers_with_fresh_ticket(rooms):
+    s, owner, worker, clock = rooms
+    created = add(s, owner, create(s, owner))
+    joined, _ = join(s, worker, created)
+    await subscribe(s, worker, joined)
+    flow_id = created['flow']['id']
+    flow = s.rooms.connect_read({'flow_id': flow_id}, owner)['flow']
+    replacement = s.rooms.connect_action({'flow_id': flow_id, 'action': 'rebind',
+        'expected_version': flow['version'], 'idempotency_key': key()}, owner)
+    candidate, _ = join(s, worker, replacement)
+    await subscribe(s, worker, candidate, 'replacement')
+    flow = s.rooms.connect_read({'flow_id': flow_id}, owner)['flow']
+    assert flow['display']['primary_action'] == 'retry_probe'
+    received = []
+
+    async def receiver(url, body, headers):
+        received.append(json.loads(body)['data'])
+        return Reply(204)
+
+    s.events.sender = receiver
+    clock[0] += 661
+    assert s.room_consumers.recover() == 1
+    assert s.room_consumers.recover() == 0
+    await s.events.tick()
+    auto = received.pop()
+    assert auto['connection_check_required'] and auto['binding_generation'] == candidate['binding_generation']
+    assert auto['wake_ticket'] != candidate['wake_ticket']
+    old_nonce = s.rooms.probe_read({**identity(candidate), 'wake_ticket': auto['wake_ticket'],
+        'idempotency_key': key()}, worker)['probe_nonce']
+    clock[0] += 1200
+    assert s.room_consumers.recover() == 0
+    request = {'flow_id': flow_id, 'action': 'resume', 'expected_version': flow['version'], 'idempotency_key': key()}
+    s.rooms.connect_action(request, owner)
+    s.rooms.connect_action(request, owner)
+    await s.events.tick()
+    assert len(received) == 1
+    retry = received[0]
+    assert retry['connection_check_required'] and retry['wake_ticket'] != auto['wake_ticket']
+    with pytest.raises(DevError) as rejected:
+        s.rooms.probe_reply({**identity(candidate), 'probe_nonce': old_nonce, 'idempotency_key': key()}, worker)
+    assert rejected.value.code == 'ROOM_PROBE_MISMATCH'
+    nonce = s.rooms.probe_read({**identity(candidate), 'wake_ticket': retry['wake_ticket'],
+        'idempotency_key': key()}, worker)['probe_nonce']
+    assert nonce != old_nonce
+    result = s.rooms.probe_reply({**identity(candidate), 'probe_nonce': nonce, 'idempotency_key': key()}, worker)
+    assert result['binding_activated']
+    assert s.room_consumers.recover() == 0
 
 
 @pytest.mark.asyncio

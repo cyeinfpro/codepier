@@ -216,6 +216,7 @@ window.CodePierCollaboration = (() => {
     ({
       refresh_invite: '刷新加入说明',
       resume: '继续连接',
+      retry_probe: '重新发送连接检查',
       pause: '暂停',
       remove: '移除成员',
       continue_connection: '继续连接',
@@ -3856,6 +3857,7 @@ window.CodePierCollaboration = (() => {
         {
           continue_connection: 'resume',
           recover_connection: 'resume',
+          retry_probe: 'resume',
           refresh_invitation: 'refresh_invite',
         }[requestAction] || requestAction;
       const result = await mutation(
@@ -3865,6 +3867,7 @@ window.CodePierCollaboration = (() => {
       );
       if (result) {
         renderFlow(result);
+        if (requestAction === 'retry_probe') announce('连接检查已排队，等待 dot 回复');
         await store.refresh();
       }
     } else if (action === 'rebind-member') {

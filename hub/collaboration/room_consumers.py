@@ -24,6 +24,7 @@ ROOM_HANDLING = (
 )
 
 FAST_WAKE_DELAYS = (30, 120, 600)
+PROBE_RETRY_DELAYS = (60, 240, 660)
 SLOW_WAKE_DELAY = 1800
 MAX_WAKE_AGE = 86400
 MAX_WAKE_ATTEMPTS = len(FAST_WAKE_DELAYS) + MAX_WAKE_AGE // SLOW_WAKE_DELAY
@@ -106,8 +107,15 @@ class RoomConsumers(FencedConsumerEngine):
 
     def scope(self, raw, principal, model):
         args = validate(model, raw)
+        can_verify = model in (contracts.RoomInboxRead, contracts.RoomConsumerBegin)
         actor, room, member = self.c.rooms.member_scope(principal, args['conversation_id'], args['member_id'],
-            args['binding_generation'], args['connection_proof'], require_proof=True)
+            args['binding_generation'], args['connection_proof'], require_proof=True, pending=can_verify)
+        if member.get('_pending_binding'):
+            if model is contracts.RoomConsumerBegin:
+                raise DevError('ROOM_PROBE_REQUIRED', '候选连接需要先使用真实通知票据读取并回复探针', 409)
+            return args, actor, room, member, member, None, None
+        if can_verify:
+            self.c.rooms.require_native(room)
         binding, sub = self.binding(room, member, actor, self.generation(member))
         return args, actor, room, member, member, binding, sub
 
@@ -210,13 +218,14 @@ class RoomConsumers(FencedConsumerEngine):
             raise DevError('ROOM_PROBE_TICKET_INVALID', '连接检查需要当前成员实际收到的原通知票据', 403)
         return ticket
 
-    def connection_probe(self, member):
+    def connection_probe(self, member, *, retry_key=None):
         """An actual host callback, with no business message or work creation."""
         room = self.store.one('SELECT * FROM conversation_rooms WHERE id=?', (member['conversation_id'],))
         binding, sub = self.binding(room, member)
         if member.get('_pending_binding') or not room['room_protocol']:
-            self._wake(member, 'connection:' + sub['id'] + ':' + str(sub['version']))
-            return
+            reason = 'connection:' + sub['id']
+            reason += ':retry:' + retry_key if retry_key is not None else ':' + str(sub['version'])
+            return self._wake(member, reason, probe=True)
         self.activate(room, member, member, binding['generation'], sub['id'])
         self.catch_up(member)
         member = self._reset_wake_episode(self.c.rooms.member(member['id']))
@@ -282,9 +291,12 @@ class RoomConsumers(FencedConsumerEngine):
         self.c.rooms.event_authorize(subscription, json.loads(subscription['arguments']), payload)
         room = self.store.one('SELECT * FROM conversation_rooms WHERE id=?', (member['conversation_id'],))
         ticket = self.issue_ticket(room, member, subscription, self.generation(member), event_id)
-        return {**payload, 'wake_ticket': ticket}
+        result = {**payload, 'wake_ticket': ticket}
+        if not member['probe_replied_at']:
+            result['connection_check_required'] = True
+        return result
 
-    def _wake(self, member, reason='dirty'):
+    def _wake(self, member, reason='dirty', *, probe=False):
         if not member['grant_id'] or member['status'] in {'paused', 'removed', 'legacy'}:
             return None
         room = self.store.one('SELECT * FROM conversation_rooms WHERE id=?', (member['conversation_id'],))
@@ -294,12 +306,15 @@ class RoomConsumers(FencedConsumerEngine):
             'conversation_id': member['conversation_id'], 'member_id': member['id'],
             'binding_generation': member['binding_generation'], 'dirty_revision': member['dirty_revision'],
             'test': False, 'test_subscription_id': ''}
-        identifier = 'room_' + digest([member['id'], member['binding_generation'], member['dirty_revision'],
-                                      member['wake_generation'], reason])
-        self.store.execute('''INSERT OR IGNORE INTO mcp_event_outbox
+        wake_identity = ([member['probe_created_at'], 'connection-check'] if probe
+                         else [member['dirty_revision'], member['wake_generation']])
+        identifier = 'room_' + digest([member['id'], member['binding_generation'], *wake_identity, reason])
+        queued = self.store.execute('''INSERT OR IGNORE INTO mcp_event_outbox
             (id,room_id,conversation_id,name,object_id,object_version,target_grant_id,data,created)
             VALUES (?,NULL,?,?,?,?,?,?,?)''', (identifier, member['conversation_id'], ROOM_INBOX_EVENT,
                 identifier, 1, member['grant_id'], canonical(payload), self.c.clock()))
+        if not queued.rowcount:
+            return None
         loops = getattr(self.c, 'loops', None)
         if loops is not None:
             self.store.after_commit(loops.wake_events)
@@ -537,6 +552,19 @@ class RoomConsumers(FencedConsumerEngine):
     def inbox(self, raw, principal):
         with self.store.transaction(immediate=False):
             args, actor, room, _, member, binding, _ = self.scope(raw, principal, contracts.RoomInboxRead)
+            if member.get('_pending_binding'):
+                if args['cursor']:
+                    raise DevError('INVALID_CURSOR', '候选连接没有可分页的收件箱', 400)
+                ready = bool(member['subscription_verified_at'] and member['probe_nonce_hash'])
+                return {'conversation_id': room['id'], 'member_id': member['id'],
+                    'binding_generation': member['binding_generation'], 'state': 'verifying' if ready else 'waiting_host',
+                    'probe_required': True, 'items': [], 'next_cursor': None, 'pagination_complete': True,
+                    'read_only': True, 'read_is_consumption': False, 'grants_authority': False,
+                    'handling_instructions': (
+                        '用当前绑定真实通知中的 wake_ticket 调用 room_probe_read，再用 room_probe_reply 回复返回的 nonce。'
+                        '没有当前票据时等待原订阅的通知，或请房主重新发送连接检查。'
+                        '验证通过后再读取业务收件箱。'
+                    ) if ready else '先按加入回执的 subscription_request 注册宿主原生订阅。'}
             cursor_scope = digest(['room-inbox', member['id'], binding['generation'], self.scope_digest(room, member)])
             after = read_cursor(self.c.secret, cursor_scope, args['cursor']) if args['cursor'] else 0
             if isinstance(after, bool) or not isinstance(after, int) or after < 0:
@@ -643,7 +671,10 @@ class RoomConsumers(FencedConsumerEngine):
 
         recover_waiting(self.c)
         with self.store.transaction():
-            count = self._maintain(max_wakes)
+            count = self._recover_probes(max_wakes)
+            if count >= max_wakes:
+                return count
+            count += self._maintain(max_wakes - count)
             if count >= max_wakes:
                 return count
             now = self.c.clock()
@@ -676,6 +707,33 @@ class RoomConsumers(FencedConsumerEngine):
             if len(rows) < 64:
                 self._after = ''
             return count
+
+    def _recover_probes(self, maximum):
+        now = self.c.clock()
+        from hub.collaboration.rooms import PROBE_LIFETIME
+
+        rows = self.store.all('''SELECT p.member_id, m.conversation_id, p.binding_generation, p.probe_created_at
+            FROM room_pending_bindings p JOIN mcp_event_subscriptions s ON s.id=p.subscription_id
+            JOIN room_members m ON m.id=p.member_id
+            WHERE p.status='verifying' AND p.revoked_at IS NULL AND p.probe_replied_at IS NULL
+              AND p.prepare_expires_at>? AND p.probe_created_at>? AND p.probe_created_at<=?
+              AND s.state='active' AND s.expires_at>? AND s.last_accepted>=p.probe_created_at
+            ORDER BY p.probe_created_at LIMIT 64''',
+            (now, now - PROBE_LIFETIME, now - PROBE_RETRY_DELAYS[0], now))
+        count = 0
+        for row in rows:
+            delay = max(delay for delay in PROBE_RETRY_DELAYS if delay <= now - row['probe_created_at'])
+            try:
+                member = self.c.rooms.event_member(row['member_id'], row['conversation_id'], row['binding_generation'])
+                if self._rejected(member['subscription_id']):
+                    continue
+                if self.connection_probe(member, retry_key='auto:' + str(delay)):
+                    count += 1
+                    if count >= maximum:
+                        break
+            except DevError:
+                continue
+        return count
 
     def _maintain(self, maximum):
         now = self.c.clock()

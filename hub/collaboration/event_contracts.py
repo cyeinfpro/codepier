@@ -39,6 +39,7 @@ class RoomInboxFilters(Model):
 
 class RoomInboxPayload(RoomInboxFilters):
     schema_version: Literal[1]
+    connection_check_required: bool = Field(default=False, exclude_if=lambda required: not required)
     dirty_revision: int = Field(ge=0)
     test: bool = False
     test_subscription_id: str = Field(default='', max_length=128)

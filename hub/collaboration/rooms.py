@@ -116,6 +116,9 @@ def migrate(db):
         AND reason_code IN ('ROOM_PAUSED','ROOM_MEMBER_PAUSE')''')
 
 
+PROBE_LIFETIME = 1800
+
+
 class Rooms:
     def __init__(self, collaboration):
         self.c, self.store = collaboration, collaboration.store
@@ -1005,6 +1008,8 @@ class Rooms:
             result['display'] = {'title': '房间已暂停，请先继续房间' if room['state'] == 'paused' else '房间已归档',
                 'primary_action': 'view_details' if room['state'] == 'paused' else None}
         if candidate:
+            if room and room['state'] == 'active' and state == 'verifying':
+                result['display'] = {'title': '等待 dot 回复连接检查', 'primary_action': 'retry_probe'}
             result['candidate_binding_generation'] = candidate['binding_generation']
             result['current_connection_preserved'] = True
             if candidate['prepare_expires_at'] <= self.c.clock() and candidate['redeemed_at']:
@@ -1091,7 +1096,10 @@ class Rooms:
                     binding = self.pending.by_generation(member, candidate['binding_generation'])
                     if binding['subscription_id']:
                         self._probe_subscription(binding)
-                        self.c.room_consumers.connection_probe(binding)
+                        if binding['probe_created_at'] + PROBE_LIFETIME <= self.c.clock():
+                            self.reset_probe(binding)
+                            binding = self.event_member(member['id'], room['id'], binding['binding_generation'])
+                        self.c.room_consumers.connection_probe(binding, retry_key=digest(args['idempotency_key']))
                     self.store.execute('UPDATE room_connect_flows SET version=version+1,updated_at=? WHERE id=?',
                         (self.c.clock(), flow['id']))
                 else:
@@ -1235,15 +1243,14 @@ class Rooms:
         member = self.event_subscription_guard(principal, filters)
         stored = json.loads(self.store.decrypt(subscription['secret']))
         changed = (member['subscription_id'] != subscription['id'] or reset_verification or
-            (not member['probe_replied_at'] and member['probe_created_at'] is not None and member['probe_created_at'] + 1800 <= self.c.clock()))
+            (not member['probe_replied_at'] and member['probe_created_at'] is not None
+             and member['probe_created_at'] + PROBE_LIFETIME <= self.c.clock()))
         table, identifier = self.binding_storage(member)
         self.store.execute(f'''UPDATE {table} SET subscription_id=?,subscription_verified_at=?,endpoint_digest=?,
             credential_digest=?,version=version+1,updated_at=? WHERE id=?''',
             (subscription['id'], self.c.clock(), digest(stored['url']), subscription['key_digest'], self.c.clock(), identifier))
         if changed or not member['probe_nonce_hash']:
-            nonce = secrets.token_urlsafe(32)
-            self.store.execute(f'''UPDATE {table} SET probe_nonce_hash=?,probe_nonce_secret=?,probe_created_at=?,
-                probe_read_at=NULL,probe_replied_at=NULL WHERE id=?''', (digest(nonce), self.store.encrypt(nonce), self.c.clock(), identifier))
+            self.reset_probe(member)
         if member.get('_pending_binding'):
             self.store.execute("UPDATE room_pending_bindings SET status='verifying' WHERE id=?", (identifier,))
         if (changed or not member['probe_nonce_hash'] or not member['probe_replied_at']) and (
@@ -1261,6 +1268,13 @@ class Rooms:
                     consumers.recover_connection(current)
                 else:
                     consumers.connection_probe(current)
+
+    def reset_probe(self, member):
+        nonce = secrets.token_urlsafe(32)
+        table, identifier = self.binding_storage(member)
+        self.store.execute(f'''UPDATE {table} SET probe_nonce_hash=?,probe_nonce_secret=?,probe_created_at=?,
+            probe_read_at=NULL,probe_replied_at=NULL WHERE id=?''',
+            (digest(nonce), self.store.encrypt(nonce), self.c.clock(), identifier))
 
     @staticmethod
     def binding_storage(member):
@@ -1330,10 +1344,11 @@ class Rooms:
             if (not member['probe_read_at'] or not member['probe_nonce_hash'] or
                     not hmac.compare_digest(digest(args['probe_nonce']), member['probe_nonce_hash'])):
                 raise DevError('ROOM_PROBE_MISMATCH', '需要先读取并回复当前绑定的连接检查', 409)
-            if member['probe_created_at'] + 1800 <= self.c.clock() and not member['probe_replied_at']:
+            if member['probe_created_at'] + PROBE_LIFETIME <= self.c.clock() and not member['probe_replied_at']:
                 raise DevError('ROOM_PROBE_EXPIRED', '连接检查已过期，请续订原订阅后重新验证', 410)
             if member.get('_pending_binding'):
                 active = self.pending.activate(member, actor)
+                recover_waiting(self.c, conversation_id=room['id'])
                 return {**self.probe_result(active, args), 'binding_activated': True}
             if not member['probe_replied_at']:
                 self.store.execute('UPDATE room_members SET probe_replied_at=?,version=version+1,updated_at=? WHERE id=?', (self.c.clock(), self.c.clock(), member['id']))
