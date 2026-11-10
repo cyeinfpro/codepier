@@ -108,7 +108,7 @@ async def test_rotation_reopens_exact_begin_proof_ticket_and_retry_body(tmp_path
             store.close()
 
 
-@pytest.mark.parametrize('kind', ['proof', 'ticket', 'sealed_delivery', 'plaintext'])
+@pytest.mark.parametrize('kind', ['proof', 'ticket', 'maintenance', 'sealed_delivery', 'plaintext'])
 def test_missing_key_distinguishes_new_ciphertext_from_legacy_json(tmp_path, kind):
     directory = tmp_path / kind
     directory.mkdir()
@@ -117,6 +117,7 @@ def test_missing_key_distinguishes_new_ciphertext_from_legacy_json(tmp_path, kin
     encrypted = Fernet(Fernet.generate_key()).encrypt(b'synthetic-only-secret').decode()
     table, column = {'proof': ('dot_consumer_sessions', 'proof_secret'),
         'ticket': ('dot_wake_tickets', 'ticket_secret'),
+        'maintenance': ('knowledge_maintenance', 'principal'),
         'sealed_delivery': ('mcp_event_deliveries', 'body'),
         'plaintext': ('mcp_event_deliveries', 'body')}[kind]
     value = '{"legacy":true}' if kind == 'plaintext' else (

@@ -2,7 +2,7 @@ name: codepier
 services:
   hub:
     build: "${CODEPIER_HUB_SOURCE:-.}"
-    image: "${CODEPIER_HUB_IMAGE:-codepier:1.33.11}"
+    image: "${CODEPIER_HUB_IMAGE:-codepier:1.33.12}"
     restart: unless-stopped
     init: true
     entrypoint: ["python", "-m", "shared.hub_data_contract", "--exec"]

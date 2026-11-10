@@ -42,7 +42,8 @@ CIPHER_COLUMNS = (("operation_payload_archives", "body"), ("devices", "secret"),
                   ("weixin_enrollments", "payload"), ("weixin_parts", "body"),
                   ("weixin_parts", "wire_body"), ("telegram_accounts", "secret"),
                   ("telegram_bindings", "pairing_secret"), ("telegram_inbox", "body"),
-                  ("channel_onboarding_notices", "body"), ("room_weixin_logins", "payload"))
+                  ("channel_onboarding_notices", "body"), ("room_weixin_logins", "payload"),
+                  ("knowledge_maintenance", "principal"))
 # Delivery bodies from older protocols remain plaintext JSON; only explicitly
 # sealed bodies participate in rotation and missing-key detection.
 PREFIXED_CIPHER_COLUMNS = (("mcp_event_deliveries", "body", "sealed:v1:"),

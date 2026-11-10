@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import sqlite3
 import subprocess
 import sys
@@ -14,6 +15,7 @@ from cryptography.fernet import Fernet, InvalidToken
 import pytest
 
 from hub import keyring
+from hub.knowledge_maintenance import KnowledgeMaintenance
 from hub.store import Store
 from shared.instance_lock import InstanceLock
 
@@ -24,6 +26,14 @@ def populated(directory: Path):
         store.execute("INSERT INTO devices(id,name,secret,created) VALUES ('d','fixture',?,?)", (store.encrypt('fixture-device-key'), time.time()))
         store.execute("INSERT INTO operations(id,actor,tool,args_summary,fingerprint,state,created,updated,payload) VALUES ('o','fixture','fs_read','{}','test','queued',?,?,?)", (time.time(), time.time(), store.encrypt('{"path":"fixture.py"}')))
         store.execute("INSERT INTO vps_connections(id,name,name_key,host,port,username,secret,created,updated) VALUES ('v','fixture','fixture','vps.invalid',22,'fixture',?,?,?)", (store.encrypt('fixture-password'), time.time(), time.time()))
+        # Disabled maintenance records retain encrypted authority too.
+        KnowledgeMaintenance(SimpleNamespace(store=store)).migrate()
+        store.execute("""INSERT INTO knowledge_maintenance
+            (id,project_id,device_id,root,workspace,principal,generation,enabled,state,
+             max_files,operation_id,pending_key,next_at,failures,last_error,updated)
+            VALUES ('m','p','d','/synthetic/project','',?,'fixture-generation',0,'disabled',
+                    10,'','',0,0,'',?)""",
+            (store.encrypt('{"owner_id":"fixture","scopes":["read"]}'), time.time()))
         return (directory / 'master.key').read_bytes()
     finally:
         store.close()
@@ -35,6 +45,7 @@ def assert_readable(directory):
         assert store.decrypt(store.one("SELECT secret FROM devices WHERE id='d'")['secret']) == 'fixture-device-key'
         assert store.decrypt(store.one("SELECT payload FROM operations WHERE id='o'")['payload']) == '{"path":"fixture.py"}'
         assert store.decrypt(store.one("SELECT secret FROM vps_connections WHERE id='v'")['secret']) == 'fixture-password'
+        assert store.decrypt(store.one("SELECT principal FROM knowledge_maintenance WHERE id='m'")['principal']) == '{"owner_id":"fixture","scopes":["read"]}'
     finally:
         store.close()
 
@@ -56,13 +67,13 @@ def test_rotation_changes_all_ciphertexts_retains_recoverable_backup_and_can_rep
     directory = tmp_path / 'hub'
     original = populated(directory)
     result = keyring.rotate_key(directory)
-    assert result['status'] == 'completed' and result['records'] == 3
+    assert result['status'] == 'completed' and result['records'] == 4
     assert (directory / 'master.key').read_bytes() != original
     assert_readable(directory)
     backup = directory / result['backup']
     assert_readable(backup)
     with sqlite3.connect(directory / 'hub.sqlite3') as db:
-        for table, column in (('devices','secret'),('operations','payload'),('vps_connections','secret')):
+        for table, column in (('devices','secret'),('operations','payload'),('vps_connections','secret'),('knowledge_maintenance','principal')):
             value = db.execute(f'SELECT {column} FROM {table}').fetchone()[0]
             assert value.startswith('cp1:' + result['key_id'] + ':')
             with pytest.raises(InvalidToken):

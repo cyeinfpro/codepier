@@ -121,6 +121,8 @@ def test_first_oauth_consent_includes_external_binding_without_second_grant(gw):
 
 
 def test_rotation_covers_gateway_oidc_and_preserves_retry_and_idempotency(gw,oidc,tmp_path):
+    from hub.knowledge_maintenance import KnowledgeMaintenance
+
     app,b,backend,c,a,binding,r,p,g=configured(gw)
     store=app.state.store
     call_result=call(b['alice'],g['token'],'kiln__echo',{'value':'saved'}).json()['result']
@@ -142,6 +144,8 @@ def test_rotation_covers_gateway_oidc_and_preserves_retry_and_idempotency(gw,oid
             (account_id,update_id,credential_version,generation,source_digest,body,state,created)
             VALUES (?,?,1,1,?,?,?,1)''',
                       ('synthetic-rotation', index, digest(str(index)), store.encrypt(f'inbox-{index}'), 'pending'))
+    # This optional table is created lazily when maintenance is first registered.
+    KnowledgeMaintenance(app.state.runtime).migrate()
     composite_keys = {
         'channel_attachment_chunks': ['attachment_id', 'offset'],
         'weixin_contexts': ['account_id', 'generation', 'peer_id'],
