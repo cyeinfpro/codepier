@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS workflow_replays (actor TEXT NOT NULL, idem TEXT NOT 
 """
 
 class Store:
-    def __init__(self, directory: str | Path, *, read_workers=3):
+    def __init__(self, directory: str | Path, *, read_workers=3, initialize_host_contract=False):
         if type(read_workers) is not int or not 2 <= read_workers <= 4:
             raise ValueError("read_workers must be between 2 and 4")
         self._reader_state = threading.local()
@@ -67,7 +67,7 @@ class Store:
         self.state_directory = state_directory(self.directory)
         self.directory.mkdir(parents=True, exist_ok=True)
         os.chmod(self.directory, 0o700)
-        from shared.hub_data_contract import check_database, check_path
+        from shared.hub_data_contract import check_database, check_path, initialize_fresh_contract
         from shared.util import VERSION
 
         check_path(self.state_directory, VERSION)
@@ -102,7 +102,12 @@ class Store:
                     # are needed with all writes made by other Store instances.
                     self.db.execute("BEGIN IMMEDIATE")
                     check_database(self.db, VERSION)
+                    fresh = initialize_host_contract and not self.db.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1"
+                    ).fetchone()
                     self._migrate()
+                    if fresh:
+                        initialize_fresh_contract(self.db, VERSION)
                     self.cipher = self._load_cipher()
                     if self.db.execute("PRAGMA foreign_key_check").fetchall():
                         raise RuntimeError("Hub migration has invalid foreign-key relationships")

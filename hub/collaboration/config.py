@@ -4,6 +4,13 @@ from dataclasses import dataclass
 from shared.config import ConfigurationError, env_bool
 
 
+def host_connections_mode_from_env():
+    mode = os.getenv('CODEPIER_ROOM_HOST_CONNECTIONS_MODE', 'auto')
+    if mode not in {'auto', 'off', 'shadow', 'on'}:
+        raise ConfigurationError('CODEPIER_ROOM_HOST_CONNECTIONS_MODE must be auto, off, shadow or on')
+    return mode
+
+
 @dataclass(frozen=True)
 class CollaborationConfig:
     enabled: bool = False
@@ -15,15 +22,13 @@ class CollaborationConfig:
     experience_projection_enabled: bool = True
     relay_batch_enabled: bool = True
     relay_batch_shadow: bool = False
-    host_connections_mode: str = 'off'
+    host_connections_mode: str = 'auto'
 
     @classmethod
     def from_env(cls):
         enabled = env_bool('CODEPIER_COLLABORATION_ENABLED', False)
         weixin_enabled = env_bool('CODEPIER_WEIXIN_ENABLED', True)
-        mode = os.getenv('CODEPIER_ROOM_HOST_CONNECTIONS_MODE', 'off')
-        if mode not in {'off', 'shadow', 'on'}:
-            raise ConfigurationError('CODEPIER_ROOM_HOST_CONNECTIONS_MODE must be off, shadow or on')
+        mode = host_connections_mode_from_env()
         result = cls(enabled,
                      env_bool('CODEPIER_MCP_EVENTS_ENABLED', False),
                      env_bool('CODEPIER_MONITOR_COLLECTOR_ENABLED', False),

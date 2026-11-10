@@ -116,12 +116,12 @@ class Connection:
 
 
 class Runtime:
-    def __init__(self, store: Store):
+    def __init__(self, store: Store, *, collaboration_config=None):
         self.store = store
         from hub.operation_output import OperationOutput
         self.outputs = OperationOutput(store)
         from hub.collaboration.lifecycle import install as install_collaboration
-        install_collaboration(self)
+        install_collaboration(self, config=collaboration_config)
         self._loop = None
         try:
             self._loop = asyncio.get_running_loop()

@@ -3,6 +3,7 @@ import asyncio
 import logging
 from threading import Lock
 from contextlib import suppress
+from dataclasses import replace
 from functools import partial
 
 logger = logging.getLogger(__name__)
@@ -13,6 +14,7 @@ class CollaborationLoops:
         self.service = service
         self.tasks = []
         self.started = False
+        self.host_backfill_pending = False
         self._wake_lock = Lock()
         self._event_loop = self._event_wake = self._wake_scheduled = None
         self._channel_wakes = {}
@@ -100,6 +102,17 @@ class CollaborationLoops:
         await self.service.store.run(self.service.room_connections.drain_revoke_jobs)
         await self.service.store.run(self.service.rooms.host_proofs.expire)
         await self.service.store.run(self.service.reconcile)
+        if self.host_backfill_pending:
+            await self.service.store.run(self.resume_host_backfill)
+
+    def resume_host_backfill(self):
+        from hub.collaboration.room_host_rollout import advance_auto_backfill
+
+        store = self.service.store
+        with store.lock:
+            if advance_auto_backfill(store):
+                self.service.config = replace(self.service.config, host_connections_mode='on')
+                self.host_backfill_pending = False
 
     async def renew_room_subscriptions(self):
         await self.service.rooms.renewals.tick(self.service.events)
@@ -153,11 +166,11 @@ class CollaborationLoops:
             self.service.health[name] = {'status': 'stopped', 'observed_at': self.service.clock()}
 
 
-def install(runtime):
+def install(runtime, *, config=None):
     from hub.collaboration.service import CollaborationService
     from hub.collaboration.events import EventService
     from hub.collaboration.monitor import MonitorService
-    service = CollaborationService(runtime)
+    service = CollaborationService(runtime, config=config)
     service.events = EventService(service)
     service.monitor = MonitorService(service)
     service.health = {name: {'status': 'not_started' if enabled else 'disabled'} for name, enabled in (

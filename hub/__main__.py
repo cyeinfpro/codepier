@@ -114,7 +114,14 @@ def main():
         except (OSError, ValueError, RuntimeError) as exc:
             parser.error(str(exc))
         return
-    store = Store(args.data_dir)
+    initialize_host_contract = False
+    if args.command == 'init':
+        from hub.collaboration.config import host_connections_mode_from_env
+        try:
+            initialize_host_contract = host_connections_mode_from_env() == 'auto'
+        except ConfigurationError as exc:
+            parser.error(str(exc))
+    store = Store(args.data_dir, initialize_host_contract=initialize_host_contract)
     try:
         if args.command in {"init", "reset-password"}:
             user = store.one("SELECT * FROM users WHERE username=?", (args.username,))
