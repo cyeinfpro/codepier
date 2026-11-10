@@ -196,7 +196,7 @@ class RoomConsumers(FencedConsumerEngine):
             route = self._original_route(row)
             if route['state'] == 'revoked':
                 raise DevError('ROOM_SUBSCRIPTION_REVOKED', '原通知连接已撤销', 403)
-            if min(route['expires_at'], row['route_expires_at']) + ROUTE_GRACE_SECONDS <= self.c.clock():
+            if self._route_finish_limit(row, route) <= self.c.clock():
                 raise DevError('DOT_CONSUMER_LEASE_EXPIRED', '原通知路线的收尾期限已结束', 409)
         if row['hard_deadline'] <= self.c.clock():
             raise DevError('DOT_CONSUMER_LEASE_EXPIRED', '原消费回合已达到最长存续期限', 409)
@@ -206,11 +206,17 @@ class RoomConsumers(FencedConsumerEngine):
                                (row['subscription_id'],))
         return route or {'state': 'unavailable', 'expires_at': row['route_expires_at']}
 
+    @staticmethod
+    def _route_finish_limit(row, route):
+        if row['route_expires_at'] is None:
+            return row['hard_deadline']  # Migrated turns have only their original lease evidence.
+        return min(route['expires_at'], row['route_expires_at']) + ROUTE_GRACE_SECONDS
+
     def _renew_until(self, now, args, row, binding, sub):
         route = self._original_route(row)
         limit = route['expires_at']
         if row['turn_policy'] == 'decoupled' or self._independent_turn_route(row, binding):
-            limit = min(limit, row['route_expires_at']) + ROUTE_GRACE_SECONDS
+            limit = self._route_finish_limit(row, route)
         if limit <= now:
             raise DevError('DOT_CONSUMER_LEASE_EXPIRED', '原通知路线的收尾期限已结束', 409)
         return min(now + args['lease_seconds'], row['hard_deadline'], limit)
