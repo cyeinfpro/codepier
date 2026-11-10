@@ -1396,10 +1396,19 @@ class Rooms:
             'has_more': len(rows) > args['limit']}
 
     def diagnostics(self, raw, principal):
-        args = validate(contracts.RoomRead, raw)
-        from hub.collaboration.room_diagnostics import projection
+        args = validate(contracts.RoomDiagnosticsRead, raw)
+        from hub.collaboration.room_diagnostics import delivery_relationships, notification_page, projection
         with self.store.transaction(immediate=False):
             principal, room = self.owner(principal, args['conversation_id'], include_archived=True)
+            if args['delivery_id']:
+                if args['member_id'] or args['cursor']:
+                    raise DevError('INVALID_ARGUMENTS', '一次只查看一条投递或一个成员的通知', 422)
+                return delivery_relationships(self.c, room, principal, args['delivery_id'])
+            if args['member_id']:
+                member = self.member(args['member_id'], room['id'])
+                return notification_page(self.c, room, principal, member, args['cursor'])
+            if args['cursor']:
+                raise DevError('INVALID_CURSOR', '查看通知历史需要指定原成员', 400)
             return projection(self.c, room, principal)
 
     def invoke(self, action, raw, principal):

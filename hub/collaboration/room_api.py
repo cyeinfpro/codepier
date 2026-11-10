@@ -134,6 +134,10 @@ def install_routes(router, auth, runtime):
             'X-Accel-Buffering': 'no', 'Vary': 'Cookie', 'X-Content-Type-Options': 'nosniff'})
 
     @router.get('/rooms/{identifier}/diagnostics')
-    async def diagnostics(request: Request, response: Response, identifier: str):
+    async def diagnostics(request: Request, response: Response, identifier: str,
+                          member_id: str | None = Query(default=None, max_length=128),
+                          delivery_id: str | None = Query(default=None, max_length=128),
+                          cursor: str = Query(default='', max_length=2048)):
         response.headers['Cache-Control'] = 'private, no-store'
-        return await store.run(lambda: service.rooms.diagnostics({'conversation_id': identifier}, auth.panel(request)))
+        return await store.run(lambda: service.rooms.diagnostics({'conversation_id': identifier,
+            'member_id': member_id, 'delivery_id': delivery_id, 'cursor': cursor}, auth.panel(request)))
