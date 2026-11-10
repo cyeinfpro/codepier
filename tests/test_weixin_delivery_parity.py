@@ -342,7 +342,7 @@ def test_ready_weixin_peers_receive_persistent_round_robin_admission(collab, mon
                        created=first['created'] + index, ordering_key=f'reply:{index}-{ordinal}')
                 channel.delivery.add_part(delivery_id, 0, 'text', {'text': 'synthetic'})
 
-    def validate_route(self, delivery):
+    def validate_route(self, delivery, *, part=None):
         binding = self.store.one('SELECT * FROM weixin_bindings WHERE id=?', (delivery['binding_id'],))
         account = self.store.one('SELECT * FROM weixin_accounts WHERE id=?', (binding['account_id'],))
         return binding, account, c.owner, None

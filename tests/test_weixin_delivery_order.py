@@ -124,3 +124,47 @@ def test_legacy_backfill_uses_durable_cursor_and_defers_inflight_snapshots(colla
     assert recovered['ordering_key'] == 'reply:' + source and recovered['ordering_revision'] == 2
     assert recovered['version'] == version
     assert part_for(store, first)['client_id'] == first_part['client_id']
+
+
+def test_backfill_preserves_existing_typed_success_requirement(collab):
+    c, channel, account, _, _ = fixture_channel(collab)
+    store = c.s.store
+    source = ingest(c, channel, account, packet(2, '原问题'))['message_ids'][0]
+    first = enqueue(c, source, '原回复')
+    original_part_id = observe_unknown(c, channel, first)
+    followup = ingest(c, channel, account, packet(3, '独立问题'))['message_ids'][0]
+    second = enqueue(c, followup, '需要原回复成功')
+    store.execute("""UPDATE weixin_deliveries SET ordering_evidence='',ordering_checked_version=0,
+        canonical_source_id=?,depends_on_delivery_id=?,dependency_mode='requires_success' WHERE id=?""",
+        (followup, first['id'], second['id']))
+
+    assert order.dependency_state(store, second['id']) == 'waiting'
+    order.backfill(store, c.clock[0])
+    row = store.one('SELECT * FROM weixin_deliveries WHERE id=?', (second['id'],))
+    assert json.loads(row['ordering_evidence'])['dependency_mode'] == 'requires_success'
+    store.execute("UPDATE weixin_parts SET state='rejected' WHERE id=?", (original_part_id,))
+    assert order.dependency_state(store, second['id']) == 'failed'
+
+
+def test_ordering_rollback_preserves_existing_relationships(collab):
+    import asyncio
+    from dataclasses import replace
+
+    c, channel, account, _, _ = fixture_channel(collab)
+    store = c.s.store
+    first_source = ingest(c, channel, account, packet(2, '旧问题'))['message_ids'][0]
+    first = enqueue(c, first_source, '旧回复')
+    c.s.config = replace(c.s.config, weixin_delivery_order_v2=False)
+    source = ingest(c, channel, account, packet(3, '回退期间的问题'))['message_ids'][0]
+    later = enqueue(c, source, '回退期间的回复')
+    store.execute('UPDATE weixin_parts SET next_attempt=?', (c.clock[0] + 60,))
+    asyncio.run(channel.delivery.tick())
+    assert store.one('SELECT ordering_schema_version FROM weixin_deliveries WHERE id=?',
+                     (later['id'],))['ordering_schema_version'] == 1
+    assert store.one('SELECT ordering_evidence FROM weixin_deliveries WHERE id=?',
+                     (first['id'],))['ordering_evidence'] == first['ordering_evidence']
+
+    c.s.config = replace(c.s.config, weixin_delivery_order_v2=True)
+    asyncio.run(channel.delivery.tick())
+    assert store.one('SELECT ordering_key FROM weixin_deliveries WHERE id=?',
+                     (later['id'],))['ordering_key'] == 'reply:' + source

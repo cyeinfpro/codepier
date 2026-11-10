@@ -135,8 +135,8 @@ def legacy_observations(store, limit):
         WHERE p.state='unknown' AND p.client_id=late.client_id AND p.body_digest=late.body_digest
           AND d.generation=late.channel_generation AND d.peer_id=late.peer_id AND b.account_id=late.account_id
           AND NOT EXISTS (SELECT 1 FROM weixin_dispatch_attempts a WHERE a.part_id=p.id)
-          AND json_valid(late.provider_receipt)
-          AND json_extract(late.provider_receipt,'$.provider_state')='accepted'
+          AND CASE WHEN json_valid(late.provider_receipt)
+              THEN json_extract(late.provider_receipt,'$.provider_state') END='accepted'
         ORDER BY late.created,p.id LIMIT ?""", (limit,))
     for row in rows:
         row['receipt'] = accepted_receipt(json.loads(row['receipt']))

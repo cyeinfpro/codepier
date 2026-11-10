@@ -52,7 +52,7 @@ def test_four_admission_batches_serve_64_contacts_and_resume_persisted_order(col
         for contact in range(-16, 64):
             seed_contact(contact, ready=contact >= 0)
 
-    def validation(delivery):
+    def validation(delivery, *, part=None):
         bound = store.one('SELECT * FROM weixin_bindings WHERE id=?', (delivery['binding_id'],))
         linked = store.one('SELECT * FROM weixin_accounts WHERE id=?', (bound['account_id'],))
         return bound, linked, c.actor, None

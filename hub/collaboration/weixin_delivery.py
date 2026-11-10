@@ -148,13 +148,13 @@ class WeixinDelivery:
             WHERE message_id=? AND COALESCE(goal_id,'')!='' HAVING COUNT(DISTINCT goal_id)=1""", (source['id'],))
         return row['goal_id'] if row else None
 
-    def task_author(self, message, source, body, *, allow_disconnected=False):
+    def task_author(self, message, source, body, *, allow_unready=False):
         native = self.c.room_channels.native
         if native.current_conversation_reply(message, source):
             if body.get('provenance_project_ids') or body.get('publish_work') is True:
-                native.conversation_reply_author(body, source, allow_disconnected=allow_disconnected)
+                native.conversation_reply_author(body, source, allow_unready=allow_unready)
             return
-        author = native.reply_author(message, source, allow_disconnected=allow_disconnected)
+        author = native.reply_author(message, source, allow_unready=allow_unready)
         if (message.get('goal_id') or body.get('provenance_project_ids') or body.get('dot_reply_complete') is False):
             if not author['authenticated']:
                 raise DevError('CHANNEL_OWNER_NOT_APPROVED', '此微信来源没有有效的工作回传授权', 403)
@@ -183,9 +183,9 @@ class WeixinDelivery:
             if native:
                 candidate = self.store.one('SELECT * FROM weixin_bindings WHERE id=?', (binding_id,))
                 binding, account, binding_owner, _, member = native.reply_binding(
-                    candidate, message, source, allow_disconnected=True)
+                    candidate, message, source, allow_unready=True)
                 self.c.chatroom.require_message_visible(binding_owner, message)
-                if not native.sender_matches(binding, message, source, allow_disconnected=True):
+                if not native.sender_matches(binding, message, source, allow_unready=True):
                     return EnqueueResult('blocked', 'sender_changed', binding_id)
                 sender = member['id']
             else:
@@ -201,7 +201,7 @@ class WeixinDelivery:
 
         try:
             if native:
-                self.task_author(message, source, body, allow_disconnected=True)
+                self.task_author(message, source, body, allow_unready=True)
             else:
                 self.c.channel_owner.require_reply_source(source)
                 author = self.c.channel_owner.author(source)
@@ -219,6 +219,11 @@ class WeixinDelivery:
             return EnqueueResult('existing', '', binding_id, old)
         ordering, evidence, predecessor = order.reply_ordering(
             self.store, message, source, binding, predecessor_id=predecessor_id, dependency_mode=dependency_mode)
+        schema_version = order.ORDERING_VERSION
+        checked_version = schema_version
+        if not self.c.config.weixin_delivery_order_v2:
+            ordering = models.delivery_order_key(self.related_goal(message, source), source.get('thread_root_id'), source['id'])
+            schema_version, checked_version = 1, 0
         raise_floor(self.store)
         now, identifier = self.c.clock(), uuid.uuid4().hex
         pending = self.store.one('''SELECT COUNT(*) AS n FROM weixin_deliveries d JOIN weixin_bindings b ON b.id=d.binding_id
@@ -230,8 +235,8 @@ class WeixinDelivery:
              ordering_schema_version,ordering_checked_version)
             VALUES (?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?)''',
             (identifier, binding['id'], binding['generation'], message['id'], message['version'], digest(body),
-             source['id'], binding['peer_id'], now, now, ordering, predecessor, evidence,
-             order.ORDERING_VERSION, order.ORDERING_VERSION))
+             source['id'], binding['peer_id'], now, now, ordering, predecessor, evidence, schema_version,
+             checked_version))
         if pending >= 1000:
             self.add_part(identifier, 0, 'text', {'text': ''})
             self.store.execute("UPDATE weixin_parts SET state='rejected',reason_code='daily_reply_quota' WHERE delivery_id=?", (identifier,))
@@ -351,7 +356,7 @@ class WeixinDelivery:
         binding = self.store.one('SELECT * FROM weixin_bindings WHERE id=?', (delivery['binding_id'],))
         if binding and binding.get('native_member_id'):
             valid = self.c.room_channels.native.delivery_validate(
-                delivery, require_task_authority=False, allow_disconnected=True)
+                delivery, require_task_authority=False, allow_unready=True)
             if valid[1]['state'] != 'active':
                 raise DevError('WEIXIN_WAITING_RECONNECT', '原微信账号恢复连接后继续投递', 409)
             message = valid[-1]
@@ -744,7 +749,7 @@ class WeixinDelivery:
                     if row and row['state'] in READY:
                         terminal_source = code in TERMINAL_SOURCE
                         state = ('rejected' if terminal_source else 'waiting_context'
-                                 if code == 'WEIXIN_WAITING_RECONNECT' else row['state'])
+                                 if code in {'WEIXIN_WAITING_RECONNECT', 'WEIXIN_ROUTE_WAITING'} else row['state'])
                         self.store.execute("UPDATE weixin_parts SET state=?,reason_code=?,next_attempt=?,updated=? WHERE id=?",
                                            (state, code, self.c.clock() + 30, self.c.clock(), identifier))
                         self.refresh(row['delivery_id'])
@@ -808,7 +813,8 @@ class WeixinDelivery:
         if not self.c.config.enabled:
             return
         await self.store.run(self.reconcile)
-        await self.store.run(order.backfill, self.store, self.c.clock())
+        if self.c.config.weixin_delivery_order_v2:
+            await self.store.run(order.backfill, self.store, self.c.clock())
         rows = await self.store.run(self.candidates, self.c.clock())
         # At most four concurrent peers, with the same fenced check in claim.
         semaphore = asyncio.Semaphore(MAX_ACTIVE_SENDERS)

@@ -220,19 +220,20 @@ def _historical_order(store, row):
     if message and source and binding:
         original_route = {**binding, 'generation': row['generation'], 'peer_id': row['peer_id']}
         old_predecessor = row['depends_on_delivery_id']
-        mode = row['dependency_mode']
-        if old_predecessor and mode == 'requires_success':
+        existing = json.loads(row['ordering_evidence']) if row['ordering_evidence'] else {}
+        mode = existing.get('dependency_mode', row['dependency_mode'])
+        if old_predecessor and (mode == 'requires_success' or existing.get('rule') == 'persisted_reply_source_v2'):
             try:
                 key, encoded, predecessor = reply_ordering(store, message, source, original_route,
                     predecessor_id=old_predecessor, dependency_mode=mode)
             except DevError:
-                return row['ordering_key'], canonical({'unresolved': True,
+                return row['ordering_key'], canonical({**existing, 'unresolved': True,
                     'reason_code': 'legacy_dependency_unverified'}), row['ordering_schema_version']
         else:
             key, encoded, predecessor = reply_ordering(store, message, source, original_route)
         evidence = json.loads(encoded)
-        if (key and not evidence.get('unresolved') and not evidence.get('recovery_predecessor_id')
-                and predecessor == row['depends_on_delivery_id']):
+        if (key and not evidence.get('unresolved') and predecessor == old_predecessor
+                and evidence.get('recovery_predecessor_id') == existing.get('recovery_predecessor_id')):
             # v1 carries only within-generation explicit edges. Never derive a
             # new historical cross-generation association during backfill.
             evidence['migration_reason'] = 'verified_historical_reply'
