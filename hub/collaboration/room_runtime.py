@@ -452,7 +452,12 @@ class RoomRuntime:
                     if selected and selected!=set(json.loads(original['spec'])['project_ids']):
                         result['scope_revision_required']=True
                     return result
-                result=self.member_receipt(args,member,principal,'room_work_start',recover)
+                # Older hosts echoed the newly returned coordinator epoch on
+                # recovery. It was not an admission input for the original Goal.
+                receipt_args=args
+                if args.get('coordinator_epoch')==self.c.room_goal_recovery.epoch(original['id']):
+                    receipt_args={**args,'coordinator_epoch':None}
+                result=self.member_receipt(receipt_args,member,principal,'room_work_start',recover)
                 return self.work_response({**result,'resumed_existing':True},args,member,principal)
             self.c.room_consumers.guard_reply_revision(args,principal,member,source,strict=False)
             native_reference,native_scope=self.c.room_work_bridge.native.prepare(member,source,principal,args)
@@ -556,7 +561,9 @@ class RoomRuntime:
             return self.work_response({'goal_id':goal['id'],'resumed_existing':True,'reason_code':'WORK_OPERATION_PENDING'},args,member,principal)
         partition=self.store.one('SELECT * FROM collaboration_rooms WHERE id=?',(goal['room_id'],))
         def save():
-            self.c.coordination.authorize(principal,partition,{**goal,'state':'active'},active=True)
+            session=self.store.one('SELECT * FROM dot_consumer_sessions WHERE id=?',(args['consumer_session_id'],))
+            exact=bool(session and session.get('turn_policy')=='decoupled')
+            self.c.coordination.authorize(principal,partition,{**goal,'state':'active'},active=True,exact_work_effect=exact)
             self.store.execute("UPDATE coordination_goals SET state='active',version=version+1,updated=? WHERE id=?",(self.c.clock(),goal['id']))
             project_id=args['target_project_id'] or spec['anchor_project_id']
             participant=next((m for m in spec['members'] if m['member_id']==member['id']),None)
