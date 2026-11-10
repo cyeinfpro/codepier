@@ -2,7 +2,7 @@
 
 让 ChatGPT 在你授权的电脑和服务器上读代码、改文件、跑测试，并拿到可核对的执行结果。
 
-[![Version](https://img.shields.io/badge/version-1.33.5-2563eb)](RELEASE.json)
+[![Version](https://img.shields.io/badge/version-1.33.6-2563eb)](RELEASE.json)
 [![License](https://img.shields.io/badge/license-MIT-16a34a)](LICENSE)
 
 CodePier 是自托管的 MCP 服务和开发面板。**Hub** 负责接入与管理，**Agent** 在 macOS、Windows 或 Linux 上运行本机工具。你也可以在网页里继续 Pi、Codex、Claude Code 会话，管理多台电脑和服务器。
@@ -21,10 +21,10 @@ CodePier 是自托管的 MCP 服务和开发面板。**Hub** 负责接入与管�
 
 ### 1. 安装 Hub
 
-服务器需准备 Git、Bash、Python 3.9+、Docker 和支持 `up --wait` 的 Docker Compose v2。以下安装本版本 **v1.33.5**，最新正式版本见 [Releases](https://github.com/cyeinfpro/codepier/releases/latest)：
+服务器需准备 Git、Bash、Python 3.9+、Docker 和支持 `up --wait` 的 Docker Compose v2。以下安装本版本 **v1.33.6**，最新正式版本见 [Releases](https://github.com/cyeinfpro/codepier/releases/latest)：
 
 ```bash
-git clone --branch v1.33.5 --depth 1 https://github.com/cyeinfpro/codepier.git
+git clone --branch v1.33.6 --depth 1 https://github.com/cyeinfpro/codepier.git
 cd codepier
 bash install.sh
 ```
@@ -78,6 +78,7 @@ CodePier **不提供模型服务**。只使用 MCP 文件与命令工具，不�
 
 ### 最近版本变化
 
+- **v1.33.6 — MCP 上下文与知识地图优化**：新增可选紧凑视图，改进大文件读取、目录发现、权限恢复和地图自动刷新。
 - **v1.33.5 — 协作房间与微信恢复完善**：统一输入权限与等待恢复，新增明确选择的任务续办、原连接托管续期及微信独立回复调度。
 - **v1.33.3 — 面板与协作流程优化**：简化电脑安装、项目授权、连接设置、CLI、VPS 和任务进度。房间默认按所选项目开放只读，微信配对可在一次范围确认后完成。
 
@@ -158,9 +159,9 @@ CodePier **不提供模型服务**。只使用 MCP 文件与命令工具，不�
 
 ## 版本与许可
 
-当前仓库的 `RELEASE.json` 标记为 **1.33.5 / prepared / source-and-image**；可下载版本以 [Releases](https://github.com/cyeinfpro/codepier/releases/latest) 为准，`main` 可能包含尚未发布的改动。
+当前仓库的 `RELEASE.json` 标记为 **1.33.6 / prepared / source-and-image**；可下载版本以 [Releases](https://github.com/cyeinfpro/codepier/releases/latest) 为准，`main` 可能包含尚未发布的改动。
 
-- **Version:** 1.33.5
+- **Version:** 1.33.6
 - **License:** [MIT](LICENSE)
 
 第三方依赖保留各自许可证，见 `web/vendor/` 与 [MCP Apps 声明](web/mcp-apps/THIRD_PARTY_NOTICES.txt)。
