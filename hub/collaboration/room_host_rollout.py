@@ -6,6 +6,7 @@ import sqlite3
 from contextlib import closing
 from dataclasses import replace
 
+from hub.collaboration.delivery_compatibility import raise_floor
 from hub.collaboration.room_host_migration import HostBindingBackfill
 from hub.state_layout import state_directory
 from hub.store import Store
@@ -77,6 +78,7 @@ def activate(data_directory, *, confirmed):
         store = Store(data_directory)
         try:
             with store.transaction():
+                raise_floor(store)
                 if not check_database(store.db, VERSION):
                     store.execute('INSERT INTO meta(key,value) VALUES (?,?)',
                                   (CONTRACT_KEY, json.dumps(CONTRACT, sort_keys=True)))

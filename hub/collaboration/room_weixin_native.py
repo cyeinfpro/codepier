@@ -318,9 +318,8 @@ class RoomWeixin:
             raise DevError('ROOM_PAUSED','原房间已暂停',409)
         account=self.c.weixin.account(binding['account_id'],owner)
         if (binding['owner_user_id']!=owner.user_id or binding['space_id']!=owner.space_id
-                or account['generation']!=binding['generation']
-                or account['credential_version']!=binding['credential_version']
-                or account['state'] not in {'active', 'attention'}):
+                or account['state'] not in {'active', 'attention'} or account['generation']!=binding['generation']
+                or account['credential_version']!=binding['credential_version']):
             raise DevError('WEIXIN_CREDENTIAL_CHANGED','原账号凭据或绑定世代已改变',403)
         if account['state'] != 'active' and not allow_unready:
             raise DevError('WEIXIN_ROUTE_WAITING', '等待原微信账号连接恢复', 409)
@@ -907,7 +906,7 @@ class RoomWeixin:
         return {'authorization_id': auth['id'], 'authorization_version': auth['version'],
                 'scope': scope, 'evidence': evidence}
 
-    def delivery_validate(self,delivery,*,require_task_authority=True):
+    def delivery_validate(self,delivery,*,require_task_authority=True,allow_unready=False):
         binding=self.store.one('SELECT * FROM weixin_bindings WHERE id=?',(delivery['binding_id'],))
         if not binding:
             raise DevError('WEIXIN_BINDING_INACTIVE','原微信绑定已不可用',403)
@@ -915,11 +914,13 @@ class RoomWeixin:
         source=self.store.one('SELECT * FROM collaboration_messages WHERE id=? AND conversation_id=?',(delivery['source_message_id'],binding['conversation_id']))
         if not message or not source:
             raise DevError('WEIXIN_DELIVERY_SOURCE_CHANGED','原房间消息已不可用',403)
-        binding,account,owner,room,member=self.reply_binding(binding,message,source)
+        binding,account,owner,room,member=self.reply_binding(
+            binding,message,source,allow_unready=allow_unready)
         body=json.loads(message['body']);origin=json.loads(source['body']).get('external_origin',{})
         self.c.chatroom.require_message_visible(owner,message)
         if (not binding['allow_replies'] or delivery['generation']!=binding['generation'] or delivery['peer_id']!=binding['peer_id']
-                or not self.sender_matches(binding,message,source) or message['version']!=delivery['message_version'] or digest(body)!=delivery['message_digest']
+                or not self.sender_matches(binding,message,source,allow_unready=allow_unready)
+                or message['version']!=delivery['message_version'] or digest(body)!=delivery['message_digest']
                 or origin.get('binding_id')!=binding['id'] or origin.get('generation')!=binding['generation'] or origin.get('peer_id')!=binding['peer_id']):
             raise DevError('WEIXIN_DELIVERY_SCOPE_CHANGED','原微信回复内容或收件身份已改变',403)
         if require_task_authority and self.store.one('SELECT 1 FROM room_channel_owner_inputs WHERE message_id=?',(source['id'],)):
@@ -955,6 +956,8 @@ class RoomWeixin:
         projects = set(body.get('provenance_project_ids', []))
         scopes = {(scope['project_id'], scope['environment_id']) for scope in body.get('provenance_scopes', [])}
         author = self.author(source, project_ids=projects or None, allow_unready=allow_unready)
+        if not author['authenticated']:
+            raise DevError('CHANNEL_OWNER_NOT_APPROVED', '此微信来源没有有效的工作回传授权', 403)
         if not projects:
             return author
         binding, _, owner, _, member = self.source_binding(source, allow_unready=allow_unready)

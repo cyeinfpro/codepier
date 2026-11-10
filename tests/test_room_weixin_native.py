@@ -402,3 +402,109 @@ async def test_native_room_qr_renewal_remains_visible_and_preserves_original_ide
     flow=await action(flow,'confirm_owner',confirm_peer_id='synthetic-peer')
     assert flow['stage']=='ready' and flow['binding']['generation']>original_generation
     assert flow['member_id']==identity['member_id'] and not s.store.all('SELECT * FROM coordination_work')
+
+
+@pytest.mark.asyncio
+async def test_reply_origin_receipt_and_outbox_are_atomic(collab, monkeypatch):
+    import sqlite3
+
+    (s, owner, worker, clock, identity, credentials), flow, _, _ = await setup_channel(collab)
+    incoming = packet(2, '原问题', create_time_ms=int(clock[0] * 1000))
+    received = s.weixin.commit_updates(s.weixin.claim_poll(flow['account_id']), incoming)['message_ids'][0]
+    entry = next(item for item in s.room_consumers.inbox(identity, worker)['items']
+                 if item['object_id'] == received)
+    request = {**identity, **credentials, **entry['reply_arguments'], 'body_text': '原回复', 'idempotency_key': key()}
+    execute = s.store.execute
+
+    def fail_receipt(sql, parameters=()):
+        if sql.startswith('INSERT INTO room_runtime_receipts') and parameters[2].startswith('room_reply:'):
+            raise sqlite3.OperationalError('injected reply receipt write failure')
+        return execute(sql, parameters)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(s.store, 'execute', fail_receipt)
+        with pytest.raises(sqlite3.OperationalError, match='injected'):
+            s.room_runtime.reply(request, worker)
+    assert not s.store.one('SELECT 1 FROM collaboration_messages WHERE reply_to_id=?', (received,))
+    assert not s.store.one('SELECT 1 FROM weixin_deliveries WHERE source_message_id=?', (received,))
+    assert not s.store.one('SELECT 1 FROM room_reply_origins')
+    assert not s.store.one("SELECT 1 FROM meta WHERE key='collaboration_min_writer'")
+    assert next(item for item in s.room_consumers.inbox(identity, worker)['items'] if item['object_id'] == received)
+
+    result = s.room_runtime.reply(request, worker)
+    reply_id = result['message']['id']
+    assert s.room_runtime.reply(request, worker)['message']['id'] == reply_id
+    receipts = s.store.all("SELECT fingerprint,result FROM room_runtime_receipts WHERE action LIKE 'room_reply:%'")
+    origins = s.store.all('SELECT * FROM room_reply_origins')
+    assert len(receipts) == len(origins) == 1
+    origin = origins[0]
+    assert origin['message_id'] == reply_id
+    assert origin['consumer_session_id'] == credentials['consumer_session_id']
+    assert origin['binding_generation'] == identity['binding_generation']
+    assert origin['request_digest'] == receipts[0]['fingerprint']
+    assert s.store.one("SELECT value FROM meta WHERE key='collaboration_min_writer'")['value'] == '1'
+    disposition = json.loads(receipts[0]['result'])['channel_dispositions'][0]
+    assert disposition['disposition'] == 'queued'
+    assert disposition['delivery_id'] == s.store.one(
+        'SELECT id FROM weixin_deliveries WHERE message_id=?', (reply_id,))['id']
+
+
+@pytest.mark.parametrize('blocked', [False, True])
+@pytest.mark.asyncio
+async def test_reply_disposition_keeps_authority_and_transport_separate(collab, blocked):
+    (s, owner, worker, clock, identity, credentials), flow, _, _ = await setup_channel(collab)
+    incoming = packet(2, '原问题', create_time_ms=int(clock[0] * 1000))
+    received = s.weixin.commit_updates(s.weixin.claim_poll(flow['account_id']), incoming)['message_ids'][0]
+    entry = next(item for item in s.room_consumers.inbox(identity, worker)['items']
+                 if item['object_id'] == received)
+    with s.store.transaction():
+        if blocked:
+            s.store.execute('UPDATE weixin_bindings SET allow_replies=0 WHERE id=?', (flow['binding']['id'],))
+        else:
+            s.store.execute('DELETE FROM weixin_contexts WHERE account_id=?', (flow['account_id'],))
+    request = {**identity, **credentials, **entry['reply_arguments'], 'body_text': '原回复', 'idempotency_key': key()}
+    reply_id = s.room_runtime.reply(request, worker)['message']['id']
+    message = s.room_runtime.read(identity['conversation_id'], owner, message_id=reply_id)['message']
+    channel, = message['channel_deliveries']
+    if blocked:
+        assert channel['state'] == 'blocked' and channel['reason_code'] == 'reply_permission_revoked'
+        assert not channel.get('id')
+        assert not s.store.one('SELECT 1 FROM weixin_deliveries WHERE message_id=?', (reply_id,))
+    else:
+        assert channel['state'] == 'waiting_context'
+        assert s.store.one('SELECT 1 FROM weixin_deliveries WHERE id=? AND message_id=?', (channel['id'], reply_id))
+    plan = s.store.all("""EXPLAIN QUERY PLAN SELECT result FROM room_runtime_receipts
+        WHERE owner_user_id=? AND conversation_id=? AND json_valid(result)
+          AND action LIKE 'room_reply:%' AND json_extract(result,'$.message_id')=?""",
+        (owner.user_id, identity['conversation_id'], reply_id))
+    assert any('room_reply_receipt_message' in row['detail'] for row in plan)
+
+
+@pytest.mark.asyncio
+async def test_room_reply_can_declare_a_visible_delivery_dependency(collab):
+    (s, _, worker, clock, identity, credentials), flow, _, _ = await setup_channel(collab)
+
+    def request_for(sequence):
+        incoming = packet(sequence, f'原问题 {sequence}', create_time_ms=int(clock[0] * 1000))
+        received = s.weixin.commit_updates(s.weixin.claim_poll(flow['account_id']), incoming)['message_ids'][0]
+        entry = next(item for item in s.room_consumers.inbox(identity, worker)['items']
+                     if item['object_id'] == received)
+        return {**identity, **credentials, **entry['reply_arguments'],
+                'body_text': f'回复 {sequence}', 'idempotency_key': key()}
+
+    first = s.room_runtime.reply(request_for(2), worker)
+    prior = s.store.one('SELECT id FROM weixin_deliveries WHERE message_id=?', (first['message']['id'],))
+    clock[0] += 3
+    request = request_for(3)
+    with pytest.raises(DevError) as invalid:
+        s.room_runtime.reply({**request, 'depends_on_delivery_id': 'missing', 'dependency_mode': 'requires_success'}, worker)
+    assert invalid.value.code == 'WEIXIN_DELIVERY_RELATION_INVALID'
+    assert not s.store.one('SELECT 1 FROM collaboration_messages WHERE reply_to_id=?', (request['source_message_id'],))
+    args = {**request, 'depends_on_delivery_id': prior['id'], 'dependency_mode': 'requires_success'}
+    second = s.room_runtime.reply(args, worker)
+    row = s.store.one('SELECT * FROM weixin_deliveries WHERE message_id=?', (second['message']['id'],))
+    assert row['depends_on_delivery_id'] == prior['id']
+    assert json.loads(row['ordering_evidence'])['dependency_mode'] == 'requires_success'
+    with pytest.raises(DevError) as conflict:
+        s.room_runtime.reply({**args, 'dependency_mode': 'after_settled'}, worker)
+    assert conflict.value.code == 'IDEMPOTENCY_CONFLICT'

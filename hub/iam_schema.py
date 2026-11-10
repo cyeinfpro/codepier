@@ -123,9 +123,10 @@ def migrate(db):
 
 
 def _migrate(db):
-    if db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0] == SCHEMA_VERSION:
-        return
+    from hub.collaboration.delivery_compatibility import PROTECTED_SCHEMA_VERSION
     version = db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0]
+    if version in {SCHEMA_VERSION, PROTECTED_SCHEMA_VERSION}:
+        return
     if version == '9':
         migrate_v10(db)
         return

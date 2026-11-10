@@ -65,6 +65,9 @@ class Store:
         self.directory = Path(directory).resolve()
         from hub.state_layout import state_directory
         self.state_directory = state_directory(self.directory)
+        from hub.collaboration.delivery_compatibility import check_database as check_delivery_path
+        from hub.collaboration.delivery_compatibility import raise_floor_in_transaction
+        check_delivery_path(self.state_directory)
         self.directory.mkdir(parents=True, exist_ok=True)
         os.chmod(self.directory, 0o700)
         from shared.hub_data_contract import check_database, check_path, initialize_fresh_contract
@@ -108,6 +111,8 @@ class Store:
                     self._migrate()
                     if fresh:
                         initialize_fresh_contract(self.db, VERSION)
+                    if check_database(self.db, VERSION):
+                        raise_floor_in_transaction(self.db)
                     self.cipher = self._load_cipher()
                     if self.db.execute("PRAGMA foreign_key_check").fetchall():
                         raise RuntimeError("Hub migration has invalid foreign-key relationships")
@@ -236,7 +241,9 @@ class Store:
                 self.db.execute(statement)
         self.db.execute("INSERT OR IGNORE INTO meta VALUES ('schema', '1')")
         version = self.db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0]
-        if version not in {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"}:
+        from hub.collaboration.delivery_compatibility import PROTECTED_SCHEMA_VERSION, assert_compatible
+        assert_compatible(self.db)
+        if version not in {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", PROTECTED_SCHEMA_VERSION}:
             raise RuntimeError(f"Unsupported Hub database schema version: {version}")
         # Additive migration: v1 databases and their audit history remain readable.
         columns = {r[1] for r in self.db.execute("PRAGMA table_info(operations)")}

@@ -101,6 +101,21 @@ class RoomRuntime:
         return self.c.room_channels.receipt(principal, conversation, action + ':' + member['id'],
                                             self.member_receipt_args(args), perform)
 
+    def delivery_dependency(self, args, member, principal):
+        predecessor = args.get('depends_on_delivery_id')
+        if not predecessor:
+            return None
+        message = self.store.one("""SELECT m.*,b.account_id AS delivery_account_id,d.peer_id AS delivery_peer_id
+            FROM weixin_deliveries d JOIN weixin_bindings b ON b.id=d.binding_id
+            JOIN collaboration_messages m ON m.id=COALESCE(d.projection_message_id,d.message_id)
+            WHERE d.id=? AND m.conversation_id=? AND b.conversation_id=?""",
+            (predecessor, member['conversation_id'], member['conversation_id']))
+        if (not message or not self.c.chatroom.message_visible(principal, message)
+                or not self.c.room_consumers._visible_message(member, principal, message)):
+            raise DevError('WEIXIN_DELIVERY_RELATION_INVALID', '当前房间和成员范围内没有此前置投递', 409)
+        return ((message['delivery_account_id'], message['delivery_peer_id']),
+                {'predecessor_id': predecessor, 'dependency_mode': args['dependency_mode']})
+
     def provenance(self,message):
         body=json.loads(message['body']) if message else {}
         projects=set(body.get('provenance_project_ids',[]))
@@ -304,10 +319,11 @@ class RoomRuntime:
         self.c.rooms.change(member['conversation_id'], 'message', identifier, message['version'])
         if args['complete'] and (handling == 'answered' or (handling is None and (not explicit or publication))):
             self.c.room_consumers.ack_message(member, source['id'], source_version=source['version'])
-        dispositions = self.reply_dispositions(message, source, related, explicit, bool(publication))
+        dependency = self.delivery_dependency(args, member, principal)
+        dispositions = self.reply_dispositions(message, source, related, explicit, bool(publication), dependency)
         self.store.execute('INSERT INTO room_reply_origins VALUES (?,?,?,?,?,?)',
                            (identifier, session['id'], member['id'], member['binding_generation'],
-                            fingerprint, self.c.clock()))
+                            fingerprint, message['created']))
         turn = self.c.room_consumers.yield_after_reply(args, principal, member, session) if args.get('yield_after') else {}
         return {'message_id': identifier, 'source_message_id': source['id'], 'complete': args['complete'],
                 'binding_generation': member['binding_generation'], 'channel_dispositions': dispositions,
@@ -334,6 +350,8 @@ class RoomRuntime:
         if (not existing or saved.get('body_text') != redact(args['body_text'])
                 or saved.get('outcome') != publication['outcome'] or saved.get('artifact_refs') != publication['artifact_refs']
                 or saved.get('coordinator_epoch', 1) != publication['coordinator_epoch']
+                or saved.get('depends_on_delivery_id') != args.get('depends_on_delivery_id')
+                or saved.get('dependency_mode') != args.get('dependency_mode')
                 or ('publish_work' in args and (existing['reply_to_id'] != source['id']
                     or saved.get('publish_work') != args['publish_work']))):
             raise DevError('ROOM_PUBLICATION_CONFLICT', '原工作本次意图已有不同的最终汇总，不能用新请求覆盖', 409)
@@ -344,35 +362,16 @@ class RoomRuntime:
         return {**receipt, 'message_id': published['message_id'], 'complete': True,
                 'binding_generation': member['binding_generation']}
 
-    def reply_dispositions(self, message, source, goal, explicit, publication):
-        delivery = self.c.weixin.delivery
-        if not explicit and source.get('room_id'):
-            self.c.channels.queue(message)
-            queued = self.c.channels.for_messages([message['id']]).get(message['id'], [])
-            if queued:
-                return [{'channel': row['channel'], 'binding_id': row.get('binding_id'),
-                         'disposition': 'queued', 'reason_code': '', 'delivery_id': row['id']} for row in queued]
-        candidates = [source] if explicit else [delivery.root_source(message)]
-        if explicit and publication:
+    def reply_dispositions(self, message, source, goal, explicit, publication, dependency):
+        if not explicit:
+            return self.c.channels.queue_reply_dispositions(message, delivery_dependency=dependency)
+        candidates = [source]
+        if publication:
             native = self.c.room_work_bridge.native
             original = native.original(native.reference(goal))
             # A shared recipient must pass the original work delivery guard.
             candidates.insert(0, self.publication_source(original, source['conversation_id']))
-        targets = {}
-        for candidate in candidates:
-            if candidate and candidate['origin'] == 'external_channel':
-                origin = json.loads(candidate['body']).get('external_origin', {})
-                if origin.get('channel') == 'weixin':
-                    targets.setdefault((origin.get('binding_id'), origin.get('generation'), origin.get('peer_id')), candidate)
-        if not targets:
-            return [{'channel': 'weixin', 'binding_id': None, 'disposition': 'not_requested',
-                     'reason_code': '', 'delivery_id': None}]
-        result = []
-        for target in targets.values():
-            queued = delivery.queue_reply_result(message, source=target)
-            result.append({'channel': 'weixin', 'binding_id': queued.binding_id, 'disposition': queued.disposition,
-                           'reason_code': queued.reason_code, 'delivery_id': queued.delivery_id})
-        return result
+        return self.c.channels.queue_reply_dispositions(message, reply_sources=candidates, delivery_dependency=dependency)
 
     def publication(self,args,member,source,goal,principal):
         native=self.c.room_work_bridge.native
@@ -632,9 +631,9 @@ class RoomRuntime:
                     'idempotency_key':'room-claim:'+digest([queued['id'],queued['version'],args['consumer_session_id']])})
             return {**result,**detail,'intent_revision':self.intent_revision(goal['id']),'scheduled':bool(eligible),'next_request':next_request}
 
-    def message_view(self,row,principal):
+    def message_view(self,row,principal,*,channel_map=None):
         self.c.chatroom.require_message_visible(principal,row)
-        view=self.c.chatroom.view(row)
+        view=self.c.chatroom.view(row,channel_map=channel_map)
         body=json.loads(row['body'])
         if body.get('sender_member_id'):
             view['display_name']=body.get('sender_name','dot')
@@ -756,7 +755,8 @@ class RoomRuntime:
             next_sequence=(selected[0]['conversation_sequence'] if len(allowed)>limit and selected else
                 rows[-1]['conversation_sequence'] if rows else None)
             work_page=self.work_page(conversation_id,principal,limit=100)
-            return {'messages':[self.message_view(row,principal) for row in selected],
+            channels=self.c.channels.for_messages([row['id'] for row in selected])
+            return {'messages':[self.message_view(row,principal,channel_map=channels) for row in selected],
                 'next_cursor':sign_cursor(self.c.secret,binding,next_sequence) if has_more and next_sequence is not None else None,
                 'works':work_page['works'],'works_next_cursor':work_page['next_cursor'],
                 'works_pagination_complete':work_page['pagination_complete'],

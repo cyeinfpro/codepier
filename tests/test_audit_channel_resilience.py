@@ -64,13 +64,23 @@ def test_weixin_poison_message_keeps_following_message_and_cursor(collab):
 
 def test_weixin_deferred_body_cannot_cross_binding_version(collab, monkeypatch):
     c, w, account, binding, _ = fixture_channel(collab)
+    original = w.ingest_one
     def blocked(*args):
         raise DevError('WEIXIN_INBOX_QUOTA', 'synthetic backlog', 429)
     monkeypatch.setattr(w, 'ingest_one', blocked)
-    wx_ingest(c, w, account)
+    first = wx_ingest(c, w, account)
+    assert not first['accepted'] and not first['cursor_persisted']
     w.store.execute('UPDATE weixin_bindings SET version=version+1 WHERE id=?', (binding['binding_id'],))
     w.replay_deferred(account['account_id'])
     assert w.store.one('SELECT reason_code FROM channel_inbound_failures')['reason_code'] == 'binding_changed_before_replay'
+    monkeypatch.setattr(w, 'ingest_one', original)
+
+    # An unadvanced provider cursor returns the original event again. A new
+    # binding version or rotated transport context must not re-admit it.
+    replay = wx_ingest(c, w, account, {'msgs': [message(2, context_token='rotated')], 'get_updates_buf': 'after-stale'})
+    assert replay['cursor_persisted'] and not replay['message_ids']
+    assert not w.store.one("SELECT 1 FROM weixin_inbound WHERE external_id='2'")
+    assert w.store.one('SELECT COUNT(*) AS n FROM channel_inbound_failures')['n'] == 1
 
 
 def test_weixin_long_text_is_bounded_not_account_failure(collab):

@@ -2,12 +2,16 @@
 from typing import Annotated
 from fastapi import Query, Request, Response
 from pydantic import Field
+from hub.collaboration.weixin_schema import DeliverySelection, NativeDeliveryControl
 from shared.collaboration_contracts import Key, Model
 from shared.util import DevError
 
 
 class RoomDeliveryRetry(Model):
     expected_version: int = Field(strict=True, ge=1)
+    expected_ordering_revision: int | None = Field(default=None, strict=True, ge=1)
+    part_ids: list[Annotated[str, Field(min_length=1, max_length=100)]] | None = Field(
+        default=None, min_length=1, max_length=32)
     idempotency_key: Key
 
 
@@ -78,6 +82,19 @@ def install_routes(router, auth, runtime):
     @router.post('/rooms/{identifier}/weixin-deliveries/{delivery_id}/retry')
     async def retry_weixin_delivery(request: Request, identifier: str, delivery_id: str, body: RoomDeliveryRetry):
         return await store.run(lambda: service.weixin.delivery.retry_room(
+            identifier, delivery_id, body.model_dump(exclude_none=True), auth.admin(request, True)))
+
+    @router.post('/rooms/{identifier}/weixin-deliveries/{delivery_id}/control-preview')
+    async def preview_weixin_delivery(request: Request, response: Response, identifier: str,
+                                       delivery_id: str, body: DeliverySelection):
+        response.headers['Cache-Control'] = 'private, no-store'
+        return await store.run(lambda: service.weixin.delivery.control_room(
+            identifier, delivery_id, body.model_dump(), auth.admin(request, True), preview=True))
+
+    @router.post('/rooms/{identifier}/weixin-deliveries/{delivery_id}/control')
+    async def control_weixin_delivery(request: Request, identifier: str,
+                                       delivery_id: str, body: NativeDeliveryControl):
+        return await store.run(lambda: service.weixin.delivery.control_room(
             identifier, delivery_id, body.model_dump(), auth.admin(request, True)))
 
     @router.get('/rooms/{identifier}/context')
@@ -187,6 +204,10 @@ def install_routes(router, auth, runtime):
             'X-Accel-Buffering': 'no', 'Vary': 'Cookie', 'X-Content-Type-Options': 'nosniff'})
 
     @router.get('/rooms/{identifier}/diagnostics')
-    async def diagnostics(request: Request, response: Response, identifier: str):
+    async def diagnostics(request: Request, response: Response, identifier: str,
+                          member_id: str | None = Query(default=None, max_length=128),
+                          delivery_id: str | None = Query(default=None, max_length=128),
+                          cursor: str = Query(default='', max_length=2048)):
         response.headers['Cache-Control'] = 'private, no-store'
-        return await store.run(lambda: service.rooms.diagnostics({'conversation_id': identifier}, auth.panel(request)))
+        return await store.run(lambda: service.rooms.diagnostics({'conversation_id': identifier,
+            'member_id': member_id, 'delivery_id': delivery_id, 'cursor': cursor}, auth.panel(request)))

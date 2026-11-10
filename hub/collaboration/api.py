@@ -207,6 +207,7 @@ def make_router(auth, runtime):
                         'weixin-files-reviewed': service.weixin.media.review.approve,
                         'weixin-approve-files': service.weixin.media.approve,
                         'weixin-delivery-control': service.weixin.delivery.control,
+                        'weixin-delivery-control-preview': service.weixin.delivery.control_preview,
                         'delegation-policy': service.delegation.set_policy,
                         'delegation-policy-control': service.delegation.control,
                         'delegation-remind': service.delegation.remind,

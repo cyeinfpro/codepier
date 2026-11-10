@@ -80,6 +80,12 @@ def migrate_dispatch(db):
     db.execute("""CREATE INDEX IF NOT EXISTS mcp_event_deliveries_head
         ON mcp_event_deliveries(subscription_id,event_seq)
         WHERE state IN ('pending','retry_wait','leased')""")
+    # A retained wake identifies an exact pre-send merge. Old rows retain
+    # their reason, but cannot be attributed to a retained wake retroactively.
+    if 'coalesced_into_delivery_id' not in {row[1] for row in db.execute('PRAGMA table_info(mcp_event_deliveries)')}:
+        db.execute("ALTER TABLE mcp_event_deliveries ADD COLUMN coalesced_into_delivery_id TEXT NOT NULL DEFAULT ''")
+    db.execute("""CREATE INDEX IF NOT EXISTS mcp_event_deliveries_diagnostics
+        ON mcp_event_deliveries(subscription_id,event_seq DESC)""")
     # Global concurrency checks must visit only currently leased deliveries,
     # not all accepted/abandoned history retained for audit and replay.
     db.execute("""CREATE INDEX IF NOT EXISTS mcp_event_deliveries_live_leases
@@ -642,15 +648,17 @@ class EventService:
             AND json_extract(e.data,'$.binding_generation')=?"""
         parameters = (subscription['id'], subscription['name'],
                       filters.get('member_id') or filters.get('slot_id'), filters['binding_generation'])
-        latest = self.store.one('SELECT MAX(d.event_seq) AS n ' + eligible, parameters)['n']
-        if latest is None:
+        latest = self.store.one('SELECT d.id,d.event_seq ' + eligible + ' ORDER BY d.event_seq DESC LIMIT 1',
+                                parameters)
+        if not latest:
             return
         old = self.store.all('SELECT d.id ' + eligible + ' AND d.event_seq<? ORDER BY d.event_seq LIMIT 100',
-                             (*parameters, latest))
+                             (*parameters, latest['event_seq']))
         if old:
             self.store.execute("""UPDATE mcp_event_deliveries SET state='abandoned',
-                reason_code='mailbox_coalesced',fence=fence+1
-                WHERE id IN (SELECT value FROM json_each(?))""", (canonical([row['id'] for row in old]),))
+                reason_code='mailbox_coalesced',coalesced_into_delivery_id=?,fence=fence+1
+                WHERE id IN (SELECT value FROM json_each(?))""",
+                (latest['id'], canonical([row['id'] for row in old])))
 
     def discover_deliveries(self, now):
         """Materialize one bounded outbox page, independently of send fairness.
@@ -954,6 +962,7 @@ class EventService:
             return stored['url'], signed_headers(item['event_id'], sub['id'], item['body'], keys, self.c.clock())
 
     def finish(self, item, status=None, reason='', retry_after=None):
+        from hub.collaboration.telemetry import Action, Channel, Reason, Stage, collaboration_telemetry
         with self.store.transaction():
             row = self.store.one('SELECT * FROM mcp_event_deliveries WHERE id=?', (item['delivery_id'],))
             if not row or row['state'] != 'leased' or row['fence'] != item['fence']:
@@ -1006,11 +1015,23 @@ class EventService:
             if accepted:
                 self.store.execute('UPDATE mcp_event_subscriptions SET last_accepted=? WHERE id=?', (now, sub['id']))
             self.advance(sub['id'])
+            stage = {'accepted': Stage.ACCEPTED, 'retry_wait': Stage.RETRY,
+                     'abandoned': Stage.CANCELLED, 'dead_letter': Stage.REJECTED}[state]
+            metric_reason = {'authorization_stopped': Reason.AUTHORIZATION, 'authorization_revoked': Reason.AUTHORIZATION,
+                             'network_error': Reason.NETWORK, 'wake_ticket_expired': Reason.EXPIRED,
+                             'callback_policy_rejected': Reason.POLICY}.get(reason, Reason.OTHER if reason or status else Reason.NONE)
+            if accepted:
+                metric_reason = Reason.NONE
+            elif status == 429:
+                metric_reason = Reason.RATE_LIMIT
+            self.store.after_commit(lambda: collaboration_telemetry.record(
+                Action.WAKE, stage, channel=Channel.HOST, reason=metric_reason))
             hints = getattr(self.c, 'relay_hints', None)
             if hints is not None:
                 self.store.after_commit(hints.wake)
 
     async def deliver(self, item):
+        from hub.collaboration.telemetry import Action, Channel, Stage, collaboration_telemetry
         try:
             async with self._network_limit:
                 outbound = await self.store.run(self.ready, item)
@@ -1021,6 +1042,7 @@ class EventService:
                 # Also bound injected/adapted transports; the native transport has
                 # its own stricter 10-second DNS/connect/body deadline.
                 async with asyncio.timeout(12):
+                    collaboration_telemetry.record(Action.WAKE, Stage.ATTEMPTED, channel=Channel.HOST)
                     reply = await self.sender(url, item['body'], headers)
             await self.store.run(self.finish, item, reply.status, '', getattr(reply, 'retry_after_seconds', None))
         except DevError as exc:

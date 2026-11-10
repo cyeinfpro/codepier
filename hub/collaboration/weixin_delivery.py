@@ -8,8 +8,16 @@ import uuid
 from dataclasses import dataclass
 from typing import Literal
 
-from hub.collaboration.common import canonical, digest
+from httpx import NetworkError, TimeoutException
+
+from hub import iam
+from hub.collaboration import weixin_delivery_order as order
+from hub.collaboration import weixin_delivery_routes as routes
+from hub.collaboration import weixin_delivery_transport as transport
 from hub.collaboration import weixin_schema as models
+from hub.collaboration.common import canonical, digest, redact
+from hub.collaboration.delivery_compatibility import raise_floor
+from hub.collaboration.telemetry import Reason, Stage
 from hub.collaboration.weixin_protocol import encode_request, send_payload
 from shared.util import DevError
 
@@ -29,27 +37,33 @@ TERMINAL_SOURCE = frozenset(TASK_STATUSES) | {
     'CHANNEL_OWNER_SOURCE_CHANGED', 'CHANNEL_OWNER_SOURCE_SUPERSEDED', 'CHANNEL_OWNER_PEER_CHANGED',
     'WEIXIN_DELIVERY_SOURCE_CHANGED', 'WEIXIN_DELIVERY_CONTENT_CHANGED', 'WEIXIN_DELIVERY_SCOPE_CHANGED',
     'WEIXIN_BINDING_INACTIVE', 'WEIXIN_CREDENTIAL_CHANGED', 'WEIXIN_RECOVERY_SOURCE_CHANGED',
+    'WEIXIN_RECOVERY_SCOPE_CHANGED',
 }
 RATE_LIMITED = 'WEIXIN_RATE_LIMITED'
 REQUEST_LIMIT = 'WEIXIN_REQUEST_LIMIT'
 MAX_SEND_ATTEMPTS = 6
+MAX_ACTIVE_SENDERS = 4
+MAX_ACTIVE_MEDIA = 2
 
 
 @dataclass(frozen=True)
 class EnqueueResult:
     disposition: Literal['queued', 'existing', 'not_requested', 'blocked', 'rejected']
+    reason_code: str
     binding_id: str = ''
-    reason_code: str = ''
     delivery: dict | None = None
 
     @property
     def delivery_id(self):
         return self.delivery['id'] if self.delivery else None
 
-    def as_dict(self):
-        return {'channel': 'weixin', 'binding_id': self.binding_id,
-                'disposition': self.disposition, 'reason_code': self.reason_code,
-                'delivery_id': self.delivery_id}
+    def view(self):
+        result = {'channel': 'weixin', 'disposition': self.disposition, 'reason_code': self.reason_code}
+        if self.binding_id:
+            result['binding_id'] = self.binding_id
+        if self.delivery:
+            result['delivery_id'] = self.delivery['id']
+        return result
 
 
 def text_items(value):
@@ -146,39 +160,44 @@ class WeixinDelivery:
                 raise DevError('CHANNEL_OWNER_NOT_APPROVED', '此微信来源没有有效的工作回传授权', 403)
 
     def queue_reply(self, message):
-        """Keep the legacy attachment and mirror callers on their original return shape."""
         return self.queue_reply_result(message).delivery
 
-    def queue_reply_result(self, message, *, source=None):
+    def queue_reply_result(self, message, *, source=None, predecessor_id=None, dependency_mode='after_settled'):
         self.store.require_transaction()
         body = json.loads(message['body'])
         if message['origin'] != 'bound_connector' or not (body.get('sender_dot_id') or body.get('sender_member_id')):
-            return EnqueueResult('not_requested')
-        source = source if source is not None else self.root_source(message)
+            return EnqueueResult('not_requested', 'no_external_reply')
+        source = source or self.root_source(message)
+        if source and source['conversation_id'] != message['conversation_id']:
+            raise DevError('WEIXIN_DELIVERY_SOURCE_CHANGED', '微信回复必须使用同一房间的原输入', 409)
         origin = json.loads(source['body']).get('external_origin', {}) if source else {}
         if origin.get('channel') != 'weixin':
-            return EnqueueResult('not_requested')
+            if predecessor_id:
+                raise DevError('WEIXIN_DELIVERY_RELATION_INVALID', '当前回复没有可承接原依赖的微信收件人', 409)
+            return EnqueueResult('not_requested', 'no_weixin_source')
         binding_id = origin.get('binding_id', '')
-        if source['conversation_id'] != message['conversation_id']:
-            return EnqueueResult('blocked', binding_id, 'WEIXIN_DELIVERY_SOURCE_CHANGED')
         if not self.c.config.enabled:
-            return EnqueueResult('blocked', binding_id, 'collaboration_disabled')
+            return EnqueueResult('blocked', 'channel_disabled', binding_id)
         native = self.c.room_channels.native if origin.get('native_room') else None
         try:
             if native:
                 candidate = self.store.one('SELECT * FROM weixin_bindings WHERE id=?', (binding_id,))
-                binding, account, owner, _, _ = native.reply_binding(candidate, message, source, allow_unready=True)
-                self.c.chatroom.require_message_visible(owner, message)
+                binding, account, binding_owner, _, member = native.reply_binding(
+                    candidate, message, source, allow_unready=True)
+                self.c.chatroom.require_message_visible(binding_owner, message)
                 if not native.sender_matches(binding, message, source, allow_unready=True):
-                    return EnqueueResult('blocked', binding_id, 'WEIXIN_MEMBER_REMOVED')
+                    return EnqueueResult('blocked', 'sender_changed', binding_id)
+                sender = member['id']
             else:
                 binding, account, _, _, member = self.w.valid(binding_id)
                 sender = body.get('sender_dot_id')
-            if (not binding['allow_replies'] or origin.get('generation') != binding['generation']
-                    or origin.get('peer_id') != binding['peer_id'] or (not native and sender != member['id'])):
-                return EnqueueResult('blocked', binding_id, 'WEIXIN_DELIVERY_SCOPE_CHANGED')
+            if not binding['allow_replies']:
+                return EnqueueResult('blocked', 'reply_permission_revoked', binding_id)
+            if (origin.get('generation') != binding['generation'] or origin.get('peer_id') != binding['peer_id']
+                    or sender != member['id']):
+                return EnqueueResult('blocked', 'recipient_changed', binding_id)
         except DevError as exc:
-            return EnqueueResult('blocked', binding_id, exc.code)
+            return EnqueueResult('blocked', exc.code, binding_id)
 
         try:
             if native:
@@ -187,87 +206,58 @@ class WeixinDelivery:
                 self.c.channel_owner.require_reply_source(source)
                 author = self.c.channel_owner.author(source)
                 if body.get('dot_reply_complete') is False and not author['authenticated']:
-                    return EnqueueResult('blocked', binding_id, 'CHANNEL_OWNER_NOT_APPROVED')
+                    return EnqueueResult('blocked', 'reply_permission_revoked', binding_id)
         except DevError as exc:
             if native:
                 self.queue_task_status(source, exc.code, projection_message_id=message['id'])
-            return EnqueueResult('blocked', binding_id, exc.code)
+            return EnqueueResult('blocked', exc.code, binding_id)
 
-        old = self.store.one("""SELECT * FROM weixin_deliveries
-            WHERE binding_id=? AND generation=? AND message_id=? AND message_version=?""",
-            (binding_id, binding['generation'], message['id'], message['version']))
+        old = self.store.one('''SELECT * FROM weixin_deliveries
+            WHERE binding_id=? AND generation=? AND message_id=? AND message_version=?''',
+            (binding['id'], binding['generation'], message['id'], message['version']))
         if old:
-            return EnqueueResult('existing', binding_id, delivery=old)
-        dependency_id = body.get('depends_on_delivery_id')
-        dependency_mode = body.get('dependency_mode', 'after_settled')
-        prior = self.store.one("""SELECT m.*,d.id AS delivery_id FROM weixin_deliveries d
-            JOIN collaboration_messages m ON m.id=d.message_id
-            WHERE d.binding_id=? AND d.generation=? AND d.peer_id=? AND d.kind='reply'
-                AND m.conversation_id=? AND (m.conversation_sequence,m.id)<(?,?)
-                AND ((? IS NOT NULL AND d.id=?) OR (? IS NULL AND d.message_id=?))
-            ORDER BY d.message_version DESC LIMIT 1""",
-            (binding_id, binding['generation'], binding['peer_id'], source['conversation_id'],
-             message['conversation_sequence'], message['id'], dependency_id, dependency_id,
-             dependency_id, message.get('reply_to_id')))
-        if dependency_id:
-            sender = self.store.one("SELECT * FROM room_members WHERE id=? AND conversation_id=?",
-                                    (body.get('sender_member_id'), source['conversation_id']))
-            actor = self.c.rooms.principal(sender) if sender else None
-            if (not actor or not prior or not self.c.room_consumers._visible_message(sender, actor, prior)
-                    or not self.c.chatroom.message_visible(actor, prior)):
-                raise DevError('WEIXIN_DELIVERY_DEPENDENCY_INVALID',
-                               '前置投递不属于当前收件路线或当前成员可见范围', 409)
-        canonical_source = self.canonical_input(binding, source, origin)
-        ordering = 'reply:' + canonical_source if canonical_source else models.delivery_order_key(
-            self.related_goal(message, source), source.get('thread_root_id'), source['id'])
-        order_version = 2 if canonical_source else 1
+            return EnqueueResult('existing', '', binding_id, old)
+        ordering, evidence, predecessor = order.reply_ordering(
+            self.store, message, source, binding, predecessor_id=predecessor_id, dependency_mode=dependency_mode)
+        schema_version = order.ORDERING_VERSION
+        checked_version = schema_version
+        if not self.c.config.weixin_delivery_order_v2:
+            ordering = models.delivery_order_key(self.related_goal(message, source), source.get('thread_root_id'), source['id'])
+            schema_version, checked_version = 1, 0
+        raise_floor(self.store)
         now, identifier = self.c.clock(), uuid.uuid4().hex
-        pending = self.store.one("""SELECT COUNT(*) AS n FROM weixin_deliveries d JOIN weixin_bindings b ON b.id=d.binding_id
-            WHERE b.account_id=? AND d.created>? AND d.state NOT IN ('accepted','owner_confirmed','cancelled')""",
+        pending = self.store.one('''SELECT COUNT(*) AS n FROM weixin_deliveries d JOIN weixin_bindings b ON b.id=d.binding_id
+            WHERE b.account_id=? AND d.created>? AND d.state NOT IN ('accepted','owner_confirmed','cancelled')''',
             (account['id'], now - 86400))['n']
-        self.store.execute("""INSERT INTO weixin_deliveries
+        self.store.execute('''INSERT INTO weixin_deliveries
             (id,binding_id,generation,message_id,message_version,message_digest,source_message_id,peer_id,
-             state,created,updated,ordering_key,depends_on_delivery_id,ordering_schema_version,
-             canonical_source_id,dependency_mode,ordering_revision)
-            VALUES (?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?,2)""",
-            (identifier, binding_id, binding['generation'], message['id'], message['version'], digest(body),
-             source['id'], binding['peer_id'], now, now, ordering, prior['delivery_id'] if prior else None,
-             order_version, canonical_source or '', dependency_mode if prior else 'after_settled'))
+             state,created,updated,ordering_key,depends_on_delivery_id,ordering_evidence,
+             ordering_schema_version,ordering_checked_version)
+            VALUES (?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?)''',
+            (identifier, binding['id'], binding['generation'], message['id'], message['version'], digest(body),
+             source['id'], binding['peer_id'], now, now, ordering, predecessor, evidence, schema_version,
+             checked_version))
         if pending >= 1000:
             self.add_part(identifier, 0, 'text', {'text': ''})
             self.store.execute("UPDATE weixin_parts SET state='rejected',reason_code='daily_reply_quota' WHERE delivery_id=?", (identifier,))
             self.refresh(identifier)
             delivery = self.store.one('SELECT * FROM weixin_deliveries WHERE id=?', (identifier,))
-            return EnqueueResult('rejected', binding_id, 'daily_reply_quota', delivery)
+            return EnqueueResult('rejected', 'daily_reply_quota', binding_id, delivery)
         pieces = text_chunks(body.get('body_text', ''))
         for ordinal, piece in enumerate(pieces):
             self.add_part(identifier, ordinal, 'text', {'text': piece})
+        reason = ''
         if not pieces:
             self.store.execute("UPDATE weixin_deliveries SET state='waiting_media' WHERE id=?", (identifier,))
         elif account['state'] != 'active' or not self.store.one("""SELECT 1 FROM weixin_contexts
                 WHERE account_id=? AND generation=? AND peer_id=?""",
                 (account['id'], binding['generation'], binding['peer_id'])):
-            reason = 'context_missing' if account['state'] == 'active' else 'WEIXIN_ROUTE_WAITING'
+            reason = 'context_missing' if account['state'] == 'active' else 'account_waiting_reconnect'
             self.store.execute("UPDATE weixin_parts SET state='waiting_context',reason_code=? WHERE delivery_id=?",
-                (reason, identifier))
+                               (reason, identifier))
             self.refresh(identifier)
         delivery = self.store.one('SELECT * FROM weixin_deliveries WHERE id=?', (identifier,))
-        return EnqueueResult('queued', binding_id, delivery=delivery)
-
-    def canonical_input(self, binding, source, origin):
-        """Anchor ordering in the provider input ledger, including verified edits."""
-        if not origin.get('external_message_id'):
-            return None
-        row = self.store.one("""SELECT first.message_id FROM weixin_inbound_versions current
-            JOIN weixin_inbound_versions first USING (account_id,generation,peer_id,external_id)
-            JOIN collaboration_messages original ON original.id=first.message_id
-            WHERE current.account_id=? AND current.generation=? AND current.peer_id=?
-                AND current.external_id=? AND current.message_id=?
-                AND original.conversation_id=? AND original.origin='external_channel'
-            ORDER BY length(first.provider_version),first.provider_version,first.created LIMIT 1""",
-            (binding['account_id'], binding['generation'], binding['peer_id'], origin['external_message_id'],
-             source['id'], source['conversation_id']))
-        return row['message_id'] if row else None
+        return EnqueueResult('queued', reason, binding_id, delivery)
 
     def status_source(self, source):
         body = json.loads(source['body'])
@@ -311,13 +301,19 @@ class WeixinDelivery:
             if old:
                 return old
             now = self.c.clock()
+            work_id = self.related_goal({}, source)
+            revision = self.store.one('SELECT intent_revision FROM room_work_intents WHERE goal_id=?',
+                                      (work_id,)) if work_id else None
+            evidence = order.status_evidence(source, work_id, revision['intent_revision'] if revision else None, now)
+            raise_floor(self.store)
             self.store.execute('''INSERT INTO weixin_deliveries
                 (id,binding_id,generation,message_id,message_version,message_digest,source_message_id,peer_id,
-                 state,created,updated,ordering_key,kind,status_code,projection_message_id)
-                VALUES (?,?,?,?,?,?,?,?,'queued',?,?,?,'status',?,?)''',
+                 state,created,updated,ordering_key,kind,status_code,projection_message_id,ordering_evidence,
+                 ordering_schema_version,ordering_checked_version)
+                VALUES (?,?,?,?,?,?,?,?,'queued',?,?,?,'status',?,?,?,?,?)''',
                 (identifier, binding['id'], binding['generation'], 'status:' + identifier, source['version'],
                  source_digest, source['id'], binding['peer_id'], now, now, 'status:' + source['id'],
-                 code, projection_message_id or source['id']))
+                 code, projection_message_id or source['id'], evidence, order.ORDERING_VERSION, order.ORDERING_VERSION))
             self.add_part(identifier, 0, 'text', {'text': notice})
             self.c.rooms.change(source['conversation_id'], 'message', projection_message_id or source['id'])
             return self.store.one('SELECT * FROM weixin_deliveries WHERE id=?', (identifier,))
@@ -342,7 +338,10 @@ class WeixinDelivery:
                 (identifier, part_id, delivery['binding_id']))
         self.refresh(delivery['id'])
 
-    def validate(self, delivery):
+    def validate(self, delivery, *, part=None):
+        recovered = routes.validate_part(self, delivery, part)
+        if recovered:
+            return recovered
         if delivery['kind'] == 'status':
             source = self.store.one('SELECT * FROM collaboration_messages WHERE id=?', (delivery['source_message_id'],))
             if not source:
@@ -356,7 +355,10 @@ class WeixinDelivery:
 
         binding = self.store.one('SELECT * FROM weixin_bindings WHERE id=?', (delivery['binding_id'],))
         if binding and binding.get('native_member_id'):
-            valid = self.c.room_channels.native.delivery_validate(delivery, require_task_authority=False)
+            valid = self.c.room_channels.native.delivery_validate(
+                delivery, require_task_authority=False, allow_unready=True)
+            if valid[1]['state'] != 'active':
+                raise DevError('WEIXIN_WAITING_RECONNECT', '原微信账号恢复连接后继续投递', 409)
             message = valid[-1]
             source = self.store.one('SELECT * FROM collaboration_messages WHERE id=?', (delivery['source_message_id'],))
             self.task_author(message, source, json.loads(message['body']))
@@ -380,7 +382,7 @@ class WeixinDelivery:
     def refresh(self, delivery_id):
         self.store.execute("""UPDATE weixin_parts SET state='rejected',reason_code='reply_part_failed',updated=?
             WHERE delivery_id=? AND state IN ('queued','waiting_context','waiting_media','attention')
-            AND (attempts=0 OR reason_code='WEIXIN_RATE_LIMITED')
+            AND (attempts=0 OR retry_rejected=1)
             AND ordinal>(SELECT MIN(ordinal) FROM weixin_parts
                 WHERE delivery_id=? AND state IN ('rejected','cancelled'))""",
             (self.c.clock(), delivery_id, delivery_id))
@@ -399,47 +401,55 @@ class WeixinDelivery:
             self.c.rooms.change(native['conversation_id'], 'message', native['message_id'], native['message_version'])
 
     def candidates(self, now, *, binding_id=None, peer_id=None):
-        # Ordering stays within the proven recipient. The network lock covers
-        # the same account and peer even if a different binding was used.
-        return self.store.all("""WITH sendable AS (
-            SELECT p.id,d.created,d.rowid AS delivery_order,p.ordinal,
-                COALESCE(rotation.admitted_sequence,0) AS admitted_sequence,
+        # Unknown external results block only established reply dependencies.
+        # The separate in-flight check fences every request to the same peer.
+        gate = self.c.channel_settings.sql_enabled('weixin', 'b')
+        return self.store.all(f'''WITH sendable AS (
+            SELECT p.id,p.kind,d.created,d.rowid AS delivery_order,p.ordinal,
+                COALESCE(turn.last_admitted_sequence,0) AS last_admitted_sequence,
                 ROW_NUMBER() OVER (PARTITION BY b.account_id,d.peer_id
                     ORDER BY d.created,d.rowid,p.ordinal) AS peer_rank
             FROM weixin_parts p JOIN weixin_deliveries d ON d.id=p.delivery_id
             JOIN weixin_bindings b ON b.id=d.binding_id
-            JOIN weixin_accounts a ON a.id=b.account_id
-            LEFT JOIN weixin_delivery_peer_rotation rotation ON rotation.account_id=b.account_id AND rotation.peer_id=d.peer_id
-            WHERE p.state IN ('queued','waiting_context','waiting_media') AND p.next_attempt<=?
-                AND a.state='active' AND b.state='active'
+            JOIN weixin_accounts account ON account.id=b.account_id
+            LEFT JOIN weixin_peer_admission turn ON turn.account_id=b.account_id AND turn.peer_id=d.peer_id
+            LEFT JOIN weixin_account_cooldown cooldown ON cooldown.account_id=b.account_id
+            WHERE b.state='active' AND account.state='active' AND COALESCE(cooldown.retry_at,0)<=?
+                AND {gate}
+                AND NOT EXISTS (SELECT 1 FROM conversation_rooms r
+                    WHERE r.id=b.conversation_id AND r.state!='active')
+                AND (b.native_member_id!='' OR NOT EXISTS (SELECT 1 FROM collaboration_rooms r
+                    WHERE r.id=b.room_id AND r.state!='active'))
+                AND p.state IN ('queued','waiting_context','waiting_media') AND p.next_attempt<=?
                 AND (? IS NULL OR (d.binding_id=? AND d.peer_id=?))
                 AND NOT EXISTS (
                     SELECT 1 FROM weixin_parts first WHERE first.delivery_id=d.id AND first.ordinal<p.ordinal
                         AND first.state NOT IN ('accepted','owner_confirmed','cancelled','rejected'))
-                AND NOT EXISTS (
-                    SELECT 1 FROM weixin_deliveries prior
-                    WHERE prior.binding_id=d.binding_id AND prior.generation=d.generation AND prior.peer_id=d.peer_id
-                        AND (prior.created,prior.rowid)<(d.created,d.rowid)
-                        AND (prior.id=d.depends_on_delivery_id
-                            OR (prior.ordering_key!='' AND prior.ordering_key=d.ordering_key)
-                            OR (d.kind='reply' AND prior.kind='reply' AND
-                                (prior.source_message_id=d.source_message_id
-                                 OR (prior.canonical_source_id!='' AND prior.canonical_source_id=d.canonical_source_id)
-                                 OR (prior.ordering_key='' AND prior.canonical_source_id='')
-                                 OR (d.ordering_key='' AND d.canonical_source_id=''))))
-                        AND (prior.state='waiting_media' OR EXISTS (
-                            SELECT 1 FROM weixin_parts earlier WHERE earlier.delivery_id=prior.id
-                                AND earlier.state NOT IN ('accepted','owner_confirmed','cancelled','rejected')))
-                        AND NOT (prior.id IS d.depends_on_delivery_id AND d.dependency_mode='requires_success'
-                            AND EXISTS (SELECT 1 FROM weixin_parts failure WHERE failure.delivery_id=prior.id
-                                        AND failure.state IN ('cancelled','rejected'))))
+                AND (
+                    (p.attempts>0 AND p.retry_rejected=0) OR ({order.FAILED_PREDECESSOR})
+                    OR (NOT ({order.WAITING_PREDECESSOR})
+                        AND (p.state!='waiting_context' OR EXISTS (
+                            SELECT 1 FROM weixin_contexts ctx WHERE ctx.account_id=b.account_id
+                                AND ctx.generation=b.generation AND ctx.peer_id=d.peer_id))
+                        AND (p.state!='waiting_media' OR NOT EXISTS (
+                            SELECT 1 FROM channel_attachment_transfers transfer
+                            JOIN channel_attachments attachment ON attachment.id=transfer.attachment_id
+                            WHERE transfer.channel='weixin' AND transfer.part_id=p.id AND attachment.expires_at>?
+                                AND attachment.state NOT IN ('ready','unavailable','expired'))))
+                )
                 AND NOT EXISTS (
                     SELECT 1 FROM weixin_deliveries held JOIN weixin_bindings hb ON hb.id=held.binding_id
                     JOIN weixin_parts sender ON sender.delivery_id=held.id
                     WHERE hb.account_id=b.account_id AND held.peer_id=d.peer_id
                         AND sender.state IN ('preparing','sending'))
-            ) SELECT id FROM sendable WHERE peer_rank=1
-                ORDER BY admitted_sequence,created,delivery_order,ordinal LIMIT 16""", (now, binding_id, binding_id, peer_id))
+            ), fair AS (
+                SELECT id,kind,ROW_NUMBER() OVER (ORDER BY last_admitted_sequence,created,delivery_order,ordinal) AS batch_rank,
+                    ROW_NUMBER() OVER (PARTITION BY kind
+                        ORDER BY last_admitted_sequence,created,delivery_order,ordinal) AS kind_rank
+                FROM sendable WHERE peer_rank=1
+            ) SELECT id,kind FROM fair
+                ORDER BY CASE WHEN kind='text' AND kind_rank=1 THEN 0 ELSE batch_rank END
+                LIMIT 16''', (now, now, binding_id, binding_id, peer_id, now))
 
     def claim(self, identifier):
         with self.store.transaction():
@@ -451,28 +461,40 @@ class WeixinDelivery:
             candidate = self.candidates(now, binding_id=delivery['binding_id'], peer_id=delivery['peer_id'])
             if not candidate or candidate[0]['id'] != identifier:
                 return None
+            if part['attempts'] and not part['retry_rejected']:
+                # Older versions could replace a rate-limit reason while waiting
+                # for context. Without exact rejection proof, keep the outcome unknown.
+                self.store.execute("""UPDATE weixin_parts SET state='unknown',reason_code='prior_send_evidence_missing',
+                    lease_fence=lease_fence+1,lease_until=0,updated=? WHERE id=?""", (now, identifier))
+                self.refresh(delivery['id'])
+                transport.record_transition(self.store, Stage.UNKNOWN, Reason.OTHER)
+                return None
+            active = self.store.one("""SELECT COUNT(*) AS total,
+                COUNT(CASE WHEN kind='attachment' THEN 1 END) AS media
+                FROM weixin_parts WHERE state IN ('preparing','sending')""")
+            if active['total'] >= MAX_ACTIVE_SENDERS or (part['kind'] == 'attachment' and active['media'] >= MAX_ACTIVE_MEDIA):
+                return None
             failed = self.store.one("""SELECT 1 FROM weixin_parts
                 WHERE delivery_id=? AND ordinal<? AND state IN ('rejected','cancelled') LIMIT 1""",
                 (delivery['id'], part['ordinal']))
             if failed:
                 self.refresh(delivery['id'])
                 return None
-            if delivery['dependency_mode'] == 'requires_success' and self.store.one(
-                    "SELECT 1 FROM weixin_parts WHERE delivery_id=? AND state IN ('rejected','cancelled') LIMIT 1",
-                    (delivery['depends_on_delivery_id'],)):
-                self.store.execute("""UPDATE weixin_parts SET state='rejected',reason_code='dependency_failed',updated=?
-                    WHERE delivery_id=? AND state IN ('queued','waiting_context','waiting_media')
-                    AND (attempts=0 OR reason_code=?)""", (now, delivery['id'], RATE_LIMITED))
-                self.refresh(delivery['id'])
+            dependency = order.dependency_state(self.store, delivery['id'])
+            if dependency == 'failed':
+                self.reject_failed_dependency(delivery['id'], now)
                 return None
-            binding, account, owner, message = self.validate(delivery)
+            if dependency == 'waiting':
+                return None
+            binding, account, owner, message = self.validate(delivery, part=part)
+            route_recovery = binding['generation'] != delivery['generation']
             context = self.store.one('SELECT * FROM weixin_contexts WHERE account_id=? AND generation=? AND peer_id=?',
                                      (account['id'], binding['generation'], delivery['peer_id']))
             if not context:
                 self.store.execute("UPDATE weixin_parts SET state='waiting_context',next_attempt=?,reason_code='context_missing',updated=? WHERE id=?", (now + 5, now, identifier))
                 self.refresh(delivery['id'])
                 return None
-            if part['kind'] == 'attachment':
+            if part['kind'] == 'attachment' and not route_recovery:
                 source = json.loads(self.store.decrypt(part['body']))
                 try:
                     attachment = self.w.media.row(source['attachment_id'], owner)
@@ -493,20 +515,26 @@ class WeixinDelivery:
             claim_owner, fence = uuid.uuid4().hex, part['lease_fence'] + 1
             self.store.execute("UPDATE weixin_parts SET state='preparing',lease_owner=?,lease_fence=?,lease_until=?,updated=? WHERE id=?",
                                (claim_owner, fence, now + (960 if part['kind'] == 'attachment' else 180), now, identifier))
-            self.store.execute("""INSERT INTO weixin_delivery_peer_rotation(account_id,peer_id,admitted_sequence)
-                VALUES (?,?,(SELECT COALESCE(MAX(admitted_sequence),0)+1 FROM weixin_delivery_peer_rotation))
-                ON CONFLICT(account_id,peer_id) DO UPDATE SET admitted_sequence=excluded.admitted_sequence""",
-                (account['id'], delivery['peer_id']))
+            transport.admit(self.store, account['id'], delivery['peer_id'])
             return {**part, 'lease_owner': claim_owner, 'lease_fence': fence, 'delivery': delivery,
-                    'binding': binding, 'account': account, 'context': context}
+                    'binding': binding, 'account': account, 'context': context,
+                    'owner': owner, 'message': message, 'route_recovery': route_recovery}
+
+    def reject_failed_dependency(self, delivery_id, now):
+        self.store.execute("""UPDATE weixin_parts SET state='rejected',reason_code='dependency_failed',
+            lease_fence=lease_fence+1,lease_until=0,updated=? WHERE delivery_id=?
+            AND state IN ('queued','waiting_context','waiting_media','attention','preparing')
+            AND (attempts=0 OR retry_rejected=1)""", (now, delivery_id))
+        self.refresh(delivery_id)
 
     def current(self, claim):
         part = self.store.one('SELECT * FROM weixin_parts WHERE id=?', (claim['id'],))
         if (not part or part['lease_owner'] != claim['lease_owner'] or part['lease_fence'] != claim['lease_fence']
                 or (part['lease_until'] or 0) <= self.c.clock() or part['state'] not in {'preparing', 'sending'}):
             raise DevError('WEIXIN_SEND_FENCE_LOST', '原微信投递世代已失效，不重发同一分项', 409)
-        binding, *_ = self.validate(claim['delivery'])
-        if binding['version'] != claim['binding']['version']:
+        binding, *_ = self.validate(claim['delivery'], part=part)
+        if (binding['id'], binding['generation'], binding['version']) != (
+                claim['binding']['id'], claim['binding']['generation'], claim['binding']['version']):
             raise DevError('WEIXIN_BINDING_CHANGED', '发送准备期间原绑定版本已变化，旧工作者不能继续发送', 409)
         return part
 
@@ -518,6 +546,14 @@ class WeixinDelivery:
                 saved = {'upload_key': secrets.token_hex(16), 'filekey': 'cpw-' + part['id']}
                 self.store.execute('UPDATE weixin_parts SET wire_body=? WHERE id=?', (self.store.encrypt(canonical(saved)), part['id']))
             return saved
+
+    def recovered_attachment(self, claim):
+        with self.store.transaction():
+            part = self.current(claim)
+            scope = (claim['binding'], claim['account'], claim['owner'], claim['message'])
+            row = routes.attachment(self, claim['delivery'], part, scope)
+            content, attachment, *_ = self.w.media.decode_range(row)
+            return content, attachment
 
     def check_upload(self, claim):
         with self.store.transaction():
@@ -575,7 +611,22 @@ class WeixinDelivery:
     def mark_sending(self, claim, items):
         with self.store.transaction():
             part = self.current(claim)
-            if part['attempts'] and part['reason_code'] == RATE_LIMITED:
+            delivery = claim['delivery']
+            dependency = order.dependency_state(self.store, delivery['id'])
+            version = self.store.one('SELECT ordering_revision FROM weixin_deliveries WHERE id=?', (delivery['id'],))
+            if dependency == 'failed':
+                self.reject_failed_dependency(delivery['id'], self.c.clock())
+                return None
+            if dependency == 'waiting' or version['ordering_revision'] != delivery['ordering_revision']:
+                self.store.execute("""UPDATE weixin_parts SET state='queued',lease_fence=lease_fence+1,
+                    lease_until=0,updated=? WHERE id=?""", (self.c.clock(), part['id']))
+                self.refresh(delivery['id'])
+                return None
+            cooldown = self.store.one('SELECT retry_at FROM weixin_account_cooldown WHERE account_id=?',
+                                      (claim['account']['id'],))
+            if cooldown and cooldown['retry_at'] > self.c.clock():
+                raise DevError('WEIXIN_ACCOUNT_COOLDOWN', '微信账号暂缓发送', 429, retry_at=cooldown['retry_at'])
+            if part['retry_rejected']:
                 wire = json.loads(self.store.decrypt(part['wire_body']))
                 context_version = part['context_version']
             else:
@@ -595,79 +646,92 @@ class WeixinDelivery:
                 encode_request(send_payload(wire['peer'], wire['context'], wire['client_id'], wire['items']))
             except DevError as exc:
                 if (exc.code == REQUEST_LIMIT and not status and part['kind'] == 'text' and not part['attempts']
-                        and self.split_unsent_text(part, wire)):
+                        and not claim['route_recovery'] and self.split_unsent_text(part, wire)):
                     return None
                 raise
-            self.store.execute("UPDATE weixin_parts SET state='sending',wire_body=?,context_version=?,attempts=attempts+1,updated=? WHERE id=?",
-                (self.store.encrypt(canonical(wire)), context_version, self.c.clock(), part['id']))
+            now = self.c.clock()
+            transport.record_attempt(self.store, claim, part, wire, now)
+            self.store.execute("UPDATE weixin_parts SET state='sending',wire_body=?,context_version=?,attempts=attempts+1,retry_rejected=0,updated=? WHERE id=?",
+                (self.store.encrypt(canonical(wire)), context_version, now, part['id']))
             self.refresh(part['delivery_id'])
+            transport.record_transition(self.store, Stage.ATTEMPTED)
             return wire
-
-    def record_late_acceptance(self, row, claim, result):
-        if (not row or row['state'] != 'unknown' or row['lease_fence'] != claim['lease_fence'] + 1
-                or row['lease_owner'] != claim['lease_owner'] or not row['wire_body']
-                or row['client_id'] != claim['client_id'] or row['body_digest'] != claim['body_digest']
-                or not isinstance(result, dict) or result.get('provider_state') != 'accepted'):
-            return
-        delivery = self.store.one('SELECT * FROM weixin_deliveries WHERE id=?', (row['delivery_id'],))
-        original = claim['delivery']
-        if (not delivery or any(delivery[key] != original[key] for key in ('id','binding_id','generation','peer_id'))
-                or claim['binding']['id'] != delivery['binding_id']
-                or claim['binding']['account_id'] != claim['account']['id']):
-            return
-        wire = json.loads(self.store.decrypt(row['wire_body']))
-        if wire.get('client_id') != row['client_id'] or wire.get('peer') != delivery['peer_id']:
-            return
-        self.store.execute("""INSERT OR IGNORE INTO weixin_delivery_late_observations
-            (part_id,send_fence,delivery_id,binding_id,channel_generation,account_id,peer_id,
-             client_id,body_digest,provider_receipt,created) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-            (row['id'], claim['lease_fence'], delivery['id'], delivery['binding_id'], delivery['generation'],
-             claim['account']['id'], delivery['peer_id'], row['client_id'], row['body_digest'],
-             canonical(result), self.c.clock()))
 
     def finish(self, claim, result=None, error=None):
         with self.store.transaction():
             row = self.store.one('SELECT * FROM weixin_parts WHERE id=?', (claim['id'],))
-            if (not row or row['lease_owner'] != claim['lease_owner'] or row['lease_fence'] != claim['lease_fence']
-                    or row['state'] not in {'preparing','sending'}):
-                self.record_late_acceptance(row, claim, result)
-                return
             now = self.c.clock()
+            if (not row or row['lease_owner'] != claim['lease_owner'] or row['lease_fence'] != claim['lease_fence']
+                    or row['state'] not in {'preparing','sending'} or (row['lease_until'] or 0) <= now):
+                transport.record_late(self.store, claim, row, result, now)
+                return
             code = error.code if isinstance(error, DevError) else type(error).__name__ if error else ''
+            receipt = transport.accepted_receipt(result) if row['state'] == 'sending' else None
             next_attempt = 0
-            if result is not None and row['state'] == 'sending':
+            preparation_failures = row['preparation_failures']
+            retry_rejected = row['retry_rejected']
+            if receipt:
                 state = 'accepted'
             elif code == REQUEST_LIMIT:
                 state = 'rejected'
             elif row['state'] == 'sending' and code == RATE_LIMITED and error.status == 429:
                 state = 'rejected'
+                delay = error.details.get('retry_after_seconds')
+                if type(delay) is not int or not 0 <= delay <= 999999999:
+                    delay = 60
+                if delay:
+                    transport.cooldown(self.store, claim['account']['id'], now + delay)
                 if row['attempts'] < MAX_SEND_ATTEMPTS:
-                    delay = error.details.get('retry_after_seconds')
-                    if type(delay) is not int or not 0 <= delay <= 999999999:
-                        delay = 60
-                    next_attempt = now + max(min(900, 15 * 2 ** row['attempts']), delay)
-                    state = 'queued'
+                    next_attempt = now + transport.delay(row['attempts'], provider_delay=delay)
+                    state, retry_rejected = 'queued', 1
+            elif row['state'] == 'sending' and code in {'WEIXIN_AUTH_REJECTED', 'WEIXIN_SESSION_EXPIRED'}:
+                state = 'rejected'
             elif row['state'] == 'sending':
-                # A send may have committed despite a lost, malformed or late
-                # response. Preserve its identity for owner review.
-                state = 'unknown'
-            elif code in {'WEIXIN_CONTEXT_CHANGED', 'WEIXIN_ROUTE_WAITING'}:
-                state, next_attempt = 'waiting_context', now + 5
+                state, code = 'unknown', code or 'WEIXIN_SEND_UNCONFIRMED'
+            elif code == 'WEIXIN_ACCOUNT_COOLDOWN':
+                state, next_attempt, code = 'queued', error.details['retry_at'], row['reason_code']
+            elif code == 'WEIXIN_SEND_INTERRUPTED':
+                state, code = 'queued', row['reason_code'] if retry_rejected else 'host_interrupted_before_send'
             elif code in TERMINAL_SOURCE or (row['kind'] == 'attachment' and code in {
                     'WEIXIN_MEDIA_LIMIT', 'WEIXIN_VOICE_SEND_UNVERIFIED', 'WEIXIN_UPLOAD_REJECTED',
                     'ATTACHMENT_EXPIRED', 'ATTACHMENT_HASH_MISMATCH', 'WEIXIN_MEDIA_INVALID'}):
                 state = 'rejected'
+            elif code in {'WEIXIN_CONTEXT_CHANGED', 'WEIXIN_WAITING_RECONNECT', 'WEIXIN_AUTH_REJECTED', 'WEIXIN_SESSION_EXPIRED'}:
+                state, next_attempt = 'waiting_context', now + 5
+            elif error and (isinstance(error, (TimeoutError, ConnectionError, TimeoutException, NetworkError))
+                            or isinstance(error, DevError) and error.status in {429, 502, 503, 504}):
+                preparation_failures += 1
+                if preparation_failures < transport.MAX_PREPARATION_FAILURES:
+                    state = 'queued'
+                    next_attempt = now + transport.delay(preparation_failures)
+                else:
+                    state, code = 'attention', 'WEIXIN_PREPARATION_BUDGET_EXHAUSTED'
             else:
                 state = 'attention'
             self.store.execute('''UPDATE weixin_parts SET state=?,reason_code=?,provider_receipt=?,
-                next_attempt=?,lease_until=0,updated=? WHERE id=?''',
-                (state, code, canonical(result) if state == 'accepted' else None, next_attempt, now, row['id']))
+                next_attempt=?,lease_until=0,preparation_failures=?,retry_rejected=?,updated=? WHERE id=?''',
+                (state, code, receipt, next_attempt, preparation_failures, retry_rejected, now, row['id']))
+            if row['state'] == 'sending':
+                stage = {'accepted': Stage.ACCEPTED, 'unknown': Stage.UNKNOWN,
+                         'rejected': Stage.REJECTED, 'queued': Stage.RETRY}[state]
+                reason = Reason.NONE
+                if code == RATE_LIMITED:
+                    reason = Reason.RATE_LIMIT
+                elif code in {'WEIXIN_AUTH_REJECTED', 'WEIXIN_SESSION_EXPIRED'}:
+                    reason = Reason.AUTHORIZATION
+                elif isinstance(error, (TimeoutError, ConnectionError, TimeoutException, NetworkError)):
+                    reason = Reason.NETWORK
+                elif error or state == 'unknown':
+                    reason = Reason.OTHER
+                transport.record_transition(self.store, stage, reason)
             self.refresh(row['delivery_id'])
             if code in TASK_STATUSES and claim['delivery']['kind'] == 'reply':
                 self.blocked_status(claim['delivery'], code)
             if code in {'WEIXIN_AUTH_REJECTED', 'WEIXIN_SESSION_EXPIRED'}:
-                self.store.execute("UPDATE weixin_accounts SET state='attention',reason_code=?,poll_fence=poll_fence+1,poll_until=0 WHERE id=?",
-                                   (code, claim['account']['id']))
+                account = claim['account']
+                self.store.execute("""UPDATE weixin_accounts SET state='attention',reason_code=?,poll_fence=poll_fence+1,
+                    poll_until=0 WHERE id=? AND credential_version=? AND generation=?""",
+                    (code, account['id'], account['credential_version'], account['generation']))
 
     def blocked_status(self, delivery, code):
         source = self.store.one('SELECT * FROM collaboration_messages WHERE id=?', (delivery['source_message_id'],))
@@ -685,7 +749,7 @@ class WeixinDelivery:
                     if row and row['state'] in READY:
                         terminal_source = code in TERMINAL_SOURCE
                         state = ('rejected' if terminal_source else 'waiting_context'
-                                 if code == 'WEIXIN_ROUTE_WAITING' else row['state'])
+                                 if code in {'WEIXIN_WAITING_RECONNECT', 'WEIXIN_ROUTE_WAITING'} else row['state'])
                         self.store.execute("UPDATE weixin_parts SET state=?,reason_code=?,next_attempt=?,updated=? WHERE id=?",
                                            (state, code, self.c.clock() + 30, self.c.clock(), identifier))
                         self.refresh(row['delivery_id'])
@@ -702,13 +766,16 @@ class WeixinDelivery:
             if digest(body) != claim['body_digest']:
                 raise DevError('WEIXIN_PART_CORRUPT', '微信分项正文摘要不匹配', 409)
             client = self.w.client_factory(claim['account']['api_base'], self.store.decrypt(claim['account']['secret']))
-            if claim['attempts'] and claim['reason_code'] == RATE_LIMITED:
+            if claim['retry_rejected']:
                 items = None  # Retry the frozen encoded message, including any uploaded item.
             elif claim['kind'] == 'text':
                 items = text_items(body['text'])
             else:
                 saved = await self.store.run(self.upload_identity, claim)
-                content, attachment = await self.store.run(self.w.media.outbound_content, body['attachment_id'], claim['binding']['id'])
+                if claim['route_recovery']:
+                    content, attachment = await self.store.run(self.recovered_attachment, claim)
+                else:
+                    content, attachment = await self.store.run(self.w.media.outbound_content, body['attachment_id'], claim['binding']['id'])
                 await self.store.run(self.check_upload, claim)
                 item = await client.upload_media(claim['delivery']['peer_id'], content, attachment['kind'], attachment['name'],
                                                  filekey=saved['filekey'], key=bytes.fromhex(saved['upload_key']))
@@ -718,6 +785,7 @@ class WeixinDelivery:
             wire = await self.store.run(self.mark_sending, claim, items)
             if wire is None:
                 return
+            transport.record_metric(Stage.DISPATCHED)
             result = await client.send(wire['peer'], wire['context'], wire['client_id'], wire['items'])
             await self.store.run(self.finish, claim, result)
         except asyncio.CancelledError:
@@ -726,65 +794,42 @@ class WeixinDelivery:
         except Exception as exc:
             await self.store.run(self.finish, claim, None, exc)
 
-    def backfill_ordering(self):
-        rows = self.store.all("""SELECT d.*, b.account_id FROM weixin_deliveries d
-            JOIN weixin_bindings b ON b.id=d.binding_id
-            WHERE d.kind='reply' AND d.ordering_revision=1
-              AND d.state NOT IN ('accepted','owner_confirmed','cancelled')
-              AND NOT EXISTS (SELECT 1 FROM weixin_parts p
-                              WHERE p.delivery_id=d.id AND p.state IN ('preparing','sending'))
-            ORDER BY d.created,d.id LIMIT 50""")
-        for delivery in rows:
-            source = self.store.one('SELECT * FROM collaboration_messages WHERE id=?', (delivery['source_message_id'],))
-            origin = json.loads(source['body']).get('external_origin', {}) if source else {}
-            verified = (source and source['origin'] == 'external_channel' and origin.get('channel') == 'weixin'
-                        and origin.get('binding_id') == delivery['binding_id']
-                        and all(origin.get(key) == delivery[key] for key in ('account_id','generation','peer_id')))
-            root = self.canonical_input(delivery, source, origin) if verified else None
-            self.store.execute("""UPDATE weixin_deliveries SET ordering_revision=ordering_revision+1,
-                ordering_schema_version=?,canonical_source_id=?,ordering_key=?
-                WHERE id=? AND ordering_revision=?""",
-                (2 if root else delivery['ordering_schema_version'], root or delivery['canonical_source_id'],
-                 'reply:' + root if root else delivery['ordering_key'], delivery['id'], delivery['ordering_revision']))
-
-    def reconcile_late_acceptance(self):
-        rows = self.store.all("""SELECT p.id,p.delivery_id,p.lease_fence,late.provider_receipt
-            FROM weixin_parts p JOIN weixin_delivery_late_observations late
-            ON late.part_id=p.id AND late.send_fence=p.lease_fence-1
-            JOIN weixin_deliveries d ON d.id=p.delivery_id AND d.id=late.delivery_id
-            JOIN weixin_bindings b ON b.id=d.binding_id AND b.id=late.binding_id
-            WHERE p.state='unknown' AND p.client_id=late.client_id AND p.body_digest=late.body_digest
-            AND d.generation=late.channel_generation AND d.peer_id=late.peer_id AND b.account_id=late.account_id
-            ORDER BY late.created,p.id LIMIT 100""")
-        for part in rows:
-            self.store.execute("""UPDATE weixin_parts SET state='accepted',reason_code='late_provider_accepted',
-                provider_receipt=?,updated=? WHERE id=? AND state='unknown' AND lease_fence=?""",
-                (part['provider_receipt'], self.c.clock(), part['id'], part['lease_fence']))
-            self.refresh(part['delivery_id'])
-
     def reconcile(self):
         with self.store.transaction():
-            self.reconcile_late_acceptance()
-            self.backfill_ordering()
             rows = self.store.all("SELECT * FROM weixin_parts WHERE state IN ('preparing','sending') AND lease_until<=? ORDER BY lease_until LIMIT 100", (self.c.clock(),))
             for row in rows:
                 state = 'unknown' if row['state'] == 'sending' else 'queued'
-                reason = RATE_LIMITED if state == 'queued' and row['reason_code'] == RATE_LIMITED else 'host_restarted_before_receipt'
+                reason = RATE_LIMITED if state == 'queued' and row['retry_rejected'] else 'host_restarted_before_receipt'
                 self.store.execute('UPDATE weixin_parts SET state=?,reason_code=?,lease_fence=lease_fence+1,lease_until=0,updated=? WHERE id=?',
                                    (state, reason, self.c.clock(), row['id']))
+                if state == 'unknown':
+                    transport.record_transition(self.store, Stage.UNKNOWN, Reason.EXPIRED)
                 self.refresh(row['delivery_id'])
+            for delivery_id in transport.adopt_late(self.store, self.c.clock()):
+                self.refresh(delivery_id)
             return [r['id'] for r in rows]
 
     async def tick(self):
         if not self.c.config.enabled:
             return
         await self.store.run(self.reconcile)
+        if self.c.config.weixin_delivery_order_v2:
+            await self.store.run(order.backfill, self.store, self.c.clock())
         rows = await self.store.run(self.candidates, self.c.clock())
         # At most four concurrent peers, with the same fenced check in claim.
-        semaphore = asyncio.Semaphore(4)
-        async def run(row):
+        semaphore = asyncio.Semaphore(MAX_ACTIVE_SENDERS)
+        media = asyncio.Semaphore(MAX_ACTIVE_MEDIA)
+
+        async def send(row):
             async with semaphore:
                 await self.send_once(row['id'])
+
+        async def run(row):
+            if row['kind'] == 'attachment':
+                async with media:
+                    await send(row)
+            else:
+                await send(row)
         await asyncio.gather(*(run(row) for row in rows))
 
     def quarantine_binding(self, identifier, reason):
@@ -792,44 +837,151 @@ class WeixinDelivery:
         for row in rows:
             # Fence stale workers and release only parts proven never sent.
             # Unknown sends keep their ordering barrier across re-login.
-            never_sent = row['attempts'] == 0 or row['reason_code'] == RATE_LIMITED
+            never_sent = row['attempts'] == 0 or row['retry_rejected']
             state = ('unknown' if row['state'] in {'sending', 'unknown'} else 'cancelled'
                      if row['state'] in READY | {'preparing', 'attention'} and never_sent else 'attention')
             self.store.execute("UPDATE weixin_parts SET state=?,reason_code=?,lease_fence=lease_fence+1,lease_until=0,updated=? WHERE id=?",
                                (state, reason, self.c.clock(), row['id']))
+            if row['state'] == 'sending':
+                transport.record_transition(self.store, Stage.UNKNOWN, Reason.AUTHORIZATION)
+            elif state == 'cancelled':
+                transport.record_transition(self.store, Stage.CANCELLED, Reason.AUTHORIZATION)
             self.refresh(row['delivery_id'])
 
     def quarantine_account(self, identifier, reason):
         for row in self.store.all('SELECT id FROM weixin_bindings WHERE account_id=?', (identifier,)):
             self.quarantine_binding(row['id'], reason)
 
+    def control_row(self, principal, conversation_id, delivery_id, *, native=False):
+        row = self.store.one("""SELECT d.* FROM weixin_deliveries d
+            JOIN weixin_bindings b ON b.id=d.binding_id
+            WHERE d.id=? AND b.conversation_id=? AND b.owner_user_id=? AND b.space_id=?
+              AND (?=0 OR b.native_member_id!='')""",
+            (delivery_id, conversation_id, principal.user_id, principal.space_id, native))
+        if not row:
+            raise DevError('WEIXIN_DELIVERY_NOT_FOUND', '当前房间没有这条投递', 404)
+        message = self.store.one('SELECT * FROM collaboration_messages WHERE id=? AND conversation_id=?',
+                                 (row['projection_message_id'] or row['message_id'], conversation_id))
+        if not message:
+            raise DevError('WEIXIN_DELIVERY_NOT_FOUND', '原投递消息不可用', 404)
+        self.c.chatroom.require_message_visible(principal, message)
+        return row
+
+    def control_plan(self, row, args, principal, conversation_id, *, cascade=True):
+        states = ("state='unknown'" if args['action'] == 'confirm_received' else
+                  "state IN ('queued','preparing','waiting_context','waiting_media','attention') "
+                  "AND (attempts=0 OR retry_rejected=1)")
+
+        def eligible(delivery_id):
+            return self.store.all(f"""SELECT id,delivery_id,ordinal,state,lease_fence FROM weixin_parts
+                WHERE delivery_id=? AND {states} ORDER BY ordinal LIMIT 101""", (delivery_id,))
+
+        parts = eligible(row['id'])
+        selected = set(args.get('part_ids') or ())
+        if selected and not selected <= {p['id'] for p in parts}:
+            raise DevError('STALE_VERSION', '选中的分项状态已变化，请刷新。', 409)
+        if selected and args['action'] == 'cancel_unsent':
+            first = min(p['ordinal'] for p in parts if p['id'] in selected)
+            parts = [p for p in parts if p['ordinal'] >= first]
+        elif selected:
+            parts = [p for p in parts if p['id'] in selected]
+
+        version = row.get('ordering_revision', 1)
+        snapshot = [(row['id'], row['version'], version)]
+        if cascade and parts and args['action'] == 'cancel_unsent' and 'ordering_evidence' in row:
+            from hub.collaboration.weixin_delivery_order import successors
+
+            visited, queue = {row['id']}, [row['id']]
+            for predecessor in queue:
+                for successor in successors(self.store, predecessor, limit=101):
+                    delivery_id = successor['id']
+                    if delivery_id in visited:
+                        continue
+                    visited.add(delivery_id)
+                    try:
+                        current = self.control_row(principal, conversation_id, delivery_id)
+                    except DevError as exc:
+                        if exc.status not in {403, 404}:
+                            raise
+                        continue
+                    dependent_parts = eligible(delivery_id)
+                    if not dependent_parts:
+                        continue
+                    queue.append(delivery_id)
+                    parts.extend(dependent_parts)
+                    snapshot.append((delivery_id, current['version'], current.get('ordering_revision', 1)))
+                    if len(parts) > 100:
+                        raise DevError('WEIXIN_CONTROL_SCOPE_LIMIT', '影响范围过大，请缩小本次操作。', 409)
+        if len(parts) > 100:
+            raise DevError('WEIXIN_CONTROL_SCOPE_LIMIT', '影响范围过大，请缩小本次操作。', 409)
+        preview = digest([args['action'], sorted(selected), sorted(snapshot), parts])
+        return {'delivery_id': row['id'], 'delivery_version': row['version'], 'ordering_revision': version,
+                'affected_parts': [{'part_id': part['id'], 'delivery_id': part['delivery_id'],
+                                    'ordinal': part['ordinal'], 'state': part['state']} for part in parts],
+                'affected_count': len(parts), 'preview_digest': preview}
+
+    def apply_control(self, row, args, principal, room, conversation_id, *, require_preview=False):
+        if row['version'] != args['expected_version']:
+            raise DevError('STALE_VERSION', '原投递分项状态已变化，请刷新。', 409)
+        scoped = require_preview or args.get('part_ids') is not None or args.get('preview_digest')
+        plan = self.control_plan(row, args, principal, conversation_id, cascade=bool(scoped))
+        if scoped and (args.get('expected_ordering_revision') != plan['ordering_revision']
+                       or args.get('preview_digest') != plan['preview_digest']):
+            raise DevError('WEIXIN_CONTROL_PREVIEW_CHANGED', '投递分项或依赖范围已变化，请刷新预览。', 409)
+        confirming = args['action'] == 'confirm_received'
+        if confirming and not args['confirmation_note'].strip():
+            raise DevError('WEIXIN_OWNER_CONFIRMATION_REQUIRED', '请记录人工核对依据。', 422)
+        now = self.c.clock()
+        for part in plan['affected_parts']:
+            if confirming:
+                updated = self.store.execute("""UPDATE weixin_parts SET state='owner_confirmed',
+                    reason_code='owner_attested_not_provider_verified',updated=? WHERE id=? AND state='unknown'""",
+                    (now, part['part_id']))
+            else:
+                updated = self.store.execute("""UPDATE weixin_parts SET state='cancelled',reason_code='owner_stopped_unsent',
+                    lease_fence=lease_fence+1,lease_until=0,updated=? WHERE id=?""", (now, part['part_id']))
+            if updated.rowcount:
+                transport.record_transition(self.store, Stage.OWNER_CONFIRMED if confirming else Stage.CANCELLED)
+        for delivery_id in sorted({p['delivery_id'] for p in plan['affected_parts']}):
+            self.refresh(delivery_id)
+        action = 'weixin.delivery_' + args['action']
+        detail = {'note': args['confirmation_note'], 'affected_parts': plan['affected_parts'],
+                  'provider_delivery_verified': False}
+        if require_preview:
+            iam.audit(self.store, principal, action, row['id'], detail=redact(detail))
+        else:
+            self.c.audit(room, principal.actor, action, row['id'], detail)
+        return {'delivery_id': row['id'], 'affected_count': plan['affected_count'],
+                'provider_delivery_verified': False, 'automatic_resend': False}
+
+    def control_preview(self, raw, principal):
+        with self.store.transaction(immediate=False):
+            args, principal, _ = self.w.owner(raw, principal, models.DeliveryPreview, enabled=False)
+            row = self.control_row(principal, args['conversation_id'], args['delivery_id'])
+            return self.control_plan(row, args, principal, args['conversation_id'])
+
     def control(self, raw, principal):
         with self.store.transaction():
             args, principal, room = self.w.owner(raw, principal, models.DeliveryControl, enabled=False)
-            row = self.store.one('SELECT d.* FROM weixin_deliveries d JOIN weixin_bindings b ON b.id=d.binding_id WHERE d.id=? AND b.room_id=? AND b.conversation_id=?',
-                                (args['delivery_id'], room['id'], args['conversation_id']))
-            if not row:
-                raise DevError('WEIXIN_DELIVERY_NOT_FOUND', '当前话题没有这条投递', 404)
-            def save():
-                current = self.store.one('SELECT * FROM weixin_deliveries WHERE id=?', (row['id'],))
-                if current['version'] != args['expected_version']:
-                    raise DevError('STALE_VERSION', '原投递分项状态已变化', 409)
-                if args['action'] == 'confirm_received':
-                    if not args['confirmation_note'].strip():
-                        raise DevError('WEIXIN_OWNER_CONFIRMATION_REQUIRED', '请明确记录人工核对依据；这不等同平台送达回执', 422)
-                    self.store.execute("UPDATE weixin_parts SET state='owner_confirmed',reason_code='owner_attested_not_provider_verified',updated=? WHERE delivery_id=? AND state='unknown'",
-                                       (self.c.clock(), row['id']))
-                else:
-                    self.store.execute("UPDATE weixin_parts SET state='cancelled',lease_fence=lease_fence+1,lease_until=0,updated=? WHERE delivery_id=? AND state IN ('queued','preparing','waiting_context','waiting_media','attention')",
-                                       (self.c.clock(), row['id']))
-                self.refresh(row['id'])
-                self.c.audit(room, principal.actor, 'weixin.delivery_' + args['action'], row['id'],
-                             {'note': args['confirmation_note'], 'provider_delivery_verified': False})
-                return {'delivery_id': row['id'], 'provider_delivery_verified': False, 'automatic_resend': False}
-            return self.c.mutation(principal, room, 'weixin_delivery_control', args, save)
+            conversation_id = args['conversation_id']
+            row = self.control_row(principal, conversation_id, args['delivery_id'])
+            return self.c.mutation(principal, room, 'weixin_delivery_control', args,
+                lambda: self.apply_control(row, args, principal, room, conversation_id))
+
+    def control_room(self, conversation_id, delivery_id, args, principal, *, preview=False):
+        with self.store.transaction(immediate=not preview):
+            principal, room = self.c.rooms.owner(principal, conversation_id)
+            self.c.rooms.require_native(room)
+            row = self.control_row(principal, conversation_id, delivery_id, native=True)
+            if preview:
+                return self.control_plan(row, args, principal, conversation_id)
+
+            return self.c.room_channels.receipt(principal, room, 'weixin_delivery_control',
+                {**args, 'delivery_id': delivery_id}, lambda: self.apply_control(
+                    row, args, principal, room, conversation_id, require_preview=True))
 
     def retry_room(self, conversation_id, delivery_id, args, principal):
-        """Requeue only parts whose send was never attempted."""
+        """Recover only proven-unsent parts, optionally on a verified new route."""
         with self.store.transaction():
             principal, room = self.c.rooms.owner(principal, conversation_id)
             self.c.rooms.require_native(room)
@@ -845,13 +997,21 @@ class WeixinDelivery:
                     raise DevError('WEIXIN_DELIVERY_NOT_FOUND', '此房间没有这条消息的发送记录。', 404)
                 if delivery['version'] != args['expected_version']:
                     raise DevError('STALE_VERSION', '发送状态已变化，请刷新。', 409)
+                if part_ids := args.get('part_ids'):
+                    if args.get('expected_ordering_revision') != delivery['ordering_revision']:
+                        raise DevError('STALE_VERSION', '原回复的前置关系已变化，请刷新。', 409)
+                    if len(set(part_ids)) != len(part_ids):
+                        raise DevError('WEIXIN_RECOVERY_PART_UNAVAILABLE', '每个原分项只可选择一次', 409)
+                    count = routes.authorize_parts(self, delivery, part_ids, principal)
+                    self.refresh(delivery_id)
+                    return {'delivery_id': delivery_id, 'queued_parts': count, 'route_recovery': True}
                 self.validate(delivery)
                 parts = self.store.all("""SELECT id FROM weixin_parts
                     WHERE delivery_id=? AND state='attention' AND attempts=0""", (delivery_id,))
                 if not parts:
                     raise DevError('WEIXIN_RETRY_UNAVAILABLE', '没有可以安全重试的分项。', 409)
                 now = self.c.clock()
-                self.store.execute("""UPDATE weixin_parts SET state='queued',next_attempt=?,reason_code='',
+                self.store.execute("""UPDATE weixin_parts SET state='queued',next_attempt=?,reason_code='',preparation_failures=0,
                     lease_fence=lease_fence+1,lease_until=0,updated=?
                     WHERE delivery_id=? AND state='attention' AND attempts=0""", (now, now, delivery_id))
                 self.refresh(delivery_id)
@@ -866,26 +1026,24 @@ class WeixinDelivery:
         if not identifiers:
             return {}
         keys = ','.join('?' for _ in identifiers)
-        rows = self.store.all(f'''SELECT id,COALESCE(projection_message_id,message_id) AS message_id,state,version,
-            message_version,updated,kind,status_code,ordering_key,canonical_source_id FROM weixin_deliveries
+        rows = self.store.all(f'''SELECT id,binding_id,COALESCE(projection_message_id,message_id) AS message_id,state,version,
+            message_version,updated,kind,status_code,ordering_key,ordering_revision,ordering_evidence FROM weixin_deliveries
             WHERE message_id IN ({keys}) OR projection_message_id IN ({keys})
             ORDER BY message_id,created,id''', (*identifiers, *identifiers))
         grouped = {}
         if not rows:
             return grouped
-        part_keys = ','.join('?' for _ in rows)
-        parts = self.store.all(f"""SELECT p.id,p.delivery_id,p.ordinal,p.kind,p.state,p.reason_code,p.attempts,
-            EXISTS(SELECT 1 FROM weixin_delivery_late_observations late WHERE late.part_id=p.id) AS late_provider_observed
-            FROM weixin_parts p WHERE p.delivery_id IN ({part_keys}) ORDER BY p.delivery_id,p.ordinal""",
-            tuple(r['id'] for r in rows))
+        parts = self.store.all('SELECT id,delivery_id,ordinal,kind,state,reason_code,attempts FROM weixin_parts WHERE delivery_id IN (' + ','.join('?' for _ in rows) + ') ORDER BY delivery_id,ordinal', tuple(r['id'] for r in rows))
         by_delivery = {}
         for part in parts:
             by_delivery.setdefault(part['delivery_id'], []).append(part)
         for row in rows:
-            ordering_key = row.pop('ordering_key')
-            canonical_source_id = row.pop('canonical_source_id')
-            ordering_reason = '' if ordering_key or canonical_source_id else 'historical_ordering_unverified'
-            grouped.setdefault(row['message_id'], []).append({**row, 'parts': by_delivery.get(row['id'], []),
+            ordering_reason = order.ordering_reason(row.pop('ordering_key'), row.pop('ordering_evidence'))
+            row_parts = by_delivery.get(row['id'], [])
+            next_part = next((part for part in row_parts if part['state'] not in routes.SUCCESSFUL), None)
+            if next_part and routes.unsent_quarantined(next_part) and routes.available_part(self, row['id']) == next_part['id']:
+                next_part['route_recovery_available'] = True
+            grouped.setdefault(row['message_id'], []).append({**row, 'parts': row_parts,
                 'ordering_reason': ordering_reason, 'provider_delivery_verified': False, 'read_verified': False})
         return grouped
 
@@ -893,9 +1051,9 @@ class WeixinDelivery:
         rows = self.store.all('''SELECT d.* FROM weixin_deliveries d JOIN weixin_bindings b ON b.id=d.binding_id
             WHERE b.room_id=? AND b.conversation_id=? ORDER BY d.created DESC,d.id DESC LIMIT 50''', (room_id, conversation_id))
         return [{k: row[k] for k in ('id', 'binding_id', 'message_version', 'state', 'version',
-                                      'created', 'updated', 'kind', 'status_code')}
+                                      'created', 'updated', 'kind', 'status_code', 'ordering_revision')}
                 | {'message_id': row['projection_message_id'] or row['message_id'],
-                   'ordering_reason': '' if row['ordering_key'] else 'historical_ordering_unverified',
+                   'ordering_reason': order.ordering_reason(row['ordering_key'], row['ordering_evidence']),
                    'parts': self.store.all('''SELECT id,ordinal,client_id,kind,state,attempts,reason_code,updated
                     FROM weixin_parts WHERE delivery_id=? ORDER BY ordinal''', (row['id'],)),
                    'provider_delivery_verified': False, 'read_verified': False} for row in rows]

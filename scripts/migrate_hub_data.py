@@ -48,6 +48,8 @@ def probe_admin(root, scratch_root=None, *, check_contract=False):
             connection = sqlite3.connect(probe, timeout=10)
             try:
                 connection.execute("PRAGMA query_only=ON")
+                from hub.collaboration.delivery_compatibility import assert_compatible
+                assert_compatible(connection)
                 if check_contract:
                     from shared.hub_data_contract import check_database
                     from shared.util import VERSION

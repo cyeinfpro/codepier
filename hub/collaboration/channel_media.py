@@ -30,6 +30,8 @@ def migrate(db):
     db.execute("""CREATE TABLE IF NOT EXISTS channel_attachment_transfers(
         attachment_id TEXT PRIMARY KEY,channel TEXT NOT NULL,part_id TEXT NOT NULL,
         upload_state TEXT NOT NULL DEFAULT 'unknown',upload_observed_at REAL,binding_version INTEGER)""")
+    db.execute("""CREATE INDEX IF NOT EXISTS channel_attachment_transfer_part
+        ON channel_attachment_transfers(channel,part_id)""")
     transfer_columns = {row[1] for row in db.execute('PRAGMA table_info(channel_attachment_transfers)')}
     if 'binding_version' not in transfer_columns:
         db.execute('ALTER TABLE channel_attachment_transfers ADD COLUMN binding_version INTEGER')

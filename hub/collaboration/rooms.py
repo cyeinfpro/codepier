@@ -1594,10 +1594,19 @@ class Rooms:
             'has_more': len(rows) > args['limit']}
 
     def diagnostics(self, raw, principal):
-        args = validate(contracts.RoomRead, raw)
-        from hub.collaboration.room_diagnostics import projection
+        args = validate(contracts.RoomDiagnosticsRead, raw)
+        from hub.collaboration.room_diagnostics import delivery_relationships, notification_page, projection
         with self.store.transaction(immediate=False):
             principal, room = self.owner(principal, args['conversation_id'], include_archived=True)
+            if args['delivery_id']:
+                if args['member_id'] or args['cursor']:
+                    raise DevError('INVALID_ARGUMENTS', '一次只查看一条投递或一个成员的通知', 422)
+                return delivery_relationships(self.c, room, principal, args['delivery_id'])
+            if args['member_id']:
+                member = self.member(args['member_id'], room['id'])
+                return notification_page(self.c, room, principal, member, args['cursor'])
+            if args['cursor']:
+                raise DevError('INVALID_CURSOR', '查看通知历史需要指定原成员', 400)
             return projection(self.c, room, principal)
 
     def turn_policy(self, raw, principal):
@@ -1625,7 +1634,8 @@ class Rooms:
             'room_connection_rebind_batch': self.host_rebinds.create,
             'room_connection_rebind_status': self.host_rebinds.status,
             'room_connection_control': self.host_proofs.control,
-            'room_connection_route_prepare': self.routes.prepare}
+            'room_connection_route_prepare': self.routes.prepare,
+            'room_turn_policy': self.turn_policy, 'room_turn_policy_update': self.update_turn_policy}
         if action not in handlers:
             raise DevError('ROOM_ACTION_UNKNOWN', '未知的房间操作', 404)
         return handlers[action](raw, principal)

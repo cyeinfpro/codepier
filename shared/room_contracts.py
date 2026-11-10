@@ -23,6 +23,12 @@ class RoomRead(Model):
     conversation_id: Identifier
 
 
+class RoomDiagnosticsRead(RoomRead):
+    member_id: Identifier | None = None
+    delivery_id: Identifier | None = None
+    cursor: str = Field(default='', max_length=2048)
+
+
 class RoomTurnPolicyUpdate(RoomRead):
     mode: Literal['strict', 'shadow', 'decoupled'] | None
     expected_version: int = Field(ge=0, strict=True)
@@ -284,7 +290,7 @@ class HostRebindStatus(HostConnectionList):
 
 ROOM_QUERY_ACTIONS = {
     'room_list': RoomList, 'room_view': RoomRead, 'room_connect': ConnectRead,
-    'room_changes': RoomChanges, 'room_diagnostics': RoomRead,
+    'room_changes': RoomChanges, 'room_diagnostics': RoomDiagnosticsRead,
     'room_project_impact': RoomProjectImpact, 'room_turn_policy': RoomRead,
     'room_connection_list': HostConnectionList, 'room_connection_view': HostConnectionRead,
     'room_connection_impact': HostConnectionImpact, 'room_connection_rebind_status': HostRebindStatus,

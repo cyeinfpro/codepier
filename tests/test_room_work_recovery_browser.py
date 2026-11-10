@@ -142,11 +142,31 @@ def test_owner_restores_original_participant_and_selects_original_goal_successor
 
         # Explicitly synthetic transport projection, independent of business
         # completion. Inspecting either receipt never sends or reruns anything.
+        checked_parts = []
+
+        def preview_delivery(route):
+            selection = route.request.post_data_json
+            assert selection == {'action': 'confirm_received', 'part_ids': ['unknown-part']}
+            route.fulfill(status=200, json={'delivery_id': 'original-delivery', 'delivery_version': 3,
+                'ordering_revision': 2, 'preview_digest': 'original-scope-digest', 'affected_count': 1,
+                'affected_parts': [{'delivery_id': 'original-delivery', 'part_id': 'unknown-part',
+                                    'ordinal': 1, 'state': 'unknown'}]})
+
+        def confirm_delivery(route):
+            checked_parts.append(route.request.post_data_json)
+            delivery = work['channel_deliveries'][0]
+            delivery['state'] = 'accepted'
+            delivery['parts'][1]['state'] = 'owner_confirmed'
+            route.fulfill(status=200, json={'delivery_id': 'original-delivery', 'affected_count': 1})
+
+        page.route('**/weixin-deliveries/original-delivery/control-preview', preview_delivery)
+        page.route('**/weixin-deliveries/original-delivery/control', confirm_delivery)
         work['version'] += 1
         work.update(state='completed', allowed_actions=[],
             display={'title': '工作已完成', 'reason': '原结果已经保存'},
             channel_deliveries=[{'id': 'original-delivery', 'message_id': 'original-final',
-                'channel': 'weixin', 'state': 'needs_attention', 'provider_delivery_verified': False,
+                'channel': 'weixin', 'state': 'needs_attention', 'version': 3, 'ordering_revision': 2,
+                'provider_delivery_verified': False,
                 'read_verified': False, 'parts': [
                     {'id': 'accepted-part', 'ordinal': 0, 'kind': 'text', 'state': 'accepted', 'attempts': 1},
                     {'id': 'unknown-part', 'ordinal': 1, 'kind': 'image', 'state': 'unknown',
@@ -156,14 +176,25 @@ def test_owner_restores_original_participant_and_selects_original_goal_successor
         page.evaluate('document.dispatchEvent(new Event("visibilitychange"))')
         expect(page.locator('[data-cr-work-view] .cr-flow-state h3')).to_contain_text('完成')
         details = page.locator('[data-cr-work-view] [data-delivery-id="original-delivery"]')
-        expect(details).to_contain_text('微信 · 送达待核对')
+        expect(details).to_contain_text('微信接口已受理 1 段，1 段待核对')
         details.locator('summary').click()
-        expect(details.locator('[data-delivery-part="unknown-part"]')).to_contain_text('送达待核对')
+        expect(details.locator('[data-delivery-part="unknown-part"]')).to_contain_text('发送结果待核对')
         expect(details.locator('[data-delivery-part="accepted-part"]')).to_contain_text('已受理')
         expect(details).not_to_contain_text('已送达')
         expect(page.locator('[data-cr-work-view] [data-cr-action="work-control"]')).to_have_count(0)
         expect(page.locator('[data-message-id="original-final"] [data-delivery-id="original-delivery"]')).to_have_count(1)
         expect(timeline_work).to_have_attribute('data-work-state', 'completed')
+        expect(details.locator('[data-delivery-part="accepted-part"] [data-cr-action="preview-delivery-control"]')).to_have_count(0)
+        details.get_by_role('button', name='核对这一段').click()
+        expect(details.locator('[data-cr-delivery-control-preview]')).to_contain_text('原回复 · 第 2 段')
+        assert checked_parts == []
+        details.get_by_role('button', name='确认已收到所选分项').click()
+        expect(page.locator('[data-message-id="original-final"]')).to_contain_text('本人已核对收到 1 段')
+        assert len(checked_parts) == 1
+        assert checked_parts[0]['part_ids'] == ['unknown-part']
+        assert checked_parts[0]['expected_version'] == 3
+        assert checked_parts[0]['expected_ordering_revision'] == 2
+        assert checked_parts[0]['preview_digest'] == 'original-scope-digest'
         page.locator('[data-cr-action="reply-work"]').click()
         expect(page.locator('dialog.cr-panel')).not_to_be_visible()
         expect(page.locator('[data-cr-reply]')).to_contain_text('先检查问题，再确认结果')

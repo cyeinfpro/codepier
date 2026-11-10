@@ -6,8 +6,7 @@ import sqlite3
 import pytest
 
 from hub.collaboration import weixin_protocol, weixin_schema
-from hub.collaboration.common import canonical
-from hub.collaboration.weixin_delivery import EnqueueResult, text_items
+from hub.collaboration.weixin_delivery import text_items
 from shared.util import DevError
 from tests.collaboration_support import collab as collab, key
 from tests.test_dot_weixin_channel import fixture_channel, ingest, packet, reply
@@ -40,10 +39,16 @@ def test_rate_limit_respects_retry_after_and_freezes_wire(collab):
     asyncio.run(channel.delivery.tick())
     queued = part_for(c.s.store, delivery)
     assert (queued['state'], queued['next_attempt'], queued['attempts']) == ('queued', c.clock[0] + 120, 1)
-    ingest(c, channel, account, packet(3, 'fresh context', context_token='new-private-context'))
+    with c.s.store.transaction():
+        c.s.store.execute('DELETE FROM weixin_contexts')
     asyncio.run(channel.delivery.tick())
     assert len(calls) == 1
     c.clock[0] = queued['next_attempt']
+    asyncio.run(channel.delivery.tick())
+    waiting = part_for(c.s.store, delivery)
+    assert waiting['state'] == 'waiting_context' and waiting['retry_rejected'] == 1
+    ingest(c, channel, account, packet(3, 'fresh context', context_token='new-private-context'))
+    c.clock[0] = waiting['next_attempt']
     asyncio.run(channel.delivery.tick())
     assert calls[0] == calls[1] and calls[0][2] == part['client_id']
     assert part_for(c.s.store, delivery)['state'] == 'accepted'
@@ -92,26 +97,29 @@ def test_unknown_blocks_related_replies_only_and_late_receipt_is_fenced(collab):
     assert not channel.delivery.candidates(c.clock[0])
     c.clock[0] += 181
     channel.delivery.reconcile()
+    channel.delivery.finish({**old, 'lease_owner': 'unrelated-worker'}, {'provider_state': 'accepted'})
+    assert not c.s.store.all('SELECT * FROM weixin_late_observations')
     calls = []
 
     class Provider:
         async def send(self, peer, context, client_id, items):
-            calls.append(items[0]['text_item']['text'])
+            calls.append((client_id, items[0]['text_item']['text']))
             return {'provider_state': 'accepted'}
 
     channel.client_factory = lambda *_: Provider()
     asyncio.run(channel.delivery.tick())
+    assert [value for _, value in calls] == ['独立回复']
+    assert part_for(c.s.store, delivery)['state'] == 'unknown'
+
+    channel.delivery.finish(old, {'provider_state': 'accepted', 'provider_message_id': 'late-receipt'})
+    assert part_for(c.s.store, delivery)['state'] == 'unknown'
+    assert len(c.s.store.all('SELECT * FROM weixin_late_observations')) == 1
     asyncio.run(channel.delivery.tick())
-    assert calls == ['独立回复']
-    assert part_for(c.s.store, delivery)['state'] == 'unknown'
-    related = c.s.store.all('SELECT state FROM weixin_deliveries WHERE source_message_id=? ORDER BY rowid', (source,))
-    assert [item['state'] for item in related] == ['needs_attention', 'queued']
-    channel.delivery.finish(old, {'provider_state': 'accepted'})
-    assert part_for(c.s.store, delivery)['state'] == 'unknown'
-    observation = c.s.store.one('SELECT * FROM weixin_delivery_late_observations WHERE part_id=?', (part['id'],))
-    assert observation['send_fence'] == old['lease_fence'] and observation['client_id'] == part['client_id']
-    channel.delivery.reconcile()
-    assert part_for(c.s.store, delivery)['state'] == 'accepted'
+    asyncio.run(channel.delivery.tick())
+    saved = part_for(c.s.store, delivery)
+    assert (saved['state'], saved['attempts'], saved['reason_code']) == ('accepted', 1, 'provider_accepted_late')
+    assert all(client_id != part['client_id'] for client_id, _ in calls)
+    assert calls[-1][1] == '同一来源的下一条回复'
 
 
 def test_encoded_budget_splits_unattempted_unicode_and_preserves_order(collab, monkeypatch):
@@ -226,7 +234,7 @@ async def test_native_reply_waits_for_original_account_and_keeps_same_outbox(col
         'body_text': '原回复已保存。', 'idempotency_key': key()}, worker)['message']
     delivery = s.store.one('SELECT * FROM weixin_deliveries WHERE message_id=?', (posted['id'],))
     part = part_for(s.store, delivery)
-    assert (delivery['state'], part['reason_code'], part['attempts']) == ('waiting_context', 'WEIXIN_ROUTE_WAITING', 0)
+    assert (delivery['state'], part['reason_code'], part['attempts']) == ('waiting_context', 'account_waiting_reconnect', 0)
     assert not s.weixin.delivery.candidates(clock[0])
     assert delivery['source_message_id'] == source and delivery['peer_id'] == 'synthetic-peer'
     calls = []
@@ -248,7 +256,7 @@ async def test_native_reply_waits_for_original_account_and_keeps_same_outbox(col
 
 
 @pytest.mark.asyncio
-async def test_current_work_followup_has_own_reply_lane_and_honors_explicit_success_dependency(collab, monkeypatch):
+async def test_followup_has_own_reply_lane_and_honors_explicit_success_dependency(collab):
     (s, _, worker, clock, identity, credentials), flow, _, _ = await setup_channel(collab)
     transport = s.weixin.delivery
     account_id = flow['account_id']
@@ -262,29 +270,22 @@ async def test_current_work_followup_has_own_reply_lane_and_honors_explicit_succ
     def queue(source_id, text, dependency_id=None):
         entry = next(item for item in s.room_consumers.inbox(identity, worker)['items']
                      if item['object_id'] == source_id)
-        with monkeypatch.context() as patch:
-            patch.setattr(transport, 'queue_reply_result', lambda *_, **__: EnqueueResult('not_requested'))
-            # Exercise the transport boundary with a persisted reply effect.
-            posted = s.room_runtime.reply({**identity, **credentials, **entry['reply_arguments'],
-                'body_text': text, 'idempotency_key': key()}, worker)['message']
-        with s.store.transaction():
-            message = s.store.one('SELECT * FROM collaboration_messages WHERE id=?', (posted['id'],))
-            body = {**json.loads(message['body']), 'publish_work': False}
-            if dependency_id:
-                body.update(depends_on_delivery_id=dependency_id, dependency_mode='requires_success')
-            message = {**message, 'body': canonical(body), 'goal_id': 'same-work-context'}
-            s.store.execute('UPDATE collaboration_messages SET body=?,goal_id=? WHERE id=?',
-                            (message['body'], message['goal_id'], message['id']))
-            result = transport.queue_reply_result(message)
-            assert result.disposition == 'queued'
-            return result.delivery, part_for(s.store, result.delivery)
+        args = {**identity, **credentials, **entry['reply_arguments'], 'body_text': text,
+                'publish_work': False, 'input_handling': 'answered', 'idempotency_key': key()}
+        if dependency_id:
+            args.update(depends_on_delivery_id=dependency_id, dependency_mode='requires_success')
+        posted = s.room_runtime.reply(args, worker)
+        disposition, = posted['channel_dispositions']
+        assert disposition['disposition'] == 'queued'
+        delivery = s.store.one('SELECT * FROM weixin_deliveries WHERE id=?', (disposition['delivery_id'],))
+        return delivery, part_for(s.store, delivery)
 
     prior, prior_part = queue(old_source, '原来工作进展')
     independent, next_part = queue(independent_source, '工作中的独立问答')
     dependent, dependent_part = queue(dependent_source, '需要原进展已经送达', prior['id'])
     assert prior['ordering_key'] == 'reply:' + old_source
     assert independent['ordering_key'] == 'reply:' + independent_source
-    assert dependent['dependency_mode'] == 'requires_success'
+    assert json.loads(dependent['ordering_evidence'])['dependency_mode'] == 'requires_success'
     blocked, blocked_part = queue(blocked_source, '第二段内容已受理后才能发送', independent['id'])
 
     claim = transport.claim(prior_part['id'])
@@ -341,7 +342,7 @@ def test_ready_weixin_peers_receive_persistent_round_robin_admission(collab, mon
                        created=first['created'] + index, ordering_key=f'reply:{index}-{ordinal}')
                 channel.delivery.add_part(delivery_id, 0, 'text', {'text': 'synthetic'})
 
-    def validate_route(self, delivery):
+    def validate_route(self, delivery, *, part=None):
         binding = self.store.one('SELECT * FROM weixin_bindings WHERE id=?', (delivery['binding_id'],))
         account = self.store.one('SELECT * FROM weixin_accounts WHERE id=?', (binding['account_id'],))
         return binding, account, c.owner, None
