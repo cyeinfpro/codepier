@@ -15,6 +15,7 @@ from hub.collaboration import weixin_delivery_order as order
 from hub.collaboration import weixin_delivery_transport as transport
 from hub.collaboration import weixin_schema as models
 from hub.collaboration.common import canonical, digest, redact
+from hub.collaboration.delivery_compatibility import raise_floor
 from hub.collaboration.weixin_protocol import encode_request, send_payload
 from shared.util import DevError
 
@@ -210,6 +211,7 @@ class WeixinDelivery:
             return EnqueueResult('existing', '', binding_id, old)
         ordering, evidence, predecessor = order.reply_ordering(
             self.store, message, source, binding, predecessor_id=predecessor_id, dependency_mode=dependency_mode)
+        raise_floor(self.store)
         now, identifier = self.c.clock(), uuid.uuid4().hex
         pending = self.store.one('''SELECT COUNT(*) AS n FROM weixin_deliveries d JOIN weixin_bindings b ON b.id=d.binding_id
             WHERE b.account_id=? AND d.created>? AND d.state NOT IN ('accepted','owner_confirmed','cancelled')''',
@@ -290,6 +292,7 @@ class WeixinDelivery:
             revision = self.store.one('SELECT intent_revision FROM room_work_intents WHERE goal_id=?',
                                       (work_id,)) if work_id else None
             evidence = order.status_evidence(source, work_id, revision['intent_revision'] if revision else None, now)
+            raise_floor(self.store)
             self.store.execute('''INSERT INTO weixin_deliveries
                 (id,binding_id,generation,message_id,message_version,message_digest,source_message_id,peer_id,
                  state,created,updated,ordering_key,kind,status_code,projection_message_id,ordering_evidence,

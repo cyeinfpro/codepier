@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from hub.collaboration.common import canonical
+from hub.collaboration.delivery_compatibility import raise_floor
 from shared.util import DevError
 
 ORDERING_VERSION = 2
@@ -256,6 +257,8 @@ def backfill(store, now):
             if held:
                 continue
             key, evidence, version = _historical_order(store, row)
+            if version == ORDERING_VERSION and not changed:
+                raise_floor(store)
             updated = store.execute('''UPDATE weixin_deliveries SET ordering_key=?,ordering_evidence=?,
                 ordering_schema_version=?,ordering_checked_version=2,ordering_revision=ordering_revision+1
                 WHERE id=? AND ordering_revision=? AND ordering_key=? AND version=? AND ordering_checked_version<2''',

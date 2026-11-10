@@ -428,6 +428,7 @@ async def test_reply_origin_receipt_and_outbox_are_atomic(collab, monkeypatch):
     assert not s.store.one('SELECT 1 FROM collaboration_messages WHERE reply_to_id=?', (received,))
     assert not s.store.one('SELECT 1 FROM weixin_deliveries WHERE source_message_id=?', (received,))
     assert not s.store.one('SELECT 1 FROM room_reply_origins')
+    assert not s.store.one("SELECT 1 FROM meta WHERE key='collaboration_min_writer'")
     assert next(item for item in s.room_consumers.inbox(identity, worker)['items'] if item['object_id'] == received)
 
     result = s.room_runtime.reply(request, worker)
@@ -441,6 +442,7 @@ async def test_reply_origin_receipt_and_outbox_are_atomic(collab, monkeypatch):
     assert origin['consumer_session_id'] == credentials['consumer_session_id']
     assert origin['binding_generation'] == identity['binding_generation']
     assert origin['request_digest'] == receipts[0]['fingerprint']
+    assert s.store.one("SELECT value FROM meta WHERE key='collaboration_min_writer'")['value'] == '1'
     disposition = json.loads(receipts[0]['result'])['channel_dispositions'][0]
     assert disposition['disposition'] == 'queued'
     assert disposition['delivery_id'] == s.store.one(
