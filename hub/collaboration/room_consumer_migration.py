@@ -71,6 +71,8 @@ def migrate(db):
     entries = {row[1] for row in db.execute('PRAGMA table_info(dot_mailbox_entries)')}
     if 'superseded_by' not in entries:
         db.execute("ALTER TABLE dot_mailbox_entries ADD COLUMN superseded_by TEXT NOT NULL DEFAULT ''")
+    if 'scope_targets' not in entries:
+        db.execute("ALTER TABLE dot_mailbox_entries ADD COLUMN scope_targets TEXT NOT NULL DEFAULT '[]'")
     db.execute('''CREATE INDEX IF NOT EXISTS room_mailbox_pending_scan
         ON dot_mailbox_entries(member_id,generation,sequence)
         WHERE member_id IS NOT NULL AND acknowledged_at IS NULL AND superseded_by='' ''')
@@ -112,10 +114,13 @@ def migrate(db):
         ('wake_episode_at', 'REAL'),
         ('wake_generation', 'INTEGER NOT NULL DEFAULT 0'),
         ('consumer_continuation_at', 'REAL'),
+        ('consumer_continuation_attempts', 'INTEGER NOT NULL DEFAULT 0'),
         ('manual_wakes', 'INTEGER NOT NULL DEFAULT 0'),
         ('manual_window_at', 'REAL NOT NULL DEFAULT 0'),
         ('last_manual_wake_at', 'REAL NOT NULL DEFAULT 0'),
     ):
         if name not in columns:
             db.execute(f'ALTER TABLE room_members ADD COLUMN {name} {declaration}')
+    db.execute('''CREATE INDEX IF NOT EXISTS room_consumer_pending_continuations
+        ON room_members(consumer_continuation_at) WHERE consumer_continuation_at IS NOT NULL''')
     db.execute("INSERT OR REPLACE INTO meta VALUES ('room_consumer_schema','1')")

@@ -107,13 +107,17 @@ class FencedConsumerEngine:
             args, principal, room, _, dot, binding, sub = self._begin_scope(raw, principal)
             fingerprint = self.begin_fingerprint(args)
             ticket = self._one('SELECT * FROM dot_wake_tickets WHERE ticket_hash=?',
-                                    (digest(args['wake_ticket']),))
-            if (not ticket or ticket[self.subject_column] != dot['id'] or ticket['generation'] != binding['generation']
-                    or ticket['grant_id'] != principal.grant_id or (sub and ticket['subscription_id'] != sub['id'])):
-                raise DevError('DOT_WAKE_TICKET_INVALID', '消费票据不属于这个 Dot 与原订阅', 403)
+                               (digest(args['wake_ticket']),))
             previous = self._one("""SELECT * FROM dot_consumer_sessions
                 WHERE dot_id=? AND generation=? AND (request_key=? OR run_id=?)""",
                 (dot['id'], binding['generation'], args['idempotency_key'], args['consumer_run_id']))
+            valid_ticket = (ticket and ticket[self.subject_column] == dot['id']
+                and ticket['generation'] == binding['generation'] and ticket['grant_id'] == principal.grant_id
+                and (not sub or ticket['subscription_id'] == sub['id']))
+            if not valid_ticket:
+                if previous and sub is None:
+                    raise DevError('IDEMPOTENCY_CONFLICT', '原消费请求标识不能用于不同参数', 409)
+                raise DevError('DOT_WAKE_TICKET_INVALID', '消费票据不属于这个 Dot 与原订阅', 403)
             if previous:
                 if (previous['request_digest'] != fingerprint or ticket['redeemed_session_id'] != previous['id']
                         or ticket['subscription_id'] != previous['subscription_id'] or previous['grant_id'] != principal.grant_id):

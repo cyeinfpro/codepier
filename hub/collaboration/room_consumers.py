@@ -100,9 +100,13 @@ class RoomConsumers(FencedConsumerEngine):
             self.store.execute("""UPDATE dot_consumer_sessions SET state='expired',updated=?
                 WHERE member_id=? AND state='active' AND turn_policy!='decoupled'""", (now, member['id']))
         reference = {'reason_code': 'member_scope_changed'}
+        targets = []
         if scope_changes is not None:
             reference['scope_change_kind'] = 'added' if additions_only else 'restricted'
-        self.enqueue_ref(member, 'control_notice', member['id'], member['scope_revision'], reference)
+            targets = [(project, environment, kind) for kind in ('added', 'changed', 'revoked', 'detached')
+                       for project, environment in scope_changes.get(kind, ())]
+        self.enqueue_ref(member, 'control_notice', member['id'], member['scope_revision'], reference,
+                         scope_targets=targets)
 
     def _identity(self, raw, principal, *, pending=False):
         return self.c.rooms.member_scope(principal, raw.get('conversation_id'), raw.get('member_id'),
@@ -149,7 +153,8 @@ class RoomConsumers(FencedConsumerEngine):
             hard_deadline=?,route_expires_at=?,route_generation=?,host_connection_id=?,host_revocation_epoch=?
             WHERE id=?''', (mode(self.store, room['id']), POLICY_REVISION, now + MAX_TURN_AGE_SECONDS,
             sub['expires_at'], binding.get('route_generation', sub['version']), host, epoch, identifier))
-        self.store.execute('UPDATE room_members SET consumer_continuation_at=NULL WHERE id=?', (dot['id'],))
+        self.store.execute('''UPDATE room_members SET consumer_continuation_at=NULL,consumer_continuation_attempts=0
+            WHERE id=?''', (dot['id'],))
 
     def _lease_scope(self, raw, principal, model):
         args = validate(model, raw)
@@ -177,8 +182,12 @@ class RoomConsumers(FencedConsumerEngine):
                 if row['turn_policy'] == 'shadow':
                     record_shadow('scope_update', 'would_allow', 'scope_changed')
                 raise DevError('DOT_CONSUMER_SCOPE_CHANGED', '消费期间授权或项目范围已改变，请恢复当前绑定', 409)
-        elif self._original_route(row)['state'] == 'revoked':
-            raise DevError('ROOM_SUBSCRIPTION_REVOKED', '原通知连接已撤销', 403)
+        else:
+            route = self._original_route(row)
+            if route['state'] == 'revoked':
+                raise DevError('ROOM_SUBSCRIPTION_REVOKED', '原通知连接已撤销', 403)
+            if min(route['expires_at'], row['route_expires_at']) + ROUTE_GRACE_SECONDS <= self.c.clock():
+                raise DevError('DOT_CONSUMER_LEASE_EXPIRED', '原通知路线的收尾期限已结束', 409)
         if row['hard_deadline'] <= self.c.clock():
             raise DevError('DOT_CONSUMER_LEASE_EXPIRED', '原消费回合已达到最长存续期限', 409)
 
@@ -324,6 +333,7 @@ class RoomConsumers(FencedConsumerEngine):
         scoped = action in OBJECT_GUARDED_ACTIONS and type(expected) is int and 0 <= expected <= member['dirty_revision']
         if require_revision and stale and (not scoped or row['turn_policy'] != 'decoupled'):
             if scoped and row['turn_policy'] == 'shadow':
+                # Only this revision gate would allow; object guards still decide the effect.
                 record_shadow(action, 'would_allow', 'inbox_revision')
             self._inbox_changed(member)
         return row
@@ -447,7 +457,8 @@ class RoomConsumers(FencedConsumerEngine):
                 AND generation!=? AND acknowledged_at IS NULL AND superseded_by=''
                 AND sequence>? ORDER BY sequence LIMIT 64''', (member['id'], generation, after))
             for row in rows:
-                self.enqueue_ref(member, row['kind'], row['object_id'], row['object_version'], json.loads(row['reference']))
+                self.enqueue_ref(member, row['kind'], row['object_id'], row['object_version'], json.loads(row['reference']),
+                                 scope_targets=json.loads(row['scope_targets']))
                 forwarded = digest(['room-entry', member['id'], generation, row['kind'], row['object_id'], row['object_version']])
                 self.store.execute('UPDATE dot_mailbox_entries SET superseded_by=? WHERE id=?', (forwarded, row['id']))
             if len(rows) < 64:
@@ -496,7 +507,7 @@ class RoomConsumers(FencedConsumerEngine):
             raise DevError('ROOM_INPUT_SCOPE_CHANGED', '消息不属于此成员房间', 403)
         return self.enqueue_ref(member, 'message', message['id'], message['version'], {'message_id': message['id']})
 
-    def enqueue_ref(self, member, kind, object_id, version, reference=None):
+    def enqueue_ref(self, member, kind, object_id, version, reference=None, *, scope_targets=()):
         member = self.c.rooms.member(member if isinstance(member, str) else member['id'])
         reference = reference or {}
         if kind == CONTINUATION_SOURCE:
@@ -525,37 +536,47 @@ class RoomConsumers(FencedConsumerEngine):
                     reference = {'goal_id': work['goal_id'], 'approval_id': work['approval_id'], 'work_item_id': work['id']}
             generation = self.generation(member)
             identifier = digest(['room-entry', member['id'], generation, kind, object_id, version])
-            previous = self.store.one('SELECT reference FROM dot_mailbox_entries WHERE id=?', (identifier,))
+            previous = self.store.one('SELECT reference,scope_targets FROM dot_mailbox_entries WHERE id=?', (identifier,))
             if previous:
-                if previous['reference'] != canonical(reference):
+                if (previous['reference'] != canonical(reference)
+                        or previous['scope_targets'] != canonical(scope_targets)):
                     raise DevError('ROOM_INBOX_ENTRY_CONFLICT', '原对象同一版本不能改成另一条引用', 409)
                 return member['dirty_revision']
             now, revision = self.c.clock(), member['dirty_revision'] + 1
             self.store.execute('''INSERT INTO dot_mailbox_entries
-                (id,member_id,generation,kind,object_id,object_version,reference,revision,created)
-                VALUES (?,?,?,?,?,?,?,?,?)''', (identifier, member['id'], generation, kind, object_id,
-                    version, canonical(reference), revision, now))
+                (id,member_id,generation,kind,object_id,object_version,reference,revision,created,scope_targets)
+                VALUES (?,?,?,?,?,?,?,?,?,?)''', (identifier, member['id'], generation, kind, object_id,
+                    version, canonical(reference), revision, now, canonical(scope_targets)))
             self.store.execute("""UPDATE room_members SET dirty_revision=?,wake_count=0,last_wake_at=?,
                 wake_episode_at=?,updated_at=? WHERE id=?""", (revision, now, now, now, member['id']))
-            self._wake(self.c.rooms.member(member['id']))
+            if member['consumer_continuation_at'] is None:
+                self._wake(self.c.rooms.member(member['id']))
             return revision
+
+    def _visible_scope_keys(self, member, principal):
+        read_scope_keys = getattr(self.c.rooms, 'read_scope_keys', None)
+        if read_scope_keys is not None:
+            return read_scope_keys(member, principal)
+        return {(scope['project_id'], scope['environment_id'])
+                for scope in self.c.rooms.scopes(member, principal) if 'read' in scope['capabilities']}
+
+    def _visibility_digest(self, room, member, principal):
+        return digest([self.scope_digest(room, member), sorted(self._visible_scope_keys(member, principal))])
 
     def _visible_message(self, member, principal, message):
         if not message or message['conversation_id'] != member['conversation_id']:
             return False
         if not self.c.chatroom.message_visible(principal, message):
             return False
-        scopes=[s for s in self.c.rooms.scopes(member,principal) if 'read' in s['capabilities']]
-        allowed = {s['project_id'] for s in scopes}
+        visible = self._visible_scope_keys(member, principal)
+        allowed = {project for project, _ in visible}
         body=json.loads(message['body'])
         provenance = set(body.get('provenance_project_ids', []))
-        if not {(s['project_id'],s['environment_id']) for s in body.get('provenance_scopes',[])} <= {
-                (scope['project_id'],scope['environment_id']) for scope in scopes}:
+        if not {(s['project_id'],s['environment_id']) for s in body.get('provenance_scopes',[])} <= visible:
             return False
         if message.get('room_id'):
             partition=self.store.one('SELECT project_id,environment_id FROM collaboration_rooms WHERE id=?',(message['room_id'],))
-            if not partition or (partition['project_id'],partition['environment_id']) not in {
-                    (scope['project_id'],scope['environment_id']) for scope in scopes}:
+            if not partition or (partition['project_id'], partition['environment_id']) not in visible:
                 return False
             provenance.add(partition['project_id'])
         return provenance <= allowed
@@ -616,6 +637,13 @@ class RoomConsumers(FencedConsumerEngine):
         item = {'id': row['id'], 'kind': row['kind'], 'object_id': row['object_id'],
                 'object_version': row['object_version'], 'revision': row['revision'],
                 'reference': reference, 'ready': True}
+        if include_actions and reference.get('scope_change_kind'):
+            visible = self._visible_scope_keys(member, principal)
+            item['scope_targets'] = [
+                {'project_id': project, 'environment_id': environment, 'change_kind': change}
+                for project, environment, change in json.loads(row['scope_targets'])
+                if (project, environment) in visible
+            ]
         if row['kind'] == 'control_notice' and reference.get('reason_code') == PAUSED_ARCHIVE_NOTICE:
             return self._paused_archive_entry(row, member, principal, item, include_actions=include_actions)
         if message_reference(row['kind'], reference):
@@ -676,9 +704,7 @@ class RoomConsumers(FencedConsumerEngine):
                             return None
                         environment=next((r['environment_id'] for r in native.record(native.reference(goal))['projects']
                             if r['project_id']==work['project_id']),None)
-                        visible = {(scope['project_id'], scope['environment_id'])
-                                   for scope in self.c.rooms.scopes(member, principal) if 'read' in scope['capabilities']}
-                        if (work['project_id'], environment) not in visible:
+                        if (work['project_id'], environment) not in self._visible_scope_keys(member, principal):
                             return None
                         if not include_actions:
                             return item
@@ -707,7 +733,7 @@ class RoomConsumers(FencedConsumerEngine):
     def _drain_ready(self, member, principal):
         generation = self.generation(member)
         room = self.store.one('SELECT * FROM conversation_rooms WHERE id=?', (member['conversation_id'],))
-        revision, visibility = member['dirty_revision'], self.scope_digest(room, member)
+        revision, visibility = member['dirty_revision'], self._visibility_digest(room, member, principal)
         checkpoint = self.store.one('''SELECT after_sequence FROM room_consumer_drain_checks
             WHERE member_id=? AND generation=? AND dirty_revision=? AND visibility_digest=?''',
             (member['id'], generation, revision, visibility))
@@ -730,7 +756,7 @@ class RoomConsumers(FencedConsumerEngine):
         if ready:
             return 'pending_input'
         updated = self.store.execute('''UPDATE room_members SET drained_revision=?,updated_at=?,
-                consumer_continuation_at=NULL
+                consumer_continuation_at=NULL,consumer_continuation_attempts=0
             WHERE id=? AND binding_generation=? AND dirty_revision=?''',
             (expected_revision, self.c.clock(), member['id'], member['binding_generation'], expected_revision))
         return 'drained' if updated.rowcount else 'inbox_changed'
@@ -812,7 +838,7 @@ class RoomConsumers(FencedConsumerEngine):
 
     def _inbox_scan(self, args, room, member, binding, actor):
         generation = binding['generation']
-        visibility = self.scope_digest(room, member)
+        visibility = self._visibility_digest(room, member, actor)
         position = self.store.one('''SELECT COALESCE(MAX(sequence),0) AS upper
             FROM dot_mailbox_entries WHERE member_id=? AND generation=?''', (member['id'], generation))
         after, upper, previous_visibility = 0, position['upper'], visibility
@@ -827,7 +853,7 @@ class RoomConsumers(FencedConsumerEngine):
                 raise DevError('INVALID_CURSOR', '收件箱游标无效', 400)
             after, upper, previous_visibility = decoded
         elif cursor:
-            legacy_scope = digest(['room-inbox', member['id'], generation, visibility])
+            legacy_scope = digest(['room-inbox', member['id'], generation, self.scope_digest(room, member)])
             after = read_cursor(self.c.secret, legacy_scope, cursor)
             if type(after) is not int or not 0 <= after <= upper:
                 raise DevError('INVALID_CURSOR', '收件箱游标无效', 400)
@@ -962,7 +988,7 @@ class RoomConsumers(FencedConsumerEngine):
             if self.store.one("""SELECT 1 FROM dot_consumer_sessions
                 WHERE member_id=? AND state='active' AND lease_until>?""", (member['id'], now)):
                 continue
-            attempts = member['wake_count']
+            attempts = member['consumer_continuation_attempts']
             try:
                 actor = self.c.rooms.principal(member)
                 room = self.c.conversations.object(actor, member['conversation_id'])
@@ -971,14 +997,16 @@ class RoomConsumers(FencedConsumerEngine):
                     raise DevError('ROOM_RECOVERY_UNAVAILABLE', '原通知路线暂不可用', 409)
                 ready = self._drain_ready(member, actor)
             except DevError:
-                self.store.execute('UPDATE room_members SET consumer_continuation_at=? WHERE id=?',
-                                   (now + min(SLOW_WAKE_DELAY, CONTINUATION_DELAY * 2 ** min(attempts, 6)), member['id']))
+                self.store.execute('''UPDATE room_members SET consumer_continuation_at=?,
+                    consumer_continuation_attempts=consumer_continuation_attempts+1 WHERE id=?''',
+                    (now + min(SLOW_WAKE_DELAY, CONTINUATION_DELAY * 2 ** min(attempts, 6)), member['id']))
                 continue
             if ready is None:
                 self.store.execute('UPDATE room_members SET consumer_continuation_at=? WHERE id=?',
                                    (now + CONTINUATION_DELAY, member['id']))
                 continue
-            self.store.execute('UPDATE room_members SET consumer_continuation_at=NULL WHERE id=?', (member['id'],))
+            self.store.execute('''UPDATE room_members SET consumer_continuation_at=NULL,
+                consumer_continuation_attempts=0 WHERE id=?''', (member['id'],))
             if ready:
                 member = self._reset_wake_episode(member)
                 if self._wake(member, 'continue-later'):
@@ -1021,7 +1049,7 @@ class RoomConsumers(FencedConsumerEngine):
                     actor = self.c.rooms.principal(member)
                     room = self.c.conversations.object(actor, member['conversation_id'])
                     _, sub = self.binding(room, member, actor)
-                    if self._rejected(sub['id']) or not self._ready(member, actor):
+                    if self._rejected(sub['id']) or self._drain_ready(member, actor) is not True:
                         continue
                 except DevError:
                     continue
