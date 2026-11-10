@@ -16,6 +16,7 @@ from hub.collaboration import weixin_delivery_transport as transport
 from hub.collaboration import weixin_schema as models
 from hub.collaboration.common import canonical, digest, redact
 from hub.collaboration.delivery_compatibility import raise_floor
+from hub.collaboration.telemetry import Reason, Stage
 from hub.collaboration.weixin_protocol import encode_request, send_payload
 from shared.util import DevError
 
@@ -602,6 +603,7 @@ class WeixinDelivery:
             self.store.execute("UPDATE weixin_parts SET state='sending',wire_body=?,context_version=?,attempts=attempts+1,retry_rejected=0,updated=? WHERE id=?",
                 (self.store.encrypt(canonical(wire)), context_version, now, part['id']))
             self.refresh(part['delivery_id'])
+            transport.record_transition(self.store, Stage.ATTEMPTED)
             return wire
 
     def finish(self, claim, result=None, error=None):
@@ -658,6 +660,19 @@ class WeixinDelivery:
             self.store.execute('''UPDATE weixin_parts SET state=?,reason_code=?,provider_receipt=?,
                 next_attempt=?,lease_until=0,preparation_failures=?,retry_rejected=?,updated=? WHERE id=?''',
                 (state, code, receipt, next_attempt, preparation_failures, retry_rejected, now, row['id']))
+            if row['state'] == 'sending':
+                stage = {'accepted': Stage.ACCEPTED, 'unknown': Stage.UNKNOWN,
+                         'rejected': Stage.REJECTED, 'queued': Stage.RETRY}[state]
+                reason = Reason.NONE
+                if code == RATE_LIMITED:
+                    reason = Reason.RATE_LIMIT
+                elif code in {'WEIXIN_AUTH_REJECTED', 'WEIXIN_SESSION_EXPIRED'}:
+                    reason = Reason.AUTHORIZATION
+                elif isinstance(error, (TimeoutError, ConnectionError, TimeoutException, NetworkError)):
+                    reason = Reason.NETWORK
+                elif error or state == 'unknown':
+                    reason = Reason.OTHER
+                transport.record_transition(self.store, stage, reason)
             self.refresh(row['delivery_id'])
             if code in TASK_STATUSES and claim['delivery']['kind'] == 'reply':
                 self.blocked_status(claim['delivery'], code)
@@ -716,6 +731,7 @@ class WeixinDelivery:
             wire = await self.store.run(self.mark_sending, claim, items)
             if wire is None:
                 return
+            transport.record_metric(Stage.DISPATCHED)
             result = await client.send(wire['peer'], wire['context'], wire['client_id'], wire['items'])
             await self.store.run(self.finish, claim, result)
         except asyncio.CancelledError:
@@ -732,6 +748,8 @@ class WeixinDelivery:
                 reason = RATE_LIMITED if state == 'queued' and row['retry_rejected'] else 'host_restarted_before_receipt'
                 self.store.execute('UPDATE weixin_parts SET state=?,reason_code=?,lease_fence=lease_fence+1,lease_until=0,updated=? WHERE id=?',
                                    (state, reason, self.c.clock(), row['id']))
+                if state == 'unknown':
+                    transport.record_transition(self.store, Stage.UNKNOWN, Reason.EXPIRED)
                 self.refresh(row['delivery_id'])
             for delivery_id in transport.adopt_late(self.store, self.c.clock()):
                 self.refresh(delivery_id)
@@ -769,6 +787,10 @@ class WeixinDelivery:
                      if row['state'] in READY | {'preparing', 'attention'} and never_sent else 'attention')
             self.store.execute("UPDATE weixin_parts SET state=?,reason_code=?,lease_fence=lease_fence+1,lease_until=0,updated=? WHERE id=?",
                                (state, reason, self.c.clock(), row['id']))
+            if row['state'] == 'sending':
+                transport.record_transition(self.store, Stage.UNKNOWN, Reason.AUTHORIZATION)
+            elif state == 'cancelled':
+                transport.record_transition(self.store, Stage.CANCELLED, Reason.AUTHORIZATION)
             self.refresh(row['delivery_id'])
 
     def quarantine_account(self, identifier, reason):
@@ -857,12 +879,14 @@ class WeixinDelivery:
         now = self.c.clock()
         for part in plan['affected_parts']:
             if confirming:
-                self.store.execute("""UPDATE weixin_parts SET state='owner_confirmed',
+                updated = self.store.execute("""UPDATE weixin_parts SET state='owner_confirmed',
                     reason_code='owner_attested_not_provider_verified',updated=? WHERE id=? AND state='unknown'""",
                     (now, part['part_id']))
             else:
-                self.store.execute("""UPDATE weixin_parts SET state='cancelled',reason_code='owner_stopped_unsent',
+                updated = self.store.execute("""UPDATE weixin_parts SET state='cancelled',reason_code='owner_stopped_unsent',
                     lease_fence=lease_fence+1,lease_until=0,updated=? WHERE id=?""", (now, part['part_id']))
+            if updated.rowcount:
+                transport.record_transition(self.store, Stage.OWNER_CONFIRMED if confirming else Stage.CANCELLED)
         for delivery_id in sorted({p['delivery_id'] for p in plan['affected_parts']}):
             self.refresh(delivery_id)
         action = 'weixin.delivery_' + args['action']

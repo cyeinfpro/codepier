@@ -4,7 +4,9 @@ import asyncio
 
 import pytest
 
+from hub.collaboration.telemetry import CollaborationTelemetry
 from hub.collaboration.weixin_delivery import WeixinDelivery, text_items
+from hub.collaboration import weixin_delivery_transport as transport
 from shared.util import DevError
 from tests.collaboration_support import collab as collab, key
 from tests.test_dot_weixin_channel import fixture_channel, packet, reply
@@ -69,7 +71,9 @@ def test_four_admission_batches_serve_64_contacts_and_resume_persisted_order(col
 
 
 @pytest.mark.asyncio
-async def test_room_control_previews_confirm_and_stop_exact_parts(collab):
+async def test_room_control_previews_confirm_and_stop_exact_parts(collab, monkeypatch):
+    telemetry = CollaborationTelemetry()
+    monkeypatch.setattr(transport, 'collaboration_telemetry', telemetry)
     (service, owner, worker, clock, identity, credentials), flow, _, _ = await setup_channel(collab)
     source = service.weixin.commit_updates(service.weixin.claim_poll(flow['account_id']),
         packet(2, '微信原始输入', create_time_ms=int(clock[0] * 1000)))['message_ids'][0]
@@ -113,6 +117,8 @@ async def test_room_control_previews_confirm_and_stop_exact_parts(collab):
     states = store.all('SELECT state,provider_receipt FROM weixin_parts WHERE delivery_id=? ORDER BY ordinal', (row['id'],))
     assert [part['state'] for part in states] == ['owner_confirmed', 'unknown', 'cancelled']
     assert all(part['provider_receipt'] is None for part in states)
+    assert {(item['stage'], item['count']) for item in telemetry.snapshot()['series']} == {
+        ('owner_confirmed', 1), ('cancelled', 1)}
 
 
 def test_preparation_retries_keep_original_identity_and_stop_at_budget(collab):
@@ -133,3 +139,67 @@ def test_preparation_retries_keep_original_identity_and_stop_at_budget(collab):
             assert saved['state'] == 'queued'
             c.clock[0] = saved['next_attempt']
     assert (saved['state'], saved['reason_code']) == ('attention', 'WEIXIN_PREPARATION_BUDGET_EXHAUSTED')
+
+
+def test_send_telemetry_follows_commits_and_late_evidence(collab, monkeypatch):
+    telemetry = CollaborationTelemetry()
+    monkeypatch.setattr(transport, 'collaboration_telemetry', telemetry)
+    c, channel, account, _, _ = fixture_channel(collab)
+    _, _, delivery = reply(c, channel, account)
+    store = c.s.store
+    sender = channel.delivery
+    part = store.one('SELECT id FROM weixin_parts WHERE delivery_id=?', (delivery['id'],))
+    claim = sender.claim(part['id'])
+
+    with pytest.raises(RuntimeError), store.transaction():
+        sender.mark_sending(claim, text_items('原正文'))
+        assert telemetry.snapshot()['series'] == []
+        raise RuntimeError('rollback')
+    assert telemetry.snapshot()['series'] == []
+    sender.mark_sending(claim, text_items('原正文'))
+    leased = store.one('SELECT lease_until FROM weixin_parts WHERE id=?', (part['id'],))
+    c.clock[0] = leased['lease_until'] + 1
+    sender.reconcile()
+    sender.finish(claim, {'provider_state': 'accepted'})
+    assert {item['stage']: item['count'] for item in telemetry.snapshot()['series']} == {
+        'attempted': 1, 'unknown': 1}
+    sender.reconcile()
+    sender.reconcile()
+    assert {item['stage']: item['count'] for item in telemetry.snapshot()['series']} == {
+        'attempted': 1, 'unknown': 1, 'accepted': 1}
+
+
+def test_adapter_invocation_distinguishes_transport_unknown(collab, monkeypatch):
+    telemetry = CollaborationTelemetry()
+    monkeypatch.setattr(transport, 'collaboration_telemetry', telemetry)
+    c, channel, account, _, _ = fixture_channel(collab)
+    _, _, delivery = reply(c, channel, account)
+    part = c.s.store.one('SELECT id FROM weixin_parts WHERE delivery_id=?', (delivery['id'],))
+
+    class Provider:
+        async def send(self, peer, context, client_id, items):
+            raise TimeoutError()
+
+    channel.client_factory = lambda *_: Provider()
+    asyncio.run(channel.delivery.send_once(part['id']))
+    asyncio.run(channel.delivery.send_once(part['id']))
+    assert {(item['stage'], item['reason']): item['count'] for item in telemetry.snapshot()['series']} == {
+        ('attempted', 'none'): 1, ('dispatched', 'none'): 1, ('unknown', 'network'): 1}
+
+
+def test_backlog_metrics_use_bounded_indexed_inventory(collab):
+    c, channel, account, _, _ = fixture_channel(collab)
+    _, _, delivery = reply(c, channel, account)
+    store = c.s.store
+    part = store.one('SELECT * FROM weixin_parts WHERE delivery_id=?', (delivery['id'],))
+    with store.transaction():
+        for offset in range(transport.BACKLOG_SAMPLE_LIMIT + 2):
+            clone(store, 'weixin_parts', part, id=f'unknown-{offset}', client_id=f'unknown-{offset}',
+                  ordinal=offset + 1, state='unknown', created=c.clock[0] - offset)
+    snapshot = transport.backlog_snapshot(store, c.clock[0])
+    unknown = next(item for item in snapshot['states'] if item['state'] == 'unknown')
+    assert unknown == {'state': 'unknown', 'count_lower_bound': transport.BACKLOG_SAMPLE_LIMIT + 1,
+                       'truncated': True, 'oldest_enqueued_age_seconds': transport.BACKLOG_SAMPLE_LIMIT + 1}
+    plan = store.all("""EXPLAIN QUERY PLAN SELECT created FROM weixin_parts WHERE state=?
+        ORDER BY created,id LIMIT ?""", ('unknown', transport.BACKLOG_SAMPLE_LIMIT + 1))
+    assert any('weixin_parts_state_age' in row['detail'] for row in plan)

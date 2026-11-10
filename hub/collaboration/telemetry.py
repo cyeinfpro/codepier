@@ -30,6 +30,7 @@ class Channel(str, Enum):
 
 class Stage(str, Enum):
     ATTEMPTED = 'attempted'
+    DISPATCHED = 'dispatched'
     SUCCEEDED = 'succeeded'
     ERROR = 'error'
     REPLAYED = 'replayed'

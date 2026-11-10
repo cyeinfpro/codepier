@@ -77,7 +77,8 @@ def make_system_router(context: HubContext):
     def collaboration_telemetry_snapshot(request: Request):
         auth.instance(request)
         from hub.collaboration.telemetry import collaboration_telemetry
-        return collaboration_telemetry.snapshot()
+        from hub.collaboration.weixin_delivery_transport import backlog_snapshot
+        return {**collaboration_telemetry.snapshot(), 'weixin_backlog': backlog_snapshot(store, time.time())}
 
     @router.get("/api/overview")
     async def overview(request: Request, include_token_usage: bool = True):
