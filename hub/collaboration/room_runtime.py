@@ -125,7 +125,8 @@ class RoomRuntime:
                 raise DevError('IDEMPOTENCY_CONFLICT', '同一请求标识不能用于另一项操作', 409)
             created = False
             if not prior:
-                member = consumers.authorize_member(args, principal, require_revision=False)
+                member = consumers.authorize_member(args, principal, require_revision=False,
+                                                    legacy_policy='publish_work' not in args)
                 receipt, created = self.save_reply(args, principal, member, session, fingerprint)
                 channels.save_receipt(identity, fingerprint, receipt)
 
