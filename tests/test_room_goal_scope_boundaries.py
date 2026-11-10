@@ -435,3 +435,28 @@ async def test_same_project_alternate_environment_cannot_read_original_work(coll
     detail=s.coordination.read({**request,'environment_id':'staging'},actor)
     assert detail['goal']['environment_id']=='staging'
     assert {rule['environment_id'] for rule in detail['room_work_context']['scope']['work_routes']}=={'staging'}
+
+
+@pytest.mark.asyncio
+async def test_decoupled_claim_checks_only_the_affected_work_scope(collab, monkeypatch):
+    monkeypatch.setenv('CODEPIER_ROOM_CHAT_SCOPE_MODE','decoupled')
+    s,owner,worker,*_=collab
+    actor=worker_for(s,worker,'decoupled-work-isolation',scopes=('read','write'))
+    s,owner,actor,_,identity,credentials=await connected(collab,
+        [{'project':'proj'},{'project':'otherproj'}],
+        [{'project_id':'proj','capabilities':['read','write']},{'project_id':'otherproj','capabilities':['read']}],
+        worker_override=actor)
+    result,_=start(s,owner,actor,identity,credentials)
+    goal_id=result['goal_id']
+    work=s.coordination.work_create({**mutation(s,identity,credentials,goal_id),
+        'target_project_id':'otherproj','objective':'核对独立项目的文件','acceptance':'保留原始结果',
+        'assignee_grant_id':actor.grant_id,'assignee_member_id':identity['member_id']},actor)['work_item']
+    claim={**mutation(s,identity,credentials,goal_id,project='otherproj'),
+           'work_item_id':work['id'],'expected_version':work['version']}
+    s.store.execute("UPDATE projects SET mode='read' WHERE id='proj'")
+    member=s.rooms.member(identity['member_id'])
+    assert ('proj','production') in s.rooms.read_scope_keys(member,actor)
+    s.room_runtime.send({'conversation_id':identity['conversation_id'],'body_text':'另外，看看今天的安排。',
+        'client_message_id':key(),'idempotency_key':key()},owner)
+    claimed=s.coordination.work_claim(claim,actor)['work_item']
+    assert claimed['id']==work['id'] and claimed['state']=='leased'

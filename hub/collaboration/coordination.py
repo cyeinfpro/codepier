@@ -36,7 +36,7 @@ class CoordinationService:
             raise DevError('GOAL_NOT_FOUND', '当前项目中没有这个协作目标', 404)
         return row
 
-    def scope(self, principal, args, *, active=False):
+    def scope(self, principal, args, *, active=False, work_effect=False):
         candidate=self.store.one('SELECT * FROM coordination_goals WHERE id=?',(args['goal_id'],))
         native=self.c.room_work_bridge.native
         if candidate and native.reference(candidate):
@@ -45,23 +45,25 @@ class CoordinationService:
             route_key=(route['project_id'],route['environment_id'])
             if route_key not in {native.scope_key(rule) for rule in native.record(native.reference(candidate))['projects']}:
                 raise DevError('GOAL_PROJECT_DENIED','读取路由不属于原工作的项目和环境',403)
+            session=None
             if principal.grant_id and args.get('consumer_session_id'):
                 session=self.store.one('SELECT member_id FROM dot_consumer_sessions WHERE id=?',(args['consumer_session_id'],))
                 if session and session['member_id']:
                     member=self.c.rooms.member(session['member_id'],candidate['conversation_id'])
                     conversation=self.store.one('SELECT * FROM conversation_rooms WHERE id=?',(candidate['conversation_id'],))
-                    self.c.room_consumers.guard_session(args,principal,conversation,member,require_revision=False)
+                    session=self.c.room_consumers.guard_session(args,principal,conversation,member,require_revision=False)
                     candidate['_reader_member_id']=member['id']
             if route_key not in native.visible_scope_keys(candidate,principal,candidate.get('_reader_member_id','')):
                 raise DevError('GOAL_PROJECT_DENIED','当前成员不能使用此项目读取原工作',403)
-            self.authorize(principal,room,candidate,active=active)
+            exact=work_effect and session and session.get('turn_policy')=='decoupled'
+            self.authorize(principal,room,candidate,active=active,exact_work_effect=bool(exact))
             return principal,room,candidate
         principal, room = self.c.scope(principal, args)
         goal = self.object(room, args['goal_id'])
         self.authorize(principal, room, goal, active=active)
         return principal, room, goal
 
-    def authorize(self, principal, room, goal, *, active=False, include_archived=False):
+    def authorize(self, principal, room, goal, *, active=False, include_archived=False, exact_work_effect=False):
         principal = refresh_principal(self.store, principal)
         if include_archived and (active or principal.grant_id):
             raise DevError('GOAL_ARCHIVE_READ_ONLY', '归档工作仅供房主查阅，不能继续处理', 403)
@@ -97,7 +99,8 @@ class CoordinationService:
         if active:
             self.c.conversations.working_scopes.validate_goal(principal, goal)
             self.c.delegation.authorize_goal(principal, room, goal)
-            self.c.live_room(room)
+            if not exact_work_effect:
+                self.c.live_room(room)
             if goal['state'] != 'active' or not goal['approval_id'] or (goal['expires_at'] or 0) <= self.c.clock():
                 raise DevError('GOAL_INACTIVE', '目标未批准、已暂停或已到期；不能开始新步骤', 409)
             approval = self.store.one('SELECT * FROM coordination_approvals WHERE id=? AND goal_id=?',
@@ -106,7 +109,9 @@ class CoordinationService:
                 raise DevError('GOAL_APPROVAL_CHANGED', '原目标批准已失效', 409)
             owner = refresh_principal(self.store, Principal(**{**json.loads(approval['principal']), 'scopes': set()}))
             self.c.owner(owner)
-            for snapshot in spec['projects']:
+            # Native work mutations check the affected assignment and partition
+            # in the same transaction. Other projects cannot gate that step.
+            for snapshot in (() if exact_work_effect else spec['projects']):
                 if spec.get('room_member_scope') and snapshot['project_id'] not in source_projects:
                     continue
                 current = projected_project(self.c, snapshot['project_id'], owner)
@@ -567,7 +572,7 @@ class CoordinationService:
     def work_create(self, raw, principal):
         args = validate(contracts.WorkCreate, raw)
         with self.store.transaction():
-            principal, room, goal = self.scope(principal, args, active=True)
+            principal, room, goal = self.scope(principal, args, active=True, work_effect=True)
             self.teams.guard(args, principal, goal, 'create')
             spec = json.loads(goal['spec'])
             if args['target_project_id'] not in spec['project_ids']:
@@ -604,7 +609,7 @@ class CoordinationService:
     def work_assign(self, raw, principal):
         args = validate(contracts.WorkAssign, raw)
         with self.store.transaction():
-            principal, room, goal = self.scope(principal, args, active=True)
+            principal, room, goal = self.scope(principal, args, active=True, work_effect=True)
             self.teams.guard(args, principal, goal, 'assign')
             item = self.work(goal, args['work_item_id'])
             assignee = self.participant(room, goal, args['assignee_grant_id'],args.get('assignee_member_id',''))
@@ -626,7 +631,7 @@ class CoordinationService:
     def work_claim(self, raw, principal):
         args = validate(contracts.WorkClaim, raw)
         with self.store.transaction():
-            principal, room, goal = self.scope(principal, args, active=True)
+            principal, room, goal = self.scope(principal, args, active=True, work_effect=True)
             self.teams.guard(args, principal, goal, 'claim', self.work(goal, args['work_item_id']))
             item = self.work(goal, args['work_item_id'])
             if not principal.grant_id or item['assignee_grant_id'] != principal.grant_id:
@@ -678,7 +683,7 @@ class CoordinationService:
     def heartbeat(self, raw, principal):
         args = validate(contracts.WorkLease, raw)
         with self.store.transaction():
-            principal, room, goal = self.scope(principal, args, active=True)
+            principal, room, goal = self.scope(principal, args, active=True, work_effect=True)
             self.teams.guard(args, principal, goal, 'heartbeat', self.work(goal, args['work_item_id']))
             def extend():
                 item = self.lease(principal, goal, args)
@@ -690,7 +695,7 @@ class CoordinationService:
     def progress(self, raw, principal):
         args = validate(contracts.WorkProgress, raw)
         with self.store.transaction():
-            principal, room, goal = self.scope(principal, args, active=True)
+            principal, room, goal = self.scope(principal, args, active=True, work_effect=True)
             self.teams.guard(args, principal, goal, 'progress', self.work(goal, args['work_item_id']))
             def save():
                 item = self.lease(principal, goal, args)
@@ -718,7 +723,7 @@ class CoordinationService:
         if not args['supersedes_operation_id']:
             args.pop('supersedes_operation_id')
         with self.store.transaction():
-            principal, room, goal = self.scope(principal, args, active=True)
+            principal, room, goal = self.scope(principal, args, active=True, work_effect=True)
             self.teams.guard(args, principal, goal, 'execute', self.work(goal, args['work_item_id']))
             spec = json.loads(goal['spec'])
             item = self.work(goal, args['work_item_id'])
@@ -825,7 +830,7 @@ class CoordinationService:
         # every scope/lease/fence check inside its writer transaction after await.
         args = validate(contracts.WorkExecute, raw)
         with self.store.transaction(immediate=False):
-            principal, _, goal = self.scope(principal, args, active=True)
+            principal, _, goal = self.scope(principal, args, active=True, work_effect=True)
             item = self.work(goal, args['work_item_id'])
             return self.runtime.project(item['project_id'], principal)['device_id']
 
@@ -929,7 +934,7 @@ class CoordinationService:
         args = validate(model, raw)
         action = 'work_archive_result' if archive else 'work_result_v2' if version2 else 'work_result'
         with self.store.transaction():
-            principal, room, goal = self.scope(principal, args, active=True)
+            principal, room, goal = self.scope(principal, args, active=True, work_effect=True)
             self.teams.guard(args, principal, goal, 'result', self.work(goal, args['work_item_id']))
             def save():
                 item = self.archive_item(principal, goal, args) if archive else self.lease(principal, goal, args)

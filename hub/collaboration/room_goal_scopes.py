@@ -253,6 +253,7 @@ class RoomGoalScopes:
                 or policy['version']!=rule['policy_version'] or policy['digest']!=rule['policy_digest']
                 or not self.bridge.authorized(policy)):
             raise DevError('ROOM_WORK_SCOPE_CHANGED','原工作项目范围已移出、撤销或重新批准',403)
+        self.require_work_partition(policy)
         for capability in rule['capabilities']:
             self.c.coordination.require_capability(actor,capability,rule['project_id'])
         return member,actor
@@ -407,7 +408,14 @@ class RoomGoalScopes:
         policy = self.store.one('SELECT * FROM delegation_policies WHERE id=?', (adapter['policy_id'],))
         if not policy or not self.bridge.authorized(policy):
             raise DevError('ROOM_WORK_SCOPE_CHANGED', '原工作步骤的当前项目授权已不可用', 403)
+        self.require_work_partition(policy)
         return member, effective
+
+    def require_work_partition(self, policy):
+        partition=self.store.one('SELECT * FROM collaboration_rooms WHERE id=?',(policy['room_id'],))
+        if not partition:
+            raise DevError('ROOM_WORK_PARTITION_CHANGED','原工作项目分区证据不存在',403)
+        self.c.live_room(partition)
 
     def continuous_rules(self, goal, source, current, proof, *, keys):
         if current['status'] in {'removed','paused','invited','legacy'}:
