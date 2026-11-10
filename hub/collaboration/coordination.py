@@ -475,10 +475,22 @@ class CoordinationService:
             'assignments':[assignment for assignment in self.store.all('''SELECT a.work_id,a.member_id,a.intent_revision FROM room_native_work_assignments a
                 JOIN coordination_work w ON w.id=a.work_id WHERE w.goal_id=?''',(goal['id'],))
                 if assignment['work_id'] in visible_ids]} if native_reference else None)
-        if native_context and not native_context['scope']['visibility_limited']:
+        if native_context:
             revision=native_context['intent_revision']
             original=native.record(native_reference)
             intent=self.store.one('SELECT * FROM room_work_intent_sources WHERE goal_id=? AND intent_revision=?',(goal['id'],revision)) or original
+            source=self.store.one('SELECT * FROM collaboration_messages WHERE id=? AND conversation_id=?',
+                (intent['source_message_id'],goal['conversation_id']))
+            conversation=self.store.one('SELECT * FROM conversation_rooms WHERE id=?',(goal['conversation_id'],))
+            reader=self.c.rooms.member(member_id,goal['conversation_id']) if member_id else None
+            context=self.c.room_context
+            source_visible=context.source_visible(source,principal,conversation,reader)
+            if source_visible and principal.grant_id and not reader:
+                source_visible=(context.message_scopes(source)<=scope_keys
+                    and context.message_projects(source)<=visible)
+            if not source_visible:
+                native_context['current_intent_source']=None
+        if native_context and source_visible and not native_context['scope']['visibility_limited']:
             evidence=self.store.all('''SELECT w.* FROM coordination_work w JOIN room_native_work_assignments a ON a.work_id=w.id
                 WHERE w.goal_id=? AND w.approval_id=? AND a.intent_revision=? AND w.result IS NOT NULL''',
                 (goal['id'],goal['approval_id'],revision))
