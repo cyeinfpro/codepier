@@ -30,21 +30,28 @@ def test_four_admission_batches_serve_64_contacts_and_resume_persisted_order(col
     context = store.one('SELECT * FROM weixin_contexts WHERE account_id=?', (account['id'],))
     first_part = store.one('SELECT * FROM weixin_parts WHERE delivery_id=?', (first['id'],))
     part_ids = {}
+
+    def seed_contact(contact, *, ready):
+        account_key, binding_key, peer = (f'{name}-{contact}' for name in ('account', 'binding', 'peer'))
+        clone(store, 'weixin_accounts', account, id=account_key, bot_id=f'bot-{contact}')
+        clone(store, 'weixin_bindings', binding, id=binding_key, account_id=account_key,
+              peer_id=peer, conversation_id=f'conversation-{contact}')
+        if ready:
+            clone(store, 'weixin_contexts', context, account_id=account_key, peer_id=peer)
+        for backlog in range(5 if ready else 1):
+            identifier = f'delivery-{contact}-{backlog}'
+            clone(store, 'weixin_deliveries', first, id=identifier, binding_id=binding_key,
+                  message_id=identifier, peer_id=peer, created=c.clock[0] + contact, ordering_key=f'contact:{contact}')
+            part_id = f'part-{contact}-{backlog}'
+            clone(store, 'weixin_parts', first_part, id=part_id, delivery_id=identifier, client_id=part_id,
+                  state='queued' if ready else 'waiting_context')
+            part_ids[part_id] = (contact, backlog)
+
     with store.transaction():
         store.execute("UPDATE weixin_parts SET state='accepted' WHERE id=?", (first_part['id'],))
-        for contact in range(64):
-            account_key, binding_key, peer = (f'{name}-{contact}' for name in ('account', 'binding', 'peer'))
-            clone(store, 'weixin_accounts', account, id=account_key, bot_id=f'bot-{contact}')
-            clone(store, 'weixin_bindings', binding, id=binding_key, account_id=account_key,
-                  peer_id=peer, conversation_id=f'conversation-{contact}')
-            clone(store, 'weixin_contexts', context, account_id=account_key, peer_id=peer)
-            for backlog in range(5):
-                identifier = f'delivery-{contact}-{backlog}'
-                clone(store, 'weixin_deliveries', first, id=identifier, binding_id=binding_key,
-                      message_id=identifier, peer_id=peer, created=c.clock[0] + contact, ordering_key=f'contact:{contact}')
-                part_id = f'part-{contact}-{backlog}'
-                clone(store, 'weixin_parts', first_part, id=part_id, delivery_id=identifier, client_id=part_id)
-                part_ids[part_id] = (contact, backlog)
+        for contact in range(-16, 64):
+            seed_contact(contact, ready=contact >= 0)
+
     def validation(delivery):
         bound = store.one('SELECT * FROM weixin_bindings WHERE id=?', (delivery['binding_id'],))
         linked = store.one('SELECT * FROM weixin_accounts WHERE id=?', (bound['account_id'],))
@@ -68,6 +75,50 @@ def test_four_admission_batches_serve_64_contacts_and_resume_persisted_order(col
     assert len(seen) == 64
     assert store.one('SELECT COUNT(*) AS count FROM weixin_peer_admission')['count'] == 64
     assert [part_ids[row['id']][1] for row in delivery.candidates(c.clock[0])] == [1] * 16
+    clone(store, 'weixin_contexts', context, account_id='account--16', peer_id='peer--16')
+    assert delivery.candidates(c.clock[0])[0]['id'] == 'part--16-0'
+
+
+def test_paused_disabled_cooled_and_waiting_media_lanes_resume_when_ready(collab):
+    c, channel, account_id, _, _ = fixture_channel(collab)
+    _, _, row = reply(c, channel, account_id)
+    store, sender = c.s.store, channel.delivery
+    binding = store.one('SELECT * FROM weixin_bindings WHERE id=?', (row['binding_id'],))
+    part = store.one('SELECT id FROM weixin_parts WHERE delivery_id=?', (row['id'],))
+
+    def candidate_ids():
+        return [candidate['id'] for candidate in sender.candidates(c.clock[0])]
+
+    assert candidate_ids() == [part['id']]
+    store.execute("UPDATE conversation_rooms SET state='paused' WHERE id=?", (binding['conversation_id'],))
+    assert not candidate_ids()
+    store.execute("UPDATE conversation_rooms SET state='active' WHERE id=?", (binding['conversation_id'],))
+    store.execute("""INSERT INTO collaboration_channel_settings
+        (space_id,owner_user_id,channel,enabled,version,updated) VALUES (?,?,'weixin',0,1,?)""",
+        (binding['space_id'], binding['owner_user_id'], c.clock[0]))
+    assert not candidate_ids()
+    store.execute("UPDATE collaboration_channel_settings SET enabled=1 WHERE channel='weixin'")
+    assert candidate_ids() == [part['id']]
+    transport.cooldown(store, binding['account_id'], c.clock[0] + 30)
+    assert not candidate_ids()
+    c.clock[0] += 30
+    assert candidate_ids() == [part['id']]
+
+    with store.transaction():
+        store.execute("UPDATE weixin_parts SET kind='attachment',state='waiting_media' WHERE id=?", (part['id'],))
+        store.execute("""INSERT INTO channel_attachments
+            (id,space_id,owner_user_id,room_id,conversation_id,project_id,message_id,ordinal,direction,
+             binding_id,generation,peer_id,kind,name,mime,state,private_source,expires_at,created,updated)
+            VALUES ('attachment',?,?,?,?,?,?,0,'outbound',?,?,?,'file','sample','application/octet-stream',
+                    'pending','',?,?,?)""",
+            (binding['space_id'], binding['owner_user_id'], binding['room_id'], binding['conversation_id'],
+             binding['project_id'], row['message_id'], binding['id'], binding['generation'], binding['peer_id'],
+             c.clock[0] + 300, c.clock[0], c.clock[0]))
+        store.execute("INSERT INTO channel_attachment_transfers(attachment_id,channel,part_id) VALUES ('attachment','weixin',?)",
+                      (part['id'],))
+    assert not candidate_ids()
+    store.execute("UPDATE channel_attachments SET state='ready' WHERE id='attachment'")
+    assert candidate_ids() == [part['id']]
 
 
 @pytest.mark.asyncio
@@ -119,6 +170,57 @@ async def test_room_control_previews_confirm_and_stop_exact_parts(collab, monkey
     assert all(part['provider_receipt'] is None for part in states)
     assert {(item['stage'], item['count']) for item in telemetry.snapshot()['series']} == {
         ('owner_confirmed', 1), ('cancelled', 1)}
+
+
+@pytest.mark.asyncio
+async def test_disconnect_after_dispatch_keeps_late_receipt_and_stops_unsent_tail(collab):
+    (service, owner, worker, clock, identity, credentials), flow, _, action = await setup_channel(collab)
+    source = service.weixin.commit_updates(service.weixin.claim_poll(flow['account_id']),
+        packet(2, '原输入', create_time_ms=int(clock[0] * 1000)))['message_ids'][0]
+    entry = next(item for item in service.room_consumers.inbox(identity, worker)['items'] if item['object_id'] == source)
+    posted = service.room_runtime.reply({**identity, **credentials, **entry['reply_arguments'],
+        'body_text': '正文' * 650, 'idempotency_key': key()}, worker)['message']
+    sender, store = service.weixin.delivery, service.store
+    row = store.one('SELECT * FROM weixin_deliveries WHERE message_id=?', (posted['id'],))
+    parts = store.all('SELECT * FROM weixin_parts WHERE delivery_id=? ORDER BY ordinal', (row['id'],))
+    assert len(parts) == 2
+    claim = sender.claim(parts[0]['id'])
+    sender.mark_sending(claim, text_items('正文' * 500))
+    await action(service.room_channels.read(flow['id'], owner)['flow'], 'disconnect')
+
+    def states():
+        return [(part['state'], part['attempts']) for part in store.all(
+            'SELECT state,attempts FROM weixin_parts WHERE delivery_id=? ORDER BY ordinal', (row['id'],))]
+
+    assert states() == [('unknown', 1), ('cancelled', 0)]
+    sender.finish(claim, {'provider_state': 'accepted'})
+    assert states() == [('unknown', 1), ('cancelled', 0)]
+    service.weixin.client_factory = lambda *_: pytest.fail('revoked delivery must not dispatch again')
+    await sender.tick()
+    assert states() == [('accepted', 1), ('cancelled', 0)]
+
+
+def test_attempted_legacy_part_without_exact_rejection_cannot_be_refrozen(collab):
+    c, channel, account, _, _ = fixture_channel(collab)
+    _, _, delivery = reply(c, channel, account)
+    store, sender = c.s.store, channel.delivery
+    part = store.one('SELECT * FROM weixin_parts WHERE delivery_id=?', (delivery['id'],))
+    claim = sender.claim(part['id'])
+    sender.mark_sending(claim, text_items('原回复'))
+    sender.finish(claim, error=DevError('WEIXIN_RATE_LIMITED', 'rate limited', 429, retry_after_seconds=0))
+    frozen = store.one('SELECT * FROM weixin_parts WHERE id=?', (part['id'],))
+    # Historical writers could replace the original rejection reason before
+    # durable rejection proof existed. Do not infer that it was safe to resend.
+    with store.transaction():
+        store.execute("""UPDATE weixin_parts SET state='waiting_context',retry_rejected=0,
+            reason_code='context_missing' WHERE id=?""", (part['id'],))
+        store.execute('DELETE FROM weixin_contexts')
+    c.clock[0] = frozen['next_attempt']
+    channel.client_factory = lambda *_: pytest.fail('unverified historical attempt must not be sent')
+    asyncio.run(sender.tick())
+    saved = store.one('SELECT * FROM weixin_parts WHERE id=?', (part['id'],))
+    assert (saved['state'], saved['attempts'], saved['reason_code']) == ('unknown', 1, 'prior_send_evidence_missing')
+    assert saved['wire_body'] == frozen['wire_body'] and saved['client_id'] == frozen['client_id']
 
 
 def test_preparation_retries_keep_original_identity_and_stop_at_budget(collab):

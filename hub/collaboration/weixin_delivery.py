@@ -398,6 +398,7 @@ class WeixinDelivery:
     def candidates(self, now, *, binding_id=None, peer_id=None):
         # Unknown external results block only established reply dependencies.
         # The separate in-flight check fences every request to the same peer.
+        gate = self.c.channel_settings.sql_enabled('weixin', 'b')
         return self.store.all(f'''WITH sendable AS (
             SELECT p.id,p.kind,d.created,d.rowid AS delivery_order,p.ordinal,
                 COALESCE(turn.last_admitted_sequence,0) AS last_admitted_sequence,
@@ -409,12 +410,28 @@ class WeixinDelivery:
             LEFT JOIN weixin_peer_admission turn ON turn.account_id=b.account_id AND turn.peer_id=d.peer_id
             LEFT JOIN weixin_account_cooldown cooldown ON cooldown.account_id=b.account_id
             WHERE b.state='active' AND account.state='active' AND COALESCE(cooldown.retry_at,0)<=?
+                AND {gate}
+                AND NOT EXISTS (SELECT 1 FROM conversation_rooms r
+                    WHERE r.id=b.conversation_id AND r.state!='active')
+                AND (b.native_member_id!='' OR NOT EXISTS (SELECT 1 FROM collaboration_rooms r
+                    WHERE r.id=b.room_id AND r.state!='active'))
                 AND p.state IN ('queued','waiting_context','waiting_media') AND p.next_attempt<=?
                 AND (? IS NULL OR (d.binding_id=? AND d.peer_id=?))
                 AND NOT EXISTS (
                     SELECT 1 FROM weixin_parts first WHERE first.delivery_id=d.id AND first.ordinal<p.ordinal
                         AND first.state NOT IN ('accepted','owner_confirmed','cancelled','rejected'))
-                AND (NOT ({order.WAITING_PREDECESSOR}) OR ({order.FAILED_PREDECESSOR}))
+                AND (
+                    (p.attempts>0 AND p.retry_rejected=0) OR ({order.FAILED_PREDECESSOR})
+                    OR (NOT ({order.WAITING_PREDECESSOR})
+                        AND (p.state!='waiting_context' OR EXISTS (
+                            SELECT 1 FROM weixin_contexts ctx WHERE ctx.account_id=b.account_id
+                                AND ctx.generation=b.generation AND ctx.peer_id=d.peer_id))
+                        AND (p.state!='waiting_media' OR NOT EXISTS (
+                            SELECT 1 FROM channel_attachment_transfers transfer
+                            JOIN channel_attachments attachment ON attachment.id=transfer.attachment_id
+                            WHERE transfer.channel='weixin' AND transfer.part_id=p.id AND attachment.expires_at>?
+                                AND attachment.state NOT IN ('ready','unavailable','expired'))))
+                )
                 AND NOT EXISTS (
                     SELECT 1 FROM weixin_deliveries held JOIN weixin_bindings hb ON hb.id=held.binding_id
                     JOIN weixin_parts sender ON sender.delivery_id=held.id
@@ -427,7 +444,7 @@ class WeixinDelivery:
                 FROM sendable WHERE peer_rank=1
             ) SELECT id,kind FROM fair
                 ORDER BY CASE WHEN kind='text' AND kind_rank=1 THEN 0 ELSE batch_rank END
-                LIMIT 16''', (now, now, binding_id, binding_id, peer_id))
+                LIMIT 16''', (now, now, binding_id, binding_id, peer_id, now))
 
     def claim(self, identifier):
         with self.store.transaction():
@@ -438,6 +455,14 @@ class WeixinDelivery:
             delivery = self.store.one('SELECT * FROM weixin_deliveries WHERE id=?', (part['delivery_id'],))
             candidate = self.candidates(now, binding_id=delivery['binding_id'], peer_id=delivery['peer_id'])
             if not candidate or candidate[0]['id'] != identifier:
+                return None
+            if part['attempts'] and not part['retry_rejected']:
+                # Older versions could replace a rate-limit reason while waiting
+                # for context. Without exact rejection proof, keep the outcome unknown.
+                self.store.execute("""UPDATE weixin_parts SET state='unknown',reason_code='prior_send_evidence_missing',
+                    lease_fence=lease_fence+1,lease_until=0,updated=? WHERE id=?""", (now, identifier))
+                self.refresh(delivery['id'])
+                transport.record_transition(self.store, Stage.UNKNOWN, Reason.OTHER)
                 return None
             active = self.store.one("""SELECT COUNT(*) AS total,
                 COUNT(CASE WHEN kind='attachment' THEN 1 END) AS media
@@ -494,7 +519,7 @@ class WeixinDelivery:
         self.store.execute("""UPDATE weixin_parts SET state='rejected',reason_code='dependency_failed',
             lease_fence=lease_fence+1,lease_until=0,updated=? WHERE delivery_id=?
             AND state IN ('queued','waiting_context','waiting_media','attention','preparing')
-            AND (attempts=0 OR reason_code='WEIXIN_RATE_LIMITED')""", (now, delivery_id))
+            AND (attempts=0 OR retry_rejected=1)""", (now, delivery_id))
         self.refresh(delivery_id)
 
     def current(self, claim):
